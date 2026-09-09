@@ -855,7 +855,9 @@ def test_the_statement_form_of_lists_getindex_still_fails_loud(block):
     stay one — the parked-value skip must not swallow it."""
     with pytest.raises(InterpreterError) as exc:
         _run([block])
-    assert 'Entferne-Element-Block hat keine Liste.' in str(exc.value)
+    # The message now NAMES the block the student dragged, in the block's
+    # own vocabulary — „Entferne-Element-Block" was a schema name.
+    assert '„entferne Element" braucht eine Liste' in str(exc.value)
 
 
 def test_the_parked_value_allowlist_matches_the_value_evaluator():
@@ -1059,3 +1061,115 @@ def test_a_classroom_sized_list_is_never_refused():
                      'inputs': {'ITEM': {'block': _num(1)},
                                 'NUM': {'block': _num(500)}}}}}}])
     assert len(ctx.variables['L']) == 500
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# E-3 — „hole Element" out of range is RED, exactly like „setze Element"
+# ══════════════════════════════════════════════════════════════════════════
+#
+# One function, one `statement` flag, three refusals gated on it: „setze
+# Element 9" of a 2-element list raised in German while „hole Element 9"
+# returned None — a blank Protokoll line, a green run, and the None then
+# propagated (`setze x auf hole Element 9` leaves x = None) so the error
+# surfaced later, somewhere unrelated. Blockly lists are 1-BASED, which makes
+# „hole Element 4" of a three-element list the single most likely list mistake
+# a twelve-year-old makes.
+
+def _get_index(list_block, at, mode='GET'):
+    return {'type': 'lists_getIndex',
+            'fields': {'MODE': mode, 'WHERE': 'FROM_START'},
+            'inputs': {'VALUE': {'block': list_block},
+                       'AT': {'block': _num(at)}}}
+
+
+def _list_of(*values):
+    return {'type': 'lists_create_with',
+            'extraState': {'itemCount': len(values)},
+            'inputs': {f'ADD{i}': {'block': _num(v)}
+                       for i, v in enumerate(values)}}
+
+
+@pytest.mark.parametrize('mode', ['GET', 'GET_REMOVE'])
+@pytest.mark.parametrize('at', [0, 3, 99])
+def test_an_out_of_range_hole_element_is_refused_in_german(mode, at):
+    """*Kills:* restoring `return None` for the value form."""
+    ctx = _Ctx()
+    ctx.variables['L'] = [10, 20]
+    block = {'type': 'variables_set', 'fields': {'VAR': 'x'},
+             'inputs': {'VALUE': {'block': _get_index(
+                 {'type': 'variables_get', 'fields': {'VAR': 'L'}}, at, mode)}}}
+    with pytest.raises(InterpreterError) as exc:
+        _run([block], ctx)
+    msg = str(exc.value)
+    assert f'Element {at} gibt es nicht' in msg, msg
+    assert 'die Liste hat nur 2 Elemente' in msg
+    assert 'Das erste Element ist Nummer 1' in msg, (
+        'the 1-based convention is the part that actually teaches')
+    # No programmer German.
+    assert 'Index' not in msg and 'Grenzen' not in msg
+    # And the list is UNCHANGED — GET_REMOVE must not have popped anything.
+    assert ctx.variables['L'] == [10, 20]
+
+
+@pytest.mark.parametrize('mode', ['GET', 'GET_REMOVE'])
+def test_hole_element_from_a_non_list_socket_is_refused(mode):
+    ctx = _Ctx()
+    block = {'type': 'variables_set', 'fields': {'VAR': 'x'},
+             'inputs': {'VALUE': {'block': _get_index(_num(42), 1, mode)}}}
+    with pytest.raises(InterpreterError) as exc:
+        _run([block], ctx)
+    assert '„hole Element" braucht eine Liste' in str(exc.value)
+
+
+@pytest.mark.parametrize('mode', ['GET', 'GET_REMOVE'])
+def test_hole_element_from_an_empty_list_is_refused(mode):
+    ctx = _Ctx()
+    ctx.variables['L'] = []
+    block = {'type': 'variables_set', 'fields': {'VAR': 'x'},
+             'inputs': {'VALUE': {'block': _get_index(
+                 {'type': 'variables_get', 'fields': {'VAR': 'L'}}, 1, mode)}}}
+    with pytest.raises(InterpreterError) as exc:
+        _run([block], ctx)
+    assert 'Die Liste ist leer' in str(exc.value)
+    assert '„hole Element"' in str(exc.value)
+
+
+def test_the_first_element_is_number_one():
+    """*Kills:* an off-by-one "fix" of the bound in either direction."""
+    ctx = _Ctx()
+    ctx.variables['L'] = [10, 20]
+    ok = {'type': 'variables_set', 'fields': {'VAR': 'x'},
+          'inputs': {'VALUE': {'block': _get_index(
+              {'type': 'variables_get', 'fields': {'VAR': 'L'}}, 1)}}}
+    _run([ok], ctx)
+    assert ctx.variables['x'] == 10, 'Element 1 is the FIRST element'
+    bad = {'type': 'variables_set', 'fields': {'VAR': 'y'},
+           'inputs': {'VALUE': {'block': _get_index(
+               {'type': 'variables_get', 'fields': {'VAR': 'L'}}, 0)}}}
+    with pytest.raises(InterpreterError):
+        _run([bad], ctx)
+
+
+def test_set_and_get_say_the_same_thing_about_the_bound():
+    """THE finding: the two halves of one block family drifted apart. One
+    sentence now, from one helper, so they cannot drift again."""
+    ctx = _Ctx()
+    ctx.variables['L'] = [10, 20]
+    get_block = {'type': 'variables_set', 'fields': {'VAR': 'x'},
+                 'inputs': {'VALUE': {'block': _get_index(
+                     {'type': 'variables_get', 'fields': {'VAR': 'L'}}, 9)}}}
+    set_block = {'type': 'lists_setIndex',
+                 'fields': {'MODE': 'SET', 'WHERE': 'FROM_START'},
+                 'inputs': {'LIST': {'block': {'type': 'variables_get',
+                                               'fields': {'VAR': 'L'}}},
+                            'AT': {'block': _num(9)},
+                            'TO': {'block': _num(1)}}}
+    with pytest.raises(InterpreterError) as get_exc:
+        _run([get_block], ctx)
+    with pytest.raises(InterpreterError) as set_exc:
+        _run([set_block], ctx)
+    assert str(get_exc.value) == str(set_exc.value), (
+        f'„hole" says {str(get_exc.value)!r} and „setze" says '
+        f'{str(set_exc.value)!r} — that drift IS the finding')
+    assert 'Listen-Index außerhalb der Grenzen' not in str(set_exc.value), (
+        'programmer German on a surface whose blocks say „Element" and „Liste"')

@@ -41,7 +41,9 @@ from typing import Any, Callable, Optional
 
 from physical_ai_server.workflow.handlers.motion import (
     WorkflowError,
+    _hold_motion_lock,
     _point_in_zone,
+    _release_motion_lock,
     _TEMPO_MAX,
     _TEMPO_MIN,
 )
@@ -176,6 +178,15 @@ class WorkflowContext:
     wait_if_paused: Callable[[], None] = field(default_factory=lambda: (lambda: None))
     wait_for_resume: Callable[[], None] = field(default_factory=lambda: (lambda: None))
     set_paused: Callable[[bool], None] = field(default_factory=lambda: (lambda _: None))
+    # A NON-CONSUMING „is the run paused right now?" probe, and non-consuming is
+    # the whole reason it exists. ``wait_for_resume`` calls
+    # ``_consume_step_token()``, which atomically clears the single „Schritt"
+    # token AND ``_resume_event``; ``wait_if_paused`` blocks. So neither of the
+    # two predicates that already existed can be used to ASK the question, and
+    # ``motion._hold_motion_lock`` has to ask it: a breakpoint inside a
+    # „wenn …"-Block pauses while ``_run_hat_handler`` holds ``motion_lock``,
+    # and the queued main stack must not then blame the student for a busy arm.
+    is_paused: Callable[[], bool] = field(default_factory=lambda: (lambda: False))
     procedures: dict[str, dict[str, Any]] = field(default_factory=dict)
     call_procedure: Callable[[str, list[Any]], Any] = field(
         default_factory=lambda: (lambda _name, _args: None)
@@ -205,12 +216,25 @@ class WorkflowContext:
     claimed_tags: set = field(default_factory=set)
     skipped_tags: set = field(default_factory=set)
     claim_lock: threading.RLock | None = None
-    # Per-tag absence tracking for the recycled-object reclaim (#1): tag id →
-    # monotonic time it was first seen ABSENT. When a claimed/skipped tag of the
-    # loop's type reappears after ≥ RECLAIM_ABSENT_S continuously absent, it was
-    # removed and put back → un-claimed/un-skipped so it is grabbed again.
-    # Guarded by claim_lock (same as claimed_tags/skipped_tags).
-    absent_since: dict = field(default_factory=dict)
+    # Per-tag POSITION tracking for the recycled-object reclaim (#1), all three
+    # guarded by claim_lock (same as claimed_tags/skipped_tags):
+    #   claim_anchor  — tag id → the base-frame (x, y) where the robot LEFT it,
+    #                   observed on the first sighting AFTER the claim. ``None``
+    #                   when that sighting could not be located, which fails the
+    #                   reclaim CLOSED for that tag.
+    #   claim_pick_xy — tag id → the (x, y) it was last seen at while still
+    #                   UNCLAIMED, i.e. the spot it was picked FROM.
+    #   claim_unseen  — tag ids missing from at least one observation since their
+    #                   claim (the only thing an absence is allowed to record).
+    # A later sighting ≥ EDUBOTICS_RECLAIM_MOVE_M from the anchor — or a return to
+    # the pick spot after an absence — means a PERSON moved it, so it is
+    # un-claimed and grabbed again. Deliberately position-based: the absence clock
+    # this replaced was sampled at loop-pass cadence (8–12 s) and could not tell
+    # one missed AprilTag look from a student picking the object up. See
+    # handlers/perception_blocks.py::_reclaim_recycled.
+    claim_anchor: dict = field(default_factory=dict)
+    claim_pick_xy: dict = field(default_factory=dict)
+    claim_unseen: set = field(default_factory=set)
     # Phase-4 no-go zones ("Sperrzonen"): a list of axis-aligned base-frame
     # keep-out boxes ``{min:[x,y,z], max:[x,y,z]}`` (metres), parsed in start()
     # from the top-level ``zones`` sibling of the workflow_json (injected for
@@ -258,9 +282,13 @@ def _hat_label_de(btype: Any) -> str:
 # interpreter's FOREVER_MIN_CYCLE_S, and for the same reason: a hat had NO rate
 # floor of any kind (MAX_LOOP_ITERATIONS never applies to hats), so a handler
 # that re-broadcasts its own event ran 570 211 bodies and published 2 851 066
-# status messages in 2 s — 71 % of a core, inside the ROS node, starving the
-# 1 Hz heartbeat until React reported „Getrennt". Two hats ping-ponging measured
-# 2 248 165 publishes / 86 %. A body doing real work exceeds this floor and pays
+# status messages in 2 s (549 236 / 2 746 185 on an independent re-run) — 71 % of
+# a core, inside the ROS node, starving the 1 Hz heartbeat until React reported
+# „Getrennt". Two hats ping-ponging measured 2 248 165 publishes / 86 %.
+# MEASURED ON THE INTERMEDIATE TREE — after the keep-alive fix, before this rate
+# floor — because on `main` a hats-only run dies immediately and the program is
+# inert (0 bodies). Both this floor and MAX_BROADCAST_BACKLOG are necessary,
+# proven by removing each. A body doing real work exceeds this floor and pays
 # nothing. Plain constant, NOT an EDUBOTICS_* env knob (that would need a
 # docker-compose forward per ci.yml's env-forwarding-guard); tests monkeypatch it.
 HAT_MIN_CYCLE_S = 0.05
@@ -279,11 +307,22 @@ HAT_MIN_CYCLE_S = 0.05
 HAT_KEEPALIVE_MAX_S = 300.0
 
 # Consecutive failures a single hat handler may hit before it is retired for the
-# rest of the run. Its body is re-run after an error (a one-off GraspSkip must
-# not silently kill the handler — measured: with 2 cubes, one grasped, the drop
-# failed, the handler exited, the second cube was never touched, the arm was
-# LEFT HOLDING the first, and the run still reported 'finished'), but a body that
-# fails EVERY time would otherwise spin against the rate floor forever.
+# rest of the run.
+#
+# Its body is re-run after an error. On `main` ALL FOUR `except` arms `return`ed,
+# so ONE failing body ended the handler THREAD for the rest of the run while the
+# run still reported green — STRUCTURALLY, not occasionally: `main`'s own comment
+# notes that the LAST object of a „Wenn … erkannt: Greife" handler legitimately
+# ends in a GraspSkip, so the ordinary TERMINAL case reached one of those
+# `return`s. Measured over four broadcasts with a deterministically-failing last
+# block: `main` fires the body ONCE, this tree fires it four times (5/5).
+#
+# (The arm is left holding on EVERY tree — nothing re-opens the gripper after a
+# body dies — so that is not the discriminator, and quoting it as the headline
+# measurement is what made this claim look unreproducible. 1 firing vs 4 is.)
+#
+# A one-off failure must not be terminal; a body that fails EVERY time would
+# otherwise spin against the rate floor forever.
 MAX_HAT_CONSECUTIVE_ERRORS = 5
 
 # Upper bound on the broadcast backlog one handler may work through. Broadcasts
@@ -302,7 +341,11 @@ _JOINT_SEED_POLL_S = 0.1
 # is really gone (see WorkflowManager._debounce_absence). Imported, not
 # redefined: perception_blocks._RECLAIM_ABSENT_S (env EDUBOTICS_RECLAIM_ABSENT_S,
 # default 1.5 s) is this codebase's already-tuned answer to exactly this
-# question, and two constants for one concept is how they drift apart.
+# question, and two constants for one concept is how they drift apart. NOTE: the
+# hat is now that constant's ONLY consumer — the recycled-object reclaim moved to
+# a POSITION rule (EDUBOTICS_RECLAIM_MOVE_M), because IT samples once per 8–12 s
+# loop pass where this hat polls several times a second, so the same seconds mean
+# something usable here and nothing usable there.
 # Imported lazily-at-module-load with a literal fallback so an import-order
 # change can never leave the hat un-debounced (0 would restore the raw-set
 # flicker bug wholesale).
@@ -806,6 +849,10 @@ class WorkflowManager:
                     wait_if_paused=self._wait_if_paused,
                     wait_for_resume=self._wait_for_resume,
                     set_paused=self._set_paused,
+                    # The manager's existing non-consuming predicate. Wiring
+                    # this to _wait_for_resume or _consume_step_token would eat
+                    # the student's „Schritt" press from a lock-wait loop.
+                    is_paused=lambda: self.is_paused,
                     object_catalog=object_catalog,
                     object_catalog_error=object_catalog_error,
                     # Fresh per-run counter store for the Zähler blocks + the
@@ -816,8 +863,11 @@ class WorkflowManager:
                     claimed_tags=set(),
                     skipped_tags=set(),
                     claim_lock=self._claim_lock,
-                    # Fresh per-run absence tracker for the recycled-object reclaim.
-                    absent_since={},
+                    # Fresh per-run position trackers for the recycled-object
+                    # reclaim (never persisted across runs).
+                    claim_anchor={},
+                    claim_pick_xy={},
+                    claim_unseen=set(),
                     # Phase-4 no-go zones (None/empty → motion behaves as today).
                     zones=zones,
                     # Phase-2 Tempo (global speed multiplier; 1.0 → unchanged speed).
@@ -1031,9 +1081,15 @@ class WorkflowManager:
                 try:
                     object_catalog.recipe_for_type(type_name)
                 except Exception:  # noqa: BLE001 — unknown type is the point
+                    # This interpolates the INTERNAL catalog KEY („wuerfel"),
+                    # not a label_de — unavoidable on this branch, because an
+                    # UNKNOWN type by definition has no label. So say what to
+                    # do about it rather than leaving a student staring at a
+                    # word that appears nowhere in their program.
                     self._warn_once(f'unknown-type:{type_name}', (
                         f'[WARNUNG] „{type_name}" ist kein bekanntes Objekt — '
-                        f'„Wenn {type_name} erkannt" wird nie ausgelöst.'
+                        f'„Wenn {type_name} erkannt" wird nie ausgelöst. Bitte '
+                        'den Typ im Block neu auswählen.'
                     ))
 
     def stop(self) -> tuple[bool, str]:
@@ -1419,10 +1475,12 @@ class WorkflowManager:
         # still trigger fast); only disappearance is debounced. That asymmetry
         # is the whole fix.
         #
-        # The grace is the SAME EDUBOTICS_RECLAIM_ABSENT_S (1.5 s) that
-        # perception_blocks._reclaim_recycled already uses to answer exactly
-        # this question — "how long until an absent tag is really absent" — so
-        # the two agree by construction instead of drifting apart.
+        # The grace is EDUBOTICS_RECLAIM_ABSENT_S (1.5 s), which this hat is now
+        # the only consumer of: the „Solange sichtbar" reclaim that once shared
+        # it moved to a POSITION rule, because it samples once per 8–12 s loop
+        # pass and could never tell a missed look from a student's hand. This
+        # hat polls several times a second, so the seconds still answer the
+        # question here.
         _seen_at: dict[int, float] = {}
         try:
             while not ctx.should_stop():
@@ -1455,8 +1513,23 @@ class WorkflowManager:
                 # Acquire the motion lock for the entire handler body.
                 # This is conservative — even a perception-only handler
                 # holds the lock — but it keeps the safety story simple.
+                #
+                # THROUGH THE ONE HELPER, and that is not tidiness. This was a
+                # blocking ``with ctx.motion_lock:`` while the composite
+                # motions polled, and a re-entering timed acquire loses EVERY
+                # handoff to a thread parked in a blocking one: measured on a
+                # bare RLock, blocking waiter 12 acquires, polling waiter 0.
+                # That single asymmetry turned an ordinary event program that
+                # finishes 3/3 into one that errors 3/3. See
+                # motion._hold_motion_lock.
                 cycle_start = time.monotonic()
-                with ctx.motion_lock:
+                try:
+                    acquired = _hold_motion_lock(ctx)
+                except WorkflowError:
+                    # „Workflow wurde gestoppt." while queueing for the arm —
+                    # the loop condition above says the same thing.
+                    return
+                try:
                     if ctx.should_stop():
                         return
                     try:
@@ -1488,6 +1561,8 @@ class WorkflowManager:
                                 f'„{label}": Interner Fehler im Ereignis-Block.'
                             ),
                         })
+                finally:
+                    _release_motion_lock(ctx, acquired)
                 if consecutive_errors >= MAX_HAT_CONSECUTIVE_ERRORS:
                     # ...but a body that fails EVERY time is a bug, not a
                     # hiccup, and would otherwise spin against the rate floor
@@ -1860,9 +1935,12 @@ class WorkflowManager:
           workaround students were driven to is an empty „wiederhole
           fortlaufend" as a keep-alive, which is exactly the accidental
           complexity the hat blocks exist to remove.
-        * A hat body already IN FLIGHT was truncated: measured, a pickup cut at
-          45 of 190 waypoints (24 %) — mid-approach, gripper open, hovering —
-          while the run reported phase='finished'.
+        * A hat body already IN FLIGHT was truncated. ON `main` THIS IS
+          INVISIBLE and TOTAL: the broadcast from block 1 never reaches its hat,
+          so the body publishes 0 of 190 waypoints while the run reports
+          'finished'. The 45-of-190 (24 %) cut — mid-approach, gripper open,
+          hovering — is the same defect measured on the INTERMEDIATE tree, where
+          the hat does fire.
 
         So: wait. Exits on Stop (the normal case), when every handler thread has
         exited on its own, or at HAT_KEEPALIVE_MAX_S. A run with no hats returns

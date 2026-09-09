@@ -18,6 +18,7 @@ handlers can resolve "ablegen bei A" to a coordinate.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -34,9 +35,55 @@ UNPINNED_SENTINEL = '—'
 _DESTINATION_NAME_RE = re.compile(r'^[A-Za-zÄÖÜäöüß0-9 _\-]{1,40}$')
 
 
+# The alphabet, spelled out for the student. Kept next to the regex so the two
+# cannot drift.
+_NAME_ALPHABET_DE = (
+    'Erlaubt sind Buchstaben (auch ä ö ü ß), Ziffern, Leerzeichen, '
+    'Unterstrich und Bindestrich, höchstens 40 Zeichen.'
+)
+
+
 def _validate_destination_name(name: str) -> None:
+    """Refuse a name outside the shared alphabet, NAMING the name and the
+    alphabet.
+
+    The message used to be the bare „Ungültiger Ziel-Name." — which aborts the
+    whole run and tells the student neither which of their names is wrong nor
+    what would be right. That matters more than usual here because the React
+    validator (``blocks/destinations.js``) has no character class of its own, so
+    every one of these first surfaces at RUN time, long after the name was
+    typed. Measured 2026-09-07 against the server: 'A B-c_Ä' accepted; 'A!',
+    'A/B', '日本', '😀', 'A\nB', 'A]B' and a 41-character name all refused with
+    that one anonymous sentence.
+
+    The offending name is echoed with its own brackets stripped so a crafted
+    name cannot smuggle a sentinel into the log strip through the error message
+    — the same injection this validator exists to prevent."""
     if not name or not _DESTINATION_NAME_RE.match(name):
-        raise WorkflowError('Ungültiger Ziel-Name.')
+        shown = str(name).replace('[', '(').replace(']', ')')
+        shown = ' '.join(shown.split())[:40]
+        raise WorkflowError(
+            f'Ungültiger Ziel-Name: „{shown}". {_NAME_ALPHABET_DE}'
+        )
+
+
+def _validate_coordinates(name: str, x: float, y: float, z: float) -> None:
+    """Refuse a non-finite pinned coordinate.
+
+    ``float('NaN')`` / ``float('Infinity')`` / ``float('1e400')`` all parse, and
+    the handler then stored them and reported SUCCESS. Measured 2026-09-07:
+    ``('NaN', 0, 0)`` → 'Ziel "A" gespeichert (nan, 0.000, 0.000).' and both
+    infinity spellings → 'inf'. Reachable without a crafted payload:
+    ``applyPinnedCoordinates`` writes ``Number(v).toFixed(3)`` and
+    ``Number(NaN).toFixed(3) === "NaN"``, so a degenerate projection lands the
+    literal string in the Blockly field. ``WorkflowManager.start()`` already
+    guards its own joint seed with ``math.isfinite``; this path did not, and
+    RS-24's start-time pre-check that was supposed to catch it is dead code."""
+    if not all(math.isfinite(v) for v in (x, y, z)):
+        raise WorkflowError(
+            f'Ziel „{name}" hat keine gültigen Koordinaten — bitte den Block '
+            'auswählen und noch einmal in die Szenen-Kamera klicken.'
+        )
 
 
 def destination_pin(ctx, args: dict[str, Any]) -> None:
@@ -71,6 +118,7 @@ def destination_pin(ctx, args: dict[str, Any]) -> None:
         z = float(raw_z)
     except (TypeError, ValueError):
         raise WorkflowError(f'Ziel "{name}" hat ungültige Koordinaten.')
+    _validate_coordinates(name, x, y, z)
     ctx.destinations[name] = {'x': x, 'y': y, 'z': z, 'label': name}
     ctx.log(f'Ziel "{name}" gespeichert ({x:.3f}, {y:.3f}, {z:.3f}).')
 
@@ -111,6 +159,10 @@ def destination_current(ctx, args: dict[str, Any]) -> None:
     pos = ctx.get_current_pose_xyz()
     if pos is None:
         raise WorkflowError('Aktuelle Position ist unbekannt.')
-    x, y, z = pos
-    ctx.destinations[name] = {'x': float(x), 'y': float(y), 'z': float(z), 'label': name}
+    try:
+        x, y, z = (float(v) for v in pos)
+    except (TypeError, ValueError):
+        raise WorkflowError('Aktuelle Position ist unbekannt.')
+    _validate_coordinates(name, x, y, z)
+    ctx.destinations[name] = {'x': x, 'y': y, 'z': z, 'label': name}
     ctx.log(f'Ziel "{name}" auf aktuelle Position gesetzt.')

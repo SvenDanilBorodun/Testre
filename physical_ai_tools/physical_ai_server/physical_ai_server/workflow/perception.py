@@ -39,7 +39,22 @@ import numpy as np
 
 @dataclass
 class Detection:
-    centroid_px: tuple[int, int]
+    # Sub-pixel float, for the SAME reason corners_px below is float: this centre
+    # is what handlers/perception_blocks._attach_named_world back-projects through
+    # projection.project_pixel_to_table to get the grasp x/y. It used to be stored
+    # as int(r.center[...]), and int() TRUNCATES rather than rounds, so the error
+    # was a systematic bias, never zero-mean noise. Measured 2026-09-07 against the
+    # real project_pixel_to_table (102 deg HFOV / 640 px -> fx 259 px, camera 0.50 m
+    # above the table, 350 poses): int -> mean dx -0.975 mm, dy +0.927 mm,
+    # mean|err| 1.449 mm, max 2.654 mm; float -> 0.000 mm everywhere. That the bias
+    # is systematic shows in mean|dx| == |mean dx| (0.975 == 0.975) — every pixel
+    # coordinate is positive, so truncation always pulls the same way. The real
+    # detector genuinely carries the information being thrown away: on a rendered
+    # tag36h11 the raw centre came back at .857/.880 px past the integer grid.
+    # The two ROS-wire consumers in physical_ai_server.py already coerce at their
+    # own call site (det.cx = int(cx) for the int32 Detection.msg field, float(cx)
+    # for the verify-point projection), so they are unaffected by construction.
+    centroid_px: tuple[float, float]
     bbox_px: tuple[int, int, int, int]   # x, y, w, h
     confidence: float
     label: str
@@ -162,7 +177,10 @@ class Perception:
         for r in results:
             if aruco_id is not None and r.tag_id != aruco_id:
                 continue
-            cx, cy = int(r.center[0]), int(r.center[1])
+            # Sub-pixel float centre — NOT int(). See Detection.centroid_px for the
+            # measurement: the int cast truncated (never rounded), biasing every
+            # grasp point by ~1.4 mm mean / 2.7 mm max in the same direction.
+            cx, cy = float(r.center[0]), float(r.center[1])
             # Sub-pixel float corners (pupil's native CCW order) for the
             # downstream tag-pose math; a separate int-cast copy drives the
             # bbox so the existing overlay/bbox path is byte-unchanged.

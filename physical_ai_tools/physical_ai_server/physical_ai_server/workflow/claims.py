@@ -25,8 +25,13 @@ clearance refusal went un-skipped for so long: the loop swallowed the
 the loop burned its three stall passes before ending on the alarming „kein
 Fortschritt" instead of simply moving to the next object.
 
-``perception_blocks`` re-exports all three under their original private names, so
-its ~10 internal call sites and every test that imports them are untouched.
+``perception_blocks`` re-exports the three public helpers under their original
+private names, so its ~10 internal call sites and every test that imports them are
+untouched.
+
+Claiming and skipping also RESET the recycled-object reclaim's per-tag position
+anchor (:func:`_forget_position_state`) — see
+``handlers.perception_blocks._reclaim_recycled``.
 
 Pure Python + stdlib — no ROS, no numpy.
 """
@@ -47,6 +52,33 @@ def excluded_ids(ctx) -> set:
     return set(claimed) | set(skipped)
 
 
+def _forget_position_state(ctx, tag: int) -> None:
+    """Drop the recycled-object reclaim's per-tag POSITION state for ``tag``.
+
+    A fresh claim (or skip) must RE-ANCHOR. ``ctx.claim_anchor`` records where the
+    robot left the object THIS time, and ``ctx.claim_unseen`` records that it has
+    gone missing since THIS claim — carrying either across a new claim would
+    compare the object's new resting place against a stale reference and un-claim
+    it on the very next look. ``ctx.claim_pick_xy`` is deliberately KEPT: it is
+    the spot the object was picked FROM, which is exactly what the PICK rule
+    needs after the claim.
+
+    getattr-guarded like everything else in this module, so a minimal unit-test
+    ctx without the dicts is a no-op. The caller already holds ``claim_lock``."""
+    anchors = getattr(ctx, 'claim_anchor', None)
+    if anchors is not None:
+        try:
+            anchors.pop(tag, None)
+        except Exception:  # noqa: BLE001 — bookkeeping never breaks a claim
+            pass
+    unseen = getattr(ctx, 'claim_unseen', None)
+    if unseen is not None:
+        try:
+            unseen.discard(tag)
+        except Exception:  # noqa: BLE001 — bookkeeping never breaks a claim
+            pass
+
+
 def claim_tag(ctx, tag_id) -> None:
     """Mark a tag id CLAIMED after a successful grasp so the loop never
     re-grabs a placed object and terminates. No-op if claim state is absent
@@ -60,8 +92,10 @@ def claim_tag(ctx, tag_id) -> None:
     if lock is not None:
         with lock:
             claimed.add(int(tag_id))
+            _forget_position_state(ctx, int(tag_id))
     else:
         claimed.add(int(tag_id))
+        _forget_position_state(ctx, int(tag_id))
 
 
 def skip_tag(ctx, tag_id) -> None:
@@ -79,5 +113,7 @@ def skip_tag(ctx, tag_id) -> None:
     if lock is not None:
         with lock:
             skipped.add(int(tag_id))
+            _forget_position_state(ctx, int(tag_id))
     else:
         skipped.add(int(tag_id))
+        _forget_position_state(ctx, int(tag_id))

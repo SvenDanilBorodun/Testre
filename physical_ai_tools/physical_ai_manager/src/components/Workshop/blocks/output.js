@@ -77,6 +77,12 @@ export const OUTPUT_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: OUTPUT_COLOR,
+    // handlers/output.py::play_tone emits [TONE:freq:seconds]; the React layer
+    // turns it into an OscillatorNode beep. Bounds mirror TONE_FREQ_MIN/MAX +
+    // TONE_SECONDS_MIN/MAX on both sides, so name them for the student.
+    tooltip:
+      'Spielt einen Ton ab. Die erste Zahl ist die Höhe in Hertz '
+      + '(100 bis 4000), die zweite die Dauer in Sekunden (0,05 bis 5).',
     extensions: ['edubotics_validate_tone'],
   },
   // On-screen message (toast). Frontend-only — the backend emits a

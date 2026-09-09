@@ -10,7 +10,7 @@
 
 import React, { useEffect, useState, useCallback, useRef, Suspense, lazy } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import toast from 'react-hot-toast';
+import toast, { useToasterStore } from 'react-hot-toast';
 import * as Blockly from 'blockly/core';
 import CalibrationWizard from '../components/Workshop/CalibrationWizard';
 import LeaderToggle from '../components/Workshop/LeaderToggle';
@@ -64,6 +64,16 @@ const UrdfTwin = lazy(() => import('../components/UrdfTwin'));
 // async chunk pulled in by CodeView → pythonCodeGen) stays out of the entry
 // bundle; mounts only while the „Code"-panel is open.
 const CodeView = lazy(() => import('../components/Workshop/CodeView'));
+
+// On-screen toast stack cap. Roboter Studio was the ONE student page without
+// it: the other five (ControlPanel, TrainingPage, EditDatasetPage, RecordPage,
+// InferencePage) all cap at 3 and dismiss the overflow. Measured here: the
+// output blocks inside „wiederhole fortlaufend" emit ~17.7 toasts/s, so a 15 s
+// loop stacks ~265 toasts — enough to cover the editor AND the run-control
+// strip, the Stopp button included, which leaves the student no way to end the
+// very run producing them. Capping the STACK is the on-screen half only; the
+// emit rate itself is rate-limited server-side.
+const TOAST_LIMIT = 3;
 
 // The „Code anzeigen" open/closed choice persists across reloads.
 const WORKSHOP_CODE_OPEN_KEY = 'edubotics_workshop_code_open';
@@ -295,6 +305,17 @@ function WorkshopPage({ isActive }) {
   const [dockOpen, setDockOpen] = useState(readDockOpen);
   const [dockCollapsed, setDockCollapsed] = useState(readDockCollapsed);
   const [dockWidth, setDockWidth] = useState(readDockWidth);
+  // Toast cap — same dismissal loop as the other five student pages. `toasts` is
+  // newest-first, so index >= TOAST_LIMIT is the overflow; dismiss (not remove)
+  // keeps the exit animation.
+  const { toasts } = useToasterStore();
+  useEffect(() => {
+    toasts
+      .filter((t) => t.visible)
+      .filter((_, i) => i >= TOAST_LIMIT)
+      .forEach((t) => toast.dismiss(t.id));
+  }, [toasts]);
+
   useEffect(() => {
     try {
       window.localStorage.setItem(DOCK_OPEN_KEY, JSON.stringify(dockOpen));

@@ -3057,6 +3057,21 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             board_table_z = (
                 float(board_z_node.real()) if not board_z_node.empty() else None
             )
+            # The MEASURED table tilt (a, b, c) from the touch-off, written into
+            # this same YAML by CalibrationManager._write_table_plane. Read here
+            # so a pinned destination can store the table height at ITS OWN
+            # (x, y) instead of the scalar taken at the tap centroid — see the
+            # comment on the persist below.
+            plane_node = fs.getNode('table_plane')
+            table_plane = None
+            if not plane_node.empty():
+                try:
+                    raw_plane = plane_node.mat()
+                    if raw_plane is not None and len(raw_plane.ravel()) >= 3:
+                        table_plane = tuple(
+                            float(v) for v in raw_plane.ravel()[:3])
+                except Exception:  # noqa: BLE001 — a bad plane falls back below
+                    table_plane = None
             fs.release()
             # The grasp height (z_table) is what move_to/drop_at descend to, so a
             # destination is only meaningful once the touch-off has run.
@@ -3102,23 +3117,66 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().warning(
                     f'mark_destination correction skipped: {e}'
                 )
+            # The grasp height AT THIS PIN, not at the tap centroid. The scalar
+            # z_table is `a·cx + b·cy + c` evaluated at the touch-off CENTROID,
+            # so on a tilted table every pin elsewhere inherited the middle of
+            # the table's height. Measured (tap centroid (0.18, 0), pin 12 cm
+            # further out): 4° → local surface +8.39 mm while the pin stored
+            # 0.00 mm, and the workspace-floor guard — which DOES evaluate the
+            # plane at the target's own (x, y) — did not object. Higher up,
+            # the same guard refuses the pin with „Zielpunkt liegt unter der
+            # Tischebene.", a message the student cannot act on because the
+            # destination they pinned is on the table. Re-derived 2026-09-08
+            # over that same 12 cm lever, WORKSPACE_FLOOR_MARGIN_M = 0.01 and a
+            # stored pin z of 0.00 — the threshold is per CONSUMER, because each
+            # adds its own clearance:
+            #
+            #   consumer          added    under the surface at   REFUSED at
+            #   move_to <pin>     0        0.00°                   4.76°
+            #   pickup <pin>      0.012    5.71°                  10.39°
+            #   named grasp       0.015    7.13°                  11.77°
+            #
+            # An earlier revision said „from ~7° up the same guard refuses EVERY
+            # such pin". 7.13° is neither pin refusal — it is where the
+            # NAMED-OBJECT grasp (a different path, a different clearance) first
+            # drops below the surface.
+            #
+            # motion.table_z_at is the ONE shared answer to "how high is the
+            # table here" (Implementer B owns it); it is duck-typed on
+            # table_plane + z_table, honours the single rollback knob
+            # EDUBOTICS_GRASP_Z_FROM_PLANE, and falls back to the scalar for a
+            # malformed/absent plane — so this is byte-identical to the old
+            # behaviour on an untilted table or with the knob off.
+            pin_z = float(z_table)
+            try:
+                import types as _types
+                from physical_ai_server.workflow.handlers.motion import table_z_at
+                holder = _types.SimpleNamespace(
+                    table_plane=table_plane, z_table=z_table)
+                resolved = table_z_at(holder, corr_x, corr_y)
+                if resolved is not None and math.isfinite(resolved):
+                    pin_z = float(resolved)
+            except Exception as e:  # noqa: BLE001 — never fail a click on this
+                self.get_logger().warning(
+                    f'mark_destination plane height skipped: {e}'
+                )
             response.success = True
             response.world_x = corr_x
             response.world_y = corr_y
-            response.world_z = float(z_table)
+            response.world_z = pin_z
             response.message = f'Ziel "{request.label}" gespeichert.'
             # Persist into the WorkflowManager so the next workflow run
             # can resolve "ablegen bei <label>" without a second click.
             try:
                 wfm = self._get_or_create_workflow_manager()
                 if wfm is not None and request.label:
-                    # Store the grasp height (z_table), matching response.world_z
-                    # — point[2] is the surface plane used only for (x, y). The
+                    # Store the grasp height, matching response.world_z —
+                    # point[2] is the surface plane used only for (x, y). The
                     # corrected (corr_x, corr_y) is what response carried, so the
                     # persisted destination matches the click feedback exactly.
                     wfm.set_destination(
                         request.label,
-                        corr_x, corr_y, float(z_table),
+                        corr_x, corr_y, pin_z,
                     )
             except Exception:
                 pass
@@ -5298,6 +5356,25 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         list(getattr(self.workflow_manager, '_breakpoints', ()) or ()))
             except Exception as e:  # noqa: BLE001 — best-effort
                 self.get_logger().warning(f'sim breakpoint seed failed: {e}')
+            # ...and the pinned destinations, for exactly the same reason. The
+            # sim manager is built with `load_destinations=lambda: {}` and owns a
+            # SEPARATE _persisted_destinations, while `set_destination` is only
+            # ever called on the REAL manager (mark_destination_callback and
+            # capture_pose_callback). So a destination the teacher pinned by
+            # clicking the scene camera existed on the arm and not in the
+            # simulator: measured on all 3 profiles, „bewege zu P" finished on
+            # the real manager and failed in sim with „Unbekanntes Ziel: „P".
+            # Bitte das Ziel zuerst in der Szenen-Kamera anklicken (pinnen)." —
+            # advice the student had already followed.
+            try:
+                if self.workflow_manager is not None:
+                    for _name, _d in (
+                            self.workflow_manager.get_destinations() or {}).items():
+                        manager.set_destination(
+                            _name, _d.get('x', 0.0), _d.get('y', 0.0),
+                            _d.get('z', 0.0))
+            except Exception as e:  # noqa: BLE001 — best-effort
+                self.get_logger().warning(f'sim destination seed failed: {e}')
         else:
             # HIGH-6 — refuse a follower-only Roboter-Studio workflow while a leader
             # arm is live (a both-arms session). Roboter Studio's trajectory writer is
@@ -5744,17 +5821,28 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     def _verify_solve(self, response):
         """Fit + persist the ground-truth correction from the collected points."""
         import math as _math
+        from physical_ai_server.workflow.calibration_manager import (
+            VERIFY_MIN_POINTS as _VERIFY_MIN_POINTS,
+        )
 
         with self._verify_lock:
             points = list(self._verify_points)
 
         n = len(points)
         response.point_count = int(n)
-        if n < 2:
+        # The floor is calibration_manager.VERIFY_MIN_POINTS, INTERPOLATED, not
+        # a literal. It said „Mindestens zwei" while the layer below refuses at
+        # three, so at n ∈ {0, 1} this gate told the student two points were
+        # enough; at n = 2 it passed and the manager's own „drei" refusal was
+        # surfaced verbatim, i.e. two German numbers for one floor. („Prüfpunkte"
+        # is the word both messages use now — the step is called „Genauigkeit
+        # prüfen", so that is the student's own word, not „Referenzpunkte".)
+        if n < _VERIFY_MIN_POINTS:
             response.success = False
             response.message = (
-                'Mindestens zwei Prüfpunkte werden benötigt (empfohlen 4–6, über '
-                'die Arbeitsfläche verteilt). Bitte mehr Punkte erfassen.'
+                f'Mindestens {_VERIFY_MIN_POINTS} Prüfpunkte werden benötigt '
+                '(empfohlen 4–6, über die Arbeitsfläche verteilt). Bitte mehr '
+                'Punkte erfassen.'
             )
             return response
 

@@ -333,3 +333,186 @@ def test_set_variable_caps_var_payload():
     assert var_lines, 'no [VAR:] emission'
     assert ' …' in var_lines[0]          # truncation marker present
     assert len(var_lines[0]) < 5000      # capped well below the 50k payload
+
+
+# The React side's OWN cap on a [VAR:] value, restated here — the ONE place in
+# this suite where a JS constant is written in Python, and acceptable only
+# because this test's whole job is to notice when the two disagree.
+#
+# `useRosTopicSubscription`: `if (rawName.length > VAR_NAME_MAX_LEN ||
+# rawValue.length > 4096) return { intercepted: true };` — an over-long value is
+# CONSUMED with NO dispatch, NO log line and NO error. The variable simply stops
+# updating and nothing anywhere says why. Measured by driving the real hook with
+# frames the real emitter built: at the shipped 2000 the value is stored; at a
+# mutated 4500 it is discarded silently, and BOTH suites stay green.
+REACT_VAR_VALUE_CAP = 4096          # useRosTopicSubscription.js
+REACT_VAR_NAME_MAX_LEN = 64         # utils/variableName.js::VAR_NAME_MAX_LEN
+
+
+def test_the_var_payload_cap_stays_inside_the_react_gate():
+    """*Kills:* raising `_MAX_VAR_PAYLOAD_CHARS` past the React gate — which is
+    exactly the change somebody makes when a student complains their list is
+    being truncated, i.e. the symptom appears on the variables that motivate it.
+    """
+    worst = (interp_mod._MAX_VAR_PAYLOAD_CHARS
+             + len('[VAR:=]') + REACT_VAR_NAME_MAX_LEN + len(' …'))
+    assert worst < REACT_VAR_VALUE_CAP, (
+        f'a [VAR:] frame can reach {worst} chars against React\'s '
+        f'{REACT_VAR_VALUE_CAP} value cap — over it the frame is consumed with '
+        'no dispatch, no log line and no error anywhere')
+
+
+def test_the_react_caps_are_still_what_this_test_says_they_are():
+    """The two literals above are a SECOND opinion about numbers React owns, so
+    they have to be checked against the source. Skips when the React tree is
+    absent (the container ships only this package), like
+    ``test_model_root_agreement``."""
+    import re
+    from pathlib import Path
+    root = (Path(__file__).resolve().parents[3] / 'physical_ai_tools'
+            / 'physical_ai_manager' / 'src')
+    if not root.is_dir():
+        import pytest as _pytest
+        _pytest.skip('React source tree not present')
+    hook = (root / 'hooks' / 'useRosTopicSubscription.js').read_text(encoding='utf-8')
+    m = re.search(r'rawValue\.length > (\d+)', hook)
+    assert m, 'the [VAR:] value gate moved or was renamed'
+    assert int(m.group(1)) == REACT_VAR_VALUE_CAP
+    names = (root / 'utils' / 'variableName.js').read_text(encoding='utf-8')
+    m = re.search(r'VAR_NAME_MAX_LEN = (\d+)', names)
+    assert m and int(m.group(1)) == REACT_VAR_NAME_MAX_LEN
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D-1 — a variable name containing the frame's own delimiters
+# ══════════════════════════════════════════════════════════════════════════
+
+def _var_lines(ctx):
+    return [m for m in ctx.logs if m.startswith('[VAR:')]
+
+
+@pytest.mark.parametrize('name', ['mein Wert=2', 'x=5', 'a[0]', 'b]c'])
+def test_a_variable_name_with_a_frame_character_is_not_emitted(name):
+    """Measured end to end through the real hook and the real reducer: a
+    variable „mein Wert=2" set to 5 emits `[VAR:mein Wert=2=5.0]`, which React's
+    `^\\[VAR:([^=]+)=(.*)\\]$` parses as name „mein Wert", value „2=5.0". The
+    panel grows a row the student never created and, if a real „mein Wert"
+    exists, its value is SILENTLY CLOBBERED — with nothing in the Protokoll.
+
+    `variableName.js`'s own `=` refusal is structurally unreachable on this
+    path: by the time it runs, `[^=]+` has already cut the name. This is the
+    only layer that still holds the whole name."""
+    interp = Interpreter([])
+    ctx = _Ctx()
+    interp._set_variable(ctx, name, 5)
+    assert _var_lines(ctx) == [], f'a corrupt frame was emitted: {ctx.logs}'
+    warns = [m for m in ctx.logs if m.startswith('[WARNUNG]')]
+    assert len(warns) == 1, f'the absence must be EXPLAINED, got {ctx.logs}'
+    assert name in warns[0] and 'Variablen-Tafel' in warns[0]
+    assert 'läuft normal weiter' in warns[0], (
+        'the program is unaffected — only the panel cannot show it')
+    # …and the variable itself is still set and readable.
+    assert ctx.variables[name] == 5
+
+
+def test_the_unshowable_warning_fires_once_per_name_per_run():
+    """*Kills:* dropping the latch, which would flood a loop."""
+    interp = Interpreter([])
+    ctx = _Ctx()
+    for _ in range(3):
+        interp._set_variable(ctx, 'x=5', 1)
+    interp._set_variable(ctx, 'y=6', 1)
+    warns = [m for m in ctx.logs if m.startswith('[WARNUNG]')]
+    assert len(warns) == 2, f'one per NAME per run, got {ctx.logs}'
+
+
+def test_a_value_containing_an_equals_sign_still_shows():
+    """*Kills:* "fixing" D-1 by splitting on the LAST `=` like `[CNT:]`. The
+    `[VAR:]` value is JSON and can legitimately contain `=` inside a string;
+    `[CNT:]`'s value is digits-only, which is the entire reason last-`=` is
+    unambiguous there. The two frames may never be harmonised."""
+    interp = Interpreter([])
+    ctx = _Ctx()
+    interp._set_variable(ctx, 'x', 'a=b')
+    lines = _var_lines(ctx)
+    assert lines == ['[VAR:x="a=b"]'], ctx.logs
+    # …and it survives React's own capture, name first.
+    import re
+    m = re.match(r'^\[VAR:([^=]+)=(.*)\]$', lines[0], re.S)
+    assert m and m.group(1) == 'x' and m.group(2) == '"a=b"'
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D-2 — an empty variable NAME
+# ══════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize('name', ['', '   ', None])
+@pytest.mark.parametrize('btype', ['variables_set', 'math_change'])
+def test_a_nameless_variable_block_is_refused_in_german(name, btype):
+    """`_read_variable_name` ends `if isinstance(value, str): return value`, so a
+    bare-string field `{"VAR": ""}` yielded '' and both guards tested `is None`.
+    The frame `[VAR:=5]` matches NEITHER React regex (`[^=]+` needs ≥1 char),
+    falls through `interceptToken` and is rendered VERBATIM in the Protokoll.
+    The two neighbouring call sites (`controls_for`, `controls_forEach`) were
+    already truthiness-guarded; these two were the odd ones out."""
+    from physical_ai_server.workflow.interpreter import InterpreterError
+    fields = {} if name is None else {'VAR': name}
+    key = 'VALUE' if btype == 'variables_set' else 'DELTA'
+    block = {'type': btype, 'fields': fields,
+             'inputs': {key: {'block': _num(5)}}}
+    interp = Interpreter([])
+    ctx = _Ctx()
+    with pytest.raises(InterpreterError) as exc:
+        if btype == 'variables_set':
+            interp._exec_variables_set(block, ctx)
+        else:
+            interp._exec_math_change(block, ctx)
+    assert 'Variable hat keinen Namen' in str(exc.value)
+    assert _var_lines(ctx) == [], f'the raw sentinel leaked: {ctx.logs}'
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# E-4 — an unknown object on a STUDENT surface
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_greifziel_variable_renders_as_student_text():
+    """`_jsonable`'s fallback was `repr(value)`, so the student's `ziel`
+    variable — the prescribed split-grasp idiom, every loop pass — rendered as
+    `Detection(centroid_px=(267, 305), bbox_px=…, corners_px=array([[…]]),
+    extras={…})`. The SAME round added `output._student_text`, which renders the
+    SAME object as „Greifziel (Marker 22) bei x=… m, …". Two stringifiers for
+    student-visible values, and only one of them knew what a Greifziel was."""
+    from physical_ai_server.workflow.perception import Detection
+    interp = Interpreter([])
+    ctx = _Ctx()
+    det = Detection(centroid_px=(267, 305), bbox_px=(0, 0, 1, 1),
+                    confidence=1.0, label='tag22', aruco_id=22,
+                    world_xyz_m=(0.158, -0.050, 0.015))
+    interp._set_variable(ctx, 'ziel', det)
+    line = _var_lines(ctx)[0]
+    assert 'Greifziel (Marker 22)' in line, line
+    assert 'Detection(' not in line and 'centroid_px' not in line
+
+
+@pytest.mark.parametrize('value', [1, 2.5, 'text', [1, 2], {'a': 1}, True, None])
+def test_a_plain_value_still_renders_unchanged(value):
+    """*Kills:* routing everything through `_student_text`."""
+    import json
+    from physical_ai_server.workflow import interpreter as _i
+    assert _i._jsonable(value) == json.loads(json.dumps(value))
+
+
+def test_a_stringifier_that_raises_still_produces_a_frame():
+    """*Kills:* deleting the `except`. Observability never breaks a run."""
+    from physical_ai_server.workflow import interpreter as _i
+
+    class _Boom:
+        def __repr__(self):
+            return 'BOOM-REPR'
+
+        @property
+        def aruco_id(self):
+            raise RuntimeError('no')
+
+    out = _i._jsonable(_Boom())
+    assert isinstance(out, str) and out

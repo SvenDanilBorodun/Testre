@@ -64,26 +64,42 @@ def _chain(*blocks):
 # ── a zombie MAIN thread refuses the next start ──────────────────────────────
 
 def test_a_zombie_main_thread_refuses_the_next_start():
-    """No fake camera needed: handlers/trajectory.py:445 is a RAW
-    ``lock.acquire(timeout=10.0)`` that never polls stop, so holding the motion
-    lock parks the main daemon past ``stop()``'s 5 s join. ``_hat_threads`` is
-    EMPTY there, so a guard that only looks at hats waves the start through and
-    ``clear()`` un-stops the previous program."""
+    """No fake camera needed: a PUBLISH that blocks parks the main daemon past
+    ``stop()``'s 5 s join — ``chunked_publish`` polls stop between points, never
+    inside the publisher call. ``_hat_threads`` is EMPTY there, so a guard that
+    only looks at hats waves the next start through and ``clear()`` un-stops the
+    previous program.
+
+    The ORIGINAL lever for this test was `handlers/trajectory.py`'s raw
+    ``lock.acquire(timeout=10.0)``, which never polled stop: simply holding the
+    motion lock parked the main daemon. That is gone — every motion-lock acquire
+    now goes through ``motion._hold_motion_lock``, which polls stop and answers
+    it in ~0.03 s, so a held lock no longer produces a zombie at all. The GUARD
+    is still needed (`perception.detect` under the AprilTag lock and a raw
+    ``EDUBOTICS_GRASP_SETTLE_S`` sleep are the remaining producers, and a
+    blocking publisher is the cheapest stand-in for both), so the test keeps its
+    subject and changes its lever."""
     published: list = []
+    parked = threading.Event()
+    release = threading.Event()
+    first = {'seen': False}
+
+    def publisher(pts):
+        published.append(
+            (time.monotonic(), threading.current_thread().name, len(pts)))
+        if not first['seen']:
+            first['seen'] = True
+            parked.set()
+            release.wait(9.0)        # park the main daemon INSIDE the publish
+
     mgr = WorkflowManager(
-        publisher=lambda pts: published.append(
-            (time.monotonic(), threading.current_thread().name, len(pts))),
+        publisher=publisher,
         emit_status=lambda _e: None,
         get_follower_joints=lambda: [0.0, -1.0, 1.0, 0.0, 0.0, 0.8],
     )
-    release = threading.Event()
-    threading.Thread(
-        target=lambda: (mgr._motion_lock.acquire(),
-                        release.wait(9.0), mgr._motion_lock.release()),
-        daemon=True).start()
-    time.sleep(0.2)
 
     assert mgr.start(_ws([_replay()], trajectories=_traj()), 'run1')[0] is True
+    assert parked.wait(5.0), 'the main daemon never reached the publish'
     time.sleep(0.5)
     mgr.stop()                                   # the 5 s join TIMES OUT
     assert mgr._thread.is_alive(), 'precondition: the main daemon outlived stop()'

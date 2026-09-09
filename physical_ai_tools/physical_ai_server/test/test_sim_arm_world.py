@@ -95,34 +95,61 @@ def test_sim_arm_holds_by_identity_all_the_way_to_the_drop_point(monkeypatch):
     assert world.is_held() is False
     assert arm._simulate_held(arm._last_q) is False
     # NOTE deliberately NOT asserting check_grasp_held(ctx) is False here. That
-    # function compares the ACHIEVED gripper angle against
-    # last_commanded_close + margin, so an OPEN gripper (+0.8 > −0.35) reads HELD
-    # on the real rig too — the documented position-only-sensing limitation
-    # (perception_blocks.wait_until_held). Identity fixed the two failures that
+    # function is position-only, and until 2026-09-07 an OPEN gripper (+0.8 >
+    # −0.35) read HELD on the real rig too. Identity fixed the two failures that
     # were sim-ONLY (MISS during the carry, HELD after moving back over a frozen
-    # object); this third one is shared with hardware and out of scope.
-    # test_open_gripper_still_reads_held_exactly_like_the_real_rig pins it.
+    # object); the third, shared with hardware, is fixed by
+    # motion.GRASP_HELD_MIN_TRAVEL_FRAC.
+    # test_open_gripper_after_a_close_now_reads_MISS_on_the_sim_and_the_rig
+    # pins the CURRENT contract: since 2026-09-07 an open gripper AFTER a
+    # commanded close reads MISS on the sim and on the rig alike.
 
 
-def test_open_gripper_still_reads_held_exactly_like_the_real_rig(monkeypatch):
-    """The ONE grasp-report wrongness identity does NOT fix, pinned so it is visible.
+def test_open_gripper_after_a_close_now_reads_MISS_on_the_sim_and_the_rig(monkeypatch):
+    """DELIBERATELY REVERSED 2026-09-07 (was
+    ``test_open_gripper_still_reads_held_exactly_like_the_real_rig``, which pinned
+    the wrongness as out of scope).
 
-    ``check_grasp_held`` compares the achieved gripper angle against
-    ``last_commanded_close + GRASP_HELD_MARGIN_RAD``; an OPEN gripper clears that
-    threshold trivially, so it reports HELD whenever the jaws are open — on the sim
-    AND on the rig (perception_blocks.wait_until_held documents it). Fixing it would
-    change real-arm grasp verification, so it is deliberately out of scope here.
-    If this test ever starts failing, the semantics changed on HARDWARE too and that
-    needs sign-off, not a test edit.
-    """
+    ``check_grasp_held`` was position-only and ONE-SIDED — ``gripper >
+    last_commanded_close + margin`` — and an OPEN gripper clears that threshold by
+    construction. So a close that never executed at all (a dropped trajectory, a
+    halted arm, a servo fault) read as HELD: measured 2026-09-07 with the follower
+    gripper PINNED at its open angle, „Greife" returned OK, printed „„Würfel"
+    gegriffen." and CLAIMED the tag on all three profiles, so a „Solange sichtbar"
+    loop marked the object done and moved on having touched nothing.
+
+    The test now pins the SECOND half of the check (see
+    ``motion.GRASP_HELD_MIN_TRAVEL_FRAC``): once a close HAS been commanded, a
+    reading still essentially AT the open command is a MISS. This is a real
+    behaviour change on hardware and it moves in the conservative direction only —
+    it can convert HELD → MISS (→ retry → skip), never the reverse.
+
+    The behaviour CLAUDE.md documents for „Greifer hält etwas?" / „warte bis
+    Greifer hält" on a FRESH run — no close commanded, open gripper reads True —
+    is preserved exactly, and is asserted below."""
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
     world = _resolved_world([_cube(0.20, 0.0)])
     arm = _omx_arm(world.objects(), world=world)
     arm.publish([([0.0] * 5 + [GRIPPER_OPEN_RAD], 1.0)])
     ctx = type('C', (), {'get_follower_joints': staticmethod(arm.get_joints),
                          'last_commanded_close_rad': GRIPPER_CLOSED_RAD})()
-    assert world.is_held() is False           # sim ground truth: nothing held
-    assert motion.check_grasp_held(ctx) is True   # ...but the angle test says HELD
+    assert world.is_held() is False               # sim ground truth: nothing held
+    assert motion.check_grasp_held(ctx) is False  # ...and the angle test agrees now
+
+    # A HELD object stops the jaws partway — still True.
+    arm.publish([([0.0] * 5 + [-0.2], 1.0)])
+    assert motion.check_grasp_held(ctx) is True
+
+    # And with NO close commanded this run, an open gripper still reads True —
+    # the documented open-gripper behaviour of grasp_held / wait_until_held.
+    arm.publish([([0.0] * 5 + [GRIPPER_OPEN_RAD], 1.0)])
+    fresh = type('C', (), {'get_follower_joints': staticmethod(arm.get_joints),
+                           'last_commanded_close_rad': None})()
+    assert motion.check_grasp_held(fresh) is True
+
+    # One-variable rollback restores the position-only test.
+    monkeypatch.setattr(motion, 'GRASP_HELD_MIN_TRAVEL_FRAC', 0.0)
+    assert motion.check_grasp_held(ctx) is True
 
 
 def test_sim_arm_capture_takes_the_nearest_cube_of_two():

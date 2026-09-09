@@ -100,7 +100,6 @@ class _PCtx:
         self.yaw_bias_rad = 0.0
         self.claimed_tags = set()
         self.skipped_tags = set()
-        self.absent_since = {}
         self.claim_lock = threading.RLock()
         self.motion_lock = threading.RLock()
         self.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]
@@ -295,19 +294,43 @@ def test_mark_done_none_raises():
         pb.mark_done(_PCtx([]), {'ziel': None})
 
 
-# ── #HIGH-3 / #MED-4: split blocks raise GraspSkip (loop-graceful) on None ────
-def test_split_blocks_raise_graspskip_on_none():
-    """move_above / close_on_object / mark_done raise GraspSkip (NOT a bare
-    WorkflowError) on a missing Greifziel, so an unguarded „Solange sichtbar" loop
-    body moves on instead of ABORTING the whole run; standalone still fails loud
-    (GraspSkip IS a WorkflowError)."""
+# ── #HIGH-3 / #MED-4 / G13: the class of a missing Greifziel follows the CAUSE ─
+def test_split_blocks_raise_a_program_error_on_an_unexplained_none():
+    """An EMPTY ZIEL socket with nothing recorded to explain it is a PROGRAM
+    error: „finde …" never ran, so no further loop pass and no hat re-fire can
+    ever fill that socket. It must be a base ``WorkflowError`` that ends the run,
+    NOT a ``GraspSkip`` the „Solange sichtbar" loop swallows — swallowing it
+    repeats the identical wrong motion until a cap trips and still reports the
+    run finished. (A RECORDED reason is the recoverable case; see the sibling.)"""
     ctx = _PCtx([])
-    with pytest.raises(GraspSkip):
-        move_above(ctx, {'ziel': None})
-    with pytest.raises(GraspSkip):
-        close_on_object(ctx, {'ziel': None})
-    with pytest.raises(GraspSkip):
-        pb.mark_done(ctx, {'ziel': None})
+    for label, call in (
+        ('move_above', lambda: move_above(ctx, {'ziel': None})),
+        ('close_on_object', lambda: close_on_object(ctx, {'ziel': None})),
+        ('mark_done', lambda: pb.mark_done(ctx, {'ziel': None})),
+    ):
+        with pytest.raises(WorkflowError) as exc:
+            call()
+        assert not isinstance(exc.value, GraspSkip), (
+            f'{label}: an unexplained empty socket must not be loop-swallowable')
+        assert str(exc.value) == motion._NO_GREIFZIEL_MSG, f'{label}'
+
+
+def test_a_recorded_find_reason_is_still_a_recoverable_skip():
+    """The OTHER half of the same helper: when ``find_object`` recorded WHY it
+    returned None („außerhalb des Greifbereichs", „nichts sichtbar"), the cause
+    is the WORLD and another instance may well succeed — so it stays a
+    ``GraspSkip`` and the loop moves on. Over-applying the program-error fix to
+    this branch would abort a whole multi-object run on one unreachable cube."""
+    ctx = _PCtx([])
+    ctx.last_find_failure = 'Der Würfel liegt außerhalb des Greifbereichs.'
+    for label, call in (
+        ('move_above', lambda: move_above(ctx, {'ziel': None})),
+        ('close_on_object', lambda: close_on_object(ctx, {'ziel': None})),
+        ('mark_done', lambda: pb.mark_done(ctx, {'ziel': None})),
+    ):
+        with pytest.raises(GraspSkip) as exc:
+            call()
+        assert 'Greifbereich' in str(exc.value), f'{label}: {exc.value}'
 
 
 # ── #BUG-4: the ZIEL→ziel dispatch contract (unit tests bypass _build_args) ───

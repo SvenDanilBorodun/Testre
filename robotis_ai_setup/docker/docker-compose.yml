@@ -320,9 +320,18 @@ services:
       - EDUBOTICS_WHILE_STALL_PASSES=${EDUBOTICS_WHILE_STALL_PASSES:-3}
       - EDUBOTICS_WHILE_MAX_SECONDS=${EDUBOTICS_WHILE_MAX_SECONDS:-120}
       - EDUBOTICS_WHILE_SETTLE_S=${EDUBOTICS_WHILE_SETTLE_S:-0.2}
-      # Recycled-object reclaim: a claimed/skipped object continuously ABSENT for
-      # ≥ this many seconds and then put back is grabbed again. Read by
-      # workflow/handlers/perception_blocks.py.
+      # Recycled-object reclaim: a claimed/skipped object that turns up ≥ this
+      # many metres from where the robot LEFT it — or back at the spot it was
+      # picked from, after having been out of sight — was moved by a person, so
+      # it is grabbed again. Both proofs act on a SIGHTING, never on an absence,
+      # so a missed AprilTag look can never re-grasp a placed object. `0`
+      # disables the reclaim entirely (one-variable rollback).
+      # Read by workflow/handlers/perception_blocks.py.
+      - EDUBOTICS_RECLAIM_MOVE_M=${EDUBOTICS_RECLAIM_MOVE_M:-0.02}
+      # „Wenn <Typ> gesehen": how long a tag must be continuously unseen before
+      # the object hat believes it is really gone. Read by
+      # workflow/handlers/perception_blocks.py (workflow_manager.py imports it
+      # as _HAT_ABSENT_GRACE_S — it is no longer a reclaim knob).
       - EDUBOTICS_RECLAIM_ABSENT_S=${EDUBOTICS_RECLAIM_ABSENT_S:-1.5}
       # Follower-only (Roboter Studio) flag. NOTE: the server does NOT read
       # this env var — leader_appears_active() (collision_monitor.py) keys
@@ -418,6 +427,38 @@ services:
       # many times before skipping the instance; GRASP_SETTLE_S settles the
       # servo before the readback. Read by workflow/handlers/motion.py.
       - EDUBOTICS_GRASP_HELD_MAX_RAD=${EDUBOTICS_GRASP_HELD_MAX_RAD:-}
+      # HELD/MISS second half: how far the jaws must have MOVED away from the
+      # OPEN command (fraction of the commanded open→close travel) before a
+      # reading counts as HELD. Without it a close that never executed reads as
+      # a successful grasp — the gripper sits AT its open angle, which is above
+      # the threshold by construction. `0` restores the position-only test
+      # (rollback). Read by workflow/handlers/motion.py.
+      - EDUBOTICS_GRASP_HELD_MIN_TRAVEL_FRAC=${EDUBOTICS_GRASP_HELD_MIN_TRAVEL_FRAC:-0.05}
+      # Gripper close for the OBJECT-AGNOSTIC „aufnehmen" block (Rule §2). EMPTY
+      # default = unset → the ArmProfile's pickup_close_rad, which is None on
+      # EVERY shipped profile after the 2026-09-08 revert, so the unset default
+      # is the arm's full hardware close everywhere. Setting this to a rig's own
+      # gripper_closed_rad therefore changes nothing; set it ABOVE that (edu6
+      # 1.0, edu1 0.10 — never 0) to opt a rig into a bounded squeeze. It is NOT
+      # band-checked, and it does not reach „schließe Greifer". Read by
+      # workflow/handlers/motion.py.
+      - EDUBOTICS_PICKUP_CLOSE_RAD=${EDUBOTICS_PICKUP_CLOSE_RAD:-}
+      # Keep a HELD object's wrist orientation across „bewege zu" / „ablegen
+      # bei" instead of re-solving with the fixed jaw constant (which twists the
+      # object in the jaws). `0` restores the fixed roll. Read by
+      # workflow/handlers/motion.py.
+      - EDUBOTICS_CARRY_KEEP_ROLL=${EDUBOTICS_CARRY_KEEP_ROLL:-1}
+      # Named-object grasp height follows the MEASURED table plane at the
+      # object's own (x, y) — the same plane the workspace floor judges against
+      # — instead of the scalar z_table sampled at the touch-off centroid. `0`
+      # restores the scalar height. Defined and read in
+      # workflow/handlers/motion.py (every mention of the name in
+      # perception_blocks.py is a cross-reference, not a read).
+      - EDUBOTICS_GRASP_Z_FROM_PLANE=${EDUBOTICS_GRASP_Z_FROM_PLANE:-1}
+      # Max emissions per second, per output-block kind („melde"/„sage"/„Ton"/
+      # „Klang"/„Meldung"), per run. `0` disables the limit. Read by
+      # workflow/handlers/output.py.
+      - EDUBOTICS_OUTPUT_MAX_PER_S=${EDUBOTICS_OUTPUT_MAX_PER_S:-5}
       - EDUBOTICS_GRASP_RETRY=${EDUBOTICS_GRASP_RETRY:-1}
       - EDUBOTICS_GRASP_SETTLE_S=${EDUBOTICS_GRASP_SETTLE_S:-0.3}
       # Teleop force/collision e-stop (Rule §2 software guard, teleop-only). Read by the

@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import types
 
 import numpy as np
@@ -520,10 +521,29 @@ def test_drop_at_outer_ring_reduces_the_release_height_instead_of_refusing(
     assert ctx.published, 'the place must actually run'
     # the object is released (gripper ends OPEN) at the outer ring
     assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_OPEN_RAD)
+    # …and it does NOT nag about it. The bisect lands on 48.4 of the requested
+    # 50 mm here — 96.8 % — and a rim clearance that came back at 48 instead of
+    # 50 mm still clears every container. The warning used to fire on ANY
+    # reduction: measured 2026-09-07, 38 of 120 successful edu6 places (31.7 %)
+    # carried it. It is now gated at the same _APPROACH_WARN_FRAC the approach
+    # hover uses, so it fires when the clearance is genuinely gone, not when it
+    # is 1.6 mm short. (Deliberately reversed from the original assertion; see
+    # the class of defect _APPROACH_WARN_FRAC itself was derived to fix.)
+    assert not [m for m in ctx.logs if 'Ablegehöhe' in m], (
+        f'a 1.6 mm reduction must not be reported — logs were {ctx.logs}')
+
+
+def test_drop_at_reports_a_release_height_that_is_actually_gone(monkeypatch):
+    """The other side of the gate: when the achieved rim clearance really is a
+    small fraction of the request, the student IS told, in German, with mm."""
+    ctx = _RecordingCtx(z_table=0.0)
+    ctx.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_CLOSED_RAD]
+    # Ask for a rim clearance far beyond this arm's ceiling so the bisect can
+    # only return a small fraction of it.
+    monkeypatch.setattr(motion, 'DROP_HEIGHT_M', 0.30)
+    drop_at(ctx, {'destination': OUTER_RING_XYZ})
     warn = [m for m in ctx.logs if 'Ablegehöhe' in m]
-    assert warn, (
-        'a reduced release height must be reported to the student in German — '
-        f'logs were {ctx.logs}')
+    assert warn, f'a consequential reduction must be reported — logs {ctx.logs}'
     assert 'mm' in warn[0]
 
 
@@ -613,3 +633,494 @@ def test_floor_z_at_uses_plane_when_present():
 def test_floor_z_at_falls_back_to_scalar_without_plane():
     ctx = _RecordingCtx(z_table=0.03, table_plane=None)
     assert motion._floor_z_at(ctx, 0.2, 0.1) == pytest.approx(0.03)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# G6 — the motion lock. RS-18 (bounded, stop-aware acquire), RS-27 („warte N
+# Sekunden" must not pin the lock), and the two defects found while verifying
+# them: a `finally` re-acquire that could return WITHOUT the lock, and an
+# unclamped EDUBOTICS_GRASP_SETTLE_S sleeping under the lock with no stop poll.
+#
+# Every number below was re-measured 2026-09-08 (the harness drove the real
+# WorkflowManager with real threads); the comments say which claims reproduced
+# and which did not.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class _Holder:
+    """A thread that takes ctx.motion_lock and keeps it until released."""
+
+    def __init__(self, ctx, hold_s=None):
+        self._ctx = ctx
+        self._hold_s = hold_s
+        self.taken = threading.Event()
+        self._let_go = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        with self._ctx.motion_lock:
+            self.taken.set()
+            if self._hold_s is None:
+                self._let_go.wait(30.0)
+            else:
+                time.sleep(self._hold_s)
+
+    def __enter__(self):
+        self._t.start()
+        assert self.taken.wait(5.0), 'the holder never got the lock'
+        return self
+
+    def __exit__(self, *_exc):
+        self._let_go.set()
+        self._t.join(30.0)
+        return False
+
+
+def test_the_motion_lock_notice_is_exactly_ten_seconds_and_there_is_no_bound():
+    """Pin the SHIPPED VALUES with literals, not with the symbols themselves.
+
+    Every other test here passes an explicit short notice, so the module
+    constants are invisible to them: mutation-tested 2026-09-08, setting the
+    old bound to 0.0 and to 1e9 both left the rest of the suite green.
+
+    The second assertion is the policy: there is NO bound any more (owner
+    decision 2026-09-09 — wait, warn once, never raise), so a
+    ``MOTION_LOCK_TIMEOUT_S`` coming back is a silent reversal of it. Waiting
+    for the arm is not an error; the only thing left is a NOTICE."""
+    assert motion.MOTION_LOCK_NOTICE_S == 10.0
+    assert motion._MOTION_LOCK_POLL_S == 0.05
+    assert not hasattr(motion, 'MOTION_LOCK_TIMEOUT_S'), (
+        'the bound is back — a queued motion must WAIT, not die at N seconds')
+
+
+def test_the_acquire_waits_for_a_stop_and_never_for_a_bound():
+    """It answers Stop, and nothing else ends the wait. Before the policy
+    change this test proved the default ARGUMENT was not 0; now it proves there
+    is no deadline at all — a 1 s Stop is what returns, not a timeout."""
+    ctx = _RecordingCtx()
+    stop = {'v': False}
+    # Bound BEFORE the call: _hold_motion_lock snapshots ctx.should_stop
+    # once, which is right (in production it is a stable bound
+    # _stop_event.is_set), so the flag has to be the mutable part.
+    ctx.should_stop = lambda: stop['v']
+    with _Holder(ctx):
+        t0 = time.monotonic()
+        raised = None
+        stop_after = threading.Timer(1.0, lambda: stop.__setitem__('v', True))
+        stop_after.start()
+        try:
+            motion._hold_motion_lock(ctx)
+        except WorkflowError as e:
+            raised = str(e)
+        finally:
+            stop_after.cancel()
+        waited = time.monotonic() - t0
+    # It waited for the Stop (1 s), not for a 0-second default.
+    assert raised is not None and 'gestoppt' in raised, (
+        f'something other than the 1 s Stop ended the wait: {raised!r}')
+    assert waited > 0.9, (
+        f'the wait collapsed to ~{waited:.2f} s — a deadline is back')
+
+
+def test_the_notice_constant_is_read_at_call_time_not_frozen_at_def_time():
+    """It was ``timeout_s: float = MOTION_LOCK_TIMEOUT_S``, and Python binds a
+    default ARGUMENT once, when the ``def`` executes. Rebinding the module
+    constant therefore did nothing while looking like it worked: an experiment
+    that set it to 3.0 and expected a 3 s failure measured 10.6 s (2026-09-08).
+    The bound is gone but the NOTICE inherited the shape, so it inherited the
+    trap; this is what stops it coming back."""
+    ctx = _RecordingCtx()
+    prev = motion.MOTION_LOCK_NOTICE_S
+    motion.MOTION_LOCK_NOTICE_S = 0.1
+    try:
+        with _Holder(ctx, hold_s=0.6):
+            t0 = time.monotonic()
+            acq = motion._hold_motion_lock(ctx)
+            waited = time.monotonic() - t0
+            motion._release_motion_lock(ctx, acq)
+    finally:
+        motion.MOTION_LOCK_NOTICE_S = prev
+    assert waited > 0.3, 'the holder was not actually holding'
+    warn = [m for m in ctx.logs if 'gleichzeitig' in m]
+    assert len(warn) == 1, (
+        f'the 0.1 s notice never fired across a {waited:.2f} s wait — the '
+        f'constant is frozen into the default argument. logs={ctx.logs}')
+
+
+def test_the_acquire_is_not_bounded_it_waits_and_warns_once():
+    """THE policy, inverted from what this test used to assert.
+
+    It used to prove the acquire RAISED „…gleichzeitig bewegen…" past a bound.
+    Owner decision 2026-09-09: a queued motion is not an error. The wait now
+    ends only when the arm is free (or Stop is pressed), and the student gets
+    ONE German [WARNUNG] that says it will carry on — 3 waits, 1 line, not one
+    line per 50 ms poll."""
+    ctx = _RecordingCtx()
+    with _Holder(ctx, hold_s=0.9):
+        t0 = time.monotonic()
+        acq = motion._hold_motion_lock(ctx, notice_s=0.1)
+        waited = time.monotonic() - t0
+        motion._release_motion_lock(ctx, acq)
+    assert acq is True, 'the acquire gave up instead of waiting'
+    assert waited > 0.5, (
+        f'returned after {waited:.2f} s of a 0.9 s hold — it did not wait')
+    warn = [m for m in ctx.logs if 'gleichzeitig' in m]
+    assert len(warn) == 1, f'exactly ONE [WARNUNG], got {ctx.logs}'
+    assert warn[0].startswith('[WARNUNG]')
+    assert 'es geht weiter' in warn[0], (
+        'with no bound, silence reads as a hang — the warning must promise it '
+        f'carries on: {warn[0]!r}')
+    # The old remedy was measurably wrong: a restart reproduces it identically.
+    assert 'neu starten' not in warn[0]
+
+
+def test_the_acquire_polls_stop_while_it_queues():
+    """RS-18's second claim, re-measured: with another thread holding for 4.0 s
+    and Stop pressed 0.2 s in, a plain lock.acquire() answered after 3.80 s and
+    the sliced acquire answers in 0.00 s. (The finding said 4.04 s; same event,
+    measured from t=0 rather than from the Stop.)"""
+    ctx = _RecordingCtx()
+    with _Holder(ctx):
+        ctx.should_stop = lambda: True
+        t0 = time.monotonic()
+        with pytest.raises(WorkflowError) as exc:
+            motion._hold_motion_lock(ctx)
+        waited = time.monotonic() - t0
+    assert 'gestoppt' in str(exc.value)
+    assert waited < 0.5, (
+        f'Stop waited {waited:.2f} s behind the lock — the stop poll is gone')
+
+
+def test_the_acquire_is_sliced_not_one_long_wait():
+    """The stop poll only works because the wait is CUT INTO SLICES. A single
+    `lock.acquire(timeout=...)` would check should_stop exactly once, at the
+    top, and then be deaf for the whole wait — which, with no bound, is
+    forever."""
+    ctx = _RecordingCtx()
+    polls = {'n': 0}
+    stop = {'v': False}
+
+    def counting_stop():
+        polls['n'] += 1
+        return stop['v']
+
+    ctx.should_stop = counting_stop
+    with _Holder(ctx):
+        stopper = threading.Timer(0.4, lambda: stop.__setitem__('v', True))
+        stopper.start()
+        try:
+            with pytest.raises(WorkflowError):
+                motion._hold_motion_lock(ctx)
+        finally:
+            stopper.cancel()
+    assert polls['n'] >= 4, (
+        f'should_stop was consulted {polls["n"]}× across a 0.4 s wait at a '
+        f'{motion._MOTION_LOCK_POLL_S}s slice — the wait is not sliced')
+
+
+# ── RS-27: „warte N Sekunden" must not pin the lock ──────────────────────────
+
+def test_wait_seconds_lets_another_thread_move_while_it_waits():
+    """Re-measured 2026-09-08 end to end: a hat running „warte 2 s" under the
+    lock delayed the main stack's next move to 2.00 s against a 0.20 s
+    no-hat baseline — 1.80 s of starvation, against the finding's claimed
+    1.89 s. With the release in place: 0.21 s, i.e. gone."""
+    ctx = _RecordingCtx()
+    got_in_at = {}
+
+    def other_motion_thread():
+        t0 = time.monotonic()
+        with ctx.motion_lock:
+            got_in_at['t'] = time.monotonic() - t0
+
+    with ctx.motion_lock:                     # the hat handler's `with`
+        t = threading.Thread(target=other_motion_thread)
+        t.start()
+        time.sleep(0.05)                      # let it queue
+        motion.wait_seconds(ctx, {'seconds': 0.6})
+        t.join(5.0)
+    assert 't' in got_in_at, 'the other motion thread never got the lock'
+    assert got_in_at['t'] < 0.4, (
+        f'the other thread waited {got_in_at["t"]:.2f} s of a 0.6 s „warte" — '
+        'the lock was held for the wait')
+
+
+def test_wait_seconds_from_the_main_stack_never_touches_the_lock():
+    """The main stack does not hold motion_lock, so the release is a no-op and
+    the finally must not try to re-take it (which would leave the main stack
+    holding a lock nobody releases)."""
+    ctx = _RecordingCtx()
+    motion.wait_seconds(ctx, {'seconds': 0.05})
+    free = ctx.motion_lock.acquire(blocking=False)
+    if free:
+        ctx.motion_lock.release()
+    assert free, 'wait_seconds left the motion lock held on the main stack'
+
+
+def test_wait_seconds_always_returns_holding_the_lock_it_released():
+    """THE defect the RS-27 fix introduced, found by running it.
+
+    The `finally` re-acquired with a BOUND and RAISED a German error when it
+    could not. Measured 2026-09-08 against the real ``_run_hat_handler`` shape
+    with another motion thread holding past the bound: the German error was
+    caught by that function's inner `except (WorkflowError, InterpreterError)`
+    exactly as designed — and then the surrounding `with ctx.motion_lock`
+    __exit__ raised ``RuntimeError: cannot release un-acquired lock``, which
+    lands in its OUTER bare `except Exception: return`. The hat is silent for
+    the rest of the run, with no message, and the run still reports green:
+    RS-16's failure mode through a new door.
+
+    (The raise's own comment said it existed "so the caller's `with
+    motion_lock` __exit__ always has something to release". On that branch it
+    has nothing.)"""
+    ctx = _RecordingCtx()
+    escaped = []
+    inner = []
+
+    def hat_handler():
+        try:
+            with ctx.motion_lock:                    # _run_hat_handler's `with`
+                try:
+                    ready.set()
+                    motion.wait_seconds(ctx, {'seconds': 0.2})
+                except Exception as e:               # noqa: BLE001 — inner arm
+                    inner.append(f'{type(e).__name__}: {e}')
+        except Exception as e:                       # noqa: BLE001 — outer arm
+            escaped.append(f'{type(e).__name__}: {e}')
+
+    ready = threading.Event()
+    # Another motion thread that grabs the lock the moment „warte" drops it and
+    # keeps it far longer than the re-acquire notice.
+    prev = motion.MOTION_LOCK_NOTICE_S
+    motion.MOTION_LOCK_NOTICE_S = 0.1
+    try:
+        h = threading.Thread(target=hat_handler)
+        h.start()
+        assert ready.wait(5.0)
+        time.sleep(0.05)
+        with _Holder(ctx, hold_s=0.9):
+            h.join(20.0)
+    finally:
+        motion.MOTION_LOCK_NOTICE_S = prev
+    assert not h.is_alive()
+    assert escaped == [], (
+        f'the hat handler died on {escaped} — wait_seconds returned without '
+        'the lock its caller is about to release')
+    assert inner == [], f'wait_seconds raised out of its own finally: {inner}'
+
+
+def test_a_slow_reacquire_is_reported_in_German_and_then_waits():
+    """It is not silent, and it does not give up. One [WARNUNG], then the
+    student's program carries on when the arm is free again."""
+    ctx = _RecordingCtx()
+    prev = motion.MOTION_LOCK_NOTICE_S
+    motion.MOTION_LOCK_NOTICE_S = 0.1
+    ready = threading.Event()
+    done = threading.Event()
+
+    def hat_handler():
+        with ctx.motion_lock:
+            ready.set()
+            motion.wait_seconds(ctx, {'seconds': 0.2})
+        done.set()
+
+    try:
+        h = threading.Thread(target=hat_handler)
+        h.start()
+        assert ready.wait(5.0)
+        time.sleep(0.05)
+        with _Holder(ctx, hold_s=0.8):
+            assert done.wait(20.0), 'the re-acquire never completed'
+    finally:
+        motion.MOTION_LOCK_NOTICE_S = prev
+        h.join(5.0)
+    warn = [m for m in ctx.logs if 'gleichzeitig' in m]
+    assert warn, f'no German [WARNUNG] for the slow re-acquire — logs {ctx.logs}'
+    assert warn[0].startswith('[WARNUNG]')
+    assert len(warn) == 1, f'the warning must be emitted ONCE, got {warn}'
+    assert 'es geht weiter' in warn[0]
+
+
+# ── EDUBOTICS_GRASP_SETTLE_S: a sleep held under the lock ────────────────────
+
+def test_the_shipped_grasp_settle_is_three_tenths_of_a_second():
+    """Pins the shipped VALUE and the ceiling. Every existing test monkeypatches
+    GRASP_SETTLE_S to 0.0, so neither was covered by anything."""
+    assert motion.GRASP_SETTLE_S == 0.3
+    assert motion.GRASP_SETTLE_MAX_S == 2.0
+
+
+@pytest.mark.parametrize('raw,expected', [
+    (0.3, 0.3),
+    (0.0, 0.0),
+    (-1.0, 0.0),           # negative silently disabled the settle
+    (10.0, 2.0),           # the deterministic park named by the zombie guard
+    (float('inf'), 2.0),   # reached time.sleep(inf) → OverflowError → traceback
+    (float('nan'), 0.0),
+    ('x', 0.0),
+])
+def test_grasp_settle_is_folded_into_the_band(raw, expected):
+    assert motion._clamped_settle_s(raw) == pytest.approx(expected)
+
+
+def test_the_env_value_actually_goes_THROUGH_the_clamp():
+    """The two tests above are both true of an UNCLAMPED module as well.
+
+    Mutation-tested 2026-09-08: reverting the assignment to a bare
+    ``GRASP_SETTLE_S = _safe_float('EDUBOTICS_GRASP_SETTLE_S', 0.3)`` SURVIVED
+    the whole suite, because with the env unset the clamp is the identity on
+    0.3 and ``_clamped_settle_s`` is still exported and still correct. Only an
+    out-of-band env value in a FRESH interpreter can tell the two apart.
+
+    Subprocess, not monkeypatch+reload, for the reason
+    ``test_dispatch_imports_clean_with_malformed_env`` already documents: a
+    reload of the live ``motion`` module rebinds ``WorkflowError`` out from
+    under the rest of the suite."""
+    env = dict(os.environ)
+    env['PYTHONPATH'] = os.pathsep.join(sys.path)
+    code = (
+        'from physical_ai_server.workflow.handlers import motion as m; '
+        'import os; '
+        'v = os.environ["EDUBOTICS_GRASP_SETTLE_S"]; '
+        'print(f"{v}->{m.GRASP_SETTLE_S}")'
+    )
+    seen = {}
+    for raw in ('10', 'inf', '-1', '0.25', 'nonsense'):
+        env['EDUBOTICS_GRASP_SETTLE_S'] = raw
+        out = subprocess.run([sys.executable, '-c', code], env=env,
+                             capture_output=True, text=True, timeout=120)
+        assert out.returncode == 0, out.stderr
+        seen[raw] = float(out.stdout.strip().split('->')[1])
+    assert seen['10'] == 2.0, (
+        f'EDUBOTICS_GRASP_SETTLE_S=10 reached the module as {seen["10"]} — '
+        'the env value does not pass through _clamped_settle_s')
+    assert seen['inf'] == 2.0
+    assert seen['-1'] == 0.0
+    assert seen['0.25'] == 0.25       # an in-band rig tuning still works
+    assert seen['nonsense'] == 0.3    # _safe_float's default, then the clamp
+
+
+def test_the_settle_sleep_honours_stop():
+    """``workflow_manager.start``'s zombie-guard comment ranks
+    EDUBOTICS_GRASP_SETTLE_S FIRST among the ways to park a thread past
+    ``stop()``'s joins (5.0 s main / 2.0 s hat), because it landed in a raw
+    ``time.sleep`` with no stop poll — and every caller of check_grasp_held
+    holds ctx.motion_lock while it sleeps. Measured 2026-09-08 with the value
+    at 10: Stop answered after 10.00 s; sliced, 0.23 s.
+
+    The ceiling alone is not enough (2 s still outlasts nothing but is 4× the
+    default), and the slicing alone is not enough (the ceiling is what bounds
+    how long the arm is OWNED while the run is not stopping)."""
+    ctx = _RecordingCtx()
+    ctx.get_follower_joints = lambda: list(HOME_JOINTS_RAD) + [0.4]
+    ctx.last_commanded_close_rad = None
+    prev = motion.GRASP_SETTLE_S
+    motion.GRASP_SETTLE_S = 5.0          # as if the clamp had let it through
+    stop = {'v': False}
+    ctx.should_stop = lambda: stop['v']
+    try:
+        threading.Timer(0.2, lambda: stop.__setitem__('v', True)).start()
+        t0 = time.monotonic()
+        motion.check_grasp_held(ctx)
+        waited = time.monotonic() - t0
+    finally:
+        motion.GRASP_SETTLE_S = prev
+    assert waited < 1.0, (
+        f'the settle slept {waited:.2f} s through a Stop — it is not sliced')
+
+
+def test_the_settle_still_settles_when_nothing_is_stopping():
+    """…and the slicing did not turn the settle into a no-op: the servo still
+    gets its full GRASP_SETTLE_S before the readback."""
+    ctx = _RecordingCtx()
+    ctx.get_follower_joints = lambda: list(HOME_JOINTS_RAD) + [0.4]
+    ctx.last_commanded_close_rad = None
+    prev = motion.GRASP_SETTLE_S
+    motion.GRASP_SETTLE_S = 0.4
+    try:
+        t0 = time.monotonic()
+        motion.check_grasp_held(ctx)
+        waited = time.monotonic() - t0
+    finally:
+        motion.GRASP_SETTLE_S = prev
+    assert 0.35 <= waited <= 1.2, f'the settle was skipped ({waited:.2f} s)'
+
+
+# ── the whole discipline, under contention ──────────────────────────────────
+
+def test_the_lock_discipline_survives_contention():
+    """Deadlock / imbalance / total-starvation guard for the shapes that
+    actually coexist at runtime: a hat holding the lock for its whole body, a
+    hat that RELEASES and re-takes it (RS-27's path), the composite motions'
+    nested acquire (RLock re-entry), and the main stack's bounded acquire.
+
+    Asserts the three properties a lock discipline has to have: every thread
+    returns, the lock is FREE at the end (every acquire balanced), and nothing
+    escaped — in particular no `RuntimeError: cannot release un-acquired
+    lock`.
+
+    DELIBERATELY NOT ASSERTED: that the RELEASING waiter (`hat_wait`) makes
+    progress. CPython's lock lets a thread that releases and immediately
+    re-acquires barge ahead of one that has been queued, and measured over six
+    2 s runs the never-releasing hat body took 136–241 turns while the waiting
+    hat took 2–14. That asymmetry is the price of the RS-27 release and it is
+    real; asserting a margin that thin would be a flaky test rather than a
+    property. The deterministic half — that the release ALWAYS gets its lock
+    back — is
+    ``test_a_slow_reacquire_is_reported_in_German_and_then_waits``."""
+    ctx = _RecordingCtx()
+    errors: list[str] = []
+    progress = {'hat_body': 0, 'hat_wait': 0, 'main': 0, 'composite': 0}
+    deadline = time.monotonic() + 2.0
+
+    def loop(name, body):
+        while time.monotonic() < deadline:
+            try:
+                body()
+                progress[name] += 1
+            except WorkflowError:
+                pass
+            except Exception as e:              # noqa: BLE001
+                errors.append(f'{name}: {type(e).__name__}: {e}')
+                return
+
+    def hat_body():
+        with ctx.motion_lock:
+            time.sleep(0.005)
+
+    def hat_wait():
+        with ctx.motion_lock:
+            motion.wait_seconds(ctx, {'seconds': 0.02})
+
+    def main_stack():
+        acq = motion._hold_motion_lock(ctx, notice_s=1.0)
+        try:
+            time.sleep(0.005)
+        finally:
+            motion._release_motion_lock(ctx, acq)
+
+    def composite():
+        outer = motion._hold_motion_lock(ctx, notice_s=1.0)
+        try:
+            inner = motion._hold_motion_lock(ctx, notice_s=1.0)
+            motion._release_motion_lock(ctx, inner)
+        finally:
+            motion._release_motion_lock(ctx, outer)
+
+    threads = [threading.Thread(target=loop, args=(n, f))
+               for n, f in (('hat_body', hat_body), ('hat_wait', hat_wait),
+                            ('main', main_stack), ('composite', composite))
+               for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30.0)
+
+    assert not [t for t in threads if t.is_alive()], 'a thread deadlocked'
+    assert errors == [], errors
+    free = ctx.motion_lock.acquire(blocking=False)
+    if free:
+        ctx.motion_lock.release()
+    assert free, 'the motion lock was left held — an acquire went unreleased'
+    assert all(progress[k] > 0 for k in ('hat_body', 'main', 'composite')), (
+        f'a non-releasing waiter made no progress at all: {progress}')

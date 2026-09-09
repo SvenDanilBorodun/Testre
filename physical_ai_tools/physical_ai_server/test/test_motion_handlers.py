@@ -143,15 +143,38 @@ def test_pickup_unreachable_target_raises_arbeitsbereich():
     assert 'Arbeitsbereich' in str(exc.value)
 
 
-def test_close_on_object_clamps_corrupt_gripper_rad_high():
-    # A corrupt catalog gripper_close_rad far ABOVE the open limit must be CLAMPED
-    # to GRIPPER_OPEN_RAD — a huge value otherwise stretches the velocity-floored
-    # close to tens of seconds (a wedged run) and commands an unreachable angle.
+def test_close_on_object_refuses_a_corrupt_gripper_rad_instead_of_opening():
+    # A corrupt catalog gripper_close_rad OUTSIDE the physical band must fall
+    # back to the generic close, NOT be clamped to the band's far end.
+    #
+    # It used to be clamped, and `max(closed, min(open, v))` clamps a too-HIGH
+    # value to GRIPPER_OPEN_RAD — so „schließe um" commanded the jaws FULLY OPEN,
+    # the exact opposite of what the block says. Measured 2026-09-07 on edu6:
+    # gripper_close_rad=100 -> commanded 1.75 (its open value), and that value
+    # was then stored as ctx.last_commanded_close_rad, which pushed
+    # _held_threshold_rad onto its out-of-band fallback and made
+    # check_grasp_held answer True unconditionally for the rest of the run.
+    # Latent through the shipped hardcoded catalog; the clamp direction was the
+    # defect, not the presence of a clamp.
     ctx = _ctx()
     ziel = types.SimpleNamespace(extras={'gripper_close_rad': 100.0})
     close_on_object(ctx, {'ziel': ziel})
-    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_OPEN_RAD)
-    assert ctx.last_full_joints[5] == pytest.approx(GRIPPER_OPEN_RAD)
+    assert ctx.last_commanded_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+    assert ctx.last_full_joints[5] == pytest.approx(GRIPPER_CLOSED_RAD)
+    assert ctx.last_commanded_joints[5] != pytest.approx(GRIPPER_OPEN_RAD)
+    assert any('Greif-Winkel' in m for m in ctx.logs)
+
+
+def test_close_on_object_refuses_a_value_that_is_not_a_greifziel():
+    # A number/text/destination in the ZIEL socket used to fall silently through
+    # to the profile's HARDEST close (measured 2026-09-07: err=None, commanded
+    # -0.5 / 0.0 / 0.0, EMPTY log on all three arms). variables_get has
+    # output:null in Blockly, so ANY variable connects here.
+    ctx = _ctx()
+    with pytest.raises(WorkflowError) as exc:
+        close_on_object(ctx, {'ziel': 42.0})
+    assert 'kein Greifziel' in str(exc.value)
+    assert ctx.published == []          # the jaws were never commanded
 
 
 def test_close_on_object_clamps_corrupt_gripper_rad_low():
@@ -447,20 +470,44 @@ def test_safe_move_refuses_when_no_route():
     assert 'Sperrzone' in str(exc.value)
 
 
-def test_descend_to_is_exempt_from_zone_check(monkeypatch):
-    # descend_to uses RAW _publish_motion — the grasp corridor is NEVER
-    # zone-checked, even when the target sits inside a zone. It must publish
-    # one segment and never reroute/refuse.
+def test_descend_to_from_directly_above_is_exempt_from_zone_check(monkeypatch):
+    # The grasp corridor — a descend from DIRECTLY above the target — is NEVER
+    # zone-checked, even when the target sits inside a zone: one raw segment, no
+    # reroute, no refusal. This is the half of descend_to that must NOT change.
     calls = []
     orig = motion._publish_motion
     monkeypatch.setattr(motion, '_publish_motion',
                         lambda c, a, b, d: (calls.append((a, b, d)), orig(c, a, b, d))[1])
     ctx = _ctx()
-    # a zone sitting right on top of the grasp point
+    ziel = _greifziel(xyz=(0.20, 0.0, 0.03), tag_yaw=0.0)
+    # Park the tool straight above the target so this really is a descend.
+    ctx.last_full_joints = list(
+        ctx.ik.solve((0.20, 0.0, 0.09), roll=GRASP_ROLL_RAD)) + [GRIPPER_OPEN_RAD]
     ctx.zones = [{'min': [0.10, -0.10, 0.0], 'max': [0.30, 0.10, 0.10]}]
-    descend_to(ctx, {'ziel': _greifziel(xyz=(0.20, 0.0, 0.03), tag_yaw=0.0)})
+    descend_to(ctx, {'ziel': ziel})
     assert len(calls) == 1                      # one raw descend, no reroute
     assert not any('Sperrzone' in m for m in ctx.logs)
+
+
+def test_descend_to_from_elsewhere_is_a_transit_and_IS_zone_checked():
+    # …but „senke auf" is only a descend when the arm is already over the target.
+    # From anywhere else it is a whole-arm TRANSIT — the first motion of a
+    # program, after „Heimposition", after a replay, after „lege ab" — and it
+    # used to publish that transit RAW. Measured 2026-09-07 on omx_full with
+    # zone {min [0.125, -0.035, 0.038], max [0.175, 0.035, 0.058]}: 31 waypoints
+    # of which 22 consecutive pairs swept the zone, with NO zone log line, while
+    # „fahre über"/„bewege zu"/„aufnehmen" all refused the same geometry. It then
+    # left the arm's own links INSIDE the box, so every later zone-checked block
+    # refused with the „liegt schon in der jetzigen Stellung … Roboterfuß"
+    # message about a zone nowhere near the foot.
+    ctx = _ctx()
+    ziel = _greifziel(xyz=(0.20, 0.0, 0.03), tag_yaw=0.0)
+    ctx.zones = [{'min': [0.10, -0.10, 0.0], 'max': [0.30, 0.10, 0.10]}]
+    # Default start pose is HOME, i.e. nowhere near the target column.
+    assert not motion._is_straight_down(ctx, 0.20, 0.0)
+    with pytest.raises(WorkflowError) as exc:
+        descend_to(ctx, {'ziel': ziel})
+    assert 'Sperrzone' in str(exc.value)
 
 
 def test_pickup_descend_exempt_but_approach_reroutes(monkeypatch):

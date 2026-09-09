@@ -144,7 +144,6 @@ class _Ctx:
         self.claim_lock = threading.RLock()
         self.claimed_tags = set()
         self.skipped_tags = set()
-        self.absent_since = {}
         # No follower-joints readback by default → the grasp-success check returns
         # None and falls back to claim-on-completion (the pre-#2 behaviour).
         self.get_follower_joints = None

@@ -198,6 +198,24 @@ class ArmProfile:
     # every parallel-jaw arm (OMX, edu6), where the tip height is constant.
     tool_tip_tracks_gripper: bool = False
     grasp_held_margin_rad: Optional[float] = None   # None → motion 0.15
+    # HELD/MISS threshold used when NO gripper close has been commanded yet this
+    # run. ``None`` → motion._grasp_held_max derives
+    # ``gripper_closed_rad + grasp_held_margin_rad``, which is exactly −0.35 on
+    # the OMX (its historical module constant, byte-identical). Stated
+    # EXPLICITLY on the two Feetech profiles because the OMX constant sits BELOW
+    # their whole gripper band: with it, „Greifer hält etwas?" and „warte bis
+    # Greifer hält" were CONSTANT TRUE there — an empty full close read as a
+    # successful grasp on the only two profiles whose sole capability is
+    # Roboter Studio (measured 2026-09-07; see motion._grasp_held_max).
+    grasp_held_max_rad: Optional[float] = None
+    # Gripper close angle for the OBJECT-AGNOSTIC „aufnehmen" block, which has
+    # no catalog entry to consult. ``None`` → ``gripper_closed_rad``, the
+    # arm's HARDWARE-closed angle — right on the OMX (where it IS the shipped
+    # catalog's close for the 30 mm cube) and a sustained stall on both Feetech
+    # arms, whose closed value is ~1.0 / 0.10 rad deeper than the same cube
+    # blocks the jaws at. Rule §2; see motion.PICKUP_CLOSE_RAD for the
+    # measurement, the disclosed trade-off and the one-variable rollback.
+    pickup_close_rad: Optional[float] = None
     # Observation pose the „Solange sichtbar" loop retreats to between passes.
     # WorkflowContext has ALWAYS stamped this onto ctx via getattr(profile,
     # 'observe_pose_joints', None) — but the field did not exist, so the stamp was
@@ -348,6 +366,33 @@ _EDU6_STUDIO = ArmProfile(
     reach_outer_m=0.21,
     gripper_mm_per_rad=25.2,
     grasp_held_margin_rad=0.12,
+    # 0.00 (closed) + 0.12 (margin) — the same rule the OMX's −0.35 follows, but
+    # inside THIS arm's 0.00…1.75 band, so an empty close (which reaches ≈0.00)
+    # now reads as a MISS instead of as HELD.
+    grasp_held_max_rad=0.12,
+    # pickup_close_rad is deliberately UNSET (→ gripper_closed_rad, the full
+    # mechanical close). OWNER DECISION 2026-09-08, taken with the trade-off in
+    # front of them and against the recommendation here.
+    #
+    # What the unset value costs: „aufnehmen" commands 0.00 rad on a 30 mm cube
+    # that already blocks the jaws at ≈1.19 rad, so the servo holds a ≈1.19 rad
+    # position error — saturated PWM against Max_Torque 150 — through the close,
+    # the lift, the whole carry and the descend, because `drop_at` carries at
+    # `last_commanded_close_rad`. Setting it to the catalog's 1.00 would leave
+    # ≈0.19 rad ≈ 4.8 mm of bounded squeeze instead.
+    #
+    # What it BUYS, and why the owner chose it: the generic block is
+    # object-agnostic and has no catalog to consult, so a bounded close silently
+    # stops gripping anything THINNER than the jaw gap at that angle — ≈20-25 mm
+    # here (the profile's 25.2 mm/rad and the URDF's 20.0 mm/rad disagree by 26 %,
+    # itself unresolved). Pens, cards and thin blocks would just fail to grip,
+    # with no message. „Greife" and the split blocks are unaffected either way:
+    # they command the recipe's own close.
+    #
+    # To opt a rig into the bounded squeeze, set EDUBOTICS_PICKUP_CLOSE_RAD to
+    # this profile's catalog close (1.0), NOT to 0 — 0 means "fully closed" here
+    # but OPENS an OMX gripper by 0.5 rad.
+    # Rig gate: neither the stall nor the bounded grip is hardware-measured.
     sim_close_threshold_rad=1.5,
     sim_held_block_offset_rad=0.19,
     # INERT BY CONSTRUCTION on this arm, and kept anyway — deliberately, with the
@@ -458,6 +503,19 @@ _EDU1_STUDIO = ArmProfile(
     # of the student, and only on the arm it is true for.
     tool_tip_tracks_gripper=True,
     grasp_held_margin_rad=0.10,
+    # 0.00 (closed) + 0.10 (margin), inside this arm's 0.00…0.90 band — same
+    # reason as the edu6's, same measurement.
+    grasp_held_max_rad=0.10,
+    # pickup_close_rad deliberately UNSET (→ gripper_closed_rad = the full close).
+    # Same OWNER DECISION 2026-09-08 as the edu6 above; see that comment for the
+    # reasoning. Here the 30 mm cube blocks the claw at ≈0.25 rad, so the unset
+    # 0.00 holds a ≈0.25 rad error rather than the catalog's bounded 0.10.
+    # The thin-object floor this buys back is ≈13 mm measured off the shipped
+    # finger meshes — NOT the ≈2 mm first reported (that came from using
+    # CLAUDE.md's 21 mm zero-offset as a slope) and NOT the ≈29.5 mm the doc's
+    # affine model predicts; the doc model does not reproduce on the meshes
+    # (tip separation is 0.20 mm at 0 rad). Rig gate E-series: unmeasured.
+    # Opt in with EDUBOTICS_PICKUP_CLOSE_RAD=0.10, never 0.
     # Sim grasp classifier. A close command is anything below 0.5, which sits
     # between the catalog close (0.10) and open (0.90); a 30 mm cube blocks the
     # real jaws at ≈0.25 rad, so commanded 0.10 + 0.15 reproduces that.

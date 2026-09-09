@@ -17,10 +17,21 @@ story is identical.
 
 CRITICAL SAFETY (Rule §2 divergence, documented): a replay drives the arm along
 an ARBITRARY recorded JOINT path, so it deliberately BYPASSES the IK reach
-annulus + the workspace-floor refusal that gate every other motion block (those
-protect against unreachable Cartesian targets; a recorded joint path is reachable
-by construction — the arm was physically hand-guided through it). What it does
-NOT bypass is the per-joint VELOCITY floor: the recorded timestamps are never
+annulus that gates every other motion block (it protects against unreachable
+Cartesian targets; a recorded joint path is reachable by construction — the arm
+was physically hand-guided through it). What it does NOT bypass:
+
+* the WORKSPACE FLOOR — every recorded waypoint AND the synthetic lead-in are
+  floor-checked (``point_floor_check`` / ``lead_in_floor_check``) and a dip below
+  the table REFUSES the replay;
+* the SPERRZONEN — this list used to omit them and the code used to match:
+  measured 2026-09-07, omx_full, one zone {min [0.125, −0.035, 0.038], max
+  [0.175, 0.035, 0.058]}, a replay published 75 waypoints of which 11 consecutive
+  pairs swept the zone, with NO zone log line at all. A recorded path cannot be
+  REROUTED (there is nothing to re-solve — that is the whole point of a replay),
+  so the only correct answer is the one the floor check already gives: REFUSE,
+  in German, before publishing anything;
+* the per-joint VELOCITY floor: the recorded timestamps are never
 published raw × speed. Each consecutive recorded pair is re-segmented through
 ``build_segment`` (whose ``_velocity_safe_duration`` floor extends any segment
 that would exceed the safe per-joint velocity), so a ``speed`` of ×2 becomes
@@ -40,7 +51,10 @@ from typing import Any
 
 from physical_ai_server.workflow.handlers.motion import (
     WorkflowError,
+    _hold_motion_lock,
+    _release_motion_lock,
     _require_seeded_start_pose,
+    _warn_unreadable_zones,
 )
 from physical_ai_server.workflow.trajectory_builder import (
     DEFAULT_FPS,
@@ -61,10 +75,33 @@ REPLAY_SPEED_MAX = 3.0
 # pose to the first recorded waypoint (build_segment extends it if the arm is far
 # from the recording's start).
 DEFAULT_LEAD_IN_S = 1.5
+# Hard bound on a recording's own TIME COLUMN (seconds from its first to its
+# last point). It bounds the whole stream ONLY together with extract_points'
+# non-decreasing check — alone it measures the endpoints while the cost is
+# per-pair; see extract_points for the measured 114-byte bypass. The recorder's
+# cap is RECORD_MAX_S = 120 s, so this is ~5x any real recording and refuses
+# only a corrupt or hand-crafted one.
+MAX_TRAJECTORY_SPAN_S = 600.0
 # Contract-B point layout: [j1..jn, grip, t_s] — (num_arm_joints + 2) floats.
 # 7 is the OMX width (n=5); extract_points/resegment_trajectory take the arm's
 # ``num_arm_joints`` and derive the width, asserting it EXACTLY (§16.4 rail #2).
 _POINT_LEN = 7
+
+
+def _replay_tempo(ctx) -> float:
+    """The workflow-global run-bar Tempo as a replay speed multiplier.
+
+    Reads ``ctx.tempo`` through motion's own resolver so the clamp window
+    ([_TEMPO_MIN, _TEMPO_MAX]) and the "non-finite / non-positive / non-numeric →
+    1.0" rule are the SAME ones every other motion block uses — one definition of
+    Tempo, not two. Never raises: any ctx without the field (every
+    non-Roboter-Studio path, every test double) resolves to 1.0, i.e. today's
+    behaviour."""
+    try:
+        from physical_ai_server.workflow.handlers.motion import _resolve_tempo
+        return float(_resolve_tempo(ctx, None))
+    except Exception:  # noqa: BLE001 — a teaching knob never breaks a replay
+        return 1.0
 
 
 def clamp_speed(raw: Any) -> float:
@@ -88,6 +125,27 @@ def extract_points(traj: Any, num_arm_joints: int = 5) -> list[list[float]]:
     (``p[:_POINT_LEN]``) — an 8-wide edu6 point on a 5-DOF build would narrow
     silently into a plausible-but-wrong command. Both directions now refuse.
 
+    The TIME COLUMN is bounded too — by MONOTONICITY *and* the endpoint span,
+    and the pair is the point. Nothing else bounds it: the cloud's
+    ``validate_trajectory`` caps the point count, the width, the JSON size and
+    the fps, but never ``t_s``, and ``/workflow/start`` over rosbridge
+    authenticates nobody. ``resegment_trajectory`` turns each pair into
+    ``round(dt * 30)`` waypoints, so the time column is a direct multiplier on
+    memory. Measured 2026-09-07: dt = 1 s → 31 waypoints, dt = 1000 s → 30 001
+    (~6 MB), and a TWO-POINT payload of 97 BYTES with dt = 1e9 implies ~3·10^10
+    waypoints against a 6 GB container ``mem_limit`` — i.e. an OOM-kill of the
+    whole ROS node from a payload smaller than this docstring.
+
+    The endpoint span ALONE did not deliver that (measured 2026-09-08, and it
+    shipped that way): it bounds ``rows[-1][-1] - rows[0][-1]`` while the cost is
+    per-pair, so a payload with an internal time SPIKE and a tiny span sailed
+    through — ``[0, 2000, 0.1]`` is 114 bytes and 60 002 waypoints. Requiring the
+    column to be NON-DECREASING closes it, because then ``sum(dt)`` IS that span
+    and one number bounds the whole stream. Both caps are generous by two orders
+    of magnitude against the recorder's own ``RECORD_MAX_S`` of 120 s and its
+    strictly-increasing ``time.monotonic()`` stamps, so no real recording can
+    reach either.
+
     Raises a German ``WorkflowError`` on a malformed/short/corrupt recording so
     replay fails loud instead of driving garbage."""
     if isinstance(traj, dict):
@@ -108,6 +166,33 @@ def extract_points(traj: Any, num_arm_joints: int = 5) -> list[list[float]]:
         if not all(math.isfinite(v) for v in row):
             raise WorkflowError('Die Aufnahme ist beschädigt.')
         rows.append(row)
+    # TWO conditions, and NEITHER is sufficient alone (measured 2026-09-08).
+    # The endpoint span was the only check and it bounds the wrong quantity: the
+    # cost is driven by the PER-PAIR dt, because resegment_trajectory emits
+    # round(dt * 30) waypoints per consecutive pair. A three-point payload whose
+    # first and last stamps are close but which contains an internal SPIKE has a
+    # tiny span and an enormous per-pair dt:
+    #   0 -> 2000  -> 0.1   (114 B)  ->  60 002 waypoints   (span 0.1 s: passed)
+    #   0 -> 20000 -> 0.1   (115 B)  -> 600 002 waypoints   (span 0.1 s: passed)
+    # scaled to 1e9 that is ~6·10^10 waypoints against the 6 GB container
+    # mem_limit — the OOM-kill of the whole ROS node, from a payload under
+    # 120 bytes, i.e. exactly what this cap exists to prevent.
+    # MONOTONICITY is what makes the endpoint check complete: with every dt >= 0,
+    # sum(dt) IS the endpoint span, so one bound covers the total waypoint count
+    # (<= 30 * span + pairs). It costs honest recordings nothing —
+    # _manual_record_sample stamps t = time.monotonic() - start, strictly
+    # increasing by construction. Both failures are one refusal because the
+    # sentence already names both ("zu lang ODER ihre Zeitangaben sind
+    # beschädigt"): a student cannot act differently on the two.
+    times = [r[-1] for r in rows]
+    span = times[-1] - times[0]
+    monotonic = all(times[i + 1] >= times[i] for i in range(len(times) - 1))
+    if not monotonic or not (0.0 <= span <= MAX_TRAJECTORY_SPAN_S):
+        raise WorkflowError(
+            'Die Aufnahme ist zu lang oder ihre Zeitangaben sind beschädigt — '
+            f'bitte eine neue Aufnahme machen (höchstens {MAX_TRAJECTORY_SPAN_S:.0f} '
+            'Sekunden).'
+        )
     return rows
 
 
@@ -273,6 +358,58 @@ def resegment_trajectory(
     return segmented
 
 
+def _refuse_if_replay_crosses_a_zone(ctx, segmented, num_arm_joints: int) -> None:
+    """Refuse, in German, when the resegmented replay would sweep a Sperrzone.
+
+    Checked on the FINAL waypoint stream (lead-in included) and BEFORE anything
+    is published, so a refusal costs zero motion — the same shape as the
+    workspace-floor refusal above. A replay cannot be REROUTED: its joint path is
+    the recording, and there is nothing to re-solve. See the module docstring for
+    the measurement (11 of 75 published waypoint pairs swept a zone, silently).
+
+    Backward-safe throughout: no zones, no solver, or a solver without
+    ``link_points`` (both OMX profiles never reach here without zones drawn)
+    behaves exactly as before. ``segment_blocked`` already reports False for
+    geometry it cannot reason about — which is precisely why an UNREADABLE zone
+    payload has to be reported before that early return."""
+    zones = getattr(ctx, 'zones', None)
+    if zones:
+        # The warning belongs to the ZONES being unreadable, not to whether
+        # THIS path can act on them — and it must sit ABOVE the early return,
+        # because an all-malformed payload is TRUTHY: `build_zones` skips every
+        # entry silently by design, `segment_blocked` then finds zero boxes to
+        # sweep, and the replay ran with no protection and not one word to the
+        # student. Of the two paths this is the worse one: „bewege zu"
+        # re-solves and reroutes, a replay drives the recorded joint path
+        # verbatim — a hand-guided recording through arbitrary space is exactly
+        # where an unprotected run matters.
+        #
+        # The latch lives on the ctx (`_zones_unreadable_warned`), so a run that
+        # both MOVES and REPLAYS still emits exactly one warning. That is why it
+        # must not become per-function state.
+        _warn_unreadable_zones(ctx, zones)
+    ik = getattr(ctx, 'ik', None)
+    if not zones or ik is None or not callable(getattr(ik, 'link_points', None)):
+        return
+    from physical_ai_server.workflow.path_guard import segment_blocked
+    width = int(num_arm_joints) + 1
+    prev = None
+    for item in segmented:
+        q = list(item[0])[:width]
+        if prev is not None:
+            try:
+                blocked = segment_blocked(ik, prev, q, zones)
+            except Exception:  # noqa: BLE001 — never block a replay on a guard error
+                blocked = False
+            if blocked:
+                raise WorkflowError(
+                    'Die Aufnahme führt durch eine Sperrzone — eine Aufnahme '
+                    'kann nicht um eine Sperrzone herumfahren. Bitte die '
+                    'Sperrzone anpassen oder eine neue Aufnahme machen.'
+                )
+        prev = q
+
+
 def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     """„Aufnahme abspielen" — replay a recorded hand-guided trajectory named
     ``args['name']`` from ``ctx.trajectories`` at ``args['speed']`` (default 1.0).
@@ -295,7 +432,17 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
         raise WorkflowError(f'Unbekannte Aufnahme: {name}')
     n = _num_joints(ctx)
     points = extract_points(traj, num_arm_joints=n)
-    speed = clamp_speed(args.get('speed'))
+    # Run-bar Tempo. „langsam"/„schnell" slow or speed up EVERY other motion
+    # block (via motion._publish_motion's single choke point) and had no effect
+    # at all here: replay does not go through _publish_motion, and the Blockly
+    # block carries no SPEED field, so clamp_speed(args.get('speed')) was always
+    # 1.0. Measured 2026-09-07: ctx.tempo 0.5 / 1.0 / 2.0 all produced the same
+    # 69 waypoints over the same 0.500 s span. Folding the tempo into the replay
+    # speed is safe by the same argument the module docstring already makes for
+    # `speed`: build_segment's per-joint VELOCITY FLOOR re-extends any segment a
+    # fast request would make unsafe, so a tempo of 2 is "≤×2, clamped where
+    # unsafe". clamp_speed bounds the product to [0.25, 3.0].
+    speed = clamp_speed(clamp_speed(args.get('speed')) * _replay_tempo(ctx))
 
     # Lead-in from the arm's current pose so the replay never jumps to the
     # recording's start. Requires a seeded start pose (same guard as every other
@@ -337,19 +484,15 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
         num_arm_joints=n, velocity_limit=_velocity_limit(ctx))
     if not segmented:
         raise WorkflowError('Die Aufnahme enthält keine Bewegung.')
+    _refuse_if_replay_crosses_a_zone(ctx, segmented, n)
 
-    # Serialize against the main stack + hat handlers, exactly like
-    # motion._publish_motion (RLock, 10 s upper bound → German error, never a
-    # silent lock-through).
-    lock = getattr(ctx, 'motion_lock', None)
-    acquired = False
-    if lock is not None:
-        acquired = lock.acquire(timeout=10.0)
-        if not acquired:
-            raise WorkflowError(
-                'Bewegung blockiert — ein anderer Workflow-Teil hält die Sperre '
-                'zu lange. Bitte Workflow neu starten.'
-            )
+    # Serialize against the main stack + hat handlers through the ONE acquire
+    # helper (motion._hold_motion_lock), exactly like motion._publish_motion.
+    # This was a raw ``acquire(timeout=10.0)`` that answered a Stop with a
+    # „Bewegung blockiert" error naming a RESTART as the remedy — a Stop
+    # reported to the student as a lock error, advising the one action that
+    # reproduces it identically.
+    acquired = _hold_motion_lock(ctx)
     try:
         ok = chunked_publish(
             publisher=ctx.publisher,
@@ -357,11 +500,7 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
             should_stop=ctx.should_stop,
         )
     finally:
-        if acquired and lock is not None:
-            try:
-                lock.release()
-            except RuntimeError:
-                pass
+        _release_motion_lock(ctx, acquired)
     if not ok:
         raise WorkflowError('Workflow wurde gestoppt.')
     # Chain subsequent motion from the final replayed pose.

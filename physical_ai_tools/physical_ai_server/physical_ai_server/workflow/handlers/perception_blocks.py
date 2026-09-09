@@ -29,11 +29,37 @@ from physical_ai_server.workflow.handlers import motion as _motion
 from physical_ai_server.workflow.handlers.motion import GraspSkip, WorkflowError
 
 # Tag-edge sanity gate: the back-projected tag side length must be within this
-# fraction of the catalog tag_size_m, else the corner geometry / plane height is
-# untrustworthy and we treat the orientation as unknown (→ the instance is
-# skipped rather than grasped with a wrong wrist roll). Rig-tunable; generous by
-# default so only gross errors (≈2× scale) trip it. env-forwarding-guard: this
-# var is forwarded in robotis_ai_setup/docker/docker-compose.yml.
+# fraction of the catalog tag_size_m, else the corner geometry is untrustworthy
+# and we treat the orientation as unknown (→ the instance is skipped rather than
+# grasped with a wrong wrist roll). Rig-tunable; generous by default so only
+# gross errors (≈2× scale) trip it. env-forwarding-guard: this var is forwarded
+# in robotis_ai_setup/docker/docker-compose.yml.
+#
+# WHAT IT IS NOT, corrected 2026-09-07: this gate does NOT catch a mis-calibrated
+# PLANE HEIGHT, which an earlier revision of this comment claimed for it. The
+# back-projected edge scales with the assumed plane depth, so tripping a 0.5
+# tolerance takes a plane error of roughly HALF the camera-to-table distance,
+# while a plane error one order of magnitude smaller than that already ruins the
+# grasp. Measured against the real ``tag_edge_length_base`` /
+# ``project_pixel_to_table`` (102° HFOV / 640 px, camera 0.55 m up, pitched 25°,
+# a 24 mm tag at base (0.18, 0) and (0.25, 0.10)):
+#
+#   plane error   edge deviation      lateral grasp offset      gate trips?
+#      10 mm          1.8 %             5.1 mm /  6.6 mm            no
+#      20 mm          3.6 %            10.2 mm / 13.2 mm            no
+#      50 mm          9.1 %            25.5 mm / 33.1 mm            no
+#     200 mm         36.4 %           101.9 mm / 132.4 mm           no
+#     300 mm         54.5 %           152.8 mm / 198.7 mm          YES
+#
+# i.e. by the time the gate fires, the grasp point is out by more than the whole
+# object. It is a ~2× WRONG-OBJECT-SCALE detector — the wrong tag size in the
+# catalog, or a tag printed at the wrong scale — and it is a good one for that.
+# Tightening the tolerance is NOT the fix: corner noise alone moves the recovered
+# edge by percent, so a threshold small enough to see 20 mm of plane error would
+# reject legitimate detections. Detecting a wrong plane height needs a second,
+# independent measurement of it (the touch-off's z_table vs the extrinsic's
+# board_table_z already are two such measurements, cross-checked at calibration
+# time by TABLE_TOUCH's 0.12 m camera cross-check) — not a stricter edge gate.
 _TAG_EDGE_TOL_FRAC = max(0.0, _motion._safe_float('EDUBOTICS_TAG_EDGE_TOL_FRAC', 0.5))
 
 # Multi-frame yaw averaging for the grasped instance. Yaw error scales as
@@ -44,18 +70,113 @@ _TAG_EDGE_TOL_FRAC = max(0.0, _motion._safe_float('EDUBOTICS_TAG_EDGE_TOL_FRAC',
 # skip-on-unreadable-yaw path handles it rather than blind-grasping).
 # env-forwarding-guard: both vars are forwarded in
 # robotis_ai_setup/docker/docker-compose.yml.
-_TAG_YAW_FRAMES = max(1, int(_motion._safe_float('EDUBOTICS_TAG_YAW_FRAMES', 7.0)))
+#
+# CLAMPED AT BOTH ENDS, and the ceiling is load-bearing rather than tidy.
+# ``_sample_tag_yaw`` runs ``2 * _TAG_YAW_FRAMES`` detect attempts spaced
+# ``_TAG_YAW_FRAME_INTERVAL_S``, measured at ≈ 0.0752 s PER FRAME (7 → 0.510 s,
+# 200 → 15.03 s, 8000 → ≈ 601 s), and its only caller is ``grasp_object``, which
+# holds ``ctx.motion_lock`` for the WHOLE grasp — doubled again by
+# ``GRASP_RETRY + 1`` attempts. Since the motion lock lost its bound
+# (``motion._hold_motion_lock``), "every holder is bounded" is the argument that
+# replaces it, so an UNCAPPED frame count would be a hole in that argument, not
+# a nit. 30 frames ≈ 1.8 s of sampling, already 4× the shipped default.
+#
+# The floor is not decoration either: ``_safe_float`` catches TypeError and
+# ValueError but the surrounding ``int()`` does NOT, so
+# ``EDUBOTICS_TAG_YAW_FRAMES=inf`` raised OverflowError and ``=nan`` ValueError
+# AT IMPORT — taking ``handlers/__init__``'s dispatch tables down with this
+# module, which is the exact cascade ``_safe_float`` exists to prevent. The
+# clamp below is written over a float and only then narrowed to an int, so both
+# faults die together. Out-of-range values FALL BACK loudly, mirroring the
+# Feetech driver's own edge/torque tick knobs. (Their shared env-var prefix is
+# deliberately NOT spelled out in this comment: ci.yml::env-forwarding-guard
+# greps `EDUBOTICS_[A-Z0-9_]+` over this whole package and its match stops at a
+# `*`, so a prose "…_EDU6_*" reads as a forwarded-key NAME and fails the build.)
+_TAG_YAW_FRAMES_MAX = 30
+
+
+def _frames_de(n: int) -> str:
+    return '1 Bild' if n == 1 else f'{n} Bilder'
+
+
+def _clamped_tag_yaw_frames() -> int:
+    raw = _motion._safe_float('EDUBOTICS_TAG_YAW_FRAMES', 7.0)
+    if not math.isfinite(raw):
+        print('[WARNUNG] EDUBOTICS_TAG_YAW_FRAMES ist kein gültiger Wert — es '
+              f'werden {_frames_de(7)} verwendet.', flush=True)
+        return 7
+    clamped = min(float(_TAG_YAW_FRAMES_MAX), max(1.0, raw))
+    if clamped != raw:
+        print(f'[WARNUNG] EDUBOTICS_TAG_YAW_FRAMES={raw:g} liegt außerhalb des '
+              f'erlaubten Bereichs (1 bis {_TAG_YAW_FRAMES_MAX}) — es '
+              f'werden {_frames_de(int(clamped))} verwendet.', flush=True)
+    return int(clamped)
+
+
+_TAG_YAW_FRAMES = _clamped_tag_yaw_frames()
 _TAG_YAW_MIN_RESULTANT = min(
     1.0, max(0.0, _motion._safe_float('EDUBOTICS_TAG_YAW_MIN_RESULTANT', 0.9)))
 # Spacing between consecutive yaw-sampling frames (~30 ms, plan W3b).
 _TAG_YAW_FRAME_INTERVAL_S = 0.03
 
-# Recycled-object reclaim (#1): a claimed/skipped tag that has been continuously
-# ABSENT for ≥ this many seconds and then reappears was removed and put back, so
-# it is un-claimed/un-skipped and grabbed again. Generous default so a tag merely
-# occluded for a frame or two is NOT reclaimed. env-forwarding-guard: this var is
-# forwarded in robotis_ai_setup/docker/docker-compose.yml.
+# „Wenn <Typ> gesehen" ABSENCE GRACE: how long a tag must be continuously unseen
+# before the object hat believes it is really gone. ``workflow_manager.py``
+# imports THIS constant as ``_HAT_ABSENT_GRACE_S`` (rather than defining a second
+# one that would drift), and is now its ONLY consumer — do not delete it.
+#
+# IT IS NO LONGER A RECLAIM KNOB. The recycled-object reclaim below reasons about
+# POSITION, not absence, because the absence clock is sampled at LOOP-PASS
+# cadence, not frame cadence: WHILE_EMPTY_SECONDS alone is 5.0 s and a
+# grasp-bearing „Solange sichtbar" pass measures 8–12 s, so "absent for ONE poll"
+# ALWAYS exceeded 1.5 s. Measured 2026-09-07 with ONE missed AprilTag look right
+# after a grasp: the SAME cube was grasped twice, at t = 0.28 s and t = 9.11 s,
+# with „wurde zurückgelegt — wird erneut gegriffen." printed although nobody had
+# touched it. The hat is a different question with a different sampling rate (it
+# polls several times a second), so the same seconds are right THERE.
+# env-forwarding-guard: this var is forwarded in
+# robotis_ai_setup/docker/docker-compose.yml.
 _RECLAIM_ABSENT_S = max(0.0, _motion._safe_float('EDUBOTICS_RECLAIM_ABSENT_S', 1.5))
+
+# Recycled-object reclaim (#1): how far (metres, base-frame table plane) a
+# claimed/skipped object must have MOVED before it counts as "a person put this
+# somewhere else" and it is un-claimed/un-skipped so it is grabbed again. See
+# ``_reclaim_recycled`` for the THREE rules (ANCHOR / PICK / SKIP anchoring);
+# the first two act on a SIGHTING, never on an absence, so a missed AprilTag
+# look cannot reclaim at any miss rate.
+#
+# WHY 20 mm. Position noise, measured over 200 frames of a STATIONARY tag through
+# the shipped ``Perception`` + ``projection.project_pixel_to_table``: σ ≤ 0.06 mm,
+# worst single-frame deviation 0.164 mm, holding across pixel noise σ 3→30, motion
+# blur, and apparent tag sizes 16–45 px. The systematic terms (intrinsics,
+# extrinsics, assumed plane height) are common-mode between two observations of
+# the same tag and cancel in the DIFFERENCE, so only that noise floor applies
+# here. 20 mm is therefore ~120× the worst observed noise, while still well inside
+# the 30 mm cube — a student who nudges an object by less than two-thirds of its
+# own width is not asking for it to be picked up again.
+#
+# ``EDUBOTICS_RECLAIM_MOVE_M=0`` (or negative) DISABLES the reclaim outright — the
+# one-variable rollback, and a strictly safer one than the knob it replaces: with
+# it set, nothing can ever re-grasp an object the program already placed.
+# env-forwarding-guard: forwarded in robotis_ai_setup/docker/docker-compose.yml +
+# docker-compose.opi.yml.
+_RECLAIM_MOVE_M = _motion._safe_float('EDUBOTICS_RECLAIM_MOVE_M', 0.02)
+
+# Rule §2 — the grasp height follows the MEASURED table plane at the object's
+# own (x, y). The knob, the measurement and the shared helper all live in
+# handlers/motion.py (``GRASP_Z_FROM_PLANE`` / ``table_z_at``) because a SECOND
+# site — physical_ai_server.py::mark_destination_callback — needs exactly the
+# same computation and exactly the same rollback, and two copies of a plane
+# evaluation are how this defect appeared in the first place.
+
+
+def _safe_log(ctx, message: str) -> None:
+    """Log a German line, swallowing any sink error — a diagnostic must never
+    break a run (the same contract every ``try: ctx.log(...)`` in this module
+    already uses, in one place)."""
+    try:
+        ctx.log(message)
+    except Exception:  # noqa: BLE001 — a diagnostic never breaks the run
+        pass
 
 
 def _ensure_perception(ctx):
@@ -100,16 +221,24 @@ def _require_marker_detector(ctx):
         )
 
 
-def _poll_until(ctx, predicate, timeout_s: float, label: str) -> bool:
+def _poll_until(ctx, predicate, timeout_s: float, label: str,
+                raise_on_timeout: bool = True) -> bool:
     """Poll ``predicate`` until it returns truthy or ``timeout_s`` elapses.
 
-    On timeout, raises ``WorkflowError`` so the workflow halts with a
-    German message — this is symmetric with the rest of the perception
-    handlers and matches what students expect when a "Warte bis …"
-    block sees nothing. The previous implementation had a dead
-    ``on_timeout='continue'`` branch reading from a block field that
-    never existed; if that affordance is wanted later, expose a
-    dropdown on the wait_until_* blocks first.
+    ``raise_on_timeout=True`` (the default, and what every non-block caller
+    wants) raises a German ``WorkflowError`` on timeout. The two „warte bis …"
+    BLOCKS pass ``False``, because they declare ``output: 'Boolean'``: Blockly
+    therefore lets a student drop them into „falls … sonst", and a raising
+    timeout made the sonst branch UNREACHABLE — the run aborted instead of
+    taking it. Measured 2026-09-07: „warte bis wuerfel sichtbar" with nothing in
+    view raised „Timeout: Objekt wuerfel nicht erkannt." (which also leaked the
+    raw catalog KEY where the catalog carries label_de „Würfel"). Returning
+    ``False`` is what the declared Boolean type promises; the student still sees
+    the timeout, as a German [WARNUNG] emitted by the caller.
+
+    (This also retires the docstring's note about a dead ``on_timeout='continue'``
+    affordance "reading from a block field that never existed" — the behaviour it
+    described is now the blocks' actual, typed contract.)
 
     Audit S1: this poll is pure perception (no motion). When called from
     inside a hat-block handler, the surrounding ``with ctx.motion_lock``
@@ -140,21 +269,22 @@ def _poll_until(ctx, predicate, timeout_s: float, label: str) -> bool:
             if predicate():
                 return True
             time.sleep(0.2)
-        raise WorkflowError(f'Timeout: {label} nicht erkannt.')
+        if raise_on_timeout:
+            raise WorkflowError(f'Timeout: {label} nicht erkannt.')
+        return False
     finally:
         if released and motion_lock is not None:
-            # Audit fix #9: bounded reacquire. The previous unbounded
-            # acquire() could hang forever if another thread held the
-            # lock and never released it (e.g. a runaway motion handler
-            # in another hat). 10 s is generous for a single motion
-            # chunk to finish; past that we'd rather raise a clear
-            # German error so the caller's `with motion_lock` __exit__
-            # has SOMETHING to release. The exception propagates out
-            # through whatever wrapped the _poll_until call.
-            if not motion_lock.acquire(timeout=10.0):
-                raise WorkflowError(
-                    'Bewegung-Sperre konnte nicht zurückgewonnen werden.'
-                )
+            # Restore the caller's invariant unconditionally. This used to be a
+            # bounded acquire that RAISED „Bewegung-Sperre konnte nicht
+            # zurückgewonnen werden." on timeout, claiming it did so "so the
+            # caller's `with motion_lock` __exit__ has SOMETHING to release" —
+            # on that branch it has precisely nothing. Driven end to end, the
+            # raise left `RuntimeError: cannot release un-acquired lock`
+            # escaping into `_run_hat_handler`'s OUTER bare `except Exception:
+            # return`: the hat died with no message, no error count and no
+            # retirement warning, run green. It also MASKED an in-flight Stop.
+            # See motion._reacquire_after_release.
+            _motion._reacquire_after_release(ctx)
 
 
 def _check_grasp_held_locked(ctx):
@@ -166,23 +296,16 @@ def _check_grasp_held_locked(ctx):
     ``ctx.last_commanded_close_rad``, which the close paths write under the
     lock). Serializing the whole check shrinks that race to nothing. RLock →
     nest-safe when the caller (e.g. a hat handler body, or ``grasp_object``)
-    already holds the lock. Mirrors ``_publish_motion``'s bounded acquire: a
-    wedged lock raises a German error instead of blocking forever."""
-    lock = getattr(ctx, 'motion_lock', None)
-    if lock is None:
-        return _motion.check_grasp_held(ctx)
-    if not lock.acquire(timeout=10.0):
-        raise WorkflowError(
-            'Bewegung blockiert — ein anderer Workflow-Teil hält '
-            'die Sperre zu lange. Bitte Workflow neu starten.'
-        )
+    already holds the lock. Goes through the ONE acquire helper, like every
+    other site (``motion._hold_motion_lock``). It used to be a raw
+    ``acquire(timeout=10.0)`` that answered a Stop with a „Bewegung blockiert"
+    error naming a RESTART as the remedy — i.e. a Stop reported to the student
+    as a lock error, advising the one action that reproduces it identically."""
+    acquired = _motion._hold_motion_lock(ctx)
     try:
         return _motion.check_grasp_held(ctx)
     finally:
-        try:
-            lock.release()
-        except RuntimeError:
-            pass
+        _motion._release_motion_lock(ctx, acquired)
 
 
 # ------------------------------------------------------------------
@@ -208,11 +331,27 @@ def _require_catalog(ctx):
     return cat
 
 
+# The React dropdown's placeholder VALUE. When GetObjectCatalog has not answered
+# yet (or answered empty), `_objectTypePlaceholder` / `_objectTypeEmpty` in
+# blocks/perception.js both serialise this sentinel into the saved workflow, and
+# all four object blocks then reached the runtime with it as their object_type —
+# so the student was shown „Unbekanntes Objekt „__none__"", an internal token
+# they cannot act on. Name the real situation instead.
+_OBJECT_TYPE_PLACEHOLDER = '__none__'
+_NO_OBJECT_TYPES_DE = (
+    'Es ist noch kein Objekt ausgewählt — die Objektliste war beim Öffnen noch '
+    'nicht geladen. Bitte den Block anklicken und das Objekt aus der Liste neu '
+    'auswählen.'
+)
+
+
 def _recipe_for(cat, type_name):
     """Look up a grasp recipe, translating the catalog's ObjectCatalogError
     (German) into a WorkflowError so the runtime surfaces it as a clean student
     message instead of the generic "Interner Fehler"."""
     from physical_ai_server.workflow.object_catalog import ObjectCatalogError
+    if str(type_name).strip() == _OBJECT_TYPE_PLACEHOLDER:
+        raise WorkflowError(_NO_OBJECT_TYPES_DE)
     try:
         return cat.recipe_for_type(type_name)
     except ObjectCatalogError as e:
@@ -239,50 +378,191 @@ _claim_tag = _claims.claim_tag
 _skip_tag = _claims.skip_tag
 
 
-def _reclaim_recycled(ctx, recipe, visible_type_ids) -> None:
-    """Un-claim / un-skip a RECYCLED object so it is grabbed again (#1).
+def _claim_store(ctx, name: str, factory):
+    """Fetch — lazily creating once — one of the reclaim's per-tag stores on ctx.
 
-    Given the set of currently-visible tag ids OF THIS TYPE, update the per-tag
-    absence tracker and, for each claimed/skipped tag of the type:
-      * visible now AND continuously absent ≥ ``_RECLAIM_ABSENT_S`` → it was
-        removed and put back: drop it from claimed/skipped and clear its absence
-        (it gets grabbed again);
-      * visible now but not long-absent → clear its absence;
-      * not visible now → mark it absent (monotonic) if not already.
-    Mutates claimed_tags/skipped_tags/absent_since under claim_lock. No-op when
-    the claim state is absent (e.g. a unit-test ctx without the sets)."""
+    ``WorkflowContext`` declares all three as fields; the lazy create is what
+    keeps a minimal ctx (every unit-test double in this suite, and any older
+    context object) working exactly as the previous absence tracker did."""
+    store = getattr(ctx, name, None)
+    if store is None:
+        store = factory()
+        try:
+            setattr(ctx, name, store)
+        except Exception:  # noqa: BLE001 — a frozen ctx just gets per-call state
+            pass
+    return store
+
+
+# The German the reclaim emits, ONE template per rule, in ONE place.
+#
+# It is a module-level table rather than three literals inside ``_reclaim``
+# because the tests FILTER the Protokoll for these sentences: a filter that
+# lists two of three variants keeps passing VACUOUSLY on the third — which is
+# exactly the shape of the defect this table was introduced to fix. The test
+# imports this dict, so adding a fourth rule cannot orphan the filter.
+#
+# „an DER alten Stelle", not „an SEINEM alten Platz": „sein/ihr" is a POSSESSIVE
+# and agrees with the possessor („seinem" for der Würfel, „ihrem" for die
+# Kugel), which would re-introduce the gender leak these messages exist without.
+# „die Stelle" carries no information about the label at all.
+_RECLAIM_TEMPLATES_DE = {
+    # The object was carried away by the robot and is back on the spot it was
+    # picked FROM. The rule fires on ``_back_at``, i.e. NOT elsewhere.
+    'pick': '„{label}" #{tag} liegt wieder an der alten Stelle — '
+            'wird noch einmal gegriffen.',
+    # It was left somewhere by the robot and has since moved away from there.
+    'anchor': '„{label}" #{tag} liegt jetzt woanders — '
+              'wird noch einmal gegriffen.',
+    # It was never carried at all (a SKIPPED object) and somebody moved it.
+    'skip': '„{label}" #{tag} wurde bewegt — neuer Versuch.',
+}
+
+
+def _reclaim_recycled(ctx, recipe, visible_xy) -> None:
+    """Un-claim / un-skip an object A PERSON moved, so it is grabbed again (#1).
+
+    ``visible_xy`` maps every currently-visible tag id OF THIS TYPE to its
+    base-frame table position ``(x, y)`` from :func:`_tag_table_xy`, or to
+    ``None`` for a tag this rig cannot locate. A tag simply ABSENT from the dict
+    is the third, distinct case.
+
+    Three rules decide, and the first two both act on a SIGHTING — never on an
+    absence — which is why a missed AprilTag look can no longer reclaim at ANY
+    miss rate:
+
+    * **ANCHOR** — the first sighting AFTER the claim records where the robot
+      LEFT the object. Anchoring on the OBSERVED rest position rather than the
+      commanded destination absorbs a bounce from ``DROP_HEIGHT_M`` for free. A
+      later sighting ≥ ``_RECLAIM_MOVE_M`` away proves somebody moved it.
+    * **PICK** — an object that has been unseen at least once since its claim and
+      then turns up back within ``_RECLAIM_MOVE_M`` of the spot it was PICKED
+      from can only have been put there by a person; the robot carried it away.
+      The prior-absence precondition is what keeps a degenerate program whose
+      drop point IS its pick point terminating.
+    * **SKIP anchoring** — a SKIPPED object was never moved by the robot, so its
+      anchor is simply where it lay when we gave up. That lets a student slide an
+      out-of-reach object into reach and have it retried in the same run.
+
+    WHY NOT ABSENCE, and the trap inside this design. The absence clock is
+    sampled at LOOP-PASS cadence (8–12 s per grasp-bearing pass), so ONE missed
+    look was indistinguishable from a student lifting the object — and no counter
+    value separates them, because a student who SLIDES the object back is never
+    absent at all. Anchoring on the last sighting BEFORE an absence re-creates
+    the original defect exactly: pass k sees the object at its pick spot, the body
+    places it at the drop spot, pass k+1 misses it (freezing the anchor at the
+    pick spot), pass k+2 sees it at the drop spot → „moved 100 mm" → a spurious
+    re-grasp. **The anchor must be observed AFTER the claim.**
+
+    Mutates claimed_tags / skipped_tags / claim_anchor / claim_pick_xy /
+    claim_unseen under claim_lock. No-op when the claim state is absent (e.g. a
+    unit-test ctx without the sets), and a no-op in the simulator, which has no
+    scene intrinsics, so every position is ``None`` and the reclaim fails
+    closed."""
+    if _RECLAIM_MOVE_M <= 0.0:
+        # One-variable rollback: the reclaim is OFF. Returning here (rather than
+        # letting a 0 m threshold through) matters — ``distance >= 0`` is true of
+        # EVERY sighting, so a fall-through would reclaim everything.
+        return
     claimed = getattr(ctx, 'claimed_tags', None)
     skipped = getattr(ctx, 'skipped_tags', None)
-    absent_since = getattr(ctx, 'absent_since', None)
-    if claimed is None or skipped is None or absent_since is None:
+    if claimed is None or skipped is None:
         return
+    anchors = _claim_store(ctx, 'claim_anchor', dict)
+    pick_xy = _claim_store(ctx, 'claim_pick_xy', dict)
+    unseen = _claim_store(ctx, 'claim_unseen', set)
     type_ids = {int(i) for i in recipe.tag_ids}
-    visible = {int(i) for i in visible_type_ids}
-    now = time.monotonic()
+    try:
+        visible = {int(k): v for k, v in dict(visible_xy).items()}
+    except Exception:  # noqa: BLE001 — an unusable view reclaims nothing
+        return
     lock = getattr(ctx, 'claim_lock', None)
 
+    def _gap(a, b):
+        """Distance between two table positions, or ``None`` when either side is
+        unknown/malformed. ``None`` never satisfies a comparison below, so an
+        unlocatable sighting fails BOTH rules closed."""
+        if a is None or b is None:
+            return None
+        try:
+            return math.hypot(float(a[0]) - float(b[0]),
+                              float(a[1]) - float(b[1]))
+        except Exception:  # noqa: BLE001 — a malformed position never reclaims
+            return None
+
+    def _moved(a, b) -> bool:
+        gap = _gap(a, b)
+        return gap is not None and gap >= _RECLAIM_MOVE_M
+
+    def _back_at(a, b) -> bool:
+        gap = _gap(a, b)
+        return gap is not None and gap < _RECLAIM_MOVE_M
+
+    def _reclaim(tag: int, rule: str) -> None:
+        claimed.discard(tag)
+        skipped.discard(tag)
+        anchors.pop(tag, None)
+        unseen.discard(tag)
+        # EACH RULE STATES ITS OWN OBSERVATION, and the `rule` argument is why.
+        # The two rules shared one sentence, and the PICK rule fires on
+        # ``_back_at`` — i.e. having JUST ESTABLISHED the object is NOT
+        # elsewhere — so „liegt jetzt woanders" printed the exact opposite of
+        # what was measured, 100 % of the time, on the put-back demo this rule
+        # exists for. (PICK ⇒ claimed, by construction: an unclaimed-and-
+        # unskipped tag `continue`s earlier, and a skipped-not-claimed tag
+        # either has its anchor set by the SKIP branch or has no pick spot at
+        # all, and ``_back_at(pos, None)`` is False.)
+        #
+        # `rule` is PASSED, never re-derived here: this function pops the anchor
+        # as its third statement, so any predicate evaluated inside it would be
+        # reading state the caller has already destroyed.
+        #
+        # The tag id is written the way the PRINTED SHEET writes it
+        # (tools/generate_apriltags.py renders „#20 Würfel"), so a student can
+        # look the number up on the paper in front of them. And every sentence
+        # states what was OBSERVED — never an intention nobody watched
+        # („wurde zurückgelegt" claimed to know that).
+        _safe_log(ctx, _RECLAIM_TEMPLATES_DE[rule].format(
+            label=recipe.label_de, tag=tag))
+
     def _update():
-        for tag in ((set(claimed) | set(skipped)) & type_ids):
-            if tag in visible:
-                started = absent_since.get(tag)
-                if started is not None and (now - started) >= _RECLAIM_ABSENT_S:
-                    claimed.discard(tag)
-                    skipped.discard(tag)
-                    absent_since.pop(tag, None)
-                    try:
-                        ctx.log(
-                            f'„{recipe.label_de}" ({tag}) wurde zurückgelegt — '
-                            'wird erneut gegriffen.'
-                        )
-                    except Exception:
-                        pass
-                else:
-                    # Visible but not (yet) long-absent: reset the absence clock.
-                    absent_since.pop(tag, None)
-            else:
-                # Not visible now: start the absence clock if not running.
-                if tag not in absent_since:
-                    absent_since[tag] = now
+        for tag in sorted(type_ids):
+            is_claimed = tag in claimed
+            is_skipped = tag in skipped
+            if not is_claimed and not is_skipped:
+                # Still up for grabs: remember where it LIES, so that once it is
+                # claimed we know the spot it was picked from (the PICK rule's
+                # reference point).
+                pos = visible.get(tag)
+                if pos is not None:
+                    pick_xy[tag] = pos
+                continue
+            if tag not in visible:
+                # An absence is evidence of NOTHING here. Record only that it
+                # happened — the PICK rule's precondition — and change nothing
+                # else, so no rule can ever fire off a missed look.
+                unseen.add(tag)
+                continue
+            pos = visible.get(tag)
+            if tag not in anchors and is_skipped and not is_claimed:
+                # SKIP anchoring: the robot never moved this one, so it lies
+                # where it lay when we gave up on it.
+                pick = pick_xy.get(tag)
+                if pick is not None:
+                    anchors[tag] = pick
+            if tag not in anchors:
+                if tag in unseen and _back_at(pos, pick_xy.get(tag)):
+                    _reclaim(tag, 'pick')                  # PICK rule
+                    continue
+                # First sighting AFTER the claim: this is where the robot left
+                # it. ``None`` is stored deliberately — an unlocatable rest
+                # position fails the reclaim closed for this tag from here on.
+                anchors[tag] = pos
+                unseen.discard(tag)
+                continue
+            unseen.discard(tag)
+            if _moved(pos, anchors.get(tag)):
+                _reclaim(tag, 'anchor' if tag in claimed else 'skip')
 
     if lock is not None:
         with lock:
@@ -291,11 +571,64 @@ def _reclaim_recycled(ctx, recipe, visible_type_ids) -> None:
         _update()
 
 
+def _all_instances_done(ctx, recipe) -> bool:
+    """True when EVERY tag id of this type is already claimed or skipped.
+
+    ``_detect_named``'s non-reclaim path returns ``[]`` BEFORE it ever grabs a
+    frame when the wanted set is empty, so „Kein „Würfel" sichtbar — bitte das
+    Objekt in den markierten Greifbereich legen." was emitted without looking at
+    the camera at all. Measured 2026-09-07 with two cubes in plain view, both
+    grasped earlier: that exact sentence, with the camera detect call count at
+    ZERO. The remedy is wrong twice over — the objects ARE in the Greifbereich,
+    and putting them back would not help, because they are marked done."""
+    try:
+        return not (set(int(i) for i in recipe.tag_ids)
+                    - {int(i) for i in _excluded_ids(ctx)})
+    except Exception:  # noqa: BLE001 — a diagnostic never breaks the run
+        return False
+
+
+def _nothing_to_grasp_message(ctx, recipe) -> str:
+    """The right German sentence for "no graspable instance right now".
+
+    NO ARTICLE, PRONOUN OR RELATIVE PRONOUN MAY AGREE WITH ``label_de``. The
+    label is a per-type string a teacher will one day author („Eigene Objekte"),
+    so anything inflected around it is wrong for some type: this read „es ist
+    KEINES mehr übrig, DAS gegriffen werden könnte" (neuter, for *der Würfel* —
+    the only object in the shipped catalog) and „bitte EIN „Würfel" kurz
+    WEGNEHMEN" (`wegnehmen` governs the accusative, so „einen"). Both were wrong
+    on the rig as shipped.
+
+    The fix is the neuter countable noun **„Objekt"**, which is not an invention:
+    ``blocks/perception.js`` already says „ein Objekt dieses Typs" and „Jedes
+    Objekt wird nur einmal gegriffen" in the tooltips of these very blocks, and
+    the sentence below already said „bitte das Objekt in den markierten
+    Greifbereich legen". A per-type ``genus`` field was considered and rejected:
+    German needs gender × CASE, ``GraspRecipe`` is a frozen dataclass whose field
+    order is load-bearing, and a declension table cannot be authored by a
+    twelve-year-old naming their own object.
+    """
+    if _all_instances_done(ctx, recipe):
+        return (
+            f'Alle „{recipe.label_de}" sind schon erledigt — es ist kein Objekt '
+            'mehr übrig, das gegriffen werden könnte. Zum Wiederholen bitte ein '
+            'Objekt kurz wegnehmen und neu hinlegen oder das Programm neu '
+            'starten.'
+        )
+    return (
+        f'Kein „{recipe.label_de}" sichtbar — bitte das Objekt in den '
+        'markierten Greifbereich legen.'
+    )
+
+
 def _detect_named_unclaimed(ctx, type_name) -> list:
-    """``_detect_named`` minus the per-run claimed/skipped ids — the basis for
-    the loop gate + see/count/wait blocks (a placed object is not re-counted).
-    Runs the recycled-object reclaim first (on the full set of visible type ids),
-    so a removed-then-replaced object is un-claimed and grabbed again (#1)."""
+    """``_detect_named`` minus the per-run claimed/skipped ids, WITH the
+    recycled-object reclaim (#1) run first on the full set of visible type ids —
+    so an object a person moved is un-claimed and grabbed again.
+
+    The „Solange sichtbar" loop gate (``count_unclaimed_visible``) is its ONLY
+    caller: the reclaim is a once-per-pass decision and every VALUE block reads
+    through ``_detect_named_unclaimed_readonly`` instead."""
     return _detect_named(ctx, type_name, reclaim=True)
 
 
@@ -337,10 +670,53 @@ def _apply_yaw_bias(ctx, yaw: Optional[float]) -> Optional[float]:
         yb = float(getattr(ctx, 'yaw_bias_rad', 0.0) or 0.0)
     except (TypeError, ValueError):
         yb = 0.0
+    # isfinite guard, the one its sibling _apply_xy_correction already has. A
+    # NaN yaw_bias_rad (a corrupt scene_handeye.yaml, which survives reboots)
+    # propagates: compute_grasp_roll → solve(roll=nan) → None → „Position
+    # außerhalb des Arbeitsbereichs" for EVERY grasp, permanently, with no hint
+    # at the cause. Measured 2026-09-07: yaw_bias_rad=nan → _apply_yaw_bias(0.5)
+    # returned nan. Treated as "no bias", the same way a malformed correction
+    # matrix falls back to the raw position.
+    if not math.isfinite(yb):
+        yb = 0.0
     if yb == 0.0:
         return float(yaw)
     from physical_ai_server.workflow.tag_pose import _wrap
     return _wrap(float(yaw) + yb)
+
+
+def _tag_table_xy(ctx, d, recipe):
+    """The detection's base-frame table position ``(x, y)`` in metres, or ``None``.
+
+    THE one projection of a tag centre onto that object's own tag-top plane:
+    ``project_pixel_to_table`` followed by the ground-truth
+    ``_apply_xy_correction``, in that order. ``None`` when the rig has nothing to
+    project with (no scene intrinsics / extrinsics / ``board_table_z`` — the
+    simulator's normal state) or when the projection itself fails.
+
+    Single-sourced on purpose: ``_attach_named_world`` derives the grasp point
+    from it and ``_reclaim_recycled`` compares two observations of it. Two copies
+    of a plane evaluation are exactly how the grasp-height defect appeared (see
+    the ``_GRASP_Z_FROM_PLANE`` note in handlers/motion.py), and a reclaim
+    disagreeing with the grasp about where an object IS would be the same class
+    of bug."""
+    board_z = getattr(ctx, 'board_table_z', None)
+    if (getattr(ctx, 'scene_intrinsics', None) is None
+            or getattr(ctx, 'scene_extrinsics', None) is None
+            or board_z is None):
+        return None
+    from physical_ai_server.workflow.projection import project_pixel_to_table
+    try:
+        cx, cy = d.centroid_px
+        point = project_pixel_to_table(
+            cx, cy, ctx.scene_intrinsics['K'], ctx.scene_intrinsics['dist'],
+            ctx.scene_extrinsics,
+            float(board_z) + float(recipe.object_height_m))
+    except Exception:  # noqa: BLE001 — an unusable detection is simply unlocated
+        return None
+    if point is None:
+        return None
+    return _apply_xy_correction(ctx, float(point[0]), float(point[1]))
 
 
 def _attach_named_world(ctx, detections: list, recipe) -> list:
@@ -364,23 +740,39 @@ def _attach_named_world(ctx, detections: list, recipe) -> list:
             or board_z is None or ctx.z_table is None):
         ctx.emit_detections(detections)
         return detections
-    from physical_ai_server.workflow.projection import project_pixel_to_table
     from physical_ai_server.workflow.tag_pose import tag_edge_length_base, tag_yaw_base
     K = ctx.scene_intrinsics['K']
     dist = ctx.scene_intrinsics['dist']
     T = ctx.scene_extrinsics
     tag_plane_z = float(board_z) + float(recipe.object_height_m)
-    grasp_z = (float(ctx.z_table) + float(recipe.object_height_m)
-               - float(recipe.grasp_depth_m))
     cat = getattr(ctx, 'object_catalog', None)
     expected_edge = float(getattr(cat, 'tag_size_m', 0.0) or 0.0)
     for d in detections:
-        cx, cy = d.centroid_px
-        point = project_pixel_to_table(cx, cy, K, dist, T, tag_plane_z)
-        if point is None:
+        # THE one projection + ground-truth XY correction, shared verbatim with
+        # the recycled-object reclaim (_tag_table_xy) so the two can never
+        # disagree about where an object is. The calibration preconditions were
+        # already checked above, so a None here means the projection failed.
+        xy = _tag_table_xy(ctx, d, recipe)
+        if xy is None:
+            # Record WHY the world position is unset so motion._resolve_target
+            # can name the projection failure instead of blaming the touch-off
+            # (which this rig has already completed) — see its fourth branch.
+            try:
+                d.extras['world_error'] = 'projection'
+            except Exception:  # noqa: BLE001 — diagnosis never breaks detection
+                pass
             continue
-        # W5-apply: ground-truth XY correction (identity when unset).
-        wx, wy = _apply_xy_correction(ctx, float(point[0]), float(point[1]))
+        wx, wy = xy
+        # Rule §2 — the grasp height follows the MEASURED table plane at THIS
+        # object's own (x, y), the same plane motion._floor_z_at judges the
+        # target against. See _GRASP_Z_FROM_PLANE for the measurement and the
+        # rollback; with no plane calibrated this is exactly float(ctx.z_table).
+        surface = _motion.table_z_at(ctx, wx, wy)
+        if surface is None or not math.isfinite(float(surface)):
+            surface = float(ctx.z_table)
+        grasp_z = (float(surface) + float(recipe.object_height_m)
+                   - float(recipe.grasp_depth_m))
+        d.extras.pop('world_error', None)
         d.world_xyz_m = (wx, wy, grasp_z)
         yaw = None
         if getattr(d, 'corners_px', None) is not None:
@@ -432,8 +824,13 @@ def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False) -> list:
         bgr = _scene_frame(ctx)
         detections = ctx.perception.detect(
             bgr, camera='scene', mode='apriltag', aruco_id=None)
-        visible_type_ids = {d.aruco_id for d in detections if d.aruco_id in type_ids}
-        _reclaim_recycled(ctx, recipe, visible_type_ids)
+        # The reclaim reasons about POSITION, so it needs each visible tag's
+        # table (x, y). A tag that is seen but cannot be LOCATED maps to None —
+        # deliberately distinct from a tag that is absent from the dict entirely,
+        # which is the only thing the reclaim reads as "not seen this time".
+        visible_xy = {int(d.aruco_id): _tag_table_xy(ctx, d, recipe)
+                      for d in detections if d.aruco_id in type_ids}
+        _reclaim_recycled(ctx, recipe, visible_xy)
         wanted = type_ids - {int(i) for i in _excluded_ids(ctx)}
         kept = [d for d in detections if d.aruco_id in wanted]
         return _attach_named_world(ctx, kept, recipe)
@@ -584,9 +981,31 @@ def _multiframe_tag_yaw(ctx, recipe, tag_id, fallback_yaw):
     expected_edge = float(getattr(cat, 'tag_size_m', 0.0) or 0.0)
     yaws: list[float] = []
     want = int(tag_id)
-    for i in range(_TAG_YAW_FRAMES):
-        if i > 0:
+    # DUPLICATE-FRAME REJECTION. ``get_scene_frame`` returns the CACHED latest
+    # frame with no sequence or timestamp check, and the burst samples ~34 ms
+    # apart against cameras configured at framerate 30.0 — so consecutive
+    # samples can be the SAME image. Measured 2026-09-07 with one noisy frame
+    # repeated 7×: the mean resultant length came back R = 1.000000 (maximum
+    # confidence, gate passed) and the "averaged" yaw was BIT-IDENTICAL to that
+    # single frame's 13.5° error. Averaging a frame with itself neither reduces
+    # its error nor lets R detect it, so the gate reported certainty about the
+    # one thing it exists to doubt. Independent-frame behaviour is sound (error
+    # drops ≈√7) and is unchanged.
+    #
+    # The discriminator is the tag CORNERS: two detections of the same image
+    # produce bit-identical sub-pixel corners, and a genuinely new frame never
+    # does (the detector is deterministic, the sensor is not). A duplicate is
+    # SKIPPED rather than counted, and the loop is allowed a bounded number of
+    # extra reads so a slow camera still reaches the sample count instead of
+    # silently degrading to <2 valid frames.
+    seen_corners: set = set()
+    duplicate_hits = 0
+    attempts = 0
+    max_attempts = _TAG_YAW_FRAMES * 2
+    while len(yaws) < _TAG_YAW_FRAMES and attempts < max_attempts:
+        if attempts > 0:
             time.sleep(_TAG_YAW_FRAME_INTERVAL_S)
+        attempts += 1
         try:
             bgr = _scene_frame(ctx)
         except WorkflowError:
@@ -598,6 +1017,12 @@ def _multiframe_tag_yaw(ctx, recipe, tag_id, fallback_yaw):
         d = next((x for x in dets if x.aruco_id == want), None)
         if d is None or getattr(d, 'corners_px', None) is None:
             continue
+        fingerprint = _corner_fingerprint(d.corners_px)
+        if fingerprint is not None:
+            if fingerprint in seen_corners:
+                duplicate_hits += 1
+                continue          # the SAME camera frame — not a new sample
+            seen_corners.add(fingerprint)
         y = tag_yaw_base(d.corners_px, K, dist, T, tag_plane_z)
         if y is None:
             continue
@@ -607,6 +1032,18 @@ def _multiframe_tag_yaw(ctx, recipe, tag_id, fallback_yaw):
             if edge is None or abs(edge - expected_edge) > _TAG_EDGE_TOL_FRAC * expected_edge:
                 continue
         yaws.append(float(y))
+    if len(yaws) == 1 and duplicate_hits:
+        # Every extra read returned the SAME camera frame, so there was nothing
+        # to average — but there IS a valid single-frame measurement, and that
+        # is exactly what the single-frame path in _attach_named_world accepts
+        # without any R gate. Return it and say the averaging did not run,
+        # rather than pretending R = 1.0 (false confidence) or refusing a grasp
+        # that used to work. This is the SIMULATOR's normal state too: its
+        # camera is deterministic, so every frame really is identical.
+        _safe_log(ctx, '[WARNUNG] Die Szenen-Kamera hat während der Messung '
+                       'keine neuen Bilder geliefert — die Ausrichtung wurde '
+                       'nur aus einem Bild bestimmt.')
+        return _apply_yaw_bias(ctx, yaws[0])
     if len(yaws) < 2:
         return None
     res = circular_mean_resultant(yaws)
@@ -620,6 +1057,20 @@ def _multiframe_tag_yaw(ctx, recipe, tag_id, fallback_yaw):
         )
         return None
     return _apply_yaw_bias(ctx, mean)
+
+
+def _corner_fingerprint(corners):
+    """A hashable identity for one detection's sub-pixel corners, or ``None``
+    when it cannot be formed (then the caller simply does not de-duplicate).
+
+    Bit-exact by design: two detections of the SAME cached camera frame give
+    byte-identical corners, and two genuinely different frames of a real scene
+    never do. Rounding here would start rejecting real, slightly-different
+    frames — which is the opposite of the intent."""
+    try:
+        return tuple(np.asarray(corners, dtype=np.float64).ravel().tolist())
+    except Exception:  # noqa: BLE001 — de-duplication is best-effort
+        return None
 
 
 def _note_grasp_check_unavailable(ctx) -> None:
@@ -669,9 +1120,10 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
     if not type_name:
         raise WorkflowError('Kein Objekt ausgewählt.')
     recipe = _recipe_for(_require_catalog(ctx), type_name)
-    lock = getattr(ctx, 'motion_lock', None)
-    if lock is not None:
-        lock.acquire()
+    # THE one acquire helper. This was a bare, UNBOUNDED ``lock.acquire()`` —
+    # the only site that was neither bounded nor stop-polling — so pressing
+    # Stop behind a 30 s holder answered in 29.70 s (0.03 s through the helper).
+    acquired = _motion._hold_motion_lock(ctx)
     try:
         attempts = _motion.GRASP_RETRY + 1
         for attempt in range(attempts):
@@ -680,10 +1132,7 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
                 # The object vanished between the loop's count and this grasp (or a
                 # standalone „greife" with nothing in view). Recoverable: the loop
                 # re-detects next pass; standalone fails loud.
-                raise GraspSkip(
-                    f'Kein „{recipe.label_de}" sichtbar — bitte das Objekt in den '
-                    'markierten Greifbereich legen.'
-                )
+                raise GraspSkip(_nothing_to_grasp_message(ctx, recipe))
             target = _select_nearest_reachable(ctx, detections)
             if target is None:
                 # Calibration incomplete (world_xyz_m unset) → _resolve_target
@@ -770,35 +1219,76 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
                 pass
             return
     finally:
-        if lock is not None:
-            try:
-                lock.release()
-            except RuntimeError:
-                pass
+        _motion._release_motion_lock(ctx, acquired)
+
+
+def _detect_named_unclaimed_readonly(ctx, type_name) -> list:
+    """Currently-visible UNCLAIMED instances WITHOUT running the reclaim.
+
+    ``_detect_named_unclaimed`` runs ``_reclaim_recycled``, which MUTATES the
+    per-run claim/position state. That is right for the „Solange sichtbar" loop
+    gate (``count_unclaimed_visible``), which owns the loop's progress, and wrong
+    for every VALUE block a student can drop anywhere — „sehe ich", „Anzahl",
+    „finde" and „warte bis" are READS, and a read that silently un-claims an
+    object changes what the surrounding loop does next. The visible ANSWER is
+    identical on every pass where the reclaim would not have fired; where it
+    would have, the loop's own gate still fires it.
+
+    „finde" and „warte bis" joined the first two when the reclaim became
+    POSITION-based, and each had its own reason:
+
+    * „finde" is legitimately called MID-CARRY (the taught pattern is finde →
+      fahre über → senke → schließe → hebe an → lege ab), and a held object's
+      projected position travels with the gripper. Running the anchor rule there
+      would un-claim the very object the robot is HOLDING.
+    * „warte bis" polls ~5×/s where one loop pass takes 15.6 s, so a 4 s wait
+      contributed ~20 observations to a rule the loop expects to advance once per
+      pass.
+
+    ACCEPTED COST, owner-approved: a „wiederhole fortlaufend" + „finde/greife"
+    program (as opposed to „Solange sichtbar") no longer reclaims at all. „Solange
+    sichtbar" is the block designed for re-picking, and it still does."""
+    return _detect_named(ctx, type_name, exclude_ids=_excluded_ids(ctx))
 
 
 def see_object(ctx, args: dict[str, Any]) -> bool:
     """True when at least one UNCLAIMED instance of the chosen type is currently
-    visible (visibility only — does not require grasp calibration)."""
-    return bool(_detect_named_unclaimed(ctx, args.get('object_type')))
+    visible (visibility only — does not require grasp calibration). A pure read:
+    it never changes the per-run claim state (see
+    ``_detect_named_unclaimed_readonly``)."""
+    return bool(_detect_named_unclaimed_readonly(ctx, args.get('object_type')))
 
 
 def count_object(ctx, args: dict[str, Any]) -> int:
-    """Number of currently-visible UNCLAIMED instances of the chosen type."""
-    return len(_detect_named_unclaimed(ctx, args.get('object_type')))
+    """Number of currently-visible UNCLAIMED instances of the chosen type. A
+    pure read: it never changes the per-run claim state."""
+    return len(_detect_named_unclaimed_readonly(ctx, args.get('object_type')))
 
 
 def wait_until_object_seen(ctx, args: dict[str, Any]) -> bool:
-    """Poll until an UNCLAIMED instance of the chosen type is visible, or raise a
-    German timeout. ``timeout`` seconds, default 10."""
+    """„warte bis <Typ> sichtbar (max N s)" — VALUE (Boolean): poll until an
+    UNCLAIMED instance of the chosen type is visible. Returns ``True`` when it
+    appears and ``False`` on timeout (with a German [WARNUNG]), so the block's
+    declared Boolean type is honest and „falls … sonst" works. ``timeout``
+    seconds, default 10."""
     timeout_s = float(args.get('timeout', 10))
     type_name = args.get('object_type')
-    return _poll_until(
+    label = label_for(ctx, type_name)
+    seen = _poll_until(
         ctx,
-        lambda: bool(_detect_named_unclaimed(ctx, type_name)),
+        # READ-ONLY: this polls ~5×/s, and the recycled-object reclaim is a
+        # once-per-loop-pass decision — see _detect_named_unclaimed_readonly.
+        lambda: bool(_detect_named_unclaimed_readonly(ctx, type_name)),
         timeout_s,
-        f'Objekt {type_name}',
+        f'Objekt {label}',
+        raise_on_timeout=False,
     )
+    if not seen:
+        # The label, never the raw catalog KEY: every neighbouring message says
+        # „Würfel", this one used to say „wuerfel".
+        _safe_log(ctx, f'[WARNUNG] „{label}" ist innerhalb von '
+                       f'{timeout_s:g} s nicht aufgetaucht.')
+    return seen
 
 
 def wait_until_held(ctx, args: dict[str, Any]) -> bool:
@@ -819,9 +1309,13 @@ def wait_until_held(ctx, args: dict[str, Any]) -> bool:
     meaningful directly AFTER a close (e.g. „Greifer schließen" or a grasp).
     The block tooltip states this. (The threshold itself is per-object since
     2026-07-10 — the last COMMANDED close, ``ctx.last_commanded_close_rad``,
-    + ``GRASP_HELD_MARGIN_RAD`` — but with no close commanded yet this run it
-    deliberately keeps the legacy global threshold, preserving exactly this
-    documented open-gripper behaviour.)
+    + ``GRASP_HELD_MARGIN_RAD``. With no close commanded yet this run the
+    fallback is ``motion._grasp_held_max``, which is PROFILE-AWARE since
+    2026-09-08 and is no longer the legacy global constant: that constant
+    (−0.35) sits below the whole Feetech gripper band, so on edu6/edu1 it
+    reported HELD for every readable angle rather than just the open one. The
+    open-gripper behaviour documented above is preserved on all three arms —
+    that is the part the change deliberately kept.)
 
     The check runs under ``motion_lock`` (``_check_grasp_held_locked``) so a
     hat-side poll can't read the threshold + joint state mid-close; note
@@ -837,7 +1331,12 @@ def wait_until_held(ctx, args: dict[str, Any]) -> bool:
             )
         return result is True
 
-    return _poll_until(ctx, _held, timeout_s, 'Greifer hält etwas')
+    held = _poll_until(ctx, _held, timeout_s, 'Greifer hält etwas',
+                       raise_on_timeout=False)
+    if not held:
+        _safe_log(ctx, '[WARNUNG] Der Greifer hat innerhalb von '
+                       f'{timeout_s:g} s nichts gegriffen.')
+    return held
 
 
 # ------------------------------------------------------------------
@@ -864,11 +1363,13 @@ def find_object(ctx, args: dict[str, Any]):
     if not type_name:
         raise WorkflowError('Kein Objekt ausgewählt.')
     recipe = _recipe_for(_require_catalog(ctx), type_name)
-    detections = _detect_named_unclaimed(ctx, type_name)
+    # READ-ONLY: „finde" is legitimately called MID-CARRY, where the held
+    # object's projected position travels with the gripper — running the
+    # position-based reclaim here would un-claim the object the robot is HOLDING.
+    # See _detect_named_unclaimed_readonly for the full reasoning + the cost.
+    detections = _detect_named_unclaimed_readonly(ctx, type_name)
     if not detections:
-        _note_find_failure(ctx, (
-            f'Kein „{recipe.label_de}" sichtbar — bitte das Objekt in den '
-            'markierten Greifbereich legen.'))
+        _note_find_failure(ctx, _nothing_to_grasp_message(ctx, recipe))
         return None
     target = _select_nearest_reachable(ctx, detections)
     if target is None:

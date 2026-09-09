@@ -62,6 +62,36 @@ export const MOTION_BLOCKS = [
     colour: MOTION_COLOR,
     tooltip: 'Schließt den Greifer.',
   },
+  // DESTINATION/TARGET accept a Ziel-WERT — the pinned-name string that
+  // `edubotics_destination_ref` and `edubotics_object_position` both output.
+  // They carried NO check, so „finde <Typ>" (output 'Greifziel') plugged
+  // straight in with one drag and the block then did the wrong thing silently:
+  // re-measured 2026-09-08 at tag yaw 1.1 rad, `pickup(Greifziel)` descended to
+  // z 0.0270 instead of 0.0150 (GRASP_CLEARANCE_M added on top of a z that IS
+  // already the grasp band) with the wrist at the fixed +1.5708 instead of the
+  // object's own +0.4708 — and because it never sees the tag yaw, the wrist is
+  // out by exactly that yaw, 1.1 rad = 63.03 degrees, on all three arms (an
+  // earlier revision said „56–57 degrees", which needs an off-axis object whose
+  // position was never recorded). On a 30 mm cube gripped 3 mm below its top,
+  // reported as success. `move_to(Greifziel)` ended at EE z = 0.0150,
+  // i.e. driving laterally at cube height. The server refuses it too
+  // (motion._refuse_greifziel), in German, on all three arms — and THE SERVER IS
+  // THE ONLY FENCE WE CAN SAFELY USE HERE.
+  //
+  // A Blockly `check` on these sockets was tried and REVERTED 2026-09-08. Blockly
+  // enforces a check at DESERIALISATION by throwing, and the throw ABORTS THE REST
+  // OF THE LOAD: measured on real Blockly 12.5.1, a saved workspace whose
+  // „finde"-into-„aufnehmen" mistake predates the check loaded 3 of its 5 blocks
+  // and re-serialised the truncated program. BlocklyWorkspace.jsx swallows the
+  // throw to console.error with no toast, and the next edit autosaves over the
+  // good version — so the guard rail silently DESTROYED the saved work of exactly
+  // the students it was meant to protect: the ones who already made the mistake.
+  //
+  // This is the same failure mode that (correctly) blocked removing
+  // `edubotics_forever`'s nextStatement for RS-35. A client-side check on an
+  // input that previously had none is only safe behind a load-time migration
+  // that rewrites the offending sockets first. Until that exists, the server
+  // refusal — which is loud, German, and cannot eat a saved file — stands alone.
   {
     type: 'edubotics_move_to',
     message0: `${DE.MOVE_TO} · ${DE.TEMPO_FIELD_LABEL} %2`,

@@ -105,7 +105,8 @@ export const DE = {
   // The interpreter logs the same fact at RUN time (_exec_forever); this is the
   // half that says so while the program is still being written.
   FOREVER_DEAD_CODE_WARNING:
-    'Blöcke unter diesem Block laufen nie. Zieh sie nach oben oder in die Schleife.',
+    // Impersonal, like the rest of this surface — not „Zieh sie".
+    'Blöcke unter diesem Block laufen nie. Bitte nach oben oder in die Schleife ziehen.',
   // „sonst" toggle on the Blockly controls_if block (see control.js).
   IF_ELSE_ADD: 'sonst',
 

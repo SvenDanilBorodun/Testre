@@ -23,11 +23,15 @@ state instead of its own private guess.
 
 Two design points that are easy to get wrong:
 
-* **A held object stays DETECTABLE**, its position tracking the gripper. Making it
-  invisible instead would start ``handlers.perception_blocks``' per-tag absence clock,
-  and ``_reclaim_recycled`` would then UN-CLAIM every carried object once it reappeared
-  at the drop point (``EDUBOTICS_RECLAIM_ABSENT_S``, default 1.5 s, is shorter than any
-  real carry) — turning „Solange sichtbar" into an infinite pick-and-place.
+* **A held object stays DETECTABLE**, its position tracking the gripper. Hiding it
+  would record a per-tag ABSENCE (``handlers.perception_blocks._reclaim_recycled``'s
+  ``claim_unseen``), which is the PICK rule's PRECONDITION — so a program whose drop
+  point lies within ``EDUBOTICS_RECLAIM_MOVE_M`` of its pick point would un-claim every
+  carried object at the drop point and „Solange sichtbar" would never terminate.
+  (Before the reclaim became POSITION-based this was worse and unconditional: it was an
+  absence CLOCK at ``EDUBOTICS_RECLAIM_ABSENT_S`` = 1.5 s, shorter than any real carry.
+  That clock is gone; the constant survives only as
+  ``workflow_manager::_HAT_ABSENT_GRACE_S``, the object-seen hat's debounce.)
 * **Capture is NEAREST-wins**, never any-match. The legacy proximity test in ``SimArm``
   returned True for ANY object inside the radius, which on edu6 (whose whole pick band
   is 120 mm wide against a 60 mm capture radius) cannot tell two adjacent cubes apart.

@@ -64,10 +64,18 @@ def test_sim_perception_reports_the_live_yaw():
 def test_a_held_object_stays_detectable_so_the_reclaim_never_fires():
     """Load-bearing, and the opposite of the intuitive design.
 
-    Making a carried object invisible would start perception_blocks' per-tag absence
-    clock; _reclaim_recycled un-claims a tag that was absent >= EDUBOTICS_RECLAIM_ABSENT_S
-    (1.5 s, far shorter than any real carry) and then reappeared — so every placed cube
-    would be un-claimed at the drop point and „Solange sichtbar" would never terminate.
+    THE RULE STAYS; its original justification does not. It was written against the
+    ABSENCE-based reclaim, which un-claimed a tag that had been gone >= 1.5 s and then
+    reappeared — so hiding a carried cube would have un-claimed every one of them at the
+    drop point and „Solange sichtbar" would never have terminated. The reclaim now
+    reasons about POSITION and clears the anchor at claim time, so that particular hazard
+    is gone.
+
+    What keeps the rule load-bearing is the front end and the students: /sim/objects is
+    what the React twin renders, and a cube that blinks out for the whole carry reads as
+    a bug in the simulator rather than as an arm holding something. (The reclaim is a
+    no-op in the simulator either way — a sim run has no scene intrinsics, so every
+    projected position is None and both rules fail closed.)
     """
     world = SimWorld([_cube(0.20, 0.0)])
     perc = SimPerception(world.objects(), CATALOG, world)

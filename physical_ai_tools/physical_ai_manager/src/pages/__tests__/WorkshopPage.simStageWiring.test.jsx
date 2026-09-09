@@ -137,7 +137,16 @@ vi.mock('../../services/workflowApi', () => ({
 }));
 vi.mock('react-hot-toast', () => ({
   __esModule: true,
-  default: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
+  default: Object.assign(vi.fn(), {
+    success: vi.fn(),
+    error: vi.fn(),
+    dismiss: vi.fn(),
+  }),
+  // RS-34: WorkshopPage now runs the shared TOAST_LIMIT dismissal loop, so
+  // the store hook has to exist on the mock (same idiom as
+  // TrainingPage.gate.test.js). An empty stack means the loop is a no-op
+  // here; the cap itself is covered by WorkshopPage.toastCap.test.jsx.
+  useToasterStore: () => ({ toasts: [] }),
 }));
 
 function baseState() {

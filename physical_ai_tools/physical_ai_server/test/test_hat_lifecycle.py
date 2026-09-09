@@ -25,9 +25,11 @@ pure threading, and driving it directly is what makes these deterministic.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -177,16 +179,52 @@ def test_hat_handlers_are_started_before_the_main_stack():
         'the run ended before its handler threads were even started')
 
 
+def test_the_shipped_hat_constants_are_the_numbers_we_chose():
+    """LITERAL pins. Every other reference to these four is written RELATIVE to
+    the constant, which is the shape a mutation walks straight through: measured
+    2026-09-09 on the full suite, ``MAX_BROADCAST_BACKLOG = 1_000_000`` and
+    ``MAX_HAT_CONSECUTIVE_ERRORS = 1`` both stayed green (1482 passed / 4
+    skipped, identical to baseline), and ``MAX_HAT_HANDLERS = 0`` needed a
+    FIXED-COUNT test before anything could see it.
+
+    A test may not restate the implementation: never the symbol under test on
+    both sides of an assertion.
+
+    Read from the SOURCE, not from the module attribute, for the reason
+    ``test_while_empty_window`` documents for env-derived constants — the
+    attribute is contaminated by whoever monkeypatched it. This very file's
+    autouse fixture sets ``HAT_KEEPALIVE_MAX_S = 3.0`` for every test in it, so
+    ``assert WM.HAT_KEEPALIVE_MAX_S == 300.0`` measures the fixture."""
+    src = Path(WM.__file__).read_text(encoding='utf-8')
+    for name, literal in (('MAX_BROADCAST_BACKLOG', '32'),
+                          ('MAX_HAT_CONSECUTIVE_ERRORS', '5'),
+                          ('MAX_HAT_HANDLERS', '16'),
+                          ('HAT_KEEPALIVE_MAX_S', '300.0'),
+                          ('HAT_MIN_CYCLE_S', '0.05')):
+        m = re.search(rf'^{name}\s*=\s*([0-9_.]+)\s*$', src, re.M)
+        assert m, f'{name} moved, was renamed, or stopped being a plain literal'
+        assert m.group(1) == literal, (
+            f'{name} shipped as {m.group(1)}, not {literal}')
+
+
 def test_the_broadcast_backlog_is_bounded():
+    """The behavioural half, with LITERAL sizes on both sides.
+
+    It used to seed ``count = MAX_BROADCAST_BACKLOG * 10`` and assert
+    ``consumed == count - MAX_BROADCAST_BACKLOG`` — a literal restatement of the
+    production line, whose seed makes the `else` branch unreachable for EVERY
+    positive cap (cap=32 → 320/288/288 equal; cap=1 000 000 → 10 000 000 /
+    9 000 000 / 9 000 000 equal). Fixed numbers are what make it fail."""
     mgr, _status = _manager()
     state = mgr._broadcast_state('go')
     ctx = types.SimpleNamespace(should_stop=lambda: False)
     hat = {'type': 'edubotics_when_broadcast', 'fields': {'EVENT_NAME': 'go'}}
     with state['cond']:
-        state['count'] = WM.MAX_BROADCAST_BACKLOG * 10
+        state['count'] = 320
     assert mgr._wait_for_hat_trigger(hat, ctx) is True
     tid = threading.get_ident()
-    assert state['consumed'][tid] == state['count'] - WM.MAX_BROADCAST_BACKLOG
+    assert state['consumed'][tid] == 288, (
+        'a 320-deep backlog must be trimmed to the newest 32')
 
 
 # ── RS-03 — a program made only of hats ────────────────────────────────────
@@ -269,7 +307,16 @@ def test_one_failing_body_does_not_silence_the_handler():
     body = {'type': 'evil_unknown_block'}
     mgr.start(_ws([main, _on_broadcast(body)]), 'wf')
     _drain(mgr, status)
-    errors = [m for m in _logs(status) if 'Wenn Ereignis empfangen' in m]
+    # „WARNUNG" is FILTERED OUT, and that one word is the whole test. Without
+    # it the RETIREMENT warning counts as an error: at MAX_HAT_CONSECUTIVE_ERRORS
+    # = 5 the handler logs 2 errors, and at MAX = 1 it logs 1 error + the
+    # retirement [WARNUNG] — `len(errors) == 2` EITHER WAY, so the mutation
+    # `MAX_HAT_CONSECUTIVE_ERRORS = 1` (which retires the handler on its first
+    # failure, i.e. the exact defect this test is named for) survived the whole
+    # suite. `test_a_body_that_always_fails_is_retired_not_spun_forever` ~30
+    # lines below already had the filter; this one did not.
+    errors = [m for m in _logs(status)
+              if 'Wenn Ereignis empfangen' in m and 'WARNUNG' not in m]
     assert len(errors) >= 2, (
         f'the handler must survive its first error; got {errors}')
 

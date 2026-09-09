@@ -125,7 +125,12 @@ class _Ctx:
         self.claim_lock = threading.RLock()
         self.claimed_tags = set()
         self.skipped_tags = set()
-        self.absent_since = {}
+        # Recycled-object reclaim state (position-based): where the robot left a
+        # claimed tag, where an unclaimed one lies, and which claimed tags have
+        # been missing at least once since their claim.
+        self.claim_anchor = {}
+        self.claim_pick_xy = {}
+        self.claim_unseen = set()
         # No follower-joints readback by default → the grasp-success check returns
         # None and falls back to claim-on-completion (the pre-#2 behaviour).
         self.get_follower_joints = None
@@ -297,30 +302,358 @@ def test_loop_no_object_selected_raises_german():
         Interpreter([])._exec_while_visible(block, ctx, lambda *a: None)
 
 
-# ── #1: recycled-object reclaim ──────────────────────────────────────────────
-def test_reclaim_unclaims_recycled_object(monkeypatch):
-    # A claimed object that goes ABSENT and then reappears (removed + put back) is
-    # un-claimed so it is grabbed again. Driven directly through the unclaimed-view
-    # detection (which runs the reclaim) across present→absent→present frames.
+# ── #1: recycled-object reclaim — POSITION, never absence ────────────────────
+# The reclaim decides on two independent proofs, BOTH taken from a SIGHTING:
+#   ANCHOR — a claimed object seen ≥ _RECLAIM_MOVE_M from where the robot LEFT it
+#            (its first observed rest position AFTER the claim) was moved;
+#   PICK   — a claimed object that has been unseen at least once and then turns
+#            up back at the spot it was PICKED from was put there by a person.
+# Because neither rule acts on an absence, a missed AprilTag look can never
+# reclaim, at ANY miss rate — which the first two tests below pin directly.
+_PICK = (0.18, 0.00)          # where an object lies before it is grasped
+_DROP = (0.18, 0.10)          # 100 mm away — where the program places it
+_NUDGED = (0.185, 0.00)       # 5 mm from _PICK — inside the threshold
+_OUT_OF_REACH = (0.60, 0.00)
+
+
+def _scripted_ctx(script):
+    """A ctx whose scene is driven by a per-observation script: one detection
+    list per ``count_unclaimed_visible`` call, with the last entry repeating."""
+    return _Ctx(_StubPerception(
+        lambda call: list(script[min(call, len(script)) - 1])))
+
+
+def _reclaim_lines(ctx):
+    """The German lines the reclaim itself emits — EVERY variant.
+
+    Derived from ``perception_blocks._RECLAIM_TEMPLATES_DE`` rather than listing
+    the sentences, because listing them is how this helper silently goes blind:
+    it named two of the variants, a third was added for the PICK rule, and
+    ``assert _reclaim_lines(ctx) == []`` then kept passing VACUOUSLY on the exact
+    rule that changed. A fourth rule cannot orphan it now.
+    """
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    heads = [t.split('#{tag}')[1].split('—')[0].strip()
+             for t in pb._RECLAIM_TEMPLATES_DE.values()]
+    assert len(heads) == 3 and all(heads), (
+        f'the reclaim template table changed shape: {pb._RECLAIM_TEMPLATES_DE}')
+    return [m for m in ctx.logs if any(h in m for h in heads)]
+
+
+def test_a_tag_missed_on_one_observation_is_never_reclaimed():
+    # THE ORIGINAL DEFECT, and the thing this design exists to make impossible:
+    # one genuine AprilTag miss (a hand passing over the table) on a cube nobody
+    # touched used to re-grasp it and print „wurde zurückgelegt". Measured
+    # 2026-09-07 under the absence rule: the SAME cube grasped twice, at
+    # t = 0.28 s and t = 9.11 s.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    placed = _det(20, _DROP)
+    ctx = _scripted_ctx([[placed], [], [placed], [placed]])
+    pb._claim_tag(ctx, 20)
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # anchor := the drop spot
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # ONE missed look
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # back, same spot
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.claimed_tags
+    assert _reclaim_lines(ctx) == []
+
+
+def test_a_tag_missed_on_five_consecutive_observations_is_never_reclaimed():
+    # No COUNTER value can work, which is why there is no longer a counter: five
+    # misses of an untouched cube are still five misses. (A counter of 5 — or of
+    # any n ≤ 5 — reclaims here.)
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    placed = _det(20, _DROP)
+    ctx = _scripted_ctx([[placed], [], [], [], [], [], [placed]])
+    pb._claim_tag(ctx, 20)
+    for _ in range(7):
+        assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.claimed_tags
+    assert _reclaim_lines(ctx) == []
+
+
+def test_an_object_moved_without_ever_being_absent_is_reclaimed():
+    # The decisive case for choosing POSITION over absence: a student who SLIDES
+    # the cube back never makes it disappear for a single observation, so every
+    # absence rule scores zero here.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _scripted_ctx([[_det(20, _PICK)], [_det(20, _PICK)], [_det(20, _DROP)]])
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1   # still up for grabs
+    pb._claim_tag(ctx, 20)
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # anchor := where it lies
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1   # 100 mm away → moved
+    assert 20 not in ctx.claimed_tags
+
+
+def test_a_place_plus_one_miss_does_not_reclaim():
+    # THE TRAP. Anchoring on the last sighting BEFORE the absence re-creates the
+    # original defect exactly: the pre-absence sighting is the PICK spot, the
+    # post-absence one is the DROP spot, and the robot's own placement then reads
+    # as „moved 100 mm". The anchor must be observed AFTER the claim.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _scripted_ctx([[_det(20, _PICK)], [], [_det(20, _DROP)], [_det(20, _DROP)]])
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1   # seen at the pick spot
+    pb._claim_tag(ctx, 20)                                  # …grasped, placed at DROP
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # first post-claim look MISSED
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # now visible at DROP
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.claimed_tags
+    assert _reclaim_lines(ctx) == []
+
+
+def test_an_object_returned_to_its_pick_spot_after_being_gone_is_reclaimed():
+    # The PICK rule: the robot carried it away, so only a person can have put it
+    # back where it started.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _scripted_ctx([[_det(20, _PICK)], [], [_det(20, _PICK)]])
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1   # pick spot recorded
+    pb._claim_tag(ctx, 20)
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # carried out of view
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1   # back at the pick spot
+    assert 20 not in ctx.claimed_tags
+
+
+def test_the_all_done_message_has_no_gendered_article():
+    """C-2 (a)+(b). „es ist KEINES mehr übrig, DAS gegriffen werden könnte" is
+    neuter — wrong for *der Würfel*, the only object in the shipped catalog — and
+    „bitte EIN „Würfel" kurz WEGNEHMEN" needs the accusative „einen". The label is
+    a per-type string a teacher will one day author, so nothing may inflect
+    around it: the countable noun is the neuter „Objekt", which the block
+    tooltips and this module's own sibling sentence already use."""
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _scripted_ctx([[]])
+    ctx.claimed_tags = {20, 21, 22}
+    recipe = ctx.object_catalog.recipe_for_type('banane')
+    msg = pb._nothing_to_grasp_message(ctx, recipe)
+    assert 'kein Objekt mehr übrig' in msg, msg
+    assert 'ein Objekt kurz wegnehmen' in msg, msg
+    assert 'keines' not in msg, 'neuter — the shipped object is *der* Würfel'
+    assert 'ein „Banane"' not in msg, '`wegnehmen` governs the accusative'
+    # The type is still NAMED, once, in topic position.
+    assert 'Alle „Banane" sind schon erledigt' in msg, msg
+
+
+def test_the_loop_pass_line_has_no_pronoun():
+    """C-3 / N2. „greife EINES" is the neuter accusative pronoun (*der Würfel*
+    needs „einen") on the line that prints once per pass — the most-read German
+    string in the whole „Solange sichtbar" lesson. Pre-existing on `main`, swept
+    with its three neighbours so the file does not ship two conventions."""
+    import inspect
+    from physical_ai_server.workflow import interpreter as _in
+    src = inspect.getsource(_in)
+    assert 'das nächste wird gegriffen' in src
+    assert 'greife eines' not in src, (
+        'the neuter pronoun is back on the loop\'s most-printed line')
+
+
+def test_the_pick_rule_says_the_object_is_back_where_it_was():
+    """C-1. The PICK rule fires on ``_back_at`` — i.e. having JUST ESTABLISHED
+    the object is NOT elsewhere — and it shared the ANCHOR rule's sentence, so it
+    printed „liegt jetzt woanders" about a cube standing on its own square.
+    Reproduced by execution against the real ``_reclaim_recycled``: byte-
+    identical sentences for the two OPPOSITE observations, 100 % of the time, on
+    the put-back demo the whole rule exists for."""
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _scripted_ctx([[_det(20, _PICK)], [], [_det(20, _PICK)]])
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1
+    pb._claim_tag(ctx, 20)
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # carried out of view
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1   # back on its own spot
+    lines = _reclaim_lines(ctx)
+    assert len(lines) == 1, f'expected one reclaim line, got {lines}'
+    assert 'liegt wieder an der alten Stelle' in lines[0], lines[0]
+    assert 'woanders' not in lines[0], (
+        'the PICK rule just measured that the object is NOT elsewhere')
+    # „an DER alten Stelle" — a possessive („an seinem/ihrem alten Platz") would
+    # agree with the LABEL's gender and re-introduce the leak.
+    assert 'seinem' not in lines[0] and 'ihrem' not in lines[0]
+
+
+def test_the_anchor_rule_still_says_woanders():
+    """The other side of C-1: a claimed object that genuinely moved away from
+    where the robot LEFT it keeps its own sentence."""
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _scripted_ctx([[_det(20, _PICK)], [_det(20, _PICK)], [_det(20, _DROP)]])
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1
+    pb._claim_tag(ctx, 20)
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # anchor := the pick spot
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1   # 100 mm away
+    lines = _reclaim_lines(ctx)
+    assert len(lines) == 1, f'expected one reclaim line, got {lines}'
+    assert 'liegt jetzt woanders' in lines[0], lines[0]
+    assert 'alten Stelle' not in lines[0], (
+        'sending every reclaim down the PICK branch is the mirror defect')
+
+
+def test_the_three_reclaim_sentences_are_three_distinct_sentences():
+    """A source fence. The defect was ONE sentence serving TWO opposite
+    observations, so what has to be pinned is that they are DIFFERENT — and that
+    the module holds exactly one copy of each, so a future edit cannot quietly
+    share one again."""
+    import inspect
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    tpl = pb._RECLAIM_TEMPLATES_DE
+    assert set(tpl) == {'pick', 'anchor', 'skip'}, tpl
+    assert len(set(tpl.values())) == 3, f'two rules share a sentence: {tpl}'
+    import ast as _ast
+    src = inspect.getsource(pb)
+    # STRING LITERALS only — the comment explaining the defect naturally quotes
+    # the sentence, and a raw text count would forbid documenting it.
+    literals = [n.value for n in _ast.walk(_ast.parse(src))
+                if isinstance(n, _ast.Constant) and isinstance(n.value, str)]
+    for sentence in ('liegt jetzt woanders', 'liegt wieder an der alten Stelle',
+                     'wurde bewegt'):
+        hits = [lit for lit in literals if sentence in lit]
+        assert len(hits) == 1, (
+            f'„{sentence}" appears in {len(hits)} string literals — two rules '
+            'sharing one sentence is the defect this table exists to stop')
+    # _reclaim takes the rule from its CALLER: it pops the anchor as its third
+    # statement, so anything re-derived inside it reads destroyed state.
+    assert 'def _reclaim(tag: int, rule: str) -> None:' in src, (
+        'the rule must be PASSED in, not re-derived inside _reclaim')
+
+
+def test_the_pick_rule_needs_a_prior_absence():
+    # Degenerate but legal program: the drop point IS the pick point. Without the
+    # prior-absence precondition the PICK rule would fire on the robot's own
+    # placement every pass and „Solange sichtbar" would never terminate.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _scripted_ctx([[_det(20, _PICK)]])
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1
+    pb._claim_tag(ctx, 20)
+    for _ in range(4):
+        assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.claimed_tags
+    assert _reclaim_lines(ctx) == []
+
+
+def test_a_skipped_out_of_reach_object_moved_into_reach_is_retried():
+    # SKIP anchoring: the robot never moved this one, so its anchor is where it
+    # lay when we gave up — which lets a student slide it into reach and have it
+    # retried in the SAME run.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _scripted_ctx([[_det(20, _OUT_OF_REACH)], [_det(20, _PICK)]])
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1
+    pb._skip_tag(ctx, 20)                                   # „außerhalb des Greifbereichs"
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1   # moved into reach → retry
+    assert 20 not in ctx.skipped_tags
+    assert any('wurde bewegt' in m for m in ctx.logs)
+
+
+def test_a_fresh_claim_re_anchors_instead_of_reusing_the_old_reference():
+    # claims.py::_forget_position_state. A tag SKIPPED where it lay gets an anchor
+    # there; a student can then „merke als erledigt" it (mark_done → _claim_tag)
+    # and the program places it elsewhere. Carrying the SKIP-time anchor into the
+    # new claim would compare the drop spot against it and un-claim the object on
+    # the very next look. The pick spot is deliberately NOT forgotten — the PICK
+    # rule needs it.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _scripted_ctx([[_det(20, _PICK)], [_det(20, _PICK)], [_det(20, _DROP)],
+                         [_det(20, _DROP)]])
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1
+    pb._skip_tag(ctx, 20)
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # skip anchor := the pick spot
+    assert ctx.claim_anchor.get(20) is not None, 'premise: the skip anchored it'
+    pb._claim_tag(ctx, 20)                                  # …„merke als erledigt"
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # placed at DROP → re-anchor
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.claimed_tags
+    assert ctx.claim_pick_xy.get(20) is not None, 'the pick spot must survive a claim'
+    assert _reclaim_lines(ctx) == []
+
+
+def test_a_move_below_the_threshold_does_not_reclaim():
+    # 5 mm — the student brushed past it. Well above the 0.164 mm worst-case
+    # projection noise, well below the 20 mm threshold and the 30 mm cube.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _scripted_ctx([[_det(20, _PICK)], [_det(20, _PICK)], [_det(20, _NUDGED)],
+                         [_det(20, _NUDGED)]])
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1
+    pb._claim_tag(ctx, 20)
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # anchor := the pick spot
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0   # nudged 5 mm
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.claimed_tags
+    assert _reclaim_lines(ctx) == []
+
+
+def test_reclaim_move_zero_disables_the_reclaim(monkeypatch):
+    # EDUBOTICS_RECLAIM_MOVE_M=0 is the one-variable rollback, and it must DISABLE
+    # the reclaim — not turn a `distance >= 0` comparison into "reclaim always".
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    monkeypatch.setattr(pb, '_RECLAIM_MOVE_M', 0.0)
+    ctx = _scripted_ctx([[_det(20, _PICK)], [_det(20, _PICK)], [_det(20, _DROP)],
+                         [_det(20, _DROP)]])
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 1
+    pb._claim_tag(ctx, 20)
+    for _ in range(3):
+        assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.claimed_tags
+    assert _reclaim_lines(ctx) == []
+
+
+def test_find_object_and_wait_until_do_not_mutate_the_claim_state():
+    # „finde" and „warte bis" are READS, exactly like „sehe ich" / „Anzahl".
+    # „finde" is called MID-CARRY by the taught split-grasp pattern, where the
+    # held object's projected position travels with the gripper — running the
+    # anchor rule there un-claims the cube the robot is HOLDING. „warte bis"
+    # polls ~5×/s against a rule the loop advances once per 15.6 s pass.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    ctx = _Ctx(_StubPerception([_det(20, _DROP)]))
+    pb._claim_tag(ctx, 20)
+    ctx.claim_anchor[20] = _PICK          # …as if the robot had left it at _PICK
+    before_anchor = dict(ctx.claim_anchor)
+    before_unseen = set(ctx.claim_unseen)
+    # Both would reclaim tag 20 (it is 100 mm from its anchor) if they ran it.
+    assert pb.find_object(ctx, {'object_type': 'banane'}) is None
+    assert pb.wait_until_object_seen(
+        ctx, {'object_type': 'banane', 'timeout': 0.05}) is False
+    assert ctx.claimed_tags == {20}
+    assert ctx.claim_anchor == before_anchor
+    assert ctx.claim_unseen == before_unseen
+    assert _reclaim_lines(ctx) == []
+
+
+def test_the_reclaim_message_names_the_tag_the_way_the_printed_sheet_does():
+    # tools/generate_apriltags.py prints „#20 Würfel" on the sheet the student has
+    # in front of them, so the Protokoll says #20 — not „(20)". And the sentence
+    # reports what was OBSERVED (it lies elsewhere), never an intention nobody
+    # watched: „wurde zurückgelegt" asserted a put-back that had not been seen.
+    from physical_ai_server.workflow.handlers import perception_blocks as pb
+    moved = _scripted_ctx([[_det(20, _PICK)], [_det(20, _PICK)], [_det(20, _DROP)]])
+    pb.count_unclaimed_visible(moved, 'banane')
+    pb._claim_tag(moved, 20)
+    pb.count_unclaimed_visible(moved, 'banane')
+    pb.count_unclaimed_visible(moved, 'banane')
+    assert _reclaim_lines(moved) == [
+        '„Banane" #20 liegt jetzt woanders — wird noch einmal gegriffen.']
+
+    skipped = _scripted_ctx([[_det(21, _OUT_OF_REACH)], [_det(21, _PICK)]])
+    pb.count_unclaimed_visible(skipped, 'banane')
+    pb._skip_tag(skipped, 21)
+    pb.count_unclaimed_visible(skipped, 'banane')
+    assert _reclaim_lines(skipped) == ['„Banane" #21 wurde bewegt — neuer Versuch.']
+    assert not any('zurückgelegt' in m or '(20)' in m or '(21)' in m
+                   for m in moved.logs + skipped.logs)
+
+
+def test_one_dropped_frame_does_not_reclaim_however_long_the_pass_took(monkeypatch):
+    # The regression test for the loop-pass-cadence defect: with the wall-clock
+    # debounce fully satisfied (0.0 s), a SINGLE absent observation still must not
+    # un-claim. Before _RECLAIM_ABSENT_PASSES this reclaimed on frame 3.
     from physical_ai_server.workflow.handlers import perception_blocks as pb
     monkeypatch.setattr(pb, '_RECLAIM_ABSENT_S', 0.0)
     det = _det(20, (0.18, 0.0))
     frames = {'mode': 'present'}
     ctx = _Ctx(_StubPerception(lambda _c: ([det] if frames['mode'] == 'present' else [])))
     ctx.claimed_tags.add(20)
-    # Frame 1: visible + claimed, never absent → still excluded, not reclaimed.
     assert pb.count_unclaimed_visible(ctx, 'banane') == 0
-    assert 20 in ctx.claimed_tags
-    assert 20 not in ctx.absent_since
-    # Frame 2: absent → the absence clock starts.
     frames['mode'] = 'absent'
-    assert pb.count_unclaimed_visible(ctx, 'banane') == 0
-    assert 20 in ctx.absent_since
-    # Frame 3: visible again after >= RECLAIM_ABSENT_S absent → reclaimed.
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0      # ONE dropped frame
     frames['mode'] = 'present'
-    assert pb.count_unclaimed_visible(ctx, 'banane') == 1
-    assert 20 not in ctx.claimed_tags
-    assert any('zurückgelegt' in m for m in ctx.logs)
+    assert pb.count_unclaimed_visible(ctx, 'banane') == 0
+    assert 20 in ctx.claimed_tags, 'one dropped frame must not re-grasp'
+    assert not any('zurückgelegt' in m for m in ctx.logs)
 
 
 def test_reclaim_not_triggered_by_brief_occlusion(monkeypatch):

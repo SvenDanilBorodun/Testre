@@ -71,9 +71,33 @@ export function driveToFromBlock(block) {
 // short and printable. We strip leading/trailing whitespace and reject
 // the sentinel string so a student can't name a block "—".
 const NAME_MAX_LEN = 24;
-function nameValidator(newValue) {
+// Characters OUTSIDE the server's destination-name alphabet. This is the exact
+// complement of handlers/destinations.py::_DESTINATION_NAME_RE
+// (^[A-Za-zÄÖÜäöüß0-9 _\-]{1,40}$), which raises the German „Ungültiger
+// Ziel-Name." — a WorkflowError that ABORTS the run. Without this class the
+// editor accepted 'A!', 'A/B', 'A]B', 'A\nB', '日本' and '😀' and the student
+// only found out mid-run, at a toast far away from the block that caused it.
+// We SANITISE rather than reject the whole edit, matching what this validator
+// already does for an over-long name (it truncates instead of refusing): the
+// student sees the bad character vanish as they type and keeps the valid part,
+// where a null would snap the field back to its previous value and lose the
+// whole word. Stripping '[' and ']' also closes the editor half of the log
+// spoofing the server comment calls out (a `\n[FEHLER] …` injection).
+const NAME_DISALLOWED_RE = /[^A-Za-zÄÖÜäöüß0-9 _-]/g;
+// NOTE: the 24-char cap is deliberately NOT the server's 40. CLAUDE.md:
+// "Destination-pin names cap at 24 chars in React (the Blockly field's
+// NAME_MAX_LEN); trajectory names use the full 1-40 backend range — two
+// frontend validators over one backend regex." Do not raise it to 40.
+//
+// Exported so the alphabet can be unit-tested directly, the same reason
+// driveToFromBlock above is exported (no real Blockly field click to simulate).
+export function nameValidator(newValue) {
   if (typeof newValue !== 'string') return null;
-  const trimmed = newValue.trim();
+  // Strip first, THEN trim + cap, so the 24 chars are 24 VALID characters and a
+  // name that is only invalid characters collapses to '' and is refused below
+  // rather than being stored as an empty name (which the server refuses in turn
+  // with „Ziel-Name fehlt.").
+  const trimmed = newValue.replace(NAME_DISALLOWED_RE, '').trim();
   if (trimmed === '' || trimmed === UNPINNED) return null;
   return trimmed.slice(0, NAME_MAX_LEN);
 }
@@ -112,6 +136,11 @@ export const DESTINATION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: DEST_COLOR,
+    // handlers/destinations.py::destination_current — saves the gripper's
+    // CURRENT position under this name while the program runs.
+    tooltip:
+      'Speichert die Stelle, an der der Greifer gerade steht, unter diesem '
+      + 'Namen. Praktisch, wenn du den Arm von Hand dorthin führst.',
     extensions: ['edubotics_validate_destination_name'],
   },
   {

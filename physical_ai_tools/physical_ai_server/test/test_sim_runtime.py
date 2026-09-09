@@ -284,7 +284,6 @@ class _SimDetectCtx:
         self.yaw_bias_rad = 0.0
         self.claimed_tags = set()
         self.skipped_tags = set()
-        self.absent_since = {}
         self.claim_lock = threading.RLock()
         self.motion_lock = threading.RLock()
         self.last_full_joints = list(HOME_JOINTS_RAD) + [GRIPPER_OPEN_RAD]

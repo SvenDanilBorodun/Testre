@@ -125,12 +125,30 @@ export function registerPerceptionBlocks() {
   // array), so these three use a custom init() with a generator-function
   // FieldDropdown (objectTypeOptions). HMR/StrictMode-guarded.
   // Field name OBJECT_TYPE serializes to fields:{OBJECT_TYPE} → args['object_type'].
-  defineObjectTypeBlock('edubotics_grasp_object', DE.GRASP_OBJECT_PREFIX, 'statement');
-  defineObjectTypeBlock('edubotics_see_object', DE.SEE_OBJECT_PREFIX, 'Boolean');
-  defineObjectTypeBlock('edubotics_count_object', DE.COUNT_OBJECT_PREFIX, 'Number');
+  // Tooltips describe what handlers/perception_blocks.py actually does: all
+  // four skip instances already CLAIMED this run (grasp_object claims a tag on
+  // success, mark_done claims it by hand), which is the single most surprising
+  // thing about them and is why „Anzahl" can shrink as a program runs.
+  defineObjectTypeBlock(
+    'edubotics_grasp_object', DE.GRASP_OBJECT_PREFIX, 'statement',
+    'Sucht ein Objekt dieses Typs, fährt darüber, greift es von oben und '
+    + 'prüft, ob es wirklich hält. Klappt es nicht, wird es noch einmal '
+    + 'versucht. Jedes Objekt wird nur einmal gegriffen.');
+  defineObjectTypeBlock(
+    'edubotics_see_object', DE.SEE_OBJECT_PREFIX, 'Boolean',
+    'Wahr, wenn gerade mindestens ein Objekt dieses Typs zu sehen ist. '
+    + 'Bereits gegriffene Objekte zählen nicht mit.');
+  defineObjectTypeBlock(
+    'edubotics_count_object', DE.COUNT_OBJECT_PREFIX, 'Number',
+    'Zählt, wie viele Objekte dieses Typs gerade zu sehen sind. Bereits '
+    + 'gegriffene Objekte zählen nicht mit.');
   // Grasp split (Phase 1): „finde <Typ>" outputs a Greifziel value (the helper
   // calls setOutput(true, kind) for any non-'statement' kind).
-  defineObjectTypeBlock('edubotics_find_object', DE.FIND_OBJECT_PREFIX, 'Greifziel');
+  defineObjectTypeBlock(
+    'edubotics_find_object', DE.FIND_OBJECT_PREFIX, 'Greifziel',
+    'Sucht ein Objekt dieses Typs und gibt es als Greifziel zurück — oder '
+    + '„nichts", wenn keines zu sehen ist. Merke dir das Ergebnis in einer '
+    + 'Variablen, statt „finde" mehrmals hintereinander zu verwenden.');
 
   // Static JSON perception blocks (no runtime dropdown). HMR/Jest-guarded.
   const toDefine = PERCEPTION_JSON_BLOCKS.filter(
@@ -180,6 +198,12 @@ export function registerPerceptionBlocks() {
           .appendField(DE.WAIT_UNTIL_OBJECT_SEEN_SUFFIX);
         this.setOutput(true, 'Boolean');
         this.setColour(PERCEPTION_COLOR);
+        // perception_blocks.wait_until_object_seen polls and RAISES a German
+        // timeout — it does not quietly return false, so say so.
+        this.setTooltip(
+          'Wartet, bis ein Objekt dieses Typs zu sehen ist. Taucht in der '
+          + 'eingestellten Zeit keines auf, bricht das Programm mit einer '
+          + 'Meldung ab.');
       },
     };
   }
@@ -214,14 +238,25 @@ export function registerPerceptionBlocks() {
           .appendField(DE.WHEN_OBJECT_SEEN_SUFFIX);
         this.setNextStatement(true, null);   // hat: top-only
         this.setColour(PERCEPTION_COLOR);
+        // Edge-triggered on the SET of unclaimed-visible tag ids changing, so
+        // it fires once per OBJECT, not once per run and not repeatedly while
+        // the same object stays in view. That is the whole point of the block
+        // and is impossible to guess from the label.
+        this.setTooltip(
+          'Startet die Blöcke darunter, sobald ein neues Objekt dieses Typs '
+          + 'auftaucht. Für jedes Objekt genau einmal — nicht immer wieder, '
+          + 'solange es liegen bleibt.');
       },
     };
   }
 }
 
 // Define one named-object block. `kind` is 'statement' (chains vertically, no
-// output) or an output type string ('Boolean' | 'Number').
-function defineObjectTypeBlock(type, prefix, kind) {
+// output) or an output type string ('Boolean' | 'Number'). `tooltip` is the
+// German hover text — REQUIRED: this helper used to set none at all, so all
+// four named-object blocks (the most-used blocks in the editor) shipped with an
+// empty tooltip while every hand-written block around them had one.
+function defineObjectTypeBlock(type, prefix, kind, tooltip) {
   if (Blockly.Blocks[type]) return; // HMR / Jest re-import guard
   Blockly.Blocks[type] = {
     init() {
@@ -235,6 +270,7 @@ function defineObjectTypeBlock(type, prefix, kind) {
         this.setOutput(true, kind);
       }
       this.setColour(PERCEPTION_COLOR);
+      this.setTooltip(tooltip);
     },
   };
 }

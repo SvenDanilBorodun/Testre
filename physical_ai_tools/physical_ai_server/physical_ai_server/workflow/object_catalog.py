@@ -564,7 +564,7 @@ def catalog_response_fields(catalog: ObjectCatalog) -> dict:
     }
 
 
-def build_object_catalog_response() -> dict:
+def build_object_catalog_response(profile_id: Optional[str] = None) -> dict:
     """Full ``GetObjectCatalog.srv`` response payload for the fixed, fleet-wide
     catalog: the six parallel arrays plus ``success`` + ``message``. Pure / ROS
     -free so the wire contract can be unit-tested end-to-end. On any error (only
@@ -574,9 +574,26 @@ def build_object_catalog_response() -> dict:
     :class:`ObjectCatalogError` text is forwarded verbatim (those are German by
     contract); any other exception (e.g. a ``TypeError`` from a malformed
     constant) would leak an English message to the editor, so it is replaced by
-    a fixed German fallback."""
+    a fixed German fallback.
+
+    ``profile_id`` is forwarded to :func:`fixed_catalog` and is OPTIONAL so that
+    omitting it reproduces the previous behaviour byte-for-byte: this builder
+    used to call the un-parameterised ``fixed_catalog()``, so ``GetObjectCatalog``
+    always shipped the OMX variant while every other consumer (production passes
+    ``self._arm_profile.profile_id``) routed through ``_CATALOG_BY_PROFILE``.
+    That is LATENT as of 2026-09-07 and not a live wrong answer: the profile
+    only changes ``gripper_close_rad``, which is not one of the six wire arrays,
+    so the payload is byte-identical for ``omx_full`` / ``edu6_studio`` /
+    ``edu1_studio`` today (verified by executing all three). It stops being
+    latent the moment a per-profile catalog differs in a WIRE field — a
+    different ``object_height_m``, ``object_width_m``, ``color_hex``,
+    ``max_instances`` (== ``len(tag_ids)``) or type set — at which point the
+    editor's dropdowns and the sim stage's render dims would silently describe
+    the wrong arm. NOTE: the ROS call site in ``physical_ai_server.py`` still
+    calls this WITHOUT an argument and must be wired to pass the resolved
+    profile id for the parameter to have any effect."""
     try:
-        fields = catalog_response_fields(fixed_catalog())
+        fields = catalog_response_fields(fixed_catalog(profile_id))
         fields['success'] = True
         fields['message'] = ''
     except Exception as e:

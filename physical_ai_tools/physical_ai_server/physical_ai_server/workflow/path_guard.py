@@ -141,6 +141,35 @@ _REFUSE_MSG = (
 )
 
 
+def _refusal_message(zones, margin: float, link_radius: float) -> str:
+    """The German refusal, naming the INFLATED size of the drawn zone.
+
+    The bare sentence above is true but gives the student nothing to act on, and
+    on a short arm the reason is almost always the same and is invisible from the
+    editor: a zone is inflated by ``link_radius + margin`` = 5 cm on EVERY face
+    before anything is tested (the Minkowski "fatten the obstacle, test link
+    centres" argument — see LINK_RADIUS_M), so a 3 cm box drawn on the mat is a
+    13 cm obstacle to the planner. Against edu6's measured 176 mm pick band
+    (r ∈ [0.0325, 0.2082]) that leaves no side to pass on, which is exactly what
+    the sweep found: over 20 blocked, non-static edu6 cases, 2880 base-swing via
+    candidates were tried, 1280 SOLVED, 426 had the FIRST leg clear and 417 the
+    SECOND — and ZERO had both. Saying the inflated width out loud is the one
+    piece of information that turns "it refused" into "draw it smaller"."""
+    boxes = build_zones(zones, link_radius + margin)
+    if not boxes:
+        return _REFUSE_MSG
+    widest = max(max(float(b.max[0]) - float(b.min[0]),
+                     float(b.max[1]) - float(b.min[1])) for b in boxes)
+    inflation = link_radius + margin
+    return (
+        'Kein sicherer Weg um die Sperrzone gefunden. Sperrzonen werden zur '
+        f'Sicherheit um {inflation * 100:.0f} cm nach allen Seiten vergrößert — '
+        f'die Zone ist dadurch etwa {widest * 100:.0f} cm breit, und der Arm '
+        'kommt an dieser Stelle weder darüber noch daran vorbei. Bitte die '
+        'Sperrzone kleiner zeichnen oder das Ziel verschieben.'
+    )
+
+
 def _pose_inside_zone(ik, q, zones, inflation: float) -> bool:
     """True when the arm STANDING STILL at ``q`` already has a link point inside
     an inflated zone. Mirrors ``segment_blocked``'s backward-safe contract: a
@@ -215,6 +244,29 @@ def _static_overlap_refusal(ik, q_start, q_end, zones, margin, link_radius):
 # values; ``None``/absent resolves to the module constant, so the OMX (and every
 # profile-less construction, i.e. all non-Roboter-Studio paths and the existing
 # tests) is bit-identical.
+#
+# RE-MEASURED 2026-09-07, and the per-arm grid does NOT revive base-swing on
+# edu6 — only its CANDIDATE count. Over 40 blocked, non-static transits between
+# two grasp points in the pick band (a 3 cm box drawn between them):
+#
+#   grid (heights, radii, cruise)                     lift  swing  refuse
+#   SHIPPED (0.03,0.05,0.02) (0.14,0.18,0.10) 0.060     5     0      35
+#   every one of 60 alternative grids swept            5     0      35
+#
+# i.e. the outcome is grid-INDEPENDENT. The reason is not reachability: over 20
+# of those cases, 2880 candidates were tried, 1280 SOLVED, 426 had leg 1 clear
+# and 417 had leg 2 clear — and ZERO had BOTH. A single via cannot be on the
+# clear side of both endpoints when the inflated obstacle (13 cm for a 3 cm box)
+# is wider than the room either side of it in a 176 mm band. Routing that case
+# needs a TWO-via rung, which is a new rung and a Rule §2-class change to a
+# collision-avoidance ladder, i.e. the user's call — NOT a re-tune of these four
+# numbers. edu1 is unaffected in practice: its lift rung answers 25/30 of the
+# same cases (OMX 22/30), because its 0.100 m ceiling clears a 5 mm-tall
+# inflated zone where edu6's 0.065 m does not.
+#
+# What DID change is the refusal: see ``_refusal_message``, which now names the
+# inflated width so the student can act on it instead of being told to move a
+# target that was never the problem.
 def _geom(ctx, attr: str, default):
     value = getattr(ctx, attr, None)
     return default if value is None else value
@@ -286,9 +338,23 @@ def _parse_minmax(raw) -> Optional[tuple[list[float], list[float]]]:
 
 def build_zones(raw_zones, inflation: float) -> list[NoGoZone]:
     """Turn the raw ``ctx.zones`` list into inflated :class:`NoGoZone` boxes,
-    skipping any malformed entry (never raises)."""
+    skipping any malformed entry (never raises). This function stays SILENT
+    because it runs per swept segment; the reporting is
+    ``motion._warn_unreadable_zones``, which asks this function for boxes and
+    warns when a truthy payload yields none — from ``safe_move`` AND from
+    ``trajectory._refuse_if_replay_crosses_a_zone``.
+
+    (A read-only ``malformed_zone_count`` companion lived here briefly. It had
+    ZERO production callers, a test was its only caller, and its docstring named
+    two reporting sites that never called it. Rewriting the warner to use it was
+    rejected as well: the two predicates are NOT the same — `build_zones` empty
+    ⟺ every entry malformed, while a count of 1 for the non-list ``{'a': 1}``
+    shape merely coincides with ``len({'a': 1})``, and hanging the warning off
+    that coincidence is worse than no helper at all.)"""
     out: list[NoGoZone] = []
     if not raw_zones:
+        return out
+    if not isinstance(raw_zones, (list, tuple)):
         return out
     for raw in raw_zones:
         parsed = _parse_minmax(raw)
@@ -570,5 +636,5 @@ def plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=None,
     if legs is not None:
         return legs
 
-    # 4. Refuse.
-    raise _m.WorkflowError(_REFUSE_MSG)
+    # 4. Refuse — naming the inflated size, which is what the student can change.
+    raise _m.WorkflowError(_refusal_message(zones, margin, link_radius))

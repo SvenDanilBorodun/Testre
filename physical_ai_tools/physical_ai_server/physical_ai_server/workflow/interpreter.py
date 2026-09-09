@@ -42,7 +42,10 @@ import time
 from typing import Any, Callable, Iterable
 
 from physical_ai_server.workflow.handlers import STATEMENT_HANDLERS, VALUE_EVALUATORS
-from physical_ai_server.workflow.handlers.motion import WorkflowError
+from physical_ai_server.workflow.handlers.motion import (
+    WorkflowError,
+    _reacquire_after_release,
+)
 
 
 # Hat block types — collected by Interpreter.split_roots() and run as
@@ -70,8 +73,18 @@ _MAX_VAR_PAYLOAD_CHARS = 2000
 # The CHAR cap above is applied to the FINISHED string, so a 10-million-element
 # list was fully json.dumps()'d (measured 0.74 s, ~268 MB RSS) and then thrown
 # away down to 2000 chars. Serializing a bounded prefix instead makes the cost
-# proportional to what is actually shown. 200 items comfortably overflows the
-# 2000-char cap for any realistic value, so nothing visible is lost.
+# proportional to what is actually shown.
+#
+# 200 items is the BINDING cap for ordinary list contents — measured with the
+# real _jsonable on 1000-element lists: 200 ints = 916 chars, 200 floats = 1316,
+# 200 short strings = 1226, 200 booleans = 1326, all well under the 2000-char
+# cap. Deliberately so: THIS cap bounds the COST, and the char cap is only the
+# backstop for one pathological VALUE. (An earlier revision claimed „200 items
+# comfortably overflows the 2000-char cap … so nothing visible is lost" — the
+# opposite of what it measures.) The student is told what was dropped
+# (`… (N Elemente)`), so a shorter prefix is a smaller view, not a wrong one;
+# raising it to 400 would double what a twelve-year-old reads in a debug panel
+# with no evidence that more is better.
 _MAX_VAR_PAYLOAD_ITEMS = 200
 
 # Hard cap on the length of a list a single block may materialize.
@@ -115,7 +128,16 @@ def _env_float(name: str, default: float) -> float:
 # briefly occluded/dropped frame — or a slow hand placing a recycled object back —
 # doesn't end the loop early. A reclaim that returns an object (count>0) resets the
 # empty state.
-WHILE_EMPTY_FRAMES = _env_int('EDUBOTICS_WHILE_EMPTY_FRAMES', 2)
+#
+# 3, not 2, since 2026-09-08 — and the reason is the STUDENT, not the camera.
+# With the reclaim rebuilt around position (perception_blocks._RECLAIM_MOVE_M),
+# the put-back demo works whenever the student gets the object back onto the
+# table before the empty window closes. Measured over 40 realistic one-cube
+# timings: 21/40 at two looks, 38/40 at three; the remaining failures are simply
+# a student slower than the loop. The cost is honest and paid by EVERY „Solange
+# sichtbar" loop on every arm, including ones nobody intends to put anything back
+# into: +7.7 s before the „nichts mehr sichtbar — fertig" line.
+WHILE_EMPTY_FRAMES = _env_int('EDUBOTICS_WHILE_EMPTY_FRAMES', 3)
 WHILE_EMPTY_SECONDS = _env_float('EDUBOTICS_WHILE_EMPTY_SECONDS', 5.0)
 # Flicker-spin guard (#3): break the loop after this many CONSECUTIVE passes where
 # the count gate said >0 but the body made no progress (a GraspSkip that neither
@@ -989,7 +1011,16 @@ class Interpreter:
                 # this type are still to do, so the loop isn't a silent black box.
                 try:
                     label = _pb.label_for(ctx, type_name)
-                    ctx.log(f'„{label}": noch {n_visible} sichtbar — greife eines.')
+                    # „greife EINES" was the neuter accusative pronoun, wrong
+                    # for *der Würfel* (which needs „einen") — and this line
+                    # prints once per pass, so it is the most-read German string
+                    # in the whole „Solange sichtbar" lesson. The passive has no
+                    # pronoun and no gender at all, and it stops reading as an
+                    # imperative aimed at the student. Pre-existing on `main`,
+                    # swept with its three neighbours so the file does not ship
+                    # two conventions.
+                    ctx.log(f'„{label}": noch {n_visible} sichtbar — '
+                            'das nächste wird gegriffen.')
                 except Exception:
                     pass
                 # Flicker-spin guard (#3): a pass makes progress iff the body
@@ -1014,10 +1045,32 @@ class Interpreter:
                 else:
                     stall_passes += 1
                     if stall_passes >= WHILE_STALL_PASSES:
+                        # „kein Fortschritt" names the SYMPTOM. When the body
+                        # provably contains no claiming block, we also know the
+                        # CAUSE and the remedy, so say them: the split grasp
+                        # path („finde" → „fahre über" → „senke auf" → „schließe
+                        # um" → „hebe an") does not claim, so „finde …" hands
+                        # back the same nearest instance every pass and the arm
+                        # re-grasps ONE object while the others are never
+                        # touched. Measured 2026-09-07, 3 cubes: 3 gripper
+                        # closes, ALL on tag 22, claimed {}, ending here.
                         ctx.log(
                             '[WARNUNG] „Solange sichtbar": kein Fortschritt — '
                             'Schleife beendet.'
                         )
+                        # An EMPTY body is excluded: „der Block fehlt" would be
+                        # the wrong half of the truth when the whole body is
+                        # missing, and nothing was grasped to mark done.
+                        if do_block is not None and not self._body_can_claim(do_block):
+                            ctx.log(
+                                '[WARNUNG] Im Schleifenkörper fehlt „merke … '
+                                'als erledigt": ohne diesen Block bleibt jedes '
+                                'Objekt offen, „finde …" wählt immer wieder '
+                                'dasselbe und der Arm greift nur dieses eine. '
+                                'Bitte „merke <Ziel> als erledigt" nach dem '
+                                'Greifen einsetzen — oder den Block „Greife …" '
+                                'benutzen, der das selbst erledigt.'
+                            )
                         break
                 # Student repetition cap (#6): stop after the requested number of
                 # passes even if more objects remain visible.
@@ -1041,15 +1094,130 @@ class Interpreter:
                     and (now - empty_since) >= WHILE_EMPTY_SECONDS):
                 # Clean completion (#7): a friendly "done" line so the student
                 # knows the loop finished because nothing is left (not an error).
+                #
+                # „nichts mehr sichtbar" is a claim about the WORLD, and it is
+                # FALSE whenever an instance ended the loop SKIPPED: the gate
+                # counts UNCLAIMED-visible, and a skipped tag is excluded from
+                # that view (claims.excluded_ids), so a cube the arm could not
+                # reach lies in plain sight while the loop reports it gone. The
+                # reason for each skip was already logged as a [WARNUNG]; what
+                # was missing is that the ENDING acknowledged it, which is what
+                # made the loop look better than the identical block-by-block
+                # program while moving the same cubes.
                 try:
-                    ctx.log(
-                        f'„{_pb.label_for(ctx, type_name)}": nichts mehr sichtbar '
-                        '— fertig.'
-                    )
+                    label = _pb.label_for(ctx, type_name)
+                    n_left = self._skipped_count_for_type(ctx, type_name)
+                    # The type is already CITED by the „{label}:" prefix, so
+                    # the second mention was pure repetition — and it was
+                    # mis-inflected: „ein „{label}"" is masculine-only, and
+                    # „{n} „{label}"" is an invariant plural (*Kugel* → *Kugeln*).
+                    # Counting OBJEKTE removes the gender surface entirely.
+                    # („Die Gründe stehen" in the plural branch: n skips produce
+                    # n separate [WARNUNG]s above.)
+                    if n_left == 1:
+                        ctx.log(
+                            f'„{label}": fertig — aber ein Objekt konnte nicht '
+                            'gegriffen werden und liegt noch da. Der Grund '
+                            'steht oben im Protokoll.'
+                        )
+                    elif n_left > 1:
+                        ctx.log(
+                            f'„{label}": fertig — aber {n_left} Objekte konnten '
+                            'nicht gegriffen werden und liegen noch da. Die '
+                            'Gründe stehen oben im Protokoll.'
+                        )
+                    else:
+                        ctx.log(f'„{label}": nichts mehr sichtbar — fertig.')
                 except Exception:
                     pass
                 break
             self._interruptible_wait(ctx, WHILE_EMPTY_SECONDS)
+
+    @staticmethod
+    def _skipped_count_for_type(ctx, type_name) -> int:
+        """How many tags of ``type_name`` ended the loop SKIPPED — i.e. objects
+        still lying on the table that the loop's gate no longer sees.
+
+        Read under ``claim_lock`` (a ``when_object_seen`` hat thread mutates the
+        same set). Best-effort: any failure — no catalog, an unknown type, no
+        claim bookkeeping on a stub ctx — answers 0, which yields the unchanged
+        „nichts mehr sichtbar" line. A diagnostic may never break a loop."""
+        from physical_ai_server.workflow.handlers import perception_blocks as _pb
+        try:
+            recipe = _pb._recipe_for(_pb._require_catalog(ctx), type_name)
+            type_ids = {int(i) for i in recipe.tag_ids}
+        except Exception:  # noqa: BLE001 — a diagnostic never fails a run
+            return 0
+        lock = getattr(ctx, 'claim_lock', None)
+        try:
+            if lock is not None:
+                with lock:
+                    skipped = {int(i) for i in (ctx.skipped_tags or set())}
+            else:
+                skipped = {int(i) for i in (getattr(ctx, 'skipped_tags', None) or set())}
+        except Exception:  # noqa: BLE001
+            return 0
+        return len(type_ids & skipped)
+
+    # Statement blocks that CLAIM a tag, and therefore the only two ways a
+    # „Solange <Typ> sichtbar" loop body can make the progress that terminates
+    # it: the composite „Greife …" (claims after check_grasp_held — never a
+    # missed grab) and the split path's explicit „merke … als erledigt". Keep in
+    # lockstep with handlers/__init__.py::STATEMENT_HANDLERS.
+    _CLAIMING_BLOCK_TYPES = frozenset({
+        'edubotics_grasp_object',
+        'edubotics_mark_done',
+    })
+    # Depth cap for the body scan below: statement nesting a student can build
+    # is far shallower, and the payload is untrusted (/workflow/start).
+    _CLAIM_SCAN_MAX_DEPTH = 64
+
+    def _body_can_claim(self, block: Any, _depth: int = 0, _seen=None) -> bool:
+        """Best-effort: can the statement chain rooted at ``block`` reach a block
+        that CLAIMS a tag?
+
+        Used ONLY to choose between two wordings of the stall warning, after the
+        loop has already MEASURED three passes with zero progress — so the scan
+        never invents an alarm, it only decides whether we may also name the
+        cause. Accordingly it FAILS OPEN: anything it cannot decide (an
+        unresolvable procedure call, a recursion/depth cap, a malformed payload)
+        answers True and the student gets the unchanged generic line. A false
+        "cannot claim" would blame a missing block that is right there; a false
+        "can claim" merely withholds a hint."""
+        if _depth > self._CLAIM_SCAN_MAX_DEPTH:
+            return True                     # undecided ⇒ fail open
+        if not isinstance(block, dict):
+            return False                    # end of chain: nothing found here
+        btype = block.get('type')
+        if btype in self._CLAIMING_BLOCK_TYPES:
+            return True
+        if btype in {'procedures_callnoreturn', 'procedures_callreturn'}:
+            # A procedure body may well claim. Resolve it; an unresolvable call
+            # is undecided, not "no".
+            seen = set(_seen) if _seen else set()
+            name = self._read_call_name(block)
+            spec = self._procedures.get(name) if name else None
+            if spec is None or name in seen:
+                return True                 # undecided ⇒ fail open
+            seen.add(name)
+            body = self._get_statement_block(spec.get('block') or {}, 'STACK')
+            if self._body_can_claim(body, _depth + 1, seen):
+                return True
+            _seen = seen
+        # Recurse into every nested statement/value slot (if / repeat / while /
+        # forever bodies all hang off `inputs`), then along the chain.
+        inputs = block.get('inputs')
+        if isinstance(inputs, dict):
+            for slot in inputs.values():
+                if not isinstance(slot, dict):
+                    continue
+                for key in ('block', 'shadow'):
+                    if self._body_can_claim(slot.get(key), _depth + 1, _seen):
+                        return True
+        nxt = block.get('next')
+        if isinstance(nxt, dict):
+            return self._body_can_claim(nxt.get('block'), _depth + 1, _seen)
+        return False
 
     @staticmethod
     def _interruptible_wait(ctx, seconds: float) -> None:
@@ -1115,9 +1283,14 @@ class Interpreter:
         if self._next_block(block) is not None:
             try:
                 ctx.log(
+                    # IMPERSONAL register, like the ~26 other strings this
+                    # surface emits: „bis auf „Stopp" gedrückt wird", not „bis
+                    # du drückst". Both are fine German; the impersonal one is
+                    # the majority and is what a teacher reading over a
+                    # shoulder expects.
                     '[WARNUNG] Blöcke unter „wiederhole fortlaufend" werden nie '
-                    'ausgeführt — die Schleife läuft, bis du auf „Stopp" '
-                    'drückst. Bitte die Blöcke nach OBEN oder IN die Schleife '
+                    'ausgeführt — die Schleife läuft, bis auf „Stopp" gedrückt '
+                    'wird. Bitte die Blöcke nach OBEN oder IN die Schleife '
                     'ziehen.'
                 )
             except Exception:
@@ -1212,13 +1385,16 @@ class Interpreter:
                 self._interruptible_wait(ctx, 0.2)
         finally:
             if released and motion_lock is not None:
-                # Bounded reacquire so the hat's `with motion_lock` __exit__ has
-                # something to release; a stuck lock raises a clear German error
-                # rather than hanging (matches _poll_until's audit fix #9).
-                if not motion_lock.acquire(timeout=10.0):
-                    raise WorkflowError(
-                        'Bewegung-Sperre konnte nicht zurückgewonnen werden.'
-                    )
+                # Restore the caller's invariant unconditionally. This was a
+                # bounded reacquire that RAISED „Bewegung-Sperre konnte nicht
+                # zurückgewonnen werden." past the bound, claiming to give the
+                # hat's outer release "something to release" — it gives it
+                # nothing, and the resulting `RuntimeError: cannot release
+                # un-acquired lock` escapes into `_run_hat_handler`'s OUTER
+                # bare `except Exception: return`: hat dead, no message, run
+                # green. It also masked an in-flight Stop. See
+                # motion._reacquire_after_release.
+                _reacquire_after_release(ctx)
 
     def _exec_for(
         self,
@@ -1237,7 +1413,11 @@ class Interpreter:
         end = self._number_or(self._eval_value(self._get_input_block(block, 'TO'), ctx), 0.0)
         step = self._number_or(self._eval_value(self._get_input_block(block, 'BY'), ctx), 1.0)
         if step == 0:
-            raise InterpreterError('Schrittweite 0 ist ungültig.')
+            # Name the FIX, not only the fault. „ungleich 0", not „größer als
+            # 0": a negative step is legal and counts down.
+            raise InterpreterError(
+                'Schrittweite 0 ist ungültig — bitte eine Schrittweite '
+                'ungleich 0 wählen.')
         # A non-finite step makes both loop conditions false, so the loop would
         # run ZERO times and report success — the same silent-wrong-answer class
         # the `or` trap above produced. Fail loud instead.
@@ -1286,11 +1466,68 @@ class Interpreter:
 
     def _exec_variables_set(self, block: dict[str, Any], ctx) -> None:
         var_name = self._read_variable_name(block, 'VAR')
-        if var_name is None:
+        # TRUTHINESS, not `is None`. `_read_variable_name` ends
+        # `if isinstance(value, str): return value`, so a bare-string field
+        # `{"VAR": ""}` yields '' and framed as `[VAR:=5]` — which matches
+        # NEITHER React regex (`[^=]+` needs ≥1 char), falls through
+        # `interceptToken` and is rendered VERBATIM in the student's Protokoll.
+        # The two neighbouring call sites (`controls_for`, `controls_forEach`)
+        # were already truthiness-guarded (`… or 'i'`); these two were the odd
+        # ones out. `.strip()` makes the server agree with React's
+        # `isDisplayableVariableName`, which already refuses whitespace-only —
+        # that half is consistency, not a bug fix (a blank-name frame is
+        # consumed silently there).
+        if not var_name or not var_name.strip():
             raise InterpreterError('Variable hat keinen Namen.')
         value_block = self._get_input_block(block, 'VALUE')
         value = self._eval_value(value_block, ctx) if value_block else None
         self._set_variable(ctx, var_name, value)
+
+    # The characters that cannot survive the `[VAR:name=json]` frame, and the
+    # one place that still holds the WHOLE name.
+    #
+    # React captures the name with `^\[VAR:([^=]+)=(.*)\]$`, so a name
+    # containing `=` RE-SPLITS the frame: measured end to end through the real
+    # hook and the real reducer, a variable „mein Wert=2" set to 5 emits
+    # `[VAR:mein Wert=2=5.0]`, which parses as name „mein Wert", value „2=5.0" —
+    # the panel grows a row the student never created and, if a real „mein Wert"
+    # exists, its value is SILENTLY CLOBBERED, with nothing in the Protokoll to
+    # say so. `variableName.js`'s `=` refusal cannot catch that: by the time it
+    # runs, `[^=]+` has already cut the name.
+    #
+    # SPLITTING ON THE LAST `=` LIKE `[CNT:]` IS REFUSED, and this must stay
+    # written down: the `[VAR:]` value is JSON and can legitimately contain `=`
+    # inside a string (`setze x auf "a=b"` → `[VAR:x="a=b"]`). `[CNT:]`'s value
+    # is DIGITS-ONLY, which is the entire reason last-`=` is unambiguous there.
+    # The two frames may never be harmonised.
+    #
+    # `[` and `]` are the frame's own delimiters and go with it. Blockly 12.5.1
+    # permits all three in a variable name (`Variables.promptName`'s whole
+    # normalization is `replace(/[\s\xa0]+/g,' ').trim()`), so „x=5" is
+    # editor-reachable and a plausible beginner name.
+    _UNSHOWABLE_NAME_CHARS = '=[]'
+
+    def _warn_unshowable_variable_once(self, ctx, name: str) -> None:
+        """One German [WARNUNG] per NAME per run — a loop would otherwise flood.
+
+        A wrong row becomes an EXPLAINED ABSENCE. The program is unaffected: the
+        variable itself is stored and readable, only the panel cannot show it.
+        """
+        try:
+            seen = getattr(ctx, '_unshowable_var_warned', None)
+            if seen is None:
+                seen = set()
+                ctx._unshowable_var_warned = seen
+            if name in seen:
+                return
+            seen.add(name)
+            ctx.log(
+                f'[WARNUNG] Die Variable „{name}" kann in der Variablen-Tafel '
+                'nicht angezeigt werden — die Zeichen = [ ] sind im Namen nicht '
+                'erlaubt. Das Programm läuft normal weiter.'
+            )
+        except Exception:  # noqa: BLE001 — observability never breaks a run
+            pass
 
     def _set_variable(self, ctx, name: str, value: Any) -> None:
         # Audit §A1: serialize all variable writes via ctx.var_lock so
@@ -1312,6 +1549,13 @@ class Interpreter:
             # over the entire object before the char cap was applied, so a
             # 10-million-element list cost 0.74 s and ~268 MB RSS to produce
             # 2000 characters — on the ROS node's own thread.
+            if any(c in name for c in self._UNSHOWABLE_NAME_CHARS):
+                # See _UNSHOWABLE_NAME_CHARS. This is the only layer that still
+                # holds the whole name, so the refusal belongs here; the React
+                # gate stays exactly as it is, as honest defence-in-depth
+                # against an untrusted wire rather than the primary defence.
+                self._warn_unshowable_variable_once(ctx, name)
+                return
             payload = json.dumps(_jsonable(value, _MAX_VAR_PAYLOAD_ITEMS))
             if len(payload) > _MAX_VAR_PAYLOAD_CHARS:
                 payload = payload[:_MAX_VAR_PAYLOAD_CHARS] + ' …'
@@ -1368,9 +1612,7 @@ class Interpreter:
         # land on an element that exists.
         upper = len(target) if inserting else len(target) - 1
         if idx < 0 or idx > upper:
-            raise InterpreterError(
-                f'Listen-Index außerhalb der Grenzen (Länge {len(target)}).'
-            )
+            raise InterpreterError(_list_index_error_de(at, len(target)))
         if inserting:
             target.insert(idx, value)
         else:
@@ -1391,27 +1633,46 @@ class Interpreter:
         ctx,
         statement: bool = False,
     ) -> Any:
+        # ALL THREE REFUSALS FIRE IN BOTH FORMS. They used to be gated on
+        # ``statement``, so „setze Element 9" of a 2-element list was RED and
+        # „hole Element 9" was GREEN with a blank Protokoll line — same block
+        # family, same lesson, opposite answers — and the resulting ``None``
+        # then propagated (`setze x auf hole Element 9` leaves x = None) so the
+        # error surfaced later, somewhere unrelated. Blockly lists are 1-BASED,
+        # which makes „hole Element 4" of a three-element list the single most
+        # likely list mistake a twelve-year-old makes.
+        #
+        # THIS DOES NOT TOUCH THE PARKED-BLOCK RULE. „EXACTLY TWO things are
+        # skipped silently … a DISABLED block and a PARKED value block" still
+        # holds: a parked block never reaches this function at all —
+        # ``_exec_block``'s ladder gates the statement route on
+        # ``_is_list_get_statement`` and every other mode falls through to the
+        # ``_BUILTIN_VALUE_TYPES`` skip, which contains this type. An empty
+        # SOCKET inside a LIVE chain is a different thing from a parked BLOCK,
+        # and the round already refused one („Beim Vergleich fehlt ein Wert").
+        #
+        # Blockly's own generated Python is ``L[i]``, which raises IndexError,
+        # so raising is PARITY with the code the student sees in the Code panel;
+        # returning None was the divergence.
+        # The block NAMES itself: in its statement form the student dragged
+        # „entferne Element", in its value form „hole Element".
+        block_de = 'entferne Element' if statement else 'hole Element'
         target = self._eval_value(self._get_input_block(block, 'VALUE'), ctx)
         if not isinstance(target, list):
-            if statement:
-                raise InterpreterError('Entferne-Element-Block hat keine Liste.')
-            return None
+            raise InterpreterError(
+                f'„{block_de}" braucht eine Liste — bitte eine Liste in den '
+                'Sockel ziehen.')
         fields = block.get('fields') or {}
         mode = fields.get('MODE', 'GET')
         where = fields.get('WHERE', 'FROM_START')
         at_block = self._get_input_block(block, 'AT')
         at = int(self._eval_value(at_block, ctx) or 0) if at_block else 0
         if not target:
-            if statement:
-                raise InterpreterError('Liste ist leer.')
-            return None
+            raise InterpreterError(
+                f'Die Liste ist leer — „{block_de}" findet nichts.')
         idx = self._resolve_index(target, where, at)
         if idx < 0 or idx >= len(target):
-            if statement:
-                raise InterpreterError(
-                    f'Listen-Index außerhalb der Grenzen (Länge {len(target)}).'
-                )
-            return None
+            raise InterpreterError(_list_index_error_de(at, len(target)))
         # GET_REMOVE and REMOVE both MUTATE — Blockly generates `L.pop(i)` for
         # each. GET_REMOVE used to return the item and leave the list untouched,
         # so „entferne und hole" silently behaved as a plain „hole" and a loop
@@ -1438,7 +1699,8 @@ class Interpreter:
         text (or nothing yet) counts as 0 rather than raising.
         """
         var_name = self._read_variable_name(block, 'VAR')
-        if var_name is None:
+        # See _exec_variables_set: truthiness, not `is None`.
+        if not var_name or not var_name.strip():
             raise InterpreterError('Variable hat keinen Namen.')
         delta = self._number_or(
             self._eval_value(self._get_input_block(block, 'DELTA'), ctx), 0.0)
@@ -2151,6 +2413,24 @@ class Interpreter:
         return str(value)
 
 
+def _list_index_error_de(at: Any, length: int) -> str:
+    """ONE out-of-range sentence, for „hole Element" AND „setze Element".
+
+    It replaces „Listen-Index außerhalb der Grenzen (Länge 2)." — „Index",
+    „Grenzen" and a bare „(Länge 2)" are programmer German on a surface whose
+    blocks say „Element" and „Liste", and a student reads it and learns nothing
+    about what to change. The last sentence is the part that actually teaches:
+    Blockly lists are 1-based, and the off-by-one is the mistake that brought
+    them here. Shared so the two blocks cannot drift apart again — the drift IS
+    the finding."""
+    try:
+        which = int(at)
+    except (TypeError, ValueError):
+        which = at
+    return (f'Element {which} gibt es nicht — die Liste hat nur {length} '
+            'Elemente. Das erste Element ist Nummer 1.')
+
+
 def _jsonable(value: Any, budget: int = _MAX_VAR_PAYLOAD_ITEMS) -> Any:
     """Best-effort conversion of an arbitrary block-runtime value to a
     JSON-serializable shape for the [VAR:..] sentinel.
@@ -2170,4 +2450,23 @@ def _jsonable(value: Any, budget: int = _MAX_VAR_PAYLOAD_ITEMS) -> Any:
     if isinstance(value, dict):
         items = list(value.items())[:budget]
         return {str(k): _jsonable(v, budget) for k, v in items}
-    return repr(value)
+    # An unknown object reaching a STUDENT surface must be rendered the way the
+    # student surface renders it. `output._student_text` already knows what a
+    # Greifziel is — „Greifziel (Marker 22) bei x=0,158 m, y=-0,050 m,
+    # z=0,015 m" — while `repr()` printed the raw dataclass:
+    # `Detection(centroid_px=(267, 305), bbox_px=…, corners_px=array([[…]]),
+    # extras={…})`, capped only by _MAX_VAR_PAYLOAD_CHARS. That is the FIRST
+    # content the Variablen-Tafel shows for the split-grasp idiom the block
+    # tooltip prescribes, every loop pass. Two stringifiers for student-visible
+    # values, and only one of them knew what a Greifziel was.
+    #
+    # LAZILY imported: output.py imports Interpreter for its own fallback, so a
+    # module-level import here closes the cycle (the house style already uses a
+    # lazy import for exactly this shape — see trajectory.py → path_guard).
+    # `_student_text`'s own fallback is `Interpreter._to_text`, so every
+    # NON-Greifziel object renders exactly as it did.
+    try:
+        from physical_ai_server.workflow.handlers.output import _student_text
+        return _student_text(value)
+    except Exception:  # noqa: BLE001 — observability never breaks a run
+        return repr(value)

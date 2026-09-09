@@ -56,7 +56,8 @@ def _sim_ctx(objects, profile_id=_EDU6):
         board_table_z=None, z_table=None,
         get_scene_frame=lambda: np.zeros((1, 1, 3), dtype=np.uint8),
         get_scene_frame_age=lambda: 0.0,
-        claimed_tags=set(), skipped_tags=set(), absent_since={}, claim_lock=None,
+        claimed_tags=set(), skipped_tags=set(), claim_lock=None,
+        claim_anchor={}, claim_pick_xy={}, claim_unseen=set(),
         emit_detections=lambda _d: None,
         should_stop=lambda: False,
         motion_lock=None,
@@ -114,9 +115,15 @@ def test_nothing_found_is_distinguished_from_never_having_searched():
     assert str(nothing.value) != _GENERIC
 
     # (b) „finde" was NEVER called — the one case the generic message describes.
+    # G13: this is the PROGRAM-error half. The socket is empty and nothing
+    # explains why, so no further loop pass can ever fill it — a base
+    # WorkflowError that ends the run, NOT a GraspSkip the „Solange sichtbar"
+    # loop swallows. The MESSAGE is still byte-identical to before.
     fresh = _sim_ctx([])
-    with pytest.raises(GraspSkip) as never:
+    with pytest.raises(WorkflowError) as never:
         motion.move_above(fresh, {'ziel': None})
+    assert not isinstance(never.value, GraspSkip), (
+        'an unexplained empty socket must not be loop-swallowable')
     assert str(never.value) == _GENERIC, (
         'with no recorded reason the message must be byte-identical to before')
 
@@ -135,8 +142,11 @@ def test_a_successful_find_clears_a_stale_reason():
     ctx.claimed_tags.clear()
     assert pb.find_object(ctx, {'object_type': 'wuerfel'}) is not None
     assert ctx.last_find_failure is None
-    with pytest.raises(GraspSkip) as excinfo:
+    # G13: with the stale reason cleared there is nothing left to explain the
+    # empty socket, so this is the PROGRAM-error branch (base WorkflowError).
+    with pytest.raises(WorkflowError) as excinfo:
         motion.move_above(ctx, {'ziel': None})
+    assert not isinstance(excinfo.value, GraspSkip)
     assert str(excinfo.value) == _GENERIC
 
 

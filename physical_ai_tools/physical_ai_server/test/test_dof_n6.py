@@ -1574,7 +1574,6 @@ def test_grasp_object_refuses_instead_of_claiming_a_shoved_cube(_fast_place_paci
     ctx.get_scene_frame_age = lambda: 0.0
     ctx.claimed_tags = set()
     ctx.skipped_tags = set()
-    ctx.absent_since = {}
     ctx.claim_lock = None
 
     from physical_ai_server.workflow.handlers.motion import GraspSkip
@@ -1692,25 +1691,41 @@ def test_lift_still_lifts_on_the_omx_and_keeps_the_wrist(_fast_place_pacing):
         assert ctx.last_full_joints[5] == pytest.approx(motion.GRIPPER_CLOSED_RAD)
 
 
-def test_lift_still_refuses_a_pose_the_solver_cannot_reproduce():
-    """The one piece of the old ``_solve_grasp_and_approach`` call that MUST
-    survive the F2 refactor: step 1 re-solved the CURRENT pose, and that is what
-    refuses a lift from a pose outside the strict-vertical family (a jog or replay
-    can leave the arm in one) or below the table.
+def test_lift_from_an_unsolvable_pose_warns_instead_of_blaming_the_object():
+    """„hebe an" from a pose the strict-vertical solver cannot reproduce is a
+    NO-OP with a German warning — it is not an error, and it is certainly not the
+    object's fault.
 
-    Nothing in the suite covered it before — a mutation run swapping
-    ``_solve_or_raise`` for ``_try_solve`` here survived, so the refusal would have
-    silently become a no-op."""
+    It used to raise ``_solve_or_raise``'s „Position außerhalb des
+    Arbeitsbereichs — bitte das Objekt in den markierten Greifbereich legen",
+    which HARD-ABORTS the run and blames an object for the ARM's pose. Both
+    Feetech HOMEs are deliberately outside the solver's image, so that is what a
+    student got for „Heimposition" → „hebe an". Measured 2026-09-07:
+
+        omx_full     fk(HOME) = [0.1582, −0.0016, 0.1390]  solve ok    lift OK
+        edu6_studio  fk(HOME) = [0.0499,  0.0000, 0.4545]  solve None  lift ERROR
+        edu1_studio  fk(HOME) = [0.0181,  0.0000, 0.5193]  solve None  lift ERROR
+
+    reached by home→lift, replay→lift, open_gripper→lift, wait→lift and every
+    ordering where „hebe an" precedes „fahre über"/„senke auf" — 44 of 120
+    orderings per arm. A lift the arm cannot compute is the same verdict as the
+    „already as high as it goes" branch: say so, publish nothing, keep going.
+
+    The table-floor half of the old call is UNCHANGED and still RAISES — that one
+    is a genuine Rule §2 refusal and is asserted below."""
     ctx = _edu6_grasp_ctx()
     # Reached by a jog/replay: a non-vertical pose whose TCP (0.281, 0, 0.110) the
     # strict-vertical solver cannot reproduce.
     ctx.last_full_joints = [0.0, 1.0, -1.0, 0.0, 0.5, 0.0, 1.0]
     assert ctx.ik.solve((0.2814, 0.0, 0.1099)) is None, 'premise'
-    with pytest.raises(WorkflowError) as excinfo:
-        motion.lift(ctx, {})
-    assert 'außerhalb des Arbeitsbereichs' in str(excinfo.value)
-    assert ctx.published == []
-    # ...and the table floor still refuses too.
+    motion.lift(ctx, {})
+    assert ctx.published == [], 'a lift it cannot compute must not move the arm'
+    assert any('hebe an' in m and 'senkrecht nach oben' in m for m in ctx.logs), (
+        f'expected the German no-op warning, got {ctx.logs}')
+    assert not any('Greifbereich' in m for m in ctx.logs), (
+        'the message must not blame the object')
+
+    # ...and the table floor still REFUSES, loudly.
     below = _edu6_grasp_ctx()
     below.z_table = 0.30
     below.last_full_joints = list(below.ik.solve(
@@ -1719,6 +1734,7 @@ def test_lift_still_refuses_a_pose_the_solver_cannot_reproduce():
     with pytest.raises(WorkflowError) as excinfo:
         motion.lift(below, {})
     assert 'Tischebene' in str(excinfo.value)
+    assert below.published == []
 
 
 def test_lift_never_raises_the_grasp_clearance_refusal():

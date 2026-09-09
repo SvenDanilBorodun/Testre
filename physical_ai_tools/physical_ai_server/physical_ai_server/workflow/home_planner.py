@@ -205,18 +205,32 @@ def _floor_fn(ctx):
     return _at
 
 
+def _floor_ok(geom, q_from, q_to, floor_fn, allowance: float) -> bool:
+    """True when the straight line ``q_from → q_to`` clears the floor allowance.
+    Geometry the model cannot judge (``None``) is NOT-OK: an unknown is never
+    silently an approval on a safety check."""
+    clearance = geom.swept_floor_clearance(q_from, q_to, floor_fn)
+    return clearance is not None and clearance >= allowance
+
+
+def _zone_ok(ctx, q_from, q_to) -> bool:
+    """True when the straight line sweeps no Sperrzone (or there are none)."""
+    from physical_ai_server.workflow import path_guard as _pg
+    zones = getattr(ctx, 'zones', None)
+    if not zones:
+        return True
+    return not _pg.segment_blocked(ctx.ik, q_from, q_to, zones)
+
+
 def _leg_ok(geom, ctx, q_from, q_to, floor_fn, allowance: float) -> bool:
     """True when the straight line ``q_from → q_to`` clears the floor allowance
-    AND no Sperrzone. Geometry the model cannot judge (``None``) is treated as
-    NOT-OK: an unknown is never silently an approval on a safety check."""
-    from physical_ai_server.workflow import path_guard as _pg
-    clearance = geom.swept_floor_clearance(q_from, q_to, floor_fn)
-    if clearance is None or clearance < allowance:
-        return False
-    zones = getattr(ctx, 'zones', None)
-    if zones and _pg.segment_blocked(ctx.ik, q_from, q_to, zones):
-        return False
-    return True
+    AND no Sperrzone.
+
+    Kept as one predicate for the VIA SEARCH, which needs "is this leg usable"
+    and does not care why. ``plan_home_route`` asks the two halves separately —
+    see the L0/L0b split there for why conflating them was a defect."""
+    return (_floor_ok(geom, q_from, q_to, floor_fn, allowance)
+            and _zone_ok(ctx, q_from, q_to))
 
 
 def _via_candidates(ctx, q_start, home_arm, geom, floor_fn,
@@ -304,9 +318,72 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float) -> list:
     allowance = -FLOOR_TOL_M
 
     # L0 — direct. The 98 % case, and the one the measurements say to keep.
-    if _leg_ok(geom, ctx, q_start, q_home_full, floor_fn, allowance):
+    floor_direct = _floor_ok(geom, q_start, q_home_full, floor_fn, allowance)
+    zone_direct = _zone_ok(ctx, q_start, q_home_full)
+    if floor_direct and zone_direct:
         _warn_self_collision(ctx, geom, direct)
         return direct
+
+    # L0b — the direct line is fine over the TABLE and blocked only by a
+    # SPERRZONE. That is path_guard's job, not this module's, and handing it
+    # over is what makes the Sperrzone reroute reachable from „Heimposition" at
+    # all.
+    #
+    # ``_leg_ok`` returned a single bool for two different causes, and rung L3
+    # then raised only ``_FLOOR_REFUSAL_DE`` — so a zone-blocked home refused
+    # with „Der Arm steht so, dass der Weg in die Grundstellung durch die
+    # Tischebene führen würde. Bitte den Arm mit der Handführung ein Stück
+    # anheben…", about a table that was never in the way, and told the student
+    # to hand-guide the arm, which cannot fix a keep-out box. And because
+    # ``plan_home_route`` hands ``safe_move`` PRE-CERTIFIED legs, path_guard's
+    # lift-and-travel / base-swing ladder was unreachable from home on every
+    # profile with box geometry. Measured 2026-09-07 over 25 path-only blocking
+    # zones per arm (zone on the line, neither endpoint statically inside):
+    #
+    #   profile        plan_safe_route routed   home REFUSED   routed BUT home refused
+    #   omx_full             10 / 25                 0                  0
+    #   edu6_studio          14 / 25                20                 11
+    #   edu1_studio          19 / 25                14                  9
+    #
+    # — 11 and 9 cases per arm where a safe route provably existed and the
+    # student was told to lift the arm instead. omx_full is unaffected either
+    # way (``resolve_geometry`` → None short-circuits above), which is why this
+    # never showed on the OMX.
+    #
+    # THE ABSOLUTE COUNTS ABOVE ARE NOT REPRODUCIBLE and should not be quoted as
+    # if they were: an independent sweep on 2026-09-08 following the stated
+    # protocol got 24/25 · 25/25 · 25/25 routed and 0/15/6 routed-but-refused.
+    # The gap is entirely the zone-SAMPLING DISTRIBUTION (position, size,
+    # height), which this comment never recorded. What both sweeps agree on —
+    # and what the change rests on — is the DIRECTION and the SHAPE: a
+    # substantial per-arm population of zone-blocked homes that path_guard can
+    # route and the old code refused, zero on omx_full, none in the other
+    # direction. Re-derive the counts with your own distribution, stated, or
+    # cite only the shape.
+    #
+    # The floor guard is NOT weakened: every leg path_guard returns is re-checked
+    # against the SAME floor allowance, and a route that fails it falls through
+    # to the existing via search exactly as before.
+    if floor_direct and not zone_direct:
+        from physical_ai_server.workflow import path_guard as _pg
+        zones = getattr(ctx, 'zones', None)
+        try:
+            legs = _pg.plan_safe_route(ctx, q_start, q_home_full, zones,
+                                       duration_s)
+        except _m.WorkflowError as zone_refusal:
+            # path_guard's own German message names the Sperrzone (and its
+            # inflated size). Re-raise it rather than the floor message: the
+            # table is provably not the obstacle here.
+            raise zone_refusal
+        if all(_floor_ok(geom, a, b, floor_fn, allowance) for a, b, _d in legs):
+            _warn_self_collision(ctx, geom, legs)
+            log = getattr(ctx, 'log', None)
+            if callable(log):
+                log('[WARNUNG] Sperrzone auf dem Weg in die Grundstellung — '
+                    'der Arm fährt eine Ausweichroute.')
+            return legs
+        # The reroute would press the table: fall through to the via search,
+        # which judges BOTH causes together.
 
     # L1 — lift over a searched via, then direct from there.
     n = ctx.ik.num_joints()
@@ -338,5 +415,12 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float) -> list:
                 'Tischebene führen — der Arm wird zuerst angehoben.')
         return legs
 
-    # L3 — refuse, naming the remedy that actually works.
+    # L3 — refuse, naming the remedy that actually works. When the DIRECT line
+    # was fine over the table and only a Sperrzone blocked it, the floor remedy
+    # (hand-guide the arm up) is the wrong advice — say what is actually in the
+    # way. path_guard owns that wording, including the inflated-size sentence.
+    if floor_direct and not zone_direct:
+        from physical_ai_server.workflow import path_guard as _pg
+        raise _m.WorkflowError(_pg._refusal_message(
+            getattr(ctx, 'zones', None), _pg.ZONE_MARGIN_M, _pg.LINK_RADIUS_M))
     raise _m.WorkflowError(_FLOOR_REFUSAL_DE)

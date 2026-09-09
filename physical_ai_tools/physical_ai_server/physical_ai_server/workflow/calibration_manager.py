@@ -230,10 +230,13 @@ SCENE_EXTRINSIC_REGION_Y_ABS = _safe_float_env('EDUBOTICS_EXTRINSIC_REGION_Y_ABS
 # captures per accepted one at 3 taps against 0.25 at 4.
 #
 # A repeated tap at the same spot is harmless and was checked, not assumed: an
-# exact duplicate 4th tap still yields rms mean 1.1978 mm (the two copies carry
-# independent tap noise, so the fit cannot interpolate both) and actually LOWERS
-# the plane error at the object (SD 3.54 mm vs 3.91 mm for a spread 4th tap),
-# so no minimum-separation gate is needed.
+# exact duplicate 4th tap still yields rms mean 1.1978 mm (an independent re-run
+# measured 1.1912) — the two copies carry independent tap noise, so the fit
+# cannot interpolate both — and that is what the "no minimum-separation gate
+# needed" conclusion rests on. (An earlier revision also claimed the duplicate
+# LOWERS the plane error at the object, 3.54 vs 3.91 mm; a re-draw measured the
+# opposite sign, 5.60 vs 5.19. Two draws disagreeing on the SIGN means the
+# effect is noise, nothing depends on it, and the sentence is gone.)
 TABLE_TOUCH_POINTS_REQUIRED = 4
 TABLE_TOUCH_MAX_RESIDUAL_M = 0.008      # 8 mm — points must lie on one plane
 TABLE_TOUCH_MIN_SPREAD_M = 0.06         # the xy points must span >= 6 cm (radius)
@@ -248,19 +251,30 @@ TABLE_TOUCH_MIN_MINOR_M = 0.015         # >= 1.5 cm spread off the dominant line
 # MIN POINTS. A 2D similarity has 4 DOF, so two point pairs give 4 equations for
 # 4 unknowns: the fit is EXACTLY determined and its residual is zero for ANY
 # input, which made the reported "Restfehler Ø 0.0 mm" a quality number that
-# could not fail. Measured 2026-09-07: over 500 pairs of COMPLETELY RANDOM,
-# unrelated 2-point sets, 249 were accepted and the worst reported residual was
-# 0.000000 mm. At n=3 the residual becomes informative (6 equations, 4 unknowns):
-# the same random draw gave a mean of 97.2 mm and a MINIMUM of 7.7 mm over 200
-# sets. n=2 is also rank-1 in the Umeyama covariance, which makes the reflection
-# test a coin flip — the pairing truth==detected (a PERFECT capture) was refused
-# as an "Achsen-/Spiegelungsfehler" for [[0.20,0.02],[0.02,0.20]] while passing
-# for [[0.1,0.0],[0.0,0.1]]. So three is the smallest honest count.
-# Independently re-measured 2026-09-08 against the pre-fix code on fresh seeds:
-# 258/500 accepted at n=2 (10 further seeds averaged 239.8/500 = 48 %), worst
-# accepted residual still 0.000000 mm; 246/500 PERFECT 2-point captures refused
-# as a mirror against 0/500 at n=3; random 3-point sets bottomed out at 9.8 mm.
-# Different seeds, same conclusion — the numbers above are not second-hand.
+# could not fail.
+#
+# THE EXACT HALF, and it is the load-bearing one: over 500 pairs of COMPLETELY
+# RANDOM, unrelated 2-point sets the worst ACCEPTED residual is
+# **0.000000 mm in every draw**. No residual gate can ever catch this — only the
+# point count can.
+#
+# THE SEED- AND LAYOUT-DEPENDENT half, stated as the distribution it is. Roughly
+# HALF of those random 2-point sets are accepted: three independent draws gave
+# 249, 258 and 242 of 500 (a further 10 seeds averaged 239.8 = 48 %). Perfect
+# 2-point captures refused as a mirror: 246 and 257 of 500 in two draws — and at
+# n=3 that is 0/500, exact in both. Do not "correct" these integers with a
+# fourth draw: the quantity depends on the layout the sampler draws from, which
+# none of the draws states, so a single integer would be false precision.
+#
+# n=2 is also rank-1 in the Umeyama covariance, which makes the reflection test a
+# coin flip — the pairing truth==detected (a PERFECT capture) was refused as an
+# "Achsen-/Spiegelungsfehler" for [[0.20,0.02],[0.02,0.20]] while passing for
+# [[0.1,0.0],[0.0,0.1]]. So three is the smallest honest count. At n=3 the
+# residual becomes informative (6 equations, 4 unknowns): the same random draw
+# gave a mean of 42–97 mm and a minimum of 3.4–9.8 mm over 200 sets across two
+# draws. That is a DISTRIBUTION, not a floor — an earlier revision of this
+# comment quoted „bottomed out at 9.8 mm" as if it were a bound, and an
+# independent re-draw measured 3.4 mm.
 # This costs no UI path: AccuracyVerifyStep.jsx already enables "Lösen" only at
 # MIN_POINTS = 4, so n<3 was reachable only by a hand-made rosbridge call.
 VERIFY_MIN_POINTS = 3
@@ -1624,10 +1638,10 @@ class CalibrationManager:
             # VERIFY_MIN_POINTS for the measurement.
             return {
                 'ok': False,
-                'message': ('Mindestens drei Referenzpunkte werden benötigt — '
-                            'mit zwei Punkten lässt sich die Genauigkeit nicht '
-                            'prüfen (der Restfehler wäre immer 0 mm). Empfohlen '
-                            'sind 4–6 gut verteilte Punkte.'),
+                'message': (f'Mindestens {VERIFY_MIN_POINTS} Prüfpunkte werden '
+                            'benötigt — mit zwei Punkten lässt sich die '
+                            'Genauigkeit nicht prüfen (der Restfehler wäre immer '
+                            '0 mm). Empfohlen sind 4–6 gut verteilte Punkte.'),
                 'xy_correction': None, 'yaw_bias_rad': 0.0,
                 'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,
                 'mirror_detected': False, 'point_count': int(n),
@@ -1636,7 +1650,10 @@ class CalibrationManager:
         if fit is None:
             return {
                 'ok': False,
-                'message': ('Die Referenzpunkte sind entartet (alle gleich) — '
+                # „Prüfpunkte" everywhere on this step, not „Referenzpunkte":
+                # the student pressed „Genauigkeit prüfen", so that is their own
+                # word. („entartet" goes with it — programmer German.)
+                'message': ('Die Prüfpunkte liegen alle auf derselben Stelle — '
                             'bitte über die Arbeitsfläche verteilt erfassen.'),
                 'xy_correction': None, 'yaw_bias_rad': 0.0,
                 'residual_mm_mean': 0.0, 'residual_mm_max': 0.0,

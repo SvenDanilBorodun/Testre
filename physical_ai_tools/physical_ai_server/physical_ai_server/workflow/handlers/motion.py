@@ -266,13 +266,28 @@ GRASP_SETTLE_S = _clamped_settle_s(
 # split blocks, which command the recipe's own close. The physical backstop
 # either way is the servo current limit.
 #
-# ONE-VARIABLE ROLLBACK: ``EDUBOTICS_PICKUP_CLOSE_RAD`` pins the generic close
+# WHAT IT ACTUALLY MOVES — narrower than "the generic close for the whole rig",
+# which is what this said and which is not true of the block a student would
+# name first. `pickup_close_rad` is read by `_pickup_close`, and `_pickup_close`
+# has exactly TWO callers: „aufnehmen" (`_execute_pickup`) and
+# `close_on_object`'s FALLBACK for a missing/malformed/out-of-band catalog
+# angle. „schließe Greifer" (`close_gripper`) commands `_gripper_closed(ctx)`
+# unconditionally and writes THAT into `ctx.last_commanded_close_rad`, so a rig
+# opted into the bounded squeeze gets a bounded „aufnehmen" and an unchanged
+# full-stall „schließe Greifer" — deliberate (an explicit „schließe Greifer" is
+# a command, not a guess about an object) but easy to read the other way.
+#
+# ONE-VARIABLE ROLLBACK: ``EDUBOTICS_PICKUP_CLOSE_RAD`` pins that generic close
 # for the whole rig. A rig runs exactly one profile, so setting it to that
 # profile's ``gripper_closed_rad`` (0 on both Feetech arms — the only arms whose
 # behaviour changes at all) restores the previous full close exactly. Empty /
 # whitespace counts as UNSET, because compose forwards it as `${…:-}` (the
 # EDUBOTICS_GRASP_HELD_MAX_RAD scar). env-forwarding-guard: forwarded in
 # robotis_ai_setup/docker/docker-compose.yml + docker-compose.opi.yml.
+#
+# A value OUTSIDE the running profile's band is USED, and the operator is told
+# once per run — see `_warn_gripper_knob_out_of_band` for why clamping would be
+# the wrong answer on this pair of knobs.
 PICKUP_CLOSE_RAD = _safe_float('EDUBOTICS_PICKUP_CLOSE_RAD', float('nan'))
 
 
@@ -331,6 +346,9 @@ def _pickup_close(ctx) -> float:
     block comment for the measurement and the rollback. Never returns a
     non-finite value."""
     if _pickup_close_env_override_set() and math.isfinite(PICKUP_CLOSE_RAD):
+        _warn_gripper_knob_out_of_band(
+            ctx, 'EDUBOTICS_PICKUP_CLOSE_RAD', PICKUP_CLOSE_RAD,
+            'Der eingestellte Greif-Winkel')
         return PICKUP_CLOSE_RAD
     val = getattr(ctx, 'pickup_close_rad', None)
     if val is None:
@@ -580,6 +598,59 @@ def _grasp_held_max(ctx) -> float:
         # No profile geometry on this ctx → the historical OMX constant.
         return GRASP_HELD_MAX_RAD
     return _gripper_closed(ctx) + _grasp_held_margin(ctx)
+
+
+# Rule §2 surface, and the answer is WARN, never CLAMP.
+#
+# `EDUBOTICS_PICKUP_CLOSE_RAD` and `EDUBOTICS_GRASP_HELD_MAX_RAD` are both
+# operator knobs that reach the published trajectory's gripper column / the
+# HELD decision, and both were guarded by `math.isfinite` alone. Measured:
+# `EDUBOTICS_PICKUP_CLOSE_RAD=5.0` on an edu6 (band 0.00..1.75) commands 5.0,
+# and `=-9.0` commands −9.0; the shipped `GRASP_HELD_MAX_RAD` default of −0.35
+# sits BELOW the whole Feetech band, so with the env set „Greifer hält etwas?"
+# answers TRUE for every readable angle.
+#
+# CLAMPING IS THE WRONG ANSWER HERE and this comment exists so nobody "fixes" it
+# into one. `EDUBOTICS_GRASP_HELD_MAX_RAD` EXISTS to restore an out-of-band
+# constant as the documented one-variable rollback (CLAUDE.md: "Setting … to a
+# NUMBER restores the fixed global threshold everywhere"); clamping it into the
+# band would silently disable the very rollback it is, and refusing it would
+# too. So the value is used verbatim and the operator is TOLD, once per run.
+#
+# This is deliberately NOT `close_on_object`'s treatment of a CATALOG value: a
+# catalog number has a documented fallback (the generic close) and no rollback
+# meaning, so there the out-of-band branch warns AND falls back. Same warning
+# shape, different second half, because the two values mean different things.
+_GRIPPER_KNOB_OUT_OF_BAND_DE = (
+    '[WARNUNG] {was} ({env} = {value:.2f}) liegt außerhalb des '
+    'Greifer-Bereichs dieses Roboters ({lo:.2f} bis {hi:.2f}). {folge}'
+    'Der Wert wird trotzdem benutzt — das Programm läuft normal weiter.'
+)
+
+
+def _warn_gripper_knob_out_of_band(ctx, env: str, value: float, was: str,
+                                   folge: str = '') -> None:
+    """Emit ONE German ``[WARNUNG]`` per run when an operator gripper knob sits
+    outside the running profile's physical band. Never changes the value."""
+    if not math.isfinite(value):
+        return
+    lo = min(_gripper_closed(ctx), _gripper_open(ctx))
+    hi = max(_gripper_closed(ctx), _gripper_open(ctx))
+    if lo <= value <= hi:
+        return
+    # Once per run: a „Solange sichtbar" loop asks for the close and the HELD
+    # threshold on every pass, and a warning repeated forty times reads as forty
+    # faults. `_output_rate_state` sets the precedent for un-locked per-run
+    # bookkeeping on the ctx; a lost race here costs one duplicate line.
+    seen = getattr(ctx, 'gripper_knob_warned', None)
+    if seen is not None:
+        if env in seen:
+            return
+        seen.add(env)
+    log = getattr(ctx, 'log', None)
+    if callable(log):
+        log(_GRIPPER_KNOB_OUT_OF_BAND_DE.format(
+            was=was, env=env, value=value, lo=lo, hi=hi, folge=folge))
 
 
 def _velocity_limit(ctx) -> float:
@@ -2076,6 +2147,11 @@ def _held_threshold_rad(ctx) -> float:
     therefore reported HELD for every reading on edu6/edu1 (see
     :func:`_grasp_held_max` for the measurement)."""
     if _grasp_held_env_override_set():
+        _warn_gripper_knob_out_of_band(
+            ctx, 'EDUBOTICS_GRASP_HELD_MAX_RAD', GRASP_HELD_MAX_RAD,
+            'Die eingestellte Griff-Schwelle',
+            '„Greifer hält etwas?" kann damit nicht mehr zwischen Griff und '
+            'Fehlgriff unterscheiden. ')
         return GRASP_HELD_MAX_RAD
     commanded = getattr(ctx, 'last_commanded_close_rad', None)
     if commanded is None:

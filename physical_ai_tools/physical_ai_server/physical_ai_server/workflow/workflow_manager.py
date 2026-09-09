@@ -248,6 +248,12 @@ class WorkflowContext:
     # case is slight OVER-emission, never a crash (individual dict ops are
     # atomic). A lock on every „melde" would cost more than the miscount.
     _output_rate_state: dict = field(default_factory=dict)
+    # Which operator gripper knobs have already been reported as out-of-band
+    # THIS RUN (motion._warn_gripper_knob_out_of_band). Declared rather than
+    # setattr'd on the fly: `ArmProfile.grasp_held_max_rad` was resolved from a
+    # ctx field that did not exist, so the branch never executed — a dead
+    # getattr is the failure mode this file has already paid for once.
+    gripper_knob_warned: set = field(default_factory=set)
     claim_pick_xy: dict = field(default_factory=dict)
     claim_unseen: set = field(default_factory=set)
     # Phase-4 no-go zones ("Sperrzonen"): a list of axis-aligned base-frame

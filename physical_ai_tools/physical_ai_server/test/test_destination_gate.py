@@ -22,8 +22,6 @@ symbol under test on both sides of the assertion.
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from physical_ai_server.workflow.handlers import destinations as dst
@@ -163,6 +161,3 @@ def test_a_padded_name_is_stored_under_the_key_the_block_uses():
     assert list(manager.get_destinations()) == ['Ablage']
     assert manager.get_destinations()['Ablage']['label'] == 'Ablage'
 
-
-def test_math_is_imported_for_the_non_finite_literals_above():
-    assert math.isnan(float('nan'))

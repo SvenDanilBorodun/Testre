@@ -161,7 +161,7 @@ def test_the_baked_field_no_longer_decides_anything_on_a_calibrated_rig():
 
 # ── the SERVICE carrier — a click that never runs the pin block ─────────────
 
-def test_a_service_pinned_destination_follows_a_later_touch_off(monkeypatch):
+def test_a_service_pinned_destination_follows_a_later_touch_off():
     """`_persisted_destinations` is written only by `set_destination` and never
     cleared, so a mid-session „Tisch vermessen" used to leave it stale."""
     mgr, arm, status = _manager({'z_table': 0.0, 'table_plane': _plane(11)})

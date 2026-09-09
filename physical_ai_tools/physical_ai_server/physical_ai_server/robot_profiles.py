@@ -197,17 +197,19 @@ class ArmProfile:
     # student-facing INSTRUCTION, not something any guard can enforce. False on
     # every parallel-jaw arm (OMX, edu6), where the tip height is constant.
     tool_tip_tracks_gripper: bool = False
-    grasp_held_margin_rad: Optional[float] = None   # None → motion 0.15
-    # HELD/MISS threshold used when NO gripper close has been commanded yet this
-    # run. ``None`` → motion._grasp_held_max derives
+    # The HELD/MISS threshold used when NO gripper close has been commanded yet
+    # this run is DERIVED from this margin — ``motion._grasp_held_max`` computes
     # ``gripper_closed_rad + grasp_held_margin_rad``, which is exactly −0.35 on
-    # the OMX (its historical module constant, byte-identical). Stated
-    # EXPLICITLY on the two Feetech profiles because the OMX constant sits BELOW
-    # their whole gripper band: with it, „Greifer hält etwas?" and „warte bis
-    # Greifer hält" were CONSTANT TRUE there — an empty full close read as a
-    # successful grasp on the only two profiles whose sole capability is
-    # Roboter Studio (measured 2026-09-07; see motion._grasp_held_max).
-    grasp_held_max_rad: Optional[float] = None
+    # the OMX (its historical module constant, byte-identical), 0.12 on edu6 and
+    # 0.10 on edu1. There WAS a `grasp_held_max_rad` field stating those two
+    # Feetech numbers outright; it was deleted 2026-09-09 because it had ZERO
+    # production readers (`motion._grasp_held_max` resolved it from
+    # ``ctx.grasp_held_max_rad`` and ``WorkflowContext`` has no such field, so
+    # every run already fell through to the derivation) and the derivation
+    # yields the identical number on all four profiles. Do not re-add it without
+    # ALSO stamping it onto the context — a second decorative field is how the
+    # first one got here.
+    grasp_held_margin_rad: Optional[float] = None   # None → motion 0.15
     # Gripper close angle for the OBJECT-AGNOSTIC „aufnehmen" block, which has
     # no catalog entry to consult. ``None`` → ``gripper_closed_rad``, the
     # arm's HARDWARE-closed angle — right on the OMX (where it IS the shipped
@@ -365,11 +367,10 @@ _EDU6_STUDIO = ArmProfile(
     reach_inner_m=0.09,
     reach_outer_m=0.21,
     gripper_mm_per_rad=25.2,
+    # 0.00 (closed) + 0.12 = 0.12 is the derived HELD/MISS fallback — the same
+    # rule the OMX's −0.35 follows, but inside THIS arm's 0.00…1.75 band, so an
+    # empty close (which reaches ≈0.00) reads as a MISS instead of as HELD.
     grasp_held_margin_rad=0.12,
-    # 0.00 (closed) + 0.12 (margin) — the same rule the OMX's −0.35 follows, but
-    # inside THIS arm's 0.00…1.75 band, so an empty close (which reaches ≈0.00)
-    # now reads as a MISS instead of as HELD.
-    grasp_held_max_rad=0.12,
     # pickup_close_rad is deliberately UNSET (→ gripper_closed_rad, the full
     # mechanical close). OWNER DECISION 2026-09-08, taken with the trade-off in
     # front of them and against the recommendation here.
@@ -502,10 +503,9 @@ _EDU1_STUDIO = ArmProfile(
     # claw CLOSED (rig gate E8) — this flag is what puts that sentence in front
     # of the student, and only on the arm it is true for.
     tool_tip_tracks_gripper=True,
+    # 0.00 (closed) + 0.10 = 0.10 derived, inside this arm's 0.00…0.90 band —
+    # same reason as the edu6's, same measurement.
     grasp_held_margin_rad=0.10,
-    # 0.00 (closed) + 0.10 (margin), inside this arm's 0.00…0.90 band — same
-    # reason as the edu6's, same measurement.
-    grasp_held_max_rad=0.10,
     # pickup_close_rad deliberately UNSET (→ gripper_closed_rad = the full close).
     # Same OWNER DECISION 2026-09-08 as the edu6 above; see that comment for the
     # reasoning. Here the 30 mm cube blocks the claw at ≈0.25 rad, so the unset

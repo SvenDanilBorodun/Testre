@@ -224,3 +224,53 @@ def test_the_once_per_run_state_is_a_REAL_WorkflowContext_field(monkeypatch):
         assert M._pickup_close(ctx) == 5.0
     assert len(lines) == 1, lines
     assert ctx.gripper_knob_warned == {'EDUBOTICS_PICKUP_CLOSE_RAD'}
+
+
+# ── the deleted ArmProfile.grasp_held_max_rad ──────────────────────────────
+# `docs/KNOWN-ISSUES.md`, second sub-bullet of the same round. The field (0.12
+# edu6, 0.10 edu1) had ZERO production readers: `_grasp_held_max` resolved it
+# from `ctx.grasp_held_max_rad` and `WorkflowContext` has no such field, so
+# every run already fell through to the derivation — which yields the IDENTICAL
+# number on all four profiles. It is gone; the derivation stays, pinned here
+# with literals so a silent drift is a failure and not a rename.
+
+def test_the_derived_fallback_is_the_number_each_arm_actually_used():
+    """Measured before AND after the deletion: identical on all four."""
+    import types as _t
+    from physical_ai_server import robot_profiles as rp
+
+    expected = {
+        'omx_full': -0.35,
+        'omx_follower': -0.35,
+        'edu6_studio': 0.12,
+        'edu1_studio': 0.10,
+    }
+    assert set(rp.ROBOT_PROFILES) == set(expected), (
+        'a profile was added or removed — give it a row here')
+    for pid, want in expected.items():
+        prof = rp.ROBOT_PROFILES[pid]
+        ctx = _t.SimpleNamespace(
+            gripper_closed_rad=prof.gripper_closed_rad,
+            gripper_open_rad=prof.gripper_open_rad,
+            grasp_held_margin_rad=prof.grasp_held_margin_rad)
+        assert M._grasp_held_max(ctx) == pytest.approx(want, abs=1e-12), pid
+
+
+def test_the_decorative_profile_field_is_gone_and_stays_gone():
+    """A field nothing reads is not a seam, it is a claim. Re-adding it needs a
+    matching `WorkflowContext` field in the same change — see the docstring of
+    `motion._grasp_held_max`."""
+    from physical_ai_server import robot_profiles as rp
+
+    for pid, prof in rp.ROBOT_PROFILES.items():
+        assert not hasattr(prof, 'grasp_held_max_rad'), pid
+
+
+def test_a_ctx_that_still_carries_the_old_attribute_is_ignored_not_obeyed():
+    """If the field ever comes back on a ctx WITHOUT the resolution rung, it
+    must not look like it works. The derivation wins."""
+    import types as _t
+    ctx = _t.SimpleNamespace(gripper_closed_rad=0.0, gripper_open_rad=1.75,
+                             grasp_held_margin_rad=0.12,
+                             grasp_held_max_rad=99.0)
+    assert M._grasp_held_max(ctx) == pytest.approx(0.12)

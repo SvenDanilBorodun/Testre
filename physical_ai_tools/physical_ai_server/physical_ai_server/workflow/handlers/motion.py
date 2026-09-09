@@ -569,30 +569,29 @@ def _grasp_held_max(ctx) -> float:
     ONLY capability is Roboter Studio, so the block was wrong on exactly the arms
     it is used on.
 
-    Resolution order:
+    Resolution order — TWO rungs, not three:
 
     1. an explicit ``EDUBOTICS_GRASP_HELD_MAX_RAD`` (the operator rollback /
        fixed global threshold) still wins everywhere — checked by the caller;
-    2. the profile's own ``grasp_held_max_rad`` when the ctx carries one
-       (``robot_profiles.ArmProfile.grasp_held_max_rad``);
-    3. otherwise DERIVED from fields the ctx already carries:
+    2. DERIVED from fields the ctx already carries:
        ``gripper_closed_rad + grasp_held_margin_rad`` — the same rule the
        per-object threshold uses for a full close. On the OMX that is
        −0.5 + 0.15 = −0.35 EXACTLY, so its behaviour is byte-identical; on edu6
        it is 0.12 and on edu1 0.10, both inside their band, which is what makes
        an empty close read as a MISS again.
 
+    There WAS a rung between them — ``ctx.grasp_held_max_rad``, fed by an
+    ``ArmProfile.grasp_held_max_rad`` field. It was DELETED 2026-09-09 because
+    it never executed: ``WorkflowContext`` has no such field and
+    ``workflow_manager.start()`` never stamped one, so every production run
+    already reached the derivation, which yields the IDENTICAL number on all
+    four profiles (0.00 + 0.12 on edu6, 0.00 + 0.10 on edu1). Re-adding the
+    lookup without ALSO declaring the ctx field would recreate a branch that
+    reads as coverage of a path that does not run.
+
     A ctx with no profile fields at all (every non-Roboter-Studio path, every
     plain test double) still lands on the OMX constants and therefore on −0.35.
     """
-    val = getattr(ctx, 'grasp_held_max_rad', None)
-    if val is not None:
-        try:
-            val = float(val)
-        except (TypeError, ValueError):
-            val = None
-        if val is not None and math.isfinite(val):
-            return val
     closed = getattr(ctx, 'gripper_closed_rad', None)
     if closed is None:
         # No profile geometry on this ctx → the historical OMX constant.

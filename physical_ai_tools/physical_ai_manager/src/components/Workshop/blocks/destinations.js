@@ -84,6 +84,35 @@ const NAME_MAX_LEN = 24;
 // whole word. Stripping '[' and ']' also closes the editor half of the log
 // spoofing the server comment calls out (a `\n[FEHLER] …` injection).
 const NAME_DISALLOWED_RE = /[^A-Za-zÄÖÜäöüß0-9 _-]/g;
+
+// The alphabet spelled out for the student — byte-for-byte the server's
+// `handlers/destinations.py::_NAME_ALPHABET_DE`. Exported because the
+// camera-click prompt (`CameraFeedOverlay`) REJECTS rather than sanitises and
+// therefore has a message to show, and there must be exactly one wording for
+// one alphabet: the overlay used to answer the bare „Ungültiger Ziel-Name." —
+// the sentence the server half of this feature was written to replace — so the
+// same feature said two different things depending on how the name was typed.
+//
+// It deliberately states no character COUNT: this field caps at 24, the
+// overlay's prompt and the server regex at 40, so any number here is wrong on
+// at least one surface that shows it.
+export const NAME_ALPHABET_DE =
+  'Erlaubt sind Buchstaben (auch ä ö ü ß), Ziffern, Leerzeichen, '
+  + 'Unterstrich und Bindestrich.';
+
+// Mirror of the server's echo rule: brackets neutralised and whitespace
+// collapsed so a pathological paste cannot smuggle a `[FEHLER]` sentinel into
+// the message, capped so a 4000-character prompt does not become the toast.
+export function destinationNameErrorDe(name) {
+  const shown = String(name ?? '')
+    .replace(/\[/g, '(')
+    .replace(/\]/g, ')')
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(' ')
+    .slice(0, 40);
+  return `Ungültiger Ziel-Name: „${shown}". ${NAME_ALPHABET_DE}`;
+}
 // NOTE: the 24-char cap is deliberately NOT the server's 40. CLAUDE.md:
 // "Destination-pin names cap at 24 chars in React (the Blockly field's
 // NAME_MAX_LEN); trajectory names use the full 1-40 backend range — two

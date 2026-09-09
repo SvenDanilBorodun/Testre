@@ -37,34 +37,84 @@ _DESTINATION_NAME_RE = re.compile(r'^[A-Za-zÄÖÜäöüß0-9 _\-]{1,40}$')
 
 # The alphabet, spelled out for the student. Kept next to the regex so the two
 # cannot drift.
+#
+# It states the ALPHABET and deliberately NOT a character count. The regex caps
+# at 40, the student's own Blockly field caps at ``NAME_MAX_LEN = 24``
+# (``blocks/destinations.js``; CLAUDE.md: "two frontend validators over one
+# backend regex"), and the camera-click prompt caps at 40 — so any number in
+# this sentence is wrong on at least one of the three surfaces that show it. The
+# earlier wording ended „…höchstens 40 Zeichen." and contradicted the editor a
+# student had just been typing in.
 _NAME_ALPHABET_DE = (
     'Erlaubt sind Buchstaben (auch ä ö ü ß), Ziffern, Leerzeichen, '
-    'Unterstrich und Bindestrich, höchstens 40 Zeichen.'
+    'Unterstrich und Bindestrich.'
 )
 
 
-def _validate_destination_name(name: str) -> None:
-    """Refuse a name outside the shared alphabet, NAMING the name and the
-    alphabet.
+def destination_name_error_de(name: Any) -> str | None:
+    """The German refusal for a name outside the shared alphabet, or ``None``
+    when the name is fine.
 
-    The message used to be the bare „Ungültiger Ziel-Name." — which aborts the
-    whole run and tells the student neither which of their names is wrong nor
-    what would be right. That matters more than usual here because the React
-    validator (``blocks/destinations.js``) has no character class of its own, so
-    every one of these first surfaces at RUN time, long after the name was
-    typed. Measured 2026-09-07 against the server: 'A B-c_Ä' accepted; 'A!',
-    'A/B', '日本', '😀', 'A\nB', 'A]B' and a 41-character name all refused with
-    that one anonymous sentence.
+    THE one opinion on this question, and it is a PURE function on purpose:
+    three writers ask it and each raises its own exception type — the block
+    handlers a :class:`WorkflowError` (aborts the run),
+    ``WorkflowManager.set_destination`` a ``ValueError`` (refuses a service
+    call). A second copy of the sentence is how the editor and the server came
+    to say two different things about the same alphabet.
+
+    The message NAMES the offending name and the alphabet. It used to be the
+    bare „Ungültiger Ziel-Name.", which aborts the whole run and tells the
+    student neither which of their names is wrong nor what would be right.
+    Measured 2026-09-07 against the server: 'A B-c_Ä' accepted; 'A!', 'A/B',
+    '日本', '😀', 'A\nB', 'A]B' and a 41-character name all refused with that one
+    anonymous sentence.
 
     The offending name is echoed with its own brackets stripped so a crafted
     name cannot smuggle a sentinel into the log strip through the error message
     — the same injection this validator exists to prevent."""
-    if not name or not _DESTINATION_NAME_RE.match(name):
-        shown = str(name).replace('[', '(').replace(']', ')')
-        shown = ' '.join(shown.split())[:40]
-        raise WorkflowError(
-            f'Ungültiger Ziel-Name: „{shown}". {_NAME_ALPHABET_DE}'
-        )
+    # A whitespace-only name matches the regex (space IS in the alphabet) but is
+    # not a name on any surface: the three block handlers and
+    # ``capture_pose_callback`` all ``.strip()`` before asking, so they turn it
+    # into „Ziel-Name fehlt." — but ``mark_destination_callback`` passed
+    # ``request.label`` verbatim and the camera prompt's own regex accepts '   ',
+    # so it reached the store as a blank key under a green „gespeichert.".
+    if (name and isinstance(name, str) and name.strip()
+            and _DESTINATION_NAME_RE.match(name)):
+        return None
+    shown = str(name).replace('[', '(').replace(']', ')')
+    shown = ' '.join(shown.split())[:40]
+    return f'Ungültiger Ziel-Name: „{shown}". {_NAME_ALPHABET_DE}'
+
+
+def _validate_destination_name(name: str) -> None:
+    """Raise the shared German refusal as a run-aborting ``WorkflowError``.
+
+    NOTE on reachability, so nobody deletes this as dead code: since the React
+    field validator (``blocks/destinations.js::nameValidator``) sanitises on
+    EDIT *and* on deserialisation, every name that reaches ``/workflow/start``
+    through the editor has already passed it — so in practice this fires only on
+    a hand-crafted rosbridge payload. rosbridge authenticates nobody, so that is
+    exactly the surface CLAUDE.md calls untrusted; this is defence in depth, not
+    the student's first line of feedback."""
+    message = destination_name_error_de(name)
+    if message is not None:
+        raise WorkflowError(message)
+
+
+def destination_coordinate_error_de(
+    name: str, x: float, y: float, z: float,
+) -> str | None:
+    """The German refusal for a non-finite pinned coordinate, or ``None``.
+
+    Pure, for the same reason :func:`destination_name_error_de` is — the two
+    block handlers raise a ``WorkflowError`` from it, ``set_destination`` a
+    ``ValueError``."""
+    if all(math.isfinite(v) for v in (x, y, z)):
+        return None
+    return (
+        f'Ziel „{name}" hat keine gültigen Koordinaten — bitte den Block '
+        'auswählen und noch einmal in die Szenen-Kamera klicken.'
+    )
 
 
 def _validate_coordinates(name: str, x: float, y: float, z: float) -> None:
@@ -79,11 +129,9 @@ def _validate_coordinates(name: str, x: float, y: float, z: float) -> None:
     literal string in the Blockly field. ``WorkflowManager.start()`` already
     guards its own joint seed with ``math.isfinite``; this path did not, and
     RS-24's start-time pre-check that was supposed to catch it is dead code."""
-    if not all(math.isfinite(v) for v in (x, y, z)):
-        raise WorkflowError(
-            f'Ziel „{name}" hat keine gültigen Koordinaten — bitte den Block '
-            'auswählen und noch einmal in die Szenen-Kamera klicken.'
-        )
+    message = destination_coordinate_error_de(name, x, y, z)
+    if message is not None:
+        raise WorkflowError(message)
 
 
 def destination_pin(ctx, args: dict[str, Any]) -> None:

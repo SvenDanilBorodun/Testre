@@ -17,6 +17,7 @@ import { isCloudOnlyMode } from '../../utils/cloudMode';
 import rosConnectionManager from '../../utils/rosConnectionManager';
 import { STREAM_QUALITY } from '../../constants/streamConfig';
 import { usePiMode, videoStreamBase } from '../../utils/piMode';
+import { destinationNameErrorDe } from './blocks/destinations';
 
 const CAMERA_TOPICS = {
   scene: '/scene/image_raw/compressed',
@@ -182,13 +183,26 @@ function CameraFeedOverlay({
       const y = (e.clientY - rect.top - offY) / scale;
       // A click in the letterbox margins is outside the real image — ignore it.
       if (x < 0 || y < 0 || x > naturalSize.w || y > naturalSize.h) return;
-      const label = window.prompt('Wie soll dieses Ziel heißen?', 'Ziel') || 'Ziel';
+      // Trimmed like the Blockly field's `nameValidator`, so the name the
+      // service stores and the name the block carries are the same string.
+      // Untrimmed, '   ' passed the regex below (space IS in the alphabet) and
+      // ' A ' was stored under a key `destination_ref` could never match.
+      const label = (window.prompt('Wie soll dieses Ziel heißen?', 'Ziel') || 'Ziel').trim();
       // Sanitize: 1-40 chars, German letters / digits / space / _ / - only.
       // Stops a stray paste or pathological prompt input from reaching the
       // ROS service with content the server would reject anyway. Full
       // inline-modal replacement is deferred (see ROBOTER_STUDIO_DEFERRED).
+      //
+      // This is a REJECT, not the Blockly field's sanitise, and that is right
+      // for a `window.prompt`: there is no live field to watch characters
+      // vanish from, so silently rewriting what the student typed would be
+      // worse than saying no. What was wrong was the MESSAGE — the bare
+      // „Ungültiger Ziel-Name.", i.e. exactly the sentence the server half of
+      // this feature replaced, on the PRIMARY way a destination is created.
+      // `destinationNameErrorDe` is the one shared wording (see
+      // blocks/destinations.js::NAME_ALPHABET_DE).
       if (!/^[A-Za-zÄÖÜäöüß0-9 _-]{1,40}$/.test(label)) {
-        toast.error('Ungültiger Ziel-Name.');
+        toast.error(destinationNameErrorDe(label));
         return;
       }
       try {

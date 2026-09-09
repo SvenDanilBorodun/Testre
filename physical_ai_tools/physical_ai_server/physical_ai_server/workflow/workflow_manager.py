@@ -530,11 +530,57 @@ class WorkflowManager:
 
     def set_destination(self, name: str, x: float, y: float, z: float) -> None:
         """Persist a teacher-pinned destination so the next workflow run
-        has it available in ``ctx.destinations``."""
+        has it available in ``ctx.destinations``.
+
+        THE gate every destination writer passes through, and the reason the
+        validation lives here rather than at each call site. There are three
+        service writers (``mark_destination_callback``, ``capture_pose_callback``
+        and the sim seed) plus the three block handlers, and until 2026-09-09
+        exactly one of the service writers validated anything:
+        ``capture_pose_callback`` checked the name AND ``math.isfinite`` on all
+        three coordinates while ``mark_destination_callback``, twenty lines of
+        the same feature away, checked neither and stored ``request.label``
+        verbatim. rosbridge authenticates nobody, so „the block handlers already
+        validate" is not a fence over this dict. One check here closes every
+        writer at once and is the only place that cannot be forgotten again.
+
+        Raises ``ValueError`` carrying the SHARED German sentence — the same
+        text the block handlers raise as a ``WorkflowError``, from the same pure
+        helpers, so the editor and the services cannot come to say two different
+        things about one alphabet. The exception type differs because the
+        consequence differs: a block handler aborts a RUN, this refuses a
+        SERVICE CALL, and each caller turns it into its own response."""
+        from physical_ai_server.workflow.handlers.destinations import (
+            destination_coordinate_error_de,
+            destination_name_error_de,
+        )
         if not name:
+            # Historical silent no-op for a falsy name, kept: every caller
+            # already guards on it (`if wfm is not None and request.label`), so
+            # nothing student-visible reaches here. A whitespace-only name is a
+            # DIFFERENT case and is refused loudly below — the camera prompt's
+            # own regex accepts '   ' and used to store it as a blank key.
             return
+        # Strip, like every other writer of this dict already does
+        # (`destination_pin`, `destination_current`, `capture_pose_callback`), so
+        # a service pin and its Blockly block agree on what the name IS: React's
+        # `nameValidator` trims, so ' A ' typed at the camera prompt used to be
+        # stored under a key the block could never match.
+        if isinstance(name, str):
+            name = name.strip()
+        message = destination_name_error_de(name)
+        if message is not None:
+            raise ValueError(message)
+        try:
+            fx, fy, fz = float(x), float(y), float(z)
+        except (TypeError, ValueError):
+            raise ValueError(destination_coordinate_error_de(
+                name, float('nan'), float('nan'), float('nan')))
+        message = destination_coordinate_error_de(name, fx, fy, fz)
+        if message is not None:
+            raise ValueError(message)
         self._persisted_destinations[name] = {
-            'x': float(x), 'y': float(y), 'z': float(z), 'label': name,
+            'x': fx, 'y': fy, 'z': fz, 'label': name,
         }
 
     def get_destinations(self) -> dict[str, dict[str, float]]:

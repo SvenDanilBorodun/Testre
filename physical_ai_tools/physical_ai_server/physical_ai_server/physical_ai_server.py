@@ -3160,13 +3160,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().warning(
                     f'mark_destination plane height skipped: {e}'
                 )
-            response.success = True
-            response.world_x = corr_x
-            response.world_y = corr_y
-            response.world_z = pin_z
-            response.message = f'Ziel "{request.label}" gespeichert.'
             # Persist into the WorkflowManager so the next workflow run
             # can resolve "ablegen bei <label>" without a second click.
+            # ORDER: the persist runs BEFORE `response.success = True`, because
+            # `set_destination` is now the ONE server-side gate on the name and
+            # the coordinates (see its docstring) and a refusal must not be
+            # reported to the student as „gespeichert.".
             try:
                 wfm = self._get_or_create_workflow_manager()
                 if wfm is not None and request.label:
@@ -3178,8 +3177,27 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         request.label,
                         corr_x, corr_y, pin_z,
                     )
+            except ValueError as e:
+                # The shared German refusal from
+                # handlers.destinations.destination_{name,coordinate}_error_de —
+                # already student-readable, so it is passed through verbatim
+                # rather than replaced by a second sentence about the same fault.
+                response.success = False
+                response.world_x = 0.0
+                response.world_y = 0.0
+                response.world_z = 0.0
+                response.message = str(e)
+                return response
             except Exception:
+                # Any OTHER failure to persist (no manager yet) stays
+                # best-effort: the projection itself succeeded and the click
+                # feedback is still the useful answer.
                 pass
+            response.success = True
+            response.world_x = corr_x
+            response.world_y = corr_y
+            response.world_z = pin_z
+            response.message = f'Ziel "{request.label}" gespeichert.'
             return response
         except Exception as e:
             self.get_logger().error(f'mark_destination failed: {e}')
@@ -3215,28 +3233,33 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return response
 
         name = (request.name or '').strip()
-        # Reuse the canonical destination-name alphabet (ASCII + ä ö ü ß, 1..40
-        # chars) so a captured point and a teacher-pinned point validate
-        # identically and the React editor's destination list stays clean.
+        # Reuse the canonical destination-name alphabet (ASCII + ä ö ü ß) AND
+        # the canonical German sentence, so a captured point and a
+        # teacher-pinned point validate identically and the student meets ONE
+        # wording for one alphabet. This used to answer the bare „Ungültiger
+        # Ziel-Name." — the sentence the shared validator was written to replace
+        # — which names neither the offending name nor what would be right.
+        name_error = None
         try:
             from physical_ai_server.workflow.handlers.destinations import (
-                _DESTINATION_NAME_RE,
+                destination_name_error_de,
             )
-            valid_name = bool(name) and bool(_DESTINATION_NAME_RE.match(name))
+            name_error = destination_name_error_de(name)
         except Exception:  # noqa: BLE001 — validator import must never crash the service
             # Fail CLOSED: if the shared validator import ever fails, fall back to a
             # local charset check (NOT a bare non-empty test) so name/sentinel
-            # injection stays blocked even on the degraded path.
+            # injection stays blocked even on the degraded path. The degraded
+            # message is the old bare sentence on purpose — reproducing the
+            # alphabet text here would be the second copy this change removes.
             import re as _re
-            valid_name = bool(name) and bool(
-                _re.match(r'^[A-Za-zÄÖÜäöüß0-9 _\-]{1,40}$', name)
-            )
-        if not valid_name:
+            if not (name and _re.match(r'^[A-Za-zÄÖÜäöüß0-9 _\-]{1,40}$', name)):
+                name_error = 'Ungültiger Ziel-Name.'
+        if name_error is not None:
             response.success = False
             response.world_x = 0.0
             response.world_y = 0.0
             response.world_z = 0.0
-            response.message = 'Ungültiger Ziel-Name.'
+            response.message = name_error
             return response
 
         # communicator not wired → the data pipeline failed to initialize at boot

@@ -155,11 +155,17 @@ def test_whitespace_only_name_rejected():
 
 
 def test_invalid_char_name_rejected():
-    # '*' is outside the canonical destination alphabet.
+    # '*' is outside the canonical destination alphabet. The message is the
+    # SHARED sentence (handlers/destinations.destination_name_error_de), not the
+    # bare „Ungültiger Ziel-Name." this used to answer — one alphabet, one
+    # wording, whichever way the name was typed (audit §7.5).
     node = _StubNode()
     resp = _capture_pose(node, _Request('Ablage*'), _Response())
     assert resp.success is False
-    assert 'Ungültiger Ziel-Name.' == resp.message
+    assert resp.message == (
+        'Ungültiger Ziel-Name: „Ablage*". Erlaubt sind Buchstaben (auch ä ö ü ß), '
+        'Ziffern, Leerzeichen, Unterstrich und Bindestrich.'
+    )
     _assert_zeros(resp)
 
 

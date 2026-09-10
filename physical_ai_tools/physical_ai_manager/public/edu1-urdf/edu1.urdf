@@ -8,7 +8,7 @@
      physical_ai_server/test/test_edu1_ik.py, so a transcription error in
      workflow/edu1_ik.py's baked constants cannot verify itself.
 
-     FOUR deliberate SEMANTIC differences from the raw CAD export. There are
+     FIVE deliberate SEMANTIC differences from the raw CAD export. There are
      three further differences that are not semantic and are listed after them,
      because "and nothing else" was wrong and the line-ending one in particular
      defeats the clean-diff hope this header ends on:
@@ -43,23 +43,42 @@
         The driver carries the same flip through its per-joint sign vector, so
         /joint_states, this twin and the servo agree. Kept as a URDF edit rather
         than a rename so a future CAD re-export still diffs cleanly against it.
+     5. joint4's LIMIT is WIDENED, not merely re-rounded: -1.57/+1.57 in the
+        export becomes -2.0071/+2.0071 (2026-09-10), i.e. +-115 deg instead of
+        +-90 deg. This is the one limit in the file that is NOT a rounded right
+        angle, so difference 3 above does not describe it and must not be read
+        as covering it. The physical range is the OWNER'S STATEMENT about the
+        hardware; treat +-115 deg as a CEILING and never widen past it.
+        It is declared in FOUR places that must move together (this file,
+        workflow/edu1_ik.py, docker/open_manipulator/edu6_arm_node.py,
+        tools/edu6_provision.py) and it is what the driver's boot probe
+        verifies as the servo EEPROM provisioning fingerprint, so a change
+        here without re-running the provisioning tool for this arm
+        (`tools/edu6_provision.py`, arm `edu1`) makes it refuse to boot.
 
      NON-SEMANTIC differences, i.e. the rest of the answer to "what else":
 
-     5. LINE ENDINGS. The raw export is CRLF (509 of them, pure ASCII); this
+     6. LINE ENDINGS. The raw export is CRLF (509 of them, pure ASCII); this
         copy is LF. That is why an un-normalised `diff` against the export
         reports 1065 changed lines (every line of both files) where the real
         figure is 113. A future CAD re-export will therefore NOT "diff cleanly"
         against this file unless it is normalised first — do that.
-     6. This header comment.
-     7. Two inline "AXIS FLIPPED" comments inside RL_joint and LF_joint.
-     Consequence of 6: this copy carries 12 non-ASCII bytes (German quotes and
+     7. This header comment.
+     8. Two inline "AXIS FLIPPED" comments inside RL_joint and LF_joint.
+     Consequence of 7: this copy carries 21 non-ASCII bytes (German quotes and
      dashes) where the export is pure ASCII. Neither file has a BOM and neither
-     ends with a newline.
+     ends with a newline. (This line said "12" until 2026-09-10; it was already
+     wrong before difference 5 was added, and 21 is the measured value both
+     before and after that edit, which was written ASCII-only to keep it so.)
 
      Verified: 184 elements each, identical tag sequence, identical element
      text, exactly 28 elements with differing attributes — 1 robot name,
-     18 mesh filenames, and 9 accounted for by differences 3 and 4.
+     18 mesh filenames, and 9 accounted for by differences 3, 4 and 5.
+     NOT RE-VERIFIED on 2026-09-10: the raw CAD export is not in this repo, so
+     the counts above still date from 2026-09-05. Difference 5 does not change
+     them: joint4's <limit> already differed (as a rounding, under difference
+     3) and now differs as a widening. But that is DERIVED from this header's
+     own record of the export, not re-measured against it.
 
      The meshes beside this file are vertex-clustering DECIMATIONS of the CAD
      STLs (15.007 MB -> 3.420 MB, 4.39x). Deviation on the worst mesh
@@ -349,8 +368,8 @@
     <axis
       xyz="0 0 -1" />
     <limit
-      lower="-1.5708"
-      upper="1.5708"
+      lower="-2.0071"
+      upper="2.0071"
       effort="1.91"
       velocity="4.72" />
   </joint>

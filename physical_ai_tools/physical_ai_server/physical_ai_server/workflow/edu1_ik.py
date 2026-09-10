@@ -16,7 +16,7 @@ The edu1 ("Edu:1") is a 5-DOF Feetech STS arm with a rotating two-blade claw
   JOINT VALUE is the NEGATIVE of the world azimuth it aims at — see
   :meth:`Edu1IKSolver.base_yaw`, which returns the AZIMUTH, not the joint.
 * ``joint2/3/4`` — shoulder / elbow / wrist pitch, all three PARALLEL (a planar
-  3R chain). ``joint2``/``joint3`` are [0, π]; ``joint4`` is ±90°.
+  3R chain). ``joint2``/``joint3`` are [0, π]; ``joint4`` is ±115°.
 * ``joint5`` — tool roll (±90°; the jaw-alignment joint). Its axis is
   collinear with the tool axis, so it never moves the TCP.
 * (``RL_joint`` is the claw servo, not a positioning DOF; ``LF_joint``
@@ -32,9 +32,19 @@ construction, and the whole solve is one pass, elbow-up preferred.
 
 CONSEQUENCE WORTH KNOWING: the vertical constraint reads
 ``q4 = q2 − q3 + (BETA0 − π)`` with ``BETA0 ≈ +π/2``, i.e. ``q4 ≈ q2 − q3 −
-π/2``. With ``q4`` bounded at ±90° that is exactly **``q2 ≥ q3``** — a
-STRUCTURAL restriction on the strict-vertical family, not a tuning choice. It is
-also why the reachable top-down band is an annulus and not a disc.
+π/2``. So ``joint4``'s LOWER limit alone sets a floor on ``q2 − q3`` — a
+STRUCTURAL restriction on the strict-vertical family, not a tuning choice, and
+it is why the reachable top-down band is an annulus and not a disc. (The upper
+limit never binds: it would need ``q2 ≥ q3 + 3.578``, and ``q2 ≤ π``.)
+
+At the ±90° this arm shipped with, that floor was exactly ``q2 ≥ q3``. At the
+current **±115°** it relaxes to ``q2 ≥ q3 − 0.43631``. Measured through
+``solve()`` over r ∈ [0.05, 0.40] × z ∈ [0.00, 0.40] at 5 mm (5751 cells,
+2026-09-10): the window admits **2068** cells instead of 902, and the
+strict-vertical TCP ceiling rises **0.100 m → 0.195 m**. Over the 2R-feasible
+set (q2/q3 in limits, n = 3087) the REQUIRED ``q4`` spans −171.21°…−62.86° —
+always negative, so it is only ever the lower limit that clips it: ±90° admitted
+29.2 % of that set, ±115° admits 67.0 %.
 
 FRAMES — the one thing to keep straight:
 
@@ -187,11 +197,30 @@ _FK_TOL_M = 1e-5
 # bearing, which is common, not a corner case — fell 0.0008 rad outside BOTH
 # folded twins and the grasp was refused as unreachable. Half a servo tick;
 # nothing physical changes.
+#
+# joint4 is ±115° (2026-09-10), not the ±90° this arm shipped with. The physical
+# range is the OWNER'S STATEMENT — the arm reaches 115° to each side — and is not
+# something this repo can measure; treat ±115° as a CEILING and never widen past
+# it. ``2.0071`` keeps the file's four-decimal convention and rounds INWARD of
+# 115° (= 2.00712864… rad) by 2.9e-6 rad ≈ 0.002 servo ticks, i.e. below the
+# 115° (= 2.0071286398… rad) by 2.864e-5 rad ≈ 0.019 servo ticks at
+# 4096 ticks/rev, i.e. below the hardware's own resolution — and inward is the
+# safe direction.
+#
+# ⚠ CHANGING ANY VALUE HERE IS A HARDWARE-PROVISIONING CHANGE, NOT A SOFTWARE
+# ONE. The driver's boot probe verifies the servo EEPROM Min/Max_Position_Limit
+# window as a PROVISIONING FINGERPRINT, so a limit that moves here without
+# ``python3 tools/edu6_provision.py --arm edu1`` being re-run on every physical
+# arm makes that arm refuse to boot, in German, with no hint why. The same pair
+# is declared in FOUR places that must move together — here, the shipped URDF
+# (physical_ai_manager/public/edu1-urdf/edu1.urdf), the driver node
+# (docker/open_manipulator/edu6_arm_node.py::_EDU1_JOINT_LIMITS_RAD) and the
+# provisioning tool (tools/edu6_provision.py::_ARM_SPECS['edu1']).
 _EDU1_JOINT_LIMITS_RAD: list[tuple[float, float]] = [
     (-1.5708, 1.5708),     # joint1  base yaw
     (0.0, 3.1416),         # joint2  shoulder
     (0.0, 3.1416),         # joint3  elbow
-    (-1.5708, 1.5708),     # joint4  wrist pitch
+    (-2.0071, 2.0071),     # joint4  wrist pitch — ±115°, owner-stated ceiling
     (-1.5708, 1.5708),     # joint5  tool roll — the jaw-fold window IS ±90°
 ]
 
@@ -304,8 +333,9 @@ _G_OFFSET = _BETA0 - _ALPHA0
 _WRIST_ABOVE_TCP = _L4 + _L_TOOL
 
 # Strict-vertical reach annulus of the WRIST CENTRE (2R span; the practical
-# authoritative bound is always ``solve(...) is not None``, because the ±90°
-# joint4 window clips this annulus further).
+# authoritative bound is always ``solve(...) is not None``, because the ±115°
+# joint4 window still clips this annulus further — it admits 67.0 % of the
+# 2R-feasible set, not all of it).
 _REACH_MIN = abs(_L2 - _L3)
 _REACH_MAX = _L2 + _L3
 
@@ -499,14 +529,49 @@ class Edu1IKSolver:
         # the shoulder→wrist line, which is what every clearance figure in the
         # plan was measured on), then elbow-down; deterministic order.
         #
-        # The elbow-DOWN branch is in fact UNREACHABLE for any target at or
-        # above the table, and it is kept anyway. Proof sketch, since "dead
-        # code" is exactly the conclusion that would get it deleted: g = −|g|
-        # gives q3 = _G_OFFSET + |g|, which needs |g| ≤ 0.203 to stay under π,
-        # which needs ρ ≥ 0.379; and q4 ≥ −π/2 then forces q2 ≥ q3 ≥ 2.94,
-        # hence ψ ≥ 1.47, hence r ≥ 9.9·d_v ≥ 0.57 m — beyond ρ's own 0.381 m
-        # ceiling. Contradiction, so no target satisfies both. Measured: 0 of
-        # 20 000 sampled targets (test_the_elbow_down_branch_is_unreachable).
+        # The elbow-DOWN branch NEVER YIELDS A RETURNED SOLUTION, and it is kept
+        # anyway. The reason is dominance, not a reach contradiction, and the
+        # distinction is load-bearing — see below.
+        #
+        # Write φ(g) = atan2(L3·sin g, L2 + L3·cos g), the 2R triangle's SHOULDER
+        # angle. Substituting the loop body's own algebra collapses to
+        #
+        #     q4_up   = ψ − π + (|g| − |φ|)
+        #     q4_down = ψ − π − (|g| − |φ|)
+        #
+        # where (|g| − |φ|) is that triangle's WRIST interior angle, hence
+        # STRICTLY POSITIVE for any non-degenerate g. Likewise
+        # q2_down − q2_up = 2|φ| ≥ 0 and q3_down − q3_up = 2|g| ≥ 0. So on every
+        # constraint that can bind, elbow-up is weakly better than elbow-down:
+        #
+        #   1. elbow-down in limits ⟹ q3_down = _G_OFFSET + |g| ≤ π
+        #                          ⟹ |g| ≤ π − _G_OFFSET = 0.20295 ⟹ |φ| ≤ 0.11857
+        #   2. q2_up = q2_down − 2|φ| ≤ π ✓, and
+        #      q2_up = ψ − |φ| − _ALPHA0 ≥ −0.11857 + 1.36784 > 0 ✓
+        #   3. q3_up = _G_OFFSET − |g| ∈ [2.7357, 2.93864] ⊂ [0, π] ✓
+        #   4. q4_up = q4_down + 2(|g| − |φ|) > q4_down ≥ −LIM ✓, and
+        #      q4_up = ψ − π + (|g| − |φ|) ≤ 0.20295 ≤ LIM ✓   (ψ ∈ [0, π])
+        #   5. theta1 and theta5 are computed ONCE, above the loop — identical on
+        #      both branches — and both branches solve the same target exactly,
+        #      so neither is filtered by _FK_TOL_M.
+        #
+        # ⟹ elbow-down in limits ⟹ elbow-up in limits, and elbow-up is tried
+        # FIRST. Holds for ANY joint4 window ≥ ±0.20295 rad and uses no property
+        # of z, so it does not rot the way its predecessor did.
+        #
+        # WHAT ITS PREDECESSOR CLAIMED, AND WHY THIS IS WRITTEN OUT: until
+        # 2026-09-10 the note here proved the stronger statement that elbow-down
+        # is never even WITHIN LIMITS, via "q4 ≥ −π/2 forces q2 ≥ q3 ≥ 2.94 …
+        # hence r ≥ 0.57 m > ρ's 0.381 m ceiling". That proof consumed the
+        # joint4 bound, and widening joint4 to ±115° killed it: elbow-down IS
+        # now in limits over a real region (measured: 4118 cells of a 900×900
+        # (g, ψ) enumeration at z ≥ 0, and 17 of the 4000 targets the shipped
+        # test samples). It is simply never SELECTED — elbow-up is in limits on
+        # 4118 of those same 4118 cells, and a direct 260×260 solve() sweep
+        # returns elbow-up on 23359 of 23359 solved targets, 0 elbow-down.
+        # So the posture the arm adopts is unchanged, which is what every
+        # clearance figure and path_guard's "no reconfiguration flip" rely on.
+        #
         # It stays because it is the CORRECT general form: delete it and a
         # future link-length change (the rods are meant to be swapped — see the
         # CAD's README_rod_lengths.md) silently loses half the solution space.

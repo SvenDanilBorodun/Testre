@@ -220,8 +220,15 @@ _EDU1_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
 _EDU1_HOME_JOINTS_RAD = (0.0, 0.64, 1.48, 0.90, 0.0)
 _EDU1_GRIPPER_OPEN_RAD = 0.90
 _EDU1_JOINT_LIMITS_RAD = (
+    # joint4 (4th tuple) is ±115° = 2.0071 rad, the OWNER-STATED physical
+    # ceiling, since 2026-09-10. joint1 and joint5 keep ±90° — the three tuples
+    # used to be textually identical, so widen by INDEX, never by search-replace.
+    # Moving any value here without re-running
+    # `tools/edu6_provision.py --arm edu1` on the physical arm makes probe_bus
+    # refuse the boot with „nicht provisioniert": these radians ARE the EEPROM
+    # fingerprint it verifies.
     (-1.5708, 1.5708), (0.0, 3.1416), (0.0, 3.1416),
-    (-1.5708, 1.5708), (-1.5708, 1.5708),
+    (-2.0071, 2.0071), (-1.5708, 1.5708),
     # claw (RL_joint): 0 = closed … the full physical band. The PROFILE's open
     # command is 0.90; the driver band is the mechanical stop, so a jog can
     # still open the claw the whole way.

@@ -251,7 +251,13 @@ def test_vertical_family_poses_in_front_and_above_the_table_are_recoverable():
         q2 = rng.uniform(0.0, 3.1416)
         q3 = rng.uniform(0.0, 3.1416)
         q4 = q2 - q3 + _Q4_VERTICAL_OFFSET
-        if not (-1.5708 <= q4 <= 1.5708):
+        # Read the window from the CONSTANT, never a literal. This is a sample
+        # FILTER (the assertions below are the literals), and when joint4 went
+        # ±90° → ±115° a hardcoded ±1.5708 here kept the sample inside the OLD
+        # window — the test stayed green while covering none of the region the
+        # change opened. Same reason line ~172's pose generator reads the table.
+        _q4_lo, _q4_hi = _EDU1_JOINT_LIMITS_RAD[3]
+        if not (_q4_lo <= q4 <= _q4_hi):
             continue
         q = [rng.uniform(-1.5, 1.5), q2, q3, q4, rng.uniform(-1.5, 1.5)]
         _, tcp = ik.fk(q)
@@ -310,23 +316,37 @@ def test_the_reachable_ring_at_the_grasp_plane_is_a_real_annulus():
     assert ik.solve((0.02, 0.0, z)) is None
 
 
-def test_the_elbow_down_branch_is_unreachable_but_is_kept_anyway():
-    """Documents a fact that would otherwise read as dead code.
+def test_the_elbow_down_branch_is_never_selected_but_is_kept_anyway():
+    """The arm NEVER adopts an elbow-down posture — the property every clearance
+    figure and ``path_guard``'s "no reconfiguration flip" assumption rest on.
 
-    With THESE link lengths and limits the elbow-down branch cannot satisfy any
-    target at or above the table (see the derivation in ``solve``). The branch
-    stays because it is the correct general form and the arm's rods are DESIGNED
-    to be swapped — the CAD ships a table of alternative lengths — so a future
-    build could make it live. This test is what stops it being deleted as
-    unused, and what would notice if a rod change made it reachable.
+    This asserts the PROPERTY, not a proxy for it. Until 2026-09-10 it asserted
+    ``both == 0``, i.e. that elbow-down is never even WITHIN LIMITS — which was
+    true only because joint4 was ±90°, and stopped being true the moment it was
+    widened to ±115° (measured then: ``both`` went 0 → 17 on this very sample).
+    "Never in limits" was always the wrong thing to pin: what matters is which
+    branch ``solve()`` HANDS BACK.
+
+    The branch stays because it is the correct general form and the rods are
+    DESIGNED to be swapped, so a future build could make it live.
     """
     from physical_ai_server.workflow import edu1_ik as m
+    ik = _ik()
     rng = random.Random(5)
-    both = down_only = up_only = 0
+    returned_down = returned_up = down_in_limits = 0
     for _ in range(4000):
         x = rng.uniform(0.02, 0.42)
         y = rng.uniform(-0.35, 0.35)
         z = rng.uniform(0.0, 0.12)
+        sol = ik.solve((x, y, z))
+        if sol is not None:
+            # q3 = _G_OFFSET − g, so the sign of g is recoverable from the
+            # answer itself: g > 0 is elbow-up, g < 0 elbow-down.
+            if m._G_OFFSET - sol[2] < -1e-9:
+                returned_down += 1
+            else:
+                returned_up += 1
+        # …and separately, whether the down branch was legal at all.
         r = math.hypot(x, y)
         d_v = (z + m._WRIST_ABOVE_TCP) - m._SHOULDER_Z
         rho = math.hypot(r, d_v)
@@ -334,24 +354,65 @@ def test_the_elbow_down_branch_is_unreachable_but_is_kept_anyway():
             continue
         cos_g = max(-1.0, min(1.0, (rho * rho - m._L2 ** 2 - m._L3 ** 2)
                               / (2.0 * m._L2 * m._L3)))
-        gamma = math.acos(cos_g)
+        g = -math.acos(cos_g)
         psi = math.atan2(r, d_v)
-        legal = []
-        for g in (gamma, -gamma):
-            alpha = psi - math.atan2(m._L3 * math.sin(g),
-                                     m._L2 + m._L3 * math.cos(g))
-            q2 = alpha - m._ALPHA0
-            q3 = m._G_OFFSET - g
-            q4 = q2 - q3 + m._Q4_VERTICAL_OFFSET
-            legal.append(_ik()._within_limits(
-                [-math.atan2(y, x), q2, q3, q4, 0.0]))
-        up, down = legal
-        both += up and down
-        down_only += down and not up
-        up_only += up and not down
-    assert up_only > 500, 'the sample never reached the arm at all'
-    assert down_only == 0
-    assert both == 0
+        q2 = psi - math.atan2(m._L3 * math.sin(g),
+                              m._L2 + m._L3 * math.cos(g)) - m._ALPHA0
+        q3 = m._G_OFFSET - g
+        if ik._within_limits([-math.atan2(y, x), q2, q3,
+                              q2 - q3 + m._Q4_VERTICAL_OFFSET, 0.0]):
+            down_in_limits += 1
+
+    assert returned_up > 500, 'the sample never reached the arm at all'
+    assert returned_down == 0, (
+        f'solve() handed back {returned_down} elbow-DOWN postures; every '
+        f'clearance figure on this arm was measured elbow-up')
+    # Not an accident of THIS window: at ±115° the down branch IS legal on part
+    # of the sample and is still never chosen. Pinning that keeps the test
+    # honest about what it proves — if this ever reads 0 the sample has stopped
+    # covering the region, and `returned_down == 0` above would be vacuous.
+    assert down_in_limits > 0, (
+        'no sampled target makes the elbow-down branch legal — this test can no '
+        'longer distinguish "never selected" from "never legal"')
+
+
+def test_elbow_up_dominates_elbow_down_on_every_binding_limit():
+    """The LEMMA behind the test above, and the reason it holds for any joint4
+    window rather than by luck at this one.
+
+    q4_up − q4_down = 2(|g| − |φ|) = twice the 2R triangle's WRIST interior
+    angle, hence strictly positive; q2_down − q2_up = 2|φ| ≥ 0 and
+    q3_down − q3_up = 2|g| ≥ 0. So elbow-up is weakly better on the lower q4
+    bound and on the upper q2/q3 bounds — the three that can bind — and
+    elbow-down being in limits therefore IMPLIES elbow-up is too.
+    """
+    from physical_ai_server.workflow import edu1_ik as m
+    rng = random.Random(23)
+    checked = 0
+    for _ in range(20000):
+        psi = rng.uniform(0.0, math.pi)
+        g = rng.uniform(1e-9, math.pi - 1e-9)
+        phi = abs(math.atan2(m._L3 * math.sin(g), m._L2 + m._L3 * math.cos(g)))
+        assert g - phi > 0.0, f'wrist interior angle not positive at g={g}'
+
+        def branch(sign):
+            gg = sign * g
+            q2 = (psi - math.atan2(m._L3 * math.sin(gg),
+                                   m._L2 + m._L3 * math.cos(gg))) - m._ALPHA0
+            q3 = m._G_OFFSET - gg
+            return q2, q3, q2 - q3 + m._Q4_VERTICAL_OFFSET
+
+        (q2u, q3u, q4u), (q2d, q3d, q4d) = branch(+1), branch(-1)
+        assert q4u > q4d
+        assert q2d >= q2u - 1e-12
+        assert q3d >= q3u - 1e-12
+        # The implication itself, over the real limit table.
+        ik = _ik()
+        if ik._within_limits([0.0, q2d, q3d, q4d, 0.0]):
+            checked += 1
+            assert ik._within_limits([0.0, q2u, q3u, q4u, 0.0]), (
+                f'elbow-down legal but elbow-up is NOT at psi={psi}, g={g}')
+    assert checked > 100, f'only {checked} elbow-down-legal samples'
 
 
 def test_the_wrist_annulus_constants_bracket_the_two_link_chain():

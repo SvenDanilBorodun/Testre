@@ -488,10 +488,30 @@ _EDU1_STUDIO = ArmProfile(
     tool_length_m=0.08625,
     torque_service='/edu1/set_torque',
     camera_roles=('scene',),
-    # Student-facing table ring, measured through the real solver at the grasp
-    # plane z = 0.015 m: r ∈ [0.082, 0.363]. Rounded INWARD on both ends so the
-    # drawn ring never promises a placement the solver then refuses.
-    reach_inner_m=0.09,
+    # Student-facing table ring. Re-measured 2026-09-10 through the real solver
+    # after joint4 went ±90° → ±115°, and the RULE changed with it: the ring is
+    # now the INTERSECTION of the grasp plane (z = 0.015) and the hover the
+    # catalog actually asks for (z = 0.015 + approach_clear_m 0.060), still
+    # rounded INWARD on both ends so the drawn ring never promises a placement
+    # the solver then refuses.
+    #
+    #   grasp plane   r ∈ [0.064, 0.374]      (was [0.082, 0.363] at ±90°)
+    #   hover z=0.075 r ∈ [0.048, 0.357]      (was [0.135, 0.310])
+    #   intersection  r ∈ [0.064, 0.357]  →   0.07 / 0.35
+    #
+    # Intersecting is the fix for a defect the grasp-plane-only rule shipped
+    # with: at ±90° the old rim r = 0.35 was solvable only to z ≈ 0.033, i.e.
+    # 18 mm of hover against a 60 mm request, so every rim grasp ran on a
+    # bisected approach — and silently, because the clamp only warns below
+    # 0.25 × 0.060 = 15 mm. At ±115° r = 0.35 reaches z ≈ 0.093 and the full
+    # 60 mm is available for the first time.
+    #
+    # So the OUTER deliberately stays 0.35 even though the grasp plane alone now
+    # reaches 0.374: r = 0.37 solves at the grasp plane and NOT at the hover
+    # (z ≈ 0.034 max, 19 mm), which would hand the rim straight back its silent
+    # clamp. The INNER moves 0.09 → 0.07, which is pure gain — r = 0.07 clears
+    # both planes with ~110 mm of hover headroom.
+    reach_inner_m=0.07,
     reach_outer_m=0.35,
     # gripper_mm_per_rad is deliberately OMITTED (→ the jog row keeps its degree
     # display). This is a ROTATING claw: the jaw gap is affine in the servo
@@ -530,14 +550,25 @@ _EDU1_STUDIO = ArmProfile(
     # would inherit the OMX −0.1: numerically just as inert, but a NEGATIVE
     # number on a gripper that never goes negative, i.e. actively misleading.
     sim_held_floor_rad=0.05,
-    # Reroute-ladder geometry, MEASURED through the real solver (2026-09-05).
-    # This arm's strict-vertical TCP ceiling is ~0.100 m (joint4's ±90° window
-    # binds through q4 = q2 − q3 − π/2, not the 2R annulus), so the OMX 0.18 m
-    # cruise and its (0.10, 0.14, 0.16) swing heights are ALL unreachable:
-    # 0/72 base-swing candidates solve with the OMX grid. The values below give
-    # 32/72 — the same fraction the edu6 grid achieves, and the ceiling here is
-    # the ±90° base yaw (only 4 of the 8 candidate azimuths are in FRONT of the
-    # arm), not the height/radius choice.
+    # Reroute-ladder geometry, MEASURED through the real solver (2026-09-05;
+    # re-measured 2026-09-10 after joint4 went ±90° → ±115°).
+    #
+    # This arm's strict-vertical TCP ceiling is now ~0.195 m, up from ~0.100 m —
+    # joint4's LOWER limit binds through q4 = q2 − q3 − π/2, so widening the
+    # joint raises the ceiling directly (the 2R annulus was never what capped
+    # it). The values below were chosen under the OLD 0.100 m ceiling and are
+    # DELIBERATELY UNCHANGED: re-measured at ±115° they still solve 36/72, with
+    # every one of the nine (height, radius) pairs inside the annulus at its own
+    # height, so nothing here is stale or broken. Raising the cruise to exploit
+    # the taller ceiling would clear taller no-go zones, but it is a reroute
+    # behaviour change that needs its own end-to-end measurement — deliberately
+    # out of scope for the joint4 widening.
+    #
+    # The 36/72 ceiling is joint1's ±90° base yaw (only 4 of the 8 candidate
+    # azimuths are in FRONT of the arm) — 4 × 9 = 36 exactly — and NOT the
+    # height/radius choice, which is why the count is identical before and
+    # after. (A stale "32/72" sat here until 2026-09-10, contradicting the
+    # "36/72" ten lines below it; 36 is the measured value at both windows.)
     safe_travel_z_m=0.075,
     # 0.0 is exact, not a shortcut: ``edu1_ik.link_points`` ends AT the
     # fingertip TCP and appends nothing below it, unlike the OMX solver, which
@@ -546,11 +577,25 @@ _EDU1_STUDIO = ArmProfile(
     tool_clear_m=0.0,
     # Mid / high / low and mid / far / near, the same ordering intent as the OMX
     # and edu6 grids. Every one of the nine (height, radius) pairs is inside the
-    # annulus at its own height — the annulus NARROWS with height (r ∈ [0.090,
-    # 0.354] at z = 0.03 but only [0.128, 0.316] at z = 0.07), so a radius chosen
-    # off the low row alone leaves a dead row in the grid. 36/72 candidates
-    # solve; the ceiling is joint1's ±90° (only 4 of the 8 candidate azimuths
-    # are in FRONT of the arm), not this choice.
+    # annulus at its own height, which is what stops a row of the grid being
+    # dead. HOW the annulus varies with height CHANGED at ±115° and the old
+    # one-line rule no longer describes it (re-measured 2026-09-10):
+    #
+    #        z      ±90° (was)          ±115° (now)
+    #     0.030   [0.090, 0.355]      [0.061, 0.371]
+    #     0.050   [0.106, 0.339]      [0.054, 0.365]
+    #     0.070   [0.128, 0.317]      [0.047, 0.359]
+    #     0.100   [0.201, 0.244]      [0.057, 0.347]
+    #     0.150        EMPTY          [0.091, 0.312]
+    #
+    # At ±90° it narrowed MONOTONICALLY and pinched shut at ~0.100 m, so a
+    # radius picked off the low row alone left the high row dead — that is the
+    # constraint these values were chosen against. At ±115° it is NO LONGER
+    # monotonic: the inner edge FALLS to a minimum near z ≈ 0.07 and only then
+    # closes in, pinching out at ~0.195 m. Every row is strictly wider than
+    # before, so the choice below is comfortably inside at all three heights and
+    # the constraint that produced it has merely relaxed. 36/72 candidates solve
+    # at both windows; the ceiling is joint1's ±90° base yaw, not this choice.
     swing_heights_m=(0.05, 0.07, 0.03),
     swing_radii_m=(0.18, 0.28, 0.14),
 )

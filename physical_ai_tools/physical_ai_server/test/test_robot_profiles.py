@@ -399,11 +399,33 @@ def test_only_the_rotating_claw_advertises_tool_tip_tracks_gripper():
 
 def test_edu1_reach_ring_is_inside_what_the_solver_reaches():
     """The ring is drawn to the STUDENT; promising a radius the solver then
-    refuses is worse than drawing a slightly small ring."""
+    refuses is worse than drawing a slightly small ring.
+
+    Since 2026-09-10 the ring must clear BOTH planes a grasp actually visits —
+    the grasp plane and the hover ``approach_clear_m`` above it — not just the
+    grasp plane. Checking only the grasp plane is what let the ±90° rim ship
+    with 18 mm of hover against a 60 mm request, bisected on every rim grasp and
+    silently, because the clamp only warns below 0.25 × the request.
+    """
+    from physical_ai_server.workflow.object_catalog import fixed_catalog
     prof = rp.resolve('edu1_studio')
     ik = prof.build_ik()
-    assert ik.solve((prof.reach_inner_m, 0.0, 0.015)) is not None
-    assert ik.solve((prof.reach_outer_m, 0.0, 0.015)) is not None
+    recipe = fixed_catalog('edu1_studio').recipe_for_type('wuerfel')
+    grasp_z = recipe.object_height_m - recipe.grasp_depth_m
+    hover_z = grasp_z + recipe.approach_clear_m
+    assert (grasp_z, hover_z) == (0.015, 0.075)
+
+    assert prof.reach_inner_m == 0.07
+    assert prof.reach_outer_m == 0.35
+    for r in (prof.reach_inner_m, prof.reach_outer_m):
+        assert ik.solve((r, 0.0, grasp_z)) is not None, r
+        assert ik.solve((r, 0.0, hover_z)) is not None, r
+
+    # TIGHT, not merely safe: the grasp plane alone reaches past 0.37, and it is
+    # the HOVER that stops the ring there. Without this the outer could be
+    # widened back to the grasp-plane edge and the test above would not notice.
+    assert ik.solve((0.37, 0.0, grasp_z)) is not None
+    assert ik.solve((0.37, 0.0, hover_z)) is None
 
 
 def test_no_drift_edu1_vs_catalog():

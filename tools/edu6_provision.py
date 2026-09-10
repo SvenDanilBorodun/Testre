@@ -129,9 +129,15 @@ _ARM_SPECS = {
     },
     'edu1': {
         'servo_ids': (1, 2, 3, 4, 5, 6),
+        # joint4 (4th tuple) is ±115° = 2.0071 rad since 2026-09-10; joint1 and
+        # joint5 keep ±90°. The three tuples used to read identically, so widen
+        # by INDEX, never by search-replace. What this tool writes into
+        # Min/Max_Position_Limit IS what the driver's boot probe verifies, so
+        # every already-provisioned Edu:1 must be re-run through
+        # `--arm edu1` or it will refuse to boot with „nicht provisioniert".
         'joint_limits_rad': (
             (-1.5708, 1.5708), (0.0, 3.1416), (0.0, 3.1416),
-            (-1.5708, 1.5708), (-1.5708, 1.5708),
+            (-2.0071, 2.0071), (-1.5708, 1.5708),
             (0.0, 1.5708),      # claw: 0 = jaws closed
         ),
         'records_dir': 'edu1_records',

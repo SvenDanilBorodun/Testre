@@ -38,7 +38,10 @@ const EDU1_CAPS = {
   gripper_open_rad: 0.9,
   gripper_closed_rad: 0.0,
   // gripper_mm_per_rad is DELIBERATELY absent — see the test below.
-  reach_inner_m: 0.09,
+  // Mirrors robot_profiles._EDU1_STUDIO: the inner went 0.09 → 0.07 when
+  // joint4 was widened ±90° → ±115° (2026-09-10). Nothing pins this fixture to
+  // the server, so it drifts silently — keep it in step by hand.
+  reach_inner_m: 0.07,
   reach_outer_m: 0.35,
   sim_close_threshold_rad: 0.5,
   tool_tip_tracks_gripper: true,
@@ -135,8 +138,8 @@ describe('reachAnnulus', () => {
   it('edu6 caps → 0.09/0.21', () => {
     expect(reachAnnulus(EDU6_CAPS)).toEqual({ inner: 0.09, outer: 0.21 });
   });
-  it('edu1 caps → 0.09/0.35', () => {
-    expect(reachAnnulus(EDU1_CAPS)).toEqual({ inner: 0.09, outer: 0.35 });
+  it('edu1 caps → 0.07/0.35', () => {
+    expect(reachAnnulus(EDU1_CAPS)).toEqual({ inner: 0.07, outer: 0.35 });
   });
   it('a nonsense outer (≤ inner) is ignored', () => {
     expect(reachAnnulus({ reach_inner_m: 0.2, reach_outer_m: 0.1 }))

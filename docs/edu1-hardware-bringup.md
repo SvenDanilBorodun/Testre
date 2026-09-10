@@ -57,6 +57,15 @@ USB-indistinguishable by design and the servo COUNT is the discriminator.
 
 ## 3. E4 — provision the EEPROM  *(nothing boots until this is done)*
 
+> **⚠ 2026-09-10: this step is OWED AGAIN on every arm provisioned before that
+> date, including arms already in a classroom.** joint4's range was widened
+> ±90° → ±115°, which moves its EEPROM window **1024…3072 → 740…3356 ticks**.
+> The boot probe verifies that window as a provisioning fingerprint, so an arm
+> carrying the old one now refuses to boot with „nicht provisioniert" — and the
+> message does not say that a software update is the cause. Re-run the command
+> below on the jig. Nothing else about the arm changes; both new ends stay well
+> inside the 0…4095 register range, so no value saturates.
+
 ```bash
 python3 tools/edu6_provision.py --arm edu1 --port /dev/ttyACM0 --serial EDU1-0001 --dry-run
 python3 tools/edu6_provision.py --arm edu1 --port /dev/ttyACM0 --serial EDU1-0001

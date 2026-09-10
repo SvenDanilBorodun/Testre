@@ -261,8 +261,10 @@ def _static_overlap_refusal(ik, q_start, q_end, zones, margin, link_radius):
 # needs a TWO-via rung, which is a new rung and a Rule §2-class change to a
 # collision-avoidance ladder, i.e. the user's call — NOT a re-tune of these four
 # numbers. edu1 is unaffected in practice: its lift rung answers 25/30 of the
-# same cases (OMX 22/30), because its 0.100 m ceiling clears a 5 mm-tall
-# inflated zone where edu6's 0.065 m does not.
+# same cases (OMX 22/30), because its ceiling clears a 5 mm-tall inflated zone
+# where edu6's 0.065 m does not. (That ceiling was 0.100 m when this was
+# measured and is 0.195 m since joint4 widened to ±115° on 2026-09-10, so the
+# conclusion holds a fortiori — but the 25/30 itself has NOT been re-measured.)
 #
 # What DID change is the refusal: see ``_refusal_message``, which now names the
 # inflated width so the student can act on it instead of being told to move a

@@ -1489,6 +1489,10 @@ def _solve_grasp_and_approach(
         edu6_studio  92 / 120 = 76.7 %      edu1_studio  1 / 120 = 0.8 %
         omx_full      8 / 109 =  7.3 %
 
+    NOT RE-MEASURED after joint4 widened to ±115° (2026-09-10), which widened
+    edu1's pick band at every height — so treat that arm's 0.8 % as a ±90°
+    figure. It does not change the CONCLUSION, which is about edu6.
+
     i.e. on the arm where „lege ab" is used most it fired on three of every four
     successful placements. The meaningful place-side signal already exists and is
     correctly worded: ``_reachable_release_clearance``'s „Ablegehöhe … reduziert".

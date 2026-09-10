@@ -257,6 +257,19 @@ def provision(bus, serial: str, signs, spec: dict,
             '[FEHLER] Interner Fehler: Arm-Spezifikation und geladene '
             'Servo-Liste passen nicht zusammen — apply_arm_spec() wurde nicht '
             'für denselben Arm aufgerufen.')
+    if tuple(spec['joint_limits_rad']) != tuple(JOINT_LIMITS_RAD):
+        # The OTHER half of the same guard, and the half that was missing until
+        # 2026-09-10 while this function's docstring already promised it. It is
+        # the limits — not the servo ids — that `limits_to_ticks` turns into the
+        # Min/Max_Position_Limit window the driver's boot probe verifies as a
+        # provisioning fingerprint, so this is the mismatch that actually
+        # bricks an arm: it would be written one window and checked against
+        # another, and the servo-id check above cannot see that at all (both
+        # Feetech arms would still agree on ids).
+        raise SystemExit(
+            '[FEHLER] Interner Fehler: Arm-Spezifikation und geladene '
+            'Gelenkgrenzen passen nicht zusammen — apply_arm_spec() wurde '
+            'nicht für denselben Arm aufgerufen.')
     display = spec['display_de']
     # 0. identity gate. Both arms MIX STS3215 with STS3250 on the high-load
     # shoulder + elbow BY DESIGN — accept the STS-series set and record each

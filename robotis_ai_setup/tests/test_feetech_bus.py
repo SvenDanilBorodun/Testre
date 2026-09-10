@@ -2939,6 +2939,51 @@ class TestGuiDetectionSeam(unittest.TestCase):
         prov.apply_arm_spec('edu6')
         self.assertEqual(prov.SERVO_IDS, _N['SERVO_IDS'])
 
+    def test_provision_refuses_a_half_migrated_spec(self):
+        """`provision()` reads the SPEC for the record and the module GLOBALS
+        for the EEPROM window, so the two disagreeing writes one arm's window
+        under the other arm's tag. Both halves must be refused.
+
+        The joint-limits half is the one that bricks: `limits_to_ticks` turns
+        JOINT_LIMITS_RAD — not the servo ids — into the Min/Max_Position_Limit
+        window the driver's boot probe verifies. Both Feetech arms could agree
+        on ids and still be provisioned to the wrong window.
+        """
+        import importlib.util
+        path = os.path.join(_HERE, '..', '..', 'tools', 'edu6_provision.py')
+        spec = importlib.util.spec_from_file_location('prov_halfmig', path)
+        prov = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prov)
+        prov.apply_arm_spec('edu1')
+        good = dict(prov._ARM_SPECS['edu1'])
+
+        # Sanity: the coherent spec gets PAST both guards and reaches real bus
+        # I/O, so neither assertion below is passing vacuously.
+        class _Reached(Exception):
+            pass
+
+        class _Bus:
+            def ping(self, sid):
+                raise _Reached
+
+        with self.assertRaises(_Reached):
+            prov.provision(_Bus(), 'EDU1-0001', (1, 1, 1, 1, 1, 1), good,
+                           dry_run=True)
+
+        mismatched_ids = dict(good, servo_ids=(1, 2, 3, 4, 5, 6, 7))
+        with self.assertRaises(SystemExit) as ids:
+            prov.provision(_Bus(), 'EDU1-0001', (1, 1, 1, 1, 1, 1),
+                           mismatched_ids, dry_run=True)
+        self.assertIn('Servo-Liste', str(ids.exception))
+
+        widened = list(good['joint_limits_rad'])
+        widened[3] = (-3.1416, 3.1416)
+        mismatched_limits = dict(good, joint_limits_rad=tuple(widened))
+        with self.assertRaises(SystemExit) as lim:
+            prov.provision(_Bus(), 'EDU1-0001', (1, 1, 1, 1, 1, 1),
+                           mismatched_limits, dry_run=True)
+        self.assertIn('Gelenkgrenzen', str(lim.exception))
+
     def test_list_arm_devices_filters_by_family(self):
         from gui.app import device_manager as dm
 

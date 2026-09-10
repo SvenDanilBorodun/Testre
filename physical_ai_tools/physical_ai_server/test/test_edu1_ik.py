@@ -153,6 +153,38 @@ def test_solver_limits_match_the_urdf():
         assert _EDU1_JOINT_LIMITS_RAD[i] == pytest.approx((lo, hi), abs=1e-9)
 
 
+def test_joint4_does_not_exceed_the_owner_stated_physical_ceiling():
+    """joint4's window is a PHYSICAL fact about the arm, and the only absolute
+    pin on it.
+
+    Every other check in this repo is RELATIVE — the solver is compared to the
+    URDF, the driver's copy to the solver's, the provisioning spec to the
+    driver's. So all four move together happily: measured 2026-09-10, widening
+    joint4 to ±143° across all four cross-pinned sites passes 1398 GUI tests and
+    76 server tests. The register range is no backstop either — ±172° still fits
+    inside the servo's 0…4095 ticks. The four sites agreed with EACH OTHER and
+    with nothing else.
+
+    115° is the OWNER'S statement about what the hardware physically reaches. It
+    is a CEILING: past it the servo drives into a mechanical stop under
+    ``Max_Torque``, which the EEPROM window is what prevents. Nothing in software
+    can measure it, so it is pinned here as a literal and changed only when the
+    owner states a new number.
+
+    The literal rounds INWARD (2.0071 rad = 114.99836°), which is the safe
+    direction — 0.019 servo ticks short of the stop rather than past it."""
+    lo, hi = _EDU1_JOINT_LIMITS_RAD[3]
+    assert (lo, hi) == (-2.0071, 2.0071), (
+        f'joint4 ships as ({lo}, {hi}); ±2.0071 rad is the owner-stated ±115°')
+    ceiling = math.radians(115.0)
+    assert hi <= ceiling, (
+        f'joint4 upper {hi} EXCEEDS the physical ceiling {ceiling:.7f} rad '
+        f'(={math.degrees(hi):.3f}° > 115°) — the servo would drive into its stop')
+    assert lo >= -ceiling, f'joint4 lower {lo} exceeds the physical ceiling'
+    # Rounded inward, not outward: strictly inside the stop on both ends.
+    assert ceiling - hi == pytest.approx(2.864e-5, abs=1e-7)
+
+
 def test_the_claw_band_is_zero_closed_and_positive_open():
     """The shipped URDF FLIPS the CAD's claw axis so open is the numerically
     larger value — every shared consumer (grasp-held check, catalog band, sim

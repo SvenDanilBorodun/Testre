@@ -101,15 +101,32 @@ _EDU6_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5',
 # edu1_studio geometry (5dof_assembly_urdf2.urdf; derivation record in
 # docs/plans/edu1-studio-arm.md). HOME stands the arm UP over its own base with
 # the claw pointing up — the same intent as the edu6 HOME and chosen the same
-# way, by measurement rather than by eye. Searched over the whole joint box for
-# the pose that maximises the distance of EVERY joint from its own limit subject
-# to |TCP radius| <= 20 mm, TCP height in [0.38, 0.52] m, table clearance
-# >= 40 mm and self-clearance >= 20 mm; the winner sits 0.640 rad clear of the
+# way, by measurement rather than by eye. It was searched over the whole joint
+# box under |TCP radius| <= 20 mm, TCP height in [0.38, 0.52] m, table clearance
+# >= 40 mm and self-clearance >= 20 mm, and it sits 0.640 rad clear of its
 # nearest limit (vs 0.049 rad for the best tool-down candidate), keeps the whole
 # arm inside a 148 mm plan radius so it does not stand in the scene camera's
 # view, and refuses the fewest boot-home glides: 1/1200 random limp-collapse
 # start poses drive a link below the table on the straight line to it, against
 # 5/1200 for a tool-down home (the edu6's own measured rate was ~1 in 100).
+#
+# UNVERIFIED, and stated so rather than left implied: this comment used to say
+# HOME is "the pose that MAXIMISES the distance of every joint from its own
+# limit" under those constraints. It is not. An independent search on 2026-09-10
+# found 1481 feasible poses that beat it, the best at 1.0462 rad against HOME's
+# 0.640 — and that was with q1 and q5 pinned to 0, i.e. a SUBSET of the box the
+# claim ranges over. Adding the boot-glide-refusal term does not rescue it
+# either (416 of 1200 for both). Note it was already NOT the maximiser at the
+# old ±90° window, so this is not something the joint4 widening broke.
+#
+# HOME IS UNCHANGED and nothing here is known to be wrong with it: every figure
+# above about the pose ITSELF re-measures, it is comfortably inside the window
+# (joint4's margin improved 0.6708 -> 1.1071 with the widening; the binding
+# joint is still joint2 at 0.640), and it refuses the fewest boot-home glides.
+# What is retracted is only the claim that a search PROVED it optimal. Choosing
+# a different HOME is a real decision with its own consequences (the boot glide,
+# the camera plan radius, every screenshot and lesson that shows this pose) and
+# belongs to the owner, not to a comment correction.
 # Fingertip TCP at world (+0.018, 0, +0.519); lowest moving-link point +43.7 mm,
 # which is link1's structural floor, i.e. the best this arm can do.
 #
@@ -501,7 +518,7 @@ _EDU1_STUDIO = ArmProfile(
     #
     # Intersecting is the fix for a defect the grasp-plane-only rule shipped
     # with: at ±90° the old rim r = 0.35 was solvable only to z ≈ 0.033, i.e.
-    # 18 mm of hover against a 60 mm request, so every rim grasp ran on a
+    # 22.3 mm of hover against a 60 mm request, so every rim grasp ran on a
     # bisected approach — and silently, because the clamp only warns below
     # 0.25 × 0.060 = 15 mm. At ±115° r = 0.35 reaches z ≈ 0.093 and the full
     # 60 mm is available for the first time.
@@ -557,18 +574,26 @@ _EDU1_STUDIO = ArmProfile(
     # joint4's LOWER limit binds through q4 = q2 − q3 − π/2, so widening the
     # joint raises the ceiling directly (the 2R annulus was never what capped
     # it). The values below were chosen under the OLD 0.100 m ceiling and are
-    # DELIBERATELY UNCHANGED: re-measured at ±115° they still solve 36/72, with
+    # DELIBERATELY UNCHANGED: re-measured at ±115° they still solve 72/144, with
     # every one of the nine (height, radius) pairs inside the annulus at its own
     # height, so nothing here is stale or broken. Raising the cruise to exploit
     # the taller ceiling would clear taller no-go zones, but it is a reroute
     # behaviour change that needs its own end-to-end measurement — deliberately
     # out of scope for the joint4 widening.
     #
-    # The 36/72 ceiling is joint1's ±90° base yaw (only 4 of the 8 candidate
-    # azimuths are in FRONT of the arm) — 4 × 9 = 36 exactly — and NOT the
+    # The 72/144 ceiling is joint1's ±90° base yaw (only 8 of the 16 candidate
+    # azimuths are in FRONT of the arm) — 8 × 9 = 72 exactly — and NOT the
     # height/radius choice, which is why the count is identical before and
-    # after. (A stale "32/72" sat here until 2026-09-10, contradicting the
-    # "36/72" ten lines below it; 36 is the measured value at both windows.)
+    # after.
+    #
+    # THE DENOMINATOR IS `path_guard._SWING_AZIMUTHS`, WHICH IS 16 AND HAS BEEN
+    # SINCE THE FEATURE LANDED. This cell has now been wrong twice, and the
+    # second time it was "fixed" from one wrong value to another: "32/72" sat
+    # here contradicting a "36/72" ten lines below, and the 2026-09-10 pass
+    # harmonised both to 36/72 — still halving the candidate set, because
+    # nobody read the constant. Anyone re-deriving this must READ
+    # `_SWING_AZIMUTHS` rather than assume 8; the fraction is what matters and
+    # it is 1/2 at both windows.
     safe_travel_z_m=0.075,
     # 0.0 is exact, not a shortcut: ``edu1_ik.link_points`` ends AT the
     # fingertip TCP and appends nothing below it, unlike the OMX solver, which
@@ -594,7 +619,7 @@ _EDU1_STUDIO = ArmProfile(
     # monotonic: the inner edge FALLS to a minimum near z ≈ 0.07 and only then
     # closes in, pinching out at ~0.195 m. Every row is strictly wider than
     # before, so the choice below is comfortably inside at all three heights and
-    # the constraint that produced it has merely relaxed. 36/72 candidates solve
+    # the constraint that produced it has merely relaxed. 72/144 candidates solve
     # at both windows; the ceiling is joint1's ±90° base yaw, not this choice.
     swing_heights_m=(0.05, 0.07, 0.03),
     swing_radii_m=(0.18, 0.28, 0.14),

@@ -404,7 +404,7 @@ def test_edu1_reach_ring_is_inside_what_the_solver_reaches():
     Since 2026-09-10 the ring must clear BOTH planes a grasp actually visits —
     the grasp plane and the hover ``approach_clear_m`` above it — not just the
     grasp plane. Checking only the grasp plane is what let the ±90° rim ship
-    with 18 mm of hover against a 60 mm request, bisected on every rim grasp and
+    with 22.3 mm of hover against a 60 mm request, bisected on every rim grasp and
     silently, because the clamp only warns below 0.25 × the request.
     """
     from physical_ai_server.workflow.object_catalog import fixed_catalog

@@ -2536,6 +2536,22 @@ class TranscriptExcerptTest(unittest.TestCase):
         self.assertEqual(out, ["Zeile A", "Zeile B", "Zeile C"],
                          "blank lines dropped, nothing elided, no marker")
 
+    def test_a_windows_powershell_51_transcript_bom_is_not_a_line(self):
+        """5.1's Start-Transcript writes UTF-8 WITH a BOM (Microsoft's
+        about_Character_Encoding). Read as plain utf-8, the first `****` rule
+        comes back as U+FEFF + stars, is not recognised as a rule, and becomes
+        the first line of the head the student sees."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "t.log")
+        with open(path, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf" + self._HEADER.encode("utf-8")
+                     + "".join(f"Zeile {i}\n" for i in range(5)).encode("utf-8"))
+        out = self._fn()(path, head=12, tail=30)
+        self.assertEqual(out[0], "Windows PowerShell-Transkript, Start")
+        self.assertFalse(any("\ufeff" in ln for ln in out))
+        self.assertFalse(any(set(ln.strip()) == {"*"} for ln in out))
+
     def test_the_endzeit_timestamp_is_kept(self):
         body = self._HEADER + "".join(f"Zeile {i}\n" for i in range(200)) + (
             "**********************\n"

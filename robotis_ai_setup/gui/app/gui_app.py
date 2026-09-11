@@ -298,7 +298,10 @@ def _transcript_excerpt(path: str, head: int = 12, tail: int = 30) -> list:
     """
     _NOISE_PREFIXES = ("WSManStackVersion:", "PSRemotingProtocolVersion:",
                        "SerializationVersion:")
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    # utf-8-SIG: Windows PowerShell 5.1's Start-Transcript writes UTF-8 WITH a
+    # BOM, which plain "utf-8" keeps as U+FEFF on the first line — the opening
+    # `****` rule then no longer consists of stars and survived into the head.
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
         raw = fh.read().splitlines()
     lines = []
     for ln in raw:

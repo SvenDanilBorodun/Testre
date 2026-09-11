@@ -154,10 +154,45 @@ try {
 } catch {
     Write-Diag "wsl" "wsl --status raised: $_"
 }
+# `wsl --status` exiting 0 proves WSL is INSTALLED, not that it can RUN: it
+# exits 0 on a PC whose hypervisor is not running yet. On 2026-09-07 this check
+# printed „[OK] WSL2 aktiv" and finalize then failed `wsl --import` with
+# HCS_E_SERVICE_NOT_AVAILABLE in the same launch — two answers to one question,
+# the second one right. So ask the ONE verdict finalize asks
+# (virtualization_ready.ps1), and downgrade only on its PROOF rungs: a
+# RebootRequired or VirtualizationDisabled verdict is a WARNUNG with the same
+# remedy finalize gives, Ready is „aktiv", and Unknown — no proof either way,
+# including a missing helper or an unreadable CIM — says only what `wsl
+# --status` proved. Never a gate: this script stays a diagnostic.
+$wslVerdict = "Unknown"
 if ($wslOk) {
+    $virtHelper = Join-Path $PSScriptRoot 'virtualization_ready.ps1'
+    if (Test-Path $virtHelper) {
+        try {
+            . $virtHelper
+            $wslState = Get-RebootState -FlagPath (Join-Path $PSScriptRoot ".reboot_required")
+            $wslVerdict = Get-VirtualizationVerdict -State $wslState
+            Write-Diag "virtualization" (("verdict={0}" -f $wslVerdict) + "`n" + (@($wslState.Notes) -join "`n"))
+        } catch {
+            $wslVerdict = "Unknown"
+            Write-Diag "virtualization" "verdict unavailable: $_"
+        }
+    } else {
+        Write-Diag "virtualization" "virtualization_ready.ps1 not found next to preflight"
+    }
+}
+if (-not $wslOk) {
+    Emit WARNUNG "WSL2 noch nicht aktiv - wird bei der Einrichtung installiert (Neustart möglich)."
+} elseif ($wslVerdict -eq "RebootRequired") {
+    Emit WARNUNG "WSL2 ist installiert, aber noch nicht einsatzbereit - bitte den PC neu starten und EduBotics danach erneut öffnen."
+} elseif ($wslVerdict -eq "VirtualizationDisabled") {
+    # The remedy sentence is finalize_install.ps1's $VIRT_NEXTSTEP_DE VERBATIM
+    # (a test pins it): one remedy for one cause, whichever script says it.
+    Emit WARNUNG "WSL2 ist installiert, aber die Virtualisierung (VT-x/AMD-V) ist auf diesem PC nicht verfügbar. Bitte zuerst den PC neu starten. Hilft das nicht, muss die Virtualisierung im BIOS/UEFI aktiviert werden — das übernimmt üblicherweise die IT-Betreuung der Schule."
+} elseif ($wslVerdict -eq "Ready") {
     Emit OK "WSL2 aktiv"
 } else {
-    Emit WARNUNG "WSL2 noch nicht aktiv - wird bei der Einrichtung installiert (Neustart möglich)."
+    Emit OK "WSL2 installiert"
 }
 
 # ── 4. dockerd reachability (only if the EduBotics distro already exists) ───

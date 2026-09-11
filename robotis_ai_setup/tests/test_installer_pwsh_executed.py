@@ -19,6 +19,8 @@ on what they DO:
     with a FAKE wsl executable first on PATH (UTF-16LE on stdout, exit -1 like
     the real one): exit codes, whether `wsl --import` was ever invoked, the
     marker, the flag's content and mtime, the echoed transcript.
+  * PreflightExecutedTest   — preflight_system.ps1's WSL2 line asks the same
+    verdict.
 
 WHERE IT RUNS. ci.yml's python-tests job runs `unittest discover -s tests` on
 ubuntu-latest, and the GitHub Ubuntu 24.04 runner image ships PowerShell 7.x
@@ -618,6 +620,60 @@ class FinalizeEndToEndTest(_InstallerSandbox):
         with open(sb["flag"], "rb") as fh:
             self.assertEqual(fh.read(), b"dd-uninstall\r\n")
         self.assertAlmostEqual(os.path.getmtime(sb["flag"]), sb["flag_mtime"], delta=1.0)
+
+
+class PreflightExecutedTest(_InstallerSandbox):
+    """preflight_system.ps1's WSL2 line asks the verdict finalize asks."""
+
+    def _preflight(self, sb):
+        r = self._ps("wrapper.ps1", _WRAPPER_PS, "-Script",
+                     os.path.join(sb["scripts"], "preflight_system.ps1"), env=sb["env"])
+        return r.returncode, r.stdout.decode("utf-8", "replace")
+
+    def _virt_nextstep(self):
+        src = open(os.path.join(_SCRIPTS, "finalize_install.ps1"), encoding="utf-8-sig").read()
+        start = src.index('$VIRT_NEXTSTEP_DE = "') + len('$VIRT_NEXTSTEP_DE = "')
+        return src[start:src.index('"', start)]
+
+    def test_the_field_state_is_not_reported_as_active(self):
+        """The 2026-09-07 launch printed „[OK] WSL2 aktiv" and then failed the
+        import on HCS_E_SERVICE_NOT_AVAILABLE."""
+        sb = self._sandbox(flag="1", flag_age=7, boot_age=1800, hv="false", vfe="true")
+        rc, out = self._preflight(sb)
+        self.assertEqual(rc, 0, "a diagnostic never gates")
+        self.assertNotIn("[OK] WSL2 aktiv", out)
+        self.assertIn("[WARNUNG] WSL2 ist installiert, aber noch nicht einsatzbereit", out)
+        self.assertIn("neu starten", out)
+
+    def test_bios_off_names_the_same_remedy_finalize_gives(self):
+        sb = self._sandbox(flag="1", flag_age=7200, boot_age=600, hv="false", vfe="false")
+        _, out = self._preflight(sb)
+        self.assertNotIn("[OK] WSL2", out)
+        self.assertIn(self._virt_nextstep(), out,
+                      "one remedy for one cause: finalize's $VIRT_NEXTSTEP_DE verbatim")
+
+    def test_a_live_hypervisor_is_active(self):
+        sb = self._sandbox(flag=None, boot_age=600, hv="true", vfe="false")
+        _, out = self._preflight(sb)
+        self.assertIn("[OK] WSL2 aktiv", out)
+        self.assertNotIn("[WARNUNG] WSL2", out)
+
+    def test_no_proof_downgrades_nothing(self):
+        """Unknown — CIM unreadable, or the helper missing — must not produce a
+        warning: refuse only on proof. It also must not claim „aktiv"."""
+        sb = self._sandbox(flag=None, boot_age=600, hv="throws", vfe="throws")
+        _, out = self._preflight(sb)
+        self.assertIn("[OK] WSL2 installiert", out)
+        self.assertNotIn("[WARNUNG] WSL2", out)
+        os.remove(os.path.join(sb["scripts"], "virtualization_ready.ps1"))
+        _, out = self._preflight(sb)
+        self.assertIn("[OK] WSL2 installiert", out)
+        self.assertNotIn("[WARNUNG] WSL2", out)
+
+    def test_wsl_missing_keeps_its_old_wording(self):
+        sb = self._sandbox(flag=None, boot_age=600, status="1", hv="false", vfe="true")
+        _, out = self._preflight(sb)
+        self.assertIn("[WARNUNG] WSL2 noch nicht aktiv - wird bei der Einrichtung installiert", out)
 
 
 if __name__ == "__main__":

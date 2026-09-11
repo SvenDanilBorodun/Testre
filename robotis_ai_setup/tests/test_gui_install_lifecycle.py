@@ -1955,19 +1955,28 @@ class DockerDesktopRebootReasonTest(unittest.TestCase):
         # the Get-WindowsOptionalFeature loop in one function). The facts are now
         # gathered once and the PRIORITY is expressed as rung order inside the
         # two policy functions, so assert that directly — which is strictly
-        # stronger than the old positional check.
+        # stronger than the old positional check. Since 2026-09-11 each rung is
+        # a CALL to a named proof predicate (neither policy spells a proof
+        # itself — see OneRebootPredicateTest), so the order is read off those
+        # call sites.
+        self.assertIn("dd-uninstall",
+                      _ps1_function_body(code, "Test-DdUninstallOutstanding"),
+                      "the dd-uninstall reason must be read by the proof "
+                      "predicate both policies share")
         for fn in ("Test-RebootOutstanding", "Get-VirtualizationVerdict"):
             with self.subTest(policy=fn):
                 body = _ps1_function_body(code, fn)
                 self.assertLess(
-                    body.index("dd-uninstall"), body.index("EnablePending"),
+                    body.index("Test-DdUninstallOutstanding"),
+                    body.index("Test-FeatureEnablePending"),
                     f"{fn} must test the dd-uninstall reason BEFORE EnablePending "
                     f"— the feature store reads Enabled throughout a pending "
                     f"Docker-Desktop removal, so the cheaper signal would win and "
                     f"the import would run next to a half-removed Docker Desktop")
         verdict = _ps1_function_body(code, "Get-VirtualizationVerdict")
         self.assertLess(
-            verdict.index("dd-uninstall"), verdict.index("HypervisorPresent"),
+            verdict.index("Test-DdUninstallOutstanding"),
+            verdict.index("HypervisorPresent"),
             "a LIVE hypervisor must not short-circuit the half-removed "
             "Docker-Desktop guard — that is why rung 1 is rung 1")
         fin = RootCauseGuardTest._code("finalize_install.ps1")
@@ -2020,6 +2029,12 @@ class OneRebootPredicateTest(unittest.TestCase):
     disk space. These tests pin the one predicate, its LADDER ORDER (every rung is
     load-bearing and two of them exist only because the obvious order is wrong),
     and the dot-source contract that keeps a helper from exiting its caller.
+
+    Since 2026-09-11 they also pin the PROOF layer. The two policies are ladders
+    over the same three proofs, and each policy originally spelled all three
+    inline — two copies of every proof inside the one file whose header claims
+    its policies cannot drift apart. One state reader was never enough; one
+    spelling per proof is the other half.
     """
 
     _code = staticmethod(RootCauseGuardTest._code)
@@ -2089,6 +2104,90 @@ class OneRebootPredicateTest(unittest.TestCase):
         block = block[:block.index("class ")]
         self.assertNotIn("virtualization_ready.ps1", block)
 
+    # ── One spelling per proof ─────────────────────────────────────────────
+    # Both policies are ladders over the SAME three proofs. Each originally
+    # spelled all three INLINE, so every proof existed twice in one file — the
+    # drift this file exists to prevent, one scope smaller. The state is read
+    # once (Get-RebootState) AND each proof is written once (below); these pin
+    # the second half, in the house style of tests/test_ros_domain_twin_lockstep
+    # .py and test_activation_agent.py::TestGateParserLockstep — drive every
+    # reader off one table, and assert the intended divergence POSITIVELY.
+    #
+    # SOURCE-LEVEL on purpose. A Python re-implementation of the ladder would be
+    # a THIRD copy, free to drift from the .ps1 exactly like the two it replaced
+    # (and PowerShell is not installed in CI, so it could never be executed
+    # against the real thing either).
+    _PROOFS = ("Test-DdUninstallOutstanding", "Test-FeatureEnablePending",
+               "Test-NoBootSinceFlag")
+    # What a RE-INLINED proof must necessarily contain: a read of the proof's own
+    # state field, or the dd reason literal. HypervisorPresent and
+    # VirtFirmwareEnabled are deliberately absent — those two rungs are the
+    # verdict's OWN and must stay spelled there. Note the fence cannot be the
+    # bare token "NoBootSinceFlag"/"EnablePending": both are substrings of the
+    # predicate NAMES that replaced them, so it is the `$State.` read that is
+    # forbidden.
+    _INLINED_PROOF_TOKENS = ("$State.FlagReason", "$State.FlagPresent",
+                             "$State.TimeReadable", "$State.NoBootSinceFlag",
+                             "$State.EnablePending", "dd-uninstall")
+    _POLICIES = ("Test-RebootOutstanding", "Get-VirtualizationVerdict")
+
+    def test_every_proof_is_a_named_predicate(self):
+        code = self._virt()
+        for fn in self._PROOFS:
+            with self.subTest(proof=fn):
+                self.assertIn(
+                    "function %s {" % fn, code,
+                    f"{fn} must exist as ONE named predicate — an inline proof "
+                    f"is a copy, and the next edit to a copy does not follow on "
+                    f"the other policy, which is how finalize and verify came to "
+                    f"disagree about the state a fresh install lands in")
+
+    def test_neither_policy_re_spells_a_proof(self):
+        """The anti-re-inlining fence, in both directions.
+
+        If a policy stops CALLING a predicate, or starts reading a proof's state
+        field itself, the file is back to two spellings of one proof and the
+        2026-09-07 class of failure is reachable again inside a single file."""
+        code = self._virt()
+        for policy in self._POLICIES:
+            body = _ps1_function_body(code, policy)
+            for fn in self._PROOFS:
+                with self.subTest(policy=policy, proof=fn):
+                    self.assertIn(
+                        fn, body,
+                        f"{policy} must COMPOSE {fn}, not re-derive it — the "
+                        f"proofs are the shared layer, and a policy that stops "
+                        f"asking has forked it")
+            for token in self._INLINED_PROOF_TOKENS:
+                with self.subTest(policy=policy, inlined=token):
+                    self.assertNotIn(
+                        token, body,
+                        f"{policy} reads {token} directly: that is a proof "
+                        f"spelled a second time. Move it into one of "
+                        f"{self._PROOFS} and call that instead, or the two "
+                        f"policies can silently disagree again")
+
+    def test_the_proof_predicates_honour_the_caller_contract(self):
+        """The header's contract binds EVERY function here, not just the two the
+        callers name. A $null state answers $false rather than throwing (the
+        callers pass Get-RebootState's result straight through), no proof falls
+        off the end returning nothing, and nothing exits the caller."""
+        code = self._virt()
+        for fn in self._PROOFS:
+            body = _ps1_function_body(code, fn)
+            with self.subTest(proof=fn):
+                self.assertIn("if ($null -eq $State) { return $false }", body,
+                              f"{fn} must answer $false on a $null state — "
+                              f"Get-RebootState's callers pass its result "
+                              f"through unguarded")
+                self.assertIn("return $false", body,
+                              f"{fn} must answer on NO PROOF, not fall off the "
+                              f"end returning nothing")
+                self.assertNotRegex(
+                    body, r"(?m)^\s*(exit|throw)\b",
+                    f"{fn} is dot-sourced into its caller; an exit there ends "
+                    f"the INSTALLER mid-run")
+
     # ── The ladder. ORDER IS THE WHOLE DESIGN. ─────────────────────────────
     def test_the_verdict_returns_exactly_the_four_vocabulary_words(self):
         body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
@@ -2106,7 +2205,7 @@ class OneRebootPredicateTest(unittest.TestCase):
         came first — trading one blind spot for another."""
         body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
         self.assertLess(
-            body.index("EnablePending"), body.index("HypervisorPresent"),
+            body.index("Test-FeatureEnablePending"), body.index("HypervisorPresent"),
             "EnablePending must be tested BEFORE the HypervisorPresent shortcut")
 
     def test_ground_truth_outranks_the_boot_time_inference(self):
@@ -2115,10 +2214,12 @@ class OneRebootPredicateTest(unittest.TestCase):
         Windows Fast Startup makes LastBootUpTime unreliable, so trusting the
         proxy over ground truth tells a working PC to reboot forever."""
         body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
-        # Rung 1 also reads NoBootSinceFlag, so anchor on rung 4's own clause —
-        # the bare flag-time rung, the one that must NOT outrank ground truth.
-        rung4 = "$State.FlagPresent -and $State.TimeReadable -and $State.NoBootSinceFlag"
-        self.assertIn(rung4, body, "rung 4's clause changed shape")
+        # Rung 1 also rests on "no boot since the flag", so anchor on rung 4's
+        # OWN call — the bare flag-time rung, the one that must NOT outrank
+        # ground truth. (Before 2026-09-11 this anchored on the inline clause
+        # `$State.FlagPresent -and …`, which the predicate extraction replaced.)
+        rung4 = "Test-NoBootSinceFlag -State $State"
+        self.assertIn(rung4, body, "rung 4's call changed shape")
         self.assertLess(
             body.index("HypervisorPresent"), body.index(rung4),
             "the Ready rung must precede the flag-time RebootRequired rung")
@@ -2154,12 +2255,21 @@ class OneRebootPredicateTest(unittest.TestCase):
             "hiccup proceed to the import, which classifies its own failure")
 
     def test_reboot_outstanding_is_proof_only(self):
-        body = _ps1_function_body(self._virt(), "Test-RebootOutstanding")
+        code = self._virt()
+        body = _ps1_function_body(code, "Test-RebootOutstanding")
         self.assertIn("return $false", body,
                       "every unreadable state must answer $false — that is "
                       "verify_system's documented SAFE direction")
-        self.assertIn("TimeReadable", body,
-                      "a time comparison may only count when the clock was read")
+        # The clock guard moved WITH the proofs on 2026-09-11 (this policy now
+        # composes them), so assert it in both time-dependent predicates rather
+        # than in the policy that no longer spells them.
+        for fn in ("Test-DdUninstallOutstanding", "Test-NoBootSinceFlag"):
+            with self.subTest(proof=fn):
+                self.assertIn(
+                    "TimeReadable", _ps1_function_body(code, fn),
+                    f"{fn} compares times: it may only count when the clock was "
+                    f"actually read, or an unreadable clock manufactures a "
+                    f"benign pending-reboot verdict over a broken install")
 
     # ── The classifier reads CODES, never German prose ─────────────────────
     def test_the_failure_classifier_matches_codes_not_messages(self):

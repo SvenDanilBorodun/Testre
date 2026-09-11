@@ -39,8 +39,15 @@
 
 # ── Facts, gathered once ────────────────────────────────────────────────────
 # The ONLY place that touches the flag, the feature store and CIM. Everything
-# else in this file is pure policy over this hashtable, which is what makes the
-# two policies below incapable of drifting apart again.
+# else in this file is pure policy over this hashtable.
+#
+# That alone is NOT what makes the two policies below incapable of drifting
+# apart — it only settles the STATE. Each policy is a ladder over the same three
+# PROOFS, and until 2026-09-11 both spelled all three inline, i.e. this file
+# carried two copies of every proof while claiming it could not. The proofs are
+# now named predicates (Test-DdUninstallOutstanding, Test-FeatureEnablePending,
+# Test-NoBootSinceFlag) and each is spelled ONCE; one state reader plus one
+# spelling per proof is what closes the seam.
 #
 # $FlagPath may legitimately NOT EXIST: the verdict's virtualization rungs are
 # flag-independent, so callers run this unconditionally rather than inside a
@@ -140,42 +147,108 @@ function Get-RebootState {
     return $state
 }
 
-# ── Policy 1: is a reboot outstanding? Proof only. ─────────────────────────
-# Consumed by verify_system.ps1 (to downgrade an expected FAIL to a benign
-# "Neustart steht noch aus") and by the verdict below. Returns $true ONLY on
-# proof; every unreadable state returns $false, which is verify_system's
-# documented SAFE direction (manufacturing a benign verdict out of an unknown
-# state is how the Audit-H23 regression survived).
+# ── The three proofs, each spelled ONCE ─────────────────────────────────────
+# The two policies below are ladders over the SAME three proofs. Until
+# 2026-09-11 each policy spelled all three INLINE — two copies of every proof,
+# in the one file whose header claims its policies are "incapable of drifting
+# apart again". That claim was true of the STATE (Get-RebootState is the only
+# reader of the flag, the feature store and CIM) and false of the PROOFS: a
+# future edit to one copy would not have followed on the other, which is the
+# exact defect class this file exists to eliminate, one scope smaller.
+#
+# The CALLER CONTRACT in the header governs every function here, not only the
+# two the callers name: each predicate is pure over the hashtable, tolerates a
+# $null state by answering $false, makes no native calls, and contains no
+# `exit`, no `throw` and no German.
+#
+# A pending Docker-Desktop removal. The feature store is BLIND to it (WSL/VMP
+# read Enabled throughout), so the flag's REASON plus "no boot since it was
+# written" is the only evidence there is.
+function Test-DdUninstallOutstanding {
+    param(
+        [hashtable]$State
+    )
+    if ($null -eq $State) { return $false }
+    if ($State.FlagReason -eq "dd-uninstall" -and $State.TimeReadable -and $State.NoBootSinceFlag) {
+        return $true
+    }
+    return $false
+}
+
+# EnablePending is DIRECT PROOF that a feature enable is waiting on a reboot. It
+# is the only signal the old finalize looked at, and it stays the FIRST
+# virtualization-independent rung of the verdict — never demote it.
+function Test-FeatureEnablePending {
+    param(
+        [hashtable]$State
+    )
+    if ($null -eq $State) { return $false }
+    if ($State.EnablePending) { return $true }
+    return $false
+}
+
+# The flag is present and nothing has booted since it was written. An INFERENCE,
+# not proof of anything mechanical: Windows Fast Startup makes LastBootUpTime an
+# unreliable proxy, which is why the verdict ranks this BELOW ground truth while
+# verify_system is content with it.
+function Test-NoBootSinceFlag {
+    param(
+        [hashtable]$State
+    )
+    if ($null -eq $State) { return $false }
+    if ($State.FlagPresent -and $State.TimeReadable -and $State.NoBootSinceFlag) { return $true }
+    return $false
+}
+
+# ── Policy 1: is a reboot outstanding? Proof only. ──────────────────────────
+# Consumed by verify_system.ps1, to downgrade an expected FAIL to a benign
+# "Neustart steht noch aus".
+#
+# Get-VirtualizationVerdict does NOT call this. It SHARES the three predicates
+# above instead, because its ground-truth rung must sit BETWEEN proof 2
+# (EnablePending) and proof 3 (no boot since the flag): a single boolean cannot
+# express a ladder that has another rung in the middle of it. So the two
+# policies compose the same proofs in different orders — what neither may ever
+# do again is re-spell a proof.
+#
+# THE ONE INTENDED DIVERGENCE, deliberate and not drift: when the hypervisor is
+# LIVE and a reboot is still outstanding, this returns $true (verify_system
+# reports the benign "Neustart steht noch aus") while the verdict returns
+# "Ready" (finalize may import, because ground truth beats the proxy). Both
+# answers are correct about their own question — "is a reboot still owed?" and
+# "can this PC run WSL2 right now?" — and collapsing them into one answer is
+# how the 2026-09-07 failure happened in the first place.
+#
+# Returns $true ONLY on proof; every unreadable state returns $false, which is
+# verify_system's documented SAFE direction (manufacturing a benign verdict out
+# of an unknown state is how the Audit-H23 regression survived).
 function Test-RebootOutstanding {
     param(
         [hashtable]$State
     )
     if ($null -eq $State) { return $false }
-    # A pending Docker-Desktop removal: the feature store cannot see it, so the
-    # flag's REASON plus "no boot since" is the only evidence there is.
-    if ($State.FlagReason -eq "dd-uninstall" -and $State.TimeReadable -and $State.NoBootSinceFlag) {
-        return $true
-    }
-    if ($State.EnablePending) { return $true }
-    if ($State.FlagPresent -and $State.TimeReadable -and $State.NoBootSinceFlag) { return $true }
+    if (Test-DdUninstallOutstanding -State $State) { return $true }
+    if (Test-FeatureEnablePending -State $State) { return $true }
+    if (Test-NoBootSinceFlag -State $State) { return $true }
     return $false
 }
 
-# ── Policy 2: the verdict ladder. ORDER IS LOAD-BEARING. ───────────────────
-#   1. dd-uninstall + no boot since the flag -> RebootRequired
+# ── Policy 2: the verdict ladder. ORDER IS LOAD-BEARING. ────────────────────
+#   1. Test-DdUninstallOutstanding       -> RebootRequired
 #      FIRST, so a live hypervisor cannot short-circuit the half-removed
-#      Docker-Desktop guard this branch exists to protect.
-#   2. a feature reads EnablePending      -> RebootRequired
+#      Docker-Desktop guard this proof exists to protect.
+#   2. Test-FeatureEnablePending         -> RebootRequired
 #      Direct proof. ABOVE the hypervisor rung: a PC running a hypervisor for
 #      Hyper-V's own sake would otherwise skip the only check that has ever
 #      worked here.
-#   3. HypervisorPresent -eq $true        -> Ready
+#   3. HypervisorPresent -eq $true       -> Ready
 #      GROUND TRUTH, deliberately ABOVE the flag-time rung, which is only an
 #      INFERENCE: Windows Fast Startup makes LastBootUpTime an unreliable proxy,
 #      and trusting the proxy over ground truth tells a working PC to reboot
-#      forever.
-#   4. no boot since the flag             -> RebootRequired
-#   5. VirtFirmwareEnabled -eq $false     -> VirtualizationDisabled
+#      forever. This rung is why the verdict cannot delegate to
+#      Test-RebootOutstanding — it lands BETWEEN two of that boolean's proofs.
+#   4. Test-NoBootSinceFlag              -> RebootRequired
+#   5. VirtFirmwareEnabled -eq $false    -> VirtualizationDisabled
 #      Sound ONLY here, below rung 3 — see the masking note in Get-RebootState.
 #      `$null -eq $false` is $false in PowerShell, so an absent/unreadable
 #      property can never produce this verdict; only a genuine $false does.
@@ -191,14 +264,10 @@ function Get-VirtualizationVerdict {
     )
     if ($null -eq $State) { return "Unknown" }
 
-    if ($State.FlagReason -eq "dd-uninstall" -and $State.TimeReadable -and $State.NoBootSinceFlag) {
-        return "RebootRequired"
-    }
-    if ($State.EnablePending) { return "RebootRequired" }
+    if (Test-DdUninstallOutstanding -State $State) { return "RebootRequired" }
+    if (Test-FeatureEnablePending -State $State) { return "RebootRequired" }
     if ($State.HypervisorPresent -eq $true) { return "Ready" }
-    if ($State.FlagPresent -and $State.TimeReadable -and $State.NoBootSinceFlag) {
-        return "RebootRequired"
-    }
+    if (Test-NoBootSinceFlag -State $State) { return "RebootRequired" }
     if ($State.VirtFirmwareEnabled -eq $false) { return "VirtualizationDisabled" }
     return "Unknown"
 }

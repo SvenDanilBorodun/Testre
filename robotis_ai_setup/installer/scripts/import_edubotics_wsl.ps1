@@ -50,6 +50,19 @@ function Write-OK   { param([string]$msg) Write-Host "   OK: $msg" -ForegroundCo
 function Write-Warn { param([string]$msg) Write-Host "   WARN: $msg" -ForegroundColor Yellow }
 function Write-FAIL { param([string]$msg) Write-Host "   FAIL: $msg" -ForegroundColor Red }
 
+# Shared `wsl` failure classifier (Get-WslFailureClass). Dot-sourced SOFTLY:
+# unlike finalize_install.ps1, this script is also the installer's [Run] Step 4,
+# where hard-failing a fresh install over a missing DIAGNOSTIC file would be the
+# worse trade. Absent helper => $failClass stays "" => byte-identical wording to
+# before this change. Test-Path first either way (Controlled Folder Access can
+# leave a partially-copied {app}\scripts).
+$virtHelper = Join-Path $PSScriptRoot 'virtualization_ready.ps1'
+$virtHelperOk = $false
+if (Test-Path $virtHelper) {
+    . $virtHelper
+    $virtHelperOk = $true
+}
+
 # Bail if prerequisites phase still needs a reboot (WSL2 not fully up yet).
 #
 # -PostReboot bypasses this guard. finalize_install.ps1 keeps .reboot_required
@@ -273,14 +286,49 @@ if (-not $skipImport) {
         Write-Host "   (kein SHA256-Sidecar gefunden: $sha256File)" -ForegroundColor Yellow
     }
 
-    wsl --import $DistroName $InstallRoot $RootfsPath --version 2
-    if ($LASTEXITCODE -ne 0) {
-        Write-FAIL "wsl --import fehlgeschlagen (exit $LASTEXITCODE)"
-        Write-Host "   Prüfen Sie: Antivirus-Ausnahme, genug Speicherplatz, WSL2 aktiviert." -ForegroundColor Red
+    # CAPTURE the import's own words, then echo them VERBATIM so the transcript
+    # keeps exactly the evidence it had before, and classify what they say.
+    # Until 2026-09-11 this was a bare call whose output nobody read, and the
+    # failure branch printed ONE hardcoded triad for every cause — so a dead
+    # hypervisor was reported as a disk/antivirus problem, in a transcript where
+    # the 20 GB disk precheck and the rootfs SHA-256 had both just PASSED.
+    #
+    # `2>&1` + NUL-strip is this file's existing house pattern for wsl.exe (see
+    # the `wsl --list --quiet` reads above): its output can be BOM-less UTF-16LE.
+    # EAP is Continue in this file (see the note at the top), so merging stderr
+    # cannot become a terminating NativeCommandError. -Width 4096 matters: the
+    # default wraps at the host width and the code token we classify on sits at
+    # column 79 of its line.
+    $importOut = ((& wsl --import $DistroName $InstallRoot $RootfsPath --version 2 2>&1 | Out-String -Width 4096) -replace "`0", "")
+    $importExit = $LASTEXITCODE
+    if (-not [string]::IsNullOrWhiteSpace($importOut)) { Write-Host $importOut.TrimEnd() }
+    if ($importExit -ne 0) {
+        # Classify on the ERROR CODE, never the message: the field transcript
+        # carried a German sentence beside an ASCII code token, which is the same
+        # reason install_prerequisites.ps1 deleted its English-only
+        # `systeminfo | Select-String "Hyper-V Requirements"` probe.
+        $failClass = ""
+        if ($virtHelperOk) { $failClass = Get-WslFailureClass -Text $importOut }
+        Write-FAIL "wsl --import fehlgeschlagen (exit $importExit)"
+        if ($failClass -eq "hypervisor") {
+            Write-Host "   Der Hypervisor von Windows läuft nicht — ohne ihn kann WSL2 keine" -ForegroundColor Red
+            Write-Host "   Umgebung anlegen. Dafür gibt es genau zwei Ursachen:" -ForegroundColor Red
+            Write-Host "   1. Der PC wurde nach der WSL2-Installation noch nicht neu gestartet." -ForegroundColor Red
+            Write-Host "   2. Die Virtualisierung (VT-x/AMD-V) ist im BIOS/UEFI deaktiviert." -ForegroundColor Red
+            Write-Host "   Bitte zuerst den PC neu starten. Hilft das nicht, bitte die IT-Betreuung" -ForegroundColor Red
+            Write-Host "   der Schule bitten, die Virtualisierung im BIOS/UEFI zu aktivieren." -ForegroundColor Red
+        } else {
+            Write-Host "   Prüfen Sie: Antivirus-Ausnahme, genug Speicherplatz, WSL2 aktiviert." -ForegroundColor Red
+        }
         # Clean up partial VHDX to prevent "import over broken state" on retry.
         if (Test-Path $InstallRoot) {
             try { Remove-Item -Path (Join-Path $InstallRoot 'ext4.vhdx') -Force -ErrorAction SilentlyContinue } catch {}
         }
+        # 11, not 1, for the hypervisor class — finalize_install.ps1 maps it to
+        # its own $EXIT_VIRT and the GUI turns that into the German reboot/BIOS
+        # dialog. Exactly mirrors the `exit 12` consent refusal above: Inno's
+        # [Run] Step 4 ignores exit codes, so this code is finalize-only.
+        if ($failClass -eq "hypervisor") { exit 11 }
         exit 1
     }
     Write-OK "Distro imported"

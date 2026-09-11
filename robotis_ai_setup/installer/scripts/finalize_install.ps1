@@ -16,10 +16,34 @@
 #    0  = done — import + pull both succeeded, .reboot_required cleared
 #   10  = a host reboot is still required; nothing was installed yet.
 #         .reboot_required is left SET (see the lifecycle comment below)
+#   11  = this PC has no usable hypervisor. The TWO remedies are a reboot and
+#         enabling virtualization (VT-x/AMD-V) in the BIOS/UEFI, and NOTHING
+#         available to us can tell them apart — `wsl` reports the same
+#         HCS_E_SERVICE_NOT_AVAILABLE for both, so the student is given both,
+#         reboot first. Distinct from 10 because nobody reboots their way out
+#         of a disabled BIOS setting; distinct from 1 because both remedies
+#         are concrete and safe to try.
 #   12  = the rootfs must be re-imported, which DESTROYS the student's data, and
 #         nobody consented — the one actionable remedy is "run the installer
 #         again". Distinct from 1 so the GUI can say so instead of "failed".
 #   1   = failed (any other reason; the transcript tail carries the cause)
+#
+# WHY THE REBOOT QUESTION IS NO LONGER ASKED HERE (2026-09-07, German school PC):
+# this script used to own a private Test-RebootStillPending that decided „did
+# they reboot?" from the WSL/VMP feature store's EnablePending state, while
+# verify_system.ps1 decided the same question from flag-mtime vs
+# Win32_OperatingSystem.LastBootUpTime — and verify's own comment claimed the
+# two were the same check. They disagree on exactly ONE state, and it is the
+# state a fresh install lands in: install_prerequisites.ps1 sets
+# .reboot_required because `wsl --install --no-distribution` RAN, after which
+# BOTH features read Enabled. So this script declared the reboot done, ran
+# `wsl --import`, and got
+#     Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE
+# on every launch while telling the student to check their disk space — a disk
+# whose 20 GB precheck had passed four lines earlier in the same transcript.
+# Both halves now consume virtualization_ready.ps1, which asks the question
+# that actually matters — is the hypervisor LIVE — instead of inferring a
+# reboot from a proxy that the one writer who matters does not set.
 #
 # .reboot_required is NOT an exit code — it means "the deferred work is not
 # finished", which is true of EVERY non-zero exit above. Routing on the flag
@@ -67,6 +91,16 @@ $ErrorActionPreference = "Continue"
 $EXIT_DONE    = 0
 $EXIT_REBOOT  = 10
 $EXIT_CONSENT = 12
+$EXIT_VIRT    = 11
+
+# The $EXIT_VIRT remedy, declared ONCE. Both paths that exit 11 (the
+# pre-import verdict and import's own classification) must say the SAME thing —
+# a duplicated German remedy that drifts is how „Prüfen Sie: Antivirus-Ausnahme,
+# genug Speicherplatz" came to be printed over a hypervisor fault in the first
+# place. The reboot leads because it is free and is the common case on a fresh
+# install; the BIOS half follows because no reboot can fix it.
+$VIRT_PROBLEM_DE  = "Die Virtualisierung ist auf diesem PC nicht verfügbar (VT-x/AMD-V)."
+$VIRT_NEXTSTEP_DE = "Bitte zuerst den PC neu starten. Hilft das nicht, muss die Virtualisierung im BIOS/UEFI aktiviert werden — das übernimmt üblicherweise die IT-Betreuung der Schule."
 $EXIT_FAILED  = 1
 
 # ── Marker: Proves the script actually started and survived long enough to
@@ -87,7 +121,20 @@ try {
 # ───────────────────────────────────────────────────────────────────────────
 $transcriptActive = $false
 try {
-    if (Test-Path $LogPath) { Remove-Item $LogPath -Force -ErrorAction SilentlyContinue }
+    # ROTATE, never delete. Start-Transcript -Force overwrites anyway, so the
+    # old Remove-Item bought nothing and cost the PREVIOUS attempt's evidence —
+    # and on a machine that LOOPS (the 2026-09-07 failure repeated identically
+    # across GUI launches) the last transcript is the least informative one,
+    # because it cannot show what changed. One generation is enough:
+    # .prev.log answers „what did the attempt before this one say".
+    if (Test-Path $LogPath) {
+        $prevLog = [System.IO.Path]::ChangeExtension($LogPath, '.prev.log')
+        try {
+            Move-Item -LiteralPath $LogPath -Destination $prevLog -Force -ErrorAction Stop
+        } catch {
+            Remove-Item $LogPath -Force -ErrorAction SilentlyContinue
+        }
+    }
     Start-Transcript -Path $LogPath -Force -IncludeInvocationHeader | Out-Null
     $transcriptActive = $true
 } catch {
@@ -143,17 +190,24 @@ function Test-ImagesPresent {
 
 # Fail the run with a German next-action for the student, record it in the
 # marker, and exit non-zero.
+#
+# $ExitCode defaults to $EXIT_FAILED and exists so the ONE marker writer can
+# also serve the routed non-zero outcomes ($EXIT_VIRT). A second inline
+# Set-Content of the FAILED marker shape would be a copy of exactly the kind
+# this change set exists to delete, and the copy would be the one that forgets
+# -Encoding UTF8 (see the marker paragraph in the header).
 function Fail-WithNextAction {
-    param([string]$Problem, [string]$NextStep)
+    param([string]$Problem, [string]$NextStep, [int]$ExitCode = $EXIT_FAILED)
     Write-FAIL $Problem
     Write-Host "   Nächster Schritt: $NextStep" -ForegroundColor Yellow
     Write-Host "   Protokoll: $LogPath"
     try {
         Set-Content -LiteralPath $MarkerPath -Value ("FAILED {0}`n{1}`n{2}" -f (Get-Date).ToString("o"), $Problem, $NextStep) -Encoding UTF8 -Force
     } catch { }
-    # $EXIT_FAILED, not a bare literal — the exit codes ARE the GUI contract, and
-    # a second spelling of the same number is how the two drift apart.
-    exit $EXIT_FAILED
+    # $ExitCode (default $EXIT_FAILED), never a bare literal — the exit codes ARE
+    # the GUI contract, and a second spelling of the same number is how the two
+    # drift apart.
+    exit $ExitCode
 }
 
 # ── Shared dockerd-readiness helper (dot-sourced; caller must keep EAP=Continue).
@@ -194,77 +248,29 @@ if (-not (Test-Path $readyHelper)) {
 # which is why the import proceeds here via an explicit -PostReboot switch.
 $flagPath = Join-Path $PSScriptRoot ".reboot_required"
 
-# True only when a Windows feature enable is genuinely still waiting on a
-# reboot. `wsl --status` is NOT a discriminator here — it exits 0 on a machine
-# whose WSL feature is merely EnablePending, where no distro can be imported
-# yet. Ask the feature store instead: it is the same signal
-# install_prerequisites.ps1 used to write the flag in the first place. An
-# unreadable feature store (COMException while a servicing op is pending) is
-# settled by flag-mtime vs last-boot-time, mirroring the dd-uninstall branch.
-function Test-RebootStillPending {
-    # The flag CONTENT names WHY the reboot was requested. "dd-uninstall" is
-    # migrate_from_docker_desktop.ps1's reason (Docker Desktop's uninstaller
-    # returned 3010 — its removal completes on the next boot). The feature-store
-    # probe below is BLIND to that state: WSL/VMP read Enabled throughout a
-    # pending DD removal, so it would declare the reboot done and let the import
-    # run next to a half-removed Docker Desktop — the exact entanglement the
-    # flag was written to prevent. For that reason, discriminate on TIME
-    # instead: a boot AFTER the flag was written means the reboot happened (and
-    # whatever remains of DD will not be fixed by another one — proceed rather
-    # than loop); no boot since the flag means the reboot is genuinely still
-    # outstanding, whatever the student clicked. Falls through to the feature
-    # checks either way a) so a combined reason (DD 3010 + a feature
-    # EnablePending in the same session) still defers, and b) on any read error.
-    try {
-        $flagReason = (Get-Content -Path $flagPath -TotalCount 1 -ErrorAction Stop)
-        if ($null -ne $flagReason -and $flagReason.Trim() -eq "dd-uninstall") {
-            $flagTime = (Get-Item -Path $flagPath -ErrorAction Stop).LastWriteTime
-            $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
-            Write-Host "   Docker-Desktop-Entfernung: Markierung $($flagTime.ToString('s')), letzter Start $($bootTime.ToString('s'))"
-            if ($bootTime -le $flagTime) {
-                Write-Host "   Seit der Markierung wurde nicht neu gestartet — die Docker-Desktop-Entfernung ist noch nicht abgeschlossen."
-                return $true
-            }
-        }
-    } catch {
-        Write-Host "   (Neustart-Grund nicht lesbar: $_ — Windows-Features werden geprüft)"
-    }
-    $pending = $false
-    $unreadable = $false
-    foreach ($feature in @("VirtualMachinePlatform", "Microsoft-Windows-Subsystem-Linux")) {
-        try {
-            $state = (Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction Stop).State
-            Write-Host "   $feature = $state"
-            if ($state -eq "EnablePending") { $pending = $true }
-        } catch {
-            $unreadable = $true
-            Write-Host "   ($feature-Status nicht lesbar: $_)"
-        }
-    }
-    if ($pending) { return $true }
-    if ($unreadable) {
-        # The feature store stays unreadable (COMException) for as long as a
-        # servicing operation is pending — which is EXACTLY the state the flag
-        # was written in, and `wsl --status` exits 0 throughout it, so the
-        # caller's wsl verdict cannot discriminate (we are only ever called
-        # when wsl responded — the old `-not $WslResponds` fallback was dead
-        # code at the single call site). Discriminate on TIME like the
-        # dd-uninstall branch: no boot since the flag was written -> the
-        # reboot is genuinely still outstanding; a boot after it -> proceed
-        # (an eternally-unreadable store must not loop the student through
-        # reboots forever).
-        try {
-            $flagTime = (Get-Item -Path $flagPath -ErrorAction Stop).LastWriteTime
-            $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
-            if ($bootTime -le $flagTime) {
-                Write-Host "   Feature-Status nicht lesbar und seit der Markierung wurde nicht neu gestartet — Neustart steht noch aus."
-                return $true
-            }
-        } catch {
-            Write-Host "   (Boot-Zeit nicht lesbar: $_)"
-        }
-    }
-    return $false
+# ── The reboot / virtualization verdict lives in ONE place ─────────────────
+# virtualization_ready.ps1 owns Get-RebootState (the only reader of the flag,
+# the feature store and CIM), Test-RebootOutstanding (proof-only boolean) and
+# Get-VirtualizationVerdict (the Ready / RebootRequired / VirtualizationDisabled
+# / Unknown ladder). verify_system.ps1 consumes the SAME file — that is the
+# whole point, see the drift narrative in the header. Test-Path FIRST, mirroring
+# the wsl_docker_ready.ps1 dot-source above: Controlled Folder Access can leave
+# a partially-copied {app}\scripts, and an unguarded dot-source of a missing file
+# THROWS. Placed after Fail-WithNextAction so the failure is reportable in German
+# instead of reaching the GUI as an empty transcript.
+$virtHelper = Join-Path $PSScriptRoot 'virtualization_ready.ps1'
+if (-not (Test-Path $virtHelper)) {
+    Fail-WithNextAction "Die Datei virtualization_ready.ps1 fehlt in $PSScriptRoot." "Die Installation ist unvollständig. Bitte den EduBotics-Installer erneut ausführen."
+}
+. $virtHelper
+
+# Render Get-RebootState's German fact lines into the transcript. Deliberately
+# LOCAL to this script: virtualization_ready.ps1 must never call a Write-*
+# helper its callers define (the lesson wsl_docker_ready.ps1 records — it would
+# blow up in whichever caller has not defined one).
+function Write-RebootNotes {
+    param([hashtable]$State)
+    foreach ($note in @($State.Notes)) { Write-Host "   $note" }
 }
 
 try {
@@ -329,12 +335,13 @@ try {
         #
         # So take custody instead of choosing one horn: snapshot the flag, and
         # restore it ONLY when the reboot it asks for is GENUINELY outstanding
-        # (Test-RebootStillPending, the same discriminator used below). A stale
-        # flag stays deleted, which is what keeps the reboot loop closed.
+        # (Test-RebootOutstanding, the same proof-only predicate the verdict gate
+        # below is built on). A stale flag stays deleted, which is what keeps the
+        # reboot loop closed.
         $flagSnapshot = $null
         if (Test-Path $flagPath) {
             Write-Step "Vorhandene Neustart-Markierung wird geprüft..."
-            if (Test-RebootStillPending) {
+            if (Test-RebootOutstanding -State (Get-RebootState -FlagPath $flagPath)) {
                 try {
                     $flagSnapshot = @{
                         Content = [string](Get-Content -Path $flagPath -Raw -ErrorAction Stop)
@@ -352,7 +359,7 @@ try {
         if (($null -ne $flagSnapshot) -and (-not (Test-Path $flagPath))) {
             # The child dropped a flag it did not write. Put it back verbatim —
             # CONTENT carries the reason ("dd-uninstall") and the ORIGINAL write
-            # time is what Test-RebootStillPending compares against the last boot.
+            # time is what Get-RebootState compares against the last boot.
             # Re-writing it fresh would reset both and declare the reboot done.
             try {
                 Set-Content -Path $flagPath -Value $flagSnapshot.Content -NoNewline -Force
@@ -393,22 +400,53 @@ try {
         Write-OK "Voraussetzungen installiert"
     }
 
-    # A flag surviving to this point means an EARLIER run asked for a reboot.
-    # Decide whether it already happened — if not, stop BEFORE the import (which
-    # would fail cryptically) and keep the flag set so the GUI can say so.
-    if (Test-Path $flagPath) {
-        Write-Step "Neustart-Status wird geprüft..."
-        if (Test-RebootStillPending) {
-            Write-Step "NEUSTART ERFORDERLICH: Bitte den PC neu starten und EduBotics erneut öffnen."
-            exit $EXIT_REBOOT
-        }
-        Write-OK "Neustart bereits erfolgt — die Windows-Features sind aktiv."
+    # Can this PC actually run WSL2 right now? Stop BEFORE the import if not —
+    # an import into a dead hypervisor fails cryptically, and the flag stays set
+    # either way so the GUI's entry check still re-routes here next launch.
+    #
+    # UNCONDITIONAL — deliberately NOT gated on `Test-Path $flagPath` any more.
+    # The verdict's virtualization rungs are flag-INDEPENDENT, and the
+    # 2026-09-07 failure (a live-looking feature store over a dead hypervisor)
+    # needs no flag to happen. An absent flag is simply one more fact.
+    #
+    # The deleted line here used to read „Neustart bereits erfolgt — die
+    # Windows-Features sind aktiv." That sentence was the single most misleading
+    # line in the field log: it is what the script printed immediately before
+    # importing into a hypervisor that was not running.
+    Write-Step "Virtualisierung und Neustart-Status werden geprüft..."
+    $rebootState = Get-RebootState -FlagPath $flagPath
+    Write-RebootNotes -State $rebootState
+    $virtVerdict = Get-VirtualizationVerdict -State $rebootState
+    Write-Host "   Ergebnis: $virtVerdict"
+    if ($virtVerdict -eq "RebootRequired") {
+        Write-Step "NEUSTART ERFORDERLICH: Bitte den PC neu starten und EduBotics erneut öffnen."
+        exit $EXIT_REBOOT
+    }
+    if ($virtVerdict -eq "VirtualizationDisabled") {
+        # Reached ONLY below the HypervisorPresent rung, so
+        # VirtualizationFirmwareEnabled is not being read through a hypervisor
+        # that masks it. Fail-WithNextAction (not an inline marker write) keeps
+        # ONE marker writer — a second copy is the class of bug this change set
+        # exists to remove. The remedy leads with the reboot because it is free,
+        # and because a false refusal here then self-heals on the next launch.
+        Fail-WithNextAction $VIRT_PROBLEM_DE $VIRT_NEXTSTEP_DE $EXIT_VIRT
+    }
+    if ($virtVerdict -eq "Unknown") {
+        # Refuse only on PROOF. A WMI hiccup must not brick a working PC; the
+        # import classifies its own failure as the backstop. Say so, so the
+        # transcript records that we proceeded WITHOUT proof.
+        Write-Warn "Virtualisierungsstatus konnte nicht geprüft werden — die Einrichtung wird trotzdem fortgesetzt."
+    } else {
+        Write-OK "Virtualisierung ist aktiv — die Einrichtung wird fortgesetzt."
     }
 
     # Phase 1: Import the distro.
     # -PostReboot: the flag above is still set on purpose (we clear it only on
-    # full success), and we have just proven the reboot already happened — so
-    # import must not defer on it. -AllowDestructiveReimport is forwarded ONLY
+    # full success), and the verdict gate above has just ruled out an outstanding
+    # reboot — Ready (proof the hypervisor is live) or Unknown (no proof either
+    # way, which proceeds by design and is caught by import's own
+    # classification) — so import must not defer on the flag.
+    # -AllowDestructiveReimport is forwarded ONLY
     # when the GUI obtained the student's data-loss consent; without it import
     # refuses a rootfs-mismatch wipe, which is the intended default.
     # HASHTABLE splat, never an array: array splatting binds POSITIONALLY, so
@@ -443,6 +481,18 @@ try {
         Write-Host "   Der Installer fragt vorher nach Ihrer Zustimmung — laden Sie Ihre"
         Write-Host "   Datensätze vorher in der Web-Oberfläche zu Hugging Face hoch."
         exit $EXIT_CONSENT
+    }
+    # import classified its OWN failure: `wsl --import` reported a dead Windows
+    # hypervisor (HCS_E_SERVICE_NOT_AVAILABLE / 0x80370102 / …). Pass it through
+    # rather than flattening it into $EXIT_FAILED, for the same reason the 12
+    # above is passed through: the remedy is specific and the GUI shows it as its
+    # own message. This is the BACKSTOP for a verdict of Unknown — the gate above
+    # proceeds without proof by design, so something has to catch the real answer.
+    # Deliberately placed BELOW the 12 branch: both read $importRc, and
+    # test_finalize_consent_branch_actually_exits_the_consent_code matches the
+    # FIRST `if ($importRc -eq N)` block in this file.
+    if ($importRc -eq $EXIT_VIRT) {
+        Fail-WithNextAction $VIRT_PROBLEM_DE $VIRT_NEXTSTEP_DE $EXIT_VIRT
     }
     if (-not (Test-DistroRegistered $DistroName)) {
         # Next step names the two known NON-transient causes (SHA-mismatch of

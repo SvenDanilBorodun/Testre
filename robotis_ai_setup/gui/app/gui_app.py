@@ -277,6 +277,47 @@ def _edubotics_diag_dir() -> str:
     return diagnostics_dir()
 
 
+def _transcript_excerpt(path: str, head: int = 12, tail: int = 30) -> list:
+    """Support-useful excerpt of a PowerShell transcript: HEAD + TAIL.
+
+    A plain ``lines[-N:]`` tail is what the 2026-09-07 field log shipped, and it
+    threw away the evidence support needs while keeping the part that carries
+    none. ``Start-Transcript -IncludeInvocationHeader`` opens with the student's
+    Windows account, the computer name, the Windows build and the PSVersion —
+    all of it at the TOP, all of it cut — while the three lines the window DID
+    keep were ``WSManStackVersion:`` / ``PSRemotingProtocolVersion:`` /
+    ``SerializationVersion:``, which say nothing about any machine.
+
+    So: keep the HEAD as well, and drop only what is provably noise — those
+    three version lines and the bare ``****`` rules. ``Startzeit``/``Endzeit``
+    are KEPT deliberately: they are a transcript's only timestamps, and on a rig
+    that loops, *when* each attempt ran is the question being asked.
+
+    Returns a list of lines (never raises on content); an elision marker names
+    how many lines were skipped so nobody reads the excerpt as the whole file.
+    """
+    _NOISE_PREFIXES = ("WSManStackVersion:", "PSRemotingProtocolVersion:",
+                       "SerializationVersion:")
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        raw = fh.read().splitlines()
+    lines = []
+    for ln in raw:
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("*") and set(stripped) == {"*"}:
+            continue
+        if stripped.startswith(_NOISE_PREFIXES):
+            continue
+        lines.append(ln)
+    if len(lines) <= head + tail:
+        return lines
+    skipped = len(lines) - head - tail
+    return (lines[:head]
+            + [f"… ({skipped} Zeilen ausgelassen) …"]
+            + lines[-tail:])
+
+
 def _asset_path(name: str) -> str:
     """Return absolute path to an asset file; works in dev + PyInstaller frozen builds."""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(
@@ -454,6 +495,18 @@ def _primary_lan_ip() -> str:
 FINALIZE_EXIT_DONE = 0      # import + pull succeeded; the flag was cleared
 FINALIZE_EXIT_REBOOT = 10   # host reboot still required; nothing installed yet
 FINALIZE_EXIT_CONSENT = 12  # rootfs rebuild needs consent -> re-run the installer
+FINALIZE_EXIT_VIRT = 11     # no usable hypervisor -> reboot, then BIOS/UEFI
+
+# Why 11 is its OWN code and not folded into 10: "reboot" and "enable
+# virtualization in the BIOS/UEFI" are DIFFERENT remedies and a student cannot
+# reboot their way out of the second. `wsl --import` reports the same
+# HCS_E_SERVICE_NOT_AVAILABLE for both, so 11 deliberately carries BOTH remedies
+# with the reboot first (it is free, and it is the common case on a fresh
+# install); the elevated transcript records which proof the script actually had.
+# Degradation is safe in both directions: a NEW script paired with an OLD GUI
+# lands in the generic else, which now shows a transcript tail that carries the
+# correct German remedy, and an OLD script paired with a NEW GUI simply never
+# emits 11.
 
 # Crossing arm families invalidates a scan (see _hardware_ready). Two sentences
 # because the two surfaces differ: the status bar carries one short line, the
@@ -1921,9 +1974,10 @@ class EduBoticsApp:
             # Surface the transcript tail.
             try:
                 if os.path.isfile(log_file) and os.path.getsize(log_file) > 0:
-                    with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
-                        lines = [ln for ln in fh.read().splitlines() if ln.strip()]
-                    tail = lines[-25:]
+                    # HEAD + TAIL via the shared excerpt: this is the transcript
+                    # that carries install_prerequisites.ps1's virtualization and
+                    # feature-state output, and a bare tail cut exactly that.
+                    tail = _transcript_excerpt(log_file, head=12, tail=25)
                     if tail:
                         self._log("── Reparatur-Protokoll ──")
                         for line in tail:
@@ -2387,12 +2441,11 @@ class EduBoticsApp:
                     return "" if "�" in name else name
                 return ""
 
-            # Surface the elevated script's transcript (last ~30 lines).
+            # Surface the elevated script's transcript (head + tail; see
+            # _transcript_excerpt for why the head is not optional).
             try:
                 if os.path.isfile(log_file) and os.path.getsize(log_file) > 0:
-                    with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
-                        lines = [ln for ln in fh.read().splitlines() if ln.strip()]
-                    tail = lines[-30:]
+                    tail = _transcript_excerpt(log_file, head=12, tail=30)
                     if tail:
                         self._log("── Setup-Protokoll ──")
                         for line in tail:
@@ -2453,6 +2506,36 @@ class EduBoticsApp:
                     "fragt vor dem Neuaufbau nach Ihrer Zustimmung.\n\n"
                     "Tipp: Laden Sie Ihre Datensätze vorher in der "
                     "Web-Oberfläche zu Hugging Face hoch.",
+                ))
+            elif exit_code == FINALIZE_EXIT_VIRT:
+                # The Windows hypervisor is not running, so WSL2 cannot create an
+                # environment at all. Both remedies are named because nothing
+                # available to us can tell them apart — `wsl --import` reports the
+                # same HCS_E_SERVICE_NOT_AVAILABLE for "never rebooted" and for
+                # "VT-x off in the BIOS" — and the reboot goes first because it is
+                # free and is the common case on a fresh install. Before this
+                # branch existed, this outcome fell into the generic else and the
+                # student was told to check their free disk space, on a machine
+                # whose 20 GB precheck had passed seconds earlier.
+                self._log(
+                    "Die Virtualisierung ist auf diesem PC nicht verfügbar — "
+                    "ohne sie kann WSL2 keine EduBotics-Umgebung anlegen. Bitte "
+                    "zuerst den PC neu starten und EduBotics danach erneut "
+                    "öffnen. Hilft das nicht, muss die Virtualisierung "
+                    "(VT-x/AMD-V) im BIOS/UEFI aktiviert werden — das übernimmt "
+                    "üblicherweise die IT-Betreuung der Schule."
+                )
+                self._set_status(
+                    "Virtualisierung nicht verfügbar — PC neu starten, danach BIOS/UEFI")
+                self.root.after(0, lambda: messagebox.showwarning(
+                    "Virtualisierung nicht verfügbar",
+                    "EduBotics braucht die Virtualisierung von Windows (WSL2). "
+                    "Sie ist auf diesem PC gerade nicht verfügbar.\n\n"
+                    "1. Bitte starten Sie den PC neu und öffnen Sie EduBotics "
+                    "danach erneut.\n\n"
+                    "2. Hilft das nicht, muss die Virtualisierung (VT-x/AMD-V) "
+                    "im BIOS/UEFI aktiviert werden. Das übernimmt üblicherweise "
+                    "die IT-Betreuung der Schule.",
                 ))
             elif exit_code == FINALIZE_EXIT_DONE and docker_manager.is_distro_registered():
                 # Latch it: finalize said done, so a .reboot_required it could
@@ -2911,9 +2994,34 @@ class EduBoticsApp:
                 self._set_status("Einige Arme nicht gefunden. Verbindungen prüfen und erneut versuchen.")
                 return
 
+            # The diagnosis must not contradict what this same session already
+            # said. In the 2026-09-07 field log the GUI printed „Ein ausstehender
+            # Windows-Neustart hat die Einrichtung unterbrochen." and then, a few
+            # seconds later, „Die EduBotics-WSL-Umgebung ist nicht registriert.
+            # Bitte den Installer erneut ausführen." — two different stories about
+            # one machine, and the second one sends the student somewhere that
+            # cannot help. device_manager knows nothing about {app}\scripts, so the
+            # ONE flag predicate stays here (_reboot_required_pending) and the
+            # decision keys on the STRUCTURED diag.wsl_distro_missing, never on the
+            # German text.
+            #
+            # The wording deliberately does NOT assert that a reboot is pending:
+            # finalize keeps .reboot_required set on EVERY unfinished outcome, so
+            # the flag proves "setup did not finish", not "a reboot is needed" —
+            # the exact conflation the finalize header warns about.
+            message_de = diag.message_de
+            if (getattr(diag, "wsl_distro_missing", False)
+                    and self._reboot_required_pending()):
+                message_de = (
+                    "Die EduBotics-Einrichtung ist noch nicht abgeschlossen — "
+                    "deshalb fehlt die EduBotics-Umgebung. Bitte EduBotics neu "
+                    "starten und die Einrichtung abschließen. Hilft das nicht, "
+                    "bitte den PC neu starten und EduBotics erneut öffnen."
+                )
+
             # Log the German message line-by-line so the GUI log pane shows the
             # full bullet list, then a single short status-bar message.
-            for line in diag.message_de.splitlines():
+            for line in message_de.splitlines():
                 self._log(line)
             if diag.details:
                 # `UsbDiagnosis.details` is ENGLISH and often raw PowerShell
@@ -2924,7 +3032,7 @@ class EduBoticsApp:
                           f"{diag.details}")
             self._log(f"Vollständiges Diagnose-Log: {device_manager.get_diagnostics_log_path()}")
 
-            short_status = diag.message_de.splitlines()[0] if diag.message_de else (
+            short_status = message_de.splitlines()[0] if message_de else (
                 "Einige Arme nicht gefunden. Verbindungen prüfen und erneut versuchen."
             )
             self._set_status(short_status)
@@ -3303,9 +3411,7 @@ class EduBoticsApp:
             # Show the tail of what happened.
             try:
                 if os.path.isfile(log_file) and os.path.getsize(log_file) > 0:
-                    with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
-                        lines = [ln for ln in fh.read().splitlines() if ln.strip()]
-                    tail = lines[-20:]
+                    tail = _transcript_excerpt(log_file, head=12, tail=20)
                     if tail:
                         self._log("── Freigabe-Protokoll ──")
                         for line in tail:

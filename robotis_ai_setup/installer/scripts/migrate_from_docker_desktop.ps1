@@ -221,7 +221,7 @@ if ($dockerDesktopInstaller) {
             Write-Diag "uninstall_installer" "rc=3010 — deferring: reboot flag written, marker withheld."
             try {
                 # "dd-uninstall", not "1": the flag CONTENT names WHY the reboot
-                # is needed. finalize_install.ps1's Test-RebootStillPending can
+                # is needed. virtualization_ready.ps1's Get-RebootState can
                 # only interrogate the WSL/VMP feature store, which is blind to a
                 # pending Docker-Desktop removal (the features are already
                 # Enabled) — with a bare "1" it would declare the reboot done and

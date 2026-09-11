@@ -100,7 +100,7 @@ def _ps1_exit_codes(path):
 
 
 def _ps1_function_body(code, name):
-    """Body of `function <name> { ... }` from (comment-stripped) .ps1 source.
+    r"""Body of `function <name> { ... }` from (comment-stripped) .ps1 source.
 
     Brace-counting, not a regex: these bodies contain nested `try`/`foreach`
     blocks, and a lazy `.*?\}` would stop at the first inner closing brace and

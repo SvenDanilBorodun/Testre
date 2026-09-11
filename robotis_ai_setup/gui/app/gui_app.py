@@ -2366,12 +2366,32 @@ class EduBoticsApp:
             diag = _edubotics_diag_dir()
             log_file = os.path.join(diag, "edubotics_finalize.log")
             marker_file = os.path.join(diag, "edubotics_finalize.marker")
-            for f in (log_file, marker_file):
+            # The previous transcript is ROTATED to edubotics_finalize.prev.log,
+            # never deleted. finalize_install.ps1 rotates too, but only what it
+            # finds at -LogPath — and this is the one production caller of that
+            # path, so a delete here left it nothing to rotate: `.prev.log` never
+            # existed on a GUI-launched run. On a rig that loops identically the
+            # attempt BEFORE this one is the only record of what changed. The
+            # name is .NET's ChangeExtension(log, '.prev.log'), spelled inline
+            # because tests exec this method with a hand-built globals dict.
+            # Emptying the path is still the point: a stale transcript must never
+            # be shown as this launch's output. So a failed rotate falls back to
+            # the delete. The marker is deleted outright: its absence is what
+            # proves "never launched" below.
+            if os.path.isfile(log_file):
                 try:
-                    if os.path.isfile(f):
-                        os.remove(f)
+                    os.replace(log_file,
+                               os.path.splitext(log_file)[0] + ".prev.log")
                 except OSError:
-                    pass
+                    try:
+                        os.remove(log_file)
+                    except OSError:
+                        pass
+            try:
+                if os.path.isfile(marker_file):
+                    os.remove(marker_file)
+            except OSError:
+                pass
 
             ps_args = (
                 f'-NoProfile -ExecutionPolicy Bypass -File "{script}" '

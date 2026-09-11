@@ -281,7 +281,7 @@ class PromptFinalizeInstallTest(unittest.TestCase):
     def _make(self, *, reason=None, consent=True, elevate=(0, False, None),
               reboot_pending=False, distro_registered=True, script="finalize.ps1",
               marker=None, marker_encoding="utf-8-sig", marker_as_dir=False,
-              transcript=None):
+              transcript=None, diag_dir=None):
         calls = {"elevate": [], "log": [], "status": [], "prereq": 0,
                  "showinfo": [], "showwarning": [], "showerror": [],
                  "askyesno": [], "fallback": []}
@@ -349,7 +349,7 @@ class PromptFinalizeInstallTest(unittest.TestCase):
             "_elevate_and_wait": _fake_elevate,
             "_run_privileged": _fake_elevate,
             "_is_elevated": lambda: False,
-            "_edubotics_diag_dir": lambda: tempfile.gettempdir(),
+            "_edubotics_diag_dir": lambda: diag_dir or tempfile.gettempdir(),
             "docker_manager": fake_dm,
             "threading": types.SimpleNamespace(Thread=_SyncThread),
             "__package__": "gui.app",
@@ -469,6 +469,66 @@ class PromptFinalizeInstallTest(unittest.TestCase):
                         f"expected the re-run-the-installer remedy: {calls['log']}")
         self.assertTrue(calls["showwarning"], "student needs a modal, not just a log line")
         self.assertTrue(any("Neuaufbau" in s for s in calls["status"]))
+
+    # The previous attempt's transcript must SURVIVE the next launch. Before
+    # 2026-09-11 this method deleted edubotics_finalize.log before starting
+    # finalize, so finalize_install.ps1's own rotation found nothing at -LogPath
+    # and `.prev.log` never existed on the one production path that passes it.
+    def _diag_with_previous_attempt(self):
+        diag = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, diag, True)
+        with open(os.path.join(diag, "edubotics_finalize.log"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("VORHERIGER VERSUCH: HCS_E_SERVICE_NOT_AVAILABLE\n")
+        return diag
+
+    def test_the_previous_transcript_is_rotated_not_deleted(self):
+        diag = self._diag_with_previous_attempt()
+        method, owner, calls = self._make(
+            elevate=(10, False, None), reboot_pending=True, diag_dir=diag,
+            transcript="NEUER VERSUCH\n")
+        self._run(method, owner)
+        rotated = os.path.join(diag, "edubotics_finalize.prev.log")
+        self.assertTrue(os.path.isfile(rotated),
+                        "the attempt BEFORE this one is the only record of what "
+                        "changed on a rig that loops")
+        with open(rotated, encoding="utf-8") as fh:
+            self.assertIn("VORHERIGER VERSUCH", fh.read())
+        logged = "\n".join(calls["log"])
+        self.assertIn("NEUER VERSUCH", logged)
+        self.assertNotIn("VORHERIGER VERSUCH", logged,
+                         "the rotated file is evidence for support, never this "
+                         "launch's output")
+
+    def test_a_launch_that_never_ran_shows_no_stale_transcript(self):
+        """Emptying -LogPath before the launch is what keeps a stale
+        transcript from being presented as this run's result; rotating must
+        preserve that, not trade it for the evidence."""
+        diag = self._diag_with_previous_attempt()
+        method, owner, calls = self._make(
+            elevate=(None, False, "Direkter Start fehlgeschlagen"),
+            reboot_pending=True, diag_dir=diag)
+        self._run(method, owner)
+        self.assertNotIn("VORHERIGER VERSUCH", "\n".join(calls["log"]))
+        self.assertTrue(os.path.isfile(
+            os.path.join(diag, "edubotics_finalize.prev.log")))
+
+    def test_gui_and_script_agree_on_the_rotated_name(self):
+        """Two rotators, one name. finalize spells it with .NET's
+        ChangeExtension($LogPath, '.prev.log'); the GUI with splitext. For the
+        one -LogPath the GUI passes, both must land on the SAME file, or support
+        reads a .prev.log the other side never writes."""
+        fin = _read(_FINALIZE_PS1, encoding="utf-8-sig")
+        self.assertIn("[System.IO.Path]::ChangeExtension($LogPath, '.prev.log')",
+                      fin)
+        gui = _method_src("_prompt_finalize_install")
+        self.assertIn('os.path.splitext(log_file)[0] + ".prev.log"', gui)
+        self.assertIn('"edubotics_finalize.log"', gui)
+        # ChangeExtension replaces the LAST extension, exactly like splitext.
+        self.assertEqual(
+            os.path.splitext(r"C:\ProgramData\EduBotics\logs\edubotics_finalize.log")[0]
+            + ".prev.log",
+            r"C:\ProgramData\EduBotics\logs\edubotics_finalize.prev.log")
 
     def test_the_transcript_excerpt_call_site_actually_resolves(self):
         """Walk the transcript branch of _run_elevated for real.

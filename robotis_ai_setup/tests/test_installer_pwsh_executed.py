@@ -408,6 +408,11 @@ if args[:2] == ["--list", "--quiet"]:
     sys.exit(0)
 if args[:1] in (["--install"], ["--update"]):
     sys.exit(0)
+if args[:1] == ["--unregister"]:
+    for n in ("registered", "vm_dead", "no_stamp"):
+        if os.path.exists(p(n)):
+            os.remove(p(n))
+    sys.exit(0)
 if args[:1] == ["--import"]:
     mode = rd("import_mode", "ok")
     if mode == "ok":
@@ -422,8 +427,15 @@ if args[:1] == ["--import"]:
 if args[:1] == ["-d"]:
     if not os.path.exists(p("registered")):
         sys.exit(255)
+    if os.path.exists(p("vm_dead")):
+        # registered, but the VM cannot start: every -d command fails like HCS
+        emit("Der Vorgang konnte nicht gestartet werden, da ein erforderliches Feature nicht installiert ist.\r\n"
+             "Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE\r\n")
+        sys.exit(255)
     rest = args[3:] if len(args) > 2 and args[2] == "--" else args[2:]
     if rest[:1] == ["cat"]:
+        if os.path.exists(p("no_stamp")):     # a distro from an installer <= 2.6.0
+            sys.stderr.write("cat: /etc/edubotics-rootfs-version: No such file or directory\n"); sys.exit(1)
         sys.stdout.write("7\n"); sys.exit(0)
     if rest[:3] == ["docker", "image", "inspect"]:
         sys.exit(0 if os.path.exists(p("images")) else 1)
@@ -432,12 +444,13 @@ sys.exit(0)
 '''
 
 _WRAPPER_PS = r'''
-param([string]$Script, [string]$LogPath = "", [string]$MarkerPath = "")
+param([string]$Script, [string]$LogPath = "", [string]$MarkerPath = "", [switch]$Destructive)
 ''' + _MOCKS_PS + r'''
 $ErrorActionPreference = "Continue"
 $splat = @{}
 if ($LogPath) { $splat["LogPath"] = $LogPath }
 if ($MarkerPath) { $splat["MarkerPath"] = $MarkerPath }
+if ($Destructive) { $splat["AllowDestructiveReimport"] = $true }
 $global:LASTEXITCODE = 0
 & $Script @splat
 exit $LASTEXITCODE
@@ -453,7 +466,8 @@ class _InstallerSandbox(_PwshCase):
     """A copied {app}\\scripts + fake {app}\\wsl_rootfs + a fake wsl on PATH."""
 
     def _sandbox(self, *, flag=None, flag_age=0, boot_age=1800, status="0", feat="", hv="false",
-                 vfe="true", import_mode="hcs", images=False, registered=False):
+                 vfe="true", import_mode="hcs", images=False, registered=False, vm_dead=False,
+                 no_stamp=False):
         base = tempfile.mkdtemp(dir=self.tmp)
         scripts = os.path.join(base, "app", "scripts")
         shutil.copytree(_SCRIPTS, scripts)
@@ -478,7 +492,8 @@ class _InstallerSandbox(_PwshCase):
         for name, value in (("status_seq", status), ("import_mode", import_mode)):
             with open(os.path.join(state, name), "w") as fh:
                 fh.write(value)
-        for name, on in (("images", images), ("registered", registered)):
+        for name, on in (("images", images), ("registered", registered), ("vm_dead", vm_dead),
+                         ("no_stamp", no_stamp)):
             if on:
                 open(os.path.join(state, name), "w").close()
         bindir = os.path.join(base, "bin")
@@ -605,6 +620,56 @@ class FinalizeEndToEndTest(_InstallerSandbox):
         with open(prev, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "VORHERIGER VERSUCH\n")
         self.assertNotIn("VORHERIGER VERSUCH", transcript)
+
+    # ── An existing distro whose VM cannot start is not a rootfs question ──
+    # The stamp read (`wsl -d EduBotics -- cat /etc/edubotics-rootfs-version`)
+    # fails both on a distro that predates the stamp AND on one whose hypervisor
+    # is dead. Only the first earns the one-final destructive re-import.
+    def _import_directly(self, sb, destructive):
+        args = ["-Script", os.path.join(sb["scripts"], "import_edubotics_wsl.ps1")]
+        if destructive:
+            args.append("-Destructive")
+        r = self._ps("wrapper.ps1", _WRAPPER_PS, *args, env=sb["env"])
+        return r.returncode, r.stdout.decode("utf-8", "replace")
+
+    def test_an_existing_distro_that_cannot_start_is_not_a_rootfs_question(self):
+        """finalize on an upgrade: an existing distro, a hypervisor that will not
+        start, a verdict of Unknown. It used to exit 12 („Neuaufbau erforderlich —
+        Installer erneut ausführen"), sending the student to a DESTRUCTIVE rebuild
+        that cannot help."""
+        sb = self._sandbox(flag="1", flag_age=7200, boot_age=600, hv="null", vfe="null",
+                           import_mode="ok", registered=True, vm_dead=True)
+        rc, transcript, marker = self._finalize(sb)
+        self.assertEqual(rc, 11, transcript[-3000:])
+        calls = self._calls(sb)
+        self.assertFalse(any(c.startswith(("--unregister", "--import")) for c in calls), calls)
+        self.assertIn("wird NICHT neu aufgebaut", transcript)
+        self.assertIn("BIOS/UEFI", marker)
+
+    def test_consent_cannot_destroy_a_distro_whose_vm_cannot_start(self):
+        """The installer's Step 4 passes -AllowDestructiveReimport after its
+        consent box; on a dead hypervisor that consent used to unregister the
+        distro (every dataset gone) and then fail the import on the same HCS
+        error. Refused on PROOF, before anything is destroyed."""
+        sb = self._sandbox(flag=None, boot_age=600, hv="null", vfe="null", import_mode="hcs",
+                           registered=True, vm_dead=True)
+        rc, out = self._import_directly(sb, destructive=True)
+        self.assertEqual(rc, 11, out[-3000:])
+        self.assertNotIn("--unregister EduBotics", self._calls(sb))
+        self.assertIn("Die Umgebung und ihre Daten bleiben erhalten", out)
+
+    def test_a_stampless_distro_still_gets_its_one_final_reimport(self):
+        """The designed case the unreadable-stamp path exists for must be
+        untouched: a HEALTHY distro from an installer <= 2.6.0 (no stamp) is
+        refused (12) without consent and rebuilt with it."""
+        sb = self._sandbox(flag=None, boot_age=600, hv="true", vfe="true", import_mode="ok",
+                           registered=True, no_stamp=True)
+        rc, out = self._import_directly(sb, destructive=False)
+        self.assertEqual(rc, 12, out[-3000:])
+        self.assertNotIn("--unregister EduBotics", self._calls(sb))
+        rc, out = self._import_directly(sb, destructive=True)
+        self.assertEqual(rc, 0, out[-3000:])
+        self.assertIn("--unregister EduBotics", self._calls(sb))
 
     def test_custody_restores_the_reason_and_the_ORIGINAL_mtime(self):
         """Phase 0: finalize's `wsl --status` fails, the child's succeeds, so the

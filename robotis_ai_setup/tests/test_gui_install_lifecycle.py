@@ -2376,8 +2376,10 @@ class OneRebootPredicateTest(unittest.TestCase):
         self.assertIn("Write-Host $importOut.TrimEnd()", code,
                       "and echo them VERBATIM — capturing without echoing would "
                       "DELETE the evidence the field log carried")
+        # Anchored on the IMPORT's classify call: since 2026-09-11 the stamp
+        # read of an existing distro is classified too, earlier in the file.
         self.assertLess(code.index("$importOut = "),
-                        code.index("Get-WslFailureClass"),
+                        code.index("Get-WslFailureClass -Text $importOut"),
                         "capture before classify")
 
     def test_import_keeps_the_old_triad_for_non_hypervisor_failures(self):

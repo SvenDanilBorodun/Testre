@@ -63,6 +63,17 @@ if (Test-Path $virtHelper) {
     $virtHelperOk = $true
 }
 
+# The hypervisor-class remedy, spelled ONCE for both places this script meets a
+# dead hypervisor: an existing distro that cannot start, and `wsl --import`.
+function Write-HypervisorRemedy {
+    Write-Host "   Der Hypervisor von Windows läuft nicht — ohne ihn kann WSL2 keine" -ForegroundColor Red
+    Write-Host "   Umgebung anlegen. Dafür gibt es genau zwei Ursachen:" -ForegroundColor Red
+    Write-Host "   1. Der PC wurde nach der WSL2-Installation noch nicht neu gestartet." -ForegroundColor Red
+    Write-Host "   2. Die Virtualisierung (VT-x/AMD-V) ist im BIOS/UEFI deaktiviert." -ForegroundColor Red
+    Write-Host "   Bitte zuerst den PC neu starten. Hilft das nicht, bitte die IT-Betreuung" -ForegroundColor Red
+    Write-Host "   der Schule bitten, die Virtualisierung im BIOS/UEFI zu aktivieren." -ForegroundColor Red
+}
+
 # Bail if prerequisites phase still needs a reboot (WSL2 not fully up yet).
 #
 # -PostReboot bypasses this guard. finalize_install.ps1 keeps .reboot_required
@@ -139,11 +150,33 @@ try {
 $skipImport = $false
 if ($existing) {
     $distroVersion = ""
+    $stampOut = ""
     if (-not $Force -and $shippedVersion) {
         try {
-            $distroVersion = ((wsl -d $DistroName -- cat /etc/edubotics-rootfs-version 2>&1 | Out-String) -replace "`0", "").Trim()
+            $stampOut = ((wsl -d $DistroName -- cat /etc/edubotics-rootfs-version 2>&1 | Out-String -Width 4096) -replace "`0", "")
+            $distroVersion = $stampOut.Trim()
             if ($LASTEXITCODE -ne 0) { $distroVersion = "" }
         } catch { $distroVersion = "" }
+    }
+    # An UNREADABLE stamp is the designed trigger for the one-final re-import
+    # (distros from installers <= 2.6.0 carry no stamp). But the read also fails
+    # when the distro CANNOT START, and then the rebuild is not a remedy: the
+    # unregister below destroys every dataset, the HF cache and the calibration,
+    # and the `wsl --import` after it fails on the same dead hypervisor —
+    # executed with a fake wsl, that sequence ran to the end with the distro
+    # gone. So when the failed read PROVES the hypervisor fault (the same
+    # code-token classifier as the import below), refuse before anything is
+    # destroyed, whatever consent was given, and report the hypervisor cause.
+    # Unclassified failures keep the old behaviour; -Force skips the read.
+    if ((-not $distroVersion) -and $virtHelperOk -and
+            ((Get-WslFailureClass -Text $stampOut) -eq "hypervisor")) {
+        if (-not [string]::IsNullOrWhiteSpace($stampOut)) { Write-Host $stampOut.TrimEnd() }
+        Write-FAIL "Die vorhandene EduBotics-Umgebung kann nicht gestartet werden — sie wird NICHT neu aufgebaut."
+        Write-HypervisorRemedy
+        Write-Host "   Die Umgebung und ihre Daten bleiben erhalten." -ForegroundColor Yellow
+        # 11 like the import's own hypervisor refusal below: finalize maps it to
+        # $EXIT_VIRT; Inno's [Run] Step 4 ignores exit codes.
+        exit 11
     }
     if ($distroVersion -and ($distroVersion -eq $shippedVersion)) {
         Write-OK "Vorhandene EduBotics-Umgebung ist aktuell (Rootfs-Version $shippedVersion) — Import übersprungen."
@@ -311,12 +344,7 @@ if (-not $skipImport) {
         if ($virtHelperOk) { $failClass = Get-WslFailureClass -Text $importOut }
         Write-FAIL "wsl --import fehlgeschlagen (exit $importExit)"
         if ($failClass -eq "hypervisor") {
-            Write-Host "   Der Hypervisor von Windows läuft nicht — ohne ihn kann WSL2 keine" -ForegroundColor Red
-            Write-Host "   Umgebung anlegen. Dafür gibt es genau zwei Ursachen:" -ForegroundColor Red
-            Write-Host "   1. Der PC wurde nach der WSL2-Installation noch nicht neu gestartet." -ForegroundColor Red
-            Write-Host "   2. Die Virtualisierung (VT-x/AMD-V) ist im BIOS/UEFI deaktiviert." -ForegroundColor Red
-            Write-Host "   Bitte zuerst den PC neu starten. Hilft das nicht, bitte die IT-Betreuung" -ForegroundColor Red
-            Write-Host "   der Schule bitten, die Virtualisierung im BIOS/UEFI zu aktivieren." -ForegroundColor Red
+            Write-HypervisorRemedy
         } else {
             Write-Host "   Prüfen Sie: Antivirus-Ausnahme, genug Speicherplatz, WSL2 aktiviert." -ForegroundColor Red
         }

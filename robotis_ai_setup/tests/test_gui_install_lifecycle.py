@@ -2201,7 +2201,7 @@ class OneRebootPredicateTest(unittest.TestCase):
         """EnablePending is PROOF a feature enable waits on a reboot.
 
         It is also the only signal the old finalize ever looked at. A PC running
-        a hypervisor for Hyper-V's own sake would短 skip it if HypervisorPresent
+        a hypervisor for Hyper-V's own sake would skip it if HypervisorPresent
         came first — trading one blind spot for another."""
         body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
         self.assertLess(

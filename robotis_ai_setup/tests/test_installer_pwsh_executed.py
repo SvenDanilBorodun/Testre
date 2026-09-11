@@ -579,6 +579,18 @@ class FinalizeEndToEndTest(_InstallerSandbox):
         self.assertNotIn("Antivirus-Ausnahme", transcript)
         self.assertIn("BIOS/UEFI", marker)
 
+    def test_unknown_with_every_value_read_does_not_claim_it_could_not_check(self):
+        """Rebooted since the flag, no hypervisor running, firmware
+        virtualization on (e.g. `hypervisorlaunchtype off`): every CIM value WAS
+        read, so „konnte nicht geprüft werden" would be false in the very
+        transcript that prints those values."""
+        sb = self._sandbox(flag="1", flag_age=7200, boot_age=600, hv="false", vfe="true", import_mode="hcs")
+        rc, transcript, _ = self._finalize(sb)
+        self.assertEqual(rc, 11, transcript[-3000:])
+        self.assertIn("Ergebnis: Unknown", transcript)
+        self.assertIn("nicht eindeutig bestätigt", transcript)
+        self.assertNotIn("konnte nicht geprüft werden", transcript)
+
     def test_a_disk_failure_keeps_the_disk_wording(self):
         sb = self._sandbox(flag=None, boot_age=600, hv="null", vfe="null", import_mode="disk")
         rc, transcript, marker = self._finalize(sb)

@@ -434,8 +434,12 @@ try {
     if ($virtVerdict -eq "Unknown") {
         # Refuse only on PROOF. A WMI hiccup must not brick a working PC; the
         # import classifies its own failure as the backstop. Say so, so the
-        # transcript records that we proceeded WITHOUT proof.
-        Write-Warn "Virtualisierungsstatus konnte nicht geprüft werden — die Einrichtung wird trotzdem fortgesetzt."
+        # transcript records that we proceeded WITHOUT proof. „nicht eindeutig",
+        # not „konnte nicht geprüft werden": Unknown is ALSO the verdict when
+        # every value WAS read (no hypervisor running, firmware virtualization
+        # on, no fresh flag — e.g. `hypervisorlaunchtype off`), and the notes
+        # printed just above show those values.
+        Write-Warn "Virtualisierung ist nicht eindeutig bestätigt — die Einrichtung wird trotzdem fortgesetzt."
     } else {
         Write-OK "Virtualisierung ist aktiv — die Einrichtung wird fortgesetzt."
     }

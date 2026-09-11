@@ -2355,7 +2355,10 @@ class OneRebootPredicateTest(unittest.TestCase):
         strips whitespace — belt and brace, because a caller that forgets the
         width must still classify."""
         body = _ps1_function_body(self._virt(), "Get-WslFailureClass")
-        self.assertRegex(body, r"\$flat = \(\$Text -replace '\\s', ''\)")
+        # Whitespace AND NUL: the NUL half is executed byte-for-byte in
+        # test_installer_pwsh_executed.ClassifierExecutedTest, which is the test
+        # that actually bites if either half is dropped.
+        self.assertRegex(body, r"\$flat = \(\$Text -replace '\[\\s\\x00\]', ''\)")
         self.assertIn("$flat -like", body,
                       "the match must run against the stripped copy, or the "
                       "normalisation is decoration")

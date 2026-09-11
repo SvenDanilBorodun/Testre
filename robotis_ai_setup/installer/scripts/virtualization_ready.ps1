@@ -298,7 +298,16 @@ function Get-WslFailureClass {
     # stripping can only ever rescue a wrapped match; it cannot invent one out
     # of unrelated text. (Callers also pass -Width 4096; this is the belt to
     # that brace, because a caller that forgets it must still classify.)
-    $flat = ($Text -replace '\s', '')
+    #
+    # NULs are stripped for the same reason. wsl.exe writes UTF-16LE to a pipe
+    # (CRT _O_U16TEXT unless WSL_UTF8=1), and Windows PowerShell 5.1 decodes a
+    # native command's bytes in the OEM code page, so every ASCII character of
+    # the token arrives followed by a U+0000 that `\s` does not match. The one
+    # caller strips them today; executed against that exact byte shape, a copy
+    # of the text that still carries them classified as "" — the disk/antivirus
+    # triad over a hypervisor fault, i.e. the 2026-09-07 failure — and nothing
+    # in the suite noticed when the caller's strip was deleted.
+    $flat = ($Text -replace '[\s\x00]', '')
     foreach ($token in @(
         "HCS_E_SERVICE_NOT_AVAILABLE",
         "HCS_E_HYPERV_NOT_INSTALLED",

@@ -74,9 +74,13 @@ function CodeView({ workspace, changeToken }) {
       </p>
     );
   } else {
+    // Capped by the VIEWPORT, not only by 16rem: this strip sits in the same
+    // column as the Blockly editor, so every pixel it grows is taken from the
+    // editor. A fixed 16rem left a 1280×690 editor (1920×1080 @150 %) ~90 px
+    // tall once a real program's preview was open.
     body = (
       <pre
-        className="m-0 px-3 py-2 text-[12px] leading-relaxed font-mono text-[var(--ink)] whitespace-pre overflow-auto max-h-64"
+        className="m-0 px-3 py-2 text-[12px] leading-relaxed font-mono text-[var(--ink)] whitespace-pre overflow-auto max-h-[min(16rem,22vh)]"
       >
         <code>{code}</code>
       </pre>

@@ -141,8 +141,14 @@ function RightDock({
   return (
     <aside
       style={collapsed ? undefined : { '--dock-w': `${width}px` }}
+      // Below md the dock stacks UNDER the editor. Expanded it takes exactly
+      // half the row (`h-1/2`): the Blockly editor keeps the other half, and the
+      // panels get a DEFINITE height to share — content-sized, two open panels
+      // (each `flex: n 1 0px`) collapsed to zero. Collapsed it is just the rail.
+      // From md up it sits beside the editor at full height.
       className={
         'flex flex-col md:flex-row shrink-0 w-full md:h-full '
+        + (collapsed ? '' : 'h-1/2 ')
         + 'border-t md:border-t-0 md:border-l border-[var(--line)] bg-[var(--bg-sunk)] '
         + (collapsed ? 'md:w-[52px]' : 'md:w-[var(--dock-w)]')
       }

@@ -22,14 +22,53 @@ import rosConnectionManager from '../utils/rosConnectionManager';
 //
 // std_msgs/String needs no interfaces rebuild, the same reason /sim/joint_states
 // reuses sensor_msgs/JointState.
+//
+// `delayMs` (SimScene passes utils/jointStateInterpolator's INTERP_DELAY_MS) holds
+// every scene back by the same delay the 3D twin draws the ARM with. The server
+// publishes a scene alongside the waypoint that changed it — the capture with the
+// frame the jaws closed on — and the twin shows that waypoint 100 ms after it
+// arrives. Applied at once, a grasp would attach the cube to jaws still 100 ms of
+// motion away, and the offset would ride along for the whole carry (visible in a
+// replay that closes while moving). 0 (the default) keeps the old immediate path.
+//
+// A NEW EPOCH is the exception: it is delivered at once and every scene still
+// waiting from the old epoch is dropped. The epoch bumps when the server resets
+// its world — at a run's start and at its end — and a reset belongs to no arm
+// pose. Delayed like the rest, the run-start scene arrived 100 ms after SimScene
+// had already started believing the server, so the twin showed the PREVIOUS
+// run's layout (keyed by index, i.e. possibly the wrong objects) for that long.
 
 const SIM_OBJECTS_TOPIC = '/sim/objects';
-// The scene changes only on a capture / carry step / release and the server already
-// deduplicates identical payloads, so this throttle is a backstop, not the mechanism.
-const SIM_OBJECTS_THROTTLE_MS = 50;
+// The server deduplicates identical payloads, so between events this topic is
+// silent; during a carry it follows the played waypoints (~30 Hz). The throttle
+// is a backstop (≤ 50 Hz) and must stay well under the joint delay: a capture held
+// back by it lands that much later than the jaws it belongs to.
+const SIM_OBJECTS_THROTTLE_MS = 20;
 const SIM_OBJECTS_QUEUE_LENGTH = 1;
 
-export default function useSimObjects(rosbridgeUrl, enabled = true) {
+// True when `next` differs from `prev` ONLY in where the HELD object is — the
+// server's ~30 Hz carry updates. Nothing reads a held object's coordinates while
+// it is held: UrdfTwin parents that mesh to the gripper link and re-seats it from
+// the scene only on the capture and the release, both of which change `held` and
+// are therefore always delivered. Skipping these saves SimScene (and the twin's
+// object layer) a re-render per carried waypoint, on the same page as Blockly.
+function onlyTheHeldObjectMoved(prev, next) {
+  if (!prev || prev.epoch !== next.epoch || prev.held === null
+      || prev.held !== next.held || prev.objects.length !== next.objects.length) {
+    return false;
+  }
+  for (let i = 0; i < next.objects.length; i += 1) {
+    const a = prev.objects[i];
+    const b = next.objects[i];
+    if (a.key !== b.key || a.type !== b.type || a.tag_id !== b.tag_id) return false;
+    if (b.key !== next.held && (a.x !== b.x || a.y !== b.y || a.yaw !== b.yaw)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export default function useSimObjects(rosbridgeUrl, enabled = true, { delayMs = 0 } = {}) {
   const [scene, setScene] = useState(null);
   // Keep the latest scene readable from stable callbacks without re-subscribing.
   const sceneRef = useRef(null);
@@ -45,6 +84,17 @@ export default function useSimObjects(rosbridgeUrl, enabled = true) {
 
     let cancelled = false;
     let subscription = null;
+    // Scenes still waiting out `delayMs`. Cleared on teardown, so a scene from a
+    // stream being left can never land after it.
+    const pending = new Set();
+    // Epoch of the newest scene RECEIVED (not delivered) on this subscription.
+    let lastEpoch = null;
+    const deliver = (next) => {
+      if (cancelled) return;
+      if (onlyTheHeldObjectMoved(sceneRef.current, next)) return;
+      sceneRef.current = next;
+      setScene(next);
+    };
 
     const run = async () => {
       let ros;
@@ -84,8 +134,22 @@ export default function useSimObjects(rosbridgeUrl, enabled = true) {
               && Number.isFinite(o.x) && Number.isFinite(o.y),
           ),
         };
-        sceneRef.current = next;
-        setScene(next);
+        const newEpoch = next.epoch !== lastEpoch;
+        lastEpoch = next.epoch;
+        if (delayMs > 0 && !newEpoch) {
+          // Equal delays keep arrival order: timers of equal timeout fire FIFO.
+          const id = setTimeout(() => {
+            pending.delete(id);
+            deliver(next);
+          }, delayMs);
+          pending.add(id);
+        } else {
+          // A reset (or the first scene, or no delay): now, and nothing from
+          // before it may land on top of it later.
+          pending.forEach((id) => clearTimeout(id));
+          pending.clear();
+          deliver(next);
+        }
       });
     };
 
@@ -95,12 +159,14 @@ export default function useSimObjects(rosbridgeUrl, enabled = true) {
 
     return () => {
       cancelled = true;
+      pending.forEach((id) => clearTimeout(id));
+      pending.clear();
       if (subscription) {
         try { subscription.unsubscribe(); } catch (_) { /* swallow */ }
         subscription = null;
       }
     };
-  }, [rosbridgeUrl, enabled]);
+  }, [rosbridgeUrl, enabled, delayMs]);
 
   return scene;
 }

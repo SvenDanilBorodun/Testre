@@ -124,21 +124,26 @@ describe('the DEPENDENCY still behaves the way those keys assume', () => {
 
   it('still defaults cross-tab copy/paste to ON, which is why this matters', () => {
     // `useCopyPasteCrossTab_ = true` in the constructor, disabled only by an
-    // explicit `multiselectCopyPaste.crossTab === false`. Our call site passes
-    // `{}`, so the disable branch is unreachable and the feature is live.
+    // explicit `multiselectCopyPaste.crossTab === false`. So any call site that
+    // does not pass that — the editor's old `ms.init({})` did not — makes the
+    // feature live.
     expect(dist).toMatch(/useCopyPasteCrossTab_\s*=\s*!0|useCopyPasteCrossTab_\s*=\s*true/);
     expect(dist).toMatch(/multiselectCopyPaste/);
   });
 
-  it('our call site really does leave the default in place', () => {
+  it('the editor does not load the plugin — re-adding it is a decision about these keys', () => {
+    // Not imported since 2026-09-11: its peer range is `>=11 <12` and its init
+    // throws on Blockly 12 (before that, its import failed with "CSS already
+    // injected", so it never ran). The scrub above stays regardless. Whoever
+    // re-enables it turns cross-tab paste back ON by default (previous test) —
+    // this assertion is where that has to be decided on purpose, together
+    // with the comment in sessionScope.js.
     const ws = fs.readFileSync(
       path.join(PKG_ROOT, 'src', 'components', 'Workshop', 'BlocklyWorkspace.jsx'),
       'utf8'
     );
-    expect(ws).toContain('blockly-plugin-workspace-multiselect');
-    // If this ever becomes `ms.init({ multiselectCopyPaste: { crossTab: false } })`
-    // the keys stop being written and the scrub entries become dead — harmless,
-    // but the comment in sessionScope.js would then be wrong.
-    expect(ws).toMatch(/ms\.init\(\{\s*\}\)/);
+    expect(ws).not.toMatch(
+      /import\(\s*['"]@mit-app-inventor\/blockly-plugin-workspace-multiselect['"]\s*\)/
+    );
   });
 });

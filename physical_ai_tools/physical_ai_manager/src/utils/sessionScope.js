@@ -96,11 +96,16 @@ export const STUDENT_SCOPED_KEYS = Object.freeze([
   //      filter judges only keys that do;
   //   3. the feature is on by DEFAULT — `Multiselect`'s constructor sets
   //      `useCopyPasteCrossTab_ = true` and only an explicit
-  //      `multiselectCopyPaste.crossTab === false` turns it off, which
-  //      `BlocklyWorkspace.jsx`'s `ms.init({})` never provides.
+  //      `multiselectCopyPaste.crossTab === false` turns it off.
   // `bootScrub.crossTab.test.js` therefore asserts the plugin still writes
   // exactly these names, so a dependency bump that renames them fails loudly
   // instead of silently reopening the leak.
+  //
+  // The editor does NOT load this plugin (since 2026-09-11: its peer range is
+  // `>=11 <12` and its init throws on Blockly 12 — and before that its import
+  // failed with "CSS already injected", so it never ran). The keys stay
+  // scrubbed anyway: a browser can still hold them from elsewhere, and
+  // re-enabling the plugin must not reopen the leak.
   'blocklyStashMulti',
   'blocklyStashConnection',
   'blocklyStashTime',

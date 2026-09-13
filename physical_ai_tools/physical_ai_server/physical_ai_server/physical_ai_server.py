@@ -723,6 +723,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._sim_joint_state_publisher = None
         self._sim_idle_timer = None
         self._last_sim_joints = None
+        # ONE lock over every /sim/* publish and the cache it writes — the
+        # real-time player's frames (their own thread), the heartbeat (the ROS
+        # executor), the boot seed and the reset (the workflow daemon). Re-entrant
+        # because a frame publishes the pose AND its scene under one hold. See
+        # _sim_idle_republish for the race it closes.
+        self._sim_pub_lock = threading.RLock()
+        # time.monotonic() of the last /sim/joint_states publish; the heartbeat
+        # stays silent while the stream is live.
+        self._last_sim_publish_mono = 0.0
+        # The last /sim/joint_states stamp, in ROS nanoseconds (see
+        # _stamp_sim_joint_state).
+        self._last_sim_stamp_ns = 0
 
         # Initialize HF API Worker
         self.hf_api_worker: Optional[HfApiWorker] = None
@@ -5178,6 +5190,20 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     # ------------------------------------------------------------------
     _SIM_JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5',
                         'gripper_joint_1']
+    # The sim heartbeat re-sends the last pose only after the stream has been quiet
+    # this long. Just under the 0.5 s timer period, so an idle twin still gets 2 Hz,
+    # while a real-time playback (a frame every ~33 ms) is never interleaved with a
+    # stale repeat.
+    _SIM_HEARTBEAT_QUIET_S = 0.45
+    # How far back a /sim/joint_states stamp may land and still be treated as a
+    # lock-order reorder (nudged forward) rather than a clock step (passed on).
+    _SIM_STAMP_REORDER_S = 0.05
+    # Stamp gap a reset puts between the pose the twin is showing and the
+    # Grundstellung it jumps to — see _publish_sim_teleport. Well above the
+    # twin's 0.5 ms "these two samples are one" threshold
+    # (utils/jointStateInterpolator.js) and far below any gap it would blend
+    # across.
+    _SIM_RESET_HOLD_S = 0.003
 
     def _sim_joint_names(self) -> list:
         """Joint-name vector for the sim /sim/joint_states publisher — the
@@ -5218,20 +5244,31 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._sim_objects_publisher = None
         if self._sim_idle_timer is None:
             try:
-                # Low-rate republish of the last commanded pose so a freshly
-                # mounted React twin gets the current rest pose without waiting
-                # for the next motion.
+                # Low-rate heartbeat of the last published pose + scene, so a
+                # freshly mounted React twin gets the current pose without waiting
+                # for the next motion — and so the twin's liveness watchdog stays
+                # green through a pause in the middle of a run.
                 self._sim_idle_timer = self.create_timer(0.5, self._sim_idle_republish)
             except Exception as e:  # noqa: BLE001 — idle republish is best-effort
                 self.get_logger().warning(f'sim idle timer create failed: {e}')
                 self._sim_idle_timer = None
 
-    def _publish_sim_joint_state(self, q):
-        """Publish ONE virtual JointState(name=joint1..joint5,gripper_joint_1,
-        position=q) on /sim/joint_states and cache it for the idle republish.
-        The per-frame burst within a chunk is paced at the chunk level by
-        chunked_publish._pace (SimArm.publish never sleeps); the React twin
-        interpolates between received poses for smoothness."""
+    def _publish_sim_joint_state(self, q, late_s=0.0, publish_scene=True):
+        """Publish ONE virtual JointState(name=<profile joint names>, position=q)
+        on /sim/joint_states and cache it for the heartbeat.
+
+        During a run the caller is SimArm's real-time player (through
+        `_publish_sim_frame`), which emits every waypoint at its own
+        time_from_start; `late_s` is how far behind that schedule it woke, and
+        the stamp is back-dated by it so the pose carries the time it was VALID.
+        The React twin interpolates on those stamps — until 2026-09-11 this
+        docstring claimed it already did while it snapped to each message, and
+        the sim sent each second of motion as one 30-pose burst.
+
+        `publish_scene=False` is the player's path: its frames carry the scene AS
+        OF their own waypoint, so a live snapshot here — the world runs up to a
+        chunk ahead of the pose being played — would show a grasp before the jaws
+        got there."""
         pub = self._sim_joint_state_publisher
         if pub is None:
             return
@@ -5240,10 +5277,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except ImportError:
             return
         msg = JointState()
-        try:
-            msg.header.stamp = self.get_clock().now().to_msg()
-        except Exception:  # noqa: BLE001 — stamp is advisory
-            pass
         positions = [float(v) for v in q]
         names = self._sim_joint_names()
         # Refuse a name/position mismatch instead of publishing a malformed
@@ -5260,35 +5293,124 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return
         msg.name = names
         msg.position = positions
-        pub.publish(msg)
-        self._last_sim_joints = positions
-        # The scene rides alongside the pose: SimArm may have just captured,
-        # carried or released. Deduplicated inside, so an unchanged scene is a
-        # string compare rather than a message.
-        self._publish_sim_objects()
+        with self._sim_pub_lock:
+            # The stamp is taken INSIDE the hold. Every /sim/joint_states
+            # publisher — the real-time player, the heartbeat, the reset, the boot
+            # seed — comes through here, so stamps now leave in publish order. Taken
+            # before the hold, a reset's HOME could be stamped EARLIER than a
+            # heartbeat that got the lock first, and the twin (which drops
+            # out-of-order samples) kept the old pose until the next heartbeat.
+            self._stamp_sim_joint_state(msg, late_s)
+            pub.publish(msg)
+            self._last_sim_joints = positions
+            self._last_sim_publish_mono = time.monotonic()
+            # The scene rides alongside the pose on the non-player paths (boot
+            # seed, reset, legacy sink). Deduplicated inside, so an unchanged scene
+            # is a string compare rather than a message.
+            if publish_scene:
+                self._publish_sim_objects()
 
-    def _publish_sim_objects(self, force: bool = False):
-        """Publish the live virtual scene so the React twin renders the SERVER's
+    def _stamp_sim_joint_state(self, msg, late_s=0.0):
+        """Stamp a /sim/joint_states message: now, back-dated by `late_s` (the
+        player's lateness — the time the pose was VALID). Called under
+        `_sim_pub_lock` only.
+
+        A stamp that would land BEHIND the previous one by less than
+        `_SIM_STAMP_REORDER_S` is nudged 1 µs past it instead. That window is the
+        one reordering left once stamps are taken under the hold: a player frame,
+        back-dated by a few ms, that had to wait for the lock while the heartbeat
+        held it. The twin drops a sample older than its newest, so without the
+        nudge that waypoint would simply vanish. A LARGER step back is a real clock
+        step (a WSL2 resync) and passes through untouched, so the twin starts a new
+        timeline rather than seeing seconds of samples squeezed onto one instant."""
+        try:
+            stamp = self.get_clock().now()
+            if late_s > 0.0:
+                from rclpy.duration import Duration
+                stamp = stamp - Duration(nanoseconds=int(late_s * 1e9))
+            ns = int(stamp.nanoseconds)
+            last = self._last_sim_stamp_ns
+            if last - int(self._SIM_STAMP_REORDER_S * 1e9) < ns <= last:
+                ns = last + 1000
+            self._last_sim_stamp_ns = ns
+            msg.header.stamp.sec = ns // 1_000_000_000
+            msg.header.stamp.nanosec = ns % 1_000_000_000
+        except Exception:  # noqa: BLE001 — stamp is advisory
+            pass
+
+    def _publish_sim_teleport(self, q):
+        """Publish a JUMP to `q` — the reset's Grundstellung — as a teleport the
+        twin cannot mistake for motion.
+
+        The twin interpolates between consecutive samples unless the gap or the
+        implied joint speed says the data is discontinuous. A reset that follows a
+        MOTIONLESS tail (a program that ended on a „warte", a Stop while the arm
+        rested) lands ~90-130 ms after the last pose, and a jump of a radian or
+        two over that gap is under the twin's speed limit — so it was drawn as a
+        five-or-six-frame sweep through poses the virtual arm never took. Sending
+        the pose it is CURRENTLY showing once more, back-dated
+        `_SIM_RESET_HOLD_S`, leaves that gap between two identical poses and puts
+        a 3 ms gap in front of the jump, which no joint speed can fill: the twin
+        steps. An older twin simply gets one extra, identical pose.
+        """
+        target = [float(v) for v in q]
+        last = self._last_sim_joints
+        if last is not None and [float(v) for v in last] != target:
+            self._publish_sim_joint_state(last, late_s=self._SIM_RESET_HOLD_S,
+                                         publish_scene=False)
+        self._publish_sim_joint_state(target)
+
+    def _publish_sim_frame(self, q, scene=None, late_s=0.0):
+        """Sink of SimArm's real-time player: ONE waypoint at its own time, plus
+        the scene AS OF that waypoint when the waypoint changed it (capture,
+        carry, release) — never the live world, which runs up to a chunk ahead of
+        the pose being played. Both publishes under one hold, so the heartbeat can
+        never slip a stale repeat in between them."""
+        with self._sim_pub_lock:
+            self._publish_sim_joint_state(q, late_s=late_s, publish_scene=False)
+            if scene is not None:
+                self._publish_sim_objects(snapshot=scene)
+
+    def _publish_sim_objects(self, force: bool = False, snapshot=None,
+                             resend: bool = False):
+        """Publish the virtual scene so the React twin renders the SERVER's
         truth instead of its own private grasp guess.
 
-        Deduplicated against the last payload: ``_publish_sim_joint_state`` calls
-        this on every commanded waypoint, but the scene only actually changes on a
-        capture, a carry step, or a release, so an unchanged snapshot costs one
-        string compare and no message. ``force=True`` re-sends anyway (used by the
-        idle republish, so a twin that mounts mid-idle gets the scene)."""
+        Three sources, one cache (``_last_sim_objects_json``):
+
+        * default — the LIVE world, deduplicated against the last payload, so an
+          unchanged snapshot costs one string compare and no message
+          (``force=True`` re-sends anyway: run start, reset);
+        * ``snapshot=`` — a scene the real-time player captured AS OF the
+          waypoint it is emitting (deduplicated the same way);
+        * ``resend=True`` — the last PUBLISHED payload again, which is what the
+          heartbeat sends. Never the live world there: during a run the world is
+          mutated a whole chunk before that chunk is played, so a heartbeat that
+          happened to fire at the start of a chunk would announce a grasp (or a
+          drop) before the twin's jaws got there."""
         pub = self._sim_objects_publisher
-        world = self._sim_world
-        if pub is None or world is None:
+        if pub is None:
             return
         try:
             from std_msgs.msg import String as _SimString
-            payload = json.dumps(world.snapshot(), separators=(',', ':'))
-            if not force and payload == self._last_sim_objects_json:
-                return
-            msg = _SimString()
-            msg.data = payload
-            pub.publish(msg)
-            self._last_sim_objects_json = payload
+            with self._sim_pub_lock:
+                if resend:
+                    payload = self._last_sim_objects_json
+                    if payload is None:
+                        return
+                else:
+                    if snapshot is None:
+                        world = self._sim_world
+                        if world is None:
+                            return
+                        snapshot = world.snapshot()
+                    payload = json.dumps(snapshot, separators=(',', ':'))
+                    if not force and payload == self._last_sim_objects_json:
+                        return
+                msg = _SimString()
+                msg.data = payload
+                pub.publish(msg)
+                self._last_sim_objects_json = payload
         except Exception as e:  # noqa: BLE001 — a diagnostic must never stop a run
             self.get_logger().warning(f'/sim/objects publish failed: {e}')
 
@@ -5372,25 +5494,46 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             else:
                 return  # no simulator has ever run here — nothing to reset
             if q is not None:
-                self._publish_sim_joint_state(q)
+                # A JUMP, not a move: see _publish_sim_teleport.
+                self._publish_sim_teleport(q)
             self._publish_sim_objects(force=True)
         except Exception as e:  # noqa: BLE001 — never break Stop over a reset
             self.get_logger().warning(f'sim scene reset failed: {e}')
 
     def _sim_idle_republish(self):
-        """Timer callback: republish the last commanded sim pose at a low rate
-        while no workflow is actively driving the virtual arm, so a twin that
-        mounts mid-idle still gets the rest pose. Suppressed during an active
-        run (the daemon thread is already streaming frames)."""
-        if getattr(self, 'on_workflow', False):
-            return
-        # force=True: a twin mounting mid-idle (or after a page reload) must get the
-        # scene even though nothing has changed since the run ended.
-        self._publish_sim_objects(force=True)
-        q = self._last_sim_joints
-        if q is None:
-            return
-        self._publish_sim_joint_state(q)
+        """Timer callback (0.5 s): the /sim/* HEARTBEAT. Re-sends the last
+        PUBLISHED pose and scene whenever the joint stream has been quiet for
+        `_SIM_HEARTBEAT_QUIET_S`, so a twin that mounts mid-idle (or after a page
+        reload) gets the current picture.
+
+        It runs DURING a run too. It used to return whenever `on_workflow` was
+        set, on the theory that a run streams frames anyway — but a run only
+        streams while the arm MOVES. A „warte"-Block, a slow perception block or
+        a debugger breakpoint left /sim/joint_states silent, and after 3 s the
+        twin's staleness watchdog put „Wartet auf Gelenkdaten …" over a simulator
+        that was working exactly as intended. The quiet-period test replaces the
+        flag: while the real-time player emits a frame every ~33 ms the heartbeat
+        stays silent, the moment the arm rests it resumes.
+
+        It re-sends, it never re-derives: a live world snapshot here could run a
+        whole chunk ahead of the pose being played (see `_publish_sim_objects`).
+
+        The whole callback runs under `_sim_pub_lock`, the lock every /sim/*
+        publish takes, and that is what closes the reset race the `on_workflow`
+        gate never actually closed (`_on_sim_workflow_finished` clears the flag
+        BEFORE it resets): the heartbeat either publishes the old pose entirely
+        before the reset's HOME, or it sees the reset's publish as "not quiet" and
+        stays silent. It can no longer read the old pose, lose the lock to the
+        reset, and then pin that old pose over HOME at 2 Hz."""
+        with self._sim_pub_lock:
+            if (time.monotonic() - self._last_sim_publish_mono
+                    < self._SIM_HEARTBEAT_QUIET_S):
+                return
+            self._publish_sim_objects(resend=True)
+            q = self._last_sim_joints
+            if q is None:
+                return
+            self._publish_sim_joint_state(q, publish_scene=False)
 
     def _get_or_create_sim_workflow_manager(self):
         """Mirror of _get_or_create_workflow_manager with the sim swaps:
@@ -5423,7 +5566,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         _home = getattr(_profile, 'home_joints_rad', None)
         _g_open = getattr(_profile, 'gripper_open_rad', None)
         sim_arm = SimArm(
-            joint_state_sink=self._publish_sim_joint_state,
+            # Real-time playback: each chunk's waypoints go out at their own
+            # time_from_start from SimArm's player thread, the way the rig's
+            # JointTrajectoryController plays them — not as one burst per second.
+            frame_sink=self._publish_sim_frame,
             ik=self._build_ik_solver(),
             objects=list(getattr(self, '_sim_objects', []) or []),
             num_arm_joints=self._profile_n(),
@@ -5992,12 +6138,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         is one the student has to reason about. „Run over" means „back at the
         start", every time. The Protokoll keeps what happened.
 
-        Runs on the workflow DAEMON thread, as SimArm.publish does. The other two
-        /sim/* publishers — the boot seed and `_sim_idle_republish` — run on the
-        ROS EXECUTOR thread instead, so do not read this as "all sim publishing is
-        on the daemon". They never overlap in practice: the idle republish
-        early-returns while `on_workflow` is set, and `_on_workflow_finished`
-        above clears that flag only after this hook's caller has finished.
+        Runs on the workflow DAEMON thread, as SimArm.publish does. The other
+        /sim/* publishers run elsewhere — the boot seed and `_sim_idle_republish`
+        on the ROS EXECUTOR thread, SimArm's real-time player on its own thread —
+        so do not read this as "all sim publishing is on the daemon". What keeps
+        them apart is not a flag: `_on_workflow_finished` above clears
+        `on_workflow` BEFORE the reset below, so a gate on that flag (which is
+        what the heartbeat used to have) left the window open. It is
+        `_sim_pub_lock`, taken by every publish, plus the reset's
+        `SimArm.set_objects` cancelling the player before it publishes HOME.
         """
         self._on_workflow_finished(terminal_phase)
         self._reset_sim_scene()

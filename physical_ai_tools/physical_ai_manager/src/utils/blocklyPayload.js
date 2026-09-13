@@ -59,22 +59,21 @@
  *   `blocklyStash*` keys ("student B could paste student A's program"), which
  *   is why those three are in `STUDENT_SCOPED_KEYS`.
  *
- * DISCLOSED COST, stated precisely because the first attempt was wrong in BOTH
- * directions. The backpack is persisted ONLY through this serializer (the
- * plugin touches no localStorage — checked, 0 hits in node_modules), so once it
- * stops riding in the document the stash is never written anywhere. But this
- * did NOT take away "surviving a reload", because it never survived one:
- * `BlocklyWorkspace.jsx` calls `initPlugins()` WITHOUT awaiting it and then
- * runs `workspaces.load` synchronously, so the Backpack is not yet in the
- * ComponentManager when the document loads and its state was already dropped on
- * every workflow load. And "lives for the session" is too generous the other
- * way: the stash belongs to the `Backpack` INSTANCE, so it is lost on every
- * workspace remount — a workflow switch, a version restore, an autosave
- * restore. What this change actually removes is the stash surviving inside one
- * saved document, which is the same thing as the privacy leak above. The durable fix
- * is a student-scoped local home for the stash (`utils/sessionScope.js` is
- * where it would be registered), which is a feature, not this change. The same
- * applies, more mildly, to the "häufig benutzt" category.
+ * DISCLOSED COST. The backpack is persisted ONLY through this serializer (the
+ * plugin touches no localStorage — checked, 0 hits in node_modules), so what
+ * this SAVE path drops is written nowhere else. Where a stash can still come
+ * back from, since `BlocklyWorkspace.jsx` initialises the plugins BEFORE it
+ * loads the initial document (2026-09-11; until then the backpack module never
+ * even loaded — "CSS already injected" — so it had no stash to lose): an
+ * AUTOSAVE restore, which reloads the full local output into a workspace whose
+ * Backpack is already registered. A cloud-loaded workflow never carries the
+ * key, so the stash is gone after a workflow switch or a version restore — the
+ * stash belongs to the `Backpack` INSTANCE and every such switch remounts it.
+ * What this allowlist removes is the stash surviving inside one saved
+ * document, which is the same thing as the privacy leak above. A durable stash
+ * would need a student-scoped local home (`utils/sessionScope.js` is where it
+ * would be registered), which is a feature, not this module. The same applies,
+ * more mildly, to the "Vorschläge" (suggested-blocks) category.
  *
  * AUTOSAVE (`useAutosave`) KEEPS THE FULL OUTPUT, deliberately. It writes to
  * LOCAL IndexedDB, namespaced per signed-in user or per browser session — it is

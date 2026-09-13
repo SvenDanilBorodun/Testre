@@ -359,21 +359,9 @@ function WorkshopPage({ isActive }) {
     });
   }, []);
 
-  // Blockly does not react to CONTAINER-only resizes (its built-in listener is
-  // window-scoped), so tell it to re-fit its SVG when the dock width or collapsed
-  // state changes — otherwise the workspace canvas keeps its old width and the
-  // trashcan / zoom controls drift off the visible area.
-  useEffect(() => {
-    const ws = workspaceRef.current;
-    if (!ws || typeof Blockly.svgResize !== 'function') return undefined;
-    const id = window.requestAnimationFrame(() => {
-      try { Blockly.svgResize(ws); } catch (_) { /* workspace torn down */ }
-    });
-    return () => window.cancelAnimationFrame(id);
-    // `simMode` swaps the right region (dock ↔ SimStage), changing the editor's
-    // available width — Blockly's window-scoped listener won't see that, so
-    // re-fit on the swap too.
-  }, [dockWidth, dockCollapsed, simMode]);
+  // No svgResize here: BlocklyWorkspace observes its own host box, which covers
+  // the dock width/collapse and the simulator swap as well as every HEIGHT
+  // change (Code-Vorschau, Protokoll, banners) the old width-only effect missed.
 
   // A panel is „busy" while it holds a live session that must NOT be torn out
   // (recording, hand-guide, or an active tutorial that owns the toolbox
@@ -1169,7 +1157,10 @@ function WorkshopPage({ isActive }) {
                   className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden"
                 >
                   <div className="flex-1 min-w-0 min-h-0 p-2 md:p-3 md:pr-0">
-                    <div className="h-full bg-white rounded-lg border border-[var(--line)] overflow-hidden min-h-[320px]">
+                    {/* No min-height: Blockly must fill exactly the box that is
+                        visible (see BlocklyWorkspace). On narrow screens the dock
+                        is height-capped instead, so the editor keeps ≥ half. */}
+                    <div className="h-full bg-white rounded-lg border border-[var(--line)] overflow-hidden">
                       <BlocklyWorkspace
                         key={editorKey}
                         initialJson={initialJsonForEditor}

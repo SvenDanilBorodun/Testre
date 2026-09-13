@@ -62,6 +62,7 @@ import {
   resolveMaxInstances,
 } from './simConstants';
 import { armGeometry } from '../../utils/armProfile';
+import { INTERP_DELAY_MS } from '../../utils/jointStateInterpolator';
 import useSimObjects from '../../hooks/useSimObjects';
 import rosConnectionManager from '../../utils/rosConnectionManager';
 
@@ -69,6 +70,11 @@ const UrdfTwin = lazy(() => import('../UrdfTwin'));
 
 // Sim-only virtual joint stream (never the bare /joint_states — see plan §C).
 const SIM_JOINT_TOPIC = '/sim/joint_states';
+// The simulator plays each waypoint at its own time (~30 Hz, SimArm's real-time
+// player), so the twin subscribes with a throttle BELOW that spacing: every pose
+// arrives, and the 20 ms floor only matters if a stream ever ran faster. The real
+// arm's twins keep UrdfTwin's default (~30 Hz out of 100 Hz).
+const SIM_JOINT_THROTTLE_MS = 20;
 
 // Strict-vertical reach annulus SHOWN TO THE STUDENT (the graspable table-top
 // ring). PROFILE-DRIVEN (edu6 §4.5) via reachAnnulus(caps): OMX fallback
@@ -288,7 +294,9 @@ function SimScene({
   // The SERVER's live scene (/sim/objects). Null until the first message — and
   // null forever on an older server image that does not publish it, which is why
   // the local grasp guess below is KEPT as a fallback rather than deleted.
-  const simScene = useSimObjects(rosbridgeUrl, true);
+  // Held back by the twin's own interpolation delay, so a grasp or a drop lands on
+  // the arm pose it belongs to rather than 100 ms ahead of the drawn jaws.
+  const simScene = useSimObjects(rosbridgeUrl, true, { delayMs: INTERP_DELAY_MS });
   // The server scene, but ONLY while it is authoritative. Null between runs →
   // `simPositions` is null → UrdfTwin's simPosOf falls back to the editor's own
   // placement coordinates, byte-identically to the pre-/sim/objects behaviour.
@@ -678,10 +686,12 @@ function SimScene({
   // onEndEffector prop identity never churns.
   const handleEndEffector = useCallback(({ x, y, gripper }) => {
     // Only a RUNNING program may grab anything. /sim/joint_states keeps ticking
-    // at 2 Hz between runs (the idle republish of the last commanded pose), so
+    // at 2 Hz between runs (the heartbeat re-sending the last commanded pose), so
     // without this an arm parked with a closed gripper could re-capture a cube
     // the student had just dragged somewhere else — a phantom grasp with no
     // program behind it. The held effect above clears graspRef on the same edge.
+    // Since the twin reports only a CHANGED drawn pose, those repeats no longer
+    // reach here at all; this stays as the guarantee rather than the mechanism.
     //
     // Its REACHABLE window is narrow and worth stating plainly: the next line
     // hands the grasp to the server whenever /sim/objects has ever been heard,
@@ -1087,6 +1097,7 @@ function SimScene({
       >
         <UrdfTwin
           jointTopic={SIM_JOINT_TOPIC}
+          jointThrottleMs={SIM_JOINT_THROTTLE_MS}
           objects={objects}
           zones={zones}
           showTable

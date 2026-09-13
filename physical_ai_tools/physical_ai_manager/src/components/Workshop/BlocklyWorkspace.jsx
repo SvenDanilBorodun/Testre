@@ -13,6 +13,7 @@ import * as Blockly from 'blockly/core';
 import 'blockly/blocks';
 import * as De from 'blockly/msg/de';
 import { buildToolbox } from './blocks/toolbox';
+import { DE } from './blocks/messages_de';
 import { registerMotionBlocks, attachMotionWorkspaceValidators } from './blocks/motion';
 import { registerPerceptionBlocks } from './blocks/perception';
 import { registerDestinationBlocks } from './blocks/destinations';
@@ -41,84 +42,224 @@ function registerAllBlocksOnce() {
   blocksRegistered = true;
 }
 
-// Lazy-init plugins so the main bundle stays small. Each plugin block
-// checks the `isDisposed()` callback before instantiating so a
-// dynamic-import that resolves *after* the workspace was disposed
-// doesn't `init()` on a dead workspace. Audit §A2.
-async function initPlugins(workspace, isDisposed) {
+// Plugin MODULES are loaded BEFORE the first Blockly.inject() and never after.
+// Backpack and zoom-to-fit (and the dropped minimap + multiselect) call
+// `Blockly.Css.register()` at module top level, and Blockly 12 throws
+// "CSS already injected" from that call once ANY workspace has been injected.
+// The old order — inject, then `await import()` — made those imports reject on
+// every page load, so the controls never existed and only a console.warn said
+// so. They stay lazy chunks (the entry-bundle rule); the injection effect
+// awaits this ONE shared promise, so no inject can ever precede them.
+//
+// Deliberately NOT loaded: @blockly/workspace-minimap (it positions itself
+// against the wrong containing block and, on this small canvas, covers the
+// trash can + zoom-to-fit; its inject() also makes it Blockly's main
+// workspace) and @mit-app-inventor/blockly-plugin-workspace-multiselect (peer
+// range `>=11 <12`, and its `init({})` throws — measured:
+// „Cannot read properties of undefined (reading 'hideIcon')", because it reads
+// `options.multiselectIcon` unconditionally).
+let pluginModulesPromise = null;
+function loadPluginModules() {
+  if (!pluginModulesPromise) {
+    const load = (label, importer) => importer().catch((e) => {
+      console.warn(`${label} import failed`, e);
+      return null;
+    });
+    pluginModulesPromise = Promise.all([
+      load('plugin-workspace-search', () => import('@blockly/plugin-workspace-search')),
+      load('workspace-backpack', () => import('@blockly/workspace-backpack')),
+      load('zoom-to-fit', () => import('@blockly/zoom-to-fit')),
+      load('block-plus-minus', () => import('@blockly/block-plus-minus')),
+      load('suggested-blocks', () => import('@blockly/suggested-blocks')),
+    // NOTHING in this `.then` may throw: the promise is cached for the page's
+    // lifetime, so a throw here would leave EVERY later mount without a
+    // workspace, not just without one plugin. Hence each step is guarded.
+    ]).then(([search, backpack, zoomToFit, plusMinus, suggested]) => {
+      if (backpack) {
+        try {
+          germanizeBackpackMenu();
+        } catch (e) {
+          console.warn('backpack German menu strings failed', e);
+        }
+      }
+      if (plusMinus) {
+        // MUST run after that import: the plugin unregisters + re-registers
+        // `controls_if_mutator` at import time, and its replacement can never
+        // add an ELSE clause (its plus() only ever adds an else-if). Re-register
+        // ours on top so a freshly dragged „wenn" block can grow a „sonst" row.
+        // It writes the GLOBAL Blockly extension registry, so it runs once,
+        // here, not per workspace. Behind a try/catch because THIS promise is
+        // cached for the page's lifetime: anything that throws here would leave
+        // every later mount without a workspace at all, not just without a
+        // „sonst" row.
+        try {
+          registerControlsIfElseMutator();
+        } catch (e) {
+          console.warn('controls_if mutator re-registration failed', e);
+        }
+      }
+      return { search, backpack, zoomToFit, suggested };
+    });
+  }
+  return pluginModulesPromise;
+}
+
+// @blockly/workspace-backpack assigns its five context-menu strings to
+// `Blockly.Msg` in ENGLISH when its module loads, and Blockly's German catalog
+// defines none of them — so making the plugin load at all (2026-09-11) would
+// have put „Copy to Backpack" into an otherwise German editor, on the student
+// AND the teacher-web build. Assign them right after that module has set its
+// defaults and BEFORE any `Backpack` is constructed: two of the four menu
+// entries (`REMOVE_FROM_BACKPACK`, `COPY_ALL_TO_BACKPACK`) read `Msg` at
+// REGISTRATION time inside `init()`, so a later assignment is too late for
+// them. The CI German lint is a Python AST walker and cannot see this file.
+function germanizeBackpackMenu() {
+  Blockly.Msg.COPY_TO_BACKPACK = DE.BACKPACK_COPY;
+  Blockly.Msg.COPY_ALL_TO_BACKPACK = DE.BACKPACK_COPY_ALL;
+  Blockly.Msg.PASTE_ALL_FROM_BACKPACK = DE.BACKPACK_PASTE_ALL;
+  Blockly.Msg.REMOVE_FROM_BACKPACK = DE.BACKPACK_REMOVE;
+  Blockly.Msg.EMPTY_BACKPACK = DE.BACKPACK_EMPTY;
+}
+
+// The only text @blockly/suggested-blocks shows a student is this hardcoded
+// English label (an empty „Vorschläge" category). Swap it for German.
+const SUGGESTED_EMPTY_EN = 'No blocks have been used yet!';
+function germanizeSuggestionPlaceholder(workspace) {
+  ['MOST_USED', 'RECENTLY_USED'].forEach((key) => {
+    const original = workspace.getToolboxCategoryCallback(key);
+    if (typeof original !== 'function') return;
+    workspace.registerToolboxCategoryCallback(key, (ws) => {
+      const items = original(ws);
+      if (!Array.isArray(items)) return items;
+      return items.map((item) => (
+        item && item.text === SUGGESTED_EMPTY_EN
+          ? { ...item, text: DE.SUGGESTED_EMPTY }
+          : item
+      ));
+    });
+  });
+}
+
+// Core lays out its corner controls in WEIGHT order and bumps each one past the
+// ones already placed. Trash (2) and the zoom cluster (3) are core; backpack and
+// zoom-to-fit register at 2, i.e. AHEAD of the zoom cluster — so in an editor
+// shorter than ~356 px the zoom +/− cluster was the one bumped above the top
+// edge, the exact "plus and minus disappear" symptom. Re-registering the two
+// plugin controls after the core ones keeps trash + zoom in their natural spots
+// at every height; the plugin extras are what run out of room first (the
+// toolbar's „Ansicht anpassen" duplicates zoom-to-fit).
+const PLUGIN_CONTROL_WEIGHTS = [['backpack', 10], ['zoomToFit', 11]];
+function positionPluginControlsAfterCoreControls(workspace) {
+  const manager = workspace.getComponentManager();
+  const { Capability } = Blockly.ComponentManager;
+  const known = [
+    Capability.POSITIONABLE,
+    Capability.DRAG_TARGET,
+    Capability.DELETE_AREA,
+    Capability.AUTOHIDEABLE,
+  ];
+  PLUGIN_CONTROL_WEIGHTS.forEach(([id, weight]) => {
+    const component = manager.getComponent(id);
+    if (!component) return;
+    const capabilities = known.filter((c) => manager.hasCapability(id, c));
+    manager.removeComponent(id);
+    manager.addComponent({ component, weight, capabilities });
+  });
+  workspace.resize();
+}
+
+// The right-hand corner column needs ~376 px for all four controls (trash,
+// zoom cluster, zoom-to-fit, backpack) and ~245 px for trash + zoom alone. In a
+// shorter editor Blockly's bump pushes the last ones PART-way past an edge — a
+// half-drawn button at the top, a backpack sliver under the scrollbar. Never
+// half: a control that does not fit whole is hidden, and a hidden trash can or
+// backpack also stops being a drop target (else it would still swallow blocks
+// dropped where it would have been). `root` finds each control's own element.
+const CORNER_CONTROLS = [
+  { id: 'trashcan', root: (svg) => svg.querySelector('.blocklyTrash') },
+  { id: 'zoomControls', root: (svg) => svg.querySelector('.blocklyZoom')?.parentNode || null },
+  { id: 'backpack', root: (svg) => svg.querySelector('.blocklyBackpack')?.parentNode || null },
+  { id: 'zoomToFit', root: (svg) => svg.querySelector('.zoomToFit') },
+];
+function hideCornerControlsThatDoNotFit(workspace, droppedTargets) {
+  const manager = workspace.getComponentManager();
+  const svg = workspace.getParentSvg();
+  const { width, height } = workspace.getCachedParentSvgSize();
+  const { DRAG_TARGET } = Blockly.ComponentManager.Capability;
+  let targetsChanged = false;
+  // CORNER_CONTROLS is in PRIORITY order, and once one control is dropped every
+  // lower-priority one goes with it. Without that cascade the shown set is not
+  // monotone in height: the backpack is TOP-anchored while the rest stack from
+  // the bottom, so Blockly's bump resolves differently either side of ~315 px
+  // and shrinking the editor made the backpack vanish while zoom-to-fit popped
+  // back IN — a flicker while dragging the dock divider.
+  let dropRest = false;
+  CORNER_CONTROLS.forEach(({ id, root }) => {
+    const component = manager.getComponent(id);
+    const el = component && svg && root(svg);
+    if (!el || typeof component.getBoundingRectangle !== 'function') return;
+    const r = component.getBoundingRectangle();
+    const fits = !dropRest
+      && !!r && r.top >= 0 && r.left >= 0 && r.bottom <= height && r.right <= width;
+    if (!fits) dropRest = true;
+    el.style.display = fits ? '' : 'none';
+    if (!fits && manager.hasCapability(id, DRAG_TARGET)) {
+      manager.removeCapability(id, DRAG_TARGET);
+      droppedTargets.add(id);
+      targetsChanged = true;
+    } else if (fits && droppedTargets.has(id)) {
+      manager.addCapability(id, DRAG_TARGET);
+      droppedTargets.delete(id);
+      targetsChanged = true;
+    }
+  });
+  if (targetsChanged) workspace.recordDragTargets();
+}
+
+// Runs synchronously right after inject and BEFORE the initial JSON loads, so
+// the backpack + suggested-blocks serializers restore their (autosaved) state.
+function initPlugins(workspace, { search, backpack, zoomToFit, suggested }, { readOnly, hasInitialJson }) {
   const guard = (label, fn) => {
-    if (isDisposed()) return;
     try {
-      return fn();
+      fn();
     } catch (e) {
       console.warn(label, 'unavailable', e);
     }
   };
-  try {
-    const mod = await import('@blockly/plugin-workspace-search');
+  if (search) {
     guard('plugin-workspace-search', () => {
-      const Cls = mod.WorkspaceSearch || mod.default;
+      const Cls = search.WorkspaceSearch || search.default;
       if (Cls) new Cls(workspace).init();
     });
-  } catch (e) { console.warn('plugin-workspace-search import failed', e); }
-
-  try {
-    const mod = await import('@blockly/workspace-backpack');
+  }
+  // A backpack is a drag/delete target — meaningless on a read-only preview,
+  // which also gets no trash can.
+  if (backpack && !readOnly) {
     guard('workspace-backpack', () => {
-      const Cls = mod.Backpack || mod.default;
+      const Cls = backpack.Backpack || backpack.default;
       if (Cls) new Cls(workspace).init();
     });
-  } catch (e) { console.warn('workspace-backpack import failed', e); }
-
-  try {
-    const mod = await import('@blockly/zoom-to-fit');
+  }
+  if (zoomToFit) {
     guard('zoom-to-fit', () => {
-      const Cls = mod.ZoomToFitControl || mod.default;
+      const Cls = zoomToFit.ZoomToFitControl || zoomToFit.default;
       if (Cls) new Cls(workspace).init();
     });
-  } catch (e) { console.warn('zoom-to-fit import failed', e); }
-
-  try {
-    const mod = await import('@blockly/workspace-minimap');
-    guard('workspace-minimap', () => {
-      const Cls = mod.PositionedMinimap || mod.Minimap || mod.default;
-      if (Cls) new Cls(workspace).init();
-    });
-  } catch (e) { console.warn('workspace-minimap import failed', e); }
-
-  try {
-    await import('@blockly/block-plus-minus');
-    // MUST run after that import: the plugin unregisters + re-registers
-    // `controls_if_mutator` at import time, and its replacement can never add
-    // an ELSE clause (its plus() only ever adds an else-if). Re-register ours
-    // on top so a freshly dragged „wenn" block can grow a „sonst" row. Not in
-    // registerAllBlocksOnce() — that runs synchronously at injection, before
-    // this import resolves, so the plugin would simply overwrite it.
-    //
-    // Deliberately NOT behind `guard`: this writes the GLOBAL Blockly
-    // extension registry, not workspace state, so an already-disposed
-    // workspace is no reason to skip it.
-    registerControlsIfElseMutator();
-  } catch (e) { console.warn('block-plus-minus import failed', e); }
-
-  try {
-    const mod = await import('@blockly/suggested-blocks');
+  }
+  if (suggested) {
     guard('suggested-blocks', () => {
-      const init = mod.init || mod.default;
-      if (typeof init === 'function') init(workspace);
+      const init = suggested.init || suggested.default;
+      if (typeof init !== 'function') return;
+      // The plugin ignores blocks created before it sees FINISHED_LOADING, so
+      // the loaded program does not count as "used". Blockly fires events
+      // asynchronously, so the load that follows in this same tick still
+      // delivers that event to it. An empty editor has no load — and so no
+      // FINISHED_LOADING — and must record from the first block on.
+      init(workspace, 10, hasInitialJson);
+      germanizeSuggestionPlaceholder(workspace);
     });
-  } catch (e) { console.warn('suggested-blocks import failed', e); }
-
-  try {
-    const mod = await import('@mit-app-inventor/blockly-plugin-workspace-multiselect');
-    guard('multiselect', () => {
-      const Cls = mod.Multiselect || mod.default;
-      if (Cls) {
-        const ms = new Cls(workspace);
-        if (typeof ms.init === 'function') ms.init({});
-      }
-    });
-  } catch (e) { console.warn('workspace-multiselect import failed', e); }
+  }
+  guard('corner-controls', () => positionPluginControlsAfterCoreControls(workspace));
 }
 
 function BlocklyWorkspace({
@@ -146,6 +287,13 @@ function BlocklyWorkspace({
   useEffect(() => {
     onWorkspaceReadyRef.current = onWorkspaceReady;
   }, [onWorkspaceReady]);
+  // Injection waits for the plugin modules, so the toolbox is built from the
+  // restriction current AT INJECT TIME, not the one captured when the effect
+  // started (a tutorial step can change it in between).
+  const restrictedBlocksRef = useRef(restrictedBlocks);
+  useEffect(() => {
+    restrictedBlocksRef.current = restrictedBlocks;
+  }, [restrictedBlocks]);
 
   // Apply toolbox restriction in a *separate* effect so changing the
   // restricted set (e.g. tutorial step advance) updates the toolbox in
@@ -165,109 +313,166 @@ function BlocklyWorkspace({
 
   useEffect(() => {
     registerAllBlocksOnce();
-    if (!containerRef.current) return undefined;
-
-    const toolbox = buildToolbox(restrictedBlocks);
-
-    const workspace = Blockly.inject(containerRef.current, {
-      toolbox,
-      readOnly,
-      trashcan: !readOnly,
-      grid: { spacing: 20, length: 1, colour: '#e5e7eb', snap: true },
-      zoom: {
-        controls: true,
-        wheel: true,
-        startScale: 0.9,
-        maxScale: 1.5,
-        minScale: 0.5,
-      },
-      move: { scrollbars: true, drag: true, wheel: false },
-      // v12 — sound effects are subtle but disable on prefers-reduced-motion.
-      sounds: !window.matchMedia
-        || !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-    });
-    workspaceRef.current = workspace;
-    setReadyTick((n) => n + 1);
-
-    // Audit §motion-r1: wire the wait_seconds numericClamp validator at
-    // the workspace level. Returns a disposer we call in the cleanup
-    // path below so the listener doesn't outlive the workspace.
-    const disposeMotionValidators = attachMotionWorkspaceValidators(workspace);
-    // Same shape: flags blocks snapped under „wiederhole fortlaufend", which
-    // can never run. Its disposer is called alongside the motion one below.
-    const disposeControlValidators = attachControlWorkspaceValidators(workspace);
-
-    // Plugins are async-imported; pass an isDisposed callback so
-    // post-dispose resolutions don't init() against a dead workspace.
     let disposed = false;
-    initPlugins(workspace, () => disposed).catch((err) => {
-      if (disposed) return;
-      console.warn('BlocklyWorkspace: plugin init failed', err);
-    });
+    let teardown = null;
 
-    if (typeof onWorkspaceReadyRef.current === 'function') {
-      onWorkspaceReadyRef.current(workspace);
-    }
+    const mount = (plugins) => {
+      const container = containerRef.current;
+      if (disposed || !container) return;
 
-    // Suppress the synthetic change event Blockly fires while loading
-    // the initial JSON; otherwise the parent's onChange handler
-    // dispatches setUnsavedBlocklyJson(null) on first mount and
-    // clobbers Redux state (audit §1.5).
-    let loadingInitial = false;
-    if (initialJson) {
-      try {
-        loadingInitial = true;
-        Blockly.serialization.workspaces.load(initialJson, workspace);
-      } catch (e) {
-        console.error('BlocklyWorkspace: failed to load initial JSON', e);
-      } finally {
-        loadingInitial = false;
+      const workspace = Blockly.inject(container, {
+        toolbox: buildToolbox(restrictedBlocksRef.current),
+        readOnly,
+        trashcan: !readOnly,
+        grid: { spacing: 20, length: 1, colour: '#e5e7eb', snap: true },
+        zoom: {
+          controls: true,
+          wheel: true,
+          startScale: 0.9,
+          maxScale: 1.5,
+          minScale: 0.5,
+        },
+        // The wheel SCROLLS the canvas (Shift+wheel sideways); Ctrl/⌘+wheel and
+        // a trackpad pinch zoom — Blockly zooms on a plain wheel only while
+        // `move.wheel` is off. With it off, one Windows notch (deltaY ≈ 100)
+        // was two 1.2 zoom steps (×1.44): a student "scrolling" hit the 0.5/1.5
+        // clamp in two notches and grew blocks over the trash can.
+        move: { scrollbars: true, drag: true, wheel: true },
+        // v12 — sound effects are subtle but disable on prefers-reduced-motion.
+        sounds: !window.matchMedia
+          || !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      });
+      workspaceRef.current = workspace;
+      setReadyTick((n) => n + 1);
+      // A MINIMAL teardown from the moment the workspace exists, replaced by
+      // the full one at the end of setup. Without it, anything that threw
+      // between here and there (a validator, the ResizeObserver ctor) left an
+      // injected, undisposed workspace behind that no unmount could reach.
+      teardown = () => {
+        workspace.dispose();
+        workspaceRef.current = null;
+      };
+
+      // Every re-layout of the corner controls goes through resize() — our
+      // observer (via svgResize), Blockly's own window-resize handler, each
+      // plugin's init(). Re-judge which controls fit whole after each one.
+      const droppedTargets = new Set();
+      const baseResize = workspace.resize.bind(workspace);
+      workspace.resize = () => {
+        baseResize();
+        hideCornerControlsThatDoNotFit(workspace, droppedTargets);
+      };
+
+      // Audit §motion-r1: wire the wait_seconds numericClamp validator at
+      // the workspace level. Returns a disposer we call in the cleanup
+      // path below so the listener doesn't outlive the workspace.
+      const disposeMotionValidators = attachMotionWorkspaceValidators(workspace);
+      // Same shape: flags blocks snapped under „wiederhole fortlaufend", which
+      // can never run. Its disposer is called alongside the motion one below.
+      const disposeControlValidators = attachControlWorkspaceValidators(workspace);
+
+      initPlugins(workspace, plugins, { readOnly, hasInitialJson: !!initialJson });
+
+      // Blockly 12 re-measures its container ONLY on a window 'resize'. Every
+      // in-page size change — the Code-Vorschau, the Protokoll (auto-opens on
+      // Start), the run-bar banners, a toolbar that re-wraps when the autosave
+      // label changes, the dock divider/collapse, the simulator swap — left the
+      // SVG at its old size: scrollbars, trash and zoom drawn over the blocks
+      // when the box grew, clipped away when it shrank. Re-fit on every change
+      // of the host box. Synchronous (the callback runs after layout, before
+      // paint) and loop-free: the host's size never depends on the SVG's.
+      let observer = null;
+      if (typeof ResizeObserver === 'function') {
+        observer = new ResizeObserver(() => {
+          if (disposed) return;
+          try { Blockly.svgResize(workspace); } catch (_) { /* torn down */ }
+        });
+        observer.observe(container);
       }
-    }
 
-    const handleChange = () => {
-      if (disposed || loadingInitial) return;
-      const fn = onChangeRef.current;
-      if (typeof fn !== 'function') return;
-      try {
-        const json = Blockly.serialization.workspaces.save(workspace);
-        fn(json);
-      } catch (e) {
-        console.error('BlocklyWorkspace: failed to serialize', e);
+      if (typeof onWorkspaceReadyRef.current === 'function') {
+        onWorkspaceReadyRef.current(workspace);
       }
+
+      // Suppress the synthetic change event Blockly fires while loading
+      // the initial JSON; otherwise the parent's onChange handler
+      // dispatches setUnsavedBlocklyJson(null) on first mount and
+      // clobbers Redux state (audit §1.5).
+      let loadingInitial = false;
+      if (initialJson) {
+        try {
+          loadingInitial = true;
+          Blockly.serialization.workspaces.load(initialJson, workspace);
+        } catch (e) {
+          console.error('BlocklyWorkspace: failed to load initial JSON', e);
+        } finally {
+          loadingInitial = false;
+        }
+      }
+
+      const handleChange = () => {
+        if (disposed || loadingInitial) return;
+        const fn = onChangeRef.current;
+        if (typeof fn !== 'function') return;
+        try {
+          const json = Blockly.serialization.workspaces.save(workspace);
+          fn(json);
+        } catch (e) {
+          console.error('BlocklyWorkspace: failed to serialize', e);
+        }
+      };
+      workspace.addChangeListener(handleChange);
+
+      teardown = () => {
+        if (observer) observer.disconnect();
+        workspace.removeChangeListener(handleChange);
+        // Detach the motion-validator listener before disposing the
+        // workspace so we don't fire one last clamp on a torn-down host.
+        try {
+          disposeMotionValidators();
+        } catch (_) { /* already disposed */ }
+        try {
+          disposeControlValidators();
+        } catch (_) { /* already disposed */ }
+        workspace.dispose();
+        workspaceRef.current = null;
+        const readyFn = onWorkspaceReadyRef.current;
+        if (typeof readyFn === 'function') {
+          readyFn(null);
+        }
+      };
     };
-    workspace.addChangeListener(handleChange);
 
-    // React 19 StrictMode mounts each effect twice; without an explicit
-    // dispose() Blockly leaks a workspace per mount and the SVG defs
-    // accumulate. The 5x mount/unmount test in the verification gate
-    // depends on this cleanup.
+    loadPluginModules()
+      .then(mount)
+      .catch((err) => {
+        if (disposed) return;
+        // Either the plugin modules never resolved, or setup threw after the
+        // workspace was injected — in which case `teardown` (assigned right
+        // after inject) still disposes it on unmount.
+        console.error('BlocklyWorkspace: workspace setup failed', err);
+      });
+
+    // Without an explicit dispose() Blockly leaks a workspace per mount and the
+    // SVG defs accumulate; the 5x mount/unmount test in the verification gate
+    // depends on this cleanup. An unmount that lands BEFORE the plugin promise
+    // resolves never injects at all (`disposed` is checked first in mount()).
     return () => {
       disposed = true;
-      workspace.removeChangeListener(handleChange);
-      // Detach the motion-validator listener before disposing the
-      // workspace so we don't fire one last clamp on a torn-down host.
-      try {
-        disposeMotionValidators();
-      } catch (_) { /* already disposed */ }
-      try {
-        disposeControlValidators();
-      } catch (_) { /* already disposed */ }
-      workspace.dispose();
-      workspaceRef.current = null;
-      const readyFn = onWorkspaceReadyRef.current;
-      if (typeof readyFn === 'function') {
-        readyFn(null);
-      }
+      if (teardown) teardown();
     };
-    // Audit §A1 — onChange + onWorkspaceReady are routed through
-    // refs (above), so a parent rebuilding the callback identity on
-    // every render does NOT re-inject the workspace. restrictedBlocks
-    // is handled by the separate `updateToolboxDefinition` effect.
+    // Audit §A1 — onChange, onWorkspaceReady and restrictedBlocks are routed
+    // through refs (above), so a parent rebuilding them on every render does
+    // NOT re-inject the workspace; restrictedBlocks changes are applied in
+    // place by the separate `updateToolbox` effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialJson, readOnly]);
 
-  return <div ref={containerRef} className="w-full h-full min-h-[420px]" />;
+  // No min-height here: it has to be the box the student actually SEES. A
+  // floor on this div inside the page's overflow-hidden wrapper made Blockly
+  // lay out for more height than was visible and draw the horizontal
+  // scrollbar and the trash can into the clipped strip.
+  return <div ref={containerRef} className="w-full h-full" />;
 }
 
 export default BlocklyWorkspace;

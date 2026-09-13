@@ -16,7 +16,7 @@
 // that changes its answer when you look away is worse than no health check.
 //
 // So this subscribes once, for the life of the page, at 1 Hz. That is one
-// extra rosbridge topic at a tenth of the twin's rate; the message is read for
+// extra rosbridge topic at a thirtieth of the twin's rate; the message is read for
 // its ARRIVAL, never its contents, so nothing is parsed and nothing rendered.
 //
 // THREE-STATE ON PURPOSE:

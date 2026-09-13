@@ -34,6 +34,22 @@ export const DE = {
   CATEGORY_AUSGABE: 'Ausgabe',
   CATEGORY_ZAEHLER: 'Zähler',
   CATEGORY_VORSCHLAEGE: 'Vorschläge',
+  // Shown in „Vorschläge" before the student has used any block. Replaces the
+  // English placeholder @blockly/suggested-blocks hardcodes (BlocklyWorkspace).
+  SUGGESTED_EMPTY: 'Noch keine Blöcke benutzt — hier erscheinen die, die du oft verwendest.',
+
+  // @blockly/workspace-backpack ships its five context-menu strings in ENGLISH
+  // (`Blockly.Msg.COPY_TO_BACKPACK` …) and Blockly's German catalog defines
+  // none of them, so the editor would show „Copy to Backpack" in an otherwise
+  // German menu. `BlocklyWorkspace::germanizeBackpackMenu` assigns these onto
+  // `Blockly.Msg` after the plugin module loads and before any Backpack is
+  // constructed — two of the four menu entries capture their text at
+  // REGISTRATION time, so a later assignment would come too late.
+  BACKPACK_COPY: 'In den Rucksack kopieren',
+  BACKPACK_COPY_ALL: 'Alle Blöcke in den Rucksack kopieren',
+  BACKPACK_PASTE_ALL: 'Alle Blöcke aus dem Rucksack einfügen',
+  BACKPACK_REMOVE: 'Aus dem Rucksack entfernen',
+  BACKPACK_EMPTY: 'Rucksack leeren',
 
   // Motion blocks
   HOME: 'Heimposition',

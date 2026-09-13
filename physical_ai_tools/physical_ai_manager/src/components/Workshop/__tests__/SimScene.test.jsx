@@ -20,10 +20,13 @@ import SimScene from '../SimScene';
 
 // The /sim/objects subscription, under test control. The hook itself has its own
 // wire contract; what matters here is WHEN SimScene is allowed to believe it.
-const simObjects = vi.hoisted(() => ({ scene: null }));
+const simObjects = vi.hoisted(() => ({ scene: null, args: null }));
 vi.mock('../../../hooks/useSimObjects', () => ({
   __esModule: true,
-  default: () => simObjects.scene,
+  default: (...args) => {
+    simObjects.args = args;
+    return simObjects.scene;
+  },
 }));
 
 // „Simulation zurücksetzen" calls /workflow/stop straight through roslib (see the
@@ -429,5 +432,28 @@ describe('SimScene — a parked arm must not grasp on its own', () => {
     // No intervening OPEN — only the latch reset can make the next line work.
     closeGripperOnTheCube();
     await waitFor(() => expect(twin()).toHaveAttribute('data-held', '7'));
+  });
+});
+
+
+// ── the simulator's 3D stream is dense AND in step with the scene (2026-09-11) ─
+// SimArm now plays every waypoint at its own time (~30 Hz). The twin must let
+// all of them through, and the scene events that ride along with them must be
+// held back by the same delay the twin draws the arm with, or a grasp attaches
+// the cube to jaws still 100 ms of motion away.
+describe('SimScene — the 3D stream and the scene share one timeline', () => {
+  test('the twin subscribes to /sim/joint_states below the 30 Hz waypoint spacing', async () => {
+    render(<SimScene scene={ONE_CUBE} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    expect(twinProps.current.jointTopic).toBe('/sim/joint_states');
+    expect(twinProps.current.jointThrottleMs).toBe(20);
+  });
+
+  test('the scene is delayed by exactly the twin\'s interpolation delay', async () => {
+    const { INTERP_DELAY_MS } = await import('../../../utils/jointStateInterpolator');
+    render(<SimScene scene={ONE_CUBE} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    expect(simObjects.args[2]).toEqual({ delayMs: INTERP_DELAY_MS });
+    expect(INTERP_DELAY_MS).toBe(100);
   });
 });

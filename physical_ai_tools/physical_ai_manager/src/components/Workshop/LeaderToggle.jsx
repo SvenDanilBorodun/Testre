@@ -77,6 +77,14 @@ const PREP_CAM_LIVE_MS = 3000;     // a scene frame within this window = live
 const PREP_JOINT_LIVE_MS = 3000;   // a /joint_states within this window = flowing
 const PREP_SETTLE_DELTA_RAD = 0.01; // per-joint step below this = "not moving"
 const PREP_SETTLE_SAMPLES = 4;     // consecutive still samples → re-home done
+// The step both numbers above are PER: 0.01 rad per 150 ms ≈ 0.067 rad/s, held
+// for 4 × 150 ms. It is also the rate this subscription asks for — but rosbridge
+// serves ONE rate per topic per client, the fastest any subscriber requested, so
+// with a 3D twin open (~30 ms) the callback runs five times as often. Counted per
+// MESSAGE, „still" then meant < 0.33 rad/s for 120 ms and a re-home's slow tail
+// read as settled. Samples are therefore evaluated on this spacing, by arrival
+// time, whatever the delivery rate.
+const PREP_SETTLE_STEP_MS = 150;
 // 2026-09-07: since the activation gate, a mode switch no longer re-homes at
 // all — the arm comes up torqued and still — so `movedRef` stays false and the
 // TIME FLOOR below is the path every toggle now takes. Both halves stay: the
@@ -146,6 +154,8 @@ export default function LeaderToggle({ isActive }) {
   const lastJointRef = useRef(0);
   const settledCountRef = useRef(0);
   const prevJointPosRef = useRef(null);
+  // Arrival time of the last /joint_states sample the settle test EVALUATED.
+  const lastSettleEvalRef = useRef(0);
   // True once the follower has actually MOVED during this prep (re-home seen), so
   // a settle can't clear the overlay during the static pre-re-home window.
   const movedRef = useRef(false);
@@ -232,6 +242,7 @@ export default function LeaderToggle({ isActive }) {
         lastJointRef.current = 0;
         settledCountRef.current = 0;
         prevJointPosRef.current = null;
+        lastSettleEvalRef.current = 0;
         movedRef.current = false;
         setPrepTimedOut(false);
         setPreparing(true);
@@ -275,10 +286,15 @@ export default function LeaderToggle({ isActive }) {
         jointSub = new ROSLIB.Topic({
           ros, name: PREP_JOINTS_TOPIC,
           messageType: 'sensor_msgs/msg/JointState',
-          throttle_rate: 150, queue_length: 1,
+          throttle_rate: PREP_SETTLE_STEP_MS, queue_length: 1,
         });
         jointSub.subscribe((msg) => {
-          lastJointRef.current = Date.now();
+          const now = Date.now();
+          lastJointRef.current = now;
+          // Evaluate on the step the thresholds are per (PREP_SETTLE_STEP_MS),
+          // not per delivered message — see the constant.
+          if (now - lastSettleEvalRef.current < PREP_SETTLE_STEP_MS) return;
+          lastSettleEvalRef.current = now;
           const pos = Array.isArray(msg?.position) ? msg.position : null;
           const prev = prevJointPosRef.current;
           if (pos && prev && pos.length === prev.length) {

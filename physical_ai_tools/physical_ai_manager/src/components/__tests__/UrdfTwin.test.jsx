@@ -8,9 +8,12 @@
 // rosbridge contract the real arm depends on:
 //   * subscribes to the BARE GLOBAL topic /joint_states,
 //   * messageType sensor_msgs/msg/JointState (the /msg/ wire form this app uses),
-//   * throttle_rate 100 ms / queue_length 1 (monitor-view budget),
+//   * throttle_rate 30 ms / queue_length 1 (~30 Hz: dense enough to interpolate,
+//     a third of the real arm's 100 Hz), and a caller-chosen rate via
+//     jointThrottleMs (the simulator stage),
 //   * a delivered JointState maps msg.name[i] -> msg.position[i] onto the
-//     robot via setJointValue for the 6 follower joints, and ignores unknowns.
+//     robot via setJointValue for the 6 follower joints, and ignores unknowns —
+//     the FIRST sample at once, later ones blended in over the next frames.
 //
 // Mock idiom mirrors ImageGridCell.test.js: vi.mock() is hoisted above imports,
 // and the `mock*`-prefixed factory vars are exempt from the TDZ guard.
@@ -58,55 +61,70 @@ const mockLoadUrls = [];
 // world-frame geometry through getWorldPosition exactly as the real link does. Left
 // null by every other test, which keeps the raw mockEEWorld path-trail behaviour.
 let mockTcpUrdf = null;
-const mockRobot = {
-  rotation: { x: 0, z: 0 },
-  setJointValue: mockSetJointValue,
-  // Box3.setFromObject(robot) walks .traverse during framing.
-  traverse: () => {},
-  // Phase-5: the path trail reads links.end_effector_link.getWorldPosition; the
-  // frame triads parent an AxesHelper onto links.link0 + links.end_effector_link.
-  // Only exercised when showPath/showFrames are true (the default tests never
-  // touch this, so they are unaffected).
-  links: {
-    link0: { add: () => {} },
-    end_effector_link: {
-      add: () => {},
-      // The grab path re-parents the held mesh here. Real three.js `attach`
-      // preserves the world transform (no move), so the stub records and does
-      // not touch .position -- a test asserting the mesh sits on the jaws can
-      // only pass if the component positioned it.
-      attach(child) {
-        attachLog.push({ parent: 'ee', child });
-        if (child) child.__parent = 'ee';
-      },
-      // Write the test-controlled TCP world position into the target vector so
-      // appendPathPoint / emitEndEffector see real numeric coords (the original
-      // `(v) => v` returned a coord-less Vector3, which appendPathPoint rejects,
-      // so the path never accumulated). Returns the same vector for the callers
-      // that read .x/.y/.z off it. When mockTcpUrdf is set, model matrixWorld by
-      // rotating that URDF-frame point through the robot's live rotation instead.
-      getWorldPosition: (v) => {
-        if (v && typeof v.set === 'function') {
-          if (mockTcpUrdf) {
-            const r = mockRobot.rotation;
-            const cx = Math.cos(r.x || 0);
-            const sx = Math.sin(r.x || 0);
-            const cz = Math.cos(r.z || 0);
-            const sz = Math.sin(r.z || 0);
-            // Rz first, then Rx (THREE order 'XYZ' with y=0: R = Rx·Rz).
-            const rx = cz * mockTcpUrdf.x - sz * mockTcpUrdf.y;
-            const ry = sz * mockTcpUrdf.x + cz * mockTcpUrdf.y;
-            const rz = mockTcpUrdf.z;
-            v.set(rx, cx * ry - sx * rz, sx * ry + cx * rz);
-          } else {
-            v.set(mockEEWorld.x, mockEEWorld.y, mockEEWorld.z);
+// A FRESH robot per URDF load, like the real loader: an asset change rebuilds the
+// viewer, and the component has to put the current pose onto the NEW model rather
+// than wait for the arm to move (UrdfTwin's `fresh` path). `mockRobot` always
+// points at the newest one, so every existing assertion on it reads the robot of
+// the render it just did; `mockRobots` keeps them all, and each records the joints
+// IT was given.
+function newMockRobot() {
+  const robot = {
+    rotation: { x: 0, z: 0 },
+    applied: [],
+    setJointValue: (name, value) => {
+      robot.applied.push([name, value]);
+      return mockSetJointValue(name, value);
+    },
+    // Box3.setFromObject(robot) walks .traverse during framing.
+    traverse: () => {},
+    // Phase-5: the path trail reads links.end_effector_link.getWorldPosition; the
+    // frame triads parent an AxesHelper onto links.link0 + links.end_effector_link.
+    // Only exercised when showPath/showFrames are true (the default tests never
+    // touch this, so they are unaffected).
+    links: {
+      link0: { add: () => {} },
+      end_effector_link: {
+        add: () => {},
+        // The grab path re-parents the held mesh here. Real three.js `attach`
+        // preserves the world transform (no move), so the stub records and does
+        // not touch .position -- a test asserting the mesh sits on the jaws can
+        // only pass if the component positioned it.
+        attach(child) {
+          attachLog.push({ parent: 'ee', child });
+          if (child) child.__parent = 'ee';
+        },
+        // Write the test-controlled TCP world position into the target vector so
+        // appendPathPoint / emitEndEffector see real numeric coords (the original
+        // `(v) => v` returned a coord-less Vector3, which appendPathPoint rejects,
+        // so the path never accumulated). Returns the same vector for the callers
+        // that read .x/.y/.z off it. When mockTcpUrdf is set, model matrixWorld by
+        // rotating that URDF-frame point through the robot's live rotation instead.
+        getWorldPosition: (v) => {
+          if (v && typeof v.set === 'function') {
+            if (mockTcpUrdf) {
+              const r = robot.rotation;
+              const cx = Math.cos(r.x || 0);
+              const sx = Math.sin(r.x || 0);
+              const cz = Math.cos(r.z || 0);
+              const sz = Math.sin(r.z || 0);
+              // Rz first, then Rx (THREE order 'XYZ' with y=0: R = Rx·Rz).
+              const rx = cz * mockTcpUrdf.x - sz * mockTcpUrdf.y;
+              const ry = sz * mockTcpUrdf.x + cz * mockTcpUrdf.y;
+              const rz = mockTcpUrdf.z;
+              v.set(rx, cx * ry - sx * rz, sx * ry + cx * rz);
+            } else {
+              v.set(mockEEWorld.x, mockEEWorld.y, mockEEWorld.z);
+            }
           }
-        }
-        return v;
+          return v;
+        },
       },
     },
-  },
-};
+  };
+  return robot;
+}
+const mockRobots = [];
+let mockRobot = newMockRobot();
 
 // Phase-5 constructor spies — assert the path line + frame triads are built ONLY
 // when their props are enabled (the default tests never construct these).
@@ -172,6 +190,8 @@ vi.mock('urdf-loader', () => ({
       // through loadMeshCb, which the old mock never called at all, leaving the
       // entire async-mesh path untested.
       if (this.manager) this.manager.itemStart(url);
+      mockRobot = newMockRobot();
+      mockRobots.push(mockRobot);
       onComplete(mockRobot);
       for (let i = 0; i < MOCK_URDF_MESH_COUNT; i += 1) {
         if (typeof this.loadMeshCb === 'function') {
@@ -448,8 +468,8 @@ beforeEach(() => {
   mockEEWorld.x = 0;
   mockEEWorld.y = 0;
   mockEEWorld.z = 0;
-  mockRobot.rotation.x = 0;
-  mockRobot.rotation.z = 0;
+  mockRobots.length = 0;
+  mockRobot = newMockRobot();
   mockLoadUrls.length = 0;
   mockStlLoads.length = 0;
   mockMeshDone.length = 0;
@@ -468,9 +488,18 @@ describe('UrdfTwin — /joint_states wire contract', () => {
     const opts = mockTopicCtor.mock.calls[0][0];
     expect(opts.name).toBe('/joint_states');
     expect(opts.messageType).toBe('sensor_msgs/msg/JointState');
-    expect(opts.throttle_rate).toBe(100);
+    expect(opts.throttle_rate).toBe(30);
     expect(opts.queue_length).toBe(1);
     expect(mockSubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  test('jointThrottleMs overrides the rate (the simulator stage passes its own)', async () => {
+    render(<UrdfTwin jointTopic="/sim/joint_states" jointThrottleMs={20} />);
+    await waitFor(() => expect(mockTopicCtor).toHaveBeenCalledTimes(1));
+    const opts = mockTopicCtor.mock.calls[0][0];
+    expect(opts.name).toBe('/sim/joint_states');
+    expect(opts.throttle_rate).toBe(20);
+    expect(opts.queue_length).toBe(1);
   });
 
   test('maps msg.name[i] -> msg.position[i] onto robot.setJointValue for the 6 follower joints', async () => {
@@ -596,18 +625,19 @@ describe('UrdfTwin — path trail accumulation (Phase-5)', () => {
     mockSetDrawRange.mockClear();
     mockPathGeometry.attributes.position.needsUpdate = false;
 
-    // First TCP world position.
+    // First TCP world position. The FIRST sample lands on the model at once.
     mockEEWorld.x = 0.10; mockEEWorld.y = 0.20; mockEEWorld.z = 0.05;
     act(() => onMsg({ name: ['joint1'], position: [0.1] }));
+    expect(mockSetDrawRange.mock.calls.map((c) => c[1])).toContain(1);
 
-    // Second, ~7 cm away (well over PATH_MIN_MOVE_M = 1 mm) -> a second point.
+    // Second, ~7 cm away (well over PATH_MIN_MOVE_M = 1 mm) -> a second point,
+    // once the interpolated pose reaches it (the render clock trails the data).
     mockEEWorld.x = 0.15; mockEEWorld.y = 0.25; mockEEWorld.z = 0.05;
     act(() => onMsg({ name: ['joint1'], position: [0.12] }));
 
     // The draw range grew 0 -> 1 -> 2 as the two distinct points were appended.
-    const ends = mockSetDrawRange.mock.calls.map((c) => c[1]);
-    expect(ends).toContain(1);
-    expect(ends).toContain(2);
+    await waitFor(() =>
+      expect(mockSetDrawRange.mock.calls.map((c) => c[1])).toContain(2));
     // The geometry's position attribute was flagged for re-upload.
     expect(mockPathGeometry.attributes.position.needsUpdate).toBe(true);
   });
@@ -622,9 +652,12 @@ describe('UrdfTwin — path trail accumulation (Phase-5)', () => {
     act(() => onMsg({ name: ['joint1'], position: [0.1] }));
     mockSetDrawRange.mockClear();
 
-    // Move 0.1 mm (< 1 mm) -> the distance gate rejects it, no draw-range change.
+    // The joint moves far enough to be DRAWN (5 mrad, over the 1 mrad render
+    // dead-band) while the TCP moves 0.1 mm (< 1 mm) -> the pose is applied, and
+    // it is the trail's distance gate that rejects the point.
     mockEEWorld.x = 0.2001;
-    act(() => onMsg({ name: ['joint1'], position: [0.1001] }));
+    act(() => onMsg({ name: ['joint1'], position: [0.105] }));
+    await waitFor(() => expect(mockSetJointValue).toHaveBeenCalledWith('joint1', 0.105));
     expect(mockSetDrawRange).not.toHaveBeenCalled();
   });
 
@@ -1187,5 +1220,211 @@ describe('UrdfTwin — the liveness chip is not a latch', () => {
     act(() => { cleanup(); });
 
     expect(vi.getTimerCount()).toBeLessThan(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Motion is INTERPOLATED on the publisher's stamps (2026-09-11).
+//
+// The twin used to setJointValue each message as it landed, so it moved in steps
+// — 10 a second on the real arm, about two a second on the simulator, which sent
+// each second of motion as one burst. It now blends between the two samples
+// around a render clock that trails the data by 100 ms.
+// ---------------------------------------------------------------------------
+
+describe('UrdfTwin — the joint stream is blended, not snapped', () => {
+  // The render loop reads performance.now(). A real clock makes "was an
+  // intermediate pose drawn?" depend on whether this worker got an animation
+  // frame inside a 100 ms window — it flaked under parallel test files. Here the
+  // test owns the clock: a frame computes exactly the pose of `clock`.
+  let clock;
+  let nowSpy;
+  beforeEach(() => {
+    clock = 50_000;
+    nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+  });
+  afterEach(() => {
+    nowSpy.mockRestore();
+  });
+
+  const S = 1_700_000_000; // an epoch second for header stamps
+  const stamped = (ms, names, position) => ({
+    header: { stamp: { sec: S + Math.floor(ms / 1000), nanosec: (ms % 1000) * 1e6 } },
+    name: names,
+    position,
+  });
+  const joint1Values = () => mockSetJointValue.mock.calls
+    .filter((c) => c[0] === 'joint1').map((c) => c[1]);
+  // Advance the owned clock and let the render loop draw at that time.
+  async function at(t) {
+    clock = t;
+    await settleFrames(2);
+  }
+
+  async function mountAndSubscribe(ui = <UrdfTwin />) {
+    render(ui);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    return mockSubscribe.mock.calls[0][0];
+  }
+
+  test('a move between two samples is drawn THROUGH its intermediate poses', async () => {
+    const onMsg = await mountAndSubscribe();
+    // Both land at t = 50 000; the render clock sits 100 ms behind the newest
+    // stamp, i.e. exactly on the first sample.
+    act(() => onMsg(stamped(0, ['joint1'], [0.0])));
+    act(() => onMsg(stamped(100, ['joint1'], [1.0])));
+    await at(50_025);
+    expect(joint1Values()[joint1Values().length - 1]).toBeCloseTo(0.25, 9);
+    await at(50_060);
+    expect(joint1Values()[joint1Values().length - 1]).toBeCloseTo(0.6, 9);
+    await at(50_100);
+    expect(joint1Values()[joint1Values().length - 1]).toBeCloseTo(1.0, 9);
+    // …and in order: a blend never runs backwards.
+    const seq = joint1Values();
+    for (let i = 1; i < seq.length; i += 1) expect(seq[i]).toBeGreaterThanOrEqual(seq[i - 1]);
+  });
+
+  test('sub-milliradian changes are not re-applied frame by frame while blending', async () => {
+    const onMsg = await mountAndSubscribe();
+    act(() => onMsg(stamped(0, ['joint1', 'joint2'], [0.2, -0.4])));
+    expect(mockSetJointValue).toHaveBeenCalledTimes(2);
+    for (let i = 1; i <= 6; i += 1) {
+      clock = 50_000 + 33 * i;
+      // ±0.4 mrad — below the 1 mrad render dead-band — ending where it began.
+      act(() => onMsg(stamped(33 * i, ['joint1', 'joint2'], [0.2 + (i % 2) * 4e-4, -0.4])));
+      // eslint-disable-next-line no-await-in-loop
+      await settleFrames(1);
+    }
+    await at(50_400);
+    expect(mockSetJointValue).toHaveBeenCalledTimes(2);
+  });
+
+  test('a blend that ends inside the dead-band still LANDS exactly on the data', async () => {
+    // The flake that found this: a frame at 90 % of a 5 mrad move applied
+    // 0.1045; the last 0.5 mrad was under the dead-band, so the model rested
+    // short of the newest sample for good.
+    const onMsg = await mountAndSubscribe();
+    act(() => onMsg(stamped(0, ['joint1'], [0.1])));
+    clock = 50_040;
+    act(() => onMsg(stamped(40, ['joint1'], [0.105])));
+    await at(50_136);                    // render time 36 of 40: 90 % of the way
+    expect(joint1Values()[joint1Values().length - 1]).toBeCloseTo(0.1045, 9);
+    await at(50_200);                    // settled
+    expect(joint1Values()[joint1Values().length - 1]).toBe(0.105);
+  });
+
+  test('a LIVE stream from a resting arm still lands exactly (it never stops sending)', async () => {
+    // The real /joint_states never goes quiet, so "the stream settled" never
+    // happens there; what matters is that the DATA stopped moving.
+    const onMsg = await mountAndSubscribe();
+    act(() => onMsg(stamped(0, ['joint1'], [0.1])));
+    clock = 50_040;
+    act(() => onMsg(stamped(40, ['joint1'], [0.105])));
+    await at(50_136);                    // 90 % of the way: 0.1045 applied
+    expect(joint1Values()[joint1Values().length - 1]).toBeCloseTo(0.1045, 9);
+    for (let k = 1; k <= 4; k += 1) {    // the arm rests; samples keep coming
+      clock = 50_040 + 33 * k;
+      act(() => onMsg(stamped(40 + 33 * k, ['joint1'], [0.105])));
+    }
+    await at(50_190);                    // rt 90: blending 0.105 → 0.105
+    expect(joint1Values()[joint1Values().length - 1]).toBe(0.105);
+  });
+
+  test('a stream that resumes after a pause STEPS — it does not glide across the gap', async () => {
+    const onMsg = await mountAndSubscribe();
+    act(() => onMsg(stamped(0, ['joint1'], [0.0])));
+    // 600 ms later (> the 250 ms blend limit): a paused run, a heartbeat gap.
+    clock = 50_600;
+    act(() => onMsg(stamped(600, ['joint1'], [0.5])));
+    for (const t of [50_620, 50_650, 50_690]) {
+      // eslint-disable-next-line no-await-in-loop
+      await at(t);
+      expect(joint1Values()[joint1Values().length - 1]).toBe(0.0);
+    }
+    await at(50_700);
+    expect(joint1Values()[joint1Values().length - 1]).toBe(0.5);
+    expect(joint1Values().filter((v) => v > 0.0 && v < 0.5)).toEqual([]);
+  });
+
+  test('a jump no joint could make is a discontinuity, not motion (a reset to HOME)', async () => {
+    const onMsg = await mountAndSubscribe();
+    act(() => onMsg(stamped(0, ['joint1'], [0.0])));
+    // 2.5 rad in 40 ms = 62 rad/s: a reset, never a blend. Delivered on time.
+    clock = 50_040;
+    act(() => onMsg(stamped(40, ['joint1'], [2.5])));
+    // Render time = clock − 100 ms (relative to the first stamp).
+    for (const t of [50_110, 50_120, 50_139]) {  // inside the 0…40 ms interval
+      // eslint-disable-next-line no-await-in-loop
+      await at(t);
+      expect(joint1Values()[joint1Values().length - 1]).toBe(0.0);
+    }
+    await at(50_140);
+    expect(joint1Values()[joint1Values().length - 1]).toBe(2.5);
+    expect(joint1Values().filter((v) => v > 0.0 && v < 2.5)).toEqual([]);
+  });
+
+  test('onEndEffector reports the gripper of the pose actually DRAWN', async () => {
+    const onEE = vi.fn();
+    const onMsg = await mountAndSubscribe(<UrdfTwin onEndEffector={onEE} />);
+    const last = () => onEE.mock.calls[onEE.mock.calls.length - 1][0].gripper;
+    act(() => onMsg(stamped(0, ['joint1', 'gripper_joint_1'], [0.0, 0.8])));
+    expect(last()).toBeCloseTo(0.8, 9);            // the first sample, at once
+    // The close arrives on time, 200 ms later. The render clock trails the
+    // data by 100 ms, so it is now halfway through that 200 ms close.
+    clock = 50_200;
+    act(() => onMsg(stamped(200, ['joint1', 'gripper_joint_1'], [0.0, -0.5])));
+    expect(last()).toBeCloseTo(0.8 - 1.3 * 0.5, 9);
+    await at(50_250);                              // three quarters
+    expect(last()).toBeCloseTo(0.8 - 1.3 * 0.75, 9);
+    await at(50_300);
+    expect(last()).toBeCloseTo(-0.5, 9);
+  });
+
+  test('a REBUILT model is given the current pose without waiting for a message', async () => {
+    // A capability manifest naming a different urdf_asset_id rebuilds the whole
+    // viewer. The buffered pose has not changed, so nothing in the dead-band path
+    // would re-apply it: without the "fresh" check the new model sits at its URDF
+    // zero pose until the arm next moves — on a resting rig, indefinitely.
+    mockState = {
+      ros: { rosbridgeUrl: 'ws://student-pc:9090', rosHost: 'student-pc' },
+      tasks: { taskStatus: { capabilities: { urdf_asset_id: 'omx_f', arm_joints: 5 } } },
+    };
+    const { rerender } = render(<UrdfTwin />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    act(() => mockSubscribe.mock.calls[0][0](stamped(0,
+      ['joint1', 'joint2'], [0.25, -0.4])));
+    expect(mockRobots).toHaveLength(1);
+    expect(mockRobots[0].applied).toEqual([['joint1', 0.25], ['joint2', -0.4]]);
+
+    // The manifest switches to the edu6 asset → a new URDF, a new model. Same
+    // joint VALUES on the wire (joint1/joint2 exist on both arms), no new message.
+    mockState = {
+      ...mockState,
+      tasks: { taskStatus: { capabilities: {
+        urdf_asset_id: 'edu6',
+        arm_joints: 6,
+        joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint'],
+      } } },
+    };
+    rerender(<UrdfTwin />);
+    await waitFor(() => expect(mockRobots).toHaveLength(2));
+    await waitFor(() => expect(mockRobots[1].applied).toEqual(
+      [['joint1', 0.25], ['joint2', -0.4]]));
+  });
+
+  test('a rebuilt subscription starts a fresh timeline (no blend across topics)', async () => {
+    const { rerender } = render(<UrdfTwin jointTopic="/joint_states" />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    act(() => mockSubscribe.mock.calls[0][0](stamped(0, ['joint1'], [0.0])));
+    // Let the FIRST stream settle (nothing left to show). Its per-frame cache
+    // would otherwise mistake the new stream's first sample — same version
+    // number, same robot, same joint set — for one it had already drawn.
+    await at(50_200);
+    rerender(<UrdfTwin jointTopic="/sim/joint_states" />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(2));
+    mockSetJointValue.mockClear();
+    // The new stream's FIRST sample lands at once, exactly like a fresh mount.
+    act(() => mockSubscribe.mock.calls[1][0](stamped(5000, ['joint1'], [0.7])));
+    expect(mockSetJointValue).toHaveBeenCalledWith('joint1', 0.7);
   });
 });

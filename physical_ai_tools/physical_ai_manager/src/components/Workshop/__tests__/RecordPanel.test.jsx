@@ -234,3 +234,145 @@ describe('RecordPanel', () => {
     }
   });
 });
+
+describe('RecordPanel — re-lock in place, warned glide, and no preview abort', () => {
+  beforeEach(() => {
+    mockRos.handGuide = vi.fn(() => Promise.resolve({ success: true }));
+    mockRos.homeArm = vi.fn(() => Promise.resolve({ success: true }));
+  });
+  afterEach(() => {
+    delete mockRos.handGuide;
+    delete mockRos.homeArm;
+  });
+
+  async function recordAndStop() {
+    await userEvent.click(screen.getByRole('button', { name: 'Bewegung aufnehmen' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Stopp' }));
+    await screen.findByText(/Aufgenommen: 3 Punkte/);
+  }
+
+  test('Stopp closes the session ONCE and offers the warned glide home', async () => {
+    render(<RecordPanel accessToken="jwt-1" workflowId="wf-1" disabled={false} />);
+    await recordAndStop();
+    expect(mockRos.handGuide).toHaveBeenCalledTimes(1);
+    expect(mockRos.handGuide).toHaveBeenCalledWith(false);
+    expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
+    // No motion before the countdown / a click.
+    expect(mockRos.homeArm).not.toHaveBeenCalled();
+    // The preview (which MOVES the arm) waits for the warning to be resolved.
+    expect(screen.getByRole('button', { name: 'Vorschau abspielen' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Hier stehen lassen' }));
+    expect(screen.getByRole('button', { name: 'Vorschau abspielen' })).not.toBeDisabled();
+  });
+
+  test('Speichern / Verwerfen after a preview do NOT send hand_guide(false) again (it aborted the preview)', async () => {
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('Bewegung 1');
+    render(<RecordPanel accessToken="jwt-1" workflowId="wf-1" disabled={false} />);
+    await recordAndStop();
+    await userEvent.click(screen.getByRole('button', { name: 'Hier stehen lassen' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Vorschau abspielen' }));
+    await waitFor(() => expect(mockRos.replayMotion).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole('button', { name: 'Speichern' }));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalled());
+    expect(mockRos.handGuide).toHaveBeenCalledTimes(1);
+    promptSpy.mockRestore();
+  });
+
+  test('the review (and its „Vorschau") waits for the session close to finish', async () => {
+    let resolveClose;
+    mockRos.handGuide = vi.fn(() => new Promise((r) => { resolveClose = r; }));
+    render(<RecordPanel accessToken="jwt-1" workflowId="wf-1" disabled={false} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Bewegung aufnehmen' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Stopp' }));
+    await waitFor(() => expect(mockRos.handGuide).toHaveBeenCalledWith(false));
+    // hand_guide(false) is the universal manual ABORT: a preview started before
+    // it lands would be cancelled by it, so no preview button may exist yet.
+    expect(screen.queryByRole('button', { name: 'Vorschau abspielen' })).not.toBeInTheDocument();
+    await act(async () => { resolveClose({ success: true }); });
+    expect(await screen.findByRole('button', { name: 'Vorschau abspielen' })).toBeInTheDocument();
+  });
+
+  test('a close the server refused is retried by the next path', async () => {
+    mockRos.handGuide = vi.fn()
+      .mockResolvedValueOnce({ success: false, message: 'Der Arm ist noch in Bewegung.' })
+      .mockResolvedValue({ success: true });
+    render(<RecordPanel accessToken="jwt-1" workflowId="wf-1" disabled={false} />);
+    await recordAndStop();
+    await userEvent.click(screen.getByRole('button', { name: 'Hier stehen lassen' }));
+    await userEvent.click(screen.getAllByRole('button', { name: 'Verwerfen' })[0]);
+    await waitFor(() => expect(mockRos.handGuide).toHaveBeenCalledTimes(2));
+  });
+
+  test('the saved points are rounded (older server images send full precision)', async () => {
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('Bewegung 1');
+    setRecord({
+      start: { success: true },
+      stop: {
+        success: true,
+        sample_count: 2,
+        duration_s: 0.04,
+        points_json: JSON.stringify({
+          fps: 25,
+          points: [
+            [0.123456789, 0, 0, 0, 0, 0.8, 0.0],
+            [0.223456789, 0, 0, 0, 0, 0.8, 0.0400001],
+          ],
+        }),
+      },
+      cancel: { success: true },
+    });
+    render(<RecordPanel accessToken="jwt-1" workflowId="wf-1" disabled={false} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Bewegung aufnehmen' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Stopp' }));
+    await screen.findByText(/Aufgenommen: 2 Punkte/);
+    await userEvent.click(screen.getByRole('button', { name: 'Speichern' }));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalled());
+    expect(mockCreate.mock.calls[0][2].points).toEqual([
+      [0.1235, 0, 0, 0, 0, 0.8, 0],
+      [0.2235, 0, 0, 0, 0, 0.8, 0.04],
+    ]);
+    promptSpy.mockRestore();
+  });
+
+  test('Verwerfen DURING a recording (arm re-locked by cancel) also offers the glide', async () => {
+    render(<RecordPanel accessToken="jwt-1" workflowId="wf-1" disabled={false} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Bewegung aufnehmen' }));
+    await screen.findByRole('button', { name: 'Stopp' });
+    await userEvent.click(screen.getByRole('button', { name: 'Verwerfen' }));
+    await waitFor(() => expect(mockRos.recordControl).toHaveBeenCalledWith('cancel'));
+    expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
+  });
+
+  test('a stop whose re-lock FAILED keeps the returned take for saving, and offers no glide', async () => {
+    setRecord({
+      start: { success: true },
+      stop: {
+        success: false,
+        message: 'Arm konnte nicht wieder verriegelt werden.',
+        sample_count: 3,
+        duration_s: 2.0,
+        points_json: JSON.stringify({ fps: 25, points: POINTS }),
+      },
+      cancel: { success: true },
+    });
+    render(<RecordPanel accessToken="jwt-1" workflowId="wf-1" disabled={false} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Bewegung aufnehmen' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Stopp' }));
+    expect(await screen.findByText(/Aufgenommen: 3 Punkte/)).toBeInTheDocument();
+    expect(mockToast.error).toHaveBeenCalledWith('Arm konnte nicht wieder verriegelt werden.');
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  test('a FAILED stop (the arm could not be re-locked) never offers a glide', async () => {
+    setRecord({
+      start: { success: true },
+      stop: { success: false, message: 'Arm konnte nicht wieder verriegelt werden.' },
+      cancel: { success: true },
+    });
+    render(<RecordPanel accessToken="jwt-1" workflowId="wf-1" disabled={false} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Bewegung aufnehmen' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Stopp' }));
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+});

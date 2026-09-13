@@ -68,9 +68,12 @@ FRAMES — the one thing to keep straight:
 
   TOUCH-OFF NOTE (rig gate E8): this claw ROTATES, so its tip height depends on
   the jaw opening — 86.25 mm below the EE origin CLOSED, 68.8 mm at 0.9 rad
-  open. „Tisch vermessen" must therefore be taught with the claw CLOSED. The
-  model is pessimistic in the safe direction everywhere else: an OPEN claw's
-  lowest point is always ABOVE the TCP this file reports.
+  open. „Tisch vermessen" must therefore be taught with the claw CLOSED. NOT
+  everywhere pessimistic, measured on the meshes: opening the claw first moves
+  the tips DOWN, by up to 0.64 mm at 0.14 rad, before they rise past the closed
+  height at ≈0.28 rad (the blade pivots sit 9.25 mm off the tool axis) — small
+  against every floor margin, and :meth:`Edu1IKSolver.tool_tip_rise_m` reports
+  it as a negative rise.
 
 ROLL contract (jaw alignment): motion's shared formula
 ``roll = base_yaw − tag_yaw + GRASP_ROLL_RAD`` is consumed here as
@@ -174,6 +177,17 @@ BASE_AXIS_X_WORLD = 0.0
 # model error, and the fold turns it into a 1.600 mm difference BETWEEN the two
 # folded twins.
 _L_TOOL = 0.02125 + 0.065
+# Claw LOWEST-point rise above the closed-tip TCP: (band start rad, min true rise
+# in [start, next start) in m, rounded DOWN to 1e-5). Generated from the shipped
+# finger STLs through RL_joint/LF_joint (see tool_tip_rise_m); the last band covers
+# [0.9, 1.5708]. Negative near 0.14 rad: the tips dip before they rise.
+_TIP_RISE_TABLE = (
+    (0.00, -0.00038), (0.05, -0.00059), (0.10, -0.00065), (0.15, -0.00064),
+    (0.20, -0.00053), (0.25, -0.00025), (0.30, 0.00019), (0.35, 0.00080),
+    (0.40, 0.00156), (0.45, 0.00249), (0.50, 0.00357), (0.55, 0.00480),
+    (0.60, 0.00618), (0.65, 0.00771), (0.70, 0.00939), (0.75, 0.01120),
+    (0.80, 0.01315), (0.85, 0.01522), (0.90, 0.01742),
+)
 
 # FK∘IK acceptance for a returned solve().
 #
@@ -658,6 +672,38 @@ class Edu1IKSolver:
         Returns a value in ``(−π, π]`` (``atan2`` range). Not gated on
         reachability — callers use :meth:`in_workspace` / :meth:`solve`."""
         return math.atan2(float(y), float(x) - BASE_AXIS_X_WORLD)
+
+    def tool_tip_rise_m(self, gripper_rad: float) -> float:
+        """Height (m) by which the claw's LOWEST point sits ABOVE the closed-fingertip
+        TCP at claw command ``gripper_rad`` — a guaranteed LOWER BOUND, and it can
+        be NEGATIVE.
+
+        Read from :data:`_TIP_RISE_TABLE`, which is DERIVED from the shipped finger
+        meshes (``right_finger.STL`` / ``left_finger.STL`` through ``RL_joint`` /
+        ``LF_joint``, the flipped axes and the ``<mimic>``): each 0.05 rad band holds
+        the MINIMUM true rise anywhere inside it, rounded DOWN to 0.01 mm. A
+        quadratic through the two CAD figures (86.25 mm closed, 68.8 mm at 0.9 rad)
+        was used first and was WRONG: the blade pivots sit 9.25 mm either side of
+        the tool axis, so opening the claw first moves the tips DOWN (−0.64 mm at
+        0.14 rad) and they only climb past the closed height at ≈0.28 rad; the
+        quadratic over-credited by up to 1.88 mm (at 0.42 rad) — i.e. it approved
+        points the floor check should have refused. A negative value therefore
+        makes the check STRICTER, never looser. ``test_edu1_claw_tip_rise_…``
+        recomputes the true curve from the meshes and fails if any band
+        over-credits. Rig gate E8 owns the physical curve."""
+        try:
+            g = float(gripper_rad)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(g):
+            return 0.0
+        value = _TIP_RISE_TABLE[0][1]
+        for band_start, rise in _TIP_RISE_TABLE:
+            if g >= band_start:
+                value = rise
+            else:
+                break
+        return value
 
     def roll_from_joints(self, joints) -> Optional[float]:
         """INVERSE of the ``roll`` → joint5 mapping: the ``roll`` to hand

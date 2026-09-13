@@ -59,6 +59,7 @@ from physical_ai_server.workflow.handlers.motion import (
 from physical_ai_server.workflow.trajectory_builder import (
     DEFAULT_FPS,
     JOINT_VELOCITY_LIMIT_RAD_S,
+    build_linear_segment,
     build_segment,
     chunked_publish,
 )
@@ -82,6 +83,26 @@ DEFAULT_LEAD_IN_S = 1.5
 # cap is RECORD_MAX_S = 120 s, so this is ~5x any real recording and refuses
 # only a corrupt or hand-crafted one.
 MAX_TRAJECTORY_SPAN_S = 600.0
+# Replay streams are published POSITION-ONLY, and that is load-bearing on the
+# OMX. `resegment_trajectory(with_velocities=True)` attaches central-difference
+# velocities, so the LAST point of every ~1 s chunk carries the arm's non-zero
+# mid-motion velocity — and ros2_controllers' JointTrajectoryController rejects
+# any trajectory whose last point has a non-zero velocity
+# (`allow_nonzero_velocity_at_trajectory_end`, default FALSE since
+# ros2_controllers 4.0.0, i.e. every ROS 2 Jazzy build; the overlay YAML does not
+# set it). The rejection is a controller log line only ("Velocity of last
+# trajectory point of joint … is not zero") — nothing reaches the student.
+# Measured 2026-09-13 on a 15 s recording through this module + chunked_publish:
+# 13 of 14 chunks rejected, 0.8 s of 16.4 s accepted — the arm did not move, or
+# only for the last fraction of a second. Position-only chunks are the shape
+# every workflow move has always published, and the controller interpolates
+# them linearly at 30 Hz. The Feetech driver ignores velocities either way.
+# Do NOT turn this back on without also making every chunk end at rest (a stop
+# every second) or setting that controller parameter (an overlay + Rule §2
+# review), and a rig measurement.
+REPLAY_PUBLISHES_VELOCITIES = False
+# Floor on one recorded pair's playback step (see resegment_trajectory).
+_MIN_PAIR_DT_S = 0.001
 # Contract-B point layout: [j1..jn, grip, t_s] — (num_arm_joints + 2) floats.
 # 7 is the OMX width (n=5); extract_points/resegment_trajectory take the arm's
 # ``num_arm_joints`` and derive the width, asserting it EXACTLY (§16.4 rail #2).
@@ -195,6 +216,74 @@ def extract_points(traj: Any, num_arm_joints: int = 5) -> list[list[float]]:
             'Sekunden).'
         )
     return rows
+
+
+def refuse_wrapped_joint_jumps(points, joint_limits, num_arm_joints: int = 5) -> None:
+    """Refuse (German ``WorkflowError``) a recording in which a FULL-CIRCLE joint
+    jumps by more than half a turn between two consecutive samples.
+
+    That is never a motion: it is the ±180° SEAM. An edu6 joint4/joint6 whose
+    limits span the whole circle reads +3.128 then −3.116 rad when the student's
+    hand turns it 18° across the seam, and the replay interpolates the NUMBERS —
+    measured, a 0.32 s hand motion replayed as a 337° rotation over 3.86 s, with
+    the gripper cable running through joint6. The servo cannot cross the seam,
+    so there is nothing to unwrap to; the take has to be re-recorded.
+
+    Judged only on joints whose limits cover a full turn (every other joint's
+    whole range is under 2π, so a > π step in one sample pair cannot occur on it
+    without the arm teleporting). ``joint_limits`` None/short → no check (a
+    profile-less caller keeps today's behaviour)."""
+    if not joint_limits:
+        return
+    n = int(num_arm_joints)
+    full_circle = []
+    for j in range(min(n, len(joint_limits))):
+        try:
+            lo, hi = (float(v) for v in joint_limits[j])
+        except (TypeError, ValueError):
+            continue
+        if hi - lo >= 2.0 * math.pi - 1e-3:
+            full_circle.append(j)
+    if not full_circle:
+        return
+    for i in range(len(points) - 1):
+        for j in full_circle:
+            if abs(float(points[i + 1][j]) - float(points[i][j])) > math.pi:
+                raise WorkflowError(
+                    f'Die Aufnahme wurde bei Gelenk {j + 1} über die ±180°-Grenze '
+                    'gedreht. Der Motor kann diese Grenze nicht überfahren und '
+                    'würde beim Abspielen fast eine ganze Umdrehung zurückdrehen. '
+                    f'Bitte neu aufnehmen, ohne Gelenk {j + 1} über die Grenze zu '
+                    'drehen.')
+
+
+def refuse_wrapped_lead_in(current, first_point, joint_limits,
+                           num_arm_joints: int = 5) -> None:
+    """Refuse (German ``WorkflowError``) a replay whose LEAD-IN would turn a
+    FULL-CIRCLE joint by more than half a turn.
+
+    The seam check above judges the recording; this judges the arm against it.
+    A joint turned by hand across ±180° AFTER the take (live +3.0 rad, recording
+    starting at −3.0) is 16° away physically but 344° away for a servo that cannot
+    cross the seam — and the quintic lead-in drives that long way round, the same
+    joint6-cable hazard. Any lead-in of more than π on such a joint is the long
+    way, so it is refused and the student brings the arm closer by hand."""
+    if not joint_limits or current is None or first_point is None:
+        return
+    n = int(num_arm_joints)
+    for j in range(min(n, len(joint_limits), len(current), len(first_point))):
+        try:
+            lo, hi = (float(v) for v in joint_limits[j])
+            delta = abs(float(first_point[j]) - float(current[j]))
+        except (TypeError, ValueError):
+            continue
+        if hi - lo >= 2.0 * math.pi - 1e-3 and delta > math.pi:
+            raise WorkflowError(
+                f'Gelenk {j + 1} steht mehr als eine halbe Umdrehung von der '
+                'Startstellung der Aufnahme entfernt und müsste den langen Weg '
+                'fahren. Bitte den Arm freischalten, Gelenk '
+                f'{j + 1} von Hand näher an die Startstellung drehen und erneut '
+                'abspielen.')
 
 
 def _add_finite_diff_velocities(
@@ -347,7 +436,18 @@ def resegment_trajectory(
             # Coincident/backwards timestamps (should not happen post-validation)
             # → one frame, so the arm still traverses q0→q1 at the velocity floor.
             dt = 1.0 / DEFAULT_FPS
-        seg = build_segment(q0, q1, dt, velocity_limit=velocity_limit)
+        elif dt < _MIN_PAIR_DT_S:
+            # A POSITIVE but sub-millisecond step (a crafted or corrupt payload —
+            # the recorder rounds to 1 ms and 25 Hz is 40 ms) produced waypoints
+            # whose time_from_start collapsed to the SAME nanosecond on the wire,
+            # and the OMX controller rejects a message whose times are not
+            # strictly increasing: measured, 2 of 3 chunks dropped silently.
+            dt = _MIN_PAIR_DT_S
+        # LINEAR, not quintic: consecutive recorded samples are one continuous
+        # motion. See trajectory_builder.build_linear_segment for the measurement
+        # and why the 0.6 × limit floor is preserved. (The lead-in above stays a
+        # quintic — it really is a move from rest.)
+        seg = build_linear_segment(q0, q1, dt, velocity_limit=velocity_limit)
         for q, t in seg:
             segmented.append((q, t_offset + t))
         if seg:
@@ -433,6 +533,9 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
         raise WorkflowError(f'Unbekannte Aufnahme: {name}')
     n = _num_joints(ctx)
     points = extract_points(traj, num_arm_joints=n)
+    refuse_wrapped_joint_jumps(
+        points, getattr(getattr(ctx, 'ik', None), 'joint_limits', None),
+        num_arm_joints=n)
     # Run-bar Tempo. „langsam"/„schnell" slow or speed up EVERY other motion
     # block (via motion._publish_motion's single choke point) and had no effect
     # at all here: replay does not go through _publish_motion, and the Blockly
@@ -451,6 +554,10 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     current = list(getattr(ctx, 'last_full_joints', None) or [])
     lead_in = current if len(current) >= n + 1 else None
+    if lead_in is not None:
+        refuse_wrapped_lead_in(
+            lead_in, points[0], getattr(getattr(ctx, 'ik', None), 'joint_limits', None),
+            num_arm_joints=n)
 
     # Floor guard for the synthetic lead-in (the recorded points are reachable-
     # above-table by construction; the current-pose→start interpolation is not).
@@ -459,6 +566,7 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     from physical_ai_server.workflow.handlers.motion import (
         WORKSPACE_FLOOR_MARGIN_M as _FLOOR_MARGIN,
         _floor_z_at,
+        tool_tip_rise_m,
     )
 
     def _lead_floor(q6):
@@ -477,11 +585,12 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
         fz = _floor_z_at(ctx, float(t[0]), float(t[1]))
         if fz is None:
             return False
-        return float(t[2]) < fz - _FLOOR_MARGIN
+        return float(t[2]) + tool_tip_rise_m(ik, q6, n) < fz - _FLOOR_MARGIN
 
     segmented = resegment_trajectory(
         points, speed, lead_in_from=lead_in, lead_in_floor_check=_lead_floor,
-        point_floor_check=_lead_floor, with_velocities=True,
+        point_floor_check=_lead_floor,
+        with_velocities=REPLAY_PUBLISHES_VELOCITIES,   # False — see the constant
         num_arm_joints=n, velocity_limit=_velocity_limit(ctx))
     if not segmented:
         raise WorkflowError('Die Aufnahme enthält keine Bewegung.')

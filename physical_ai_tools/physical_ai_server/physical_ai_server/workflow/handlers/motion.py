@@ -668,6 +668,35 @@ def _velocity_limit(ctx) -> float:
     return val if (math.isfinite(val) and val > 0.0) else JOINT_VELOCITY_LIMIT_RAD_S
 
 
+def tool_tip_rise_m(ik, q_full, num_arm_joints: int) -> float:
+    """How far the tool's LOWEST point sits ABOVE the modelled TCP for the gripper
+    angle carried in ``q_full[num_arm_joints]`` — 0.0 on every arm whose solver
+    does not model it (OMX, edu6: parallel jaws, constant tip height). May be
+    slightly NEGATIVE (the edu1's tips dip before they rise), which only makes a
+    floor check stricter.
+
+    For a floor check on a RECORDED or hand-guided pose only: on a rotating claw
+    (edu1) the TCP is the CLOSED fingertip, and an open claw's tips ride up, so a
+    take in which the OPEN claw touched the table read as below it and was
+    refused („Die Aufnahme führt unter die Tischebene"). Never raises; any
+    failure answers 0.0, i.e. the old, stricter check."""
+    fn = getattr(ik, 'tool_tip_rise_m', None)
+    if not callable(fn):
+        return 0.0
+    try:
+        n = int(num_arm_joints)
+        if len(q_full) <= n:
+            return 0.0
+        rise = float(fn(float(q_full[n])))
+    except Exception:  # noqa: BLE001
+        return 0.0
+    # Bounded both ways: a solver bug must never turn this into a large credit
+    # (a floor bypass) nor a large penalty (every take refused).
+    if not math.isfinite(rise):
+        return 0.0
+    return max(-0.005, min(0.06, rise))
+
+
 class WorkflowError(Exception):
     """Raised by handlers with a German message ready for the editor's
     log strip and toast."""
@@ -1874,15 +1903,18 @@ def home(ctx, args: dict[str, Any]) -> None:
     # Measured: that line drove a link up to 167.9 mm BELOW the table in roughly
     # 1 in 100 attainable start poses.
     #
-    # An arm with no link-box table (both OMX profiles, every profile-less ctx)
-    # gets exactly one leg back, byte-identical to the old call.
+    # The OMX (no link-box table) is judged too since 2026-09-13 (owner-approved):
+    # plan_floor_checked_home_route adds a point-model floor rung over
+    # ik.link_points — direct when the line clears the table (every grasp/tap pose
+    # measured), else a straight-up lift first, else the German refusal. A
+    # profile-less ctx or a solver without link_points still gets one direct leg.
     #
     # `home` is a pure Blockly block (handlers/__init__ `edubotics_home`), never
     # an un-catchable recovery/teardown, so the planner's German refusal is safe
     # to raise here.
     from physical_ai_server.workflow import home_planner
-    legs = home_planner.plan_home_route(ctx, q_start, q_end,
-                                        DEFAULT_HOME_DURATION_S)
+    legs = home_planner.plan_floor_checked_home_route(ctx, q_start, q_end,
+                                                      DEFAULT_HOME_DURATION_S)
     for leg_start, leg_end, leg_dur in legs:
         safe_move(ctx, leg_start, leg_end, leg_dur)
     ctx.last_arm_joints = _home_joints(ctx)

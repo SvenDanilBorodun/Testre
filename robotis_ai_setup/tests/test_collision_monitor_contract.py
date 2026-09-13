@@ -850,5 +850,191 @@ class ForceResumeContractTest(unittest.TestCase):
         self.assertEqual(host.pub_for('/task/status').published[-1].phase, _TaskStatus.READY)
 
 
+
+# ---- latched-joint recovery: reboot -> HOLD -> torque, awaited (2026-09-13) -------------
+
+class _DoneFuture:
+    def __init__(self, result=None, done=True):
+        self._result = result
+        self._done = done
+
+    def done(self):
+        return self._done
+
+    def result(self):
+        return self._result
+
+
+class _RecordingClient:
+    def __init__(self, name, events, result=None, done=True, available=True):
+        self.name = name
+        self.events = events
+        self.result = result
+        self.done = done
+        self.available = available
+
+    def wait_for_service(self, timeout_sec=None):
+        return self.available
+
+    def call_async(self, req):
+        self.events.append(self.name)
+        return _DoneFuture(self.result, self.done)
+
+
+class LatchedJointRecoveryContractTest(unittest.TestCase):
+
+    def setUp(self):
+        class _Req:
+            pass
+
+        self._saved = {k: sys.modules.get(k) for k in (
+            'dynamixel_interfaces', 'dynamixel_interfaces.srv', 'std_srvs', 'std_srvs.srv',
+            'rclpy.callback_groups')}
+        sys.modules['rclpy.callback_groups'] = types.SimpleNamespace(
+            ReentrantCallbackGroup=lambda: 'reentrant-group')
+        sys.modules['dynamixel_interfaces'] = types.ModuleType('dynamixel_interfaces')
+        sys.modules['dynamixel_interfaces.srv'] = types.SimpleNamespace(
+            RebootDxl=types.SimpleNamespace(Request=type('RebootReq', (), {'id': 0})))
+        sys.modules['std_srvs'] = types.ModuleType('std_srvs')
+        sys.modules['std_srvs.srv'] = types.SimpleNamespace(
+            SetBool=types.SimpleNamespace(Request=type('SetBoolReq', (), {'data': False})))
+        self._real_time = CM.time
+        CM.time = types.SimpleNamespace(sleep=lambda s: None, monotonic=self._real_time.monotonic)
+        self._real_threading = CM.threading
+        self.started = []
+        test = self
+
+        class _Thread:
+            def __init__(self, target, args=(), **kw):
+                self.target, self.args = target, args
+
+            def start(self):
+                test.started.append(self)
+
+        CM.threading = types.SimpleNamespace(Thread=_Thread)
+
+    def tearDown(self):
+        CM.time = self._real_time
+        CM.threading = self._real_threading
+        for k, v in self._saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    def _host(self, torque_ok=True, reboot_done=True):
+        host = _Host()
+        host.timers = [t for t in host.timers if t.callback != host._collision_watchdog_cb]
+        host._collision_follower_pos = dict(CONTACT_POSE)
+        host._collision_follower_vel = {j: 0.0 for j in CM.ARM_JOINT_NAMES}
+        host.events = []
+        rail = host.pub_for(CM.LEADER_TRAJECTORY_TOPIC)
+        real_publish = rail.publish
+
+        def _publish(msg):
+            host.events.append('hold' if len(msg.points) == 1 else 'glide')
+            real_publish(msg)
+        rail.publish = _publish
+        clients = {
+            CM.REBOOT_DXL_SERVICE: _RecordingClient('reboot', host.events, done=reboot_done),
+            CM.SET_TORQUE_SERVICE: _RecordingClient(
+                'torque', host.events, result=types.SimpleNamespace(success=torque_ok)),
+        }
+        host.client_groups = []
+
+        def _create_client(_type, name, callback_group=None):
+            host.client_groups.append(callback_group)
+            return clients[name]
+        host.create_client = _create_client
+        host._collision_active = True
+        host._collision_overload_joints = ['joint2']
+        return host
+
+    def test_home_with_a_latched_joint_does_not_glide_until_recovery_finished(self):
+        host = self._host()
+        host.home_follower()
+        self.assertEqual(len(self.started), 1)            # recovery on its own thread
+        self.assertTrue(host._collision_recovering)
+        host.fire_pending_timers()                        # glide timer while recovering
+        self.assertNotIn('glide', host.events)            # never drives an unpowered joint
+        self.started[0].target(*self.started[0].args)     # the thread runs
+        host.fire_pending_timers()
+        self.assertIn('glide', host.events)
+
+    def test_the_recovery_holds_the_measured_pose_BEFORE_torque_and_clears_only_on_success(self):
+        host = self._host()
+        host._recover_overloaded_joints(['joint2'])
+        self.assertEqual(host.events, ['reboot', 'hold', 'torque'])
+        # Replies on a reentrant group, never the node-default one this thread waits on.
+        self.assertEqual(host.client_groups, ['reentrant-group', 'reentrant-group'])
+        hold = host.pub_for(CM.LEADER_TRAJECTORY_TOPIC).published[-1]
+        held = dict(zip(hold.joint_names, hold.points[0].positions))
+        for joint in CM.LEADER_JOINTS:
+            self.assertAlmostEqual(held[joint], CONTACT_POSE[joint])
+        self.assertEqual(host._collision_overload_joints, [])
+        self.assertFalse(host._collision_recovery_failed)
+
+    def test_a_failed_recovery_keeps_the_joint_for_a_retry_and_tells_the_student(self):
+        host = self._host(torque_ok=False)
+        host.home_follower()
+        self.started[0].target(*self.started[0].args)
+        self.assertEqual(host._collision_overload_joints, ['joint2'])   # retried next click
+        host.fire_pending_timers()
+        self.assertNotIn('glide', host.events)
+        self.assertFalse(host._collision_homing)
+        self.assertEqual(host.pub_for('/task/status').published[-1].current_task_instruction,
+                         CM.COLLISION_REBOOT_FAILED_MESSAGE_DE)
+        # The retry click starts a NEW recovery (the old code had cleared the list).
+        host.home_follower()
+        self.assertEqual(len(self.started), 2)
+
+    def test_torque_never_comes_on_before_the_reboot_answered(self):
+        host = self._host(reboot_done=False)
+        saved = CM.REBOOT_WAIT_S
+        CM.REBOOT_WAIT_S = 0.02
+        try:
+            self.assertFalse(host._best_effort_reboot(['joint2']))
+        finally:
+            CM.REBOOT_WAIT_S = saved
+        self.assertEqual(host.events, ['reboot'])          # no hold, no torque
+
+
+class LatchedJointRecoveryEdgesTest(LatchedJointRecoveryContractTest):
+
+    def test_an_unanswered_torque_switch_is_a_failed_recovery(self):
+        host = self._host()
+        host.create_client = lambda _type, name, callback_group=None: {
+            CM.REBOOT_DXL_SERVICE: _RecordingClient('reboot', host.events),
+            CM.SET_TORQUE_SERVICE: _RecordingClient(
+                'torque', host.events, result=types.SimpleNamespace(success=True),
+                done=False),
+        }[name]
+        saved = CM.TORQUE_WAIT_S
+        CM.TORQUE_WAIT_S = 0.02
+        try:
+            self.assertFalse(host._best_effort_reboot(['joint2']))
+        finally:
+            CM.TORQUE_WAIT_S = saved
+
+    def test_retry_clicks_reuse_the_recovery_clients(self):
+        host = self._host()
+        host._best_effort_reboot(['joint2'])
+        host._best_effort_reboot(['joint2'])
+        self.assertEqual(len(host.client_groups), 2)       # created once, not per click
+
+    def test_a_new_trip_never_inherits_a_previous_failed_recovery(self):
+        host = self._host()
+        host._collision_recovery_failed = True
+        _trip(host)
+        self.assertFalse(host._collision_recovery_failed)
+
+    def test_a_recovery_that_outlives_its_collision_neither_fails_it_nor_holds(self):
+        host = self._host(torque_ok=False)
+        host._collision_active = False             # force-resumed meanwhile
+        host._recover_overloaded_joints(['joint2'])
+        self.assertFalse(host._collision_recovery_failed)
+        self.assertNotIn('hold', host.events)      # teleop owns the rail now
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -13,6 +13,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import toast, { useToasterStore } from 'react-hot-toast';
 import * as Blockly from 'blockly/core';
 import CalibrationWizard from '../components/Workshop/CalibrationWizard';
+import { HomeGlideProvider } from '../components/Workshop/HomeGlidePrompt';
 import LeaderToggle from '../components/Workshop/LeaderToggle';
 import BlocklyWorkspace from '../components/Workshop/BlocklyWorkspace';
 import RunControls from '../components/Workshop/RunControls';
@@ -1033,6 +1034,10 @@ function WorkshopPage({ isActive }) {
   ];
 
   return (
+    // ONE warned glide-to-Grundstellung prompt for the whole page: its three
+    // callers (TableTouchStep, JogPanel, RecordPanel) can each unmount while a
+    // countdown is still running — see HomeGlidePrompt.
+    <HomeGlideProvider>
     <div className="flex flex-col h-full w-full overflow-hidden">
       <header className="px-3 sm:px-4 py-2 border-b border-[var(--line)] bg-white shrink-0">
         <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -1281,6 +1286,7 @@ function WorkshopPage({ isActive }) {
         )}
       </main>
     </div>
+    </HomeGlideProvider>
   );
 }
 

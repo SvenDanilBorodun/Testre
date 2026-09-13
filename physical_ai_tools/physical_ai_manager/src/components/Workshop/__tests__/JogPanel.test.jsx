@@ -46,7 +46,14 @@ vi.mock('../../../hooks/useRosServiceCaller', () => ({
   useRosServiceCaller: () => mockRos,
 }));
 
-const mockToast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+// Callable like the real react-hot-toast default export: the warned-glide dialog
+// (HomeGlidePrompt) uses the plain `toast(...)` form for neutral notices.
+const mockToast = vi.hoisted(() => {
+  const t = vi.fn();
+  t.success = vi.fn();
+  t.error = vi.fn();
+  return t;
+});
 vi.mock('react-hot-toast', () => ({ __esModule: true, default: mockToast }));
 
 beforeEach(() => {
@@ -114,6 +121,24 @@ describe('JogPanel', () => {
 
     await userEvent.click(festsetzen);
     await waitFor(() => expect(mockRos.handGuide).toHaveBeenCalledWith(false));
+  });
+
+  test('festsetzen re-locks in place and WARNS before any glide home; freischalten never does', async () => {
+    render(<JogPanel disabled={false} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Arm freischalten' }));
+    const festsetzen = await screen.findByRole('button', { name: 'Arm festsetzen' });
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    await userEvent.click(festsetzen);
+    expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
+    expect(screen.getByText(/fährt gleich in die Grundstellung/)).toBeInTheDocument();
+    // Nothing is sent to the arm by the warning itself.
+    expect(mockRos.jogArm).not.toHaveBeenCalled();
+    // While the warning is up, jogging is locked — and so is freeing the arm.
+    expect(screen.getByRole('button', { name: 'Gelenk 1 erhöhen' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Arm freischalten' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Hier stehen lassen' }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Gelenk 1 erhöhen' })).not.toBeDisabled();
   });
 
   test('disabled hides jogging: every nudge + freischalten is disabled', () => {

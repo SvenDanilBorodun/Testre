@@ -23,6 +23,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import { armGeometry } from '../../utils/armProfile';
+import { useHomeGlide } from './HomeGlidePrompt';
 import {
   markStepComplete,
   setCalibProgress,
@@ -58,6 +59,11 @@ function TableTouchStep() {
   const calibError = useSelector((s) => s.workshop.calibError);
   const [busy, setBusy] = useState(null);
   const [started, setStarted] = useState(false);
+  // The solve re-locks the arm IN PLACE, tip still on the table. Getting it back
+  // to the Grundstellung is a separate, warned, slow glide (HomeGlidePrompt) —
+  // it used to be an instant snap on the OMX. The page-level provider owns the
+  // countdown: the solve advances the wizard and unmounts this step.
+  const { offerHomeGlide, homeGlideDialog } = useHomeGlide();
 
   useEffect(() => {
     setStarted(false);
@@ -114,13 +120,16 @@ function TableTouchStep() {
         toast.error(r.message || 'Tischvermessung fehlgeschlagen.');
         return;
       }
+      // Offer FIRST: markStepComplete advances the wizard and unmounts this
+      // step, so nothing after it may depend on this component still existing.
+      offerHomeGlide();
       dispatch(setCalibError(null));
       dispatch(markStepComplete('table_touch'));
       toast.success(r.message);
     } catch (e) {
       toast.error(`Service-Aufruf fehlgeschlagen: ${e.message || e}`);
     } finally { setBusy(null); }
-  }, [calibrationSolve, dispatch]);
+  }, [calibrationSolve, dispatch, offerHomeGlide]);
 
   // ONE derived number, read by all three surfaces below (the instruction
   // sentence, the counter and the „Weiter"-Gate). The sentence used to carry
@@ -163,8 +172,13 @@ function TableTouchStep() {
           Wiederhole an <strong>mindestens {tapsRequired} verschiedenen Stellen</strong>,
           gut über die Arbeitsfläche verteilt (Ecken + Mitte).
         </li>
-        <li>„Berechnen &amp; speichern" drücken — der Arm wird wieder fest.</li>
+        <li>
+          „Berechnen &amp; speichern" drücken — der Arm wird wieder fest und
+          bleibt zuerst stehen. Danach fährt er nach einer Warnung langsam in
+          die Grundstellung: Hände weg vom Arm.
+        </li>
       </ol>
+      {homeGlideDialog}
 
       <div className="bg-white border border-[var(--line)] rounded-lg p-4 mb-4">
         <div className="flex items-center justify-between mb-1">

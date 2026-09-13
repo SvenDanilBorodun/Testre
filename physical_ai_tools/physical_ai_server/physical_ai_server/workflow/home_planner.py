@@ -424,3 +424,178 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float) -> list:
         raise _m.WorkflowError(_pg._refusal_message(
             getattr(ctx, 'zones', None), _pg.ZONE_MARGIN_M, _pg.LINK_RADIUS_M))
     raise _m.WorkflowError(_FLOOR_REFUSAL_DE)
+
+
+# ── Floor-checked home route: the manual glide AND the Blockly `home` block ──
+#
+# plan_home_route above is inert on every arm without a link-box table — both
+# OMX profiles got one direct joint-space leg, judged by nothing. The manual
+# glide (/workshop/jog mode 'home') starts from wherever a student LEFT the arm by
+# hand, and a program's `home` starts from wherever the previous block left it
+# (a grasp or a drop at the table) — both are exactly the starts where that line
+# can press a link through the table. Owner-approved 2026-09-13 for both. Measured 2026-09-13 on the real OMX solver over uniformly sampled
+# joint poses whose TCP rests 0–60 mm above the table: the direct line to HOME
+# drives the TCP more than 1 mm below the table from 4,193 of 20,069 starts,
+# worst 87.6 mm; a straight-up lift first rescues 2,733 of those.
+#
+# So the manual glide adds a POINT-MODEL floor rung on arms that have no box
+# table but do expose ``link_points`` (the OMX solver, which already samples its
+# link centrelines for the Sperrzone guard). Centreline points are NOT
+# conservative the way the boxes are — the real link surface is ~a link radius
+# further out — so there is NO allowance below the table here (the boxes get
+# FLOOR_TOL_M because they over-cover). A route may never take a moving point
+# deeper than the table, nor deeper than it already is (a tap pose starts with
+# the finger samples at the table).
+#
+# The ladder mirrors plan_home_route: direct → a small joint-space lift via →
+# German refusal naming the hand-guide remedy. Box-table arms and
+# EDUBOTICS_HOME_FLOOR_TOL_M=0 (the rollback) go through plan_home_route
+# unchanged. Rule §2 class: a Roboter-Studio workflow-level REFUSAL on one
+# student-requested motion; it never reshapes a recorded or inference action.
+
+_POINT_LINE_SAMPLES = 31
+_POINT_LIFT_DURATION_S = 1.5
+# Joint-space via search (joints 2/3/4 only; see the LIFT rung).
+_POINT_VIA_MAX_STEP_RAD = 0.6
+_POINT_VIA_STEPS_RAD = (-0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6)
+_POINT_VIA_MIN_GAIN_M = 0.02
+_POINT_VIA_TEST_BUDGET = 24
+
+
+def _base_plane_floor(_x: float, _y: float) -> float:
+    return 0.0
+
+
+def _moving_point_start(ik) -> Optional[int]:
+    """Index of the first link sample whose HEIGHT depends on the joints.
+
+    The leading samples are the base column up to the shoulder, whose z no joint
+    changes (joint1 only yaws them); judging them against the table would refuse
+    every route, since the base is bolted to it. Derived from the solver itself
+    so a different chain cannot silently shift the cut."""
+    try:
+        n = int(ik.num_joints())
+        a = ik.link_points([0.0] * n)
+        b = ik.link_points([0.0] + [0.7 * (-1) ** i for i in range(n - 1)])
+    except Exception:  # noqa: BLE001 — unjudgeable geometry is handled by the caller
+        return None
+    if not a or not b:
+        return None
+    k = 0
+    while k < min(len(a), len(b)) and abs(float(a[k][2]) - float(b[k][2])) < 1e-9:
+        k += 1
+    return k if k < min(len(a), len(b)) else None
+
+
+def _point_clearance(ik, q_arm, floor_fn, start_idx) -> Optional[float]:
+    try:
+        pts = ik.link_points(list(q_arm))
+    except Exception:  # noqa: BLE001
+        return None
+    if not pts or len(pts) <= start_idx:
+        return None
+    return min(float(p[2]) - float(floor_fn(float(p[0]), float(p[1])))
+               for p in pts[start_idx:])
+
+
+def _point_line_ok(ik, a_arm, b_arm, floor_fn, start_idx, allowance) -> bool:
+    """True when every sample of the straight joint line keeps every moving
+    point at or above ``allowance``. Unjudgeable geometry is NOT-OK."""
+    a = np.asarray(a_arm, dtype=float)
+    b = np.asarray(b_arm, dtype=float)
+    for s in np.linspace(0.0, 1.0, _POINT_LINE_SAMPLES):
+        c = _point_clearance(ik, (a + (b - a) * s).tolist(), floor_fn, start_idx)
+        if c is None or c < allowance:
+            return False
+    return True
+
+
+def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float) -> list:
+    """Legs to HOME for the manual glide and the `home` block, or raise
+    ``WorkflowError`` (German).
+
+    Box-table arms (edu6, edu1), a disabled floor rung, or a solver without
+    ``link_points`` → exactly :func:`plan_home_route`. Otherwise (the OMX) the
+    point-model ladder described above."""
+    from physical_ai_server.workflow import arm_geometry as _ag
+    from physical_ai_server.workflow.handlers import motion as _m
+
+    ik = getattr(ctx, 'ik', None)
+    if (_ag.resolve_geometry(ctx) is not None or FLOOR_TOL_M <= 0.0 or ik is None
+            or not callable(getattr(ik, 'link_points', None))):
+        return plan_home_route(ctx, q_start, q_home_full, duration_s)
+
+    start_idx = _moving_point_start(ik)
+    if start_idx is None:
+        raise _m.WorkflowError(_FLOOR_REFUSAL_DE)
+    n = int(ik.num_joints())
+    # The point model is judged against z = 0 — the surface the base is bolted to —
+    # NOT the touch-off. On these solvers the touch-off's z_table/plane is the
+    # END-EFFECTOR FRAME's height when the FINGERS touch the table (the grasp
+    # descends that frame, see CLAUDE.md "DUAL Z-KEY CONVENTION"), i.e. ~the
+    # finger length ABOVE the real surface, while link_points already samples the
+    # fingers themselves. Judging the fingers and the elbow against that plane
+    # made a calibrated rig lift or refuse for a table that was ~40 mm lower.
+    # (The box model keeps the touch-off: there the TCP IS the fingertip.)
+    floor_fn = _base_plane_floor
+    q_start = [float(v) for v in q_start]
+    q_home_full = [float(v) for v in q_home_full]
+    start_arm, home_arm = q_start[:n], q_home_full[:n]
+    gripper = q_start[n] if len(q_start) > n else q_home_full[n]
+
+    start_clear = _point_clearance(ik, start_arm, floor_fn, start_idx)
+    if start_clear is None:
+        raise _m.WorkflowError(_FLOOR_REFUSAL_DE)
+    # Never below the table, and never deeper than the arm already is.
+    allowance = min(0.0, start_clear) - 1e-9
+
+    if _point_line_ok(ik, start_arm, home_arm, floor_fn, start_idx, allowance):
+        return [(list(q_start), list(q_home_full), duration_s)]
+
+    # LIFT rung — a small JOINT-SPACE via, never a Cartesian re-solve. The first
+    # version solved the strict-vertical IK 2–6 cm above the TCP; from any start
+    # whose tool is not already vertical that picks another branch (measured:
+    # 1,279 of 5,981 "lifts" moved a joint ≥ 0.9π further than the direct line,
+    # joint1 −0.99 → +2.27, and near ±π an extra full base turn), labelled „der Arm
+    # wird zuerst angehoben". So: joint1 and the roll joint stay put; the pitch
+    # joints (2, 3, 4) step by at most _POINT_VIA_MAX_STEP_RAD each; a via must
+    # gain clearance; candidates are tried in order of LEAST joint travel within
+    # _POINT_VIA_TEST_BUDGET. Measured cost of never swapping branch: more
+    # refusals from arbitrary hand-left poses (final verifier B: 35 of 150 against
+    # 12 for the branch-swapping re-solve); a branch-CONSISTENT re-solve was tried
+    # as a fallback and rescued none of them (2,010 qualifying vias, 0 passing the
+    # floor lines), so it is not here. Table-tap and grasp/drop starts: 0 refusals.
+    candidates = []
+    for d2 in _POINT_VIA_STEPS_RAD:
+        for d3 in _POINT_VIA_STEPS_RAD:
+            for d4 in _POINT_VIA_STEPS_RAD:
+                if d2 == d3 == d4 == 0.0:
+                    continue
+                via_arm = list(start_arm)
+                for idx, d in ((1, d2), (2, d3), (3, d4)):
+                    via_arm[idx] = start_arm[idx] + d
+                if not all(lo <= via_arm[i] <= hi
+                           for i, (lo, hi) in enumerate(ik.joint_limits)):
+                    continue
+                via_clear = _point_clearance(ik, via_arm, floor_fn, start_idx)
+                if via_clear is None:
+                    continue
+                if via_clear < max(0.0, start_clear) + _POINT_VIA_MIN_GAIN_M:
+                    continue
+                travel = max(abs(d2), abs(d3), abs(d4))
+                candidates.append((travel, -via_clear, via_arm, via_clear))
+    candidates.sort(key=lambda c: (c[0], c[1]))
+    for _travel, _neg, via_arm, via_clear in candidates[:_POINT_VIA_TEST_BUDGET]:
+        if not _point_line_ok(ik, start_arm, via_arm, floor_fn, start_idx, allowance):
+            continue
+        if not _point_line_ok(ik, via_arm, home_arm, floor_fn, start_idx,
+                              min(0.0, via_clear) - 1e-9):
+            continue
+        via = via_arm + [gripper]
+        log = getattr(ctx, 'log', None)
+        if callable(log):
+            log('[WARNUNG] Der direkte Weg in die Grundstellung würde durch die '
+                'Tischebene führen — der Arm wird zuerst angehoben.')
+        return [(list(q_start), via, _POINT_LIFT_DURATION_S),
+                (via, list(q_home_full), duration_s)]
+    raise _m.WorkflowError(_FLOOR_REFUSAL_DE)

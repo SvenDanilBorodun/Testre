@@ -67,6 +67,7 @@
 # so a trip would freeze/relax against a non-existent leader with no recovery path.
 
 import os
+import threading
 import time
 
 from physical_ai_interfaces.msg import TaskStatus
@@ -150,6 +151,14 @@ GLIDE_MAX_SENDS = 3
 GLIDE_PROGRESS_EPS_RAD = 0.05  # max-joint dist-to-home improvement that counts as "moving"
 HOME_ARRIVED_TOL_RAD = 0.10    # max-joint distance that counts as "reached home"
 
+# Latched-joint recovery (HOME_FOLLOWER on a firmware Overload): reboot, HOLD the
+# measured pose, THEN torque — awaited, on its own thread (a blocking wait in the
+# service callback would stall the node's default group). The glide waits for it.
+REBOOT_WAIT_S = 3.0            # reboot_dxl futures
+REBOOT_SETTLE_S = 0.5          # firmware back up after the reboot answered
+TORQUE_WAIT_S = 3.0            # set_dxl_torque future
+RECOVERY_POLL_S = 0.1          # glide timer re-check while the recovery runs
+
 RESYNC_DURATION_S = 3.0
 WATCHDOG_PERIOD_S = 0.2
 DEFAULT_RESUME_TOL_RAD = 0.30
@@ -178,6 +187,10 @@ COLLISION_HOMED_MESSAGE_DE = (
     'Der Follower ist in der Grundstellung. Bringe den Leader-Arm in die gleiche Stellung '
     'und klicke dann auf „Teleoperation fortsetzen".'
 )
+COLLISION_REBOOT_FAILED_MESSAGE_DE = (
+    'Ein überlastetes Gelenk konnte nicht wieder eingeschaltet werden. Bitte erneut auf '
+    '„Follower in Grundstellung fahren" klicken — hilft das nicht, die Umgebung neu starten.'
+)
 COLLISION_HOME_FAILED_MESSAGE_DE = (
     'Der Follower konnte die Grundstellung nicht erreichen. Prüfe, ob das Hindernis entfernt '
     'ist, und klicke erneut auf „Follower in Grundstellung fahren".'
@@ -194,6 +207,9 @@ class CollisionMonitorMixin:
         self._collision_homing = False
         self._collision_homed = False
         self._collision_overload_joints = []
+        # Latched-joint recovery thread state (see _recover_overloaded_joints).
+        self._collision_recovering = False
+        self._collision_recovery_failed = False
         self._collision_message = COLLISION_MESSAGE_DE
         self._collision_resync_timer = None
         # Seamless-resume state: when a collision trips MID-RECORDING we discard the
@@ -517,6 +533,9 @@ class CollisionMonitorMixin:
         self._collision_homing = False
         self._collision_homed = False
         self._collision_overload_joints = list(result.latched_overload)
+        # A NEW trip never inherits the previous recovery's outcome (a thread that
+        # failed after a force-resume would otherwise abort this trip's first glide).
+        self._collision_recovery_failed = False
         self._collision_message = COLLISION_MESSAGE_DE
         self.get_logger().warning(f'[KOLLISION] Stop ausgelöst: {result.reason}')
 
@@ -643,9 +662,22 @@ class CollisionMonitorMixin:
         # Firmware-latched (Overload) joints have torque disabled and cannot glide — recover
         # them first. Best-effort and rare: the software guard normally trips well before the
         # firmware latches.
-        if self._collision_overload_joints:
-            self._best_effort_reboot(self._collision_overload_joints)
-            self._collision_overload_joints = []
+        #
+        # The recovery used to fire reboot_dxl AND set_dxl_torque(True) back to back,
+        # un-awaited, bypassing the node's hold-before-torque: the latched joint had
+        # been unpowered since the trip, gravity had moved it off the relax reference,
+        # and Torque Enable (Drive Mode 4, 50 ms) snapped it back the moment the
+        # student clicked — and a torque-on landing before the reboot finished left
+        # it limp, with the overload list already cleared so a retry never rebooted
+        # again. Now: a thread reboots, awaits, holds the MEASURED pose, then torques
+        # and awaits; the list is cleared only on success; the glide waits for it.
+        if self._collision_overload_joints and not self._collision_recovering:
+            self._collision_recovering = True
+            self._collision_recovery_failed = False
+            threading.Thread(
+                target=self._recover_overloaded_joints,
+                args=(list(self._collision_overload_joints),),
+                name='collision-reboot', daemon=True).start()
 
         self._cancel_relax_timer()
         self._collision_homing = True
@@ -698,6 +730,18 @@ class CollisionMonitorMixin:
         report failure back to the student (modal step 1 stays, with a retry hint)."""
         self._cancel_glide_timer()
         if not self._collision_active or not self._collision_homing:
+            return
+        if self._collision_recovering:
+            # A latched joint is still being rebooted + re-torqued; gliding now would
+            # drive an arm with an unpowered joint.
+            self._schedule_glide(RECOVERY_POLL_S)
+            return
+        if self._collision_recovery_failed:
+            self._collision_recovery_failed = False
+            self._collision_homing = False
+            self._collision_homed = False
+            self._collision_message = COLLISION_REBOOT_FAILED_MESSAGE_DE
+            self._publish_collision_status()
             return
         dist = self._dist_to_home()
         if dist is not None and dist <= HOME_ARRIVED_TOL_RAD:
@@ -940,6 +984,7 @@ class CollisionMonitorMixin:
             self._collision_resync_timer = None
         # Clear local state BEFORE publishing False so the watchdog can't re-assert True.
         self._collision_active = False
+        self._collision_recovery_failed = False
         self._collision_homing = False
         self._collision_homed = False
         self._collision_overload_joints = []
@@ -1001,18 +1046,64 @@ class CollisionMonitorMixin:
             self.on_recording = False
             return False
 
+    def _recover_overloaded_joints(self, joints):
+        """Thread body: reboot → hold → torque, each awaited. Clears the overload list
+        ONLY on success, so a failed attempt is retried by the next click. Never raises."""
+        ok = False
+        try:
+            ok = self._best_effort_reboot(joints)
+        except Exception as exc:  # noqa: BLE001 - must never kill the thread silently
+            self.get_logger().warning(f'[KOLLISION] joint recovery failed: {exc}')
+            ok = False
+        if ok:
+            self._collision_overload_joints = [
+                j for j in self._collision_overload_joints if j not in joints]
+        elif self._collision_active:
+            # Only a recovery that still belongs to a LIVE collision may fail it.
+            self._collision_recovery_failed = True
+        self._collision_recovering = False
+
+    @staticmethod
+    def _await_future(future, timeout_s):
+        """True once ``future`` is done within ``timeout_s`` (polled — the node's
+        multi-threaded executor completes it on another thread)."""
+        deadline = time.monotonic() + timeout_s
+        while not future.done():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+        return True
+
     def _best_effort_reboot(self, joints):
-        """Reboot firmware-latched Dynamixels, then re-enable torque. Fully guarded; rare path."""
+        """Reboot firmware-latched Dynamixels, HOLD the measured pose, then re-enable
+        torque — every step awaited. Returns True only when the torque switch
+        confirmed. Runs on the collision-reboot thread, never on a callback."""
         try:
             from dynamixel_interfaces.srv import RebootDxl
         except ImportError:
             self.get_logger().warning(
                 '[KOLLISION] dynamixel_interfaces unavailable — cannot auto-reboot latched '
                 f'joints {joints}. If the arm does not move, restart the environment.')
-            return
+            return False
         try:
             from std_srvs.srv import SetBool
-            reboot_client = self.create_client(RebootDxl, REBOOT_DXL_SERVICE)
+            # Replies on a REENTRANT group: this thread polls the futures, and on the
+            # node-default mutually-exclusive group any long default-group callback
+            # would hold them back until the wait times out.
+            # Created ONCE and reused: every retry click used to create two new
+            # clients that were never destroyed.
+            clients = getattr(self, '_collision_recovery_clients', None)
+            if clients is None:
+                from rclpy.callback_groups import ReentrantCallbackGroup
+                group = ReentrantCallbackGroup()
+                clients = {'group': group}
+                self._collision_recovery_clients = clients
+            group = clients['group']
+            reboot_client = clients.get('reboot')
+            if reboot_client is None:
+                reboot_client = self.create_client(
+                    RebootDxl, REBOOT_DXL_SERVICE, callback_group=group)
+                clients['reboot'] = reboot_client
             # ArmProfile seam (edu6 §3.4): the torque service name comes from the
             # resolved profile (OMX default = the Dynamixel HW interface), with the
             # legacy literal as fallback — mirrors physical_ai_server._set_follower_
@@ -1021,25 +1112,53 @@ class CollisionMonitorMixin:
             torque_service = getattr(
                 getattr(self, '_arm_profile', None), 'torque_service',
                 None) or SET_TORQUE_SERVICE
-            torque_client = self.create_client(SetBool, torque_service)
-            if reboot_client.wait_for_service(timeout_sec=1.0):
-                for joint in joints:
-                    dxl_id = JOINT_TO_DXL_ID.get(joint)
-                    req = RebootDxl.Request()
-                    # Set an id field if the srv exposes one (shape varies by version).
-                    for field in ('id', 'dxl_id', 'ids'):
-                        if hasattr(req, field) and dxl_id is not None:
-                            setattr(req, field, [dxl_id] if field == 'ids' else dxl_id)
-                            break
-                    reboot_client.call_async(req)
-                self.get_logger().warning(f'[KOLLISION] reboot_dxl requested for {joints}.')
-            if torque_client.wait_for_service(timeout_sec=1.0):
-                req = SetBool.Request()
-                req.data = True
-                torque_client.call_async(req)
+            torque_client = clients.get('torque')
+            if torque_client is None:
+                torque_client = self.create_client(
+                    SetBool, torque_service, callback_group=group)
+                clients['torque'] = torque_client
+            if not reboot_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warning('[KOLLISION] reboot_dxl unavailable.')
+                return False
+            futures = []
+            for joint in joints:
+                dxl_id = JOINT_TO_DXL_ID.get(joint)
+                req = RebootDxl.Request()
+                # Set an id field if the srv exposes one (shape varies by version).
+                for field in ('id', 'dxl_id', 'ids'):
+                    if hasattr(req, field) and dxl_id is not None:
+                        setattr(req, field, [dxl_id] if field == 'ids' else dxl_id)
+                        break
+                futures.append(reboot_client.call_async(req))
+            self.get_logger().warning(f'[KOLLISION] reboot_dxl requested for {joints}.')
+            if not all(self._await_future(f, REBOOT_WAIT_S) for f in futures):
+                self.get_logger().warning('[KOLLISION] reboot_dxl did not answer in time.')
+                return False
+            time.sleep(REBOOT_SETTLE_S)
+            # The controller's reference is still the relax pose captured at the trip;
+            # the rebooted joint has sagged since. Command where it IS before energising
+            # — but only while the collision still owns the rail: after a force-resume
+            # the teleop broadcaster does, and a hold there would fight it.
+            if self._collision_active:
+                self._publish_hold_current_pose()
+                time.sleep(RELAX_HOLD_DURATION_S + 0.05)
+            if not torque_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warning('[KOLLISION] set_dxl_torque unavailable.')
+                return False
+            req = SetBool.Request()
+            req.data = True
+            future = torque_client.call_async(req)
+            if not self._await_future(future, TORQUE_WAIT_S):
+                self.get_logger().warning('[KOLLISION] set_dxl_torque did not answer in time.')
+                return False
+            result = future.result()
+            ok = bool(getattr(result, 'success', False)) if result is not None else False
+            if ok and hasattr(self, '_follower_torque_on'):
+                self._follower_torque_on = True
+            return ok
         except Exception as exc:  # noqa: BLE001 - best effort only
             self.get_logger().warning(f'[KOLLISION] best-effort reboot failed: {exc}')
-
+            return False
 
 def _env_float(name, default):
     raw = os.environ.get(name)

@@ -150,6 +150,46 @@ _MANUAL_RECORD_MAX_SAMPLES = int(RECORD_MAX_S * _MANUAL_RECORD_FPS) + 100
 # is RADIANS (0…1.75 rad), not metres — 0.003 rad = 0.17 % of the 1.75 rad stroke —
 # so this uniform epsilon dedups correctly on BOTH profiles (no per-channel split).
 _MANUAL_RECORD_MIN_DELTA_RAD = 0.003
+# Recorded samples are ROUNDED at the sampler: joint values to 1e-4 rad, the time
+# column to 1 ms. A full-precision float serialises to ~19 characters, which put
+# a Contract-B recording past the cloud's 256 KiB trajectory cap after ~76 s of
+# continuous motion (7-wide; ~66 s 8-wide) while the recorder allows RECORD_MAX_S
+# = 120 s — the save then failed with a 413 and the take could never be replayed
+# from a program. Measured 2026-09-13 on a synthetic 120 s × 25 Hz take: 403 KiB
+# full / 176 KiB rounded (7-wide), 463 / 201 KiB (8-wide). 1e-4 rad is ~15× finer
+# than either servo family's
+# encoder step (2π/4096 ≈ 1.5e-3 rad), so no information is lost; rounding is
+# monotone, so the non-decreasing time column extract_points requires survives.
+_MANUAL_RECORD_JOINT_DECIMALS = 4
+_MANUAL_RECORD_TIME_DECIMALS = 3
+# Re-lock-in-place before re-energising a ros2_control (Dynamixel/JTC) follower.
+# While the arm is limp the JointTrajectoryController keeps the reference it held
+# BEFORE the torque-off (usually HOME), and the OMX servos run a 50 ms time-based
+# profile (Drive Mode 4) — so Torque Enable snapped a hand-guided arm back to that
+# stale reference in ~50 ms: the "jumps to home" after „Tisch vermessen" and
+# „Arm festsetzen". A single-point trajectory at the MEASURED pose is published
+# first, and torque is enabled only after the controller has adopted it. The
+# Feetech driver needs none of this (set_torque seeds Goal = Present itself, and
+# it DROPS trajectories while limp), so the step is gated to the Dynamixel rail.
+_TORQUE_ON_HOLD_TIME_FROM_START_S = 0.05
+_TORQUE_ON_HOLD_SETTLE_S = 0.2
+# After the SECOND (fresh) hold: its point time plus two 100 Hz controller cycles.
+_TORQUE_ON_HOLD_CYCLE_MARGIN_S = 0.02
+# How long a hold waits for the command-rail publisher to match a subscriber
+# (see the boot pre-create in __init__). Discovery across containers is
+# sub-second on a healthy rig; beyond this the hold is sent anyway.
+_COMMAND_RAIL_MATCH_WAIT_S = 1.0
+# Manual „Grundstellung" glide (/workshop/jog mode 'home'): the React side warns
+# first, then asks for this move. It is deliberately SLOWER than the workflow
+# `home` block — the student's hands were on the arm a moment ago — so each leg's
+# duration is stretched until no joint's quintic PEAK exceeds this speed, and is
+# never shorter than the planner's own duration. build_segment's velocity floor
+# still applies on top (it only ever extends).
+_MANUAL_HOME_PEAK_RAD_S = 1.0
+_MANUAL_HOME_MIN_DURATION_S = 3.0
+# Every arm joint already this close to HOME → answer „steht bereits in der
+# Grundstellung" instead of running a 3 s glide that goes nowhere.
+_MANUAL_HOME_ALREADY_THERE_RAD = 0.01
 # Timeout (s) for acquiring the manual-control mutex in a driving/torque-switch
 # callback. If a jog/replay drive is holding it, a new manual op is refused in
 # German rather than queueing (the callbacks run on the reentrant preempt group,
@@ -422,6 +462,23 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._seed_sim_rest_pose()
         except Exception as e:  # noqa: BLE001 — cosmetic; never fatal at boot
             self.get_logger().warning(f'sim rest-pose seed failed: {e}')
+
+        # The command-rail publisher is created at BOOT, not on first use. A DDS
+        # publisher that sends before discovery has matched the subscriber in the
+        # OTHER container (the JointTrajectoryController / the Feetech driver,
+        # both VOLATILE) delivers nothing — and the first message a fresh server
+        # sends is typically the pre-torque HOLD („Tisch vermessen" or „Arm
+        # festsetzen" as the first manual action after activation), so a lazily
+        # created publisher lost exactly the message that stops the snap, or the
+        # first chunk of the first jog (a jump). Best-effort: a failure here
+        # falls back to the lazy creation in _trajectory_publisher.
+        try:
+            from trajectory_msgs.msg import JointTrajectory as _BootJT
+            if getattr(self, '_workflow_traj_publisher', None) is None:
+                self._workflow_traj_publisher = self.create_publisher(
+                    _BootJT, '/leader/joint_trajectory', 10)
+        except Exception as e:  # noqa: BLE001 — never fatal at boot
+            self.get_logger().warning(f'command-rail publisher pre-create failed: {e}')
 
         # Robot-type self-init (D1) — LAST statement of __init__. Resolves the
         # hardset EDUBOTICS_ROBOT_TYPE into an ArmProfile, sets operation_mode
@@ -2717,6 +2774,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 if not client.wait_for_service(timeout_sec=2.0):
                     self.get_logger().warning('set_dxl_torque service unavailable.')
                     return False
+                # Re-lock IN PLACE: on the Dynamixel/JTC rail the controller still
+                # holds its pre-torque-off reference, and energising would snap
+                # the hand-guided arm back to it (see _TORQUE_ON_HOLD_*). Only on a
+                # torque-ON that is not already confirmed ON — a redundant
+                # torque-on over a holding arm needs no new reference.
+                if (enabled and self._follower_torque_on is not True
+                        and self._follower_rail_is_ros2_control()):
+                    # TWO publishes: the first replaces the stale reference, the
+                    # second — re-read just before energising — follows a limp arm
+                    # that kept sagging under gravity during the settle, so torque
+                    # does not pull it back up to where it was 0.2 s earlier.
+                    if self._hold_follower_at_measured_pose(allow_stale=True):
+                        time.sleep(_TORQUE_ON_HOLD_SETTLE_S)
+                        if self._hold_follower_at_measured_pose(allow_stale=True):
+                            time.sleep(_TORQUE_ON_HOLD_TIME_FROM_START_S
+                                       + _TORQUE_ON_HOLD_CYCLE_MARGIN_S)
                 req = SetBool.Request()
                 req.data = bool(enabled)
                 future = client.call_async(req)
@@ -2752,6 +2825,90 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             except Exception as e:  # noqa: BLE001
                 self.get_logger().warning(f'set_dxl_torque failed: {e!r}')
                 return False
+
+    def _follower_rail_is_ros2_control(self) -> bool:
+        """True when the follower is driven through ros2_control's
+        JointTrajectoryController (both OMX profiles), False for an arm with its
+        own driver node (edu6_studio / edu1_studio).
+
+        Keyed on the profile's torque service: the Dynamixel hardware interface's
+        ``set_dxl_torque`` IS the ros2_control rail, and every Feetech profile
+        names its own driver's service. A profile-less node is the OMX default."""
+        service = getattr(getattr(self, '_arm_profile', None), 'torque_service',
+                          None) or '/dynamixel_hardware_interface/set_dxl_torque'
+        return service == '/dynamixel_hardware_interface/set_dxl_torque'
+
+    def _hold_follower_at_measured_pose(self, allow_stale: bool = False) -> bool:
+        """Publish ONE single-point trajectory at the follower's MEASURED pose
+        (zero velocity) on the command rail. Returns True when it was published.
+
+        Two uses, one mechanism (the collision monitor's relax-in-place, see
+        ``safety/collision_monitor._publish_hold_current_pose``): before a
+        ros2_control re-torque it replaces the controller's stale reference so
+        Torque Enable holds the arm where the student left it; after an aborted
+        manual glide it stops the ≤1 s chunk still playing on either rail.
+
+        Skipped — never guessed — when the readback is missing, short or
+        non-finite: commanding a default would itself be the jump this prevents.
+
+        ``allow_stale`` (the pre-energise use ONLY): a readback older than
+        _FOLLOWER_JOINT_MAX_AGE_S is still used. While a service callback on the
+        node-default mutually-exclusive group runs (``/calibration/solve``), the
+        follower /joint_states subscription on that same group is starved, so on
+        a RE-TRY of a failed torque switch the cached pose is seconds old — yet it
+        was read while the arm was limp, which is still far closer to the truth
+        than the controller's reference from BEFORE the limp phase. Skipping it
+        there brought the snap back. On a MOVING, torqued arm (a stopped glide) a
+        stale pose would command a jump backwards, so that use stays strict.
+        Never raises."""
+        try:
+            if self.communicator is None or (
+                    not allow_stale and self._follower_joints_stale()):
+                self.get_logger().warning(
+                    'Hold-in-place skipped — follower pose unknown or stale.')
+                return False
+            joints = self.communicator.get_latest_follower_joints()
+            width = self._profile_n() + 1
+            if not joints or len(joints) < width:
+                self.get_logger().warning(
+                    'Hold-in-place skipped — follower pose incomplete.')
+                return False
+            joints = [float(v) for v in joints[:width]]
+            if not all(math.isfinite(v) for v in joints):
+                self.get_logger().warning(
+                    'Hold-in-place skipped — follower pose non-finite.')
+                return False
+            matched = self._wait_for_command_rail_subscriber()
+            self._trajectory_publisher(
+                [(joints, _TORQUE_ON_HOLD_TIME_FROM_START_S, [0.0] * width)])
+            if not matched:
+                self.get_logger().warning(
+                    'Hold-in-place published with NO matched subscriber on '
+                    '/leader/joint_trajectory — it may not arrive.')
+            return matched
+        except Exception as e:  # noqa: BLE001 — a hold must never break a re-lock
+            self.get_logger().warning(f'Hold-in-place publish failed: {e!r}')
+            return False
+
+    def _wait_for_command_rail_subscriber(self) -> bool:
+        """True once the command-rail publisher has at least one matched
+        subscriber, polling up to _COMMAND_RAIL_MATCH_WAIT_S. A publisher that
+        cannot report a count (a test double, an rclpy without the call) counts as
+        matched — this is a delivery aid, never a gate. Never raises."""
+        pub = getattr(self, '_workflow_traj_publisher', None)
+        counter = getattr(pub, 'get_subscription_count', None)
+        if not callable(counter):
+            return True
+        deadline = time.monotonic() + _COMMAND_RAIL_MATCH_WAIT_S
+        while True:
+            try:
+                if int(counter()) >= 1:
+                    return True
+            except Exception:  # noqa: BLE001
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
 
     def _retorque_follower_or_keep_locked(self, response) -> bool:
         """Re-assert follower torque after a touch-off that left the arm limp.
@@ -3641,6 +3798,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     response.message = 'Erst die Aufnahme beenden.'
                     return response
                 self._manual_stop_event.clear()
+                if ((request.mode or '').strip().lower() == 'home'
+                        and self._follower_torque_on is False):
+                    # The glide is offered AFTER a re-lock; a confirmed-limp arm
+                    # here means a hand-guide session was opened meanwhile (the
+                    # student's hand may be on it). Never torque it up and drive.
+                    response.message = ('Der Arm ist freigeschaltet — bitte zuerst '
+                                        '„Arm festsetzen", dann in die '
+                                        'Grundstellung fahren.')
+                    return response
                 # Assert torque ON defensively (a prior hand-guide may have left it
                 # OFF). F7 — after a bounded run of consecutive failures, clear
                 # on_manual so the student is never wedged behind „Handbetrieb".
@@ -3696,6 +3862,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     response.message = ('Aktuelle Armstellung ist ungültig — bitte '
                                         'kurz warten und erneut versuchen.')
                     return response
+                if (request.mode or '').strip().lower() == 'home':
+                    # The warned, slow glide to the Grundstellung that the React
+                    # side offers after a re-lock (touch-off, „Arm festsetzen",
+                    # recording stop). Same planner as the `home` block.
+                    self._run_manual_home_glide(joints, exit_gen, response)
+                    return response
                 try:
                     q_end, world = self._compute_jog_target(request.mode, request, joints)
                 except WorkflowError as e:
@@ -3747,6 +3919,190 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     self._manual_transient_ops = max(
                         0, self._manual_transient_ops - 1)
                     self._recompute_on_manual_locked()
+
+    def _plan_manual_home_legs(self, joints):
+        """Legs ``[(q_from, q_to, duration), …]`` from the live pose ``joints``
+        (n arm joints + gripper) to the profile HOME, gripper CARRIED (a held
+        object stays held — the `home` block's rule).
+
+        Routed through ``home_planner.plan_floor_checked_home_route``: on the Feetech
+        arms that IS the `home` block's box-model ladder (direct → lift over a
+        via → German refusal); on the OMX, which has no box table, it adds a
+        point-model floor rung (direct → straight-up lift → refusal), because a
+        hand-guided start is exactly where the OMX's direct line to HOME can
+        drive a link through the table (measured: 4,193 of 20,069 near-table
+        starts, worst 87.6 mm). A manual jog has no Sperrzonen (they live in a
+        run payload), so ``zones`` is None, as for every other jog. Raises
+        ``motion.WorkflowError`` (German) on a refusal."""
+        from types import SimpleNamespace
+        from physical_ai_server.workflow import home_planner
+        from physical_ai_server.workflow.handlers import motion as _motion
+        ik = self._build_ik_solver()
+        if ik is None:
+            raise _motion.WorkflowError(
+                'Roboter-Beschreibung nicht verfügbar — der Bewegungsrechner (IK) '
+                'konnte nicht gestartet werden. Bitte die Umgebung neu starten.')
+        try:
+            calib = self._load_workflow_calibration() or {}
+        except Exception:  # noqa: BLE001 — the planner falls back to z = 0
+            calib = {}
+        profile = getattr(self, '_arm_profile', None)
+        n = self._profile_n()
+        home = getattr(profile, 'home_joints_rad', None)
+        if home is None or len(home) != n:
+            home = _motion.HOME_JOINTS_RAD
+        q_start = [float(v) for v in joints[:n + 1]]
+        q_home = [float(v) for v in home] + [q_start[n]]
+
+        def _log(text):
+            self.get_logger().warning(str(text))
+            # Also handed back to the student with the result: a lift over a via
+            # is a motion they did not see coming from the countdown text alone.
+            notes = getattr(self, '_manual_home_notes', None)
+            if isinstance(notes, list):
+                notes.append(str(text).replace('[WARNUNG] ', ''))
+
+        shim = SimpleNamespace(
+            ik=ik,
+            z_table=calib.get('z_table'),
+            table_plane=calib.get('table_plane'),
+            zones=None,
+            log=_log,
+            num_arm_joints=n,
+        )
+        return home_planner.plan_floor_checked_home_route(
+            shim, q_start, q_home, _MANUAL_HOME_MIN_DURATION_S)
+
+    def _run_manual_home_glide(self, joints, exit_gen, response) -> None:
+        """Body of /workshop/jog mode 'home'. Runs with ``_manual_lock`` HELD and
+        torque already asserted ON by the jog callback; fills ``response``.
+
+        Every leg is stretched to ``_MANUAL_HOME_PEAK_RAD_S`` (quintic peak) and
+        published through the one command rail. A „Stopp" (hand_guide(false) sets
+        the stop event and bumps the exit generation) halts between chunks AND
+        publishes a hold at the measured pose, so the ≤1 s chunk already on the
+        rail does not keep carrying the arm toward HOME."""
+        from physical_ai_server.workflow.handlers.motion import WorkflowError
+        from physical_ai_server.workflow.trajectory_builder import (
+            _QUINTIC_PEAK_VELOCITY_FACTOR, build_segment, chunked_publish,
+            JOINT_VELOCITY_LIMIT_RAD_S as _VL_DEFAULT,
+        )
+        self._manual_home_notes = []
+        try:
+            legs = self._plan_manual_home_legs(joints)
+        except WorkflowError as e:
+            response.message = str(e)
+            return
+        except Exception as e:  # noqa: BLE001 — a service callback must never kill the node
+            self.get_logger().error(f'manual home planning failed: {e!r}')
+            response.message = ('Die Fahrt in die Grundstellung konnte nicht '
+                                'geplant werden — Details im Protokoll.')
+            return
+        notes = list(self._manual_home_notes)
+        n = self._profile_n()
+        already_home = len(legs) == 1 and all(
+            abs(float(b) - float(a)) < _MANUAL_HOME_ALREADY_THERE_RAD
+            for a, b in zip(legs[0][0][:n], legs[0][1][:n]))
+        if already_home:
+            # Not a 3 s glide that goes nowhere.
+            response.success = True
+            response.joints = [float(v) for v in legs[-1][1]]
+            response.message = 'Der Arm steht bereits in der Grundstellung.'
+            return
+        _vl = getattr(getattr(self, '_arm_profile', None),
+                      'velocity_limit_rad_s', None)
+        velocity_limit = float(_vl) if _vl else _VL_DEFAULT
+
+        def _should_stop():
+            return (self._manual_stop_event.is_set()
+                    or self._manual_exit_gen != exit_gen)
+
+        try:
+            points = []
+            t_offset = 0.0
+            for q_from, q_to, leg_duration in legs:
+                max_delta = max((abs(float(b) - float(a))
+                                 for a, b in zip(q_from, q_to)), default=0.0)
+                duration = max(float(leg_duration), _MANUAL_HOME_MIN_DURATION_S,
+                               max_delta * _QUINTIC_PEAK_VELOCITY_FACTOR
+                               / _MANUAL_HOME_PEAK_RAD_S)
+                segment = build_segment(q_from, q_to, duration,
+                                        velocity_limit=velocity_limit)
+                for q, t in segment:
+                    points.append((q, t_offset + t))
+                if segment:
+                    t_offset += segment[-1][1]
+            published = chunked_publish(
+                publisher=self._trajectory_publisher,
+                points=points,
+                should_stop=_should_stop,
+            )
+        except Exception as e:  # noqa: BLE001 — a service callback must never kill the node
+            self.get_logger().error(f'manual home glide failed: {e!r}')
+            self._hold_follower_at_measured_pose()
+            response.message = ('Die Fahrt in die Grundstellung wurde abgebrochen '
+                                '— Details im Protokoll.')
+            return
+        if not published:
+            if self._hold_follower_at_measured_pose():
+                response.message = ('Fahrt in die Grundstellung gestoppt — der Arm '
+                                    'hält seine aktuelle Position.')
+            else:
+                response.message = ('Fahrt in die Grundstellung gestoppt — der Arm '
+                                    'beendet noch die letzte Teilbewegung (höchstens '
+                                    'etwa eine Sekunde).')
+            return
+        q_end = list(points[-1][0])
+        world = (0.0, 0.0, 0.0)
+        ik = self._build_ik_solver()
+        if ik is not None:
+            try:
+                fk = ik.fk(q_end[:n])
+                if fk is not None:
+                    world = (float(fk[1][0]), float(fk[1][1]), float(fk[1][2]))
+            except Exception:  # noqa: BLE001 — the world echo is informational
+                pass
+        response.success = True
+        response.joints = [float(v) for v in q_end]
+        response.world_x = float(world[0])
+        response.world_y = float(world[1])
+        response.world_z = float(world[2])
+        # Arrival is CHECKED, not assumed — warn-only at the same 0.30 rad the
+        # boot-home verifiers use; nothing is re-sent (the glide may have been
+        # blocked by a hand or an obstacle, and pushing again is the wrong answer).
+        off = self._manual_home_joints_off(q_end[:n])
+        if off:
+            response.message = (
+                'Der Arm hat die Grundstellung nicht ganz erreicht (Gelenk '
+                + ', '.join(str(i + 1) for i in off)
+                + '). Bitte prüfen, ob etwas im Weg ist.')
+        else:
+            response.message = 'Der Arm steht in der Grundstellung.'
+        if notes:
+            response.message += ' Hinweis: ' + ' '.join(notes)
+
+    def _manual_home_joints_off(self, target_arm) -> list:
+        """0-based indices of arm joints still more than 0.30 rad from
+        ``target_arm`` after a short settle, or [] when arrived OR when the pose
+        cannot be read (a diagnostic never turns a finished glide into an
+        error)."""
+        time.sleep(0.3)
+        try:
+            actual = (self.communicator.get_latest_follower_joints()
+                      if self.communicator is not None else None)
+        except Exception:  # noqa: BLE001
+            return []
+        n = len(target_arm)
+        if not actual or len(actual) < n:
+            return []
+        off = []
+        for i in range(n):
+            try:
+                if abs(float(actual[i]) - float(target_arm[i])) > 0.30:
+                    off.append(i)
+            except (TypeError, ValueError):
+                return []
+        return off
 
     def _follower_joints_stale(self) -> bool:
         """True when the latest follower JointState is older than
@@ -4088,16 +4444,24 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     response.message = 'Aufnahme verworfen.'
                     return response
                 # stop
-                if not self._retorque_follower_or_keep_locked(response):
-                    response.sample_count = len(buf)  # report what was captured
-                    return response  # keep on_manual True (arm may be limp)
                 duration = float(buf[-1][0]) if buf else 0.0
                 # Buffer sample layout: [t_s, j1..jn, grip]. CONTRACT B point:
                 # [j1..jn, grip, t_s] — width-agnostic rotation of the row.
                 points = [list(s[1:]) + [s[0]] for s in buf]
-                response.points_json = json.dumps({
+                points_json = json.dumps({
                     'fps': _MANUAL_RECORD_FPS, 'points': points,
                 })
+                if not self._retorque_follower_or_keep_locked(response):
+                    # The arm could not be re-locked (e.g. a Feetech joint parked
+                    # on its position-map edge). The session stays claimed — that
+                    # safety half is unchanged — but the TAKE is returned anyway:
+                    # it is data, returning it moves nothing, and discarding it
+                    # made the student re-record a motion that was captured fine.
+                    response.sample_count = len(buf)
+                    response.duration_s = duration
+                    response.points_json = points_json
+                    return response  # keep on_manual True (arm may be limp)
+                response.points_json = points_json
                 response.sample_count = len(buf)
                 response.duration_s = duration
                 response.success = True
@@ -4137,7 +4501,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if not joints or len(joints) < width:
             return
         t = time.monotonic() - self._manual_record_start_mono
-        sample = [float(t)] + [float(v) for v in joints[:width]]
+        # Rounded HERE (not at stop) so the dedupe below compares exactly what is
+        # stored — see _MANUAL_RECORD_JOINT_DECIMALS for why rounding exists.
+        sample = ([round(float(t), _MANUAL_RECORD_TIME_DECIMALS)]
+                  + [round(float(v), _MANUAL_RECORD_JOINT_DECIMALS)
+                     for v in joints[:width]])
         acquired = self._manual_lock.acquire(timeout=0.05)
         if not acquired:
             return  # a stop/jog holds the mutex; drop this frame (bounded loss)
@@ -4249,7 +4617,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         CONTRACT B) OR a server-persisted trajectory named ``name``."""
         from physical_ai_server.workflow.handlers.motion import WorkflowError
         from physical_ai_server.workflow.handlers.trajectory import (
-            clamp_speed, extract_points, resegment_trajectory,
+            REPLAY_PUBLISHES_VELOCITIES, clamp_speed, extract_points,
+            refuse_wrapped_joint_jumps, refuse_wrapped_lead_in, resegment_trajectory,
         )
         response.success = False
         response.message = ''
@@ -4311,6 +4680,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         n = self._profile_n()
         try:
             points = extract_points(traj, num_arm_joints=n)
+            refuse_wrapped_joint_jumps(
+                points, getattr(self._build_ik_solver(), 'joint_limits', None),
+                num_arm_joints=n)
+            # (the LEAD-IN twin of this check runs inside _segment_from below)
         except WorkflowError as e:
             response.message = str(e)
             return response
@@ -4337,19 +4710,51 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # not). Returns None (no check) when the floor is unknown → lead-in behaves
         # exactly as before.
         lead_floor = self._build_replay_lead_floor_check()
-        try:
-            from physical_ai_server.workflow.trajectory_builder import (
-                JOINT_VELOCITY_LIMIT_RAD_S as _VL_DEFAULT,
-            )
-            _vl = getattr(getattr(self, '_arm_profile', None),
-                          'velocity_limit_rad_s', None)
-            segmented = resegment_trajectory(
-                points, speed, lead_in_from=current,
+        from physical_ai_server.workflow.trajectory_builder import (
+            JOINT_VELOCITY_LIMIT_RAD_S as _VL_DEFAULT,
+        )
+        _vl = getattr(getattr(self, '_arm_profile', None),
+                      'velocity_limit_rad_s', None)
+        velocity_limit = float(_vl) if _vl else _VL_DEFAULT
+
+        joint_limits = getattr(self._build_ik_solver(), 'joint_limits', None)
+
+        def _segment_from(pose):
+            refuse_wrapped_lead_in(pose, points[0], joint_limits, num_arm_joints=n)
+            return resegment_trajectory(
+                points, speed, lead_in_from=pose,
                 lead_in_floor_check=lead_floor,
                 point_floor_check=lead_floor,  # FIX 5 — floor-check recorded points
-                with_velocities=True,          # smooth cubic playback (velocities)
+                # POSITION-ONLY, deliberately — see handlers/trajectory.py
+                # ::REPLAY_PUBLISHES_VELOCITIES. With per-point velocities the
+                # OMX JointTrajectoryController REJECTED every chunk but the last.
+                with_velocities=REPLAY_PUBLISHES_VELOCITIES,
                 num_arm_joints=n,
-                velocity_limit=float(_vl) if _vl else _VL_DEFAULT)
+                velocity_limit=velocity_limit)
+
+        def _rebuild_from_live_pose():
+            """Re-derive the lead-in from the pose the arm has NOW — called by
+            _run_replay after it holds _manual_lock and has re-torqued. The pose
+            read above can be up to 30 s old by then (a jog still moving, a limp
+            arm settling during the re-torque), and the driver applies a chunk's
+            first point at once: a stale lead-in start was a snap BACK to where the
+            arm had been. Raises WorkflowError (German) like the first build."""
+            live = None
+            try:
+                live = self.communicator.get_latest_follower_joints()
+            except Exception:  # noqa: BLE001
+                live = None
+            if (self._follower_joints_stale() or not live or len(live) < n + 1
+                    or not all(math.isfinite(float(v)) for v in live[:n + 1])):
+                raise WorkflowError('Aktuelle Armstellung ist noch nicht bekannt — '
+                                    'bitte kurz warten und erneut abspielen.')
+            return _segment_from([float(v) for v in live[:n + 1]])
+
+        try:
+            # Built once HERE so a floor / zone refusal still answers the service
+            # call synchronously in German; _run_replay rebuilds it from the live
+            # pose before driving.
+            segmented = _segment_from(current)
         except WorkflowError as e:
             response.message = str(e)
             return response
@@ -4396,7 +4801,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             exit_gen = self._manual_exit_gen
             thread = threading.Thread(
                 target=self._run_replay,
-                args=(segmented, exit_gen),
+                args=(segmented, exit_gen, _rebuild_from_live_pose),
                 name='workshop-replay',
                 daemon=True,
             )
@@ -4408,6 +4813,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         response.success = True
         response.message = 'Wiedergabe gestartet.'
         return response
+
+    def _publish_manual_notice(self, text: str) -> None:
+        """Best-effort German notice on /task/status (React toasts a non-empty
+        ``error``). For the replay DAEMON: /workshop/replay has already answered
+        „Wiedergabe gestartet" by the time it can fail, so without this every
+        abort below was a server log line only and the student saw an arm that
+        simply did not move. Same shape as _finish_manual_record_on_cap's notice.
+        Never raises."""
+        try:
+            if self.communicator is not None:
+                notice = TaskStatus()
+                notice.phase = TaskStatus.READY
+                notice.error = str(text)
+                self.communicator.publish_status(status=notice)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warning(f'manual notice publish failed: {e}')
 
     def _build_replay_lead_floor_check(self):
         """Return a ``callable(q6) -> bool`` (True when a lead-in waypoint dips the
@@ -4442,11 +4863,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             fz = _motion._floor_z_at(shim, float(t[0]), float(t[1]))
             if fz is None:
                 return False
-            return float(t[2]) < fz - _motion.WORKSPACE_FLOOR_MARGIN_M
+            return (float(t[2]) + _motion.tool_tip_rise_m(ik, q6, _n_fk)
+                    < fz - _motion.WORKSPACE_FLOOR_MARGIN_M)
 
         return _lead_floor
 
-    def _run_replay(self, segmented, exit_gen):
+    def _run_replay(self, segmented, exit_gen, rebuild=None):
         """Daemon body for /workshop/replay. Holds _manual_lock for the whole
         chunked publish (so a jog can't drive concurrently). F3: the re-torque AND
         the _manual_stop_event.clear() happen HERE, AFTER acquiring _manual_lock —
@@ -4459,12 +4881,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         down and we abort without driving. FIX 2 — a record start seizing the
         (limp) arm between the claim and here also aborts the drive."""
         from types import SimpleNamespace
+        from physical_ai_server.workflow.handlers.motion import WorkflowError
         from physical_ai_server.workflow.trajectory_builder import chunked_publish
         acquired = self._manual_lock.acquire(timeout=30.0)
         keep_session = False
         try:
             if not acquired:
                 self.get_logger().warning('replay could not acquire manual lock')
+                self._publish_manual_notice(
+                    'Wiedergabe nicht gestartet — der Arm war mit einer anderen '
+                    'Bewegung beschäftigt. Bitte erneut abspielen.')
                 return
             # FIX 4 — a „Beenden" bumped the exit generation while we waited on
             # _manual_lock → the session was torn down; do NOT drive after it.
@@ -4472,6 +4898,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().warning(
                     'replay aborted — Handbetrieb was ended before the drive '
                     'started.')
+                self._publish_manual_notice(
+                    'Wiedergabe abgebrochen — der Handbetrieb wurde beendet, '
+                    'bevor sich der Arm bewegt hat. Bitte erneut abspielen.')
                 return
             # FIX 2 — a record start seized the (limp) arm between the callback's
             # claim and here; driving now would fight the student's hand. Mirror
@@ -4479,6 +4908,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if self._manual_record_active:
                 self.get_logger().warning(
                     'replay aborted — a recording started before the drive.')
+                self._publish_manual_notice(
+                    'Wiedergabe abgebrochen — es läuft gerade eine Aufnahme.')
                 return
             # F3 — re-torque UNDER the lock (serialised against jogs), fail-loud.
             if not self._retorque_follower_or_keep_locked(
@@ -4486,6 +4917,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 keep_session = True  # arm may be limp → keep the ref, do NOT drive
                 self.get_logger().error(
                     'replay re-torque failed — not driving; Handbetrieb bleibt aktiv.')
+                self._publish_manual_notice(
+                    'Wiedergabe nicht möglich — der Arm konnte nicht verriegelt '
+                    'werden.' + self._last_torque_reason())
                 return
             # FIX 4 (Finding 1) — re-check the exit generation AFTER the blocking
             # re-torque. A „Beenden" that landed DURING the re-torque bumped
@@ -4496,7 +4930,19 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if self._manual_exit_gen != exit_gen:
                 self.get_logger().warning(
                     'replay aborted — Handbetrieb was ended during the re-torque.')
+                self._publish_manual_notice(
+                    'Wiedergabe abgebrochen — der Handbetrieb wurde beendet, '
+                    'bevor sich der Arm bewegt hat. Bitte erneut abspielen.')
                 return
+            # Lead-in from the arm's LIVE pose, now that we own the arm and it is
+            # torqued (see _rebuild_from_live_pose). A refusal here is told to the
+            # student — the service call already answered „Wiedergabe gestartet".
+            if callable(rebuild):
+                try:
+                    segmented = rebuild()
+                except WorkflowError as e:
+                    self._publish_manual_notice(f'Wiedergabe abgebrochen — {e}')
+                    return
             # F3 — clear the SHARED stop-event only now, under the lock.
             self._manual_stop_event.clear()
             # A „Beenden" that races the clear above still bumped the exit
@@ -4511,6 +4957,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             )
         except Exception as e:  # noqa: BLE001 — daemon must never crash the node
             self.get_logger().error(f'replay failed: {e!r}')
+            self._publish_manual_notice(
+                'Wiedergabe fehlgeschlagen — Details im Protokoll.')
         finally:
             # FIX 1 — release this transient replay's ref under the arbiter lock,
             # unless a re-torque failure left the arm possibly-limp (keep_session
@@ -4669,10 +5117,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             t = pt[1]
             point = JointTrajectoryPoint()
             point.positions = [float(v) for v in q]
-            # Replay passes an optional 3rd tuple element: per-joint velocities, so
-            # the controller uses a cubic spline with velocity continuity across
-            # chunk boundaries (smooth playback). Workflow moves / jog pass
-            # 2-tuples → position-only (linear), byte-identical to before.
+            # An optional 3rd tuple element carries per-joint velocities. NO shipped
+            # caller sends it any more: replay became position-only because the OMX
+            # controller rejects a message whose LAST point still has a velocity
+            # (see handlers/trajectory.py::REPLAY_PUBLISHES_VELOCITIES). The hold
+            # sends explicit zeros, which is always accepted.
             if len(pt) >= 3 and pt[2] is not None:
                 point.velocities = [float(v) for v in pt[2]]
             point.time_from_start.sec = int(t)
@@ -5471,6 +5920,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if manager is None:
                 response.success = False
                 response.message = 'Workflow-Runtime kann nicht initialisiert werden.'
+                response.unreachable_block_ids = []
+                response.unreachable_messages = []
+                return False
+            # A program on a LIMP follower used to finish GREEN with no motion:
+            # the Feetech driver drops every trajectory while torque is off (a
+            # rate-limited log line only), and nothing before a run asserted it.
+            # Same defensive torque-on every jog already does; on the OMX it
+            # carries the hold-in-place, so it cannot snap. No hand-guided arm
+            # can be stiffened here — _assert_no_other_active('workflow') has
+            # already refused any open manual session.
+            torque_on = getattr(self, '_set_follower_torque', None)
+            if callable(torque_on) and not torque_on(True):
+                response.success = False
+                response.message = (
+                    'Programm nicht gestartet — der Arm konnte nicht verriegelt '
+                    'werden und würde sich nicht bewegen.' + self._last_torque_reason())
                 response.unreachable_block_ids = []
                 response.unreachable_messages = []
                 return False

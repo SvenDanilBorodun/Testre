@@ -30,6 +30,7 @@ import * as workflowApi from '../../services/workflowApi';
 import { collectReplayNames } from './blocks/trajectories';
 import { DE } from './blocks/messages_de';
 import { slimRunPayload } from '../../utils/blocklyPayload';
+import { compactTrajectoryPoints } from '../../utils/trajectoryCompact';
 import { rsControlBase, usePiMode } from '../../utils/piMode';
 
 const BUTTON_BASE =
@@ -54,6 +55,10 @@ const BUTTON_BASE =
 // first probe waits for `piModeResolved`, so a boot-window probe on a Pi never
 // mis-routes to the loopback base before the marker resolves.
 const RS_STATUS_TIMEOUT_MS = 4000;
+// Mirror of workflow_manager.MAX_WORKFLOW_JSON_BYTES (256 KiB) — used ONLY to
+// name the cause when recordings make the run payload too big; the server stays
+// the authority.
+const RUN_PAYLOAD_MAX_BYTES = 256 * 1024;
 const RS_STATUS_POLL_MS = 8000;
 
 // Phase-2 Tempo — the global run-bar speed multiplier injected as a top-level
@@ -436,8 +441,14 @@ function RunControls({
               return;
             }
             // Inject only the run-payload sibling (Contract C: { fps, points }) —
-            // the arm-family tag was consumed by the refusal check above.
-            trajectories[name] = { fps: norm.fps, points: norm.points };
+            // the arm-family tag was consumed by the refusal check above. Points
+            // are rounded to 1e-4 rad / 1 ms (utils/trajectoryCompact): a
+            // full-precision recording saved before the sampler rounded is ~2.4×
+            // larger and pushed the run payload past the server's 256 KiB cap.
+            trajectories[name] = {
+              fps: norm.fps,
+              points: compactTrajectoryPoints(norm.points),
+            };
           }
         } catch (e) {
           toast.error(`Bewegung konnte nicht geladen werden: ${e.message || e}`);
@@ -483,6 +494,18 @@ function RunControls({
             trajectories,
           })
         : JSON.stringify({ ...programJson, zones, tempo, trajectories });
+      // The server refuses a payload over MAX_WORKFLOW_JSON_BYTES (256 KiB) with
+      // „Workflow-JSON ist zu groß", which names no cause and no remedy. When
+      // recordings ride along they are almost always the reason — say so, in
+      // German, before anything is sent.
+      if (Object.keys(trajectories).length > 0
+          && new TextEncoder().encode(workflowJsonStr).length > RUN_PAYLOAD_MAX_BYTES) {
+        toast.error(
+          'Die aufgenommenen Bewegungen in diesem Programm sind zusammen zu groß '
+          + 'für einen Start. Bitte kürzere Bewegungen aufnehmen oder weniger '
+          + 'verschiedene Bewegungen im selben Programm abspielen.');
+        return;
+      }
       const r = await callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',

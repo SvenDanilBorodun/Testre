@@ -270,3 +270,38 @@ describe('RunControls — cross-profile replay refusal', () => {
     expect(parsed.trajectories).toEqual({ 'Bewegung 1': { fps: 25, points: POINTS } });
   });
 });
+
+describe('RunControls — recordings in the run payload stay small', () => {
+  test('injected points are rounded to 1e-4 rad / 1 ms', async () => {
+    mockGetTrajectory.mockResolvedValue({
+      fps: 25,
+      points: [
+        [0.123456789, -1.570796327, 1.570796327, 0.0, 0.0, 0.8, 0.0400001],
+        [0.223456789, -1.470796327, 1.470796327, 0.0, 0.0, 0.8, 0.0800009],
+      ],
+    });
+    render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
+    await userEvent.click(screen.getByRole('button', { name: /Start/ }));
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalled());
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    expect(parsed.trajectories['Bewegung 1'].points).toEqual([
+      [0.1235, -1.5708, 1.5708, 0, 0, 0.8, 0.04],
+      [0.2235, -1.4708, 1.4708, 0, 0, 0.8, 0.08],
+    ]);
+  });
+
+  test('a payload the server would refuse as too big is refused HERE, naming the recordings', async () => {
+    // ~4000 rows of 7 values is well past 256 KiB even after rounding.
+    const rows = [];
+    for (let i = 0; i < 12000; i += 1) {
+      rows.push([1.2345, -1.2345, 1.2345, -1.2345, 1.2345, 0.8, i * 0.04]);
+    }
+    mockGetTrajectory.mockResolvedValue({ fps: 25, points: rows });
+    render(<RunControls workflowId="wf-1" blocklyJson={REPLAY_JSON} simMode={false} simScene={null} />);
+    await userEvent.click(screen.getByRole('button', { name: /Start/ }));
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith(
+      expect.stringContaining('aufgenommenen Bewegungen')));
+    expect(mockRos.callService).not.toHaveBeenCalledWith(
+      '/workflow/start', expect.anything(), expect.anything());
+  });
+});

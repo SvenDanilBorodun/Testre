@@ -17,6 +17,8 @@ import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 // `undefined` and handled by the `typeof` guard below. Called by name per the
 // CONTRACT (workflowApi.createTrajectory).
 import * as workflowApi from '../../services/workflowApi';
+import { compactTrajectoryPoints } from '../../utils/trajectoryCompact';
+import { useHomeGlide } from './HomeGlidePrompt';
 
 // Roboter Studio Batch 2b — „Bewegung aufnehmen". The student hand-guides the
 // follower (frees it in the JogPanel) while this panel records the joint stream
@@ -77,6 +79,17 @@ function RecordPanel({
   onRecordingChange = null,
 }) {
   const { recordControl, replayMotion, handGuide } = useRosServiceCaller();
+  // Stopp / Verwerfen re-lock the arm IN PLACE; the way back to the
+  // Grundstellung is the warned, slow glide (HomeGlidePrompt).
+  const { offerHomeGlide, homeGlideDialog, homeGlideActive } = useHomeGlide();
+  // Is the server-side manual SESSION this panel opened still open? `record
+  // start` opens a persistent session and only hand_guide(false) closes it.
+  // Tracked so that ONE successful close is enough: every later
+  // hand_guide(false) (Speichern, Verwerfen, the unmount teardown) used to fire
+  // again, and hand_guide(false) is also the universal ABORT — it cancelled a
+  // „Vorschau" that was still playing (the preview service returns as soon as
+  // the replay has STARTED), so the arm stopped part-way through the motion.
+  const sessionOpenRef = useRef(false);
   // The rig's DATA-robot-type identity (server: profile.data_robot_type, stamped
   // on /task/status → taskStatus.robotType: 'omx_f' for both OMX profiles,
   // 'edu6_studio' for the 6-DOF arm). This is the id space the cloud trajectory
@@ -133,6 +146,7 @@ function RecordPanel({
           Promise.resolve(recordControlRef.current('cancel')).catch(() => {});
         } catch (_) { /* fire-and-forget */ }
       } else if ((st === 'review' || st === 'saving')
+          && sessionOpenRef.current
           && typeof handGuideRef.current === 'function') {
         try {
           Promise.resolve(handGuideRef.current(false)).catch(() => {});
@@ -162,9 +176,16 @@ function RecordPanel({
   // A „Vorschau abspielen" (replay) still works after this: the backend replay
   // transiently re-opens the session for its own drive. Best-effort + idempotent.
   const closeManualSession = useCallback(async () => {
-    if (typeof handGuide !== 'function') return;
+    if (!sessionOpenRef.current) return;
+    if (typeof handGuide !== 'function') {
+      sessionOpenRef.current = false;
+      return;
+    }
     try {
-      await handGuide(false);
+      const res = await handGuide(false);
+      // Only a CONFIRMED close retires the session; a refusal (e.g. „Der Arm ist
+      // noch in Bewegung") leaves it open so the next path retries.
+      if (!res || res.success !== false) sessionOpenRef.current = false;
     } catch (e) {
       console.warn('hand_guide(false) after recording failed', e);
     }
@@ -178,6 +199,7 @@ function RecordPanel({
         toast.error((res && res.message) || 'Aufnahme konnte nicht gestartet werden.');
         return;
       }
+      sessionOpenRef.current = true;
       setElapsed(0);
       setState('recording');
       stopTimer();
@@ -199,10 +221,28 @@ function RecordPanel({
       stopTimer();
       // FIX 3: `record stop` keeps the manual session open — close it on EVERY
       // stop path so the student is never stranded behind „Handbetrieb ist aktiv".
-      // (Preview still works; the backend replay re-opens the session transiently.)
-      closeManualSession();
+      // AWAITED: a „Vorschau" clicked while this close is still in flight would
+      // be aborted by it (hand_guide(false) is the universal manual abort).
+      await closeManualSession();
       if (!res || !res.success) {
+        // A failed stop means the server could NOT re-lock the arm — never
+        // offer a glide over an arm that may still be limp.
         toast.error((res && res.message) || 'Aufnahme konnte nicht beendet werden.');
+        // …but the TAKE is still good: the server returns it even when the
+        // re-lock fails, so keep it for „Speichern" instead of making the
+        // student re-record a motion that was captured fine.
+        const kept = res ? parsePoints(res.points_json) : null;
+        if (kept && kept.points.length > 0) {
+          setRecorded({
+            raw: res.points_json,
+            fps: kept.fps,
+            points: kept.points,
+            sampleCount: Number(res.sample_count) || kept.points.length,
+            duration: Number(res.duration_s) || 0,
+          });
+          setState('review');
+          return;
+        }
         setState('idle');
         return;
       }
@@ -212,6 +252,7 @@ function RecordPanel({
         toast('Keine Bewegung aufgenommen — bitte den Arm während der Aufnahme bewegen.', { icon: '💡' });
         setState('idle');
         setRecorded(null);
+        offerHomeGlide();
         return;
       }
       setRecorded({
@@ -222,6 +263,7 @@ function RecordPanel({
         duration: Number(res.duration_s) || 0,
       });
       setState('review');
+      offerHomeGlide();
     } catch (e) {
       toast.error(`Beenden fehlgeschlagen: ${e.message || e}`);
       closeManualSession();  // stop threw — still release the arm/session
@@ -229,7 +271,7 @@ function RecordPanel({
     } finally {
       setBusy(false);
     }
-  }, [recordControl, stopTimer, closeManualSession]);
+  }, [recordControl, stopTimer, closeManualSession, offerHomeGlide]);
 
   // FIX 5: mirror the backend RECORD_MAX_S cap. When the elapsed timer reaches
   // the cap, the backend has already auto-stopped SAMPLING — so auto-invoke the
@@ -252,7 +294,12 @@ function RecordPanel({
   const handleCancel = useCallback(async () => {
     setBusy(true);
     try {
-      await recordControl('cancel');
+      const res = await recordControl('cancel');
+      if (res && res.success) {
+        // `record cancel` re-locks the arm AND closes the session server-side.
+        sessionOpenRef.current = false;
+        offerHomeGlide();
+      }
     } catch (e) {
       // Best-effort — the local recording is discarded regardless.
       console.warn('recordControl(cancel) failed', e);
@@ -262,7 +309,7 @@ function RecordPanel({
       setRecorded(null);
       setBusy(false);
     }
-  }, [recordControl, stopTimer]);
+  }, [recordControl, stopTimer, offerHomeGlide]);
 
   const handleDiscard = useCallback(() => {
     closeManualSession();  // FIX 3: release the arm/session on discard
@@ -316,7 +363,9 @@ function RecordPanel({
       const payload = {
         name,
         fps: recorded.fps,
-        points: recorded.points,
+        // Rounded to 1e-4 rad / 1 ms: an older server image sends full-precision
+        // floats, which pushed a long recording past the cloud's 256 KiB cap.
+        points: compactTrajectoryPoints(recorded.points),
         // FIX 6: persist the reviewed duration (the route already accepts it).
         duration_s: recorded.duration,
       };
@@ -343,6 +392,7 @@ function RecordPanel({
 
   return (
     <div className="rounded-lg border border-[var(--line)] bg-white p-3">
+      {homeGlideDialog}
       <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
         <h3 className="text-sm font-semibold text-[var(--ink)]">Bewegung aufnehmen</h3>
         {state === 'recording' && (
@@ -358,7 +408,7 @@ function RecordPanel({
           <button
             type="button"
             onClick={handleStart}
-            disabled={disabled || busy}
+            disabled={disabled || busy || homeGlideActive}
             title="Eine handgeführte Bewegung des Arms aufnehmen"
             className={
               'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
@@ -369,7 +419,8 @@ function RecordPanel({
             Bewegung aufnehmen
           </button>
           <p className="text-[11px] text-[var(--ink-3)] mt-1.5">
-            Schalte den Arm frei, bewege ihn von Hand und nimm die Bewegung auf.
+            „Bewegung aufnehmen" schaltet den Arm selbst frei — bewege ihn dann
+            von Hand und drücke „Stopp".
             {!workflowId && ' Zum Speichern muss der Workflow zuerst gespeichert werden.'}
           </p>
         </>
@@ -411,7 +462,7 @@ function RecordPanel({
             <button
               type="button"
               onClick={handlePreview}
-              disabled={disabled || busy}
+              disabled={disabled || busy || homeGlideActive}
               title="Die aufgenommene Bewegung auf dem Roboter abspielen"
               className="text-xs px-2.5 py-1 rounded-md border border-[var(--line)] text-[var(--ink)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed"
             >

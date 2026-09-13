@@ -13,6 +13,7 @@ import toast from 'react-hot-toast';
 import { useSelector } from 'react-redux';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import { armGeometry } from '../../utils/armProfile';
+import { useHomeGlide } from './HomeGlidePrompt';
 
 // Roboter Studio Batch 2b — „Roboter steuern (Tippbetrieb)". Incremental JOG of
 // the real follower: per-joint − / + nudges (Gelenk 1–5 + Greifer-Drehung),
@@ -79,6 +80,9 @@ const NUDGE_BTN =
  */
 function JogPanel({ disabled = false, onHandGuideChange = null }) {
   const { jogArm, handGuide } = useRosServiceCaller();
+  // „Arm festsetzen" now re-locks the arm WHERE IT IS; the way back to the
+  // Grundstellung is this warned, slow glide (see HomeGlidePrompt).
+  const { offerHomeGlide, homeGlideDialog, homeGlideActive } = useHomeGlide();
   const [stepId, setStepId] = useState('medium');
   const [busy, setBusy] = useState(false);
   // Hand-guide (torque-off) state. While the arm is freigeschaltet, jog nudges
@@ -167,7 +171,7 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
     return () => clearInterval(id);
   }, [handGuideOn]);
 
-  const jogDisabled = disabled || busy || handGuideOn;
+  const jogDisabled = disabled || busy || handGuideOn || homeGlideActive;
 
   const caps = useSelector((st) => (st.tasks && st.tasks.taskStatus ? st.tasks.taskStatus.capabilities : null));
   const geo = useMemo(() => armGeometry(caps), [caps]);
@@ -228,17 +232,19 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
       toast.success(
         enabled
           ? 'Arm freigeschaltet — du kannst ihn jetzt mit der Hand bewegen.'
-          : 'Arm festgesetzt.',
+          : 'Arm festgesetzt — er hält seine Position.',
       );
+      if (!enabled) offerHomeGlide();
     } catch (e) {
       toast.error(`Umschalten fehlgeschlagen: ${e.message || e}`);
     } finally {
       setBusy(false);
     }
-  }, [handGuide]);
+  }, [handGuide, offerHomeGlide]);
 
   return (
     <div className="rounded-lg border border-[var(--line)] bg-white p-3">
+      {homeGlideDialog}
       <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
         <h3 className="text-sm font-semibold text-[var(--ink)]">
           Roboter steuern (Tippbetrieb)
@@ -271,7 +277,10 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
           <button
             type="button"
             onClick={() => toggleHandGuide(true)}
-            disabled={disabled || busy}
+            // Never free the arm while the glide warning or the glide itself is
+            // up: the server would then refuse the glide over a limp arm, or —
+            // worse — the student's hand would be on an arm about to move.
+            disabled={disabled || busy || homeGlideActive}
             title="Motoren lösen, damit du den Arm mit der Hand bewegen kannst"
             className={
               'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '

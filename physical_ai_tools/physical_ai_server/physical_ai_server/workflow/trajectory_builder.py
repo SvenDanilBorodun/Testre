@@ -121,6 +121,47 @@ def build_segment(
     return samples
 
 
+def build_linear_segment(
+    q_start: list[float],
+    q_end: list[float],
+    duration_s: float,
+    fps: int = DEFAULT_FPS,
+    velocity_limit: float = JOINT_VELOCITY_LIMIT_RAD_S,
+) -> list[tuple[list[float], float]]:
+    """``(q, t)`` waypoints on the STRAIGHT (constant-velocity) line from
+    ``q_start`` to ``q_end``, first sample at ``t = dt``.
+
+    For replaying a DENSE hand-guided recording, where consecutive samples are
+    one point of ONE continuous motion — not the rest-to-rest moves
+    :func:`build_segment` is for. Judging each 40 ms recorded pair as a quintic
+    (peak = 15/8 × mean) slowed any joint above 0.6·limit·8/15 (1.54 rad/s on
+    the OMX) and put a stop-and-go ripple inside every stretched pair: measured
+    2026-09-13, a take peaking at 2.0 rad/s replayed 26 % slower, at 2.8 rad/s
+    76 % slower (edu6/edu1 up to 38 % / 46 % on the Feetech audit's takes).
+
+    THE FLOOR IS KEPT, only measured correctly: on this line every joint moves at
+    exactly ``|Δq| / duration``, so the duration is extended until that is at most
+    ``_VELOCITY_SAFETY_FRACTION × velocity_limit`` — the same 0.6 × limit
+    ceiling, now on the velocity the arm is actually commanded (the controller
+    interpolates linearly between position-only points, the Feetech driver too).
+    It only ever EXTENDS. Owner sign-off (Rule §2): 2026-09-13."""
+    if len(q_start) != len(q_end):
+        raise ValueError('q_start and q_end must have the same length')
+    if duration_s <= 0:
+        duration_s = 1.0 / fps
+    q_start_arr = np.asarray(q_start, dtype=np.float64)
+    delta = np.asarray(q_end, dtype=np.float64) - q_start_arr
+    if delta.size:
+        max_delta = float(np.max(np.abs(delta)))
+        v_safe = _VELOCITY_SAFETY_FRACTION * velocity_limit
+        if max_delta > 0.0 and v_safe > 0.0:
+            duration_s = max(duration_s, max_delta / v_safe)
+    num_samples = max(1, int(round(duration_s * fps)))
+    dt = duration_s / num_samples
+    return [((q_start_arr + delta * (i / num_samples)).tolist(), i * dt)
+            for i in range(1, num_samples + 1)]
+
+
 def chunked_publish(
     publisher: Callable[[list[tuple[list[float], float]]], None],
     points: Iterable[tuple[list[float], float]],

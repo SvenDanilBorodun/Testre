@@ -10,6 +10,10 @@
 #                rejected (the top-down arm cannot hold them).
 #   drive_to   — move straight to (target_x, target_y, target_z), top-down roll
 #                (the per-block „fahre dorthin" / the editor's Move button).
+#   home       — slow, floor-checked glide to the profile Grundstellung, gripper
+#                carried (the `home` block's route planner; index/delta/target_*/
+#                duration_s ignored). Sent ONLY by the React warning dialog
+#                (HomeGlidePrompt) after a re-lock; hand_guide(false) stops it.
 # `duration_s` is the REQUESTED move duration (clamped; the velocity floor may
 # extend it). Torque is asserted ON at the start of the move.
 string mode

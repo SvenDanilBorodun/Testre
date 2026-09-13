@@ -690,6 +690,30 @@ export function useRosServiceCaller() {
     [callService]
   );
 
+  // The slow, floor-checked glide to the Grundstellung (WorkshopJog mode 'home').
+  // ONLY ever called by the warned flow in components/Workshop/HomeGlidePrompt —
+  // never fire it without that warning. 45 s: the server stretches each leg to a
+  // gentle peak speed (a far start plus a lift-over via can take >10 s) and first
+  // waits for the manual lock. Resp { success, joints[], world_*, message }.
+  const homeArm = useCallback(
+    async () =>
+      callService(
+        '/workshop/jog',
+        'physical_ai_interfaces/srv/WorkshopJog',
+        {
+          mode: 'home',
+          index: 0,
+          delta: 0,
+          target_x: 0,
+          target_y: 0,
+          target_z: 0,
+          duration_s: 0,
+        },
+        45000,
+      ),
+    [callService]
+  );
+
   // Torque the follower off (enabled=true → student can hand-guide it) or back
   // on (enabled=false → the arm holds its pose). Resp { success, message }.
   const handGuide = useCallback(
@@ -874,6 +898,7 @@ export function useRosServiceCaller() {
     getObjectCatalog,
     capturePose,
     jogArm,
+    homeArm,
     handGuide,
     recordControl,
     replayMotion,

@@ -29,6 +29,8 @@ _CONSTS = dict(
     _MANUAL_RECORD_FPS=25,
     _MANUAL_RECORD_MAX_SAMPLES=int(120.0 * 25) + 100,
     _MANUAL_RECORD_MIN_DELTA_RAD=0.003,
+    _MANUAL_RECORD_JOINT_DECIMALS=4,
+    _MANUAL_RECORD_TIME_DECIMALS=3,
     _MANUAL_LOCK_TIMEOUT_S=2.0,
     _MANUAL_TORQUE_FAIL_LIMIT=3,
     _FOLLOWER_JOINT_MAX_AGE_S=1.0,
@@ -212,14 +214,22 @@ class _FakeNode:
     def _build_replay_lead_floor_check(self):
         return None  # no floor guard in these unit tests
 
+    def _publish_manual_notice(self, text):
+        # The replay daemon's German notice for an abort the /workshop/replay
+        # caller can no longer see (it already answered „Wiedergabe gestartet").
+        self.notices = getattr(self, 'notices', []) + [text]
+
     def _schedule_manual_record_cap_finish(self):
         self.cap_finish_scheduled += 1
 
     def _cancel_manual_record_cap_timer(self):
         self._manual_record_cap_timer = None
 
-    def _run_replay(self, segmented, exit_gen):
+    def _run_replay(self, segmented, exit_gen, rebuild=None):
         self.replay_runs.append((segmented, exit_gen))
+
+    def _build_ik_solver(self):
+        return None  # no joint limits → the ±180° seam check is skipped here
 
     def _manual_record_sample(self):
         # Present so the record-start callback's create_timer(..., self.
@@ -528,6 +538,10 @@ def test_record_stop_retorque_failure_keeps_session():
     assert resp.success is False
     assert node.on_manual is True   # limp-arm protection
     assert resp.sample_count == 2   # still reports what was captured
+    # The TAKE survives the failed re-lock (audit M1): returning data moves
+    # nothing, and discarding it made the student re-record a good motion.
+    parsed = json.loads(resp.points_json)
+    assert len(parsed['points']) == 2 and parsed['fps'] == 25
 
 
 def test_record_cancel_discards_and_clears_session():
@@ -720,6 +734,8 @@ def test_run_replay_retorque_failure_keeps_session_no_drive_no_clear():
     assert node._manual_transient_ops == 1   # ref retained (keep_session)
     assert node.published == []
     assert 'retorque' in node.torque_calls
+    # The abort is TOLD to the student, not only logged.
+    assert getattr(node, 'notices', []) and 'verriegelt' in node.notices[-1]
     # F3 — the SHARED stop-event must NOT be cleared when the drive is refused.
     assert node._manual_stop_event.is_set()
     assert node._manual_lock.acquire(blocking=False)  # lock released
@@ -763,6 +779,7 @@ def test_run_replay_aborts_on_exit_gen_mismatch_no_drive():
     assert node.published == []
     assert node._manual_stop_event.is_set()   # not cleared
     assert 'retorque' not in node.torque_calls  # never re-torqued
+    assert getattr(node, 'notices', []), 'aborted replay was silent'
     assert node._manual_transient_ops == 0    # ref released (aborted, not kept)
     assert node.on_manual is False
     assert node._manual_lock.acquire(blocking=False)
@@ -778,6 +795,7 @@ def test_run_replay_aborts_when_record_started_no_drive():
     _run_replay_inline(node, [([0.0] * 6, 0.1), ([0.1] * 6, 0.2)])
     assert node.published == []
     assert 'retorque' not in node.torque_calls
+    assert getattr(node, 'notices', []), 'aborted replay was silent'
     assert node._manual_transient_ops == 0    # transient ref released
     assert node.on_manual is True             # persistent record session stays open
 
@@ -805,6 +823,7 @@ def test_run_replay_aborts_when_beenden_lands_during_retorque_no_drive():
     _run_replay_inline(node, [([0.0] * 6, 0.1), ([0.1] * 6, 0.2)], exit_gen=5)
     assert node.published == [], 'drove the replay after „Beenden"'
     assert 'retorque' in node.torque_calls          # re-torque did run
+    assert getattr(node, 'notices', []), 'aborted replay was silent'
     assert node._manual_stop_event.is_set()         # abort did NOT clear it
     assert node._manual_transient_ops == 0          # ref released (aborted)
     assert node.on_manual is False
@@ -999,3 +1018,50 @@ def test_only_a_failed_switch_stores_a_reason():
     assert 'if not ok:' in window, (
         'the reason must be captured under a NOT-ok guard, or a successful '
         "switch's 'ok' message would surface to the student")
+
+
+def test_a_home_glide_is_refused_over_a_limp_hand_guided_arm():
+    # The glide is offered after a re-lock; a confirmed-limp arm means a
+    # hand-guide session was opened since (the student's hand may be on it).
+    node = _FakeNode(persistent=True)
+    node._follower_torque_on = False
+    resp = _CB['workshop_jog_callback'](node, _Req(mode='home', index=0, delta=0.0,
+                                                   target_x=0.0, target_y=0.0,
+                                                   target_z=0.0, duration_s=0.0),
+                                        _JogResp())
+    assert resp.success is False
+    assert 'Arm festsetzen' in resp.message
+    assert node.torque_calls == []          # never stiffened
+    assert node.published == []             # never driven
+
+
+def test_run_replay_rebuilds_the_lead_in_from_the_live_pose_after_the_retorque():
+    node = _FakeNode()
+    node._manual_transient_ops = 1
+    node._recompute_on_manual_locked()
+    order = []
+    node._retorque_follower_or_keep_locked = (
+        lambda response: order.append('retorque') or True)
+    fresh = [([0.9] * 6, 0.1)]
+
+    def _rebuild():
+        order.append('rebuild')
+        return fresh
+    node._manual_replay_thread = threading.current_thread()
+    _CB['_run_replay'](node, [([0.0] * 6, 0.1)], node._manual_exit_gen, _rebuild)
+    assert order == ['retorque', 'rebuild']          # AFTER owning + torquing the arm
+    assert node.published == fresh                   # the stale stream never drove
+
+
+def test_run_replay_tells_the_student_when_the_live_rebuild_refuses():
+    from physical_ai_server.workflow.handlers.motion import WorkflowError
+    node = _FakeNode()
+    node._manual_transient_ops = 1
+    node._recompute_on_manual_locked()
+
+    def _rebuild():
+        raise WorkflowError('Aktuelle Armstellung ist noch nicht bekannt.')
+    node._manual_replay_thread = threading.current_thread()
+    _CB['_run_replay'](node, [([0.0] * 6, 0.1)], node._manual_exit_gen, _rebuild)
+    assert node.published == []
+    assert node.notices and 'Armstellung' in node.notices[-1]

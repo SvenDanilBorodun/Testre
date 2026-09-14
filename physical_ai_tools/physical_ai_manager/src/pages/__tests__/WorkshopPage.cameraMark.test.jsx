@@ -35,11 +35,12 @@ vi.mock('react-redux', () => ({
 
 // ── BlocklyWorkspace: hands the page a FAKE workspace through the real
 //    onWorkspaceReady callback, as the live editor does after inject. ──
-const mockWorkspace = vi.hoisted(() => ({ current: null }));
+const mockWorkspace = vi.hoisted(() => ({ current: null, sammlungProvider: null }));
 vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
   __esModule: true,
   // Named + capitalized so react-hooks/rules-of-hooks recognizes it as a component.
-  default: function MockBlocklyWorkspace({ onWorkspaceReady }) {
+  default: function MockBlocklyWorkspace({ onWorkspaceReady, sammlungProvider }) {
+    mockWorkspace.sammlungProvider = sammlungProvider || null;
     React.useEffect(() => {
       if (onWorkspaceReady && mockWorkspace.current) onWorkspaceReady(mockWorkspace.current);
     }, [onWorkspaceReady]);
@@ -49,10 +50,11 @@ vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
 
 // ── Right-region components. RightDock renders ONLY the camera tab, so the
 //    page's real CameraFeedOverlay wiring is what the overlay mock captures. ──
+const mockDock = vi.hoisted(() => ({ openIds: null }));
 vi.mock('../../components/Workshop/RightDock', () => ({
   __esModule: true,
-  default: ({ tabs }) => (
-    <div data-testid="right-dock">
+  default: ({ tabs, openIds }) => (
+    <div data-testid="right-dock" ref={() => { mockDock.openIds = openIds; }}>
       {(tabs || [])
         .filter((t) => t.id === 'camera')
         .map((t) => (
@@ -264,6 +266,8 @@ async function mountWith(ws) {
 beforeEach(() => {
   mockState = baseState();
   mockOverlay.props = null;
+  mockWorkspace.sammlungProvider = null;
+  mockDock.openIds = null;
   mockDispatch.mockClear();
   mockStore.entries = [];
   mockStore.getEntries.mockClear();
@@ -371,5 +375,35 @@ describe('WorkshopPage — the camera click resolves ONE name for one point', ()
     act(() => { res = mockOverlay.props.onRenameMark('d_00000001', 'Kiste'); });
     expect(res.ok).toBe(false);
     expect(toast.error).toHaveBeenCalledWith('Der Name „Kiste" ist schon vergeben.');
+  });
+});
+
+describe('WorkshopPage — the Sammlung „Ziele" group points at the camera', () => {
+  test('the provider offers a camera Ziel only on a calibrated real rig', async () => {
+    await mountWith(makeWorkspace());
+    const provider = mockWorkspace.sammlungProvider;
+    expect(provider).not.toBeNull();
+    const snap = provider.getSnapshot();
+    expect(snap.capabilities).toMatchObject({
+      hardware: true, simMode: false, pinCamera: true, teach: false, drawer: false, preview: false,
+    });
+    expect(snap.robotType).toBe('omx_f');
+    expect(snap.trajectories.status).toBe('none');
+  });
+
+  test('„Ziel in der Kamera setzen" opens the Kamera tab and says where to click', async () => {
+    // A stored layout WITHOUT the camera tab (the default opens it).
+    window.localStorage.setItem('edubotics_workshop_dock_open', JSON.stringify(['control']));
+    try {
+      mockWorkspace.current = makeWorkspace();
+      render(<WorkshopPage isActive />);
+      await waitFor(() => expect(mockWorkspace.sammlungProvider).not.toBeNull());
+      await waitFor(() => expect(mockDock.openIds).toEqual(['control']));
+      act(() => { mockWorkspace.sammlungProvider.dispatchAction({ type: 'pinCamera' }); });
+      await waitFor(() => expect(mockDock.openIds).toEqual(['control', 'camera']));
+      expect(toast).toHaveBeenCalledWith(DE.FLY_PIN_CAMERA_HINT, { icon: '📷' });
+    } finally {
+      window.localStorage.removeItem('edubotics_workshop_dock_open');
+    }
   });
 });

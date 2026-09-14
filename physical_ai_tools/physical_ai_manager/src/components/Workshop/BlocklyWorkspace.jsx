@@ -27,6 +27,10 @@ import {
 import { registerCounterBlocks } from './blocks/counters';
 import { registerTrajectoryBlocks } from './blocks/trajectories';
 import { registerDestinationSerializer } from './sammlung/destinationStore';
+import { registerAssetCardInflater } from './sammlung/AssetCardInflater';
+import { registerSammlungCategories } from './sammlung/toolboxCategories';
+import { attachAssetReferenceValidators } from './sammlung/referenceValidators';
+import { EMPTY_SAMMLUNG_PROVIDER } from './sammlung/provider';
 
 let blocksRegistered = false;
 function registerAllBlocksOnce() {
@@ -44,6 +48,8 @@ function registerAllBlocksOnce() {
   // Explicit, never at module import: blocklyPayload.test.js pins the CORE
   // serializer inventory and page tests mock `blockly/core` minimally.
   registerDestinationSerializer();
+  // The Sammlung flyout card item (a registry CLASS, instantiated per flyout).
+  registerAssetCardInflater();
   blocksRegistered = true;
 }
 
@@ -273,6 +279,7 @@ function BlocklyWorkspace({
   onWorkspaceReady,
   readOnly = false,
   restrictedBlocks = null,
+  sammlungProvider = EMPTY_SAMMLUNG_PROVIDER,
 }) {
   const containerRef = useRef(null);
   const workspaceRef = useRef(null);
@@ -292,6 +299,12 @@ function BlocklyWorkspace({
   useEffect(() => {
     onWorkspaceReadyRef.current = onWorkspaceReady;
   }, [onWorkspaceReady]);
+  // The Sammlung provider is read through a ref at event time: a new provider
+  // (or a new snapshot) must never re-inject the editor.
+  const sammlungProviderRef = useRef(sammlungProvider || EMPTY_SAMMLUNG_PROVIDER);
+  useEffect(() => {
+    sammlungProviderRef.current = sammlungProvider || EMPTY_SAMMLUNG_PROVIDER;
+  }, [sammlungProvider]);
   // Injection waits for the plugin modules, so the toolbox is built from the
   // restriction current AT INJECT TIME, not the one captured when the effect
   // started (a tutorial step can change it in between).
@@ -375,6 +388,14 @@ function BlocklyWorkspace({
       // Same shape: flags blocks snapped under „wiederhole fortlaufend", which
       // can never run. Its disposer is called alongside the motion one below.
       const disposeControlValidators = attachControlWorkspaceValidators(workspace);
+      // The Sammlung toolbox groups (on EVERY workspace — an unregistered custom
+      // category key throws when opened) and the keyed missing-name warnings.
+      // Both read the provider through the ref at event time.
+      const disposeSammlung = registerSammlungCategories(workspace, sammlungProviderRef);
+      const disposeReferenceValidators = attachAssetReferenceValidators(
+        workspace,
+        sammlungProviderRef,
+      );
 
       initPlugins(workspace, plugins, { readOnly, hasInitialJson: !!initialJson });
 
@@ -439,6 +460,12 @@ function BlocklyWorkspace({
         try {
           disposeControlValidators();
         } catch (_) { /* already disposed */ }
+        try {
+          disposeSammlung();
+        } catch (_) { /* already disposed */ }
+        try {
+          disposeReferenceValidators();
+        } catch (_) { /* already disposed */ }
         workspace.dispose();
         workspaceRef.current = null;
         const readyFn = onWorkspaceReadyRef.current;
@@ -477,7 +504,14 @@ function BlocklyWorkspace({
   // floor on this div inside the page's overflow-hidden wrapper made Blockly
   // lay out for more height than was visible and draw the horizontal
   // scrollbar and the trash can into the clipped strip.
-  return <div ref={containerRef} className="w-full h-full" />;
+  //
+  // Blockly's toolbox is `position:absolute; z-index:70` and nothing above this
+  // div creates a stacking context, so without isolation the category column
+  // paints over the Sammlung drawer, the Vormachen overlay and the
+  // CollisionModal (measured in Chromium). Isolation keeps Blockly's internal
+  // z-indices inside the editor box; its WidgetDiv/DropDownDiv live on <body>
+  // and are unaffected.
+  return <div ref={containerRef} className="w-full h-full" style={{ isolation: 'isolate' }} />;
 }
 
 export default BlocklyWorkspace;

@@ -29,6 +29,9 @@ import { render, waitFor, act } from '@testing-library/react';
 import * as Blockly from 'blockly/core';
 import BlocklyWorkspace from '../BlocklyWorkspace';
 import { DE } from '../blocks/messages_de';
+import { SAMMLUNG_CATEGORY_KEYS } from '../blocks/toolbox';
+import { createSammlungProvider } from '../sammlung/provider';
+import { getDestinationStore } from '../sammlung/destinationStore';
 
 // jsdom has no ResizeObserver; capture instances so a test can fire one.
 const observers = [];
@@ -300,6 +303,16 @@ describe('BlocklyWorkspace — sizing', () => {
     unmount();
   });
 
+  it('the host isolates Blockly\'s stacking context', async () => {
+    // The toolbox is z-index 70 in the ROOT stacking context without it, and
+    // paints over the Sammlung drawer, the Vormachen overlay and the CollisionModal.
+    const { container, unmount } = await mountEditor();
+    expect(hostOf(container).style.isolation).toBe('isolate');
+    expect(hostOf(container).style.minHeight).toBe('');
+    expect(hostOf(container).className).not.toMatch(/min-h-/);
+    unmount();
+  });
+
   it('disconnects the observer and disposes the workspace on unmount', async () => {
     const { container, onWorkspaceReady, unmount } = await mountEditor();
     const host = hostOf(container);
@@ -317,6 +330,35 @@ describe('BlocklyWorkspace — sizing', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(onWorkspaceReady).not.toHaveBeenCalled();
     expect(findInDocument('.injectionDiv')).toBeNull();
+  });
+});
+
+describe('BlocklyWorkspace — Sammlung groups', () => {
+  it('registers the four Sammlung category callbacks on a read-only workspace', async () => {
+    const { ws, unmount } = await mountEditor({ readOnly: true });
+    for (const key of Object.values(SAMMLUNG_CATEGORY_KEYS)) {
+      expect(ws.getToolboxCategoryCallback(key)).toEqual(expect.any(Function));
+    }
+    unmount();
+  });
+
+  it('disposes the Sammlung listeners on unmount', async () => {
+    const provider = createSammlungProvider();
+    const unsubscribes = [];
+    const realSubscribe = provider.subscribe;
+    provider.subscribe = (fn) => {
+      const off = vi.fn(realSubscribe(fn));
+      unsubscribes.push(off);
+      return off;
+    };
+    const { ws, unmount } = await mountEditor({ sammlungProvider: provider });
+    // The toolbox groups and the reference warnings each follow the provider.
+    expect(unsubscribes).toHaveLength(2);
+    const store = getDestinationStore(ws);
+    expect(store.listeners_.size).toBe(2);
+    unmount();
+    unsubscribes.forEach((off) => expect(off).toHaveBeenCalledTimes(1));
+    expect(store.listeners_.size).toBe(0);
   });
 });
 

@@ -304,6 +304,72 @@ export const DE = {
   // lead-in refusal advises lifting the arm — impossible in a simulator.
   PREVIEW_LEAD_IN_BELOW_TABLE:
     'Die Aufnahme beginnt unter dem Tisch des Simulators — im Simulator kann sie nicht abgespielt werden.',
+  // Card ▶ aria-label (sammlung/AssetCardInflater.js); the buttons come later.
+  PREVIEW_START: 'Im Simulator ansehen',
+
+  // Sammlung toolbox groups (blocks/toolbox.js + sammlung/toolboxCategories.js).
+  CATEGORY_AUFNAHMEN: 'Aufnahmen',
+  CATEGORY_POSITIONEN: 'Positionen',
+  FLY_TEACH_RECORDING: '✋ Bewegung vormachen',
+  FLY_TEACH_POSE: '✋ Position vormachen',
+  FLY_TEACH_ZIEL: '✋ Ziel vormachen',
+  FLY_MANAGE: 'Alle verwalten …',
+  FLY_PIN_CAMERA: 'Ziel in der Kamera setzen',
+  FLY_PIN_SIM: 'Ziel auf den Sim-Tisch setzen',
+  FLY_PIN_CAMERA_HINT: 'Klicke ins Kamerabild, um ein Ziel zu setzen.',
+  FLY_SECTION_MISSING: 'Fehlt im Programm',
+  FLY_SECTION_PROGRAM: 'Im Programm gesetzt',
+  FLY_SECTION_YOURS: 'Deine Ziele',
+  FLY_RECORDINGS_COUNT: '%1 von 16',
+  FLY_RECORDINGS_LOADING: 'Aufnahmen werden geladen …',
+  FLY_RECORDINGS_ERROR: 'Aufnahmen konnten nicht geladen werden.',
+  FLY_RECORDINGS_EMPTY: 'Noch keine Aufnahmen.',
+  FLY_RECORDINGS_TEACHER: 'Aufnahmen gehören zu einem Schüler-Workflow.',
+  FLY_PLACES_EMPTY: 'Noch keine Ziele in deiner Sammlung.',
+  FLY_POSES_EMPTY: 'Noch keine Positionen.',
+  FLY_COUNT_VARIABLEN_ONE: '1 Variable',
+  FLY_COUNT_VARIABLEN: '%1 Variablen',
+  FLY_COUNT_ZIELE_ONE: '1 Ziel',
+  FLY_COUNT_ZIELE: '%1 Ziele',
+  FLY_COUNT_POSITIONEN_ONE: '1 Position',
+  FLY_COUNT_POSITIONEN: '%1 Positionen',
+
+  // Sammlung cards: second line, chips, robot labels (sammlung/assetIndex.js,
+  // sammlung/format.js).
+  CARD_MANAGE: 'Verwalten',
+  CARD_RECORDING_META: '%1 s · %2 Punkte',
+  CARD_PLACE_META: 'x %1 · y %2 mm · %3',
+  CARD_POSE_META: 'z %1 mm · %2',
+  ROBOT_SHORT_OMX: 'OMX',
+  ROBOT_SHORT_EDU6: '6-Achs',
+  ROBOT_SHORT_EDU1: 'Edu:1',
+  ROBOT_LABEL_OMX: 'OpenMANIPULATOR-X',
+  ROBOT_LABEL_EDU6: 'EduBotics 6-Achs',
+  ROBOT_LABEL_EDU1: 'Edu:1',
+  CARD_SOURCE_CAMERA: 'Kamera',
+  CARD_SOURCE_SIM: 'Sim-Tisch',
+  CARD_SOURCE_TOUCH: 'am Tisch',
+  CARD_SOURCE_CAPTURE: 'gemessen',
+  CARD_PROGRAM_PIN_META: 'im Programm · x %1 · y %2 mm',
+  CARD_VARIABLE_NO_VALUE: 'noch kein Wert',
+  CARD_VARIABLE_VALUE: '%1 · vor %2 s',
+  CHIP_USED: '%1× benutzt',
+  CHIP_UNUSED: 'nicht benutzt',
+  CHIP_VERSIONS: '%1 Versionen',
+  CHIP_MISSING: 'fehlt',
+  CHIP_SEARCHED_ONE_RECORDING: '1 Block sucht diese Aufnahme',
+  CHIP_SEARCHED_MANY_RECORDING: '%1 Blöcke suchen diese Aufnahme',
+  CHIP_OTHER_ROBOT: 'anderer Roboter',
+  CHIP_OVERRIDDEN: 'im Programm überschrieben',
+  CHIP_SIM_REFUSED: 'im Simulator abgelehnt',
+  CHIP_UNREACHABLE: 'nicht erreichbar',
+
+  // Keyed canvas warnings for names the program uses but the workflow does not
+  // have (sammlung/referenceValidators.js).
+  WARN_MISSING_RECORDING:
+    'Eine Aufnahme „%1" gibt es in diesem Workflow nicht. Nimm sie auf oder wähle eine vorhandene.',
+  WARN_MISSING_DESTINATION:
+    '„%1" ist nicht in deiner Sammlung — lege das Ziel neu an oder wähle ein vorhandenes.',
 };
 
 /**

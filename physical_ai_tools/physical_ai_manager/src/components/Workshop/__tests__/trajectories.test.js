@@ -18,7 +18,7 @@ import {
   collectReplayNames,
   REPLAY_BLOCK_TYPE,
 } from '../blocks/trajectories';
-import { buildToolbox } from '../blocks/toolbox';
+import { buildToolbox, SAMMLUNG_BASE_BLOCKS, SAMMLUNG_CATEGORY_KEYS } from '../blocks/toolbox';
 
 describe('replay-trajectory block', () => {
   beforeAll(() => {
@@ -56,9 +56,14 @@ describe('replay-trajectory block', () => {
     }
   });
 
-  test('the replay block is present in the built toolbox (Bewegung)', () => {
-    const json = JSON.stringify(buildToolbox());
-    expect(json).toContain(REPLAY_BLOCK_TYPE);
+  // The replay block left the static „Bewegung" category: the „Aufnahmen"
+  // group offers it (prefilled per recording, generic otherwise). That the
+  // flyout really emits it is pinned in sammlung/__tests__/toolboxCategories.test.jsx.
+  test('the replay block is offered by the Aufnahmen group', () => {
+    expect(SAMMLUNG_BASE_BLOCKS).toContainEqual({ kind: 'block', type: REPLAY_BLOCK_TYPE });
+    const categories = buildToolbox().contents;
+    expect(categories.some((c) => c.custom === SAMMLUNG_CATEGORY_KEYS.AUFNAHMEN)).toBe(true);
+    expect(JSON.stringify(buildToolbox())).not.toContain(REPLAY_BLOCK_TYPE);
   });
 });
 

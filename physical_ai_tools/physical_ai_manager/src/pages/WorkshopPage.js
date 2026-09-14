@@ -8,7 +8,7 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useEffect, useState, useCallback, useRef, Suspense, lazy } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef, Suspense, lazy } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast, { useToasterStore } from 'react-hot-toast';
 import * as Blockly from 'blockly/core';
@@ -40,6 +40,9 @@ import {
   nextAutoName,
   takenDestinationNames,
 } from '../components/Workshop/sammlung/destinationStore';
+import { createSammlungProvider } from '../components/Workshop/sammlung/provider';
+import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
+import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
 import { slimSavePayload } from '../utils/blocklyPayload';
 import {
@@ -49,7 +52,11 @@ import {
   requestRecalibration,
   setDebuggerVisible,
 } from '../features/workshop/workshopSlice';
-import { fetchTrajectories } from '../features/workshop/studioAssetsSlice';
+import {
+  fetchTrajectories,
+  selectLastPreviewResult,
+  selectTrajectoryList,
+} from '../features/workshop/studioAssetsSlice';
 import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
 import { useRosTopicSubscription } from '../hooks/useRosTopicSubscription';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
@@ -266,6 +273,11 @@ function WorkshopPage({ isActive }) {
   // cross-student autosave bleed.
   const userId = useSelector((s) => s.auth?.session?.user?.id || null);
   const restrictedBlocks = useSelector((s) => s.workshop.restrictedBlocks);
+  // Sammlung toolbox groups: what the flyouts and the reference warnings read.
+  const trajectoryList = useSelector(selectTrajectoryList);
+  const lastPreviewResult = useSelector(selectLastPreviewResult);
+  const variableValues = useSelector((s) => (s.workshop && s.workshop.variables) || null);
+  const debuggerWarnings = useSelector((s) => (s.workshop ? s.workshop.debuggerWarnings : null));
   const activeTutorialId = useSelector((s) => s.workshop.activeTutorialId);
 
   const [editorJson, setEditorJson] = useState(null);
@@ -949,6 +961,51 @@ function WorkshopPage({ isActive }) {
   useEffect(() => { refetchTrajectories(); }, [refetchTrajectories, hasAccessToken]);
   useRefetchOnFocus(isActive ? refetchTrajectories : null);
 
+  // The Sammlung provider: ONE object for the page's lifetime (BlocklyWorkspace
+  // reads it through a ref), fed a snapshot of the rig and the recording list.
+  const sammlungProvider = useMemo(() => createSammlungProvider(), []);
+  useEffect(() => {
+    sammlungProvider.setSnapshot({
+      capabilities: {
+        hardware: true,
+        simMode,
+        teach: false,
+        drawer: false,
+        preview: false,
+        previewVariables: false,
+        pinCamera: !!calibrated && !simMode,
+        pinSim: false,
+      },
+      robotType: robotType || '',
+      trajectories: {
+        status: (trajectoryList && trajectoryList.status) || 'none',
+        items: (trajectoryList && Array.isArray(trajectoryList.items)) ? trajectoryList.items : [],
+      },
+      lastPreviewResult: lastPreviewResult || {},
+      variableValues: variableValues || {},
+      restrictedBlocks: Array.isArray(restrictedBlocks) ? restrictedBlocks : null,
+    });
+  }, [sammlungProvider, simMode, calibrated, robotType, trajectoryList, lastPreviewResult,
+    variableValues, restrictedBlocks]);
+  useEffect(() => {
+    sammlungProvider.setActionHandler((action) => {
+      if (!action || typeof action !== 'object') return;
+      if (action.type === 'pinCamera') {
+        setDockCollapsed(false);
+        setDockOpen((prev) => (prev.includes('camera') ? prev : addOpenTab(prev, 'camera', isTabBusy)));
+        toast(DE.FLY_PIN_CAMERA_HINT, { icon: '📷' });
+      } else if (action.type === 'jumpToBlock') {
+        jumpToBlock(workspaceRef.current, action.blockId);
+      }
+      // teach / manage / preview / pinSim / highlight: wired by their own work packages.
+    });
+  }, [sammlungProvider, isTabBusy]);
+  // RunControls writes its IK pre-check warnings UNKEYED; re-apply the keyed
+  // missing-name warnings after each change (forced — the validator caches).
+  useEffect(() => {
+    if (workspace) refreshAssetReferenceWarnings(workspace, { force: true });
+  }, [debuggerWarnings, workspace]);
+
   if (!isActive) return null;
 
   // Per-panel gating (same rules as before — the panels just moved into the dock).
@@ -1304,6 +1361,7 @@ function WorkshopPage({ isActive }) {
                         onChange={handleEditorChange}
                         onWorkspaceReady={handleWorkspaceReady}
                         restrictedBlocks={restrictedBlocks}
+                        sammlungProvider={sammlungProvider}
                       />
                     </div>
                   </div>

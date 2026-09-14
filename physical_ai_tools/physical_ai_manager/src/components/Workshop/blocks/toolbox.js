@@ -25,6 +25,41 @@ function textShadow(value) {
   return { shadow: { type: 'text', fields: { TEXT: value } } };
 }
 
+// The Sammlung groups: dynamic categories whose flyouts are built per open by
+// `sammlung/toolboxCategories.js` from the destination store, the recording
+// list and the workspace variables. Every workspace registers their callbacks
+// (an unregistered custom key throws when its category is opened).
+export const SAMMLUNG_CATEGORY_KEYS = Object.freeze({
+  VARIABLEN: 'EDU_SAMMLUNG_VARIABLEN',
+  AUFNAHMEN: 'EDU_SAMMLUNG_AUFNAHMEN',
+  ZIELE: 'EDU_SAMMLUNG_ZIELE',
+  POSITIONEN: 'EDU_SAMMLUNG_POSITIONEN',
+});
+
+export const SAMMLUNG_TOOLBOX_IDS = Object.freeze({
+  VARIABLEN: 'sammlung-variablen',
+  AUFNAHMEN: 'sammlung-aufnahmen',
+  ZIELE: 'sammlung-ziele',
+  POSITIONEN: 'sammlung-positionen',
+});
+
+// The blocks that left the static toolbox. The dynamic flyouts always emit
+// each of them (generic or prefilled), so coverage tests union this list.
+export const SAMMLUNG_BASE_BLOCKS = Object.freeze([
+  { kind: 'block', type: 'edubotics_destination_pin' },
+  { kind: 'block', type: 'edubotics_destination_ref' },
+  { kind: 'block', type: 'edubotics_destination_current' },
+  { kind: 'block', type: 'edubotics_replay_trajectory' },
+]);
+
+// Order and colours of the four groups (below the separator).
+const SAMMLUNG_CATEGORIES = Object.freeze([
+  { key: 'VARIABLEN', nameKey: 'CATEGORY_VARIABLEN', colour: '#a78bfa' },
+  { key: 'AUFNAHMEN', nameKey: 'CATEGORY_AUFNAHMEN', colour: '#3b82f6' },
+  { key: 'ZIELE', nameKey: 'CATEGORY_ZIELE', colour: '#f59e0b' },
+  { key: 'POSITIONEN', nameKey: 'CATEGORY_POSITIONEN', colour: '#14b8a6' },
+]);
+
 // Build a category that can be hidden when the parent supplies a
 // `restrictedBlocks` set (used by tutorials in phase 3). When the
 // restriction list is empty, every block in the category is shown.
@@ -63,8 +98,8 @@ export function buildToolbox(restrictedBlocks = null) {
       type: 'edubotics_wait_seconds',
       inputs: { SECONDS: numberShadow(1) },
     },
-    // Batch 2b — replay a recorded hand-guided motion by name.
-    { kind: 'block', type: 'edubotics_replay_trajectory' },
+    // The replay block moved to the dynamic „Aufnahmen" group
+    // (SAMMLUNG_BASE_BLOCKS below), where it is offered prefilled per recording.
   ], restricted);
 
   // Named-object AprilTag grasping (dropdown fed by the runtime catalog).
@@ -97,11 +132,8 @@ export function buildToolbox(restrictedBlocks = null) {
     { kind: 'block', type: 'edubotics_when_counter_gt' },
   ], restricted);
 
-  const destinations = filterContents([
-    { kind: 'block', type: 'edubotics_destination_pin' },
-    { kind: 'block', type: 'edubotics_destination_ref' },
-    { kind: 'block', type: 'edubotics_destination_current' },
-  ], restricted);
+  // The three destination blocks live in the dynamic „Ziele"/„Positionen"
+  // groups (SAMMLUNG_BASE_BLOCKS below).
 
   const logic = filterContents([
     { kind: 'block', type: 'controls_if' },
@@ -244,12 +276,6 @@ export function buildToolbox(restrictedBlocks = null) {
     },
     {
       kind: 'category',
-      name: DE.CATEGORY_ZIELE,
-      colour: '#f59e0b',
-      contents: destinations,
-    },
-    {
-      kind: 'category',
       name: DE.CATEGORY_LOGIK,
       colour: '#eab308',
       contents: logic,
@@ -259,12 +285,6 @@ export function buildToolbox(restrictedBlocks = null) {
       name: DE.CATEGORY_LISTE,
       colour: '#0ea5e9',
       contents: lists,
-    },
-    {
-      kind: 'category',
-      name: DE.CATEGORY_VARIABLEN,
-      colour: '#a78bfa',
-      custom: 'VARIABLE',
     },
     {
       kind: 'category',
@@ -296,10 +316,22 @@ export function buildToolbox(restrictedBlocks = null) {
       colour: '#0891b2',
       contents: counters,
     },
+    // The student's own things. A categoryToolbox has no label item, so a
+    // separator is the only heading there is.
+    { kind: 'sep' },
+    ...SAMMLUNG_CATEGORIES.map((c) => ({
+      kind: 'category',
+      name: DE[c.nameKey],
+      colour: c.colour,
+      custom: SAMMLUNG_CATEGORY_KEYS[c.key],
+      toolboxitemid: SAMMLUNG_TOOLBOX_IDS[c.key],
+    })),
   ].filter((c) => {
-    // Keep dynamic categories regardless; drop static categories with
-    // no remaining contents (happens when restrictedBlocks is set).
-    if (c.custom) return true;
+    // Keep dynamic categories and the separator regardless (the separator is
+    // always followed by the four Sammlung categories, which are custom and
+    // never dropped); drop static categories with no remaining contents
+    // (happens when restrictedBlocks is set).
+    if (c.custom || c.kind === 'sep') return true;
     return Array.isArray(c.contents) && c.contents.length > 0;
   });
 

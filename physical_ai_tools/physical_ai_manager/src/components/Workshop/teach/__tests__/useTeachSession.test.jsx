@@ -1054,6 +1054,22 @@ describe('useTeachSession', () => {
       expect(h.count('handGuide', false)).toBe(1); // unmount does not tear down twice
     });
 
+    it('Esc offline with a keepalive in flight closes only after the keepalive answered', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.advance(15000);
+      expect(h.count('handGuide', true)).toBe(2);
+      const keepalive = h.last('handGuide');
+      h.rerender({ heartbeatOk: false });
+      await h.press('Escape');
+      expect(h.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: true, relockOk: false, offline: true });
+      expect(h.count('handGuide', false)).toBe(0);
+      await h.resolve(keepalive, { success: true });
+      expect(h.count('handGuide', false)).toBe(1);
+      h.unmount();
+      expect(h.count('handGuide', false)).toBe(1);
+    });
+
     it('a thrown hand_guide(false) during finish closes offline', async () => {
       const h = setup();
       await toFrei(h);
@@ -1208,6 +1224,48 @@ describe('useTeachSession', () => {
       await p.resolve(start, { success: true });
       expect(p.count('recordControl', 'cancel')).toBe(1);
       p.unmount();
+    });
+
+    // A keepalive IS a hand_guide(true): a teardown false completing inside
+    // its server claim-to-lock window leaves the arm limp with on_manual False.
+    it('unmount with a keepalive in flight waits for it, then closes once', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.advance(15000);
+      expect(h.count('handGuide', true)).toBe(2);
+      const keepalive = h.last('handGuide');
+      h.unmount();
+      expect(h.count('handGuide', false)).toBe(0);
+      await h.resolve(keepalive, { success: true });
+      expect(h.count('handGuide', false)).toBe(1);
+      expect(h.count('handGuide', true)).toBe(2);
+    });
+
+    it('pagehide with a keepalive in flight waits for it, then closes once', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.advance(15000);
+      const keepalive = h.last('handGuide');
+      act(() => { window.dispatchEvent(new Event('pagehide')); });
+      expect(h.count('handGuide', false)).toBe(0);
+      await h.resolve(keepalive, { success: true });
+      expect(h.count('handGuide', false)).toBe(1);
+      h.unmount();
+      expect(h.count('handGuide', false)).toBe(1);
+    });
+
+    it('a keepalive still QUEUED at teardown is never sent, and the close waits', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.advance(14800);
+      await h.press('p'); // capture in flight across the 15 s tick
+      await h.advance(400); // keepalive queued behind it
+      expect(h.count('handGuide', true)).toBe(1);
+      h.unmount();
+      expect(h.count('handGuide', false)).toBe(0);
+      await h.resolve(h.last('capturePose'), { success: true });
+      expect(h.count('handGuide', true)).toBe(1);
+      expect(h.count('handGuide', false)).toBe(1);
     });
 
     it('a start still QUEUED at teardown is never sent', async () => {

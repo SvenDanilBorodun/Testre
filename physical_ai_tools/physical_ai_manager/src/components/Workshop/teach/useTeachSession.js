@@ -548,23 +548,34 @@ export function createTeachEngine(getProps, publish) {
     if (!p.enabled || r.tornDown || r.state !== 'frei' || r.relock === 'failed'
         || p.heartbeatOk === false || r.keepaliveStopped || r.keepaliveQueued) return;
     r.keepaliveQueued = true;
+    // A keepalive IS a hand_guide(true), so it counts as a pending start: the
+    // server claims `_manual_persistent` BEFORE it waits for `_manual_lock`,
+    // and a teardown hand_guide(false) completing inside that window is undone
+    // by the keepalive (arm limp, on_manual False, idle watchdog inert).
+    // Teardown therefore chains behind it exactly like behind a record start.
+    r.pendingStart += 1;
+    const done = () => { r.pendingStart -= 1; };
     enqueue(async () => {
-      r.keepaliveQueued = false;
-      if (r.state !== 'frei' || r.relock === 'failed' || r.keepaliveStopped) return;
-      let res;
       try {
-        res = await call('handGuide', true);
-      } catch (_) {
-        return; // the heartbeat owns „offline"; the next tick retries
+        r.keepaliveQueued = false;
+        if (r.state !== 'frei' || r.relock === 'failed' || r.keepaliveStopped) return;
+        let res;
+        try {
+          res = await call('handGuide', true);
+        } catch (_) {
+          return; // the heartbeat owns „offline"; the next tick retries
+        }
+        if (res && res.success === false) {
+          // e.g. another tab turned the leader on: the server stamps activity
+          // BEFORE its leader check, so a refused keepalive still re-locks here.
+          r.keepaliveStopped = true;
+          if (res.message) notify('onError', res.message);
+          lock();
+        }
+      } finally {
+        done();
       }
-      if (res && res.success === false) {
-        // e.g. another tab turned the leader on: the server stamps activity
-        // BEFORE its leader check, so a refused keepalive still re-locks here.
-        r.keepaliveStopped = true;
-        if (res.message) notify('onError', res.message);
-        lock();
-      }
-    }, { onSkip: () => { r.keepaliveQueued = false; } });
+    }, { onSkip: () => { r.keepaliveQueued = false; done(); } });
   }
 
   // ---- leader turned on while teaching by hand --------------------------
@@ -740,8 +751,9 @@ export function createTeachEngine(getProps, publish) {
 
   // ---- teardown (unmount, pagehide, offline close) ----------------------
 
-  // Fire-and-forget. A start still queued or in flight is WAITED for (chained
-  // onto the queue tail): an immediate cancel racing a start is exactly the
+  // Fire-and-forget. A start still queued or in flight — a keepalive
+  // hand_guide(true) included — is WAITED for (chained onto the queue tail):
+  // an immediate cancel racing a start is exactly the
   // ordering that left the arm limp with on_manual False. A page killed before
   // the chained call is sent falls back to the server's own limits (the 30 s
   // idle watchdog, RECORD_MAX_S).

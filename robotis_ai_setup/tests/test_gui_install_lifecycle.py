@@ -46,6 +46,7 @@ the regression guard, and re-introducing a flag-first branch must fail them.
 import contextlib
 import os
 import re
+import shutil
 import sys
 import tempfile
 import textwrap
@@ -64,6 +65,7 @@ _GUI_SRC = os.path.join(os.path.dirname(__file__), "..", "gui", "app", "gui_app.
 _SCRIPTS = os.path.join(os.path.dirname(__file__), "..", "installer", "scripts")
 _FINALIZE_PS1 = os.path.join(_SCRIPTS, "finalize_install.ps1")
 _IMPORT_PS1 = os.path.join(_SCRIPTS, "import_edubotics_wsl.ps1")
+_VIRT_PS1 = os.path.join(_SCRIPTS, "virtualization_ready.ps1")
 
 
 def _read(path, encoding="utf-8"):
@@ -95,6 +97,25 @@ def _ps1_exit_codes(path):
         for m in re.finditer(r"^\$EXIT_([A-Z]+)\s*=\s*(\d+)",
                              _read(path, encoding="utf-8-sig"), re.M)
     }
+
+
+def _ps1_function_body(code, name):
+    """Body of `function <name> { ... }` from (comment-stripped) .ps1 source.
+
+    Brace-counting, not a regex: these bodies contain nested `try`/`foreach`
+    blocks, and a lazy `.*?\}` would stop at the first inner closing brace and
+    silently shrink the window an ordering assertion is made inside."""
+    start = code.index("function %s {" % name)
+    i = code.index("{", start)
+    depth = 0
+    for j in range(i, len(code)):
+        if code[j] == "{":
+            depth += 1
+        elif code[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[i:j + 1]
+    raise AssertionError("unbalanced braces in %s" % name)
 
 
 def _module_fn_src(name):
@@ -259,7 +280,8 @@ class PromptFinalizeInstallTest(unittest.TestCase):
 
     def _make(self, *, reason=None, consent=True, elevate=(0, False, None),
               reboot_pending=False, distro_registered=True, script="finalize.ps1",
-              marker=None, marker_encoding="utf-8-sig", marker_as_dir=False):
+              marker=None, marker_encoding="utf-8-sig", marker_as_dir=False,
+              transcript=None):
         calls = {"elevate": [], "log": [], "status": [], "prereq": 0,
                  "showinfo": [], "showwarning": [], "showerror": [],
                  "askyesno": [], "fallback": []}
@@ -280,6 +302,18 @@ class PromptFinalizeInstallTest(unittest.TestCase):
             # the cheapest reproduction of an OSError that is NOT
             # FileNotFoundError (IsADirectoryError on POSIX, PermissionError on
             # Windows). See test_an_unreadable_marker_path_cannot_raise.
+            # Stand in for finalize_install.ps1's Start-Transcript. Taken out of
+            # the command line the GUI actually built, like the marker, so a
+            # rename of -LogPath breaks the fixture instead of silently leaving
+            # the transcript branch unexercised — which is exactly the state this
+            # harness was in: no fixture ever created the log file, so the
+            # _transcript_excerpt call inside _run_elevated was never executed and
+            # a NameError there would have shipped.
+            if transcript is not None:
+                m = re.search(r'-LogPath "([^"]+)"', args)
+                assert m, f"no -LogPath in the built args: {args}"
+                with open(m.group(1), "w", encoding="utf-8") as fh:
+                    fh.write(transcript)
             if marker_as_dir:
                 m = re.search(r'-MarkerPath "([^"]+)"', args)
                 assert m, f"no -MarkerPath in the built args: {args}"
@@ -322,6 +356,10 @@ class PromptFinalizeInstallTest(unittest.TestCase):
         }
         # The real exit-code constants, not literals — see _gui_exit_codes().
         ns.update(_gui_exit_codes())
+        # The REAL _transcript_excerpt, exec'd from gui_app.py: _load_method only
+        # execs the method, so a module-level helper it calls must be supplied or
+        # the call site raises NameError at runtime and never in the suite.
+        exec(compile(_module_fn_src("_transcript_excerpt"), _GUI_SRC, "exec"), ns)
         method = _load_method("_prompt_finalize_install", ns)
         owner = types.SimpleNamespace(
             _resolve_finalize_script=lambda: script,
@@ -431,6 +469,76 @@ class PromptFinalizeInstallTest(unittest.TestCase):
                         f"expected the re-run-the-installer remedy: {calls['log']}")
         self.assertTrue(calls["showwarning"], "student needs a modal, not just a log line")
         self.assertTrue(any("Neuaufbau" in s for s in calls["status"]))
+
+    def test_the_transcript_excerpt_call_site_actually_resolves(self):
+        """Walk the transcript branch of _run_elevated for real.
+
+        Every other test here leaves the log file absent, so `os.path.isfile`
+        short-circuits and the excerpt call is never executed. A source grep
+        cannot see a NameError; this does."""
+        header = ("**********************\n"
+                  "Benutzername: SCHULE\\schueler01\n"
+                  "Computer: PC-RAUM-12 (Microsoft Windows NT 10.0.26100.0)\n"
+                  "WSManStackVersion: 3.0\n"
+                  "**********************\n")
+        body = header + "".join(f"Zeile {i}\n" for i in range(120))
+        method, owner, calls = self._make(
+            elevate=(1, False, None), reboot_pending=True, transcript=body)
+        self._run(method, owner)
+        logged = "\n".join(calls["log"])
+        self.assertIn("── Setup-Protokoll ──", logged)
+        self.assertIn("Benutzername: SCHULE\\schueler01", logged,
+                      "the invocation header must reach the Protokoll — that is "
+                      "the whole point of the head half")
+        self.assertIn("Zeile 119", logged, "the tail must still be the tail")
+        self.assertNotIn("WSManStackVersion", logged,
+                         "and the noise must still be dropped")
+        self.assertTrue(any("ausgelassen" in m for m in calls["log"]))
+
+    # Outcome 6/6 (2026-09-11): the PC has no usable hypervisor. Rebooting MIGHT
+    # fix it and enabling VT-x in the BIOS/UEFI might be what is actually needed —
+    # `wsl` reports the same HCS_E_SERVICE_NOT_AVAILABLE for both — so the student
+    # gets both remedies, reboot first. Before this code existed the outcome fell
+    # into the generic else: "Einrichtung fehlgeschlagen (exit 1)" plus advice to
+    # check free disk space, on a machine whose 20 GB precheck had just passed.
+    def test_exit11_shows_the_virtualization_remedy(self):
+        method, owner, calls = self._make(
+            elevate=(11, False, None), reboot_pending=True,
+            distro_registered=False)
+        self._run(method, owner)
+        self.assertEqual(calls["prereq"], 0)  # did NOT proceed
+        self.assertTrue(calls["showwarning"],
+                        "the student needs a modal, not only a log line")
+        self.assertEqual(calls["showinfo"], [],
+                         "must NOT reuse the plain reboot modal — the BIOS half "
+                         "of the remedy would be lost")
+        joined = " ".join(calls["log"])
+        self.assertIn("Virtualisierung", joined)
+        self.assertIn("BIOS/UEFI", joined,
+                      "the second remedy must be named; a student cannot reboot "
+                      "their way out of a disabled BIOS setting")
+        self.assertIn("neu starten", joined,
+                      "the FREE remedy must still be offered, and first")
+        self.assertFalse(
+            any("fehlgeschlagen" in m for m in calls["log"]),
+            "this must not read as a generic failure — it has two concrete "
+            "remedies")
+        self.assertTrue(any("Virtualisierung" in st for st in calls["status"]))
+
+    def test_exit11_is_not_mistaken_for_a_plain_reboot(self):
+        """10 and 11 must stay distinguishable at the GUI.
+
+        Folding 11 into the reboot branch is the tempting simplification and it
+        is wrong: the reboot modal never mentions the BIOS, so a student on a
+        VT-x-disabled PC would reboot forever."""
+        m10, o10, reboot_calls = self._make(elevate=(10, False, None),
+                                           reboot_pending=True)
+        self._run(m10, o10)
+        m11, o11, virt_calls = self._make(elevate=(11, False, None),
+                                          reboot_pending=True)
+        self._run(m11, o11)
+        self.assertNotIn("BIOS", " ".join(reboot_calls["log"]))
+        self.assertIn("BIOS", " ".join(virt_calls["log"]))
 
     # Outcome 5/5: the student refused the UAC prompt. Checked FIRST, before any
     # exit code (there is no exit code to read).
@@ -1001,7 +1109,8 @@ class FinalizeExitContractTest(unittest.TestCase):
         gui = _gui_exit_codes()
         for short, long in (("DONE", "FINALIZE_EXIT_DONE"),
                             ("REBOOT", "FINALIZE_EXIT_REBOOT"),
-                            ("CONSENT", "FINALIZE_EXIT_CONSENT")):
+                            ("CONSENT", "FINALIZE_EXIT_CONSENT"),
+                            ("VIRT", "FINALIZE_EXIT_VIRT")):
             self.assertIn(short, ps1, f"$EXIT_{short} missing from finalize_install.ps1")
             self.assertIn(long, gui, f"{long} missing from gui_app.py")
             self.assertEqual(
@@ -1016,6 +1125,10 @@ class FinalizeExitContractTest(unittest.TestCase):
             "FINALIZE_EXIT_DONE": 0,
             "FINALIZE_EXIT_REBOOT": 10,
             "FINALIZE_EXIT_CONSENT": 12,
+            # 11 = no usable hypervisor. Its own code because "reboot" and
+            # "enable virtualization in the BIOS/UEFI" are different remedies
+            # and a student cannot reboot their way out of the second.
+            "FINALIZE_EXIT_VIRT": 11,
         })
 
     def test_failed_code_is_distinct_from_the_routed_ones(self):
@@ -1024,7 +1137,8 @@ class FinalizeExitContractTest(unittest.TestCase):
         # EXIT_FAILED has no GUI mirror on purpose — it is the else branch. It
         # must not collide with a code that routes somewhere specific.
         self.assertNotIn(ps1["FAILED"],
-                         [ps1["DONE"], ps1["REBOOT"], ps1["CONSENT"]])
+                         [ps1["DONE"], ps1["REBOOT"], ps1["CONSENT"],
+                          ps1["VIRT"]])
 
     def test_import_consent_refusal_code_matches_finalize(self):
         # import_edubotics_wsl.ps1 emits the bare literal `exit 12`; finalize
@@ -1035,6 +1149,37 @@ class FinalizeExitContractTest(unittest.TestCase):
             import_src, rf"(?m)^\s*exit {consent}\s*$",
             f"import_edubotics_wsl.ps1 no longer exits {consent} on a refused "
             f"destructive re-import — finalize's $EXIT_CONSENT mapping is dead")
+
+    def test_import_hypervisor_refusal_code_matches_finalize(self):
+        """import classifies the dead-hypervisor failure itself and exits 11.
+
+        Mirrors test_import_consent_refusal_code_matches_finalize: import emits a
+        bare literal, finalize keys $EXIT_VIRT off that exact number. This is the
+        BACKSTOP for a verdict of Unknown — the pre-import gate proceeds without
+        proof by design, so if nothing downstream classified the real failure the
+        2026-09-07 outcome (a hypervisor fault reported as a disk/AV problem)
+        comes straight back."""
+        import_src = _read(_IMPORT_PS1, encoding="utf-8-sig")
+        virt = _ps1_exit_codes(_FINALIZE_PS1)["VIRT"]
+        self.assertRegex(
+            import_src, rf'if \(\$failClass -eq "hypervisor"\) \{{ exit {virt} \}}',
+            "import must exit the same code finalize propagates as $EXIT_VIRT")
+        fin = _read(_FINALIZE_PS1, encoding="utf-8-sig")
+        self.assertIn(
+            "if ($importRc -eq $EXIT_VIRT) {", fin,
+            "finalize must PROPAGATE import's hypervisor refusal, not flatten it "
+            "into $EXIT_FAILED — the GUI shows the remedy as its own message")
+
+    def test_the_consent_branch_is_matched_before_the_virt_branch(self):
+        """Both branches read $importRc; the CONSENT one must come first.
+
+        test_finalize_consent_branch_actually_exits_the_consent_code regexes the
+        FIRST `if ($importRc -eq N)` block in the file, so ordering them the other
+        way round would make that guard assert against the wrong branch and pass
+        vacuously. Pin the order rather than leaving it to luck."""
+        src = _read(_FINALIZE_PS1, encoding="utf-8-sig")
+        self.assertLess(src.index("if ($importRc -eq 12) {"),
+                        src.index("if ($importRc -eq $EXIT_VIRT) {"))
 
     def test_every_reboot_announcement_exits_the_reboot_code(self):
         """Telling the student to reboot and exiting a non-reboot code is the N1
@@ -1681,23 +1826,42 @@ class RootCauseGuardTest(unittest.TestCase):
             "the flag's mere existence must NOT mean 'a reboot is pending' — "
             "finalize keeps it set on every unfinished outcome, including a "
             "hard failure, so this branch would exit 0 over a broken install")
-        self.assertIn(
-            "LastBootUpTime", code,
-            "must discriminate flag-mtime vs last-boot-time, not existence")
+        # The TIME comparison itself moved into virtualization_ready.ps1 on
+        # 2026-09-11, because finalize_install.ps1 had a DIFFERENT answer to the
+        # same question and the weaker one guarded the import. What this file
+        # must now prove is that it ASKS the shared predicate rather than
+        # growing a third opinion.
         self.assertRegex(
-            code, r"\$rebootPending\s*=\s*\(\$bootTime\s+-le\s+\$flagTime\)",
-            "pending means: no boot has happened since the flag was written")
+            code, r"\$rebootPending\s*=\s*Test-RebootOutstanding\s+-State",
+            "verify must consume the SHARED predicate, not re-derive it")
+        self.assertIn("virtualization_ready.ps1", code,
+                      "verify must dot-source the one predicate file")
+        self.assertNotIn(
+            "LastBootUpTime", code,
+            "a SECOND copy of the boot-time comparison is the defect this "
+            "change removed — ask Test-RebootOutstanding instead")
 
     def test_verify_unreadable_clock_reports_failed_not_pending(self):
         code = self._code("verify_system.ps1")
         init = re.search(r"\$rebootPending\s*=\s*\$false", code)
         self.assertIsNotNone(
-            init, "$rebootPending must DEFAULT to $false so a throwing "
-                  "Get-CimInstance/Get-Item reports FAILED — the safe "
-                  "direction — instead of a benign pending reboot")
+            init, "$rebootPending must DEFAULT to $false so an unreadable clock "
+                  "(or an absent helper) reports FAILED — the safe direction — "
+                  "instead of a benign pending reboot")
         self.assertLess(
-            init.start(), code.index("LastBootUpTime"),
-            "the $false default must precede the probe it guards")
+            init.start(), code.index("Test-RebootOutstanding"),
+            "the $false default must precede the predicate it guards")
+
+    def test_verify_dot_source_is_test_path_guarded(self):
+        """An unguarded dot-source of a missing file THROWS.
+
+        Controlled Folder Access can leave a partially-copied {app}\\scripts —
+        a state this codebase already anticipates — and a throw here would turn
+        "Installation prüfen" into a crash instead of a FAIL verdict."""
+        code = self._code("verify_system.ps1")
+        guard = code.index("if (Test-Path $rebootHelper)")
+        self.assertLess(guard, code.index(". $rebootHelper"),
+                        "Test-Path must precede the dot-source")
 
     # ── 5. finalize's custody of .reboot_required across the prereq child ────
     # finalize deliberately calls install_prerequisites.ps1 WITHOUT
@@ -1772,20 +1936,54 @@ class DockerDesktopRebootReasonTest(unittest.TestCase):
             "(the WSL/VMP feature store reads Enabled throughout it)")
 
     def test_finalize_discriminates_the_dd_reason_by_boot_time(self):
-        code = self._code("finalize_install.ps1")
+        # The predicate moved to virtualization_ready.ps1 on 2026-09-11 (finalize
+        # and verify_system each had their own, and they disagreed). The
+        # INVARIANT is unchanged and is asserted against its new home; finalize
+        # must no longer carry a private copy.
+        code = RootCauseGuardTest._code("virtualization_ready.ps1")
         self.assertIn("dd-uninstall", code,
-                      "finalize no longer reads the dd-uninstall reason — the "
+                      "the dd-uninstall reason is no longer read — the "
                       "feature-store probe alone cannot see a pending DD removal")
         self.assertIn("LastBootUpTime", code,
                       "the dd-uninstall reason must be settled by comparing the "
                       "flag's write time against the last boot time — any other "
                       "signal either loops the student (a lingering registry "
                       "entry) or trusts the honor system (the dialog)")
-        # The dd discrimination must run BEFORE the feature-store loop, so a
+        # The dd discrimination must outrank the feature-store signal, so a
         # not-yet-rebooted DD removal defers even though the features read
-        # Enabled.
-        self.assertLess(code.index("dd-uninstall"),
-                        code.index("Get-WindowsOptionalFeature"))
+        # Enabled. It used to be provable by FILE ORDER (the dd branch sat above
+        # the Get-WindowsOptionalFeature loop in one function). The facts are now
+        # gathered once and the PRIORITY is expressed as rung order inside the
+        # two policy functions, so assert that directly — which is strictly
+        # stronger than the old positional check. Since 2026-09-11 each rung is
+        # a CALL to a named proof predicate (neither policy spells a proof
+        # itself — see OneRebootPredicateTest), so the order is read off those
+        # call sites.
+        self.assertIn("dd-uninstall",
+                      _ps1_function_body(code, "Test-DdUninstallOutstanding"),
+                      "the dd-uninstall reason must be read by the proof "
+                      "predicate both policies share")
+        for fn in ("Test-RebootOutstanding", "Get-VirtualizationVerdict"):
+            with self.subTest(policy=fn):
+                body = _ps1_function_body(code, fn)
+                self.assertLess(
+                    body.index("Test-DdUninstallOutstanding"),
+                    body.index("Test-FeatureEnablePending"),
+                    f"{fn} must test the dd-uninstall reason BEFORE EnablePending "
+                    f"— the feature store reads Enabled throughout a pending "
+                    f"Docker-Desktop removal, so the cheaper signal would win and "
+                    f"the import would run next to a half-removed Docker Desktop")
+        verdict = _ps1_function_body(code, "Get-VirtualizationVerdict")
+        self.assertLess(
+            verdict.index("Test-DdUninstallOutstanding"),
+            verdict.index("HypervisorPresent"),
+            "a LIVE hypervisor must not short-circuit the half-removed "
+            "Docker-Desktop guard — that is why rung 1 is rung 1")
+        fin = RootCauseGuardTest._code("finalize_install.ps1")
+        self.assertNotIn(
+            "Get-WindowsOptionalFeature", fin,
+            "finalize must not keep a private feature-store probe — that copy IS "
+            "the 2026-09-07 defect")
 
     def test_prereqs_never_clobber_an_existing_flag_reason(self):
         # Under -PreserveExistingRebootFlag the flag may carry migrate's
@@ -1810,6 +2008,539 @@ class DockerDesktopRebootReasonTest(unittest.TestCase):
             code.index("if ($rebootPending)"), code.index("if ($stillPresent)"),
             "migrate must route the rc=3010 case to the reboot message BEFORE "
             "the still-present manual-removal message")
+
+
+class OneRebootPredicateTest(unittest.TestCase):
+    """virtualization_ready.ps1 — the ONE reboot / virtualization verdict.
+
+    THE INCIDENT (2026-09-07, German school PC). finalize_install.ps1 and
+    verify_system.ps1 each answered "is a reboot outstanding" their own way, and
+    the weaker answer guarded `wsl --import`. finalize asked the WSL/VMP feature
+    store for EnablePending; verify compared flag-mtime against
+    Win32_OperatingSystem.LastBootUpTime. They agree on every state EXCEPT the one
+    a fresh install lands in — install_prerequisites.ps1 sets .reboot_required
+    because `wsl --install --no-distribution` RAN, after which both features read
+    Enabled — so finalize printed "Neustart bereits erfolgt" and imported into a
+    hypervisor that was not running:
+
+        Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE
+
+    forever, across GUI launches, while the student was told to check their free
+    disk space. These tests pin the one predicate, its LADDER ORDER (every rung is
+    load-bearing and two of them exist only because the obvious order is wrong),
+    and the dot-source contract that keeps a helper from exiting its caller.
+
+    Since 2026-09-11 they also pin the PROOF layer. The two policies are ladders
+    over the same three proofs, and each policy originally spelled all three
+    inline — two copies of every proof inside the one file whose header claims
+    its policies cannot drift apart. One state reader was never enough; one
+    spelling per proof is the other half.
+    """
+
+    _code = staticmethod(RootCauseGuardTest._code)
+
+    def _virt(self):
+        return self._code("virtualization_ready.ps1")
+
+    # ── The file exists and both consumers ask it ───────────────────────────
+    def test_both_consumers_dot_source_the_one_predicate(self):
+        for name in ("finalize_install.ps1", "verify_system.ps1"):
+            with self.subTest(script=name):
+                self.assertIn("virtualization_ready.ps1", self._code(name))
+
+    def test_finalize_keeps_no_private_copy(self):
+        code = self._code("finalize_install.ps1")
+        self.assertNotIn("function Test-RebootStillPending", code,
+                         "the private predicate must be GONE, not kept alongside "
+                         "— a fifth implementation is not a fix")
+        for probe in ("Get-WindowsOptionalFeature", "LastBootUpTime",
+                      "HypervisorPresent"):
+            self.assertNotIn(
+                probe, code,
+                f"finalize must not read {probe} itself; that copy IS the defect")
+
+    def test_finalize_dot_source_is_test_path_guarded(self):
+        code = self._code("finalize_install.ps1")
+        self.assertLess(code.index("if (-not (Test-Path $virtHelper))"),
+                        code.index(". $virtHelper"),
+                        "an unguarded dot-source of a missing file THROWS, and a "
+                        "partially-copied {app}\\scripts is a state this codebase "
+                        "already anticipates (Controlled Folder Access)")
+        self.assertLess(
+            code.index("function Fail-WithNextAction"),
+            code.index("$virtHelper = Join-Path"),
+            "the guard must be able to report in German via Fail-WithNextAction; "
+            "above it, a missing file reaches the GUI as an EMPTY transcript")
+
+    # ── The dot-source contract ────────────────────────────────────────────
+    def test_the_helper_cannot_exit_or_poison_its_caller(self):
+        raw = _read(_VIRT_PS1, encoding="utf-8-sig")
+        code = self._virt()
+        self.assertNotRegex(
+            code, r"(?m)^\s*(exit|throw)\b",
+            "a dot-sourced file that exits terminates its CALLER — and "
+            "ps-readiness-retry-lint discovers hard-exit helpers cross-file")
+        self.assertNotRegex(
+            code, r"\$ErrorActionPreference\s*=",
+            "assigning EAP in a dot-sourced file poisons the caller; every "
+            "consumer must keep EAP=Continue (ci.yml::powershell-native-stderr)")
+        for native in ("wsl ", "docker "):
+            self.assertNotIn(
+                native, code,
+                "the helper makes NO native calls — a readiness probe here would "
+                "trip ps-readiness-retry-lint and could not be retried")
+        self.assertTrue(raw.startswith("#"),
+                        "BOM-stripped source must open with the header comment")
+
+    def test_the_helper_is_not_in_the_terminal_exit_list(self):
+        """ScriptTerminalExitTest's list must NOT grow to include this file.
+
+        Those scripts end with `exit 0` because their exit code is a contract.
+        This one is DOT-SOURCED: an `exit 0` at its end would end the caller
+        mid-run, silently reporting success."""
+        src = _read(os.path.join(os.path.dirname(__file__),
+                                 "test_gui_install_lifecycle.py"))
+        block = src[src.index("def test_scripts_end_with_explicit_exit_zero"):]
+        block = block[:block.index("class ")]
+        self.assertNotIn("virtualization_ready.ps1", block)
+
+    # ── One spelling per proof ─────────────────────────────────────────────
+    # Both policies are ladders over the SAME three proofs. Each originally
+    # spelled all three INLINE, so every proof existed twice in one file — the
+    # drift this file exists to prevent, one scope smaller. The state is read
+    # once (Get-RebootState) AND each proof is written once (below); these pin
+    # the second half, in the house style of tests/test_ros_domain_twin_lockstep
+    # .py and test_activation_agent.py::TestGateParserLockstep — drive every
+    # reader off one table, and assert the intended divergence POSITIVELY.
+    #
+    # SOURCE-LEVEL on purpose. A Python re-implementation of the ladder would be
+    # a THIRD copy, free to drift from the .ps1 exactly like the two it replaced
+    # (and PowerShell is not installed in CI, so it could never be executed
+    # against the real thing either).
+    _PROOFS = ("Test-DdUninstallOutstanding", "Test-FeatureEnablePending",
+               "Test-NoBootSinceFlag")
+    # What a RE-INLINED proof must necessarily contain: a read of the proof's own
+    # state field, or the dd reason literal. HypervisorPresent and
+    # VirtFirmwareEnabled are deliberately absent — those two rungs are the
+    # verdict's OWN and must stay spelled there. Note the fence cannot be the
+    # bare token "NoBootSinceFlag"/"EnablePending": both are substrings of the
+    # predicate NAMES that replaced them, so it is the `$State.` read that is
+    # forbidden.
+    _INLINED_PROOF_TOKENS = ("$State.FlagReason", "$State.FlagPresent",
+                             "$State.TimeReadable", "$State.NoBootSinceFlag",
+                             "$State.EnablePending", "dd-uninstall")
+    _POLICIES = ("Test-RebootOutstanding", "Get-VirtualizationVerdict")
+
+    def test_every_proof_is_a_named_predicate(self):
+        code = self._virt()
+        for fn in self._PROOFS:
+            with self.subTest(proof=fn):
+                self.assertIn(
+                    "function %s {" % fn, code,
+                    f"{fn} must exist as ONE named predicate — an inline proof "
+                    f"is a copy, and the next edit to a copy does not follow on "
+                    f"the other policy, which is how finalize and verify came to "
+                    f"disagree about the state a fresh install lands in")
+
+    def test_neither_policy_re_spells_a_proof(self):
+        """The anti-re-inlining fence, in both directions.
+
+        If a policy stops CALLING a predicate, or starts reading a proof's state
+        field itself, the file is back to two spellings of one proof and the
+        2026-09-07 class of failure is reachable again inside a single file."""
+        code = self._virt()
+        for policy in self._POLICIES:
+            body = _ps1_function_body(code, policy)
+            for fn in self._PROOFS:
+                with self.subTest(policy=policy, proof=fn):
+                    self.assertIn(
+                        fn, body,
+                        f"{policy} must COMPOSE {fn}, not re-derive it — the "
+                        f"proofs are the shared layer, and a policy that stops "
+                        f"asking has forked it")
+            for token in self._INLINED_PROOF_TOKENS:
+                with self.subTest(policy=policy, inlined=token):
+                    self.assertNotIn(
+                        token, body,
+                        f"{policy} reads {token} directly: that is a proof "
+                        f"spelled a second time. Move it into one of "
+                        f"{self._PROOFS} and call that instead, or the two "
+                        f"policies can silently disagree again")
+
+    def test_the_proof_predicates_honour_the_caller_contract(self):
+        """The header's contract binds EVERY function here, not just the two the
+        callers name. A $null state answers $false rather than throwing (the
+        callers pass Get-RebootState's result straight through), no proof falls
+        off the end returning nothing, and nothing exits the caller."""
+        code = self._virt()
+        for fn in self._PROOFS:
+            body = _ps1_function_body(code, fn)
+            with self.subTest(proof=fn):
+                self.assertIn("if ($null -eq $State) { return $false }", body,
+                              f"{fn} must answer $false on a $null state — "
+                              f"Get-RebootState's callers pass its result "
+                              f"through unguarded")
+                self.assertIn("return $false", body,
+                              f"{fn} must answer on NO PROOF, not fall off the "
+                              f"end returning nothing")
+                self.assertNotRegex(
+                    body, r"(?m)^\s*(exit|throw)\b",
+                    f"{fn} is dot-sourced into its caller; an exit there ends "
+                    f"the INSTALLER mid-run")
+
+    # ── The ladder. ORDER IS THE WHOLE DESIGN. ─────────────────────────────
+    def test_the_verdict_returns_exactly_the_four_vocabulary_words(self):
+        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
+        found = set(re.findall(r'return "([A-Za-z]+)"', body))
+        self.assertEqual(
+            found, {"Ready", "RebootRequired", "VirtualizationDisabled", "Unknown"},
+            "the verdict vocabulary is the contract the .ps1 branches and the GUI "
+            "exit codes are built on")
+
+    def test_enable_pending_outranks_the_hypervisor_shortcut(self):
+        """EnablePending is PROOF a feature enable waits on a reboot.
+
+        It is also the only signal the old finalize ever looked at. A PC running
+        a hypervisor for Hyper-V's own sake would skip it if HypervisorPresent
+        came first — trading one blind spot for another."""
+        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
+        self.assertLess(
+            body.index("Test-FeatureEnablePending"), body.index("HypervisorPresent"),
+            "EnablePending must be tested BEFORE the HypervisorPresent shortcut")
+
+    def test_ground_truth_outranks_the_boot_time_inference(self):
+        """HypervisorPresent is the thing the reboot was FOR; flag-mtime is a proxy.
+
+        Windows Fast Startup makes LastBootUpTime unreliable, so trusting the
+        proxy over ground truth tells a working PC to reboot forever."""
+        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
+        # Rung 1 also rests on "no boot since the flag", so anchor on rung 4's
+        # OWN call — the bare flag-time rung, the one that must NOT outrank
+        # ground truth. (Before 2026-09-11 this anchored on the inline clause
+        # `$State.FlagPresent -and …`, which the predicate extraction replaced.)
+        rung4 = "Test-NoBootSinceFlag -State $State"
+        self.assertIn(rung4, body, "rung 4's call changed shape")
+        self.assertLess(
+            body.index("HypervisorPresent"), body.index(rung4),
+            "the Ready rung must precede the flag-time RebootRequired rung")
+
+    def test_virtualization_firmware_is_only_read_below_the_hypervisor_rung(self):
+        """A RUNNING hypervisor commonly MASKS VirtualizationFirmwareEnabled to
+        $false — which is exactly why install_prerequisites.ps1 ORs the two. The
+        refusal is sound ONLY because it is unreachable while HypervisorPresent is
+        $true."""
+        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
+        self.assertLess(
+            body.index("HypervisorPresent"), body.index("VirtFirmwareEnabled"),
+            "reading the firmware flag above the hypervisor rung would refuse "
+            "working machines whose hypervisor masks it")
+
+    def test_only_a_genuine_false_refuses(self):
+        """`-eq $false`, never `-ne $true`.
+
+        PowerShell evaluates `$null -eq $false` as $false, so an absent or
+        unreadable property can never produce VirtualizationDisabled. `-ne $true`
+        would refuse on every $null — fail-CLOSED on a WMI hiccup, which bricks
+        working PCs."""
+        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
+        self.assertRegex(body, r"\$State\.VirtFirmwareEnabled -eq \$false")
+        self.assertNotIn("VirtFirmwareEnabled -ne $true", body)
+        self.assertRegex(body, r"\$State\.HypervisorPresent -eq \$true")
+
+    def test_unknown_is_the_fall_through_not_a_refusal(self):
+        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
+        self.assertTrue(
+            body.rstrip().rstrip("}").rstrip().endswith('return "Unknown"'),
+            "Unknown must be the LAST rung: refuse only on proof, and let a WMI "
+            "hiccup proceed to the import, which classifies its own failure")
+
+    def test_reboot_outstanding_is_proof_only(self):
+        code = self._virt()
+        body = _ps1_function_body(code, "Test-RebootOutstanding")
+        self.assertIn("return $false", body,
+                      "every unreadable state must answer $false — that is "
+                      "verify_system's documented SAFE direction")
+        # The clock guard moved WITH the proofs on 2026-09-11 (this policy now
+        # composes them), so assert it in both time-dependent predicates rather
+        # than in the policy that no longer spells them.
+        for fn in ("Test-DdUninstallOutstanding", "Test-NoBootSinceFlag"):
+            with self.subTest(proof=fn):
+                self.assertIn(
+                    "TimeReadable", _ps1_function_body(code, fn),
+                    f"{fn} compares times: it may only count when the clock was "
+                    f"actually read, or an unreadable clock manufactures a "
+                    f"benign pending-reboot verdict over a broken install")
+
+    # ── The classifier reads CODES, never German prose ─────────────────────
+    def test_the_failure_classifier_matches_codes_not_messages(self):
+        body = _ps1_function_body(self._virt(), "Get-WslFailureClass")
+        self.assertIn("HCS_E_SERVICE_NOT_AVAILABLE", body,
+                      "the code the field log actually carried")
+        self.assertIn("0x80370102", body)
+        # The 2026-09-07 transcript carried a GERMAN sentence beside an ASCII code
+        # token. Matching prose is the mistake install_prerequisites.ps1 already
+        # corrected when it deleted its English-only `systeminfo | Select-String
+        # "Hyper-V Requirements"` probe, which never matched on a German PC.
+        for german in ("Vorgang", "erforderliches Feature", "Fehlercode"):
+            self.assertNotIn(
+                german, body,
+                "classify on the CODE token; a localized message cannot be "
+                "matched on the student PCs this ships to")
+
+    def test_the_classifier_survives_out_string_wrapping(self):
+        """`Fehlercode: Wsl/.../HCS_E_SERVICE_NOT_AVAILABLE` is 79 characters.
+
+        Out-String wraps at the host width, so the token is one character from
+        being split in half. The caller passes -Width 4096 AND the classifier
+        strips whitespace — belt and brace, because a caller that forgets the
+        width must still classify."""
+        body = _ps1_function_body(self._virt(), "Get-WslFailureClass")
+        self.assertRegex(body, r"\$flat = \(\$Text -replace '\\s', ''\)")
+        self.assertIn("$flat -like", body,
+                      "the match must run against the stripped copy, or the "
+                      "normalisation is decoration")
+        self.assertIn("Out-String -Width 4096",
+                      _read(_IMPORT_PS1, encoding="utf-8-sig"))
+
+    # ── The import actually captures what it classifies ───────────────────
+    def test_import_captures_and_echoes_the_wsl_output(self):
+        code = self._code("import_edubotics_wsl.ps1")
+        self.assertIn("$importOut = ", code,
+                      "the import must CAPTURE wsl's words to classify them")
+        self.assertIn("$importExit = $LASTEXITCODE", code,
+                      "the exit code must be snapshotted before any later native "
+                      "call can overwrite $LASTEXITCODE")
+        self.assertIn("Write-Host $importOut.TrimEnd()", code,
+                      "and echo them VERBATIM — capturing without echoing would "
+                      "DELETE the evidence the field log carried")
+        self.assertLess(code.index("$importOut = "),
+                        code.index("Get-WslFailureClass"),
+                        "capture before classify")
+
+    def test_import_keeps_the_old_triad_for_non_hypervisor_failures(self):
+        code = self._code("import_edubotics_wsl.ps1")
+        self.assertIn("Antivirus-Ausnahme, genug Speicherplatz, WSL2 aktiviert", code,
+                      "the disk/AV wording is still RIGHT for the failures it "
+                      "fits; only the hypervisor class was mis-served by it")
+        self.assertIn('if ($virtHelperOk) { $failClass = Get-WslFailureClass', code,
+                      "a missing helper must degrade to the old wording, never "
+                      "hard-fail the installer's own [Run] Step 4")
+
+    # ── The misleading sentence is gone for good ──────────────────────────
+    def test_the_false_reassurance_is_deleted(self):
+        code = self._code("finalize_install.ps1")
+        self.assertNotIn(
+            "Neustart bereits erfolgt", code,
+            "this is the line the field log printed immediately before importing "
+            "into a dead hypervisor; it asserts a fact the script cannot know")
+
+    def test_the_verdict_gate_is_not_gated_on_the_flag(self):
+        """The virtualization rungs are flag-INDEPENDENT.
+
+        Wrapping the gate in `if (Test-Path $flagPath)` — as the old reboot check
+        was — means a PC with no flag and a dead hypervisor walks straight into
+        the import."""
+        code = self._code("finalize_install.ps1")
+        gate = code.index("Get-VirtualizationVerdict -State $rebootState")
+        window = code[max(0, gate - 400):gate]
+        self.assertNotIn("if (Test-Path $flagPath) {", window,
+                         "the verdict gate must run unconditionally")
+
+    def test_there_is_one_marker_writer(self):
+        """$EXIT_VIRT goes out through Fail-WithNextAction, not a second
+        Set-Content of the FAILED marker shape — the copy would be the one that
+        forgets -Encoding UTF8 (see the marker paragraph in the .ps1 header)."""
+        code = self._code("finalize_install.ps1")
+        self.assertEqual(
+            code.count('Value ("FAILED {0}'), 1,
+            "exactly one writer of the FAILED marker shape")
+        self.assertIn("[int]$ExitCode = $EXIT_FAILED", code,
+                      "the routed codes reuse that writer via a parameter")
+        self.assertEqual(code.count("function Fail-WithNextAction"), 1)
+
+    def test_the_virt_remedy_is_declared_once(self):
+        """A duplicated German remedy is the class this change set removes.
+
+        Both paths that exit 11 — the pre-import verdict and import's own
+        classification — must say the SAME thing, and the way the old code got
+        „Prüfen Sie: Antivirus-Ausnahme, genug Speicherplatz" printed over a
+        hypervisor fault was exactly one remedy written in one place and used
+        for every cause."""
+        code = self._code("finalize_install.ps1")
+        self.assertEqual(code.count("$VIRT_PROBLEM_DE  ="), 1,
+                         "declared exactly once")
+        self.assertEqual(code.count("Fail-WithNextAction $VIRT_PROBLEM_DE "), 2,
+                         "and used by BOTH exit-11 paths")
+        self.assertNotIn(
+            'Fail-WithNextAction "Die Virtualisierung', code,
+            "no inline copy of the German remedy may remain")
+        for half in ("neu starten", "BIOS/UEFI"):
+            self.assertIn(half, code, "both remedies must be named")
+
+    def test_finalize_rotates_its_log_instead_of_destroying_it(self):
+        code = self._code("finalize_install.ps1")
+        self.assertIn(".prev.log", code,
+                      "the previous attempt's transcript is the only thing that "
+                      "can show what CHANGED on a rig that loops identically")
+        self.assertLess(code.index(".prev.log"), code.index("Start-Transcript"),
+                        "rotate before the new transcript opens")
+
+
+class TranscriptExcerptTest(unittest.TestCase):
+    """_transcript_excerpt — HEAD + TAIL, because a bare tail lost the evidence.
+
+    The 2026-09-07 field log is the proof. `lines[-25:]` / `lines[-30:]` kept the
+    LAST lines of the elevated transcripts, so the
+    `Start-Transcript -IncludeInvocationHeader` block — Windows account, computer
+    name, Windows build, PSVersion — was cut, along with
+    install_prerequisites.ps1's "Checking virtualization support..." output. What
+    the window DID keep was the three lines `WSManStackVersion:`,
+    `PSRemotingProtocolVersion:`, `SerializationVersion:`, which say nothing
+    about any machine. That is the shape of the fix: keep the head, drop the
+    noise, and keep the timestamps.
+    """
+
+    @staticmethod
+    def _fn():
+        ns = {"os": os}
+        exec(compile(_module_fn_src("_transcript_excerpt"), _GUI_SRC, "exec"), ns)
+        return ns["_transcript_excerpt"]
+
+    def _write(self, body):
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "t.log")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        self.addCleanup(shutil.rmtree, tmp, True)
+        return path
+
+    # A faithful miniature of the real transcript shape, including the three
+    # noise lines that the old tail kept and the header lines it dropped.
+    _HEADER = (
+        "**********************\n"
+        "Windows PowerShell-Transkript, Start\n"
+        "Startzeit: 20260907141240\n"
+        "Benutzername: SCHULE\\schueler01\n"
+        "Computer: PC-RAUM-12 (Microsoft Windows NT 10.0.26100.0)\n"
+        "PSVersion: 5.1.26100.1234\n"
+        "WSManStackVersion: 3.0\n"
+        "PSRemotingProtocolVersion: 2.3\n"
+        "SerializationVersion: 1.1.0.1\n"
+        "**********************\n"
+    )
+
+    def test_the_invocation_header_survives(self):
+        body = self._HEADER + "".join(f"Zeile {i}\n" for i in range(200))
+        out = self._fn()(self._write(body), head=12, tail=30)
+        joined = "\n".join(out)
+        for evidence in ("Benutzername: SCHULE\\schueler01",
+                         "Computer: PC-RAUM-12",
+                         "PSVersion: 5.1.26100.1234",
+                         "Startzeit: 20260907141240"):
+            self.assertIn(evidence, joined,
+                          "this is exactly what support needs and what the bare "
+                          "tail threw away")
+
+    def test_the_noise_lines_are_dropped(self):
+        body = self._HEADER + "".join(f"Zeile {i}\n" for i in range(200))
+        out = self._fn()(self._write(body), head=12, tail=30)
+        joined = "\n".join(out)
+        for noise in ("WSManStackVersion:", "PSRemotingProtocolVersion:",
+                      "SerializationVersion:"):
+            self.assertNotIn(noise, joined,
+                             "these three were the ONLY header lines the old "
+                             "tail kept, and they describe no machine")
+        self.assertNotIn("**********", joined)
+
+    def test_the_tail_is_still_the_tail(self):
+        body = self._HEADER + "".join(f"Zeile {i}\n" for i in range(200))
+        out = self._fn()(self._write(body), head=12, tail=30)
+        self.assertEqual(out[-1], "Zeile 199",
+                         "the failure and its German remedy live at the END")
+
+    def test_the_elision_is_announced(self):
+        body = self._HEADER + "".join(f"Zeile {i}\n" for i in range(200))
+        out = self._fn()(self._write(body), head=12, tail=30)
+        self.assertTrue(
+            any("ausgelassen" in ln for ln in out),
+            "nobody may read an excerpt as the whole file")
+
+    def test_a_short_transcript_is_returned_whole(self):
+        body = "Zeile A\nZeile B\n\nZeile C\n"
+        out = self._fn()(self._write(body), head=12, tail=30)
+        self.assertEqual(out, ["Zeile A", "Zeile B", "Zeile C"],
+                         "blank lines dropped, nothing elided, no marker")
+
+    def test_the_endzeit_timestamp_is_kept(self):
+        body = self._HEADER + "".join(f"Zeile {i}\n" for i in range(200)) + (
+            "**********************\n"
+            "Ende der Windows PowerShell-Aufzeichnung\n"
+            "Endzeit: 20260907141249\n"
+            "**********************\n")
+        out = self._fn()(self._write(body), head=12, tail=30)
+        self.assertIn("Endzeit: 20260907141249", "\n".join(out),
+                      "a transcript's only timestamps; on a rig that loops, WHEN "
+                      "each attempt ran is the question being asked")
+
+    def test_all_three_call_sites_use_the_shared_excerpt(self):
+        """One implementation, three transcripts.
+
+        The repair transcript is the one that carried
+        install_prerequisites.ps1's virtualization and feature output, so leaving
+        any call site on a bare tail keeps the evidence loss alive."""
+        src = _read(_GUI_SRC)
+        self.assertEqual(
+            src.count("_transcript_excerpt(log_file"), 3,
+            "Setup-, Reparatur- and Freigabe-Protokoll must all use it")
+        self.assertNotRegex(
+            src, r"tail = lines\[-\d+:\]",
+            "no bare tail slice may remain")
+
+
+class RebootAwareScanDiagnosisTest(unittest.TestCase):
+    """The arm-scan diagnosis must not contradict the GUI's own entry check.
+
+    In the field log the GUI printed „Ein ausstehender Windows-Neustart hat die
+    Einrichtung unterbrochen." and then, seconds later in the same session,
+    „Die EduBotics-WSL-Umgebung ist nicht registriert. Bitte den Installer erneut
+    ausführen." — two stories about one machine, and the second sends the student
+    to a remedy that cannot help.
+    """
+
+    def test_the_distro_missing_diagnosis_is_reboot_aware(self):
+        src = _method_src("_scan_arms")
+        self.assertIn("wsl_distro_missing", src,
+                      "the decision must key on the STRUCTURED diagnosis flag, "
+                      "never on matching the German text")
+        self.assertIn("self._reboot_required_pending()", src,
+                      "and on the ONE flag predicate the GUI already owns — "
+                      "device_manager knows nothing about {app}\\scripts")
+
+    def test_the_override_does_not_claim_a_pending_reboot(self):
+        """.reboot_required means "the deferred work is not finished", which is
+        true of EVERY failed finalize. Asserting a reboot is the exact conflation
+        the finalize header warns about."""
+        src = _method_src("_scan_arms")
+        start = src.index("message_de = (")
+        block = src[start:start + 600]
+        self.assertIn("noch nicht abgeschlossen", block)
+        self.assertNotIn("Neustart steht", block)
+        self.assertIn("Einrichtung abschließen", block,
+                      "the actionable remedy is finishing setup, not re-running "
+                      "the installer")
+
+    def test_the_short_status_follows_the_same_message(self):
+        """A status bar that still quotes diag.message_de would show the
+        contradicted sentence while the log shows the corrected one."""
+        src = _method_src("_scan_arms")
+        self.assertIn("short_status = message_de.splitlines()[0]", src)
+        self.assertNotIn("short_status = diag.message_de", src)
+
+    def test_the_technical_details_are_still_surfaced(self):
+        """Overriding the STUDENT sentence must not hide the English details
+        support reads — they are what proved the distro was absent."""
+        src = _method_src("_scan_arms")
+        self.assertIn("diag.details", src)
 
 
 class UacCancelDetectionTest(unittest.TestCase):

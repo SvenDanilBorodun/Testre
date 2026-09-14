@@ -77,29 +77,39 @@ $allOk = $true
 # KEEPS the flag set on Fail-WithNextAction and on `exit $EXIT_FAILED`, so routing
 # on existence reported "Ein Windows-Neustart steht noch aus" + exit 0 over a
 # genuinely broken install, forever. Concretely: 14 GB free -> dism 3010 -> flag;
-# the student reboots; finalize's Test-RebootStillPending correctly says the boot
+# the student reboots; the shared Test-RebootOutstanding correctly says the boot
 # happened, Phase 1 then hard-fails on import's <20 GB disk precheck and keeps the
 # flag; "Installation prüfen" then printed the reboot line and exited 0, and the
 # real cause (disk space) was never surfaced.
 #
-# Discriminate on TIME, exactly like finalize's Test-RebootStillPending: the flag
-# only means "reboot outstanding" when NO boot has happened since it was written.
-# A read error prefers the SAFE direction (fall through to the exit-1 branch) —
-# manufacturing a benign verdict out of an unreadable state is how this class of
-# bug survives. Note the branch is unreachable for the common benign case anyway
-# (missing images are Write-WARN only and never clear $allOk), so it fires only on
-# genuinely broken states; tightening it costs nothing.
+# The ANSWER comes from virtualization_ready.ps1::Test-RebootOutstanding, and it
+# is the same function finalize_install.ps1 asks. Until 2026-09-11 this script
+# held its OWN copy of the logic while finalize held a DIFFERENT one, and the
+# comment right here claimed they were "exactly" the same check. They were not:
+# finalize asked the feature store for EnablePending, which `wsl --install
+# --no-distribution` does not leave behind, so finalize imported into a dead
+# hypervisor while THIS file would have deferred correctly on the identical
+# state. Two implementations of one predicate, and the weaker one guarded the
+# expensive operation. There is now one.
+#
+# The contract this branch needs is unchanged: $true only on PROOF (flag reason
+# + no boot since it, a feature reading EnablePending, or flag-mtime newer than
+# the last boot), and a read error must prefer the SAFE direction — fall through
+# to the exit-1 branch rather than manufacture a benign verdict. Test-RebootOut-
+# standing returns $false on every unreadable state, and $rebootPending keeps its
+# $false DEFAULT so a missing helper lands there too. Note the branch is
+# unreachable for the common benign case anyway (missing images are Write-WARN
+# only and never clear $allOk), so it fires only on genuinely broken states.
 $rebootPending = $false
 $rebootFlagPath = Join-Path $PSScriptRoot ".reboot_required"
-if (Test-Path $rebootFlagPath) {
-    try {
-        $flagTime = (Get-Item -Path $rebootFlagPath -ErrorAction Stop).LastWriteTime
-        $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
-        $rebootPending = ($bootTime -le $flagTime)
-        Write-Diag "reboot_flag" ("flag={0} lastBoot={1} pending={2}" -f $flagTime.ToString("o"), $bootTime.ToString("o"), $rebootPending)
-    } catch {
-        Write-Diag "reboot_flag" "flag present but the boot/flag time was unreadable ($_) — treating the install as FAILED rather than as a benign pending reboot"
-    }
+$rebootHelper = Join-Path $PSScriptRoot 'virtualization_ready.ps1'
+if (Test-Path $rebootHelper) {
+    . $rebootHelper
+    $rebootState = Get-RebootState -FlagPath $rebootFlagPath
+    $rebootPending = Test-RebootOutstanding -State $rebootState
+    Write-Diag "reboot_flag" (("pending={0}" -f $rebootPending) + "`n" + (@($rebootState.Notes) -join "`n"))
+} else {
+    Write-Diag "reboot_flag" "virtualization_ready.ps1 not found next to this script — treating the install as FAILED rather than as a benign pending reboot"
 }
 
 Write-Step "Verifying EduBotics installation..."

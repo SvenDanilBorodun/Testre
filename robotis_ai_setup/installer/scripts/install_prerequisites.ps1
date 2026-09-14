@@ -435,7 +435,8 @@ if ($needsReboot) {
     # Write flag file so Inno Setup knows a reboot is required before image pull / WSL import.
     # Write ONLY if absent: under -PreserveExistingRebootFlag an existing flag may
     # carry migrate's "dd-uninstall" REASON, which finalize_install.ps1's
-    # Test-RebootStillPending needs (the WSL/VMP feature store is blind to a
+    # virtualization_ready.ps1::Get-RebootState needs (the WSL/VMP feature store
+    # is blind to a
     # pending Docker-Desktop removal) — overwriting it with "1" would erase the
     # reason AND refresh the write time finalize compares against the last boot.
     if (-not (Test-Path $FlagPath)) {

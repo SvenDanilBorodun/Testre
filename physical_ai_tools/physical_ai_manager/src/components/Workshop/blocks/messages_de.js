@@ -370,6 +370,53 @@ export const DE = {
     'Eine Aufnahme „%1" gibt es in diesem Workflow nicht. Nimm sie auf oder wähle eine vorhandene.',
   WARN_MISSING_DESTINATION:
     '„%1" ist nicht in deiner Sammlung — lege das Ziel neu an oder wähle ein vorhandenes.',
+
+  // Sammlung drawer (sammlung/SammlungDrawer.jsx and its detail views).
+  SAMMLUNG_TITLE: 'Sammlung',
+  DRAWER_CLOSE: 'Sammlung schließen',
+  DRAWER_NAME: 'Name',
+  DRAWER_RENAME: 'Umbenennen',
+  DRAWER_SAVE_NAME: 'Speichern',
+  DRAWER_CANCEL: 'Abbrechen',
+  DRAWER_DURATION: 'Dauer',
+  DRAWER_DURATION_VALUE: '%1 s · %2 Punkte · %3 Hz',
+  DRAWER_ROBOT: 'Roboter',
+  DRAWER_ROBOT_LEGACY: 'OMX (alte Aufnahme)',
+  DRAWER_RECORDED_AT: 'Aufgenommen',
+  DRAWER_COORDS: 'Koordinaten',
+  DRAWER_COORDS_VALUE: 'x %1 · y %2 · z %3 mm',
+  DRAWER_SOURCE: 'Herkunft',
+  DRAWER_USED_IN: 'Benutzt in',
+  DRAWER_USED_NOWHERE_RECORDING: 'Nirgends — ziehe den Block aus der Gruppe „Aufnahmen" ins Programm.',
+  DRAWER_USED_NOWHERE_PLACE: 'Nirgends — ziehe den Block aus der Gruppe „Ziele" ins Programm.',
+  DRAWER_USED_NOWHERE_POSE: 'Nirgends — ziehe den Block aus der Gruppe „Positionen" ins Programm.',
+  DRAWER_USED_NOWHERE_VARIABLE: 'Nirgends — ziehe den Block aus der Gruppe „Variablen" ins Programm.',
+  DRAWER_DISABLED_SUFFIX: '(ausgeschaltet)',
+  DRAWER_OLDER_VERSIONS: 'Ältere Versionen',
+  DRAWER_VERSION_NOT_PLAYED: 'wird nicht abgespielt',
+  DRAWER_DELETE_VERSION: 'Löschen',
+  DRAWER_DELETE_RECORDING: 'Aufnahme löschen',
+  DRAWER_DELETE_PLACE: 'Ziel löschen',
+  DRAWER_DELETE_POSE: 'Position löschen',
+  DRAWER_DELETE_VARIABLE: 'Variable löschen',
+  DRAWER_EMPTY_TAB: 'Hier ist noch nichts.',
+  CONFIRM_DELETE_USED:
+    '„%1" wird in %2 Blöcken benutzt. Trotzdem löschen? Die Blöcke bleiben stehen und zeigen danach eine Warnung.',
+  CONFIRM_DELETE_USED_ONE:
+    '„%1" wird in 1 Block benutzt. Trotzdem löschen? Der Block bleibt stehen und zeigt danach eine Warnung.',
+  CONFIRM_REPLACE_RECORDING: 'Eine Bewegung „%1" gibt es schon. Ersetzen?',
+  CONFIRM_YES_DELETE: 'Löschen',
+  CONFIRM_YES_REPLACE: 'Ersetzen',
+  UNDO: 'Rückgängig',
+  TOAST_DELETED: '„%1" gelöscht.',
+  TOAST_RENAMED: '„%1" heißt jetzt „%2".',
+  ERR_RENAME_FAILED: 'Umbenennen fehlgeschlagen: %1',
+  ERR_RENAME_SPLIT:
+    'Achtung: Die Aufnahme heißt jetzt „%1", der Workflow ist aber noch nicht gespeichert. Bitte erneut speichern.',
+  TOAST_DISMISS: 'Schließen',
+  ERR_DELETE_FAILED: 'Löschen fehlgeschlagen: %1',
+  ERR_RECORDING_NAME:
+    'Der Name darf nur Buchstaben, Ziffern, Leerzeichen, _ und - enthalten (höchstens 40 Zeichen).',
 };
 
 /**

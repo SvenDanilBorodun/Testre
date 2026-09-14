@@ -384,8 +384,10 @@ describe('WorkshopPage — the Sammlung „Ziele" group points at the camera', (
     const provider = mockWorkspace.sammlungProvider;
     expect(provider).not.toBeNull();
     const snap = provider.getSnapshot();
+    // `drawer: true` since the Sammlung drawer landed (its „Verwalten" buttons
+    // and card ⋯ open it); teach and preview stay off until their packages.
     expect(snap.capabilities).toMatchObject({
-      hardware: true, simMode: false, pinCamera: true, teach: false, drawer: false, preview: false,
+      hardware: true, simMode: false, pinCamera: true, teach: false, drawer: true, preview: false,
     });
     expect(snap.robotType).toBe('omx_f');
     expect(snap.trajectories.status).toBe('none');

@@ -41,6 +41,7 @@ import {
   takenDestinationNames,
 } from '../components/Workshop/sammlung/destinationStore';
 import { createSammlungProvider } from '../components/Workshop/sammlung/provider';
+import SammlungDrawer from '../components/Workshop/sammlung/SammlungDrawer';
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
 import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
@@ -53,7 +54,10 @@ import {
   setDebuggerVisible,
 } from '../features/workshop/workshopSlice';
 import {
+  closeDrawer,
   fetchTrajectories,
+  openDrawer,
+  selectDrawer,
   selectLastPreviewResult,
   selectTrajectoryList,
 } from '../features/workshop/studioAssetsSlice';
@@ -276,6 +280,7 @@ function WorkshopPage({ isActive }) {
   // Sammlung toolbox groups: what the flyouts and the reference warnings read.
   const trajectoryList = useSelector(selectTrajectoryList);
   const lastPreviewResult = useSelector(selectLastPreviewResult);
+  const drawer = useSelector(selectDrawer);
   const variableValues = useSelector((s) => (s.workshop && s.workshop.variables) || null);
   const debuggerWarnings = useSelector((s) => (s.workshop ? s.workshop.debuggerWarnings : null));
   const activeTutorialId = useSelector((s) => s.workshop.activeTutorialId);
@@ -970,7 +975,7 @@ function WorkshopPage({ isActive }) {
         hardware: true,
         simMode,
         teach: false,
-        drawer: false,
+        drawer: true,
         preview: false,
         previewVariables: false,
         pinCamera: !!calibrated && !simMode,
@@ -996,10 +1001,20 @@ function WorkshopPage({ isActive }) {
         toast(DE.FLY_PIN_CAMERA_HINT, { icon: '📷' });
       } else if (action.type === 'jumpToBlock') {
         jumpToBlock(workspaceRef.current, action.blockId);
+      } else if (action.type === 'manage') {
+        // The card or „Alle verwalten …" already names the tab (recording →
+        // aufnahmen, pin → ziele, pose → positionen, variable → variablen).
+        dispatch(openDrawer({ tab: action.tab, focusId: action.focusId ?? null }));
       }
-      // teach / manage / preview / pinSim / highlight: wired by their own work packages.
+      // teach / preview / pinSim / highlight: wired by their own work packages.
     });
-  }, [sammlungProvider, isTabBusy]);
+  }, [sammlungProvider, isTabBusy, dispatch]);
+  // The drawer belongs to the editor it was opened over. Redux keeps
+  // `drawer.open` across the Galerie switch and a tab change, so without this
+  // it reappeared over a freshly mounted editor.
+  useEffect(() => {
+    if (!isActive || view === 'gallery') dispatch(closeDrawer());
+  }, [isActive, view, dispatch]);
   // RunControls writes its IK pre-check warnings UNKEYED; re-apply the keyed
   // missing-name warnings after each change (forced — the validator caches).
   useEffect(() => {
@@ -1354,7 +1369,9 @@ function WorkshopPage({ isActive }) {
                     {/* No min-height: Blockly must fill exactly the box that is
                         visible (see BlocklyWorkspace). On narrow screens the dock
                         is height-capped instead, so the editor keeps ≥ half. */}
-                    <div className="h-full bg-white rounded-lg border border-[var(--line)] overflow-hidden">
+                    {/* `relative`: the Sammlung drawer is positioned inside this
+                        box beside the toolbox and never changes its size. */}
+                    <div className="relative h-full bg-white rounded-lg border border-[var(--line)] overflow-hidden">
                       <BlocklyWorkspace
                         key={editorKey}
                         initialJson={initialJsonForEditor}
@@ -1363,6 +1380,18 @@ function WorkshopPage({ isActive }) {
                         restrictedBlocks={restrictedBlocks}
                         sammlungProvider={sammlungProvider}
                       />
+                      {drawer && drawer.open && (
+                        <SammlungDrawer
+                          workspace={workspace}
+                          provider={sammlungProvider}
+                          accessToken={accessToken}
+                          workflowId={selectedWorkflowId}
+                          robotType={robotType}
+                          onPreview={(asset) => sammlungProvider.dispatchAction({ type: 'preview', asset })}
+                          saveWorkflowNow={saveWorkflowNow}
+                          refetchTrajectories={refetchTrajectories}
+                        />
+                      )}
                     </div>
                   </div>
                   {simMode ? (

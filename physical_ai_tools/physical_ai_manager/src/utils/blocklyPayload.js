@@ -15,7 +15,8 @@
  * (Blockly 12.5.1): the CORE registers `blocks`, `variables` and
  * `workspaceComments`; `@blockly/suggested-blocks` adds `suggested-blocks` at
  * IMPORT time, and `@blockly/workspace-backpack` adds `backpack` when the
- * `Backpack` is constructed. Five in the running app.
+ * `Backpack` is constructed. Five from Blockly and its plugins, plus this
+ * app's own `edubotics-destinations` (below): six in the running app.
  *
  * An ALLOWLIST is the right primitive — a denylist of two plugin names would
  * silently admit the next plugin's key. Two DIFFERENT allowlists, because the
@@ -31,6 +32,16 @@
  *          student's free-floating canvas notes (`workspaceComments`) must
  *          survive — dropping them would destroy work — while the two plugin
  *          keys must not, for two independent reasons below.
+ *
+ * ZIELE AND POSITIONEN ARE DOCUMENT CONTENT. `edubotics-destinations` holds the
+ * student's saved points (`components/Workshop/sammlung/destinationStore.js`),
+ * so the SAVE path keeps the key — dropping it would delete every Ziel on the
+ * next save. The RUN allowlist stays at two keys: `RunControls` sends the store
+ * as an explicit `destinations: [{name, kind, x, y, z}]` sibling instead, so the
+ * server parses a documented wire shape rather than a Blockly internal. That
+ * key is registered by `registerDestinationSerializer()` (from
+ * `BlocklyWorkspace.jsx::registerAllBlocksOnce`), not by a plugin, and never at
+ * import.
  *
  * WHY THE SAVE PATH IS SLIMMED AT ALL (audit §11.2 / §11.3):
  *
@@ -91,8 +102,10 @@
 /** The two keys the interpreter reads. */
 export const RUN_PAYLOAD_SERIALIZER_KEYS = ['blocks', 'variables'];
 
-/** The three keys that make up the student's DOCUMENT. */
-export const SAVE_PAYLOAD_SERIALIZER_KEYS = ['blocks', 'variables', 'workspaceComments'];
+/** The four keys that make up the student's DOCUMENT. */
+export const SAVE_PAYLOAD_SERIALIZER_KEYS = [
+  'blocks', 'variables', 'workspaceComments', 'edubotics-destinations',
+];
 
 /**
  * Copy `keys` out of a serializer output into a FRESH object.

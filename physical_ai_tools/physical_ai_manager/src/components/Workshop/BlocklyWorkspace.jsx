@@ -26,6 +26,7 @@ import {
 } from './blocks/control';
 import { registerCounterBlocks } from './blocks/counters';
 import { registerTrajectoryBlocks } from './blocks/trajectories';
+import { registerDestinationSerializer } from './sammlung/destinationStore';
 
 let blocksRegistered = false;
 function registerAllBlocksOnce() {
@@ -39,6 +40,10 @@ function registerAllBlocksOnce() {
   registerControlBlocks();
   registerCounterBlocks();
   registerTrajectoryBlocks();
+  // The Ziele/Positionen document serializer + its undoable change event.
+  // Explicit, never at module import: blocklyPayload.test.js pins the CORE
+  // serializer inventory and page tests mock `blockly/core` minimally.
+  registerDestinationSerializer();
   blocksRegistered = true;
 }
 

@@ -45,7 +45,9 @@
 import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import * as Blockly from 'blockly/core';
 import RunControls from '../RunControls';
+import { getDestinationStore } from '../sammlung/destinationStore';
 
 let mockState;
 const mockDispatch = vi.fn();
@@ -166,10 +168,13 @@ describe('RunControls — run payload excludes editor-plugin serializer keys', (
     // separateness is tested only by naming what it drops is not tested at all:
     // the next plugin's key would ride to the server unnoticed, and so would a
     // one-word edit pointing this path at the SAVE allowlist. `blocks` and
-    // `variables` come THROUGH the allowlist; the other three are run-only
+    // `variables` come THROUGH the allowlist; the other four are run-only
     // siblings added on top (`sim` joins them only in Simulator mode).
+    // `destinations` is ALWAYS present, even empty: its presence is how the
+    // server knows this client sends the student's document.
     expect(Object.keys(parsed).sort()).toEqual(
-      ['blocks', 'tempo', 'trajectories', 'variables', 'zones']);
+      ['blocks', 'destinations', 'tempo', 'trajectories', 'variables', 'zones']);
+    expect(parsed.destinations).toEqual([]);
     // …and the program itself is untouched.
     expect(parsed.blocks).toEqual({
       languageVersion: 0,
@@ -211,6 +216,57 @@ describe('RunControls — run payload excludes editor-plugin serializer keys', (
     expect(parsed['suggested-blocks']).toBeUndefined();
     expect(parsed.backpack).toBeUndefined();
     expect(parsed.blocks).toBeTruthy();
+    expect(parsed.destinations).toEqual([]);
+  });
+
+  test('the document Ziele ride as the explicit destinations sibling, not the serializer key', async () => {
+    // Ziele/Positionen are DOCUMENT content (the `edubotics-destinations`
+    // serializer, on the SAVE allowlist only). With no live workspace the run
+    // reads them from the serializer output; the wire item is exactly
+    // {name, kind, x, y, z} — id, source, robot type and timestamp stay home.
+    const parsed = await startAndCapture({
+      workspace: null,
+      blocklyJson: {
+        ...editorJsonWithPluginState(),
+        'edubotics-destinations': {
+          version: 1,
+          entries: [{
+            id: 'd_4f1c9a2e', name: 'Ablage', kind: 'pin', x: 0.182, y: -0.064, z: 0.012,
+            source: 'camera', robot_type: 'omx_f', created_at: '2026-09-13T10:12:04.000Z',
+          }],
+        },
+      },
+    });
+    expect(parsed.destinations).toEqual([
+      { name: 'Ablage', kind: 'pin', x: 0.182, y: -0.064, z: 0.012 },
+    ]);
+    expect(parsed['edubotics-destinations']).toBeUndefined();
+  });
+
+  test('a live workspace store wins over a stale serializer output', async () => {
+    // `blocklyJson` is re-serialized on a debounce; the store is what the
+    // student just changed. A Ziel added a moment before „Start" must ride.
+    const ws = new Blockly.Workspace();
+    try {
+      expect(getDestinationStore(ws).add({
+        name: 'Live', kind: 'pose', source: 'capture', x: 0.1, y: 0.02, z: 0.15,
+      }).ok).toBe(true);
+      const parsed = await startAndCapture({
+        workspace: ws,
+        blocklyJson: {
+          blocks: { languageVersion: 0, blocks: [{ type: 'edubotics_home', id: 'b1' }] },
+          'edubotics-destinations': {
+            version: 1,
+            entries: [{ name: 'Veraltet', kind: 'pin', x: 0, y: 0, z: 0 }],
+          },
+        },
+      });
+      expect(parsed.destinations).toEqual([
+        { name: 'Live', kind: 'pose', x: 0.1, y: 0.02, z: 0.15 },
+      ]);
+    } finally {
+      ws.dispose();
+    }
   });
 
   test('the slimming measurably shrinks the payload', async () => {

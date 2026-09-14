@@ -283,4 +283,23 @@ export const DE = {
   GALLERY_BY: 'von',
   GALLERY_CLONE: 'Klonen',
   GALLERY_EMPTY: 'Noch keine Workflows in der Galerie.',
+
+  // Sammlung — Ziele and Positionen held in the workflow document
+  // (sammlung/destinationStore.js). `%1` is filled by formatDe below.
+  ERR_NAME_TAKEN: 'Der Name „%1" ist schon vergeben.',
+  ERR_STORE_FULL: 'In diesem Workflow gibt es schon 64 Ziele und Positionen.',
+  ERR_COORDINATES: 'Diese Stelle hat keine gültigen Koordinaten.',
+  // rename/remove of an entry that is already gone (an undo in between).
+  ERR_DESTINATION_MISSING: 'Diesen Eintrag gibt es nicht mehr.',
 };
+
+/**
+ * Fill `%1`, `%2`, … in a DE template with the given arguments.
+ *
+ * A placeholder with no matching argument stays as written (`%2` with one
+ * argument reads `%2`), so a missing argument is visible in the UI instead of
+ * silently becoming „undefined".
+ */
+export function formatDe(template, ...args) {
+  return String(template).replace(/%(\d)/g, (m, i) => (args[Number(i) - 1] ?? m));
+}

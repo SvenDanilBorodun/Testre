@@ -420,6 +420,31 @@ export const DE = {
   ERR_UNDO_NEWER_VERSION: 'Rückgängig nicht möglich: Von „%1" gibt es inzwischen eine neuere Aufnahme.',
   ERR_RECORDING_NAME:
     'Der Name darf nur Buchstaben, Ziffern, Leerzeichen, _ und - enthalten (höchstens 40 Zeichen).',
+
+  // Vormachen (teach/teachGates.js + teach/useTeachSession.js).
+  TEACH_BLOCK_OFFLINE: 'Keine Verbindung zum Roboter-Dienst.',
+  TEACH_BLOCK_RUNNING: 'Ein Programm läuft gerade – erst auf „Stopp" drücken.',
+  TEACH_BLOCK_SIM: 'Vormachen braucht den echten Roboter.',
+  TEACH_BLOCK_JOG: 'Der Arm ist unter „Steuern" freigeschaltet — bitte dort zuerst festsetzen.',
+  TEACH_BLOCK_GLIDE: 'Der Arm fährt gerade in die Grundstellung — bitte kurz warten.',
+  TEACH_BLOCK_PREVIEW: 'Erst die Vorschau beenden.',
+  // Hand mode only; leader-arm Vormachen replaces this refusal.
+  TEACH_BLOCK_LEADER: 'Erst oben „Leader abschalten".',
+  TEACH_NO_MOTION: 'Keine Bewegung aufgenommen — bitte den Arm während der Aufnahme bewegen.',
+  TEACH_CAP_REACHED: 'Maximale Aufnahmedauer erreicht — Aufnahme wird beendet.',
+  TEACH_ZIEL_BLOCKED_REC: 'Erst Aufnahme beenden',
+  TEACH_OFFLINE: 'Keine Verbindung zum Roboter-Dienst.',
+  TEACH_CLOSE_OFFLINE:
+    'Keine Verbindung zum Roboter-Dienst — Vormachen wurde geschlossen. Halte den Arm fest: Er wird spätestens nach 2 Minuten automatisch festgesetzt.',
+  TEACH_RELOCK_FAILED: 'Der Arm konnte nicht festgesetzt werden. Halte ihn weiter fest und drücke F.',
+  TEACH_LEADER_TURNED_ON:
+    'Der Leader-Arm wurde eingeschaltet — Vormachen mit der Hand ist jetzt nicht möglich.',
+  TEACH_ROBOT_PREVIEW_RUNNING: 'Der Arm fährt die Bewegung ab — Abstand halten.',
+  TEACH_ROBOT_PREVIEW_NO_MOTION:
+    'Der Arm hat noch nicht angefangen — er kann jederzeit losfahren. Mit „Stopp“ abbrechen.',
+  TEACH_STATE_DONE: 'Arm ist fest — fertig vorgemacht',
+  TEACH_REVIEW_ON_ROBOT_CONFIRM:
+    'Die Bewegung jetzt auf dem echten Roboter abspielen? Bitte Abstand halten.',
 };
 
 /**

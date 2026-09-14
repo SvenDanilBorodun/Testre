@@ -294,5 +294,25 @@ def test_persist_failure_fails_loud():
     _assert_zeros(resp)
 
 
+# ---------------------------------------------------------------------------
+# Vormachen pin (WP7a): P during a take („Position merken" while `aufnahme`)
+# must work — the capture takes no manual lock and ignores the recorder.
+# ---------------------------------------------------------------------------
+
+def test_capture_takes_no_manual_lock_and_ignores_record_state():
+    source = _SERVER_PY.read_text(encoding='utf-8')
+    tree = ast.parse(source)
+    seg = next(
+        ast.get_source_segment(source, n) for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == 'capture_pose_callback')
+    assert '_manual_lock' not in seg
+    assert '_manual_record_active' not in seg
+    node = _StubNode(xyz=(0.2, 0.0, 0.1))
+    node._manual_record_active = True
+    resp = _capture_pose(node, _Request('Wegpunkt'), _Response())
+    assert resp.success is True
+    assert resp.world_x == pytest.approx(0.2)
+
+
 if __name__ == '__main__':
     raise SystemExit(pytest.main([__file__, '-q']))

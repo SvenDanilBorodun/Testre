@@ -1065,3 +1065,40 @@ def test_run_replay_tells_the_student_when_the_live_rebuild_refuses():
     _CB['_run_replay'](node, [([0.0] * 6, 0.1)], node._manual_exit_gen, _rebuild)
     assert node.published == []
     assert node.notices and 'Armstellung' in node.notices[-1]
+
+
+# ==========================================================================
+# Vormachen pins (WP7a) — the client's useTeachSession relies on these server
+# behaviours; the server code is unchanged, these only fence them.
+# ==========================================================================
+
+def test_record_start_inside_open_hand_guide_session():
+    # Vormachen presses Space in `frei`: a record start arrives while the
+    # hand-guide session (F) is still open. It must succeed and keep the
+    # persistent claim, not refuse as "another mode".
+    node = _FakeNode(persistent=True)
+    resp = _rec(node, 'start')
+    assert resp.success is True
+    assert node._manual_persistent is True
+    assert node.on_manual is True
+    assert False in node.torque_calls      # torque-off recorded
+    assert len(node.created_timers) == 1   # the sampler timer
+
+
+def test_a_still_arm_take_returns_one_point():
+    # The reason useTeachSession's TEACH_MIN_POINTS exists: the sampler's dedupe
+    # keeps only the FIRST sample of a still arm, and one point can never be
+    # replayed (extract_points refuses fewer than 2).
+    fake_time = _FakeTime([0.04 * (i + 1) for i in range(40)])
+    fns = _load(['_manual_record_sample'], {**_G, 'time': fake_time})
+    sample = fns['_manual_record_sample']
+    still = [0.1, -0.2, 0.3, 0.0, 0.5, 0.8]
+    node = _sampler_node([list(still) for _ in range(12)])
+    node._manual_persistent = True
+    node._recompute_on_manual_locked()
+    node._manual_record_timer = object()
+    for _ in range(12):
+        sample(node)
+    resp = _rec(node, 'stop')
+    assert resp.sample_count == 1
+    assert len(json.loads(resp.points_json)['points']) == 1

@@ -1,0 +1,1258 @@
+/*
+ * Copyright 2026 EduBotics
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ */
+
+// useTeachSession — the Vormachen state machine against the REAL keyboard path
+// (document keydown in the capture phase) and deferred service mocks the tests
+// resolve explicitly, so every ordering claim is observed, not assumed.
+
+import { renderHook, act } from '@testing-library/react';
+import useTeachSession from '../useTeachSession';
+import { DE } from '../../blocks/messages_de';
+import { replayDriveEstimateMs } from '../teachGates';
+import { compactTrajectoryPoints } from '../../../../utils/trajectoryCompact';
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+function makeServices() {
+  const calls = [];
+  const mk = (name) => vi.fn((...args) => {
+    const d = deferred();
+    calls.push({ name, args, d, settled: false });
+    return d.promise;
+  });
+  return {
+    calls,
+    services: {
+      handGuide: mk('handGuide'), recordControl: mk('recordControl'),
+      capturePose: mk('capturePose'), replayMotion: mk('replayMotion'),
+    },
+  };
+}
+
+const flush = async () => {
+  for (let i = 0; i < 25; i += 1) await Promise.resolve(); // eslint-disable-line no-await-in-loop
+};
+
+const points = (n) => JSON.stringify({
+  fps: 25, points: Array.from({ length: n }, (_, i) => [0.1 * i, 0, 0, 0, 0, 0.8, 0.04 * i]),
+});
+
+// 30 s at 25 fps, joint1 = 0.8·sin(2π·t) — replays LONGER than recorded.
+const FAST_ROWS = Array.from({ length: 751 }, (_, i) => {
+  const t = i / 25;
+  return [0.8 * Math.sin(2 * Math.PI * t), 0, 0, 0, 0, 0, t];
+});
+
+function setup(overrides = {}) {
+  const svc = makeServices();
+  const feed = { cb: null, subs: 0, unsubs: 0 };
+  const subscribeFollowerJoints = vi.fn((cb) => {
+    feed.cb = cb;
+    feed.subs += 1;
+    return () => { feed.unsubs += 1; feed.cb = null; };
+  });
+  const sounds = { tick: vi.fn(), start: vi.fn(), stop: vi.fn(), capture: vi.fn(), dispose: vi.fn() };
+  const cbs = {
+    onCapture: vi.fn(), onTake: vi.fn(), onKeep: vi.fn(), onError: vi.fn(), onFinished: vi.fn(),
+  };
+  let counter = 0;
+  const namer = vi.fn((kind) => { counter += 1; return `${kind}-${counter}`; });
+  const initialProps = {
+    enabled: true, mode: 'hand', heartbeatOk: true, collisionActive: false, leaderLive: false,
+    roundItemCount: 0, services: svc.services, sounds, subscribeFollowerJoints, ...cbs, ...overrides,
+  };
+  const view = renderHook((props) => useTeachSession(props), { initialProps });
+  const listener = (e) => view.result.current.onKeyDown(e);
+  document.addEventListener('keydown', listener, true);
+  view.result.current.setCaptureNamer(namer);
+  const target = document.createElement('div');
+  document.body.appendChild(target);
+  let props = initialProps;
+
+  const h = {
+    ...svc, feed, sounds, cbs, namer, view, target, subscribeFollowerJoints,
+    get cur() { return view.result.current; },
+    get state() { return view.result.current.state; },
+    rerender: (patch) => { props = { ...props, ...patch }; view.rerender(props); },
+    unmount: () => {
+      document.removeEventListener('keydown', listener, true);
+      view.unmount();
+      target.remove();
+    },
+    async press(key, { on = target, repeat = false } = {}) {
+      const e = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, repeat });
+      await act(async () => { on.dispatchEvent(e); await flush(); });
+      return e;
+    },
+    async advance(ms) {
+      await act(async () => { vi.advanceTimersByTime(ms); await flush(); });
+    },
+    last(name) {
+      const list = svc.calls.filter((c) => c.name === name);
+      return list[list.length - 1];
+    },
+    async resolve(call, value) {
+      expect(call).toBeTruthy();
+      call.settled = true;
+      await act(async () => { call.d.resolve(value); await flush(); });
+    },
+    async reject(call, err = new Error('boom')) {
+      call.settled = true;
+      await act(async () => { call.d.reject(err); await flush(); });
+    },
+    count(name, ...args) {
+      return svc.calls.filter((c) => c.name === name
+        && args.every((a, i) => c.args[i] === a)).length;
+    },
+  };
+  return h;
+}
+
+// ---- reaching each state ----------------------------------------------
+
+async function toFrei(h) {
+  await h.press('f');
+  await h.advance(3000);
+  await h.resolve(h.last('handGuide'), { success: true, message: 'Handbetrieb aktiv.' });
+  expect(h.state).toBe('frei');
+}
+
+async function toAufnahme(h) {
+  await h.press(' ');
+  await h.advance(3000);
+  await h.resolve(h.last('recordControl'), { success: true, message: 'Aufnahme läuft.' });
+  expect(h.state).toBe('aufnahme');
+}
+
+async function toPruefen(h, { n = 3, stopRes = {}, close = { success: true } } = {}) {
+  await toAufnahme(h);
+  await h.advance(500);
+  await h.press(' ');
+  await h.resolve(h.last('recordControl'), {
+    success: true, points_json: points(n), sample_count: n, duration_s: 0.04 * (n - 1), ...stopRes,
+  });
+  await h.resolve(h.last('handGuide'), close);
+}
+
+describe('useTeachSession', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  it('starts locked with nothing sent', () => {
+    const h = setup();
+    expect(h.state).toBe('fest');
+    expect(h.cur.relock).toBe('none');
+    expect(h.cur.busy).toBe(false);
+    expect(h.calls).toHaveLength(0);
+    h.unmount();
+  });
+
+  describe('key table — fest', () => {
+    it('Space counts down (tick per second) and then starts a recording', async () => {
+      const h = setup();
+      const e = await h.press(' ');
+      expect(e.defaultPrevented).toBe(true);
+      expect(h.state).toBe('countdown');
+      expect(h.cur.countdownLeft).toBe(3);
+      expect(h.calls).toHaveLength(0);
+      await h.advance(2000);
+      expect(h.cur.countdownLeft).toBe(1);
+      expect(h.sounds.tick).toHaveBeenCalledTimes(3);
+      expect(h.calls).toHaveLength(0);
+      await h.advance(1000);
+      expect(h.count('recordControl', 'start')).toBe(1);
+      await h.resolve(h.last('recordControl'), { success: true });
+      expect(h.state).toBe('aufnahme');
+      expect(h.cur.releasedOnce).toBe(true);
+      expect(h.sounds.start).toHaveBeenCalledTimes(1);
+      await h.advance(1000);
+      expect(h.cur.elapsedS).toBeCloseTo(1, 1);
+      h.unmount();
+    });
+
+    it('F counts down and then frees the arm', async () => {
+      const h = setup();
+      await h.press('f');
+      expect(h.state).toBe('countdown');
+      await h.advance(3000);
+      expect(h.count('handGuide', true)).toBe(1);
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('frei');
+      expect(h.cur.relock).toBe('none');
+      h.unmount();
+    });
+
+    it('a failed start returns to the state before the countdown', async () => {
+      const h = setup();
+      await h.press(' ');
+      await h.advance(3000);
+      await h.resolve(h.last('recordControl'), { success: false, message: 'Nicht möglich.' });
+      expect(h.state).toBe('fest');
+      expect(h.cbs.onError).toHaveBeenCalledWith('Nicht möglich.');
+      await h.advance(500);
+      await h.press('f');
+      await h.advance(3000);
+      await h.resolve(h.last('handGuide'), { success: false, message: 'Leader aktiv.' });
+      expect(h.state).toBe('fest');
+      expect(h.cbs.onError).toHaveBeenLastCalledWith('Leader aktiv.');
+      h.unmount();
+    });
+
+    it('P and Z capture with a name chosen on the key press', async () => {
+      const h = setup();
+      await h.press('p');
+      expect(h.namer).toHaveBeenCalledWith('pose');
+      expect(h.last('capturePose').args).toEqual(['pose-1']);
+      await h.resolve(h.last('capturePose'), { success: true, world_x: 0.1 });
+      expect(h.sounds.capture).toHaveBeenCalledTimes(1);
+      expect(h.cbs.onCapture).toHaveBeenCalledWith({
+        kind: 'pose', name: 'pose-1', response: { success: true, world_x: 0.1 },
+      });
+      await h.press('z');
+      expect(h.last('capturePose').args).toEqual(['ziel-2']);
+      await h.resolve(h.last('capturePose'), { success: true });
+      expect(h.cbs.onCapture).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'ziel', name: 'ziel-2' }));
+      expect(h.state).toBe('fest');
+      h.unmount();
+    });
+
+    it('a refused capture is reported, never stored', async () => {
+      const h = setup();
+      await h.press('p');
+      await h.resolve(h.last('capturePose'), { success: false, message: 'Armstellung unbekannt.' });
+      expect(h.cbs.onCapture).not.toHaveBeenCalled();
+      expect(h.cbs.onError).toHaveBeenCalledWith('Armstellung unbekannt.');
+      h.unmount();
+    });
+
+    it('Esc finishes', async () => {
+      const h = setup();
+      await h.press('Escape');
+      expect(h.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: false, relockOk: true, offline: false });
+      expect(h.calls).toHaveLength(0);
+      h.unmount();
+    });
+  });
+
+  describe('key table — countdown', () => {
+    it.each([[' '], ['f'], ['Escape']])('%j cancels without a call', async (key) => {
+      const h = setup();
+      await h.press('f');
+      await h.advance(1000);
+      await h.press(key);
+      expect(h.state).toBe('fest');
+      await h.advance(5000);
+      expect(h.calls).toHaveLength(0);
+      h.unmount();
+    });
+  });
+
+  describe('key table — frei', () => {
+    it('Space records at once, without a countdown', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.press(' ');
+      expect(h.count('recordControl', 'start')).toBe(1);
+      await h.resolve(h.last('recordControl'), { success: true });
+      expect(h.state).toBe('aufnahme');
+      h.unmount();
+    });
+
+    it('F locks (confirmed hand_guide(false))', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.press('f');
+      expect(h.count('handGuide', false)).toBe(1);
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('fest');
+      expect(h.cur.relock).toBe('ok');
+      h.unmount();
+    });
+
+    it.each([['p', 'pose'], ['z', 'ziel']])('%s captures a %s', async (key, kind) => {
+      const h = setup();
+      await toFrei(h);
+      await h.press(key);
+      expect(h.last('capturePose').args).toEqual([`${kind}-1`]);
+      await h.resolve(h.last('capturePose'), { success: true });
+      expect(h.cbs.onCapture).toHaveBeenCalledWith(expect.objectContaining({ kind }));
+      expect(h.state).toBe('frei');
+      h.unmount();
+    });
+
+    it('Esc locks first, then finishes', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.press('Escape');
+      expect(h.cbs.onFinished).not.toHaveBeenCalled();
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: true, relockOk: true, offline: false });
+      h.unmount();
+    });
+  });
+
+  describe('key table — aufnahme', () => {
+    it.each([[' '], ['f']])('%j stops, then closes the session (stop BEFORE close)', async (key) => {
+      const h = setup();
+      await toAufnahme(h);
+      await h.advance(500);
+      await h.press(key);
+      expect(h.count('recordControl', 'stop')).toBe(1);
+      expect(h.count('handGuide', false)).toBe(0);
+      await h.resolve(h.last('recordControl'), { success: true, points_json: points(3), sample_count: 3 });
+      expect(h.count('handGuide', false)).toBe(1);
+      const stopCall = h.services.recordControl.mock.invocationCallOrder[1];
+      const closeCall = h.services.handGuide.mock.invocationCallOrder[0];
+      expect(stopCall).toBeLessThan(closeCall);
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('pruefen');
+      expect(h.sounds.stop).toHaveBeenCalledTimes(1);
+      h.unmount();
+    });
+
+    it('P captures a waypoint during the take', async () => {
+      const h = setup();
+      await toAufnahme(h);
+      await h.press('p');
+      expect(h.last('capturePose').args).toEqual(['pose-1']);
+      await h.resolve(h.last('capturePose'), { success: true });
+      expect(h.state).toBe('aufnahme');
+      expect(h.cbs.onCapture).toHaveBeenCalledTimes(1);
+      h.unmount();
+    });
+
+    it('Z is refused with a German hint and no call', async () => {
+      const h = setup();
+      await toAufnahme(h);
+      const before = h.calls.length;
+      const e = await h.press('z');
+      expect(e.defaultPrevented).toBe(true);
+      expect(h.calls).toHaveLength(before);
+      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_ZIEL_BLOCKED_REC);
+      expect(h.state).toBe('aufnahme');
+      h.unmount();
+    });
+
+    it('Esc stops and closes after the review is kept', async () => {
+      const h = setup({ roundItemCount: 0 });
+      await toAufnahme(h);
+      await h.press('Escape');
+      await h.resolve(h.last('recordControl'), { success: true, points_json: points(3) });
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('pruefen');
+      expect(h.cbs.onFinished).not.toHaveBeenCalled();
+      await h.press('Enter');
+      expect(h.cbs.onKeep).toHaveBeenCalledTimes(1);
+      // The kept take is one item the overlay's prop does not show yet.
+      expect(h.state).toBe('abschluss');
+      h.unmount();
+    });
+  });
+
+  describe('key table — pruefen', () => {
+    it('Enter keeps the take and returns to fest', async () => {
+      const h = setup();
+      await toPruefen(h);
+      const take = h.cur.take;
+      expect(take).toEqual(expect.objectContaining({ fps: 25, sampleCount: 3, relockOk: true }));
+      expect(h.cbs.onTake).toHaveBeenCalledWith(take);
+      await h.press('Enter');
+      expect(h.cbs.onKeep).toHaveBeenCalledWith(take);
+      expect(h.state).toBe('fest');
+      expect(h.cur.take).toBeNull();
+      expect(h.cbs.onFinished).not.toHaveBeenCalled();
+      h.unmount();
+    });
+
+    it('R discards and counts down to a new take', async () => {
+      const h = setup();
+      await toPruefen(h);
+      await h.press('r');
+      expect(h.state).toBe('countdown');
+      expect(h.cur.take).toBeNull();
+      expect(h.cbs.onKeep).not.toHaveBeenCalled();
+      await h.advance(3000);
+      expect(h.count('recordControl', 'start')).toBe(2);
+      h.unmount();
+    });
+
+    it('R then Esc during the countdown lands in fest with no take (never a take-less pruefen)', async () => {
+      const h = setup();
+      await toPruefen(h);
+      await h.press('r');
+      await h.press('Escape');
+      expect(h.state).toBe('fest');
+      expect(h.cur.take).toBeNull();
+      await h.press('Enter');
+      expect(h.cbs.onKeep).not.toHaveBeenCalled();
+      h.unmount();
+    });
+
+    it('Entf discards', async () => {
+      const h = setup();
+      await toPruefen(h);
+      await h.press('Delete');
+      expect(h.state).toBe('fest');
+      expect(h.cbs.onKeep).not.toHaveBeenCalled();
+      h.unmount();
+    });
+
+    it('Esc keeps, then finishes (summary when the take is the only item)', async () => {
+      const h = setup();
+      await toPruefen(h);
+      await h.press('Escape');
+      expect(h.cbs.onKeep).toHaveBeenCalledTimes(1);
+      expect(h.state).toBe('abschluss');
+      await h.press('Escape');
+      expect(h.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: true, relockOk: true, offline: false });
+      h.unmount();
+    });
+
+    it('F locks only while the re-lock failed', async () => {
+      const h = setup();
+      await toPruefen(h, { close: { success: false, message: 'Arm nicht fest.' } });
+      expect(h.cur.relock).toBe('failed');
+      expect(h.cur.take.relockOk).toBe(false);
+      await h.press('f');
+      expect(h.count('handGuide', false)).toBe(2);
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.cur.relock).toBe('ok');
+      expect(h.state).toBe('pruefen');
+      await h.press('f');
+      expect(h.count('handGuide', false)).toBe(2);
+      h.unmount();
+    });
+  });
+
+  describe('vorschau — the real-arm preview ends on observed stillness', () => {
+    const ESTIMATE = replayDriveEstimateMs(compactTrajectoryPoints(FAST_ROWS), 1.0);
+    const MOVING = (t) => [t * 0.001, 0, 0, 0, 0, 0.8];
+    const STILL = () => [0.5, 0, 0, 0, 0, 0.8];
+
+    // Emits a pose every `step` ms for `ms` ms (the rosbridge throttle is 30 ms).
+    function feedFor(h, ms, poseAt, step = 30) {
+      act(() => {
+        let t = 0;
+        while (t + step <= ms) {
+          vi.advanceTimersByTime(step);
+          t += step;
+          if (h.feed.cb) h.feed.cb(poseAt(t));
+        }
+        if (ms > t) vi.advanceTimersByTime(ms - t);
+      });
+    }
+
+    async function toVorschau(h) {
+      await toPruefen(h, { stopRes: { points_json: JSON.stringify({ fps: 25, points: FAST_ROWS }) } });
+      await act(async () => { h.cur.actions.previewOnRobot(); await flush(); });
+      const replay = h.last('replayMotion');
+      expect(replay.args[0].speed).toBe(1.0);
+      expect(JSON.parse(replay.args[0].points_json)).toEqual({
+        fps: 25, points: compactTrajectoryPoints(FAST_ROWS),
+      });
+      await h.resolve(replay, { success: true, message: 'Wiedergabe gestartet.' });
+      expect(h.state).toBe('vorschau');
+    }
+
+    it('the estimate is the stretched drive, not the recorded duration', () => {
+      expect(ESTIMATE).toBeGreaterThan(4500 + 30000 + 1000);
+    });
+
+    it('opens exactly one subscription; teaching keys send nothing', async () => {
+      const h = setup();
+      await toVorschau(h);
+      expect(h.feed.subs).toBe(1);
+      const before = h.calls.length;
+      for (const key of [' ', 'f', 'r', 'Enter', 'p', 'z']) {
+        await h.press(key); // eslint-disable-line no-await-in-loop
+        await h.advance(500); // eslint-disable-line no-await-in-loop
+      }
+      expect(h.calls).toHaveLength(before);
+      expect(h.state).toBe('vorschau');
+      h.unmount();
+    });
+
+    it('never exits on time alone while the arm keeps moving', async () => {
+      const h = setup();
+      await toVorschau(h);
+      feedFor(h, 4500 + 30000 + 1000, MOVING);
+      expect(h.state).toBe('vorschau');
+      h.unmount();
+    });
+
+    it('a still pause inside the take (before the estimate) does not end it', async () => {
+      const h = setup();
+      await toVorschau(h);
+      feedFor(h, 1000, MOVING);
+      feedFor(h, 3000, STILL);
+      expect(3000).toBeLessThan(ESTIMATE);
+      expect(h.state).toBe('vorschau');
+      h.unmount();
+    });
+
+    it('exits once the estimate passed since the first motion AND the arm is still', async () => {
+      const h = setup();
+      await toVorschau(h);
+      // The first judged sample lands on tick 1 (150 ms); motion is seen on tick 2.
+      feedFor(h, ESTIMATE - 1000, MOVING);
+      feedFor(h, 1000 + 299 - 30, STILL); // up to 300 + ESTIMATE - 1 since the answer
+      expect(h.state).toBe('vorschau');
+      expect(h.feed.unsubs).toBe(0);
+      feedFor(h, 30 + 150, STILL);
+      expect(h.state).toBe('pruefen');
+      expect(h.feed.unsubs).toBe(1);
+      expect(h.cur.take).not.toBeNull();
+      h.unmount();
+    });
+
+    it('a dead feed never reads as still', async () => {
+      const h = setup();
+      await toVorschau(h);
+      feedFor(h, 2000, MOVING);
+      await h.advance(ESTIMATE + 600000);
+      expect(h.state).toBe('vorschau');
+      h.unmount();
+    });
+
+    it('a feed that stalls mid-settle restarts the still count', async () => {
+      const h = setup();
+      await toVorschau(h);
+      // One emit right after each 150 ms tick, so the next tick judges it.
+      const tickThenEmit = (n, poseAt) => act(() => {
+        for (let i = 0; i < n; i += 1) {
+          vi.advanceTimersByTime(150);
+          h.feed.cb(poseAt(i));
+        }
+      });
+      tickThenEmit(Math.ceil((ESTIMATE + 1000) / 150), (i) => MOVING(i * 150));
+      tickThenEmit(4, STILL); // judged: motion, 1, 2 …
+      act(() => { vi.advanceTimersByTime(150); }); // … 3 still ticks
+      expect(h.state).toBe('vorschau');
+      act(() => { vi.advanceTimersByTime(1200); }); // no sample for > 1 s
+      tickThenEmit(1, STILL);
+      act(() => { vi.advanceTimersByTime(150); });
+      expect(h.state).toBe('vorschau'); // 1 fresh still tick, not 4
+      tickThenEmit(3, STILL);
+      act(() => { vi.advanceTimersByTime(150); });
+      expect(h.state).toBe('pruefen');
+      h.unmount();
+    });
+
+    it('never moved: no timed exit, only the no-motion hint at 52 s', async () => {
+      const h = setup();
+      await toVorschau(h);
+      feedFor(h, 51990, STILL);
+      await h.advance(9);
+      expect(h.cur.previewNoMotionHint).toBe(false);
+      await h.advance(1);
+      expect(h.cur.previewNoMotionHint).toBe(true);
+      feedFor(h, 600000 - 52000, STILL);
+      expect(h.state).toBe('vorschau');
+      feedFor(h, 1000, MOVING);
+      expect(h.cur.previewNoMotionHint).toBe(false);
+      feedFor(h, ESTIMATE + 1000, STILL);
+      expect(h.state).toBe('pruefen');
+      h.unmount();
+    });
+
+    it('Stopp: one hand_guide(false); confirmed waits for stillness', async () => {
+      const h = setup();
+      await toVorschau(h);
+      feedFor(h, 1000, MOVING);
+      await h.press('Escape');
+      expect(h.count('handGuide', false)).toBe(2);
+      await h.resolve(h.last('handGuide'), { success: true });
+      feedFor(h, 1500, MOVING);
+      expect(h.state).toBe('vorschau');
+      feedFor(h, 5 * 150, STILL);
+      expect(h.state).toBe('pruefen');
+      expect(h.count('handGuide', false)).toBe(2);
+      h.unmount();
+    });
+
+    it('Stopp confirmed with a dead feed exits at the 2 s tail cap', async () => {
+      const h = setup();
+      await toVorschau(h);
+      await h.press('Escape');
+      await h.resolve(h.last('handGuide'), { success: true });
+      await h.advance(1950);
+      expect(h.state).toBe('vorschau');
+      await h.advance(200);
+      expect(h.state).toBe('pruefen');
+      h.unmount();
+    });
+
+    it('Stopp refused: German reason, still vorschau, Stopp can be pressed again', async () => {
+      const h = setup();
+      await toVorschau(h);
+      await h.press('Escape');
+      await h.resolve(h.last('handGuide'), { success: false, message: 'Der Arm ist noch in Bewegung.' });
+      expect(h.cbs.onError).toHaveBeenCalledWith('Der Arm ist noch in Bewegung.');
+      expect(h.state).toBe('vorschau');
+      await h.press('Escape');
+      expect(h.count('handGuide', false)).toBe(3);
+      h.unmount();
+    });
+
+    it('is not offered while the re-lock failed, while busy, or offline', async () => {
+      const failed = setup();
+      await toPruefen(failed, { close: { success: false } });
+      await act(async () => { failed.cur.actions.previewOnRobot(); await flush(); });
+      expect(failed.count('replayMotion')).toBe(0);
+      failed.unmount();
+
+      const busy = setup();
+      await toPruefen(busy);
+      // The first request is queued/in flight, so the second finds the queue busy.
+      await act(async () => {
+        busy.cur.actions.previewOnRobot();
+        busy.cur.actions.previewOnRobot();
+        await flush();
+      });
+      expect(busy.count('replayMotion')).toBe(1);
+      busy.unmount();
+
+      const offline = setup();
+      await toPruefen(offline);
+      offline.rerender({ heartbeatOk: false });
+      await act(async () => { offline.cur.actions.previewOnRobot(); await flush(); });
+      expect(offline.count('replayMotion')).toBe(0);
+      offline.unmount();
+    });
+
+    it('a refused replay stays in pruefen with the reason', async () => {
+      const h = setup();
+      await toPruefen(h);
+      await act(async () => { h.cur.actions.previewOnRobot(); await flush(); });
+      await h.resolve(h.last('replayMotion'), { success: false, message: 'Die Aufnahme enthält keine Bewegung.' });
+      expect(h.state).toBe('pruefen');
+      expect(h.cbs.onError).toHaveBeenCalledWith('Die Aufnahme enthält keine Bewegung.');
+      h.unmount();
+    });
+  });
+
+  describe('key table — abschluss', () => {
+    it('Esc closes; continueTeaching returns to fest', async () => {
+      const h = setup({ roundItemCount: 2 });
+      await h.press('Escape');
+      expect(h.state).toBe('abschluss');
+      expect(h.cbs.onFinished).not.toHaveBeenCalled();
+      act(() => { h.cur.actions.continueTeaching(); });
+      expect(h.state).toBe('fest');
+      await h.press('Escape');
+      await h.press('Escape');
+      expect(h.cbs.onFinished).toHaveBeenCalledTimes(1);
+      expect(h.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: false, relockOk: true, offline: false });
+      expect(h.calls).toHaveLength(0);
+      h.unmount();
+    });
+  });
+
+  describe('key table — every „—" cell', () => {
+    const toVorschauSimple = async (h) => {
+      await toPruefen(h);
+      await act(async () => { h.cur.actions.previewOnRobot(); await flush(); });
+      await h.resolve(h.last('replayMotion'), { success: true });
+    };
+    const REACH = {
+      fest: async () => {},
+      countdown: async (h) => { await h.press(' '); },
+      frei: toFrei,
+      aufnahme: toAufnahme,
+      pruefen: (h) => toPruefen(h),
+      vorschau: toVorschauSimple,
+      abschluss: async (h) => { h.rerender({ roundItemCount: 1 }); await h.press('Escape'); },
+    };
+    const DASH = [
+      ['fest', ['Enter', 'r', 'Delete']],
+      ['countdown', ['p', 'z', 'Enter', 'r', 'Delete']],
+      ['frei', ['Enter', 'r', 'Delete']],
+      ['aufnahme', ['Enter', 'r', 'Delete']],
+      ['pruefen', [' ', 'p', 'z']],
+      ['vorschau', [' ', 'f', 'p', 'z', 'Enter', 'r', 'Delete']],
+      ['abschluss', [' ', 'f', 'p', 'z', 'Enter', 'r', 'Delete']],
+    ].flatMap(([state, keys]) => keys.map((key) => [state, key]));
+
+    it.each(DASH)('%s + %j: prevented, no call, state unchanged', async (state, key) => {
+      const h = setup();
+      await REACH[state](h);
+      expect(h.state).toBe(state);
+      await h.advance(450); // clear the Space debounce of the reaching press
+      if (state === 'countdown') {
+        act(() => { h.cur.actions.continueTeaching(); }); // no-op outside abschluss
+      }
+      const stateNow = h.state;
+      const before = h.calls.length;
+      const e = await h.press(key);
+      expect(e.defaultPrevented).toBe(true);
+      expect(h.calls).toHaveLength(before);
+      expect(h.state).toBe(stateNow);
+      expect(h.cbs.onKeep).not.toHaveBeenCalled();
+      h.unmount();
+    });
+  });
+
+  describe('the service queue', () => {
+    it('a lock waits for the in-flight keepalive, then sends exactly one hand_guide(false)', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.advance(15000);
+      expect(h.count('handGuide', true)).toBe(2);
+      await h.press('f');
+      expect(h.count('handGuide', false)).toBe(0);
+      expect(h.cur.busy).toBe(true);
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.count('handGuide', false)).toBe(1);
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('fest');
+      expect(h.cur.busy).toBe(false);
+      h.unmount();
+    });
+
+    it('a record start waits for the pending capture', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.press('p');
+      await h.advance(450);
+      await h.press(' ');
+      expect(h.count('recordControl', 'start')).toBe(0);
+      await h.resolve(h.last('capturePose'), { success: true });
+      expect(h.count('recordControl', 'start')).toBe(1);
+      h.unmount();
+    });
+
+    it('a queued stop whose state changed meanwhile sends nothing', async () => {
+      const h = setup();
+      await toAufnahme(h);
+      await h.advance(500);
+      await h.press('p'); // capture in flight
+      await h.press('f'); // stop queued behind it
+      await h.advance(450);
+      await h.press(' '); // second stop queued
+      expect(h.count('recordControl', 'stop')).toBe(0);
+      await h.resolve(h.last('capturePose'), { success: true });
+      expect(h.count('recordControl', 'stop')).toBe(1);
+      await h.resolve(h.last('recordControl'), { success: true, points_json: points(3) });
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('pruefen');
+      expect(h.count('recordControl', 'stop')).toBe(1);
+      expect(h.count('handGuide', false)).toBe(1);
+      h.unmount();
+    });
+  });
+
+  describe('keepalive', () => {
+    it('runs only in frei, every 15 s', async () => {
+      const h = setup();
+      await h.advance(60000);
+      expect(h.count('handGuide', true)).toBe(0);
+      await toFrei(h);
+      await h.advance(14999);
+      expect(h.count('handGuide', true)).toBe(1);
+      await h.advance(1);
+      expect(h.count('handGuide', true)).toBe(2);
+      await h.resolve(h.last('handGuide'), { success: true });
+      await h.press(' ');
+      await h.resolve(h.last('recordControl'), { success: true });
+      expect(h.state).toBe('aufnahme');
+      await h.advance(60000);
+      expect(h.count('handGuide', true)).toBe(2);
+      h.unmount();
+    });
+
+    it('is queued behind a capture spanning the tick, never skipped', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.advance(14000);
+      await h.press('p');
+      await h.advance(1500); // tick at 15 s while the capture is in flight
+      expect(h.count('handGuide', true)).toBe(1);
+      await h.resolve(h.last('capturePose'), { success: true }); // answer at 15.5 s
+      expect(h.count('handGuide', true)).toBe(2);
+      h.unmount();
+    });
+
+    it('never queues two keepalives', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.press('p');
+      await h.advance(45000); // three ticks while the capture hangs
+      await h.resolve(h.last('capturePose'), { success: true });
+      expect(h.count('handGuide', true)).toBe(2);
+      h.unmount();
+    });
+
+    it('a refused keepalive reports, re-locks once, and stops the keepalive', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.advance(15000);
+      const msg = 'Handbetrieb nicht möglich, solange der Leader-Arm aktiv ist.';
+      await h.resolve(h.last('handGuide'), { success: false, message: msg });
+      expect(h.cbs.onError).toHaveBeenCalledWith(msg);
+      expect(h.count('handGuide', false)).toBe(1);
+      await h.resolve(h.last('handGuide'), { success: false, message: 'Arm nicht fest.' });
+      expect(h.state).toBe('frei');
+      await h.advance(30000);
+      expect(h.count('handGuide', true)).toBe(2);
+      h.unmount();
+    });
+  });
+
+  describe('stop', () => {
+    it('≥ 2 points + confirmed close → pruefen, relockOk true', async () => {
+      const h = setup();
+      await toPruefen(h, { n: 2 });
+      expect(h.state).toBe('pruefen');
+      expect(h.cur.relock).toBe('ok');
+      expect(h.cur.take).toEqual(expect.objectContaining({ relockOk: true, sampleCount: 2 }));
+      h.unmount();
+    });
+
+    it.each([[1], [0]])('%i point(s) → „no motion", no take, fest', async (n) => {
+      const h = setup();
+      await toPruefen(h, { n });
+      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_NO_MOTION);
+      expect(h.cbs.onTake).not.toHaveBeenCalled();
+      expect(h.state).toBe('fest');
+      expect(h.cur.take).toBeNull();
+      h.unmount();
+    });
+
+    it('record stop success:false WITH 3 points + confirmed close → pruefen, relock ok', async () => {
+      const h = setup();
+      await toPruefen(h, { stopRes: { success: false, message: 'Arm konnte nicht wieder verriegelt werden.' } });
+      expect(h.state).toBe('pruefen');
+      expect(h.cur.relock).toBe('ok');
+      expect(h.cbs.onError).not.toHaveBeenCalled();
+      h.unmount();
+    });
+
+    it('1 point + record stop success:false + confirmed close → „no motion", not the stale re-lock text', async () => {
+      const h = setup();
+      await toPruefen(h, {
+        n: 1,
+        stopRes: { success: false, message: 'Arm konnte nicht wieder verriegelt werden — der Greifer ist noch frei beweglich.' },
+      });
+      expect(h.cbs.onError).toHaveBeenCalledTimes(1);
+      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_NO_MOTION);
+      expect(h.state).toBe('fest');
+      expect(h.cur.relock).toBe('ok');
+      h.unmount();
+    });
+
+    it('a stop that did not execute (no points_json) shows the server reason', async () => {
+      const h = setup();
+      await toPruefen(h, { stopRes: { success: false, points_json: '', message: 'Aufnahme ist beschäftigt.' } });
+      expect(h.cbs.onError).toHaveBeenCalledWith('Aufnahme ist beschäftigt.');
+      expect(h.state).toBe('fest');
+      h.unmount();
+    });
+
+    it('success + REFUSED close → pruefen with relock failed; F then re-locks', async () => {
+      const h = setup();
+      await toPruefen(h, { close: { success: false, message: 'Arm nicht fest.' } });
+      expect(h.state).toBe('pruefen');
+      expect(h.cur.relock).toBe('failed');
+      await h.press('f');
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.cur.relock).toBe('ok');
+      h.unmount();
+    });
+
+    it('a thrown record stop keeps recording (the server records until its cap)', async () => {
+      const h = setup();
+      await toAufnahme(h);
+      await h.advance(500);
+      await h.press(' ');
+      await h.reject(h.last('recordControl'));
+      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_OFFLINE);
+      expect(h.state).toBe('aufnahme');
+      expect(h.count('handGuide', false)).toBe(0);
+      h.unmount();
+    });
+
+    it('an Esc-stop with no take clears close-after-review: a later keep does not finish', async () => {
+      const h = setup();
+      await toAufnahme(h);
+      await h.press('Escape');
+      await h.resolve(h.last('recordControl'), { success: true, points_json: points(1) });
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('fest');
+      await toPruefen(h);
+      await h.press('Enter');
+      expect(h.cbs.onKeep).toHaveBeenCalledTimes(1);
+      expect(h.state).toBe('fest');
+      expect(h.cbs.onFinished).not.toHaveBeenCalled();
+      h.unmount();
+    });
+
+    it('stops once at the 120 s cap', async () => {
+      const h = setup();
+      await toAufnahme(h);
+      await h.advance(120000);
+      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_CAP_REACHED);
+      expect(h.count('recordControl', 'stop')).toBe(1);
+      await h.advance(5000);
+      expect(h.count('recordControl', 'stop')).toBe(1);
+      expect(h.cbs.onError.mock.calls.filter(([m]) => m === DE.TEACH_CAP_REACHED)).toHaveLength(1);
+      h.unmount();
+    });
+  });
+
+  describe('relock recovery and the lock precondition', () => {
+    it('frei + F refused → relock failed, still frei, no keepalive; F again confirmed → fest', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.press('f');
+      await h.resolve(h.last('handGuide'), { success: false, message: 'Arm nicht fest.' });
+      expect(h.cur.relock).toBe('failed');
+      expect(h.cbs.onError).toHaveBeenCalledWith('Arm nicht fest.');
+      expect(h.state).toBe('frei');
+      await h.advance(30000);
+      expect(h.count('handGuide', true)).toBe(1);
+      await h.press('f');
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('fest');
+      h.unmount();
+    });
+
+    it('a refused lock without a reason uses the German default', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.press('f');
+      await h.resolve(h.last('handGuide'), { success: false });
+      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_RELOCK_FAILED);
+      h.unmount();
+    });
+
+    it('pruefen (failed) + R records at once and resets relock; lock is then a no-op in aufnahme', async () => {
+      const h = setup();
+      await toPruefen(h, { close: { success: false } });
+      await h.press('r');
+      expect(h.count('recordControl', 'start')).toBe(2);
+      await h.resolve(h.last('recordControl'), { success: true });
+      expect(h.state).toBe('aufnahme');
+      expect(h.cur.relock).toBe('none');
+      const before = h.count('handGuide', false);
+      await act(async () => { h.cur.actions.lock(); await flush(); });
+      expect(h.count('handGuide', false)).toBe(before);
+      expect(h.state).toBe('aufnahme');
+      h.unmount();
+    });
+
+    it('actions.lock sends nothing in fest, countdown and vorschau', async () => {
+      const h = setup();
+      await act(async () => { h.cur.actions.lock(); await flush(); });
+      await h.press(' ');
+      await act(async () => { h.cur.actions.lock(); await flush(); });
+      expect(h.calls).toHaveLength(0);
+      await h.press('Escape');
+      expect(h.state).toBe('fest');
+      await h.advance(450); // the Space debounce
+      await toPruefen(h);
+      await act(async () => { h.cur.actions.previewOnRobot(); await flush(); });
+      await h.resolve(h.last('replayMotion'), { success: true });
+      expect(h.state).toBe('vorschau');
+      const before = h.calls.length;
+      await act(async () => { h.cur.actions.lock(); await flush(); });
+      expect(h.calls).toHaveLength(before);
+      h.unmount();
+    });
+  });
+
+  describe('finish and the summary', () => {
+    it('fest + Esc: at once with 0 items, abschluss with 2', async () => {
+      const zero = setup({ roundItemCount: 0 });
+      await zero.press('Escape');
+      expect(zero.cbs.onFinished).toHaveBeenCalledTimes(1);
+      zero.unmount();
+
+      const two = setup({ roundItemCount: 2 });
+      await two.press('Escape');
+      expect(two.state).toBe('abschluss');
+      await two.press('Escape');
+      expect(two.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: false, relockOk: true, offline: false });
+      two.unmount();
+    });
+
+    it('finish from frei: lock confirmed → abschluss', async () => {
+      const h = setup({ roundItemCount: 1 });
+      await toFrei(h);
+      await act(async () => { h.cur.actions.finish(); await flush(); });
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('abschluss');
+      act(() => { h.cur.actions.finish(); });
+      expect(h.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: true, relockOk: true, offline: false });
+      h.unmount();
+    });
+
+    it('finish from frei: lock refused → stays frei, never finished', async () => {
+      const h = setup({ roundItemCount: 1 });
+      await toFrei(h);
+      await h.press('Escape');
+      await h.resolve(h.last('handGuide'), { success: false, message: 'Arm nicht fest.' });
+      expect(h.state).toBe('frei');
+      expect(h.cur.relock).toBe('failed');
+      expect(h.cbs.onFinished).not.toHaveBeenCalled();
+      h.unmount();
+    });
+
+    it('„Fertig" does what Esc does: countdown cancels, aufnahme stops, vorschau stops the preview', async () => {
+      const h = setup();
+      await h.press(' ');
+      act(() => { h.cur.actions.finish(); });
+      expect(h.state).toBe('fest');
+      await h.advance(450);
+      await toAufnahme(h);
+      await act(async () => { h.cur.actions.finish(); await flush(); });
+      expect(h.count('recordControl', 'stop')).toBe(1);
+      await h.resolve(h.last('recordControl'), { success: true, points_json: points(3) });
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('pruefen');
+      await act(async () => { h.cur.actions.previewOnRobot(); await flush(); });
+      await h.resolve(h.last('replayMotion'), { success: true });
+      await act(async () => { h.cur.actions.finish(); await flush(); });
+      expect(h.count('handGuide', false)).toBe(2);
+      expect(h.state).toBe('vorschau');
+      h.unmount();
+    });
+  });
+
+  describe('offline', () => {
+    it('ignores teaching keys (still prevented)', async () => {
+      const h = setup({ heartbeatOk: false });
+      const e = await h.press(' ');
+      expect(e.defaultPrevented).toBe(true);
+      await h.advance(5000);
+      expect(h.calls).toHaveLength(0);
+      expect(h.state).toBe('fest');
+      h.unmount();
+    });
+
+    it('Esc in frei closes at once: hand_guide(false) fired, offline onFinished', async () => {
+      const h = setup();
+      await toFrei(h);
+      h.rerender({ heartbeatOk: false });
+      await h.press('Escape');
+      expect(h.count('handGuide', false)).toBe(1);
+      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_CLOSE_OFFLINE);
+      expect(h.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: true, relockOk: false, offline: true });
+      h.unmount();
+      expect(h.count('handGuide', false)).toBe(1); // unmount does not tear down twice
+    });
+
+    it('a thrown hand_guide(false) during finish closes offline', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.press('Escape');
+      await h.reject(h.last('handGuide'));
+      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_CLOSE_OFFLINE);
+      expect(h.cbs.onFinished).toHaveBeenCalledWith(expect.objectContaining({ offline: true, relockOk: false }));
+      h.unmount();
+    });
+  });
+
+  describe('leader turned on while teaching by hand', () => {
+    it('frei: reports, locks, then only Esc works', async () => {
+      const h = setup();
+      await toFrei(h);
+      h.rerender({ leaderLive: true });
+      await act(async () => { await flush(); });
+      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_LEADER_TURNED_ON);
+      expect(h.count('handGuide', false)).toBe(1);
+      await h.resolve(h.last('handGuide'), { success: true });
+      const before = h.calls.length;
+      await h.press(' ');
+      await h.press('f');
+      await h.press('p');
+      await h.advance(5000);
+      expect(h.calls).toHaveLength(before);
+      await h.press('Escape');
+      expect(h.cbs.onFinished).toHaveBeenCalledTimes(1);
+      h.unmount();
+    });
+
+    it('countdown is cancelled and aufnahme is stopped', async () => {
+      const c = setup();
+      await c.press('f');
+      c.rerender({ leaderLive: true });
+      expect(c.state).toBe('fest');
+      await c.advance(5000);
+      expect(c.calls).toHaveLength(0);
+      c.unmount();
+
+      const a = setup();
+      await toAufnahme(a);
+      a.rerender({ leaderLive: true });
+      await act(async () => { await flush(); });
+      expect(a.count('recordControl', 'stop')).toBe(1);
+      a.unmount();
+    });
+  });
+
+  describe('keyboard rules', () => {
+    it('collisionActive: nothing handled and nothing prevented', async () => {
+      const h = setup({ collisionActive: true });
+      const e = await h.press(' ');
+      expect(e.defaultPrevented).toBe(false);
+      await h.advance(5000);
+      expect(h.calls).toHaveLength(0);
+      expect(h.state).toBe('fest');
+      h.unmount();
+    });
+
+    it('target rule: interactive targets keep their native keys, Esc on a button still finishes', async () => {
+      const h = setup();
+      const button = document.createElement('button');
+      const input = document.createElement('input');
+      document.body.append(button, input);
+      const space = await h.press(' ', { on: button });
+      expect(space.defaultPrevented).toBe(false);
+      expect(h.state).toBe('fest');
+      const escInput = await h.press('Escape', { on: input });
+      expect(escInput.defaultPrevented).toBe(false);
+      expect(h.cbs.onFinished).not.toHaveBeenCalled();
+      const escButton = await h.press('Escape', { on: button });
+      expect(escButton.defaultPrevented).toBe(true);
+      expect(h.cbs.onFinished).toHaveBeenCalledTimes(1);
+      h.unmount();
+    });
+
+    it('Space on a plain div in pruefen is prevented and sends nothing', async () => {
+      const h = setup();
+      await toPruefen(h);
+      await h.advance(450);
+      const before = h.calls.length;
+      const e = await h.press(' ');
+      expect(e.defaultPrevented).toBe(true);
+      expect(h.calls).toHaveLength(before);
+      h.unmount();
+    });
+
+    it('a repeated key is ignored (prevented) and Space is debounced', async () => {
+      const h = setup();
+      const rep = await h.press(' ', { repeat: true });
+      expect(rep.defaultPrevented).toBe(true);
+      expect(h.state).toBe('fest');
+      await h.press(' ');
+      expect(h.state).toBe('countdown');
+      await h.advance(399);
+      const bounced = await h.press(' ');
+      expect(bounced.defaultPrevented).toBe(true);
+      expect(h.state).toBe('countdown');
+      await h.advance(1);
+      await h.press(' ');
+      expect(h.state).toBe('fest');
+      h.unmount();
+    });
+
+    it('a capture name is chosen before the service call', async () => {
+      const h = setup();
+      await h.press('p');
+      expect(h.namer.mock.invocationCallOrder[0])
+        .toBeLessThan(h.services.capturePose.mock.invocationCallOrder[0]);
+      h.unmount();
+    });
+  });
+
+  describe('teardown', () => {
+    it('unmount during a pending record start cancels once, after it answered', async () => {
+      const h = setup();
+      await h.press(' ');
+      await h.advance(3000);
+      const start = h.last('recordControl');
+      h.unmount();
+      expect(h.count('recordControl', 'cancel')).toBe(0);
+      await h.resolve(start, { success: true });
+      expect(h.count('recordControl', 'cancel')).toBe(1);
+      expect(h.count('handGuide', false)).toBe(0);
+    });
+
+    it('unmount in frei closes the session once; in fest sends nothing', async () => {
+      const f = setup();
+      await toFrei(f);
+      f.unmount();
+      expect(f.count('handGuide', false)).toBe(1);
+
+      const g = setup();
+      g.unmount();
+      expect(g.calls).toHaveLength(0);
+    });
+
+    it('pagehide behaves like unmount', async () => {
+      const h = setup();
+      await toFrei(h);
+      act(() => { window.dispatchEvent(new Event('pagehide')); });
+      expect(h.count('handGuide', false)).toBe(1);
+      h.unmount();
+      expect(h.count('handGuide', false)).toBe(1);
+
+      const p = setup();
+      await p.press(' ');
+      await p.advance(3000);
+      const start = p.last('recordControl');
+      act(() => { window.dispatchEvent(new Event('pagehide')); });
+      await p.resolve(start, { success: true });
+      expect(p.count('recordControl', 'cancel')).toBe(1);
+      p.unmount();
+    });
+
+    it('a start still QUEUED at teardown is never sent', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.press('p'); // capture in flight
+      await h.press(' '); // start queued behind it
+      h.unmount();
+      await h.resolve(h.last('capturePose'), { success: true });
+      expect(h.count('recordControl', 'start')).toBe(0);
+      expect(h.count('handGuide', false)).toBe(1);
+    });
+
+    it('a replay answered after unmount is aborted and arms no feed or timer', async () => {
+      const h = setup();
+      await toPruefen(h);
+      await act(async () => { h.cur.actions.previewOnRobot(); await flush(); });
+      const replay = h.last('replayMotion');
+      h.unmount();
+      expect(h.count('handGuide', false)).toBe(1);
+      await h.resolve(replay, { success: true });
+      expect(h.count('handGuide', false)).toBe(2);
+      expect(h.feed.subs).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('a start answered after unmount arms no timer', async () => {
+      const h = setup();
+      await h.press('f');
+      await h.advance(3000);
+      const start = h.last('handGuide');
+      h.unmount();
+      await h.resolve(start, { success: true });
+      expect(h.count('handGuide', false)).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('unmount in vorschau aborts the drive (the Stopp nobody can press any more)', async () => {
+      const h = setup();
+      await toPruefen(h);
+      await act(async () => { h.cur.actions.previewOnRobot(); await flush(); });
+      await h.resolve(h.last('replayMotion'), { success: true });
+      h.unmount();
+      expect(h.count('handGuide', false)).toBe(2);
+      expect(h.feed.unsubs).toBe(1);
+    });
+  });
+});

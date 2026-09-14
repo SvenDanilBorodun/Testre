@@ -10,6 +10,8 @@ Covers:
     + the cloner's ownership
   * IDOR: a non-owner cannot create / delete another user's trajectory (404),
     and cannot list a workflow they can't see (404)
+  * rename (PATCH) renames every row sharing the target's name, owner-scoped,
+    409 on a clash, created_at untouched; the PATCH rate-limit rule exists
   * the schema probe (main.py) lists "workflow_trajectories"
 
 Follows the house pattern: stub fastapi + pydantic + the auth / supabase leaf
@@ -20,6 +22,7 @@ validators are NOT stubbed — the real size/type/finite logic runs.
 from __future__ import annotations
 
 import ast
+import copy
 import os
 import sys
 import types
@@ -236,6 +239,15 @@ class _FakeQuery:
             rows = [r for r in db.trajectories.values() if self._match(r)]
             if self._op == "select":
                 rows = self._sorted_limited(rows)
+                return SimpleNamespace(data=[_public(r) for r in rows])
+            if self._op == "update":
+                # Apply the payload to EVERY matched row (never touching _seq, so
+                # created_at order is unchanged) and bump updated_at the way
+                # trg_workflow_trajectories_touch does; return the updated rows
+                # like PostgREST's return=representation.
+                for r in rows:
+                    r.update(self._payload)
+                    r["updated_at"] = f"u{db.next_seq():06d}"
                 return SimpleNamespace(data=[_public(r) for r in rows])
             if self._op == "delete":
                 for r in rows:
@@ -789,7 +801,156 @@ class TestTrajectoryRoutes(unittest.TestCase):
         self.assertIn(created.id, db.trajectories)
 
 
-class TestCloneCarriesTrajectories(unittest.TestCase):
+class TestTrajectoryRename(unittest.TestCase):
+    """PATCH /workflows/{id}/trajectories/{tid}: every row sharing the target's
+    name is renamed in one owner-scoped UPDATE (the versions of a name are one
+    recording to the student)."""
+
+    def _seed(self, db, names=("Bewegung1",), owner="owner"):
+        with _Ctx(db):
+            w = wf.create_workflow(_create_wf_payload(), user=SimpleNamespace(id=owner))
+            rows = [
+                wf.create_trajectory(w.id, _traj_payload(name=n), user=SimpleNamespace(id=owner))
+                for n in names
+            ]
+        return w, rows
+
+    def test_owner_renames_a_single_row(self):
+        db = _FakeDB()
+        w, (row,) = self._seed(db)
+        before = dict(db.trajectories[row.id])
+        with _Ctx(db):
+            res = wf.rename_trajectory(w.id, row.id, SimpleNamespace(name="Neu"), user=_OWNER)
+        self.assertEqual(res.name, "Neu")
+        self.assertEqual(res.id, row.id)
+        self.assertIsNone(res.samples)
+        stored = db.trajectories[row.id]
+        self.assertEqual(stored["name"], "Neu")
+        self.assertEqual(stored["created_at"], before["created_at"])
+        self.assertNotEqual(stored["updated_at"], before["updated_at"])
+        # The samples blob itself is untouched — only the response omits it.
+        self.assertEqual(stored["samples"], before["samples"])
+
+    def test_every_version_of_the_name_is_renamed(self):
+        db = _FakeDB()
+        w, (old_winken, new_winken, tanz) = self._seed(db, names=("Winken", "Winken", "Tanz"))
+        created = {r.id: db.trajectories[r.id]["created_at"] for r in (old_winken, new_winken)}
+        with _Ctx(db):
+            res = wf.rename_trajectory(w.id, old_winken.id, SimpleNamespace(name="Gruß"), user=_OWNER)
+        self.assertEqual(res.id, old_winken.id)
+        self.assertEqual(res.name, "Gruß")
+        self.assertEqual(db.trajectories[old_winken.id]["name"], "Gruß")
+        self.assertEqual(db.trajectories[new_winken.id]["name"], "Gruß")
+        self.assertEqual(db.trajectories[tanz.id]["name"], "Tanz")
+        for tid, ts in created.items():
+            self.assertEqual(db.trajectories[tid]["created_at"], ts)
+        # by-name newest-wins still resolves to the NEWER version.
+        with _Ctx(db):
+            got = wf.get_trajectory_by_name(w.id, "Gruß", user=_OWNER)
+        self.assertEqual(got.points, db.trajectories[new_winken.id]["samples"]["points"])
+
+    def test_attacker_gets_workflow_404_and_nothing_changes(self):
+        db = _FakeDB()
+        w, (row,) = self._seed(db)
+        snapshot = copy.deepcopy(db.trajectories)
+        with _Ctx(db):
+            with self.assertRaises(HTTPException) as cm:
+                wf.rename_trajectory(w.id, row.id, SimpleNamespace(name="Neu"), user=_ATTACKER)
+        self.assertEqual(cm.exception.status_code, 404)
+        self.assertEqual(cm.exception.detail, "Workflow nicht gefunden")
+        self.assertEqual(db.trajectories, snapshot)
+
+    def test_id_of_the_owners_other_workflow_is_404(self):
+        db = _FakeDB()
+        w1, _ = self._seed(db, names=("A",))
+        _w2, (other,) = self._seed(db, names=("B",))
+        snapshot = copy.deepcopy(db.trajectories)
+        with _Ctx(db):
+            with self.assertRaises(HTTPException) as cm:
+                wf.rename_trajectory(w1.id, other.id, SimpleNamespace(name="Neu"), user=_OWNER)
+        self.assertEqual(cm.exception.status_code, 404)
+        self.assertEqual(cm.exception.detail, "Bewegung nicht gefunden")
+        self.assertEqual(db.trajectories, snapshot)
+
+    def test_clash_with_an_existing_name_is_409_and_nothing_changes(self):
+        db = _FakeDB()
+        w, (winken, _tanz) = self._seed(db, names=("Winken", "Tanz"))
+        snapshot = copy.deepcopy(db.trajectories)
+        with _Ctx(db):
+            with self.assertRaises(HTTPException) as cm:
+                wf.rename_trajectory(w.id, winken.id, SimpleNamespace(name="Tanz"), user=_OWNER)
+        self.assertEqual(cm.exception.status_code, 409)
+        self.assertEqual(
+            cm.exception.detail,
+            'Eine Bewegung mit dem Namen „Tanz" gibt es schon — bitte einen anderen Namen wählen.',
+        )
+        self.assertEqual(db.trajectories, snapshot)
+
+    def test_clash_detail_is_localized(self):
+        # apiRequest keeps a server detail only when it contains ä/ö/ü/ß; an
+        # English-looking 409 would be replaced by a generic client message.
+        db = _FakeDB()
+        w, (winken, _tanz) = self._seed(db, names=("Winken", "Tanz"))
+        with _Ctx(db):
+            with self.assertRaises(HTTPException) as cm:
+                wf.rename_trajectory(w.id, winken.id, SimpleNamespace(name="Tanz"), user=_OWNER)
+        self.assertTrue(any(ch in cm.exception.detail for ch in "äöüß"))
+
+    def test_same_name_is_200_without_a_write(self):
+        db = _FakeDB()
+        w, (row,) = self._seed(db, names=("Winken",))
+        before = dict(db.trajectories[row.id])
+        with _Ctx(db):
+            res = wf.rename_trajectory(w.id, row.id, SimpleNamespace(name=" Winken "), user=_OWNER)
+        self.assertEqual(res.name, "Winken")
+        self.assertIsNone(res.samples)
+        self.assertEqual(db.trajectories[row.id]["updated_at"], before["updated_at"])
+
+    def test_new_name_is_stored_trimmed(self):
+        db = _FakeDB()
+        w, (row,) = self._seed(db)
+        with _Ctx(db):
+            res = wf.rename_trajectory(w.id, row.id, SimpleNamespace(name="  Neu  "), user=_OWNER)
+        self.assertEqual(res.name, "Neu")
+        self.assertEqual(db.trajectories[row.id]["name"], "Neu")
+
+    def test_invalid_name_is_400_and_nothing_changes(self):
+        db = _FakeDB()
+        w, (row,) = self._seed(db)
+        snapshot = copy.deepcopy(db.trajectories)
+        with _Ctx(db):
+            with self.assertRaises(HTTPException) as cm:
+                wf.rename_trajectory(w.id, row.id, SimpleNamespace(name="A/B"), user=_OWNER)
+        self.assertEqual(cm.exception.status_code, 400)
+        self.assertEqual(db.trajectories, snapshot)
+
+    def test_a_row_of_another_owner_sharing_the_name_is_not_renamed(self):
+        # Defence in depth (Rule §4): the UPDATE is re-scoped by owner_user_id,
+        # so a row under this workflow that the caller does not own keeps its
+        # name even when it shares the old one.
+        db = _FakeDB()
+        w, (mine,) = self._seed(db, names=("Winken",))
+        foreign_id = db.new_traj_id()
+        db.trajectories[foreign_id] = {
+            **copy.deepcopy(db.trajectories[mine.id]),
+            "id": foreign_id, "owner_user_id": "someone-else", "_seq": db.next_seq(),
+        }
+        with _Ctx(db):
+            wf.rename_trajectory(w.id, mine.id, SimpleNamespace(name="Neu"), user=_OWNER)
+        self.assertEqual(db.trajectories[mine.id]["name"], "Neu")
+        self.assertEqual(db.trajectories[foreign_id]["name"], "Winken")
+
+    def test_the_target_row_must_be_owned_by_the_caller(self):
+        db = _FakeDB()
+        w, (mine,) = self._seed(db, names=("Winken",))
+        db.trajectories[mine.id]["owner_user_id"] = "someone-else"
+        snapshot = copy.deepcopy(db.trajectories)
+        with _Ctx(db):
+            with self.assertRaises(HTTPException) as cm:
+                wf.rename_trajectory(w.id, mine.id, SimpleNamespace(name="Neu"), user=_OWNER)
+        self.assertEqual(cm.exception.status_code, 404)
+        self.assertEqual(cm.exception.detail, "Bewegung nicht gefunden")
+        self.assertEqual(db.trajectories, snapshot)
     def test_clone_copies_trajectories_under_new_workflow(self):
         db = _FakeDB()
         with _Ctx(db):
@@ -922,6 +1083,60 @@ class TestWorkflowsRateLimitedPerUser(unittest.TestCase):
             },
         )
         for fn in post_fns:
+            self.assertTrue(
+                _has_current_user_dep(fn),
+                f"{fn.name} must require Depends(get_current_user)",
+            )
+
+    def test_patch_rule_present(self):
+        # _RATE_LIMIT_RULES is an ANNOTATED assignment (ast.AnnAssign), which
+        # _extract_per_user_prefixes' ast.Assign walk would never see.
+        main_path = os.path.join(os.path.dirname(HERE), "main.py")
+        with open(main_path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=main_path)
+        rules = [
+            ast.literal_eval(n.value)
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AnnAssign)
+            and isinstance(n.target, ast.Name)
+            and n.target.id == "_RATE_LIMIT_RULES"
+        ]
+        self.assertEqual(len(rules), 1, "_RATE_LIMIT_RULES not found in main.py")
+        self.assertIn(("PATCH", "/workflows", 30, 60.0), rules[0])
+
+    def test_all_workflows_patch_routes_require_jwt(self):
+        # The PATCH rule shares the per-user /workflows prefix, so every PATCH
+        # handler must require a JWT (same precondition as the POST routes).
+        wf_path = os.path.join(os.path.dirname(HERE), "routes", "workflows.py")
+        with open(wf_path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=wf_path)
+
+        def _is_patch(fn: ast.FunctionDef) -> bool:
+            return any(
+                isinstance(d, ast.Call)
+                and isinstance(d.func, ast.Attribute)
+                and d.func.attr == "patch"
+                for d in fn.decorator_list
+            )
+
+        def _has_current_user_dep(fn: ast.FunctionDef) -> bool:
+            return any(
+                isinstance(default, ast.Call)
+                and isinstance(default.func, ast.Name)
+                and default.func.id == "Depends"
+                and default.args
+                and isinstance(default.args[0], ast.Name)
+                and default.args[0].id == "get_current_user"
+                for default in fn.args.defaults
+            )
+
+        patch_fns = [
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and _is_patch(n)
+        ]
+        self.assertEqual(
+            {fn.name for fn in patch_fns}, {"update_workflow", "rename_trajectory"}
+        )
+        for fn in patch_fns:
             self.assertTrue(
                 _has_current_user_dep(fn),
                 f"{fn.name} must require Depends(get_current_user)",

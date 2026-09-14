@@ -536,13 +536,18 @@ logger.info("CORS allowed origins: %s", allowed_origins)
 _rate_limiter = RateLimiter()
 
 # (method, path prefix, limit, window seconds). Method "*" matches any.
-# Method-aware so we can rate-limit POST /workflows (creation) without
-# also throttling PATCH /workflows/{id} which the Blockly editor calls
-# on every debounced save.
+# Method-aware so each verb under one prefix gets its own budget: POST
+# /workflows (creation, clone, restore, trajectory upload) is held at
+# 10/min, PATCH /workflows (explicit saves + recording renames) at 30/min.
+# The Blockly editor's debounced autosave is local IndexedDB and never
+# reaches this API.
 _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     ("*", "/trainings/start", 10, 60.0),
     ("*", "/trainings/cancel", 20, 60.0),
     ("POST", "/workflows", 10, 60.0),
+    # Recording renames + explicit workflow saves; per-user keyed via the
+    # `/workflows` prefix. Autosave is local IndexedDB and never PATCHes.
+    ("PATCH", "/workflows", 30, 60.0),
     # Teacher classroom + template creation. Audit §2.1: the v1 ship
     # left teacher template POST unrate-limited, leaving a DOS hole
     # next to the student-side guarded path. The prefix covers both
@@ -769,12 +774,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             else:
                 matched = path == prefix or path.startswith(prefix + "/")
             if matched:
-                # /workflows must NOT match /workflows/{id} for PATCH
-                # — when the rule pins the method, allow the prefix
-                # match to apply across path lengths; when it's "*",
-                # the legacy behaviour is preserved. The POST-on-create
-                # rule combined with method=POST ensures PATCH on the
-                # same prefix is unaffected.
+                # The prefix match applies across path lengths, so a
+                # method-pinned rule covers every sub-resource under its
+                # prefix for THAT verb only: the POST /workflows rule never
+                # counts a PATCH, which has its own rule on the same prefix.
                 use_user_key = any(
                     path.startswith(p) for p in _PER_USER_RATE_LIMIT_PREFIXES
                 )

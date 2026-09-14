@@ -46,6 +46,7 @@ from physical_ai_server.workflow.handlers.motion import (
     _release_motion_lock,
     _TEMPO_MAX,
     _TEMPO_MIN,
+    resolve_destination_z,
 )
 from physical_ai_server.workflow.interpreter import (
     Interpreter,
@@ -63,6 +64,23 @@ _HOME_FULL_JOINTS = [0.0, -math.pi / 2, math.pi / 2, 0.0, 0.0, 0.8]
 # attempt; an overall cap so a 100-block workflow doesn't stall start.
 _IKPRECHECK_PER_TARGET_TIMEOUT_S = 0.05
 _IKPRECHECK_TOTAL_BUDGET_S = 1.0
+
+# The student's document destinations (the Sammlung's Ziele / Positionen) ride
+# a top-level ``destinations`` sibling of /workflow/start. The cap bounds a
+# crafted payload; the kind → plane_tracked map is PROVENANCE decided in code,
+# never read back out of payload data (a camera pin re-asks the table height,
+# a measured pose keeps its z — motion.resolve_destination_z).
+MAX_PAYLOAD_DESTINATIONS = 64
+_DESTINATION_KIND_PLANE_TRACKED = {'pin': True, 'pose': False}   # provenance -> flag, IN CODE
+
+
+def _payload_coordinate_error_de(name: str) -> str:
+    """Skip reason for a Sammlung entry whose x/y/z is not a usable number.
+
+    Deliberately NOT destination_coordinate_error_de: that sentence tells the
+    student to select a BLOCK and click the camera again, and a Sammlung entry
+    has no block."""
+    return f'„{name}" hat keine gültigen Koordinaten.'
 
 
 @dataclass
@@ -811,9 +829,26 @@ class WorkflowManager:
                         object_catalog = None
                         object_catalog_error = str(e)
 
-                destinations = dict(self._persisted_destinations)
-                for k, v in (self._load_destinations() or {}).items():
-                    destinations.setdefault(k, v)
+                # Destination precedence (highest first): pin/current STATEMENTS
+                # at run time (they overwrite ctx.destinations), then the payload
+                # ``destinations`` sibling — the student's document. Parsing
+                # returns data and never raises, so it cannot skip the
+                # ``finally`` below or a refusal guard above.
+                payload_destinations, skipped_destinations, document_sent = (
+                    self._parse_destinations(workflow_json))
+                destinations = dict(payload_destinations)
+                if not document_sent:
+                    # An older client that does not send the student's document:
+                    # the legacy robot-local merge, unchanged. A client that DOES
+                    # send it is authoritative — robot-local entries are written
+                    # under automatic names every student shares on one rig, and
+                    # falling back to them resolved a deleted Ziel to ANOTHER
+                    # student's point (measured). Nothing is written back either
+                    # way, so a run or preview leaves no robot-local residue.
+                    for k, v in self._persisted_destinations.items():
+                        destinations.setdefault(k, v)
+                    for k, v in (self._load_destinations() or {}).items():
+                        destinations.setdefault(k, v)
 
                 # Batch 2b — recorded trajectories: server-persisted recordings first,
                 # then the top-level ``trajectories`` sibling of workflow_json
@@ -864,7 +899,12 @@ class WorkflowManager:
                 # surfaces as setWarningText on the affected blocks. A concrete pin
                 # that sits inside a no-go zone is flagged on the same list. The
                 # safety envelope is still the authoritative runtime gate.
-                unreachable = self._ik_precheck(interpreter, ik_instance, zones)
+                # A ``destination_ref`` no pin/current statement sets is checked
+                # against the merged destinations, height resolved under THIS
+                # run's calibration (advisory, see _precheck_destination_points).
+                unreachable = self._ik_precheck(interpreter, ik_instance, zones,
+                                                destinations=destinations,
+                                                calib=calib)
 
                 # Audit fix #6: seed ctx.last_full_joints synchronously HERE,
                 # before hat threads (or the main daemon) ever spawn. The
@@ -1014,6 +1054,11 @@ class WorkflowManager:
                 # types. Best-effort — a diagnostic must never stop a run.
                 try:
                     self._diagnose_events(interpreter, object_catalog)
+                    # Skipped Sammlung entries — only on a run that really starts,
+                    # once per identical reason.
+                    for reason in skipped_destinations:
+                        self._warn_once(f'dest-skip:{reason}',
+                                        f'[WARNUNG] Ziel aus der Sammlung übersprungen: {reason}')
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -1353,6 +1398,69 @@ class WorkflowManager:
         return raw if isinstance(raw, list) else None
 
     @staticmethod
+    def _parse_destinations(workflow_json: str) -> tuple[dict[str, dict[str, Any]], list[str], bool]:
+        """Top-level `destinations` sibling of /workflow/start: [{name, kind, x, y, z}, ...].
+
+        Returns (entries, german_skip_reasons, present). Never raises: a bad entry is
+        skipped with a German reason, a bad payload yields ({}, [], False). `present`
+        is True when the payload carries the sibling as a list (every client since
+        the Sammlung); start() then treats the document as authoritative.
+        plane_tracked is decided HERE, in code, from a CLOSED kind enum — an unknown
+        or missing kind is skipped, never defaulted."""
+        from physical_ai_server.workflow.handlers.destinations import destination_name_error_de
+        try:
+            parsed = json.loads(workflow_json)
+        except (ValueError, TypeError):
+            return {}, [], False
+        if not isinstance(parsed, dict):
+            return {}, [], False
+        raw = parsed.get('destinations')
+        if not isinstance(raw, list):
+            return {}, [], False
+        out: dict[str, dict[str, Any]] = {}
+        skipped: list[str] = []
+        for i, item in enumerate(raw):
+            if len(out) >= MAX_PAYLOAD_DESTINATIONS:
+                skipped.append(
+                    f'Mehr als {MAX_PAYLOAD_DESTINATIONS} Ziele — der Rest wurde nicht übernommen.')
+                break
+            if not isinstance(item, dict):
+                skipped.append(f'Ziel Nr. {i + 1} ist ungültig.')
+                continue
+            name = item.get('name')
+            if isinstance(name, str):
+                name = name.strip()
+            name_error = destination_name_error_de(name)
+            if name_error is not None:
+                skipped.append(name_error)
+                continue
+            kind = item.get('kind')
+            if not isinstance(kind, str) or kind not in _DESTINATION_KIND_PLANE_TRACKED:
+                skipped.append(f'„{name}" hat eine unbekannte Art.')
+                continue
+            coords = (item.get('x'), item.get('y'), item.get('z'))
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in coords):
+                skipped.append(_payload_coordinate_error_de(name))
+                continue
+            try:
+                # float() BEFORE the finite test: a 401-digit JSON integer is an int
+                # that float() / math.isfinite() refuse with OverflowError, which
+                # is neither TypeError nor ValueError.
+                fx, fy, fz = (float(v) for v in coords)
+            except (OverflowError, ValueError, TypeError):
+                skipped.append(_payload_coordinate_error_de(name))
+                continue
+            if not all(math.isfinite(v) for v in (fx, fy, fz)):
+                skipped.append(_payload_coordinate_error_de(name))
+                continue
+            if name in out:
+                skipped.append(f'„{name}" gibt es doppelt.')
+                continue
+            out[name] = {'x': fx, 'y': fy, 'z': fz, 'label': name,
+                         'plane_tracked': _DESTINATION_KIND_PLANE_TRACKED[kind]}
+        return out, skipped, True
+
+    @staticmethod
     def _parse_trajectories(workflow_json: str) -> dict[str, Any]:
         """Extract the top-level ``trajectories`` sibling injected into the
         ``/workflow/start`` payload (Batch 2b, CONTRACT C: ``{"<name>": {"fps":
@@ -1401,24 +1509,57 @@ class WorkflowManager:
         raw = parsed.get('tempo')
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             return 1.0
-        val = float(raw)
+        try:
+            val = float(raw)
+        except OverflowError:
+            # A JSON integer too large for a float (json.loads accepts one) is a
+            # malformed value like any other — it must not escape start().
+            return 1.0
         if not math.isfinite(val) or val <= 0.0:
             return 1.0
         return max(_TEMPO_MIN, min(_TEMPO_MAX, val))
+
+    @staticmethod
+    def _precheck_destination_points(
+        destinations, calib,
+    ) -> dict[str, tuple[float, float, float]]:
+        """name → xyz of the stored destinations, for the ADVISORY pre-check.
+
+        The height is resolved the way the run will resolve it
+        (``resolve_destination_z``): a plane-tracked pin re-asks the table in
+        force under ``calib``, a measured pose keeps its z. Anything that cannot
+        be resolved to three finite floats is left out — the pre-check is a
+        warning, never a refusal, and the runtime stays the authoritative gate."""
+        calib = calib or {}
+        shim = types.SimpleNamespace(z_table=calib.get('z_table'),
+                                     table_plane=calib.get('table_plane'))
+        out: dict[str, tuple[float, float, float]] = {}
+        for name, entry in (destinations or {}).items():
+            try:
+                x, y = float(entry['x']), float(entry['y'])
+                z = resolve_destination_z(shim, entry)
+            except Exception:  # noqa: BLE001 — advisory
+                continue
+            if all(math.isfinite(v) for v in (x, y, z)):
+                out[name] = (x, y, z)
+        return out
 
     def _ik_precheck(
         self,
         interpreter: Interpreter,
         ik,
         zones: list | None = None,
+        destinations: dict[str, dict[str, Any]] | None = None,
+        calib: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        extra = self._precheck_destination_points(destinations, calib)
         if ik is None or not hasattr(ik, 'solve'):
             # Even without an IK solver we can still flag concrete pins that sit
             # inside a no-go zone (a pure-geometry test).
             if zones:
-                return self._zone_precheck_only(interpreter, zones)
+                return self._zone_precheck_only(interpreter, zones, extra=extra)
             return []
-        targets = interpreter.collect_concrete_destinations()
+        targets = interpreter.collect_concrete_destinations(extra_destinations=extra)
         if not targets:
             return []
         unreachable: list[dict[str, Any]] = []
@@ -1464,12 +1605,13 @@ class WorkflowManager:
         self,
         interpreter: Interpreter,
         zones: list,
+        extra: dict[str, tuple[float, float, float]] | None = None,
     ) -> list[dict[str, Any]]:
         """Flag concrete destination pins that sit inside a no-go zone, when no
         IK solver is available (pure geometry)."""
         out: list[dict[str, Any]] = []
         zone_ctx = types.SimpleNamespace(zones=zones)
-        for target in interpreter.collect_concrete_destinations():
+        for target in interpreter.collect_concrete_destinations(extra_destinations=extra):
             xyz = target['xyz']
             if _point_in_zone(zone_ctx, xyz[0], xyz[1], xyz[2]):
                 out.append({

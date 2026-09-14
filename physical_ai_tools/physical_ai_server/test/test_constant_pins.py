@@ -192,6 +192,9 @@ _SHIPPED_DEFAULTS = [
     ('workflow/workflow_manager.py', 'MAX_HAT_HANDLERS', '16'),
     ('workflow/workflow_manager.py', 'HAT_KEEPALIVE_MAX_S', '300.0'),
     ('workflow/workflow_manager.py', 'HAT_MIN_CYCLE_S', '0.05'),
+    # The Sammlung's per-run cap on the payload ``destinations`` sibling — the
+    # bound on what a crafted /workflow/start can put into ctx.destinations.
+    ('workflow/workflow_manager.py', 'MAX_PAYLOAD_DESTINATIONS', '64'),
     # Promoted OUT of the ALLOWLIST: it is the number the velocity floor
     # extends every segment against, so a silent drift changes how fast the
     # arm is allowed to move on every path in the package.

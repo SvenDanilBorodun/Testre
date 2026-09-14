@@ -329,7 +329,9 @@ def _parse_minmax(raw) -> Optional[tuple[list[float], list[float]]]:
     try:
         mnf = [float(v) for v in mn]
         mxf = [float(v) for v in mx]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: a JSON integer too large for a float (json.loads
+        # accepts a 401-digit one) is malformed too, not a crash.
         return None
     if not all(math.isfinite(v) for v in mnf + mxf):
         return None

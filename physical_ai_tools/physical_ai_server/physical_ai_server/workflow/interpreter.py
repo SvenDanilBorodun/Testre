@@ -413,10 +413,21 @@ class Interpreter:
                 main.append(block)
         return main, hats
 
-    def collect_concrete_destinations(self) -> list[dict[str, Any]]:
+    def collect_concrete_destinations(
+        self,
+        extra_destinations: dict[str, tuple[float, float, float]] | None = None,
+    ) -> list[dict[str, Any]]:
         """Walk the tree and collect every move_to / pickup / drop_at
         block whose target is an immediately-resolvable XYZ. Used by
         WorkflowManager.start() for the IK / Sperrzone pre-check.
+
+        ``extra_destinations`` (name → xyz) are the STORED destinations the run
+        starts with (the payload document, or the legacy robot-local merge).
+        A ref resolves with precedence pin statement → ``destination_current``
+        statement (unknown before the run, so not concrete) → extra → nothing,
+        which is the order the runtime overwrites ``ctx.destinations`` in. An
+        extra z is advisory: the caller resolved it plane-aware under this
+        run's calibration. Omitted, the walk is exactly what it was before.
 
         RESOLVE THE WAY THE RUNTIME DOES. This used to match only a
         ``destination_pin`` sitting INSIDE a value input — and that block is a
@@ -438,6 +449,7 @@ class Interpreter:
         warning. The runtime remains the authoritative gate either way.
         """
         pins: dict[str, tuple[float, float, float]] = {}
+        current_names: set[str] = set()
         consumers: list[dict[str, Any]] = []
 
         def walk(block: dict[str, Any] | None) -> None:
@@ -455,6 +467,10 @@ class Interpreter:
                 xyz = self._extract_concrete_xyz(block)
                 if name and xyz is not None:
                     pins[name] = xyz
+            elif btype == 'edubotics_destination_current':
+                name = self._pin_name(block)
+                if name:
+                    current_names.add(name)
             elif btype in {'edubotics_move_to', 'edubotics_pickup',
                            'edubotics_drop_at'}:
                 target = (self._get_input_block(block, 'DESTINATION')
@@ -483,7 +499,9 @@ class Interpreter:
 
         out: list[dict[str, Any]] = []
         for consumer in consumers:
-            xyz = self._resolve_concrete_target(consumer['target'], pins)
+            xyz = self._resolve_concrete_target(
+                consumer['target'], pins, extra=extra_destinations,
+                current_names=frozenset(current_names))
             if xyz is not None:
                 out.append({
                     'block_id': consumer['block_id'],
@@ -497,18 +515,29 @@ class Interpreter:
         cls,
         target: dict[str, Any] | None,
         pins: dict[str, tuple[float, float, float]],
+        extra: dict[str, tuple[float, float, float]] | None = None,
+        current_names: frozenset = frozenset(),
     ) -> tuple[float, float, float] | None:
         """XYZ for a move_to/pickup/drop_at target, or None when it can only be
-        known at run time (a „Position von" lookup, a variable, an unpinned
-        name). Only ``destination_ref`` → a pinned name is resolvable statically;
-        ``destination_current`` deliberately is not (it captures wherever the
-        arm happens to be)."""
+        known at run time (a „Position von" lookup, a variable, an unknown
+        name). Only ``destination_ref`` is resolvable statically, with the
+        precedence pin statement → ``destination_current`` statement (None: it
+        captures wherever the arm happens to be) → a stored ``extra`` entry
+        (advisory z, resolved plane-aware at run start) → None."""
         if not isinstance(target, dict):
             return None
         btype = target.get('type')
         if btype == 'edubotics_destination_ref':
             name = cls._pin_name(target)
-            return pins.get(name) if name else None
+            if not name:
+                return None
+            if name in pins:
+                return pins[name]
+            if name in current_names:
+                return None
+            if extra and name in extra:
+                return extra[name]
+            return None
         # Kept for hand-written / imported JSON: nothing the editor can build.
         if btype == 'edubotics_destination_pin':
             return cls._extract_concrete_xyz(target)

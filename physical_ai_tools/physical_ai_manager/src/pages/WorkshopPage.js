@@ -29,11 +29,17 @@ import JogPanel from '../components/Workshop/JogPanel';
 import RecordPanel from '../components/Workshop/RecordPanel';
 import RightDock from '../components/Workshop/RightDock';
 import { buildCatalogDims } from '../components/Workshop/simConstants';
-import { DE } from '../components/Workshop/blocks/messages_de';
+import { DE, formatDe } from '../components/Workshop/blocks/messages_de';
 import {
   applyPinnedCoordinates,
   setDriveToHandler,
 } from '../components/Workshop/blocks/destinations';
+import {
+  MAX_DESTINATION_ENTRIES,
+  getDestinationStore,
+  nextAutoName,
+  takenDestinationNames,
+} from '../components/Workshop/sammlung/destinationStore';
 import { useAutosave } from '../components/Workshop/useAutosave';
 import { slimSavePayload } from '../utils/blocklyPayload';
 import {
@@ -43,6 +49,8 @@ import {
   requestRecalibration,
   setDebuggerVisible,
 } from '../features/workshop/workshopSlice';
+import { fetchTrajectories } from '../features/workshop/studioAssetsSlice';
+import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
 import { useRosTopicSubscription } from '../hooks/useRosTopicSubscription';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import {
@@ -240,6 +248,17 @@ function WorkshopPage({ isActive }) {
   const selectedWorkflowId = useSelector((s) => s.workshop.selectedWorkflowId);
   const unsavedBlocklyJson = useSelector((s) => s.workshop.unsavedBlocklyJson);
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
+  // Effects key on whether a token EXISTS, never on its value: Supabase
+  // rotates the string on every TOKEN_REFRESHED (~hourly), and a hydrate keyed
+  // on it re-fetched the workflow and REMOUNTED the editor under the student.
+  // Callers read the current token through the ref.
+  const hasAccessToken = !!accessToken;
+  const accessTokenRef = useRef(accessToken);
+  useEffect(() => { accessTokenRef.current = accessToken; }, [accessToken]);
+  // The id this page itself just CREATED (first save of an unsaved workflow):
+  // the live editor already IS that document, so its hydrate is skipped once.
+  const skipHydrateForIdRef = useRef(null);
+  const robotType = useSelector((s) => (s.tasks && s.tasks.taskStatus ? s.tasks.taskStatus.robotType : ''));
   // Audit fix: prior path `s.auth?.user?.id` was always null (no
   // top-level `user` field on the auth slice). The Supabase user lives
   // under `session.user.id`. Without this fix the autosave scopeKey
@@ -537,8 +556,16 @@ function WorkshopPage({ isActive }) {
   useEffect(() => {
     let cancelled = false;
     if (!isActive) return undefined;
-    if (selectedWorkflowId && accessToken) {
-      getWorkflow(accessToken, selectedWorkflowId)
+    // The live editor IS this document — the page just created it; a re-fetch
+    // would remount the workspace and drop anything captured during the save
+    // round-trip. Consumed once, so a later re-open hydrates normally.
+    if (selectedWorkflowId && skipHydrateForIdRef.current === selectedWorkflowId) {
+      skipHydrateForIdRef.current = null;
+      return undefined;
+    }
+    const token = accessTokenRef.current;
+    if (selectedWorkflowId && token) {
+      getWorkflow(token, selectedWorkflowId)
         .then((w) => {
           if (cancelled) return;
           setInitialJsonForEditor(w?.blockly_json || null);
@@ -564,9 +591,10 @@ function WorkshopPage({ isActive }) {
     return () => { cancelled = true; };
     // unsavedBlocklyJson intentionally omitted from deps: we only want
     // to seed once per workflow-id change. The change-listener inside
-    // BlocklyWorkspace keeps Redux in sync after that.
+    // BlocklyWorkspace keeps Redux in sync after that. The token is read
+    // through its ref: only its PRESENCE is a dependency (see hasAccessToken).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, selectedWorkflowId, accessToken]);
+  }, [isActive, selectedWorkflowId, hasAccessToken]);
 
   const handleEditorChange = useCallback(
     (json) => {
@@ -722,33 +750,62 @@ function WorkshopPage({ isActive }) {
     [dispatch]
   );
 
-  // Click-to-pin handler: when the student clicks the scene camera and
-  // a destination_pin block is selected, write the world coordinates
-  // returned by /workshop/mark_destination into that block's X/Y/Z
-  // fields. Without this, the destination_pin handler at runtime would
-  // overwrite the click data with zeros (audit §1.4).
-  const handleMarkDestination = useCallback(({ label, world_x, world_y, world_z }) => {
+  // Camera click → Ziel, without a prompt. CameraFeedOverlay asks for the
+  // label BEFORE it calls /workshop/mark_destination, so one point has one name
+  // on the server and in the editor:
+  //   * a „setze Ziel = Pin" block was selected last → that block's own NAME,
+  //     and its X/Y/Z fields receive the coordinates (the remembered id, not the
+  //     live selection — the camera click has already blurred the block in
+  //     Chromium, see lastPinBlockIdRef; getBlockById returns null for a
+  //     deleted block, which drops the stale id);
+  //   * otherwise → a new „Ziel n" in the document's destination store, which
+  //     the overlay then offers to rename inline.
+  const resolveMarkLabel = useCallback(() => {
     const ws = workspaceRef.current;
-    if (!ws) return;
-    // Use the remembered pin id, not live selection — the camera click has
-    // already blurred the block in Chromium (see lastPinBlockIdRef note).
-    // getBlockById returns null for a deleted/disposed block, so this also
-    // covers "selected a pin, then deleted it before clicking".
+    if (!ws) return null;
     const id = lastPinBlockIdRef.current;
     const block = id ? ws.getBlockById(id) : null;
-    if (!block || block.type !== 'edubotics_destination_pin') {
-      lastPinBlockIdRef.current = null;
-      toast(
-        'Tipp: Wähle zuerst einen "setze Ziel = Pin"-Block aus, '
-        + 'dann klicke in die Szenen-Kamera, damit die Koordinaten '
-        + `in den Block geschrieben werden. (Ziel "${label}" wurde `
-        + 'serverseitig gespeichert, aber kein Block aktualisiert.)',
-        { icon: '💡' },
-      );
-      return;
+    if (block && block.type === 'edubotics_destination_pin') {
+      return { label: (block.getFieldValue('NAME') || '').trim() || 'A', target: 'block', blockId: id };
     }
-    applyPinnedCoordinates(block, world_x, world_y, world_z);
-    toast.success(`Koordinaten in Block „${block.getFieldValue('NAME') || label}" geschrieben.`);
+    lastPinBlockIdRef.current = null;
+    const store = getDestinationStore(ws);
+    if (store.getEntries().length >= MAX_DESTINATION_ENTRIES) { toast.error(DE.ERR_STORE_FULL); return null; }
+    return { label: nextAutoName(DE.TEACH_AUTO_NAME_ZIEL, takenDestinationNames(ws)), target: 'store' };
+  }, []);
+
+  const handleMarkDestination = useCallback(({ label, target, blockId, world_x, world_y, world_z }) => {
+    const ws = workspaceRef.current;
+    if (!ws) return null;
+    if (target === 'block') {
+      const block = blockId ? ws.getBlockById(blockId) : null;
+      if (!block || block.type !== 'edubotics_destination_pin') return null;
+      applyPinnedCoordinates(block, world_x, world_y, world_z);
+      toast.success(formatDe(DE.CAMERA_PIN_WRITTEN, block.getFieldValue('NAME') || label));
+      return null;
+    }
+    const res = getDestinationStore(ws).add({
+      name: label,
+      kind: 'pin',
+      source: 'camera',
+      x: world_x,
+      y: world_y,
+      z: world_z,
+      robot_type: robotType || undefined,
+    });
+    if (!res.ok) { toast.error(res.error); return null; }
+    toast.success(formatDe(DE.CAMERA_ZIEL_CREATED, res.entry.name));
+    return { entryId: res.entry.id, name: res.entry.name };
+  }, [robotType]);
+
+  // The overlay's inline rename field. The result is returned so the field
+  // stays open (with the refusal toasted) until a name is accepted.
+  const handleRenameMarked = useCallback((entryId, rawName) => {
+    const ws = workspaceRef.current;
+    if (!ws) return { ok: false };
+    const res = getDestinationStore(ws).rename(entryId, rawName);
+    if (!res.ok) toast.error(res.error);
+    return res;
   }, []);
 
   // Autosave hook. Restores the most-recent local state if the parent
@@ -771,53 +828,126 @@ function WorkshopPage({ isActive }) {
     onRestore: handleAutosaveRestore,
   });
 
-  const handleSave = useCallback(async () => {
-    if (!accessToken) {
+  // ONE save path. The Speichern button, and later every caller that needs a
+  // saved workflow id (Vormachen, the Sammlung drawer), go through
+  // saveWorkflowNow. The document is serialised when a save STARTS (the live
+  // workspace first, the last onChange snapshot as the fallback), so nothing
+  // captured during an earlier round-trip is lost.
+  const selectedWorkflowIdRef = useRef(selectedWorkflowId);
+  const simSceneRef = useRef(simScene);
+  const editorJsonRef = useRef(editorJson);
+  const unsavedJsonRef = useRef(unsavedBlocklyJson);
+  useEffect(() => { selectedWorkflowIdRef.current = selectedWorkflowId; }, [selectedWorkflowId]);
+  useEffect(() => { simSceneRef.current = simScene; }, [simScene]);
+  useEffect(() => { editorJsonRef.current = editorJson; }, [editorJson]);
+  useEffect(() => { unsavedJsonRef.current = unsavedBlocklyJson; }, [unsavedBlocklyJson]);
+  const saveStateRef = useRef({ inflight: null, followUp: null, followUpToast: false });
+
+  const runSave = useCallback(async ({ toastOnSuccess }) => {
+    const token = accessTokenRef.current;
+    if (!token) {
       toast.error('Nicht angemeldet — Speichern nicht möglich.');
-      return;
+      return { ok: false };
     }
-    const json = editorJson || unsavedBlocklyJson;
+    let json = null;
+    const ws = workspaceRef.current;
+    if (ws) {
+      try {
+        json = Blockly.serialization.workspaces.save(ws);
+      } catch (_) {
+        json = null;
+      }
+    }
+    if (!json) json = editorJsonRef.current || unsavedJsonRef.current;
     if (!json) {
       toast.error('Workflow ist leer.');
-      return;
+      return { ok: false };
     }
-    // The DOCUMENT — `blocks`, `variables` and the student's canvas notes
-    // (`workspaceComments`) — and deliberately NOT the two editor-plugin keys.
-    // `suggested-blocks` grows ~16 bytes per drag and is never trimmed, so a
-    // long-lived workflow eventually crosses MAX_BLOCKLY_JSON_BYTES (256 KiB)
-    // and becomes unsaveable behind a German 413 the student cannot act on;
-    // `backpack` is one student's private clipboard, and this row is read by
-    // group siblings, cloned by `clone_workflow` and published as a classroom
-    // template. See `utils/blocklyPayload.js` for the measurements and for the
-    // disclosed cost (the stash no longer survives a reload). AUTOSAVE keeps
-    // the full output — it is local, per-student and never shared.
+    // The DOCUMENT — `blocks`, `variables`, the student's canvas notes
+    // (`workspaceComments`) and the Ziele/Positionen (`edubotics-destinations`)
+    // — and deliberately NOT the two editor-plugin keys. `suggested-blocks`
+    // grows ~16 bytes per drag and is never trimmed, so a long-lived workflow
+    // eventually crosses MAX_BLOCKLY_JSON_BYTES (256 KiB) and becomes unsaveable
+    // behind a German 413 the student cannot act on; `backpack` is one
+    // student's private clipboard, and this row is read by group siblings,
+    // cloned by `clone_workflow` and published as a classroom template. See
+    // `utils/blocklyPayload.js` for the measurements and for the disclosed cost
+    // (the stash no longer survives a reload). AUTOSAVE keeps the full output —
+    // it is local, per-student and never shared.
+    //
+    // Both `blockly_json` writes below stay one key per line: the call-site
+    // fence in utils/__tests__/blocklyPayload.test.js reads them line by line,
+    // and a one-line object literal reads as an unslimmed writer.
     const documentJson = slimSavePayload(json);
     setSaving(true);
     try {
-      if (selectedWorkflowId) {
-        await updateWorkflow(accessToken, selectedWorkflowId, {
+      if (selectedWorkflowIdRef.current) {
+        await updateWorkflow(token, selectedWorkflowIdRef.current, {
           blockly_json: documentJson,
-          sim_scene: simScene,
+          sim_scene: simSceneRef.current,
         });
-      } else {
-        const created = await createWorkflow(accessToken, {
-          name: 'Neuer Workflow',
-          description: '',
-          blockly_json: documentJson,
-          sim_scene: simScene,
-        });
-        if (created && created.id) {
-          dispatch(setSelectedWorkflowId(created.id));
-        }
+        dispatch(markWorkflowSaved());
+        if (toastOnSuccess) toast.success('Gespeichert.');
+        return { ok: true, workflowId: selectedWorkflowIdRef.current, created: false };
       }
+      const created = await createWorkflow(token, {
+        name: 'Neuer Workflow',
+        description: '',
+        blockly_json: documentJson,
+        sim_scene: simSceneRef.current,
+      });
+      if (!created || !created.id) {
+        toast.error('Speichern fehlgeschlagen: keine Workflow-ID erhalten.');
+        return { ok: false };
+      }
+      skipHydrateForIdRef.current = created.id;
+      selectedWorkflowIdRef.current = created.id;
+      dispatch(setSelectedWorkflowId(created.id));
       dispatch(markWorkflowSaved());
-      toast.success('Gespeichert.');
+      if (toastOnSuccess) toast.success('Gespeichert.');
+      return { ok: true, workflowId: created.id, created: true };
     } catch (e) {
       toast.error(`Speichern fehlgeschlagen: ${e.message || e}`);
+      return { ok: false, error: e };
     } finally {
       setSaving(false);
     }
-  }, [accessToken, editorJson, unsavedBlocklyJson, selectedWorkflowId, simScene, dispatch]);
+  }, [dispatch]);
+
+  // A save never JOINS a save in flight — a join reported `ok` for a document
+  // it never sent. A caller arriving mid-save gets ONE coalesced follow-up that
+  // serialises when IT starts (so the newest document is the last one sent);
+  // the follow-up of a create is an update, never a second create.
+  const saveWorkflowNow = useCallback(({ toastOnSuccess = true } = {}) => {
+    const st = saveStateRef.current;
+    const start = (toastFlag) => {
+      const p = runSave({ toastOnSuccess: toastFlag });
+      st.inflight = p;
+      p.finally(() => { if (st.inflight === p) st.inflight = null; });
+      return p;
+    };
+    if (!st.inflight) return start(toastOnSuccess);
+    st.followUpToast = st.followUpToast || toastOnSuccess;
+    if (!st.followUp) {
+      st.followUp = st.inflight.then(() => {}, () => {}).then(() => {
+        const toastFlag = st.followUpToast;
+        st.followUp = null;
+        st.followUpToast = false;
+        return start(toastFlag);
+      });
+    }
+    return st.followUp;
+  }, [runSave]);
+  const handleSave = useCallback(() => { saveWorkflowNow(); }, [saveWorkflowNow]);
+
+  // The open workflow's recordings (studioAssets.trajectories): on open, when a
+  // token first appears, and when the tab regains focus.
+  const refetchTrajectories = useCallback(() => {
+    if (!isActive || !selectedWorkflowId || !accessTokenRef.current) return;
+    dispatch(fetchTrajectories({ accessToken: accessTokenRef.current, workflowId: selectedWorkflowId }));
+  }, [isActive, selectedWorkflowId, dispatch]);
+  useEffect(() => { refetchTrajectories(); }, [refetchTrajectories, hasAccessToken]);
+  useRefetchOnFocus(isActive ? refetchTrajectories : null);
 
   if (!isActive) return null;
 
@@ -895,7 +1025,14 @@ function WorkshopPage({ isActive }) {
           {/* The feed fills the panel height (fill), so a taller panel shows a
               bigger camera instead of a small strip with empty space below. */}
           <div className="flex-1 min-h-0">
-            <CameraFeedOverlay camera="scene" clickable={true} fill onMark={handleMarkDestination} />
+            <CameraFeedOverlay
+              camera="scene"
+              clickable={true}
+              fill
+              resolveMarkLabel={resolveMarkLabel}
+              onMark={handleMarkDestination}
+              onRenameMark={handleRenameMarked}
+            />
           </div>
           {/* Capture the arm's CURRENT pose as a named destination (does NOT
               drive the arm). Usable afterwards via „Ziel <Name>" / „bewege zu". */}

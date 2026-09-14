@@ -26,6 +26,7 @@ import authSlice from '../features/auth/authSlice';
 import teacherSlice from '../features/teacher/teacherSlice';
 import adminSlice from '../features/admin/adminSlice';
 import workshopSlice from '../features/workshop/workshopSlice';
+import studioAssetsSlice from '../features/workshop/studioAssetsSlice';
 import jetsonSlice from './jetsonSlice';
 
 export const store = configureStore({
@@ -39,6 +40,7 @@ export const store = configureStore({
     teacher: teacherSlice,
     admin: adminSlice,
     workshop: workshopSlice,
+    studioAssets: studioAssetsSlice,
     jetson: jetsonSlice,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware(),

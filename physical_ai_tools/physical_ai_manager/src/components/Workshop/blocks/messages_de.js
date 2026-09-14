@@ -291,6 +291,19 @@ export const DE = {
   ERR_COORDINATES: 'Diese Stelle hat keine gültigen Koordinaten.',
   // rename/remove of an entry that is already gone (an undo in between).
   ERR_DESTINATION_MISSING: 'Diesen Eintrag gibt es nicht mehr.',
+
+  // Camera click → Ziel (CameraFeedOverlay + WorkshopPage). No prompt: the
+  // point gets an automatic name and an inline rename field at the click.
+  CAMERA_ZIEL_CREATED: 'Ziel „%1" gesetzt.',
+  CAMERA_PIN_WRITTEN: 'Koordinaten in Block „%1" geschrieben.',
+  CAMERA_RENAME_ARIA: 'Ziel umbenennen',
+  CAMERA_RENAME_TITLE: 'Enter speichert den Namen, Esc behält ihn.',
+  TEACH_AUTO_NAME_ZIEL: 'Ziel %1',
+
+  // Simulator previews (utils/simPreview.js::previewMessageDe). The server's
+  // lead-in refusal advises lifting the arm — impossible in a simulator.
+  PREVIEW_LEAD_IN_BELOW_TABLE:
+    'Die Aufnahme beginnt unter dem Tisch des Simulators — im Simulator kann sie nicht abgespielt werden.',
 };
 
 /**

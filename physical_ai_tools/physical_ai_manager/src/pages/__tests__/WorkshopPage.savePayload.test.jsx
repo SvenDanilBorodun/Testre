@@ -291,6 +291,27 @@ describe('WorkshopPage — what the cloud SAVE actually ships', () => {
     expect(mockApi.createWorkflow).not.toHaveBeenCalled();
   });
 
+  test('the Ziele/Positionen (`edubotics-destinations`) are part of the saved document', async () => {
+    // The document serializer from the Sammlung round: the store of named
+    // places travels in the workflow row, so a reload or a clone keeps them.
+    const withDestinations = {
+      ...FULL_EDITOR_JSON,
+      'edubotics-destinations': {
+        version: 1,
+        entries: [{ id: 'd_00000001', name: 'Ablage', kind: 'pin', x: 0.18, y: -0.06, z: 0.01, source: 'camera' }],
+      },
+    };
+    mockState = baseState({ unsavedBlocklyJson: withDestinations });
+    render(<WorkshopPage isActive />);
+    await userEvent.click(await screen.findByTestId('save-button'));
+    await waitFor(() => expect(mockApi.createWorkflow).toHaveBeenCalledTimes(1));
+
+    const sent = mockApi.createWorkflow.mock.calls[0][1].blockly_json;
+    expect(Object.keys(sent).sort())
+      .toEqual(['blocks', 'edubotics-destinations', 'variables', 'workspaceComments']);
+    expect(sent['edubotics-destinations']).toEqual(withDestinations['edubotics-destinations']);
+  });
+
   test('the object the editor and AUTOSAVE share is not mutated', async () => {
     const before = JSON.stringify(FULL_EDITOR_JSON);
     render(<WorkshopPage isActive />);

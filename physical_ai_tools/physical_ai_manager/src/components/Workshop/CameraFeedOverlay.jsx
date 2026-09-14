@@ -18,6 +18,8 @@ import rosConnectionManager from '../../utils/rosConnectionManager';
 import { STREAM_QUALITY } from '../../constants/streamConfig';
 import { usePiMode, videoStreamBase } from '../../utils/piMode';
 import { destinationNameErrorDe } from './blocks/destinations';
+import { DE } from './blocks/messages_de';
+import { sanitizeDestinationNameInput } from './sammlung/destinationStore';
 
 const CAMERA_TOPICS = {
   scene: '/scene/image_raw/compressed',
@@ -44,6 +46,15 @@ function CameraFeedOverlay({
   // distorted); the click-mapping below accounts for the letterbox so
   // click-to-mark stays accurate.
   fill = false,
+  // Camera click → Ziel, with no prompt. `resolveMarkLabel()` hands over the
+  // name BEFORE the service call — `{label, target: 'block'|'store', blockId?}`
+  // (the selected pin block's own name, or an automatic „Ziel n") or `null` to
+  // abort. `onMark(payload)` receives that intent plus the world coordinates
+  // and may return `{entryId, name}` for a new store entry, which opens an
+  // inline rename field at the click point; `onRenameMark(entryId, rawName)`
+  // answers `{ok, error?}` and keeps the field open until it is `ok`.
+  resolveMarkLabel,
+  onRenameMark,
   ...rest
 }) {
   // Hooks first, no conditional returns above them — react-hooks/rules
@@ -64,6 +75,13 @@ function CameraFeedOverlay({
   // (audit F25 — naturalSize sticking after a mid-session resolution
   // change is fixed by re-creating the <img>).
   const [reloadKey, setReloadKey] = useState(0);
+  // Inline rename of the Ziel the last click created:
+  // { entryId, value, leftPct, topPct } | null. While it is open, image clicks
+  // are ignored, so one field never races a second service call.
+  const [renameField, setRenameField] = useState(null);
+  // Set synchronously by a click that passed the gates, so a double click
+  // cannot start a second service call before the first has answered.
+  const markBusyRef = useRef(false);
 
   useEffect(() => {
     if (cloudOnly) return undefined;
@@ -183,28 +201,35 @@ function CameraFeedOverlay({
       const y = (e.clientY - rect.top - offY) / scale;
       // A click in the letterbox margins is outside the real image — ignore it.
       if (x < 0 || y < 0 || x > naturalSize.w || y > naturalSize.h) return;
+      if (renameField || markBusyRef.current) return;
+      // No prompt: the page decides the name (the selected pin block's own
+      // name, so one point has one name, or an automatic „Ziel n"). `null`
+      // aborts — no workspace yet, or the page already said why (store full).
+      const intent = typeof resolveMarkLabel === 'function'
+        ? resolveMarkLabel()
+        : { label: 'Ziel', target: 'store' };
+      if (!intent) return;
       // Trimmed like the Blockly field's `nameValidator`, so the name the
       // service stores and the name the block carries are the same string.
       // Untrimmed, '   ' passed the regex below (space IS in the alphabet) and
       // ' A ' was stored under a key `destination_ref` could never match.
-      const label = (window.prompt('Wie soll dieses Ziel heißen?', 'Ziel') || 'Ziel').trim();
-      // Sanitize: 1-40 chars, German letters / digits / space / _ / - only.
-      // Stops a stray paste or pathological prompt input from reaching the
-      // ROS service with content the server would reject anyway. Full
-      // inline-modal replacement is deferred (see ROBOTER_STUDIO_DEFERRED).
-      //
-      // This is a REJECT, not the Blockly field's sanitise, and that is right
-      // for a `window.prompt`: there is no live field to watch characters
-      // vanish from, so silently rewriting what the student typed would be
-      // worse than saying no. What was wrong was the MESSAGE — the bare
-      // „Ungültiger Ziel-Name.", i.e. exactly the sentence the server half of
-      // this feature replaced, on the PRIMARY way a destination is created.
+      const label = String(intent.label ?? '').trim();
+      // Sanitize: 1-40 chars, German letters / digits / space / _ / - only —
+      // the server's own alphabet, so nothing reaches the ROS service that it
+      // would refuse anyway. A REJECT, not a rewrite: the label is handed over
+      // whole, and silently changing it would store a name nobody chose.
       // `destinationNameErrorDe` is the one shared wording (see
       // blocks/destinations.js::NAME_ALPHABET_DE).
       if (!/^[A-Za-zÄÖÜäöüß0-9 _-]{1,40}$/.test(label)) {
         toast.error(destinationNameErrorDe(label));
         return;
       }
+      // Where the rename field opens: the click point, as a percentage of the
+      // container box (the field is positioned inside it).
+      const box = containerRef.current ? containerRef.current.getBoundingClientRect() : null;
+      const leftPct = box && box.width ? ((e.clientX - box.left) / box.width) * 100 : 50;
+      const topPct = box && box.height ? ((e.clientY - box.top) / box.height) * 100 : 50;
+      markBusyRef.current = true;
       try {
         const r = await callService(
           '/workshop/mark_destination',
@@ -215,21 +240,51 @@ function CameraFeedOverlay({
           toast.error(r.message || 'Ziel konnte nicht erstellt werden.');
           return;
         }
-        toast.success(r.message);
-        if (onMark) {
-          onMark({
-            label,
-            world_x: r.world_x,
-            world_y: r.world_y,
-            world_z: r.world_z,
+        // No success toast here: the page reports what it did with the point
+        // (a new Ziel, or coordinates written into a block).
+        const created = onMark
+          ? onMark({ ...intent, label, world_x: r.world_x, world_y: r.world_y, world_z: r.world_z })
+          : null;
+        if (created && created.entryId) {
+          setRenameField({
+            entryId: created.entryId,
+            value: sanitizeDestinationNameInput(created.name),
+            leftPct: Math.min(Math.max(leftPct, 0), 100),
+            topPct: Math.min(Math.max(topPct, 0), 100),
           });
         }
       } catch (err) {
         toast.error(`Service-Aufruf fehlgeschlagen: ${err.message || err}`);
+      } finally {
+        markBusyRef.current = false;
       }
     },
-    [callService, camera, clickable, naturalSize, onMark]
+    [callService, camera, clickable, naturalSize, onMark, renameField, resolveMarkLabel]
   );
+
+  const closeRenameField = useCallback(() => setRenameField(null), []);
+
+  const handleRenameKeyDown = useCallback(
+    (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeRenameField();
+        return;
+      }
+      if (e.key !== 'Enter' || !renameField) return;
+      e.preventDefault();
+      const res = typeof onRenameMark === 'function'
+        ? onRenameMark(renameField.entryId, renameField.value)
+        : { ok: true };
+      // A refusal keeps the field open: the page toasted why, the student fixes it.
+      if (res && res.ok) closeRenameField();
+    },
+    [closeRenameField, onRenameMark, renameField]
+  );
+
+  // The field sits inside the clickable container: its clicks must not reach
+  // the image's click handler (that would mark a second point).
+  const stopPropagation = useCallback((e) => { e.stopPropagation(); }, []);
 
   // `fill` grows to the container height (dock panel); otherwise a fixed 16:9 box.
   const boxSize = fill ? 'w-full h-full min-h-0' : 'w-full aspect-video';
@@ -271,6 +326,25 @@ function CameraFeedOverlay({
           Kamera-Stream nicht erreichbar. Bitte Verbindung prüfen
           und neu laden.
         </div>
+      )}
+      {renameField && (
+        <input
+          type="text"
+          aria-label={DE.CAMERA_RENAME_ARIA}
+          title={DE.CAMERA_RENAME_TITLE}
+          value={renameField.value}
+          autoFocus
+          onChange={(e) => {
+            const value = sanitizeDestinationNameInput(e.target.value);
+            setRenameField((prev) => (prev ? { ...prev, value } : prev));
+          }}
+          onKeyDown={handleRenameKeyDown}
+          onBlur={closeRenameField}
+          onPointerDown={stopPropagation}
+          onClick={stopPropagation}
+          className="absolute z-10 w-40 max-w-[60%] -translate-x-1/2 -translate-y-1/2 rounded-md border border-[var(--ink-3)] bg-white px-2 py-1 text-sm text-[var(--ink)] shadow"
+          style={{ left: `${renameField.leftPct}%`, top: `${renameField.topPct}%` }}
+        />
       )}
       {!streamError && isFrozen && (
         <div className="absolute top-2 right-2 px-2 py-1 rounded-md bg-amber-500/90 text-xs font-semibold text-white shadow pointer-events-none">

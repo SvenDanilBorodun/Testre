@@ -404,6 +404,7 @@ export const DE = {
     '„%1" wird in %2 Blöcken benutzt. Trotzdem löschen? Die Blöcke bleiben stehen und zeigen danach eine Warnung.',
   CONFIRM_DELETE_USED_ONE:
     '„%1" wird in 1 Block benutzt. Trotzdem löschen? Der Block bleibt stehen und zeigt danach eine Warnung.',
+  CONFIRM_DELETE_VERSION: 'Diese ältere Version löschen? Das lässt sich nicht rückgängig machen.',
   CONFIRM_REPLACE_RECORDING: 'Eine Bewegung „%1" gibt es schon. Ersetzen?',
   CONFIRM_YES_DELETE: 'Löschen',
   CONFIRM_YES_REPLACE: 'Ersetzen',
@@ -415,6 +416,8 @@ export const DE = {
     'Achtung: Die Aufnahme heißt jetzt „%1", der Workflow ist aber noch nicht gespeichert. Bitte erneut speichern.',
   TOAST_DISMISS: 'Schließen',
   ERR_DELETE_FAILED: 'Löschen fehlgeschlagen: %1',
+  ERR_UNDO_FAILED: 'Rückgängig fehlgeschlagen: %1',
+  ERR_UNDO_NEWER_VERSION: 'Rückgängig nicht möglich: Von „%1" gibt es inzwischen eine neuere Aufnahme.',
   ERR_RECORDING_NAME:
     'Der Name darf nur Buchstaben, Ziffern, Leerzeichen, _ und - enthalten (höchstens 40 Zeichen).',
 };

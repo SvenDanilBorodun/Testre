@@ -164,6 +164,37 @@ function newestRow(rows) {
   return best;
 }
 
+function stampOf(iso) {
+  const t = typeof iso === 'string' ? Date.parse(iso) : NaN;
+  return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * Whether re-creating `deleted` keeps the take that plays. The cloud stamps a
+ * re-created row NOW (its insert takes no created_at), and a replay plays the
+ * NEWEST row of a name — so a restore is right only when every row of that
+ * name still in the cloud (`remaining`) is OLDER than every copy restored.
+ * Undoing the delete of an older version is never right: the played take is
+ * newer, and the restore would silently make the old take the one that plays.
+ * An unreadable stamp proves nothing and answers false.
+ */
+export function restoreKeepsPlayedTake(deleted, remaining) {
+  const copies = (Array.isArray(deleted) ? deleted : []).filter((d) => d && typeof d === 'object');
+  if (copies.length === 0) return false;
+  const oldest = new Map();
+  for (const d of copies) {
+    const t = stampOf(d.created_at);
+    if (t === null) return false;
+    if (!oldest.has(d.name) || t < oldest.get(d.name)) oldest.set(d.name, t);
+  }
+  for (const row of Array.isArray(remaining) ? remaining : []) {
+    if (!row || typeof row !== 'object' || !oldest.has(row.name)) continue;
+    const t = stampOf(row.created_at);
+    if (t === null || t >= oldest.get(row.name)) return false;
+  }
+  return true;
+}
+
 function rewriteReplayGrouped(workspace, fromName, toName) {
   Blockly.Events.setGroup(true);
   try {
@@ -282,6 +313,10 @@ export async function deleteRecordingRows({ api, accessToken, workflowId, rows }
 /**
  * Re-create deleted rows, OLDEST first, so the newest version is the newest
  * row again (by-name newest-wins picks the same take as before the delete).
+ * Re-created rows are stamped NOW, so the current cloud list is read FIRST and
+ * nothing is created when a row of the same name that is not older than every
+ * copy is still there (an older version was deleted, a newest delete failed,
+ * or a new take was recorded meanwhile) — see restoreKeepsPlayedTake.
  * @returns {Promise<{ok:boolean, restored:number, error?:string}>}
  */
 export async function restoreRecordingRows({ api, accessToken, workflowId, deleted }) {
@@ -291,6 +326,19 @@ export async function restoreRecordingRows({ api, accessToken, workflowId, delet
     // Oldest first; equal stamps keep reverse input order (the input is newest first).
     .sort((a, b) => (timeOf(a.d.created_at) - timeOf(b.d.created_at)) || (b.index - a.index))
     .map(({ d }) => d);
+  if (list.length === 0) return { ok: true, restored: 0 };
+  let current;
+  try {
+    current = await api.listTrajectories(accessToken, workflowId);
+  } catch (err) {
+    return { ok: false, restored: 0, error: formatDe(DE.ERR_UNDO_FAILED, messageOf(err) || '—') };
+  }
+  if (!Array.isArray(current)) {
+    return { ok: false, restored: 0, error: formatDe(DE.ERR_UNDO_FAILED, '—') };
+  }
+  if (!restoreKeepsPlayedTake(list, current)) {
+    return { ok: false, restored: 0, error: formatDe(DE.ERR_UNDO_NEWER_VERSION, list[0].name) };
+  }
   let restored = 0;
   let error;
   for (const d of list) {
@@ -306,7 +354,7 @@ export async function restoreRecordingRows({ api, accessToken, workflowId, delet
       await api.createTrajectory(accessToken, workflowId, payload);
       restored += 1;
     } catch (err) {
-      if (!error) error = messageOf(err) || '—';
+      if (!error) error = formatDe(DE.ERR_UNDO_FAILED, messageOf(err) || '—');
     }
   }
   return { ok: !error, restored, ...(error ? { error } : {}) };

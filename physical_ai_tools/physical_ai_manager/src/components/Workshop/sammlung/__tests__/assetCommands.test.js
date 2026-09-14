@@ -28,6 +28,7 @@ import {
   usageRows,
   renameRecording,
   deleteRecordingRows,
+  restoreKeepsPlayedTake,
   restoreRecordingRows,
   renamePlace,
   deletePlace,
@@ -90,6 +91,7 @@ function makeApi(overrides = {}) {
     deleteTrajectory: vi.fn(async () => ({})),
     getTrajectory: vi.fn(async () => ({})),
     createTrajectory: vi.fn(async () => ({})),
+    listTrajectories: vi.fn(async () => []),
     ...overrides,
   };
 }
@@ -331,6 +333,88 @@ describe('recording rows: delete and restore', () => {
         name: 'Winken', fps: 25, points: [[1]], point_count: 1, duration_s: 1.2, robot_profile: 'edu6_studio',
       },
     ]);
+  });
+
+  // An in-memory cloud with the real route's two properties that matter here:
+  // an insert is stamped NOW, and a replay plays the newest row of a name.
+  function fakeCloud() {
+    let clock = Date.parse('2026-09-13T12:00:00Z');
+    let seq = 0;
+    const db = [
+      { id: 't3', name: 'Winken', fps: 25, points: [[3]], duration_s: 4.2, created_at: '2026-09-13T10:30:00Z' },
+      { id: 't1', name: 'Winken', fps: 25, points: [[1]], duration_s: 3.1, created_at: '2026-09-13T10:00:00Z' },
+    ];
+    const byNewest = () => [...db].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+    const api = makeApi({
+      listTrajectories: vi.fn(async () => byNewest().map(({ points, ...meta }) => meta)),
+      getTrajectory: vi.fn(async (_t, _w, id) => {
+        const row = db.find((r) => r.id === id);
+        return { ...row, samples: { fps: row.fps, points: row.points } };
+      }),
+      deleteTrajectory: vi.fn(async (_t, _w, id) => { db.splice(db.findIndex((r) => r.id === id), 1); }),
+      createTrajectory: vi.fn(async (_t, _w, p) => {
+        clock += 1000;
+        const row = { id: `n${++seq}`, ...p, created_at: new Date(clock).toISOString() };
+        db.push(row);
+        return row;
+      }),
+    });
+    const played = (name) => byNewest().find((r) => r.name === name);
+    return { api, db, played };
+  }
+
+  it('undoing the delete of an OLDER version is refused: the played take stays the played take', async () => {
+    const { api, played } = fakeCloud();
+    const versions = await api.listTrajectories();
+    const del = await deleteRecordingRows({ api, accessToken: 'tok', workflowId: 'wf1', rows: [versions[1]] });
+    expect(del.ok).toBe(true);
+    // The drawer's decision: a newer row of the name is left, so no „Rückgängig".
+    expect(restoreKeepsPlayedTake(del.deleted, [versions[0]])).toBe(false);
+    const result = await restoreRecordingRows({ api, accessToken: 'tok', workflowId: 'wf1', deleted: del.deleted });
+    expect(result).toEqual({ ok: false, restored: 0, error: formatDe(DE.ERR_UNDO_NEWER_VERSION, 'Winken') });
+    expect(api.createTrajectory).not.toHaveBeenCalled();
+    expect(played('Winken').id).toBe('t3');
+  });
+
+  it('undoing a delete of EVERY version brings the same take back as the played one', async () => {
+    const { api, db, played } = fakeCloud();
+    const versions = await api.listTrajectories();
+    const del = await deleteRecordingRows({ api, accessToken: 'tok', workflowId: 'wf1', rows: versions });
+    expect(restoreKeepsPlayedTake(del.deleted, [])).toBe(true);
+    const result = await restoreRecordingRows({ api, accessToken: 'tok', workflowId: 'wf1', deleted: del.deleted });
+    expect(result).toEqual({ ok: true, restored: 2 });
+    expect(db).toHaveLength(2);
+    expect(played('Winken').points).toEqual([[3]]);
+  });
+
+  it('a take recorded under the name before „Rückgängig" blocks the restore', async () => {
+    const { api, played } = fakeCloud();
+    const versions = await api.listTrajectories();
+    const del = await deleteRecordingRows({ api, accessToken: 'tok', workflowId: 'wf1', rows: versions });
+    await api.createTrajectory('tok', 'wf1', { name: 'Winken', fps: 25, points: [[9]] });
+    api.createTrajectory.mockClear();
+    const result = await restoreRecordingRows({ api, accessToken: 'tok', workflowId: 'wf1', deleted: del.deleted });
+    expect(result.ok).toBe(false);
+    expect(api.createTrajectory).not.toHaveBeenCalled();
+    expect(played('Winken').points).toEqual([[9]]);
+  });
+
+  it('an unreadable cloud list restores nothing', async () => {
+    const api = makeApi({ listTrajectories: vi.fn(async () => { throw new Error('offline'); }) });
+    const deleted = [{ name: 'Winken', fps: 25, points: [[1]], created_at: '2026-09-13T10:30:00Z' }];
+    const result = await restoreRecordingRows({ api, accessToken: 'tok', workflowId: 'wf1', deleted });
+    expect(result).toEqual({ ok: false, restored: 0, error: formatDe(DE.ERR_UNDO_FAILED, 'offline') });
+    expect(api.createTrajectory).not.toHaveBeenCalled();
+  });
+
+  it('restoreKeepsPlayedTake: older leftovers and other names are fine; newer, equal or unreadable stamps are not', () => {
+    const copy = { name: 'Winken', created_at: '2026-09-13T10:30:00Z' };
+    expect(restoreKeepsPlayedTake([copy], [{ name: 'Winken', created_at: '2026-09-13T10:00:00Z' }])).toBe(true);
+    expect(restoreKeepsPlayedTake([copy], [{ name: 'Tanz', created_at: '2026-09-13T11:00:00Z' }])).toBe(true);
+    expect(restoreKeepsPlayedTake([copy], [{ name: 'Winken', created_at: '2026-09-13T10:30:00Z' }])).toBe(false);
+    expect(restoreKeepsPlayedTake([copy], [{ name: 'Winken', created_at: null }])).toBe(false);
+    expect(restoreKeepsPlayedTake([{ name: 'Winken', created_at: null }], [])).toBe(false);
+    expect(restoreKeepsPlayedTake([], [])).toBe(false);
   });
 });
 

@@ -24,6 +24,7 @@ import { DE, formatDe } from '../blocks/messages_de';
 import {
   deleteRecordingRows,
   renameRecording,
+  restoreKeepsPlayedTake,
   restoreRecordingRows,
   usageRows,
 } from './assetCommands';
@@ -131,13 +132,21 @@ export default function DrawerRecording({
       });
       if (result.deleted.length > 0) {
         if (clearFocus && result.ok) dispatch(setDrawerFocus(null));
-        showUndoToast(formatDe(DE.TOAST_DELETED, name), async () => {
-          const restored = await restoreRecordingRows({
-            api: workflowApi, accessToken, workflowId, deleted: result.deleted,
+        const targetIds = new Set(targetRows.map((r) => r.id));
+        const remaining = versions.filter((v) => !targetIds.has(v.id)).concat(result.failed);
+        // A restored row is stamped NOW and would become the played take, so
+        // „Rückgängig" is offered only when nothing newer of this name is left.
+        if (restoreKeepsPlayedTake(result.deleted, remaining)) {
+          showUndoToast(formatDe(DE.TOAST_DELETED, name), async () => {
+            const restored = await restoreRecordingRows({
+              api: workflowApi, accessToken, workflowId, deleted: result.deleted,
+            });
+            if (!restored.ok) toast.error(restored.error);
+            refetch();
           });
-          if (!restored.ok) toast.error(restored.error);
-          refetch();
-        });
+        } else {
+          toast.success(formatDe(DE.TOAST_DELETED, name));
+        }
       }
       if (!result.ok) toast.error(result.error);
       refetch();
@@ -152,6 +161,13 @@ export default function DrawerRecording({
       if (!yes) return;
     }
     await removeRows(versions, { clearFocus: true });
+  };
+
+  // An older version's delete cannot be undone (restoreKeepsPlayedTake), so it asks first.
+  const handleDeleteVersion = async (row) => {
+    const yes = await ask(DE.CONFIRM_DELETE_VERSION, DE.CONFIRM_YES_DELETE);
+    if (!yes) return;
+    await removeRows([row], { clearFocus: false });
   };
 
   if (missing || !newest) {
@@ -200,8 +216,8 @@ export default function DrawerRecording({
                 </span>
                 <button
                   type="button"
-                  disabled={busy}
-                  onClick={() => removeRows([row], { clearFocus: false })}
+                  disabled={busy || !!confirm}
+                  onClick={() => handleDeleteVersion(row)}
                   className="rounded px-2 py-0.5 text-red-700 hover:bg-red-50 disabled:opacity-50"
                 >
                   {DE.DRAWER_DELETE_VERSION}

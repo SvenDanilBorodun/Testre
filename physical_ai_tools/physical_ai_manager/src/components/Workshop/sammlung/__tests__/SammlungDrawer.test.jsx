@@ -45,6 +45,15 @@ vi.mock('../../../../services/workflowApi', () => ({
   listTrajectories: vi.fn(async () => []),
 }));
 
+const mockToast = vi.hoisted(() => {
+  const fn = vi.fn();
+  fn.success = vi.fn();
+  fn.error = vi.fn();
+  fn.dismiss = vi.fn();
+  return fn;
+});
+vi.mock('react-hot-toast', () => ({ __esModule: true, default: mockToast }));
+
 let ws;
 
 beforeAll(() => {
@@ -257,6 +266,34 @@ describe('SammlungDrawer: rename and delete', () => {
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
     expect(workflowApi.getTrajectory).not.toHaveBeenCalled();
     expect(workflowApi.deleteTrajectory).not.toHaveBeenCalled();
+  });
+
+  it('deleting an older version asks first and offers NO „Rückgängig" (a restore would make it the played take)', async () => {
+    const { refetchTrajectories } = setup({ drawer: { focusId: 'Winken' } });
+    fireEvent.click(screen.getByRole('button', { name: DE.DRAWER_DELETE_VERSION }));
+    let dialog = await screen.findByRole('alertdialog');
+    expect(within(dialog).getByText(DE.CONFIRM_DELETE_VERSION)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: DE.DRAWER_CANCEL }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(workflowApi.deleteTrajectory).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: DE.DRAWER_DELETE_VERSION }));
+    dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: DE.CONFIRM_YES_DELETE }));
+    await waitFor(() => expect(refetchTrajectories).toHaveBeenCalled());
+    expect(workflowApi.deleteTrajectory).toHaveBeenCalledTimes(1);
+    expect(workflowApi.deleteTrajectory).toHaveBeenCalledWith('tok', 'wf1', 't1');
+    expect(mockToast.success).toHaveBeenCalledWith(formatDe(DE.TOAST_DELETED, 'Winken'));
+    expect(mockToast).not.toHaveBeenCalled();
+  });
+
+  it('deleting every version of an unused recording offers „Rückgängig"', async () => {
+    const { refetchTrajectories } = setup({ drawer: { focusId: 'Winken' } });
+    fireEvent.click(screen.getByRole('button', { name: DE.DRAWER_DELETE_RECORDING }));
+    await waitFor(() => expect(refetchTrajectories).toHaveBeenCalled());
+    expect(workflowApi.deleteTrajectory.mock.calls.map((c) => c[2])).toEqual(['t3', 't1']);
+    expect(mockToast).toHaveBeenCalledTimes(1);
+    expect(mockToast.success).not.toHaveBeenCalled();
   });
 
   it('a rename onto an existing recording asks „Ersetzen?" inline and replaces on the button', async () => {

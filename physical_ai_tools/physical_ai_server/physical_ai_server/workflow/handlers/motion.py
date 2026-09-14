@@ -1960,6 +1960,15 @@ def open_gripper(ctx, args: dict[str, Any]) -> None:
     q_end = q_start[:_n(ctx)] + [_gripper_open(ctx)]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
     ctx.last_full_joints = q_end
+    # The gripper is empty now, so whatever was carried is released HERE — but
+    # „öffne Greifer" has no destination and this module keeps only JOINT-space
+    # pose bookkeeping (``last_full_joints`` / ``last_arm_joints``), so there is
+    # no commanded (x, y) to record without running FK. We deliberately do NOT
+    # add one: the recycled-object reclaim is a convenience, and an unknown
+    # release point fails it CLOSED (that tag is simply never re-grasped) rather
+    # than inventing a reference a later sighting would be judged against.
+    # „ablegen bei" is the block that knows where it put something.
+    note_object_released(ctx, None)
 
 
 def close_gripper(ctx, args: dict[str, Any]) -> None:
@@ -2298,6 +2307,86 @@ def _jaws_left_the_open_position(ctx, gripper: float) -> bool:
     return abs(gripper - opened) > GRASP_HELD_MIN_TRAVEL_FRAC * travel
 
 
+# ── carry bookkeeping for the recycled-object reclaim ────────────────────────
+# The reclaim (handlers/perception_blocks.py::_reclaim_recycled) judges a claimed
+# object against the point the robot COMMANDED its release, so exactly two events
+# matter and both are recorded here rather than at their four call sites: the
+# object is PICKED UP (its old release point stops being the truth, and while it
+# is in the jaws no sighting of it means anything) and it is LET GO (the
+# commanded destination becomes the new reference).
+#
+# They live in this module, not in ``claims.py``, because BOTH families of writer
+# need them: the composite ``grasp_object`` / split ``close_on_object`` on the
+# pick-up side, ``drop_at`` / ``open_gripper`` on the release side —
+# ``perception_blocks`` already imports this module at module scope, so the call
+# reaches it, while the reverse edge cannot exist. Two copies of this pair is how
+# a half-updated carry state would silently disable the reclaim for one path.
+#
+# getattr/try-guarded throughout, like the rest of this module: a minimal
+# unit-test ctx without the stores is a no-op, never an AttributeError on a
+# motion path.
+
+
+def note_object_picked_up(ctx, tag_id) -> None:
+    """Record that ``tag_id`` is now IN THE GRIPPER (and drop its stale release
+    point, which describes where it used to lie, not where it will).
+
+    Called by BOTH grasp paths. The split path does not CLAIM, and a
+    ``carried_tag`` for an unclaimed tag is harmless — the reclaim only ever
+    consults claimed or skipped tags — while forgetting to set it there would let
+    a mid-carry „finde" judge a held object against its previous release point."""
+    if tag_id is None:
+        return
+    try:
+        tag = int(tag_id)
+    except (TypeError, ValueError):
+        return
+    try:
+        ctx.carried_tag = tag
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks a grasp
+        pass
+    release_xy = getattr(ctx, 'claim_release_xy', None)
+    if release_xy is not None:
+        try:
+            release_xy.pop(tag, None)
+        except Exception:  # noqa: BLE001 — bookkeeping never breaks a grasp
+            pass
+
+
+def note_object_released(ctx, xy) -> None:
+    """Record that the carried object was LET GO at commanded ``(x, y)`` — or at
+    an unknown place when ``xy`` is ``None`` — and that the gripper is empty.
+
+    A ``None`` position is stored DELIBERATELY rather than skipped: it says „this
+    tag was released somewhere the robot did not aim for", which fails the reclaim
+    CLOSED for that tag (``_gap`` answers ``None`` and no comparison succeeds).
+    Leaving no entry at all would mean the same thing today, but the explicit
+    ``None`` is what a reader — and the next writer — can see.
+
+    A no-op when nothing is carried, so a bare „öffne Greifer" in a program that
+    never grasped anything changes nothing."""
+    tag = getattr(ctx, 'carried_tag', None)
+    if tag is None:
+        return
+    try:
+        tag = int(tag)
+    except (TypeError, ValueError):
+        tag = None
+    release_xy = getattr(ctx, 'claim_release_xy', None)
+    if tag is not None and release_xy is not None:
+        try:
+            if xy is None:
+                release_xy[tag] = None
+            else:
+                release_xy[tag] = (float(xy[0]), float(xy[1]))
+        except Exception:  # noqa: BLE001 — bookkeeping never breaks a place
+            pass
+    try:
+        ctx.carried_tag = None
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks a place
+        pass
+
+
 def pickup(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     _refuse_greifziel(args.get('target'), 'aufnehmen')
@@ -2388,6 +2477,13 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
         # Gripper-only open (release) — EXEMPT (raw).
         _publish_motion_t(ctx, drop_closed_q, drop_open_q, DEFAULT_GRIPPER_DURATION_S, tempo)
         ctx.last_full_joints = drop_open_q
+        # THE reference point of the recycled-object reclaim: the robot knows
+        # where it put this object, because it drove there. Recorded only AFTER
+        # the release publish has actually gone out — a refusal above (unreachable
+        # drop, zone reroute failure) leaves the object still in the gripper, and
+        # claiming a release that never happened would judge the next sighting
+        # against a place the object has never been.
+        note_object_released(ctx, (target[0], target[1]))
         # RETREAT back up to the hover — TRANSIT, zone-avoided.
         safe_move(ctx, drop_open_q, retreat_open_q, DEFAULT_APPROACH_DURATION_S,
                   roll=roll, tempo=tempo)
@@ -2727,6 +2823,11 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
     # Record the COMMANDED close (the Greifziel's tuned angle) for the
     # per-object grasp-held threshold.
     ctx.last_commanded_close_rad = close_rad
+    # The split grasp path's pick-up event: from here until „ablegen bei" /
+    # „öffne Greifer" this tag travels with the gripper, so the reclaim must not
+    # judge any sighting of it. The split path never CLAIMS (that is „merke … als
+    # erledigt"), and marking an unclaimed tag as carried is harmless.
+    note_object_picked_up(ctx, getattr(ziel, 'aruco_id', None))
 
 
 def lift(ctx, args: dict[str, Any]) -> None:

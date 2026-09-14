@@ -216,23 +216,31 @@ class WorkflowContext:
     claimed_tags: set = field(default_factory=set)
     skipped_tags: set = field(default_factory=set)
     claim_lock: threading.RLock | None = None
-    # Per-tag POSITION tracking for the recycled-object reclaim (#1), all three
+    # Per-tag POSITION tracking for the recycled-object reclaim (#1), all
     # guarded by claim_lock (same as claimed_tags/skipped_tags):
-    #   claim_anchor  — tag id → the base-frame (x, y) where the robot LEFT it,
-    #                   observed on the first sighting AFTER the claim. ``None``
-    #                   when that sighting could not be located, which fails the
-    #                   reclaim CLOSED for that tag.
-    #   claim_pick_xy — tag id → the (x, y) it was last seen at while still
-    #                   UNCLAIMED, i.e. the spot it was picked FROM.
-    #   claim_unseen  — tag ids missing from at least one observation since their
-    #                   claim (the only thing an absence is allowed to record).
-    # A later sighting ≥ EDUBOTICS_RECLAIM_MOVE_M from the anchor — or a return to
-    # the pick spot after an absence — means a PERSON moved it, so it is
-    # un-claimed and grabbed again. Deliberately position-based: the absence clock
-    # this replaced was sampled at loop-pass cadence (8–12 s) and could not tell
-    # one missed AprilTag look from a student picking the object up. See
+    #   claim_release_xy — tag id → the COMMANDED base-frame (x, y) the robot
+    #                      released it at (``drop_at``'s own target), or ``None``
+    #                      when it was released somewhere the robot did not aim
+    #                      for (a bare „öffne Greifer"), which fails the reclaim
+    #                      CLOSED for that tag.
+    #   claim_pick_xy    — tag id → the (x, y) it was last seen at while still
+    #                      UNCLAIMED, i.e. the spot it was picked FROM. The
+    #                      reference for a SKIPPED object, which the robot never
+    #                      carried anywhere.
+    #   carried_tag      — the tag currently IN THE GRIPPER. Never reclaimed: a
+    #                      held object's projected position travels with the arm.
+    # A later sighting ≥ EDUBOTICS_RELEASE_MOVE_M from the release point means a
+    # PERSON moved it, so it is un-claimed and grabbed again.
+    #
+    # The reference is the COMMANDED release point, never an observation: the
+    # sighting-derived anchor this replaced could only arm when the drop
+    # destination lay inside the scene camera's view, and on a rig that places
+    # objects off-camera it never armed at all. Deriving it from the command also
+    # makes a missed AprilTag look irrelevant BY CONSTRUCTION — there is no
+    # observation for a miss to corrupt. See
     # handlers/perception_blocks.py::_reclaim_recycled.
-    claim_anchor: dict = field(default_factory=dict)
+    claim_release_xy: dict = field(default_factory=dict)
+    carried_tag: int | None = None
 
     # Token-bucket state for the output rate limiter, per KIND
     # (handlers/output.py::_rate_ok). DECLARED rather than set as an ad-hoc
@@ -255,7 +263,12 @@ class WorkflowContext:
     # getattr is the failure mode this file has already paid for once.
     gripper_knob_warned: set = field(default_factory=set)
     claim_pick_xy: dict = field(default_factory=dict)
-    claim_unseen: set = field(default_factory=set)
+    # Object types already told „alles erledigt" THIS RUN, so the unclaimed view's
+    # blind-state notice (perception_blocks._detect_named) says it once per type
+    # rather than on every pass of a „Solange sichtbar" loop. Declared for the
+    # same reason gripper_knob_warned is — an undeclared ctx field is a branch
+    # that silently never runs.
+    all_done_notified: set = field(default_factory=set)
     # Phase-4 no-go zones ("Sperrzonen"): a list of axis-aligned base-frame
     # keep-out boxes ``{min:[x,y,z], max:[x,y,z]}`` (metres), parsed in start()
     # from the top-level ``zones`` sibling of the workflow_json (injected for
@@ -947,9 +960,10 @@ class WorkflowManager:
                     claim_lock=self._claim_lock,
                     # Fresh per-run position trackers for the recycled-object
                     # reclaim (never persisted across runs).
-                    claim_anchor={},
+                    claim_release_xy={},
                     claim_pick_xy={},
-                    claim_unseen=set(),
+                    carried_tag=None,
+                    all_done_notified=set(),
                     # Phase-4 no-go zones (None/empty → motion behaves as today).
                     zones=zones,
                     # Phase-2 Tempo (global speed multiplier; 1.0 → unchanged speed).

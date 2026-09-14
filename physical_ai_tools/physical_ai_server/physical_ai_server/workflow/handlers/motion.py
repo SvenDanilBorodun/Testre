@@ -1960,15 +1960,30 @@ def open_gripper(ctx, args: dict[str, Any]) -> None:
     q_end = q_start[:_n(ctx)] + [_gripper_open(ctx)]
     _publish_motion(ctx, q_start, q_end, DEFAULT_GRIPPER_DURATION_S)
     ctx.last_full_joints = q_end
-    # The gripper is empty now, so whatever was carried is released HERE — but
-    # „öffne Greifer" has no destination and this module keeps only JOINT-space
-    # pose bookkeeping (``last_full_joints`` / ``last_arm_joints``), so there is
-    # no commanded (x, y) to record without running FK. We deliberately do NOT
-    # add one: the recycled-object reclaim is a convenience, and an unknown
-    # release point fails it CLOSED (that tag is simply never re-grasped) rather
-    # than inventing a reference a later sighting would be judged against.
-    # „ablegen bei" is the block that knows where it put something.
-    note_object_released(ctx, None)
+    # The gripper is empty now, so whatever was carried is released HERE — and
+    # the robot DOES know where it was standing when it let go. The reclaim's
+    # reference is a COMMANDED point, and ``last_full_joints`` is exactly that:
+    # the pose this module has commanded, updated one line above. FK it (see
+    # ``_current_tool_xy``) so „öffne Greifer" records the same kind of reference
+    # „ablegen bei" does, and a student who then moves the object gets it grabbed
+    # again.
+    #
+    # THIS USED TO STORE ``None`` UNCONDITIONALLY, on the reasoning that running
+    # FK here was a dependency not worth adding. That reasoning was wrong and the
+    # hole it left was two blocks wide: measured 2026-09-14, „Greife Würfel" →
+    # „öffne Greifer" (instead of „ablegen bei") left that cube unreclaimable for
+    # the rest of the run, at any distance — ``claim_release_xy[tag] = None``
+    # makes the ``tag in release_xy`` branch TRUE and then fails every comparison.
+    # The split path ending „öffne Greifer" → „merke … als erledigt" is the same
+    # shape. FK is not a new dependency here either: this module already calls
+    # ``ctx.ik.fk`` in ``_is_straight_down`` and in ``lift``.
+    #
+    # ``None`` is still the answer whenever FK cannot say, and
+    # ``note_object_released(ctx, None)``'s documented meaning — „released
+    # somewhere the robot did not aim for", which fails the reclaim CLOSED — is
+    # unchanged and still reached from there. Never guess a position: a wrong
+    # reference would re-grasp an object nobody touched.
+    note_object_released(ctx, _current_tool_xy(ctx))
 
 
 def close_gripper(ctx, args: dict[str, Any]) -> None:
@@ -2325,6 +2340,44 @@ def _jaws_left_the_open_position(ctx, gripper: float) -> bool:
 # getattr/try-guarded throughout, like the rest of this module: a minimal
 # unit-test ctx without the stores is a no-op, never an AttributeError on a
 # motion path.
+
+
+def _current_tool_xy(ctx):
+    """The tool's CURRENT base-frame ``(x, y)`` from forward kinematics, or
+    ``None`` when it cannot be known.
+
+    THE FRAME IS THE ONE THE RECLAIM COMPARES IN, and that is checked, not
+    assumed: ``_is_straight_down`` above already compares this very quantity
+    against a grasp target's (x, y), and those targets come from
+    ``perception_blocks._tag_table_xy`` — the same base-frame table positions the
+    reclaim judges. Measured 2026-09-14, solve(target) → fk(joints) round-trips
+    to 1.6 mm on the OMX solver, 4e-15 m on edu6 and 2e-6 m on edu1; all three
+    are far inside the 50 mm ``_RELEASE_MOVE_M`` threshold, and the OMX residual
+    is the solver's own strict-vertical approximation, not an error in this read.
+
+    EVERY failure answers ``None`` — no solver, a raising ``fk``, an ``fk`` that
+    answers ``None``, a short or unseeded joint vector, a non-finite coordinate —
+    which is exactly what the caller stored before this existed. Fails CLOSED by
+    construction: an unknown release point simply never reclaims that tag.
+    """
+    ik = getattr(ctx, 'ik', None)
+    pose = getattr(ctx, 'last_full_joints', None)
+    if ik is None or not pose:
+        return None
+    try:
+        fk = ik.fk([float(v) for v in pose[:_n(ctx)]])
+    except Exception:  # noqa: BLE001 — an unknown pose is simply unknown
+        return None
+    if fk is None:
+        return None
+    try:
+        _R, t = fk
+        x, y = float(t[0]), float(t[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None
+    return (x, y)
 
 
 def note_object_picked_up(ctx, tag_id) -> None:

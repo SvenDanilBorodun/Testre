@@ -21,6 +21,7 @@
  */
 
 import { DE } from '../blocks/messages_de';
+import { pointFromValue } from './assetIndex';
 
 export const MARKER_COLORS = Object.freeze({
   pin: '#f59e0b',
@@ -28,10 +29,26 @@ export const MARKER_COLORS = Object.freeze({
   variable: '#a78bfa',
 });
 
-// 64 store entries (MAX_DESTINATION_ENTRIES) + 16 variable points (WP13).
+// 64 store entries (MAX_DESTINATION_ENTRIES) + 16 variable points.
+export const MAX_VARIABLE_POINTS = 16;
 export const MAX_TWIN_MARKERS = 80;
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+
+/**
+ * The run's point-shaped variables (`workshop.variables`, {name: {value, ts}})
+ * as `variablePoints`: only values `pointFromValue` accepts, newest first, the
+ * MAX_VARIABLE_POINTS most recent — store entries are pushed first, so a program
+ * writing many points can never crowd a Ziel or Position off the capped list.
+ */
+export function variablePointsFromValues(variables) {
+  if (!variables || typeof variables !== 'object') return [];
+  return Object.entries(variables)
+    .map(([name, v]) => ({ name, point: pointFromValue(v && v.value), ts: v && v.ts }))
+    .filter((p) => p.point)
+    .sort((a, b) => (finite(b.ts) ? b.ts : 0) - (finite(a.ts) ? a.ts : 0))
+    .slice(0, MAX_VARIABLE_POINTS);
+}
 
 /**
  * @param {object} args

@@ -210,7 +210,11 @@ function buildProgramPins(ctx) {
 
 // JSON for the card; a string shows unquoted. Capped so a long list cannot
 // widen the card's second line.
-function displayValue(value) {
+/**
+ * A variable value as a student reads it: strings unquoted, everything else as
+ * JSON, cut at `maxChars` with an ellipsis. The card uses 20, the drawer 200.
+ */
+export function displayValue(value, maxChars = VARIABLE_VALUE_MAX_CHARS) {
   let text;
   if (typeof value === 'string') text = value;
   else {
@@ -221,7 +225,7 @@ function displayValue(value) {
     }
     if (typeof text !== 'string') text = String(value);
   }
-  return ellipsize(text, VARIABLE_VALUE_MAX_CHARS);
+  return ellipsize(text, maxChars);
 }
 
 function buildVariables(variables, ctx) {

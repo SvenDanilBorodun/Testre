@@ -441,3 +441,47 @@ describe('WorkshopPage — Ziel/Position markers and „Ziel setzen"', () => {
     expect(screen.getByRole('button', { name: 'Bahn anzeigen' })).toBeInTheDocument();
   });
 });
+
+describe('WorkshopPage — variable point markers', () => {
+  const POINT = { x: 0.15, y: 0.02, z: 0.04 };
+
+  test('point-shaped variables reach both twins as violet markers; other values do not', async () => {
+    mockState.workshop.variables = {
+      Punkt: { value: POINT, ts: 200 },
+      Zahl: { value: 7, ts: 300 },
+      Liste: { value: [0.1, 0.2, 0.3], ts: 400 },
+    };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const lastTwin = () => mockTwin.mock.calls[mockTwin.mock.calls.length - 1][0];
+    await waitFor(() => expect(lastTwin().markers).toEqual([
+      { id: 'var:Punkt', label: 'Punkt', kind: 'variable', ...POINT, highlighted: false },
+    ]));
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-scene');
+    expect(lastSimSceneProps().markers.map((m) => m.id)).toEqual(['var:Punkt']);
+  });
+
+  test('the provider enables variable previews; ▶ on a variable opens the simulator WITHOUT the trail and highlights its marker', async () => {
+    mockState.workshop.variables = { Punkt: { value: POINT, ts: 200 } };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await waitFor(() => expect(mockBlockly.provider).not.toBeNull());
+    expect(mockBlockly.provider.getSnapshot().capabilities.previewVariables).toBe(true);
+    mockDispatch.mockClear();
+    act(() => {
+      mockBlockly.provider.dispatchAction({ type: 'preview', asset: { kind: 'variable', id: 'v1', name: 'Punkt' } });
+    });
+    expect(await screen.findByTestId('sim-scene')).toBeInTheDocument();
+    await waitFor(
+      () => expect(mockDispatch).toHaveBeenCalledWith({
+        type: 'studioAssets/setHighlight', payload: { kind: 'variable', id: 'var:Punkt' },
+      }),
+      { timeout: 2000 },
+    );
+    expect(lastSimSceneProps().showPath).toBe(false);
+    // Not a run: no preview bookkeeping, no refusal toast.
+    expect(mockDispatch.mock.calls.map(([a]) => a.type).filter((t) => /preview/i.test(t))).toEqual([]);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+});

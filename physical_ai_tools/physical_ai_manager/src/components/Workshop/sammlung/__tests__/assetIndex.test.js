@@ -182,6 +182,21 @@ describe('buildAssetIndex — variables', () => {
     expect(idx.variables[0].canPreview).toBe(false);
   });
 
+  it('▶ needs BOTH previewVariables and a point-shaped value', () => {
+    const variables = [{ id: 'a', name: 'Ohne' }, { id: 'b', name: 'Punkt' }, { id: 'c', name: 'Zahl' }];
+    const variableValues = {
+      Punkt: { value: { x: 0.1, y: 0, z: 0.05 }, ts: NOW },
+      Zahl: { value: 3, ts: NOW },
+    };
+    const on = buildAssetIndex({ variables, variableValues, capabilities: { previewVariables: true }, now: NOW });
+    expect(on.variables.map((v) => [v.assetName, v.canPreview]))
+      .toEqual([['Ohne', false], ['Punkt', true], ['Zahl', false]]);
+    const off = buildAssetIndex({
+      variables, variableValues, capabilities: { preview: true, previewVariables: false }, now: NOW,
+    });
+    expect(off.variables.map((v) => v.canPreview)).toEqual([false, false, false]);
+  });
+
   it('titles are cut at 22 characters with an ellipsis', () => {
     const idx = buildAssetIndex({
       variables: [{ id: 'v', name: 'abcdefghijklmnopqrstuvwxyz' }],

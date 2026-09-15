@@ -432,6 +432,10 @@ export const DE = {
   DRAWER_DELETE_POSE: 'Position löschen',
   DRAWER_DELETE_VARIABLE: 'Variable löschen',
   DRAWER_EMPTY_TAB: 'Hier ist noch nichts.',
+  DRAWER_LAST_VALUE: 'Letzter Wert',
+  DRAWER_LAST_VALUES: 'Zuletzt',
+  DRAWER_NO_VALUE: 'Noch kein Wert — starte das Programm.',
+  DRAWER_SHOW_POINT: 'Im Simulator zeigen',
   CONFIRM_DELETE_USED:
     '„%1" wird in %2 Blöcken benutzt. Trotzdem löschen? Die Blöcke bleiben stehen und zeigen danach eine Warnung.',
   CONFIRM_DELETE_USED_ONE:

@@ -9,7 +9,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildTwinMarkers, MARKER_COLORS, MAX_TWIN_MARKERS } from '../markers';
+import {
+  buildTwinMarkers, MARKER_COLORS, MAX_TWIN_MARKERS, MAX_VARIABLE_POINTS, variablePointsFromValues,
+} from '../markers';
 import { DE } from '../../blocks/messages_de';
 
 const PIN = { id: 'd_00000001', name: 'Ablage', kind: 'pin', x: 0.182, y: -0.064, z: 0.012 };
@@ -89,5 +91,56 @@ describe('buildTwinMarkers', () => {
   it('is total on missing input', () => {
     expect(buildTwinMarkers({})).toEqual([]);
     expect(buildTwinMarkers()).toEqual([]);
+  });
+});
+
+describe('variablePointsFromValues — variable markers only for point-shaped values', () => {
+  const VALUES = {
+    Zahl: { value: 7, ts: 100 },
+    Text: { value: 'hallo', ts: 110 },
+    Liste: { value: [0.1, 0.2, 0.3], ts: 120 },
+    Halb: { value: { x: 0.1, y: 0.2 }, ts: 130 },
+    Kaputt: { value: { x: 0.1, y: NaN, z: 0 }, ts: 140 },
+    Alt: { value: { x: 0.1, y: 0, z: 0.05 }, ts: 150 },
+    Neu: { value: { x: 0.2, y: -0.1, z: 0.03 }, ts: 160 },
+    Leer: null,
+  };
+
+  it('keeps only {x, y, z} values, newest first', () => {
+    expect(variablePointsFromValues(VALUES)).toEqual([
+      { name: 'Neu', point: { x: 0.2, y: -0.1, z: 0.03 }, ts: 160 },
+      { name: 'Alt', point: { x: 0.1, y: 0, z: 0.05 }, ts: 150 },
+    ]);
+  });
+
+  it('feeds buildTwinMarkers: a violet marker per point, none for other values', () => {
+    const markers = buildTwinMarkers({
+      entries: [PIN],
+      variablePoints: variablePointsFromValues(VALUES),
+      simMode: true,
+      highlight: { kind: 'variable', id: 'var:Alt' },
+    });
+    expect(markers.map((m) => [m.id, m.kind, m.highlighted])).toEqual([
+      [PIN.id, 'pin', false],
+      ['var:Neu', 'variable', false],
+      ['var:Alt', 'variable', true],
+    ]);
+  });
+
+  it('keeps the MAX_VARIABLE_POINTS most recent, so store entries are never crowded out', () => {
+    const many = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`p${i}`, { value: { x: 0, y: 0, z: 0 }, ts: i }]));
+    const points = variablePointsFromValues(many);
+    expect(MAX_VARIABLE_POINTS).toBe(16);
+    expect(points.map((p) => p.name)).toEqual(Array.from({ length: 16 }, (_, i) => `p${29 - i}`));
+    const entries = Array.from({ length: 64 }, (_, i) => ({ ...PIN, id: `d_${i}`, name: `Ziel ${i}` }));
+    const markers = buildTwinMarkers({ entries, variablePoints: points, simMode: true, highlight: null });
+    expect(markers).toHaveLength(MAX_TWIN_MARKERS);
+    expect(markers.filter((m) => m.kind === 'pin')).toHaveLength(64);
+  });
+
+  it('is total on missing input', () => {
+    expect(variablePointsFromValues(null)).toEqual([]);
+    expect(variablePointsFromValues(undefined)).toEqual([]);
+    expect(variablePointsFromValues({})).toEqual([]);
   });
 });

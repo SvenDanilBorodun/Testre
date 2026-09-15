@@ -40,7 +40,7 @@ import {
   takenDestinationNames,
 } from '../components/Workshop/sammlung/destinationStore';
 import { createSammlungProvider } from '../components/Workshop/sammlung/provider';
-import { buildTwinMarkers } from '../components/Workshop/sammlung/markers';
+import { buildTwinMarkers, variablePointsFromValues } from '../components/Workshop/sammlung/markers';
 import { ghostJointsFromEntry } from '../utils/armProfile';
 import SammlungDrawer from '../components/Workshop/sammlung/SammlungDrawer';
 import TeachHost from '../components/Workshop/teach/TeachHost';
@@ -848,9 +848,14 @@ function WorkshopPage({ isActive }) {
     setStoreEntries(store.getEntries());
     return store.subscribe((entries) => setStoreEntries(entries));
   }, [workspace]);
+  // Point-shaped variable values ({x, y, z} in metres) get a violet marker
+  // (the most recently set ones — sammlung/markers.js::variablePointsFromValues).
+  const variablePoints = useMemo(() => variablePointsFromValues(variableValues), [variableValues]);
   const markers = useMemo(
-    () => buildTwinMarkers({ entries: storeEntries, simMode, highlight }),
-    [storeEntries, simMode, highlight],
+    () => buildTwinMarkers({
+      entries: storeEntries, variablePoints, simMode, highlight,
+    }),
+    [storeEntries, variablePoints, simMode, highlight],
   );
   // The ghost arm: the highlighted Position's captured joints, when they fit
   // this arm (utils/armProfile.js::ghostJointsFromEntry). Anything else → null.
@@ -1056,6 +1061,18 @@ function WorkshopPage({ isActive }) {
   // startPreview through this ref.
   const startPreviewRef = useRef(startPreview);
   startPreviewRef.current = startPreview;
+  // ▶ / „Im Simulator zeigen" on a point-shaped VARIABLE is not a run: open the
+  // simulator (never the trail) and highlight its marker — no service call.
+  // Every other kind goes to the generated sim run. Shared by the flyout card
+  // action and the drawer, so both routes behave identically.
+  const previewAsset = useCallback(async (asset, options) => {
+    if (asset && asset.kind === 'variable') {
+      await ensureSimMode({ showPath: false });
+      dispatch(setHighlight({ kind: 'variable', id: `var:${asset.name}` }));
+      return;
+    }
+    await startPreviewRef.current(asset, options);
+  }, [ensureSimMode, dispatch]);
   useEffect(() => {
     sammlungProvider.setSnapshot({
       capabilities: {
@@ -1064,7 +1081,7 @@ function WorkshopPage({ isActive }) {
         teach: true,
         drawer: true,
         preview: true,
-        previewVariables: false,
+        previewVariables: true,
         pinCamera: !!calibrated && !simMode,
         pinSim: true,
       },
@@ -1096,8 +1113,8 @@ function WorkshopPage({ isActive }) {
         // TeachHost judges the gates (and a glide) when it processes the request.
         dispatch(requestTeach({ focus: action.focus ?? null }));
       } else if (action.type === 'preview') {
-        // The flyout ▶ always plays at tempo 1.0.
-        startPreviewRef.current(action.asset);
+        // The flyout ▶ always plays at tempo 1.0 (a variable: its marker).
+        previewAsset(action.asset);
       } else if (action.type === 'pinSim') {
         // Never turns the trail on (ensureSimMode showPath: false).
         ensureSimMode({ showPath: false }).then((entered) => {
@@ -1107,7 +1124,7 @@ function WorkshopPage({ isActive }) {
         dispatch(setHighlight(action.asset ?? null));
       }
     });
-  }, [sammlungProvider, isTabBusy, dispatch, ensureSimMode]);
+  }, [sammlungProvider, isTabBusy, dispatch, ensureSimMode, previewAsset]);
   // A Ziel/Position focused in the drawer highlights its marker; clearing that
   // focus (or leaving those tabs) drops only the highlight the drawer set.
   const drawerHighlightRef = useRef(null);
@@ -1503,7 +1520,7 @@ function WorkshopPage({ isActive }) {
                           accessToken={accessToken}
                           workflowId={selectedWorkflowId}
                           robotType={robotType}
-                          onPreview={startPreview}
+                          onPreview={previewAsset}
                           saveWorkflowNow={saveWorkflowNow}
                           refetchTrajectories={refetchTrajectories}
                         />

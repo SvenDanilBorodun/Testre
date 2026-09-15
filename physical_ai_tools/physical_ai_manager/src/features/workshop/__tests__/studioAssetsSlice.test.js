@@ -17,6 +17,7 @@
 import reducer, {
   fetchTrajectories,
   previewFailed,
+  previewEnded,
   previewStarted,
   previewUnreachable,
   requestTeach,
@@ -189,6 +190,16 @@ describe('studioAssets — a preview is finalized only from its OWN workflow id'
     const s = run(started(), setWorkflowStatus({ workflow_id: OWN, phase: 'running' }), setRunState('stopped'));
     expect(s.preview).toBeNull();
     expect(s.lastPreviewResult[KEY].status).toBe('stopped');
+  });
+
+  test('previewEnded ends a preview that never saw its own status (Stopp before the first status)', () => {
+    const stuck = run(started(), setRunState('stopped'));
+    expect(stuck.preview).not.toBeNull();
+    const s = run(stuck, previewEnded('stopped'));
+    expect(s.preview).toBeNull();
+    expect(s.lastPreviewResult[KEY].status).toBe('stopped');
+    // Without a preview it is a no-op.
+    expect(run(s, previewEnded('stopped'))).toEqual(s);
   });
 
   test('a stale terminal of an earlier run never finalizes the preview', () => {

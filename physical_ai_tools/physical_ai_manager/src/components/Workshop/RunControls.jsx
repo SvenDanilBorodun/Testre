@@ -29,7 +29,7 @@ import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import * as workflowApi from '../../services/workflowApi';
 import { collectReplayNames } from './blocks/trajectories';
 import { DE, formatDe } from './blocks/messages_de';
-import { selectPreview } from '../../features/workshop/studioAssetsSlice';
+import { previewEnded, selectPreview } from '../../features/workshop/studioAssetsSlice';
 import { slimRunPayload } from '../../utils/blocklyPayload';
 import { compactTrajectoryPoints } from '../../utils/trajectoryCompact';
 import useRsBridgeStatus from '../../hooks/useRsBridgeStatus';
@@ -291,6 +291,8 @@ function RunControls({
       // setRunState('running') at the bottom, because every one of those abort
       // paths returns before it.
       dispatch(clearWorkflowError());
+      // A preview that never saw its own status must not label this run.
+      if (preview) dispatch(previewEnded('stopped'));
       // Clear stale unreachable warnings from a previous run before
       // dispatching the new ones; the effect above handles the actual
       // block-level setWarningText(null) calls.
@@ -478,6 +480,7 @@ function RunControls({
     robotType,
     breakpoints,
     setWorkflowBreakpoints,
+    preview,
   ]);
 
   const handleStop = useCallback(async () => {
@@ -490,6 +493,8 @@ function RunControls({
       );
       dispatch(setRunState('stopped'));
       dispatch(setPaused(false));
+      // No-op once setRunState finalized it; ends one that never saw its status.
+      if (preview) dispatch(previewEnded('stopped'));
       if (!r.success) {
         toast.error(r.message || 'Stopp fehlgeschlagen.');
       } else {
@@ -500,7 +505,7 @@ function RunControls({
     } finally {
       setBusy(false);
     }
-  }, [callService, dispatch]);
+  }, [callService, dispatch, preview]);
 
   const handlePause = useCallback(async () => {
     setBusy(true);

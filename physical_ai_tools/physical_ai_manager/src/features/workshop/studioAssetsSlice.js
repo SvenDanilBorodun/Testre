@@ -142,6 +142,14 @@ const studioAssetsSlice = createSlice({
       };
       state.preview = null;
     },
+    // The local end of a preview that may never see its own status (Stopp, or
+    // a program run started, before the first vorschau-* status arrived — e.g.
+    // rosbridge dropped). Without it the preview stayed in flight for good and
+    // its banner/chip labelled the student's real runs. Only a student action
+    // dispatches this, so a previous run's late terminal still cannot.
+    previewEnded: (state, action) => {
+      finalizePreview(state, action.payload === 'error' ? 'error' : 'stopped');
+    },
     previewUnreachable: (state, action) => {
       if (!state.preview) return;
       const { message } = action.payload || {};
@@ -243,6 +251,7 @@ export const {
   setDrawerFocus,
   setPreviewTempo,
   previewStarted,
+  previewEnded,
   previewFailed,
   previewUnreachable,
   requestTeach,

@@ -153,6 +153,20 @@ export default function useSimPreview({
         return;
       }
 
+      // The gates were judged before the sim-entry settle and the recording
+      // fetch; the leader (or a teach session, a run …) may have come on since.
+      const late = previewBlockReason({
+        ...(now.gates || {}),
+        asset,
+        robotType: now.robotType,
+        workflowId: now.workflowId,
+        inFlight: false,
+      });
+      if (late) {
+        toast.error(PREVIEW_BLOCK_TITLES_DE[late]);
+        return;
+      }
+
       dispatch(clearWorkflowLog());
       dispatch(clearWorkflowError());
       dispatch(setWorkflowStatus({ log_message: formatDe(logTemplate, name) }));
@@ -176,6 +190,13 @@ export default function useSimPreview({
         const messages = Array.isArray(r.unreachable_messages) ? r.unreachable_messages : [];
         dispatch(previewUnreachable({ key, message: messages[0] || '' }));
       }
+      // The terminal status can arrive BEFORE the start reply (a lead-in refused
+      // at run start): a result already recorded means the run is over, and
+      // 'running' would re-block previews and sim exit until a Stopp.
+      const startedPrev = startedRef.current && startedRef.current.key === key
+        ? startedRef.current.prev : undefined;
+      const current = resultsRef.current ? resultsRef.current[key] : undefined;
+      if (current !== undefined && current !== startedPrev) return;
       dispatch(setRunState('running'));
       dispatch(setPaused(false));
     } catch (e) {

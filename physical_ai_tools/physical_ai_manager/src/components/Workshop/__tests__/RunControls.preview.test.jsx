@@ -13,7 +13,7 @@
 // alone: the running block ids are the generated `vorschau-*` ones.
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import RunControls from '../RunControls';
 import { DE, formatDe } from '../blocks/messages_de';
 
@@ -106,5 +106,13 @@ describe('RunControls — a preview in flight', () => {
     mockState = state({ preview: null, currentBlockId: 'b7' });
     rerender(<RunControls workflowId="wf-1" simMode simScene={null} workspace={ws} />);
     expect(ws.highlightBlock).toHaveBeenCalledWith('b7');
+  });
+
+  test('Stopp ends a preview that never saw its own status', async () => {
+    mockRos.callService.mockResolvedValue({ success: true, message: 'Gestoppt.' });
+    mockState = state({ preview: { ...PREVIEW, sawOwnStatus: false } });
+    render(<RunControls workflowId="wf-1" simMode simScene={null} workspace={makeWorkspace()} />);
+    fireEvent.click(screen.getByRole('button', { name: DE.RUN_STOP }));
+    await waitFor(() => expect(mockDispatch).toHaveBeenCalledWith({ type: 'studioAssets/previewEnded', payload: 'stopped' }));
   });
 });

@@ -322,3 +322,44 @@ describe('useSimPreview — the result of the started preview', () => {
     expect(mockToast.success).not.toHaveBeenCalled();
   });
 });
+
+describe('useSimPreview — late changes while the preview starts', () => {
+  function deferred() {
+    let resolve;
+    const promise = new Promise((res) => { resolve = res; });
+    return { promise, resolve };
+  }
+
+  test('the leader switched on during the sim-entry settle refuses before anything is sent', async () => {
+    const entry = deferred();
+    ensureSimMode = vi.fn(() => entry.promise);
+    const { result, rerender } = setup();
+    let pending;
+    act(() => { pending = result.current.startPreview(REC); });
+    rerender(props({ gates: { ...GATES, rsLeaderOn: true } }));
+    await act(async () => { entry.resolve(true); await pending; });
+    expect(mockToast.error).toHaveBeenCalledWith(DE.PREVIEW_BLOCK_LEADER);
+    expect(mockRos.callService).not.toHaveBeenCalled();
+    expect(types()).not.toContain('studioAssets/previewStarted');
+  });
+
+  test('a terminal result that lands before the start reply is not overwritten with running', async () => {
+    const reply = deferred();
+    mockRos.callService.mockImplementation(() => reply.promise);
+    const { result, rerender } = setup();
+    let pending;
+    await act(async () => {
+      pending = result.current.startPreview(REC);
+      for (let i = 0; i < 10 && !mockRos.callService.mock.calls.length; i += 1) await Promise.resolve();
+    });
+    expect(mockRos.callService).toHaveBeenCalledTimes(1);
+    mockState = { studioAssets: { lastPreviewResult: { [`rec:${TRAJ_ID}`]: { status: 'refused', message: 'x', ts: 1 } } } };
+    rerender(props());
+    await act(async () => {
+      reply.resolve({ success: true, message: 'ok', unreachable_block_ids: [], unreachable_messages: [] });
+      await pending;
+    });
+    expect(types()).toContain('studioAssets/previewStarted');
+    expect(types()).not.toContain('workshop/setRunState');
+  });
+});

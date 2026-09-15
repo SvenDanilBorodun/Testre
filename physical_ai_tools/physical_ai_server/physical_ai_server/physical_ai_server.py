@@ -3509,6 +3509,34 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             response.message = 'Position konnte nicht gespeichert werden.'
             return response
 
+        # S3 — additive: hand back the joint vector the pose was captured from
+        # (Communicator.FOLLOWER_JOINT_ORDER, arm joints then the gripper), so the
+        # client can draw a ghost arm and remember the gripper state. Only on
+        # THIS success path; every refusal above leaves both arrays at their
+        # message defaults (empty). Two reads of the same cached message,
+        # microseconds apart — on a held arm they agree.
+        try:
+            # Inside the try on purpose: a server package run against interfaces
+            # built from the OLD .srv (a hot-deploy; the image always rebuilds
+            # both together) has __slots__ without these fields, and an
+            # AttributeError escaping a service callback kills the node (main()
+            # catches only KeyboardInterrupt).
+            response.joint_positions = []
+            response.joint_names = []
+            getter = getattr(self.communicator, 'get_latest_follower_joints', None)
+            snap = getter() if callable(getter) else None
+            names = list(getattr(self.communicator, 'FOLLOWER_JOINT_ORDER', ()) or ())
+            if (snap and names and len(snap) == len(names)
+                    and all(math.isfinite(float(v)) for v in snap)):
+                # Build both lists BEFORE assigning either, so a conversion
+                # failure can never leave positions without their names.
+                positions = [float(v) for v in snap]
+                joint_names = [str(n) for n in names]
+                response.joint_positions = positions
+                response.joint_names = joint_names
+        except Exception:  # noqa: BLE001 — additive telemetry must never fail a capture
+            pass
+
         response.success = True
         response.world_x = x
         response.world_y = y

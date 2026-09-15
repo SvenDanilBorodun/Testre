@@ -10,3 +10,8 @@ float32 world_x
 float32 world_y
 float32 world_z
 string message
+# The follower's joint vector the pose was captured from, in
+# Communicator.FOLLOWER_JOINT_ORDER (arm joints, then the gripper). Empty on
+# every refusal and on a server that predates this field.
+float64[] joint_positions
+string[] joint_names

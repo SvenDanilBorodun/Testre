@@ -2825,15 +2825,43 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 # the hand-guided arm back to it (see _TORQUE_ON_HOLD_*). Only on a
                 # torque-ON that is not already confirmed ON — a redundant
                 # torque-on over a holding arm needs no new reference.
-                if (enabled and self._follower_torque_on is not True
-                        and self._follower_rail_is_ros2_control()):
+                hold_wanted = (enabled and self._follower_torque_on is not True
+                               and self._follower_rail_is_ros2_control())
+                # EXCEPT while a leader-arm take is live (owner sign-off
+                # 2026-09-15, Rule §2): the follower is teleoperated and already
+                # torqued (a take cannot start while a manual session holds the arm
+                # limp), and the leader broadcaster writes the command rail at
+                # 100 Hz, so a hold would be a SECOND writer. Only the holds are
+                # skipped — the torque-on call below and every other effect run
+                # unchanged, and hand_guide(false) stays ungated.
+                #
+                # `on_leader_teach` is read WITHOUT a lock: one attribute read is
+                # atomic under the GIL, and taking _mode_lock here would add a
+                # _dxl_torque_lock -> _mode_lock edge no other path has. It is
+                # re-read before EACH publish, and once it is seen set no hold is
+                # published for the rest of this call — the conservative direction
+                # (no second writer while a take may be live). Residual window: a
+                # take that claims after a read it passed can still get THAT one
+                # hold (at most the first hold plus its _TORQUE_ON_HOLD_SETTLE_S
+                # settle); it targets the measured pose and teleop overrides it on
+                # its next tick. A take that ENDS during the call only loses holds:
+                # the teleop broadcaster is still the rail's writer after a take.
+                if hold_wanted and getattr(self, 'on_leader_teach', False) is True:
+                    self.get_logger().info(
+                        'Pre-energise hold skipped — a leader-arm take owns the '
+                        'command rail.')
+                elif hold_wanted:
                     # TWO publishes: the first replaces the stale reference, the
                     # second — re-read just before energising — follows a limp arm
                     # that kept sagging under gravity during the settle, so torque
                     # does not pull it back up to where it was 0.2 s earlier.
                     if self._hold_follower_at_measured_pose(allow_stale=True):
                         time.sleep(_TORQUE_ON_HOLD_SETTLE_S)
-                        if self._hold_follower_at_measured_pose(allow_stale=True):
+                        if getattr(self, 'on_leader_teach', False) is True:
+                            self.get_logger().info(
+                                'Second pre-energise hold skipped — a leader-arm '
+                                'take started during the settle.')
+                        elif self._hold_follower_at_measured_pose(allow_stale=True):
                             time.sleep(_TORQUE_ON_HOLD_TIME_FROM_START_S
                                        + _TORQUE_ON_HOLD_CYCLE_MARGIN_S)
                 req = SetBool.Request()

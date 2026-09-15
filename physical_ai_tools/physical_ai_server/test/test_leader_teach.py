@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import json
 import math
+import sys
 import textwrap
 import threading
 import time
@@ -572,20 +573,199 @@ def test_T16_capture_coexists_with_a_take_and_with_handbetrieb():
     assert node._assert_no_other_active('capture') == (True, '')
 
 
-def test_T17_hand_guide_false_during_a_take_leaves_leader_state_alone():
-    node = _armed()
+# The REAL re-torque chain for T17: hand_guide(false) ->
+# _retorque_follower_or_keep_locked -> _set_follower_torque, with the hold and the
+# SetBool client as spies (test_manual_relock_home_glide.py pins the hold itself).
+_HOLD_CONSTS = _module_constants((
+    '_TORQUE_ON_HOLD_TIME_FROM_START_S', '_TORQUE_ON_HOLD_SETTLE_S',
+    '_TORQUE_ON_HOLD_CYCLE_MARGIN_S',
+))
+
+
+class _SetBool:
+    class Request:
+        data = False
+
+
+class _RelockTime:
+    """``time`` for the extracted torque chain: a real clock, a recorded sleep and
+    one optional hook per sleep (the settle is where a take can claim)."""
+
+    def __init__(self):
+        self.sleeps = []
+        self.on_sleep = []
+
+    @staticmethod
+    def monotonic():
+        return time.monotonic()
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        if self.on_sleep:
+            self.on_sleep.pop(0)()
+
+
+class _TorqueClient:
+    def __init__(self, events, on_call=None):
+        self.events = events
+        self.on_call = on_call
+
+    def wait_for_service(self, timeout_sec=None):
+        return True
+
+    def call_async(self, req):
+        self.events.append(('torque', bool(req.data)))
+        if self.on_call:
+            self.on_call()
+        return types.SimpleNamespace(
+            done=lambda: True,
+            result=lambda: types.SimpleNamespace(success=True, message='ok'))
+
+
+_RELOCK_TIME = _RelockTime()
+_RELOCK = _load_methods(
+    ('_set_follower_torque', '_retorque_follower_or_keep_locked',
+     '_follower_rail_is_ros2_control'),
+    {**_G, **_HOLD_CONSTS, 'time': _RELOCK_TIME})
+
+
+@pytest.fixture
+def fake_std_srvs(monkeypatch):
+    srv = types.ModuleType('std_srvs.srv')
+    srv.SetBool = _SetBool
+    pkg = types.ModuleType('std_srvs')
+    pkg.srv = srv
+    monkeypatch.setitem(sys.modules, 'std_srvs', pkg)
+    monkeypatch.setitem(sys.modules, 'std_srvs.srv', srv)
+    _RELOCK_TIME.sleeps.clear()
+    _RELOCK_TIME.on_sleep.clear()
+    return _RELOCK_TIME
+
+
+class _RelockNode(_LeaderNode):
+    """``_LeaderNode`` on the OMX rail (the ros2_control torque service) whose
+    hand_guide(false) runs the REAL re-torque chain down to the SetBool call."""
+
+    _set_follower_torque = _RELOCK['_set_follower_torque']
+    _retorque_follower_or_keep_locked = _RELOCK['_retorque_follower_or_keep_locked']
+    _follower_rail_is_ros2_control = _RELOCK['_follower_rail_is_ros2_control']
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._arm_profile.torque_service = '/dynamixel_hardware_interface/set_dxl_torque'
+        self._dxl_torque_lock = threading.Lock()
+        self.events = []
+        self._dxl_torque_client = _TorqueClient(self.events)
+        self.resettles = 0
+
+    def _hold_follower_at_measured_pose(self, allow_stale=False):
+        self.events.append(('hold', allow_stale))
+        self.published.append(('hold', list(self.communicator.joints)))
+        return True
+
+    def note_collision_resettle(self):
+        self.resettles += 1
+
+
+def _hand_guide_false(node):
+    return node.workshop_hand_guide_callback(_Req(enabled=False), _Resp())
+
+
+def _armed_relock_node():
+    node = _RelockNode()
+    resp = _rec(node, 'start_leader')
+    assert resp.success is True, resp.message
+    return node
+
+
+def test_T17_hand_guide_false_during_a_take_skips_the_hold_but_still_torques(fake_std_srvs):
+    """FIXED 2026-09-15 (owner sign-off, Rule §2): an ungated hand_guide(false)
+    from a second tab or raw rosbridge during a leader take re-torques, but no
+    measured-pose hold lands on the command rail teleop is writing — while the
+    leader take's own state is left exactly as it was."""
+    node = _armed_relock_node()
     _sample_rows(node, _moving_rows(4))
     before = [list(r) for r in node._leader_teach_buffer]
-    node.workshop_hand_guide_callback(_Req(enabled=False), _Resp())
+    assert node._follower_torque_on is None          # the boot state of a teleop rig
+    resp = _hand_guide_false(node)
+    assert (resp.success, resp.message) == (True, 'Arm ist wieder verriegelt.')
+    # The torque-on still happens, and nothing else: no hold, no settle sleep.
+    assert node.events == [('torque', True)]
+    assert node.published == []
+    assert fake_std_srvs.sleeps == []
+    assert node._follower_torque_on is True
+    assert node.resettles == 1
+    # hand_guide(false) keeps closing a manual session exactly as before.
+    assert node.on_manual is False and node._manual_persistent is False
+    assert node._manual_exit_gen == 1
+    # Leader-take state untouched.
     assert node.on_leader_teach is True
     assert node._leader_teach_active is True
     assert node._leader_teach_buffer == before
     assert node._leader_teach_timer is not None
-    # KNOWN residual (docs/KNOWN-ISSUES.md, next to L-R4): hand_guide(false) is
-    # deliberately ungated, so it still re-torques through _set_follower_torque,
-    # whose pre-energise measured-pose hold can land on the command rail while
-    # teleop drives the follower. Pinned so gating it is a deliberate (Rule §2) act.
-    assert node.torque_calls == ['retorque']
+
+
+def test_T17b_outside_a_take_the_same_relock_still_holds_twice_before_energising(fake_std_srvs):
+    """The exception is ONLY the live take: the same rig, the same call, no take
+    (never armed, and after the take ended) publishes both holds, then torques."""
+    settle = _HOLD_CONSTS['_TORQUE_ON_HOLD_SETTLE_S']
+    second = (_HOLD_CONSTS['_TORQUE_ON_HOLD_TIME_FROM_START_S']
+              + _HOLD_CONSTS['_TORQUE_ON_HOLD_CYCLE_MARGIN_S'])
+    held_then_torqued = [('hold', True), ('hold', True), ('torque', True)]
+
+    node = _RelockNode()                                  # never armed
+    assert _hand_guide_false(node).success is True
+    assert node.events == held_then_torqued
+    assert fake_std_srvs.sleeps == [settle, second]
+
+    fake_std_srvs.sleeps.clear()
+    node = _armed_relock_node()                           # armed, then stopped
+    _sample_rows(node, _moving_rows(3))
+    assert _rec(node, 'stop_leader').success is True
+    assert node.on_leader_teach is False
+    assert _hand_guide_false(node).success is True
+    assert node.events == held_then_torqued
+    assert fake_std_srvs.sleeps == [settle, second]
+
+
+def test_T17c_a_take_that_claims_during_the_settle_gets_no_second_hold(fake_std_srvs):
+    """The flag is re-read before EACH publish: a take claiming inside the first
+    hold's settle stops the second hold; the torque-on still runs."""
+    node = _RelockNode()
+    fake_std_srvs.on_sleep.append(lambda: setattr(node, 'on_leader_teach', True))
+    assert _hand_guide_false(node).success is True
+    assert node.events == [('hold', True), ('torque', True)]
+    assert fake_std_srvs.sleeps == [_HOLD_CONSTS['_TORQUE_ON_HOLD_SETTLE_S']]
+    assert node._follower_torque_on is True
+
+
+def test_T17d_a_take_that_ends_during_the_call_never_gets_a_late_hold(fake_std_srvs):
+    """Seen live at the decision, the take ending before the energise (here: at
+    the SetBool call itself) publishes nothing afterwards — teleop is still the
+    rail's writer once a take ends."""
+    node = _armed_relock_node()
+    node._dxl_torque_client.on_call = lambda: _rec(node, 'cancel_leader')
+    assert _hand_guide_false(node).success is True
+    assert node.on_leader_teach is False
+    assert node.events == [('torque', True)]
+    assert node.published == []
+
+
+def test_T17e_the_skip_reads_on_leader_teach_and_changes_no_lock_order():
+    """Structural pin of the sign-off's two conditions: the flag is read inside
+    _set_follower_torque's _dxl_torque_lock block, BEFORE both hold publishes and
+    call_async, and the method takes no other lock (no _mode_lock edge)."""
+    fn = _function_defs('_set_follower_torque')[0]
+    seg = ast.get_source_segment(_SOURCE, fn)
+    i_lock = seg.index('with self._dxl_torque_lock:')
+    i_flag = seg.index("getattr(self, 'on_leader_teach', False) is True")
+    i_hold = seg.index('self._hold_follower_at_measured_pose(allow_stale=True)')
+    i_flag2 = seg.index("getattr(self, 'on_leader_teach', False) is True", i_hold)
+    i_hold2 = seg.index('self._hold_follower_at_measured_pose(allow_stale=True)', i_hold + 1)
+    i_call = seg.index('client.call_async(req)')
+    assert i_lock < i_flag < i_hold < i_flag2 < i_hold2 < i_call
+    withs = {w for n in ast.walk(fn) if isinstance(n, ast.With) for w in _with_locks(n)}
+    assert withs == {'_dxl_torque_lock'}
 
 
 def test_T25_stop_and_cancel_carry_no_claim_token_any_caller_ends_the_live_take():

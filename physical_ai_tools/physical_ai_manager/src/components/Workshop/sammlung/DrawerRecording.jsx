@@ -16,10 +16,17 @@
  */
 
 import React, { useState } from 'react';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import * as workflowApi from '../../../services/workflowApi';
-import { setDrawerFocus, setRenameSplit } from '../../../features/workshop/studioAssetsSlice';
+import {
+  selectDrawer,
+  selectLastPreviewResult,
+  setDrawerFocus,
+  setPreviewTempo,
+  setRenameSplit,
+} from '../../../features/workshop/studioAssetsSlice';
+import { previewKeyForRecording } from '../../../utils/simPreview';
 import { DE, formatDe } from '../blocks/messages_de';
 import {
   deleteRecordingRows,
@@ -50,6 +57,24 @@ function secondsDe(v) {
   return isFiniteNumber(v) ? formatSecondsDe(v) : '—';
 }
 
+// The run bar's three tempos; the drawer's choice lives in `drawer.previewTempo`.
+const PREVIEW_TEMPO_BUTTONS = [
+  { value: 0.5, label: DE.RUN_TEMPO_SLOW },
+  { value: 1.0, label: DE.RUN_TEMPO_NORMAL },
+  { value: 2.0, label: DE.RUN_TEMPO_FAST },
+];
+
+// The newest result among this recording's versions (each version is its own
+// preview key), or null.
+function latestVersionResult(lastPreviewResult, versions) {
+  let best = null;
+  versions.forEach((v) => {
+    const r = lastPreviewResult ? lastPreviewResult[previewKeyForRecording(v.id)] : null;
+    if (r && (!best || (r.ts || 0) >= (best.ts || 0))) best = r;
+  });
+  return best;
+}
+
 function robotLabel(profile) {
   if (!profile) return DE.DRAWER_ROBOT_LEGACY;
   const long = robotLongLabelDe(profile);
@@ -68,6 +93,9 @@ export default function DrawerRecording({
   refetchTrajectories,
 }) {
   const dispatch = useDispatch();
+  const drawer = useSelector(selectDrawer);
+  const lastPreviewResult = useSelector(selectLastPreviewResult);
+  const previewTempo = (drawer && drawer.previewTempo) || 1.0;
   // { text, yesLabel, onYes, onNo } — one inline confirm at a time.
   const [confirm, setConfirm] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -182,6 +210,13 @@ export default function DrawerRecording({
   const fps = isFiniteNumber(newest.fps) ? newest.fps.toLocaleString('de-DE') : '—';
   const points = isFiniteNumber(newest.point_count) ? newest.point_count : '—';
   const older = versions.slice(1);
+  const previewEnabled = !!(capabilities && capabilities.preview && typeof onPreview === 'function');
+  const lastResult = latestVersionResult(lastPreviewResult, versions);
+  // The drawer plays at its own tempo; the flyout ▶ always plays at 1.0.
+  const playVersion = (row) => onPreview(
+    { kind: 'recording', id: row.id, name, robotProfile: row.robot_profile ?? null },
+    { tempo: previewTempo },
+  );
 
   return (
     <div className="p-3">
@@ -193,16 +228,40 @@ export default function DrawerRecording({
         <DetailRow label={DE.DRAWER_ROBOT}>{robotLabel(newest.robot_profile)}</DetailRow>
         <DetailRow label={DE.DRAWER_RECORDED_AT}>{formatRecordedAtDe(newest.created_at)}</DetailRow>
       </dl>
-      {capabilities && capabilities.preview && card.canPreview && typeof onPreview === 'function' && (
-        <button
-          type="button"
-          onClick={() => onPreview({
-            kind: 'recording', id: newest.id, name, robotProfile: newest.robot_profile ?? null,
-          })}
-          className="mt-2 rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50"
-        >
-          {`▶ ${DE.PREVIEW_START}`}
-        </button>
+      {previewEnabled && card.canPreview && (
+        <section className="mt-3" aria-label={DE.PREVIEW_START}>
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">{DE.PREVIEW_START}</h4>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => playVersion(newest)}
+              className="rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50"
+            >
+              {DE.PREVIEW_PLAY}
+            </button>
+            <div className="inline-flex items-center gap-1" role="group" aria-label={DE.RUN_TEMPO_LABEL}>
+              {PREVIEW_TEMPO_BUTTONS.map((t) => (
+                <button
+                  key={t.value}
+                  type="button"
+                  aria-pressed={previewTempo === t.value}
+                  onClick={() => dispatch(setPreviewTempo(t.value))}
+                  className={
+                    'rounded border px-2 py-0.5 text-xs '
+                    + (previewTempo === t.value
+                      ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                      : 'border-[var(--line)] text-gray-700 hover:bg-gray-50')
+                  }
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {lastResult && lastResult.status === 'refused' && lastResult.message && (
+            <p className="mt-1 text-sm text-red-700">{lastResult.message}</p>
+          )}
+        </section>
       )}
       <UsageList workspace={workspace} rows={rows} nowhereText={DE.DRAWER_USED_NOWHERE_RECORDING} />
       {older.length > 0 && (
@@ -214,6 +273,17 @@ export default function DrawerRecording({
                 <span className="min-w-0 flex-1 text-gray-700">
                   {`${formatVersionDateDe(row.created_at)} · ${secondsDe(row.duration_s)} s · ${DE.DRAWER_VERSION_NOT_PLAYED}`}
                 </span>
+                {previewEnabled && (
+                  <button
+                    type="button"
+                    aria-label={DE.PREVIEW_START}
+                    title={DE.PREVIEW_START}
+                    onClick={() => playVersion(row)}
+                    className="rounded px-2 py-0.5 text-gray-700 hover:bg-gray-50"
+                  >
+                    ▶
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={busy || !!confirm}

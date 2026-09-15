@@ -15,9 +15,14 @@
  */
 
 import React, { useState } from 'react';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
-import { setDrawerFocus } from '../../../features/workshop/studioAssetsSlice';
+import {
+  selectDrawer,
+  selectLastPreviewResult,
+  setDrawerFocus,
+} from '../../../features/workshop/studioAssetsSlice';
+import { previewKeyForDestination } from '../../../utils/simPreview';
 import { DE, formatDe } from '../blocks/messages_de';
 import { deletePlace, renamePlace, usageRows } from './assetCommands';
 import { getDestinationStore, sanitizeDestinationNameInput } from './destinationStore';
@@ -48,6 +53,10 @@ export default function DrawerPlace({ workspace, card, capabilities, onPreview }
   const isPose = entry.kind === 'pose';
   const rows = usageRows(workspace, entry.kind, entry.name);
   const robot = robotLongLabelDe(entry.robot_type);
+  const drawer = useSelector(selectDrawer);
+  const results = useSelector(selectLastPreviewResult);
+  const previewTempo = (drawer && drawer.previewTempo) || 1.0;
+  const lastResult = results ? results[previewKeyForDestination(entry.id)] : null;
 
   const handleRename = (draft) => {
     const result = renamePlace({ workspace, entryId: entry.id, toName: draft });
@@ -104,13 +113,28 @@ export default function DrawerPlace({ workspace, card, capabilities, onPreview }
         </DetailRow>
       </dl>
       {capabilities && capabilities.preview && typeof onPreview === 'function' && (
-        <button
-          type="button"
-          onClick={() => onPreview({ kind: entry.kind, id: entry.id, name: entry.name })}
-          className="mt-2 rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50"
-        >
-          {`▶ ${DE.PREVIEW_START}`}
-        </button>
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => onPreview(
+              { kind: entry.kind, id: entry.id, name: entry.name },
+              { tempo: previewTempo },
+            )}
+            className="rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50"
+          >
+            {`▶ ${DE.PREVIEW_START}`}
+          </button>
+          {lastResult && lastResult.status === 'refused' && lastResult.message && (
+            <p className="mt-1 text-sm text-red-700">{lastResult.message}</p>
+          )}
+          {lastResult && lastResult.unreachable && (
+            <p className="mt-1 text-sm text-amber-800">
+              {lastResult.unreachableMessage
+                ? `${DE.CHIP_UNREACHABLE}: ${lastResult.unreachableMessage}`
+                : DE.CHIP_UNREACHABLE}
+            </p>
+          )}
+        </div>
       )}
       <UsageList
         workspace={workspace}

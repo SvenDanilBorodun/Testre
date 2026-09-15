@@ -28,7 +28,8 @@ import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 // build-time "not exported" error. Called by name per CONTRACT C.
 import * as workflowApi from '../../services/workflowApi';
 import { collectReplayNames } from './blocks/trajectories';
-import { DE } from './blocks/messages_de';
+import { DE, formatDe } from './blocks/messages_de';
+import { selectPreview } from '../../features/workshop/studioAssetsSlice';
 import { slimRunPayload } from '../../utils/blocklyPayload';
 import { compactTrajectoryPoints } from '../../utils/trajectoryCompact';
 import useRsBridgeStatus from '../../hooks/useRsBridgeStatus';
@@ -137,6 +138,9 @@ function RunControls({
   const debuggerVisible = useSelector((s) => s.workshop.debuggerVisible);
   const debuggerWarnings = useSelector((s) => s.workshop.debuggerWarnings);
   const breakpoints = useSelector((s) => s.workshop.breakpoints);
+  // A simulator preview in flight (hooks/useSimPreview.js). Its program is
+  // generated, so its block ids are `vorschau-*` and never the student's.
+  const preview = useSelector(selectPreview);
   const [busy, setBusy] = useState(false);
   // Redesign (compact density): the Protokoll log used to be an always-on 192px
   // block. It is now a collapsed-by-default drawer that auto-opens on a run start
@@ -228,14 +232,17 @@ function RunControls({
   // setRunState('stopped') → runState 'idle', re-running this effect) or the id
   // is empty. NOTE: glowStack/glowBlock do not exist in blockly@12.5.1; the
   // installed API is WorkspaceSvg.highlightBlock(id|null).
+  // A preview's current_block_id names a generated `vorschau-*` block that is
+  // not on the canvas, so the highlight is left alone while it plays.
   useEffect(() => {
     if (!workspace || typeof workspace.highlightBlock !== 'function') return;
+    if (preview) return;
     if (runState === 'running' && currentBlockId) {
       workspace.highlightBlock(currentBlockId);
     } else {
       workspace.highlightBlock(null);
     }
-  }, [currentBlockId, runState, workspace]);
+  }, [currentBlockId, runState, workspace, preview]);
 
   // Auto-open the Protokoll drawer when a run starts or an error appears, so the
   // student never misses live output just because the log was collapsed.
@@ -649,7 +656,7 @@ function RunControls({
             }
             aria-hidden="true"
           />
-          {phaseLabel}
+          {preview ? formatDe(DE.PREVIEW_RUNNING, preview.name) : phaseLabel}
         </span>
 
         {/* Phase-2 global Tempo control. Applies to the WHOLE program at the
@@ -726,7 +733,14 @@ function RunControls({
         </div>
       )}
 
-      {simMode && !isRunning && (
+      {preview ? (
+        <div
+          role="status"
+          className="bg-teal-50 border border-teal-200 text-teal-800 text-sm rounded-md p-2 mb-2"
+        >
+          {formatDe(DE.PREVIEW_BANNER, preview.name)}
+        </div>
+      ) : simMode && !isRunning && (
         <div
           role="status"
           className="bg-blue-50 border border-blue-200 text-blue-800 text-sm rounded-md p-2 mb-2"

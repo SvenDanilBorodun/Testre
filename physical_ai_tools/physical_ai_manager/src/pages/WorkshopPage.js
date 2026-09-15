@@ -69,6 +69,13 @@ import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
 import { useRosTopicSubscription } from '../hooks/useRosTopicSubscription';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import useRsBridgeStatus from '../hooks/useRsBridgeStatus';
+import useSimPreview from '../hooks/useSimPreview';
+import {
+  SIM_ENTRY_BLOCK_TITLES_DE,
+  SIM_ENTRY_SETTLE_MS,
+  SIM_TOGGLE_DEFAULT_TITLE_DE,
+  simEntryBlockReason,
+} from '../utils/simPreview';
 import {
   setObjectCatalogOptions,
   setWorkspaceAccessor,
@@ -493,6 +500,34 @@ function WorkshopPage({ isActive }) {
     }
     prevRunStateRef.current = runState;
   }, [runState]);
+
+  // One ladder for the header sim toggle AND a preview's sim entry
+  // (utils/simPreview.js::simEntryBlockReason).
+  const simEntryReason = simEntryBlockReason({
+    simRunActive, simMode, activeTutorialId, teachOpen, jogHandGuideOn,
+  });
+  const simEntryReasonRef = useRef(simEntryReason);
+  simEntryReasonRef.current = simEntryReason;
+  const simModeRef = useRef(simMode);
+  simModeRef.current = simMode;
+  // Enter the simulator on behalf of a preview (and, later, „Ziel setzen" / a
+  // point marker with `showPath: false`, which never turns the trail on).
+  // Resolves true once the simulator is (or already was) open.
+  const ensureSimMode = useCallback(async ({ showPath: withPath = true } = {}) => {
+    if (simModeRef.current) {
+      if (withPath) setShowPath(true);
+      return true;
+    }
+    const reason = simEntryReasonRef.current;
+    if (reason) {
+      toast.error(SIM_ENTRY_BLOCK_TITLES_DE[reason]);
+      return false;
+    }
+    setSimMode(true);
+    if (withPath) setShowPath(true);
+    await new Promise((resolve) => { setTimeout(resolve, SIM_ENTRY_SETTLE_MS); });
+    return true;
+  }, []);
 
   const calibrated =
     hasIntrinsicScene &&
@@ -931,6 +966,30 @@ function WorkshopPage({ isActive }) {
   // The Sammlung provider: ONE object for the page's lifetime (BlocklyWorkspace
   // reads it through a ref), fed a snapshot of the rig and the recording list.
   const sammlungProvider = useMemo(() => createSammlungProvider(), []);
+  // ▶ on a card or in the drawer: a generated SIM run (hooks/useSimPreview.js).
+  // It never addresses the real arm (no /workshop/replay, no /workshop/jog).
+  const { startPreview } = useSimPreview({
+    workspace,
+    simScene,
+    workflowId: selectedWorkflowId,
+    accessToken,
+    robotType,
+    gates: {
+      heartbeatStatus,
+      runState,
+      paused,
+      teachOpen,
+      jogHandGuideOn,
+      simMode,
+      activeTutorialId,
+      rsLeaderOn: !!(rsBridge && rsBridge.leaderOn),
+    },
+    ensureSimMode,
+  });
+  // The provider's action handler is installed once; it reaches the latest
+  // startPreview through this ref.
+  const startPreviewRef = useRef(startPreview);
+  startPreviewRef.current = startPreview;
   useEffect(() => {
     sammlungProvider.setSnapshot({
       capabilities: {
@@ -938,7 +997,7 @@ function WorkshopPage({ isActive }) {
         simMode,
         teach: true,
         drawer: true,
-        preview: false,
+        preview: true,
         previewVariables: false,
         pinCamera: !!calibrated && !simMode,
         pinSim: false,
@@ -970,8 +1029,11 @@ function WorkshopPage({ isActive }) {
       } else if (action.type === 'teach') {
         // TeachHost judges the gates (and a glide) when it processes the request.
         dispatch(requestTeach({ focus: action.focus ?? null }));
+      } else if (action.type === 'preview') {
+        // The flyout ▶ always plays at tempo 1.0.
+        startPreviewRef.current(action.asset);
       }
-      // preview / pinSim / highlight: wired by their own work packages.
+      // pinSim / highlight: wired by their own work packages.
     });
   }, [sammlungProvider, isTabBusy, dispatch]);
   // The drawer belongs to the editor it was opened over. Redux keeps
@@ -1196,10 +1258,7 @@ function WorkshopPage({ isActive }) {
                 // which the simulator would hide under the student's hand), or
                 // while the arm is hand-guided (unmounting JogPanel re-torques /
                 // resets the live hand-guide session under the student's hand).
-                if (simRunActive
-                    || (!simMode && (!!activeTutorialId || teachOpen || jogHandGuideOn))) {
-                  return;
-                }
+                if (simEntryReason) return;
                 setSimMode((v) => {
                   const next = !v;
                   // The avoidance trail is a headline sim feature — turn it on
@@ -1210,17 +1269,10 @@ function WorkshopPage({ isActive }) {
                 });
               }}
               aria-pressed={simMode}
-              disabled={simRunActive
-                || (!simMode && (!!activeTutorialId || teachOpen || jogHandGuideOn))}
-              title={simRunActive
-                ? 'Während ein Simulationslauf läuft, kann der Simulator nicht beendet werden — bitte zuerst stoppen.'
-                : (!simMode && !!activeTutorialId)
-                ? 'Während ein Lernpfad aktiv ist, kann der Simulator nicht gestartet werden — bitte den Lernpfad zuerst beenden.'
-                : (!simMode && teachOpen)
-                ? DE.TEACH_SIM_ENTRY_BLOCKED
-                : (!simMode && jogHandGuideOn)
-                ? 'Solange der Arm freigeschaltet ist, kann der Simulator nicht gestartet werden — bitte den Arm zuerst festsetzen.'
-                : 'Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung'}
+              disabled={!!simEntryReason}
+              title={simEntryReason
+                ? SIM_ENTRY_BLOCK_TITLES_DE[simEntryReason]
+                : SIM_TOGGLE_DEFAULT_TITLE_DE}
               className={
                 'text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 '
                 + 'disabled:cursor-not-allowed '
@@ -1355,7 +1407,7 @@ function WorkshopPage({ isActive }) {
                           accessToken={accessToken}
                           workflowId={selectedWorkflowId}
                           robotType={robotType}
-                          onPreview={(asset) => sammlungProvider.dispatchAction({ type: 'preview', asset })}
+                          onPreview={startPreview}
                           saveWorkflowNow={saveWorkflowNow}
                           refetchTrajectories={refetchTrajectories}
                         />

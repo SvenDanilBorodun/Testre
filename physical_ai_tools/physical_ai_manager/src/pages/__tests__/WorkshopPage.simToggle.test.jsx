@@ -38,10 +38,12 @@ const mockBlockly = vi.hoisted(() => ({ mountCount: 0 }));
 vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
   __esModule: true,
   // Named + capitalized so react-hooks/rules-of-hooks recognizes it as a component.
-  default: function MockBlocklyWorkspace() {
+  default: function MockBlocklyWorkspace({ sammlungProvider }) {
     React.useEffect(() => {
       mockBlockly.mountCount += 1;
     }, []);
+    // The page's Sammlung provider, so a test can dispatch a card action.
+    mockBlockly.provider = sammlungProvider;
     return <div data-testid="blockly-workspace" />;
   },
 }));
@@ -298,6 +300,68 @@ describe('WorkshopPage — sim toggle swaps only the right region', () => {
     expect(btn).toBeDisabled();
     expect(btn.getAttribute('title')).toContain('freigeschaltet');
     await userEvent.click(btn);
+    expect(screen.queryByTestId('sim-stage')).toBeNull();
+  });
+
+  // The ladder moved into utils/simPreview.js::simEntryBlockReason; every title
+  // the student reads is pinned here verbatim, as rendered.
+  test('all toggle titles are unchanged', async () => {
+    const titleOf = () => screen.getByRole('button', { name: /Test im Simulator|Simulator beenden/ })
+      .getAttribute('title');
+    const { unmount } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(titleOf()).toBe('Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung');
+    await userEvent.click(screen.getByTestId('jog-hand-guide-on'));
+    expect(titleOf()).toBe(
+      'Solange der Arm freigeschaltet ist, kann der Simulator nicht gestartet werden — bitte den Arm zuerst festsetzen.');
+    unmount();
+
+    mockState = baseState({ activeTutorialId: 'tut-1' });
+    const { unmount: unmountSecond } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(titleOf()).toBe(
+      'Während ein Lernpfad aktiv ist, kann der Simulator nicht gestartet werden — bitte den Lernpfad zuerst beenden.');
+    unmountSecond();
+
+    mockState = baseState();
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    // Inside the simulator a tutorial no longer blocks — only a sim run does.
+    expect(titleOf()).toBe('Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung');
+    mockState = baseState({ runState: 'running' });
+    rerender(<WorkshopPage isActive />);
+    const leave = screen.getByRole('button', { name: 'Simulator beenden' });
+    expect(leave).toBeDisabled();
+    expect(leave.getAttribute('title')).toBe(
+      'Während ein Simulationslauf läuft, kann der Simulator nicht beendet werden — bitte zuerst stoppen.');
+  });
+});
+
+describe('WorkshopPage — simulator previews', () => {
+  test('the provider offers ▶ (capability preview)', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(mockBlockly.provider.getSnapshot().capabilities.preview).toBe(true);
+  });
+
+  test('a card ▶ enters the simulator on the student\'s behalf', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(screen.queryByTestId('sim-stage')).toBeNull();
+    mockBlockly.provider.dispatchAction({ type: 'preview', asset: { kind: 'pin', id: 'd_1', name: 'Ablage' } });
+    expect(await screen.findByTestId('sim-stage')).toBeInTheDocument();
+    expect(screen.queryByTestId('right-dock')).toBeNull();
+  });
+
+  test('a refused ▶ toasts its reason and never enters the simulator', async () => {
+    mockState = baseState({ activeTutorialId: 'tut-1' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    mockBlockly.provider.dispatchAction({ type: 'preview', asset: { kind: 'pin', id: 'd_1', name: 'Ablage' } });
+    await new Promise((r) => { setTimeout(r, 0); });
+    expect(toast.error).toHaveBeenCalledWith(DE.PREVIEW_BLOCK_TUTORIAL);
     expect(screen.queryByTestId('sim-stage')).toBeNull();
   });
 });

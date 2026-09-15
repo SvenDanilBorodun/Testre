@@ -303,8 +303,31 @@ export const DE = {
   // lead-in refusal advises lifting the arm — impossible in a simulator.
   PREVIEW_LEAD_IN_BELOW_TABLE:
     'Die Aufnahme beginnt unter dem Tisch des Simulators — im Simulator kann sie nicht abgespielt werden.',
-  // Card ▶ aria-label (sammlung/AssetCardInflater.js); the buttons come later.
+  // Card ▶ aria-label (sammlung/AssetCardInflater.js) and the drawer's preview
+  // section heading / Ziel button (sammlung/DrawerRecording.jsx, DrawerPlace.jsx).
   PREVIEW_START: 'Im Simulator ansehen',
+  // hooks/useSimPreview.js + RunControls.jsx (the preview in flight).
+  PREVIEW_PLAY: '▶ Abspielen',
+  PREVIEW_RUNNING: 'Vorschau läuft: %1',
+  PREVIEW_DONE: 'Vorschau beendet.',
+  PREVIEW_BANNER:
+    'Vorschau spielt „%1" auf dem virtuellen Roboter ab. Dein Programm und deine Szene bleiben unverändert.',
+  PREVIEW_LOG_RECORDING: '— Vorschau: Bewegung „%1" —',
+  PREVIEW_LOG_PLACE: '— Vorschau: Ziel „%1" —',
+  PREVIEW_LOG_POSE: '— Vorschau: Position „%1" —',
+  PREVIEW_TOO_BIG: 'Diese Bewegung ist zu groß für eine Vorschau.',
+  PREVIEW_FAILED: 'Vorschau fehlgeschlagen: %1',
+  // utils/simPreview.js::PREVIEW_BLOCK_TITLES_DE — why ▶ is refused client-side.
+  PREVIEW_BLOCK_OFFLINE: 'Keine Verbindung zum Roboter-Dienst.',
+  PREVIEW_BLOCK_RUNNING: 'Ein Programm läuft gerade – erst auf „Stopp" drücken.',
+  PREVIEW_BLOCK_TEACH: 'Erst Vormachen beenden.',
+  PREVIEW_BLOCK_HANDGUIDE: 'Der Arm ist freigeschaltet – bitte zuerst festsetzen.',
+  PREVIEW_BLOCK_TUTORIAL: 'Während eines Lernpfads kann der Simulator nicht geöffnet werden.',
+  PREVIEW_BLOCK_LEADER:
+    'Solange der Leader-Arm eingeschaltet ist, gibt es keine Vorschau. Bitte zuerst oben „Leader abschalten".',
+  PREVIEW_BLOCK_OTHER_ROBOT:
+    'Diese Bewegung wurde mit einem anderen Robotertyp aufgenommen und kann hier nicht abgespielt werden.',
+  PREVIEW_BLOCK_UNSAVED: 'Bitte zuerst den Workflow speichern.',
 
   // Sammlung toolbox groups (blocks/toolbox.js + sammlung/toolboxCategories.js).
   CATEGORY_AUFNAHMEN: 'Aufnahmen',

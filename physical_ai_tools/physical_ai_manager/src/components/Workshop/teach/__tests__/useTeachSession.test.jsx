@@ -659,6 +659,26 @@ describe('useTeachSession', () => {
       offline.unmount();
     });
 
+    it('a replay call that throws enters vorschau (the drive may have started) and reports offline', async () => {
+      const h = setup();
+      await toPruefen(h);
+      await act(async () => { h.cur.actions.previewOnRobot(); await flush(); });
+      await h.reject(h.last('replayMotion'));
+      expect(h.state).toBe('vorschau');
+      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_OFFLINE);
+      h.unmount();
+    });
+
+    it('a free refusal with no message names the arm, not the connection', async () => {
+      const h = setup();
+      await h.press('f');
+      await h.advance(3000);
+      await h.resolve(h.last('handGuide'), { success: false, message: '' });
+      expect(h.state).toBe('fest');
+      expect(h.cbs.onError).toHaveBeenLastCalledWith(DE.TEACH_FREE_FAILED);
+      h.unmount();
+    });
+
     it('a refused replay stays in pruefen with the reason', async () => {
       const h = setup();
       await toPruefen(h);

@@ -473,6 +473,11 @@ export const DE = {
   TEACH_CAP_REACHED: 'Maximale Aufnahmedauer erreicht — Aufnahme wird beendet.',
   TEACH_ZIEL_BLOCKED_REC: 'Erst Aufnahme beenden',
   TEACH_OFFLINE: 'Keine Verbindung zum Roboter-Dienst.',
+  // A server that ANSWERED but gave no reason — never „Keine Verbindung".
+  TEACH_FREE_FAILED: 'Arm konnte nicht freigeschaltet werden.',
+  TEACH_RECORD_START_FAILED: 'Aufnahme konnte nicht gestartet werden.',
+  TEACH_PREVIEW_FAILED: 'Vorschau nicht möglich.',
+  TEACH_CAPTURE_FAILED: 'Position konnte nicht gespeichert werden.',
   TEACH_CLOSE_OFFLINE:
     'Keine Verbindung zum Roboter-Dienst — Vormachen wurde geschlossen. Halte den Arm fest: Er wird spätestens nach 2 Minuten automatisch festgesetzt.',
   TEACH_RELOCK_FAILED: 'Der Arm konnte nicht festgesetzt werden. Halte ihn weiter fest und drücke F.',

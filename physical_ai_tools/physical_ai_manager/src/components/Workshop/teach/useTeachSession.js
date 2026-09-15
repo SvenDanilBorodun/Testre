@@ -43,12 +43,9 @@ import {
   TEACH_LEADER_COLLISION_GRACE_MS,
 } from './teachGates';
 
-const RECORD_START_FAILED_DE = 'Aufnahme konnte nicht gestartet werden.';
 // Server _assert_no_other_active('leader_teach') while a take is armed — from
 // another tab, or one of ours whose cancel was lost. Matched verbatim.
 export const LEADER_TAKE_BUSY_DE = 'Eine Leader-Aufnahme läuft gerade — bitte zuerst beenden.';
-const PREVIEW_FAILED_DE = 'Vorschau nicht möglich.';
-const CAPTURE_FAILED_DE = 'Position konnte nicht gespeichert werden.';
 const ELAPSED_STEP_MS = 250;
 
 const INTERACTIVE_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
@@ -290,7 +287,8 @@ export function createTeachEngine(getProps, publish) {
         }
         if (!res || !res.success) {
           setState(fallback);
-          notify('onError', (res && res.message) || (kind === 'record' ? RECORD_START_FAILED_DE : DE.TEACH_OFFLINE));
+          notify('onError', (res && res.message)
+            || (kind === 'record' ? DE.TEACH_RECORD_START_FAILED : DE.TEACH_FREE_FAILED));
           emit();
           return;
         }
@@ -421,7 +419,7 @@ export function createTeachEngine(getProps, publish) {
           return;
         }
         if (!res || !res.success) {
-          const msg = (res && res.message) || RECORD_START_FAILED_DE;
+          const msg = (res && res.message) || DE.TEACH_RECORD_START_FAILED;
           if (msg === LEADER_TAKE_BUSY_DE) r.staleLeaderTake = true;
           emit();
           notify('onError', msg);
@@ -752,7 +750,7 @@ export function createTeachEngine(getProps, publish) {
         return;
       }
       if (!res || !res.success) {
-        notify('onError', (res && res.message) || CAPTURE_FAILED_DE);
+        notify('onError', (res && res.message) || DE.TEACH_CAPTURE_FAILED);
         return;
       }
       sound('capture');
@@ -841,7 +839,7 @@ export function createTeachEngine(getProps, publish) {
         return;
       }
       if (!res || !res.success) {
-        notify('onError', (res && res.message) || PREVIEW_FAILED_DE);
+        notify('onError', (res && res.message) || DE.TEACH_PREVIEW_FAILED);
         return;
       }
       enterPreview(rows);

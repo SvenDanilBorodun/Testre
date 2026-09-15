@@ -28,8 +28,8 @@ import { DE } from './blocks/messages_de';
 // container, and its content comes from `tab.render()` (invoked, NOT used as a
 // `<tab.render/>` element type). React therefore keeps the panel INSTANCE mounted
 // across "open a 2nd panel" / resize / re-render — a spurious remount of a live
-// JogPanel/RecordPanel would fire their unmount teardown (re-torque the arm /
-// cancel an in-progress recording). Panels unmount ONLY on a deliberate close,
+// JogPanel would fire its unmount teardown (re-torque the arm). Panels unmount
+// ONLY on a deliberate close,
 // evict, or dock collapse.
 
 const SPLIT_STORAGE_KEY = 'edubotics_workshop_dock_split';

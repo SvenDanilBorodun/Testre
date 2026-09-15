@@ -14,6 +14,7 @@ import { useSelector } from 'react-redux';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import { armGeometry } from '../../utils/armProfile';
 import { useHomeGlide } from './HomeGlidePrompt';
+import { DE } from './blocks/messages_de';
 
 // Roboter Studio Batch 2b — „Roboter steuern (Tippbetrieb)". Incremental JOG of
 // the real follower: per-joint − / + nudges (Gelenk 1–5 + Greifer-Drehung),
@@ -72,11 +73,11 @@ const NUDGE_BTN =
 
 /**
  * @param {boolean} disabled - blocked by the parent (not connected / a run is
- *   active). When true, every jog + the freischalten toggle is disabled.
+ *   active / Vormachen is open). When true, every jog + the freischalten toggle
+ *   is disabled — never „Arm festsetzen", which stays usable on purpose.
  * @param {(handGuideOn: boolean) => void} onHandGuideChange - reports whether a
- *   hand-guide (torque-off) session is currently open, so the parent can disable
- *   sibling controls (RecordPanel) while the arm is limp. Mirrors
- *   RecordPanel.onRecordingChange.
+ *   hand-guide (torque-off) session is currently open, so the parent can refuse
+ *   Vormachen (teach/TeachHost) while the arm is limp.
  */
 function JogPanel({ disabled = false, onHandGuideChange = null }) {
   const { jogArm, handGuide } = useRosServiceCaller();
@@ -96,8 +97,8 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
   // navigated away while it is still freigeschaltet, so a student never leaves
   // the follower limp. CRITICAL: a React unmount cleanup does NOT run on
   // tab-close / navigation, so the unmount-only cleanup missed the cardinal
-  // limp-arm case — a `pagehide` (+ `beforeunload`) listener covers it, exactly
-  // mirroring RecordPanel's teardown. Latest-value refs so the closures see the
+  // limp-arm case — a `pagehide` (+ `beforeunload`) listener covers it, the same
+  // rule Vormachen's useTeachSession teardown follows. Latest-value refs so the closures see the
   // live state + service fns.
   const handGuideOnRef = useRef(false);
   const handGuideFnRef = useRef(handGuide);
@@ -124,7 +125,7 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
       }
       refixArm();
       // Clear the parent's mirror so a stale „freigeschaltet" can't survive the
-      // unmount (mirrors RecordPanel's onRecordingChange(false) on teardown).
+      // unmount (Vormachen's entry gate reads it).
       if (typeof onHandGuideChangeRef.current === 'function') {
         onHandGuideChangeRef.current(false);
       }
@@ -132,8 +133,8 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
   }, []);
 
   // FIX (hand-guide desync): report the freischalten state up so the parent can
-  // disable RecordPanel while a JogPanel hand-guide session is open — a driven /
-  // recorded move would fight the limp arm. Mirrors RecordPanel.onRecordingChange.
+  // refuse Vormachen (useTeachSession) while a JogPanel hand-guide session is
+  // open — a driven / taught move would fight the limp arm.
   useEffect(() => {
     if (typeof onHandGuideChange === 'function') {
       onHandGuideChange(handGuideOn);
@@ -306,9 +307,7 @@ function JogPanel({ disabled = false, onHandGuideChange = null }) {
           </button>
         )}
         <span className="text-[11px] text-[var(--ink-3)]">
-          {handGuideOn
-            ? 'Arm ist freigeschaltet — jetzt „Position merken" verwenden.'
-            : 'Freischalten, von Hand bewegen, dann „Position merken".'}
+          {handGuideOn ? DE.TEACH_JOG_HINT_FREE : DE.TEACH_JOG_HINT}
         </span>
       </div>
 

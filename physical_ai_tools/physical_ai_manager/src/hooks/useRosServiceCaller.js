@@ -638,7 +638,7 @@ export function useRosServiceCaller() {
     [callService]
   );
 
-  // Roboter Studio „Position merken": capture the follower's CURRENT pose as a
+  // Roboter Studio Vormachen „P" / „Z": capture the follower's CURRENT pose as a
   // named destination (the server runs FK on the live joints, writes it to the
   // destinations table, and returns the world coordinates). The named point is
   // then usable by „Ziel <Name>" (destination_ref) / „bewege zu". The request
@@ -740,8 +740,9 @@ export function useRosServiceCaller() {
     [callService]
   );
 
-  // Replay a trajectory NOW on the follower (used for the RecordPanel preview
-  // and any direct playback). `points_json` is the CONTRACT-B JSON string;
+  // Replay a trajectory NOW on the follower (used for Vormachen's „Auf dem
+  // Roboter ansehen" preview and any direct playback). `points_json` is the
+  // CONTRACT-B JSON string;
   // `speed` is a >0 multiplier. Resp { success, message }. 60 s: replays a whole
   // recorded motion.
   const replayMotion = useCallback(

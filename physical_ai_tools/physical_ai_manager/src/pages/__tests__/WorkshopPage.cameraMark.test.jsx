@@ -96,7 +96,15 @@ vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, defau
 vi.mock('../../components/Workshop/GalleryTab', () => ({ __esModule: true, default: () => <div data-testid="gallery-tab" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
 vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule: true, default: () => <div data-testid="version-history" /> }));
-// JogPanel/RecordPanel: import-safe stubs (the shared idiom's shape).
+// Vormachen: TeachHost is a stub (the overlay has its own tests, and its
+// leader-mode child would read `s.ros`, which these mock states lack), and the
+// bridge probe is stubbed so no page test fetches localhost:8769.
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+vi.mock('../../hooks/useRsBridgeStatus', () => ({
+  __esModule: true,
+  default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false }),
+}));
+// JogPanel: an import-safe stub (the shared idiom's shape).
 vi.mock('../../components/Workshop/JogPanel', () => ({
   __esModule: true,
   default: function MockJogPanel({ onHandGuideChange }) {
@@ -106,20 +114,6 @@ vi.mock('../../components/Workshop/JogPanel', () => ({
           type="button"
           data-testid="jog-hand-guide-on"
           onClick={() => onHandGuideChange && onHandGuideChange(true)}
-        />
-      </div>
-    );
-  },
-}));
-vi.mock('../../components/Workshop/RecordPanel', () => ({
-  __esModule: true,
-  default: function MockRecordPanel({ onRecordingChange }) {
-    return (
-      <div data-testid="record-panel">
-        <button
-          type="button"
-          data-testid="record-panel-recording-on"
-          onClick={() => onRecordingChange && onRecordingChange(true)}
         />
       </div>
     );
@@ -385,12 +379,23 @@ describe('WorkshopPage — the Sammlung „Ziele" group points at the camera', (
     expect(provider).not.toBeNull();
     const snap = provider.getSnapshot();
     // `drawer: true` since the Sammlung drawer landed (its „Verwalten" buttons
-    // and card ⋯ open it); teach and preview stay off until their packages.
+    // and card ⋯ open it), `teach: true` since Vormachen landed; preview stays
+    // off until its package.
     expect(snap.capabilities).toMatchObject({
-      hardware: true, simMode: false, pinCamera: true, teach: false, drawer: true, preview: false,
+      hardware: true, simMode: false, pinCamera: true, teach: true, drawer: true, preview: false,
     });
     expect(snap.robotType).toBe('omx_f');
     expect(snap.trajectories.status).toBe('none');
+  });
+
+  test('a flyout „✋ … vormachen" action requests Vormachen with its focus', async () => {
+    await mountWith(makeWorkspace());
+    const provider = mockWorkspace.sammlungProvider;
+    mockDispatch.mockClear();
+    act(() => { provider.dispatchAction({ type: 'teach', focus: 'pose' }); });
+    const requested = mockDispatch.mock.calls.map((c) => c[0]).filter((x) => x && x.type === 'studioAssets/requestTeach');
+    expect(requested).toHaveLength(1);
+    expect(requested[0].payload).toEqual({ focus: 'pose' });
   });
 
   test('„Ziel in der Kamera setzen" opens the Kamera tab and says where to click', async () => {

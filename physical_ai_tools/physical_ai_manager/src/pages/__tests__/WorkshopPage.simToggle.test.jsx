@@ -19,6 +19,9 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WorkshopPage from '../WorkshopPage';
+import toast from 'react-hot-toast';
+import { DE } from '../../components/Workshop/blocks/messages_de';
+import { setDriveToHandler } from '../../components/Workshop/blocks/destinations';
 
 // ── react-redux: selector-aware stub over a mutable module-level state. ──
 let mockState;
@@ -44,16 +47,18 @@ vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
 }));
 
 // ── Right-region components — recognizable stubs so we can assert the swap. ──
-// RightDock additionally renders the control/record tab panels (the JogPanel/
-// RecordPanel mocks below expose trigger buttons) so the sim-entry guard tests
-// can flip the page's recording/hand-guide state through the real callbacks.
+// RightDock additionally renders the control tab panel (the JogPanel mock
+// below exposes a trigger button) so the sim-entry guard tests can flip the
+// page's hand-guide state through the real callback, and the camera tab (its
+// feed is a stub) so the retired „Position merken" row can be asserted absent.
+// `data-open-ids` exposes the dock layout the page read from storage.
 // Other tabs are NOT rendered — the '3d' tab would mount the real lazy UrdfTwin.
 vi.mock('../../components/Workshop/RightDock', () => ({
   __esModule: true,
-  default: ({ tabs }) => (
-    <div data-testid="right-dock">
+  default: ({ tabs, openIds }) => (
+    <div data-testid="right-dock" data-open-ids={JSON.stringify(openIds)}>
       {(tabs || [])
-        .filter((t) => t.id === 'control' || t.id === 'record')
+        .filter((t) => t.id === 'control' || t.id === 'camera')
         .map((t) => (
           <div key={t.id}>{t.render()}</div>
         ))}
@@ -68,41 +73,43 @@ vi.mock('../../components/Workshop/SimStage', () => ({
 // ── Remaining children: import-safe no-op stubs (inlined — a vi.mock factory is
 //    hoisted above imports, so it can't reference a top-level helper). ──
 vi.mock('../../components/Workshop/CalibrationWizard', () => ({ __esModule: true, default: () => <div data-testid="calib-wizard" /> }));
-vi.mock('../../components/Workshop/LeaderToggle', () => ({ __esModule: true, default: () => <div data-testid="leader-toggle" /> }));
+// LeaderToggle exposes the lock reason the page hands it.
+vi.mock('../../components/Workshop/LeaderToggle', () => ({
+  __esModule: true,
+  default: ({ lockedReason }) => <div data-testid="leader-toggle" data-locked-reason={lockedReason || ''} />,
+}));
 vi.mock('../../components/Workshop/RunControls', () => ({ __esModule: true, default: () => <div data-testid="run-controls" /> }));
 vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
 vi.mock('../../components/Workshop/TemplatePicker', () => ({ __esModule: true, default: () => <div data-testid="template-picker" /> }));
-vi.mock('../../components/Workshop/ToolbarButtons', () => ({ __esModule: true, default: () => <div data-testid="toolbar-buttons" /> }));
+// ToolbarButtons renders its `extra` slot, where the Vormachen button lives.
+vi.mock('../../components/Workshop/ToolbarButtons', () => ({
+  __esModule: true,
+  default: ({ extra }) => <div data-testid="toolbar-buttons">{extra}</div>,
+}));
 vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, default: () => <div data-testid="debug-panel" /> }));
 vi.mock('../../components/Workshop/GalleryTab', () => ({ __esModule: true, default: () => <div data-testid="gallery-tab" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
 vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule: true, default: () => <div data-testid="version-history" /> }));
-// JogPanel/RecordPanel stubs expose trigger buttons wired to the REAL page
-// callbacks (onHandGuideChange/onRecordingChange), so the sim-entry guard tests
+// Vormachen: TeachHost is a stub (the overlay has its own tests, and its
+// leader-mode child would read `s.ros`, which these mock states lack), and the
+// bridge probe is stubbed so no page test fetches localhost:8769.
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+vi.mock('../../hooks/useRsBridgeStatus', () => ({
+  __esModule: true,
+  default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false }),
+}));
+// The JogPanel stub exposes a trigger button wired to the REAL page
+// callback (onHandGuideChange), so the sim-entry guard tests
 // drive the page state exactly like a live panel would.
 vi.mock('../../components/Workshop/JogPanel', () => ({
   __esModule: true,
-  default: function MockJogPanel({ onHandGuideChange }) {
+  default: function MockJogPanel({ onHandGuideChange, disabled }) {
     return (
-      <div data-testid="jog-panel">
+      <div data-testid="jog-panel" data-disabled={String(!!disabled)}>
         <button
           type="button"
           data-testid="jog-hand-guide-on"
           onClick={() => onHandGuideChange && onHandGuideChange(true)}
-        />
-      </div>
-    );
-  },
-}));
-vi.mock('../../components/Workshop/RecordPanel', () => ({
-  __esModule: true,
-  default: function MockRecordPanel({ onRecordingChange }) {
-    return (
-      <div data-testid="record-panel">
-        <button
-          type="button"
-          data-testid="record-panel-recording-on"
-          onClick={() => onRecordingChange && onRecordingChange(true)}
         />
       </div>
     );
@@ -249,19 +256,34 @@ describe('WorkshopPage — sim toggle swaps only the right region', () => {
     expect(screen.queryByTestId('sim-stage')).toBeNull();
   });
 
-  test('sim entry is BLOCKED while a recording runs (entering sim would unmount RecordPanel and DISCARD the take)', async () => {
+  test('sim entry is BLOCKED while Vormachen is open (it owns the REAL arm under the student\'s hand)', async () => {
+    mockState = { ...baseState(), studioAssets: { teach: { open: true } } };
     render(<WorkshopPage isActive />);
     await screen.findByTestId('blockly-workspace');
     const btn = screen.getByRole('button', { name: 'Test im Simulator' });
-    expect(btn).toBeEnabled();
-
-    // RecordPanel reports a live recording via the real onRecordingChange.
-    await userEvent.click(screen.getByTestId('record-panel-recording-on'));
-
     expect(btn).toBeDisabled();
-    expect(btn.getAttribute('title')).toContain('Aufnahme');
+    expect(btn.getAttribute('title')).toBe(DE.TEACH_SIM_ENTRY_BLOCKED);
     await userEvent.click(btn);
     expect(screen.queryByTestId('sim-stage')).toBeNull();
+  });
+
+  test('the Kamera tab is only the feed — the retired „Position merken" button is gone', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(screen.getAllByTestId('camera-feed').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: /Position merken/ })).toBeNull();
+    expect(screen.queryByText('Speichert die aktuelle Armposition als Ziel.')).toBeNull();
+  });
+
+  test('a stored dock layout naming the retired „record" tab heals to the known tabs', async () => {
+    window.localStorage.setItem('edubotics_workshop_dock_open', JSON.stringify(['camera', 'record']));
+    try {
+      render(<WorkshopPage isActive />);
+      const dock = await screen.findByTestId('right-dock');
+      expect(JSON.parse(dock.getAttribute('data-open-ids'))).toEqual(['camera']);
+    } finally {
+      window.localStorage.removeItem('edubotics_workshop_dock_open');
+    }
   });
 
   test('sim entry is BLOCKED while the arm is hand-guided (entering sim would unmount JogPanel mid-session)', async () => {
@@ -277,5 +299,51 @@ describe('WorkshopPage — sim toggle swaps only the right region', () => {
     expect(btn.getAttribute('title')).toContain('freigeschaltet');
     await userEvent.click(btn);
     expect(screen.queryByTestId('sim-stage')).toBeNull();
+  });
+});
+
+describe('WorkshopPage — Vormachen wiring', () => {
+  test('the toolbar „✋ Vormachen" requests Vormachen with no focus', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const btn = screen.getByRole('button', { name: DE.TOOLBAR_TEACH });
+    expect(btn).toBeEnabled();
+    expect(btn.getAttribute('title')).toBe(DE.TOOLBAR_TEACH_TITLE);
+    mockDispatch.mockClear();
+    await userEvent.click(btn);
+    const requested = mockDispatch.mock.calls.map((c) => c[0]).filter((a) => a && a.type === 'studioAssets/requestTeach');
+    expect(requested).toHaveLength(1);
+    expect(requested[0].payload).toEqual({ focus: null });
+  });
+
+  test('offline the toolbar button is disabled and names the reason', async () => {
+    mockState = { ...baseState(), tasks: { heartbeatStatus: 'disconnected' } };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const btn = screen.getByRole('button', { name: DE.TOOLBAR_TEACH });
+    expect(btn).toBeDisabled();
+    expect(btn.getAttribute('title')).toBe(DE.TEACH_BLOCK_OFFLINE);
+  });
+
+  test('while Vormachen is open: the button, the LeaderToggle and the drive-to are locked', async () => {
+    mockState = { ...baseState(), studioAssets: { teach: { open: true } } };
+    setDriveToHandler.mockClear();
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(screen.getByRole('button', { name: DE.TOOLBAR_TEACH })).toBeDisabled();
+    expect(screen.getByTestId('leader-toggle').getAttribute('data-locked-reason')).toBe(DE.TEACH_BLOCK_UI_LOCKED);
+    expect(screen.getByTestId('jog-panel').getAttribute('data-disabled')).toBe('true');
+    const handler = setDriveToHandler.mock.calls.map((c) => c[0]).filter(Boolean).pop();
+    toast.error.mockClear();
+    await handler({ name: 'A', x: 0.2, y: 0, z: 0.05 });
+    expect(toast.error).toHaveBeenCalledWith(DE.TEACH_DRIVE_BLOCKED);
+    expect(mockRos.jogArm).not.toHaveBeenCalled();
+  });
+
+  test('with Vormachen closed the LeaderToggle carries no lock reason', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(screen.getByTestId('leader-toggle').getAttribute('data-locked-reason')).toBe('');
+    expect(screen.getByTestId('jog-panel').getAttribute('data-disabled')).toBe('false');
   });
 });

@@ -125,7 +125,10 @@ const boxStyle = {
 };
 const modalStyle = { ...boxStyle, textAlign: 'left' };
 
-export default function LeaderToggle({ isActive }) {
+// `lockedReason` (string | null): while set — Vormachen is open and owns the
+// arm — the three toggle buttons are disabled and carry it as their title; the
+// readiness overlay's „Trotzdem fortfahren" is unaffected.
+export default function LeaderToggle({ isActive, lockedReason = null }) {
   // Pi mode from context (never the synchronous module cache): `piMode` selects
   // the control base and `piModeResolved` gates the FIRST probe so it can't fire
   // with the loopback default during the boot window on a Pi.
@@ -355,11 +358,11 @@ export default function LeaderToggle({ isActive }) {
       {!followerOnly ? (
         <button
           type="button"
-          disabled={busy || taskBusy}
+          disabled={busy || taskBusy || !!lockedReason}
           onClick={() => doToggle(true)}
-          title={taskBusy
+          title={lockedReason || (taskBusy
             ? 'Während Aufnahme/Inferenz nicht verfügbar.'
-            : 'Schaltet den Leader-Arm ab, damit Roboter Studio den Follower allein steuert.'}
+            : 'Schaltet den Leader-Arm ab, damit Roboter Studio den Follower allein steuert.')}
         >
           Leader abschalten (Roboter Studio)
         </button>
@@ -370,9 +373,9 @@ export default function LeaderToggle({ isActive }) {
           </span>
           <button
             type="button"
-            disabled={busy || taskBusy}
+            disabled={busy || taskBusy || !!lockedReason}
             onClick={() => setShowReconnect(true)}
-            title={taskBusy ? 'Während Aufnahme/Inferenz nicht verfügbar.' : undefined}
+            title={lockedReason || (taskBusy ? 'Während Aufnahme/Inferenz nicht verfügbar.' : undefined)}
           >
             Leader verbinden
           </button>
@@ -428,8 +431,8 @@ export default function LeaderToggle({ isActive }) {
               <button type="button" onClick={() => setShowReconnect(false)}>Abbrechen</button>
               <button
                 type="button"
-                disabled={busy || taskBusy}
-                title={taskBusy ? 'Während Aufnahme/Inferenz nicht verfügbar.' : undefined}
+                disabled={busy || taskBusy || !!lockedReason}
+                title={lockedReason || (taskBusy ? 'Während Aufnahme/Inferenz nicht verfügbar.' : undefined)}
                 onClick={() => { setShowReconnect(false); doToggle(false); }}
               >
                 Verbinden

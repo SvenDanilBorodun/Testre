@@ -62,8 +62,15 @@ vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, defau
 vi.mock('../../components/Workshop/GalleryTab', () => ({ __esModule: true, default: () => <div data-testid="gallery-tab" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
 vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule: true, default: () => <div data-testid="version-history" /> }));
+// Vormachen: TeachHost is a stub (the overlay has its own tests, and its
+// leader-mode child would read `s.ros`, which these mock states lack), and the
+// bridge probe is stubbed so no page test fetches localhost:8769.
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+vi.mock('../../hooks/useRsBridgeStatus', () => ({
+  __esModule: true,
+  default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false }),
+}));
 vi.mock('../../components/Workshop/JogPanel', () => ({ __esModule: true, default: () => <div data-testid="jog-panel" /> }));
-vi.mock('../../components/Workshop/RecordPanel', () => ({ __esModule: true, default: () => <div data-testid="record-panel" /> }));
 
 vi.mock('blockly/core', () => ({
   __esModule: true,

@@ -52,16 +52,16 @@ vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
 }));
 
 // ── Right-region components — recognizable stubs so we can assert the swap. ──
-// RightDock additionally renders the control/record tab panels (the JogPanel/
-// RecordPanel mocks below expose trigger buttons) so the sim-entry guard tests
-// can flip the page's recording/hand-guide state through the real callbacks.
+// RightDock additionally renders the control tab panel (the JogPanel mock
+// below exposes a trigger button) so the sim-entry guard tests can flip the
+// page's hand-guide state through the real callback.
 // Other tabs are NOT rendered — the '3d' tab would mount the real lazy UrdfTwin.
 vi.mock('../../components/Workshop/RightDock', () => ({
   __esModule: true,
   default: ({ tabs }) => (
     <div data-testid="right-dock">
       {(tabs || [])
-        .filter((t) => t.id === 'control' || t.id === 'record')
+        .filter((t) => t.id === 'control')
         .map((t) => (
           <div key={t.id}>{t.render()}</div>
         ))}
@@ -93,8 +93,16 @@ vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, defau
 vi.mock('../../components/Workshop/GalleryTab', () => ({ __esModule: true, default: () => <div data-testid="gallery-tab" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
 vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule: true, default: () => <div data-testid="version-history" /> }));
-// JogPanel/RecordPanel stubs expose trigger buttons wired to the REAL page
-// callbacks (onHandGuideChange/onRecordingChange), so the sim-entry guard tests
+// Vormachen: TeachHost is a stub (the overlay has its own tests, and its
+// leader-mode child would read `s.ros`, which these mock states lack), and the
+// bridge probe is stubbed so no page test fetches localhost:8769.
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+vi.mock('../../hooks/useRsBridgeStatus', () => ({
+  __esModule: true,
+  default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false }),
+}));
+// The JogPanel stub exposes a trigger button wired to the REAL page
+// callback (onHandGuideChange), so the sim-entry guard tests
 // drive the page state exactly like a live panel would.
 vi.mock('../../components/Workshop/JogPanel', () => ({
   __esModule: true,
@@ -105,20 +113,6 @@ vi.mock('../../components/Workshop/JogPanel', () => ({
           type="button"
           data-testid="jog-hand-guide-on"
           onClick={() => onHandGuideChange && onHandGuideChange(true)}
-        />
-      </div>
-    );
-  },
-}));
-vi.mock('../../components/Workshop/RecordPanel', () => ({
-  __esModule: true,
-  default: function MockRecordPanel({ onRecordingChange }) {
-    return (
-      <div data-testid="record-panel">
-        <button
-          type="button"
-          data-testid="record-panel-recording-on"
-          onClick={() => onRecordingChange && onRecordingChange(true)}
         />
       </div>
     );

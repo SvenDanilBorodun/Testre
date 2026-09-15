@@ -26,7 +26,6 @@ import GalleryTab from '../components/Workshop/GalleryTab';
 import SkillmapPlayer from '../components/Workshop/SkillmapPlayer';
 import VersionHistoryDropdown from '../components/Workshop/VersionHistoryDropdown';
 import JogPanel from '../components/Workshop/JogPanel';
-import RecordPanel from '../components/Workshop/RecordPanel';
 import RightDock from '../components/Workshop/RightDock';
 import { buildCatalogDims } from '../components/Workshop/simConstants';
 import { DE, formatDe } from '../components/Workshop/blocks/messages_de';
@@ -42,6 +41,8 @@ import {
 } from '../components/Workshop/sammlung/destinationStore';
 import { createSammlungProvider } from '../components/Workshop/sammlung/provider';
 import SammlungDrawer from '../components/Workshop/sammlung/SammlungDrawer';
+import TeachHost from '../components/Workshop/teach/TeachHost';
+import { TEACH_BLOCK_TITLES_DE, teachEntryBlockReason } from '../components/Workshop/teach/teachGates';
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
 import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
@@ -57,13 +58,17 @@ import {
   closeDrawer,
   fetchTrajectories,
   openDrawer,
+  requestTeach,
   selectDrawer,
   selectLastPreviewResult,
+  selectPreviewActive,
+  selectTeachOpen,
   selectTrajectoryList,
 } from '../features/workshop/studioAssetsSlice';
 import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
 import { useRosTopicSubscription } from '../hooks/useRosTopicSubscription';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import useRsBridgeStatus from '../hooks/useRsBridgeStatus';
 import {
   setObjectCatalogOptions,
   setWorkspaceAccessor,
@@ -103,7 +108,9 @@ const WORKSHOP_CODE_OPEN_KEY = 'edubotics_workshop_code_open';
 // (top→bottom, normally ≤2), `dock_collapsed` folds the dock to the rail.
 const DOCK_OPEN_KEY = 'edubotics_workshop_dock_open';
 const DOCK_COLLAPSED_KEY = 'edubotics_workshop_dock_collapsed';
-const KNOWN_TAB_IDS = ['camera', 'control', 'record', '3d', 'tutorial', 'debug'];
+// `record` is gone (the „Aufnehmen" tab retired into Vormachen); a stored
+// layout still naming it heals through the unknown-id filter below.
+const KNOWN_TAB_IDS = ['camera', 'control', '3d', 'tutorial', 'debug'];
 const DEFAULT_DOCK_OPEN = ['camera'];
 
 function readDockOpen() {
@@ -163,23 +170,6 @@ function addOpenTab(openIds, id, isBusy) {
   next.splice(evictIdx, 1);
   next.push(id);
   return next;
-}
-
-// Mirror the BACKEND validator (_DESTINATION_NAME_RE, handlers/destinations.py):
-// letters (incl. ä ö ü ß), digits, space, underscore, hyphen — used by
-// „Position merken". Capped at 24 (NOT the backend's 40) to MATCH the
-// destination_pin / destination_ref block NAME field (destinations.js
-// NAME_MAX_LEN=24): a captured point is typed by name into those blocks, and a
-// 25–40-char name would be truncated to 24 there → „Ziel nicht gefunden" at run
-// time. 24 is a safe subset of the backend's 1..40 range.
-const CAPTURE_NAME_MAX_LEN = 24;
-const CAPTURE_NAME_RE = /^[A-Za-zÄÖÜäöüß0-9 _-]{1,24}$/;
-function sanitizeDestinationName(raw) {
-  if (typeof raw !== 'string') return '';
-  const trimmed = raw.trim().slice(0, CAPTURE_NAME_MAX_LEN);
-  if (trimmed === '' || trimmed === '—') return '';
-  if (!CAPTURE_NAME_RE.test(trimmed)) return '';
-  return trimmed;
 }
 
 // Phase-3 simulator fallback palette: if the catalog service momentarily returns
@@ -314,20 +304,34 @@ function WorkshopPage({ isActive }) {
   // „Debug" tab) is replaced by SimStage, so RunControls' Debug button targets
   // this flag instead of the dock tab (see onToggleDebug wiring below).
   const [simDebugOpen, setSimDebugOpen] = useState(false);
-  // Batch 2b: rosbridge liveness gates the real-arm jog/record panels (the same
+  // Batch 2b: rosbridge liveness gates the real-arm jog panel and Vormachen (the same
   // signal the rest of the app uses for „Roboter verbunden").
   const heartbeatStatus = useSelector((s) => s.tasks?.heartbeatStatus);
-  // Batch 2b: RecordPanel reports whether a hand-guide recording is in flight
-  // (lifted here) so we can disable JogPanel + the „fahre dorthin" drive-to while
-  // the arm is being hand-guided — a driven move would fight the student's hand.
-  const [recordPanelRecording, setRecordPanelRecording] = useState(false);
+  const caps = useSelector((s) => (s.tasks && s.tasks.taskStatus ? s.tasks.taskStatus.capabilities : null) || null);
+  // Vormachen (teach/TeachHost) owns the arm while open: JogPanel, the
+  // LeaderToggle, the „fahre dorthin" drive-to and the sim entry are locked, since
+  // a driven move or a container flip would fight the student's hand.
+  const teachOpen = useSelector(selectTeachOpen);
+  const paused = useSelector((s) => !!(s.workshop && s.workshop.paused));
+  const previewActive = useSelector(selectPreviewActive);
   // Batch 2b: JogPanel reports whether a hand-guide (torque-off) session is open
-  // (lifted here, like recordPanelRecording) so we can disable RecordPanel while
-  // the arm is limp — one shared truth, so neither panel shows a stale
-  // „freigeschaltet"/disabled state after the sibling closes the session.
+  // (lifted here) so Vormachen refuses to open over a limp arm — one shared truth,
+  // so no surface shows a stale „freigeschaltet" state after JogPanel closes it.
   const [jogHandGuideOn, setJogHandGuideOn] = useState(false);
+  // The Roboter-Studio bridge (:8769): Vormachen reads `leaderOn` (entry gate,
+  // and a leader switched on mid-session). Polled only while the page is shown.
+  const rsBridge = useRsBridgeStatus({ enabled: isActive });
+  const teachReason = teachEntryBlockReason({
+    heartbeatStatus,
+    runState,
+    paused,
+    simMode,
+    jogHandGuideOn,
+    previewActive,
+    rsLeaderOn: !!(rsBridge && rsBridge.leaderOn),
+  });
   const subscriptions = useRosTopicSubscription();
-  const { getObjectCatalog, capturePose, jogArm } = useRosServiceCaller();
+  const { getObjectCatalog, jogArm } = useRosServiceCaller();
   const workspaceRef = useRef(null);
   // Blockly 12 ties getSelected() to the FocusManager, and clicking the
   // camera overlay (a non-focusable div) blurs the block in Chromium →
@@ -336,8 +340,7 @@ function WorkshopPage({ isActive }) {
   // SELECTED change-listener and use THAT at mark time, not live selection.
   const lastPinBlockIdRef = useRef(null);
 
-  // Redesign: the right-side tools (camera / jog / record / 3D / Lernpfad /
-  // Debug) live in a tabbed, collapsible RightDock instead of a tall stacked
+  // Redesign: the right-side tools (camera / jog / 3D / Lernpfad / Debug) live in a tabbed, collapsible RightDock instead of a tall stacked
   // column. `dockOpen` is the ordered list of open panels (≤2 by default),
   // `dockCollapsed` folds the dock to its rail. Both persist across reloads.
   const [dockOpen, setDockOpen] = useState(readDockOpen);
@@ -405,9 +408,8 @@ function WorkshopPage({ isActive }) {
   const isTabBusy = useCallback(
     (id) =>
       (id === 'control' && jogHandGuideOn)
-      || (id === 'record' && recordPanelRecording)
       || (id === 'tutorial' && !!activeTutorialId),
-    [jogHandGuideOn, recordPanelRecording, activeTutorialId],
+    [jogHandGuideOn, activeTutorialId],
   );
 
   const handleToggleTab = useCallback(
@@ -478,46 +480,6 @@ function WorkshopPage({ isActive }) {
     });
   }, []);
 
-  // Phase-2: „Position merken" — capture the follower's current pose as a named
-  // destination via /workshop/capture_pose. Does NOT drive the arm; the named
-  // point is then usable by „Ziel <Name>" / „bewege zu".
-  const [capturing, setCapturing] = useState(false);
-  const handleCapturePose = useCallback(async () => {
-    if (typeof window === 'undefined') return;
-    const raw = window.prompt('Name für die gemerkte Position:', '');
-    if (raw === null) return; // student cancelled the prompt
-    const name = sanitizeDestinationName(raw);
-    if (!name) {
-      toast.error(
-        'Bitte einen gültigen Namen verwenden '
-        + '(Buchstaben, Zahlen, Leerzeichen, _ und -).',
-      );
-      return;
-    }
-    setCapturing(true);
-    try {
-      const res = await capturePose(name);
-      if (res && res.success) {
-        const x = Number(res.world_x || 0).toFixed(3);
-        const y = Number(res.world_y || 0).toFixed(3);
-        const z = Number(res.world_z || 0).toFixed(3);
-        toast.success(
-          `Position „${name}" gemerkt (x=${x}, y=${y}, z=${z}). `
-          + 'Du kannst sie jetzt mit „Ziel ' + name + '" verwenden.',
-        );
-      } else {
-        toast.error(
-          (res && res.message)
-            ? res.message
-            : 'Position konnte nicht gemerkt werden.',
-        );
-      }
-    } catch (e) {
-      toast.error(`Position konnte nicht gemerkt werden: ${e.message || e}`);
-    } finally {
-      setCapturing(false);
-    }
-  }, [capturePose]);
   // Twin overlays: the end-effector path trail + base/TCP coordinate triads.
   const [showPath, setShowPath] = useState(false);
   const [showFrames, setShowFrames] = useState(false);
@@ -662,7 +624,7 @@ function WorkshopPage({ isActive }) {
         toast.error('Im Simulator kann der echte Roboter nicht gefahren werden.');
         return;
       }
-      // Refuse a driven move on a disconnected robot (matches JogPanel/RecordPanel
+      // Refuse a driven move on a disconnected robot (matches JogPanel/Vormachen
       // gating) — without this the jog call silently no-ops "successfully".
       if (heartbeatStatus !== 'connected') {
         toast.error('Roboter nicht verbunden.');
@@ -672,8 +634,8 @@ function WorkshopPage({ isActive }) {
         toast.error('Während ein Programm läuft, ist das Fahren gesperrt.');
         return;
       }
-      if (recordPanelRecording) {
-        toast.error('Erst die Aufnahme beenden, dann fahren.');
+      if (teachOpen) {
+        toast.error(DE.TEACH_DRIVE_BLOCKED);
         return;
       }
       // Refuse a driven move while the arm is hand-guided (limp — the student's
@@ -712,7 +674,7 @@ function WorkshopPage({ isActive }) {
       }
     });
     return () => setDriveToHandler(null);
-  }, [jogArm, simMode, runState, recordPanelRecording, heartbeatStatus, jogHandGuideOn]);
+  }, [jogArm, simMode, runState, teachOpen, heartbeatStatus, jogHandGuideOn]);
 
   // Fetch the named-object catalog for the Blockly dropdowns once the editor is
   // available (calibrated). Re-fetch if the student calibrates in-session. The
@@ -974,7 +936,7 @@ function WorkshopPage({ isActive }) {
       capabilities: {
         hardware: true,
         simMode,
-        teach: false,
+        teach: true,
         drawer: true,
         preview: false,
         previewVariables: false,
@@ -1005,8 +967,11 @@ function WorkshopPage({ isActive }) {
         // The card or „Alle verwalten …" already names the tab (recording →
         // aufnahmen, pin → ziele, pose → positionen, variable → variablen).
         dispatch(openDrawer({ tab: action.tab, focusId: action.focusId ?? null }));
+      } else if (action.type === 'teach') {
+        // TeachHost judges the gates (and a glide) when it processes the request.
+        dispatch(requestTeach({ focus: action.focus ?? null }));
       }
-      // teach / preview / pinSim / highlight: wired by their own work packages.
+      // preview / pinSim / highlight: wired by their own work packages.
     });
   }, [sammlungProvider, isTabBusy, dispatch]);
   // The drawer belongs to the editor it was opened over. Redux keeps
@@ -1024,10 +989,11 @@ function WorkshopPage({ isActive }) {
   if (!isActive) return null;
 
   // Per-panel gating (same rules as before — the panels just moved into the dock).
+  // Vormachen owns the arm while it is open, so JogPanel's torque-off and nudges
+  // are locked (its „Arm festsetzen" stays usable — JogPanel never disables it).
   const jogDisabled =
-    heartbeatStatus !== 'connected' || runState === 'running' || recordPanelRecording;
-  const recordDisabled =
-    heartbeatStatus !== 'connected' || runState === 'running' || jogHandGuideOn;
+    heartbeatStatus !== 'connected' || runState === 'running' || teachOpen;
+  const teachReasonText = teachReason ? TEACH_BLOCK_TITLES_DE[teachReason] : null;
 
   // Editor/Galerie switch — shared by both views (in the editor toolbar, and as a
   // standalone strip in the gallery view where the toolbar is absent).
@@ -1083,8 +1049,8 @@ function WorkshopPage({ isActive }) {
 
   // Dock tab registry. `render` is INVOKED by RightDock (never used as a
   // `<tab.render/>` element type), so each panel INSTANCE stays mounted across
-  // dock re-renders / resize — critical for JogPanel + RecordPanel, whose unmount
-  // teardown re-torques the arm / cancels a recording. The whole dock is REPLACED
+  // dock re-renders / resize — critical for JogPanel, whose unmount teardown
+  // re-torques the arm. The whole dock is REPLACED
   // by SimStage while in the simulator (see the render tree), so these tabs never
   // render during sim — no `hidden: simMode` / SimScene special-casing is needed.
   const dockTabs = [
@@ -1092,6 +1058,7 @@ function WorkshopPage({ isActive }) {
       id: 'camera',
       label: DE.DOCK_TAB_CAMERA,
       icon: '📷',
+      // Only the feed: capturing the arm's pose moved into Vormachen („P").
       render: () => (
         <div className="flex flex-col gap-2 h-full">
           {/* The feed fills the panel height (fill), so a taller panel shows a
@@ -1106,26 +1073,6 @@ function WorkshopPage({ isActive }) {
               onRenameMark={handleRenameMarked}
             />
           </div>
-          {/* Capture the arm's CURRENT pose as a named destination (does NOT
-              drive the arm). Usable afterwards via „Ziel <Name>" / „bewege zu". */}
-          <div className="shrink-0 flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={handleCapturePose}
-              disabled={capturing}
-              title="Aktuelle Roboterposition als benanntes Ziel speichern"
-              className={
-                'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
-                + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
-                + 'border-[var(--accent)] hover:opacity-90'
-              }
-            >
-              {capturing ? 'Wird gemerkt …' : 'Position merken'}
-            </button>
-            <span className="text-[11px] text-[var(--ink-3)]">
-              Speichert die aktuelle Armposition als Ziel.
-            </span>
-          </div>
         </div>
       ),
     },
@@ -1136,20 +1083,6 @@ function WorkshopPage({ isActive }) {
       busy: jogHandGuideOn,
       render: () => (
         <JogPanel disabled={jogDisabled} onHandGuideChange={setJogHandGuideOn} />
-      ),
-    },
-    {
-      id: 'record',
-      label: DE.DOCK_TAB_RECORD,
-      icon: '⏺',
-      busy: recordPanelRecording,
-      render: () => (
-        <RecordPanel
-          accessToken={accessToken}
-          workflowId={selectedWorkflowId}
-          disabled={recordDisabled}
-          onRecordingChange={setRecordPanelRecording}
-        />
       ),
     },
     {
@@ -1232,7 +1165,7 @@ function WorkshopPage({ isActive }) {
 
   return (
     // ONE warned glide-to-Grundstellung prompt for the whole page: its three
-    // callers (TableTouchStep, JogPanel, RecordPanel) can each unmount while a
+    // callers (TableTouchStep, JogPanel, Vormachen) can each unmount while a
     // countdown is still running — see HomeGlidePrompt.
     <HomeGlideProvider>
     <div className="flex flex-col h-full w-full overflow-hidden">
@@ -1259,12 +1192,12 @@ function WorkshopPage({ isActive }) {
                 // four): never toggle while a sim run is in flight, and never
                 // ENTER sim during an active tutorial (replacing the dock would
                 // unmount SkillmapPlayer + lift the toolbox restriction
-                // mid-tutorial), during a live recording (the dock swap unmounts
-                // RecordPanel, whose teardown cancels and DISCARDS the take), or
+                // mid-tutorial), while Vormachen is open (it owns the REAL arm,
+                // which the simulator would hide under the student's hand), or
                 // while the arm is hand-guided (unmounting JogPanel re-torques /
                 // resets the live hand-guide session under the student's hand).
                 if (simRunActive
-                    || (!simMode && (!!activeTutorialId || recordPanelRecording || jogHandGuideOn))) {
+                    || (!simMode && (!!activeTutorialId || teachOpen || jogHandGuideOn))) {
                   return;
                 }
                 setSimMode((v) => {
@@ -1278,13 +1211,13 @@ function WorkshopPage({ isActive }) {
               }}
               aria-pressed={simMode}
               disabled={simRunActive
-                || (!simMode && (!!activeTutorialId || recordPanelRecording || jogHandGuideOn))}
+                || (!simMode && (!!activeTutorialId || teachOpen || jogHandGuideOn))}
               title={simRunActive
                 ? 'Während ein Simulationslauf läuft, kann der Simulator nicht beendet werden — bitte zuerst stoppen.'
                 : (!simMode && !!activeTutorialId)
                 ? 'Während ein Lernpfad aktiv ist, kann der Simulator nicht gestartet werden — bitte den Lernpfad zuerst beenden.'
-                : (!simMode && recordPanelRecording)
-                ? 'Während einer Aufnahme kann der Simulator nicht gestartet werden — bitte die Aufnahme zuerst beenden.'
+                : (!simMode && teachOpen)
+                ? DE.TEACH_SIM_ENTRY_BLOCKED
                 : (!simMode && jogHandGuideOn)
                 ? 'Solange der Arm freigeschaltet ist, kann der Simulator nicht gestartet werden — bitte den Arm zuerst festsetzen.'
                 : 'Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung'}
@@ -1300,10 +1233,32 @@ function WorkshopPage({ isActive }) {
             </button>
             {/* Follower-only leader toggle (Windows student rig only; self-hides
                 on Jetson/cloud where the GUI control bridge is absent). */}
-            <LeaderToggle isActive={isActive} />
+            <LeaderToggle
+              isActive={isActive}
+              lockedReason={teachOpen ? DE.TEACH_BLOCK_UI_LOCKED : null}
+            />
           </div>
         </div>
       </header>
+      {/* Vormachen: the full-screen teaching overlay, opened from the toolbar
+          button or a Sammlung flyout („✋ … vormachen"). */}
+      <TeachHost
+        isActive={isActive}
+        workspace={workspace}
+        accessToken={accessToken}
+        workflowId={selectedWorkflowId}
+        robotType={robotType}
+        caps={caps}
+        heartbeatStatus={heartbeatStatus}
+        runState={runState}
+        paused={paused}
+        simMode={simMode}
+        jogHandGuideOn={jogHandGuideOn}
+        previewActive={previewActive}
+        rsBridge={rsBridge}
+        saveWorkflowNow={saveWorkflowNow}
+        refetchTrajectories={refetchTrajectories}
+      />
       <main className="flex-1 overflow-hidden flex flex-col min-h-0">
         {showEditor ? (
           <>
@@ -1341,6 +1296,19 @@ function WorkshopPage({ isActive }) {
                   }
                   extra={
                     <>
+                      <button
+                        type="button"
+                        onClick={() => dispatch(requestTeach({ focus: null }))}
+                        disabled={!!teachReason || teachOpen}
+                        title={teachReasonText || DE.TOOLBAR_TEACH_TITLE}
+                        className={
+                          'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
+                          + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
+                          + 'border-[var(--accent)] hover:opacity-90'
+                        }
+                      >
+                        {DE.TOOLBAR_TEACH}
+                      </button>
                       <VersionHistoryDropdown
                         workflowId={selectedWorkflowId}
                         onRestore={(updated) => {

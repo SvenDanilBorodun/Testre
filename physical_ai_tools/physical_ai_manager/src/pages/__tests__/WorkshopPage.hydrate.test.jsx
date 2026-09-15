@@ -53,14 +53,14 @@ vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
 }));
 
 // ── Right-region components — recognizable stubs so we can assert the swap. ──
-// Only the control/record tabs render — the '3d' tab would mount the real lazy
+// Only the control tab renders — the '3d' tab would mount the real lazy
 // UrdfTwin.
 vi.mock('../../components/Workshop/RightDock', () => ({
   __esModule: true,
   default: ({ tabs }) => (
     <div data-testid="right-dock">
       {(tabs || [])
-        .filter((t) => t.id === 'control' || t.id === 'record')
+        .filter((t) => t.id === 'control')
         .map((t) => (
           <div key={t.id}>{t.render()}</div>
         ))}
@@ -92,7 +92,15 @@ vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, defau
 vi.mock('../../components/Workshop/GalleryTab', () => ({ __esModule: true, default: () => <div data-testid="gallery-tab" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
 vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule: true, default: () => <div data-testid="version-history" /> }));
-// JogPanel/RecordPanel: import-safe stubs (the shared idiom's shape).
+// Vormachen: TeachHost is a stub (the overlay has its own tests, and its
+// leader-mode child would read `s.ros`, which these mock states lack), and the
+// bridge probe is stubbed so no page test fetches localhost:8769.
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+vi.mock('../../hooks/useRsBridgeStatus', () => ({
+  __esModule: true,
+  default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false }),
+}));
+// JogPanel: an import-safe stub (the shared idiom's shape).
 vi.mock('../../components/Workshop/JogPanel', () => ({
   __esModule: true,
   default: function MockJogPanel({ onHandGuideChange }) {
@@ -102,20 +110,6 @@ vi.mock('../../components/Workshop/JogPanel', () => ({
           type="button"
           data-testid="jog-hand-guide-on"
           onClick={() => onHandGuideChange && onHandGuideChange(true)}
-        />
-      </div>
-    );
-  },
-}));
-vi.mock('../../components/Workshop/RecordPanel', () => ({
-  __esModule: true,
-  default: function MockRecordPanel({ onRecordingChange }) {
-    return (
-      <div data-testid="record-panel">
-        <button
-          type="button"
-          data-testid="record-panel-recording-on"
-          onClick={() => onRecordingChange && onRecordingChange(true)}
         />
       </div>
     );

@@ -179,7 +179,7 @@ export const LOGOUT_BLOCK_TITLES_DE = Object.freeze({
  * still be OBSERVED. The alternative — clearing `running` on the
  * connected→disconnected edge — was rejected: `taskStatus.running` is read by
  * `beforeunload`, by the InfoPanel/InferencePanel editability gates and by
- * RecordPanel, and the server-side recorder keeps recording whether or not the
+ * the recording page, and the server-side recorder keeps recording whether or not the
  * browser can see it, so publishing "no task is running" to all of them would
  * be a lie told to widen one button's availability.
  *

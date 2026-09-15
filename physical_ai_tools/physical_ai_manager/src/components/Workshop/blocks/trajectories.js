@@ -11,8 +11,9 @@
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
 
-// Batch 2b — recorded-motion replay. A student records a hand-guided motion in
-// the RecordPanel (saved as a named trajectory on the cloud workflow), then
+// Batch 2b — recorded-motion replay. A student shows a hand-guided motion in
+// „✋ Vormachen" (teach/TeachOverlay; saved as a named trajectory on the cloud
+// workflow), then
 // drops this block to replay it inside a program. The block carries only the
 // trajectory NAME (a free-text field); the run bar (RunControls) collects every
 // referenced name, fetches each trajectory's {fps, points} from the cloud, and
@@ -52,9 +53,9 @@ export const TRAJECTORY_BLOCKS = [
     nextStatement: null,
     colour: TRAJECTORY_COLOR,
     tooltip:
-      'Spielt eine zuvor aufgenommene Bewegung ab (gleicher Name wie im '
-      + 'Aufnahme-Feld). Nimm die Bewegung zuerst mit „Bewegung aufnehmen" auf '
-      + 'und speichere sie unter genau diesem Namen.',
+      'Spielt eine zuvor aufgenommene Bewegung ab (gleicher Name wie unter '
+      + '„Aufnahmen"). Mach die Bewegung zuerst mit „✋ Vormachen" vor '
+      + 'und gib ihr genau diesen Namen.',
     extensions: ['edubotics_validate_trajectory_name'],
   },
 ];

@@ -78,7 +78,7 @@ function isButtonTarget(target) {
 }
 
 // A hand_guide(false) counts as CONFIRMED when it did not throw and did not
-// answer success:false (a bare answer confirms, as RecordPanel always did).
+// answer success:false (a bare answer confirms, as the retired RecordPanel did).
 function isConfirmed(res) {
   return !res || res.success !== false;
 }

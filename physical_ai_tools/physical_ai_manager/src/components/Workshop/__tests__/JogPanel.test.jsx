@@ -18,6 +18,7 @@ import userEvent from '@testing-library/user-event';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import JogPanel from '../JogPanel';
+import { DE } from '../blocks/messages_de';
 
 // JogPanel reads the capability manifest (profile-driven jog rows, edu6 §4.5)
 // via useSelector — wrap every render in a minimal store. null caps = the OMX
@@ -191,6 +192,25 @@ describe('JogPanel', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test('with `disabled` (Vormachen open) freischalten and every nudge are locked, but „Arm festsetzen" is NOT', async () => {
+    const store = makeStore(null);
+    const { rerender } = rtlRender(<Provider store={store}><JogPanel disabled={false} /></Provider>);
+    expect(screen.getByText(DE.TEACH_JOG_HINT)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Arm freischalten' }));
+    const festsetzen = await screen.findByRole('button', { name: 'Arm festsetzen' });
+    expect(screen.getByText(DE.TEACH_JOG_HINT_FREE)).toBeInTheDocument();
+    // Vormachen opens (the page flips `disabled`): the limp arm must stay lockable.
+    rerender(<Provider store={store}><JogPanel disabled={true} /></Provider>);
+    expect(screen.getByRole('button', { name: 'Arm festsetzen' })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Gelenk 1 erhöhen' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'X erhöhen' })).toBeDisabled();
+    await userEvent.click(festsetzen);
+    await waitFor(() => expect(mockRos.handGuide).toHaveBeenCalledWith(false));
+    await userEvent.click(await screen.findByRole('button', { name: 'Hier stehen lassen' }));
+    expect(screen.getByRole('button', { name: 'Arm freischalten' })).toBeDisabled();
+    expect(screen.getByText(DE.TEACH_JOG_HINT)).toBeInTheDocument();
   });
 
   test('reports the hand-guide state up via onHandGuideChange', async () => {

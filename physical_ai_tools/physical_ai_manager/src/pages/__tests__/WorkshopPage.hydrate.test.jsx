@@ -169,6 +169,7 @@ const mockApi = vi.hoisted(() => ({
   getWorkflow: vi.fn(() => Promise.resolve(null)),
   createWorkflow: vi.fn(() => Promise.resolve({ id: 'wf-new' })),
   updateWorkflow: vi.fn(() => Promise.resolve({})),
+  listTrajectories: vi.fn(() => Promise.resolve([])),
 }));
 vi.mock('../../services/workflowApi', () => ({ __esModule: true, ...mockApi }));
 vi.mock('react-hot-toast', () => ({
@@ -347,6 +348,73 @@ describe('WorkshopPage — one save path, never a joined save', () => {
     expect(mockApi.createWorkflow).not.toHaveBeenCalled();
   });
 
+  test('a tab switch while the first save is in flight re-hydrates the new id on return', async () => {
+    const create = deferred();
+    mockApi.createWorkflow.mockImplementation(() => create.promise);
+    mockState = baseState({ unsavedBlocklyJson: DOC('a') });
+    const { rerender } = render(<WorkshopPage isActive />);
+    await userEvent.click(await screen.findByTestId('save-button'));
+    await settle();
+
+    rerender(<WorkshopPage isActive={false} />);
+    await act(async () => { create.resolve({ id: 'wf-new' }); });
+    await settle();
+    // The store answers the dispatch while the page is hidden.
+    mockState = baseState({ unsavedBlocklyJson: null, selectedWorkflowId: 'wf-new' });
+    rerender(<WorkshopPage isActive={false} />);
+    await settle();
+    expect(mockApi.getWorkflow).not.toHaveBeenCalled();
+
+    rerender(<WorkshopPage isActive />);
+    await waitFor(() => expect(mockApi.getWorkflow).toHaveBeenCalledWith('jwt', 'wf-new'));
+  });
+
+  test('a workflow picked while a follow-up waits drops the follow-up instead of overwriting it', async () => {
+    const first = deferred();
+    mockApi.updateWorkflow
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementation(() => Promise.resolve({}));
+    mockState = baseState({ selectedWorkflowId: 'wf-1', unsavedBlocklyJson: DOC('a') });
+    const { rerender } = render(<WorkshopPage isActive />);
+    const button = await screen.findByTestId('save-button');
+    await settle();
+    await userEvent.click(button);
+    await userEvent.click(button);
+    mockState = baseState({ selectedWorkflowId: 'wf-2', unsavedBlocklyJson: DOC('b') });
+    rerender(<WorkshopPage isActive />);
+    await settle();
+
+    await act(async () => { first.resolve({}); });
+    await settle();
+    expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1);
+    expect(mockApi.updateWorkflow.mock.calls[0][1]).toBe('wf-1');
+  });
+
+  test('a workflow picked while a create is in flight keeps its id — the new id is not forced over it', async () => {
+    const create = deferred();
+    mockApi.createWorkflow.mockImplementation(() => create.promise);
+    mockState = baseState({ unsavedBlocklyJson: DOC('a') });
+    const { rerender } = render(<WorkshopPage isActive />);
+    const button = await screen.findByTestId('save-button');
+    await userEvent.click(button);
+    await settle();
+    mockState = baseState({ selectedWorkflowId: 'wf-b', unsavedBlocklyJson: DOC('b') });
+    rerender(<WorkshopPage isActive />);
+    await settle();
+
+    await act(async () => { create.resolve({ id: 'wf-new' }); });
+    await settle();
+    const selected = mockDispatch.mock.calls
+      .map(([a]) => a)
+      .filter((a) => a && a.type === 'workshop/setSelectedWorkflowId');
+    expect(selected).toEqual([]);
+    expect(successToasts()).toBe(1);
+
+    await userEvent.click(await screen.findByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    expect(mockApi.updateWorkflow.mock.calls[0][1]).toBe('wf-b');
+  });
+
   test('a failed save still lets the coalesced follow-up run', async () => {
     const first = deferred();
     mockApi.updateWorkflow
@@ -360,5 +428,45 @@ describe('WorkshopPage — one save path, never a joined save', () => {
     await act(async () => { first.reject(new Error('Netz weg')); });
     await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(2));
     expect(toast.error).toHaveBeenCalledWith('Speichern fehlgeschlagen: Netz weg');
+  });
+});
+
+describe('WorkshopPage — the open workflow\'s recording list', () => {
+  beforeEach(() => {
+    mockApi.listTrajectories.mockReset();
+    mockApi.listTrajectories.mockImplementation(() => Promise.resolve([]));
+    // Run thunks, so fetchTrajectories really reaches the API.
+    mockDispatch.mockImplementation((action) => (
+      typeof action === 'function' ? action(mockDispatch, () => mockState, undefined) : action
+    ));
+  });
+  afterEach(() => { mockDispatch.mockReset(); });
+
+  const calledFor = (id) => mockApi.listTrajectories.mock.calls.filter(([, wf]) => wf === id).length;
+
+  test('loads once on open and not again when the token string rotates', async () => {
+    mockState = baseState({ selectedWorkflowId: 'wf-1' });
+    const { rerender } = render(<WorkshopPage isActive />);
+    await waitFor(() => expect(mockApi.listTrajectories).toHaveBeenCalledWith('jwt', 'wf-1'));
+    await settle();
+    expect(calledFor('wf-1')).toBe(1);
+
+    mockState = baseState({ selectedWorkflowId: 'wf-1' }, 'jwt-refreshed');
+    rerender(<WorkshopPage isActive />);
+    await settle();
+    expect(calledFor('wf-1')).toBe(1);
+  });
+
+  test('loads the new id after the first save created it', async () => {
+    mockState = baseState({ unsavedBlocklyJson: DOC('a') });
+    const { rerender } = render(<WorkshopPage isActive />);
+    await settle();
+    expect(mockApi.listTrajectories).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByTestId('save-button'));
+    await waitFor(() => expect(mockApi.createWorkflow).toHaveBeenCalledTimes(1));
+    await settle();
+    mockState = baseState({ unsavedBlocklyJson: null, selectedWorkflowId: 'wf-new' });
+    rerender(<WorkshopPage isActive />);
+    await waitFor(() => expect(calledFor('wf-new')).toBe(1));
   });
 });

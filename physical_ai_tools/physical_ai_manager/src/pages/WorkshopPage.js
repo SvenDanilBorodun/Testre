@@ -582,7 +582,14 @@ function WorkshopPage({ isActive }) {
   // is re-applied — Blockly only consumes initialJson on mount.
   useEffect(() => {
     let cancelled = false;
-    if (!isActive) return undefined;
+    if (!isActive) {
+      // The inactive page renders nothing, so BlocklyWorkspace is unmounted and
+      // its next activation must hydrate: a skip left armed here (a create that
+      // resolved after a tab switch) would remount the editor from a stale
+      // document under the new id.
+      skipHydrateForIdRef.current = null;
+      return undefined;
+    }
     // The live editor IS this document — the page just created it; a re-fetch
     // would remount the workspace and drop anything captured during the save
     // round-trip. Consumed once, so a later re-open hydrates normally.
@@ -926,7 +933,11 @@ function WorkshopPage({ isActive }) {
   useEffect(() => { simSceneRef.current = simScene; }, [simScene]);
   useEffect(() => { editorJsonRef.current = editorJson; }, [editorJson]);
   useEffect(() => { unsavedJsonRef.current = unsavedBlocklyJson; }, [unsavedBlocklyJson]);
-  const saveStateRef = useRef({ inflight: null, followUp: null, followUpToast: false });
+  // followUpId: the workflow a queued follow-up belongs to, snapshotted when it
+  // is QUEUED (null = the document a create in flight is creating).
+  const saveStateRef = useRef({
+    inflight: null, followUp: null, followUpToast: false, followUpId: null,
+  });
 
   const runSave = useCallback(async ({ toastOnSuccess }) => {
     const token = accessTokenRef.current;
@@ -965,15 +976,18 @@ function WorkshopPage({ isActive }) {
     // and a one-line object literal reads as an unslimmed writer.
     const documentJson = slimSavePayload(json);
     setSaving(true);
+    // The id is taken with the document, at the same instant: a workflow picked
+    // while this save is in flight must not receive this document's blocks.
+    const targetId = selectedWorkflowIdRef.current;
     try {
-      if (selectedWorkflowIdRef.current) {
-        await updateWorkflow(token, selectedWorkflowIdRef.current, {
+      if (targetId) {
+        await updateWorkflow(token, targetId, {
           blockly_json: documentJson,
           sim_scene: simSceneRef.current,
         });
-        dispatch(markWorkflowSaved());
+        if (selectedWorkflowIdRef.current === targetId) dispatch(markWorkflowSaved());
         if (toastOnSuccess) toast.success('Gespeichert.');
-        return { ok: true, workflowId: selectedWorkflowIdRef.current, created: false };
+        return { ok: true, workflowId: targetId, created: false };
       }
       const created = await createWorkflow(token, {
         name: 'Neuer Workflow',
@@ -985,10 +999,18 @@ function WorkshopPage({ isActive }) {
         toast.error('Speichern fehlgeschlagen: keine Workflow-ID erhalten.');
         return { ok: false };
       }
-      skipHydrateForIdRef.current = created.id;
-      selectedWorkflowIdRef.current = created.id;
-      dispatch(setSelectedWorkflowId(created.id));
-      dispatch(markWorkflowSaved());
+      // Stamp the new id only while the editor still shows the unsaved document
+      // it was created from. A workflow the student picked meanwhile keeps the
+      // editor; forcing the id over it would put that workflow's blocks under
+      // the new id at the next save.
+      if (selectedWorkflowIdRef.current === null) {
+        skipHydrateForIdRef.current = created.id;
+        selectedWorkflowIdRef.current = created.id;
+        const st = saveStateRef.current;
+        if (st.followUp && st.followUpId === null) st.followUpId = created.id;
+        dispatch(setSelectedWorkflowId(created.id));
+        dispatch(markWorkflowSaved());
+      }
       if (toastOnSuccess) toast.success('Gespeichert.');
       return { ok: true, workflowId: created.id, created: true };
     } catch (e) {
@@ -1014,10 +1036,18 @@ function WorkshopPage({ isActive }) {
     if (!st.inflight) return start(toastOnSuccess);
     st.followUpToast = st.followUpToast || toastOnSuccess;
     if (!st.followUp) {
+      st.followUpId = selectedWorkflowIdRef.current;
       st.followUp = st.inflight.then(() => {}, () => {}).then(() => {
         const toastFlag = st.followUpToast;
+        const queuedFor = st.followUpId;
         st.followUp = null;
         st.followUpToast = false;
+        st.followUpId = null;
+        // Another workflow was opened while the follow-up waited: the document
+        // it would serialise now belongs to that workflow, not to this save.
+        if (selectedWorkflowIdRef.current !== queuedFor) {
+          return { ok: false, error: new Error('Inzwischen wurde ein anderer Workflow geöffnet.') };
+        }
         return start(toastFlag);
       });
     }

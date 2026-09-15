@@ -27,11 +27,11 @@ param(
     # GUI-driven finalize can never silently wipe data on a rootfs bump.
     [switch]$AllowDestructiveReimport,
     # Bypass the .reboot_required deferral guard below. finalize_install.ps1
-    # passes this AFTER it has authoritatively confirmed (via the WSL/VMP
-    # optional-feature state) that the pending reboot already happened — so the
-    # stale flag, which finalize clears only after a FULL success, must not defer
-    # the import here. The installer's Step 4 does NOT pass it (its
-    # ShouldImportDistro Check already gates on IsRebootRequired).
+    # passes this AFTER virtualization_ready.ps1's verdict came back Ready or
+    # Unknown (never RebootRequired / VirtualizationDisabled) — so the flag,
+    # which finalize clears only after a FULL success, must not defer the import
+    # here. The installer's Step 4 does NOT pass it (its ShouldImportDistro
+    # Check already gates on IsRebootRequired).
     [switch]$PostReboot
 )
 

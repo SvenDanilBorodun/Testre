@@ -252,7 +252,8 @@ describe('store mutations', () => {
     expect(store.rename(a.id, 'B').error).toBe(formatDe(DE.ERR_NAME_TAKEN, 'B'));
     expect(store.rename(a.id, '  Ablage  ')).toMatchObject({ ok: true, oldName: 'A' });
     expect(store.getById(a.id).name).toBe('Ablage');
-    expect(store.rename('d_ffffffff', 'X').error).toBe(DE.ERR_DESTINATION_MISSING);
+    expect(store.rename('d_ffffffff', 'X')).toEqual({ ok: false, error: DE.ERR_DESTINATION_MISSING });
+    expect(store.remove('d_ffffffff')).toEqual({ ok: false, error: DE.ERR_DESTINATION_MISSING });
     const removed = store.remove(a.id);
     expect(removed).toMatchObject({ ok: true, index: 0 });
     expect(store.getEntries().map((e) => e.name)).toEqual(['B']);

@@ -70,6 +70,8 @@ function SimStage({
   markers,
   requestedMode,
   onCreateDestination,
+  // Ghost arm of the highlighted Position ({names, positions} | null) → SimScene → UrdfTwin.
+  ghostJoints = null,
 }) {
   // Runtime feedback signals — both already maintained in Redux by the existing
   // run path (workshopSlice.log + debuggerWarnings). Read-only here.
@@ -152,6 +154,7 @@ function SimStage({
           showShadows
           showReach
           markers={markers}
+          ghostJoints={ghostJoints}
           requestedMode={requestedMode}
           onCreateDestination={onCreateDestination}
         />

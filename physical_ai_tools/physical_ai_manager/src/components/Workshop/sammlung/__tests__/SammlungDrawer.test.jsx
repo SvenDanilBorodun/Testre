@@ -226,6 +226,25 @@ describe('SammlungDrawer: rename and delete', () => {
     expect(input.value).toBe('x'.repeat(24));
   });
 
+  it('a Position detail names its captured gripper only when the S3 joints classify', () => {
+    const names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
+    const { unmount } = setup({
+      pins: [{ ...POSE, joints: [0, -0.9, 1.1, 0.3, 0, -0.3], joint_names: names }],
+      drawer: { tab: 'positionen' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Über Kiste/ }));
+    expect(screen.getByText(DE.DRAWER_STATE)).toBeInTheDocument();
+    expect(screen.getByText(DE.TEACH_GRIPPER_CLOSED)).toBeInTheDocument();
+    unmount();
+    ws.dispose();
+    // An older server's Position (no joints): no gripper line at all.
+    setup({ pins: [POSE], drawer: { tab: 'positionen' } });
+    fireEvent.click(screen.getByRole('button', { name: /Über Kiste/ }));
+    expect(screen.getByText(DE.DRAWER_SOURCE)).toBeInTheDocument();
+    expect(screen.queryByText(DE.DRAWER_STATE)).toBeNull();
+    expect(screen.queryByText(DE.TEACH_GRIPPER_OPEN)).toBeNull();
+  });
+
   it('a destination rename rewrites the reference blocks', () => {
     const { store } = setup({ pins: [PIN], blocks: [ref('Ablage', 'r1')], drawer: { tab: 'ziele' } });
     fireEvent.click(screen.getByRole('button', { name: /Ablage/ }));

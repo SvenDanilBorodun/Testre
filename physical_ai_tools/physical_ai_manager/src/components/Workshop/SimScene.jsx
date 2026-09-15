@@ -61,7 +61,7 @@ import {
   SIM_OBJECT_HELD_COLOR_HEX,
   resolveMaxInstances,
 } from './simConstants';
-import { armGeometry } from '../../utils/armProfile';
+import { gripperBand } from '../../utils/armProfile';
 import { INTERP_DELAY_MS } from '../../utils/jointStateInterpolator';
 import useSimObjects from '../../hooks/useSimObjects';
 import rosConnectionManager from '../../utils/rosConnectionManager';
@@ -105,16 +105,10 @@ const ORIGIN_PY = PX_PER_M * VIEW_MAX_X;
 // sizes its square from width_m × PX_PER_M instead, so the 2D + 3D panes agree.
 const OBJECT_PX = SIM_OBJECT_FALLBACK_SIZE_M * PX_PER_M;
 
-// Grasp-attach geometry (front-end, idealized). The OMX-F gripper joint rests
-// open ≈ +0.8 rad and any CLOSE drives it negative-ish (per-object close angles
-// run ≈ -0.1 … -0.5, with no fixed floor). The published /sim/joint_states stream
-// is the COMMANDED gripper, so classify with a wide hysteresis band well below the
-// open rest: "closing" when it crosses BELOW +0.2 (catches even a shallow -0.1
-// close on a wide object — M1 fix; the old -0.20 threshold missed those), "open"
-// again above +0.5. The 0.2…0.5 band prevents chatter; the descend (gripper held
-// at +0.8) never trips "closing".
-const GRIPPER_CLOSED_RAD = 0.2;
-const GRIPPER_OPEN_RAD = 0.5;
+// Grasp-attach geometry (front-end, idealized). The published /sim/joint_states
+// stream is the COMMANDED gripper; the hysteresis band (OMX 0.2 / 0.5, or the
+// profile's sim_close_threshold_rad) lives in utils/armProfile.js::gripperBand,
+// shared with „Greifer merken" in inserted programs.
 const CAPTURE_RADIUS_M = 0.06;
 
 // „Simulator zurücksetzen" rides the EXISTING /workflow/stop service — no new
@@ -239,6 +233,9 @@ function SimScene({
   // Sammlung markers (sammlung/markers.js), drawn on the 2D table AND handed to
   // the one UrdfTwin: [{id, label, kind: 'pin'|'pose'|'variable', x, y, z, highlighted}].
   markers = NO_MARKERS,
+  // Ghost arm of the highlighted Position ({names, positions} | null), handed
+  // to the one UrdfTwin — the 2D table draws no ghost.
+  ghostJoints = null,
   // {mode: 'ziel', token} from the page (the flyout's „Ziel auf den Sim-Tisch
   // setzen"): each new token switches the editor into „Ziel setzen".
   requestedMode = null,
@@ -277,18 +274,7 @@ function SimScene({
       : false
   ));
   const annulus = useMemo(() => reachAnnulus(caps), [caps]);
-  const graspBand = useMemo(() => {
-    const geo = armGeometry(caps);
-    if (geo.simCloseThresholdRad === null) {
-      return { close: GRIPPER_CLOSED_RAD, open: GRIPPER_OPEN_RAD };
-    }
-    // Profile-supplied close threshold; re-open hysteresis sits halfway
-    // between it and the profile's full-open command (edu6: 1.5 / 1.625).
-    return {
-      close: geo.simCloseThresholdRad,
-      open: (geo.simCloseThresholdRad + geo.gripperOpenRad) / 2,
-    };
-  }, [caps]);
+  const graspBand = useMemo(() => gripperBand(caps), [caps]);
   const graspBandRef = useRef(graspBand);
   useEffect(() => { graspBandRef.current = graspBand; }, [graspBand]);
   const annulusRef = useRef(annulus);
@@ -1208,6 +1194,7 @@ function SimScene({
           showShadows={showShadows}
           showReach={showReach}
           markers={markerList}
+          ghostJoints={ghostJoints}
         />
       </Suspense>
     </div>

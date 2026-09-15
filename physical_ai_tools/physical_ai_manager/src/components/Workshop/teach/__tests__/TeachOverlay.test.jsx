@@ -370,6 +370,56 @@ describe('TeachOverlay — captures go into the document store, named on the key
     expect(within(row).getByText(`x 182 · y −64 mm · ${DE.CARD_SOURCE_TOUCH}`)).toBeInTheDocument();
   });
 
+  test('S3: the capture\'s joint snapshot is stored when present and the list names the gripper', () => {
+    withSnapshot({ state: 'fest' });
+    mockStore.add.mockImplementation((input) => ({
+      ok: true,
+      entry: {
+        id: 'd_1', name: input.name, kind: input.kind, x: input.x, y: input.y, z: input.z,
+        joints: input.joints, joint_names: input.joint_names,
+      },
+    }));
+    render(<TeachOverlay {...baseProps()} />);
+    const names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
+    act(() => {
+      mockHook.props.onCapture({
+        kind: 'pose',
+        name: 'Position 1',
+        response: {
+          success: true, world_x: 0.2, world_y: -0.05, world_z: 0.118,
+          joint_positions: [0, -0.9, 1.1, 0.3, 0, -0.3], joint_names: names,
+        },
+      });
+    });
+    expect(mockStore.add).toHaveBeenCalledWith({
+      name: 'Position 1', kind: 'pose', source: 'capture', x: 0.2, y: -0.05, z: 0.118, robot_type: 'omx_f',
+      joints: [0, -0.9, 1.1, 0.3, 0, -0.3], joint_names: names,
+    });
+    const row = screen.getByTestId('teach-item-pose');
+    expect(within(row).getByText(`z 118 mm · ${DE.TEACH_GRIPPER_CLOSED}`)).toBeInTheDocument();
+  });
+
+  test.each([
+    ['absent (older server)', {}],
+    ['empty arrays (a refusal default)', { joint_positions: [], joint_names: [] }],
+    ['a length mismatch', { joint_positions: [0, 1], joint_names: ['joint1'] }],
+  ])('S3: joints are omitted when %s', (_label, extra) => {
+    withSnapshot({ state: 'fest' });
+    mockStore.add.mockImplementation((input) => ({
+      ok: true, entry: { id: 'd_1', name: input.name, kind: input.kind, x: input.x, y: input.y, z: input.z },
+    }));
+    render(<TeachOverlay {...baseProps()} />);
+    act(() => {
+      mockHook.props.onCapture({
+        kind: 'pose', name: 'Position 1', response: { success: true, world_x: 0.2, world_y: -0.05, world_z: 0.118, ...extra },
+      });
+    });
+    const input = mockStore.add.mock.calls[0][0];
+    expect(input).not.toHaveProperty('joints');
+    expect(input).not.toHaveProperty('joint_names');
+    expect(within(screen.getByTestId('teach-item-pose')).getByText('z 118 mm')).toBeInTheDocument();
+  });
+
   test('a store refusal is toasted and lists nothing', () => {
     withSnapshot({ state: 'fest' });
     mockStore.add.mockReturnValue({ ok: false, error: 'Der Name „Position 1" ist schon vergeben.' });
@@ -607,6 +657,9 @@ describe('TeachOverlay — list meta and slot lines', () => {
     expect(teachListMeta({ kind: 'recording', durationS: 3.1, status: 'saved' })).toBe('3,1 s · gespeichert');
     expect(teachListMeta({ kind: 'recording', durationS: 3.1, status: 'failed' })).toBe('3,1 s · nicht gespeichert');
     expect(teachListMeta({ kind: 'pose', z: 0.118 })).toBe('z 118 mm');
+    expect(teachListMeta({ kind: 'pose', z: 0.118, gripper: 'open' })).toBe('z 118 mm · Greifer offen');
+    expect(teachListMeta({ kind: 'pose', z: 0.118, gripper: 'closed' })).toBe('z 118 mm · Greifer zu');
+    expect(teachListMeta({ kind: 'pose', z: 0.118, gripper: null })).toBe('z 118 mm');
     expect(teachListMeta({ kind: 'ziel', x: 0.182, y: -0.064, z: 0 })).toBe('x 182 · y −64 mm · am Tisch');
   });
 
@@ -929,5 +982,40 @@ describe('TeachOverlay — „Als Programm einfügen"', () => {
     mockStore.getById.mockReturnValue(null);
     act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 2', response: { success: true, world_x: 0.1, world_y: 0, world_z: 0.1 } }); });
     expect(screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 1) })).toBeInTheDocument();
+  });
+
+  test('„Greifer merken": a changed captured gripper state adds a gripper block to the count and the insert', () => {
+    withSnapshot({ state: 'fest' });
+    const props = baseProps();
+    render(<TeachOverlay {...props} />);
+    const names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
+    const entries = {};
+    let seq = 0;
+    mockStore.add.mockImplementation((input) => {
+      seq += 1;
+      const entry = { id: `d_${seq}`, ...input };
+      entries[entry.id] = entry;
+      return { ok: true, entry };
+    });
+    mockStore.getById.mockImplementation((id) => entries[id] || null);
+    const capture = (name, grip) => act(() => {
+      mockHook.props.onCapture({
+        kind: 'pose',
+        name,
+        response: {
+          success: true, world_x: 0.1, world_y: 0, world_z: 0.1,
+          joint_positions: [0, 0, 0, 0, 0, grip], joint_names: names,
+        },
+      });
+    });
+    capture('Position 1', 0.8);
+    capture('Position 2', -0.3);
+    // two moves + „schließe Greifer" after the second.
+    const button = screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 3) });
+    mockInsert.fn.mockReturnValue({ blockId: 'b1', count: 3 });
+    fireEvent.click(button);
+    const [, items, opts] = mockInsert.fn.mock.calls[0];
+    expect(opts.gripperStateOf(items[0])).toEqual({ state: 'open' });
+    expect(opts.gripperStateOf(items[1])).toEqual({ state: 'closed' });
   });
 });

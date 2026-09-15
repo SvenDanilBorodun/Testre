@@ -43,7 +43,9 @@ import useTeachSession, { classifyTeachKey } from './useTeachSession';
 import { createTeachSounds } from './teachSounds';
 import ReviewStrip from './ReviewStrip';
 import { formatCmDe, isZielTouchTooHigh, zielTouchHeightAboveTableMm } from './zielTouch';
-import { buildProgramBlocks, insertProgram } from './insertProgram';
+import {
+  buildProgramBlocks, insertProgram, makeGripperStateOf, placeGripperState,
+} from './insertProgram';
 
 // The cloud keeps at most 16 recording rows per workflow (SQL prune cap).
 export const TEACH_TRAJECTORY_SLOTS = 16;
@@ -105,7 +107,13 @@ export function teachListMeta(item) {
         : DE.TEACH_LIST_SAVING;
     return formatDe(DE.TEACH_LIST_RECORDING_META, formatSecondsDe(Number(item.durationS) || 0), status);
   }
-  if (item.kind === 'pose') return formatDe(DE.TEACH_LIST_POSE_META, formatMmDe(item.z));
+  if (item.kind === 'pose') {
+    const meta = formatDe(DE.TEACH_LIST_POSE_META, formatMmDe(item.z));
+    // „Greifer merken": the captured gripper state, only when it is known.
+    if (item.gripper === 'open') return `${meta} · ${DE.TEACH_GRIPPER_OPEN}`;
+    if (item.gripper === 'closed') return `${meta} · ${DE.TEACH_GRIPPER_CLOSED}`;
+    return meta;
+  }
   return formatDe(DE.TEACH_LIST_PLACE_META, formatMmDe(item.x), formatMmDe(item.y), DE.CARD_SOURCE_TOUCH);
 }
 
@@ -275,6 +283,15 @@ function TeachOverlay({
     };
     const profile = String(latest.current.robotType || '').trim();
     if (profile) input.robot_type = profile;
+    // S3: the joint snapshot of the same capture (ghost arm, „Greifer merken").
+    // An older server sends none — then the entry simply has no joints; the
+    // store normalises the pair and drops both if either is malformed.
+    if (Array.isArray(response.joint_positions) && response.joint_positions.length > 0
+      && Array.isArray(response.joint_names)
+      && response.joint_names.length === response.joint_positions.length) {
+      input.joints = Array.from(response.joint_positions);
+      input.joint_names = Array.from(response.joint_names);
+    }
     let result;
     try {
       result = getDestinationStore(latest.current.workspace).add(input);
@@ -295,6 +312,7 @@ function TeachOverlay({
       x: entry.x,
       y: entry.y,
       z: entry.z,
+      gripper: placeGripperState(entry, latest.current.caps),
     }]);
   }, [updateItems]);
 
@@ -604,11 +622,20 @@ function TeachOverlay({
     const entry = store && typeof store.getById === 'function' ? store.getById(item.entryId) : null;
     return entry ? entry.name : null;
   }, []);
-  const insertCount = buildProgramBlocks(items, { placeNameOf }).count;
+  // „Greifer merken": gripper blocks where the captured state changed — read
+  // from the kept rows and the store entry's S3 joints, never guessed.
+  const gripperStateOf = useCallback((item) => makeGripperStateOf({
+    caps: latest.current.caps,
+    entryOf: (it) => {
+      const store = getDestinationStore(latest.current.workspace);
+      return store && typeof store.getById === 'function' ? store.getById(it.entryId) : null;
+    },
+  })(item), []);
+  const insertCount = buildProgramBlocks(items, { placeNameOf, gripperStateOf }).count;
   const handleInsert = () => {
     let result;
     try {
-      result = insertProgram(latest.current.workspace, itemsRef.current, { placeNameOf });
+      result = insertProgram(latest.current.workspace, itemsRef.current, { placeNameOf, gripperStateOf });
     } catch (err) {
       console.error('insertProgram failed:', err);
       toast.error(INSERT_FAILED_DE);

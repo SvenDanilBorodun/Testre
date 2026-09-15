@@ -22,6 +22,7 @@ import {
   selectLastPreviewResult,
   setDrawerFocus,
 } from '../../../features/workshop/studioAssetsSlice';
+import { placeGripperState } from '../../../utils/armProfile';
 import { previewKeyForDestination } from '../../../utils/simPreview';
 import { DE, formatDe } from '../blocks/messages_de';
 import { deletePlace, renamePlace, usageRows } from './assetCommands';
@@ -57,6 +58,10 @@ export default function DrawerPlace({ workspace, card, capabilities, onPreview }
   const results = useSelector(selectLastPreviewResult);
   const previewTempo = (drawer && drawer.previewTempo) || 1.0;
   const lastResult = results ? results[previewKeyForDestination(entry.id)] : null;
+  // „Greifer merken": a Position's captured gripper, only when its S3 joint
+  // snapshot classifies on THIS arm (none from an older server).
+  const robotCaps = useSelector((s) => (s.tasks && s.tasks.taskStatus ? s.tasks.taskStatus.capabilities : null));
+  const gripper = isPose ? placeGripperState(entry, robotCaps) : null;
 
   const handleRename = (draft) => {
     const result = renamePlace({ workspace, entryId: entry.id, toName: draft });
@@ -111,6 +116,11 @@ export default function DrawerPlace({ workspace, card, capabilities, onPreview }
         <DetailRow label={DE.DRAWER_SOURCE}>
           {robot ? `${sourceLabel(entry)} · ${robot}` : sourceLabel(entry)}
         </DetailRow>
+        {gripper && (
+          <DetailRow label={DE.DRAWER_STATE}>
+            {gripper === 'closed' ? DE.TEACH_GRIPPER_CLOSED : DE.TEACH_GRIPPER_OPEN}
+          </DetailRow>
+        )}
       </dl>
       {capabilities && capabilities.preview && typeof onPreview === 'function' && (
         <div className="mt-2">

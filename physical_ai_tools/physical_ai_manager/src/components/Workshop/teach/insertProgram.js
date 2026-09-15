@@ -18,8 +18,51 @@
 
 import * as Blockly from 'blockly/core';
 
+import { placeGripperState, recordingGripperStates } from '../../../utils/armProfile';
+
+export { placeGripperState, recordingGripperStates };
+
 const ORIGIN = 20;
 const GAP_X = 60;
+
+// „Greifer merken": the gripper state each item was captured with, read from
+// data the capture already carries — a recording's own gripper column, a
+// place's S3 joint snapshot (WorkshopCapturePose.joint_positions). Nothing is
+// subscribed and nothing is guessed: every unreadable case is null (unknown).
+// The two pure classifiers live in utils/armProfile.js (dependency-free, so the
+// Sammlung drawer can show a Position's gripper without pulling in Blockly).
+
+/**
+ * The overlay's `gripperStateOf(item)`: recordings → `{ start, end }` from the
+ * rows the keep stored (`item.upload.rows`); places → `{ state }` from the
+ * store entry `entryOf(item)` returns (null when it left the store).
+ */
+export function makeGripperStateOf({ caps = null, entryOf = () => null } = {}) {
+  return (item) => {
+    if (!item) return null;
+    if (item.kind === 'recording') {
+      return recordingGripperStates(item.upload && item.upload.rows, caps);
+    }
+    let entry = null;
+    try {
+      entry = entryOf(item);
+    } catch (_) {
+      entry = null;
+    }
+    return { state: placeGripperState(entry, caps) };
+  };
+}
+
+function safeGripperState(gripperStateOf, item) {
+  try {
+    const s = gripperStateOf(item);
+    return s && typeof s === 'object' ? s : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const knownState = (v) => (v === 'open' || v === 'closed' ? v : null);
 
 function recordingStatement(item) {
   if (item.status !== 'saved' || typeof item.name !== 'string' || !item.name) return null;
@@ -47,21 +90,39 @@ function placeStatement(item, placeNameOf) {
  *
  * opts.placeNameOf(item) → the place's CURRENT store name, or null when it is
  *   no longer in the store (skipped). Default: the row's own name.
- * opts.gripperStateOf(item) → gripper state; `() => null` until the gripper
- *   blocks land (WP11b), so no gripper block is emitted yet.
+ * opts.gripperStateOf(item) → recordings `{ start, end }`, places `{ state }`
+ *   ('open' | 'closed' | null each), or null. Default `() => null`: no gripper
+ *   block. A place whose known state differs from the last known state gets
+ *   „schließe/öffne Greifer" AFTER its move; the first known state never emits
+ *   (nothing to compare it with), and an unknown state never emits nor resets.
+ *   Only EMITTED items advance the state — a skipped item moves no arm.
  *
  * @returns {{ json: object|null, count: number }} `count` = top-level statements.
  */
 export function buildProgramBlocks(items, opts = {}) {
   const placeNameOf = typeof opts.placeNameOf === 'function' ? opts.placeNameOf : (item) => item.name;
+  const gripperStateOf = typeof opts.gripperStateOf === 'function' ? opts.gripperStateOf : () => null;
   const statements = [];
+  let prev = null;
   for (const item of Array.isArray(items) ? items : []) {
     if (item && item.kind === 'recording') {
       const s = recordingStatement(item);
-      if (s) statements.push(s);
+      if (s) {
+        statements.push(s);
+        const g = safeGripperState(gripperStateOf, item);
+        prev = (g && knownState(g.end)) || prev;
+      }
     } else if (item && (item.kind === 'pose' || item.kind === 'pin' || item.kind === 'ziel')) {
       const s = placeStatement(item, placeNameOf);
-      if (s) statements.push(s);
+      if (s) {
+        statements.push(s);
+        const g = safeGripperState(gripperStateOf, item);
+        const state = g && knownState(g.state);
+        if (state && prev && state !== prev) {
+          statements.push({ type: state === 'closed' ? 'edubotics_close_gripper' : 'edubotics_open_gripper' });
+        }
+        prev = state || prev;
+      }
     }
   }
   let json = null;

@@ -528,6 +528,16 @@ describe('SimScene — Ziel setzen and Sammlung markers', () => {
     expect(screen.getByRole('button', { name: 'Ziel setzen' })).toHaveAttribute('aria-pressed', 'true');
   });
 
+  test('ghostJoints reach the one twin by identity (null by default)', async () => {
+    const ghostJoints = { names: ['joint1', 'joint2'], positions: [0.1, -0.4] };
+    const props = { scene: { objects: [], zones: [] }, catalog: CATALOG, onChange: () => {} };
+    const { rerender, store } = render(<SimScene {...props} />);
+    await screen.findByTestId('urdf-twin');
+    expect(twinProps.current.ghostJoints).toBeNull();
+    rerender(<Provider store={store}><SimScene {...props} ghostJoints={ghostJoints} /></Provider>);
+    expect(twinProps.current.ghostJoints).toBe(ghostJoints);
+  });
+
   test('markers render on the 2D table with their labels and reach the twin', async () => {
     const markers = [
       { id: 'd_00000001', label: 'Ablage', kind: 'pin', x: 0.18, y: -0.06, z: 0, highlighted: false },

@@ -218,6 +218,21 @@ const JOINT_STALE_CHECK_MS = 1000;
 // cleaner, better-lit look in the viewer).
 const LINK_COLOR = 0xbfc4cc;
 
+// Ghost arm: the Positionen teal (sammlung/markers.js MARKER_COLORS.pose).
+const GHOST_COLOR = 0x14b8a6;
+
+// `{names, positions}` with equal-length arrays of non-empty strings and finite
+// numbers, else null — an invalid ghost draws nothing rather than a half pose.
+function validGhostJoints(g) {
+  if (!g || typeof g !== 'object') return null;
+  const { names, positions } = g;
+  if (!Array.isArray(names) || !Array.isArray(positions)) return null;
+  if (names.length === 0 || names.length !== positions.length) return null;
+  if (!names.every((n) => typeof n === 'string' && n)) return null;
+  if (!positions.every((v) => typeof v === 'number' && Number.isFinite(v))) return null;
+  return { names, positions };
+}
+
 // ── Sim-object render constants ──────────────────────────────────────────────
 // Objects are sized/coloured PER TYPE from the `catalogDims` prop (the sim-stage
 // catalog seam); a type absent from the map falls back to a fixed amber cube. The
@@ -301,6 +316,10 @@ export default function UrdfTwin({
   // THIS twin (never a second WebGL context) and diffed by id. The default []
   // constructs nothing.
   markers = [],
+  // Ghost arm („Position" preview): `{names, positions}` — a translucent clone
+  // of the LOADED robot posed at these joints, on THIS twin. null (the default)
+  // constructs nothing; an invalid value is treated as null.
+  ghostJoints = null,
   // Start-page hero seam. `showChrome = false` suppresses this component's
   // own header chip and „Wartet auf Gelenkdaten …" hint so a parent can
   // draw its own overlay; the default keeps RecordPage and SimScene
@@ -361,6 +380,14 @@ export default function UrdfTwin({
   // Sammlung marker layer: a lazily created group + id → {object, key}.
   const markersGroupRef = useRef(null);
   const markerMapRef = useRef(new Map());
+  // Ghost arm layer. `robotReadyRef` is the robot whose meshes have ALL landed
+  // (loadingManager.onLoad) — cloning earlier would copy a geometry-less URDF
+  // skeleton, and the ghost is built once. `robotReadyTick` re-runs the ghost
+  // effect at that moment; it changes nothing else.
+  const [robotReadyTick, setRobotReadyTick] = useState(0);
+  const robotReadyRef = useRef(null);
+  const ghostRef = useRef(null);
+  const ghostMaterialRef = useRef(null);
   // Latest onEndEffector callback, read by the (stable) subscription closure.
   const onEndEffectorRef = useRef(onEndEffector);
   useEffect(() => {
@@ -649,6 +676,9 @@ export default function UrdfTwin({
             if (obj && obj.isMesh) obj.castShadow = true;
           });
         }
+        // The ghost layer may clone this robot from now on.
+        robotReadyRef.current = robot;
+        setRobotReadyTick((t) => t + 1);
       }
       needsRender = true;
     };
@@ -751,6 +781,14 @@ export default function UrdfTwin({
       markerMap.forEach(({ object }) => disposeMarker(object));
       markerMap.clear();
       markersGroupRef.current = null;
+      // The ghost SHARES the live robot's geometries: detach it BEFORE the
+      // traverse below (which would reach it and free them a second time) and
+      // free only its own material.
+      if (ghostRef.current) scene.remove(ghostRef.current);
+      if (ghostMaterialRef.current) ghostMaterialRef.current.dispose();
+      ghostRef.current = null;
+      ghostMaterialRef.current = null;
+      robotReadyRef.current = null;
       // Dispose every geometry/material reachable from the scene (three leaks
       // GPU memory otherwise), then the shared link material + renderer. This
       // also reaches the sim-object meshes (under objectsGroup → scene) and a
@@ -1030,6 +1068,66 @@ export default function UrdfTwin({
     });
     requestRenderRef.current();
   }, [markers, asset]);
+
+  // ---- Ghost arm (a Position's captured joints) ------------------------------
+  // A translucent clone of the LOADED robot, built ONCE per robot and re-posed on
+  // every change. `robot.clone(true)` runs urdf-loader's URDFRobot.copy, which
+  // rebuilds the clone's joints/links/mimic maps, so setJointValue drives the
+  // clone alone. The clone SHARES every geometry with the live robot: removing
+  // the ghost disposes ONLY its one material, never a geometry. For the default
+  // ghostJoints=null call nothing is constructed.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    const ghostPose = validGhostJoints(ghostJoints);
+    if (!ghostPose) {
+      if (!ghostRef.current && !ghostMaterialRef.current) return;
+      if (ghostRef.current && scene) scene.remove(ghostRef.current);
+      if (ghostMaterialRef.current) ghostMaterialRef.current.dispose();
+      ghostRef.current = null;
+      ghostMaterialRef.current = null;
+      requestRenderRef.current();
+      return;
+    }
+    const robot = robotRef.current;
+    // Not yet loaded (or loaded meshes still in flight): the onLoad tick re-runs this.
+    if (!scene || !robot || robotReadyRef.current !== robot) return;
+    let ghost = ghostRef.current;
+    if (!ghost) {
+      if (typeof robot.clone !== 'function') return;
+      ghost = robot.clone(true);
+      const ghostMaterial = new THREE.MeshStandardMaterial({
+        color: GHOST_COLOR, transparent: true, opacity: 0.35, depthWrite: false,
+      });
+      const strays = [];
+      if (typeof ghost.traverse === 'function') {
+        ghost.traverse((obj) => {
+          if (!obj || obj === ghost) return;
+          // A held sim object and the „Achsen" triads hang under the live robot's
+          // links; the clone copied them, but they are not part of the arm.
+          if (obj.userData && obj.userData.simId !== undefined) {
+            strays.push(obj);
+          } else if (obj.isMesh) {
+            obj.material = ghostMaterial;
+            obj.castShadow = false;
+            obj.receiveShadow = false;
+          } else if (obj.isLine || obj.isLineSegments || obj.isPoints || obj.isSprite) {
+            strays.push(obj);
+          }
+        });
+      }
+      strays.forEach((obj) => { if (obj.parent) obj.parent.remove(obj); });
+      ghost.rotation.x = robot.rotation.x;
+      ghost.rotation.z = robot.rotation.z;
+      scene.add(ghost);
+      ghostRef.current = ghost;
+      ghostMaterialRef.current = ghostMaterial;
+    }
+    const jointNames = jointSetRef.current;
+    ghostPose.names.forEach((name, i) => {
+      if (jointNames.has(name)) ghost.setJointValue(name, ghostPose.positions[i]);
+    });
+    requestRenderRef.current();
+  }, [ghostJoints, robotReadyTick]);
 
   // ---- Phase-5: end-effector path trail ("Bahn anzeigen") -------------------
   // Lazily builds a cyan THREE.Line over a PREALLOCATED Float32Array the first

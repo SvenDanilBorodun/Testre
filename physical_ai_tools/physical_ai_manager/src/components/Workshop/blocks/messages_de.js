@@ -416,6 +416,8 @@ export const DE = {
   DRAWER_COORDS: 'Koordinaten',
   DRAWER_COORDS_VALUE: 'x %1 · y %2 · z %3 mm',
   DRAWER_SOURCE: 'Herkunft',
+  // A Position's captured gripper (S3 joints); the value is TEACH_GRIPPER_OPEN/_CLOSED.
+  DRAWER_STATE: 'Zustand',
   DRAWER_USED_IN: 'Benutzt in',
   DRAWER_USED_NOWHERE_RECORDING: 'Nirgends — ziehe den Block aus der Gruppe „Aufnahmen" ins Programm.',
   DRAWER_USED_NOWHERE_PLACE: 'Nirgends — ziehe den Block aus der Gruppe „Ziele" ins Programm.',
@@ -521,6 +523,10 @@ export const DE = {
   TEACH_LIST_RECORDING_META: '%1 s · %2',
   TEACH_LIST_POSE_META: 'z %1 mm',
   TEACH_LIST_PLACE_META: 'x %1 · y %2 mm · %3',
+  // „Greifer merken" (S3 capture joints): the captured gripper state, shown
+  // only when the snapshot classifies it.
+  TEACH_GRIPPER_OPEN: 'Greifer offen',
+  TEACH_GRIPPER_CLOSED: 'Greifer zu',
   TEACH_RENAME_LOCKED: 'Umbenennen geht, wenn der Arm fest ist.',
   TEACH_BLOCK_UI_LOCKED: 'Während Vormachen nicht verfügbar.',
   TEACH_DRIVE_BLOCKED: 'Erst Vormachen beenden, dann fahren.',

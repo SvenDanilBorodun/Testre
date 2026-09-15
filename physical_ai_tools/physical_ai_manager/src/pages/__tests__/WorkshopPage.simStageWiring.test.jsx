@@ -386,6 +386,34 @@ describe('WorkshopPage — Ziel/Position markers and „Ziel setzen"', () => {
     expect(mockDispatch).toHaveBeenLastCalledWith({ type: 'studioAssets/setHighlight', payload: null });
   });
 
+  test('a highlighted Position with fitting joints draws its ghost on both twins; anything else draws none', async () => {
+    const names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
+    const GHOSTED = { ...POSE, robot_type: 'omx_f', joints: [0, -0.9, 1.1, 0.3, 0, 0.8], joint_names: names };
+    mockStore.entries = [PIN, GHOSTED];
+    mockState.studioAssets = { highlight: { kind: 'pose', id: POSE.id } };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const lastTwin = () => mockTwin.mock.calls[mockTwin.mock.calls.length - 1][0];
+    await waitFor(() => expect(lastTwin().ghostJoints).toEqual({ names, positions: GHOSTED.joints }));
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-scene');
+    expect(lastSimSceneProps().ghostJoints).toEqual({ names, positions: GHOSTED.joints });
+    // Another arm's snapshot (or an older server's joint-less Position) draws nothing.
+    act(() => { mockStore.listeners.forEach((fn) => fn([PIN, { ...GHOSTED, robot_type: 'edu6_studio' }])); });
+    await waitFor(() => expect(lastSimSceneProps().ghostJoints).toBeNull());
+    act(() => { mockStore.listeners.forEach((fn) => fn([PIN, POSE])); });
+    await waitFor(() => expect(lastSimSceneProps().ghostJoints).toBeNull());
+  });
+
+  test('a highlighted Ziel never draws a ghost', async () => {
+    const names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
+    mockStore.entries = [{ ...PIN, joints: [0, 0, 0, 0, 0, 0.8], joint_names: names }];
+    mockState.studioAssets = { highlight: { kind: 'pin', id: PIN.id } };
+    await enterSim();
+    await waitFor(() => expect(lastSimSceneProps().markers).toHaveLength(1));
+    expect(lastSimSceneProps().ghostJoints).toBeNull();
+  });
+
   test('a Ziel focused in the drawer highlights its marker', async () => {
     mockState.studioAssets = { drawer: { open: true, tab: 'ziele', focusId: PIN.id, previewTempo: 1 } };
     render(<WorkshopPage isActive />);

@@ -77,6 +77,12 @@ function newMockRobot() {
     },
     // Box3.setFromObject(robot) walks .traverse during framing.
     traverse: () => {},
+    // Ghost arm: urdf-loader's URDFRobot.copy under clone(true).
+    clone: vi.fn(() => {
+      const ghost = newMockGhost();
+      mockGhosts.push(ghost);
+      return ghost;
+    }),
     // Phase-5: the path trail reads links.end_effector_link.getWorldPosition; the
     // frame triads parent an AxesHelper onto links.link0 + links.end_effector_link.
     // Only exercised when showPath/showFrames are true (the default tests never
@@ -145,6 +151,35 @@ const mockAxesCtor = vi.fn();
 const mockBoxGeometryCtor = vi.fn();
 const mockRingGeometryCtor = vi.fn();
 const mockStandardMaterialCtor = vi.fn(); // captures the opts (incl. color)
+// Every MeshStandardMaterial instance (each with a dispose spy) and every
+// scene.add / scene.remove, so the ghost-arm tests can prove exactly which
+// material was freed and that the clone left the scene.
+const mockStandardMaterials = [];
+const mockSceneOps = [];
+// Ghost arm: each robot.clone(true) result. Its traverse visits two arm meshes
+// (sharing spied geometries), a held sim object and an „Achsen" triad — the
+// last two hang under a link and must be detached from the clone.
+const mockGhosts = [];
+function newMockGhost() {
+  const link = { remove: vi.fn() };
+  const mesh = (i) => ({
+    isMesh: true, userData: {}, castShadow: true, receiveShadow: true,
+    geometry: { dispose: vi.fn(), id: `geo${i}` }, material: { dispose: vi.fn() },
+  });
+  const ghost = {
+    rotation: { x: 0, z: 0 },
+    link,
+    meshes: [mesh(0), mesh(1)],
+    held: { isMesh: true, userData: { simId: 7 }, parent: link, material: { dispose: vi.fn() } },
+    axes: { isLineSegments: true, userData: {}, parent: link },
+    setJointValue: vi.fn(),
+  };
+  ghost.traverse = vi.fn((fn) => {
+    fn(ghost);
+    [...ghost.meshes, ghost.held, ghost.axes].forEach(fn);
+  });
+  return ghost;
+}
 // material.color.set spy shared by every MeshStandardMaterial — the held-release
 // tests assert the release recolor value (grab/release recolors go through
 // setMeshColor → material.color.set).
@@ -265,7 +300,8 @@ vi.mock('three', () => {
     Scene: function Scene() {
       return noopObj({
         background: null,
-        remove: () => {},
+        add: (child) => { mockSceneOps.push(['add', child]); },
+        remove: (child) => { mockSceneOps.push(['remove', child]); },
         traverse: () => {},
         attach(child) {
           attachLog.push({ parent: 'scene', child });
@@ -321,7 +357,9 @@ vi.mock('three', () => {
       // assert an object used its catalog colour; color.set is the shared
       // mockColorSet spy so the grasp/release recolor values are assertable.
       mockStandardMaterialCtor(opts);
-      return { color: { set: mockColorSet }, dispose: () => {} };
+      const mat = { opts, color: { set: mockColorSet }, dispose: vi.fn() };
+      mockStandardMaterials.push(mat);
+      return mat;
     },
     MeshPhongMaterial: function MeshPhongMaterial() { return { dispose: () => {} }; },
     MeshBasicMaterial: function MeshBasicMaterial() { return { color: { set: () => {} }, dispose: () => {} }; },
@@ -512,6 +550,9 @@ beforeEach(() => {
   mockBoxGeometryCtor.mockClear();
   mockRingGeometryCtor.mockClear();
   mockStandardMaterialCtor.mockClear();
+  mockStandardMaterials.length = 0;
+  mockSceneOps.length = 0;
+  mockGhosts.length = 0;
   mockColorSet.mockClear();
   mockMeshInstances.length = 0;
   mockRenderer = null;
@@ -1600,5 +1641,103 @@ describe('UrdfTwin — Sammlung markers', () => {
     idle = await settled();
     rerender(<UrdfTwin markers={[]} />); // remove
     await waitFor(() => expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+  });
+});
+
+describe('UrdfTwin — ghost arm (a Position\'s captured joints)', () => {
+  const GHOST = {
+    names: ['joint1', 'joint2', 'gripper_joint_1', 'not_a_joint'],
+    positions: [0.1, -0.9, 0.8, 5],
+  };
+  const ghostMaterials = () => mockStandardMaterials.filter((m) => m.opts && m.opts.color === 0x14b8a6);
+
+  async function mountLoaded(ui) {
+    const utils = render(ui);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    return utils;
+  }
+
+  test('default props never clone the robot and build no ghost material', async () => {
+    await mountLoaded(<UrdfTwin />);
+    expect(mockRobot.clone).not.toHaveBeenCalled();
+    expect(ghostMaterials()).toEqual([]);
+  });
+
+  test('ghostJoints set before the meshes land creates the ghost only after manager.onLoad', async () => {
+    render(<UrdfTwin ghostJoints={GHOST} />);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads[0].finish(); });
+    // The URDF callback already ran and one mesh landed — still no clone.
+    expect(mockRobot.clone).not.toHaveBeenCalled();
+    await act(async () => { mockStlLoads[1].finish(); });
+    await waitFor(() => expect(mockRobot.clone).toHaveBeenCalledTimes(1));
+    expect(mockRobot.clone).toHaveBeenCalledWith(true);
+    const [ghost] = mockGhosts;
+    expect(mockSceneOps).toContainEqual(['add', ghost]);
+    const [mat] = ghostMaterials();
+    expect(mat.opts).toEqual({ color: 0x14b8a6, transparent: true, opacity: 0.35, depthWrite: false });
+    // Every arm mesh wears the one ghost material and casts no shadow.
+    ghost.meshes.forEach((m) => {
+      expect(m.material).toBe(mat);
+      expect(m.castShadow).toBe(false);
+    });
+    // The held sim object and the triad copied from the live robot are detached.
+    expect(ghost.link.remove).toHaveBeenCalledWith(ghost.held);
+    expect(ghost.link.remove).toHaveBeenCalledWith(ghost.axes);
+    expect(ghost.rotation).toEqual({ x: -Math.PI / 2, z: 0 });
+  });
+
+  test('values are applied by name to the clone only; unknown names are ignored', async () => {
+    await mountLoaded(<UrdfTwin ghostJoints={GHOST} />);
+    const [ghost] = mockGhosts;
+    expect(ghost.setJointValue.mock.calls).toEqual([
+      ['joint1', 0.1], ['joint2', -0.9], ['gripper_joint_1', 0.8],
+    ]);
+    expect(mockRobot.applied).toEqual([]);
+  });
+
+  test('a new pose re-poses the same clone and repaints', async () => {
+    const { rerender } = await mountLoaded(<UrdfTwin ghostJoints={GHOST} />);
+    await settleFrames();
+    const idle = mockRender.mock.calls.length;
+    rerender(<UrdfTwin ghostJoints={{ names: ['joint1'], positions: [0.4] }} />);
+    expect(mockRobot.clone).toHaveBeenCalledTimes(1);
+    expect(mockGhosts[0].setJointValue).toHaveBeenLastCalledWith('joint1', 0.4);
+    await waitFor(() => expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+  });
+
+  test('ghostJoints=null removes it, disposes exactly one material and no geometry', async () => {
+    const { rerender } = await mountLoaded(<UrdfTwin ghostJoints={GHOST} />);
+    const [ghost] = mockGhosts;
+    const [mat] = ghostMaterials();
+    rerender(<UrdfTwin ghostJoints={null} />);
+    expect(mockSceneOps).toContainEqual(['remove', ghost]);
+    expect(mockStandardMaterials.filter((m) => m.dispose.mock.calls.length > 0)).toEqual([mat]);
+    expect(mat.dispose).toHaveBeenCalledTimes(1);
+    ghost.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled());
+    // A later pose builds a fresh ghost.
+    rerender(<UrdfTwin ghostJoints={GHOST} />);
+    expect(mockRobot.clone).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    ['mismatched lengths', { names: ['joint1'], positions: [0.1, 0.2] }],
+    ['a non-finite value', { names: ['joint1'], positions: [Number.NaN] }],
+    ['empty arrays', { names: [], positions: [] }],
+    ['not an object', 'joint1'],
+  ])('an invalid ghostJoints (%s) draws nothing', async (_label, value) => {
+    await mountLoaded(<UrdfTwin ghostJoints={value} />);
+    expect(mockRobot.clone).not.toHaveBeenCalled();
+  });
+
+  test('unmount detaches the ghost and frees its material without touching geometry', async () => {
+    const { unmount } = await mountLoaded(<UrdfTwin ghostJoints={GHOST} />);
+    const [ghost] = mockGhosts;
+    const [mat] = ghostMaterials();
+    unmount();
+    expect(mockSceneOps).toContainEqual(['remove', ghost]);
+    expect(mat.dispose).toHaveBeenCalledTimes(1);
+    ghost.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled());
   });
 });

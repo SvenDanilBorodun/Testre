@@ -41,6 +41,7 @@ import {
 } from '../components/Workshop/sammlung/destinationStore';
 import { createSammlungProvider } from '../components/Workshop/sammlung/provider';
 import { buildTwinMarkers } from '../components/Workshop/sammlung/markers';
+import { ghostJointsFromEntry } from '../utils/armProfile';
 import SammlungDrawer from '../components/Workshop/sammlung/SammlungDrawer';
 import TeachHost from '../components/Workshop/teach/TeachHost';
 import { TEACH_BLOCK_TITLES_DE, teachEntryBlockReason } from '../components/Workshop/teach/teachGates';
@@ -851,6 +852,13 @@ function WorkshopPage({ isActive }) {
     () => buildTwinMarkers({ entries: storeEntries, simMode, highlight }),
     [storeEntries, simMode, highlight],
   );
+  // The ghost arm: the highlighted Position's captured joints, when they fit
+  // this arm (utils/armProfile.js::ghostJointsFromEntry). Anything else → null.
+  const ghostJoints = useMemo(() => {
+    if (!highlight || highlight.kind !== 'pose') return null;
+    const entry = storeEntries.find((e) => e && e.id === highlight.id);
+    return ghostJointsFromEntry(entry, caps, robotType);
+  }, [storeEntries, highlight, caps, robotType]);
 
   // A tap in SimScene's „Ziel setzen" mode: a pin ON the virtual table (z 0).
   // On a calibrated real rig the same entry later re-asks the measured plane
@@ -1286,6 +1294,7 @@ function WorkshopPage({ isActive }) {
                 pathClearToken={pathClearToken}
                 showFrames={showFrames}
                 markers={markers}
+                ghostJoints={ghostJoints}
               />
             </Suspense>
             {showFrames && (
@@ -1519,6 +1528,7 @@ function WorkshopPage({ isActive }) {
                       onClearPath={() => setPathClearToken((t) => t + 1)}
                       pathClearToken={pathClearToken}
                       markers={markers}
+                      ghostJoints={ghostJoints}
                       requestedMode={simZielRequest}
                       onCreateDestination={handleCreateSimDestination}
                     />

@@ -105,6 +105,12 @@ describe('SimStage', () => {
     expect(props.onCreateDestination).toBe(onCreateDestination);
   });
 
+  test('ghostJoints passes through to SimScene by identity (null by default)', () => {
+    const ghostJoints = { names: ['joint1'], positions: [0.2] };
+    renderStage({ ghostJoints });
+    expect(mockSimScene.mock.calls[0][0].ghostJoints).toBe(ghostJoints);
+  });
+
   test('the „Bahn" toggle reflects showPath and calls onToggleShowPath', async () => {
     const onToggleShowPath = vi.fn();
     renderStage({ showPath: true, onToggleShowPath });

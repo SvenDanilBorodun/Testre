@@ -643,7 +643,11 @@ export function useRosServiceCaller() {
   // destinations table, and returns the world coordinates). The named point is
   // then usable by „Ziel <Name>" (destination_ref) / „bewege zu". The request
   // is just { name }; the response carries { success, world_x, world_y,
-  // world_z, message }. Contract owned by the backend WorkshopCapturePose.srv.
+  // world_z, message } plus the ADDITIVE S3 pair { joint_positions, joint_names }
+  // (Communicator.FOLLOWER_JOINT_ORDER) — the ghost arm and „Greifer merken" read
+  // it. Both arrays are empty on a refusal and ABSENT from an older server, so a
+  // consumer must treat „no joints" as normal. Contract owned by the backend
+  // WorkshopCapturePose.srv.
   const capturePose = useCallback(
     async (name) =>
       callService(

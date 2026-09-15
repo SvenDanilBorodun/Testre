@@ -11,7 +11,7 @@
 // armGeometry — the caps→geometry resolver every profile-driven surface
 // (UrdfTwin / JogPanel / SimScene) consumes (edu6 §4.5).
 
-import { armGeometry } from '../armProfile';
+import { armGeometry, ghostJointsFromEntry } from '../armProfile';
 import { reachAnnulus, REACH_INNER_M, REACH_OUTER_M } from '../../components/Workshop/simConstants';
 
 const EDU6_CAPS = {
@@ -144,5 +144,36 @@ describe('reachAnnulus', () => {
   it('a nonsense outer (≤ inner) is ignored', () => {
     expect(reachAnnulus({ reach_inner_m: 0.2, reach_outer_m: 0.1 }))
       .toEqual({ inner: 0.2, outer: REACH_OUTER_M });
+  });
+});
+
+describe('ghostJointsFromEntry — the ghost arm draws only a snapshot that fits this arm', () => {
+  const OMX_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
+  const POSE = {
+    id: 'd_00000001', name: 'Oben', kind: 'pose', x: 0.1, y: 0, z: 0.1,
+    joints: [0, -0.9, 1.1, 0.3, 0, 0.8], joint_names: OMX_NAMES,
+  };
+
+  it('returns {names, positions} copies for a fitting OMX Position (robot_type absent or equal)', () => {
+    const g = ghostJointsFromEntry(POSE, null, 'omx_f');
+    expect(g).toEqual({ names: OMX_NAMES, positions: POSE.joints });
+    expect(g.names).not.toBe(POSE.joint_names);
+    expect(ghostJointsFromEntry({ ...POSE, robot_type: 'omx_f' }, null, 'omx_f')).not.toBeNull();
+  });
+
+  it('refuses a Ziel, a joint-less entry (older server), another arm and a stranger joint name', () => {
+    expect(ghostJointsFromEntry({ ...POSE, kind: 'pin' }, null, 'omx_f')).toBeNull();
+    expect(ghostJointsFromEntry({ ...POSE, joints: undefined, joint_names: undefined }, null, 'omx_f')).toBeNull();
+    expect(ghostJointsFromEntry({ ...POSE, robot_type: 'edu6_studio' }, null, 'omx_f')).toBeNull();
+    expect(ghostJointsFromEntry(POSE, EDU6_CAPS, 'edu6_studio')).toBeNull();
+    expect(ghostJointsFromEntry({ ...POSE, joints: [0, Number.NaN] , joint_names: ['joint1', 'joint2'] }, null, 'omx_f')).toBeNull();
+    expect(ghostJointsFromEntry({ ...POSE, joint_names: OMX_NAMES.slice(0, 5) }, null, 'omx_f')).toBeNull();
+    expect(ghostJointsFromEntry(null, null, 'omx_f')).toBeNull();
+  });
+
+  it('accepts an edu6 snapshot under edu6 caps', () => {
+    const names = EDU6_CAPS.joint_names;
+    const entry = { ...POSE, robot_type: 'edu6_studio', joints: [0, 0.7, -2.4, 0, 0.7, 0, 1.75], joint_names: names };
+    expect(ghostJointsFromEntry(entry, EDU6_CAPS, 'edu6_studio')).toEqual({ names, positions: entry.joints });
   });
 });

@@ -17,7 +17,9 @@ import * as De from 'blockly/msg/de';
 import { registerTrajectoryBlocks } from '../../blocks/trajectories';
 import { registerDestinationBlocks } from '../../blocks/destinations';
 import { registerMotionBlocks } from '../../blocks/motion';
-import { buildProgramBlocks, insertProgram } from '../insertProgram';
+import {
+  buildProgramBlocks, insertProgram, makeGripperStateOf, placeGripperState, recordingGripperStates,
+} from '../insertProgram';
 
 const flushEvents = async () => {
   await new Promise((resolve) => {
@@ -71,6 +73,119 @@ describe('buildProgramBlocks (pure)', () => {
       placeNameOf: () => { throw new Error('gone'); },
     });
     expect(r.count).toBe(0);
+  });
+});
+
+// „Greifer merken" — gripper blocks exactly where the captured state changed.
+const chainTypes = (json) => {
+  const out = [];
+  for (let b = json; b; b = b.next && b.next.block) out.push(b.type);
+  return out;
+};
+const OMX_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
+const poseEntry = (grip, names = OMX_NAMES) => ({
+  joints: [0, -0.9, 1.1, 0.3, 0, grip], joint_names: names,
+});
+const omxRow = (grip, t) => [0, 0, 0, 0, 0, grip, t];
+
+describe('buildProgramBlocks — „Greifer merken"', () => {
+  const places = (entries) => {
+    const entryOf = (item) => entries[item.entryId] || null;
+    return {
+      placeNameOf: (item) => (entries[item.entryId] ? item.name : null),
+      gripperStateOf: makeGripperStateOf({ caps: null, entryOf }),
+    };
+  };
+
+  it('pose open → pose closed emits „schließe Greifer" after the second move', () => {
+    const opts = places({ a: poseEntry(0.8), b: poseEntry(-0.3) });
+    const { json, count } = buildProgramBlocks([
+      { kind: 'pose', name: 'P1', entryId: 'a' },
+      { kind: 'pose', name: 'P2', entryId: 'b' },
+    ], opts);
+    expect(chainTypes(json)).toEqual([
+      'edubotics_move_to', 'edubotics_move_to', 'edubotics_close_gripper',
+    ]);
+    expect(json.next.block.inputs.DESTINATION.block.fields.NAME).toBe('P2');
+    expect(count).toBe(3);
+  });
+
+  it('a recording ending closed → pose open emits „öffne Greifer" after the pose', () => {
+    const opts = places({ a: poseEntry(0.8) });
+    const { json } = buildProgramBlocks([
+      { kind: 'recording', name: 'B1', status: 'saved', upload: { rows: [omxRow(0.8, 0), omxRow(-0.4, 1)] } },
+      { kind: 'pose', name: 'P1', entryId: 'a' },
+    ], opts);
+    expect(chainTypes(json)).toEqual([
+      'edubotics_replay_trajectory', 'edubotics_move_to', 'edubotics_open_gripper',
+    ]);
+  });
+
+  it('the same state twice emits nothing, and the first known state never emits', () => {
+    const opts = places({ a: poseEntry(-0.4), b: poseEntry(-0.2) });
+    const { json } = buildProgramBlocks([
+      { kind: 'pose', name: 'P1', entryId: 'a' },
+      { kind: 'ziel', name: 'Z1', entryId: 'b' },
+    ], opts);
+    expect(chainTypes(json)).toEqual(['edubotics_move_to', 'edubotics_move_to']);
+  });
+
+  it('unknown states (in the band, no joints, old server) emit nothing and do not reset', () => {
+    const opts = places({
+      a: poseEntry(0.8), b: poseEntry(0.35), c: { }, d: poseEntry(0.8),
+    });
+    const { json } = buildProgramBlocks([
+      { kind: 'pose', name: 'P1', entryId: 'a' },
+      { kind: 'pose', name: 'P2', entryId: 'b' },
+      { kind: 'pose', name: 'P3', entryId: 'c' },
+      { kind: 'pose', name: 'P4', entryId: 'd' },
+    ], opts);
+    expect(chainTypes(json)).toEqual(Array(4).fill('edubotics_move_to'));
+  });
+
+  it('a mismatched gripper joint name is unknown', () => {
+    const edu6Names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'end_gear_joint'];
+    expect(placeGripperState(poseEntry(-0.3, edu6Names), null)).toBeNull();
+    const opts = places({ a: poseEntry(0.8), b: poseEntry(-0.3, edu6Names) });
+    const { json } = buildProgramBlocks([
+      { kind: 'pose', name: 'P1', entryId: 'a' },
+      { kind: 'pose', name: 'P2', entryId: 'b' },
+    ], opts);
+    expect(chainTypes(json)).toEqual(['edubotics_move_to', 'edubotics_move_to']);
+  });
+
+  it('a skipped item (unsaved recording, place gone) never advances the state', () => {
+    const opts = places({ b: poseEntry(0.8) });
+    const { json } = buildProgramBlocks([
+      { kind: 'recording', name: 'B1', status: 'failed', upload: { rows: [omxRow(-0.4, 0), omxRow(-0.4, 1)] } },
+      { kind: 'pose', name: 'gone', entryId: 'a' },
+      { kind: 'pose', name: 'P2', entryId: 'b' },
+    ], opts);
+    expect(chainTypes(json)).toEqual(['edubotics_move_to']);
+  });
+
+  it('a throwing gripperStateOf degrades to no gripper block', () => {
+    const { json } = buildProgramBlocks([
+      { kind: 'pose', name: 'P1' }, { kind: 'pose', name: 'P2' },
+    ], { gripperStateOf: () => { throw new Error('boom'); } });
+    expect(chainTypes(json)).toEqual(['edubotics_move_to', 'edubotics_move_to']);
+  });
+
+  it('recordingGripperStates reads the profile gripper column of exact-width rows only', () => {
+    expect(recordingGripperStates([omxRow(0.8, 0), omxRow(-0.4, 1)], null))
+      .toEqual({ start: 'open', end: 'closed' });
+    const edu6Caps = {
+      arm_joints: 6,
+      joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint'],
+      sim_close_threshold_rad: 1.5,
+      gripper_open_rad: 1.75,
+    };
+    // A 7-wide OMX row under edu6 caps is not an edu6 take → unknown.
+    expect(recordingGripperStates([omxRow(0.8, 0)], edu6Caps)).toEqual({ start: null, end: null });
+    expect(recordingGripperStates([[0, 0, 0, 0, 0, 0, 1.0, 0], [0, 0, 0, 0, 0, 0, 1.75, 1]], edu6Caps))
+      .toEqual({ start: 'closed', end: 'open' });
+    expect(recordingGripperStates([], null)).toEqual({ start: null, end: null });
+    expect(recordingGripperStates(undefined, null)).toEqual({ start: null, end: null });
   });
 });
 
@@ -162,6 +277,19 @@ describe('insertProgram (real Blockly)', () => {
     await flushEvents();
     expect(ws.getBlockById(r.blockId)).toBeNull();
     expect(ws.getAllBlocks(false).length).toBe(2);
+  });
+
+  it('gripper blocks load into the real workspace inside the one stack', () => {
+    const entries = { a: poseEntry(0.8), b: poseEntry(-0.3) };
+    const r = insertProgram(ws, [
+      { kind: 'pose', name: 'P1', entryId: 'a' },
+      { kind: 'pose', name: 'P2', entryId: 'b' },
+    ], { gripperStateOf: makeGripperStateOf({ entryOf: (item) => entries[item.entryId] }) });
+    expect(r.count).toBe(3);
+    const types = [];
+    for (let b = ws.getBlockById(r.blockId); b; b = b.getNextBlock()) types.push(b.type);
+    expect(types).toEqual(['edubotics_move_to', 'edubotics_move_to', 'edubotics_close_gripper']);
+    expect(ws.getTopBlocks(false)).toHaveLength(1);
   });
 
   it('nothing to insert touches nothing', () => {

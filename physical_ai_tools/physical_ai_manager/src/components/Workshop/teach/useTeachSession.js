@@ -49,7 +49,10 @@ export const LEADER_TAKE_BUSY_DE = 'Eine Leader-Aufnahme läuft gerade — bitte
 const ELAPSED_STEP_MS = 250;
 
 const INTERACTIVE_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
-const INTERACTIVE_ROLES = new Set(['slider', 'button', 'checkbox']);
+// NOT 'slider': the review strip's handles use only the arrow keys, none of
+// which is a teach key — so after trimming with the arrows, Enter still keeps,
+// R and Entf still act (the handle keeps focus; a click was never needed).
+const INTERACTIVE_ROLES = new Set(['button', 'checkbox']);
 
 // `bereit` is leader mode's resting state (the follower is teleoperated, never
 // „fest" or „frei").

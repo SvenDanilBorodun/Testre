@@ -162,23 +162,34 @@ describe('recordingCleanup — the end handle and the fall onset', () => {
 
   it('only the profile\'s fall joints count (edu6 watches joint5, not joint4)', () => {
     const fall = (idx) => {
-      const rows = [row7(0, [0, 0, 0, 0, 0, 0, 1]), row7(0.1, [0, 0, 0, 0, 0, 0, 1])];
+      const rows = [row7(0, [0, 0, 0, 0, 0, 0, 1]), row7(0.5, [0, 0, 0, 0, 0, 0, 1]),
+        row7(1.0, [0, 0, 0, 0, 0, 0, 1])];
       for (let i = 1; i <= 5; i += 1) {
         const q = [0, 0, 0, 0, 0, 0, 1];
         q[idx] = -0.2 * i;
-        rows.push([...q, 0.1 + 0.04 * i]);
+        rows.push([...q, 1.0 + 0.04 * i]);
       }
       return rows;
     };
-    expect(analyzeTake(fall(4), EDU6).suggestedEndIndex).toBe(1);
+    expect(analyzeTake(fall(4), EDU6).suggestedEndIndex).toBe(2);
     expect(analyzeTake(fall(3), EDU6).suggestedEndIndex).toBeNull();
-    expect(analyzeTake(fall(3), OMX).suggestedEndIndex).toBe(1);
+    expect(analyzeTake(fall(3), OMX).suggestedEndIndex).toBe(2);
   });
 
-  it('the suggestion is never below index 1', () => {
-    const rows = [row7(0, [0, 0.5, 0, 0, 0, 0.8]), row7(0.04, [0, 0.3, 0, 0, 0, 0.8]),
+  it('a short take, or a single fast move, is never trimmed down to its start', () => {
+    const fastOnly = [row7(0, [0, 0.5, 0, 0, 0, 0.8]), row7(0.04, [0, 0.3, 0, 0, 0, 0.8]),
       row7(0.08, [0, 0.1, 0, 0, 0, 0.8])];
-    expect(analyzeTake(rows, OMX).suggestedEndIndex).toBe(1);
+    expect(analyzeTake(fastOnly, OMX).suggestedEndIndex).toBeNull();
+    // 600 ms of take, then a real fall: still too little before the onset.
+    const rows = [row7(0), row7(0.3), row7(0.6)];
+    let q2 = 0.5;
+    for (let ms = 640; ms <= 800; ms += 40) { q2 -= 0.2; rows.push(row7(ms / 1000, [0, q2, -0.5, 0, 0, 0.8])); }
+    expect(analyzeTake(rows, OMX).suggestedEndIndex).toBeNull();
+    // The same fall after 800 ms of take is suggested.
+    const longer = [row7(0), row7(0.4), row7(0.8)];
+    q2 = 0.5;
+    for (let ms = 840; ms <= 1000; ms += 40) { q2 -= 0.2; longer.push(row7(ms / 1000, [0, q2, -0.5, 0, 0, 0.8])); }
+    expect(analyzeTake(longer, OMX).suggestedEndIndex).toBe(2);
   });
 
   it('endIndex slices the tail; the handles clamp to at least 2 rows', () => {

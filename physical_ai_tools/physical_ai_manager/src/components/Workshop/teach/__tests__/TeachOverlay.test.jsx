@@ -97,7 +97,9 @@ vi.mock('../../sammlung/assetCommands', () => ({
 
 // A controllable hook: with `snapshot` set, the overlay gets that snapshot and
 // `actions`; otherwise the REAL useTeachSession runs. Never toggled mid-test.
-const mockHook = vi.hoisted(() => ({ snapshot: null, props: null, namer: null, actions: null }));
+const mockHook = vi.hoisted(() => ({
+  snapshot: null, props: null, namer: null, actions: null, onKeyDown: null,
+}));
 vi.mock('../useTeachSession', async (importOriginal) => {
   const actual = await importOriginal();
   return {
@@ -110,7 +112,7 @@ vi.mock('../useTeachSession', async (importOriginal) => {
         releasedOnce: false, previewNoMotionHint: false,
         ...mockHook.snapshot,
         actions: mockHook.actions,
-        onKeyDown: () => {},
+        onKeyDown: (e) => { if (mockHook.onKeyDown) mockHook.onKeyDown(e); },
         setCaptureNamer: (fn) => { mockHook.namer = fn; },
       };
     },
@@ -165,6 +167,7 @@ beforeEach(() => {
   mockHook.props = null;
   mockHook.namer = null;
   mockHook.actions = null;
+  mockHook.onKeyDown = null;
   mockGlide.offer.mockReset();
   mockActivation.status = null;
   mockGlide.active = false;
@@ -867,6 +870,24 @@ describe('TeachOverlay — review clean-up (trims with undo, cleaned rows kept a
     expect(screen.getByText(formatDe(DE.TEACH_LIST_RECORDING_META, '1,3', DE.TEACH_LIST_SAVED))).toBeInTheDocument();
   });
 
+  test('a start handle moved with the arrow key reaches the upload: points start there, duration_s is their span', async () => {
+    const { take, onset } = cleanupTake();
+    withSnapshot({ state: 'pruefen', relock: 'ok', take });
+    workflowApi.createTrajectory.mockResolvedValue({ id: 't' });
+    render(<TeachOverlay {...baseProps()} />);
+    const start = within(screen.getByTestId('teach-review')).getByRole('slider', { name: DE.TEACH_HANDLE_START });
+    fireEvent.keyDown(start, { key: 'ArrowRight' });
+    fireEvent.keyDown(start, { key: 'ArrowRight' });
+    expect(start).toHaveAttribute('aria-valuenow', '2');
+    await act(async () => { mockHook.props.onKeep(take); await flush(); });
+    const expected = compactTrajectoryPoints(applyCleanup(take.points, { startIndex: 2, endIndex: onset }));
+    const sent = workflowApi.createTrajectory.mock.calls[0][2];
+    expect(sent.points).toEqual(expected);
+    expect(sent.points).toHaveLength(onset - 1);
+    expect(sent.points[0][6]).toBe(0);
+    expect(sent.duration_s).toBe(expected[expected.length - 1][6]);
+  });
+
   test('„Auf dem Roboter ansehen" previews exactly the cleaned rows', () => {
     const { take, onset } = cleanupTake();
     const actions = withSnapshot({ state: 'pruefen', relock: 'ok', take });
@@ -946,6 +967,23 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
     expect(within(screen.getByTestId('teach-item-pose')).getByText('Position 1')).toBeInTheDocument();
   });
 
+  test('Z is swallowed while the question is open (no second capture); other keys still reach the session', () => {
+    withSnapshot({ state: 'frei' });
+    storeEchoes();
+    mockHook.onKeyDown = vi.fn();
+    render(<TeachOverlay {...baseProps()} />);
+    captureHigh();
+    const z = new KeyboardEvent('keydown', { key: 'z', bubbles: true, cancelable: true });
+    act(() => { document.body.dispatchEvent(z); });
+    expect(z.defaultPrevented).toBe(true);
+    expect(mockHook.onKeyDown).not.toHaveBeenCalled();
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    expect(mockStore.add).not.toHaveBeenCalled();
+    const p = new KeyboardEvent('keydown', { key: 'p', bubbles: true, cancelable: true });
+    act(() => { document.body.dispatchEvent(p); });
+    expect(mockHook.onKeyDown).toHaveBeenCalledTimes(1);
+  });
+
   test('„Trotzdem als Ziel" stores a Ziel under its own name', () => {
     withSnapshot({ state: 'frei' });
     storeEchoes();
@@ -1023,7 +1061,10 @@ describe('TeachOverlay — „Als Programm einfügen"', () => {
     await fillRound();
     mockStore.getById.mockReturnValue(null);
     act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 2', response: { success: true, world_x: 0.1, world_y: 0, world_z: 0.1 } }); });
-    expect(screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 1) })).toBeInTheDocument();
+    // One block is „1 Block", never „1 Blöcke".
+    expect(screen.getByRole('button', { name: DE.TEACH_INSERT_ONE })).toBeInTheDocument();
+    expect(DE.TEACH_INSERT_ONE).toBe('Als Programm einfügen (1 Block)');
+    expect(DE.TEACH_INSERT_DONE_ONE).toBe('1 Block eingefügt.');
   });
 
   test('„Greifer merken": a changed captured gripper state adds a gripper block to the count and the insert', () => {

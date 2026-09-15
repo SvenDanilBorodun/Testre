@@ -377,6 +377,21 @@ describe('useTeachSession', () => {
       h.unmount();
     });
 
+    it('Enter on a focused review-strip handle (role slider) still keeps', async () => {
+      const h = setup();
+      await toPruefen(h);
+      const handle = document.createElement('div');
+      handle.setAttribute('role', 'slider');
+      handle.tabIndex = 0;
+      h.target.appendChild(handle);
+      await h.press('ArrowRight', { on: handle });
+      expect(h.state).toBe('pruefen');
+      await h.press('Enter', { on: handle });
+      expect(h.cbs.onKeep).toHaveBeenCalledTimes(1);
+      expect(h.state).toBe('fest');
+      h.unmount();
+    });
+
     it('R discards and counts down to a new take', async () => {
       const h = setup();
       await toPruefen(h);

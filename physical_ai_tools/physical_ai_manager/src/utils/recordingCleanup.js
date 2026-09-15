@@ -26,6 +26,11 @@ import { armGeometry } from './armProfile';
 export const LEAD_GAP_MAX_MS = 300;
 export const FALL_WINDOW_MS = 800;
 export const FALL_SPEED_RAD_S = 2.5;
+// A fall is a release at the END of a real take: it is suggested only when at
+// least this much of the take lies before its onset. Without it a short take,
+// or one that is a single fast deliberate move, was trimmed to its first two
+// samples by default (rig gate S-R6 owns the number).
+export const FALL_MIN_BEFORE_MS = 800;
 export const PAUSE_GAP_MS = 1000;
 export const PAUSE_TARGET_MS = 500;
 export const ACTIVITY_BIN_MS = 200;
@@ -103,7 +108,8 @@ export function analyzeTake(points, caps) {
   const last = points.length - 1;
   const durationMs = ms[last] - ms[0];
   const leadGapMs = ms[1] - ms[0];
-  const onset = fallOnset(points, ms, fallJointIndices(caps));
+  const found = fallOnset(points, ms, fallJointIndices(caps));
+  const onset = found !== null && ms[found] - ms[0] >= FALL_MIN_BEFORE_MS ? found : null;
   const suggested = onset === null ? null : Math.max(onset, 1);
   const pauses = [];
   for (let k = 2; k <= last; k += 1) {

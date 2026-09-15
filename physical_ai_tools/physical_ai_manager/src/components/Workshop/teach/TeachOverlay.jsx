@@ -689,7 +689,10 @@ function TeachOverlay({
       toast.error(INSERT_FAILED_DE);
       return;
     }
-    if (result && result.count > 0) toast.success(formatDe(DE.TEACH_INSERT_DONE, result.count));
+    if (result && result.count > 0) {
+      toast.success(result.count === 1
+        ? DE.TEACH_INSERT_DONE_ONE : formatDe(DE.TEACH_INSERT_DONE, result.count));
+    }
     refocus();
   };
 
@@ -948,7 +951,7 @@ function TeachOverlay({
                 disabled={insertCount === 0 || !workspace}
                 className="w-full rounded-lg border border-[var(--accent)] px-3 py-2 text-base font-semibold text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40 hover:bg-[var(--bg-sunk)]"
               >
-                {formatDe(DE.TEACH_INSERT, insertCount)}
+                {insertCount === 1 ? DE.TEACH_INSERT_ONE : formatDe(DE.TEACH_INSERT, insertCount)}
               </button>
             </div>
           </aside>

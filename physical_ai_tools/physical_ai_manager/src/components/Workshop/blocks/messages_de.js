@@ -567,7 +567,9 @@ export const DE = {
   TEACH_ZIEL_AS_POSE: 'Als Position speichern',
   TEACH_ZIEL_AS_PIN: 'Trotzdem als Ziel',
   TEACH_INSERT: 'Als Programm einfügen (%1 Blöcke)',
+  TEACH_INSERT_ONE: 'Als Programm einfügen (1 Block)',
   TEACH_INSERT_DONE: '%1 Blöcke eingefügt.',
+  TEACH_INSERT_DONE_ONE: '1 Block eingefügt.',
 };
 
 /**

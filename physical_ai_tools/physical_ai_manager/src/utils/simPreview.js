@@ -119,13 +119,23 @@ export function buildDestinationPreviewProgram({ entry, simScene, tempo }) {
  * server or the bridge) or the bridge ANSWERED „follower only", an unanswered
  * probe is `rsLeaderUnknown`. omx_follower/edu6/edu1 carry `has_leader: false`,
  * which is what keeps a bridge-less rig previewable.
+ *
+ * `rsLeaderPending` (owner decision 2026-09-15, B1) splits that unknown in two:
+ * while the bridge has NOT ANSWERED ONCE yet (`probed === false`) the refusal is
+ * „Roboterstatus wird geprüft …" and the page disables every preview ▶; after
+ * the first answer the unknown stays `rsLeaderUnknown`. Only an EXPLICIT
+ * `probed === false` is pending — a bridge object without the field (an older
+ * caller, a test double) keeps the pre-decision `rsLeaderUnknown` answer. The
+ * two are mutually exclusive, and neither is ever set on a proven leader-less rig.
  */
 export function previewLeaderGate(rsBridge, caps) {
   const bridge = rsBridge && typeof rsBridge === 'object' ? rsBridge : {};
   const rsLeaderOn = bridge.leaderOn === true;
   const provenLeaderless = (caps && caps.has_leader === false) || bridge.hasLeader === false;
   const answered = bridge.available === true;
-  return { rsLeaderOn, rsLeaderUnknown: !rsLeaderOn && !provenLeaderless && !answered };
+  const undecided = !rsLeaderOn && !provenLeaderless && !answered;
+  const rsLeaderPending = undecided && bridge.probed === false;
+  return { rsLeaderOn, rsLeaderPending, rsLeaderUnknown: undecided && !rsLeaderPending };
 }
 
 /**
@@ -135,7 +145,8 @@ export function previewLeaderGate(rsBridge, caps) {
  */
 export function previewBlockReason({
   heartbeatStatus, runState, paused, teachOpen, jogHandGuideOn, simMode,
-  activeTutorialId, rsLeaderOn, rsLeaderUnknown, asset, robotType, workflowId, inFlight,
+  activeTutorialId, rsLeaderOn, rsLeaderPending, rsLeaderUnknown, asset, robotType, workflowId,
+  inFlight,
 }) {
   if (heartbeatStatus !== 'connected') return 'offline';
   if (runState === 'running' || paused === true) return 'running';
@@ -145,6 +156,8 @@ export function previewBlockReason({
   // A sim run sets on_workflow, which gates the teleop e-stop OFF while a live
   // leader still drives the real follower (§8 B1) — so no preview then.
   if (rsLeaderOn) return 'leader';
+  // …not before the bridge has answered once (owner decision 2026-09-15)…
+  if (rsLeaderPending) return 'leaderPending';
   // …and no preview while that cannot be RULED OUT either (previewLeaderGate).
   if (rsLeaderUnknown) return 'leaderUnknown';
   if (asset && asset.kind === 'recording') {
@@ -162,6 +175,7 @@ export const PREVIEW_BLOCK_TITLES_DE = Object.freeze({
   handguide: DE.PREVIEW_BLOCK_HANDGUIDE,
   tutorial: DE.PREVIEW_BLOCK_TUTORIAL,
   leader: DE.PREVIEW_BLOCK_LEADER,
+  leaderPending: DE.PREVIEW_BLOCK_LEADER_PENDING,
   leaderUnknown: DE.PREVIEW_BLOCK_LEADER_UNKNOWN,
   otherRobot: DE.PREVIEW_BLOCK_OTHER_ROBOT,
   unsaved: DE.PREVIEW_BLOCK_UNSAVED,

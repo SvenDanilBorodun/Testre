@@ -58,6 +58,7 @@ export default function DrawerPlace({ workspace, card, capabilities, onPreview }
   const results = useSelector(selectLastPreviewResult);
   const previewTempo = (drawer && drawer.previewTempo) || 1.0;
   const lastResult = results ? results[previewKeyForDestination(entry.id)] : null;
+  const previewPending = !!(capabilities && capabilities.previewPending === true);
   // „Greifer merken": a Position's captured gripper, only when its S3 joint
   // snapshot classifies on THIS arm (none from an older server).
   const robotCaps = useSelector((s) => (s.tasks && s.tasks.taskStatus ? s.tasks.taskStatus.capabilities : null));
@@ -130,7 +131,10 @@ export default function DrawerPlace({ workspace, card, capabilities, onPreview }
               { kind: entry.kind, id: entry.id, name: entry.name },
               { tempo: previewTempo },
             )}
-            className="rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50"
+            // Disabled until the leader-status bridge has answered once.
+            disabled={previewPending}
+            title={previewPending ? DE.PREVIEW_BLOCK_LEADER_PENDING : undefined}
+            className="rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {`▶ ${DE.PREVIEW_START}`}
           </button>

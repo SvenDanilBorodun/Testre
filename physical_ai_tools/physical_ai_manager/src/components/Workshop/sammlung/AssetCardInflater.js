@@ -185,24 +185,45 @@ export class AssetCard {
       textNode(this.svgGroup, { x: x + 6, y: y + 12, 'font-size': 10, fill: colours.text }, chip.text);
     }
     if (this.state.canPreview === true) {
-      this.previewEl = this.hitArea_(this.width - 2 * HIT_SIZE - 8, '▶', DE.PREVIEW_START);
+      // While the leader-status bridge has not answered once, ▶ is drawn
+      // DISABLED with the reason as its tooltip/description, and a press
+      // dispatches nothing. The flyout re-populates on the provider snapshot
+      // change, so the answer brings back an enabled ▶ (a card never updates in
+      // place).
+      this.previewPending = this.state.previewPending === true;
+      this.previewEl = this.hitArea_(this.width - 2 * HIT_SIZE - 8, '▶', DE.PREVIEW_START,
+        this.previewPending ? DE.PREVIEW_BLOCK_LEADER_PENDING : null);
     } else {
+      this.previewPending = false;
       this.previewEl = null;
     }
     this.manageEl = this.hitArea_(this.width - HIT_SIZE - 4, '⋯', DE.CARD_MANAGE);
   }
 
-  hitArea_(x, glyph, label) {
+  // `disabledReason`: a non-empty string draws the control disabled
+  // (`aria-disabled`, greyed) with that reason as an SVG <title> — the tooltip
+  // and, next to the aria-label, the accessible description.
+  hitArea_(x, glyph, label, disabledReason = null) {
     const { Svg } = Blockly.utils;
-    const g = svg(Svg.G, {
-      class: 'eduAssetCardButton', role: 'button', 'aria-label': label,
+    const disabled = typeof disabledReason === 'string' && disabledReason !== '';
+    const attrs = {
+      class: disabled ? 'eduAssetCardButton eduAssetCardButtonDisabled' : 'eduAssetCardButton',
+      role: 'button',
+      'aria-label': label,
       transform: `translate(${x},7)`,
-    }, this.svgGroup);
+    };
+    if (disabled) attrs['aria-disabled'] = 'true';
+    const g = svg(Svg.G, attrs, this.svgGroup);
+    if (disabled) {
+      const title = document.createElementNS(Blockly.utils.dom.SVG_NS, 'title');
+      title.appendChild(document.createTextNode(disabledReason));
+      g.appendChild(title);
+    }
     svg(Svg.RECT, {
-      width: HIT_SIZE, height: HIT_SIZE, rx: 4, ry: 4, fill: '#f3f4f6',
+      width: HIT_SIZE, height: HIT_SIZE, rx: 4, ry: 4, fill: disabled ? '#f9fafb' : '#f3f4f6',
     }, g);
     textNode(g, {
-      x: HIT_SIZE / 2, y: 16, 'font-size': 12, fill: '#374151', 'text-anchor': 'middle',
+      x: HIT_SIZE / 2, y: 16, 'font-size': 12, fill: disabled ? '#9ca3af' : '#374151', 'text-anchor': 'middle',
     }, glyph);
     return g;
   }
@@ -220,6 +241,9 @@ export class AssetCard {
       bind(this.previewEl, 'pointerdown', (e) => e.stopPropagation(), true);
       bind(this.previewEl, 'pointerup', (e) => {
         e.stopPropagation();
+        // Disabled (pending): the press is swallowed like any other ▶ tap —
+        // still no flyout gesture — but asks for nothing.
+        if (this.previewPending) return;
         this.dispatch_('preview');
       }, true);
     }

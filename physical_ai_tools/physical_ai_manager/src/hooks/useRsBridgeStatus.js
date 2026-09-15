@@ -67,15 +67,24 @@ function sameStatus(a, b) {
 /**
  * Poll the control bridge every RS_STATUS_POLL_MS.
  *
- * Returns `{ available, followerOnly, hasLeader, busy, leaderOn }` with
+ * Returns `{ available, followerOnly, hasLeader, busy, leaderOn, probed }` with
  * `leaderOn = available && !followerOnly`. A failed probe yields
  * `available false, followerOnly false`, so `leaderOn` fails OPEN to false —
  * and a consumer that needs a POSITIVE follower-only answer must test
  * `available === true && followerOnly === true`, never `!leaderOn`.
- * `enabled: false` stops polling and reports the fail-open answer.
+ *
+ * `probed` tells „not answered yet" from „answered: unavailable": it is false
+ * until the FIRST probe of this mount has settled — a bridge answer, an HTTP
+ * error, a network error and the RS_STATUS_TIMEOUT_MS abort all count — and
+ * then stays true (a later failed poll is an answer, not a return to „pending").
+ * Before that, `available false` means NOTHING about the bridge. A consumer that
+ * ignores `probed` sees exactly the fields it saw before.
+ * `enabled: false` stops polling and reports the fail-open answer with
+ * `probed: false` (nothing is being asked).
  */
 export default function useRsBridgeStatus({ enabled = true } = {}) {
   const [status, setStatus] = useState(UNAVAILABLE);
+  const [probed, setProbed] = useState(false);
   const { piMode, piModeResolved } = usePiMode();
 
   useEffect(() => {
@@ -87,6 +96,9 @@ export default function useRsBridgeStatus({ enabled = true } = {}) {
       // Keep the previous object on an unchanged answer, so a consumer does
       // not re-render every poll.
       setStatus((prev) => (sameStatus(prev, next) ? prev : next));
+      // probeRsStatus never throws and always settles (its own abort timer), so
+      // every first tick ends here. Setting true again is a no-op re-render.
+      setProbed(true);
     };
     tick();
     const intervalId = setInterval(tick, RS_STATUS_POLL_MS);
@@ -97,8 +109,10 @@ export default function useRsBridgeStatus({ enabled = true } = {}) {
   }, [enabled, piMode, piModeResolved]);
 
   const effective = enabled ? status : UNAVAILABLE;
+  const effectiveProbed = enabled && probed;
   return useMemo(() => ({
     ...effective,
     leaderOn: effective.available && !effective.followerOnly,
-  }), [effective]);
+    probed: effectiveProbed,
+  }), [effective, effectiveProbed]);
 }

@@ -250,6 +250,36 @@ describe('Sammlung toolbox groups', () => {
   });
 });
 
+describe('Sammlung groups — ▶ pending on the first leader-status answer (B1, 2026-09-15)', () => {
+  it('marks only the SIM-RUN cards (recording, Ziel, Position) pending; a variable ▶ never waits', async () => {
+    const provider = fixtureProvider({
+      capabilities: { ...FULL_CAPS, previewPending: true, previewVariables: true },
+      variableValues: { Zahl: { value: { x: 0.1, y: 0, z: 0.05 }, ts: Date.now() } },
+    });
+    const { ws, unmount } = await mountEditor({ sammlungProvider: provider });
+    seed(ws);
+    const cardsIn = (key) => flyoutOf(ws, key).filter((it) => it.kind === 'edubotics_asset_card');
+    const [recording, missing] = cardsIn(SAMMLUNG_CATEGORY_KEYS.AUFNAHMEN);
+    expect(recording).toMatchObject({ assetKind: 'recording', canPreview: true, previewPending: true });
+    expect(missing).not.toHaveProperty('previewPending');
+    const [pin, programPin] = cardsIn(SAMMLUNG_CATEGORY_KEYS.ZIELE);
+    expect(pin).toMatchObject({ assetKind: 'pin', canPreview: true, previewPending: true });
+    expect(programPin).not.toHaveProperty('previewPending');
+    const [pose] = cardsIn(SAMMLUNG_CATEGORY_KEYS.POSITIONEN);
+    expect(pose).toMatchObject({ assetKind: 'pose', canPreview: true, previewPending: true });
+    const [variable] = cardsIn(SAMMLUNG_CATEGORY_KEYS.VARIABLEN);
+    expect(variable).toMatchObject({ assetKind: 'variable', canPreview: true });
+    expect(variable).not.toHaveProperty('previewPending');
+
+    // The answer: the key is gone again (a card that is not pending is unchanged).
+    provider.setSnapshot({ capabilities: { previewPending: false } });
+    expect(cardsIn(SAMMLUNG_CATEGORY_KEYS.AUFNAHMEN)[0]).not.toHaveProperty('previewPending');
+    expect(cardsIn(SAMMLUNG_CATEGORY_KEYS.ZIELE)[0]).not.toHaveProperty('previewPending');
+    expect(cardsIn(SAMMLUNG_CATEGORY_KEYS.POSITIONEN)[0]).not.toHaveProperty('previewPending');
+    unmount();
+  });
+});
+
 describe('Sammlung groups — restriction, counts, teacher page', () => {
   it('a tutorial restriction keeps ref blocks, cards and labels, drops pin/current blocks', async () => {
     const { ws, unmount } = await mountEditor({

@@ -232,6 +232,9 @@ export default function DrawerRecording({
   const points = isFiniteNumber(newest.point_count) ? newest.point_count : '—';
   const older = versions.slice(1);
   const previewEnabled = !!(capabilities && capabilities.preview && typeof onPreview === 'function');
+  // Until the leader-status bridge has answered once, every ▶ here is disabled
+  // with the reason as its title (WorkshopPage `previewPending`).
+  const previewPending = !!(capabilities && capabilities.previewPending === true);
   const lastResult = latestVersionResult(lastPreviewResult, versions);
   // The drawer plays at its own tempo; the flyout ▶ always plays at 1.0.
   const playVersion = (row) => onPreview(
@@ -256,7 +259,9 @@ export default function DrawerRecording({
             <button
               type="button"
               onClick={() => playVersion(newest)}
-              className="rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50"
+              disabled={previewPending}
+              title={previewPending ? DE.PREVIEW_BLOCK_LEADER_PENDING : undefined}
+              className="rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {DE.PREVIEW_PLAY}
             </button>
@@ -298,9 +303,10 @@ export default function DrawerRecording({
                   <button
                     type="button"
                     aria-label={DE.PREVIEW_START}
-                    title={DE.PREVIEW_START}
+                    title={previewPending ? DE.PREVIEW_BLOCK_LEADER_PENDING : DE.PREVIEW_START}
+                    disabled={previewPending}
                     onClick={() => playVersion(row)}
-                    className="rounded px-2 py-0.5 text-gray-700 hover:bg-gray-50"
+                    className="rounded px-2 py-0.5 text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     ▶
                   </button>

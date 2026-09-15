@@ -361,3 +361,71 @@ describe('AssetCardInflater', () => {
     card.dispose();
   });
 });
+
+// Owner decision 2026-09-15 (B1): until the leader-status bridge has answered
+// once, WorkshopPage pushes `capabilities.previewPending` and every sim-run ▶ is
+// drawn disabled with „Roboterstatus wird geprüft …"; the answer re-populates the
+// open flyout with an enabled ▶.
+describe('Sammlung cards — ▶ waits for the first leader-status answer', () => {
+  const playOf = (card) => card.getSvgRoot().querySelector(`[role="button"][aria-label="${DE.PREVIEW_START}"]`);
+  const titleOf = (el) => {
+    const t = Array.from(el.childNodes).find((n) => n.nodeName.toLowerCase() === 'title');
+    return t ? t.textContent : null;
+  };
+  const tap = (el, id) => {
+    el.dispatchEvent(pointer('pointerdown', id));
+    el.dispatchEvent(pointer('pointerup', id));
+  };
+
+  it('pending: ▶ is aria-disabled with the German hint and dispatches nothing; the answer re-enables it', async () => {
+    provider.setSnapshot({ capabilities: { previewPending: true } });
+    let flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN);
+    let [card] = cardsOf(flyout);
+    let play = playOf(card);
+    expect(play).not.toBeNull();
+    expect(play.getAttribute('aria-disabled')).toBe('true');
+    expect(titleOf(play)).toBe('Roboterstatus wird geprüft …');
+    expect(titleOf(play)).toBe(DE.PREVIEW_BLOCK_LEADER_PENDING);
+    const gestureSpy = vi.spyOn(ws, 'getGesture');
+    dispatched.length = 0;
+    tap(play, 51);
+    await flushEvents();
+    expect(dispatched).toEqual([]);
+    expect(gestureSpy).not.toHaveBeenCalled();
+
+    // The bridge answers: the page pushes previewPending false and the open
+    // flyout re-populates (coalesced, REFRESH_DEBOUNCE_MS).
+    provider.setSnapshot({ capabilities: { previewPending: false } });
+    await new Promise((r) => { setTimeout(r, 250); });
+    flyout = ws.getFlyout();
+    [card] = cardsOf(flyout);
+    play = playOf(card);
+    expect(play.getAttribute('aria-disabled')).toBeNull();
+    expect(titleOf(play)).toBeNull();
+    tap(play, 52);
+    await flushEvents();
+    expect(dispatched).toEqual([{
+      type: 'preview',
+      asset: { kind: 'recording', id: RECORDING.id, name: 'Greifen links', robotProfile: 'omx_f' },
+    }]);
+  });
+
+  it('pending applies to Ziel and Position cards too; not pending leaves the card unchanged', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN);
+    const inflater = new AssetCardInflater();
+    for (const assetKind of ['pin', 'pose', 'recording']) {
+      const pending = inflater.load(cardState({ assetKind, previewPending: true }), flyout).getElement();
+      expect(playOf(pending).getAttribute('aria-disabled')).toBe('true');
+      expect(titleOf(playOf(pending))).toBe(DE.PREVIEW_BLOCK_LEADER_PENDING);
+      pending.dispose();
+    }
+    const ready = inflater.load(cardState(), flyout).getElement();
+    expect(playOf(ready).getAttribute('aria-disabled')).toBeNull();
+    expect(titleOf(playOf(ready))).toBeNull();
+    ready.dispose();
+    // No ▶ at all stays no ▶ at all.
+    const none = inflater.load(cardState({ canPreview: false, previewPending: true }), flyout).getElement();
+    expect(playOf(none)).toBeNull();
+    none.dispose();
+  });
+});

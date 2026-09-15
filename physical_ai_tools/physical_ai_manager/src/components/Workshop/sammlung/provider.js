@@ -25,6 +25,9 @@ export const DEFAULT_SAMMLUNG_SNAPSHOT = Object.freeze({
     teach: false,
     drawer: false,
     preview: false,
+    // True while the page's leader-status bridge has not answered once: every
+    // sim-run ▶ is drawn disabled („Roboterstatus wird geprüft …").
+    previewPending: false,
     previewVariables: false,
     pinCamera: false,
     pinSim: false,

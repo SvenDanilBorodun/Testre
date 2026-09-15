@@ -325,6 +325,9 @@ export const DE = {
   PREVIEW_BLOCK_TUTORIAL: 'Während eines Lernpfads kann der Simulator nicht geöffnet werden.',
   PREVIEW_BLOCK_LEADER:
     'Solange der Leader-Arm eingeschaltet ist, gibt es keine Vorschau. Bitte zuerst oben „Leader abschalten".',
+  // Before the control bridge has answered once (useRsBridgeStatus `probed`):
+  // also the disabled ▶'s title on a card and in the drawer.
+  PREVIEW_BLOCK_LEADER_PENDING: 'Roboterstatus wird geprüft …',
   PREVIEW_BLOCK_LEADER_UNKNOWN:
     'Gerade ist nicht klar, ob der Leader-Arm eingeschaltet ist – die Steuerung antwortet nicht. Bitte gleich noch einmal versuchen.',
   PREVIEW_BLOCK_OTHER_ROBOT:

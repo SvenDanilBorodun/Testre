@@ -70,14 +70,14 @@ const ITEMS = [
 ];
 const PIN = { name: 'Ablage', kind: 'pin', source: 'camera', robot_type: 'omx_f', x: 0.182, y: -0.064, z: 0.012 };
 
-function setup({ tab = 'aufnahmen', focus = 'Winken', preview = true } = {}) {
+function setup({ tab = 'aufnahmen', focus = 'Winken', preview = true, previewPending = false } = {}) {
   ws = new Blockly.Workspace();
   ws.getToolbox = () => ({ getWidth: () => 118, clearSelection: vi.fn() });
   const store = getDestinationStore(ws);
   store.add(PIN);
   const pinId = store.getByName('Ablage').id;
   const provider = createSammlungProvider({
-    capabilities: { hardware: true, drawer: true, preview },
+    capabilities: { hardware: true, drawer: true, preview, previewPending },
     robotType: 'omx_f',
     trajectories: { status: 'ready', items: ITEMS },
   });
@@ -98,7 +98,7 @@ function setup({ tab = 'aufnahmen', focus = 'Winken', preview = true } = {}) {
       />
     </Provider>,
   );
-  return { redux, onPreview, pinId };
+  return { redux, onPreview, pinId, provider };
 }
 
 describe('DrawerRecording — preview', () => {
@@ -167,5 +167,51 @@ describe('DrawerPlace — preview', () => {
     });
     expect(screen.getByText(`${DE.CHIP_UNREACHABLE}: Ziel außerhalb des Arbeitsbereichs.`)).toBeInTheDocument();
     expect(screen.queryByText('Unbekanntes Ziel „Ablage".')).toBeNull();
+  });
+});
+
+// Owner decision 2026-09-15 (B1): until the leader-status bridge has answered
+// once (WorkshopPage `previewPending`), every drawer ▶ is disabled with the
+// German hint as its title; the answer (a provider snapshot) re-enables it.
+describe('Drawer ▶ — waits for the first leader-status answer', () => {
+  it('recording: ▶ Abspielen and an older version ▶ are disabled with the hint, then enabled', () => {
+    const { onPreview, provider } = setup({ previewPending: true });
+    const section = screen.getByRole('region', { name: DE.PREVIEW_START });
+    const play = within(section).getByRole('button', { name: DE.PREVIEW_PLAY });
+    const [older] = screen.getAllByRole('button', { name: DE.PREVIEW_START });
+    for (const btn of [play, older]) {
+      expect(btn).toBeDisabled();
+      expect(btn).toHaveAttribute('title', 'Roboterstatus wird geprüft …');
+      expect(btn).toHaveAccessibleDescription(DE.PREVIEW_BLOCK_LEADER_PENDING);
+      fireEvent.click(btn);
+    }
+    expect(onPreview).not.toHaveBeenCalled();
+
+    act(() => { provider.setSnapshot({ capabilities: { previewPending: false } }); });
+    const playNow = within(screen.getByRole('region', { name: DE.PREVIEW_START }))
+      .getByRole('button', { name: DE.PREVIEW_PLAY });
+    const [olderNow] = screen.getAllByRole('button', { name: DE.PREVIEW_START });
+    expect(playNow).toBeEnabled();
+    expect(playNow).not.toHaveAttribute('title');
+    expect(olderNow).toBeEnabled();
+    expect(olderNow).toHaveAttribute('title', DE.PREVIEW_START);
+    fireEvent.click(playNow);
+    expect(onPreview).toHaveBeenLastCalledWith(
+      { kind: 'recording', id: 't3', name: 'Winken', robotProfile: 'omx_f' }, { tempo: 1.0 });
+  });
+
+  it('Ziel: ▶ Im Simulator ansehen is disabled with the hint, then enabled', () => {
+    const { onPreview, pinId, provider } = setup({ tab: 'ziele', focus: 'pin', previewPending: true });
+    const btn = screen.getByRole('button', { name: `▶ ${DE.PREVIEW_START}` });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('title', DE.PREVIEW_BLOCK_LEADER_PENDING);
+    fireEvent.click(btn);
+    expect(onPreview).not.toHaveBeenCalled();
+    act(() => { provider.setSnapshot({ capabilities: { previewPending: false } }); });
+    const now = screen.getByRole('button', { name: `▶ ${DE.PREVIEW_START}` });
+    expect(now).toBeEnabled();
+    expect(now).not.toHaveAttribute('title');
+    fireEvent.click(now);
+    expect(onPreview).toHaveBeenLastCalledWith({ kind: 'pin', id: pinId, name: 'Ablage' }, { tempo: 1.0 });
   });
 });

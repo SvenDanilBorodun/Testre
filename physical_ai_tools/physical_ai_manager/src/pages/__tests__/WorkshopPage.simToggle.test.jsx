@@ -96,9 +96,15 @@ vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule:
 // leader-mode child would read `s.ros`, which these mock states lack), and the
 // bridge probe is stubbed so no page test fetches localhost:8769.
 vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+// `mockBridge.status` is mutable so the preview tests can answer the probe; the
+// default carries no `probed` (the pre-2026-09-15 hook shape).
+const BRIDGE_DEFAULT = Object.freeze({
+  available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false,
+});
+const mockBridge = vi.hoisted(() => ({ status: null }));
 vi.mock('../../hooks/useRsBridgeStatus', () => ({
   __esModule: true,
-  default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false }),
+  default: () => mockBridge.status,
 }));
 // The JogPanel stub exposes a trigger button wired to the REAL page
 // callback (onHandGuideChange), so the sim-entry guard tests
@@ -211,6 +217,7 @@ function baseState(over = {}) {
 }
 
 beforeEach(() => {
+  mockBridge.status = BRIDGE_DEFAULT;
   mockState = baseState();
   mockBlockly.mountCount = 0;
   mockDispatch.mockClear();
@@ -392,6 +399,64 @@ describe('WorkshopPage — simulator previews', () => {
     await new Promise((r) => { setTimeout(r, 0); });
     expect(toast.error).toHaveBeenCalledWith(DE.PREVIEW_BLOCK_LEADER_UNKNOWN);
     expect(screen.queryByTestId('sim-stage')).toBeNull();
+  });
+
+  // Owner decision 2026-09-15 (B1): before the bridge's FIRST answer every
+  // preview ▶ is disabled (provider `previewPending`) and a press is refused with
+  // „Roboterstatus wird geprüft …"; after it the ordinary leader rules apply.
+  const leaderRig = () => ({
+    ...baseState(),
+    tasks: { heartbeatStatus: 'connected', taskStatus: { capabilities: { has_leader: true } } },
+  });
+  const PREVIEW_PIN = { type: 'preview', asset: { kind: 'pin', id: 'd_1', name: 'Ablage' } };
+
+  test('omx_full: ▶ is pending until the first probe answer, then previews with the leader off', async () => {
+    mockState = leaderRig();
+    mockBridge.status = { ...BRIDGE_DEFAULT, probed: false };
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(mockBlockly.provider.getSnapshot().capabilities.previewPending).toBe(true);
+    mockBlockly.provider.dispatchAction(PREVIEW_PIN);
+    await new Promise((r) => { setTimeout(r, 0); });
+    expect(toast.error).toHaveBeenCalledWith(DE.PREVIEW_BLOCK_LEADER_PENDING);
+    expect(DE.PREVIEW_BLOCK_LEADER_PENDING).toBe('Roboterstatus wird geprüft …');
+    expect(screen.queryByTestId('sim-stage')).toBeNull();
+
+    // The bridge answers „follower only": no longer pending, the preview runs.
+    toast.error.mockClear();
+    mockBridge.status = {
+      available: true, followerOnly: true, hasLeader: true, busy: false, leaderOn: false, probed: true,
+    };
+    rerender(<WorkshopPage isActive />);
+    expect(mockBlockly.provider.getSnapshot().capabilities.previewPending).toBe(false);
+    mockBlockly.provider.dispatchAction(PREVIEW_PIN);
+    expect(await screen.findByTestId('sim-stage')).toBeInTheDocument();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  test('omx_full: an answer of „unavailable" ends pending and keeps the fail-closed refusal', async () => {
+    mockState = leaderRig();
+    mockBridge.status = { ...BRIDGE_DEFAULT, probed: false };
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    mockBridge.status = { ...BRIDGE_DEFAULT, probed: true };
+    rerender(<WorkshopPage isActive />);
+    expect(mockBlockly.provider.getSnapshot().capabilities.previewPending).toBe(false);
+    mockBlockly.provider.dispatchAction(PREVIEW_PIN);
+    await new Promise((r) => { setTimeout(r, 0); });
+    expect(toast.error).toHaveBeenCalledWith(DE.PREVIEW_BLOCK_LEADER_UNKNOWN);
+    expect(screen.queryByTestId('sim-stage')).toBeNull();
+  });
+
+  test('a proven leader-less rig is never pending: ▶ previews before the bridge answers', async () => {
+    mockState = leaderless();
+    mockBridge.status = { ...BRIDGE_DEFAULT, probed: false };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(mockBlockly.provider.getSnapshot().capabilities.previewPending).toBe(false);
+    mockBlockly.provider.dispatchAction(PREVIEW_PIN);
+    expect(await screen.findByTestId('sim-stage')).toBeInTheDocument();
+    expect(toast.error).not.toHaveBeenCalledWith(DE.PREVIEW_BLOCK_LEADER_PENDING);
   });
 
   test('a refused ▶ toasts its reason and never enters the simulator', async () => {

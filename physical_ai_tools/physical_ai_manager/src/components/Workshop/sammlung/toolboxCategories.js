@@ -107,7 +107,13 @@ function restrictionOf(snapshot) {
 }
 
 // Card flyout item (§ the card contract) or its Plan B labels + buttons.
-function cardItems(vm) {
+// `c` (the snapshot capabilities) is passed only by the groups whose ▶ is a SIM
+// RUN (recordings, Ziele, Positionen): while `previewPending` that ▶ is drawn
+// disabled. A variable's ▶ only highlights a marker and never waits. The key is
+// added only when true, so a card that is not pending is byte-unchanged.
+function cardItems(vm, c = null) {
+  const previewPending = vm.canPreview === true && vm.assetKind !== 'variable'
+    && !!c && c.previewPending === true;
   if (SAMMLUNG_FLYOUT_MODE === 'plan-b') {
     // `title · meta · chip · chip`; an empty meta (a missing recording) adds
     // no empty segment.
@@ -123,6 +129,8 @@ function cardItems(vm) {
       text,
       'web-class': 'eduSammlungCardLabel',
     }];
+    // Plan B (a test seam, never shipped) draws no disabled state: a press while
+    // the bridge is pending is refused by useSimPreview with the same title.
     if (vm.canPreview) {
       items.push({
         kind: 'button',
@@ -148,6 +156,7 @@ function cardItems(vm) {
     meta: vm.meta,
     chips: vm.chips.map((c) => ({ text: c.text, level: c.level })),
     canPreview: vm.canPreview,
+    ...(previewPending ? { previewPending: true } : {}),
     colour: vm.colour,
     gap: 4,
   }];
@@ -243,7 +252,7 @@ export function aufnahmenFlyout(workspace) {
   if (c.drawer) items.push(button(DE.FLY_MANAGE, SAMMLUNG_BUTTON_KEYS.MANAGE_AUFNAHMEN));
   let prefilled = 0;
   for (const vm of index.recordings) {
-    items.push(...cardItems(vm));
+    items.push(...cardItems(vm, c));
     if (replayAllowed) {
       items.push({ kind: 'block', type: REPLAY_BLOCK_TYPE, fields: { NAME: vm.assetName } });
       prefilled += 1;
@@ -283,7 +292,7 @@ export function zieleFlyout(workspace) {
   items.push(label(DE.FLY_SECTION_YOURS));
   if (index.pins.length === 0) items.push(label(DE.FLY_PLACES_EMPTY));
   for (const vm of index.pins) {
-    items.push(...cardItems(vm));
+    items.push(...cardItems(vm, c));
     if (allowedType(REF_TYPE)) items.push({ kind: 'block', type: REF_TYPE, fields: { NAME: vm.assetName } });
   }
   if (index.programPins.length > 0) {
@@ -304,7 +313,7 @@ export function positionenFlyout(workspace) {
   if (c.drawer) items.push(button(DE.FLY_MANAGE, SAMMLUNG_BUTTON_KEYS.MANAGE_POSITIONEN));
   if (index.poses.length === 0) items.push(label(DE.FLY_POSES_EMPTY));
   for (const vm of index.poses) {
-    items.push(...cardItems(vm));
+    items.push(...cardItems(vm, c));
     if (refAllowed) items.push({ kind: 'block', type: REF_TYPE, fields: { NAME: vm.assetName } });
   }
   return items;

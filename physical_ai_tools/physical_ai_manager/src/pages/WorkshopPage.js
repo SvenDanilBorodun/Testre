@@ -1074,6 +1074,10 @@ function WorkshopPage({ isActive }) {
   // The Sammlung provider: ONE object for the page's lifetime (BlocklyWorkspace
   // reads it through a ref), fed a snapshot of the rig and the recording list.
   const sammlungProvider = useMemo(() => createSammlungProvider(), []);
+  // Fails CLOSED on an unanswered bridge probe (see previewLeaderGate); before the
+  // FIRST answer every preview ▶ is also disabled (`previewPending` below).
+  const previewGate = previewLeaderGate(rsBridge, caps);
+  const previewPending = previewGate.rsLeaderPending;
   // ▶ on a card or in the drawer: a generated SIM run (hooks/useSimPreview.js).
   // It never addresses the real arm (no /workshop/replay, no /workshop/jog).
   const { startPreview } = useSimPreview({
@@ -1090,8 +1094,7 @@ function WorkshopPage({ isActive }) {
       jogHandGuideOn,
       simMode,
       activeTutorialId,
-      // Fails CLOSED on an unanswered bridge probe (see previewLeaderGate).
-      ...previewLeaderGate(rsBridge, caps),
+      ...previewGate,
     },
     ensureSimMode,
   });
@@ -1128,6 +1131,9 @@ function WorkshopPage({ isActive }) {
         teach: true,
         drawer: true,
         preview: true,
+        // A sim-run ▶ (recording, Ziel, Position — never a variable's marker)
+        // is drawn disabled until the control bridge has answered once.
+        previewPending,
         previewVariables: true,
         pinCamera: !!calibrated && !simMode,
         pinSim: true,
@@ -1141,8 +1147,8 @@ function WorkshopPage({ isActive }) {
       variableValues: variableValues || {},
       restrictedBlocks: Array.isArray(restrictedBlocks) ? restrictedBlocks : null,
     });
-  }, [sammlungProvider, simMode, calibrated, robotType, trajectoryList, lastPreviewResult,
-    variableValues, restrictedBlocks]);
+  }, [sammlungProvider, simMode, calibrated, previewPending, robotType, trajectoryList,
+    lastPreviewResult, variableValues, restrictedBlocks]);
   useEffect(() => {
     sammlungProvider.setActionHandler((action) => {
       if (!action || typeof action !== 'object') return;

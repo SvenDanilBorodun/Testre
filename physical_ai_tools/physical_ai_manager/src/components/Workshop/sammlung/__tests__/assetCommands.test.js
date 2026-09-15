@@ -30,6 +30,7 @@ import {
   deleteRecordingRows,
   restoreKeepsPlayedTake,
   restoreRecordingRows,
+  RESTORE_RATE_LIMIT_RETRIES,
   renamePlace,
   deletePlace,
   renameVariable,
@@ -443,6 +444,68 @@ describe('recording rows: delete and restore', () => {
     expect(result.ok).toBe(false);
     expect(api.createTrajectory).not.toHaveBeenCalled();
     expect(played('Winken').points).toEqual([[9]]);
+  });
+
+  // Sixteen versions (the prune cap) against the cloud's 10/min POST budget.
+  function rateLimitedCreate({ budget, status = 429, clearsAfterSleeps = 1 }) {
+    let used = 0;
+    let sleeps = 0;
+    const msg = status === 429 ? 'Zu viele Anfragen — bitte einen Moment warten.' : `Server-Fehler (${status}).`;
+    const err = Object.assign(new Error(msg), { status });
+    const created = [];
+    const createTrajectory = vi.fn(async (_t, _w, p) => {
+      if (used >= budget && sleeps < clearsAfterSleeps) throw err;
+      used += 1;
+      created.push(p);
+      return { id: `n${used}` };
+    });
+    const sleep = vi.fn(async () => { sleeps += 1; });
+    return { createTrajectory, sleep, created };
+  }
+  const sixteen = () => Array.from({ length: 16 }, (_, i) => ({
+    name: 'Winken', fps: 25, points: [[i]], created_at: new Date(Date.UTC(2026, 8, 13, 10, i)).toISOString(),
+  })).reverse();
+
+  it('a 429 on the 11th re-create is waited out: every version comes back, oldest first', async () => {
+    const limited = rateLimitedCreate({ budget: 10 });
+    const api = makeApi({ createTrajectory: limited.createTrajectory });
+    const onRateLimited = vi.fn();
+    const result = await restoreRecordingRows({
+      api, accessToken: 'tok', workflowId: 'wf1', deleted: sixteen(), sleep: limited.sleep, onRateLimited,
+    });
+    expect(result).toEqual({ ok: true, restored: 16 });
+    expect(limited.created.map((p) => p.points[0][0])).toEqual([...Array(16).keys()]);
+    expect(limited.sleep).toHaveBeenCalledTimes(1);
+    expect(onRateLimited).toHaveBeenCalledTimes(1);
+  });
+
+  it('a 429 that never clears stops the restore and names how many versions are missing', async () => {
+    const limited = rateLimitedCreate({ budget: 10, clearsAfterSleeps: Infinity });
+    const api = makeApi({ createTrajectory: limited.createTrajectory });
+    const result = await restoreRecordingRows({
+      api, accessToken: 'tok', workflowId: 'wf1', deleted: sixteen(), sleep: limited.sleep,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.restored).toBe(10);
+    expect(result.error).toBe(formatDe(
+      DE.ERR_UNDO_PARTIAL, 10, 16, 6, 'Zu viele Anfragen — bitte einen Moment warten.',
+    ));
+    // Bounded: the 11th version was tried 1 + RESTORE_RATE_LIMIT_RETRIES times, the 12th never.
+    expect(limited.createTrajectory).toHaveBeenCalledTimes(10 + 1 + RESTORE_RATE_LIMIT_RETRIES);
+  });
+
+  it('a non-429 failure is not re-tried and stops at once', async () => {
+    const limited = rateLimitedCreate({ budget: 3, status: 500, clearsAfterSleeps: Infinity });
+    const api = makeApi({ createTrajectory: limited.createTrajectory });
+    const result = await restoreRecordingRows({
+      api, accessToken: 'tok', workflowId: 'wf1', deleted: sixteen(), sleep: limited.sleep,
+    });
+    expect(result.restored).toBe(3);
+    expect(result.error).toBe(formatDe(
+      DE.ERR_UNDO_PARTIAL, 3, 16, 13, 'Server-Fehler (500).',
+    ));
+    expect(limited.sleep).not.toHaveBeenCalled();
+    expect(limited.createTrajectory).toHaveBeenCalledTimes(4);
   });
 
   it('an unreadable cloud list restores nothing', async () => {

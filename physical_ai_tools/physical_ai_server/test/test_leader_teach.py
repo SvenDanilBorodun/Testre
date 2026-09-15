@@ -581,6 +581,31 @@ def test_T17_hand_guide_false_during_a_take_leaves_leader_state_alone():
     assert node._leader_teach_active is True
     assert node._leader_teach_buffer == before
     assert node._leader_teach_timer is not None
+    # KNOWN residual (docs/KNOWN-ISSUES.md, next to L-R4): hand_guide(false) is
+    # deliberately ungated, so it still re-torques through _set_follower_torque,
+    # whose pre-energise measured-pose hold can land on the command rail while
+    # teleop drives the follower. Pinned so gating it is a deliberate (Rule §2) act.
+    assert node.torque_calls == ['retorque']
+
+
+def test_T25_stop_and_cancel_carry_no_claim_token_any_caller_ends_the_live_take():
+    """KNOWN multi-tab edge (docs/KNOWN-ISSUES.md): the request is `action` only,
+    so a second tab's stop/cancel ends tab A's take — the sanctioned „Alte Aufnahme
+    verwerfen" escape depends on exactly that. Tab A learns it at its own stop."""
+    node = _armed()                               # tab A arms a take
+    _sample_rows(node, _moving_rows(4))
+    other = _rec(node, 'cancel_leader')           # tab B, no identity on the wire
+    assert (other.success, other.message) == (True, 'Aufnahme verworfen.')
+    assert node.on_leader_teach is False and node._leader_teach_active is False
+    mine = _rec(node, 'stop_leader')              # tab A's own stop
+    assert (mine.success, mine.message, mine.points_json) == (False, _NOTHING, '')
+    _untouched_manual_and_rail(node)
+    # A second tab's STOP takes tab A's samples with it.
+    node = _armed()
+    _sample_rows(node, _moving_rows(3))
+    other = _rec(node, 'stop_leader')
+    assert other.success is True and other.sample_count == 3
+    assert _rec(node, 'stop_leader').message == _NOTHING
 
 
 def test_T20_claim_released_by_another_tab_before_arming():

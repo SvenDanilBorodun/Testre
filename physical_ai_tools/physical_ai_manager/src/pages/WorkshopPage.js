@@ -78,6 +78,7 @@ import {
   SIM_ENTRY_BLOCK_TITLES_DE,
   SIM_ENTRY_SETTLE_MS,
   SIM_TOGGLE_DEFAULT_TITLE_DE,
+  previewLeaderGate,
   simEntryBlockReason,
 } from '../utils/simPreview';
 import {
@@ -1089,7 +1090,8 @@ function WorkshopPage({ isActive }) {
       jogHandGuideOn,
       simMode,
       activeTutorialId,
-      rsLeaderOn: !!(rsBridge && rsBridge.leaderOn),
+      // Fails CLOSED on an unanswered bridge probe (see previewLeaderGate).
+      ...previewLeaderGate(rsBridge, caps),
     },
     ensureSimMode,
   });

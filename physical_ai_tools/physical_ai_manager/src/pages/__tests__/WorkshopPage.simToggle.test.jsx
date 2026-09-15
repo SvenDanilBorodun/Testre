@@ -364,13 +364,34 @@ describe('WorkshopPage — simulator previews', () => {
     expect(mockBlockly.provider.getSnapshot().capabilities.preview).toBe(true);
   });
 
+  // The mocked control bridge never answers, so the rig must be PROVEN leader-less
+  // for a preview to start (utils/simPreview.js::previewLeaderGate).
+  const leaderless = () => ({
+    ...baseState(),
+    tasks: { heartbeatStatus: 'connected', taskStatus: { capabilities: { has_leader: false } } },
+  });
+
   test('a card ▶ enters the simulator on the student\'s behalf', async () => {
+    mockState = leaderless();
     render(<WorkshopPage isActive />);
     await screen.findByTestId('blockly-workspace');
     expect(screen.queryByTestId('sim-stage')).toBeNull();
     mockBlockly.provider.dispatchAction({ type: 'preview', asset: { kind: 'pin', id: 'd_1', name: 'Ablage' } });
     expect(await screen.findByTestId('sim-stage')).toBeInTheDocument();
     expect(screen.queryByTestId('right-dock')).toBeNull();
+  });
+
+  test('an unanswered bridge probe on a leader rig refuses ▶ (fails closed)', async () => {
+    mockState = {
+      ...baseState(),
+      tasks: { heartbeatStatus: 'connected', taskStatus: { capabilities: { has_leader: true } } },
+    };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    mockBlockly.provider.dispatchAction({ type: 'preview', asset: { kind: 'pin', id: 'd_1', name: 'Ablage' } });
+    await new Promise((r) => { setTimeout(r, 0); });
+    expect(toast.error).toHaveBeenCalledWith(DE.PREVIEW_BLOCK_LEADER_UNKNOWN);
+    expect(screen.queryByTestId('sim-stage')).toBeNull();
   });
 
   test('a refused ▶ toasts its reason and never enters the simulator', async () => {

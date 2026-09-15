@@ -359,29 +359,36 @@ describe('refreshIfOpen', () => {
     provider.setSnapshot({ robotType: 'edu6_studio' });
     provider.setSnapshot({ robotType: 'omx_f' });
     expect(refresh).toHaveBeenCalledTimes(1);
-    await new Promise((resolve) => { setTimeout(resolve, 200); });
-    expect(refresh).toHaveBeenCalledTimes(2);
+    // Wait on the spy, never on a fixed sleep: under full-suite load a 200 ms
+    // sleep raced the debounce timer.
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+
+    // Creating the block fires a NON-UI BLOCK_CREATE, which schedules its own
+    // coalesced refresh. Drain it HERE: left pending, it landed during a later
+    // flush whenever the suite ran slowly and made the exact counts below flaky.
+    const block = ws.newBlock('edubotics_home');
+    await flushEvents();
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(3));
 
     const dragging = vi.spyOn(ws, 'isDragging').mockReturnValue(true);
     expect(refreshIfOpen(ws)).toBe(false);
-    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenCalledTimes(3);
     dragging.mockReturnValue(false);
-    const block = ws.newBlock('edubotics_home');
     const BlockDrag = Blockly.Events.get(Blockly.Events.BLOCK_DRAG);
     Blockly.Events.fire(new BlockDrag(block, false, []));
     await flushEvents();
-    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(refresh).toHaveBeenCalledTimes(4);
 
     // A press that has not become a drag yet: Blockly would ignore the refresh,
     // so it stays pending and runs when the click ends the gesture.
     ws.currentGesture_ = {};
     expect(refreshIfOpen(ws)).toBe(false);
-    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(refresh).toHaveBeenCalledTimes(4);
     ws.currentGesture_ = null;
     const Click = Blockly.Events.get(Blockly.Events.CLICK);
     Blockly.Events.fire(new Click(null, ws.id, 'workspace'));
     await flushEvents();
-    expect(refresh).toHaveBeenCalledTimes(4);
+    expect(refresh).toHaveBeenCalledTimes(5);
     unmount();
   });
 });

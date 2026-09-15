@@ -325,6 +325,8 @@ export const DE = {
   PREVIEW_BLOCK_TUTORIAL: 'Während eines Lernpfads kann der Simulator nicht geöffnet werden.',
   PREVIEW_BLOCK_LEADER:
     'Solange der Leader-Arm eingeschaltet ist, gibt es keine Vorschau. Bitte zuerst oben „Leader abschalten".',
+  PREVIEW_BLOCK_LEADER_UNKNOWN:
+    'Gerade ist nicht klar, ob der Leader-Arm eingeschaltet ist – die Steuerung antwortet nicht. Bitte gleich noch einmal versuchen.',
   PREVIEW_BLOCK_OTHER_ROBOT:
     'Diese Bewegung wurde mit einem anderen Robotertyp aufgenommen und kann hier nicht abgespielt werden.',
   PREVIEW_BLOCK_UNSAVED: 'Bitte zuerst den Workflow speichern.',
@@ -455,6 +457,9 @@ export const DE = {
   ERR_REPLACED_LOST:
     'Die ersetzte Aufnahme „%1" wurde dabei gelöscht und konnte nicht wiederhergestellt werden.',
   ERR_UNDO_FAILED: 'Rückgängig fehlgeschlagen: %1',
+  ERR_UNDO_PARTIAL:
+    'Rückgängig nur teilweise: %1 von %2 Versionen wiederhergestellt, nicht wiederhergestellt: %3 (%4).',
+  UNDO_RATE_LIMIT_WAIT: 'Viele Versionen – die Wiederherstellung dauert etwa eine Minute …',
   ERR_UNDO_NEWER_VERSION: 'Rückgängig nicht möglich: Von „%1" gibt es inzwischen eine neuere Aufnahme.',
   ERR_RECORDING_NAME:
     'Der Name darf nur Buchstaben, Ziffern, Leerzeichen, _ und - enthalten (höchstens 40 Zeichen).',

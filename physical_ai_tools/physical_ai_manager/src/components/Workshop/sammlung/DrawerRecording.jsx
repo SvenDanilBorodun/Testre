@@ -178,8 +178,17 @@ export default function DrawerRecording({
         // „Rückgängig" is offered only when nothing newer of this name is left.
         if (restoreKeepsPlayedTake(result.deleted, remaining)) {
           showUndoToast(formatDe(DE.TOAST_DELETED, name), async () => {
+            let waitToasted = false;
             const restored = await restoreRecordingRows({
-              api: workflowApi, accessToken, workflowId, deleted: result.deleted,
+              api: workflowApi,
+              accessToken,
+              workflowId,
+              deleted: result.deleted,
+              onRateLimited: () => {
+                if (waitToasted) return;
+                waitToasted = true;
+                toast(DE.UNDO_RATE_LIMIT_WAIT);
+              },
             });
             if (!restored.ok) toast.error(restored.error);
             refetch();

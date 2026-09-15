@@ -107,13 +107,35 @@ export function buildDestinationPreviewProgram({ entry, simScene, tempo }) {
 }
 
 /**
+ * The two leader inputs of previewBlockReason, from the control-bridge probe
+ * (hooks/useRsBridgeStatus) and the server-pushed capabilities.
+ *
+ * `useRsBridgeStatus().leaderOn` fails OPEN: a probe timeout or a Pi agent that
+ * is down reads as „no leader". That is right for the run bar, but a preview is
+ * a SIM run, which claims on_workflow and so disarms the teleop e-stop while a
+ * live leader may still drive the real follower — and nothing server-side
+ * checks for a leader on a preview. So the preview gate fails CLOSED: unless
+ * the rig is PROVEN leader-less (an explicit `has_leader === false` from the
+ * server or the bridge) or the bridge ANSWERED „follower only", an unanswered
+ * probe is `rsLeaderUnknown`. omx_follower/edu6/edu1 carry `has_leader: false`,
+ * which is what keeps a bridge-less rig previewable.
+ */
+export function previewLeaderGate(rsBridge, caps) {
+  const bridge = rsBridge && typeof rsBridge === 'object' ? rsBridge : {};
+  const rsLeaderOn = bridge.leaderOn === true;
+  const provenLeaderless = (caps && caps.has_leader === false) || bridge.hasLeader === false;
+  const answered = bridge.available === true;
+  return { rsLeaderOn, rsLeaderUnknown: !rsLeaderOn && !provenLeaderless && !answered };
+}
+
+/**
  * Why ▶ is refused right now, or null. The ORDER is the contract: the first
  * matching reason is the one the student reads. `inFlight` is silent (a double
  * click must not toast).
  */
 export function previewBlockReason({
   heartbeatStatus, runState, paused, teachOpen, jogHandGuideOn, simMode,
-  activeTutorialId, rsLeaderOn, asset, robotType, workflowId, inFlight,
+  activeTutorialId, rsLeaderOn, rsLeaderUnknown, asset, robotType, workflowId, inFlight,
 }) {
   if (heartbeatStatus !== 'connected') return 'offline';
   if (runState === 'running' || paused === true) return 'running';
@@ -123,6 +145,8 @@ export function previewBlockReason({
   // A sim run sets on_workflow, which gates the teleop e-stop OFF while a live
   // leader still drives the real follower (§8 B1) — so no preview then.
   if (rsLeaderOn) return 'leader';
+  // …and no preview while that cannot be RULED OUT either (previewLeaderGate).
+  if (rsLeaderUnknown) return 'leaderUnknown';
   if (asset && asset.kind === 'recording') {
     if (!trajectoryMatchesRig(asset.robotProfile, robotType)) return 'otherRobot';
     if (!workflowId) return 'unsaved';
@@ -138,6 +162,7 @@ export const PREVIEW_BLOCK_TITLES_DE = Object.freeze({
   handguide: DE.PREVIEW_BLOCK_HANDGUIDE,
   tutorial: DE.PREVIEW_BLOCK_TUTORIAL,
   leader: DE.PREVIEW_BLOCK_LEADER,
+  leaderUnknown: DE.PREVIEW_BLOCK_LEADER_UNKNOWN,
   otherRobot: DE.PREVIEW_BLOCK_OTHER_ROBOT,
   unsaved: DE.PREVIEW_BLOCK_UNSAVED,
 });

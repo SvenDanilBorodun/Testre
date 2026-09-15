@@ -28,6 +28,7 @@ import {
   buildRecordingPreviewProgram,
   isPreviewWorkflowId,
   previewBlockReason,
+  previewLeaderGate,
   previewKeyForDestination,
   previewKeyForRecording,
   previewMessageDe,
@@ -182,6 +183,7 @@ describe('previewBlockReason — each reason when only its condition holds', () 
     ['handguide', { jogHandGuideOn: true }],
     ['tutorial', { activeTutorialId: 'tut-1' }],
     ['leader', { rsLeaderOn: true }],
+    ['leaderUnknown', { rsLeaderUnknown: true }],
     ['otherRobot', { asset: { kind: 'recording', id: 't1', name: 'A', robotProfile: 'edu6_studio' } }],
     ['unsaved', { workflowId: null }],
     ['inFlight', { inFlight: true }],
@@ -196,13 +198,13 @@ describe('previewBlockReason — each reason when only its condition holds', () 
   test('the order is the contract: an earlier reason wins over every later one', () => {
     const all = {
       ...OPEN, heartbeatStatus: 'x', runState: 'running', teachOpen: true, jogHandGuideOn: true,
-      activeTutorialId: 't', rsLeaderOn: true, workflowId: null, inFlight: true,
+      activeTutorialId: 't', rsLeaderOn: true, rsLeaderUnknown: true, workflowId: null, inFlight: true,
       asset: { kind: 'recording', id: 't1', name: 'A', robotProfile: 'edu6_studio' },
     };
-    const order = ['offline', 'running', 'teach', 'handguide', 'tutorial', 'leader', 'otherRobot', 'unsaved', 'inFlight'];
+    const order = ['offline', 'running', 'teach', 'handguide', 'tutorial', 'leader', 'leaderUnknown', 'otherRobot', 'unsaved', 'inFlight'];
     const clear = [
       { heartbeatStatus: 'connected' }, { runState: 'idle' }, { teachOpen: false }, { jogHandGuideOn: false },
-      { activeTutorialId: null }, { rsLeaderOn: false },
+      { activeTutorialId: null }, { rsLeaderOn: false }, { rsLeaderUnknown: false },
       { asset: { kind: 'recording', id: 't1', name: 'A', robotProfile: 'omx_f' } },
       { workflowId: 'wf' }, { inFlight: false },
     ];
@@ -222,6 +224,7 @@ describe('previewBlockReason — each reason when only its condition holds', () 
       handguide: 'Der Arm ist freigeschaltet – bitte zuerst festsetzen.',
       tutorial: 'Während eines Lernpfads kann der Simulator nicht geöffnet werden.',
       leader: 'Solange der Leader-Arm eingeschaltet ist, gibt es keine Vorschau. Bitte zuerst oben „Leader abschalten".',
+      leaderUnknown: 'Gerade ist nicht klar, ob der Leader-Arm eingeschaltet ist – die Steuerung antwortet nicht. Bitte gleich noch einmal versuchen.',
       otherRobot: 'Diese Bewegung wurde mit einem anderen Robotertyp aufgenommen und kann hier nicht abgespielt werden.',
       unsaved: 'Bitte zuerst den Workflow speichern.',
     });
@@ -252,5 +255,31 @@ describe('simEntryBlockReason — the header toggle ladder', () => {
     });
     expect(SIM_TOGGLE_DEFAULT_TITLE_DE).toBe(
       'Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung');
+  });
+});
+
+// hooks/useRsBridgeStatus::UNAVAILABLE and a live answer, as the hook returns them.
+const BRIDGE_DOWN = { available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false };
+const BRIDGE_LEADER = { available: true, followerOnly: false, hasLeader: true, busy: false, leaderOn: true };
+const BRIDGE_FOLLOWER = { available: true, followerOnly: true, hasLeader: true, busy: false, leaderOn: false };
+
+describe('previewLeaderGate — the preview fails CLOSED on an unanswered bridge probe', () => {
+  test.each([
+    ['bridge down, omx_full caps', BRIDGE_DOWN, { has_leader: true }, { rsLeaderOn: false, rsLeaderUnknown: true }],
+    ['bridge down, caps not yet pushed', BRIDGE_DOWN, null, { rsLeaderOn: false, rsLeaderUnknown: true }],
+    ['bridge down, leader-less profile', BRIDGE_DOWN, { has_leader: false }, { rsLeaderOn: false, rsLeaderUnknown: false }],
+    ['no bridge object at all, leader-less', undefined, { has_leader: false }, { rsLeaderOn: false, rsLeaderUnknown: false }],
+    ['no bridge object at all, has leader', undefined, { has_leader: true }, { rsLeaderOn: false, rsLeaderUnknown: true }],
+    ['bridge says leader on', BRIDGE_LEADER, { has_leader: true }, { rsLeaderOn: true, rsLeaderUnknown: false }],
+    ['bridge says follower only', BRIDGE_FOLLOWER, { has_leader: true }, { rsLeaderOn: false, rsLeaderUnknown: false }],
+    ['bridge answers has_leader false', { ...BRIDGE_FOLLOWER, hasLeader: false }, null, { rsLeaderOn: false, rsLeaderUnknown: false }],
+  ])('%s', (_label, bridge, caps, expected) => {
+    expect(previewLeaderGate(bridge, caps)).toEqual(expected);
+  });
+
+  test('a probe timeout on a leader rig refuses the preview in German', () => {
+    const reason = previewBlockReason({ ...OPEN, ...previewLeaderGate(BRIDGE_DOWN, { has_leader: true }) });
+    expect(reason).toBe('leaderUnknown');
+    expect(PREVIEW_BLOCK_TITLES_DE[reason]).toBe(DE.PREVIEW_BLOCK_LEADER_UNKNOWN);
   });
 });

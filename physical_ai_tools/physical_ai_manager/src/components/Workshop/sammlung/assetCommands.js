@@ -328,9 +328,19 @@ export async function deleteRecordingRows({ api, accessToken, workflowId, rows }
  * nothing is created when a row of the same name that is not older than every
  * copy is still there (an older version was deleted, a newest delete failed,
  * or a new take was recorded meanwhile) — see restoreKeepsPlayedTake.
+ * A 429 (more than 10 versions inside the cloud's per-minute POST budget) is
+ * waited out and the same version re-tried; any other failure stops the restore
+ * and the German error names how many versions came back and how many did not.
  * @returns {Promise<{ok:boolean, restored:number, error?:string}>}
  */
-export async function restoreRecordingRows({ api, accessToken, workflowId, deleted }) {
+export const RESTORE_RATE_LIMIT_WAIT_MS = 15000;
+export const RESTORE_RATE_LIMIT_RETRIES = 5;
+
+const defaultSleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+export async function restoreRecordingRows({
+  api, accessToken, workflowId, deleted, sleep = defaultSleep, onRateLimited,
+}) {
   const list = (Array.isArray(deleted) ? deleted : [])
     .filter((d) => d && typeof d === 'object')
     .map((d, index) => ({ d, index }))
@@ -351,7 +361,6 @@ export async function restoreRecordingRows({ api, accessToken, workflowId, delet
     return { ok: false, restored: 0, error: formatDe(DE.ERR_UNDO_NEWER_VERSION, list[0].name) };
   }
   let restored = 0;
-  let error;
   for (const d of list) {
     const payload = {
       name: d.name,
@@ -361,14 +370,39 @@ export async function restoreRecordingRows({ api, accessToken, workflowId, delet
       ...(Number.isFinite(d.duration_s) ? { duration_s: d.duration_s } : {}),
       ...(d.robot_profile ? { robot_profile: d.robot_profile } : {}),
     };
-    try {
-      await api.createTrajectory(accessToken, workflowId, payload);
-      restored += 1;
-    } catch (err) {
-      if (!error) error = formatDe(DE.ERR_UNDO_FAILED, messageOf(err) || '—');
+    let lastErr = null;
+    for (let attempt = 0; attempt <= RESTORE_RATE_LIMIT_RETRIES; attempt += 1) {
+      try {
+        await api.createTrajectory(accessToken, workflowId, payload);
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        // The cloud holds POST /workflows/** at 10/min per user over a
+        // SLIDING window that does not count refusals, so a 429 always clears
+        // within a minute: wait and re-try THIS version rather than skipping it.
+        if (!(err && err.status === 429) || attempt === RESTORE_RATE_LIMIT_RETRIES) break;
+        if (typeof onRateLimited === 'function') onRateLimited();
+        await sleep(RESTORE_RATE_LIMIT_WAIT_MS);
+      }
     }
+    if (lastErr) {
+      // STOP at the first version that could not be re-created: the copies run
+      // oldest → newest, so creating a later one after a gap would still not
+      // bring back what is missing, and the student has to be told how much.
+      const reason = messageOf(lastErr) || '—';
+      if (restored === 0) {
+        return { ok: false, restored, error: formatDe(DE.ERR_UNDO_FAILED, reason) };
+      }
+      return {
+        ok: false,
+        restored,
+        error: formatDe(DE.ERR_UNDO_PARTIAL, restored, list.length, list.length - restored, reason),
+      };
+    }
+    restored += 1;
   }
-  return { ok: !error, restored, ...(error ? { error } : {}) };
+  return { ok: true, restored };
 }
 
 // ── Ziele / Positionen (the document's destination store) ──────────────────

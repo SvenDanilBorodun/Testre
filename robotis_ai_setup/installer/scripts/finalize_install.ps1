@@ -16,14 +16,21 @@
 #    0  = done — import + pull both succeeded, .reboot_required cleared
 #   10  = a host reboot is still required; nothing was installed yet.
 #         .reboot_required is left SET (see the lifecycle comment below)
-#   11  = WSL2 could not start a VM: `wsl` itself reported a hypervisor-class
-#         failure (import_edubotics_wsl.ps1 classified it). Only that report
-#         exits 11 — a CIM reading never does. WHICH remedy the student is given
-#         (a BIOS setting / a missing Windows feature / the VM service) is
-#         chosen from proof by virtualization_ready.ps1::
-#         Get-HypervisorRemedyKind and travels to the GUI in the FAILED marker's
-#         problem + next-step lines. Distinct from 10 because a restart is not
-#         always the fix; distinct from 1 because the remedy is concrete.
+#   11  = WSL2 cannot start, and ANOTHER restart is not the plain fix. Exactly
+#         two ways in, and a CIM reading is neither:
+#           * import_edubotics_wsl.ps1 exited 11 — a `wsl --import` whose failure
+#             classified as "hypervisor", or an EXISTING distro that did not
+#             start for the stamp probe (whatever wsl said);
+#           * the restart this script asked for HAPPENED and the same reboot
+#             reason is still there (virtualization_ready.ps1::
+#             Test-RestartDidNotHelp), so asking again would loop forever.
+#         WHICH remedy the student is given is chosen from proof
+#         (Get-HypervisorRemedyKind: disk / BIOS setting / Windows feature / VM
+#         service / unclassified, or the restart-did-not-help remedy) and
+#         travels to the GUI in the FAILED marker's problem + next-step lines,
+#         with wsl's code in the problem line. Distinct from 10 because a
+#         restart is not (or no longer) the fix; distinct from 1 because the
+#         remedy is concrete.
 #   12  = the rootfs must be re-imported, which DESTROYS the student's data, and
 #         nobody consented — the one actionable remedy is "run the installer
 #         again". Distinct from 1 so the GUI can say so instead of "failed".
@@ -97,13 +104,21 @@ $EXIT_VIRT    = 11
 # The $EXIT_VIRT remedies, declared ONCE, one per Get-HypervisorRemedyKind
 # result. A single remedy for every hypervisor failure is how this script used
 # to print „Virtualisierung ist aktiv" and then blame VT-x in the BIOS in the
-# same transcript. Each sentence states only what its kind PROVES:
-#   Firmware — Windows itself reports the BIOS/UEFI setting off, so a restart is
-#              not offered as the fix.
-#   Feature  — wsl reported HCS_E_HYPERV_NOT_INSTALLED: restart first (a pending
-#              feature enable completes then), then the feature and BIOS for IT.
-#   Service  — everything else, including the 2026-09-07 field code: restart
-#              first, then the VM service / hypervisorlaunchtype / BIOS for IT.
+# same transcript. Each sentence states only what its kind PROVES, and
+# Fail-WithHypervisorRemedy appends wsl's own code to the problem line:
+#   Disk         — wsl named a disk stage (MountVhd/AttachDisk/MountDisk) or a
+#                  full disk: restart first, then the VHDX, locks, compression,
+#                  space and a WSL repair for IT.
+#   Firmware     — Windows itself reports the BIOS/UEFI setting off, so a
+#                  restart is not offered as the fix.
+#   Feature      — wsl reported HCS_E_HYPERV_NOT_INSTALLED: restart first (a
+#                  pending feature enable completes then), then the feature and
+#                  BIOS for IT.
+#   Service      — any other VM-start failure, including the 2026-09-07 field
+#                  code: restart first, then the VM service /
+#                  hypervisorlaunchtype / BIOS for IT. The problem line names no
+#                  cause — the code beside it does.
+#   Unclassified — an existing distro did not start and wsl named nothing known.
 # „Neu starten, nicht Herunterfahren": with Fast Startup a shutdown resumes the
 # old kernel, so neither a pending feature nor a hypervisor launch setting
 # takes effect. preflight_system.ps1 and gui_app.py restate some of these; tests
@@ -113,8 +128,17 @@ $VIRT_FIRMWARE_PROBLEM_DE  = "Laut Windows ist die Virtualisierung (VT-x/AMD-V) 
 $VIRT_FIRMWARE_NEXTSTEP_DE = "Bitte die IT-Betreuung der Schule bitten, die Virtualisierung im BIOS/UEFI einzuschalten, und EduBotics danach erneut öffnen."
 $VIRT_FEATURE_PROBLEM_DE   = "WSL2 konnte seine virtuelle Maschine nicht starten, weil eine dafür nötige Windows-Funktion fehlt oder noch nicht aktiv ist."
 $VIRT_FEATURE_NEXTSTEP_DE  = "Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und EduBotics danach erneut öffnen. Hilft das nicht, bitte die IT-Betreuung informieren: die Windows-Funktion VM-Plattform und die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI prüfen."
-$VIRT_SERVICE_PROBLEM_DE   = "WSL2 konnte seine virtuelle Maschine nicht starten, weil der Windows-Dienst für virtuelle Maschinen nicht verfügbar ist."
+$VIRT_SERVICE_PROBLEM_DE   = "WSL2 konnte seine virtuelle Maschine nicht starten."
 $VIRT_SERVICE_NEXTSTEP_DE  = "Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und EduBotics danach erneut öffnen. Hilft das nicht, bitte die IT-Betreuung informieren: den Dienst vmcompute, die Starteinstellung hypervisorlaunchtype und die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI prüfen."
+$VIRT_DISK_PROBLEM_DE      = "WSL2 konnte eine virtuelle Festplatte nicht einbinden, die es zum Starten braucht."
+$VIRT_DISK_NEXTSTEP_DE     = "Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und EduBotics danach erneut öffnen. Hilft das nicht, bitte die IT-Betreuung informieren: prüfen, ob die Datei ext4.vhdx im Ordner EduBotics\wsl unter ProgramData vorhanden ist und nicht von einem Virenschutz- oder Backup-Programm gesperrt wird, ob der Ordner komprimiert oder verschlüsselt ist und ob genug Speicherplatz frei ist; danach WSL mit wsl --update aktualisieren."
+$VIRT_UNCLASSIFIED_PROBLEM_DE  = "Die EduBotics-Umgebung ließ sich nicht starten."
+$VIRT_UNCLASSIFIED_NEXTSTEP_DE = "Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und EduBotics danach erneut öffnen. Hilft das nicht, bitte die IT-Betreuung informieren und ihr das Protokoll zeigen."
+# The OTHER way into $EXIT_VIRT: the restart this script asked for happened and
+# the same reboot reason is still there. Deliberately NOT a request for another
+# restart — that is the loop this remedy ends.
+$RESTART_DID_NOT_HELP_PROBLEM_DE  = "Ein Neustart hat nicht geholfen: Die Einrichtung von WSL2 wartet auch nach dem Neustart noch auf einen Neustart."
+$RESTART_DID_NOT_HELP_NEXTSTEP_DE = "Ein weiterer Neustart hilft hier nicht. Bitte die IT-Betreuung informieren: WSL mit wsl --update aktualisieren, die Windows-Funktionen VM-Plattform und Windows-Subsystem für Linux sowie die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI prüfen und EduBotics danach erneut öffnen."
 $EXIT_FAILED  = 1
 
 # ── Marker: Proves the script actually started and survived long enough to
@@ -306,16 +330,24 @@ function Write-WslVersion {
 }
 
 # Fail with the $EXIT_VIRT remedy that the PROOF supports (see the constants at
-# the top and virtualization_ready.ps1::Get-HypervisorRemedyKind). ONE exit-11
-# path, so the three remedies cannot drift into three call sites.
+# the top and virtualization_ready.ps1::Get-HypervisorRemedyKind). ONE place
+# picks a kind's words, so the remedies cannot drift into several call sites.
+# wsl's own code goes into the problem line — the student's screenshot then
+# names what wsl said, which is also what IT will search for.
 function Fail-WithHypervisorRemedy {
-    param([hashtable]$State, [string]$FailureCode = "")
-    $kind = Get-HypervisorRemedyKind -State $State -FailureCode $FailureCode
+    param([hashtable]$State, [string]$FailureCode = "", [string]$FailureClass = "")
+    $kind = Get-HypervisorRemedyKind -State $State -FailureCode $FailureCode -FailureClass $FailureClass
     switch ($kind) {
-        "Firmware" { Fail-WithNextAction $VIRT_FIRMWARE_PROBLEM_DE $VIRT_FIRMWARE_NEXTSTEP_DE $EXIT_VIRT }
-        "Feature"  { Fail-WithNextAction $VIRT_FEATURE_PROBLEM_DE $VIRT_FEATURE_NEXTSTEP_DE $EXIT_VIRT }
-        default    { Fail-WithNextAction $VIRT_SERVICE_PROBLEM_DE $VIRT_SERVICE_NEXTSTEP_DE $EXIT_VIRT }
+        "Disk"     { $problem = $VIRT_DISK_PROBLEM_DE;         $next = $VIRT_DISK_NEXTSTEP_DE }
+        "Firmware" { $problem = $VIRT_FIRMWARE_PROBLEM_DE;     $next = $VIRT_FIRMWARE_NEXTSTEP_DE }
+        "Feature"  { $problem = $VIRT_FEATURE_PROBLEM_DE;      $next = $VIRT_FEATURE_NEXTSTEP_DE }
+        "Service"  { $problem = $VIRT_SERVICE_PROBLEM_DE;      $next = $VIRT_SERVICE_NEXTSTEP_DE }
+        default    { $problem = $VIRT_UNCLASSIFIED_PROBLEM_DE; $next = $VIRT_UNCLASSIFIED_NEXTSTEP_DE }
     }
+    if ($FailureCode) {
+        $problem = ($problem.TrimEnd('.') + " (Fehlercode: $FailureCode).")
+    }
+    Fail-WithNextAction $problem $next $EXIT_VIRT
 }
 
 try {
@@ -465,9 +497,41 @@ try {
     Write-WslVersion
     $virtVerdict = Get-VirtualizationVerdict -State $rebootState
     Write-Host "   Ergebnis: $virtVerdict"
+    # ── One restart per reason, not one per launch ─────────────────────────
+    # A RebootRequired verdict asks for a restart and RECORDS the boot it asked
+    # in and the rung that asked ($restartRecordPath, virtualization_ready.ps1::
+    # Format-RestartRequest). When that restart has HAPPENED (LastBootUpTime
+    # moved; Fast Startup's shutdown does not move it) and the SAME rung fires
+    # again, the restart did not help: say so, and stop asking — the review
+    # replayed a PC that exited 10 after every restart, forever, because its
+    # `wsl --status` failed on every boot and Phase 0's `wsl --install` refreshed
+    # the flag each time. The record is left untouched on that path (it names
+    # the restart that did not help) and removed as soon as the verdict passes.
+    # {app}\scripts is elevated-write only, like the flag, and an upgrade's
+    # [InstallDelete] of {app}\scripts starts the count over.
+    $restartRecordPath = Join-Path $PSScriptRoot ".restart_requested"
     if ($virtVerdict -eq "RebootRequired") {
+        $rebootReason = Get-RebootRequiredReason -State $rebootState
+        $restartRequest = Read-RestartRequest -Path $restartRecordPath
+        if (Test-RestartDidNotHelp -State $rebootState -Request $restartRequest -Reason $rebootReason) {
+            Write-Host ("   Neustart angefordert (Grund {0}, Systemstart {1:s}Z), erfolgt (Systemstart {2:s}), Grund besteht weiter." -f $rebootReason, $restartRequest.Boot, $rebootState.BootTime)
+            Fail-WithNextAction $RESTART_DID_NOT_HELP_PROBLEM_DE $RESTART_DID_NOT_HELP_NEXTSTEP_DE $EXIT_VIRT
+        }
+        if ($rebootState.BootTime -is [datetime]) {
+            try {
+                Set-Content -LiteralPath $restartRecordPath -Value (Format-RestartRequest -BootTime $rebootState.BootTime -Reason $rebootReason) -Encoding ASCII -Force -ErrorAction Stop
+            } catch {
+                Write-Warn "Neustart-Anforderung konnte nicht vermerkt werden: $_"
+            }
+        }
         Write-Step "NEUSTART ERFORDERLICH: Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und EduBotics erneut öffnen."
         exit $EXIT_REBOOT
+    }
+    # Any other verdict: whatever restart was asked for has done its job (or none
+    # was asked). A stale record must not turn a LATER, genuine reboot request
+    # into „Ein Neustart hat nicht geholfen".
+    if (Test-Path -LiteralPath $restartRecordPath) {
+        Remove-Item -LiteralPath $restartRecordPath -Force -ErrorAction SilentlyContinue
     }
     # Every other verdict PROCEEDS to the import — deliberately including
     # VirtualizationDisabled. That word comes from a CIM property, and a CIM
@@ -534,6 +598,7 @@ try {
     # (same runspace: it is invoked with `&`). Reset first so a value from an
     # earlier call can never masquerade as this import's.
     $global:EDUBOTICS_WSL_FAILURE_CODE = ""
+    $global:EDUBOTICS_WSL_FAILURE_CLASS = ""
     try { & (Join-Path $PSScriptRoot "import_edubotics_wsl.ps1") @importArgs } catch { Write-Warn "Import meldete einen Fehler, prüfe tatsächlichen Zustand: $_" }
     $importRc = $LASTEXITCODE
     if ($importRc -eq 12) {
@@ -549,19 +614,20 @@ try {
         Write-Host "   Datensätze vorher in der Web-Oberfläche zu Hugging Face hoch."
         exit $EXIT_CONSENT
     }
-    # import classified its OWN failure: wsl reported that no VM could start
-    # (HCS_E_SERVICE_NOT_AVAILABLE / HCS_E_HYPERV_NOT_INSTALLED, on the import or
-    # on an existing distro's stamp read). Pass it through rather than
-    # flattening it into $EXIT_FAILED, for the same reason the 12 above is passed
-    # through: the remedy is specific and the GUI shows it as its own message.
-    # This is the ONLY way to exit 11 — the verdict gate above never refuses on
-    # a CIM reading. The remedy WORDS come from $rebootState (the CIM facts the
-    # gate printed) plus the code import handed back.
+    # import reported that WSL2 could not start: a `wsl --import` whose failure
+    # classified as "hypervisor", or an existing distro that did not start for
+    # its stamp probe (whatever wsl said). Pass it through rather than flattening
+    # it into $EXIT_FAILED, for the same reason the 12 above is passed through:
+    # the remedy is specific and the GUI shows it as its own message. Besides the
+    # restart-did-not-help branch of the verdict gate, this is the only way to
+    # exit 11 — the gate never refuses on a CIM reading. The remedy WORDS come
+    # from $rebootState (the CIM facts the gate printed) plus the code and class
+    # import handed back.
     # Deliberately placed BELOW the 12 branch: both read $importRc, and
     # test_finalize_consent_branch_actually_exits_the_consent_code matches the
     # FIRST `if ($importRc -eq N)` block in this file.
     if ($importRc -eq $EXIT_VIRT) {
-        Fail-WithHypervisorRemedy -State $rebootState -FailureCode ([string]$global:EDUBOTICS_WSL_FAILURE_CODE)
+        Fail-WithHypervisorRemedy -State $rebootState -FailureCode ([string]$global:EDUBOTICS_WSL_FAILURE_CODE) -FailureClass ([string]$global:EDUBOTICS_WSL_FAILURE_CLASS)
     }
     $registration = Get-EduBoticsDistroRegistration -DistroName $DistroName
     if ($registration -eq "Unresponsive") {

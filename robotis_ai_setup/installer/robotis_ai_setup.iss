@@ -307,46 +307,78 @@ begin
     Result := Trim(Lines[0]);
 end;
 
-// True ONLY when reading the existing distro's stamp PROVES its VM cannot start:
-// wsl's own error CODE token (never the localized sentence) names the hypervisor
-// class — the same four tokens virtualization_ready.ps1::Get-WslFailureCode
-// matches, against the same whitespace- and NUL-stripped copy (wsl.exe writes
-// BOM-less UTF-16LE; `> file` keeps those bytes). Anything else, including a
-// failed Exec or an unreadable temp file, is False: this only ever REMOVES an
-// offer, so it may refuse on proof alone.
+// Probe the EXISTING distro for its rootfs stamp WITH PROOF that its VM started.
+// Returns STAMP_PROBE_PRESENT (Version holds the stamp), STAMP_PROBE_ABSENT (the
+// VM started and the stamp file does not exist — the one state that earns the
+// one-final re-import of a distro from an installer <= 2.6.0) or
+// STAMP_PROBE_NO_PROOF (anything else: the VM did not start, wsl timed out, the
+// Exec or the temp file failed).
 //
-// Why it exists: an unreadable stamp is the designed trigger for the one-final
-// rebuild of a distro from an installer <= 2.6.0 — but the read also fails when
-// the distro simply cannot START (the 2026-09-07 HCS_E_SERVICE_NOT_AVAILABLE
-// class). ShouldImportDistro then offered a DESTRUCTIVE rebuild consent box over
-// a distro whose data was intact; import_edubotics_wsl.ps1 refuses that wipe on
-// the same proof, so the box could only mislead.
-function DistroVmCannotStart(): Boolean;
+// One command runs INSIDE the distro and prints EDUBOTICS_VM_UP first; only that
+// line proves the VM started. The script and both sentinels are
+// import_edubotics_wsl.ps1's $STAMP_PROBE_* spellings (a test pins them equal).
+// `--exec /bin/sh -c` keeps the script ONE argument (without --exec wsl joins the
+// arguments back into a shell command line); the script has no $, pipe or
+// redirection, so cmd.exe passes it through untouched inside its quotes.
+//
+// Why proof and not a failure classifier: GetDistroRootfsVersion returns '' on ANY
+// failed read, and a distro whose VM cannot start fails that read too. The
+// previous gate (the four HCS code tokens) only removed the consent box for those
+// four codes; any other VM-start failure (MountVhd/HCS/0x80070032,
+// HCS_E_CONNECTION_TIMEOUT, ...) still offered to destroy an intact distro.
+const
+  STAMP_PROBE_NO_PROOF = 0;
+  STAMP_PROBE_ABSENT = 1;
+  STAMP_PROBE_PRESENT = 2;
+
+function ProbeDistroStamp(var Version: String): Integer;
 var
   ResultCode: Integer;
   TempFile: String;
   Raw: AnsiString;
   S: String;
+  Lines: TStringList;
+  I: Integer;
+  SawUp: Boolean;
+  L: String;
 begin
-  Result := False;
+  Result := STAMP_PROBE_NO_PROOF;
+  Version := '';
   TempFile := ExpandConstant('{tmp}\distro_stamp_probe.txt');
-  if not Exec(ExpandConstant('{cmd}'), '/c wsl -d EduBotics -- cat /etc/edubotics-rootfs-version > "' + TempFile + '" 2>&1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    exit;
-  if ResultCode = 0 then
+  if not Exec(ExpandConstant('{cmd}'), '/c wsl -d EduBotics --exec /bin/sh -c "echo EDUBOTICS_VM_UP; if [ -e /etc/edubotics-rootfs-version ]; then cat /etc/edubotics-rootfs-version; else echo EDUBOTICS_STAMP_ABSENT; fi" > "' + TempFile + '" 2>&1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     exit;
   if not LoadStringFromFile(TempFile, Raw) then
     exit;
   S := String(Raw);
+  // wsl.exe's own messages are BOM-less UTF-16LE; the Linux output is UTF-8.
+  // Dropping NULs and CRs leaves LF-separated ASCII either way.
   StringChangeEx(S, #0, '', True);
   StringChangeEx(S, #13, '', True);
-  StringChangeEx(S, #10, '', True);
-  StringChangeEx(S, #9, '', True);
-  StringChangeEx(S, ' ', '', True);
-  S := Uppercase(S);
-  Result := (Pos('HCS_E_SERVICE_NOT_AVAILABLE', S) > 0) or
-            (Pos('HCS_E_HYPERV_NOT_INSTALLED', S) > 0) or
-            (Pos('0X80370102', S) > 0) or
-            (Pos('0X80370114', S) > 0);
+  Lines := TStringList.Create;
+  try
+    Lines.Text := S;
+    SawUp := False;
+    for I := 0 to Lines.Count - 1 do
+    begin
+      L := Trim(Lines[I]);
+      if L = 'EDUBOTICS_VM_UP' then
+        SawUp := True
+      else if SawUp and (L = 'EDUBOTICS_STAMP_ABSENT') then
+      begin
+        Result := STAMP_PROBE_ABSENT;
+        exit;
+      end
+      else if SawUp and (L <> '') and (Result = STAMP_PROBE_NO_PROOF) then
+      begin
+        Version := L;
+        Result := STAMP_PROBE_PRESENT;
+      end;
+    end;
+    if SawUp and (Result = STAMP_PROBE_NO_PROOF) then
+      Result := STAMP_PROBE_PRESENT;
+  finally
+    Lines.Free;
+  end;
 end;
 
 // Compare the EXISTING distro's rootfs stamp against the one this installer
@@ -448,6 +480,8 @@ function ShouldImportDistro(): Boolean;
 var
   NeedsRebuild: Boolean;
   StampUnreadable: Boolean;
+  ProbedVersion: String;
+  Probe: Integer;
 begin
   if IsRebootRequired() then
   begin
@@ -467,17 +501,30 @@ begin
   NeedsRebuild := RootfsStampCompare(StampUnreadable);
   if StampUnreadable then
   begin
-    if DistroVmCannotStart() then
+    // The plain read failed. Offer the destructive rebuild ONLY on proof that
+    // the VM started and the stamp is genuinely absent (ProbeDistroStamp).
+    Probe := ProbeDistroStamp(ProbedVersion);
+    if Probe = STAMP_PROBE_NO_PROOF then
     begin
-      // Not a rootfs question at all: the distro exists but its VM cannot
-      // start. No consent box, no import step — EduBotics' own finalize reports
-      // the hypervisor remedy on next launch, and the data stays untouched.
-      Log('EduBotics distro cannot start (hypervisor-class wsl error while reading the rootfs stamp) - NOT offering a destructive re-import; Docker volumes preserved.');
+      // Not a rootfs question at all: the distro exists but did not start. No
+      // consent box, no import step, the data stays untouched. On the next
+      // launch the GUI's start probe (_run_prerequisite_checks_body) reports
+      // why it cannot start.
+      Log('EduBotics distro did not start for the rootfs stamp probe - NOT offering a destructive re-import; Docker volumes preserved.');
       Result := False;
       exit;
     end;
-    Log('EduBotics rootfs stamp unreadable - offering the one-final-re-import (installers <= 2.6.0 shipped no stamp). Declining only postpones it.');
-    NeedsRebuild := True;
+    if Probe = STAMP_PROBE_ABSENT then
+    begin
+      Log('EduBotics rootfs stamp absent (the VM started; installers <= 2.6.0 shipped no stamp) - offering the one-final-re-import. Declining only postpones it.');
+      NeedsRebuild := True;
+    end
+    else
+    begin
+      // The probe read what the plain read could not (a transient failure).
+      NeedsRebuild := (ProbedVersion <> GetShippedRootfsVersion());
+      Log('EduBotics rootfs stamp read by the probe: "' + ProbedVersion + '".');
+    end;
   end;
   if not NeedsRebuild then
   begin

@@ -368,91 +368,169 @@ def _wrap(s, width):
 
 
 class ClassifierExecutedTest(_PwshCase):
-    """Get-WslFailureClass reads the ASCII CODE, never the localized message."""
+    """Get-WslFailureClass / Get-WslFailureCode read wsl's STAGE and CODE, never
+    the localized message — and the GUI's Python twin
+    (wsl_bridge.classify_wsl_failure) gives the same answer on every row.
+
+    Row = (name, text, class, code). The stage rows are real WSL error paths
+    (microsoft/WSL issues cited in virtualization_ready.ps1)."""
 
     CORPUS = [
-        ("field_verbatim", _FIELD, "hypervisor"),
+        ("field_verbatim", _FIELD, "hypervisor", "HCS_E_SERVICE_NOT_AVAILABLE"),
         ("english", _FIELD.replace("Der Vorgang konnte nicht gestartet werden, da ein erforderliches Feature "
                                    "nicht installiert ist.", "The operation could not be started because a "
                                    "required feature is not installed.").replace("Fehlercode", "Error code"),
-         "hypervisor"),
+         "hypervisor", "HCS_E_SERVICE_NOT_AVAILABLE"),
         # The 5.1 byte shape, NOT NUL-stripped: the classifier must survive a
         # caller that forgets the strip, exactly as it survives one that forgets
         # -Width. Before 2026-09-11 this row classified as "".
-        ("field_cp850_with_nuls", _oem(_FIELD, "cp850"), "hypervisor"),
-        ("field_cp437_with_nuls", _oem(_FIELD, "cp437"), "hypervisor"),
-        ("field_wrapped_at_60", _wrap(_FIELD, 60), "hypervisor"),
-        ("field_wrapped_at_80", _wrap(_FIELD, 80), "hypervisor"),
+        ("field_cp850_with_nuls", _oem(_FIELD, "cp850"), "hypervisor", "HCS_E_SERVICE_NOT_AVAILABLE"),
+        ("field_cp437_with_nuls", _oem(_FIELD, "cp437"), "hypervisor", "HCS_E_SERVICE_NOT_AVAILABLE"),
+        ("field_wrapped_at_60", _wrap(_FIELD, 60), "hypervisor", "HCS_E_SERVICE_NOT_AVAILABLE"),
+        ("field_wrapped_at_80", _wrap(_FIELD, 80), "hypervisor", "HCS_E_SERVICE_NOT_AVAILABLE"),
         ("hyperv_not_installed_symbolic",
-         "Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED\r\n", "hypervisor"),
-        ("legacy_0x80370102", "WslRegisterDistribution failed with error: 0x80370102\r\n", "hypervisor"),
+         "Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED\r\n",
+         "hypervisor", "HCS_E_HYPERV_NOT_INSTALLED"),
+        ("legacy_0x80370102", "WslRegisterDistribution failed with error: 0x80370102\r\n",
+         "hypervisor", "HCS_E_HYPERV_NOT_INSTALLED"),
         ("legacy_0x80370114", "Error: 0x80370114 The operation could not be started because a required "
-                              "feature is not installed.\r\n", "hypervisor"),
+                              "feature is not installed.\r\n", "hypervisor", "HCS_E_SERVICE_NOT_AVAILABLE"),
         ("lowercase_token", "error code: wsl/service/registerdistro/createvm/hcs/hcs_e_service_not_available",
-         "hypervisor"),
-        # Never hypervisor: each of these has its own, different remedy.
+         "hypervisor", "HCS_E_SERVICE_NOT_AVAILABLE"),
+        # A CreateVm STAGE is a VM-start failure whatever the code (review item 2).
+        ("hcs_connection_timeout", "Fehlercode: Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_CONNECTION_TIMEOUT\r\n",
+         "hypervisor", "HCS_E_CONNECTION_TIMEOUT"),
+        ("hcs_connection_timeout_no_hcs_segment",
+         "Error code: Wsl/Service/CreateInstance/CreateVm/HCS_E_CONNECTION_TIMEOUT\r\n",
+         "hypervisor", "HCS_E_CONNECTION_TIMEOUT"),
+        ("service_disabled_0x80070422", "Fehlercode: Wsl/Service/RegisterDistro/CreateVm/HCS/0x80070422\r\n",
+         "hypervisor", "0x80070422"),
+        ("createvm_file_not_found", "Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/ERROR_FILE_NOT_FOUND\r\n",
+         "hypervisor", "ERROR_FILE_NOT_FOUND"),
+        ("createvm_lowercase_hex", "fehlercode: wsl/service/createinstance/createvm/hcs/0x800706bA\r\n",
+         "hypervisor", "0x800706BA"),
+        # A disk STAGE outranks the CreateVm it sits in: attaching a disk failed.
+        ("mountvhd_under_createvm_0x80070032",
+         "Fehler beim Anfügen des Datenträgers \"C:\\Program Files\\WSL\\system.vhd\" an WSL2: Die Anforderung wird nicht unterstützt.\r\n"
+         "Fehlercode: Wsl/Service/CreateInstance/CreateVm/MountVhd/HCS/0x80070032\r\n", "disk", "0x80070032"),
+        ("mountvhd_access_denied", "Error code: Wsl/Service/CreateInstance/MountVhd/HCS/E_ACCESSDENIED\r\n",
+         "disk", "E_ACCESSDENIED"),
+        ("mountvhd_corrupt", "Error code: Wsl/Service/CreateInstance/MountVhd/HCS/0x80070570\r\n", "disk", "0x80070570"),
+        ("attachdisk_sharing_violation", "Fehlercode: Wsl/Service/CreateInstance/AttachDisk/HCS/ERROR_SHARING_VIOLATION\r\n",
+         "disk", "ERROR_SHARING_VIOLATION"),
+        ("mountdisk_not_found", "Fehlercode: Wsl/Service/CreateInstance/CreateVm/MountDisk/HCS/ERROR_PATH_NOT_FOUND\r\n",
+         "disk", "ERROR_PATH_NOT_FOUND"),
         ("disk_full_symbolic", "Auf dem Datenträger ist nicht genügend Speicherplatz vorhanden.\r\n"
-                               "Fehlercode: Wsl/Service/RegisterDistro/ERROR_DISK_FULL\r\n", ""),
-        ("disk_full_hex", "Error code: Wsl/Service/RegisterDistro/0x80070070\r\n", ""),
-        ("hcs_connection_timeout", "Fehlercode: Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_CONNECTION_TIMEOUT\r\n", ""),
-        ("kernel_update_0x800701bc", "Fehlercode: Wsl/Service/RegisterDistro/0x800701bc\r\n", ""),
-        ("service_disabled_0x80070422", "Fehlercode: Wsl/Service/RegisterDistro/CreateVm/HCS/0x80070422\r\n", ""),
-        ("access_denied", "Zugriff verweigert\r\nFehlercode: Wsl/Service/RegisterDistro/E_ACCESSDENIED\r\n", ""),
-        ("already_exists", "Fehlercode: Wsl/Service/RegisterDistro/ERROR_ALREADY_EXISTS\r\n", ""),
-        ("german_umlauts_cp850", _oem("Für diesen Vorgang ist ein Neustart erforderlich.\r\n", "cp850"), ""),
-        ("empty", "", ""),
-        ("whitespace_only", " \r\n\t", ""),
+                               "Fehlercode: Wsl/Service/RegisterDistro/ERROR_DISK_FULL\r\n", "disk", "ERROR_DISK_FULL"),
+        ("disk_full_hex", "Error code: Wsl/Service/RegisterDistro/0x80070070\r\n", "disk", "0x80070070"),
+        ("disk_full_under_createvm", "Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/ERROR_DISK_FULL\r\n",
+         "disk", "ERROR_DISK_FULL"),
+        # The two named HCS codes win over a disk stage.
+        ("hcs_token_under_mountvhd", "Fehlercode: Wsl/Service/CreateInstance/CreateVm/MountVhd/HCS/HCS_E_SERVICE_NOT_AVAILABLE\r\n",
+         "hypervisor", "HCS_E_SERVICE_NOT_AVAILABLE"),
+        # Never a class: each of these has its own, different remedy — but the
+        # code is still read, so a remedy can echo it.
+        ("kernel_update_0x800701bc", "Fehlercode: Wsl/Service/RegisterDistro/0x800701bc\r\n", "", "0x800701BC"),
+        ("access_denied_no_stage", "Zugriff verweigert\r\nFehlercode: Wsl/Service/RegisterDistro/E_ACCESSDENIED\r\n",
+         "", "E_ACCESSDENIED"),
+        ("already_exists", "Fehlercode: Wsl/Service/RegisterDistro/ERROR_ALREADY_EXISTS\r\n", "", "ERROR_ALREADY_EXISTS"),
+        ("vm_not_available_is_no_hcs_code", "Fehlercode: Wsl/Service/ERROR_VM_NOT_AVAILABLE\r\n", "", "ERROR_VM_NOT_AVAILABLE"),
+        ("service_down", "Fehlercode: Wsl/Service/E_UNEXPECTED\r\n", "", "E_UNEXPECTED"),
+        ("distro_not_found", "Fehlercode: Wsl/Service/WSL_E_DISTRO_NOT_FOUND\r\n", "", "WSL_E_DISTRO_NOT_FOUND"),
+        # A path glued to the next line's words must not be read into the code:
+        # the code is read on text whose line breaks are intact.
+        ("path_then_next_line", "Fehlercode: Wsl/Service/RegisterDistro/ERROR_ALREADY_EXISTS\r\nNaechsteZeile\r\n",
+         "", "ERROR_ALREADY_EXISTS"),
+        ("no_path_legacy_hex", "WslRegisterDistribution failed with error: 0x80070070\r\n", "", ""),
+        ("german_umlauts_cp850", _oem("Für diesen Vorgang ist ein Neustart erforderlich.\r\n", "cp850"), "", ""),
+        ("empty", "", "", ""),
+        ("whitespace_only", " \r\n\t", "", ""),
     ]
 
-    _PS = r'''
+    _PS = r"""
 param([string]$Helper, [string]$Dir)
 $ErrorActionPreference = "Continue"
 . $Helper
 foreach ($f in (Get-ChildItem -LiteralPath $Dir -Filter "*.txt" | Sort-Object Name)) {
     $t = [System.IO.File]::ReadAllText($f.FullName, [System.Text.UTF8Encoding]::new($false))
-    "{0}`t{1}" -f $f.BaseName, (Get-WslFailureClass -Text $t)
+    "{0}`t{1}`t{2}" -f $f.BaseName, (Get-WslFailureClass -Text $t), (Get-WslFailureCode -Text $t)
 }
-"null`t{0}" -f (Get-WslFailureClass -Text $null)
-'''
+"null`t{0}`t{1}" -f (Get-WslFailureClass -Text $null), (Get-WslFailureCode -Text $null)
+"""
 
-    def test_the_corpus(self):
+    def _run_corpus(self):
         d = tempfile.mkdtemp(dir=self.tmp)
-        for i, (name, text, _exp) in enumerate(self.CORPUS):
+        for i, (name, text, _c, _k) in enumerate(self.CORPUS):
             with open(os.path.join(d, f"{i:02d}_{name}.txt"), "w", encoding="utf-8", newline="") as fh:
                 fh.write(text)
         r = self._ps("classify.ps1", self._PS, "-Helper", _VIRT_PS1, "-Dir", d)
-        got = dict(ln.split("\t", 1) for ln in r.stdout.decode("utf-8").splitlines() if "\t" in ln)
-        for i, (name, _text, exp) in enumerate(self.CORPUS):
-            with self.subTest(case=name):
-                self.assertEqual(got.get(f"{i:02d}_{name}"), exp)
-        self.assertEqual(got.get("null"), "")
+        got = {}
+        for ln in r.stdout.decode("utf-8").splitlines():
+            parts = ln.split("\t")
+            if len(parts) == 3:
+                got[parts[0]] = (parts[1], parts[2])
+        self.assertIn("null", got, r.stderr.decode("utf-8", "replace")[-1500:])
+        return got
 
-    def test_the_code_token_is_normalised_to_its_symbolic_name(self):
-        """Get-WslFailureCode picks the REMEDY family, so the hex spellings must
-        land on the same name as the symbolic ones, and nothing else may
-        classify. `ERROR_VM_NOT_AVAILABLE` is not a WSL token: it used to be in
-        the list and must not match any more."""
-        cases = [
-            ("field", _FIELD, "HCS_E_SERVICE_NOT_AVAILABLE"),
-            ("field_cp850_nuls", _oem(_FIELD, "cp850"), "HCS_E_SERVICE_NOT_AVAILABLE"),
-            ("hex_0114", "Error: 0x80370114\r\n", "HCS_E_SERVICE_NOT_AVAILABLE"),
-            ("hyperv_symbolic", "Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED\r\n",
-             "HCS_E_HYPERV_NOT_INSTALLED"),
-            ("hex_0102", "WslRegisterDistribution failed with error: 0x80370102\r\n", "HCS_E_HYPERV_NOT_INSTALLED"),
-            ("vm_not_available", "Fehlercode: Wsl/Service/ERROR_VM_NOT_AVAILABLE\r\n", ""),
-            ("disk", "Fehlercode: Wsl/Service/RegisterDistro/ERROR_DISK_FULL\r\n", ""),
-            ("empty", "", ""),
-        ]
-        d = tempfile.mkdtemp(dir=self.tmp)
-        for i, (name, text, _e) in enumerate(cases):
-            with open(os.path.join(d, f"{i:02d}_{name}.txt"), "w", encoding="utf-8", newline="") as fh:
-                fh.write(text)
-        ps = self._PS.replace("Get-WslFailureClass -Text $t", "Get-WslFailureCode -Text $t")
-        r = self._ps("code.ps1", ps, "-Helper", _VIRT_PS1, "-Dir", d)
-        got = dict(ln.split("\t", 1) if "\t" in ln else (ln, "") for ln in r.stdout.decode("utf-8").splitlines())
-        for i, (name, _t, exp) in enumerate(cases):
+    def test_the_corpus(self):
+        got = self._run_corpus()
+        for i, (name, _text, cls, code) in enumerate(self.CORPUS):
             with self.subTest(case=name):
-                self.assertEqual(got.get(f"{i:02d}_{name}", "<missing>"), exp)
+                self.assertEqual(got.get(f"{i:02d}_{name}"), (cls, code))
+        self.assertEqual(got.get("null"), ("", ""))
+
+    def test_the_python_twin_agrees_on_every_row(self):
+        """THE TWIN LOCKSTEP: the GUI classifies the SAME wsl output when a
+        registered distro does not start (_run_prerequisite_checks_body). Two
+        implementations of one decision, fenced by one corpus — cell by cell,
+        against what the .ps1 actually RETURNED, not against the table."""
+        got = self._run_corpus()
+        sys.path.insert(0, os.path.normpath(os.path.join(_TESTS, "..")))
+        from gui.app import wsl_bridge
+        drift = []
+        for i, (name, text, _cls, _code) in enumerate(self.CORPUS):
+            twin = wsl_bridge.classify_wsl_failure(text)
+            if twin != got.get(f"{i:02d}_{name}"):
+                drift.append((name, got.get(f"{i:02d}_{name}"), twin))
+        self.assertEqual(drift, [], "the .ps1 classifier and wsl_bridge.classify_wsl_failure disagree")
+        self.assertEqual(wsl_bridge.classify_wsl_failure(None), ("", ""))
+
+    def test_the_gui_picks_the_remedy_finalize_would_without_cim(self):
+        """gui_app.py::_distro_start_remedy_kind is Get-HypervisorRemedyKind with
+        no CIM state (the GUI reads none). Over every corpus row, the kind the
+        .ps1 returns for the .ps1's own (class, code) with a $null state must be
+        the kind the GUI returns for the twin's pair."""
+        import ast
+        got = self._run_corpus()
+        d = tempfile.mkdtemp(dir=self.tmp)
+        cases = os.path.join(d, "cases.tsv")
+        with open(cases, "w", encoding="utf-8") as fh:
+            for key, (cls, code) in got.items():
+                fh.write(f"{key}\t{cls}\t{code}\n")
+        ps = r"""
+param([string]$Helper, [string]$Cases)
+$ErrorActionPreference = "Continue"
+. $Helper
+foreach ($line in [System.IO.File]::ReadAllLines($Cases)) {
+    $f = $line -split "`t", 3
+    "{0}`t{1}" -f $f[0], (Get-HypervisorRemedyKind -State $null -FailureCode $f[2] -FailureClass $f[1])
+}
+"""
+        r = self._ps("gui_kind.ps1", ps, "-Helper", _VIRT_PS1, "-Cases", cases)
+        ps_kind = dict(ln.split("\t", 1) for ln in r.stdout.decode("utf-8").splitlines() if "\t" in ln)
+        gui_src = open(os.path.normpath(os.path.join(_TESTS, "..", "gui", "app", "gui_app.py")), encoding="utf-8").read()
+        fn = next(n for n in ast.parse(gui_src).body
+                  if isinstance(n, ast.FunctionDef) and n.name == "_distro_start_remedy_kind")
+        sys.path.insert(0, os.path.normpath(os.path.join(_TESTS, "..")))
+        from gui.app import wsl_bridge
+        ns = {"wsl_bridge": wsl_bridge}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "gui_app.py", "exec"), ns)
+        drift = [(k, ps_kind.get(k), ns["_distro_start_remedy_kind"](*got[k]))
+                 for k in got if ps_kind.get(k) != ns["_distro_start_remedy_kind"](*got[k])]
+        self.assertEqual(len(ps_kind), len(got), r.stderr.decode("utf-8", "replace")[-800:])
+        self.assertEqual(drift, [])
+        self.assertIn("Disk", set(ps_kind.values()))
+        self.assertIn("Unclassified", set(ps_kind.values()))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -460,46 +538,71 @@ class RemedyKindExecutedTest(_PwshCase):
     """Get-HypervisorRemedyKind: the words follow the PROOF.
 
     The review of PR #28 found a transcript saying „Virtualisierung ist aktiv"
-    and then blaming VT-x in the BIOS. Firmware wording is allowed ONLY when
-    Windows reports both no running hypervisor AND firmware virtualization off
-    (a running hypervisor masks the firmware property); the HYPERV_NOT_INSTALLED
-    code gets the feature wording; everything else the service wording."""
+    and then blaming VT-x in the BIOS. wsl's own DISK report outranks a CIM
+    reading; Firmware wording is allowed ONLY when Windows reports both no
+    running hypervisor AND firmware virtualization off (a running hypervisor
+    masks the firmware property); the HYPERV_NOT_INSTALLED code gets the feature
+    wording; any other hypervisor-class failure the service wording; and a start
+    that failed with nothing known the unclassified wording, which claims no
+    cause. A bare code (no class passed) is classified on its own."""
 
-    _PS = r'''
+    _PS = r"""
 param([string]$Helper)
 $ErrorActionPreference = "Continue"
 . $Helper
 foreach ($hv in @('true', 'false', 'null')) {
   foreach ($vfe in @('true', 'false', 'null')) {
-    foreach ($code in @('', 'HCS_E_SERVICE_NOT_AVAILABLE', 'HCS_E_HYPERV_NOT_INSTALLED')) {
-      $st = @{ HypervisorPresent = $null; VirtFirmwareEnabled = $null }
-      if ($hv -eq 'true') { $st.HypervisorPresent = $true } elseif ($hv -eq 'false') { $st.HypervisorPresent = $false }
-      if ($vfe -eq 'true') { $st.VirtFirmwareEnabled = $true } elseif ($vfe -eq 'false') { $st.VirtFirmwareEnabled = $false }
-      "{0}|{1}|{2}`t{3}" -f $hv, $vfe, $code, (Get-HypervisorRemedyKind -State $st -FailureCode $code)
+    foreach ($code in @('', 'HCS_E_SERVICE_NOT_AVAILABLE', 'HCS_E_HYPERV_NOT_INSTALLED', 'ERROR_DISK_FULL', '0x80070422')) {
+      foreach ($class in @('', 'hypervisor', 'disk')) {
+        $st = @{ HypervisorPresent = $null; VirtFirmwareEnabled = $null }
+        if ($hv -eq 'true') { $st.HypervisorPresent = $true } elseif ($hv -eq 'false') { $st.HypervisorPresent = $false }
+        if ($vfe -eq 'true') { $st.VirtFirmwareEnabled = $true } elseif ($vfe -eq 'false') { $st.VirtFirmwareEnabled = $false }
+        "{0}|{1}|{2}|{3}`t{4}" -f $hv, $vfe, $code, $class, (Get-HypervisorRemedyKind -State $st -FailureCode $code -FailureClass $class)
+      }
     }
   }
 }
 "null-state`t{0}" -f (Get-HypervisorRemedyKind -State $null -FailureCode 'HCS_E_HYPERV_NOT_INSTALLED')
-'''
+"no-class-param`t{0}" -f (Get-HypervisorRemedyKind -State @{} -FailureCode 'HCS_E_SERVICE_NOT_AVAILABLE')
+"""
 
-    @staticmethod
-    def _expected(hv, vfe, code):
+    _CODE_CLASS = {"HCS_E_SERVICE_NOT_AVAILABLE": "hypervisor", "HCS_E_HYPERV_NOT_INSTALLED": "hypervisor",
+                   "ERROR_DISK_FULL": "disk", "0x80070422": ""}
+
+    @classmethod
+    def _expected(cls, hv, vfe, code, klass):
+        """The specification, rung by rung — not derived from the .ps1."""
+        effective = klass or (cls._CODE_CLASS.get(code, "") if code else "")
+        if effective == "disk":
+            return "Disk"
         if hv == "false" and vfe == "false":
             return "Firmware"
         if code == "HCS_E_HYPERV_NOT_INSTALLED":
             return "Feature"
-        return "Service"
+        if effective == "hypervisor":
+            return "Service"
+        return "Unclassified"
 
     def test_every_combination(self):
         r = self._ps("kind.ps1", self._PS, "-Helper", _VIRT_PS1)
         got = dict(ln.split("\t", 1) for ln in r.stdout.decode("utf-8").splitlines() if "\t" in ln)
-        self.assertEqual(len(got), 28, r.stderr.decode("utf-8", "replace")[-1500:])
+        self.assertEqual(len(got), 3 * 3 * 5 * 3 + 2, r.stderr.decode("utf-8", "replace")[-1500:])
         for hv in ("true", "false", "null"):
             for vfe in ("true", "false", "null"):
-                for code in ("", "HCS_E_SERVICE_NOT_AVAILABLE", "HCS_E_HYPERV_NOT_INSTALLED"):
-                    with self.subTest(hv=hv, vfe=vfe, code=code):
-                        self.assertEqual(got[f"{hv}|{vfe}|{code}"], self._expected(hv, vfe, code))
+                for code in ("", "HCS_E_SERVICE_NOT_AVAILABLE", "HCS_E_HYPERV_NOT_INSTALLED", "ERROR_DISK_FULL", "0x80070422"):
+                    for klass in ("", "hypervisor", "disk"):
+                        with self.subTest(hv=hv, vfe=vfe, code=code, klass=klass):
+                            self.assertEqual(got[f"{hv}|{vfe}|{code}|{klass}"],
+                                             self._expected(hv, vfe, code, klass))
         self.assertEqual(got["null-state"], "Feature")
+        self.assertEqual(got["no-class-param"], "Service")
+        # The cells the review was about, spelled out.
+        self.assertEqual(got["true|true|0x80070422|hypervisor"], "Service",
+                         "a CreateVm-stage failure with any code gets the VM remedy")
+        self.assertEqual(got["false|false|ERROR_DISK_FULL|disk"], "Disk",
+                         "wsl's own disk report outranks a CIM firmware reading")
+        self.assertEqual(got["true|true||"], "Unclassified",
+                         "nothing known must not be dressed up as the VM service")
 
     def test_the_evidence_reaches_the_notes(self):
         """The facts a remedy is chosen from must be IN the transcript — the
@@ -671,7 +774,7 @@ if args[:1] == ["--version"]:
 if args[:1] in (["--install"], ["--update"]):
     sys.exit(0)
 if args[:1] == ["--unregister"]:
-    for n in ("registered", "vm_dead", "no_stamp"):
+    for n in ("registered", "vm_dead", "no_stamp", "stamp"):
         if os.path.exists(p(n)):
             os.remove(p(n))
     sys.exit(0)
@@ -688,16 +791,35 @@ if args[:1] == ["--import"]:
     elif mode == "disk":
         emit("Auf dem Datenträger ist nicht genügend Speicherplatz vorhanden.\r\n"
              "Fehlercode: Wsl/Service/RegisterDistro/ERROR_DISK_FULL\r\n")
+    elif mode == "custom":
+        emit(open(p("import_text"), encoding="utf-8").read())
     sys.exit(255)   # wsl.exe exits -1; a POSIX status can only say 255
 if args[:1] == ["-d"]:
     if not os.path.exists(p("registered")):
         sys.exit(255)
     if os.path.exists(p("vm_dead")):
-        # registered, but the VM cannot start: every -d command fails like HCS
-        emit("Der Vorgang konnte nicht gestartet werden, da ein erforderliches Feature nicht installiert ist.\r\n"
-             "Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE\r\n")
+        # registered, but the VM cannot start: every -d command fails with wsl's
+        # OWN words (vm_dead's content; empty = the 2026-09-07 HCS class)
+        emit(open(p("vm_dead"), encoding="utf-8").read() or ("Der Vorgang konnte nicht gestartet werden, da ein erforderliches Feature nicht installiert ist.\r\n"
+                               "Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE\r\n"))
         sys.exit(255)
     rest = args[3:] if len(args) > 2 and args[2] == "--" else args[2:]
+    if rest[:3] == ["--exec", "/bin/sh", "-c"] and len(rest) == 4:
+        # The distro's VM is up: run the caller's script under a REAL /bin/sh,
+        # with the distro's stamp file mapped into the state dir (absent when
+        # no_stamp, "7" unless a "stamp" file says otherwise). Linux output is
+        # UTF-8, not UTF-16 — only wsl.exe's own messages are UTF-16LE.
+        stamp_file = p("distro_etc_stamp")
+        if os.path.exists(stamp_file):
+            os.remove(stamp_file)
+        if not os.path.exists(p("no_stamp")):
+            with open(stamp_file, "w") as fh:
+                fh.write(rd("stamp", "7") + "\n")
+        import subprocess
+        r = subprocess.run(["/bin/sh", "-c", rest[3].replace("/etc/edubotics-rootfs-version", stamp_file)],
+                           capture_output=True)
+        sys.stdout.buffer.write(r.stdout); sys.stderr.buffer.write(r.stderr)
+        sys.exit(r.returncode)
     if rest[:1] == ["cat"]:
         if os.path.exists(p("no_stamp")):     # a distro from an installer <= 2.6.0
             sys.stderr.write("cat: /etc/edubotics-rootfs-version: No such file or directory\n"); sys.exit(1)
@@ -735,7 +857,8 @@ class _InstallerSandbox(_PwshCase):
 
     def _sandbox(self, *, flag=None, flag_age=0, boot_age=1800, status="0", feat="", hv="false",
                  vfe="true", import_mode="hcs", images=False, registered=False, vm_dead=False,
-                 no_stamp=False, list_mode="ok", lxss=None, svc="vmcompute=Stopped/Manual;WslService=Running/Automatic"):
+                 no_stamp=False, list_mode="ok", lxss=None, svc="vmcompute=Stopped/Manual;WslService=Running/Automatic",
+                 stamp=None, import_text=None):
         base = tempfile.mkdtemp(dir=self.tmp)
         scripts = os.path.join(base, "app", "scripts")
         shutil.copytree(_SCRIPTS, scripts)
@@ -763,7 +886,15 @@ class _InstallerSandbox(_PwshCase):
         for name, on in (("images", images), ("registered", registered), ("vm_dead", vm_dead),
                          ("no_stamp", no_stamp)):
             if on:
-                open(os.path.join(state, name), "w").close()
+                with open(os.path.join(state, name), "w") as fh:
+                    # vm_dead may carry the exact wsl text to emit
+                    fh.write(on if isinstance(on, str) else "")
+        if stamp is not None:
+            with open(os.path.join(state, "stamp"), "w") as fh:
+                fh.write(stamp)
+        if import_text is not None:
+            with open(os.path.join(state, "import_text"), "w", encoding="utf-8") as fh:
+                fh.write(import_text)
         bindir = os.path.join(base, "bin")
         os.makedirs(bindir)
         for name, body in (("wsl", _FAKE_WSL), ("usbipd", "import sys; print('5.3.0')"),
@@ -801,6 +932,13 @@ def _finalize_const(name):
     m = re.search(r'(?m)^\$%s\s*=\s*"([^"]*)"' % re.escape(name), src)
     assert m, f"${name} is no longer a one-line assignment in finalize_install.ps1"
     return m.group(1)
+
+
+def _problem_with_code(name, code):
+    """A remedy's problem line as Fail-WithHypervisorRemedy writes it: wsl's
+    code inside the sentence's final period."""
+    problem = _finalize_const(name)
+    return f"{problem.rstrip('.')} (Fehlercode: {code})." if code else problem
 
 
 class FinalizeEndToEndTest(_InstallerSandbox):
@@ -861,7 +999,8 @@ class FinalizeEndToEndTest(_InstallerSandbox):
                 self.assertEqual(rc, 11, transcript[-3000:])
                 self.assertTrue(self._imported(sb), "the import is tried; ITS failure exits 11")
                 problem, nextstep = self._marker_lines(marker)
-                self.assertEqual(problem, _finalize_const("VIRT_FIRMWARE_PROBLEM_DE"))
+                self.assertEqual(problem, _problem_with_code("VIRT_FIRMWARE_PROBLEM_DE",
+                                                             "HCS_E_SERVICE_NOT_AVAILABLE"))
                 self.assertEqual(nextstep, _finalize_const("VIRT_FIRMWARE_NEXTSTEP_DE"))
 
     def test_an_unknown_verdict_is_caught_by_the_import_classifier(self):
@@ -875,12 +1014,12 @@ class FinalizeEndToEndTest(_InstallerSandbox):
         self.assertIn("Fehlercode: Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE",
                       transcript, "wsl's own words must be echoed into the transcript")
         self.assertNotIn("\x00", transcript, "the echo must be NUL-free")
-        self.assertIn("WSL2 konnte keine virtuelle Maschine starten", transcript)
-        self.assertIn("Hypervisor-Fehlerart: Service, Fehlercode: HCS_E_SERVICE_NOT_AVAILABLE)", transcript)
-        self.assertEqual(transcript.count("Hypervisor-Fehlerart"), 1, "the remedy kind is reported once")
+        self.assertIn("WSL2 konnte nicht starten (Fehlerart: Service, Fehlercode: HCS_E_SERVICE_NOT_AVAILABLE).",
+                      transcript)
+        self.assertEqual(transcript.count("Fehlerart:"), 1, "the remedy kind is reported once")
         self.assertNotIn("Antivirus-Ausnahme", transcript)
         problem, nextstep = self._marker_lines(marker)
-        self.assertEqual(problem, _finalize_const("VIRT_SERVICE_PROBLEM_DE"))
+        self.assertEqual(problem, _problem_with_code("VIRT_SERVICE_PROBLEM_DE", "HCS_E_SERVICE_NOT_AVAILABLE"))
         self.assertEqual(nextstep, _finalize_const("VIRT_SERVICE_NEXTSTEP_DE"))
         # The evidence the remedy was chosen from is IN the transcript.
         for fact in ("HypervisorPresent = (leer)", "VirtualizationFirmwareEnabled = (leer)",
@@ -900,14 +1039,14 @@ class FinalizeEndToEndTest(_InstallerSandbox):
         self.assertNotIn("Virtualisierung ist aktiv", transcript)
         self.assertNotIn("ausgeschaltet", transcript)
         problem, _ = self._marker_lines(marker)
-        self.assertEqual(problem, _finalize_const("VIRT_SERVICE_PROBLEM_DE"))
+        self.assertEqual(problem, _problem_with_code("VIRT_SERVICE_PROBLEM_DE", "HCS_E_SERVICE_NOT_AVAILABLE"))
 
     def test_hyperv_not_installed_gets_the_feature_remedy(self):
         sb = self._sandbox(flag=None, boot_age=600, hv="false", vfe="true", import_mode="hyperv")
         rc, transcript, marker = self._finalize(sb)
         self.assertEqual(rc, 11, transcript[-3000:])
         problem, nextstep = self._marker_lines(marker)
-        self.assertEqual(problem, _finalize_const("VIRT_FEATURE_PROBLEM_DE"))
+        self.assertEqual(problem, _problem_with_code("VIRT_FEATURE_PROBLEM_DE", "HCS_E_HYPERV_NOT_INSTALLED"))
         self.assertIn("VM-Plattform", nextstep)
 
     def test_a_pending_feature_enable_defers_even_with_no_flag(self):
@@ -1067,12 +1206,15 @@ class FinalizeEndToEndTest(_InstallerSandbox):
     def test_a_stampless_distro_still_gets_its_one_final_reimport(self):
         """The designed case the unreadable-stamp path exists for must be
         untouched: a HEALTHY distro from an installer <= 2.6.0 (no stamp) is
-        refused (12) without consent and rebuilt with it."""
+        refused (12) without consent and rebuilt with it — now on PROOF: its VM
+        answered the probe and the stamp file does not exist."""
         sb = self._sandbox(flag=None, boot_age=600, hv="true", vfe="true", import_mode="ok",
                            registered=True, no_stamp=True)
         rc, out = self._import_directly(sb, destructive=False)
         self.assertEqual(rc, 12, out[-3000:])
         self.assertNotIn("--unregister EduBotics", self._calls(sb))
+        self.assertIn("keinen Rootfs-Versionsstempel", out)
+        self.assertNotIn("Rootfs-Version ''", out, "the false mismatch line is gone")
         rc, out = self._import_directly(sb, destructive=True)
         self.assertEqual(rc, 0, out[-3000:])
         self.assertIn("--unregister EduBotics", self._calls(sb))
@@ -1103,6 +1245,113 @@ class FinalizeEndToEndTest(_InstallerSandbox):
         self.assertFalse(any(c.startswith(("--unregister", "--import")) for c in self._calls(sb)))
         self.assertIn("WSL antwortet gerade nicht", out)
 
+    # ── Review item 1: no destructive rebuild without POSITIVE proof ───────────
+    _MOUNTVHD_0032 = ("Fehler beim Anfügen des Datenträgers \"C:\\Program Files\\WSL\\system.vhd\" an WSL2: "
+                      "Die Anforderung wird nicht unterstützt.\r\n"
+                      "Fehlercode: Wsl/Service/CreateInstance/CreateVm/MountVhd/HCS/0x80070032\r\n")
+
+    def test_a_dead_vm_with_an_unlisted_code_is_never_rebuilt(self):
+        """The review's High finding. A registered distro whose VM fails with a
+        code OUTSIDE the old four tokens (MountVhd/HCS/0x80070032 after 24H2)
+        used to read as "no stamp": exit 12, the false line „Rootfs-Version ''
+        passt nicht", and after the installer's consent `wsl --unregister`."""
+        sb = self._sandbox(flag="1", flag_age=86400, boot_age=3600, hv="true", vfe="false", import_mode="ok",
+                           registered=True, vm_dead=self._MOUNTVHD_0032)
+        rc, transcript, marker = self._finalize(sb)
+        self.assertEqual(rc, 11, transcript[-3000:])
+        calls = self._calls(sb)
+        self.assertFalse(any(c.startswith(("--unregister", "--import")) for c in calls), calls)
+        self.assertNotIn("Rootfs-Version ''", transcript)
+        self.assertNotIn("Installer erneut", marker)
+        problem, nextstep = self._marker_lines(marker)
+        self.assertEqual(problem, _problem_with_code("VIRT_DISK_PROBLEM_DE", "0x80070032"))
+        self.assertEqual(nextstep, _finalize_const("VIRT_DISK_NEXTSTEP_DE"))
+        # And the installer's Step 4, which arrives WITH consent (and only
+        # runs when no reboot flag is pending):
+        os.remove(sb["flag"])
+        rc, out = self._import_directly(sb, destructive=True)
+        self.assertEqual(rc, 11, out[-3000:])
+        self.assertNotIn("--unregister EduBotics", self._calls(sb))
+        self.assertIn("Die Umgebung und ihre Daten bleiben erhalten", out)
+
+    def test_a_dead_vm_that_names_nothing_known_is_not_rebuilt_either(self):
+        """No classifier can list every failure, so the rule is proof-only: a
+        distro that did not start is never rebuilt, whatever wsl said. The words
+        then claim no cause, but still carry whatever code wsl printed."""
+        for text, code in (("Fehlercode: Wsl/Service/E_UNEXPECTED\r\n", "E_UNEXPECTED"),
+                           ("Zeitüberschreitung beim Warten auf die virtuelle Maschine.\r\n", "")):
+            with self.subTest(code=code or "(none)"):
+                sb = self._sandbox(flag="1", flag_age=86400, boot_age=3600, hv="null", vfe="null",
+                                   import_mode="ok", registered=True, vm_dead=text)
+                rc, transcript, marker = self._finalize(sb)
+                self.assertEqual(rc, 11, transcript[-3000:])
+                self.assertFalse(any(c.startswith(("--unregister", "--import")) for c in self._calls(sb)))
+                problem, nextstep = self._marker_lines(marker)
+                self.assertEqual(problem, _problem_with_code("VIRT_UNCLASSIFIED_PROBLEM_DE", code))
+                self.assertEqual(nextstep, _finalize_const("VIRT_UNCLASSIFIED_NEXTSTEP_DE"))
+                os.remove(sb["flag"])
+                rc, out = self._import_directly(sb, destructive=True)
+                self.assertEqual(rc, 11, out[-3000:])
+                self.assertNotIn("--unregister EduBotics", self._calls(sb))
+
+    def test_a_readable_different_stamp_still_needs_consent_and_gets_it(self):
+        """A VM that started and a stamp that DIFFERS is the one proven rebuild
+        besides the absent stamp: 12 without consent (naming both versions),
+        rebuilt with it."""
+        sb = self._sandbox(flag=None, boot_age=600, hv="true", vfe="true", import_mode="ok",
+                           registered=True, stamp="6", images=True)
+        rc, out = self._import_directly(sb, destructive=False)
+        self.assertEqual(rc, 12, out[-3000:])
+        self.assertIn("Vorhandene Rootfs-Version '6' passt nicht zur neuen Version '7'", out)
+        self.assertNotIn("--unregister EduBotics", self._calls(sb))
+        rc, out = self._import_directly(sb, destructive=True)
+        self.assertEqual(rc, 0, out[-3000:])
+        self.assertIn("--unregister EduBotics", self._calls(sb))
+
+    def test_a_matching_stamp_keeps_the_distro(self):
+        sb = self._sandbox(flag="1", flag_age=86400, boot_age=3600, hv="true", vfe="true", import_mode="ok",
+                           registered=True, images=True)
+        rc, transcript, marker = self._finalize(sb)
+        self.assertEqual(rc, 0, transcript[-3000:])
+        self.assertIn("Import übersprungen", transcript)
+        self.assertFalse(any(c.startswith(("--unregister", "--import")) for c in self._calls(sb)))
+        self.assertTrue(marker.startswith("SUCCESS "), marker)
+
+    def test_the_stamp_is_read_by_one_command_inside_the_distro(self):
+        """The proof is a sentinel printed by the SAME command that reads the
+        stamp; a separate probe could race a VM that dies in between."""
+        sb = self._sandbox(flag=None, boot_age=600, hv="true", vfe="true", import_mode="ok",
+                           registered=True, images=True)
+        self._import_directly(sb, destructive=False)
+        probes = [c for c in self._calls(sb) if c.startswith("-d EduBotics --exec /bin/sh -c ")]
+        self.assertEqual(len(probes), 1, self._calls(sb))
+        self.assertIn("echo EDUBOTICS_VM_UP;", probes[0])
+        self.assertFalse(any(c.startswith("-d EduBotics -- cat") for c in self._calls(sb)),
+                         "the unproven read is gone")
+
+    # ── Review item 2: classify by STAGE ─────────────────────────────────────
+    def test_a_createvm_stage_import_failure_gets_the_vm_remedy(self):
+        """CreateVm/HCS/0x80070422 (a disabled service) is outside the old four
+        tokens and got the disk/antivirus triad — the original complaint."""
+        sb = self._sandbox(flag=None, boot_age=600, hv="null", vfe="null", import_mode="custom",
+                           import_text="Der Dienst kann nicht gestartet werden.\r\n"
+                                       "Fehlercode: Wsl/Service/RegisterDistro/CreateVm/HCS/0x80070422\r\n")
+        rc, transcript, marker = self._finalize(sb)
+        self.assertEqual(rc, 11, transcript[-3000:])
+        self.assertNotIn("Antivirus-Ausnahme", transcript)
+        problem, _ = self._marker_lines(marker)
+        self.assertEqual(problem, _problem_with_code("VIRT_SERVICE_PROBLEM_DE", "0x80070422"))
+
+    def test_a_disk_stage_import_failure_keeps_the_disk_wording(self):
+        """A FRESH import that cannot attach its disk has no data to protect:
+        exit 1 and the disk triad, as for a full disk."""
+        sb = self._sandbox(flag=None, boot_age=600, hv="null", vfe="null", import_mode="custom",
+                           import_text="Zugriff verweigert.\r\n"
+                                       "Fehlercode: Wsl/Service/RegisterDistro/MountVhd/HCS/E_ACCESSDENIED\r\n")
+        rc, transcript, _ = self._finalize(sb)
+        self.assertEqual(rc, 1, transcript[-3000:])
+        self.assertIn("Prüfen Sie: Antivirus-Ausnahme, genug Speicherplatz", transcript)
+
     def test_import_without_its_helpers_keeps_the_old_wording(self):
         """Step 4 of a partially-copied {app}\\scripts must degrade, never
         hard-fail: no classifier, no three-way read, the pre-2026-09 triad."""
@@ -1113,6 +1362,158 @@ class FinalizeEndToEndTest(_InstallerSandbox):
         self.assertEqual(rc, 1, out[-3000:])
         self.assertIn("Prüfen Sie: Antivirus-Ausnahme, genug Speicherplatz", out)
         self.assertTrue(any(c.startswith("--import") for c in self._calls(sb)))
+
+
+class RestartRecordExecutedTest(_InstallerSandbox):
+    """Review item 4: one restart per reason, not one per launch.
+
+    A PC whose `wsl --status` fails on every boot re-runs `wsl --install` in
+    finalize's Phase 0 (exit 0), which refreshes the flag IN THIS BOOT, so the
+    verdict says RebootRequired after every restart — exit 10, forever. finalize
+    now records the boot it asked in and the rung that asked; a RebootRequired
+    verdict for the SAME rung after a REAL restart (LastBootUpTime moved by more
+    than 60 s) exits 11 with „Ein Neustart hat nicht geholfen"."""
+
+    def _finalize(self, sb):
+        return FinalizeEndToEndTest._finalize(self, sb)
+
+    def _record(self, sb):
+        path = os.path.join(sb["scripts"], ".restart_requested")
+        return open(path, encoding="ascii").read() if os.path.exists(path) else None
+
+    @staticmethod
+    def _boot(seconds_ago):
+        return dt.datetime.fromtimestamp(time.time() - seconds_ago).isoformat(timespec="seconds")
+
+    def _marker_pair(self, marker):
+        lines = marker.splitlines()
+        self.assertTrue(lines and lines[0].startswith("FAILED "), marker)
+        return lines[1], lines[2]
+
+    def test_the_loop_ends_after_one_fruitless_restart(self):
+        sb = self._sandbox(flag="1", flag_age=7200, boot_age=600, status="1", hv="false", vfe="true")
+        rc, transcript, _ = self._finalize(sb)
+        self.assertEqual(rc, 10, transcript[-3000:])
+        self.assertIn("reason=NoBootSinceFlag", self._record(sb) or "", "the request is recorded")
+        # The student restarts (a real restart: the boot moves by minutes) and reopens.
+        sb["env"]["MOCK_BOOT"] = self._boot(60)
+        rc, transcript, marker = self._finalize(sb)
+        self.assertEqual(rc, 11, transcript[-3000:])
+        problem, nextstep = self._marker_pair(marker)
+        self.assertEqual(problem, _finalize_const("RESTART_DID_NOT_HELP_PROBLEM_DE"))
+        self.assertEqual(nextstep, _finalize_const("RESTART_DID_NOT_HELP_NEXTSTEP_DE"))
+        self.assertNotIn("Neu starten, nicht Herunterfahren", nextstep, "no request for another restart")
+        self.assertFalse(any(c.startswith("--import") for c in self._calls(sb)))
+        # Reopened again in the same boot, and after yet another restart: it keeps
+        # saying the restart did not help, and never asks for one again.
+        for boot_ago in (60, 5):
+            sb["env"]["MOCK_BOOT"] = self._boot(boot_ago)
+            rc, transcript, _ = self._finalize(sb)
+            self.assertEqual(rc, 11, transcript[-3000:])
+
+    def test_reopening_without_a_restart_still_asks_for_one(self):
+        """Same boot (or Fast Startup, which does not move LastBootUpTime)."""
+        sb = self._sandbox(flag="1", flag_age=7200, boot_age=600, status="1", hv="false", vfe="true")
+        self.assertEqual(self._finalize(sb)[0], 10)
+        rc, transcript, _ = self._finalize(sb)
+        self.assertEqual(rc, 10, transcript[-3000:])
+        self.assertIn("nicht Herunterfahren", transcript)
+
+    def test_a_clock_step_inside_the_tolerance_is_not_a_restart(self):
+        sb = self._sandbox(flag="1", flag_age=7200, boot_age=600, status="1", hv="false", vfe="true")
+        boot = sb["env"]["MOCK_BOOT"]
+        self.assertEqual(self._finalize(sb)[0], 10)
+        sb["env"]["MOCK_BOOT"] = (dt.datetime.fromisoformat(boot) + dt.timedelta(seconds=45)).isoformat()
+        self.assertEqual(self._finalize(sb)[0], 10)
+
+    def test_a_restart_that_uncovered_another_reason_gets_its_own_restart(self):
+        """A pending feature enable asks for a restart; after it the WSL install
+        needs one. That is progress, not a loop."""
+        sb = self._sandbox(flag=None, boot_age=600, status="0", hv="false", vfe="true",
+                           feat="VirtualMachinePlatform=EnablePending")
+        self.assertEqual(self._finalize(sb)[0], 10)
+        self.assertIn("reason=EnablePending", self._record(sb) or "")
+        sb["env"]["MOCK_BOOT"] = self._boot(60)
+        sb["env"]["MOCK_FEAT"] = ""
+        with open(os.path.join(sb["state"], "status_seq"), "w") as fh:
+            fh.write("1")
+        rc, transcript, _ = self._finalize(sb)
+        self.assertEqual(rc, 10, transcript[-3000:])
+        self.assertIn("reason=NoBootSinceFlag", self._record(sb) or "")
+
+    def test_a_stuck_feature_enable_is_bounded_too(self):
+        sb = self._sandbox(flag=None, boot_age=600, status="0", hv="false", vfe="true",
+                           feat="VirtualMachinePlatform=EnablePending")
+        self.assertEqual(self._finalize(sb)[0], 10)
+        sb["env"]["MOCK_BOOT"] = self._boot(60)
+        rc, transcript, marker = self._finalize(sb)
+        self.assertEqual(rc, 11, transcript[-3000:])
+        self.assertEqual(self._marker_pair(marker)[0], _finalize_const("RESTART_DID_NOT_HELP_PROBLEM_DE"))
+
+    def test_a_restart_that_helped_clears_the_record(self):
+        """The legitimate first reboot: asked once, the restart settles it, the
+        install completes — and no stale record can turn a LATER genuine
+        request into „hat nicht geholfen"."""
+        sb = self._sandbox(flag="1", flag_age=7, boot_age=1800, status="0", hv="false", vfe="true",
+                           import_mode="ok", images=True)
+        self.assertEqual(self._finalize(sb)[0], 10)
+        self.assertIsNotNone(self._record(sb))
+        sb["env"]["MOCK_BOOT"] = self._boot(60)
+        sb["env"]["MOCK_HV"] = "true"
+        rc, transcript, marker = self._finalize(sb)
+        self.assertEqual(rc, 0, transcript[-3000:])
+        self.assertIsNone(self._record(sb), "the verdict passed, so the request is settled")
+
+    def test_an_unreadable_boot_time_keeps_asking_and_records_nothing(self):
+        sb = self._sandbox(flag=None, boot_age=600, status="0", hv="false", vfe="true",
+                           feat="VirtualMachinePlatform=EnablePending")
+        sb["env"]["MOCK_BOOT"] = "throws"
+        for _ in range(2):
+            rc, transcript, _ = self._finalize(sb)
+            self.assertEqual(rc, 10, transcript[-3000:])
+        self.assertIsNone(self._record(sb))
+
+    def test_the_record_reader_and_the_test_refuse_what_they_cannot_prove(self):
+        ps = r"""
+param([string]$Helper, [string]$Dir)
+$ErrorActionPreference = "Continue"
+. $Helper
+$boot = [datetime]::Parse("2026-09-15T10:00:00")
+$ok = Join-Path $Dir "ok"
+Set-Content -LiteralPath $ok -Value (Format-RestartRequest -BootTime $boot -Reason "NoBootSinceFlag") -Encoding ASCII
+$cases = [ordered]@{
+  "missing" = (Join-Path $Dir "nope");
+  "garbage" = "garbage"; "no_reason" = "noreason"; "bad_ticks" = "badticks"; "neg_ticks" = "negticks"
+}
+Set-Content -LiteralPath (Join-Path $Dir "garbage") -Value "hello" -Encoding ASCII
+Set-Content -LiteralPath (Join-Path $Dir "noreason") -Value ("boot={0}" -f $boot.ToUniversalTime().Ticks) -Encoding ASCII
+Set-Content -LiteralPath (Join-Path $Dir "badticks") -Value "boot=abc`nreason=NoBootSinceFlag" -Encoding ASCII
+Set-Content -LiteralPath (Join-Path $Dir "negticks") -Value "boot=-5`nreason=NoBootSinceFlag" -Encoding ASCII
+foreach ($k in $cases.Keys) {
+  $path = $cases[$k]; if (-not [System.IO.Path]::IsPathRooted($path)) { $path = Join-Path $Dir $path }
+  "read:{0}`t{1}" -f $k, ($null -eq (Read-RestartRequest -Path $path))
+}
+$req = Read-RestartRequest -Path $ok
+"roundtrip`t{0}|{1}" -f ($req.Boot -eq $boot.ToUniversalTime()), $req.Reason
+$st = @{ BootTime = $boot.AddSeconds(61) }
+"moved61`t{0}" -f (Test-RestartDidNotHelp -State $st -Request $req -Reason "NoBootSinceFlag")
+"moved60`t{0}" -f (Test-RestartDidNotHelp -State @{ BootTime = $boot.AddSeconds(60) } -Request $req -Reason "NoBootSinceFlag")
+"other_reason`t{0}" -f (Test-RestartDidNotHelp -State $st -Request $req -Reason "EnablePending")
+"no_reason`t{0}" -f (Test-RestartDidNotHelp -State $st -Request $req -Reason "")
+"no_boot`t{0}" -f (Test-RestartDidNotHelp -State @{ BootTime = $null } -Request $req -Reason "NoBootSinceFlag")
+"no_request`t{0}" -f (Test-RestartDidNotHelp -State $st -Request $null -Reason "NoBootSinceFlag")
+"backwards`t{0}" -f (Test-RestartDidNotHelp -State @{ BootTime = $boot.AddSeconds(-600) } -Request $req -Reason "NoBootSinceFlag")
+"""
+        d = tempfile.mkdtemp(dir=self.tmp)
+        r = self._ps("record.ps1", ps, "-Helper", _VIRT_PS1, "-Dir", d)
+        got = dict(ln.split("\t", 1) for ln in r.stdout.decode("utf-8").splitlines() if "\t" in ln)
+        for k in ("missing", "garbage", "no_reason", "bad_ticks", "neg_ticks"):
+            self.assertEqual(got.get(f"read:{k}"), "True", (k, r.stderr.decode("utf-8", "replace")[-800:]))
+        self.assertEqual(got.get("roundtrip"), "True|NoBootSinceFlag")
+        self.assertEqual(got.get("moved61"), "True")
+        self.assertEqual(got.get("moved60"), "False", "60 s is inside the tolerance")
+        for k in ("other_reason", "no_reason", "no_boot", "no_request", "backwards"):
+            self.assertEqual(got.get(k), "False", k)
 
 
 class PrerequisitesExecutedTest(_InstallerSandbox):
@@ -1220,6 +1621,24 @@ class PreflightExecutedTest(_InstallerSandbox):
         _, out = self._preflight(sb)
         self.assertIn("[OK] WSL2 installiert", out)
         self.assertNotIn("[WARNUNG] WSL2", out)
+
+    def test_a_restart_that_did_not_help_is_said_in_finalizes_words(self):
+        """preflight runs beside finalize in the same launch; after a fruitless
+        restart it must not print „bitte den PC neu starten" above finalize's
+        „Ein Neustart hat nicht geholfen"."""
+        sb = self._sandbox(flag="1", flag_age=7, boot_age=1800, hv="false", vfe="true")
+        boot = dt.datetime.fromisoformat(sb["env"]["MOCK_BOOT"])
+        earlier = boot - dt.timedelta(hours=1)
+        ticks = int((earlier.astimezone(dt.timezone.utc).replace(tzinfo=None) - dt.datetime(1, 1, 1)).total_seconds()) * 10**7
+        with open(os.path.join(sb["scripts"], ".restart_requested"), "w") as fh:
+            fh.write(f"boot={ticks}\nreason=NoBootSinceFlag\n")
+        _, out = self._preflight(sb)
+        self.assertIn(_finalize_const("RESTART_DID_NOT_HELP_PROBLEM_DE"), out)
+        self.assertIn(_finalize_const("RESTART_DID_NOT_HELP_NEXTSTEP_DE"), out)
+        self.assertNotIn("noch nicht einsatzbereit", out)
+        os.remove(os.path.join(sb["scripts"], ".restart_requested"))
+        _, out = self._preflight(sb)
+        self.assertIn("noch nicht einsatzbereit", out, "without a record it still asks for the restart")
 
     def test_wsl_missing_keeps_its_old_wording(self):
         sb = self._sandbox(flag=None, boot_age=600, status="1", hv="false", vfe="true")

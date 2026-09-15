@@ -73,12 +73,14 @@ if (Test-Path $distroHelper) {
     $distroHelperOk = $true
 }
 
-# The hypervisor-class report, spelled ONCE for both places this script meets
-# a VM that cannot start: an existing distro whose stamp read fails that way,
-# and `wsl --import`. It does three things and asserts nothing it cannot know:
-#   * hands the classified CODE back to finalize_install.ps1 through
-#     $global:EDUBOTICS_WSL_FAILURE_CODE (same runspace — finalize invokes this
-#     script with `&`), so finalize can pick the remedy for the GUI;
+# The "WSL2 could not start" report, spelled ONCE for both places this script
+# meets it: an existing distro that did not start for the stamp probe, and a
+# `wsl --import` whose failure classified as "hypervisor". It does three things
+# and asserts nothing it cannot know:
+#   * hands the classified CODE and CLASS back to finalize_install.ps1 through
+#     $global:EDUBOTICS_WSL_FAILURE_CODE / $global:EDUBOTICS_WSL_FAILURE_CLASS
+#     (same runspace — finalize invokes this script with `&`), so finalize can
+#     pick the remedy for the GUI;
 #   * prints the CIM facts the remedy kind is chosen from, when the helper is
 #     there to read them (this script also runs standalone as the installer's
 #     [Run] Step 4, where there is no finalize transcript to carry them);
@@ -88,21 +90,26 @@ if (Test-Path $distroHelper) {
 function Write-HypervisorRemedy {
     param([string]$Text)
     $code = ""
-    if ($virtHelperOk) { $code = Get-WslFailureCode -Text $Text }
+    $class = ""
+    if ($virtHelperOk) {
+        $code = Get-WslFailureCode -Text $Text
+        $class = Get-WslFailureClass -Text $Text
+    }
     $global:EDUBOTICS_WSL_FAILURE_CODE = $code
-    $kind = "Service"
+    $global:EDUBOTICS_WSL_FAILURE_CLASS = $class
+    $kind = "Unclassified"
     if ($virtHelperOk) {
         try {
             $st = Get-RebootState -FlagPath $rebootFlag
             # Under -PostReboot finalize printed these same facts moments ago.
             if (-not $PostReboot) { foreach ($note in @($st.Notes)) { Write-Host "   $note" } }
-            $kind = Get-HypervisorRemedyKind -State $st -FailureCode $code
+            $kind = Get-HypervisorRemedyKind -State $st -FailureCode $code -FailureClass $class
         } catch {
             Write-Host "   (Virtualisierungsstatus nicht lesbar: $_)" -ForegroundColor Yellow
         }
     }
     $codeLabel = if ($code) { $code } else { "unbekannt" }
-    Write-Host "   WSL2 konnte keine virtuelle Maschine starten (Hypervisor-Fehlerart: $kind, Fehlercode: $codeLabel)." -ForegroundColor Red
+    Write-Host "   WSL2 konnte nicht starten (Fehlerart: $kind, Fehlercode: $codeLabel)." -ForegroundColor Red
     # Under -PostReboot, finalize_install.ps1 prints the full remedy for this
     # kind on the very next lines (Fail-WithHypervisorRemedy); a second, shorter
     # copy here would only make the transcript say it twice.
@@ -110,11 +117,73 @@ function Write-HypervisorRemedy {
     if ($kind -eq "Firmware") {
         Write-Host "   Laut Windows ist die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI ausgeschaltet." -ForegroundColor Red
         Write-Host "   Bitte die IT-Betreuung der Schule bitten, sie im BIOS/UEFI einzuschalten." -ForegroundColor Red
+    } elseif ($kind -eq "Disk") {
+        Write-Host "   Bitte den PC neu starten (Neu starten, nicht Herunterfahren). Hilft das nicht," -ForegroundColor Red
+        Write-Host "   bitte die IT-Betreuung informieren (Datei ext4.vhdx vorhanden und nicht von" -ForegroundColor Red
+        Write-Host "   Virenschutz/Backup gesperrt, Ordner nicht komprimiert, Speicherplatz, wsl --update)." -ForegroundColor Red
+    } elseif ($kind -eq "Unclassified") {
+        Write-Host "   Bitte den PC neu starten (Neu starten, nicht Herunterfahren). Hilft das nicht," -ForegroundColor Red
+        Write-Host "   bitte die IT-Betreuung informieren und ihr dieses Protokoll zeigen." -ForegroundColor Red
     } else {
         Write-Host "   Bitte den PC neu starten (Neu starten, nicht Herunterfahren). Hilft das nicht," -ForegroundColor Red
         Write-Host "   bitte die IT-Betreuung informieren (Dienst vmcompute, hypervisorlaunchtype," -ForegroundColor Red
         Write-Host "   Windows-Funktion VM-Plattform, Virtualisierung im BIOS/UEFI)." -ForegroundColor Red
     }
+}
+
+# ── The existing distro's rootfs stamp, with PROOF that its VM started ──────
+# ONE command runs INSIDE the distro: it prints a sentinel first, then the stamp
+# or a second sentinel when the stamp file does not exist. Only the first
+# sentinel proves the VM started; only the second proves the stamp is genuinely
+# ABSENT — the one state (a distro from an installer <= 2.6.0) that earns the
+# destructive one-final re-import.
+#
+# The old read was `wsl -d EduBotics -- cat /etc/edubotics-rootfs-version`, and
+# ANY failure of it counted as "no stamp". That conflated two states: a distro
+# with no stamp, and a distro whose VM cannot start at all. Classifying the
+# failure (the four HCS tokens) only narrowed it — a VM that fails with any
+# other code (MountVhd/HCS/0x80070032, HCS_E_CONNECTION_TIMEOUT,
+# CreateVm/HCS/0x80070422) still got exit 12 and, after the installer's consent
+# box, `wsl --unregister` of an intact distro. Now the rule is proof-only: no
+# first sentinel, no rebuild — whatever wsl said, and whether or not it could
+# be classified.
+#
+# `--exec /bin/sh -c`: without --exec wsl joins the arguments back into ONE
+# command line for the default shell and the script loses its quoting. The
+# script has no `$`, no pipe and no redirection, so neither PowerShell 5.1's
+# native-argument quoting nor cmd.exe (the installer runs the same script) can
+# change it. robotis_ai_setup.iss::ProbeDistroStamp sends the SAME script with
+# the SAME sentinels; a test pins the spellings equal.
+$STAMP_PROBE_VM_UP  = 'EDUBOTICS_VM_UP'
+$STAMP_PROBE_ABSENT = 'EDUBOTICS_STAMP_ABSENT'
+$STAMP_PROBE_SCRIPT = 'echo EDUBOTICS_VM_UP; if [ -e /etc/edubotics-rootfs-version ]; then cat /etc/edubotics-rootfs-version; else echo EDUBOTICS_STAMP_ABSENT; fi'
+
+# @{ State = "Present" | "Absent" | "NoProof"; Version; Output }.
+function Get-ExistingDistroStamp {
+    param([string]$Name)
+    $out = ""
+    try {
+        $out = ((& wsl -d $Name --exec /bin/sh -c $STAMP_PROBE_SCRIPT 2>&1 | Out-String -Width 4096) -replace "`0", "")
+    } catch {
+        $out = "$_"
+    }
+    # The same walk as the .iss: nothing counts before the VM sentinel; after
+    # it, the absent sentinel or the first non-empty line (the stamp) decides.
+    # A VM that started with an EMPTY stamp file is "Present" with version "",
+    # which is honestly a different version.
+    $state = "NoProof"
+    $version = ""
+    foreach ($raw in ($out -split "`r?`n")) {
+        $l = ([string]$raw).Trim()
+        if ($l -eq $STAMP_PROBE_VM_UP) {
+            $state = "Present"
+        } elseif (($state -eq "Present") -and ($l -eq $STAMP_PROBE_ABSENT)) {
+            return @{ State = "Absent"; Version = ""; Output = $out }
+        } elseif (($state -eq "Present") -and $l -and (-not $version)) {
+            $version = $l
+        }
+    }
+    return @{ State = $state; Version = $version; Output = $out }
 }
 
 # Bail if prerequisites phase still needs a reboot (WSL2 not fully up yet).
@@ -208,33 +277,28 @@ if ($distroHelperOk) {
 $skipImport = $false
 if ($existing) {
     $distroVersion = ""
-    $stampOut = ""
+    # "Present" / "Absent" / "NoProof", or "" when the stamp is not read at all
+    # (-Force, or a dev build that ships no ROOTFS_VERSION — both unchanged).
+    $stampState = ""
     if (-not $Force -and $shippedVersion) {
-        try {
-            $stampOut = ((wsl -d $DistroName -- cat /etc/edubotics-rootfs-version 2>&1 | Out-String -Width 4096) -replace "`0", "")
-            $distroVersion = $stampOut.Trim()
-            if ($LASTEXITCODE -ne 0) { $distroVersion = "" }
-        } catch { $distroVersion = "" }
-    }
-    # An UNREADABLE stamp is the designed trigger for the one-final re-import
-    # (distros from installers <= 2.6.0 carry no stamp). But the read also fails
-    # when the distro CANNOT START, and then the rebuild is not a remedy: the
-    # unregister below destroys every dataset, the HF cache and the calibration,
-    # and the `wsl --import` after it fails on the same dead hypervisor —
-    # executed with a fake wsl, that sequence ran to the end with the distro
-    # gone. So when the failed read PROVES the hypervisor fault (the same
-    # code-token classifier as the import below), refuse before anything is
-    # destroyed, whatever consent was given, and report the hypervisor cause.
-    # Unclassified failures keep the old behaviour; -Force skips the read.
-    if ((-not $distroVersion) -and $virtHelperOk -and
-            ((Get-WslFailureClass -Text $stampOut) -eq "hypervisor")) {
-        if (-not [string]::IsNullOrWhiteSpace($stampOut)) { Write-Host $stampOut.TrimEnd() }
-        Write-FAIL "Die vorhandene EduBotics-Umgebung kann nicht gestartet werden — sie wird NICHT neu aufgebaut."
-        Write-HypervisorRemedy -Text $stampOut
-        Write-Host "   Die Umgebung und ihre Daten bleiben erhalten." -ForegroundColor Yellow
-        # 11 like the import's own hypervisor refusal below: finalize maps it to
-        # $EXIT_VIRT; Inno's [Run] Step 4 ignores exit codes.
-        exit 11
+        $stamp = Get-ExistingDistroStamp -Name $DistroName
+        $stampState = $stamp.State
+        $distroVersion = $stamp.Version
+        if ($stampState -eq "NoProof") {
+            # The distro did not start for the probe. Whatever wsl said —
+            # classified or not — that proves NOTHING about the stamp, so no
+            # rebuild is offered or run, whatever consent was given: the
+            # unregister below would destroy every dataset, the HF cache and the
+            # calibration of a distro that may be perfectly intact. Report why it
+            # did not start instead.
+            if (-not [string]::IsNullOrWhiteSpace($stamp.Output)) { Write-Host $stamp.Output.TrimEnd() }
+            Write-FAIL "Die vorhandene EduBotics-Umgebung ließ sich nicht starten — sie wird NICHT neu aufgebaut."
+            Write-HypervisorRemedy -Text $stamp.Output
+            Write-Host "   Die Umgebung und ihre Daten bleiben erhalten." -ForegroundColor Yellow
+            # 11 like the import's own hypervisor refusal below: finalize maps it
+            # to $EXIT_VIRT; Inno's [Run] Step 4 ignores exit codes.
+            exit 11
+        }
     }
     if ($distroVersion -and ($distroVersion -eq $shippedVersion)) {
         Write-OK "Vorhandene EduBotics-Umgebung ist aktuell (Rootfs-Version $shippedVersion) — Import übersprungen."
@@ -250,7 +314,11 @@ if ($existing) {
         # student's data on a rootfs bump during a reboot-pending upgrade.
         if (-not ($Force -or $AllowDestructiveReimport)) {
             Write-FAIL "Rootfs-Update erfordert eine Neuinstallation über den Installer."
-            Write-Host "   Vorhandene Rootfs-Version '$distroVersion' passt nicht zur neuen Version '$shippedVersion'." -ForegroundColor Yellow
+            if ($stampState -eq "Absent") {
+                Write-Host "   Die vorhandene Umgebung hat keinen Rootfs-Versionsstempel (mit einem älteren Installer eingerichtet); neue Version '$shippedVersion'." -ForegroundColor Yellow
+            } elseif ($stampState -eq "Present") {
+                Write-Host "   Vorhandene Rootfs-Version '$distroVersion' passt nicht zur neuen Version '$shippedVersion'." -ForegroundColor Yellow
+            }
             Write-Host "   Ein automatischer Neuaufbau würde lokale Daten löschen und wird ohne" -ForegroundColor Yellow
             Write-Host "   Zustimmung nicht durchgeführt. Bitte den EduBotics-Installer erneut" -ForegroundColor Yellow
             Write-Host "   ausführen — er fragt vor dem Neuaufbau nach Zustimmung." -ForegroundColor Yellow
@@ -263,6 +331,8 @@ if ($existing) {
         }
         if ($Force) {
             Write-Host "   Re-Import erzwungen (-Force)." -ForegroundColor White
+        } elseif ($stampState -eq "Absent") {
+            Write-Host "   Vorhandene Umgebung ohne Rootfs-Versionsstempel (neu: '$shippedVersion') — Neuaufbau mit Zustimmung." -ForegroundColor White
         } else {
             Write-Host "   Rootfs-Version unterschiedlich (vorhanden: '$distroVersion', neu: '$shippedVersion') — Neuaufbau mit Zustimmung." -ForegroundColor White
         }
@@ -398,6 +468,9 @@ if (-not $skipImport) {
         # carried a German sentence beside an ASCII code token, which is the same
         # reason install_prerequisites.ps1 deleted its English-only
         # `systeminfo | Select-String "Hyper-V Requirements"` probe.
+        # "disk" keeps the disk triad below and exit 1: on a FRESH import there
+        # is no data to protect, and a disk that cannot be attached or is full
+        # is exactly what that triad names.
         $failClass = ""
         if ($virtHelperOk) { $failClass = Get-WslFailureClass -Text $importOut }
         Write-FAIL "wsl --import fehlgeschlagen (exit $importExit)"

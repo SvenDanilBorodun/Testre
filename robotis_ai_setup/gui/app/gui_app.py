@@ -523,28 +523,98 @@ FINALIZE_EXIT_REBOOT = 10   # host reboot still required; nothing installed yet
 FINALIZE_EXIT_CONSENT = 12  # rootfs rebuild needs consent -> re-run the installer
 FINALIZE_EXIT_VIRT = 11     # WSL2 could not start a VM -> the remedy in the marker
 
-# Why 11 is its OWN code and not folded into 10: a restart is not always the
-# fix. WHICH remedy applies (a BIOS setting / a Windows feature / the VM service)
-# finalize decides from proof (virtualization_ready.ps1::Get-HypervisorRemedyKind)
+# Why 11 is its OWN code and not folded into 10: a restart is not (or no
+# longer) the fix. WHICH remedy applies finalize decides from proof
+# (virtualization_ready.ps1::Get-HypervisorRemedyKind, or its restart record)
 # and writes into the FAILED marker's problem + next-step lines, which the
-# exit-11 branch shows via _read_failed_marker. The two sentences below are the
-# FALLBACK when that marker cannot be read — the „Service" wording, which
-# offers the free remedy first and names every IT check, and is byte-equal to
-# finalize_install.ps1's $VIRT_SERVICE_PROBLEM_DE / $VIRT_SERVICE_NEXTSTEP_DE
-# (pinned by a test). Degradation is safe in both directions: a NEW script with
-# an OLD GUI lands in the old 11 branch whose text still says restart first, and
-# an OLD script with a NEW GUI writes an older remedy into the same marker shape.
+# exit-11 branch shows via _read_failed_marker. The „Service" pair below is the
+# FALLBACK when that marker cannot be read: it offers the free remedy first and
+# names every IT check. A GUI whose exit-11 branch does not exist falls into the
+# generic „Einrichtung fehlgeschlagen (exit 11)" — unreachable in practice,
+# since the GUI and the scripts ship in the same installer.
+#
+# The same words also serve a REGISTERED distro that does not start at GUI
+# launch (_report_distro_cannot_start): finalize never runs there, so the GUI
+# classifies wsl's output itself (wsl_bridge.classify_wsl_failure, the twin of
+# the .ps1 classifier) and picks the pair with _distro_start_remedy. Every pair
+# is byte-equal to finalize_install.ps1's $VIRT_<KIND>_PROBLEM_DE /
+# $VIRT_<KIND>_NEXTSTEP_DE (pinned by a test). The GUI has no Firmware pair on
+# purpose: that wording needs CIM proof, which only finalize reads.
 VIRT_SERVICE_PROBLEM_DE = (
-    "WSL2 konnte seine virtuelle Maschine nicht starten, weil der "
-    "Windows-Dienst für virtuelle Maschinen nicht verfügbar ist."
+    "WSL2 konnte seine virtuelle Maschine nicht starten."
 )
 VIRT_SERVICE_NEXTSTEP_DE = (
     "Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und "
-    "EduBotics danach erneut öffnen. Hilft das nicht, bitte die IT-Betreuung "
-    "informieren: den Dienst vmcompute, die Starteinstellung "
-    "hypervisorlaunchtype und die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI "
-    "prüfen."
+    "EduBotics danach erneut öffnen. Hilft das nicht, bitte die "
+    "IT-Betreuung informieren: den Dienst vmcompute, die Starteinstellung "
+    "hypervisorlaunchtype und die Virtualisierung (VT-x/AMD-V) im "
+    "BIOS/UEFI prüfen."
 )
+VIRT_FEATURE_PROBLEM_DE = (
+    "WSL2 konnte seine virtuelle Maschine nicht starten, weil eine dafür "
+    "nötige Windows-Funktion fehlt oder noch nicht aktiv ist."
+)
+VIRT_FEATURE_NEXTSTEP_DE = (
+    "Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und "
+    "EduBotics danach erneut öffnen. Hilft das nicht, bitte die "
+    "IT-Betreuung informieren: die Windows-Funktion VM-Plattform und die "
+    "Virtualisierung (VT-x/AMD-V) im BIOS/UEFI prüfen."
+)
+VIRT_DISK_PROBLEM_DE = (
+    "WSL2 konnte eine virtuelle Festplatte nicht einbinden, die es zum "
+    "Starten braucht."
+)
+VIRT_DISK_NEXTSTEP_DE = (
+    "Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und "
+    "EduBotics danach erneut öffnen. Hilft das nicht, bitte die "
+    "IT-Betreuung informieren: prüfen, ob die Datei ext4.vhdx im Ordner "
+    "EduBotics\\wsl unter ProgramData vorhanden ist und nicht von einem "
+    "Virenschutz- oder Backup-Programm gesperrt wird, ob der Ordner "
+    "komprimiert oder verschlüsselt ist und ob genug Speicherplatz frei "
+    "ist; danach WSL mit wsl --update aktualisieren."
+)
+VIRT_UNCLASSIFIED_PROBLEM_DE = (
+    "Die EduBotics-Umgebung ließ sich nicht starten."
+)
+VIRT_UNCLASSIFIED_NEXTSTEP_DE = (
+    "Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und "
+    "EduBotics danach erneut öffnen. Hilft das nicht, bitte die "
+    "IT-Betreuung informieren und ihr das Protokoll zeigen."
+)
+
+# The dialog title and status line for every „WSL2 cannot start" remedy — the
+# exit-11 branch and the start probe alike. „Virtualisierung nicht verfügbar"
+# was true of one of the five remedy kinds only.
+VM_START_DIALOG_TITLE_DE = "EduBotics-Umgebung kann nicht starten"
+VM_START_STATUS_DE = "EduBotics-Umgebung kann nicht starten — Hinweis im Protokoll beachten"
+
+
+def _distro_start_remedy_kind(failure_class: str, code: str) -> str:
+    """The remedy KIND for a registered distro that did not start, from wsl's
+    own classified output — virtualization_ready.ps1::Get-HypervisorRemedyKind
+    with no CIM state (so never "Firmware"; the executed test compares the two
+    over the classifier corpus)."""
+    if failure_class == wsl_bridge.WSL_CLASS_DISK:
+        return "Disk"
+    if code == "HCS_E_HYPERV_NOT_INSTALLED":
+        return "Feature"
+    if failure_class == wsl_bridge.WSL_CLASS_HYPERVISOR:
+        return "Service"
+    return "Unclassified"
+
+
+def _distro_start_remedy(failure_class: str, code: str) -> tuple:
+    """``(problem, next_step)`` in German, wsl's code in the problem line exactly
+    as finalize_install.ps1::Fail-WithHypervisorRemedy puts it there."""
+    problem, next_step = {
+        "Disk": (VIRT_DISK_PROBLEM_DE, VIRT_DISK_NEXTSTEP_DE),
+        "Feature": (VIRT_FEATURE_PROBLEM_DE, VIRT_FEATURE_NEXTSTEP_DE),
+        "Service": (VIRT_SERVICE_PROBLEM_DE, VIRT_SERVICE_NEXTSTEP_DE),
+    }.get(_distro_start_remedy_kind(failure_class, code),
+          (VIRT_UNCLASSIFIED_PROBLEM_DE, VIRT_UNCLASSIFIED_NEXTSTEP_DE))
+    if code:
+        problem = f"{problem.rstrip('.')} (Fehlercode: {code})."
+    return problem, next_step
 
 # Crossing arm families invalidates a scan (see _hardware_ready). Two sentences
 # because the two surfaces differ: the status bar carries one short line, the
@@ -1722,12 +1792,30 @@ class EduBoticsApp:
         docker_manager.start_keepalive()
         if not docker_manager.is_docker_running():
             self._log("EduBotics-Umgebung startet...")
-            docker_manager.start_edubotics_distro()
+            # Start the distro with PROOF: the probe's sentinel comes back only
+            # from inside a VM that started. A registered distro whose VM cannot
+            # start never reaches finalize (no flag, nothing missing), so this is
+            # the one place that can say why — the review's upgrade over a dead
+            # VM printed only „konnte nicht gestartet werden" after a two-minute
+            # wait. When wsl NAMED a VM-start or disk failure, report it at once;
+            # an unclassified miss (a slow first boot can outlast the probe)
+            # still gets the dockerd wait, and a second probe after it.
+            started, start_output = docker_manager.probe_distro_start()
+            if not started and wsl_bridge.classify_wsl_failure(start_output)[0]:
+                self._report_distro_cannot_start(start_output)
+                self.root.after(0, lambda: self.progress.stop())
+                return
             if not docker_manager.wait_for_docker(
                 callback=lambda e, t: self._set_status(f"Warte auf EduBotics-Umgebung... {e}s/{t}s")
             ):
-                self._log("[FEHLER] EduBotics-Umgebung konnte nicht gestartet werden.")
-                self._set_status("EduBotics-Umgebung nicht bereit")
+                if not started:
+                    started, start_output = docker_manager.probe_distro_start()
+                if not started:
+                    self._report_distro_cannot_start(start_output)
+                else:
+                    # The VM runs; dockerd inside it does not answer.
+                    self._log("[FEHLER] EduBotics-Umgebung konnte nicht gestartet werden.")
+                    self._set_status("EduBotics-Umgebung nicht bereit")
                 self.root.after(0, lambda: self.progress.stop())
                 return
         self._log("[OK] EduBotics-Umgebung bereit.")
@@ -1900,6 +1988,26 @@ class EduBoticsApp:
         # and the cloud_only tk Var read inside must happen on main (same
         # convention as _start_environment's capture-first pattern).
         self.root.after(0, self._try_rehydrate_arms)
+
+    def _report_distro_cannot_start(self, wsl_output):
+        """A registered EduBotics distro did not start: say why, from what wsl
+        printed, in the words finalize would use — and keep it as THIS session's
+        setup outcome, so „Arme scannen" repeats it instead of a generic line.
+
+        The early return this serves sits ABOVE ensure_environment_stopped() on
+        purpose and harmlessly: dockerd never answered, so no container can be
+        running and a teardown could not reach one anyway."""
+        failure_class, code = wsl_bridge.classify_wsl_failure(wsl_output)
+        lines = [ln.strip() for ln in (wsl_output or "").replace("\x00", "").splitlines() if ln.strip()]
+        for line in lines[:10]:
+            self._log(f"  wsl: {line}")
+        problem, next_step = _distro_start_remedy(failure_class, code)
+        self._last_setup_outcome = "virt"
+        self._last_setup_detail = (problem, next_step)
+        self._log(f"[FEHLER] {problem} {next_step}")
+        self._set_status(VM_START_STATUS_DE)
+        self.root.after(0, lambda p=problem, n=next_step: messagebox.showwarning(
+            VM_START_DIALOG_TITLE_DE, f"{p}\n\n{n}"))
 
     # ── Repair: usbipd missing (driver-level prerequisite) ──────────
 
@@ -2601,23 +2709,23 @@ class EduBoticsApp:
                     "Web-Oberfläche zu Hugging Face hoch.",
                 ))
             elif exit_code == FINALIZE_EXIT_VIRT:
-                # WSL2 reported that it could not start a VM. WHICH remedy fits
-                # was decided by finalize from proof (the CIM facts it printed
-                # plus wsl's own error code) and written into the FAILED marker;
-                # show exactly that. A hardcoded "VT-x in the BIOS" here used to
-                # contradict a transcript that had just read the hypervisor as
-                # running. The fallback is the Service wording, which offers the
-                # free remedy first and names every IT check.
+                # WSL2 cannot start and a restart is not (or no longer) the fix.
+                # WHICH remedy fits was decided by finalize from proof (the CIM
+                # facts it printed, wsl's own code and class, or its restart
+                # record) and written into the FAILED marker; show exactly that.
+                # A hardcoded "VT-x in the BIOS" here used to contradict a
+                # transcript that had just read the hypervisor as running. The
+                # fallback is the Service wording, which offers the free remedy
+                # first and names every IT check.
                 remedy = _read_failed_marker(marker_file)
                 problem, next_step = remedy if remedy else (
                     VIRT_SERVICE_PROBLEM_DE, VIRT_SERVICE_NEXTSTEP_DE)
                 self._last_setup_outcome = "virt"
                 self._last_setup_detail = (problem, next_step)
                 self._log(f"{problem} {next_step}")
-                self._set_status(
-                    "Virtualisierung nicht verfügbar — Hinweis im Protokoll beachten")
+                self._set_status(VM_START_STATUS_DE)
                 self.root.after(0, lambda p=problem, n=next_step: messagebox.showwarning(
-                    "Virtualisierung nicht verfügbar", f"{p}\n\n{n}"))
+                    VM_START_DIALOG_TITLE_DE, f"{p}\n\n{n}"))
             elif exit_code == FINALIZE_EXIT_DONE and docker_manager.is_distro_registered():
                 # Latch it: finalize said done, so a .reboot_required it could
                 # not delete (it warns and still exits 0) must not send

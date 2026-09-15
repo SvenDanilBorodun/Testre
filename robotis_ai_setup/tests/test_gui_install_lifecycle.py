@@ -377,7 +377,8 @@ class PromptFinalizeInstallTest(unittest.TestCase):
         # the call site raises NameError at runtime and never in the suite.
         exec(compile(_module_fn_src("_transcript_excerpt"), _GUI_SRC, "exec"), ns)
         exec(compile(_module_fn_src("_read_failed_marker"), _GUI_SRC, "exec"), ns)
-        ns.update(_gui_str_constants("VIRT_SERVICE_PROBLEM_DE", "VIRT_SERVICE_NEXTSTEP_DE"))
+        ns.update(_gui_str_constants("VIRT_SERVICE_PROBLEM_DE", "VIRT_SERVICE_NEXTSTEP_DE",
+                                     "VM_START_DIALOG_TITLE_DE", "VM_START_STATUS_DE"))
         method = _load_method("_prompt_finalize_install", ns)
         owner = types.SimpleNamespace(
             _resolve_finalize_script=lambda: script,
@@ -600,7 +601,8 @@ class PromptFinalizeInstallTest(unittest.TestCase):
             any("fehlgeschlagen" in m for m in calls["log"]),
             "this must not read as a generic failure — it has two concrete "
             "remedies")
-        self.assertTrue(any("Virtualisierung" in st for st in calls["status"]))
+        self.assertEqual(calls["status"][-1],
+                         _gui_str_constants("VM_START_STATUS_DE")["VM_START_STATUS_DE"])
 
     def test_exit11_is_not_mistaken_for_a_plain_reboot(self):
         """10 and 11 must stay distinguishable at the GUI.
@@ -629,8 +631,11 @@ class PromptFinalizeInstallTest(unittest.TestCase):
         self._run(method, owner)
         problem, next_step = self._FIRMWARE_MARKER.splitlines()[1:3]
         self.assertIn(f"{problem} {next_step}", calls["log"])
+        # One neutral title for every exit-11 remedy: „Virtualisierung nicht
+        # verfügbar" was true of one of its kinds only (a disk that cannot be
+        # attached, a restart that did not help, … are not virtualization).
         self.assertEqual(calls["showwarning"],
-                         [("Virtualisierung nicht verfügbar", f"{problem}\n\n{next_step}")])
+                         [("EduBotics-Umgebung kann nicht starten", f"{problem}\n\n{next_step}")])
         self.assertEqual(owner._last_setup_outcome, "virt")
         self.assertEqual(owner._last_setup_detail, (problem, next_step))
         self.assertNotIn("neu starten", " ".join(calls["log"]),
@@ -1000,7 +1005,7 @@ class PrerequisiteLifecycleTeardownTest(unittest.TestCase):
             distro_registration=lambda attempts=1, delay_s=5.0: "registered",
             start_keepalive=lambda: True,
             is_docker_running=lambda: docker_running,
-            start_edubotics_distro=lambda: events.append("distro_boot"),
+            probe_distro_start=lambda: events.append("distro_boot") or (True, "EDUBOTICS_VM_UP\n"),
             wait_for_docker=lambda callback=None: True,
             ensure_environment_stopped=_teardown,
             images_exist=lambda: {"img": True},
@@ -1093,7 +1098,7 @@ class PrerequisiteRegistrationRoutingTest(unittest.TestCase):
             is_distro_registered=lambda: registration == "registered",
             start_keepalive=lambda: events.append("keepalive"),
             is_docker_running=lambda: True,
-            start_edubotics_distro=lambda: events.append("distro_boot"),
+            probe_distro_start=lambda: events.append("distro_boot") or (True, "EDUBOTICS_VM_UP\n"),
             wait_for_docker=lambda callback=None: True,
             ensure_environment_stopped=lambda log=None: events.append("teardown") or False,
             images_exist=lambda: {"img": True},
@@ -1154,6 +1159,135 @@ class PrerequisiteRegistrationRoutingTest(unittest.TestCase):
         self.assertIn("Die Einrichtung ist noch nicht abgeschlossen — sie wird jetzt fortgesetzt.", logs)
         self.assertFalse(any("Neustart" in m for m in logs),
                          "the flag proves unfinished work, not a pending restart")
+
+
+class DistroStartProbeTest(unittest.TestCase):
+    """Review item 3: a REGISTERED distro whose VM does not start.
+
+    finalize never runs there (no flag, nothing missing), so the student used to
+    see „EduBotics-Umgebung konnte nicht gestartet werden." after a two-minute
+    dockerd wait and nothing else. The GUI now starts the distro with a probe
+    whose sentinel only a started VM prints, classifies what wsl said with the
+    twin of the installer's classifier, and shows the remedy finalize would."""
+
+    _HCS = ("Der Vorgang konnte nicht gestartet werden, da ein erforderliches Feature nicht installiert ist.\r\n"
+            "Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE\r\n")
+    _MOUNTVHD = "Fehlercode: Wsl/Service/CreateInstance/CreateVm/MountVhd/HCS/0x80070032\r\n"
+
+    def _make(self, *, probes, wait_ok=False):
+        import importlib
+        sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..")))
+        wsl_bridge = importlib.import_module("gui.app.wsl_bridge")
+        events, logs, statuses, dialogs = [], [], [], []
+        probe_results = list(probes)
+
+        def _probe():
+            events.append("probe")
+            return probe_results.pop(0)
+
+        def _wait(callback=None):
+            events.append("wait")
+            return wait_ok
+
+        fake_dm = types.SimpleNamespace(
+            distro_registration=lambda attempts=1, delay_s=5.0: "registered",
+            start_keepalive=lambda: events.append("keepalive"),
+            is_docker_running=lambda: False,
+            probe_distro_start=_probe,
+            wait_for_docker=_wait,
+            ensure_environment_stopped=lambda log=None: events.append("teardown") or False,
+            images_exist=lambda: {"img": True},
+            pull_images=lambda **kw: True,
+            check_for_updates=lambda log=None: False,
+            get_last_pull_status=lambda: {"age_days": 0, "digests": {}},
+            has_gpu=lambda: False,
+        )
+        ns = {
+            "os": os, "sys": types.SimpleNamespace(frozen=False),
+            "device_manager": types.SimpleNamespace(usbipd_reachable=lambda: True,
+                                                    usbipd_path=lambda: r"C:\usbipd.exe"),
+            "docker_manager": fake_dm, "wsl_bridge": wsl_bridge, "IMAGE_TAG": "2.21.0",
+            "webview_window": types.SimpleNamespace(destroy_all=lambda: None),
+            "messagebox": types.SimpleNamespace(showwarning=lambda *a, **k: dialogs.append(a)),
+            "__package__": "gui.app",
+        }
+        names = [f"VIRT_{k}_{part}_DE" for k in ("SERVICE", "FEATURE", "DISK", "UNCLASSIFIED")
+                 for part in ("PROBLEM", "NEXTSTEP")]
+        ns.update(_gui_str_constants(*names, "VM_START_DIALOG_TITLE_DE", "VM_START_STATUS_DE"))
+        # The two module-level functions, exactly as gui_app.py defines them
+        # (ast, not a text slice: the next top-level `def` is past the class).
+        import ast
+        wanted = [n for n in ast.parse(_read(_GUI_SRC)).body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name in ("_distro_start_remedy_kind", "_distro_start_remedy")]
+        self.assertEqual(len(wanted), 2)
+        exec(compile(ast.Module(body=wanted, type_ignores=[]), _GUI_SRC, "exec"), ns)
+        body = _load_method("_run_prerequisite_checks_body", ns)
+        report = _load_method("_report_distro_cannot_start", ns)
+        owner = types.SimpleNamespace(
+            _log=logs.append, _set_status=statuses.append,
+            _reboot_required_pending=lambda: False, _finalize_completed=False,
+            _prompt_finalize_install=lambda reason=None: events.append("finalize"),
+            _rootfs_rebuild_required=lambda: False, _prerequisites_done=False,
+            _last_setup_outcome=None, _last_setup_detail=None,
+            _update_start_button=lambda: None, _try_rehydrate_arms=lambda: None,
+            progress=types.SimpleNamespace(start=lambda *_a: None, stop=lambda *_a: None),
+            root=types.SimpleNamespace(after=lambda _ms, fn=None: fn() if fn is not None else None),
+        )
+        owner._report_distro_cannot_start = lambda out: report(owner, out)
+        return body, owner, events, logs, statuses, dialogs, ns
+
+    def test_a_named_vm_failure_is_reported_at_once(self):
+        body, owner, events, logs, statuses, dialogs, ns = self._make(probes=[(False, self._HCS)])
+        body(owner)
+        self.assertEqual(events, ["keepalive", "probe"], "no two-minute dockerd wait over a VM wsl says is dead")
+        self.assertEqual(owner._last_setup_outcome, "virt")
+        problem, next_step = owner._last_setup_detail
+        self.assertEqual(problem, "WSL2 konnte seine virtuelle Maschine nicht starten "
+                                  "(Fehlercode: HCS_E_SERVICE_NOT_AVAILABLE).")
+        self.assertEqual(next_step, ns["VIRT_SERVICE_NEXTSTEP_DE"])
+        self.assertEqual(dialogs, [(ns["VM_START_DIALOG_TITLE_DE"], f"{problem}\n\n{next_step}")])
+        self.assertIn(ns["VM_START_STATUS_DE"], statuses)
+        self.assertTrue(any("wsl: Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE" in m
+                            for m in logs), "wsl's own words reach the Protokoll")
+        self.assertFalse(owner._prerequisites_done)
+        self.assertNotIn("teardown", events, "dockerd never answered: nothing to tear down")
+        self.assertFalse(any("konnte nicht gestartet werden." == m.split("] ")[-1] for m in logs))
+
+    def test_a_disk_stage_gets_the_disk_words(self):
+        body, owner, *_rest, ns = self._make(probes=[(False, self._MOUNTVHD)])
+        body(owner)
+        self.assertEqual(owner._last_setup_detail,
+                         (ns["VIRT_DISK_PROBLEM_DE"].rstrip(".") + " (Fehlercode: 0x80070032).",
+                          ns["VIRT_DISK_NEXTSTEP_DE"]))
+
+    def test_an_unnamed_miss_still_waits_then_probes_again(self):
+        """A slow first boot can outlast the probe with nothing printed: that
+        proves nothing, so dockerd still gets its wait — and a second probe then
+        decides what to say."""
+        body, owner, events, logs, _s, dialogs, ns = self._make(
+            probes=[(False, ""), (False, "Fehlercode: Wsl/Service/E_UNEXPECTED\r\n")])
+        body(owner)
+        self.assertEqual(events, ["keepalive", "probe", "wait", "probe"])
+        self.assertEqual(owner._last_setup_detail,
+                         (ns["VIRT_UNCLASSIFIED_PROBLEM_DE"].rstrip(".") + " (Fehlercode: E_UNEXPECTED).",
+                          ns["VIRT_UNCLASSIFIED_NEXTSTEP_DE"]))
+        self.assertEqual(len(dialogs), 1)
+
+    def test_a_started_vm_with_a_dead_dockerd_keeps_its_old_message(self):
+        body, owner, events, logs, statuses, dialogs, _ns = self._make(probes=[(True, "EDUBOTICS_VM_UP\n")])
+        body(owner)
+        self.assertEqual(events, ["keepalive", "probe", "wait"], "no second probe for a VM that answered")
+        self.assertIn("[FEHLER] EduBotics-Umgebung konnte nicht gestartet werden.", logs)
+        self.assertIsNone(owner._last_setup_outcome, "that is not a VM-start remedy")
+        self.assertEqual(dialogs, [])
+
+    def test_a_slow_boot_that_recovers_continues(self):
+        body, owner, events, *_rest = self._make(probes=[(False, "")], wait_ok=True)
+        body(owner)
+        self.assertEqual(events[:3], ["keepalive", "probe", "wait"])
+        self.assertIn("teardown", events)
+        self.assertTrue(owner._prerequisites_done)
 
 
 class ScanRefusalAndSetupContextTest(unittest.TestCase):
@@ -1342,6 +1476,40 @@ class WslDistroRegistrationTest(unittest.TestCase):
         with patch.object(docker_manager.wsl_bridge, "distro_registration",
                           return_value=docker_manager.wsl_bridge.DISTRO_UNRESPONSIVE):
             self.assertFalse(docker_manager.is_distro_registered())
+
+    def test_the_start_probe_believes_only_its_sentinel(self):
+        """probe_distro_start: started only when the sentinel came back from
+        inside the distro; wsl's own UTF-16LE words are kept (NULs dropped) for
+        the classifier; a timeout or a missing wsl.exe is never "started"."""
+        wb = self._wb
+        import subprocess as sp
+        err = "Fehlercode: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE\r\n".encode("utf-16-le")
+        cases = [
+            (types.SimpleNamespace(returncode=0, stdout=b"EDUBOTICS_VM_UP\n", stderr=b""), True),
+            # wsl.exe exits 0 for its own "success" but no sentinel: not proof
+            (types.SimpleNamespace(returncode=0, stdout=b"", stderr=b""), False),
+            (types.SimpleNamespace(returncode=255, stdout=err, stderr=b""), False),
+            # a warning line before the sentinel does not hide it
+            (types.SimpleNamespace(returncode=0, stdout="wsl: Warnung\r\n".encode("utf-16-le") + b"EDUBOTICS_VM_UP\n",
+                                   stderr=b""), True),
+        ]
+        for result, started in cases:
+            with self.subTest(stdout=result.stdout[:20], rc=result.returncode):
+                with patch.object(wb.subprocess, "run", return_value=result) as run:
+                    got_started, text = wb.probe_distro_start()
+                self.assertEqual(got_started, started)
+                self.assertNotIn("\x00", text)
+                cmd = run.call_args[0][0]
+                self.assertEqual(cmd, ["wsl", "-d", "EduBotics", "--exec", "/bin/echo", "EDUBOTICS_VM_UP"])
+        with patch.object(wb.subprocess, "run", return_value=cases[2][0]):
+            self.assertEqual(wb.classify_wsl_failure(wb.probe_distro_start()[1]),
+                             ("hypervisor", "HCS_E_SERVICE_NOT_AVAILABLE"))
+        with patch.object(wb.subprocess, "run", side_effect=sp.TimeoutExpired("wsl", 30, output=err)):
+            started, text = wb.probe_distro_start()
+            self.assertFalse(started)
+            self.assertIn("HCS_E_SERVICE_NOT_AVAILABLE", text, "what a timed-out wsl already said is kept")
+        with patch.object(wb.subprocess, "run", side_effect=FileNotFoundError()):
+            self.assertEqual(wb.probe_distro_start(), (False, ""))
 
     def test_the_diagnosis_never_calls_an_unresponsive_wsl_missing(self):
         with patch.object(device_manager, "_run_usbipd_list", return_value="BUSID  VID:PID\n"), \
@@ -2523,15 +2691,15 @@ class OneRebootPredicateTest(unittest.TestCase):
                       "the routed codes reuse that writer via a parameter")
         self.assertEqual(code.count("function Fail-WithNextAction"), 1)
 
-    _VIRT_KINDS = ("FIRMWARE", "FEATURE", "SERVICE")
+    _VIRT_KINDS = ("DISK", "FIRMWARE", "FEATURE", "SERVICE", "UNCLASSIFIED")
 
     def test_each_virt_remedy_is_declared_once_and_used_once(self):
-        """One sentence per remedy KIND, one exit-11 path.
+        """One sentence per remedy KIND, one place that picks it.
 
         A single hardcoded remedy for every hypervisor failure is how the
         transcript came to say „Virtualisierung ist aktiv" and then blame VT-x in
-        the BIOS; three inline copies at three call sites is how they would
-        drift apart again. Behaviour (which kind a state gets) is executed in
+        the BIOS; inline copies at several call sites is how they would drift
+        apart again. Behaviour (which kind a state gets) is executed in
         test_installer_pwsh_executed.RemedyKindExecutedTest."""
         code = self._code("finalize_install.ps1")
         for kind in self._VIRT_KINDS:
@@ -2542,44 +2710,71 @@ class OneRebootPredicateTest(unittest.TestCase):
                     self.assertEqual(len(declarations), 1,
                                      f"{name} must be declared exactly once")
         body = _ps1_function_body(code, "Fail-WithHypervisorRemedy")
-        self.assertEqual(body.count("$EXIT_VIRT"), 3, "one exit per kind, all in ONE function")
+        for kind in self._VIRT_KINDS:
+            self.assertIn(f"$VIRT_{kind}_PROBLEM_DE", body, f"{kind} is picked inside the ONE function")
+        self.assertEqual(body.count("Fail-WithNextAction"), 1, "one exit, after the words are picked")
         outside = code.replace(body, "")
         self.assertNotRegex(outside, r"Fail-WithNextAction \$VIRT_",
                             "no second exit-11 call site may pick a remedy itself")
         self.assertEqual(outside.count("Fail-WithHypervisorRemedy -State"), 1,
-                         "exactly one exit-11 path: import's classified failure")
+                         "exactly one remedy-kind path: import's report")
+        # The ONE other way into exit 11 is the restart that did not help, and it
+        # has its own words, declared once and used once.
+        for part in ("PROBLEM", "NEXTSTEP"):
+            name = f"$RESTART_DID_NOT_HELP_{part}_DE"
+            self.assertEqual(len(re.findall(r"(?m)^" + re.escape(name) + r"\s*=", code)), 1, name)
+        self.assertEqual(
+            code.count("Fail-WithNextAction $RESTART_DID_NOT_HELP_PROBLEM_DE $RESTART_DID_NOT_HELP_NEXTSTEP_DE $EXIT_VIRT"),
+            1)
         self.assertNotIn('Fail-WithNextAction "Die Virtualisierung', code)
 
-    def test_the_gui_fallback_remedy_is_finalizes_service_wording(self):
-        """gui_app.py shows the marker's remedy; when that cannot be read it
-        falls back to the SERVICE wording — which must be finalize's, verbatim."""
-        fin = _read(_FINALIZE_PS1, encoding="utf-8-sig")
-        gui = _gui_str_constants("VIRT_SERVICE_PROBLEM_DE", "VIRT_SERVICE_NEXTSTEP_DE")
-        for name, value in gui.items():
-            m = re.search(r'(?m)^\$%s\s*=\s*"([^"]*)"' % name, fin)
-            self.assertIsNotNone(m, f"${name} is gone from finalize_install.ps1")
-            self.assertEqual(value, m.group(1), f"{name}: GUI fallback and finalize disagree")
+    _GUI_REMEDY_PAIRS = ("SERVICE", "FEATURE", "DISK", "UNCLASSIFIED")
 
-    def test_the_installer_refuses_a_rebuild_on_the_same_tokens_import_does(self):
-        """robotis_ai_setup.iss::DistroVmCannotStart and virtualization_ready.ps1
-        ::Get-WslFailureCode decide the same question („does this wsl output
-        prove the VM cannot start?") in two languages. Pascal cannot be executed
-        here (the compile is proven by release-installer.yml), so the TOKEN SETS
-        are compared: a code added to one and not the other is how the installer
-        would again offer a destructive rebuild that import then refuses."""
+    def test_the_gui_remedies_are_finalizes_words(self):
+        """gui_app.py shows the marker's remedy; when that cannot be read it
+        falls back to the SERVICE pair, and a registered distro that does not
+        start at GUI launch gets a pair picked by _distro_start_remedy. Every
+        pair the GUI holds must be finalize's, verbatim."""
+        fin = _read(_FINALIZE_PS1, encoding="utf-8-sig")
+        names = [f"VIRT_{k}_{part}_DE" for k in self._GUI_REMEDY_PAIRS for part in ("PROBLEM", "NEXTSTEP")]
+        gui = _gui_str_constants(*names)
+        for name, value in gui.items():
+            with self.subTest(constant=name):
+                m = re.search(r'(?m)^\$%s\s*=\s*"([^"]*)"' % name, fin)
+                self.assertIsNotNone(m, f"${name} is gone from finalize_install.ps1")
+                self.assertEqual(value, m.group(1), f"{name}: GUI and finalize disagree")
+
+    def test_the_installer_and_import_probe_the_stamp_with_the_same_proof(self):
+        """robotis_ai_setup.iss::ProbeDistroStamp and import_edubotics_wsl.ps1
+        ::Get-ExistingDistroStamp decide the same question („did the VM start,
+        and is the stamp genuinely absent?") in two languages. Pascal cannot be
+        executed here (it is compiled by release-installer.yml), so the SCRIPT
+        and both SENTINELS are compared: a drift is how the installer would again
+        offer a destructive rebuild that import refuses — or the reverse."""
         iss = _read(os.path.join(_SCRIPTS, "..", "robotis_ai_setup.iss"))
-        body = iss[iss.index("function DistroVmCannotStart(): Boolean;"):]
+        imp = self._code("import_edubotics_wsl.ps1")
+        script = re.search(r"(?m)^\$STAMP_PROBE_SCRIPT\s*=\s*'([^']*)'", imp).group(1)
+        up = re.search(r"(?m)^\$STAMP_PROBE_VM_UP\s*=\s*'([^']*)'", imp).group(1)
+        absent = re.search(r"(?m)^\$STAMP_PROBE_ABSENT\s*=\s*'([^']*)'", imp).group(1)
+        body = iss[iss.index("function ProbeDistroStamp(var Version: String): Integer;"):]
         body = body[:body.index("\nend;")]
-        iss_tokens = set(re.findall(r"Pos\('([A-Z0-9_]+)', S\)", body))
-        ps_body = _ps1_function_body(RootCauseGuardTest._code("virtualization_ready.ps1"),
-                                     "Get-WslFailureCode")
-        ps_tokens = {t.upper() for t in re.findall(r'@\("([A-Za-z0-9_]+)",', ps_body)}
-        self.assertTrue(ps_tokens, "the classifier's token table changed shape")
-        self.assertEqual(iss_tokens, ps_tokens)
-        self.assertIn("S := Uppercase(S);", body, "the .iss compares upper-cased, like -like")
+        self.assertIn('--exec /bin/sh -c "' + script + '"', body, "the .iss sends import's script verbatim")
+        self.assertIn("if L = '%s' then" % up, body)
+        self.assertIn("(L = '%s')" % absent, body)
+        self.assertIn("echo %s;" % up, script)
+        self.assertIn("echo %s;" % absent, script)
+        self.assertNotIn("$", script, "PowerShell 5.1 and cmd.exe must pass the script untouched")
+        self.assertIn("& wsl -d $Name --exec /bin/sh -c $STAMP_PROBE_SCRIPT", imp)
+        # The GUI's start probe proves a started VM with the same word.
+        bridge = _read(os.path.join(os.path.dirname(_GUI_SRC), "wsl_bridge.py"))
+        self.assertIn('DISTRO_STARTED_SENTINEL = "%s"' % up, bridge)
+        # The .iss offers the rebuild ONLY on the two proofs, and asks nothing
+        # without one — the probe runs before the consent box.
         should = iss[iss.index("function ShouldImportDistro(): Boolean;"):]
-        self.assertLess(should.index("DistroVmCannotStart()"), should.index("MsgBox("),
-                        "the dead-VM check must come before the consent box is shown")
+        should = should[:should.index("\nend;")]
+        self.assertLess(should.index("ProbeDistroStamp("), should.index("MsgBox("))
+        self.assertIn("if Probe = STAMP_PROBE_NO_PROOF then", should)
+        self.assertNotIn("DistroVmCannotStart", iss, "the token check is replaced, not kept beside the proof")
 
     def test_the_distro_state_helper_honours_the_dot_source_contract(self):
         """wsl_distro_state.ps1 is dot-sourced by finalize, import, preflight and

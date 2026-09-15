@@ -4,6 +4,7 @@ Every `wsl` invocation targets the EduBotics distro explicitly so the GUI
 behaves the same way regardless of what other distros the user has installed.
 """
 
+import re
 import subprocess
 import sys
 from typing import Optional
@@ -202,6 +203,112 @@ def distro_registration(attempts: int = 1, delay_s: float = 5.0) -> str:
 def is_edubotics_distro_registered() -> bool:
     """Return True iff the EduBotics WSL2 distro is registered."""
     return distro_registration() == DISTRO_REGISTERED
+
+
+# Printed by a command INSIDE the distro. Seeing it is the only proof that the
+# distro's VM started — an exit code is not (wsl.exe exits non-zero for its own
+# failures AND passes a Linux command's status through). The installer's stamp
+# probe uses the same word: import_edubotics_wsl.ps1::$STAMP_PROBE_VM_UP and
+# robotis_ai_setup.iss::ProbeDistroStamp, pinned equal by a test.
+DISTRO_STARTED_SENTINEL = "EDUBOTICS_VM_UP"
+
+
+def _decode_wsl_bytes(data) -> str:
+    """wsl.exe writes its OWN messages as BOM-less UTF-16LE to a pipe, while a
+    Linux command's output is UTF-8. Dropping the NULs turns the ASCII half of
+    UTF-16LE back into ASCII — the error CODE is ASCII, which is all a caller
+    classifies; umlauts in wsl's sentence may garble."""
+    if not data:
+        return ""
+    if isinstance(data, str):
+        return data.replace("\x00", "")
+    return bytes(data).replace(b"\x00", b"").decode("utf-8", errors="replace")
+
+
+def probe_distro_start(timeout: int = 30) -> tuple[bool, str]:
+    """Start the EduBotics distro once and report ``(started, wsl_output)``.
+
+    ``started`` is True only when the sentinel came back from inside the
+    distro. ``wsl_output`` is everything wsl printed (NULs dropped), for
+    ``classify_wsl_failure`` and for the Protokoll. Never raises: a missing
+    wsl.exe or a timeout is ``(False, <what was captured>)``. ``--exec`` with an
+    absolute path runs the command without a shell, so nothing here depends on
+    quoting."""
+    cmd = ["wsl", "-d", WSL_DISTRO_NAME, "--exec", "/bin/echo", DISTRO_STARTED_SENTINEL]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=timeout, **_SUBPROCESS_KWARGS)
+        text = _decode_wsl_bytes(result.stdout) + _decode_wsl_bytes(result.stderr)
+    except subprocess.TimeoutExpired as exc:
+        text = _decode_wsl_bytes(exc.stdout) + _decode_wsl_bytes(exc.stderr)
+    except (FileNotFoundError, OSError):
+        return False, ""
+    started = any(line.strip() == DISTRO_STARTED_SENTINEL for line in text.splitlines())
+    return started, text
+
+
+# ── Why WSL2 did not start — the twin of virtualization_ready.ps1 ────────────
+# classify_wsl_failure is the Python twin of Get-WslFailureClass +
+# Get-WslFailureCode (installer/scripts/virtualization_ready.ps1), which carries
+# the reasoning and the WSL sources. The rules, restated only as far as needed
+# to read this code:
+#   * code: one of the two HCS codes (symbolic or legacy hex) found anywhere in
+#     a whitespace/NUL-stripped copy, normalised to its symbolic name; else the
+#     last segment of the first `Wsl/...` path in the NUL-stripped text
+#     (symbolic names upper-case, hex as 0x + upper-case digits); else "".
+#   * class: "hypervisor" for those two codes, "disk" for a full-disk code;
+#     else "disk" for a MountVhd / AttachDisk / MountDisk stage, "hypervisor"
+#     for a CreateVm stage; else "".
+# tests/test_installer_pwsh_executed.py::ClassifierExecutedTest runs the .ps1
+# over a corpus and asserts THIS function returns the same pair on every row.
+WSL_CLASS_HYPERVISOR = "hypervisor"
+WSL_CLASS_DISK = "disk"
+
+_HCS_CODE_TOKENS = (
+    ("HCS_E_HYPERV_NOT_INSTALLED", "HCS_E_HYPERV_NOT_INSTALLED"),
+    ("0X80370102", "HCS_E_HYPERV_NOT_INSTALLED"),
+    ("HCS_E_SERVICE_NOT_AVAILABLE", "HCS_E_SERVICE_NOT_AVAILABLE"),
+    ("0X80370114", "HCS_E_SERVICE_NOT_AVAILABLE"),
+)
+_HYPERVISOR_CODES = frozenset({"HCS_E_SERVICE_NOT_AVAILABLE", "HCS_E_HYPERV_NOT_INSTALLED"})
+_DISK_FULL_CODES = frozenset({"ERROR_DISK_FULL", "0X80070070", "ERROR_HANDLE_DISK_FULL", "0X80070027"})
+_DISK_STAGES = ("/MOUNTVHD/", "/ATTACHDISK/", "/MOUNTDISK/")
+_VM_STAGE = "/CREATEVM/"
+_WSL_PATH_RE = re.compile(r"(?<![A-Za-z0-9_])[Ww][Ss][Ll][Gg]?/(?:[A-Za-z0-9_]+/)*([A-Za-z0-9_]+)")
+_HEX_CODE_RE = re.compile(r"0[xX][0-9A-Fa-f]{8}")
+
+
+def _wsl_failure_code(text: str) -> str:
+    no_nul = text.replace("\x00", "")
+    flat = "".join(no_nul.split()).upper()
+    for token, name in _HCS_CODE_TOKENS:
+        if token in flat:
+            return name
+    m = _WSL_PATH_RE.search(no_nul)
+    if not m:
+        return ""
+    raw = m.group(1)
+    if _HEX_CODE_RE.fullmatch(raw):
+        return "0x" + raw[2:].upper()
+    return raw.upper()
+
+
+def classify_wsl_failure(text) -> tuple[str, str]:
+    """``(class, code)`` for what wsl.exe printed when it failed — see the block
+    comment above. Never raises; ``None``/blank text is ``("", "")``."""
+    if not text or not str(text).strip():
+        return "", ""
+    text = str(text)
+    code = _wsl_failure_code(text)
+    if code in _HYPERVISOR_CODES:
+        return WSL_CLASS_HYPERVISOR, code
+    if code.upper() in _DISK_FULL_CODES:
+        return WSL_CLASS_DISK, code
+    flat = "".join(text.replace("\x00", "").split()).upper()
+    if any(stage in flat for stage in _DISK_STAGES):
+        return WSL_CLASS_DISK, code
+    if _VM_STAGE in flat:
+        return WSL_CLASS_HYPERVISOR, code
+    return "", code
 
 
 def list_serial_devices() -> list[str]:

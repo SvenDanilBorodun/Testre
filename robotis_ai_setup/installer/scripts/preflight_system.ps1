@@ -184,7 +184,24 @@ if ($wslOk) {
 if (-not $wslOk) {
     Emit WARNUNG "WSL2 noch nicht aktiv - wird bei der Einrichtung installiert (Neustart möglich)."
 } elseif ($wslVerdict -eq "RebootRequired") {
-    Emit WARNUNG "WSL2 ist installiert, aber noch nicht einsatzbereit - bitte den PC neu starten (Neu starten, nicht Herunterfahren) und EduBotics danach erneut öffnen."
+    # The same record finalize keeps (.restart_requested): when the restart it
+    # asked for already happened and the same reason is still there, another
+    # „bitte neu starten" here would contradict finalize's „Ein Neustart hat
+    # nicht geholfen" a few lines further down the same Protokoll. Its words
+    # VERBATIM (a test pins them to finalize's $RESTART_DID_NOT_HELP_*).
+    $restartDidNotHelp = $false
+    try {
+        $restartDidNotHelp = Test-RestartDidNotHelp -State $wslState `
+            -Request (Read-RestartRequest -Path (Join-Path $PSScriptRoot ".restart_requested")) `
+            -Reason (Get-RebootRequiredReason -State $wslState)
+    } catch {
+        $restartDidNotHelp = $false
+    }
+    if ($restartDidNotHelp) {
+        Emit WARNUNG "Ein Neustart hat nicht geholfen: Die Einrichtung von WSL2 wartet auch nach dem Neustart noch auf einen Neustart. Ein weiterer Neustart hilft hier nicht. Bitte die IT-Betreuung informieren: WSL mit wsl --update aktualisieren, die Windows-Funktionen VM-Plattform und Windows-Subsystem für Linux sowie die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI prüfen und EduBotics danach erneut öffnen."
+    } else {
+        Emit WARNUNG "WSL2 ist installiert, aber noch nicht einsatzbereit - bitte den PC neu starten (Neu starten, nicht Herunterfahren) und EduBotics danach erneut öffnen."
+    }
 } elseif (($wslVerdict -eq "VirtualizationDisabled") -and
           ((Get-HypervisorRemedyKind -State $wslState) -eq "Firmware")) {
     # Only on PROOF — both CIM values genuinely $false — and with the words

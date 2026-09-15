@@ -144,24 +144,13 @@ def read_rootfs_version() -> Optional[str]:
     return version or None
 
 
-def start_edubotics_distro() -> bool:
-    """Wake the EduBotics distro so systemd starts dockerd.
-
-    A bare `wsl -d EduBotics echo ready` triggers the WSL2 VM to boot the
-    distro if it's idle; from there, systemd (enabled in wsl.conf) brings
-    docker.service up on its own.
-    """
-    if not is_distro_registered():
-        return False
-    try:
-        result = subprocess.run(
-            ["wsl", "-d", WSL_DISTRO_NAME, "--", "echo", "ready"],
-            capture_output=True, text=True, timeout=20,
-            **_SUBPROCESS_KWARGS,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+def probe_distro_start(timeout: int = 30) -> tuple[bool, str]:
+    """Wake the EduBotics distro (its wsl.conf [boot] command starts dockerd)
+    and report ``(started, wsl_output)`` — see ``wsl_bridge.probe_distro_start``.
+    It replaced ``start_edubotics_distro``, whose bare boolean threw away what
+    wsl said: a distro whose VM cannot start could not be told apart from a
+    dockerd that is merely slow, and no reason could be reported."""
+    return wsl_bridge.probe_distro_start(timeout=timeout)
 
 
 def start_keepalive() -> bool:

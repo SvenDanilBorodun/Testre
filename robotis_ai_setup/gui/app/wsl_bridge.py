@@ -85,22 +85,123 @@ def is_wsl_available() -> bool:
         return False
 
 
+# The three answers to "is the EduBotics distro registered?". The twin of
+# installer/scripts/wsl_distro_state.ps1::Get-EduBoticsDistroRegistration — same
+# rules, same words (lower-cased here), pinned together cell by cell by
+# tests/test_installer_pwsh_executed.py::DistroRegistrationExecutedTest.
+DISTRO_REGISTERED = "registered"
+DISTRO_ABSENT = "absent"
+DISTRO_UNRESPONSIVE = "unresponsive"
+
+_LXSS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Lxss"
+
+
+def _lxss_distro_names() -> tuple[bool, list[str]]:
+    """(readable, names) from the per-user WSL registration store.
+
+    ``HKCU\\...\\Lxss\\{GUID}\\DistributionName`` is what ``wsl --list`` itself
+    reads. A missing Lxss key means nothing was ever registered for this
+    Windows account (readable, no names); any other failure — including not
+    running on Windows — means "cannot tell"."""
+    try:
+        import winreg  # noqa: PLC0415 — Windows-only module
+    except ImportError:
+        return False, []
+    try:
+        root = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _LXSS_KEY)
+    except FileNotFoundError:
+        return True, []
+    except OSError:
+        return False, []
+    names: list[str] = []
+    try:
+        index = 0
+        while True:
+            try:
+                sub_name = winreg.EnumKey(root, index)
+            except OSError:
+                break
+            index += 1
+            try:
+                with winreg.OpenKey(root, sub_name) as sub:
+                    value, _kind = winreg.QueryValueEx(sub, "DistributionName")
+                if value:
+                    names.append(str(value))
+            except OSError:
+                continue
+    finally:
+        winreg.CloseKey(root)
+    return True, names
+
+
+def resolve_distro_registration(list_ran: bool, list_returncode: int,
+                                list_text: str, registry_readable: bool,
+                                registry_names: list[str],
+                                distro: str = WSL_DISTRO_NAME) -> str:
+    """Pure three-way decision over already-gathered facts.
+
+    * listed by ``wsl --list --quiet``            -> registered
+    * the listing answered (rc 0) without it      -> absent
+    * wsl said it has NO distributions at all
+      (store WSL's ``WSL_E_DEFAULT_DISTRO_NOT_FOUND`` token)  -> absent
+    * no listing, but the registration store is readable:
+      names the distro -> unresponsive, otherwise -> absent
+    * no listing and no readable store            -> unresponsive
+
+    The store is only the TIE-BREAKER: a fresh PC's zero-distro listing can exit
+    non-zero with a LOCALIZED sentence and no token, which by exit code alone
+    looks exactly like a WSL that is not answering."""
+    text = list_text or ""
+    # CASE-INSENSITIVE, like WSL's own distro names and like the PowerShell
+    # twin's -eq / -contains.
+    wanted = distro.casefold()
+    if list_ran and any(line.replace("\x00", "").strip().casefold() == wanted
+                        for line in text.splitlines()):
+        return DISTRO_REGISTERED
+    if list_ran and list_returncode == 0:
+        return DISTRO_ABSENT
+    flat = "".join(text.split()).replace("\x00", "").upper()
+    if "WSL_E_DEFAULT_DISTRO_NOT_FOUND" in flat:
+        return DISTRO_ABSENT
+    if registry_readable:
+        named = any(str(n).casefold() == wanted for n in registry_names)
+        return DISTRO_UNRESPONSIVE if named else DISTRO_ABSENT
+    return DISTRO_UNRESPONSIVE
+
+
+def distro_registration(attempts: int = 1, delay_s: float = 5.0) -> str:
+    """"registered" / "absent" / "unresponsive" for the EduBotics distro.
+
+    "unresponsive" means WSL did not answer and the distro may exist — it must
+    never be reported as missing, routed into a (re)import or answered with
+    „Installer erneut ausführen". ``attempts`` > 1 re-asks, ``delay_s`` apart,
+    ONLY while the answer is unresponsive: a WSL service that is still starting
+    after boot blocks `wsl --list` for a few seconds."""
+    answer = DISTRO_UNRESPONSIVE
+    for attempt in range(max(1, attempts)):
+        if attempt:
+            import time  # noqa: PLC0415
+            time.sleep(delay_s)
+        try:
+            result = subprocess.run(
+                ["wsl", "--list", "--quiet"],
+                capture_output=True, text=True, timeout=10,
+                **_SUBPROCESS_KWARGS,
+            )
+            list_ran, rc = True, result.returncode
+            text = (result.stdout or "") + (result.stderr or "")
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            list_ran, rc, text = False, -1, ""
+        readable, names = _lxss_distro_names()
+        answer = resolve_distro_registration(list_ran, rc, text, readable, names)
+        if answer != DISTRO_UNRESPONSIVE:
+            break
+    return answer
+
+
 def is_edubotics_distro_registered() -> bool:
     """Return True iff the EduBotics WSL2 distro is registered."""
-    try:
-        result = subprocess.run(
-            ["wsl", "--list", "--quiet"],
-            capture_output=True, text=True, timeout=10,
-            **_SUBPROCESS_KWARGS,
-        )
-        if result.returncode != 0:
-            return False
-        for line in result.stdout.splitlines():
-            if line.replace("\x00", "").strip() == WSL_DISTRO_NAME:
-                return True
-        return False
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+    return distro_registration() == DISTRO_REGISTERED
 
 
 def list_serial_devices() -> list[str]:

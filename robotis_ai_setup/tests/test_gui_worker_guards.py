@@ -205,6 +205,7 @@ class ARaisingScanDoesNotStrandTheButton(unittest.TestCase):
         owner = types.SimpleNamespace(
             _scanning=False,
             _scan_confirm_open=False,
+            _scan_blocked_reason=lambda: None,
             _confirm_arm_scan_closes_window=lambda: True,
             btn_scan_leader=types.SimpleNamespace(
                 config=lambda **kw: rec.button.append(kw.get("state"))),

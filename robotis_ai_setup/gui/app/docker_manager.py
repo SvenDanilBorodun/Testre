@@ -56,6 +56,7 @@ from .constants import (
     WSL_DISTRO_NAME,
     _to_wsl_path,
 )
+from . import wsl_bridge
 
 # docker-compose service name → the pinned image it runs. Lets the env-start
 # pull-skip (and any future per-service logic) reason about exactly the
@@ -87,24 +88,21 @@ def _docker_cmd(*args: str, cwd_wsl: Optional[str] = None) -> list[str]:
     return cmd
 
 
+def distro_registration(attempts: int = 1, delay_s: float = 5.0) -> str:
+    """"registered" / "absent" / "unresponsive" — see
+    ``wsl_bridge.distro_registration``, the one implementation. Callers that
+    route the student somewhere (finalize, a diagnosis) must use THIS, not
+    ``is_distro_registered``: only the three-way answer can tell a missing
+    distro from a WSL that is not answering."""
+    return wsl_bridge.distro_registration(attempts=attempts, delay_s=delay_s)
+
+
 def is_distro_registered() -> bool:
-    """Return True iff the EduBotics WSL2 distro is installed."""
-    try:
-        result = subprocess.run(
-            ["wsl", "--list", "--quiet"],
-            capture_output=True, text=True, timeout=10,
-            **_SUBPROCESS_KWARGS,
-        )
-        if result.returncode != 0:
-            return False
-        # wsl --list --quiet outputs UTF-16LE with embedded NULs when not captured
-        # as text; python already decodes with text=True but stray NULs can appear.
-        for line in result.stdout.splitlines():
-            if line.replace("\x00", "").strip() == WSL_DISTRO_NAME:
-                return True
-        return False
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+    """Return True iff the EduBotics WSL2 distro is installed (and WSL answers).
+
+    A boolean on purpose for the keep-alive / boot / success-gate callers, where
+    "not answering" and "absent" both mean "do not proceed"."""
+    return wsl_bridge.distro_registration() == wsl_bridge.DISTRO_REGISTERED
 
 
 def is_docker_running() -> bool:

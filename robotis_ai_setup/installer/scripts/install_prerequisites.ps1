@@ -42,12 +42,22 @@ param(
 # checked via $LASTEXITCODE; do NOT revert to Stop without wrapping every wsl/docker
 # call in try/catch.
 $ErrorActionPreference = "Continue"
+# TWO different facts, kept apart on purpose:
+#   $needsReboot   — THIS run found its own reason (a feature enable pending /
+#                    dism 3010 / `wsl --install` ran). Only this announces
+#                    „A REBOOT IS REQUIRED to complete WSL2 installation" and
+#                    skips the WSL update (a kernel update before that reboot is
+#                    pointless).
+#   $preservedFlag — an EARLIER step's flag that -PreserveExistingRebootFlag
+#                    keeps. It is reported as what it is and nothing more.
+# They used to be one variable, pre-seeded from the flag's mere existence, so a
+# stale flag made the GUI's usbipd repair print the WSL2 reboot sentence and
+# skip `wsl --update` on a PC whose WSL was healthy — and finalize said „Ready"
+# seconds later in the same Protokoll (2026-09-07 field log, block 2).
 $needsReboot = $false
 
 $FlagPath = Join-Path $PSScriptRoot ".reboot_required"
-if ($PreserveExistingRebootFlag -and (Test-Path $FlagPath)) {
-    $needsReboot = $true
-}
+$preservedFlag = ($PreserveExistingRebootFlag -and (Test-Path $FlagPath))
 
 # ── Diagnostics sink ───────────────────────────────────────────────────────
 # Every prerequisite step appends to a single log so that when a student hits a
@@ -433,20 +443,36 @@ try {
 Write-Step "Prerequisites installation complete!"
 if ($needsReboot) {
     # Write flag file so Inno Setup knows a reboot is required before image pull / WSL import.
-    # Write ONLY if absent: under -PreserveExistingRebootFlag an existing flag may
-    # carry migrate's "dd-uninstall" REASON, which finalize_install.ps1's
+    # CONTENT only if absent: under -PreserveExistingRebootFlag an existing flag may
+    # carry migrate's "dd-uninstall" REASON, which
     # virtualization_ready.ps1::Get-RebootState needs (the WSL/VMP feature store
-    # is blind to a
-    # pending Docker-Desktop removal) — overwriting it with "1" would erase the
-    # reason AND refresh the write time finalize compares against the last boot.
+    # is blind to a pending Docker-Desktop removal) — overwriting it with "1"
+    # would erase that reason.
     if (-not (Test-Path $FlagPath)) {
         Set-Content -Path $FlagPath -Value "1"
+    } else {
+        # The WRITE TIME, however, must move: this run found a reboot reason of
+        # its own IN THIS BOOT, and Get-RebootState settles "has the reboot
+        # happened" by comparing the flag's write time with the last boot. An
+        # existing flag written before an earlier boot left that comparison
+        # saying "rebooted since", so the verdict fell to Unknown, the import
+        # ran into a hypervisor that had not started, and the student got
+        # exit 11 instead of the plain reboot (exit 10). Moving the time
+        # forward is safe for the dd-uninstall reason too: a reboot is owed
+        # after NOW either way.
+        try {
+            (Get-Item -LiteralPath $FlagPath -ErrorAction Stop).LastWriteTime = Get-Date
+        } catch {
+            Write-Diag "reboot_flag" "could not refresh the flag write time: $_"
+        }
     }
     Write-Host "`nA REBOOT IS REQUIRED to complete WSL2 installation." -ForegroundColor Yellow
+} elseif ($preservedFlag) {
+    # An EARLIER step's request (e.g. migrate's "dd-uninstall"), kept as asked.
+    # Say that, and only that — this run itself needs no reboot.
+    Write-Host "`nHinweis: Eine Neustart-Markierung aus einem früheren Einrichtungsschritt ist vorhanden und bleibt bestehen." -ForegroundColor Yellow
 } else {
-    # Remove flag if no reboot needed (re-run after reboot). $needsReboot is
-    # pre-seeded from an existing flag under -PreserveExistingRebootFlag, so an
-    # earlier step's request is never dropped here.
+    # Remove flag if no reboot needed (re-run after reboot).
     if (Test-Path $FlagPath) { Remove-Item $FlagPath -Force }
 }
 

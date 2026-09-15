@@ -125,14 +125,27 @@ try {
 # 2. EduBotics distro registered
 Write-Host "   Checking EduBotics distro..." -ForegroundColor White
 $distroListed = $false
-try {
-    $out = wsl --list --quiet 2>&1
-    foreach ($line in $out) {
-        if (($line -replace "`0", "").Trim() -eq $DistroName) { $distroListed = $true; break }
-    }
-} catch { }
+$distroState = ""
+$distroHelper = Join-Path $PSScriptRoot 'wsl_distro_state.ps1'
+if (Test-Path $distroHelper) {
+    . $distroHelper
+    $distroState = Get-EduBoticsDistroRegistration -DistroName $DistroName
+    $distroListed = ($distroState -eq "Registered")
+    Write-Diag "distro_registration" $distroState
+} else {
+    try {
+        $out = wsl --list --quiet 2>&1
+        foreach ($line in $out) {
+            if (($line -replace "`0", "").Trim() -eq $DistroName) { $distroListed = $true; break }
+        }
+    } catch { }
+}
 if ($distroListed) {
     Write-OK "$DistroName distro registered"
+} elseif ($distroState -eq "Unresponsive") {
+    # WSL did not answer; "not found" would be a claim this script cannot make.
+    Write-FAIL "WSL is not responding - cannot tell whether $DistroName is registered"
+    $allOk = $false
 } else {
     Write-FAIL "$DistroName distro not found"
     $allOk = $false

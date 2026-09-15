@@ -307,6 +307,48 @@ begin
     Result := Trim(Lines[0]);
 end;
 
+// True ONLY when reading the existing distro's stamp PROVES its VM cannot start:
+// wsl's own error CODE token (never the localized sentence) names the hypervisor
+// class — the same four tokens virtualization_ready.ps1::Get-WslFailureCode
+// matches, against the same whitespace- and NUL-stripped copy (wsl.exe writes
+// BOM-less UTF-16LE; `> file` keeps those bytes). Anything else, including a
+// failed Exec or an unreadable temp file, is False: this only ever REMOVES an
+// offer, so it may refuse on proof alone.
+//
+// Why it exists: an unreadable stamp is the designed trigger for the one-final
+// rebuild of a distro from an installer <= 2.6.0 — but the read also fails when
+// the distro simply cannot START (the 2026-09-07 HCS_E_SERVICE_NOT_AVAILABLE
+// class). ShouldImportDistro then offered a DESTRUCTIVE rebuild consent box over
+// a distro whose data was intact; import_edubotics_wsl.ps1 refuses that wipe on
+// the same proof, so the box could only mislead.
+function DistroVmCannotStart(): Boolean;
+var
+  ResultCode: Integer;
+  TempFile: String;
+  Raw: AnsiString;
+  S: String;
+begin
+  Result := False;
+  TempFile := ExpandConstant('{tmp}\distro_stamp_probe.txt');
+  if not Exec(ExpandConstant('{cmd}'), '/c wsl -d EduBotics -- cat /etc/edubotics-rootfs-version > "' + TempFile + '" 2>&1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    exit;
+  if ResultCode = 0 then
+    exit;
+  if not LoadStringFromFile(TempFile, Raw) then
+    exit;
+  S := String(Raw);
+  StringChangeEx(S, #0, '', True);
+  StringChangeEx(S, #13, '', True);
+  StringChangeEx(S, #10, '', True);
+  StringChangeEx(S, #9, '', True);
+  StringChangeEx(S, ' ', '', True);
+  S := Uppercase(S);
+  Result := (Pos('HCS_E_SERVICE_NOT_AVAILABLE', S) > 0) or
+            (Pos('HCS_E_HYPERV_NOT_INSTALLED', S) > 0) or
+            (Pos('0X80370102', S) > 0) or
+            (Pos('0X80370114', S) > 0);
+end;
+
 // Compare the EXISTING distro's rootfs stamp against the one this installer
 // ships. Returns True ONLY when both stamps are readable and DIFFER — i.e. a
 // re-import is PROVABLE. "Could not read the existing stamp" is reported through
@@ -425,6 +467,15 @@ begin
   NeedsRebuild := RootfsStampCompare(StampUnreadable);
   if StampUnreadable then
   begin
+    if DistroVmCannotStart() then
+    begin
+      // Not a rootfs question at all: the distro exists but its VM cannot
+      // start. No consent box, no import step — EduBotics' own finalize reports
+      // the hypervisor remedy on next launch, and the data stays untouched.
+      Log('EduBotics distro cannot start (hypervisor-class wsl error while reading the rootfs stamp) - NOT offering a destructive re-import; Docker volumes preserved.');
+      Result := False;
+      exit;
+    end;
     Log('EduBotics rootfs stamp unreadable - offering the one-final-re-import (installers <= 2.6.0 shipped no stamp). Declining only postpones it.');
     NeedsRebuild := True;
   end;

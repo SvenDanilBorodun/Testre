@@ -1259,6 +1259,9 @@ class UsbDiagnosis:
     """
     usbipd_missing: bool = False
     wsl_distro_missing: bool = False
+    # WSL did not answer — the distro may exist. Distinct from
+    # wsl_distro_missing so nothing routes a not-answering WSL into a re-import.
+    wsl_unresponsive: bool = False
     windows_sees_no_robotis: bool = False
     usbipd_sees_no_robotis: bool = False
     attach_failed: bool = False
@@ -1350,8 +1353,23 @@ def diagnose_usb_environment(image: Optional[str] = None,
         diag.details = "usbipd list timed out"
         return diag
 
-    # 2. WSL distro registered?
-    if not wsl_bridge.is_edubotics_distro_registered():
+    # 2. WSL distro registered? THREE answers: a WSL that does not answer is
+    # not a missing distro, and the „Installer erneut ausführen" remedy is
+    # wrong for it (2026-09-07: that sentence went to a student whose distro
+    # was listed again 80 s later).
+    registration = wsl_bridge.distro_registration()
+    if registration == wsl_bridge.DISTRO_UNRESPONSIVE:
+        diag.wsl_unresponsive = True
+        diag.message_de = (
+            "WSL antwortet gerade nicht — ob die EduBotics-Umgebung vorhanden "
+            "ist, lässt sich deshalb nicht prüfen.\n"
+            "Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und "
+            "EduBotics danach erneut öffnen."
+        )
+        diag.details = ("wsl --list --quiet did not answer and the Lxss "
+                        "registration store names the distro or is unreadable")
+        return diag
+    if registration != wsl_bridge.DISTRO_REGISTERED:
         diag.wsl_distro_missing = True
         diag.message_de = (
             "Die EduBotics-WSL-Umgebung ist nicht registriert. "

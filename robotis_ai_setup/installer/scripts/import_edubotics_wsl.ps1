@@ -63,15 +63,58 @@ if (Test-Path $virtHelper) {
     $virtHelperOk = $true
 }
 
-# The hypervisor-class remedy, spelled ONCE for both places this script meets a
-# dead hypervisor: an existing distro that cannot start, and `wsl --import`.
+# Three-way registration (wsl_distro_state.ps1). Soft for the same reason: an
+# absent helper falls back to the old two-way read below, byte-identical to
+# before, so a partially-copied {app}\scripts never hard-fails the installer.
+$distroHelper = Join-Path $PSScriptRoot 'wsl_distro_state.ps1'
+$distroHelperOk = $false
+if (Test-Path $distroHelper) {
+    . $distroHelper
+    $distroHelperOk = $true
+}
+
+# The hypervisor-class report, spelled ONCE for both places this script meets
+# a VM that cannot start: an existing distro whose stamp read fails that way,
+# and `wsl --import`. It does three things and asserts nothing it cannot know:
+#   * hands the classified CODE back to finalize_install.ps1 through
+#     $global:EDUBOTICS_WSL_FAILURE_CODE (same runspace — finalize invokes this
+#     script with `&`), so finalize can pick the remedy for the GUI;
+#   * prints the CIM facts the remedy kind is chosen from, when the helper is
+#     there to read them (this script also runs standalone as the installer's
+#     [Run] Step 4, where there is no finalize transcript to carry them);
+#   * prints a short German pointer that never claims a single cause — the
+#     old text named „genau zwei Ursachen" and was wrong on a PC whose
+#     hypervisor was running.
 function Write-HypervisorRemedy {
-    Write-Host "   Der Hypervisor von Windows läuft nicht — ohne ihn kann WSL2 keine" -ForegroundColor Red
-    Write-Host "   Umgebung anlegen. Dafür gibt es genau zwei Ursachen:" -ForegroundColor Red
-    Write-Host "   1. Der PC wurde nach der WSL2-Installation noch nicht neu gestartet." -ForegroundColor Red
-    Write-Host "   2. Die Virtualisierung (VT-x/AMD-V) ist im BIOS/UEFI deaktiviert." -ForegroundColor Red
-    Write-Host "   Bitte zuerst den PC neu starten. Hilft das nicht, bitte die IT-Betreuung" -ForegroundColor Red
-    Write-Host "   der Schule bitten, die Virtualisierung im BIOS/UEFI zu aktivieren." -ForegroundColor Red
+    param([string]$Text)
+    $code = ""
+    if ($virtHelperOk) { $code = Get-WslFailureCode -Text $Text }
+    $global:EDUBOTICS_WSL_FAILURE_CODE = $code
+    $kind = "Service"
+    if ($virtHelperOk) {
+        try {
+            $st = Get-RebootState -FlagPath $rebootFlag
+            # Under -PostReboot finalize printed these same facts moments ago.
+            if (-not $PostReboot) { foreach ($note in @($st.Notes)) { Write-Host "   $note" } }
+            $kind = Get-HypervisorRemedyKind -State $st -FailureCode $code
+        } catch {
+            Write-Host "   (Virtualisierungsstatus nicht lesbar: $_)" -ForegroundColor Yellow
+        }
+    }
+    $codeLabel = if ($code) { $code } else { "unbekannt" }
+    Write-Host "   WSL2 konnte keine virtuelle Maschine starten (Hypervisor-Fehlerart: $kind, Fehlercode: $codeLabel)." -ForegroundColor Red
+    # Under -PostReboot, finalize_install.ps1 prints the full remedy for this
+    # kind on the very next lines (Fail-WithHypervisorRemedy); a second, shorter
+    # copy here would only make the transcript say it twice.
+    if ($PostReboot) { return }
+    if ($kind -eq "Firmware") {
+        Write-Host "   Laut Windows ist die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI ausgeschaltet." -ForegroundColor Red
+        Write-Host "   Bitte die IT-Betreuung der Schule bitten, sie im BIOS/UEFI einzuschalten." -ForegroundColor Red
+    } else {
+        Write-Host "   Bitte den PC neu starten (Neu starten, nicht Herunterfahren). Hilft das nicht," -ForegroundColor Red
+        Write-Host "   bitte die IT-Betreuung informieren (Dienst vmcompute, hypervisorlaunchtype," -ForegroundColor Red
+        Write-Host "   Windows-Funktion VM-Plattform, Virtualisierung im BIOS/UEFI)." -ForegroundColor Red
+    }
 }
 
 # Bail if prerequisites phase still needs a reboot (WSL2 not fully up yet).
@@ -137,15 +180,30 @@ foreach ($vf in @(
 # Detect an existing EduBotics distro (upgrade path)
 Write-Step "Checking for existing EduBotics distro..."
 $existing = $false
-try {
-    $listed = wsl --list --quiet 2>&1
-    foreach ($line in $listed) {
-        if (($line -replace "`0", "").Trim() -eq $DistroName) {
-            $existing = $true
-            break
-        }
+if ($distroHelperOk) {
+    $registration = Get-EduBoticsDistroRegistration -DistroName $DistroName
+    if ($registration -eq "Unresponsive") {
+        # WSL did not answer, so whether the distro exists is UNKNOWN. Both
+        # things this script could do next are wrong for that: an import over
+        # a registration that may exist, or the upgrade path's unregister of a
+        # distro whose data we cannot even see. Refuse before either.
+        Write-FAIL "WSL antwortet gerade nicht — die EduBotics-Umgebung wird NICHT eingerichtet oder verändert."
+        Write-Host "   Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und die Einrichtung erneut starten." -ForegroundColor Red
+        Write-Host "   Eine vorhandene Umgebung und ihre Daten bleiben unberührt." -ForegroundColor Yellow
+        exit 1
     }
-} catch { }
+    $existing = ($registration -eq "Registered")
+} else {
+    try {
+        $listed = wsl --list --quiet 2>&1
+        foreach ($line in $listed) {
+            if (($line -replace "`0", "").Trim() -eq $DistroName) {
+                $existing = $true
+                break
+            }
+        }
+    } catch { }
+}
 
 $skipImport = $false
 if ($existing) {
@@ -172,7 +230,7 @@ if ($existing) {
             ((Get-WslFailureClass -Text $stampOut) -eq "hypervisor")) {
         if (-not [string]::IsNullOrWhiteSpace($stampOut)) { Write-Host $stampOut.TrimEnd() }
         Write-FAIL "Die vorhandene EduBotics-Umgebung kann nicht gestartet werden — sie wird NICHT neu aufgebaut."
-        Write-HypervisorRemedy
+        Write-HypervisorRemedy -Text $stampOut
         Write-Host "   Die Umgebung und ihre Daten bleiben erhalten." -ForegroundColor Yellow
         # 11 like the import's own hypervisor refusal below: finalize maps it to
         # $EXIT_VIRT; Inno's [Run] Step 4 ignores exit codes.
@@ -344,7 +402,7 @@ if (-not $skipImport) {
         if ($virtHelperOk) { $failClass = Get-WslFailureClass -Text $importOut }
         Write-FAIL "wsl --import fehlgeschlagen (exit $importExit)"
         if ($failClass -eq "hypervisor") {
-            Write-HypervisorRemedy
+            Write-HypervisorRemedy -Text $importOut
         } else {
             Write-Host "   Prüfen Sie: Antivirus-Ausnahme, genug Speicherplatz, WSL2 aktiviert." -ForegroundColor Red
         }

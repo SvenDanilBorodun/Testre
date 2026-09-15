@@ -999,6 +999,9 @@ class TheScanAsksFirstWhenThereIsASessionToLose(unittest.TestCase):
         owner = types.SimpleNamespace(
             _scanning=False,
             _scan_confirm_open=False,
+            # Setup is finished in these tests: the scan-refusal gate (its own
+            # coverage lives in test_gui_install_lifecycle) says nothing.
+            _scan_blocked_reason=lambda: None,
             btn_scan_leader=types.SimpleNamespace(
                 config=lambda **kw: rec.button.append(kw.get('state'))),
             # The SECOND scan button. A leader-less robot type hides Schritt A

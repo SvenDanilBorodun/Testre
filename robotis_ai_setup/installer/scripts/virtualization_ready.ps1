@@ -129,8 +129,14 @@ function Get-RebootState {
     # hypervisor commonly MASKS it to $false — which is why the verdict may only
     # consult it BELOW the HypervisorPresent rung. Keep both reads here and the
     # ordering rule there.
+    #
+    # Both values are WRITTEN INTO THE NOTES as well as the state: a transcript
+    # that ends in an exit-11 remedy must show the facts the remedy was chosen
+    # from (Get-HypervisorRemedyKind below), or support cannot tell a BIOS
+    # setting from a stopped service.
     try {
         $state.HypervisorPresent = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).HypervisorPresent
+        $notes += ("HypervisorPresent = {0}" -f (Format-RebootFact $state.HypervisorPresent))
     } catch {
         $state.CimReadable = $false
         $notes += "(Hypervisor-Status nicht lesbar: $_)"
@@ -138,13 +144,36 @@ function Get-RebootState {
     try {
         $state.VirtFirmwareEnabled = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop |
             Select-Object -First 1).VirtualizationFirmwareEnabled
+        $notes += ("VirtualizationFirmwareEnabled = {0}" -f (Format-RebootFact $state.VirtFirmwareEnabled))
     } catch {
         $state.CimReadable = $false
         $notes += "(Virtualisierungs-Status der Firmware nicht lesbar: $_)"
     }
 
+    # The two services WSL2 needs to start a VM. EVIDENCE ONLY — no rung reads
+    # them: a Stopped service with StartType Manual is the healthy idle state of
+    # vmcompute (it is trigger-started), so a status is not a verdict. What they
+    # buy is a transcript that shows a DISABLED service instead of leaving
+    # support to guess (Get-Service's StartType is an enum, i.e. locale-free).
+    foreach ($svc in @("vmcompute", "WslService")) {
+        try {
+            $s = Get-Service -Name $svc -ErrorAction Stop
+            $notes += ("Dienst {0} = {1} ({2})" -f $svc, $s.Status, $s.StartType)
+        } catch {
+            $notes += "(Dienst $svc nicht lesbar: $_)"
+        }
+    }
+
     $state.Notes = @($notes)
     return $state
+}
+
+# One rendering for a CIM fact in the notes: $null is not $false, and a note
+# that printed an empty string for it would hide exactly that difference.
+function Format-RebootFact {
+    param($Value)
+    if ($null -eq $Value) { return "(leer)" }
+    return [string]$Value
 }
 
 # ── The three proofs, each spelled ONCE ─────────────────────────────────────
@@ -254,10 +283,15 @@ function Test-RebootOutstanding {
 #      property can never produce this verdict; only a genuine $false does.
 #   6. anything else, or any CIM/WMI error -> Unknown
 #
-# Unknown PROCEEDS (the caller runs the import anyway). Fail-closed would brick
-# working machines on a WMI hiccup, and the import classifies its own failure as
-# the backstop. The same fail-open-on-no-proof doctrine as
-# device_manager::serial_path_family_conflict and the HF namespace guard.
+# Unknown AND VirtualizationDisabled both PROCEED (finalize runs the import
+# anyway). Fail-closed would brick working machines on a WMI hiccup — and a CIM
+# property that misreports would brick them on EVERY launch, with no way past
+# it. The import classifies its own failure; that failure, not a CIM read, is
+# what exits 11. VirtualizationDisabled survives as a word because preflight
+# warns on it and it names the likely remedy. The same fail-open-on-no-proof
+# doctrine as device_manager::serial_path_family_conflict and the HF namespace
+# guard. Only the RebootRequired rungs stop an import: each is settled by a real
+# restart, so none can strand a PC.
 function Get-VirtualizationVerdict {
     param(
         [hashtable]$State
@@ -289,6 +323,30 @@ function Get-WslFailureClass {
     param(
         [string]$Text
     )
+    if (Get-WslFailureCode -Text $Text) { return "hypervisor" }
+    return ""
+}
+
+# The hypervisor-class CODE token the text carries, normalised to its symbolic
+# name, or "" — the same stripped match Get-WslFailureClass uses (it delegates
+# here, so the two can never disagree about what counts).
+#
+# The token list is what WSL actually prints for a hypervisor that cannot start
+# a VM: the symbolic HCS names (store WSL, `Fehlercode: Wsl/…/HCS/<name>`) and
+# their legacy hex spellings (inbox WSL, `Error: 0x…`). An `ERROR_VM_NOT_AVAILABLE`
+# entry used to sit here; no WSL build or field report emits it, so it was
+# removed rather than kept as an unfalsifiable match.
+#   HCS_E_HYPERV_NOT_INSTALLED  = 0x80370102  "the virtual machine could not be
+#       started because a required feature is not installed" — Microsoft's
+#       remedy: the Virtual Machine Platform feature and BIOS virtualization.
+#   HCS_E_SERVICE_NOT_AVAILABLE = 0x80370114  "the operation could not be
+#       started because a required feature is not installed" — the 2026-09-07
+#       field code; in practice the Host Compute Service (vmcompute) or a
+#       hypervisor that did not launch.
+function Get-WslFailureCode {
+    param(
+        [string]$Text
+    )
     if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
     # Match against a WHITESPACE-STRIPPED copy. `Out-String` wraps at the host
     # width, and the field log's own line — „Fehlercode: Wsl/Service/
@@ -302,20 +360,48 @@ function Get-WslFailureClass {
     # NULs are stripped for the same reason. wsl.exe writes UTF-16LE to a pipe
     # (CRT _O_U16TEXT unless WSL_UTF8=1), and Windows PowerShell 5.1 decodes a
     # native command's bytes in the OEM code page, so every ASCII character of
-    # the token arrives followed by a U+0000 that `\s` does not match. The one
-    # caller strips them today; executed against that exact byte shape, a copy
-    # of the text that still carries them classified as "" — the disk/antivirus
-    # triad over a hypervisor fault, i.e. the 2026-09-07 failure — and nothing
-    # in the suite noticed when the caller's strip was deleted.
+    # the token arrives followed by a U+0000 that `\s` does not match. Executed
+    # against that exact byte shape, a copy that still carried them classified
+    # as "" — the disk/antivirus triad over a hypervisor fault — while every
+    # caller's own strip hid it.
     $flat = ($Text -replace '[\s\x00]', '')
-    foreach ($token in @(
-        "HCS_E_SERVICE_NOT_AVAILABLE",
-        "HCS_E_HYPERV_NOT_INSTALLED",
-        "ERROR_VM_NOT_AVAILABLE",
-        "0x80370102",
-        "0x80370114"
+    foreach ($pair in @(
+        @("HCS_E_HYPERV_NOT_INSTALLED", "HCS_E_HYPERV_NOT_INSTALLED"),
+        @("0x80370102", "HCS_E_HYPERV_NOT_INSTALLED"),
+        @("HCS_E_SERVICE_NOT_AVAILABLE", "HCS_E_SERVICE_NOT_AVAILABLE"),
+        @("0x80370114", "HCS_E_SERVICE_NOT_AVAILABLE")
     )) {
-        if ($flat -like "*$token*") { return "hypervisor" }
+        if ($flat -like ("*" + $pair[0] + "*")) { return $pair[1] }
     }
     return ""
+}
+
+# ── Which remedy fits a hypervisor failure — from PROOF, never a default ────
+# Returns "Firmware", "Feature" or "Service". Pure over the state + the code;
+# the German text for each kind lives in the callers (see the header contract).
+#
+#   Firmware — CIM read HypervisorPresent = $false AND VirtualizationFirmware-
+#              Enabled = $false: Windows itself says the BIOS/UEFI setting is
+#              off, and no hypervisor is running to mask that property. Both
+#              must be a genuine $false; $null (unreadable) proves nothing.
+#   Feature  — no such proof, but wsl reported HCS_E_HYPERV_NOT_INSTALLED
+#              (0x80370102), whose documented causes are the VM-Plattform
+#              feature and BIOS virtualization.
+#   Service  — everything else, the 2026-09-07 HCS_E_SERVICE_NOT_AVAILABLE
+#              included: restart first, then vmcompute / hypervisorlaunchtype /
+#              BIOS for IT.
+#
+# It only chooses WORDS. Nothing gates on it: an import is always attempted and
+# the failure it reports is what exits 11.
+function Get-HypervisorRemedyKind {
+    param(
+        [hashtable]$State,
+        [string]$FailureCode = ""
+    )
+    if (($null -ne $State) -and ($State.HypervisorPresent -eq $false) -and
+            ($State.VirtFirmwareEnabled -eq $false)) {
+        return "Firmware"
+    }
+    if ($FailureCode -eq "HCS_E_HYPERV_NOT_INSTALLED") { return "Feature" }
+    return "Service"
 }

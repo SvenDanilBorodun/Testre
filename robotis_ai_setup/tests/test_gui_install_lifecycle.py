@@ -90,6 +90,22 @@ def _gui_exit_codes():
     return found
 
 
+def _gui_str_constants(*names):
+    """Module-level string constants of gui_app.py, evaluated from its AST —
+    the REAL values, never a copy in the test."""
+    import ast
+    found = {}
+    for node in ast.parse(_read(_GUI_SRC)).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in names):
+            found[node.targets[0].id] = ast.literal_eval(node.value)
+    missing = set(names) - set(found)
+    if missing:
+        raise AssertionError(f"gui_app.py no longer defines {sorted(missing)}")
+    return found
+
+
 def _ps1_exit_codes(path):
     """`$EXIT_NAME = <int>` assignments from a PowerShell script (BOM-tolerant)."""
     return {
@@ -360,6 +376,8 @@ class PromptFinalizeInstallTest(unittest.TestCase):
         # execs the method, so a module-level helper it calls must be supplied or
         # the call site raises NameError at runtime and never in the suite.
         exec(compile(_module_fn_src("_transcript_excerpt"), _GUI_SRC, "exec"), ns)
+        exec(compile(_module_fn_src("_read_failed_marker"), _GUI_SRC, "exec"), ns)
+        ns.update(_gui_str_constants("VIRT_SERVICE_PROBLEM_DE", "VIRT_SERVICE_NEXTSTEP_DE"))
         method = _load_method("_prompt_finalize_install", ns)
         owner = types.SimpleNamespace(
             _resolve_finalize_script=lambda: script,
@@ -555,12 +573,11 @@ class PromptFinalizeInstallTest(unittest.TestCase):
                          "and the noise must still be dropped")
         self.assertTrue(any("ausgelassen" in m for m in calls["log"]))
 
-    # Outcome 6/6 (2026-09-11): the PC has no usable hypervisor. Rebooting MIGHT
-    # fix it and enabling VT-x in the BIOS/UEFI might be what is actually needed —
-    # `wsl` reports the same HCS_E_SERVICE_NOT_AVAILABLE for both — so the student
-    # gets both remedies, reboot first. Before this code existed the outcome fell
-    # into the generic else: "Einrichtung fehlgeschlagen (exit 1)" plus advice to
-    # check free disk space, on a machine whose 20 GB precheck had just passed.
+    # Outcome 6/6: WSL2 could not start a VM (exit 11). Before this code existed
+    # the outcome fell into the generic else: "Einrichtung fehlgeschlagen (exit
+    # 1)" plus advice to check free disk space, on a machine whose 20 GB precheck
+    # had just passed. With no readable marker (this test) the GUI shows the
+    # Service fallback: restart first, then the IT checks incl. the BIOS.
     def test_exit11_shows_the_virtualization_remedy(self):
         method, owner, calls = self._make(
             elevate=(11, False, None), reboot_pending=True,
@@ -599,6 +616,57 @@ class PromptFinalizeInstallTest(unittest.TestCase):
         self._run(m11, o11)
         self.assertNotIn("BIOS", " ".join(reboot_calls["log"]))
         self.assertIn("BIOS", " ".join(virt_calls["log"]))
+
+    # ── exit 11 shows the remedy finalize chose FROM PROOF ────────────────────
+    _FIRMWARE_MARKER = (
+        "FAILED 2026-09-15T10:00:00.0000000+02:00\n"
+        "Laut Windows ist die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI dieses PCs ausgeschaltet — ohne sie kann WSL2 nicht starten.\n"
+        "Bitte die IT-Betreuung der Schule bitten, die Virtualisierung im BIOS/UEFI einzuschalten, und EduBotics danach erneut öffnen.\n")
+
+    def test_exit11_shows_the_marker_remedy_not_a_hardcoded_one(self):
+        method, owner, calls = self._make(elevate=(11, False, None),
+                                          marker=self._FIRMWARE_MARKER)
+        self._run(method, owner)
+        problem, next_step = self._FIRMWARE_MARKER.splitlines()[1:3]
+        self.assertIn(f"{problem} {next_step}", calls["log"])
+        self.assertEqual(calls["showwarning"],
+                         [("Virtualisierung nicht verfügbar", f"{problem}\n\n{next_step}")])
+        self.assertEqual(owner._last_setup_outcome, "virt")
+        self.assertEqual(owner._last_setup_detail, (problem, next_step))
+        self.assertNotIn("neu starten", " ".join(calls["log"]),
+                         "the firmware proof must not be diluted with the service remedy")
+
+    def test_exit11_falls_back_to_the_service_wording(self):
+        """No marker, a marker of another shape, or an ANSI-written one with a
+        U+FFFD: the GUI shows the Service wording, never mojibake."""
+        service = _gui_str_constants("VIRT_SERVICE_PROBLEM_DE", "VIRT_SERVICE_NEXTSTEP_DE")
+        expected = f"{service['VIRT_SERVICE_PROBLEM_DE']} {service['VIRT_SERVICE_NEXTSTEP_DE']}"
+        for label, kwargs in (
+                ("no marker", dict(marker=None)),
+                ("started marker", dict(marker="started 2026-09-15 pid=1 user=schueler\n")),
+                ("ansi marker", dict(marker=self._FIRMWARE_MARKER, marker_encoding="cp1252")),
+                ("marker is a directory", dict(marker_as_dir=True))):
+            with self.subTest(label):
+                method, owner, calls = self._make(elevate=(11, False, None), **kwargs)
+                self._run(method, owner)
+                self.assertIn(expected, calls["log"])
+                self.assertEqual(owner._last_setup_outcome, "virt")
+
+    def test_exit10_names_restart_not_shutdown(self):
+        """Fast Startup: „Herunterfahren" resumes the old kernel and the pending
+        work never completes, so the student would loop."""
+        method, owner, calls = self._make(elevate=(10, False, None), reboot_pending=True)
+        self._run(method, owner)
+        self.assertTrue(any("nicht Herunterfahren" in m for m in calls["log"]))
+        self.assertIn("nicht Herunterfahren", calls["showinfo"][0][1])
+        self.assertEqual(owner._last_setup_outcome, "reboot")
+
+    def test_the_outcome_is_recorded_for_every_routed_code(self):
+        for code, outcome in ((0, "done"), (10, "reboot"), (11, "virt"), (12, "consent"), (1, "failed")):
+            with self.subTest(exit_code=code):
+                method, owner, _calls = self._make(elevate=(code, False, None), distro_registered=True)
+                self._run(method, owner)
+                self.assertEqual(getattr(owner, "_last_setup_outcome", None), outcome)
 
     # Outcome 5/5: the student refused the UAC prompt. Checked FIRST, before any
     # exit code (there is no exit code to read).
@@ -929,6 +997,7 @@ class PrerequisiteLifecycleTeardownTest(unittest.TestCase):
 
         fake_dm = types.SimpleNamespace(
             is_distro_registered=lambda: True,
+            distro_registration=lambda attempts=1, delay_s=5.0: "registered",
             start_keepalive=lambda: True,
             is_docker_running=lambda: docker_running,
             start_edubotics_distro=lambda: events.append("distro_boot"),
@@ -1002,6 +1071,288 @@ class PrerequisiteLifecycleTeardownTest(unittest.TestCase):
                                            docker_running=False)
         method(owner)
         self.assertLess(events.index("distro_boot"), events.index("teardown"))
+
+
+class PrerequisiteRegistrationRoutingTest(unittest.TestCase):
+    """_run_prerequisite_checks_body routes on the THREE-way registration.
+
+    A WSL that does not answer must never be routed into an elevated
+    (re)import — the 2026-09-07 PC got `wsl --import` over a distro that was
+    listed again minutes later. And the flag-pending entry says only what the
+    flag proves: setup is unfinished, not that a restart is pending."""
+
+    def _make(self, *, registration="registered", reboot_pending=False):
+        events, logs, statuses, calls = [], [], [], {}
+
+        def _registration(attempts=1, delay_s=5.0):
+            calls["attempts"] = attempts
+            return registration
+
+        fake_dm = types.SimpleNamespace(
+            distro_registration=_registration,
+            is_distro_registered=lambda: registration == "registered",
+            start_keepalive=lambda: events.append("keepalive"),
+            is_docker_running=lambda: True,
+            start_edubotics_distro=lambda: events.append("distro_boot"),
+            wait_for_docker=lambda callback=None: True,
+            ensure_environment_stopped=lambda log=None: events.append("teardown") or False,
+            images_exist=lambda: {"img": True},
+            pull_images=lambda **kw: True,
+            check_for_updates=lambda log=None: False,
+            get_last_pull_status=lambda: {"age_days": 0, "digests": {}},
+            has_gpu=lambda: False,
+        )
+        ns = {
+            "os": os, "sys": types.SimpleNamespace(frozen=False),
+            "device_manager": types.SimpleNamespace(usbipd_reachable=lambda: True,
+                                                    usbipd_path=lambda: r"C:\usbipd.exe"),
+            "docker_manager": fake_dm, "IMAGE_TAG": "2.21.0", "__package__": "gui.app",
+            "webview_window": types.SimpleNamespace(destroy_all=lambda: None),
+        }
+        method = _load_method("_run_prerequisite_checks_body", ns)
+        owner = types.SimpleNamespace(
+            _log=logs.append, _set_status=statuses.append,
+            _reboot_required_pending=lambda: reboot_pending, _finalize_completed=False,
+            _prompt_finalize_install=lambda reason=None: events.append("finalize"),
+            _rootfs_rebuild_required=lambda: False, _prerequisites_done=False,
+            _last_setup_outcome=None, _update_start_button=lambda: None,
+            _try_rehydrate_arms=lambda: None,
+            progress=types.SimpleNamespace(start=lambda *_a: None, stop=lambda *_a: None),
+            root=types.SimpleNamespace(after=lambda _ms, fn=None: fn() if fn is not None else None),
+        )
+        return method, owner, events, logs, statuses, calls
+
+    def test_an_unresponsive_wsl_is_never_routed_into_finalize(self):
+        method, owner, events, logs, statuses, calls = self._make(registration="unresponsive")
+        method(owner)
+        self.assertNotIn("finalize", events)
+        self.assertNotIn("distro_boot", events)
+        self.assertEqual(calls["attempts"], 3, "a WSL service still starting deserves a re-ask")
+        self.assertEqual(owner._last_setup_outcome, "wsl_unresponsive")
+        joined = " ".join(logs)
+        self.assertIn("WSL antwortet gerade nicht", joined)
+        self.assertIn("NICHT neu eingerichtet", joined)
+        self.assertNotIn("noch nicht eingerichtet", joined)
+        self.assertNotIn("Installer", joined)
+        self.assertFalse(owner._prerequisites_done)
+
+    def test_an_absent_distro_still_routes_into_finalize(self):
+        method, owner, events, logs, _s, _c = self._make(registration="absent")
+        method(owner)
+        self.assertEqual(events, ["finalize"])
+
+    def test_a_registered_distro_continues(self):
+        method, owner, events, _l, _s, _c = self._make(registration="registered")
+        method(owner)
+        self.assertNotIn("finalize", events)
+        self.assertTrue(owner._prerequisites_done)
+
+    def test_the_flag_entry_says_unfinished_not_restart(self):
+        method, owner, events, logs, _s, _c = self._make(reboot_pending=True)
+        method(owner)
+        self.assertEqual(events, ["finalize"])
+        self.assertIn("Die Einrichtung ist noch nicht abgeschlossen — sie wird jetzt fortgesetzt.", logs)
+        self.assertFalse(any("Neustart" in m for m in logs),
+                         "the flag proves unfinished work, not a pending restart")
+
+
+class ScanRefusalAndSetupContextTest(unittest.TestCase):
+    """„Arme scannen" is refused while setup is not finished, and says why from
+    what THIS session concluded — never from the flag's mere existence."""
+
+    def _owner(self, **attrs):
+        ns = {"__package__": "gui.app"}
+        ns.update(_gui_str_constants("VIRT_SERVICE_PROBLEM_DE", "VIRT_SERVICE_NEXTSTEP_DE"))
+        unfinished = _load_method("_setup_unfinished_de", ns)
+        blocked = _load_method("_scan_blocked_reason", ns)
+        base = dict(_finalize_in_progress=False, _prerequisites_done=True,
+                    _prereq_in_progress=False, _last_setup_outcome=None,
+                    _last_setup_detail=None)
+        base.update(attrs)
+        owner = types.SimpleNamespace(**base)
+        owner._setup_unfinished_de = lambda: unfinished(owner)
+        owner._scan_blocked_reason = lambda: blocked(owner)
+        return owner
+
+    def test_a_finished_setup_blocks_nothing(self):
+        self.assertIsNone(self._owner()._scan_blocked_reason())
+
+    def test_a_running_finalize_blocks(self):
+        reason = self._owner(_finalize_in_progress=True)._scan_blocked_reason()
+        self.assertIn("Einrichtung läuft gerade", reason)
+
+    def test_a_running_prerequisite_scan_blocks(self):
+        reason = self._owner(_prerequisites_done=False, _prereq_in_progress=True)._scan_blocked_reason()
+        self.assertIn("Systemprüfung läuft noch", reason)
+
+    def test_the_refusal_carries_the_outcome(self):
+        cases = {
+            "reboot": ("nicht Herunterfahren", "Installer"),
+            "wsl_unresponsive": ("WSL antwortet gerade nicht", "Installer"),
+            "consent": ("Installer erneut ausführen", "Neustart"),
+            None: ("noch nicht abgeschlossen", "Installer"),
+            "failed": ("noch nicht abgeschlossen", "Installer"),
+        }
+        for outcome, (must, must_not) in cases.items():
+            with self.subTest(outcome=outcome):
+                reason = self._owner(_prerequisites_done=False,
+                                     _last_setup_outcome=outcome)._scan_blocked_reason()
+                self.assertIn(must, reason)
+                self.assertNotIn(must_not, reason)
+
+    def test_the_virt_outcome_repeats_the_proven_remedy(self):
+        owner = self._owner(_prerequisites_done=False, _last_setup_outcome="virt",
+                            _last_setup_detail=("Laut Windows ist … aus.", "Bitte die IT … ein."))
+        self.assertEqual(owner._scan_blocked_reason(),
+                         "Die Einrichtung ist nicht abgeschlossen: Laut Windows ist … aus. Bitte die IT … ein.")
+        owner = self._owner(_prerequisites_done=False, _last_setup_outcome="virt")
+        self.assertIn("vmcompute", owner._scan_blocked_reason(), "no detail -> the Service fallback")
+
+    def _drive_scan(self, owner, diag=None):
+        rec = types.SimpleNamespace(logs=[], statuses=[], teardown=0, identified=0, buttons=[])
+
+        def _identify(image, arm_family="omx"):
+            rec.identified += 1
+            return None, None
+
+        ns = {
+            "threading": types.SimpleNamespace(Thread=_SyncThread),
+            "docker_manager": types.SimpleNamespace(
+                ensure_environment_stopped=lambda log=None: setattr(rec, "teardown", rec.teardown + 1) or False),
+            "device_manager": types.SimpleNamespace(
+                scan_and_identify_arms=_identify,
+                diagnose_usb_environment=lambda **kw: diag,
+                get_diagnostics_log_path=lambda: "/tmp/d.log",
+                LAST_SCAN_NOTICE=""),
+            "webview_window": types.SimpleNamespace(destroy_all=lambda: None),
+            "IMAGE_OPEN_MANIPULATOR": "img",
+            "ROBOT_PROFILES": constants.ROBOT_PROFILES,
+            "tk": types.SimpleNamespace(DISABLED="disabled", NORMAL="normal"),
+        }
+        scan = _load_method("_scan_arms", ns)
+        for name, value in dict(
+                _scanning=False, _scan_confirm_open=False,
+                _confirm_arm_scan_closes_window=lambda: True,
+                btn_scan_leader=types.SimpleNamespace(config=lambda **kw: rec.buttons.append(kw)),
+                btn_scan_arm=types.SimpleNamespace(config=lambda **kw: rec.buttons.append(kw)),
+                btn_stop=types.SimpleNamespace(config=lambda **kw: None),
+                btn_open_browser=types.SimpleNamespace(config=lambda **kw: None),
+                _selected_robot_profile=lambda: "omx_full",
+                root=types.SimpleNamespace(after=lambda _d, fn=None, *a: fn(*a) if fn is not None else None),
+                progress=types.SimpleNamespace(start=lambda *a: None, stop=lambda *a: None),
+                hardware=types.SimpleNamespace(leader=None, follower=None),
+                leader_status_var=types.SimpleNamespace(set=lambda *a: None),
+                follower_status_var=types.SimpleNamespace(set=lambda *a: None),
+                _set_status=rec.statuses.append, _log=rec.logs.append,
+                _clear_arm_repair=lambda: None, _stop_camera_bridge=lambda: None,
+                _stop_rs_control_server=lambda: None, _update_start_button=lambda: None,
+                _show_arm_repair=lambda *a, **k: None, running=False,
+                _reboot_required_pending=lambda: False).items():
+            if not hasattr(owner, name):
+                setattr(owner, name, value)
+        scan(owner)
+        return rec
+
+    def test_a_refused_scan_touches_nothing_and_says_why(self):
+        owner = self._owner(_finalize_in_progress=True)
+        rec = self._drive_scan(owner)
+        self.assertEqual((rec.teardown, rec.identified, rec.buttons), (0, 0, []))
+        self.assertFalse(owner._scanning)
+        self.assertTrue(rec.logs and "Einrichtung läuft gerade" in rec.logs[0])
+        self.assertEqual(rec.statuses, rec.logs)
+
+    def test_the_missing_distro_diagnosis_keeps_the_session_context(self):
+        """Finalize's Phase 0 may delete a stale flag; after an exit 11 the
+        diagnosis must still say what finalize proved, not „Installer erneut"."""
+        diag = device_manager.UsbDiagnosis(
+            wsl_distro_missing=True,
+            message_de="Die EduBotics-WSL-Umgebung ist nicht registriert. Bitte den Installer erneut ausführen.",
+            details="wsl --list --quiet does not contain 'EduBotics'")
+        owner = self._owner(_last_setup_outcome="virt",
+                            _last_setup_detail=("Problem aus dem Marker.", "Nächster Schritt aus dem Marker."))
+        rec = self._drive_scan(owner, diag=diag)
+        joined = "\n".join(rec.logs)
+        self.assertIn("Problem aus dem Marker.", joined)
+        self.assertNotIn("Installer erneut ausführen", joined)
+        self.assertIn(diag.details, joined, "support still gets the technical detail")
+
+    def test_the_plain_missing_distro_diagnosis_is_unchanged(self):
+        diag = device_manager.UsbDiagnosis(
+            wsl_distro_missing=True,
+            message_de="Die EduBotics-WSL-Umgebung ist nicht registriert. Bitte den Installer erneut ausführen.")
+        rec = self._drive_scan(self._owner(), diag=diag)
+        self.assertIn("Bitte den Installer erneut ausführen.", "\n".join(rec.logs))
+
+
+class WslDistroRegistrationTest(unittest.TestCase):
+    """gui/app/wsl_bridge.py — the Python twin of wsl_distro_state.ps1.
+
+    The PowerShell twin is executed over the same input space in
+    test_installer_pwsh_executed.DistroRegistrationExecutedTest, which uses
+    wsl_bridge.resolve_distro_registration as one of its oracles."""
+
+    from gui.app import wsl_bridge as _wb
+
+    def test_the_decision_table(self):
+        wb = self._wb
+        R, A, U = wb.DISTRO_REGISTERED, wb.DISTRO_ABSENT, wb.DISTRO_UNRESPONSIVE
+        cases = [
+            # (list_ran, rc, text, registry_readable, registry_names) -> answer
+            ((True, 0, "Ubuntu\nEduBotics\n", True, []), R),
+            ((True, 0, "E\x00d\x00u\x00B\x00o\x00t\x00i\x00c\x00s\x00\n", False, []), R),
+            ((True, 0, "Ubuntu\n", True, ["EduBotics"]), A),
+            ((True, 255, "Error code: Wsl/WSL_E_DEFAULT_DISTRO_NOT_FOUND\n", False, []), A),
+            ((True, 255, "Das Windows-Subsystem für Linux verfügt über keine installierten Distributionen.\n",
+              True, []), A),
+            ((True, 255, "Fehlercode: Wsl/Service/E_UNEXPECTED\n", True, ["EduBotics"]), U),
+            ((True, 255, "Fehlercode: Wsl/Service/E_UNEXPECTED\n", False, []), U),
+            ((False, -1, "", True, []), A),
+            ((False, -1, "", True, ["EduBotics"]), U),
+            ((False, -1, "", False, []), U),
+        ]
+        for args, expected in cases:
+            with self.subTest(args=args[:2] + args[3:]):
+                self.assertEqual(wb.resolve_distro_registration(*args), expected)
+
+    def test_retries_only_while_unresponsive(self):
+        wb = self._wb
+        answers = iter([
+            types.SimpleNamespace(returncode=255, stdout="Fehlercode: Wsl/Service/E_UNEXPECTED\n", stderr=""),
+            types.SimpleNamespace(returncode=0, stdout="EduBotics\n", stderr=""),
+            types.SimpleNamespace(returncode=0, stdout="EduBotics\n", stderr=""),
+        ])
+        sleeps = []
+        with patch.object(wb.subprocess, "run", side_effect=lambda *a, **k: next(answers)), \
+                patch.object(wb, "_lxss_distro_names", return_value=(True, ["EduBotics"])), \
+                patch("time.sleep", side_effect=sleeps.append):
+            self.assertEqual(wb.distro_registration(attempts=3, delay_s=5.0), wb.DISTRO_REGISTERED)
+        self.assertEqual(sleeps, [5.0], "one re-ask, then stop as soon as WSL answers")
+
+    def test_a_timeout_is_not_a_missing_distro(self):
+        wb = self._wb
+        import subprocess as sp
+        with patch.object(wb.subprocess, "run", side_effect=sp.TimeoutExpired("wsl", 10)), \
+                patch.object(wb, "_lxss_distro_names", return_value=(True, ["EduBotics"])), \
+                patch("time.sleep"):
+            self.assertEqual(wb.distro_registration(attempts=2), wb.DISTRO_UNRESPONSIVE)
+            self.assertFalse(wb.is_edubotics_distro_registered())
+
+    def test_the_boolean_callers_see_unresponsive_as_not_registered(self):
+        from gui.app import docker_manager
+        with patch.object(docker_manager.wsl_bridge, "distro_registration",
+                          return_value=docker_manager.wsl_bridge.DISTRO_UNRESPONSIVE):
+            self.assertFalse(docker_manager.is_distro_registered())
+
+    def test_the_diagnosis_never_calls_an_unresponsive_wsl_missing(self):
+        with patch.object(device_manager, "_run_usbipd_list", return_value="BUSID  VID:PID\n"), \
+                patch.object(device_manager.wsl_bridge, "distro_registration",
+                             return_value=device_manager.wsl_bridge.DISTRO_UNRESPONSIVE):
+            diag = device_manager.diagnose_usb_environment(image=None, arm_family="omx")
+        self.assertTrue(diag.wsl_unresponsive)
+        self.assertFalse(diag.wsl_distro_missing,
+                         "wsl_distro_missing is what routes into „Einrichtung abschließen“")
+        self.assertNotIn("Installer", diag.message_de)
+        self.assertIn("nicht Herunterfahren", diag.message_de)
 
 
 class PrerequisiteReentrancyTest(unittest.TestCase):
@@ -1330,7 +1681,7 @@ class PreflightAccountScopeTest(unittest.TestCase):
 
     def test_the_check_exists_and_tests_both_halves_of_the_split(self):
         src = self._src()
-        self.assertIn("$vhdxPresent -and (-not $distroPresent)", src,
+        self.assertIn('$vhdxPresent -and ($distroState -eq "Absent")', src,
                       "check 5 must fire on disk-YES + registered-NO; either "
                       "half alone is a normal state (a fresh PC, or a healthy "
                       "install) and would false-positive on every rig")
@@ -1924,50 +2275,10 @@ class RootCauseGuardTest(unittest.TestCase):
                         "Test-Path must precede the dot-source")
 
     # ── 5. finalize's custody of .reboot_required across the prereq child ────
-    # finalize deliberately calls install_prerequisites.ps1 WITHOUT
-    # -PreserveExistingRebootFlag (a preserved STALE flag re-arms the reboot
-    # loop). But that child deletes the flag whenever IT concludes no reboot is
-    # needed — including a "dd-uninstall" flag whose reboot has NOT happened,
-    # written by migrate_from_docker_desktop.ps1, whose reason the feature-store
-    # probe is blind to. Losing it makes finalize skip Test-RebootStillPending
-    # and import the distro next to a half-removed Docker Desktop: precisely the
-    # entanglement the flag exists to prevent. So finalize takes custody.
-    def test_finalize_takes_custody_of_the_flag_across_the_prereq_child(self):
-        code = self._code("finalize_install.ps1")
-        call = re.search(
-            r"&\s*\(Join-Path \$PSScriptRoot \"install_prerequisites\.ps1\"\)",
-            code)
-        self.assertIsNotNone(call, "prereq child invocation not found")
-        snap = code.index("$flagSnapshot")
-        self.assertLess(
-            snap, call.start(),
-            "the flag must be snapshotted BEFORE the child can delete it")
-        after = code[call.end():]
-        self.assertIn(
-            "Set-Content", after,
-            "a flag the child deleted but did not own must be RESTORED after "
-            "the call, or a pending Docker-Desktop removal is erased into a "
-            "distro import")
-        self.assertRegex(
-            after, r"-not \(Test-Path \$flagPath\)",
-            "the restore must be conditional on the child having deleted it — "
-            "an unconditional rewrite would re-arm the reboot loop")
-
-    def test_finalize_does_not_preserve_a_stale_flag_instead(self):
-        # The tempting one-line 'fix' (always pass -PreserveExistingRebootFlag)
-        # is wrong in the other direction: a STALE flag then survives forever and
-        # every launch dead-ends on "Neustart erforderlich". Custody, not
-        # preservation, is the contract.
-        code = self._code("finalize_install.ps1")
-        call = re.search(
-            r"&\s*\(Join-Path \$PSScriptRoot \"install_prerequisites\.ps1\"\)",
-            code)
-        window = code[max(0, call.start() - 1200):call.start()]
-        self.assertNotIn(
-            "PreserveExistingRebootFlag = $true", window,
-            "finalize must NOT blanket-preserve the flag — a stale flag would "
-            "re-arm the reboot loop it exists to close")
-
+    # EXECUTED since 2026-09-15, not grepped: test_installer_pwsh_executed.py
+    # ::FinalizeEndToEndTest.test_custody_restores_the_reason_and_the_ORIGINAL_mtime
+    # (a dd-uninstall flag the child dropped comes back byte-for-byte with its
+    # original write time) and ::test_custody_does_not_preserve_a_stale_flag.
 
 class DockerDesktopRebootReasonTest(unittest.TestCase):
     """The .reboot_required CONTENT contract between migrate and finalize.
@@ -1994,69 +2305,6 @@ class DockerDesktopRebootReasonTest(unittest.TestCase):
             "migrate must write the dd-uninstall REASON into the flag — a bare "
             '"1" makes finalize blind to the pending Docker-Desktop removal '
             "(the WSL/VMP feature store reads Enabled throughout it)")
-
-    def test_finalize_discriminates_the_dd_reason_by_boot_time(self):
-        # The predicate moved to virtualization_ready.ps1 on 2026-09-11 (finalize
-        # and verify_system each had their own, and they disagreed). The
-        # INVARIANT is unchanged and is asserted against its new home; finalize
-        # must no longer carry a private copy.
-        code = RootCauseGuardTest._code("virtualization_ready.ps1")
-        self.assertIn("dd-uninstall", code,
-                      "the dd-uninstall reason is no longer read — the "
-                      "feature-store probe alone cannot see a pending DD removal")
-        self.assertIn("LastBootUpTime", code,
-                      "the dd-uninstall reason must be settled by comparing the "
-                      "flag's write time against the last boot time — any other "
-                      "signal either loops the student (a lingering registry "
-                      "entry) or trusts the honor system (the dialog)")
-        # The dd discrimination must outrank the feature-store signal, so a
-        # not-yet-rebooted DD removal defers even though the features read
-        # Enabled. It used to be provable by FILE ORDER (the dd branch sat above
-        # the Get-WindowsOptionalFeature loop in one function). The facts are now
-        # gathered once and the PRIORITY is expressed as rung order inside the
-        # two policy functions, so assert that directly — which is strictly
-        # stronger than the old positional check. Since 2026-09-11 each rung is
-        # a CALL to a named proof predicate (neither policy spells a proof
-        # itself — see OneRebootPredicateTest), so the order is read off those
-        # call sites.
-        self.assertIn("dd-uninstall",
-                      _ps1_function_body(code, "Test-DdUninstallOutstanding"),
-                      "the dd-uninstall reason must be read by the proof "
-                      "predicate both policies share")
-        for fn in ("Test-RebootOutstanding", "Get-VirtualizationVerdict"):
-            with self.subTest(policy=fn):
-                body = _ps1_function_body(code, fn)
-                self.assertLess(
-                    body.index("Test-DdUninstallOutstanding"),
-                    body.index("Test-FeatureEnablePending"),
-                    f"{fn} must test the dd-uninstall reason BEFORE EnablePending "
-                    f"— the feature store reads Enabled throughout a pending "
-                    f"Docker-Desktop removal, so the cheaper signal would win and "
-                    f"the import would run next to a half-removed Docker Desktop")
-        verdict = _ps1_function_body(code, "Get-VirtualizationVerdict")
-        self.assertLess(
-            verdict.index("Test-DdUninstallOutstanding"),
-            verdict.index("HypervisorPresent"),
-            "a LIVE hypervisor must not short-circuit the half-removed "
-            "Docker-Desktop guard — that is why rung 1 is rung 1")
-        fin = RootCauseGuardTest._code("finalize_install.ps1")
-        self.assertNotIn(
-            "Get-WindowsOptionalFeature", fin,
-            "finalize must not keep a private feature-store probe — that copy IS "
-            "the 2026-09-07 defect")
-
-    def test_prereqs_never_clobber_an_existing_flag_reason(self):
-        # Under -PreserveExistingRebootFlag the flag may carry migrate's
-        # "dd-uninstall"; the Summary re-write with "1" would erase the reason
-        # AND refresh the mtime finalize compares against the last boot.
-        code = self._code("install_prerequisites.ps1")
-        self.assertRegex(
-            code,
-            r'if \(-not \(Test-Path \$FlagPath\)\) \{\s*'
-            r'Set-Content -Path \$FlagPath -Value "1"',
-            "install_prerequisites must write the reboot flag only when ABSENT "
-            "— an existing flag keeps its content (migrate's dd-uninstall "
-            "reason and its write time must survive)")
 
     def test_migrate_reboot_branch_precedes_the_still_present_branch(self):
         # After rc=3010 the Uninstall registry entry legitimately lingers until
@@ -2086,9 +2334,10 @@ class OneRebootPredicateTest(unittest.TestCase):
         Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE
 
     forever, across GUI launches, while the student was told to check their free
-    disk space. These tests pin the one predicate, its LADDER ORDER (every rung is
-    load-bearing and two of them exist only because the obvious order is wrong),
-    and the dot-source contract that keeps a helper from exiting its caller.
+    disk space. These tests pin the one predicate's STRUCTURE — one spelling per
+    proof, no private copy in finalize, the dot-source contract that keeps a
+    helper from exiting its caller. Its BEHAVIOUR (the ladder order, the
+    classifier) is executed under pwsh in test_installer_pwsh_executed.py.
 
     Since 2026-09-11 they also pin the PROOF layer. The two policies are ladders
     over the same three proofs, and each policy originally spelled all three
@@ -2173,10 +2422,9 @@ class OneRebootPredicateTest(unittest.TestCase):
     # .py and test_activation_agent.py::TestGateParserLockstep — drive every
     # reader off one table, and assert the intended divergence POSITIVELY.
     #
-    # SOURCE-LEVEL on purpose. A Python re-implementation of the ladder would be
-    # a THIRD copy, free to drift from the .ps1 exactly like the two it replaced
-    # (and PowerShell is not installed in CI, so it could never be executed
-    # against the real thing either).
+    # SOURCE-LEVEL on purpose: executing the ladder (test_installer_pwsh_executed
+    # .py) proves what it DOES, and cannot see a second spelling of a proof that
+    # happens to agree with the first today.
     _PROOFS = ("Test-DdUninstallOutstanding", "Test-FeatureEnablePending",
                "Test-NoBootSinceFlag")
     # What a RE-INLINED proof must necessarily contain: a read of the proof's own
@@ -2248,149 +2496,13 @@ class OneRebootPredicateTest(unittest.TestCase):
                     f"{fn} is dot-sourced into its caller; an exit there ends "
                     f"the INSTALLER mid-run")
 
-    # ── The ladder. ORDER IS THE WHOLE DESIGN. ─────────────────────────────
-    def test_the_verdict_returns_exactly_the_four_vocabulary_words(self):
-        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
-        found = set(re.findall(r'return "([A-Za-z]+)"', body))
-        self.assertEqual(
-            found, {"Ready", "RebootRequired", "VirtualizationDisabled", "Unknown"},
-            "the verdict vocabulary is the contract the .ps1 branches and the GUI "
-            "exit codes are built on")
-
-    def test_enable_pending_outranks_the_hypervisor_shortcut(self):
-        """EnablePending is PROOF a feature enable waits on a reboot.
-
-        It is also the only signal the old finalize ever looked at. A PC running
-        a hypervisor for Hyper-V's own sake would skip it if HypervisorPresent
-        came first — trading one blind spot for another."""
-        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
-        self.assertLess(
-            body.index("Test-FeatureEnablePending"), body.index("HypervisorPresent"),
-            "EnablePending must be tested BEFORE the HypervisorPresent shortcut")
-
-    def test_ground_truth_outranks_the_boot_time_inference(self):
-        """HypervisorPresent is the thing the reboot was FOR; flag-mtime is a proxy.
-
-        Windows Fast Startup makes LastBootUpTime unreliable, so trusting the
-        proxy over ground truth tells a working PC to reboot forever."""
-        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
-        # Rung 1 also rests on "no boot since the flag", so anchor on rung 4's
-        # OWN call — the bare flag-time rung, the one that must NOT outrank
-        # ground truth. (Before 2026-09-11 this anchored on the inline clause
-        # `$State.FlagPresent -and …`, which the predicate extraction replaced.)
-        rung4 = "Test-NoBootSinceFlag -State $State"
-        self.assertIn(rung4, body, "rung 4's call changed shape")
-        self.assertLess(
-            body.index("HypervisorPresent"), body.index(rung4),
-            "the Ready rung must precede the flag-time RebootRequired rung")
-
-    def test_virtualization_firmware_is_only_read_below_the_hypervisor_rung(self):
-        """A RUNNING hypervisor commonly MASKS VirtualizationFirmwareEnabled to
-        $false — which is exactly why install_prerequisites.ps1 ORs the two. The
-        refusal is sound ONLY because it is unreachable while HypervisorPresent is
-        $true."""
-        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
-        self.assertLess(
-            body.index("HypervisorPresent"), body.index("VirtFirmwareEnabled"),
-            "reading the firmware flag above the hypervisor rung would refuse "
-            "working machines whose hypervisor masks it")
-
-    def test_only_a_genuine_false_refuses(self):
-        """`-eq $false`, never `-ne $true`.
-
-        PowerShell evaluates `$null -eq $false` as $false, so an absent or
-        unreadable property can never produce VirtualizationDisabled. `-ne $true`
-        would refuse on every $null — fail-CLOSED on a WMI hiccup, which bricks
-        working PCs."""
-        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
-        self.assertRegex(body, r"\$State\.VirtFirmwareEnabled -eq \$false")
-        self.assertNotIn("VirtFirmwareEnabled -ne $true", body)
-        self.assertRegex(body, r"\$State\.HypervisorPresent -eq \$true")
-
-    def test_unknown_is_the_fall_through_not_a_refusal(self):
-        body = _ps1_function_body(self._virt(), "Get-VirtualizationVerdict")
-        self.assertTrue(
-            body.rstrip().rstrip("}").rstrip().endswith('return "Unknown"'),
-            "Unknown must be the LAST rung: refuse only on proof, and let a WMI "
-            "hiccup proceed to the import, which classifies its own failure")
-
-    def test_reboot_outstanding_is_proof_only(self):
-        code = self._virt()
-        body = _ps1_function_body(code, "Test-RebootOutstanding")
-        self.assertIn("return $false", body,
-                      "every unreadable state must answer $false — that is "
-                      "verify_system's documented SAFE direction")
-        # The clock guard moved WITH the proofs on 2026-09-11 (this policy now
-        # composes them), so assert it in both time-dependent predicates rather
-        # than in the policy that no longer spells them.
-        for fn in ("Test-DdUninstallOutstanding", "Test-NoBootSinceFlag"):
-            with self.subTest(proof=fn):
-                self.assertIn(
-                    "TimeReadable", _ps1_function_body(code, fn),
-                    f"{fn} compares times: it may only count when the clock was "
-                    f"actually read, or an unreadable clock manufactures a "
-                    f"benign pending-reboot verdict over a broken install")
-
-    # ── The classifier reads CODES, never German prose ─────────────────────
-    def test_the_failure_classifier_matches_codes_not_messages(self):
-        body = _ps1_function_body(self._virt(), "Get-WslFailureClass")
-        self.assertIn("HCS_E_SERVICE_NOT_AVAILABLE", body,
-                      "the code the field log actually carried")
-        self.assertIn("0x80370102", body)
-        # The 2026-09-07 transcript carried a GERMAN sentence beside an ASCII code
-        # token. Matching prose is the mistake install_prerequisites.ps1 already
-        # corrected when it deleted its English-only `systeminfo | Select-String
-        # "Hyper-V Requirements"` probe, which never matched on a German PC.
-        for german in ("Vorgang", "erforderliches Feature", "Fehlercode"):
-            self.assertNotIn(
-                german, body,
-                "classify on the CODE token; a localized message cannot be "
-                "matched on the student PCs this ships to")
-
-    def test_the_classifier_survives_out_string_wrapping(self):
-        """`Fehlercode: Wsl/.../HCS_E_SERVICE_NOT_AVAILABLE` is 79 characters.
-
-        Out-String wraps at the host width, so the token is one character from
-        being split in half. The caller passes -Width 4096 AND the classifier
-        strips whitespace — belt and brace, because a caller that forgets the
-        width must still classify."""
-        body = _ps1_function_body(self._virt(), "Get-WslFailureClass")
-        # Whitespace AND NUL: the NUL half is executed byte-for-byte in
-        # test_installer_pwsh_executed.ClassifierExecutedTest, which is the test
-        # that actually bites if either half is dropped.
-        self.assertRegex(body, r"\$flat = \(\$Text -replace '\[\\s\\x00\]', ''\)")
-        self.assertIn("$flat -like", body,
-                      "the match must run against the stripped copy, or the "
-                      "normalisation is decoration")
-        self.assertIn("Out-String -Width 4096",
-                      _read(_IMPORT_PS1, encoding="utf-8-sig"))
-
-    # ── The import actually captures what it classifies ───────────────────
-    def test_import_captures_and_echoes_the_wsl_output(self):
-        code = self._code("import_edubotics_wsl.ps1")
-        self.assertIn("$importOut = ", code,
-                      "the import must CAPTURE wsl's words to classify them")
-        self.assertIn("$importExit = $LASTEXITCODE", code,
-                      "the exit code must be snapshotted before any later native "
-                      "call can overwrite $LASTEXITCODE")
-        self.assertIn("Write-Host $importOut.TrimEnd()", code,
-                      "and echo them VERBATIM — capturing without echoing would "
-                      "DELETE the evidence the field log carried")
-        # Anchored on the IMPORT's classify call: since 2026-09-11 the stamp
-        # read of an existing distro is classified too, earlier in the file.
-        self.assertLess(code.index("$importOut = "),
-                        code.index("Get-WslFailureClass -Text $importOut"),
-                        "capture before classify")
-
-    def test_import_keeps_the_old_triad_for_non_hypervisor_failures(self):
-        code = self._code("import_edubotics_wsl.ps1")
-        self.assertIn("Antivirus-Ausnahme, genug Speicherplatz, WSL2 aktiviert", code,
-                      "the disk/AV wording is still RIGHT for the failures it "
-                      "fits; only the hypervisor class was mis-served by it")
-        self.assertIn('if ($virtHelperOk) { $failClass = Get-WslFailureClass', code,
-                      "a missing helper must degrade to the old wording, never "
-                      "hard-fail the installer's own [Run] Step 4")
-
+    # ── The ladder, the classifier and the import's capture ────────────────
+    # EXECUTED, not grepped (test_installer_pwsh_executed.py): the verdict over
+    # its whole reachable state space, the classifier over real codes and the
+    # 5.1 byte shapes, finalize -> import end to end with a fake wsl. What stays
+    # here is what execution cannot see: a SECOND copy of a proof or a remedy
+    # that happens to agree today.
+    #
     # ── The misleading sentence is gone for good ──────────────────────────
     def test_the_false_reassurance_is_deleted(self):
         code = self._code("finalize_install.ps1")
@@ -2398,18 +2510,6 @@ class OneRebootPredicateTest(unittest.TestCase):
             "Neustart bereits erfolgt", code,
             "this is the line the field log printed immediately before importing "
             "into a dead hypervisor; it asserts a fact the script cannot know")
-
-    def test_the_verdict_gate_is_not_gated_on_the_flag(self):
-        """The virtualization rungs are flag-INDEPENDENT.
-
-        Wrapping the gate in `if (Test-Path $flagPath)` — as the old reboot check
-        was — means a PC with no flag and a dead hypervisor walks straight into
-        the import."""
-        code = self._code("finalize_install.ps1")
-        gate = code.index("Get-VirtualizationVerdict -State $rebootState")
-        window = code[max(0, gate - 400):gate]
-        self.assertNotIn("if (Test-Path $flagPath) {", window,
-                         "the verdict gate must run unconditionally")
 
     def test_there_is_one_marker_writer(self):
         """$EXIT_VIRT goes out through Fail-WithNextAction, not a second
@@ -2423,32 +2523,81 @@ class OneRebootPredicateTest(unittest.TestCase):
                       "the routed codes reuse that writer via a parameter")
         self.assertEqual(code.count("function Fail-WithNextAction"), 1)
 
-    def test_the_virt_remedy_is_declared_once(self):
-        """A duplicated German remedy is the class this change set removes.
+    _VIRT_KINDS = ("FIRMWARE", "FEATURE", "SERVICE")
 
-        Both paths that exit 11 — the pre-import verdict and import's own
-        classification — must say the SAME thing, and the way the old code got
-        „Prüfen Sie: Antivirus-Ausnahme, genug Speicherplatz" printed over a
-        hypervisor fault was exactly one remedy written in one place and used
-        for every cause."""
-        code = self._code("finalize_install.ps1")
-        self.assertEqual(code.count("$VIRT_PROBLEM_DE  ="), 1,
-                         "declared exactly once")
-        self.assertEqual(code.count("Fail-WithNextAction $VIRT_PROBLEM_DE "), 2,
-                         "and used by BOTH exit-11 paths")
-        self.assertNotIn(
-            'Fail-WithNextAction "Die Virtualisierung', code,
-            "no inline copy of the German remedy may remain")
-        for half in ("neu starten", "BIOS/UEFI"):
-            self.assertIn(half, code, "both remedies must be named")
+    def test_each_virt_remedy_is_declared_once_and_used_once(self):
+        """One sentence per remedy KIND, one exit-11 path.
 
-    def test_finalize_rotates_its_log_instead_of_destroying_it(self):
+        A single hardcoded remedy for every hypervisor failure is how the
+        transcript came to say „Virtualisierung ist aktiv" and then blame VT-x in
+        the BIOS; three inline copies at three call sites is how they would
+        drift apart again. Behaviour (which kind a state gets) is executed in
+        test_installer_pwsh_executed.RemedyKindExecutedTest."""
         code = self._code("finalize_install.ps1")
-        self.assertIn(".prev.log", code,
-                      "the previous attempt's transcript is the only thing that "
-                      "can show what CHANGED on a rig that loops identically")
-        self.assertLess(code.index(".prev.log"), code.index("Start-Transcript"),
-                        "rotate before the new transcript opens")
+        for kind in self._VIRT_KINDS:
+            for part in ("PROBLEM", "NEXTSTEP"):
+                name = f"$VIRT_{kind}_{part}_DE"
+                with self.subTest(constant=name):
+                    declarations = re.findall(r"(?m)^" + re.escape(name) + r"\s*=", code)
+                    self.assertEqual(len(declarations), 1,
+                                     f"{name} must be declared exactly once")
+        body = _ps1_function_body(code, "Fail-WithHypervisorRemedy")
+        self.assertEqual(body.count("$EXIT_VIRT"), 3, "one exit per kind, all in ONE function")
+        outside = code.replace(body, "")
+        self.assertNotRegex(outside, r"Fail-WithNextAction \$VIRT_",
+                            "no second exit-11 call site may pick a remedy itself")
+        self.assertEqual(outside.count("Fail-WithHypervisorRemedy -State"), 1,
+                         "exactly one exit-11 path: import's classified failure")
+        self.assertNotIn('Fail-WithNextAction "Die Virtualisierung', code)
+
+    def test_the_gui_fallback_remedy_is_finalizes_service_wording(self):
+        """gui_app.py shows the marker's remedy; when that cannot be read it
+        falls back to the SERVICE wording — which must be finalize's, verbatim."""
+        fin = _read(_FINALIZE_PS1, encoding="utf-8-sig")
+        gui = _gui_str_constants("VIRT_SERVICE_PROBLEM_DE", "VIRT_SERVICE_NEXTSTEP_DE")
+        for name, value in gui.items():
+            m = re.search(r'(?m)^\$%s\s*=\s*"([^"]*)"' % name, fin)
+            self.assertIsNotNone(m, f"${name} is gone from finalize_install.ps1")
+            self.assertEqual(value, m.group(1), f"{name}: GUI fallback and finalize disagree")
+
+    def test_the_installer_refuses_a_rebuild_on_the_same_tokens_import_does(self):
+        """robotis_ai_setup.iss::DistroVmCannotStart and virtualization_ready.ps1
+        ::Get-WslFailureCode decide the same question („does this wsl output
+        prove the VM cannot start?") in two languages. Pascal cannot be executed
+        here (the compile is proven by release-installer.yml), so the TOKEN SETS
+        are compared: a code added to one and not the other is how the installer
+        would again offer a destructive rebuild that import then refuses."""
+        iss = _read(os.path.join(_SCRIPTS, "..", "robotis_ai_setup.iss"))
+        body = iss[iss.index("function DistroVmCannotStart(): Boolean;"):]
+        body = body[:body.index("\nend;")]
+        iss_tokens = set(re.findall(r"Pos\('([A-Z0-9_]+)', S\)", body))
+        ps_body = _ps1_function_body(RootCauseGuardTest._code("virtualization_ready.ps1"),
+                                     "Get-WslFailureCode")
+        ps_tokens = {t.upper() for t in re.findall(r'@\("([A-Za-z0-9_]+)",', ps_body)}
+        self.assertTrue(ps_tokens, "the classifier's token table changed shape")
+        self.assertEqual(iss_tokens, ps_tokens)
+        self.assertIn("S := Uppercase(S);", body, "the .iss compares upper-cased, like -like")
+        should = iss[iss.index("function ShouldImportDistro(): Boolean;"):]
+        self.assertLess(should.index("DistroVmCannotStart()"), should.index("MsgBox("),
+                        "the dead-VM check must come before the consent box is shown")
+
+    def test_the_distro_state_helper_honours_the_dot_source_contract(self):
+        """wsl_distro_state.ps1 is dot-sourced by finalize, import, preflight and
+        verify_system: an exit/throw there ends the CALLER, an EAP assignment
+        poisons it. Execution cannot see a contract breach on a path it did not
+        walk, so this one is structural."""
+        code = self._code("wsl_distro_state.ps1")
+        self.assertNotRegex(code, r"(?m)^\s*(exit|throw)\b")
+        self.assertNotRegex(code, r"\$ErrorActionPreference\s*=")
+        raw = _read(os.path.join(_SCRIPTS, "wsl_distro_state.ps1"), encoding="utf-8-sig")
+        self.assertTrue(raw.startswith("#"))
+        for name in ("finalize_install.ps1", "import_edubotics_wsl.ps1",
+                     "preflight_system.ps1", "verify_system.ps1"):
+            with self.subTest(script=name):
+                c = self._code(name)
+                self.assertIn("wsl_distro_state.ps1", c)
+                self.assertLess(c.index("Test-Path $distroHelper"), c.index(". $distroHelper"),
+                                "every dot-source is Test-Path-guarded")
 
 
 class TranscriptExcerptTest(unittest.TestCase):

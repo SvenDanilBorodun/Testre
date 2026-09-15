@@ -321,6 +321,29 @@ def _transcript_excerpt(path: str, head: int = 12, tail: int = 30) -> list:
             + lines[-tail:])
 
 
+def _read_failed_marker(path: str):
+    """``(problem, next_step)`` from finalize_install.ps1's FAILED marker, or None.
+
+    The marker's FAILED shape is ``FAILED <iso>\\n<problem>\\n<next step>`` —
+    written by the ONE writer, finalize's ``Fail-WithNextAction``, with
+    ``-Encoding UTF8`` (a BOM on 5.1, hence ``utf-8-sig``). It is how the
+    remedy finalize chose FROM PROOF reaches the GUI without a new exit code.
+    Never raises; any other shape, an unreadable file or a U+FFFD in either line
+    (an old ANSI-written marker) yields None, and the caller falls back to its
+    own wording rather than show mojibake."""
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+            lines = [ln.strip() for ln in fh.read().splitlines()]
+    except OSError:
+        return None
+    if len(lines) < 3 or not lines[0].startswith("FAILED "):
+        return None
+    problem, next_step = lines[1], lines[2]
+    if not problem or not next_step or "�" in problem + next_step:
+        return None
+    return problem, next_step
+
+
 def _asset_path(name: str) -> str:
     """Return absolute path to an asset file; works in dev + PyInstaller frozen builds."""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(
@@ -498,18 +521,30 @@ def _primary_lan_ip() -> str:
 FINALIZE_EXIT_DONE = 0      # import + pull succeeded; the flag was cleared
 FINALIZE_EXIT_REBOOT = 10   # host reboot still required; nothing installed yet
 FINALIZE_EXIT_CONSENT = 12  # rootfs rebuild needs consent -> re-run the installer
-FINALIZE_EXIT_VIRT = 11     # no usable hypervisor -> reboot, then BIOS/UEFI
+FINALIZE_EXIT_VIRT = 11     # WSL2 could not start a VM -> the remedy in the marker
 
-# Why 11 is its OWN code and not folded into 10: "reboot" and "enable
-# virtualization in the BIOS/UEFI" are DIFFERENT remedies and a student cannot
-# reboot their way out of the second. `wsl --import` reports the same
-# HCS_E_SERVICE_NOT_AVAILABLE for both, so 11 deliberately carries BOTH remedies
-# with the reboot first (it is free, and it is the common case on a fresh
-# install); the elevated transcript records which proof the script actually had.
-# Degradation is safe in both directions: a NEW script paired with an OLD GUI
-# lands in the generic else, which now shows a transcript tail that carries the
-# correct German remedy, and an OLD script paired with a NEW GUI simply never
-# emits 11.
+# Why 11 is its OWN code and not folded into 10: a restart is not always the
+# fix. WHICH remedy applies (a BIOS setting / a Windows feature / the VM service)
+# finalize decides from proof (virtualization_ready.ps1::Get-HypervisorRemedyKind)
+# and writes into the FAILED marker's problem + next-step lines, which the
+# exit-11 branch shows via _read_failed_marker. The two sentences below are the
+# FALLBACK when that marker cannot be read — the „Service" wording, which
+# offers the free remedy first and names every IT check, and is byte-equal to
+# finalize_install.ps1's $VIRT_SERVICE_PROBLEM_DE / $VIRT_SERVICE_NEXTSTEP_DE
+# (pinned by a test). Degradation is safe in both directions: a NEW script with
+# an OLD GUI lands in the old 11 branch whose text still says restart first, and
+# an OLD script with a NEW GUI writes an older remedy into the same marker shape.
+VIRT_SERVICE_PROBLEM_DE = (
+    "WSL2 konnte seine virtuelle Maschine nicht starten, weil der "
+    "Windows-Dienst für virtuelle Maschinen nicht verfügbar ist."
+)
+VIRT_SERVICE_NEXTSTEP_DE = (
+    "Bitte den PC neu starten (Neu starten, nicht Herunterfahren) und "
+    "EduBotics danach erneut öffnen. Hilft das nicht, bitte die IT-Betreuung "
+    "informieren: den Dienst vmcompute, die Starteinstellung "
+    "hypervisorlaunchtype und die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI "
+    "prüfen."
+)
 
 # Crossing arm families invalidates a scan (see _hardware_ready). Two sentences
 # because the two surfaces differ: the status bar carries one short line, the
@@ -604,6 +639,15 @@ class EduBoticsApp:
         # session back into finalize. Session-scoped on purpose: a next launch
         # retries the (idempotent) finalize once, which retries the delete.
         self._finalize_completed = False
+        # What the setup chain last concluded THIS SESSION — "reboot", "virt",
+        # "consent", "failed", "done" (from finalize's exit code) or
+        # "wsl_unresponsive" (from the prerequisite scan) — plus, for "virt",
+        # the (problem, next step) finalize wrote. In-process on purpose, NOT in
+        # .reboot_required: finalize's Phase 0 may legitimately delete a stale
+        # flag, and the arm-scan refusal / diagnosis must keep saying why setup
+        # is not finished after that. None = nothing concluded yet.
+        self._last_setup_outcome = None
+        self._last_setup_detail = None
         # Native camera capture bridge (Windows student path). Created on
         # environment start, stopped on environment stop / app close.
         self.camera_bridge = None
@@ -1633,14 +1677,34 @@ class EduBoticsApp:
         # flag it merely failed to delete must not re-route us into an endless
         # finalize/UAC loop.
         if self._reboot_required_pending() and not self._finalize_completed:
-            self._log("Ein ausstehender Windows-Neustart hat die Einrichtung unterbrochen.")
+            # The flag PROVES only that deferred setup work is unfinished — not
+            # that a restart is pending (finalize keeps it on every unfinished
+            # outcome). The old sentence, „Ein ausstehender Windows-Neustart hat
+            # die Einrichtung unterbrochen.", was false in the 2026-09-07 log's
+            # last block, where dockerd was already answering.
+            self._log("Die Einrichtung ist noch nicht abgeschlossen — sie wird jetzt fortgesetzt.")
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, self._prompt_finalize_install)
             return
 
-        # Check the EduBotics WSL2 distro is installed and docker engine is up
+        # Check the EduBotics WSL2 distro is installed and docker engine is up.
+        # THREE answers: a WSL that does not answer must never be read as "not
+        # installed" and routed into an elevated (re)import. Re-asked a few
+        # times first — after a boot the WSL service can take seconds to answer.
         self._set_status("EduBotics-Umgebung wird geprüft...")
-        if not docker_manager.is_distro_registered():
+        registration = docker_manager.distro_registration(attempts=3, delay_s=5.0)
+        if registration == "unresponsive":
+            self._last_setup_outcome = "wsl_unresponsive"
+            self._log(
+                "[WARNUNG] WSL antwortet gerade nicht — ob die EduBotics-Umgebung "
+                "vorhanden ist, lässt sich nicht feststellen. Sie wird deshalb "
+                "NICHT neu eingerichtet. Bitte den PC neu starten (Neu starten, "
+                "nicht Herunterfahren) und EduBotics danach erneut öffnen."
+            )
+            self._set_status("WSL antwortet nicht — PC neu starten")
+            self.root.after(0, lambda: self.progress.stop())
+            return
+        if registration != "registered":
             self._log("EduBotics-Umgebung ist noch nicht eingerichtet.")
             self.root.after(0, lambda: self.progress.stop())
             # Auto-run finalize (finalize_install.ps1) — direct when already
@@ -2499,22 +2563,28 @@ class EduBoticsApp:
                         f"powershell.exe {ps_args}",
                     )
             elif exit_code == FINALIZE_EXIT_REBOOT:
+                # „Neu starten, nicht Herunterfahren": with Windows Fast
+                # Startup (the default) a shutdown resumes the old kernel, so
+                # the pending feature enable never completes and finalize asks
+                # again on every launch.
+                self._last_setup_outcome = "reboot"
                 self._log(
-                    "Neustart erforderlich: Bitte den PC neu starten und "
-                    "EduBotics danach erneut öffnen, um die Einrichtung "
-                    "abzuschließen."
+                    "Neustart erforderlich: Bitte den PC neu starten (Neu "
+                    "starten, nicht Herunterfahren) und EduBotics danach "
+                    "erneut öffnen, um die Einrichtung abzuschließen."
                 )
                 self._set_status("Neustart erforderlich — danach EduBotics erneut öffnen")
                 self.root.after(0, lambda: messagebox.showinfo(
                     "Neustart erforderlich",
                     "Windows muss neu gestartet werden, um die EduBotics-"
                     "Installation abzuschließen.\n\n"
-                    "Bitte starten Sie den PC neu und öffnen Sie EduBotics "
-                    "danach erneut.",
+                    "Bitte starten Sie den PC neu (Neu starten, nicht "
+                    "Herunterfahren) und öffnen Sie EduBotics danach erneut.",
                 ))
             elif exit_code == FINALIZE_EXIT_CONSENT:
                 # The rootfs must be rebuilt and nobody consented. Rebooting can
                 # never fix this; the installer is the only path that asks.
+                self._last_setup_outcome = "consent"
                 self._log(
                     "Die EduBotics-Umgebung muss neu aufgebaut werden. Bitte "
                     "den Installer erneut ausführen — er fragt vorher nach "
@@ -2531,41 +2601,30 @@ class EduBoticsApp:
                     "Web-Oberfläche zu Hugging Face hoch.",
                 ))
             elif exit_code == FINALIZE_EXIT_VIRT:
-                # The Windows hypervisor is not running, so WSL2 cannot create an
-                # environment at all. Both remedies are named because nothing
-                # available to us can tell them apart — `wsl --import` reports the
-                # same HCS_E_SERVICE_NOT_AVAILABLE for "never rebooted" and for
-                # "VT-x off in the BIOS" — and the reboot goes first because it is
-                # free and is the common case on a fresh install. Before this
-                # branch existed, this outcome fell into the generic else and the
-                # student was told to check their free disk space, on a machine
-                # whose 20 GB precheck had passed seconds earlier.
-                self._log(
-                    "Die Virtualisierung ist auf diesem PC nicht verfügbar — "
-                    "ohne sie kann WSL2 keine EduBotics-Umgebung anlegen. Bitte "
-                    "zuerst den PC neu starten und EduBotics danach erneut "
-                    "öffnen. Hilft das nicht, muss die Virtualisierung "
-                    "(VT-x/AMD-V) im BIOS/UEFI aktiviert werden — das übernimmt "
-                    "üblicherweise die IT-Betreuung der Schule."
-                )
+                # WSL2 reported that it could not start a VM. WHICH remedy fits
+                # was decided by finalize from proof (the CIM facts it printed
+                # plus wsl's own error code) and written into the FAILED marker;
+                # show exactly that. A hardcoded "VT-x in the BIOS" here used to
+                # contradict a transcript that had just read the hypervisor as
+                # running. The fallback is the Service wording, which offers the
+                # free remedy first and names every IT check.
+                remedy = _read_failed_marker(marker_file)
+                problem, next_step = remedy if remedy else (
+                    VIRT_SERVICE_PROBLEM_DE, VIRT_SERVICE_NEXTSTEP_DE)
+                self._last_setup_outcome = "virt"
+                self._last_setup_detail = (problem, next_step)
+                self._log(f"{problem} {next_step}")
                 self._set_status(
-                    "Virtualisierung nicht verfügbar — PC neu starten, danach BIOS/UEFI")
-                self.root.after(0, lambda: messagebox.showwarning(
-                    "Virtualisierung nicht verfügbar",
-                    "EduBotics braucht die Virtualisierung von Windows (WSL2). "
-                    "Sie ist auf diesem PC gerade nicht verfügbar.\n\n"
-                    "1. Bitte starten Sie den PC neu und öffnen Sie EduBotics "
-                    "danach erneut.\n\n"
-                    "2. Hilft das nicht, muss die Virtualisierung (VT-x/AMD-V) "
-                    "im BIOS/UEFI aktiviert werden. Das übernimmt üblicherweise "
-                    "die IT-Betreuung der Schule.",
-                ))
+                    "Virtualisierung nicht verfügbar — Hinweis im Protokoll beachten")
+                self.root.after(0, lambda p=problem, n=next_step: messagebox.showwarning(
+                    "Virtualisierung nicht verfügbar", f"{p}\n\n{n}"))
             elif exit_code == FINALIZE_EXIT_DONE and docker_manager.is_distro_registered():
                 # Latch it: finalize said done, so a .reboot_required it could
                 # not delete (it warns and still exits 0) must not send
                 # _run_prerequisite_checks straight back here — that would loop
                 # the student through UAC prompts for the rest of the session.
                 self._finalize_completed = True
+                self._last_setup_outcome = "done"
                 self._log("Einrichtung abgeschlossen. Systemprüfung wird fortgesetzt...")
                 self.root.after(0, lambda: threading.Thread(
                     target=self._run_prerequisite_checks, daemon=True).start())
@@ -2637,6 +2696,7 @@ class EduBoticsApp:
                     f"powershell.exe {ps_args}",
                 )
             else:
+                self._last_setup_outcome = "failed"
                 self._log(
                     f"Einrichtung fehlgeschlagen (exit {exit_code}). "
                     "Siehe Protokoll oben."
@@ -2863,9 +2923,63 @@ class EduBoticsApp:
         finally:
             self._scan_confirm_open = False
 
+    def _setup_unfinished_de(self) -> str:
+        """One German sentence for WHY setup is not finished, from what this
+        session actually concluded (``_last_setup_outcome``), never from the
+        existence of ``.reboot_required``. Shared by the scan refusal and the
+        scan diagnosis so the two cannot tell different stories."""
+        outcome = getattr(self, "_last_setup_outcome", None)
+        if outcome == "reboot":
+            return ("Die Einrichtung wartet auf einen Neustart. Bitte den PC neu "
+                    "starten (Neu starten, nicht Herunterfahren) und EduBotics "
+                    "danach erneut öffnen.")
+        if outcome == "virt":
+            detail = getattr(self, "_last_setup_detail", None)
+            if detail:
+                return f"Die Einrichtung ist nicht abgeschlossen: {detail[0]} {detail[1]}"
+            return ("Die Einrichtung ist nicht abgeschlossen: "
+                    f"{VIRT_SERVICE_PROBLEM_DE} {VIRT_SERVICE_NEXTSTEP_DE}")
+        if outcome == "wsl_unresponsive":
+            return ("WSL antwortet gerade nicht. Bitte den PC neu starten (Neu "
+                    "starten, nicht Herunterfahren) und EduBotics danach erneut "
+                    "öffnen.")
+        if outcome == "consent":
+            return ("Die EduBotics-Umgebung muss neu aufgebaut werden. Bitte den "
+                    "EduBotics-Installer erneut ausführen — er fragt vorher nach "
+                    "Ihrer Zustimmung.")
+        return ("Die EduBotics-Einrichtung ist noch nicht abgeschlossen. Bitte die "
+                "Meldungen oben im Protokoll beachten und EduBotics danach erneut "
+                "öffnen. Hilft das nicht, bitte den PC neu starten.")
+
+    def _scan_blocked_reason(self):
+        """German reason „Arme scannen" must not run now, or None.
+
+        The scan tears the environment down and runs the identify container, so
+        it needs a FINISHED setup: in the 2026-09-07 log it ran while finalize
+        was still importing, and before prerequisites were done it could only
+        end in a diagnosis blaming the distro. Refused with a sentence instead —
+        no teardown, no confirm dialog, no ``_scanning`` change."""
+        if getattr(self, "_finalize_in_progress", False):
+            return ("Die Einrichtung läuft gerade — „Arme scannen“ ist erst "
+                    "danach möglich.")
+        if not getattr(self, "_prerequisites_done", False):
+            if getattr(self, "_prereq_in_progress", False):
+                return ("Die Systemprüfung läuft noch — „Arme scannen“ ist erst "
+                        "danach möglich.")
+            return self._setup_unfinished_de()
+        return None
+
     def _scan_arms(self):
         """Nach Roboterarmen scannen — läuft im Hintergrund."""
         if self._scanning or self._scan_confirm_open:
+            return
+        # A SEPARATE statement from the re-entrancy guard above on purpose: that
+        # guard shares its clause with a DECLINED confirmation and must stay
+        # silent, while a refusal here has to say why.
+        blocked = self._scan_blocked_reason()
+        if blocked:
+            self._log(blocked)
+            self._set_status(blocked)
             return
         # BEFORE any state changes: a declined scan must leave the GUI exactly
         # as it found it — button live, `_scanning` false, no status, no log,
@@ -3032,15 +3146,25 @@ class EduBoticsApp:
             # finalize keeps .reboot_required set on EVERY unfinished outcome, so
             # the flag proves "setup did not finish", not "a reboot is needed" —
             # the exact conflation the finalize header warns about.
+            #
+            # Since 2026-09-15 the context also comes from what THIS session
+            # concluded (`_last_setup_outcome`): finalize's Phase 0 may delete a
+            # stale flag, and after an exit 10/11 the student must keep hearing
+            # the restart / virtualization remedy, not „Installer erneut
+            # ausführen". A WSL that does not answer has its own diagnosis
+            # (`wsl_unresponsive`) and never reaches this override.
             message_de = diag.message_de
-            if (getattr(diag, "wsl_distro_missing", False)
-                    and self._reboot_required_pending()):
-                message_de = (
-                    "Die EduBotics-Einrichtung ist noch nicht abgeschlossen — "
-                    "deshalb fehlt die EduBotics-Umgebung. Bitte EduBotics neu "
-                    "starten und die Einrichtung abschließen. Hilft das nicht, "
-                    "bitte den PC neu starten und EduBotics erneut öffnen."
-                )
+            if getattr(diag, "wsl_distro_missing", False):
+                if getattr(self, "_last_setup_outcome", None) in (
+                        "reboot", "virt", "consent", "wsl_unresponsive", "failed"):
+                    message_de = self._setup_unfinished_de()
+                elif self._reboot_required_pending():
+                    message_de = (
+                        "Die EduBotics-Einrichtung ist noch nicht abgeschlossen — "
+                        "deshalb fehlt die EduBotics-Umgebung. Bitte EduBotics neu "
+                        "starten und die Einrichtung abschließen. Hilft das nicht, "
+                        "bitte den PC neu starten und EduBotics erneut öffnen."
+                    )
 
             # Log the German message line-by-line so the GUI log pane shows the
             # full bullet list, then a single short status-bar message.

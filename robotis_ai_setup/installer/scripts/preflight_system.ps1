@@ -184,11 +184,14 @@ if ($wslOk) {
 if (-not $wslOk) {
     Emit WARNUNG "WSL2 noch nicht aktiv - wird bei der Einrichtung installiert (Neustart möglich)."
 } elseif ($wslVerdict -eq "RebootRequired") {
-    Emit WARNUNG "WSL2 ist installiert, aber noch nicht einsatzbereit - bitte den PC neu starten und EduBotics danach erneut öffnen."
-} elseif ($wslVerdict -eq "VirtualizationDisabled") {
-    # The remedy sentence is finalize_install.ps1's $VIRT_NEXTSTEP_DE VERBATIM
-    # (a test pins it): one remedy for one cause, whichever script says it.
-    Emit WARNUNG "WSL2 ist installiert, aber die Virtualisierung (VT-x/AMD-V) ist auf diesem PC nicht verfügbar. Bitte zuerst den PC neu starten. Hilft das nicht, muss die Virtualisierung im BIOS/UEFI aktiviert werden — das übernimmt üblicherweise die IT-Betreuung der Schule."
+    Emit WARNUNG "WSL2 ist installiert, aber noch nicht einsatzbereit - bitte den PC neu starten (Neu starten, nicht Herunterfahren) und EduBotics danach erneut öffnen."
+} elseif (($wslVerdict -eq "VirtualizationDisabled") -and
+          ((Get-HypervisorRemedyKind -State $wslState) -eq "Firmware")) {
+    # Only on PROOF — both CIM values genuinely $false — and with the words
+    # finalize_install.ps1 uses for that proof: its $VIRT_FIRMWARE_PROBLEM_DE +
+    # $VIRT_FIRMWARE_NEXTSTEP_DE VERBATIM (a test pins them). A diagnostic, not a
+    # gate: finalize still attempts the import, because a CIM value can be wrong.
+    Emit WARNUNG "WSL2 ist installiert, aber: Laut Windows ist die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI dieses PCs ausgeschaltet — ohne sie kann WSL2 nicht starten. Bitte die IT-Betreuung der Schule bitten, die Virtualisierung im BIOS/UEFI einzuschalten, und EduBotics danach erneut öffnen."
 } elseif ($wslVerdict -eq "Ready") {
     Emit OK "WSL2 aktiv"
 } else {
@@ -196,19 +199,42 @@ if (-not $wslOk) {
 }
 
 # ── 4. dockerd reachability (only if the EduBotics distro already exists) ───
+# Three answers, not two (wsl_distro_state.ps1): a WSL that does not answer is
+# NOT "noch nicht vorhanden" — that sentence sat two lines above an import that
+# then failed on a distro WSL simply could not list. A missing helper degrades
+# to the old two-way read.
 $distroPresent = $false
-try {
-    $listed = wsl --list --quiet 2>&1
-    foreach ($line in $listed) {
-        if ((($line -replace "`0", "").Trim()) -eq "EduBotics") {
-            $distroPresent = $true
-            break
-        }
+$distroState = ""
+$distroHelper = Join-Path $PSScriptRoot 'wsl_distro_state.ps1'
+if (Test-Path $distroHelper) {
+    try {
+        . $distroHelper
+        $distroState = Get-EduBoticsDistroRegistration -DistroName "EduBotics"
+    } catch {
+        $distroState = ""
+        Write-Diag "distro" "registration helper raised: $_"
     }
-} catch {
-    Write-Diag "distro" "wsl --list raised: $_"
 }
-if ($distroPresent) {
+if ($distroState) {
+    $distroPresent = ($distroState -eq "Registered")
+    Write-Diag "distro" "registration=$distroState"
+} else {
+    try {
+        $listed = wsl --list --quiet 2>&1
+        foreach ($line in $listed) {
+            if ((($line -replace "`0", "").Trim()) -eq "EduBotics") {
+                $distroPresent = $true
+                break
+            }
+        }
+    } catch {
+        Write-Diag "distro" "wsl --list raised: $_"
+    }
+    $distroState = if ($distroPresent) { "Registered" } else { "Absent" }
+}
+if ($distroState -eq "Unresponsive") {
+    Emit WARNUNG "WSL antwortet gerade nicht - ob die EduBotics-Umgebung vorhanden ist, lässt sich nicht feststellen. Bitte den PC neu starten (Neu starten, nicht Herunterfahren)."
+} elseif ($distroPresent) {
     # Reuse the single source of truth for dockerd-readiness. Dot-source it from
     # the same scripts dir; it exists at runtime alongside this file.
     $dockerReady = $false
@@ -302,7 +328,9 @@ if ($markerUser.IndexOf([char]0xFFFD) -ge 0) { $markerUser = "" }
 # spelling it out keeps the intent from reading like an oversight.)
 $accountSplit = ($markerUser -ne "") -and ($env:USERNAME) -and ($markerUser -ine $env:USERNAME)
 Write-Diag "account_scope" "vhdx=$VhdxPath present=$vhdxPresent distroRegistered=$distroPresent USERNAME=$env:USERNAME markerUser=$markerUser split=$accountSplit"
-if ($vhdxPresent -and (-not $distroPresent)) {
+# "Absent" only: an Unresponsive WSL proves nothing about registration, and this
+# check accuses a Windows account on a proof of absence.
+if ($vhdxPresent -and ($distroState -eq "Absent")) {
     if ($accountSplit) {
         Emit FEHLER "Die EduBotics-Umgebung wurde mit dem Windows-Konto ($markerUser) eingerichtet, angemeldet sind Sie aber als ($env:USERNAME). Eine WSL-Umgebung gehört immer genau einem Windows-Konto und ist für jedes andere Konto unsichtbar. Bitte EduBotics mit dem Konto ($markerUser) starten - oder den EduBotics-Installer erneut ausführen, während Sie mit Ihrem eigenen Konto angemeldet sind."
     } else {

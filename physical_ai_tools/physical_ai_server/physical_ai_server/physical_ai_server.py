@@ -162,6 +162,14 @@ _MANUAL_RECORD_MIN_DELTA_RAD = 0.003
 # monotone, so the non-decreasing time column extract_points requires survives.
 _MANUAL_RECORD_JOINT_DECIMALS = 4
 _MANUAL_RECORD_TIME_DECIMALS = 3
+# D8 — the German sentence for each data stop that DISCARDS a leader-arm take
+# (keyed by _leader_teach_abort_reason). A collision has no /task/status notice
+# (the CollisionModal owns the screen) but stop_leader still answers with it.
+_LEADER_TEACH_ABORT_MESSAGES_DE = {
+    'collision': 'Die Aufnahme wurde wegen einer Kollision verworfen.',
+    'leader_lost': 'Der Leader-Arm sendet keine Daten mehr — die Aufnahme wurde verworfen.',
+    'follower_lost': 'Die Armstellung kommt nicht mehr an — die Aufnahme wurde verworfen.',
+}
 # Re-lock-in-place before re-energising a ros2_control (Dynamixel/JTC) follower.
 # While the arm is limp the JointTrajectoryController keeps the reference it held
 # BEFORE the torque-off (usually HOME), and the OMX servos run a 50 ms time-based
@@ -379,6 +387,21 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._manual_transient_ops = 0
         self._manual_persistent = False
         self._manual_exit_gen = 0
+
+        # D8 — leader-arm Vormachen. A SEPARATE claim from the manual arbiter: the follower
+        # is teleoperated (torqued, driven by the leader broadcaster), so on_manual must NOT
+        # be set (it would gate the teleop collision e-stop OFF). Lock order is
+        # _leader_teach_lock -> _mode_lock only; _manual_lock is never taken here.
+        self.on_leader_teach = False
+        self._leader_teach_claim_gen = 0              # bumped under _mode_lock by every start_leader claim
+        self._leader_teach_lock = threading.Lock()
+        self._leader_teach_active = False
+        self._leader_teach_buffer: list = []          # [t_s, j1..jn, grip] rows, like _handguide_buffer
+        self._leader_teach_timer = None
+        self._leader_teach_reap_timer = None
+        self._leader_teach_start_mono = 0.0
+        self._leader_teach_abort_reason = ''          # '' | 'collision' | 'leader_lost' | 'follower_lost'
+        self._leader_teach_cap_reached = False
 
         self.hf_cancel_on_progress = False
 
@@ -846,8 +869,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # Audit fix 3 — on_calibration joins the mode gate (parity with
         # _assert_no_other_active): a touch-off/extrinsic capture is an active
         # mode; READY every ~4 s during it was a divergence, not a feature.
+        # D8 — a leader-arm take joins it for the same parity reason.
         if (self.on_recording or self.on_inference or self.on_workflow
-                or self.on_manual or self.on_calibration):
+                or self.on_manual or self.on_calibration
+                or getattr(self, 'on_leader_teach', False)):
             return
         if getattr(self, '_collision_active', False):
             return
@@ -2535,7 +2560,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         Returns (ok, german_message). `requested_mode` is one of
         'calibration', 'workflow', 'recording', 'inference', 'training',
-        'manual' — used only for error message clarity.
+        'manual', 'capture', 'leader_teach'. It selects which relaxations apply:
+        'manual' coexists with an open Handbetrieb session; 'capture' (a read-only
+        FK snapshot) coexists with Handbetrieb AND a leader-arm take; 'leader_teach'
+        coexists with nothing, itself included.
         """
         # A collision recovery owns the arm until the student finishes the two-step
         # home→resume flow (which, mid-recording, seamlessly resumes that recording). Block
@@ -2560,8 +2588,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # capture/jog/record/replay coexist within the one session; every OTHER
         # mode refuses so a recording / inference can't claim the arm mid
         # hand-guide (the follower is LIMP) or mid driven jog/replay.
-        if requested_mode != 'manual' and getattr(self, 'on_manual', False):
+        # 'capture' is a read-only FK snapshot that drives nothing, so it coexists with
+        # an open Handbetrieb session exactly like 'manual' does …
+        if requested_mode not in ('manual', 'capture') and getattr(self, 'on_manual', False):
             return False, 'Handbetrieb ist aktiv — bitte zuerst den Handbetrieb beenden.'
+        # D8 — a leader take owns the recording slot while the follower stays
+        # teleoperated. Only a capture may coexist (a Position/Ziel captured mid-take).
+        if requested_mode != 'capture' and getattr(self, 'on_leader_teach', False):
+            return False, 'Eine Leader-Aufnahme läuft gerade — bitte zuerst beenden.'
         return True, ''
 
     # ------------------------------------------------------------------
@@ -3392,13 +3426,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         student can save a point at whatever height the arm currently holds.
         """
         # Gate: refuse while recording / inference / training / calibration /
-        # workflow / collision-recovery owns the arm. 'manual' relaxes only against
-        # on_manual, so it refuses on EVERY active owner. F1 — hold _mode_lock
-        # around the check for arbiter consistency (this is a read-only FK snapshot
-        # that drives NOTHING and claims no flag, so the lock is released
-        # immediately; belt-and-suspenders with the mode arbiter).
+        # workflow / collision-recovery owns the arm. 'capture' relaxes only against
+        # on_manual and on_leader_teach: a capture coexists with an open Handbetrieb
+        # session AND with a leader-arm Vormachen take (D8 — a Position/Ziel captured
+        # mid-take), and refuses on every other owner. F1 — hold _mode_lock around
+        # the check for arbiter consistency (this is a read-only FK snapshot that
+        # drives NOTHING and claims no flag, so the lock is released immediately;
+        # belt-and-suspenders with the mode arbiter).
         with self._mode_lock:
-            ok, msg = self._assert_no_other_active('manual')
+            ok, msg = self._assert_no_other_active('capture')
         if not ok:
             response.success = False
             response.world_x = 0.0
@@ -4361,7 +4397,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         Non-blocking: ``start`` torques OFF and arms a ~25 Hz sampling timer;
         ``stop`` stops it, re-torques (fail-loud) and returns the CONTRACT-B
         points_json; ``cancel`` stops it, re-torques and discards. stop/cancel are
-        NOT gated (re-locking must always be possible)."""
+        NOT gated (re-locking must always be possible).
+
+        D8 — leader-arm Vormachen: ``start_leader`` claims the SEPARATE
+        ``on_leader_teach`` slot (never on_manual, never _manual_lock, never
+        torque) on a has_leader profile with a live leader and a known follower
+        vector, and arms a ~25 Hz follower sampler; ``stop_leader`` returns the
+        CONTRACT-B take (or the data-stop sentence when it was discarded);
+        ``cancel_leader`` discards. The follower stays teleoperated throughout, so
+        the teleop collision e-stop stays ARMED."""
         response.success = False
         response.sample_count = 0
         response.duration_s = 0.0
@@ -4521,6 +4565,131 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 except RuntimeError:
                     pass
 
+        if action == 'start_leader':
+            caps = getattr(getattr(self, '_arm_profile', None), 'capabilities', None)
+            if not getattr(caps, 'has_leader', False):
+                response.message = 'Dieser Roboter hat keinen Leader-Arm.'
+                return response
+            with self._mode_lock:
+                ok, msg = self._assert_no_other_active('leader_teach')
+                if not ok:
+                    response.message = msg
+                    return response
+                self.on_leader_teach = True
+                # Token the claim: a stop/cancel from another tab can release it and a
+                # THIRD tab can claim again before this call gives up — this call's
+                # finally must then leave the newer claim alone.
+                self._leader_teach_claim_gen += 1
+                my_gen = self._leader_teach_claim_gen
+            release = True
+            try:
+                leader_check = getattr(self, 'leader_appears_active', None)
+                leader_live = False
+                if callable(leader_check):
+                    try:
+                        leader_live = bool(leader_check())
+                    except Exception as e:  # noqa: BLE001 — no leader signal means no take
+                        self.get_logger().warning(f'leader_appears_active check failed: {e}')
+                if not leader_live:
+                    response.message = ('Der Leader-Arm sendet keine Daten — bitte den Leader-Arm '
+                                        'verbinden und den Roboter auf der Startseite aktivieren.')
+                    return response
+                if self.communicator is None:
+                    response.message = ('Roboter-Initialisierung fehlgeschlagen — bitte die '
+                                        'Umgebung neu starten (Details im Protokoll).')
+                    return response
+                # _follower_joints_stale() is False for a follower that has NEVER
+                # published (age None), so a missing/short vector is refused here
+                # explicitly — the sampler could otherwise never cap or abort.
+                try:
+                    start_joints = self.communicator.get_latest_follower_joints()
+                except Exception:  # noqa: BLE001
+                    start_joints = None
+                if (self._follower_joints_stale() or not start_joints
+                        or len(start_joints) < self._profile_n() + 1):
+                    response.message = ('Aktuelle Position ist noch nicht bekannt — bitte kurz '
+                                        'warten und erneut versuchen.')
+                    return response
+                with self._leader_teach_lock:
+                    # A stop/cancel from another tab can release the claim between
+                    # the _mode_lock claim above and this point, and a third tab can
+                    # claim again; never arm a take without THIS call's claim
+                    # (lock order _leader_teach_lock -> _mode_lock).
+                    with self._mode_lock:
+                        still_claimed = (self.on_leader_teach
+                                         and self._leader_teach_claim_gen == my_gen)
+                    if not still_claimed:
+                        response.message = 'Aufnahme konnte nicht gestartet werden.'
+                        return response
+                    self._destroy_leader_teach_timers_locked()
+                    self._leader_teach_buffer = []
+                    self._leader_teach_abort_reason = ''
+                    self._leader_teach_cap_reached = False
+                    self._leader_teach_start_mono = time.monotonic()
+                    self._leader_teach_active = True
+                    try:
+                        self._leader_teach_timer = self.create_timer(
+                            1.0 / _MANUAL_RECORD_FPS, self._leader_teach_sample)
+                    except Exception as e:  # noqa: BLE001
+                        self._leader_teach_active = False
+                        self.get_logger().error(f'leader teach timer create failed: {e}')
+                        response.message = 'Aufnahme konnte nicht gestartet werden.'
+                        return response
+                release = False
+                response.success = True
+                response.message = 'Aufnahme gestartet — führe den Leader-Arm.'
+                return response
+            finally:
+                if release:
+                    with self._mode_lock:
+                        # Only THIS call's claim, and never under an armed take.
+                        if (self._leader_teach_claim_gen == my_gen
+                                and not self._leader_teach_active):
+                            self.on_leader_teach = False
+
+        if action in ('stop_leader', 'cancel_leader'):
+            with self._leader_teach_lock:
+                was_active = self._leader_teach_active
+                self._leader_teach_active = False
+                buf = list(self._leader_teach_buffer)
+                abort_reason = self._leader_teach_abort_reason
+                if (was_active and not abort_reason
+                        and getattr(self, '_collision_active', False)):
+                    # The e-stop tripped after the sampler's last tick (<= 40 ms ago)
+                    # but before this stop: the buffer holds the press. READ-ONLY —
+                    # the same data stop the sampler would have made one tick later.
+                    abort_reason = 'collision'
+                cap_reached = self._leader_teach_cap_reached
+                self._leader_teach_buffer = []
+                self._leader_teach_abort_reason = ''
+                self._leader_teach_cap_reached = False
+                self._destroy_leader_teach_timers_locked()
+                with self._mode_lock:
+                    self.on_leader_teach = False
+            if action == 'cancel_leader':
+                response.success = True
+                response.message = 'Aufnahme verworfen.'
+                return response
+            if abort_reason:
+                response.message = _LEADER_TEACH_ABORT_MESSAGES_DE.get(
+                    abort_reason, 'Aufnahme verworfen.')
+                return response
+            if not was_active and not buf and not cap_reached:
+                response.message = 'Es läuft keine Leader-Aufnahme.'
+                return response
+            duration = float(buf[-1][0]) if buf else 0.0
+            # Buffer row [t_s, j1..jn, grip] -> CONTRACT B point [j1..jn, grip, t_s].
+            points = [list(s[1:]) + [s[0]] for s in buf]
+            response.points_json = json.dumps({'fps': _MANUAL_RECORD_FPS, 'points': points})
+            response.sample_count = len(buf)
+            response.duration_s = duration
+            response.success = True
+            response.message = f'Aufnahme beendet — {len(buf)} Punkte.'
+            if cap_reached:
+                response.message += (' Maximale Aufnahmedauer erreicht — die Aufnahme '
+                                     'wurde automatisch beendet.')
+            return response
+
         response.message = 'Unbekannte Aufnahme-Aktion.'
         return response
 
@@ -4574,6 +4743,126 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self._manual_lock.release()
             except RuntimeError:
                 pass
+
+    def _leader_teach_sample(self):
+        """~25 Hz sampler for a leader-arm take. Reads the FOLLOWER (teleop mirrors the
+        leader). Never blocks, never drives, never touches torque or the collision
+        state. A take whose inputs stop being trustworthy is DISCARDED, not filtered."""
+        if not self._leader_teach_active:
+            return
+        abort_reason = ''
+        if getattr(self, '_collision_active', False):
+            abort_reason = 'collision'
+        else:
+            leader_check = getattr(self, 'leader_appears_active', None)
+            try:
+                leader_live = bool(leader_check()) if callable(leader_check) else False
+            except Exception:  # noqa: BLE001
+                leader_live = False
+            if not leader_live:
+                abort_reason = 'leader_lost'
+            elif self._follower_joints_stale():
+                abort_reason = 'follower_lost'
+        joints = None
+        if not abort_reason and self.communicator is not None:
+            try:
+                joints = self.communicator.get_latest_follower_joints()
+            except Exception:  # noqa: BLE001
+                joints = None
+        width = self._profile_n() + 1
+        if not self._leader_teach_lock.acquire(timeout=0.05):
+            return  # a stop/cancel holds the lock; drop this frame (bounded loss)
+        released = False
+        notice = ''
+        try:
+            if not self._leader_teach_active:
+                return
+            if abort_reason:
+                self._leader_teach_active = False
+                self._leader_teach_buffer = []
+                self._leader_teach_abort_reason = abort_reason
+                released = True
+                # NO notice for a collision: a READY+error /task/status during the
+                # collision would fight the CollisionModal's COLLISION phases.
+                if abort_reason != 'collision':
+                    notice = _LEADER_TEACH_ABORT_MESSAGES_DE[abort_reason]
+            else:
+                t = time.monotonic() - self._leader_teach_start_mono
+                buf = self._leader_teach_buffer
+                if joints and len(joints) >= width:
+                    sample = ([round(float(t), _MANUAL_RECORD_TIME_DECIMALS)]
+                              + [round(float(v), _MANUAL_RECORD_JOINT_DECIMALS)
+                                 for v in joints[:width]])
+                    duplicate = bool(buf) and all(
+                        abs(sample[1 + i] - buf[-1][1 + i]) < _MANUAL_RECORD_MIN_DELTA_RAD
+                        for i in range(width))
+                    if not duplicate:
+                        buf.append(sample)
+                # The cap is judged on EVERY tick, a tick without a usable joint
+                # vector included — otherwise a take whose follower vector vanished
+                # would hold the claim forever.
+                if len(buf) >= _MANUAL_RECORD_MAX_SAMPLES or t >= RECORD_MAX_S:
+                    self._leader_teach_active = False
+                    self._leader_teach_cap_reached = True
+                    released = True
+                    notice = ('Maximale Aufnahmedauer erreicht — die Aufnahme wurde '
+                              'automatisch beendet.')
+            if released:
+                with self._mode_lock:
+                    self.on_leader_teach = False
+        finally:
+            try:
+                self._leader_teach_lock.release()
+            except RuntimeError:
+                pass
+        if released:
+            self._schedule_leader_teach_reap()
+            if notice:
+                self._publish_manual_notice(notice)
+
+    def _schedule_leader_teach_reap(self):
+        """One-shot 0.1 s timer that destroys the stopped sampler timer (a periodic
+        timer must not be destroyed from inside its own callback). Idempotent."""
+        if getattr(self, '_leader_teach_reap_timer', None) is not None:
+            return
+        try:
+            self._leader_teach_reap_timer = self.create_timer(0.1, self._reap_leader_teach_timer)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'leader teach reap schedule failed: {e}')
+
+    def _reap_leader_teach_timer(self):
+        timer = getattr(self, '_leader_teach_reap_timer', None)
+        self._leader_teach_reap_timer = None
+        if timer is not None:
+            try:
+                self.destroy_timer(timer)
+            except Exception:  # noqa: BLE001
+                pass
+        if not self._leader_teach_lock.acquire(timeout=1.0):
+            return  # stop/cancel/start will destroy the sampler timer anyway
+        try:
+            if not self._leader_teach_active and self._leader_teach_timer is not None:
+                try:
+                    self.destroy_timer(self._leader_teach_timer)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._leader_teach_timer = None
+        finally:
+            try:
+                self._leader_teach_lock.release()
+            except RuntimeError:
+                pass
+
+    def _destroy_leader_teach_timers_locked(self):
+        """MUST be called holding _leader_teach_lock."""
+        for attr in ('_leader_teach_timer', '_leader_teach_reap_timer'):
+            timer = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if timer is not None:
+                try:
+                    self.destroy_timer(timer)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _schedule_manual_record_cap_finish(self):
         """Schedule the F4 one-shot clean-stop after a RECORD_MAX_S auto-stop.

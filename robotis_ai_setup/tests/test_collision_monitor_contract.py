@@ -649,6 +649,18 @@ class ModeGateTest(unittest.TestCase):
         host._process_gpio_states(self._good_msg())
         self.assertEqual(calls['update'], 1)  # guard armed → detection ran
 
+    def test_on_leader_teach_keeps_detector_armed(self):
+        # D8 — a leader-arm Vormachen take is TELEOP: the follower mirrors the
+        # leader, so the e-stop must stay armed. It claims neither on_workflow nor
+        # on_manual, and the monitor gates only on those two.
+        host, calls = self._spy_host()
+        host.on_leader_teach = True
+        host.on_manual = False
+        host.on_workflow = False
+        host._process_gpio_states(self._good_msg())
+        self.assertEqual(calls['update'], 1)  # guard armed → detection ran
+        self.assertEqual(calls['reset'], 0)
+
 
 class StateCallbackSafetyTest(unittest.TestCase):
     """The /joint_states + /leader/joint_states subscriptions run continuously on

@@ -163,8 +163,10 @@ def test_busy_refuses_with_german_message():
     assert resp.success is False
     assert resp.message == 'Aufnahme läuft gerade — bitte zuerst stoppen.'
     _assert_zeros(resp)
-    # The gate is consulted with the 'manual' mode (refuses on every owner).
-    assert node.gate_modes == ['manual']
+    # The gate is consulted with the 'capture' mode (D8): it relaxes against
+    # exactly what 'manual' did (on_manual) plus on_leader_teach — a capture
+    # coexists with a leader-arm take — and refuses on every other owner.
+    assert node.gate_modes == ['capture']
 
 
 # ---------------------------------------------------------------------------

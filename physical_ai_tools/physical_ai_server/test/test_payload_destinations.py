@@ -326,6 +326,7 @@ def test_one_bad_entry_emits_exactly_one_status_warning():
 
 
 def test_the_skip_reasons_are_bounded_with_one_summary_line():
+    assert MAX_DESTINATION_SKIP_REASONS == 8
     items = [0] * 5000
     out, skipped, present = _parse({'destinations': items})
     assert present and out == {}

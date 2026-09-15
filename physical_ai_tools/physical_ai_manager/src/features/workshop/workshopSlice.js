@@ -31,6 +31,18 @@ function emptySensorSnapshot() {
   };
 }
 
+// Values kept per variable for the Sammlung drawer's „Zuletzt" list.
+export const VAR_HISTORY_LIMIT = 5;
+
+// Push {value, ts} to the FRONT of `name`'s history unless the newest entry
+// already holds the same value — a loop re-setting an unchanged variable every
+// pass would otherwise flush the list with five copies of one number.
+function appendVariableHistory(state, name, value, ts) {
+  const prev = Array.isArray(state.variableHistory[name]) ? state.variableHistory[name] : [];
+  if (prev.length > 0 && JSON.stringify(prev[0].value) === JSON.stringify(value)) return;
+  state.variableHistory[name] = [{ value, ts }, ...prev].slice(0, VAR_HISTORY_LIMIT);
+}
+
 const initialState = {
   // Calibration wizard state
   // WS4 (2026-06-17): scene-cam-only calibration. The wizard starts on the
@@ -105,6 +117,12 @@ const initialState = {
   sensorSnapshot: emptySensorSnapshot(),
   // Variable inspector — Map-like {name: {value, ts}}
   variables: {},
+  // Sammlung drawer „Zuletzt" — {name: [{value, ts}]}, newest first, at most
+  // VAR_HISTORY_LIMIT entries, a new entry only when the value CHANGED. A
+  // SEPARATE map on purpose: `variables[name]` stays exactly {value, ts}, which
+  // the inspector and its tests pin. Retired with `variables` (clearVariables
+  // on every Start, and signedOut).
+  variableHistory: {},
   // Zähler inspector — the SAME shape, a SEPARATE map. „Punkte" is the name
   // pre-filled in all three Zähler blocks and a perfectly ordinary variable
   // name too, so one shared map would have a student's variable and their
@@ -411,13 +429,20 @@ const workshopSlice = createSlice({
               oldestKey = k;
             }
           }
-          if (oldestKey) delete state.variables[oldestKey];
+          if (oldestKey) {
+            delete state.variables[oldestKey];
+            // An evicted variable takes its history with it, or the history
+            // map would grow past the cap the variables map enforces.
+            delete state.variableHistory[oldestKey];
+          }
         }
       }
       state.variables[name] = { value, ts };
+      appendVariableHistory(state, name, value, ts);
     },
     clearVariables: (state) => {
       state.variables = {};
+      state.variableHistory = {};
     },
     // The [CNT:name=int] twin of setVariable. Same three gates in the same
     // order — prototype names, then the SHARED display predicate, then the cap
@@ -561,6 +586,7 @@ const workshopSlice = createSlice({
       // warnings about their destinations.
       state.log = [];
       state.variables = {};
+      state.variableHistory = {};
       state.counters = {};
       state.breakpoints = [];
       state.debuggerWarnings = [];

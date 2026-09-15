@@ -18,7 +18,7 @@
 // not added to buildToolbox().
 
 import * as Blockly from 'blockly/core';
-import { buildToolbox, TOOLBOX } from '../blocks/toolbox';
+import { buildToolbox, TOOLBOX, SAMMLUNG_BASE_BLOCKS } from '../blocks/toolbox';
 import { registerMotionBlocks } from '../blocks/motion';
 import { registerPerceptionBlocks } from '../blocks/perception';
 import { registerDestinationBlocks } from '../blocks/destinations';
@@ -76,7 +76,11 @@ describe('Workshop toolbox consistency', () => {
     definedTypes = new Set(
       Object.keys(Blockly.Blocks).filter((t) => t.startsWith('edubotics_'))
     );
-    toolboxTypes = collectToolboxBlockTypes(buildToolbox());
+    // The destination and replay blocks live in the dynamic Sammlung flyouts
+    // (sammlung/toolboxCategories.js), which always emit SAMMLUNG_BASE_BLOCKS —
+    // pinned by sammlung/__tests__/toolboxCategories.test.jsx, which injects a
+    // workspace (this file must not). Coverage counts them as in the palette.
+    toolboxTypes = collectToolboxBlockTypes([buildToolbox(), SAMMLUNG_BASE_BLOCKS]);
   });
 
   test('Blockly imports + registers every Workshop block cleanly under jsdom', () => {
@@ -125,9 +129,12 @@ describe('Workshop toolbox consistency', () => {
   test('the named TOOLBOX export and a fresh buildToolbox() agree on edubotics_* blocks', () => {
     // TOOLBOX is `buildToolbox()` captured at module load; assert the runtime
     // default the editor injects carries the same edubotics_* set.
+    // Compared with a FRESH build, not with the coverage union above: the union
+    // differs from TOOLBOX by exactly the four SAMMLUNG_BASE_BLOCKS types.
     const exportTypes = collectToolboxBlockTypes(TOOLBOX);
     const exportEdubotics = [...exportTypes].filter((t) => t.startsWith('edubotics_')).sort();
-    const freshEdubotics = [...toolboxTypes].filter((t) => t.startsWith('edubotics_')).sort();
+    const freshEdubotics = [...collectToolboxBlockTypes(buildToolbox())]
+      .filter((t) => t.startsWith('edubotics_')).sort();
     expect(exportEdubotics).toEqual(freshEdubotics);
   });
 });

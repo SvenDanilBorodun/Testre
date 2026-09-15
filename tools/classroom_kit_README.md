@@ -67,7 +67,16 @@ Kanten anschlägt.
 
 ### 3. Arbeits-Matte (Greifbereich + Tafel-Platz)
 
-Auf eine abwischbare Matte (oder direkt auf den Tisch mit Klebeband):
+Für den **ROBOTIS OpenMANIPULATOR-X (OMX)** gibt es eine maßstabsgetreue A4-Positionierschablone, die direkt unter die Basis gelegt wird:
+
+```bash
+cd Testre
+python tools/generate_omx_mat.py --out classroom_kit/omx_mat.pdf
+```
+
+Das PDF auf **DIN A4 mit „Tatsächliche Größe"** drucken (100-mm-Linie nachmessen). Die Vorlage unter die Roboterbasis legen: Sie bildet den exakten CAD-Sockel ab und positioniert die ChArUco-Tafel bei **exakt 180 mm** mit Ursprungsecke (Marker 0 vorne links), Anschlagkante und Schnitt-/Faltlinie.
+
+Alternativ direkt auf den Tisch mit Klebeband markieren:
 
 - **Greif-Ring markieren:** ein Ring etwa **10–28 cm vor/um die Roboterbasis**
   (genaue Werte beim Erst-Test prüfen, siehe unten). Objekte **nur in diesen

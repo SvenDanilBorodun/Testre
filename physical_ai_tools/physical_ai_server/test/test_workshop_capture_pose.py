@@ -69,6 +69,38 @@ class _Response:
         self.world_y = None
         self.world_z = None
         self.message = None
+        # S3 (WP11a) — the additive arrays default to empty, exactly like a
+        # generated ROS response; the callback assigns them on success only.
+        self.joint_positions = []
+        self.joint_names = []
+
+
+class _OldInterfaceResponse:
+    """A response generated from the PRE-S3 .srv: rosidl messages use
+    ``__slots__``, so assigning ``joint_positions`` raises AttributeError."""
+
+    __slots__ = ('success', 'world_x', 'world_y', 'world_z', 'message')
+
+    def __init__(self):
+        self.success = None
+        self.world_x = None
+        self.world_y = None
+        self.world_z = None
+        self.message = None
+
+
+_OMX_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1')
+
+
+class _JointComm:
+    """Communicator stub exposing the two attributes the S3 block reads."""
+
+    def __init__(self, joints, names=_OMX_JOINT_NAMES):
+        self._joints = joints
+        self.FOLLOWER_JOINT_ORDER = names
+
+    def get_latest_follower_joints(self):
+        return self._joints
 
 
 class _Request:
@@ -131,8 +163,10 @@ def test_busy_refuses_with_german_message():
     assert resp.success is False
     assert resp.message == 'Aufnahme läuft gerade — bitte zuerst stoppen.'
     _assert_zeros(resp)
-    # The gate is consulted with the 'manual' mode (refuses on every owner).
-    assert node.gate_modes == ['manual']
+    # The gate is consulted with the 'capture' mode (D8): it relaxes against
+    # exactly what 'manual' did (on_manual) plus on_leader_teach — a capture
+    # coexists with a leader-arm take — and refuses on every other owner.
+    assert node.gate_modes == ['capture']
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +326,140 @@ def test_persist_failure_fails_loud():
     assert resp.success is False
     assert resp.message == 'Position konnte nicht gespeichert werden.'
     _assert_zeros(resp)
+
+
+# ---------------------------------------------------------------------------
+# Vormachen pin (WP7a): P during a take („Position merken" while `aufnahme`)
+# must work — the capture takes no manual lock and ignores the recorder.
+# ---------------------------------------------------------------------------
+
+def test_capture_takes_no_manual_lock_and_ignores_record_state():
+    source = _SERVER_PY.read_text(encoding='utf-8')
+    tree = ast.parse(source)
+    seg = next(
+        ast.get_source_segment(source, n) for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == 'capture_pose_callback')
+    assert '_manual_lock' not in seg
+    assert '_manual_record_active' not in seg
+    node = _StubNode(xyz=(0.2, 0.0, 0.1))
+    node._manual_record_active = True
+    resp = _capture_pose(node, _Request('Wegpunkt'), _Response())
+    assert resp.success is True
+    assert resp.world_x == pytest.approx(0.2)
+
+
+# ---------------------------------------------------------------------------
+# S3 (WP11a) — the captured joint vector rides back additively.
+# ---------------------------------------------------------------------------
+
+_JOINTS = [0.0, -0.9, 1.1, 0.3, 0.0, 0.8]
+
+
+def test_capture_returns_joint_vector_in_follower_order():
+    node = _StubNode(communicator=_JointComm(list(_JOINTS)), xyz=(0.2, 0.0, 0.1))
+    resp = _capture_pose(node, _Request('Ablage'), _Response())
+    assert resp.success is True
+    assert resp.joint_positions == _JOINTS
+    assert all(isinstance(v, float) for v in resp.joint_positions)
+    assert resp.joint_names == list(_OMX_JOINT_NAMES)
+    # The FK xyz is unchanged by the additive block.
+    assert resp.world_x == pytest.approx(0.2)
+    assert resp.world_z == pytest.approx(0.1)
+
+
+_EDU6_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint')
+
+
+def test_capture_fill_is_width_generic_for_a_seven_joint_feetech_order():
+    joints = [0.0, 0.7, -2.4, 0.0, 0.7, 0.0, 1.75]
+    node = _StubNode(communicator=_JointComm(list(joints), names=_EDU6_JOINT_NAMES),
+                     xyz=(0.15, 0.0, 0.05))
+    resp = _capture_pose(node, _Request('Ablage'), _Response())
+    assert resp.success is True
+    assert resp.joint_positions == joints
+    assert resp.joint_names == list(_EDU6_JOINT_NAMES)
+
+
+def test_plain_communicator_leaves_arrays_empty_and_still_captures():
+    node = _StubNode(communicator=object(), xyz=(0.1, 0.2, 0.3))
+    resp = _capture_pose(node, _Request('Ablage'), _Response())
+    assert resp.success is True
+    assert resp.joint_positions == []
+    assert resp.joint_names == []
+    assert 'Ablage' in node._wfm.get_destinations()
+
+
+@pytest.mark.parametrize('joints', [
+    _JOINTS[:5],                               # length mismatch vs 6 names
+    [0.0, float('nan'), 1.1, 0.3, 0.0, 0.8],   # non-finite joint
+    [0.0, -0.9, float('inf'), 0.3, 0.0, 0.8],
+    None,                                      # no joint message yet
+    [],
+    ['a', 'b', 'c', 'd', 'e', 'f'],            # not numbers — swallowed
+])
+def test_unusable_joint_snapshot_leaves_arrays_empty(joints):
+    node = _StubNode(communicator=_JointComm(joints), xyz=(0.1, 0.2, 0.3))
+    resp = _capture_pose(node, _Request('Ablage'), _Response())
+    assert resp.success is True
+    assert resp.joint_positions == []
+    assert resp.joint_names == []
+
+
+def test_getter_that_raises_never_fails_the_capture():
+    class _BoomComm:
+        FOLLOWER_JOINT_ORDER = _OMX_JOINT_NAMES
+
+        def get_latest_follower_joints(self):
+            raise RuntimeError('boom')
+
+    node = _StubNode(communicator=_BoomComm(), xyz=(0.1, 0.2, 0.3))
+    resp = _capture_pose(node, _Request('Ablage'), _Response())
+    assert resp.success is True
+    assert resp.joint_positions == []
+    assert resp.joint_names == []
+
+
+@pytest.mark.parametrize('kwargs,name', [
+    ({'gate': (False, 'Aufnahme läuft gerade — bitte zuerst stoppen.')}, 'Ablage'),
+    ({}, 'Ablage*'),
+    ({'stale': True}, 'Ablage'),
+    ({'xyz': None}, 'Ablage'),
+    ({'xyz': (0.1, float('nan'), 0.3)}, 'Ablage'),
+])
+def test_refusals_leave_arrays_empty_even_with_live_joints(kwargs, name):
+    # A communicator that WOULD answer — so an empty array proves the refusal
+    # path, not a missing joint source.
+    node = _StubNode(communicator=_JointComm(list(_JOINTS)), **kwargs)
+    resp = _capture_pose(node, _Request(name), _Response())
+    assert resp.success is False
+    assert resp.joint_positions == []
+    assert resp.joint_names == []
+
+
+def test_persist_failure_leaves_arrays_empty_even_with_live_joints():
+    class _BoomWfm:
+        def set_destination(self, *a, **k):
+            raise RuntimeError('disk full')
+
+    node = _StubNode(communicator=_JointComm(list(_JOINTS)), xyz=(0.1, 0.2, 0.3),
+                     wfm=_BoomWfm())
+    resp = _capture_pose(node, _Request('Ablage'), _Response())
+    assert resp.success is False
+    assert resp.joint_positions == []
+    assert resp.joint_names == []
+
+
+def test_old_interface_response_still_captures_with_fk_xyz():
+    # A server package run against interfaces built from the pre-S3 .srv: the
+    # additive assignments raise AttributeError, which must be swallowed.
+    node = _StubNode(communicator=_JointComm(list(_JOINTS)), xyz=(0.234, -0.012, 0.187))
+    resp = _capture_pose(node, _Request('Ablage'), _OldInterfaceResponse())
+    assert resp.success is True
+    assert resp.world_x == pytest.approx(0.234)
+    assert resp.world_y == pytest.approx(-0.012)
+    assert resp.world_z == pytest.approx(0.187)
+    assert 'gespeichert' in resp.message
+    assert not hasattr(resp, 'joint_positions')
 
 
 if __name__ == '__main__':

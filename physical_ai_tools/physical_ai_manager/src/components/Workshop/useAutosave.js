@@ -13,6 +13,7 @@ import * as Blockly from 'blockly/core';
 import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval';
 import toast from 'react-hot-toast';
 import { DE } from './blocks/messages_de';
+import { slimSavePayload } from '../../utils/blocklyPayload';
 
 const STORAGE_KEY = 'edubotics:workshop:autosave';
 // Names the BROWSER SESSION, so the un-signed-in autosave bucket is per-session
@@ -192,21 +193,40 @@ export function useAutosave({
     // Measure UTF-8 bytes (what the server's 256KB cap actually
     // checks), not JS string-length, so we don't autosave a payload
     // that would be rejected by the server. Audit §J6.
-    const utf8Bytes =
-      typeof TextEncoder !== 'undefined'
-        ? new TextEncoder().encode(serialized).length
-        : serialized.length;
-    if (utf8Bytes > MAX_JSON_BYTES) {
-      // Audit §autosave-r1: distinguish "workflow exceeds the 256 KB
-      // server cap" from "IndexedDB quota exceeded". They are two
-      // different failure modes with two different remedies — telling
-      // a student their browser is full when the actual issue is a
-      // bloated workflow sends them down the wrong recovery path.
-      toast.error(DE.AUTOSAVE_TOO_BIG, { id: 'autosave-too-big' });
-      return;
+    const utf8Bytes = (text) =>
+      (typeof TextEncoder !== 'undefined'
+        ? new TextEncoder().encode(text).length
+        : text.length);
+    let payload = state;
+    if (utf8Bytes(serialized) > MAX_JSON_BYTES) {
+      // The FULL serializer output also carries the editor PLUGINS' state —
+      // `backpack`, and `suggested-blocks`, which gains a little on every block
+      // a student drags and is never trimmed. This cap mirrors the SERVER's,
+      // and the server is only ever sent the DOCUMENT (`slimSavePayload`), so
+      // plugin state must not be what refuses a crash-recovery snapshot: retry
+      // with the document alone. Losing a stash is not losing work; losing the
+      // snapshot is. A document that is itself too big still gets the German
+      // toast below — which is then the true diagnosis.
+      let documentSerialized;
+      try {
+        payload = slimSavePayload(state);
+        documentSerialized = JSON.stringify(payload);
+      } catch (e) {
+        console.error('useAutosave: slim stringify failed', e);
+        return;
+      }
+      if (utf8Bytes(documentSerialized) > MAX_JSON_BYTES) {
+        // Audit §autosave-r1: distinguish "workflow exceeds the 256 KB
+        // server cap" from "IndexedDB quota exceeded". They are two
+        // different failure modes with two different remedies — telling
+        // a student their browser is full when the actual issue is a
+        // bloated workflow sends them down the wrong recovery path.
+        toast.error(DE.AUTOSAVE_TOO_BIG, { id: 'autosave-too-big' });
+        return;
+      }
     }
     try {
-      await idbSet(storageKey, { state, ts: nowMs() });
+      await idbSet(storageKey, { state: payload, ts: nowMs() });
       setLastSavedAt(nowMs());
     } catch (e) {
       const msg = (e && e.name) || '';

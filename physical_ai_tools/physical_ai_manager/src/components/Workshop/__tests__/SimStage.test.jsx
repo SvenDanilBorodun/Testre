@@ -94,6 +94,23 @@ describe('SimStage', () => {
     expect(props.scene).toEqual({ objects: [], zones: [] });
   });
 
+  test('markers, requestedMode and onCreateDestination pass through to SimScene by identity', () => {
+    const markers = [{ id: 'd_00000001', label: 'Ablage', kind: 'pin', x: 0.18, y: 0, z: 0, highlighted: false }];
+    const requestedMode = { mode: 'ziel', token: 7 };
+    const onCreateDestination = vi.fn();
+    renderStage({ markers, requestedMode, onCreateDestination });
+    const props = mockSimScene.mock.calls[0][0];
+    expect(props.markers).toBe(markers);
+    expect(props.requestedMode).toBe(requestedMode);
+    expect(props.onCreateDestination).toBe(onCreateDestination);
+  });
+
+  test('ghostJoints passes through to SimScene by identity (null by default)', () => {
+    const ghostJoints = { names: ['joint1'], positions: [0.2] };
+    renderStage({ ghostJoints });
+    expect(mockSimScene.mock.calls[0][0].ghostJoints).toBe(ghostJoints);
+  });
+
   test('the „Bahn" toggle reflects showPath and calls onToggleShowPath', async () => {
     const onToggleShowPath = vi.fn();
     renderStage({ showPath: true, onToggleShowPath });

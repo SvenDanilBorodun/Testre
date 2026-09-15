@@ -8,9 +8,12 @@
 // rosbridge contract the real arm depends on:
 //   * subscribes to the BARE GLOBAL topic /joint_states,
 //   * messageType sensor_msgs/msg/JointState (the /msg/ wire form this app uses),
-//   * throttle_rate 100 ms / queue_length 1 (monitor-view budget),
+//   * throttle_rate 30 ms / queue_length 1 (~30 Hz: dense enough to interpolate,
+//     a third of the real arm's 100 Hz), and a caller-chosen rate via
+//     jointThrottleMs (the simulator stage),
 //   * a delivered JointState maps msg.name[i] -> msg.position[i] onto the
-//     robot via setJointValue for the 6 follower joints, and ignores unknowns.
+//     robot via setJointValue for the 6 follower joints, and ignores unknowns —
+//     the FIRST sample at once, later ones blended in over the next frames.
 //
 // Mock idiom mirrors ImageGridCell.test.js: vi.mock() is hoisted above imports,
 // and the `mock*`-prefixed factory vars are exempt from the TDZ guard.
@@ -58,59 +61,89 @@ const mockLoadUrls = [];
 // world-frame geometry through getWorldPosition exactly as the real link does. Left
 // null by every other test, which keeps the raw mockEEWorld path-trail behaviour.
 let mockTcpUrdf = null;
-const mockRobot = {
-  rotation: { x: 0, z: 0 },
-  setJointValue: mockSetJointValue,
-  // Box3.setFromObject(robot) walks .traverse during framing.
-  traverse: () => {},
-  // Phase-5: the path trail reads links.end_effector_link.getWorldPosition; the
-  // frame triads parent an AxesHelper onto links.link0 + links.end_effector_link.
-  // Only exercised when showPath/showFrames are true (the default tests never
-  // touch this, so they are unaffected).
-  links: {
-    link0: { add: () => {} },
-    end_effector_link: {
-      add: () => {},
-      // The grab path re-parents the held mesh here. Real three.js `attach`
-      // preserves the world transform (no move), so the stub records and does
-      // not touch .position -- a test asserting the mesh sits on the jaws can
-      // only pass if the component positioned it.
-      attach(child) {
-        attachLog.push({ parent: 'ee', child });
-        if (child) child.__parent = 'ee';
-      },
-      // Write the test-controlled TCP world position into the target vector so
-      // appendPathPoint / emitEndEffector see real numeric coords (the original
-      // `(v) => v` returned a coord-less Vector3, which appendPathPoint rejects,
-      // so the path never accumulated). Returns the same vector for the callers
-      // that read .x/.y/.z off it. When mockTcpUrdf is set, model matrixWorld by
-      // rotating that URDF-frame point through the robot's live rotation instead.
-      getWorldPosition: (v) => {
-        if (v && typeof v.set === 'function') {
-          if (mockTcpUrdf) {
-            const r = mockRobot.rotation;
-            const cx = Math.cos(r.x || 0);
-            const sx = Math.sin(r.x || 0);
-            const cz = Math.cos(r.z || 0);
-            const sz = Math.sin(r.z || 0);
-            // Rz first, then Rx (THREE order 'XYZ' with y=0: R = Rx·Rz).
-            const rx = cz * mockTcpUrdf.x - sz * mockTcpUrdf.y;
-            const ry = sz * mockTcpUrdf.x + cz * mockTcpUrdf.y;
-            const rz = mockTcpUrdf.z;
-            v.set(rx, cx * ry - sx * rz, sx * ry + cx * rz);
-          } else {
-            v.set(mockEEWorld.x, mockEEWorld.y, mockEEWorld.z);
+// A FRESH robot per URDF load, like the real loader: an asset change rebuilds the
+// viewer, and the component has to put the current pose onto the NEW model rather
+// than wait for the arm to move (UrdfTwin's `fresh` path). `mockRobot` always
+// points at the newest one, so every existing assertion on it reads the robot of
+// the render it just did; `mockRobots` keeps them all, and each records the joints
+// IT was given.
+function newMockRobot() {
+  const robot = {
+    rotation: { x: 0, z: 0 },
+    applied: [],
+    setJointValue: (name, value) => {
+      robot.applied.push([name, value]);
+      return mockSetJointValue(name, value);
+    },
+    // Box3.setFromObject(robot) walks .traverse during framing.
+    traverse: () => {},
+    // Ghost arm: urdf-loader's URDFRobot.copy under clone(true).
+    clone: vi.fn(() => {
+      const ghost = newMockGhost();
+      mockGhosts.push(ghost);
+      return ghost;
+    }),
+    // Phase-5: the path trail reads links.end_effector_link.getWorldPosition; the
+    // frame triads parent an AxesHelper onto links.link0 + links.end_effector_link.
+    // Only exercised when showPath/showFrames are true (the default tests never
+    // touch this, so they are unaffected).
+    links: {
+      link0: { add: () => {} },
+      end_effector_link: {
+        add: () => {},
+        // The grab path re-parents the held mesh here. Real three.js `attach`
+        // preserves the world transform (no move), so the stub records and does
+        // not touch .position -- a test asserting the mesh sits on the jaws can
+        // only pass if the component positioned it.
+        attach(child) {
+          attachLog.push({ parent: 'ee', child });
+          if (child) child.__parent = 'ee';
+        },
+        // Write the test-controlled TCP world position into the target vector so
+        // appendPathPoint / emitEndEffector see real numeric coords (the original
+        // `(v) => v` returned a coord-less Vector3, which appendPathPoint rejects,
+        // so the path never accumulated). Returns the same vector for the callers
+        // that read .x/.y/.z off it. When mockTcpUrdf is set, model matrixWorld by
+        // rotating that URDF-frame point through the robot's live rotation instead.
+        getWorldPosition: (v) => {
+          if (v && typeof v.set === 'function') {
+            if (mockTcpUrdf) {
+              const r = robot.rotation;
+              const cx = Math.cos(r.x || 0);
+              const sx = Math.sin(r.x || 0);
+              const cz = Math.cos(r.z || 0);
+              const sz = Math.sin(r.z || 0);
+              // Rz first, then Rx (THREE order 'XYZ' with y=0: R = Rx·Rz).
+              const rx = cz * mockTcpUrdf.x - sz * mockTcpUrdf.y;
+              const ry = sz * mockTcpUrdf.x + cz * mockTcpUrdf.y;
+              const rz = mockTcpUrdf.z;
+              v.set(rx, cx * ry - sx * rz, sx * ry + cx * rz);
+            } else {
+              v.set(mockEEWorld.x, mockEEWorld.y, mockEEWorld.z);
+            }
           }
-        }
-        return v;
+          return v;
+        },
       },
     },
-  },
-};
+  };
+  return robot;
+}
+const mockRobots = [];
+let mockRobot = newMockRobot();
 
 // Phase-5 constructor spies — assert the path line + frame triads are built ONLY
 // when their props are enabled (the default tests never construct these).
 const mockGroupCtor = vi.fn();
+const mockGroupInstances = [];
+// Sammlung marker primitives: every construction as {type, args, obj}, so a test
+// can assert which glyph was built and whether its dispose() ran.
+const mockMarkerPrims = [];
+function mockMarkerPrim(type, args) {
+  const obj = { type, dispose: vi.fn() };
+  mockMarkerPrims.push({ type, args, obj });
+  return obj;
+}
 const mockLineCtor = vi.fn();
 const mockAxesCtor = vi.fn();
 // Sim-stage spies — assert the catalog-sized boxes, the reach ring, and the
@@ -118,6 +151,35 @@ const mockAxesCtor = vi.fn();
 const mockBoxGeometryCtor = vi.fn();
 const mockRingGeometryCtor = vi.fn();
 const mockStandardMaterialCtor = vi.fn(); // captures the opts (incl. color)
+// Every MeshStandardMaterial instance (each with a dispose spy) and every
+// scene.add / scene.remove, so the ghost-arm tests can prove exactly which
+// material was freed and that the clone left the scene.
+const mockStandardMaterials = [];
+const mockSceneOps = [];
+// Ghost arm: each robot.clone(true) result. Its traverse visits two arm meshes
+// (sharing spied geometries), a held sim object and an „Achsen" triad — the
+// last two hang under a link and must be detached from the clone.
+const mockGhosts = [];
+function newMockGhost() {
+  const link = { remove: vi.fn() };
+  const mesh = (i) => ({
+    isMesh: true, userData: {}, castShadow: true, receiveShadow: true,
+    geometry: { dispose: vi.fn(), id: `geo${i}` }, material: { dispose: vi.fn() },
+  });
+  const ghost = {
+    rotation: { x: 0, z: 0 },
+    link,
+    meshes: [mesh(0), mesh(1)],
+    held: { isMesh: true, userData: { simId: 7 }, parent: link, material: { dispose: vi.fn() } },
+    axes: { isLineSegments: true, userData: {}, parent: link },
+    setJointValue: vi.fn(),
+  };
+  ghost.traverse = vi.fn((fn) => {
+    fn(ghost);
+    [...ghost.meshes, ghost.held, ghost.axes].forEach(fn);
+  });
+  return ghost;
+}
 // material.color.set spy shared by every MeshStandardMaterial — the held-release
 // tests assert the release recolor value (grab/release recolors go through
 // setMeshColor → material.color.set).
@@ -172,6 +234,8 @@ vi.mock('urdf-loader', () => ({
       // through loadMeshCb, which the old mock never called at all, leaving the
       // entire async-mesh path untested.
       if (this.manager) this.manager.itemStart(url);
+      mockRobot = newMockRobot();
+      mockRobots.push(mockRobot);
       onComplete(mockRobot);
       for (let i = 0; i < MOCK_URDF_MESH_COUNT; i += 1) {
         if (typeof this.loadMeshCb === 'function') {
@@ -236,7 +300,11 @@ vi.mock('three', () => {
     Scene: function Scene() {
       return noopObj({
         background: null,
-        traverse: () => {},
+        add: (child) => { mockSceneOps.push(['add', child]); },
+        remove: (child) => { mockSceneOps.push(['remove', child]); },
+        // Recorded (and still visiting nothing), so a test can prove the ghost
+        // left the scene BEFORE the unmount's dispose traverse ran.
+        traverse: () => { mockSceneOps.push(['traverse']); },
         attach(child) {
           attachLog.push({ parent: 'scene', child });
           if (child) child.__parent = 'scene';
@@ -291,7 +359,9 @@ vi.mock('three', () => {
       // assert an object used its catalog colour; color.set is the shared
       // mockColorSet spy so the grasp/release recolor values are assertable.
       mockStandardMaterialCtor(opts);
-      return { color: { set: mockColorSet }, dispose: () => {} };
+      const mat = { opts, color: { set: mockColorSet }, dispose: vi.fn() };
+      mockStandardMaterials.push(mat);
+      return mat;
     },
     MeshPhongMaterial: function MeshPhongMaterial() { return { dispose: () => {} }; },
     MeshBasicMaterial: function MeshBasicMaterial() { return { color: { set: () => {} }, dispose: () => {} }; },
@@ -341,7 +411,48 @@ vi.mock('three', () => {
     DoubleSide: 2,
     // Phase-5 path-trail + frame-triad primitives (inert; constructed only when
     // showPath/showFrames are enabled).
-    Group: function Group() { mockGroupCtor(); return noopObj({ visible: true }); },
+    // A real child list + remove/traverse and recording position/scale setters,
+    // so the Sammlung marker layer's diff (add, move, remove + dispose) is
+    // observable. The path trail only ever add()s one line and flips `visible`.
+    Group: function Group() {
+      mockGroupCtor();
+      const group = {
+        visible: true,
+        // `kids`, not `children`: testing-library's no-node-access lint reads any
+        // `.children` as a DOM walk.
+        kids: [],
+        add(child) { this.kids.push(child); },
+        remove(child) { this.kids = this.kids.filter((c) => c !== child); },
+        traverse(fn) {
+          fn(this);
+          this.kids.forEach((c) => (typeof c.traverse === 'function' ? c.traverse(fn) : fn(c)));
+        },
+        position: { set: vi.fn() },
+        scale: { set: vi.fn() },
+        rotation: { x: 0 },
+        dispose: () => {},
+        addEventListener: () => {},
+      };
+      mockGroupInstances.push(group);
+      return group;
+    },
+    // Sammlung marker primitives — spied, inert, each with a dispose spy so the
+    // marker tests can prove a replaced/removed marker freed its GPU objects.
+    ConeGeometry: function ConeGeometry(...a) { return mockMarkerPrim('ConeGeometry', a); },
+    SphereGeometry: function SphereGeometry(...a) { return mockMarkerPrim('SphereGeometry', a); },
+    OctahedronGeometry: function OctahedronGeometry(...a) { return mockMarkerPrim('OctahedronGeometry', a); },
+    TorusGeometry: function TorusGeometry(...a) { return mockMarkerPrim('TorusGeometry', a); },
+    CanvasTexture: function CanvasTexture(...a) { return mockMarkerPrim('CanvasTexture', a); },
+    SpriteMaterial: function SpriteMaterial(opts) {
+      return Object.assign(mockMarkerPrim('SpriteMaterial', [opts]), { map: opts && opts.map });
+    },
+    Sprite: function Sprite(material) {
+      return Object.assign(mockMarkerPrim('Sprite', [material]), {
+        material,
+        position: { set: vi.fn() },
+        scale: { set: vi.fn() },
+      });
+    },
     BufferGeometry: function BufferGeometry() {
       // Capture the path geometry + spy its setDrawRange so the path-trail tests
       // can assert the draw range advances (append) and resets (clear). Only the
@@ -434,11 +545,16 @@ beforeEach(() => {
   mockUnsubscribe.mockClear();
   mockSetJointValue.mockClear();
   mockGroupCtor.mockClear();
+  mockGroupInstances.length = 0;
+  mockMarkerPrims.length = 0;
   mockLineCtor.mockClear();
   mockAxesCtor.mockClear();
   mockBoxGeometryCtor.mockClear();
   mockRingGeometryCtor.mockClear();
   mockStandardMaterialCtor.mockClear();
+  mockStandardMaterials.length = 0;
+  mockSceneOps.length = 0;
+  mockGhosts.length = 0;
   mockColorSet.mockClear();
   mockMeshInstances.length = 0;
   mockRenderer = null;
@@ -448,8 +564,8 @@ beforeEach(() => {
   mockEEWorld.x = 0;
   mockEEWorld.y = 0;
   mockEEWorld.z = 0;
-  mockRobot.rotation.x = 0;
-  mockRobot.rotation.z = 0;
+  mockRobots.length = 0;
+  mockRobot = newMockRobot();
   mockLoadUrls.length = 0;
   mockStlLoads.length = 0;
   mockMeshDone.length = 0;
@@ -468,9 +584,18 @@ describe('UrdfTwin — /joint_states wire contract', () => {
     const opts = mockTopicCtor.mock.calls[0][0];
     expect(opts.name).toBe('/joint_states');
     expect(opts.messageType).toBe('sensor_msgs/msg/JointState');
-    expect(opts.throttle_rate).toBe(100);
+    expect(opts.throttle_rate).toBe(30);
     expect(opts.queue_length).toBe(1);
     expect(mockSubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  test('jointThrottleMs overrides the rate (the simulator stage passes its own)', async () => {
+    render(<UrdfTwin jointTopic="/sim/joint_states" jointThrottleMs={20} />);
+    await waitFor(() => expect(mockTopicCtor).toHaveBeenCalledTimes(1));
+    const opts = mockTopicCtor.mock.calls[0][0];
+    expect(opts.name).toBe('/sim/joint_states');
+    expect(opts.throttle_rate).toBe(20);
+    expect(opts.queue_length).toBe(1);
   });
 
   test('maps msg.name[i] -> msg.position[i] onto robot.setJointValue for the 6 follower joints', async () => {
@@ -596,18 +721,19 @@ describe('UrdfTwin — path trail accumulation (Phase-5)', () => {
     mockSetDrawRange.mockClear();
     mockPathGeometry.attributes.position.needsUpdate = false;
 
-    // First TCP world position.
+    // First TCP world position. The FIRST sample lands on the model at once.
     mockEEWorld.x = 0.10; mockEEWorld.y = 0.20; mockEEWorld.z = 0.05;
     act(() => onMsg({ name: ['joint1'], position: [0.1] }));
+    expect(mockSetDrawRange.mock.calls.map((c) => c[1])).toContain(1);
 
-    // Second, ~7 cm away (well over PATH_MIN_MOVE_M = 1 mm) -> a second point.
+    // Second, ~7 cm away (well over PATH_MIN_MOVE_M = 1 mm) -> a second point,
+    // once the interpolated pose reaches it (the render clock trails the data).
     mockEEWorld.x = 0.15; mockEEWorld.y = 0.25; mockEEWorld.z = 0.05;
     act(() => onMsg({ name: ['joint1'], position: [0.12] }));
 
     // The draw range grew 0 -> 1 -> 2 as the two distinct points were appended.
-    const ends = mockSetDrawRange.mock.calls.map((c) => c[1]);
-    expect(ends).toContain(1);
-    expect(ends).toContain(2);
+    await waitFor(() =>
+      expect(mockSetDrawRange.mock.calls.map((c) => c[1])).toContain(2));
     // The geometry's position attribute was flagged for re-upload.
     expect(mockPathGeometry.attributes.position.needsUpdate).toBe(true);
   });
@@ -622,9 +748,12 @@ describe('UrdfTwin — path trail accumulation (Phase-5)', () => {
     act(() => onMsg({ name: ['joint1'], position: [0.1] }));
     mockSetDrawRange.mockClear();
 
-    // Move 0.1 mm (< 1 mm) -> the distance gate rejects it, no draw-range change.
+    // The joint moves far enough to be DRAWN (5 mrad, over the 1 mrad render
+    // dead-band) while the TCP moves 0.1 mm (< 1 mm) -> the pose is applied, and
+    // it is the trail's distance gate that rejects the point.
     mockEEWorld.x = 0.2001;
-    act(() => onMsg({ name: ['joint1'], position: [0.1001] }));
+    act(() => onMsg({ name: ['joint1'], position: [0.105] }));
+    await waitFor(() => expect(mockSetJointValue).toHaveBeenCalledWith('joint1', 0.105));
     expect(mockSetDrawRange).not.toHaveBeenCalled();
   });
 
@@ -1187,5 +1316,436 @@ describe('UrdfTwin — the liveness chip is not a latch', () => {
     act(() => { cleanup(); });
 
     expect(vi.getTimerCount()).toBeLessThan(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Motion is INTERPOLATED on the publisher's stamps (2026-09-11).
+//
+// The twin used to setJointValue each message as it landed, so it moved in steps
+// — 10 a second on the real arm, about two a second on the simulator, which sent
+// each second of motion as one burst. It now blends between the two samples
+// around a render clock that trails the data by 100 ms.
+// ---------------------------------------------------------------------------
+
+describe('UrdfTwin — the joint stream is blended, not snapped', () => {
+  // The render loop reads performance.now(). A real clock makes "was an
+  // intermediate pose drawn?" depend on whether this worker got an animation
+  // frame inside a 100 ms window — it flaked under parallel test files. Here the
+  // test owns the clock: a frame computes exactly the pose of `clock`.
+  let clock;
+  let nowSpy;
+  beforeEach(() => {
+    clock = 50_000;
+    nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+  });
+  afterEach(() => {
+    nowSpy.mockRestore();
+  });
+
+  const S = 1_700_000_000; // an epoch second for header stamps
+  const stamped = (ms, names, position) => ({
+    header: { stamp: { sec: S + Math.floor(ms / 1000), nanosec: (ms % 1000) * 1e6 } },
+    name: names,
+    position,
+  });
+  const joint1Values = () => mockSetJointValue.mock.calls
+    .filter((c) => c[0] === 'joint1').map((c) => c[1]);
+  // Advance the owned clock and let the render loop draw at that time.
+  async function at(t) {
+    clock = t;
+    await settleFrames(2);
+  }
+
+  async function mountAndSubscribe(ui = <UrdfTwin />) {
+    render(ui);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    return mockSubscribe.mock.calls[0][0];
+  }
+
+  test('a move between two samples is drawn THROUGH its intermediate poses', async () => {
+    const onMsg = await mountAndSubscribe();
+    // Both land at t = 50 000; the render clock sits 100 ms behind the newest
+    // stamp, i.e. exactly on the first sample.
+    act(() => onMsg(stamped(0, ['joint1'], [0.0])));
+    act(() => onMsg(stamped(100, ['joint1'], [1.0])));
+    await at(50_025);
+    expect(joint1Values()[joint1Values().length - 1]).toBeCloseTo(0.25, 9);
+    await at(50_060);
+    expect(joint1Values()[joint1Values().length - 1]).toBeCloseTo(0.6, 9);
+    await at(50_100);
+    expect(joint1Values()[joint1Values().length - 1]).toBeCloseTo(1.0, 9);
+    // …and in order: a blend never runs backwards.
+    const seq = joint1Values();
+    for (let i = 1; i < seq.length; i += 1) expect(seq[i]).toBeGreaterThanOrEqual(seq[i - 1]);
+  });
+
+  test('sub-milliradian changes are not re-applied frame by frame while blending', async () => {
+    const onMsg = await mountAndSubscribe();
+    act(() => onMsg(stamped(0, ['joint1', 'joint2'], [0.2, -0.4])));
+    expect(mockSetJointValue).toHaveBeenCalledTimes(2);
+    for (let i = 1; i <= 6; i += 1) {
+      clock = 50_000 + 33 * i;
+      // ±0.4 mrad — below the 1 mrad render dead-band — ending where it began.
+      act(() => onMsg(stamped(33 * i, ['joint1', 'joint2'], [0.2 + (i % 2) * 4e-4, -0.4])));
+      // eslint-disable-next-line no-await-in-loop
+      await settleFrames(1);
+    }
+    await at(50_400);
+    expect(mockSetJointValue).toHaveBeenCalledTimes(2);
+  });
+
+  test('a blend that ends inside the dead-band still LANDS exactly on the data', async () => {
+    // The flake that found this: a frame at 90 % of a 5 mrad move applied
+    // 0.1045; the last 0.5 mrad was under the dead-band, so the model rested
+    // short of the newest sample for good.
+    const onMsg = await mountAndSubscribe();
+    act(() => onMsg(stamped(0, ['joint1'], [0.1])));
+    clock = 50_040;
+    act(() => onMsg(stamped(40, ['joint1'], [0.105])));
+    await at(50_136);                    // render time 36 of 40: 90 % of the way
+    expect(joint1Values()[joint1Values().length - 1]).toBeCloseTo(0.1045, 9);
+    await at(50_200);                    // settled
+    expect(joint1Values()[joint1Values().length - 1]).toBe(0.105);
+  });
+
+  test('a LIVE stream from a resting arm still lands exactly (it never stops sending)', async () => {
+    // The real /joint_states never goes quiet, so "the stream settled" never
+    // happens there; what matters is that the DATA stopped moving.
+    const onMsg = await mountAndSubscribe();
+    act(() => onMsg(stamped(0, ['joint1'], [0.1])));
+    clock = 50_040;
+    act(() => onMsg(stamped(40, ['joint1'], [0.105])));
+    await at(50_136);                    // 90 % of the way: 0.1045 applied
+    expect(joint1Values()[joint1Values().length - 1]).toBeCloseTo(0.1045, 9);
+    for (let k = 1; k <= 4; k += 1) {    // the arm rests; samples keep coming
+      clock = 50_040 + 33 * k;
+      act(() => onMsg(stamped(40 + 33 * k, ['joint1'], [0.105])));
+    }
+    await at(50_190);                    // rt 90: blending 0.105 → 0.105
+    expect(joint1Values()[joint1Values().length - 1]).toBe(0.105);
+  });
+
+  test('a stream that resumes after a pause STEPS — it does not glide across the gap', async () => {
+    const onMsg = await mountAndSubscribe();
+    act(() => onMsg(stamped(0, ['joint1'], [0.0])));
+    // 600 ms later (> the 250 ms blend limit): a paused run, a heartbeat gap.
+    clock = 50_600;
+    act(() => onMsg(stamped(600, ['joint1'], [0.5])));
+    for (const t of [50_620, 50_650, 50_690]) {
+      // eslint-disable-next-line no-await-in-loop
+      await at(t);
+      expect(joint1Values()[joint1Values().length - 1]).toBe(0.0);
+    }
+    await at(50_700);
+    expect(joint1Values()[joint1Values().length - 1]).toBe(0.5);
+    expect(joint1Values().filter((v) => v > 0.0 && v < 0.5)).toEqual([]);
+  });
+
+  test('a jump no joint could make is a discontinuity, not motion (a reset to HOME)', async () => {
+    const onMsg = await mountAndSubscribe();
+    act(() => onMsg(stamped(0, ['joint1'], [0.0])));
+    // 2.5 rad in 40 ms = 62 rad/s: a reset, never a blend. Delivered on time.
+    clock = 50_040;
+    act(() => onMsg(stamped(40, ['joint1'], [2.5])));
+    // Render time = clock − 100 ms (relative to the first stamp).
+    for (const t of [50_110, 50_120, 50_139]) {  // inside the 0…40 ms interval
+      // eslint-disable-next-line no-await-in-loop
+      await at(t);
+      expect(joint1Values()[joint1Values().length - 1]).toBe(0.0);
+    }
+    await at(50_140);
+    expect(joint1Values()[joint1Values().length - 1]).toBe(2.5);
+    expect(joint1Values().filter((v) => v > 0.0 && v < 2.5)).toEqual([]);
+  });
+
+  test('onEndEffector reports the gripper of the pose actually DRAWN', async () => {
+    const onEE = vi.fn();
+    const onMsg = await mountAndSubscribe(<UrdfTwin onEndEffector={onEE} />);
+    const last = () => onEE.mock.calls[onEE.mock.calls.length - 1][0].gripper;
+    act(() => onMsg(stamped(0, ['joint1', 'gripper_joint_1'], [0.0, 0.8])));
+    expect(last()).toBeCloseTo(0.8, 9);            // the first sample, at once
+    // The close arrives on time, 200 ms later. The render clock trails the
+    // data by 100 ms, so it is now halfway through that 200 ms close.
+    clock = 50_200;
+    act(() => onMsg(stamped(200, ['joint1', 'gripper_joint_1'], [0.0, -0.5])));
+    expect(last()).toBeCloseTo(0.8 - 1.3 * 0.5, 9);
+    await at(50_250);                              // three quarters
+    expect(last()).toBeCloseTo(0.8 - 1.3 * 0.75, 9);
+    await at(50_300);
+    expect(last()).toBeCloseTo(-0.5, 9);
+  });
+
+  test('a REBUILT model is given the current pose without waiting for a message', async () => {
+    // A capability manifest naming a different urdf_asset_id rebuilds the whole
+    // viewer. The buffered pose has not changed, so nothing in the dead-band path
+    // would re-apply it: without the "fresh" check the new model sits at its URDF
+    // zero pose until the arm next moves — on a resting rig, indefinitely.
+    mockState = {
+      ros: { rosbridgeUrl: 'ws://student-pc:9090', rosHost: 'student-pc' },
+      tasks: { taskStatus: { capabilities: { urdf_asset_id: 'omx_f', arm_joints: 5 } } },
+    };
+    const { rerender } = render(<UrdfTwin />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    act(() => mockSubscribe.mock.calls[0][0](stamped(0,
+      ['joint1', 'joint2'], [0.25, -0.4])));
+    expect(mockRobots).toHaveLength(1);
+    expect(mockRobots[0].applied).toEqual([['joint1', 0.25], ['joint2', -0.4]]);
+
+    // The manifest switches to the edu6 asset → a new URDF, a new model. Same
+    // joint VALUES on the wire (joint1/joint2 exist on both arms), no new message.
+    mockState = {
+      ...mockState,
+      tasks: { taskStatus: { capabilities: {
+        urdf_asset_id: 'edu6',
+        arm_joints: 6,
+        joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint'],
+      } } },
+    };
+    rerender(<UrdfTwin />);
+    await waitFor(() => expect(mockRobots).toHaveLength(2));
+    await waitFor(() => expect(mockRobots[1].applied).toEqual(
+      [['joint1', 0.25], ['joint2', -0.4]]));
+  });
+
+  test('a rebuilt subscription starts a fresh timeline (no blend across topics)', async () => {
+    const { rerender } = render(<UrdfTwin jointTopic="/joint_states" />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    act(() => mockSubscribe.mock.calls[0][0](stamped(0, ['joint1'], [0.0])));
+    // Let the FIRST stream settle (nothing left to show). Its per-frame cache
+    // would otherwise mistake the new stream's first sample — same version
+    // number, same robot, same joint set — for one it had already drawn.
+    await at(50_200);
+    rerender(<UrdfTwin jointTopic="/sim/joint_states" />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(2));
+    mockSetJointValue.mockClear();
+    // The new stream's FIRST sample lands at once, exactly like a fresh mount.
+    act(() => mockSubscribe.mock.calls[1][0](stamped(5000, ['joint1'], [0.7])));
+    expect(mockSetJointValue).toHaveBeenCalledWith('joint1', 0.7);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sammlung markers (Ziele / Positionen / variable points) on the SAME twin.
+// ---------------------------------------------------------------------------
+describe('UrdfTwin — Sammlung markers', () => {
+  const PIN = { id: 'd_00000001', label: 'Ablage', kind: 'pin', x: 0.18, y: -0.06, z: 0, highlighted: false };
+  const POSE = { id: 'd_00000002', label: 'Über der Kiste', kind: 'pose', x: 0.14, y: 0.1, z: 0.12, highlighted: false };
+  const fakeCtx = () => ({
+    beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), quadraticCurveTo: vi.fn(),
+    closePath: vi.fn(), fill: vi.fn(), fillText: vi.fn(),
+  });
+  let getContextSpy;
+  beforeEach(() => {
+    // jsdom has no 2D canvas: null is the production "no label" branch.
+    getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+  });
+  afterEach(() => { getContextSpy.mockRestore(); });
+
+  const prims = (type) => mockMarkerPrims.filter((p) => p.type === type);
+  // The layer is the first Group the marker effect creates (no other layer is on).
+  const layer = () => mockGroupInstances[0];
+  async function mount(markers) {
+    const utils = render(<UrdfTwin markers={markers} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    return utils;
+  }
+
+  test('default props construct no marker primitive and no group', async () => {
+    render(<UrdfTwin />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockMarkerPrims).toEqual([]);
+    expect(mockGroupCtor).not.toHaveBeenCalled();
+  });
+
+  test('one pin + one pose build a cone + ball and an octahedron, placed at (x, z, −y)', async () => {
+    await mount([PIN, POSE]);
+    expect(prims('ConeGeometry').map((p) => p.args)).toEqual([[0.008, 0.03, 16]]);
+    expect(prims('SphereGeometry').map((p) => p.args)).toEqual([[0.008, 16, 12]]);
+    expect(prims('OctahedronGeometry').map((p) => p.args)).toEqual([[0.012]]);
+    expect(prims('TorusGeometry')).toEqual([]);
+    // No 2D canvas → no label sprite, glyph only.
+    expect(prims('Sprite')).toEqual([]);
+    expect(prims('CanvasTexture')).toEqual([]);
+    const [pinRoot, poseRoot] = layer().kids;
+    expect(pinRoot.position.set).toHaveBeenLastCalledWith(0.18, 0, 0.06);
+    expect(poseRoot.position.set).toHaveBeenLastCalledWith(0.14, 0.12, -0.1);
+    expect(pinRoot.scale.set).not.toHaveBeenCalled();
+  });
+
+  test('a variable point is a flat ring; a highlighted marker is scaled up', async () => {
+    await mount([{ id: 'var:Punkt', label: 'Punkt', kind: 'variable', x: 0.1, y: 0, z: 0.05, highlighted: true }]);
+    expect(prims('TorusGeometry').map((p) => p.args)).toEqual([[0.012, 0.003, 8, 24]]);
+    expect(layer().kids[0].scale.set).toHaveBeenCalledWith(1.4, 1.4, 1.4);
+  });
+
+  test('with a 2D canvas the label is a depth-test-free sprite above the glyph', async () => {
+    getContextSpy.mockReturnValue(fakeCtx());
+    await mount([PIN]);
+    expect(prims('CanvasTexture')).toHaveLength(1);
+    const [mat] = prims('SpriteMaterial');
+    expect(mat.args[0]).toEqual({ map: prims('CanvasTexture')[0].obj, depthTest: false });
+    const sprite = prims('Sprite')[0].obj;
+    expect(sprite.scale.set).toHaveBeenCalledWith(0.12, 0.03, 1);
+    expect(sprite.position.set).toHaveBeenCalledWith(0, 0.065, 0);
+  });
+
+  test('a label change disposes the old marker (texture included) and builds a new one', async () => {
+    getContextSpy.mockReturnValue(fakeCtx());
+    const { rerender } = await mount([PIN, POSE]);
+    const oldCone = prims('ConeGeometry')[0].obj;
+    const oldTexture = prims('CanvasTexture')[0].obj;
+    rerender(<UrdfTwin markers={[{ ...PIN, label: 'Kiste' }, POSE]} />);
+    expect(oldCone.dispose).toHaveBeenCalled();
+    expect(oldTexture.dispose).toHaveBeenCalled();
+    expect(prims('ConeGeometry')).toHaveLength(2);
+    // The pose was untouched: still one octahedron, never disposed.
+    expect(prims('OctahedronGeometry')).toHaveLength(1);
+    expect(prims('OctahedronGeometry')[0].obj.dispose).not.toHaveBeenCalled();
+    expect(layer().kids).toHaveLength(2);
+  });
+
+  test('a moved marker is repositioned, not rebuilt', async () => {
+    const { rerender } = await mount([PIN]);
+    const root = layer().kids[0];
+    rerender(<UrdfTwin markers={[{ ...PIN, x: 0.2, y: 0.05 }]} />);
+    expect(prims('ConeGeometry')).toHaveLength(1);
+    expect(layer().kids[0]).toBe(root);
+    expect(root.position.set).toHaveBeenLastCalledWith(0.2, 0, -0.05);
+  });
+
+  test('removing a marker disposes it and drops it from the layer', async () => {
+    const { rerender } = await mount([PIN, POSE]);
+    rerender(<UrdfTwin markers={[POSE]} />);
+    expect(prims('ConeGeometry')[0].obj.dispose).toHaveBeenCalled();
+    expect(prims('SphereGeometry')[0].obj.dispose).toHaveBeenCalled();
+    expect(layer().kids).toHaveLength(1);
+    rerender(<UrdfTwin markers={[]} />);
+    expect(prims('OctahedronGeometry')[0].obj.dispose).toHaveBeenCalled();
+    expect(layer().kids).toHaveLength(0);
+  });
+
+  test('every marker mutation repaints the on-demand loop', async () => {
+    const { rerender } = await mount([PIN]);
+    const settled = async () => {
+      await settleFrames();
+      const idle = mockRender.mock.calls.length;
+      await settleFrames();
+      expect(mockRender.mock.calls.length).toBe(idle);
+      return idle;
+    };
+    let idle = await settled();
+    rerender(<UrdfTwin markers={[{ ...PIN, x: 0.2 }]} />); // move
+    await waitFor(() => expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+    idle = await settled();
+    rerender(<UrdfTwin markers={[{ ...PIN, x: 0.2, highlighted: true }]} />); // rebuild
+    await waitFor(() => expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+    idle = await settled();
+    rerender(<UrdfTwin markers={[]} />); // remove
+    await waitFor(() => expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+  });
+});
+
+describe('UrdfTwin — ghost arm (a Position\'s captured joints)', () => {
+  const GHOST = {
+    names: ['joint1', 'joint2', 'gripper_joint_1', 'not_a_joint'],
+    positions: [0.1, -0.9, 0.8, 5],
+  };
+  const ghostMaterials = () => mockStandardMaterials.filter((m) => m.opts && m.opts.color === 0x14b8a6);
+
+  async function mountLoaded(ui) {
+    const utils = render(ui);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    return utils;
+  }
+
+  test('default props never clone the robot and build no ghost material', async () => {
+    await mountLoaded(<UrdfTwin />);
+    expect(mockRobot.clone).not.toHaveBeenCalled();
+    expect(ghostMaterials()).toEqual([]);
+  });
+
+  test('ghostJoints set before the meshes land creates the ghost only after manager.onLoad', async () => {
+    render(<UrdfTwin ghostJoints={GHOST} />);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads[0].finish(); });
+    // The URDF callback already ran and one mesh landed — still no clone.
+    expect(mockRobot.clone).not.toHaveBeenCalled();
+    await act(async () => { mockStlLoads[1].finish(); });
+    await waitFor(() => expect(mockRobot.clone).toHaveBeenCalledTimes(1));
+    expect(mockRobot.clone).toHaveBeenCalledWith(true);
+    const [ghost] = mockGhosts;
+    expect(mockSceneOps).toContainEqual(['add', ghost]);
+    const [mat] = ghostMaterials();
+    expect(mat.opts).toEqual({ color: 0x14b8a6, transparent: true, opacity: 0.35, depthWrite: false });
+    // Every arm mesh wears the one ghost material and casts no shadow.
+    ghost.meshes.forEach((m) => {
+      expect(m.material).toBe(mat);
+      expect(m.castShadow).toBe(false);
+    });
+    // The held sim object and the triad copied from the live robot are detached.
+    expect(ghost.link.remove).toHaveBeenCalledWith(ghost.held);
+    expect(ghost.link.remove).toHaveBeenCalledWith(ghost.axes);
+    expect(ghost.rotation).toEqual({ x: -Math.PI / 2, z: 0 });
+  });
+
+  test('values are applied by name to the clone only; unknown names are ignored', async () => {
+    await mountLoaded(<UrdfTwin ghostJoints={GHOST} />);
+    const [ghost] = mockGhosts;
+    expect(ghost.setJointValue.mock.calls).toEqual([
+      ['joint1', 0.1], ['joint2', -0.9], ['gripper_joint_1', 0.8],
+    ]);
+    expect(mockRobot.applied).toEqual([]);
+  });
+
+  test('a new pose re-poses the same clone and repaints', async () => {
+    const { rerender } = await mountLoaded(<UrdfTwin ghostJoints={GHOST} />);
+    await settleFrames();
+    const idle = mockRender.mock.calls.length;
+    rerender(<UrdfTwin ghostJoints={{ names: ['joint1'], positions: [0.4] }} />);
+    expect(mockRobot.clone).toHaveBeenCalledTimes(1);
+    expect(mockGhosts[0].setJointValue).toHaveBeenLastCalledWith('joint1', 0.4);
+    await waitFor(() => expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+  });
+
+  test('ghostJoints=null removes it, disposes exactly one material and no geometry', async () => {
+    const { rerender } = await mountLoaded(<UrdfTwin ghostJoints={GHOST} />);
+    const [ghost] = mockGhosts;
+    const [mat] = ghostMaterials();
+    rerender(<UrdfTwin ghostJoints={null} />);
+    expect(mockSceneOps).toContainEqual(['remove', ghost]);
+    expect(mockStandardMaterials.filter((m) => m.dispose.mock.calls.length > 0)).toEqual([mat]);
+    expect(mat.dispose).toHaveBeenCalledTimes(1);
+    ghost.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled());
+    // A later pose builds a fresh ghost.
+    rerender(<UrdfTwin ghostJoints={GHOST} />);
+    expect(mockRobot.clone).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    ['mismatched lengths', { names: ['joint1'], positions: [0.1, 0.2] }],
+    ['a non-finite value', { names: ['joint1'], positions: [Number.NaN] }],
+    ['empty arrays', { names: [], positions: [] }],
+    ['not an object', 'joint1'],
+  ])('an invalid ghostJoints (%s) draws nothing', async (_label, value) => {
+    await mountLoaded(<UrdfTwin ghostJoints={value} />);
+    expect(mockRobot.clone).not.toHaveBeenCalled();
+  });
+
+  test('unmount detaches the ghost and frees its material without touching geometry', async () => {
+    const { unmount } = await mountLoaded(<UrdfTwin ghostJoints={GHOST} />);
+    const [ghost] = mockGhosts;
+    const [mat] = ghostMaterials();
+    unmount();
+    expect(mockSceneOps).toContainEqual(['remove', ghost]);
+    // The clone shares the robot's geometries: it must be detached BEFORE the
+    // scene-wide dispose traverse, or that traverse would free them.
+    const removedAt = mockSceneOps.findIndex((op) => op[0] === 'remove' && op[1] === ghost);
+    const traversedAt = mockSceneOps.map((op) => op[0]).lastIndexOf('traverse');
+    expect(traversedAt).toBeGreaterThan(-1);
+    expect(removedAt).toBeLessThan(traversedAt);
+    expect(mat.dispose).toHaveBeenCalledTimes(1);
+    ghost.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled());
   });
 });

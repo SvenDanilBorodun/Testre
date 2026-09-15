@@ -78,6 +78,13 @@ def test_invalid_coordinate_raises():
     assert 'ungültig' in str(exc.value).lower() or 'invalid' in str(exc.value).lower()
 
 
+def test_an_overflowing_coordinate_raises_the_german_error_not_overflow():
+    ctx = _StubCtx(z_table=0.05)
+    with pytest.raises(WorkflowError) as exc:
+        destination_pin(ctx, {'name': 'A', 'x': 10 ** 400, 'y': 0.0, 'z': 0.0})
+    assert str(exc.value) == 'Ziel "A" hat ungültige Koordinaten.'
+
+
 def test_missing_name_raises():
     ctx = _StubCtx()
     with pytest.raises(WorkflowError):

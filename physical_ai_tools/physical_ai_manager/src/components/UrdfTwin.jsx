@@ -24,20 +24,46 @@
 // never land in the entry bundle the white-screen CI greps. It mounts only while
 // the panel is open, and fully tears down its WebGL context on unmount/collapse.
 //
-// Props (ALL optional — the default-prop call `<UrdfTwin/>` is byte-for-byte the
-// pre-Phase-3 behaviour, so RecordPage is untouched):
+// MOTION IS INTERPOLATED, NOT SNAPPED (2026-09-11). Every JointState goes into
+// utils/jointStateInterpolator and the render loop asks it for the pose of the
+// CURRENT frame — a blend of the two samples around a render clock that trails
+// the data by INTERP_DELAY_MS (100 ms), on the publisher's header stamps. That is
+// what makes all four mounts (Startseite, Aufnahme, the Roboter-Studio dock, the
+// simulator stage) move at the display's frame rate instead of in 10 Hz steps —
+// or, on the old burst-publishing simulator, about two poses a second.
+// Consequences to keep:
+//   * the FIRST sample of a stream is applied at once (there is nothing to blend
+//     from), so a single message still lands on the model synchronously;
+//   * a resting arm costs almost nothing: the loop idles once the data stops
+//     moving, and a pose mid-blend is re-applied only past RENDER_DEADBAND_RAD
+//     (an arm reporting ±1 encoder tick of flicker still redraws a few times a
+//     second, against ten unconditionally before) — but the pose is landed
+//     EXACTLY the moment the data stops, never a fraction short;
+//   * the path trail and onEndEffector follow the pose that is DRAWN, not the
+//     newest message, so the trail is the curve the student watched and the local
+//     grasp guess judges the gripper where it visibly is.
+//
+// Props (ALL optional; the default-prop call `<UrdfTwin/>` builds none of the
+// sim-stage layers — RecordPage constructs zero of those primitives — though
+// since 2026-09-11 it does subscribe at ~30 Hz and draw an interpolated pose
+// like every other mount):
 //   * jointTopic   — the JointState topic to mirror (default the bare global
 //                    /joint_states; SimScene passes the sim-only /sim/joint_states).
+//   * jointThrottleMs — rosbridge throttle_rate for that subscription (default
+//                    JOINT_THROTTLE_MS, ~30 Hz off the real arm's 100 Hz; SimScene
+//                    passes a lower one so the simulator's 30 Hz stream arrives
+//                    whole).
 //   * objects      — Phase-3 sim objects [{type, tag_id, x, y, yaw}] rendered as
 //                    primitive meshes on a virtual table. Empty → nothing built.
 //   * showTable    — draw a flat table plane at the base z=0 plane.
 //   * heldObjectId — tag_id of the object currently grasped; its mesh is
 //                    re-parented to the end-effector link so it follows the
 //                    gripper, and dropped back to the table on release.
-//   * onEndEffector — callback({x,y,z,gripper}) fired per joint update with the
-//                    end-effector world position in BASE (ROS) frame + the
-//                    gripper angle, so SimScene can run the grasp-attach geometry
-//                    outside this thin renderer. Default null → never invoked.
+//   * onEndEffector — callback({x,y,z,gripper}) fired whenever the DRAWN pose
+//                    changes, with the end-effector world position in BASE (ROS)
+//                    frame + the gripper angle of that same pose, so SimScene can
+//                    run the grasp-attach geometry outside this thin renderer.
+//                    Default null → never invoked.
 //   * zones        — Phase-4 no-go ("Sperrzone") keep-out boxes
 //                    [{min:[x,y,z], max:[x,y,z]}] (base-frame metres) rendered as
 //                    translucent-red boxes + red wireframes. Empty (the default)
@@ -72,7 +98,7 @@
 //                    wrist-centre span). Default false → the ring builds ZERO
 //                    primitives.
 
-import React, { useMemo, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
@@ -80,6 +106,7 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import URDFLoader from 'urdf-loader';
 import ROSLIB from 'roslib';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { createJointStateInterpolator } from '../utils/jointStateInterpolator';
 import {
   reachAnnulus,
   SIM_OBJECT_FALLBACK_SIZE_M,
@@ -87,21 +114,14 @@ import {
   SIM_OBJECT_HELD_COLOR_HEX,
 } from './Workshop/simConstants';
 import { armGeometry } from '../utils/armProfile';
+import { MARKER_COLORS } from './Workshop/sammlung/markers';
 
-// The OMX follower joints the URDF exposes as drivable revolute joints. This is
-// the FALLBACK set only — the LIVE joint set is profile-driven (armGeometry from
-// the capability manifest; edu6 uses joint1..joint6 + end_gear_joint). We map by
-// NAME from each JointState message, so the order here is only documentation —
-// unknown names in a message are ignored, and a missing name simply isn't updated.
-const FOLLOWER_JOINTS = [
-  'joint1',
-  'joint2',
-  'joint3',
-  'joint4',
-  'joint5',
-  'gripper_joint_1',
-];
-const FOLLOWER_JOINT_SET = new Set(FOLLOWER_JOINTS);
+// The joints applied to the model are profile-driven (armGeometry from the
+// capability manifest: the OMX's joint1..joint5 + gripper_joint_1 when there is
+// none, edu6's joint1..joint6 + end_gear_joint, edu1's joint1..joint5 +
+// RL_joint). They are matched by NAME in each JointState, so unknown names — a
+// URDF <mimic> joint like gripper_joint_2, which urdf-loader drives itself — are
+// ignored, and a name missing from a message keeps its last value.
 
 // Per-URDF-asset render config (edu6 §4.5). The capability manifest's
 // urdf_asset_id picks the row; joint names come from the manifest itself
@@ -157,10 +177,25 @@ const URDF_ASSETS = {
   },
 };
 
-// Match ImageGridCell's monitor-view budget: 10 Hz over rosbridge, newest frame
-// only. /joint_states at 100 Hz on the wire would be wasteful for a visual twin.
-const JOINT_THROTTLE_MS = 100;
+// ~30 Hz over rosbridge, newest frame only. The full 100 Hz of the real
+// /joint_states would be wasteful for a visual twin; 10 Hz (the old budget) is
+// too sparse to interpolate: with samples 100 ms apart the render clock, 100 ms
+// behind, keeps catching up with the data and the arm stalls between samples.
+// At ~30 Hz there are three samples of margin. A JointState is a few hundred
+// bytes of JSON, so this is tens of KB/s on a link that carries MJPEG.
+const JOINT_THROTTLE_MS = 30;
 const JOINT_QUEUE_LENGTH = 1;
+// While the drawn pose is a BLEND of two differing samples it is re-applied (and
+// the frame redrawn) only when some joint moved more than this since the last
+// applied pose: 1 mrad ≈ 0.06°, ~0.3 mm at the arms' ~0.3 m reach — invisible.
+// It trims the slow tails of motion and encoder flicker: one tick (2π/4096 ≈
+// 1.53 mrad on both servo families) blended over the ~30-40 ms between samples
+// is ~0.8 mrad per 60 Hz frame, so roughly every other flicker frame is skipped.
+// As soon as the DATA stops moving (the pose is a sample verbatim, or a blend of
+// two samples that agree) the pose is applied EXACTLY, dead-band or not — also on
+// a live stream from a resting arm, which never stops sending — so the model
+// never rests a fraction of a milliradian short of the data.
+const RENDER_DEADBAND_RAD = 1e-3;
 // How long without a JointState before the twin admits it is no longer live.
 // `hasJointData` used to be a ONE-WAY latch — `setHasJointData(true)` was its
 // only setter, with no false path and no timer — so when the feed died (rosbridge
@@ -169,7 +204,8 @@ const JOINT_QUEUE_LENGTH = 1;
 // GREEN. The pane positively asserted liveness over a stale picture, which is the
 // same "state that only ever advances" shape as the black-pane and stale-sim
 // bugs. 3 s clears every real cadence with room to spare: the real /joint_states
-// is throttled to 100 ms and the sim idle republish runs at 500 ms.
+// is throttled to ~30 ms and the sim heartbeat runs at 500 ms — during a run too,
+// since a paused or waiting program is exactly when nothing else is sent.
 const JOINT_STALE_MS = 3000;
 const JOINT_STALE_CHECK_MS = 1000;
 
@@ -181,6 +217,21 @@ const JOINT_STALE_CHECK_MS = 1000;
 // Arm link colour (the URDF materials are a flat dark grey; we override for a
 // cleaner, better-lit look in the viewer).
 const LINK_COLOR = 0xbfc4cc;
+
+// Ghost arm: the Positionen teal (sammlung/markers.js MARKER_COLORS.pose).
+const GHOST_COLOR = 0x14b8a6;
+
+// `{names, positions}` with equal-length arrays of non-empty strings and finite
+// numbers, else null — an invalid ghost draws nothing rather than a half pose.
+function validGhostJoints(g) {
+  if (!g || typeof g !== 'object') return null;
+  const { names, positions } = g;
+  if (!Array.isArray(names) || !Array.isArray(positions)) return null;
+  if (names.length === 0 || names.length !== positions.length) return null;
+  if (!names.every((n) => typeof n === 'string' && n)) return null;
+  if (!positions.every((v) => typeof v === 'number' && Number.isFinite(v))) return null;
+  return { names, positions };
+}
 
 // ── Sim-object render constants ──────────────────────────────────────────────
 // Objects are sized/coloured PER TYPE from the `catalogDims` prop (the sim-stage
@@ -207,8 +258,17 @@ const EE_LINK_NAME = 'end_effector_link';
 // the draw range grows as the arm moves. Capped so a long session can't grow the
 // buffer unbounded — once full, the trail simply freezes.
 const PATH_COLOR = 0x22d3ee; // cyan-400
-const PATH_MAX_POINTS = 4000;
+// Sized for the INTERPOLATED pose: points are appended per drawn frame (not per
+// message), at up to PATH_MIN_INTERVAL_MS apart and ≥ 1 mm apart, so a moving
+// tool tip adds up to ~60 points a second. 30 000 is ~8 min of continuous motion
+// (360 KB) — at the old 4000 the trail froze after ~70 s, i.e. a looping program
+// stopped drawing its path after a handful of passes. Only the appended vertex is
+// uploaded (addUpdateRange), so a big buffer costs nothing per frame.
+const PATH_MAX_POINTS = 30000;
 const PATH_MIN_MOVE_M = 0.001; // append only when the TCP moved ≥ ~1 mm
+// …and at most one point per ~60 Hz frame, so a 120/144 Hz display does not
+// fill the trail two or three times faster than a 60 Hz one.
+const PATH_MIN_INTERVAL_MS = 15;
 // Base/TCP coordinate-frame triads ("Achsen"): a small RGB AxesHelper parented to
 // link0 (base) and end_effector_link (TCP). Parented under the robot so they
 // inherit its -π/2 viewer rotation automatically — no manual frame math.
@@ -229,6 +289,7 @@ const SHADOW_MAP_SIZE = 1024;
 
 export default function UrdfTwin({
   jointTopic = '/joint_states',
+  jointThrottleMs = JOINT_THROTTLE_MS,
   objects = [],
   showTable = false,
   heldObjectId = null,
@@ -249,6 +310,16 @@ export default function UrdfTwin({
   catalogDims = {},
   showShadows = false,
   showReach = false,
+  // Sammlung markers (sammlung/markers.js::buildTwinMarkers): the document's
+  // Ziele/Positionen and variable points, in BASE coordinates
+  // [{id, label, kind: 'pin'|'pose'|'variable', x, y, z, highlighted}]. Drawn on
+  // THIS twin (never a second WebGL context) and diffed by id. The default []
+  // constructs nothing.
+  markers = [],
+  // Ghost arm („Position" preview): `{names, positions}` — a translucent clone
+  // of the LOADED robot posed at these joints, on THIS twin. null (the default)
+  // constructs nothing; an invalid value is treated as null.
+  ghostJoints = null,
   // Start-page hero seam. `showChrome = false` suppresses this component's
   // own header chip and „Wartet auf Gelenkdaten …" hint so a parent can
   // draw its own overlay; the default keeps RecordPage and SimScene
@@ -306,6 +377,17 @@ export default function UrdfTwin({
   const prevHeldIdRef = useRef(null);
   // Phase-4 no-go zone layer (stays null/unused for the default zones=[] call).
   const zonesGroupRef = useRef(null);
+  // Sammlung marker layer: a lazily created group + id → {object, key}.
+  const markersGroupRef = useRef(null);
+  const markerMapRef = useRef(new Map());
+  // Ghost arm layer. `robotReadyRef` is the robot whose meshes have ALL landed
+  // (loadingManager.onLoad) — cloning earlier would copy a geometry-less URDF
+  // skeleton, and the ghost is built once. `robotReadyTick` re-runs the ghost
+  // effect at that moment; it changes nothing else.
+  const [robotReadyTick, setRobotReadyTick] = useState(0);
+  const robotReadyRef = useRef(null);
+  const ghostRef = useRef(null);
+  const ghostMaterialRef = useRef(null);
   // Latest onEndEffector callback, read by the (stable) subscription closure.
   const onEndEffectorRef = useRef(onEndEffector);
   useEffect(() => {
@@ -349,6 +431,76 @@ export default function UrdfTwin({
     showShadowsRef.current = showShadows;
   }, [showShadows]);
 
+  // ---- joint stream → robot model (the interpolated pose) ----
+  // The live interpolator for the CURRENT subscription (replaced with it).
+  const interpRef = useRef(null);
+  // What was last written onto the model, so an unchanged pose is not re-applied
+  // and a rebuilt robot / changed joint set gets the pose again at once.
+  const appliedRef = useRef({ robot: null, jointSet: null, pose: new Map() });
+  // Which interpolator was last asked, its version then, and whether it had
+  // nothing left to show — so an idle stream costs the render loop one comparison
+  // per frame. Keyed on the interpolator's IDENTITY, not just its version: a
+  // replaced stream starts counting at zero again, and the animation loop is not
+  // guaranteed to have run in between (a hidden tab's frames are paused), so a
+  // version match alone could mistake a new stream's first sample for one already
+  // drawn.
+  const stepStateRef = useRef({ interp: null, version: -1, settled: false });
+
+  // Advance the model to the pose of time `nowMs`. Called by the render loop
+  // every frame and by the subscription on every message; returns true when it
+  // changed the model (i.e. the frame must be redrawn). Reads refs only, hence
+  // stable.
+  const stepPose = useCallback((nowMs) => {
+    const robot = robotRef.current;
+    const interp = interpRef.current;
+    if (!robot || !interp) return false;
+    const jointSet = jointSetRef.current;
+    const applied = appliedRef.current;
+    const fresh = applied.robot !== robot || applied.jointSet !== jointSet;
+    const step = stepStateRef.current;
+    if (!fresh && step.interp === interp && step.settled
+        && step.version === interp.version) {
+      return false;
+    }
+    const { pose, pending, moving } = interp.frame(nowMs);
+    step.interp = interp;
+    step.version = interp.version;
+    step.settled = !pending;
+    if (!pose) return false;
+    if (fresh) applied.pose.clear();
+    else if (!poseMovedBeyond(pose, applied.pose, jointSet,
+      moving ? RENDER_DEADBAND_RAD : 0)) {
+      return false;
+    }
+    pose.forEach((value, name) => {
+      if (!jointSet.has(name)) return;
+      robot.setJointValue(name, value);
+      applied.pose.set(name, value);
+    });
+    applied.robot = robot;
+    applied.jointSet = jointSet;
+    // Phase-5: accumulate the end-effector world position into the path trail
+    // — only while „Bahn anzeigen" is on (showPathRef). RecordPage's default
+    // showPath=false skips this entirely (no getWorldPosition, no allocation).
+    if (showPathRef.current) {
+      if (!pathTmpRef.current) pathTmpRef.current = new THREE.Vector3();
+      appendPathPoint(
+        robot,
+        pathLineRef.current,
+        pathPositionsRef.current,
+        pathStateRef.current,
+        pathTmpRef.current,
+        nowMs,
+      );
+    }
+    // Surface the end-effector pose + gripper for the sim grasp geometry —
+    // only when a consumer is wired (RecordPage passes none → zero cost, and
+    // the robot.links/getWorldPosition reads never run).
+    const cb = onEndEffectorRef.current;
+    if (cb) emitEndEffector(robot, pose.get(gripperJointRef.current), cb);
+    return true;
+  }, []);
+
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return undefined;
@@ -356,6 +508,7 @@ export default function UrdfTwin({
     // Capture the (stable, never-reassigned) sim-object map for use in the
     // cleanup, so the lint's "ref may have changed by cleanup" guard is happy.
     const objectMeshMap = objectMeshMapRef.current;
+    const markerMap = markerMapRef.current;
 
     let disposed = false;
     let animationId = null;
@@ -523,6 +676,9 @@ export default function UrdfTwin({
             if (obj && obj.isMesh) obj.castShadow = true;
           });
         }
+        // The ghost layer may clone this robot from now on.
+        robotReadyRef.current = robot;
+        setRobotReadyTick((t) => t + 1);
       }
       needsRender = true;
     };
@@ -599,6 +755,10 @@ export default function UrdfTwin({
       // drag — controlsUpdated is true while damping settles, so we keep
       // rendering until it stops, then idle.
       const controlsUpdated = controls.update();
+      // Move the arm to THIS frame's interpolated pose. While the stream carries
+      // motion this dirties every frame (60 fps motion from ~30 Hz data); at rest
+      // it returns false and the loop idles as before.
+      if (stepPose(performance.now())) needsRender = true;
       if (needsRender || controlsUpdated) {
         renderer.render(scene, camera);
         needsRender = false;
@@ -614,6 +774,21 @@ export default function UrdfTwin({
       if (resizeObserver) resizeObserver.disconnect();
       if (animationId !== null) window.cancelAnimationFrame(animationId);
       controls.dispose();
+      // Markers carry a CanvasTexture label, which the generic traverse below
+      // does not reach (disposeObject frees geometry + material only), so they
+      // are detached and disposed whole first.
+      if (markersGroupRef.current) scene.remove(markersGroupRef.current);
+      markerMap.forEach(({ object }) => disposeMarker(object));
+      markerMap.clear();
+      markersGroupRef.current = null;
+      // The ghost SHARES the live robot's geometries: detach it BEFORE the
+      // traverse below (which would reach it and free them a second time) and
+      // free only its own material.
+      if (ghostRef.current) scene.remove(ghostRef.current);
+      if (ghostMaterialRef.current) ghostMaterialRef.current.dispose();
+      ghostRef.current = null;
+      ghostMaterialRef.current = null;
+      robotReadyRef.current = null;
       // Dispose every geometry/material reachable from the scene (three leaks
       // GPU memory otherwise), then the shared link material + renderer. This
       // also reaches the sim-object meshes (under objectsGroup → scene) and a
@@ -648,8 +823,8 @@ export default function UrdfTwin({
     // asset: a profile change (the capability manifest naming a different
     // urdf_asset_id) rebuilds the whole viewer with the right URDF — rare
     // (caps normally settle before the twin first opens) and the cleanup
-    // above already disposes everything.
-  }, [asset]);
+    // above already disposes everything. stepPose is stable (refs only).
+  }, [asset, stepPose]);
 
   // ---- Phase-3: sim objects + table layer (built/diffed on demand) ----------
   // Lazily creates a THREE.Group the first time there is something to show, then
@@ -845,10 +1020,120 @@ export default function UrdfTwin({
     requestRenderRef.current();
   }, [zones]);
 
+  // ---- Sammlung markers (Ziele / Positionen / variable points) --------------
+  // Diffed by id: a marker is REBUILT only when its kind, label or highlight
+  // changed (the label is a baked canvas texture) and merely MOVED otherwise;
+  // one no longer listed is removed and disposed. `asset` is a dep because a
+  // profile change rebuilds the whole scene and the mount teardown has already
+  // dropped this layer. Every mutation dirties the on-demand render loop. For
+  // the default markers=[] call this returns BEFORE constructing any primitive.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const list = Array.isArray(markers) ? markers : [];
+    if (list.length === 0 && !markersGroupRef.current) return;
+
+    let group = markersGroupRef.current;
+    if (!group) {
+      group = new THREE.Group();
+      scene.add(group);
+      markersGroupRef.current = group;
+    }
+    const map = markerMapRef.current;
+    const seen = new Set();
+    list.forEach((m) => {
+      if (!m || m.id === undefined || m.id === null || seen.has(m.id)) return;
+      if (![m.x, m.y, m.z].every((v) => typeof v === 'number' && Number.isFinite(v))) return;
+      seen.add(m.id);
+      const key = `${m.kind}|${m.label}|${m.highlighted ? 1 : 0}`;
+      let entry = map.get(m.id);
+      if (entry && entry.key !== key) {
+        group.remove(entry.object);
+        disposeMarker(entry.object);
+        entry = null;
+      }
+      if (!entry) {
+        entry = { object: buildMarkerObject(m), key };
+        group.add(entry.object);
+        map.set(m.id, entry);
+      }
+      // Base (ROS) frame → viewer frame, exactly as the zone layer: (x, z, −y).
+      entry.object.position.set(m.x, m.z, -m.y);
+    });
+    map.forEach((entry, id) => {
+      if (seen.has(id)) return;
+      group.remove(entry.object);
+      disposeMarker(entry.object);
+      map.delete(id);
+    });
+    requestRenderRef.current();
+  }, [markers, asset]);
+
+  // ---- Ghost arm (a Position's captured joints) ------------------------------
+  // A translucent clone of the LOADED robot, built ONCE per robot and re-posed on
+  // every change. `robot.clone(true)` runs urdf-loader's URDFRobot.copy, which
+  // rebuilds the clone's joints/links/mimic maps, so setJointValue drives the
+  // clone alone. The clone SHARES every geometry with the live robot: removing
+  // the ghost disposes ONLY its one material, never a geometry. For the default
+  // ghostJoints=null call nothing is constructed.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    const ghostPose = validGhostJoints(ghostJoints);
+    if (!ghostPose) {
+      if (!ghostRef.current && !ghostMaterialRef.current) return;
+      if (ghostRef.current && scene) scene.remove(ghostRef.current);
+      if (ghostMaterialRef.current) ghostMaterialRef.current.dispose();
+      ghostRef.current = null;
+      ghostMaterialRef.current = null;
+      requestRenderRef.current();
+      return;
+    }
+    const robot = robotRef.current;
+    // Not yet loaded (or loaded meshes still in flight): the onLoad tick re-runs this.
+    if (!scene || !robot || robotReadyRef.current !== robot) return;
+    let ghost = ghostRef.current;
+    if (!ghost) {
+      if (typeof robot.clone !== 'function') return;
+      ghost = robot.clone(true);
+      const ghostMaterial = new THREE.MeshStandardMaterial({
+        color: GHOST_COLOR, transparent: true, opacity: 0.35, depthWrite: false,
+      });
+      const strays = [];
+      if (typeof ghost.traverse === 'function') {
+        ghost.traverse((obj) => {
+          if (!obj || obj === ghost) return;
+          // A held sim object and the „Achsen" triads hang under the live robot's
+          // links; the clone copied them, but they are not part of the arm.
+          if (obj.userData && obj.userData.simId !== undefined) {
+            strays.push(obj);
+          } else if (obj.isMesh) {
+            obj.material = ghostMaterial;
+            obj.castShadow = false;
+            obj.receiveShadow = false;
+          } else if (obj.isLine || obj.isLineSegments || obj.isPoints || obj.isSprite) {
+            strays.push(obj);
+          }
+        });
+      }
+      strays.forEach((obj) => { if (obj.parent) obj.parent.remove(obj); });
+      ghost.rotation.x = robot.rotation.x;
+      ghost.rotation.z = robot.rotation.z;
+      scene.add(ghost);
+      ghostRef.current = ghost;
+      ghostMaterialRef.current = ghostMaterial;
+    }
+    const jointNames = jointSetRef.current;
+    ghostPose.names.forEach((name, i) => {
+      if (jointNames.has(name)) ghost.setJointValue(name, ghostPose.positions[i]);
+    });
+    requestRenderRef.current();
+  }, [ghostJoints, robotReadyTick]);
+
   // ---- Phase-5: end-effector path trail ("Bahn anzeigen") -------------------
   // Lazily builds a cyan THREE.Line over a PREALLOCATED Float32Array the first
   // time the trail is enabled, then just toggles its visibility. Points are
-  // appended in the joint-state callback (guarded by showPathRef). For the
+  // appended whenever the drawn pose changes (stepPose, guarded by showPathRef),
+  // so the trail is the interpolated curve the student watched. For the
   // default showPath=false call this returns BEFORE constructing any THREE
   // primitive — RecordPage's `<UrdfTwin/>` and the jsdom three mock (no Line/
   // BufferGeometry/LineBasicMaterial) are never exercised.
@@ -963,9 +1248,13 @@ export default function UrdfTwin({
 
     let cancelled = false;
     let subscription = null;
+    // A fresh timeline per subscription: a different topic (or a reconnect to a
+    // different bridge) must not be blended with the previous one's samples.
+    const interp = createJointStateInterpolator();
+    interpRef.current = interp;
     // The staleness watchdog. Deliberately a plain interval rather than a
-    // per-message timeout: at 10 Hz that would re-arm a timer ten times a second
-    // for the life of the session.
+    // per-message timeout: at ~30 Hz that would re-arm a timer thirty times a
+    // second for the life of the session.
     const staleTimer = window.setInterval(() => {
       if (cancelled) return;
       const last = lastJointAtRef.current;
@@ -991,37 +1280,20 @@ export default function UrdfTwin({
         ros,
         name: jointTopic,
         messageType: 'sensor_msgs/msg/JointState',
-        throttle_rate: JOINT_THROTTLE_MS,
+        throttle_rate: jointThrottleMs,
         queue_length: JOINT_QUEUE_LENGTH,
       });
       subscription.subscribe((msg) => {
         if (cancelled) return;
-        const robot = robotRef.current;
-        applyJointState(robot, msg, jointSetRef.current);
-        requestRenderRef.current();
-        if (!cancelled) {
-          lastJointAtRef.current = Date.now();
-          setHasJointData(true);
-        }
-        // Phase-5: accumulate the end-effector world position into the path trail
-        // — only while „Bahn anzeigen" is on (showPathRef). RecordPage's default
-        // showPath=false skips this entirely (no getWorldPosition, no allocation).
-        if (showPathRef.current && robot) {
-          if (!pathTmpRef.current) pathTmpRef.current = new THREE.Vector3();
-          const added = appendPathPoint(
-            robot,
-            pathLineRef.current,
-            pathPositionsRef.current,
-            pathStateRef.current,
-            pathTmpRef.current,
-          );
-          if (added) requestRenderRef.current();
-        }
-        // Surface the end-effector pose + gripper for the sim grasp geometry —
-        // only when a consumer is wired (RecordPage passes none → zero cost,
-        // and the robot.links/getWorldPosition reads never run).
-        const cb = onEndEffectorRef.current;
-        if (cb && robot) emitEndEffector(robot, msg, cb, gripperJointRef.current);
+        const now = performance.now();
+        interp.push(msg, now);
+        lastJointAtRef.current = Date.now();
+        setHasJointData(true);
+        // The render loop picks the pose up on its next frame anyway; stepping
+        // here as well lands the FIRST sample of a stream on the model at once
+        // (nothing to blend from), which is also what a hidden tab — whose
+        // animation frames are paused — keeps doing.
+        if (stepPose(now)) requestRenderRef.current();
       });
     };
     run().catch((err) => {
@@ -1030,13 +1302,14 @@ export default function UrdfTwin({
 
     return () => {
       cancelled = true;
+      if (interpRef.current === interp) interpRef.current = null;
       window.clearInterval(staleTimer);
       if (subscription) {
         try { subscription.unsubscribe(); } catch (_) { /* swallow */ }
         subscription = null;
       }
     };
-  }, [rosbridgeUrl, jointTopic]);
+  }, [rosbridgeUrl, jointTopic, jointThrottleMs, stepPose]);
 
   return (
     <div className="relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden bg-[#1a1d23]">
@@ -1074,25 +1347,16 @@ export default function UrdfTwin({
   );
 }
 
-// Map a sensor_msgs/JointState message onto the robot. Only the 6 known
-// follower joints are applied; any other name (e.g. gripper_joint_2, which the
-// URDF mimics automatically) is ignored. Safe when robot is null (the URDF may
-// still be loading) and when name/position arrays are missing/mismatched.
-function applyJointState(robot, msg, jointSet = FOLLOWER_JOINT_SET) {
-  if (!robot || !msg || !Array.isArray(msg.name) || !Array.isArray(msg.position)) {
-    return;
-  }
-  const { name, position } = msg;
-  const n = Math.min(name.length, position.length);
-  for (let i = 0; i < n; i += 1) {
-    const jointName = name[i];
-    if (jointSet.has(jointName)) {
-      const value = position[i];
-      if (typeof value === 'number' && Number.isFinite(value)) {
-        robot.setJointValue(jointName, value);
-      }
-    }
-  }
+// Has any applicable joint of `pose` moved more than `eps` from what the model
+// was last given? A joint the model has never been given counts as moved.
+function poseMovedBeyond(pose, applied, jointSet, eps) {
+  let moved = false;
+  pose.forEach((value, name) => {
+    if (moved || !jointSet.has(name)) return;
+    const prev = applied.get(name);
+    if (prev === undefined || Math.abs(value - prev) > eps) moved = true;
+  });
+  return moved;
 }
 
 // Stable id for a sim object: its (globally unique) tag_id. Returns null for a
@@ -1278,22 +1542,17 @@ function setMeshColor(mesh, color) {
 // software WORLD frame — exactly what the world-space object layer + IK expect,
 // by construction (a URDF TCP at (x, y) surfaces as (-x, -y)). On an un-yawed
 // asset (OMX, rotation.z = 0) it yields the URDF/base frame unchanged. No
-// per-asset branch is needed here — the yaw lives in matrixWorld. Then extract
-// the gripper angle from the message and hand both to the consumer.
-function emitEndEffector(robot, msg, cb, gripperJoint = 'gripper_joint_1') {
+// per-asset branch is needed here — the yaw lives in matrixWorld. The gripper
+// angle is the one just APPLIED to the model (the profile's gripper joint), so
+// the position and the jaw opening the consumer sees belong to the same frame.
+function emitEndEffector(robot, gripperValue, cb) {
   const link = robot && robot.links
     ? (robot.links[robot.userData?.eeLinkName || EE_LINK_NAME]
        || robot.links[EE_LINK_NAME]) : null;
   if (!link || typeof link.getWorldPosition !== 'function') return;
   const world = link.getWorldPosition(new THREE.Vector3());
-  let gripper = null;
-  if (msg && Array.isArray(msg.name) && Array.isArray(msg.position)) {
-    const gi = msg.name.indexOf(gripperJoint);
-    if (gi >= 0 && gi < msg.position.length) {
-      const v = msg.position[gi];
-      if (typeof v === 'number' && Number.isFinite(v)) gripper = v;
-    }
-  }
+  const gripper = typeof gripperValue === 'number' && Number.isFinite(gripperValue)
+    ? gripperValue : null;
   cb({ x: world.x, y: -world.z, z: world.y, gripper });
 }
 
@@ -1316,15 +1575,20 @@ function frameRobot(camera, controls, robot) {
 
 // Phase-5: append the end-effector world position to the preallocated path
 // buffer when the arm has moved at least PATH_MIN_MOVE_M since the last recorded
-// point. The stored coordinates are VIEWER-frame (the line is added straight to
+// point and at least PATH_MIN_INTERVAL_MS has passed (`nowMs` omitted → no time
+// gate). The stored coordinates are VIEWER-frame (the line is added straight to
 // the scene, so it draws where the TCP visibly is — no base-frame conversion).
 // Returns true when a point was added so the caller can request a render. Caps at
 // PATH_MAX_POINTS — once full, further points are dropped (the trail freezes).
-function appendPathPoint(robot, line, positions, state, tmp) {
+function appendPathPoint(robot, line, positions, state, tmp, nowMs) {
   const link = robot && robot.links
     ? (robot.links[robot.userData?.eeLinkName || EE_LINK_NAME]
        || robot.links[EE_LINK_NAME]) : null;
   if (!link || typeof link.getWorldPosition !== 'function' || !line || !positions) {
+    return false;
+  }
+  if (typeof nowMs === 'number' && typeof state.lastAt === 'number'
+      && nowMs - state.lastAt < PATH_MIN_INTERVAL_MS) {
     return false;
   }
   const world = link.getWorldPosition(tmp);
@@ -1343,13 +1607,17 @@ function appendPathPoint(robot, line, positions, state, tmp) {
   positions[i + 1] = world.y;
   positions[i + 2] = world.z;
   state.count += 1;
+  if (typeof nowMs === 'number') state.lastAt = nowMs;
   if (!state.last) state.last = new THREE.Vector3();
   state.last.set(world.x, world.y, world.z);
   const geo = line.geometry;
   if (geo) {
     geo.setDrawRange(0, state.count);
-    if (geo.attributes && geo.attributes.position) {
-      geo.attributes.position.needsUpdate = true;
+    const attr = geo.attributes && geo.attributes.position;
+    if (attr) {
+      // Upload only the vertex just written, not the whole 30 000-point buffer.
+      if (typeof attr.addUpdateRange === 'function') attr.addUpdateRange(i, 3);
+      attr.needsUpdate = true;
     }
   }
   return true;
@@ -1393,6 +1661,88 @@ function disposeFrameTriads(baseRef, tcpRef) {
       disposeObject(ax);
       ref.current = null;
     }
+  });
+}
+
+// One Sammlung marker: a group at the marker's point (the caller positions it)
+// holding the glyph — pin = a cone standing tip-down on the point with a ball on
+// top, pose = an octahedron, variable = a flat ring — plus a German name label.
+function buildMarkerObject(m) {
+  const root = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial({ color: MARKER_COLORS[m.kind] || MARKER_COLORS.pin });
+  if (m.kind === 'pose') {
+    const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.012), material);
+    gem.position.set(0, 0.012, 0);
+    root.add(gem);
+  } else if (m.kind === 'variable') {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.012, 0.003, 8, 24), material);
+    ring.rotation.x = Math.PI / 2; // lie flat on the point
+    ring.position.set(0, 0.002, 0);
+    root.add(ring);
+  } else {
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.008, 0.03, 16), material);
+    cone.rotation.x = Math.PI; // tip DOWN, touching the point
+    cone.position.set(0, 0.015, 0);
+    root.add(cone);
+    // The head shares the cone's material; disposeMarker disposes it once per mesh
+    // (three's dispose is idempotent).
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.008, 16, 12), material);
+    head.position.set(0, 0.034, 0);
+    root.add(head);
+  }
+  if (m.highlighted) root.scale.set(1.4, 1.4, 1.4);
+  const label = buildMarkerLabel(typeof m.label === 'string' ? m.label : '');
+  if (label) root.add(label);
+  return root;
+}
+
+// A camera-facing name sprite. Skipped (glyph only) where there is no 2D canvas.
+function buildMarkerLabel(text) {
+  let ctx = null;
+  let canvas = null;
+  try {
+    canvas = document.createElement('canvas');
+    ctx = canvas.getContext('2d');
+  } catch (_) {
+    ctx = null;
+  }
+  if (!ctx) return null;
+  canvas.width = 256;
+  canvas.height = 64;
+  ctx.font = 'bold 28px sans-serif';
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  const r = 14;
+  ctx.beginPath();
+  ctx.moveTo(r, 0);
+  ctx.lineTo(256 - r, 0);
+  ctx.quadraticCurveTo(256, 0, 256, r);
+  ctx.lineTo(256, 64 - r);
+  ctx.quadraticCurveTo(256, 64, 256 - r, 64);
+  ctx.lineTo(r, 64);
+  ctx.quadraticCurveTo(0, 64, 0, 64 - r);
+  ctx.lineTo(0, r);
+  ctx.quadraticCurveTo(0, 0, r, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 128, 32, 240);
+  const map = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, depthTest: false }));
+  sprite.scale.set(0.12, 0.03, 1);
+  sprite.position.set(0, 0.065, 0);
+  return sprite;
+}
+
+// Free everything a marker owns, including the label's canvas texture.
+function disposeMarker(obj) {
+  if (!obj || typeof obj.traverse !== 'function') return;
+  obj.traverse((o) => {
+    if (o.material && o.material.map && typeof o.material.map.dispose === 'function') {
+      o.material.map.dispose();
+    }
+    disposeObject(o);
   });
 }
 

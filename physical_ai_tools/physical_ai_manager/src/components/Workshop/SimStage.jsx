@@ -66,6 +66,12 @@ function SimStage({
   onToggleShowPath,
   onClearPath,
   pathClearToken,
+  // Sammlung markers + „Ziel setzen" (WorkshopPage → SimScene, unchanged).
+  markers,
+  requestedMode,
+  onCreateDestination,
+  // Ghost arm of the highlighted Position ({names, positions} | null) → SimScene → UrdfTwin.
+  ghostJoints = null,
 }) {
   // Runtime feedback signals — both already maintained in Redux by the existing
   // run path (workshopSlice.log + debuggerWarnings). Read-only here.
@@ -77,8 +83,12 @@ function SimStage({
 
   return (
     <aside
+      // Below md the stage stacks UNDER the editor: capped at half the row (and
+      // scrollable) so the Blockly editor keeps at least the other half, like
+      // RightDock. Uncapped from md up, where it sits beside the editor.
       className={
         'flex flex-col w-full md:h-full shrink-0 md:w-[55%] min-h-0 '
+        + 'max-h-[50%] overflow-y-auto md:max-h-none md:overflow-visible '
         + 'border-t md:border-t-0 md:border-l border-[var(--line)] bg-[var(--bg-sunk)]'
       }
       aria-label="Simulator"
@@ -143,6 +153,10 @@ function SimStage({
           pathClearToken={pathClearToken}
           showShadows
           showReach
+          markers={markers}
+          ghostJoints={ghostJoints}
+          requestedMode={requestedMode}
+          onCreateDestination={onCreateDestination}
         />
       </div>
 

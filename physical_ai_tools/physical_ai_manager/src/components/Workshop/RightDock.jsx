@@ -28,8 +28,8 @@ import { DE } from './blocks/messages_de';
 // container, and its content comes from `tab.render()` (invoked, NOT used as a
 // `<tab.render/>` element type). React therefore keeps the panel INSTANCE mounted
 // across "open a 2nd panel" / resize / re-render — a spurious remount of a live
-// JogPanel/RecordPanel would fire their unmount teardown (re-torque the arm /
-// cancel an in-progress recording). Panels unmount ONLY on a deliberate close,
+// JogPanel would fire its unmount teardown (re-torque the arm). Panels unmount
+// ONLY on a deliberate close,
 // evict, or dock collapse.
 
 const SPLIT_STORAGE_KEY = 'edubotics_workshop_dock_split';
@@ -141,8 +141,14 @@ function RightDock({
   return (
     <aside
       style={collapsed ? undefined : { '--dock-w': `${width}px` }}
+      // Below md the dock stacks UNDER the editor. Expanded it takes exactly
+      // half the row (`h-1/2`): the Blockly editor keeps the other half, and the
+      // panels get a DEFINITE height to share — content-sized, two open panels
+      // (each `flex: n 1 0px`) collapsed to zero. Collapsed it is just the rail.
+      // From md up it sits beside the editor at full height.
       className={
         'flex flex-col md:flex-row shrink-0 w-full md:h-full '
+        + (collapsed ? '' : 'h-1/2 ')
         + 'border-t md:border-t-0 md:border-l border-[var(--line)] bg-[var(--bg-sunk)] '
         + (collapsed ? 'md:w-[52px]' : 'md:w-[var(--dock-w)]')
       }

@@ -638,12 +638,16 @@ export function useRosServiceCaller() {
     [callService]
   );
 
-  // Roboter Studio „Position merken": capture the follower's CURRENT pose as a
+  // Roboter Studio Vormachen „P" / „Z": capture the follower's CURRENT pose as a
   // named destination (the server runs FK on the live joints, writes it to the
   // destinations table, and returns the world coordinates). The named point is
   // then usable by „Ziel <Name>" (destination_ref) / „bewege zu". The request
   // is just { name }; the response carries { success, world_x, world_y,
-  // world_z, message }. Contract owned by the backend WorkshopCapturePose.srv.
+  // world_z, message } plus the ADDITIVE S3 pair { joint_positions, joint_names }
+  // (Communicator.FOLLOWER_JOINT_ORDER) — the ghost arm and „Greifer merken" read
+  // it. Both arrays are empty on a refusal and ABSENT from an older server, so a
+  // consumer must treat „no joints" as normal. Contract owned by the backend
+  // WorkshopCapturePose.srv.
   const capturePose = useCallback(
     async (name) =>
       callService(
@@ -740,8 +744,9 @@ export function useRosServiceCaller() {
     [callService]
   );
 
-  // Replay a trajectory NOW on the follower (used for the RecordPanel preview
-  // and any direct playback). `points_json` is the CONTRACT-B JSON string;
+  // Replay a trajectory NOW on the follower (used for Vormachen's „Auf dem
+  // Roboter ansehen" preview and any direct playback). `points_json` is the
+  // CONTRACT-B JSON string;
   // `speed` is a >0 multiplier. Resp { success, message }. 60 s: replays a whole
   // recorded motion.
   const replayMotion = useCallback(

@@ -26,6 +26,7 @@ _NEW_SRVS = [
     'WorkshopHandGuide',
     'WorkshopRecordControl',
     'WorkshopReplay',
+    'WorkshopCapturePose',
 ]
 
 # (request field names, response field names) each srv MUST expose — the fixed
@@ -49,6 +50,13 @@ _EXPECTED = {
         ['success', 'message'],
     ),
 }
+# S3 (WP11a) — the additive joint vector sits AFTER the original five fields;
+# the exact order is pinned so a reshuffle is a deliberate, reviewed change.
+_EXPECTED['WorkshopCapturePose'] = (
+    ['name'],
+    ['success', 'world_x', 'world_y', 'world_z', 'message',
+     'joint_positions', 'joint_names'],
+)
 
 
 def _field_names(section: str) -> list[str]:

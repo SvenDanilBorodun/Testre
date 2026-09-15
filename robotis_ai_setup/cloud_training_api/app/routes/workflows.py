@@ -571,6 +571,11 @@ def restore_workflow_version(
 # cap 16. Writes assert workflow ownership + set owner/workflow SERVER-SIDE
 # (Rule §4 — service-role bypasses RLS); reads use the workflow read-visibility
 # ladder (_assert_workflow_visible).
+#
+# Six routes: create (POST), list (GET), by-name (GET), single (GET), rename
+# (PATCH) and delete (DELETE). The rename is owner-only and renames EVERY row
+# sharing the target's current name — the re-recorded versions of a name are
+# one recording to the student.
 
 
 class TrajectoryCreate(BaseModel):
@@ -751,6 +756,72 @@ def get_trajectory(
     if not result.data:
         raise HTTPException(status_code=404, detail="Bewegung nicht gefunden")
     return TrajectoryResponse(**result.data[0])
+
+
+class TrajectoryRename(BaseModel):
+    name: str = Field(..., min_length=1, max_length=MAX_NAME_LENGTH)
+
+
+@router.patch(
+    "/{workflow_id}/trajectories/{trajectory_id}", response_model=TrajectoryResponse
+)
+def rename_trajectory(
+    workflow_id: str,
+    trajectory_id: str,
+    payload: TrajectoryRename,
+    user=Depends(get_current_user),
+) -> TrajectoryResponse:
+    """Rename a recording. EVERY row sharing the target row's current name is
+    renamed in one owner-scoped UPDATE — the versions of a name are one
+    recording to the student, and a per-row PATCH would 409 the second version
+    against the first. Owner-only (Rule §4): _assert_workflow_owned + the write
+    re-scoped by owner_user_id. created_at is untouched, so the prune order and
+    by-name newest-wins do not change; updated_at moves via
+    trg_workflow_trajectories_touch.
+
+    KNOWN, accepted: the clash check and the UPDATE are two statements, not one
+    transaction, and no unique (workflow_id, name) constraint can back them
+    (the versions of a name share it by design). Two concurrent renames onto one
+    free name by the same owner could both pass the check; closing that needs a
+    row-locking RPC."""
+    _assert_workflow_owned(user.id, workflow_id)
+    new_name = validate_trajectory_name(payload.name)
+    supabase = get_supabase()
+    target = (
+        # Metadata only: the samples (up to 256 KB) are never returned here.
+        supabase.table("workflow_trajectories").select(
+            "id, workflow_id, owner_user_id, name, point_count, duration_s, fps, "
+            "robot_profile, created_at, updated_at"
+        )
+        .eq("workflow_id", workflow_id).eq("id", trajectory_id)
+        .eq("owner_user_id", user.id).execute()
+    )
+    if not target.data:
+        raise HTTPException(status_code=404, detail="Bewegung nicht gefunden")
+    row = target.data[0]
+    old_name = row["name"]
+    if new_name == old_name:
+        return TrajectoryResponse(**{**row, "samples": None})
+    # The clash check spans the whole workflow (not only the caller's rows): two
+    # recordings with one name would silently merge under by-name newest-wins.
+    clash = (
+        supabase.table("workflow_trajectories").select("id")
+        .eq("workflow_id", workflow_id).eq("name", new_name).limit(1).execute()
+    )
+    if clash.data:
+        raise HTTPException(
+            status_code=409,
+            detail=f'Eine Bewegung mit dem Namen „{new_name}" gibt es schon — bitte einen anderen Namen wählen.',
+        )
+    updated = (
+        supabase.table("workflow_trajectories").update({"name": new_name})
+        .eq("workflow_id", workflow_id).eq("owner_user_id", user.id)
+        .eq("name", old_name).execute()
+    )
+    renamed = next((r for r in (updated.data or []) if r.get("id") == trajectory_id), None)
+    if renamed is None:
+        raise HTTPException(status_code=404, detail="Bewegung nicht gefunden")
+    return TrajectoryResponse(**{**renamed, "samples": None})
 
 
 @router.delete("/{workflow_id}/trajectories/{trajectory_id}")

@@ -320,14 +320,22 @@ services:
       - EDUBOTICS_WHILE_STALL_PASSES=${EDUBOTICS_WHILE_STALL_PASSES:-3}
       - EDUBOTICS_WHILE_MAX_SECONDS=${EDUBOTICS_WHILE_MAX_SECONDS:-120}
       - EDUBOTICS_WHILE_SETTLE_S=${EDUBOTICS_WHILE_SETTLE_S:-0.2}
-      # Recycled-object reclaim: a claimed/skipped object that turns up ≥ this
-      # many metres from where the robot LEFT it — or back at the spot it was
-      # picked from, after having been out of sight — was moved by a person, so
-      # it is grabbed again. Both proofs act on a SIGHTING, never on an absence,
-      # so a missed AprilTag look can never re-grasp a placed object. `0`
-      # disables the reclaim entirely (one-variable rollback).
+      # Recycled-object reclaim: how far (metres) a SKIPPED object must have
+      # moved from where it lay when the robot gave up on it before a person is
+      # held responsible and it is tried again. `0` disables the reclaim
+      # entirely, both halves (the one-variable rollback).
       # Read by workflow/handlers/perception_blocks.py.
       - EDUBOTICS_RECLAIM_MOVE_M=${EDUBOTICS_RECLAIM_MOVE_M:-0.02}
+      # …and how far it must lie from the point the robot COMMANDED its RELEASE
+      # („ablegen bei" drives there before it opens the jaws). Its own, larger
+      # number because the jaws open a full EDUBOTICS_DROP_HEIGHT_M above the
+      # surface and the object settles some centimetres away — a threshold below
+      # that settle radius makes an untouched object read as "moved" and the arm
+      # shuffles it forever. A bound derived from the drop height, not a rig
+      # measurement. Non-positive → falls back to EDUBOTICS_RECLAIM_MOVE_M (which
+      # is the single OFF switch for both halves).
+      # Read by workflow/handlers/perception_blocks.py.
+      - EDUBOTICS_RELEASE_MOVE_M=${EDUBOTICS_RELEASE_MOVE_M:-0.05}
       # „Wenn <Typ> gesehen": how long a tag must be continuously unseen before
       # the object hat believes it is really gone. Read by
       # workflow/handlers/perception_blocks.py (workflow_manager.py imports it

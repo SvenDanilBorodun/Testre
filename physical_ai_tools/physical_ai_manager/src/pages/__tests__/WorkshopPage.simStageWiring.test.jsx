@@ -18,9 +18,11 @@
 // Debug toggle drives SimStage's debug strip (debugOpen).
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import toast from 'react-hot-toast';
 import WorkshopPage from '../WorkshopPage';
+import { DE } from '../../components/Workshop/blocks/messages_de';
 
 // ── react-redux: selector-aware stub over a mutable module-level state. ──
 let mockState;
@@ -42,10 +44,63 @@ vi.mock('../../components/Workshop/SimScene', () => ({
   },
 }));
 
-// ── BlocklyWorkspace: inert stub (the editor is not under test). ──
+// ── BlocklyWorkspace: hands the page a FAKE workspace through the real
+//    onWorkspaceReady callback (the destination store is keyed by it) and
+//    exposes the page's Sammlung provider so a test can dispatch a card action. ──
+const mockBlockly = vi.hoisted(() => ({ workspace: null, provider: null }));
 vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
   __esModule: true,
-  default: () => <div data-testid="blockly-workspace" />,
+  // Named + capitalized so react-hooks/rules-of-hooks recognizes it as a component.
+  default: function MockBlocklyWorkspace({ onWorkspaceReady, sammlungProvider }) {
+    mockBlockly.provider = sammlungProvider || null;
+    React.useEffect(() => {
+      if (onWorkspaceReady && mockBlockly.workspace) onWorkspaceReady(mockBlockly.workspace);
+    }, [onWorkspaceReady]);
+    return <div data-testid="blockly-workspace" />;
+  },
+}));
+
+// ── The document's destination store: spies over a mutable entry list, with
+//    the synchronous subscribe the page's marker state listens to. ──
+const mockStore = vi.hoisted(() => {
+  const store = { entries: [], listeners: [] };
+  store.getEntries = vi.fn(() => store.entries);
+  store.add = vi.fn();
+  store.rename = vi.fn();
+  store.subscribe = vi.fn((fn) => {
+    store.listeners.push(fn);
+    return () => { store.listeners = store.listeners.filter((l) => l !== fn); };
+  });
+  return store;
+});
+vi.mock('../../components/Workshop/sammlung/destinationStore', () => ({
+  __esModule: true,
+  MAX_DESTINATION_ENTRIES: 64,
+  getDestinationStore: () => mockStore,
+  nextAutoName: () => 'Ziel 1',
+  takenDestinationNames: () => ['Ablage'],
+}));
+const mockDrawerProps = vi.hoisted(() => ({ current: null }));
+vi.mock('../../components/Workshop/sammlung/SammlungDrawer', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockDrawerProps.current = props;
+    return <div data-testid="sammlung-drawer" />;
+  },
+}));
+const mockRefresh = vi.hoisted(() => vi.fn());
+vi.mock('../../components/Workshop/sammlung/referenceValidators', async (importOriginal) => ({
+  ...(await importOriginal()),
+  refreshAssetReferenceWarnings: mockRefresh,
+}));
+// The „3D-Ansicht" dock tab mounts the lazy UrdfTwin: capture its props.
+const mockTwin = vi.hoisted(() => vi.fn());
+vi.mock('../../components/UrdfTwin', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockTwin(props);
+    return <div data-testid="urdf-twin" />;
+  },
 }));
 
 // ── RunControls: exposes the Debug toggle so the test can drive simDebugOpen
@@ -66,7 +121,15 @@ vi.mock('../../components/Workshop/RunControls', () => ({
 
 // ── Remaining children: import-safe no-op stubs (mirrors the simToggle test —
 //    a vi.mock factory is hoisted above imports, so no shared helper). ──
-vi.mock('../../components/Workshop/RightDock', () => ({ __esModule: true, default: () => <div data-testid="right-dock" /> }));
+// RightDock renders ONLY the „3D-Ansicht" tab, so its twin's props are observable.
+vi.mock('../../components/Workshop/RightDock', () => ({
+  __esModule: true,
+  default: ({ tabs }) => (
+    <div data-testid="right-dock">
+      {(tabs || []).filter((t) => t.id === '3d').map((t) => <div key={t.id}>{t.render()}</div>)}
+    </div>
+  ),
+}));
 vi.mock('../../components/Workshop/CalibrationWizard', () => ({ __esModule: true, default: () => <div data-testid="calib-wizard" /> }));
 vi.mock('../../components/Workshop/LeaderToggle', () => ({ __esModule: true, default: () => <div data-testid="leader-toggle" /> }));
 vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
@@ -76,8 +139,18 @@ vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, defau
 vi.mock('../../components/Workshop/GalleryTab', () => ({ __esModule: true, default: () => <div data-testid="gallery-tab" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
 vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule: true, default: () => <div data-testid="version-history" /> }));
+// Vormachen: TeachHost is a stub (the overlay has its own tests, and its
+// leader-mode child would read `s.ros`, which these mock states lack), and the
+// bridge probe is stubbed so no page test fetches localhost:8769.
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+const mockBridge = vi.hoisted(() => ({
+  current: { available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false },
+}));
+vi.mock('../../hooks/useRsBridgeStatus', () => ({
+  __esModule: true,
+  default: () => mockBridge.current,
+}));
 vi.mock('../../components/Workshop/JogPanel', () => ({ __esModule: true, default: () => <div data-testid="jog-panel" /> }));
-vi.mock('../../components/Workshop/RecordPanel', () => ({ __esModule: true, default: () => <div data-testid="record-panel" /> }));
 
 // ── Blockly + the block-registration modules (they pull in blockly/core). ──
 vi.mock('blockly/core', () => ({
@@ -166,15 +239,31 @@ function baseState() {
       debuggerWarnings: [],
     },
     auth: { session: { access_token: 'jwt', user: { id: 'u1' } } },
-    tasks: { heartbeatStatus: 'connected' },
+    tasks: { heartbeatStatus: 'connected', taskStatus: { robotType: 'omx_f' } },
   };
+}
+
+function fakeWorkspace() {
+  return { addChangeListener: vi.fn(), getBlockById: vi.fn(() => null), centerOnBlock: vi.fn() };
 }
 
 beforeEach(() => {
   mockState = baseState();
+  mockBlockly.workspace = fakeWorkspace();
+  mockBlockly.provider = null;
+  mockStore.entries = [];
+  mockStore.listeners = [];
+  mockStore.add.mockReset();
+  mockStore.add.mockImplementation((input) => ({ ok: true, entry: { id: 'd_00000009', ...input } }));
+  mockTwin.mockClear();
+  toast.success.mockClear();
+  toast.error.mockClear();
   mockDispatch.mockClear();
   mockSimScene.mockClear();
   mockRos.getObjectCatalog.mockClear();
+  mockDrawerProps.current = null;
+  mockRefresh.mockClear();
+  mockBridge.current = { available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false };
 });
 
 const lastSimSceneProps = () =>
@@ -234,5 +323,268 @@ describe('WorkshopPage — SimStage wiring (real SimStage, mocked SimScene)', ()
     // Toggle again → the strip closes.
     await userEvent.click(screen.getByTestId('run-controls-debug'));
     await waitFor(() => expect(screen.queryByTestId('debug-panel')).toBeNull());
+  });
+});
+
+describe('WorkshopPage — Ziel/Position markers and „Ziel setzen"', () => {
+  const PIN = { id: 'd_00000001', name: 'Ablage', kind: 'pin', x: 0.18, y: -0.06, z: 0.012, source: 'camera' };
+  const POSE = { id: 'd_00000002', name: 'Oben', kind: 'pose', x: 0.14, y: 0.1, z: 0.12, source: 'capture' };
+
+  async function enterSim() {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-scene');
+  }
+
+  test('SimStage receives the store as markers (pins on the virtual table) and onCreateDestination', async () => {
+    mockStore.entries = [PIN, POSE];
+    await enterSim();
+    await waitFor(() => expect(lastSimSceneProps().markers).toHaveLength(2));
+    const props = lastSimSceneProps();
+    expect(props.markers).toEqual([
+      { id: PIN.id, label: 'Ablage', kind: 'pin', x: 0.18, y: -0.06, z: 0, highlighted: false },
+      { id: POSE.id, label: 'Oben', kind: 'pose', x: 0.14, y: 0.1, z: 0.12, highlighted: false },
+    ]);
+    expect(typeof props.onCreateDestination).toBe('function');
+    expect(mockStore.subscribe).toHaveBeenCalled();
+  });
+
+  test('onCreateDestination adds a sim pin at z 0 through the store and names it', async () => {
+    await enterSim();
+    act(() => { lastSimSceneProps().onCreateDestination({ x: 0.135, y: 0 }); });
+    expect(mockStore.add).toHaveBeenCalledTimes(1);
+    expect(mockStore.add.mock.calls[0][0]).toEqual({
+      name: 'Ziel 1', kind: 'pin', source: 'sim', x: 0.135, y: 0, z: 0, robot_type: 'omx_f',
+    });
+    expect(toast.success).toHaveBeenCalledWith('Ziel „Ziel 1" auf den Sim-Tisch gesetzt.');
+  });
+
+  test('a full store refuses the Ziel with the German „full" sentence', async () => {
+    mockStore.entries = Array.from({ length: 64 }, (_, i) => ({ ...PIN, id: `d_${i}`, name: `Ziel ${i + 1}` }));
+    await enterSim();
+    act(() => { lastSimSceneProps().onCreateDestination({ x: 0.1, y: 0 }); });
+    expect(mockStore.add).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith('In diesem Workflow gibt es schon 64 Ziele und Positionen.');
+  });
+
+  test('a store change reaches the markers without a re-render from outside', async () => {
+    await enterSim();
+    await waitFor(() => expect(mockStore.listeners.length).toBeGreaterThan(0));
+    act(() => { mockStore.listeners.forEach((fn) => fn([PIN])); });
+    await waitFor(() => expect(lastSimSceneProps().markers.map((m) => m.id)).toEqual([PIN.id]));
+  });
+
+  test('the „3D-Ansicht" twin gets the same markers, with the real-rig pin label', async () => {
+    mockStore.entries = [PIN];
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await waitFor(() => expect(mockTwin).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(mockTwin.mock.calls[mockTwin.mock.calls.length - 1][0].markers).toEqual([
+        { id: PIN.id, label: 'Ablage (z ≈)', kind: 'pin', x: 0.18, y: -0.06, z: 0.012, highlighted: false },
+      ]);
+    });
+  });
+
+  test('the Sammlung highlight marks its marker; a card hover dispatches setHighlight', async () => {
+    mockStore.entries = [PIN, POSE];
+    mockState.studioAssets = { highlight: { kind: 'pose', id: POSE.id } };
+    await enterSim();
+    await waitFor(() => expect(lastSimSceneProps().markers).toHaveLength(2));
+    expect(lastSimSceneProps().markers.map((m) => m.highlighted)).toEqual([false, true]);
+    mockDispatch.mockClear();
+    act(() => { mockBlockly.provider.dispatchAction({ type: 'highlight', asset: { kind: 'pin', id: PIN.id } }); });
+    expect(mockDispatch).toHaveBeenCalledWith({
+      type: 'studioAssets/setHighlight', payload: { kind: 'pin', id: PIN.id },
+    });
+    act(() => { mockBlockly.provider.dispatchAction({ type: 'highlight', asset: null }); });
+    expect(mockDispatch).toHaveBeenLastCalledWith({ type: 'studioAssets/setHighlight', payload: null });
+  });
+
+  test('a highlighted Position with fitting joints draws its ghost on both twins; anything else draws none', async () => {
+    const names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
+    const GHOSTED = { ...POSE, robot_type: 'omx_f', joints: [0, -0.9, 1.1, 0.3, 0, 0.8], joint_names: names };
+    mockStore.entries = [PIN, GHOSTED];
+    mockState.studioAssets = { highlight: { kind: 'pose', id: POSE.id } };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const lastTwin = () => mockTwin.mock.calls[mockTwin.mock.calls.length - 1][0];
+    await waitFor(() => expect(lastTwin().ghostJoints).toEqual({ names, positions: GHOSTED.joints }));
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-scene');
+    expect(lastSimSceneProps().ghostJoints).toEqual({ names, positions: GHOSTED.joints });
+    // Another arm's snapshot (or an older server's joint-less Position) draws nothing.
+    act(() => { mockStore.listeners.forEach((fn) => fn([PIN, { ...GHOSTED, robot_type: 'edu6_studio' }])); });
+    await waitFor(() => expect(lastSimSceneProps().ghostJoints).toBeNull());
+    act(() => { mockStore.listeners.forEach((fn) => fn([PIN, POSE])); });
+    await waitFor(() => expect(lastSimSceneProps().ghostJoints).toBeNull());
+  });
+
+  test('a highlighted Ziel never draws a ghost', async () => {
+    const names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
+    mockStore.entries = [{ ...PIN, joints: [0, 0, 0, 0, 0, 0.8], joint_names: names }];
+    mockState.studioAssets = { highlight: { kind: 'pin', id: PIN.id } };
+    await enterSim();
+    await waitFor(() => expect(lastSimSceneProps().markers).toHaveLength(1));
+    expect(lastSimSceneProps().ghostJoints).toBeNull();
+  });
+
+  test('a Ziel focused in the drawer highlights its marker', async () => {
+    mockState.studioAssets = { drawer: { open: true, tab: 'ziele', focusId: PIN.id, previewTempo: 1 } };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await waitFor(() => expect(mockDispatch).toHaveBeenCalledWith({
+      type: 'studioAssets/setHighlight', payload: { kind: 'pin', id: PIN.id },
+    }));
+  });
+
+  test('the provider offers pinSim; from the editor it enters the simulator WITHOUT the trail and asks for „Ziel setzen"', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await waitFor(() => expect(mockBlockly.provider).not.toBeNull());
+    expect(mockBlockly.provider.getSnapshot().capabilities.pinSim).toBe(true);
+    expect(screen.queryByTestId('sim-scene')).toBeNull();
+    act(() => { mockBlockly.provider.dispatchAction({ type: 'pinSim' }); });
+    expect(await screen.findByTestId('sim-scene')).toBeInTheDocument();
+    // ensureSimMode({ showPath: false }) never turns the trail on.
+    expect(lastSimSceneProps().showPath).toBe(false);
+    await waitFor(
+      () => expect(lastSimSceneProps().requestedMode).toEqual({ mode: 'ziel', token: expect.any(Number) }),
+      { timeout: 2000 },
+    );
+    expect(lastSimSceneProps().showPath).toBe(false);
+    expect(screen.getByRole('button', { name: 'Bahn anzeigen' })).toBeInTheDocument();
+  });
+});
+
+describe('WorkshopPage — variable point markers', () => {
+  const POINT = { x: 0.15, y: 0.02, z: 0.04 };
+
+  test('point-shaped variables reach both twins as violet markers; other values do not', async () => {
+    mockState.workshop.variables = {
+      Punkt: { value: POINT, ts: 200 },
+      Zahl: { value: 7, ts: 300 },
+      Liste: { value: [0.1, 0.2, 0.3], ts: 400 },
+    };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const lastTwin = () => mockTwin.mock.calls[mockTwin.mock.calls.length - 1][0];
+    await waitFor(() => expect(lastTwin().markers).toEqual([
+      { id: 'var:Punkt', label: 'Punkt', kind: 'variable', ...POINT, highlighted: false },
+    ]));
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-scene');
+    expect(lastSimSceneProps().markers.map((m) => m.id)).toEqual(['var:Punkt']);
+  });
+
+  test('the provider enables variable previews; ▶ on a variable opens the simulator WITHOUT the trail and highlights its marker', async () => {
+    mockState.workshop.variables = { Punkt: { value: POINT, ts: 200 } };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await waitFor(() => expect(mockBlockly.provider).not.toBeNull());
+    expect(mockBlockly.provider.getSnapshot().capabilities.previewVariables).toBe(true);
+    mockDispatch.mockClear();
+    act(() => {
+      mockBlockly.provider.dispatchAction({ type: 'preview', asset: { kind: 'variable', id: 'v1', name: 'Punkt' } });
+    });
+    expect(await screen.findByTestId('sim-scene')).toBeInTheDocument();
+    await waitFor(
+      () => expect(mockDispatch).toHaveBeenCalledWith({
+        type: 'studioAssets/setHighlight', payload: { kind: 'variable', id: 'var:Punkt' },
+      }),
+      { timeout: 2000 },
+    );
+    expect(lastSimSceneProps().showPath).toBe(false);
+    // Not a run: no preview bookkeeping, no refusal toast.
+    expect(mockDispatch.mock.calls.map(([a]) => a.type).filter((t) => /preview/i.test(t))).toEqual([]);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  test('a refused sim entry highlights no variable marker', async () => {
+    mockState.workshop.variables = { Punkt: { value: POINT, ts: 200 } };
+    mockState.workshop.activeTutorialId = 'tut-1';
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await waitFor(() => expect(mockBlockly.provider).not.toBeNull());
+    mockDispatch.mockClear();
+    await act(async () => {
+      mockBlockly.provider.dispatchAction({ type: 'preview', asset: { kind: 'variable', id: 'v1', name: 'Punkt' } });
+    });
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(screen.queryByTestId('sim-scene')).toBeNull();
+    expect(mockDispatch.mock.calls.map(([a]) => a.type)).not.toContain('studioAssets/setHighlight');
+  });
+
+  test('„Im Simulator zeigen" in the drawer opens the stage WITHOUT a run and highlights the marker; closing the drawer retires it', async () => {
+    mockState.workshop.variables = { Punkt: { value: POINT, ts: 200 } };
+    mockState.studioAssets = { drawer: { open: true, tab: 'variablen', focusId: 'v1', previewTempo: 1 } };
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('sammlung-drawer');
+    mockDispatch.mockClear();
+    await act(async () => {
+      await mockDrawerProps.current.onPreview({ kind: 'variable', id: 'v1', name: 'Punkt' });
+    });
+    expect(await screen.findByTestId('sim-scene')).toBeInTheDocument();
+    expect(lastSimSceneProps().showPath).toBe(false);
+    expect(mockDispatch).toHaveBeenCalledWith({
+      type: 'studioAssets/setHighlight', payload: { kind: 'variable', id: 'var:Punkt' },
+    });
+    expect(mockDispatch.mock.calls.map(([a]) => a.type).filter((t) => /preview/i.test(t))).toEqual([]);
+
+    mockDispatch.mockClear();
+    mockState.studioAssets = { drawer: { open: false, tab: 'variablen', focusId: 'v1', previewTempo: 1 } };
+    rerender(<WorkshopPage isActive />);
+    await waitFor(() => expect(mockDispatch).toHaveBeenCalledWith({ type: 'studioAssets/setHighlight', payload: null }));
+  });
+});
+
+describe('WorkshopPage — Sammlung actions wired on the page', () => {
+  const PIN = { id: 'd_00000001', name: 'Ablage', kind: 'pin', x: 0.18, y: -0.06, z: 0.012, source: 'camera' };
+
+  test('a card body „jumpToBlock" centres the editor on that block', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await waitFor(() => expect(mockBlockly.provider).not.toBeNull());
+    act(() => { mockBlockly.provider.dispatchAction({ type: 'jumpToBlock', blockId: 'b7' }); });
+    expect(mockBlockly.workspace.centerOnBlock).toHaveBeenCalledWith('b7', true);
+  });
+
+  test('a change of the debugger warnings re-applies the keyed reference warnings (forced)', async () => {
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await waitFor(() => expect(mockRefresh).toHaveBeenCalledWith(mockBlockly.workspace, { force: true }));
+    mockRefresh.mockClear();
+    mockState.workshop.debuggerWarnings = [{ block_id: 'b1', message: 'x' }];
+    rerender(<WorkshopPage isActive />);
+    await waitFor(() => expect(mockRefresh).toHaveBeenCalledWith(mockBlockly.workspace, { force: true }));
+  });
+
+  test('a live leader (bridge) refuses a ▶ preview in German and starts nothing', async () => {
+    mockBridge.current = { available: true, followerOnly: false, hasLeader: true, busy: false, leaderOn: true };
+    mockStore.entries = [PIN];
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await waitFor(() => expect(mockBlockly.provider).not.toBeNull());
+    mockDispatch.mockClear();
+    await act(async () => {
+      mockBlockly.provider.dispatchAction({ type: 'preview', asset: { kind: 'pin', id: PIN.id, name: PIN.name } });
+    });
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(DE.PREVIEW_BLOCK_LEADER));
+    expect(screen.queryByTestId('sim-scene')).toBeNull();
+    expect(mockDispatch.mock.calls.map(([a]) => a.type)).not.toContain('studioAssets/previewStarted');
+  });
+
+  test('when a card hover ends, the drawer\'s focused Ziel stays highlighted', async () => {
+    mockStore.entries = [PIN];
+    mockState.studioAssets = { drawer: { open: true, tab: 'ziele', focusId: PIN.id, previewTempo: 1 } };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await waitFor(() => expect(mockBlockly.provider).not.toBeNull());
+    act(() => { mockBlockly.provider.dispatchAction({ type: 'highlight', asset: { kind: 'pose', id: 'd_00000002' } }); });
+    act(() => { mockBlockly.provider.dispatchAction({ type: 'highlight', asset: null }); });
+    expect(mockDispatch).toHaveBeenLastCalledWith({
+      type: 'studioAssets/setHighlight', payload: { kind: 'pin', id: PIN.id },
+    });
   });
 });

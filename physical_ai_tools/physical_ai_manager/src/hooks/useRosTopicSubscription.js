@@ -1183,6 +1183,10 @@ export function useRosTopicSubscription() {
           progress: msg.progress,
           error: msg.error || '',
           log_message: tokenResult.intercepted ? '' : msg.log_message,
+          // Which run this status belongs to. workshopSlice ignores it; the
+          // studioAssets preview finalizes only on its OWN id, so a previous
+          // run's late terminal can never record a preview's result.
+          workflow_id: msg.workflow_id || '',
         }));
         if (msg.phase === 'finished' || msg.phase === 'stopped' || msg.phase === 'error') {
           dispatch(setRunState(msg.phase));

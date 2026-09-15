@@ -34,6 +34,22 @@ export const DE = {
   CATEGORY_AUSGABE: 'Ausgabe',
   CATEGORY_ZAEHLER: 'Zähler',
   CATEGORY_VORSCHLAEGE: 'Vorschläge',
+  // Shown in „Vorschläge" before the student has used any block. Replaces the
+  // English placeholder @blockly/suggested-blocks hardcodes (BlocklyWorkspace).
+  SUGGESTED_EMPTY: 'Noch keine Blöcke benutzt — hier erscheinen die, die du oft verwendest.',
+
+  // @blockly/workspace-backpack ships its five context-menu strings in ENGLISH
+  // (`Blockly.Msg.COPY_TO_BACKPACK` …) and Blockly's German catalog defines
+  // none of them, so the editor would show „Copy to Backpack" in an otherwise
+  // German menu. `BlocklyWorkspace::germanizeBackpackMenu` assigns these onto
+  // `Blockly.Msg` after the plugin module loads and before any Backpack is
+  // constructed — two of the four menu entries capture their text at
+  // REGISTRATION time, so a later assignment would come too late.
+  BACKPACK_COPY: 'In den Rucksack kopieren',
+  BACKPACK_COPY_ALL: 'Alle Blöcke in den Rucksack kopieren',
+  BACKPACK_PASTE_ALL: 'Alle Blöcke aus dem Rucksack einfügen',
+  BACKPACK_REMOVE: 'Aus dem Rucksack entfernen',
+  BACKPACK_EMPTY: 'Rucksack leeren',
 
   // Motion blocks
   HOME: 'Heimposition',
@@ -193,7 +209,6 @@ export const DE = {
   // that replaced the tall stacked right column. Up to two panels open at once.
   DOCK_TAB_CAMERA: 'Kamera',
   DOCK_TAB_CONTROL: 'Steuern',
-  DOCK_TAB_RECORD: 'Aufnehmen',
   DOCK_TAB_3D: '3D-Ansicht',
   DOCK_TAB_TUTORIAL: 'Lernpfad',
   DOCK_TAB_DEBUG: 'Debug',
@@ -267,4 +282,319 @@ export const DE = {
   GALLERY_BY: 'von',
   GALLERY_CLONE: 'Klonen',
   GALLERY_EMPTY: 'Noch keine Workflows in der Galerie.',
+
+  // Sammlung — Ziele and Positionen held in the workflow document
+  // (sammlung/destinationStore.js). `%1` is filled by formatDe below.
+  ERR_NAME_TAKEN: 'Der Name „%1" ist schon vergeben.',
+  ERR_STORE_FULL: 'In diesem Workflow gibt es schon 64 Ziele und Positionen.',
+  ERR_COORDINATES: 'Diese Stelle hat keine gültigen Koordinaten.',
+  // rename/remove of an entry that is already gone (an undo in between).
+  ERR_DESTINATION_MISSING: 'Diesen Eintrag gibt es nicht mehr.',
+
+  // Camera click → Ziel (CameraFeedOverlay + WorkshopPage). No prompt: the
+  // point gets an automatic name and an inline rename field at the click.
+  CAMERA_ZIEL_CREATED: 'Ziel „%1" gesetzt.',
+  CAMERA_PIN_WRITTEN: 'Koordinaten in Block „%1" geschrieben.',
+  CAMERA_RENAME_ARIA: 'Ziel umbenennen',
+  CAMERA_RENAME_TITLE: 'Enter speichert den Namen, Esc behält ihn.',
+  TEACH_AUTO_NAME_ZIEL: 'Ziel %1',
+
+  // Simulator previews (utils/simPreview.js::previewMessageDe). The server's
+  // lead-in refusal advises lifting the arm — impossible in a simulator.
+  PREVIEW_LEAD_IN_BELOW_TABLE:
+    'Die Aufnahme beginnt unter dem Tisch des Simulators — im Simulator kann sie nicht abgespielt werden.',
+  // Card ▶ aria-label (sammlung/AssetCardInflater.js) and the drawer's preview
+  // section heading / Ziel button (sammlung/DrawerRecording.jsx, DrawerPlace.jsx).
+  PREVIEW_START: 'Im Simulator ansehen',
+  // hooks/useSimPreview.js + RunControls.jsx (the preview in flight).
+  PREVIEW_PLAY: '▶ Abspielen',
+  PREVIEW_RUNNING: 'Vorschau läuft: %1',
+  PREVIEW_DONE: 'Vorschau beendet.',
+  PREVIEW_BANNER:
+    'Vorschau spielt „%1" auf dem virtuellen Roboter ab. Dein Programm und deine Szene bleiben unverändert.',
+  PREVIEW_LOG_RECORDING: '— Vorschau: Bewegung „%1" —',
+  PREVIEW_LOG_PLACE: '— Vorschau: Ziel „%1" —',
+  PREVIEW_LOG_POSE: '— Vorschau: Position „%1" —',
+  PREVIEW_TOO_BIG: 'Diese Bewegung ist zu groß für eine Vorschau.',
+  PREVIEW_FAILED: 'Vorschau fehlgeschlagen: %1',
+  // utils/simPreview.js::PREVIEW_BLOCK_TITLES_DE — why ▶ is refused client-side.
+  PREVIEW_BLOCK_OFFLINE: 'Keine Verbindung zum Roboter-Dienst.',
+  PREVIEW_BLOCK_RUNNING: 'Ein Programm läuft gerade – erst auf „Stopp" drücken.',
+  PREVIEW_BLOCK_TEACH: 'Erst Vormachen beenden.',
+  PREVIEW_BLOCK_HANDGUIDE: 'Der Arm ist freigeschaltet – bitte zuerst festsetzen.',
+  PREVIEW_BLOCK_TUTORIAL: 'Während eines Lernpfads kann der Simulator nicht geöffnet werden.',
+  PREVIEW_BLOCK_LEADER:
+    'Solange der Leader-Arm eingeschaltet ist, gibt es keine Vorschau. Bitte zuerst oben „Leader abschalten".',
+  // Before the control bridge has answered once (useRsBridgeStatus `probed`):
+  // also the disabled ▶'s title on a card and in the drawer.
+  PREVIEW_BLOCK_LEADER_PENDING: 'Roboterstatus wird geprüft …',
+  PREVIEW_BLOCK_LEADER_UNKNOWN:
+    'Gerade ist nicht klar, ob der Leader-Arm eingeschaltet ist – die Steuerung antwortet nicht. Bitte gleich noch einmal versuchen.',
+  PREVIEW_BLOCK_OTHER_ROBOT:
+    'Diese Bewegung wurde mit einem anderen Robotertyp aufgenommen und kann hier nicht abgespielt werden.',
+  PREVIEW_BLOCK_UNSAVED: 'Bitte zuerst den Workflow speichern.',
+
+  // Simulator „Ziel setzen" mode (SimScene.jsx) + the twin marker labels
+  // (sammlung/markers.js). A real-rig pin marker says its height is approximate:
+  // a pin re-asks the measured table plane on every run.
+  SIM_MODE_ZIEL: 'Ziel setzen',
+  SIM_ZIEL_HINT: 'Tippe auf den Tisch — dort entsteht ein Ziel.',
+  SIM_ZIEL_CREATED: 'Ziel „%1" auf den Sim-Tisch gesetzt.',
+  MARKER_PIN_REAL_SUFFIX: '(z ≈)',
+
+  // Sammlung toolbox groups (blocks/toolbox.js + sammlung/toolboxCategories.js).
+  CATEGORY_AUFNAHMEN: 'Aufnahmen',
+  CATEGORY_POSITIONEN: 'Positionen',
+  FLY_TEACH_RECORDING: '✋ Bewegung vormachen',
+  FLY_TEACH_POSE: '✋ Position vormachen',
+  FLY_TEACH_ZIEL: '✋ Ziel vormachen',
+  FLY_MANAGE: 'Alle verwalten …',
+  FLY_PIN_CAMERA: 'Ziel in der Kamera setzen',
+  FLY_PIN_SIM: 'Ziel auf den Sim-Tisch setzen',
+  FLY_PIN_CAMERA_HINT: 'Klicke ins Kamerabild, um ein Ziel zu setzen.',
+  FLY_SECTION_MISSING: 'Fehlt im Programm',
+  FLY_SECTION_PROGRAM: 'Im Programm gesetzt',
+  FLY_SECTION_YOURS: 'Deine Ziele',
+  FLY_RECORDINGS_COUNT: '%1 von 16',
+  FLY_RECORDINGS_LOADING: 'Aufnahmen werden geladen …',
+  FLY_RECORDINGS_ERROR: 'Aufnahmen konnten nicht geladen werden.',
+  FLY_RECORDINGS_EMPTY: 'Noch keine Aufnahmen.',
+  FLY_RECORDINGS_TEACHER: 'Aufnahmen gehören zu einem Schüler-Workflow.',
+  FLY_PLACES_EMPTY: 'Noch keine Ziele in deiner Sammlung.',
+  FLY_POSES_EMPTY: 'Noch keine Positionen.',
+  FLY_COUNT_VARIABLEN_ONE: '1 Variable',
+  FLY_COUNT_VARIABLEN: '%1 Variablen',
+  FLY_COUNT_ZIELE_ONE: '1 Ziel',
+  FLY_COUNT_ZIELE: '%1 Ziele',
+  FLY_COUNT_POSITIONEN_ONE: '1 Position',
+  FLY_COUNT_POSITIONEN: '%1 Positionen',
+
+  // Sammlung cards: second line, chips, robot labels (sammlung/assetIndex.js,
+  // sammlung/format.js).
+  CARD_MANAGE: 'Verwalten',
+  CARD_RECORDING_META: '%1 s · %2 Punkte',
+  CARD_PLACE_META: 'x %1 · y %2 mm · %3',
+  CARD_POSE_META: 'z %1 mm · %2',
+  ROBOT_SHORT_OMX: 'OMX',
+  ROBOT_SHORT_EDU6: '6-Achs',
+  ROBOT_SHORT_EDU1: 'Edu:1',
+  ROBOT_LABEL_OMX: 'OpenMANIPULATOR-X',
+  ROBOT_LABEL_EDU6: 'EduBotics 6-Achs',
+  ROBOT_LABEL_EDU1: 'Edu:1',
+  CARD_SOURCE_CAMERA: 'Kamera',
+  CARD_SOURCE_SIM: 'Sim-Tisch',
+  CARD_SOURCE_TOUCH: 'am Tisch',
+  CARD_SOURCE_CAPTURE: 'gemessen',
+  CARD_PROGRAM_PIN_META: 'im Programm · x %1 · y %2 mm',
+  CARD_VARIABLE_NO_VALUE: 'noch kein Wert',
+  CARD_VARIABLE_VALUE: '%1 · vor %2 s',
+  CHIP_USED: '%1× benutzt',
+  CHIP_UNUSED: 'nicht benutzt',
+  CHIP_VERSIONS: '%1 Versionen',
+  CHIP_MISSING: 'fehlt',
+  CHIP_SEARCHED_ONE_RECORDING: '1 Block sucht diese Aufnahme',
+  CHIP_SEARCHED_MANY_RECORDING: '%1 Blöcke suchen diese Aufnahme',
+  CHIP_OTHER_ROBOT: 'anderer Roboter',
+  CHIP_OVERRIDDEN: 'im Programm überschrieben',
+  CHIP_SIM_REFUSED: 'im Simulator abgelehnt',
+  CHIP_UNREACHABLE: 'nicht erreichbar',
+
+  // Keyed canvas warnings for names the program uses but the workflow does not
+  // have (sammlung/referenceValidators.js).
+  WARN_MISSING_RECORDING:
+    'Eine Aufnahme „%1" gibt es in diesem Workflow nicht. Nimm sie auf oder wähle eine vorhandene.',
+  WARN_MISSING_DESTINATION:
+    '„%1" ist nicht in deiner Sammlung — lege das Ziel neu an oder wähle ein vorhandenes.',
+
+  // Sammlung drawer (sammlung/SammlungDrawer.jsx and its detail views).
+  SAMMLUNG_TITLE: 'Sammlung',
+  DRAWER_CLOSE: 'Sammlung schließen',
+  DRAWER_NAME: 'Name',
+  DRAWER_RENAME: 'Umbenennen',
+  DRAWER_SAVE_NAME: 'Speichern',
+  DRAWER_CANCEL: 'Abbrechen',
+  DRAWER_DURATION: 'Dauer',
+  DRAWER_DURATION_VALUE: '%1 s · %2 Punkte · %3 Hz',
+  DRAWER_ROBOT: 'Roboter',
+  DRAWER_ROBOT_LEGACY: 'OMX (alte Aufnahme)',
+  DRAWER_RECORDED_AT: 'Aufgenommen',
+  DRAWER_COORDS: 'Koordinaten',
+  DRAWER_COORDS_VALUE: 'x %1 · y %2 · z %3 mm',
+  DRAWER_SOURCE: 'Herkunft',
+  // A Position's captured gripper (S3 joints); the value is TEACH_GRIPPER_OPEN/_CLOSED.
+  DRAWER_STATE: 'Zustand',
+  DRAWER_USED_IN: 'Benutzt in',
+  DRAWER_USED_NOWHERE_RECORDING: 'Nirgends — ziehe den Block aus der Gruppe „Aufnahmen" ins Programm.',
+  DRAWER_USED_NOWHERE_PLACE: 'Nirgends — ziehe den Block aus der Gruppe „Ziele" ins Programm.',
+  DRAWER_USED_NOWHERE_POSE: 'Nirgends — ziehe den Block aus der Gruppe „Positionen" ins Programm.',
+  DRAWER_USED_NOWHERE_VARIABLE: 'Nirgends — ziehe den Block aus der Gruppe „Variablen" ins Programm.',
+  DRAWER_DISABLED_SUFFIX: '(ausgeschaltet)',
+  DRAWER_OLDER_VERSIONS: 'Ältere Versionen',
+  DRAWER_VERSION_NOT_PLAYED: 'wird nicht abgespielt',
+  DRAWER_DELETE_VERSION: 'Löschen',
+  DRAWER_DELETE_RECORDING: 'Aufnahme löschen',
+  DRAWER_DELETE_PLACE: 'Ziel löschen',
+  DRAWER_DELETE_POSE: 'Position löschen',
+  DRAWER_DELETE_VARIABLE: 'Variable löschen',
+  DRAWER_EMPTY_TAB: 'Hier ist noch nichts.',
+  DRAWER_LAST_VALUE: 'Letzter Wert',
+  DRAWER_LAST_VALUES: 'Zuletzt',
+  DRAWER_NO_VALUE: 'Noch kein Wert — starte das Programm.',
+  DRAWER_SHOW_POINT: 'Im Simulator zeigen',
+  CONFIRM_DELETE_USED:
+    '„%1" wird in %2 Blöcken benutzt. Trotzdem löschen? Die Blöcke bleiben stehen und zeigen danach eine Warnung.',
+  CONFIRM_DELETE_USED_ONE:
+    '„%1" wird in 1 Block benutzt. Trotzdem löschen? Der Block bleibt stehen und zeigt danach eine Warnung.',
+  CONFIRM_DELETE_VERSION: 'Diese ältere Version löschen? Das lässt sich nicht rückgängig machen.',
+  CONFIRM_REPLACE_RECORDING: 'Eine Bewegung „%1" gibt es schon. Ersetzen?',
+  CONFIRM_YES_DELETE: 'Löschen',
+  CONFIRM_YES_REPLACE: 'Ersetzen',
+  UNDO: 'Rückgängig',
+  TOAST_DELETED: '„%1" gelöscht.',
+  TOAST_RENAMED: '„%1" heißt jetzt „%2".',
+  ERR_RENAME_FAILED: 'Umbenennen fehlgeschlagen: %1',
+  ERR_RENAME_SPLIT:
+    'Achtung: Die Aufnahme heißt jetzt „%1", der Workflow ist aber noch nicht gespeichert. Bitte erneut speichern.',
+  TOAST_DISMISS: 'Schließen',
+  ERR_DELETE_FAILED: 'Löschen fehlgeschlagen: %1',
+  ERR_REPLACED_LOST:
+    'Die ersetzte Aufnahme „%1" wurde dabei gelöscht und konnte nicht wiederhergestellt werden.',
+  ERR_UNDO_FAILED: 'Rückgängig fehlgeschlagen: %1',
+  ERR_UNDO_PARTIAL:
+    'Rückgängig nur teilweise: %1 von %2 Versionen wiederhergestellt, nicht wiederhergestellt: %3 (%4).',
+  UNDO_RATE_LIMIT_WAIT: 'Viele Versionen – die Wiederherstellung dauert etwa eine Minute …',
+  ERR_UNDO_NEWER_VERSION: 'Rückgängig nicht möglich: Von „%1" gibt es inzwischen eine neuere Aufnahme.',
+  ERR_RECORDING_NAME:
+    'Der Name darf nur Buchstaben, Ziffern, Leerzeichen, _ und - enthalten (höchstens 40 Zeichen).',
+
+  // Vormachen (teach/teachGates.js + teach/useTeachSession.js).
+  TEACH_BLOCK_OFFLINE: 'Keine Verbindung zum Roboter-Dienst.',
+  TEACH_BLOCK_RUNNING: 'Ein Programm läuft gerade – erst auf „Stopp" drücken.',
+  TEACH_BLOCK_SIM: 'Vormachen braucht den echten Roboter.',
+  TEACH_BLOCK_JOG: 'Der Arm ist unter „Steuern" freigeschaltet — bitte dort zuerst festsetzen.',
+  TEACH_BLOCK_GLIDE: 'Der Arm fährt gerade in die Grundstellung — bitte kurz warten.',
+  TEACH_BLOCK_PREVIEW: 'Erst die Vorschau beenden.',
+  // Leader mode (D8): the teleop broadcaster is spawned only by the Startseite
+  // activation, so an un-activated rig would record a still follower.
+  TEACH_BLOCK_NOT_ACTIVE: 'Aktiviere den Roboter auf der Startseite, bevor du ihn bewegst.',
+  TEACH_NO_MOTION: 'Keine Bewegung aufgenommen — bitte den Arm während der Aufnahme bewegen.',
+  TEACH_CAP_REACHED: 'Maximale Aufnahmedauer erreicht — Aufnahme wird beendet.',
+  TEACH_ZIEL_BLOCKED_REC: 'Erst Aufnahme beenden',
+  TEACH_OFFLINE: 'Keine Verbindung zum Roboter-Dienst.',
+  // A server that ANSWERED but gave no reason — never „Keine Verbindung".
+  TEACH_FREE_FAILED: 'Arm konnte nicht freigeschaltet werden.',
+  TEACH_RECORD_START_FAILED: 'Aufnahme konnte nicht gestartet werden.',
+  TEACH_PREVIEW_FAILED: 'Vorschau nicht möglich.',
+  TEACH_CAPTURE_FAILED: 'Position konnte nicht gespeichert werden.',
+  TEACH_CLOSE_OFFLINE:
+    'Keine Verbindung zum Roboter-Dienst — Vormachen wurde geschlossen. Halte den Arm fest: Er wird spätestens nach 2 Minuten automatisch festgesetzt.',
+  TEACH_RELOCK_FAILED: 'Der Arm konnte nicht festgesetzt werden. Halte ihn weiter fest und drücke F.',
+  TEACH_LEADER_TURNED_ON:
+    'Der Leader-Arm wurde eingeschaltet — Vormachen mit der Hand ist jetzt nicht möglich.',
+  TEACH_COLLISION_DISCARDED: 'Kollision — die Aufnahme wurde verworfen.',
+  TEACH_LEADER_GONE: 'Der Leader-Arm ist nicht mehr aktiv — bitte Vormachen schließen und neu öffnen.',
+  // R7 (teach/teachGates.js::teachLeaderStatusNoticeDe): the leader-status bridge
+  // cannot say whether the leader is on — no new teaching until it answers. The
+  // bridge is the EduBotics program on Windows, the Orange Pi agent in Pi mode.
+  TEACH_LEADER_STATUS_PENDING: 'Roboterstatus wird geprüft …',
+  TEACH_LEADER_STATUS_UNKNOWN:
+    'Leader-Status unbekannt — das EduBotics-Programm auf diesem PC antwortet nicht. Vormachen ist gesperrt, bis es wieder antwortet.',
+  TEACH_LEADER_STATUS_UNKNOWN_PI:
+    'Leader-Status unbekannt — der Roboter-Dienst antwortet nicht. Bitte die System-Seite prüfen. Vormachen ist gesperrt, bis er wieder antwortet.',
+  TEACH_LEADER_DISCARD_OLD: 'Alte Aufnahme verwerfen',
+  TEACH_LEADER_ZIEL_HINT: 'Tippe den Tisch mit dem Leader-Arm nur leicht an.',
+  TEACH_ROBOT_PREVIEW_RUNNING: 'Der Arm fährt die Bewegung ab — Abstand halten.',
+  TEACH_ROBOT_PREVIEW_NO_MOTION:
+    'Der Arm hat noch nicht angefangen — er kann jederzeit losfahren. Mit „Stopp“ abbrechen.',
+  TEACH_STATE_DONE: 'Arm ist fest — fertig vorgemacht',
+  TEACH_REVIEW_ON_ROBOT_CONFIRM:
+    'Die Bewegung jetzt auf dem echten Roboter abspielen? Bitte Abstand halten.',
+
+  // Vormachen overlay + host (teach/TeachOverlay.jsx, teach/TeachHost.jsx) and
+  // the page surfaces it locks.
+  TOOLBAR_TEACH: '✋ Vormachen',
+  TOOLBAR_TEACH_TITLE: 'Bewegungen, Positionen und Ziele am echten Roboter vormachen',
+  TEACH_TITLE: 'Vormachen',
+  TEACH_MODE_HAND: 'Mit der Hand führen',
+  TEACH_MODE_LEADER: 'Mit dem Leader-Arm führen',
+  TEACH_STATE_LEADER_READY: 'Führe den Leader-Arm',
+  TEACH_HINT_LEADER: 'Bewege den Leader-Arm — der Roboter macht mit. Leertaste startet die Aufnahme.',
+  TEACH_HINT_LEADER_REC: 'Führe den Leader-Arm. Leertaste beendet die Aufnahme.',
+  TEACH_STATE_LOCKED: 'Arm ist fest',
+  TEACH_STATE_FREE: 'Arm ist frei — halte ihn fest',
+  TEACH_STATE_REC: 'Aufnahme läuft',
+  TEACH_STATE_REVIEW: 'Aufnahme prüfen',
+  TEACH_COUNTDOWN: 'Halte den Arm fest — %1',
+  TEACH_HINT_LOCKED: 'F gibt den Arm frei. Die Leertaste zählt herunter und startet die Aufnahme.',
+  TEACH_HINT_FREE: 'Bring den Arm an den Start. Leertaste startet die Aufnahme.',
+  TEACH_HINT_REC: 'Bewege den Arm. Drücke die Leertaste, bevor du loslässt.',
+  TEACH_HINT_DONE: 'Benenne deine Sachen mit ✎ um oder füge sie als Programm ein.',
+  TEACH_KEY_REC: 'Aufnahme',
+  TEACH_KEY_STOP: 'Stopp',
+  TEACH_KEY_POSE: 'Position merken',
+  TEACH_KEY_ZIEL: 'Ziel hier',
+  TEACH_KEY_FREE: 'Arm frei',
+  TEACH_KEY_LOCK: 'Arm festsetzen',
+  TEACH_REVIEW_KEEP: 'Behalten',
+  TEACH_REVIEW_AGAIN: 'Nochmal',
+  TEACH_REVIEW_DISCARD: 'Verwerfen',
+  TEACH_REVIEW_ON_ROBOT: 'Auf dem Roboter ansehen',
+  TEACH_REVIEW_ON_ROBOT_LEADER: 'Mit eingeschaltetem Leader-Arm nicht möglich.',
+  TEACH_REVIEW_META: '%1 · %2 s · %3 Punkte',
+  TEACH_ROBOT_PREVIEW_STOP: 'Stopp',
+  TEACH_SLOTS_LOW: 'Noch %1 Plätze für Aufnahmen frei.',
+  TEACH_SLOTS_FULL: 'Es gibt schon 16 Aufnahmen — beim Behalten wird die älteste gelöscht.',
+  TEACH_DONE: 'Fertig',
+  TEACH_CONTINUE: 'Weiter vormachen',
+  TEACH_CLOSE: 'Schließen',
+  TEACH_AUTOSAVED_WORKFLOW: 'Workflow als „Neuer Workflow" gespeichert.',
+  TEACH_AUTO_NAME_RECORDING: 'Bewegung %1',
+  TEACH_AUTO_NAME_POSE: 'Position %1',
+  TEACH_LIST_TITLE: 'In dieser Runde',
+  TEACH_LIST_EMPTY: 'Noch nichts vorgemacht.',
+  TEACH_LIST_SAVING: 'wird gespeichert …',
+  TEACH_LIST_SAVED: 'gespeichert',
+  TEACH_LIST_FAILED: 'nicht gespeichert',
+  TEACH_LIST_RETRY: 'Erneut speichern',
+  TEACH_LIST_REVIEWING: 'wird geprüft …',
+  TEACH_LIST_RECORDING_META: '%1 s · %2',
+  TEACH_LIST_POSE_META: 'z %1 mm',
+  TEACH_LIST_PLACE_META: 'x %1 · y %2 mm · %3',
+  // „Greifer merken" (S3 capture joints): the captured gripper state, shown
+  // only when the snapshot classifies it.
+  TEACH_GRIPPER_OPEN: 'Greifer offen',
+  TEACH_GRIPPER_CLOSED: 'Greifer zu',
+  TEACH_RENAME_LOCKED: 'Umbenennen geht, wenn der Arm fest ist.',
+  TEACH_BLOCK_UI_LOCKED: 'Während Vormachen nicht verfügbar.',
+  TEACH_DRIVE_BLOCKED: 'Erst Vormachen beenden, dann fahren.',
+  TEACH_SIM_ENTRY_BLOCKED:
+    'Während Vormachen kann der Simulator nicht gestartet werden — bitte Vormachen zuerst beenden.',
+  TEACH_JOG_HINT: 'Zum Vormachen oben ✋ Vormachen benutzen.',
+  TEACH_JOG_HINT_FREE: 'Arm ist freigeschaltet — zum Merken oben ✋ Vormachen benutzen.',
+  // Vormachen review clean-up, Ziel by touch, „Als Programm einfügen".
+  TEACH_TRIM_START: 'Warten am Anfang entfernt',
+  TEACH_TRIM_END: 'Ende sieht nach Loslassen aus — gekürzt',
+  TEACH_TRIM_UNDO: 'Kürzung zurücknehmen',
+  TEACH_PAUSES: 'Pausen kürzen',
+  TEACH_STRIP_ARIA: 'Bewegungsverlauf — mit den Griffen den Anfang und das Ende wählen',
+  TEACH_HANDLE_START: 'Anfang',
+  TEACH_HANDLE_END: 'Ende',
+  TEACH_ZIEL_TOO_HIGH: 'Die Greiferspitze ist %1 cm über dem Tisch. Als Position speichern?',
+  TEACH_ZIEL_AS_POSE: 'Als Position speichern',
+  TEACH_ZIEL_AS_PIN: 'Trotzdem als Ziel',
+  TEACH_INSERT: 'Als Programm einfügen (%1 Blöcke)',
+  TEACH_INSERT_ONE: 'Als Programm einfügen (1 Block)',
+  TEACH_INSERT_DONE: '%1 Blöcke eingefügt.',
+  TEACH_INSERT_DONE_ONE: '1 Block eingefügt.',
 };
+
+/**
+ * Fill `%1`, `%2`, … in a DE template with the given arguments.
+ *
+ * A placeholder with no matching argument stays as written (`%2` with one
+ * argument reads `%2`), so a missing argument is visible in the UI instead of
+ * silently becoming „undefined".
+ */
+export function formatDe(template, ...args) {
+  return String(template).replace(/%(\d)/g, (m, i) => (args[Number(i) - 1] ?? m));
+}

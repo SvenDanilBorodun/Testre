@@ -61,14 +61,25 @@ import {
   SIM_OBJECT_HELD_COLOR_HEX,
   resolveMaxInstances,
 } from './simConstants';
-import { armGeometry } from '../../utils/armProfile';
+import { gripperBand } from '../../utils/armProfile';
+import { INTERP_DELAY_MS } from '../../utils/jointStateInterpolator';
 import useSimObjects from '../../hooks/useSimObjects';
 import rosConnectionManager from '../../utils/rosConnectionManager';
+import { DE } from './blocks/messages_de';
+import { MARKER_COLORS } from './sammlung/markers';
 
 const UrdfTwin = lazy(() => import('../UrdfTwin'));
 
+// A stable empty marker list, so the twin's marker effect keeps one identity.
+const NO_MARKERS = Object.freeze([]);
+
 // Sim-only virtual joint stream (never the bare /joint_states — see plan §C).
 const SIM_JOINT_TOPIC = '/sim/joint_states';
+// The simulator plays each waypoint at its own time (~30 Hz, SimArm's real-time
+// player), so the twin subscribes with a throttle BELOW that spacing: every pose
+// arrives, and the 20 ms floor only matters if a stream ever ran faster. The real
+// arm's twins keep UrdfTwin's default (~30 Hz out of 100 Hz).
+const SIM_JOINT_THROTTLE_MS = 20;
 
 // Strict-vertical reach annulus SHOWN TO THE STUDENT (the graspable table-top
 // ring). PROFILE-DRIVEN (edu6 §4.5) via reachAnnulus(caps): OMX fallback
@@ -94,16 +105,10 @@ const ORIGIN_PY = PX_PER_M * VIEW_MAX_X;
 // sizes its square from width_m × PX_PER_M instead, so the 2D + 3D panes agree.
 const OBJECT_PX = SIM_OBJECT_FALLBACK_SIZE_M * PX_PER_M;
 
-// Grasp-attach geometry (front-end, idealized). The OMX-F gripper joint rests
-// open ≈ +0.8 rad and any CLOSE drives it negative-ish (per-object close angles
-// run ≈ -0.1 … -0.5, with no fixed floor). The published /sim/joint_states stream
-// is the COMMANDED gripper, so classify with a wide hysteresis band well below the
-// open rest: "closing" when it crosses BELOW +0.2 (catches even a shallow -0.1
-// close on a wide object — M1 fix; the old -0.20 threshold missed those), "open"
-// again above +0.5. The 0.2…0.5 band prevents chatter; the descend (gripper held
-// at +0.8) never trips "closing".
-const GRIPPER_CLOSED_RAD = 0.2;
-const GRIPPER_OPEN_RAD = 0.5;
+// Grasp-attach geometry (front-end, idealized). The published /sim/joint_states
+// stream is the COMMANDED gripper; the hysteresis band (OMX 0.2 / 0.5, or the
+// profile's sim_close_threshold_rad) lives in utils/armProfile.js::gripperBand,
+// shared with „Greifer merken" in inserted programs.
 const CAPTURE_RADIUS_M = 0.06;
 
 // „Simulator zurücksetzen" rides the EXISTING /workflow/stop service — no new
@@ -209,6 +214,11 @@ function clampRange(v, lo, hi) {
 function round3(v) {
   return Math.round(v * 1000) / 1000;
 }
+// A „Ziel setzen" point at the destination store's own precision (4 decimals).
+function round4(v) {
+  const r = Math.round(v * 1e4) / 1e4;
+  return r === 0 ? 0 : r; // never -0
+}
 
 function SimScene({
   scene,
@@ -220,6 +230,18 @@ function SimScene({
   pathClearToken = 0,
   showShadows = false,
   showReach = false,
+  // Sammlung markers (sammlung/markers.js), drawn on the 2D table AND handed to
+  // the one UrdfTwin: [{id, label, kind: 'pin'|'pose'|'variable', x, y, z, highlighted}].
+  markers = NO_MARKERS,
+  // Ghost arm of the highlighted Position ({names, positions} | null), handed
+  // to the one UrdfTwin — the 2D table draws no ghost.
+  ghostJoints = null,
+  // {mode: 'ziel', token} from the page (the flyout's „Ziel auf den Sim-Tisch
+  // setzen"): each new token switches the editor into „Ziel setzen".
+  requestedMode = null,
+  // ({x, y}) → the page adds a `source: 'sim'` pin. The „Ziel setzen" mode is
+  // offered only when this is a function.
+  onCreateDestination = null,
 }) {
   const objects = useMemo(
     () => (scene && Array.isArray(scene.objects) ? scene.objects : []),
@@ -252,18 +274,7 @@ function SimScene({
       : false
   ));
   const annulus = useMemo(() => reachAnnulus(caps), [caps]);
-  const graspBand = useMemo(() => {
-    const geo = armGeometry(caps);
-    if (geo.simCloseThresholdRad === null) {
-      return { close: GRIPPER_CLOSED_RAD, open: GRIPPER_OPEN_RAD };
-    }
-    // Profile-supplied close threshold; re-open hysteresis sits halfway
-    // between it and the profile's full-open command (edu6: 1.5 / 1.625).
-    return {
-      close: geo.simCloseThresholdRad,
-      open: (geo.simCloseThresholdRad + geo.gripperOpenRad) / 2,
-    };
-  }, [caps]);
+  const graspBand = useMemo(() => gripperBand(caps), [caps]);
   const graspBandRef = useRef(graspBand);
   useEffect(() => { graspBandRef.current = graspBand; }, [graspBand]);
   const annulusRef = useRef(annulus);
@@ -288,7 +299,9 @@ function SimScene({
   // The SERVER's live scene (/sim/objects). Null until the first message — and
   // null forever on an older server image that does not publish it, which is why
   // the local grasp guess below is KEPT as a fallback rather than deleted.
-  const simScene = useSimObjects(rosbridgeUrl, true);
+  // Held back by the twin's own interpolation delay, so a grasp or a drop lands on
+  // the arm pose it belongs to rather than 100 ms ahead of the drawn jaws.
+  const simScene = useSimObjects(rosbridgeUrl, true, { delayMs: INTERP_DELAY_MS });
   // The server scene, but ONLY while it is authoritative. Null between runs →
   // `simPositions` is null → UrdfTwin's simPosOf falls back to the editor's own
   // placement coordinates, byte-identically to the pre-/sim/objects behaviour.
@@ -297,8 +310,18 @@ function SimScene({
   // every time the run state flips.
   const runningRef = useRef(workflowRunning);
   useEffect(() => { runningRef.current = workflowRunning; }, [workflowRunning]);
-  // Editor mode: place objects, or draw a no-go Sperrzone rectangle.
-  const [mode, setMode] = useState('object'); // 'object' | 'zone'
+  // Editor mode: place objects, draw a no-go Sperrzone rectangle, or tap a Ziel.
+  const [mode, setMode] = useState('object'); // 'object' | 'zone' | 'ziel'
+  const canCreateZiel = typeof onCreateDestination === 'function';
+  const markerList = Array.isArray(markers) ? markers : NO_MARKERS;
+  const requestToken = requestedMode ? requestedMode.token : null;
+  useEffect(() => {
+    if (requestToken !== null && requestToken !== undefined && canCreateZiel) setMode('ziel');
+  }, [requestToken, canCreateZiel]);
+  // A page that stops offering Ziele must not strand the editor in that mode.
+  useEffect(() => {
+    if (!canCreateZiel) setMode((m) => (m === 'ziel' ? 'object' : m));
+  }, [canCreateZiel]);
   // „Simulation zurücksetzen" in flight (the service call can take a moment when
   // it has to stop a running program first).
   const [resetting, setResetting] = useState(false);
@@ -619,6 +642,17 @@ function SimScene({
   // place/drag handlers; in zone mode they draw a drag-rectangle.
   const handleSvgPointerDown = useCallback(
     (e) => {
+      if (mode === 'ziel') {
+        if (!canCreateZiel) return;
+        const base = eventToBase(e);
+        if (!base) return;
+        // Clamped to the VIEW window only — NOT the reach annulus: an unreachable
+        // Ziel is allowed, and the preview / the run start report it.
+        const x = clampRange(base.x, VIEW_MIN_X, VIEW_MAX_X);
+        const y = clampRange(base.y, VIEW_MIN_Y, VIEW_MAX_Y);
+        onCreateDestination({ x: round4(x), y: round4(y) });
+        return;
+      }
       if (mode === 'zone') {
         const base = eventToBase(e);
         if (!base) return;
@@ -633,7 +667,7 @@ function SimScene({
       }
       handlePlace(e);
     },
-    [mode, eventToBase, handlePlace],
+    [mode, eventToBase, handlePlace, canCreateZiel, onCreateDestination],
   );
 
   const handleSvgPointerMove = useCallback(
@@ -678,10 +712,12 @@ function SimScene({
   // onEndEffector prop identity never churns.
   const handleEndEffector = useCallback(({ x, y, gripper }) => {
     // Only a RUNNING program may grab anything. /sim/joint_states keeps ticking
-    // at 2 Hz between runs (the idle republish of the last commanded pose), so
+    // at 2 Hz between runs (the heartbeat re-sending the last commanded pose), so
     // without this an arm parked with a closed gripper could re-capture a cube
     // the student had just dragged somewhere else — a phantom grasp with no
     // program behind it. The held effect above clears graspRef on the same edge.
+    // Since the twin reports only a CHANGED drawn pose, those repeats no longer
+    // reach here at all; this stays as the guarantee rather than the mechanism.
     //
     // Its REACHABLE window is narrow and worth stating plainly: the next line
     // hands the grasp to the server whenever /sim/objects has ever been heard,
@@ -805,6 +841,24 @@ function SimScene({
         >
           Sperrzone zeichnen
         </button>
+        {canCreateZiel && (
+          <button
+            type="button"
+            onClick={() => setMode('ziel')}
+            aria-pressed={mode === 'ziel'}
+            className={
+              'px-2.5 py-1 text-xs rounded-md border '
+              + (mode === 'ziel'
+                ? 'bg-teal-600 text-white border-teal-600'
+                : 'bg-white text-teal-700 border-teal-200 hover:bg-teal-50')
+            }
+          >
+            {DE.SIM_MODE_ZIEL}
+          </button>
+        )}
+        {mode === 'ziel' && (
+          <span className="text-xs text-[var(--ink-4)]">{DE.SIM_ZIEL_HINT}</span>
+        )}
         {mode === 'zone' && (
           <span className="text-xs text-[var(--ink-4)]">
             Ziehe ein Rechteck auf — der Roboter fährt um Sperrzonen herum.
@@ -823,7 +877,7 @@ function SimScene({
           onPointerUp={handleSvgPointerUp}
           onPointerLeave={handleSvgPointerUp}
           role="application"
-          aria-label="Simulator-Tisch — Objekte und Sperrzonen platzieren"
+          aria-label="Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren"
         >
           {/* Reach annulus (graspable ring) */}
           <circle
@@ -897,6 +951,45 @@ function SimScene({
               pointerEvents="none"
             />
           )}
+
+          {/* Sammlung markers (Ziele / Positionen / variable points): after the
+              zones, under the objects, and never a pointer target — a tap on a
+              marker must reach the table like a tap anywhere else. */}
+          {markerList.map((m) => {
+            if (!m || !Number.isFinite(m.x) || !Number.isFinite(m.y)) return null;
+            const { px, py } = baseToSvg(m.x, m.y);
+            const color = MARKER_COLORS[m.kind] || MARKER_COLORS.pin;
+            const grow = m.highlighted ? 2 : 0;
+            const sw = m.highlighted ? 3 : 1.5;
+            let glyph;
+            if (m.kind === 'pose') {
+              const s = 8 + grow;
+              glyph = (
+                <rect
+                  x={px - s / 2} y={py - s / 2} width={s} height={s}
+                  transform={`rotate(45 ${px} ${py})`}
+                  fill={color} stroke="#ffffff" strokeWidth={sw}
+                />
+              );
+            } else if (m.kind === 'variable') {
+              glyph = <circle cx={px} cy={py} r={5 + grow} fill="none" stroke={color} strokeWidth={sw + 1} />;
+            } else {
+              glyph = <circle cx={px} cy={py} r={5 + grow} fill={color} stroke="#ffffff" strokeWidth={sw} />;
+            }
+            return (
+              <g
+                key={`marker-${m.id}`}
+                pointerEvents="none"
+                data-marker-kind={m.kind}
+                data-highlighted={m.highlighted ? 'true' : 'false'}
+              >
+                {glyph}
+                <text x={px + 8 + grow} y={py + 3} fontSize="9" fill={color} fontWeight={m.highlighted ? 700 : 400}>
+                  {m.label}
+                </text>
+              </g>
+            );
+          })}
 
           {/* Placed objects */}
           {objects.map((o) => {
@@ -1087,6 +1180,7 @@ function SimScene({
       >
         <UrdfTwin
           jointTopic={SIM_JOINT_TOPIC}
+          jointThrottleMs={SIM_JOINT_THROTTLE_MS}
           objects={objects}
           zones={zones}
           showTable
@@ -1099,6 +1193,8 @@ function SimScene({
           pathClearToken={pathClearToken}
           showShadows={showShadows}
           showReach={showReach}
+          markers={markerList}
+          ghostJoints={ghostJoints}
         />
       </Suspense>
     </div>

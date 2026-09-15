@@ -52,16 +52,16 @@ vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
 }));
 
 // ── Right-region components — recognizable stubs so we can assert the swap. ──
-// RightDock additionally renders the control/record tab panels (the JogPanel/
-// RecordPanel mocks below expose trigger buttons) so the sim-entry guard tests
-// can flip the page's recording/hand-guide state through the real callbacks.
+// RightDock additionally renders the control tab panel (the JogPanel mock
+// below exposes a trigger button) so the sim-entry guard tests can flip the
+// page's hand-guide state through the real callback.
 // Other tabs are NOT rendered — the '3d' tab would mount the real lazy UrdfTwin.
 vi.mock('../../components/Workshop/RightDock', () => ({
   __esModule: true,
   default: ({ tabs }) => (
     <div data-testid="right-dock">
       {(tabs || [])
-        .filter((t) => t.id === 'control' || t.id === 'record')
+        .filter((t) => t.id === 'control')
         .map((t) => (
           <div key={t.id}>{t.render()}</div>
         ))}
@@ -93,8 +93,16 @@ vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, defau
 vi.mock('../../components/Workshop/GalleryTab', () => ({ __esModule: true, default: () => <div data-testid="gallery-tab" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
 vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule: true, default: () => <div data-testid="version-history" /> }));
-// JogPanel/RecordPanel stubs expose trigger buttons wired to the REAL page
-// callbacks (onHandGuideChange/onRecordingChange), so the sim-entry guard tests
+// Vormachen: TeachHost is a stub (the overlay has its own tests, and its
+// leader-mode child would read `s.ros`, which these mock states lack), and the
+// bridge probe is stubbed so no page test fetches localhost:8769.
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+vi.mock('../../hooks/useRsBridgeStatus', () => ({
+  __esModule: true,
+  default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false }),
+}));
+// The JogPanel stub exposes a trigger button wired to the REAL page
+// callback (onHandGuideChange), so the sim-entry guard tests
 // drive the page state exactly like a live panel would.
 vi.mock('../../components/Workshop/JogPanel', () => ({
   __esModule: true,
@@ -105,20 +113,6 @@ vi.mock('../../components/Workshop/JogPanel', () => ({
           type="button"
           data-testid="jog-hand-guide-on"
           onClick={() => onHandGuideChange && onHandGuideChange(true)}
-        />
-      </div>
-    );
-  },
-}));
-vi.mock('../../components/Workshop/RecordPanel', () => ({
-  __esModule: true,
-  default: function MockRecordPanel({ onRecordingChange }) {
-    return (
-      <div data-testid="record-panel">
-        <button
-          type="button"
-          data-testid="record-panel-recording-on"
-          onClick={() => onRecordingChange && onRecordingChange(true)}
         />
       </div>
     );
@@ -289,6 +283,27 @@ describe('WorkshopPage — what the cloud SAVE actually ships', () => {
     expect(Object.keys(sent).sort())
       .toEqual(['blocks', 'variables', 'workspaceComments']);
     expect(mockApi.createWorkflow).not.toHaveBeenCalled();
+  });
+
+  test('the Ziele/Positionen (`edubotics-destinations`) are part of the saved document', async () => {
+    // The document serializer from the Sammlung round: the store of named
+    // places travels in the workflow row, so a reload or a clone keeps them.
+    const withDestinations = {
+      ...FULL_EDITOR_JSON,
+      'edubotics-destinations': {
+        version: 1,
+        entries: [{ id: 'd_00000001', name: 'Ablage', kind: 'pin', x: 0.18, y: -0.06, z: 0.01, source: 'camera' }],
+      },
+    };
+    mockState = baseState({ unsavedBlocklyJson: withDestinations });
+    render(<WorkshopPage isActive />);
+    await userEvent.click(await screen.findByTestId('save-button'));
+    await waitFor(() => expect(mockApi.createWorkflow).toHaveBeenCalledTimes(1));
+
+    const sent = mockApi.createWorkflow.mock.calls[0][1].blockly_json;
+    expect(Object.keys(sent).sort())
+      .toEqual(['blocks', 'edubotics-destinations', 'variables', 'workspaceComments']);
+    expect(sent['edubotics-destinations']).toEqual(withDestinations['edubotics-destinations']);
   });
 
   test('the object the editor and AUTOSAVE share is not mutated', async () => {

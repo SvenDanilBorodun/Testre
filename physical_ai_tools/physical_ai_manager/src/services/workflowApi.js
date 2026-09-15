@@ -175,6 +175,19 @@ export async function getTrajectory(accessToken, workflowId, trajectoryId) {
   );
 }
 
+export async function renameTrajectory(accessToken, workflowId, trajectoryId, name) {
+  // Renames EVERY row sharing this recording's current name (the re-recorded
+  // versions of a name are one recording to the student), in one owner-scoped
+  // UPDATE; created_at is untouched. → the targeted row, { samples: null }.
+  // A clash is a 409 with a German detail, which apiRequest preserves.
+  return apiRequest(
+    `/workflows/${workflowId}/trajectories/${trajectoryId}`,
+    'PATCH',
+    accessToken,
+    { name },
+  );
+}
+
 export async function deleteTrajectory(accessToken, workflowId, trajectoryId) {
   return apiRequest(
     `/workflows/${workflowId}/trajectories/${trajectoryId}`,

@@ -11,7 +11,7 @@
 // caps (pre-capability image, pre-first-tick) still render (`=== false` only).
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import LeaderToggle from '../LeaderToggle';
 
 let mockState;
@@ -122,5 +122,51 @@ describe('LeaderToggle — has_leader from the control bridge (Pi)', () => {
     bridgeStatus({ follower_only: false, busy: false, has_leader: true });
     render(<LeaderToggle isActive />);
     expect(await screen.findByText(/Leader abschalten/)).toBeTruthy();
+  });
+});
+
+// While Vormachen is open it owns the arm, so the page hands the toggle a
+// `lockedReason`: every button that would flip the arm container is disabled
+// and says why (a container restart under a hand-guided arm is the hazard).
+describe('LeaderToggle — lockedReason (Vormachen open)', () => {
+  const REASON = 'Während Vormachen nicht verfügbar.';
+
+  it('disables „Leader abschalten (Roboter Studio)" with the reason as title', async () => {
+    setCaps({ has_leader: true });
+    bridgeStatus({ follower_only: false, busy: false });
+    render(<LeaderToggle isActive lockedReason={REASON} />);
+    const btn = await screen.findByRole('button', { name: 'Leader abschalten (Roboter Studio)' });
+    expect(btn).toBeDisabled();
+    expect(btn.getAttribute('title')).toBe(REASON);
+  });
+
+  it('without a reason the same button is enabled', async () => {
+    setCaps({ has_leader: true });
+    bridgeStatus({ follower_only: false, busy: false });
+    render(<LeaderToggle isActive lockedReason={null} />);
+    const btn = await screen.findByRole('button', { name: 'Leader abschalten (Roboter Studio)' });
+    expect(btn).toBeEnabled();
+  });
+
+  it('in follower-only state disables „Leader verbinden" with the reason as title', async () => {
+    setCaps({ has_leader: true });
+    bridgeStatus({ follower_only: true, busy: false });
+    render(<LeaderToggle isActive lockedReason={REASON} />);
+    const btn = await screen.findByRole('button', { name: 'Leader verbinden' });
+    expect(btn).toBeDisabled();
+    expect(btn.getAttribute('title')).toBe(REASON);
+  });
+
+  it('disables the reconnect „Verbinden" once a lock reason arrives', async () => {
+    setCaps({ has_leader: true });
+    bridgeStatus({ follower_only: true, busy: false });
+    const { rerender } = render(<LeaderToggle isActive lockedReason={null} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Leader verbinden' }));
+    const confirm = screen.getByRole('button', { name: 'Verbinden' });
+    expect(confirm).toBeEnabled();
+    rerender(<LeaderToggle isActive lockedReason={REASON} />);
+    const locked = screen.getByRole('button', { name: 'Verbinden' });
+    expect(locked).toBeDisabled();
+    expect(locked.getAttribute('title')).toBe(REASON);
   });
 });

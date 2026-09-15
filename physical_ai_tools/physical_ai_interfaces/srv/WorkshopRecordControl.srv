@@ -6,6 +6,10 @@
 #                       recorded path as CONTRACT-B `points_json`
 #                       {"fps":25,"points":[[j1..j5,grip,t_s], ...]}.
 #   action = "cancel" → stop sampling, re-torque, discard the buffer.
+#   action = "start_leader" / "stop_leader" / "cancel_leader" → the leader-arm
+#                       take (Vormachen with the leader on an OMX full kit):
+#                       sample the TELEOPERATED follower with no torque change;
+#                       stop returns `points_json` like "stop", cancel discards.
 string action
 ---
 bool success

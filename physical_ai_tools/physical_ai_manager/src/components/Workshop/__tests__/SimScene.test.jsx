@@ -20,10 +20,13 @@ import SimScene from '../SimScene';
 
 // The /sim/objects subscription, under test control. The hook itself has its own
 // wire contract; what matters here is WHEN SimScene is allowed to believe it.
-const simObjects = vi.hoisted(() => ({ scene: null }));
+const simObjects = vi.hoisted(() => ({ scene: null, args: null }));
 vi.mock('../../../hooks/useSimObjects', () => ({
   __esModule: true,
-  default: () => simObjects.scene,
+  default: (...args) => {
+    simObjects.args = args;
+    return simObjects.scene;
+  },
 }));
 
 // „Simulation zurücksetzen" calls /workflow/stop straight through roslib (see the
@@ -429,5 +432,155 @@ describe('SimScene — a parked arm must not grasp on its own', () => {
     // No intervening OPEN — only the latch reset can make the next line work.
     closeGripperOnTheCube();
     await waitFor(() => expect(twin()).toHaveAttribute('data-held', '7'));
+  });
+});
+
+
+// ── the simulator's 3D stream is dense AND in step with the scene (2026-09-11) ─
+// SimArm now plays every waypoint at its own time (~30 Hz). The twin must let
+// all of them through, and the scene events that ride along with them must be
+// held back by the same delay the twin draws the arm with, or a grasp attaches
+// the cube to jaws still 100 ms of motion away.
+describe('SimScene — the 3D stream and the scene share one timeline', () => {
+  test('the twin subscribes to /sim/joint_states below the 30 Hz waypoint spacing', async () => {
+    render(<SimScene scene={ONE_CUBE} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    expect(twinProps.current.jointTopic).toBe('/sim/joint_states');
+    expect(twinProps.current.jointThrottleMs).toBe(20);
+  });
+
+  test('the scene is delayed by exactly the twin\'s interpolation delay', async () => {
+    const { INTERP_DELAY_MS } = await import('../../../utils/jointStateInterpolator');
+    render(<SimScene scene={ONE_CUBE} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    expect(simObjects.args[2]).toEqual({ delayMs: INTERP_DELAY_MS });
+    expect(INTERP_DELAY_MS).toBe(100);
+  });
+});
+
+describe('SimScene — Ziel setzen and Sammlung markers', () => {
+  const giveSvgABox = () => {
+    const svg = screen.getByRole('application', {
+      name: 'Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren',
+    });
+    svg.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: SVG_W, height: SVG_H, right: SVG_W, bottom: SVG_H, x: 0, y: 0,
+    });
+    return svg;
+  };
+
+  test('the „Ziel setzen" mode is offered only when the page can create a Ziel', async () => {
+    const { unmount } = render(
+      <SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />,
+    );
+    await screen.findByTestId('urdf-twin');
+    expect(screen.queryByRole('button', { name: 'Ziel setzen' })).toBeNull();
+    unmount();
+    render(
+      <SimScene
+        scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}}
+        onCreateDestination={() => {}}
+      />,
+    );
+    await screen.findByTestId('urdf-twin');
+    expect(screen.getByRole('button', { name: 'Ziel setzen' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  test('a tap in ziel mode creates a Ziel at base coordinates and places no object', async () => {
+    const onChange = vi.fn();
+    const onCreateDestination = vi.fn();
+    render(
+      <SimScene
+        scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={onChange}
+        onCreateDestination={onCreateDestination}
+      />,
+    );
+    await screen.findByTestId('urdf-twin');
+    fireEvent.click(screen.getByRole('button', { name: 'Ziel setzen' }));
+    expect(screen.getByText('Tippe auf den Tisch — dort entsteht ein Ziel.')).toBeInTheDocument();
+    const svg = giveSvgABox();
+    // px 150 → y = 0.30 − 150/500 = 0; py 92.5 → x = 0.32 − 92.5/500 = 0.135.
+    fireEvent.pointerDown(svg, { clientX: SVG_W / 2, clientY: SVG_H / 2 });
+    expect(onCreateDestination).toHaveBeenCalledTimes(1);
+    expect(onCreateDestination).toHaveBeenCalledWith({ x: 0.135, y: 0 });
+    expect(onChange).not.toHaveBeenCalled();
+    // NOT clamped into the reach annulus: a tap at the base (r ≈ 0) stays there.
+    fireEvent.pointerDown(svg, { clientX: 150, clientY: 160 });
+    expect(onCreateDestination).toHaveBeenLastCalledWith({ x: 0, y: 0 });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test('a new requestedMode token switches the editor into „Ziel setzen"', async () => {
+    const props = {
+      scene: { objects: [], zones: [] }, catalog: CATALOG, onChange: () => {}, onCreateDestination: () => {},
+    };
+    const { rerender, store } = render(<SimScene {...props} requestedMode={null} />);
+    await screen.findByTestId('urdf-twin');
+    expect(screen.getByRole('button', { name: 'Objekte platzieren' })).toHaveAttribute('aria-pressed', 'true');
+    rerender(<Provider store={store}><SimScene {...props} requestedMode={{ mode: 'ziel', token: 1 }} /></Provider>);
+    expect(screen.getByRole('button', { name: 'Ziel setzen' })).toHaveAttribute('aria-pressed', 'true');
+    // The student switches back; the SAME token does not grab the mode again…
+    fireEvent.click(screen.getByRole('button', { name: 'Objekte platzieren' }));
+    rerender(<Provider store={store}><SimScene {...props} requestedMode={{ mode: 'ziel', token: 1 }} /></Provider>);
+    expect(screen.getByRole('button', { name: 'Objekte platzieren' })).toHaveAttribute('aria-pressed', 'true');
+    // …a NEW request does.
+    rerender(<Provider store={store}><SimScene {...props} requestedMode={{ mode: 'ziel', token: 2 }} /></Provider>);
+    expect(screen.getByRole('button', { name: 'Ziel setzen' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  test('losing onCreateDestination while in „Ziel setzen" leaves ziel mode: a tap places an object again', async () => {
+    const onChange = vi.fn();
+    const onCreateDestination = vi.fn();
+    const props = { scene: { objects: [], zones: [] }, catalog: CATALOG, onChange };
+    const { rerender, store } = render(
+      <SimScene {...props} onCreateDestination={onCreateDestination} requestedMode={{ mode: 'ziel', token: 1 }} />,
+    );
+    await screen.findByTestId('urdf-twin');
+    expect(screen.getByText('Tippe auf den Tisch — dort entsteht ein Ziel.')).toBeInTheDocument();
+    rerender(<Provider store={store}><SimScene {...props} onCreateDestination={null} requestedMode={{ mode: 'ziel', token: 1 }} /></Provider>);
+    expect(screen.queryByText('Tippe auf den Tisch — dort entsteht ein Ziel.')).toBeNull();
+    const svg = giveSvgABox();
+    fireEvent.pointerDown(svg, { clientX: SVG_W / 2, clientY: SVG_H / 2 });
+    expect(onCreateDestination).not.toHaveBeenCalled();
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  test('ghostJoints reach the one twin by identity (null by default)', async () => {
+    const ghostJoints = { names: ['joint1', 'joint2'], positions: [0.1, -0.4] };
+    const props = { scene: { objects: [], zones: [] }, catalog: CATALOG, onChange: () => {} };
+    const { rerender, store } = render(<SimScene {...props} />);
+    await screen.findByTestId('urdf-twin');
+    expect(twinProps.current.ghostJoints).toBeNull();
+    rerender(<Provider store={store}><SimScene {...props} ghostJoints={ghostJoints} /></Provider>);
+    expect(twinProps.current.ghostJoints).toBe(ghostJoints);
+  });
+
+  test('markers render on the 2D table with their labels and reach the twin', async () => {
+    const markers = [
+      { id: 'd_00000001', label: 'Ablage', kind: 'pin', x: 0.18, y: -0.06, z: 0, highlighted: false },
+      { id: 'd_00000002', label: 'Über der Kiste', kind: 'pose', x: 0.14, y: 0.1, z: 0.12, highlighted: true },
+    ];
+    const { container } = render(
+      <SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} markers={markers} />,
+    );
+    await screen.findByTestId('urdf-twin');
+    expect(screen.getByText('Ablage')).toBeInTheDocument();
+    expect(screen.getByText('Über der Kiste')).toBeInTheDocument();
+    expect(twinProps.current.markers).toBe(markers);
+    // SVG groups have no ARIA role, so a DOM query is the only way to assert on them.
+    // eslint-disable-next-line testing-library/no-container, testing-library/no-node-access
+    const pin = container.querySelector('g[data-marker-kind="pin"]');
+    // eslint-disable-next-line testing-library/no-container, testing-library/no-node-access
+    const pose = container.querySelector('g[data-marker-kind="pose"]');
+    expect(pin.getAttribute('pointer-events')).toBe('none');
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(pin.querySelector('circle').getAttribute('fill')).toBe('#f59e0b');
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(pin.querySelector('circle').getAttribute('r')).toBe('5');
+    // eslint-disable-next-line testing-library/no-node-access
+    const poseRect = pose.querySelector('rect');
+    expect(poseRect.getAttribute('fill')).toBe('#14b8a6');
+    expect(poseRect.getAttribute('stroke-width')).toBe('3');
+    expect(poseRect.getAttribute('width')).toBe('10');
   });
 });

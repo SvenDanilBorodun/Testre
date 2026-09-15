@@ -32,6 +32,7 @@ import {
   slimRunPayload,
   slimSavePayload,
 } from '../blocklyPayload';
+import { registerDestinationSerializer } from '../../components/Workshop/sammlung/destinationStore';
 
 function registeredSerializers() {
   return Object.keys(
@@ -54,6 +55,15 @@ describe('the serializer inventory this allowlist is defined against', () => {
     const mod = await import('@blockly/workspace-backpack');
     expect(typeof (mod.Backpack || mod.default)).toBe('function');
   });
+
+  it('gains edubotics-destinations when registerDestinationSerializer() runs', () => {
+    // The app's OWN serializer (Ziele/Positionen). Importing its module above
+    // registered nothing — the first test in this block proves that — and the
+    // explicit call from BlocklyWorkspace.jsx::registerAllBlocksOnce is what adds it.
+    expect(registeredSerializers()).not.toContain('edubotics-destinations');
+    registerDestinationSerializer();
+    expect(registeredSerializers()).toContain('edubotics-destinations');
+  });
 });
 
 describe('the two allowlists', () => {
@@ -61,12 +71,12 @@ describe('the two allowlists', () => {
     expect(RUN_PAYLOAD_SERIALIZER_KEYS).toEqual(['blocks', 'variables']);
   });
 
-  it('the SAVE payload additionally keeps the student canvas notes', () => {
+  it('the SAVE payload additionally keeps the student canvas notes and the Ziele', () => {
     expect(SAVE_PAYLOAD_SERIALIZER_KEYS)
-      .toEqual(['blocks', 'variables', 'workspaceComments']);
+      .toEqual(['blocks', 'variables', 'workspaceComments', 'edubotics-destinations']);
   });
 
-  it('they DIFFER, and the difference is workspaceComments', () => {
+  it('they DIFFER, and the differences are workspaceComments and edubotics-destinations', () => {
     // If these two ever collapse into one list, the run grows a key the
     // interpreter cannot read or the save loses a student's notes.
     const runOnly = RUN_PAYLOAD_SERIALIZER_KEYS.filter(
@@ -74,7 +84,9 @@ describe('the two allowlists', () => {
     const saveOnly = SAVE_PAYLOAD_SERIALIZER_KEYS.filter(
       (k) => !RUN_PAYLOAD_SERIALIZER_KEYS.includes(k));
     expect(runOnly).toEqual([]);
-    expect(saveOnly).toEqual(['workspaceComments']);
+    // Ziele/Positionen are document content: saved, but the run carries them
+    // as the explicit `destinations` sibling, never as the Blockly internal.
+    expect(saveOnly).toEqual(['workspaceComments', 'edubotics-destinations']);
   });
 });
 
@@ -85,20 +97,26 @@ describe('what each path drops from a full serializer output', () => {
     workspaceComments: [{ id: 'c1', text: 'Notiz' }],
     'suggested-blocks': { recentlyUsedBlocks: ['a', 'b'] },
     backpack: ['<block type="edubotics_home"/>'],
+    'edubotics-destinations': { version: 1, entries: [] },
   };
 
-  it('the RUN payload drops THREE keys, not two', () => {
+  it('the RUN payload drops FOUR keys — the three editor keys and the destinations document', () => {
+    // Ziele/Positionen are document content; the run sends them as the
+    // explicit `destinations` sibling (RunControls), not as this key.
     const slim = slimRunPayload(full);
     expect(Object.keys(slim).sort()).toEqual(['blocks', 'variables']);
     const dropped = Object.keys(full).filter((k) => !(k in slim)).sort();
-    expect(dropped).toEqual(['backpack', 'suggested-blocks', 'workspaceComments']);
+    expect(dropped).toEqual(
+      ['backpack', 'edubotics-destinations', 'suggested-blocks', 'workspaceComments']);
   });
 
-  it('the SAVE payload keeps the notes and drops the two plugin keys', () => {
+  it('the SAVE payload keeps the notes and the Ziele and drops the two plugin keys', () => {
+    // Ziele/Positionen are document content: a save without them deletes them.
     const slim = slimSavePayload(full);
     expect(Object.keys(slim).sort())
-      .toEqual(['blocks', 'variables', 'workspaceComments']);
+      .toEqual(['blocks', 'edubotics-destinations', 'variables', 'workspaceComments']);
     expect(slim.workspaceComments).toBe(full.workspaceComments);
+    expect(slim['edubotics-destinations']).toBe(full['edubotics-destinations']);
     expect('backpack' in slim).toBe(false);
     expect('suggested-blocks' in slim).toBe(false);
   });

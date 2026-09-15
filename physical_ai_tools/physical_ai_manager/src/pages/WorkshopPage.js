@@ -8,7 +8,7 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useEffect, useState, useCallback, useRef, Suspense, lazy } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef, Suspense, lazy } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast, { useToasterStore } from 'react-hot-toast';
 import * as Blockly from 'blockly/core';
@@ -26,14 +26,27 @@ import GalleryTab from '../components/Workshop/GalleryTab';
 import SkillmapPlayer from '../components/Workshop/SkillmapPlayer';
 import VersionHistoryDropdown from '../components/Workshop/VersionHistoryDropdown';
 import JogPanel from '../components/Workshop/JogPanel';
-import RecordPanel from '../components/Workshop/RecordPanel';
 import RightDock from '../components/Workshop/RightDock';
 import { buildCatalogDims } from '../components/Workshop/simConstants';
-import { DE } from '../components/Workshop/blocks/messages_de';
+import { DE, formatDe } from '../components/Workshop/blocks/messages_de';
 import {
   applyPinnedCoordinates,
   setDriveToHandler,
 } from '../components/Workshop/blocks/destinations';
+import {
+  MAX_DESTINATION_ENTRIES,
+  getDestinationStore,
+  nextAutoName,
+  takenDestinationNames,
+} from '../components/Workshop/sammlung/destinationStore';
+import { createSammlungProvider } from '../components/Workshop/sammlung/provider';
+import { buildTwinMarkers, variablePointsFromValues } from '../components/Workshop/sammlung/markers';
+import { ghostJointsFromEntry } from '../utils/armProfile';
+import SammlungDrawer from '../components/Workshop/sammlung/SammlungDrawer';
+import TeachHost from '../components/Workshop/teach/TeachHost';
+import { TEACH_BLOCK_TITLES_DE, teachEntryBlockReason } from '../components/Workshop/teach/teachGates';
+import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
+import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
 import { slimSavePayload } from '../utils/blocklyPayload';
 import {
@@ -43,8 +56,31 @@ import {
   requestRecalibration,
   setDebuggerVisible,
 } from '../features/workshop/workshopSlice';
+import {
+  closeDrawer,
+  fetchTrajectories,
+  openDrawer,
+  requestTeach,
+  selectDrawer,
+  selectHighlight,
+  selectLastPreviewResult,
+  selectPreviewActive,
+  selectTeachOpen,
+  selectTrajectoryList,
+  setHighlight,
+} from '../features/workshop/studioAssetsSlice';
+import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
 import { useRosTopicSubscription } from '../hooks/useRosTopicSubscription';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import useRsBridgeStatus from '../hooks/useRsBridgeStatus';
+import useSimPreview from '../hooks/useSimPreview';
+import {
+  SIM_ENTRY_BLOCK_TITLES_DE,
+  SIM_ENTRY_SETTLE_MS,
+  SIM_TOGGLE_DEFAULT_TITLE_DE,
+  previewLeaderGate,
+  simEntryBlockReason,
+} from '../utils/simPreview';
 import {
   setObjectCatalogOptions,
   setWorkspaceAccessor,
@@ -84,7 +120,9 @@ const WORKSHOP_CODE_OPEN_KEY = 'edubotics_workshop_code_open';
 // (top→bottom, normally ≤2), `dock_collapsed` folds the dock to the rail.
 const DOCK_OPEN_KEY = 'edubotics_workshop_dock_open';
 const DOCK_COLLAPSED_KEY = 'edubotics_workshop_dock_collapsed';
-const KNOWN_TAB_IDS = ['camera', 'control', 'record', '3d', 'tutorial', 'debug'];
+// `record` is gone (the „Aufnehmen" tab retired into Vormachen); a stored
+// layout still naming it heals through the unknown-id filter below.
+const KNOWN_TAB_IDS = ['camera', 'control', '3d', 'tutorial', 'debug'];
 const DEFAULT_DOCK_OPEN = ['camera'];
 
 function readDockOpen() {
@@ -144,23 +182,6 @@ function addOpenTab(openIds, id, isBusy) {
   next.splice(evictIdx, 1);
   next.push(id);
   return next;
-}
-
-// Mirror the BACKEND validator (_DESTINATION_NAME_RE, handlers/destinations.py):
-// letters (incl. ä ö ü ß), digits, space, underscore, hyphen — used by
-// „Position merken". Capped at 24 (NOT the backend's 40) to MATCH the
-// destination_pin / destination_ref block NAME field (destinations.js
-// NAME_MAX_LEN=24): a captured point is typed by name into those blocks, and a
-// 25–40-char name would be truncated to 24 there → „Ziel nicht gefunden" at run
-// time. 24 is a safe subset of the backend's 1..40 range.
-const CAPTURE_NAME_MAX_LEN = 24;
-const CAPTURE_NAME_RE = /^[A-Za-zÄÖÜäöüß0-9 _-]{1,24}$/;
-function sanitizeDestinationName(raw) {
-  if (typeof raw !== 'string') return '';
-  const trimmed = raw.trim().slice(0, CAPTURE_NAME_MAX_LEN);
-  if (trimmed === '' || trimmed === '—') return '';
-  if (!CAPTURE_NAME_RE.test(trimmed)) return '';
-  return trimmed;
 }
 
 // Phase-3 simulator fallback palette: if the catalog service momentarily returns
@@ -240,6 +261,17 @@ function WorkshopPage({ isActive }) {
   const selectedWorkflowId = useSelector((s) => s.workshop.selectedWorkflowId);
   const unsavedBlocklyJson = useSelector((s) => s.workshop.unsavedBlocklyJson);
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
+  // Effects key on whether a token EXISTS, never on its value: Supabase
+  // rotates the string on every TOKEN_REFRESHED (~hourly), and a hydrate keyed
+  // on it re-fetched the workflow and REMOUNTED the editor under the student.
+  // Callers read the current token through the ref.
+  const hasAccessToken = !!accessToken;
+  const accessTokenRef = useRef(accessToken);
+  useEffect(() => { accessTokenRef.current = accessToken; }, [accessToken]);
+  // The id this page itself just CREATED (first save of an unsaved workflow):
+  // the live editor already IS that document, so its hydrate is skipped once.
+  const skipHydrateForIdRef = useRef(null);
+  const robotType = useSelector((s) => (s.tasks && s.tasks.taskStatus ? s.tasks.taskStatus.robotType : ''));
   // Audit fix: prior path `s.auth?.user?.id` was always null (no
   // top-level `user` field on the auth slice). The Supabase user lives
   // under `session.user.id`. Without this fix the autosave scopeKey
@@ -247,6 +279,13 @@ function WorkshopPage({ isActive }) {
   // cross-student autosave bleed.
   const userId = useSelector((s) => s.auth?.session?.user?.id || null);
   const restrictedBlocks = useSelector((s) => s.workshop.restrictedBlocks);
+  // Sammlung toolbox groups: what the flyouts and the reference warnings read.
+  const trajectoryList = useSelector(selectTrajectoryList);
+  const lastPreviewResult = useSelector(selectLastPreviewResult);
+  const drawer = useSelector(selectDrawer);
+  const highlight = useSelector(selectHighlight);
+  const variableValues = useSelector((s) => (s.workshop && s.workshop.variables) || null);
+  const debuggerWarnings = useSelector((s) => (s.workshop ? s.workshop.debuggerWarnings : null));
   const activeTutorialId = useSelector((s) => s.workshop.activeTutorialId);
 
   const [editorJson, setEditorJson] = useState(null);
@@ -278,20 +317,34 @@ function WorkshopPage({ isActive }) {
   // „Debug" tab) is replaced by SimStage, so RunControls' Debug button targets
   // this flag instead of the dock tab (see onToggleDebug wiring below).
   const [simDebugOpen, setSimDebugOpen] = useState(false);
-  // Batch 2b: rosbridge liveness gates the real-arm jog/record panels (the same
+  // Batch 2b: rosbridge liveness gates the real-arm jog panel and Vormachen (the same
   // signal the rest of the app uses for „Roboter verbunden").
   const heartbeatStatus = useSelector((s) => s.tasks?.heartbeatStatus);
-  // Batch 2b: RecordPanel reports whether a hand-guide recording is in flight
-  // (lifted here) so we can disable JogPanel + the „fahre dorthin" drive-to while
-  // the arm is being hand-guided — a driven move would fight the student's hand.
-  const [recordPanelRecording, setRecordPanelRecording] = useState(false);
+  const caps = useSelector((s) => (s.tasks && s.tasks.taskStatus ? s.tasks.taskStatus.capabilities : null) || null);
+  // Vormachen (teach/TeachHost) owns the arm while open: JogPanel, the
+  // LeaderToggle, the „fahre dorthin" drive-to and the sim entry are locked, since
+  // a driven move or a container flip would fight the student's hand.
+  const teachOpen = useSelector(selectTeachOpen);
+  const paused = useSelector((s) => !!(s.workshop && s.workshop.paused));
+  const previewActive = useSelector(selectPreviewActive);
   // Batch 2b: JogPanel reports whether a hand-guide (torque-off) session is open
-  // (lifted here, like recordPanelRecording) so we can disable RecordPanel while
-  // the arm is limp — one shared truth, so neither panel shows a stale
-  // „freigeschaltet"/disabled state after the sibling closes the session.
+  // (lifted here) so Vormachen refuses to open over a limp arm — one shared truth,
+  // so no surface shows a stale „freigeschaltet" state after JogPanel closes it.
   const [jogHandGuideOn, setJogHandGuideOn] = useState(false);
+  // The Roboter-Studio bridge (:8769): Vormachen reads `leaderOn` (leader vs
+  // hand mode, and a leader switched on mid-session) and `followerOnly` (the
+  // leader gone in leader mode). Polled only while the page is shown.
+  const rsBridge = useRsBridgeStatus({ enabled: isActive });
+  const teachReason = teachEntryBlockReason({
+    heartbeatStatus,
+    runState,
+    paused,
+    simMode,
+    jogHandGuideOn,
+    previewActive,
+  });
   const subscriptions = useRosTopicSubscription();
-  const { getObjectCatalog, capturePose, jogArm } = useRosServiceCaller();
+  const { getObjectCatalog, jogArm } = useRosServiceCaller();
   const workspaceRef = useRef(null);
   // Blockly 12 ties getSelected() to the FocusManager, and clicking the
   // camera overlay (a non-focusable div) blurs the block in Chromium →
@@ -300,8 +353,7 @@ function WorkshopPage({ isActive }) {
   // SELECTED change-listener and use THAT at mark time, not live selection.
   const lastPinBlockIdRef = useRef(null);
 
-  // Redesign: the right-side tools (camera / jog / record / 3D / Lernpfad /
-  // Debug) live in a tabbed, collapsible RightDock instead of a tall stacked
+  // Redesign: the right-side tools (camera / jog / 3D / Lernpfad / Debug) live in a tabbed, collapsible RightDock instead of a tall stacked
   // column. `dockOpen` is the ordered list of open panels (≤2 by default),
   // `dockCollapsed` folds the dock to its rail. Both persist across reloads.
   const [dockOpen, setDockOpen] = useState(readDockOpen);
@@ -359,21 +411,9 @@ function WorkshopPage({ isActive }) {
     });
   }, []);
 
-  // Blockly does not react to CONTAINER-only resizes (its built-in listener is
-  // window-scoped), so tell it to re-fit its SVG when the dock width or collapsed
-  // state changes — otherwise the workspace canvas keeps its old width and the
-  // trashcan / zoom controls drift off the visible area.
-  useEffect(() => {
-    const ws = workspaceRef.current;
-    if (!ws || typeof Blockly.svgResize !== 'function') return undefined;
-    const id = window.requestAnimationFrame(() => {
-      try { Blockly.svgResize(ws); } catch (_) { /* workspace torn down */ }
-    });
-    return () => window.cancelAnimationFrame(id);
-    // `simMode` swaps the right region (dock ↔ SimStage), changing the editor's
-    // available width — Blockly's window-scoped listener won't see that, so
-    // re-fit on the swap too.
-  }, [dockWidth, dockCollapsed, simMode]);
+  // No svgResize here: BlocklyWorkspace observes its own host box, which covers
+  // the dock width/collapse and the simulator swap as well as every HEIGHT
+  // change (Code-Vorschau, Protokoll, banners) the old width-only effect missed.
 
   // A panel is „busy" while it holds a live session that must NOT be torn out
   // (recording, hand-guide, or an active tutorial that owns the toolbox
@@ -381,9 +421,8 @@ function WorkshopPage({ isActive }) {
   const isTabBusy = useCallback(
     (id) =>
       (id === 'control' && jogHandGuideOn)
-      || (id === 'record' && recordPanelRecording)
       || (id === 'tutorial' && !!activeTutorialId),
-    [jogHandGuideOn, recordPanelRecording, activeTutorialId],
+    [jogHandGuideOn, activeTutorialId],
   );
 
   const handleToggleTab = useCallback(
@@ -454,51 +493,19 @@ function WorkshopPage({ isActive }) {
     });
   }, []);
 
-  // Phase-2: „Position merken" — capture the follower's current pose as a named
-  // destination via /workshop/capture_pose. Does NOT drive the arm; the named
-  // point is then usable by „Ziel <Name>" / „bewege zu".
-  const [capturing, setCapturing] = useState(false);
-  const handleCapturePose = useCallback(async () => {
-    if (typeof window === 'undefined') return;
-    const raw = window.prompt('Name für die gemerkte Position:', '');
-    if (raw === null) return; // student cancelled the prompt
-    const name = sanitizeDestinationName(raw);
-    if (!name) {
-      toast.error(
-        'Bitte einen gültigen Namen verwenden '
-        + '(Buchstaben, Zahlen, Leerzeichen, _ und -).',
-      );
-      return;
-    }
-    setCapturing(true);
-    try {
-      const res = await capturePose(name);
-      if (res && res.success) {
-        const x = Number(res.world_x || 0).toFixed(3);
-        const y = Number(res.world_y || 0).toFixed(3);
-        const z = Number(res.world_z || 0).toFixed(3);
-        toast.success(
-          `Position „${name}" gemerkt (x=${x}, y=${y}, z=${z}). `
-          + 'Du kannst sie jetzt mit „Ziel ' + name + '" verwenden.',
-        );
-      } else {
-        toast.error(
-          (res && res.message)
-            ? res.message
-            : 'Position konnte nicht gemerkt werden.',
-        );
-      }
-    } catch (e) {
-      toast.error(`Position konnte nicht gemerkt werden: ${e.message || e}`);
-    } finally {
-      setCapturing(false);
-    }
-  }, [capturePose]);
   // Twin overlays: the end-effector path trail + base/TCP coordinate triads.
   const [showPath, setShowPath] = useState(false);
   const [showFrames, setShowFrames] = useState(false);
   // Bumped to clear the path trail (manual „Bahn löschen" + auto on run start).
   const [pathClearToken, setPathClearToken] = useState(0);
+  // „Ziel auf den Sim-Tisch setzen" (Sammlung flyout): {mode: 'ziel', token}; each
+  // new token switches SimScene into its „Ziel setzen" mode.
+  const [simZielRequest, setSimZielRequest] = useState(null);
+  // A request belongs to the simulator visit it was made in: SimScene remounts
+  // on the next entry and would otherwise re-read a stale token as a new ask.
+  useEffect(() => {
+    if (!simMode) setSimZielRequest(null);
+  }, [simMode]);
   // Auto-clear the trail when a run begins, so each run draws a fresh path.
   const prevRunStateRef = useRef(runState);
   useEffect(() => {
@@ -507,6 +514,34 @@ function WorkshopPage({ isActive }) {
     }
     prevRunStateRef.current = runState;
   }, [runState]);
+
+  // One ladder for the header sim toggle AND a preview's sim entry
+  // (utils/simPreview.js::simEntryBlockReason).
+  const simEntryReason = simEntryBlockReason({
+    simRunActive, simMode, activeTutorialId, teachOpen, jogHandGuideOn,
+  });
+  const simEntryReasonRef = useRef(simEntryReason);
+  simEntryReasonRef.current = simEntryReason;
+  const simModeRef = useRef(simMode);
+  simModeRef.current = simMode;
+  // Enter the simulator on behalf of a preview (and, later, „Ziel setzen" / a
+  // point marker with `showPath: false`, which never turns the trail on).
+  // Resolves true once the simulator is (or already was) open.
+  const ensureSimMode = useCallback(async ({ showPath: withPath = true } = {}) => {
+    if (simModeRef.current) {
+      if (withPath) setShowPath(true);
+      return true;
+    }
+    const reason = simEntryReasonRef.current;
+    if (reason) {
+      toast.error(SIM_ENTRY_BLOCK_TITLES_DE[reason]);
+      return false;
+    }
+    setSimMode(true);
+    if (withPath) setShowPath(true);
+    await new Promise((resolve) => { setTimeout(resolve, SIM_ENTRY_SETTLE_MS); });
+    return true;
+  }, []);
 
   const calibrated =
     hasIntrinsicScene &&
@@ -548,9 +583,24 @@ function WorkshopPage({ isActive }) {
   // is re-applied — Blockly only consumes initialJson on mount.
   useEffect(() => {
     let cancelled = false;
-    if (!isActive) return undefined;
-    if (selectedWorkflowId && accessToken) {
-      getWorkflow(accessToken, selectedWorkflowId)
+    if (!isActive) {
+      // The inactive page renders nothing, so BlocklyWorkspace is unmounted and
+      // its next activation must hydrate: a skip left armed here (a create that
+      // resolved after a tab switch) would remount the editor from a stale
+      // document under the new id.
+      skipHydrateForIdRef.current = null;
+      return undefined;
+    }
+    // The live editor IS this document — the page just created it; a re-fetch
+    // would remount the workspace and drop anything captured during the save
+    // round-trip. Consumed once, so a later re-open hydrates normally.
+    if (selectedWorkflowId && skipHydrateForIdRef.current === selectedWorkflowId) {
+      skipHydrateForIdRef.current = null;
+      return undefined;
+    }
+    const token = accessTokenRef.current;
+    if (selectedWorkflowId && token) {
+      getWorkflow(token, selectedWorkflowId)
         .then((w) => {
           if (cancelled) return;
           setInitialJsonForEditor(w?.blockly_json || null);
@@ -576,9 +626,10 @@ function WorkshopPage({ isActive }) {
     return () => { cancelled = true; };
     // unsavedBlocklyJson intentionally omitted from deps: we only want
     // to seed once per workflow-id change. The change-listener inside
-    // BlocklyWorkspace keeps Redux in sync after that.
+    // BlocklyWorkspace keeps Redux in sync after that. The token is read
+    // through its ref: only its PRESENCE is a dependency (see hasAccessToken).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, selectedWorkflowId, accessToken]);
+  }, [isActive, selectedWorkflowId, hasAccessToken]);
 
   const handleEditorChange = useCallback(
     (json) => {
@@ -629,7 +680,7 @@ function WorkshopPage({ isActive }) {
         toast.error('Im Simulator kann der echte Roboter nicht gefahren werden.');
         return;
       }
-      // Refuse a driven move on a disconnected robot (matches JogPanel/RecordPanel
+      // Refuse a driven move on a disconnected robot (matches JogPanel/Vormachen
       // gating) — without this the jog call silently no-ops "successfully".
       if (heartbeatStatus !== 'connected') {
         toast.error('Roboter nicht verbunden.');
@@ -639,8 +690,8 @@ function WorkshopPage({ isActive }) {
         toast.error('Während ein Programm läuft, ist das Fahren gesperrt.');
         return;
       }
-      if (recordPanelRecording) {
-        toast.error('Erst die Aufnahme beenden, dann fahren.');
+      if (teachOpen) {
+        toast.error(DE.TEACH_DRIVE_BLOCKED);
         return;
       }
       // Refuse a driven move while the arm is hand-guided (limp — the student's
@@ -679,7 +730,7 @@ function WorkshopPage({ isActive }) {
       }
     });
     return () => setDriveToHandler(null);
-  }, [jogArm, simMode, runState, recordPanelRecording, heartbeatStatus, jogHandGuideOn]);
+  }, [jogArm, simMode, runState, teachOpen, heartbeatStatus, jogHandGuideOn]);
 
   // Fetch the named-object catalog for the Blockly dropdowns once the editor is
   // available (calibrated). Re-fetch if the student calibrates in-session. The
@@ -734,34 +785,121 @@ function WorkshopPage({ isActive }) {
     [dispatch]
   );
 
-  // Click-to-pin handler: when the student clicks the scene camera and
-  // a destination_pin block is selected, write the world coordinates
-  // returned by /workshop/mark_destination into that block's X/Y/Z
-  // fields. Without this, the destination_pin handler at runtime would
-  // overwrite the click data with zeros (audit §1.4).
-  const handleMarkDestination = useCallback(({ label, world_x, world_y, world_z }) => {
+  // Camera click → Ziel, without a prompt. CameraFeedOverlay asks for the
+  // label BEFORE it calls /workshop/mark_destination, so one point has one name
+  // on the server and in the editor:
+  //   * a „setze Ziel = Pin" block was selected last → that block's own NAME,
+  //     and its X/Y/Z fields receive the coordinates (the remembered id, not the
+  //     live selection — the camera click has already blurred the block in
+  //     Chromium, see lastPinBlockIdRef; getBlockById returns null for a
+  //     deleted block, which drops the stale id);
+  //   * otherwise → a new „Ziel n" in the document's destination store, which
+  //     the overlay then offers to rename inline.
+  const resolveMarkLabel = useCallback(() => {
     const ws = workspaceRef.current;
-    if (!ws) return;
-    // Use the remembered pin id, not live selection — the camera click has
-    // already blurred the block in Chromium (see lastPinBlockIdRef note).
-    // getBlockById returns null for a deleted/disposed block, so this also
-    // covers "selected a pin, then deleted it before clicking".
+    if (!ws) return null;
     const id = lastPinBlockIdRef.current;
     const block = id ? ws.getBlockById(id) : null;
-    if (!block || block.type !== 'edubotics_destination_pin') {
-      lastPinBlockIdRef.current = null;
-      toast(
-        'Tipp: Wähle zuerst einen "setze Ziel = Pin"-Block aus, '
-        + 'dann klicke in die Szenen-Kamera, damit die Koordinaten '
-        + `in den Block geschrieben werden. (Ziel "${label}" wurde `
-        + 'serverseitig gespeichert, aber kein Block aktualisiert.)',
-        { icon: '💡' },
-      );
+    if (block && block.type === 'edubotics_destination_pin') {
+      return { label: (block.getFieldValue('NAME') || '').trim() || 'A', target: 'block', blockId: id };
+    }
+    lastPinBlockIdRef.current = null;
+    const store = getDestinationStore(ws);
+    if (store.getEntries().length >= MAX_DESTINATION_ENTRIES) { toast.error(DE.ERR_STORE_FULL); return null; }
+    return { label: nextAutoName(DE.TEACH_AUTO_NAME_ZIEL, takenDestinationNames(ws)), target: 'store' };
+  }, []);
+
+  const handleMarkDestination = useCallback(({ label, target, blockId, world_x, world_y, world_z }) => {
+    const ws = workspaceRef.current;
+    if (!ws) return null;
+    if (target === 'block') {
+      const block = blockId ? ws.getBlockById(blockId) : null;
+      if (!block || block.type !== 'edubotics_destination_pin') return null;
+      applyPinnedCoordinates(block, world_x, world_y, world_z);
+      toast.success(formatDe(DE.CAMERA_PIN_WRITTEN, block.getFieldValue('NAME') || label));
+      return null;
+    }
+    const res = getDestinationStore(ws).add({
+      name: label,
+      kind: 'pin',
+      source: 'camera',
+      x: world_x,
+      y: world_y,
+      z: world_z,
+      robot_type: robotType || undefined,
+    });
+    if (!res.ok) { toast.error(res.error); return null; }
+    toast.success(formatDe(DE.CAMERA_ZIEL_CREATED, res.entry.name));
+    return { entryId: res.entry.id, name: res.entry.name };
+  }, [robotType]);
+
+  // The overlay's inline rename field. The result is returned so the field
+  // stays open (with the refusal toasted) until a name is accepted.
+  const handleRenameMarked = useCallback((entryId, rawName) => {
+    const ws = workspaceRef.current;
+    if (!ws) return { ok: false };
+    const res = getDestinationStore(ws).rename(entryId, rawName);
+    if (!res.ok) toast.error(res.error);
+    return res;
+  }, []);
+
+  // The document's Ziele/Positionen as markers on the twin and the sim table.
+  // The store notifies synchronously on every change (add, rename, delete, undo,
+  // load), so the markers follow the document without polling.
+  const [storeEntries, setStoreEntries] = useState([]);
+  useEffect(() => {
+    if (!workspace) {
+      setStoreEntries([]);
+      return undefined;
+    }
+    const store = getDestinationStore(workspace);
+    setStoreEntries(store.getEntries());
+    return store.subscribe((entries) => setStoreEntries(entries));
+  }, [workspace]);
+  // Point-shaped variable values ({x, y, z} in metres) get a violet marker
+  // (the most recently set ones — sammlung/markers.js::variablePointsFromValues).
+  const variablePoints = useMemo(() => variablePointsFromValues(variableValues), [variableValues]);
+  const markers = useMemo(
+    () => buildTwinMarkers({
+      entries: storeEntries, variablePoints, simMode, highlight,
+    }),
+    [storeEntries, variablePoints, simMode, highlight],
+  );
+  // The ghost arm: the highlighted Position's captured joints, when they fit
+  // this arm (utils/armProfile.js::ghostJointsFromEntry). Anything else → null.
+  const ghostJoints = useMemo(() => {
+    if (!highlight || highlight.kind !== 'pose') return null;
+    const entry = storeEntries.find((e) => e && e.id === highlight.id);
+    return ghostJointsFromEntry(entry, caps, robotType);
+  }, [storeEntries, highlight, caps, robotType]);
+
+  // A tap in SimScene's „Ziel setzen" mode: a pin ON the virtual table (z 0).
+  // On a calibrated real rig the same entry later re-asks the measured plane
+  // (plane-tracked, motion.resolve_destination_z); an uncalibrated rig cannot
+  // START it outside the simulator because showEditor hides RunControls.
+  const handleCreateSimDestination = useCallback(({ x, y }) => {
+    const ws = workspaceRef.current;
+    if (!ws) return;
+    const store = getDestinationStore(ws);
+    if (store.getEntries().length >= MAX_DESTINATION_ENTRIES) {
+      toast.error(DE.ERR_STORE_FULL);
       return;
     }
-    applyPinnedCoordinates(block, world_x, world_y, world_z);
-    toast.success(`Koordinaten in Block „${block.getFieldValue('NAME') || label}" geschrieben.`);
-  }, []);
+    const res = store.add({
+      name: nextAutoName(DE.TEACH_AUTO_NAME_ZIEL, takenDestinationNames(ws)),
+      kind: 'pin',
+      source: 'sim',
+      x,
+      y,
+      z: 0,
+      robot_type: robotType || undefined,
+    });
+    if (!res.ok) {
+      toast.error(res.error);
+      return;
+    }
+    toast.success(formatDe(DE.SIM_ZIEL_CREATED, res.entry.name));
+  }, [robotType]);
 
   // Autosave hook. Restores the most-recent local state if the parent
   // hasn't already loaded a server workflow. Scoped per user so two
@@ -783,61 +921,301 @@ function WorkshopPage({ isActive }) {
     onRestore: handleAutosaveRestore,
   });
 
-  const handleSave = useCallback(async () => {
-    if (!accessToken) {
-      toast.error('Nicht angemeldet — Speichern nicht möglich.');
-      return;
+  // ONE save path. The Speichern button, and later every caller that needs a
+  // saved workflow id (Vormachen, the Sammlung drawer), go through
+  // saveWorkflowNow. The document is serialised when a save STARTS (the live
+  // workspace first, the last onChange snapshot as the fallback), so nothing
+  // captured during an earlier round-trip is lost.
+  const selectedWorkflowIdRef = useRef(selectedWorkflowId);
+  const simSceneRef = useRef(simScene);
+  const editorJsonRef = useRef(editorJson);
+  const unsavedJsonRef = useRef(unsavedBlocklyJson);
+  useEffect(() => { selectedWorkflowIdRef.current = selectedWorkflowId; }, [selectedWorkflowId]);
+  useEffect(() => { simSceneRef.current = simScene; }, [simScene]);
+  useEffect(() => { editorJsonRef.current = editorJson; }, [editorJson]);
+  useEffect(() => { unsavedJsonRef.current = unsavedBlocklyJson; }, [unsavedBlocklyJson]);
+  // followUpId: the workflow a queued follow-up belongs to, snapshotted when it
+  // is QUEUED (null = the document a create in flight is creating).
+  const saveStateRef = useRef({
+    inflight: null, followUp: null, followUpToast: false, followUpErrorToast: false, followUpId: null,
+  });
+
+  // Every failure returns its German reason as `error` (a caller that shows
+  // the failure itself — the drawer's rename — passes toastOnError: false, so
+  // the student is not told twice).
+  const runSave = useCallback(async ({ toastOnSuccess, toastOnError = true }) => {
+    const fail = (toastText, error) => {
+      if (toastOnError) toast.error(toastText);
+      return { ok: false, error };
+    };
+    const token = accessTokenRef.current;
+    if (!token) {
+      return fail('Nicht angemeldet — Speichern nicht möglich.',
+        new Error('Nicht angemeldet — Speichern nicht möglich.'));
     }
-    const json = editorJson || unsavedBlocklyJson;
-    if (!json) {
-      toast.error('Workflow ist leer.');
-      return;
+    let json = null;
+    const ws = workspaceRef.current;
+    if (ws) {
+      try {
+        json = Blockly.serialization.workspaces.save(ws);
+      } catch (_) {
+        json = null;
+      }
     }
-    // The DOCUMENT — `blocks`, `variables` and the student's canvas notes
-    // (`workspaceComments`) — and deliberately NOT the two editor-plugin keys.
-    // `suggested-blocks` grows ~16 bytes per drag and is never trimmed, so a
-    // long-lived workflow eventually crosses MAX_BLOCKLY_JSON_BYTES (256 KiB)
-    // and becomes unsaveable behind a German 413 the student cannot act on;
-    // `backpack` is one student's private clipboard, and this row is read by
-    // group siblings, cloned by `clone_workflow` and published as a classroom
-    // template. See `utils/blocklyPayload.js` for the measurements and for the
-    // disclosed cost (the stash no longer survives a reload). AUTOSAVE keeps
-    // the full output — it is local, per-student and never shared.
+    if (!json) json = editorJsonRef.current || unsavedJsonRef.current;
+    if (!json) return fail('Workflow ist leer.', new Error('Workflow ist leer.'));
+    // The DOCUMENT — `blocks`, `variables`, the student's canvas notes
+    // (`workspaceComments`) and the Ziele/Positionen (`edubotics-destinations`)
+    // — and deliberately NOT the two editor-plugin keys. `suggested-blocks`
+    // grows ~16 bytes per drag and is never trimmed, so a long-lived workflow
+    // eventually crosses MAX_BLOCKLY_JSON_BYTES (256 KiB) and becomes unsaveable
+    // behind a German 413 the student cannot act on; `backpack` is one
+    // student's private clipboard, and this row is read by group siblings,
+    // cloned by `clone_workflow` and published as a classroom template. See
+    // `utils/blocklyPayload.js` for the measurements and for the disclosed cost
+    // (the stash no longer survives a reload). AUTOSAVE keeps the full output —
+    // it is local, per-student and never shared.
+    //
+    // Both `blockly_json` writes below stay one key per line: the call-site
+    // fence in utils/__tests__/blocklyPayload.test.js reads them line by line,
+    // and a one-line object literal reads as an unslimmed writer.
     const documentJson = slimSavePayload(json);
     setSaving(true);
+    // The id is taken with the document, at the same instant: a workflow picked
+    // while this save is in flight must not receive this document's blocks.
+    const targetId = selectedWorkflowIdRef.current;
     try {
-      if (selectedWorkflowId) {
-        await updateWorkflow(accessToken, selectedWorkflowId, {
+      if (targetId) {
+        await updateWorkflow(token, targetId, {
           blockly_json: documentJson,
-          sim_scene: simScene,
+          sim_scene: simSceneRef.current,
         });
-      } else {
-        const created = await createWorkflow(accessToken, {
-          name: 'Neuer Workflow',
-          description: '',
-          blockly_json: documentJson,
-          sim_scene: simScene,
-        });
-        if (created && created.id) {
-          dispatch(setSelectedWorkflowId(created.id));
-        }
+        if (selectedWorkflowIdRef.current === targetId) dispatch(markWorkflowSaved());
+        if (toastOnSuccess) toast.success('Gespeichert.');
+        return { ok: true, workflowId: targetId, created: false };
       }
-      dispatch(markWorkflowSaved());
-      toast.success('Gespeichert.');
+      const created = await createWorkflow(token, {
+        name: 'Neuer Workflow',
+        description: '',
+        blockly_json: documentJson,
+        sim_scene: simSceneRef.current,
+      });
+      if (!created || !created.id) {
+        return fail('Speichern fehlgeschlagen: keine Workflow-ID erhalten.',
+          new Error('keine Workflow-ID erhalten.'));
+      }
+      // Stamp the new id only while the editor still shows the unsaved document
+      // it was created from. A workflow the student picked meanwhile keeps the
+      // editor; forcing the id over it would put that workflow's blocks under
+      // the new id at the next save.
+      if (selectedWorkflowIdRef.current === null) {
+        skipHydrateForIdRef.current = created.id;
+        selectedWorkflowIdRef.current = created.id;
+        const st = saveStateRef.current;
+        if (st.followUp && st.followUpId === null) st.followUpId = created.id;
+        dispatch(setSelectedWorkflowId(created.id));
+        dispatch(markWorkflowSaved());
+      }
+      if (toastOnSuccess) toast.success('Gespeichert.');
+      return { ok: true, workflowId: created.id, created: true };
     } catch (e) {
-      toast.error(`Speichern fehlgeschlagen: ${e.message || e}`);
+      return fail(`Speichern fehlgeschlagen: ${e.message || e}`, e);
     } finally {
       setSaving(false);
     }
-  }, [accessToken, editorJson, unsavedBlocklyJson, selectedWorkflowId, simScene, dispatch]);
+  }, [dispatch]);
+
+  // A save never JOINS a save in flight — a join reported `ok` for a document
+  // it never sent. A caller arriving mid-save gets ONE coalesced follow-up that
+  // serialises when IT starts (so the newest document is the last one sent);
+  // the follow-up of a create is an update, never a second create.
+  const saveWorkflowNow = useCallback(({ toastOnSuccess = true, toastOnError = true } = {}) => {
+    const st = saveStateRef.current;
+    const start = (toastFlag, errorToastFlag) => {
+      const p = runSave({ toastOnSuccess: toastFlag, toastOnError: errorToastFlag });
+      st.inflight = p;
+      p.finally(() => { if (st.inflight === p) st.inflight = null; });
+      return p;
+    };
+    if (!st.inflight) return start(toastOnSuccess, toastOnError);
+    st.followUpToast = st.followUpToast || toastOnSuccess;
+    st.followUpErrorToast = st.followUpErrorToast || toastOnError;
+    if (!st.followUp) {
+      st.followUpId = selectedWorkflowIdRef.current;
+      st.followUp = st.inflight.then(() => {}, () => {}).then(() => {
+        const toastFlag = st.followUpToast;
+        const errorToastFlag = st.followUpErrorToast;
+        const queuedFor = st.followUpId;
+        st.followUp = null;
+        st.followUpToast = false;
+        st.followUpErrorToast = false;
+        st.followUpId = null;
+        // Another workflow was opened while the follow-up waited: the document
+        // it would serialise now belongs to that workflow, not to this save.
+        if (selectedWorkflowIdRef.current !== queuedFor) {
+          return { ok: false, error: new Error('Inzwischen wurde ein anderer Workflow geöffnet.') };
+        }
+        return start(toastFlag, errorToastFlag);
+      });
+    }
+    return st.followUp;
+  }, [runSave]);
+  const handleSave = useCallback(() => { saveWorkflowNow(); }, [saveWorkflowNow]);
+
+  // The open workflow's recordings (studioAssets.trajectories): on open, when a
+  // token first appears, and when the tab regains focus.
+  const refetchTrajectories = useCallback(() => {
+    if (!isActive || !selectedWorkflowId || !accessTokenRef.current) return;
+    dispatch(fetchTrajectories({ accessToken: accessTokenRef.current, workflowId: selectedWorkflowId }));
+  }, [isActive, selectedWorkflowId, dispatch]);
+  useEffect(() => { refetchTrajectories(); }, [refetchTrajectories, hasAccessToken]);
+  useRefetchOnFocus(isActive ? refetchTrajectories : null);
+
+  // The Sammlung provider: ONE object for the page's lifetime (BlocklyWorkspace
+  // reads it through a ref), fed a snapshot of the rig and the recording list.
+  const sammlungProvider = useMemo(() => createSammlungProvider(), []);
+  // Fails CLOSED on an unanswered bridge probe (see previewLeaderGate); before the
+  // FIRST answer every preview ▶ is also disabled (`previewPending` below).
+  const previewGate = previewLeaderGate(rsBridge, caps);
+  const previewPending = previewGate.rsLeaderPending;
+  // ▶ on a card or in the drawer: a generated SIM run (hooks/useSimPreview.js).
+  // It never addresses the real arm (no /workshop/replay, no /workshop/jog).
+  const { startPreview } = useSimPreview({
+    workspace,
+    simScene,
+    workflowId: selectedWorkflowId,
+    accessToken,
+    robotType,
+    gates: {
+      heartbeatStatus,
+      runState,
+      paused,
+      teachOpen,
+      jogHandGuideOn,
+      simMode,
+      activeTutorialId,
+      ...previewGate,
+    },
+    ensureSimMode,
+  });
+  // The provider's action handler is installed once; it reaches the latest
+  // startPreview through this ref.
+  const startPreviewRef = useRef(startPreview);
+  startPreviewRef.current = startPreview;
+  // ▶ / „Im Simulator zeigen" on a point-shaped VARIABLE is not a run: open the
+  // simulator (never the trail) and highlight its marker — no service call.
+  // Every other kind goes to the generated sim run. Shared by the flyout card
+  // action and the drawer, so both routes behave identically.
+  // The highlight the student ASKED for (a drawer focus, a variable's
+  // „Im Simulator zeigen"), as { kind, id }. A card hover is transient: when it
+  // ends the highlight falls back to this one instead of to nothing, and the
+  // drawer retires it when its focus or tab changes or it closes.
+  const drawerHighlightRef = useRef(null);
+  const previewAsset = useCallback(async (asset, options) => {
+    if (asset && asset.kind === 'variable') {
+      // A refused sim entry (a running program, a tutorial) has already toasted;
+      // highlighting a marker on a stage that never opened would be a lie.
+      if (!(await ensureSimMode({ showPath: false }))) return;
+      const highlight = { kind: 'variable', id: `var:${asset.name}` };
+      drawerHighlightRef.current = highlight;
+      dispatch(setHighlight(highlight));
+      return;
+    }
+    await startPreviewRef.current(asset, options);
+  }, [ensureSimMode, dispatch]);
+  useEffect(() => {
+    sammlungProvider.setSnapshot({
+      capabilities: {
+        hardware: true,
+        simMode,
+        teach: true,
+        drawer: true,
+        preview: true,
+        // A sim-run ▶ (recording, Ziel, Position — never a variable's marker)
+        // is drawn disabled until the control bridge has answered once.
+        previewPending,
+        previewVariables: true,
+        pinCamera: !!calibrated && !simMode,
+        pinSim: true,
+      },
+      robotType: robotType || '',
+      trajectories: {
+        status: (trajectoryList && trajectoryList.status) || 'none',
+        items: (trajectoryList && Array.isArray(trajectoryList.items)) ? trajectoryList.items : [],
+      },
+      lastPreviewResult: lastPreviewResult || {},
+      variableValues: variableValues || {},
+      restrictedBlocks: Array.isArray(restrictedBlocks) ? restrictedBlocks : null,
+    });
+  }, [sammlungProvider, simMode, calibrated, previewPending, robotType, trajectoryList,
+    lastPreviewResult, variableValues, restrictedBlocks]);
+  useEffect(() => {
+    sammlungProvider.setActionHandler((action) => {
+      if (!action || typeof action !== 'object') return;
+      if (action.type === 'pinCamera') {
+        setDockCollapsed(false);
+        setDockOpen((prev) => (prev.includes('camera') ? prev : addOpenTab(prev, 'camera', isTabBusy)));
+        toast(DE.FLY_PIN_CAMERA_HINT, { icon: '📷' });
+      } else if (action.type === 'jumpToBlock') {
+        jumpToBlock(workspaceRef.current, action.blockId);
+      } else if (action.type === 'manage') {
+        // The card or „Alle verwalten …" already names the tab (recording →
+        // aufnahmen, pin → ziele, pose → positionen, variable → variablen).
+        dispatch(openDrawer({ tab: action.tab, focusId: action.focusId ?? null }));
+      } else if (action.type === 'teach') {
+        // TeachHost judges the gates (and a glide) when it processes the request.
+        dispatch(requestTeach({ focus: action.focus ?? null }));
+      } else if (action.type === 'preview') {
+        // The flyout ▶ always plays at tempo 1.0 (a variable: its marker).
+        previewAsset(action.asset);
+      } else if (action.type === 'pinSim') {
+        // Never turns the trail on (ensureSimMode showPath: false).
+        ensureSimMode({ showPath: false }).then((entered) => {
+          if (entered) setSimZielRequest({ mode: 'ziel', token: Date.now() });
+        });
+      } else if (action.type === 'highlight') {
+        dispatch(setHighlight(action.asset ?? drawerHighlightRef.current));
+      }
+    });
+  }, [sammlungProvider, isTabBusy, dispatch, ensureSimMode, previewAsset]);
+  // A Ziel/Position focused in the drawer highlights its marker; clearing that
+  // focus (or leaving those tabs) drops only the highlight the drawer set.
+  // drawerHighlightRef is declared with previewAsset above.
+  const drawerOpen = !!(drawer && drawer.open);
+  const drawerTab = drawer ? drawer.tab : null;
+  const drawerFocusId = drawer ? drawer.focusId : null;
+  useEffect(() => {
+    let kind = null;
+    if (drawerTab === 'ziele') kind = 'pin';
+    else if (drawerTab === 'positionen') kind = 'pose';
+    if (drawerOpen && kind && drawerFocusId) {
+      drawerHighlightRef.current = { kind, id: drawerFocusId };
+      dispatch(setHighlight({ kind, id: drawerFocusId }));
+    } else if (drawerHighlightRef.current) {
+      drawerHighlightRef.current = null;
+      dispatch(setHighlight(null));
+    }
+  }, [drawerOpen, drawerTab, drawerFocusId, dispatch]);
+  // The drawer belongs to the editor it was opened over. Redux keeps
+  // `drawer.open` across the Galerie switch and a tab change, so without this
+  // it reappeared over a freshly mounted editor.
+  useEffect(() => {
+    if (!isActive || view === 'gallery') dispatch(closeDrawer());
+  }, [isActive, view, dispatch]);
+  // RunControls writes its IK pre-check warnings UNKEYED; re-apply the keyed
+  // missing-name warnings after each change (forced — the validator caches).
+  useEffect(() => {
+    if (workspace) refreshAssetReferenceWarnings(workspace, { force: true });
+  }, [debuggerWarnings, workspace]);
 
   if (!isActive) return null;
 
   // Per-panel gating (same rules as before — the panels just moved into the dock).
+  // Vormachen owns the arm while it is open, so JogPanel's torque-off and nudges
+  // are locked (its „Arm festsetzen" stays usable — JogPanel never disables it).
   const jogDisabled =
-    heartbeatStatus !== 'connected' || runState === 'running' || recordPanelRecording;
-  const recordDisabled =
-    heartbeatStatus !== 'connected' || runState === 'running' || jogHandGuideOn;
+    heartbeatStatus !== 'connected' || runState === 'running' || teachOpen;
+  const teachReasonText = teachReason ? TEACH_BLOCK_TITLES_DE[teachReason] : null;
 
   // Editor/Galerie switch — shared by both views (in the editor toolbar, and as a
   // standalone strip in the gallery view where the toolbar is absent).
@@ -893,8 +1271,8 @@ function WorkshopPage({ isActive }) {
 
   // Dock tab registry. `render` is INVOKED by RightDock (never used as a
   // `<tab.render/>` element type), so each panel INSTANCE stays mounted across
-  // dock re-renders / resize — critical for JogPanel + RecordPanel, whose unmount
-  // teardown re-torques the arm / cancels a recording. The whole dock is REPLACED
+  // dock re-renders / resize — critical for JogPanel, whose unmount teardown
+  // re-torques the arm. The whole dock is REPLACED
   // by SimStage while in the simulator (see the render tree), so these tabs never
   // render during sim — no `hidden: simMode` / SimScene special-casing is needed.
   const dockTabs = [
@@ -902,32 +1280,20 @@ function WorkshopPage({ isActive }) {
       id: 'camera',
       label: DE.DOCK_TAB_CAMERA,
       icon: '📷',
+      // Only the feed: capturing the arm's pose moved into Vormachen („P").
       render: () => (
         <div className="flex flex-col gap-2 h-full">
           {/* The feed fills the panel height (fill), so a taller panel shows a
               bigger camera instead of a small strip with empty space below. */}
           <div className="flex-1 min-h-0">
-            <CameraFeedOverlay camera="scene" clickable={true} fill onMark={handleMarkDestination} />
-          </div>
-          {/* Capture the arm's CURRENT pose as a named destination (does NOT
-              drive the arm). Usable afterwards via „Ziel <Name>" / „bewege zu". */}
-          <div className="shrink-0 flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={handleCapturePose}
-              disabled={capturing}
-              title="Aktuelle Roboterposition als benanntes Ziel speichern"
-              className={
-                'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
-                + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
-                + 'border-[var(--accent)] hover:opacity-90'
-              }
-            >
-              {capturing ? 'Wird gemerkt …' : 'Position merken'}
-            </button>
-            <span className="text-[11px] text-[var(--ink-3)]">
-              Speichert die aktuelle Armposition als Ziel.
-            </span>
+            <CameraFeedOverlay
+              camera="scene"
+              clickable={true}
+              fill
+              resolveMarkLabel={resolveMarkLabel}
+              onMark={handleMarkDestination}
+              onRenameMark={handleRenameMarked}
+            />
           </div>
         </div>
       ),
@@ -939,20 +1305,6 @@ function WorkshopPage({ isActive }) {
       busy: jogHandGuideOn,
       render: () => (
         <JogPanel disabled={jogDisabled} onHandGuideChange={setJogHandGuideOn} />
-      ),
-    },
-    {
-      id: 'record',
-      label: DE.DOCK_TAB_RECORD,
-      icon: '⏺',
-      busy: recordPanelRecording,
-      render: () => (
-        <RecordPanel
-          accessToken={accessToken}
-          workflowId={selectedWorkflowId}
-          disabled={recordDisabled}
-          onRecordingChange={setRecordPanelRecording}
-        />
       ),
     },
     {
@@ -1007,7 +1359,13 @@ function WorkshopPage({ isActive }) {
                 </div>
               }
             >
-              <UrdfTwin showPath={showPath} pathClearToken={pathClearToken} showFrames={showFrames} />
+              <UrdfTwin
+                showPath={showPath}
+                pathClearToken={pathClearToken}
+                showFrames={showFrames}
+                markers={markers}
+                ghostJoints={ghostJoints}
+              />
             </Suspense>
             {showFrames && (
               <div className="absolute bottom-1.5 left-1.5 z-10 px-2 py-0.5 rounded bg-black/55 text-[10px] text-white/80 font-mono">
@@ -1035,7 +1393,7 @@ function WorkshopPage({ isActive }) {
 
   return (
     // ONE warned glide-to-Grundstellung prompt for the whole page: its three
-    // callers (TableTouchStep, JogPanel, RecordPanel) can each unmount while a
+    // callers (TableTouchStep, JogPanel, Vormachen) can each unmount while a
     // countdown is still running — see HomeGlidePrompt.
     <HomeGlideProvider>
     <div className="flex flex-col h-full w-full overflow-hidden">
@@ -1062,14 +1420,11 @@ function WorkshopPage({ isActive }) {
                 // four): never toggle while a sim run is in flight, and never
                 // ENTER sim during an active tutorial (replacing the dock would
                 // unmount SkillmapPlayer + lift the toolbox restriction
-                // mid-tutorial), during a live recording (the dock swap unmounts
-                // RecordPanel, whose teardown cancels and DISCARDS the take), or
+                // mid-tutorial), while Vormachen is open (it owns the REAL arm,
+                // which the simulator would hide under the student's hand), or
                 // while the arm is hand-guided (unmounting JogPanel re-torques /
                 // resets the live hand-guide session under the student's hand).
-                if (simRunActive
-                    || (!simMode && (!!activeTutorialId || recordPanelRecording || jogHandGuideOn))) {
-                  return;
-                }
+                if (simEntryReason) return;
                 setSimMode((v) => {
                   const next = !v;
                   // The avoidance trail is a headline sim feature — turn it on
@@ -1080,17 +1435,10 @@ function WorkshopPage({ isActive }) {
                 });
               }}
               aria-pressed={simMode}
-              disabled={simRunActive
-                || (!simMode && (!!activeTutorialId || recordPanelRecording || jogHandGuideOn))}
-              title={simRunActive
-                ? 'Während ein Simulationslauf läuft, kann der Simulator nicht beendet werden — bitte zuerst stoppen.'
-                : (!simMode && !!activeTutorialId)
-                ? 'Während ein Lernpfad aktiv ist, kann der Simulator nicht gestartet werden — bitte den Lernpfad zuerst beenden.'
-                : (!simMode && recordPanelRecording)
-                ? 'Während einer Aufnahme kann der Simulator nicht gestartet werden — bitte die Aufnahme zuerst beenden.'
-                : (!simMode && jogHandGuideOn)
-                ? 'Solange der Arm freigeschaltet ist, kann der Simulator nicht gestartet werden — bitte den Arm zuerst festsetzen.'
-                : 'Programm auf einem virtuellen Roboter testen — ohne echten Roboter und ohne Kalibrierung'}
+              disabled={!!simEntryReason}
+              title={simEntryReason
+                ? SIM_ENTRY_BLOCK_TITLES_DE[simEntryReason]
+                : SIM_TOGGLE_DEFAULT_TITLE_DE}
               className={
                 'text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 '
                 + 'disabled:cursor-not-allowed '
@@ -1103,10 +1451,32 @@ function WorkshopPage({ isActive }) {
             </button>
             {/* Follower-only leader toggle (Windows student rig only; self-hides
                 on Jetson/cloud where the GUI control bridge is absent). */}
-            <LeaderToggle isActive={isActive} />
+            <LeaderToggle
+              isActive={isActive}
+              lockedReason={teachOpen ? DE.TEACH_BLOCK_UI_LOCKED : null}
+            />
           </div>
         </div>
       </header>
+      {/* Vormachen: the full-screen teaching overlay, opened from the toolbar
+          button or a Sammlung flyout („✋ … vormachen"). */}
+      <TeachHost
+        isActive={isActive}
+        workspace={workspace}
+        accessToken={accessToken}
+        workflowId={selectedWorkflowId}
+        robotType={robotType}
+        caps={caps}
+        heartbeatStatus={heartbeatStatus}
+        runState={runState}
+        paused={paused}
+        simMode={simMode}
+        jogHandGuideOn={jogHandGuideOn}
+        previewActive={previewActive}
+        rsBridge={rsBridge}
+        saveWorkflowNow={saveWorkflowNow}
+        refetchTrajectories={refetchTrajectories}
+      />
       <main className="flex-1 overflow-hidden flex flex-col min-h-0">
         {showEditor ? (
           <>
@@ -1144,6 +1514,19 @@ function WorkshopPage({ isActive }) {
                   }
                   extra={
                     <>
+                      <button
+                        type="button"
+                        onClick={() => dispatch(requestTeach({ focus: null }))}
+                        disabled={!!teachReason || teachOpen}
+                        title={teachReasonText || DE.TOOLBAR_TEACH_TITLE}
+                        className={
+                          'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
+                          + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
+                          + 'border-[var(--accent)] hover:opacity-90'
+                        }
+                      >
+                        {DE.TOOLBAR_TEACH}
+                      </button>
                       <VersionHistoryDropdown
                         workflowId={selectedWorkflowId}
                         onRestore={(updated) => {
@@ -1169,14 +1552,32 @@ function WorkshopPage({ isActive }) {
                   className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden"
                 >
                   <div className="flex-1 min-w-0 min-h-0 p-2 md:p-3 md:pr-0">
-                    <div className="h-full bg-white rounded-lg border border-[var(--line)] overflow-hidden min-h-[320px]">
+                    {/* No min-height: Blockly must fill exactly the box that is
+                        visible (see BlocklyWorkspace). On narrow screens the dock
+                        is height-capped instead, so the editor keeps ≥ half. */}
+                    {/* `relative`: the Sammlung drawer is positioned inside this
+                        box beside the toolbox and never changes its size. */}
+                    <div className="relative h-full bg-white rounded-lg border border-[var(--line)] overflow-hidden">
                       <BlocklyWorkspace
                         key={editorKey}
                         initialJson={initialJsonForEditor}
                         onChange={handleEditorChange}
                         onWorkspaceReady={handleWorkspaceReady}
                         restrictedBlocks={restrictedBlocks}
+                        sammlungProvider={sammlungProvider}
                       />
+                      {drawer && drawer.open && (
+                        <SammlungDrawer
+                          workspace={workspace}
+                          provider={sammlungProvider}
+                          accessToken={accessToken}
+                          workflowId={selectedWorkflowId}
+                          robotType={robotType}
+                          onPreview={previewAsset}
+                          saveWorkflowNow={saveWorkflowNow}
+                          refetchTrajectories={refetchTrajectories}
+                        />
+                      )}
                     </div>
                   </div>
                   {simMode ? (
@@ -1196,6 +1597,10 @@ function WorkshopPage({ isActive }) {
                       onToggleShowPath={() => setShowPath((v) => !v)}
                       onClearPath={() => setPathClearToken((t) => t + 1)}
                       pathClearToken={pathClearToken}
+                      markers={markers}
+                      ghostJoints={ghostJoints}
+                      requestedMode={simZielRequest}
+                      onCreateDestination={handleCreateSimDestination}
                     />
                   ) : (
                     <>

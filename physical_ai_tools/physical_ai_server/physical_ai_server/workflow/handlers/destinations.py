@@ -167,7 +167,7 @@ def destination_pin(ctx, args: dict[str, Any]) -> None:
         x = float(raw_x)
         y = float(raw_y)
         z = float(raw_z)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise WorkflowError(f'Ziel "{name}" hat ungültige Koordinaten.')
     _validate_coordinates(name, x, y, z)
     # PLANE-TRACKED. The block's Z field was READ OFF the table plane at the

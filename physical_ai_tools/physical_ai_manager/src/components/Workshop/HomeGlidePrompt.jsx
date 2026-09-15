@@ -19,7 +19,8 @@ import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 //
 // Three places hand the student a limp arm and then lock it again: „Tisch
 // vermessen" (touch-off solve), „Arm festsetzen" after „Arm freischalten", and
-// the end of „Bewegung aufnehmen". The server now re-locks every one of them IN
+// „✋ Vormachen" (offered ONCE at „Fertig", only after a confirmed re-lock of an
+// arm the session released). The server now re-locks every one of them IN
 // PLACE (on the OMX the re-torque used to snap the arm back to the controller's
 // old setpoint in ~50 ms — the "jump to home"). Getting back to the
 // Grundstellung is then a SEPARATE, visible step: this dialog warns first, counts
@@ -229,8 +230,9 @@ export function useHomeGlidePrompt() {
 // ONE prompt per Roboter-Studio page. The three callers do not live long
 // enough to own a countdown themselves: a successful touch-off advances the
 // wizard (unmounting TableTouchStep), „Überspringen" on the verify step swaps
-// the wizard for the editor, and the dock panel hosting JogPanel/RecordPanel
-// can be closed. WorkshopPage outlives all three, so it hosts the provider.
+// the wizard for the editor, the dock panel hosting JogPanel can be closed, and
+// the Vormachen overlay unmounts the moment it offers the glide. WorkshopPage
+// outlives all three, so it hosts the provider.
 const HomeGlideContext = createContext(null);
 
 export function HomeGlideProvider({ children }) {

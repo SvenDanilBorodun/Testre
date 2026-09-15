@@ -7,7 +7,10 @@ pattern from ``test_workshop_capture_pose.py``. Verifies:
 * a 'manual' request RELAXES against on_manual (jog/record/replay/capture coexist)
   yet still refuses on collision / recording / inference / training / calibration
   / workflow;
-* every NON-manual request refuses when on_manual is set.
+* every NON-manual request refuses when on_manual is set;
+* D8 — a 'leader_teach' request is refused by every owner (itself included),
+  every non-capture mode refuses while on_leader_teach is set, and 'capture'
+  relaxes against on_manual AND on_leader_teach.
 """
 
 from __future__ import annotations
@@ -47,7 +50,22 @@ _ALL_FLAGS = dict(
     on_calibration=False,
     on_workflow=False,
     on_manual=False,
+    on_leader_teach=False,
 )
+
+# The owner flags in the order the gate checks them, with the sentence each one
+# refuses a 'leader_teach' request with (the D8 matrix, §5.3).
+_OWNER_SENTENCES = [
+    ('_collision_active', 'Eine Kollision wird gerade behoben — bitte zuerst die '
+                          'Schritte im Hinweisfenster abschließen.'),
+    ('on_recording', 'Aufnahme läuft gerade — bitte zuerst stoppen.'),
+    ('on_inference', 'Inferenz läuft gerade — bitte zuerst stoppen.'),
+    ('is_training', 'Training läuft gerade — bitte abwarten oder abbrechen.'),
+    ('on_calibration', 'Kalibrierung läuft gerade — bitte zuerst beenden.'),
+    ('on_workflow', 'Ein Workflow läuft gerade — bitte zuerst stoppen.'),
+    ('on_manual', 'Handbetrieb ist aktiv — bitte zuerst den Handbetrieb beenden.'),
+    ('on_leader_teach', 'Eine Leader-Aufnahme läuft gerade — bitte zuerst beenden.'),
+]
 
 
 def _node(**overrides):
@@ -101,6 +119,67 @@ def test_missing_on_manual_attr_defaults_false():
     )
     ok, msg = _assert(st, 'recording')
     assert ok is True and msg == ''
+
+
+# --- D8: leader_teach + capture --------------------------------------------
+
+@pytest.mark.parametrize('flag,sentence', _OWNER_SENTENCES)
+def test_leader_teach_refused_by_every_owner(flag, sentence):
+    # Every owner refuses a leader take — itself included (a second tab).
+    ok, msg = _assert(_node(**{flag: True}), 'leader_teach')
+    assert ok is False
+    assert msg == sentence
+
+
+@pytest.mark.parametrize('mode', ['manual', 'recording', 'inference', 'workflow',
+                                  'calibration', 'training', 'leader_teach'])
+def test_non_capture_modes_refused_while_leader_teach(mode):
+    ok, msg = _assert(_node(on_leader_teach=True), mode)
+    assert ok is False
+    assert 'Leader-Aufnahme' in msg
+
+
+def test_manual_refused_while_leader_teach():
+    ok, msg = _assert(_node(on_leader_teach=True), 'manual')
+    assert (ok, msg) == (False, 'Eine Leader-Aufnahme läuft gerade — bitte zuerst beenden.')
+
+
+@pytest.mark.parametrize('flag', ['on_manual', 'on_leader_teach'])
+def test_capture_relaxes_against_manual_and_leader_teach(flag):
+    ok, msg = _assert(_node(**{flag: True}), 'capture')
+    assert ok is True and msg == ''
+    ok, msg = _assert(_node(on_manual=True, on_leader_teach=True), 'capture')
+    assert ok is True and msg == ''
+
+
+@pytest.mark.parametrize('flag,sentence', _OWNER_SENTENCES[:6])
+def test_capture_still_refuses_on_other_owners(flag, sentence):
+    ok, msg = _assert(_node(**{flag: True}), 'capture')
+    assert (ok, msg) == (False, sentence)
+
+
+@pytest.mark.parametrize('mode', ['recording', 'inference', 'workflow', 'calibration'])
+def test_other_modes_refuse_while_leader_teach_even_vs_their_own_flag(mode):
+    # workflow relaxes vs on_workflow and calibration vs on_calibration, but
+    # neither relaxes against a leader take.
+    own = {'workflow': 'on_workflow', 'calibration': 'on_calibration'}.get(mode)
+    flags = {'on_leader_teach': True}
+    if own:
+        flags[own] = True
+    ok, msg = _assert(_node(**flags), mode)
+    assert ok is False
+    assert 'Leader-Aufnahme' in msg
+
+
+def test_missing_on_leader_teach_attr_defaults_false():
+    st = types.SimpleNamespace(
+        _collision_active=False, on_recording=False, on_inference=False,
+        is_training=False, on_calibration=False, on_workflow=False,
+        on_manual=False,
+    )
+    for mode in ('leader_teach', 'capture', 'manual', 'workflow'):
+        ok, msg = _assert(st, mode)
+        assert ok is True and msg == '', mode
 
 
 if __name__ == '__main__':

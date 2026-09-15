@@ -167,6 +167,14 @@ const studioAssetsSlice = createSlice({
       state.teach.focus = focus || null;
       state.teach.requested = null;
     },
+    // R7: a session opened while the leader status was unknown (`mode: null`)
+    // gets its mode once the bridge answers. Only an OPEN, still-unresolved
+    // session, and only a real mode — a resolved session never changes mode.
+    teachModeResolved: (state, action) => {
+      const { mode } = action.payload || {};
+      if (!state.teach.open || state.teach.mode || (mode !== 'hand' && mode !== 'leader')) return;
+      state.teach.mode = mode;
+    },
     teachRequestHandled: (state) => {
       state.teach.requested = null;
     },
@@ -256,6 +264,7 @@ export const {
   previewUnreachable,
   requestTeach,
   teachOpened,
+  teachModeResolved,
   teachRequestHandled,
   teachClosed,
   setHighlight,

@@ -493,6 +493,14 @@ export const DE = {
     'Der Leader-Arm wurde eingeschaltet — Vormachen mit der Hand ist jetzt nicht möglich.',
   TEACH_COLLISION_DISCARDED: 'Kollision — die Aufnahme wurde verworfen.',
   TEACH_LEADER_GONE: 'Der Leader-Arm ist nicht mehr aktiv — bitte Vormachen schließen und neu öffnen.',
+  // R7 (teach/teachGates.js::teachLeaderStatusNoticeDe): the leader-status bridge
+  // cannot say whether the leader is on — no new teaching until it answers. The
+  // bridge is the EduBotics program on Windows, the Orange Pi agent in Pi mode.
+  TEACH_LEADER_STATUS_PENDING: 'Roboterstatus wird geprüft …',
+  TEACH_LEADER_STATUS_UNKNOWN:
+    'Leader-Status unbekannt — das EduBotics-Programm auf diesem PC antwortet nicht. Vormachen ist gesperrt, bis es wieder antwortet.',
+  TEACH_LEADER_STATUS_UNKNOWN_PI:
+    'Leader-Status unbekannt — der Roboter-Dienst antwortet nicht. Bitte die System-Seite prüfen. Vormachen ist gesperrt, bis er wieder antwortet.',
   TEACH_LEADER_DISCARD_OLD: 'Alte Aufnahme verwerfen',
   TEACH_LEADER_ZIEL_HINT: 'Tippe den Tisch mit dem Leader-Arm nur leicht an.',
   TEACH_ROBOT_PREVIEW_RUNNING: 'Der Arm fährt die Bewegung ab — Abstand halten.',

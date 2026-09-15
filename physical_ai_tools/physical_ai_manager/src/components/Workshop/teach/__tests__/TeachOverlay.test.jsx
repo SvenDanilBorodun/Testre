@@ -59,6 +59,12 @@ vi.mock('../teachSounds', () => ({
   createTeachSounds: () => ({ tick() {}, start() {}, stop() {}, capture() {}, dispose() {} }),
 }));
 vi.mock('../../../../utils/rosConnectionManager', () => ({ __esModule: true, default: { ros: null } }));
+// R7: the unavailable-bridge notice names the Windows program or the Pi service.
+const mockPi = vi.hoisted(() => ({ piMode: false }));
+vi.mock('../../../../utils/piMode', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, usePiMode: () => ({ piMode: mockPi.piMode, piModeResolved: true }) };
+});
 vi.mock('roslib', () => ({
   __esModule: true,
   default: { Topic: function Topic() { this.subscribe = () => {}; this.unsubscribe = () => {}; } },
@@ -170,6 +176,7 @@ beforeEach(() => {
   mockHook.onKeyDown = null;
   mockGlide.offer.mockReset();
   mockActivation.status = null;
+  mockPi.piMode = false;
   mockGlide.active = false;
   mockStore.add.mockReset();
   mockStore.getById.mockReset();
@@ -1269,5 +1276,162 @@ describe('TeachOverlay — leader mode with the real session hook (D8)', () => {
     key('Escape');
     await act(async () => { await flush(); });
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// R7 (fixed 2026-09-15): a rig that may have a leader, with a bridge that cannot
+// report the leader state, gets a German notice and no NEW teaching until it
+// answers; exits and an in-flight take stay available.
+describe('TeachOverlay — leader status unknown (R7)', () => {
+  const PENDING = { available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false, probed: false };
+  const DOWN = { ...PENDING, probed: true };
+  const FOLLOWER = { available: true, followerOnly: true, hasLeader: true, busy: false, leaderOn: false, probed: true };
+  const OMX_FULL = { has_leader: true };
+  const btn = (label) => screen.getByRole('button', { name: new RegExp(label) });
+  const notice = () => screen.queryByTestId('teach-leader-status');
+
+  test('pending session: „Roboterstatus wird geprüft …", no mode, no state line, teaching disabled, Fertig works', () => {
+    const actions = withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps({ mode: 'pending', caps: OMX_FULL, rsBridge: PENDING })} />);
+    expect(notice()).toHaveTextContent('Roboterstatus wird geprüft …');
+    expect(notice()).toHaveAttribute('role', 'status');
+    expect(screen.queryByText(DE.TEACH_MODE_HAND)).toBeNull();
+    expect(screen.queryByText(DE.TEACH_MODE_LEADER)).toBeNull();
+    expect(screen.getByTestId('teach-state-line')).toHaveTextContent('');
+    expect(screen.queryByText(DE.TEACH_HINT_LOCKED)).toBeNull();
+    expect(btn(DE.TEACH_KEY_REC)).toBeDisabled();
+    expect(btn(DE.TEACH_KEY_POSE)).toBeDisabled();
+    expect(btn(DE.TEACH_KEY_ZIEL)).toBeDisabled();
+    expect(screen.queryByText(DE.TEACH_KEY_FREE)).toBeNull();
+    expect(mockHook.props).toMatchObject({ mode: 'pending', leaderStatusUnknown: true });
+    const done = screen.getByRole('button', { name: `${DE.TEACH_DONE} (Esc)` });
+    expect(done).toBeEnabled();
+    fireEvent.click(done);
+    expect(actions.finish).toHaveBeenCalledTimes(1);
+  });
+
+  test('hand mode, bridge answered unavailable (Windows): the EduBotics-program notice, new teaching disabled', () => {
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps({ caps: OMX_FULL, rsBridge: DOWN })} />);
+    expect(notice()).toHaveTextContent(
+      'Leader-Status unbekannt — das EduBotics-Programm auf diesem PC antwortet nicht. '
+      + 'Vormachen ist gesperrt, bis es wieder antwortet.');
+    expect(notice()).toHaveAttribute('role', 'alert');
+    for (const label of [DE.TEACH_KEY_REC, DE.TEACH_KEY_POSE, DE.TEACH_KEY_ZIEL, DE.TEACH_KEY_FREE]) {
+      expect(btn(label)).toBeDisabled();
+    }
+    expect(mockHook.props.leaderStatusUnknown).toBe(true);
+  });
+
+  test('Pi mode: the Roboter-Dienst / System-Seite notice', () => {
+    mockPi.piMode = true;
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps({ caps: OMX_FULL, rsBridge: DOWN })} />);
+    expect(notice()).toHaveTextContent(
+      'Leader-Status unbekannt — der Roboter-Dienst antwortet nicht. Bitte die System-Seite prüfen. '
+      + 'Vormachen ist gesperrt, bis er wieder antwortet.');
+    expect(notice()).not.toHaveTextContent('EduBotics-Programm');
+  });
+
+  test('the notice follows the live polls: pending → unavailable → answered (notice gone, teaching enabled)', () => {
+    withSnapshot({ state: 'fest' });
+    const { rerender } = render(<TeachOverlay {...baseProps({ caps: OMX_FULL, rsBridge: PENDING })} />);
+    expect(notice()).toHaveTextContent(DE.TEACH_LEADER_STATUS_PENDING);
+    rerender(<TeachOverlay {...baseProps({ caps: OMX_FULL, rsBridge: DOWN })} />);
+    expect(notice()).toHaveTextContent(DE.TEACH_LEADER_STATUS_UNKNOWN);
+    rerender(<TeachOverlay {...baseProps({ caps: OMX_FULL, rsBridge: FOLLOWER })} />);
+    expect(notice()).toBeNull();
+    expect(btn(DE.TEACH_KEY_REC)).toBeEnabled();
+    expect(btn(DE.TEACH_KEY_FREE)).toBeEnabled();
+    expect(mockHook.props.leaderStatusUnknown).toBe(false);
+  });
+
+  test.each(['omx_follower', 'edu6_studio', 'edu1_studio'])('%s (has_leader false): never blocked, no notice', () => {
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps({ caps: { has_leader: false }, rsBridge: PENDING })} />);
+    expect(notice()).toBeNull();
+    expect(btn(DE.TEACH_KEY_REC)).toBeEnabled();
+    expect(btn(DE.TEACH_KEY_POSE)).toBeEnabled();
+    expect(mockHook.props.leaderStatusUnknown).toBe(false);
+  });
+
+  test('an in-flight hand take is not interrupted: Stop stays enabled, a capture waits, review keep/discard stay', () => {
+    withSnapshot({ state: 'aufnahme', elapsedS: 4 });
+    const { rerender } = render(<TeachOverlay {...baseProps({ caps: OMX_FULL, rsBridge: DOWN })} />);
+    expect(btn(DE.TEACH_KEY_STOP)).toBeEnabled();
+    expect(btn(DE.TEACH_KEY_POSE)).toBeDisabled();
+    expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_LOCK) })).toBeEnabled();
+    withSnapshot({ state: 'pruefen', take: TAKE, relock: 'ok' });
+    rerender(<TeachOverlay {...baseProps({ caps: OMX_FULL, rsBridge: DOWN })} />);
+    const review = screen.getByTestId('teach-review');
+    expect(within(review).getByRole('button', { name: new RegExp(DE.TEACH_REVIEW_KEEP) })).toBeEnabled();
+    expect(within(review).getByRole('button', { name: new RegExp(DE.TEACH_REVIEW_DISCARD) })).toBeEnabled();
+    expect(within(review).getByRole('button', { name: new RegExp(DE.TEACH_REVIEW_AGAIN) })).toBeDisabled();
+    expect(within(review).getByRole('button', { name: DE.TEACH_REVIEW_ON_ROBOT })).toBeDisabled();
+  });
+
+  test('an in-flight leader take is not interrupted: Stop enabled, P/Z wait, no leader-gone', () => {
+    withSnapshot({ state: 'aufnahme', elapsedS: 2 });
+    render(<TeachOverlay {...baseProps({ mode: 'leader', caps: OMX_FULL, rsBridge: DOWN })} />);
+    expect(notice()).toHaveTextContent(DE.TEACH_LEADER_STATUS_UNKNOWN);
+    expect(btn(DE.TEACH_KEY_STOP)).toBeEnabled();
+    expect(btn(DE.TEACH_KEY_POSE)).toBeDisabled();
+    expect(btn(DE.TEACH_KEY_ZIEL)).toBeDisabled();
+    expect(mockHook.props).toMatchObject({ leaderGone: false, leaderStatusUnknown: true });
+    expect(screen.queryByText(DE.TEACH_LEADER_GONE)).toBeNull();
+  });
+});
+
+describe('TeachOverlay — leader status unknown with the real session hook (R7)', () => {
+  const PENDING = { available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false, probed: false };
+  const DOWN = { ...PENDING, probed: true };
+  const key = (k) => {
+    const ev = new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
+    act(() => { screen.getByRole('dialog').dispatchEvent(ev); });
+    return ev;
+  };
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  test('pending: keys send nothing, a live-leader answer shows no lock-out banner, Esc closes without a glide', async () => {
+    const props = baseProps({ mode: 'pending', caps: { has_leader: true }, rsBridge: PENDING });
+    const { rerender } = render(<TeachOverlay {...props} />);
+    for (const k of [' ', 'f', 'p', 'z']) key(k);
+    await act(async () => { vi.advanceTimersByTime(4000); await flush(); });
+    expect(mockRos.handGuide).not.toHaveBeenCalled();
+    expect(mockRos.recordControl).not.toHaveBeenCalled();
+    expect(mockRos.capturePose).not.toHaveBeenCalled();
+    rerender(<TeachOverlay {...props} rsBridge={{ ...PENDING, available: true, leaderOn: true, probed: true }} />);
+    await act(async () => { await flush(); });
+    expect(screen.queryByText(DE.TEACH_LEADER_TURNED_ON)).toBeNull();
+    expect(toast.error).not.toHaveBeenCalledWith(DE.TEACH_LEADER_TURNED_ON);
+    key('Escape');
+    await act(async () => { await flush(); });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockGlide.offer).not.toHaveBeenCalled();
+  });
+
+  test('hand mode, bridge gone mid-take: Space still stops the take; the next Space starts nothing', async () => {
+    mockRos.recordControl.mockResolvedValueOnce({ success: true, message: 'Aufnahme läuft.' });
+    const props = baseProps({ caps: { has_leader: true } });
+    const { rerender } = render(<TeachOverlay {...props} />);
+    key(' ');
+    await act(async () => { vi.advanceTimersByTime(3000); await flush(); });
+    expect(mockRos.recordControl).toHaveBeenCalledWith('start');
+    expect(screen.getByText(DE.TEACH_STATE_REC)).toBeInTheDocument();
+    rerender(<TeachOverlay {...props} rsBridge={DOWN} />);
+    await act(async () => { vi.advanceTimersByTime(1000); await flush(); });
+    expect(screen.getByTestId('teach-leader-status')).toHaveTextContent(DE.TEACH_LEADER_STATUS_UNKNOWN);
+    expect(mockRos.recordControl).toHaveBeenCalledTimes(1);
+    mockRos.recordControl.mockResolvedValueOnce({ success: false, message: '', points_json: '' });
+    mockRos.handGuide.mockResolvedValueOnce({ success: true });
+    key(' ');
+    await act(async () => { await flush(); });
+    expect(mockRos.recordControl).toHaveBeenLastCalledWith('stop');
+    await act(async () => { vi.advanceTimersByTime(500); await flush(); });
+    key(' ');
+    await act(async () => { vi.advanceTimersByTime(4000); await flush(); });
+    expect(mockRos.recordControl).toHaveBeenCalledTimes(2);
   });
 });

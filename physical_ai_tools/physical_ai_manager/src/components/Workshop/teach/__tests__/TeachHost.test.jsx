@@ -36,16 +36,25 @@ vi.mock('../../HomeGlidePrompt', () => ({
   useHomeGlide: () => ({ offerHomeGlide: vi.fn(), homeGlideDialog: null, homeGlideActive: mockGlide.active }),
 }));
 
-const mockOverlay = vi.hoisted(() => ({ props: null }));
-vi.mock('../TeachOverlay', () => ({
-  __esModule: true,
-  default: (props) => {
-    mockOverlay.props = props;
-    return <div data-testid="teach-overlay-stub" />;
-  },
-}));
+const mockOverlay = vi.hoisted(() => ({ props: null, mounts: 0 }));
+vi.mock('../TeachOverlay', async () => {
+  const { useEffect } = await vi.importActual('react');
+  return {
+    __esModule: true,
+    // Named + capitalized so react-hooks/rules-of-hooks recognizes it as a component.
+    default: function MockTeachOverlay(props) {
+      mockOverlay.props = props;
+      // One bump per MOUNT, so a remount on the resolved mode is observable.
+      useEffect(() => { mockOverlay.mounts += 1; }, []);
+      return <div data-testid="teach-overlay-stub" />;
+    },
+  };
+});
 
 const IDLE_BRIDGE = { available: true, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false };
+// hooks/useRsBridgeStatus before its first answer, and after an unavailable one.
+const PENDING_BRIDGE = { available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false, probed: false };
+const DOWN_BRIDGE = { ...PENDING_BRIDGE, probed: true };
 
 function hostProps(over = {}) {
   return {
@@ -79,6 +88,7 @@ beforeEach(() => {
   toast.error.mockClear();
   mockGlide.active = false;
   mockOverlay.props = null;
+  mockOverlay.mounts = 0;
   teachState({});
 });
 
@@ -125,8 +135,10 @@ describe('TeachHost', () => {
     ['a live leader with unknown caps', { rsBridge: { ...IDLE_BRIDGE, leaderOn: true }, caps: null }, 'leader'],
     ['a live leader on a leader-less profile', { rsBridge: { ...IDLE_BRIDGE, leaderOn: true }, caps: { has_leader: false } }, 'hand'],
     ['no leader', { rsBridge: IDLE_BRIDGE, caps: { has_leader: true } }, 'hand'],
-    ['a failed bridge probe', { rsBridge: { available: false, followerOnly: false, leaderOn: false }, caps: { has_leader: true } }, 'hand'],
-    ['no bridge at all', { rsBridge: null, caps: { has_leader: true } }, 'hand'],
+    // R7 (2026-09-15): a leader-less profile needs no bridge answer at all.
+    ['a failed bridge probe on a leader-less profile', { rsBridge: DOWN_BRIDGE, caps: { has_leader: false } }, 'hand'],
+    ['an unanswered bridge on a leader-less profile', { rsBridge: PENDING_BRIDGE, caps: { has_leader: false } }, 'hand'],
+    ['the bridge itself saying has_leader false', { rsBridge: { ...IDLE_BRIDGE, followerOnly: true, hasLeader: false, probed: true }, caps: null }, 'hand'],
   ])('D8: %s opens %s mode, never a refusal', (_label, over, mode) => {
     teachState({ requested: { focus: 'recording', token: 9 } });
     render(<TeachHost {...hostProps(over)} />);
@@ -134,6 +146,60 @@ describe('TeachHost', () => {
     const opened = dispatched('studioAssets/teachOpened');
     expect(opened).toHaveLength(1);
     expect(opened[0].payload).toEqual({ mode, focus: 'recording' });
+  });
+
+  // R7 (2026-09-15): a rig that may have a leader never opens silently in hand
+  // mode while the bridge cannot report the leader state.
+  test.each([
+    ['the bridge has not answered yet', { rsBridge: PENDING_BRIDGE, caps: { has_leader: true } }],
+    ['the bridge answered unavailable', { rsBridge: DOWN_BRIDGE, caps: { has_leader: true } }],
+    ['a failed probe of an older hook (no probed field)', { rsBridge: { available: false, followerOnly: false, leaderOn: false }, caps: { has_leader: true } }],
+    ['no bridge at all', { rsBridge: null, caps: { has_leader: true } }],
+    ['unknown caps and no answer', { rsBridge: PENDING_BRIDGE, caps: null }],
+  ])('R7: %s opens UNRESOLVED (mode null), never a refusal', (_label, over) => {
+    teachState({ requested: { focus: 'pose', token: 11 } });
+    render(<TeachHost {...hostProps(over)} />);
+    expect(toast.error).not.toHaveBeenCalled();
+    const opened = dispatched('studioAssets/teachOpened');
+    expect(opened).toHaveLength(1);
+    expect(opened[0].payload).toEqual({ mode: null, focus: 'pose' });
+  });
+
+  test('R7: an unresolved session renders the overlay as pending', () => {
+    teachState({ open: true, mode: null, focus: 'ziel' });
+    render(<TeachHost {...hostProps({ rsBridge: PENDING_BRIDGE, caps: { has_leader: true } })} />);
+    expect(mockOverlay.props.mode).toBe('pending');
+    expect(dispatched('studioAssets/teachModeResolved')).toHaveLength(0);
+  });
+
+  test.each([
+    ['answered „follower only" → hand', { ...IDLE_BRIDGE, followerOnly: true, probed: true }, 'hand'],
+    ['answered „leader on" → leader', { ...IDLE_BRIDGE, leaderOn: true, probed: true }, 'leader'],
+  ])('R7: the bridge %s resolves the open session', (_label, answer, mode) => {
+    teachState({ open: true, mode: null, focus: null });
+    const { rerender } = render(<TeachHost {...hostProps({ rsBridge: PENDING_BRIDGE, caps: { has_leader: true } })} />);
+    rerender(<TeachHost {...hostProps({ rsBridge: DOWN_BRIDGE, caps: { has_leader: true } })} />);
+    expect(dispatched('studioAssets/teachModeResolved')).toHaveLength(0);
+    rerender(<TeachHost {...hostProps({ rsBridge: answer, caps: { has_leader: true } })} />);
+    const resolved = dispatched('studioAssets/teachModeResolved');
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].payload).toEqual({ mode });
+  });
+
+  test('R7: the resolved mode REMOUNTS the overlay (a fresh session); a resolved session is never re-resolved', () => {
+    teachState({ open: true, mode: null });
+    const { rerender } = render(<TeachHost {...hostProps({ rsBridge: PENDING_BRIDGE, caps: { has_leader: true } })} />);
+    expect(mockOverlay.mounts).toBe(1);
+    teachState({ open: true, mode: 'hand' });
+    rerender(<TeachHost {...hostProps({ rsBridge: { ...IDLE_BRIDGE, followerOnly: true, probed: true }, caps: { has_leader: true } })} />);
+    expect(mockOverlay.props.mode).toBe('hand');
+    expect(mockOverlay.mounts).toBe(2);
+    mockDispatch.mockClear();
+    // The bridge going away in an open, resolved session changes nothing here.
+    rerender(<TeachHost {...hostProps({ rsBridge: DOWN_BRIDGE, caps: { has_leader: true } })} />);
+    expect(mockOverlay.props.mode).toBe('hand');
+    expect(mockOverlay.mounts).toBe(2);
+    expect(dispatched('studioAssets/teachModeResolved')).toHaveLength(0);
   });
 
   test('renders the overlay in leader mode when the slice says so', () => {

@@ -35,6 +35,7 @@ import reducer, {
   setPreviewTempo,
   setRenameSplit,
   teachOpened,
+  teachModeResolved,
   openDrawer,
 } from '../studioAssetsSlice';
 import {
@@ -279,6 +280,20 @@ describe('studioAssets — small reducers', () => {
     expect(reducer(init(), setPreviewTempo(7)).drawer.previewTempo).toBe(2.0);
     expect(reducer(init(), setPreviewTempo(0.1)).drawer.previewTempo).toBe(0.5);
     expect(reducer(init(), setPreviewTempo('x')).drawer.previewTempo).toBe(1.0);
+  });
+
+  test('R7: teachOpened with no mode opens UNRESOLVED; teachModeResolved sets it once', () => {
+    const open = reducer(reducer(init(), requestTeach({ focus: 'pose' })), teachOpened({ mode: null, focus: 'pose' }));
+    expect(open.teach).toEqual({ open: true, requested: null, mode: null, focus: 'pose' });
+    const resolved = reducer(open, teachModeResolved({ mode: 'leader' }));
+    expect(resolved.teach).toEqual({ open: true, requested: null, mode: 'leader', focus: 'pose' });
+    // A resolved session never changes mode, a closed one is never resolved,
+    // and only a real mode resolves.
+    expect(reducer(resolved, teachModeResolved({ mode: 'hand' })).teach.mode).toBe('leader');
+    expect(reducer(init(), teachModeResolved({ mode: 'hand' })).teach).toEqual(init().teach);
+    expect(reducer(open, teachModeResolved({ mode: 'pending' })).teach.mode).toBeNull();
+    expect(reducer(open, teachModeResolved({})).teach.mode).toBeNull();
+    expect(reducer(open, teachModeResolved()).teach.mode).toBeNull();
   });
 
   test('requestTeach stamps a token; teachOpened consumes the request', () => {

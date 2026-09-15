@@ -7,6 +7,7 @@
 
 import { DE } from '../../blocks/messages_de';
 import {
+  resolveTeachMode, teachLeaderStatus, teachLeaderStatusNoticeDe,
   teachEntryBlockReason, teachModeFor, TEACH_BLOCK_TITLES_DE, TEACH_COUNTDOWN_S, TEACH_SPACE_DEBOUNCE_MS,
   TEACH_KEEPALIVE_MS, TEACH_RECORD_MAX_S, TEACH_MIN_POINTS, TEACH_ROBOT_PREVIEW_LEAD_IN_MAX_MS,
   TEACH_REPLAY_VELOCITY_FLOOR_RAD_S, TEACH_ROBOT_PREVIEW_NO_MOTION_HINT_MS,
@@ -158,5 +159,45 @@ describe('replayDriveEstimateMs', () => {
     // The old fixed window (lead-in + recorded duration + 1 s) ended while the
     // arm still moved.
     expect(est).toBeGreaterThan(4500 + 30000 + 1000);
+  });
+});
+
+// R7 (fixed 2026-09-15): a rig that may have a leader never teaches before the
+// leader-status bridge has given a DEFINITE answer.
+describe('teachLeaderStatus / resolveTeachMode', () => {
+  const PENDING = { available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false, probed: false };
+  const DOWN = { ...PENDING, probed: true };
+  const LEADER_ON = { available: true, followerOnly: false, hasLeader: true, busy: false, leaderOn: true, probed: true };
+  const FOLLOWER = { available: true, followerOnly: true, hasLeader: true, busy: false, leaderOn: false, probed: true };
+  it.each([
+    ['pending, omx_full', PENDING, { has_leader: true }, 'pending', null],
+    ['pending, caps not yet pushed', PENDING, null, 'pending', null],
+    ['answered unavailable', DOWN, { has_leader: true }, 'unavailable', null],
+    ['an older hook without probed, unavailable', { available: false, leaderOn: false }, { has_leader: true }, 'unavailable', null],
+    ['no bridge object at all', null, { has_leader: true }, 'unavailable', null],
+    ['answered leader on', LEADER_ON, { has_leader: true }, 'known', 'leader'],
+    ['answered follower only', FOLLOWER, { has_leader: true }, 'known', 'hand'],
+    ['answered leader on, caps unknown', LEADER_ON, null, 'known', 'leader'],
+    // Proven leader-less rigs (omx_follower, edu6_studio, edu1_studio) never wait.
+    ['leader-less caps, pending', PENDING, { has_leader: false }, 'known', 'hand'],
+    ['leader-less caps, unavailable', DOWN, { has_leader: false }, 'known', 'hand'],
+    ['leader-less caps, no bridge', null, { has_leader: false }, 'known', 'hand'],
+    ['the bridge saying has_leader false', { ...FOLLOWER, hasLeader: false }, null, 'known', 'hand'],
+  ])('%s', (_label, rsBridge, caps, status, mode) => {
+    expect(teachLeaderStatus({ rsBridge, caps })).toBe(status);
+    expect(resolveTeachMode({ rsBridge, caps })).toBe(mode);
+  });
+
+  it('the notice: pending wording, then the platform-specific unavailable wording, none when known', () => {
+    expect(teachLeaderStatusNoticeDe('pending', false)).toBe('Roboterstatus wird geprüft …');
+    expect(teachLeaderStatusNoticeDe('pending', true)).toBe(DE.TEACH_LEADER_STATUS_PENDING);
+    expect(teachLeaderStatusNoticeDe('unavailable', false)).toBe(
+      'Leader-Status unbekannt — das EduBotics-Programm auf diesem PC antwortet nicht. '
+      + 'Vormachen ist gesperrt, bis es wieder antwortet.');
+    expect(teachLeaderStatusNoticeDe('unavailable', true)).toBe(
+      'Leader-Status unbekannt — der Roboter-Dienst antwortet nicht. Bitte die System-Seite prüfen. '
+      + 'Vormachen ist gesperrt, bis er wieder antwortet.');
+    expect(teachLeaderStatusNoticeDe('known', false)).toBeNull();
+    expect(teachLeaderStatusNoticeDe('known', true)).toBeNull();
   });
 });

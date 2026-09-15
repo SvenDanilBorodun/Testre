@@ -51,6 +51,51 @@ export function teachModeFor({ rsLeaderOn, caps } = {}) {
   return rsLeaderOn && !(caps && caps.has_leader === false) ? 'leader' : 'hand';
 }
 
+/**
+ * R7 (fixed 2026-09-15): can the leader-status bridge (hooks/useRsBridgeStatus)
+ * pick a Vormachen mode right now?
+ *   'known'       — the rig is PROVEN leader-less (`caps.has_leader === false` or
+ *                   the bridge's `hasLeader === false`), or the bridge ANSWERED
+ *                   (`available === true`), so `leaderOn` is a definite state.
+ *   'pending'     — the bridge has not answered once yet (`probed === false`).
+ *   'unavailable' — it answered but could not report (HTTP error, network
+ *                   error, timeout), or there is no bridge object at all.
+ * Only an EXPLICIT `probed === false` is pending, like utils/simPreview.js's
+ * previewLeaderGate (its preview twin, which keeps its own copy of the
+ * leader-less rule because its precedence differs: a preview refuses a live
+ * leader even on a leader-less profile, Vormachen then teaches by hand).
+ *
+ * @returns {'known'|'pending'|'unavailable'}
+ */
+export function teachLeaderStatus({ rsBridge, caps } = {}) {
+  const bridge = rsBridge && typeof rsBridge === 'object' ? rsBridge : {};
+  if ((caps && caps.has_leader === false) || bridge.hasLeader === false) return 'known';
+  if (bridge.available === true) return 'known';
+  return bridge.probed === false ? 'pending' : 'unavailable';
+}
+
+/**
+ * The mode a Vormachen session gets, or null while the leader status is not
+ * known — then TeachHost opens the overlay UNRESOLVED (notice, no teaching) and
+ * resolves it when the bridge answers. Never silently „hand" on a rig that may
+ * have a live leader.
+ *
+ * @returns {'leader'|'hand'|null}
+ */
+export function resolveTeachMode({ rsBridge, caps } = {}) {
+  if (teachLeaderStatus({ rsBridge, caps }) !== 'known') return null;
+  return teachModeFor({ rsLeaderOn: !!(rsBridge && rsBridge.leaderOn), caps });
+}
+
+/** The German notice for a leader status that is not 'known', or null. */
+export function teachLeaderStatusNoticeDe(status, piMode = false) {
+  if (status === 'pending') return DE.TEACH_LEADER_STATUS_PENDING;
+  if (status === 'unavailable') {
+    return piMode ? DE.TEACH_LEADER_STATUS_UNKNOWN_PI : DE.TEACH_LEADER_STATUS_UNKNOWN;
+  }
+  return null;
+}
+
 export const TEACH_COUNTDOWN_S = 3;
 export const TEACH_SPACE_DEBOUNCE_MS = 400;
 // Well inside the server's 30 s idle watchdog (_MANUAL_IDLE_RETORQUE_S).

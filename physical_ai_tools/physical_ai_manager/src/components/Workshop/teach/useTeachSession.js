@@ -31,6 +31,17 @@
 // stays armed, so a collision DISCARDS: a take in `aufnahme`, a stop answer
 // that lands after the trip, and a returned take whose trip arrives within
 // TEACH_LEADER_COLLISION_GRACE_MS of its stop (keep is held until then).
+//
+// R7 (fixed 2026-09-15): `leaderStatusUnknown` (the leader-status bridge cannot
+// say whether the leader is on) and `mode === 'pending'` (a session TeachHost
+// opened before it could pick hand or leader) block every NEW teaching action —
+// free the arm, start a take or a countdown, R, a capture, a real-arm replay —
+// and leave every EXIT alone: Space/F still stop a take in progress, cancel a
+// countdown or re-lock, Enter/Entf still keep or discard a returned take, Esc and
+// „Fertig" still close. An in-flight take is therefore never interrupted by the
+// bridge going away: a hand take keeps sampling until the student stops it, a
+// leader take until its stop or a server data stop, and `leaderGone` (which
+// needs a POSITIVE follower-only answer) is not raised by an unavailable bridge.
 
 import { useEffect, useRef, useState } from 'react';
 import { DE } from '../blocks/messages_de';
@@ -147,6 +158,9 @@ export function createTeachEngine(getProps, publish) {
   };
 
   const isLeader = () => getProps().mode === 'leader';
+  // R7: opened before the bridge could pick a mode; TeachHost remounts the
+  // overlay (a fresh engine) with the resolved mode.
+  const isPending = () => getProps().mode === 'pending';
 
   // Leader mode: Enter/Esc cannot keep a returned take while a trip of the
   // detector's debounce may still be on its way.
@@ -255,6 +269,13 @@ export function createTeachEngine(getProps, publish) {
         return;
       }
       clearTimer('countdown');
+      // R7: the leader status became unknown during the count — the start is a
+      // NEW teaching action, so the count ends where it began instead.
+      if (newActionsBlocked(getProps())) {
+        setState(r.preCountdown);
+        emit();
+        return;
+      }
       emit();
       runStart(kind, 'countdown', r.preCountdown);
     }, 1000);
@@ -637,8 +658,9 @@ export function createTeachEngine(getProps, publish) {
   function offlineClose() {
     teardown();
     // TEACH_CLOSE_OFFLINE tells the student to hold a LIMP arm — never true in
-    // leader mode, where the follower stays torqued.
-    notify('onError', isLeader() ? DE.TEACH_OFFLINE : DE.TEACH_CLOSE_OFFLINE);
+    // leader mode, where the follower stays torqued, nor in a pending session,
+    // which never released anything.
+    notify('onError', isLeader() || isPending() ? DE.TEACH_OFFLINE : DE.TEACH_CLOSE_OFFLINE);
     emitFinished(true);
   }
 
@@ -803,8 +825,10 @@ export function createTeachEngine(getProps, publish) {
   function onLeaderLive(live) {
     // Tracked only while enabled, so a leader already on at enable still
     // counts as „turned on while open".
-    // Leader mode expects a live leader; its loss is `leaderGone`.
-    if (!getProps().enabled || isLeader()) return;
+    // Leader mode expects a live leader; its loss is `leaderGone`. A pending
+    // session is not hand mode yet: a leader answering „on" RESOLVES it to
+    // leader mode (TeachHost), it is no lock-out.
+    if (!getProps().enabled || isLeader() || isPending()) return;
     const was = r.prevLeaderLive;
     r.prevLeaderLive = live;
     if (!live || was || r.leaderLockout || r.tornDown || r.finished) return;
@@ -1054,6 +1078,22 @@ export function createTeachEngine(getProps, publish) {
     return isLeader() && (p.leaderGone === true || p.activationBlocked === true);
   }
 
+  // R7: no NEW teaching action while the leader status is unknown (see the
+  // module header for what counts as new and why the exits stay open).
+  function newActionsBlocked(p) {
+    return p.leaderStatusUnknown === true || isPending();
+  }
+
+  // Does `key` in the current state START something (rather than stop, cancel,
+  // re-lock, keep, discard or close)?
+  function startsNewAction(key) {
+    if (key === 'p' || key === 'z') return true;
+    if (key === 'r') return r.state === 'pruefen';
+    if (isLeader()) return key === 'space' && r.state === 'bereit';
+    if (key === 'space') return r.state === 'fest' || r.state === 'frei';
+    return key === 'f' && r.state === 'fest';
+  }
+
   function onKeyDown(e) {
     const p = getProps();
     if (!p.enabled || r.tornDown || r.finished) return;
@@ -1072,6 +1112,7 @@ export function createTeachEngine(getProps, publish) {
       r.lastSpaceAt = t;
     }
     if (key !== 'escape' && (p.heartbeatOk === false || r.leaderLockout || leaderBlocked(p))) return;
+    if (newActionsBlocked(p) && startsNewAction(key)) return;
     const handler = handlerFor(key);
     if (handler) handler();
   }
@@ -1086,7 +1127,7 @@ export function createTeachEngine(getProps, publish) {
 
   // A button does exactly what its key does in the current state.
   function press(key) {
-    if (!canAct()) return;
+    if (!canAct() || (newActionsBlocked(getProps()) && startsNewAction(key))) return;
     const handler = handlerFor(key);
     if (handler) handler();
   }
@@ -1108,7 +1149,9 @@ export function createTeachEngine(getProps, publish) {
       again: () => press('r'),
       discard: () => press('delete'),
       // Hand mode only: leader mode never replays on the real arm.
-      previewOnRobot: (cleanedRows) => { if (canAct() && !isLeader()) previewOnRobot(cleanedRows); },
+      previewOnRobot: (cleanedRows) => {
+        if (canAct() && !isLeader() && !newActionsBlocked(getProps())) previewOnRobot(cleanedRows);
+      },
       // Leader mode: cancel the take that refused our start.
       discardStaleLeaderTake: () => { if (canAct()) discardStaleLeaderTake(); },
       stopPreview: () => { if (!r.tornDown) stopPreview(); },
@@ -1125,6 +1168,9 @@ export function createTeachEngine(getProps, publish) {
  * Leader mode (`mode: 'leader'`) inputs: collisionActive (tasks.collision),
  * leaderGone (the bridge POSITIVELY reports follower-only — a failed probe is
  * NOT leader-gone), activationBlocked (LeaderActivationGate's panel is up).
+ * Both modes: leaderStatusUnknown (R7, teachGates.js::teachLeaderStatus is not
+ * 'known') blocks new teaching actions only. `mode: 'pending'` is a session
+ * whose mode is not resolved yet: it behaves as blocked throughout.
  *
  * subscribeFollowerJoints(cb) → unsubscribe: cb(positions: number[]) per
  * /joint_states message; opened ONLY while `vorschau`. Absent → the hook never

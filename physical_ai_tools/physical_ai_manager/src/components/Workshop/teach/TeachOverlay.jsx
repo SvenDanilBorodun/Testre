@@ -24,6 +24,7 @@ import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import ROSLIB from 'roslib';
 import rosConnectionManager from '../../../utils/rosConnectionManager';
+import { usePiMode } from '../../../utils/piMode';
 import * as workflowApi from '../../../services/workflowApi';
 import { compactTrajectoryPoints } from '../../../utils/trajectoryCompact';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
@@ -43,6 +44,7 @@ import useTeachSession, { classifyTeachKey } from './useTeachSession';
 import { createTeachSounds } from './teachSounds';
 import ReviewStrip from './ReviewStrip';
 import LeaderActivationGate from './LeaderActivationGate';
+import { teachLeaderStatus, teachLeaderStatusNoticeDe } from './teachGates';
 import { formatCmDe, isZielTouchTooHigh, zielTouchHeightAboveTableMm } from './zielTouch';
 import {
   buildProgramBlocks, insertProgram, makeGripperStateOf, placeGripperState,
@@ -416,6 +418,19 @@ function TeachOverlay({
   const isLeaderMode = mode === 'leader';
   const leaderGone = isLeaderMode && !!rsBridge && rsBridge.available === true && rsBridge.followerOnly === true;
   const [activationBlocked, setActivationBlocked] = useState(false);
+  // R7: `mode === 'pending'` is a session TeachHost opened before the bridge
+  // could pick hand or leader (it remounts this overlay once it can). In either
+  // mode an unknown leader status blocks NEW teaching only — stop, re-lock,
+  // keep, discard and „Fertig" stay (useTeachSession's header). The notice
+  // follows the hook's live polls: pending → unavailable wording → gone.
+  const { piMode } = usePiMode();
+  const isPendingMode = mode === 'pending';
+  const leaderStatus = teachLeaderStatus({ rsBridge, caps });
+  const leaderStatusUnknown = isPendingMode || leaderStatus !== 'known';
+  // A pending session whose answer just arrived renders once more before
+  // TeachHost remounts it: it keeps the „wird geprüft" line, never a blank.
+  const leaderStatusNotice = teachLeaderStatusNoticeDe(leaderStatus, piMode === true)
+    || (isPendingMode ? DE.TEACH_LEADER_STATUS_PENDING : null);
 
   const session = useTeachSession({
     enabled: true,
@@ -424,6 +439,7 @@ function TeachOverlay({
     collisionActive,
     leaderGone,
     activationBlocked: isLeaderMode && activationBlocked,
+    leaderStatusUnknown,
     leaderLive: !!(rsBridge && rsBridge.leaderOn),
     roundItemCount: items.length,
     services,
@@ -556,8 +572,11 @@ function TeachOverlay({
 
   const leaderOn = !!(rsBridge && rsBridge.leaderOn);
   const [leaderTurnedOn, setLeaderTurnedOn] = useState(false);
-  // Hand mode only: in leader mode a live leader is the point.
-  useEffect(() => { if (leaderOn && !isLeaderMode) setLeaderTurnedOn(true); }, [leaderOn, isLeaderMode]);
+  // Hand mode only: in leader mode a live leader is the point, and in a pending
+  // session it is the answer that resolves the mode.
+  useEffect(() => {
+    if (leaderOn && !isLeaderMode && !isPendingMode) setLeaderTurnedOn(true);
+  }, [leaderOn, isLeaderMode, isPendingMode]);
 
   const [renaming, setRenaming] = useState(null); // { key, draft }
   const renameOk = teachRenameEnabled(state, relock, mode);
@@ -611,29 +630,36 @@ function TeachOverlay({
       ...items.filter((it) => it.kind === 'recording').map((it) => it.name),
     ])
     : '';
-  const hintLine = (isLeaderMode ? LEADER_HINT_LINE : HINT_LINE)[state] || null;
+  const hintLine = isPendingMode ? null : ((isLeaderMode ? LEADER_HINT_LINE : HINT_LINE)[state] || null);
   // Leader mode: the teaching content waits behind the activation gate.
   const maybeGated = (content) => (isLeaderMode
     ? <LeaderActivationGate onBlockedChange={setActivationBlocked}>{content}</LeaderActivationGate>
     : content);
-  const stateLine = state === 'countdown'
+  // A pending session has no mode yet, so no „Arm ist fest" to report.
+  const stateLine = isPendingMode ? '' : (state === 'countdown'
     ? formatDe(DE.TEACH_COUNTDOWN, countdownLeft)
-    : (STATE_LINE[state] || '');
+    : (STATE_LINE[state] || ''));
+  // R7: a cell that STARTS something also needs a known leader status; the
+  // stop/cancel/re-lock cells do not (the session hook applies the same split).
+  const canStartNew = online && !leaderStatusUnknown;
   const cell = isLeaderMode ? {
-    space: online && ['bereit', 'aufnahme'].includes(state),
+    space: (canStartNew && state === 'bereit') || (online && state === 'aufnahme'),
     f: false,
-    p: online && ['bereit', 'aufnahme'].includes(state),
-    z: online && ['bereit', 'aufnahme'].includes(state),
+    p: canStartNew && ['bereit', 'aufnahme'].includes(state),
+    z: canStartNew && ['bereit', 'aufnahme'].includes(state),
   } : {
-    space: online && ['fest', 'countdown', 'frei', 'aufnahme'].includes(state),
-    f: online && (['fest', 'countdown', 'frei', 'aufnahme'].includes(state)
-      || (state === 'pruefen' && relock === 'failed')),
-    p: online && ['fest', 'frei', 'aufnahme'].includes(state),
-    z: online && ['fest', 'frei'].includes(state),
+    space: (canStartNew && ['fest', 'frei'].includes(state))
+      || (online && ['countdown', 'aufnahme'].includes(state)),
+    f: (canStartNew && state === 'fest')
+      || (online && (['countdown', 'frei', 'aufnahme'].includes(state)
+        || (state === 'pruefen' && relock === 'failed'))),
+    p: canStartNew && ['fest', 'frei', 'aufnahme'].includes(state),
+    z: canStartNew && ['fest', 'frei'].includes(state),
   };
   const fLocks = state === 'frei' || state === 'aufnahme' || state === 'pruefen';
   const showRelockBanner = relock === 'failed' && (state === 'frei' || state === 'pruefen');
-  const previewDisabled = state !== 'pruefen' || busy || homeGlideActive || !online || relock === 'failed';
+  const previewDisabled = state !== 'pruefen' || busy || homeGlideActive || !online || relock === 'failed'
+    || leaderStatusUnknown;
 
   // Review clean-up. The choice belongs to one take (object identity); a new
   // take starts from the defaults.
@@ -713,9 +739,11 @@ function TeachOverlay({
           <h2 id="teach-title" className="text-xl font-semibold text-[var(--ink)]">
             {`✋ ${DE.TEACH_TITLE}`}
           </h2>
-          <span className="rounded-full bg-[var(--bg-sunk)] px-2.5 py-0.5 text-sm text-[var(--ink-3)]">
-            {isLeaderMode ? DE.TEACH_MODE_LEADER : DE.TEACH_MODE_HAND}
-          </span>
+          {!isPendingMode && (
+            <span className="rounded-full bg-[var(--bg-sunk)] px-2.5 py-0.5 text-sm text-[var(--ink-3)]">
+              {isLeaderMode ? DE.TEACH_MODE_LEADER : DE.TEACH_MODE_HAND}
+            </span>
+          )}
           <button
             type="button"
             onClick={() => actions.finish()}
@@ -729,6 +757,15 @@ function TeachOverlay({
           <section className="flex min-w-0 flex-1 flex-col gap-4 p-4 sm:p-6">
             {heartbeatOk === false && (
               <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-base text-red-800">{DE.TEACH_OFFLINE}</p>
+            )}
+            {leaderStatusNotice && (
+              <p
+                role={leaderStatus === 'unavailable' ? 'alert' : 'status'}
+                data-testid="teach-leader-status"
+                className="rounded-lg bg-amber-50 px-3 py-2 text-base text-amber-900"
+              >
+                {leaderStatusNotice}
+              </p>
             )}
             {leaderGone && (
               <p role="alert" className="rounded-lg bg-amber-50 px-3 py-2 text-base text-amber-900">
@@ -813,7 +850,7 @@ function TeachOverlay({
                   onClick={actions.captureZiel}
                   onPointerUp={refocus}
                 />
-                {!isLeaderMode && (
+                {!isLeaderMode && !isPendingMode && (
                   <ActionButton
                     icon={fLocks ? '🔒' : '✋'}
                     label={fLocks ? DE.TEACH_KEY_LOCK : DE.TEACH_KEY_FREE}
@@ -894,7 +931,7 @@ function TeachOverlay({
                   ) : (
                     <SmallKeyButton label={`✓ ${DE.TEACH_REVIEW_KEEP}`} keyHint="Enter" disabled={state !== 'pruefen' || !online} onClick={actions.keep} onPointerUp={refocus} />
                   )}
-                  <SmallKeyButton label={`↺ ${DE.TEACH_REVIEW_AGAIN}`} keyHint="R" disabled={state !== 'pruefen' || !online} onClick={actions.again} onPointerUp={refocus} />
+                  <SmallKeyButton label={`↺ ${DE.TEACH_REVIEW_AGAIN}`} keyHint="R" disabled={state !== 'pruefen' || !canStartNew} onClick={actions.again} onPointerUp={refocus} />
                   <SmallKeyButton label={DE.TEACH_REVIEW_DISCARD} keyHint="Entf" disabled={state !== 'pruefen' || !online} onClick={actions.discard} onPointerUp={refocus} />
                   {!isLeaderMode && (
                     <SmallKeyButton label={DE.TEACH_REVIEW_ON_ROBOT} disabled={previewDisabled} onClick={handlePreviewOnRobot} onPointerUp={refocus} />

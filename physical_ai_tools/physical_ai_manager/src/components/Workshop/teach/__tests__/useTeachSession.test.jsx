@@ -1912,3 +1912,143 @@ describe('useTeachSession — leader mode gates and teardown (D8)', () => {
     h.unmount();
   });
 });
+
+// R7 (fixed 2026-09-15): an unknown leader status blocks NEW teaching actions
+// and never an exit; `mode: 'pending'` (TeachHost has not picked a mode yet)
+// behaves as blocked throughout.
+describe('useTeachSession — leader status unknown (R7)', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  it('hand mode, fest: Space, F, P, Z and the buttons send nothing and start no countdown', async () => {
+    const h = setup({ leaderStatusUnknown: true });
+    for (const k of [' ', 'f', 'p', 'z']) {
+      const e = await h.press(k); // eslint-disable-line no-await-in-loop
+      expect(e.defaultPrevented).toBe(true);
+      expect(h.state).toBe('fest');
+    }
+    act(() => {
+      h.cur.actions.space(); h.cur.actions.toggleFree(); h.cur.actions.capturePose(); h.cur.actions.captureZiel();
+    });
+    await h.advance(4000);
+    expect(h.state).toBe('fest');
+    expect(h.calls).toHaveLength(0);
+    // The answer arrives: teaching works again.
+    h.rerender({ leaderStatusUnknown: false });
+    await h.press('p');
+    expect(h.count('capturePose')).toBe(1);
+    h.unmount();
+  });
+
+  it('a take in progress is NOT interrupted: P waits, Space still stops it (hand mode)', async () => {
+    const h = setup();
+    await toAufnahme(h);
+    h.rerender({ leaderStatusUnknown: true });
+    await h.advance(1000);
+    expect(h.state).toBe('aufnahme');
+    expect(h.count('recordControl', 'cancel')).toBe(0);
+    expect(h.count('handGuide', false)).toBe(0);
+    await h.press('p');
+    expect(h.count('capturePose')).toBe(0);
+    await h.press(' ');
+    expect(h.count('recordControl', 'stop')).toBe(1);
+    await h.resolve(h.last('recordControl'), {
+      success: true, points_json: points(3), sample_count: 3, duration_s: 0.08,
+    });
+    await h.resolve(h.last('handGuide'), { success: true });
+    expect(h.state).toBe('pruefen');
+    // Review: R (a new take) and the real-arm replay wait; Enter still keeps.
+    await h.press('r');
+    expect(h.state).toBe('pruefen');
+    act(() => { h.cur.actions.previewOnRobot(); });
+    await act(async () => { await flush(); });
+    expect(h.count('replayMotion')).toBe(0);
+    await h.press('Enter');
+    expect(h.cbs.onKeep).toHaveBeenCalledTimes(1);
+    expect(h.state).toBe('fest');
+    h.unmount();
+  });
+
+  it('frei: F still re-locks, Space and P wait (hand mode)', async () => {
+    const h = setup();
+    await toFrei(h);
+    h.rerender({ leaderStatusUnknown: true });
+    await h.press(' ');
+    await h.press('p');
+    expect(h.count('recordControl', 'start')).toBe(0);
+    expect(h.count('capturePose')).toBe(0);
+    await h.press('f');
+    expect(h.count('handGuide', false)).toBe(1);
+    await h.resolve(h.last('handGuide'), { success: true });
+    expect(h.state).toBe('fest');
+    h.unmount();
+  });
+
+  it('a countdown still running when the status turns unknown ends where it began, and F/Space cancel it', async () => {
+    const h = setup();
+    await h.press(' ');
+    expect(h.state).toBe('countdown');
+    h.rerender({ leaderStatusUnknown: true });
+    await h.advance(3000);
+    expect(h.state).toBe('fest');
+    expect(h.calls).toHaveLength(0);
+    h.rerender({ leaderStatusUnknown: false });
+    await h.press('f');
+    expect(h.state).toBe('countdown');
+    h.rerender({ leaderStatusUnknown: true });
+    await h.press('f');
+    expect(h.state).toBe('fest');
+    expect(h.calls).toHaveLength(0);
+    h.unmount();
+  });
+
+  it('leader mode: a leader take keeps running and Space stops it; a new take, P and Z wait', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    h.rerender({ leaderStatusUnknown: true });
+    await h.advance(1000);
+    expect(h.state).toBe('aufnahme');
+    expect(h.count('recordControl', 'cancel_leader')).toBe(0);
+    await h.press('p');
+    await h.press('z');
+    expect(h.count('capturePose')).toBe(0);
+    await h.press(' ');
+    expect(h.count('recordControl', 'stop_leader')).toBe(1);
+    await h.resolve(h.last('recordControl'), { success: false, message: 'Aufnahme verworfen.' });
+    expect(h.state).toBe('bereit');
+    await h.advance(500);
+    await h.press(' ');
+    expect(h.count('recordControl', 'start_leader')).toBe(1);
+    h.unmount();
+  });
+
+  it('pending mode: nothing teaches, no lock-out toast when the leader answers „on", Esc closes', async () => {
+    const h = setup({ mode: 'pending', roundItemCount: 0 });
+    expect(h.state).toBe('fest');
+    for (const k of [' ', 'f', 'p', 'z']) {
+      await h.press(k); // eslint-disable-line no-await-in-loop
+    }
+    await h.advance(4000);
+    expect(h.calls).toHaveLength(0);
+    h.rerender({ leaderLive: true });
+    await act(async () => { await flush(); });
+    expect(h.cbs.onError).not.toHaveBeenCalledWith(DE.TEACH_LEADER_TURNED_ON);
+    await h.press('Escape');
+    expect(h.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: false, relockOk: true, offline: false });
+    h.unmount();
+    expect(h.calls).toHaveLength(0);
+  });
+
+  it('pending mode offline: closes with „Keine Verbindung", never the hold-the-limp-arm sentence', async () => {
+    const h = setup({ mode: 'pending', heartbeatOk: false });
+    await h.press('Escape');
+    expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_OFFLINE);
+    expect(h.cbs.onError).not.toHaveBeenCalledWith(DE.TEACH_CLOSE_OFFLINE);
+    expect(h.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: false, relockOk: false, offline: true });
+    h.unmount();
+  });
+});

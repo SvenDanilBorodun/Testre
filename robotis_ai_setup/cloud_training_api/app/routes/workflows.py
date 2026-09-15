@@ -777,12 +777,22 @@ def rename_trajectory(
     against the first. Owner-only (Rule §4): _assert_workflow_owned + the write
     re-scoped by owner_user_id. created_at is untouched, so the prune order and
     by-name newest-wins do not change; updated_at moves via
-    trg_workflow_trajectories_touch."""
+    trg_workflow_trajectories_touch.
+
+    KNOWN, accepted: the clash check and the UPDATE are two statements, not one
+    transaction, and no unique (workflow_id, name) constraint can back them
+    (the versions of a name share it by design). Two concurrent renames onto one
+    free name by the same owner could both pass the check; closing that needs a
+    row-locking RPC."""
     _assert_workflow_owned(user.id, workflow_id)
     new_name = validate_trajectory_name(payload.name)
     supabase = get_supabase()
     target = (
-        supabase.table("workflow_trajectories").select("*")
+        # Metadata only: the samples (up to 256 KB) are never returned here.
+        supabase.table("workflow_trajectories").select(
+            "id, workflow_id, owner_user_id, name, point_count, duration_s, fps, "
+            "robot_profile, created_at, updated_at"
+        )
         .eq("workflow_id", workflow_id).eq("id", trajectory_id)
         .eq("owner_user_id", user.id).execute()
     )

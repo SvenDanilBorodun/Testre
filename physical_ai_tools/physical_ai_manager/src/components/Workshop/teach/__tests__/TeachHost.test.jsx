@@ -99,7 +99,6 @@ describe('TeachHost', () => {
     ['a running preview', { runState: 'running', previewActive: true }, DE.TEACH_BLOCK_PREVIEW],
     ['the simulator', { simMode: true }, DE.TEACH_BLOCK_SIM],
     ['a hand-guide in „Steuern"', { jogHandGuideOn: true }, DE.TEACH_BLOCK_JOG],
-    ['the leader arm', { rsBridge: { ...IDLE_BRIDGE, leaderOn: true } }, DE.TEACH_BLOCK_LEADER],
   ])('refuses during %s with its own text', (_label, over, text) => {
     teachState({ requested: { focus: 'recording', token: 7 } });
     const props = hostProps(over);
@@ -119,6 +118,28 @@ describe('TeachHost', () => {
     expect(opened).toHaveLength(1);
     expect(opened[0].payload).toEqual({ mode: 'hand', focus: 'pose' });
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a live leader on a leader-capable profile', { rsBridge: { ...IDLE_BRIDGE, leaderOn: true }, caps: { has_leader: true } }, 'leader'],
+    ['a live leader with unknown caps', { rsBridge: { ...IDLE_BRIDGE, leaderOn: true }, caps: null }, 'leader'],
+    ['a live leader on a leader-less profile', { rsBridge: { ...IDLE_BRIDGE, leaderOn: true }, caps: { has_leader: false } }, 'hand'],
+    ['no leader', { rsBridge: IDLE_BRIDGE, caps: { has_leader: true } }, 'hand'],
+    ['a failed bridge probe', { rsBridge: { available: false, followerOnly: false, leaderOn: false }, caps: { has_leader: true } }, 'hand'],
+    ['no bridge at all', { rsBridge: null, caps: { has_leader: true } }, 'hand'],
+  ])('D8: %s opens %s mode, never a refusal', (_label, over, mode) => {
+    teachState({ requested: { focus: 'recording', token: 9 } });
+    render(<TeachHost {...hostProps(over)} />);
+    expect(toast.error).not.toHaveBeenCalled();
+    const opened = dispatched('studioAssets/teachOpened');
+    expect(opened).toHaveLength(1);
+    expect(opened[0].payload).toEqual({ mode, focus: 'recording' });
+  });
+
+  test('renders the overlay in leader mode when the slice says so', () => {
+    teachState({ open: true, mode: 'leader' });
+    render(<TeachHost {...hostProps({ rsBridge: { ...IDLE_BRIDGE, leaderOn: true } })} />);
+    expect(mockOverlay.props.mode).toBe('leader');
   });
 
   test('a request with no editor on screen is dropped silently', () => {

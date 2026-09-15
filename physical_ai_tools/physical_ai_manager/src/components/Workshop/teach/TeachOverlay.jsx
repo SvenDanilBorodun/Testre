@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  */
 
-// Vormachen overlay (hand mode): renders the useTeachSession state machine as a
+// Vormachen overlay (hand and leader mode): renders the useTeachSession state machine as a
 // full-screen dialog readable from a metre away, uploads kept takes, stores
 // captured Positionen/Ziele in the document, and offers the home glide ONCE
 // at „Fertig". Every service call and every key rule lives in the hook.
@@ -42,6 +42,7 @@ import { analyzeTake, applyCleanup } from '../../../utils/recordingCleanup';
 import useTeachSession, { classifyTeachKey } from './useTeachSession';
 import { createTeachSounds } from './teachSounds';
 import ReviewStrip from './ReviewStrip';
+import LeaderActivationGate from './LeaderActivationGate';
 import { formatCmDe, isZielTouchTooHigh, zielTouchHeightAboveTableMm } from './zielTouch';
 import {
   buildProgramBlocks, insertProgram, makeGripperStateOf, placeGripperState,
@@ -65,12 +66,19 @@ const STATE_LINE = {
   pruefen: DE.TEACH_STATE_REVIEW,
   vorschau: DE.TEACH_STATE_REVIEW,
   abschluss: DE.TEACH_STATE_DONE,
+  bereit: DE.TEACH_STATE_LEADER_READY,
 };
 
 const HINT_LINE = {
   fest: DE.TEACH_HINT_LOCKED,
   frei: DE.TEACH_HINT_FREE,
   aufnahme: DE.TEACH_HINT_REC,
+  abschluss: DE.TEACH_HINT_DONE,
+};
+
+const LEADER_HINT_LINE = {
+  bereit: DE.TEACH_HINT_LEADER,
+  aufnahme: DE.TEACH_HINT_LEADER_REC,
   abschluss: DE.TEACH_HINT_DONE,
 };
 
@@ -87,8 +95,12 @@ function messageOf(err) {
   return String(err.detail || err.message || '');
 }
 
-/** ✎ is allowed only while the arm is locked — never while it is limp or moving. */
-export function teachRenameEnabled(state, relock) {
+/**
+ * ✎ is allowed only while the arm is locked — never while it is limp or moving.
+ * Leader mode: the follower stays torqued, so every state but `aufnahme`.
+ */
+export function teachRenameEnabled(state, relock, mode = 'hand') {
+  if (mode === 'leader') return state !== 'aufnahme';
   return state === 'fest' || state === 'abschluss' || (state === 'pruefen' && relock !== 'failed');
 }
 
@@ -399,11 +411,19 @@ function TeachOverlay({
     };
   }, []);
 
+  // Leader mode (D8). leaderGone needs a POSITIVE follower-only answer: a
+  // failed bridge probe ({available:false}) must never block stopping a take.
+  const isLeaderMode = mode === 'leader';
+  const leaderGone = isLeaderMode && !!rsBridge && rsBridge.available === true && rsBridge.followerOnly === true;
+  const [activationBlocked, setActivationBlocked] = useState(false);
+
   const session = useTeachSession({
     enabled: true,
     mode,
     heartbeatOk: heartbeatOk !== false,
     collisionActive,
+    leaderGone,
+    activationBlocked: isLeaderMode && activationBlocked,
     leaderLive: !!(rsBridge && rsBridge.leaderOn),
     roundItemCount: items.length,
     services,
@@ -416,7 +436,7 @@ function TeachOverlay({
   });
   const {
     state, countdownLeft, elapsedS, busy, take, relock, previewNoMotionHint, actions, onKeyDown,
-    setCaptureNamer,
+    setCaptureNamer, staleLeaderTake, keepHeld,
   } = session;
 
   useEffect(() => { setCaptureNamer(captureNamer); }, [setCaptureNamer, captureNamer]);
@@ -520,10 +540,11 @@ function TeachOverlay({
 
   const leaderOn = !!(rsBridge && rsBridge.leaderOn);
   const [leaderTurnedOn, setLeaderTurnedOn] = useState(false);
-  useEffect(() => { if (leaderOn) setLeaderTurnedOn(true); }, [leaderOn]);
+  // Hand mode only: in leader mode a live leader is the point.
+  useEffect(() => { if (leaderOn && !isLeaderMode) setLeaderTurnedOn(true); }, [leaderOn, isLeaderMode]);
 
   const [renaming, setRenaming] = useState(null); // { key, draft }
-  const renameOk = teachRenameEnabled(state, relock);
+  const renameOk = teachRenameEnabled(state, relock, mode);
   const commitRename = async () => {
     const cur = renaming;
     const item = cur && itemsRef.current.find((it) => it.key === cur.key);
@@ -563,7 +584,8 @@ function TeachOverlay({
     refocus();
   };
 
-  const online = heartbeatOk !== false && !leaderTurnedOn;
+  const online = heartbeatOk !== false && !leaderTurnedOn
+    && !(isLeaderMode && (leaderGone || activationBlocked));
   const inReview = !!take && (state === 'pruefen' || state === 'vorschau');
   const pendingUploads = items.filter((it) => it.kind === 'recording' && it.status === 'saving').length;
   const slotsLine = teachSlotsLine(cloudItems.length + pendingUploads);
@@ -573,10 +595,20 @@ function TeachOverlay({
       ...items.filter((it) => it.kind === 'recording').map((it) => it.name),
     ])
     : '';
+  const hintLine = (isLeaderMode ? LEADER_HINT_LINE : HINT_LINE)[state] || null;
+  // Leader mode: the teaching content waits behind the activation gate.
+  const maybeGated = (content) => (isLeaderMode
+    ? <LeaderActivationGate onBlockedChange={setActivationBlocked}>{content}</LeaderActivationGate>
+    : content);
   const stateLine = state === 'countdown'
     ? formatDe(DE.TEACH_COUNTDOWN, countdownLeft)
     : (STATE_LINE[state] || '');
-  const cell = {
+  const cell = isLeaderMode ? {
+    space: online && ['bereit', 'aufnahme'].includes(state),
+    f: false,
+    p: online && ['bereit', 'aufnahme'].includes(state),
+    z: online && ['bereit', 'aufnahme'].includes(state),
+  } : {
     space: online && ['fest', 'countdown', 'frei', 'aufnahme'].includes(state),
     f: online && (['fest', 'countdown', 'frei', 'aufnahme'].includes(state)
       || (state === 'pruefen' && relock === 'failed')),
@@ -663,7 +695,7 @@ function TeachOverlay({
             {`✋ ${DE.TEACH_TITLE}`}
           </h2>
           <span className="rounded-full bg-[var(--bg-sunk)] px-2.5 py-0.5 text-sm text-[var(--ink-3)]">
-            {DE.TEACH_MODE_HAND}
+            {isLeaderMode ? DE.TEACH_MODE_LEADER : DE.TEACH_MODE_HAND}
           </span>
           <button
             type="button"
@@ -678,6 +710,11 @@ function TeachOverlay({
           <section className="flex min-w-0 flex-1 flex-col gap-4 p-4 sm:p-6">
             {heartbeatOk === false && (
               <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-base text-red-800">{DE.TEACH_OFFLINE}</p>
+            )}
+            {leaderGone && (
+              <p role="alert" className="rounded-lg bg-amber-50 px-3 py-2 text-base text-amber-900">
+                {DE.TEACH_LEADER_GONE}
+              </p>
             )}
             {leaderTurnedOn && (
               <p role="alert" className="rounded-lg bg-amber-50 px-3 py-2 text-base text-amber-900">
@@ -697,12 +734,23 @@ function TeachOverlay({
                 </button>
               </div>
             )}
+            {maybeGated(<>
+            {isLeaderMode && staleLeaderTake && state === 'bereit' && (
+              <div className="flex flex-wrap items-center gap-3">
+                <SmallKeyButton
+                  label={DE.TEACH_LEADER_DISCARD_OLD}
+                  disabled={busy || !online}
+                  onClick={() => actions.discardStaleLeaderTake()}
+                  onPointerUp={refocus}
+                />
+              </div>
+            )}
             <div>
               <p aria-live="assertive" className="text-3xl font-semibold text-[var(--ink)]">
                 {stateLine}
                 {state === 'aufnahme' && <span className="ml-3 tabular-nums">{mmss(elapsedS)}</span>}
               </p>
-              {HINT_LINE[state] && <p className="mt-1 text-lg text-[var(--ink-3)]">{HINT_LINE[state]}</p>}
+              {hintLine && <p className="mt-1 text-lg text-[var(--ink-3)]">{hintLine}</p>}
             </div>
             {zielPrompts.length > 0 && (
               <ZielTooHighPrompt
@@ -736,19 +784,22 @@ function TeachOverlay({
                   label={DE.TEACH_KEY_ZIEL}
                   keyHint="Z"
                   disabled={!cell.z || zielPrompts.length > 0}
-                  title={state === 'aufnahme' ? DE.TEACH_ZIEL_BLOCKED_REC : undefined}
+                  title={!isLeaderMode && state === 'aufnahme' ? DE.TEACH_ZIEL_BLOCKED_REC : undefined}
+                  hint={isLeaderMode ? DE.TEACH_LEADER_ZIEL_HINT : undefined}
                   highlighted={highlightKey === 'z'}
                   onClick={actions.captureZiel}
                   onPointerUp={refocus}
                 />
-                <ActionButton
-                  icon={fLocks ? '🔒' : '✋'}
-                  label={fLocks ? DE.TEACH_KEY_LOCK : DE.TEACH_KEY_FREE}
-                  keyHint="F"
-                  disabled={!cell.f}
-                  onClick={actions.toggleFree}
-                  onPointerUp={refocus}
-                />
+                {!isLeaderMode && (
+                  <ActionButton
+                    icon={fLocks ? '🔒' : '✋'}
+                    label={fLocks ? DE.TEACH_KEY_LOCK : DE.TEACH_KEY_FREE}
+                    keyHint="F"
+                    disabled={!cell.f}
+                    onClick={actions.toggleFree}
+                    onPointerUp={refocus}
+                  />
+                )}
               </div>
             )}
             {inReview && (
@@ -814,11 +865,23 @@ function TeachOverlay({
                   </div>
                 )}
                 <div className="flex flex-wrap gap-2">
-                  <SmallKeyButton label={`✓ ${DE.TEACH_REVIEW_KEEP}`} keyHint="Enter" disabled={state !== 'pruefen' || !online} onClick={actions.keep} onPointerUp={refocus} />
+                  {keepHeld ? (
+                    // Leader mode: a trip within the grace window still discards this take.
+                    <SmallKeyButton label={DE.TEACH_LIST_REVIEWING} keyHint="Enter" disabled onClick={actions.keep} onPointerUp={refocus} />
+                  ) : (
+                    <SmallKeyButton label={`✓ ${DE.TEACH_REVIEW_KEEP}`} keyHint="Enter" disabled={state !== 'pruefen' || !online} onClick={actions.keep} onPointerUp={refocus} />
+                  )}
                   <SmallKeyButton label={`↺ ${DE.TEACH_REVIEW_AGAIN}`} keyHint="R" disabled={state !== 'pruefen' || !online} onClick={actions.again} onPointerUp={refocus} />
                   <SmallKeyButton label={DE.TEACH_REVIEW_DISCARD} keyHint="Entf" disabled={state !== 'pruefen' || !online} onClick={actions.discard} onPointerUp={refocus} />
-                  <SmallKeyButton label={DE.TEACH_REVIEW_ON_ROBOT} disabled={previewDisabled} onClick={handlePreviewOnRobot} onPointerUp={refocus} />
+                  {!isLeaderMode && (
+                    <SmallKeyButton label={DE.TEACH_REVIEW_ON_ROBOT} disabled={previewDisabled} onClick={handlePreviewOnRobot} onPointerUp={refocus} />
+                  )}
                 </div>
+                {isLeaderMode && (
+                  <p className="text-sm text-[var(--ink-3)]" data-testid="teach-review-on-robot-leader">
+                    {`${DE.TEACH_REVIEW_ON_ROBOT}: ${DE.TEACH_REVIEW_ON_ROBOT_LEADER}`}
+                  </p>
+                )}
                 {slotsLine && <p className="text-sm text-amber-800">{slotsLine}</p>}
               </div>
             )}
@@ -828,6 +891,7 @@ function TeachOverlay({
                 <SmallKeyButton label={DE.TEACH_CLOSE} keyHint="Esc" primary onClick={actions.finish} onPointerUp={refocus} />
               </div>
             )}
+            </>)}
           </section>
           <aside className="flex w-full shrink-0 flex-col gap-2 border-t border-[var(--line)] p-4 md:w-80 md:border-l md:border-t-0">
             <h3 className="text-base font-semibold text-[var(--ink)]">{DE.TEACH_LIST_TITLE}</h3>
@@ -874,7 +938,7 @@ function TeachOverlay({
   );
 }
 
-function ActionButton({ icon, label, keyHint, disabled, highlighted, title, onClick, onPointerUp }) {
+function ActionButton({ icon, label, hint, keyHint, disabled, highlighted, title, onClick, onPointerUp }) {
   return (
     <button
       type="button"
@@ -889,7 +953,10 @@ function ActionButton({ icon, label, keyHint, disabled, highlighted, title, onCl
       }
     >
       <span aria-hidden="true">{icon}</span>
-      <span className="flex-1">{label}</span>
+      <span className="flex-1">
+        {label}
+        {hint && <span className="block text-sm font-normal text-[var(--ink-3)]">{hint}</span>}
+      </span>
       <kbd className="rounded border border-[var(--line)] bg-[var(--bg-sunk)] px-2 py-0.5 text-sm font-normal">{keyHint}</kbd>
     </button>
   );

@@ -7,7 +7,7 @@
 
 import { DE } from '../../blocks/messages_de';
 import {
-  teachEntryBlockReason, TEACH_BLOCK_TITLES_DE, TEACH_COUNTDOWN_S, TEACH_SPACE_DEBOUNCE_MS,
+  teachEntryBlockReason, teachModeFor, TEACH_BLOCK_TITLES_DE, TEACH_COUNTDOWN_S, TEACH_SPACE_DEBOUNCE_MS,
   TEACH_KEEPALIVE_MS, TEACH_RECORD_MAX_S, TEACH_MIN_POINTS, TEACH_ROBOT_PREVIEW_LEAD_IN_MAX_MS,
   TEACH_REPLAY_VELOCITY_FLOOR_RAD_S, TEACH_ROBOT_PREVIEW_NO_MOTION_HINT_MS,
   TEACH_ROBOT_PREVIEW_SETTLE_DELTA_RAD, TEACH_ROBOT_PREVIEW_SETTLE_STEP_MS,
@@ -29,7 +29,7 @@ function fastFixtureRows() {
 
 const OPEN = {
   heartbeatStatus: 'connected', runState: 'idle', paused: false, simMode: false,
-  jogHandGuideOn: false, previewActive: false, rsLeaderOn: false,
+  jogHandGuideOn: false, previewActive: false,
 };
 
 describe('teachEntryBlockReason', () => {
@@ -37,18 +37,22 @@ describe('teachEntryBlockReason', () => {
     expect(teachEntryBlockReason(OPEN)).toBeNull();
   });
 
-  it('orders offline > running/preview > sim > handguide > leader', () => {
+  it('orders offline > running/preview > sim > handguide', () => {
     const all = { ...OPEN, heartbeatStatus: 'disconnected', runState: 'running', simMode: true,
-      jogHandGuideOn: true, rsLeaderOn: true };
+      jogHandGuideOn: true };
     expect(teachEntryBlockReason(all)).toBe('offline');
     expect(teachEntryBlockReason({ ...all, heartbeatStatus: 'connected' })).toBe('running');
     expect(teachEntryBlockReason({ ...all, heartbeatStatus: 'connected', previewActive: true }))
       .toBe('preview');
     expect(teachEntryBlockReason({ ...all, heartbeatStatus: 'connected', runState: 'idle' }))
       .toBe('sim');
-    expect(teachEntryBlockReason({ ...OPEN, jogHandGuideOn: true, rsLeaderOn: true }))
-      .toBe('handguide');
-    expect(teachEntryBlockReason({ ...OPEN, rsLeaderOn: true })).toBe('leader');
+    expect(teachEntryBlockReason({ ...OPEN, jogHandGuideOn: true })).toBe('handguide');
+  });
+
+  it('D8: a live leader is no longer a refusal (it selects leader mode)', () => {
+    expect(teachEntryBlockReason({ ...OPEN, rsLeaderOn: true })).toBeNull();
+    expect(Object.keys(TEACH_BLOCK_TITLES_DE)).not.toContain('leader');
+    expect(DE.TEACH_BLOCK_LEADER).toBeUndefined();
   });
 
   it('treats a paused run as running and an unknown heartbeat as offline', () => {
@@ -60,9 +64,32 @@ describe('teachEntryBlockReason', () => {
     expect(TEACH_BLOCK_TITLES_DE).toEqual({
       offline: DE.TEACH_BLOCK_OFFLINE, running: DE.TEACH_BLOCK_RUNNING,
       preview: DE.TEACH_BLOCK_PREVIEW, sim: DE.TEACH_BLOCK_SIM, handguide: DE.TEACH_BLOCK_JOG,
-      glide: DE.TEACH_BLOCK_GLIDE, leader: DE.TEACH_BLOCK_LEADER,
+      glide: DE.TEACH_BLOCK_GLIDE,
     });
+    expect(Object.keys(TEACH_BLOCK_TITLES_DE).sort())
+      .toEqual(['glide', 'handguide', 'offline', 'preview', 'running', 'sim']);
     Object.values(TEACH_BLOCK_TITLES_DE).forEach((t) => expect(t).toMatch(/\S/));
+  });
+});
+
+describe('teachModeFor', () => {
+  it.each([
+    [true, null, 'leader'],
+    [true, undefined, 'leader'],
+    [true, {}, 'leader'],
+    [true, { has_leader: true }, 'leader'],
+    [true, { has_leader: undefined }, 'leader'],
+    [true, { has_leader: false }, 'hand'],
+    [false, { has_leader: true }, 'hand'],
+    [false, null, 'hand'],
+    [undefined, { has_leader: true }, 'hand'],
+    [false, { has_leader: false }, 'hand'],
+  ])('rsLeaderOn=%s caps=%j → %s', (rsLeaderOn, caps, mode) => {
+    expect(teachModeFor({ rsLeaderOn, caps })).toBe(mode);
+  });
+
+  it('defaults to hand with no arguments', () => {
+    expect(teachModeFor()).toBe('hand');
   });
 });
 

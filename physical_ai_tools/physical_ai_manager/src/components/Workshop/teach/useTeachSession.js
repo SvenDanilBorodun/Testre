@@ -23,6 +23,14 @@
 //   3. A real-arm preview (`vorschau`) ends on OBSERVED stillness, never on a
 //      bare timer: /workshop/replay answers when the drive STARTS, and the
 //      server stretches fast takes, so no timer can know when the arm stops.
+//
+// Leader mode (D8, `mode === 'leader'`): the follower is teleoperated and stays
+// torqued, so there is no hand_guide call, no keepalive, no countdown, no
+// real-arm preview and no glide — only start_leader / stop_leader /
+// cancel_leader and the captures, through the SAME queue. The teleop e-stop
+// stays armed, so a collision DISCARDS: a take in `aufnahme`, a stop answer
+// that lands after the trip, and a returned take whose trip arrives within
+// TEACH_LEADER_COLLISION_GRACE_MS of its stop (keep is held until then).
 
 import { useEffect, useRef, useState } from 'react';
 import { DE } from '../blocks/messages_de';
@@ -32,9 +40,13 @@ import {
   TEACH_MIN_POINTS, TEACH_ROBOT_PREVIEW_NO_MOTION_HINT_MS, TEACH_ROBOT_PREVIEW_SETTLE_DELTA_RAD,
   TEACH_ROBOT_PREVIEW_SETTLE_STEP_MS, TEACH_ROBOT_PREVIEW_SETTLE_SAMPLES,
   TEACH_ROBOT_PREVIEW_FEED_STALE_MS, TEACH_ROBOT_PREVIEW_STOP_TAIL_MAX_MS, replayDriveEstimateMs,
+  TEACH_LEADER_COLLISION_GRACE_MS,
 } from './teachGates';
 
 const RECORD_START_FAILED_DE = 'Aufnahme konnte nicht gestartet werden.';
+// Server _assert_no_other_active('leader_teach') while a take is armed — from
+// another tab, or one of ours whose cancel was lost. Matched verbatim.
+export const LEADER_TAKE_BUSY_DE = 'Eine Leader-Aufnahme läuft gerade — bitte zuerst beenden.';
 const PREVIEW_FAILED_DE = 'Vorschau nicht möglich.';
 const CAPTURE_FAILED_DE = 'Position konnte nicht gespeichert werden.';
 const ELAPSED_STEP_MS = 250;
@@ -42,8 +54,10 @@ const ELAPSED_STEP_MS = 250;
 const INTERACTIVE_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
 const INTERACTIVE_ROLES = new Set(['slider', 'button', 'checkbox']);
 
+// `bereit` is leader mode's resting state (the follower is teleoperated, never
+// „fest" or „frei").
 export const TEACH_STATES = Object.freeze([
-  'fest', 'frei', 'countdown', 'aufnahme', 'pruefen', 'vorschau', 'abschluss',
+  'fest', 'frei', 'countdown', 'aufnahme', 'pruefen', 'vorschau', 'abschluss', 'bereit',
 ]);
 
 // Map a keydown to a table column, or null. A key held with Ctrl/Meta/Alt is
@@ -100,22 +114,31 @@ function parseStopPoints(pointsJson) {
 
 const INITIAL_SNAPSHOT = Object.freeze({
   state: 'fest', countdownLeft: 0, elapsedS: 0, busy: false, take: null, relock: 'none',
-  releasedOnce: false, previewNoMotionHint: false,
+  releasedOnce: false, previewNoMotionHint: false, staleLeaderTake: false, keepHeld: false,
 });
+
+function initialStateFor(mode) {
+  return mode === 'leader' ? 'bereit' : 'fest';
+}
 
 // The state machine, framework-free so every function can reference every
 // other one and the handlers stay stable for document listeners.
 export function createTeachEngine(getProps, publish) {
   const r = {
-    state: 'fest', relock: 'none', take: null, releasedOnce: false, countdownLeft: 0,
-    elapsedS: 0, previewNoMotionHint: false,
+    state: initialStateFor((getProps() || {}).mode), relock: 'none', take: null, releasedOnce: false,
+    countdownLeft: 0, elapsedS: 0, previewNoMotionHint: false,
     sessionOpen: false, recordActive: false, pendingStart: 0, lastSpaceAt: -Infinity,
     keepaliveQueued: false, keepaliveStopped: false, closeAfterReview: false,
     leaderLockout: false, prevLeaderLive: false, capFired: false,
     preCountdown: 'fest', countdownKind: null, recordStartedAt: 0,
     queueTail: Promise.resolve(), queueCount: 0, tornDown: false, finished: false,
     namer: null, preview: null,
-    timers: { countdown: null, elapsed: null, keepalive: null, previewTick: null, previewHint: null },
+    // Leader mode: a take refused as already running; the stop answer's time
+    // (the collision grace window runs from it); rising collision edges seen.
+    staleLeaderTake: false, stoppedAt: 0, collisionSeq: 0, prevCollision: false,
+    timers: {
+      countdown: null, elapsed: null, keepalive: null, previewTick: null, previewHint: null, grace: null,
+    },
   };
 
   const now = () => {
@@ -123,11 +146,19 @@ export function createTeachEngine(getProps, publish) {
     return typeof fn === 'function' ? fn() : Date.now();
   };
 
+  const isLeader = () => getProps().mode === 'leader';
+
+  // Leader mode: Enter/Esc cannot keep a returned take while a trip of the
+  // detector's debounce may still be on its way.
+  function keepHeld() {
+    return isLeader() && r.state === 'pruefen' && now() - r.stoppedAt <= TEACH_LEADER_COLLISION_GRACE_MS;
+  }
+
   function emit() {
     publish({
       state: r.state, countdownLeft: r.countdownLeft, elapsedS: r.elapsedS,
       busy: r.queueCount > 0, take: r.take, relock: r.relock, releasedOnce: r.releasedOnce,
-      previewNoMotionHint: r.previewNoMotionHint,
+      previewNoMotionHint: r.previewNoMotionHint, staleLeaderTake: r.staleLeaderTake, keepHeld: keepHeld(),
     });
   }
 
@@ -174,6 +205,7 @@ export function createTeachEngine(getProps, publish) {
       r.timers.keepalive = setInterval(keepaliveTick, TEACH_KEEPALIVE_MS);
     }
     if (prev === 'aufnahme' && next !== 'aufnahme') clearTimer('elapsed');
+    if (prev === 'pruefen' && next !== 'pruefen') clearTimer('grace');
   }
 
   // The ONE FIFO queue. `fn` runs only after the previous entry settled;
@@ -202,6 +234,7 @@ export function createTeachEngine(getProps, publish) {
   }
 
   function afterState() {
+    if (isLeader()) return 'bereit';
     return r.relock === 'failed' ? 'frei' : 'fest';
   }
 
@@ -305,6 +338,10 @@ export function createTeachEngine(getProps, publish) {
 
   function stop() {
     if (r.state !== 'aufnahme') return;
+    if (isLeader()) {
+      stopLeader();
+      return;
+    }
     enqueue(async () => {
       if (r.state !== 'aufnahme') return;
       let res;
@@ -361,6 +398,178 @@ export function createTeachEngine(getProps, publish) {
       setState(afterState());
       emit();
       notify('onError', msg);
+    });
+  }
+
+  // ---- leader mode (D8): start_leader / stop_leader / cancel_leader -------
+
+  // `bereit` + Space, and R after a discard. No countdown: nothing goes limp.
+  function startLeader() {
+    if (r.state !== 'bereit') return;
+    r.pendingStart += 1;
+    const done = () => { r.pendingStart -= 1; };
+    enqueue(async () => {
+      try {
+        if (r.state !== 'bereit') return;
+        const seq = r.collisionSeq;
+        let res;
+        try {
+          res = await call('recordControl', 'start_leader');
+        } catch (_) {
+          notify('onError', DE.TEACH_OFFLINE);
+          emit();
+          return;
+        }
+        if (!res || !res.success) {
+          const msg = (res && res.message) || RECORD_START_FAILED_DE;
+          if (msg === LEADER_TAKE_BUSY_DE) r.staleLeaderTake = true;
+          emit();
+          notify('onError', msg);
+          return;
+        }
+        r.recordActive = true;
+        r.staleLeaderTake = false;
+        r.capFired = false;
+        r.elapsedS = 0;
+        r.recordStartedAt = now();
+        // The e-stop tripped while the start was in flight: the server discards
+        // the take on its next tick, and so do we.
+        if (getProps().collisionActive || r.collisionSeq !== seq) {
+          collisionDiscardRecording();
+          return;
+        }
+        setState('aufnahme');
+        sound('start');
+        clearTimer('elapsed');
+        if (!r.tornDown) r.timers.elapsed = setInterval(elapsedTick, ELAPSED_STEP_MS);
+        emit();
+      } finally {
+        done();
+      }
+    }, { onSkip: done });
+  }
+
+  // The stop's answer is judged against collisions seen since it was SENT: a
+  // trip that reached the client first already moved the state to `bereit`
+  // and told the student, so a take returned afterwards is dropped silently.
+  function stopLeader() {
+    enqueue(async () => {
+      if (r.state !== 'aufnahme') return;
+      const seq = r.collisionSeq;
+      let res;
+      try {
+        res = await call('recordControl', 'stop_leader');
+      } catch (_) {
+        if (r.state !== 'aufnahme' || r.collisionSeq !== seq) return;
+        // The server keeps sampling until a data stop or its cap; retry.
+        r.closeAfterReview = false;
+        notify('onError', DE.TEACH_OFFLINE);
+        emit();
+        return;
+      }
+      r.recordActive = false;
+      if (r.state !== 'aufnahme' || r.collisionSeq !== seq) {
+        r.closeAfterReview = false;
+        emit();
+        return;
+      }
+      clearTimer('elapsed');
+      const parsed = parseStopPoints(res && res.points_json);
+      if (res && res.success !== false && parsed.points.length >= TEACH_MIN_POINTS) {
+        const pts = parsed.points;
+        const first = pts[0];
+        const last = pts[pts.length - 1];
+        const span = Number(last[last.length - 1]) - Number(first[first.length - 1]);
+        r.take = {
+          points: pts,
+          fps: parsed.fps,
+          sampleCount: Number(res.sample_count) || pts.length,
+          durationS: Number(res.duration_s) || (Number.isFinite(span) ? span : 0),
+          relockOk: true, // the follower never went limp
+        };
+        r.stoppedAt = now();
+        setState('pruefen');
+        clearTimer('grace');
+        // Re-publish once the window has passed, so keepHeld clears on screen.
+        if (!r.tornDown) {
+          r.timers.grace = setTimeout(() => { if (r.state === 'pruefen') emit(); },
+            TEACH_LEADER_COLLISION_GRACE_MS + 1);
+        }
+        sound('stop');
+        emit();
+        if (judgeReviewCollision()) return;
+        notify('onTake', r.take);
+        return;
+      }
+      // A refusal (a data stop's sentence, „keine Leader-Aufnahme") or a still
+      // follower / an un-activated rig that returned fewer than 2 points.
+      r.closeAfterReview = false;
+      setState('bereit');
+      emit();
+      notify('onError', res && res.success === false && res.message ? res.message : DE.TEACH_NO_MOTION);
+    });
+  }
+
+  // A trip during a take: the samples hold the press. Best-effort cancel (the
+  // server's sampler discards on its own within one tick).
+  function collisionDiscardRecording() {
+    r.closeAfterReview = false;
+    setState('bereit');
+    emit();
+    notify('onError', DE.TEACH_COLLISION_DISCARDED);
+    enqueue(async () => {
+      try {
+        await call('recordControl', 'cancel_leader');
+        r.recordActive = false;
+      } catch (_) { /* teardown or the next start/stop answers for it */ }
+    });
+  }
+
+  // LEVEL-triggered: a returned take is discarded while the e-stop is up and
+  // its stop answered at most TEACH_LEADER_COLLISION_GRACE_MS ago.
+  function judgeReviewCollision() {
+    if (!isLeader() || !getProps().collisionActive || r.state !== 'pruefen' || !r.take) return false;
+    if (now() - r.stoppedAt > TEACH_LEADER_COLLISION_GRACE_MS) return false;
+    r.take = null;
+    r.closeAfterReview = false;
+    setState('bereit');
+    emit();
+    notify('onError', DE.TEACH_COLLISION_DISCARDED);
+    return true;
+  }
+
+  function onCollisionChange(active) {
+    const was = r.prevCollision;
+    r.prevCollision = !!active;
+    if (!getProps().enabled || !isLeader() || r.tornDown || r.finished) return;
+    if (active && !was) {
+      r.collisionSeq += 1;
+      if (r.state === 'aufnahme') {
+        collisionDiscardRecording();
+        return;
+      }
+    }
+    if (active) judgeReviewCollision();
+  }
+
+  // „Alte Aufnahme verwerfen": the take that refused our start.
+  function discardStaleLeaderTake() {
+    if (!isLeader() || !r.staleLeaderTake || r.state !== 'bereit') return;
+    enqueue(async () => {
+      if (!r.staleLeaderTake) return;
+      let res;
+      try {
+        res = await call('recordControl', 'cancel_leader');
+      } catch (_) {
+        notify('onError', DE.TEACH_OFFLINE);
+        return;
+      }
+      if (res && res.success === false) {
+        notify('onError', res.message || DE.TEACH_OFFLINE);
+        return;
+      }
+      r.staleLeaderTake = false;
+      emit();
     });
   }
 
@@ -426,7 +635,9 @@ export function createTeachEngine(getProps, publish) {
 
   function offlineClose() {
     teardown();
-    notify('onError', DE.TEACH_CLOSE_OFFLINE);
+    // TEACH_CLOSE_OFFLINE tells the student to hold a LIMP arm — never true in
+    // leader mode, where the follower stays torqued.
+    notify('onError', isLeader() ? DE.TEACH_OFFLINE : DE.TEACH_CLOSE_OFFLINE);
     emitFinished(true);
   }
 
@@ -439,6 +650,7 @@ export function createTeachEngine(getProps, publish) {
     }
     switch (r.state) {
       case 'fest':
+      case 'bereit':
         completeFinish(extraItems);
         break;
       case 'frei':
@@ -470,7 +682,7 @@ export function createTeachEngine(getProps, publish) {
 
   function continueTeaching() {
     if (r.state !== 'abschluss') return;
-    setState('fest');
+    setState(initialStateFor(getProps().mode));
     emit();
   }
 
@@ -478,6 +690,9 @@ export function createTeachEngine(getProps, publish) {
 
   function keep(thenFinish = false) {
     if (r.state !== 'pruefen' || !r.take) return;
+    // Leader mode: a trip within the grace window must still be able to
+    // discard this take (§5.7 row 12c).
+    if (keepHeld()) return;
     const take = r.take;
     const close = thenFinish || r.closeAfterReview;
     r.take = null;
@@ -502,13 +717,17 @@ export function createTeachEngine(getProps, publish) {
   function again() {
     if (r.state !== 'pruefen') return;
     discard();
-    if (r.state === 'frei') runStart('record', 'frei', 'frei');
+    if (isLeader()) startLeader();
+    else if (r.state === 'frei') runStart('record', 'frei', 'frei');
     else startCountdown('record');
   }
 
   // ---- captures ---------------------------------------------------------
 
   function captureAllowed(kind) {
+    // Leader mode: the follower is torqued throughout, so a Ziel during a take
+    // is as safe as a Position (a light touch; a hard press trips the e-stop).
+    if (isLeader()) return r.state === 'bereit' || r.state === 'aufnahme';
     if (kind === 'pose') return r.state === 'fest' || r.state === 'frei' || r.state === 'aufnahme';
     return r.state === 'fest' || r.state === 'frei';
   }
@@ -583,7 +802,8 @@ export function createTeachEngine(getProps, publish) {
   function onLeaderLive(live) {
     // Tracked only while enabled, so a leader already on at enable still
     // counts as „turned on while open".
-    if (!getProps().enabled) return;
+    // Leader mode expects a live leader; its loss is `leaderGone`.
+    if (!getProps().enabled || isLeader()) return;
     const was = r.prevLeaderLive;
     r.prevLeaderLive = live;
     if (!live || was || r.leaderLockout || r.tornDown || r.finished) return;
@@ -768,11 +988,12 @@ export function createTeachEngine(getProps, publish) {
     clearTimer('countdown');
     clearTimer('elapsed');
     clearTimer('keepalive');
+    clearTimer('grace');
     closePreviewFeed();
     const act = () => {
       let pending = null;
       if (r.recordActive) {
-        pending = call('recordControl', 'cancel');
+        pending = call('recordControl', isLeader() ? 'cancel_leader' : 'cancel');
       } else if (r.sessionOpen || wasPreview) {
         // In `vorschau` this is the „Stopp" of a drive nobody watches any more.
         pending = call('handGuide', false);
@@ -807,6 +1028,31 @@ export function createTeachEngine(getProps, publish) {
     abschluss: { escape: () => finish() },
   };
 
+  // Leader mode (D8). No F (nothing to free or lock), no preview.
+  const LEADER_TABLE = {
+    bereit: {
+      space: startLeader, p: () => capture('pose'), z: () => capture('ziel'), escape: () => finish(),
+    },
+    aufnahme: {
+      space: stop, p: () => capture('pose'), z: () => capture('ziel'), escape: () => finish(),
+    },
+    pruefen: {
+      enter: () => keep(false), r: again, delete: discard, escape: () => finish(),
+    },
+    abschluss: { escape: () => finish() },
+  };
+
+  function handlerFor(key) {
+    const table = isLeader() ? LEADER_TABLE : TABLE;
+    return (table[r.state] || {})[key];
+  }
+
+  // Leader mode: every key but Esc waits while the bridge POSITIVELY reports
+  // the leader gone, or while the rig is not activated (LeaderActivationGate).
+  function leaderBlocked(p) {
+    return isLeader() && (p.leaderGone === true || p.activationBlocked === true);
+  }
+
   function onKeyDown(e) {
     const p = getProps();
     if (!p.enabled || r.tornDown || r.finished) return;
@@ -824,8 +1070,8 @@ export function createTeachEngine(getProps, publish) {
       if (t - r.lastSpaceAt < TEACH_SPACE_DEBOUNCE_MS) return;
       r.lastSpaceAt = t;
     }
-    if (key !== 'escape' && (p.heartbeatOk === false || r.leaderLockout)) return;
-    const handler = (TABLE[r.state] || {})[key];
+    if (key !== 'escape' && (p.heartbeatOk === false || r.leaderLockout || leaderBlocked(p))) return;
+    const handler = handlerFor(key);
     if (handler) handler();
   }
 
@@ -833,13 +1079,14 @@ export function createTeachEngine(getProps, publish) {
   // exits (finish, Stopp, continue) stay available.
   function canAct() {
     const p = getProps();
-    return !!p.enabled && !r.tornDown && !r.finished && p.heartbeatOk !== false && !r.leaderLockout;
+    return !!p.enabled && !r.tornDown && !r.finished && p.heartbeatOk !== false && !r.leaderLockout
+      && !leaderBlocked(p);
   }
 
   // A button does exactly what its key does in the current state.
   function press(key) {
     if (!canAct()) return;
-    const handler = (TABLE[r.state] || {})[key];
+    const handler = handlerFor(key);
     if (handler) handler();
   }
 
@@ -847,6 +1094,7 @@ export function createTeachEngine(getProps, publish) {
     onKeyDown,
     teardown,
     onLeaderLive,
+    onCollisionChange,
     setCaptureNamer: (fn) => { r.namer = typeof fn === 'function' ? fn : null; },
     actions: {
       space: () => press('space'),
@@ -858,7 +1106,10 @@ export function createTeachEngine(getProps, publish) {
       keep: () => press('enter'),
       again: () => press('r'),
       discard: () => press('delete'),
-      previewOnRobot: (cleanedRows) => { if (canAct()) previewOnRobot(cleanedRows); },
+      // Hand mode only: leader mode never replays on the real arm.
+      previewOnRobot: (cleanedRows) => { if (canAct() && !isLeader()) previewOnRobot(cleanedRows); },
+      // Leader mode: cancel the take that refused our start.
+      discardStaleLeaderTake: () => { if (canAct()) discardStaleLeaderTake(); },
       stopPreview: () => { if (!r.tornDown) stopPreview(); },
       // „Fertig": what Esc does in the current state.
       finish: () => { if (!r.tornDown) finish(); },
@@ -868,7 +1119,11 @@ export function createTeachEngine(getProps, publish) {
 }
 
 /**
- * Vormachen session (hand mode). See createTeachEngine for the rules.
+ * Vormachen session (hand and leader mode). See createTeachEngine for the rules.
+ *
+ * Leader mode (`mode: 'leader'`) inputs: collisionActive (tasks.collision),
+ * leaderGone (the bridge POSITIVELY reports follower-only — a failed probe is
+ * NOT leader-gone), activationBlocked (LeaderActivationGate's panel is up).
  *
  * subscribeFollowerJoints(cb) → unsubscribe: cb(positions: number[]) per
  * /joint_states message; opened ONLY while `vorschau`. Absent → the hook never
@@ -879,7 +1134,9 @@ export function createTeachEngine(getProps, publish) {
 export default function useTeachSession(props) {
   const propsRef = useRef(props);
   propsRef.current = props;
-  const [snapshot, setSnapshot] = useState(INITIAL_SNAPSHOT);
+  const [snapshot, setSnapshot] = useState(
+    () => ({ ...INITIAL_SNAPSHOT, state: initialStateFor(props && props.mode) }),
+  );
   const engineRef = useRef(null);
   if (engineRef.current === null) {
     engineRef.current = createTeachEngine(() => propsRef.current, setSnapshot);
@@ -891,6 +1148,11 @@ export default function useTeachSession(props) {
   useEffect(() => {
     engine.onLeaderLive(leaderLive);
   }, [engine, leaderLive, enabled]);
+
+  const collisionActive = !!(props && props.collisionActive);
+  useEffect(() => {
+    engine.onCollisionChange(collisionActive);
+  }, [engine, collisionActive, enabled]);
 
   useEffect(() => {
     const onPageHide = () => engine.teardown();

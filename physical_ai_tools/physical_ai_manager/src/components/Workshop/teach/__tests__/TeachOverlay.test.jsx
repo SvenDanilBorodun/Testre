@@ -13,7 +13,7 @@
 import React from 'react';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import toast from 'react-hot-toast';
-import TeachOverlay, { teachListMeta, teachSlotsLine } from '../TeachOverlay';
+import TeachOverlay, { teachListMeta, teachRenameEnabled, teachSlotsLine } from '../TeachOverlay';
 import { DE, formatDe } from '../../blocks/messages_de';
 import { compactTrajectoryPoints } from '../../../../utils/trajectoryCompact';
 import { applyCleanup } from '../../../../utils/recordingCleanup';
@@ -63,6 +63,17 @@ vi.mock('roslib', () => ({
   __esModule: true,
   default: { Topic: function Topic() { this.subscribe = () => {}; this.unsubscribe = () => {}; } },
 }));
+
+// Leader mode renders LeaderActivationGate, whose hook reads s.ros — mocked
+// here so no test needs that slice; `status` null = unknown (not blocked).
+const mockActivation = vi.hoisted(() => ({ status: null }));
+vi.mock('../../../../hooks/useRobotActivation', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    default: () => ({ status: mockActivation.status, activate: vi.fn(), calling: false, error: null }),
+  };
+});
 
 const mockStore = vi.hoisted(() => ({ add: vi.fn(), getById: vi.fn(), taken: [] }));
 vi.mock('../../sammlung/destinationStore', async (importOriginal) => {
@@ -118,7 +129,7 @@ function makeActions() {
   return {
     space: vi.fn(), toggleFree: vi.fn(), lock: vi.fn(), capturePose: vi.fn(), captureZiel: vi.fn(),
     keep: vi.fn(), again: vi.fn(), discard: vi.fn(), previewOnRobot: vi.fn(), stopPreview: vi.fn(),
-    finish: vi.fn(), continueTeaching: vi.fn(),
+    finish: vi.fn(), continueTeaching: vi.fn(), discardStaleLeaderTake: vi.fn(),
   };
 }
 
@@ -155,6 +166,7 @@ beforeEach(() => {
   mockHook.namer = null;
   mockHook.actions = null;
   mockGlide.offer.mockReset();
+  mockActivation.status = null;
   mockGlide.active = false;
   mockStore.add.mockReset();
   mockStore.getById.mockReset();
@@ -1017,5 +1029,174 @@ describe('TeachOverlay — „Als Programm einfügen"', () => {
     const [, items, opts] = mockInsert.fn.mock.calls[0];
     expect(opts.gripperStateOf(items[0])).toEqual({ state: 'open' });
     expect(opts.gripperStateOf(items[1])).toEqual({ state: 'closed' });
+  });
+});
+
+describe('TeachOverlay — leader mode (D8)', () => {
+  const LEADER_BRIDGE = { available: true, followerOnly: false, hasLeader: true, busy: false, leaderOn: true };
+  const leaderProps = (over = {}) => baseProps({ mode: 'leader', caps: { has_leader: true }, rsBridge: LEADER_BRIDGE, ...over });
+
+  test('bereit: leader header, state and hint lines, no F button, the light-touch Z hint', () => {
+    withSnapshot({ state: 'bereit' });
+    render(<TeachOverlay {...leaderProps()} />);
+    expect(screen.getByText(DE.TEACH_MODE_LEADER)).toBeInTheDocument();
+    expect(screen.queryByText(DE.TEACH_MODE_HAND)).toBeNull();
+    expect(screen.getByText(DE.TEACH_STATE_LEADER_READY)).toBeInTheDocument();
+    expect(screen.getByText(DE.TEACH_HINT_LEADER)).toBeInTheDocument();
+    expect(screen.queryByText(DE.TEACH_KEY_FREE)).toBeNull();
+    expect(screen.queryByText(DE.TEACH_KEY_LOCK)).toBeNull();
+    const z = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_ZIEL) });
+    expect(within(z).getByText(DE.TEACH_LEADER_ZIEL_HINT)).toBeInTheDocument();
+    expect(z).toBeEnabled();
+    expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_REC) })).toBeEnabled();
+    expect(mockHook.props).toMatchObject({ mode: 'leader', leaderGone: false, activationBlocked: false });
+  });
+
+  test('aufnahme: the leader recording hint, Stop, P and Z enabled (no „Erst Aufnahme beenden")', () => {
+    withSnapshot({ state: 'aufnahme', elapsedS: 3 });
+    render(<TeachOverlay {...leaderProps()} />);
+    expect(screen.getByText(DE.TEACH_STATE_REC)).toBeInTheDocument();
+    expect(screen.getByText(DE.TEACH_HINT_LEADER_REC)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_STOP) })).toBeEnabled();
+    const z = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_ZIEL) });
+    expect(z).toBeEnabled();
+    expect(z).not.toHaveAttribute('title', DE.TEACH_ZIEL_BLOCKED_REC);
+  });
+
+  test('the review never offers a real-arm replay, and keep waits out the grace window', () => {
+    const actions = withSnapshot({ state: 'pruefen', take: TAKE, keepHeld: true });
+    const { rerender } = render(<TeachOverlay {...leaderProps()} />);
+    const review = screen.getByTestId('teach-review');
+    expect(within(review).queryByRole('button', { name: DE.TEACH_REVIEW_ON_ROBOT })).toBeNull();
+    expect(within(review).getByTestId('teach-review-on-robot-leader'))
+      .toHaveTextContent(DE.TEACH_REVIEW_ON_ROBOT_LEADER);
+    const held = within(review).getByRole('button', { name: new RegExp(DE.TEACH_LIST_REVIEWING) });
+    expect(held).toBeDisabled();
+    expect(within(review).queryByRole('button', { name: new RegExp(DE.TEACH_REVIEW_KEEP) })).toBeNull();
+    withSnapshot({ state: 'pruefen', take: TAKE, keepHeld: false });
+    mockHook.actions = actions;
+    rerender(<TeachOverlay {...leaderProps()} />);
+    const keepBtn = screen.getByRole('button', { name: new RegExp(DE.TEACH_REVIEW_KEEP) });
+    expect(keepBtn).toBeEnabled();
+    fireEvent.click(keepBtn);
+    expect(actions.keep).toHaveBeenCalledTimes(1);
+    expect(actions.previewOnRobot).not.toHaveBeenCalled();
+  });
+
+  test.each(['idle', 'activating', 'failed'])('activation %s: the blocked panel replaces the teaching content', (state) => {
+    mockActivation.status = { state, step: '', message: '', robotType: 'omx_full', hasLeader: true, required: true };
+    withSnapshot({ state: 'bereit' });
+    render(<TeachOverlay {...leaderProps()} />);
+    expect(screen.getByText(DE.TEACH_BLOCK_NOT_ACTIVE)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: new RegExp(DE.TEACH_KEY_REC) })).toBeNull();
+    expect(mockHook.props.activationBlocked).toBe(true);
+    // „Fertig (Esc)" stays.
+    expect(screen.getByRole('button', { name: `${DE.TEACH_DONE} (Esc)` })).toBeInTheDocument();
+  });
+
+  test('activation active or unknown: teaching content, not blocked', () => {
+    mockActivation.status = { state: 'active', step: '', message: '', robotType: 'omx_full', hasLeader: true, required: true };
+    withSnapshot({ state: 'bereit' });
+    render(<TeachOverlay {...leaderProps()} />);
+    expect(screen.queryByText(DE.TEACH_BLOCK_NOT_ACTIVE)).toBeNull();
+    expect(mockHook.props.activationBlocked).toBe(false);
+  });
+
+  test('hand mode never renders the activation gate', () => {
+    mockActivation.status = { state: 'idle', step: '', message: '', robotType: 'omx_full', hasLeader: true, required: true };
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps()} />);
+    expect(screen.queryByText(DE.TEACH_BLOCK_NOT_ACTIVE)).toBeNull();
+    expect(mockHook.props.activationBlocked).toBe(false);
+    expect(mockHook.props.leaderGone).toBe(false);
+  });
+
+  test('leaderGone needs a POSITIVE follower-only answer; a failed probe is not leader-gone', () => {
+    withSnapshot({ state: 'aufnahme' });
+    const { rerender } = render(<TeachOverlay {...leaderProps({ rsBridge: { available: false, followerOnly: false, leaderOn: false } })} />);
+    expect(mockHook.props.leaderGone).toBe(false);
+    expect(screen.queryByText(DE.TEACH_LEADER_GONE)).toBeNull();
+    expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_STOP) })).toBeEnabled();
+    rerender(<TeachOverlay {...leaderProps({ rsBridge: { available: true, followerOnly: true, leaderOn: false } })} />);
+    expect(mockHook.props.leaderGone).toBe(true);
+    expect(screen.getByText(DE.TEACH_LEADER_GONE)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_STOP) })).toBeDisabled();
+    // Never the hand-mode lock-out banner in leader mode.
+    expect(screen.queryByText(DE.TEACH_LEADER_TURNED_ON)).toBeNull();
+  });
+
+  test('a take already running: „Alte Aufnahme verwerfen" calls discardStaleLeaderTake', () => {
+    const actions = withSnapshot({ state: 'bereit', staleLeaderTake: true });
+    render(<TeachOverlay {...leaderProps()} />);
+    fireEvent.click(screen.getByRole('button', { name: DE.TEACH_LEADER_DISCARD_OLD }));
+    expect(actions.discardStaleLeaderTake).toHaveBeenCalledTimes(1);
+  });
+
+  test('✎ rename: every state but aufnahme in leader mode (the follower stays torqued)', () => {
+    ['bereit', 'pruefen', 'abschluss'].forEach((st) => expect(teachRenameEnabled(st, 'none', 'leader')).toBe(true));
+    expect(teachRenameEnabled('aufnahme', 'none', 'leader')).toBe(false);
+    expect(teachRenameEnabled('aufnahme', 'none')).toBe(false);
+    expect(teachRenameEnabled('fest', 'none')).toBe(true);
+  });
+});
+
+describe('TeachOverlay — leader mode with the real session hook (D8)', () => {
+  const LEADER_BRIDGE = { available: true, followerOnly: false, hasLeader: true, busy: false, leaderOn: true };
+  const leaderProps = (over = {}) => baseProps({ mode: 'leader', caps: { has_leader: true }, rsBridge: LEADER_BRIDGE, ...over });
+  function pendingOf(fn) {
+    const pending = [];
+    fn.mockImplementation(() => new Promise((resolve) => { pending.push(resolve); }));
+    return pending;
+  }
+  const key = (k) => {
+    const ev = new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
+    act(() => { screen.getByRole('dialog').dispatchEvent(ev); });
+    return ev;
+  };
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  test('a collision during a take toasts TEACH_COLLISION_DISCARDED and cancels it', async () => {
+    const rec = pendingOf(mockRos.recordControl);
+    const props = leaderProps();
+    const { rerender } = render(<TeachOverlay {...props} />);
+    key(' ');
+    await act(async () => { await flush(); });
+    expect(mockRos.recordControl).toHaveBeenCalledWith('start_leader');
+    await act(async () => { rec[0]({ success: true }); await flush(); });
+    expect(screen.getByText(DE.TEACH_HINT_LEADER_REC)).toBeInTheDocument();
+    setState({ collision: true });
+    rerender(<TeachOverlay {...props} />);
+    await act(async () => { await flush(); });
+    expect(toast.error).toHaveBeenCalledWith(DE.TEACH_COLLISION_DISCARDED);
+    expect(mockRos.recordControl).toHaveBeenLastCalledWith('cancel_leader');
+    expect(mockRos.handGuide).not.toHaveBeenCalled();
+  });
+
+  test('„Fertig" never offers the home glide in leader mode', async () => {
+    const props = leaderProps();
+    render(<TeachOverlay {...props} />);
+    key('Escape');
+    await act(async () => { await flush(); });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockGlide.offer).not.toHaveBeenCalled();
+    expect(mockRos.handGuide).not.toHaveBeenCalled();
+  });
+
+  test('not activated: Space sends nothing behind the panel, Esc still closes', async () => {
+    mockActivation.status = { state: 'idle', step: '', message: '', robotType: 'omx_full', hasLeader: true, required: true };
+    const props = leaderProps();
+    render(<TeachOverlay {...props} />);
+    await act(async () => { await flush(); });
+    key(' ');
+    key('p');
+    key('z');
+    await act(async () => { await flush(); });
+    expect(mockRos.recordControl).not.toHaveBeenCalled();
+    expect(mockRos.capturePose).not.toHaveBeenCalled();
+    key('Escape');
+    await act(async () => { await flush(); });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 });

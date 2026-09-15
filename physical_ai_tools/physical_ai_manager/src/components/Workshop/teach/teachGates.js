@@ -16,18 +16,17 @@ import { DE } from '../blocks/messages_de';
  * Why Vormachen cannot open right now, or null. ORDER IS THE CONTRACT: the
  * first matching reason is the one the student reads.
  *
- * @returns {'offline'|'running'|'preview'|'sim'|'handguide'|'leader'|null}
+ * A live leader is NOT a reason: it selects leader mode (teachModeFor).
+ *
+ * @returns {'offline'|'running'|'preview'|'sim'|'handguide'|null}
  */
 export function teachEntryBlockReason({
-  heartbeatStatus, runState, paused, simMode, jogHandGuideOn, previewActive, rsLeaderOn,
+  heartbeatStatus, runState, paused, simMode, jogHandGuideOn, previewActive,
 } = {}) {
   if (heartbeatStatus !== 'connected') return 'offline';
   if (runState === 'running' || paused === true) return previewActive ? 'preview' : 'running';
   if (simMode) return 'sim';
   if (jogHandGuideOn) return 'handguide';
-  // Hand mode only: until leader-arm Vormachen lands, a live leader refuses the
-  // overlay instead of letting the server refuse every key press.
-  if (rsLeaderOn) return 'leader';
   return null;
 }
 
@@ -38,8 +37,19 @@ export const TEACH_BLOCK_TITLES_DE = Object.freeze({
   sim: DE.TEACH_BLOCK_SIM,
   handguide: DE.TEACH_BLOCK_JOG,
   glide: DE.TEACH_BLOCK_GLIDE,
-  leader: DE.TEACH_BLOCK_LEADER,
 });
+
+/**
+ * D8: which Vormachen mode an open request gets. Leader mode needs a POSITIVE
+ * bridge answer that the leader is on (a failed probe reports leaderOn false)
+ * and a profile that does not explicitly deny a leader; everything else
+ * teaches by hand.
+ *
+ * @returns {'leader'|'hand'}
+ */
+export function teachModeFor({ rsLeaderOn, caps } = {}) {
+  return rsLeaderOn && !(caps && caps.has_leader === false) ? 'leader' : 'hand';
+}
 
 export const TEACH_COUNTDOWN_S = 3;
 export const TEACH_SPACE_DEBOUNCE_MS = 400;

@@ -460,8 +460,9 @@ export const DE = {
   TEACH_BLOCK_JOG: 'Der Arm ist unter „Steuern" freigeschaltet — bitte dort zuerst festsetzen.',
   TEACH_BLOCK_GLIDE: 'Der Arm fährt gerade in die Grundstellung — bitte kurz warten.',
   TEACH_BLOCK_PREVIEW: 'Erst die Vorschau beenden.',
-  // Hand mode only; leader-arm Vormachen replaces this refusal.
-  TEACH_BLOCK_LEADER: 'Erst oben „Leader abschalten".',
+  // Leader mode (D8): the teleop broadcaster is spawned only by the Startseite
+  // activation, so an un-activated rig would record a still follower.
+  TEACH_BLOCK_NOT_ACTIVE: 'Aktiviere den Roboter auf der Startseite, bevor du ihn bewegst.',
   TEACH_NO_MOTION: 'Keine Bewegung aufgenommen — bitte den Arm während der Aufnahme bewegen.',
   TEACH_CAP_REACHED: 'Maximale Aufnahmedauer erreicht — Aufnahme wird beendet.',
   TEACH_ZIEL_BLOCKED_REC: 'Erst Aufnahme beenden',
@@ -471,6 +472,10 @@ export const DE = {
   TEACH_RELOCK_FAILED: 'Der Arm konnte nicht festgesetzt werden. Halte ihn weiter fest und drücke F.',
   TEACH_LEADER_TURNED_ON:
     'Der Leader-Arm wurde eingeschaltet — Vormachen mit der Hand ist jetzt nicht möglich.',
+  TEACH_COLLISION_DISCARDED: 'Kollision — die Aufnahme wurde verworfen.',
+  TEACH_LEADER_GONE: 'Der Leader-Arm ist nicht mehr aktiv — bitte Vormachen schließen und neu öffnen.',
+  TEACH_LEADER_DISCARD_OLD: 'Alte Aufnahme verwerfen',
+  TEACH_LEADER_ZIEL_HINT: 'Tippe den Tisch mit dem Leader-Arm nur leicht an.',
   TEACH_ROBOT_PREVIEW_RUNNING: 'Der Arm fährt die Bewegung ab — Abstand halten.',
   TEACH_ROBOT_PREVIEW_NO_MOTION:
     'Der Arm hat noch nicht angefangen — er kann jederzeit losfahren. Mit „Stopp“ abbrechen.',
@@ -484,6 +489,10 @@ export const DE = {
   TOOLBAR_TEACH_TITLE: 'Bewegungen, Positionen und Ziele am echten Roboter vormachen',
   TEACH_TITLE: 'Vormachen',
   TEACH_MODE_HAND: 'Mit der Hand führen',
+  TEACH_MODE_LEADER: 'Mit dem Leader-Arm führen',
+  TEACH_STATE_LEADER_READY: 'Führe den Leader-Arm',
+  TEACH_HINT_LEADER: 'Bewege den Leader-Arm — der Roboter macht mit. Leertaste startet die Aufnahme.',
+  TEACH_HINT_LEADER_REC: 'Führe den Leader-Arm. Leertaste beendet die Aufnahme.',
   TEACH_STATE_LOCKED: 'Arm ist fest',
   TEACH_STATE_FREE: 'Arm ist frei — halte ihn fest',
   TEACH_STATE_REC: 'Aufnahme läuft',
@@ -503,6 +512,7 @@ export const DE = {
   TEACH_REVIEW_AGAIN: 'Nochmal',
   TEACH_REVIEW_DISCARD: 'Verwerfen',
   TEACH_REVIEW_ON_ROBOT: 'Auf dem Roboter ansehen',
+  TEACH_REVIEW_ON_ROBOT_LEADER: 'Mit eingeschaltetem Leader-Arm nicht möglich.',
   TEACH_REVIEW_META: '%1 · %2 s · %3 Punkte',
   TEACH_ROBOT_PREVIEW_STOP: 'Stopp',
   TEACH_SLOTS_LOW: 'Noch %1 Plätze für Aufnahmen frei.',

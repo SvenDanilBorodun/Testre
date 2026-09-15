@@ -1340,3 +1340,540 @@ describe('useTeachSession', () => {
     });
   });
 });
+
+// ---- leader mode (D8) ------------------------------------------------------
+
+async function leaderToAufnahme(h) {
+  await h.press(' ');
+  await h.resolve(h.last('recordControl'), { success: true, message: 'Aufnahme gestartet — führe den Leader-Arm.' });
+  expect(h.state).toBe('aufnahme');
+}
+
+// The stop answer lands at the current fake time; the grace window runs from it.
+async function leaderToPruefen(h, { n = 3 } = {}) {
+  await leaderToAufnahme(h);
+  await h.advance(500);
+  await h.press(' ');
+  await h.resolve(h.last('recordControl'), {
+    success: true, points_json: points(n), sample_count: n, duration_s: 0.04 * (n - 1),
+  });
+  expect(h.state).toBe('pruefen');
+}
+
+const leaderSetup = (over = {}) => setup({ mode: 'leader', leaderLive: true, ...over });
+
+describe('useTeachSession — leader mode key table (D8)', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  it('starts in bereit with nothing sent', () => {
+    const h = leaderSetup();
+    expect(h.state).toBe('bereit');
+    expect(h.calls).toHaveLength(0);
+    h.unmount();
+  });
+
+  it('bereit + Space: start_leader at once (no countdown) → aufnahme + start sound', async () => {
+    const h = leaderSetup();
+    await h.press(' ');
+    expect(h.count('recordControl', 'start_leader')).toBe(1);
+    expect(h.sounds.tick).not.toHaveBeenCalled();
+    await h.resolve(h.last('recordControl'), { success: true });
+    expect(h.state).toBe('aufnahme');
+    expect(h.sounds.start).toHaveBeenCalledTimes(1);
+    await h.advance(2000);
+    expect(h.cur.elapsedS).toBeGreaterThanOrEqual(1.75);
+    h.unmount();
+  });
+
+  it('bereit + Space refused: the server sentence, still bereit', async () => {
+    const h = leaderSetup();
+    await h.press(' ');
+    await h.resolve(h.last('recordControl'), { success: false, message: 'Dieser Roboter hat keinen Leader-Arm.' });
+    expect(h.state).toBe('bereit');
+    expect(h.cbs.onError).toHaveBeenCalledWith('Dieser Roboter hat keinen Leader-Arm.');
+    expect(h.cur.staleLeaderTake).toBe(false);
+    h.unmount();
+  });
+
+  it('a take already running: staleLeaderTake, and „Alte Aufnahme verwerfen" cancels it', async () => {
+    const h = leaderSetup();
+    await h.press(' ');
+    await h.resolve(h.last('recordControl'), {
+      success: false, message: 'Eine Leader-Aufnahme läuft gerade — bitte zuerst beenden.',
+    });
+    expect(h.cur.staleLeaderTake).toBe(true);
+    expect(h.cbs.onError).toHaveBeenCalledWith('Eine Leader-Aufnahme läuft gerade — bitte zuerst beenden.');
+    await act(async () => { h.cur.actions.discardStaleLeaderTake(); await flush(); });
+    expect(h.count('recordControl', 'cancel_leader')).toBe(1);
+    expect(h.cur.staleLeaderTake).toBe(true);
+    await h.resolve(h.last('recordControl'), { success: true, message: 'Aufnahme verworfen.' });
+    expect(h.cur.staleLeaderTake).toBe(false);
+    expect(h.state).toBe('bereit');
+    h.unmount();
+  });
+
+  it('bereit + P and + Z capture (named on the key press)', async () => {
+    const h = leaderSetup();
+    await h.press('p');
+    await h.resolve(h.last('capturePose'), { success: true, world_z: 0.1 });
+    await h.press('z');
+    await h.resolve(h.last('capturePose'), { success: true, world_z: 0.04 });
+    expect(h.count('capturePose')).toBe(2);
+    expect(h.cbs.onCapture.mock.calls.map((c) => c[0].kind)).toEqual(['pose', 'ziel']);
+    h.unmount();
+  });
+
+  it('bereit + Esc: finished at once with 0 items (never a glide), abschluss with items', async () => {
+    const zero = leaderSetup({ roundItemCount: 0 });
+    await zero.press('Escape');
+    expect(zero.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: false, relockOk: true, offline: false });
+    expect(zero.calls).toHaveLength(0);
+    zero.unmount();
+
+    const two = leaderSetup({ roundItemCount: 2 });
+    await two.press('Escape');
+    expect(two.state).toBe('abschluss');
+    await two.press('Escape');
+    expect(two.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: false, relockOk: true, offline: false });
+    two.unmount();
+  });
+
+  it('aufnahme + Space: stop_leader → pruefen with the take (relockOk), stop sound, onTake', async () => {
+    const h = leaderSetup();
+    await leaderToPruefen(h);
+    expect(h.cur.take).toMatchObject({ fps: 25, sampleCount: 3, relockOk: true });
+    expect(h.cur.take.points).toHaveLength(3);
+    expect(h.sounds.stop).toHaveBeenCalledTimes(1);
+    expect(h.cbs.onTake).toHaveBeenCalledTimes(1);
+    expect(h.count('recordControl', 'stop_leader')).toBe(1);
+    h.unmount();
+  });
+
+  it('aufnahme + P and + Z both capture (the follower stays torqued)', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    await h.press('p');
+    await h.resolve(h.last('capturePose'), { success: true });
+    await h.press('z');
+    await h.resolve(h.last('capturePose'), { success: true });
+    expect(h.count('capturePose')).toBe(2);
+    expect(h.cbs.onError).not.toHaveBeenCalledWith(DE.TEACH_ZIEL_BLOCKED_REC);
+    expect(h.state).toBe('aufnahme');
+    h.unmount();
+  });
+
+  it('aufnahme + Esc: stop first, review, keep after the grace window, then finish', async () => {
+    const h = leaderSetup({ roundItemCount: 0 });
+    await leaderToAufnahme(h);
+    await h.advance(500);
+    await h.press('Escape');
+    expect(h.count('recordControl', 'stop_leader')).toBe(1);
+    await h.resolve(h.last('recordControl'), { success: true, points_json: points(4) });
+    expect(h.state).toBe('pruefen');
+    await h.advance(1100);
+    await h.press('Enter');
+    expect(h.cbs.onKeep).toHaveBeenCalledTimes(1);
+    // The kept take counts as an item: the summary, never an immediate close.
+    expect(h.state).toBe('abschluss');
+    expect(h.cbs.onFinished).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('pruefen + Enter: ignored 200 ms after the stop, keeps at 1100 ms', async () => {
+    const h = leaderSetup();
+    await leaderToPruefen(h);
+    expect(h.cur.keepHeld).toBe(true);
+    await h.advance(200);
+    await h.press('Enter');
+    expect(h.cbs.onKeep).not.toHaveBeenCalled();
+    expect(h.state).toBe('pruefen');
+    await h.advance(900);
+    expect(h.cur.keepHeld).toBe(false);
+    await h.press('Enter');
+    expect(h.cbs.onKeep).toHaveBeenCalledTimes(1);
+    expect(h.state).toBe('bereit');
+    h.unmount();
+  });
+
+  it('pruefen + Esc: ignored inside the grace window, keeps and finishes after it', async () => {
+    const h = leaderSetup({ roundItemCount: 0 });
+    await leaderToPruefen(h);
+    await h.press('Escape');
+    expect(h.cbs.onKeep).not.toHaveBeenCalled();
+    expect(h.state).toBe('pruefen');
+    await h.advance(1100);
+    await h.press('Escape');
+    expect(h.cbs.onKeep).toHaveBeenCalledTimes(1);
+    expect(h.state).toBe('abschluss');
+    h.unmount();
+  });
+
+  it('pruefen + R: discards and starts a new take (start_leader, no countdown)', async () => {
+    const h = leaderSetup();
+    await leaderToPruefen(h);
+    await h.press('r');
+    expect(h.cur.take).toBeNull();
+    expect(h.count('recordControl', 'start_leader')).toBe(2);
+    await h.resolve(h.last('recordControl'), { success: true });
+    expect(h.state).toBe('aufnahme');
+    expect(h.cbs.onKeep).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('pruefen + Entf: discards with no service call', async () => {
+    const h = leaderSetup();
+    await leaderToPruefen(h);
+    const before = h.calls.length;
+    await h.press('Delete');
+    expect(h.state).toBe('bereit');
+    expect(h.cur.take).toBeNull();
+    expect(h.calls).toHaveLength(before);
+    expect(h.cbs.onKeep).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('abschluss + Esc closes', async () => {
+    const h = leaderSetup({ roundItemCount: 1 });
+    await h.press('Escape');
+    expect(h.state).toBe('abschluss');
+    await h.press('Escape');
+    expect(h.cbs.onFinished).toHaveBeenCalledTimes(1);
+    h.unmount();
+  });
+
+  it('every „—" cell sends nothing and changes nothing', async () => {
+    const b = leaderSetup();
+    for (const k of ['f', 'Enter', 'r', 'Delete']) {
+      await b.press(k); // eslint-disable-line no-await-in-loop
+    }
+    expect(b.calls).toHaveLength(0);
+    expect(b.state).toBe('bereit');
+    b.unmount();
+
+    const a = leaderSetup();
+    await leaderToAufnahme(a);
+    const beforeA = a.calls.length;
+    for (const k of ['f', 'Enter', 'r', 'Delete']) {
+      await a.press(k); // eslint-disable-line no-await-in-loop
+    }
+    expect(a.calls).toHaveLength(beforeA);
+    expect(a.state).toBe('aufnahme');
+    a.unmount();
+
+    const p = leaderSetup();
+    await leaderToPruefen(p);
+    const beforeP = p.calls.length;
+    await p.advance(500);
+    for (const k of [' ', 'f', 'p', 'z']) {
+      await p.press(k); // eslint-disable-line no-await-in-loop
+    }
+    expect(p.calls).toHaveLength(beforeP);
+    expect(p.state).toBe('pruefen');
+    p.unmount();
+
+    const s = leaderSetup({ roundItemCount: 1 });
+    await s.press('Escape');
+    for (const k of [' ', 'f', 'p', 'z', 'Enter', 'r', 'Delete']) {
+      await s.press(k); // eslint-disable-line no-await-in-loop
+    }
+    expect(s.calls).toHaveLength(0);
+    expect(s.state).toBe('abschluss');
+    s.unmount();
+  });
+
+  it('handGuide is never called, and no preview, over a whole leader session', async () => {
+    const h = leaderSetup({ roundItemCount: 0 });
+    await leaderToPruefen(h);
+    await act(async () => { h.cur.actions.previewOnRobot(); h.cur.actions.lock(); h.cur.actions.toggleFree(); await flush(); });
+    await h.advance(20000);
+    await h.press('Enter');
+    await h.press('Escape');
+    h.unmount();
+    expect(h.count('handGuide')).toBe(0);
+    expect(h.count('replayMotion')).toBe(0);
+    expect(h.sounds.tick).not.toHaveBeenCalled();
+  });
+});
+
+describe('useTeachSession — leader mode stops and collisions (D8)', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  const collide = async (h, active = true) => {
+    h.rerender({ collisionActive: active });
+    await act(async () => { await flush(); });
+  };
+
+  it('a 1-point take (a still follower, an un-activated rig) is „no motion" → bereit', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    await h.advance(500);
+    await h.press(' ');
+    await h.resolve(h.last('recordControl'), { success: true, points_json: points(1), sample_count: 1 });
+    expect(h.state).toBe('bereit');
+    expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_NO_MOTION);
+    expect(h.cbs.onTake).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('a refused stop shows the server sentence verbatim → bereit', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    await h.advance(500);
+    await h.press(' ');
+    const msg = 'Der Leader-Arm sendet keine Daten mehr — die Aufnahme wurde verworfen.';
+    await h.resolve(h.last('recordControl'), { success: false, message: msg, points_json: '' });
+    expect(h.state).toBe('bereit');
+    expect(h.cbs.onError).toHaveBeenCalledWith(msg);
+    expect(h.cbs.onTake).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('a thrown stop keeps aufnahme (the student can retry)', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    await h.advance(500);
+    await h.press(' ');
+    await h.reject(h.last('recordControl'));
+    expect(h.state).toBe('aufnahme');
+    expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_OFFLINE);
+    h.unmount();
+  });
+
+  it('the 120 s cap stops once with TEACH_CAP_REACHED', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    await h.advance(120250);
+    expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_CAP_REACHED);
+    expect(h.count('recordControl', 'stop_leader')).toBe(1);
+    await h.advance(5000);
+    expect(h.count('recordControl', 'stop_leader')).toBe(1);
+    h.unmount();
+  });
+
+  it('collision in aufnahme: cancel_leader, bereit, TEACH_COLLISION_DISCARDED; keys ignored, not prevented', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    await collide(h);
+    expect(h.state).toBe('bereit');
+    expect(h.count('recordControl', 'cancel_leader')).toBe(1);
+    expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_COLLISION_DISCARDED);
+    await h.resolve(h.last('recordControl'), { success: true, message: 'Aufnahme verworfen.' });
+    const before = h.calls.length;
+    await h.advance(500);
+    for (const k of [' ', 'p', 'z', 'Escape']) {
+      const e = await h.press(k); // eslint-disable-line no-await-in-loop
+      expect(e.defaultPrevented).toBe(false);
+    }
+    expect(h.calls).toHaveLength(before);
+    expect(h.cbs.onFinished).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('collision 600 ms after the stop discards the returned take', async () => {
+    const h = leaderSetup();
+    await leaderToPruefen(h);
+    await h.advance(600);
+    await collide(h);
+    expect(h.state).toBe('bereit');
+    expect(h.cur.take).toBeNull();
+    expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_COLLISION_DISCARDED);
+    await collide(h, false);
+    await h.advance(2000);
+    await h.press('Enter');
+    expect(h.cbs.onKeep).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('collision 1500 ms after the stop keeps the take', async () => {
+    const h = leaderSetup();
+    await leaderToPruefen(h);
+    await h.advance(1500);
+    await collide(h);
+    expect(h.state).toBe('pruefen');
+    expect(h.cur.take).not.toBeNull();
+    expect(h.cbs.onError).not.toHaveBeenCalledWith(DE.TEACH_COLLISION_DISCARDED);
+    await collide(h, false);
+    await h.press('Enter');
+    expect(h.cbs.onKeep).toHaveBeenCalledTimes(1);
+    h.unmount();
+  });
+
+  it('a collision that reaches the client while stop_leader is in flight drops the take it returns', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    await h.advance(500);
+    await h.press(' ');
+    const stopCall = h.last('recordControl');
+    await collide(h);
+    expect(h.state).toBe('bereit');
+    // The server handled the stop before its detector tripped: it returns the press.
+    await h.resolve(stopCall, { success: true, points_json: points(10), sample_count: 10 });
+    expect(h.state).toBe('bereit');
+    expect(h.cur.take).toBeNull();
+    expect(h.cbs.onTake).not.toHaveBeenCalled();
+    expect(h.cbs.onError).toHaveBeenCalledTimes(1);
+    expect(h.count('recordControl', 'cancel_leader')).toBe(1);
+    await collide(h, false);
+    await h.advance(2000);
+    await h.press('Enter');
+    expect(h.cbs.onKeep).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('a collision while start_leader is in flight cancels the take it arms', async () => {
+    const h = leaderSetup();
+    await h.press(' ');
+    const start = h.last('recordControl');
+    await collide(h);
+    await h.resolve(start, { success: true });
+    expect(h.state).toBe('bereit');
+    expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_COLLISION_DISCARDED);
+    expect(h.count('recordControl', 'cancel_leader')).toBe(1);
+    h.unmount();
+  });
+
+  it('keepHeld clears on its own once the window has passed', async () => {
+    const h = leaderSetup();
+    await leaderToPruefen(h);
+    expect(h.cur.keepHeld).toBe(true);
+    await h.advance(1001);
+    expect(h.cur.keepHeld).toBe(false);
+    h.unmount();
+  });
+});
+
+describe('useTeachSession — leader mode gates and teardown (D8)', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  it('a failed bridge probe mid-take is NOT leader-gone: Space still stops', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    // What the overlay derives from {available:false, followerOnly:false}.
+    h.rerender({ leaderLive: false, leaderGone: false });
+    await h.advance(500);
+    await h.press(' ');
+    expect(h.count('recordControl', 'stop_leader')).toBe(1);
+    h.unmount();
+  });
+
+  it('leaderGone: every key but Esc waits (buttons too); Esc still finishes', async () => {
+    const h = leaderSetup({ leaderGone: true, roundItemCount: 0 });
+    for (const k of [' ', 'p', 'z']) {
+      await h.press(k); // eslint-disable-line no-await-in-loop
+    }
+    act(() => { h.cur.actions.space(); h.cur.actions.capturePose(); h.cur.actions.captureZiel(); });
+    await act(async () => { await flush(); });
+    expect(h.calls).toHaveLength(0);
+    await h.press('Escape');
+    expect(h.cbs.onFinished).toHaveBeenCalledTimes(1);
+    h.unmount();
+  });
+
+  it('leaderGone in aufnahme: Space waits, Esc stops the take', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    h.rerender({ leaderGone: true });
+    await h.advance(500);
+    await h.press(' ');
+    expect(h.count('recordControl', 'stop_leader')).toBe(0);
+    await h.press('Escape');
+    expect(h.count('recordControl', 'stop_leader')).toBe(1);
+    h.unmount();
+  });
+
+  it('activationBlocked: Space/P/Z send nothing, Esc finishes', async () => {
+    const h = leaderSetup({ activationBlocked: true, roundItemCount: 0 });
+    for (const k of [' ', 'p', 'z']) {
+      const e = await h.press(k); // eslint-disable-line no-await-in-loop
+      expect(e.defaultPrevented).toBe(true);
+    }
+    act(() => { h.cur.actions.space(); });
+    await act(async () => { await flush(); });
+    expect(h.calls).toHaveLength(0);
+    h.rerender({ activationBlocked: false });
+    await h.advance(500);
+    await h.press(' ');
+    expect(h.count('recordControl', 'start_leader')).toBe(1);
+    h.rerender({ activationBlocked: true });
+    await h.press('Escape');
+    expect(h.cbs.onFinished).toHaveBeenCalledTimes(1);
+    h.unmount();
+  });
+
+  it('a live leader is expected: no TEACH_LEADER_TURNED_ON lock-out', async () => {
+    const h = leaderSetup({ leaderLive: false });
+    h.rerender({ leaderLive: true });
+    await act(async () => { await flush(); });
+    expect(h.cbs.onError).not.toHaveBeenCalledWith(DE.TEACH_LEADER_TURNED_ON);
+    await h.press(' ');
+    expect(h.count('recordControl', 'start_leader')).toBe(1);
+    h.unmount();
+  });
+
+  it('unmount in aufnahme cancels the take once', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    h.unmount();
+    expect(h.count('recordControl', 'cancel_leader')).toBe(1);
+    expect(h.count('recordControl', 'cancel')).toBe(0);
+    expect(h.count('handGuide')).toBe(0);
+  });
+
+  it('unmount during a pending start_leader cancels once, after it answered', async () => {
+    const h = leaderSetup();
+    await h.press(' ');
+    const start = h.last('recordControl');
+    h.unmount();
+    expect(h.count('recordControl', 'cancel_leader')).toBe(0);
+    await h.resolve(start, { success: true });
+    expect(h.count('recordControl', 'cancel_leader')).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('pagehide during a pending start_leader behaves like unmount', async () => {
+    const h = leaderSetup();
+    await h.press(' ');
+    const start = h.last('recordControl');
+    act(() => { window.dispatchEvent(new Event('pagehide')); });
+    await h.resolve(start, { success: true });
+    expect(h.count('recordControl', 'cancel_leader')).toBe(1);
+    h.unmount();
+    expect(h.count('recordControl', 'cancel_leader')).toBe(1);
+  });
+
+  it('a start_leader refused before teardown sends no cancel (it could be another tab\'s take)', async () => {
+    const h = leaderSetup();
+    await h.press(' ');
+    const start = h.last('recordControl');
+    h.unmount();
+    await h.resolve(start, { success: false, message: 'Eine Leader-Aufnahme läuft gerade — bitte zuerst beenden.' });
+    expect(h.count('recordControl', 'cancel_leader')).toBe(0);
+  });
+
+  it('offline close in aufnahme: cancel_leader as the teardown, no limp-arm advice', async () => {
+    const h = leaderSetup();
+    await leaderToAufnahme(h);
+    h.rerender({ heartbeatOk: false });
+    await h.press('Escape');
+    expect(h.count('recordControl', 'cancel_leader')).toBe(1);
+    expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_OFFLINE);
+    expect(h.cbs.onError).not.toHaveBeenCalledWith(DE.TEACH_CLOSE_OFFLINE);
+    expect(h.cbs.onFinished).toHaveBeenCalledWith({ releasedOnce: false, relockOk: false, offline: true });
+    h.unmount();
+  });
+});

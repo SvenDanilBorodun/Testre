@@ -20,7 +20,7 @@ import {
   teachRequestHandled,
 } from '../../../features/workshop/studioAssetsSlice';
 import { useHomeGlide } from '../HomeGlidePrompt';
-import { TEACH_BLOCK_TITLES_DE, teachEntryBlockReason } from './teachGates';
+import { TEACH_BLOCK_TITLES_DE, teachEntryBlockReason, teachModeFor } from './teachGates';
 import TeachOverlay from './TeachOverlay';
 
 function TeachHost({
@@ -50,7 +50,6 @@ function TeachHost({
       simMode,
       jogHandGuideOn,
       previewActive,
-      rsLeaderOn: !!(rsBridge && rsBridge.leaderOn),
     }) || (homeGlideActive ? 'glide' : null);
     if (reason) {
       toast.error(TEACH_BLOCK_TITLES_DE[reason]);
@@ -59,7 +58,10 @@ function TeachHost({
     }
     // Close the flyout the request came from, so Blockly holds no focus.
     try { workspace.hideChaff(); } catch (_) { /* a disposed workspace */ }
-    dispatch(teachOpened({ mode: 'hand', focus: teach.requested.focus || null }));
+    // D8: a live leader (a POSITIVE bridge answer) on a leader-capable profile
+    // teaches with the leader arm; the mode is fixed for the whole session.
+    const mode = teachModeFor({ rsLeaderOn: !!(rsBridge && rsBridge.leaderOn), caps });
+    dispatch(teachOpened({ mode, focus: teach.requested.focus || null }));
     // Only a NEW token is a new request; the gate inputs are read as they are now.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);

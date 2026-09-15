@@ -330,8 +330,9 @@ function WorkshopPage({ isActive }) {
   // (lifted here) so Vormachen refuses to open over a limp arm — one shared truth,
   // so no surface shows a stale „freigeschaltet" state after JogPanel closes it.
   const [jogHandGuideOn, setJogHandGuideOn] = useState(false);
-  // The Roboter-Studio bridge (:8769): Vormachen reads `leaderOn` (entry gate,
-  // and a leader switched on mid-session). Polled only while the page is shown.
+  // The Roboter-Studio bridge (:8769): Vormachen reads `leaderOn` (leader vs
+  // hand mode, and a leader switched on mid-session) and `followerOnly` (the
+  // leader gone in leader mode). Polled only while the page is shown.
   const rsBridge = useRsBridgeStatus({ enabled: isActive });
   const teachReason = teachEntryBlockReason({
     heartbeatStatus,
@@ -340,7 +341,6 @@ function WorkshopPage({ isActive }) {
     simMode,
     jogHandGuideOn,
     previewActive,
-    rsLeaderOn: !!(rsBridge && rsBridge.leaderOn),
   });
   const subscriptions = useRosTopicSubscription();
   const { getObjectCatalog, jogArm } = useRosServiceCaller();

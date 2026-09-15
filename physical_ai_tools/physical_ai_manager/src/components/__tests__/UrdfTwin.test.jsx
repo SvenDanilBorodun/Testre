@@ -302,7 +302,9 @@ vi.mock('three', () => {
         background: null,
         add: (child) => { mockSceneOps.push(['add', child]); },
         remove: (child) => { mockSceneOps.push(['remove', child]); },
-        traverse: () => {},
+        // Recorded (and still visiting nothing), so a test can prove the ghost
+        // left the scene BEFORE the unmount's dispose traverse ran.
+        traverse: () => { mockSceneOps.push(['traverse']); },
         attach(child) {
           attachLog.push({ parent: 'scene', child });
           if (child) child.__parent = 'scene';
@@ -1737,6 +1739,12 @@ describe('UrdfTwin — ghost arm (a Position\'s captured joints)', () => {
     const [mat] = ghostMaterials();
     unmount();
     expect(mockSceneOps).toContainEqual(['remove', ghost]);
+    // The clone shares the robot's geometries: it must be detached BEFORE the
+    // scene-wide dispose traverse, or that traverse would free them.
+    const removedAt = mockSceneOps.findIndex((op) => op[0] === 'remove' && op[1] === ghost);
+    const traversedAt = mockSceneOps.map((op) => op[0]).lastIndexOf('traverse');
+    expect(traversedAt).toBeGreaterThan(-1);
+    expect(removedAt).toBeLessThan(traversedAt);
     expect(mat.dispose).toHaveBeenCalledTimes(1);
     ghost.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled());
   });

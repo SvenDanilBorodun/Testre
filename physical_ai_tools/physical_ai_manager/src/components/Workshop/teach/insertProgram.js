@@ -34,8 +34,11 @@ const GAP_X = 60;
 
 /**
  * The overlay's `gripperStateOf(item)`: recordings → `{ start, end }` from the
- * rows the keep stored (`item.upload.rows`); places → `{ state }` from the
- * store entry `entryOf(item)` returns (null when it left the store).
+ * rows the keep stored (`item.upload.rows`); a Position → `{ state }` from the
+ * store entry `entryOf(item)` returns (null when it left the store). A Ziel is
+ * always `{ state: null }`: the list and the drawer name a gripper state only
+ * for Positionen (design §S3), and a Ziel touched with the claw closed for the
+ * measurement must not insert an unexplained „schließe Greifer".
  */
 export function makeGripperStateOf({ caps = null, entryOf = () => null } = {}) {
   return (item) => {
@@ -43,6 +46,7 @@ export function makeGripperStateOf({ caps = null, entryOf = () => null } = {}) {
     if (item.kind === 'recording') {
       return recordingGripperStates(item.upload && item.upload.rows, caps);
     }
+    if (item.kind !== 'pose') return { state: null };
     let entry = null;
     try {
       entry = entryOf(item);

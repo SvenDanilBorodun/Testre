@@ -528,6 +528,23 @@ describe('SimScene — Ziel setzen and Sammlung markers', () => {
     expect(screen.getByRole('button', { name: 'Ziel setzen' })).toHaveAttribute('aria-pressed', 'true');
   });
 
+  test('losing onCreateDestination while in „Ziel setzen" leaves ziel mode: a tap places an object again', async () => {
+    const onChange = vi.fn();
+    const onCreateDestination = vi.fn();
+    const props = { scene: { objects: [], zones: [] }, catalog: CATALOG, onChange };
+    const { rerender, store } = render(
+      <SimScene {...props} onCreateDestination={onCreateDestination} requestedMode={{ mode: 'ziel', token: 1 }} />,
+    );
+    await screen.findByTestId('urdf-twin');
+    expect(screen.getByText('Tippe auf den Tisch — dort entsteht ein Ziel.')).toBeInTheDocument();
+    rerender(<Provider store={store}><SimScene {...props} onCreateDestination={null} requestedMode={{ mode: 'ziel', token: 1 }} /></Provider>);
+    expect(screen.queryByText('Tippe auf den Tisch — dort entsteht ein Ziel.')).toBeNull();
+    const svg = giveSvgABox();
+    fireEvent.pointerDown(svg, { clientX: SVG_W / 2, clientY: SVG_H / 2 });
+    expect(onCreateDestination).not.toHaveBeenCalled();
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
   test('ghostJoints reach the one twin by identity (null by default)', async () => {
     const ghostJoints = { names: ['joint1', 'joint2'], positions: [0.1, -0.4] };
     const props = { scene: { objects: [], zones: [] }, catalog: CATALOG, onChange: () => {} };

@@ -130,6 +130,18 @@ describe('buildProgramBlocks — „Greifer merken"', () => {
     expect(chainTypes(json)).toEqual(['edubotics_move_to', 'edubotics_move_to']);
   });
 
+  it('a Ziel never contributes a gripper state, even with a closed joint snapshot', () => {
+    const opts = places({ a: poseEntry(0.8), b: poseEntry(-0.3), c: poseEntry(-0.3) });
+    const { json } = buildProgramBlocks([
+      { kind: 'pose', name: 'P1', entryId: 'a' },
+      { kind: 'ziel', name: 'Z1', entryId: 'b' },
+      { kind: 'pin', name: 'Z2', entryId: 'c' },
+    ], opts);
+    expect(chainTypes(json)).toEqual(['edubotics_move_to', 'edubotics_move_to', 'edubotics_move_to']);
+    expect(makeGripperStateOf({ entryOf: () => poseEntry(-0.3) })({ kind: 'ziel', entryId: 'b' }))
+      .toEqual({ state: null });
+  });
+
   it('unknown states (in the band, no joints, old server) emit nothing and do not reset', () => {
     const opts = places({
       a: poseEntry(0.8), b: poseEntry(0.35), c: { }, d: poseEntry(0.8),

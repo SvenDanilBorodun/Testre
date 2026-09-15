@@ -1095,10 +1095,19 @@ function WorkshopPage({ isActive }) {
   // simulator (never the trail) and highlight its marker — no service call.
   // Every other kind goes to the generated sim run. Shared by the flyout card
   // action and the drawer, so both routes behave identically.
+  // The highlight the student ASKED for (a drawer focus, a variable's
+  // „Im Simulator zeigen"), as { kind, id }. A card hover is transient: when it
+  // ends the highlight falls back to this one instead of to nothing, and the
+  // drawer retires it when its focus or tab changes or it closes.
+  const drawerHighlightRef = useRef(null);
   const previewAsset = useCallback(async (asset, options) => {
     if (asset && asset.kind === 'variable') {
-      await ensureSimMode({ showPath: false });
-      dispatch(setHighlight({ kind: 'variable', id: `var:${asset.name}` }));
+      // A refused sim entry (a running program, a tutorial) has already toasted;
+      // highlighting a marker on a stage that never opened would be a lie.
+      if (!(await ensureSimMode({ showPath: false }))) return;
+      const highlight = { kind: 'variable', id: `var:${asset.name}` };
+      drawerHighlightRef.current = highlight;
+      dispatch(setHighlight(highlight));
       return;
     }
     await startPreviewRef.current(asset, options);
@@ -1151,13 +1160,13 @@ function WorkshopPage({ isActive }) {
           if (entered) setSimZielRequest({ mode: 'ziel', token: Date.now() });
         });
       } else if (action.type === 'highlight') {
-        dispatch(setHighlight(action.asset ?? null));
+        dispatch(setHighlight(action.asset ?? drawerHighlightRef.current));
       }
     });
   }, [sammlungProvider, isTabBusy, dispatch, ensureSimMode, previewAsset]);
   // A Ziel/Position focused in the drawer highlights its marker; clearing that
   // focus (or leaving those tabs) drops only the highlight the drawer set.
-  const drawerHighlightRef = useRef(null);
+  // drawerHighlightRef is declared with previewAsset above.
   const drawerOpen = !!(drawer && drawer.open);
   const drawerTab = drawer ? drawer.tab : null;
   const drawerFocusId = drawer ? drawer.focusId : null;
@@ -1166,7 +1175,7 @@ function WorkshopPage({ isActive }) {
     if (drawerTab === 'ziele') kind = 'pin';
     else if (drawerTab === 'positionen') kind = 'pose';
     if (drawerOpen && kind && drawerFocusId) {
-      drawerHighlightRef.current = drawerFocusId;
+      drawerHighlightRef.current = { kind, id: drawerFocusId };
       dispatch(setHighlight({ kind, id: drawerFocusId }));
     } else if (drawerHighlightRef.current) {
       drawerHighlightRef.current = null;

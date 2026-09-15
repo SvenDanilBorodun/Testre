@@ -8,13 +8,13 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import { describe, it, expect, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import * as Blockly from 'blockly/core';
 import 'blockly/blocks';
 import * as De from 'blockly/msg/de';
 import { registerTrajectoryBlocks } from '../../blocks/trajectories';
 import { registerDestinationBlocks } from '../../blocks/destinations';
-import { collectBlockUsage } from '../blockUsage';
+import { collectBlockUsage, jumpToBlock } from '../blockUsage';
 
 let ws;
 
@@ -118,5 +118,26 @@ describe('collectBlockUsage', () => {
     const flyoutLike = { isFlyout: true, getAllBlocks: (o) => ws.getAllBlocks(o) };
     expect(collectBlockUsage(flyoutLike).replay.size).toBe(0);
     expect(collectBlockUsage(null).replay.size).toBe(0);
+  });
+});
+
+describe('jumpToBlock', () => {
+  it('centres on the block and focuses it; a missing workspace or id does nothing', () => {
+    const block = { id: 'b1' };
+    const target = { centerOnBlock: vi.fn(), getBlockById: vi.fn(() => block) };
+    const focus = vi.spyOn(Blockly.getFocusManager(), 'focusNode').mockImplementation(() => {});
+    try {
+      jumpToBlock(target, 'b1');
+      expect(target.centerOnBlock).toHaveBeenCalledWith('b1', true);
+      expect(focus).toHaveBeenCalledWith(block);
+      expect(() => jumpToBlock(null, 'b1')).not.toThrow();
+      jumpToBlock(target, '');
+      expect(target.centerOnBlock).toHaveBeenCalledTimes(1);
+      // A block deleted in between: centerOnBlock throws, nothing escapes.
+      target.centerOnBlock.mockImplementation(() => { throw new Error('gone'); });
+      expect(() => jumpToBlock(target, 'b2')).not.toThrow();
+    } finally {
+      focus.mockRestore();
+    }
   });
 });

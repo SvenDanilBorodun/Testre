@@ -497,7 +497,7 @@ below **401** would abort exactly the pull-in the boot probe deliberately ACCEPT
    1.44 s/rev) — with no torque-on event for guards 3 or 4 to hang off (the edge
    refusal is OFF→ON-gated; the abort only runs at torque-on). Reachable with no
    external force at all: hand-guide J6 past +180° → the reading WRAPS to tick ≈0 →
-   a „Bewegung aufnehmen" recording stores ≈ −3.14 rad → **replaying it commands
+   a recorded take („✋ Vormachen") stores ≈ −3.14 rad → **replaying it commands
    tick 1**. `WorkshopJog` also accepts exactly `hi` (`if new < lo or new > hi`).
    `_write_targets` now converts through `rad_to_command_tick`, which clamps every
    commanded tick into `[m, 4095 − m]`, m = 128 by default. The minimum forced
@@ -1197,7 +1197,7 @@ rotated cube. Free to flip — symmetric window, `.env` only, no re-provision.
 
 **R8** 3D-twin browser smoke (π-yaw, finger animation, „Bahn" trail). **R10** end-to-end: scan →
 Umgebung starten → calibrate (20-frame intrinsics → extrinsic → „Tisch vermessen") → Blockly
-„finde Würfel → greife → lege ab" → „Bewegung aufnehmen" → replay → cloud save (auto-tagged
+„finde Würfel → greife → lege ab" → „✋ Vormachen" (Leertaste → „Behalten") → replay → cloud save (auto-tagged
 `edu6_studio`; cross-check an OMX rig refuses it). Sanity: only Roboter Studio + Inferenz tabs,
 lone camera = Szenen-Kamera, jog shows Gelenk 1–6, second launch fast-rehydrates.
 

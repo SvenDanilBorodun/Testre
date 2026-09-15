@@ -393,6 +393,39 @@ def test_T8_collision_discards_silently_then_stop_answers_the_collision_sentence
     _untouched_manual_and_rail(node)
 
 
+def test_a_tick_whose_take_was_replaced_before_the_lock_is_ignored():
+    # The sampler reads its abort verdict BEFORE taking the lock; a stop_leader +
+    # a new start_leader in between must not hand that stale verdict to the new take.
+    node = _armed()
+    _sample_rows(node, _moving_rows(3))
+    real = node._leader_teach_lock
+
+    class _NewTakeBeforeLock:
+        def acquire(self, *a, **k):
+            node._leader_teach_start_mono += 5.0   # a new take armed meanwhile
+            return real.acquire(*a, **k)
+
+        def release(self):
+            real.release()
+
+        def __enter__(self):
+            real.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            real.release()
+            return False
+
+    node._leader_teach_lock = _NewTakeBeforeLock()
+    node.leader_live = False                          # the OLD tick's verdict
+    node._leader_teach_sample()
+    node._leader_teach_lock = real
+    assert node._leader_teach_active is True
+    assert node.notices == []
+    assert node._leader_teach_abort_reason == ''
+    assert len(node._leader_teach_buffer) == 3
+
+
 def test_T9_leader_lost_discards_with_notice():
     node = _armed()
     _sample_rows(node, _moving_rows(3))

@@ -4643,6 +4643,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 if release:
                     with self._mode_lock:
                         # Only THIS call's claim, and never under an armed take.
+                        # The generation test is the mechanism (a later
+                        # start_leader bumps it); the `_leader_teach_active`
+                        # clause is belt-and-braces — with release still True
+                        # and the generation unchanged no other path can have
+                        # armed a take, so a mutation deleting it is equivalent.
                         if (self._leader_teach_claim_gen == my_gen
                                 and not self._leader_teach_active):
                             self.on_leader_teach = False
@@ -4750,6 +4755,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         state. A take whose inputs stop being trustworthy is DISCARDED, not filtered."""
         if not self._leader_teach_active:
             return
+        # The pre-lock reads below belong to THIS take: a stop_leader + a new
+        # start_leader between them and the lock would otherwise hand this tick's
+        # stale verdict (or a sample stamped against the new start) to the new take.
+        take_started = self._leader_teach_start_mono
         abort_reason = ''
         if getattr(self, '_collision_active', False):
             abort_reason = 'collision'
@@ -4775,7 +4784,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         released = False
         notice = ''
         try:
-            if not self._leader_teach_active:
+            if not self._leader_teach_active or self._leader_teach_start_mono != take_started:
                 return
             if abort_reason:
                 self._leader_teach_active = False

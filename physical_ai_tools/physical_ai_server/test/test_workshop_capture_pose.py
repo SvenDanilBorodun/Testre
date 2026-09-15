@@ -367,6 +367,19 @@ def test_capture_returns_joint_vector_in_follower_order():
     assert resp.world_z == pytest.approx(0.1)
 
 
+_EDU6_JOINT_NAMES = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint')
+
+
+def test_capture_fill_is_width_generic_for_a_seven_joint_feetech_order():
+    joints = [0.0, 0.7, -2.4, 0.0, 0.7, 0.0, 1.75]
+    node = _StubNode(communicator=_JointComm(list(joints), names=_EDU6_JOINT_NAMES),
+                     xyz=(0.15, 0.0, 0.05))
+    resp = _capture_pose(node, _Request('Ablage'), _Response())
+    assert resp.success is True
+    assert resp.joint_positions == joints
+    assert resp.joint_names == list(_EDU6_JOINT_NAMES)
+
+
 def test_plain_communicator_leaves_arrays_empty_and_still_captures():
     node = _StubNode(communicator=object(), xyz=(0.1, 0.2, 0.3))
     resp = _capture_pose(node, _Request('Ablage'), _Response())

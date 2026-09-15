@@ -54,7 +54,7 @@
 # The MARKER file is a second, NARROWER channel. The EXIT CODE still decides
 # WHAT happened — the marker never overrides it and never picks a branch of the
 # chain above. In exactly ONE cell it disambiguates WHICH German remedy to show:
-# exit 0 (so finalize's own Test-DistroRegistered passed) while the un-elevated
+# exit 0 (so finalize's own registration check passed) while the un-elevated
 # GUI still cannot see the distro. It is written "started <iso> pid=<n>
 # user=<name>" the moment this script executes any code (proof it launched), and
 # BOTH terminal paths overwrite it: Fail-WithNextAction with "FAILED
@@ -164,15 +164,6 @@ function Write-Warn { param([string]$msg) Write-Host "   WARN: $msg" -Foreground
 # $LASTEXITCODE — a cosmetic non-zero from an import child must NOT skip the
 # image pull (the compounding root cause), and a thrown terminating error in a
 # child must become a warning, not an abort.
-
-# True iff the WSL distro is registered — the success gate below. Registration
-# itself is answered by wsl_distro_state.ps1 (dot-sourced further down), which
-# tells "not registered" from "WSL is not answering"; this wrapper is only the
-# boolean the state-gated phases read.
-function Test-DistroRegistered {
-    param([string]$DistroName)
-    return ((Get-EduBoticsDistroRegistration -DistroName $DistroName) -eq "Registered")
-}
 
 # True iff all three EduBotics images are present inside the distro. Resolves
 # $Registry/$ImageTag exactly like pull_images.ps1 (docker/versions.env, with
@@ -530,7 +521,7 @@ try {
         Write-Host "   Zustimmung zum Neuaufbau liegt vor (Daten werden neu angelegt)."
         $importArgs["AllowDestructiveReimport"] = $true
     }
-    # SUCCESS is judged on VERIFIED STATE below (Test-DistroRegistered +
+    # SUCCESS is judged on VERIFIED STATE below (Get-EduBoticsDistroRegistration +
     # Wait-DockerReady), never on the child's exit code — a cosmetic non-zero
     # (or a thrown terminating error) from the import child must not abort or
     # skip Phase 2. The ONE exit code that IS meaningful is import's 12

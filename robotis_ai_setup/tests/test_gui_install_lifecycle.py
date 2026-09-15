@@ -752,7 +752,7 @@ class PromptFinalizeInstallTest(unittest.TestCase):
     # is PrivilegesRequired=admin, so on a managed school PC where a DIFFERENT
     # admin elevates, the import lands in the admin's hive and the student's
     # un-elevated GUI cannot see it. FINALIZE_EXIT_DONE proves finalize's own
-    # Test-DistroRegistered PASSED (every other outcome exits through
+    # registration check said Registered (every other outcome exits through
     # Fail-WithNextAction), so exit 0 + invisible + a different `user=` in the
     # marker IS the per-account split — and rebooting, which the generic message
     # advises, can never fix it. Same user / no marker keeps the old message.

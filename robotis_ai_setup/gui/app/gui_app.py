@@ -2636,7 +2636,7 @@ class EduBoticsApp:
                 #
                 # There are TWO causes and they need different remedies, so
                 # discriminate before reporting. FINALIZE_EXIT_DONE implies
-                # finalize ran Test-DistroRegistered and it PASSED — every other
+                # finalize's registration check PASSED — every other
                 # outcome leaves through Fail-WithNextAction — so "the elevated
                 # side saw the distro, we cannot" plus "it ran as a DIFFERENT
                 # Windows account" is an inference from the contract, not a

@@ -65,6 +65,12 @@ function countInto(map, name, block, enabled) {
   row.blockIds.push(block.id);
 }
 
+// First entry per name, upgraded once from a disabled block to an enabled one.
+function shouldRecord(map, name, enabled) {
+  const prev = map.get(name);
+  return !prev || (!prev.enabled && enabled);
+}
+
 /**
  * @returns {{
  *   replay: Map<string,{enabled:number,disabled:number,blockIds:string[]}>,
@@ -105,8 +111,11 @@ export function collectBlockUsage(workspace) {
     } else if (type === REF_TYPE) {
       countInto(usage.refs, name, block, enabled);
     } else if (type === PIN_TYPE) {
-      // First in creation order wins, as on the server.
-      if (!usage.pinStatements.has(name)) {
+      // The first ENABLED statement in creation order wins; a disabled one is
+      // kept only until an enabled one of the same name turns up. A disabled
+      // block never runs, so letting it shadow a later enabled pin reported a
+      // „missing Ziel" for a name the run resolves fine.
+      if (shouldRecord(usage.pinStatements, name, enabled)) {
         usage.pinStatements.set(name, {
           blockId: block.id,
           enabled,
@@ -115,7 +124,7 @@ export function collectBlockUsage(workspace) {
           z: labelNumber(block, 'Z'),
         });
       }
-    } else if (!usage.currentStatements.has(name)) {
+    } else if (shouldRecord(usage.currentStatements, name, enabled)) {
       usage.currentStatements.set(name, { blockId: block.id, enabled });
     }
   }

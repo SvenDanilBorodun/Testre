@@ -332,13 +332,17 @@ function selectedToolboxItemId(workspace) {
  * Re-populate the open flyout when it is a Sammlung group. While a drag is in
  * progress (a block dragged OUT of that very flyout) re-populating would
  * dispose the flyout under the gesture, so the refresh is deferred until the
- * drag ends or another category is selected. Returns true when it refreshed.
+ * drag ends or another category is selected. A press that has not yet become a
+ * drag defers too: Blockly 12's refreshToolboxSelection does NOTHING while any
+ * gesture exists, so clearing the dirty flag then dropped the refresh. The
+ * deferred refresh runs at the drag end, the click that ends a press, or the
+ * next category selection. Returns true when it refreshed.
  */
 export function refreshIfOpen(workspace) {
   if (!workspace || workspace.isFlyout) return false;
   if (!selectedToolboxItemId(workspace).startsWith(SAMMLUNG_ID_PREFIX)) return false;
   try {
-    if (workspace.isDragging()) {
+    if (workspace.isDragging() || workspace.currentGesture_) {
       dirtyWorkspaces.add(workspace);
       return false;
     }
@@ -439,7 +443,8 @@ export function registerSammlungCategories(workspace, providerRef) {
     syncProvider();
     if (dirtyWorkspaces.has(workspace)) {
       const dragEnded = e.type === Blockly.Events.BLOCK_DRAG && !e.isStart;
-      if (dragEnded || e.type === Blockly.Events.TOOLBOX_ITEM_SELECT) {
+      if (dragEnded || e.type === Blockly.Events.CLICK
+        || e.type === Blockly.Events.TOOLBOX_ITEM_SELECT) {
         refreshIfOpen(workspace);
       }
     }

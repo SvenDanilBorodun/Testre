@@ -371,6 +371,17 @@ describe('refreshIfOpen', () => {
     Blockly.Events.fire(new BlockDrag(block, false, []));
     await flushEvents();
     expect(refresh).toHaveBeenCalledTimes(3);
+
+    // A press that has not become a drag yet: Blockly would ignore the refresh,
+    // so it stays pending and runs when the click ends the gesture.
+    ws.currentGesture_ = {};
+    expect(refreshIfOpen(ws)).toBe(false);
+    expect(refresh).toHaveBeenCalledTimes(3);
+    ws.currentGesture_ = null;
+    const Click = Blockly.Events.get(Blockly.Events.CLICK);
+    Blockly.Events.fire(new Click(null, ws.id, 'workspace'));
+    await flushEvents();
+    expect(refresh).toHaveBeenCalledTimes(4);
     unmount();
   });
 });

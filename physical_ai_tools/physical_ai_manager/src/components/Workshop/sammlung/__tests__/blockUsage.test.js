@@ -87,6 +87,21 @@ describe('collectBlockUsage', () => {
     expect(usage.currentStatements.get('Hier')).toEqual({ blockId: 'c1', enabled: true });
   });
 
+  it('a disabled statement does not shadow a later enabled one of the same name', () => {
+    load([
+      { ...pinBlock('A', '0.1', '0', '0', 'p1'), x: 0, y: 0 },
+      { ...pinBlock('A', '0.2', '0', '0', 'p2'), x: 0, y: 100 },
+      { ...pinBlock('A', '0.3', '0', '0', 'p3'), x: 0, y: 200 },
+      { type: 'edubotics_destination_current', id: 'c1', fields: { NAME: 'Hier' }, x: 0, y: 300 },
+      { type: 'edubotics_destination_current', id: 'c2', fields: { NAME: 'Hier' }, x: 0, y: 400 },
+    ]);
+    ws.getBlockById('p1').setDisabledReason(true, 'test');
+    ws.getBlockById('c1').setDisabledReason(true, 'test');
+    const usage = collectBlockUsage(ws);
+    expect(usage.pinStatements.get('A')).toMatchObject({ blockId: 'p2', enabled: true, x: 0.2 });
+    expect(usage.currentStatements.get('Hier')).toEqual({ blockId: 'c2', enabled: true });
+  });
+
   it('counts variable uses by id', () => {
     load([
       { type: 'variables_set', fields: { VAR: { id: 'v1' } }, x: 0, y: 0 },

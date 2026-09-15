@@ -1176,7 +1176,7 @@ class PreflightExecutedTest(_InstallerSandbox):
         sb = self._sandbox(flag="1", flag_age=7, boot_age=1800, hv="false", vfe="true")
         rc, out = self._preflight(sb)
         self.assertEqual(rc, 0, "a diagnostic never gates")
-        self.assertNotIn("[OK] WSL2 aktiv", out)
+        self.assertNotIn("[OK] WSL2", out)
         self.assertIn("[WARNUNG] WSL2 ist installiert, aber noch nicht einsatzbereit", out)
         self.assertIn("neu starten (Neu starten, nicht Herunterfahren)", out)
 
@@ -1205,15 +1205,16 @@ class PreflightExecutedTest(_InstallerSandbox):
     def test_a_live_hypervisor_is_active(self):
         sb = self._sandbox(flag=None, boot_age=600, hv="true", vfe="false")
         _, out = self._preflight(sb)
-        self.assertIn("[OK] WSL2 aktiv", out)
+        self.assertIn("[OK] WSL2 installiert, der Windows-Hypervisor läuft", out)
         self.assertNotIn("[WARNUNG] WSL2", out)
 
     def test_no_proof_downgrades_nothing(self):
         """Unknown — CIM unreadable, or the helper missing — must not produce a
-        warning: refuse only on proof. It also must not claim „aktiv"."""
+        warning: refuse only on proof. It also must not claim a running hypervisor."""
         sb = self._sandbox(flag=None, boot_age=600, hv="throws", vfe="throws")
         _, out = self._preflight(sb)
         self.assertIn("[OK] WSL2 installiert", out)
+        self.assertNotIn("Hypervisor läuft", out, "Unknown proves no running hypervisor")
         self.assertNotIn("[WARNUNG] WSL2", out)
         os.remove(os.path.join(sb["scripts"], "virtualization_ready.ps1"))
         _, out = self._preflight(sb)

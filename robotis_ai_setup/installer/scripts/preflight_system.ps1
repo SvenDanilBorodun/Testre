@@ -160,8 +160,8 @@ try {
 # HCS_E_SERVICE_NOT_AVAILABLE in the same launch — two answers to one question,
 # the second one right. So ask the ONE verdict finalize asks
 # (virtualization_ready.ps1), and downgrade only on its PROOF rungs: a
-# RebootRequired or VirtualizationDisabled verdict is a WARNUNG with the same
-# remedy finalize gives, Ready is „aktiv", and Unknown — no proof either way,
+# RebootRequired verdict, or a VirtualizationDisabled one with firmware PROOF, is a
+# WARNUNG with the words finalize gives, Ready says the hypervisor runs, and Unknown — no proof either way,
 # including a missing helper or an unreadable CIM — says only what `wsl
 # --status` proved. Never a gate: this script stays a diagnostic.
 $wslVerdict = "Unknown"
@@ -193,7 +193,10 @@ if (-not $wslOk) {
     # gate: finalize still attempts the import, because a CIM value can be wrong.
     Emit WARNUNG "WSL2 ist installiert, aber: Laut Windows ist die Virtualisierung (VT-x/AMD-V) im BIOS/UEFI dieses PCs ausgeschaltet — ohne sie kann WSL2 nicht starten. Bitte die IT-Betreuung der Schule bitten, die Virtualisierung im BIOS/UEFI einzuschalten, und EduBotics danach erneut öffnen."
 } elseif ($wslVerdict -eq "Ready") {
-    Emit OK "WSL2 aktiv"
+    # Ready = HypervisorPresent read $true, and that is ALL it proves: a running
+    # hypervisor with a stopped VM service still fails an import. So say what
+    # was read, not „aktiv".
+    Emit OK "WSL2 installiert, der Windows-Hypervisor läuft"
 } else {
     Emit OK "WSL2 installiert"
 }

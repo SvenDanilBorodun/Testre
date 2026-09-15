@@ -240,23 +240,31 @@ class WorkflowContext:
     claimed_tags: set = field(default_factory=set)
     skipped_tags: set = field(default_factory=set)
     claim_lock: threading.RLock | None = None
-    # Per-tag POSITION tracking for the recycled-object reclaim (#1), all three
+    # Per-tag POSITION tracking for the recycled-object reclaim (#1), all
     # guarded by claim_lock (same as claimed_tags/skipped_tags):
-    #   claim_anchor  — tag id → the base-frame (x, y) where the robot LEFT it,
-    #                   observed on the first sighting AFTER the claim. ``None``
-    #                   when that sighting could not be located, which fails the
-    #                   reclaim CLOSED for that tag.
-    #   claim_pick_xy — tag id → the (x, y) it was last seen at while still
-    #                   UNCLAIMED, i.e. the spot it was picked FROM.
-    #   claim_unseen  — tag ids missing from at least one observation since their
-    #                   claim (the only thing an absence is allowed to record).
-    # A later sighting ≥ EDUBOTICS_RECLAIM_MOVE_M from the anchor — or a return to
-    # the pick spot after an absence — means a PERSON moved it, so it is
-    # un-claimed and grabbed again. Deliberately position-based: the absence clock
-    # this replaced was sampled at loop-pass cadence (8–12 s) and could not tell
-    # one missed AprilTag look from a student picking the object up. See
+    #   claim_release_xy — tag id → the COMMANDED base-frame (x, y) the robot
+    #                      released it at (``drop_at``'s own target), or ``None``
+    #                      when it was released somewhere the robot did not aim
+    #                      for (a bare „öffne Greifer"), which fails the reclaim
+    #                      CLOSED for that tag.
+    #   claim_pick_xy    — tag id → the (x, y) it was last seen at while still
+    #                      UNCLAIMED, i.e. the spot it was picked FROM. The
+    #                      reference for a SKIPPED object, which the robot never
+    #                      carried anywhere.
+    #   carried_tag      — the tag currently IN THE GRIPPER. Never reclaimed: a
+    #                      held object's projected position travels with the arm.
+    # A later sighting ≥ EDUBOTICS_RELEASE_MOVE_M from the release point means a
+    # PERSON moved it, so it is un-claimed and grabbed again.
+    #
+    # The reference is the COMMANDED release point, never an observation: the
+    # sighting-derived anchor this replaced could only arm when the drop
+    # destination lay inside the scene camera's view, and on a rig that places
+    # objects off-camera it never armed at all. Deriving it from the command also
+    # makes a missed AprilTag look irrelevant BY CONSTRUCTION — there is no
+    # observation for a miss to corrupt. See
     # handlers/perception_blocks.py::_reclaim_recycled.
-    claim_anchor: dict = field(default_factory=dict)
+    claim_release_xy: dict = field(default_factory=dict)
+    carried_tag: int | None = None
 
     # Token-bucket state for the output rate limiter, per KIND
     # (handlers/output.py::_rate_ok). DECLARED rather than set as an ad-hoc
@@ -279,7 +287,20 @@ class WorkflowContext:
     # getattr is the failure mode this file has already paid for once.
     gripper_knob_warned: set = field(default_factory=set)
     claim_pick_xy: dict = field(default_factory=dict)
-    claim_unseen: set = field(default_factory=set)
+    # Object types already told „alles erledigt" THIS RUN, so the unclaimed view's
+    # blind-state notice (perception_blocks._detect_named) says it once per type
+    # rather than on every pass of a „Solange sichtbar" loop. Declared for the
+    # same reason gripper_knob_warned is — an undeclared ctx field is a branch
+    # that silently never runs.
+    all_done_notified: set = field(default_factory=set)
+    # „Wenn <Typ> gesehen" reclaim rate floor: object type → the monotonic time
+    # that hat's trigger poll last ran the recycled-object reclaim. Keyed by TYPE
+    # and not by hat thread on purpose, so N hats watching one type still cost
+    # one detect per _HAT_RECLAIM_MIN_INTERVAL_S between them. Declared here
+    # rather than left to perception_blocks._claim_store's lazy create for the
+    # same reason its three siblings are — see the comment on the rate-limiter
+    # state below.
+    hat_reclaim_at: dict = field(default_factory=dict)
     # Phase-4 no-go zones ("Sperrzonen"): a list of axis-aligned base-frame
     # keep-out boxes ``{min:[x,y,z], max:[x,y,z]}`` (metres), parsed in start()
     # from the top-level ``zones`` sibling of the workflow_json (injected for
@@ -993,9 +1014,11 @@ class WorkflowManager:
                     claim_lock=self._claim_lock,
                     # Fresh per-run position trackers for the recycled-object
                     # reclaim (never persisted across runs).
-                    claim_anchor={},
+                    claim_release_xy={},
                     claim_pick_xy={},
-                    claim_unseen=set(),
+                    carried_tag=None,
+                    all_done_notified=set(),
+                    hat_reclaim_at={},
                     # Phase-4 no-go zones (None/empty → motion behaves as today).
                     zones=zones,
                     # Phase-2 Tempo (global speed multiplier; 1.0 → unchanged speed).
@@ -1991,7 +2014,14 @@ class WorkflowManager:
         frame has arrived yet (startup, and a hat can poll before the first
         one lands), the camera is not subscribed, and a JPEG that fails to
         decode. Those are what the debounce now absorbs, and they are the whole
-        justification for this return type — not a frame drop."""
+        justification for this return type — not a frame drop.
+
+        THIS POLL ALSO RUNS THE RECYCLED-OBJECT RECLAIM, on both of its paths
+        and without ever emitting detections — see the two inline comments
+        below. It did not until 2026-09-14, and a program made only of these
+        hats therefore went silent for the rest of the run once its cubes were
+        claimed. Neither the return type nor the debounce is involved: the
+        reclaim only mutates the claim sets the ``wanted`` filter reads."""
         if not type_name:
             return False
         for _ in range(2):  # 2 × ~0.5 s budget, matching the other hats
@@ -2017,19 +2047,42 @@ class WorkflowManager:
                 #
                 # Deliberately INLINE rather than calling _detect_named_unclaimed:
                 # that helper emits ctx.emit_detections (a ~5 Hz /workflow/status
-                # flood from this poll) and runs the recycled-object reclaim from a
-                # second thread, neither of which belongs in a trigger check.
+                # flood from this poll), which does not belong in a trigger check.
+                # The reclaim DOES belong here — see the all-claimed branch below.
                 from physical_ai_server.workflow.handlers.perception_blocks import (
-                    _excluded_ids,
+                    _excluded_ids, reclaim_from_detections, reclaim_only,
                 )
-                wanted = ({int(i) for i in recipe.tag_ids}
-                          - {int(i) for i in _excluded_ids(ctx)})
+                tag_ids = {int(i) for i in recipe.tag_ids}
+                wanted = tag_ids - {int(i) for i in _excluded_ids(ctx)}
                 if not wanted:
                     # Every instance of this type is done — stay un-triggered so
                     # the handler re-arms instead of spinning. A BARE False on
                     # purpose (see the docstring): routing this through the
                     # absence debounce would keep the already-claimed ids in the
-                    # trigger set and re-fire the body on them.
+                    # trigger set and re-fire the body on them. THAT CONTRACT IS
+                    # UNCHANGED; the reclaim below does not touch the return.
+                    #
+                    # THIS BRANCH IS THE STUCK STATE, and until 2026-09-14 it was
+                    # a state a program made only of „Wenn … gesehen" hats could
+                    # never leave: no looking block runs in such a program, so
+                    # nothing ever ran the recycled-object reclaim, so ``wanted``
+                    # stayed empty for the rest of the run and putting the cubes
+                    # somewhere else could not revive it. Measured through the
+                    # real manager: two cubes grasped and placed, both moved
+                    # 250 mm, eight further seconds of polling, zero re-grasps —
+                    # while the SAME program plus one „falls sehe ich …" on the
+                    # main stack recovered both.
+                    #
+                    # ``reclaim_only`` is the split the old comment's two costs
+                    # asked for: it never emits detections, and it rate-limits
+                    # itself to ~1 Hz per object type, because this branch is the
+                    # one that performs ZERO camera reads today and an AprilTag
+                    # detect at the ~5 Hz poll rate is real CPU on an Orange Pi.
+                    # It never raises. Deliberately ONLY here: while ``wanted`` is
+                    # non-empty the hat is alive and firing, its body's looking
+                    # blocks reach the reclaim the ordinary way, and the firing
+                    # path must not pay for this at all.
+                    reclaim_only(ctx, type_name)
                     time.sleep(0.2)
                     return False
                 frame = ctx.get_scene_frame()
@@ -2044,6 +2097,32 @@ class WorkflowManager:
                 detections = ctx.perception.detect(
                     frame, camera='scene', mode='apriltag', aruco_id=None,
                 )
+                # THE OTHER SILENT SHAPE, and the one the all-claimed branch
+                # above does NOT cover. When some id of this type is merely never
+                # placed — the shipped „Würfel" declares two tag ids and a
+                # classroom may put out one cube — ``wanted`` stays non-empty
+                # forever, so we reach here, look, and then filter the claimed
+                # tag straight out of ``seen``. Measured 2026-09-14: a hats-only
+                # program in exactly that state polled 31 times after both cubes
+                # were moved 250 mm and reclaimed nothing, because the inline
+                # filter has no reclaim on ANY path — not just on the early
+                # return. So run it on the frame ALREADY IN HAND.
+                #
+                # NOT rate-limited, deliberately, and the asymmetry with
+                # ``reclaim_only`` is the whole point: the cost the 1 Hz floor
+                # exists for is the camera read, and there is none here. What
+                # remains is projecting this type's few tags and one update under
+                # ``ctx.claim_lock`` — and that is safe at any rate, measured:
+                # the reference is a fixed commanded point, so a stationary
+                # object reclaims exactly once (500 consecutive looks → 1), and a
+                # tag in the jaws is guarded by ``ctx.carried_tag`` (300 mid-carry
+                # sightings → 0).
+                reclaim_from_detections(ctx, recipe, detections)
+                # RE-READ the exclusions: the reclaim may have just un-claimed a
+                # tag that IS in `detections`, and stale `wanted` would filter it
+                # back out — the hat would then stay quiet for another poll about
+                # an object it has already decided is available again.
+                wanted = tag_ids - {int(i) for i in _excluded_ids(ctx)}
                 seen = frozenset(
                     getattr(d, 'aruco_id', None) for d in (detections or [])
                 ) & wanted

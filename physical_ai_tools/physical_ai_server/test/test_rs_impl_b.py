@@ -78,11 +78,15 @@ class Ctx:
         self.tempo = tempo
         self.claimed_tags: set = set()
         self.skipped_tags: set = set()
-        # The reclaim's position state (G9 replaced the absence clock).
-        # `absent_since` no longer exists in production.
-        self.claim_anchor: dict = {}
+        # The reclaim's position state. The reference is the COMMANDED release
+        # point (`claim_release_xy`); `claim_pick_xy` is the SKIP reference and
+        # `carried_tag` the in-the-gripper guard. `absent_since` and the
+        # sighting-derived `claim_anchor`/`claim_unseen` no longer exist in
+        # production.
+        self.claim_release_xy: dict = {}
         self.claim_pick_xy: dict = {}
-        self.claim_unseen: set = set()
+        self.carried_tag = None
+        self.all_done_notified: set = set()
         self.last_commanded_close_rad = None
         self.last_arm_joints = None
         self.num_arm_joints = p.num_arm_joints
@@ -1289,23 +1293,24 @@ def test_a_genuinely_empty_scene_still_says_nothing_visible():
     assert 'sichtbar' in str(exc.value)
 
 
-def test_see_and_count_do_not_mutate_the_claim_state():
-    """They are pure VALUE blocks a student can drop anywhere; a read that
-    silently un-claims an object changes what the surrounding loop does next."""
+def test_see_and_count_do_not_un_claim_an_object_nobody_moved():
+    """„sehe ich" and „Anzahl" DO run the reclaim now — every looking block does,
+    which is what stops a loop nested inside „falls sehe ich …" deadlocking — but
+    a claimed object the program never released has no reference to be judged
+    against, so nothing here may change.
+
+    This guard used to read `ctx.absent_since`, a field that no longer existed in
+    production — so it compared {} to {} and had SILENTLY STOPPED TESTING
+    ANYTHING. Re-pointed at the stores the reclaim mutates today."""
     ctx = _perception_ctx()
     ctx.claimed_tags.add(20)
-    # This guard used to read `ctx.absent_since`, a field that no longer exists
-    # in production after G9 — so it compared {} to {} and had SILENTLY STOPPED
-    # TESTING ANYTHING. Re-pointed at the three stores the reclaim mutates today.
-    before_anchor = dict(ctx.claim_anchor)
+    before_release = dict(ctx.claim_release_xy)
     before_pick = dict(ctx.claim_pick_xy)
-    before_unseen = set(ctx.claim_unseen)
     pb.see_object(ctx, {'object_type': 'wuerfel'})
     pb.count_object(ctx, {'object_type': 'wuerfel'})
     assert ctx.claimed_tags == {20}
-    assert ctx.claim_anchor == before_anchor
+    assert ctx.claim_release_xy == before_release
     assert ctx.claim_pick_xy == before_pick
-    assert ctx.claim_unseen == before_unseen
 
 
 # ══════════════════════════════════════════════════════════════════════════

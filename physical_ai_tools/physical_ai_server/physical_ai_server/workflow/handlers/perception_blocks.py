@@ -138,11 +138,13 @@ _TAG_YAW_FRAME_INTERVAL_S = 0.03
 _RECLAIM_ABSENT_S = max(0.0, _motion._safe_float('EDUBOTICS_RECLAIM_ABSENT_S', 1.5))
 
 # Recycled-object reclaim (#1): how far (metres, base-frame table plane) a
-# claimed/skipped object must have MOVED before it counts as "a person put this
-# somewhere else" and it is un-claimed/un-skipped so it is grabbed again. See
-# ``_reclaim_recycled`` for the THREE rules (ANCHOR / PICK / SKIP anchoring);
-# the first two act on a SIGHTING, never on an absence, so a missed AprilTag
-# look cannot reclaim at any miss rate.
+# SKIPPED object must have MOVED before it counts as "a person put this somewhere
+# else" and it is un-skipped so it is tried again. See ``_reclaim_recycled``; a
+# skipped object was never carried by the robot, so the reference is simply where
+# it lay when we gave up on it (``claim_pick_xy``).
+#
+# This is NO LONGER the threshold for a CLAIMED object — that one is
+# ``_RELEASE_MOVE_M`` below, measured from where the robot COMMANDED the release.
 #
 # WHY 20 mm. Position noise, measured over 200 frames of a STATIONARY tag through
 # the shipped ``Perception`` + ``projection.project_pixel_to_table``: σ ≤ 0.06 mm,
@@ -155,11 +157,33 @@ _RECLAIM_ABSENT_S = max(0.0, _motion._safe_float('EDUBOTICS_RECLAIM_ABSENT_S', 1
 # own width is not asking for it to be picked up again.
 #
 # ``EDUBOTICS_RECLAIM_MOVE_M=0`` (or negative) DISABLES the reclaim outright — the
-# one-variable rollback, and a strictly safer one than the knob it replaces: with
-# it set, nothing can ever re-grasp an object the program already placed.
+# MASTER one-variable rollback, covering the release rule below as well: with it
+# set, nothing can ever re-grasp an object the program already placed.
 # env-forwarding-guard: forwarded in robotis_ai_setup/docker/docker-compose.yml +
 # docker-compose.opi.yml.
 _RECLAIM_MOVE_M = _motion._safe_float('EDUBOTICS_RECLAIM_MOVE_M', 0.02)
+
+# Recycled-object reclaim, CLAIMED half: how far a claimed object must lie from
+# the point the robot COMMANDED its RELEASE before a person is held responsible.
+#
+# WHY IT IS ITS OWN, LARGER NUMBER. ``motion.DROP_HEIGHT_M`` is 0.05 m, so the
+# robot opens the jaws a full drop height ABOVE the surface and a 30 mm cube
+# tumbles and settles some centimetres from the point it was aimed at. The
+# threshold has to EXCEED that settle radius, or an object nobody touched reads as
+# "moved" on the very next look and the arm shuffles the same cube around the
+# table for the rest of the run. 0.05 m is a BOUND derived from the release
+# height, NOT a measurement: the real settle radius depends on the object, the
+# surface and the drop height, and this repo has no way to derive it — measuring
+# it per rig is the honest way to tune this knob.
+#
+# A non-positive value falls back to ``_RECLAIM_MOVE_M``, so the pair can never
+# end up with the claimed half silently disabled while the skip half still fires;
+# turning the reclaim OFF is ``EDUBOTICS_RECLAIM_MOVE_M=0``, one knob, both halves.
+# env-forwarding-guard: forwarded in robotis_ai_setup/docker/docker-compose.yml +
+# docker-compose.opi.yml.
+_RELEASE_MOVE_M = _motion._safe_float('EDUBOTICS_RELEASE_MOVE_M', 0.05)
+if not (_RELEASE_MOVE_M > 0.0):
+    _RELEASE_MOVE_M = _RECLAIM_MOVE_M
 
 # Rule §2 — the grasp height follows the MEASURED table plane at the object's
 # own (x, y). The knob, the measurement and the shared helper all live in
@@ -396,24 +420,22 @@ def _claim_store(ctx, name: str, factory):
 
 # The German the reclaim emits, ONE template per rule, in ONE place.
 #
-# It is a module-level table rather than three literals inside ``_reclaim``
+# It is a module-level table rather than two literals inside ``_reclaim``
 # because the tests FILTER the Protokoll for these sentences: a filter that
-# lists two of three variants keeps passing VACUOUSLY on the third — which is
+# lists one of two variants keeps passing VACUOUSLY on the other — which is
 # exactly the shape of the defect this table was introduced to fix. The test
-# imports this dict, so adding a fourth rule cannot orphan the filter.
+# imports this dict, so adding a third rule cannot orphan the filter.
 #
 # „an DER alten Stelle", not „an SEINEM alten Platz": „sein/ihr" is a POSSESSIVE
 # and agrees with the possessor („seinem" for der Würfel, „ihrem" for die
 # Kugel), which would re-introduce the gender leak these messages exist without.
 # „die Stelle" carries no information about the label at all.
 _RECLAIM_TEMPLATES_DE = {
-    # The object was carried away by the robot and is back on the spot it was
-    # picked FROM. The rule fires on ``_back_at``, i.e. NOT elsewhere.
-    'pick': '„{label}" #{tag} liegt wieder an der alten Stelle — '
-            'wird noch einmal gegriffen.',
-    # It was left somewhere by the robot and has since moved away from there.
-    'anchor': '„{label}" #{tag} liegt jetzt woanders — '
-              'wird noch einmal gegriffen.',
+    # The robot released it at a commanded spot and it is no longer there.
+    # (Inherited verbatim from the 'anchor' rule this replaced — the sentence was
+    # right, only the reference point it was measured against was wrong.)
+    'release': '„{label}" #{tag} liegt jetzt woanders — '
+               'wird noch einmal gegriffen.',
     # It was never carried at all (a SKIPPED object) and somebody moved it.
     'skip': '„{label}" #{tag} wurde bewegt — neuer Versuch.',
 }
@@ -427,38 +449,40 @@ def _reclaim_recycled(ctx, recipe, visible_xy) -> None:
     ``None`` for a tag this rig cannot locate. A tag simply ABSENT from the dict
     is the third, distinct case.
 
-    Three rules decide, and the first two both act on a SIGHTING — never on an
-    absence — which is why a missed AprilTag look can no longer reclaim at ANY
-    miss rate:
+    ONE rule decides, and its reference is the ROBOT'S OWN COMMAND:
 
-    * **ANCHOR** — the first sighting AFTER the claim records where the robot
-      LEFT the object. Anchoring on the OBSERVED rest position rather than the
-      commanded destination absorbs a bounce from ``DROP_HEIGHT_M`` for free. A
-      later sighting ≥ ``_RECLAIM_MOVE_M`` away proves somebody moved it.
-    * **PICK** — an object that has been unseen at least once since its claim and
-      then turns up back within ``_RECLAIM_MOVE_M`` of the spot it was PICKED
-      from can only have been put there by a person; the robot carried it away.
-      The prior-absence precondition is what keeps a degenerate program whose
-      drop point IS its pick point terminating.
-    * **SKIP anchoring** — a SKIPPED object was never moved by the robot, so its
-      anchor is simply where it lay when we gave up. That lets a student slide an
-      out-of-reach object into reach and have it retried in the same run.
+    * **RELEASE** — ``drop_at`` drives to a commanded ``(x, y)`` before it opens
+      the jaws, and records it in ``ctx.claim_release_xy``. An object seen
+      ≥ ``_RELEASE_MOVE_M`` from there is somewhere the robot did not put it, so
+      a person moved it.
+    * **SKIP** — a SKIPPED object was never carried anywhere, so its reference is
+      simply where it lay when we gave up on it (``ctx.claim_pick_xy``), judged
+      at ``_RECLAIM_MOVE_M``. That lets a student slide an out-of-reach object
+      into reach and have it retried in the same run.
 
-    WHY NOT ABSENCE, and the trap inside this design. The absence clock is
-    sampled at LOOP-PASS cadence (8–12 s per grasp-bearing pass), so ONE missed
-    look was indistinguishable from a student lifting the object — and no counter
-    value separates them, because a student who SLIDES the object back is never
-    absent at all. Anchoring on the last sighting BEFORE an absence re-creates
-    the original defect exactly: pass k sees the object at its pick spot, the body
-    places it at the drop spot, pass k+1 misses it (freezing the anchor at the
-    pick spot), pass k+2 sees it at the drop spot → „moved 100 mm" → a spurious
-    re-grasp. **The anchor must be observed AFTER the claim.**
+    Everything else fails CLOSED: a tag in the gripper (``ctx.carried_tag``) is
+    never reclaimed, and a claimed tag with no recorded release point — released
+    by a bare „öffne Greifer", or claimed by hand with „merke … als erledigt" —
+    has no reference to judge against and keeps its claim.
 
-    Mutates claimed_tags / skipped_tags / claim_anchor / claim_pick_xy /
-    claim_unseen under claim_lock. No-op when the claim state is absent (e.g. a
-    unit-test ctx without the sets), and a no-op in the simulator, which has no
-    scene intrinsics, so every position is ``None`` and the reclaim fails
-    closed."""
+    WHY THE COMMAND AND NOT A SIGHTING. The reference used to be the first
+    sighting AFTER the claim, which is only available when the drop destination
+    lies inside the scene camera's view; on a rig that places objects off-camera
+    it never armed, and the reclaim was unrecoverable in practice. Reading it off
+    the command also makes a missed AprilTag look irrelevant BY CONSTRUCTION —
+    there is no observation for a miss to corrupt, at any miss rate — which is
+    what the sighting-derived design had to spend a prior-absence precondition
+    and an "anchor AFTER the claim" trap to approximate.
+    (The PICK rule this replaced — "back within ``_RECLAIM_MOVE_M`` of the spot it
+    was picked FROM, after an absence" — is GONE with them. It was the only half
+    that worked off-camera and it was far too weak to carry the feature alone: it
+    fires on exactly one destination, the pick spot itself. Do not restore it;
+    the release point answers the same question everywhere.)
+
+    Mutates claimed_tags / skipped_tags / claim_release_xy / claim_pick_xy under
+    claim_lock. No-op when the claim state is absent (e.g. a unit-test ctx without
+    the sets), and a no-op in the simulator, which has no scene intrinsics, so
+    every position is ``None`` and the reclaim fails closed."""
     if _RECLAIM_MOVE_M <= 0.0:
         # One-variable rollback: the reclaim is OFF. Returning here (rather than
         # letting a 0 m threshold through) matters — ``distance >= 0`` is true of
@@ -468,9 +492,13 @@ def _reclaim_recycled(ctx, recipe, visible_xy) -> None:
     skipped = getattr(ctx, 'skipped_tags', None)
     if claimed is None or skipped is None:
         return
-    anchors = _claim_store(ctx, 'claim_anchor', dict)
+    release_xy = _claim_store(ctx, 'claim_release_xy', dict)
     pick_xy = _claim_store(ctx, 'claim_pick_xy', dict)
-    unseen = _claim_store(ctx, 'claim_unseen', set)
+    carried = getattr(ctx, 'carried_tag', None)
+    try:
+        carried = None if carried is None else int(carried)
+    except (TypeError, ValueError):   # a malformed marker guards nothing
+        carried = None
     type_ids = {int(i) for i in recipe.tag_ids}
     try:
         visible = {int(k): v for k, v in dict(visible_xy).items()}
@@ -480,8 +508,9 @@ def _reclaim_recycled(ctx, recipe, visible_xy) -> None:
 
     def _gap(a, b):
         """Distance between two table positions, or ``None`` when either side is
-        unknown/malformed. ``None`` never satisfies a comparison below, so an
-        unlocatable sighting fails BOTH rules closed."""
+        unknown/malformed. ``None`` never satisfies the comparison below, so an
+        unlocatable sighting — or a release the robot never aimed for — fails the
+        rule closed."""
         if a is None or b is None:
             return None
         try:
@@ -490,32 +519,18 @@ def _reclaim_recycled(ctx, recipe, visible_xy) -> None:
         except Exception:  # noqa: BLE001 — a malformed position never reclaims
             return None
 
-    def _moved(a, b) -> bool:
+    def _moved(a, b, threshold: float) -> bool:
         gap = _gap(a, b)
-        return gap is not None and gap >= _RECLAIM_MOVE_M
-
-    def _back_at(a, b) -> bool:
-        gap = _gap(a, b)
-        return gap is not None and gap < _RECLAIM_MOVE_M
+        return gap is not None and gap >= threshold
 
     def _reclaim(tag: int, rule: str) -> None:
         claimed.discard(tag)
         skipped.discard(tag)
-        anchors.pop(tag, None)
-        unseen.discard(tag)
-        # EACH RULE STATES ITS OWN OBSERVATION, and the `rule` argument is why.
-        # The two rules shared one sentence, and the PICK rule fires on
-        # ``_back_at`` — i.e. having JUST ESTABLISHED the object is NOT
-        # elsewhere — so „liegt jetzt woanders" printed the exact opposite of
-        # what was measured, 100 % of the time, on the put-back demo this rule
-        # exists for. (PICK ⇒ claimed, by construction: an unclaimed-and-
-        # unskipped tag `continue`s earlier, and a skipped-not-claimed tag
-        # either has its anchor set by the SKIP branch or has no pick spot at
-        # all, and ``_back_at(pos, None)`` is False.)
-        #
-        # `rule` is PASSED, never re-derived here: this function pops the anchor
-        # as its third statement, so any predicate evaluated inside it would be
-        # reading state the caller has already destroyed.
+        release_xy.pop(tag, None)
+        # EACH RULE STATES ITS OWN OBSERVATION, and the `rule` argument is why:
+        # this function pops the release point as its third statement, so any
+        # predicate evaluated inside it would be reading state the caller has
+        # already destroyed.
         #
         # The tag id is written the way the PRINTED SHEET writes it
         # (tools/generate_apriltags.py renders „#20 Würfel"), so a student can
@@ -527,42 +542,75 @@ def _reclaim_recycled(ctx, recipe, visible_xy) -> None:
 
     def _update():
         for tag in sorted(type_ids):
+            if carried is not None and tag == carried:
+                # In the gripper: a held object's projected position travels with
+                # the arm, so every sighting of it is „somewhere else" by
+                # construction. This is the guard that lets EVERY looking block
+                # run the reclaim, including „finde", which the taught
+                # split-grasp pattern calls MID-CARRY. It comes first so a
+                # carried-but-unclaimed tag (the split path claims nothing) does
+                # not record its in-flight position as the spot it lies at.
+                continue
             is_claimed = tag in claimed
             is_skipped = tag in skipped
             if not is_claimed and not is_skipped:
-                # Still up for grabs: remember where it LIES, so that once it is
-                # claimed we know the spot it was picked from (the PICK rule's
-                # reference point).
+                # Still up for grabs: remember where it LIES, so that if we later
+                # give up on it, the SKIP rule has a reference point.
                 pos = visible.get(tag)
                 if pos is not None:
                     pick_xy[tag] = pos
                 continue
             if tag not in visible:
-                # An absence is evidence of NOTHING here. Record only that it
-                # happened — the PICK rule's precondition — and change nothing
-                # else, so no rule can ever fire off a missed look.
-                unseen.add(tag)
+                # An absence is evidence of NOTHING, and this design records
+                # nothing about it at all — the reference is a command, so there
+                # is no observation a missed look could corrupt.
                 continue
             pos = visible.get(tag)
-            if tag not in anchors and is_skipped and not is_claimed:
-                # SKIP anchoring: the robot never moved this one, so it lies
-                # where it lay when we gave up on it.
-                pick = pick_xy.get(tag)
-                if pick is not None:
-                    anchors[tag] = pick
-            if tag not in anchors:
-                if tag in unseen and _back_at(pos, pick_xy.get(tag)):
-                    _reclaim(tag, 'pick')                  # PICK rule
-                    continue
-                # First sighting AFTER the claim: this is where the robot left
-                # it. ``None`` is stored deliberately — an unlocatable rest
-                # position fails the reclaim closed for this tag from here on.
-                anchors[tag] = pos
-                unseen.discard(tag)
+            if tag in release_xy:
+                # RELEASE rule: judged against the point the robot aimed at. A
+                # stored ``None`` (released with no commanded destination) fails
+                # closed through ``_gap``.
+                if _moved(pos, release_xy.get(tag), _RELEASE_MOVE_M):
+                    _reclaim(tag, 'release')
                 continue
-            unseen.discard(tag)
-            if _moved(pos, anchors.get(tag)):
-                _reclaim(tag, 'anchor' if tag in claimed else 'skip')
+            if is_skipped and not is_claimed:
+                # SKIP rule: the robot never moved this one, so it lies where it
+                # lay when we gave up on it.
+                #
+                # NO REFERENCE ⇒ ADOPT THIS SIGHTING, AND GIVE NO VERDICT THIS
+                # PASS. A tag reaches here with no pick record whenever it was
+                # skipped without ever having been SEEN by a looking block: the
+                # only writer of ``claim_pick_xy`` is the unclaimed branch above,
+                # which needs the tag visible-and-unskipped at the moment a
+                # LOOKING block runs, while the skip writers need neither —
+                # ``grasp_object`` detects through the NON-reclaim
+                # ``_detect_named`` and skips from there. Measured 2026-09-14
+                # inside „Solange sichtbar": one tag occluded at the gate and
+                # visible to the grasp's own detect a moment later was skipped
+                # with no pick record, and was then unreclaimable at ANY distance
+                # for the rest of the run, while its sibling — seen at the gate,
+                # so recorded — reclaimed on the very same nudge.
+                #
+                # Adopting weakens nothing. The first sighting only RECORDS; the
+                # rule still needs a real ``_RECLAIM_MOVE_M`` move afterwards
+                # before anything is un-skipped, so this can never reclaim on a
+                # first look. It restores precisely what the pre-2026-09-14
+                # fall-through did (``anchors[tag] = pos``) — verified against
+                # that commit, where the student's SECOND nudge un-stuck the tag
+                # and here no number of nudges ever did.
+                ref = pick_xy.get(tag)
+                if ref is None:
+                    # Fail-closed as before: an unlocatable sighting (``pos is
+                    # None``) records nothing, so it cannot become a reference a
+                    # later look would be judged against.
+                    if pos is not None:
+                        pick_xy[tag] = pos
+                    continue
+                if _moved(pos, ref, _RECLAIM_MOVE_M):
+                    _reclaim(tag, 'skip')
+                continue
+            # Claimed but never released (a hand „merke … als erledigt", or a
+            # grasp whose release has not happened yet): no reference, no verdict.
 
     if lock is not None:
         with lock:
@@ -621,14 +669,52 @@ def _nothing_to_grasp_message(ctx, recipe) -> str:
     )
 
 
+def _note_all_instances_done(ctx, recipe) -> None:
+    """Say ONCE per run, per type, that every instance is already done.
+
+    „sehe ich Würfel" answering False is TRUE and useless: the cubes are lying
+    right there and the student is told nothing. The unclaimed view is the only
+    place that knows the difference between „nichts auf dem Tisch" and „alles
+    schon erledigt", and after the reclaim it also knows that saying so is
+    actionable — moving one of them brings it back.
+
+    Deduped through ``ctx.all_done_notified`` because every looking block now
+    reaches here, including „warte bis"'s ~5 Hz poll: undeduped this would fill
+    the Protokoll at the poll rate. Deliberately NOT a ``[WARNUNG]`` — a finished
+    table is not a fault — and deliberately NOT emitted on the non-reclaim path,
+    where ``grasp_object`` already raises the same sentence as its GraspSkip."""
+    if not _all_instances_done(ctx, recipe):
+        return
+    try:
+        seen = _claim_store(ctx, 'all_done_notified', set)
+        key = str(recipe.type_name)
+        if key in seen:
+            return
+        seen.add(key)
+    except Exception:  # noqa: BLE001 — a diagnostic never breaks the run
+        return
+    _safe_log(ctx, _nothing_to_grasp_message(ctx, recipe))
+
+
 def _detect_named_unclaimed(ctx, type_name) -> list:
     """``_detect_named`` minus the per-run claimed/skipped ids, WITH the
     recycled-object reclaim (#1) run first on the full set of visible type ids —
     so an object a person moved is un-claimed and grabbed again.
 
-    The „Solange sichtbar" loop gate (``count_unclaimed_visible``) is its ONLY
-    caller: the reclaim is a once-per-pass decision and every VALUE block reads
-    through ``_detect_named_unclaimed_readonly`` instead."""
+    EVERY block that looks goes through here: the „Solange sichtbar" loop gate
+    (``count_unclaimed_visible``) and all four VALUE blocks („sehe ich", „Anzahl",
+    „finde", „warte bis"). There used to be a read-only twin for the VALUE
+    blocks, because the sighting-derived anchor it guarded could un-claim a
+    carried object from a mid-carry „finde", and because a 5 Hz „warte bis" poll
+    fed dozens of observations into a rule the loop advanced once per pass.
+    ``ctx.carried_tag`` closes the first hazard precisely, and the release rule
+    has no second one: the reference is a fixed commanded point, so a stationary
+    object's distance from it is CONSTANT and the rule is idempotent under poll
+    rate — it reclaims exactly once, or never.
+
+    That split was also the whole reason a loop nested inside „falls sehe ich
+    Würfel" deadlocked: once every tag was claimed, „sehe ich" answered False
+    forever and the only reclaiming block was unreachable."""
     return _detect_named(ctx, type_name, reclaim=True)
 
 
@@ -801,6 +887,133 @@ def _attach_named_world(ctx, detections: list, recipe) -> list:
     return detections
 
 
+def reclaim_from_detections(ctx, recipe, detections) -> None:
+    """Run the recycled-object reclaim over detections the caller ALREADY HAS.
+
+    THE projection step, single-sourced: every reclaim in the product reaches
+    ``_reclaim_recycled`` through this one function, for the same reason
+    ``_tag_table_xy`` is single-sourced — two copies of "what did the reclaim
+    see" is how the paths would drift into disagreeing about where an object is.
+
+    Deliberately does NOT attach world positions, so it never calls
+    ``ctx.emit_detections``. That makes it the form the „Wenn <Typ> gesehen"
+    trigger poll can use on the frame it already grabbed: no extra camera read,
+    no ``/workflow/status`` publish, just the projection of this type's tags and
+    the claim-state update under ``ctx.claim_lock``."""
+    type_ids = {int(i) for i in recipe.tag_ids}
+    # The reclaim reasons about POSITION, so it needs each visible tag's table
+    # (x, y). A tag that is seen but cannot be LOCATED maps to None —
+    # deliberately distinct from a tag that is absent from the dict entirely,
+    # which is the only thing the reclaim reads as "not seen this time".
+    visible_xy = {int(d.aruco_id): _tag_table_xy(ctx, d, recipe)
+                  for d in (detections or []) if d.aruco_id in type_ids}
+    _reclaim_recycled(ctx, recipe, visible_xy)
+
+
+def _look_and_reclaim(ctx, recipe) -> list:
+    """Grab ONE scene frame, reclaim over it, and hand the RAW detections back.
+
+    The frame-grabbing wrapper around :func:`reclaim_from_detections`, shared by
+    the unclaimed view (``_detect_named``'s reclaim branch) and by
+    :func:`reclaim_only`. It attaches nothing and emits nothing; that is the
+    caller's job."""
+    bgr = _scene_frame(ctx)
+    detections = ctx.perception.detect(
+        bgr, camera='scene', mode='apriltag', aruco_id=None)
+    reclaim_from_detections(ctx, recipe, detections)
+    return detections
+
+
+# „Wenn <Typ> gesehen" RECLAIM CADENCE. That hat's trigger poll runs at ~5 Hz,
+# and in the all-claimed state it performs ZERO camera reads today — which is
+# precisely the state the reclaim has to break, so giving it one is a REAL new
+# cost, not a free ride: an AprilTag detect on an Orange Pi 5 Pro is tens of
+# milliseconds and a program may carry up to MAX_HAT_HANDLERS (16) hats.
+#
+# 1 Hz, and the store is keyed by OBJECT TYPE rather than by hat thread, so the
+# added cost is ONE detect per second per type however many hats watch it —
+# a fifth of the poll rate and bounded independently of the program's shape.
+# It is also fast enough to be invisible to a student: a cube they move is
+# picked up again within a second, well inside the 1.5 s this same hat already
+# treats as the resolution at which the world changes (``_RECLAIM_ABSENT_S``,
+# its absence grace). A plain constant, not an env knob, for the reason
+# ``WAIT_UNTIL_MAX_SECONDS`` already documents: a new ``EDUBOTICS_*`` name has
+# to be threaded through every compose to satisfy ``env-forwarding-guard``.
+_HAT_RECLAIM_MIN_INTERVAL_S = 1.0
+
+
+def reclaim_only(ctx, type_name) -> None:
+    """Run the recycled-object reclaim for ``type_name`` WITHOUT emitting
+    detections, at most once per ``_HAT_RECLAIM_MIN_INTERVAL_S`` per type.
+
+    THE „Wenn <Typ> gesehen" ENTRY POINT FOR THE ALL-CLAIMED BRANCH ONLY.
+    That hat's trigger poll is the one looking path that cannot use the unclaimed
+    view: ``workflow_manager._wait_object_visible`` filters the claimed/skipped
+    ids INLINE. Its two stated reasons for not calling ``_detect_named_unclaimed``
+    both still hold, so this SPLITS them rather than undoing either.
+
+    * The emit flood is avoided, not tolerated: ``_detect_named_unclaimed``
+      reaches ``_attach_named_world``, which calls ``ctx.emit_detections`` — a
+      ``/workflow/status`` publish — and at the poll rate that is a flood. This
+      function never attaches and never emits.
+    * "from a second thread" is safe BY CONSTRUCTION here, and that is measured,
+      not assumed: ``_reclaim_recycled`` mutates only under ``ctx.claim_lock``,
+      the lock that exists precisely because a hat thread mutates the claim sets
+      concurrently (``workflow.claims``); its reference is a FIXED commanded
+      point, so a stationary object reclaims exactly ONCE however fast you look
+      (500 consecutive looks → 1 reclaim line, 2026-09-14); and a tag in the
+      jaws is guarded by identity through ``ctx.carried_tag`` (300 mid-carry
+      sightings across the table → 0 reclaims).
+
+    THE POLL HAS TWO SILENT SHAPES AND THIS ANSWERS ONLY ONE. When EVERY tag id
+    of the type is excluded the poll returns a bare ``False`` before it ever
+    grabs a frame — that is this function's case, and the one that must pay for
+    a camera read of its own, hence the rate floor. When some id of the type is
+    merely never placed (the shipped „Würfel" declares two ids and a classroom
+    may have one cube) the poll DOES grab a frame and simply filters the claimed
+    tag out of ``seen``; that case is answered by ``reclaim_from_detections`` on
+    the frame already in hand, costs no camera read, and is therefore NOT rate
+    limited. Both shapes were measured silent (2026-09-14); a fix in one alone
+    leaves the other stuck.
+
+    WHAT IT FIXES. A program made only of „Wenn … gesehen" hats went permanently
+    silent once every tag was claimed — no looking block ever ran, so nothing
+    reclaimed, so the inline ``wanted`` set stayed empty forever and putting the
+    cubes somewhere else could not revive it. Measured 2026-09-14 through the
+    real manager and real hat threads: two cubes grasped and placed, both then
+    moved 250 mm, eight further seconds of polling, ZERO reclaims and zero
+    re-grasps; the identical program with one „falls sehe ich …" block on the
+    main stack reclaimed and re-grasped both.
+
+    NEVER RAISES. The hat's behaviour must not depend on a convenience: a missing
+    catalog, a stale frame or a perception error simply means no reclaim this
+    second. (The caller's own broad ``except`` would swallow it, but then the
+    poll's sleep would be skipped and the loop would spin.)"""
+    if _RECLAIM_MOVE_M <= 0.0:
+        # One-variable rollback: with the reclaim off there is nothing to look
+        # for, so do not pay for the frame either.
+        return
+    try:
+        cat = getattr(ctx, 'object_catalog', None)
+        if cat is None or not type_name:
+            return
+        recipe = cat.recipe_for_type(type_name)
+        last_at = _claim_store(ctx, 'hat_reclaim_at', dict)
+        key = str(recipe.type_name)
+        now = time.monotonic()
+        last = last_at.get(key)
+        if last is not None and (now - last) < _HAT_RECLAIM_MIN_INTERVAL_S:
+            return
+        # Stamped BEFORE the look, so a slow or raising detect cannot turn the
+        # rate floor off by never reaching the write.
+        last_at[key] = now
+        _ensure_perception(ctx)
+        _require_marker_detector(ctx)
+        _look_and_reclaim(ctx, recipe)
+    except Exception:  # noqa: BLE001 — a reclaim never changes what the hat does
+        return
+
+
 def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False) -> list:
     """All catalog tags of ``type_name`` currently visible (minus
     ``exclude_ids``), with world_xyz_m + tag_yaw + close_rad attached. Reusable
@@ -821,17 +1034,10 @@ def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False) -> list:
     if reclaim:
         # Detect unconditionally — the reclaim needs the full set of visible type
         # ids even when every instance is currently claimed/skipped.
-        bgr = _scene_frame(ctx)
-        detections = ctx.perception.detect(
-            bgr, camera='scene', mode='apriltag', aruco_id=None)
-        # The reclaim reasons about POSITION, so it needs each visible tag's
-        # table (x, y). A tag that is seen but cannot be LOCATED maps to None —
-        # deliberately distinct from a tag that is absent from the dict entirely,
-        # which is the only thing the reclaim reads as "not seen this time".
-        visible_xy = {int(d.aruco_id): _tag_table_xy(ctx, d, recipe)
-                      for d in detections if d.aruco_id in type_ids}
-        _reclaim_recycled(ctx, recipe, visible_xy)
+        detections = _look_and_reclaim(ctx, recipe)
         wanted = type_ids - {int(i) for i in _excluded_ids(ctx)}
+        if not wanted:
+            _note_all_instances_done(ctx, recipe)
         kept = [d for d in detections if d.aruco_id in wanted]
         return _attach_named_world(ctx, kept, recipe)
     wanted = set(type_ids)
@@ -1211,6 +1417,10 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
             if held is None:
                 _note_grasp_check_unavailable(ctx)
             _claim_tag(ctx, target.aruco_id)
+            # The composite path's pick-up event, the twin of the split path's
+            # in ``close_on_object``: the object is in the jaws, so no sighting of
+            # it means anything until „ablegen bei" records where it was let go.
+            _motion.note_object_picked_up(ctx, target.aruco_id)
             # Per-pass positive feedback (#7): a brief success line so the student
             # sees progress (the loop only logged warnings before).
             try:
@@ -1222,47 +1432,18 @@ def grasp_object(ctx, args: dict[str, Any]) -> None:
         _motion._release_motion_lock(ctx, acquired)
 
 
-def _detect_named_unclaimed_readonly(ctx, type_name) -> list:
-    """Currently-visible UNCLAIMED instances WITHOUT running the reclaim.
-
-    ``_detect_named_unclaimed`` runs ``_reclaim_recycled``, which MUTATES the
-    per-run claim/position state. That is right for the „Solange sichtbar" loop
-    gate (``count_unclaimed_visible``), which owns the loop's progress, and wrong
-    for every VALUE block a student can drop anywhere — „sehe ich", „Anzahl",
-    „finde" and „warte bis" are READS, and a read that silently un-claims an
-    object changes what the surrounding loop does next. The visible ANSWER is
-    identical on every pass where the reclaim would not have fired; where it
-    would have, the loop's own gate still fires it.
-
-    „finde" and „warte bis" joined the first two when the reclaim became
-    POSITION-based, and each had its own reason:
-
-    * „finde" is legitimately called MID-CARRY (the taught pattern is finde →
-      fahre über → senke → schließe → hebe an → lege ab), and a held object's
-      projected position travels with the gripper. Running the anchor rule there
-      would un-claim the very object the robot is HOLDING.
-    * „warte bis" polls ~5×/s where one loop pass takes 15.6 s, so a 4 s wait
-      contributed ~20 observations to a rule the loop expects to advance once per
-      pass.
-
-    ACCEPTED COST, owner-approved: a „wiederhole fortlaufend" + „finde/greife"
-    program (as opposed to „Solange sichtbar") no longer reclaims at all. „Solange
-    sichtbar" is the block designed for re-picking, and it still does."""
-    return _detect_named(ctx, type_name, exclude_ids=_excluded_ids(ctx))
-
-
 def see_object(ctx, args: dict[str, Any]) -> bool:
     """True when at least one UNCLAIMED instance of the chosen type is currently
-    visible (visibility only — does not require grasp calibration). A pure read:
-    it never changes the per-run claim state (see
-    ``_detect_named_unclaimed_readonly``)."""
-    return bool(_detect_named_unclaimed_readonly(ctx, args.get('object_type')))
+    visible (visibility only — does not require grasp calibration). Runs the
+    recycled-object reclaim like every other looking block (see
+    ``_detect_named_unclaimed``), so „falls sehe ich …" recovers once a student
+    moves a placed object."""
+    return bool(_detect_named_unclaimed(ctx, args.get('object_type')))
 
 
 def count_object(ctx, args: dict[str, Any]) -> int:
-    """Number of currently-visible UNCLAIMED instances of the chosen type. A
-    pure read: it never changes the per-run claim state."""
-    return len(_detect_named_unclaimed_readonly(ctx, args.get('object_type')))
+    """Number of currently-visible UNCLAIMED instances of the chosen type."""
+    return len(_detect_named_unclaimed(ctx, args.get('object_type')))
 
 
 def wait_until_object_seen(ctx, args: dict[str, Any]) -> bool:
@@ -1276,9 +1457,11 @@ def wait_until_object_seen(ctx, args: dict[str, Any]) -> bool:
     label = label_for(ctx, type_name)
     seen = _poll_until(
         ctx,
-        # READ-ONLY: this polls ~5×/s, and the recycled-object reclaim is a
-        # once-per-loop-pass decision — see _detect_named_unclaimed_readonly.
-        lambda: bool(_detect_named_unclaimed_readonly(ctx, type_name)),
+        # Polls ~5×/s, and that is harmless: the release rule measures against a
+        # FIXED commanded point, so a stationary object's verdict does not change
+        # with the sampling rate — it reclaims on the first look that sees it
+        # moved, and never again (the reclaim drops the release point).
+        lambda: bool(_detect_named_unclaimed(ctx, type_name)),
         timeout_s,
         f'Objekt {label}',
         raise_on_timeout=False,
@@ -1363,11 +1546,13 @@ def find_object(ctx, args: dict[str, Any]):
     if not type_name:
         raise WorkflowError('Kein Objekt ausgewählt.')
     recipe = _recipe_for(_require_catalog(ctx), type_name)
-    # READ-ONLY: „finde" is legitimately called MID-CARRY, where the held
-    # object's projected position travels with the gripper — running the
-    # position-based reclaim here would un-claim the object the robot is HOLDING.
-    # See _detect_named_unclaimed_readonly for the full reasoning + the cost.
-    detections = _detect_named_unclaimed_readonly(ctx, type_name)
+    # Runs the reclaim like every other looking block. „finde" IS legitimately
+    # called MID-CARRY (the taught pattern is finde → fahre über → senke →
+    # schließe → hebe an → lege ab) and a held object's projected position
+    # travels with the gripper — but the guard for that is now ``ctx.carried_tag``
+    # inside _reclaim_recycled, which names the held tag exactly, rather than a
+    # read-only twin that also stopped „falls sehe ich …" ever recovering.
+    detections = _detect_named_unclaimed(ctx, type_name)
     if not detections:
         _note_find_failure(ctx, _nothing_to_grasp_message(ctx, recipe))
         return None

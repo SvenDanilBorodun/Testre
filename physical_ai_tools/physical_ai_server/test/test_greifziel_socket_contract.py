@@ -172,12 +172,13 @@ class _Ctx:
         self.claimed_tags = set()
         self.skipped_tags = set()
         # _reclaim_recycled early-returns unless claimed_tags/skipped_tags
-        # exist; the three position stores below are lazily created by
-        # _claim_store, and are declared here only so a reader can see the whole
-        # claim state at once.
-        self.claim_anchor = {}
+        # exist; the position stores below are lazily created by _claim_store,
+        # and are declared here only so a reader can see the whole claim state at
+        # once.
+        self.claim_release_xy = {}
         self.claim_pick_xy = {}
-        self.claim_unseen = set()
+        self.carried_tag = None
+        self.all_done_notified = set()
         self.destinations = {}
         self.trajectories = {}
         self.zones = None

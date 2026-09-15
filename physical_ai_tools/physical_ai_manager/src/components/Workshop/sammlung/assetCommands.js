@@ -212,6 +212,12 @@ function rewriteReplayGrouped(workspace, fromName, toName) {
  * cloud's new name — then only the saved document is behind, and saving again
  * (the advice in ERR_RENAME_SPLIT) really fixes it.
  *
+ * Replacing a clashing recording deletes its rows FIRST (fetched before the
+ * delete, like deleteRecordingRows) and re-creates them whenever the rename does
+ * not end ok but the cloud is back at `fromName` — „nothing else changed" has to
+ * include the recording the student agreed to replace. If that restore fails
+ * too, the error says the replaced recording is gone.
+ *
  * @returns {Promise<{ok:boolean, error?:string, cancelled?:boolean, persistent?:boolean}>}
  */
 export async function renameRecording({
@@ -225,30 +231,35 @@ export async function renameRecording({
   const newest = newestRow(rowsNamed(items, fromName));
   if (!newest) return { ok: false, error: formatDe(DE.ERR_RENAME_FAILED, 'Bewegung nicht gefunden.') };
 
+  let replaced = [];
+  const giveBackReplaced = async (failure) => {
+    if (replaced.length === 0) return failure;
+    const back = await restoreRecordingRows({ api, accessToken, workflowId, deleted: replaced });
+    if (back.ok) return failure;
+    return { ...failure, error: `${failure.error} ${formatDe(DE.ERR_REPLACED_LOST, to)}` };
+  };
+
   const clashes = rowsNamed(items, to);
   if (clashes.length > 0) {
     const replace = await confirmReplace(to);
     if (!replace) return { ok: false, cancelled: true };
-    for (const row of clashes) {
-      try {
-        await api.deleteTrajectory(accessToken, workflowId, row.id);
-      } catch (err) {
-        return { ok: false, error: formatDe(DE.ERR_DELETE_FAILED, messageOf(err)) };
-      }
-    }
+    const removed = await deleteRecordingRows({ api, accessToken, workflowId, rows: clashes });
+    replaced = removed.deleted;
+    if (!removed.ok) return giveBackReplaced({ ok: false, error: removed.error });
   }
 
   try {
     await api.renameTrajectory(accessToken, workflowId, newest.id, to);
   } catch (err) {
-    return { ok: false, error: formatDe(DE.ERR_RENAME_FAILED, messageOf(err)) };
+    return giveBackReplaced({ ok: false, error: formatDe(DE.ERR_RENAME_FAILED, messageOf(err)) });
   }
 
   rewriteReplayGrouped(workspace, fromName, to);
 
   let saved = null;
   try {
-    saved = await saveWorkflowNow({ toastOnSuccess: false });
+    // The drawer reports a failure itself (ERR_RENAME_FAILED carries the reason).
+    saved = await saveWorkflowNow({ toastOnSuccess: false, toastOnError: false });
   } catch (err) {
     saved = { ok: false, error: err };
   }
@@ -262,7 +273,7 @@ export async function renameRecording({
     return { ok: false, persistent: true, error: formatDe(DE.ERR_RENAME_SPLIT, to) };
   }
   rewriteReplayGrouped(workspace, to, fromName);
-  return { ok: false, error: formatDe(DE.ERR_RENAME_FAILED, saveError) };
+  return giveBackReplaced({ ok: false, error: formatDe(DE.ERR_RENAME_FAILED, saveError) });
 }
 
 /**

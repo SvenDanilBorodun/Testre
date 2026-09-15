@@ -452,6 +452,8 @@ export const DE = {
     'Achtung: Die Aufnahme heißt jetzt „%1", der Workflow ist aber noch nicht gespeichert. Bitte erneut speichern.',
   TOAST_DISMISS: 'Schließen',
   ERR_DELETE_FAILED: 'Löschen fehlgeschlagen: %1',
+  ERR_REPLACED_LOST:
+    'Die ersetzte Aufnahme „%1" wurde dabei gelöscht und konnte nicht wiederhergestellt werden.',
   ERR_UNDO_FAILED: 'Rückgängig fehlgeschlagen: %1',
   ERR_UNDO_NEWER_VERSION: 'Rückgängig nicht möglich: Von „%1" gibt es inzwischen eine neuere Aufnahme.',
   ERR_RECORDING_NAME:

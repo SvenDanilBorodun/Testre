@@ -177,7 +177,7 @@ describe('renameRecording', () => {
     expect(writeOrders.length).toBe(2);
     expect(renameOrder).toBeLessThan(Math.min(...writeOrders));
     expect(Math.max(...writeOrders)).toBeLessThan(saveOrder);
-    expect(args.saveWorkflowNow).toHaveBeenCalledWith({ toastOnSuccess: false });
+    expect(args.saveWorkflowNow).toHaveBeenCalledWith({ toastOnSuccess: false, toastOnError: false });
     expect(names('edubotics_replay_trajectory')).toEqual(['Greifen', 'Greifen']);
   });
 
@@ -191,6 +191,52 @@ describe('renameRecording', () => {
     expect(api.deleteTrajectory).toHaveBeenCalledWith('tok', 'wf1', 't9');
     expect(api.deleteTrajectory.mock.invocationCallOrder[0])
       .toBeLessThan(api.renameTrajectory.mock.invocationCallOrder[0]);
+  });
+
+  it('a replace whose rename then fails re-creates the replaced recording', async () => {
+    load([replay('Winken', 'a')]);
+    const api = makeApi({
+      getTrajectory: vi.fn(async () => ({
+        name: 'Tanz', samples: { fps: 25, points: [[0, 0, 0, 0, 0, 0.8, 0]] }, created_at: '2026-09-13T09:00:00Z',
+      })),
+      renameTrajectory: vi.fn(async () => { throw new Error('offline'); }),
+      listTrajectories: vi.fn(async () => [ITEMS[0], ITEMS[1]]),
+    });
+    const result = await renameRecording(renameArgs(api, { toName: 'Tanz' }));
+    expect(result).toEqual({ ok: false, error: formatDe(DE.ERR_RENAME_FAILED, 'offline') });
+    expect(api.deleteTrajectory).toHaveBeenCalledWith('tok', 'wf1', 't9');
+    expect(api.createTrajectory).toHaveBeenCalledTimes(1);
+    expect(api.createTrajectory.mock.calls[0][2]).toMatchObject({ name: 'Tanz', fps: 25 });
+    expect(names('edubotics_replay_trajectory')).toEqual(['Winken']);
+  });
+
+  it('a replace whose save fails re-creates the replaced recording after the cloud compensation', async () => {
+    load([replay('Winken', 'a')]);
+    const api = makeApi({
+      getTrajectory: vi.fn(async () => ({ name: 'Tanz', samples: { fps: 25, points: [] }, created_at: '2026-09-13T09:00:00Z' })),
+    });
+    const args = renameArgs(api, {
+      toName: 'Tanz',
+      saveWorkflowNow: vi.fn(async () => ({ ok: false, error: new Error('Netzwerkfehler') })),
+    });
+    const result = await renameRecording(args);
+    expect(result).toEqual({ ok: false, error: formatDe(DE.ERR_RENAME_FAILED, 'Netzwerkfehler') });
+    expect(api.renameTrajectory.mock.calls.map((c) => c[3])).toEqual(['Tanz', 'Winken']);
+    expect(api.createTrajectory.mock.invocationCallOrder[0])
+      .toBeGreaterThan(api.renameTrajectory.mock.invocationCallOrder[1]);
+  });
+
+  it('a replaced recording that cannot be re-created is named in the error', async () => {
+    load([replay('Winken', 'a')]);
+    const api = makeApi({
+      getTrajectory: vi.fn(async () => ({ name: 'Tanz', samples: { fps: 25, points: [] }, created_at: '2026-09-13T09:00:00Z' })),
+      renameTrajectory: vi.fn(async () => { throw new Error('offline'); }),
+      createTrajectory: vi.fn(async () => { throw new Error('offline'); }),
+    });
+    const result = await renameRecording(renameArgs(api, { toName: 'Tanz' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe(
+      `${formatDe(DE.ERR_RENAME_FAILED, 'offline')} ${formatDe(DE.ERR_REPLACED_LOST, 'Tanz')}`);
   });
 
   it('a declined replace makes zero API calls and changes nothing', async () => {

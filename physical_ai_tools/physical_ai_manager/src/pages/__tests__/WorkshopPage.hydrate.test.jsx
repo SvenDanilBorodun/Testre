@@ -95,7 +95,14 @@ vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule:
 // Vormachen: TeachHost is a stub (the overlay has its own tests, and its
 // leader-mode child would read `s.ros`, which these mock states lack), and the
 // bridge probe is stubbed so no page test fetches localhost:8769.
-vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+const mockTeachProps = vi.hoisted(() => ({ current: null }));
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockTeachProps.current = props;
+    return <div data-testid="teach-host" />;
+  },
+}));
 vi.mock('../../hooks/useRsBridgeStatus', () => ({
   __esModule: true,
   default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false }),
@@ -413,6 +420,29 @@ describe('WorkshopPage — one save path, never a joined save', () => {
     await userEvent.click(await screen.findByTestId('save-button'));
     await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
     expect(mockApi.updateWorkflow.mock.calls[0][1]).toBe('wf-b');
+  });
+
+  test('toastOnError: false returns the German reason and toasts nothing', async () => {
+    mockApi.updateWorkflow.mockImplementation(() => Promise.reject(new Error('Netz weg')));
+    mockState = baseState({ selectedWorkflowId: 'wf-1', unsavedBlocklyJson: DOC('a') });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('teach-host');
+    let result;
+    await act(async () => {
+      result = await mockTeachProps.current.saveWorkflowNow({ toastOnSuccess: false, toastOnError: false });
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toBe('Netz weg');
+    expect(toast.error).not.toHaveBeenCalled();
+
+    // An empty document still names its reason.
+    mockState = baseState({ selectedWorkflowId: 'wf-1', unsavedBlocklyJson: null });
+    render(<WorkshopPage isActive />);
+    await act(async () => {
+      result = await mockTeachProps.current.saveWorkflowNow({ toastOnSuccess: false, toastOnError: false });
+    });
+    expect(result).toEqual({ ok: false, error: new Error('Workflow ist leer.') });
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   test('a failed save still lets the coalesced follow-up run', async () => {

@@ -326,10 +326,52 @@ describe('SammlungDrawer: rename and delete', () => {
     expect(within(dialog).getByText('Eine Bewegung „Tanz" gibt es schon. Ersetzen?')).toBeInTheDocument();
     expect(workflowApi.deleteTrajectory).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole('button', { name: DE.CONFIRM_YES_REPLACE }));
-    await waitFor(() => expect(saveWorkflowNow).toHaveBeenCalledWith({ toastOnSuccess: false }));
+    await waitFor(() => expect(saveWorkflowNow).toHaveBeenCalledWith({ toastOnSuccess: false, toastOnError: false }));
     expect(workflowApi.deleteTrajectory).toHaveBeenCalledWith('tok', 'wf1', 't9');
     expect(workflowApi.renameTrajectory).toHaveBeenCalledWith('tok', 'wf1', 't3', 'Tanz');
     expect(ws.getBlockById('b1').getFieldValue('NAME')).toBe('Tanz');
     await waitFor(() => expect(refetchTrajectories).toHaveBeenCalled());
+  });
+
+  it('a failed save whose compensation fails too shows the split banner, keeps the new name and a persistent toast', async () => {
+    const { saveWorkflowNow, redux } = setup({ blocks: [replay('Winken', 'b1')], drawer: { focusId: 'Winken' } });
+    saveWorkflowNow.mockImplementation(async () => ({ ok: false, error: new Error('offline') }));
+    workflowApi.renameTrajectory
+      .mockImplementationOnce(async () => ({}))
+      .mockImplementationOnce(async () => { throw new Error('offline'); });
+    fireEvent.click(screen.getByRole('button', { name: DE.DRAWER_RENAME }));
+    fireEvent.change(screen.getByRole('textbox', { name: DE.DRAWER_NAME }), { target: { value: 'Greifen' } });
+    fireEvent.click(screen.getByRole('button', { name: DE.DRAWER_SAVE_NAME }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(formatDe(DE.ERR_RENAME_SPLIT, 'Greifen')));
+    expect(ws.getBlockById('b1').getFieldValue('NAME')).toBe('Greifen');
+    expect(redux.getState().studioAssets.renameSplit).toEqual({ cloudName: 'Greifen' });
+    expect(mockToast.error).toHaveBeenCalledTimes(1);
+    expect(mockToast.error.mock.calls[0][1]).toMatchObject({ duration: Infinity });
+  });
+
+  it('„Rückgängig" on the delete toast re-creates the deleted rows', async () => {
+    const { refetchTrajectories } = setup({ drawer: { focusId: 'Winken' } });
+    fireEvent.click(screen.getByRole('button', { name: DE.DRAWER_DELETE_RECORDING }));
+    await waitFor(() => expect(refetchTrajectories).toHaveBeenCalled());
+    const renderToast = mockToast.mock.calls[0][0];
+    render(renderToast({ id: 'undo-1' }));
+    fireEvent.click(screen.getByRole('button', { name: DE.UNDO }));
+    await waitFor(() => expect(workflowApi.createTrajectory).toHaveBeenCalledTimes(2));
+    expect(mockToast.dismiss).toHaveBeenCalledWith('undo-1');
+    expect(workflowApi.listTrajectories).toHaveBeenCalledWith('tok', 'wf1');
+  });
+
+  it('the delete buttons wait while a rename is in flight', async () => {
+    let fail;
+    workflowApi.renameTrajectory.mockImplementationOnce(() => new Promise((_res, rej) => { fail = rej; }));
+    setup({ drawer: { focusId: 'Winken' } });
+    fireEvent.click(screen.getByRole('button', { name: DE.DRAWER_RENAME }));
+    fireEvent.change(screen.getByRole('textbox', { name: DE.DRAWER_NAME }), { target: { value: 'Greifen' } });
+    fireEvent.click(screen.getByRole('button', { name: DE.DRAWER_SAVE_NAME }));
+    await waitFor(() => expect(workflowApi.renameTrajectory).toHaveBeenCalled());
+    expect(screen.getByRole('button', { name: DE.DRAWER_DELETE_RECORDING })).toBeDisabled();
+    // A failed rename keeps the focus on „Winken", so its buttons come back.
+    await act(async () => { fail(new Error('offline')); });
+    await waitFor(() => expect(screen.getByRole('button', { name: DE.DRAWER_DELETE_RECORDING })).toBeEnabled());
   });
 });

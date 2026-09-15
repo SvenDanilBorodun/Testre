@@ -99,6 +99,9 @@ export default function DrawerRecording({
   // { text, yesLabel, onYes, onNo } — one inline confirm at a time.
   const [confirm, setConfirm] = useState(null);
   const [busy, setBusy] = useState(false);
+  // A rename in flight targets these same rows (and may rename them back), so
+  // the delete buttons wait for it.
+  const [renaming, setRenaming] = useState(false);
 
   const name = card.assetName;
   const missing = card.assetKind === 'missingRecording';
@@ -117,6 +120,15 @@ export default function DrawerRecording({
   });
 
   const handleRename = async (draft) => {
+    setRenaming(true);
+    try {
+      return await commitRename(draft);
+    } finally {
+      setRenaming(false);
+    }
+  };
+
+  const commitRename = async (draft) => {
     const result = await renameRecording({
       workspace,
       api: workflowApi,
@@ -286,7 +298,7 @@ export default function DrawerRecording({
                 )}
                 <button
                   type="button"
-                  disabled={busy || !!confirm}
+                  disabled={busy || renaming || !!confirm}
                   onClick={() => handleDeleteVersion(row)}
                   className="rounded px-2 py-0.5 text-red-700 hover:bg-red-50 disabled:opacity-50"
                 >
@@ -302,7 +314,7 @@ export default function DrawerRecording({
       )}
       <button
         type="button"
-        disabled={busy || !!confirm}
+        disabled={busy || renaming || !!confirm}
         onClick={handleDeleteAll}
         className="mt-4 rounded border border-red-300 px-2 py-1 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50"
       >

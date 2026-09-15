@@ -936,14 +936,21 @@ function WorkshopPage({ isActive }) {
   // followUpId: the workflow a queued follow-up belongs to, snapshotted when it
   // is QUEUED (null = the document a create in flight is creating).
   const saveStateRef = useRef({
-    inflight: null, followUp: null, followUpToast: false, followUpId: null,
+    inflight: null, followUp: null, followUpToast: false, followUpErrorToast: false, followUpId: null,
   });
 
-  const runSave = useCallback(async ({ toastOnSuccess }) => {
+  // Every failure returns its German reason as `error` (a caller that shows
+  // the failure itself — the drawer's rename — passes toastOnError: false, so
+  // the student is not told twice).
+  const runSave = useCallback(async ({ toastOnSuccess, toastOnError = true }) => {
+    const fail = (toastText, error) => {
+      if (toastOnError) toast.error(toastText);
+      return { ok: false, error };
+    };
     const token = accessTokenRef.current;
     if (!token) {
-      toast.error('Nicht angemeldet — Speichern nicht möglich.');
-      return { ok: false };
+      return fail('Nicht angemeldet — Speichern nicht möglich.',
+        new Error('Nicht angemeldet — Speichern nicht möglich.'));
     }
     let json = null;
     const ws = workspaceRef.current;
@@ -955,10 +962,7 @@ function WorkshopPage({ isActive }) {
       }
     }
     if (!json) json = editorJsonRef.current || unsavedJsonRef.current;
-    if (!json) {
-      toast.error('Workflow ist leer.');
-      return { ok: false };
-    }
+    if (!json) return fail('Workflow ist leer.', new Error('Workflow ist leer.'));
     // The DOCUMENT — `blocks`, `variables`, the student's canvas notes
     // (`workspaceComments`) and the Ziele/Positionen (`edubotics-destinations`)
     // — and deliberately NOT the two editor-plugin keys. `suggested-blocks`
@@ -996,8 +1000,8 @@ function WorkshopPage({ isActive }) {
         sim_scene: simSceneRef.current,
       });
       if (!created || !created.id) {
-        toast.error('Speichern fehlgeschlagen: keine Workflow-ID erhalten.');
-        return { ok: false };
+        return fail('Speichern fehlgeschlagen: keine Workflow-ID erhalten.',
+          new Error('keine Workflow-ID erhalten.'));
       }
       // Stamp the new id only while the editor still shows the unsaved document
       // it was created from. A workflow the student picked meanwhile keeps the
@@ -1014,8 +1018,7 @@ function WorkshopPage({ isActive }) {
       if (toastOnSuccess) toast.success('Gespeichert.');
       return { ok: true, workflowId: created.id, created: true };
     } catch (e) {
-      toast.error(`Speichern fehlgeschlagen: ${e.message || e}`);
-      return { ok: false, error: e };
+      return fail(`Speichern fehlgeschlagen: ${e.message || e}`, e);
     } finally {
       setSaving(false);
     }
@@ -1025,30 +1028,33 @@ function WorkshopPage({ isActive }) {
   // it never sent. A caller arriving mid-save gets ONE coalesced follow-up that
   // serialises when IT starts (so the newest document is the last one sent);
   // the follow-up of a create is an update, never a second create.
-  const saveWorkflowNow = useCallback(({ toastOnSuccess = true } = {}) => {
+  const saveWorkflowNow = useCallback(({ toastOnSuccess = true, toastOnError = true } = {}) => {
     const st = saveStateRef.current;
-    const start = (toastFlag) => {
-      const p = runSave({ toastOnSuccess: toastFlag });
+    const start = (toastFlag, errorToastFlag) => {
+      const p = runSave({ toastOnSuccess: toastFlag, toastOnError: errorToastFlag });
       st.inflight = p;
       p.finally(() => { if (st.inflight === p) st.inflight = null; });
       return p;
     };
-    if (!st.inflight) return start(toastOnSuccess);
+    if (!st.inflight) return start(toastOnSuccess, toastOnError);
     st.followUpToast = st.followUpToast || toastOnSuccess;
+    st.followUpErrorToast = st.followUpErrorToast || toastOnError;
     if (!st.followUp) {
       st.followUpId = selectedWorkflowIdRef.current;
       st.followUp = st.inflight.then(() => {}, () => {}).then(() => {
         const toastFlag = st.followUpToast;
+        const errorToastFlag = st.followUpErrorToast;
         const queuedFor = st.followUpId;
         st.followUp = null;
         st.followUpToast = false;
+        st.followUpErrorToast = false;
         st.followUpId = null;
         // Another workflow was opened while the follow-up waited: the document
         // it would serialise now belongs to that workflow, not to this save.
         if (selectedWorkflowIdRef.current !== queuedFor) {
           return { ok: false, error: new Error('Inzwischen wurde ein anderer Workflow geöffnet.') };
         }
-        return start(toastFlag);
+        return start(toastFlag, errorToastFlag);
       });
     }
     return st.followUp;

@@ -27,6 +27,7 @@ from physical_ai_server.workflow.sim_arm import SimArm
 from physical_ai_server.workflow.sim_perception import SimPerception
 from physical_ai_server.workflow.sim_world import SimWorld
 from physical_ai_server.workflow.workflow_manager import (
+    MAX_DESTINATION_SKIP_REASONS,
     MAX_PAYLOAD_DESTINATIONS,
     WorkflowManager,
 )
@@ -322,6 +323,23 @@ def test_one_bad_entry_emits_exactly_one_status_warning():
     assert len(warns) == 1
     assert warns[0]['log_message'] == (
         '[WARNUNG] Ziel aus der Sammlung übersprungen: „C" hat eine unbekannte Art.')
+
+
+def test_the_skip_reasons_are_bounded_with_one_summary_line():
+    items = [0] * 5000
+    out, skipped, present = _parse({'destinations': items})
+    assert present and out == {}
+    assert skipped == [f'Ziel Nr. {i + 1} ist ungültig.'
+                       for i in range(MAX_DESTINATION_SKIP_REASONS)] + [
+        'Weitere ungültige Ziele werden nicht einzeln aufgeführt.']
+
+
+def test_a_flood_of_bad_entries_emits_a_bounded_number_of_warnings():
+    status = []
+    mgr, _arm, _w = _sim_manager([], status, {'z_table': 0.0})
+    bad = [_entry(f'N{i}', x='kaputt') for i in range(3000)]
+    _run(mgr, _empty_program([_entry('P')] + bad), status)
+    assert len(_warnings(status)) == MAX_DESTINATION_SKIP_REASONS + 1
 
 
 def test_an_identical_reason_is_emitted_once():

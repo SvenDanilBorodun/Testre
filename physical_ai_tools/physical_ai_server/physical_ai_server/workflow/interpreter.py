@@ -467,6 +467,11 @@ class Interpreter:
                 xyz = self._extract_concrete_xyz(block)
                 if name and xyz is not None:
                     pins[name] = xyz
+                elif name:
+                    # An enabled pin with unusable coordinates still OWNS its
+                    # name at run time (it sets it or aborts), so the stored
+                    # entry of that name must not be pre-checked in its place.
+                    current_names.add(name)
             elif btype == 'edubotics_destination_current':
                 name = self._pin_name(block)
                 if name:
@@ -560,7 +565,10 @@ class Interpreter:
             x = float(fields.get('X', '—'))
             y = float(fields.get('Y', '—'))
             z = float(fields.get('Z', '—'))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: a hand-built payload can put a 401-digit JSON
+            # integer into a field, and float() refuses that with neither of
+            # the other two — it escaped WorkflowManager.start() uncaught.
             return None
         # NaN / Infinity are not "concrete": a degenerate projection can write
         # the literal string "NaN" into the label (applyPinnedCoordinates uses

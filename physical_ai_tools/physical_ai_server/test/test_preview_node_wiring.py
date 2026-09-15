@@ -251,7 +251,7 @@ def test_without_extra_destinations_nothing_changes():
     assert _collect(_program(_CURRENT)) == []
 
 
-def _start_with_payload_destination(x):
+def _start_with_payload_destination(x, kind='pin', z=0.05):
     status = []
     mgr = WorkflowManager(
         publisher=lambda *_a, **_k: None,
@@ -263,7 +263,7 @@ def _start_with_payload_destination(x):
     )
     mgr._run = lambda interpreter, ctx: None     # the pre-check is all we look at
     program = _program()
-    program['destinations'] = [{'name': 'Ablage', 'kind': 'pin', 'x': x, 'y': 0.0, 'z': 0.05}]
+    program['destinations'] = [{'name': 'Ablage', 'kind': kind, 'x': x, 'y': 0.0, 'z': z}]
     ok, msg, unreachable = mgr.start(json.dumps(program), 'wf')
     assert ok, msg
     return unreachable
@@ -276,6 +276,42 @@ def test_start_flags_an_unreachable_stored_destination():
 
 def test_start_does_not_flag_a_reachable_stored_destination():
     assert _start_with_payload_destination(0.2) == []
+
+
+def test_start_pre_checks_a_camera_pin_at_this_runs_table_height():
+    # The stored z (0.6 m) alone is out of reach; the calibrated table (z 0.0)
+    # is not. Only a start() that hands its calibration to the pre-check can
+    # tell the two apart — a measured pose keeps its stored z and is flagged.
+    assert _start_with_payload_destination(0.2, kind='pin', z=0.6) == []
+    assert _start_with_payload_destination(0.2, kind='pose', z=0.6) == [
+        {'block_id': 'mv', 'message': 'Diese Position ist außerhalb des Arbeitsbereichs.'}]
+
+
+def test_an_unusable_pin_statement_hides_the_stored_entry_of_its_name():
+    unpinned = dict(_PIN, fields={'NAME': 'Ablage', 'X': '—', 'Y': '—', 'Z': '—'})
+    huge = dict(_PIN, fields={'NAME': 'Ablage', 'X': 10 ** 400, 'Y': 0, 'Z': 0})
+    assert _collect(_program(unpinned), _EXTRA) == []
+    assert _collect(_program(huge), _EXTRA) == []
+
+
+def test_start_survives_an_overflowing_pin_field():
+    status = []
+    mgr = WorkflowManager(
+        publisher=lambda *_a, **_k: None,
+        ik_factory=lambda: IKSolver(),
+        load_destinations=lambda: {},
+        load_calibration=lambda: {'z_table': 0.0},
+        emit_status=status.append,
+        on_finished=lambda phase: status.append({'_finished': phase}),
+    )
+    mgr._run = lambda interpreter, ctx: None
+    program = _program(_PIN)
+    program['destinations'] = []
+    text = json.dumps(program).replace('"X": "0.2"', '"X": ' + '9' * 401)
+    assert '9' * 401 in text
+    ok, msg, unreachable = mgr.start(text, 'wf')
+    assert ok, msg
+    assert unreachable == []
 
 
 _PLANE_CALIB = {'z_table': 0.0, 'table_plane': (0.0, 0.0, 0.02)}

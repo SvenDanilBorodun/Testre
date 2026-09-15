@@ -71,6 +71,12 @@ _IKPRECHECK_TOTAL_BUDGET_S = 1.0
 # never read back out of payload data (a camera pin re-asks the table height,
 # a measured pose keeps its z — motion.resolve_destination_z).
 MAX_PAYLOAD_DESTINATIONS = 64
+# The cap above counts ACCEPTED entries only, and every skip reason is unique
+# (it names a position or a name), so without a bound of its own one crafted
+# payload of 85 000 junk items emitted 85 000 [WARNUNG] statuses. A diagnostic
+# must never become its own flood: past this many reasons one summary line.
+MAX_DESTINATION_SKIP_REASONS = 8
+_DESTINATION_SKIP_OVERFLOW_DE = 'Weitere ungültige Ziele werden nicht einzeln aufgeführt.'
 _DESTINATION_KIND_PLANE_TRACKED = {'pin': True, 'pose': False}   # provenance -> flag, IN CODE
 
 
@@ -1419,28 +1425,38 @@ class WorkflowManager:
             return {}, [], False
         out: dict[str, dict[str, Any]] = {}
         skipped: list[str] = []
+        overflowed = False
+
+        def skip(reason: str) -> None:
+            nonlocal overflowed
+            if len(skipped) < MAX_DESTINATION_SKIP_REASONS:
+                skipped.append(reason)
+            else:
+                overflowed = True
+
         for i, item in enumerate(raw):
             if len(out) >= MAX_PAYLOAD_DESTINATIONS:
+                # Said once and ends the scan, so it bypasses the reason bound.
                 skipped.append(
                     f'Mehr als {MAX_PAYLOAD_DESTINATIONS} Ziele — der Rest wurde nicht übernommen.')
                 break
             if not isinstance(item, dict):
-                skipped.append(f'Ziel Nr. {i + 1} ist ungültig.')
+                skip(f'Ziel Nr. {i + 1} ist ungültig.')
                 continue
             name = item.get('name')
             if isinstance(name, str):
                 name = name.strip()
             name_error = destination_name_error_de(name)
             if name_error is not None:
-                skipped.append(name_error)
+                skip(name_error)
                 continue
             kind = item.get('kind')
             if not isinstance(kind, str) or kind not in _DESTINATION_KIND_PLANE_TRACKED:
-                skipped.append(f'„{name}" hat eine unbekannte Art.')
+                skip(f'„{name}" hat eine unbekannte Art.')
                 continue
             coords = (item.get('x'), item.get('y'), item.get('z'))
             if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in coords):
-                skipped.append(_payload_coordinate_error_de(name))
+                skip(_payload_coordinate_error_de(name))
                 continue
             try:
                 # float() BEFORE the finite test: a 401-digit JSON integer is an int
@@ -1448,16 +1464,18 @@ class WorkflowManager:
                 # is neither TypeError nor ValueError.
                 fx, fy, fz = (float(v) for v in coords)
             except (OverflowError, ValueError, TypeError):
-                skipped.append(_payload_coordinate_error_de(name))
+                skip(_payload_coordinate_error_de(name))
                 continue
             if not all(math.isfinite(v) for v in (fx, fy, fz)):
-                skipped.append(_payload_coordinate_error_de(name))
+                skip(_payload_coordinate_error_de(name))
                 continue
             if name in out:
-                skipped.append(f'„{name}" gibt es doppelt.')
+                skip(f'„{name}" gibt es doppelt.')
                 continue
             out[name] = {'x': fx, 'y': fy, 'z': fz, 'label': name,
                          'plane_tracked': _DESTINATION_KIND_PLANE_TRACKED[kind]}
+        if overflowed:
+            skipped.append(_DESTINATION_SKIP_OVERFLOW_DE)
         return out, skipped, True
 
     @staticmethod

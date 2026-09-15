@@ -198,6 +198,36 @@ describe('TeachOverlay — dialog, focus and the CollisionModal', () => {
     opener.remove();
   });
 
+  test('a Tab while focus fell out of the dialog (unmounted or disabled control) comes back inside', () => {
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps()} />);
+    const dialog = screen.getByRole('dialog');
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+    const enabled = () => within(dialog).getAllByRole('button').filter((b) => !b.disabled);
+    fireEvent.keyDown(outside, { key: 'Tab' });
+    expect(enabled()[0]).toHaveFocus();
+
+    const inside = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_POSE) });
+    inside.focus();
+    inside.disabled = true;
+    fireEvent.keyDown(inside, { key: 'Tab', shiftKey: true });
+    const controls = enabled();
+    expect(controls[controls.length - 1]).toHaveFocus();
+    outside.remove();
+  });
+
+  test('only the state line is live; the recording clock is outside the live region', () => {
+    withSnapshot({ state: 'aufnahme', elapsedS: 7 });
+    render(<TeachOverlay {...baseProps()} />);
+    const live = screen.getByTestId('teach-state-line');
+    expect(live).toHaveAttribute('aria-live', 'assertive');
+    expect(screen.getByTestId('teach-elapsed')).toHaveTextContent('00:07');
+    expect(live).not.toContainElement(screen.getByTestId('teach-elapsed'));
+    expect(screen.getByTestId('teach-elapsed')).not.toHaveAttribute('aria-live');
+  });
+
   test('a pointerup on an action button hands focus back to the container', () => {
     vi.useFakeTimers();
     try {

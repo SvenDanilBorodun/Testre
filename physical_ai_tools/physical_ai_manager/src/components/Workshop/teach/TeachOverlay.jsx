@@ -453,6 +453,22 @@ function TeachOverlay({
   }, []);
   useEffect(() => {
     const handler = (e) => {
+      // The container's own Tab trap only sees keys while focus is INSIDE it. A
+      // focused button that unmounted or became disabled on a state change
+      // drops focus to <body>, whose Tab would walk to the page behind the
+      // dialog — so a Tab from outside (or from a disabled control) comes back.
+      if (e.key === 'Tab' && !collisionRef.current) {
+        const root = containerRef.current;
+        const active = document.activeElement;
+        if (root && (!active || !root.contains(active) || active.disabled)) {
+          e.preventDefault();
+          e.stopPropagation();
+          const nodes = Array.from(root.querySelectorAll(FOCUSABLE_SELECTOR));
+          const target = e.shiftKey ? nodes[nodes.length - 1] : nodes[0];
+          (target || root).focus();
+          return;
+        }
+      }
       if (zielPromptsRef.current.length > 0 && !collisionRef.current) {
         const key = classifyTeachKey(e);
         const onButton = !!e.target && e.target.tagName === 'BUTTON';
@@ -746,9 +762,13 @@ function TeachOverlay({
               </div>
             )}
             <div>
-              <p aria-live="assertive" className="text-3xl font-semibold text-[var(--ink)]">
-                {stateLine}
-                {state === 'aufnahme' && <span className="ml-3 tabular-nums">{mmss(elapsedS)}</span>}
+              {/* Only the state is announced; the ticking clock sits OUTSIDE the
+                  live region, or a screen reader would read it every second. */}
+              <p className="text-3xl font-semibold text-[var(--ink)]">
+                <span aria-live="assertive" data-testid="teach-state-line">{stateLine}</span>
+                {state === 'aufnahme' && (
+                  <span className="ml-3 tabular-nums" data-testid="teach-elapsed">{mmss(elapsedS)}</span>
+                )}
               </p>
               {hintLine && <p className="mt-1 text-lg text-[var(--ink-3)]">{hintLine}</p>}
             </div>

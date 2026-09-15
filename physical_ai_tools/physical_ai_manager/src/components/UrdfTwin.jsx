@@ -114,6 +114,7 @@ import {
   SIM_OBJECT_HELD_COLOR_HEX,
 } from './Workshop/simConstants';
 import { armGeometry } from '../utils/armProfile';
+import { MARKER_COLORS } from './Workshop/sammlung/markers';
 
 // The joints applied to the model are profile-driven (armGeometry from the
 // capability manifest: the OMX's joint1..joint5 + gripper_joint_1 when there is
@@ -294,6 +295,12 @@ export default function UrdfTwin({
   catalogDims = {},
   showShadows = false,
   showReach = false,
+  // Sammlung markers (sammlung/markers.js::buildTwinMarkers): the document's
+  // Ziele/Positionen and variable points, in BASE coordinates
+  // [{id, label, kind: 'pin'|'pose'|'variable', x, y, z, highlighted}]. Drawn on
+  // THIS twin (never a second WebGL context) and diffed by id. The default []
+  // constructs nothing.
+  markers = [],
   // Start-page hero seam. `showChrome = false` suppresses this component's
   // own header chip and „Wartet auf Gelenkdaten …" hint so a parent can
   // draw its own overlay; the default keeps RecordPage and SimScene
@@ -351,6 +358,9 @@ export default function UrdfTwin({
   const prevHeldIdRef = useRef(null);
   // Phase-4 no-go zone layer (stays null/unused for the default zones=[] call).
   const zonesGroupRef = useRef(null);
+  // Sammlung marker layer: a lazily created group + id → {object, key}.
+  const markersGroupRef = useRef(null);
+  const markerMapRef = useRef(new Map());
   // Latest onEndEffector callback, read by the (stable) subscription closure.
   const onEndEffectorRef = useRef(onEndEffector);
   useEffect(() => {
@@ -471,6 +481,7 @@ export default function UrdfTwin({
     // Capture the (stable, never-reassigned) sim-object map for use in the
     // cleanup, so the lint's "ref may have changed by cleanup" guard is happy.
     const objectMeshMap = objectMeshMapRef.current;
+    const markerMap = markerMapRef.current;
 
     let disposed = false;
     let animationId = null;
@@ -733,6 +744,13 @@ export default function UrdfTwin({
       if (resizeObserver) resizeObserver.disconnect();
       if (animationId !== null) window.cancelAnimationFrame(animationId);
       controls.dispose();
+      // Markers carry a CanvasTexture label, which the generic traverse below
+      // does not reach (disposeObject frees geometry + material only), so they
+      // are detached and disposed whole first.
+      if (markersGroupRef.current) scene.remove(markersGroupRef.current);
+      markerMap.forEach(({ object }) => disposeMarker(object));
+      markerMap.clear();
+      markersGroupRef.current = null;
       // Dispose every geometry/material reachable from the scene (three leaks
       // GPU memory otherwise), then the shared link material + renderer. This
       // also reaches the sim-object meshes (under objectsGroup → scene) and a
@@ -963,6 +981,55 @@ export default function UrdfTwin({
 
     requestRenderRef.current();
   }, [zones]);
+
+  // ---- Sammlung markers (Ziele / Positionen / variable points) --------------
+  // Diffed by id: a marker is REBUILT only when its kind, label or highlight
+  // changed (the label is a baked canvas texture) and merely MOVED otherwise;
+  // one no longer listed is removed and disposed. `asset` is a dep because a
+  // profile change rebuilds the whole scene and the mount teardown has already
+  // dropped this layer. Every mutation dirties the on-demand render loop. For
+  // the default markers=[] call this returns BEFORE constructing any primitive.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const list = Array.isArray(markers) ? markers : [];
+    if (list.length === 0 && !markersGroupRef.current) return;
+
+    let group = markersGroupRef.current;
+    if (!group) {
+      group = new THREE.Group();
+      scene.add(group);
+      markersGroupRef.current = group;
+    }
+    const map = markerMapRef.current;
+    const seen = new Set();
+    list.forEach((m) => {
+      if (!m || m.id === undefined || m.id === null || seen.has(m.id)) return;
+      if (![m.x, m.y, m.z].every((v) => typeof v === 'number' && Number.isFinite(v))) return;
+      seen.add(m.id);
+      const key = `${m.kind}|${m.label}|${m.highlighted ? 1 : 0}`;
+      let entry = map.get(m.id);
+      if (entry && entry.key !== key) {
+        group.remove(entry.object);
+        disposeMarker(entry.object);
+        entry = null;
+      }
+      if (!entry) {
+        entry = { object: buildMarkerObject(m), key };
+        group.add(entry.object);
+        map.set(m.id, entry);
+      }
+      // Base (ROS) frame → viewer frame, exactly as the zone layer: (x, z, −y).
+      entry.object.position.set(m.x, m.z, -m.y);
+    });
+    map.forEach((entry, id) => {
+      if (seen.has(id)) return;
+      group.remove(entry.object);
+      disposeMarker(entry.object);
+      map.delete(id);
+    });
+    requestRenderRef.current();
+  }, [markers, asset]);
 
   // ---- Phase-5: end-effector path trail ("Bahn anzeigen") -------------------
   // Lazily builds a cyan THREE.Line over a PREALLOCATED Float32Array the first
@@ -1496,6 +1563,88 @@ function disposeFrameTriads(baseRef, tcpRef) {
       disposeObject(ax);
       ref.current = null;
     }
+  });
+}
+
+// One Sammlung marker: a group at the marker's point (the caller positions it)
+// holding the glyph — pin = a cone standing tip-down on the point with a ball on
+// top, pose = an octahedron, variable = a flat ring — plus a German name label.
+function buildMarkerObject(m) {
+  const root = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial({ color: MARKER_COLORS[m.kind] || MARKER_COLORS.pin });
+  if (m.kind === 'pose') {
+    const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.012), material);
+    gem.position.set(0, 0.012, 0);
+    root.add(gem);
+  } else if (m.kind === 'variable') {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.012, 0.003, 8, 24), material);
+    ring.rotation.x = Math.PI / 2; // lie flat on the point
+    ring.position.set(0, 0.002, 0);
+    root.add(ring);
+  } else {
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.008, 0.03, 16), material);
+    cone.rotation.x = Math.PI; // tip DOWN, touching the point
+    cone.position.set(0, 0.015, 0);
+    root.add(cone);
+    // The head shares the cone's material; disposeMarker disposes it once per mesh
+    // (three's dispose is idempotent).
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.008, 16, 12), material);
+    head.position.set(0, 0.034, 0);
+    root.add(head);
+  }
+  if (m.highlighted) root.scale.set(1.4, 1.4, 1.4);
+  const label = buildMarkerLabel(typeof m.label === 'string' ? m.label : '');
+  if (label) root.add(label);
+  return root;
+}
+
+// A camera-facing name sprite. Skipped (glyph only) where there is no 2D canvas.
+function buildMarkerLabel(text) {
+  let ctx = null;
+  let canvas = null;
+  try {
+    canvas = document.createElement('canvas');
+    ctx = canvas.getContext('2d');
+  } catch (_) {
+    ctx = null;
+  }
+  if (!ctx) return null;
+  canvas.width = 256;
+  canvas.height = 64;
+  ctx.font = 'bold 28px sans-serif';
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  const r = 14;
+  ctx.beginPath();
+  ctx.moveTo(r, 0);
+  ctx.lineTo(256 - r, 0);
+  ctx.quadraticCurveTo(256, 0, 256, r);
+  ctx.lineTo(256, 64 - r);
+  ctx.quadraticCurveTo(256, 64, 256 - r, 64);
+  ctx.lineTo(r, 64);
+  ctx.quadraticCurveTo(0, 64, 0, 64 - r);
+  ctx.lineTo(0, r);
+  ctx.quadraticCurveTo(0, 0, r, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 128, 32, 240);
+  const map = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, depthTest: false }));
+  sprite.scale.set(0.12, 0.03, 1);
+  sprite.position.set(0, 0.065, 0);
+  return sprite;
+}
+
+// Free everything a marker owns, including the label's canvas texture.
+function disposeMarker(obj) {
+  if (!obj || typeof obj.traverse !== 'function') return;
+  obj.traverse((o) => {
+    if (o.material && o.material.map && typeof o.material.map.dispose === 'function') {
+      o.material.map.dispose();
+    }
+    disposeObject(o);
   });
 }
 

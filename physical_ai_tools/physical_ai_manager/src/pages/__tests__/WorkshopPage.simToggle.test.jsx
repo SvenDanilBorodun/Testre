@@ -339,6 +339,24 @@ describe('WorkshopPage — sim toggle swaps only the right region', () => {
   });
 });
 
+describe('WorkshopPage — an uncalibrated rig cannot START outside the simulator (§3.49)', () => {
+  // A simulator „Ziel setzen" pin is stored at z = 0 (the virtual table). On a
+  // real rig with no touch-off the server keeps that stored 0 and has no floor
+  // (measured: OMX fingertips 40 mm into the table, no refusal). The ONE thing
+  // keeping that run from being started is that showEditor hides RunControls
+  // outside the simulator until the rig is calibrated. Keep this gate.
+  test('no touch-off, simulator off → the CalibrationWizard, no RunControls; in the simulator → RunControls', async () => {
+    mockState = baseState({ hasTableTouch: false });
+    render(<WorkshopPage isActive />);
+    expect(await screen.findByTestId('calib-wizard')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-controls')).toBeNull();
+    expect(screen.queryByTestId('blockly-workspace')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    expect(await screen.findByTestId('run-controls')).toBeInTheDocument();
+    expect(screen.queryByTestId('calib-wizard')).toBeNull();
+  });
+});
+
 describe('WorkshopPage — simulator previews', () => {
   test('the provider offers ▶ (capability preview)', async () => {
     render(<WorkshopPage isActive />);

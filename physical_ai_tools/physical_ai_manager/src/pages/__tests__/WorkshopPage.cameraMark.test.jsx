@@ -140,6 +140,8 @@ const mockStore = vi.hoisted(() => {
   store.getEntries = vi.fn(() => store.entries);
   store.add = vi.fn();
   store.rename = vi.fn();
+  // The page subscribes for its twin/sim-table markers (§4.1 store contract).
+  store.subscribe = vi.fn(() => () => {});
   return store;
 });
 const mockDestinationStoreModule = vi.hoisted(() => ({

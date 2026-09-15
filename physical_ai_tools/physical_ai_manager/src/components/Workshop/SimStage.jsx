@@ -66,6 +66,10 @@ function SimStage({
   onToggleShowPath,
   onClearPath,
   pathClearToken,
+  // Sammlung markers + „Ziel setzen" (WorkshopPage → SimScene, unchanged).
+  markers,
+  requestedMode,
+  onCreateDestination,
 }) {
   // Runtime feedback signals — both already maintained in Redux by the existing
   // run path (workshopSlice.log + debuggerWarnings). Read-only here.
@@ -147,6 +151,9 @@ function SimStage({
           pathClearToken={pathClearToken}
           showShadows
           showReach
+          markers={markers}
+          requestedMode={requestedMode}
+          onCreateDestination={onCreateDestination}
         />
       </div>
 

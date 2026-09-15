@@ -27,6 +27,7 @@ import {
   ASSET_CARD_FLYOUT_TYPE,
   AssetCard,
   AssetCardInflater,
+  highlightAssetFor,
   layoutChips,
   registerAssetCardInflater,
 } from '../AssetCardInflater';
@@ -302,6 +303,33 @@ describe('AssetCardInflater', () => {
     expect(root.isConnected).toBe(true);
     inflater.disposeItem(item);
     expect(root.isConnected).toBe(false);
+  });
+
+  it('hovering a Ziel/Position/Variable card highlights its marker; leaving clears it', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN);
+    const inflater = new AssetCardInflater();
+    const pin = inflater.load(cardState(), flyout).getElement();
+    dispatched.length = 0;
+    pin.getSvgRoot().dispatchEvent(new PointerEvent('pointerenter', { pointerId: 3 }));
+    expect(dispatched).toEqual([{ type: 'highlight', asset: { kind: 'pin', id: 'd_1' } }]);
+    pin.getSvgRoot().dispatchEvent(new PointerEvent('pointerleave', { pointerId: 3 }));
+    expect(dispatched[1]).toEqual({ type: 'highlight', asset: null });
+    // A variable marker is keyed by NAME (markers.js `var:<name>`).
+    const variable = inflater.load(cardState({ assetKind: 'variable', assetId: 'Xy9=', assetName: 'Punkt' }), flyout)
+      .getElement();
+    variable.getSvgRoot().dispatchEvent(new PointerEvent('pointerenter', { pointerId: 3 }));
+    expect(dispatched[2]).toEqual({ type: 'highlight', asset: { kind: 'variable', id: 'var:Punkt' } });
+    // Disposed under the pointer (a flyout re-populate): the highlight is dropped.
+    variable.dispose();
+    expect(dispatched[3]).toEqual({ type: 'highlight', asset: null });
+    // A recording card has no marker: hover dispatches nothing.
+    const recording = inflater.load(cardState({ assetKind: 'recording', assetName: 'Greifen' }), flyout).getElement();
+    recording.getSvgRoot().dispatchEvent(new PointerEvent('pointerenter', { pointerId: 3 }));
+    expect(dispatched).toHaveLength(4);
+    pin.dispose();
+    recording.dispose();
+    expect(dispatched).toHaveLength(4);
+    expect(highlightAssetFor({ assetKind: 'programPin', assetId: 'b1' })).toBeNull();
   });
 
   it('draws no ▶ when the asset cannot be previewed, and sizes by chips', () => {

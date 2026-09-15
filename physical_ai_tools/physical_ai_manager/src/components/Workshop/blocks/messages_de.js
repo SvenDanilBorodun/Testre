@@ -329,6 +329,14 @@ export const DE = {
     'Diese Bewegung wurde mit einem anderen Robotertyp aufgenommen und kann hier nicht abgespielt werden.',
   PREVIEW_BLOCK_UNSAVED: 'Bitte zuerst den Workflow speichern.',
 
+  // Simulator „Ziel setzen" mode (SimScene.jsx) + the twin marker labels
+  // (sammlung/markers.js). A real-rig pin marker says its height is approximate:
+  // a pin re-asks the measured table plane on every run.
+  SIM_MODE_ZIEL: 'Ziel setzen',
+  SIM_ZIEL_HINT: 'Tippe auf den Tisch — dort entsteht ein Ziel.',
+  SIM_ZIEL_CREATED: 'Ziel „%1" auf den Sim-Tisch gesetzt.',
+  MARKER_PIN_REAL_SUFFIX: '(z ≈)',
+
   // Sammlung toolbox groups (blocks/toolbox.js + sammlung/toolboxCategories.js).
   CATEGORY_AUFNAHMEN: 'Aufnahmen',
   CATEGORY_POSITIONEN: 'Positionen',

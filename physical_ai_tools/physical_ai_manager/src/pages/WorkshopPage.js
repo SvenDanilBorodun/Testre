@@ -40,6 +40,7 @@ import {
   takenDestinationNames,
 } from '../components/Workshop/sammlung/destinationStore';
 import { createSammlungProvider } from '../components/Workshop/sammlung/provider';
+import { buildTwinMarkers } from '../components/Workshop/sammlung/markers';
 import SammlungDrawer from '../components/Workshop/sammlung/SammlungDrawer';
 import TeachHost from '../components/Workshop/teach/TeachHost';
 import { TEACH_BLOCK_TITLES_DE, teachEntryBlockReason } from '../components/Workshop/teach/teachGates';
@@ -60,10 +61,12 @@ import {
   openDrawer,
   requestTeach,
   selectDrawer,
+  selectHighlight,
   selectLastPreviewResult,
   selectPreviewActive,
   selectTeachOpen,
   selectTrajectoryList,
+  setHighlight,
 } from '../features/workshop/studioAssetsSlice';
 import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
 import { useRosTopicSubscription } from '../hooks/useRosTopicSubscription';
@@ -278,6 +281,7 @@ function WorkshopPage({ isActive }) {
   const trajectoryList = useSelector(selectTrajectoryList);
   const lastPreviewResult = useSelector(selectLastPreviewResult);
   const drawer = useSelector(selectDrawer);
+  const highlight = useSelector(selectHighlight);
   const variableValues = useSelector((s) => (s.workshop && s.workshop.variables) || null);
   const debuggerWarnings = useSelector((s) => (s.workshop ? s.workshop.debuggerWarnings : null));
   const activeTutorialId = useSelector((s) => s.workshop.activeTutorialId);
@@ -492,6 +496,14 @@ function WorkshopPage({ isActive }) {
   const [showFrames, setShowFrames] = useState(false);
   // Bumped to clear the path trail (manual „Bahn löschen" + auto on run start).
   const [pathClearToken, setPathClearToken] = useState(0);
+  // „Ziel auf den Sim-Tisch setzen" (Sammlung flyout): {mode: 'ziel', token}; each
+  // new token switches SimScene into its „Ziel setzen" mode.
+  const [simZielRequest, setSimZielRequest] = useState(null);
+  // A request belongs to the simulator visit it was made in: SimScene remounts
+  // on the next entry and would otherwise re-read a stale token as a new ask.
+  useEffect(() => {
+    if (!simMode) setSimZielRequest(null);
+  }, [simMode]);
   // Auto-clear the trail when a run begins, so each run draws a fresh path.
   const prevRunStateRef = useRef(runState);
   useEffect(() => {
@@ -822,6 +834,52 @@ function WorkshopPage({ isActive }) {
     return res;
   }, []);
 
+  // The document's Ziele/Positionen as markers on the twin and the sim table.
+  // The store notifies synchronously on every change (add, rename, delete, undo,
+  // load), so the markers follow the document without polling.
+  const [storeEntries, setStoreEntries] = useState([]);
+  useEffect(() => {
+    if (!workspace) {
+      setStoreEntries([]);
+      return undefined;
+    }
+    const store = getDestinationStore(workspace);
+    setStoreEntries(store.getEntries());
+    return store.subscribe((entries) => setStoreEntries(entries));
+  }, [workspace]);
+  const markers = useMemo(
+    () => buildTwinMarkers({ entries: storeEntries, simMode, highlight }),
+    [storeEntries, simMode, highlight],
+  );
+
+  // A tap in SimScene's „Ziel setzen" mode: a pin ON the virtual table (z 0).
+  // On a calibrated real rig the same entry later re-asks the measured plane
+  // (plane-tracked, motion.resolve_destination_z); an uncalibrated rig cannot
+  // START it outside the simulator because showEditor hides RunControls.
+  const handleCreateSimDestination = useCallback(({ x, y }) => {
+    const ws = workspaceRef.current;
+    if (!ws) return;
+    const store = getDestinationStore(ws);
+    if (store.getEntries().length >= MAX_DESTINATION_ENTRIES) {
+      toast.error(DE.ERR_STORE_FULL);
+      return;
+    }
+    const res = store.add({
+      name: nextAutoName(DE.TEACH_AUTO_NAME_ZIEL, takenDestinationNames(ws)),
+      kind: 'pin',
+      source: 'sim',
+      x,
+      y,
+      z: 0,
+      robot_type: robotType || undefined,
+    });
+    if (!res.ok) {
+      toast.error(res.error);
+      return;
+    }
+    toast.success(formatDe(DE.SIM_ZIEL_CREATED, res.entry.name));
+  }, [robotType]);
+
   // Autosave hook. Restores the most-recent local state if the parent
   // hasn't already loaded a server workflow. Scoped per user so two
   // students sharing a browser don't see each other's drafts.
@@ -1000,7 +1058,7 @@ function WorkshopPage({ isActive }) {
         preview: true,
         previewVariables: false,
         pinCamera: !!calibrated && !simMode,
-        pinSim: false,
+        pinSim: true,
       },
       robotType: robotType || '',
       trajectories: {
@@ -1032,10 +1090,34 @@ function WorkshopPage({ isActive }) {
       } else if (action.type === 'preview') {
         // The flyout ▶ always plays at tempo 1.0.
         startPreviewRef.current(action.asset);
+      } else if (action.type === 'pinSim') {
+        // Never turns the trail on (ensureSimMode showPath: false).
+        ensureSimMode({ showPath: false }).then((entered) => {
+          if (entered) setSimZielRequest({ mode: 'ziel', token: Date.now() });
+        });
+      } else if (action.type === 'highlight') {
+        dispatch(setHighlight(action.asset ?? null));
       }
-      // pinSim / highlight: wired by their own work packages.
     });
-  }, [sammlungProvider, isTabBusy, dispatch]);
+  }, [sammlungProvider, isTabBusy, dispatch, ensureSimMode]);
+  // A Ziel/Position focused in the drawer highlights its marker; clearing that
+  // focus (or leaving those tabs) drops only the highlight the drawer set.
+  const drawerHighlightRef = useRef(null);
+  const drawerOpen = !!(drawer && drawer.open);
+  const drawerTab = drawer ? drawer.tab : null;
+  const drawerFocusId = drawer ? drawer.focusId : null;
+  useEffect(() => {
+    let kind = null;
+    if (drawerTab === 'ziele') kind = 'pin';
+    else if (drawerTab === 'positionen') kind = 'pose';
+    if (drawerOpen && kind && drawerFocusId) {
+      drawerHighlightRef.current = drawerFocusId;
+      dispatch(setHighlight({ kind, id: drawerFocusId }));
+    } else if (drawerHighlightRef.current) {
+      drawerHighlightRef.current = null;
+      dispatch(setHighlight(null));
+    }
+  }, [drawerOpen, drawerTab, drawerFocusId, dispatch]);
   // The drawer belongs to the editor it was opened over. Redux keeps
   // `drawer.open` across the Galerie switch and a tab change, so without this
   // it reappeared over a freshly mounted editor.
@@ -1199,7 +1281,12 @@ function WorkshopPage({ isActive }) {
                 </div>
               }
             >
-              <UrdfTwin showPath={showPath} pathClearToken={pathClearToken} showFrames={showFrames} />
+              <UrdfTwin
+                showPath={showPath}
+                pathClearToken={pathClearToken}
+                showFrames={showFrames}
+                markers={markers}
+              />
             </Suspense>
             {showFrames && (
               <div className="absolute bottom-1.5 left-1.5 z-10 px-2 py-0.5 rounded bg-black/55 text-[10px] text-white/80 font-mono">
@@ -1431,6 +1518,9 @@ function WorkshopPage({ isActive }) {
                       onToggleShowPath={() => setShowPath((v) => !v)}
                       onClearPath={() => setPathClearToken((t) => t + 1)}
                       pathClearToken={pathClearToken}
+                      markers={markers}
+                      requestedMode={simZielRequest}
+                      onCreateDestination={handleCreateSimDestination}
                     />
                   ) : (
                     <>

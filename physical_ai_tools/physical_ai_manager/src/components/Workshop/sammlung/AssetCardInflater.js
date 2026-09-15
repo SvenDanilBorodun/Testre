@@ -121,6 +121,18 @@ export function previewAssetFor(state, snapshot) {
   return asset;
 }
 
+/**
+ * The marker a card's hover highlights (sammlung/markers.js ids), or null for a
+ * card with no marker (recordings, program pins). A variable's marker is keyed
+ * by NAME (`var:<name>`), like its point marker, not by the Blockly variable id.
+ */
+export function highlightAssetFor(state) {
+  const kind = str(state.assetKind);
+  if (kind === 'pin' || kind === 'pose') return { kind, id: str(state.assetId) };
+  if (kind === 'variable') return { kind, id: `var:${str(state.assetName)}` };
+  return null;
+}
+
 export class AssetCard {
   constructor(state, flyout) {
     this.state = state && typeof state === 'object' ? state : {};
@@ -216,6 +228,30 @@ export class AssetCard {
       e.stopPropagation();
       this.dispatch_('manage');
     }, true);
+    // Hover highlights the asset's marker on the twin and the sim table. A plain
+    // `bind`: enter/leave start no gesture and must never touch Blockly's touch
+    // identifier.
+    this.hovered = false;
+    if (highlightAssetFor(this.state)) {
+      this.bindings.push(Blockly.browserEvents.bind(this.svgGroup, 'pointerenter', null, () => {
+        this.hovered = true;
+        this.dispatchHighlight_(highlightAssetFor(this.state));
+      }));
+      this.bindings.push(Blockly.browserEvents.bind(this.svgGroup, 'pointerleave', null, () => {
+        this.hovered = false;
+        this.dispatchHighlight_(null);
+      }));
+    }
+  }
+
+  dispatchHighlight_(asset) {
+    const provider = getProviderForWorkspace(this.targetWorkspace);
+    if (!provider) return;
+    try {
+      provider.dispatchAction({ type: 'highlight', asset });
+    } catch (err) {
+      console.error('Sammlung card highlight failed:', err);
+    }
   }
 
   onBodyDown_(e) {
@@ -287,6 +323,12 @@ export class AssetCard {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    // A re-populated flyout replaces the card under a resting pointer, which
+    // never sends pointerleave: drop the highlight it was holding.
+    if (this.hovered) {
+      this.hovered = false;
+      this.dispatchHighlight_(null);
+    }
     for (const data of this.bindings) Blockly.browserEvents.unbind(data);
     this.bindings = [];
     Blockly.utils.dom.removeNode(this.svgGroup);

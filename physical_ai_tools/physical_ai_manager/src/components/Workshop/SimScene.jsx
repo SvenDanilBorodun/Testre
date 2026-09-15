@@ -65,8 +65,13 @@ import { armGeometry } from '../../utils/armProfile';
 import { INTERP_DELAY_MS } from '../../utils/jointStateInterpolator';
 import useSimObjects from '../../hooks/useSimObjects';
 import rosConnectionManager from '../../utils/rosConnectionManager';
+import { DE } from './blocks/messages_de';
+import { MARKER_COLORS } from './sammlung/markers';
 
 const UrdfTwin = lazy(() => import('../UrdfTwin'));
+
+// A stable empty marker list, so the twin's marker effect keeps one identity.
+const NO_MARKERS = Object.freeze([]);
 
 // Sim-only virtual joint stream (never the bare /joint_states — see plan §C).
 const SIM_JOINT_TOPIC = '/sim/joint_states';
@@ -215,6 +220,11 @@ function clampRange(v, lo, hi) {
 function round3(v) {
   return Math.round(v * 1000) / 1000;
 }
+// A „Ziel setzen" point at the destination store's own precision (4 decimals).
+function round4(v) {
+  const r = Math.round(v * 1e4) / 1e4;
+  return r === 0 ? 0 : r; // never -0
+}
 
 function SimScene({
   scene,
@@ -226,6 +236,15 @@ function SimScene({
   pathClearToken = 0,
   showShadows = false,
   showReach = false,
+  // Sammlung markers (sammlung/markers.js), drawn on the 2D table AND handed to
+  // the one UrdfTwin: [{id, label, kind: 'pin'|'pose'|'variable', x, y, z, highlighted}].
+  markers = NO_MARKERS,
+  // {mode: 'ziel', token} from the page (the flyout's „Ziel auf den Sim-Tisch
+  // setzen"): each new token switches the editor into „Ziel setzen".
+  requestedMode = null,
+  // ({x, y}) → the page adds a `source: 'sim'` pin. The „Ziel setzen" mode is
+  // offered only when this is a function.
+  onCreateDestination = null,
 }) {
   const objects = useMemo(
     () => (scene && Array.isArray(scene.objects) ? scene.objects : []),
@@ -305,8 +324,18 @@ function SimScene({
   // every time the run state flips.
   const runningRef = useRef(workflowRunning);
   useEffect(() => { runningRef.current = workflowRunning; }, [workflowRunning]);
-  // Editor mode: place objects, or draw a no-go Sperrzone rectangle.
-  const [mode, setMode] = useState('object'); // 'object' | 'zone'
+  // Editor mode: place objects, draw a no-go Sperrzone rectangle, or tap a Ziel.
+  const [mode, setMode] = useState('object'); // 'object' | 'zone' | 'ziel'
+  const canCreateZiel = typeof onCreateDestination === 'function';
+  const markerList = Array.isArray(markers) ? markers : NO_MARKERS;
+  const requestToken = requestedMode ? requestedMode.token : null;
+  useEffect(() => {
+    if (requestToken !== null && requestToken !== undefined && canCreateZiel) setMode('ziel');
+  }, [requestToken, canCreateZiel]);
+  // A page that stops offering Ziele must not strand the editor in that mode.
+  useEffect(() => {
+    if (!canCreateZiel) setMode((m) => (m === 'ziel' ? 'object' : m));
+  }, [canCreateZiel]);
   // „Simulation zurücksetzen" in flight (the service call can take a moment when
   // it has to stop a running program first).
   const [resetting, setResetting] = useState(false);
@@ -627,6 +656,17 @@ function SimScene({
   // place/drag handlers; in zone mode they draw a drag-rectangle.
   const handleSvgPointerDown = useCallback(
     (e) => {
+      if (mode === 'ziel') {
+        if (!canCreateZiel) return;
+        const base = eventToBase(e);
+        if (!base) return;
+        // Clamped to the VIEW window only — NOT the reach annulus: an unreachable
+        // Ziel is allowed, and the preview / the run start report it.
+        const x = clampRange(base.x, VIEW_MIN_X, VIEW_MAX_X);
+        const y = clampRange(base.y, VIEW_MIN_Y, VIEW_MAX_Y);
+        onCreateDestination({ x: round4(x), y: round4(y) });
+        return;
+      }
       if (mode === 'zone') {
         const base = eventToBase(e);
         if (!base) return;
@@ -641,7 +681,7 @@ function SimScene({
       }
       handlePlace(e);
     },
-    [mode, eventToBase, handlePlace],
+    [mode, eventToBase, handlePlace, canCreateZiel, onCreateDestination],
   );
 
   const handleSvgPointerMove = useCallback(
@@ -815,6 +855,24 @@ function SimScene({
         >
           Sperrzone zeichnen
         </button>
+        {canCreateZiel && (
+          <button
+            type="button"
+            onClick={() => setMode('ziel')}
+            aria-pressed={mode === 'ziel'}
+            className={
+              'px-2.5 py-1 text-xs rounded-md border '
+              + (mode === 'ziel'
+                ? 'bg-teal-600 text-white border-teal-600'
+                : 'bg-white text-teal-700 border-teal-200 hover:bg-teal-50')
+            }
+          >
+            {DE.SIM_MODE_ZIEL}
+          </button>
+        )}
+        {mode === 'ziel' && (
+          <span className="text-xs text-[var(--ink-4)]">{DE.SIM_ZIEL_HINT}</span>
+        )}
         {mode === 'zone' && (
           <span className="text-xs text-[var(--ink-4)]">
             Ziehe ein Rechteck auf — der Roboter fährt um Sperrzonen herum.
@@ -833,7 +891,7 @@ function SimScene({
           onPointerUp={handleSvgPointerUp}
           onPointerLeave={handleSvgPointerUp}
           role="application"
-          aria-label="Simulator-Tisch — Objekte und Sperrzonen platzieren"
+          aria-label="Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren"
         >
           {/* Reach annulus (graspable ring) */}
           <circle
@@ -907,6 +965,45 @@ function SimScene({
               pointerEvents="none"
             />
           )}
+
+          {/* Sammlung markers (Ziele / Positionen / variable points): after the
+              zones, under the objects, and never a pointer target — a tap on a
+              marker must reach the table like a tap anywhere else. */}
+          {markerList.map((m) => {
+            if (!m || !Number.isFinite(m.x) || !Number.isFinite(m.y)) return null;
+            const { px, py } = baseToSvg(m.x, m.y);
+            const color = MARKER_COLORS[m.kind] || MARKER_COLORS.pin;
+            const grow = m.highlighted ? 2 : 0;
+            const sw = m.highlighted ? 3 : 1.5;
+            let glyph;
+            if (m.kind === 'pose') {
+              const s = 8 + grow;
+              glyph = (
+                <rect
+                  x={px - s / 2} y={py - s / 2} width={s} height={s}
+                  transform={`rotate(45 ${px} ${py})`}
+                  fill={color} stroke="#ffffff" strokeWidth={sw}
+                />
+              );
+            } else if (m.kind === 'variable') {
+              glyph = <circle cx={px} cy={py} r={5 + grow} fill="none" stroke={color} strokeWidth={sw + 1} />;
+            } else {
+              glyph = <circle cx={px} cy={py} r={5 + grow} fill={color} stroke="#ffffff" strokeWidth={sw} />;
+            }
+            return (
+              <g
+                key={`marker-${m.id}`}
+                pointerEvents="none"
+                data-marker-kind={m.kind}
+                data-highlighted={m.highlighted ? 'true' : 'false'}
+              >
+                {glyph}
+                <text x={px + 8 + grow} y={py + 3} fontSize="9" fill={color} fontWeight={m.highlighted ? 700 : 400}>
+                  {m.label}
+                </text>
+              </g>
+            );
+          })}
 
           {/* Placed objects */}
           {objects.map((o) => {
@@ -1110,6 +1207,7 @@ function SimScene({
           pathClearToken={pathClearToken}
           showShadows={showShadows}
           showReach={showReach}
+          markers={markerList}
         />
       </Suspense>
     </div>

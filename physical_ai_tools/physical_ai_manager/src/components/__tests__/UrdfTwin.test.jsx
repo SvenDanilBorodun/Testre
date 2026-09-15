@@ -129,6 +129,15 @@ let mockRobot = newMockRobot();
 // Phase-5 constructor spies — assert the path line + frame triads are built ONLY
 // when their props are enabled (the default tests never construct these).
 const mockGroupCtor = vi.fn();
+const mockGroupInstances = [];
+// Sammlung marker primitives: every construction as {type, args, obj}, so a test
+// can assert which glyph was built and whether its dispose() ran.
+const mockMarkerPrims = [];
+function mockMarkerPrim(type, args) {
+  const obj = { type, dispose: vi.fn() };
+  mockMarkerPrims.push({ type, args, obj });
+  return obj;
+}
 const mockLineCtor = vi.fn();
 const mockAxesCtor = vi.fn();
 // Sim-stage spies — assert the catalog-sized boxes, the reach ring, and the
@@ -256,6 +265,7 @@ vi.mock('three', () => {
     Scene: function Scene() {
       return noopObj({
         background: null,
+        remove: () => {},
         traverse: () => {},
         attach(child) {
           attachLog.push({ parent: 'scene', child });
@@ -361,7 +371,48 @@ vi.mock('three', () => {
     DoubleSide: 2,
     // Phase-5 path-trail + frame-triad primitives (inert; constructed only when
     // showPath/showFrames are enabled).
-    Group: function Group() { mockGroupCtor(); return noopObj({ visible: true }); },
+    // A real child list + remove/traverse and recording position/scale setters,
+    // so the Sammlung marker layer's diff (add, move, remove + dispose) is
+    // observable. The path trail only ever add()s one line and flips `visible`.
+    Group: function Group() {
+      mockGroupCtor();
+      const group = {
+        visible: true,
+        // `kids`, not `children`: testing-library's no-node-access lint reads any
+        // `.children` as a DOM walk.
+        kids: [],
+        add(child) { this.kids.push(child); },
+        remove(child) { this.kids = this.kids.filter((c) => c !== child); },
+        traverse(fn) {
+          fn(this);
+          this.kids.forEach((c) => (typeof c.traverse === 'function' ? c.traverse(fn) : fn(c)));
+        },
+        position: { set: vi.fn() },
+        scale: { set: vi.fn() },
+        rotation: { x: 0 },
+        dispose: () => {},
+        addEventListener: () => {},
+      };
+      mockGroupInstances.push(group);
+      return group;
+    },
+    // Sammlung marker primitives — spied, inert, each with a dispose spy so the
+    // marker tests can prove a replaced/removed marker freed its GPU objects.
+    ConeGeometry: function ConeGeometry(...a) { return mockMarkerPrim('ConeGeometry', a); },
+    SphereGeometry: function SphereGeometry(...a) { return mockMarkerPrim('SphereGeometry', a); },
+    OctahedronGeometry: function OctahedronGeometry(...a) { return mockMarkerPrim('OctahedronGeometry', a); },
+    TorusGeometry: function TorusGeometry(...a) { return mockMarkerPrim('TorusGeometry', a); },
+    CanvasTexture: function CanvasTexture(...a) { return mockMarkerPrim('CanvasTexture', a); },
+    SpriteMaterial: function SpriteMaterial(opts) {
+      return Object.assign(mockMarkerPrim('SpriteMaterial', [opts]), { map: opts && opts.map });
+    },
+    Sprite: function Sprite(material) {
+      return Object.assign(mockMarkerPrim('Sprite', [material]), {
+        material,
+        position: { set: vi.fn() },
+        scale: { set: vi.fn() },
+      });
+    },
     BufferGeometry: function BufferGeometry() {
       // Capture the path geometry + spy its setDrawRange so the path-trail tests
       // can assert the draw range advances (append) and resets (clear). Only the
@@ -454,6 +505,8 @@ beforeEach(() => {
   mockUnsubscribe.mockClear();
   mockSetJointValue.mockClear();
   mockGroupCtor.mockClear();
+  mockGroupInstances.length = 0;
+  mockMarkerPrims.length = 0;
   mockLineCtor.mockClear();
   mockAxesCtor.mockClear();
   mockBoxGeometryCtor.mockClear();
@@ -1426,5 +1479,126 @@ describe('UrdfTwin — the joint stream is blended, not snapped', () => {
     // The new stream's FIRST sample lands at once, exactly like a fresh mount.
     act(() => mockSubscribe.mock.calls[1][0](stamped(5000, ['joint1'], [0.7])));
     expect(mockSetJointValue).toHaveBeenCalledWith('joint1', 0.7);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sammlung markers (Ziele / Positionen / variable points) on the SAME twin.
+// ---------------------------------------------------------------------------
+describe('UrdfTwin — Sammlung markers', () => {
+  const PIN = { id: 'd_00000001', label: 'Ablage', kind: 'pin', x: 0.18, y: -0.06, z: 0, highlighted: false };
+  const POSE = { id: 'd_00000002', label: 'Über der Kiste', kind: 'pose', x: 0.14, y: 0.1, z: 0.12, highlighted: false };
+  const fakeCtx = () => ({
+    beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), quadraticCurveTo: vi.fn(),
+    closePath: vi.fn(), fill: vi.fn(), fillText: vi.fn(),
+  });
+  let getContextSpy;
+  beforeEach(() => {
+    // jsdom has no 2D canvas: null is the production "no label" branch.
+    getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+  });
+  afterEach(() => { getContextSpy.mockRestore(); });
+
+  const prims = (type) => mockMarkerPrims.filter((p) => p.type === type);
+  // The layer is the first Group the marker effect creates (no other layer is on).
+  const layer = () => mockGroupInstances[0];
+  async function mount(markers) {
+    const utils = render(<UrdfTwin markers={markers} />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    return utils;
+  }
+
+  test('default props construct no marker primitive and no group', async () => {
+    render(<UrdfTwin />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    expect(mockMarkerPrims).toEqual([]);
+    expect(mockGroupCtor).not.toHaveBeenCalled();
+  });
+
+  test('one pin + one pose build a cone + ball and an octahedron, placed at (x, z, −y)', async () => {
+    await mount([PIN, POSE]);
+    expect(prims('ConeGeometry').map((p) => p.args)).toEqual([[0.008, 0.03, 16]]);
+    expect(prims('SphereGeometry').map((p) => p.args)).toEqual([[0.008, 16, 12]]);
+    expect(prims('OctahedronGeometry').map((p) => p.args)).toEqual([[0.012]]);
+    expect(prims('TorusGeometry')).toEqual([]);
+    // No 2D canvas → no label sprite, glyph only.
+    expect(prims('Sprite')).toEqual([]);
+    expect(prims('CanvasTexture')).toEqual([]);
+    const [pinRoot, poseRoot] = layer().kids;
+    expect(pinRoot.position.set).toHaveBeenLastCalledWith(0.18, 0, 0.06);
+    expect(poseRoot.position.set).toHaveBeenLastCalledWith(0.14, 0.12, -0.1);
+    expect(pinRoot.scale.set).not.toHaveBeenCalled();
+  });
+
+  test('a variable point is a flat ring; a highlighted marker is scaled up', async () => {
+    await mount([{ id: 'var:Punkt', label: 'Punkt', kind: 'variable', x: 0.1, y: 0, z: 0.05, highlighted: true }]);
+    expect(prims('TorusGeometry').map((p) => p.args)).toEqual([[0.012, 0.003, 8, 24]]);
+    expect(layer().kids[0].scale.set).toHaveBeenCalledWith(1.4, 1.4, 1.4);
+  });
+
+  test('with a 2D canvas the label is a depth-test-free sprite above the glyph', async () => {
+    getContextSpy.mockReturnValue(fakeCtx());
+    await mount([PIN]);
+    expect(prims('CanvasTexture')).toHaveLength(1);
+    const [mat] = prims('SpriteMaterial');
+    expect(mat.args[0]).toEqual({ map: prims('CanvasTexture')[0].obj, depthTest: false });
+    const sprite = prims('Sprite')[0].obj;
+    expect(sprite.scale.set).toHaveBeenCalledWith(0.12, 0.03, 1);
+    expect(sprite.position.set).toHaveBeenCalledWith(0, 0.065, 0);
+  });
+
+  test('a label change disposes the old marker (texture included) and builds a new one', async () => {
+    getContextSpy.mockReturnValue(fakeCtx());
+    const { rerender } = await mount([PIN, POSE]);
+    const oldCone = prims('ConeGeometry')[0].obj;
+    const oldTexture = prims('CanvasTexture')[0].obj;
+    rerender(<UrdfTwin markers={[{ ...PIN, label: 'Kiste' }, POSE]} />);
+    expect(oldCone.dispose).toHaveBeenCalled();
+    expect(oldTexture.dispose).toHaveBeenCalled();
+    expect(prims('ConeGeometry')).toHaveLength(2);
+    // The pose was untouched: still one octahedron, never disposed.
+    expect(prims('OctahedronGeometry')).toHaveLength(1);
+    expect(prims('OctahedronGeometry')[0].obj.dispose).not.toHaveBeenCalled();
+    expect(layer().kids).toHaveLength(2);
+  });
+
+  test('a moved marker is repositioned, not rebuilt', async () => {
+    const { rerender } = await mount([PIN]);
+    const root = layer().kids[0];
+    rerender(<UrdfTwin markers={[{ ...PIN, x: 0.2, y: 0.05 }]} />);
+    expect(prims('ConeGeometry')).toHaveLength(1);
+    expect(layer().kids[0]).toBe(root);
+    expect(root.position.set).toHaveBeenLastCalledWith(0.2, 0, -0.05);
+  });
+
+  test('removing a marker disposes it and drops it from the layer', async () => {
+    const { rerender } = await mount([PIN, POSE]);
+    rerender(<UrdfTwin markers={[POSE]} />);
+    expect(prims('ConeGeometry')[0].obj.dispose).toHaveBeenCalled();
+    expect(prims('SphereGeometry')[0].obj.dispose).toHaveBeenCalled();
+    expect(layer().kids).toHaveLength(1);
+    rerender(<UrdfTwin markers={[]} />);
+    expect(prims('OctahedronGeometry')[0].obj.dispose).toHaveBeenCalled();
+    expect(layer().kids).toHaveLength(0);
+  });
+
+  test('every marker mutation repaints the on-demand loop', async () => {
+    const { rerender } = await mount([PIN]);
+    const settled = async () => {
+      await settleFrames();
+      const idle = mockRender.mock.calls.length;
+      await settleFrames();
+      expect(mockRender.mock.calls.length).toBe(idle);
+      return idle;
+    };
+    let idle = await settled();
+    rerender(<UrdfTwin markers={[{ ...PIN, x: 0.2 }]} />); // move
+    await waitFor(() => expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+    idle = await settled();
+    rerender(<UrdfTwin markers={[{ ...PIN, x: 0.2, highlighted: true }]} />); // rebuild
+    await waitFor(() => expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+    idle = await settled();
+    rerender(<UrdfTwin markers={[]} />); // remove
+    await waitFor(() => expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
   });
 });

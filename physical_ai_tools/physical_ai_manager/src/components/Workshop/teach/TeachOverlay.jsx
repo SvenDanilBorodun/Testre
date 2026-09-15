@@ -38,14 +38,19 @@ import {
 } from '../sammlung/destinationStore';
 import { renamePlace, renameRecording } from '../sammlung/assetCommands';
 import { formatMmDe, formatSecondsDe } from '../sammlung/format';
-import useTeachSession from './useTeachSession';
+import { analyzeTake, applyCleanup } from '../../../utils/recordingCleanup';
+import useTeachSession, { classifyTeachKey } from './useTeachSession';
 import { createTeachSounds } from './teachSounds';
+import ReviewStrip from './ReviewStrip';
+import { formatCmDe, isZielTouchTooHigh, zielTouchHeightAboveTableMm } from './zielTouch';
+import { buildProgramBlocks, insertProgram } from './insertProgram';
 
 // The cloud keeps at most 16 recording rows per workflow (SQL prune cap).
 export const TEACH_TRAJECTORY_SLOTS = 16;
 const SLOTS_LOW_FROM = 14;
 const FOCUS_HIGHLIGHT_MS = 2000;
 const NOT_SIGNED_IN_DE = 'Nicht angemeldet — Speichern nicht möglich.';
+const INSERT_FAILED_DE = 'Die Blöcke konnten nicht eingefügt werden.';
 const COLLISION_BUTTON_SELECTOR =
   '[role="alertdialog"][aria-label="Kollision erkannt"] button:not([disabled])';
 const FOCUSABLE_SELECTOR =
@@ -104,8 +109,32 @@ export function teachListMeta(item) {
   return formatDe(DE.TEACH_LIST_PLACE_META, formatMmDe(item.x), formatMmDe(item.y), DE.CARD_SOURCE_TOUCH);
 }
 
+/** A fresh take's clean-up: lead trimmed, the fall-onset end applied, pauses kept. */
+export function defaultCleanupChoice(take, analysis) {
+  const last = Math.max(0, (Array.isArray(take && take.points) ? take.points.length : 0) - 1);
+  const suggested = analysis ? analysis.suggestedEndIndex : null;
+  return {
+    take, startIndex: 0, endIndex: suggested ?? last, compressPauses: false, fallTrim: suggested !== null,
+  };
+}
+
+/** The rows a keep stores and a robot preview plays: clean-up BEFORE compaction. */
+export function cleanedTakeRows(take, choice) {
+  return compactTrajectoryPoints(applyCleanup(take.points, {
+    trimLead: true,
+    startIndex: choice.startIndex,
+    endIndex: choice.endIndex,
+    compressPauses: choice.compressPauses,
+  }));
+}
+
+/** The rows are re-based, so the last time IS the duration. */
+export function rowsDurationS(rows) {
+  return rows.length ? rows[rows.length - 1][rows[0].length - 1] : 0;
+}
+
 function TeachOverlay({
-  mode = 'hand', focus = null, onClose, workspace, accessToken, workflowId, robotType,
+  mode = 'hand', focus = null, onClose, workspace, accessToken, workflowId, robotType, caps = null,
   heartbeatOk, rsBridge, saveWorkflowNow, refetchTrajectories,
 }) {
   const containerRef = useRef(null);
@@ -123,7 +152,7 @@ function TeachOverlay({
   // Latest values for callbacks that outlive a render (uploads, the hook).
   const latest = useRef({});
   latest.current = {
-    accessToken, workflowId, robotType, saveWorkflowNow, refetchTrajectories, workspace, onClose,
+    accessToken, workflowId, robotType, saveWorkflowNow, refetchTrajectories, workspace, onClose, caps,
   };
 
   // „In dieser Runde". The ref is written synchronously, so two keeps inside
@@ -163,7 +192,18 @@ function TeachOverlay({
     return name;
   }, []);
 
-  const uploadRecording = useCallback(async (key, name, take) => {
+  // The clean-up the student chose for the take under review (set by render).
+  // A take this ref does not describe gets the defaults.
+  const choiceRef = useRef(null);
+  const rowsForTake = useCallback((tk) => {
+    const cur = choiceRef.current;
+    const choice = cur && cur.take === tk
+      ? cur : defaultCleanupChoice(tk, analyzeTake(tk.points, latest.current.caps));
+    return cleanedTakeRows(tk, choice);
+  }, []);
+
+  // `upload`: { fps, rows (cleaned + compacted), durationS (of those rows) }.
+  const uploadRecording = useCallback(async (key, name, upload) => {
     patchItem(key, { status: 'saving', error: '' });
     const cur = latest.current;
     const token = cur.accessToken;
@@ -189,11 +229,13 @@ function TeachOverlay({
       if (r.created) toast.success(DE.TEACH_AUTOSAVED_WORKFLOW);
       wfId = r.workflowId;
     }
+    // duration_s is the CLEANED rows' span: the cloud stores it verbatim, so the
+    // server's untrimmed take.durationS would disagree with the stored samples.
     const payload = {
       name,
-      fps: take.fps,
-      points: compactTrajectoryPoints(take.points),
-      duration_s: take.durationS,
+      fps: upload.fps,
+      points: upload.rows,
+      duration_s: upload.durationS,
     };
     const profile = String(latest.current.robotType || '').trim();
     if (profile) payload.robot_profile = profile;
@@ -213,17 +255,16 @@ function TeachOverlay({
     const name = nextAutoName(DE.TEACH_AUTO_NAME_RECORDING, recordingNames());
     keySeq.current += 1;
     const key = `rec-${keySeq.current}`;
+    const rows = rowsForTake(take);
+    const upload = { fps: take.fps, rows, durationS: rowsDurationS(rows) };
     updateItems((list) => [
-      ...list, { key, kind: 'recording', name, status: 'saving', error: '', durationS: take.durationS, take },
+      ...list, { key, kind: 'recording', name, status: 'saving', error: '', durationS: upload.durationS, upload },
     ]);
-    uploadRecording(key, name, take);
-  }, [recordingNames, updateItems, uploadRecording]);
+    uploadRecording(key, name, upload);
+  }, [recordingNames, rowsForTake, updateItems, uploadRecording]);
 
-  // Only successful captures arrive here; the hook toasts a refusal itself.
-  // The list is the feedback, so a stored capture shows no toast.
-  const onCapture = useCallback(({ kind, name, response }) => {
-    if (!response || !response.success) return;
-    issuedPlaceNames.current.delete(name);
+  // Store one capture in the document. `kind`: 'pose' | 'ziel'.
+  const storePlace = useCallback((kind, name, response) => {
     const input = {
       name,
       kind: kind === 'pose' ? 'pose' : 'pin',
@@ -256,6 +297,58 @@ function TeachOverlay({
       z: entry.z,
     }]);
   }, [updateItems]);
+
+  // Ziel by touch: a Z whose TCP is too far above the table asks first — a
+  // Ziel's height is re-read from the table plane on every run, so a point in
+  // the air would silently lose its height. Default (Enter/Esc): a Position,
+  // which keeps the measured z. Prompts queue; the first is shown.
+  const [zielPrompts, setZielPrompts] = useState([]);
+  const zielPromptsRef = useRef([]);
+  const updatePrompts = useCallback((fn) => {
+    zielPromptsRef.current = fn(zielPromptsRef.current);
+    setZielPrompts(zielPromptsRef.current);
+  }, []);
+
+  const resolveZielPrompt = useCallback((asPin) => {
+    const [first] = zielPromptsRef.current;
+    if (!first) return;
+    updatePrompts((list) => list.slice(1));
+    issuedPlaceNames.current.delete(first.name);
+    if (asPin) {
+      storePlace('ziel', first.name, first.response);
+      return;
+    }
+    // Stored as a Position, so it is NAMED as one (automatic, never asked).
+    const poseName = captureNamer('pose');
+    issuedPlaceNames.current.delete(poseName);
+    storePlace('pose', poseName, first.response);
+  }, [captureNamer, storePlace, updatePrompts]);
+
+  // Only successful captures arrive here; the hook toasts a refusal itself.
+  // The list is the feedback, so a stored capture shows no toast.
+  const onCapture = useCallback(({ kind, name, response }) => {
+    if (!response || !response.success) return;
+    if (kind !== 'pose' && isZielTouchTooHigh(response.world_z, latest.current.caps)) {
+      // The name stays issued until the student answers.
+      keySeq.current += 1;
+      updatePrompts((list) => [...list, {
+        key: `ziel-prompt-${keySeq.current}`,
+        name,
+        response,
+        heightMm: zielTouchHeightAboveTableMm(response.world_z, latest.current.caps),
+      }]);
+      return;
+    }
+    issuedPlaceNames.current.delete(name);
+    storePlace(kind, name, response);
+  }, [storePlace, updatePrompts]);
+
+  // Closing with a question still open keeps the capture as the default.
+  const resolveZielPromptRef = useRef(resolveZielPrompt);
+  resolveZielPromptRef.current = resolveZielPrompt;
+  useEffect(() => () => {
+    while (zielPromptsRef.current.length > 0) resolveZielPromptRef.current(false);
+  }, []);
 
   const onError = useCallback((message) => {
     if (message) toast.error(message);
@@ -310,11 +403,36 @@ function TeachOverlay({
 
   useEffect(() => { setCaptureNamer(captureNamer); }, [setCaptureNamer, captureNamer]);
 
-  // The hook's keys, in the capture phase, while the overlay is open.
+  // The hook's keys, in the capture phase, while the overlay is open. An open
+  // „too high" question answers Enter/Esc itself (a Position) and swallows Z;
+  // Enter on a focused button still activates that button natively.
+  const collisionRef = useRef(collisionActive);
+  collisionRef.current = collisionActive;
+  const refocus = useCallback(() => {
+    setTimeout(() => {
+      if (containerRef.current) containerRef.current.focus();
+    }, 0);
+  }, []);
   useEffect(() => {
-    document.addEventListener('keydown', onKeyDown, true);
-    return () => document.removeEventListener('keydown', onKeyDown, true);
-  }, [onKeyDown]);
+    const handler = (e) => {
+      if (zielPromptsRef.current.length > 0 && !collisionRef.current) {
+        const key = classifyTeachKey(e);
+        const onButton = !!e.target && e.target.tagName === 'BUTTON';
+        if (key === 'escape' || (key === 'enter' && !onButton) || key === 'z') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (key !== 'z') {
+            resolveZielPromptRef.current(false);
+            refocus();
+          }
+          return;
+        }
+      }
+      onKeyDown(e);
+    };
+    document.addEventListener('keydown', handler, true);
+    return () => document.removeEventListener('keydown', handler, true);
+  }, [onKeyDown, refocus]);
 
   // Focus: the container on open, back to where it was on close.
   useEffect(() => {
@@ -350,12 +468,6 @@ function TeachOverlay({
     }
     return undefined;
   }, [collisionActive]);
-
-  const refocus = useCallback(() => {
-    setTimeout(() => {
-      if (containerRef.current) containerRef.current.focus();
-    }, 0);
-  }, []);
 
   const onContainerKeyDown = (e) => {
     if (e.key !== 'Tab' || collisionActive) return;
@@ -457,9 +569,53 @@ function TeachOverlay({
   const showRelockBanner = relock === 'failed' && (state === 'frei' || state === 'pruefen');
   const previewDisabled = state !== 'pruefen' || busy || homeGlideActive || !online || relock === 'failed';
 
+  // Review clean-up. The choice belongs to one take (object identity); a new
+  // take starts from the defaults.
+  const [cleanupState, setCleanupState] = useState(null);
+  const analysis = useMemo(
+    () => (take && Array.isArray(take.points) ? analyzeTake(take.points, caps) : null),
+    [take, caps],
+  );
+  const choice = take && analysis
+    ? (cleanupState && cleanupState.take === take ? cleanupState : defaultCleanupChoice(take, analysis))
+    : null;
+  choiceRef.current = choice;
+  const choiceStart = choice ? choice.startIndex : 0;
+  const choiceEnd = choice ? choice.endIndex : 0;
+  const choicePauses = choice ? choice.compressPauses : false;
+  const reviewRows = useMemo(
+    () => (take && Array.isArray(take.points)
+      ? cleanedTakeRows(take, { startIndex: choiceStart, endIndex: choiceEnd, compressPauses: choicePauses })
+      : []),
+    [take, choiceStart, choiceEnd, choicePauses],
+  );
+  const lastIndex = take && Array.isArray(take.points) ? take.points.length - 1 : 0;
+  const cleanupLocked = state !== 'pruefen';
+
   const handlePreviewOnRobot = () => {
     if (!window.confirm(DE.TEACH_REVIEW_ON_ROBOT_CONFIRM)) return;
-    actions.previewOnRobot();
+    // The same cleaned rows a keep would store (the hook estimates from them).
+    actions.previewOnRobot(reviewRows);
+  };
+
+  // „Als Programm einfügen": a place counts only while it is still in the store.
+  const placeNameOf = useCallback((item) => {
+    const store = getDestinationStore(latest.current.workspace);
+    const entry = store && typeof store.getById === 'function' ? store.getById(item.entryId) : null;
+    return entry ? entry.name : null;
+  }, []);
+  const insertCount = buildProgramBlocks(items, { placeNameOf }).count;
+  const handleInsert = () => {
+    let result;
+    try {
+      result = insertProgram(latest.current.workspace, itemsRef.current, { placeNameOf });
+    } catch (err) {
+      console.error('insertProgram failed:', err);
+      toast.error(INSERT_FAILED_DE);
+      return;
+    }
+    if (result && result.count > 0) toast.success(formatDe(DE.TEACH_INSERT_DONE, result.count));
+    refocus();
   };
 
   return (
@@ -521,6 +677,13 @@ function TeachOverlay({
               </p>
               {HINT_LINE[state] && <p className="mt-1 text-lg text-[var(--ink-3)]">{HINT_LINE[state]}</p>}
             </div>
+            {zielPrompts.length > 0 && (
+              <ZielTooHighPrompt
+                key={zielPrompts[0].key}
+                heightMm={zielPrompts[0].heightMm}
+                onAnswer={(asPin) => { resolveZielPrompt(asPin); refocus(); }}
+              />
+            )}
             {state !== 'abschluss' && (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <ActionButton
@@ -545,7 +708,7 @@ function TeachOverlay({
                   icon="🎯"
                   label={DE.TEACH_KEY_ZIEL}
                   keyHint="Z"
-                  disabled={!cell.z}
+                  disabled={!cell.z || zielPrompts.length > 0}
                   title={state === 'aufnahme' ? DE.TEACH_ZIEL_BLOCKED_REC : undefined}
                   highlighted={highlightKey === 'z'}
                   onClick={actions.captureZiel}
@@ -564,9 +727,49 @@ function TeachOverlay({
             {inReview && (
               <div className="flex flex-col gap-3 rounded-xl border border-[var(--line)] p-4" data-testid="teach-review">
                 <p className="text-lg text-[var(--ink)]">
-                  {formatDe(DE.TEACH_REVIEW_META, reviewName, formatSecondsDe(Number(take.durationS) || 0),
-                    Array.isArray(take.points) ? take.points.length : 0)}
+                  {formatDe(DE.TEACH_REVIEW_META, reviewName, formatSecondsDe(Number(rowsDurationS(reviewRows)) || 0),
+                    reviewRows.length)}
                 </p>
+                {analysis && analysis.leadTrimMs > 0 && (
+                  <p className="text-base text-[var(--ink-3)]">{DE.TEACH_TRIM_START}</p>
+                )}
+                {choice && choice.fallTrim && (
+                  <div className="flex flex-wrap items-center gap-3 text-base text-[var(--ink-3)]">
+                    <span>{DE.TEACH_TRIM_END}</span>
+                    <SmallKeyButton
+                      label={DE.TEACH_TRIM_UNDO}
+                      disabled={cleanupLocked}
+                      onClick={() => setCleanupState({ ...choice, endIndex: lastIndex, fallTrim: false })}
+                      onPointerUp={refocus}
+                    />
+                  </div>
+                )}
+                {choice && analysis && (
+                  <ReviewStrip
+                    activity={analysis.activity}
+                    timesMs={analysis.timesMs}
+                    startIndex={choice.startIndex}
+                    endIndex={choice.endIndex}
+                    disabled={cleanupLocked}
+                    onHandleRelease={refocus}
+                    onChange={(next) => setCleanupState({
+                      ...choice, ...next, fallTrim: choice.fallTrim && next.endIndex === choice.endIndex,
+                    })}
+                  />
+                )}
+                {choice && analysis && analysis.pauses.length > 0 && (
+                  <label className="flex items-center gap-2 text-base text-[var(--ink)]">
+                    <input
+                      type="checkbox"
+                      checked={choice.compressPauses}
+                      disabled={cleanupLocked}
+                      onChange={(e) => setCleanupState({ ...choice, compressPauses: e.target.checked })}
+                      onPointerUp={refocus}
+                      className="h-5 w-5"
+                    />
+                    {DE.TEACH_PAUSES}
+                  </label>
+                )}
                 {state === 'vorschau' && (
                   <div role="status" className="flex flex-wrap items-center gap-3 rounded-lg bg-amber-50 px-3 py-2 text-base text-amber-900">
                     <div className="flex-1">
@@ -615,7 +818,7 @@ function TeachOverlay({
                   onDraft={(draft) => setRenaming((cur) => (cur ? { ...cur, draft } : cur))}
                   onCommit={commitRename}
                   onCancel={() => { setRenaming(null); refocus(); }}
-                  onRetry={() => uploadRecording(item.key, item.name, item.take)}
+                  onRetry={() => uploadRecording(item.key, item.name, item.upload)}
                   refocus={refocus}
                 />
               ))}
@@ -626,6 +829,17 @@ function TeachOverlay({
                 </li>
               )}
             </ul>
+            <div className="mt-auto pt-2">
+              <button
+                type="button"
+                onClick={handleInsert}
+                onPointerUp={refocus}
+                disabled={insertCount === 0 || !workspace}
+                className="w-full rounded-lg border border-[var(--accent)] px-3 py-2 text-base font-semibold text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40 hover:bg-[var(--bg-sunk)]"
+              >
+                {formatDe(DE.TEACH_INSERT, insertCount)}
+              </button>
+            </div>
           </aside>
         </div>
       </div>
@@ -733,6 +947,44 @@ function ListRow({ item, renameOk, editing, onStartRename, onDraft, onCommit, on
         </div>
       )}
     </li>
+  );
+}
+
+// „Die Greiferspitze ist … cm über dem Tisch." — default focus on the Position
+// answer, so Enter (and Esc, handled by the overlay's key listener) keep the
+// measured height.
+function ZielTooHighPrompt({ heightMm, onAnswer }) {
+  const poseRef = useRef(null);
+  useEffect(() => {
+    if (poseRef.current) poseRef.current.focus();
+  }, []);
+  return (
+    <div
+      role="alertdialog"
+      aria-labelledby="teach-ziel-too-high"
+      data-testid="teach-ziel-too-high"
+      className="flex flex-col gap-3 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900"
+    >
+      <p id="teach-ziel-too-high" className="text-lg">{formatDe(DE.TEACH_ZIEL_TOO_HIGH, formatCmDe(heightMm))}</p>
+      <div className="flex flex-wrap gap-2">
+        <button
+          ref={poseRef}
+          type="button"
+          onClick={() => onAnswer(false)}
+          className="flex items-center gap-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] px-4 py-2 text-base text-white hover:opacity-90"
+        >
+          <span>{DE.TEACH_ZIEL_AS_POSE}</span>
+          <kbd className="rounded border border-current/30 px-1.5 text-xs">Enter</kbd>
+        </button>
+        <button
+          type="button"
+          onClick={() => onAnswer(true)}
+          className="rounded-lg border border-[var(--line)] bg-white px-4 py-2 text-base hover:bg-[var(--bg-sunk)]"
+        >
+          {DE.TEACH_ZIEL_AS_PIN}
+        </button>
+      </div>
+    </div>
   );
 }
 

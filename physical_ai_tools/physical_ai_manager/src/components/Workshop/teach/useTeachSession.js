@@ -596,12 +596,16 @@ export function createTeachEngine(getProps, publish) {
 
   // ---- robot preview (`vorschau`) ---------------------------------------
 
-  function previewOnRobot() {
+  // `cleanedRows`: the overlay's cleaned-up take (utils/recordingCleanup), the
+  // rows a keep would store; absent or too short → the take as recorded.
+  function previewOnRobot(cleanedRows) {
     const p = getProps();
     if (r.state !== 'pruefen' || !r.take || r.relock === 'failed' || p.heartbeatOk === false
         || r.queueCount > 0) return;
     // The SAME rows go into points_json and into the drive estimate.
-    const rows = compactTrajectoryPoints(r.take.points);
+    const source = Array.isArray(cleanedRows) && cleanedRows.length >= TEACH_MIN_POINTS
+      ? cleanedRows : r.take.points;
+    const rows = compactTrajectoryPoints(source);
     const pointsJson = JSON.stringify({ fps: r.take.fps, points: rows });
     enqueue(async () => {
       if (r.state !== 'pruefen' || r.relock === 'failed') return;
@@ -854,7 +858,7 @@ export function createTeachEngine(getProps, publish) {
       keep: () => press('enter'),
       again: () => press('r'),
       discard: () => press('delete'),
-      previewOnRobot: () => { if (canAct()) previewOnRobot(); },
+      previewOnRobot: (cleanedRows) => { if (canAct()) previewOnRobot(cleanedRows); },
       stopPreview: () => { if (!r.tornDown) stopPreview(); },
       // „Fertig": what Esc does in the current state.
       finish: () => { if (!r.tornDown) finish(); },

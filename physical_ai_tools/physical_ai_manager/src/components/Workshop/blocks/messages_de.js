@@ -497,6 +497,19 @@ export const DE = {
     'Während Vormachen kann der Simulator nicht gestartet werden — bitte Vormachen zuerst beenden.',
   TEACH_JOG_HINT: 'Zum Vormachen oben ✋ Vormachen benutzen.',
   TEACH_JOG_HINT_FREE: 'Arm ist freigeschaltet — zum Merken oben ✋ Vormachen benutzen.',
+  // Vormachen review clean-up, Ziel by touch, „Als Programm einfügen".
+  TEACH_TRIM_START: 'Warten am Anfang entfernt',
+  TEACH_TRIM_END: 'Ende sieht nach Loslassen aus — gekürzt',
+  TEACH_TRIM_UNDO: 'Kürzung zurücknehmen',
+  TEACH_PAUSES: 'Pausen kürzen',
+  TEACH_STRIP_ARIA: 'Bewegungsverlauf — mit den Griffen den Anfang und das Ende wählen',
+  TEACH_HANDLE_START: 'Anfang',
+  TEACH_HANDLE_END: 'Ende',
+  TEACH_ZIEL_TOO_HIGH: 'Die Greiferspitze ist %1 cm über dem Tisch. Als Position speichern?',
+  TEACH_ZIEL_AS_POSE: 'Als Position speichern',
+  TEACH_ZIEL_AS_PIN: 'Trotzdem als Ziel',
+  TEACH_INSERT: 'Als Programm einfügen (%1 Blöcke)',
+  TEACH_INSERT_DONE: '%1 Blöcke eingefügt.',
 };
 
 /**

@@ -16,6 +16,7 @@ import toast from 'react-hot-toast';
 import TeachOverlay, { teachListMeta, teachSlotsLine } from '../TeachOverlay';
 import { DE, formatDe } from '../../blocks/messages_de';
 import { compactTrajectoryPoints } from '../../../../utils/trajectoryCompact';
+import { applyCleanup } from '../../../../utils/recordingCleanup';
 import * as workflowApi from '../../../../services/workflowApi';
 import { renamePlace, renameRecording } from '../../sammlung/assetCommands';
 
@@ -63,7 +64,7 @@ vi.mock('roslib', () => ({
   default: { Topic: function Topic() { this.subscribe = () => {}; this.unsubscribe = () => {}; } },
 }));
 
-const mockStore = vi.hoisted(() => ({ add: vi.fn(), taken: [] }));
+const mockStore = vi.hoisted(() => ({ add: vi.fn(), getById: vi.fn(), taken: [] }));
 vi.mock('../../sammlung/destinationStore', async (importOriginal) => {
   const actual = await importOriginal();
   return {
@@ -71,6 +72,11 @@ vi.mock('../../sammlung/destinationStore', async (importOriginal) => {
     getDestinationStore: () => mockStore,
     takenDestinationNames: () => mockStore.taken,
   };
+});
+const mockInsert = vi.hoisted(() => ({ fn: vi.fn() }));
+vi.mock('../insertProgram', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, insertProgram: (...args) => mockInsert.fn(...args) };
 });
 vi.mock('../../sammlung/assetCommands', () => ({
   __esModule: true,
@@ -100,9 +106,11 @@ vi.mock('../useTeachSession', async (importOriginal) => {
   };
 });
 
+// The time column spans durationS: the kept duration and the review meta are
+// derived from the cleaned rows (lead gap ≤ 300 ms, so nothing is trimmed here).
 const TAKE = {
-  points: [[0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 0], [0.11, 0.21, 0.31, 0.41, 0.51, 0.8, 0.04],
-    [0.123456789, 0.2, 0.3, 0.4, 0.5, 0.8, 0.0812345]],
+  points: [[0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 0], [0.11, 0.21, 0.31, 0.41, 0.51, 0.8, 0.3],
+    [0.123456789, 0.2, 0.3, 0.4, 0.5, 0.8, 1.2004]],
   fps: 25, sampleCount: 3, durationS: 1.2, relockOk: true,
 };
 
@@ -149,7 +157,9 @@ beforeEach(() => {
   mockGlide.offer.mockReset();
   mockGlide.active = false;
   mockStore.add.mockReset();
+  mockStore.getById.mockReset();
   mockStore.taken = [];
+  mockInsert.fn.mockReset();
   Object.values(mockRos).forEach((fn) => fn.mockReset());
   workflowApi.createTrajectory.mockReset();
   renamePlace.mockReset();
@@ -707,5 +717,217 @@ describe('TeachOverlay — with the real session hook', () => {
     const ev = new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true });
     document.body.dispatchEvent(ev);
     expect(ev.defaultPrevented).toBe(false);
+  });
+});
+
+describe('TeachOverlay — review clean-up (trims with undo, cleaned rows kept and previewed)', () => {
+  // A 2.346 s wait before the first move, then a release: the last 280 ms
+  // joint2 falls at −5 rad/s.
+  function cleanupTake() {
+    const points = [[0, 0.5, -0.5, 0, 0, 0.8, 0]];
+    for (let ms = 2346; ms <= 3346; ms += 40) points.push([0.001 * (ms - 2346), 0.5, -0.5, 0, 0, 0.8, ms / 1000]);
+    const onset = points.length - 1;
+    let q2 = 0.5;
+    for (let i = 1; i <= 7; i += 1) {
+      q2 -= 0.2;
+      points.push([1, q2, -0.5, 0, 0, 0.8, (3346 + 40 * i) / 1000]);
+    }
+    return { take: { points, fps: 25, sampleCount: points.length, durationS: 3.626, relockOk: true }, onset };
+  }
+
+  test('the notes name both trims; „Kürzung zurücknehmen" restores the end and a keep then stores it all', async () => {
+    const { take, onset } = cleanupTake();
+    withSnapshot({ state: 'pruefen', relock: 'ok', take });
+    workflowApi.createTrajectory.mockResolvedValue({ id: 't' });
+    render(<TeachOverlay {...baseProps()} />);
+    const review = screen.getByTestId('teach-review');
+    expect(within(review).getByText(DE.TEACH_TRIM_START)).toBeInTheDocument();
+    expect(within(review).getByText(DE.TEACH_TRIM_END)).toBeInTheDocument();
+    expect(within(review).getByRole('slider', { name: DE.TEACH_HANDLE_END })).toHaveAttribute('aria-valuenow', String(onset));
+    expect(within(review).getByText(formatDe(DE.TEACH_REVIEW_META, 'Bewegung 1', '1,3', onset + 1))).toBeInTheDocument();
+    fireEvent.click(within(review).getByRole('button', { name: DE.TEACH_TRIM_UNDO }));
+    expect(within(review).queryByText(DE.TEACH_TRIM_END)).toBeNull();
+    expect(within(review).getByText(DE.TEACH_TRIM_START)).toBeInTheDocument();
+    expect(within(review).getByRole('slider', { name: DE.TEACH_HANDLE_END }))
+      .toHaveAttribute('aria-valuenow', String(take.points.length - 1));
+    await act(async () => { mockHook.props.onKeep(take); await flush(); });
+    const sent = workflowApi.createTrajectory.mock.calls[0][2];
+    expect(sent.points).toHaveLength(take.points.length);
+    expect(sent.duration_s).toBe(1.58);
+  });
+
+  test('a take with a 2.346 s leading gap keeps with duration_s = the cleaned rows\' last time', async () => {
+    const { take, onset } = cleanupTake();
+    withSnapshot({ state: 'pruefen', relock: 'ok', take });
+    workflowApi.createTrajectory.mockResolvedValue({ id: 't' });
+    render(<TeachOverlay {...baseProps()} />);
+    await act(async () => { mockHook.props.onKeep(take); await flush(); });
+    const expected = compactTrajectoryPoints(applyCleanup(take.points, { endIndex: onset }));
+    const sent = workflowApi.createTrajectory.mock.calls[0][2];
+    expect(sent.points).toEqual(expected);
+    expect(sent.points[1][6]).toBe(0.3);
+    expect(sent.duration_s).toBe(expected[expected.length - 1][6]);
+    expect(sent.duration_s).toBe(1.3);
+    expect(sent.duration_s).not.toBe(take.durationS);
+    expect(screen.getByText(formatDe(DE.TEACH_LIST_RECORDING_META, '1,3', DE.TEACH_LIST_SAVED))).toBeInTheDocument();
+  });
+
+  test('„Auf dem Roboter ansehen" previews exactly the cleaned rows', () => {
+    const { take, onset } = cleanupTake();
+    const actions = withSnapshot({ state: 'pruefen', relock: 'ok', take });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      render(<TeachOverlay {...baseProps()} />);
+      fireEvent.click(screen.getByRole('button', { name: DE.TEACH_REVIEW_ON_ROBOT }));
+      expect(actions.previewOnRobot).toHaveBeenCalledWith(
+        compactTrajectoryPoints(applyCleanup(take.points, { endIndex: onset })),
+      );
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  test('„Pausen kürzen" shows only when the take has a pause, and changes what a keep stores', async () => {
+    const points = [[0, 0, 0, 0, 0, 0.8, 0], [0.1, 0, 0, 0, 0, 0.8, 0.2], [0.2, 0, 0, 0, 0, 0.8, 2.2],
+      [0.3, 0, 0, 0, 0, 0.8, 2.4]];
+    const take = { points, fps: 25, sampleCount: 4, durationS: 2.4, relockOk: true };
+    withSnapshot({ state: 'pruefen', relock: 'ok', take });
+    workflowApi.createTrajectory.mockResolvedValue({ id: 't' });
+    render(<TeachOverlay {...baseProps()} />);
+    expect(screen.queryByText(DE.TEACH_TRIM_START)).toBeNull();
+    const box = screen.getByRole('checkbox', { name: DE.TEACH_PAUSES });
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    await act(async () => { mockHook.props.onKeep(take); await flush(); });
+    expect(workflowApi.createTrajectory.mock.calls[0][2].duration_s).toBe(0.9);
+  });
+
+  test('no pause → no checkbox; the clean-up controls are locked while the robot preview runs', () => {
+    const { take } = cleanupTake();
+    withSnapshot({ state: 'vorschau', relock: 'ok', take });
+    render(<TeachOverlay {...baseProps()} />);
+    expect(screen.queryByRole('checkbox', { name: DE.TEACH_PAUSES })).toBeNull();
+    expect(screen.getByRole('button', { name: DE.TEACH_TRIM_UNDO })).toBeDisabled();
+    expect(screen.getByRole('slider', { name: DE.TEACH_HANDLE_END })).toHaveAttribute('tabindex', '-1');
+  });
+});
+
+describe('TeachOverlay — Ziel by touch: too high asks „Als Position speichern?"', () => {
+  const HIGH = { success: true, world_x: 0.18, world_y: -0.06, world_z: 0.16 }; // OMX: 120 mm above the table
+
+  function storeEchoes() {
+    mockStore.add.mockImplementation((input) => ({
+      ok: true, entry: { id: `d_${input.name}`, name: input.name, kind: input.kind, x: input.x, y: input.y, z: input.z },
+    }));
+  }
+
+  function captureHigh() {
+    act(() => { mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 1', response: HIGH }); });
+  }
+
+  test('the question names the height in cm, stores nothing yet, and focuses „Als Position speichern"', () => {
+    withSnapshot({ state: 'frei' });
+    storeEchoes();
+    render(<TeachOverlay {...baseProps()} />);
+    captureHigh();
+    const dialog = screen.getByRole('alertdialog');
+    expect(within(dialog).getByText(formatDe(DE.TEACH_ZIEL_TOO_HIGH, '12,0'))).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: new RegExp(DE.TEACH_ZIEL_AS_POSE) })).toHaveFocus();
+    expect(mockStore.add).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_ZIEL) })).toBeDisabled();
+  });
+
+  test.each([['Enter'], ['Escape']])('%s stores a Position (measured z kept, named as a Position)', (key) => {
+    withSnapshot({ state: 'frei' });
+    storeEchoes();
+    render(<TeachOverlay {...baseProps()} />);
+    captureHigh();
+    fireEvent.keyDown(screen.getByRole('dialog'), { key });
+    expect(mockStore.add).toHaveBeenCalledTimes(1);
+    expect(mockStore.add).toHaveBeenCalledWith({
+      name: 'Position 1', kind: 'pose', source: 'capture', x: 0.18, y: -0.06, z: 0.16, robot_type: 'omx_f',
+    });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(within(screen.getByTestId('teach-item-pose')).getByText('Position 1')).toBeInTheDocument();
+  });
+
+  test('„Trotzdem als Ziel" stores a Ziel under its own name', () => {
+    withSnapshot({ state: 'frei' });
+    storeEchoes();
+    render(<TeachOverlay {...baseProps()} />);
+    captureHigh();
+    fireEvent.click(screen.getByRole('button', { name: DE.TEACH_ZIEL_AS_PIN }));
+    expect(mockStore.add).toHaveBeenCalledWith(expect.objectContaining({ name: 'Ziel 1', kind: 'pin', source: 'capture', z: 0.16 }));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.getByTestId('teach-item-ziel')).toBeInTheDocument();
+  });
+
+  test('a touch within 30 mm of the table is a Ziel without a question; the threshold is per arm', () => {
+    withSnapshot({ state: 'frei' });
+    storeEchoes();
+    const { unmount } = render(<TeachOverlay {...baseProps()} />);
+    act(() => { mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 1', response: { ...HIGH, world_z: 0.07 } }); });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(mockStore.add.mock.calls[0][0]).toMatchObject({ kind: 'pin', z: 0.07 });
+    unmount();
+    // Edu:6: the TCP is the fingertip, so the same 0.07 m is 70 mm up.
+    render(<TeachOverlay {...baseProps({ caps: { urdf_asset_id: 'edu6', arm_joints: 6 } })} />);
+    act(() => { mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 2', response: { ...HIGH, world_z: 0.07 } }); });
+    expect(within(screen.getByRole('alertdialog')).getByText(formatDe(DE.TEACH_ZIEL_TOO_HIGH, '7,0'))).toBeInTheDocument();
+  });
+
+  test('P is never questioned; closing with a question open keeps the capture as a Position', () => {
+    withSnapshot({ state: 'frei' });
+    storeEchoes();
+    const { unmount } = render(<TeachOverlay {...baseProps()} />);
+    act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: HIGH }); });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    mockStore.taken = ['Position 1'];
+    captureHigh();
+    unmount();
+    expect(mockStore.add.mock.calls.map((c) => [c[0].name, c[0].kind])).toEqual([
+      ['Position 1', 'pose'], ['Position 2', 'pose'],
+    ]);
+  });
+});
+
+describe('TeachOverlay — „Als Programm einfügen"', () => {
+  async function fillRound() {
+    workflowApi.createTrajectory.mockResolvedValue({ id: 't' });
+    mockStore.add.mockImplementation((input) => ({
+      ok: true, entry: { id: 'd_p1', name: input.name, kind: input.kind, x: input.x, y: input.y, z: input.z },
+    }));
+    mockStore.getById.mockImplementation((id) => (id === 'd_p1' ? { id, name: 'Position 1' } : null));
+    await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
+    act(() => {
+      mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: { success: true, world_x: 0.1, world_y: 0, world_z: 0.1 } });
+    });
+  }
+
+  test.each(['fest', 'abschluss'])('in %s the button counts the insertable items and inserts them with a toast', async (state) => {
+    withSnapshot({ state });
+    const props = baseProps();
+    render(<TeachOverlay {...props} />);
+    expect(screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 0) })).toBeDisabled();
+    await fillRound();
+    const button = screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 2) });
+    expect(button).toBeEnabled();
+    mockInsert.fn.mockReturnValue({ blockId: 'b1', count: 2 });
+    fireEvent.click(button);
+    expect(mockInsert.fn).toHaveBeenCalledTimes(1);
+    const [ws, items, opts] = mockInsert.fn.mock.calls[0];
+    expect(ws).toBe(props.workspace);
+    expect(items.map((it) => it.name)).toEqual(['Bewegung 1', 'Position 1']);
+    expect(opts.placeNameOf(items[1])).toBe('Position 1');
+    expect(toast.success).toHaveBeenCalledWith(formatDe(DE.TEACH_INSERT_DONE, 2));
+  });
+
+  test('a place no longer in the store does not count', async () => {
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps()} />);
+    await fillRound();
+    mockStore.getById.mockReturnValue(null);
+    act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 2', response: { success: true, world_x: 0.1, world_y: 0, world_z: 0.1 } }); });
+    expect(screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 1) })).toBeInTheDocument();
   });
 });

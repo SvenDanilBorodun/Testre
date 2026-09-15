@@ -518,6 +518,32 @@ describe('useTeachSession', () => {
       h.unmount();
     });
 
+    it('cleaned rows from the overlay are what it sends AND what the exit estimate is computed from', async () => {
+      const cleaned = FAST_ROWS.slice(0, 26); // one second of the take
+      const short = replayDriveEstimateMs(compactTrajectoryPoints(cleaned), 1.0);
+      expect(short).toBeLessThan(ESTIMATE - 5000);
+      const h = setup();
+      await toPruefen(h, { stopRes: { points_json: JSON.stringify({ fps: 25, points: FAST_ROWS }) } });
+      await act(async () => { h.cur.actions.previewOnRobot(cleaned); await flush(); });
+      const replay = h.last('replayMotion');
+      expect(JSON.parse(replay.args[0].points_json)).toEqual({ fps: 25, points: compactTrajectoryPoints(cleaned) });
+      await h.resolve(replay, { success: true });
+      feedFor(h, short - 1000, MOVING);
+      feedFor(h, 1000 + 299 - 30, STILL);
+      expect(h.state).toBe('vorschau');
+      feedFor(h, 30 + 150, STILL);
+      expect(h.state).toBe('pruefen');
+      h.unmount();
+    });
+
+    it('fewer than 2 cleaned rows fall back to the take as recorded', async () => {
+      const h = setup();
+      await toPruefen(h, { stopRes: { points_json: JSON.stringify({ fps: 25, points: FAST_ROWS }) } });
+      await act(async () => { h.cur.actions.previewOnRobot([FAST_ROWS[0]]); await flush(); });
+      expect(JSON.parse(h.last('replayMotion').args[0].points_json).points).toEqual(compactTrajectoryPoints(FAST_ROWS));
+      h.unmount();
+    });
+
     it('a dead feed never reads as still', async () => {
       const h = setup();
       await toVorschau(h);

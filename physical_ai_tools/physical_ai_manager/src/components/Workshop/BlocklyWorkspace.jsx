@@ -52,25 +52,45 @@ function registerAllBlocksOnce() {
   registerDestinationSerializer();
   // The Sammlung flyout card item (a registry CLASS, instantiated per flyout).
   registerAssetCardInflater();
-  removeEnglishHelpMenuItem();
+  blankNonGermanHelpUrls();
   blocksRegistered = true;
 }
 
-// „Hilfe" in a block's right-click menu opens `block.getHelpUrl()`. Every
-// EduBotics block leaves that empty (measured null), so the entry only ever
-// appears on Blockly's own built-ins — where all 34 URLs in the German catalog
-// point at ENGLISH pages (the Blockly wiki, Wikipedia). Sending a German-
-// speaking student there is worse than not offering the entry, and overriding
-// 34 upstream URLs by hand is a maintenance burden with no owner. Unregistering
-// the item removes it from the built-ins and changes nothing for our own blocks,
-// which never showed it. Global (ContextMenuRegistry is), hence once, here.
-function removeEnglishHelpMenuItem() {
+// „Hilfe" in a block's right-click menu opens `block.getHelpUrl()`, which for
+// Blockly's built-ins resolves a `%{BKY_*_HELPURL}` out of the German catalog.
+// 62 of those are non-empty and they are NOT all English: 24 point at
+// `de.wikipedia.org` („For-Schleife", „Vergleich (Zahlen)" …), which is real
+// help for a German-speaking student. 38 point elsewhere — the Blockly wiki on
+// github.com, `en.wikipedia.org`, and four one-off English pages.
+//
+// So the entry stays and the ENGLISH targets are blanked, by HOST rather than
+// by a hardcoded list of keys, so a Blockly upgrade that adds or moves a URL is
+// classified the same way. A block whose help URL is empty hides the „Hilfe"
+// item by itself (Blockly's own precondition), which is why nothing else is
+// needed. Runs once, before the first inject, because `Blockly.Msg` is global
+// and each block resolves its URL at construction.
+//
+// (An earlier attempt unregistered the whole `blockHelp` context-menu item on
+// the false premise that all 34 were English — it also deleted the 24 German
+// pages. Counted, not assumed, this time.)
+const GERMAN_HELP_HOSTS = ['de.wikipedia.org'];
+function blankNonGermanHelpUrls() {
   try {
-    if (Blockly.ContextMenuRegistry.registry.getItem('blockHelp')) {
-      Blockly.ContextMenuRegistry.registry.unregister('blockHelp');
-    }
+    Object.keys(Blockly.Msg)
+      .filter((key) => key.endsWith('_HELPURL'))
+      .forEach((key) => {
+        const url = Blockly.Msg[key];
+        if (typeof url !== 'string' || url === '') return;
+        let host = '';
+        try {
+          host = new URL(url).host;
+        } catch (_) {
+          host = '';
+        }
+        if (!GERMAN_HELP_HOSTS.includes(host)) Blockly.Msg[key] = '';
+      });
   } catch (e) {
-    console.warn('help context-menu item could not be removed', e);
+    console.warn('English help URLs could not be blanked', e);
   }
 }
 

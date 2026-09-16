@@ -74,16 +74,3 @@ export function setEditValidator(field, validator) {
     return validator.call(this, value);
   });
 }
-
-/**
- * True while `field` is being filled by the serializer.
- *
- * Exported for the dropdown in `blocks/perception.js`, which needs the same
- * signal without replacing its validator.
- *
- * @param {Blockly.Field} field The field to ask about.
- * @returns {boolean} Whether a saved value is being loaded right now.
- */
-export function isLoadingSavedValue(field) {
-  return !!(field && field.eduLoadingSavedValue_);
-}

@@ -238,12 +238,22 @@ describe('BlocklyWorkspace — plugins load before inject', () => {
     unmount();
   });
 
-  it('offers no „Hilfe" that would open an English page', async () => {
+  it('keeps German help pages and drops the English ones', async () => {
     const { unmount } = await mountEditor();
-    // Every EduBotics block leaves helpUrl empty, so the entry only ever showed
-    // on Blockly's built-ins — all 34 of whose German-catalog URLs are English
-    // pages.
-    expect(Blockly.ContextMenuRegistry.registry.getItem('blockHelp')).toBeFalsy();
+    const host = (url) => { try { return new URL(url).host; } catch (_) { return ''; } };
+    const urls = Object.keys(Blockly.Msg)
+      .filter((key) => key.endsWith('_HELPURL'))
+      .map((key) => Blockly.Msg[key])
+      .filter((url) => typeof url === 'string' && url !== '');
+    // Every surviving help target is German …
+    expect(urls.length).toBeGreaterThan(0);
+    expect([...new Set(urls.map(host))]).toEqual(['de.wikipedia.org']);
+    // … and the entry itself is still there, so those pages stay reachable.
+    expect(Blockly.ContextMenuRegistry.registry.getItem('blockHelp')).toBeTruthy();
+    // A block with a German page still offers „Hilfe"; one whose English target
+    // was blanked no longer does (Blockly hides the item on an empty URL).
+    expect(Blockly.Msg.CONTROLS_FOR_HELPURL).toContain('de.wikipedia.org');
+    expect(Blockly.Msg.PROCEDURES_DEFNORETURN_HELPURL).toBe('');
     unmount();
   });
 });

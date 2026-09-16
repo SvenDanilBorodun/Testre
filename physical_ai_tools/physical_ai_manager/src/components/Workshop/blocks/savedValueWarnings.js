@@ -29,7 +29,8 @@ import { trajectoryNameValidator } from './trajectories';
 //
 // It also carries the one limit the editor could always have known about and
 // never said: `interpreter.py::MAX_LIST_CREATE_ITEMS` refuses a „erzeuge Liste
-// mit" of more than 20 FILLED sockets, while ⊕ goes on forever (measured to 43).
+// mit" whose filled sockets are too many OR reach index 20, while ⊕ goes on
+// forever (measured to 43). See `refusedListIndices` for both halves.
 //
 // Both are KEYED warnings — `BlockSvg.setWarningText(text, id)` keeps one
 // message per id, so this writer can never clobber RunControls' IK pre-check
@@ -41,9 +42,7 @@ export const SAVED_NAME_WARNING_ID = 'edubotics_saved_name';
 /** Warning id for a „erzeuge Liste mit" the server will refuse. */
 export const LIST_SIZE_WARNING_ID = 'edubotics_list_too_long';
 
-// Mirror of `interpreter.py::MAX_LIST_CREATE_ITEMS`. The server counts FILLED
-// sockets, not the block's item count, so an empty socket is free — exactly
-// what this check counts, or the warning would appear on a block that runs.
+// Mirror of `interpreter.py::MAX_LIST_CREATE_ITEMS`.
 export const MAX_LIST_CREATE_ITEMS = 20;
 
 // [block type, field name, the validator that judges an EDIT of that field].
@@ -62,12 +61,26 @@ const NAME_FIELDS = [
   ['edubotics_replay_trajectory', 'NAME', trajectoryNameValidator],
 ];
 
-function filledListSockets(block) {
-  return block.inputList.filter((input) => (
-    /^ADD\d+$/.test(input.name)
-    && input.connection
-    && input.connection.targetBlock()
-  )).length;
+// The server's rule, both halves of it. `interpreter.py` collects the ADDk keys
+// the payload CONTAINS — an empty socket is omitted by the serializer, so only
+// filled ones count — and refuses when there are more than the cap OR when any
+// index reaches it: `len(add_indices) > 20 or max(add_indices) >= 20`. The
+// second half is not redundant, because the indices are the block's socket
+// NUMBERS, not a count: a list with 20 filled sockets one of which is ADD20, or
+// with just ADD0 and ADD24, is refused too. Counting only the filled sockets —
+// as this did until 2026-09-16 — left those a silent false negative: no warning
+// in the editor, a refused run on the rig.
+function refusedListIndices(block) {
+  const filled = block.inputList
+    .filter((input) => (
+      /^ADD\d+$/.test(input.name)
+      && input.connection
+      && input.connection.targetBlock()
+    ))
+    .map((input) => Number(input.name.slice(3)));
+  if (!filled.length) return false;
+  return filled.length > MAX_LIST_CREATE_ITEMS
+    || Math.max(...filled) >= MAX_LIST_CREATE_ITEMS;
 }
 
 function checkNames(workspace) {
@@ -90,8 +103,8 @@ function checkListLengths(workspace) {
   if (typeof workspace.getBlocksByType !== 'function') return;
   workspace.getBlocksByType('lists_create_with', false).forEach((block) => {
     if (!block || typeof block.setWarningText !== 'function') return;
-    const tooLong = filledListSockets(block) > MAX_LIST_CREATE_ITEMS;
-    block.setWarningText(tooLong ? DE.LIST_TOO_LONG_WARNING : null, LIST_SIZE_WARNING_ID);
+    const refused = refusedListIndices(block);
+    block.setWarningText(refused ? DE.LIST_TOO_LONG_WARNING : null, LIST_SIZE_WARNING_ID);
   });
 }
 

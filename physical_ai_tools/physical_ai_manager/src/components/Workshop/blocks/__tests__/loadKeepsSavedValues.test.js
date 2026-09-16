@@ -101,6 +101,20 @@ describe('a saved object type survives the catalog arriving late', () => {
       .toEqual([['Würfel', 'wuerfel'], ['Kugel', 'kugel']]);
   });
 
+  test('a catalog that is already loaded does not eat the saved type either', () => {
+    // The guard used to infer "not yet set" from the value the field HELD
+    // during the load. That is the „(lädt …)" placeholder only while the
+    // catalog is EMPTY — once one exists the default is its FIRST entry, so a
+    // saved „kugel" loaded as „wuerfel" and was saved back that way. Measured
+    // 2026-09-16; the flag replaced the inference.
+    setObjectCatalogOptions([['Würfel', 'wuerfel']]);
+    const { block, fields } = roundTrip({
+      type: 'edubotics_grasp_object', fields: { OBJECT_TYPE: 'kugel' },
+    });
+    expect(block.getFieldValue('OBJECT_TYPE')).toBe('kugel');
+    expect(fields.OBJECT_TYPE).toBe('kugel');
+  });
+
   test('the „(lädt …)" placeholder IS replaced — it is ours, not the student’s', () => {
     // The catalog is module state that outlives one test, exactly as it
     // outlives one workspace in the page: start from "nothing delivered".

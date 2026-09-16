@@ -94,13 +94,20 @@ function objectTypeOptions() {
     : null;
   if (!saved || saved === '__none__') return options;
   if (options.some(([, value]) => value === saved)) return options;
-  // Only while the block still HOLDS it: once the student picks something else
-  // the unknown type is theirs to lose, and the entry disappears with it. The
-  // placeholder counts as "not yet set" — DURING the load the field still holds
-  // it, and that is exactly when the entry has to be there for the incoming
-  // value to pass `doClassValidation_`.
+  // DURING the load the entry must be there unconditionally — that is the only
+  // moment `doClassValidation_` asks, and the field still holds its DEFAULT,
+  // which is the first CATALOG entry as soon as a catalog exists (it is the
+  // „(lädt …)" placeholder only on an empty one). Inferring "not yet set" from
+  // the held value therefore worked on an empty catalog and silently failed on
+  // a full one: a saved „kugel" loaded as „wuerfel". The flag is the fact; the
+  // held value is a guess.
+  if (this.eduLoadingObjectType_) {
+    return options.concat([[`${saved} ${DE.OBJECT_TYPE_UNKNOWN}`, saved]]);
+  }
+  // Afterwards: only while the block still HOLDS it. Once the student picks
+  // something else the unknown type is theirs to lose, and the entry goes too.
   const held = typeof this.getValue === 'function' ? this.getValue() : null;
-  if (held !== null && held !== saved && held !== '__none__') return options;
+  if (held !== null && held !== saved) return options;
   return options.concat([[`${saved} ${DE.OBJECT_TYPE_UNKNOWN}`, saved]]);
 }
 
@@ -118,15 +125,20 @@ function makeObjectTypeField() {
     : null;
   field.loadState = function loadSavedObjectType(state) {
     if (typeof state === 'string') field.eduSavedObjectType_ = state;
-    // FieldDropdown validates against its CACHED option list, which was built
-    // when the block was constructed — i.e. before the saved value was known.
-    // Re-running the generator un-cached is what puts the „(unbekannt)" entry
-    // in front of `doClassValidation_`; without it the value is still refused.
-    if (typeof field.getOptions === 'function') field.getOptions(false);
-    if (loadState) {
-      loadState(state);
-    } else {
-      field.setValue(state);
+    field.eduLoadingObjectType_ = true;
+    try {
+      // FieldDropdown validates against its CACHED option list, built when the
+      // block was constructed — i.e. before the saved value was known.
+      // Re-running the generator un-cached is what puts the „(unbekannt)" entry
+      // in front of `doClassValidation_`; without it the value is refused.
+      if (typeof field.getOptions === 'function') field.getOptions(false);
+      if (loadState) {
+        loadState(state);
+      } else {
+        field.setValue(state);
+      }
+    } finally {
+      field.eduLoadingObjectType_ = false;
     }
   };
   return field;

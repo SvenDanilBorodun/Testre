@@ -113,6 +113,24 @@ test('„erzeuge Liste mit" is flagged past the limit the server enforces', asyn
   expect(warningOf(block)).toContain(DE.LIST_TOO_LONG_WARNING);
 });
 
+test('a filled socket AT the limit index is flagged, even with few items', async () => {
+  // The server refuses on `len > 20 OR max(index) >= 20`, and the index half is
+  // not redundant: ADD0 + ADD24 is two items and a refused run. Counting only
+  // the filled sockets left that a silent false negative — no warning here, a
+  // German abort on the rig.
+  const block = Blockly.serialization.blocks.append(
+    { type: 'lists_create_with', extraState: { itemCount: 25 } }, workspace,
+  );
+  [0, 24].forEach((i) => {
+    const item = Blockly.serialization.blocks.append(
+      { type: 'math_number', fields: { NUM: i } }, workspace,
+    );
+    block.getInput(`ADD${i}`).connection.connect(item.outputConnection);
+  });
+  await flush();
+  expect(warningOf(block)).toContain(DE.LIST_TOO_LONG_WARNING);
+});
+
 test('a list at the limit is fine, and empty sockets do not count', async () => {
   const block = Blockly.serialization.blocks.append(
     { type: 'lists_create_with', extraState: { itemCount: MAX_LIST_CREATE_ITEMS + 5 } }, workspace,

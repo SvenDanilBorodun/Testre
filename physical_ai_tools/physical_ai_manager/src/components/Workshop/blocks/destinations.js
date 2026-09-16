@@ -10,6 +10,7 @@
 
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
+import { setEditValidator } from './fieldLoad';
 
 const DEST_COLOR = '#f59e0b';
 
@@ -213,10 +214,11 @@ function registerExtensionOnce(name, fn) {
 
 export function registerDestinationBlocks() {
   registerExtensionOnce('edubotics_validate_destination_name', function () {
-    const field = this.getField('NAME');
-    if (field && typeof field.setValidator === 'function') {
-      field.setValidator(nameValidator);
-    }
+    // setEditValidator, not setValidator: the same rule must guard a student's
+    // EDIT and keep its hands off a name the student already saved (blocks/
+    // fieldLoad.js). „Ablage.1" used to load as „Ablage1", and a name that was
+    // only punctuation collapsed to the block DEFAULT, so two pins could merge.
+    setEditValidator(this.getField('NAME'), nameValidator);
   });
   // Batch 2b — append the clickable „fahre dorthin" button as a third row on the
   // pin block. FieldImage with an onClick is Blockly's button-in-block idiom;

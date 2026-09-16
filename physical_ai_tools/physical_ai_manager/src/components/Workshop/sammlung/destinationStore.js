@@ -184,14 +184,47 @@ function normalizeList(rawEntries) {
   return out;
 }
 
-/** Saved state → a list of normalised entries. Total: never throws. */
+/**
+ * Saved state → a list of normalised entries. Total: never throws.
+ *
+ * Every INTERACTIVE path into this store refuses loudly (`add`, `rename` and
+ * `remove` all return a German reason the drawer shows). The LOAD path was the
+ * one exception: it dropped entries — and, on a version it does not know, the
+ * whole list — in silence, and the next save then wrote that loss back. The
+ * thresholds are right as defence-in-depth; only the silence was wrong, so this
+ * says what it dropped. `console.warn`, not a toast: a serializer callback has
+ * no route to the drawer, and this is for whoever has to explain a Ziel that
+ * vanished. Nothing in the classroom can reach it today (there is one version
+ * and the writer is this file), which is exactly why it must not stay mute when
+ * a second one arrives.
+ */
 export function loadState(state) {
   try {
     if (!state || typeof state !== 'object' || Array.isArray(state)) return [];
-    if (state.version !== DESTINATIONS_STATE_VERSION) return [];
+    if (state.version !== DESTINATIONS_STATE_VERSION) {
+      console.warn(
+        '[Sammlung] destinations dropped: state version',
+        state.version,
+        'is not',
+        DESTINATIONS_STATE_VERSION,
+      );
+      return [];
+    }
     if (!Array.isArray(state.entries)) return [];
-    return normalizeList(state.entries);
-  } catch (_) {
+    const entries = normalizeList(state.entries);
+    if (entries.length !== state.entries.length) {
+      console.warn(
+        '[Sammlung] destinations dropped on load:',
+        state.entries.length - entries.length,
+        'of',
+        state.entries.length,
+        '(invalid, duplicate, or past the cap of',
+        `${MAX_DESTINATION_ENTRIES})`,
+      );
+    }
+    return entries;
+  } catch (e) {
+    console.warn('[Sammlung] destinations could not be loaded', e);
     return [];
   }
 }

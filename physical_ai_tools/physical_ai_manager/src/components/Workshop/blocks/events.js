@@ -10,6 +10,7 @@
 
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
+import { setEditValidator } from './fieldLoad';
 
 const EVENT_COLOR = '#ec4899';
 
@@ -24,7 +25,7 @@ const HAT_SHAPE = {
 };
 
 const NAME_MAX_LEN = 40;
-function eventNameValidator(newValue) {
+export function eventNameValidator(newValue) {
   if (typeof newValue !== 'string') return null;
   const trimmed = newValue.trim();
   if (trimmed === '') return null;
@@ -67,10 +68,7 @@ function registerExtensionOnce(name, fn) {
 
 export function registerEventBlocks() {
   registerExtensionOnce('edubotics_validate_event_name', function () {
-    const f = this.getField('EVENT_NAME');
-    if (f && typeof f.setValidator === 'function') {
-      f.setValidator(eventNameValidator);
-    }
+    setEditValidator(this.getField('EVENT_NAME'), eventNameValidator);
   });
   // Audit round-3 §A — guard against re-definition on hot-reload or
   // Jest re-import. Blockly.defineBlocksWithJsonArray throws "Block

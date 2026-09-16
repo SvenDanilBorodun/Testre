@@ -12,6 +12,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import BlocklyWorkspace from '../../components/Workshop/BlocklyWorkspace';
+import { setObjectCatalogOptions } from '../../components/Workshop/blocks/perception';
+import { DEFAULT_OBJECT_CATALOG } from '../../components/Workshop/blocks/objectCatalogDefaults';
 import { slimSavePayload } from '../../utils/blocklyPayload';
 import {
   listClassroomTemplates,
@@ -41,6 +43,14 @@ function WorkflowTemplatesPage({ classroomId }) {
       setLoading(false);
     }
   }, [accessToken, classroomId]);
+
+  // The teacher-web build has no rosbridge, so nothing ever delivers the object
+  // catalog here and every „Greife"-type block in a template was published with
+  // the „(lädt …)" placeholder as its object type. Seed the list the server
+  // ships; a student rig replaces it with the live one.
+  useEffect(() => {
+    setObjectCatalogOptions(DEFAULT_OBJECT_CATALOG);
+  }, []);
 
   useEffect(() => {
     refetch();

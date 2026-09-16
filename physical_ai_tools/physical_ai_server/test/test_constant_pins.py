@@ -157,6 +157,9 @@ ALLOWLIST: dict[str, str] = {
 # obvious diff.
 _SHIPPED_DEFAULTS = [
     ('workflow/interpreter.py', 'MAX_LIST_ITEMS', '1000'),
+    # The editor MIRRORS this one (blocks/savedValueWarnings.js), so a move here
+    # silently desynchronises the warning a student sees from the refusal.
+    ('workflow/interpreter.py', 'MAX_LIST_CREATE_ITEMS', '20'),
     ('workflow/interpreter.py', 'WAIT_UNTIL_MAX_SECONDS', '300.0'),
     ('workflow/interpreter.py', '_MAX_VAR_PAYLOAD_CHARS', '2000'),
     ('workflow/interpreter.py', '_MAX_VAR_PAYLOAD_ITEMS', '200'),

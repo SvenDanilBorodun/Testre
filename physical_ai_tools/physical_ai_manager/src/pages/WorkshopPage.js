@@ -16,6 +16,7 @@ import CalibrationWizard from '../components/Workshop/CalibrationWizard';
 import { HomeGlideProvider } from '../components/Workshop/HomeGlidePrompt';
 import LeaderToggle from '../components/Workshop/LeaderToggle';
 import BlocklyWorkspace from '../components/Workshop/BlocklyWorkspace';
+import { DEFAULT_OBJECT_CATALOG } from '../components/Workshop/blocks/objectCatalogDefaults';
 import RunControls from '../components/Workshop/RunControls';
 import CameraFeedOverlay from '../components/Workshop/CameraFeedOverlay';
 import SimStage from '../components/Workshop/SimStage';
@@ -189,7 +190,9 @@ function addOpenTab(openIds, id, isBusy) {
 // real type in the server's FIXED object set (`wuerfel`,
 // object_catalog.py::_FIXED_CATALOG) — else the server drops every placed object
 // silently. `wuerfel` is always present in the fixed set.
-const SIM_DEFAULT_CATALOG = [['Würfel', 'wuerfel']];
+// One copy, in blocks/objectCatalogDefaults.js — shared with the teacher-web
+// template editor, which has no robot to ask either.
+const SIM_DEFAULT_CATALOG = DEFAULT_OBJECT_CATALOG;
 // Phase-4: `zones` is a first-class key alongside `objects` (no-go Sperrzonen).
 // hydrate/save round-trip the whole sim_scene unchanged, so persisted zones ride
 // along in workflows.sim_scene.zones.

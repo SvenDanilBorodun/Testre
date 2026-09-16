@@ -92,9 +92,20 @@ _MAX_VAR_PAYLOAD_CHARS = 2000
 # with no evidence that more is better.
 _MAX_VAR_PAYLOAD_ITEMS = 200
 
+# Hard cap on the number of FILLED sockets a ``lists_create_with`` may carry.
+#
+# This is OURS, not Blockly's. The old comment claimed it was "its mutator's own
+# limit" — measured false on 2026-09-16 against Blockly 12.5.1 AND
+# @blockly/block-plus-minus 9.0.10: neither the gear dialog nor ⊕ has any limit,
+# and ⊕ reached 43 sockets, which serialized and loaded fine. So the editor could
+# always build a block this refuses; `blocks/savedValueWarnings.js` is the half
+# that now says so while the program is still being written, and it mirrors THIS
+# constant. Counting filled sockets (not the block's item count) is deliberate:
+# an empty socket contributes nothing to the materialized list.
+MAX_LIST_CREATE_ITEMS = 20
+
 # Hard cap on the length of a list a single block may materialize.
-# ``lists_create_with`` has always been capped at 20 (its mutator's own limit),
-# but ``lists_repeat`` had NO cap: measured 5 000 000 elements in 0.38 s and
+# ``lists_repeat`` had NO cap: measured 5 000 000 elements in 0.38 s and
 # 100 000 000 in 0.04 s from a two-block program, inside the ROS node whose
 # container mem_limit is 6g. This is the classroom-generous ceiling for the
 # blocks that BUILD a list; it is deliberately far above any teaching use and
@@ -2149,9 +2160,11 @@ class Interpreter:
                     if suffix.isdigit():
                         add_indices.append(int(suffix))
             if add_indices:
-                if len(add_indices) > 20 or max(add_indices) >= 20:
+                if (len(add_indices) > MAX_LIST_CREATE_ITEMS
+                        or max(add_indices) >= MAX_LIST_CREATE_ITEMS):
                     raise InterpreterError(
-                        'Listen-Erstellen-Block ist auf 20 Elemente begrenzt.'
+                        f'Listen-Erstellen-Block ist auf '
+                        f'{MAX_LIST_CREATE_ITEMS} Elemente begrenzt.'
                     )
                 add_indices.sort()
                 items: list[Any] = []
@@ -2171,8 +2184,9 @@ class Interpreter:
             if not math.isfinite(raw_n):
                 raise InterpreterError('Anzahl ist keine gültige Zahl.')
             n = max(0, int(raw_n))
-            # lists_create_with has always been capped (at its mutator's 20);
-            # this one had NO cap at all, so a two-block program materialized
+            # lists_create_with is capped by MAX_LIST_CREATE_ITEMS above (ours,
+            # not the mutator's — it has none); this one had NO cap at all, so a
+            # two-block program materialized
             # 5 000 000 elements in 0.38 s inside the ROS node. Raise rather
             # than silently truncate — a student who asked for 5 000 000 has a
             # bug, and a quietly shortened list is a wrong answer.

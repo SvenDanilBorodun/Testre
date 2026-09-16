@@ -51,6 +51,35 @@ export const DE = {
   BACKPACK_REMOVE: 'Aus dem Rucksack entfernen',
   BACKPACK_EMPTY: 'Rucksack leeren',
 
+  // @blockly/block-plus-minus writes `Blockly.Msg.PROCEDURE_VARIABLE` in
+  // ENGLISH („variable:") at module evaluation, and Blockly's German catalog
+  // has no such key — so every parameter row of every „Funktion" block read
+  // „variable: x". Assigned right after the plugin import, for the same reason
+  // the backpack strings are.
+  PROCEDURE_VARIABLE: 'Variable:',
+
+  // @blockly/plugin-workspace-search hardcodes its four strings in English.
+  // They are the Ctrl+F bar's placeholder and the aria-labels of its three
+  // buttons, i.e. the only text that plugin shows a student.
+  SEARCH_PLACEHOLDER: 'Suchen',
+  SEARCH_NEXT: 'Nächster Treffer',
+  SEARCH_PREVIOUS: 'Vorheriger Treffer',
+  SEARCH_CLOSE: 'Suche schließen',
+
+  // Editor-side warnings for a SAVED value the robot refuses. The load path
+  // keeps such a value verbatim (blocks/fieldLoad.js), so this is what tells
+  // the student, on the block, instead of the name being silently repaired.
+  SAVED_NAME_WARNING:
+    'Dieser Name passt nicht mehr zu den erlaubten Zeichen. Der Roboter lehnt '
+    + 'ihn ab — bitte tippe den Namen neu ein.',
+  LIST_TOO_LONG_WARNING:
+    'Diese Liste hat mehr als 20 gefüllte Felder. So viele nimmt der Roboter '
+    + 'nicht an — bitte entferne ein paar.',
+
+  // Appended to an object type a block was saved with while the object list
+  // does not (yet) contain it, so the student can see it is being kept.
+  OBJECT_TYPE_UNKNOWN: '(unbekannt)',
+
   // Motion blocks
   HOME: 'Heimposition',
   OPEN_GRIPPER: 'Greifer öffnen',

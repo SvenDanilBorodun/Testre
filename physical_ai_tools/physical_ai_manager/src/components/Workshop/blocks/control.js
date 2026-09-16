@@ -158,12 +158,15 @@ export function attachControlWorkspaceValidators(workspace) {
 //
 // The fix re-registers `controls_if_mutator` a THIRD time, after the plugin,
 // with the plugin's semantics plus an else toggle. Registration therefore
-// cannot live in `registerControlBlocks()` — that runs synchronously at
-// injection time, long before `initPlugins`' dynamic
-// `import('@blockly/block-plus-minus')` resolves and clobbers it. It is called
-// from `initPlugins` instead, immediately after that import (the plugin is
-// lazy-loaded on purpose: CLAUDE.md keeps every `@blockly/*` plugin out of the
-// entry bundle).
+// cannot live in `registerControlBlocks()` — the plugin's own registration
+// lands at IMPORT time and would simply overwrite it. It is called from
+// `BlocklyWorkspace.jsx::loadPluginModules`'s `.then()` instead, immediately
+// after that import resolves and BEFORE the first `Blockly.inject` (the plugin
+// is lazy-loaded on purpose: CLAUDE.md keeps every `@blockly/*` plugin out of
+// the entry bundle). That ordering is what makes the ⊕/⊖ UI the ONLY one a
+// student ever sees; when the plugin loaded after inject, the same block showed
+// Blockly's gear or the ⊕ depending on when it was created. It is pinned by
+// `__tests__/BlocklyWorkspace.test.jsx`.
 //
 // SERIALIZATION IS UNCHANGED, and that is the whole backward-safety argument:
 // the state keys stay `elseIfCount` (number, omitted when 0) and `hasElse`
@@ -464,10 +467,13 @@ function controlsIfElseHelper() {
  * Idempotent: re-registering the same name is what both Blockly core and the
  * plugin already do, and mixins are applied per block at CONSTRUCTION time, so
  * blocks that already exist keep whichever mutator they were built with. That
- * is also why blocks restored by `Blockly.serialization.workspaces.load` on the
- * injection tick keep Blockly core's mutator (the load is synchronous, the
- * plugin import is not) — they already had a working else via the gear dialog,
- * and both mutators write the same bytes.
+ * is exactly why the CALLER must run before any workspace is injected — which
+ * `loadPluginModules` guarantees by awaiting the plugin modules first. Until
+ * 2026-09-13 it did not, and a program restored on the injection tick kept
+ * Blockly's GEAR while a block dragged in a moment later got the ⊕: the same
+ * block type with two different editing UIs in one workspace, decided by which
+ * chunk had arrived. Both mutators write the same bytes, so nothing was lost —
+ * it just looked broken and could not grow a „sonst".
  */
 export function registerControlsIfElseMutator() {
   if (Blockly.Extensions.isRegistered('controls_if_mutator')) {

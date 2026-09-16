@@ -26,6 +26,8 @@ import {
 } from './blocks/control';
 import { registerCounterBlocks } from './blocks/counters';
 import { registerTrajectoryBlocks } from './blocks/trajectories';
+import { registerProcedureCallArgumentFix } from './blocks/procedures';
+import { attachSavedValueWarnings } from './blocks/savedValueWarnings';
 import { registerDestinationSerializer } from './sammlung/destinationStore';
 import { registerAssetCardInflater } from './sammlung/AssetCardInflater';
 import { registerSammlungCategories } from './sammlung/toolboxCategories';
@@ -50,7 +52,26 @@ function registerAllBlocksOnce() {
   registerDestinationSerializer();
   // The Sammlung flyout card item (a registry CLASS, instantiated per flyout).
   registerAssetCardInflater();
+  removeEnglishHelpMenuItem();
   blocksRegistered = true;
+}
+
+// „Hilfe" in a block's right-click menu opens `block.getHelpUrl()`. Every
+// EduBotics block leaves that empty (measured null), so the entry only ever
+// appears on Blockly's own built-ins — where all 34 URLs in the German catalog
+// point at ENGLISH pages (the Blockly wiki, Wikipedia). Sending a German-
+// speaking student there is worse than not offering the entry, and overriding
+// 34 upstream URLs by hand is a maintenance burden with no owner. Unregistering
+// the item removes it from the built-ins and changes nothing for our own blocks,
+// which never showed it. Global (ContextMenuRegistry is), hence once, here.
+function removeEnglishHelpMenuItem() {
+  try {
+    if (Blockly.ContextMenuRegistry.registry.getItem('blockHelp')) {
+      Blockly.ContextMenuRegistry.registry.unregister('blockHelp');
+    }
+  } catch (e) {
+    console.warn('help context-menu item could not be removed', e);
+  }
 }
 
 // Plugin MODULES are loaded BEFORE the first Blockly.inject() and never after.
@@ -108,6 +129,22 @@ function loadPluginModules() {
         } catch (e) {
           console.warn('controls_if mutator re-registration failed', e);
         }
+        // Same seam, same reason: the plugin replaces the „Funktion" DEFINITION
+        // blocks at import time, and its ⊖ made every CALL block re-attach its
+        // arguments by POSITION — so removing a parameter silently moved the
+        // remaining values onto the wrong parameters (blocks/procedures.js).
+        try {
+          registerProcedureCallArgumentFix();
+        } catch (e) {
+          console.warn('procedure call argument fix failed', e);
+        }
+        // The plugin also writes `Blockly.Msg.PROCEDURE_VARIABLE = "variable:"`
+        // at module evaluation, which is the one English string it shows.
+        try {
+          Blockly.Msg.PROCEDURE_VARIABLE = DE.PROCEDURE_VARIABLE;
+        } catch (e) {
+          console.warn('procedure German strings failed', e);
+        }
       }
       return { search, backpack, zoomToFit, suggested };
     });
@@ -130,6 +167,31 @@ function germanizeBackpackMenu() {
   Blockly.Msg.PASTE_ALL_FROM_BACKPACK = DE.BACKPACK_PASTE_ALL;
   Blockly.Msg.REMOVE_FROM_BACKPACK = DE.BACKPACK_REMOVE;
   Blockly.Msg.EMPTY_BACKPACK = DE.BACKPACK_EMPTY;
+}
+
+// @blockly/plugin-workspace-search 10.1.8 hardcodes its four strings in
+// English — it reads no `Blockly.Msg` key for them, so they have to be fixed on
+// the DOM the plugin just built: the Ctrl+F bar's input placeholder and the
+// aria-labels of its next / previous / close buttons. Measured in the shipped
+// bundle: placeholder "Search", labels "Find next", "Find previous", "Close
+// search bar". Best-effort by design — a plugin version that renames a class
+// simply leaves the English in place rather than breaking the editor.
+const SEARCH_BAR_STRINGS = [
+  ['.blockly-ws-search-input input', 'placeholder', () => DE.SEARCH_PLACEHOLDER],
+  ['.blockly-ws-search-next-btn', 'aria-label', () => DE.SEARCH_NEXT],
+  ['.blockly-ws-search-previous-btn', 'aria-label', () => DE.SEARCH_PREVIOUS],
+  ['.blockly-ws-search-close-btn', 'aria-label', () => DE.SEARCH_CLOSE],
+];
+function germanizeSearchBar(workspace) {
+  const root = workspace.getInjectionDiv
+    ? workspace.getInjectionDiv()
+    : null;
+  const bar = root && root.querySelector('.blockly-ws-search');
+  if (!bar) return;
+  SEARCH_BAR_STRINGS.forEach(([selector, attribute, text]) => {
+    const el = bar.querySelector(selector);
+    if (el) el.setAttribute(attribute, text());
+  });
 }
 
 // The only text @blockly/suggested-blocks shows a student is this hardcoded
@@ -240,7 +302,9 @@ function initPlugins(workspace, { search, backpack, zoomToFit, suggested }, { re
   if (search) {
     guard('plugin-workspace-search', () => {
       const Cls = search.WorkspaceSearch || search.default;
-      if (Cls) new Cls(workspace).init();
+      if (!Cls) return;
+      new Cls(workspace).init();
+      germanizeSearchBar(workspace);
     });
   }
   // A backpack is a drag/delete target — meaningless on a read-only preview,
@@ -396,6 +460,9 @@ function BlocklyWorkspace({
         workspace,
         sammlungProviderRef,
       );
+      // A saved value the robot refuses is KEPT (blocks/fieldLoad.js) and
+      // marked on the block instead of being silently repaired.
+      const disposeSavedValueWarnings = attachSavedValueWarnings(workspace);
 
       initPlugins(workspace, plugins, { readOnly, hasInitialJson: !!initialJson });
 
@@ -420,23 +487,35 @@ function BlocklyWorkspace({
         onWorkspaceReadyRef.current(workspace);
       }
 
-      // Suppress the synthetic change event Blockly fires while loading
-      // the initial JSON; otherwise the parent's onChange handler
-      // dispatches setUnsavedBlocklyJson(null) on first mount and
-      // clobbers Redux state (audit §1.5).
-      let loadingInitial = false;
+      // Suppress the synthetic change events Blockly fires while loading the
+      // initial JSON; otherwise the parent's onChange handler mirrors a program
+      // the student has not touched back into Redux and the autosave (audit
+      // §1.5).
+      //
+      // A flag set around the `load()` CALL cannot do this: Blockly delivers
+      // every load event ASYNCHRONOUSLY, long after the call has returned, so
+      // the old `loadingInitial` was always false by the time they arrived —
+      // measured 2026-09-16, 19 onChange calls with no user action. The
+      // workspace's own FINISHED_LOADING event is the end of the load, and it
+      // is queued behind them, so it is the signal that actually separates "the
+      // document as saved" from "the student changed something".
+      let loadingInitial = !!initialJson;
       if (initialJson) {
         try {
-          loadingInitial = true;
           Blockly.serialization.workspaces.load(initialJson, workspace);
         } catch (e) {
           console.error('BlocklyWorkspace: failed to load initial JSON', e);
-        } finally {
+          // A load that threw fires no FINISHED_LOADING; forward again at once
+          // rather than going deaf for the workspace's lifetime.
           loadingInitial = false;
         }
       }
 
-      const handleChange = () => {
+      const handleChange = (event) => {
+        if (event && event.type === Blockly.Events.FINISHED_LOADING) {
+          loadingInitial = false;
+          return;
+        }
         if (disposed || loadingInitial) return;
         const fn = onChangeRef.current;
         if (typeof fn !== 'function') return;
@@ -465,6 +544,9 @@ function BlocklyWorkspace({
         } catch (_) { /* already disposed */ }
         try {
           disposeReferenceValidators();
+        } catch (_) { /* already disposed */ }
+        try {
+          disposeSavedValueWarnings();
         } catch (_) { /* already disposed */ }
         workspace.dispose();
         workspaceRef.current = null;

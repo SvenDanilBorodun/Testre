@@ -81,8 +81,55 @@ let OBJECT_TYPE_OPTIONS = _objectTypePlaceholder();
 // Passed to new Blockly.FieldDropdown(...). Blockly re-invokes it whenever the
 // menu (re)renders, so once the cache is filled the menu shows real options.
 // MUST always return a non-empty [label, value] array.
+//
+// Blockly calls the generator with the FIELD as `this`, which is what lets a
+// block keep an object type the catalog does not (yet) know: a FieldDropdown
+// REFUSES any value outside its options, so without this entry a saved
+// „kugel" was dropped to the „(lädt …)" placeholder on load and then written
+// back over the student's file. See makeObjectTypeField below.
 function objectTypeOptions() {
-  return OBJECT_TYPE_OPTIONS.length ? OBJECT_TYPE_OPTIONS : _objectTypeEmpty();
+  const options = OBJECT_TYPE_OPTIONS.length ? OBJECT_TYPE_OPTIONS : _objectTypeEmpty();
+  const saved = this && typeof this.eduSavedObjectType_ === 'string'
+    ? this.eduSavedObjectType_
+    : null;
+  if (!saved || saved === '__none__') return options;
+  if (options.some(([, value]) => value === saved)) return options;
+  // Only while the block still HOLDS it: once the student picks something else
+  // the unknown type is theirs to lose, and the entry disappears with it. The
+  // placeholder counts as "not yet set" — DURING the load the field still holds
+  // it, and that is exactly when the entry has to be there for the incoming
+  // value to pass `doClassValidation_`.
+  const held = typeof this.getValue === 'function' ? this.getValue() : null;
+  if (held !== null && held !== saved && held !== '__none__') return options;
+  return options.concat([[`${saved} ${DE.OBJECT_TYPE_UNKNOWN}`, saved]]);
+}
+
+// One OBJECT_TYPE field, with the saved value remembered across the load.
+//
+// `loadState` is the only hook Blockly calls exclusively from the serializer
+// (blocks/fieldLoad.js explains the seam), and it runs BEFORE the value is
+// validated — which is exactly what the generator needs, because
+// `doClassValidation_` asks for the options while the field still holds its
+// DEFAULT and would otherwise never see the incoming value.
+function makeObjectTypeField() {
+  const field = new Blockly.FieldDropdown(objectTypeOptions);
+  const loadState = typeof field.loadState === 'function'
+    ? field.loadState.bind(field)
+    : null;
+  field.loadState = function loadSavedObjectType(state) {
+    if (typeof state === 'string') field.eduSavedObjectType_ = state;
+    // FieldDropdown validates against its CACHED option list, which was built
+    // when the block was constructed — i.e. before the saved value was known.
+    // Re-running the generator un-cached is what puts the „(unbekannt)" entry
+    // in front of `doClassValidation_`; without it the value is still refused.
+    if (typeof field.getOptions === 'function') field.getOptions(false);
+    if (loadState) {
+      loadState(state);
+    } else {
+      field.setValue(state);
+    }
+  };
+  return field;
 }
 
 let _workspaceAccessor = null;
@@ -93,8 +140,17 @@ export function setWorkspaceAccessor(fn) {
 }
 
 // Re-resolve + re-render every live OBJECT_TYPE dropdown after the catalog
-// arrives (the generator's cached option list + a now-invalid stored value
-// would otherwise persist on a block dragged out before the fetch resolved).
+// arrives (the generator's cached option list would otherwise persist on a
+// block dragged out before the fetch resolved).
+//
+// It promotes the PLACEHOLDER and nothing else. Snapping every value the
+// catalog does not contain to `valid[0]` is what turned a saved „kugel" into
+// „wuerfel" the moment the catalog landed — silently, unundoably (Blockly
+// refuses to set the placeholder back), and on the ORDINARY lesson-start path,
+// since the catalog fetch waits for `calibrated || simMode` while
+// EDUBOTICS_FORCE_RECALIBRATION ships ON. A block the student never touched
+// keeps what the student saved; only „(lädt …)" — which is ours, not theirs —
+// is replaced.
 function refreshObjectTypeDropdowns() {
   const ws = _workspaceAccessor ? _workspaceAccessor() : null;
   if (!ws || typeof ws.getAllBlocks !== 'function') return;
@@ -104,8 +160,8 @@ function refreshObjectTypeDropdowns() {
     const field = b.getField('OBJECT_TYPE');
     if (!field) return;
     if (typeof field.getOptions === 'function') field.getOptions(false); // re-run generator, un-cached
-    if (valid.length && !valid.includes(field.getValue())) {
-      field.setValue(valid[0]); // snap a stale/placeholder value to a real type
+    if (valid.length && field.getValue() === '__none__' && valid[0] !== '__none__') {
+      field.setValue(valid[0]); // the placeholder is ours to replace
     }
     if (typeof field.forceRerender === 'function') field.forceRerender();
   });
@@ -166,7 +222,7 @@ export function registerPerceptionBlocks() {
       init() {
         this.appendDummyInput()
           .appendField(DE.WHILE_VISIBLE_PREFIX)
-          .appendField(new Blockly.FieldDropdown(objectTypeOptions), 'OBJECT_TYPE')
+          .appendField(makeObjectTypeField(), 'OBJECT_TYPE')
           .appendField(DE.WHILE_VISIBLE_SUFFIX)
           // #6 optional repetition cap: 0 = unbegrenzt (the server's wall-clock
           // and no-progress guards still bound it). The field key MAX_REPS is
@@ -191,7 +247,7 @@ export function registerPerceptionBlocks() {
       init() {
         this.appendDummyInput()
           .appendField(DE.WAIT_UNTIL_OBJECT_SEEN_PREFIX)
-          .appendField(new Blockly.FieldDropdown(objectTypeOptions), 'OBJECT_TYPE')
+          .appendField(makeObjectTypeField(), 'OBJECT_TYPE')
           .appendField(DE.WAIT_UNTIL_OBJECT_SEEN_MID)
           .appendField(
             new Blockly.FieldNumber(10, TIMEOUT_MIN_S, TIMEOUT_MAX_S, 1), 'TIMEOUT')
@@ -234,7 +290,7 @@ export function registerPerceptionBlocks() {
       init() {
         this.appendDummyInput()
           .appendField(DE.WHEN_OBJECT_SEEN_PREFIX)
-          .appendField(new Blockly.FieldDropdown(objectTypeOptions), 'OBJECT_TYPE')
+          .appendField(makeObjectTypeField(), 'OBJECT_TYPE')
           .appendField(DE.WHEN_OBJECT_SEEN_SUFFIX);
         this.setNextStatement(true, null);   // hat: top-only
         this.setColour(PERCEPTION_COLOR);
@@ -262,7 +318,7 @@ function defineObjectTypeBlock(type, prefix, kind, tooltip) {
     init() {
       this.appendDummyInput()
         .appendField(prefix)
-        .appendField(new Blockly.FieldDropdown(objectTypeOptions), 'OBJECT_TYPE');
+        .appendField(makeObjectTypeField(), 'OBJECT_TYPE');
       if (kind === 'statement') {
         this.setPreviousStatement(true, null);
         this.setNextStatement(true, null);

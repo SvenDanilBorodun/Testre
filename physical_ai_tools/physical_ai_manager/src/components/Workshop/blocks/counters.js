@@ -10,6 +10,7 @@
 
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
+import { setEditValidator } from './fieldLoad';
 
 // Cyan hue, distinct from the existing category colours; mirrored by the
 // „Zähler" toolbox category in toolbox.js.
@@ -102,10 +103,7 @@ function registerExtensionOnce(name, fn) {
 
 export function registerCounterBlocks() {
   registerExtensionOnce('edubotics_validate_counter_name', function () {
-    const f = this.getField('NAME');
-    if (f && typeof f.setValidator === 'function') {
-      f.setValidator(counterNameValidator);
-    }
+    setEditValidator(this.getField('NAME'), counterNameValidator);
   });
   // Skip re-definition on HMR / Jest re-import (defineBlocksWithJsonArray throws
   // "Block type X is already defined" the second time). Mirrors events.js §A.

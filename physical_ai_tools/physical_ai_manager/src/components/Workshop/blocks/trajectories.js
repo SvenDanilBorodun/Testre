@@ -10,6 +10,7 @@
 
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
+import { setEditValidator } from './fieldLoad';
 
 // Batch 2b — recorded-motion replay. A student shows a hand-guided motion in
 // „✋ Vormachen" (teach/TeachOverlay; saved as a named trajectory on the cloud
@@ -35,7 +36,7 @@ const TRAJECTORY_COLOR = '#3b82f6';
 // reject the control + bracket chars that would break audit-log scraping or
 // spoof a [VAR:..]/[TOAST:..] sentinel.
 const NAME_MAX_LEN = 40;
-function nameValidator(newValue) {
+export function trajectoryNameValidator(newValue) {
   if (typeof newValue !== 'string') return null;
   const trimmed = newValue.trim();
   if (trimmed === '') return null;
@@ -68,10 +69,9 @@ function registerExtensionOnce(name, fn) {
 
 export function registerTrajectoryBlocks() {
   registerExtensionOnce('edubotics_validate_trajectory_name', function () {
-    const field = this.getField('NAME');
-    if (field && typeof field.setValidator === 'function') {
-      field.setValidator(nameValidator);
-    }
+    // A recording is addressed BY NAME, so a load-time rewrite could point the
+    // block at a different real recording („Bewegung [2]" became „Bewegung 1").
+    setEditValidator(this.getField('NAME'), trajectoryNameValidator);
   });
   // HMR / Jest re-import guard — defineBlocksWithJsonArray throws on a
   // second definition of the same type (audit round-3 §A idiom).

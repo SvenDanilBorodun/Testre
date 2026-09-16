@@ -178,6 +178,74 @@ describe('BlocklyWorkspace — plugins load before inject', () => {
     expect(() => Blockly.Css.register('.late-plugin{}')).toThrow(/CSS already injected/);
     unmount();
   });
+
+  // The ORDER, pinned through the production wiring rather than through a
+  // test's own beforeAll — which is what the plugin tests above could not see.
+  // Until 2026-09-13 the +/− plugin was imported AFTER Blockly.inject, so a
+  // program restored on the injection tick kept Blockly's GEAR while a block
+  // dragged in a second later got the ⊕: the same block type, two editing UIs,
+  // decided by which chunk had arrived. Moving that import back — or moving
+  // registerControlsIfElseMutator into registerControlBlocks — keeps every
+  // other test green and fails these two.
+  const MUTATOR_BLOCKS = [
+    'controls_if', 'lists_create_with', 'text_join',
+    'procedures_defnoreturn', 'procedures_defreturn',
+  ];
+
+  it('gives every mutator block the ⊕/⊖ UI, never Blockly’s gear', async () => {
+    const saved = {
+      blocks: {
+        languageVersion: 0,
+        blocks: MUTATOR_BLOCKS.map((type, i) => ({ type, x: 0, y: i * 80 })),
+      },
+    };
+    const { ws, unmount } = await mountEditor({ initialJson: saved });
+    // Restored with the document …
+    ws.getTopBlocks(false).forEach((block) => {
+      expect(block.hasIcon(Blockly.icons.MutatorIcon.TYPE)).toBe(false);
+    });
+    // … and created afterwards, the way a block leaves the flyout.
+    MUTATOR_BLOCKS.forEach((type) => {
+      const block = Blockly.serialization.blocks.append({ type }, ws);
+      expect(block.hasIcon(Blockly.icons.MutatorIcon.TYPE)).toBe(false);
+    });
+    unmount();
+  });
+
+  it('lets a freshly dragged „wenn" grow a „sonst"', async () => {
+    const { ws, unmount } = await mountEditor();
+    const block = Blockly.serialization.blocks.append({ type: 'controls_if' }, ws);
+    // The plugin's own mutator has no else toggle at all; ours adds this row.
+    expect(block.inputList.map((input) => input.name)).toContain('ELSE_ADD');
+    unmount();
+  });
+
+  it('says every plugin string in German', async () => {
+    const { unmount } = await mountEditor();
+    // @blockly/block-plus-minus sets this one to „variable:" at import.
+    expect(Blockly.Msg.PROCEDURE_VARIABLE).toBe(DE.PROCEDURE_VARIABLE);
+    // @blockly/plugin-workspace-search hardcodes these four in English.
+    const bar = findInDocument('.blockly-ws-search');
+    expect(bar).toBeTruthy();
+    expect(find(bar, '.blockly-ws-search-input input').getAttribute('placeholder'))
+      .toBe(DE.SEARCH_PLACEHOLDER);
+    expect(find(bar, '.blockly-ws-search-next-btn').getAttribute('aria-label'))
+      .toBe(DE.SEARCH_NEXT);
+    expect(find(bar, '.blockly-ws-search-previous-btn').getAttribute('aria-label'))
+      .toBe(DE.SEARCH_PREVIOUS);
+    expect(find(bar, '.blockly-ws-search-close-btn').getAttribute('aria-label'))
+      .toBe(DE.SEARCH_CLOSE);
+    unmount();
+  });
+
+  it('offers no „Hilfe" that would open an English page', async () => {
+    const { unmount } = await mountEditor();
+    // Every EduBotics block leaves helpUrl empty, so the entry only ever showed
+    // on Blockly's built-ins — all 34 of whose German-catalog URLs are English
+    // pages.
+    expect(Blockly.ContextMenuRegistry.registry.getItem('blockHelp')).toBeFalsy();
+    unmount();
+  });
 });
 
 describe('BlocklyWorkspace — corner controls', () => {

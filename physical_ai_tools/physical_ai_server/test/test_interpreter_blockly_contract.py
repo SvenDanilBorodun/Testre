@@ -44,6 +44,7 @@ import pytest
 from physical_ai_server.workflow.interpreter import (
     Interpreter,
     InterpreterError,
+    MAX_LIST_CREATE_ITEMS,
     MAX_LIST_ITEMS,
     MAX_TEXT_CHARS,
     _BUILTIN_VALUE_TYPES,
@@ -1087,6 +1088,38 @@ def _list_of(*values):
             'extraState': {'itemCount': len(values)},
             'inputs': {f'ADD{i}': {'block': _num(v)}
                        for i, v in enumerate(values)}}
+
+
+def test_the_list_create_limit_counts_filled_sockets():
+    """The editor mirrors THIS number (blocks/savedValueWarnings.js).
+
+    It is ours, not Blockly's: neither the gear dialog nor the +/- plugin caps
+    a ``lists_create_with`` at all (measured 43 sockets), so the editor could
+    always build a block this refuses. Counting FILLED sockets is the contract
+    the editor's warning copies — a block with many empty sockets still runs.
+
+    *Kills:* re-hardcoding 20, or switching either side to the item count.
+    """
+    ctx = _Ctx()
+    at_limit = _list_of(*range(MAX_LIST_CREATE_ITEMS))
+    _run([{'type': 'variables_set', 'fields': {'VAR': 'x'},
+           'inputs': {'VALUE': {'block': at_limit}}}], ctx)
+    assert ctx.variables['x'] == list(range(MAX_LIST_CREATE_ITEMS))
+
+    over = _list_of(*range(MAX_LIST_CREATE_ITEMS + 1))
+    with pytest.raises(InterpreterError) as exc:
+        _run([{'type': 'variables_set', 'fields': {'VAR': 'y'},
+               'inputs': {'VALUE': {'block': over}}}], ctx)
+    assert str(MAX_LIST_CREATE_ITEMS) in str(exc.value), str(exc.value)
+
+    # An EMPTY socket costs nothing: the same block with one value at a far
+    # index is refused for its INDEX, while a short filled list is fine.
+    sparse = {'type': 'lists_create_with',
+              'inputs': {'ADD0': {'block': _num(1)},
+                         f'ADD{MAX_LIST_CREATE_ITEMS}': {'block': _num(2)}}}
+    with pytest.raises(InterpreterError):
+        _run([{'type': 'variables_set', 'fields': {'VAR': 'z'},
+               'inputs': {'VALUE': {'block': sparse}}}], ctx)
 
 
 @pytest.mark.parametrize('mode', ['GET', 'GET_REMOVE'])

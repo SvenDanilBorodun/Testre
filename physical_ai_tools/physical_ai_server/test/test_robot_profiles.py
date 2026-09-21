@@ -486,3 +486,26 @@ def test_registry_wide_invariants():
         # 'scene' is mandatory everywhere (Roboter Studio perception).
         assert 'scene' in prof.camera_roles
         assert prof.torque_service.startswith('/')
+
+
+# --- code_languages (Roboter Studio coding suite, WP3 §3.9) ----------------
+
+@pytest.mark.parametrize('pid', ['omx_full', 'omx_follower',
+                                 'edu6_studio', 'edu1_studio'])
+def test_caps_json_advertises_both_code_languages(pid):
+    """Every profile's manifest carries code_languages ['python', 'java'] — the
+    static image capability React's codeRunBlockReason keys on. Additive: the
+    six-boolean adopt-guard is unaffected (a list, not a boolean)."""
+    obj = json.loads(rp.capabilities_json(rp.resolve(pid)))
+    assert obj['code_languages'] == ['python', 'java']
+    # the six-boolean contract still holds beside it.
+    assert set(_CAP_KEYS) <= set(obj.keys())
+
+
+def test_code_languages_matches_the_code_program_twin():
+    """The manifest literal is the twin of workflow.code_program.CODE_LANGUAGES
+    (kept a literal in robot_profiles rather than imported to avoid pulling the
+    RPC/handler stack into the identity module)."""
+    from physical_ai_server.workflow.code_program import CODE_LANGUAGES
+    obj = json.loads(rp.capabilities_json(rp.resolve('omx_full')))
+    assert obj['code_languages'] == list(CODE_LANGUAGES)

@@ -125,6 +125,17 @@ describe('taskSlice setTaskStatus — capabilities validation (fail-closed)', ()
     state = tasksReducer(state, setTaskStatus({ capabilities: CAPS_FULL }));
     expect(state.taskStatus.capabilities).toEqual(CAPS_FULL);
   });
+
+  it('adopts a manifest carrying the additive code_languages list (WP3 §3.9)', () => {
+    // robot_profiles.capabilities_json now ships code_languages ['python','java']
+    // on every profile. It is a non-boolean extra: the six-boolean adopt-guard
+    // tolerates it, and it must survive adoption verbatim so React's
+    // codeRunBlockReason can key on membership.
+    const caps = { ...CAPS_FULL, code_languages: ['python', 'java'] };
+    const state = withCaps(caps);
+    expect(state.taskStatus.capabilities).toEqual(caps);
+    expect(state.taskStatus.capabilities.code_languages).toEqual(['python', 'java']);
+  });
 });
 
 describe('isValidCapabilities — the shared manifest validator', () => {
@@ -157,6 +168,11 @@ describe('isValidCapabilities — the shared manifest validator', () => {
     expect(isValidCapabilities({})).toBe(false);
     expect(isValidCapabilities({ recordable: true })).toBe(false);
     expect(isValidCapabilities({ ...CAPS_FULL, inferable: 1 })).toBe(false);
+  });
+
+  it('tolerates the additive code_languages list (WP3 §3.9)', () => {
+    expect(isValidCapabilities({ ...CAPS_FULL, code_languages: ['python', 'java'] }))
+      .toBe(true);
   });
 });
 

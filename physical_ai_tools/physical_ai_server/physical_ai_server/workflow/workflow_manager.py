@@ -49,6 +49,12 @@ from physical_ai_server.workflow.handlers.motion import (
     _TEMPO_MIN,
     resolve_destination_z,
 )
+from physical_ai_server.workflow.code_program import (
+    CODE_LANGUAGES,
+    CodeProgram,
+    _breakpoints_by_file,
+    language_of,
+)
 from physical_ai_server.workflow.interpreter import (
     Interpreter,
     InterpreterError,
@@ -456,6 +462,7 @@ class WorkflowManager:
         get_follower_joints: Callable[[], list[float] | None] | None = None,
         load_object_catalog: Callable[[], Any] | None = None,
         arm_profile: Any | None = None,
+        code_rpc: Any | None = None,
     ) -> None:
         self._publisher = publisher
         self._ik_factory = ik_factory
@@ -496,6 +503,14 @@ class WorkflowManager:
             self._home_full_joints = list(_HOME_FULL_JOINTS)
         self._thread: Optional[threading.Thread] = None
         self._hat_threads: list[threading.Thread] = []
+        # Roboter Studio text programs (§3.3): the CodeRpcServer the node built
+        # (None → every code run refused in German), the live program object
+        # (an Interpreter for Blockly, a CodeProgram for code — stop() reads it),
+        # and the dispatch worker(s) of the current code run so
+        # _prev_run_threads_alive can see one outlive _run.
+        self._code_rpc = code_rpc
+        self._program: Any | None = None
+        self._code_threads: list[threading.Thread] = []
         self._stop_event = threading.Event()
         # Pause/step plumbing. resume_event is set when the workflow
         # is allowed to run; cleared while paused. step_event is set
@@ -582,12 +597,24 @@ class WorkflowManager:
         live run) and fired ``_on_finished`` (releasing ``on_workflow`` so a
         recording could claim the arm).
 
-        Bounded by construction: ``_run`` always reaches its ``finally``.
+        Bounded by construction: ``_run`` always reaches its ``finally``. For a
+        Blockly program because the interpreter polls stop per block; for a code
+        program because every wait in ``CodeProgram.execute`` is timeout-bounded
+        (``CODE_RPC_RECV_TIMEOUT_S``) and the kill travels out-of-band on its own
+        control connection, so ``execute`` returns within ``CODE_STOP_DEADLINE_S``
+        of ``_stop_event`` whether or not the student process answers.
         """
         thread = self._thread
         if thread is not None and thread.is_alive():
             return True
-        return any(t.is_alive() for t in self._hat_threads)
+        if any(t.is_alive() for t in self._hat_threads):
+            return True
+        # A code run's dispatch worker (code_rpc.RunSession) is a SEPARATE thread
+        # from ``_thread``; ``CodeProgram.execute`` joins it via ``close_run``,
+        # but if that join times out (a handler still mid-motion) it can outlive
+        # ``_run`` — the same „a stopped run still holds the arm" class the main
+        # and hat checks above guard.
+        return any(t.is_alive() for t in self._code_threads)
 
     @property
     def is_paused(self) -> bool:
@@ -766,8 +793,22 @@ class WorkflowManager:
                     f'Workflow-JSON ist zu groß '
                     f'(>{MAX_WORKFLOW_JSON_BYTES // 1024} KiB).'
                 ), []
+            # Roboter Studio text programs (§3.3): a payload whose ``language``
+            # is in CODE_LANGUAGES routes to CodeProgram instead of the Blockly
+            # interpreter — read the language BEFORE Interpreter.from_json (which
+            # would choke on the poison block an old image errors on loudly).
+            # Both objects expose split_roots()/execute()/roots, so the rest of
+            # start() is unchanged; a code build failure (bad files, runner down)
+            # raises InterpreterError like a bad Blockly payload.
+            code_language = language_of(workflow_json)
+            is_code = code_language in CODE_LANGUAGES
             try:
-                interpreter = Interpreter.from_json(workflow_json)
+                if is_code:
+                    interpreter = CodeProgram.from_payload(
+                        workflow_json, workflow_id, self._code_rpc,
+                        breakpoints=_breakpoints_by_file(self._breakpoints))
+                else:
+                    interpreter = Interpreter.from_json(workflow_json)
             except InterpreterError as e:
                 return False, str(e), []
 
@@ -943,9 +984,14 @@ class WorkflowManager:
                 # A ``destination_ref`` no pin/current statement sets is checked
                 # against the merged destinations, height resolved under THIS
                 # run's calibration (advisory, see _precheck_destination_points).
-                unreachable = self._ik_precheck(interpreter, ik_instance, zones,
-                                                destinations=destinations,
-                                                calib=calib)
+                # A code program has no Blockly destinations to pre-solve and no
+                # event blocks to diagnose (§3.3: both skipped, unreachable=[]).
+                if is_code:
+                    unreachable = []
+                else:
+                    unreachable = self._ik_precheck(interpreter, ik_instance, zones,
+                                                    destinations=destinations,
+                                                    calib=calib)
 
                 # Audit fix #6: seed ctx.last_full_joints synchronously HERE,
                 # before hat threads (or the main daemon) ever spawn. The
@@ -1096,7 +1142,8 @@ class WorkflowManager:
                 # Static, start-time diagnostics: orphan events + unknown object
                 # types. Best-effort — a diagnostic must never stop a run.
                 try:
-                    self._diagnose_events(interpreter, object_catalog)
+                    if not is_code:
+                        self._diagnose_events(interpreter, object_catalog)
                     # Skipped Sammlung entries — only on a run that really starts,
                     # once per identical reason.
                     for reason in skipped_destinations:
@@ -1110,6 +1157,15 @@ class WorkflowManager:
                 if seeded_joints is None:
                     self._start_joint_seed_watchdog(ctx)
 
+                # Keep the live program so stop() can reach a CodeProgram's
+                # out-of-band request_stop() (an Interpreter has no such method,
+                # so the Blockly path is unchanged). A fresh code-thread list per
+                # run; the CodeProgram registers its dispatch worker into it as
+                # execute() opens the run, so _prev_run_threads_alive sees it.
+                self._program = interpreter
+                self._code_threads = []
+                if is_code:
+                    interpreter._register_thread = self._code_threads.append
                 self._thread = threading.Thread(
                     target=self._run,
                     args=(interpreter, ctx),
@@ -1272,6 +1328,16 @@ class WorkflowManager:
         # Wake every hat handler waiting on a broadcast Condition so
         # they observe the stop flag and exit their loops.
         self._wake_all_broadcasts()
+        # Out-of-band stop for a code program (A7.2): kill travels on its own
+        # control connection BEFORE the joins, so _run's finally never waits on
+        # the student process answering. An Interpreter has no request_stop, so
+        # the Blockly path is untouched.
+        prog = self._program
+        if prog is not None and hasattr(prog, 'request_stop'):
+            try:
+                prog.request_stop()
+            except Exception:  # noqa: BLE001 — stop must never wedge on this
+                pass
         if self._thread is not None:
             self._thread.join(timeout=5.0)
         for t in self._hat_threads:

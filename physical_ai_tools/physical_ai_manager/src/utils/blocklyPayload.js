@@ -50,8 +50,14 @@
  *   plus `defaultJsonForBlockLookup[type] = event.json`. MEASURED headless
  *   against the real plugin (@blockly/suggested-blocks 6.0.10) and real
  *   Blockly: **17.0 bytes a drag** for one 14-character type, **25.7** when the
- *   drags round-robin the 47 real `edubotics_*` types (mean name 22.7 chars).
- *   So `validators/workflow.py::MAX_BLOCKLY_JSON_BYTES` (256 KiB) is crossed at
+ *   drags round-robin types whose names average 22.7 characters. What drives
+ *   the cost is the NAME LENGTH, and those two figures stand — but the set
+ *   they were attributed to did not: there are **39** real `edubotics_*`
+ *   types, not 47 (counted from `blocks/*.js`, and the same 39 are exactly
+ *   the server's `STATEMENT_HANDLERS | VALUE_EVALUATORS | HAT_BLOCK_TYPES`
+ *   keys), averaging **21.2** characters. So the real per-drag cost sits a
+ *   little under the measured 25.7.
+ *   `validators/workflow.py::MAX_BLOCKLY_JSON_BYTES` (256 KiB) is crossed at
  *   **~15 400 drags** in the first case and **~10 000** in the second, after
  *   which the document is UNSAVEABLE behind a German 413 the student cannot act
  *   on, because the bloat is invisible to them. (An earlier revision of this

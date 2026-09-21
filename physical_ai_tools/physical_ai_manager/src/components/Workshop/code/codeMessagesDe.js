@@ -12,9 +12,15 @@
 // place (the `blocks/messages_de.js` idiom, kept separate because that file
 // belongs to the Blockly surface). `{0}`/`{1}` are filled by `formatCode`.
 //
-// The cap refusals mirror the server's `code_program.py` sentences word for
-// word, so a student who trips the same cap after a round-trip reads the same
-// sentence.
+// The cap refusals mirror the server's `code_program.py` / the cloud's
+// `validators/workflow.py` sentences word for word, so a student who trips the
+// same cap after a round-trip reads the same sentence — with ONE deliberate
+// exception. `ERR_BAD_PATH` ADDS the rule („… erlaubt sind Buchstaben, Ziffern
+// und _, höchstens drei Ordner, und die Endung .py oder .java"), because here
+// the student is being asked for a name and can act on it; the server refuses
+// a name already on the wire and says only that it is not allowed. Do not
+// „harmonise" that one back — a refusal at the prompt that names no rule sends
+// the student guessing.
 
 export const CODE_DE = Object.freeze({
   NEW: 'Neu',
@@ -55,9 +61,7 @@ export const CODE_DE = Object.freeze({
 
   RUN_UNSUPPORTED: 'Bitte zuerst die Umgebung aktualisieren — dieser Roboter kann noch keine '
     + 'Python-/Java-Programme ausführen.',
-  RUN_EMPTY: 'Das Programm ist leer.',
   RUN_TOO_BIG: 'Das Programm ist zu groß, um es zu starten — bitte Dateien kürzen.',
-  SAVE_EMPTY: 'Das Programm ist leer.',
   NEW_PROGRAM_NAME: 'Neues Programm',
 
   SUBMIT: 'Abgeben',

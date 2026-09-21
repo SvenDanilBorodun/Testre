@@ -737,6 +737,19 @@ jobs:
         # most affects the newer *-opi repos (opi is continue-on-error, so a
         # private opi package warns rather than blocking the amd64/Jetson release).
         #
+        # FIRST PUBLISH. "Private by default" also means a package that has NEVER
+        # been pushed answers exactly like one that REGRESSED to Private — both
+        # say DENIED (measured 2026-09-21: code-runner/code-runner-opi answer
+        # DENIED at ghcr.io/token, every already-published repo answers 200).
+        # So the run that CREATES a package would fail this step, and on the
+        # amd64 leg — which is not continue-on-error — that fails W4 after W1's
+        # migration and both Railway deploys have landed. FIRST_PUBLISH_REPOS
+        # below carves exactly those repos out, warning instead of failing; a
+        # repo that already publishes is never on the list, so the visibility
+        # REGRESSION this step exists to catch stays fatal. A MISSING TAG stays
+        # fatal for everyone: that is a publish failure, not a visibility one.
+        # tests/test_publish_lists_lockstep.py pins all three properties.
+        #
         # RETRIED, because on the amd64/arm64 legs this step is NOT
         # continue-on-error and it is the last gate before the release proceeds:
         # a single un-retried GHCR 5xx/429/DNS blip would fail W4 -> W5 skipped
@@ -756,6 +769,11 @@ jobs:
           REF="${GITHUB_REF#refs/tags/}"
           case "$REF" in v*.*.*) TAG="${REF#v}" ;; *) TAG="latest" ;; esac
           FIX_HINT="Make it public (Owner > Packages > <repo> > Package settings > Change visibility, or: gh api -X PATCH /user/packages/container/<repo> -f visibility=public)."
+          # Repos whose GHCR package has never been created, and for which DENIED
+          # is therefore the expected answer of the run that creates it. REMOVE a
+          # name from here in the same PR that flips its package to Public — the
+          # warning below says so on every run it fires in.
+          FIRST_PUBLISH_REPOS="code-runner code-runner-opi"
           for repo in "$SERVER_REPO" "$ARM_REPO" "$MANAGER_REPO" "$RUNNER_REPO"; do
             [ -n "$repo" ] || continue
             IMG="ghcr.io/svendanilborodun/${repo}:${TAG}"
@@ -774,6 +792,16 @@ jobs:
               # to print for every non-zero exit.
               case "$err" in
                 *denied*|*unauthorized*|*[Aa]uthentication\ required*)
+                  # A repo whose package this run may have just CREATED: DENIED
+                  # is the expected first answer, so it warns and the leg
+                  # continues (the authenticated pulls below still exercise the
+                  # image). Every other repo keeps the fatal branch.
+                  case " ${FIRST_PUBLISH_REPOS} " in
+                    *" ${repo} "*)
+                      echo "::warning::${IMG} is not anonymously pullable yet — expected for a package published for the FIRST time (new GHCR packages default to Private). NEXT ACTION: make it public, then remove ${repo} from FIRST_PUBLISH_REPOS in this workflow, so a later visibility regression fails the release again. ${FIX_HINT} (registry said: ${err})"
+                      continue 2
+                      ;;
+                  esac
                   echo "::error::Anonymous manifest fetch of ${IMG} was DENIED — the GHCR package is PRIVATE. Students pull anonymously and would silently fall back to Docker Hub. ${FIX_HINT} (registry said: ${err})"
                   exit 1
                   ;;

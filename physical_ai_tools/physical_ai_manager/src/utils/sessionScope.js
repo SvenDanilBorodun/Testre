@@ -190,6 +190,18 @@ export const IGNORED_STORAGE_KEYS = Object.freeze({
     + 'sign-out would destroy work to prevent a disclosure the namespacing '
     + 'already prevents. The bare name itself is written by nothing any more; '
     + 'useAutosave deletes a pre-namespacing leftover once on mount.',
+  'edubotics:workshop:code-autosave':
+    'IndexedDB (idb-keyval), the CODE document’s half of the same crash-'
+    + 'recovery cache and classified for the same reason as '
+    + '„edubotics:workshop:autosave" above: a synchronous localStorage loop '
+    + 'cannot reach it, components/Workshop/code/useCodeAutosave namespaces '
+    + 'EVERY bucket by the same rule (`:<supabase user id>`, else '
+    + '`:<browser-session id>`), and deleting a student’s draft on sign-out '
+    + 'would destroy work to prevent a disclosure the namespacing already '
+    + 'prevents. It is a SECOND bucket rather than a second shape in the first '
+    + 'one so the two can never both answer on mount; the hook deletes it as '
+    + 'soon as the open document is not code, so a student who moved on to '
+    + 'blocks is never pulled back into an old Python program.',
   edubotics_workshop_autosave_session:
     'sessionStorage, owned by components/Workshop/useAutosave::'
     + 'autosaveSessionScope. It is the ANONYMOUS half of the identity that '

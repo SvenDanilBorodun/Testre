@@ -42,6 +42,34 @@ function writeLastFile(path) {
   } catch (_) { /* quota / private mode — the in-memory choice still holds */ }
 }
 
+/**
+ * The editor is a lazy chunk, and a chunk can fail to arrive: a WebView2 whose
+ * cache survived an image update asks for a file the new image no longer
+ * serves (the webview URL carries a cache-busting `_v=<IMAGE_TAG>` for exactly
+ * that reason). Without a boundary that throw unmounts the whole Roboter-
+ * Studio page — a white screen instead of a sentence the student can act on.
+ * Scoped to the editor pane alone, so the file tree survives.
+ */
+class EditorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <p className="px-3 py-4 text-xs text-[var(--ink-3)]">{CODE_DE.EDITOR_FAILED}</p>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const sortPaths = (paths) => paths.slice().sort((a, b) => {
   const da = a.includes('/') ? 1 : 0;
   const db = b.includes('/') ? 1 : 0;
@@ -169,19 +197,21 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
         )}
       </aside>
       <div className="flex-1 min-w-0 min-h-0">
-        <Suspense
-          fallback={
-            <p className="px-3 py-4 text-xs text-[var(--ink-3)]">{CODE_DE.EDITOR_LOADING}</p>
-          }
-        >
-          <CodeEditor
-            language={language}
-            path={active}
-            value={files ? files[active] : ''}
-            onChange={handleContentChange}
-            readOnly={readOnly}
-          />
-        </Suspense>
+        <EditorBoundary>
+          <Suspense
+            fallback={
+              <p className="px-3 py-4 text-xs text-[var(--ink-3)]">{CODE_DE.EDITOR_LOADING}</p>
+            }
+          >
+            <CodeEditor
+              language={language}
+              path={active}
+              value={files ? files[active] : ''}
+              onChange={handleContentChange}
+              readOnly={readOnly}
+            />
+          </Suspense>
+        </EditorBoundary>
       </div>
     </div>
   );

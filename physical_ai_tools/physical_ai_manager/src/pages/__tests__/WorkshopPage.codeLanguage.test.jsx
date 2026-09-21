@@ -126,7 +126,17 @@ vi.mock('../../hooks/useRosTopicSubscription', () => ({
 vi.mock('../../components/Workshop/useAutosave', () => ({
   __esModule: true,
   useAutosave: () => ({ lastSavedAt: null }),
+  autosaveSessionScope: () => 'session-1',
 }));
+// NOT mocked: `code/useCodeAutosave`. The crash-recovery draft of a CODE
+// document is the thing the last describe below measures, and it measures it
+// the way a student loses work — through the bucket that is or is not written.
+const idb = vi.hoisted(() => ({
+  get: vi.fn(async () => undefined),
+  set: vi.fn(async () => undefined),
+  del: vi.fn(async () => undefined),
+}));
+vi.mock('idb-keyval', () => ({ get: idb.get, set: idb.set, del: idb.del }));
 const mockApi = vi.hoisted(() => ({
   getWorkflow: vi.fn(() => Promise.resolve(null)),
   createWorkflow: vi.fn(() => Promise.resolve({ id: 'wf-new' })),
@@ -187,8 +197,18 @@ beforeEach(() => {
   mockApi.submitWorkflow.mockClear();
   mockToast.success.mockClear();
   mockToast.error.mockClear();
+  idb.get.mockReset();
+  idb.get.mockImplementation(async () => undefined);
+  idb.set.mockClear();
+  idb.del.mockClear();
   try { window.localStorage.clear(); } catch (_) { /* jsdom */ }
 });
+
+/** The `{state, ts}` a code-draft bucket was last written with, or null. */
+const lastCodeDraft = () => {
+  const call = idb.set.mock.calls.filter(([k]) => String(k).includes('code-autosave')).pop();
+  return call ? { key: call[0], ...call[1] } : null;
+};
 
 describe('WorkshopPage — a code workflow', () => {
   test('a python workflow never mounts the Blockly canvas and saves the code fields', async () => {
@@ -302,5 +322,70 @@ describe('WorkshopPage — „Abgeben"', () => {
     expect(mockApi.submitWorkflow).not.toHaveBeenCalled();
     expect(mockApi.updateWorkflow).not.toHaveBeenCalled();
     window.confirm.mockRestore();
+  });
+});
+
+// The crash-recovery draft. `useAutosave` is keyed on the BLOCKLY workspace —
+// `save()` returns at `if (!enabled || !workspace) return;` — and a code
+// workflow renders CodeWorkspace instead of BlocklyWorkspace, whose unmount
+// hands the page `onWorkspaceReady(null)`. So a Python student's edits reached
+// no local draft at all: a reload, a WebView2 crash, „Neu ▾" or picking another
+// workflow (neither confirms) lost every edit since the last „Speichern", while
+// a Blockly student kept a 750 ms-debounced one.
+describe('WorkshopPage — the code document is autosaved locally', () => {
+  test('an edit reaches a code-autosave bucket namespaced by the student', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+
+    await userEvent.click(screen.getByTestId('code-edit'));
+
+    await waitFor(() => expect(lastCodeDraft()).not.toBeNull(), { timeout: 4000 });
+    const draft = lastCodeDraft();
+    // The user id, never a shared bare name — one PC, one WebView2 profile,
+    // many students (utils/sessionScope).
+    expect(draft.key).toBe('edubotics:workshop:code-autosave:u1');
+    expect(draft.state.language).toBe('python');
+    expect(draft.state.files['main.py']).toContain('geändert');
+    expect(draft.state.files['hilfe.py']).toBe('x = 1\n');
+    expect(typeof draft.ts).toBe('number');
+  });
+
+  test('a stored draft reopens the unsaved program, and a saved workflow wins over it', async () => {
+    idb.get.mockImplementation(async (key) => (String(key).includes('code-autosave')
+      ? { state: { language: 'java', files: { 'Main.java': 'class Main {}\n' } }, ts: 5 }
+      : undefined));
+
+    // (a) nothing open: the draft becomes the editor's document.
+    const view = render(<WorkshopPage isActive />);
+    const editor = await screen.findByTestId('code-workspace');
+    expect(editor.getAttribute('data-language')).toBe('java');
+    expect(JSON.parse(screen.getByTestId('code-files').textContent))
+      .toEqual({ 'Main.java': 'class Main {}\n' });
+    view.unmount();
+
+    // (b) a cloud workflow is selected: it takes precedence, exactly as the
+    // Blockly restore does — the draft must never clobber a server document.
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    const second = await screen.findByTestId('code-workspace');
+    expect(second.getAttribute('data-language')).toBe('python');
+  });
+
+  test('choosing „Neu → Blöcke" drops the code draft instead of resurrecting it', async () => {
+    // The bucket exists only while the open document is code. Without that a
+    // student who moved on to blocks would be pulled back into their old
+    // Python program on the next reload.
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await userEvent.click(screen.getByRole('button', { name: /^Neu/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Blöcke/ }));
+
+    await waitFor(() => expect(
+      idb.del.mock.calls.some(([k]) => String(k).includes('code-autosave')),
+    ).toBe(true));
+    expect(lastCodeDraft()).toBeNull();
   });
 });

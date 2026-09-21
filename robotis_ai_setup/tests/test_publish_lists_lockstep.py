@@ -84,21 +84,36 @@ def _case_bodies(text):
     return dict(re.findall(r"\n    (amd64|arm64|opi)\)\n(.*?)\n        ;;", text, re.S))
 
 
+def _gui_image_names():
+    from gui.app import constants
+    return list(constants.IMAGE_NAMES)
+
+
+def _pi_image_names():
+    # pi_agent has its own package root; read the list off the source so this
+    # suite does not import the agent's constants module (its sys.path is the
+    # pi_agent test suite's, not ours).
+    src = _read(os.path.join(_SETUP_ROOT, "pi_agent", "constants.py"))
+    body = re.search(r"^IMAGE_NAMES = \[\n(.*?)\n\]", src, re.M | re.S).group(1)
+    return re.findall(r'"([a-z0-9-]+)"', body)
+
+
+def _step_body(text, name_fragment):
+    """The `run:` script of the first step whose `- name:` contains the fragment."""
+    m = re.search(
+        r"\n      - name: [^\n]*" + re.escape(name_fragment) + r"[^\n]*\n(.*?)(?=\n      - (?:name|uses): )",
+        text,
+        re.S,
+    )
+    return m.group(1) if m else None
+
+
 class TestDockerPublishListsCarryTheRunner(unittest.TestCase):
     def setUp(self):
         self.text = _read(_PUBLISH_YML)
 
-    def _gui_names(self):
-        from gui.app import constants
-        return list(constants.IMAGE_NAMES)
-
-    def _pi_names(self):
-        # pi_agent has its own package root; read the list off the source so
-        # this suite does not import the agent's constants module (its
-        # sys.path is the pi_agent test suite's, not ours).
-        src = _read(os.path.join(_SETUP_ROOT, "pi_agent", "constants.py"))
-        body = re.search(r"^IMAGE_NAMES = \[\n(.*?)\n\]", src, re.M | re.S).group(1)
-        return re.findall(r'"([a-z0-9-]+)"', body)
+    _gui_names = staticmethod(_gui_image_names)
+    _pi_names = staticmethod(_pi_image_names)
 
     def test_the_fleet_lists_this_test_compares_against_carry_the_runner(self):
         # The premise, restated so a failure below reads correctly: the two
@@ -159,6 +174,113 @@ class TestDockerPublishListsCarryTheRunner(unittest.TestCase):
         # The acceptance grep, kept literal: header comment, three list sites,
         # the matrix column, the probe env, the size step, the parity step.
         self.assertGreaterEqual(self.text.count(_RUNNER), 8)
+
+
+class TestTheFirstPublishCarveOutIsNarrow(unittest.TestCase):
+    """A GHCR package that has NEVER been pushed is Private by default, and the
+    anonymous-pull probe cannot tell that apart from a package that REGRESSED to
+    Private — both answer DENIED. Measured 2026-09-21, anonymously:
+    physical-ai-server / open-manipulator / physical-ai-manager /
+    physical-ai-server-opi each answer token 200 + manifest 200, while
+    code-runner and code-runner-opi answer DENIED at the token endpoint.
+
+    So the FIRST docker-publish run that creates the runner package reaches this
+    probe and gets DENIED — and the amd64 leg is NOT `continue-on-error`, so it
+    fails W4. On a tag push that is after W1's migration and both Railway
+    deploys have landed, and it skips W5 (installer) and W6.
+
+    The carve-out is an explicit allowlist, deliberately shaped so it cannot
+    grow into a hole: only the two never-published repos are on it, DENIED stays
+    fatal for every repo that HAS published, and a missing TAG stays fatal for
+    everyone (that is a publish failure, not a visibility one). The residual —
+    static text cannot know whether the first publish has happened — is carried
+    by the warning itself, which names the removal in every run it fires in.
+    """
+
+    # The ONLY repos a DENIED verdict may be non-fatal for. Widening this pair
+    # is a deliberate act that has to edit this test too.
+    FIRST_PUBLISH = [_RUNNER, _RUNNER_OPI]
+
+    def setUp(self):
+        self.text = _read(_PUBLISH_YML)
+        self.body = _step_body(self.text, "Assert GHCR package is PUBLIC")
+        self.assertIsNotNone(self.body, "no anonymous-pull probe step in smoke-test")
+
+    @staticmethod
+    def _fleet():
+        """Every image name either platform pulls."""
+        return set(_gui_image_names()) | set(_pi_image_names())
+
+    def _allowlist(self):
+        lists = _shell_list(self.body, "FIRST_PUBLISH_REPOS")
+        self.assertEqual(len(lists), 1,
+                         "the probe must declare FIRST_PUBLISH_REPOS exactly once")
+        return lists[0]
+
+    def _arm(self, pattern):
+        """One arm of the probe's `case "$err"`, ending at ITS OWN `;;`.
+
+        Anchored on the arm's indentation (18 spaces), not on the first `;;`:
+        the DENIED arm nests a second `case`, whose arm ends in a `;;` of its
+        own two levels deeper.
+        """
+        m = re.search(pattern + r"[^\n]*\n(.*?)\n {18};;\n", self.body, re.S)
+        self.assertIsNotNone(m, f"no {pattern} arm in the probe's case")
+        return m.group(1)
+
+    def test_the_allowlist_is_exactly_the_two_never_published_repos(self):
+        self.assertEqual(self._allowlist(), self.FIRST_PUBLISH)
+
+    def test_no_repo_that_already_publishes_may_join_the_allowlist(self):
+        # The whole point: DENIED stays fatal for every image students already
+        # pull. A visibility REGRESSION on one of those is the B1 audit finding
+        # this step exists for, and it must never be downgraded to a warning.
+        established = self._fleet() - set(self.FIRST_PUBLISH)
+        self.assertTrue(established, "sanity: the fleet is more than the runner")
+        for repo in sorted(established):
+            self.assertNotIn(repo, self._allowlist(),
+                             f"{repo} already publishes — DENIED must stay fatal for it")
+
+    def test_every_allowlisted_name_is_a_real_fleet_image(self):
+        # A typo here is worse than no allowlist: the guard reads as present and
+        # is inert, so the first publish still fails W4.
+        for repo in self._allowlist():
+            self.assertIn(repo, self._fleet())
+
+    def test_a_denied_allowlisted_repo_warns_and_continues_instead_of_exiting(self):
+        arm = self._arm(r"\*denied\*\|\*unauthorized\*")
+        guard = re.search(
+            r'case " \$\{FIRST_PUBLISH_REPOS\} " in\n(.*?)\n\s*esac', arm, re.S)
+        self.assertIsNotNone(
+            guard, "the DENIED arm must consult FIRST_PUBLISH_REPOS before it exits")
+        guarded = guard.group(1)
+        self.assertIn("::warning::", guarded)
+        self.assertNotIn("exit 1", guarded,
+                         "an allowlisted repo's first publish must not fail the release")
+        self.assertRegex(guarded, r"\bcontinue 2\b",
+                         "the carve-out must skip to the next REPO, not the next attempt")
+        # …and the fatal branch still exists, for everyone else.
+        self.assertIn("exit 1", arm.replace(guarded, ""))
+
+    def test_the_warning_names_how_to_retire_the_carve_out(self):
+        # Nothing static can know whether the first publish has happened, so the
+        # only thing that keeps the allowlist from outliving it is that it SAYS
+        # so, loudly, in every run it fires in.
+        warning = re.search(r'echo "::warning::([^"]*)"',
+                            self._arm(r"\*denied\*\|\*unauthorized\*"))
+        self.assertIsNotNone(warning, "the carve-out must print a ::warning::")
+        text = warning.group(1)
+        self.assertIn("FIRST_PUBLISH_REPOS", text,
+                      "the warning must name the list to remove the repo from")
+        self.assertIn("public", text,
+                      "the warning must name the visibility flip that retires it")
+
+    def test_a_missing_tag_stays_fatal_for_every_repo(self):
+        # „manifest unknown" means the package IS anonymously reachable and the
+        # TAG is absent — a publish failure, not a first-publish visibility one.
+        unknown = self._arm(r"\*manifest\\ unknown\*")
+        self.assertNotIn("FIRST_PUBLISH_REPOS", unknown)
+        self.assertIn("exit 1", unknown)
 
 
 class TestReleaseProbeLoopNamesEveryOpiImage(unittest.TestCase):

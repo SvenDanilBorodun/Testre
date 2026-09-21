@@ -49,6 +49,7 @@ import { TEACH_BLOCK_TITLES_DE, teachEntryBlockReason } from '../components/Work
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
 import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
+import { useCodeAutosave } from '../components/Workshop/code/useCodeAutosave';
 import CodeWorkspace from '../components/Workshop/code/CodeWorkspace';
 import NewProgramDialog from '../components/Workshop/code/NewProgramDialog';
 import SubmitButton from '../components/Workshop/code/SubmitButton';
@@ -320,6 +321,10 @@ function WorkshopPage({ isActive }) {
   const [codeLanguage, setCodeLanguage] = useState('');
   const [codeFiles, setCodeFiles] = useState(null);
   const isCodeWorkflow = isCodeLanguage(codeLanguage);
+  // „Neu ▾" has been used this mount: the student has CHOSEN what the editor
+  // holds, so a crash-recovery draft arriving a moment later must not overrule
+  // them (the read is async; the click is not).
+  const documentChosenRef = useRef(false);
   // #B2: leaving simMode while a sim run is active would unmount RunControls (and
   // its Stop button) on an uncalibrated rig, stranding the run. Lock the toggle
   // while a sim run is in flight (mirrors LeaderToggle's run-guard).
@@ -830,6 +835,7 @@ function WorkshopPage({ isActive }) {
   // Nothing is created here: a student who changes their mind before saving
   // leaves no row behind.
   const handleNewProgram = useCallback((choice) => {
+    documentChosenRef.current = true;
     dispatch(setSelectedWorkflowId(null));
     dispatch(setUnsavedBlocklyJson(null));
     setEditorJson(null);
@@ -979,6 +985,31 @@ function WorkshopPage({ isActive }) {
     enabled: isActive && (calibrated || simMode),
     scopeKey: userId,
     onRestore: handleAutosaveRestore,
+  });
+
+  // The same crash recovery for a CODE document, which `useAutosave` cannot
+  // give it: that hook is keyed on the Blockly workspace, and a code workflow
+  // renders CodeWorkspace instead (see code/useCodeAutosave.js). Gated exactly
+  // as the Blockly restore is — a selected cloud workflow takes precedence —
+  // plus the two cases the Blockly one cannot meet: the student has already
+  // chosen a document with „Neu ▾", or one is already open.
+  const handleCodeAutosaveRestore = useCallback(
+    (draft) => {
+      if (selectedWorkflowId) return;
+      if (documentChosenRef.current) return;
+      if (isCodeLanguage(codeLanguage)) return;
+      setCodeLanguage(draft.language);
+      setCodeFiles(draft.files);
+      setEditorKey((k) => k + 1);
+    },
+    [selectedWorkflowId, codeLanguage]
+  );
+  useCodeAutosave({
+    language: codeLanguage,
+    files: codeFiles,
+    enabled: isActive && (calibrated || simMode),
+    scopeKey: userId,
+    onRestore: handleCodeAutosaveRestore,
   });
 
   // ONE save path. The Speichern button, and later every caller that needs a

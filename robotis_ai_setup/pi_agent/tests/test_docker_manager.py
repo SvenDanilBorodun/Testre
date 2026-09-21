@@ -987,6 +987,50 @@ class TestPrePull(_LifecycleBase):
         self.assertTrue(rec.any_call(lambda a: _contains(a, "up", "physical_ai_manager")))
 
 
+class TestFleetEnumerationsCarryTheRunner(unittest.TestCase):
+    """The `code_runner` container (2026-09-21) belongs to the ROBOT tier: it
+    is started and stopped with the arm, never with the always-on manager,
+    and it is a fourth image the update path pulls, prunes and probes."""
+
+    def test_the_robot_tier_is_the_three_student_owned_services(self):
+        self.assertEqual(dm._ROBOT_TIER, ("open_manipulator", "physical_ai_server", "code_runner"))
+        self.assertEqual(dm.MANAGER_SERVICE, "physical_ai_manager")
+        self.assertEqual(dm._ALL_SERVICES,
+                         ("open_manipulator", "physical_ai_server", "physical_ai_manager",
+                          "code_runner"))
+
+    def test_the_service_image_map_covers_every_service(self):
+        from pi_agent import constants
+        self.assertEqual(set(dm._SERVICE_IMAGE), set(dm._ALL_SERVICES))
+        self.assertEqual(dm._SERVICE_IMAGE["code_runner"], constants.IMAGE_CODE_RUNNER)
+        self.assertTrue(dm._SERVICE_IMAGE["code_runner"].split(":")[0].endswith("/code-runner-opi"))
+
+    def test_robot_tier_running_needs_the_runner_too(self):
+        with patch.object(dm, "get_container_status",
+                          return_value={"open_manipulator": "running",
+                                        "physical_ai_server": "running",
+                                        "code_runner": "exited",
+                                        "physical_ai_manager": "running"}):
+            self.assertFalse(dm.robot_tier_running())
+
+    def test_the_data_volume_suffixes_stay_three_and_say_why(self):
+        # code_runner_ipc carries two socket files, both unlinked-before-bind
+        # by their owners; a reset that deleted it would only race a running
+        # stack. DELIBERATELY excluded — and written beside the tuple.
+        self.assertEqual(dm.EDUBOTICS_DATA_VOLUME_SUFFIXES,
+                         ("ai_workspace", "huggingface_cache", "edubotics_calib"))
+        src = Path(dm.__file__).read_text(encoding="utf-8")
+        idx = src.index("EDUBOTICS_DATA_VOLUME_SUFFIXES = (")
+        self.assertIn("code_runner_ipc", src[max(0, idx - 1200):idx])
+
+    def test_no_prose_still_counts_two_or_three(self):
+        src = Path(dm.__file__).read_text(encoding="utf-8")
+        for stale in ("the other two are the student-owned robot tier",
+                      "BOTH robot-tier containers",
+                      "The three persistent data volumes the opi compose declares"):
+            self.assertFalse(stale in src, f"docker_manager.py still says {stale!r}")
+
+
 class TestLifecycleCommands(_LifecycleBase):
     def test_start_manager_no_deps(self):
         rec = _Recorder(_Proc(0))
@@ -998,13 +1042,14 @@ class TestLifecycleCommands(_LifecycleBase):
         # The manager start never names the robot tier.
         self.assertFalse(rec.any_call(lambda a: "open_manipulator" in a))
 
-    def test_start_robot_tier_both_named(self):
+    def test_start_robot_tier_names_every_robot_tier_service(self):
+        # Three since 2026-09-21: the code_runner comes and goes with the arm.
         rec = _Recorder(_Proc(0))
         with patch.object(dm.subprocess, "run", rec):
             self.assertTrue(dm.start_robot_tier())
         self.assertTrue(rec.any_call(lambda a: _contains(
             a, "up", "-d", "--force-recreate", "--no-deps",
-            "open_manipulator", "physical_ai_server")))
+            "open_manipulator", "physical_ai_server", "code_runner")))
 
     def test_restart_open_manipulator_only(self):
         rec = _Recorder(_Proc(0))
@@ -1025,9 +1070,9 @@ class TestLifecycleCommands(_LifecycleBase):
         with patch.object(dm.subprocess, "run", rec):
             dm.stop_robot_tier()
         self.assertTrue(rec.any_call(lambda a: _contains(
-            a, "stop", "open_manipulator", "physical_ai_server")))
+            a, "stop", "open_manipulator", "physical_ai_server", "code_runner")))
         self.assertTrue(rec.any_call(lambda a: _contains(
-            a, "rm", "-f", "open_manipulator", "physical_ai_server")))
+            a, "rm", "-f", "open_manipulator", "physical_ai_server", "code_runner")))
         # THE invariant: never `compose down`.
         self.assertFalse(rec.any_call(lambda a: "down" in a))
         # And never touch the always-on manager.
@@ -1140,6 +1185,7 @@ class TestContainerStatus(_LifecycleBase):
         with patch.object(dm, "get_container_status",
                           return_value={"open_manipulator": "running",
                                         "physical_ai_server": "running",
+                                        "code_runner": "running",
                                         "physical_ai_manager": "running"}):
             self.assertTrue(dm.manager_running())
             self.assertTrue(dm.robot_tier_running())

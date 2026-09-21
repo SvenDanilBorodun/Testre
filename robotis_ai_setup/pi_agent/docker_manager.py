@@ -43,6 +43,7 @@ from .constants import (
     COMPOSE_FILE,
     DOCKER_STARTUP_TIMEOUT,
     ENV_FILE,
+    IMAGE_CODE_RUNNER,
     IMAGE_FRESHNESS_WARN_DAYS,
     IMAGE_NAMES,
     IMAGE_OPEN_MANIPULATOR,
@@ -59,10 +60,13 @@ from .constants import (
 
 # Compose service / container names (the opi compose sets container_name to
 # match, exactly like the student file). The manager is the always-on tier; the
-# other two are the student-owned robot tier.
+# other three are the student-owned robot tier — the arm, the ROS node and the
+# Roboter Studio code sandbox, which is started and stopped WITH the arm and
+# never with the manager (it is useless without the server it talks to).
 MANAGER_SERVICE = "physical_ai_manager"
-_ROBOT_TIER = ("open_manipulator", "physical_ai_server")
-_ALL_SERVICES = ("open_manipulator", "physical_ai_server", "physical_ai_manager")
+_ROBOT_TIER = ("open_manipulator", "physical_ai_server", "code_runner")
+_ALL_SERVICES = ("open_manipulator", "physical_ai_server", "physical_ai_manager",
+                 "code_runner")
 
 # docker-compose service name → the pinned image it runs. Lets update logic
 # reason about exactly which image(s) a service touches.
@@ -70,11 +74,18 @@ _SERVICE_IMAGE = {
     "open_manipulator": IMAGE_OPEN_MANIPULATOR,
     "physical_ai_server": IMAGE_PHYSICAL_AI_SERVER,
     "physical_ai_manager": IMAGE_PHYSICAL_AI_MANAGER,
+    "code_runner": IMAGE_CODE_RUNNER,
 }
 
-# The three persistent data volumes the opi compose declares. Compose prefixes
-# them with the project name at create time (e.g. edubotics_huggingface_cache),
-# so factory_reset matches by suffix against `docker volume ls`.
+# The three persistent DATA volumes of the opi compose. Compose prefixes them
+# with the project name at create time (e.g. edubotics_huggingface_cache), so
+# factory_reset matches by suffix against `docker volume ls`.
+#
+# The compose declares a FOURTH volume, code_runner_ipc, which is DELIBERATELY
+# not here: it holds only the two unix sockets between physical_ai_server and
+# code_runner (rpc.sock, runner.sock), both unlinked before bind by their
+# owners, so a stale volume is harmless and a reset that deleted it would only
+# race a running stack. Nothing a student made lives in it.
 EDUBOTICS_DATA_VOLUME_SUFFIXES = (
     "ai_workspace",
     "huggingface_cache",
@@ -877,7 +888,7 @@ def manager_running() -> bool:
 
 
 def robot_tier_running() -> bool:
-    """True iff BOTH robot-tier containers are running."""
+    """True iff every robot-tier container (arm, server, code sandbox) is running."""
     st = get_container_status()
     return all(st.get(n) == "running" for n in _ROBOT_TIER)
 

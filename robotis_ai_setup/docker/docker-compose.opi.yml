@@ -28,7 +28,8 @@
 #     is DROPPED: no `runtime: nvidia` (the Pi's Mali-G610 has no CUDA),
 #     and docker-compose.gpu.yml must NEVER be layered on the Pi.
 #   * NEW in this file: physical_ai_manager as a THIRD service (the
-#     always-on wizard host), the ${EDUBOTICS_BIND_HOST}-driven port
+#     always-on wizard host; code_runner, the fourth, arrived 2026-09-21 in
+#     lockstep with the student file), the ${EDUBOTICS_BIND_HOST}-driven port
 #     bindings (the agent's `.env` regenerate maps EDUBOTICS_LAN_OPEN onto
 #     0.0.0.0 vs 127.0.0.1) — with ONE deliberate exception, the debug
 #     :9090/:8080 publishes, which are loopback-PINNED because rosbridge is
@@ -48,8 +49,9 @@
 #     before the student can ever press "Umgebung starten" (chicken-and-
 #     egg otherwise). It therefore has NO `depends_on: physical_ai_server`
 #     — it must serve the wizard while the robot tier is down.
-#   * ROBOT TIER (student-owned): open_manipulator + physical_ai_server
-#     stay `restart: "no"` and come up only on "Umgebung starten" — the
+#   * ROBOT TIER (student-owned): open_manipulator + physical_ai_server +
+#     code_runner stay `restart: "no"` and come up only on "Umgebung
+#     starten" (pi_agent/docker_manager.py::_ROBOT_TIER names all three) — the
 #     Dynamixel-serial-bus lesson (student docker-compose.yml header)
 #     survives where it matters. The pi-agent NEVER runs `compose down`
 #     for ANY operation (that would delete ros_net and kill the manager's
@@ -602,6 +604,12 @@ services:
       # path as the student file, so ./physical_ai_server/.s6-keep resolves.
       # CI compose-validate asserts this mount exists.
       - ./physical_ai_server/.s6-keep:/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro
+      # Roboter Studio text programs: the two unix sockets shared with the
+      # code_runner service below. The server CREATES rpc.sock here (0666,
+      # the student uid connects to it) and CONNECTS to the supervisor's
+      # runner.sock (0600). No depends_on on the runner: without it every
+      # code run is refused in German and Blockly is untouched.
+      - code_runner_ipc:/run/edubotics/code
     # Resource cap tuned for the 8 GB board (student file: 6g). No local
     # policy loads on the Pi (Jetson-only inference), so recording peak
     # (streaming h264 encode) stays well under 5g — §9.
@@ -661,6 +669,65 @@ services:
       retries: 3
       start_period: 20s
 
+  code_runner:
+    container_name: code_runner
+    # The sandbox that runs a student's Python or Java program (Roboter
+    # Studio text programs) beside physical_ai_server — the `-opi` flavour
+    # of the student file's service, key for key (the agent starts and stops
+    # it with the robot tier). It reaches the server over TWO unix sockets in
+    # the code_runner_ipc volume and over nothing else: no network, no port,
+    # no device, no dataset or HF-cache volume, and NO environment block
+    # (compose-env-parity then sees {} on both sides, and nothing in the
+    # runner tree reads one). The sandbox keys below are a sandbox only
+    # TOGETHER — tests/test_code_runner_sandbox.py asserts every one of them
+    # on the student file, this file and the pi_agent twin.
+    image: ${REGISTRY:-ghcr.io/svendanilborodun}/code-runner-opi:${IMAGE_TAG:-latest}
+    # Decision A15: restart: "no" like the rest of the robot tier — a Java
+    # program that OOM-kills the runner stays dead until „Umgebung starten".
+    # No depends_on in either direction: the server runs without the runner
+    # (code runs are refused in German) and the runner has nothing to wait
+    # for.
+    restart: "no"
+    # tini is PID 1, so the supervisor is PID >= 2 (A7.4) and a student's
+    # orphans are reaped.
+    init: true
+    # The supervisor is uid 0 with EXACTLY the three capabilities below. A
+    # non-root user gets no effective capabilities at all and could neither
+    # spawn the student as another uid nor signal it (measured, P23); every
+    # student process runs as uid 10001 in its own session.
+    user: "0:0"
+    read_only: true
+    # The RPC rides the ipc volume, never a port.
+    network_mode: "none"
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID   # Popen(user=10001)
+      - SETGID
+      - KILL     # killpg + the /proc uid sweep
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      # Per-run project dirs, created by helpers running as uid 10001. The
+      # explicit size is what stops a student program filling the board's RAM.
+      - /work:size=64m,mode=1777
+      - /tmp:size=16m,mode=1777
+    volumes:
+      # rpc.sock (the server's, 0666) + runner.sock (the supervisor's, 0600):
+      # the runner's ONLY mount.
+      - code_runner_ipc:/run/edubotics/code
+    mem_limit: 768m
+    pids_limit: 128
+    cpus: 1.0
+    # Bounded json-file logs — see the anchor on open_manipulator above.
+    logging: *opi_logging
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/edubotics/code/runner.sock"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
 volumes:
   # Bare declarations (NO explicit `name:`, unlike the Jetson file): compose
   # project-prefixes them (e.g. docker_ai_workspace), and the agent's
@@ -677,6 +744,11 @@ volumes:
   # omission would wipe calibration on every arm-container recreate.
   edubotics_calib:
     driver: local
+  # The two unix sockets between physical_ai_server and code_runner. NOT a
+  # data volume: it holds only rpc.sock + runner.sock, both unlinked before
+  # bind by their owners, so it is deliberately outside the agent's factory
+  # reset set (docker_manager.EDUBOTICS_DATA_VOLUME_SUFFIXES).
+  code_runner_ipc:
 
 networks:
   ros_net:

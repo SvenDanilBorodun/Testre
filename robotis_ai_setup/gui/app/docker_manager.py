@@ -41,6 +41,7 @@ from .constants import (
     DOCKER_DIR_WSL,
     DOCKER_STARTUP_TIMEOUT,
     ENV_FILE,
+    IMAGE_CODE_RUNNER,
     IMAGE_FRESHNESS_WARN_DAYS,
     IMAGE_NAMES,
     IMAGE_OPEN_MANIPULATOR,
@@ -67,6 +68,7 @@ _SERVICE_IMAGE = {
     "open_manipulator": IMAGE_OPEN_MANIPULATOR,
     "physical_ai_server": IMAGE_PHYSICAL_AI_SERVER,
     "physical_ai_manager": IMAGE_PHYSICAL_AI_MANAGER,
+    "code_runner": IMAGE_CODE_RUNNER,
 }
 
 
@@ -1469,10 +1471,16 @@ def stop_containers(gpu: bool = False) -> bool:
         return False
 
 
-# The three persistent data volumes compose declares (docker-compose.yml).
+# The three persistent DATA volumes compose declares (docker-compose.yml).
 # Compose prefixes them with the project name at create time (e.g.
 # robotis_ai_setup_huggingface_cache), so factory_reset matches by suffix
 # against `docker volume ls` instead of hardcoding the prefix.
+#
+# compose declares a FOURTH volume, code_runner_ipc, which is DELIBERATELY not
+# here: it holds only the two unix sockets between physical_ai_server and
+# code_runner (rpc.sock, runner.sock), both unlinked before bind by their
+# owners, so a stale volume is harmless and a reset that deleted it would only
+# race a running stack. Nothing a student made lives in it.
 EDUBOTICS_DATA_VOLUME_SUFFIXES = (
     "ai_workspace",
     "huggingface_cache",
@@ -1539,14 +1547,20 @@ def factory_reset(log=None) -> tuple[bool, str]:
     )
 
 
+# The four project containers, in one place so get_container_status and the
+# any_container_running probe below cannot disagree about what "the stack" is.
+PROJECT_CONTAINERS = (
+    "open_manipulator", "physical_ai_server", "physical_ai_manager", "code_runner",
+)
+
+
 def get_container_status() -> dict[str, str]:
     """Get status of all project containers.
 
     Returns dict of container_name -> status (e.g. "running", "exited", "not found").
     """
-    containers = ["open_manipulator", "physical_ai_server", "physical_ai_manager"]
     status = {}
-    for name in containers:
+    for name in PROJECT_CONTAINERS:
         try:
             result = subprocess.run(
                 _docker_cmd("inspect", "-f", "{{.State.Status}}", name),
@@ -1560,14 +1574,9 @@ def get_container_status() -> dict[str, str]:
 
 
 def all_containers_running() -> bool:
-    """Check if all 3 containers are in 'running' state."""
+    """Check if all four project containers are in 'running' state."""
     status = get_container_status()
     return all(s == "running" for s in status.values())
-
-
-# The three project containers, in one place so the probe below and
-# get_container_status cannot disagree about what "the stack" is.
-PROJECT_CONTAINERS = ("open_manipulator", "physical_ai_server", "physical_ai_manager")
 
 
 def any_container_running() -> bool:
@@ -1579,10 +1588,10 @@ def any_container_running() -> bool:
     clears it on any failure occurring AFTER `start_containers` succeeded, so
     the flag reads False over a live stack.
 
-    ONE `docker ps` rather than get_container_status's three `docker inspect`
+    ONE `docker ps` rather than get_container_status's four `docker inspect`
     calls, deliberately: this runs on the Tk main thread inside `_on_close`,
-    and three 10 s timeouts against a wedged dockerd would freeze the close for
-    half a minute. Names are re-checked against PROJECT_CONTAINERS because
+    and four 10 s timeouts against a wedged dockerd would freeze the close for
+    most of a minute. Names are re-checked against PROJECT_CONTAINERS because
     docker's `--filter name=` is a SUBSTRING match.
 
     Fails CLOSED for the caller's purposes — anything unexpected returns False,

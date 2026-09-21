@@ -116,7 +116,7 @@ IMAGE_TAG = _resolve_setting("EDUBOTICS_IMAGE_TAG", "IMAGE_TAG", "latest")
 # Image SHORT names (the registry-independent per-repo component). Deriving both
 # the primary and fallback full refs from one list avoids split('/') munging,
 # which breaks on a two-segment registry like ghcr.io/<owner>.
-IMAGE_NAMES = ["open-manipulator", "physical-ai-server", "physical-ai-manager"]
+IMAGE_NAMES = ["open-manipulator", "physical-ai-server", "physical-ai-manager", "code-runner"]
 
 
 def image_ref(name: str, registry: str = REGISTRY, tag: str = "") -> str:
@@ -131,6 +131,8 @@ def image_ref(name: str, registry: str = REGISTRY, tag: str = "") -> str:
 IMAGE_OPEN_MANIPULATOR = image_ref("open-manipulator")
 IMAGE_PHYSICAL_AI_SERVER = image_ref("physical-ai-server")
 IMAGE_PHYSICAL_AI_MANAGER = image_ref("physical-ai-manager")
+# The Roboter Studio code sandbox (docker-compose.yml::code_runner).
+IMAGE_CODE_RUNNER = image_ref("code-runner")
 ALL_IMAGES = [image_ref(n) for n in IMAGE_NAMES]
 
 # Network ports

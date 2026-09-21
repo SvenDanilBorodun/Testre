@@ -388,5 +388,22 @@ class TestArmFamilyForRobotType(unittest.TestCase):
             constants.ROBOT_PROFILES[constants.DEFAULT_ROBOT_PROFILE]["arm_family"])
 
 
+class TestImageNamesCarryTheRunner(unittest.TestCase):
+    """`code-runner-opi` (2026-09-21) is the fourth `-opi` image. The Pi's
+    list is the Windows list with the flavour suffix — asserted as a lockstep
+    so a name added on one platform cannot be forgotten on the other."""
+
+    def test_four_opi_names_with_the_runner_last(self):
+        self.assertEqual(constants.IMAGE_NAMES,
+                         ["open-manipulator-opi", "physical-ai-server-opi",
+                          "physical-ai-manager-opi", "code-runner-opi"])
+        self.assertEqual(constants.IMAGE_CODE_RUNNER, constants.image_ref("code-runner-opi"))
+        self.assertEqual(len(constants.ALL_IMAGES), 4)
+
+    def test_the_list_is_the_windows_list_plus_the_flavour_suffix(self):
+        from gui.app import constants as win
+        self.assertEqual(constants.IMAGE_NAMES, [f"{n}-opi" for n in win.IMAGE_NAMES])
+
+
 if __name__ == "__main__":
     unittest.main()

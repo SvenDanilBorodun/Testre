@@ -193,6 +193,7 @@ IMAGE_NAMES = [
     "open-manipulator-opi",
     "physical-ai-server-opi",
     "physical-ai-manager-opi",
+    "code-runner-opi",
 ]
 
 
@@ -208,6 +209,8 @@ def image_ref(name: str, registry: str = REGISTRY, tag: str = "") -> str:
 IMAGE_OPEN_MANIPULATOR = image_ref("open-manipulator-opi")
 IMAGE_PHYSICAL_AI_SERVER = image_ref("physical-ai-server-opi")
 IMAGE_PHYSICAL_AI_MANAGER = image_ref("physical-ai-manager-opi")
+# The Roboter Studio code sandbox (docker-compose.opi.yml::code_runner).
+IMAGE_CODE_RUNNER = image_ref("code-runner-opi")
 ALL_IMAGES = [image_ref(n) for n in IMAGE_NAMES]
 
 # --- Network ports (all native; no usbipd, no WSL localhost forwarder) ---

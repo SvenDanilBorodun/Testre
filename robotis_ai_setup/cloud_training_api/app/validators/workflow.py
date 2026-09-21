@@ -95,6 +95,42 @@ INT4_MAX = 2_147_483_647
 TRAJECTORY_NAME_MAX_LENGTH = 40
 TRAJECTORY_NAME_RE = re.compile(r"^[A-Za-zÄÖÜäöüß0-9 _\-]{1,40}$")
 
+# Roboter Studio code programs (Python / Java; migration 040). ``code_files``
+# is a JSONB object path -> source text; ``code_language`` selects the entry
+# file and the extension every file must carry. The caps, the path rule, the
+# language set and the reserved names MUST mirror the ROS server —
+# ``workflow/robot_api.py`` (the ONE source ``code_rpc.py`` and the runner
+# read) and ``workflow/code_program.py::from_payload`` — because a project the
+# cloud stored must be a project the server accepts at Start. The cloud cannot
+# import the server package (separate deployment), so the literals are
+# duplicated here like TEMPO_MIN/MAX and MAX_SIM_SCENE_OBJECTS, and
+# ``robotis_ai_setup/tests/test_code_caps_lockstep.py`` AST-compares them.
+#
+# Three caps, because a count cap plus a per-file cap is not a bound (N × M
+# is): ≤ 32 files, ≤ 64 KiB per file (UTF-8 bytes of the content) and
+# ≤ 128 KiB for the whole project, measured on the SAME
+# ``json.dumps(files, ensure_ascii=False)`` rendering the server measures and
+# the control frame carries. Migration 040's CHECK constraints are the floor
+# under these (32 / 64 KiB exact, 160 KiB rendered).
+CODE_LANGUAGES = ("python", "java")
+MAX_CODE_FILES = 32
+MAX_CODE_FILE_BYTES = 65536
+MAX_CODE_PROJECT_BYTES = 131072
+# ≤ 80 chars, at most three directories, no `..`, no leading `/`, stems start
+# with a letter, `.py` or `.java`.
+CODE_PATH_RE = (
+    r'^(?:[A-Za-z][A-Za-z0-9_]{0,39}/){0,3}[A-Za-z][A-Za-z0-9_]{0,39}\.(py|java)$'
+)
+_CODE_PATH_RE = re.compile(CODE_PATH_RE)
+# Entry file per language (required at the project root) and the extension
+# every file of that language must carry.
+CODE_ENTRY_FILE = {"python": "main.py", "java": "Main.java"}
+CODE_EXT_FOR = {"python": ".py", "java": ".java"}
+# Reserved file stems a student may not use (they would shadow the shipped
+# stub module / the reserved namespace on the runner's sys.path).
+CODE_RESERVED_STEMS = ("robot",)
+CODE_RESERVED_PREFIX = "edubotics"
+
 
 def validate_blockly_json(payload: dict) -> None:
     """Defang malicious or runaway payloads before they hit Postgres.
@@ -425,3 +461,89 @@ def validate_trajectory_metadata(point_count: Any, duration_s: Any) -> None:
                 status_code=400,
                 detail="Dauer muss eine endliche, nicht-negative Zahl sein.",
             )
+
+
+def validate_code_language(language: Any) -> str:
+    """Validate a code program's language and return it.
+
+    Exactly ``CODE_LANGUAGES`` (``'python'`` | ``'java'``), case-sensitive.
+    The column's ``''`` default marks a Blockly program and is never a language
+    a code document may declare, so it is refused here too — the ROUTE decides
+    whether a payload is a code program at all. German HTTP 400 otherwise.
+    """
+    if not isinstance(language, str) or language not in CODE_LANGUAGES:
+        raise HTTPException(status_code=400, detail="Unbekannte Programmiersprache.")
+    return language
+
+
+def validate_code_files(files: Any, language: Any) -> dict[str, str]:
+    """Defang a code project before it hits Postgres and return it.
+
+    The cloud twin of ``CodeProgram.from_payload`` on the ROS server, refusal
+    for refusal and in the same order: a non-empty JSON object; at most
+    ``MAX_CODE_FILES`` entries (413); every key a path matching
+    ``CODE_PATH_RE`` whose stem is not reserved and whose extension matches
+    ``language``; every value a string of at most ``MAX_CODE_FILE_BYTES`` UTF-8
+    bytes (413); the language's entry file at the root; and the whole project
+    at most ``MAX_CODE_PROJECT_BYTES`` when rendered with
+    ``json.dumps(files, ensure_ascii=False)`` (413) — the measure the server
+    and the control frame use, so a project stored here is a project the
+    runner can be handed. German HTTP 400/413 on any violation.
+    Defense-in-depth only: the server re-validates at Start.
+    """
+    language = validate_code_language(language)
+    if not isinstance(files, dict) or not files:
+        raise HTTPException(
+            status_code=400, detail="Das Programm enthält keine Dateien."
+        )
+    if len(files) > MAX_CODE_FILES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Das Programm hat zu viele Dateien (höchstens {MAX_CODE_FILES}).",
+        )
+    ext = CODE_EXT_FOR[language]
+    entry = CODE_ENTRY_FILE[language]
+    for path, content in files.items():
+        if not isinstance(path, str) or not isinstance(content, str):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Der Dateiname „{path}“ ist nicht erlaubt.",
+            )
+        if not _CODE_PATH_RE.fullmatch(path):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Der Dateiname „{path}“ ist nicht erlaubt.",
+            )
+        stem = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if stem in CODE_RESERVED_STEMS or stem.lower().startswith(CODE_RESERVED_PREFIX):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Der Dateiname „{path}“ ist reserviert.",
+            )
+        if not path.endswith(ext):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Die Datei „{path}“ passt nicht zur Sprache {language}.",
+            )
+        if len(content.encode("utf-8")) > MAX_CODE_FILE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Die Datei „{path}“ ist zu groß "
+                    f"(höchstens {MAX_CODE_FILE_BYTES // 1024} KiB)."
+                ),
+            )
+    if entry not in files:
+        raise HTTPException(
+            status_code=400, detail=f"Die Startdatei „{entry}“ fehlt."
+        )
+    project_bytes = len(json.dumps(files, ensure_ascii=False).encode("utf-8"))
+    if project_bytes > MAX_CODE_PROJECT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Das Programm ist insgesamt zu groß "
+                f"(höchstens {MAX_CODE_PROJECT_BYTES // 1024} KiB)."
+            ),
+        )
+    return files

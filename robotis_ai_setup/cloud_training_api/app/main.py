@@ -259,6 +259,7 @@ def _validate_required_schema() -> None:
         "datasets",
         "progress_entries",
         "jetsons",  # 019 — classroom Jetson Orin Nano support
+        "workflow_submissions",  # 040 — Roboter Studio „Abgeben" snapshots
     )
     missing_tables: list[str] = []
     for table in required_tables:
@@ -307,6 +308,15 @@ def _validate_required_schema() -> None:
         # landing the code before the ALTER TABLE would 500 the whole
         # record/replay surface.
         ("workflow_trajectories", "robot_profile"),
+        # Migration 040 — Roboter Studio code programs. WorkflowResponse
+        # round-trips the two code columns on every read; create/clone insert
+        # them; the version trigger snapshots them; POST .../submit copies
+        # them into workflow_submissions. A deploy landing the code before the
+        # migration would 500 the first code save — fail the deploy fast.
+        ("workflows", "code_files, code_language"),
+        ("workflow_versions", "code_files, code_language"),
+        ("workflow_submissions",
+         "id, student_user_id, workflow_id, classroom_id, code_language, submitted_at"),
     )
     for table, cols in required_columns:
         try:
@@ -445,6 +455,17 @@ def _validate_required_schema() -> None:
             "p_total_frames": None,
             "p_fps": None,
             "p_robot_type": None,
+        }),
+        # Migration 040 — the SECURITY DEFINER code writer (owner-only, sets
+        # the app.user_id GUC so the version trigger stamps saved_by) that
+        # PATCH /workflows/{id} routes a code_files change through. The
+        # dummy ids answer P0002 („nicht gefunden"), which proves the RPC
+        # exists; PGRST202 means 040 has not been applied.
+        ("update_workflow_code", {
+            "p_workflow_id": dummy,
+            "p_user_id": dummy,
+            "p_code_files": {},
+            "p_code_language": "python",
         }),
     )
     missing_rpcs: list[str] = []

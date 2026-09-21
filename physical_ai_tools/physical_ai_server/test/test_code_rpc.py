@@ -25,6 +25,7 @@ import importlib.util
 import json
 import math
 import os
+import select
 import socket
 import struct
 import tempfile
@@ -54,6 +55,28 @@ _PACKAGE_DIR = Path(code_rpc.__file__).resolve().parents[1]
 _CODE_RPC_SRC = Path(code_rpc.__file__).read_text(encoding='utf-8')
 
 _L = robot_api.RPC_LIMITS
+# The bucket grants a token on ``tokens >= 1.0`` over a float refill; a
+# draining client measured against BURST + rate × elapsed may see one or two
+# calls of rounding, never a policy's worth.
+_RATE_SLACK_CALLS = 2
+
+
+def _conn_threads() -> int:
+    return sum(1 for t in threading.enumerate() if t.name == 'code-rpc-conn')
+
+
+def _wait_for_no_conn_threads(timeout_s: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while _conn_threads() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def _peer_closed(s: socket.socket) -> bool:
+    """EOF, or the error a peer that closed with our byte unread leaves."""
+    try:
+        return s.recv(1) == b''
+    except OSError:
+        return True
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -458,6 +481,82 @@ def test_fifth_connection_of_a_run_is_closed(server):
     server.close_run(session)
 
 
+def test_ungreeted_connections_are_capped_and_the_rest_closed_at_accept(server):
+    """A7.3: a connection that never greets (one byte, then silence) holds a
+    reader thread only up to ``CODE_RPC_MAX_PENDING_CONNECTIONS`` process-wide;
+    every further one is closed at accept, before a thread exists for it, and
+    the slots come back once the hello deadline has closed the silent ones. The
+    per-run cap of four is enforced only AFTER a valid ``__hello`` and so cannot
+    bound this."""
+    assert code_rpc.CODE_RPC_MAX_PENDING_CONNECTIONS == 8
+    _wait_for_no_conn_threads()
+    assert _conn_threads() == 0
+    cap = code_rpc.CODE_RPC_MAX_PENDING_CONNECTIONS
+    extra = 6
+    socks = []
+    for _ in range(cap + extra):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(server.socket_path)
+        try:
+            s.sendall(b'\x00')
+        except OSError:
+            pass                       # closed at accept before our byte went out
+        socks.append(s)
+    try:
+        time.sleep(0.3)
+        held = _conn_threads()
+        assert held <= cap, f'{held} reader threads for {cap + extra} un-greeted connections'
+        readable, _, _ = select.select(socks, [], [], 0.5)
+        assert len(readable) == extra, 'the connections past the cap must see EOF at once'
+        assert all(_peer_closed(s) for s in readable)
+        time.sleep(code_rpc.CODE_RPC_HELLO_TIMEOUT_S + 0.5)
+        assert _conn_threads() == 0
+        readable, _, _ = select.select(socks, [], [], 0.5)
+        assert len(readable) == cap + extra, 'the silent ones must be gone after the deadline'
+        # …and the slots are free again for a run that greets properly.
+        session = server.open_run(_ctx())
+        ok = _Client(server.socket_path, session.token)
+        assert ok.hello_reply['ok'] is True
+        ok.close()
+        server.close_run(session)
+    finally:
+        for s in socks:
+            s.close()
+
+
+def test_the_hello_read_is_bounded_as_a_whole_not_per_byte(server):
+    """A client that announces a 2000-byte hello and then drips one byte every
+    0.4 s stays inside every per-recv timeout forever; the connection must
+    still be closed once ``CODE_RPC_HELLO_TIMEOUT_S`` has passed in total."""
+    assert code_rpc.CODE_RPC_HELLO_TIMEOUT_S == 2.0
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(server.socket_path)
+    s.sendall(struct.pack('>I', 2000))
+    stop = threading.Event()
+
+    def _drip():
+        while not stop.wait(0.4):
+            try:
+                s.sendall(b'x')
+            except OSError:
+                return
+    t = threading.Thread(target=_drip, daemon=True)
+    t0 = time.monotonic()
+    t.start()
+    s.settimeout(code_rpc.CODE_RPC_HELLO_TIMEOUT_S * 2)
+    try:
+        got = s.recv(1)
+    except socket.timeout:
+        pytest.fail('the drip kept an un-greeted connection alive past the hello deadline')
+    finally:
+        stop.set()
+    elapsed = time.monotonic() - t0
+    t.join(2.0)
+    s.close()
+    assert got == b''
+    assert elapsed <= code_rpc.CODE_RPC_HELLO_TIMEOUT_S + 1.0, f'closed only after {elapsed:.2f} s'
+
+
 def test_data_frame_over_64kib_closes_the_connection(server):
     session = server.open_run(_ctx())
     c = _Client(server.socket_path, session.token)
@@ -603,13 +702,67 @@ def test_the_worker_calls_wait_if_paused_before_every_handler(server):
     server.close_run(session)
 
 
+def test_a_queued_call_is_refused_once_the_run_was_stopped(server):
+    """The Blockly contract (``interpreter._exec_chain`` polls
+    ``ctx.should_stop()`` before every statement) holds on the wire too: a
+    call reaching the worker after Stopp never reaches its handler — a new
+    trajectory must not START in the window between the manager's stop event
+    and ``close_run``. The second half pins WHERE the poll sits: a stop that
+    releases a pause is seen after ``wait_if_paused``, not only before it."""
+    ran = []
+    server.handlers = _fake_handlers(edubotics_move_to=lambda c, a: ran.append(a))
+    session = server.open_run(_ctx(should_stop=lambda: True))
+    c = _Client(server.socket_path, session.token)
+    r = c.call('move_to', [[0.15, 0.0, 0.05]])
+    assert r == {'id': 2, 'ok': False, 'k': 'robot', 'e': code_rpc.RUN_STOPPED_DE}
+    assert ran == []
+    server.close_run(session)
+    flag = {'stop': False}
+    ctx = _ctx(should_stop=lambda: flag['stop'],
+               wait_if_paused=lambda: flag.update(stop=True))
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    r = c.call('move_to', [[0.15, 0.0, 0.05]])
+    assert r['ok'] is False and r['e'] == code_rpc.RUN_STOPPED_DE
+    assert ran == []
+    server.close_run(session)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # rate budgets (B1 / B2)
 # ══════════════════════════════════════════════════════════════════════════
 
+def test_a_draining_client_is_served_at_the_policy_rate(server):
+    """THE fence for the global bucket: a client that reads every reply before
+    its next call — so socket backpressure cannot be what bounds it — calls
+    for 2 s and is served at most ``BURST + MAX_CALLS_PER_S × elapsed`` times.
+    (The fire-and-forget sibling below passes on backpressure alone: an
+    AF_UNIX send buffer fills after ~200 unread replies, so it cannot tell a
+    missing bucket from a present one; this shape measured 43,643 calls/s
+    with ``_SleepingBucket.take`` short-circuited.)"""
+    server.handlers = _fake_handlers(edubotics_home=lambda ctx, args: None)
+    session = server.open_run(_ctx())
+    c = _Client(server.socket_path, session.token)
+    n = 0
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 2.0:
+        assert c.call('home', [])['ok'] is True
+        n += 1
+    elapsed = time.monotonic() - t0
+    server.close_run(session)
+    c.close()
+    allowed = _L.BURST + _L.MAX_CALLS_PER_S * elapsed
+    assert n <= allowed + _RATE_SLACK_CALLS, (
+        f'{n} calls served in {elapsed:.2f} s; the policy allows {allowed:.0f}')
+    assert n >= 100, 'the server was not serving at all'
+
+
 def test_fire_and_forget_flood_is_decoded_at_the_policy_rate(server):
     """P11 as a test: a client that never reads its replies floods the socket
-    for 2 s; the server decodes at most 200/s + the burst (≤ 260/s averaged)."""
+    for 2 s and the server decodes ≤ 260/s averaged (200/s + the burst). This
+    is the non-draining SHAPE of P11 (the reader waits for each reply, so a
+    full reply buffer stalls the decode too); the bucket itself is fenced by
+    the draining sibling above."""
     server.handlers = _fake_handlers(edubotics_home=lambda ctx, args: None)
     session = server.open_run(_ctx())
     c = _Client(server.socket_path, session.token)

@@ -29,7 +29,16 @@ timeout themselves before every ``recv``/``sendall`` (an AST test asserts no
 socket op without a preceding ``settimeout`` in its function). A read timeout
 is a POLL POINT — ``should_continue()`` is asked and the partial frame is
 resumed — not a frame boundary; a send timeout means the client is not
-draining its replies and the connection is closed.
+draining its replies and the connection is closed. The hello read is
+additionally bounded AS A WHOLE (``deadline_s``): a per-recv timeout alone
+lets a one-byte-per-second drip hold a reader thread forever.
+
+**Before the hello, the surface is anonymous and bounded twice.** At most
+``CODE_RPC_MAX_PENDING_CONNECTIONS`` connections may sit un-greeted at once,
+process-wide; past that a connection is closed at accept, before a thread is
+spawned for it (the per-run cap of ``CODE_RPC_MAX_CONNECTIONS_PER_RUN``
+applies only after a valid ``__hello``, so it cannot bound this). Each
+pending one lives at most ``CODE_RPC_HELLO_TIMEOUT_S``.
 
 **Rate budget (B1/B2), the server half.** Each run has one global bucket
 (``MAX_CALLS_PER_S`` / ``BURST``) and one perception bucket
@@ -44,9 +53,11 @@ bounded by construction (P11: ~200/s against a 350k/s flood).
 **One dispatch worker per run.** All data connections of a run (at most
 ``CODE_RPC_MAX_CONNECTIONS_PER_RUN``) feed ONE worker thread; handlers never
 run concurrently with each other (D5). The worker calls
-``ctx.wait_if_paused()`` before every handler and takes no lock of its own —
-the handlers hold ``ctx.motion_lock`` through ``motion._hold_motion_lock``
-exactly as a Blockly run does.
+``ctx.wait_if_paused()`` before every handler, then polls
+``ctx.should_stop()`` the way ``interpreter._exec_chain`` does before every
+statement (a call queued after Stopp never starts a handler), and takes no
+lock of its own — the handlers hold ``ctx.motion_lock`` through
+``motion._hold_motion_lock`` exactly as a Blockly run does.
 
 **Handles.** A row returning ``'ziel'`` (``find``) hands back ``{"h": n}``;
 the Detection lives in ``ctx.rpc_handles`` (an ``OrderedDict`` capped at
@@ -125,9 +136,14 @@ _log = logging.getLogger(__name__)
 # ── constants (§3.2) ──────────────────────────────────────────────────────
 CODE_RPC_RECV_TIMEOUT_S = 0.25
 CODE_RPC_SEND_TIMEOUT_S = 2.0
-# The first frame (``__hello``) must arrive within this; a connection that
-# sits silent is somebody else's, not a run's.
+# The first frame (``__hello``) must arrive within this — a bound on the WHOLE
+# frame, not on each recv, so a byte-by-byte drip cannot hold the reader; a
+# connection that sits silent is somebody else's, not a run's.
 CODE_RPC_HELLO_TIMEOUT_S = 2.0
+# Un-greeted connections (accepted, ``__hello`` not yet validated) are capped
+# process-wide: past this, a connection is closed at accept, before a thread
+# exists for it. The per-run cap below applies only AFTER a valid hello.
+CODE_RPC_MAX_PENDING_CONNECTIONS = 8
 CODE_RPC_MAX_CONNECTIONS_PER_RUN = 4
 CODE_RPC_MAX_HANDLES = 256
 CODE_STATUS_MIN_INTERVAL_S = 0.1
@@ -227,16 +243,26 @@ def encode_frame_body(obj: Any) -> bytes:
 
 
 def _recv_exact(sock: socket.socket, n: int, timeout_s: float,
-                should_continue: Callable[[], bool] | None) -> bytes | None:
+                should_continue: Callable[[], bool] | None,
+                deadline: float | None) -> bytes | None:
     """Exactly ``n`` bytes into a fresh buffer; ``None`` on a clean EOF before
     the first byte. A timeout asks ``should_continue`` and resumes the same
     buffer, so a slow sender never loses a partial frame; with no callback the
-    ``socket.timeout`` propagates."""
+    ``socket.timeout`` propagates. ``deadline`` (a ``time.monotonic()`` value)
+    bounds the whole read: each recv waits at most what is left of it, and
+    once nothing is left ``socket.timeout`` is raised whatever the callback
+    says — a byte-by-byte drip cannot hold the reader."""
     buf = bytearray(n)
     view = memoryview(buf)
     got = 0
-    sock.settimeout(timeout_s)
     while got < n:
+        wait = timeout_s
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0.0:
+                raise socket.timeout('frame deadline passed')
+            wait = min(timeout_s, left)
+        sock.settimeout(wait)
         try:
             k = sock.recv_into(view[got:], n - got)
         except socket.timeout:
@@ -255,20 +281,24 @@ def _recv_exact(sock: socket.socket, n: int, timeout_s: float,
 
 def read_frame(sock: socket.socket, max_bytes: int, *,
                timeout_s: float = CODE_RPC_RECV_TIMEOUT_S,
-               should_continue: Callable[[], bool] | None = None) -> dict | None:
+               should_continue: Callable[[], bool] | None = None,
+               deadline_s: float | None = None) -> dict | None:
     """One framed JSON object, or ``None`` on a clean EOF.
 
     Raises :class:`FrameTooLarge` when the announced length exceeds
     ``max_bytes`` (nothing of the body is read), :class:`FrameError` on a body
     that is not a JSON object, :class:`ReadAbandoned` when ``should_continue``
-    says so, ``socket.timeout`` when there is no callback."""
-    header = _recv_exact(sock, 4, timeout_s, should_continue)
+    says so, ``socket.timeout`` when there is no callback or when
+    ``deadline_s`` — a bound on the WHOLE frame, header and body, measured
+    from this call — has elapsed."""
+    deadline = None if deadline_s is None else time.monotonic() + deadline_s
+    header = _recv_exact(sock, 4, timeout_s, should_continue, deadline)
     if header is None:
         return None
     (length,) = struct.unpack('>I', header)
     if length > max_bytes:
         raise FrameTooLarge(length, max_bytes)
-    body = _recv_exact(sock, length, timeout_s, should_continue) if length else b''
+    body = _recv_exact(sock, length, timeout_s, should_continue, deadline) if length else b''
     if body is None:
         raise FrameError('connection closed after the header')
     try:
@@ -692,7 +722,11 @@ class RunSession:
         try:
             self._emit_running(job.file, job.line)
             self.ctx.wait_if_paused()
-            if self.closed.is_set():
+            # The Blockly contract (interpreter._exec_chain polls should_stop
+            # before every statement) holds here too: a call queued after
+            # Stopp — including one a stop released from its pause — never
+            # starts a handler in the window before close_run.
+            if self.closed.is_set() or self.ctx.should_stop():
                 job.reply = _err(rid, 'robot', RUN_STOPPED_DE)
                 return
             kwargs: dict[str, Any] = {}
@@ -760,6 +794,8 @@ class CodeRpcServer:
         self._sessions: dict[str, RunSession] = {}
         self._lock = threading.Lock()
         self._closed = threading.Event()
+        # Connections accepted but not yet greeted (under _lock).
+        self._pending = 0
         try:
             if stat.S_ISSOCK(os.lstat(socket_path).st_mode) or os.path.isfile(socket_path):
                 os.unlink(socket_path)
@@ -826,14 +862,33 @@ class CodeRpcServer:
                     return
                 time.sleep(_ACCEPT_POLL_S)
                 continue
+            with self._lock:
+                admitted = self._pending < CODE_RPC_MAX_PENDING_CONNECTIONS
+                if admitted:
+                    self._pending += 1
+            if not admitted:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
             threading.Thread(target=self._serve, args=(conn,), daemon=True,
                              name='code-rpc-conn').start()
 
+    def _release_pending(self) -> None:
+        with self._lock:
+            self._pending -= 1
+
     def _serve(self, conn: socket.socket) -> None:
+        """The hello gate, then the run's frame loop. The connection counts as
+        pending until its ``__hello`` has been validated AND attached; the
+        hello read is bounded as a whole by ``CODE_RPC_HELLO_TIMEOUT_S``."""
         session: RunSession | None = None
+        pending = True
         try:
             try:
-                hello = read_frame(conn, MAX_FRAME_BYTES, timeout_s=CODE_RPC_HELLO_TIMEOUT_S)
+                hello = read_frame(conn, MAX_FRAME_BYTES, timeout_s=CODE_RPC_HELLO_TIMEOUT_S,
+                                   deadline_s=CODE_RPC_HELLO_TIMEOUT_S)
             except (FrameError, socket.timeout, OSError):
                 return
             if hello is None or hello.get('m') != '__hello':
@@ -845,9 +900,13 @@ class CodeRpcServer:
             session = self._session_for(args[0])
             if session is None or not session.attach(conn):
                 return
+            self._release_pending()
+            pending = False
             self._write_reply(conn, _ok(_request_id(hello), None))
             self._serve_run(conn, session)
         finally:
+            if pending:
+                self._release_pending()
             if session is not None:
                 session.detach(conn)
             try:

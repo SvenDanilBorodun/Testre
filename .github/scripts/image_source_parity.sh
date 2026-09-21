@@ -10,6 +10,12 @@
 #          BYTE-IDENTICAL to the repo source-of-truth tree (exact diff -r).
 #   kind = open-manipulator     -> overlay model: every overlay source file
 #          must be present (by sha256) in the image install tree (it landed).
+#   kind = code-runner          -> COPY-wholesale: the shipped runner tree
+#          (/opt/edubotics/runner) must be BYTE-IDENTICAL to
+#          robotis_ai_setup/docker/code_runner/runner/, minus what the build
+#          adds (java-classes/, bytecode). Without this kind an edit to the
+#          Python stub, the supervisor or the Java sources ships nothing and
+#          nobody notices.
 set -euo pipefail
 
 KIND="${1:?usage: image_source_parity.sh <kind> <image-ref>}"
@@ -106,8 +112,28 @@ case "$KIND" in
     echo "OK: all plain COPYs byte-identical"
     ;;
 
+  code-runner)
+    REPO="robotis_ai_setup/docker/code_runner/runner"
+    rm -rf /tmp/parity_runner_repo /tmp/parity_runner_img
+    mkdir -p /tmp/parity_runner_repo
+    cp -a "${REPO}/." /tmp/parity_runner_repo/
+    strip_pyc /tmp/parity_runner_repo
+    # The Dockerfile COPYs runner/ verbatim, then ADDS java-classes/ (javac
+    # output) and compiles + deletes the bytecode. Strip exactly those two
+    # build products from the image side; everything else must match.
+    extract /opt/edubotics/runner /tmp/parity_runner_img
+    rm -rf /tmp/parity_runner_img/java-classes
+    strip_pyc /tmp/parity_runner_img
+    if diff -rq /tmp/parity_runner_repo /tmp/parity_runner_img; then
+        echo "OK: code-runner shipped tree is byte-identical to repo HEAD"
+    else
+        echo "::error::code-runner shipped tree DIVERGES from repo HEAD (see diff above) — image does not reflect main"
+        exit 1
+    fi
+    ;;
+
   *)
-    echo "::error::unknown kind '$KIND' (expected physical-ai-server | open-manipulator)"
+    echo "::error::unknown kind '$KIND' (expected physical-ai-server | open-manipulator | code-runner)"
     exit 2
     ;;
 esac

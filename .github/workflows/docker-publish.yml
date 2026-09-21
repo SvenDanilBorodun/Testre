@@ -9,16 +9,20 @@ name: docker-publish
 #   - nettername/open-manipulator-opi      (arm64 — Orange Pi 5 Pro, CPU)
 #   - nettername/physical-ai-server-opi    (arm64 — Orange Pi 5 Pro, CPU)
 #   - nettername/physical-ai-manager-opi   (arm64 — Orange Pi 5 Pro)
+#   - nettername/code-runner               (amd64 — Roboter Studio Python/Java sandbox)
+#   - nettername/code-runner-opi           (arm64 — Orange Pi 5 Pro)
 #
 # nettername/physical-ai-manager-jetson does NOT exist (manager only
 # runs on student PCs, not on Jetson). The Orange Pi (opi) flavor DOES
 # ship a manager — the Pi serves the React SPA itself (see build-images.sh
-# and physical_ai_manager/Dockerfile.opi).
+# and physical_ai_manager/Dockerfile.opi). nettername/code-runner-jetson
+# does not exist either: the Roboter-Studio tab is jetsonIncompatible, so
+# the sandbox ships only where a student can reach it (amd64 + opi).
 # nettername/robotis-ai-training is NOT built here — it's owned by
 # Modal now (see build-images.sh:395-397). The stale Docker Hub copy
 # is on the cleanup list in tools/docker-hub-cleanup.sh.
 #
-# This is W4 in the golden order — the three production images publish
+# This is W4 in the golden order — the production images publish
 # AFTER W1 supabase, W2 cloud-api, and W3 teacher-web, and BEFORE W5 (the
 # Windows installer, which bakes these image tags into the .exe payload).
 #
@@ -86,7 +90,7 @@ concurrency:
   #   (2) quick-succession main pushes: keying on github.sha put DIFFERENT
   #       shas in different groups, so two close pushes built :latest in
   #       parallel — both plain-push :latest per-repo and both retag jobs copy
-  #       Hub:latest→GHCR:latest at interleaved times, leaving the 8-repo
+  #       Hub:latest→GHCR:latest at interleaved times, leaving the 10-repo
   #       :latest set mixed across shas (and GHCR≠Hub divergent).
   #
   # Why the release lane must be SEPARATE. GitHub keeps at most ONE *pending*
@@ -327,8 +331,9 @@ jobs:
     # 45 (was 15): the Hub-side retags are manifest-only (near-instant), but the
     # GHCR side is a CROSS-REGISTRY blob copy — `imagetools create` streams every
     # layer (~6 GB/repo, blobs deduped per repo so ~once each) from Docker Hub
-    # through the runner up to GHCR. ~40 GB across the 8 repos on the first push
-    # (the 3 opi repos add a ~5-6 GB server + two small thin layers).
+    # through the runner up to GHCR. ~41 GB across the 10 repos on the first push
+    # (the 3 opi robot repos add a ~5-6 GB server + two small thin layers; the
+    # two code-runner repos add ~0.5 GB each).
     timeout-minutes: 45
     # packages: write is needed to push to GHCR via GITHUB_TOKEN. Per-job (not
     # workflow-level) keeps the grant scoped to the only job that pushes. NOTE
@@ -398,10 +403,12 @@ jobs:
             *)      SEMVER="" ;;
           esac
 
-          AMD64_REPOS="open-manipulator physical-ai-server physical-ai-manager"
+          # These three lists are held to gui/app/constants.py::IMAGE_NAMES and
+          # pi_agent/constants.py::IMAGE_NAMES by tests/test_publish_lists_lockstep.py.
+          AMD64_REPOS="open-manipulator physical-ai-server physical-ai-manager code-runner"
           ARM64_REPOS="open-manipulator-jetson physical-ai-server-jetson"
-          # Orange Pi 5 Pro (arm64, CPU) — includes a manager, unlike the Jetson set.
-          OPI_REPOS="open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi"
+          # Orange Pi 5 Pro (arm64, CPU) — includes a manager and the code runner, unlike the Jetson set.
+          OPI_REPOS="open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi code-runner-opi"
 
           # _tag_exists: FREE existence probe via the Docker Hub web API
           # (hub.docker.com), which is NOT the registry pull endpoint and does
@@ -533,10 +540,10 @@ jobs:
           GHCR="ghcr.io/svendanilborodun"
           # NOTE: this is the SECOND hardcoded repo list (the retag step above has
           # the first, AMD64_REPOS/ARM64_REPOS/OPI_REPOS) — keep BOTH in sync.
-          REPOS="open-manipulator physical-ai-server physical-ai-manager open-manipulator-jetson physical-ai-server-jetson open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi"
+          REPOS="open-manipulator physical-ai-server physical-ai-manager code-runner open-manipulator-jetson physical-ai-server-jetson open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi code-runner-opi"
           # opi subset — decoupled from the core release, so a missing opi image
           # here (opi build leg skipped/failed) is a WARNING, never a fatal.
-          OPI_REPOS="open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi"
+          OPI_REPOS="open-manipulator-opi physical-ai-server-opi physical-ai-manager-opi code-runner-opi"
           # Top-level manifest digest of a ref (the `Digest:` header line).
           _top() {
             docker buildx imagetools inspect "$1" 2>/dev/null | awk '/^Digest:/{print $2; exit}'
@@ -696,22 +703,27 @@ jobs:
             server_repo: physical-ai-server
             arm_repo: open-manipulator
             manager_repo: physical-ai-manager
+            runner_repo: code-runner
           - platform: arm64
             runner: ubuntu-24.04-arm
             server_repo: physical-ai-server-jetson
             arm_repo: open-manipulator-jetson
-            # No manager-jetson repo (manager only ships on student PCs).
+            # No manager-jetson repo (manager only ships on student PCs), and
+            # no code-runner-jetson (the Roboter-Studio tab is jetsonIncompatible).
             manager_repo: ""
+            runner_repo: ""
           # opi (Orange Pi 5 Pro): arm64 CPU flavor, and it DOES ship a manager
-          # (the Pi serves the SPA), so the bundle-grep step runs for opi too.
+          # (the Pi serves the SPA), so the bundle-grep step runs for opi too,
+          # and a code runner, so the runner size gate + parity run for opi too.
           # ROS-jazzy / dynamixel_sdk / arch-sanity / image_source_parity are all
-          # matrix-driven and cover opi automatically. Its size gate is a separate
-          # opi-only step (the amd64 CUDA-slim gate stays amd64-gated).
+          # matrix-driven and cover opi automatically. Its server size gate is a
+          # separate opi-only step (the amd64 CUDA-slim gate stays amd64-gated).
           - platform: opi
             runner: ubuntu-24.04-arm
             server_repo: physical-ai-server-opi
             arm_repo: open-manipulator-opi
             manager_repo: physical-ai-manager-opi
+            runner_repo: code-runner-opi
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -738,12 +750,13 @@ jobs:
           SERVER_REPO: ${{ matrix.server_repo }}
           ARM_REPO: ${{ matrix.arm_repo }}
           MANAGER_REPO: ${{ matrix.manager_repo }}
+          RUNNER_REPO: ${{ matrix.runner_repo }}
         run: |
           set -e
           REF="${GITHUB_REF#refs/tags/}"
           case "$REF" in v*.*.*) TAG="${REF#v}" ;; *) TAG="latest" ;; esac
           FIX_HINT="Make it public (Owner > Packages > <repo> > Package settings > Change visibility, or: gh api -X PATCH /user/packages/container/<repo> -f visibility=public)."
-          for repo in "$SERVER_REPO" "$ARM_REPO" "$MANAGER_REPO"; do
+          for repo in "$SERVER_REPO" "$ARM_REPO" "$MANAGER_REPO" "$RUNNER_REPO"; do
             [ -n "$repo" ] || continue
             IMG="ghcr.io/svendanilborodun/${repo}:${TAG}"
             ok=0
@@ -932,6 +945,49 @@ jobs:
             exit 1
           fi
           echo "OK: opi server image is within the size ceiling (${SIZE} bytes)."
+      - name: Pull + assert code-runner is THIS run's build and under its size ceiling
+        if: matrix.runner_repo != ''
+        # The Roboter Studio sandbox (amd64 + opi; the Jetson leg has no
+        # runner_repo). Two assertions, both against REAL bytes/labels of the
+        # pulled GHCR image:
+        #   (1) org.opencontainers.image.revision == github.sha — the same
+        #       "which image" guard the server step above carries. The runner is
+        #       retagged by the same marker-gated job, so a stale :latest would
+        #       otherwise pass every property check below, green.
+        #   (2) uncompressed layer bytes < 900 MB, summed with `docker image
+        #       history --human=false` — NEVER `docker image inspect .Size`,
+        #       which reads COMPRESSED under the containerd snapshotter and would
+        #       make this gate inert (the UNITS block on the amd64 server step).
+        # Calibration (measured, not estimated): the arm64 image built from the
+        # shipped Dockerfile sums to 0.535 GB (eclipse-temurin:21-jdk-noble
+        # 0.496 GB + apt python3 + the runner tree + java-classes). 900 MB is
+        # ~1.7x headroom and still catches the regressions this gate exists for:
+        # a `pip install` creeping into the Dockerfile, a JDK base swapped for a
+        # fatter one, or apt recommends left on. Deliberately not tighter: a
+        # false failure blocks a release.
+        env:
+          EXPECT_SHA: ${{ github.sha }}
+          RUNNER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.runner_repo }}:latest
+        run: |
+          set -e
+          docker pull "$RUNNER_IMAGE"
+          GOT_SHA="$(docker image inspect "$RUNNER_IMAGE" \
+                     --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          if [ "$GOT_SHA" != "$EXPECT_SHA" ]; then
+            echo "::error::${RUNNER_IMAGE} carries org.opencontainers.image.revision='${GOT_SHA}' but this run is '${EXPECT_SHA}'. The runner on GHCR is NOT the one this run built (for opi: the build leg failed/skipped, so the retag left the previous release's image in place)."
+            exit 1
+          fi
+          echo "OK: ${RUNNER_IMAGE} was built from ${GOT_SHA} (== this run's sha)"
+          SIZE=$(docker image history --human=false --format '{{.Size}}' "$RUNNER_IMAGE" \
+                 | awk '{s+=$1} END {print s+0}')
+          [ "${SIZE:-0}" -gt 0 ] || { echo "::error::could not measure code-runner size (docker image history returned nothing)"; exit 1; }
+          CEIL=$((900 * 1000 * 1000))
+          echo "code-runner uncompressed layer bytes: ${SIZE} (ceiling ${CEIL})"
+          if [ "$SIZE" -ge "$CEIL" ]; then
+            echo "::error::${RUNNER_IMAGE} is ${SIZE} uncompressed bytes (>= ${CEIL}) — something beyond 'public JDK base + apt python3 + the runner tree' got into the sandbox image."
+            exit 1
+          fi
+          echo "OK: code-runner is within its size ceiling (${SIZE} uncompressed bytes)."
       - name: Pull + assert open-manipulator has Dynamixel SDK + pyserial
         # `serial` is asserted EXPLICITLY, not left to ride on dynamixel_sdk.
         # It is the edu6 driver's only third-party dependency: `feetech_bus.py`
@@ -970,12 +1026,20 @@ jobs:
         # monorepo edit/deletion silently never reached the image. For
         # physical-ai-server (COPY-wholesale) the image package must be
         # BYTE-IDENTICAL to the repo source of truth; for open-manipulator
-        # (overlay model) every overlay must be present in the image.
+        # (overlay model) every overlay must be present in the image; for
+        # code-runner (COPY-wholesale, amd64 + opi only) the shipped runner
+        # tree must be byte-identical to docker/code_runner/runner/ minus the
+        # build's own java-classes/ + bytecode.
+        env:
+          RUNNER_REPO: ${{ matrix.runner_repo }}
         run: |
           set -e
           chmod +x .github/scripts/image_source_parity.sh
           .github/scripts/image_source_parity.sh physical-ai-server "ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest"
           .github/scripts/image_source_parity.sh open-manipulator "ghcr.io/svendanilborodun/${{ matrix.arm_repo }}:latest"
+          if [ -n "$RUNNER_REPO" ]; then
+            .github/scripts/image_source_parity.sh code-runner "ghcr.io/svendanilborodun/${RUNNER_REPO}:latest"
+          fi
 
   cleanup-dirty-tags:
     # Manual-dispatch only — sweeps any *-dirty tags from Docker Hub.

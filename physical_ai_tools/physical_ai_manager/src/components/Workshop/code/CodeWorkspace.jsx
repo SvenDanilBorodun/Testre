@@ -20,13 +20,27 @@
 // program, not of the rig.
 
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
+import { addBreakpoint, removeBreakpoint } from '../../../features/workshop/workshopSlice';
+import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
+import { breakpointLinesForFile, codeBreakpointId, parseCodeBreakpointId } from './codeBreakpoints';
 import { CODE_DE, formatCode } from './codeMessagesDe';
 import { CODE_LIMITS, ENTRY_FILE, validateProjectPath } from './codeProject';
 
 const CodeEditor = lazy(() => import('./CodeEditor'));
 
 const CODE_LAST_FILE_KEY = 'edubotics_code_last_file';
+
+/** Python debugs (A8); Java runs and stops. The list is the whole policy. */
+const DEBUGGABLE_LANGUAGES = Object.freeze(['python']);
+
+/**
+ * Toggling ten breakpoints in a row must cost ONE service call, not ten — the
+ * same 250 ms `BreakpointList` settled on, for the same reason: every call
+ * contends for `useRosServiceCaller`'s 10 s timeout.
+ */
+const BREAKPOINT_PUSH_DEBOUNCE_MS = 250;
 
 function readLastFile() {
   try {
@@ -150,6 +164,57 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
     open(entry);
   }, [active, entry, files, onFilesChange, open]);
 
+  /*
+   * The debugger (§3.5). The slice gets NO new state: the breakpoint ids live
+   * where the Blockly ones already do (`s.workshop.breakpoints`, through the
+   * existing add/remove reducers) and the highlighted line is DERIVED here from
+   * `currentBlockId` + `phase`/`paused`. Both id spaces share those two fields,
+   * so `parseCodeBreakpointId` is what tells them apart — a Blockly id resolves
+   * to nothing and lights up no line.
+   */
+  const dispatch = useDispatch();
+  const { setWorkflowBreakpoints } = useRosServiceCaller();
+  const breakpoints = useSelector((s) => s.workshop.breakpoints);
+  const currentBlockId = useSelector((s) => s.workshop.currentBlockId);
+  const runState = useSelector((s) => s.workshop.runState);
+  const phase = useSelector((s) => s.workshop.phase);
+  const paused = useSelector((s) => s.workshop.paused);
+
+  const debuggable = !readOnly && DEBUGGABLE_LANGUAGES.includes(language);
+  const breakpointLines = useMemo(
+    () => (debuggable ? breakpointLinesForFile(breakpoints, active) : []),
+    [debuggable, breakpoints, active],
+  );
+
+  const handleToggleBreakpoint = useCallback((line) => {
+    if (!Number.isInteger(line) || line < 1) return;
+    const id = codeBreakpointId(active, line);
+    dispatch(breakpoints.includes(id) ? removeBreakpoint(id) : addBreakpoint(id));
+  }, [active, breakpoints, dispatch]);
+
+  // Push to the runtime only while a program is LIVE. Before Start the set
+  // rides `RunControls.handleStart`, which pushes it before `/workflow/start`
+  // so the first blocks cannot outrun it; pushing here too would answer „Es
+  // läuft kein Workflow." once per toggle. Best-effort by design: a failure is
+  // reported by the run itself, not by a toast per keystroke.
+  const live = runState === 'running' || paused;
+  useEffect(() => {
+    if (!debuggable || !live) return undefined;
+    const timer = setTimeout(() => {
+      Promise.resolve(setWorkflowBreakpoints(breakpoints)).catch(() => {});
+    }, BREAKPOINT_PUSH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [debuggable, live, breakpoints, setWorkflowBreakpoints]);
+
+  const highlight = useMemo(() => {
+    const parsed = parseCodeBreakpointId(currentBlockId);
+    if (!parsed || parsed.path !== active) return { line: null, kind: null };
+    if (phase === 'error') return { line: parsed.line, kind: 'error' };
+    if (paused) return { line: parsed.line, kind: 'paused' };
+    if (runState === 'running') return { line: parsed.line, kind: 'running' };
+    return { line: null, kind: null };
+  }, [currentBlockId, active, phase, paused, runState]);
+
   const smallButton = 'text-xs px-2 py-1 rounded-md border border-[var(--line)] bg-white '
     + 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed';
 
@@ -181,19 +246,24 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
           ))}
         </ul>
         {!readOnly && (
-          <div className="p-1.5 flex flex-col gap-1 border-t border-[var(--line)]">
-            <button type="button" onClick={handleNewFile} className={smallButton}>
-              + {CODE_DE.FILE_NEW}
-            </button>
-            <div className="flex gap-1">
-              <button type="button" onClick={handleRename} disabled={active === entry} className={smallButton + ' flex-1'}>
-                {CODE_DE.FILE_RENAME}
+          <>
+            <p className="px-2 py-1.5 text-[10px] leading-snug text-[var(--ink-4)] border-t border-[var(--line)]">
+              {debuggable ? CODE_DE.DEBUG_BP_HINT_PY : CODE_DE.DEBUG_JAVA_NO_BREAKPOINTS}
+            </p>
+            <div className="p-1.5 flex flex-col gap-1 border-t border-[var(--line)]">
+              <button type="button" onClick={handleNewFile} className={smallButton}>
+                + {CODE_DE.FILE_NEW}
               </button>
-              <button type="button" onClick={handleDelete} disabled={active === entry} className={smallButton + ' flex-1'}>
-                {CODE_DE.FILE_DELETE}
-              </button>
+              <div className="flex gap-1">
+                <button type="button" onClick={handleRename} disabled={active === entry} className={smallButton + ' flex-1'}>
+                  {CODE_DE.FILE_RENAME}
+                </button>
+                <button type="button" onClick={handleDelete} disabled={active === entry} className={smallButton + ' flex-1'}>
+                  {CODE_DE.FILE_DELETE}
+                </button>
+              </div>
             </div>
-          </div>
+          </>
         )}
       </aside>
       <div className="flex-1 min-w-0 min-h-0">
@@ -209,6 +279,10 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
               value={files ? files[active] : ''}
               onChange={handleContentChange}
               readOnly={readOnly}
+              breakpointLines={breakpointLines}
+              onToggleBreakpoint={debuggable ? handleToggleBreakpoint : null}
+              highlightLine={highlight.line}
+              highlightKind={highlight.kind}
             />
           </Suspense>
         </EditorBoundary>

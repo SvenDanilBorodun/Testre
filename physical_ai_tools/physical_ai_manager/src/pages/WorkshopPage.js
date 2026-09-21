@@ -1515,7 +1515,11 @@ function WorkshopPage({ isActive }) {
       id: 'debug',
       label: DE.DOCK_TAB_DEBUG,
       icon: '🔍',
-      render: () => <DebugPanel workspace={workspace} />,
+      // The open document's language decides the „Haltepunkte" tab: a code
+      // program has no blocks to Alt-click, and Java has no breakpoints at all
+      // this round (A8). It is a page-level fact — the dock's panels are
+      // rendered here — and the panel has no other route to it.
+      render: () => <DebugPanel workspace={workspace} codeLanguage={codeLanguage} />,
     },
   ];
 

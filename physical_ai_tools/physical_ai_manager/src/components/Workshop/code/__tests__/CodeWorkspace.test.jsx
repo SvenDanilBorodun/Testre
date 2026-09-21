@@ -20,9 +20,17 @@
 import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { Provider } from 'react-redux';
+import { configureStore } from '@reduxjs/toolkit';
 import CodeWorkspace from '../CodeWorkspace';
 import { CODE_DE, formatCode } from '../codeMessagesDe';
 import { CODE_LIMITS, ENTRY_FILE } from '../codeProject';
+import workshopReducer from '../../../../features/workshop/workshopSlice';
+
+vi.mock('../../../../hooks/useRosServiceCaller', () => ({
+  __esModule: true,
+  useRosServiceCaller: () => ({ setWorkflowBreakpoints: vi.fn(() => Promise.resolve({})) }),
+}));
 
 const mockToast = vi.hoisted(() => {
   const t = { error: vi.fn(), success: vi.fn() };
@@ -57,11 +65,20 @@ const BASE_FILES = Object.freeze({
   'formen/kreis.py': 'RADIUS = 3\n',
 });
 
-/** Render, wait for the lazy editor, and hand back the onFilesChange spy. */
+/**
+ * Render, wait for the lazy editor, and hand back the onFilesChange spy.
+ *
+ * The Provider is here because the component reads the debugger's own state
+ * (`s.workshop.breakpoints`, `currentBlockId`) out of Redux — see
+ * CodeWorkspace.debugger.test.jsx, which owns those assertions. Nothing in
+ * THIS file depends on that state; a default store is enough.
+ */
 async function mount(files = BASE_FILES, over = {}) {
   const onFilesChange = vi.fn();
+  const store = configureStore({ reducer: { workshop: workshopReducer } });
   const utils = render(
     <CodeWorkspace language="python" files={files} onFilesChange={onFilesChange} {...over} />,
+    { wrapper: ({ children }) => <Provider store={store}>{children}</Provider> },
   );
   await screen.findByTestId('code-editor');
   return { onFilesChange, ...utils };
@@ -288,8 +305,11 @@ describe('an editor that does not arrive', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     editorMock.throws = true;
 
+    const store = configureStore({ reducer: { workshop: workshopReducer } });
     render(
-      <CodeWorkspace language="python" files={BASE_FILES} onFilesChange={vi.fn()} />,
+      <Provider store={store}>
+        <CodeWorkspace language="python" files={BASE_FILES} onFilesChange={vi.fn()} />
+      </Provider>,
     );
 
     expect(await screen.findByText(CODE_DE.EDITOR_FAILED)).toBeInTheDocument();

@@ -48,6 +48,7 @@ import {
   validateProject,
 } from './code/codeProject';
 import { CODE_DE } from './code/codeMessagesDe';
+import { isCodeBreakpointId } from './code/codeBreakpoints';
 
 const BUTTON_BASE =
   'inline-flex items-center justify-center min-h-[36px] '
@@ -78,6 +79,10 @@ const TEMPO_PRESETS = [
 function clampTempo(value) {
   return Math.min(TEMPO_MAX, Math.max(TEMPO_MIN, value));
 }
+
+// The sentinel `workflow/code_program.py::_raise_error` prefixes the runner's
+// own last output line with (decision A14). Spelled once, here and there.
+const TECHNIK_PREFIX = '[TECHNIK] ';
 
 // ── Run-payload slimming ─────────────────────────────────────────────────────
 // The allowlist and the reasoning live in `utils/blocklyPayload.js`, shared with
@@ -156,6 +161,8 @@ function RunControls({
   const debuggerVisible = useSelector((s) => s.workshop.debuggerVisible);
   const debuggerWarnings = useSelector((s) => s.workshop.debuggerWarnings);
   const breakpoints = useSelector((s) => s.workshop.breakpoints);
+  // A boolean, so it is as stable a hook dependency as the string it comes from.
+  const isCodeProgram = isCodeLanguage(codeLanguage);
   // A simulator preview in flight (hooks/useSimPreview.js). Its program is
   // generated, so its block ids are `vorschau-*` and never the student's.
   const preview = useSelector(selectPreview);
@@ -252,10 +259,16 @@ function RunControls({
   // installed API is WorkspaceSvg.highlightBlock(id|null).
   // A preview's current_block_id names a generated `vorschau-*` block that is
   // not on the canvas, so the highlight is left alone while it plays.
+  // A code program's `current_block_id` is a `<file>:L<line>` id on the SAME
+  // field (codeBreakpoints.js). `highlightBlock` on an unknown id is a silent
+  // no-op, and today a code workflow mounts no canvas at all — which is
+  // precisely why the refusal is explicit rather than left to those two
+  // accidents: the editor owns the code line highlight (CodeWorkspace), the
+  // canvas owns the block one, and neither may be handed the other's id.
   useEffect(() => {
     if (!workspace || typeof workspace.highlightBlock !== 'function') return;
     if (preview) return;
-    if (runState === 'running' && currentBlockId) {
+    if (runState === 'running' && currentBlockId && !isCodeBreakpointId(currentBlockId)) {
       workspace.highlightBlock(currentBlockId);
     } else {
       workspace.highlightBlock(null);
@@ -276,7 +289,7 @@ function RunControls({
   }, [error]);
 
   const handleStart = useCallback(async () => {
-    const isCode = isCodeLanguage(codeLanguage);
+    const isCode = isCodeProgram;
     if (isCode) {
       // Fail CLOSED (§3.9): the robot must have SAID it runs this language.
       // An old image would otherwise receive a program it cannot run and the
@@ -534,6 +547,7 @@ function RunControls({
     setWorkflowBreakpoints,
     preview,
     codeLanguage,
+    isCodeProgram,
     codeFiles,
     caps,
   ]);
@@ -607,6 +621,25 @@ function RunControls({
       setBusy(false);
     }
   }, [continueWorkflow, dispatch]);
+
+  // Decision A14, the disclosed Rule §1 exception: the runner's own last line
+  // (a CPython traceback line, a `javac` message) rides the Protokoll as ONE
+  // `[TECHNIK] ` entry beside the German sentence (code_program.py::_raise_error).
+  // The Protokoll is collapsed by default, so the line is repeated under the
+  // banner, where the student is already looking — as a SEPARATE element, never
+  // spliced into the sentence. The newest one wins: the log is append-only and
+  // an earlier run's line would name a defect that is no longer there.
+  const technikLine = isCodeProgram && error
+    ? (() => {
+      for (let i = log.length - 1; i >= 0; i -= 1) {
+        const text = log[i] && log[i].text;
+        if (typeof text === 'string' && text.startsWith(TECHNIK_PREFIX)) {
+          return text.slice(TECHNIK_PREFIX.length);
+        }
+      }
+      return '';
+    })()
+    : '';
 
   // State-driven German label (#L2): the raw server `phase` is English
   // ('running'/'done') and now lingers between blocks (truthy-guarded), so map
@@ -811,12 +844,32 @@ function RunControls({
         </div>
       )}
 
+      {paused && isCodeProgram && (
+        <div
+          role="status"
+          className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-md p-2 mb-2"
+        >
+          {CODE_DE.RUN_PAUSE_CODE_HINT}
+        </div>
+      )}
+
       {error && (
         <div
           role="alert"
           className="bg-red-50 border border-red-200 text-red-800 text-sm rounded-md p-2 mb-2"
         >
           {error}
+          {technikLine && (
+            <>
+              <div className="mt-1.5 text-xs text-red-700">{CODE_DE.ERROR_TECHNIK_LABEL}</div>
+              <div
+                data-testid="technik-line"
+                className="mt-0.5 font-mono text-xs text-red-900 bg-red-100 rounded px-1.5 py-1 overflow-x-auto whitespace-pre-wrap break-words"
+              >
+                {technikLine}
+              </div>
+            </>
+          )}
         </div>
       )}
 

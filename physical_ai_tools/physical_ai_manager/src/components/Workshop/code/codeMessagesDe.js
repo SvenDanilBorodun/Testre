@@ -64,6 +64,29 @@ export const CODE_DE = Object.freeze({
   RUN_TOO_BIG: 'Das Programm ist zu groß, um es zu starten — bitte Dateien kürzen.',
   NEW_PROGRAM_NAME: 'Neues Programm',
 
+  // The debugger (A8). Python gets breakpoints; Java gets run and stop. The
+  // asymmetry is SAID, in both places a student looks for it — beside the
+  // editor and in the Debug-Panel — because „parity" is not claimed for
+  // something only one language has.
+  DEBUG_BP_HINT_PY: 'Haltepunkt setzen: links neben die Zeilennummer klicken.',
+  DEBUG_JAVA_NO_BREAKPOINTS: 'Für Java gibt es noch keine Haltepunkte — Java-Programme '
+    + 'lassen sich starten und stoppen, Schritt für Schritt geht nur in Python.',
+  // „Noch keine Haltepunkte gesetzt." is NOT repeated here: the Blockly panel
+  // already says it as `DE.DEBUG_NO_BREAKPOINTS` and the code panel reuses that
+  // key. These two are the verbs of the list itself, which BreakpointList
+  // carries as inline literals.
+  DEBUG_BP_REMOVE: 'Haltepunkt entfernen: {0}',
+  DEBUG_BP_CLEAR: 'Alle entfernen',
+  // The pause asymmetry of §3.3: a code run is interrupted where it talks to
+  // the robot, not between two lines. Saying so beats a student watching a
+  // „pausiert" chip over a loop that keeps counting.
+  RUN_PAUSE_CODE_HINT: 'Die Pause wirkt beim nächsten Roboter-Befehl oder Haltepunkt.',
+  // Decision A14, the disclosed Rule §1 exception: the raw tool line (a CPython
+  // traceback line, a `javac` message) is English and is shown anyway, because
+  // for Java it is the only text that says what was actually wrong. The German
+  // sentence LEADS; this label introduces the raw line beneath it.
+  ERROR_TECHNIK_LABEL: 'Technische Meldung:',
+
   SUBMIT: 'Abgeben',
   SUBMIT_TITLE: 'Diesen Stand des Programms bei der Lehrkraft abgeben',
   SUBMIT_CONFIRM: 'Programm jetzt abgeben? Die Lehrkraft sieht danach genau diesen Stand.',

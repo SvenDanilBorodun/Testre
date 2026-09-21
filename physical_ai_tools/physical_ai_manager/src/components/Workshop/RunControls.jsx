@@ -40,6 +40,14 @@ import {
   readDestinationEntries,
   entriesForRunPayload,
 } from './sammlung/destinationStore';
+import {
+  CODE_RUN_BLOCK_TITLES_DE,
+  codeRunBlockReason,
+  codeRunPayloadBase,
+  isCodeLanguage,
+  validateProject,
+} from './code/codeProject';
+import { CODE_DE } from './code/codeMessagesDe';
 
 const BUTTON_BASE =
   'inline-flex items-center justify-center min-h-[36px] '
@@ -113,6 +121,11 @@ function RunControls({
   // absent so the component still works standalone (and existing tests pass).
   debugOpen = null,
   onToggleDebug = null,
+  // A CODE program (Roboter Studio Python/Java): the language and the
+  // `{ path: content }` project replace `blocklyJson` as the thing that runs.
+  // '' / null keep the Blockly path byte-for-byte.
+  codeLanguage = '',
+  codeFiles = null,
 }) {
   const dispatch = useDispatch();
   const {
@@ -130,6 +143,11 @@ function RunControls({
   // both 7-wide, so for that pair this tag is the ONLY separator there is.
   const robotType = useSelector((s) => (s.tasks && s.tasks.taskStatus
     ? s.tasks.taskStatus.robotType : ''));
+  // The rig's capability manifest (null until the server has said anything):
+  // a code run needs `code_languages` to name its language, and unknown is not
+  // permission (codeProject.codeRunBlockReason).
+  const caps = useSelector((s) => (s.tasks && s.tasks.taskStatus
+    ? s.tasks.taskStatus.capabilities : null) || null);
   const phase = useSelector((s) => s.workshop.phase);
   const currentBlockId = useSelector((s) => s.workshop.currentBlockId);
   const paused = useSelector((s) => s.workshop.paused);
@@ -258,7 +276,25 @@ function RunControls({
   }, [error]);
 
   const handleStart = useCallback(async () => {
-    if (!blocklyJson) {
+    const isCode = isCodeLanguage(codeLanguage);
+    if (isCode) {
+      // Fail CLOSED (§3.9): the robot must have SAID it runs this language.
+      // An old image would otherwise receive a program it cannot run and the
+      // only thing standing between that and a silent green run is the poison
+      // block below. Nothing is sent.
+      const blocked = codeRunBlockReason(caps, codeLanguage);
+      if (blocked) {
+        toast.error(CODE_RUN_BLOCK_TITLES_DE[blocked]);
+        return;
+      }
+      // The §3.7 caps, judged here with the same German sentences the server
+      // and the cloud refuse on — before anything is sent.
+      const projectError = validateProject(codeFiles, codeLanguage);
+      if (projectError) {
+        toast.error(projectError);
+        return;
+      }
+    } else if (!blocklyJson) {
       toast.error('Workflow ist leer.');
       return;
     }
@@ -319,7 +355,9 @@ function RunControls({
       // it to resolve each replay block. Fail LOUD (abort the start) if a
       // referenced trajectory can't be fetched — running a replay program
       // without its data would silently no-op the motion.
-      const replayNames = collectReplayNames(blocklyJson);
+      // A code program names its recordings at run time (`robot.replay`), not
+      // in a block tree — nothing to collect, `trajectories` stays `{}`.
+      const replayNames = isCode ? [] : collectReplayNames(blocklyJson);
       const trajectories = {};
       if (replayNames.length > 0) {
         if (!workflowId) {
@@ -399,16 +437,25 @@ function RunControls({
       // The `sim` / `zones` / `tempo` / `trajectories` / `destinations` siblings
       // below are NOT serializer keys; they are added by this payload and the
       // server parses each of them, so they ride on top of the slimmed base.
-      const programJson = slimRunPayload(blocklyJson);
+      // A code program's base is the poison block + `language` + `files`
+      // (codeProject.codeRunPayloadBase, §3.9); the siblings below ride on
+      // both bases unchanged.
+      const programJson = isCode
+        ? codeRunPayloadBase(codeLanguage, codeFiles)
+        : slimRunPayload(blocklyJson);
       // S1: the student's Ziele/Positionen (the `edubotics-destinations`
       // document serializer) as an explicit sibling — ALWAYS present, possibly
       // [], because its presence is what tells the server the document is
       // authoritative (a deleted Ziel must not resolve to another student's
       // robot-local point). The live store is the freshest truth; the
-      // serializer output is the fallback when no workspace is mounted.
-      const destinationEntries = workspace
-        ? getDestinationStore(workspace).getEntries()
-        : readDestinationEntries(blocklyJson);
+      // serializer output is the fallback when no workspace is mounted. A code
+      // program has no Blockly document: it pins its own points in code.
+      let destinationEntries = [];
+      if (!isCode) {
+        destinationEntries = workspace
+          ? getDestinationStore(workspace).getEntries()
+          : readDestinationEntries(blocklyJson);
+      }
       const destinations = entriesForRunPayload(destinationEntries);
       const workflowJsonStr = simMode
         ? JSON.stringify({
@@ -423,7 +470,12 @@ function RunControls({
       // The server refuses a payload over MAX_WORKFLOW_JSON_BYTES (256 KiB) with
       // „Workflow-JSON ist zu groß", which names no cause and no remedy. When
       // recordings ride along they are almost always the reason — say so, in
-      // German, before anything is sent.
+      // German, before anything is sent. A code project is capped at 128 KiB
+      // above, so only its siblings could push it over; still judged.
+      if (isCode && exceedsRunPayloadCap(workflowJsonStr)) {
+        toast.error(CODE_DE.RUN_TOO_BIG);
+        return;
+      }
       if (Object.keys(trajectories).length > 0 && exceedsRunPayloadCap(workflowJsonStr)) {
         toast.error(RUN_PAYLOAD_TOO_BIG_RECORDINGS_DE);
         return;
@@ -481,6 +533,9 @@ function RunControls({
     breakpoints,
     setWorkflowBreakpoints,
     preview,
+    codeLanguage,
+    codeFiles,
+    caps,
   ]);
 
   const handleStop = useCallback(async () => {

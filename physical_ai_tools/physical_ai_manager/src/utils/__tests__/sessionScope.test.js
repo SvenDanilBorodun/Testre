@@ -215,6 +215,9 @@ describe('clearStudentScopedStorage', () => {
       'blocklyStashMulti',
       'blocklyStashTime',
       'edubotics:workshop:theme',
+      // The file last open in the Roboter-Studio code editor: a view of the
+      // student's OWN program, the same class as edubotics_workshop_code_open.
+      'edubotics_code_last_file',
       // Startseite hero view („3D-Modell" / „Kamera"). Student-scoped by the
       // WHO-sets-it tie-break: a student picks it for themselves, the way they
       // pick an editor theme. It also has a cost the other view toggles do not

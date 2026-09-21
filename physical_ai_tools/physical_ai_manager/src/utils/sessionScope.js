@@ -70,6 +70,11 @@ export const STUDENT_SCOPED_KEYS = Object.freeze([
   // program, not of the rig — a beginner who never asked for generated code
   // should not inherit it from the previous student's lesson.
   'edubotics_workshop_code_open',
+  // The file last open in the Roboter-Studio CODE editor (a Python/Java
+  // program's file tree). The same class as the key above — a view of the
+  // student's own program — and deliberately NOT spelled
+  // `edubotics_workshop_code_open_file`, which would read as a suffix of it.
+  'edubotics_code_last_file',
   // Startseite hero view — „3D-Modell" or „Kamera". A personal choice about
   // their own workspace, same class as the editor theme below: the student
   // sets it for themselves, not a teacher for the room. Also the reason it

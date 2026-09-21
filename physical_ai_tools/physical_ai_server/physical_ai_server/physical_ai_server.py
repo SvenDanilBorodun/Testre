@@ -5392,7 +5392,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         from physical_ai_server.workflow.object_catalog import (
             build_object_catalog_response,
         )
-        fields = build_object_catalog_response()
+        # Pass the resolved profile id (§3.10) — closes the KNOWN-ISSUES latent
+        # item where GetObjectCatalog always shipped the OMX variant. Byte-
+        # identical today (only gripper_close_rad differs per profile, not a wire
+        # field), so a wiring test — not a behaviour test — fences it.
+        fields = build_object_catalog_response(getattr(
+            getattr(self, '_arm_profile', None), 'profile_id', None))
         response.type_names = fields['type_names']
         response.labels_de = fields['labels_de']
         response.object_height_m = fields['object_height_m']

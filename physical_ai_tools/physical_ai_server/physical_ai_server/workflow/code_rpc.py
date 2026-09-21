@@ -146,6 +146,9 @@ CODE_RPC_HELLO_TIMEOUT_S = 2.0
 CODE_RPC_MAX_PENDING_CONNECTIONS = 8
 CODE_RPC_MAX_CONNECTIONS_PER_RUN = 4
 CODE_RPC_MAX_HANDLES = 256
+# Student-defined Greifobjekt types registered per run (§3.10). Per-run only:
+# ctx is rebuilt every start, nothing is persisted, no table (A13).
+CODE_MAX_STUDENT_OBJECTS = 8
 CODE_STATUS_MIN_INTERVAL_S = 0.1
 # Supervisor → server stdout/stderr events are bounded per line and per
 # second (the supervisor enforces them; the server sizes its buffers by them).
@@ -181,8 +184,11 @@ FRAME_TOO_BIG_DE = 'Die Nachricht an den Roboter ist zu groß.'
 BAD_FRAME_DE = 'Die Nachricht an den Roboter ist unverständlich.'
 BAD_REQUEST_DE = 'Der Aufruf ist unvollständig — Methode und Argumente fehlen.'
 RUN_STOPPED_DE = 'Programm wurde gestoppt.'
-REGISTER_OBJECT_UNAVAILABLE_DE = ('Eigene Objekt-Typen sind auf diesem Roboter '
-                                  'noch nicht verfügbar.')
+# A student redefines a type under the same name with different values.
+REGISTER_OBJECT_REDEFINED_DE = ('Objekt „{name}“ ist in diesem Programm bereits '
+                                'anders definiert.')
+REGISTER_OBJECT_TOO_MANY_DE = ('Zu viele eigene Objekte in einem Programm '
+                               '(höchstens {n}).')
 _UNKNOWN_METHOD_DE = 'robot.{name} gibt es nicht.'
 _UNKNOWN_METHOD_SUGGEST_DE = 'robot.{name} gibt es nicht. Meintest du robot.{suggestion}?'
 _ARITY_DE = 'robot.{name} erwartet {expected} Angabe(n), erhält aber {got}.'
@@ -631,7 +637,7 @@ class RunSession:
         if name == '__paused':
             return _ok(rid, self._paused(args[0], args[1], args[2]))
         if name == 'register_object':
-            return _err(rid, 'robot', REGISTER_OBJECT_UNAVAILABLE_DE)
+            return self._register_object(args, rid)
         return _err(rid, 'internal', INTERNAL_ERROR_DE)
 
     @staticmethod
@@ -702,6 +708,87 @@ class RunSession:
                 self.ctx.log(f'[VAR:{name}={payload}]')
             except Exception:  # noqa: BLE001 — observability never breaks a run
                 pass
+
+    # ── register_object (§3.10, A13) — the reader thread, perception budget ──
+    def _register_object(self, args: list, rid: int | None) -> dict:
+        """Register a student-defined Greifobjekt type for THIS run. args are
+        already validated against the row (name/label/tag_ids/hoehe_m/greiftiefe_m
+        + the two nullable trailing floats). Builds the merged catalog from the
+        ctx PROFILE's own fixed set + the previously registered student types +
+        the new one, re-runs ``parse_catalog`` under the profile's gripper band,
+        and — only on success — rebinds ``ctx.object_catalog`` atomically and
+        records the entry in ``ctx.student_objects``. Any ``ObjectCatalogError``
+        (a tag-id collision with the built-in type, an out-of-band close, a
+        grasp depth over the object height) is the German refusal verbatim."""
+        from physical_ai_server.workflow import object_catalog as _oc
+        name, label, tag_ids, hoehe_m, greiftiefe_m, close, anfahr = args
+        entry: dict[str, Any] = {
+            'label_de': label,
+            'tag_ids': [int(t) for t in tag_ids],
+            'object_height_m': float(hoehe_m),
+            'grasp_depth_m': float(greiftiefe_m),
+        }
+        base_dict, band = self._profile_catalog()
+        if close is None:
+            # A missing close defaults to the profile's built-in wuerfel close
+            # (OMX −0.5, edu6 1.0, edu1 0.10) — never OMX unconditionally (§3.10).
+            try:
+                close = base_dict['types']['wuerfel']['gripper_close_rad']
+            except Exception:  # noqa: BLE001 — a profile without wuerfel
+                close = -0.5
+        entry['gripper_close_rad'] = float(close)
+        if anfahr is not None:
+            entry['approach_clear_m'] = float(anfahr)
+        with self._lock:
+            student = getattr(self.ctx, 'student_objects', None)
+            if not isinstance(student, dict):
+                student = {}
+                try:
+                    self.ctx.student_objects = student
+                except Exception:  # noqa: BLE001 — a stub ctx without the field
+                    pass
+            existing = student.get(name)
+            if existing is not None:
+                if existing == entry:
+                    return _ok(rid, None)          # identical re-definition: no-op
+                return _err(rid, 'robot',
+                            REGISTER_OBJECT_REDEFINED_DE.format(name=name))
+            if len(student) >= CODE_MAX_STUDENT_OBJECTS:
+                return _err(rid, 'robot',
+                            REGISTER_OBJECT_TOO_MANY_DE.format(n=CODE_MAX_STUDENT_OBJECTS))
+            # Merge: the profile's own base + every prior student type + the new
+            # one. A fresh dict, so the module constant is never mutated.
+            merged = {'types': dict(base_dict.get('types', {}))}
+            merged['types'].update(student)
+            merged['types'][name] = entry
+            try:
+                catalog = _oc.parse_catalog(merged, gripper_close_range=band)
+            except _oc.ObjectCatalogError as exc:
+                return _err(rid, 'robot', str(exc))
+            # Success: rebind atomically and record (only now).
+            self.ctx.object_catalog = catalog
+            student[name] = entry
+        return _ok(rid, None)
+
+    def _profile_catalog(self):
+        """The ctx profile's built-in catalog dict + gripper band, from
+        ``_CATALOG_BY_PROFILE`` (never ``_FIXED_CATALOG`` unconditionally). The
+        arm is identified the way every handler does — through
+        ``motion._profile_for_ctx`` (the solver's backend) — since the ctx does
+        not carry the profile id. An unresolved profile (both OMX, no solver)
+        gets the OMX set with its negative-close rule (band ``None``)."""
+        from physical_ai_server.workflow import object_catalog as _oc
+        pid = None
+        try:
+            from physical_ai_server.workflow.handlers.motion import _profile_for_ctx
+            prof = _profile_for_ctx(self.ctx)
+            pid = getattr(prof, 'profile_id', None)
+        except Exception:  # noqa: BLE001 — identity lookup never raises here
+            pid = None
+        entry = _oc._CATALOG_BY_PROFILE.get((pid or '').strip())
+        if entry is not None:
+            return entry[0], entry[1]
+        return _oc._FIXED_CATALOG, None
 
     # ── the worker ───────────────────────────────────────────────────────
     def _worker_loop(self) -> None:

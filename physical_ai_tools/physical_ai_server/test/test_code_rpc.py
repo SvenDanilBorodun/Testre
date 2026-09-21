@@ -969,11 +969,15 @@ def test_paused_answers_stop_when_the_run_was_stopped(server):
     server.close_run(session)
 
 
-def test_register_object_is_validated_and_refused_until_wp4(server):
+def test_register_object_is_validated_and_registers(server):
+    # WP4 landed the catalog merge (§3.10): a schema-valid registration now
+    # SUCCEEDS (the OMX default close is negative, no tag collision), while the
+    # per-parameter range check still refuses hoehe_m == 0.0 with k == 'value'.
+    # (The full register_object contract lives in test_code_rpc_register_object.)
     session = server.open_run(_ctx())
     c = _Client(server.socket_path, session.token)
     r = c.call('register_object', ['banane', 'Banane', [30, 31], 0.04, 0.015, None, None])
-    assert r['ok'] is False and r['k'] == 'robot' and 'Objekt' in r['e']
+    assert r['ok'] is True, r
     r = c.call('register_object', ['banane', 'Banane', [30, 31], 0.0, 0.015, None, None])
     assert r['ok'] is False and r['k'] == 'value'
     server.close_run(session)

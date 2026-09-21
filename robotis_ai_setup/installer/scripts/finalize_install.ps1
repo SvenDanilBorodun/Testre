@@ -189,7 +189,11 @@ function Write-Warn { param([string]$msg) Write-Host "   WARN: $msg" -Foreground
 # image pull (the compounding root cause), and a thrown terminating error in a
 # child must become a warning, not an abort.
 
-# True iff all three EduBotics images are present inside the distro. Resolves
+# True iff all four EduBotics images are present inside the distro. The list
+# is the one pull_images.ps1 pulls (lockstepped with gui/app/constants.py
+# IMAGE_NAMES by tests/test_docker_auto_pull.py): this function is BOTH the
+# skip gate and the post-pull verification of Phase 2 below, so a name missing
+# here is an image finalize never pulls and never reports absent. Resolves
 # $Registry/$ImageTag exactly like pull_images.ps1 (docker/versions.env, with
 # the same installed-layout + dev-tree fallback and the same defaults).
 function Test-ImagesPresent {
@@ -207,7 +211,7 @@ function Test-ImagesPresent {
             if ($_ -match '^\s*IMAGE_TAG\s*=\s*(.+?)\s*$') { $ImageTag = $Matches[1] }
         }
     }
-    foreach ($name in @("open-manipulator", "physical-ai-server", "physical-ai-manager")) {
+    foreach ($name in @("open-manipulator", "physical-ai-server", "physical-ai-manager", "code-runner")) {
         & wsl -d $DistroName -- docker image inspect "${Registry}/${name}:${ImageTag}" *>$null 2>&1
         if ($LASTEXITCODE -ne 0) { return $false }
     }

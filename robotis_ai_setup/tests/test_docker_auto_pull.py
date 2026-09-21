@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -606,6 +607,18 @@ class TestFleetEnumerationsCarryTheRunner(unittest.TestCase):
                         "code_runner")
     _PS1 = os.path.join(_REPO_ROOT, "installer", "scripts", "pull_images.ps1")
     _DM_SRC = os.path.join(_REPO_ROOT, "gui", "app", "docker_manager.py")
+    # Every installer script that carries its OWN image list, and the regex
+    # whose group 1 is that list's body. pull_images.ps1 pulls it,
+    # finalize_install.ps1::Test-ImagesPresent is both finalize's skip gate and
+    # its post-pull verification, verify_system.ps1 reports it.
+    _INSTALLER_IMAGE_LISTS = {
+        "pull_images.ps1": r"^\$repoNames = @\(([^\r\n]*)\)\r?$",
+        "finalize_install.ps1": r"foreach \(\$name in @\(([^\r\n]*?)\)\) \{",
+        "verify_system.ps1": r"^\$images = @\(\r?\n([\s\S]*?)\r?\n\)\r?$",
+    }
+    # A short name as pull_images/finalize spell it, or inside verify_system's
+    # full "${registry}/<name>:${imageTag}" ref.
+    _IMAGE_NAME_IN_LIST = re.compile(r'"(?:\$\{registry\}/)?([a-z0-9-]+)(?::\$\{imageTag\})?"')
 
     def test_image_names_has_four_names_with_the_runner_last(self):
         from gui.app import constants
@@ -659,6 +672,28 @@ class TestFleetEnumerationsCarryTheRunner(unittest.TestCase):
         # the first „Umgebung starten".
         self.assertRegex(text, r'Failed to pull \$primary \(GHCR and Docker Hub fallback\)"'
                                r' -ForegroundColor Red\r\n\s+exit 1')
+
+    def test_every_installer_ps1_enumerates_exactly_the_image_names(self):
+        """Three installer scripts each carry their own image list; a name
+        missing from one of them is invisible THERE. finalize_install.ps1 once
+        kept three names after pull_images.ps1 gained the fourth: its
+        Test-ImagesPresent skipped the pull over an install whose code-runner
+        was absent, printed „Images bereitgestellt (Zustand verifiziert)" and
+        exited 0 — and never retried on any later run. The lists are compared
+        to IMAGE_NAMES exactly, so a stale fifth name fails here too."""
+        from gui.app import constants
+        scripts = os.path.join(_REPO_ROOT, "installer", "scripts")
+        for name, pattern in self._INSTALLER_IMAGE_LISTS.items():
+            with self.subTest(script=name):
+                with open(os.path.join(scripts, name), "rb") as handle:
+                    raw = handle.read()
+                self.assertTrue(raw.startswith(b"\xef\xbb\xbf"), f"{name} lost its UTF-8 BOM")
+                self.assertNotIn(b"\n", raw.replace(b"\r\n", b""), f"{name} is no longer CRLF")
+                text = raw.decode("utf-8-sig")
+                match = re.search(pattern, text, re.MULTILINE)
+                self.assertIsNotNone(match, f"{name}: the image list moved; update the pattern")
+                self.assertEqual(self._IMAGE_NAME_IN_LIST.findall(match.group(1)),
+                                 constants.IMAGE_NAMES)
 
     def test_no_prose_still_counts_three_containers(self):
         with open(self._DM_SRC, encoding="utf-8") as handle:

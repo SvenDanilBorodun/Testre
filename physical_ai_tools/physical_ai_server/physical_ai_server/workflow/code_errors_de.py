@@ -68,6 +68,11 @@ SENTENCES: dict[str, str] = {
              'erneut starten.'),
     'runner_down': ('Die Programmier-Umgebung läuft nicht — bitte die Umgebung '
                     'neu starten.'),
+    # The server's own verdict when the control connection ends with no
+    # ``exited`` (the runner container died mid-program — A15 keeps it dead
+    # until „Umgebung starten"); never a kind the student process reports.
+    'runner_crashed': ('Die Programmier-Umgebung ist während des Programms '
+                       'abgestürzt — bitte die Umgebung neu starten.'),
     'other': ('Zeile {line} in {file}: Das Programm ist mit einem Fehler '
               'abgebrochen ({exc_type}).'),
 }

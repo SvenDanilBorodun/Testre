@@ -81,3 +81,8 @@ def test_error_kinds_cover_the_faulting_exits_and_exclude_the_clean_ones():
     assert 'killed' not in ce.ERROR_KINDS
     assert 'runner_down' not in ce.ERROR_KINDS
     assert 'busy' not in ce.ERROR_KINDS
+    # runner_crashed is the SERVER's verdict on a control connection that ended
+    # with no `exited` (fix round 1): a sentence in the table, never a kind the
+    # student process may report about itself through __exit.
+    assert 'runner_crashed' in ce.SENTENCES
+    assert 'runner_crashed' not in ce.ERROR_KINDS

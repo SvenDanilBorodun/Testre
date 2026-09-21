@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from physical_ai_server.workflow import code_errors_de
 from physical_ai_server.workflow import code_program
 from physical_ai_server.workflow import robot_api
 from physical_ai_server.workflow.code_rpc import (
@@ -50,13 +51,17 @@ _CP_SRC = Path(code_program.__file__).read_text(encoding='utf-8')
 class FakeSupervisor:
     """Listens on runner.sock and speaks the control protocol. Configurable:
     whether it acks `started`, whether it sends `exited`, whether it acks
-    `killed`. Records the connection id that carried `start` vs `kill`."""
+    `killed`, and whether it DIES after `started` (closes the start connection
+    with no `exited` — the runner container OOM-killed, A15). Records the
+    connection id that carried `start` vs `kill`."""
 
-    def __init__(self, path, *, ack_started=True, exited=None, ack_killed=True):
+    def __init__(self, path, *, ack_started=True, exited=None, ack_killed=True,
+                 die_after_start=False):
         self.path = path
         self.ack_started = ack_started
         self.exited = exited                  # None → hang; else e.g. {'code': 0}
         self.ack_killed = ack_killed
+        self.die_after_start = die_after_start
         self.start_cid = None
         self.kill_cid = None
         self.token = None
@@ -99,6 +104,9 @@ class FakeSupervisor:
                     if self.ack_started:
                         write_frame(conn, {'ev': 'started'}, CONTROL_MAX_FRAME_BYTES,
                                     timeout_s=1.0)
+                    if self.die_after_start:
+                        conn.close()
+                        return
                     if self.exited is not None:
                         write_frame(conn, {'ev': 'exited', **self.exited},
                                     CONTROL_MAX_FRAME_BYTES, timeout_s=1.0)
@@ -135,9 +143,10 @@ def _flood_data_socket(sock_path, token, stop_flag):
         return
 
 
-def _manager(sock_dir, finished):
+def _manager(sock_dir, finished, statuses=None):
     return WorkflowManager(
         publisher=lambda pts: None,
+        emit_status=None if statuses is None else statuses.append,
         on_finished=finished.append,
         get_follower_joints=lambda: [0.0, -1.57, 1.57, 0.0, 0.0, 0.8],
         code_rpc=CodeRpcServer(os.path.join(sock_dir, 'rpc.sock')),
@@ -344,6 +353,40 @@ def test_kill_travels_on_a_second_connection():
                 time.sleep(0.02)
             assert sup.start_cid is not None and sup.kill_cid is not None
             assert sup.kill_cid != sup.start_cid, (sup.start_cid, sup.kill_cid)
+        finally:
+            sup.close()
+            mgr._code_rpc.close()
+
+
+def test_a_runner_that_dies_mid_program_is_reported_as_an_error_never_as_finished():
+    """Fix round 1: a supervisor that acks `started` and then CLOSES the start
+    connection with no `exited` (the runner container OOM-killed mid-program,
+    A15) fell through _drive to the clean-exit verdict — on_finished ==
+    ['finished'] and a green „Workflow abgeschlossen." for a program that never
+    reached its end. §3.9: never a silent green run. The `eof` outcome is an
+    error carrying the German `runner_crashed` sentence, and the kill still
+    travels out-of-band so a supervisor alive behind a broken control
+    connection ends the run too."""
+    with tempfile.TemporaryDirectory(prefix='crash-') as d:
+        finished, statuses = [], []
+        mgr = _manager(d, finished, statuses)
+        sup = FakeSupervisor(os.path.join(d, 'runner.sock'),
+                             ack_started=True, die_after_start=True)
+        try:
+            ok, msg, _ = mgr.start(_code_payload(), 'crashwf')
+            assert ok, msg
+            deadline = time.monotonic() + 8.0
+            while not finished and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert finished == ['error'], finished
+            errors = [s for s in statuses if s.get('phase') == 'error']
+            assert errors, statuses
+            assert errors[-1]['error'] == code_errors_de.sentence('runner_crashed')
+            for _ in range(50):
+                if sup.kill_cid:
+                    break
+                time.sleep(0.02)
+            assert sup.kill_cid is not None, 'no kill after the control eof'
         finally:
             sup.close()
             mgr._code_rpc.close()

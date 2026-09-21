@@ -353,7 +353,17 @@ class CodeProgram:
         kind = info.get('kind')
         if kind in code_errors_de.ERROR_KINDS:
             self._raise_error(ctx, on_block_change, session, info)
-        code = exited.get('code') if isinstance(exited, dict) else 0
+        if outcome != 'exited':
+            # 'eof': the control connection closed, reset or went malformed
+            # with no `exited` — the supervisor or its container died
+            # mid-program (A15: an OOM-killed runner). A green verdict needs
+            # the `exited` frame, never the absence of a fault (§3.9). The
+            # kill still goes out-of-band: a supervisor alive behind a broken
+            # control connection ends the run; a dead one answers nothing
+            # within the bound.
+            self.request_stop()
+            raise WorkflowError(code_errors_de.sentence('runner_crashed'))
+        code = exited.get('code')
         if isinstance(code, int) and code != 0:
             self._raise_error(ctx, on_block_change, session,
                               {'kind': 'other', 'exc_type': f'Code {code}'})
@@ -361,7 +371,8 @@ class CodeProgram:
 
     def _event_loop(self, control, ctx, on_block_change):
         """Handle control events until ``exited`` / ``compile_error`` / stop /
-        deadline. Returns ``(outcome, exited_frame, compile_error_frame)``.
+        deadline / ``eof`` (the connection ended or went malformed with no
+        ``exited``). Returns ``(outcome, exited_frame, compile_error_frame)``.
         Every read is bounded; ``ctx.should_stop()`` and the deadline are polled
         between recv timeouts through ``should_continue``."""
         deadline = time.monotonic() + CODE_RUN_MAX_S

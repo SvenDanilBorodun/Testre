@@ -1,0 +1,743 @@
+{
+  "generated_by": "physical_ai_server/workflow/robot_api.py",
+  "methods": [
+    {
+      "name": "home",
+      "java_name": "home",
+      "block_type": "edubotics_home",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist.",
+      "params": []
+    },
+    {
+      "name": "open_gripper",
+      "java_name": "openGripper",
+      "block_type": "edubotics_open_gripper",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Öffnet den Greifer.",
+      "params": []
+    },
+    {
+      "name": "close_gripper",
+      "java_name": "closeGripper",
+      "block_type": "edubotics_close_gripper",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Schließt den Greifer.",
+      "params": []
+    },
+    {
+      "name": "move_to",
+      "java_name": "moveTo",
+      "block_type": "edubotics_move_to",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels.",
+      "params": [
+        {
+          "name": "target",
+          "kind": "target",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "pickup",
+      "java_name": "pickup",
+      "block_type": "edubotics_pickup",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Nimmt an dieser Stelle etwas auf: hinfahren, absenken, Greifer schließen, anheben.",
+      "params": [
+        {
+          "name": "target",
+          "kind": "target",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "drop_at",
+      "java_name": "dropAt",
+      "block_type": "edubotics_drop_at",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Legt das Gehaltene über dem Ziel ab und öffnet den Greifer.",
+      "params": [
+        {
+          "name": "target",
+          "kind": "target",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "wait",
+      "java_name": "waitSeconds",
+      "block_type": "edubotics_wait_seconds",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Wartet so viele Sekunden (höchstens 300).",
+      "params": [
+        {
+          "name": "seconds",
+          "kind": "float",
+          "required": true,
+          "lo": 0.0,
+          "hi": 300.0
+        }
+      ]
+    },
+    {
+      "name": "replay",
+      "java_name": "replay",
+      "block_type": "edubotics_replay_trajectory",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Spielt eine aufgenommene Bewegung ab; speed 1.0 ist die Geschwindigkeit der Aufnahme, höchstens 3.0.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$"
+        },
+        {
+          "name": "speed",
+          "kind": "float",
+          "required": false,
+          "default": 1.0,
+          "lo": 0.25,
+          "hi": 3.0
+        }
+      ]
+    },
+    {
+      "name": "move_above",
+      "java_name": "moveAbove",
+      "block_type": "edubotics_move_above",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Fährt in Anfahrhöhe über das gefundene Objekt.",
+      "params": [
+        {
+          "name": "ziel",
+          "kind": "ziel",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "descend_to",
+      "java_name": "descendTo",
+      "block_type": "edubotics_descend_to",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Senkt den geöffneten Greifer auf das gefundene Objekt ab.",
+      "params": [
+        {
+          "name": "ziel",
+          "kind": "ziel",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "close_on_object",
+      "java_name": "closeOnObject",
+      "block_type": "edubotics_close_on_object",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Schließt den Greifer um das gefundene Objekt.",
+      "params": [
+        {
+          "name": "ziel",
+          "kind": "ziel",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "lift",
+      "java_name": "lift",
+      "block_type": "edubotics_lift",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Hebt den Greifer gerade nach oben an, so weit der Arm kann.",
+      "params": []
+    },
+    {
+      "name": "grasp",
+      "java_name": "grasp",
+      "block_type": "edubotics_grasp_object",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen.",
+      "params": [
+        {
+          "name": "obj",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$"
+        }
+      ]
+    },
+    {
+      "name": "mark_done",
+      "java_name": "markDone",
+      "block_type": "edubotics_mark_done",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Merkt dieses Objekt als erledigt, damit es nicht noch einmal gefunden wird.",
+      "params": [
+        {
+          "name": "ziel",
+          "kind": "ziel",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "pin",
+      "java_name": "pin",
+      "block_type": "edubotics_destination_pin",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel für move_to und drop_at.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$"
+        },
+        {
+          "name": "x",
+          "kind": "float",
+          "required": true,
+          "lo": -1.0,
+          "hi": 1.0
+        },
+        {
+          "name": "y",
+          "kind": "float",
+          "required": true,
+          "lo": -1.0,
+          "hi": 1.0
+        },
+        {
+          "name": "z",
+          "kind": "float",
+          "required": true,
+          "lo": -1.0,
+          "hi": 1.0
+        }
+      ]
+    },
+    {
+      "name": "pin_current",
+      "java_name": "pinCurrent",
+      "block_type": "edubotics_destination_current",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Merkt die Stelle, an der der Greifer gerade steht, unter diesem Namen als Ziel.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$"
+        }
+      ]
+    },
+    {
+      "name": "log",
+      "java_name": "log",
+      "block_type": "edubotics_log",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens 2000 Zeichen.",
+      "params": [
+        {
+          "name": "message",
+          "kind": "text",
+          "required": true,
+          "max_len": 2000
+        }
+      ]
+    },
+    {
+      "name": "beep",
+      "java_name": "beep",
+      "block_type": "edubotics_play_sound",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Spielt einen kurzen Signalton ab — hörbar im Browser.",
+      "params": []
+    },
+    {
+      "name": "speak",
+      "java_name": "speak",
+      "block_type": "edubotics_speak_de",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Liest den Text mit deutscher Stimme vor (höchstens 240 Zeichen).",
+      "params": [
+        {
+          "name": "text",
+          "kind": "text",
+          "required": true,
+          "max_len": 240
+        }
+      ]
+    },
+    {
+      "name": "tone",
+      "java_name": "tone",
+      "block_type": "edubotics_play_tone",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Spielt einen Ton mit dieser Frequenz in Hertz für so viele Sekunden (höchstens 5).",
+      "params": [
+        {
+          "name": "freq",
+          "kind": "float",
+          "required": false,
+          "default": 880.0,
+          "lo": 100.0,
+          "hi": 4000.0
+        },
+        {
+          "name": "seconds",
+          "kind": "float",
+          "required": false,
+          "default": 0.25,
+          "lo": 0.05,
+          "hi": 5.0
+        }
+      ]
+    },
+    {
+      "name": "toast",
+      "java_name": "toast",
+      "block_type": "edubotics_toast",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Zeigt eine Meldung auf dem Bildschirm; level ist info, success, warning oder error, seconds höchstens 15.",
+      "params": [
+        {
+          "name": "text",
+          "kind": "text",
+          "required": true,
+          "max_len": 240
+        },
+        {
+          "name": "level",
+          "kind": "str",
+          "required": false,
+          "default": "info",
+          "max_len": 7,
+          "pattern": "^(info|success|warning|error)$"
+        },
+        {
+          "name": "seconds",
+          "kind": "int",
+          "required": false,
+          "default": 3,
+          "lo": 1,
+          "hi": 15
+        }
+      ]
+    },
+    {
+      "name": "counter_reset",
+      "java_name": "counterReset",
+      "block_type": "edubotics_counter_reset",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Setzt den Zähler mit diesem Namen auf 0.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$"
+        }
+      ]
+    },
+    {
+      "name": "counter_add",
+      "java_name": "counterAdd",
+      "block_type": "edubotics_counter_add",
+      "table": "statement",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Erhöht den Zähler mit diesem Namen um 1.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$"
+        }
+      ]
+    },
+    {
+      "name": "ziel",
+      "java_name": "ziel",
+      "block_type": "edubotics_destination_ref",
+      "table": "value",
+      "budget": "call",
+      "returns": "name",
+      "doc_de": "Gibt den Namen eines gemerkten Ziels für move_to und drop_at zurück; ein unbekannter Name wird abgelehnt.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$"
+        }
+      ]
+    },
+    {
+      "name": "sees",
+      "java_name": "sees",
+      "block_type": "edubotics_see_object",
+      "table": "value",
+      "budget": "perception",
+      "returns": "bool",
+      "doc_de": "Prüft, ob gerade ein noch nicht erledigtes Objekt dieses Typs zu sehen ist.",
+      "params": [
+        {
+          "name": "obj",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$"
+        }
+      ]
+    },
+    {
+      "name": "count",
+      "java_name": "count",
+      "block_type": "edubotics_count_object",
+      "table": "value",
+      "budget": "perception",
+      "returns": "int",
+      "doc_de": "Zählt die sichtbaren, noch nicht erledigten Objekte dieses Typs.",
+      "params": [
+        {
+          "name": "obj",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$"
+        }
+      ]
+    },
+    {
+      "name": "wait_until_seen",
+      "java_name": "waitUntilSeen",
+      "block_type": "edubotics_wait_until_object_seen",
+      "table": "value",
+      "budget": "perception",
+      "returns": "bool",
+      "doc_de": "Wartet, bis ein Objekt dieses Typs zu sehen ist; False, wenn es nach timeout Sekunden nicht da ist.",
+      "params": [
+        {
+          "name": "obj",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$"
+        },
+        {
+          "name": "timeout",
+          "kind": "float",
+          "required": false,
+          "default": 10.0,
+          "lo": 0.0,
+          "hi": 300.0
+        }
+      ]
+    },
+    {
+      "name": "wait_until_held",
+      "java_name": "waitUntilHeld",
+      "block_type": "edubotics_wait_until_held",
+      "table": "value",
+      "budget": "call",
+      "returns": "bool",
+      "doc_de": "Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist.",
+      "params": [
+        {
+          "name": "timeout",
+          "kind": "float",
+          "required": false,
+          "default": 10.0,
+          "lo": 0.0,
+          "hi": 300.0
+        }
+      ]
+    },
+    {
+      "name": "find",
+      "java_name": "find",
+      "block_type": "edubotics_find_object",
+      "table": "value",
+      "budget": "perception",
+      "returns": "ziel",
+      "doc_de": "Findet das nächste greifbare Objekt dieses Typs und gibt ein Greifziel zurück, sonst None.",
+      "params": [
+        {
+          "name": "obj",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$"
+        }
+      ]
+    },
+    {
+      "name": "object_position",
+      "java_name": "objectPosition",
+      "block_type": "edubotics_object_position",
+      "table": "value",
+      "budget": "perception",
+      "returns": "point",
+      "doc_de": "Gibt die Position [x, y, z] des Greifziels in Metern zurück.",
+      "params": [
+        {
+          "name": "ziel",
+          "kind": "ziel",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "is_holding",
+      "java_name": "isHolding",
+      "block_type": "edubotics_grasp_held",
+      "table": "value",
+      "budget": "call",
+      "returns": "bool",
+      "doc_de": "Prüft, ob der Greifer etwas hält.",
+      "params": []
+    },
+    {
+      "name": "counter_get",
+      "java_name": "counterGet",
+      "block_type": "edubotics_counter_get",
+      "table": "value",
+      "budget": "call",
+      "returns": "int",
+      "doc_de": "Gibt den Wert des Zählers zurück; 0, wenn er noch nie gesetzt wurde.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$"
+        }
+      ]
+    }
+  ],
+  "internal": [
+    {
+      "name": "__hello",
+      "java_name": "__hello",
+      "block_type": null,
+      "table": "internal",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Meldet das Programm mit seinem Lauf-Schlüssel an — das macht die Bibliothek selbst.",
+      "params": [
+        {
+          "name": "token",
+          "kind": "str",
+          "required": true,
+          "max_len": 32,
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      ]
+    },
+    {
+      "name": "__paused",
+      "java_name": "__paused",
+      "block_type": null,
+      "table": "internal",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Meldet einen erreichten Haltepunkt und wartet, bis der Lauf weiterläuft — das macht die Bibliothek selbst.",
+      "params": [
+        {
+          "name": "file",
+          "kind": "str",
+          "required": true,
+          "max_len": 80,
+          "pattern": "^(?:[A-Za-z][A-Za-z0-9_]{0,39}/){0,3}[A-Za-z][A-Za-z0-9_]{0,39}\\.(py|java)$"
+        },
+        {
+          "name": "line",
+          "kind": "int",
+          "required": true,
+          "lo": 0,
+          "hi": 1000000
+        },
+        {
+          "name": "locals",
+          "kind": "dict",
+          "required": true,
+          "max_len": 30
+        }
+      ]
+    },
+    {
+      "name": "__line",
+      "java_name": "__line",
+      "block_type": null,
+      "table": "internal",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Meldet die Zeile, die gerade läuft, für die Anzeige — das macht die Bibliothek selbst.",
+      "params": [
+        {
+          "name": "file",
+          "kind": "str",
+          "required": true,
+          "max_len": 80,
+          "pattern": "^(?:[A-Za-z][A-Za-z0-9_]{0,39}/){0,3}[A-Za-z][A-Za-z0-9_]{0,39}\\.(py|java)$"
+        },
+        {
+          "name": "line",
+          "kind": "int",
+          "required": true,
+          "lo": 0,
+          "hi": 1000000
+        }
+      ]
+    },
+    {
+      "name": "__exit",
+      "java_name": "__exit",
+      "block_type": null,
+      "table": "internal",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Meldet, dass das Programm zu Ende ist oder abgebrochen wurde — das macht die Bibliothek selbst.",
+      "params": [
+        {
+          "name": "info",
+          "kind": "dict",
+          "required": true,
+          "max_len": 8
+        }
+      ]
+    },
+    {
+      "name": "register_object",
+      "java_name": "register_object",
+      "block_type": null,
+      "table": "internal",
+      "budget": "perception",
+      "returns": "none",
+      "doc_de": "Meldet einen eigenen Objekt-Typ für diesen Lauf an — das macht Greifobjekt selbst.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$"
+        },
+        {
+          "name": "label",
+          "kind": "str",
+          "required": true,
+          "max_len": 40
+        },
+        {
+          "name": "tag_ids",
+          "kind": "tagids",
+          "required": true
+        },
+        {
+          "name": "hoehe_m",
+          "kind": "float",
+          "required": true,
+          "lo": 0.0,
+          "hi": 0.3,
+          "lo_open": true
+        },
+        {
+          "name": "greiftiefe_m",
+          "kind": "float",
+          "required": true,
+          "lo": 0.0,
+          "hi": 0.3
+        },
+        {
+          "name": "greifer_schliessen_rad",
+          "kind": "float",
+          "required": true,
+          "lo": -1.75,
+          "hi": 1.75,
+          "nullable": true
+        },
+        {
+          "name": "anfahrhoehe_m",
+          "kind": "float",
+          "required": true,
+          "lo": 0.0,
+          "hi": 0.3,
+          "lo_open": true,
+          "nullable": true
+        }
+      ]
+    }
+  ],
+  "limits": {
+    "MAX_CALLS_PER_S": 200.0,
+    "BURST": 50,
+    "PERCEPTION_MAX_PER_S": 20.0,
+    "PERCEPTION_BURST": 5,
+    "MAX_FRAME_BYTES": 65536,
+    "CONTROL_MAX_FRAME_BYTES": 196608,
+    "MAX_CODE_FILES": 32,
+    "MAX_CODE_FILE_BYTES": 65536,
+    "MAX_CODE_PROJECT_BYTES": 131072,
+    "CODE_PATH_RE": "^(?:[A-Za-z][A-Za-z0-9_]{0,39}/){0,3}[A-Za-z][A-Za-z0-9_]{0,39}\\.(py|java)$"
+  }
+}

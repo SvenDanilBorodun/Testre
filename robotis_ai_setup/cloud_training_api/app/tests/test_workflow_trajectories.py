@@ -300,6 +300,10 @@ def _create_wf_payload(**over):
         classroom_id=None,
         share_with_group=False,
         sim_scene=None,
+        # Migration 040 fields with their model defaults (the pydantic stub
+        # applies none, so the fake carries them).
+        code_language="",
+        code_files=None,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -1072,7 +1076,8 @@ class TestWorkflowsRateLimitedPerUser(unittest.TestCase):
             for n in ast.walk(tree)
             if isinstance(n, ast.FunctionDef) and _is_post(n)
         ]
-        # There are exactly the four documented POST routes.
+        # There are exactly the five documented POST routes (submit joined
+        # with migration 040; it shares the same per-user 10/min bucket).
         self.assertEqual(
             {fn.name for fn in post_fns},
             {
@@ -1080,6 +1085,7 @@ class TestWorkflowsRateLimitedPerUser(unittest.TestCase):
                 "clone_workflow",
                 "restore_workflow_version",
                 "create_trajectory",
+                "submit_workflow",
             },
         )
         for fn in post_fns:

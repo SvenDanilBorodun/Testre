@@ -248,6 +248,10 @@ def _create_payload(**over):
         classroom_id=None,
         share_with_group=False,
         sim_scene=None,
+        # Migration 040 fields with their model defaults (the pydantic stub
+        # applies none, so the fake carries them).
+        code_language="",
+        code_files=None,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -260,6 +264,8 @@ def _update_payload(**over):
         blockly_json=None,
         share_with_group=None,
         sim_scene=None,
+        code_language=None,
+        code_files=None,
     )
     base.update(over)
     return SimpleNamespace(**base)

@@ -121,12 +121,12 @@ describe('CodeEditor — the run-line highlight', () => {
     expect(contentLines(container).indexOf(marked(container)[0])).toBe(6); // line 7, 0-based
   });
 
-  test('the kind rides the class, so an error line is distinguishable from a running one', () => {
-    const { container, show } = mount({ highlightLine: 4, highlightKind: 'error' });
-    expect(marked(container)[0].classList.contains('cm-edubotics-run-error')).toBe(true);
+  test('the kind rides the class, so a paused line is distinguishable from a running one', () => {
+    const { container, show } = mount({ highlightLine: 4, highlightKind: 'paused' });
+    expect(marked(container)[0].classList.contains('cm-edubotics-run-paused')).toBe(true);
     show({ highlightKind: 'running' });
     expect(marked(container)[0].classList.contains('cm-edubotics-run-running')).toBe(true);
-    expect(marked(container)[0].classList.contains('cm-edubotics-run-error')).toBe(false);
+    expect(marked(container)[0].classList.contains('cm-edubotics-run-paused')).toBe(false);
   });
 
   test('no highlight, and a line beyond the document, leave every line alone', () => {
@@ -135,7 +135,7 @@ describe('CodeEditor — the run-line highlight', () => {
     // A `current_block_id` naming a line the open file does not have (the
     // student edited it while the run was live) must not throw out of
     // `Text.line`, which would take the whole editor down.
-    show({ highlightLine: 999, highlightKind: 'error' });
+    show({ highlightLine: 999, highlightKind: 'running' });
     expect(marked(container)).toHaveLength(0);
   });
 });

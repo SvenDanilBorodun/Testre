@@ -168,7 +168,7 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
    * The debugger (§3.5). The slice gets NO new state: the breakpoint ids live
    * where the Blockly ones already do (`s.workshop.breakpoints`, through the
    * existing add/remove reducers) and the highlighted line is DERIVED here from
-   * `currentBlockId` + `phase`/`paused`. Both id spaces share those two fields,
+   * `currentBlockId` + `runState`/`paused`. Both id spaces share those fields,
    * so `parseCodeBreakpointId` is what tells them apart — a Blockly id resolves
    * to nothing and lights up no line.
    */
@@ -177,7 +177,6 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
   const breakpoints = useSelector((s) => s.workshop.breakpoints);
   const currentBlockId = useSelector((s) => s.workshop.currentBlockId);
   const runState = useSelector((s) => s.workshop.runState);
-  const phase = useSelector((s) => s.workshop.phase);
   const paused = useSelector((s) => s.workshop.paused);
 
   const debuggable = !readOnly && DEBUGGABLE_LANGUAGES.includes(language);
@@ -206,14 +205,22 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
     return () => clearTimeout(timer);
   }, [debuggable, live, breakpoints, setWorkflowBreakpoints]);
 
+  // Only the two kinds a LIVE run can reach. There is deliberately no `error`
+  // kind: the server does publish `<file>:L<line>` with phase `error`
+  // (`code_program._raise_error`), but `useRosTopicSubscription` answers that
+  // tick with `setWorkflowStatus` AND `setRunState('error')` in one callback,
+  // and the terminal branch of `setRunState` nulls `currentBlockId` and blanks
+  // `phase` — so the committed state after ANY error tick carries no id. A
+  // branch on it would be dead code claiming a feature the student never gets;
+  // the line is named in the German error banner instead. Reviving it means
+  // changing that reducer first (see docs/KNOWN-ISSUES.md).
   const highlight = useMemo(() => {
     const parsed = parseCodeBreakpointId(currentBlockId);
     if (!parsed || parsed.path !== active) return { line: null, kind: null };
-    if (phase === 'error') return { line: parsed.line, kind: 'error' };
     if (paused) return { line: parsed.line, kind: 'paused' };
     if (runState === 'running') return { line: parsed.line, kind: 'running' };
     return { line: null, kind: null };
-  }, [currentBlockId, active, phase, paused, runState]);
+  }, [currentBlockId, active, paused, runState]);
 
   const smallButton = 'text-xs px-2 py-1 rounded-md border border-[var(--line)] bg-white '
     + 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed';

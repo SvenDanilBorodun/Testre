@@ -98,14 +98,43 @@ And W2's `schema-probe` job does not probe the schema: it imports `app.main`,
 while `_validate_required_schema` is scheduled from an `on_event("startup")`
 hook that a bare import never fires (`docs/KNOWN-ISSUES.md`).
 
+**Two corrections to THIS round's own output, 2026-09-22, both found by
+reversing a claim rather than re-reading it.** The debugger shipped a
+`phase === 'error'` rung that highlighted the failing line, a matching
+`.cm-edubotics-run-error` style, and a `CLAUDE.md` sentence asserting the
+feature — and none of it could fire. `useRosTopicSubscription` answers an error
+tick with `setWorkflowStatus` AND `setRunState('error')` in one callback, and
+that terminal branch nulls `currentBlockId` and blanks `phase`, so the id the
+server took care to publish is discarded on arrival. It passed CI because its
+test preloaded `{phase:'error', currentBlockId:'main.py:L4'}` into a store — a
+state the production reducers cannot reach; driven through the real three
+dispatches the same component answers `data-highlight-line=""`. The rung, the
+style and the sentence are gone, the test now drives the real sequence and pins
+the CAUSE so it goes red if the reducer moves, and the richer fix — keeping the
+id for `'error'` — is an owner call in `docs/KNOWN-ISSUES.md`, because it lives
+in a file this round's grant forbids and needs a second edit nobody would guess
+(`handleStart` clears five things but not `phase`). The same reducer, it turns
+out, has been making `RunControls`' red „Fehler" pill dead for Blockly programs
+since long before this branch. Second: §3.10 wired
+`get_object_catalog_callback` to pass the resolved profile id into the optional
+parameter the builder had carried unused since RS-56, which CLOSED the
+long-standing latent item — but `CLAUDE.md` still ended that bullet with „the
+wire response always carries the OMX variant" and `KNOWN-ISSUES` still carried
+the entry twice, so the one commit whose purpose was document truth left three
+sentences asserting the bug it had just fixed. Fixed; the fence is a wiring
+test, because the payload stays byte-identical until a per-profile catalog
+differs in a wire field — which is also why an un-wired optional parameter can
+only ever be caught by one.
+
 **Scale**: 10 images instead of 8 (the runner on amd64 and opi; the Jetson pair
 gets neither manager nor runner, the whole tab being `jetsonIncompatible`), the
 boot probe at 14 tables / 10 column sets / 20 RPCs, migration 040, and a third
 `image_source_parity.sh` kind — without which an edit to the shipped stub
 library or the supervisor would ship nothing, silently.
 
-**Verified** at the end of the round: 147 vitest files / 2215 tests (was
-132 / 2034 at the branch base) with 0 failures and 2 expected failures — the
+**Verified** at the end of the round: 147 vitest files / 2216 tests (was
+132 / 2034 at the branch base; 2215 before the 2026-09-22 corrections above
+added the positive control) with 0 failures and 2 expected failures — the
 A16 noise gate, which shipped disabled by its own written exit
 (`docs/KNOWN-ISSUES.md`); 2163 server tests (2159 passed, 4 skipped);
 367 cloud-API; 1664 GUI (66 skipped — the 57 executed installer tests need

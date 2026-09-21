@@ -104,8 +104,11 @@ export function robotApiCompletionSource(language) {
  * `setBreakpointLines` carries the lines of the OPEN file only — CodeWorkspace
  * has already split the `<file>:L<line>` id space (codeBreakpoints.js), so the
  * editor never sees an id and can never mistake a Blockly one for a line.
- * `setRunHighlight` carries `{line, kind}` from `WorkflowStatus.current_block_id`
- * + `phase`, or null.
+ * `setRunHighlight` carries `{line, kind}` derived from
+ * `WorkflowStatus.current_block_id` (CodeWorkspace), or null. The kind rides
+ * through as a class so a future one needs no change here; the theme paints
+ * every reachable kind the same amber, `running` and `paused` being the two
+ * (CodeWorkspace says why there is no `error`).
  */
 const setBreakpointLines = StateEffect.define();
 const setRunHighlight = StateEffect.define();
@@ -222,7 +225,6 @@ const theme = EditorView.theme({
   '.cm-edubotics-bp': { display: 'block', width: '100%', fontSize: '11px', lineHeight: 'inherit' },
   '.cm-edubotics-bp-set': { color: '#dc2626' },
   '.cm-edubotics-run-line': { backgroundColor: '#fef3c7' },
-  '.cm-edubotics-run-error': { backgroundColor: '#fee2e2' },
 });
 
 function editorExtensions(language, onDocChange, readOnlyCompartment, onToggleRef, withGutter) {

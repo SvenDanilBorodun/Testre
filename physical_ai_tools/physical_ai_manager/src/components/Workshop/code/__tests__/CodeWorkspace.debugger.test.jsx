@@ -19,13 +19,15 @@
 // wrong language is visible as a value rather than as a pixel.
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import CodeWorkspace from '../CodeWorkspace';
 import { CODE_DE } from '../codeMessagesDe';
-import workshopReducer from '../../../../features/workshop/workshopSlice';
+import workshopReducer, {
+  setWorkflowStatus, setRunState, setPaused,
+} from '../../../../features/workshop/workshopSlice';
 
 const mockRos = vi.hoisted(() => ({
   callService: vi.fn(),
@@ -145,10 +147,58 @@ describe('CodeWorkspace — the run line', () => {
     expect(editor()).toHaveAttribute('data-highlight-kind', 'paused');
   });
 
-  test('phase error highlights the line as an error', async () => {
-    await mount({ workshop: { currentBlockId: 'main.py:L4', phase: 'error', runState: 'idle' } });
-    expect(editor()).toHaveAttribute('data-highlight-line', '4');
-    expect(editor()).toHaveAttribute('data-highlight-kind', 'error');
+  // The error line is NOT highlighted, and this test exists so nobody re-adds
+  // the claim without changing what makes it false. The server does publish the
+  // id (`code_program._raise_error` → `<file>:L<line>` with phase `error`), but
+  // one topic callback dispatches BOTH `setWorkflowStatus` and
+  // `setRunState('error')`, and the terminal branch of the latter nulls
+  // `currentBlockId` and blanks `phase`. Driving the REAL reducers through that
+  // real sequence is the whole point: a preloaded `{phase:'error',
+  // currentBlockId:'main.py:L4'}` store is a state production cannot reach, and
+  // asserting against one is how the unreachable branch shipped green.
+  test('a terminal error tick leaves no line highlighted — the id is gone by then', async () => {
+    const { store } = await mount({ workshop: { runState: 'running', phase: 'running' } });
+    await act(async () => {
+      store.dispatch(setWorkflowStatus({
+        current_block_id: 'main.py:L4',
+        phase: 'error',
+        progress: 1,
+        error: 'Zeile 4 in main.py',
+        log_message: '',
+        workflow_id: 'wf-1',
+      }));
+      store.dispatch(setRunState('error'));
+      store.dispatch(setPaused(false));
+    });
+    // The cause, pinned: if this ever holds the id again, revisit the highlight.
+    expect(store.getState().workshop.currentBlockId).toBeNull();
+    expect(store.getState().workshop.phase).toBe('');
+    expect(editor()).toHaveAttribute('data-highlight-line', '');
+    expect(editor()).toHaveAttribute('data-highlight-kind', '');
+  });
+
+  // The positive control for the test above: the two kinds that DO survive the
+  // real dispatch sequence. A breakpoint tick dispatches only `setPaused(true)`
+  // and a per-line tick re-dispatches `setRunState('running')` while runState is
+  // ALREADY 'running', so its transition guard does not null the id.
+  test('a paused tick and a running tick both keep their line, through the real dispatches', async () => {
+    const { store } = await mount({ workshop: { runState: 'running', phase: 'running' } });
+    const tick = (block, phase) => ({
+      current_block_id: block, phase, progress: 0, error: '', log_message: '', workflow_id: 'wf-1',
+    });
+    await act(async () => {
+      store.dispatch(setWorkflowStatus(tick('main.py:L2', 'running')));
+      store.dispatch(setRunState('running'));
+      store.dispatch(setPaused(false));
+    });
+    expect(editor()).toHaveAttribute('data-highlight-line', '2');
+    expect(editor()).toHaveAttribute('data-highlight-kind', 'running');
+    await act(async () => {
+      store.dispatch(setWorkflowStatus(tick('main.py:L9', 'paused')));
+      store.dispatch(setPaused(true));
+    });
+    expect(editor()).toHaveAttribute('data-highlight-line', '9');
+    expect(editor()).toHaveAttribute('data-highlight-kind', 'paused');
   });
 
   test('an id of an UNKNOWN shape is ignored — a Blockly id is not a line', async () => {

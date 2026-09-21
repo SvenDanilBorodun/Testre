@@ -36,6 +36,7 @@ import threading
 import time
 import traceback
 import types
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -293,6 +294,19 @@ class WorkflowContext:
     # same reason gripper_knob_warned is — an undeclared ctx field is a branch
     # that silently never runs.
     all_done_notified: set = field(default_factory=set)
+    # ── Text programs (code_rpc) ─────────────────────────────────────────────
+    # rpc_handles — Greifziel handle → Detection for a run driven over the data
+    #   socket (a text program cannot hold a Detection, it holds an int the
+    #   server resolves). An OrderedDict so the oldest is evicted at
+    #   code_rpc.CODE_RPC_MAX_HANDLES; written and read on the run's single
+    #   dispatch worker only.
+    # student_objects — name → the recipe dict a Greifobjekt registered THIS
+    #   RUN (the merge into ctx.object_catalog lands with register_object).
+    # code_status_last_emit — monotonic time of the last „running" status the
+    #   dispatcher emitted; the B13 throttle (never per line) keys on it.
+    rpc_handles: OrderedDict = field(default_factory=OrderedDict)
+    student_objects: dict = field(default_factory=dict)
+    code_status_last_emit: float = 0.0
     # „Wenn <Typ> gesehen" reclaim rate floor: object type → the monotonic time
     # that hat's trigger poll last ran the recycled-object reclaim. Keyed by TYPE
     # and not by hat thread on purpose, so N hats watching one type still cost

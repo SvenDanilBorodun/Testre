@@ -34,7 +34,14 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
-          python-version: "3.11"
+          # 3.12+, NOT 3.11, and this floor is load-bearing for the code runner.
+          # The runner container ships Python >= 3.12 and its debugger is PEP 669
+          # `sys.monitoring`, which does not exist before 3.12. On 3.11 the seven
+          # `HookBehaviour` tests — the ONLY executable fence on the DISABLE +
+          # restart_events contract — skip silently, and
+          # test_robot_api_generated.py::test_stub_compiles_under_the_runner_python_floor
+          # fails outright. Lowering this again re-opens both.
+          python-version: "3.12"
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip

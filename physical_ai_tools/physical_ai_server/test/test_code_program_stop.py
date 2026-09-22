@@ -53,17 +53,22 @@ class FakeSupervisor:
     whether it acks `started`, whether it sends `exited`, whether it acks
     `killed`, and whether it DIES after `started` (closes the start connection
     with no `exited` — the runner container OOM-killed, A15). Records the
-    connection id that carried `start` vs `kill`."""
+    connection id that carried `start` vs `kill` vs `breakpoints`."""
 
     def __init__(self, path, *, ack_started=True, exited=None, ack_killed=True,
-                 die_after_start=False):
+                 die_after_start=False, applied=True):
         self.path = path
         self.ack_started = ack_started
         self.exited = exited                  # None → hang; else e.g. {'code': 0}
         self.ack_killed = ack_killed
         self.die_after_start = die_after_start
+        self.applied = applied                # what `breakpoints_set` reports
         self.start_cid = None
         self.kill_cid = None
+        self.breakpoints_cid = None
+        self.breakpoints_run_id = None
+        self.breakpoints_lines = None
+        self.start_breakpoints = None
         self.token = None
         self.start_files = None
         self._closed = threading.Event()
@@ -101,6 +106,7 @@ class FakeSupervisor:
                     self.start_cid = cid
                     self.token = frame.get('token')
                     self.start_files = frame.get('files')
+                    self.start_breakpoints = frame.get('breakpoints')
                     if self.ack_started:
                         write_frame(conn, {'ev': 'started'}, CONTROL_MAX_FRAME_BYTES,
                                     timeout_s=1.0)
@@ -115,6 +121,14 @@ class FakeSupervisor:
                     if self.ack_killed:
                         write_frame(conn, {'ev': 'killed'}, CONTROL_MAX_FRAME_BYTES,
                                     timeout_s=1.0)
+                elif ev == 'breakpoints':
+                    self.breakpoints_cid = cid
+                    self.breakpoints_run_id = frame.get('run_id')
+                    self.breakpoints_lines = frame.get('lines')
+                    write_frame(conn, {'ev': 'breakpoints_set',
+                                       'run_id': frame.get('run_id'),
+                                       'applied': self.applied},
+                                CONTROL_MAX_FRAME_BYTES, timeout_s=1.0)
         except OSError:
             return
 
@@ -354,6 +368,86 @@ def test_kill_travels_on_a_second_connection():
             assert sup.start_cid is not None and sup.kill_cid is not None
             assert sup.kill_cid != sup.start_cid, (sup.start_cid, sup.kill_cid)
         finally:
+            sup.close()
+            mgr._code_rpc.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# the mid-run breakpoint change (§3.5)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_breakpoint_set_mid_run_reaches_the_runner_on_its_own_connection():
+    """E2E fix round 1. `WorkflowManager.set_breakpoints` only rebound the
+    frozenset the BLOCKLY interpreter reads through `ctx.get_breakpoints()`. A
+    code program runs in another PROCESS behind the control socket, so a
+    breakpoint the student adds while a Python program runs reached nothing:
+    the gutter dot appeared, `/workflow/set_breakpoints` answered success, and
+    the program never stopped there. `restart_events()` in the runner's hook,
+    the supervisor's `breakpoints` branch and `Run.set_breakpoints` were all
+    unreachable from the product.
+
+    Driven through the REAL manager, so it fails if either half is missing."""
+    with tempfile.TemporaryDirectory(prefix='bp-') as d:
+        finished = []
+        mgr = _manager(d, finished)
+        sup = FakeSupervisor(os.path.join(d, 'runner.sock'),
+                             ack_started=True, exited=None, ack_killed=True)
+        try:
+            mgr.set_breakpoints(['main.py:L1'])     # armed before the run
+            ok, msg, _ = mgr.start(_code_payload(), 'bpwf')
+            assert ok, msg
+            for _ in range(100):
+                if sup.start_cid:
+                    break
+                time.sleep(0.02)
+            assert sup.start_cid is not None, 'supervisor never saw start'
+            assert sup.start_breakpoints == {'main.py': [1]}, sup.start_breakpoints
+
+            mgr.set_breakpoints(['main.py:L3', 'hilfe.py:L7'])
+            for _ in range(100):
+                if sup.breakpoints_cid:
+                    break
+                time.sleep(0.02)
+            assert sup.breakpoints_cid is not None, (
+                'a mid-run breakpoint change never reached the runner')
+            assert sup.breakpoints_run_id == 'bpwf'
+            assert sup.breakpoints_lines == {'main.py': [3], 'hilfe.py': [7]}, \
+                sup.breakpoints_lines
+            # Its OWN control connection — never the one carrying `start`
+            # (which the event loop is reading) and never the data socket.
+            assert sup.breakpoints_cid != sup.start_cid, \
+                (sup.start_cid, sup.breakpoints_cid)
+            # The Blockly-side frozenset is still rebound — one call, both.
+            assert mgr._breakpoints == frozenset({'main.py:L3', 'hilfe.py:L7'})
+        finally:
+            mgr.stop()
+            sup.close()
+            mgr._code_rpc.close()
+
+
+def test_a_breakpoint_change_with_no_runner_listening_never_raises():
+    """Best-effort exactly like `stop()`'s `request_stop`: the service callback
+    answers „…Haltepunkt(e) gesetzt." whatever the runner does. Here the
+    supervisor is GONE — the socket file does not exist — and a live program
+    still takes the forward without raising."""
+    with tempfile.TemporaryDirectory(prefix='bpnone-') as d:
+        finished = []
+        mgr = _manager(d, finished)
+        sup = FakeSupervisor(os.path.join(d, 'runner.sock'),
+                             ack_started=True, exited=None, ack_killed=True)
+        try:
+            ok, msg, _ = mgr.start(_code_payload(), 'bpgonewf')
+            assert ok, msg
+            for _ in range(100):
+                if sup.start_cid:
+                    break
+                time.sleep(0.02)
+            sup.close()
+            os.unlink(os.path.join(d, 'runner.sock'))
+            mgr.set_breakpoints(['main.py:L5'])       # must not raise
+            assert mgr._breakpoints == frozenset({'main.py:L5'})
+        finally:
+            mgr.stop()
             sup.close()
             mgr._code_rpc.close()
 

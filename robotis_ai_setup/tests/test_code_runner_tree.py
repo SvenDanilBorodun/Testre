@@ -3,10 +3,11 @@
 ``robotis_ai_setup/docker/code_runner/`` is outside all seven compileall
 roots and every ``ci.yml`` scan (the workflow file may not be edited for
 this), so this file is the syntax gate for the shipped Python and the fence
-on the two things §3.1 forbids in the tree: an ``EDUBOTICS_`` token (the
-``code_runner`` compose service carries no ``environment:`` block, so a read
-here would be dead code with a live-looking name) and a Dockerfile that
-fetches anything but noble's ``python3``.
+on the three things the tree may not carry: an ``EDUBOTICS_`` token (§3.1 —
+the ``code_runner`` compose service carries no ``environment:`` block, so a
+read here would be dead code with a live-looking name), a Dockerfile that
+fetches anything but noble's ``python3``, and a CREDENTIAL-SHAPED literal —
+``ci.yml::secret-scan`` is the fence the last one broke.
 """
 
 import ast
@@ -30,6 +31,20 @@ _EXPECTED_FILES = {
     'java/edubotics/SmokeMain.java',
 }
 
+# gitleaks' `generic-api-key` rule fires on a long word-ish literal bound to a
+# name that READS like a credential. Its keyword list is what decides, not the
+# value: the runner's fixed self-test handshake word is no secret at all, but
+# `_TOKEN = '<32 hex>'` matched, and `ci.yml::secret-scan` scans the FULL
+# history, so the failure outlives the commit that introduced it.
+_CREDENTIAL_NAME = re.compile(
+    r'(?i)(key|api|token|secret|passwd|password|auth|access|credential)')
+_LONG_LITERAL_BINDING = re.compile(
+    r'''(?x)
+    ([A-Za-z_][A-Za-z0-9_]*)        # the name the literal is bound to
+    \s*(?:=|:)\s*
+    (["'])([A-Za-z0-9_\-]{16,})\2   # a long, word-ish literal
+    ''')
+
 
 class RunnerTree(unittest.TestCase):
     def setUp(self):
@@ -49,6 +64,24 @@ class RunnerTree(unittest.TestCase):
             self.assertIsNone(token.search(text),
                               f'{path.relative_to(_TREE)} names an EDUBOTICS_* variable; the '
                               f'runner service forwards none, so the read would be dead code')
+
+    def test_no_shipped_file_binds_a_long_literal_to_a_credential_name(self):
+        """`ci.yml::secret-scan` runs gitleaks over the FULL git history, so a
+        credential-SHAPED literal fails the branch for good — renaming it later
+        leaves the introducing commit matching. The runner's fixed handshake
+        word must therefore never be bound to a name gitleaks reads as a
+        credential (the value cannot change: `RUN_TOKEN_RE` pins 32 hex)."""
+        for path in self.files + [_DOCKERFILE]:
+            text = path.read_text(encoding='utf-8')
+            for match in _LONG_LITERAL_BINDING.finditer(text):
+                name, _quote, value = match.groups()
+                if not _CREDENTIAL_NAME.search(name):
+                    continue
+                line = text[:match.start()].count('\n') + 1
+                self.fail(
+                    f'{path.name}:{line} binds a {len(value)}-character literal to '
+                    f'„{name}" — gitleaks\' generic-api-key rule matches that shape '
+                    f'and ci.yml::secret-scan then fails on every push')
 
     def test_the_tree_is_exactly_the_expected_set(self):
         rel = {str(p.relative_to(_RUNNER)) for p in self.files}

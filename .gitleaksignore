@@ -18,3 +18,14 @@ b0b601fac9e3b30b1e9288425c91d0f3eb30f793:physical_ai_tools/lerobot/README.md:aws
 #    the full-history scan. The literal is truncated as of the commit adding
 #    this entry; the historical introduction stays fingerprinted here.
 09ad31012468a47d12dc7c85457edaedb73f05f6:.gitleaksignore:aws-access-token:8
+#
+# 4. The code-runner self-test's fixed handshake word (a literal 0123456789…
+#    counting pattern, no secret at all), which dc16314 introduced as
+#    `_TOKEN = '<32 hex>'`. gitleaks' generic-api-key rule keys on the NAME, so
+#    the binding is now `_HANDSHAKE_WORD` and the shipped tree no longer
+#    matches (test_code_runner_tree.py fences that). The rename cannot unmake
+#    the commit that added the old name, and `ci.yml::secret-scan` reads the
+#    whole history — measured 2026-09-22: rename alone, still 1 leak; rename +
+#    this line, 0. The VALUE cannot change: `runner_limits.RUN_TOKEN_RE` pins
+#    32 lowercase hex.
+dc16314b45a64df1947222f0c023fa3307d17fb9:robotis_ai_setup/docker/code_runner/runner/selftest.py:generic-api-key:48

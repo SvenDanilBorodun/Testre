@@ -22,8 +22,10 @@ import {
   CODE_LIMITS,
   ENTRY_FILE,
   STARTER_FILES,
+  MAX_CODE_REPLAY_NAMES,
   codeRunBlockReason,
   codeRunPayloadBase,
+  collectCodeReplayNames,
   isCodeLanguage,
   projectBytes,
   validateProject,
@@ -205,6 +207,53 @@ describe('codeRunPayloadBase — the poison block an old image trips over', () =
     expect(base.variables).toEqual([]);
     expect(base.language).toBe('python');
     expect(base.files).toBe(files);
+  });
+});
+
+describe('collectCodeReplayNames — which recordings a code run has to carry', () => {
+  test('a literal name in either language is collected, once, in first-seen order', () => {
+    expect(collectCodeReplayNames({
+      'main.py': 'import robot\nrobot.replay("Winken")\nrobot.replay(\'Greifen\')\n'
+        + 'robot.replay("Winken", 2.0)\n',
+    })).toEqual(['Winken', 'Greifen']);
+    expect(collectCodeReplayNames({
+      'Main.java': 'import edubotics.Robot;\npublic class Main {\n'
+        + '  public static void main(String[] a) { Robot.replay("Winken", 1.5); }\n}\n',
+    })).toEqual(['Winken']);
+  });
+
+  test('a bare import-style call and whitespace around the name are collected too', () => {
+    expect(collectCodeReplayNames({
+      'main.py': 'from robot import replay\nreplay(  "Bewegung 1"  )\n',
+    })).toEqual(['Bewegung 1']);
+  });
+
+  test('a name that is not a replay call is never collected', () => {
+    expect(collectCodeReplayNames({
+      'main.py': 'meinreplay("X")\nrobot.log("replay")\nrobot.replay(name)\n'
+        + 'robot.replay("")\nrobot.replay("   ")\n',
+    })).toEqual([]);
+  });
+
+  test('every non-string input answers an empty list, never throws', () => {
+    expect(collectCodeReplayNames(null)).toEqual([]);
+    expect(collectCodeReplayNames(undefined)).toEqual([]);
+    expect(collectCodeReplayNames({})).toEqual([]);
+    expect(collectCodeReplayNames({ 'main.py': 42 })).toEqual([]);
+    expect(collectCodeReplayNames([])).toEqual([]);
+  });
+
+  test('the list is capped at the cloud’s per-workflow prune cap', () => {
+    const calls = Array.from({ length: MAX_CODE_REPLAY_NAMES + 5 },
+      (_, i) => `robot.replay("B${i}")`).join('\n');
+    const names = collectCodeReplayNames({ 'main.py': calls });
+    expect(names).toHaveLength(MAX_CODE_REPLAY_NAMES);
+    expect(names[0]).toBe('B0');
+  });
+
+  test('a name the server would refuse is not fetched', () => {
+    const tooLong = 'B'.repeat(41);
+    expect(collectCodeReplayNames({ 'main.py': `robot.replay("${tooLong}")` })).toEqual([]);
   });
 });
 

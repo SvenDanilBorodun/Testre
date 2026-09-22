@@ -214,6 +214,43 @@ class CodeProgram:
             except OSError:
                 pass
 
+    def set_breakpoints(self, block_ids) -> bool:
+        """Forward a breakpoint change to the supervisor while this run is live
+        (§3.5), on a NEW control connection — never the one ``_drive`` is
+        reading, never the data socket. Returns whether the supervisor said it
+        applied them.
+
+        The start envelope carries the set the run BEGAN with; a student who
+        adds or clears a gutter dot while the program runs reaches the student
+        process only through this frame, which is what makes the runner hook's
+        ``sys.monitoring.restart_events()`` matter (without it a breakpoint
+        added mid-run never fires — measured 0 hits).
+
+        Best-effort and never raising, exactly like :meth:`request_stop`: the
+        ``/workflow/set_breakpoints`` service answers the student, and a
+        missing breakpoint is not a failed service call. A run that is already
+        stopping or exited is skipped rather than reconnected."""
+        if self._stop_requested.is_set() or self._exited.is_set():
+            return False
+        lines = _breakpoints_by_file(block_ids)
+        control = self._connect_control()
+        if control is None:
+            return False
+        try:
+            write_frame(control, {'ev': 'breakpoints', 'run_id': self.run_id,
+                                  'lines': lines},
+                        CONTROL_MAX_FRAME_BYTES, timeout_s=CODE_RPC_SEND_TIMEOUT_S)
+            ack = self._await_event(control, {'breakpoints_set'},
+                                    CODE_CONTROL_TIMEOUT_S)
+        except (FrameError, socket.timeout, OSError):
+            return False
+        finally:
+            try:
+                control.close()
+            except OSError:
+                pass
+        return bool(ack and ack.get('applied'))
+
     # ── build (validate the project up front — before any socket) ───────────
     @classmethod
     def from_payload(cls, workflow_json: str, workflow_id: str, code_rpc: Any, *,

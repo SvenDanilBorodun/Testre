@@ -17,6 +17,7 @@ import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import RunControls from '../RunControls';
+import * as workflowApi from '../../../services/workflowApi';
 import { CODE_LIMITS } from '../code/codeProject';
 
 let mockState;
@@ -110,6 +111,7 @@ beforeEach(() => {
   mockToast.mockClear();
   mockToast.success.mockClear();
   mockToast.error.mockClear();
+  workflowApi.getTrajectoryByName.mockReset();
   global.fetch = vi.fn(() => Promise.reject(new Error('no bridge')));
 });
 
@@ -169,6 +171,90 @@ describe('RunControls — the fail-closed capability gate', () => {
     await clickStart({ codeLanguage: 'java', codeFiles: { 'Main.java': 'public class Main {}' } });
     await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
     expect(mockToast.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('RunControls — a code run carries the recordings its replay calls name', () => {
+  // E2E fix round 1: `trajectories` was hardcoded `{}` for a code run, so
+  // `robot.replay(...)` — a full row in `ROBOT_API`, rendered into both stubs
+  // and offered by the editor's autocomplete with a German promise — could
+  // only ever reach the server's „Unbekannte Aufnahme: …" and abort the run.
+  const REPLAY_FILES = {
+    'main.py': 'import robot\nrobot.replay("Winken", 1.5)\n',
+  };
+  const ROW = {
+    fps: 25,
+    points: [[0, 0, 0, 0, 0, 0.8, 0], [0.1, 0, 0, 0, 0, 0.8, 0.04]],
+    robot_profile: 'omx_f',
+  };
+
+  test('a literal name is fetched and rides the run payload', async () => {
+    workflowApi.getTrajectoryByName.mockResolvedValue(ROW);
+    await clickStart({ codeFiles: REPLAY_FILES });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    expect(workflowApi.getTrajectoryByName).toHaveBeenCalledWith('jwt-1', 'wf-1', 'Winken');
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    expect(Object.keys(parsed.trajectories)).toEqual(['Winken']);
+    expect(parsed.trajectories.Winken.fps).toBe(25);
+    expect(parsed.trajectories.Winken.points).toHaveLength(2);
+  });
+
+  test('a recording of another rig is refused in German, and nothing is sent', async () => {
+    workflowApi.getTrajectoryByName.mockResolvedValue({ ...ROW, robot_profile: 'edu6_studio' });
+    await clickStart({ codeFiles: REPLAY_FILES });
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
+    expect(mockToast.error.mock.calls[0][0]).toMatch(/anderen Robotertyp/);
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('a name the cloud says it does not have is SKIPPED, never a refused start', async () => {
+    // The scan reads free-form text, so a hit may be a comment or a string.
+    // Aborting the start on it would refuse a program that never replays;
+    // the run reports the server's own sentence if the call is really made.
+    // A 404 is the ONE answer that means „there is no such Bewegung".
+    workflowApi.getTrajectoryByName.mockRejectedValue(
+      Object.assign(new Error('Bewegung nicht gefunden'), { status: 404 }));
+    await clickStart({ codeFiles: REPLAY_FILES });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    expect(mockToast.error).not.toHaveBeenCalled();
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    expect(parsed.trajectories).toEqual({});
+  });
+
+  test.each([
+    ['a dead connection or a timeout', 0],
+    ['a server error', 500],
+    ['an expired session', 401],
+  ])('%s is refused LOUDLY, never silently dropped', async (_why, status) => {
+    // „Wir konnten nicht fragen" is NOT „diese Bewegung gibt es nicht":
+    // `WorkflowApiError` carries status 0 for a timeout or a dead connection
+    // and the HTTP code otherwise, the same split `isCloudUnreachableAuthError`
+    // already makes. Dropping the name on one of those starts a run that then
+    // aborts on the server's „Unbekannte Aufnahme: …", blaming a recording the
+    // student has and which is perfectly fine.
+    workflowApi.getTrajectoryByName.mockRejectedValue(
+      Object.assign(new Error('Verbindung zum Server fehlgeschlagen.'), { status }));
+    await clickStart({ codeFiles: REPLAY_FILES });
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
+    expect(mockToast.error.mock.calls[0][0]).toMatch(/konnte nicht geladen werden/);
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('a row that arrives but will not parse is refused loudly too', async () => {
+    // A 200 whose body is not a usable recording is corrupt data, not a
+    // phantom name — the student HAS this Bewegung. Loud on both paths.
+    workflowApi.getTrajectoryByName.mockResolvedValue({ fps: 25, points: 'nope' });
+    await clickStart({ codeFiles: REPLAY_FILES });
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
+    expect(mockToast.error.mock.calls[0][0]).toMatch(/Winken/);
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('a project with no replay call fetches nothing', async () => {
+    workflowApi.getTrajectoryByName.mockResolvedValue(ROW);
+    await clickStart();
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    expect(workflowApi.getTrajectoryByName).not.toHaveBeenCalled();
   });
 });
 

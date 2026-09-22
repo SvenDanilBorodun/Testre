@@ -44,6 +44,7 @@ import {
   CODE_RUN_BLOCK_TITLES_DE,
   codeRunBlockReason,
   codeRunPayloadBase,
+  collectCodeReplayNames,
   isCodeLanguage,
   validateProject,
 } from './code/codeProject';
@@ -83,6 +84,12 @@ function clampTempo(value) {
 // The sentinel `workflow/code_program.py::_raise_error` prefixes the runner's
 // own last output line with (decision A14). Spelled once, here and there.
 const TECHNIK_PREFIX = '[TECHNIK] ';
+
+// A code run's replay names come from a TEXT scan, so one may be a comment or
+// an unrelated string. This marks the one answer that proves such a name is a
+// phantom — the cloud's 404 „Bewegung nicht gefunden" — so the loop can drop it
+// without confusing it with a row that arrived and would not parse.
+const NO_SUCH_RECORDING = Symbol('no such recording');
 
 // ── Run-payload slimming ─────────────────────────────────────────────────────
 // The allowlist and the reasoning live in `utils/blocklyPayload.js`, shared with
@@ -368,30 +375,59 @@ function RunControls({
       // it to resolve each replay block. Fail LOUD (abort the start) if a
       // referenced trajectory can't be fetched — running a replay program
       // without its data would silently no-op the motion.
-      // A code program names its recordings at run time (`robot.replay`), not
-      // in a block tree — nothing to collect, `trajectories` stays `{}`.
-      const replayNames = isCode ? [] : collectReplayNames(blocklyJson);
+      // A code program names its recordings in TEXT (`robot.replay("…")`), so
+      // they are scanned out of the project instead of walked out of a block
+      // tree. `trajectories` used to stay `{}` for a code run, which made
+      // `robot.replay` — a full ROBOT_API row, in both stubs and in the
+      // editor's autocomplete — reach nothing but the server's „Unbekannte
+      // Aufnahme: …" and abort the run.
+      const replayNames = isCode
+        ? collectCodeReplayNames(codeFiles)
+        : collectReplayNames(blocklyJson);
       const trajectories = {};
-      if (replayNames.length > 0) {
-        if (!workflowId) {
-          toast.error(
-            'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
+      // A scan hit may be a comment or an unrelated string, so for a code
+      // program a name the CLOUD SAYS IT DOES NOT HAVE (404) is SKIPPED and the
+      // run reports the server's own sentence IF the call is really made. A
+      // block tree's names are exact, so that path still fails LOUD. Every
+      // OTHER failure is loud on both paths — see the catch below.
+      const skipUnknownNames = isCode;
+      const canFetchTrajectories = !!workflowId
+        && typeof workflowApi.getTrajectoryByName === 'function';
+      if (replayNames.length > 0 && !canFetchTrajectories && !skipUnknownNames) {
+        toast.error(workflowId
+          ? 'Aufgenommene Bewegungen können zurzeit nicht geladen werden.'
+          : 'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
             + 'gehören zu einem gespeicherten Workflow.');
-          return;
-        }
-        if (typeof workflowApi.getTrajectoryByName !== 'function') {
-          toast.error('Aufgenommene Bewegungen können zurzeit nicht geladen werden.');
-          return;
-        }
+        return;
+      }
+      if (replayNames.length > 0 && canFetchTrajectories) {
         try {
           const fetched = await Promise.all(
             replayNames.map((name) =>
               workflowApi.getTrajectoryByName(accessToken, workflowId, name)
-                .then((t) => [name, t])),
+                .then((t) => [name, t])
+                .catch((e) => {
+                  // A 404 is the cloud judging THIS name: there is no such
+                  // recording, so a text scan's hit was a comment or an
+                  // unrelated string and a code run drops it. Everything else
+                  // means „we could not ask" — `WorkflowApiError` carries
+                  // status 0 for a timeout or a dead connection and the HTTP
+                  // code otherwise, the same split `isCloudUnreachableAuthError`
+                  // makes — and dropping the name THERE would start a run that
+                  // aborts on the server's „Unbekannte Aufnahme: …", blaming a
+                  // Bewegung the student has and which is perfectly fine.
+                  if (skipUnknownNames && e && e.status === 404) {
+                    return [name, NO_SUCH_RECORDING];
+                  }
+                  throw e;
+                })),
           );
           for (const [name, t] of fetched) {
+            if (t === NO_SUCH_RECORDING) continue;
             const norm = normalizeTrajectory(t);
             if (!norm) {
+              // A row that ARRIVED and will not parse is corrupt data, not a
+              // phantom name — the student has this Bewegung. Loud on both.
               throw new Error(`Bewegung „${name}" wurde nicht gefunden.`);
             }
             // Cross-profile replay refusal: a recording's arm family must match

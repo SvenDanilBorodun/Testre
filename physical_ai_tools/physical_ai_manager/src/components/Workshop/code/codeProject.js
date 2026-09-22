@@ -155,6 +155,55 @@ export const CODE_RUN_BLOCK_TITLES_DE = Object.freeze({
 // `language` before the interpreter ever sees it.
 export const CODE_POISON_BLOCK_TYPE = 'edubotics_code_program_v1';
 
+// ── which recordings a code run has to carry ──────────────────────────────
+// A Blockly run collects them from the block tree (`collectReplayNames`); a
+// code program names them in TEXT, so they are scanned out of the files. The
+// scan is deliberately LOOSE — over-collecting costs one fetch that comes back
+// empty and is then skipped, while under-collecting leaves `robot.replay` with
+// no data and the run aborts on the server's „Unbekannte Aufnahme: …". Both
+// call shapes a student writes are matched: `robot.replay("X")` /
+// `Robot.replay("X", 1.5)` and a bare `replay("X")` after
+// `from robot import replay`.
+const REPLAY_CALL_RE = /\breplay\s*\(\s*(["'])([^"'\\\r\n]*)\1/g;
+// The name rule is the one the generated table already carries for this
+// method's first parameter — never a second copy of the pattern.
+const replayNameParam = (robotApi.methods || [])
+  .find((m) => m && m.name === 'replay')?.params?.[0] || {};
+const REPLAY_NAME_RE = new RegExp(replayNameParam.pattern);
+// `workflow_trajectories` is pruned to 16 rows per workflow (migration 034),
+// so a 17th DISTINCT name cannot name a recording that exists — and an
+// unbounded list would turn one pathological file into that many cloud reads.
+export const MAX_CODE_REPLAY_NAMES = 16;
+
+/**
+ * Every recording name a code project's `replay(...)` calls reference, trimmed,
+ * de-duplicated, in first-seen order, capped at `MAX_CODE_REPLAY_NAMES`. Pure;
+ * never throws on a malformed project.
+ *
+ * @param {object|null} files - `{ path: content }`.
+ * @returns {string[]}
+ */
+export function collectCodeReplayNames(files) {
+  if (!files || typeof files !== 'object' || Array.isArray(files)) return [];
+  const seen = new Set();
+  const order = [];
+  for (const content of Object.values(files)) {
+    if (typeof content !== 'string') continue;
+    REPLAY_CALL_RE.lastIndex = 0;
+    let match = REPLAY_CALL_RE.exec(content);
+    while (match !== null) {
+      const name = match[2].trim();
+      if (name && REPLAY_NAME_RE.test(name) && !seen.has(name)) {
+        seen.add(name);
+        order.push(name);
+      }
+      match = REPLAY_CALL_RE.exec(content);
+    }
+    if (order.length >= MAX_CODE_REPLAY_NAMES) break;
+  }
+  return order.slice(0, MAX_CODE_REPLAY_NAMES);
+}
+
 export function codeRunPayloadBase(language, files) {
   return {
     blocks: { blocks: [{ type: CODE_POISON_BLOCK_TYPE, id: 'code' }] },

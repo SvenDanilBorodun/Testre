@@ -203,7 +203,11 @@ class ControlVocabulary(unittest.TestCase):
 
     def test_every_event_the_server_sends_is_one_the_supervisor_dispatches(self):
         sent = self._ev_values_in_dicts(self.program)
-        self.assertEqual(sent, {'start', 'kill'})
+        # The exact vocabulary, so a fourth frame has to be declared here. It
+        # read {'start', 'kill'} while `breakpoints` was DOCUMENTED and never
+        # sent — the supervisor's branch for it, `Run.set_breakpoints` and the
+        # hook's `restart_events()` were all unreachable from the product.
+        self.assertEqual(sent, {'start', 'kill', 'breakpoints'})
         handled = set()
         for node in ast.walk(self.supervisor):
             if isinstance(node, ast.Compare) and ast.unparse(node.left) in ('ev', "frame.get('ev')"):

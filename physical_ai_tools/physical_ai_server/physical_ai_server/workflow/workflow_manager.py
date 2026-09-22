@@ -725,12 +725,29 @@ class WorkflowManager:
         ``ctx.get_breakpoints`` returns the manager's latest frozenset, so
         rebinding here propagates to the running workflow without sharing
         a mutable object between threads.
+
+        A CODE program does not read that frozenset: it runs in another
+        PROCESS behind the runner's control socket, so §3.5's ``breakpoints``
+        frame is the only way a change reaches it. Forwarded OUTSIDE
+        ``self._lock`` — it is bounded socket I/O and ``start()`` holds this
+        lock for its whole body — and best-effort exactly like ``stop()``'s
+        ``request_stop``: an Interpreter has no ``set_breakpoints``, so the
+        Blockly path is untouched.
         """
         if not isinstance(block_ids, (list, tuple, set)):
             block_ids = []
         new_set = frozenset(str(b) for b in block_ids if b)
         with self._lock:
             self._breakpoints = new_set
+            # Only a LIVE program is forwarded to: self._program outlives its
+            # run (it is rebound at the next start), and the pre-arm call from
+            # RunControls would otherwise reconnect to a finished run.
+            prog = self._program if self.is_running else None
+        if prog is not None and hasattr(prog, 'set_breakpoints'):
+            try:
+                prog.set_breakpoints(new_set)
+            except Exception:  # noqa: BLE001 — a breakpoint never breaks a run
+                pass
 
     def pause(self) -> tuple[bool, str]:
         # Audit fix #13: read is_running + mutate the events under the

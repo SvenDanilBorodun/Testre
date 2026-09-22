@@ -32,7 +32,7 @@ def _read_version_file() -> str:
             return candidate.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
             continue
-    return "2.21.1"
+    return "2.22.0"
 
 
 # GUI version — read from repo-root VERSION file (single source of truth).

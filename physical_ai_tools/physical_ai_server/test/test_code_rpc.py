@@ -59,6 +59,14 @@ _L = robot_api.RPC_LIMITS
 # draining client measured against BURST + rate × elapsed may see one or two
 # calls of rounding, never a policy's worth.
 _RATE_SLACK_CALLS = 2
+# The fire-and-forget flood's anti-vacuity probe: how many buffered replies it
+# reads back, and how long the server then has to decode that many more frames.
+# 100 is the number the old frame-count floor asserted — it is asserted here on
+# the same counter, over a window the TEST opens instead of one the host's
+# socket buffer happened to close. 100 calls cost 0.25 s measured on both hosts
+# (BURST is free, the rest at MAX_CALLS_PER_S); the bound is 12× that.
+_FLOOD_PROBE_REPLIES = 100
+_FLOOD_PROBE_RESUME_S = 3.0
 
 
 def _conn_threads() -> int:
@@ -308,6 +316,17 @@ def test_control_framing_round_trips_a_start_envelope_at_MAX_CODE_PROJECT_BYTES(
     assert len(json.dumps(envelope).encode('utf-8')) > code_rpc.CONTROL_MAX_FRAME_BYTES
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
+        # The send buffer is shrunk deliberately, and that is what makes the
+        # hangup half below mean the same thing on every host. This envelope is
+        # 134,862 wire bytes; an AF_UNIX socketpair absorbs 8,192 unread bytes
+        # on macOS but 180,224 on Linux (measured), so with the default buffer
+        # the writer is genuinely mid-``sendall`` on one platform and long
+        # finished on the other — and only the first is the state the EPIPE
+        # assertion describes. Held under the frame size on BOTH, it is always
+        # the first. The absorbed case is pinned separately, at the end.
+        a.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+        assert a.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) < code_rpc.MAX_CODE_PROJECT_BYTES, (
+            'this host would not shrink the send buffer under the envelope')
         err = []
 
         def _send():
@@ -332,6 +351,13 @@ def test_control_framing_round_trips_a_start_envelope_at_MAX_CODE_PROJECT_BYTES(
         t.join(5.0)
         assert not t.is_alive()
         assert len(err) == 1 and isinstance(err[0], OSError)
+        # A refused frame is never quietly delivered. With the buffer shrunk the
+        # writer above saw the hangup itself; with a DEFAULT buffer on Linux the
+        # kernel swallows all 134,862 bytes and that ``sendall`` simply returns
+        # — so this second write is what says, on either host, that the
+        # connection is torn down and the refused frame never arrived.
+        with pytest.raises(OSError):
+            write_frame(a, {'m': 'weiter'}, code_rpc.CONTROL_MAX_FRAME_BYTES, timeout_s=5.0)
     finally:
         a.close()
         b.close()
@@ -762,7 +788,18 @@ def test_fire_and_forget_flood_is_decoded_at_the_policy_rate(server):
     for 2 s and the server decodes ≤ 260/s averaged (200/s + the burst). This
     is the non-draining SHAPE of P11 (the reader waits for each reply, so a
     full reply buffer stalls the decode too); the bucket itself is fenced by
-    the draining sibling above."""
+    the draining sibling above.
+
+    WHERE the flood stalls is the host's socket buffer, not a policy: the same
+    2 s decodes 71 frames on Linux and 200 on macOS (measured). So the fence
+    against a vacuous ceiling — ``decoded == 0`` satisfies any rate bound — is
+    not a frame count, which would only pin whichever kernel wrote it. It is
+    the stall's CAUSE: reading ``_FLOOD_PROBE_REPLIES`` replies frees exactly
+    that many reply slots, and a server that is stalled on backpressure — not
+    wedged — decodes and answers that many more frames. A reader that died
+    never answers them; a slow one does not answer them in time. That is a
+    sharper fence than any count here could be: a server wedged at 71 frames
+    is indistinguishable from a healthy Linux host by the count alone."""
     server.handlers = _fake_handlers(edubotics_home=lambda ctx, args: None)
     session = server.open_run(_ctx())
     c = _Client(server.socket_path, session.token)
@@ -780,11 +817,27 @@ def test_fire_and_forget_flood_is_decoded_at_the_policy_rate(server):
     time.sleep(2.0)
     decoded = session.frames_decoded
     elapsed = time.monotonic() - t0
+    read = 0
+    try:
+        while read < _FLOOD_PROBE_REPLIES and c.recv(timeout_s=2.0) is not None:
+            read += 1
+    except (OSError, FrameError):
+        pass
+    resume_by = time.monotonic() + _FLOOD_PROBE_RESUME_S
+    while session.frames_decoded < decoded + read and time.monotonic() < resume_by:
+        time.sleep(0.01)
+    advanced = session.frames_decoded
     server.close_run(session)
     c.close()
     t.join(5.0)
     assert decoded / elapsed <= 260.0, f'{decoded} frames in {elapsed:.2f} s'
-    assert decoded >= 100, 'the server was not decoding at all'
+    assert read == _FLOOD_PROBE_REPLIES, (
+        f'only {read} of {_FLOOD_PROBE_REPLIES} replies were waiting — the '
+        f'server stopped answering after {decoded} frames')
+    assert advanced >= decoded + _FLOOD_PROBE_REPLIES, (
+        f'{decoded} frames decoded in {elapsed:.2f} s, then {advanced - decoded} '
+        f'more for {_FLOOD_PROBE_REPLIES} replies read — the server was not '
+        f'decoding, it was stuck')
 
 
 def test_perception_calls_have_their_own_bucket(server):

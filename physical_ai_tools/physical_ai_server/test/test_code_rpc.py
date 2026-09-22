@@ -323,7 +323,9 @@ def test_control_framing_round_trips_a_start_envelope_at_MAX_CODE_PROJECT_BYTES(
         # the writer is genuinely mid-``sendall`` on one platform and long
         # finished on the other — and only the first is the state the EPIPE
         # assertion describes. Held under the frame size on BOTH, it is always
-        # the first. The absorbed case is pinned separately, at the end.
+        # the first. The shrink is UNCONDITIONAL and the precondition below
+        # hard-fails a host that refuses it, so the absorbed case is EXCLUDED
+        # here, not covered — nothing in this test exercises a default buffer.
         a.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
         assert a.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) < code_rpc.MAX_CODE_PROJECT_BYTES, (
             'this host would not shrink the send buffer under the envelope')
@@ -351,11 +353,12 @@ def test_control_framing_round_trips_a_start_envelope_at_MAX_CODE_PROJECT_BYTES(
         t.join(5.0)
         assert not t.is_alive()
         assert len(err) == 1 and isinstance(err[0], OSError)
-        # A refused frame is never quietly delivered. With the buffer shrunk the
-        # writer above saw the hangup itself; with a DEFAULT buffer on Linux the
-        # kernel swallows all 134,862 bytes and that ``sendall`` simply returns
-        # — so this second write is what says, on either host, that the
-        # connection is torn down and the refused frame never arrived.
+        # A refused frame is never quietly delivered. This is an ADDITIONAL and
+        # INDEPENDENT property, asserted on every host: the refusing reader's
+        # hangup really tore the connection down, so a later write cannot
+        # succeed. It does NOT stand in for a default-buffer run — the shrink
+        # above forbids one — and it fails loudly against a live peer, where
+        # this same write returns normally.
         with pytest.raises(OSError):
             write_frame(a, {'m': 'weiter'}, code_rpc.CONTROL_MAX_FRAME_BYTES, timeout_s=5.0)
     finally:
@@ -815,6 +818,14 @@ def test_fire_and_forget_flood_is_decoded_at_the_policy_rate(server):
     t0 = time.monotonic()
     t.start()
     time.sleep(2.0)
+    # TIMING, and it is coupled to the rate limits. The reads below must begin
+    # while the server is still blocked in ``_write_reply``, which tears the
+    # connection down after CODE_RPC_SEND_TIMEOUT_S (2.0 s). The margin is
+    # (reply capacity − BURST) / MAX_CALLS_PER_S — measured ~105 ms on Linux
+    # (capacity ~71) and ~744 ms on macOS (~200). It held 14/14 under a 2-vCPU
+    # quota and 6 CPU burners, because CPU pressure delays the buffer filling
+    # as much as the wake-up, but RAISING ``BURST`` toward the reply capacity
+    # shrinks it to nothing: BURST=70 is a knife-edge and BURST=80 fails here.
     decoded = session.frames_decoded
     elapsed = time.monotonic() - t0
     read = 0
@@ -832,8 +843,10 @@ def test_fire_and_forget_flood_is_decoded_at_the_policy_rate(server):
     t.join(5.0)
     assert decoded / elapsed <= 260.0, f'{decoded} frames in {elapsed:.2f} s'
     assert read == _FLOOD_PROBE_REPLIES, (
-        f'only {read} of {_FLOOD_PROBE_REPLIES} replies were waiting — the '
-        f'server stopped answering after {decoded} frames')
+        f'only {read} of {_FLOOD_PROBE_REPLIES} replies were waiting after '
+        f'{decoded} frames — either the server stopped answering, or this '
+        f'host/BURST left no margin against CODE_RPC_SEND_TIMEOUT_S (see the '
+        f'timing note above)')
     assert advanced >= decoded + _FLOOD_PROBE_REPLIES, (
         f'{decoded} frames decoded in {elapsed:.2f} s, then {advanced - decoded} '
         f'more for {_FLOOD_PROBE_REPLIES} replies read — the server was not '

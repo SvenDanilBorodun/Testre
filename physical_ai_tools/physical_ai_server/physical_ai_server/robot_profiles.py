@@ -693,6 +693,15 @@ def capabilities_json(profile: ArmProfile) -> str:
         # can say "2 von 2 Kameras" instead of counting topics blind. Same
         # allowlist the GUI/Pi wizards enforce at setup time.
         'camera_roles': list(profile.camera_roles),
+        # The text-program languages this image can run (Roboter Studio coding
+        # suite). Additive — the six-boolean adopt-guard tolerates it — and a
+        # list, not a boolean, so React's codeRunBlockReason keys on membership,
+        # fail-closed on absence. Every image that ships the code_runner can run
+        # both, so this is a static image capability (a run start still refuses
+        # in German when the runner container is down). Kept a plain literal
+        # rather than imported from workflow.code_program (which pulls the whole
+        # RPC/handler stack) — code_program.CODE_LANGUAGES is the twin.
+        'code_languages': ['python', 'java'],
     }
     for key, value in (
         ('reach_inner_m', profile.reach_inner_m),

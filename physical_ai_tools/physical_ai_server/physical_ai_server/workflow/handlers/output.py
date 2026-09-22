@@ -151,8 +151,10 @@ OUTPUT_MAX_PER_S = max(0.0, _env_float('EDUBOTICS_OUTPUT_MAX_PER_S', 5.0))
 OUTPUT_BURST = 50
 OUTPUT_BURST_LOG = 500
 
-# Which kinds pay wall-clock (OUTPUT_BURST) and which pay volume.
-_BURST_BY_KIND = {'melde': OUTPUT_BURST_LOG}
+# Which kinds pay wall-clock (OUTPUT_BURST) and which pay volume. „ausgabe" is
+# a Python/Java program's print() line — a VOLUME kind like „melde" (a straight
+# loop of prints is a program, not a burst), so it gets the same high budget.
+_BURST_BY_KIND = {'melde': OUTPUT_BURST_LOG, 'ausgabe': OUTPUT_BURST_LOG}
 
 # Every one ends „Das Programm läuft normal weiter." — the same clause the
 # unshowable-variable warning carries. A twelve-year-old meets this MID-LOOP
@@ -173,6 +175,10 @@ _RATE_LIMIT_NOTICE_DE = {
              'Das Programm läuft normal weiter.',
     'meldung': 'Zu viele Meldungen — es wird nur noch ein Teil angezeigt. '
                'Das Programm läuft normal weiter.',
+    # A Python/Java program's own output. Never says „melde", a block a code
+    # student did not use (m7 of the review).
+    'ausgabe': 'Sehr viele Ausgabe-Zeilen — die weiteren werden nicht mehr '
+               'angezeigt. Das Programm läuft normal weiter.',
 }
 
 
@@ -211,18 +217,25 @@ def _rate_ok(ctx, kind: str) -> bool:
         return True
 
 
-def log(ctx, args: dict[str, Any]) -> None:
-    if not _rate_ok(ctx, 'melde'):
+def emit_student_text(ctx, text: str, kind: str) -> None:
+    """Emit ONE student-facing line: rate-check under ``kind``'s bucket,
+    truncate to ``MAX_LOG_CHARS``, strip bracket sentinels, collapse
+    line-breaking whitespace, and hand it to ``ctx.log``.
+
+    ``text`` is already a ``str`` — a „melde" VALUE is stringified by ``log``
+    before the call, a Python/Java ``print()`` line arrives as a ``str`` — so
+    this helper NEVER stringifies (R2-4 of the review). ``kind`` is ``'melde"``
+    for the block or ``'ausgabe"`` for program output; each has its own per-run
+    bucket and drop notice (§3.2)."""
+    if not _rate_ok(ctx, kind):
         return
-    # German-aware, not str(): see _student_text.
-    text = _student_text(args.get('message'))
     if len(text) > MAX_LOG_CHARS:
         # Truncate so the RESULT is MAX_LOG_CHARS, not MAX_LOG_CHARS + 2. The
         # old form emitted 2002 characters for a 2000-character cap; measured
         # 2026-09-07, and the constant is the thing the WorkflowStatus channel
         # is sized against.
         text = text[:MAX_LOG_CHARS - 2] + ' …'
-    # Strip ALL bracket-sentinel chars so a student's log payload can't
+    # Strip ALL bracket-sentinel chars so a student's log/output payload can't
     # spoof [VAR:...] / [SPEAK:...] / [TONE:...] / [SOUND] tokens into
     # the React-side debug panel.
     text = text.replace('[', '(').replace(']', ')')
@@ -244,6 +257,12 @@ def log(ctx, args: dict[str, Any]) -> None:
     # student's „melde"-Text keeps its own spacing.
     text = re.sub(r'\s', ' ', text)
     ctx.log(text)
+
+
+def log(ctx, args: dict[str, Any]) -> None:
+    # German-aware, not str(): see _student_text. The stringification stays HERE
+    # (a block VALUE), then the shared helper does the rate/truncate/strip.
+    emit_student_text(ctx, _student_text(args.get('message')), 'melde')
 
 
 def play_sound(ctx, args: dict[str, Any]) -> None:

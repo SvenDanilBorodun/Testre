@@ -6,6 +6,146 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-09-20 — Roboter Studio learns to run real Python and real Java
+
+The owner asked for „a full coding suite not just a add on to blocky" (A1). What
+shipped is free-form Python and Java that actually drive the arm, in multi-file
+projects with imports and the real standard libraries — which is what decided
+the runtime: an in-process interpreter was rejected because a teaching-subset
+Java parser „would have been a growing lie" (A4). So there is a fourth container,
+`code_runner`, holding a real CPython 3.12 and a real JDK 21, and the student's
+program reaches the robot over a unix socket.
+
+**Rule §2 was opened deliberately and priced in advance.** A second execution
+path drives the arm; the owner pre-approved it under four conditions that no
+agent may descope, and all four are in `CLAUDE.md` now. The load-bearing one is
+the least obvious: a rate budget at BOTH ends, because a unix socket carries
+~466 000 calls/s and a boundary alone only relocates a flood. The server-side
+bucket is charged for every DECODED frame, before validation, so an
+invalid-frame flood is throttled too. The other three: Stop travels out-of-band
+on its own control connection and `_run`'s `finally` never waits on the student
+process (`CODE_STOP_DEADLINE_S` is DERIVED from its three parts, never a
+literal); every frame is validated server-side from `robot_api`'s own rows,
+because the runner ships `socket`, `subprocess` and `ctypes`; and the supervisor
+runs as uid 0 with exactly `SETUID`/`SETGID`/`KILL` while the student runs as uid
+10001, with tini as PID 1. A non-root supervisor was measured infeasible —
+Docker grants it no effective capabilities, so it could neither spawn as another
+uid nor signal it, and the plan's „user: non-root" was simply wrong.
+
+**One table, five generated artifacts.** `workflow/robot_api.py` carries one row
+per handler-table key, and the Python stub, the three Java files and the
+editor's `robot_api.json` are all rendered from it and checked in, byte-equality
+fenced. The protocol methods and `register_object` sit in the SAME shape, so the
+client renderers and the server validator read one row rather than two
+descriptions of one wire shape.
+
+**`print()` is not a second output path.** It rides
+`handlers/output.emit_student_text` — the same function the „melde"-Block uses —
+and therefore inherits that function's bracket-sentinel strip, so
+`print("[VAR:x=1]")` cannot forge a row in the Variablen inspector. It carries
+its own `'ausgabe'` notice kind rather than the Block's, so a student reading the
+Protokoll can tell which of the two produced a line.
+
+**Errors are German at the right line, with one disclosed English exception.**
+`code_errors_de.py` maps a fault kind to a sentence with `file`/`line`
+placeholders and never interpolates the CPython or JVM message into it;
+`robot_method` adds a `difflib` suggestion over the API names. The raw tool line
+is shown anyway, as a separate `[TECHNIK] ` log entry beneath the German
+sentence — decision A14, and now an INVARIANT in Rule §1 rather than a lapse
+waiting to be „fixed": a student debugging real code benefits from the real
+compiler message, and for Java `javac`'s text is the only thing that says what
+was actually wrong.
+
+**The debugger is Python-only and says so.** PEP 669 `sys.monitoring` is
+effectively free — the installed hook measures ×1.02 against no hook
+(`edubotics_debug.py`'s own figure; the decision file's ×0.96 was a different
+probe) — because the LINE callback returns `DISABLE` for every location with no
+breakpoint. That is also what makes `restart_events()`
+mandatory on every mid-run breakpoint change: without it a location the callback
+has already disabled never fires again (0 hits vs millions). The „where am I"
+indicator is a sampler thread, never a per-line event. Java gets run and stop,
+and the asymmetry is stated in the UI in both places a student looks for it —
+„parity" is not claimed for something only one language has.
+
+**An old image must fail LOUD.** The run payload carries a poison block,
+`edubotics_code_program_v1`, which no handler table has ever held: an old server
+reads only `blocks` and aborts by name in German instead of reporting a green run
+that did nothing. The client refuses first anyway — `capabilities.code_languages`
+must NAME the language, and absence is not permission.
+
+**Students can define their own graspable object IN CODE** (A13), for that run
+only, validated from the same `register_object` row: ranges are per-family
+(`gripper_close_rad` is negative on the OMX and positive on both Feetech arms)
+and a tag-id collision with the built-in type is a German refusal, not
+last-writer-wins. Nothing is persisted and no table is touched — „Eigene Objekte"
+keeps its reserved migration 037 and its whole design space.
+
+**What the teacher gets** (A3): the programs as they stand and the snapshots the
+student handed in („Abgeben"), read-only, behind `_assert_student_owned` and
+scoped on the row's own student column — never on `workflows.classroom_id`, which
+a client sets at create with no membership check.
+
+**Corrections this round made, to documents that were wrong before it started.**
+`StartWorkflow.srv` claimed the server validates against an „allowed-block-type
+allowlist" (there has been none since the 2026-05 stripdown; the gate is „the
+handler table has a key") and that „the safety envelope still gates motion at
+runtime" (removed in the same stripdown — the arm-facing refusals live in
+`workflow/handlers/`). `blocklyPayload.js` said „the 47 real `edubotics_*`
+types"; there are **39**, counted from `blocks/*.js` and matching the server's
+dispatch keys exactly, averaging 21.2 characters rather than 22.7 — the two
+measured byte-per-drag figures stand, the set they were attributed to did not.
+And W2's `schema-probe` job does not probe the schema: it imports `app.main`,
+while `_validate_required_schema` is scheduled from an `on_event("startup")`
+hook that a bare import never fires (`docs/KNOWN-ISSUES.md`).
+
+**Two corrections to THIS round's own output, 2026-09-22, both found by
+reversing a claim rather than re-reading it.** The debugger shipped a
+`phase === 'error'` rung that highlighted the failing line, a matching
+`.cm-edubotics-run-error` style, and a `CLAUDE.md` sentence asserting the
+feature — and none of it could fire. `useRosTopicSubscription` answers an error
+tick with `setWorkflowStatus` AND `setRunState('error')` in one callback, and
+that terminal branch nulls `currentBlockId` and blanks `phase`, so the id the
+server took care to publish is discarded on arrival. It passed CI because its
+test preloaded `{phase:'error', currentBlockId:'main.py:L4'}` into a store — a
+state the production reducers cannot reach; driven through the real three
+dispatches the same component answers `data-highlight-line=""`. The rung, the
+style and the sentence are gone, the test now drives the real sequence and pins
+the CAUSE so it goes red if the reducer moves, and the richer fix — keeping the
+id for `'error'` — is an owner call in `docs/KNOWN-ISSUES.md`, because it lives
+in a file this round's grant forbids and needs a second edit nobody would guess
+(`handleStart` clears five things but not `phase`). The same reducer, it turns
+out, has been making `RunControls`' red „Fehler" pill dead for Blockly programs
+since long before this branch. Second: §3.10 wired
+`get_object_catalog_callback` to pass the resolved profile id into the optional
+parameter the builder had carried unused since RS-56, which CLOSED the
+long-standing latent item — but `CLAUDE.md` still ended that bullet with „the
+wire response always carries the OMX variant" and `KNOWN-ISSUES` still carried
+the entry twice, so the one commit whose purpose was document truth left three
+sentences asserting the bug it had just fixed. Fixed; the fence is a wiring
+test, because the payload stays byte-identical until a per-profile catalog
+differs in a wire field — which is also why an un-wired optional parameter can
+only ever be caught by one.
+
+**Scale**: 10 images instead of 8 (the runner on amd64 and opi; the Jetson pair
+gets neither manager nor runner, the whole tab being `jetsonIncompatible`), the
+boot probe at 14 tables / 10 column sets / 20 RPCs, migration 040, and a third
+`image_source_parity.sh` kind — without which an edit to the shipped stub
+library or the supervisor would ship nothing, silently.
+
+**Verified** at the end of the round: 147 vitest files / 2216 tests (was
+132 / 2034 at the branch base; 2215 before the 2026-09-22 corrections above
+added the positive control) with 0 failures and 2 expected failures — the
+A16 noise gate, which shipped disabled by its own written exit
+(`docs/KNOWN-ISSUES.md`); 2163 server tests (2159 passed, 4 skipped);
+367 cloud-API; 1664 GUI (66 skipped — the 57 executed installer tests need
+`pwsh`, absent on the build host); 594 pi-agent; 30 Jetson-agent; React lint
+clean; `interfaces-validate` and `enum-parity` green.
+The teacher-web image was built the way `ci.yml` builds it: all three
+placeholder greps pass, `version.json`'s buildId is intact, and CodeMirror's
+runtime tokens occur zero times in the entry chunk. **Not proven anywhere but
+CI or a rig**: every amd64 image, the runner's amd64 size, the `.ps1` change
+(no `pwsh` on the build host), and the six C-R gates.
+
 ### Unreleased, 2026-09-16 — the editor stops repairing what the student saved
 
 Reported as „sometimes I get a gear and sometimes a + on some blocks". Five Blockly built-ins carry a mutator (`controls_if`, `lists_create_with`, `text_join`, the two `procedures_def*`), and `@blockly/block-plus-minus` replaces Blockly's gear with ⊕/⊖ only for blocks created AFTER it loads. Every build up to 2026-09-13 imported it AFTER `Blockly.inject`, so the program restored on the injection tick kept the gear while a block dragged in a moment later got the ⊕; a second visit to the page showed the opposite, and a reload flipped it back. `ff68457` had already fixed that by awaiting the plugin modules before inject (it was chasing „CSS already injected"), so the answer to the question as asked was „already fixed, not yet pushed". What the hunt for the same SHAPE — *what a student sees, or what gets SAVED, depends on load order, and fails silently* — turned up is this round's real content. Measured with real Blockly 12.5.1, the real plugin from `node_modules`, and the real editor component in jsdom; an independent auditor re-derived every claim from scratch and refuted one of them (undo of the ⊖ damage was never broken).

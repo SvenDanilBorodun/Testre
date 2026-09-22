@@ -503,12 +503,45 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception as e:  # noqa: BLE001 — never fatal at boot
             self.get_logger().warning(f'command-rail publisher pre-create failed: {e}')
 
+        # Roboter Studio text-program RPC server (§3.3): bind rpc.sock in the
+        # shared ipc volume so a student's Python/Java program can drive the arm
+        # over the data socket. Best-effort like its two neighbours above; on any
+        # failure self._code_rpc stays None and CodeProgram refuses every run
+        # with the German runner_down message. Stays ABOVE _init_robot_profile,
+        # which remains the LAST statement (degraded-boot contract) — hoist
+        # nothing else.
+        try:
+            self._init_code_rpc()
+        except Exception as e:  # noqa: BLE001 — never fatal at boot
+            self.get_logger().warning(f'code RPC init failed: {e}')
+
         # Robot-type self-init (D1) — LAST statement of __init__. Resolves the
         # hardset EDUBOTICS_ROBOT_TYPE into an ArmProfile, sets operation_mode
         # FIRST (the Communicator ctor needs it), and brings up the data pipeline
         # via init_ros_params at BOOT (was: at React robot-selection time). Never
         # raises out of __init__ — respawn=True would otherwise crash-loop.
         self._init_robot_profile()
+
+    def _init_code_rpc(self):
+        """Bind the Roboter Studio text-program DATA socket (``rpc.sock``) in the
+        shared ipc volume so a Python/Java program can drive the arm over the
+        socket (§3.2). Best-effort: on any failure ``self._code_rpc`` stays
+        ``None`` and every code run is refused in German (``runner_down``). The
+        socket directory only exists when the ``code_runner`` compose volume is
+        mounted; absent it, this skips silently (a rig without the coding
+        suite). Never raises out of __init__ (its caller also guards)."""
+        self._code_rpc = None
+        socket_dir = '/run/edubotics/code'
+        if not os.path.isdir(socket_dir):
+            self.get_logger().info(
+                f'code RPC socket dir {socket_dir} absent — text programs disabled')
+            return
+        try:
+            from physical_ai_server.workflow.code_rpc import CodeRpcServer
+            self._code_rpc = CodeRpcServer(os.path.join(socket_dir, 'rpc.sock'))
+        except Exception as e:  # noqa: BLE001 — degrade to "no coding suite"
+            self._code_rpc = None
+            self.get_logger().warning(f'code RPC bind failed: {e}')
 
     def _init_robot_profile(self):
         """Boot-time robot identity + data-pipeline bring-up (Rule D1).
@@ -5359,7 +5392,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         from physical_ai_server.workflow.object_catalog import (
             build_object_catalog_response,
         )
-        fields = build_object_catalog_response()
+        # Pass the resolved profile id (§3.10) — closes the KNOWN-ISSUES latent
+        # item where GetObjectCatalog always shipped the OMX variant. Byte-
+        # identical today (only gripper_close_rad differs per profile, not a wire
+        # field), so a wiring test — not a behaviour test — fences it.
+        fields = build_object_catalog_response(getattr(
+            getattr(self, '_arm_profile', None), 'profile_id', None))
         response.type_names = fields['type_names']
         response.labels_de = fields['labels_de']
         response.object_height_m = fields['object_height_m']
@@ -5536,6 +5574,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # onto every WorkflowContext so the handlers' ctx accessors read
             # the profile instead of the OMX module constants.
             arm_profile=getattr(self, '_arm_profile', None),
+            # Roboter Studio text programs (§3.3): the DATA-socket RPC server,
+            # or None when the coding suite is not up (runs refused in German).
+            code_rpc=getattr(self, '_code_rpc', None),
         )
         return self.workflow_manager
 
@@ -5980,6 +6021,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             get_follower_joints=sim_arm.get_joints,
             load_object_catalog=self._load_object_catalog,
             arm_profile=getattr(self, '_arm_profile', None),
+            # A code run in the simulator drives the virtual arm the same way
+            # (student types simply can't be placed in the sim — §3.10).
+            code_rpc=getattr(self, '_code_rpc', None),
         )
         return self.sim_workflow_manager
 

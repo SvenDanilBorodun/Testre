@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -591,6 +592,116 @@ class TestRegistryResolution(unittest.TestCase):
         self.assertTrue(constants.REGISTRY.startswith("ghcr.io/"))
         self.assertEqual(constants.REGISTRY_FALLBACK, "nettername")
         self.assertTrue(all(img.startswith("ghcr.io/") for img in constants.ALL_IMAGES))
+
+
+class TestFleetEnumerationsCarryTheRunner(unittest.TestCase):
+    """The `code_runner` container (2026-09-21) is a FOURTH image and a fourth
+    project container. Every place the Windows side enumerates the stack must
+    say so, or the runner is silently never pulled, never pruned, never torn
+    down, and a stack with only the runner alive reads as "nothing running".
+    """
+
+    _FOUR_IMAGES = ["open-manipulator", "physical-ai-server", "physical-ai-manager",
+                    "code-runner"]
+    _FOUR_CONTAINERS = ("open_manipulator", "physical_ai_server", "physical_ai_manager",
+                        "code_runner")
+    _PS1 = os.path.join(_REPO_ROOT, "installer", "scripts", "pull_images.ps1")
+    _DM_SRC = os.path.join(_REPO_ROOT, "gui", "app", "docker_manager.py")
+    # Every installer script that carries its OWN image list, and the regex
+    # whose group 1 is that list's body. pull_images.ps1 pulls it,
+    # finalize_install.ps1::Test-ImagesPresent is both finalize's skip gate and
+    # its post-pull verification, verify_system.ps1 reports it.
+    _INSTALLER_IMAGE_LISTS = {
+        "pull_images.ps1": r"^\$repoNames = @\(([^\r\n]*)\)\r?$",
+        "finalize_install.ps1": r"foreach \(\$name in @\(([^\r\n]*?)\)\) \{",
+        "verify_system.ps1": r"^\$images = @\(\r?\n([\s\S]*?)\r?\n\)\r?$",
+    }
+    # A short name as pull_images/finalize spell it, or inside verify_system's
+    # full "${registry}/<name>:${imageTag}" ref.
+    _IMAGE_NAME_IN_LIST = re.compile(r'"(?:\$\{registry\}/)?([a-z0-9-]+)(?::\$\{imageTag\})?"')
+
+    def test_image_names_has_four_names_with_the_runner_last(self):
+        from gui.app import constants
+        self.assertEqual(constants.IMAGE_NAMES, self._FOUR_IMAGES)
+        self.assertEqual(constants.IMAGE_CODE_RUNNER, constants.image_ref("code-runner"))
+        self.assertEqual(len(constants.ALL_IMAGES), 4)
+        self.assertIn(constants.IMAGE_CODE_RUNNER, constants.ALL_IMAGES)
+
+    def test_the_service_image_map_names_the_runner(self):
+        from gui.app import constants
+        self.assertEqual(docker_manager._SERVICE_IMAGE["code_runner"],
+                         constants.IMAGE_CODE_RUNNER)
+        self.assertEqual(set(docker_manager._SERVICE_IMAGE), set(self._FOUR_CONTAINERS))
+
+    def test_project_containers_and_the_status_probe_carry_the_runner(self):
+        self.assertEqual(docker_manager.PROJECT_CONTAINERS, self._FOUR_CONTAINERS)
+        inspected = []
+
+        def _run(cmd, *a, **k):
+            inspected.append(cmd[-1])
+            return MagicMock(returncode=0, stdout="running\n")
+
+        with patch("gui.app.docker_manager.subprocess.run", side_effect=_run):
+            status = docker_manager.get_container_status()
+        self.assertEqual(set(inspected), set(self._FOUR_CONTAINERS))
+        self.assertEqual(set(status), set(self._FOUR_CONTAINERS))
+
+    def test_the_data_volume_suffixes_stay_three_and_say_why_the_ipc_volume_is_excluded(self):
+        # code_runner_ipc holds two socket files, both unlinked-before-bind by
+        # their owners; a factory reset that deleted it would only race a
+        # running stack. DELIBERATELY not in the set — and the tuple says so.
+        self.assertEqual(docker_manager.EDUBOTICS_DATA_VOLUME_SUFFIXES,
+                         ("ai_workspace", "huggingface_cache", "edubotics_calib"))
+        with open(self._DM_SRC, encoding="utf-8") as handle:
+            src = handle.read()
+        idx = src.index("EDUBOTICS_DATA_VOLUME_SUFFIXES = (")
+        preamble = src[max(0, idx - 1200):idx]
+        self.assertIn("code_runner_ipc", preamble,
+                      "the exclusion of code_runner_ipc must be written beside the tuple")
+
+    def test_pull_images_ps1_pulls_four_repos_and_keeps_its_encoding(self):
+        with open(self._PS1, "rb") as handle:
+            raw = handle.read()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"), "pull_images.ps1 lost its UTF-8 BOM")
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""), "pull_images.ps1 is no longer CRLF")
+        text = raw.decode("utf-8-sig")
+        self.assertIn('$repoNames = @("open-manipulator", "physical-ai-server", '
+                      '"physical-ai-manager", "code-runner")', text)
+        # The runner is a HARD install dependency by design: a release whose
+        # code-runner never published fails every install loudly here, not at
+        # the first „Umgebung starten".
+        self.assertRegex(text, r'Failed to pull \$primary \(GHCR and Docker Hub fallback\)"'
+                               r' -ForegroundColor Red\r\n\s+exit 1')
+
+    def test_every_installer_ps1_enumerates_exactly_the_image_names(self):
+        """Three installer scripts each carry their own image list; a name
+        missing from one of them is invisible THERE. finalize_install.ps1 once
+        kept three names after pull_images.ps1 gained the fourth: its
+        Test-ImagesPresent skipped the pull over an install whose code-runner
+        was absent, printed „Images bereitgestellt (Zustand verifiziert)" and
+        exited 0 — and never retried on any later run. The lists are compared
+        to IMAGE_NAMES exactly, so a stale fifth name fails here too."""
+        from gui.app import constants
+        scripts = os.path.join(_REPO_ROOT, "installer", "scripts")
+        for name, pattern in self._INSTALLER_IMAGE_LISTS.items():
+            with self.subTest(script=name):
+                with open(os.path.join(scripts, name), "rb") as handle:
+                    raw = handle.read()
+                self.assertTrue(raw.startswith(b"\xef\xbb\xbf"), f"{name} lost its UTF-8 BOM")
+                self.assertNotIn(b"\n", raw.replace(b"\r\n", b""), f"{name} is no longer CRLF")
+                text = raw.decode("utf-8-sig")
+                match = re.search(pattern, text, re.MULTILINE)
+                self.assertIsNotNone(match, f"{name}: the image list moved; update the pattern")
+                self.assertEqual(self._IMAGE_NAME_IN_LIST.findall(match.group(1)),
+                                 constants.IMAGE_NAMES)
+
+    def test_no_prose_still_counts_three_containers(self):
+        with open(self._DM_SRC, encoding="utf-8") as handle:
+            src = handle.read()
+        for stale in ("all 3 containers", "The three project containers",
+                      "three `docker inspect`", "three 10 s timeouts",
+                      "take down all three containers"):
+            self.assertFalse(stale in src, f"docker_manager.py still says {stale!r}")
 
 
 if __name__ == "__main__":

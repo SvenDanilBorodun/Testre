@@ -889,6 +889,37 @@ class TheStackProbeIsBoundedAndFailsClosed(unittest.TestCase):
         self.assertNotIn('all(', self.code)
 
 
+class TheStackProbeCountsTheRunner(unittest.TestCase):
+    """`code_runner` (2026-09-21) is a fourth project container. A stack whose
+    only survivor is the runner must still read as "a stack is live" at close,
+    so the one list both probes read carries it — and both probes really read
+    the ONE list, which the comment above `PROJECT_CONTAINERS` has always
+    claimed and nothing enforced."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tree = ast.parse(_DOCKER_MANAGER_SRC.read_text(encoding='utf-8'))
+
+    def _fn(self, name):
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        raise AssertionError(f'{name} not found')
+
+    def test_project_containers_carries_the_runner(self):
+        from gui.app import docker_manager
+        self.assertEqual(
+            docker_manager.PROJECT_CONTAINERS,
+            ('open_manipulator', 'physical_ai_server', 'physical_ai_manager', 'code_runner'))
+
+    def test_get_container_status_iterates_the_one_list(self):
+        code = ast.unparse(self._fn('get_container_status'))
+        self.assertIn('for name in PROJECT_CONTAINERS', code)
+        self.assertNotIn('"physical_ai_manager"]', code,
+                         'get_container_status keeps its own literal list — the two '
+                         'probes can disagree about what "the stack" is')
+
+
 class TheScanAsksFirstWhenThereIsASessionToLose(unittest.TestCase):
     """„Arme scannen" mid-lesson used to sign the student out with no warning.
 

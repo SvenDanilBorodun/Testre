@@ -252,7 +252,8 @@ if (Test-Path $VersionsEnv) {
 $images = @(
     "${registry}/open-manipulator:${imageTag}",
     "${registry}/physical-ai-server:${imageTag}",
-    "${registry}/physical-ai-manager:${imageTag}"
+    "${registry}/physical-ai-manager:${imageTag}",
+    "${registry}/code-runner:${imageTag}"
 )
 if ($distroListed) {
     foreach ($image in $images) {

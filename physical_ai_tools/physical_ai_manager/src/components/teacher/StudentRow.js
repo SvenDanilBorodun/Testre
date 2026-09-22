@@ -12,6 +12,7 @@ import {
   MdTune,
   MdEventNote,
   MdGroups,
+  MdTerminal,
 } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
@@ -27,6 +28,7 @@ import {
 } from '../../features/teacher/teacherSlice';
 import { updateTeacherPool } from '../../features/auth/authSlice';
 import PasswordResetModal from './PasswordResetModal';
+import StudentProgramsDrawer from './StudentProgramsDrawer';
 import { Avatar, Btn, Pill, Progress } from '../EbUI';
 
 function RenameInline({ student, onSave, onCancel }) {
@@ -187,6 +189,10 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
   const token = useSelector((s) => s.auth.session?.access_token);
   const [busy, setBusy] = useState(false);
   const [showPwModal, setShowPwModal] = useState(false);
+  // The programs drawer is opened from HERE rather than from the parent
+  // (`onShowHistory`'s route): it needs no page state, and keeping it local
+  // means ClassroomDetail carries nothing for it.
+  const [showPrograms, setShowPrograms] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [moving, setMoving] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
@@ -456,6 +462,14 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
             <Btn
               variant="ghost"
               size="sm"
+              onClick={() => setShowPrograms(true)}
+              title="Programme · Abgaben"
+            >
+              <MdTerminal size={18} />
+            </Btn>
+            <Btn
+              variant="ghost"
+              size="sm"
               onClick={() => onShowHistory(student)}
               title="Trainings-Historie"
             >
@@ -494,6 +508,9 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
           </div>
         )}
       </td>
+      {showPrograms && (
+        <StudentProgramsDrawer student={student} onClose={() => setShowPrograms(false)} />
+      )}
       {showPwModal && (
         <PasswordResetModal
           username={student.username}

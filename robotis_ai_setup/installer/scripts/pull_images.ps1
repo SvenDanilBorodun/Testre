@@ -56,7 +56,11 @@ Write-Host "Using image tag: $ImageTag (registry: $Registry, fallback: $Registry
 
 # Image SHORT names; the primary ref is ${Registry}/<name>:<tag>, the fallback
 # (Docker Hub twin, dual-pushed → digest-identical) is ${RegistryFallback}/<name>:<tag>.
-$repoNames = @("open-manipulator", "physical-ai-server", "physical-ai-manager")
+# code-runner (the Roboter Studio code sandbox, 2026-09-21) is a HARD install
+# dependency by design: the pull loop below exit 1s the whole step for a repo
+# that pulls from NEITHER registry, so a release whose code-runner never
+# published fails every install loudly here, not at the first "Umgebung starten".
+$repoNames = @("open-manipulator", "physical-ai-server", "physical-ai-manager", "code-runner")
 
 Write-Step "Pulling Docker images into $DistroName..."
 

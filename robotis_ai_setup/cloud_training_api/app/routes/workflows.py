@@ -21,6 +21,7 @@ from app.services.supabase_client import get_supabase
 from app.validators.workflow import (
     MAX_NAME_LENGTH,
     validate_blockly_json,
+    validate_code_files,
     validate_sim_scene,
     validate_trajectory,
     validate_trajectory_metadata,
@@ -34,6 +35,12 @@ router = APIRouter(prefix="/workflows", tags=["workflows"])
 # Pagination defaults match the rest of the API surface.
 DEFAULT_LIST_LIMIT = 100
 MAX_LIST_LIMIT = 500
+
+# One workflow is one language (decision D3): a Blockly program or a Python /
+# Java program, never both on one row. The two German refusals below are the
+# only way a create or PATCH can mix them.
+_ONE_LANGUAGE_DE = "Ein Programm besteht entweder aus Blöcken oder aus Code, nicht aus beidem."
+_LANGUAGE_IMMUTABLE_DE = "Die Programmiersprache kann nach dem Anlegen nicht geändert werden."
 
 
 # ---------- Models ----------
@@ -50,6 +57,11 @@ class WorkflowCreate(BaseModel):
     # Roboter Studio Phase-3 Sim-Szene (placed virtual objects). Optional —
     # a non-sim workflow omits it and the column defaults to {}.
     sim_scene: dict | None = None
+    # Roboter Studio code programs (migration 040). '' = a Blockly program
+    # (the column default); 'python' | 'java' = a code program whose
+    # blockly_json must be EMPTY and whose code_files carry the project.
+    code_language: str = ""
+    code_files: dict | None = None
 
 
 class WorkflowUpdate(BaseModel):
@@ -62,6 +74,13 @@ class WorkflowUpdate(BaseModel):
     # blockly+sim PATCH carries both (the sim_scene write is applied via the
     # plain owner-scoped update BEFORE the snapshot RPC — see update_workflow).
     sim_scene: dict | None = None
+    # Code programs. The language is IMMUTABLE after create: a client may echo
+    # the document's own language, any other value is a 409 — never silently
+    # ignored. code_files goes through the SECURITY DEFINER RPC
+    # update_workflow_code (see update_workflow) and never rides a PATCH that
+    # also carries blockly_json.
+    code_language: str | None = None
+    code_files: dict | None = None
 
 
 class WorkflowResponse(BaseModel):
@@ -79,6 +98,10 @@ class WorkflowResponse(BaseModel):
     # back to the client (Pydantic drops undeclared fields). Defaults to None
     # for tolerance of a pre-migration row that lacks the column.
     sim_scene: dict | None = None
+    # Migration 040. The defaults are the column defaults, so a row read before
+    # the migration (or a client that never sends them) is a Blockly program.
+    code_language: str = ""
+    code_files: dict = Field(default_factory=dict)
 
 
 # ---------- Helpers ----------
@@ -267,6 +290,21 @@ def create_workflow(
     validate_blockly_json(payload.blockly_json)
     if payload.sim_scene is not None:
         validate_sim_scene(payload.sim_scene)
+    # A code program (migration 040): files AND a language, and no blocks.
+    # Files without a language or a language without files are refused (the
+    # validator refuses an empty project); a Blockly program sends neither
+    # and its insert payload is unchanged from before 040 (column defaults).
+    code_language = payload.code_language or ""
+    if payload.code_files and not code_language:
+        raise HTTPException(
+            status_code=400,
+            detail="Für Programmdateien muss eine Programmiersprache angegeben werden.",
+        )
+    if code_language and payload.blockly_json:
+        raise HTTPException(status_code=400, detail=_ONE_LANGUAGE_DE)
+    code_files = (
+        validate_code_files(payload.code_files, code_language) if code_language else None
+    )
     supabase = get_supabase()
     profile = get_user_profile(str(user.id))
     workgroup_id = (
@@ -284,6 +322,9 @@ def create_workflow(
         "sim_scene": payload.sim_scene or {},
         "is_template": False,
     }
+    if code_files is not None:
+        insert_payload["code_language"] = code_language
+        insert_payload["code_files"] = code_files
     result = supabase.table("workflows").insert(insert_payload).execute()
     if not result.data:
         raise HTTPException(status_code=500, detail="Workflow konnte nicht gespeichert werden.")
@@ -296,7 +337,19 @@ def update_workflow(
     payload: WorkflowUpdate,
     user=Depends(get_current_user),
 ) -> WorkflowResponse:
-    _assert_workflow_owned(user.id, workflow_id)
+    row = _assert_workflow_owned(user.id, workflow_id)
+    # One workflow is one language (migration 040). A pre-040 row has no
+    # code_language key at all: that is a Blockly program.
+    stored_language = row.get("code_language") or ""
+    if payload.blockly_json is not None and payload.code_files is not None:
+        raise HTTPException(status_code=400, detail=_ONE_LANGUAGE_DE)
+    if payload.code_language is not None and payload.code_language != stored_language:
+        raise HTTPException(status_code=409, detail=_LANGUAGE_IMMUTABLE_DE)
+    if payload.code_files is not None and not stored_language:
+        # A Blockly program never becomes a code program through PATCH.
+        raise HTTPException(status_code=409, detail=_LANGUAGE_IMMUTABLE_DE)
+    if payload.blockly_json is not None and stored_language:
+        raise HTTPException(status_code=400, detail=_ONE_LANGUAGE_DE)
     update_payload: dict[str, Any] = {}
     if payload.name is not None:
         update_payload["name"] = payload.name
@@ -305,6 +358,8 @@ def update_workflow(
     if payload.blockly_json is not None:
         validate_blockly_json(payload.blockly_json)
         update_payload["blockly_json"] = payload.blockly_json
+    if payload.code_files is not None:
+        update_payload["code_files"] = validate_code_files(payload.code_files, stored_language)
     if payload.sim_scene is not None:
         validate_sim_scene(payload.sim_scene)
         update_payload["sim_scene"] = payload.sim_scene
@@ -356,6 +411,42 @@ def update_workflow(
                     "p_blockly_json": update_payload["blockly_json"],
                     "p_name": update_payload.get("name"),
                     "p_description": update_payload.get("description"),
+                },
+            ).execute()
+        except Exception as exc:
+            msg = str(exc)
+            if "P0002" in msg or "nicht gefunden" in msg:
+                raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
+            raise
+        final = (
+            supabase.table("workflows")
+            .select("*")
+            .eq("id", workflow_id)
+            .execute()
+        )
+        if not final.data:
+            raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
+        return WorkflowResponse(**final.data[0])
+
+    # Migration 040: a code_files change mirrors the blockly branch above —
+    # every other column of this PATCH via the plain owner-scoped update
+    # first (the RPC takes only the two code columns), then the SECURITY
+    # DEFINER RPC update_workflow_code (owner-only, stamps saved_by on the
+    # version snapshot), then a re-SELECT so the response is the merged row.
+    if "code_files" in update_payload:
+        plain = {k: v for k, v in update_payload.items() if k != "code_files"}
+        if plain:
+            supabase.table("workflows").update(plain).eq("id", workflow_id).eq(
+                "owner_user_id", user.id
+            ).execute()
+        try:
+            supabase.rpc(
+                "update_workflow_code",
+                {
+                    "p_workflow_id": workflow_id,
+                    "p_user_id": str(user.id),
+                    "p_code_files": update_payload["code_files"],
+                    "p_code_language": stored_language,
                 },
             ).execute()
         except Exception as exc:
@@ -430,6 +521,10 @@ def clone_workflow(workflow_id: str, user=Depends(get_current_user)) -> Workflow
         # Carry the Sim-Szene into the clone (already validated when the
         # source was saved). Defaults to {} for a pre-Phase-3 source row.
         "sim_scene": src.get("sim_scene") or {},
+        # Carry the code document too (migration 040): a clone of a Python
+        # program is a Python program. A pre-040 source row lacks both keys.
+        "code_language": src.get("code_language") or "",
+        "code_files": src.get("code_files") or {},
         "is_template": False,
     }
     inserted = supabase.table("workflows").insert(insert_payload).execute()
@@ -843,3 +938,97 @@ def delete_trajectory(
         .execute()
     )
     return {"ok": True}
+
+
+# ---------- „Abgeben": immutable submissions (migration 040) ----------
+#
+# A student deliberately hands the teacher a snapshot of the current document.
+# The row copies name / language / code_files / blockly_json / sim_scene from
+# the WORKFLOW ROW (never from the body) and stamps student_user_id +
+# classroom_id SERVER-SIDE — classroom_id from users.classroom_id, never from
+# workflows.classroom_id, which a client sets at create with no membership
+# check (Rule §4). Postgres keeps the newest 8 per (student, workflow) and
+# refuses every UPDATE. Owner-only both ways. POST .../submit sits under the
+# existing per-user POST /workflows 10/min rule by prefix and under the 384 KB
+# body middleware; the teacher's reads live in routes/teacher.py.
+
+SUBMISSION_NOTE_MAX_LENGTH = 500
+
+
+class SubmissionCreate(BaseModel):
+    note: str = ""
+
+
+class SubmissionResponse(BaseModel):
+    id: str
+    workflow_id: str
+    student_user_id: str
+    name: str
+    code_language: str = ""
+    note: str = ""
+    submitted_at: str
+    # The snapshot itself: present on the submit response, omitted (None) on
+    # the list so a listing stays light.
+    code_files: dict | None = None
+    blockly_json: dict | None = None
+    sim_scene: dict | None = None
+
+
+@router.post("/{workflow_id}/submit", response_model=SubmissionResponse)
+def submit_workflow(
+    workflow_id: str,
+    payload: SubmissionCreate | None = None,
+    user=Depends(get_current_user),
+) -> SubmissionResponse:
+    """Snapshot the current document as an „Abgabe" for the teacher.
+
+    Owner-only (``_assert_workflow_owned``). Everything but the note comes
+    from the row and the caller's own users row — a body carrying ids is
+    ignored (the model has no such fields)."""
+    row = _assert_workflow_owned(user.id, workflow_id)
+    note = (payload.note if payload is not None else "") or ""
+    if len(note) > SUBMISSION_NOTE_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Die Notiz darf höchstens {SUBMISSION_NOTE_MAX_LENGTH} Zeichen lang sein.",
+        )
+    supabase = get_supabase()
+    insert_payload = {
+        "workflow_id": workflow_id,
+        "student_user_id": user.id,
+        "classroom_id": _get_user_classroom_id(user.id),
+        "name": row["name"],
+        "code_language": row.get("code_language") or "",
+        "code_files": row.get("code_files") or {},
+        "blockly_json": row.get("blockly_json") or {},
+        "sim_scene": row.get("sim_scene") or {},
+        "note": note,
+    }
+    result = supabase.table("workflow_submissions").insert(insert_payload).execute()
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Abgabe konnte nicht gespeichert werden.")
+    return SubmissionResponse(**result.data[0])
+
+
+@router.get("/{workflow_id}/submissions", response_model=list[SubmissionResponse])
+def list_submissions(
+    workflow_id: str,
+    user=Depends(get_current_user),
+) -> list[SubmissionResponse]:
+    """The caller's own submissions of this workflow, newest first, without
+    the documents. No limit parameter: Postgres keeps at most 8 rows per
+    (student, workflow), so the listing is bounded by construction."""
+    _assert_workflow_owned(user.id, workflow_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("workflow_submissions")
+        .select("id, workflow_id, student_user_id, name, code_language, note, submitted_at")
+        .eq("workflow_id", workflow_id)
+        .eq("student_user_id", user.id)
+        .order("submitted_at", desc=True)
+        .execute()
+    )
+    return [
+        SubmissionResponse(**{**r, "code_files": None, "blockly_json": None, "sim_scene": None})
+        for r in (result.data or [])
+    ]

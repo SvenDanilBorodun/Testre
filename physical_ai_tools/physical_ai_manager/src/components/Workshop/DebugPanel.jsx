@@ -13,6 +13,8 @@ import { DE } from './blocks/messages_de';
 import SensorPanel from './SensorPanel';
 import VariableInspector from './VariableInspector';
 import BreakpointList from './BreakpointList';
+import CodeBreakpointPanel from './code/CodeBreakpointPanel';
+import { isCodeLanguage } from './code/codeProject';
 
 const TABS = ['sensors', 'variables', 'breakpoints'];
 
@@ -29,8 +31,16 @@ function tabLabel(tab) {
   }
 }
 
-function DebugPanel({ workspace }) {
+/**
+ * `codeLanguage` is the OPEN workflow's, '' for a Blockly one. Only the
+ * „Haltepunkte" tab differs: a code program has no blocks to Alt-click and no
+ * Blockly workspace to resolve a label against, and Java has no breakpoints at
+ * all this round (A8) — so that tab is a different component, not a flag.
+ * „Sensoren" and „Variablen" are notation-independent and stay as they are.
+ */
+function DebugPanel({ workspace, codeLanguage = '' }) {
   const [tab, setTab] = useState('sensors');
+  const isCode = isCodeLanguage(codeLanguage);
 
   return (
     <aside
@@ -61,7 +71,9 @@ function DebugPanel({ workspace }) {
       <div role="tabpanel" className="flex-1 overflow-auto p-3">
         {tab === 'sensors' && <SensorPanel />}
         {tab === 'variables' && <VariableInspector />}
-        {tab === 'breakpoints' && <BreakpointList workspace={workspace} />}
+        {tab === 'breakpoints' && (isCode
+          ? <CodeBreakpointPanel language={codeLanguage} />
+          : <BreakpointList workspace={workspace} />)}
       </div>
     </aside>
   );

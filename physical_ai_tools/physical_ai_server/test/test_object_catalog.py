@@ -8,6 +8,9 @@ fleet-wide object set (:func:`fixed_catalog`).
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from physical_ai_server.workflow import object_catalog as object_catalog_mod
@@ -19,6 +22,9 @@ from physical_ai_server.workflow.object_catalog import (
     fixed_catalog,
     parse_catalog,
 )
+
+_NODE = (Path(__file__).resolve().parents[1]
+         / 'physical_ai_server' / 'physical_ai_server.py')
 
 
 def _valid_dict() -> dict:
@@ -462,3 +468,28 @@ def test_build_object_catalog_response_german_fallback_on_unexpected_error(monke
     assert 'english' not in resp['message']
     for k in _RESPONSE_ARRAY_KEYS:
         assert resp[k] == []
+
+
+# ── WP4 §3.10: the node passes the resolved profile id (closes the KNOWN-ISSUES
+# latent item). physical_ai_server.py can't be imported without rclpy, so the
+# call site is fenced as source — the test_sim_node_wiring idiom.
+def test_get_object_catalog_callback_passes_the_profile_id():
+    tree = ast.parse(_NODE.read_text(encoding='utf-8'))
+    fn = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.FunctionDef)
+                and node.name == 'get_object_catalog_callback'):
+            fn = node
+    assert fn is not None, 'get_object_catalog_callback not found'
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == 'build_object_catalog_response']
+    assert len(calls) == 1, f'expected one builder call, found {len(calls)}'
+    call = calls[0]
+    # It must now be called WITH an argument (the resolved profile id), not the
+    # bare no-arg form that always shipped the OMX variant.
+    assert (call.args or call.keywords), (
+        'build_object_catalog_response() is still called with no profile id')
+    # …and that argument reads the resolved profile via _arm_profile.profile_id.
+    src = ast.get_source_segment(_NODE.read_text(encoding='utf-8'), call) or ''
+    assert 'profile_id' in src and '_arm_profile' in src, src

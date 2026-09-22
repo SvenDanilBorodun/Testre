@@ -49,6 +49,12 @@ import { TEACH_BLOCK_TITLES_DE, teachEntryBlockReason } from '../components/Work
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
 import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
+import { useCodeAutosave } from '../components/Workshop/code/useCodeAutosave';
+import CodeWorkspace from '../components/Workshop/code/CodeWorkspace';
+import NewProgramDialog from '../components/Workshop/code/NewProgramDialog';
+import SubmitButton from '../components/Workshop/code/SubmitButton';
+import { CODE_DE } from '../components/Workshop/code/codeMessagesDe';
+import { STARTER_FILES, isCodeLanguage, validateProject } from '../components/Workshop/code/codeProject';
 import { slimSavePayload } from '../utils/blocklyPayload';
 import {
   setUnsavedBlocklyJson,
@@ -294,6 +300,12 @@ function WorkshopPage({ isActive }) {
   const [editorJson, setEditorJson] = useState(null);
   const [initialJsonForEditor, setInitialJsonForEditor] = useState(null);
   const [editorKey, setEditorKey] = useState(0);
+  // True while a selected workflow's row is being fetched: NEITHER editor
+  // mounts until the language is known, so a code workflow never flashes (and
+  // never injects) the Blockly canvas, and a Blockly workflow never mounts a
+  // blank canvas it will remount a moment later. Seeded from the props, not
+  // `false`: the first render happens BEFORE the hydrate effect can say so.
+  const [hydrating, setHydrating] = useState(() => !!(selectedWorkflowId && accessToken));
   const [workspace, setWorkspace] = useState(null);
   const [saving, setSaving] = useState(false);
   const [view, setView] = useState('editor'); // 'editor' | 'gallery'
@@ -301,6 +313,18 @@ function WorkshopPage({ isActive }) {
   // swaps the live scene camera for the SimScene editor + virtual-arm preview.
   const [simMode, setSimMode] = useState(false);
   const [simScene, setSimScene] = useState(EMPTY_SIM_SCENE);
+  // A CODE workflow (Roboter Studio Python/Java): one workflow is one language,
+  // chosen at creation (NewProgramDialog) and immutable after. '' is a Blockly
+  // document; a code document never mounts the Blockly canvas and saves
+  // `code_language` + `code_files` as two fields on the same PATCH/POST —
+  // never inside `blockly_json`, whose SAVE allowlist would delete them.
+  const [codeLanguage, setCodeLanguage] = useState('');
+  const [codeFiles, setCodeFiles] = useState(null);
+  const isCodeWorkflow = isCodeLanguage(codeLanguage);
+  // „Neu ▾" has been used this mount: the student has CHOSEN what the editor
+  // holds, so a crash-recovery draft arriving a moment later must not overrule
+  // them (the read is async; the click is not).
+  const documentChosenRef = useRef(false);
   // #B2: leaving simMode while a sim run is active would unmount RunControls (and
   // its Stop button) on an uncalibrated rig, stranding the run. Lock the toggle
   // while a sim run is in flight (mirrors LeaderToggle's run-guard).
@@ -603,6 +627,7 @@ function WorkshopPage({ isActive }) {
     }
     const token = accessTokenRef.current;
     if (selectedWorkflowId && token) {
+      setHydrating(true);
       getWorkflow(token, selectedWorkflowId)
         .then((w) => {
           if (cancelled) return;
@@ -614,18 +639,33 @@ function WorkshopPage({ isActive }) {
               ? w.sim_scene
               : EMPTY_SIM_SCENE,
           );
+          // A code workflow (migration 040): the language routes the editor,
+          // the files are the document. A pre-040 row or a Blockly workflow
+          // carries '' / {} and clears any code document that was open.
+          if (isCodeLanguage(w?.code_language)) {
+            setCodeLanguage(w.code_language);
+            setCodeFiles(w.code_files && typeof w.code_files === 'object' ? w.code_files : {});
+          } else {
+            setCodeLanguage('');
+            setCodeFiles(null);
+          }
           setEditorKey((k) => k + 1);
+          setHydrating(false);
         })
         .catch((e) => {
           if (cancelled) return;
           toast.error(`Workflow konnte nicht geladen werden: ${e.message || e}`);
           setInitialJsonForEditor(unsavedBlocklyJson || null);
+          setCodeLanguage('');
+          setCodeFiles(null);
           setEditorKey((k) => k + 1);
+          setHydrating(false);
         });
       return () => { cancelled = true; };
     }
     setInitialJsonForEditor(unsavedBlocklyJson || null);
     setEditorKey((k) => k + 1);
+    setHydrating(false);
     return () => { cancelled = true; };
     // unsavedBlocklyJson intentionally omitted from deps: we only want
     // to seed once per workflow-id change. The change-listener inside
@@ -788,6 +828,29 @@ function WorkshopPage({ isActive }) {
     [dispatch]
   );
 
+  // „Neu → Blöcke / Python / Java" (NewProgramDialog): the ONE moment a
+  // workflow's language is chosen. The editor becomes an UNSAVED document of
+  // that kind — a blank canvas, or the language's starter project — and the
+  // first save creates the row with `code_language` + `code_files` (runSave).
+  // Nothing is created here: a student who changes their mind before saving
+  // leaves no row behind.
+  const handleNewProgram = useCallback((choice) => {
+    documentChosenRef.current = true;
+    dispatch(setSelectedWorkflowId(null));
+    dispatch(setUnsavedBlocklyJson(null));
+    setEditorJson(null);
+    setInitialJsonForEditor(null);
+    setSimScene(EMPTY_SIM_SCENE);
+    if (isCodeLanguage(choice)) {
+      setCodeLanguage(choice);
+      setCodeFiles({ ...STARTER_FILES[choice] });
+    } else {
+      setCodeLanguage('');
+      setCodeFiles(null);
+    }
+    setEditorKey((k) => k + 1);
+  }, [dispatch]);
+
   // Camera click → Ziel, without a prompt. CameraFeedOverlay asks for the
   // label BEFORE it calls /workshop/mark_destination, so one point has one name
   // on the server and in the editor:
@@ -924,6 +987,31 @@ function WorkshopPage({ isActive }) {
     onRestore: handleAutosaveRestore,
   });
 
+  // The same crash recovery for a CODE document, which `useAutosave` cannot
+  // give it: that hook is keyed on the Blockly workspace, and a code workflow
+  // renders CodeWorkspace instead (see code/useCodeAutosave.js). Gated exactly
+  // as the Blockly restore is — a selected cloud workflow takes precedence —
+  // plus the two cases the Blockly one cannot meet: the student has already
+  // chosen a document with „Neu ▾", or one is already open.
+  const handleCodeAutosaveRestore = useCallback(
+    (draft) => {
+      if (selectedWorkflowId) return;
+      if (documentChosenRef.current) return;
+      if (isCodeLanguage(codeLanguage)) return;
+      setCodeLanguage(draft.language);
+      setCodeFiles(draft.files);
+      setEditorKey((k) => k + 1);
+    },
+    [selectedWorkflowId, codeLanguage]
+  );
+  useCodeAutosave({
+    language: codeLanguage,
+    files: codeFiles,
+    enabled: isActive && (calibrated || simMode),
+    scopeKey: userId,
+    onRestore: handleCodeAutosaveRestore,
+  });
+
   // ONE save path. The Speichern button, and later every caller that needs a
   // saved workflow id (Vormachen, the Sammlung drawer), go through
   // saveWorkflowNow. The document is serialised when a save STARTS (the live
@@ -933,10 +1021,14 @@ function WorkshopPage({ isActive }) {
   const simSceneRef = useRef(simScene);
   const editorJsonRef = useRef(editorJson);
   const unsavedJsonRef = useRef(unsavedBlocklyJson);
+  const codeLanguageRef = useRef(codeLanguage);
+  const codeFilesRef = useRef(codeFiles);
   useEffect(() => { selectedWorkflowIdRef.current = selectedWorkflowId; }, [selectedWorkflowId]);
   useEffect(() => { simSceneRef.current = simScene; }, [simScene]);
   useEffect(() => { editorJsonRef.current = editorJson; }, [editorJson]);
   useEffect(() => { unsavedJsonRef.current = unsavedBlocklyJson; }, [unsavedBlocklyJson]);
+  useEffect(() => { codeLanguageRef.current = codeLanguage; }, [codeLanguage]);
+  useEffect(() => { codeFilesRef.current = codeFiles; }, [codeFiles]);
   // followUpId: the workflow a queued follow-up belongs to, snapshotted when it
   // is QUEUED (null = the document a create in flight is creating).
   const saveStateRef = useRef({
@@ -956,9 +1048,22 @@ function WorkshopPage({ isActive }) {
       return fail('Nicht angemeldet — Speichern nicht möglich.',
         new Error('Nicht angemeldet — Speichern nicht möglich.'));
     }
+    // A CODE document: the project is the thing saved, the Blockly document is
+    // the EMPTY `{}` the cloud requires beside it on create (and is absent
+    // from the PATCH — the cloud refuses a PATCH mixing the two). The caps of
+    // §3.7 are judged here with the server's own German sentences.
+    const saveLanguage = codeLanguageRef.current;
+    const saveFiles = codeFilesRef.current;
+    const savingCode = isCodeLanguage(saveLanguage);
+    if (savingCode) {
+      const projectError = validateProject(saveFiles, saveLanguage);
+      if (projectError) return fail(projectError, new Error(projectError));
+    }
     let json = null;
     const ws = workspaceRef.current;
-    if (ws) {
+    if (savingCode) {
+      json = {};
+    } else if (ws) {
       try {
         json = Blockly.serialization.workspaces.save(ws);
       } catch (_) {
@@ -989,20 +1094,40 @@ function WorkshopPage({ isActive }) {
     const targetId = selectedWorkflowIdRef.current;
     try {
       if (targetId) {
-        await updateWorkflow(token, targetId, {
-          blockly_json: documentJson,
-          sim_scene: simSceneRef.current,
-        });
+        if (savingCode) {
+          // The PATCH echoes the document's OWN language (the cloud answers
+          // 409 on any other value; it is immutable after create) and never
+          // carries blockly_json beside the files.
+          await updateWorkflow(token, targetId, {
+            code_language: saveLanguage,
+            code_files: saveFiles,
+            sim_scene: simSceneRef.current,
+          });
+        } else {
+          await updateWorkflow(token, targetId, {
+            blockly_json: documentJson,
+            sim_scene: simSceneRef.current,
+          });
+        }
         if (selectedWorkflowIdRef.current === targetId) dispatch(markWorkflowSaved());
         if (toastOnSuccess) toast.success('Gespeichert.');
         return { ok: true, workflowId: targetId, created: false };
       }
-      const created = await createWorkflow(token, {
-        name: 'Neuer Workflow',
-        description: '',
-        blockly_json: documentJson,
-        sim_scene: simSceneRef.current,
-      });
+      const created = await createWorkflow(token, savingCode
+        ? {
+          name: CODE_DE.NEW_PROGRAM_NAME,
+          description: '',
+          blockly_json: documentJson,
+          sim_scene: simSceneRef.current,
+          code_language: saveLanguage,
+          code_files: saveFiles,
+        }
+        : {
+          name: 'Neuer Workflow',
+          description: '',
+          blockly_json: documentJson,
+          sim_scene: simSceneRef.current,
+        });
       if (!created || !created.id) {
         return fail('Speichern fehlgeschlagen: keine Workflow-ID erhalten.',
           new Error('keine Workflow-ID erhalten.'));
@@ -1390,7 +1515,11 @@ function WorkshopPage({ isActive }) {
       id: 'debug',
       label: DE.DOCK_TAB_DEBUG,
       icon: '🔍',
-      render: () => <DebugPanel workspace={workspace} />,
+      // The open document's language decides the „Haltepunkte" tab: a code
+      // program has no blocks to Alt-click, and Java has no breakpoints at all
+      // this round (A8). It is a page-level fact — the dock's panels are
+      // rendered here — and the panel has no other route to it.
+      render: () => <DebugPanel workspace={workspace} codeLanguage={codeLanguage} />,
     },
   ];
 
@@ -1407,12 +1536,23 @@ function WorkshopPage({ isActive }) {
               Roboter Studio
             </h1>
             <p className="text-xs text-[var(--ink-3)] hidden lg:block truncate">
-              {showEditor
-                ? 'Bausteine ziehen, Aufgabe zusammenstellen und vom Roboter ausführen lassen.'
-                : 'Bevor wir loslegen können, muss die Kamera eingerichtet werden.'}
+              {!showEditor
+                ? 'Bevor wir loslegen können, muss die Kamera eingerichtet werden.'
+                : isCodeWorkflow
+                  ? CODE_DE.HEADER_HINT_CODE
+                  : 'Bausteine ziehen, Aufgabe zusammenstellen und vom Roboter ausführen lassen.'}
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            {/* „Abgeben": hand the teacher this stand (saves first, then
+                POST /workflows/{id}/submit). Blocks and code alike. */}
+            {showEditor && (
+              <SubmitButton
+                accessToken={accessToken}
+                saveWorkflowNow={saveWorkflowNow}
+                running={runState === 'running'}
+              />
+            )}
             {/* Phase-3: open the editor on a virtual arm — no calibration, no
                 real robot. The interpreter + IK run for real on a simulated
                 arm; only logic, order and reachability are validated. */}
@@ -1512,6 +1652,7 @@ function WorkshopPage({ isActive }) {
                   leading={
                     <>
                       {viewTabs}
+                      <NewProgramDialog onCreate={handleNewProgram} disabled={runState === 'running'} />
                       <OpenWorkflowPopover onPicked={handlePickWorkflow} />
                     </>
                   }
@@ -1533,7 +1674,17 @@ function WorkshopPage({ isActive }) {
                       <VersionHistoryDropdown
                         workflowId={selectedWorkflowId}
                         onRestore={(updated) => {
-                          if (updated && updated.blockly_json) {
+                          if (!updated) return;
+                          // A code version carries its files (migration 040);
+                          // a legacy version restores blocks only.
+                          if (isCodeLanguage(updated.code_language) && updated.code_files
+                              && typeof updated.code_files === 'object') {
+                            setCodeLanguage(updated.code_language);
+                            setCodeFiles(updated.code_files);
+                            setEditorKey((k) => k + 1);
+                            return;
+                          }
+                          if (updated.blockly_json) {
                             setInitialJsonForEditor(updated.blockly_json);
                             setEditorKey((k) => k + 1);
                             dispatch(setUnsavedBlocklyJson(updated.blockly_json));
@@ -1561,15 +1712,33 @@ function WorkshopPage({ isActive }) {
                     {/* `relative`: the Sammlung drawer is positioned inside this
                         box beside the toolbox and never changes its size. */}
                     <div className="relative h-full bg-white rounded-lg border border-[var(--line)] overflow-hidden">
-                      <BlocklyWorkspace
-                        key={editorKey}
-                        initialJson={initialJsonForEditor}
-                        onChange={handleEditorChange}
-                        onWorkspaceReady={handleWorkspaceReady}
-                        restrictedBlocks={restrictedBlocks}
-                        sammlungProvider={sammlungProvider}
-                      />
-                      {drawer && drawer.open && (
+                      {/* One workflow is one language: a code document mounts the
+                          file tree + CodeMirror host and NEVER the Blockly canvas
+                          (the Sammlung drawer belongs to that canvas). While the
+                          row is being fetched, neither — the language is not
+                          known yet. */}
+                      {hydrating ? (
+                        <p className="px-3 py-4 text-xs text-[var(--ink-3)]">
+                          {CODE_DE.WORKFLOW_LOADING}
+                        </p>
+                      ) : isCodeWorkflow ? (
+                        <CodeWorkspace
+                          key={editorKey}
+                          language={codeLanguage}
+                          files={codeFiles}
+                          onFilesChange={setCodeFiles}
+                        />
+                      ) : (
+                        <BlocklyWorkspace
+                          key={editorKey}
+                          initialJson={initialJsonForEditor}
+                          onChange={handleEditorChange}
+                          onWorkspaceReady={handleWorkspaceReady}
+                          restrictedBlocks={restrictedBlocks}
+                          sammlungProvider={sammlungProvider}
+                        />
+                      )}
+                      {!isCodeWorkflow && drawer && drawer.open && (
                         <SammlungDrawer
                           workspace={workspace}
                           provider={sammlungProvider}
@@ -1636,7 +1805,9 @@ function WorkshopPage({ isActive }) {
                   )}
                 </div>
                 {/* Read-only Python „Code"-Vorschau — compact, collapsible,
-                    full-width strip between the editor row and the run controls. */}
+                    full-width strip between the editor row and the run controls.
+                    A Blockly affordance: a code program IS its code. */}
+                {!isCodeWorkflow && (
                 <div className="px-2 sm:px-3 pb-1 shrink-0">
                   <div className="rounded-lg border border-[var(--line)] bg-white overflow-hidden">
                     <div className="flex items-center gap-2 px-3 py-1 border-b border-[var(--line)]">
@@ -1674,12 +1845,15 @@ function WorkshopPage({ isActive }) {
                     )}
                   </div>
                 </div>
+                )}
                 <RunControls
                   workflowId={selectedWorkflowId}
                   blocklyJson={editorJson || unsavedBlocklyJson}
                   workspace={workspace}
                   simMode={simMode}
                   simScene={simScene}
+                  codeLanguage={codeLanguage}
+                  codeFiles={codeFiles}
                   debugOpen={simMode ? simDebugOpen : dockOpen.includes('debug')}
                   onToggleDebug={() => {
                     if (simMode) setSimDebugOpen((v) => !v);

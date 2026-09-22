@@ -40,6 +40,16 @@ import {
   readDestinationEntries,
   entriesForRunPayload,
 } from './sammlung/destinationStore';
+import {
+  CODE_RUN_BLOCK_TITLES_DE,
+  codeRunBlockReason,
+  codeRunPayloadBase,
+  collectCodeReplayNames,
+  isCodeLanguage,
+  validateProject,
+} from './code/codeProject';
+import { CODE_DE } from './code/codeMessagesDe';
+import { isCodeBreakpointId } from './code/codeBreakpoints';
 
 const BUTTON_BASE =
   'inline-flex items-center justify-center min-h-[36px] '
@@ -70,6 +80,16 @@ const TEMPO_PRESETS = [
 function clampTempo(value) {
   return Math.min(TEMPO_MAX, Math.max(TEMPO_MIN, value));
 }
+
+// The sentinel `workflow/code_program.py::_raise_error` prefixes the runner's
+// own last output line with (decision A14). Spelled once, here and there.
+const TECHNIK_PREFIX = '[TECHNIK] ';
+
+// A code run's replay names come from a TEXT scan, so one may be a comment or
+// an unrelated string. This marks the one answer that proves such a name is a
+// phantom — the cloud's 404 „Bewegung nicht gefunden" — so the loop can drop it
+// without confusing it with a row that arrived and would not parse.
+const NO_SUCH_RECORDING = Symbol('no such recording');
 
 // ── Run-payload slimming ─────────────────────────────────────────────────────
 // The allowlist and the reasoning live in `utils/blocklyPayload.js`, shared with
@@ -113,6 +133,11 @@ function RunControls({
   // absent so the component still works standalone (and existing tests pass).
   debugOpen = null,
   onToggleDebug = null,
+  // A CODE program (Roboter Studio Python/Java): the language and the
+  // `{ path: content }` project replace `blocklyJson` as the thing that runs.
+  // '' / null keep the Blockly path byte-for-byte.
+  codeLanguage = '',
+  codeFiles = null,
 }) {
   const dispatch = useDispatch();
   const {
@@ -130,6 +155,11 @@ function RunControls({
   // both 7-wide, so for that pair this tag is the ONLY separator there is.
   const robotType = useSelector((s) => (s.tasks && s.tasks.taskStatus
     ? s.tasks.taskStatus.robotType : ''));
+  // The rig's capability manifest (null until the server has said anything):
+  // a code run needs `code_languages` to name its language, and unknown is not
+  // permission (codeProject.codeRunBlockReason).
+  const caps = useSelector((s) => (s.tasks && s.tasks.taskStatus
+    ? s.tasks.taskStatus.capabilities : null) || null);
   const phase = useSelector((s) => s.workshop.phase);
   const currentBlockId = useSelector((s) => s.workshop.currentBlockId);
   const paused = useSelector((s) => s.workshop.paused);
@@ -138,6 +168,8 @@ function RunControls({
   const debuggerVisible = useSelector((s) => s.workshop.debuggerVisible);
   const debuggerWarnings = useSelector((s) => s.workshop.debuggerWarnings);
   const breakpoints = useSelector((s) => s.workshop.breakpoints);
+  // A boolean, so it is as stable a hook dependency as the string it comes from.
+  const isCodeProgram = isCodeLanguage(codeLanguage);
   // A simulator preview in flight (hooks/useSimPreview.js). Its program is
   // generated, so its block ids are `vorschau-*` and never the student's.
   const preview = useSelector(selectPreview);
@@ -234,10 +266,16 @@ function RunControls({
   // installed API is WorkspaceSvg.highlightBlock(id|null).
   // A preview's current_block_id names a generated `vorschau-*` block that is
   // not on the canvas, so the highlight is left alone while it plays.
+  // A code program's `current_block_id` is a `<file>:L<line>` id on the SAME
+  // field (codeBreakpoints.js). `highlightBlock` on an unknown id is a silent
+  // no-op, and today a code workflow mounts no canvas at all — which is
+  // precisely why the refusal is explicit rather than left to those two
+  // accidents: the editor owns the code line highlight (CodeWorkspace), the
+  // canvas owns the block one, and neither may be handed the other's id.
   useEffect(() => {
     if (!workspace || typeof workspace.highlightBlock !== 'function') return;
     if (preview) return;
-    if (runState === 'running' && currentBlockId) {
+    if (runState === 'running' && currentBlockId && !isCodeBreakpointId(currentBlockId)) {
       workspace.highlightBlock(currentBlockId);
     } else {
       workspace.highlightBlock(null);
@@ -258,7 +296,25 @@ function RunControls({
   }, [error]);
 
   const handleStart = useCallback(async () => {
-    if (!blocklyJson) {
+    const isCode = isCodeProgram;
+    if (isCode) {
+      // Fail CLOSED (§3.9): the robot must have SAID it runs this language.
+      // An old image would otherwise receive a program it cannot run and the
+      // only thing standing between that and a silent green run is the poison
+      // block below. Nothing is sent.
+      const blocked = codeRunBlockReason(caps, codeLanguage);
+      if (blocked) {
+        toast.error(CODE_RUN_BLOCK_TITLES_DE[blocked]);
+        return;
+      }
+      // The §3.7 caps, judged here with the same German sentences the server
+      // and the cloud refuse on — before anything is sent.
+      const projectError = validateProject(codeFiles, codeLanguage);
+      if (projectError) {
+        toast.error(projectError);
+        return;
+      }
+    } else if (!blocklyJson) {
       toast.error('Workflow ist leer.');
       return;
     }
@@ -319,28 +375,59 @@ function RunControls({
       // it to resolve each replay block. Fail LOUD (abort the start) if a
       // referenced trajectory can't be fetched — running a replay program
       // without its data would silently no-op the motion.
-      const replayNames = collectReplayNames(blocklyJson);
+      // A code program names its recordings in TEXT (`robot.replay("…")`), so
+      // they are scanned out of the project instead of walked out of a block
+      // tree. `trajectories` used to stay `{}` for a code run, which made
+      // `robot.replay` — a full ROBOT_API row, in both stubs and in the
+      // editor's autocomplete — reach nothing but the server's „Unbekannte
+      // Aufnahme: …" and abort the run.
+      const replayNames = isCode
+        ? collectCodeReplayNames(codeFiles)
+        : collectReplayNames(blocklyJson);
       const trajectories = {};
-      if (replayNames.length > 0) {
-        if (!workflowId) {
-          toast.error(
-            'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
+      // A scan hit may be a comment or an unrelated string, so for a code
+      // program a name the CLOUD SAYS IT DOES NOT HAVE (404) is SKIPPED and the
+      // run reports the server's own sentence IF the call is really made. A
+      // block tree's names are exact, so that path still fails LOUD. Every
+      // OTHER failure is loud on both paths — see the catch below.
+      const skipUnknownNames = isCode;
+      const canFetchTrajectories = !!workflowId
+        && typeof workflowApi.getTrajectoryByName === 'function';
+      if (replayNames.length > 0 && !canFetchTrajectories && !skipUnknownNames) {
+        toast.error(workflowId
+          ? 'Aufgenommene Bewegungen können zurzeit nicht geladen werden.'
+          : 'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
             + 'gehören zu einem gespeicherten Workflow.');
-          return;
-        }
-        if (typeof workflowApi.getTrajectoryByName !== 'function') {
-          toast.error('Aufgenommene Bewegungen können zurzeit nicht geladen werden.');
-          return;
-        }
+        return;
+      }
+      if (replayNames.length > 0 && canFetchTrajectories) {
         try {
           const fetched = await Promise.all(
             replayNames.map((name) =>
               workflowApi.getTrajectoryByName(accessToken, workflowId, name)
-                .then((t) => [name, t])),
+                .then((t) => [name, t])
+                .catch((e) => {
+                  // A 404 is the cloud judging THIS name: there is no such
+                  // recording, so a text scan's hit was a comment or an
+                  // unrelated string and a code run drops it. Everything else
+                  // means „we could not ask" — `WorkflowApiError` carries
+                  // status 0 for a timeout or a dead connection and the HTTP
+                  // code otherwise, the same split `isCloudUnreachableAuthError`
+                  // makes — and dropping the name THERE would start a run that
+                  // aborts on the server's „Unbekannte Aufnahme: …", blaming a
+                  // Bewegung the student has and which is perfectly fine.
+                  if (skipUnknownNames && e && e.status === 404) {
+                    return [name, NO_SUCH_RECORDING];
+                  }
+                  throw e;
+                })),
           );
           for (const [name, t] of fetched) {
+            if (t === NO_SUCH_RECORDING) continue;
             const norm = normalizeTrajectory(t);
             if (!norm) {
+              // A row that ARRIVED and will not parse is corrupt data, not a
+              // phantom name — the student has this Bewegung. Loud on both.
               throw new Error(`Bewegung „${name}" wurde nicht gefunden.`);
             }
             // Cross-profile replay refusal: a recording's arm family must match
@@ -399,16 +486,25 @@ function RunControls({
       // The `sim` / `zones` / `tempo` / `trajectories` / `destinations` siblings
       // below are NOT serializer keys; they are added by this payload and the
       // server parses each of them, so they ride on top of the slimmed base.
-      const programJson = slimRunPayload(blocklyJson);
+      // A code program's base is the poison block + `language` + `files`
+      // (codeProject.codeRunPayloadBase, §3.9); the siblings below ride on
+      // both bases unchanged.
+      const programJson = isCode
+        ? codeRunPayloadBase(codeLanguage, codeFiles)
+        : slimRunPayload(blocklyJson);
       // S1: the student's Ziele/Positionen (the `edubotics-destinations`
       // document serializer) as an explicit sibling — ALWAYS present, possibly
       // [], because its presence is what tells the server the document is
       // authoritative (a deleted Ziel must not resolve to another student's
       // robot-local point). The live store is the freshest truth; the
-      // serializer output is the fallback when no workspace is mounted.
-      const destinationEntries = workspace
-        ? getDestinationStore(workspace).getEntries()
-        : readDestinationEntries(blocklyJson);
+      // serializer output is the fallback when no workspace is mounted. A code
+      // program has no Blockly document: it pins its own points in code.
+      let destinationEntries = [];
+      if (!isCode) {
+        destinationEntries = workspace
+          ? getDestinationStore(workspace).getEntries()
+          : readDestinationEntries(blocklyJson);
+      }
       const destinations = entriesForRunPayload(destinationEntries);
       const workflowJsonStr = simMode
         ? JSON.stringify({
@@ -423,7 +519,12 @@ function RunControls({
       // The server refuses a payload over MAX_WORKFLOW_JSON_BYTES (256 KiB) with
       // „Workflow-JSON ist zu groß", which names no cause and no remedy. When
       // recordings ride along they are almost always the reason — say so, in
-      // German, before anything is sent.
+      // German, before anything is sent. A code project is capped at 128 KiB
+      // above, so only its siblings could push it over; still judged.
+      if (isCode && exceedsRunPayloadCap(workflowJsonStr)) {
+        toast.error(CODE_DE.RUN_TOO_BIG);
+        return;
+      }
       if (Object.keys(trajectories).length > 0 && exceedsRunPayloadCap(workflowJsonStr)) {
         toast.error(RUN_PAYLOAD_TOO_BIG_RECORDINGS_DE);
         return;
@@ -481,6 +582,10 @@ function RunControls({
     breakpoints,
     setWorkflowBreakpoints,
     preview,
+    codeLanguage,
+    isCodeProgram,
+    codeFiles,
+    caps,
   ]);
 
   const handleStop = useCallback(async () => {
@@ -552,6 +657,25 @@ function RunControls({
       setBusy(false);
     }
   }, [continueWorkflow, dispatch]);
+
+  // Decision A14, the disclosed Rule §1 exception: the runner's own last line
+  // (a CPython traceback line, a `javac` message) rides the Protokoll as ONE
+  // `[TECHNIK] ` entry beside the German sentence (code_program.py::_raise_error).
+  // The Protokoll is collapsed by default, so the line is repeated under the
+  // banner, where the student is already looking — as a SEPARATE element, never
+  // spliced into the sentence. The newest one wins: the log is append-only and
+  // an earlier run's line would name a defect that is no longer there.
+  const technikLine = isCodeProgram && error
+    ? (() => {
+      for (let i = log.length - 1; i >= 0; i -= 1) {
+        const text = log[i] && log[i].text;
+        if (typeof text === 'string' && text.startsWith(TECHNIK_PREFIX)) {
+          return text.slice(TECHNIK_PREFIX.length);
+        }
+      }
+      return '';
+    })()
+    : '';
 
   // State-driven German label (#L2): the raw server `phase` is English
   // ('running'/'done') and now lingers between blocks (truthy-guarded), so map
@@ -756,12 +880,32 @@ function RunControls({
         </div>
       )}
 
+      {paused && isCodeProgram && (
+        <div
+          role="status"
+          className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-md p-2 mb-2"
+        >
+          {CODE_DE.RUN_PAUSE_CODE_HINT}
+        </div>
+      )}
+
       {error && (
         <div
           role="alert"
           className="bg-red-50 border border-red-200 text-red-800 text-sm rounded-md p-2 mb-2"
         >
           {error}
+          {technikLine && (
+            <>
+              <div className="mt-1.5 text-xs text-red-700">{CODE_DE.ERROR_TECHNIK_LABEL}</div>
+              <div
+                data-testid="technik-line"
+                className="mt-0.5 font-mono text-xs text-red-900 bg-red-100 rounded px-1.5 py-1 overflow-x-auto whitespace-pre-wrap break-words"
+              >
+                {technikLine}
+              </div>
+            </>
+          )}
         </div>
       )}
 

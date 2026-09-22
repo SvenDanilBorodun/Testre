@@ -12,7 +12,7 @@ name: release
 #   W3 railway-deploy-teacher-web
 #       │
 #       ▼
-#   W4 docker-publish        (builds + pushes 3 amd64 + 2 jetson + 3 -opi images)
+#   W4 docker-publish        (builds + pushes 4 amd64 + 2 jetson + 4 -opi images)
 #       │
 #       ▼
 #   W5 release-installer
@@ -683,7 +683,7 @@ jobs:
           # release can attach the pi-agent tarball (which pins IMAGE_TAG=X.Y.Z)
           # while the -opi images never published. A Pi that self-updates then
           # pins X.Y.Z and 404s on the next "Umgebung starten" → robot tier dead
-          # fleet-wide. So if ANY of the three -opi:${VERSION} images is not
+          # fleet-wide. So if ANY of the four -opi:${VERSION} images is not
           # anonymously pullable (missing OR private — a Pi pulls anonymously)
           # on GHCR *or, failing that, on its Docker Hub twin* — mirroring the
           # Pi's own GHCR→Hub acquisition order — advertise NO Pi update
@@ -761,7 +761,11 @@ jobs:
           if [ -n "$PI_SHA" ]; then
             _GATE_START=$SECONDS
             _over_budget() { [ $((SECONDS - _GATE_START)) -gt 150 ]; }
-            for repo in physical-ai-server-opi physical-ai-manager-opi open-manipulator-opi; do
+            # Every -opi image the Pi compose references — held to
+            # pi_agent/constants.py::IMAGE_NAMES by tests/test_publish_lists_lockstep.py
+            # (a repo missing here advertises a self-update whose compose names
+            # an image this gate never proved pullable).
+            for repo in physical-ai-server-opi physical-ai-manager-opi open-manipulator-opi code-runner-opi; do
               if _over_budget; then
                 echo "::warning::opi image gate exceeded its 150 s budget — withholding the Pi self-update advertisement (empty pi_agent_sha256) rather than risking the W6 job timeout (which would also withhold the .exe)."
                 PI_SHA=""

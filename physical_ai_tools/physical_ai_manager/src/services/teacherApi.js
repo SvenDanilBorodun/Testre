@@ -47,6 +47,25 @@ export const listTrainingCheckpoints = (token, studentId, trainingId) =>
     token
   );
 
+// ---------- Roboter Studio: a student's programs + „Abgaben" (migration 040) ----------
+//
+// Decision A3: a teacher sees (a) the programs as they stand and (b) the
+// snapshots the student handed in. Read-only, and per STUDENT — every one of
+// the four routes sits behind `_assert_student_owned` and is scoped on the
+// row's own student column, never on `workflows.classroom_id` (routes/teacher.py).
+
+export const listStudentWorkflows = (token, studentId) =>
+  apiRequest(`/teacher/students/${studentId}/workflows`, 'GET', token);
+
+export const getStudentWorkflow = (token, studentId, workflowId) =>
+  apiRequest(`/teacher/students/${studentId}/workflows/${workflowId}`, 'GET', token);
+
+export const listStudentSubmissions = (token, studentId) =>
+  apiRequest(`/teacher/students/${studentId}/submissions`, 'GET', token);
+
+export const getStudentSubmission = (token, studentId, submissionId) =>
+  apiRequest(`/teacher/students/${studentId}/submissions/${submissionId}`, 'GET', token);
+
 // ---------- Daily progress entries ----------
 
 export const listProgressEntries = (

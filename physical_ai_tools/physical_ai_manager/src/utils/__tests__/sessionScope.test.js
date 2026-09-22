@@ -142,7 +142,19 @@ function scanStorageKeys() {
     if (SCAN_EXCLUDE.has(rel)) continue;
     const text = stripComments(raw);
     const consts = new Map();
-    for (const m of text.matchAll(CONST_LITERAL_RE)) consts.set(m[1], m[3]);
+    for (const m of text.matchAll(CONST_LITERAL_RE)) {
+      // A TEMPLATE with a substitution is not a literal, and treating it as one
+      // was a silent hole: `const storageKey = `${BASE}:${scope}`` matched here
+      // (it contains no quote and no newline), so `storageKey` resolved to the
+      // TEXT `${BASE}:${scope}` — which fails isEdubotics and is dropped — and
+      // the CONST_EXPR_RE path that would have resolved it to BASE never ran.
+      // useAutosave's base key was discovered anyway, but only because it also
+      // passes STORAGE_KEY to idbDel directly; a namespaced key with no such
+      // call (code/useCodeAutosave) was invisible while this module claimed to
+      // refuse what it cannot resolve.
+      if (m[2] === '`' && m[3].includes('${')) continue;
+      consts.set(m[1], m[3]);
+    }
     const exprs = new Map();
     for (const m of text.matchAll(CONST_EXPR_RE)) {
       if (!consts.has(m[1])) exprs.set(m[1], m[2]);
@@ -215,6 +227,9 @@ describe('clearStudentScopedStorage', () => {
       'blocklyStashMulti',
       'blocklyStashTime',
       'edubotics:workshop:theme',
+      // The file last open in the Roboter-Studio code editor: a view of the
+      // student's OWN program, the same class as edubotics_workshop_code_open.
+      'edubotics_code_last_file',
       // Startseite hero view („3D-Modell" / „Kamera"). Student-scoped by the
       // WHO-sets-it tie-break: a student picks it for themselves, the way they
       // pick an editor theme. It also has a cost the other view toggles do not
@@ -435,6 +450,18 @@ describe('every edubotics persistence key in src/ is classified', () => {
     // and it is not in localStorage at all. Before the scan understood
     // idb-keyval, this assertion was the thing that could not be written.
     expect([...scanStorageKeys().keys]).toContain('edubotics:workshop:autosave');
+  });
+
+  it('sees a key that exists only inside a namespaced template', () => {
+    // `components/Workshop/code/useCodeAutosave` never hands its BASE key to
+    // idb-keyval: every call site passes the composed `${BASE}:${scope}`. So
+    // this key is reachable only through the CONST_EXPR_RE path — and while
+    // CONST_LITERAL_RE still swallowed the template, that path never ran for
+    // it and the scan reported full coverage having missed the whole bucket.
+    // `edubotics:workshop:autosave` could not catch that: it is ALSO passed to
+    // idbDel directly (the pre-namespacing cleanup), so it was discovered by
+    // the literal route whatever the template route did.
+    expect([...scanStorageKeys().keys]).toContain('edubotics:workshop:code-autosave');
   });
 
   it('only recognises idb-keyval under the aliases it scans for', () => {

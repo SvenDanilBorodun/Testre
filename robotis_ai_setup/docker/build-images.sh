@@ -75,6 +75,9 @@ case "$PLATFORM" in
         # Manager (React+nginx) output repo — built on amd64 + opi, skipped on
         # arm64/Jetson (empty). See the manager build block below.
         MANAGER_OUT_REPO="${REGISTRY}/physical-ai-manager"
+        # Roboter Studio code sandbox (docker/code_runner) — amd64 + opi only,
+        # empty on arm64/Jetson (the Roboter-Studio tab is jetsonIncompatible).
+        RUNNER_OUT_REPO="${REGISTRY}/code-runner"
         DOCKER_BUILDX_ARGS=""
         ;;
     arm64)
@@ -95,6 +98,10 @@ case "$PLATFORM" in
         # No manager on the Jetson — the React SPA stays on student PCs and
         # connects to the Jetson rosbridge via the proxy.
         MANAGER_OUT_REPO=""
+        # No code runner on the Jetson either: the Roboter-Studio tab is
+        # jetsonIncompatible, so a Jetson runner would ship something no
+        # student can reach. Empty == the runner build block is skipped.
+        RUNNER_OUT_REPO=""
         # buildx with --push bypasses Docker Desktop's dual-image-store gotcha
         # (CLAUDE.md §13.4.bis). On a Linux maintainer host with native arm64
         # this is also the only sane way to push the right manifest digests.
@@ -124,6 +131,7 @@ case "$PLATFORM" in
         OMX_OUT_REPO="${REGISTRY}/open-manipulator-opi"
         PAS_OUT_REPO="${REGISTRY}/physical-ai-server-opi"
         MANAGER_OUT_REPO="${REGISTRY}/physical-ai-manager-opi"
+        RUNNER_OUT_REPO="${REGISTRY}/code-runner-opi"
         # opi's thin server image builds --load then FLATTENs (on arm64), so it
         # does NOT ride the arm64 --push path; DOCKER_BUILDX_ARGS is unused for
         # opi. The per-image opi buildx calls below name their flags explicitly
@@ -708,6 +716,32 @@ else
 fi
 echo "   OK: open-manipulator built"
 
+# ── Image 5: code_runner (Roboter Studio Python/Java sandbox) ──
+# A PUBLIC base (eclipse-temurin:21-jdk-noble), so there is no self-built base
+# to resolve and nothing here joins Rule §6's manual base-rebuild set. Built
+# --load and pushed in the loop below on amd64 + opi; NEVER on arm64/Jetson
+# (RUNNER_OUT_REPO is empty there — the Roboter-Studio tab is
+# jetsonIncompatible). Not flattened: it has no whiteouts worth reclaiming
+# (~0.5 GB, one apt layer over the base). The Dockerfile's own build gates
+# (python >= 3.12 + sys.monitoring, javac -Werror + SmokeMain, the self-test's
+# build rungs) are what prove the image; docker-publish's smoke-test adds the
+# size ceiling and image_source_parity's code-runner kind.
+if [ -n "$RUNNER_OUT_REPO" ]; then
+    echo ""
+    echo ">> Building code_runner (Roboter Studio sandbox)..."
+    if [ "$PLATFORM" = "opi" ]; then
+        RUNNER_PLATFORM="linux/arm64"
+    else
+        RUNNER_PLATFORM="linux/amd64"
+    fi
+    docker buildx build --platform "$RUNNER_PLATFORM" --load --no-cache --pull \
+        "${OCI_LABELS[@]}" \
+        -t "${RUNNER_OUT_REPO}:${IMAGE_TAG_SUFFIX}" \
+        -f "${SCRIPT_DIR}/code_runner/Dockerfile" \
+        "${SCRIPT_DIR}/code_runner/"
+    echo "   OK: code-runner built"
+fi
+
 # Cloud training image (formerly robotis-ai-training on Docker Hub) is now
 # owned by Modal — see robotis_ai_setup/modal_training/. Deploy with:
 #     modal deploy robotis_ai_setup/modal_training/modal_app.py
@@ -728,7 +762,7 @@ if [ "$PLATFORM" = "amd64" ]; then
     # set in the platform case at the top) instead of re-hardcoding literals —
     # a renamed output repo can no longer desync the build refs from the push
     # refs. ${VAR##*/} strips the registry prefix, leaving the bare repo name.
-    for img in "${MANAGER_OUT_REPO##*/}" "${PAS_OUT_REPO##*/}" "${OMX_OUT_REPO##*/}"; do
+    for img in "${MANAGER_OUT_REPO##*/}" "${PAS_OUT_REPO##*/}" "${OMX_OUT_REPO##*/}" "${RUNNER_OUT_REPO##*/}"; do
         if docker push "${REGISTRY}/${img}:${IMAGE_TAG_SUFFIX}"; then
             pushed+=("$img")
             echo "   Pushed: $img"
@@ -745,12 +779,12 @@ elif [ "$PLATFORM" = "opi" ]; then
     echo ""
     echo ">> Pushing opi images to ${REGISTRY}..."
     pushed=()
-    # opi built all three thin images with --load (server was flattened), so
+    # opi built all four thin images with --load (server was flattened), so
     # they live in the local daemon and must be pushed here (the arm64/Jetson
     # path pushes via buildx --push during the build and skips this loop).
     # Repo names derive from the *_OUT_REPO vars (same single-source rule as
     # the amd64 loop above) — no more hardcoded image-name literals.
-    for img in "${MANAGER_OUT_REPO##*/}" "${PAS_OUT_REPO##*/}" "${OMX_OUT_REPO##*/}"; do
+    for img in "${MANAGER_OUT_REPO##*/}" "${PAS_OUT_REPO##*/}" "${OMX_OUT_REPO##*/}" "${RUNNER_OUT_REPO##*/}"; do
         if docker push "${REGISTRY}/${img}:${IMAGE_TAG_SUFFIX}"; then
             pushed+=("$img")
             echo "   Pushed: $img"
@@ -775,9 +809,13 @@ echo ""
 echo "Images:"
 echo "  ${OMX_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
 echo "  ${PAS_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
-# MANAGER_OUT_REPO is set for amd64 + opi, empty on arm64/Jetson (no manager).
+# MANAGER_OUT_REPO and RUNNER_OUT_REPO are set for amd64 + opi, empty on
+# arm64/Jetson (no manager, no code runner).
 if [ -n "$MANAGER_OUT_REPO" ]; then
     echo "  ${MANAGER_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
+fi
+if [ -n "$RUNNER_OUT_REPO" ]; then
+    echo "  ${RUNNER_OUT_REPO}:${IMAGE_TAG_SUFFIX}"
 fi
 echo ""
 echo "Platform: ${PLATFORM}"

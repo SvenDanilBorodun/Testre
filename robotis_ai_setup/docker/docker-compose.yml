@@ -193,7 +193,7 @@ services:
     # deeper rework than fits here — tracked in context/21-known-issues.md §3.3.
     privileged: true
     # Resource cap: one runaway ROS node should not OOM the distro and
-    # take down all three containers + corrupt ai_workspace.
+    # take down the other containers + corrupt ai_workspace.
     mem_limit: 2g
     pids_limit: 512
     healthcheck:
@@ -501,6 +501,12 @@ services:
       - edubotics_calib:/root/.cache/edubotics
       - /var/run/robotis/agent_sockets/physical_ai_server:/var/run/agent
       - ./physical_ai_server/.s6-keep:/etc/s6-overlay/s6-rc.d/user/contents.d/physical_ai_server:ro
+      # Roboter Studio text programs: the two unix sockets shared with the
+      # code_runner service below. The server CREATES rpc.sock here (0666,
+      # the student uid connects to it) and CONNECTS to the supervisor's
+      # runner.sock (0600). No depends_on on the runner: without it every
+      # code run is refused in German and Blockly is untouched.
+      - code_runner_ipc:/run/edubotics/code
     mem_limit: 6g
     pids_limit: 1024
     healthcheck:
@@ -540,6 +546,62 @@ services:
       retries: 3
       start_period: 20s
 
+  code_runner:
+    container_name: code_runner
+    # The sandbox that runs a student's Python or Java program (Roboter
+    # Studio text programs) beside physical_ai_server. It reaches the server
+    # over TWO unix sockets in the code_runner_ipc volume and over nothing
+    # else: no network, no port, no device, no dataset or HF-cache volume,
+    # and NO environment block (compose-env-parity then sees {} on both
+    # sides, and nothing in the runner tree reads one). The sandbox keys
+    # below are a sandbox only TOGETHER — tests/test_code_runner_sandbox.py
+    # asserts every one of them on this file, the opi compose and the
+    # pi_agent twin.
+    image: ${REGISTRY:-ghcr.io/svendanilborodun}/code-runner:${IMAGE_TAG:-latest}
+    # Decision A15: restart: "no" like every other student-stack service — a
+    # Java program that OOM-kills the runner stays dead until „Umgebung
+    # starten". No depends_on in either direction: the server runs without
+    # the runner (code runs are refused in German) and the runner has
+    # nothing to wait for.
+    restart: "no"
+    # tini is PID 1, so the supervisor is PID >= 2 (A7.4) and a student's
+    # orphans are reaped.
+    init: true
+    # The supervisor is uid 0 with EXACTLY the three capabilities below. A
+    # non-root user gets no effective capabilities at all and could neither
+    # spawn the student as another uid nor signal it (measured, P23); every
+    # student process runs as uid 10001 in its own session.
+    user: "0:0"
+    read_only: true
+    # The RPC rides the ipc volume, never a port.
+    network_mode: "none"
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID   # Popen(user=10001)
+      - SETGID
+      - KILL     # killpg + the /proc uid sweep
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      # Per-run project dirs, created by helpers running as uid 10001. The
+      # explicit size is what stops a student program filling the host's RAM.
+      - /work:size=64m,mode=1777
+      - /tmp:size=16m,mode=1777
+    volumes:
+      # rpc.sock (the server's, 0666) + runner.sock (the supervisor's, 0600):
+      # the runner's ONLY mount.
+      - code_runner_ipc:/run/edubotics/code
+    mem_limit: 768m
+    pids_limit: 128
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/edubotics/code/runner.sock"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
 volumes:
   ai_workspace:
   # HuggingFace cache can grow to tens of GB per student (each LeRobot
@@ -557,3 +619,8 @@ volumes:
   # — desired, since re-calibration is a 15-minute teacher activity.
   edubotics_calib:
     driver: local
+  # The two unix sockets between physical_ai_server and code_runner. NOT a
+  # data volume: it holds only rpc.sock + runner.sock, both unlinked before
+  # bind by their owners, so it is deliberately outside the GUI's factory
+  # reset set (docker_manager.EDUBOTICS_DATA_VOLUME_SUFFIXES).
+  code_runner_ipc:

@@ -196,6 +196,17 @@ export async function deleteTrajectory(accessToken, workflowId, trajectoryId) {
   );
 }
 
+// ---------- Roboter Studio code programs: „Abgeben" ----------
+//
+// A submission is a server-side SNAPSHOT of the workflow row (name, language,
+// code_files, blockly_json, sim_scene) the teacher can read; the student only
+// adds an optional note. Owner-only, under the POST /workflows 10/min rule.
+
+export async function submitWorkflow(accessToken, workflowId, payload = { note: '' }) {
+  // → { id, workflow_id, student_user_id, name, code_language, note, submitted_at, … }
+  return apiRequest(`/workflows/${workflowId}/submit`, 'POST', accessToken, payload);
+}
+
 export async function listClassroomTemplates(accessToken, classroomId) {
   return apiRequest(`/teacher/classrooms/${classroomId}/workflow-templates`, 'GET', accessToken);
 }

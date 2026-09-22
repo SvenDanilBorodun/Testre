@@ -1167,6 +1167,143 @@ async def list_student_inference_runs(
     return [InferenceRunSummary(**r) for r in (result.data or [])]
 
 
+# ---------- Roboter Studio: a student's programs + „Abgeben" (migration 040) ----------
+#
+# What a teacher sees (decision A3): (a) any of their students' CURRENT
+# programs and (b) the snapshots the student deliberately submitted. Four
+# reads, all German 404 (never 403 — no existence leakage), all behind
+# _assert_student_owned FIRST and scoped on the row's own student column
+# (workflows.owner_user_id / workflow_submissions.student_user_id).
+# workflows.classroom_id is NEVER a filter here: a client sets it at create
+# with no membership check, so keying on it would let one student's row show
+# up under another teacher's classroom (Rule §4). A source-level test asserts
+# these four bodies contain no "classroom_id" at all.
+
+
+class StudentWorkflowSummary(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    code_language: str = ""
+    created_at: str
+    updated_at: str
+
+
+class StudentWorkflowDocument(StudentWorkflowSummary):
+    blockly_json: dict = Field(default_factory=dict)
+    code_files: dict = Field(default_factory=dict)
+    sim_scene: dict | None = None
+
+
+class StudentSubmissionSummary(BaseModel):
+    id: str
+    workflow_id: str
+    name: str
+    code_language: str = ""
+    note: str = ""
+    submitted_at: str
+
+
+class StudentSubmissionDocument(StudentSubmissionSummary):
+    code_files: dict = Field(default_factory=dict)
+    blockly_json: dict = Field(default_factory=dict)
+    sim_scene: dict = Field(default_factory=dict)
+
+
+@router.get(
+    "/students/{student_id}/workflows",
+    response_model=list[StudentWorkflowSummary],
+)
+async def list_student_workflows(
+    student_id: str,
+    teacher=Depends(get_current_teacher),
+):
+    """The student's own non-template programs, newest first, summaries only."""
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("workflows")
+        .select("id, name, description, code_language, created_at, updated_at")
+        .eq("owner_user_id", student_id)
+        .eq("is_template", False)
+        .order("updated_at", desc=True)
+        .limit(DEFAULT_LIST_LIMIT)
+        .execute()
+    )
+    return [StudentWorkflowSummary(**r) for r in (result.data or [])]
+
+
+@router.get(
+    "/students/{student_id}/workflows/{workflow_id}",
+    response_model=StudentWorkflowDocument,
+)
+async def get_student_workflow(
+    student_id: str,
+    workflow_id: str,
+    teacher=Depends(get_current_teacher),
+):
+    """One of the student's programs, with its document."""
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("workflows")
+        .select("*")
+        .eq("id", workflow_id)
+        .eq("owner_user_id", student_id)
+        .eq("is_template", False)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Programm nicht gefunden")
+    return StudentWorkflowDocument(**result.data[0])
+
+
+@router.get(
+    "/students/{student_id}/submissions",
+    response_model=list[StudentSubmissionSummary],
+)
+async def list_student_submissions(
+    student_id: str,
+    teacher=Depends(get_current_teacher),
+):
+    """The student's „Abgaben", newest first, summaries only."""
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("workflow_submissions")
+        .select("id, workflow_id, name, code_language, note, submitted_at")
+        .eq("student_user_id", student_id)
+        .order("submitted_at", desc=True)
+        .limit(DEFAULT_LIST_LIMIT)
+        .execute()
+    )
+    return [StudentSubmissionSummary(**r) for r in (result.data or [])]
+
+
+@router.get(
+    "/students/{student_id}/submissions/{submission_id}",
+    response_model=StudentSubmissionDocument,
+)
+async def get_student_submission(
+    student_id: str,
+    submission_id: str,
+    teacher=Depends(get_current_teacher),
+):
+    """One „Abgabe" of the student, with its snapshot."""
+    _assert_student_owned(teacher["id"], student_id)
+    supabase = get_supabase()
+    result = (
+        supabase.table("workflow_submissions")
+        .select("*")
+        .eq("id", submission_id)
+        .eq("student_user_id", student_id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Abgabe nicht gefunden")
+    return StudentSubmissionDocument(**result.data[0])
+
+
 # ---------- Daily progress entries ----------
 #
 # Each entry is scoped to a single day (entry_date) under a classroom.

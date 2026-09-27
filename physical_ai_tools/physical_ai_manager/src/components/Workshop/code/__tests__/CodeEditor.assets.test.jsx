@@ -363,3 +363,22 @@ describe('a reveal belongs to its nonce, not to the file on screen (review m5)',
     expect(next.state.selection.main.head).toBe(0);
   });
 });
+
+describe('the knowledge is built inside the lazy editor from its inputs (review n10)', () => {
+  test('assetSources become the same completion options as ready-made assets', async () => {
+    const doc = 'import robot\nrobot.move_to("';
+    const { view } = mount({
+      value: doc,
+      assets: null,
+      assetSources: {
+        files: { 'main.py': doc }, language: 'python', entries: KNOWN.places, trajectories: null, objectTypes: [],
+      },
+    });
+    act(() => { view.dispatch({ selection: EditorSelection.cursor(doc.length) }); });
+    await act(async () => {
+      startCompletion(view);
+      await new Promise((r) => { setTimeout(r, 120); });
+    });
+    expect(currentCompletions(view.state).map((c) => c.label)).toEqual(['Ablage', 'Hoch']);
+  });
+});

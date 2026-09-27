@@ -41,7 +41,6 @@ import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import { DE } from '../blocks/messages_de';
 import { newActionsFor } from '../sammlung/newActions';
 import { breakpointLinesForFile, codeBreakpointId, parseCodeBreakpointId } from './codeBreakpoints';
-import { buildCodeAssetKnowledge } from './codeAssetCompletion';
 import { CODE_DE, formatCode } from './codeMessagesDe';
 import { CODE_LIMITS, ENTRY_FILE, validateProjectPath } from './codeProject';
 
@@ -408,17 +407,21 @@ function CodeWorkspace({
     // buildIndex reads through the document.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assetDoc, provider, sammlungTick, deferredFiles]);
-  const assets = useMemo(() => {
+  // What the editor's helpers know is BUILT inside the lazy editor chunk
+  // (CodeEditor → codeAssetCompletion.buildCodeAssetKnowledge), so those
+  // helpers stay out of the entry bundle (review n10); this hands over the
+  // inputs, a new object whenever one of them changed.
+  const assetSources = useMemo(() => {
     if (!assetDoc) return null;
     const store = assetDoc.getStore();
     const snapshot = snapshotOf(provider);
-    return buildCodeAssetKnowledge({
+    return {
       files: deferredFiles,
       language,
       entries: store && typeof store.getEntries === 'function' ? store.getEntries() : [],
       trajectories: snapshot ? snapshot.trajectories : null,
       objectTypes,
-    });
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assetDoc, provider, sammlungTick, deferredFiles, language, objectTypes]);
   const newActions = useMemo(
@@ -510,7 +513,7 @@ function CodeWorkspace({
               onToggleBreakpoint={debuggable ? handleToggleBreakpoint : null}
               highlightLine={highlight.line}
               highlightKind={highlight.kind}
-              assets={assets}
+              assetSources={assetSources}
               revealRequest={editorReveal}
               onCursorChange={handleEditorCursor}
             />

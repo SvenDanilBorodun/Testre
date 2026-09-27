@@ -24,6 +24,7 @@ import CodeWorkspace from '../CodeWorkspace';
 import { CODE_DE } from '../codeMessagesDe';
 import { DE } from '../../blocks/messages_de';
 import { createCodeAssetDocument } from '../codeAssetDocument';
+import { buildCodeAssetKnowledge } from '../codeAssetCompletion';
 import { createDetachedDestinationStore } from '../../sammlung/destinationStore';
 import { createSammlungProvider } from '../../sammlung/provider';
 import workshopReducer from '../../../../features/workshop/workshopSlice';
@@ -197,14 +198,16 @@ describe('the cursor for „Einfügen"', () => {
 
 describe('what the editor knows', () => {
   test('the Sammlung’s names, the program’s own, the catalog’s object types', async () => {
+    // The inputs travel; the lazy editor builds the knowledge (review n10).
     const { store } = await mount();
-    const { assets } = editor.props;
+    const assets = buildCodeAssetKnowledge(editor.props.assetSources);
     expect(assets.recordings.map((r) => r.name)).toEqual(['Winken']);
     expect(assets.recordingsStatus).toBe('ready');
     expect(assets.places.map((e) => e.name)).toEqual(['Ablage', 'Hoch']);
     expect(assets.objects).toEqual(['wuerfel']);
     act(() => { store.add({ name: 'Rand', kind: 'pin', source: 'sim', x: 0.15, y: 0.05, z: 0 }); });
-    expect(editor.props.assets.places.map((e) => e.name)).toEqual(['Ablage', 'Hoch', 'Rand']);
+    expect(buildCodeAssetKnowledge(editor.props.assetSources).places.map((e) => e.name))
+      .toEqual(['Ablage', 'Hoch', 'Rand']);
   });
 });
 

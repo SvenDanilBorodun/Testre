@@ -13,6 +13,8 @@
 // warning for a name the Sammlung does not have (the rules of
 // sammlung/referenceValidators.js), and the hover text.
 
+import fs from 'fs';
+import path from 'path';
 import { describe, it, expect } from 'vitest';
 import {
   ASSET_LINT_LANGUAGES,
@@ -200,5 +202,25 @@ describe('n2: a pin() in a comment does not satisfy a move_to', () => {
     expect(known.codePinnedNames).toEqual([]);
     const d = assetDiagnostics(files['main.py'], 'python', known, { cursorLine: 1 });
     expect(d.map((x) => x.message)).toEqual([formatCode(CODE_DE.ASSET_MISSING_PLACE, 'Ablage')]);
+  });
+});
+
+describe('the editor helpers ride the lazy editor chunk, not the entry bundle (review n10)', () => {
+  it('only CodeEditor.jsx (lazy-loaded) imports codeAssetCompletion.js', () => {
+    const srcRoot = path.resolve(__dirname, '../../../..');
+    const importers = [];
+    const walk = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (e.name !== '__tests__' && e.name !== 'node_modules') walk(full);
+        } else if (/\.(js|jsx)$/.test(e.name)
+                   && /from\s+['"][^'"]*codeAssetCompletion['"]/.test(fs.readFileSync(full, 'utf8'))) {
+          importers.push(path.relative(srcRoot, full));
+        }
+      }
+    };
+    walk(srcRoot);
+    expect(importers).toEqual([path.join('components', 'Workshop', 'code', 'CodeEditor.jsx')]);
   });
 });

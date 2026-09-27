@@ -28,7 +28,7 @@
 // line; `onCursorChange` tells the page where the student's cursor is, which
 // is where „Einfügen" writes.
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { Decoration, EditorView, GutterMarker, gutter, hoverTooltip, keymap, lineNumbers,
   highlightActiveLine, highlightActiveLineGutter,
   drawSelection, rectangularSelection } from '@codemirror/view';
@@ -52,6 +52,7 @@ import {
 import { robotApiCompletions, robotApiTriggerFrom } from './robotApiCompletion';
 import {
   ASSET_LINT_LANGUAGES,
+  buildCodeAssetKnowledge,
   assetArgContext,
   assetAtOffset,
   assetDiagnostics,
@@ -458,7 +459,10 @@ function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef,
  * change re-creates the view.
  *
  * The code Sammlung's four: `assets` (what codeAssetCompletion.js knows —
- * recordings, places, the program's pins, counters, objects), `revealRequest`
+ * recordings, places, the program's pins, counters, objects) or
+ * `assetSources` (its inputs — files, language, Ziele entries, the recording
+ * list, object types — built into `assets` HERE, inside the lazy chunk, so
+ * the helpers never reach the entry bundle), `revealRequest`
  * (`{line, nonce}`: put the caret at the end of that line, once per nonce,
  * clamped to the document), `onCursorChange(line)` (the student's own cursor
  * moves and edits only — never a programmatic selection or an external value).
@@ -474,14 +478,18 @@ function CodeEditor({
   language, path, value, onChange, readOnly = false,
   breakpointLines = null, onToggleBreakpoint = null,
   highlightLine = null, highlightKind = null,
-  assets = null, revealRequest = null, onCursorChange = null,
+  assets = null, assetSources = null, revealRequest = null, onCursorChange = null,
 }) {
+  const knowledge = useMemo(
+    () => assets ?? (assetSources ? buildCodeAssetKnowledge(assetSources) : null),
+    [assets, assetSources],
+  );
   const hostRef = useRef(null);
   const viewRef = useRef(null);
   const onChangeRef = useRef(onChange);
   const onToggleRef = useRef(onToggleBreakpoint);
   const onCursorRef = useRef(onCursorChange);
-  const assetsRef = useRef(assets);
+  const assetsRef = useRef(knowledge);
   const readOnlyRef = useRef(new Compartment());
   useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
   useEffect(() => { onToggleRef.current = onToggleBreakpoint; }, [onToggleBreakpoint]);
@@ -549,13 +557,13 @@ function CodeEditor({
   // New Sammlung names: the warnings are re-judged at once (completion and
   // hover read the ref on their own next query).
   useEffect(() => {
-    assetsRef.current = assets;
+    assetsRef.current = knowledge;
     const view = viewRef.current;
     if (view && ASSET_LINT_LANGUAGES.includes(language)) {
       view.dispatch({ effects: assetsChanged.of(null) });
       forceLinting(view);
     }
-  }, [assets, language]);
+  }, [knowledge, language]);
 
   // A „Benutzt in" jump or an insertion: the caret at the end of the line.
   const revealNonce = revealRequest ? revealRequest.nonce : null;

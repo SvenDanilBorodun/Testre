@@ -120,6 +120,13 @@ export const CODE_DE = Object.freeze({
   // No cursor and no `main` in the Java program: nothing is written (never
   // outside the class, review R-O2).
   NO_MAIN_HINT: 'Keine main-Methode gefunden – klicke in deinen Code, wo es eingefügt werden soll.',
+  // A Java cursor on an import, class or field line: statements only go
+  // inside a method (review round 2, mi3).
+  NOT_IN_METHOD_HINT: 'Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, '
+    + 'wo es eingefügt werden soll.',
+  // The file ends inside brackets or an unfinished text: no place is safe.
+  NO_SAFE_PLACE_HINT: 'Im Programm ist keine sichere Stelle zu finden – ist eine Klammer oder ein Text '
+    + 'nicht geschlossen? Klicke in deinen Code, wo es eingefügt werden soll.',
   VARIABLES_EDIT_IN_CODE: 'Umbenennen und Löschen geht bei Code direkt im Programm.',
   VARIABLES_JAVA_NOTE: 'Java zeigt Werte nur mit Robot.zeige("Name", wert); an.',
   VARIABLE_USED_NOWHERE: 'Nirgends — der Name kommt im Programm nicht (mehr) vor.',

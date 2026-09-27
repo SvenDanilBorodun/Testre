@@ -29,6 +29,7 @@
 // is where „Einfügen" writes.
 
 import React, { useEffect, useMemo, useRef } from 'react';
+import toast from 'react-hot-toast';
 import { Decoration, EditorView, GutterMarker, gutter, hoverTooltip, keymap, lineNumbers,
   highlightActiveLine, highlightActiveLineGutter,
   drawSelection, rectangularSelection } from '@codemirror/view';
@@ -60,7 +61,7 @@ import {
   assetOptions,
 } from './codeAssetCompletion';
 import {
-  CODE_INDENT_UNIT, SNIPPET_MIME, insertionEdit, minimalChange, snippetLines,
+  SNIPPET_MIME, fileIndentUnit, insertionChange, insertionTargetAt, minimalChange, snippetLines,
 } from './codeInsert';
 
 const LANGUAGE_SUPPORT = { python, java };
@@ -202,10 +203,13 @@ function assetHover(language, knownRef) {
 
 /**
  * A Sammlung row dropped onto the text (the drawer's `SNIPPET_MIME` payload
- * `{kind, name}`) becomes the line(s) that use it, on new lines BELOW the drop
- * line and indented like it (codeInsert.insertionEdit — the same rule as
- * „Einfügen"). Without drop coordinates the cursor's line is the anchor.
- * Anything else — ordinary text — is left to CodeMirror's own handler.
+ * `{kind, name}`) becomes the line(s) that use it, placed exactly as
+ * „Einfügen" places them with the cursor on the drop line
+ * (codeInsert.insertionTargetAt: the statement on that line, its body when it
+ * opens one, before it when it never lets the next line run). Without drop
+ * coordinates the cursor's line is the anchor. A drop where no statement may
+ * stand (a Java import or class line) writes nothing and says why. Anything
+ * else — ordinary text — is left to CodeMirror's own handler.
  */
 function snippetDrop(language) {
   return EditorView.domEventHandlers({
@@ -238,16 +242,20 @@ function snippetDrop(language) {
       }
       const pos = Number.isInteger(at) ? at : view.state.selection.main.head;
       const dropLine = view.state.doc.lineAt(pos).number;
-      const edit = insertionEdit(view.state.doc.toString(), dropLine, lines, { language });
-      if (!edit.insert) return true;
-      // The end of the last inserted line: the insertion either ends with the
-      // newline that separates it from the drop line's successor, or (at the
-      // very end of a file without one) starts with it.
-      const caret = edit.insert.endsWith('\n')
-        ? edit.from + edit.insert.length - 1
-        : edit.from + edit.insert.length;
+      const doc = view.state.doc.toString();
+      const target = insertionTargetAt(doc, language, dropLine);
+      if (target.notFound) {
+        toast.error(target.hint);
+        return true;
+      }
+      const res = insertionChange(doc, target, lines, language);
+      if (!res.change) return true;
+      // The caret at the end of the last inserted line (a line of the result).
+      const rows = res.content.split('\n');
+      let caret = 0;
+      for (let i = 0; i < res.lastLine; i += 1) caret += rows[i].length + (i < res.lastLine - 1 ? 1 : 0);
       view.dispatch({
-        changes: { from: edit.from, insert: edit.insert },
+        changes: res.change,
         selection: EditorSelection.cursor(caret),
         scrollIntoView: true,
         userEvent: 'input.drop',
@@ -402,7 +410,29 @@ const theme = EditorView.theme({
   '.cm-edubotics-asset-hover': { padding: '2px 6px', fontSize: '12px' },
 });
 
-function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef, withGutter, assetsRef) {
+/**
+ * The editor's indentation unit is the FILE's own (review round 2, R2-O2):
+ * `fileIndentUnit` of the text — the same function the insertion uses — set
+ * when the view is created and re-derived in the very transaction that
+ * changes it (the first indented line typed, an external replacement), so
+ * Enter, Tab and Backspace continue a 2-space program with 2 spaces. A fixed
+ * 4-space unit wrote an IndentationError into every 2-space program's next
+ * body line, and Backspace jumped to column 0.
+ */
+export function fileIndentUnitExtensions(language, compartment, initialText) {
+  return [
+    compartment.of(indentUnit.of(fileIndentUnit(initialText, language))),
+    EditorState.transactionExtender.of((tr) => {
+      if (!tr.docChanged) return null;
+      const unit = fileIndentUnit(tr.newDoc.toString(), language);
+      if (unit === tr.startState.facet(indentUnit)) return null;
+      return { effects: compartment.reconfigure(indentUnit.of(unit)) };
+    }),
+  ];
+}
+
+function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef, withGutter, assetsRef,
+  indentCompartment, initialText) {
   const parseLint = parseLintExtensions(language);
   return [
     lineNumbers(),
@@ -416,10 +446,7 @@ function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef,
     drawSelection(),
     rectangularSelection(),
     indentOnInput(),
-    // The same unit an insertion falls back to (codeInsert.CODE_INDENT_UNIT):
-    // CodeMirror's default of 2 spaces next to a 4-space insertion wrote an
-    // IndentationError into the student's program (review M2).
-    indentUnit.of(CODE_INDENT_UNIT),
+    fileIndentUnitExtensions(language, indentCompartment, initialText),
     bracketMatching(),
     closeBrackets(),
     syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
@@ -491,6 +518,7 @@ function CodeEditor({
   const onCursorRef = useRef(onCursorChange);
   const assetsRef = useRef(knowledge);
   const readOnlyRef = useRef(new Compartment());
+  const indentRef = useRef(new Compartment());
   useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
   useEffect(() => { onToggleRef.current = onToggleBreakpoint; }, [onToggleBreakpoint]);
   useEffect(() => { onCursorRef.current = onCursorChange; }, [onCursorChange]);
@@ -510,6 +538,8 @@ function CodeEditor({
           onToggleRef,
           typeof onToggleRef.current === 'function',
           assetsRef,
+          indentRef.current,
+          value || '',
         ),
       }),
       parent: hostRef.current,
@@ -554,16 +584,26 @@ function CodeEditor({
     if (change) view.dispatch({ changes: change, annotations: externalSync.of(true) });
   }, [value]);
 
-  // New Sammlung names: the warnings are re-judged at once (completion and
-  // hover read the ref on their own next query).
+  // Completion and hover read the ref on their own next query.
+  useEffect(() => { assetsRef.current = knowledge; }, [knowledge]);
+  // New Sammlung names: the warnings are re-judged at once — only when the
+  // names really changed. `assetSources` is a new object on every deferred
+  // keystroke, and forcing the lint on each one skipped the linter's own idle
+  // debounce (review round 2, ni3).
+  const knowledgeKey = useMemo(() => {
+    try {
+      return JSON.stringify(knowledge);
+    } catch (_) {
+      return null;
+    }
+  }, [knowledge]);
   useEffect(() => {
-    assetsRef.current = knowledge;
     const view = viewRef.current;
     if (view && ASSET_LINT_LANGUAGES.includes(language)) {
       view.dispatch({ effects: assetsChanged.of(null) });
       forceLinting(view);
     }
-  }, [knowledge, language]);
+  }, [knowledgeKey, language]);
 
   // A „Benutzt in" jump or an insertion: the caret at the end of the line.
   const revealNonce = revealRequest ? revealRequest.nonce : null;

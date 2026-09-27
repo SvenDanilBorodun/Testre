@@ -131,8 +131,10 @@ export function createCodeAssetDocument({
     const project = files();
     const cursor = typeof getCursor === 'function' ? getCursor() : null;
     const target = insertionTarget(project, language, cursor);
-    // No cursor and no Java `main`: nothing is written (review R-O2).
-    if (target.notFound) return { count: 0, error: CODE_DE.NO_MAIN_HINT };
+    // No SAFE place (no Java `main`, a Java cursor outside a method, a file
+    // that ends inside brackets): nothing is written, the hint says why
+    // (review R-O2, round 2 mi2/mi3).
+    if (target.notFound) return { count: 0, error: target.hint || CODE_DE.NO_MAIN_HINT };
     const content = typeof project[target.file] === 'string' ? project[target.file] : '';
     const res = insertAtTarget(content, target, lines, language);
     applyFiles({ ...project, [target.file]: res.content });

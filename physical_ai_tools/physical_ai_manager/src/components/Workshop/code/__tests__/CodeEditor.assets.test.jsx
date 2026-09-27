@@ -345,10 +345,8 @@ describe('one indentation unit for the editor and the insertion (review M2)', ()
     const { view } = mount({ value: two });
     view.posAtCoords = () => view.state.doc.line(2).from + 3;
     const data = { [SNIPPET_MIME]: JSON.stringify({ kind: 'pose', name: 'Hoch' }) };
-    act(() => {
-      fireEvent.drop(view.contentDOM, {
-        dataTransfer: { types: Object.keys(data), getData: (t) => data[t] || '' },
-      });
+    fireEvent.drop(view.contentDOM, {
+      dataTransfer: { types: Object.keys(data), getData: (t) => data[t] || '' },
     });
     expect(view.state.doc.toString())
       .toBe('import robot\nfor i in range(3):\n  robot.move_to("Hoch")\n  robot.home()\n');

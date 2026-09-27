@@ -8,7 +8,9 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-// Autocomplete and hover docs for the `robot.*` / `Robot.*` API, from
+// Autocomplete for the `robot.*` / `Robot.*` API (each entry's German
+// docstring rides as its `info`; there is no hover help on a command already
+// in the text — owner decision R3-O3), from
 // `robot_api.json` and nothing else (the one generated table). PURE: it builds
 // plain completion objects in the shape `@codemirror/autocomplete` consumes
 // (`label`, `type`, `detail`, `info`, `apply`); the CodeMirror wiring lives in

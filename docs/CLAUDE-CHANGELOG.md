@@ -6,6 +6,101 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-09-27 (fix round 3) — the student puts the line, the block keeps its indentation
+
+Two more fresh reviewers (3-A adversarial, 3-B regression and delivery)
+re-read the branch after fix round 2. The owner had every finding fixed by a
+fresh implementer (R3-O1), pre-approved one CI line (R3-O2), deferred the
+command help (R3-O3), and, while the round ran, replaced every automatic
+insertion placement (R3-O4). Every fix got a test that failed first, and
+every protecting test was proven by mutation: removing its production hunk
+turns it red. This entry supersedes the „Insertion guessed" paragraph and
+the „the unit is the FILE's own" rule of the entry below.
+
+**Indentation was still guessed from the wrong lines (MB1).** Round 2's
+`detectIndentUnit` counted every positive indent step, including bracket
+continuations. A clean 2-space program with three aligned two-row list
+literals (the shape CodeMirror's own `delimitedIndent` writes) detected a
+FIVE-space unit, and Enter inside its `if` body produced a program CPython
+3.12.13 refused with „IndentationError: unexpected indent (line 10)". Mixed
+files flipped too: a 4-space snippet pasted into a 2-space file made Enter in
+the old block „unexpected indent", and one hand-typed 2-space block in a
+4-space file made Enter in the 4-space body „unindent does not match". Now
+only the step from a block opener to its first statement votes, and Enter
+does not ask the file at all inside an existing block: `newlineIndentAt`
+answers the block's own sibling indentation, and a new block's first line
+gets the unit of the block its opener sits in. Python's Enter, Tab,
+Shift-Tab and Backspace are bound above the default keymap to the block
+structure's levels, and a multi-line paste into a line's indentation keeps
+its relative shape at the cursor's column. On a 64 KiB program the
+indentation question behind one Enter takes about 2 ms and one typed
+character about 3.5 ms in a real view, the unit's re-detection on every
+change included (jsdom on an Apple M5 Pro, medians of 15).
+
+**The student places the line (R3-O4).** Round 2 placed a line without a
+cursor at the end of the body that runs last and moved a line at a bad
+cursor to the nearest safe spot. The reviewers still found lines above
+`import robot` (a NameError), lines put straight into a `match` or `switch`
+body, lines after `sys.exit(main())`, `while not False:`, `while 1 == 1:`, an
+if/else that returns on both sides or Java's `System.exit`, all compiled and
+never run, and a no-cursor Java insertion after `while (LAUF)` with an
+interface constant that javac rejected as unreachable. The owner decided the
+app should stop guessing: a line goes ONLY directly below the cursor line or
+the drop line, and nowhere without one. `insertionTargetAt` became a
+validator that answers either „here, at this indentation" or a short German
+reason; the no-cursor placer (`mainTarget`, the `__main__`/final-call
+descent, the Java `main` search, `NO_MAIN_HINT`) was deleted, not kept dead.
+Vormachen without a cursor puts its lines on the clipboard. The reachability
+analysis stayed, as the validator, with the review's corrections: Python
+folds literal conditions and knows exit calls and `break` out of the loop in
+question; Java treats interface fields as final (JLS §9.3) and a condition
+with one non-constant operand as non-constant (JLS §15.29), so `i <
+args.length` completes normally. Every line regex is CRLF-safe, and
+`new Foo<T>() {` is an anonymous class, not a bracket the hint blamed. The
+fixture has 165 cases (77 insertions, 88 German hints); each insertion is
+parsed and run to its marker by CPython 3.12 and compiled and run by javac
+21, and a case may not be both.
+
+**Tests that protected nothing (MB2).** Removing the production hunk left
+these green: the `__vars` budget charge (the test counted decoded frames),
+the page's version-restore refusal (asserted outside `act`), the „Neu"
+refusal (never reached), the history's pre-cloud refusal (masked by disabled
+buttons), `fit_vars` before a robot call, the Java class-closer hint for local
+and anonymous classes, and a breakpoint fence round 2 had deleted. Each now
+fails without its hunk. Across the round: 55 React mutations, 6 runner and
+server mutations and 1 scanner mutation, all red; for four of them the tests
+from before the fix, run against the same mutation, stayed green, which is
+the finding (one was this round's own: `test_constant_pins` caught that the
+new Java value width was fenced against the table but never pinned as a
+literal).
+
+**The rest.** The document-switch lock applied even when the robot link had
+died, so a run state nothing could retire locked the student out of every
+other program; it now needs a live link, like „Abmelden" (mb1). An insertion
+waiting for its module landed in whatever document was open when it
+arrived; it now checks the document it started in (mb9), and „Einfügen" is
+disabled while one runs, because a double click inserted twice (nb4). A
+restore racing a run start could leave the cloud row restored while the page
+refused to show it; a restore on its way now holds off Start and every
+preview (nb2). The old document's Ziele subscription could mark the next
+document as changed (nb5). A commented call's keyword argument counted only
+in first position (nb3). Java `zeige` showed „[J@15db9742" for a `long[]`
+and „[Ljava.lang.String;@6d6f6e28" for a `String[]`; every array and
+`Iterable` is now a JSON list, by reflection, under the Python stub's depth
+and width bounds (nb6). `LiveValues.final` could wait up to 2 s for another
+thread's check and then one more interval for the server's floor; both waits
+now share one 0.5 s deadline (nb7). A hostile raw-socket `zeige` flood costs
+about 2 ms of CPU per frame, close to half a core at the 200/s budget
+(measured with client and server in one process), recorded in CLAUDE.md as
+the surface's known ceiling (nb11). CI's `python-tests` sets
+`EDUBOTICS_REQUIRE_JAVAC=1` (nb10). The „about +28 kB" entry-bundle claim
+named no build conditions and was dropped (nb9), and CLAUDE.md's „hover
+docs" for `robot_api.json` was false (there is no hover help on a command;
+R3-O3 records that gap). The code-runner image was rebuilt for linux/arm64
+from a clean archive of the committed tree: `javac -Xlint:all -Werror`,
+SmokeMain and `selftest.py --build` pass, and in the image every array type
+renders as a list and the debug-hook suite passes on CPython 3.12.3.
+
 ### Unreleased, 2026-09-27 (fix round 2) — live values ride the program's own robot calls, and the editor indents like the file
 
 Two more fresh reviewers (2-A adversarial, 2-B regression and delivery)
@@ -86,7 +181,8 @@ asset lint, forced on every deferred keystroke because `assetSources` got a
 new identity each render, is forced only when the names it judges by
 changed. The insertion code left the entry bundle (ni4:
 1754.25 kB → 1736.68 kB, below round 1's 1738.73 kB despite this round's new
-code). The SQL assertion headers say how to run them — the squashed baseline
+code; the student build's entry chunk, uncompressed, from a local `vite
+build` with placeholder env values). The SQL assertion headers say how to run them — the squashed baseline
 needs its one guarded line on a fresh database — and that 040's file run
 after 041 FAILs T4b as well as T8 (ni5, ni6; measured on a local stack).
 
@@ -144,7 +240,8 @@ keeps its name reserved; the Variablen list scans once, not once per variable
 `Object` overload); a file switch no longer replays the previous file's caret;
 the editor's knowledge builder moved into the lazy editor chunk (entry
 −4.2 kB; the rest of the ~30 kB stays in the entry because the page creates
-the code document synchronously).
+the code document synchronously; the build conditions of these two numbers
+were not recorded).
 
 ### Unreleased, 2026-09-27 — a Python student gets the Sammlung, and stored Ziele finally reach code
 

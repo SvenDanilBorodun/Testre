@@ -363,11 +363,12 @@ describe('review round 2 (2026-09-27): keyword arguments, Unicode boundaries, th
       '# robot.replay(speed=2, other="Nein")',
       '# robot.replay(speed="Falsch")',
       '# robot.replay(x, "Nein2")',
+      '# robot.zeige(wert="x", name="punkte")',
       'robot.replay(speed=2, name="Alt")',
       '',
     ].join('\n');
     expect(names(src)).toEqual([
-      'replay:Alt(c)', 'move_to:Ablage(c)', 'pin:Mitte(c)', 'replay:Alt',
+      'replay:Alt(c)', 'move_to:Ablage(c)', 'pin:Mitte(c)', 'zeige:punkte(c)', 'replay:Alt',
     ]);
     const pin = findAssetCalls(src, 'python').find((c) => c.method === 'pin');
     expect(pin.coords).toEqual({ x: 0.1, y: 0.2, z: 0 });

@@ -224,3 +224,16 @@ describe('the editor helpers ride the lazy editor chunk, not the entry bundle (r
     expect(importers).toEqual([path.join('components', 'Workshop', 'code', 'CodeEditor.jsx')]);
   });
 });
+
+describe('review round 2: completion knows the keyword form and a Unicode receiver boundary (ni1, ni2)', () => {
+  it('offers inside `name="` / `target="` — the parameter the table names — and nowhere else', () => {
+    expect(assetArgContext('robot.replay(name="Wi', 'python')).toMatchObject({ asset: 'recording', prefix: 'Wi' });
+    expect(assetArgContext('robot.replay(speed=2, name="', 'python')).toMatchObject({ asset: 'recording', prefix: '' });
+    expect(assetArgContext('robot.move_to(target=\'Ab', 'python')).toMatchObject({ asset: 'place', prefix: 'Ab' });
+    expect(assetArgContext('robot.replay(speed="', 'python')).toBeNull();
+    expect(assetArgContext('Größrobot.replay("', 'python')).toBeNull();
+    expect(assetArgContext('ßmove_to("', 'python')).toBeNull();
+    expect(assetArgContext('ÄRobot.replay("', 'java')).toBeNull();
+    expect(assetArgContext('edubotics.Robot.replay("', 'java')).toMatchObject({ asset: 'recording' });
+  });
+});

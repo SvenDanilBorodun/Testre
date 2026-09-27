@@ -76,8 +76,10 @@ describe('the asset call table comes from robot_api.json', () => {
     const tagged = robotApi.methods.filter((m) => m.params && m.params[0] && m.params[0].asset);
     expect(tagged.length).toBeGreaterThan(10);
     for (const m of tagged) {
-      expect(ASSET_CALLS.python.get(m.name)).toEqual({ method: m.name, asset: m.params[0].asset });
-      expect(ASSET_CALLS.java.get(m.java_name)).toEqual({ method: m.name, asset: m.params[0].asset });
+      // `param`: the keyword a Python call may name the asset by (round 2, ni1).
+      const row = { method: m.name, asset: m.params[0].asset, param: m.params[0].name };
+      expect(ASSET_CALLS.python.get(m.name)).toEqual(row);
+      expect(ASSET_CALLS.java.get(m.java_name)).toEqual(row);
     }
     expect(ASSET_CALLS.python.get('home')).toBeUndefined();
     expect(ASSET_CALLS.java.get('moveTo').asset).toBe('place');
@@ -305,5 +307,89 @@ describe('review round fixes (2026-09-27)', () => {
     for (const name of ['punkte', 'größe', 'fehlt']) {
       expect(all.get(name)).toEqual(variableOccurrences(files, 'python', name));
     }
+  });
+});
+
+describe('review round 2 (2026-09-27): keyword arguments, Unicode boundaries, the variable list', () => {
+  const names = (content, language = 'python') => findAssetCalls(content, language)
+    .map((c) => `${c.method}:${c.name}${c.inComment ? '(c)' : ''}`);
+
+  it('ni1: a keyword first argument is the same asset — every tagged method, its own parameter name', () => {
+    const src = [
+      'import robot',
+      'robot.replay(name="Winken")',
+      'robot.replay(speed=2.0, name="Tanz")',
+      'robot.move_to(target="Ablage")',
+      'robot.pickup(target = "Kiste")',
+      'robot.drop_at(target="Kiste")',
+      'x = robot.ziel(name="Mitte")',
+      'robot.pin(name="Neu", x=0.1, y=0.2, z=0.0)',
+      'robot.counter_add(name="Punkte")',
+      'robot.grasp(obj="wuerfel")',
+      'robot.zeige(name="punkte", wert=3)',
+      '# robot.replay(name="Alt")',
+      'robot.replay(speed="Falsch")',
+      '',
+    ].join('\n');
+    expect(names(src)).toEqual([
+      'replay:Winken', 'replay:Tanz', 'move_to:Ablage', 'pickup:Kiste', 'drop_at:Kiste', 'ziel:Mitte',
+      'pin:Neu', 'counter_add:Punkte', 'grasp:wuerfel', 'zeige:punkte', 'replay:Alt(c)',
+    ]);
+    const pin = findAssetCalls(src, 'python').find((c) => c.method === 'pin');
+    expect(pin.coords).toEqual({ x: 0.1, y: 0.2, z: 0 });
+    // Java has no keyword arguments: `name = "W"` is an assignment expression.
+    expect(names('Robot.replay(name = "W");', 'java')).toEqual([]);
+  });
+
+  it('ni1: rename, usage and the defined names see the keyword form too', () => {
+    const files = { 'main.py': 'import robot\nrobot.replay(name="Winken")\nrobot.move_to(target="Ablage")\n' };
+    const rec = renameCodeAssetRefs(files, 'python', 'recording', 'Winken', 'Gruss');
+    expect(rec.count).toBe(1);
+    expect(rec.files['main.py']).toBe('import robot\nrobot.replay(name="Gruss")\nrobot.move_to(target="Ablage")\n');
+    const place = renameCodeAssetRefs(files, 'python', 'place', 'Ablage', 'Tisch');
+    expect(place.files['main.py']).toContain('robot.move_to(target="Tisch")');
+    const scan = scanCodeAssets(files, 'python');
+    expect([...scan.replay.keys()]).toEqual(['Winken']);
+    expect([...scan.refs.keys()]).toEqual(['Ablage']);
+    expect(codeDefinedPlaceNames({ 'main.py': 'robot.pin(name="P", x=0, y=0, z=0)\n' }, 'python')).toEqual(['P']);
+  });
+
+  it('ni1: the run-time scan fetches a keyword-form recording as well', () => {
+    expect(collectCodeReplayNames({ 'main.py': 'robot.replay(name="A")\nrobot.replay(speed=2, name=\'B\')\n' }))
+      .toEqual(['A', 'B']);
+  });
+
+  it('ni2: the receiver needs a Unicode identifier boundary', () => {
+    expect(names('Größrobot.replay("W")\nßreplay("X")\nüber.robot.replay("Y")\n')).toEqual([]);
+    expect(names('größe = 1\nrobot.replay("W")\n')).toEqual(['replay:W']);
+    expect(names('class Gruß {\n  void f() { ÄRobot.replay("W"); }\n}\n', 'java')).toEqual([]);
+  });
+
+  it('ni2: the tokenizer’s identifier characters are Unicode — `ür"x"` is a name then a plain string', () => {
+    const segs = tokenizeCode('ür"x"', 'python');
+    expect(segs.map((s) => [s.type, s.start, s.end, s.prefix ?? null])).toEqual([
+      ['code', 0, 2, null], ['string', 2, 5, ''],
+    ]);
+  });
+
+  it('ni2: annotated and chained assignments are listed; keyword arguments and dict keys are not', () => {
+    const files = {
+      'main.py': [
+        'import robot',
+        'x: int = 5',
+        'a = b = 1',
+        'liste: list[int] = []',
+        'robot.pin("A",',
+        '          x2=0.1,',
+        '          y2=0.2, z2=0.0)',
+        'd = {',
+        '    "k": 1,',
+        '}',
+        'else_ = 3',
+        '',
+      ].join('\n'),
+    };
+    expect(collectCodeVariables(files, 'python').map((v) => v.name))
+      .toEqual(['x', 'a', 'b', 'liste', 'd', 'else_']);
   });
 });

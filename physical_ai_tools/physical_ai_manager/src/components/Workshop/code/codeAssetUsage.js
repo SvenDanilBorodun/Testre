@@ -16,13 +16,17 @@
 // WHAT IT READS. Only a string-LITERAL FIRST argument of an asset-tagged call
 // (`robot_api.json` → `params[0].asset`): `robot.replay("Winken")`,
 // `Robot.moveTo("Ablage");`, a bare `move_to("Ablage")` after
-// `from robot import move_to`. The receiver is `robot`/`Robot` or none — so
-// `"abc".count("a")` (Python's str.count) is never an object reference. A
-// literal must be the WHOLE argument (followed by `,` or `)`), unprefixed or
-// `r`/`u`, single-line, with no backslash: an f-string, a concatenation or an
-// escape is not a name this module can know, and a rename must only ever
-// rewrite text it is sure of. The method set is read from the generated table,
-// never kept here.
+// `from robot import move_to` — and, in Python, the same argument given by
+// its keyword wherever it stands (`robot.replay(speed=2, name="Winken")`, the
+// parameter name read from the table; review round 2, ni1). The receiver is
+// `robot`/`Robot` (Java also `edubotics.Robot`) or none, bounded like an
+// identifier in both languages: `Größrobot.replay`, `ßreplay` and
+// `x.robot.replay` are not the robot (ni2), and `"abc".count("a")` (Python's
+// str.count) is never an object reference. A literal must be the WHOLE
+// argument (followed by `,` or `)`), unprefixed or `r`/`u`, single-line, with
+// no backslash: an f-string, a concatenation or an escape is not a name this
+// module can know, and a rename must only ever rewrite text it is sure of.
+// The method set is read from the generated table, never kept here.
 //
 // WHY A TOKENIZER. A regex over the raw text cannot tell a call from the same
 // characters inside a string (`print('robot.replay("x")')`) or a comment. The
@@ -48,13 +52,14 @@ function buildAssetCalls() {
   for (const m of robotApi.methods || []) {
     const first = m && Array.isArray(m.params) ? m.params[0] : null;
     if (!first || typeof first.asset !== 'string') continue;
-    python.set(m.name, { method: m.name, asset: first.asset });
-    java.set(m.java_name, { method: m.name, asset: first.asset });
+    python.set(m.name, { method: m.name, asset: first.asset, param: first.name });
+    java.set(m.java_name, { method: m.name, asset: first.asset, param: first.name });
   }
   return { python, java };
 }
 
-/** language → Map<spelling, {method (Python name), asset}>. */
+/** language → Map<spelling, {method (Python name), asset, param (its first
+ *  parameter's name — the keyword a Python call may give it by)}>. */
 export const ASSET_CALLS = Object.freeze(buildAssetCalls());
 
 // Which asset tags each scan map collects, and which a rename rewrites.
@@ -265,12 +270,36 @@ function lineColAt(starts, offset) {
 
 // ── the asset calls ────────────────────────────────────────────────────────
 
+// The receiver of a call, bounded like an identifier on its left (a letter,
+// a digit, `_` or a `.` before it means it is not the robot).
+const RECEIVER = {
+  python: '(?<![\\p{L}\\p{N}_.])(robot)\\s*\\.\\s*',
+  java: '(?<![\\p{L}\\p{N}_.])((?:edubotics\\s*\\.\\s*)?Robot)\\s*\\.\\s*',
+};
+const CALLEE = '(?:RECV|(?<![\\p{L}\\p{N}_.]))([A-Za-z_][A-Za-z0-9_]*)';
+const callee = (language) => CALLEE.replace('RECV', RECEIVER[language] || RECEIVER.python);
 // The call right before a string: `robot.name(` / `Robot.name(` / bare `name(`.
-const CALL_TAIL_RE = /(?:\b(robot|Robot)\s*\.\s*|(?<![\w.]))([A-Za-z_]\w*)\s*\(\s*$/;
-// The same, whole, inside a comment's text (a comment holds no string tokens).
-const COMMENT_CALL_RE = /(?:\b(robot|Robot)\s*\.\s*|(?<![\w.]))([A-Za-z_]\w*)\s*\(\s*(["'])([^"'\\\n]*)\3(?=\s*[,)])/g;
+const CALL_TAIL_RE = {
+  python: new RegExp(`${callee('python')}\\s*\\(\\s*$`, 'u'),
+  java: new RegExp(`${callee('java')}\\s*\\(\\s*$`, 'u'),
+};
+// A call's name right before its `(` (the keyword path scans back to it).
+const CALL_NAME_RE = {
+  python: new RegExp(`${callee('python')}\\s*$`, 'u'),
+  java: new RegExp(`${callee('java')}\\s*$`, 'u'),
+};
+// A keyword right before a string: `name=`, `target = `.
+const KEYWORD_TAIL_RE = /(?<![\p{L}\p{N}_])([A-Za-z_][A-Za-z0-9_]*)\s*=\s*$/u;
+// The same call, whole, inside a comment's text (a comment holds no string
+// tokens): an optional keyword, the literal, then `,` or `)`.
+const COMMENT_CALL_RE = {
+  python: new RegExp(`${callee('python')}\\s*\\(\\s*(?:([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*)?(["'])([^"'\\\\\\n]*)\\4(?=\\s*[,)])`, 'gu'),
+  java: new RegExp(`${callee('java')}\\s*\\(\\s*()(["'])([^"'\\\\\\n]*)\\4(?=\\s*[,)])`, 'gu'),
+};
 const NUMBER = '[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?';
-const PIN_COORDS_RE = new RegExp(`^\\s*,\\s*(${NUMBER})\\s*,\\s*(${NUMBER})\\s*,\\s*(${NUMBER})\\s*\\)`);
+const PIN_COORD_KEYS = ['x', 'y', 'z'];
+// Farther back than this a keyword's call is not looked for.
+const KEYWORD_SCAN_MAX = 2000;
 
 function lookupCall(language, receiver, spelling) {
   const table = ASSET_CALLS[language];
@@ -287,10 +316,77 @@ function literalIsUsable(seg) {
     && !seg.value.includes('\n');
 }
 
-function coordsAfter(text, from) {
-  const m = PIN_COORDS_RE.exec(text.slice(from, from + 200));
-  if (!m) return { x: NaN, y: NaN, z: NaN };
-  return { x: Number(m[1]), y: Number(m[2]), z: Number(m[3]) };
+// `text` with every string, char literal and comment blanked, built from the
+// segments already at hand (newlines and length kept).
+function blankedFrom(text, segs) {
+  let out = '';
+  for (const seg of segs) {
+    const part = text.slice(seg.start, seg.end);
+    out += seg.type === 'code' ? part : part.replace(/[^\n]/g, ' ');
+  }
+  return out;
+}
+
+// The `(` that opens the call whose argument list holds offset `at`, scanning
+// back through code-only text over nested brackets; -1 when `at` is not in
+// a call's parentheses.
+function enclosingParen(code, at) {
+  let depth = 0;
+  for (let i = at - 1; i >= 0 && at - i <= KEYWORD_SCAN_MAX; i -= 1) {
+    const ch = code[i];
+    if (ch === ')' || ch === ']' || ch === '}') depth += 1;
+    else if (ch === '(' || ch === '[' || ch === '{') {
+      if (depth === 0) return ch === '(' ? i : -1;
+      depth -= 1;
+    }
+  }
+  return -1;
+}
+
+// The code-only text of the arguments of the call opened at `paren`.
+function argsOf(code, paren) {
+  let depth = 0;
+  for (let i = paren; i < code.length && i - paren <= KEYWORD_SCAN_MAX; i += 1) {
+    const ch = code[i];
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      depth -= 1;
+      if (depth === 0) return code.slice(paren + 1, i);
+    }
+  }
+  return code.slice(paren + 1, paren + 1 + 200);
+}
+
+// The pinned point of a pin() call from its arguments (code-only text, the
+// name literal blanked): positional after the name, or `x=`/`y=`/`z=`
+// keywords; NaN where an argument is not a numeric literal.
+function coordsOf(args) {
+  const parts = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < args.length; i += 1) {
+    const ch = args[i];
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+    else if (ch === ',' && depth === 0) {
+      parts.push(args.slice(from, i));
+      from = i + 1;
+    }
+  }
+  parts.push(args.slice(from));
+  const value = (t) => (new RegExp(`^\\s*${NUMBER}\\s*$`).test(t) ? Number(t) : NaN);
+  const out = { x: NaN, y: NaN, z: NaN };
+  let positional = 0;
+  for (const part of parts) {
+    const kw = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)([\s\S]*)$/.exec(part);
+    if (kw) {
+      if (PIN_COORD_KEYS.includes(kw[1])) out[kw[1]] = value(kw[2]);
+    } else {
+      if (positional >= 1 && positional <= 3) out[PIN_COORD_KEYS[positional - 1]] = value(part);
+      positional += 1;
+    }
+  }
+  return out;
 }
 
 /**
@@ -304,9 +400,10 @@ export function findAssetCalls(content, language) {
   const text = typeof content === 'string' ? content : '';
   if (!ASSET_CALLS[language]) return [];
   const segs = tokenizeCode(text, language);
+  const code = blankedFrom(text, segs);
   const starts = lineStarts(text);
   const out = [];
-  const push = (hit, quoteAt, valueStart, valueEnd, inComment) => {
+  const push = (hit, quoteAt, valueStart, valueEnd, inComment, paren) => {
     const rawValue = text.slice(valueStart, valueEnd);
     const name = rawValue.trim();
     if (!name) return;
@@ -314,21 +411,32 @@ export function findAssetCalls(content, language) {
     const row = {
       method: hit.method, asset: hit.asset, name, rawValue, line, col, inComment, valueStart, valueEnd,
     };
-    if (hit.method === 'pin') row.coords = coordsAfter(text, valueEnd + 1);
+    if (hit.method === 'pin') {
+      row.coords = paren >= 0 ? coordsOf(argsOf(code, paren)) : { x: NaN, y: NaN, z: NaN };
+    }
     out.push(row);
+    return row;
   };
   segs.forEach((seg, idx) => {
     if (seg.type === 'comment') {
       const body = text.slice(seg.start, seg.end);
-      COMMENT_CALL_RE.lastIndex = 0;
-      let m = COMMENT_CALL_RE.exec(body);
+      const re = COMMENT_CALL_RE[language];
+      re.lastIndex = 0;
+      let m = re.exec(body);
       while (m !== null) {
         const hit = lookupCall(language, m[1], m[2]);
-        if (hit) {
-          const quoteAt = seg.start + m.index + m[0].length - m[4].length - 2;
-          push(hit, quoteAt, quoteAt + 1, quoteAt + 1 + m[4].length, true);
+        if (hit && (!m[3] || m[3] === hit.param)) {
+          const quoteAt = seg.start + m.index + m[0].length - m[5].length - 2;
+          const row = push(hit, quoteAt, quoteAt + 1, quoteAt + 1 + m[5].length, true, -1);
+          if (row && hit.method === 'pin') {
+            // A comment holds no string tokens: its arguments, quotes blanked.
+            const args = body.slice(m.index + m[0].indexOf('(') + 1);
+            const close = args.indexOf(')');
+            row.coords = coordsOf((close < 0 ? args : args.slice(0, close))
+              .replace(/(["'])[^"'\n]*\1/g, (q) => ' '.repeat(q.length)));
+          }
         }
-        m = COMMENT_CALL_RE.exec(body);
+        m = re.exec(body);
       }
       return;
     }
@@ -337,13 +445,30 @@ export function findAssetCalls(content, language) {
     const next = segs[idx + 1];
     if (!prev || prev.type !== 'code') return;
     if (language === 'java' && seg.quote !== '"') return;
-    const tail = CALL_TAIL_RE.exec(text.slice(Math.max(prev.start, seg.start - 200), seg.start));
-    if (!tail) return;
-    const hit = lookupCall(language, tail[1], tail[2]);
-    if (!hit) return;
-    // The literal must be the WHOLE first argument.
+    // The literal must be the WHOLE argument.
     if (!next || next.type !== 'code' || !/^\s*[,)]/.test(text.slice(next.start, next.end))) return;
-    push(hit, seg.start + seg.prefix.length, seg.valueStart, seg.valueEnd, false);
+    const before = code.slice(Math.max(0, seg.start - 200), seg.start);
+    const tail = CALL_TAIL_RE[language].exec(before);
+    if (tail) {
+      const hit = lookupCall(language, tail[1], tail[2]);
+      if (hit) {
+        push(hit, seg.start + seg.prefix.length, seg.valueStart, seg.valueEnd, false,
+          seg.start - before.length + before.lastIndexOf('('));
+      }
+      return;
+    }
+    if (language !== 'python') return;
+    // `name="…"` anywhere in a call's arguments: the call is found by
+    // scanning back to its `(`, and the keyword must be the name the table
+    // gives the asset parameter (review round 2, ni1).
+    const kw = KEYWORD_TAIL_RE.exec(before);
+    if (!kw) return;
+    const paren = enclosingParen(code, seg.start - kw[0].length);
+    if (paren < 0) return;
+    const call = CALL_NAME_RE.python.exec(code.slice(Math.max(0, paren - 200), paren));
+    const hit = call ? lookupCall(language, call[1], call[2]) : null;
+    if (!hit || hit.param !== kw[1]) return;
+    push(hit, seg.start + seg.prefix.length, seg.valueStart, seg.valueEnd, false, paren);
   });
   out.sort((a, b) => a.valueStart - b.valueStart);
   return out;
@@ -503,10 +628,17 @@ export function codeDefinedPlaceNames(files, language, { includeComments = false
 
 // Identifiers are Unicode (Python 3, Java): `größe`, `Würfel` (review m3).
 const ID = '[\\p{L}_][\\p{L}\\p{N}_]*';
-const PY_ASSIGN_RE = new RegExp(
-  `^[ \\t]*(${ID}(?:[ \\t]*,[ \\t]*${ID})*)[ \\t]*(?:=(?!=)|\\+=|-=|\\*=|\\/=|\\/\\/=|%=|\\*\\*=|\\|=|&=|\\^=)`, 'gmu',
+// One target list and its `=` (or an augmented assignment) at the START of
+// what is left of a line — applied again after each `=`, so `a = b = 1`
+// lists both (review round 2, ni2).
+const PY_TARGETS_RE = new RegExp(
+  `^[ \\t]*(${ID}(?:[ \\t]*,[ \\t]*${ID})*)[ \\t]*(=(?!=)|\\+=|-=|\\*=|\\/=|\\/\\/=|%=|\\*\\*=|\\|=|&=|\\^=)`, 'u',
 );
-const PY_FOR_RE = new RegExp(`^[ \\t]*(?:async[ \\t]+)?for[ \\t]+(${ID}(?:[ \\t]*,[ \\t]*${ID})*)[ \\t]+in(?![\\p{L}\\p{N}_])`, 'gmu');
+// An annotated assignment `x: int = 5` (the annotation holds no `=`).
+const PY_ANNOTATED_RE = new RegExp(`^[ \\t]*(${ID})[ \\t]*:[ \\t]*[^=\\n]+?[ \\t]*=(?!=)`, 'u');
+const PY_FOR_RE = new RegExp(`^[ \\t]*(?:async[ \\t]+)?for[ \\t]+(${ID}(?:[ \\t]*,[ \\t]*${ID})*)[ \\t]+in(?![\\p{L}\\p{N}_])`, 'u');
+// Python's soft keywords can start a line with a `:` that is no annotation.
+const PY_SOFT_KEYWORDS = new Set(['match', 'case', 'type']);
 const JAVA_TYPE = '(?:int|long|double|float|boolean|char|byte|short|String|var|\\p{Lu}[\\p{L}\\p{N}_]*(?:<[^;(){}]*?>)?)';
 // A declared name starts lower-case (or `_`) — the Java convention that tells
 // `Würfel w` (type, name) from a statement.
@@ -548,12 +680,34 @@ export function collectCodeVariables(files, language) {
         m = JAVA_DECL_RE.exec(code);
       }
     } else {
-      for (const re of [PY_ASSIGN_RE, PY_FOR_RE]) {
-        re.lastIndex = 0;
-        let m = re.exec(code);
-        while (m !== null) {
-          found.push({ index: m.index, names: m[1].split(',').map((n) => n.trim()) });
-          m = re.exec(code);
+      // Only a line that starts a statement: inside brackets `x=0.1,` is a
+      // keyword argument and `"k": 1,` a dict entry, not a variable.
+      let depth = 0;
+      for (let row = 0; row < starts.length; row += 1) {
+        const from = starts[row];
+        const to = row + 1 < starts.length ? starts[row + 1] - 1 : code.length;
+        const line = code.slice(from, to);
+        if (depth === 0) {
+          const annotated = PY_ANNOTATED_RE.exec(line);
+          const forLoop = PY_FOR_RE.exec(line);
+          if (forLoop) {
+            found.push({ index: from, names: forLoop[1].split(',').map((n) => n.trim()) });
+          } else if (annotated && !PY_KEYWORDS.has(annotated[1]) && !PY_SOFT_KEYWORDS.has(annotated[1])) {
+            found.push({ index: from, names: [annotated[1]] });
+          } else {
+            let rest = line;
+            let m = PY_TARGETS_RE.exec(rest);
+            while (m !== null) {
+              found.push({ index: from, names: m[1].split(',').map((n) => n.trim()) });
+              if (m[2] !== '=') break;
+              rest = rest.slice(m[0].length);
+              m = PY_TARGETS_RE.exec(rest);
+            }
+          }
+        }
+        for (const ch of line) {
+          if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+          else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
         }
       }
     }

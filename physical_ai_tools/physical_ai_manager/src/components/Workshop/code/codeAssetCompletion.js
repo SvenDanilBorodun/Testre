@@ -39,9 +39,12 @@ import { CODE_DE, formatCode } from './codeMessagesDe';
 export const ASSET_LINT_LANGUAGES = Object.freeze(['python', 'java']);
 
 // `robot.name("…`, `Robot.name("…` or a bare `name("…` up to the cursor, the
-// string still open. Java strings are double-quoted only.
-const PY_CONTEXT_RE = /(?:\b(robot|Robot)\s*\.\s*|(?<![\w.]))([A-Za-z_]\w*)\s*\(\s*(["'])([^"'\\]*)$/;
-const JAVA_CONTEXT_RE = /(?:\b(robot|Robot)\s*\.\s*|(?<![\w.]))([A-Za-z_]\w*)\s*\(\s*(")([^"\\]*)$/;
+// string still open — in Python also `name(…, param="…` (the keyword the
+// table gives the asset parameter, review round 2 ni1). The receiver is
+// bounded like an identifier (`Größrobot.`, `ßname(` are not calls of the
+// robot, ni2). Java strings are double-quoted only.
+const PY_CONTEXT_RE = /(?:(?<![\p{L}\p{N}_.])(robot)\s*\.\s*|(?<![\p{L}\p{N}_.]))([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(?:(?:[^()"'\n]*,\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*)?(["'])([^"'\\]*)$/u;
+const JAVA_CONTEXT_RE = /(?:(?<![\p{L}\p{N}_.])((?:edubotics\s*\.\s*)?Robot)\s*\.\s*|(?<![\p{L}\p{N}_.]))([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*()(")([^"\\]*)$/u;
 
 /**
  * The asset argument the cursor sits in, from the text of its line before the
@@ -55,9 +58,9 @@ export function assetArgContext(textBefore, language) {
   const m = (language === 'java' ? JAVA_CONTEXT_RE : PY_CONTEXT_RE).exec(textBefore);
   if (!m) return null;
   const hit = table.get(m[2]);
-  if (!hit) return null;
+  if (!hit || (m[3] && m[3] !== hit.param)) return null;
   return {
-    asset: hit.asset, method: hit.method, quote: m[3], prefix: m[4], from: textBefore.length - m[4].length,
+    asset: hit.asset, method: hit.method, quote: m[4], prefix: m[5], from: textBefore.length - m[5].length,
   };
 }
 

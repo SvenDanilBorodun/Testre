@@ -163,13 +163,18 @@ export const CODE_POISON_BLOCK_TYPE = 'edubotics_code_program_v1';
 // no data and the run aborts on the server's „Unbekannte Aufnahme: …". Both
 // call shapes a student writes are matched: `robot.replay("X")` /
 // `Robot.replay("X", 1.5)` and a bare `replay("X")` after
-// `from robot import replay`.
-const REPLAY_CALL_RE = /\breplay\s*\(\s*(["'])([^"'\\\r\n]*)\1/g;
-// The name rule is the one the generated table already carries for this
-// method's first parameter — never a second copy of the pattern.
+// `from robot import replay` — and the name given by its keyword,
+// `replay(speed=2, name="X")` (review round 2, ni1: that run fetched
+// nothing and failed on the robot).
+// The name rule and the keyword are the ones the generated table carries for
+// this method's first parameter — never a second copy.
 const replayNameParam = (robotApi.methods || [])
   .find((m) => m && m.name === 'replay')?.params?.[0] || {};
 const REPLAY_NAME_RE = new RegExp(replayNameParam.pattern);
+const REPLAY_CALL_RE = new RegExp(
+  `\\breplay\\s*\\(\\s*(?:[^()"'\\r\\n]*?\\b${replayNameParam.name || 'name'}\\s*=\\s*)?`
+  + '(["\'])([^"\'\\\\\\r\\n]*)\\1', 'g',
+);
 // `workflow_trajectories` is pruned to 16 rows per workflow (migration 034),
 // so a 17th DISTINCT name cannot name a recording that exists — and an
 // unbounded list would turn one pathological file into that many cloud reads.

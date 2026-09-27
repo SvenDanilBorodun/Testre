@@ -340,6 +340,12 @@ describe('RunControls — an unsaved code program that replays is told to save f
     expect(mockRos.callService).not.toHaveBeenCalled();
   });
 
+  test('the keyword form `replay(name="…")` is caught too (review round 2, ni1)', async () => {
+    await clickStart({ workflowId: null, codeFiles: { 'main.py': 'import robot\nrobot.replay(speed=2, name="Winken")\n' } });
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith(SAVE_FIRST));
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
   test('a replay only inside a comment or a string does not block an unsaved run', async () => {
     await clickStart({
       workflowId: null,

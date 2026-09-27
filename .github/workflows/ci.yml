@@ -28,6 +28,10 @@ jobs:
   python-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # test_code_insert_cases.py compiles the insertion fixture with javac
+      # ($JAVA_HOME_21_X64 on this runner): a lost JDK fails, never skips.
+      EDUBOTICS_REQUIRE_JAVAC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:

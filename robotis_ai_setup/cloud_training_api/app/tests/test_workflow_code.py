@@ -5,8 +5,13 @@ programs, migration 040): ``WorkflowCreate`` / ``WorkflowUpdate`` /
 Covers:
   * create with a language stores the files and an EMPTY blockly_json; a
     Blockly create's insert payload is byte-identical to before 040
-  * one workflow is one language: a create or PATCH carrying blockly_json AND
-    code is refused, and so is a Blockly write onto a code program
+  * one workflow is one language: a create or PATCH carrying blocks AND code
+    is refused, and so is a Blockly write onto a code program
+  * migration 041: a code program's blockly_json carries its Ziele and
+    Positionen (``edubotics-destinations``) and nothing else; a code save
+    sends them WITH the files and both reach ``update_workflow_code`` in one
+    call (the code branch is tested BEFORE the blockly branch, or a code save
+    with Ziele would go through ``update_workflow_blockly``)
   * PATCH code_files goes through the SECURITY DEFINER RPC
     ``update_workflow_code`` (never a plain ``.update``), owner-only (404)
   * the language is immutable after create (409), and a Blockly program can
@@ -49,8 +54,9 @@ ROUTES_DIR = os.path.join(os.path.dirname(HERE), "routes")
 # A generic stateful fake supabase client: every table is a dict of rows,
 # every .eq()/.in_() filter is honoured on every table, ORDER BY … DESC + LIMIT
 # are honoured (by insertion sequence), UPDATE/DELETE apply to every matched
-# row. rpc('update_workflow_code') behaves like the migration's function:
-# owner-only (P0002), language-checked (22023), then the two columns move.
+# row. rpc('update_workflow_code') behaves like the migration's function
+# (041): owner-only (P0002), language- and blockly_json-checked (22023), then
+# the code columns move and blockly_json = COALESCE(p_blockly_json, blockly_json).
 # ------------------------------------------------------------------
 def _public(row: dict) -> dict:
     return {k: v for k, v in row.items() if k != "_seq"}
@@ -182,11 +188,18 @@ class _FakeDB:
             language = params.get("p_code_language")
             if language not in ("python", "java"):
                 raise Exception("22023: Unbekannte Programmiersprache.")
+            blockly = params.get("p_blockly_json")
+            if blockly is not None and (
+                not isinstance(blockly, dict) or set(blockly) - {"edubotics-destinations"}
+            ):
+                raise Exception("22023: Ein Code-Programm speichert neben dem Code nur seine Ziele und Positionen.")
             row = self.tables.get("workflows", {}).get(params["p_workflow_id"])
             if row is None or row.get("owner_user_id") != params["p_user_id"]:
                 raise Exception("P0002: Workflow nicht gefunden oder kein Zugriff.")
             row["code_files"] = params["p_code_files"]
             row["code_language"] = language
+            if blockly is not None:
+                row["blockly_json"] = blockly
             row["updated_at"] = f"u{self.next_seq():06d}"
             return SimpleNamespace(data=[_public(row)])
 
@@ -376,10 +389,13 @@ class TestPatchCode(unittest.TestCase):
         new_files = {"main.py": "import robot\nrobot.open_gripper()\n"}
         with _Ctx(db):
             updated = wf.update_workflow(row["id"], _update_payload(code_files=new_files), user=_OWNER)
+        # 041: p_blockly_json is ALWAYS sent, explicitly None when the PATCH
+        # carries no Ziele (the RPC's COALESCE then keeps the stored ones).
         self.assertEqual(db.rpc_calls, [(
             "update_workflow_code",
             {"p_workflow_id": row["id"], "p_user_id": "owner",
-             "p_code_files": new_files, "p_code_language": "python"},
+             "p_code_files": new_files, "p_code_language": "python",
+             "p_blockly_json": None},
         )])
         # Never a plain owner-scoped .update() carrying the code (the RPC is
         # what stamps saved_by on the version snapshot).
@@ -508,6 +524,176 @@ class TestPatchCode(unittest.TestCase):
         finally:
             wf._assert_workflow_owned = original
         self.assertEqual(exc.status_code, 404)
+
+
+# ==================================================================
+# migration 041: a code program keeps its Ziele / Positionen
+# ==================================================================
+_ZIELE = {
+    "edubotics-destinations": {
+        "version": 1,
+        "entries": [{"name": "Ablage", "kind": "pin", "x": 0.2, "y": 0.0, "z": 0.0}],
+    }
+}
+
+
+class TestCodeProgramZiele(unittest.TestCase):
+    def test_create_with_code_and_ziele_stores_both(self):
+        db = _FakeDB()
+        with _Ctx(db):
+            created = wf.create_workflow(
+                _create_payload(code_language="python", code_files=_PY_FILES, blockly_json=_ZIELE),
+                user=_OWNER,
+            )
+        row = db.tables["workflows"][created.id]
+        self.assertEqual(row["blockly_json"], _ZIELE)
+        self.assertEqual((row["code_language"], row["code_files"]), ("python", _PY_FILES))
+        self.assertEqual(created.blockly_json, _ZIELE)
+
+    def test_create_refuses_any_other_blockly_key_on_a_code_program(self):
+        db = _FakeDB()
+        with _Ctx(db):
+            for extra in ({"variables": []}, {"workspaceComments": []}, dict(_ZIELE, blocks={})):
+                exc = _refusal(
+                    wf.create_workflow,
+                    _create_payload(code_language="java", code_files=_JAVA_FILES, blockly_json=extra),
+                    user=_OWNER,
+                )
+                self.assertEqual(exc.status_code, 400, extra)
+                self.assertEqual(exc.detail, wf._ONE_LANGUAGE_DE)
+        self.assertEqual(db.tables.get("workflows", {}), {})
+
+    def test_a_code_save_with_ziele_is_ONE_update_workflow_code_call(self):
+        # The review's blocking finding: the code branch must win over the
+        # blockly branch, or a code save carrying Ziele goes through
+        # update_workflow_blockly (which would write blockly_json and never the
+        # code, and a second snapshot).
+        db = _FakeDB()
+        row = _seed_python(db)
+        new_files = {"main.py": 'import robot\nrobot.move_to("Ablage")\n'}
+        with _Ctx(db):
+            updated = wf.update_workflow(
+                row["id"], _update_payload(code_files=new_files, blockly_json=_ZIELE), user=_OWNER
+            )
+        self.assertEqual(db.rpc_calls, [(
+            "update_workflow_code",
+            {"p_workflow_id": row["id"], "p_user_id": "owner",
+             "p_code_files": new_files, "p_code_language": "python",
+             "p_blockly_json": _ZIELE},
+        )])
+        self.assertEqual(db.plain_updates, [])
+        self.assertEqual(updated.blockly_json, _ZIELE)
+        self.assertEqual(updated.code_files, new_files)
+
+    def test_a_code_save_with_ziele_and_the_sim_scene_keeps_blockly_json_out_of_the_plain_update(self):
+        db = _FakeDB()
+        row = _seed_python(db)
+        scene = {"objects": []}
+        with _Ctx(db):
+            updated = wf.update_workflow(
+                row["id"],
+                _update_payload(name="Neu", code_files=_PY_FILES, blockly_json=_ZIELE, sim_scene=scene,
+                                code_language="python"),
+                user=_OWNER,
+            )
+        self.assertEqual(db.plain_updates, [("workflows", {"name": "Neu", "sim_scene": scene})])
+        self.assertEqual([n for n, _p in db.rpc_calls], ["update_workflow_code"])
+        self.assertEqual(db.rpc_calls[0][1]["p_blockly_json"], _ZIELE)
+        self.assertEqual((updated.name, updated.sim_scene, updated.blockly_json), ("Neu", scene, _ZIELE))
+
+    def test_emptying_the_ziele_sends_the_empty_document(self):
+        db = _FakeDB()
+        row = _seed_python(db)
+        db.tables["workflows"][row["id"]]["blockly_json"] = dict(_ZIELE)
+        empty = {"edubotics-destinations": None}
+        with _Ctx(db):
+            updated = wf.update_workflow(
+                row["id"], _update_payload(code_files=_PY_FILES, blockly_json=empty), user=_OWNER
+            )
+        self.assertEqual(db.rpc_calls[0][1]["p_blockly_json"], empty)
+        self.assertEqual(updated.blockly_json, empty)
+
+    def test_a_code_only_patch_leaves_the_stored_ziele_alone(self):
+        # An older client (or any PATCH without Ziele) sends no blockly_json:
+        # p_blockly_json is None and the RPC keeps what is stored.
+        db = _FakeDB()
+        row = _seed_python(db)
+        db.tables["workflows"][row["id"]]["blockly_json"] = dict(_ZIELE)
+        with _Ctx(db):
+            updated = wf.update_workflow(row["id"], _update_payload(code_files=_PY_FILES), user=_OWNER)
+        self.assertIsNone(db.rpc_calls[0][1]["p_blockly_json"])
+        self.assertEqual(updated.blockly_json, _ZIELE)
+
+    def test_ziele_without_the_code_are_refused_on_a_code_program(self):
+        db = _FakeDB()
+        row = _seed_python(db)
+        with _Ctx(db):
+            exc = _refusal(wf.update_workflow, row["id"], _update_payload(blockly_json=_ZIELE), user=_OWNER)
+        self.assertEqual(exc.status_code, 400)
+        self.assertEqual(exc.detail, wf._CODE_ZIELE_NEED_FILES_DE)
+        self.assertEqual(db.rpc_calls, [])
+        self.assertEqual(db.plain_updates, [])
+        self.assertEqual(db.tables["workflows"][row["id"]]["blockly_json"], {})
+
+    def test_blocks_with_the_code_are_still_refused(self):
+        db = _FakeDB()
+        row = _seed_python(db)
+        with _Ctx(db):
+            for bad in (dict(_ZIELE, blocks={"blocks": []}), {"variables": []}):
+                exc = _refusal(
+                    wf.update_workflow, row["id"],
+                    _update_payload(code_files=_PY_FILES, blockly_json=bad), user=_OWNER,
+                )
+                self.assertEqual(exc.status_code, 400, bad)
+                self.assertEqual(exc.detail, wf._ONE_LANGUAGE_DE)
+        self.assertEqual(db.rpc_calls, [])
+        self.assertEqual(db.plain_updates, [])
+
+    def test_a_code_save_still_runs_the_blockly_size_validator(self):
+        db = _FakeDB()
+        row = _seed_python(db)
+        huge = {"edubotics-destinations": {"version": 1, "entries": ["x" * (300 * 1024)]}}
+        with _Ctx(db):
+            exc = _refusal(
+                wf.update_workflow, row["id"],
+                _update_payload(code_files=_PY_FILES, blockly_json=huge), user=_OWNER,
+            )
+        self.assertEqual(exc.status_code, 413)
+        self.assertEqual(db.rpc_calls, [])
+
+    def test_ziele_and_code_on_a_blockly_program_are_still_refused(self):
+        db = _FakeDB()
+        row = _seed_blockly(db)
+        with _Ctx(db):
+            exc = _refusal(
+                wf.update_workflow, row["id"],
+                _update_payload(code_files=_PY_FILES, blockly_json=_ZIELE), user=_OWNER,
+            )
+        self.assertEqual(exc.status_code, 400)
+        self.assertEqual(db.rpc_calls, [])
+        self.assertEqual(db.tables["workflows"][row["id"]]["code_language"], "")
+
+    def test_a_blockly_program_saving_its_own_ziele_is_unchanged(self):
+        # A Blockly program's blockly_json keeps every key it always had; it
+        # still goes through update_workflow_blockly.
+        db = _FakeDB()
+        row = _seed_blockly(db)
+        doc = dict(_ZIELE, blocks={"blocks": []}, variables=[])
+        with _Ctx(db):
+            wf.update_workflow(row["id"], _update_payload(blockly_json=doc), user=_OWNER)
+        self.assertEqual([n for n, _p in db.rpc_calls], ["update_workflow_blockly"])
+        self.assertEqual(db.rpc_calls[0][1]["p_blockly_json"], doc)
+
+    def test_the_key_rule_is_one_helper(self):
+        ok = wf._code_blockly_json_ok
+        self.assertTrue(ok({}))
+        self.assertTrue(ok(_ZIELE))
+        self.assertTrue(ok({"edubotics-destinations": None}))
+        self.assertFalse(ok({"blocks": {}}))
+        self.assertFalse(ok(dict(_ZIELE, variables=[])))
+        self.assertFalse(ok([]))
+        self.assertFalse(ok(None))
+        self.assertEqual(wf._CODE_BLOCKLY_KEYS, frozenset({"edubotics-destinations"}))
 
 
 # ==================================================================

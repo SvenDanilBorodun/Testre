@@ -458,14 +458,18 @@ def _validate_required_schema() -> None:
         }),
         # Migration 040 — the SECURITY DEFINER code writer (owner-only, sets
         # the app.user_id GUC so the version trigger stamps saved_by) that
-        # PATCH /workflows/{id} routes a code_files change through. The
+        # PATCH /workflows/{id} routes a code_files change through. Migration
+        # 041 gave it a fifth argument, p_blockly_json (a code program's
+        # Ziele), and the route always sends it: the probe names it too, so a
+        # database without 041 answers PGRST202 and the deploy aborts. The
         # dummy ids answer P0002 („nicht gefunden"), which proves the RPC
-        # exists; PGRST202 means 040 has not been applied.
+        # exists.
         ("update_workflow_code", {
             "p_workflow_id": dummy,
             "p_user_id": dummy,
             "p_code_files": {},
             "p_code_language": "python",
+            "p_blockly_json": None,
         }),
     )
     missing_rpcs: list[str] = []

@@ -40,7 +40,8 @@ import {
   scanCodeAssets,
   variableOccurrences,
 } from './codeAssetUsage';
-import { insertLinesAt, insertionTarget, snippetLines, stepsToCode } from './codeInsert';
+import { insertAtTarget, insertionTarget, snippetLines, stepsToCode } from './codeInsert';
+import { CODE_DE } from './codeMessagesDe';
 
 // CodeWorkspace's file sidebar (`w-44`, 11rem at the 16 px root): the drawer
 // opens right beside it, over the editor.
@@ -127,8 +128,10 @@ export function createCodeAssetDocument({
     const project = files();
     const cursor = typeof getCursor === 'function' ? getCursor() : null;
     const target = insertionTarget(project, language, cursor);
+    // No cursor and no Java `main`: nothing is written (review R-O2).
+    if (target.notFound) return { count: 0, error: CODE_DE.NO_MAIN_HINT };
     const content = typeof project[target.file] === 'string' ? project[target.file] : '';
-    const res = insertLinesAt(content, target.afterLine, lines, { indent: target.indent, language });
+    const res = insertAtTarget(content, target, lines, language);
     applyFiles({ ...project, [target.file]: res.content });
     if (typeof setCursor === 'function') setCursor({ file: target.file, line: res.lastLine });
     if (typeof requestReveal === 'function') requestReveal({ file: target.file, line: res.lastLine });

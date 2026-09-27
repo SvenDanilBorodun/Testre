@@ -148,6 +148,10 @@ export default function SammlungDrawer({
 
   const insert = (card) => {
     const result = assetDoc.insertSnippet({ kind: card.assetKind, name: card.assetName });
+    if (result && result.error) {
+      toast.error(result.error);
+      return;
+    }
     if (result && result.count > 0) {
       toast.success(formatCode(CODE_DE.INSERTED_AT, result.file, result.firstLine));
     }

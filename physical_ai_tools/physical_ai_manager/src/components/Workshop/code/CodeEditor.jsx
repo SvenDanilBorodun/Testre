@@ -36,7 +36,7 @@ import {
   Annotation, EditorSelection, EditorState, Compartment, StateEffect, StateField,
 } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
-import { bracketMatching, ensureSyntaxTree, indentOnInput, syntaxHighlighting,
+import { bracketMatching, ensureSyntaxTree, indentOnInput, indentUnit, syntaxHighlighting,
   defaultHighlightStyle } from '@codemirror/language';
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
 import { forceLinting, linter, lintGutter } from '@codemirror/lint';
@@ -58,7 +58,9 @@ import {
   assetHoverText,
   assetOptions,
 } from './codeAssetCompletion';
-import { SNIPPET_MIME, insertionEdit, minimalChange, snippetLines } from './codeInsert';
+import {
+  CODE_INDENT_UNIT, SNIPPET_MIME, insertionEdit, minimalChange, snippetLines,
+} from './codeInsert';
 
 const LANGUAGE_SUPPORT = { python, java };
 
@@ -413,6 +415,10 @@ function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef,
     drawSelection(),
     rectangularSelection(),
     indentOnInput(),
+    // The same unit an insertion falls back to (codeInsert.CODE_INDENT_UNIT):
+    // CodeMirror's default of 2 spaces next to a 4-space insertion wrote an
+    // IndentationError into the student's program (review M2).
+    indentUnit.of(CODE_INDENT_UNIT),
     bracketMatching(),
     closeBrackets(),
     syntaxHighlighting(defaultHighlightStyle, { fallback: true }),

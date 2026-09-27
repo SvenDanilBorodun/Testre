@@ -15,10 +15,22 @@
 //   * The spellings come from robot_api.json (Python name / Java name), never a
 //     second copy: `robot.move_to("Ablage")` / `Robot.moveTo("Ablage");`.
 //   * WHERE: on new lines below the last line the student's cursor was on,
-//     indented like it (one level deeper after a line that opens a block — `:`
-//     or `{`). A student who never clicked into the editor gets the end of main:
-//     the end of main.py at the top level, or just inside `main()`'s closing
-//     brace in Java (a brace scan that skips strings and comments).
+//     indented like it. After a line that opens a block (`:` or `{`) the lines
+//     take the indentation of the body line below it; with no body yet, the
+//     opener's own indentation plus the unit the FILE uses (detectIndentUnit),
+//     else CODE_INDENT_UNIT — which is also the editor's indentUnit, so the two
+//     can never disagree (a fixed 4 spaces under a 2-space body was an
+//     IndentationError, review M2).
+//   * A student who never clicked into the editor gets the end of main
+//     (review R-O2): the end of main.py at the top level, or just inside
+//     `main()`'s closing brace in Java (a brace scan that skips strings and
+//     comments) — BEFORE a trailing endless loop (`while True:`,
+//     `while (true)`, `for (;;)`, `do … while (true);`) or a trailing
+//     `return`, where code would never run (Java: „unreachable statement").
+//     A Java program with no findable `main` gets no place at all
+//     (`notFound`): the caller says so in German instead of writing outside
+//     the class; a `main` whose closing brace shares a line with code is
+//     opened up (`split`).
 //
 // PURE — strings in, strings out. CodeEditor (a drop) and the code asset
 // adapter (a row's „Einfügen", Vormachen's „Als Programm einfügen") call it.
@@ -36,7 +48,9 @@ export const SNIPPET_MIME = 'application/x-edubotics-snippet';
 const METHODS = new Map((robotApi.methods || []).map((m) => [m.name, m]));
 // An asset name that can sit between double quotes in both languages as is.
 const SAFE_NAME_RE = /^[^"\\\n\r]+$/;
-const DEFAULT_INDENT_UNIT = '    ';
+/** One indentation level: the editor's indentUnit AND the insertion's
+ *  fallback (PEP 8's 4 spaces; the Java starter file uses 4 too). */
+export const CODE_INDENT_UNIT = '    ';
 
 /** One call as a line: `robot.name(args)` / `Robot.javaName(args);`. */
 export function codeCallLine(method, args, language) {
@@ -90,6 +104,44 @@ function codePart(line, language) {
   return codeOnlyText(line, language).replace(/\s+$/, '');
 }
 
+/**
+ * The indentation step `content` uses: the most common increase from one
+ * code line to the next (a tab when tabs win; ties go to the smaller step),
+ * or null when nothing is indented. Strings and comments do not count.
+ */
+export function detectIndentUnit(content, language = 'python') {
+  const code = codeOnlyText(typeof content === 'string' ? content : '', language);
+  const votes = new Map();
+  let prev = '';
+  for (const row of code.split('\n')) {
+    if (row.trim() === '') continue;
+    const own = leadingWhitespace(row);
+    if (own.length > prev.length && own.startsWith(prev)) {
+      const delta = own.slice(prev.length);
+      const key = delta.includes('\t') ? '\t' : delta;
+      votes.set(key, (votes.get(key) || 0) + 1);
+    }
+    prev = own;
+  }
+  let best = null;
+  for (const [unit, n] of votes) {
+    const bestN = best === null ? -1 : votes.get(best);
+    if (n > bestN || (n === bestN && unit.length < best.length)) best = unit;
+  }
+  return best;
+}
+
+// The indentation of the first non-empty line below row `index` when it is
+// deeper than `own`, else null.
+function deeperBodyIndent(rows, index, own) {
+  for (let j = index + 1; j < rows.length; j += 1) {
+    if (rows[j].trim() === '') continue;
+    const o = leadingWhitespace(rows[j]);
+    return o.length > own.length && o.startsWith(own) ? o : null;
+  }
+  return null;
+}
+
 // Where the lines go and how they are indented; shared by the string form
 // (insertLinesAt) and the editor-change form (insertionEdit), so the two can
 // never disagree.
@@ -98,15 +150,19 @@ function planInsertion(content, afterLine, lines, opts) {
   const rows = text.split('\n');
   const body = Array.isArray(lines) ? lines : [];
   const at = Math.min(Math.max(Number.isInteger(afterLine) ? afterLine : 0, 0), rows.length);
+  const language = opts.language || 'python';
   let indent = typeof opts.indent === 'string' ? opts.indent : null;
   if (indent === null) {
     indent = '';
     for (let i = at - 1; i >= 0; i -= 1) {
       if (rows[i].trim() === '') continue;
       const own = leadingWhitespace(rows[i]);
-      const code = codePart(rows[i], opts.language || 'python');
-      const unit = own.includes('\t') ? '\t' : DEFAULT_INDENT_UNIT;
-      indent = /[:{]$/.test(code) ? own + unit : own;
+      if (/[:{]$/.test(codePart(rows[i], language))) {
+        indent = deeperBodyIndent(rows, i, own)
+          ?? own + (detectIndentUnit(text, language) || CODE_INDENT_UNIT);
+      } else {
+        indent = own;
+      }
       break;
     }
   }
@@ -193,22 +249,84 @@ function lineOf(text, offset) {
   return line;
 }
 
+// The last top-level statement of a Python module is `while True:` /
+// `while 1:` (strings and comments blanked).
+const PY_ENDLESS_RE = /^while\s+(True|1)\s*:/;
+// The last statement of Java's main never lets a following line run.
+const JAVA_ENDLESS_RES = [
+  /^while\s*\(\s*true\s*\)/,
+  /^for\s*\(\s*;\s*;\s*\)/,
+  /^return\b/,
+  /^do\b[\s\S]*\bwhile\s*\(\s*true\s*\)\s*;\s*$/,
+];
+const JAVA_CONTINUATION_RE = /^(else|catch|finally)\b/;
+
+// Offset of the last statement that starts at the top level of the block
+// body code[open+1 … close-1], or -1. `}` ends a statement unless `else`,
+// `catch`, `finally` or a do-loop's `while` continues it; `;` inside
+// parentheses (a for header) ends nothing.
+function lastStatementStart(code, open, close) {
+  let depth = 0;
+  let paren = 0;
+  let pending = true;
+  let afterBrace = false;
+  let current = -1;
+  for (let i = open + 1; i < close; i += 1) {
+    const ch = code[i];
+    if (pending && !/\s/.test(ch)) {
+      const rest = code.slice(i, i + 12);
+      const continues = afterBrace && (JAVA_CONTINUATION_RE.test(rest)
+        || (/^while\b/.test(rest) && current >= 0 && /^do\b/.test(code.slice(current, current + 3))));
+      if (!continues) current = i;
+      pending = false;
+      afterBrace = false;
+    }
+    if (ch === '(') paren += 1;
+    else if (ch === ')') paren -= 1;
+    else if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0 && paren === 0) {
+        pending = true;
+        afterBrace = true;
+      }
+    } else if (ch === ';' && depth === 0 && paren === 0) {
+      pending = true;
+      afterBrace = false;
+    }
+  }
+  return current;
+}
+
 /**
- * Where „at the end of main" is. Python: after the last line of main.py, at
- * the top level. Java: just before `main()`'s closing brace, one level inside
- * it — or the end of the file when there is no `static void main(` whose body
- * spans lines.
- * @returns {{afterLine: number, indent: string}}
+ * Where „at the end of main" is (review R-O2).
+ *   Python: after the last line of main.py, at the top level — or before a
+ *     trailing top-level `while True:` / `while 1:`.
+ *   Java: inside `main()`, below its last line and indented like its body —
+ *     or before a trailing `while (true)`, `for (;;)`, `do … while (true);`
+ *     or `return`.
+ * Returns `{afterLine, indent}`; for a Java `main` whose closing brace
+ * shares its line with code, `{split: {at, bodyIndent, closeIndent}}` (the
+ * body is opened up at that brace, see insertAtTarget); for Java with no
+ * findable, closed `main`, `{notFound: true}`.
  */
 export function mainBodyEnd(content, language) {
   const text = typeof content === 'string' ? content : '';
-  const end = { afterLine: lastRealLine(text), indent: '' };
-  if (language !== 'java') return end;
+  const rows = text.split('\n');
+  if (language !== 'java') {
+    const codeRows = codeOnlyText(text, 'python').split('\n');
+    let lastTop = -1;
+    codeRows.forEach((row, i) => {
+      if (row.trim() !== '' && !/^\s/.test(row)) lastTop = i;
+    });
+    if (lastTop >= 0 && PY_ENDLESS_RE.test(codeRows[lastTop])) return { afterLine: lastTop, indent: '' };
+    return { afterLine: lastRealLine(text), indent: '' };
+  }
   const code = codeOnlyText(text, 'java');
   const decl = /\bstatic\s+void\s+main\s*\(/.exec(code);
-  if (!decl) return end;
+  if (!decl) return { notFound: true };
   const open = code.indexOf('{', decl.index + decl[0].length);
-  if (open < 0) return end;
+  if (open < 0) return { notFound: true };
   let depth = 0;
   let close = -1;
   for (let i = open; i < code.length; i += 1) {
@@ -221,20 +339,67 @@ export function mainBodyEnd(content, language) {
       }
     }
   }
-  if (close < 0) return end;
+  if (close < 0) return { notFound: true };
+  const unit = detectIndentUnit(text, 'java') || CODE_INDENT_UNIT;
   const openLine = lineOf(text, open);
   const closeLine = lineOf(text, close);
-  if (closeLine <= openLine) return end;
-  const closeRow = text.split('\n')[closeLine - 1];
-  const own = leadingWhitespace(closeRow);
-  return { afterLine: closeLine - 1, indent: own + (own.includes('\t') ? '\t' : DEFAULT_INDENT_UNIT) };
+  const closeRow = rows[closeLine - 1];
+  const closeCol = close - (text.lastIndexOf('\n', close - 1) + 1);
+  if (closeLine === openLine || closeRow.slice(0, closeCol).trim() !== '') {
+    const declIndent = leadingWhitespace(rows[openLine - 1]);
+    const bodyIndent = closeLine === openLine ? declIndent + unit : leadingWhitespace(closeRow);
+    return { split: { at: close, bodyIndent, closeIndent: declIndent } };
+  }
+  const last = lastStatementStart(code, open, close);
+  if (last >= 0) {
+    const stmt = code.slice(last, close).trim();
+    if (JAVA_ENDLESS_RES.some((re) => re.test(stmt))) {
+      const line = lineOf(text, last);
+      return { afterLine: line - 1, indent: leadingWhitespace(rows[line - 1]) };
+    }
+  }
+  const closeIndent = leadingWhitespace(closeRow);
+  let bodyIndent = null;
+  for (let l = closeLine - 1; l > openLine; l -= 1) {
+    if (rows[l - 1].trim() === '') continue;
+    const o = leadingWhitespace(rows[l - 1]);
+    if (o.length > closeIndent.length && o.startsWith(closeIndent)) bodyIndent = o;
+    break;
+  }
+  return { afterLine: closeLine - 1, indent: bodyIndent ?? closeIndent + unit };
+}
+
+/**
+ * Apply an insertion target (insertionTarget / mainBodyEnd) to `content`:
+ * `{content, firstLine, lastLine}`. A `split` target opens a one-line body
+ * at its closing brace: the lines go on their own lines, the brace on the
+ * next, indented like the declaration.
+ */
+export function insertAtTarget(content, target, lines, language) {
+  const text = typeof content === 'string' ? content : '';
+  const body = Array.isArray(lines) ? lines : [];
+  if (target && target.split) {
+    const { at, bodyIndent, closeIndent } = target.split;
+    const before = text.slice(0, at).replace(/[ \t]+$/, '');
+    const firstLine = before.split('\n').length + 1;
+    const next = `${before}\n${body.map((l) => `${bodyIndent}${l}`).join('\n')}\n${closeIndent}${text.slice(at)}`;
+    return { content: next, firstLine, lastLine: firstLine + body.length - 1 };
+  }
+  const afterLine = target ? target.afterLine : 0;
+  return insertLinesAt(text, afterLine, body, {
+    indent: target && typeof target.indent === 'string' ? target.indent : undefined,
+    language,
+  });
 }
 
 /**
  * The insertion point for `files`: the last cursor `{file, line}` when that
  * file exists and has that line (below it, indented like it), else the end of
- * the entry file's main.
- * @returns {{file: string, afterLine: number, indent?: string, fromCursor: boolean}}
+ * the entry file's main (mainBodyEnd: before a trailing endless loop or
+ * return; `split` for a one-line Java main; `notFound` when Java has no main —
+ * the caller writes nothing and says so). Apply it with insertAtTarget.
+ * @returns {{file: string, afterLine?: number, indent?: string, split?: object,
+ *   notFound?: true, fromCursor: boolean}}
  */
 export function insertionTarget(files, language, cursor) {
   const project = files && typeof files === 'object' ? files : {};
@@ -247,5 +412,7 @@ export function insertionTarget(files, language, cursor) {
   }
   const entry = ENTRY_FILE[language];
   const at = mainBodyEnd(project[entry] || '', language);
+  if (at.notFound) return { file: entry, notFound: true, fromCursor: false };
+  if (at.split) return { file: entry, split: at.split, fromCursor: false };
   return { file: entry, afterLine: at.afterLine, indent: at.indent, fromCursor: false };
 }

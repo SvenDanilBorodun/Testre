@@ -120,6 +120,30 @@ describe('SammlungDrawer over a Python program', () => {
     expect(mockToast.success).toHaveBeenCalledWith(formatCode(CODE_DE.INSERTED_AT, 'main.py', 4));
   });
 
+  it('„Einfügen" into a Java program without main says so in German and writes nothing', () => {
+    const src = 'public class Main {\n}\n';
+    let files = { 'Main.java': src };
+    const store = createDetachedDestinationStore([]);
+    store.add({ name: 'Hoch', kind: 'pose', source: 'capture', x: 0.1, y: 0.1, z: 0.15 });
+    const assetDoc = createCodeAssetDocument({
+      language: 'java', store, getFiles: () => files, applyFiles: (n) => { files = n; },
+      requestReveal: () => {}, getCursor: () => null,
+    });
+    const provider = createSammlungProvider({ capabilities: { hardware: true, drawer: true } });
+    const redux = configureStore({ reducer: { studioAssets: studioAssetsReducer } });
+    redux.dispatch(openDrawer({ tab: 'positionen', focusId: null }));
+    render(
+      <Provider store={redux}>
+        <SammlungDrawer assetDoc={assetDoc} provider={provider} accessToken="tok" workflowId="wf1"
+          robotType="omx_f" onPreview={vi.fn()} saveWorkflowNow={vi.fn()} refetchTrajectories={vi.fn()} />
+      </Provider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: `${CODE_DE.SAMMLUNG_INSERT}: Hoch` }));
+    expect(mockToast.error).toHaveBeenCalledWith(CODE_DE.NO_MAIN_HINT);
+    expect(mockToast.success).not.toHaveBeenCalled();
+    expect(files['Main.java']).toBe(src);
+  });
+
   it('a row can be dragged into the editor as a snippet', () => {
     setup();
     const item = screen.getAllByRole('listitem')

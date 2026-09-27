@@ -28,7 +28,7 @@ import CodeEditor, {
   assetCompletionSource,
   assetHoverAt,
 } from '../CodeEditor';
-import { SNIPPET_MIME } from '../codeInsert';
+import { CODE_INDENT_UNIT, SNIPPET_MIME } from '../codeInsert';
 import { CODE_LINT_IDLE_MS } from '../parseMarkers';
 import { CODE_DE, formatCode } from '../codeMessagesDe';
 
@@ -40,6 +40,8 @@ let currentCompletions;
 let startCompletion;
 let undo;
 let forEachDiagnostic;
+let indentUnitFacet;
+let insertNewlineAndIndent;
 
 // jsdom has no layout, and its Range has no getClientRects — which the
 // editor's cursor drawing calls on every selection change. An empty list is
@@ -63,13 +65,16 @@ afterAll(() => {
 });
 
 beforeAll(async () => {
-  const [view, state, autocomplete, commands, lint] = await Promise.all([
+  const [view, state, autocomplete, commands, lint, language] = await Promise.all([
     import('@codemirror/view'),
     import('@codemirror/state'),
     import('@codemirror/autocomplete'),
     import('@codemirror/commands'),
     import('@codemirror/lint'),
+    import('@codemirror/language'),
   ]);
+  indentUnitFacet = language.indentUnit;
+  insertNewlineAndIndent = commands.insertNewlineAndIndent;
   EditorView = view.EditorView;
   EditorState = state.EditorState;
   EditorSelection = state.EditorSelection;
@@ -320,5 +325,32 @@ describe('dropping a Sammlung row', () => {
     view.posAtCoords = () => view.state.doc.line(1).from;
     act(() => { dropOn(view, { kind: 'pose', name: 'Hoch' }); });
     expect(view.state.doc.toString()).toBe(PY);
+  });
+});
+
+describe('one indentation unit for the editor and the insertion (review M2)', () => {
+  test('the editor indents with CODE_INDENT_UNIT, so Enter after a block opener agrees', () => {
+    const doc = 'for i in range(3):';
+    const { view } = mount({ value: doc });
+    expect(view.state.facet(indentUnitFacet)).toBe(CODE_INDENT_UNIT);
+    act(() => {
+      view.dispatch({ selection: EditorSelection.cursor(doc.length) });
+      insertNewlineAndIndent(view);
+    });
+    expect(view.state.doc.toString()).toBe(`for i in range(3):\n${CODE_INDENT_UNIT}`);
+  });
+
+  test('a row dropped into a 2-space body lands with 2 spaces', () => {
+    const two = 'import robot\nfor i in range(3):\n  robot.home()\n';
+    const { view } = mount({ value: two });
+    view.posAtCoords = () => view.state.doc.line(2).from + 3;
+    const data = { [SNIPPET_MIME]: JSON.stringify({ kind: 'pose', name: 'Hoch' }) };
+    act(() => {
+      fireEvent.drop(view.contentDOM, {
+        dataTransfer: { types: Object.keys(data), getData: (t) => data[t] || '' },
+      });
+    });
+    expect(view.state.doc.toString())
+      .toBe('import robot\nfor i in range(3):\n  robot.move_to("Hoch")\n  robot.home()\n');
   });
 });

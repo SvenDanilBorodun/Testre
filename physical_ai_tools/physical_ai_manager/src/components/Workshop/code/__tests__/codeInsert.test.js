@@ -15,7 +15,10 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  CODE_INDENT_UNIT,
   SNIPPET_MIME,
+  detectIndentUnit,
+  insertAtTarget,
   insertLinesAt,
   insertionEdit,
   insertionTarget,
@@ -83,8 +86,9 @@ describe('insertLinesAt', () => {
   it('adds one level after a line opening a block (Python `:`, Java `{`)', () => {
     expect(insertLinesAt('if x:\n    pass\n', 1, ['a()']).content).toBe('if x:\n    a()\n    pass\n');
     expect(insertLinesAt('if x:  # kommentar\n', 1, ['a()']).content).toBe('if x:  # kommentar\n    a()\n');
+    // No body yet: the anchor's own indentation plus the FILE's unit (2 here).
     expect(insertLinesAt('  void f() {\n  }\n', 1, ['a();'], { language: 'java' }).content)
-      .toBe('  void f() {\n      a();\n  }\n');
+      .toBe('  void f() {\n    a();\n  }\n');
   });
 
   it('takes an empty anchor line’s indentation from the nearest line above', () => {
@@ -131,8 +135,10 @@ describe('mainBodyEnd', () => {
     expect(out).toContain('        Robot.log("Hallo Roboter!");\n        Robot.beep();\n    }\n}');
   });
 
-  it('Java without a main: the end of the file', () => {
-    expect(mainBodyEnd('class A {}\n', 'java')).toEqual({ afterLine: 1, indent: '' });
+  it('Java without a main: never outside the class — no place at all (R-O2)', () => {
+    expect(mainBodyEnd('class A {}\n', 'java')).toEqual({ notFound: true });
+    expect(mainBodyEnd('public class Main {\n  static void main(String[] a) {\n', 'java'))
+      .toEqual({ notFound: true });
   });
 });
 
@@ -196,5 +202,101 @@ describe('minimalChange — an external edit as the smallest replacement', () =>
 describe('SNIPPET_MIME', () => {
   it('is the one drag type the drawer sets and the editor reads', () => {
     expect(SNIPPET_MIME).toBe('application/x-edubotics-snippet');
+  });
+});
+
+describe('indentation follows the program, not a fixed 4 spaces (review M2)', () => {
+  it('the editor and the fallback agree on one unit: 4 spaces (PEP 8, the Java starter)', () => {
+    expect(CODE_INDENT_UNIT).toBe('    ');
+    expect(STARTER_FILES.java['Main.java']).toContain('\n    public static void main');
+  });
+
+  it('after a block opener: the indentation of the body line below it', () => {
+    const two = 'import robot\n\nfor i in range(3):\n  robot.replay("Winken")\nrobot.home()\n';
+    expect(insertLinesAt(two, 3, ['robot.beep()']).content)
+      .toBe('import robot\n\nfor i in range(3):\n  robot.beep()\n  robot.replay("Winken")\nrobot.home()\n');
+    const tab = 'for i in range(3):\n\trobot.home()\n';
+    expect(insertLinesAt(tab, 1, ['a()']).content).toBe('for i in range(3):\n\ta()\n\trobot.home()\n');
+    const four = 'while x:\n    a()\n';
+    expect(insertLinesAt(four, 1, ['b()']).content).toBe('while x:\n    b()\n    a()\n');
+  });
+
+  it('an opener with no body yet: its own indentation plus the unit the file uses', () => {
+    expect(insertLinesAt('def f():\n  return 1\nif x:\n', 3, ['a()']).content)
+      .toBe('def f():\n  return 1\nif x:\n  a()\n');
+    expect(insertLinesAt('def f():\n\treturn 1\nif x:\n', 3, ['a()']).content)
+      .toBe('def f():\n\treturn 1\nif x:\n\ta()\n');
+    expect(insertLinesAt('if x:\n', 1, ['a()']).content).toBe('if x:\n    a()\n');
+  });
+
+  it('inside a body the anchor’s own indentation (2 spaces stays 2)', () => {
+    const two = 'for i in range(3):\n  robot.home()\n';
+    const out = insertLinesAt(two, 2, ['robot.beep()']).content;
+    expect(out).toBe('for i in range(3):\n  robot.home()\n  robot.beep()\n');
+  });
+
+  it('detectIndentUnit reads the smallest step the file uses', () => {
+    expect(detectIndentUnit('if a:\n  if b:\n    c()\n')).toBe('  ');
+    expect(detectIndentUnit('if a:\n\tb()\n')).toBe('\t');
+    expect(detectIndentUnit('a()\nb()\n')).toBeNull();
+    expect(detectIndentUnit('x = """\n      text\n"""\n', 'python')).toBeNull();
+  });
+
+  it('Java main with a 2-space body: the body’s own indentation', () => {
+    const src = 'public class Main {\n  public static void main(String[] a) {\n    Robot.home();\n  }\n}\n';
+    expect(mainBodyEnd(src, 'java')).toEqual({ afterLine: 3, indent: '    ' });
+    const empty = 'public class Main {\n  public static void main(String[] a) {\n  }\n}\n';
+    expect(mainBodyEnd(empty, 'java')).toEqual({ afterLine: 2, indent: '    ' });
+  });
+});
+
+describe('the end of main stops before an endless loop or a return (review R-O2)', () => {
+  it('Python: before a trailing top-level `while True:`', () => {
+    const src = 'import robot\nrobot.home()\nwhile True:\n    robot.beep()\n\n# Ende\n';
+    expect(mainBodyEnd(src, 'python')).toEqual({ afterLine: 2, indent: '' });
+    expect(mainBodyEnd('while 1:\n    pass\n', 'python')).toEqual({ afterLine: 0, indent: '' });
+    // Not trailing: the end of the file.
+    const notLast = 'while True:\n    break\nrobot.home()\n';
+    expect(mainBodyEnd(notLast, 'python')).toEqual({ afterLine: 3, indent: '' });
+  });
+
+  const java = (body) => ['public class Main {', '    public static void main(String[] args) {',
+    ...body, '    }', '}', ''].join('\n');
+
+  it('Java: before a trailing while (true) / for (;;) / return / do … while (true)', () => {
+    expect(mainBodyEnd(java(['        Robot.home();', '        while (true) {', '            Robot.beep();', '        }']), 'java'))
+      .toEqual({ afterLine: 3, indent: '        ' });
+    expect(mainBodyEnd(java(['        Robot.home();', '        for (;;) Robot.beep();']), 'java'))
+      .toEqual({ afterLine: 3, indent: '        ' });
+    expect(mainBodyEnd(java(['        Robot.home();', '        return;']), 'java'))
+      .toEqual({ afterLine: 3, indent: '        ' });
+    expect(mainBodyEnd(java(['        do {', '            Robot.beep();', '        } while (true);']), 'java'))
+      .toEqual({ afterLine: 2, indent: '        ' });
+  });
+
+  it('Java: an ordinary last statement (an if/else, a finite loop) keeps the end of main', () => {
+    const src = java(['        if (x) {', '            a();', '        } else {', '            b();', '        }',
+      '        while (i < 3) { i++; }']);
+    expect(mainBodyEnd(src, 'java')).toEqual({ afterLine: 8, indent: '        ' });
+  });
+
+  it('Java: a main whose braces sit on ONE line is opened up, inside the class', () => {
+    const src = 'public class Main {\n    public static void main(String[] a) { Robot.home(); }\n}\n';
+    const at = mainBodyEnd(src, 'java');
+    expect(at.split).toBeDefined();
+    const out = insertAtTarget(src, at, ['Robot.beep();'], 'java');
+    expect(out.content).toBe(
+      'public class Main {\n    public static void main(String[] a) { Robot.home();\n'
+      + '        Robot.beep();\n    }\n}\n',
+    );
+    expect([out.firstLine, out.lastLine]).toEqual([3, 3]);
+  });
+
+  it('insertionTarget passes a missing main on instead of guessing a place', () => {
+    const t = insertionTarget({ 'Main.java': 'class A {}\n' }, 'java', null);
+    expect(t).toMatchObject({ file: 'Main.java', notFound: true, fromCursor: false });
+    // With a cursor there is always a place.
+    expect(insertionTarget({ 'Main.java': 'class A {}\n' }, 'java', { file: 'Main.java', line: 1 }))
+      .toMatchObject({ fromCursor: true, afterLine: 1 });
   });
 });

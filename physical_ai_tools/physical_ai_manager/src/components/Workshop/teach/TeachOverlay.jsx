@@ -737,6 +737,12 @@ function TeachOverlay({
       toast.error(isCode ? CODE_DE.TEACH_INSERT_FAILED : INSERT_FAILED_DE);
       return;
     }
+    if (result && result.error) {
+      // A code program with no place to write (no cursor, no Java main).
+      toast.error(result.error);
+      refocus();
+      return;
+    }
     if (result && result.count > 0) {
       if (isCode) {
         // Where the lines went: the cursor's file and line, or the end of main.

@@ -203,6 +203,24 @@ describe('TeachOverlay over a Python program', () => {
     expect(reveals[reveals.length - 1]).toEqual({ file: 'main.py', line: 4 });
   });
 
+  test('a Java program without main gets the German hint, and nothing is written', () => {
+    let files = { 'Main.java': 'public class Main {\n}\n' };
+    const doc = createCodeAssetDocument({
+      language: 'java',
+      store: createDetachedDestinationStore([]),
+      getFiles: () => files,
+      applyFiles: (next) => { files = next; },
+      requestReveal: () => {},
+      getCursor: () => null,
+    });
+    render(<TeachOverlay {...props(doc)} />);
+    act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
+    fireEvent.click(screen.getByRole('button', { name: CODE_DE.TEACH_INSERT_LINE_ONE }));
+    expect(toast.error).toHaveBeenCalledWith(CODE_DE.NO_MAIN_HINT);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(files['Main.java']).toBe('public class Main {\n}\n');
+  });
+
   test('one line is „1 Zeile", never „1 Zeilen", and an empty round inserts nothing', () => {
     const { doc } = codeDoc('import robot\n');
     render(<TeachOverlay {...props(doc)} />);

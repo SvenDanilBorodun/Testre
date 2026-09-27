@@ -117,6 +117,9 @@ export const CODE_DE = Object.freeze({
   TEACH_INSERT_LINES: 'Als Programm einfügen ({0} Zeilen)',
   TEACH_INSERT_LINE_ONE: 'Als Programm einfügen (1 Zeile)',
   TEACH_INSERT_FAILED: 'Die Zeilen konnten nicht eingefügt werden.',
+  // No cursor and no `main` in the Java program: nothing is written (never
+  // outside the class, review R-O2).
+  NO_MAIN_HINT: 'Keine main-Methode gefunden – klicke in deinen Code, wo es eingefügt werden soll.',
   VARIABLES_EDIT_IN_CODE: 'Umbenennen und Löschen geht bei Code direkt im Programm.',
   VARIABLES_JAVA_NOTE: 'Java zeigt Werte nur mit Robot.zeige("Name", wert); an.',
   VARIABLE_USED_NOWHERE: 'Nirgends — der Name kommt im Programm nicht (mehr) vor.',

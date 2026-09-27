@@ -32,6 +32,7 @@ import {
 } from '../destinationStore';
 import { createBlocklyAssetDocument } from '../assetDocument';
 import { createCodeAssetDocument, CODE_SIDEBAR_WIDTH_PX } from '../../code/codeAssetDocument';
+import { CODE_DE } from '../../code/codeMessagesDe';
 
 const PIN = { name: 'Ablage', kind: 'pin', source: 'camera', x: 0.2, y: 0, z: 0 };
 const POSE = { name: 'Hoch', kind: 'pose', source: 'capture', x: 0.1, y: 0.1, z: 0.15 };
@@ -280,6 +281,69 @@ describe('the code document alone', () => {
     });
     expect(doc.usageRows('variable', 'punkte').map((r) => r.id))
       .toEqual(['main.py:L2', 'main.py:L3', 'main.py:L4']);
+  });
+});
+
+describe('the code document alone — where insertions go (review M2, R-O2)', () => {
+  const make = (files, language = 'python', cursor = null) => {
+    let current = { ...files };
+    const reveals = [];
+    const doc = createCodeAssetDocument({
+      language,
+      store: createDetachedDestinationStore([]),
+      getFiles: () => current,
+      applyFiles: (next) => { current = next; },
+      requestReveal: (at) => reveals.push(at),
+      getCursor: () => cursor,
+    });
+    return { doc, reveals, files: () => current };
+  };
+
+  it('„Einfügen" under a 2-space block uses 2 spaces', () => {
+    const { doc, files } = make({ 'main.py': 'import robot\nfor i in range(3):\n  robot.home()\n' },
+      'python', { file: 'main.py', line: 2 });
+    doc.insertSnippet({ kind: 'recording', name: 'Winken' });
+    expect(files()['main.py']).toBe('import robot\nfor i in range(3):\n  robot.replay("Winken")\n  robot.home()\n');
+  });
+
+  it('„Als Programm einfügen" under a tab-indented block uses tabs', () => {
+    const { doc, files } = make({ 'main.py': 'while x:\n\tpass\n' }, 'python', { file: 'main.py', line: 1 });
+    const r = doc.insertProgram(
+      [{ kind: 'pin', name: 'Ablage', entryId: 'e' }],
+      { placeNameOf: (it) => it.name, gripperStateOf: () => null },
+    );
+    expect(r.count).toBe(1);
+    expect(files()['main.py']).toBe('while x:\n\trobot.move_to("Ablage")\n\tpass\n');
+  });
+
+  it('without a cursor: before a trailing endless loop', () => {
+    const { doc, files } = make({ 'main.py': 'import robot\nwhile True:\n    robot.beep()\n' });
+    const r = doc.insertSnippet({ kind: 'pose', name: 'Hoch' });
+    expect(r).toMatchObject({ count: 1, file: 'main.py', firstLine: 2 });
+    expect(files()['main.py']).toBe('import robot\nrobot.move_to("Hoch")\nwhile True:\n    robot.beep()\n');
+  });
+
+  it('Java without a findable main: nothing written, a German hint instead', () => {
+    const src = 'public class Main {\n    static void hilfe() {\n    }\n}\n';
+    const { doc, files, reveals } = make({ 'Main.java': src }, 'java');
+    const r = doc.insertSnippet({ kind: 'pose', name: 'Hoch' });
+    expect(r).toEqual({ count: 0, error: CODE_DE.NO_MAIN_HINT });
+    expect(CODE_DE.NO_MAIN_HINT).toBe('Keine main-Methode gefunden – klicke in deinen Code, wo es eingefügt werden soll.');
+    expect(files()['Main.java']).toBe(src);
+    expect(reveals).toEqual([]);
+    expect(doc.insertProgram([{ kind: 'pin', name: 'A', entryId: 'e' }],
+      { placeNameOf: (it) => it.name, gripperStateOf: () => null })).toEqual({ count: 0, error: CODE_DE.NO_MAIN_HINT });
+  });
+
+  it('Java: a one-line main is opened up, inside the class', () => {
+    const src = 'public class Main {\n    public static void main(String[] a) { Robot.home(); }\n}\n';
+    const { doc, files, reveals } = make({ 'Main.java': src }, 'java');
+    const r = doc.insertSnippet({ kind: 'recording', name: 'Winken' });
+    expect(r).toMatchObject({ count: 1, file: 'Main.java', firstLine: 3, lastLine: 3 });
+    expect(files()['Main.java']).toBe(
+      'public class Main {\n    public static void main(String[] a) { Robot.home();\n        Robot.replay("Winken");\n    }\n}\n',
+    );
+    expect(reveals).toEqual([{ file: 'Main.java', line: 3 }]);
   });
 });
 

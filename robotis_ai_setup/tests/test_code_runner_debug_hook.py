@@ -226,9 +226,11 @@ class _RecordingRpc:
 
 
 class VarsSnapshot(unittest.TestCase):
-    """2026-09-27 (O3): the sampler's `__vars` snapshot — the innermost
-    project frame's locals (a function's), then its module's globals, then the
-    entry module's; at most 30; modules/functions/classes/dunders skipped."""
+    """2026-09-27, owner decision R-O1 (the O3 fallback): the sampler's
+    `__vars` snapshot is MODULE-LEVEL only — the innermost project frame's
+    module globals, then the entry module's; never a function frame's
+    `f_locals` (reading them from another thread writes the frame's own
+    `locals()` dict); at most 30; modules/functions/classes/dunders skipped."""
 
     def setUp(self):
         self.dbg = _load_hook()
@@ -248,37 +250,39 @@ class VarsSnapshot(unittest.TestCase):
         sys.path.remove(self.tmp)
         sys.modules.pop('helfer', None)
 
-    def test_function_locals_come_first_and_shadow_the_globals(self):
+    def test_a_function_frame_shows_its_module_globals_and_never_its_locals(self):
         f_frame = self.ns['FRAMES'][0]
         snap = self.dbg.snapshot_vars(f_frame, self.tmp)
-        self.assertEqual(snap['lokal'], 1)
-        self.assertEqual(snap['name'], 'innen')          # the local wins
+        self.assertNotIn('lokal', snap)
+        self.assertEqual(snap['name'], 'Robo')           # the GLOBAL, not the local
         self.assertEqual(snap['zaehler'], 3)
         for skipped in ('sys', 'helfer', 'f', 'Kiste', '__name__'):
             self.assertNotIn(skipped, snap)
-        self.assertLess(list(snap).index('lokal'), list(snap).index('zaehler'))
 
     def test_a_helper_module_frame_shows_its_module_and_the_entry_module(self):
         tief_frame = self.ns['FRAMES'][1]
         tief_frame.f_back  # noqa: B018 — a returned frame has no caller chain
         snap = self.dbg.snapshot_vars(tief_frame, self.tmp)
-        self.assertEqual(snap['wert'], 9)
+        self.assertNotIn('wert', snap)
         self.assertEqual(snap['basis'], 5)
 
-    def test_at_most_max_locals(self):
+    def test_at_most_max_locals_and_f_locals_is_never_read(self):
         class _Code:
             co_filename = os.path.join(self.tmp, 'main.py')
             co_name = 'g'
 
         class _Frame:
             f_code = _Code()
-            f_locals = {f'v{i}': i for i in range(40)}
             f_globals = {f'g{i}': i for i in range(40)}
             f_back = None
 
+            @property
+            def f_locals(self):
+                raise AssertionError('the sampler must never read f_locals')
+
         snap = self.dbg.snapshot_vars(_Frame(), self.tmp, 30)
         self.assertEqual(len(snap), 30)
-        self.assertEqual(list(snap)[:3], ['v0', 'v1', 'v2'])
+        self.assertEqual(list(snap)[:3], ['g0', 'g1', 'g2'])
 
     def test_a_frame_outside_the_project_has_no_variables(self):
         self.assertEqual(self.dbg.snapshot_vars(sys._getframe(), self.tmp), {})
@@ -337,7 +341,7 @@ class VarsSampler(unittest.TestCase):
         self.assertTrue(all(len(a[2]) <= 30 for a in sent))
         seen = {k: v for a in sent for k, v in a[2].items()}
         self.assertIn('zaehler', seen)
-        self.assertIn('lokal', seen)
+        self.assertNotIn('lokal', seen)             # R-O1: module level only
         self.assertTrue(all(kind == 'call' for _m, _a, kind in rpc.calls))
         # __line keeps working beside it.
         self.assertTrue(any(m == '__line' for m, _a, _k in rpc.calls))
@@ -353,6 +357,170 @@ class VarsSampler(unittest.TestCase):
         self._run(rpc, send_vars=False)
         self.assertFalse(any(m == '__vars' for m, _a, _k in rpc.calls))
         self.assertTrue(any(m == '__line' for m, _a, _k in rpc.calls))
+
+
+_NEVER_RUN_SRC = (
+    'import time\n'
+    'class _Meta(type):\n'
+    '    zaehler = 0\n'
+    '    @property\n'
+    '    def __name__(cls):\n'
+    '        _Meta.zaehler += 1\n'
+    '        return "Falsch"\n'
+    'class Laut(metaclass=_Meta):\n'
+    '    aufrufe = 0\n'
+    '    def _merk(self):\n'
+    '        Laut.aufrufe += 1\n'
+    '    def __repr__(self):\n'
+    '        self._merk()\n'
+    '        return "Laut"\n'
+    '    def __str__(self):\n'
+    '        self._merk()\n'
+    '        return "Laut"\n'
+    '    def __iter__(self):\n'
+    '        self._merk()\n'
+    '        return iter(())\n'
+    '    def __len__(self):\n'
+    '        self._merk()\n'
+    '        return 0\n'
+    '    def __eq__(self, other):\n'
+    '        self._merk()\n'
+    '        return False\n'
+    '    def __hash__(self):\n'
+    '        return 7\n'
+    '    def __getattr__(self, name):\n'
+    '        self._merk()\n'
+    '        raise AttributeError(name)\n'
+    'class MeinText(str):\n'
+    '    def __repr__(self):\n'
+    '        Laut.aufrufe += 1\n'
+    '        return "x"\n'
+    'class MeineListe(list):\n'
+    '    def __iter__(self):\n'
+    '        Laut.aufrufe += 1\n'
+    '        return iter([])\n'
+    'ding = Laut()\n'
+    'liste = [1, Laut(), "a"]\n'
+    'zuordnung = {"a": 1, 2: "b", Laut(): 3, True: None}\n'
+    'text = MeinText("hallo")\n'
+    'eigen = MeineListe([1, 2])\n'
+    'riesig = 2 ** 5000\n'
+    'def arbeite():\n'
+    '    lokal = Laut()\n'
+    '    ende = time.monotonic() + 0.4\n'
+    '    while time.monotonic() < ende:\n'
+    '        pass\n'
+    '    return lokal\n'
+    'arbeite()\n'
+    'ende = time.monotonic() + 0.3\n'
+    'while time.monotonic() < ende:\n'
+    '    pass\n'
+    'ERGEBNIS = (Laut.aufrufe, _Meta.zaehler)\n'
+)
+
+_LOCALS_LOOP_SRC = (
+    'import time\n'
+    'def f():\n'
+    '    a = 1\n'
+    '    b = 2\n'
+    '    seen = []\n'
+    '    for k in locals():\n'
+    '        seen.append(k)\n'
+    '        time.sleep(0.1)\n'
+    '    return seen\n'
+    'try:\n'
+    '    ERGEBNIS = ("ok", f())\n'
+    'except RuntimeError as exc:\n'
+    '    ERGEBNIS = ("RuntimeError", str(exc))\n'
+)
+
+
+@unittest.skipUnless(hasattr(sys, 'monitoring'), 'needs sys.monitoring (3.12+)')
+class SamplerNeverRunsStudentCode(unittest.TestCase):
+    """2026-09-27 review round (M1/m6, owner decision R-O1). The sampler is a
+    second thread inside the student's process: it must render only EXACT
+    builtin values, walk only exact builtin containers within a budget, name
+    everything else `<Klasse>` without asking the class, and never touch a
+    function frame's locals. Each test is the reviewers' repro."""
+
+    def setUp(self):
+        self.dbg = _load_hook()
+        self.tmp = tempfile.mkdtemp(prefix='edu-never-')
+        self.stop = threading.Event()
+
+    def tearDown(self):
+        self.stop.set()
+
+    def _run(self, src, interval_s=0.02):
+        path = os.path.join(self.tmp, 'main.py')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write(src)
+        rpc = _RecordingRpc()
+        thread = self.dbg.start_line_sampler(rpc, self.tmp, interval_s=interval_s, stop=self.stop)
+        ns = runpy.run_path(path, run_name='__main__')
+        self.stop.set()
+        thread.join(2.0)
+        self.assertFalse(thread.is_alive())
+        return ns, [args[2] for method, args, _k in rpc.calls if method == '__vars']
+
+    def test_no_student_method_runs_and_every_other_value_is_its_class_name(self):
+        ns, sent = self._run(_NEVER_RUN_SRC)
+        self.assertEqual(ns['ERGEBNIS'], (0, 0), 'the sampler ran student code')
+        self.assertTrue(sent)
+        last = sent[-1]
+        self.assertEqual(last['ding'], '<Laut>')          # the real name, not the metaclass's
+        self.assertEqual(last['liste'], [1, '<Laut>', 'a'])
+        self.assertEqual(last['zuordnung'], {'a': 1, '2': 'b', 'True': None})
+        self.assertEqual(last['text'], '<MeinText>')
+        self.assertEqual(last['eigen'], '<MeineListe>')
+        self.assertEqual(last['riesig'], '<int>')
+        self.assertNotIn('lokal', {k for snap in sent for k in snap})
+
+    def test_iterating_locals_in_a_function_is_unaffected_by_the_sampler(self):
+        ns, _sent = self._run(_LOCALS_LOOP_SRC, interval_s=0.01)
+        self.assertEqual(ns['ERGEBNIS'], ('ok', ['a', 'b', 'seen']))
+
+    def test_a_huge_global_costs_no_full_repr(self):
+        import tracemalloc
+
+        class _Code:
+            co_filename = os.path.join(self.tmp, 'main.py')
+            co_name = '<module>'
+
+        class _Frame:
+            f_code = _Code()
+            f_back = None
+            f_globals = {
+                'text': 'ä' * 5_000_000,
+                'tabelle': {i: 'x' * 60 for i in range(200_000)},
+                'liste': ['y' * 80] * 200_000,
+            }
+
+        tracemalloc.start()
+        try:
+            snap = self.dbg.snapshot_vars(_Frame(), self.tmp)
+            _cur, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 1_000_000, f'peak {peak} bytes: a full repr was built')
+        self.assertEqual(set(snap), {'text', 'tabelle', 'liste'})
+        self.assertLessEqual(len(snap['text']), self.dbg.VALUE_MAX_CHARS)
+        # Per value: the character budget plus a few separator/key bytes per
+        # visited node — independent of how big the global is.
+        per_value = self.dbg.SAFE_VALUE_MAX_CHARS + 12 * self.dbg.SAFE_VALUE_MAX_NODES
+        self.assertLessEqual(len(self.dbg.json.dumps(snap, ensure_ascii=False)), 3 * per_value)
+
+    def test_the_renderer_is_bounded_by_nodes_and_depth(self):
+        render = self.dbg.safe_render
+        # CONTAINER_MAX_DEPTH (3) levels are walked; the 4th is only named.
+        self.assertEqual(render([[[[1]]]]), [[['<list>']]])
+        out = render([list(range(1000))] * 1000)
+        count = len(self.dbg.json.dumps(out))
+        self.assertLess(count, 2000)
+        self.assertEqual(render(float('nan')), 'nan')
+        self.assertEqual(render(float('inf')), 'inf')
+        self.assertIs(render(True), True)
+        self.assertEqual(render({(1, 2): 'tupel-schlüssel', 'k': 1}), {'k': 1})
 
 
 class HookSource(unittest.TestCase):

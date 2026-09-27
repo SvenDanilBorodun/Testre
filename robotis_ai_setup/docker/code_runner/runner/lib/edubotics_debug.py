@@ -16,15 +16,31 @@ Installed by ``student_main.py`` into the student's own process before
 * :func:`start_line_sampler` — the „where am I" indicator and the live
   variable values. A daemon thread reads the main thread's frame every
   ``interval_s`` and, when the connection lock is free, reports the innermost
-  PROJECT line as ``__line`` when it changed and the program's variables as
-  ``__vars`` when their snapshot changed (:func:`snapshot_vars`: the current
-  function's locals, then the module globals; at most 30). Never a per-line
-  event (B13). Reading ``f_locals`` of the main thread's frame from this
-  thread was MEASURED safe on the runner's CPython 3.12.3 (owner decision O3,
-  2026-09-27: millions of cross-thread reads against a mutating main thread
-  with ``sys.monitoring`` active — results exact, no exception, no refcount
-  creep). A frame the sampler just read keeps its locals' objects alive until
-  the next sample (≤ ``interval_s``); nothing else about the program changes.
+  PROJECT line as ``__line`` when it changed and the program's MODULE-LEVEL
+  variables as ``__vars`` when their snapshot changed (:func:`snapshot_vars`;
+  at most 30). Never a per-line event (B13).
+
+  The sampler is a second thread INSIDE the student's program, so two rules
+  bind it (owner decision R-O1, 2026-09-27 — the O3 fallback):
+
+  - It never reads a function frame's ``f_locals``. On CPython 3.12 that read
+    re-syncs the frame's own ``locals()`` dict, so a student's
+    ``for k in locals():`` raised „dictionary changed size during iteration"
+    (the O3 probe had measured values and refcounts, not the student's view
+    of ``locals()``). Module globals are read through ``f_globals``, the
+    module's own dict, which a read never changes.
+  - It never runs student code. :func:`safe_render` renders only EXACT
+    builtin types (``type(v) is …``, never ``isinstance``, which may consult
+    ``__class__``), walks only exact builtin containers, each value within a
+    node and character budget, and names anything else ``<Klasse>`` — the
+    name read through ``type``'s own descriptor, so a metaclass's
+    ``__name__`` never runs. No ``repr``, ``str``, ``__iter__``, ``__len__``,
+    ``__eq__`` or ``__hash__`` of a student object is ever called, and no
+    full ``repr`` of a big container is ever built.
+
+  The breakpoint path (:class:`Hook`, ``__paused``) is unchanged: it renders
+  on the student's own thread while the program stands still, where calling
+  a ``__repr__`` is what every Python debugger does.
 
 Only the main thread is debugged; a line event from any other thread (the
 sampler, a student's own thread) is DISABLEd on sight. Neither mechanism is
@@ -115,6 +131,106 @@ def _render_value(value):
         return '<?>'
 
 
+# ── the sampler's renderer: exact builtin types only, never student code ──
+
+# Per shown value: nodes visited and string characters copied. A snapshot
+# holds at most 30 values, so a whole `__vars` frame stays far below the
+# server's per-frame cap (code_rpc.SHOWN_FRAME_MAX_NODES).
+SAFE_VALUE_MAX_NODES = 100
+SAFE_VALUE_MAX_CHARS = VALUE_MAX_CHARS
+# An exact int wider than this is only named: int→str is quadratic and
+# refuses past 4300 digits.
+SAFE_INT_MAX_BITS = 256
+# At most this many module globals are looked at per module per sample.
+GLOBALS_SCAN_MAX = 512
+_SAFE_SEQUENCES = (list, tuple, set, frozenset)
+_SAFE_KEY_SCALARS = (bool, int, float)
+_TYPE_NAME = type.__dict__['__name__']
+
+
+def type_name_of(value) -> str:
+    """The class name of ``value`` without running student code: ``type()``
+    reads the object's type slot, and ``type``'s own ``__name__`` descriptor
+    reads the class's stored name — a metaclass ``__name__`` property is
+    never consulted."""
+    try:
+        return _TYPE_NAME.__get__(type(value), type)
+    except Exception:  # noqa: BLE001 — never raise out of the sampler
+        return '?'
+
+
+def safe_render(value, _budget: list | None = None, _depth: int = 0):
+    """``value`` as JSON-able builtins, without running student code.
+
+    Exact ``None``/``bool``/``int``/``float``/``str`` are rendered (a string
+    cut to the character budget, a non-finite float as ``'nan'``/``'inf'``, an
+    int over :data:`SAFE_INT_MAX_BITS` bits as ``'<int>'``); an exact
+    ``list``/``tuple``/``set``/``frozenset``/``dict`` is walked up to
+    ``CONTAINER_MAX_DEPTH`` levels and ``CONTAINER_MAX_ITEMS`` items, its
+    prefix copied in ONE C-level ``islice`` pass (atomic under the GIL); a
+    dict entry is kept only when its key is an exact builtin scalar. Anything
+    else — a subclass of a builtin included — is ``'<Klasse>'``."""
+    budget = _budget if _budget is not None else [SAFE_VALUE_MAX_NODES, SAFE_VALUE_MAX_CHARS]
+    if budget[0] <= 0:
+        return '…'
+    budget[0] -= 1
+    t = type(value)
+    if value is None or t is bool:
+        return value
+    if t is int:
+        return value if value.bit_length() <= SAFE_INT_MAX_BITS else '<int>'
+    if t is float:
+        return value if math.isfinite(value) else float.__repr__(value)
+    if t is str:
+        n = max(0, min(len(value), budget[1]))
+        budget[1] -= n
+        return value[:n]
+    if t in _SAFE_SEQUENCES or t is dict:
+        if _depth >= CONTAINER_MAX_DEPTH:
+            return f'<{type_name_of(value)}>'
+        take = max(0, min(CONTAINER_MAX_ITEMS, budget[0]))
+        if t is dict:
+            out = {}
+            for k, v in list(itertools.islice(value.items(), take)):
+                kt = type(k)
+                if kt is str:
+                    key = k[:VALUE_MAX_CHARS]
+                elif k is None or (kt in _SAFE_KEY_SCALARS
+                                   and (kt is not int or k.bit_length() <= SAFE_INT_MAX_BITS)):
+                    key = repr(k)
+                else:
+                    continue
+                out[key] = safe_render(v, budget, _depth + 1)
+            return out
+        return [safe_render(v, budget, _depth + 1)
+                for v in list(itertools.islice(value, take))]
+    return f'<{type_name_of(value)}>'
+
+
+def _is_skipped_type(value) -> bool:
+    """Modules, functions, methods and classes are not variables worth
+    showing — decided on ``type(value)`` alone (``issubclass`` against
+    builtin types reads the MRO slot; no student code)."""
+    try:
+        return issubclass(type(value), _SKIPPED_VALUE_TYPES)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _add_safe_globals(out: dict, namespace, max_locals: int) -> None:
+    """Copy showable module globals into ``out`` (the sampler's path)."""
+    if type(namespace) is not dict:
+        return
+    for name, value in list(itertools.islice(namespace.items(), GLOBALS_SCAN_MAX)):
+        if len(out) >= max_locals:
+            return
+        if type(name) is not str or name.startswith('__') or name in out:
+            continue
+        if _is_skipped_type(value):
+            continue
+        out[name] = safe_render(value)
+
+
 def _add_mapping(out: dict, items, max_locals: int) -> None:
     """Copy showable ``(name, value)`` pairs into ``out`` until it holds
     ``max_locals``; a name already in ``out`` keeps its first value."""
@@ -140,12 +256,11 @@ def snapshot_vars(frame, project_root: str, max_locals: int = _DEFAULT_MAX_LOCAL
     """The variables a student sees while the program runs, for ``__vars``.
 
     From ``frame`` (the main thread's current one) the innermost PROJECT
-    frame is found; its locals come first when it is a function (they shadow
-    a global of the same name, as in Python), then its module's globals, then
-    the entry module's (``main.py``) when that is another module. At most
-    ``max_locals``; dunders, modules, functions and classes skipped — the
-    same rules and bounds as a breakpoint's snapshot. A module frame is read
-    through ``f_globals`` directly (the module's own dict)."""
+    frame is found; its MODULE's globals come first, then the entry module's
+    (``main.py``) when that is another module. Never a function frame's
+    ``f_locals`` (see the module docstring). At most ``max_locals``; dunders,
+    modules, functions and classes skipped; every value through
+    :func:`safe_render`, so no student code runs."""
     root = os.path.abspath(project_root)
     project = []
     while frame is not None:
@@ -156,11 +271,9 @@ def snapshot_vars(frame, project_root: str, max_locals: int = _DEFAULT_MAX_LOCAL
         return {}
     inner, outer = project[0], project[-1]
     out: dict = {}
-    if inner.f_code.co_name != '<module>':
-        _add_mapping(out, list(inner.f_locals.items()), max_locals)
-    _add_mapping(out, list(inner.f_globals.items()), max_locals)
+    _add_safe_globals(out, inner.f_globals, max_locals)
     if outer.f_globals is not inner.f_globals:
-        _add_mapping(out, list(outer.f_globals.items()), max_locals)
+        _add_safe_globals(out, outer.f_globals, max_locals)
     return out
 
 

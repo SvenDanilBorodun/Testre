@@ -24,7 +24,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { setDrawerFocus } from '../../../features/workshop/studioAssetsSlice';
 import { DE, formatDe } from '../blocks/messages_de';
-import { deleteVariable, renameVariable, usageRows } from './assetCommands';
+import { assetDocumentOf } from './assetDocument';
 import { displayValue, pointFromValue } from './assetIndex';
 import { DetailRow, RenameField, UsageList } from './drawerParts';
 
@@ -39,9 +39,12 @@ const timeDe = (ts) => {
   return Number.isFinite(d.getTime()) ? d.toLocaleTimeString('de-DE') : '—';
 };
 
-export default function DrawerVariable({ workspace, card, capabilities, onPreview }) {
+export default function DrawerVariable({
+  assetDoc: assetDocProp = null, workspace = null, card, capabilities, onPreview,
+}) {
   const dispatch = useDispatch();
-  const rows = usageRows(workspace, 'variable', card.assetId);
+  const assetDoc = assetDocumentOf(assetDocProp, workspace);
+  const rows = assetDoc ? assetDoc.usageRows('variable', card.assetId) : [];
   const name = card.assetName;
   const current = useSelector((s) => ownEntry(s.workshop && s.workshop.variables, name));
   const history = useSelector((s) => ownEntry(s.workshop && s.workshop.variableHistory, name));
@@ -61,7 +64,7 @@ export default function DrawerVariable({ workspace, card, capabilities, onPrevie
     ? Math.max(0, Math.floor((now - current.ts) / 1000)) : 0;
 
   const handleRename = (draft) => {
-    const result = renameVariable({ workspace, variableId: card.assetId, toName: draft });
+    const result = assetDoc.renameVariable(card.assetId, draft);
     if (!result.ok) {
       toast.error(result.error);
       return false;
@@ -70,7 +73,7 @@ export default function DrawerVariable({ workspace, card, capabilities, onPrevie
   };
 
   const handleDelete = () => {
-    const result = deleteVariable({ workspace, variableId: card.assetId });
+    const result = assetDoc.deleteVariable(card.assetId);
     if (!result.ok) {
       toast.error(result.error);
       return;
@@ -116,7 +119,7 @@ export default function DrawerVariable({ workspace, card, capabilities, onPrevie
           </ul>
         </section>
       )}
-      <UsageList workspace={workspace} rows={rows} nowhereText={DE.DRAWER_USED_NOWHERE_VARIABLE} />
+      <UsageList assetDoc={assetDoc} rows={rows} nowhereText={DE.DRAWER_USED_NOWHERE_VARIABLE} />
       <button
         type="button"
         onClick={handleDelete}

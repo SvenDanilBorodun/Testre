@@ -86,8 +86,16 @@ export function DetailRow({ label, children }) {
   );
 }
 
-/** „Benutzt in": one button per block (click scrolls to it), or the kind's „Nirgends …". */
-export function UsageList({ workspace, rows, nowhereText }) {
+/**
+ * „Benutzt in": one button per use (click shows it — a block, or a code line),
+ * or the kind's „Nirgends …". Rows are `{id, label, disabled}` from the asset
+ * document; a caller that still hands a bare workspace gets `jumpToBlock`.
+ */
+export function UsageList({ assetDoc = null, workspace = null, rows, nowhereText }) {
+  const jump = (id) => {
+    if (assetDoc) assetDoc.jump(id);
+    else jumpToBlock(workspace, id);
+  };
   return (
     <section aria-label={DE.DRAWER_USED_IN} className="mt-3">
       <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">{DE.DRAWER_USED_IN}</h4>
@@ -96,10 +104,10 @@ export function UsageList({ workspace, rows, nowhereText }) {
       ) : (
         <ul className="mt-1 space-y-1">
           {rows.map((row) => (
-            <li key={row.blockId}>
+            <li key={row.id ?? row.blockId}>
               <button
                 type="button"
-                onClick={() => jumpToBlock(workspace, row.blockId)}
+                onClick={() => jump(row.id ?? row.blockId)}
                 className="w-full truncate rounded px-2 py-1 text-left text-sm hover:bg-gray-100"
               >
                 {row.disabled ? `${row.label} ${DE.DRAWER_DISABLED_SUFFIX}` : row.label}

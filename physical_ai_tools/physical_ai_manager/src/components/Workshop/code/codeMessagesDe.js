@@ -107,6 +107,11 @@ export const CODE_DE = Object.freeze({
   HOVER_CODE_PIN: 'Ziel „{0}“ · wird im Programm mit pin gesetzt',
   HOVER_RECORDING: 'Aufnahme „{0}“ · {1} s',
   HOVER_RECORDING_VERSIONS: 'Aufnahme „{0}“ · {1} s · {2} Versionen',
+  SAMMLUNG_NEW: 'Neu',
+  SAMMLUNG_INSERT: 'Einfügen',
+  SAMMLUNG_INSERT_TITLE: 'Unter der Zeile einfügen, in der zuletzt der Cursor stand — '
+    + 'oder die Zeile in den Code ziehen.',
+  INSERTED_AT: 'In {0} ab Zeile {1} eingefügt.',
 
   SUBMIT: 'Abgeben',
   SUBMIT_TITLE: 'Diesen Stand des Programms bei der Lehrkraft abgeben',

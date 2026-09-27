@@ -1,10 +1,12 @@
 """What the code editor writes into a student's program is judged by the REAL
-tools (review round 2, mi2/mi3 and MA1): every program in the React fixtures
-is parsed and compiled by CPython and compiled by javac, and the inserted
-marker line is checked to be reachable — statically for every case (nothing
-before it in its block that never lets the next line run: javac's own
-„unreachable statement" rule for Java), and by RUNNING the program for every
-case whose marker must run (the end of main: the body that runs last).
+tools (review round 2, mi2/mi3 and MA1; round 3, R3-O4 and MB1): every
+program in the React fixtures is parsed and compiled by CPython and compiled
+by javac, and the inserted marker line is checked to be reachable —
+statically (nothing before it in its block that never lets the next line
+run: javac's own „unreachable statement" rule for Java) and by RUNNING the
+program to it. A case either inserted exactly that (reach 'run') or
+inserted NOTHING and carries its German reason (reach 'hint'): never a
+broken insertion, never a dead one.
 
 The fixtures are written by the vitest files that compute them
 (`codeInsert.cases.test.js`, `CodeEditor.indent.test.jsx`), which compare
@@ -77,20 +79,111 @@ def _load(path):
 
 # ── Python: static reachability (the rule the insertion itself follows) ─────
 
+_FOLD_BINOPS = {
+    ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
+    ast.Div: lambda a, b: a / b, ast.FloorDiv: lambda a, b: a // b, ast.Mod: lambda a, b: a % b,
+    ast.Pow: lambda a, b: a ** b,
+}
+_FOLD_CMPOPS = {
+    ast.Eq: lambda a, b: a == b, ast.NotEq: lambda a, b: a != b, ast.Lt: lambda a, b: a < b,
+    ast.LtE: lambda a, b: a <= b, ast.Gt: lambda a, b: a > b, ast.GtE: lambda a, b: a >= b,
+    ast.Is: lambda a, b: a is b, ast.IsNot: lambda a, b: a is not b,
+}
+
+
+class _NotConstant(Exception):
+    pass
+
+
+def _fold(node):
+    """The value of an expression made only of literals and operators (the
+    interpreter's own semantics), else _NotConstant."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.UnaryOp):
+        v = _fold(node.operand)
+        if isinstance(node.op, ast.Not):
+            return not v
+        if isinstance(node.op, ast.USub):
+            return -v
+        if isinstance(node.op, ast.UAdd):
+            return +v
+    if isinstance(node, ast.BinOp) and type(node.op) in _FOLD_BINOPS:
+        return _FOLD_BINOPS[type(node.op)](_fold(node.left), _fold(node.right))
+    if isinstance(node, ast.BoolOp):
+        values = [_fold(v) for v in node.values]
+        out = values[0]
+        for v in values[1:]:
+            out = (out and v) if isinstance(node.op, ast.And) else (out or v)
+        return out
+    if isinstance(node, ast.Compare) and all(type(o) in _FOLD_CMPOPS for o in node.ops):
+        left = _fold(node.left)
+        for op, right_node in zip(node.ops, node.comparators):
+            right = _fold(right_node)
+            if not _FOLD_CMPOPS[type(op)](left, right):
+                return False
+            left = right
+        return True
+    raise _NotConstant()
+
+
+def _constant_true(test) -> bool:
+    try:
+        return bool(_fold(test))
+    except Exception:  # noqa: BLE001 — anything not a folded literal is not constant
+        return False
+
+
+def _breaks_out(loop) -> bool:
+    """A `break` in `loop`'s body that leaves THIS loop (not an inner loop's,
+    and not one inside a nested def/class/lambda; an inner loop's `else:`
+    breaks the outer one)."""
+    stack = list(loop.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Break):
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            stack.extend(node.orelse)
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def _is_exit_call(stmt) -> bool:
+    if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+        return False
+    func = stmt.value.func
+    if isinstance(func, ast.Name):
+        return func.id in ('exit', 'quit')
+    return (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+            and (func.value.id, func.attr) in (('sys', 'exit'), ('os', '_exit')))
+
+
+def _endless_loop(stmt) -> bool:
+    return isinstance(stmt, ast.While) and _constant_true(stmt.test) and not _breaks_out(stmt)
+
+
 def _never_falls_through(stmt) -> bool:
     if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
         return True
-    if isinstance(stmt, ast.While):
-        test = stmt.test
-        const = isinstance(test, ast.Constant) and bool(test.value)
-        has_break = any(isinstance(n, ast.Break) for s in stmt.body for n in ast.walk(s))
-        return const and not has_break
+    if _is_exit_call(stmt):
+        return True
+    if isinstance(stmt, (ast.While, ast.For, ast.AsyncFor)):
+        if _endless_loop(stmt):
+            return True
+        return bool(stmt.orelse) and not _breaks_out(stmt) and _body_ends(stmt.orelse)
     if isinstance(stmt, ast.If):
         return bool(stmt.orelse) and _body_ends(stmt.body) and _body_ends(stmt.orelse)
-    if isinstance(stmt, ast.Try):
+    if isinstance(stmt, (ast.Try, getattr(ast, 'TryStar', ast.Try))):
         if stmt.finalbody and _body_ends(stmt.finalbody):
             return True
-        return _body_ends(stmt.body) and all(_body_ends(h.body) for h in stmt.handlers)
+        body_ends = _body_ends(stmt.body) or bool(stmt.orelse and _body_ends(stmt.orelse))
+        return bool(stmt.handlers) and body_ends and all(_body_ends(h.body) for h in stmt.handlers)
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        return _body_ends(stmt.body)
     return False
 
 
@@ -111,20 +204,28 @@ def _statically_reachable(tree, line) -> bool:
                 sub = getattr(stmt, field, None)
                 if isinstance(sub, list) and any(
                         s.lineno <= line <= (s.end_lineno or s.lineno) for s in sub):
+                    # The `else:` of an endless loop never runs.
+                    if field == 'orelse' and _endless_loop(stmt):
+                        return False
                     return walk(sub)
             for handler in getattr(stmt, 'handlers', None) or []:
                 if handler.lineno <= line <= (handler.end_lineno or handler.lineno):
                     return walk(handler.body)
+            for case in getattr(stmt, 'cases', None) or []:
+                if case.body and case.body[0].lineno <= line <= (case.body[-1].end_lineno or line):
+                    return walk(case.body)
             return False
         return False
     return walk(tree.body)
 
 
-class _Reached(Exception):
+# BaseException: the program's own `except Exception:` (a try body is a
+# valid spot) must not swallow the verdict.
+class _Reached(BaseException):
     pass
 
 
-class _OutOfSteps(Exception):
+class _OutOfSteps(BaseException):
     pass
 
 
@@ -145,9 +246,12 @@ def _runs_to_the_marker(src: str, steps: int = 50_000) -> bool:
     left = [steps]
 
     def tracer(frame, event, arg):
-        left[0] -= 1
-        if left[0] <= 0:
-            raise _OutOfSteps()
+        # Only the program's own lines count: a library it calls (asyncio.run
+        # runs thousands of lines) is not the program looping.
+        if frame.f_code.co_filename == 'main.py':
+            left[0] -= 1
+            if left[0] <= 0:
+                raise _OutOfSteps()
         return tracer
     sys.settrace(tracer)
     try:
@@ -174,11 +278,62 @@ def _python_cases():
     return out
 
 
+class TheJudgeHasTeeth(unittest.TestCase):
+    """The judge itself refuses what an insertion must never produce: a
+    marker below something that never lets it run, and one that never runs
+    — so a fixture it passes is evidence, not a formality."""
+
+    _M = 'robot.replay("Winken")'
+
+    def _line(self, src):
+        return [i + 1 for i, r in enumerate(src.split('\n')) if r.strip() == self._M][0]
+
+    def test_a_dead_marker_is_statically_unreachable(self):
+        dead = [
+            f'def f():\n    return 1\n    {self._M}\nf()\n',
+            f'import sys\nsys.exit(0)\n{self._M}\n',
+            f'while not False:\n    pass\n{self._M}\n',
+            f'while 1 == 1:\n    pass\n{self._M}\n',
+            f'def f():\n    if x:\n        return\n    else:\n        raise ValueError()\n    {self._M}\n',
+            f'def f():\n    try:\n        a()\n    finally:\n        return\n    {self._M}\n',
+            f'while True:\n    pass\nelse:\n    {self._M}\n',
+            f'for i in []:\n    pass\nelse:\n    exit()\n{self._M}\n',
+        ]
+        for src in dead:
+            with self.subTest(src=src):
+                self.assertFalse(_statically_reachable(ast.parse(src), self._line(src)))
+
+    def test_a_reachable_marker_stays_reachable(self):
+        live = [
+            f'while True:\n    for i in []:\n        break\n    break\n{self._M}\n',
+            f'while True:\n    if x:\n        break\n{self._M}\n',
+            f'def f():\n    if x:\n        return\n    {self._M}\n',
+        ]
+        for src in live:
+            with self.subTest(src=src):
+                self.assertTrue(_statically_reachable(ast.parse(src), self._line(src)))
+
+    def test_a_marker_that_never_runs_is_caught_by_running(self):
+        self.assertFalse(_runs_to_the_marker(f'def f():\n    {self._M}\n'))
+        self.assertFalse(_runs_to_the_marker(f'while True:\n    pass\n{self._M}\n'))
+        self.assertTrue(_runs_to_the_marker(f'try:\n    {self._M}\nexcept Exception:\n    pass\n'))
+
+
 class PythonCasesCompile(unittest.TestCase):
     def test_the_fixtures_exist_and_carry_cases(self):
         self.assertTrue(_INSERT_CASES.is_file(), _INSERT_CASES)
         self.assertTrue(_INDENT_CASES.is_file(), _INDENT_CASES)
         self.assertGreaterEqual(len(_python_cases()), 40)
+
+    def test_a_case_either_inserted_or_says_why_never_both(self):
+        for fixture, case, _marker in _python_cases():
+            with self.subTest(fixture=fixture, case=case['name']):
+                self.assertIn(case['reach'], ('run', 'hint'))
+                if case['reach'] == 'hint':
+                    self.assertIsNone(case['output'])
+                    self.assertTrue(case['hint'])
+                else:
+                    self.assertIsNotNone(case['output'])
 
     def test_every_python_program_parses_and_its_marker_is_reachable(self):
         for fixture, case, marker in _python_cases():
@@ -244,7 +399,9 @@ class JavaCasesCompile(unittest.TestCase):
             subprocess.run([javac, '-d', lib, os.path.join(src, 'Robot.java')],
                            check=True, capture_output=True, timeout=120)
             for case in cases:
+                self.assertIn(case['reach'], ('run', 'hint'), case['name'])
                 if case['output'] is None:
+                    self.assertEqual(case['reach'], 'hint', case['name'])
                     self.assertTrue(case['hint'], case['name'])
                     continue
                 with self.subTest(case=case['name']):

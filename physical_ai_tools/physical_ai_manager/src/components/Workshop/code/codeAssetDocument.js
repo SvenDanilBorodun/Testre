@@ -26,7 +26,10 @@
 //   * variables are listed (declarations, the run's values, zeige names) but
 //     never renamed or deleted — there is no language server (decision D7);
 //   * the drawer sits beside the file sidebar, and rows can be inserted into
-//     the program („Einfügen", owner decision O6).
+//     the program („Einfügen") directly below the line the student's cursor
+//     is on, checked by codeInsert (owner decision R3-O4): without a cursor
+//     nothing is written, and the answer carries the lines so Vormachen can
+//     put them on the clipboard instead.
 
 import { buildAssetIndex } from '../sammlung/assetIndex';
 import { buildProgramSteps } from '../teach/insertProgram';
@@ -107,9 +110,13 @@ function toUsageRows(files, rows) {
  *   when the student never clicked into the editor.
  * @param {({file, line}) => void} [args.setCursor] - where the next insertion
  *   goes after this one (below what was just inserted).
+ * @param {() => any} [args.getDocumentToken] - the open document's identity:
+ *   it changes the moment the page starts replacing the document. An
+ *   insertion waiting for its module checks it before writing (review round
+ *   3, mb9).
  */
 export function createCodeAssetDocument({
-  language, store, getFiles, applyFiles, requestReveal, getCursor, setCursor,
+  language, store, getFiles, applyFiles, requestReveal, getCursor, setCursor, getDocumentToken,
 }) {
   // Loaded now, so the first „Einfügen" waits for nothing.
   loadCodeInsert().catch(() => {});
@@ -145,18 +152,29 @@ export function createCodeAssetDocument({
   };
 
   // Async: the insertion module may still be loading. The files and the
-  // cursor are read AFTER it arrived, so the lines go into the latest text.
+  // cursor are read AFTER it arrived, so the lines go into the latest text —
+  // of the SAME document: one the student opened meanwhile gets nothing
+  // (review round 3, mb9: the old document's language, the new one's files).
+  const documentToken = () => (typeof getDocumentToken === 'function' ? getDocumentToken() : null);
   const insertLines = async (lineOf) => {
+    const token = documentToken();
     const { insertAtTarget, insertionTarget, ...spell } = await loadCodeInsert();
+    if (documentToken() !== token) return { count: 0, error: CODE_DE.INSERT_DOCUMENT_CHANGED };
     const lines = lineOf(spell);
     if (!Array.isArray(lines) || lines.length === 0) return { count: 0 };
     const project = files();
     const cursor = typeof getCursor === 'function' ? getCursor() : null;
     const target = insertionTarget(project, language, cursor);
-    // No SAFE place (no Java `main`, a Java cursor outside a method, a file
-    // that ends inside brackets): nothing is written, the hint says why
-    // (review R-O2, round 2 mi2/mi3).
-    if (target.notFound) return { count: 0, error: target.hint || CODE_DE.NO_MAIN_HINT };
+    // The student chooses the spot (R3-O4): no cursor, or one where a line
+    // cannot stand or never runs — nothing is written, the hint says why.
+    // Without a cursor the lines ride along, for the clipboard.
+    if (target.notFound) {
+      return target.noCursor
+        ? {
+          count: 0, error: target.hint, noCursor: true, lines,
+        }
+        : { count: 0, error: target.hint };
+    }
     const content = typeof project[target.file] === 'string' ? project[target.file] : '';
     const res = insertAtTarget(content, target, lines, language);
     applyFiles({ ...project, [target.file]: res.content });

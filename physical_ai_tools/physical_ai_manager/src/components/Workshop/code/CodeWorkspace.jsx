@@ -26,7 +26,8 @@
 // cursor „Einfügen" writes below. The last cursor line is remembered PER FILE
 // (in memory, never stored) and reported to the page as `{file, line}`; a file
 // the student opened but never clicked into reports null, so an insertion then
-// goes to the end of main (codeInsert.insertionTarget). A reveal request from
+// writes nothing and asks the student to click first (owner decision R3-O4,
+// codeInsert.insertionTarget). A reveal request from
 // the page (`{file, line, nonce}`: a „Benutzt in" jump, an insertion) switches
 // to that file and puts the caret on that line.
 

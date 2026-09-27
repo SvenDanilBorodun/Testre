@@ -34,10 +34,10 @@ import { Decoration, EditorView, GutterMarker, gutter, hoverTooltip, keymap, lin
   highlightActiveLine, highlightActiveLineGutter,
   drawSelection, rectangularSelection } from '@codemirror/view';
 import {
-  Annotation, EditorSelection, EditorState, Compartment, StateEffect, StateField,
+  Annotation, EditorSelection, EditorState, Compartment, Prec, StateEffect, StateField, countColumn,
 } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
-import { bracketMatching, ensureSyntaxTree, indentOnInput, indentUnit, syntaxHighlighting,
+import { bracketMatching, ensureSyntaxTree, indentOnInput, indentService, indentUnit, syntaxHighlighting,
   defaultHighlightStyle } from '@codemirror/language';
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
 import { forceLinting, linter, lintGutter } from '@codemirror/lint';
@@ -61,7 +61,8 @@ import {
   assetOptions,
 } from './codeAssetCompletion';
 import {
-  fileIndentUnit, insertionChange, insertionTargetAt, minimalChange, snippetLines,
+  fileIndentUnit, indentStepAt, insertionChange, insertionTargetAt, minimalChange, newlineIndentAt,
+  snippetLines,
 } from './codeInsert';
 import { SNIPPET_MIME } from './snippetMime';
 
@@ -432,6 +433,142 @@ export function fileIndentUnitExtensions(language, compartment, initialText) {
   ];
 }
 
+/**
+ * The program's BLOCK STRUCTURE decides a new line's indentation (review
+ * round 3, MB1): the unit alone could not — a file with blocks in two units
+ * (a pasted snippet, one hand-typed block) put Enter at a column no block
+ * uses, an IndentationError in a program that compiled a keystroke before.
+ *
+ *   * An indent service (both languages) answers codeInsert.newlineIndentAt:
+ *     inside a block its own sibling indentation, a new block's first line
+ *     the unit of the block its opener sits in. It is what the stock
+ *     `insertNewlineAndIndent` asks, so Enter and an insertion agree.
+ *   * Python only, at a higher precedence than the default keymap: Enter
+ *     writes that indentation as the exact whitespace (a tab block in a
+ *     space file keeps its tabs), and Tab / Shift-Tab / Backspace in a
+ *     line's leading whitespace go to the next / previous LEVEL of the block
+ *     stack (codeInsert.indentStepAt) — never to a column between two
+ *     levels. Where the structure has no answer (inside brackets or a
+ *     string, a multi-line selection, Java) the stock commands run.
+ *   * Python only: a multi-line paste onto an indented empty position lines
+ *     its following lines up with the first (Vormachen's „Kopiert – … Strg+V"
+ *     lines arrive flat).
+ */
+export function structureIndentExtensions(language) {
+  const service = indentService.of((cx, pos) => {
+    const indent = newlineIndentAt(cx.state.doc.toString(), pos, language);
+    return indent === null ? undefined : countColumn(indent, cx.state.tabSize);
+  });
+  if (language !== 'python') return [service];
+  return [
+    service,
+    Prec.high(keymap.of([
+      { key: 'Enter', run: pythonEnter },
+      { key: 'Tab', run: pythonIndentStep(1), shift: pythonIndentStep(-1) },
+      { key: 'Backspace', run: pythonBackspace },
+    ])),
+    pasteLinesUpWithTheCursor,
+  ];
+}
+
+/** Enter in a Python file: a line break plus the structure's exact indentation. */
+export function pythonEnter(view) {
+  const { state } = view;
+  if (state.readOnly || state.selection.ranges.length !== 1 || !state.selection.main.empty) return false;
+  const pos = state.selection.main.head;
+  const indent = newlineIndentAt(state.doc.toString(), pos, 'python');
+  if (indent === null) return false;
+  const line = state.doc.lineAt(pos);
+  let from = pos;
+  let to = pos;
+  while (to < line.to && /\s/.test(line.text[to - line.from])) to += 1;
+  if (from > line.from && !/\S/.test(line.text.slice(0, from - line.from))) from = line.from;
+  const insert = `${state.lineBreak}${indent}`;
+  view.dispatch({
+    changes: { from, to, insert },
+    selection: EditorSelection.cursor(from + insert.length),
+    scrollIntoView: true,
+    userEvent: 'input',
+  });
+  return true;
+}
+
+// Replace line `line`'s leading whitespace by `target`, keeping the cursor
+// on the same text (at the new indentation's end when it was inside it).
+function setLineIndent(view, line, target, userEvent) {
+  const own = /^[ \t]*/.exec(line.text)[0];
+  const head = view.state.selection.main.head;
+  const cursor = head >= line.from + own.length
+    ? head + target.length - own.length : line.from + target.length;
+  view.dispatch({
+    changes: { from: line.from, to: line.from + own.length, insert: target },
+    selection: EditorSelection.cursor(cursor),
+    userEvent,
+  });
+}
+
+/** Tab (+1) / Shift-Tab (-1) on one Python line: the next / previous level. */
+export function pythonIndentStep(direction) {
+  return (view) => {
+    const { state } = view;
+    if (state.readOnly || state.selection.ranges.length !== 1) return false;
+    const { main } = state.selection;
+    const line = state.doc.lineAt(main.head);
+    if (state.doc.lineAt(main.anchor).number !== line.number) return false;
+    const target = indentStepAt(state.doc.toString(), 'python', line.number, direction);
+    if (target === null) return false;
+    setLineIndent(view, line, target, direction > 0 ? 'input.indent' : 'delete.dedent');
+    return true;
+  };
+}
+
+/** Backspace at the end of a Python line's leading whitespace: one level back. */
+export function pythonBackspace(view) {
+  const { state } = view;
+  if (state.readOnly || state.selection.ranges.length !== 1 || !state.selection.main.empty) return false;
+  const pos = state.selection.main.head;
+  const line = state.doc.lineAt(pos);
+  const before = line.text.slice(0, pos - line.from);
+  const own = /^[ \t]*/.exec(line.text)[0];
+  if (before === '' || before.length !== own.length) return false;
+  const target = indentStepAt(state.doc.toString(), 'python', line.number, -1);
+  if (target === null) return false;
+  setLineIndent(view, line, target, 'delete.backward');
+  return true;
+}
+
+// A multi-line paste onto a position with only whitespace before it on its
+// line: the pasted lines after the first keep their shape relative to each
+// other and line up with that whitespace (the first line already stands
+// there). Anything else is pasted as it is.
+const pasteLinesUpWithTheCursor = EditorState.transactionFilter.of((tr) => {
+  if (!tr.docChanged || !tr.isUserEvent('input.paste')) return tr;
+  const changes = [];
+  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => changes.push({ fromA, toA, inserted }));
+  if (changes.length !== 1) return tr;
+  const { fromA, toA, inserted } = changes[0];
+  const text = inserted.toString();
+  if (!text.includes('\n')) return tr;
+  const line = tr.startState.doc.lineAt(fromA);
+  const prefix = tr.startState.doc.sliceString(line.from, fromA);
+  if (prefix === '' || /\S/.test(prefix)) return tr;
+  const rows = text.split('\n');
+  const rest = rows.slice(1);
+  const indents = rest.filter((r) => r.trim() !== '').map((r) => /^[ \t]*/.exec(r)[0]);
+  if (indents.length === 0) return tr;
+  const base = indents.reduce((a, b) => (b.length < a.length ? b : a));
+  if (!indents.every((i) => i.startsWith(base))) return tr;
+  const moved = rest.map((r) => (r.trim() === '' ? r : prefix + r.slice(base.length)));
+  const next = [rows[0], ...moved].join('\n');
+  if (next === text) return tr;
+  return {
+    changes: { from: fromA, to: toA, insert: next },
+    selection: EditorSelection.cursor(fromA + next.length),
+    scrollIntoView: true,
+    userEvent: 'input.paste',
+  };
+});
+
 function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef, withGutter, assetsRef,
   indentCompartment, initialText) {
   const parseLint = parseLintExtensions(language);
@@ -448,6 +585,7 @@ function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef,
     rectangularSelection(),
     indentOnInput(),
     fileIndentUnitExtensions(language, indentCompartment, initialText),
+    structureIndentExtensions(language),
     bracketMatching(),
     closeBrackets(),
     syntaxHighlighting(defaultHighlightStyle, { fallback: true }),

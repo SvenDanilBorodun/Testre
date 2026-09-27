@@ -8,21 +8,25 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-// Every insertion case of review round 2 (mi2, mi3 — the reviewer's list and
-// the owner's) as a GOLDEN FIXTURE: this test computes what „Einfügen" writes
-// into each program and compares it with fixtures/code-insert-cases.json; the
-// fixture is what robotis_ai_setup/tests/test_code_insert_cases.py PARSES
-// with CPython 3.12 and COMPILES with javac 21 — and runs, checking the
-// inserted `robot.replay("Winken")` is reached. A change to the insertion
-// therefore fails here until the fixture is regenerated, and the regenerated
-// programs are judged by the real tools:
+// Every insertion case as a GOLDEN FIXTURE (owner decision R3-O4: the student
+// chooses the spot, the app only checks it). This test computes what
+// „Einfügen" does for each program and cursor line and compares it with
+// fixtures/code-insert-cases.json; the fixture is what
+// robotis_ai_setup/tests/test_code_insert_cases.py PARSES with CPython 3.12
+// and COMPILES with javac 21 — and RUNS, checking the inserted
+// `robot.replay("Winken")` is reached. A change to the insertion therefore
+// fails here until the fixture is regenerated, and the regenerated programs
+// are judged by the real tools:
 //
 //   EDUBOTICS_REGEN_CODE_CASES=1 npx vitest run src/components/Workshop/code/__tests__/codeInsert.cases.test.js
 //
-// `reach: 'run'` — the marker must actually run (main runs, and the lines are
-// in the body that runs last or in main); `reach: 'static'` — only that no
-// statement before it in its block makes it unreachable (an insertion into a
-// function the case never calls).
+// Every case ends ONE of two ways — never a broken insertion, never a dead
+// one, never a line moved somewhere the student did not click:
+//   'run'  — the marker stands directly below the cursor line, the program
+//            compiles, and running it reaches the marker;
+//   a hint — nothing is inserted, and the German reason is the one named.
+// The cases include every program of the round-3 review (3-A's probe list
+// and 3-B's), re-cast with the cursor where each one's question now lies.
 
 import fs from 'fs';
 import path from 'path';
@@ -30,127 +34,253 @@ import { describe, it, expect } from 'vitest';
 import {
   insertAtTarget, insertionTarget, snippetLines,
 } from '../codeInsert';
+import { CODE_DE, formatCode } from '../codeMessagesDe';
+import { STARTER_FILES } from '../codeProject';
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'code-insert-cases.json');
 const REGEN = !['', '0', undefined].includes(process.env.EDUBOTICS_REGEN_CODE_CASES);
 
-const J = (body, head = 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n') => (
-  `${head}${body}    }\n}\n`
-);
+const NEVER = (what) => formatCode(CODE_DE.INSERT_NEVER_RUNS_HINT, what);
+const H = {
+  click: CODE_DE.CLICK_FIRST_HINT,
+  lead: CODE_DE.INSERT_LEADING_BLOCK_HINT,
+  doc: CODE_DE.INSERT_DOCSTRING_HINT,
+  deco: CODE_DE.INSERT_DECORATOR_HINT,
+  match: CODE_DE.INSERT_MATCH_HINT,
+  switch: CODE_DE.INSERT_SWITCH_HINT,
+  inside: CODE_DE.INSERT_INSIDE_EXPRESSION_HINT,
+  clause: CODE_DE.INSERT_CLAUSE_HINT,
+  indent: CODE_DE.INSERT_INDENT_HINT,
+  indentBroken: CODE_DE.INSERT_INDENT_BROKEN_HINT,
+  unclosed: CODE_DE.NO_SAFE_PLACE_HINT,
+  unreadable: CODE_DE.INSERT_UNREADABLE_HINT,
+  method: CODE_DE.NOT_IN_METHOD_HINT,
+  unsure: CODE_DE.INSERT_UNSURE_HINT,
+  return: NEVER('„return“'),
+  raise: NEVER('„raise“'),
+  throw: NEVER('„throw“'),
+  break: NEVER('„break“'),
+  continue: NEVER('„continue“'),
+  exit: NEVER('ein Programmende (exit)'),
+  loop: NEVER('eine Endlosschleife'),
+  ifelse: NEVER('ein if/else, das in jedem Zweig endet'),
+  try: NEVER('ein try, das in jedem Zweig endet'),
+  switchEnds: NEVER('ein switch, das in jedem Fall endet'),
+};
 
-// [name, input, cursorLine | null, reach]
+const J = (body, pre = '', post = '') => (
+  `import edubotics.Robot;\n${pre}public class Main {\n    public static void main(String[] args) {\n${body}    }\n${post}}\n`
+);
+const PY_STARTER = STARTER_FILES.python['main.py'];
+const JAVA_STARTER = STARTER_FILES.java['Main.java'];
+
+// [name, input, cursorLine | null, 'run' | hint key]
 const PYTHON = [
-  ['two_space_func_call', 'import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log("x")\n\nmain()\n', null, 'run'],
-  ['trailing_while_in_main_guard', 'import robot\n\ndef main():\n    robot.home()\n\nif __name__ == "__main__":\n    while True:\n        main()\n', null, 'run'],
-  ['trailing_while_in_func', 'import robot\n\ndef main():\n    robot.home()\n    while True:\n        robot.log("x")\n\nmain()\n', null, 'run'],
-  ['guard_calls_main_with_loop', 'import robot\n\ndef main():\n    robot.home()\n    while True:\n        robot.log("x")\n\nif __name__ == \'__main__\':\n    main()\n', null, 'run'],
-  ['func_trailing_return', 'import robot\n\ndef main():\n    robot.home()\n    return\n\nmain()\n', null, 'run'],
-  ['top_while_true', 'import robot\nrobot.home()\nwhile True:\n    robot.log("x")\n', null, 'run'],
-  ['top_while_one_liner', 'import robot\nrobot.home()\nwhile True: pass\n', null, 'run'],
-  ['top_while_else', 'import robot\nwhile True:\n    break\nelse:\n    robot.home()\n', null, 'run'],
-  ['no_trailing_newline', 'import robot\nrobot.home()', null, 'run'],
-  ['crlf', 'import robot\r\nrobot.home()\r\nwhile True:\r\n    robot.log("x")\r\n', null, 'run'],
-  ['tabs_body', 'import robot\nif True:\n\trobot.home()\nwhile True:\n\trobot.log("x")\n', null, 'run'],
-  ['docstring_end', 'import robot\n"""\nwhile True:\n"""\n', null, 'run'],
-  ['last_line_in_multiline_call', 'import robot\nrobot.log(\n"x"\n)\n', null, 'run'],
-  ['while_1', 'import robot\nwhile 1:\n    robot.home()\n', null, 'run'],
-  ['empty', '', null, 'run'],
-  ['cursor_multiline_if', 'import robot\nif (1 and\n        2):\n    robot.home()\n', 2, 'run'],
-  ['cursor_in_list', 'import robot\npunkte = [\n    1,\n    2,\n]\n', 3, 'run'],
-  ['cursor_decorator', 'import robot\nimport functools\n@functools.cache\ndef f():\n    return 1\n', 3, 'static'],
-  ['cursor_opener_comment', 'import robot\nfor i in range(2):  # loop:\n    robot.home()\n', 2, 'run'],
-  ['cursor_opener_no_body_2sp', 'import robot\ndef f():\n  x = 1\n  if x:\n    robot.home()\nf()\n', 4, 'run'],
-  ['cursor_else', 'import robot\nif 0:\n  robot.home()\nelse:\n  robot.log("y")\n', 4, 'run'],
-  ['cursor_dict_brace', 'import robot\nd = {\n    "a": 1,\n}\n', 2, 'run'],
-  ['cursor_backslash', 'import robot\nx = 1 + \\\n    2\n', 2, 'run'],
-  ['cursor_docstring_mid', 'import robot\ndef f():\n    """Doc\n    more"""\n    return 1\n', 3, 'static'],
-  ['cursor_opener_tab_body', 'import robot\nif True:\n\trobot.home()\n', 2, 'run'],
-  ['cursor_2sp_opener_bodyless_file4', 'import robot\ndef f():\n    pass\nfor i in range(2):\n', 4, 'run'],
-  ['cursor_class_line', 'import robot\nclass A:\n    x = 1\n', 2, 'run'],
-  ['cursor_try', 'import robot\ntry:\n    robot.home()\nexcept Exception:\n    pass\nfinally:\n    pass\n', 6, 'run'],
-  ['cursor_on_return', 'import robot\ndef f():\n    robot.home()\n    return 1\nf()\n', 4, 'run'],
-  ['cursor_on_raise', 'import robot\ndef f():\n    robot.home()\n    raise ValueError(1)\ntry:\n    f()\nexcept ValueError:\n    pass\n', 4, 'run'],
-  ['cursor_on_break', 'import robot\nfor i in range(3):\n    robot.home()\n    break\n', 4, 'run'],
-  ['cursor_on_continue', 'import robot\nfor i in range(3):\n    robot.home()\n    continue\n', 4, 'run'],
-  ['cursor_on_endless_oneliner', 'import robot\nrobot.home()\nwhile True: robot.log("x")\n', 3, 'run'],
-  ['cursor_on_semicolon_return', 'import robot\ndef f():\n    robot.home(); return 1\nf()\n', 3, 'run'],
+  // ── valid spots: the line goes directly below, and runs ──
+  ['starter_below_import', PY_STARTER, 3, 'run'],
+  ['starter_blank_line', PY_STARTER, 4, 'run'],
+  ['starter_last_line', PY_STARTER, 6, 'run'],
+  ['plain_statement', 'import robot\nrobot.home()\n', 2, 'run'],
+  ['no_trailing_newline', 'import robot\nrobot.home()', 2, 'run'],
+  ['empty_file', '', 1, 'run'],
+  ['for_body_sibling', 'import robot\nfor i in range(2):\n    robot.home()\n', 3, 'run'],
+  ['for_header_body', 'import robot\nfor i in range(2):\n    robot.home()\n', 2, 'run'],
+  ['two_space_inner', 'import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log("x")\n\nmain()\n', 5, 'run'],
+  ['two_space_header', 'import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log("x")\n\nmain()\n', 4, 'run'],
+  ['two_space_outer', 'import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log("x")\n\nmain()\n', 6, 'run'],
+  ['tabs_body', 'import robot\nif True:\n\trobot.home()\n\tif True:\n\t\trobot.log("a")\n', 5, 'run'],
+  ['aligned_literals', 'import robot\na = [[0.1, 0.2],\n     [0.3, 0.4]]\nb = [[0.1, 0.2],\n     [0.3, 0.4]]\nif True:\n  robot.home()\n  robot.log("x")\n', 7, 'run'],
+  ['aligned_literals_header', 'import robot\na = [[0.1, 0.2],\n     [0.3, 0.4]]\nif True:\n  robot.home()\n', 4, 'run'],
+  ['mixed_four_space_body', 'import robot\ndef f():\n    robot.home()\n\nf()\nif True:\n  robot.log("a")\n', 3, 'run'],
+  ['mixed_two_space_block', 'import robot\ndef f():\n    robot.home()\n\nf()\nif True:\n  robot.log("a")\n', 7, 'run'],
+  ['multiline_statement_end', 'import robot\nrobot.log(\n    "x"\n)\n', 4, 'run'],
+  ['multiline_if_end', 'import robot\nif (1 and\n        2):\n    robot.home()\n', 3, 'run'],
+  ['else_header', 'import robot\nif 0:\n  robot.home()\nelse:\n  robot.log("y")\n', 4, 'run'],
+  ['if_body_before_else', 'import robot\nif 1:\n  robot.home()\nelse:\n  robot.log("y")\n', 3, 'run'],
+  ['elif_header', 'import robot\nx = 2\nif x == 1:\n    robot.home()\nelif x == 2:\n    robot.log("a")\n', 5, 'run'],
+  ['after_loop_with_break', 'import robot\ndef f():\n    while True:\n        robot.home()\n        break\n    # hier\nf()\n', 6, 'run'],
+  ['after_while_true_break_top', 'import robot\nrobot.home()\nn = 0\nwhile True:\n    n += 1\n    if n > 3:\n        break\n\n', 8, 'run'],
+  ['main_guard_body', 'import robot\n\ndef main():\n    robot.home()\n\nif __name__ == "__main__":\n    main()\n', 7, 'run'],
+  ['main_guard_crlf_comment', 'import robot\r\n\r\ndef main():\r\n    robot.home()\r\n\r\nif __name__ == "__main__":  # Start\r\n    main()\r\n', 6, 'run'],
+  ['crlf_body', 'import robot\r\nif True:\r\n    robot.home()\r\n', 3, 'run'],
+  ['before_return_in_main', 'import robot, sys\n\ndef main():\n    robot.home()\n    return 0\n\nif __name__ == "__main__":\n    sys.exit(main())\n', 4, 'run'],
+  ['blank_line_in_block', 'import robot\ndef f():\n    robot.home()\n    \n    robot.log("x")\nf()\n', 4, 'run'],
+  ['comment_line_in_block', 'import robot\ndef f():\n    robot.home()\n    # Kommentar\n    robot.log("x")\nf()\n', 4, 'run'],
+  ['class_body', 'import robot\nclass A:\n    x = 1\nrobot.home()\n', 2, 'run'],
+  ['try_body', 'import robot\ntry:\n    robot.home()\nexcept Exception:\n    pass\n', 3, 'run'],
+  ['with_body', 'import robot\nimport contextlib\nwith contextlib.nullcontext():\n    robot.home()\n', 4, 'run'],
+  ['match_case_body', 'import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n    case _:\n        pass\n', 5, 'run'],
+  ['async_main_body', 'import asyncio\nimport robot\n\nasync def main():\n    robot.home()\n\nasyncio.run(main())\n', 5, 'run'],
+  ['decorated_def_body', 'import robot, functools\n\n@functools.lru_cache\ndef main():\n    robot.home()\n\nmain()\n', 5, 'run'],
+  ['only_comments', '# nur ein Kommentar\n# noch einer\n', 2, 'run'],
+  ['one_line_guard', 'import robot\n\ndef main():\n    robot.home()\n\nif __name__ == "__main__": main()\n', 6, 'run'],
+  ['semicolon_line', 'import robot\n\ndef main():\n    robot.home(); robot.log("a")\n\nmain()\n', 4, 'run'],
+  ['loop_else_body', 'import robot\nfor i in range(2):\n    robot.home()\nelse:\n    robot.log("x")\n', 5, 'run'],
+  ['after_finite_while', 'import robot\nn = 0\nwhile n < 3:\n    n += 1\n\n', 5, 'run'],
+  ['docstring_statement', '"""Mein Programm."""\nimport robot\nrobot.home()\n', 3, 'run'],
+  ['future_then_code', '"""Doku."""\nfrom __future__ import annotations\nimport robot\nrobot.home()\n', 3, 'run'],
+  // ── invalid spots: nothing is inserted, and the reason is said ──
+  ['no_cursor', 'import robot\nrobot.home()\n', null, 'click'],
+  ['starter_comment_line', PY_STARTER, 1, 'lead'],
+  ['starter_second_comment', PY_STARTER, 2, 'lead'],
+  ['docstring_then_future', '"""Mein Programm."""\nfrom __future__ import annotations\nimport robot\nrobot.home()\n', 1, 'lead'],
+  ['comment_then_future', '# Kopf\nfrom __future__ import annotations\nimport robot\nrobot.home()\n', 1, 'lead'],
+  ['between_imports', 'import robot\nimport sys\nrobot.home()\n', 1, 'lead'],
+  ['def_docstring', 'import robot\ndef f():\n    """Doku."""\n    robot.home()\nf()\n', 2, 'doc'],
+  ['class_docstring', 'import robot\nclass A:\n    """Doku."""\n    x = 1\nrobot.home()\n', 2, 'doc'],
+  ['decorator_line', 'import robot\nimport functools\n@functools.cache\ndef f():\n    return 1\nf()\n', 3, 'deco'],
+  ['match_header', 'import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n', 3, 'match'],
+  ['case_header', 'import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n', 4, 'match'],
+  ['between_cases', 'import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n    \n    case 2:\n        pass\n', 6, 'match'],
+  ['after_last_case_at_case_level', 'import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n    \nrobot.log("a")\n', 6, 'match'],
+  ['inside_list', 'import robot\npunkte = [\n    1,\n    2,\n]\n', 3, 'inside'],
+  ['list_opener_line', 'import robot\nd = {\n    "a": 1,\n}\n', 2, 'inside'],
+  ['backslash_line', 'import robot\nx = 1 + \\\n    2\nrobot.home()\n', 2, 'inside'],
+  ['crlf_backslash_line', 'import robot\r\nx = 1 + \\\r\n    2\r\nrobot.home()\r\n', 2, 'inside'],
+  ['lambda_multiline', 'import robot\nf = (lambda a:\n     a + 1)\nrobot.home()\n', 2, 'inside'],
+  ['docstring_inside', 'import robot\ndef f():\n    """Doc\n    more"""\n    return 1\n', 3, 'inside'],
+  ['multiline_if_first_row', 'import robot\nif (1 and\n        2):\n    robot.home()\n', 2, 'inside'],
+  ['after_return', 'import robot\ndef f():\n    robot.home()\n    return 1\nf()\n', 4, 'return'],
+  ['after_raise', 'import robot\ndef f():\n    robot.home()\n    raise ValueError(1)\ntry:\n    f()\nexcept ValueError:\n    pass\n', 4, 'raise'],
+  ['after_break', 'import robot\nfor i in range(3):\n    robot.home()\n    break\n', 4, 'break'],
+  ['after_continue', 'import robot\nfor i in range(3):\n    robot.home()\n    continue\n', 4, 'continue'],
+  ['after_semicolon_return', 'import robot\ndef f():\n    robot.home(); return 1\nf()\n', 3, 'return'],
+  ['after_sys_exit_main', 'import robot, sys\n\ndef main():\n    robot.home()\n    return 0\n\nif __name__ == "__main__":\n    sys.exit(main())\n', 8, 'exit'],
+  ['after_exit', 'import robot\nrobot.home()\nexit()\n', 3, 'exit'],
+  ['after_quit', 'import robot\nrobot.home()\nquit()\n', 3, 'exit'],
+  ['after_os_exit', 'import robot, os\nrobot.home()\nos._exit(0)\n', 3, 'exit'],
+  ['after_raise_systemexit', 'import robot\nrobot.home()\nraise SystemExit(0)\n', 3, 'raise'],
+  ['after_while_true', 'import robot\nrobot.home()\nwhile True:\n    robot.log("x")\n\n', 5, 'loop'],
+  ['after_while_not_false', 'import robot\nrobot.home()\nwhile not False:\n    robot.log("x")\n\n', 5, 'loop'],
+  ['after_while_1_eq_1', 'import robot\nrobot.home()\nwhile 1 == 1:\n    robot.log("x")\n\n', 5, 'loop'],
+  ['after_while_one_liner', 'import robot\nrobot.home()\nwhile True: robot.log("x")\n', 3, 'loop'],
+  ['after_while_true_in_func', 'import robot\ndef main():\n    robot.home()\n    while True:\n        robot.log("x")\n    # danach\nmain()\n', 6, 'loop'],
+  ['else_of_endless_loop', 'import robot\nwhile True:\n    robot.home()\nelse:\n    robot.log("x")\n', 5, 'loop'],
+  ['after_if_else_returns', 'import robot\n\ndef main():\n    robot.home()\n    if robot.sees("wuerfel"):\n        return\n    else:\n        return\n    # danach\n\nmain()\n', 9, 'ifelse'],
+  ['after_try_finally_returns', 'import robot\ndef main():\n    try:\n        robot.home()\n    finally:\n        return\n    # danach\nmain()\n', 7, 'try'],
+  ['before_else_clause', 'import robot\nif 1:\n    robot.home()\n\nelse:\n    robot.log("x")\n', 4, 'clause'],
+  ['dedented_blank_mid_block', 'import robot\ndef f():\n    robot.home()\n\n    robot.log("x")\nf()\n', 4, 'indent'],
+  ['inconsistent_file', 'import robot\nif True:\n    robot.home()\n  robot.log("x")\n', 3, 'indentBroken'],
+  ['unclosed_bracket', 'import robot\nrobot.home()\nx = (\n', 2, 'unclosed'],
+  ['unclosed_triple_string', 'import robot\nrobot.home()\n"""\noffen\n', 2, 'unclosed'],
+  ['fstring_multiline', 'import robot\nx = f"{\n1}"\nrobot.home()\n', 2, 'unreadable'],
 ];
 
 const JAVA = [
-  ['plain', 'import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', null, 'run'],
-  ['trailing_while', J('        Robot.home();\n        while (true) {\n            Robot.log("x");\n        }\n'), null, 'run'],
-  ['trailing_while_nospace', J('        while(true){\n            Robot.log("x");\n        }\n'), null, 'run'],
-  ['trailing_for', J('        for (;;) { Robot.home(); }\n'), null, 'run'],
-  ['trailing_do', J('        do {\n            Robot.home();\n        } while (true);\n'), null, 'run'],
-  ['trailing_return', J('        Robot.home();\n        return;\n'), null, 'run'],
-  ['trailing_labeled_while', J('        outer:\n        while (true) {\n            Robot.home();\n        }\n'), null, 'run'],
-  ['trailing_labeled_while_sameline', J('        outer: while (true) {\n            Robot.home();\n        }\n'), null, 'run'],
-  ['trailing_throw', J('        Robot.home();\n        throw new RuntimeException("x");\n'), null, 'run'],
-  ['return_nested_not_trailing', J('        if (args.length > 5) {\n            return;\n        }\n        Robot.home();\n'), null, 'run'],
-  ['one_line_main', 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) { Robot.home(); }\n}\n', null, 'run'],
-  ['one_line_main_while', 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) { while (true) { Robot.home(); } }\n}\n', null, 'run'],
-  ['main_in_comment_first', 'import edubotics.Robot;\n// public static void main(String[] a) { }\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', null, 'run'],
-  ['main_in_string_first', 'import edubotics.Robot;\npublic class Main {\n    static String s = "static void main( {";\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', null, 'run'],
-  ['overloaded_main_first', 'import edubotics.Robot;\npublic class Main {\n    static void main(int x) {\n        Robot.home();\n    }\n    public static void main(String[] args) {\n        main(1);\n    }\n}\n', null, 'run'],
-  ['nested_class_main_first', 'import edubotics.Robot;\npublic class Main {\n    static class Inner {\n        static void main(String[] a) { }\n    }\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', null, 'run'],
-  ['static_public_order', 'import edubotics.Robot;\npublic class Main {\n    static public void main(String[] args) {\n        Robot.home();\n    }\n}\n', null, 'run'],
-  ['final_main', 'import edubotics.Robot;\npublic class Main {\n    public static final void main(String[] args) {\n        Robot.home();\n    }\n}\n', null, 'run'],
-  ['generic_main', 'import edubotics.Robot;\npublic class Main {\n    public static <T> void main(String[] args) {\n        Robot.home();\n    }\n}\n', null, 'run'],
-  ['annotated_param', 'import edubotics.Robot;\npublic class Main {\n    public static void main(final String... args) {\n        Robot.home();\n    }\n}\n', null, 'run'],
-  ['c_style_array_param', 'import edubotics.Robot;\npublic class Main {\n    public static void main(String args[]) {\n        Robot.home();\n    }\n}\n', null, 'run'],
-  ['text_block', J('        String t = """\n            }\n            """;\n        Robot.log(t);\n'), null, 'run'],
-  ['char_brace', J("        char c = '}';\n        Robot.home();\n"), null, 'run'],
-  ['lambda_last', J('        Runnable r = () -> { Robot.home(); };\n'), null, 'run'],
-  ['allman', 'import edubotics.Robot;\npublic class Main\n{\n    public static void main(String[] args)\n    {\n        Robot.home();\n    }\n}\n', null, 'run'],
-  ['close_same_line', 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home(); }\n}\n', null, 'run'],
-  ['crlf', 'import edubotics.Robot;\r\npublic class Main {\r\n    public static void main(String[] args) {\r\n        Robot.home();\r\n    }\r\n}\r\n', null, 'run'],
-  ['if_else_return', J('        if (args.length == 0) { return; } else { return; }\n'), null, 'run'],
-  ['while_constant', J('        while (1 == 1) { Robot.home(); }\n'), null, 'run'],
-  ['final_constant_loop', J('        final boolean immer = true;\n        while (immer) { Robot.home(); }\n'), null, 'run'],
-  ['finite_loop_on_variable', J('        boolean laeuft = args.length > 5;\n        while (laeuft) { laeuft = false; }\n'), null, 'run'],
-  ['finite_for', J('        for (int i = 0; i < 3; i++) {\n            Robot.home();\n        }\n'), null, 'run'],
-  ['endless_with_break', J('        while (true) {\n            Robot.home();\n            break;\n        }\n'), null, 'run'],
-  ['trailing_switch', J('        switch (args.length) {\n            case 0:\n                return;\n            default:\n                return;\n        }\n'), null, 'run'],
-  ['try_while', J('        try {\n            while (true) { Robot.home(); }\n        } finally {\n            Robot.log("x");\n        }\n'), null, 'run'],
-  ['no_main', 'import edubotics.Robot;\npublic class Main {\n}\n', null, 'hint'],
-  ['cursor_import_line', 'import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 1, 'hint'],
-  ['cursor_class_line', 'import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 3, 'hint'],
-  ['cursor_field_line', 'import edubotics.Robot;\npublic class Main {\n    static int zaehler = 0;\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 3, 'hint'],
-  ['cursor_between_methods', 'import edubotics.Robot;\npublic class Main {\n    static void hilfe() {\n    }\n\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 5, 'hint'],
-  ['cursor_return', J('        Robot.home();\n        return;\n'), 5, 'run'],
-  ['cursor_on_throw', J('        Robot.home();\n        throw new RuntimeException("x");\n'), 5, 'run'],
-  ['cursor_on_break_in_loop', J('        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            break;\n        }\n'), 6, 'run'],
-  ['cursor_on_continue', J('        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            continue;\n        }\n'), 6, 'run'],
-  ['cursor_in_call_args', J('        Robot.log(\n            "x");\n'), 4, 'run'],
-  ['cursor_on_endless_loop_header', J('        while (true) {\n            Robot.home();\n        }\n'), 4, 'run'],
-  ['cursor_on_endless_loop_close', J('        Robot.home();\n        while (true) {\n            Robot.log("x");\n        }\n'), 8, 'run'],
-  ['cursor_on_main_close', J('        Robot.home();\n'), 5, 'run'],
-  ['cursor_one_line_main', 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) { Robot.home(); }\n}\n', 3, 'run'],
+  // ── valid spots ──
+  ['starter_no_cursor', JAVA_STARTER, null, 'click'],
+  ['starter_body', JAVA_STARTER, 7, 'run'],
+  ['starter_main_header', JAVA_STARTER, 6, 'run'],
+  ['starter_last_statement', JAVA_STARTER, 8, 'run'],
+  ['two_space_body', 'import edubotics.Robot;\npublic class Main {\n  public static void main(String[] args) {\n    Robot.home();\n  }\n}\n', 4, 'run'],
+  ['mixed_units_loop_body', 'import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        for (int i = 0; i < 3; i++) {\n          Robot.log("x");\n        }\n    }\n}\n', 7, 'run'],
+  ['after_finite_for', J('        for (int i = 0; i < 3; i++) {\n            Robot.home();\n        }\n'), 6, 'run'],
+  ['after_for_limit_final', J('        Robot.home();\n        for (int i = 0; i < ANZAHL; i++) {\n            Robot.beep();\n        }\n', '', '    static final int ANZAHL = 3;\n'), 7, 'run'],
+  ['after_for_args_length', J('        Robot.home();\n        for (int i = 0; i < args.length; i++) {\n            Robot.beep();\n        }\n'), 7, 'run'],
+  ['after_while_counter_max', J('        int n = 0;\n        while (n < MAX) {\n            n++;\n        }\n', '', '    static final int MAX = 3;\n'), 7, 'run'],
+  ['after_while_true_break', J('        int n = 0;\n        while (true) {\n            n++;\n            if (n > 3) break;\n        }\n'), 8, 'run'],
+  ['after_labelled_break_inner', J('        aussen:\n        while (true) {\n            while (true) {\n                break aussen;\n            }\n        }\n'), 9, 'run'],
+  ['after_label_same_line', J('        aussen: for (;;) { for (;;) { break aussen; } }\n'), 4, 'run'],
+  ['after_label_break_in_switch', J('        int x = 1;\n        aussen:\n        while (true) {\n            switch (x) {\n                case 1: break aussen;\n                default: break;\n            }\n        }\n'), 11, 'run'],
+  ['after_do_while_counter', J('        int i = 0;\n        do {\n            i++;\n        } while (i < 3);\n'), 7, 'run'],
+  ['after_switch_no_default', J('        int x = 1;\n        switch (x) {\n            case 1: Robot.home(); break;\n        }\n'), 7, 'run'],
+  ['in_case_group', J('        int x = 1;\n        switch (x) {\n            case 1:\n                Robot.home();\n                break;\n            default:\n                Robot.beep();\n        }\n'), 7, 'run'],
+  ['after_try_catch', J('        try {\n            Robot.home();\n        } catch (RuntimeException e) {\n            Robot.beep();\n        }\n'), 8, 'run'],
+  ['try_block_body', J('        try {\n            Robot.home();\n        } finally {\n            Robot.beep();\n        }\n'), 5, 'run'],
+  ['if_block_body', J('        if (args.length == 0) {\n            Robot.home();\n        }\n'), 5, 'run'],
+  ['else_block_header', J('        if (args.length > 0) {\n            Robot.home();\n        } else {\n            Robot.beep();\n        }\n'), 6, 'run'],
+  ['lambda_body', J('        Runnable r = () -> {\n            Robot.home();\n        };\n        r.run();\n'), 5, 'run'],
+  ['anonymous_method_body', J('        Runnable r = new Runnable() {\n            public void run() {\n                Robot.home();\n            }\n        };\n        r.run();\n'), 6, 'run'],
+  ['after_anonymous_generic', J('        java.util.Comparator<Integer> c = new java.util.Comparator<Integer>() {\n            public int compare(Integer a, Integer b) { return a - b; }\n        };\n        Robot.home();\n'), 7, 'run'],
+  ['after_text_block', J('        String s = """\n            } { main( "\n            """;\n        Robot.home();\n'), 7, 'run'],
+  ['after_char_brace', J("        char c = '{';\n        char d = '\\'';\n        Robot.home();\n"), 6, 'run'],
+  ['after_local_record', J('        record P(int x) { }\n        Robot.home();\n'), 4, 'run'],
+  ['after_switch_expression', J('        int x = 1;\n        int y = switch (x) {\n            case 1 -> { yield 2; }\n            default -> 3;\n        };\n        Robot.home();\n'), 9, 'run'],
+  ['labelled_block_body', J('        block: {\n            Robot.home();\n            if (args.length == 0) break block;\n            return;\n        }\n'), 5, 'run'],
+  ['after_labelled_block', J('        block: {\n            Robot.home();\n            if (args.length == 0) break block;\n            return;\n        }\n'), 8, 'run'],
+  ['crlf_body', J('        Robot.home();\n').replace(/\n/g, '\r\n'), 4, 'run'],
+  ['after_comment_line', J('        Robot.home(); // Start\n        // nächster Schritt\n'), 5, 'run'],
+  ['record_main', 'import edubotics.Robot;\npublic record Main(int x) {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 4, 'run'],
+  ['enum_main', 'import edubotics.Robot;\npublic enum Main {\n    A, B;\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 5, 'run'],
+  ['interface_main', 'import edubotics.Robot;\npublic interface Main {\n    static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 4, 'run'],
+  ['after_final_local_non_constant', J('        final boolean lauf = args.length > 5;\n        while (lauf) {\n            Robot.home();\n        }\n'), 7, 'run'],
+  // ── invalid spots ──
+  ['no_cursor', J('        Robot.home();\n'), null, 'click'],
+  ['starter_comment_line', JAVA_STARTER, 1, 'method'],
+  ['import_line', JAVA_STARTER, 3, 'method'],
+  ['class_header', JAVA_STARTER, 5, 'method'],
+  ['main_closing_brace', JAVA_STARTER, 9, 'method'],
+  ['class_closing_brace', JAVA_STARTER, 10, 'method'],
+  ['field_line', 'import edubotics.Robot;\npublic class Main {\n    static int zaehler = 0;\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 3, 'method'],
+  ['between_methods', 'import edubotics.Robot;\npublic class Main {\n    static void hilfe() {\n    }\n\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 5, 'method'],
+  ['one_line_main', 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) { Robot.home(); }\n}\n', 3, 'method'],
+  ['enum_body_line', 'import edubotics.Robot;\npublic class Main {\n    enum Farbe { ROT, GRUEN }\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 3, 'method'],
+  ['anonymous_generic_field', J('        java.util.Comparator<Integer> c = new java.util.Comparator<Integer>() {\n            int zaehler = 0;\n\n            public int compare(Integer a, Integer b) { return a - b; }\n        };\n'), 6, 'method'],
+  ['anonymous_field', J('        Runnable r = new Runnable() {\n            int zaehler = 0;\n\n            public void run() { Robot.home(); }\n        };\n        r.run();\n'), 5, 'method'],
+  ['local_class_member_line', J('        class Hilfe {\n            int x = 1;\n\n            void f() { Robot.home(); }\n        }\n        new Hilfe().f();\n'), 5, 'method'],
+  ['switch_header', J('        int x = 1;\n        switch (x) {\n            case 1: Robot.home(); break;\n        }\n'), 5, 'switch'],
+  ['case_label_line', J('        int x = 1;\n        switch (x) {\n            case 1:\n                Robot.home();\n                break;\n        }\n'), 6, 'switch'],
+  ['arrow_case_line', J('        int x = 1;\n        switch (x) {\n            case 1 -> Robot.home();\n            default -> Robot.beep();\n        }\n'), 7, 'switch'],
+  ['default_label_line', J('        int x = 1;\n        switch (x) {\n            case 1: Robot.home(); break;\n            default:\n                Robot.beep();\n        }\n'), 7, 'switch'],
+  ['blank_in_arrow_switch', J('        int x = 1;\n        switch (x) {\n            case 1 -> Robot.home();\n\n            default -> Robot.beep();\n        }\n'), 7, 'switch'],
+  ['after_return', J('        Robot.home();\n        return;\n'), 5, 'return'],
+  ['after_throw', J('        Robot.home();\n        throw new RuntimeException("x");\n'), 5, 'throw'],
+  ['after_system_exit', J('        Robot.home();\n        System.exit(0);\n'), 5, 'exit'],
+  ['after_break_in_loop', J('        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            break;\n        }\n'), 6, 'break'],
+  ['after_continue_in_loop', J('        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            continue;\n        }\n'), 6, 'continue'],
+  ['after_while_true', J('        Robot.home();\n        while (true) {\n            Robot.log("x");\n        }\n'), 7, 'loop'],
+  ['after_for_ever', J('        for (;;) { Robot.home(); }\n'), 4, 'loop'],
+  ['after_do_while_true', J('        do {\n            Robot.home();\n        } while (true);\n'), 6, 'loop'],
+  ['after_while_constant', J('        while (1 == 1) { Robot.home(); }\n'), 4, 'loop'],
+  ['after_while_final_local', J('        final boolean lauf = true;\n        while (lauf) {\n            Robot.home();\n        }\n'), 7, 'loop'],
+  ['after_interface_constant', 'import edubotics.Robot;\ninterface Einstellungen {\n    boolean LAUF = true;\n}\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 9, 'loop'],
+  ['after_static_final_constant', J('        while (MAX > 0) {\n            Robot.home();\n        }\n', '', '    static final int MAX = 3;\n'), 6, 'loop'],
+  ['after_if_else_returns', J('        if (args.length == 0) { return; } else { return; }\n'), 4, 'ifelse'],
+  ['after_if_else_if_returns', J('        int x = 1;\n        if (x == 1) return; else if (x == 2) return; else return;\n'), 5, 'ifelse'],
+  ['after_try_finally_return', J('        try {\n            Robot.home();\n        } finally {\n            return;\n        }\n'), 8, 'return'],
+  ['after_try_catch_both_return', J('        try {\n            Robot.home();\n            return;\n        } catch (RuntimeException e) {\n            return;\n        }\n'), 9, 'try'],
+  ['after_switch_all_return', J('        int x = 1;\n        switch (x) {\n            case 1: return;\n            default: return;\n        }\n'), 8, 'switchEnds'],
+  ['after_sync_return', J('        synchronized (Main.class) {\n            Robot.home();\n            return;\n        }\n'), 7, 'return'],
+  ['in_call_arguments', J('        Robot.log(\n            "x");\n'), 4, 'inside'],
+  ['in_multiline_expression', J('        int x = 1 +\n            2;\n        Robot.home();\n'), 4, 'inside'],
+  ['in_text_block', J('        String s = """\n            text\n            """;\n        Robot.home();\n'), 5, 'inside'],
+  ['in_block_comment', J('        /* ein\n           Kommentar */\n        Robot.home();\n'), 4, 'inside'],
+  ['unsure_foreign_constant', J('        while (Konstanten.LAUF) {\n            Robot.home();\n        }\n'), 6, 'unsure'],
+  ['unbalanced_braces', 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n', 4, 'unclosed'],
+  ['unclosed_string', J('        String s = "offen;\n        Robot.home();\n'), 5, 'unreadable'],
 ];
 
 function compute() {
   const cases = [];
   for (const [language, table, file] of [['python', PYTHON, 'main.py'], ['java', JAVA, 'Main.java']]) {
     const lines = snippetLines({ kind: 'recording', name: 'Winken' }, language);
-    for (const [name, input, line, reach] of table) {
+    for (const [name, input, line, expect] of table) {
       const cursor = line === null ? null : { file, line };
       const target = insertionTarget({ [file]: input }, language, cursor);
       const out = target.notFound ? null : insertAtTarget(input, target, lines, language).content;
       cases.push({
-        name, language, line, reach, input, output: out, hint: target.notFound ? target.hint : null,
+        name,
+        language,
+        line,
+        reach: expect === 'run' ? 'run' : 'hint',
+        input,
+        output: out,
+        hint: target.notFound ? target.hint : null,
       });
     }
   }
   return {
     _generated_by: 'physical_ai_manager/src/components/Workshop/code/__tests__/codeInsert.cases.test.js '
       + '(EDUBOTICS_REGEN_CODE_CASES=1 to regenerate)',
-    _checked_by: 'robotis_ai_setup/tests/test_code_insert_cases.py (CPython ast/compile + javac 21)',
+    _checked_by: 'robotis_ai_setup/tests/test_code_insert_cases.py (CPython ast/compile + a run, javac 21 + a run)',
     marker: { python: 'robot.replay("Winken")', java: 'Robot.replay("Winken");' },
     cases,
   };
 }
 
-describe('the insertion cases of review round 2 (mi2, mi3)', () => {
+const EXPECTED = new Map([...PYTHON.map((c) => [`python:${c[0]}`, c]), ...JAVA.map((c) => [`java:${c[0]}`, c])]);
+
+describe('insertion at the spot the student chose (owner decision R3-O4)', () => {
   it('match the fixture the compile-and-run test judges', () => {
     const now = compute();
     if (REGEN) {
@@ -161,15 +291,32 @@ describe('the insertion cases of review round 2 (mi2, mi3)', () => {
     expect(now).toEqual(saved);
   });
 
-  it('place a hint only where no statement may stand, and nowhere else', () => {
+  it('every case is an insertion directly below the cursor line — or its German reason, and nothing else', () => {
     const { cases } = compute();
-    const hinted = cases.filter((c) => c.output === null).map((c) => c.name);
-    expect(hinted).toEqual(cases.filter((c) => c.reach === 'hint').map((c) => c.name));
-    for (const c of cases.filter((x) => x.output !== null)) {
+    const wrong = [];
+    for (const c of cases) {
+      const [, , line, want] = EXPECTED.get(`${c.language}:${c.name}`);
+      if (want !== 'run') {
+        if (c.output !== null || c.hint !== H[want]) wrong.push([c.language, c.name, want, c.hint, c.output]);
+        continue;
+      }
+      if (c.output === null) {
+        wrong.push([c.language, c.name, 'run', c.hint]);
+        continue;
+      }
       const marker = c.language === 'java' ? 'Robot.replay("Winken");' : 'robot.replay("Winken")';
-      expect(c.output.split(/\r?\n/).filter((l) => l.trim() === marker)).toHaveLength(1);
-      // Nothing but the inserted line (and line breaks around a split) changed.
-      expect(c.output.replace(/\s+/g, '').replace(marker, '')).toBe(c.input.replace(/\s+/g, ''));
+      const rows = c.output.split(/\r?\n/);
+      const markerRows = rows.map((r, i) => (r.trim() === marker ? i : -1)).filter((i) => i >= 0);
+      // Exactly one marker, on the line right below the cursor's (1-based
+      // cursor line = the 0-based index of the row below it) …
+      if (markerRows.length !== 1 || markerRows[0] !== (c.input === '' ? 0 : line)) {
+        wrong.push([c.language, c.name, 'marker rows', markerRows]);
+        continue;
+      }
+      // … and nothing but that one line was added.
+      const without = rows.filter((_, i) => i !== markerRows[0]).join(c.input.includes('\r\n') ? '\r\n' : '\n');
+      if (without !== c.input) wrong.push([c.language, c.name, 'changed', c.output]);
     }
+    expect(wrong).toEqual([]);
   });
 });

@@ -8,13 +8,17 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-// Code insertion (owner decision O6): the steps a Vormachen round or a Sammlung
-// row stands for, spelled in the program's language from robot_api.json, and
-// placed by the program's STRUCTURE — the statement on the cursor's line, else
-// the end of the body that runs last (review round 2, mi2/mi3). Every program
-// these produce is also PARSED by CPython 3.12 and COMPILED by javac 21
-// (codeInsert.cases.test.js writes them to a fixture that
-// robotis_ai_setup/tests/test_code_insert_cases.py compiles and runs).
+// Code insertion: the steps a Vormachen round or a Sammlung row stands for,
+// spelled in the program's language from robot_api.json — and put where the
+// STUDENT chose (owner decision R3-O4): directly below the cursor's line,
+// after this module CHECKED that a line can stand there and run. Without a
+// cursor, and at a spot that fails the check, nothing is written and a short
+// German reason says why; the line is never moved anywhere else. The program
+// structure also decides the indentation, the same function the editor's
+// Enter uses (review round 3, MB1). Every program these produce is also
+// PARSED by CPython 3.12 and COMPILED by javac 21 (codeInsert.cases.test.js
+// writes them to a fixture that robotis_ai_setup/tests/
+// test_code_insert_cases.py compiles and runs).
 
 import { describe, it, expect } from 'vitest';
 import {
@@ -22,17 +26,18 @@ import {
   SNIPPET_MIME,
   detectIndentUnit,
   fileIndentUnit,
+  indentStepAt,
   insertAtTarget,
   insertionChange,
   insertionTarget,
   insertionTargetAt,
-  mainTarget,
   minimalChange,
+  newlineIndentAt,
   snippetLines,
   stepsToCode,
 } from '../codeInsert';
 import { STARTER_FILES } from '../codeProject';
-import { CODE_DE } from '../codeMessagesDe';
+import { CODE_DE, formatCode } from '../codeMessagesDe';
 
 const STEPS = [
   { type: 'replay', name: 'Winken' },
@@ -42,13 +47,12 @@ const STEPS = [
   { type: 'open_gripper' },
 ];
 
-// The lines inserted with the cursor on `line`, and at the end of main.
+// The lines inserted with the cursor on `line` (the refusal leaves the text).
 const at = (content, line, lines, language = 'python') => insertAtTarget(
   content, insertionTargetAt(content, language, line), lines, language,
 );
-const atMain = (content, lines, language = 'python') => insertAtTarget(
-  content, mainTarget(content, language), lines, language,
-);
+const hintAt = (content, line, language = 'python') => insertionTargetAt(content, language, line).hint;
+const NEVER = (what) => formatCode(CODE_DE.INSERT_NEVER_RUNS_HINT, what);
 
 describe('stepsToCode', () => {
   it('spells Python calls from robot_api.json', () => {
@@ -88,143 +92,184 @@ describe('snippetLines — a Sammlung row as one line of code', () => {
   });
 });
 
-describe('the cursor’s statement decides', () => {
-  it('inserts below the anchor line with its indentation', () => {
+describe('directly below the line the student chose (owner decision R3-O4)', () => {
+  it('goes on the next line with the block’s own indentation', () => {
     const src = 'import robot\nfor i in range(3):\n    robot.home()\nprint(1)\n';
     const r = at(src, 3, ['robot.lift()', 'robot.beep()']);
     expect(r.content).toBe('import robot\nfor i in range(3):\n    robot.home()\n    robot.lift()\n    robot.beep()\nprint(1)\n');
     expect([r.firstLine, r.lastLine]).toEqual([4, 5]);
   });
 
-  it('adds one level after a line opening a block (Python `:`, Java `{`)', () => {
+  it('below a block opener: its body’s first line (Python `:`, Java `{`)', () => {
     expect(at('if x:\n    pass\n', 1, ['a()']).content).toBe('if x:\n    a()\n    pass\n');
-    expect(at('if x:  # kommentar\n', 1, ['a()']).content).toBe('if x:  # kommentar\n    a()\n');
-    // No body yet: the anchor's own indentation plus the FILE's unit (2 here).
-    expect(at('  void f() {\n  }\n', 1, ['a();'], 'java').content)
-      .toBe('  void f() {\n    a();\n  }\n');
+    expect(at('if x:  # kommentar\n    pass\n', 1, ['a()']).content).toBe('if x:  # kommentar\n    a()\n    pass\n');
+    const java = 'class Main {\n  static void main(String[] a) {\n    Robot.home();\n  }\n}\n';
+    expect(at(java, 2, ['Robot.beep();'], 'java').content)
+      .toBe('class Main {\n  static void main(String[] a) {\n    Robot.beep();\n    Robot.home();\n  }\n}\n');
   });
 
-  it('takes an empty anchor line’s indentation from the statement above it', () => {
-    expect(at('def f():\n    x = 1\n\n', 3, ['y()']).content).toBe('def f():\n    x = 1\n\n    y()\n');
+  it('a bodyless opener: its own indentation plus the unit of the block it sits in (MB1)', () => {
+    // Top level: the file's unit (2 here); inside a 4-space block: 4.
+    expect(at('def f():\n  return 1\nif x:\n', 3, ['a()']).content).toBe('def f():\n  return 1\nif x:\n  a()\n');
+    expect(at('if x:\n', 1, ['a()']).content).toBe('if x:\n    a()\n');
+    expect(at('def g():\n  pass\ndef f():\n    y = 1\n    if y:\n', 5, ['a()']).content)
+      .toBe('def g():\n  pass\ndef f():\n    y = 1\n    if y:\n        a()\n');
   });
 
-  it('keeps tabs as tabs and clamps the line to the file', () => {
+  it('a blank or comment line keeps its own level when a statement may take it', () => {
+    expect(at('def f():\n    x = 1\n    \n    y = 2\nf()\n', 3, ['z()']).content)
+      .toBe('def f():\n    x = 1\n    \n    z()\n    y = 2\nf()\n');
+    expect(at('def f():\n    x = 1\n\nf()\n', 3, ['y()']).content).toBe('def f():\n    x = 1\n\ny()\nf()\n');
+  });
+
+  it('keeps tabs as tabs, clamps the line to the file, and needs no final newline', () => {
     expect(at('if x:\n\tpass\n', 2, ['a()']).content).toBe('if x:\n\tpass\n\ta()\n');
     expect(at('a\n', 99, ['b']).content).toBe('a\nb\n');
     expect(at('a', 1, ['b']).content).toBe('a\nb');
+    expect(at('', 1, ['b']).content).toBe('b\n');
   });
 
-  it('a statement that spans lines is moved past as a whole (mi3)', () => {
-    // Inside brackets, a `\` continuation, a docstring: the statement's end.
-    expect(at('d = {\n    "a": 1,\n}\n', 1, ['b()']).content).toBe('d = {\n    "a": 1,\n}\nb()\n');
-    expect(at('x = 1 + \\\n    2\n', 1, ['b()']).content).toBe('x = 1 + \\\n    2\nb()\n');
-    expect(at('def f():\n    """Doc\n    mehr"""\n    return 1\n', 2, ['b()']).content)
-      .toBe('def f():\n    """Doc\n    mehr"""\n    b()\n    return 1\n');
-    // A multi-line header ends in `:` — its body gets the lines.
-    expect(at('if (a and\n        b):\n    c()\n', 1, ['x()']).content)
-      .toBe('if (a and\n        b):\n    x()\n    c()\n');
-    // A decorator belongs to its def.
-    expect(at('@cache\ndef f():\n    return 1\n', 1, ['x()']).content)
-      .toBe('@cache\ndef f():\n    x()\n    return 1\n');
+  it('a refusal writes nothing — never a line moved somewhere else', () => {
+    const src = 'import robot\ndef f():\n    robot.home()\n    return 1\nf()\n';
+    const target = insertionTargetAt(src, 'python', 4);
+    expect(target).toEqual({ notFound: true, hint: NEVER('„return“') });
+    expect(insertAtTarget(src, target, ['x()'], 'python')).toEqual({ content: src, firstLine: 0, lastLine: -1 });
+  });
+});
+
+describe('the spots a line may not take, each with its reason', () => {
+  it('above or inside the file’s leading block (mb5): the starter’s comments, a docstring, __future__', () => {
+    const starter = STARTER_FILES.python['main.py'];
+    expect(hintAt(starter, 1)).toBe(CODE_DE.INSERT_LEADING_BLOCK_HINT);
+    expect(hintAt(starter, 2)).toBe(CODE_DE.INSERT_LEADING_BLOCK_HINT);
+    expect(at(starter, 3, ['robot.beep()']).content.split('\n')[3]).toBe('robot.beep()');
+    expect(hintAt('"""Doku."""\nfrom __future__ import annotations\nimport robot\n', 1))
+      .toBe(CODE_DE.INSERT_LEADING_BLOCK_HINT);
+    expect(hintAt('import robot\nimport sys\nrobot.home()\n', 1)).toBe(CODE_DE.INSERT_LEADING_BLOCK_HINT);
   });
 
-  it('never below a statement that lets no next line run: before it (mi3)', () => {
-    expect(at('def f():\n    a()\n    return 1\n', 3, ['x()']).content)
-      .toBe('def f():\n    a()\n    x()\n    return 1\n');
-    expect(at('for i in y:\n    break\n', 2, ['x()']).content).toBe('for i in y:\n    x()\n    break\n');
-    expect(at('while True: pass\n', 1, ['x()']).content).toBe('x()\nwhile True: pass\n');
-    const java = 'class Main {\n  static void main(String[] a) {\n    Robot.home();\n    return;\n  }\n}\n';
-    expect(at(java, 4, ['Robot.beep();'], 'java').content)
-      .toBe('class Main {\n  static void main(String[] a) {\n    Robot.home();\n    Robot.beep();\n    return;\n  }\n}\n');
+  it('right above a def’s or class’s docstring, right below a decorator', () => {
+    expect(hintAt('def f():\n    """Doku."""\n    return 1\n', 1)).toBe(CODE_DE.INSERT_DOCSTRING_HINT);
+    expect(hintAt('class A:\n    """Doku."""\n', 1)).toBe(CODE_DE.INSERT_DOCSTRING_HINT);
+    expect(hintAt('import functools\n@functools.cache\ndef f():\n    return 1\n', 2)).toBe(CODE_DE.INSERT_DECORATOR_HINT);
   });
 
-  it('Java: a cursor in a call’s arguments moves to the statement’s end; on a closing brace, into the block', () => {
-    const src = 'class Main {\n  static void main(String[] a) {\n    Robot.log(\n      "x");\n  }\n}\n';
-    expect(at(src, 3, ['Robot.beep();'], 'java').content)
-      .toBe('class Main {\n  static void main(String[] a) {\n    Robot.log(\n      "x");\n    Robot.beep();\n  }\n}\n');
-    expect(at(src, 5, ['Robot.beep();'], 'java').content)
-      .toBe('class Main {\n  static void main(String[] a) {\n    Robot.log(\n      "x");\n    Robot.beep();\n  }\n}\n');
+  it('a match/case line (mb4) and a switch/case line (mb3)', () => {
+    const py = 'x = 1\nmatch x:\n    case 1:\n        pass\n';
+    expect(hintAt(py, 2)).toBe(CODE_DE.INSERT_MATCH_HINT);
+    expect(hintAt(py, 3)).toBe(CODE_DE.INSERT_MATCH_HINT);
+    const java = (body) => `class Main {\n  static void main(String[] a) {\n    int x = 1;\n${body}  }\n}\n`;
+    const colon = java('    switch (x) {\n      case 1:\n        Robot.home();\n        break;\n      default:\n        Robot.beep();\n    }\n');
+    for (const line of [4, 5, 8]) expect(hintAt(colon, line, 'java')).toBe(CODE_DE.INSERT_SWITCH_HINT);
+    // A statement line inside a case group is a spot like any other.
+    expect(at(colon, 6, ['Robot.log("x");'], 'java').content.split('\n')[6]).toBe('        Robot.log("x");');
+    const arrow = java('    switch (x) {\n      case 1 -> Robot.home();\n      default -> Robot.beep();\n    }\n');
+    for (const line of [4, 5, 6]) expect(hintAt(arrow, line, 'java')).toBe(CODE_DE.INSERT_SWITCH_HINT);
   });
 
-  it('Java: no statement outside a method — an import, class or field line is a German hint (mi3)', () => {
-    const src = 'import edubotics.Robot;\n\npublic class Main {\n  static int x = 1;\n  public static void main(String[] a) {\n  }\n}\n';
-    for (const line of [1, 3, 4]) {
-      expect(insertionTargetAt(src, 'java', line)).toEqual({ notFound: true, hint: CODE_DE.NOT_IN_METHOD_HINT });
+  it('inside a multi-line expression, a `\\` continuation or a string', () => {
+    for (const [src, line] of [['d = {\n    "a": 1,\n}\n', 1], ['x = 1 + \\\n    2\n', 1],
+      ['def f():\n    """Doc\n    mehr"""\n    return 1\n', 2], ['if (a and\n        b):\n    c()\n', 1]]) {
+      expect(hintAt(src, line)).toBe(CODE_DE.INSERT_INSIDE_EXPRESSION_HINT);
     }
-    expect(CODE_DE.NOT_IN_METHOD_HINT).toMatch(/Methode/);
+    const java = 'class Main {\n  static void main(String[] a) {\n    Robot.log(\n      "x");\n  }\n}\n';
+    expect(hintAt(java, 3, 'java')).toBe(CODE_DE.INSERT_INSIDE_EXPRESSION_HINT);
+    // Its LAST line is a spot: the line goes below the whole statement.
+    expect(at(java, 4, ['Robot.beep();'], 'java').content.split('\n')[4]).toBe('    Robot.beep();');
+  });
+
+  it('Java outside a method body: an import, class, field or closing-brace line — and a local or anonymous class member line (MB2g)', () => {
+    const src = 'import edubotics.Robot;\n\npublic class Main {\n  static int x = 1;\n  public static void main(String[] a) {\n  }\n}\n';
+    for (const line of [1, 3, 4, 6, 7]) expect(hintAt(src, line, 'java')).toBe(CODE_DE.NOT_IN_METHOD_HINT);
+    const local = 'class Main {\n  static void main(String[] a) {\n    class Hilfe {\n      int x = 1;\n      void f() { }\n    }\n    new Hilfe().f();\n  }\n}\n';
+    expect(hintAt(local, 4, 'java')).toBe(CODE_DE.NOT_IN_METHOD_HINT);
+    const anon = 'class Main {\n  static void main(String[] a) {\n    Runnable r = new Runnable() {\n      int x = 1;\n      public void run() { }\n    };\n  }\n}\n';
+    expect(hintAt(anon, 4, 'java')).toBe(CODE_DE.NOT_IN_METHOD_HINT);
+  });
+
+  it('nb1: a generic anonymous class is a class body, and „unclosed" is said only when something is', () => {
+    const generic = 'class Main {\n  static void main(String[] a) {\n    java.util.Comparator<Integer> c = new java.util.Comparator<Integer>() {\n      int z = 0;\n      public int compare(Integer x, Integer y) { return x - y; }\n    };\n  }\n}\n';
+    expect(hintAt(generic, 4, 'java')).toBe(CODE_DE.NOT_IN_METHOD_HINT);
+    expect(hintAt('class Main {\n  static void main(String[] a) {\n    Robot.home();\n', 3, 'java'))
+      .toBe(CODE_DE.NO_SAFE_PLACE_HINT);
+    expect(hintAt('x = (\n', 1)).toBe(CODE_DE.NO_SAFE_PLACE_HINT);
+    expect(hintAt('import robot\n"""\noffen\n', 1)).toBe(CODE_DE.NO_SAFE_PLACE_HINT);
+    expect(CODE_DE.NO_SAFE_PLACE_HINT).toMatch(/Klammer oder ein Text/);
+    expect(CODE_DE.INSERT_UNREADABLE_HINT).not.toMatch(/Klammer/);
+  });
+
+  it('a spot that can never run: after return/raise/break/continue/exit (mb6)', () => {
+    expect(hintAt('def f():\n    a()\n    return 1\n', 3)).toBe(NEVER('„return“'));
+    expect(hintAt('for i in y:\n    break\n', 2)).toBe(NEVER('„break“'));
+    expect(hintAt('for i in y:\n    continue\n', 2)).toBe(NEVER('„continue“'));
+    expect(hintAt('def f():\n    raise ValueError(1)\n', 2)).toBe(NEVER('„raise“'));
+    for (const call of ['sys.exit(main())', 'exit()', 'quit()', 'os._exit(0)']) {
+      expect(hintAt(`import sys, os\n${call}\n`, 2)).toBe(NEVER('ein Programmende (exit)'));
+    }
+    const java = (s) => `class Main {\n  static void main(String[] a) {\n    ${s}\n  }\n}\n`;
+    expect(hintAt(java('return;'), 3, 'java')).toBe(NEVER('„return“'));
+    expect(hintAt(java('throw new RuntimeException();'), 3, 'java')).toBe(NEVER('„throw“'));
+    expect(hintAt(java('System.exit(0);'), 3, 'java')).toBe(NEVER('ein Programmende (exit)'));
+  });
+
+  it('after an endless loop — a provably constant condition, no break out (mb6, mb7, mb2)', () => {
+    for (const cond of ['True', '1', 'not False', '1 == 1', '(True)', '2 > 1 and True']) {
+      expect(hintAt(`import robot\nwhile ${cond}:\n    robot.home()\n\n`, 4)).toBe(NEVER('eine Endlosschleife'));
+    }
+    // A break out of it, or a condition that can change: the loop ends.
+    expect(at('while True:\n    break\n\n', 3, ['x()']).content).toBe('while True:\n    break\n\nx()\n');
+    expect(at('n = 0\nwhile n < 3:\n    n += 1\n\n', 4, ['x()']).content).toBe('n = 0\nwhile n < 3:\n    n += 1\n\nx()\n');
+    const java = (body, extra = '') => `interface K {\n  boolean LAUF = true;\n}\nclass Main implements K {\n${extra}  static void main(String[] a) {\n${body}  }\n}\n`;
+    const after = (body, extra) => {
+      const src = java(body, extra);
+      const rows = src.split('\n');
+      return insertionTargetAt(src, 'java', rows.lastIndexOf('    }') + 1);
+    };
+    expect(after('    while (LAUF) {\n    }\n').hint).toBe(NEVER('eine Endlosschleife'));
+    expect(after('    while (MAX > 0) {\n    }\n', '  static final int MAX = 3;\n').hint).toBe(NEVER('eine Endlosschleife'));
+    expect(after('    for (int i = 0; i < MAX; i++) {\n    }\n', '  static final int MAX = 3;\n').notFound).toBeUndefined();
+    expect(after('    for (int i = 0; i < a.length; i++) {\n    }\n').notFound).toBeUndefined();
+    expect(after('    int n = 0;\n    while (n < MAX) {\n      n++;\n    }\n', '  static final int MAX = 3;\n').notFound).toBeUndefined();
+    expect(after('    while (Konstanten.LAUF) {\n    }\n').hint).toBe(CODE_DE.INSERT_UNSURE_HINT);
+  });
+
+  it('after an if/else or try whose every way out leaves (mb6)', () => {
+    expect(hintAt('def f():\n    if a:\n        return\n    else:\n        return\n    # danach\n', 6))
+      .toBe(NEVER('ein if/else, das in jedem Zweig endet'));
+    expect(hintAt('def f():\n    try:\n        a()\n    finally:\n        return\n    # danach\n', 6))
+      .toBe(NEVER('ein try, das in jedem Zweig endet'));
+    // Inside the else-body, before its return, the line runs.
+    expect(at('def f():\n    if a:\n        return\n    else:\n        b()\n        return\n', 5, ['x()']).content)
+      .toBe('def f():\n    if a:\n        return\n    else:\n        b()\n        x()\n        return\n');
+  });
+
+  it('no line between a block and its else/elif/except/finally, none where the indentation cannot fit', () => {
+    expect(hintAt('if a:\n    b()\n\nelse:\n    c()\n', 3)).toBe(CODE_DE.INSERT_CLAUSE_HINT);
+    expect(hintAt('def f():\n    a()\n\n    b()\n', 3)).toBe(CODE_DE.INSERT_INDENT_HINT);
+    expect(hintAt('if True:\n    a()\n  b()\n', 2)).toBe(CODE_DE.INSERT_INDENT_BROKEN_HINT);
   });
 });
 
-describe('the end of main', () => {
-  it('Python: the end of main.py, top level', () => {
-    const src = 'import robot\nfor i in range(3):\n    robot.home()\n';
-    expect(atMain(src, ['robot.beep()']).content)
-      .toBe('import robot\nfor i in range(3):\n    robot.home()\nrobot.beep()\n');
-    expect(atMain('', ['robot.beep()']).content).toBe('robot.beep()\n');
-  });
-
-  it('Java: inside main, after its last statement — braces in strings and comments skipped', () => {
-    const src = [
-      'public class Main {',
-      '    public static void main(String[] args) {',
-      '        String s = "}";',
-      '        // }',
-      '        Robot.home();',
-      '    }',
-      '    static void hilfe() {',
-      '    }',
-      '}',
-      '',
-    ].join('\n');
-    const out = atMain(src, ['Robot.beep();'], 'java');
-    expect(out.content.split('\n').slice(4, 7)).toEqual(['        Robot.home();', '        Robot.beep();', '    }']);
-    expect([out.firstLine, out.lastLine]).toEqual([6, 6]);
-  });
-
-  it('Java starter: lands inside main', () => {
-    const src = STARTER_FILES.java['Main.java'];
-    const out = atMain(src, ['Robot.beep();'], 'java').content;
-    expect(out).toContain('        Robot.log("Hallo Roboter!");\n        Robot.beep();\n    }\n}');
-  });
-
-  it('Java without a main, or with unbalanced braces: nothing, and a German reason', () => {
-    expect(mainTarget('class A {}\n', 'java')).toEqual({ notFound: true, hint: CODE_DE.NO_MAIN_HINT });
-    expect(mainTarget('public class Main {\n  static void main(String[] a) {\n', 'java'))
-      .toEqual({ notFound: true, hint: CODE_DE.NO_SAFE_PLACE_HINT });
-    expect(insertAtTarget('class A {}\n', mainTarget('class A {}\n', 'java'), ['x();'], 'java').content)
-      .toBe('class A {}\n');
-  });
-
-  it('Python: an unterminated string or bracket at the end is no safe place', () => {
-    expect(mainTarget('x = (\n', 'python')).toEqual({ notFound: true, hint: CODE_DE.NO_SAFE_PLACE_HINT });
-    expect(mainTarget('"""\noffen\n', 'python')).toEqual({ notFound: true, hint: CODE_DE.NO_SAFE_PLACE_HINT });
-  });
-});
-
-describe('insertionTarget — the cursor, else the end of main', () => {
+describe('insertionTarget — the cursor, or nothing', () => {
   const files = { 'main.py': 'import robot\nrobot.home()\n', 'hilfe.py': 'def f():\n    pass\n' };
 
   it('uses the last cursor when its file and line exist', () => {
     const t = insertionTarget(files, 'python', { file: 'hilfe.py', line: 2 });
-    expect(t).toMatchObject({ file: 'hilfe.py', fromCursor: true, mode: 'after', indent: '    ' });
+    expect(t).toMatchObject({ file: 'hilfe.py', mode: 'after', indent: '    ' });
     expect(insertAtTarget(files['hilfe.py'], t, ['x()'], 'python').content).toBe('def f():\n    pass\n    x()\n');
   });
 
-  it('falls back to the entry file’s main end when the cursor is unknown or stale', () => {
+  it('without a known cursor NOTHING is placed — the student is asked to click first', () => {
     for (const cursor of [null, { file: 'weg.py', line: 1 }, { file: 'main.py', line: 99 }]) {
-      const t = insertionTarget(files, 'python', cursor);
-      expect(t).toMatchObject({ file: 'main.py', fromCursor: false });
-      expect(insertAtTarget(files['main.py'], t, ['x()'], 'python').content)
-        .toBe('import robot\nrobot.home()\nx()\n');
+      expect(insertionTarget(files, 'python', cursor))
+        .toEqual({ notFound: true, noCursor: true, hint: CODE_DE.CLICK_FIRST_HINT });
     }
+    expect(CODE_DE.CLICK_FIRST_HINT).toBe('Klicke zuerst in deinen Code, wo die Zeile hin soll.');
   });
 
-  it('passes a missing main on instead of guessing a place — and a class-level cursor too', () => {
-    const t = insertionTarget({ 'Main.java': 'class A {}\n' }, 'java', null);
-    expect(t).toMatchObject({ file: 'Main.java', notFound: true, fromCursor: false, hint: CODE_DE.NO_MAIN_HINT });
-    // A cursor on a class line is no place for a statement either (mi3).
+  it('a cursor on a class line is no place for a statement', () => {
     expect(insertionTarget({ 'Main.java': 'class A {}\n' }, 'java', { file: 'Main.java', line: 1 }))
-      .toMatchObject({ fromCursor: true, notFound: true, hint: CODE_DE.NOT_IN_METHOD_HINT });
+      .toEqual({ file: 'Main.java', notFound: true, hint: CODE_DE.NOT_IN_METHOD_HINT });
   });
 });
 
@@ -236,11 +281,12 @@ describe('insertionChange — the same insertion as ONE editor change', () => {
       ['a\n', 99, 'python'],
       ['a', 1, 'python'],
       ['', 1, 'python'],
-      ['  void f() {\n  }\n', 1, 'java'],
-      ['class M {\n  static void main(String[] a) { Robot.home(); }\n}\n', 2, 'java'],
+      ['class M {\n  void f() {\n  }\n}\n', 2, 'java'],
+      ['class M {\r\n  static void main(String[] a) {\r\n    Robot.home();\r\n  }\r\n}\r\n', 3, 'java'],
     ];
     for (const [content, line, language] of cases) {
       const target = insertionTargetAt(content, language, line);
+      expect(target.notFound).toBeUndefined();
       const res = insertionChange(content, target, ['x()', 'y()'], language);
       const { from, to, insert } = res.change;
       expect(content.slice(0, from) + insert + content.slice(to)).toBe(res.content);
@@ -275,8 +321,8 @@ describe('SNIPPET_MIME', () => {
   });
 });
 
-describe('indentation is the file’s own (review M2, round 2 R2-O2)', () => {
-  it('a file with no indented line uses 4 spaces (PEP 8, the Java starter)', () => {
+describe('the file’s indentation unit: only statement starts vote (review round 3, MB1)', () => {
+  it('a file with no indented block uses 4 spaces (PEP 8, the Java starter)', () => {
     expect(CODE_INDENT_UNIT).toBe('    ');
     expect(fileIndentUnit('a()\nb()\n', 'python')).toBe('    ');
     expect(fileIndentUnit('', 'python')).toBe('    ');
@@ -284,110 +330,85 @@ describe('indentation is the file’s own (review M2, round 2 R2-O2)', () => {
     expect(fileIndentUnit(STARTER_FILES.java['Main.java'], 'java')).toBe('    ');
   });
 
-  it('after a block opener: the indentation of the body line below it', () => {
-    const two = 'import robot\n\nfor i in range(3):\n  robot.replay("Winken")\nrobot.home()\n';
-    expect(at(two, 3, ['robot.beep()']).content)
-      .toBe('import robot\n\nfor i in range(3):\n  robot.beep()\n  robot.replay("Winken")\nrobot.home()\n');
-    const tab = 'for i in range(3):\n\trobot.home()\n';
-    expect(at(tab, 1, ['a()']).content).toBe('for i in range(3):\n\ta()\n\trobot.home()\n');
-    const four = 'while x:\n    a()\n';
-    expect(at(four, 1, ['b()']).content).toBe('while x:\n    b()\n    a()\n');
-  });
-
-  it('an opener with no body yet: its own indentation plus the unit the file uses', () => {
-    expect(at('def f():\n  return 1\nif x:\n', 3, ['a()']).content)
-      .toBe('def f():\n  return 1\nif x:\n  a()\n');
-    expect(at('def f():\n\treturn 1\nif x:\n', 3, ['a()']).content)
-      .toBe('def f():\n\treturn 1\nif x:\n\ta()\n');
-    expect(at('if x:\n', 1, ['a()']).content).toBe('if x:\n    a()\n');
-  });
-
-  it('inside a body the anchor’s own indentation (2 spaces stays 2)', () => {
-    const two = 'for i in range(3):\n  robot.home()\n';
-    expect(at(two, 2, ['robot.beep()']).content).toBe('for i in range(3):\n  robot.home()\n  robot.beep()\n');
-  });
-
-  it('detectIndentUnit reads the step the file uses; the editor reads the same function', () => {
+  it('the step from an opener to its body’s first statement; continuation lines never vote', () => {
     expect(detectIndentUnit('if a:\n  if b:\n    c()\n')).toBe('  ');
     expect(detectIndentUnit('if a:\n\tb()\n')).toBe('\t');
     expect(detectIndentUnit('a()\nb()\n')).toBeNull();
     expect(detectIndentUnit('x = """\n      text\n"""\n', 'python')).toBeNull();
-    expect(fileIndentUnit('if a:\n  b()\n', 'python')).toBe('  ');
+    expect(detectIndentUnit('x = [1,\n     2]\ny = (3 +\n     4)\nz = 1 + \\\n     5\n', 'python')).toBeNull();
+    expect(detectIndentUnit('a = [[1],\n     [2]]\nb = [[1],\n     [2]]\nif a:\n  b()\n', 'python')).toBe('  ');
+    expect(detectIndentUnit('int[] a = {\n        1,\n};\nvoid f() {\n  g();\n}\n', 'java')).toBe('  ');
   });
 
-  it('Java main with a 2-space body: the body’s own indentation', () => {
-    const src = 'public class Main {\n  public static void main(String[] a) {\n    Robot.home();\n  }\n}\n';
-    expect(atMain(src, ['Robot.beep();'], 'java').content)
-      .toBe('public class Main {\n  public static void main(String[] a) {\n    Robot.home();\n    Robot.beep();\n  }\n}\n');
-    const empty = 'public class Main {\n  public static void main(String[] a) {\n  }\n}\n';
-    expect(atMain(empty, ['Robot.beep();'], 'java').content)
-      .toBe('public class Main {\n  public static void main(String[] a) {\n    Robot.beep();\n  }\n}\n');
+  it('ties go to the smaller step', () => {
+    expect(detectIndentUnit('def f():\n    a()\nif b:\n  c()\n')).toBe('  ');
   });
 });
 
-describe('the end of main stops before what never lets the next line run (review R-O2, round 2 mi2)', () => {
-  it('Python: before a trailing top-level `while True:`; a finite end keeps the end of the file', () => {
-    const src = 'import robot\nrobot.home()\nwhile True:\n    robot.beep()\n\n# Ende\n';
-    expect(atMain(src, ['x()']).content)
-      .toBe('import robot\nrobot.home()\nx()\nwhile True:\n    robot.beep()\n\n# Ende\n');
-    expect(atMain('while 1:\n    pass\n', ['x()']).content).toBe('x()\nwhile 1:\n    pass\n');
-    const notLast = 'while True:\n    break\nrobot.home()\n';
-    expect(atMain(notLast, ['x()']).content).toBe('while True:\n    break\nrobot.home()\nx()\n');
+describe('newlineIndentAt — what Enter writes (review round 3, MB1)', () => {
+  const end = (src, line) => src.split('\n').slice(0, line).join('\n').length;
+  it('Python: a block’s own sibling indentation, whatever unit the file votes for', () => {
+    const src = 'def f():\n    a()\nif b:\n  c()\nif d:\n  e()\n';
+    expect(detectIndentUnit(src)).toBe('  ');
+    expect(newlineIndentAt(src, end(src, 2), 'python')).toBe('    ');
+    expect(newlineIndentAt(src, end(src, 4), 'python')).toBe('  ');
   });
 
-  it('Python: into the body that runs last — the __main__ block, the function a final call runs', () => {
-    const guard = 'def main():\n    a()\n\nif __name__ == "__main__":\n    while True:\n        main()\n';
-    expect(atMain(guard, ['x()']).content)
-      .toBe('def main():\n    a()\n\nif __name__ == "__main__":\n    x()\n    while True:\n        main()\n');
-    const func = 'def main():\n    a()\n    while True:\n        b()\n\nmain()\n';
-    expect(atMain(func, ['x()']).content)
-      .toBe('def main():\n    a()\n    x()\n    while True:\n        b()\n\nmain()\n');
-    // A function with an ordinary end: the lines go at its end, still run last.
-    const plain = 'def main():\n  a()\n\nmain()\n';
-    expect(atMain(plain, ['x()']).content).toBe('def main():\n  a()\n  x()\n\nmain()\n');
+  it('Python: after an opener its existing body, else the opener’s block unit', () => {
+    expect(newlineIndentAt('for i in x:\n   a()\n', end('for i in x:\n   a()\n', 1), 'python')).toBe('   ');
+    const nested = 'def f():\n    if a:\n';
+    expect(newlineIndentAt(nested, nested.length - 1, 'python')).toBe('        ');
   });
 
-  const java = (body) => ['public class Main {', '    public static void main(String[] args) {',
-    ...body, '    }', '}', ''].join('\n');
-  const lastLines = (content, n = 3) => content.split('\n').slice(2, 2 + n);
-
-  it('Java: before a trailing while (true) / for (;;) / return / do … while (true) / throw', () => {
-    expect(lastLines(atMain(java(['        Robot.home();', '        while (true) {', '            Robot.beep();', '        }']), ['X();'], 'java').content))
-      .toEqual(['        Robot.home();', '        X();', '        while (true) {']);
-    expect(lastLines(atMain(java(['        Robot.home();', '        for (;;) Robot.beep();']), ['X();'], 'java').content))
-      .toEqual(['        Robot.home();', '        X();', '        for (;;) Robot.beep();']);
-    expect(lastLines(atMain(java(['        Robot.home();', '        return;']), ['X();'], 'java').content))
-      .toEqual(['        Robot.home();', '        X();', '        return;']);
-    expect(lastLines(atMain(java(['        do {', '            Robot.beep();', '        } while (true);']), ['X();'], 'java').content, 2))
-      .toEqual(['        X();', '        do {']);
-    expect(lastLines(atMain(java(['        throw new RuntimeException("x");']), ['X();'], 'java').content, 2))
-      .toEqual(['        X();', '        throw new RuntimeException("x");']);
+  it('Python: the editor’s own rule inside brackets, strings, after `\\`, before a clause word', () => {
+    expect(newlineIndentAt('x = (1,\n', 7, 'python')).toBeNull();
+    expect(newlineIndentAt('x = """a\n', 7, 'python')).toBeNull();
+    expect(newlineIndentAt('x = 1 + \\\n', 9, 'python')).toBeNull();
+    expect(newlineIndentAt('if a:\n    b()\nelse:\n', 14, 'python')).toBeNull();
   });
 
-  it('Java: an ordinary last statement (an if/else, a finite loop on a variable) keeps the end of main', () => {
-    const src = java(['        int i = 0;', '        if (i > 1) {', '            a();', '        } else {', '            b();', '        }',
-      '        while (i < 3) { i++; }']);
-    expect(atMain(src, ['X();'], 'java').content.split('\n').slice(8, 10))
-      .toEqual(['        while (i < 3) { i++; }', '        X();']);
+  it('Python: in front of a statement the statement keeps its own indentation', () => {
+    const src = 'def f():\n    a()\n    b()\n';
+    expect(newlineIndentAt(src, src.indexOf('    b()'), 'python')).toBe('    ');
   });
 
-  it('Java: a main whose braces sit on ONE line is opened up, inside the class', () => {
-    const src = 'public class Main {\n    public static void main(String[] a) { Robot.home(); }\n}\n';
-    const out = atMain(src, ['Robot.beep();'], 'java');
-    expect(out.content).toBe(
-      'public class Main {\n    public static void main(String[] a) { Robot.home();\n'
-      + '        Robot.beep();\n    }\n}\n',
-    );
-    expect([out.firstLine, out.lastLine]).toEqual([3, 3]);
+  it('Java: a block’s sibling indentation (3-B N1), a closing brace left to the editor', () => {
+    const src = 'class M {\n    void f() {\n        for (;;) {\n          g();\n        }\n    }\n}\n';
+    const pos = src.indexOf('g();') + 'g();'.length;
+    expect(newlineIndentAt(src, pos, 'java')).toBe('          ');
+    expect(newlineIndentAt(src, src.indexOf('        }'), 'java')).toBeNull();
   });
 });
 
-describe('a CRLF file gets CRLF line breaks (review round 2, ni2)', () => {
-  it('both at the end of main and below a cursor', () => {
-    expect(atMain('import robot\r\nrobot.home()\r\n', ['x()']).content).toBe('import robot\r\nrobot.home()\r\nx()\r\n');
+describe('indentStepAt — Python Tab / Backspace go level to level (review round 3, MB1)', () => {
+  const src = 'import robot\nif True:\n  robot.home()\n  for i in range(1):\n      robot.log("a")\n      \n';
+  it('Backspace from the inner level lands on the outer one, never between', () => {
+    expect(indentStepAt(src, 'python', 6, -1)).toBe('  ');
+    expect(indentStepAt('if a:\n  b()\n  \n', 'python', 3, -1)).toBe('');
+  });
+
+  it('Tab goes to the next level, a new body gets its block’s unit', () => {
+    expect(indentStepAt('def f():\n    a()\n\n', 'python', 3, 1)).toBe('    ');
+    expect(indentStepAt('def f():\n    if a:\n    b()\n', 'python', 3, 1)).toBe('        ');
+    expect(indentStepAt('x = 1\n', 'java', 1, 1)).toBeNull();
+  });
+});
+
+describe('a CRLF file gets CRLF line breaks, and every rule reads CRLF (mb8)', () => {
+  it('below a cursor, in both languages', () => {
     expect(at('if x:\r\n    a()\r\n', 1, ['b()']).content).toBe('if x:\r\n    b()\r\n    a()\r\n');
     const java = 'class Main {\r\n  static void main(String[] a) {\r\n    Robot.home();\r\n  }\r\n}\r\n';
-    expect(atMain(java, ['X();'], 'java').content)
+    expect(at(java, 3, ['X();'], 'java').content)
       .toBe('class Main {\r\n  static void main(String[] a) {\r\n    Robot.home();\r\n    X();\r\n  }\r\n}\r\n');
+  });
+
+  it('a trailing comment, a guard, a return and a decorator read the same with CRLF', () => {
+    const guard = 'import robot\r\ndef main():\r\n    robot.home()\r\n\r\nif __name__ == "__main__":  # Start\r\n    main()\r\n';
+    expect(at(guard, 5, ['x()']).content.split('\r\n')[5]).toBe('    x()');
+    expect(hintAt('def f():\r\n    return 1  # fertig\r\n', 2)).toBe(NEVER('„return“'));
+    expect(hintAt('import functools\r\n@functools.cache\r\ndef f():\r\n    return 1\r\n', 2))
+      .toBe(CODE_DE.INSERT_DECORATOR_HINT);
+    const java = 'class Main {\r\n  static void main(String[] a) {\r\n    Robot.home(); // Start\r\n  }\r\n}\r\n';
+    expect(at(java, 3, ['X();'], 'java').content.split('\r\n')[3]).toBe('    X();');
   });
 });

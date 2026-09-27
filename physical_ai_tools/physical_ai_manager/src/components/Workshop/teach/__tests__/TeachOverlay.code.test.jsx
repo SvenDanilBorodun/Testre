@@ -10,7 +10,9 @@
 // is REAL here (code/codeAssetDocument.js over a detached Ziele store), so what
 // is asserted is what reaches the program: a capture lands in the document's
 // store, named past the program's own pins; a rename rewrites the code; „Als
-// Programm einfügen" writes lines and says where.
+// Programm einfügen" writes lines directly below the student's cursor and says
+// where — and without a cursor puts them on the clipboard (owner decision
+// R3-O4).
 //
 // The session hook is the controllable one of TeachOverlay.test.jsx.
 
@@ -106,11 +108,11 @@ function setState(items = []) {
   };
 }
 
-function codeDoc(main) {
+function codeDoc(main, startCursor = null) {
   let files = { 'main.py': main };
   const store = createDetachedDestinationStore([]);
   const reveals = [];
-  let cursor = null;
+  let cursor = startCursor;
   const doc = createCodeAssetDocument({
     language: 'python',
     store,
@@ -189,8 +191,8 @@ describe('TeachOverlay over a Python program', () => {
     expect(p.saveWorkflowNow).toHaveBeenCalled();
   });
 
-  test('„Als Programm einfügen" writes the round as lines and says where', async () => {
-    const { doc, main, reveals } = codeDoc('import robot\nrobot.home()\n');
+  test('„Als Programm einfügen" writes the round below the cursor’s line and says where', async () => {
+    const { doc, main, reveals } = codeDoc('import robot\nrobot.home()\n', { file: 'main.py', line: 2 });
     workflowApi.createTrajectory.mockResolvedValue({ id: 't1' });
     render(<TeachOverlay {...props(doc)} />);
     await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
@@ -205,7 +207,76 @@ describe('TeachOverlay over a Python program', () => {
     expect(reveals[reveals.length - 1]).toEqual({ file: 'main.py', line: 4 });
   });
 
-  test('a Java program without main gets the German hint, and nothing is written', async () => {
+  describe('without a cursor, nothing is written (R3-O4)', () => {
+    const had = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    afterEach(() => {
+      if (had) Object.defineProperty(navigator, 'clipboard', had);
+      else delete navigator.clipboard;
+    });
+
+    test('the round goes to the clipboard, and the student is told to paste it', async () => {
+      const writeText = vi.fn(async () => {});
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      const { doc, main } = codeDoc('import robot\nrobot.home()\n');
+      workflowApi.createTrajectory.mockResolvedValue({ id: 't1' });
+      render(<TeachOverlay {...props(doc)} />);
+      await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
+      act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
+      fireEvent.click(screen.getByRole('button', { name: formatCode(CODE_DE.TEACH_INSERT_LINES, 2) }));
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith(CODE_DE.COPIED_PASTE_HINT));
+      expect(writeText).toHaveBeenCalledWith('robot.replay("Bewegung 1")\nrobot.move_to("Position 1")');
+      expect(CODE_DE.COPIED_PASTE_HINT).toBe('Kopiert – klicke in deinen Code und drücke Strg+V.');
+      expect(main()).toBe('import robot\nrobot.home()\n');
+      expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    test('no clipboard: the click-first hint instead', async () => {
+      Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+      const { doc, main } = codeDoc('import robot\nrobot.home()\n');
+      render(<TeachOverlay {...props(doc)} />);
+      act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
+      fireEvent.click(screen.getByRole('button', { name: CODE_DE.TEACH_INSERT_LINE_ONE }));
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith(CODE_DE.CLICK_FIRST_HINT));
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(main()).toBe('import robot\nrobot.home()\n');
+    });
+
+    test('a refused clipboard: the click-first hint as well', async () => {
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText: vi.fn(async () => { throw new Error('nope'); }) }, configurable: true,
+      });
+      const { doc } = codeDoc('import robot\n');
+      render(<TeachOverlay {...props(doc)} />);
+      act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
+      fireEvent.click(screen.getByRole('button', { name: CODE_DE.TEACH_INSERT_LINE_ONE }));
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith(CODE_DE.CLICK_FIRST_HINT));
+    });
+  });
+
+  test('nb4: a second click while the round is being inserted writes it once', async () => {
+    const { doc, main } = codeDoc('import robot\nrobot.home()\n', { file: 'main.py', line: 2 });
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const original = doc.insertProgram;
+    let calls = 0;
+    doc.insertProgram = async (...args) => {
+      calls += 1;
+      await gate;
+      return original(...args);
+    };
+    render(<TeachOverlay {...props(doc)} />);
+    act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
+    const button = screen.getByRole('button', { name: CODE_DE.TEACH_INSERT_LINE_ONE });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(calls).toBe(1);
+    await waitFor(() => expect(button).toBeDisabled());
+    release();
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    expect(main()).toBe('import robot\nrobot.home()\nrobot.move_to("Position 1")\n');
+  });
+
+  test('a Java class line gets the German reason, and nothing is written', async () => {
     let files = { 'Main.java': 'public class Main {\n}\n' };
     const doc = createCodeAssetDocument({
       language: 'java',
@@ -213,12 +284,12 @@ describe('TeachOverlay over a Python program', () => {
       getFiles: () => files,
       applyFiles: (next) => { files = next; },
       requestReveal: () => {},
-      getCursor: () => null,
+      getCursor: () => ({ file: 'Main.java', line: 1 }),
     });
     render(<TeachOverlay {...props(doc)} />);
     act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
     fireEvent.click(screen.getByRole('button', { name: CODE_DE.TEACH_INSERT_LINE_ONE }));
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(CODE_DE.NO_MAIN_HINT));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(CODE_DE.NOT_IN_METHOD_HINT));
     expect(toast.success).not.toHaveBeenCalled();
     expect(files['Main.java']).toBe('public class Main {\n}\n');
   });

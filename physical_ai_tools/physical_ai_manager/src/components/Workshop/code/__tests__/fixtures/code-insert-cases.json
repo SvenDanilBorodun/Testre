@@ -1,193 +1,175 @@
 {
  "_generated_by": "physical_ai_manager/src/components/Workshop/code/__tests__/codeInsert.cases.test.js (EDUBOTICS_REGEN_CODE_CASES=1 to regenerate)",
- "_checked_by": "robotis_ai_setup/tests/test_code_insert_cases.py (CPython ast/compile + javac 21)",
+ "_checked_by": "robotis_ai_setup/tests/test_code_insert_cases.py (CPython ast/compile + a run, javac 21 + a run)",
  "marker": {
   "python": "robot.replay(\"Winken\")",
   "java": "Robot.replay(\"Winken\");"
  },
  "cases": [
   {
-   "name": "two_space_func_call",
+   "name": "starter_below_import",
    "language": "python",
-   "line": null,
+   "line": 3,
    "reach": "run",
-   "input": "import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log(\"x\")\n\nmain()\n",
-   "output": "import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log(\"x\")\n  robot.replay(\"Winken\")\n\nmain()\n",
+   "input": "# Dein Python-Programm für den Roboter.\n# Alles, was der Roboter kann, steckt im Modul „robot“ — tippe robot. für die Liste.\nimport robot\n\nrobot.home()\nrobot.log(\"Hallo Roboter!\")\n",
+   "output": "# Dein Python-Programm für den Roboter.\n# Alles, was der Roboter kann, steckt im Modul „robot“ — tippe robot. für die Liste.\nimport robot\nrobot.replay(\"Winken\")\n\nrobot.home()\nrobot.log(\"Hallo Roboter!\")\n",
    "hint": null
   },
   {
-   "name": "trailing_while_in_main_guard",
+   "name": "starter_blank_line",
    "language": "python",
-   "line": null,
+   "line": 4,
    "reach": "run",
-   "input": "import robot\n\ndef main():\n    robot.home()\n\nif __name__ == \"__main__\":\n    while True:\n        main()\n",
-   "output": "import robot\n\ndef main():\n    robot.home()\n\nif __name__ == \"__main__\":\n    robot.replay(\"Winken\")\n    while True:\n        main()\n",
+   "input": "# Dein Python-Programm für den Roboter.\n# Alles, was der Roboter kann, steckt im Modul „robot“ — tippe robot. für die Liste.\nimport robot\n\nrobot.home()\nrobot.log(\"Hallo Roboter!\")\n",
+   "output": "# Dein Python-Programm für den Roboter.\n# Alles, was der Roboter kann, steckt im Modul „robot“ — tippe robot. für die Liste.\nimport robot\n\nrobot.replay(\"Winken\")\nrobot.home()\nrobot.log(\"Hallo Roboter!\")\n",
    "hint": null
   },
   {
-   "name": "trailing_while_in_func",
+   "name": "starter_last_line",
    "language": "python",
-   "line": null,
+   "line": 6,
    "reach": "run",
-   "input": "import robot\n\ndef main():\n    robot.home()\n    while True:\n        robot.log(\"x\")\n\nmain()\n",
-   "output": "import robot\n\ndef main():\n    robot.home()\n    robot.replay(\"Winken\")\n    while True:\n        robot.log(\"x\")\n\nmain()\n",
+   "input": "# Dein Python-Programm für den Roboter.\n# Alles, was der Roboter kann, steckt im Modul „robot“ — tippe robot. für die Liste.\nimport robot\n\nrobot.home()\nrobot.log(\"Hallo Roboter!\")\n",
+   "output": "# Dein Python-Programm für den Roboter.\n# Alles, was der Roboter kann, steckt im Modul „robot“ — tippe robot. für die Liste.\nimport robot\n\nrobot.home()\nrobot.log(\"Hallo Roboter!\")\nrobot.replay(\"Winken\")\n",
    "hint": null
   },
   {
-   "name": "guard_calls_main_with_loop",
+   "name": "plain_statement",
    "language": "python",
-   "line": null,
+   "line": 2,
    "reach": "run",
-   "input": "import robot\n\ndef main():\n    robot.home()\n    while True:\n        robot.log(\"x\")\n\nif __name__ == '__main__':\n    main()\n",
-   "output": "import robot\n\ndef main():\n    robot.home()\n    robot.replay(\"Winken\")\n    while True:\n        robot.log(\"x\")\n\nif __name__ == '__main__':\n    main()\n",
-   "hint": null
-  },
-  {
-   "name": "func_trailing_return",
-   "language": "python",
-   "line": null,
-   "reach": "run",
-   "input": "import robot\n\ndef main():\n    robot.home()\n    return\n\nmain()\n",
-   "output": "import robot\n\ndef main():\n    robot.home()\n    robot.replay(\"Winken\")\n    return\n\nmain()\n",
-   "hint": null
-  },
-  {
-   "name": "top_while_true",
-   "language": "python",
-   "line": null,
-   "reach": "run",
-   "input": "import robot\nrobot.home()\nwhile True:\n    robot.log(\"x\")\n",
-   "output": "import robot\nrobot.home()\nrobot.replay(\"Winken\")\nwhile True:\n    robot.log(\"x\")\n",
-   "hint": null
-  },
-  {
-   "name": "top_while_one_liner",
-   "language": "python",
-   "line": null,
-   "reach": "run",
-   "input": "import robot\nrobot.home()\nwhile True: pass\n",
-   "output": "import robot\nrobot.home()\nrobot.replay(\"Winken\")\nwhile True: pass\n",
-   "hint": null
-  },
-  {
-   "name": "top_while_else",
-   "language": "python",
-   "line": null,
-   "reach": "run",
-   "input": "import robot\nwhile True:\n    break\nelse:\n    robot.home()\n",
-   "output": "import robot\nwhile True:\n    break\nelse:\n    robot.home()\nrobot.replay(\"Winken\")\n",
+   "input": "import robot\nrobot.home()\n",
+   "output": "import robot\nrobot.home()\nrobot.replay(\"Winken\")\n",
    "hint": null
   },
   {
    "name": "no_trailing_newline",
    "language": "python",
-   "line": null,
+   "line": 2,
    "reach": "run",
    "input": "import robot\nrobot.home()",
    "output": "import robot\nrobot.home()\nrobot.replay(\"Winken\")",
    "hint": null
   },
   {
-   "name": "crlf",
+   "name": "empty_file",
    "language": "python",
-   "line": null,
-   "reach": "run",
-   "input": "import robot\r\nrobot.home()\r\nwhile True:\r\n    robot.log(\"x\")\r\n",
-   "output": "import robot\r\nrobot.home()\r\nrobot.replay(\"Winken\")\r\nwhile True:\r\n    robot.log(\"x\")\r\n",
-   "hint": null
-  },
-  {
-   "name": "tabs_body",
-   "language": "python",
-   "line": null,
-   "reach": "run",
-   "input": "import robot\nif True:\n\trobot.home()\nwhile True:\n\trobot.log(\"x\")\n",
-   "output": "import robot\nif True:\n\trobot.home()\nrobot.replay(\"Winken\")\nwhile True:\n\trobot.log(\"x\")\n",
-   "hint": null
-  },
-  {
-   "name": "docstring_end",
-   "language": "python",
-   "line": null,
-   "reach": "run",
-   "input": "import robot\n\"\"\"\nwhile True:\n\"\"\"\n",
-   "output": "import robot\n\"\"\"\nwhile True:\n\"\"\"\nrobot.replay(\"Winken\")\n",
-   "hint": null
-  },
-  {
-   "name": "last_line_in_multiline_call",
-   "language": "python",
-   "line": null,
-   "reach": "run",
-   "input": "import robot\nrobot.log(\n\"x\"\n)\n",
-   "output": "import robot\nrobot.log(\n\"x\"\n)\nrobot.replay(\"Winken\")\n",
-   "hint": null
-  },
-  {
-   "name": "while_1",
-   "language": "python",
-   "line": null,
-   "reach": "run",
-   "input": "import robot\nwhile 1:\n    robot.home()\n",
-   "output": "import robot\nrobot.replay(\"Winken\")\nwhile 1:\n    robot.home()\n",
-   "hint": null
-  },
-  {
-   "name": "empty",
-   "language": "python",
-   "line": null,
+   "line": 1,
    "reach": "run",
    "input": "",
    "output": "robot.replay(\"Winken\")\n",
    "hint": null
   },
   {
-   "name": "cursor_multiline_if",
+   "name": "for_body_sibling",
+   "language": "python",
+   "line": 3,
+   "reach": "run",
+   "input": "import robot\nfor i in range(2):\n    robot.home()\n",
+   "output": "import robot\nfor i in range(2):\n    robot.home()\n    robot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "for_header_body",
    "language": "python",
    "line": 2,
+   "reach": "run",
+   "input": "import robot\nfor i in range(2):\n    robot.home()\n",
+   "output": "import robot\nfor i in range(2):\n    robot.replay(\"Winken\")\n    robot.home()\n",
+   "hint": null
+  },
+  {
+   "name": "two_space_inner",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log(\"x\")\n\nmain()\n",
+   "output": "import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n    robot.replay(\"Winken\")\n  robot.log(\"x\")\n\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "two_space_header",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log(\"x\")\n\nmain()\n",
+   "output": "import robot\n\ndef main():\n  for i in range(3):\n    robot.replay(\"Winken\")\n    robot.home()\n  robot.log(\"x\")\n\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "two_space_outer",
+   "language": "python",
+   "line": 6,
+   "reach": "run",
+   "input": "import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log(\"x\")\n\nmain()\n",
+   "output": "import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log(\"x\")\n  robot.replay(\"Winken\")\n\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "tabs_body",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot\nif True:\n\trobot.home()\n\tif True:\n\t\trobot.log(\"a\")\n",
+   "output": "import robot\nif True:\n\trobot.home()\n\tif True:\n\t\trobot.log(\"a\")\n\t\trobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "aligned_literals",
+   "language": "python",
+   "line": 7,
+   "reach": "run",
+   "input": "import robot\na = [[0.1, 0.2],\n     [0.3, 0.4]]\nb = [[0.1, 0.2],\n     [0.3, 0.4]]\nif True:\n  robot.home()\n  robot.log(\"x\")\n",
+   "output": "import robot\na = [[0.1, 0.2],\n     [0.3, 0.4]]\nb = [[0.1, 0.2],\n     [0.3, 0.4]]\nif True:\n  robot.home()\n  robot.replay(\"Winken\")\n  robot.log(\"x\")\n",
+   "hint": null
+  },
+  {
+   "name": "aligned_literals_header",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\na = [[0.1, 0.2],\n     [0.3, 0.4]]\nif True:\n  robot.home()\n",
+   "output": "import robot\na = [[0.1, 0.2],\n     [0.3, 0.4]]\nif True:\n  robot.replay(\"Winken\")\n  robot.home()\n",
+   "hint": null
+  },
+  {
+   "name": "mixed_four_space_body",
+   "language": "python",
+   "line": 3,
+   "reach": "run",
+   "input": "import robot\ndef f():\n    robot.home()\n\nf()\nif True:\n  robot.log(\"a\")\n",
+   "output": "import robot\ndef f():\n    robot.home()\n    robot.replay(\"Winken\")\n\nf()\nif True:\n  robot.log(\"a\")\n",
+   "hint": null
+  },
+  {
+   "name": "mixed_two_space_block",
+   "language": "python",
+   "line": 7,
+   "reach": "run",
+   "input": "import robot\ndef f():\n    robot.home()\n\nf()\nif True:\n  robot.log(\"a\")\n",
+   "output": "import robot\ndef f():\n    robot.home()\n\nf()\nif True:\n  robot.log(\"a\")\n  robot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "multiline_statement_end",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\nrobot.log(\n    \"x\"\n)\n",
+   "output": "import robot\nrobot.log(\n    \"x\"\n)\nrobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "multiline_if_end",
+   "language": "python",
+   "line": 3,
    "reach": "run",
    "input": "import robot\nif (1 and\n        2):\n    robot.home()\n",
    "output": "import robot\nif (1 and\n        2):\n    robot.replay(\"Winken\")\n    robot.home()\n",
    "hint": null
   },
   {
-   "name": "cursor_in_list",
-   "language": "python",
-   "line": 3,
-   "reach": "run",
-   "input": "import robot\npunkte = [\n    1,\n    2,\n]\n",
-   "output": "import robot\npunkte = [\n    1,\n    2,\n]\nrobot.replay(\"Winken\")\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_decorator",
-   "language": "python",
-   "line": 3,
-   "reach": "static",
-   "input": "import robot\nimport functools\n@functools.cache\ndef f():\n    return 1\n",
-   "output": "import robot\nimport functools\n@functools.cache\ndef f():\n    robot.replay(\"Winken\")\n    return 1\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_opener_comment",
-   "language": "python",
-   "line": 2,
-   "reach": "run",
-   "input": "import robot\nfor i in range(2):  # loop:\n    robot.home()\n",
-   "output": "import robot\nfor i in range(2):  # loop:\n    robot.replay(\"Winken\")\n    robot.home()\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_opener_no_body_2sp",
-   "language": "python",
-   "line": 4,
-   "reach": "run",
-   "input": "import robot\ndef f():\n  x = 1\n  if x:\n    robot.home()\nf()\n",
-   "output": "import robot\ndef f():\n  x = 1\n  if x:\n    robot.replay(\"Winken\")\n    robot.home()\nf()\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_else",
+   "name": "else_header",
    "language": "python",
    "line": 4,
    "reach": "run",
@@ -196,466 +178,988 @@
    "hint": null
   },
   {
-   "name": "cursor_dict_brace",
-   "language": "python",
-   "line": 2,
-   "reach": "run",
-   "input": "import robot\nd = {\n    \"a\": 1,\n}\n",
-   "output": "import robot\nd = {\n    \"a\": 1,\n}\nrobot.replay(\"Winken\")\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_backslash",
-   "language": "python",
-   "line": 2,
-   "reach": "run",
-   "input": "import robot\nx = 1 + \\\n    2\n",
-   "output": "import robot\nx = 1 + \\\n    2\nrobot.replay(\"Winken\")\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_docstring_mid",
+   "name": "if_body_before_else",
    "language": "python",
    "line": 3,
-   "reach": "static",
-   "input": "import robot\ndef f():\n    \"\"\"Doc\n    more\"\"\"\n    return 1\n",
-   "output": "import robot\ndef f():\n    \"\"\"Doc\n    more\"\"\"\n    robot.replay(\"Winken\")\n    return 1\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_opener_tab_body",
-   "language": "python",
-   "line": 2,
    "reach": "run",
-   "input": "import robot\nif True:\n\trobot.home()\n",
-   "output": "import robot\nif True:\n\trobot.replay(\"Winken\")\n\trobot.home()\n",
+   "input": "import robot\nif 1:\n  robot.home()\nelse:\n  robot.log(\"y\")\n",
+   "output": "import robot\nif 1:\n  robot.home()\n  robot.replay(\"Winken\")\nelse:\n  robot.log(\"y\")\n",
    "hint": null
   },
   {
-   "name": "cursor_2sp_opener_bodyless_file4",
+   "name": "elif_header",
    "language": "python",
-   "line": 4,
+   "line": 5,
    "reach": "run",
-   "input": "import robot\ndef f():\n    pass\nfor i in range(2):\n",
-   "output": "import robot\ndef f():\n    pass\nfor i in range(2):\n    robot.replay(\"Winken\")\n",
+   "input": "import robot\nx = 2\nif x == 1:\n    robot.home()\nelif x == 2:\n    robot.log(\"a\")\n",
+   "output": "import robot\nx = 2\nif x == 1:\n    robot.home()\nelif x == 2:\n    robot.replay(\"Winken\")\n    robot.log(\"a\")\n",
    "hint": null
   },
   {
-   "name": "cursor_class_line",
-   "language": "python",
-   "line": 2,
-   "reach": "run",
-   "input": "import robot\nclass A:\n    x = 1\n",
-   "output": "import robot\nclass A:\n    robot.replay(\"Winken\")\n    x = 1\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_try",
+   "name": "after_loop_with_break",
    "language": "python",
    "line": 6,
    "reach": "run",
-   "input": "import robot\ntry:\n    robot.home()\nexcept Exception:\n    pass\nfinally:\n    pass\n",
-   "output": "import robot\ntry:\n    robot.home()\nexcept Exception:\n    pass\nfinally:\n    robot.replay(\"Winken\")\n    pass\n",
+   "input": "import robot\ndef f():\n    while True:\n        robot.home()\n        break\n    # hier\nf()\n",
+   "output": "import robot\ndef f():\n    while True:\n        robot.home()\n        break\n    # hier\n    robot.replay(\"Winken\")\nf()\n",
    "hint": null
   },
   {
-   "name": "cursor_on_return",
+   "name": "after_while_true_break_top",
+   "language": "python",
+   "line": 8,
+   "reach": "run",
+   "input": "import robot\nrobot.home()\nn = 0\nwhile True:\n    n += 1\n    if n > 3:\n        break\n\n",
+   "output": "import robot\nrobot.home()\nn = 0\nwhile True:\n    n += 1\n    if n > 3:\n        break\n\nrobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "main_guard_body",
+   "language": "python",
+   "line": 7,
+   "reach": "run",
+   "input": "import robot\n\ndef main():\n    robot.home()\n\nif __name__ == \"__main__\":\n    main()\n",
+   "output": "import robot\n\ndef main():\n    robot.home()\n\nif __name__ == \"__main__\":\n    main()\n    robot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "main_guard_crlf_comment",
+   "language": "python",
+   "line": 6,
+   "reach": "run",
+   "input": "import robot\r\n\r\ndef main():\r\n    robot.home()\r\n\r\nif __name__ == \"__main__\":  # Start\r\n    main()\r\n",
+   "output": "import robot\r\n\r\ndef main():\r\n    robot.home()\r\n\r\nif __name__ == \"__main__\":  # Start\r\n    robot.replay(\"Winken\")\r\n    main()\r\n",
+   "hint": null
+  },
+  {
+   "name": "crlf_body",
+   "language": "python",
+   "line": 3,
+   "reach": "run",
+   "input": "import robot\r\nif True:\r\n    robot.home()\r\n",
+   "output": "import robot\r\nif True:\r\n    robot.home()\r\n    robot.replay(\"Winken\")\r\n",
+   "hint": null
+  },
+  {
+   "name": "before_return_in_main",
    "language": "python",
    "line": 4,
    "reach": "run",
+   "input": "import robot, sys\n\ndef main():\n    robot.home()\n    return 0\n\nif __name__ == \"__main__\":\n    sys.exit(main())\n",
+   "output": "import robot, sys\n\ndef main():\n    robot.home()\n    robot.replay(\"Winken\")\n    return 0\n\nif __name__ == \"__main__\":\n    sys.exit(main())\n",
+   "hint": null
+  },
+  {
+   "name": "blank_line_in_block",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\ndef f():\n    robot.home()\n    \n    robot.log(\"x\")\nf()\n",
+   "output": "import robot\ndef f():\n    robot.home()\n    \n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nf()\n",
+   "hint": null
+  },
+  {
+   "name": "comment_line_in_block",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\ndef f():\n    robot.home()\n    # Kommentar\n    robot.log(\"x\")\nf()\n",
+   "output": "import robot\ndef f():\n    robot.home()\n    # Kommentar\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nf()\n",
+   "hint": null
+  },
+  {
+   "name": "class_body",
+   "language": "python",
+   "line": 2,
+   "reach": "run",
+   "input": "import robot\nclass A:\n    x = 1\nrobot.home()\n",
+   "output": "import robot\nclass A:\n    robot.replay(\"Winken\")\n    x = 1\nrobot.home()\n",
+   "hint": null
+  },
+  {
+   "name": "try_body",
+   "language": "python",
+   "line": 3,
+   "reach": "run",
+   "input": "import robot\ntry:\n    robot.home()\nexcept Exception:\n    pass\n",
+   "output": "import robot\ntry:\n    robot.home()\n    robot.replay(\"Winken\")\nexcept Exception:\n    pass\n",
+   "hint": null
+  },
+  {
+   "name": "with_body",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\nimport contextlib\nwith contextlib.nullcontext():\n    robot.home()\n",
+   "output": "import robot\nimport contextlib\nwith contextlib.nullcontext():\n    robot.home()\n    robot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "match_case_body",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n    case _:\n        pass\n",
+   "output": "import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n        robot.replay(\"Winken\")\n    case _:\n        pass\n",
+   "hint": null
+  },
+  {
+   "name": "async_main_body",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import asyncio\nimport robot\n\nasync def main():\n    robot.home()\n\nasyncio.run(main())\n",
+   "output": "import asyncio\nimport robot\n\nasync def main():\n    robot.home()\n    robot.replay(\"Winken\")\n\nasyncio.run(main())\n",
+   "hint": null
+  },
+  {
+   "name": "decorated_def_body",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot, functools\n\n@functools.lru_cache\ndef main():\n    robot.home()\n\nmain()\n",
+   "output": "import robot, functools\n\n@functools.lru_cache\ndef main():\n    robot.home()\n    robot.replay(\"Winken\")\n\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "only_comments",
+   "language": "python",
+   "line": 2,
+   "reach": "run",
+   "input": "# nur ein Kommentar\n# noch einer\n",
+   "output": "# nur ein Kommentar\n# noch einer\nrobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "one_line_guard",
+   "language": "python",
+   "line": 6,
+   "reach": "run",
+   "input": "import robot\n\ndef main():\n    robot.home()\n\nif __name__ == \"__main__\": main()\n",
+   "output": "import robot\n\ndef main():\n    robot.home()\n\nif __name__ == \"__main__\": main()\nrobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "semicolon_line",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\n\ndef main():\n    robot.home(); robot.log(\"a\")\n\nmain()\n",
+   "output": "import robot\n\ndef main():\n    robot.home(); robot.log(\"a\")\n    robot.replay(\"Winken\")\n\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "loop_else_body",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot\nfor i in range(2):\n    robot.home()\nelse:\n    robot.log(\"x\")\n",
+   "output": "import robot\nfor i in range(2):\n    robot.home()\nelse:\n    robot.log(\"x\")\n    robot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "after_finite_while",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot\nn = 0\nwhile n < 3:\n    n += 1\n\n",
+   "output": "import robot\nn = 0\nwhile n < 3:\n    n += 1\n\nrobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "docstring_statement",
+   "language": "python",
+   "line": 3,
+   "reach": "run",
+   "input": "\"\"\"Mein Programm.\"\"\"\nimport robot\nrobot.home()\n",
+   "output": "\"\"\"Mein Programm.\"\"\"\nimport robot\nrobot.home()\nrobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "future_then_code",
+   "language": "python",
+   "line": 3,
+   "reach": "run",
+   "input": "\"\"\"Doku.\"\"\"\nfrom __future__ import annotations\nimport robot\nrobot.home()\n",
+   "output": "\"\"\"Doku.\"\"\"\nfrom __future__ import annotations\nimport robot\nrobot.replay(\"Winken\")\nrobot.home()\n",
+   "hint": null
+  },
+  {
+   "name": "no_cursor",
+   "language": "python",
+   "line": null,
+   "reach": "hint",
+   "input": "import robot\nrobot.home()\n",
+   "output": null,
+   "hint": "Klicke zuerst in deinen Code, wo die Zeile hin soll."
+  },
+  {
+   "name": "starter_comment_line",
+   "language": "python",
+   "line": 1,
+   "reach": "hint",
+   "input": "# Dein Python-Programm für den Roboter.\n# Alles, was der Roboter kann, steckt im Modul „robot“ — tippe robot. für die Liste.\nimport robot\n\nrobot.home()\nrobot.log(\"Hallo Roboter!\")\n",
+   "output": null,
+   "hint": "Hier geht es nicht – oben stehen die Imports (und die Beschreibung) des Programms. Klicke in eine Zeile darunter."
+  },
+  {
+   "name": "starter_second_comment",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "# Dein Python-Programm für den Roboter.\n# Alles, was der Roboter kann, steckt im Modul „robot“ — tippe robot. für die Liste.\nimport robot\n\nrobot.home()\nrobot.log(\"Hallo Roboter!\")\n",
+   "output": null,
+   "hint": "Hier geht es nicht – oben stehen die Imports (und die Beschreibung) des Programms. Klicke in eine Zeile darunter."
+  },
+  {
+   "name": "docstring_then_future",
+   "language": "python",
+   "line": 1,
+   "reach": "hint",
+   "input": "\"\"\"Mein Programm.\"\"\"\nfrom __future__ import annotations\nimport robot\nrobot.home()\n",
+   "output": null,
+   "hint": "Hier geht es nicht – oben stehen die Imports (und die Beschreibung) des Programms. Klicke in eine Zeile darunter."
+  },
+  {
+   "name": "comment_then_future",
+   "language": "python",
+   "line": 1,
+   "reach": "hint",
+   "input": "# Kopf\nfrom __future__ import annotations\nimport robot\nrobot.home()\n",
+   "output": null,
+   "hint": "Hier geht es nicht – oben stehen die Imports (und die Beschreibung) des Programms. Klicke in eine Zeile darunter."
+  },
+  {
+   "name": "between_imports",
+   "language": "python",
+   "line": 1,
+   "reach": "hint",
+   "input": "import robot\nimport sys\nrobot.home()\n",
+   "output": null,
+   "hint": "Hier geht es nicht – oben stehen die Imports (und die Beschreibung) des Programms. Klicke in eine Zeile darunter."
+  },
+  {
+   "name": "def_docstring",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "import robot\ndef f():\n    \"\"\"Doku.\"\"\"\n    robot.home()\nf()\n",
+   "output": null,
+   "hint": "Hier geht es nicht – direkt darunter steht die Beschreibung (Docstring). Klicke in eine Zeile darunter."
+  },
+  {
+   "name": "class_docstring",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "import robot\nclass A:\n    \"\"\"Doku.\"\"\"\n    x = 1\nrobot.home()\n",
+   "output": null,
+   "hint": "Hier geht es nicht – direkt darunter steht die Beschreibung (Docstring). Klicke in eine Zeile darunter."
+  },
+  {
+   "name": "decorator_line",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot\nimport functools\n@functools.cache\ndef f():\n    return 1\nf()\n",
+   "output": null,
+   "hint": "Hier geht es nicht – zwischen einem @-Dekorator und seiner Funktion darf nichts stehen."
+  },
+  {
+   "name": "match_header",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n",
+   "output": null,
+   "hint": "Auf einer match- oder case-Zeile geht es nicht – klicke in eine Zeile in einem case-Zweig."
+  },
+  {
+   "name": "case_header",
+   "language": "python",
+   "line": 4,
+   "reach": "hint",
+   "input": "import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n",
+   "output": null,
+   "hint": "Auf einer match- oder case-Zeile geht es nicht – klicke in eine Zeile in einem case-Zweig."
+  },
+  {
+   "name": "between_cases",
+   "language": "python",
+   "line": 6,
+   "reach": "hint",
+   "input": "import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n    \n    case 2:\n        pass\n",
+   "output": null,
+   "hint": "Auf einer match- oder case-Zeile geht es nicht – klicke in eine Zeile in einem case-Zweig."
+  },
+  {
+   "name": "after_last_case_at_case_level",
+   "language": "python",
+   "line": 6,
+   "reach": "hint",
+   "input": "import robot\nx = 1\nmatch x:\n    case 1:\n        robot.home()\n    \nrobot.log(\"a\")\n",
+   "output": null,
+   "hint": "Auf einer match- oder case-Zeile geht es nicht – klicke in eine Zeile in einem case-Zweig."
+  },
+  {
+   "name": "inside_list",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot\npunkte = [\n    1,\n    2,\n]\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "list_opener_line",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "import robot\nd = {\n    \"a\": 1,\n}\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "backslash_line",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "import robot\nx = 1 + \\\n    2\nrobot.home()\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "crlf_backslash_line",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "import robot\r\nx = 1 + \\\r\n    2\r\nrobot.home()\r\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "lambda_multiline",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "import robot\nf = (lambda a:\n     a + 1)\nrobot.home()\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "docstring_inside",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot\ndef f():\n    \"\"\"Doc\n    more\"\"\"\n    return 1\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "multiline_if_first_row",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "import robot\nif (1 and\n        2):\n    robot.home()\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "after_return",
+   "language": "python",
+   "line": 4,
+   "reach": "hint",
    "input": "import robot\ndef f():\n    robot.home()\n    return 1\nf()\n",
-   "output": "import robot\ndef f():\n    robot.home()\n    robot.replay(\"Winken\")\n    return 1\nf()\n",
-   "hint": null
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „return“. Klicke weiter oben."
   },
   {
-   "name": "cursor_on_raise",
+   "name": "after_raise",
    "language": "python",
    "line": 4,
-   "reach": "run",
+   "reach": "hint",
    "input": "import robot\ndef f():\n    robot.home()\n    raise ValueError(1)\ntry:\n    f()\nexcept ValueError:\n    pass\n",
-   "output": "import robot\ndef f():\n    robot.home()\n    robot.replay(\"Winken\")\n    raise ValueError(1)\ntry:\n    f()\nexcept ValueError:\n    pass\n",
-   "hint": null
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „raise“. Klicke weiter oben."
   },
   {
-   "name": "cursor_on_break",
+   "name": "after_break",
    "language": "python",
    "line": 4,
-   "reach": "run",
+   "reach": "hint",
    "input": "import robot\nfor i in range(3):\n    robot.home()\n    break\n",
-   "output": "import robot\nfor i in range(3):\n    robot.home()\n    robot.replay(\"Winken\")\n    break\n",
-   "hint": null
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „break“. Klicke weiter oben."
   },
   {
-   "name": "cursor_on_continue",
+   "name": "after_continue",
    "language": "python",
    "line": 4,
-   "reach": "run",
+   "reach": "hint",
    "input": "import robot\nfor i in range(3):\n    robot.home()\n    continue\n",
-   "output": "import robot\nfor i in range(3):\n    robot.home()\n    robot.replay(\"Winken\")\n    continue\n",
-   "hint": null
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „continue“. Klicke weiter oben."
   },
   {
-   "name": "cursor_on_endless_oneliner",
+   "name": "after_semicolon_return",
    "language": "python",
    "line": 3,
-   "reach": "run",
-   "input": "import robot\nrobot.home()\nwhile True: robot.log(\"x\")\n",
-   "output": "import robot\nrobot.home()\nrobot.replay(\"Winken\")\nwhile True: robot.log(\"x\")\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_on_semicolon_return",
-   "language": "python",
-   "line": 3,
-   "reach": "run",
+   "reach": "hint",
    "input": "import robot\ndef f():\n    robot.home(); return 1\nf()\n",
-   "output": "import robot\ndef f():\n    robot.replay(\"Winken\")\n    robot.home(); return 1\nf()\n",
-   "hint": null
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „return“. Klicke weiter oben."
   },
   {
-   "name": "plain",
+   "name": "after_sys_exit_main",
+   "language": "python",
+   "line": 8,
+   "reach": "hint",
+   "input": "import robot, sys\n\ndef main():\n    robot.home()\n    return 0\n\nif __name__ == \"__main__\":\n    sys.exit(main())\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein Programmende (exit). Klicke weiter oben."
+  },
+  {
+   "name": "after_exit",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot\nrobot.home()\nexit()\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein Programmende (exit). Klicke weiter oben."
+  },
+  {
+   "name": "after_quit",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot\nrobot.home()\nquit()\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein Programmende (exit). Klicke weiter oben."
+  },
+  {
+   "name": "after_os_exit",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot, os\nrobot.home()\nos._exit(0)\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein Programmende (exit). Klicke weiter oben."
+  },
+  {
+   "name": "after_raise_systemexit",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot\nrobot.home()\nraise SystemExit(0)\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „raise“. Klicke weiter oben."
+  },
+  {
+   "name": "after_while_true",
+   "language": "python",
+   "line": 5,
+   "reach": "hint",
+   "input": "import robot\nrobot.home()\nwhile True:\n    robot.log(\"x\")\n\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_while_not_false",
+   "language": "python",
+   "line": 5,
+   "reach": "hint",
+   "input": "import robot\nrobot.home()\nwhile not False:\n    robot.log(\"x\")\n\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_while_1_eq_1",
+   "language": "python",
+   "line": 5,
+   "reach": "hint",
+   "input": "import robot\nrobot.home()\nwhile 1 == 1:\n    robot.log(\"x\")\n\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_while_one_liner",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot\nrobot.home()\nwhile True: robot.log(\"x\")\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_while_true_in_func",
+   "language": "python",
+   "line": 6,
+   "reach": "hint",
+   "input": "import robot\ndef main():\n    robot.home()\n    while True:\n        robot.log(\"x\")\n    # danach\nmain()\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "else_of_endless_loop",
+   "language": "python",
+   "line": 5,
+   "reach": "hint",
+   "input": "import robot\nwhile True:\n    robot.home()\nelse:\n    robot.log(\"x\")\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_if_else_returns",
+   "language": "python",
+   "line": 9,
+   "reach": "hint",
+   "input": "import robot\n\ndef main():\n    robot.home()\n    if robot.sees(\"wuerfel\"):\n        return\n    else:\n        return\n    # danach\n\nmain()\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein if/else, das in jedem Zweig endet. Klicke weiter oben."
+  },
+  {
+   "name": "after_try_finally_returns",
+   "language": "python",
+   "line": 7,
+   "reach": "hint",
+   "input": "import robot\ndef main():\n    try:\n        robot.home()\n    finally:\n        return\n    # danach\nmain()\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein try, das in jedem Zweig endet. Klicke weiter oben."
+  },
+  {
+   "name": "before_else_clause",
+   "language": "python",
+   "line": 4,
+   "reach": "hint",
+   "input": "import robot\nif 1:\n    robot.home()\n\nelse:\n    robot.log(\"x\")\n",
+   "output": null,
+   "hint": "Hier geht es nicht – vor einem else, elif, except oder finally darf keine Zeile stehen. Klicke in die Zeile darüber."
+  },
+  {
+   "name": "dedented_blank_mid_block",
+   "language": "python",
+   "line": 4,
+   "reach": "hint",
+   "input": "import robot\ndef f():\n    robot.home()\n\n    robot.log(\"x\")\nf()\n",
+   "output": null,
+   "hint": "Hier passt die Einrückung nicht zum Block – klicke an das Ende einer Zeile im selben Block."
+  },
+  {
+   "name": "inconsistent_file",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot\nif True:\n    robot.home()\n  robot.log(\"x\")\n",
+   "output": null,
+   "hint": "Die Einrückung im Programm passt nicht zusammen – bitte zuerst korrigieren."
+  },
+  {
+   "name": "unclosed_bracket",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "import robot\nrobot.home()\nx = (\n",
+   "output": null,
+   "hint": "Hier geht es nicht – im Programm ist eine Klammer oder ein Text nicht geschlossen. Bitte zuerst schließen."
+  },
+  {
+   "name": "unclosed_triple_string",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "import robot\nrobot.home()\n\"\"\"\noffen\n",
+   "output": null,
+   "hint": "Hier geht es nicht – im Programm ist eine Klammer oder ein Text nicht geschlossen. Bitte zuerst schließen."
+  },
+  {
+   "name": "fstring_multiline",
+   "language": "python",
+   "line": 2,
+   "reach": "hint",
+   "input": "import robot\nx = f\"{\n1}\"\nrobot.home()\n",
+   "output": null,
+   "hint": "Diese Stelle lässt sich nicht sicher bestimmen – klicke in eine andere Zeile mit einem Befehl."
+  },
+  {
+   "name": "starter_no_cursor",
    "language": "java",
    "line": null,
+   "reach": "hint",
+   "input": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
+   "output": null,
+   "hint": "Klicke zuerst in deinen Code, wo die Zeile hin soll."
+  },
+  {
+   "name": "starter_body",
+   "language": "java",
+   "line": 7,
    "reach": "run",
-   "input": "import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "input": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
+   "output": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
    "hint": null
   },
   {
-   "name": "trailing_while",
+   "name": "starter_main_header",
    "language": "java",
-   "line": null,
+   "line": 6,
    "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        while (true) {\n            Robot.log(\"x\");\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n        while (true) {\n            Robot.log(\"x\");\n        }\n    }\n}\n",
+   "input": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
+   "output": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
    "hint": null
   },
   {
-   "name": "trailing_while_nospace",
+   "name": "starter_last_statement",
    "language": "java",
-   "line": null,
+   "line": 8,
    "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while(true){\n            Robot.log(\"x\");\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        while(true){\n            Robot.log(\"x\");\n        }\n    }\n}\n",
+   "input": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
+   "output": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n        Robot.replay(\"Winken\");\n    }\n}\n",
    "hint": null
   },
   {
-   "name": "trailing_for",
+   "name": "two_space_body",
    "language": "java",
-   "line": null,
+   "line": 4,
    "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        for (;;) { Robot.home(); }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        for (;;) { Robot.home(); }\n    }\n}\n",
+   "input": "import edubotics.Robot;\npublic class Main {\n  public static void main(String[] args) {\n    Robot.home();\n  }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n  public static void main(String[] args) {\n    Robot.home();\n    Robot.replay(\"Winken\");\n  }\n}\n",
    "hint": null
   },
   {
-   "name": "trailing_do",
+   "name": "mixed_units_loop_body",
    "language": "java",
-   "line": null,
+   "line": 7,
    "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        do {\n            Robot.home();\n        } while (true);\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        do {\n            Robot.home();\n        } while (true);\n    }\n}\n",
+   "input": "import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        for (int i = 0; i < 3; i++) {\n          Robot.log(\"x\");\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        for (int i = 0; i < 3; i++) {\n          Robot.log(\"x\");\n          Robot.replay(\"Winken\");\n        }\n    }\n}\n",
    "hint": null
   },
   {
-   "name": "trailing_return",
+   "name": "after_finite_for",
    "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        return;\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n        return;\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "trailing_labeled_while",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        outer:\n        while (true) {\n            Robot.home();\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        outer:\n        while (true) {\n            Robot.home();\n        }\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "trailing_labeled_while_sameline",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        outer: while (true) {\n            Robot.home();\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        outer: while (true) {\n            Robot.home();\n        }\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "trailing_throw",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        throw new RuntimeException(\"x\");\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n        throw new RuntimeException(\"x\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "return_nested_not_trailing",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        if (args.length > 5) {\n            return;\n        }\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        if (args.length > 5) {\n            return;\n        }\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "one_line_main",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) { Robot.home(); }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) { Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "one_line_main_while",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) { while (true) { Robot.home(); } }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        while (true) { Robot.home(); } }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "main_in_comment_first",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\n// public static void main(String[] a) { }\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\n// public static void main(String[] a) { }\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "main_in_string_first",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    static String s = \"static void main( {\";\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    static String s = \"static void main( {\";\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "overloaded_main_first",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    static void main(int x) {\n        Robot.home();\n    }\n    public static void main(String[] args) {\n        main(1);\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    static void main(int x) {\n        Robot.home();\n    }\n    public static void main(String[] args) {\n        main(1);\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "nested_class_main_first",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    static class Inner {\n        static void main(String[] a) { }\n    }\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    static class Inner {\n        static void main(String[] a) { }\n    }\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "static_public_order",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    static public void main(String[] args) {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    static public void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "final_main",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static final void main(String[] args) {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static final void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "generic_main",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static <T> void main(String[] args) {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static <T> void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "annotated_param",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(final String... args) {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(final String... args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "c_style_array_param",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String args[]) {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String args[]) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "text_block",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        String t = \"\"\"\n            }\n            \"\"\";\n        Robot.log(t);\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        String t = \"\"\"\n            }\n            \"\"\";\n        Robot.log(t);\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "char_brace",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        char c = '}';\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        char c = '}';\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "lambda_last",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Runnable r = () -> { Robot.home(); };\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Runnable r = () -> { Robot.home(); };\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "allman",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main\n{\n    public static void main(String[] args)\n    {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main\n{\n    public static void main(String[] args)\n    {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "close_same_line",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home(); }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "crlf",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\r\npublic class Main {\r\n    public static void main(String[] args) {\r\n        Robot.home();\r\n    }\r\n}\r\n",
-   "output": "import edubotics.Robot;\r\npublic class Main {\r\n    public static void main(String[] args) {\r\n        Robot.home();\r\n        Robot.replay(\"Winken\");\r\n    }\r\n}\r\n",
-   "hint": null
-  },
-  {
-   "name": "if_else_return",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        if (args.length == 0) { return; } else { return; }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        if (args.length == 0) { return; } else { return; }\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "while_constant",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (1 == 1) { Robot.home(); }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        while (1 == 1) { Robot.home(); }\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "final_constant_loop",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        final boolean immer = true;\n        while (immer) { Robot.home(); }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        final boolean immer = true;\n        Robot.replay(\"Winken\");\n        while (immer) { Robot.home(); }\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "finite_loop_on_variable",
-   "language": "java",
-   "line": null,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        boolean laeuft = args.length > 5;\n        while (laeuft) { laeuft = false; }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        boolean laeuft = args.length > 5;\n        while (laeuft) { laeuft = false; }\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "finite_for",
-   "language": "java",
-   "line": null,
+   "line": 6,
    "reach": "run",
    "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        for (int i = 0; i < 3; i++) {\n            Robot.home();\n        }\n    }\n}\n",
    "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        for (int i = 0; i < 3; i++) {\n            Robot.home();\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n",
    "hint": null
   },
   {
-   "name": "endless_with_break",
+   "name": "after_for_limit_final",
    "language": "java",
-   "line": null,
+   "line": 7,
    "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (true) {\n            Robot.home();\n            break;\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (true) {\n            Robot.home();\n            break;\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        for (int i = 0; i < ANZAHL; i++) {\n            Robot.beep();\n        }\n    }\n    static final int ANZAHL = 3;\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        for (int i = 0; i < ANZAHL; i++) {\n            Robot.beep();\n        }\n        Robot.replay(\"Winken\");\n    }\n    static final int ANZAHL = 3;\n}\n",
    "hint": null
   },
   {
-   "name": "trailing_switch",
+   "name": "after_for_args_length",
    "language": "java",
-   "line": null,
+   "line": 7,
    "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        switch (args.length) {\n            case 0:\n                return;\n            default:\n                return;\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        switch (args.length) {\n            case 0:\n                return;\n            default:\n                return;\n        }\n    }\n}\n",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        for (int i = 0; i < args.length; i++) {\n            Robot.beep();\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        for (int i = 0; i < args.length; i++) {\n            Robot.beep();\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n",
    "hint": null
   },
   {
-   "name": "try_while",
+   "name": "after_while_counter_max",
    "language": "java",
-   "line": null,
+   "line": 7,
    "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        try {\n            while (true) { Robot.home(); }\n        } finally {\n            Robot.log(\"x\");\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.replay(\"Winken\");\n        try {\n            while (true) { Robot.home(); }\n        } finally {\n            Robot.log(\"x\");\n        }\n    }\n}\n",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int n = 0;\n        while (n < MAX) {\n            n++;\n        }\n    }\n    static final int MAX = 3;\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int n = 0;\n        while (n < MAX) {\n            n++;\n        }\n        Robot.replay(\"Winken\");\n    }\n    static final int MAX = 3;\n}\n",
    "hint": null
   },
   {
-   "name": "no_main",
+   "name": "after_while_true_break",
+   "language": "java",
+   "line": 8,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int n = 0;\n        while (true) {\n            n++;\n            if (n > 3) break;\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int n = 0;\n        while (true) {\n            n++;\n            if (n > 3) break;\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_labelled_break_inner",
+   "language": "java",
+   "line": 9,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        aussen:\n        while (true) {\n            while (true) {\n                break aussen;\n            }\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        aussen:\n        while (true) {\n            while (true) {\n                break aussen;\n            }\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_label_same_line",
+   "language": "java",
+   "line": 4,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        aussen: for (;;) { for (;;) { break aussen; } }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        aussen: for (;;) { for (;;) { break aussen; } }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_label_break_in_switch",
+   "language": "java",
+   "line": 11,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        aussen:\n        while (true) {\n            switch (x) {\n                case 1: break aussen;\n                default: break;\n            }\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        aussen:\n        while (true) {\n            switch (x) {\n                case 1: break aussen;\n                default: break;\n            }\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_do_while_counter",
+   "language": "java",
+   "line": 7,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int i = 0;\n        do {\n            i++;\n        } while (i < 3);\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int i = 0;\n        do {\n            i++;\n        } while (i < 3);\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_switch_no_default",
+   "language": "java",
+   "line": 7,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) {\n            case 1: Robot.home(); break;\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) {\n            case 1: Robot.home(); break;\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "in_case_group",
+   "language": "java",
+   "line": 7,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) {\n            case 1:\n                Robot.home();\n                break;\n            default:\n                Robot.beep();\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) {\n            case 1:\n                Robot.home();\n                Robot.replay(\"Winken\");\n                break;\n            default:\n                Robot.beep();\n        }\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_try_catch",
+   "language": "java",
+   "line": 8,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        try {\n            Robot.home();\n        } catch (RuntimeException e) {\n            Robot.beep();\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        try {\n            Robot.home();\n        } catch (RuntimeException e) {\n            Robot.beep();\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "try_block_body",
+   "language": "java",
+   "line": 5,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        try {\n            Robot.home();\n        } finally {\n            Robot.beep();\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        try {\n            Robot.home();\n            Robot.replay(\"Winken\");\n        } finally {\n            Robot.beep();\n        }\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "if_block_body",
+   "language": "java",
+   "line": 5,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        if (args.length == 0) {\n            Robot.home();\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        if (args.length == 0) {\n            Robot.home();\n            Robot.replay(\"Winken\");\n        }\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "else_block_header",
+   "language": "java",
+   "line": 6,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        if (args.length > 0) {\n            Robot.home();\n        } else {\n            Robot.beep();\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        if (args.length > 0) {\n            Robot.home();\n        } else {\n            Robot.replay(\"Winken\");\n            Robot.beep();\n        }\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "lambda_body",
+   "language": "java",
+   "line": 5,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Runnable r = () -> {\n            Robot.home();\n        };\n        r.run();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Runnable r = () -> {\n            Robot.home();\n            Robot.replay(\"Winken\");\n        };\n        r.run();\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "anonymous_method_body",
+   "language": "java",
+   "line": 6,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Runnable r = new Runnable() {\n            public void run() {\n                Robot.home();\n            }\n        };\n        r.run();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Runnable r = new Runnable() {\n            public void run() {\n                Robot.home();\n                Robot.replay(\"Winken\");\n            }\n        };\n        r.run();\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_anonymous_generic",
+   "language": "java",
+   "line": 7,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        java.util.Comparator<Integer> c = new java.util.Comparator<Integer>() {\n            public int compare(Integer a, Integer b) { return a - b; }\n        };\n        Robot.home();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        java.util.Comparator<Integer> c = new java.util.Comparator<Integer>() {\n            public int compare(Integer a, Integer b) { return a - b; }\n        };\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_text_block",
+   "language": "java",
+   "line": 7,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        String s = \"\"\"\n            } { main( \"\n            \"\"\";\n        Robot.home();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        String s = \"\"\"\n            } { main( \"\n            \"\"\";\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_char_brace",
+   "language": "java",
+   "line": 6,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        char c = '{';\n        char d = '\\'';\n        Robot.home();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        char c = '{';\n        char d = '\\'';\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_local_record",
+   "language": "java",
+   "line": 4,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        record P(int x) { }\n        Robot.home();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        record P(int x) { }\n        Robot.replay(\"Winken\");\n        Robot.home();\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_switch_expression",
+   "language": "java",
+   "line": 9,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        int y = switch (x) {\n            case 1 -> { yield 2; }\n            default -> 3;\n        };\n        Robot.home();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        int y = switch (x) {\n            case 1 -> { yield 2; }\n            default -> 3;\n        };\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "labelled_block_body",
+   "language": "java",
+   "line": 5,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        block: {\n            Robot.home();\n            if (args.length == 0) break block;\n            return;\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        block: {\n            Robot.home();\n            Robot.replay(\"Winken\");\n            if (args.length == 0) break block;\n            return;\n        }\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_labelled_block",
+   "language": "java",
+   "line": 8,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        block: {\n            Robot.home();\n            if (args.length == 0) break block;\n            return;\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        block: {\n            Robot.home();\n            if (args.length == 0) break block;\n            return;\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "crlf_body",
+   "language": "java",
+   "line": 4,
+   "reach": "run",
+   "input": "import edubotics.Robot;\r\npublic class Main {\r\n    public static void main(String[] args) {\r\n        Robot.home();\r\n    }\r\n}\r\n",
+   "output": "import edubotics.Robot;\r\npublic class Main {\r\n    public static void main(String[] args) {\r\n        Robot.home();\r\n        Robot.replay(\"Winken\");\r\n    }\r\n}\r\n",
+   "hint": null
+  },
+  {
+   "name": "after_comment_line",
+   "language": "java",
+   "line": 5,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home(); // Start\n        // nächster Schritt\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home(); // Start\n        // nächster Schritt\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "record_main",
+   "language": "java",
+   "line": 4,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic record Main(int x) {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic record Main(int x) {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "enum_main",
+   "language": "java",
+   "line": 5,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic enum Main {\n    A, B;\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic enum Main {\n    A, B;\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "interface_main",
+   "language": "java",
+   "line": 4,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic interface Main {\n    static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic interface Main {\n    static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_final_local_non_constant",
+   "language": "java",
+   "line": 7,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        final boolean lauf = args.length > 5;\n        while (lauf) {\n            Robot.home();\n        }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        final boolean lauf = args.length > 5;\n        while (lauf) {\n            Robot.home();\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "no_cursor",
    "language": "java",
    "line": null,
    "reach": "hint",
-   "input": "import edubotics.Robot;\npublic class Main {\n}\n",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
    "output": null,
-   "hint": "Keine main-Methode gefunden – klicke in deinen Code, wo es eingefügt werden soll."
+   "hint": "Klicke zuerst in deinen Code, wo die Zeile hin soll."
   },
   {
-   "name": "cursor_import_line",
+   "name": "starter_comment_line",
    "language": "java",
    "line": 1,
    "reach": "hint",
-   "input": "import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
+   "input": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
    "output": null,
    "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
   },
   {
-   "name": "cursor_class_line",
+   "name": "import_line",
    "language": "java",
    "line": 3,
    "reach": "hint",
-   "input": "import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
+   "input": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
    "output": null,
    "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
   },
   {
-   "name": "cursor_field_line",
+   "name": "class_header",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
+   "output": null,
+   "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
+  },
+  {
+   "name": "main_closing_brace",
+   "language": "java",
+   "line": 9,
+   "reach": "hint",
+   "input": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
+   "output": null,
+   "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
+  },
+  {
+   "name": "class_closing_brace",
+   "language": "java",
+   "line": 10,
+   "reach": "hint",
+   "input": "// Dein Java-Programm für den Roboter.\n// Alles, was der Roboter kann, steckt in der Klasse Robot — tippe Robot. für die Liste.\nimport edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.log(\"Hallo Roboter!\");\n    }\n}\n",
+   "output": null,
+   "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
+  },
+  {
+   "name": "field_line",
    "language": "java",
    "line": 3,
    "reach": "hint",
@@ -664,7 +1168,7 @@
    "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
   },
   {
-   "name": "cursor_between_methods",
+   "name": "between_methods",
    "language": "java",
    "line": 5,
    "reach": "hint",
@@ -673,85 +1177,319 @@
    "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
   },
   {
-   "name": "cursor_return",
-   "language": "java",
-   "line": 5,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        return;\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n        return;\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_on_throw",
-   "language": "java",
-   "line": 5,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        throw new RuntimeException(\"x\");\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n        throw new RuntimeException(\"x\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_on_break_in_loop",
-   "language": "java",
-   "line": 6,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            break;\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            Robot.replay(\"Winken\");\n            break;\n        }\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_on_continue",
-   "language": "java",
-   "line": 6,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            continue;\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            Robot.replay(\"Winken\");\n            continue;\n        }\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_in_call_args",
-   "language": "java",
-   "line": 4,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.log(\n            \"x\");\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.log(\n            \"x\");\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_on_endless_loop_header",
-   "language": "java",
-   "line": 4,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (true) {\n            Robot.home();\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (true) {\n            Robot.replay(\"Winken\");\n            Robot.home();\n        }\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_on_endless_loop_close",
-   "language": "java",
-   "line": 8,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        while (true) {\n            Robot.log(\"x\");\n        }\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n        while (true) {\n            Robot.log(\"x\");\n        }\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_on_main_close",
-   "language": "java",
-   "line": 5,
-   "reach": "run",
-   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
-  },
-  {
-   "name": "cursor_one_line_main",
+   "name": "one_line_main",
    "language": "java",
    "line": 3,
-   "reach": "run",
+   "reach": "hint",
    "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) { Robot.home(); }\n}\n",
-   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) { Robot.home();\n        Robot.replay(\"Winken\");\n    }\n}\n",
-   "hint": null
+   "output": null,
+   "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
+  },
+  {
+   "name": "enum_body_line",
+   "language": "java",
+   "line": 3,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    enum Farbe { ROT, GRUEN }\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n",
+   "output": null,
+   "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
+  },
+  {
+   "name": "anonymous_generic_field",
+   "language": "java",
+   "line": 6,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        java.util.Comparator<Integer> c = new java.util.Comparator<Integer>() {\n            int zaehler = 0;\n\n            public int compare(Integer a, Integer b) { return a - b; }\n        };\n    }\n}\n",
+   "output": null,
+   "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
+  },
+  {
+   "name": "anonymous_field",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Runnable r = new Runnable() {\n            int zaehler = 0;\n\n            public void run() { Robot.home(); }\n        };\n        r.run();\n    }\n}\n",
+   "output": null,
+   "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
+  },
+  {
+   "name": "local_class_member_line",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        class Hilfe {\n            int x = 1;\n\n            void f() { Robot.home(); }\n        }\n        new Hilfe().f();\n    }\n}\n",
+   "output": null,
+   "hint": "Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, wo es eingefügt werden soll."
+  },
+  {
+   "name": "switch_header",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) {\n            case 1: Robot.home(); break;\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Auf einer switch- oder case-Zeile geht es nicht – klicke in eine Zeile in einem case-Zweig oder unter die switch-Anweisung."
+  },
+  {
+   "name": "case_label_line",
+   "language": "java",
+   "line": 6,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) {\n            case 1:\n                Robot.home();\n                break;\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Auf einer switch- oder case-Zeile geht es nicht – klicke in eine Zeile in einem case-Zweig oder unter die switch-Anweisung."
+  },
+  {
+   "name": "arrow_case_line",
+   "language": "java",
+   "line": 7,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) {\n            case 1 -> Robot.home();\n            default -> Robot.beep();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Auf einer switch- oder case-Zeile geht es nicht – klicke in eine Zeile in einem case-Zweig oder unter die switch-Anweisung."
+  },
+  {
+   "name": "default_label_line",
+   "language": "java",
+   "line": 7,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) {\n            case 1: Robot.home(); break;\n            default:\n                Robot.beep();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Auf einer switch- oder case-Zeile geht es nicht – klicke in eine Zeile in einem case-Zweig oder unter die switch-Anweisung."
+  },
+  {
+   "name": "blank_in_arrow_switch",
+   "language": "java",
+   "line": 7,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) {\n            case 1 -> Robot.home();\n\n            default -> Robot.beep();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Auf einer switch- oder case-Zeile geht es nicht – klicke in eine Zeile in einem case-Zweig oder unter die switch-Anweisung."
+  },
+  {
+   "name": "after_return",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        return;\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „return“. Klicke weiter oben."
+  },
+  {
+   "name": "after_throw",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        throw new RuntimeException(\"x\");\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „throw“. Klicke weiter oben."
+  },
+  {
+   "name": "after_system_exit",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        System.exit(0);\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein Programmende (exit). Klicke weiter oben."
+  },
+  {
+   "name": "after_break_in_loop",
+   "language": "java",
+   "line": 6,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            break;\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „break“. Klicke weiter oben."
+  },
+  {
+   "name": "after_continue_in_loop",
+   "language": "java",
+   "line": 6,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            continue;\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „continue“. Klicke weiter oben."
+  },
+  {
+   "name": "after_while_true",
+   "language": "java",
+   "line": 7,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        while (true) {\n            Robot.log(\"x\");\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_for_ever",
+   "language": "java",
+   "line": 4,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        for (;;) { Robot.home(); }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_do_while_true",
+   "language": "java",
+   "line": 6,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        do {\n            Robot.home();\n        } while (true);\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_while_constant",
+   "language": "java",
+   "line": 4,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (1 == 1) { Robot.home(); }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_while_final_local",
+   "language": "java",
+   "line": 7,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        final boolean lauf = true;\n        while (lauf) {\n            Robot.home();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_interface_constant",
+   "language": "java",
+   "line": 9,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\ninterface Einstellungen {\n    boolean LAUF = true;\n}\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_static_final_constant",
+   "language": "java",
+   "line": 6,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (MAX > 0) {\n            Robot.home();\n        }\n    }\n    static final int MAX = 3;\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_if_else_returns",
+   "language": "java",
+   "line": 4,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        if (args.length == 0) { return; } else { return; }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein if/else, das in jedem Zweig endet. Klicke weiter oben."
+  },
+  {
+   "name": "after_if_else_if_returns",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        if (x == 1) return; else if (x == 2) return; else return;\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein if/else, das in jedem Zweig endet. Klicke weiter oben."
+  },
+  {
+   "name": "after_try_finally_return",
+   "language": "java",
+   "line": 8,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        try {\n            Robot.home();\n        } finally {\n            return;\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „return“. Klicke weiter oben."
+  },
+  {
+   "name": "after_try_catch_both_return",
+   "language": "java",
+   "line": 9,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        try {\n            Robot.home();\n            return;\n        } catch (RuntimeException e) {\n            return;\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein try, das in jedem Zweig endet. Klicke weiter oben."
+  },
+  {
+   "name": "after_switch_all_return",
+   "language": "java",
+   "line": 8,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) {\n            case 1: return;\n            default: return;\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein switch, das in jedem Fall endet. Klicke weiter oben."
+  },
+  {
+   "name": "after_sync_return",
+   "language": "java",
+   "line": 7,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        synchronized (Main.class) {\n            Robot.home();\n            return;\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „return“. Klicke weiter oben."
+  },
+  {
+   "name": "in_call_arguments",
+   "language": "java",
+   "line": 4,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.log(\n            \"x\");\n    }\n}\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "in_multiline_expression",
+   "language": "java",
+   "line": 4,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1 +\n            2;\n        Robot.home();\n    }\n}\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "in_text_block",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        String s = \"\"\"\n            text\n            \"\"\";\n        Robot.home();\n    }\n}\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "in_block_comment",
+   "language": "java",
+   "line": 4,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        /* ein\n           Kommentar */\n        Robot.home();\n    }\n}\n",
+   "output": null,
+   "hint": "Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text über mehrere Zeilen. Klicke in seine letzte Zeile."
+  },
+  {
+   "name": "unsure_foreign_constant",
+   "language": "java",
+   "line": 6,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (Konstanten.LAUF) {\n            Robot.home();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Ob die Zeile hier je läuft, lässt sich nicht sicher sagen – klicke an eine andere Stelle."
+  },
+  {
+   "name": "unbalanced_braces",
+   "language": "java",
+   "line": 4,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n",
+   "output": null,
+   "hint": "Hier geht es nicht – im Programm ist eine Klammer oder ein Text nicht geschlossen. Bitte zuerst schließen."
+  },
+  {
+   "name": "unclosed_string",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        String s = \"offen;\n        Robot.home();\n    }\n}\n",
+   "output": null,
+   "hint": "Diese Stelle lässt sich nicht sicher bestimmen – klicke in eine andere Zeile mit einem Befehl."
   }
  ]
 }

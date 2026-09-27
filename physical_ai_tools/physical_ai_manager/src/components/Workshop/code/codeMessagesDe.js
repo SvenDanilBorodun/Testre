@@ -118,16 +118,46 @@ export const CODE_DE = Object.freeze({
   TEACH_INSERT_LINES: 'Als Programm einfügen ({0} Zeilen)',
   TEACH_INSERT_LINE_ONE: 'Als Programm einfügen (1 Zeile)',
   TEACH_INSERT_FAILED: 'Die Zeilen konnten nicht eingefügt werden.',
-  // No cursor and no `main` in the Java program: nothing is written (never
-  // outside the class, review R-O2).
-  NO_MAIN_HINT: 'Keine main-Methode gefunden – klicke in deinen Code, wo es eingefügt werden soll.',
+  // Where an inserted line goes is the student's choice (owner decision
+  // R3-O4): directly below the line the cursor is on. Without a cursor
+  // nothing is written; a spot where the line could not stand or never run
+  // is refused with one of the SHORT reasons below — never moved elsewhere.
+  CLICK_FIRST_HINT: 'Klicke zuerst in deinen Code, wo die Zeile hin soll.',
+  // Vormachen without a cursor: the lines go to the clipboard instead.
+  COPIED_PASTE_HINT: 'Kopiert – klicke in deinen Code und drücke Strg+V.',
+  // The student opened another program while the insertion was loading.
+  INSERT_DOCUMENT_CHANGED: 'Inzwischen ist ein anderes Programm offen – es wurde nichts eingefügt.',
   // A Java cursor on an import, class or field line: statements only go
   // inside a method (review round 2, mi3).
   NOT_IN_METHOD_HINT: 'Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, '
     + 'wo es eingefügt werden soll.',
-  // The file ends inside brackets or an unfinished text: no place is safe.
-  NO_SAFE_PLACE_HINT: 'Im Programm ist keine sichere Stelle zu finden – ist eine Klammer oder ein Text '
-    + 'nicht geschlossen? Klicke in deinen Code, wo es eingefügt werden soll.',
+  // Only when the program really has an unclosed bracket or text (review
+  // round 3, nb1).
+  NO_SAFE_PLACE_HINT: 'Hier geht es nicht – im Programm ist eine Klammer oder ein Text nicht '
+    + 'geschlossen. Bitte zuerst schließen.',
+  INSERT_UNREADABLE_HINT: 'Diese Stelle lässt sich nicht sicher bestimmen – klicke in eine andere Zeile '
+    + 'mit einem Befehl.',
+  INSERT_LEADING_BLOCK_HINT: 'Hier geht es nicht – oben stehen die Imports (und die Beschreibung) des '
+    + 'Programms. Klicke in eine Zeile darunter.',
+  INSERT_INSIDE_EXPRESSION_HINT: 'Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text '
+    + 'über mehrere Zeilen. Klicke in seine letzte Zeile.',
+  INSERT_DOCSTRING_HINT: 'Hier geht es nicht – direkt darunter steht die Beschreibung (Docstring). Klicke '
+    + 'in eine Zeile darunter.',
+  INSERT_DECORATOR_HINT: 'Hier geht es nicht – zwischen einem @-Dekorator und seiner Funktion darf nichts '
+    + 'stehen.',
+  INSERT_MATCH_HINT: 'Auf einer match- oder case-Zeile geht es nicht – klicke in eine Zeile in einem '
+    + 'case-Zweig.',
+  INSERT_SWITCH_HINT: 'Auf einer switch- oder case-Zeile geht es nicht – klicke in eine Zeile in einem '
+    + 'case-Zweig oder unter die switch-Anweisung.',
+  INSERT_CLAUSE_HINT: 'Hier geht es nicht – vor einem else, elif, except oder finally darf keine Zeile '
+    + 'stehen. Klicke in die Zeile darüber.',
+  INSERT_INDENT_HINT: 'Hier passt die Einrückung nicht zum Block – klicke an das Ende einer Zeile im '
+    + 'selben Block.',
+  INSERT_INDENT_BROKEN_HINT: 'Die Einrückung im Programm passt nicht zusammen – bitte zuerst korrigieren.',
+  // {0}: what stands before the spot („return“, eine Endlosschleife, …).
+  INSERT_NEVER_RUNS_HINT: 'Hier würde die Zeile nie laufen – davor steht {0}. Klicke weiter oben.',
+  INSERT_UNSURE_HINT: 'Ob die Zeile hier je läuft, lässt sich nicht sicher sagen – klicke an eine andere '
+    + 'Stelle.',
   VARIABLES_EDIT_IN_CODE: 'Umbenennen und Löschen geht bei Code direkt im Programm.',
   VARIABLES_JAVA_NOTE: 'Java zeigt Werte nur mit Robot.zeige("Name", wert); an.',
   VARIABLE_USED_NOWHERE: 'Nirgends — der Name kommt im Programm nicht (mehr) vor.',

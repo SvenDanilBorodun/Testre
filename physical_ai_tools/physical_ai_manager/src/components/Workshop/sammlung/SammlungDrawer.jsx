@@ -30,7 +30,9 @@
  * provider actions (Vormachen, a camera click, the simulator table).
  */
 
-import React, { useEffect, useMemo, useReducer } from 'react';
+import React, {
+  useEffect, useMemo, useReducer, useState,
+} from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import {
@@ -147,24 +149,33 @@ export default function SammlungDrawer({
   const snippetable = (card) => canInsert && SNIPPET_KINDS.has(card.assetKind);
 
   // A code document's insertion may load its module first (async); a
-  // Blockly document answers at once — `await` takes both.
+  // Blockly document answers at once — `await` takes both. One at a time
+  // (review round 3, nb4): a second click while the module loaded inserted
+  // the line twice. The buttons are disabled from the first click on (a
+  // click is a discrete event: React renders before the next one).
+  const [inserting, setInserting] = useState(false);
   const insert = async (card) => {
-    let result;
+    setInserting(true);
     try {
-      result = await assetDoc.insertSnippet({ kind: card.assetKind, name: card.assetName });
-    } catch (err) {
-      // The insertion module loads on demand (review round 2, ni4); a failed
-      // load wrote nothing.
-      console.error('insertSnippet failed:', err);
-      toast.error(CODE_DE.SAMMLUNG_INSERT_FAILED);
-      return;
-    }
-    if (result && result.error) {
-      toast.error(result.error);
-      return;
-    }
-    if (result && result.count > 0) {
-      toast.success(formatCode(CODE_DE.INSERTED_AT, result.file, result.firstLine));
+      let result;
+      try {
+        result = await assetDoc.insertSnippet({ kind: card.assetKind, name: card.assetName });
+      } catch (err) {
+        // The insertion module loads on demand (review round 2, ni4); a
+        // failed load wrote nothing.
+        console.error('insertSnippet failed:', err);
+        toast.error(CODE_DE.SAMMLUNG_INSERT_FAILED);
+        return;
+      }
+      if (result && result.error) {
+        toast.error(result.error);
+        return;
+      }
+      if (result && result.count > 0) {
+        toast.success(formatCode(CODE_DE.INSERTED_AT, result.file, result.firstLine));
+      }
+    } finally {
+      setInserting(false);
     }
   };
 
@@ -310,7 +321,9 @@ export default function SammlungDrawer({
                       aria-label={`${CODE_DE.SAMMLUNG_INSERT}: ${card.assetName}`}
                       title={CODE_DE.SAMMLUNG_INSERT_TITLE}
                       onClick={() => insert(card)}
-                      className="shrink-0 px-2 text-xs font-medium text-[var(--accent)] hover:bg-gray-50"
+                      disabled={inserting}
+                      aria-busy={inserting || undefined}
+                      className="shrink-0 px-2 text-xs font-medium text-[var(--accent)] hover:bg-gray-50 disabled:cursor-wait disabled:opacity-50"
                     >
                       {CODE_DE.SAMMLUNG_INSERT}
                     </button>

@@ -14,8 +14,9 @@
 // workspace or a Python/Java program (owner decision O4). Captures go into its
 // Ziele store, automatic names skip the names the program pins itself, a
 // rename rewrites the program, and „Als Programm einfügen" builds blocks or
-// writes lines — below the student's last cursor line, or at the end of main
-// (codeInsert.js), with a toast that says where.
+// writes lines directly below the student's cursor line, checked by
+// codeInsert.js, with a toast that says where. Without a cursor nothing is
+// written: the lines go to the clipboard (owner decision R3-O4).
 //
 // Two rules here carry weight of their own:
 //   * No name is ever asked while the arm is limp: a capture/take gets an
@@ -53,6 +54,19 @@ import { formatCmDe, isZielTouchTooHigh, zielTouchHeightAboveTableMm } from './z
 import {
   buildProgramBlocks, buildProgramSteps, makeGripperStateOf, placeGripperState,
 } from './insertProgram';
+
+// Puts a program's lines on the clipboard, one per line; false when the
+// browser offers no clipboard (or refuses it).
+async function copyLines(lines) {
+  try {
+    const clip = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+    if (!clip || typeof clip.writeText !== 'function') return false;
+    await clip.writeText(lines.join('\n'));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 // The cloud keeps at most 16 recording rows per workflow (SQL prune cap).
 export const TEACH_TRAJECTORY_SLOTS = 16;
@@ -728,33 +742,50 @@ function TeachOverlay({
     ? (insertCount === 1 ? CODE_DE.TEACH_INSERT_LINE_ONE : formatCode(CODE_DE.TEACH_INSERT_LINES, insertCount))
     : (insertCount === 1 ? DE.TEACH_INSERT_ONE : formatDe(DE.TEACH_INSERT, insertCount));
   // A code document's insertion may load its module first (async); a
-  // Blockly document answers at once — `await` takes both.
+  // Blockly document answers at once — `await` takes both. One at a time
+  // (review round 3, nb4): a second click while it loaded inserted twice;
+  // the button is disabled from the first click on.
+  const [inserting, setInserting] = useState(false);
   const handleInsert = async () => {
-    const target = latest.current.doc;
-    let result;
+    setInserting(true);
     try {
-      result = await target.insertProgram(itemsRef.current, { placeNameOf, gripperStateOf });
-    } catch (err) {
-      console.error('insertProgram failed:', err);
-      toast.error(isCode ? CODE_DE.TEACH_INSERT_FAILED : INSERT_FAILED_DE);
-      return;
-    }
-    if (result && result.error) {
-      // A code program with no place to write (no cursor, no Java main).
-      toast.error(result.error);
-      refocus();
-      return;
-    }
-    if (result && result.count > 0) {
-      if (isCode) {
-        // Where the lines went: the cursor's file and line, or the end of main.
-        toast.success(formatCode(CODE_DE.INSERTED_AT, result.file, result.firstLine));
-      } else {
-        toast.success(result.count === 1
-          ? DE.TEACH_INSERT_DONE_ONE : formatDe(DE.TEACH_INSERT_DONE, result.count));
+      const target = latest.current.doc;
+      let result;
+      try {
+        result = await target.insertProgram(itemsRef.current, { placeNameOf, gripperStateOf });
+      } catch (err) {
+        console.error('insertProgram failed:', err);
+        toast.error(isCode ? CODE_DE.TEACH_INSERT_FAILED : INSERT_FAILED_DE);
+        return;
       }
+      if (result && result.noCursor && Array.isArray(result.lines)) {
+        // The student never clicked into the code (owner decision R3-O4):
+        // nothing is written — the lines go to the clipboard, to paste where
+        // they belong. No clipboard: the click-first hint.
+        if (await copyLines(result.lines)) toast.success(CODE_DE.COPIED_PASTE_HINT);
+        else toast.error(result.error || CODE_DE.CLICK_FIRST_HINT);
+        refocus();
+        return;
+      }
+      if (result && result.error) {
+        // A spot where the lines cannot stand or never run: the reason.
+        toast.error(result.error);
+        refocus();
+        return;
+      }
+      if (result && result.count > 0) {
+        if (isCode) {
+          // Where the lines went: below the cursor's line.
+          toast.success(formatCode(CODE_DE.INSERTED_AT, result.file, result.firstLine));
+        } else {
+          toast.success(result.count === 1
+            ? DE.TEACH_INSERT_DONE_ONE : formatDe(DE.TEACH_INSERT_DONE, result.count));
+        }
+      }
+      refocus();
+    } finally {
+      setInserting(false);
     }
-    refocus();
   };
 
   return (
@@ -1020,7 +1051,8 @@ function TeachOverlay({
                 type="button"
                 onClick={handleInsert}
                 onPointerUp={refocus}
-                disabled={insertCount === 0 || !doc}
+                disabled={insertCount === 0 || !doc || inserting}
+                aria-busy={inserting || undefined}
                 className="w-full rounded-lg border border-[var(--accent)] px-3 py-2 text-base font-semibold text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40 hover:bg-[var(--bg-sunk)]"
               >
                 {insertLabel}

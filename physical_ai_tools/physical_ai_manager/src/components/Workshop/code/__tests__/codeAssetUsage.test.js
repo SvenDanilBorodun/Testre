@@ -354,6 +354,32 @@ describe('review round 2 (2026-09-27): keyword arguments, Unicode boundaries, th
     expect(codeDefinedPlaceNames({ 'main.py': 'robot.pin(name="P", x=0, y=0, z=0)\n' }, 'python')).toEqual(['P']);
   });
 
+  it('nb3 (round 3): in a comment, the keyword argument counts wherever it stands, like in code', () => {
+    const src = [
+      'import robot',
+      '# robot.replay(speed=2, name="Alt")',
+      '# robot.move_to(target = "Ablage")',
+      '# robot.pin(x=0.1, y=0.2, z=0.0, name="Mitte")',
+      '# robot.replay(speed=2, other="Nein")',
+      '# robot.replay(speed="Falsch")',
+      '# robot.replay(x, "Nein2")',
+      'robot.replay(speed=2, name="Alt")',
+      '',
+    ].join('\n');
+    expect(names(src)).toEqual([
+      'replay:Alt(c)', 'move_to:Ablage(c)', 'pin:Mitte(c)', 'replay:Alt',
+    ]);
+    const pin = findAssetCalls(src, 'python').find((c) => c.method === 'pin');
+    expect(pin.coords).toEqual({ x: 0.1, y: 0.2, z: 0 });
+    const files = { 'main.py': src };
+    const rec = renameCodeAssetRefs(files, 'python', 'recording', 'Alt', 'Neu');
+    expect(rec.count).toBe(2);
+    expect(rec.files['main.py']).toContain('# robot.replay(speed=2, name="Neu")');
+    expect(rec.files['main.py']).toContain('\nrobot.replay(speed=2, name="Neu")');
+    // Java has no keyword arguments; a comment's first positional literal still counts.
+    expect(names('// Robot.replay("A", 2.0);\n// Robot.replay(x, "B");\n', 'java')).toEqual(['replay:A(c)']);
+  });
+
   it('ni1: the run-time scan fetches a keyword-form recording as well', () => {
     expect(collectCodeReplayNames({ 'main.py': 'robot.replay(name="A")\nrobot.replay(speed=2, name=\'B\')\n' }))
       .toEqual(['A', 'B']);

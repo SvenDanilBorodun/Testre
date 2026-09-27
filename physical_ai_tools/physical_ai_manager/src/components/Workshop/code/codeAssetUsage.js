@@ -290,12 +290,17 @@ const CALL_NAME_RE = {
 };
 // A keyword right before a string: `name=`, `target = `.
 const KEYWORD_TAIL_RE = /(?<![\p{L}\p{N}_])([A-Za-z_][A-Za-z0-9_]*)\s*=\s*$/u;
-// The same call, whole, inside a comment's text (a comment holds no string
-// tokens): an optional keyword, the literal, then `,` or `)`.
-const COMMENT_CALL_RE = {
-  python: new RegExp(`${callee('python')}\\s*\\(\\s*(?:([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*)?(["'])([^"'\\\\\\n]*)\\4(?=\\s*[,)])`, 'gu'),
-  java: new RegExp(`${callee('java')}\\s*\\(\\s*()(["'])([^"'\\\\\\n]*)\\4(?=\\s*[,)])`, 'gu'),
+// The same call inside a comment's text (a comment holds no string tokens):
+// its head, then its arguments read one by one (review round 3, nb3 — a
+// keyword argument anywhere in the list, like the code path, not only first).
+const COMMENT_CALL_HEAD_RE = {
+  python: new RegExp(`${callee('python')}\\s*\\(`, 'gu'),
+  java: new RegExp(`${callee('java')}\\s*\\(`, 'gu'),
 };
+// One argument that is exactly a literal: `"A"` / `'A'`, or (Python)
+// `name="A"`; no backslash, no line break, no other quote inside.
+const COMMENT_LITERAL_ARG_RE = /^(["'])([^"'\\\n]*)\1$/;
+const COMMENT_KEYWORD_ARG_RE = /^([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*(["'])([^"'\\\n]*)\2$/;
 const NUMBER = '[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?';
 const PIN_COORD_KEYS = ['x', 'y', 'z'];
 // Farther back than this a keyword's call is not looked for.
@@ -389,6 +394,95 @@ function coordsOf(args) {
   return out;
 }
 
+// The arguments of the call whose `(` ends at `open` in a comment's text:
+// `[{start, end}]` (relative to `body`, untrimmed), split at top-level
+// commas, quotes and brackets skipped whole, up to the closing `)`, and
+// `close` (-1 when the comment ends first — then the last argument, not
+// ended by `,` or `)`, is not counted).
+function commentCallArgs(body, open) {
+  const args = [];
+  let depth = 0;
+  let from = open;
+  let i = open;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      while (j < body.length && body[j] !== ch && body[j] !== '\n') j += body[j] === '\\' ? 2 : 1;
+      i = j + 1;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      if (depth === 0) {
+        if (ch === ')') {
+          args.push({ start: from, end: i });
+          return { args, close: i };
+        }
+        break;
+      }
+      depth -= 1;
+    } else if (ch === ',' && depth === 0) {
+      args.push({ start: from, end: i });
+      from = i + 1;
+    }
+    i += 1;
+  }
+  return { args, close: -1 };
+}
+
+// Every asset call in a comment's text with a usable literal for its asset
+// parameter: the FIRST positional argument, or (Python) the argument named
+// like the table's asset parameter, wherever it stands (`robot.replay(speed=2,
+// name="A")`) — the same rule as the code path. `quoteAt` is relative to
+// `body`.
+function commentAssetCalls(body, language) {
+  const re = COMMENT_CALL_HEAD_RE[language];
+  if (!re) return [];
+  const out = [];
+  re.lastIndex = 0;
+  let m = re.exec(body);
+  while (m !== null) {
+    const hit = lookupCall(language, m[1], m[2]);
+    if (hit) {
+      const open = m.index + m[0].length;
+      const { args, close } = commentCallArgs(body, open);
+      let positional = 0;
+      for (const a of args) {
+        const raw = body.slice(a.start, a.end);
+        const text = raw.trim();
+        const lead = a.start + (raw.length - raw.trimStart().length);
+        const kw = language === 'python' ? COMMENT_KEYWORD_ARG_RE.exec(text) : null;
+        if (kw) {
+          if (kw[1] === hit.param) {
+            out.push({
+              hit, quoteAt: lead + text.indexOf(kw[2], kw[1].length), value: kw[3],
+              argsText: body.slice(open, close < 0 ? body.length : close),
+            });
+            break;
+          }
+          continue;
+        }
+        if (positional === 0) {
+          const lit = COMMENT_LITERAL_ARG_RE.exec(text);
+          if (lit) {
+            out.push({
+              hit, quoteAt: lead, value: lit[2], argsText: body.slice(open, close < 0 ? body.length : close),
+            });
+            break;
+          }
+        }
+        positional += 1;
+        // Python allows no positional argument after a keyword one; a first
+        // positional that is not a literal names no asset this scan can know.
+        if (positional > 0 && language !== 'python') break;
+      }
+    }
+    m = re.exec(body);
+  }
+  return out;
+}
+
 /**
  * Every asset call of ONE file with a literal first argument, in text order:
  * `{method, asset, name (trimmed), rawValue, line, col, inComment,
@@ -420,23 +514,13 @@ export function findAssetCalls(content, language) {
   segs.forEach((seg, idx) => {
     if (seg.type === 'comment') {
       const body = text.slice(seg.start, seg.end);
-      const re = COMMENT_CALL_RE[language];
-      re.lastIndex = 0;
-      let m = re.exec(body);
-      while (m !== null) {
-        const hit = lookupCall(language, m[1], m[2]);
-        if (hit && (!m[3] || m[3] === hit.param)) {
-          const quoteAt = seg.start + m.index + m[0].length - m[5].length - 2;
-          const row = push(hit, quoteAt, quoteAt + 1, quoteAt + 1 + m[5].length, true, -1);
-          if (row && hit.method === 'pin') {
-            // A comment holds no string tokens: its arguments, quotes blanked.
-            const args = body.slice(m.index + m[0].indexOf('(') + 1);
-            const close = args.indexOf(')');
-            row.coords = coordsOf((close < 0 ? args : args.slice(0, close))
-              .replace(/(["'])[^"'\n]*\1/g, (q) => ' '.repeat(q.length)));
-          }
+      for (const found of commentAssetCalls(body, language)) {
+        const quoteAt = seg.start + found.quoteAt;
+        const row = push(found.hit, quoteAt, quoteAt + 1, quoteAt + 1 + found.value.length, true, -1);
+        if (row && found.hit.method === 'pin') {
+          // A comment holds no string tokens: its arguments, quotes blanked.
+          row.coords = coordsOf(found.argsText.replace(/(["'])[^"'\n]*\1/g, (q) => ' '.repeat(q.length)));
         }
-        m = re.exec(body);
       }
       return;
     }

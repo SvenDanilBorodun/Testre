@@ -352,3 +352,14 @@ describe('one indentation unit for the editor and the insertion (review M2)', ()
       .toBe('import robot\nfor i in range(3):\n  robot.move_to("Hoch")\n  robot.home()\n');
   });
 });
+
+describe('a reveal belongs to its nonce, not to the file on screen (review m5)', () => {
+  test('switching the file with the same request leaves the caret alone', () => {
+    const { view, show } = mount({ revealRequest: { line: 4, nonce: 1 } });
+    expect(view.state.selection.main.head).toBe(view.state.doc.line(4).to);
+    show({ path: 'hilfe.py', value: 'a = 1\nb = 2\nc = 3\nd = 4\ne = 5\n', revealRequest: { line: 4, nonce: 1 } });
+    // eslint-disable-next-line testing-library/no-node-access
+    const next = EditorView.findFromDOM(document.querySelector('.cm-editor'));
+    expect(next.state.selection.main.head).toBe(0);
+  });
+});

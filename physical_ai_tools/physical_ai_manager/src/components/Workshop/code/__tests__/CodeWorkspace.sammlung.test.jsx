@@ -228,3 +228,15 @@ describe('a keystroke never undoes an edit the page applied a moment before (rev
     expect(latest['main.py']).toBe(`${FILES['main.py']}x = 1\n`);
   });
 });
+
+describe('a file switch without a remembered line reveals nothing (review m5)', () => {
+  test('the caret request of another file is not carried over', async () => {
+    const { show, onCursorChange } = await mount();
+    show({ revealRequest: { file: 'hilfe.py', line: 1, nonce: 7 } });
+    expect(editor.props.revealRequest).toMatchObject({ line: 1 });
+    fireEvent.click(screen.getByRole('option', { name: /main\.py$/ }));
+    expect(activePath()).toBe('main.py');
+    expect(editor.props.revealRequest).toBeNull();
+    expect(onCursorChange).toHaveBeenLastCalledWith(null);
+  });
+});

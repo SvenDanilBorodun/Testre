@@ -90,3 +90,20 @@ describe('the code editor’s German catalogue', () => {
     expect(formatCode(CODE_DE.ERR_FILE_TOO_BIG, 'gross.py', 64)).not.toMatch(/\{\d\}/);
   });
 });
+
+describe('German quotation marks (review n5)', () => {
+  it('every „ is closed by “, never by an ASCII "', () => {
+    const bad = [];
+    for (const [key, value] of Object.entries(CODE_DE)) {
+      if (typeof value !== 'string') continue;
+      let at = value.indexOf('„');
+      while (at >= 0) {
+        const rest = value.slice(at + 1);
+        const close = rest.search(/[“"]/);
+        if (close < 0 || rest[close] !== '“') bad.push(key);
+        at = value.indexOf('„', at + 1);
+      }
+    }
+    expect(bad).toEqual([]);
+  });
+});

@@ -568,11 +568,13 @@ function CodeEditor({
       selection: EditorSelection.cursor(caret),
       effects: EditorView.scrollIntoView(caret, { y: 'center' }),
     });
-    // One reveal per nonce: the request object's identity and line are not
-    // the trigger, its nonce is (a repeated jump to the same line gets a new
-    // nonce from the page).
+    // One reveal per NONCE: the request object's identity and line are not
+    // the trigger, and neither is the file on screen — a file switch with an
+    // unchanged request used to replay the previous file's line (review m5).
+    // A reveal that arrives WITH a file switch still runs after the new view
+    // exists: this effect is declared after the one that creates it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [revealNonce, path]);
+  }, [revealNonce]);
 
   useEffect(() => {
     const view = viewRef.current;

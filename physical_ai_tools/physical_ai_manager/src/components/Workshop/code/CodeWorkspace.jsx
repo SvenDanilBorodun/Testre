@@ -234,6 +234,10 @@ function CodeWorkspace({
       reportCursor({ file: path, line });
       revealInEditor(line);
     } else {
+      // No remembered line: no caret request either — the previous file's
+      // reveal must not land in this one while the page's cursor is null
+      // (review m5: the caret and the insertion point must agree).
+      setEditorReveal(null);
       reportCursor(null);
     }
   }, [reportCursor, revealInEditor]);

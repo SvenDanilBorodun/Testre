@@ -123,7 +123,7 @@ export const CODE_DE = Object.freeze({
   VARIABLES_EDIT_IN_CODE: 'Umbenennen und Löschen geht bei Code direkt im Programm.',
   VARIABLES_JAVA_NOTE: 'Java zeigt Werte nur mit Robot.zeige("Name", wert); an.',
   VARIABLE_USED_NOWHERE: 'Nirgends — der Name kommt im Programm nicht (mehr) vor.',
-  USED_NOWHERE_INSERT: 'Nirgends — „Einfügen" schreibt den Aufruf ins Programm.',
+  USED_NOWHERE_INSERT: 'Nirgends — „Einfügen“ schreibt den Aufruf ins Programm.',
 
   SUBMIT: 'Abgeben',
   SUBMIT_TITLE: 'Diesen Stand des Programms bei der Lehrkraft abgeben',

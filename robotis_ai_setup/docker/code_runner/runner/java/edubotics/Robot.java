@@ -340,26 +340,6 @@ public final class Robot {
     }
 
     /** Zeigt einen Wert unter diesem Namen im Variablen-Bereich an — Zahlen, Texte, Listen; höchstens 40 Zeichen Name. */
-    public static void zeige(String name, String wert) {
-        RpcClient.call("zeige", new Object[] {name, RpcClient.shownText(wert)}, "call");
-    }
-
-    /** Zeigt einen Wert unter diesem Namen im Variablen-Bereich an — Zahlen, Texte, Listen; höchstens 40 Zeichen Name. */
-    public static void zeige(String name, double[] wert) {
-        RpcClient.call("zeige", new Object[] {name, RpcClient.shownDoubles(wert)}, "call");
-    }
-
-    /** Zeigt einen Wert unter diesem Namen im Variablen-Bereich an — Zahlen, Texte, Listen; höchstens 40 Zeichen Name. */
-    public static void zeige(String name, int[] wert) {
-        RpcClient.call("zeige", new Object[] {name, RpcClient.shownInts(wert)}, "call");
-    }
-
-    /** Zeigt einen Wert unter diesem Namen im Variablen-Bereich an — Zahlen, Texte, Listen; höchstens 40 Zeichen Name. */
-    public static void zeige(String name, Greifziel wert) {
-        RpcClient.call("zeige", new Object[] {name, String.valueOf(wert)}, "call");
-    }
-
-    /** Zeigt einen Wert unter diesem Namen im Variablen-Bereich an — Zahlen, Texte, Listen; höchstens 40 Zeichen Name. */
     public static void zeige(String name, Object wert) {
         RpcClient.call("zeige", new Object[] {name, RpcClient.shownObject(wert)}, "call");
     }

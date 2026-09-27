@@ -68,6 +68,36 @@ public final class SmokeMain {
             refused = true;
         }
         check(refused, "find() refused without a socket");
+        // zeige(): every value a student may hold COMPILES (null included —
+        // one reference overload, dispatched at run time) and renders
+        // JSON-safe; without a socket each call is refused.
+        int zeigeRefused = 0;
+        Object[] shown = {null, "Würfel", new double[] {1.0, Double.NaN}, new int[] {1, 2},
+                          List.of(1, "a"), 'c', 3.5f};
+        for (Object value : shown) {
+            try {
+                Robot.zeige("x", value);
+            } catch (RpcClient.RobotError e) {
+                zeigeRefused++;
+            }
+        }
+        try {
+            Robot.zeige("x", null);
+        } catch (RpcClient.RobotError e) {
+            zeigeRefused++;
+        }
+        try {
+            Robot.zeige("x", 5);
+        } catch (RpcClient.RobotError e) {
+            zeigeRefused++;
+        }
+        check(zeigeRefused == shown.length + 2, "zeige refused without a socket");
+        check(RpcClient.shownObject(null) == null, "zeige null");
+        check("Würfel".equals(RpcClient.shownObject("Würfel")), "zeige text");
+        check("c".equals(RpcClient.shownObject('c')), "zeige char");
+        check(EduJson.encode(RpcClient.shownObject(new double[] {1.0, Double.NaN}))
+                .equals("[1.0,\"NaN\"]"), "zeige double[]");
+        check(EduJson.encode(RpcClient.shownObject(new int[] {1, 2})).equals("[1,2]"), "zeige int[]");
         check(RpcClient.asPoint(null) == null, "null point");
         check(RpcClient.asPoint(List.of(1.0, 2L, 3.5))[1] == 2.0, "point decode");
 

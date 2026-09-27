@@ -285,6 +285,12 @@ public final class RpcClient {
                 || o instanceof Short || o instanceof Byte) {
             return o;
         }
+        if (o instanceof String) {
+            return shownText((String) o);
+        }
+        if (o instanceof Character) {
+            return String.valueOf(o);
+        }
         if (o instanceof Number) {
             return shownDouble(((Number) o).doubleValue());
         }

@@ -881,15 +881,15 @@ _JAVA_ALTS = {
     'ziel': (('Greifziel', '{v}.handle()'),),
     'tagids': (('int[]', '{v}'),),
     'obj': (('String', '{v}'), ('Greifobjekt', '{v}.name()')),
-    # zeige(): one overload per value type a student holds; the RpcClient
-    # helpers render each into a bounded, JSON-safe shape (a non-finite double
-    # becomes text, arrays are capped) before EduJson frames it.
+    # zeige(): the primitives plus exactly ONE reference overload, Object,
+    # which RpcClient.shownObject dispatches at run time (String, double[],
+    # int[], a List, a Greifziel …). Two reference overloads would make
+    # `Robot.zeige("x", null)` ambiguous — a compile error a student cannot
+    # read (2026-09-27 review, n3). Every rendering is bounded and JSON-safe
+    # (a non-finite double becomes text, arrays are capped) before EduJson
+    # frames it.
     'value': (('int', '{v}'), ('long', '{v}'), ('double', 'RpcClient.shownDouble({v})'),
               ('boolean', '{v}'), ('char', 'String.valueOf({v})'),
-              ('String', 'RpcClient.shownText({v})'),
-              ('double[]', 'RpcClient.shownDoubles({v})'),
-              ('int[]', 'RpcClient.shownInts({v})'),
-              ('Greifziel', 'String.valueOf({v})'),
               ('Object', 'RpcClient.shownObject({v})')),
 }
 
@@ -1359,6 +1359,12 @@ public final class RpcClient {{
         if (o == null || o instanceof Boolean || o instanceof Integer || o instanceof Long
                 || o instanceof Short || o instanceof Byte) {{
             return o;
+        }}
+        if (o instanceof String) {{
+            return shownText((String) o);
+        }}
+        if (o instanceof Character) {{
+            return String.valueOf(o);
         }}
         if (o instanceof Number) {{
             return shownDouble(((Number) o).doubleValue());

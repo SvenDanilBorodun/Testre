@@ -253,10 +253,17 @@ def test_zeige_renders_in_both_stubs_and_the_asset_tag_in_neither():
     assert [a.arg for a in fn.args.args] == ['name', 'wert']
     assert 'asset' not in _STUB
     java = _RENDERED[robot_api.GENERATED_PATHS['java_robot']]
-    for jtype in ('int', 'long', 'double', 'boolean', 'char', 'String', 'double[]',
-                  'int[]', 'Greifziel', 'Object'):
+    # 2026-09-27 review round (n3): primitives plus ONE reference overload.
+    # Two or more reference-typed overloads (String, double[], int[],
+    # Greifziel …) made `Robot.zeige("x", null)` a compile error („reference
+    # to zeige is ambiguous"); Object dispatches at run time instead.
+    for jtype in ('int', 'long', 'double', 'boolean', 'char', 'Object'):
         assert f'public static void zeige(String name, {jtype} wert)' in java, jtype
-    assert java.count('public static void zeige(') == 10
+    assert java.count('public static void zeige(') == 6
+    rpc = _RENDERED[robot_api.GENERATED_PATHS['java_rpc_client']]
+    for branch in ('instanceof String', 'instanceof double[]', 'instanceof int[]',
+                   'instanceof Iterable', 'instanceof Character'):
+        assert branch in rpc, branch
     for rel in (robot_api.GENERATED_PATHS['java_robot'],
                 robot_api.GENERATED_PATHS['java_greifobjekt'],
                 robot_api.GENERATED_PATHS['java_rpc_client']):

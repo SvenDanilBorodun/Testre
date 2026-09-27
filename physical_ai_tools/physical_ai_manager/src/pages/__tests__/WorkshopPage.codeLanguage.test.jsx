@@ -24,7 +24,9 @@
 // Same mocking idiom as WorkshopPage.savePayload.test.jsx.
 
 import React from 'react';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import {
+  act, fireEvent, render, screen, waitFor,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WorkshopPage from '../WorkshopPage';
 
@@ -630,6 +632,53 @@ describe('WorkshopPage — the code editor host gets the Sammlung (O4–O7)', ()
     const files = JSON.parse(screen.getByTestId('code-files').textContent);
     expect(files['hilfe.py']).toBe('x = 1\nrobot.replay("Winken")\n');
     expect(mockPage.host.revealRequest).toMatchObject({ file: 'hilfe.py', line: 2 });
+  });
+});
+
+describe('WorkshopPage — an insertion never lands in another document (review round 3, mb9)', () => {
+  test('„Neu" while the insertion module loads: the new program gets nothing, the student is told', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    act(() => { mockPage.host.onCursorChange({ file: 'main.py', line: 2 }); });
+    await userEvent.click(screen.getByRole('button', { name: /^Neu/ }));
+    const java = screen.getByRole('button', { name: /Java/ });
+    const doc = mockPage.assetDoc;
+    let pending;
+    // The click and the switch in the same tick: the module promise has not
+    // settled when „Neu → Java" replaces the document.
+    pending = doc.insertSnippet({ kind: 'recording', name: 'Winken' });
+    fireEvent.click(java);
+    let result;
+    await act(async () => { result = await pending; });
+    expect(result).toEqual({ count: 0, error: 'Inzwischen ist ein anderes Programm offen – es wurde nichts eingefügt.' });
+    expect(screen.getByTestId('code-workspace').getAttribute('data-language')).toBe('java');
+    expect(screen.getByTestId('code-files').textContent).not.toMatch(/Winken/);
+  });
+});
+
+describe('WorkshopPage — the previous document’s Ziele store lets go (review round 3, nb5)', () => {
+  test('a change to the OLD store after a switch does not mark the new document’s Ziele as changed', async () => {
+    const other = {
+      ...PYTHON_ROW, id: 'wf-py2', name: 'Anderes', code_files: { 'main.py': 'import robot\n' },
+    };
+    mockApi.getWorkflow.mockImplementation((_tok, id) => Promise.resolve(id === 'wf-py2' ? other : PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    const oldStore = mockPage.assetDoc.getStore();
+    mockState = baseState({ selectedWorkflowId: 'wf-py2' });
+    rerender(<WorkshopPage isActive />);
+    await waitFor(() => expect(mockPage.assetDoc.getStore()).not.toBe(oldStore));
+    // Something still holding the old store (a Vormachen overlay, an
+    // insertion in flight) changes it after the switch.
+    act(() => { oldStore.add({ name: 'Alt', kind: 'pin', source: 'camera', x: 0.1, y: 0, z: 0 }); });
+    await userEvent.click(screen.getByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    const [, id, body] = mockApi.updateWorkflow.mock.calls[0];
+    expect(id).toBe('wf-py2');
+    expect(Object.keys(body)).not.toContain('blockly_json');
   });
 });
 

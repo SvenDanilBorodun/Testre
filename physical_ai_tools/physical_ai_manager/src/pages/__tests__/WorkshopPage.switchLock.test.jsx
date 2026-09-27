@@ -19,9 +19,15 @@
 //
 // The harness is WorkshopPage.codeLanguage.test.jsx's, with the three pickers
 // replaced by prop-capturing stubs.
+//
+// Review round 3: the lock holds only while the robot link is alive (mb1,
+// like utils/signOut::logoutBlockReason); a refusal is observed after React
+// flushed (MB2b — asserted synchronously it could not see a restore that
+// DID land) and on the „Neu" menu left open when the lock came (MB2c); and no
+// run or preview starts while a version restore is on its way (nb2).
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WorkshopPage from '../WorkshopPage';
 
@@ -106,9 +112,12 @@ vi.mock('../../components/Workshop/CalibrationWizard', () => ({ __esModule: true
 vi.mock('../../components/Workshop/LeaderToggle', () => ({ __esModule: true, default: () => <div data-testid="leader-toggle" /> }));
 vi.mock('../../components/Workshop/RunControls', () => ({
   __esModule: true,
-  default: ({ codeLanguage, codeFiles, destinationStore }) => (
+  default: ({
+    codeLanguage, codeFiles, destinationStore, startBlockedReason,
+  }) => (
     <div
       data-testid="run-controls"
+      data-start-blocked={startBlockedReason || ''}
       data-language={codeLanguage || ''}
       data-files={codeFiles ? Object.keys(codeFiles).join(',') : ''}
       data-ziele={destinationStore ? destinationStore.getEntries().map((e) => e.name).join(',') : '-'}
@@ -331,9 +340,60 @@ describe.each([
     await userEvent.click(screen.getByTestId('pick-other'));
     expect(openWorkflowActions()).toEqual([]);
     expect(mockToast.error).toHaveBeenCalledWith(REASON);
-    // A version the cloud already restored is not swapped in either.
-    mockPickers.history.onRestore({ id: 'wf-py', code_language: 'python', code_files: { 'main.py': 'x = 9\n' } });
+    // A version the cloud already restored is not swapped in either —
+    // observed after React flushed (MB2b: asserted synchronously, the check
+    // could not see a restore that DID land).
+    const restored = { id: 'wf-py', code_language: 'python', code_files: { 'main.py': 'x = 9\n' } };
+    await act(async () => {
+      mockPickers.history.onRestore(restored);
+      await Promise.resolve();
+    });
     expect(screen.queryByText(/x = 9/)).toBeNull();
+    // The positive control: unlocked, the same restore DOES show.
+    mockState = baseState({ ...over });
+    rerender(<WorkshopPage isActive />);
+    await act(async () => {
+      mockPickers.history.onRestore(restored);
+      await Promise.resolve();
+    });
+    expect(screen.getByText(/x = 9/)).toBeInTheDocument();
+  });
+
+  test('MB2c: a „Neu" menu opened before the run is refused in German, and nothing changes', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ ...over });
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId(editorTestId);
+    await userEvent.click(screen.getByRole('button', { name: /^Neu/ }));
+    const java = screen.getByRole('button', { name: /Java/ });
+    mockState = baseState({ ...over, runState: 'running' });
+    rerender(<WorkshopPage isActive />);
+    mockDispatch.mockClear();
+    await userEvent.click(java);
+    expect(mockToast.error).toHaveBeenCalledWith(REASON);
+    expect(screen.getByTestId(editorTestId)).toBeInTheDocument();
+    expect(screen.queryByTestId('code-workspace')?.getAttribute('data-language') ?? 'none').not.toBe('java');
+    expect(mockDispatch.mock.calls.map(([a]) => a && a.type)).not.toContain('workshop/clearVariables');
+  });
+
+  test('mb1: with the robot link gone, the lock is released — a dead link cannot retire a run', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ ...over, runState: 'running' });
+    mockState.tasks = { heartbeatStatus: 'disconnected' };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId(editorTestId);
+    const open = screen.getByRole('button', { name: /Öffnen/ });
+    expect(open).toBeEnabled();
+    expect(open.getAttribute('title')).not.toBe(REASON);
+    expect(screen.getByRole('button', { name: /^Neu/ })).toBeEnabled();
+    expect(mockPickers.history.lockedReason).toBeNull();
+    await userEvent.click(open);
+    mockDispatch.mockClear();
+    await userEvent.click(screen.getByTestId('pick-other'));
+    expect(openWorkflowActions()).toEqual([{ type: 'workshop/openWorkflow', payload: 'wf-other' }]);
+    await userEvent.click(screen.getByRole('button', { name: 'Galerie' }));
+    await screen.findByTestId('gallery-tab');
+    expect(mockPickers.gallery.lockedReason).toBeNull();
   });
 
   test('when nothing runs, every control is live and a pick opens through openWorkflow', async () => {
@@ -347,5 +407,31 @@ describe.each([
     mockDispatch.mockClear();
     await userEvent.click(screen.getByTestId('pick-other'));
     expect(openWorkflowActions()).toEqual([{ type: 'workshop/openWorkflow', payload: 'wf-other' }]);
+  });
+});
+
+describe('nb2: no run and no preview starts while a version restore is on its way', () => {
+  test('the Start button says why while the restore runs, and is free again after', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    const runControls = () => screen.getByTestId('run-controls');
+    expect(runControls().getAttribute('data-start-blocked')).toBe('');
+    act(() => { mockPickers.history.onRestoringChange(true); });
+    expect(runControls().getAttribute('data-start-blocked'))
+      .toBe('Eine frühere Version wird gerade wiederhergestellt – bitte kurz warten.');
+    // A preview is a run too: refused with the same reason.
+    mockToast.error.mockClear();
+    act(() => {
+      mockPage.host.provider.dispatchAction({
+        type: 'preview', asset: { kind: 'pin', id: 'p1', name: 'Ablage' },
+      });
+    });
+    expect(mockToast.error).toHaveBeenCalledWith(
+      'Eine frühere Version wird gerade wiederhergestellt – bitte kurz warten.',
+    );
+    act(() => { mockPickers.history.onRestoringChange(false); });
+    expect(runControls().getAttribute('data-start-blocked')).toBe('');
   });
 });

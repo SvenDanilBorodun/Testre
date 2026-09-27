@@ -122,8 +122,35 @@ test('the version history: the toggle is disabled and a restore is refused befor
   rerender(<VersionHistoryDropdown workflowId="wf-1" onRestore={onRestore} lockedReason={REASON} />);
   expect(screen.getByRole('button', { name: /Verlauf|Versionen/ })).toBeDisabled();
   expect(screen.getByRole('button', { name: /Verlauf|Versionen/ }).getAttribute('title')).toBe(REASON);
-  expect(load).toBeDisabled();
+  // The list opened before the run stays clickable and SAYS why (review
+  // round 3, MB2f: a disabled „laden" hid the refusal from every test, and
+  // from the student) — the cloud is never asked.
+  expect(load).toBeEnabled();
+  expect(load.getAttribute('title')).toBe(REASON);
   await userEvent.click(load);
+  expect(mockToast.error).toHaveBeenCalledWith(REASON);
   expect(mockApi.restoreWorkflowVersion).not.toHaveBeenCalled();
   expect(onRestore).not.toHaveBeenCalled();
+});
+
+test('nb2: the history tells the page a restore is on its way, and when it is over', async () => {
+  mockApi.listWorkflowVersions.mockResolvedValue([{ id: 'v1', created_at: '2026-09-27T10:00:00Z' }]);
+  let finish;
+  mockApi.restoreWorkflowVersion.mockImplementation(() => new Promise((r) => { finish = r; }));
+  const onRestore = vi.fn();
+  const onRestoringChange = vi.fn();
+  render(<VersionHistoryDropdown workflowId="wf-1" onRestore={onRestore} onRestoringChange={onRestoringChange} />);
+  await userEvent.click(screen.getByRole('button', { name: /Verlauf|Versionen/ }));
+  await userEvent.click(await screen.findByRole('button', { name: DE.VERSION_LOAD }));
+  expect(onRestoringChange.mock.calls).toEqual([[true]]);
+  expect(onRestore).not.toHaveBeenCalled();
+  finish({ id: 'wf-1', blockly_json: {} });
+  await waitFor(() => expect(onRestoringChange.mock.calls).toEqual([[true], [false]]));
+  expect(onRestore).toHaveBeenCalledTimes(1);
+  // A failed restore ends it too.
+  mockApi.restoreWorkflowVersion.mockRejectedValue(new Error('weg'));
+  onRestoringChange.mockClear();
+  await userEvent.click(screen.getByRole('button', { name: /Verlauf|Versionen/ }));
+  await userEvent.click(await screen.findByRole('button', { name: DE.VERSION_LOAD }));
+  await waitFor(() => expect(onRestoringChange.mock.calls).toEqual([[true], [false]]));
 });

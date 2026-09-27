@@ -144,12 +144,14 @@ export function previewLeaderGate(rsBridge, caps) {
  * click must not toast).
  */
 export function previewBlockReason({
-  heartbeatStatus, runState, paused, teachOpen, jogHandGuideOn, simMode,
+  heartbeatStatus, runState, paused, versionRestoring, teachOpen, jogHandGuideOn, simMode,
   activeTutorialId, rsLeaderOn, rsLeaderPending, rsLeaderUnknown, asset, robotType, workflowId,
   inFlight,
 }) {
   if (heartbeatStatus !== 'connected') return 'offline';
   if (runState === 'running' || paused === true) return 'running';
+  // A preview is a run: none while a version restore is on its way (nb2).
+  if (versionRestoring) return 'restoring';
   if (teachOpen) return 'teach';
   if (jogHandGuideOn) return 'handguide';
   if (!simMode && activeTutorialId) return 'tutorial';
@@ -171,6 +173,7 @@ export function previewBlockReason({
 export const PREVIEW_BLOCK_TITLES_DE = Object.freeze({
   offline: DE.PREVIEW_BLOCK_OFFLINE,
   running: DE.PREVIEW_BLOCK_RUNNING,
+  restoring: DE.VERSION_RESTORE_IN_FLIGHT,
   teach: DE.PREVIEW_BLOCK_TEACH,
   handguide: DE.PREVIEW_BLOCK_HANDGUIDE,
   tutorial: DE.PREVIEW_BLOCK_TUTORIAL,

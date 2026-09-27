@@ -179,6 +179,7 @@ describe('previewBlockReason — each reason when only its condition holds', () 
     ['offline', { heartbeatStatus: 'disconnected' }],
     ['running', { runState: 'running' }],
     ['running', { paused: true }],
+    ['restoring', { versionRestoring: true }],
     ['teach', { teachOpen: true }],
     ['handguide', { jogHandGuideOn: true }],
     ['tutorial', { activeTutorialId: 'tut-1' }],
@@ -198,17 +199,18 @@ describe('previewBlockReason — each reason when only its condition holds', () 
 
   test('the order is the contract: an earlier reason wins over every later one', () => {
     const all = {
-      ...OPEN, heartbeatStatus: 'x', runState: 'running', teachOpen: true, jogHandGuideOn: true,
+      ...OPEN, heartbeatStatus: 'x', runState: 'running', versionRestoring: true, teachOpen: true, jogHandGuideOn: true,
       activeTutorialId: 't', rsLeaderOn: true, rsLeaderPending: true, rsLeaderUnknown: true, workflowId: null,
       inFlight: true,
       asset: { kind: 'recording', id: 't1', name: 'A', robotProfile: 'edu6_studio' },
     };
     const order = [
-      'offline', 'running', 'teach', 'handguide', 'tutorial', 'leader', 'leaderPending', 'leaderUnknown',
+      'offline', 'running', 'restoring', 'teach', 'handguide', 'tutorial', 'leader', 'leaderPending', 'leaderUnknown',
       'otherRobot', 'unsaved', 'inFlight',
     ];
     const clear = [
-      { heartbeatStatus: 'connected' }, { runState: 'idle' }, { teachOpen: false }, { jogHandGuideOn: false },
+      { heartbeatStatus: 'connected' }, { runState: 'idle' }, { versionRestoring: false }, { teachOpen: false },
+      { jogHandGuideOn: false },
       { activeTutorialId: null }, { rsLeaderOn: false }, { rsLeaderPending: false }, { rsLeaderUnknown: false },
       { asset: { kind: 'recording', id: 't1', name: 'A', robotProfile: 'omx_f' } },
       { workflowId: 'wf' }, { inFlight: false },
@@ -225,6 +227,7 @@ describe('previewBlockReason — each reason when only its condition holds', () 
     expect(PREVIEW_BLOCK_TITLES_DE).toEqual({
       offline: 'Keine Verbindung zum Roboter-Dienst.',
       running: 'Ein Programm läuft gerade – erst auf „Stopp" drücken.',
+      restoring: 'Eine frühere Version wird gerade wiederhergestellt – bitte kurz warten.',
       teach: 'Erst Vormachen beenden.',
       handguide: 'Der Arm ist freigeschaltet – bitte zuerst festsetzen.',
       tutorial: 'Während eines Lernpfads kann der Simulator nicht geöffnet werden.',

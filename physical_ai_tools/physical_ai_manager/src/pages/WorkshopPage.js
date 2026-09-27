@@ -365,11 +365,21 @@ function WorkshopPage({ isActive }) {
   // them all then sends `{}`). A Ziele-free program sends no blockly_json at
   // all, so it still saves against an API from before migration 041.
   const codeZieleSendRef = useRef(false);
+  // The previous code document's store subscription, ended when the next
+  // document opens (review round 3, nb5): the old store stays reachable (a
+  // TeachOverlay still open, an insertion in flight) and a change to it must
+  // not mark the NEXT document's Ziele as changed.
+  const codeStoreUnsubscribeRef = useRef(null);
   // Where the student's cursor last was ({file, line}), reported by
-  // CodeWorkspace — null until they click into the editor, which is what makes
-  // an insertion go to the end of main instead (owner decision O6). A request
-  // to show a line (a „Benutzt in" row, an insertion) travels as a prop.
+  // CodeWorkspace — null until they click into the editor; an insertion then
+  // writes nothing and asks them to click first (owner decision R3-O4). A
+  // request to show a line (a „Benutzt in" row, an insertion) travels as a prop.
   const codeCursorRef = useRef(null);
+  // The open code document's identity for an insertion still loading its
+  // module (review round 3, mb9): bumped the moment the page starts
+  // replacing the document — every code document opens through
+  // openCodeDocument, and every other workflow through the hydrate fetch.
+  const codeDocTokenRef = useRef(0);
   const revealSeqRef = useRef(0);
   const [codeRevealRequest, setCodeRevealRequest] = useState(null);
   // The ONLY way a code document opens (hydrate, its failure, „Neu", a draft,
@@ -377,13 +387,18 @@ function WorkshopPage({ isActive }) {
   // `blockly_json` (`edubotics-destinations`). A non-code `language` closes
   // any open code document. The caller bumps editorKey, as before.
   const openCodeDocument = useCallback(({ language, files, blocklyJson } = {}) => {
+    codeDocTokenRef.current += 1;
     codeCursorRef.current = null;
     setCodeRevealRequest(null);
+    if (codeStoreUnsubscribeRef.current) {
+      codeStoreUnsubscribeRef.current();
+      codeStoreUnsubscribeRef.current = null;
+    }
     if (isCodeLanguage(language)) {
       const store = createDetachedDestinationStore(readDestinationEntries(blocklyJson));
       codeZieleSendRef.current = store.getEntries().length > 0;
       // The store lives exactly as long as this document; so does this.
-      store.subscribe(() => { codeZieleSendRef.current = true; });
+      codeStoreUnsubscribeRef.current = store.subscribe(() => { codeZieleSendRef.current = true; });
       codeLanguageRef.current = language;
       codeStoreRef.current = store;
       setCodeLanguage(language);
@@ -412,8 +427,12 @@ function WorkshopPage({ isActive }) {
   // disabled with this German reason, and the handlers refuse it too (a clone
   // that finishes after the run started, a popover opened before). A run
   // keeps reporting on the program that produced it.
+  // Only while the robot link is alive (review round 3, mb1) — exactly like
+  // utils/signOut::logoutBlockReason: a run state the dead link can no longer
+  // retire must not lock the student out of every other program.
   const workflowRunning = useSelector(selectWorkflowRunning);
-  const switchLockReason = workflowRunning ? DE.STOP_PROGRAM_FIRST : null;
+  const switchHeartbeat = useSelector((s) => s.tasks?.heartbeatStatus);
+  const switchLockReason = workflowRunning && switchHeartbeat === 'connected' ? DE.STOP_PROGRAM_FIRST : null;
   const switchLockRef = useRef(switchLockReason);
   switchLockRef.current = switchLockReason;
   const refuseSwitch = useCallback(() => {
@@ -442,6 +461,10 @@ function WorkshopPage({ isActive }) {
   // „Debug" tab) is replaced by SimStage, so RunControls' Debug button targets
   // this flag instead of the dock tab (see onToggleDebug wiring below).
   const [simDebugOpen, setSimDebugOpen] = useState(false);
+  // A version restore on its way to the cloud (review round 3, nb2): no run
+  // or preview starts meanwhile — a restore that lands while a program runs is
+  // refused by the switch lock, and the cloud row and the editor would part.
+  const [versionRestoring, setVersionRestoring] = useState(false);
   // Batch 2b: rosbridge liveness gates the real-arm jog panel and Vormachen (the same
   // signal the rest of the app uses for „Roboter verbunden").
   const heartbeatStatus = useSelector((s) => s.tasks?.heartbeatStatus);
@@ -725,6 +748,9 @@ function WorkshopPage({ isActive }) {
     }
     const token = accessTokenRef.current;
     if (selectedWorkflowId && token) {
+      // Another document is on its way: an insertion still loading its
+      // module must not land in it (mb9).
+      codeDocTokenRef.current += 1;
       setHydrating(true);
       getWorkflow(token, selectedWorkflowId)
         .then((w) => {
@@ -826,6 +852,7 @@ function WorkshopPage({ isActive }) {
         },
         getCursor: () => codeCursorRef.current,
         setCursor: (at) => { codeCursorRef.current = at; },
+        getDocumentToken: () => codeDocTokenRef.current,
       });
     }
     return workspace ? createBlocklyAssetDocument(workspace) : null;
@@ -1380,6 +1407,7 @@ function WorkshopPage({ isActive }) {
       heartbeatStatus,
       runState,
       paused,
+      versionRestoring,
       teachOpen,
       jogHandGuideOn,
       simMode,
@@ -1842,6 +1870,7 @@ function WorkshopPage({ isActive }) {
                       <VersionHistoryDropdown
                         workflowId={selectedWorkflowId}
                         lockedReason={switchLockReason}
+                        onRestoringChange={setVersionRestoring}
                         onRestore={(updated) => {
                           if (!updated || refuseSwitch()) return;
                           // A code version carries its files (migration 040)
@@ -2035,6 +2064,7 @@ function WorkshopPage({ isActive }) {
                   codeLanguage={codeLanguage}
                   codeFiles={codeFiles}
                   destinationStore={activeStore}
+                  startBlockedReason={versionRestoring ? DE.VERSION_RESTORE_IN_FLIGHT : null}
                   debugOpen={simMode ? simDebugOpen : dockOpen.includes('debug')}
                   onToggleDebug={() => {
                     if (simMode) setSimDebugOpen((v) => !v);

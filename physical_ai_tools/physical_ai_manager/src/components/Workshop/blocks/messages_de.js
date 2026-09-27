@@ -353,6 +353,9 @@ export const DE = {
   // „Neu", a version restore, an opening clone) while a program runs or
   // stands at a breakpoint (review round 2, owner decision R2-O3).
   STOP_PROGRAM_FIRST: 'Stoppe zuerst dein Programm.',
+  // While a version restore is on its way (review round 3, nb2): no run and
+  // no preview starts — the restore would land under a running program.
+  VERSION_RESTORE_IN_FLIGHT: 'Eine frühere Version wird gerade wiederhergestellt – bitte kurz warten.',
   PREVIEW_BLOCK_TEACH: 'Erst Vormachen beenden.',
   PREVIEW_BLOCK_HANDGUIDE: 'Der Arm ist freigeschaltet – bitte zuerst festsetzen.',
   PREVIEW_BLOCK_TUTORIAL: 'Während eines Lernpfads kann der Simulator nicht geöffnet werden.',

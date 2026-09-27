@@ -160,6 +160,9 @@ function RunControls({
   // detached one for Python/Java (migration 041). Absent → the workspace's
   // store, else the serializer output, as before.
   destinationStore = null,
+  // Why no run may start right now, or null (review round 3, nb2: a version
+  // restore on its way). The Start button is disabled and says why.
+  startBlockedReason = null,
 }) {
   const dispatch = useDispatch();
   const {
@@ -726,10 +729,10 @@ function RunControls({
           <button
             type="button"
             onClick={handleStart}
-            disabled={busy || (rsLeaderOn && !simMode)}
-            title={rsLeaderOn && !simMode
+            disabled={busy || (rsLeaderOn && !simMode) || !!startBlockedReason}
+            title={startBlockedReason || (rsLeaderOn && !simMode
               ? 'Bitte zuerst „Leader abschalten" (oben), bevor du das Programm ausführst.'
-              : undefined}
+              : undefined)}
             className={
               BUTTON_BASE
               + ' bg-[var(--accent)] text-white hover:opacity-90 '

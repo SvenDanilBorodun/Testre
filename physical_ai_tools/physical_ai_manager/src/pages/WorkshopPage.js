@@ -35,11 +35,16 @@ import {
   setDriveToHandler,
 } from '../components/Workshop/blocks/destinations';
 import {
+  DESTINATIONS_SERIALIZER_NAME,
   MAX_DESTINATION_ENTRIES,
+  createDetachedDestinationStore,
   getDestinationStore,
   nextAutoName,
-  takenDestinationNames,
+  readDestinationEntries,
+  serializeState,
 } from '../components/Workshop/sammlung/destinationStore';
+import { createBlocklyAssetDocument } from '../components/Workshop/sammlung/assetDocument';
+import { createCodeAssetDocument } from '../components/Workshop/code/codeAssetDocument';
 import { createSammlungProvider } from '../components/Workshop/sammlung/provider';
 import { buildTwinMarkers, variablePointsFromValues } from '../components/Workshop/sammlung/markers';
 import { ghostJointsFromEntry } from '../utils/armProfile';
@@ -321,6 +326,56 @@ function WorkshopPage({ isActive }) {
   const [codeLanguage, setCodeLanguage] = useState('');
   const [codeFiles, setCodeFiles] = useState(null);
   const isCodeWorkflow = isCodeLanguage(codeLanguage);
+  // Migration 041: a code document's Ziele/Positionen live in ONE detached
+  // DestinationStore per open code document (a Blockly document keeps them in
+  // its workspace's store). Created by openCodeDocument — never
+  // `getDestinationStore(null)`, which hands out a fresh store on every call.
+  const [codeDestinationStore, setCodeDestinationStore] = useState(null);
+  // The ref every save reads. applyCodeFiles sets it SYNCHRONOUSLY: a rename
+  // rewrites the code and then awaits saveWorkflowNow in the same tick, and a
+  // ref refreshed in an effect would still hold the old text when runSave reads
+  // it. Every programmatic code edit (a rename, an insertion) and the editor's
+  // own typing go through applyCodeFiles.
+  const codeFilesRef = useRef(codeFiles);
+  // The language and the Ziele store of the open code document, read by every
+  // save beside codeFilesRef — so openCodeDocument moves all three together,
+  // synchronously: a save between two renders must never pair one document's
+  // files with another's language or Ziele.
+  const codeLanguageRef = useRef(codeLanguage);
+  const codeStoreRef = useRef(null);
+  const applyCodeFiles = useCallback((next) => {
+    codeFilesRef.current = next;
+    setCodeFiles(next);
+  }, []);
+  // Where the student's cursor last was ({file, line}), reported by
+  // CodeWorkspace — null until they click into the editor, which is what makes
+  // an insertion go to the end of main instead (owner decision O6). A request
+  // to show a line (a „Benutzt in" row, an insertion) travels as a prop.
+  const codeCursorRef = useRef(null);
+  const revealSeqRef = useRef(0);
+  const [codeRevealRequest, setCodeRevealRequest] = useState(null);
+  // The ONLY way a code document opens (hydrate, its failure, „Neu", a draft,
+  // a version restore): language + files + its Ziele from the saved
+  // `blockly_json` (`edubotics-destinations`). A non-code `language` closes
+  // any open code document. The caller bumps editorKey, as before.
+  const openCodeDocument = useCallback(({ language, files, blocklyJson } = {}) => {
+    codeCursorRef.current = null;
+    setCodeRevealRequest(null);
+    if (isCodeLanguage(language)) {
+      const store = createDetachedDestinationStore(readDestinationEntries(blocklyJson));
+      codeLanguageRef.current = language;
+      codeStoreRef.current = store;
+      setCodeLanguage(language);
+      applyCodeFiles(files && typeof files === 'object' && !Array.isArray(files) ? files : {});
+      setCodeDestinationStore(store);
+      return;
+    }
+    codeLanguageRef.current = '';
+    codeStoreRef.current = null;
+    setCodeLanguage('');
+    applyCodeFiles(null);
+    setCodeDestinationStore(null);
+  }, [applyCodeFiles]);
   // „Neu ▾" has been used this mount: the student has CHOSEN what the editor
   // holds, so a crash-recovery draft arriving a moment later must not overrule
   // them (the read is async; the click is not).
@@ -640,15 +695,14 @@ function WorkshopPage({ isActive }) {
               : EMPTY_SIM_SCENE,
           );
           // A code workflow (migration 040): the language routes the editor,
-          // the files are the document. A pre-040 row or a Blockly workflow
-          // carries '' / {} and clears any code document that was open.
-          if (isCodeLanguage(w?.code_language)) {
-            setCodeLanguage(w.code_language);
-            setCodeFiles(w.code_files && typeof w.code_files === 'object' ? w.code_files : {});
-          } else {
-            setCodeLanguage('');
-            setCodeFiles(null);
-          }
+          // the files are the document, and (041) blockly_json carries its
+          // Ziele. A pre-040 row or a Blockly workflow carries '' / {} and
+          // closes any code document that was open.
+          openCodeDocument({
+            language: w?.code_language,
+            files: w?.code_files,
+            blocklyJson: w?.blockly_json,
+          });
           setEditorKey((k) => k + 1);
           setHydrating(false);
         })
@@ -656,8 +710,7 @@ function WorkshopPage({ isActive }) {
           if (cancelled) return;
           toast.error(`Workflow konnte nicht geladen werden: ${e.message || e}`);
           setInitialJsonForEditor(unsavedBlocklyJson || null);
-          setCodeLanguage('');
-          setCodeFiles(null);
+          openCodeDocument({ language: '' });
           setEditorKey((k) => k + 1);
           setHydrating(false);
         });
@@ -705,6 +758,38 @@ function WorkshopPage({ isActive }) {
       }
     });
   }, []);
+
+  // The open document's Ziele store and its asset document — ONE for either
+  // notation: the Blockly workspace's own store, or the code document's
+  // detached one. Every Ziele path of the page (a camera click, the sim
+  // table, the markers, a preview, the run, Vormachen, the drawer) goes
+  // through these, so a code program gets all of them (owner decision O4).
+  const activeStore = isCodeWorkflow
+    ? codeDestinationStore
+    : (workspace ? getDestinationStore(workspace) : null);
+  const activeStoreRef = useRef(activeStore);
+  activeStoreRef.current = activeStore;
+  const assetDoc = useMemo(() => {
+    if (isCodeWorkflow) {
+      if (!codeDestinationStore) return null;
+      return createCodeAssetDocument({
+        language: codeLanguage,
+        store: codeDestinationStore,
+        getFiles: () => codeFilesRef.current,
+        applyFiles: applyCodeFiles,
+        requestReveal: (at) => {
+          revealSeqRef.current += 1;
+          setCodeRevealRequest({ ...at, nonce: revealSeqRef.current });
+        },
+        getCursor: () => codeCursorRef.current,
+        setCursor: (at) => { codeCursorRef.current = at; },
+      });
+    }
+    return workspace ? createBlocklyAssetDocument(workspace) : null;
+  }, [isCodeWorkflow, codeLanguage, codeDestinationStore, workspace, applyCodeFiles]);
+  const assetDocRef = useRef(assetDoc);
+  assetDocRef.current = assetDoc;
+  const handleCodeCursorChange = useCallback((at) => { codeCursorRef.current = at; }, []);
 
   // Wire the workspace accessor so a late object-catalog refresh can reach the
   // live OBJECT_TYPE dropdowns (perception.js refreshObjectTypeDropdowns).
@@ -841,15 +926,11 @@ function WorkshopPage({ isActive }) {
     setEditorJson(null);
     setInitialJsonForEditor(null);
     setSimScene(EMPTY_SIM_SCENE);
-    if (isCodeLanguage(choice)) {
-      setCodeLanguage(choice);
-      setCodeFiles({ ...STARTER_FILES[choice] });
-    } else {
-      setCodeLanguage('');
-      setCodeFiles(null);
-    }
+    openCodeDocument(isCodeLanguage(choice)
+      ? { language: choice, files: { ...STARTER_FILES[choice] }, blocklyJson: null }
+      : { language: '' });
     setEditorKey((k) => k + 1);
-  }, [dispatch]);
+  }, [dispatch, openCodeDocument]);
 
   // Camera click → Ziel, without a prompt. CameraFeedOverlay asks for the
   // label BEFORE it calls /workshop/mark_destination, so one point has one name
@@ -861,31 +942,38 @@ function WorkshopPage({ isActive }) {
   //     deleted block, which drops the stale id);
   //   * otherwise → a new „Ziel n" in the document's destination store, which
   //     the overlay then offers to rename inline.
+  //   * a CODE program has no „setze Ziel" block to select: the click always
+  //     makes a new Ziel in its store, named past its store names AND the
+  //     names the program pins itself.
   const resolveMarkLabel = useCallback(() => {
+    const store = activeStoreRef.current;
+    const doc = assetDocRef.current;
+    if (!store || !doc) return null;
     const ws = workspaceRef.current;
-    if (!ws) return null;
-    const id = lastPinBlockIdRef.current;
-    const block = id ? ws.getBlockById(id) : null;
-    if (block && block.type === 'edubotics_destination_pin') {
-      return { label: (block.getFieldValue('NAME') || '').trim() || 'A', target: 'block', blockId: id };
+    if (ws) {
+      const id = lastPinBlockIdRef.current;
+      const block = id ? ws.getBlockById(id) : null;
+      if (block && block.type === 'edubotics_destination_pin') {
+        return { label: (block.getFieldValue('NAME') || '').trim() || 'A', target: 'block', blockId: id };
+      }
     }
     lastPinBlockIdRef.current = null;
-    const store = getDestinationStore(ws);
     if (store.getEntries().length >= MAX_DESTINATION_ENTRIES) { toast.error(DE.ERR_STORE_FULL); return null; }
-    return { label: nextAutoName(DE.TEACH_AUTO_NAME_ZIEL, takenDestinationNames(ws)), target: 'store' };
+    return { label: nextAutoName(DE.TEACH_AUTO_NAME_ZIEL, doc.takenPlaceNames()), target: 'store' };
   }, []);
 
   const handleMarkDestination = useCallback(({ label, target, blockId, world_x, world_y, world_z }) => {
-    const ws = workspaceRef.current;
-    if (!ws) return null;
+    const store = activeStoreRef.current;
+    if (!store) return null;
     if (target === 'block') {
-      const block = blockId ? ws.getBlockById(blockId) : null;
+      const ws = workspaceRef.current;
+      const block = ws && blockId ? ws.getBlockById(blockId) : null;
       if (!block || block.type !== 'edubotics_destination_pin') return null;
       applyPinnedCoordinates(block, world_x, world_y, world_z);
       toast.success(formatDe(DE.CAMERA_PIN_WRITTEN, block.getFieldValue('NAME') || label));
       return null;
     }
-    const res = getDestinationStore(ws).add({
+    const res = store.add({
       name: label,
       kind: 'pin',
       source: 'camera',
@@ -902,9 +990,9 @@ function WorkshopPage({ isActive }) {
   // The overlay's inline rename field. The result is returned so the field
   // stays open (with the refusal toasted) until a name is accepted.
   const handleRenameMarked = useCallback((entryId, rawName) => {
-    const ws = workspaceRef.current;
-    if (!ws) return { ok: false };
-    const res = getDestinationStore(ws).rename(entryId, rawName);
+    const store = activeStoreRef.current;
+    if (!store) return { ok: false };
+    const res = store.rename(entryId, rawName);
     if (!res.ok) toast.error(res.error);
     return res;
   }, []);
@@ -914,14 +1002,13 @@ function WorkshopPage({ isActive }) {
   // load), so the markers follow the document without polling.
   const [storeEntries, setStoreEntries] = useState([]);
   useEffect(() => {
-    if (!workspace) {
+    if (!activeStore) {
       setStoreEntries([]);
       return undefined;
     }
-    const store = getDestinationStore(workspace);
-    setStoreEntries(store.getEntries());
-    return store.subscribe((entries) => setStoreEntries(entries));
-  }, [workspace]);
+    setStoreEntries(activeStore.getEntries());
+    return activeStore.subscribe((entries) => setStoreEntries(entries));
+  }, [activeStore]);
   // Point-shaped variable values ({x, y, z} in metres) get a violet marker
   // (the most recently set ones — sammlung/markers.js::variablePointsFromValues).
   const variablePoints = useMemo(() => variablePointsFromValues(variableValues), [variableValues]);
@@ -944,15 +1031,15 @@ function WorkshopPage({ isActive }) {
   // (plane-tracked, motion.resolve_destination_z); an uncalibrated rig cannot
   // START it outside the simulator because showEditor hides RunControls.
   const handleCreateSimDestination = useCallback(({ x, y }) => {
-    const ws = workspaceRef.current;
-    if (!ws) return;
-    const store = getDestinationStore(ws);
+    const store = activeStoreRef.current;
+    const doc = assetDocRef.current;
+    if (!store || !doc) return;
     if (store.getEntries().length >= MAX_DESTINATION_ENTRIES) {
       toast.error(DE.ERR_STORE_FULL);
       return;
     }
     const res = store.add({
-      name: nextAutoName(DE.TEACH_AUTO_NAME_ZIEL, takenDestinationNames(ws)),
+      name: nextAutoName(DE.TEACH_AUTO_NAME_ZIEL, doc.takenPlaceNames()),
       kind: 'pin',
       source: 'sim',
       x,
@@ -998,15 +1085,20 @@ function WorkshopPage({ isActive }) {
       if (selectedWorkflowId) return;
       if (documentChosenRef.current) return;
       if (isCodeLanguage(codeLanguage)) return;
-      setCodeLanguage(draft.language);
-      setCodeFiles(draft.files);
+      openCodeDocument({
+        language: draft.language,
+        files: draft.files,
+        blocklyJson: draft.destinations ? { [DESTINATIONS_SERIALIZER_NAME]: draft.destinations } : null,
+      });
       setEditorKey((k) => k + 1);
     },
-    [selectedWorkflowId, codeLanguage]
+    [selectedWorkflowId, codeLanguage, openCodeDocument]
   );
   useCodeAutosave({
     language: codeLanguage,
     files: codeFiles,
+    // The draft carries the document's Ziele beside its files (041).
+    destinations: isCodeWorkflow ? storeEntries : null,
     enabled: isActive && (calibrated || simMode),
     scopeKey: userId,
     onRestore: handleCodeAutosaveRestore,
@@ -1021,14 +1113,13 @@ function WorkshopPage({ isActive }) {
   const simSceneRef = useRef(simScene);
   const editorJsonRef = useRef(editorJson);
   const unsavedJsonRef = useRef(unsavedBlocklyJson);
-  const codeLanguageRef = useRef(codeLanguage);
-  const codeFilesRef = useRef(codeFiles);
   useEffect(() => { selectedWorkflowIdRef.current = selectedWorkflowId; }, [selectedWorkflowId]);
   useEffect(() => { simSceneRef.current = simScene; }, [simScene]);
   useEffect(() => { editorJsonRef.current = editorJson; }, [editorJson]);
   useEffect(() => { unsavedJsonRef.current = unsavedBlocklyJson; }, [unsavedBlocklyJson]);
-  useEffect(() => { codeLanguageRef.current = codeLanguage; }, [codeLanguage]);
-  useEffect(() => { codeFilesRef.current = codeFiles; }, [codeFiles]);
+  // codeLanguageRef / codeFilesRef / codeStoreRef are written synchronously by
+  // openCodeDocument and applyCodeFiles — their only writers — never by an
+  // effect that could run late and put an older value back.
   // followUpId: the workflow a queued follow-up belongs to, snapshotted when it
   // is QUEUED (null = the document a create in flight is creating).
   const saveStateRef = useRef({
@@ -1048,10 +1139,13 @@ function WorkshopPage({ isActive }) {
       return fail('Nicht angemeldet — Speichern nicht möglich.',
         new Error('Nicht angemeldet — Speichern nicht möglich.'));
     }
-    // A CODE document: the project is the thing saved, the Blockly document is
-    // the EMPTY `{}` the cloud requires beside it on create (and is absent
-    // from the PATCH — the cloud refuses a PATCH mixing the two). The caps of
-    // §3.7 are judged here with the server's own German sentences.
+    // A CODE document: the project is the thing saved, and its blockly_json
+    // carries its Ziele/Positionen and nothing else (migration 041) — the
+    // serializer's state under `edubotics-destinations`, or `{}` when it has
+    // none, the same shape a Blockly document's serializer produces. It rides
+    // the SAME PATCH as the files: the cloud writes both in one
+    // update_workflow_code call (one version snapshot). The caps of §3.7 are
+    // judged here with the server's own German sentences.
     const saveLanguage = codeLanguageRef.current;
     const saveFiles = codeFilesRef.current;
     const savingCode = isCodeLanguage(saveLanguage);
@@ -1062,7 +1156,8 @@ function WorkshopPage({ isActive }) {
     let json = null;
     const ws = workspaceRef.current;
     if (savingCode) {
-      json = {};
+      const entries = codeStoreRef.current ? codeStoreRef.current.getEntries() : [];
+      json = entries.length > 0 ? { [DESTINATIONS_SERIALIZER_NAME]: serializeState(entries) } : {};
     } else if (ws) {
       try {
         json = Blockly.serialization.workspaces.save(ws);
@@ -1096,11 +1191,12 @@ function WorkshopPage({ isActive }) {
       if (targetId) {
         if (savingCode) {
           // The PATCH echoes the document's OWN language (the cloud answers
-          // 409 on any other value; it is immutable after create) and never
-          // carries blockly_json beside the files.
+          // 409 on any other value; it is immutable after create) and carries
+          // the Ziele beside the files — never a Blockly key (041).
           await updateWorkflow(token, targetId, {
             code_language: saveLanguage,
             code_files: saveFiles,
+            blockly_json: documentJson,
             sim_scene: simSceneRef.current,
           });
         } else {
@@ -1210,6 +1306,7 @@ function WorkshopPage({ isActive }) {
   // It never addresses the real arm (no /workshop/replay, no /workshop/jog).
   const { startPreview } = useSimPreview({
     workspace,
+    destinationStore: activeStore,
     simScene,
     workflowId: selectedWorkflowId,
     accessToken,
@@ -1675,12 +1772,16 @@ function WorkshopPage({ isActive }) {
                         workflowId={selectedWorkflowId}
                         onRestore={(updated) => {
                           if (!updated) return;
-                          // A code version carries its files (migration 040);
-                          // a legacy version restores blocks only.
+                          // A code version carries its files (migration 040)
+                          // and its Ziele (041); a legacy version restores
+                          // blocks only.
                           if (isCodeLanguage(updated.code_language) && updated.code_files
                               && typeof updated.code_files === 'object') {
-                            setCodeLanguage(updated.code_language);
-                            setCodeFiles(updated.code_files);
+                            openCodeDocument({
+                              language: updated.code_language,
+                              files: updated.code_files,
+                              blocklyJson: updated.blockly_json,
+                            });
                             setEditorKey((k) => k + 1);
                             return;
                           }
@@ -1726,7 +1827,11 @@ function WorkshopPage({ isActive }) {
                           key={editorKey}
                           language={codeLanguage}
                           files={codeFiles}
-                          onFilesChange={setCodeFiles}
+                          onFilesChange={applyCodeFiles}
+                          assetDoc={assetDoc}
+                          provider={sammlungProvider}
+                          onCursorChange={handleCodeCursorChange}
+                          revealRequest={codeRevealRequest}
                         />
                       ) : (
                         <BlocklyWorkspace
@@ -1738,8 +1843,9 @@ function WorkshopPage({ isActive }) {
                           sammlungProvider={sammlungProvider}
                         />
                       )}
-                      {!isCodeWorkflow && drawer && drawer.open && (
+                      {drawer && drawer.open && (
                         <SammlungDrawer
+                          assetDoc={assetDoc}
                           workspace={workspace}
                           provider={sammlungProvider}
                           accessToken={accessToken}
@@ -1763,6 +1869,7 @@ function WorkshopPage({ isActive }) {
                       catalog={objectCatalog}
                       catalogDims={catalogDims}
                       workspace={workspace}
+                      codeLanguage={codeLanguage}
                       debugOpen={simDebugOpen}
                       onToggleDebug={() => setSimDebugOpen((v) => !v)}
                       showPath={showPath}
@@ -1854,6 +1961,7 @@ function WorkshopPage({ isActive }) {
                   simScene={simScene}
                   codeLanguage={codeLanguage}
                   codeFiles={codeFiles}
+                  destinationStore={activeStore}
                   debugOpen={simMode ? simDebugOpen : dockOpen.includes('debug')}
                   onToggleDebug={() => {
                     if (simMode) setSimDebugOpen((v) => !v);

@@ -40,7 +40,11 @@ vi.mock('../SimScene', () => ({
 vi.mock('../DebugPanel', () => ({
   __esModule: true,
   default: (props) => (
-    <div data-testid="debug-panel" data-has-ws={String(!!props.workspace)} />
+    <div
+      data-testid="debug-panel"
+      data-has-ws={String(!!props.workspace)}
+      data-language={props.codeLanguage === undefined ? 'undefined' : props.codeLanguage}
+    />
   ),
 }));
 
@@ -139,6 +143,18 @@ describe('SimStage', () => {
     expect(panel.getAttribute('data-has-ws')).toBe('true');
     await userEvent.click(screen.getByRole('button', { name: 'Debug schließen' }));
     expect(onToggleDebug).toHaveBeenCalledTimes(1);
+  });
+
+  test('the debug strip gets the open program’s language (a code program shows its own breakpoints)', () => {
+    // O9: the simulator's Debug panel was handed no language, so a Python
+    // program in the simulator showed the Blockly breakpoint list.
+    renderStage({ debugOpen: true, codeLanguage: 'python' });
+    expect(screen.getByTestId('debug-panel').getAttribute('data-language')).toBe('python');
+  });
+
+  test('a Blockly program passes the empty language', () => {
+    renderStage({ debugOpen: true, codeLanguage: '' });
+    expect(screen.getByTestId('debug-panel').getAttribute('data-language')).toBe('');
   });
 
   test('status line surfaces the MOST RECENT reroute log entry', () => {

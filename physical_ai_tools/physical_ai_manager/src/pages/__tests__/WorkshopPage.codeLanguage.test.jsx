@@ -14,10 +14,17 @@
 // `blockly_json`, whose SAVE allowlist would silently delete them), and its
 // PATCH echoes the document's own language — never a different one.
 //
+// Migration 041 (owner decisions O1/O2): a code program keeps its Ziele and
+// Positionen where a Blockly program keeps them — `blockly_json`'s
+// `edubotics-destinations` key, and nothing else there. So a code save now
+// sends `blockly_json` too: `{}` without Ziele, the serializer state with them.
+// Every path that opens a code document (hydrate, „Neu", a draft, a version
+// restore) loads them into ONE store per document (openCodeDocument).
+//
 // Same mocking idiom as WorkshopPage.savePayload.test.jsx.
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WorkshopPage from '../WorkshopPage';
 
@@ -41,41 +48,87 @@ vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
 }));
 
 // The code editor host: a stub that exposes what the page handed it and lets a
-// test edit the entry file through the page's own onChange.
+// test edit the entry file through the page's own onChange — and, through the
+// asset document the page hands it, rename a Ziel and save IN THE SAME TICK
+// (the drawer's rename does exactly that: rewrite the code, then await a save).
+const mockPage = vi.hoisted(() => ({ onSave: null, assetDoc: null }));
 vi.mock('../../components/Workshop/code/CodeWorkspace', () => ({
   __esModule: true,
-  default: function MockCodeWorkspace({ language, files, onFilesChange }) {
+  default: function MockCodeWorkspace({ language, files, onFilesChange, assetDoc }) {
+    mockPage.assetDoc = assetDoc;
     return (
       <div data-testid="code-workspace" data-language={language}>
         <pre data-testid="code-files">{JSON.stringify(files)}</pre>
+        <pre data-testid="code-ziele">
+          {JSON.stringify(assetDoc ? assetDoc.getStore().getEntries().map((e) => e.name) : null)}
+        </pre>
         <button
           type="button"
           data-testid="code-edit"
           onClick={() => onFilesChange({ ...files, 'main.py': 'import robot\nrobot.log("geändert")\n' })}
+        />
+        <button
+          type="button"
+          data-testid="code-rename-and-save"
+          onClick={() => {
+            const entry = assetDoc.getStore().getByName('Ablage');
+            assetDoc.renamePlace(entry.id, 'Tisch');
+            mockPage.onSave();
+          }}
         />
       </div>
     );
   },
 }));
 
-vi.mock('../../components/Workshop/RightDock', () => ({ __esModule: true, default: () => <div data-testid="right-dock" /> }));
-vi.mock('../../components/Workshop/SimStage', () => ({ __esModule: true, default: () => <div data-testid="sim-stage" /> }));
+// RightDock renders ONLY the camera tab, so the page's CameraFeedOverlay wiring
+// is reachable (the camera click-to-mark of a code program).
+vi.mock('../../components/Workshop/RightDock', () => ({
+  __esModule: true,
+  default: ({ tabs }) => (
+    <div data-testid="right-dock">
+      {(tabs || []).filter((t) => t.id === 'camera').map((t) => <div key={t.id}>{t.render()}</div>)}
+    </div>
+  ),
+}));
+const mockSimStage = vi.hoisted(() => ({ props: null }));
+vi.mock('../../components/Workshop/SimStage', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockSimStage.props = props;
+    return <div data-testid="sim-stage" data-language={props.codeLanguage} />;
+  },
+}));
 vi.mock('../../components/Workshop/CalibrationWizard', () => ({ __esModule: true, default: () => <div data-testid="calib-wizard" /> }));
 vi.mock('../../components/Workshop/LeaderToggle', () => ({ __esModule: true, default: () => <div data-testid="leader-toggle" /> }));
 vi.mock('../../components/Workshop/RunControls', () => ({
   __esModule: true,
-  default: ({ codeLanguage, codeFiles }) => (
-    <div data-testid="run-controls" data-language={codeLanguage || ''} data-files={codeFiles ? Object.keys(codeFiles).join(',') : ''} />
+  default: ({ codeLanguage, codeFiles, destinationStore }) => (
+    <div
+      data-testid="run-controls"
+      data-language={codeLanguage || ''}
+      data-files={codeFiles ? Object.keys(codeFiles).join(',') : ''}
+      data-ziele={destinationStore ? destinationStore.getEntries().map((e) => e.name).join(',') : '-'}
+    />
   ),
 }));
-vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
+const mockOverlay = vi.hoisted(() => ({ props: null }));
+vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockOverlay.props = props;
+    return <div data-testid="camera-feed" />;
+  },
+}));
 vi.mock('../../components/Workshop/TemplatePicker', () => ({ __esModule: true, default: () => <div data-testid="template-picker" /> }));
 vi.mock('../../components/Workshop/ToolbarButtons', () => ({
   __esModule: true,
-  default: function MockToolbarButtons({ onSave, leading }) {
+  default: function MockToolbarButtons({ onSave, leading, extra }) {
+    mockPage.onSave = onSave;
     return (
       <div>
         {leading}
+        {extra}
         <button type="button" data-testid="save-button" onClick={() => onSave && onSave()} />
       </div>
     );
@@ -84,7 +137,14 @@ vi.mock('../../components/Workshop/ToolbarButtons', () => ({
 vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, default: () => <div data-testid="debug-panel" /> }));
 vi.mock('../../components/Workshop/GalleryTab', () => ({ __esModule: true, default: () => <div data-testid="gallery-tab" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
-vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule: true, default: () => <div data-testid="version-history" /> }));
+const mockHistory = vi.hoisted(() => ({ onRestore: null }));
+vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({
+  __esModule: true,
+  default: ({ onRestore }) => {
+    mockHistory.onRestore = onRestore;
+    return <div data-testid="version-history" />;
+  },
+}));
 vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
 vi.mock('../../hooks/useRsBridgeStatus', () => ({
   __esModule: true,
@@ -231,10 +291,12 @@ describe('WorkshopPage — a code workflow', () => {
     const [token, id, body] = mockApi.updateWorkflow.mock.calls[0];
     expect(token).toBe('jwt');
     expect(id).toBe('wf-py');
-    // Two fields on the PATCH — and NO blockly_json beside them (the cloud
-    // refuses a PATCH that mixes the two, and the SAVE allowlist would have
-    // deleted the files had they ridden inside blockly_json).
-    expect(Object.keys(body).sort()).toEqual(['code_files', 'code_language', 'sim_scene']);
+    // The code fields on the PATCH — and, since migration 041, the document's
+    // Ziele beside them as blockly_json: `{}` for a program without any (never
+    // the files: the SAVE allowlist would have deleted them had they ridden
+    // inside blockly_json, and the cloud refuses any other key there).
+    expect(Object.keys(body).sort()).toEqual(['blockly_json', 'code_files', 'code_language', 'sim_scene']);
+    expect(body.blockly_json).toEqual({});
     expect(body.code_language).toBe('python');
     expect(body.code_files['main.py']).toContain('geändert');
     expect(body.code_files['hilfe.py']).toBe('x = 1\n');
@@ -387,5 +449,156 @@ describe('WorkshopPage — the code document is autosaved locally', () => {
       idb.del.mock.calls.some(([k]) => String(k).includes('code-autosave')),
     ).toBe(true));
     expect(lastCodeDraft()).toBeNull();
+  });
+});
+
+// Migration 041: a code program keeps its Ziele/Positionen.
+const ZIELE_STATE = {
+  version: 1,
+  entries: [
+    { id: 'd_0000aaaa', name: 'Ablage', kind: 'pin', x: 0.2, y: 0, z: 0, source: 'camera' },
+    { id: 'd_0000bbbb', name: 'Hoch', kind: 'pose', x: 0.1, y: 0.1, z: 0.15, source: 'capture' },
+  ],
+};
+const PYTHON_ROW_ZIELE = {
+  ...PYTHON_ROW,
+  blockly_json: { 'edubotics-destinations': ZIELE_STATE },
+  code_files: { 'main.py': 'import robot\nrobot.move_to("Ablage")\n' },
+};
+
+describe('WorkshopPage — a code program’s Ziele (migration 041)', () => {
+  test('hydrate loads them into the document’s store, the run gets them, the save sends them back', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW_ZIELE));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual(['Ablage', 'Hoch']);
+    expect(screen.getByTestId('run-controls').getAttribute('data-ziele')).toBe('Ablage,Hoch');
+
+    await userEvent.click(screen.getByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    const body = mockApi.updateWorkflow.mock.calls[0][2];
+    expect(Object.keys(body.blockly_json)).toEqual(['edubotics-destinations']);
+    expect(body.blockly_json['edubotics-destinations'].entries.map((e) => e.name)).toEqual(['Ablage', 'Hoch']);
+  });
+
+  test('a rename that rewrites the code and saves in the SAME tick saves the rewritten code', async () => {
+    // applyCodeFiles sets the ref runSave reads synchronously — a ref updated
+    // in an effect would still hold the old text when the save starts.
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW_ZIELE));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByTestId('code-rename-and-save'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    const body = mockApi.updateWorkflow.mock.calls[0][2];
+    expect(body.code_files['main.py']).toBe('import robot\nrobot.move_to("Tisch")\n');
+    expect(body.blockly_json['edubotics-destinations'].entries.map((e) => e.name)).toEqual(['Tisch', 'Hoch']);
+  });
+
+  test('„Neu → Python" starts with an EMPTY store, never the previous program’s', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW_ZIELE));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByRole('button', { name: /^Neu/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Python/ }));
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual([]));
+  });
+
+  test('a version restore of a code program brings its Ziele back', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual([]);
+    act(() => { mockHistory.onRestore(PYTHON_ROW_ZIELE); });
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual(['Ablage', 'Hoch']));
+    expect(JSON.parse(screen.getByTestId('code-files').textContent)).toEqual(PYTHON_ROW_ZIELE.code_files);
+  });
+
+  test('the local draft carries the Ziele and a restored draft brings them back', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW_ZIELE));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    const view = render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByTestId('code-edit'));
+    await waitFor(() => expect(lastCodeDraft()).not.toBeNull(), { timeout: 4000 });
+    expect(lastCodeDraft().state.destinations.entries.map((e) => e.name)).toEqual(['Ablage', 'Hoch']);
+    view.unmount();
+
+    idb.get.mockImplementation(async (key) => (String(key).includes('code-autosave')
+      ? { state: { language: 'python', files: { 'main.py': 'import robot\n' }, destinations: ZIELE_STATE }, ts: 5 }
+      : undefined));
+    mockState = baseState();
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual(['Ablage', 'Hoch']));
+  });
+
+  test('an older draft without Ziele still restores', async () => {
+    idb.get.mockImplementation(async (key) => (String(key).includes('code-autosave')
+      ? { state: { language: 'python', files: { 'main.py': 'import robot\n' } }, ts: 5 }
+      : undefined));
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual([]);
+  });
+});
+
+describe('WorkshopPage — the simulator of a code program (O9)', () => {
+  test('SimStage receives the open program’s language for its Debug panel', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    const stage = await screen.findByTestId('sim-stage');
+    expect(stage.getAttribute('data-language')).toBe('python');
+  });
+});
+
+describe('WorkshopPage — creating Ziele in a code program (the three silent no-ops)', () => {
+  const PY_PINNED = {
+    ...PYTHON_ROW_ZIELE,
+    code_files: { 'main.py': 'import robot\nrobot.pin("Ziel 1", 0.1, 0.0, 0.0)\n' },
+  };
+
+  test('a camera click makes a new Ziel in the document’s store, named past the code’s own pins', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PY_PINNED));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await waitFor(() => expect(mockOverlay.props).not.toBeNull());
+    const resolved = mockOverlay.props.resolveMarkLabel();
+    expect(resolved).toEqual({ label: 'Ziel 2', target: 'store' });
+    let marked;
+    act(() => {
+      marked = mockOverlay.props.onMark({ ...resolved, world_x: 0.15, world_y: 0.02, world_z: 0.01 });
+    });
+    expect(marked).toMatchObject({ name: 'Ziel 2' });
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent))
+      .toEqual(['Ablage', 'Hoch', 'Ziel 2']));
+    expect(screen.getByTestId('run-controls').getAttribute('data-ziele')).toBe('Ablage,Hoch,Ziel 2');
+    // …and the overlay's inline rename renames it in that same store.
+    act(() => { mockOverlay.props.onRenameMark(marked.entryId, 'Tischkante'); });
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent))
+      .toEqual(['Ablage', 'Hoch', 'Tischkante']));
+  });
+
+  test('„Ziel setzen" on the sim table adds a pin at z 0 to the code document', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PY_PINNED));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    act(() => { mockSimStage.props.onCreateDestination({ x: 0.2, y: -0.1 }); });
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent))
+      .toEqual(['Ablage', 'Hoch', 'Ziel 2']));
+    const pin = mockPage.assetDoc.getStore().getByName('Ziel 2');
+    expect(pin).toMatchObject({ kind: 'pin', source: 'sim', z: 0 });
+    // The sim stage's markers are the code document's entries.
+    expect(mockSimStage.props.markers.map((m) => m.label)).toEqual(expect.arrayContaining(['Ablage', 'Hoch', 'Ziel 2']));
   });
 });

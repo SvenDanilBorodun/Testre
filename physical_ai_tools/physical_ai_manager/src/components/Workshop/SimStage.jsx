@@ -60,6 +60,10 @@ function SimStage({
   catalog,
   catalogDims,
   workspace,
+  // The open program's language ('' for Blockly): the Debug panel shows a
+  // code program's own breakpoints (Python) or says Java has none — never the
+  // Blockly list over a code program (O9).
+  codeLanguage = '',
   debugOpen,
   onToggleDebug,
   showPath,
@@ -182,7 +186,7 @@ function SimStage({
             </button>
           </div>
           <div className="flex-1 min-h-0 overflow-auto p-2">
-            <DebugPanel workspace={workspace} />
+            <DebugPanel workspace={workspace} codeLanguage={codeLanguage} />
           </div>
         </section>
       )}

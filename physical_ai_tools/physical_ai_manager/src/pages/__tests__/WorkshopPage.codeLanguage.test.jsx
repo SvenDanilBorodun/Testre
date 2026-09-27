@@ -52,7 +52,7 @@ vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
 // asset document the page hands it, rename a Ziel and save IN THE SAME TICK
 // (the drawer's rename does exactly that: rewrite the code, then await a save).
 const mockPage = vi.hoisted(() => ({
-  onSave: null, assetDoc: null, host: null,
+  onSave: null, assetDoc: null, host: null, teachHost: null,
 }));
 vi.mock('../../components/Workshop/code/CodeWorkspace', () => ({
   __esModule: true,
@@ -151,7 +151,13 @@ vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({
     return <div data-testid="version-history" />;
   },
 }));
-vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockPage.teachHost = props;
+    return <div data-testid="teach-host" />;
+  },
+}));
 vi.mock('../../hooks/useRsBridgeStatus', () => ({
   __esModule: true,
   default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false }),
@@ -623,5 +629,18 @@ describe('WorkshopPage — the code editor host gets the Sammlung (O4–O7)', ()
     const files = JSON.parse(screen.getByTestId('code-files').textContent);
     expect(files['hilfe.py']).toBe('x = 1\nrobot.replay("Winken")\n');
     expect(mockPage.host.revealRequest).toMatchObject({ file: 'hilfe.py', line: 2 });
+  });
+});
+
+describe('WorkshopPage — Vormachen for a code program (O4)', () => {
+  test('TeachHost gets the code document while its editor is on screen, and none in the gallery', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    expect(mockPage.teachHost.assetDoc).toBe(mockPage.assetDoc);
+    expect(mockPage.teachHost.assetDoc.kind).toBe('code');
+    await userEvent.click(screen.getByRole('button', { name: 'Galerie' }));
+    expect(mockPage.teachHost.assetDoc).toBeNull();
   });
 });

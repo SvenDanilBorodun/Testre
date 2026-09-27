@@ -114,6 +114,9 @@ export const CODE_DE = Object.freeze({
   INSERTED_AT: 'In {0} ab Zeile {1} eingefügt.',
   SAMMLUNG_OPEN_TAB: '„{0}“ in der Sammlung öffnen',
   SAMMLUNG_NEW_MENU: 'Neu in der Sammlung',
+  TEACH_INSERT_LINES: 'Als Programm einfügen ({0} Zeilen)',
+  TEACH_INSERT_LINE_ONE: 'Als Programm einfügen (1 Zeile)',
+  TEACH_INSERT_FAILED: 'Die Zeilen konnten nicht eingefügt werden.',
 
   SUBMIT: 'Abgeben',
   SUBMIT_TITLE: 'Diesen Stand des Programms bei der Lehrkraft abgeben',

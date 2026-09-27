@@ -796,6 +796,12 @@ function WorkshopPage({ isActive }) {
   }, [isCodeWorkflow, codeLanguage, codeDestinationStore, workspace, applyCodeFiles]);
   const assetDocRef = useRef(assetDoc);
   assetDocRef.current = assetDoc;
+  // Vormachen teaches into the document only while its editor is on screen —
+  // a Blockly workspace exists only then; a code document outlives its
+  // editor (gallery, calibration), so it is handed over only while
+  // CodeWorkspace is mounted.
+  const teachAssetDoc = assetDoc && (!isCodeWorkflow || (showEditor && view !== 'gallery' && !hydrating))
+    ? assetDoc : null;
   const handleCodeCursorChange = useCallback((at) => { codeCursorRef.current = at; }, []);
 
   // Wire the workspace accessor so a late object-catalog refresh can reach the
@@ -1710,6 +1716,7 @@ function WorkshopPage({ isActive }) {
       <TeachHost
         isActive={isActive}
         workspace={workspace}
+        assetDoc={teachAssetDoc}
         accessToken={accessToken}
         workflowId={selectedWorkflowId}
         robotType={robotType}

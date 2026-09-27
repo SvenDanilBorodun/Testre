@@ -1,13 +1,26 @@
 -- Behavioural assertions for migration 041 (a code program keeps its Ziele and
 -- Positionen in blockly_json['edubotics-destinations']), run BY HAND against a
--- fresh LOCAL stack — never CI, never the linked project (it seeds rows):
---   supabase start && supabase db reset --local   (scratch project copy)
+-- fresh LOCAL stack — never CI, never the linked project (it seeds rows).
+--
+-- The squashed baseline does NOT replay on a fresh database as shipped
+-- (docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from scratch"): run
+-- it in a SCRATCH copy of supabase/ whose baseline has its one
+-- `RENAME COLUMN runpod_job_id` line guarded exactly as
+-- 040_code_programs_assertions.sql's header shows, with every migration
+-- through 041, then
+--   supabase start   (in the scratch copy; it applies the migrations)
 --   psql <local db url> < supabase/tests/041_code_destinations_assertions.sql
 -- Expected: 21 PASS, 0 FAIL/ERROR (T1..T12, some with a/b/c/d halves).
 --
--- NOTE: 040_code_programs_assertions.sql's T8 names the 4-argument
--- update_workflow_code(uuid,uuid,jsonb,text), which 041 drops; after 041 that
--- one line ERRORs by design (T8 below is its successor).
+-- NOTE: 040_code_programs_assertions.sql checks a database AT 040. Run after
+-- 041 it prints 14 PASS and two expected failures, both by design:
+--   T4b FAILs — its simulated legacy version carries a blockly_json that is
+--       not Ziele ({"legacy": true}), and restoring it onto a code row now
+--       violates workflows_code_blockly_json_destinations_only (the CHECK
+--       answers first, with an ERROR line, then the FAIL line);
+--   T8 ERRORs — it names the 4-argument
+--       update_workflow_code(uuid,uuid,jsonb,text), which 041 drops (T8
+--       below is its successor).
 \set ON_ERROR_STOP off
 \pset pager off
 

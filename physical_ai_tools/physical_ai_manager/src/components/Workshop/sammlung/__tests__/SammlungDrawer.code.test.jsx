@@ -60,7 +60,7 @@ const ITEMS = [
   { id: 't1', name: 'Winken', point_count: 50, duration_s: 2, fps: 25, robot_profile: 'omx_f', created_at: '2026-09-27T10:00:00Z' },
 ];
 
-function setup({ drawer = {}, capabilities = {} } = {}) {
+function setup({ drawer = {}, capabilities = {}, adjustDoc = null } = {}) {
   let files = { 'main.py': MAIN };
   const store = createDetachedDestinationStore([]);
   store.add({ name: 'Ablage', kind: 'pin', source: 'camera', x: 0.2, y: 0, z: 0 });
@@ -74,6 +74,7 @@ function setup({ drawer = {}, capabilities = {} } = {}) {
     requestReveal: (at) => reveals.push(at),
     getCursor: () => null,
   });
+  if (adjustDoc) adjustDoc(assetDoc);
   const provider = createSammlungProvider({
     capabilities: {
       hardware: true, drawer: true, teach: true, pinCamera: true, pinSim: true, ...capabilities,
@@ -112,15 +113,32 @@ describe('SammlungDrawer over a Python program', () => {
     expect(screen.getByRole('dialog', { name: DE.SAMMLUNG_TITLE }).style.left).toBe('176px');
   });
 
-  it('„Einfügen" writes the call into the program and says where', () => {
+  it('„Einfügen" writes the call into the program and says where', async () => {
     const { files, reveals } = setup({ drawer: { tab: 'positionen' } });
     fireEvent.click(screen.getByRole('button', { name: `${CODE_DE.SAMMLUNG_INSERT}: Hoch` }));
-    expect(files()['main.py'].split('\n')[3]).toBe('robot.move_to("Hoch")');
+    // The insertion module loads on demand (review round 2, ni4).
+    await waitFor(() => expect(files()['main.py'].split('\n')[3]).toBe('robot.move_to("Hoch")'));
     expect(reveals).toEqual([{ file: 'main.py', line: 4 }]);
     expect(mockToast.success).toHaveBeenCalledWith(formatCode(CODE_DE.INSERTED_AT, 'main.py', 4));
   });
 
-  it('„Einfügen" into a Java program without main says so in German and writes nothing', () => {
+  it('„Einfügen" whose insertion module failed to load says so in German and writes nothing (ni4)', async () => {
+    const { files } = setup({
+      drawer: { tab: 'positionen' },
+      adjustDoc: (doc) => {
+        // eslint-disable-next-line no-param-reassign
+        doc.insertSnippet = async () => { throw new Error('chunk'); };
+      },
+    });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    fireEvent.click(screen.getByRole('button', { name: `${CODE_DE.SAMMLUNG_INSERT}: Hoch` }));
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith(CODE_DE.SAMMLUNG_INSERT_FAILED));
+    expect(files()['main.py']).toBe(MAIN);
+    expect(mockToast.success).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('„Einfügen" into a Java program without main says so in German and writes nothing', async () => {
     const src = 'public class Main {\n}\n';
     let files = { 'Main.java': src };
     const store = createDetachedDestinationStore([]);
@@ -139,7 +157,7 @@ describe('SammlungDrawer over a Python program', () => {
       </Provider>,
     );
     fireEvent.click(screen.getByRole('button', { name: `${CODE_DE.SAMMLUNG_INSERT}: Hoch` }));
-    expect(mockToast.error).toHaveBeenCalledWith(CODE_DE.NO_MAIN_HINT);
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith(CODE_DE.NO_MAIN_HINT));
     expect(mockToast.success).not.toHaveBeenCalled();
     expect(files['Main.java']).toBe(src);
   });

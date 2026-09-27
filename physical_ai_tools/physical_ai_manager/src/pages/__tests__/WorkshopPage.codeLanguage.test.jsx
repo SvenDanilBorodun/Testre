@@ -625,7 +625,8 @@ describe('WorkshopPage — the code editor host gets the Sammlung (O4–O7)', ()
     expect(typeof mockPage.host.provider.dispatchAction).toBe('function');
 
     act(() => { mockPage.host.onCursorChange({ file: 'hilfe.py', line: 1 }); });
-    act(() => { mockPage.assetDoc.insertSnippet({ kind: 'recording', name: 'Winken' }); });
+    // The insertion module loads on demand (review round 2, ni4).
+    await act(async () => { await mockPage.assetDoc.insertSnippet({ kind: 'recording', name: 'Winken' }); });
     const files = JSON.parse(screen.getByTestId('code-files').textContent);
     expect(files['hilfe.py']).toBe('x = 1\nrobot.replay("Winken")\n');
     expect(mockPage.host.revealRequest).toMatchObject({ file: 'hilfe.py', line: 2 });

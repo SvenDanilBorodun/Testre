@@ -232,13 +232,13 @@ describe.each([
     expect(fn.mock.calls.length).toBe(calls);
   });
 
-  it('inserts a Vormachen round as program steps', () => {
+  it('inserts a Vormachen round as program steps', async () => {
     const { doc, programText } = make({ empty: true });
     const items = [
       { kind: 'recording', name: 'Winken', status: 'saved' },
       { kind: 'pin', name: 'Ablage', entryId: 'x' },
     ];
-    const result = doc.insertProgram(items, { placeNameOf: (it) => it.name, gripperStateOf: () => null });
+    const result = await doc.insertProgram(items, { placeNameOf: (it) => it.name, gripperStateOf: () => null });
     expect(result.count).toBe(2);
     expect(programText()).toMatch(/Winken/);
     expect(programText()).toMatch(/Ablage/);
@@ -261,9 +261,9 @@ describe('the code document alone', () => {
     expect(reveals).toEqual([{ file: 'main.py', line: 3 }]);
   });
 
-  it('„Einfügen" writes one line at the end of main when there is no cursor', () => {
+  it('„Einfügen" writes one line at the end of main when there is no cursor', async () => {
     const { doc, programText, reveals } = codeDoc();
-    const result = doc.insertSnippet({ kind: 'pose', name: 'Hoch' });
+    const result = await doc.insertSnippet({ kind: 'pose', name: 'Hoch' });
     expect(result).toMatchObject({ count: 1, file: 'main.py', firstLine: 7 });
     expect(programText().split('\n')[6]).toBe('robot.move_to("Hoch")');
     expect(reveals[reveals.length - 1]).toEqual({ file: 'main.py', line: 7 });
@@ -299,16 +299,16 @@ describe('the code document alone — where insertions go (review M2, R-O2)', ()
     return { doc, reveals, files: () => current };
   };
 
-  it('„Einfügen" under a 2-space block uses 2 spaces', () => {
+  it('„Einfügen" under a 2-space block uses 2 spaces', async () => {
     const { doc, files } = make({ 'main.py': 'import robot\nfor i in range(3):\n  robot.home()\n' },
       'python', { file: 'main.py', line: 2 });
-    doc.insertSnippet({ kind: 'recording', name: 'Winken' });
+    await doc.insertSnippet({ kind: 'recording', name: 'Winken' });
     expect(files()['main.py']).toBe('import robot\nfor i in range(3):\n  robot.replay("Winken")\n  robot.home()\n');
   });
 
-  it('„Als Programm einfügen" under a tab-indented block uses tabs', () => {
+  it('„Als Programm einfügen" under a tab-indented block uses tabs', async () => {
     const { doc, files } = make({ 'main.py': 'while x:\n\tpass\n' }, 'python', { file: 'main.py', line: 1 });
-    const r = doc.insertProgram(
+    const r = await doc.insertProgram(
       [{ kind: 'pin', name: 'Ablage', entryId: 'e' }],
       { placeNameOf: (it) => it.name, gripperStateOf: () => null },
     );
@@ -316,29 +316,29 @@ describe('the code document alone — where insertions go (review M2, R-O2)', ()
     expect(files()['main.py']).toBe('while x:\n\trobot.move_to("Ablage")\n\tpass\n');
   });
 
-  it('without a cursor: before a trailing endless loop', () => {
+  it('without a cursor: before a trailing endless loop', async () => {
     const { doc, files } = make({ 'main.py': 'import robot\nwhile True:\n    robot.beep()\n' });
-    const r = doc.insertSnippet({ kind: 'pose', name: 'Hoch' });
+    const r = await doc.insertSnippet({ kind: 'pose', name: 'Hoch' });
     expect(r).toMatchObject({ count: 1, file: 'main.py', firstLine: 2 });
     expect(files()['main.py']).toBe('import robot\nrobot.move_to("Hoch")\nwhile True:\n    robot.beep()\n');
   });
 
-  it('Java without a findable main: nothing written, a German hint instead', () => {
+  it('Java without a findable main: nothing written, a German hint instead', async () => {
     const src = 'public class Main {\n    static void hilfe() {\n    }\n}\n';
     const { doc, files, reveals } = make({ 'Main.java': src }, 'java');
-    const r = doc.insertSnippet({ kind: 'pose', name: 'Hoch' });
+    const r = await doc.insertSnippet({ kind: 'pose', name: 'Hoch' });
     expect(r).toEqual({ count: 0, error: CODE_DE.NO_MAIN_HINT });
     expect(CODE_DE.NO_MAIN_HINT).toBe('Keine main-Methode gefunden – klicke in deinen Code, wo es eingefügt werden soll.');
     expect(files()['Main.java']).toBe(src);
     expect(reveals).toEqual([]);
-    expect(doc.insertProgram([{ kind: 'pin', name: 'A', entryId: 'e' }],
+    expect(await doc.insertProgram([{ kind: 'pin', name: 'A', entryId: 'e' }],
       { placeNameOf: (it) => it.name, gripperStateOf: () => null })).toEqual({ count: 0, error: CODE_DE.NO_MAIN_HINT });
   });
 
-  it('Java: a one-line main is opened up, inside the class', () => {
+  it('Java: a one-line main is opened up, inside the class', async () => {
     const src = 'public class Main {\n    public static void main(String[] a) { Robot.home(); }\n}\n';
     const { doc, files, reveals } = make({ 'Main.java': src }, 'java');
-    const r = doc.insertSnippet({ kind: 'recording', name: 'Winken' });
+    const r = await doc.insertSnippet({ kind: 'recording', name: 'Winken' });
     expect(r).toMatchObject({ count: 1, file: 'Main.java', firstLine: 3, lastLine: 3 });
     expect(files()['Main.java']).toBe(
       'public class Main {\n    public static void main(String[] a) { Robot.home();\n        Robot.replay("Winken");\n    }\n}\n',

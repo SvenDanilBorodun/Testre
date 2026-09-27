@@ -15,7 +15,7 @@
 // The session hook is the controllable one of TeachOverlay.test.jsx.
 
 import React from 'react';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import toast from 'react-hot-toast';
 import TeachOverlay from '../TeachOverlay';
 import { DE } from '../../blocks/messages_de';
@@ -198,12 +198,14 @@ describe('TeachOverlay over a Python program', () => {
     const button = screen.getByRole('button', { name: formatCode(CODE_DE.TEACH_INSERT_LINES, 2) });
     expect(button).toBeEnabled();
     fireEvent.click(button);
-    expect(main()).toBe('import robot\nrobot.home()\nrobot.replay("Bewegung 1")\nrobot.move_to("Position 1")\n');
+    // The insertion module loads on demand (review round 2, ni4).
+    await waitFor(() => expect(main())
+      .toBe('import robot\nrobot.home()\nrobot.replay("Bewegung 1")\nrobot.move_to("Position 1")\n'));
     expect(toast.success).toHaveBeenCalledWith(formatCode(CODE_DE.INSERTED_AT, 'main.py', 3));
     expect(reveals[reveals.length - 1]).toEqual({ file: 'main.py', line: 4 });
   });
 
-  test('a Java program without main gets the German hint, and nothing is written', () => {
+  test('a Java program without main gets the German hint, and nothing is written', async () => {
     let files = { 'Main.java': 'public class Main {\n}\n' };
     const doc = createCodeAssetDocument({
       language: 'java',
@@ -216,7 +218,7 @@ describe('TeachOverlay over a Python program', () => {
     render(<TeachOverlay {...props(doc)} />);
     act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
     fireEvent.click(screen.getByRole('button', { name: CODE_DE.TEACH_INSERT_LINE_ONE }));
-    expect(toast.error).toHaveBeenCalledWith(CODE_DE.NO_MAIN_HINT);
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(CODE_DE.NO_MAIN_HINT));
     expect(toast.success).not.toHaveBeenCalled();
     expect(files['Main.java']).toBe('public class Main {\n}\n');
   });

@@ -42,6 +42,10 @@
  *   canEditVariables, renameVariable(id, name), deleteVariable(id)
  *   canInsertSnippets, insertSnippet(asset)
  *   insertProgram(items, opts)   Vormachen's „Als Programm einfügen"
+ *                                — both answer `{count, error?, file?,
+ *                                firstLine?, lastLine?}` or a Promise of it
+ *                                (a code document loads its insertion module
+ *                                on demand); callers `await` either
  *   anchorLeft()                 the drawer's left edge in px
  *   closeFlyout(), hideChaff()
  */

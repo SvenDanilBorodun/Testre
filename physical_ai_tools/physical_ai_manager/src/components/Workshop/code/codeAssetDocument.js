@@ -41,8 +41,24 @@ import {
   variableOccurrences,
   variableOccurrencesAll,
 } from './codeAssetUsage';
-import { insertAtTarget, insertionTarget, snippetLines, stepsToCode } from './codeInsert';
 import { CODE_DE } from './codeMessagesDe';
+
+// codeInsert.js (the insertion's structure analysis, with a Java statement
+// parser) is not in the entry bundle (review round 2, ni4): it is loaded the
+// first time a code document is created and awaited by an insertion. A load
+// that failed (offline, a chunk replaced by a deploy) is not cached, so the
+// next insertion asks again.
+let codeInsertModule = null;
+/** The insertion module, loaded once. */
+export function loadCodeInsert() {
+  if (!codeInsertModule) {
+    codeInsertModule = import('./codeInsert').catch((err) => {
+      codeInsertModule = null;
+      throw err;
+    });
+  }
+  return codeInsertModule;
+}
 
 // CodeWorkspace's file sidebar (`w-44`, 11rem at the 16 px root): the drawer
 // opens right beside it, over the editor.
@@ -95,6 +111,8 @@ function toUsageRows(files, rows) {
 export function createCodeAssetDocument({
   language, store, getFiles, applyFiles, requestReveal, getCursor, setCursor,
 }) {
+  // Loaded now, so the first „Einfügen" waits for nothing.
+  loadCodeInsert().catch(() => {});
   const files = () => {
     const f = typeof getFiles === 'function' ? getFiles() : null;
     return f && typeof f === 'object' && !Array.isArray(f) ? f : {};
@@ -126,7 +144,11 @@ export function createCodeAssetDocument({
     }));
   };
 
-  const insertLines = (lines) => {
+  // Async: the insertion module may still be loading. The files and the
+  // cursor are read AFTER it arrived, so the lines go into the latest text.
+  const insertLines = async (lineOf) => {
+    const { insertAtTarget, insertionTarget, ...spell } = await loadCodeInsert();
+    const lines = lineOf(spell);
     if (!Array.isArray(lines) || lines.length === 0) return { count: 0 };
     const project = files();
     const cursor = typeof getCursor === 'function' ? getCursor() : null;
@@ -225,8 +247,10 @@ export function createCodeAssetDocument({
     renameVariable: () => ({ ok: false }),
     deleteVariable: () => ({ ok: false }),
     canInsertSnippets: true,
-    insertSnippet: (asset) => insertLines(snippetLines(asset, language)),
-    insertProgram: (items, opts) => insertLines(stepsToCode(buildProgramSteps(items, opts), language)),
+    insertSnippet: (asset) => insertLines(({ snippetLines }) => snippetLines(asset, language)),
+    insertProgram: (items, opts) => insertLines(
+      ({ stepsToCode }) => stepsToCode(buildProgramSteps(items, opts), language),
+    ),
     anchorLeft: () => CODE_SIDEBAR_WIDTH_PX,
     closeFlyout: () => {},
     hideChaff: () => {},

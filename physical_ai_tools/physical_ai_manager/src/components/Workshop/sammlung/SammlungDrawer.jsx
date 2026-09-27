@@ -42,7 +42,7 @@ import {
 } from '../../../features/workshop/studioAssetsSlice';
 import { DE, formatDe } from '../blocks/messages_de';
 import { CODE_DE, formatCode } from '../code/codeMessagesDe';
-import { SNIPPET_MIME } from '../code/codeInsert';
+import { SNIPPET_MIME } from '../code/snippetMime';
 import { newActionsFor } from './newActions';
 import { EMPTY_SAMMLUNG_PROVIDER } from './provider';
 import { assetDocumentOf } from './assetDocument';
@@ -146,8 +146,19 @@ export default function SammlungDrawer({
   const newActions = isCode ? newActionsFor(capabilities, tab) : [];
   const snippetable = (card) => canInsert && SNIPPET_KINDS.has(card.assetKind);
 
-  const insert = (card) => {
-    const result = assetDoc.insertSnippet({ kind: card.assetKind, name: card.assetName });
+  // A code document's insertion may load its module first (async); a
+  // Blockly document answers at once — `await` takes both.
+  const insert = async (card) => {
+    let result;
+    try {
+      result = await assetDoc.insertSnippet({ kind: card.assetKind, name: card.assetName });
+    } catch (err) {
+      // The insertion module loads on demand (review round 2, ni4); a failed
+      // load wrote nothing.
+      console.error('insertSnippet failed:', err);
+      toast.error(CODE_DE.SAMMLUNG_INSERT_FAILED);
+      return;
+    }
     if (result && result.error) {
       toast.error(result.error);
       return;

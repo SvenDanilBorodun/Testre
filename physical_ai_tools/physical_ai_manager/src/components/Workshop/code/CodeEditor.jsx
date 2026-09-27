@@ -61,8 +61,9 @@ import {
   assetOptions,
 } from './codeAssetCompletion';
 import {
-  SNIPPET_MIME, fileIndentUnit, insertionChange, insertionTargetAt, minimalChange, snippetLines,
+  fileIndentUnit, insertionChange, insertionTargetAt, minimalChange, snippetLines,
 } from './codeInsert';
+import { SNIPPET_MIME } from './snippetMime';
 
 const LANGUAGE_SUPPORT = { python, java };
 

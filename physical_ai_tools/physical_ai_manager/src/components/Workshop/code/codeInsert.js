@@ -45,17 +45,16 @@
 //
 // PURE — strings in, strings out. CodeEditor (a drop) and the code asset
 // adapter (a row's „Einfügen", Vormachen's „Als Programm einfügen") call it.
+// It is NOT in the entry bundle: the lazy editor imports it, and the asset
+// adapter loads it on demand (codeAssetDocument.loadCodeInsert — review
+// round 2, ni4).
 
 import robotApi from './robot_api.json';
 import { ENTRY_FILE } from './codeProject';
 import { codeOnlyText, tokenizeCode } from './codeAssetUsage';
 import { CODE_DE } from './codeMessagesDe';
 
-/**
- * The drag-and-drop type of a Sammlung row dropped into the code editor: the
- * drawer sets it, CodeEditor reads it. The payload is `{kind, name}` JSON.
- */
-export const SNIPPET_MIME = 'application/x-edubotics-snippet';
+export { SNIPPET_MIME } from './snippetMime';
 
 const METHODS = new Map((robotApi.methods || []).map((m) => [m.name, m]));
 // An asset name that can sit between double quotes in both languages as is.

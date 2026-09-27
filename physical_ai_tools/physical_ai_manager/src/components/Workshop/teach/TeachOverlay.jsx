@@ -727,11 +727,13 @@ function TeachOverlay({
   const insertLabel = isCode
     ? (insertCount === 1 ? CODE_DE.TEACH_INSERT_LINE_ONE : formatCode(CODE_DE.TEACH_INSERT_LINES, insertCount))
     : (insertCount === 1 ? DE.TEACH_INSERT_ONE : formatDe(DE.TEACH_INSERT, insertCount));
-  const handleInsert = () => {
+  // A code document's insertion may load its module first (async); a
+  // Blockly document answers at once — `await` takes both.
+  const handleInsert = async () => {
     const target = latest.current.doc;
     let result;
     try {
-      result = target.insertProgram(itemsRef.current, { placeNameOf, gripperStateOf });
+      result = await target.insertProgram(itemsRef.current, { placeNameOf, gripperStateOf });
     } catch (err) {
       console.error('insertProgram failed:', err);
       toast.error(isCode ? CODE_DE.TEACH_INSERT_FAILED : INSERT_FAILED_DE);

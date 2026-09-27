@@ -13,10 +13,18 @@ Installed by ``student_main.py`` into the student's own process before
   callback has already DISABLEd never fires again (P13: 0 hits without it,
   millions with it), so a breakpoint added while the loop runs would be
   silently dead.
-* :func:`start_line_sampler` — the „where am I" indicator. A daemon thread
-  reads the main thread's frame every ``interval_s`` and reports the
-  innermost PROJECT line as ``__line`` when it changed and the connection
-  lock is free. Never a per-line event (B13).
+* :func:`start_line_sampler` — the „where am I" indicator and the live
+  variable values. A daemon thread reads the main thread's frame every
+  ``interval_s`` and, when the connection lock is free, reports the innermost
+  PROJECT line as ``__line`` when it changed and the program's variables as
+  ``__vars`` when their snapshot changed (:func:`snapshot_vars`: the current
+  function's locals, then the module globals; at most 30). Never a per-line
+  event (B13). Reading ``f_locals`` of the main thread's frame from this
+  thread was MEASURED safe on the runner's CPython 3.12.3 (owner decision O3,
+  2026-09-27: millions of cross-thread reads against a mutating main thread
+  with ``sys.monitoring`` active — results exact, no exception, no refcount
+  creep). A frame the sampler just read keeps its locals' objects alive until
+  the next sample (≤ ``interval_s``); nothing else about the program changes.
 
 Only the main thread is debugged; a line event from any other thread (the
 sampler, a student's own thread) is DISABLEd on sight. Neither mechanism is
@@ -26,6 +34,7 @@ process (R-3); the server-side budgets and validation are the boundary.
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import os
@@ -47,6 +56,9 @@ CONTAINER_MAX_DEPTH = 3
 _DEFAULT_MAX_LOCALS = 30
 
 SAMPLER_INTERVAL_S = 0.5
+# A `__vars` frame is trimmed below this many bytes of JSON (the DATA frame
+# bound is 64 KiB; the envelope and the position fit in the rest).
+VARS_FRAME_BUDGET_BYTES = 48 * 1024
 
 
 class StopRequested(BaseException):
@@ -66,12 +78,14 @@ def _jsonable(value, depth: int = 0):
     if isinstance(value, str):
         return value[:VALUE_MAX_CHARS]
     if depth < CONTAINER_MAX_DEPTH:
+        # islice inside one list() call: O(CONTAINER_MAX_ITEMS), not O(len),
+        # and one C-level pass (the sampler reads while the program runs).
         if isinstance(value, (list, tuple, set, frozenset)):
-            items = list(value)[:CONTAINER_MAX_ITEMS]
+            items = list(itertools.islice(value, CONTAINER_MAX_ITEMS))
             return [_jsonable(v, depth + 1) for v in items]
         if isinstance(value, dict):
             out = {}
-            for k, v in list(value.items())[:CONTAINER_MAX_ITEMS]:
+            for k, v in list(itertools.islice(value.items(), CONTAINER_MAX_ITEMS)):
                 out[str(k)[:VALUE_MAX_CHARS]] = _jsonable(v, depth + 1)
             return out
     try:
@@ -86,24 +100,79 @@ _SKIPPED_VALUE_TYPES = (
 )
 
 
+def _render_value(value):
+    """One value, bounded: the structured rendering when its JSON fits
+    ``VALUE_MAX_CHARS``, else the (cut) repr — never an exception."""
+    try:
+        rendered = _jsonable(value)
+        if len(json.dumps(rendered, ensure_ascii=False)) <= VALUE_MAX_CHARS:
+            return rendered
+    except Exception:  # noqa: BLE001 — a hostile __str__ on a key, a mutation mid-walk
+        pass
+    try:
+        return repr(value)[:VALUE_MAX_CHARS]
+    except Exception:  # noqa: BLE001 — a hostile __repr__ must not break a pause
+        return '<?>'
+
+
+def _add_mapping(out: dict, items, max_locals: int) -> None:
+    """Copy showable ``(name, value)`` pairs into ``out`` until it holds
+    ``max_locals``; a name already in ``out`` keeps its first value."""
+    for name, value in items:
+        if len(out) >= max_locals:
+            return
+        if not isinstance(name, str) or name.startswith('__') or name in out:
+            continue
+        if isinstance(value, _SKIPPED_VALUE_TYPES):
+            continue
+        out[name] = _render_value(value)
+
+
 def snapshot_locals(frame, max_locals: int = _DEFAULT_MAX_LOCALS) -> dict:
     """At most ``max_locals`` of the frame's locals, dunders and code objects
     skipped, every value bounded so the whole frame fits the DATA bound."""
     out: dict = {}
-    for name, value in list(frame.f_locals.items()):
-        if len(out) >= max_locals:
-            break
-        if not isinstance(name, str) or name.startswith('__'):
-            continue
-        if isinstance(value, _SKIPPED_VALUE_TYPES):
-            continue
-        rendered = _jsonable(value)
-        try:
-            if len(json.dumps(rendered, ensure_ascii=False)) > VALUE_MAX_CHARS:
-                rendered = repr(value)[:VALUE_MAX_CHARS]
-        except (TypeError, ValueError):
-            rendered = repr(value)[:VALUE_MAX_CHARS]
-        out[name] = rendered
+    _add_mapping(out, list(frame.f_locals.items()), max_locals)
+    return out
+
+
+def snapshot_vars(frame, project_root: str, max_locals: int = _DEFAULT_MAX_LOCALS) -> dict:
+    """The variables a student sees while the program runs, for ``__vars``.
+
+    From ``frame`` (the main thread's current one) the innermost PROJECT
+    frame is found; its locals come first when it is a function (they shadow
+    a global of the same name, as in Python), then its module's globals, then
+    the entry module's (``main.py``) when that is another module. At most
+    ``max_locals``; dunders, modules, functions and classes skipped — the
+    same rules and bounds as a breakpoint's snapshot. A module frame is read
+    through ``f_globals`` directly (the module's own dict)."""
+    root = os.path.abspath(project_root)
+    project = []
+    while frame is not None:
+        if project_relpath(frame.f_code.co_filename, root) is not None:
+            project.append(frame)
+        frame = frame.f_back
+    if not project:
+        return {}
+    inner, outer = project[0], project[-1]
+    out: dict = {}
+    if inner.f_code.co_name != '<module>':
+        _add_mapping(out, list(inner.f_locals.items()), max_locals)
+    _add_mapping(out, list(inner.f_globals.items()), max_locals)
+    if outer.f_globals is not inner.f_globals:
+        _add_mapping(out, list(outer.f_globals.items()), max_locals)
+    return out
+
+
+def fit_vars(snapshot: dict, budget_bytes: int = VARS_FRAME_BUDGET_BYTES) -> dict:
+    """Drop the biggest entries until the snapshot's JSON fits the budget."""
+    out = dict(snapshot)
+
+    def size(obj) -> int:
+        return len(json.dumps(obj, ensure_ascii=False).encode('utf-8'))
+
+    while out and size(out) > budget_bytes:
+        del out[max(out, key=lambda k: size(out[k]))]
     return out
 
 
@@ -212,29 +281,55 @@ def _innermost_project_position(frame, project_root: str):
 
 
 def start_line_sampler(rpc, project_root: str, *,
-                       interval_s: float = SAMPLER_INTERVAL_S) -> threading.Thread:
-    """Report the main thread's current project line as ``__line`` every
-    ``interval_s`` when it changed, only when the RPC lock is free (a student
-    call in flight is never delayed by the indicator)."""
+                       interval_s: float = SAMPLER_INTERVAL_S,
+                       send_vars: bool = True,
+                       stop: threading.Event | None = None) -> threading.Thread:
+    """Every ``interval_s``: report the main thread's current project line as
+    ``__line`` when it changed, and its variables (:func:`snapshot_vars`, cut
+    to the frame budget by :func:`fit_vars`) as ``__vars`` when the snapshot
+    changed — both only when the RPC lock is free (a student call in flight
+    is never delayed by the indicator). ``stop`` ends the thread (tests)."""
     root = os.path.abspath(project_root)
     main_id = threading.main_thread().ident
     lock = rpc._lock
 
     def run() -> None:
         last = None
+        last_vars = None
         while True:
-            time.sleep(interval_s)
+            if stop is not None:
+                if stop.wait(interval_s):
+                    return
+            else:
+                time.sleep(interval_s)
             frame = sys._current_frames().get(main_id)
             if frame is None:
                 return
             pos = _innermost_project_position(frame, root)
-            if pos is None or pos == last:
+            if pos is None:
+                continue
+            new_vars = None
+            if send_vars:
+                try:
+                    snapshot = fit_vars(snapshot_vars(frame, root))
+                    key = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
+                    if key != last_vars:
+                        new_vars = (snapshot, key)
+                except Exception:  # noqa: BLE001 — a value the snapshot cannot render
+                    new_vars = None
+            # Drop the frame now: a held frame keeps the program's objects alive.
+            frame = None
+            if pos == last and new_vars is None:
                 continue
             if not lock.acquire(blocking=False):
                 continue
             try:
-                rpc.call('__line', [pos[0], pos[1]], 'call')
-                last = pos
+                if pos != last:
+                    rpc.call('__line', [pos[0], pos[1]], 'call')
+                    last = pos
+                if new_vars is not None:
+                    rpc.call('__vars', [pos[0], pos[1], new_vars[0]], 'call')
+                    last_vars = new_vars[1]
             except Exception:  # noqa: BLE001 — the indicator never ends a run
                 return
             finally:

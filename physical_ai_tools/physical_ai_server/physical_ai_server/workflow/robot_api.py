@@ -32,6 +32,18 @@ shape so the validator reads one table and the ``Greifobjekt`` renderers read
 the same ``register_object`` row the server validates against — one wire
 shape, one source.
 
+``CODE_ONLY_METHODS`` are PUBLIC calls a text program makes that have no block
+and dispatch to no handler (``zeige``: show a value in the Variablen panel).
+They render into both stubs and the JSON like a table row, sit OUTSIDE the
+handler bijection, and never reach the arm: ``code_rpc`` answers them itself,
+through ``ctx.log`` only.
+
+``ApiParam.asset`` tags a parameter whose string argument names a Sammlung
+asset (``recording`` / ``place`` / ``place_def`` / ``counter`` / ``object`` /
+``variable``). Only the JSON renders it: the editor's scanner, completion,
+lint and hover read the tag, never a hand-kept list of method names; the two
+stubs are unaffected by it.
+
 Seven Blockly types deliberately have no row: ``edubotics_forever`` /
 ``edubotics_wait_until`` / ``edubotics_while_visible`` are language constructs
 in a text program (``while True``, ``while not …``, ``while robot.sees(…)``),
@@ -124,9 +136,17 @@ CODE_PROJECT_LIMITS: dict[str, Any] = {
 #   tagids  1..16 ints each in 0..586 (tag36h11's id space)
 #   obj     a catalog type name / Greifobjekt name (`_TYPE_NAME_RE`, ≤ 24)
 #   dict    a JSON object with ≤ max_len string keys (protocol payloads)
+#   value   any JSON value a student shows („zeige"): nesting and node count
+#           bounded (SHOWN_VALUE_MAX_DEPTH / _NODES in code_rpc), the frame
+#           bound caps the bytes; rendered like a Blockly [VAR:] value
 KINDS = frozenset({
     'float', 'int', 'str', 'text', 'bool', 'point', 'target', 'ziel',
-    'tagids', 'obj', 'dict',
+    'tagids', 'obj', 'dict', 'value',
+})
+
+# What a string argument names, for the editor (see the module docstring).
+ASSET_KINDS = frozenset({
+    'recording', 'place', 'place_def', 'counter', 'object', 'variable',
 })
 
 # What a row hands back over the wire:
@@ -152,6 +172,15 @@ TRAJECTORY_NAME_RE = r'^[A-Za-zÄÖÜäöüß0-9 _\-]{1,40}$'
 # A counter name rides the `[CNT:name=int]` sentinel: no `=`, `[`, `]`.
 COUNTER_NAME_RE = r'^[^=\[\]\x00-\x1f]{1,40}$'
 TYPE_NAME_RE = r'^[A-Za-z0-9_]{1,24}$'
+# A `zeige` name rides the `[VAR:name=json]` sentinel exactly like a counter
+# name: no `=`, `[`, `]`, no control character, and — since the React name
+# gate (utils/variableName.js) drops a whitespace-only name silently — not
+# only whitespace.
+SHOWN_NAME_RE = r'^(?=.*\S)[^=\[\]\x00-\x1f\x7f]{1,40}$'
+# The rendered [VAR:] payload is cut here, the interpreter's
+# _MAX_VAR_PAYLOAD_CHARS (a test pins the two equal; the stubs size their own
+# rendering against it).
+SHOWN_VALUE_MAX_CHARS = 2000
 TOAST_LEVEL_RE = r'^(info|success|warning|error)$'
 RUN_TOKEN_RE = r'^[0-9a-f]{32}$'
 # Exit-info / paused payloads carry a bounded set of keys.
@@ -171,6 +200,7 @@ class ApiParam:
     nullable: bool = False
     lo_open: bool = False
     default: Any = REQUIRED
+    asset: str | None = None
 
     @property
     def required(self) -> bool:
@@ -182,7 +212,7 @@ class ApiCall:
     name: str
     java_name: str
     block_type: str | None
-    table: str                       # 'statement' | 'value' | 'internal'
+    table: str                       # 'statement' | 'value' | 'internal' | 'code'
     params: tuple[ApiParam, ...]
     returns: str
     doc_de: str
@@ -208,11 +238,19 @@ def _internal(name: str, params: tuple[ApiParam, ...], doc_de: str,
     return ApiCall(name, name, None, 'internal', params, 'none', doc_de, budget)
 
 
+def _code_only(name: str, java_name: str, params: tuple[ApiParam, ...],
+               doc_de: str) -> ApiCall:
+    return ApiCall(name, java_name, None, 'code', params, 'none', doc_de, 'call')
+
+
 _ZIEL = _p('ziel', 'ziel')
-_OBJ = _p('obj', 'obj', 'object_type', max_len=24, pattern=TYPE_NAME_RE)
+_OBJ = _p('obj', 'obj', 'object_type', max_len=24, pattern=TYPE_NAME_RE,
+          asset='object')
 _TIMEOUT = _p('timeout', 'float', lo=0.0, hi=300.0, default=10.0)
-_COUNTER = _p('name', 'str', max_len=40, pattern=COUNTER_NAME_RE)
+_COUNTER = _p('name', 'str', max_len=40, pattern=COUNTER_NAME_RE, asset='counter')
 _DEST_NAME = _p('name', 'str', max_len=40, pattern=DESTINATION_NAME_RE)
+_DEST_DEF = _p('name', 'str', max_len=40, pattern=DESTINATION_NAME_RE, asset='place_def')
+_DEST_REF = _p('name', 'str', max_len=40, pattern=DESTINATION_NAME_RE, asset='place')
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -228,21 +266,21 @@ ROBOT_API: tuple[ApiCall, ...] = (
     _stmt('close_gripper', 'closeGripper', 'edubotics_close_gripper', (),
           'Schließt den Greifer.'),
     _stmt('move_to', 'moveTo', 'edubotics_move_to',
-          (_p('target', 'target', 'destination'),),
+          (_p('target', 'target', 'destination', asset='place'),),
           'Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name '
           'eines gemerkten Ziels.'),
     _stmt('pickup', 'pickup', 'edubotics_pickup',
-          (_p('target', 'target', 'target'),),
+          (_p('target', 'target', 'target', asset='place'),),
           'Nimmt an dieser Stelle etwas auf: hinfahren, absenken, Greifer '
           'schließen, anheben.'),
     _stmt('drop_at', 'dropAt', 'edubotics_drop_at',
-          (_p('target', 'target', 'destination'),),
+          (_p('target', 'target', 'destination', asset='place'),),
           'Legt das Gehaltene über dem Ziel ab und öffnet den Greifer.'),
     _stmt('wait', 'waitSeconds', 'edubotics_wait_seconds',
           (_p('seconds', 'float', lo=0.0, hi=300.0),),
           'Wartet so viele Sekunden (höchstens 300).'),
     _stmt('replay', 'replay', 'edubotics_replay_trajectory',
-          (_p('name', 'str', max_len=40, pattern=TRAJECTORY_NAME_RE),
+          (_p('name', 'str', max_len=40, pattern=TRAJECTORY_NAME_RE, asset='recording'),
            _p('speed', 'float', lo=0.25, hi=3.0, default=1.0)),
           'Spielt eine aufgenommene Bewegung ab; speed 1.0 ist die Geschwindigkeit '
           'der Aufnahme, höchstens 3.0.'),
@@ -263,14 +301,14 @@ ROBOT_API: tuple[ApiCall, ...] = (
           'gefunden wird.'),
     # ── Destinations ──────────────────────────────────────────────────────
     _stmt('pin', 'pin', 'edubotics_destination_pin',
-          (_DEST_NAME,
+          (_DEST_DEF,
            _p('x', 'float', lo=-1.0, hi=1.0),
            _p('y', 'float', lo=-1.0, hi=1.0),
            _p('z', 'float', lo=-1.0, hi=1.0)),
           'Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel '
           'für move_to und drop_at.'),
     _stmt('pin_current', 'pinCurrent', 'edubotics_destination_current',
-          (_DEST_NAME,),
+          (_DEST_DEF,),
           'Merkt die Stelle, an der der Greifer gerade steht, unter diesem '
           'Namen als Ziel.'),
     # ── Output ────────────────────────────────────────────────────────────
@@ -300,7 +338,7 @@ ROBOT_API: tuple[ApiCall, ...] = (
     _stmt('counter_add', 'counterAdd', 'edubotics_counter_add', (_COUNTER,),
           'Erhöht den Zähler mit diesem Namen um 1.'),
     # ── Values ────────────────────────────────────────────────────────────
-    _value('ziel', 'ziel', 'edubotics_destination_ref', (_DEST_NAME,), 'name',
+    _value('ziel', 'ziel', 'edubotics_destination_ref', (_DEST_REF,), 'name',
            'Gibt den Namen eines gemerkten Ziels für move_to und drop_at zurück; '
            'ein unbekannter Name wird abgelehnt.'),
     _value('sees', 'sees', 'edubotics_see_object', (_OBJ,), 'bool',
@@ -343,6 +381,9 @@ INTERNAL_METHODS: tuple[ApiCall, ...] = (
     _internal('__line', (_FILE, _LINE),
               'Meldet die Zeile, die gerade läuft, für die Anzeige — das macht '
               'die Bibliothek selbst.'),
+    _internal('__vars', (_FILE, _LINE, _p('locals', 'dict', max_len=PAUSED_MAX_LOCALS)),
+              'Meldet die aktuellen Werte der Variablen für den Variablen-Bereich — '
+              'das macht die Bibliothek selbst.'),
     _internal('__exit', (_p('info', 'dict', max_len=EXIT_INFO_MAX_KEYS),),
               'Meldet, dass das Programm zu Ende ist oder abgebrochen wurde — '
               'das macht die Bibliothek selbst.'),
@@ -358,10 +399,23 @@ INTERNAL_METHODS: tuple[ApiCall, ...] = (
               'Greifobjekt selbst.', budget='perception'),
 )
 
+# Public calls with no block and no handler (see the module docstring). The
+# server answers them itself (code_rpc.RunSession._code_only), never the arm.
+CODE_ONLY_METHODS: tuple[ApiCall, ...] = (
+    _code_only('zeige', 'zeige',
+               (_p('name', 'str', max_len=40, pattern=SHOWN_NAME_RE, asset='variable'),
+                _p('wert', 'value')),
+               'Zeigt einen Wert unter diesem Namen im Variablen-Bereich an — '
+               'Zahlen, Texte, Listen; höchstens 40 Zeichen Name.'),
+)
+
 ROBOT_API_BY_NAME: dict[str, ApiCall] = {c.name: c for c in ROBOT_API}
 ROBOT_API_BY_BLOCK_TYPE: dict[str, ApiCall] = {c.block_type: c for c in ROBOT_API}
 INTERNAL_METHODS_BY_NAME: dict[str, ApiCall] = {c.name: c for c in INTERNAL_METHODS}
-PYTHON_NAMES: tuple[str, ...] = tuple(c.name for c in ROBOT_API)
+CODE_ONLY_METHODS_BY_NAME: dict[str, ApiCall] = {c.name: c for c in CODE_ONLY_METHODS}
+# The public Python surface: the handler rows plus the code-only rows (what a
+# misspelling is compared against).
+PYTHON_NAMES: tuple[str, ...] = tuple(c.name for c in ROBOT_API + CODE_ONLY_METHODS)
 
 
 def suggest(name: str) -> str | None:
@@ -418,10 +472,17 @@ def _comment_safe(text: str) -> str:
 
 # ── Python stub ───────────────────────────────────────────────────────────
 
+# The zeige() rendering budget, in characters of text spent across the whole
+# value (two SHOWN_VALUE_MAX_CHARS: the robot cuts at one, so the student sees
+# the cut the robot makes, not the stub's). Every string/key/scalar costs at
+# least 4, so the rendered JSON is O(budget), far below MAX_FRAME_BYTES.
+_SHOWN_BUDGET_CHARS = 2 * SHOWN_VALUE_MAX_CHARS
+
 _PY_ARG_MARSHAL = {
     'ziel': '_handle({v})',
     'obj': '_type_name({v})',
     'tagids': 'list({v})',
+    'value': '_shown({v})',
 }
 
 _PY_RESULT_UNWRAP = {
@@ -471,6 +532,7 @@ Lehnt der Roboter etwas ab, gibt es einen RobotError mit deutscher Meldung.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import socket
@@ -690,6 +752,63 @@ def _point(r):
     return None
 
 
+# What zeige() sends: a JSON-safe rendering of any value, bounded as a WHOLE
+# (a character budget spent across the tree) so the frame stays far below
+# MAX_FRAME_BYTES whatever the program hands over. The robot shows at most
+# {SHOWN_VALUE_MAX_CHARS!r} characters of it.
+_SHOWN_BUDGET_CHARS = {SHOWN_BUDGET_CHARS!r}
+_SHOWN_MAX_DEPTH = 3
+_SHOWN_MAX_ITEMS = 50
+_SHOWN_BIG_INT = 2 ** 53
+_SHOWN_TOO_BIG_DE = 'sehr große Zahl'
+
+
+def _shown(value):
+    return _shown_part(value, 0, [_SHOWN_BUDGET_CHARS])
+
+
+def _shown_part(value, depth, budget):
+    if budget[0] <= 0:
+        return '…'
+    budget[0] -= 4
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if -_SHOWN_BIG_INT <= value <= _SHOWN_BIG_INT:
+            return value
+        try:
+            return float(value)
+        except OverflowError:
+            return _SHOWN_TOO_BIG_DE
+    if isinstance(value, float):
+        if value != value or value in (float('inf'), float('-inf')):
+            return repr(value)
+        return value
+    if isinstance(value, str):
+        text = value[:max(0, min(budget[0], 1000))]
+        budget[0] -= len(text)
+        return text
+    if isinstance(value, Greifziel):
+        return repr(value)
+    try:
+        if depth < _SHOWN_MAX_DEPTH:
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return [_shown_part(v, depth + 1, budget)
+                        for v in itertools.islice(value, _SHOWN_MAX_ITEMS)]
+            if isinstance(value, dict):
+                out = {{}}
+                for k, v in itertools.islice(value.items(), _SHOWN_MAX_ITEMS):
+                    key = str(k)[:100]
+                    budget[0] -= len(key)
+                    out[key] = _shown_part(v, depth + 1, budget)
+                return out
+        text = repr(value)[:max(0, min(budget[0], 200))]
+    except Exception:  # noqa: BLE001 — a hostile __repr__/__str__ must not break zeige
+        return '<?>'
+    budget[0] -= len(text)
+    return text
+
+
 '''
 
 _PY_STUB_TAIL = '''
@@ -732,8 +851,10 @@ def render_python_stub() -> str:
         PERCEPTION_MAX_PER_S=limits['PERCEPTION_MAX_PER_S'],
         PERCEPTION_BURST=limits['PERCEPTION_BURST'],
         MAX_FRAME_BYTES=limits['MAX_FRAME_BYTES'],
+        SHOWN_VALUE_MAX_CHARS=SHOWN_VALUE_MAX_CHARS,
+        SHOWN_BUDGET_CHARS=_SHOWN_BUDGET_CHARS,
     )
-    methods = '\n'.join(_py_method(c) for c in ROBOT_API)
+    methods = '\n'.join(_py_method(c) for c in ROBOT_API + CODE_ONLY_METHODS)
     row = INTERNAL_METHODS_BY_NAME['register_object']
     # The seven positionals, in the row's order: the first two come from the
     # class name, the rest are the class attributes named like the row.
@@ -760,6 +881,16 @@ _JAVA_ALTS = {
     'ziel': (('Greifziel', '{v}.handle()'),),
     'tagids': (('int[]', '{v}'),),
     'obj': (('String', '{v}'), ('Greifobjekt', '{v}.name()')),
+    # zeige(): one overload per value type a student holds; the RpcClient
+    # helpers render each into a bounded, JSON-safe shape (a non-finite double
+    # becomes text, arrays are capped) before EduJson frames it.
+    'value': (('int', '{v}'), ('long', '{v}'), ('double', 'RpcClient.shownDouble({v})'),
+              ('boolean', '{v}'), ('char', 'String.valueOf({v})'),
+              ('String', 'RpcClient.shownText({v})'),
+              ('double[]', 'RpcClient.shownDoubles({v})'),
+              ('int[]', 'RpcClient.shownInts({v})'),
+              ('Greifziel', 'String.valueOf({v})'),
+              ('Object', 'RpcClient.shownObject({v})')),
 }
 
 _JAVA_RETURN = {
@@ -879,7 +1010,8 @@ public final class Robot {{
 def render_java_robot() -> str:
     notice = _GENERATED_NOTICE.replace('\n', '\n * ')
     body = '\n\n'.join(
-        overload for call in ROBOT_API for overload in _java_overloads(call))
+        overload for call in ROBOT_API + CODE_ONLY_METHODS
+        for overload in _java_overloads(call))
     return _JAVA_ROBOT_HEAD.format(notice=notice) + body + '\n}\n'
 
 
@@ -1180,6 +1312,76 @@ public final class RpcClient {{
         throw new RobotError(BAD_REPLY_DE);
     }}
 
+    // ── zeige(): bounded, JSON-safe renderings of a shown value ─────────────
+
+    static final int SHOWN_MAX_ITEMS = 50;
+    static final int SHOWN_MAX_CHARS = {SHOWN_TEXT_MAX_CHARS};
+
+    static Object shownDouble(double v) {{
+        if (Double.isNaN(v) || Double.isInfinite(v)) {{
+            return String.valueOf(v);
+        }}
+        return v;
+    }}
+
+    static String shownText(String s) {{
+        if (s == null) {{
+            return null;
+        }}
+        return s.length() > SHOWN_MAX_CHARS ? s.substring(0, SHOWN_MAX_CHARS) : s;
+    }}
+
+    static List<Object> shownDoubles(double[] a) {{
+        if (a == null) {{
+            return null;
+        }}
+        int n = Math.min(a.length, SHOWN_MAX_ITEMS);
+        List<Object> out = new java.util.ArrayList<>(n);
+        for (int i = 0; i < n; i++) {{
+            out.add(shownDouble(a[i]));
+        }}
+        return out;
+    }}
+
+    static List<Object> shownInts(int[] a) {{
+        if (a == null) {{
+            return null;
+        }}
+        int n = Math.min(a.length, SHOWN_MAX_ITEMS);
+        List<Object> out = new java.util.ArrayList<>(n);
+        for (int i = 0; i < n; i++) {{
+            out.add(a[i]);
+        }}
+        return out;
+    }}
+
+    static Object shownObject(Object o) {{
+        if (o == null || o instanceof Boolean || o instanceof Integer || o instanceof Long
+                || o instanceof Short || o instanceof Byte) {{
+            return o;
+        }}
+        if (o instanceof Number) {{
+            return shownDouble(((Number) o).doubleValue());
+        }}
+        if (o instanceof double[]) {{
+            return shownDoubles((double[]) o);
+        }}
+        if (o instanceof int[]) {{
+            return shownInts((int[]) o);
+        }}
+        if (o instanceof Iterable) {{
+            List<Object> out = new java.util.ArrayList<>();
+            for (Object item : (Iterable<?>) o) {{
+                if (out.size() >= SHOWN_MAX_ITEMS) {{
+                    break;
+                }}
+                out.add(shownText(String.valueOf(item)));
+            }}
+            return out;
+        }}
+        return shownText(String.valueOf(o));
+    }}
+
     static double[] asPoint(Object r) {{
         if (r == null) {{
             return null;
@@ -1211,6 +1413,7 @@ def render_java_rpc_client() -> str:
         PERCEPTION_MAX_PER_S=_java_literal(limits['PERCEPTION_MAX_PER_S']),
         PERCEPTION_BURST=_java_literal(limits['PERCEPTION_BURST']),
         MAX_FRAME_BYTES=_java_literal(limits['MAX_FRAME_BYTES']),
+        SHOWN_TEXT_MAX_CHARS=_java_literal(1000),
     )
 
 
@@ -1236,6 +1439,8 @@ def _param_json(p: ApiParam) -> dict[str, Any]:
         out['lo_open'] = True
     if p.nullable:
         out['nullable'] = True
+    if p.asset is not None:
+        out['asset'] = p.asset
     return out
 
 
@@ -1258,7 +1463,7 @@ def export_json() -> str:
     limits.update(CODE_PROJECT_LIMITS)
     doc = {
         'generated_by': 'physical_ai_server/workflow/robot_api.py',
-        'methods': [_call_json(c) for c in ROBOT_API],
+        'methods': [_call_json(c) for c in ROBOT_API + CODE_ONLY_METHODS],
         'internal': [_call_json(c) for c in INTERNAL_METHODS],
         'limits': limits,
     }

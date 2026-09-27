@@ -17,6 +17,7 @@ refuses a drift and documents how to regenerate.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import socket
@@ -236,6 +237,63 @@ def _point(r):
     return None
 
 
+# What zeige() sends: a JSON-safe rendering of any value, bounded as a WHOLE
+# (a character budget spent across the tree) so the frame stays far below
+# MAX_FRAME_BYTES whatever the program hands over. The robot shows at most
+# 2000 characters of it.
+_SHOWN_BUDGET_CHARS = 4000
+_SHOWN_MAX_DEPTH = 3
+_SHOWN_MAX_ITEMS = 50
+_SHOWN_BIG_INT = 2 ** 53
+_SHOWN_TOO_BIG_DE = 'sehr große Zahl'
+
+
+def _shown(value):
+    return _shown_part(value, 0, [_SHOWN_BUDGET_CHARS])
+
+
+def _shown_part(value, depth, budget):
+    if budget[0] <= 0:
+        return '…'
+    budget[0] -= 4
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if -_SHOWN_BIG_INT <= value <= _SHOWN_BIG_INT:
+            return value
+        try:
+            return float(value)
+        except OverflowError:
+            return _SHOWN_TOO_BIG_DE
+    if isinstance(value, float):
+        if value != value or value in (float('inf'), float('-inf')):
+            return repr(value)
+        return value
+    if isinstance(value, str):
+        text = value[:max(0, min(budget[0], 1000))]
+        budget[0] -= len(text)
+        return text
+    if isinstance(value, Greifziel):
+        return repr(value)
+    try:
+        if depth < _SHOWN_MAX_DEPTH:
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return [_shown_part(v, depth + 1, budget)
+                        for v in itertools.islice(value, _SHOWN_MAX_ITEMS)]
+            if isinstance(value, dict):
+                out = {}
+                for k, v in itertools.islice(value.items(), _SHOWN_MAX_ITEMS):
+                    key = str(k)[:100]
+                    budget[0] -= len(key)
+                    out[key] = _shown_part(v, depth + 1, budget)
+                return out
+        text = repr(value)[:max(0, min(budget[0], 200))]
+    except Exception:  # noqa: BLE001 — a hostile __repr__/__str__ must not break zeige
+        return '<?>'
+    budget[0] -= len(text)
+    return text
+
+
 def home():
     """Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist."""
     _rpc.call('home', [], 'call')
@@ -365,6 +423,10 @@ def is_holding():
 def counter_get(name):
     """Gibt den Wert des Zählers zurück; 0, wenn er noch nie gesetzt wurde."""
     return _rpc.call('counter_get', [name], 'call')
+
+def zeige(name, wert):
+    """Zeigt einen Wert unter diesem Namen im Variablen-Bereich an — Zahlen, Texte, Listen; höchstens 40 Zeichen Name."""
+    _rpc.call('zeige', [name, _shown(wert)], 'call')
 
 class Greifobjekt:
     """Eigener Objekt-Typ: eine Unterklasse anlegen, fertig.

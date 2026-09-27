@@ -164,7 +164,7 @@ def test_the_socket_fence_bites_on_a_module_level_sender():
 def test_every_api_method_in_the_stub_goes_through_rpc_call():
     tree = ast.parse(_STUB)
     defs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-    for call in robot_api.ROBOT_API:
+    for call in robot_api.ROBOT_API + robot_api.CODE_ONLY_METHODS:
         fn = defs[call.name]
         args = [a.arg for a in fn.args.args]
         assert args == [p.name for p in call.params], call.name
@@ -242,6 +242,64 @@ def test_java_robot_has_every_row_and_the_object_overloads():
     assert 'moveTo(double[] target)' in java and 'moveTo(String target)' in java
     # A trailing default renders an extra overload.
     assert 'replay(String name, double speed)' in java and 'replay(String name)' in java
+
+
+def test_zeige_renders_in_both_stubs_and_the_asset_tag_in_neither():
+    """2026-09-27 (O3): `zeige` is public in the Python stub and in Robot.java
+    with one overload per Java value type; the asset tags are JSON-only, so no
+    stub carries the word."""
+    tree = ast.parse(_STUB)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'zeige')
+    assert [a.arg for a in fn.args.args] == ['name', 'wert']
+    assert 'asset' not in _STUB
+    java = _RENDERED[robot_api.GENERATED_PATHS['java_robot']]
+    for jtype in ('int', 'long', 'double', 'boolean', 'char', 'String', 'double[]',
+                  'int[]', 'Greifziel', 'Object'):
+        assert f'public static void zeige(String name, {jtype} wert)' in java, jtype
+    assert java.count('public static void zeige(') == 10
+    for rel in (robot_api.GENERATED_PATHS['java_robot'],
+                robot_api.GENERATED_PATHS['java_greifobjekt'],
+                robot_api.GENERATED_PATHS['java_rpc_client']):
+        assert 'asset' not in _RENDERED[rel], rel
+
+
+def test_the_python_zeige_value_is_bounded_and_json_safe(tmp_path, monkeypatch):
+    """`_shown` renders any value into a bounded JSON-safe shape without a
+    second json.dumps in the stub (the encoder fence above pins exactly one):
+    non-finite floats and huge ints become text, containers are capped, a
+    hostile __repr__ cannot break the call, and the rendered frame stays far
+    below MAX_FRAME_BYTES whatever the student hands over."""
+    monkeypatch.delenv('CODE_RPC_SOCKET', raising=False)
+    robot = _load_stub(tmp_path)
+    sent = []
+    monkeypatch.setattr(robot._rpc, 'call', lambda m, a, k: sent.append((m, a, k)))
+
+    class Boese:
+        def __repr__(self):
+            raise RuntimeError('nope')
+
+    import json as _json
+    import math as _math
+    robot.zeige('a', 3)
+    robot.zeige('b', _math.nan)
+    robot.zeige('c', 10 ** 5000)
+    robot.zeige('d', [[['x' * 5000] * 80] * 80] * 80)
+    robot.zeige('e', Boese())
+    robot.zeige('f', {'x': (1, 2.5, None, True)})
+    robot.zeige('g', robot.Greifziel(4))
+    assert [m for m, _a, _k in sent] == ['zeige'] * 7
+    assert all(k == 'call' for _m, _a, k in sent)
+    values = {a[0]: a[1] for _m, a, _k in sent}
+    assert values['a'] == 3
+    assert values['b'] == 'nan'
+    assert isinstance(values['c'], str)
+    assert values['e'] == '<?>'
+    assert values['f'] == {'x': [1, 2.5, None, True]}
+    assert values['g'] == 'Greifziel(4)'
+    for _m, a, _k in sent:
+        body = _json.dumps({'id': 1, 'm': 'zeige', 'a': a}, ensure_ascii=False,
+                           allow_nan=False).encode('utf-8')
+        assert len(body) < robot_api.RPC_LIMITS.MAX_FRAME_BYTES // 4, len(body)
 
 
 # ── the stub as a Python module ───────────────────────────────────────────

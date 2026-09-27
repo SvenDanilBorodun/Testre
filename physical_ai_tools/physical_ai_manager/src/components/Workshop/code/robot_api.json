@@ -43,7 +43,8 @@
         {
           "name": "target",
           "kind": "target",
-          "required": true
+          "required": true,
+          "asset": "place"
         }
       ]
     },
@@ -59,7 +60,8 @@
         {
           "name": "target",
           "kind": "target",
-          "required": true
+          "required": true,
+          "asset": "place"
         }
       ]
     },
@@ -75,7 +77,8 @@
         {
           "name": "target",
           "kind": "target",
-          "required": true
+          "required": true,
+          "asset": "place"
         }
       ]
     },
@@ -111,7 +114,8 @@
           "kind": "str",
           "required": true,
           "max_len": 40,
-          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$"
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
+          "asset": "recording"
         },
         {
           "name": "speed",
@@ -195,7 +199,8 @@
           "kind": "obj",
           "required": true,
           "max_len": 24,
-          "pattern": "^[A-Za-z0-9_]{1,24}$"
+          "pattern": "^[A-Za-z0-9_]{1,24}$",
+          "asset": "object"
         }
       ]
     },
@@ -229,7 +234,8 @@
           "kind": "str",
           "required": true,
           "max_len": 40,
-          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$"
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
+          "asset": "place_def"
         },
         {
           "name": "x",
@@ -268,7 +274,8 @@
           "kind": "str",
           "required": true,
           "max_len": 40,
-          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$"
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
+          "asset": "place_def"
         }
       ]
     },
@@ -390,7 +397,8 @@
           "kind": "str",
           "required": true,
           "max_len": 40,
-          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$"
+          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
+          "asset": "counter"
         }
       ]
     },
@@ -408,7 +416,8 @@
           "kind": "str",
           "required": true,
           "max_len": 40,
-          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$"
+          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
+          "asset": "counter"
         }
       ]
     },
@@ -426,7 +435,8 @@
           "kind": "str",
           "required": true,
           "max_len": 40,
-          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$"
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
+          "asset": "place"
         }
       ]
     },
@@ -444,7 +454,8 @@
           "kind": "obj",
           "required": true,
           "max_len": 24,
-          "pattern": "^[A-Za-z0-9_]{1,24}$"
+          "pattern": "^[A-Za-z0-9_]{1,24}$",
+          "asset": "object"
         }
       ]
     },
@@ -462,7 +473,8 @@
           "kind": "obj",
           "required": true,
           "max_len": 24,
-          "pattern": "^[A-Za-z0-9_]{1,24}$"
+          "pattern": "^[A-Za-z0-9_]{1,24}$",
+          "asset": "object"
         }
       ]
     },
@@ -480,7 +492,8 @@
           "kind": "obj",
           "required": true,
           "max_len": 24,
-          "pattern": "^[A-Za-z0-9_]{1,24}$"
+          "pattern": "^[A-Za-z0-9_]{1,24}$",
+          "asset": "object"
         },
         {
           "name": "timeout",
@@ -525,7 +538,8 @@
           "kind": "obj",
           "required": true,
           "max_len": 24,
-          "pattern": "^[A-Za-z0-9_]{1,24}$"
+          "pattern": "^[A-Za-z0-9_]{1,24}$",
+          "asset": "object"
         }
       ]
     },
@@ -569,7 +583,32 @@
           "kind": "str",
           "required": true,
           "max_len": 40,
-          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$"
+          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
+          "asset": "counter"
+        }
+      ]
+    },
+    {
+      "name": "zeige",
+      "java_name": "zeige",
+      "block_type": null,
+      "table": "code",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Zeigt einen Wert unter diesem Namen im Variablen-Bereich an — Zahlen, Texte, Listen; höchstens 40 Zeichen Name.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^(?=.*\\S)[^=\\[\\]\\x00-\\x1f\\x7f]{1,40}$",
+          "asset": "variable"
+        },
+        {
+          "name": "wert",
+          "kind": "value",
+          "required": true
         }
       ]
     }
@@ -646,6 +685,37 @@
           "required": true,
           "lo": 0,
           "hi": 1000000
+        }
+      ]
+    },
+    {
+      "name": "__vars",
+      "java_name": "__vars",
+      "block_type": null,
+      "table": "internal",
+      "budget": "call",
+      "returns": "none",
+      "doc_de": "Meldet die aktuellen Werte der Variablen für den Variablen-Bereich — das macht die Bibliothek selbst.",
+      "params": [
+        {
+          "name": "file",
+          "kind": "str",
+          "required": true,
+          "max_len": 80,
+          "pattern": "^(?:[A-Za-z][A-Za-z0-9_]{0,39}/){0,3}[A-Za-z][A-Za-z0-9_]{0,39}\\.(py|java)$"
+        },
+        {
+          "name": "line",
+          "kind": "int",
+          "required": true,
+          "lo": 0,
+          "hi": 1000000
+        },
+        {
+          "name": "locals",
+          "kind": "dict",
+          "required": true,
+          "max_len": 30
         }
       ]
     },

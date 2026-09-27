@@ -72,9 +72,20 @@ supervisor, retired the instant the run ends), ``__line`` (status position,
 throttled at ``CODE_STATUS_MIN_INTERVAL_S``), ``__paused`` (a breakpoint hit:
 emits the locals as ``[VAR:]`` sentinels, sets the pause, and BLOCKS on the
 reader thread until the manager resumes — answering ``continue`` / ``step`` /
-``stop``), ``__exit`` (the launcher's exit report, kept on the session for
-the program object that owns the run). ``register_object`` is validated from
-its row and refused until the catalog merge lands.
+``stop``), ``__vars`` (the runner's line sampler: the current frame's
+variables, emitted as ``[VAR:]`` sentinels ONLY for names whose rendered value
+changed since this run last showed them), ``__exit`` (the launcher's exit
+report, kept on the session for the program object that owns the run).
+``register_object`` is validated from its row and registers a per-run type.
+
+**The code-only rows** (``robot_api.CODE_ONLY_METHODS``: ``zeige``) are
+public calls with no block and no handler. They are queued to the run's one
+worker like a statement (so they wait while paused, are refused after Stopp
+and keep program order), and answered there by :meth:`RunSession._code_only`,
+which only ever calls ``ctx.log`` — never ``ctx.publisher``, the handler table
+or the motion lock (an AST fence in ``test_code_rpc_zeige_vars.py``). ``zeige``
+emits its ``[VAR:]`` sentinel on every call; ``__vars``, ``zeige`` and a
+breakpoint's locals share one per-run map of the last payload per name.
 
 **Replies.** ``{"id", "ok": true, "r"}`` or ``{"id", "ok": false, "k", "e"}``
 with a German ``e``. A ``WorkflowError`` from a handler is relayed verbatim
@@ -114,6 +125,7 @@ from physical_ai_server.workflow.interpreter import (
     _jsonable,
 )
 from physical_ai_server.workflow.robot_api import (
+    CODE_ONLY_METHODS_BY_NAME,
     CODE_PATH_RE,
     INTERNAL_METHODS_BY_NAME,
     MAX_CODE_FILE_BYTES,
@@ -176,6 +188,15 @@ _EXIT_INFO_KEYS = {
 # interpreter's _UNSHOWABLE_NAME_CHARS, re-spelled here rather than imported
 # from a class attribute).
 _UNSHOWABLE_NAME_CHARS = '=[]'
+# A shown value (the `value` kind of `zeige`, every entry of `__vars`) is a
+# JSON tree bounded in depth and size before it is rendered — walked
+# iteratively, so a hostile nesting is a refusal, never a RecursionError. The
+# stubs render at most 3 levels, so a real program never meets either bound.
+SHOWN_VALUE_MAX_DEPTH = 8
+SHOWN_VALUE_MAX_NODES = 5000
+# The per-run map of the last payload shown per name is bounded; past this a
+# NEW name is still shown, just not remembered (so it re-emits every change).
+SHOWN_VAR_NAMES_MAX = 256
 
 # ── German replies ────────────────────────────────────────────────────────
 INTERNAL_ERROR_DE = 'Interner Fehler — bitte den Lehrer rufen.'
@@ -207,6 +228,7 @@ _KIND_TAGIDS_DE = '„{p}“ muss eine Liste mit 1 bis 16 Marker-IDs (0 bis 586)
 _KIND_OBJ_DE = ('„{p}“ muss ein Objekt-Name aus Buchstaben, Ziffern und Unterstrichen '
                 'sein (höchstens 24 Zeichen).')
 _KIND_DICT_DE = '„{p}“ muss eine Zuordnung mit höchstens {n} Einträgen sein.'
+_KIND_VALUE_DE = '„{p}“ ist zu tief verschachtelt oder zu groß zum Anzeigen.'
 _RANGE_DE = '„{p}“ muss zwischen {lo} und {hi} liegen.'
 _RANGE_OPEN_DE = '„{p}“ muss größer als {lo} und höchstens {hi} sein.'
 _TOO_LONG_DE = '„{p}“ ist zu lang (höchstens {n} Zeichen).'
@@ -371,6 +393,29 @@ def _point_error(p: ApiParam, v: Any, sentence: str) -> str | None:
     return None
 
 
+def shown_value_is_bad(v: Any) -> bool:
+    """True when ``v`` is not a JSON tree within ``SHOWN_VALUE_MAX_DEPTH`` /
+    ``SHOWN_VALUE_MAX_NODES`` (an explicit stack: no recursion)."""
+    stack = [(v, 0)]
+    nodes = 0
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if nodes > SHOWN_VALUE_MAX_NODES:
+            return True
+        if isinstance(item, (list, tuple)):
+            if depth >= SHOWN_VALUE_MAX_DEPTH:
+                return True
+            stack.extend((x, depth + 1) for x in item)
+        elif isinstance(item, dict):
+            if depth >= SHOWN_VALUE_MAX_DEPTH:
+                return True
+            stack.extend((x, depth + 1) for x in item.values())
+        elif not (item is None or isinstance(item, (bool, int, float, str))):
+            return True
+    return False
+
+
 def validate_value(p: ApiParam, v: Any) -> str | None:
     """The German reason ``v`` is not a valid ``p``, or ``None`` when it is."""
     if v is None and p.nullable:
@@ -426,6 +471,8 @@ def validate_value(p: ApiParam, v: Any) -> str | None:
                 or any(not isinstance(k, str) for k in v)):
             return _KIND_DICT_DE.format(p=p.name, n=cap)
         return None
+    if kind == 'value':
+        return _KIND_VALUE_DE.format(p=p.name) if shown_value_is_bad(v) else None
     return INTERNAL_ERROR_DE
 
 
@@ -442,7 +489,8 @@ def _validate_call(call: ApiCall, args: list) -> tuple[str, str] | None:
 
 
 def _lookup(method: str) -> ApiCall | None:
-    return ROBOT_API_BY_NAME.get(method) or INTERNAL_METHODS_BY_NAME.get(method)
+    return (ROBOT_API_BY_NAME.get(method) or INTERNAL_METHODS_BY_NAME.get(method)
+            or CODE_ONLY_METHODS_BY_NAME.get(method))
 
 
 def _unknown_method_de(name: str) -> str:
@@ -557,6 +605,11 @@ class RunSession:
                 pass
         self._handles: OrderedDict = handles
         self._next_handle = 0
+        # name -> the last [VAR:] payload this run showed (zeige, __vars, a
+        # breakpoint's locals). Its own lock: the reader (__vars, __paused)
+        # and the worker (zeige) both write it.
+        self._var_lock = threading.Lock()
+        self._var_payloads: dict[str, str] = {}
         self._worker = threading.Thread(target=self._worker_loop, daemon=True,
                                         name=f'code-rpc-worker-{self.token[:8]}')
         self._worker.start()
@@ -631,6 +684,9 @@ class RunSession:
         if name == '__line':
             self._emit_running(args[0], args[1])
             return _ok(rid, None)
+        if name == '__vars':
+            self._emit_changed_vars(args[2])
+            return _ok(rid, None)
         if name == '__exit':
             self.exit_info = self._clean_exit_info(args[0])
             return _ok(rid, None)
@@ -697,17 +753,53 @@ class RunSession:
         return 'step' if callable(is_paused) and is_paused() else 'continue'
 
     def _emit_locals(self, local_vars: dict) -> None:
+        """A breakpoint's locals: every one shown (and remembered)."""
         for name, value in list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]:
-            if (not isinstance(name, str) or not name or len(name) > _MAX_NAME_CHARS
-                    or any(c in name for c in _UNSHOWABLE_NAME_CHARS)):
-                continue
-            try:
-                payload = json.dumps(_jsonable(value, _MAX_VAR_PAYLOAD_ITEMS))
-                if len(payload) > _MAX_VAR_PAYLOAD_CHARS:
-                    payload = payload[:_MAX_VAR_PAYLOAD_CHARS] + ' …'
-                self.ctx.log(f'[VAR:{name}={payload}]')
-            except Exception:  # noqa: BLE001 — observability never breaks a run
-                pass
+            self._emit_var(name, value, force=True)
+
+    def _emit_changed_vars(self, local_vars: dict) -> None:
+        """``__vars``: only the names whose rendered value changed."""
+        for name, value in list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]:
+            self._emit_var(name, value, force=False)
+
+    def _emit_var(self, name: Any, value: Any, *, force: bool) -> None:
+        """One ``[VAR:name=json]`` sentinel, rendered and capped exactly like
+        ``interpreter._set_variable``'s. An unshowable name (empty, only
+        whitespace, over 64 characters, a control character or the frame's
+        own ``=[]``) or an out-of-bounds value is skipped. ``force=False``
+        skips a name whose payload this run already showed. Only ``ctx.log``
+        is called — this is observability, never control — and nothing raises
+        out of it."""
+        if (not isinstance(name, str) or not name.strip() or len(name) > _MAX_NAME_CHARS
+                or any(c in name for c in _UNSHOWABLE_NAME_CHARS)
+                or any(ord(c) < 0x20 or c == '\x7f' for c in name)):
+            return
+        if shown_value_is_bad(value):
+            return
+        try:
+            payload = json.dumps(_jsonable(value, _MAX_VAR_PAYLOAD_ITEMS))
+        except Exception:  # noqa: BLE001 — observability never breaks a run
+            return
+        if len(payload) > _MAX_VAR_PAYLOAD_CHARS:
+            payload = payload[:_MAX_VAR_PAYLOAD_CHARS] + ' …'
+        with self._var_lock:
+            if not force and self._var_payloads.get(name) == payload:
+                return
+            if name in self._var_payloads or len(self._var_payloads) < SHOWN_VAR_NAMES_MAX:
+                self._var_payloads[name] = payload
+        try:
+            self.ctx.log(f'[VAR:{name}={payload}]')
+        except Exception:  # noqa: BLE001 — observability never breaks a run
+            pass
+
+    # ── the code-only rows (the worker, after the pause/stop gate) ──────────
+    def _code_only(self, call: ApiCall, args: list, rid: int | None) -> dict:
+        """``zeige(name, wert)``: show the value in the Variablen panel. The
+        args are validated against the row already. Nothing else is touched."""
+        if call.name == 'zeige':
+            self._emit_var(args[0], args[1], force=True)
+            return _ok(rid, None)
+        return _err(rid, 'internal', INTERNAL_ERROR_DE)
 
     # ── register_object (§3.10, A13) — the reader thread, perception budget ──
     def _register_object(self, args: list, rid: int | None) -> dict:
@@ -815,6 +907,9 @@ class RunSession:
             # starts a handler in the window before close_run.
             if self.closed.is_set() or self.ctx.should_stop():
                 job.reply = _err(rid, 'robot', RUN_STOPPED_DE)
+                return
+            if job.call.table == 'code':
+                job.reply = self._code_only(job.call, job.args, rid)
                 return
             kwargs: dict[str, Any] = {}
             for p, v in zip(job.call.params, job.args):

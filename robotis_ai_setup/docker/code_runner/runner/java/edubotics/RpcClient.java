@@ -237,6 +237,76 @@ public final class RpcClient {
         throw new RobotError(BAD_REPLY_DE);
     }
 
+    // ── zeige(): bounded, JSON-safe renderings of a shown value ─────────────
+
+    static final int SHOWN_MAX_ITEMS = 50;
+    static final int SHOWN_MAX_CHARS = 1000;
+
+    static Object shownDouble(double v) {
+        if (Double.isNaN(v) || Double.isInfinite(v)) {
+            return String.valueOf(v);
+        }
+        return v;
+    }
+
+    static String shownText(String s) {
+        if (s == null) {
+            return null;
+        }
+        return s.length() > SHOWN_MAX_CHARS ? s.substring(0, SHOWN_MAX_CHARS) : s;
+    }
+
+    static List<Object> shownDoubles(double[] a) {
+        if (a == null) {
+            return null;
+        }
+        int n = Math.min(a.length, SHOWN_MAX_ITEMS);
+        List<Object> out = new java.util.ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            out.add(shownDouble(a[i]));
+        }
+        return out;
+    }
+
+    static List<Object> shownInts(int[] a) {
+        if (a == null) {
+            return null;
+        }
+        int n = Math.min(a.length, SHOWN_MAX_ITEMS);
+        List<Object> out = new java.util.ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            out.add(a[i]);
+        }
+        return out;
+    }
+
+    static Object shownObject(Object o) {
+        if (o == null || o instanceof Boolean || o instanceof Integer || o instanceof Long
+                || o instanceof Short || o instanceof Byte) {
+            return o;
+        }
+        if (o instanceof Number) {
+            return shownDouble(((Number) o).doubleValue());
+        }
+        if (o instanceof double[]) {
+            return shownDoubles((double[]) o);
+        }
+        if (o instanceof int[]) {
+            return shownInts((int[]) o);
+        }
+        if (o instanceof Iterable) {
+            List<Object> out = new java.util.ArrayList<>();
+            for (Object item : (Iterable<?>) o) {
+                if (out.size() >= SHOWN_MAX_ITEMS) {
+                    break;
+                }
+                out.add(shownText(String.valueOf(item)));
+            }
+            return out;
+        }
+        return shownText(String.valueOf(o));
+    }
+
     static double[] asPoint(Object r) {
         if (r == null) {
             return null;

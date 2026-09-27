@@ -1,12 +1,18 @@
 // The editor's robot_api.json (rendered from the server's robot_api.py table)
 // and pythonCodeGen.js (the Blockly display mirror) describe the same
-// `robot.*` surface from two ends. They differ in EXACTLY two names, and
-// both differences are deliberate:
+// `robot.*` surface from two ends. They differ in EXACTLY three names, and
+// every difference is deliberate:
 //
-//   json − pythonCodeGen == {'ziel'}       robot.ziel(name) is how a TEXT
+//   json − pythonCodeGen == {'zeige', 'ziel'}
+//                                          robot.ziel(name) is how a TEXT
 //                                          program references a pinned
 //                                          destination; Blockly drops the
-//                                          value block into the socket
+//                                          value block into the socket.
+//                                          robot.zeige(name, wert) is a
+//                                          code-only row (robot_api
+//                                          CODE_ONLY_METHODS, 2026-09-27):
+//                                          a block program's variables reach
+//                                          the Variablen panel by themselves
 //   pythonCodeGen − json == {'broadcast'}  hats have no meaning in a text
 //                                          program; a text program uses
 //                                          functions
@@ -34,23 +40,28 @@ function codeGenMethodNames() {
 const minus = (a, b) => [...a].filter((x) => !b.has(x)).sort();
 
 describe('robot_api.json vs pythonCodeGen.js', () => {
-  it('the JSON names minus the generator names are exactly {ziel}', () => {
-    expect(minus(jsonMethodNames(), codeGenMethodNames())).toEqual(['ziel']);
+  it('the JSON names minus the generator names are exactly {zeige, ziel}', () => {
+    expect(minus(jsonMethodNames(), codeGenMethodNames())).toEqual(['zeige', 'ziel']);
   });
 
   it('the generator names minus the JSON names are exactly {broadcast}', () => {
     expect(minus(codeGenMethodNames(), jsonMethodNames())).toEqual(['broadcast']);
   });
 
-  it('the JSON carries 32 methods, every one with a German doc and a block type', () => {
+  it('the JSON carries 32 handler methods with a block type and one code-only method', () => {
     const doc = JSON.parse(fs.readFileSync(API_JSON, 'utf8'));
-    expect(doc.methods).toHaveLength(32);
+    expect(doc.methods).toHaveLength(33);
+    const handlerRows = doc.methods.filter((m) => m.table !== 'code');
+    const codeOnly = doc.methods.filter((m) => m.table === 'code');
+    expect(handlerRows).toHaveLength(32);
+    expect(codeOnly.map((m) => m.name)).toEqual(['zeige']);
     for (const m of doc.methods) {
       expect(typeof m.doc_de).toBe('string');
       expect(m.doc_de.length).toBeGreaterThan(0);
-      expect(m.block_type).toMatch(/^edubotics_/);
       expect(Array.isArray(m.params)).toBe(true);
     }
+    for (const m of handlerRows) expect(m.block_type).toMatch(/^edubotics_/);
+    for (const m of codeOnly) expect(m.block_type).toBeNull();
   });
 
   it('the JSON carries both frame bounds and the three project caps', () => {

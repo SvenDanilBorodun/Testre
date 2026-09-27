@@ -51,11 +51,17 @@ vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
 // test edit the entry file through the page's own onChange — and, through the
 // asset document the page hands it, rename a Ziel and save IN THE SAME TICK
 // (the drawer's rename does exactly that: rewrite the code, then await a save).
-const mockPage = vi.hoisted(() => ({ onSave: null, assetDoc: null }));
+const mockPage = vi.hoisted(() => ({
+  onSave: null, assetDoc: null, host: null,
+}));
 vi.mock('../../components/Workshop/code/CodeWorkspace', () => ({
   __esModule: true,
-  default: function MockCodeWorkspace({ language, files, onFilesChange, assetDoc }) {
+  default: function MockCodeWorkspace(props) {
+    const {
+      language, files, onFilesChange, assetDoc,
+    } = props;
     mockPage.assetDoc = assetDoc;
+    mockPage.host = props;
     return (
       <div data-testid="code-workspace" data-language={language}>
         <pre data-testid="code-files">{JSON.stringify(files)}</pre>
@@ -600,5 +606,22 @@ describe('WorkshopPage — creating Ziele in a code program (the three silent no
     expect(pin).toMatchObject({ kind: 'pin', source: 'sim', z: 0 });
     // The sim stage's markers are the code document's entries.
     expect(mockSimStage.props.markers.map((m) => m.label)).toEqual(expect.arrayContaining(['Ablage', 'Hoch', 'Ziel 2']));
+  });
+});
+
+describe('WorkshopPage — the code editor host gets the Sammlung (O4–O7)', () => {
+  test('the catalog’s object types, the page’s provider, and the cursor „Einfügen" writes below', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await waitFor(() => expect(mockPage.host.objectTypes).toEqual(['wuerfel']));
+    expect(typeof mockPage.host.provider.dispatchAction).toBe('function');
+
+    act(() => { mockPage.host.onCursorChange({ file: 'hilfe.py', line: 1 }); });
+    act(() => { mockPage.assetDoc.insertSnippet({ kind: 'recording', name: 'Winken' }); });
+    const files = JSON.parse(screen.getByTestId('code-files').textContent);
+    expect(files['hilfe.py']).toBe('x = 1\nrobot.replay("Winken")\n');
+    expect(mockPage.host.revealRequest).toMatchObject({ file: 'hilfe.py', line: 2 });
   });
 });

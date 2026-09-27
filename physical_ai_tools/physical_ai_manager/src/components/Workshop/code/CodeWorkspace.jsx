@@ -18,13 +18,30 @@
 // The file last open is remembered under `edubotics_code_last_file`, a
 // STUDENT-scoped key (utils/sessionScope.js): it is a view of the student's own
 // program, not of the rig.
+//
+// The code Sammlung (owner decisions O4–O7), when the page hands an asset
+// document (`assetDoc`) and its Sammlung provider: a „Sammlung" section under
+// the files — four counts that open the drawer on their tab, and „+ Neu" with
+// the creation actions the flyout cards offer a Blockly program — plus the
+// cursor „Einfügen" writes below. The last cursor line is remembered PER FILE
+// (in memory, never stored) and reported to the page as `{file, line}`; a file
+// the student opened but never clicked into reports null, so an insertion then
+// goes to the end of main (codeInsert.insertionTarget). A reveal request from
+// the page (`{file, line, nonce}`: a „Benutzt in" jump, an insertion) switches
+// to that file and puts the caret on that line.
 
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import React, {
+  Suspense, lazy, useCallback, useDeferredValue, useEffect, useMemo, useReducer, useRef, useState,
+} from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { addBreakpoint, removeBreakpoint } from '../../../features/workshop/workshopSlice';
+import { openDrawer } from '../../../features/workshop/studioAssetsSlice';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
+import { DE } from '../blocks/messages_de';
+import { newActionsFor } from '../sammlung/newActions';
 import { breakpointLinesForFile, codeBreakpointId, parseCodeBreakpointId } from './codeBreakpoints';
+import { buildCodeAssetKnowledge } from './codeAssetCompletion';
 import { CODE_DE, formatCode } from './codeMessagesDe';
 import { CODE_LIMITS, ENTRY_FILE, validateProjectPath } from './codeProject';
 
@@ -84,13 +101,100 @@ class EditorBoundary extends React.Component {
   }
 }
 
+// The sidebar's Sammlung rows: [drawer tab, label, index count key].
+const SAMMLUNG_ROWS = Object.freeze([
+  ['aufnahmen', DE.CATEGORY_AUFNAHMEN],
+  ['ziele', DE.CATEGORY_ZIELE],
+  ['positionen', DE.CATEGORY_POSITIONEN],
+  ['variablen', DE.CATEGORY_VARIABLEN],
+]);
+
+const NO_OBJECT_TYPES = Object.freeze([]);
+
+function snapshotOf(provider) {
+  try {
+    return provider && typeof provider.getSnapshot === 'function' ? provider.getSnapshot() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * The „Sammlung" section of the sidebar: the counts (each opens the drawer on
+ * its tab) and „+ Neu". Rendered only with an asset document.
+ */
+function SammlungSection({ counts, actions, onOpen, onAction, buttonClass }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  return (
+    <section
+      aria-label={DE.SAMMLUNG_TITLE}
+      className="border-t border-[var(--line)] px-1 py-1.5"
+    >
+      <div className="px-1 pb-1 text-[11px] font-semibold text-[var(--ink-3)] uppercase tracking-wide">
+        {DE.SAMMLUNG_TITLE}
+      </div>
+      {SAMMLUNG_ROWS.map(([tab, label]) => (
+        <button
+          key={tab}
+          type="button"
+          onClick={() => onOpen(tab)}
+          title={formatCode(CODE_DE.SAMMLUNG_OPEN_TAB, label)}
+          className="w-full text-left text-xs px-2 py-0.5 rounded text-[var(--ink)] hover:bg-white"
+        >
+          {`${label} ${counts[tab] ?? 0}`}
+        </button>
+      ))}
+      {actions.length > 0 && (
+        <div className="relative px-1 pt-1">
+          <button
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+            className={buttonClass + ' w-full'}
+          >
+            {`+ ${CODE_DE.SAMMLUNG_NEW}`}
+          </button>
+          {menuOpen && (
+            <ul
+              role="menu"
+              aria-label={CODE_DE.SAMMLUNG_NEW_MENU}
+              className="absolute left-1 right-1 bottom-full mb-1 z-10 rounded-md border border-[var(--line)] bg-white py-1 shadow"
+            >
+              {actions.map(({ label, action }) => (
+                <li key={label} role="none">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onAction(action);
+                    }}
+                    className="w-full text-left text-xs px-2 py-1 text-[var(--ink)] hover:bg-[var(--bg-sunk)]"
+                  >
+                    {label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 const sortPaths = (paths) => paths.slice().sort((a, b) => {
   const da = a.includes('/') ? 1 : 0;
   const db = b.includes('/') ? 1 : 0;
   return da - db || a.localeCompare(b, 'de');
 });
 
-function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
+function CodeWorkspace({
+  language, files, onFilesChange, readOnly = false,
+  assetDoc = null, provider = null, onCursorChange = null, revealRequest = null,
+  objectTypes = NO_OBJECT_TYPES,
+}) {
   const entry = ENTRY_FILE[language];
   const paths = useMemo(() => sortPaths(Object.keys(files || {})), [files]);
   const [active, setActive] = useState(() => {
@@ -106,10 +210,53 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
     }
   }, [files, active, entry]);
 
+  /*
+   * The cursor „Einfügen" writes below. `cursorByFile` is the last line the
+   * student's cursor was on, per file; `editorReveal` is what the editor is
+   * asked to show (`{line, nonce}`, a fresh nonce per request).
+   */
+  const cursorByFile = useRef(new Map());
+  const revealSeq = useRef(0);
+  const [editorReveal, setEditorReveal] = useState(null);
+  const onCursorRef = useRef(onCursorChange);
+  useEffect(() => { onCursorRef.current = onCursorChange; }, [onCursorChange]);
+  const reportCursor = useCallback((at) => { onCursorRef.current?.(at); }, []);
+  const revealInEditor = useCallback((line) => {
+    revealSeq.current += 1;
+    setEditorReveal({ line, nonce: revealSeq.current });
+  }, []);
+
   const open = useCallback((path) => {
     setActive(path);
     writeLastFile(path);
-  }, []);
+    const line = cursorByFile.current.get(path);
+    if (Number.isInteger(line)) {
+      reportCursor({ file: path, line });
+      revealInEditor(line);
+    } else {
+      reportCursor(null);
+    }
+  }, [reportCursor, revealInEditor]);
+
+  const handleEditorCursor = useCallback((line) => {
+    if (!Number.isInteger(line) || line < 1) return;
+    cursorByFile.current.set(active, line);
+    reportCursor({ file: active, line });
+  }, [active, reportCursor]);
+
+  // The page's reveal: switch to its file (if the program has it), caret there.
+  const pageRevealNonce = revealRequest ? revealRequest.nonce : null;
+  useEffect(() => {
+    if (!revealRequest || typeof revealRequest.file !== 'string' || !Number.isInteger(revealRequest.line)) return;
+    if (!files || !Object.prototype.hasOwnProperty.call(files, revealRequest.file)) return;
+    const { file, line } = revealRequest;
+    setActive(file);
+    cursorByFile.current.set(file, line);
+    reportCursor({ file, line });
+    revealInEditor(line);
+    // Once per nonce — the files change on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageRevealNonce]);
 
   const handleContentChange = useCallback((content) => {
     if (!files || files[active] === content) return;
@@ -149,6 +296,9 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
     }
     const next = {};
     for (const p of Object.keys(files)) next[p === active ? path : p] = files[p];
+    const remembered = cursorByFile.current.get(active);
+    cursorByFile.current.delete(active);
+    if (Number.isInteger(remembered)) cursorByFile.current.set(path, remembered);
     onFilesChange(next);
     open(path);
   }, [active, entry, language, files, onFilesChange, open]);
@@ -160,6 +310,7 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
     }
     const next = { ...files };
     delete next[active];
+    cursorByFile.current.delete(active);
     onFilesChange(next);
     open(entry);
   }, [active, entry, files, onFilesChange, open]);
@@ -222,6 +373,56 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
     return { line: null, kind: null };
   }, [currentBlockId, active, paused, runState]);
 
+  /*
+   * The Sammlung: counts for the section and the names the editor completes,
+   * warns about and describes. Both re-derive on a store or provider change
+   * (a new Ziel, a recording list arriving) and on the files — deferred, so a
+   * keystroke never waits for a whole-project scan.
+   */
+  const [sammlungTick, bumpSammlung] = useReducer((n) => n + 1, 0);
+  useEffect(() => {
+    const offs = [];
+    if (assetDoc && typeof assetDoc.subscribe === 'function') offs.push(assetDoc.subscribe(bumpSammlung));
+    if (provider && typeof provider.subscribe === 'function') offs.push(provider.subscribe(bumpSammlung));
+    return () => offs.forEach((off) => off());
+  }, [assetDoc, provider]);
+  const deferredFiles = useDeferredValue(files);
+  const sammlungCounts = useMemo(() => {
+    if (!assetDoc) return null;
+    try {
+      return assetDoc.buildIndex(snapshotOf(provider) || undefined).counts || {};
+    } catch (_) {
+      return {};
+    }
+    // sammlungTick and deferredFiles are the change signals of what
+    // buildIndex reads through the document.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assetDoc, provider, sammlungTick, deferredFiles]);
+  const assets = useMemo(() => {
+    if (!assetDoc) return null;
+    const store = assetDoc.getStore();
+    const snapshot = snapshotOf(provider);
+    return buildCodeAssetKnowledge({
+      files: deferredFiles,
+      language,
+      entries: store && typeof store.getEntries === 'function' ? store.getEntries() : [],
+      trajectories: snapshot ? snapshot.trajectories : null,
+      objectTypes,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assetDoc, provider, sammlungTick, deferredFiles, language, objectTypes]);
+  const newActions = useMemo(
+    () => (readOnly || !assetDoc ? [] : newActionsFor((snapshotOf(provider) || {}).capabilities)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [readOnly, assetDoc, provider, sammlungTick],
+  );
+  const openSammlungTab = useCallback((tab) => {
+    dispatch(openDrawer({ tab, focusId: null }));
+  }, [dispatch]);
+  const dispatchSammlungAction = useCallback((action) => {
+    if (provider && typeof provider.dispatchAction === 'function') provider.dispatchAction(action);
+  }, [provider]);
+
   const smallButton = 'text-xs px-2 py-1 rounded-md border border-[var(--line)] bg-white '
     + 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed';
 
@@ -272,6 +473,15 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
             </div>
           </>
         )}
+        {sammlungCounts && (
+          <SammlungSection
+            counts={sammlungCounts}
+            actions={newActions}
+            onOpen={openSammlungTab}
+            onAction={dispatchSammlungAction}
+            buttonClass={smallButton}
+          />
+        )}
       </aside>
       <div className="flex-1 min-w-0 min-h-0">
         <EditorBoundary>
@@ -290,6 +500,9 @@ function CodeWorkspace({ language, files, onFilesChange, readOnly = false }) {
               onToggleBreakpoint={debuggable ? handleToggleBreakpoint : null}
               highlightLine={highlight.line}
               highlightKind={highlight.kind}
+              assets={assets}
+              revealRequest={editorReveal}
+              onCursorChange={handleEditorCursor}
             />
           </Suspense>
         </EditorBoundary>

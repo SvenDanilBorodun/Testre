@@ -112,6 +112,8 @@ export const CODE_DE = Object.freeze({
   SAMMLUNG_INSERT_TITLE: 'Unter der Zeile einfügen, in der zuletzt der Cursor stand — '
     + 'oder die Zeile in den Code ziehen.',
   INSERTED_AT: 'In {0} ab Zeile {1} eingefügt.',
+  SAMMLUNG_OPEN_TAB: '„{0}“ in der Sammlung öffnen',
+  SAMMLUNG_NEW_MENU: 'Neu in der Sammlung',
 
   SUBMIT: 'Abgeben',
   SUBMIT_TITLE: 'Diesen Stand des Programms bei der Lehrkraft abgeben',

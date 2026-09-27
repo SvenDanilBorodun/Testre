@@ -42,6 +42,8 @@ import {
 } from '../../../features/workshop/studioAssetsSlice';
 import { DE, formatDe } from '../blocks/messages_de';
 import { CODE_DE, formatCode } from '../code/codeMessagesDe';
+import { SNIPPET_MIME } from '../code/codeInsert';
+import { newActionsFor } from './newActions';
 import { EMPTY_SAMMLUNG_PROVIDER } from './provider';
 import { assetDocumentOf } from './assetDocument';
 import DrawerRecording from './DrawerRecording';
@@ -56,22 +58,10 @@ export const DRAWER_TABS = Object.freeze([
 ]);
 
 /** The drag-and-drop type of a Sammlung row dropped into the code editor. */
-export const SNIPPET_MIME = 'application/x-edubotics-snippet';
+export { SNIPPET_MIME };
 
 // The row kinds a code program can take as a line of code.
 const SNIPPET_KINDS = new Set(['recording', 'pin', 'pose']);
-
-// „Neu" per tab, for a code program: [label, action, capability test].
-const canTeach = (c) => !!(c.hardware && c.teach && !c.simMode);
-const NEW_ACTIONS = Object.freeze({
-  aufnahmen: [[DE.FLY_TEACH_RECORDING, { type: 'teach', focus: 'recording' }, canTeach]],
-  ziele: [
-    [DE.FLY_TEACH_ZIEL, { type: 'teach', focus: 'ziel' }, canTeach],
-    [DE.FLY_PIN_CAMERA, { type: 'pinCamera' }, (c) => !!c.pinCamera],
-    [DE.FLY_PIN_SIM, { type: 'pinSim' }, (c) => !!c.pinSim],
-  ],
-  positionen: [[DE.FLY_TEACH_POSE, { type: 'teach', focus: 'pose' }, canTeach]],
-});
 
 const CHIP_CLASSES = {
   ok: 'bg-green-100 text-green-800',
@@ -153,9 +143,7 @@ export default function SammlungDrawer({
   const anchorLeft = assetDoc ? assetDoc.anchorLeft() : 0;
   const isCode = !!assetDoc && assetDoc.kind === 'code';
   const canInsert = !!assetDoc && assetDoc.canInsertSnippets === true;
-  const newActions = isCode
-    ? (NEW_ACTIONS[tab] || []).filter(([, , allowed]) => allowed(capabilities))
-    : [];
+  const newActions = isCode ? newActionsFor(capabilities, tab) : [];
   const snippetable = (card) => canInsert && SNIPPET_KINDS.has(card.assetKind);
 
   const insert = (card) => {
@@ -247,7 +235,7 @@ export default function SammlungDrawer({
           className="flex flex-wrap items-center gap-1 border-b border-[var(--line)] px-2 py-1.5"
         >
           <span className="text-xs font-semibold text-gray-500">{CODE_DE.SAMMLUNG_NEW}</span>
-          {newActions.map(([label, action]) => (
+          {newActions.map(({ label, action }) => (
             <button
               key={label}
               type="button"

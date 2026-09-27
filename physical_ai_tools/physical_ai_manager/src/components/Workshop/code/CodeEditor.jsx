@@ -17,18 +17,29 @@
 // Deliberately NOT `basicSetup`: it brings the search panel and the lint panel,
 // whose built-in strings are English (Rule §1). The extension list below is
 // assembled by hand and every student-visible string it can produce is German
-// (the parse notice, the API docs).
+// (the parse notice, the API docs, the Sammlung warnings and hover text).
+//
+// The code Sammlung (owner decisions O5–O7) reaches the editor through four
+// props and the pure modules it wires in: the asset names (`assets`, read
+// through a ref, so a new Ziel never rebuilds the view) feed a second
+// completion source, a warning linter and a hover tooltip
+// (codeAssetCompletion.js); a Sammlung row dropped onto the text becomes the
+// line(s) that use it (codeInsert.js); `revealRequest` puts the caret on a
+// line; `onCursorChange` tells the page where the student's cursor is, which
+// is where „Einfügen" writes.
 
 import React, { useEffect, useRef } from 'react';
-import { Decoration, EditorView, GutterMarker, gutter, keymap, lineNumbers,
+import { Decoration, EditorView, GutterMarker, gutter, hoverTooltip, keymap, lineNumbers,
   highlightActiveLine, highlightActiveLineGutter,
   drawSelection, rectangularSelection } from '@codemirror/view';
-import { EditorState, Compartment, StateEffect, StateField } from '@codemirror/state';
+import {
+  Annotation, EditorSelection, EditorState, Compartment, StateEffect, StateField,
+} from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { bracketMatching, ensureSyntaxTree, indentOnInput, syntaxHighlighting,
   defaultHighlightStyle } from '@codemirror/language';
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
-import { linter, lintGutter } from '@codemirror/lint';
+import { forceLinting, linter, lintGutter } from '@codemirror/lint';
 import { python } from '@codemirror/lang-python';
 import { java } from '@codemirror/lang-java';
 import {
@@ -39,6 +50,15 @@ import {
   diagnosticsForRegions,
 } from './parseMarkers';
 import { robotApiCompletions, robotApiTriggerFrom } from './robotApiCompletion';
+import {
+  ASSET_LINT_LANGUAGES,
+  assetArgContext,
+  assetAtOffset,
+  assetDiagnostics,
+  assetHoverText,
+  assetOptions,
+} from './codeAssetCompletion';
+import { SNIPPET_MIME, insertionEdit, minimalChange, snippetLines } from './codeInsert';
 
 const LANGUAGE_SUPPORT = { python, java };
 
@@ -93,6 +113,157 @@ export function robotApiCompletionSource(language) {
     if (from < 0) return null;
     return { from: line.from + from, options, validFor: /^[A-Za-z_][A-Za-z0-9_]*$/ };
   };
+}
+
+/**
+ * The Sammlung completion source: inside the string argument of an asset call
+ * (`robot.move_to("`, `Robot.replay("`), the names the Sammlung and the
+ * program know. `knownRef.current` is read on every query.
+ */
+export function assetCompletionSource(language, knownRef) {
+  return (context) => {
+    const line = context.state.doc.lineAt(context.pos);
+    const before = line.text.slice(0, context.pos - line.from);
+    const hit = assetArgContext(before, language);
+    if (!hit) return null;
+    const options = assetOptions(hit.asset, knownRef && knownRef.current)
+      .map((o) => ({ label: o.label, detail: o.detail, type: 'constant' }));
+    if (options.length === 0) return null;
+    return { from: line.from + hit.from, options, validFor: /^[^"'\\\n]*$/ };
+  };
+}
+
+// Dispatched when the Sammlung's names change. `forceLinting` alone only
+// hurries a lint that is already PENDING, so the source is asked to re-run
+// through `needsRefresh` first.
+const assetsChanged = StateEffect.define();
+
+/**
+ * The Sammlung warnings as a lint extension (only for a language on
+ * ASSET_LINT_LANGUAGES). The cursor's line is skipped (a half-typed name is on
+ * it by construction), so moving to another line re-runs the source, and so
+ * does a change of the Sammlung's names. A diagnostic carries no `source`: the
+ * lint tooltip would print it, and it is an English word.
+ */
+function assetLintExtensions(language, knownRef, withGutter) {
+  if (!ASSET_LINT_LANGUAGES.includes(language)) return [];
+  let lastCursorLine = -1;
+  const source = (view) => {
+    const { state } = view;
+    const cursorLine = state.doc.lineAt(state.selection.main.head).number;
+    lastCursorLine = cursorLine;
+    return assetDiagnostics(state.doc.toString(), language, knownRef.current, { cursorLine })
+      .map((d) => ({
+        from: d.from, to: d.to, severity: d.severity, message: d.message,
+      }));
+  };
+  const needsRefresh = (update) => {
+    if (update.transactions.some((tr) => tr.effects.some((e) => e.is(assetsChanged)))) return true;
+    if (!update.selectionSet) return false;
+    return update.state.doc.lineAt(update.state.selection.main.head).number !== lastCursorLine;
+  };
+  return [
+    linter(source, { delay: CODE_LINT_IDLE_MS, needsRefresh }),
+    withGutter ? lintGutter() : [],
+  ];
+}
+
+/**
+ * What a hover over position `pos` shows: the asset literal under it and its
+ * German description, `{pos, end, text}`, or null.
+ */
+export function assetHoverAt(state, pos, language, known) {
+  const hit = assetAtOffset(state.doc.toString(), language, pos);
+  if (!hit) return null;
+  const text = assetHoverText(hit.asset, hit.name, known);
+  return text ? { pos: hit.from, end: hit.to, text } : null;
+}
+
+function assetHover(language, knownRef) {
+  return hoverTooltip((view, pos) => {
+    const hit = assetHoverAt(view.state, pos, language, knownRef.current);
+    if (!hit) return null;
+    return {
+      pos: hit.pos,
+      end: hit.end,
+      above: true,
+      create() {
+        const dom = document.createElement('div');
+        dom.className = 'cm-edubotics-asset-hover';
+        dom.textContent = hit.text;
+        return { dom };
+      },
+    };
+  });
+}
+
+/**
+ * A Sammlung row dropped onto the text (the drawer's `SNIPPET_MIME` payload
+ * `{kind, name}`) becomes the line(s) that use it, on new lines BELOW the drop
+ * line and indented like it (codeInsert.insertionEdit — the same rule as
+ * „Einfügen"). Without drop coordinates the cursor's line is the anchor.
+ * Anything else — ordinary text — is left to CodeMirror's own handler.
+ */
+function snippetDrop(language) {
+  return EditorView.domEventHandlers({
+    dragover(event) {
+      const types = event.dataTransfer && event.dataTransfer.types;
+      if (types && Array.from(types).includes(SNIPPET_MIME)) {
+        event.preventDefault();
+        return true;
+      }
+      return false;
+    },
+    drop(event, view) {
+      const raw = event.dataTransfer ? event.dataTransfer.getData(SNIPPET_MIME) : '';
+      if (!raw) return false;
+      event.preventDefault();
+      if (view.state.readOnly) return true;
+      let asset = null;
+      try {
+        asset = JSON.parse(raw);
+      } catch (_) {
+        return true;
+      }
+      const lines = snippetLines(asset, language);
+      if (lines.length === 0) return true;
+      let at = null;
+      try {
+        at = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      } catch (_) {
+        at = null;
+      }
+      const pos = Number.isInteger(at) ? at : view.state.selection.main.head;
+      const dropLine = view.state.doc.lineAt(pos).number;
+      const edit = insertionEdit(view.state.doc.toString(), dropLine, lines, { language });
+      if (!edit.insert) return true;
+      // The end of the last inserted line: the insertion either ends with the
+      // newline that separates it from the drop line's successor, or (at the
+      // very end of a file without one) starts with it.
+      const caret = edit.insert.endsWith('\n')
+        ? edit.from + edit.insert.length - 1
+        : edit.from + edit.insert.length;
+      view.dispatch({
+        changes: { from: edit.from, insert: edit.insert },
+        selection: EditorSelection.cursor(caret),
+        scrollIntoView: true,
+        userEvent: 'input.drop',
+      });
+      return true;
+    },
+  });
+}
+
+// Marks the transaction that applies an external `value` (a rename, an
+// insertion from the drawer): the page already holds that text, so it is not
+// echoed back through onChange, and it is not a cursor move of the student's.
+const externalSync = Annotation.define();
+
+// The transactions that are the student's own doing: typing, deleting,
+// pasting, a drop, undo/redo, a click or an arrow key.
+const STUDENT_EVENTS = ['input', 'delete', 'move', 'select', 'undo', 'redo'];
+function isStudentTransaction(tr) {
+  return !tr.annotation(externalSync) && STUDENT_EVENTS.some((e) => tr.isUserEvent(e));
 }
 
 /*
@@ -225,9 +396,11 @@ const theme = EditorView.theme({
   '.cm-edubotics-bp': { display: 'block', width: '100%', fontSize: '11px', lineHeight: 'inherit' },
   '.cm-edubotics-bp-set': { color: '#dc2626' },
   '.cm-edubotics-run-line': { backgroundColor: '#fef3c7' },
+  '.cm-edubotics-asset-hover': { padding: '2px 6px', fontSize: '12px' },
 });
 
-function editorExtensions(language, onDocChange, readOnlyCompartment, onToggleRef, withGutter) {
+function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef, withGutter, assetsRef) {
+  const parseLint = parseLintExtensions(language);
   return [
     lineNumbers(),
     breakpointLinesField,
@@ -243,13 +416,24 @@ function editorExtensions(language, onDocChange, readOnlyCompartment, onToggleRe
     bracketMatching(),
     closeBrackets(),
     syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-    autocompletion({ override: [robotApiCompletionSource(language)] }),
+    autocompletion({
+      override: [robotApiCompletionSource(language), assetCompletionSource(language, assetsRef)],
+    }),
     keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
     LANGUAGE_SUPPORT[language](),
-    parseLintExtensions(language),
+    parseLint,
+    // One lint gutter: the parse markers bring their own when they are on.
+    assetLintExtensions(language, assetsRef, parseLint.length === 0),
+    assetHover(language, assetsRef),
+    snippetDrop(language),
     readOnlyCompartment.of(EditorState.readOnly.of(false)),
     EditorView.updateListener.of((update) => {
-      if (update.docChanged) onDocChange(update.state.doc.toString());
+      const external = update.transactions.some((tr) => tr.annotation(externalSync));
+      if (update.docChanged && !external) callbacks.onDocChange(update.state.doc.toString());
+      const own = update.transactions.some(isStudentTransaction);
+      if ((own && (update.selectionSet || update.docChanged)) || (update.focusChanged && update.view.hasFocus)) {
+        callbacks.onCursor(update.state.doc.lineAt(update.state.selection.main.head).number);
+      }
     }),
     theme,
   ];
@@ -267,22 +451,35 @@ function editorExtensions(language, onDocChange, readOnlyCompartment, onToggleRe
  * creation, which is fine because the language decides it and a language
  * change re-creates the view.
  *
+ * The code Sammlung's four: `assets` (what codeAssetCompletion.js knows —
+ * recordings, places, the program's pins, counters, objects), `revealRequest`
+ * (`{line, nonce}`: put the caret at the end of that line, once per nonce,
+ * clamped to the document), `onCursorChange(line)` (the student's own cursor
+ * moves and edits only — never a programmatic selection or an external value).
+ *
  * The view is created once per (language, path); typing flows out through
  * onChange, and an external `value` that differs from the document (a rename,
- * a version restore) is applied without moving the cursor more than needed.
+ * an insertion from the drawer, a version restore) is applied as the SMALLEST
+ * change (codeInsert.minimalChange), so the cursor stays where the text around
+ * it did not change and Strg+Z undoes exactly that edit. It is not echoed back
+ * through onChange: the page already holds it.
  */
 function CodeEditor({
   language, path, value, onChange, readOnly = false,
   breakpointLines = null, onToggleBreakpoint = null,
   highlightLine = null, highlightKind = null,
+  assets = null, revealRequest = null, onCursorChange = null,
 }) {
   const hostRef = useRef(null);
   const viewRef = useRef(null);
   const onChangeRef = useRef(onChange);
   const onToggleRef = useRef(onToggleBreakpoint);
+  const onCursorRef = useRef(onCursorChange);
+  const assetsRef = useRef(assets);
   const readOnlyRef = useRef(new Compartment());
   useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
   useEffect(() => { onToggleRef.current = onToggleBreakpoint; }, [onToggleBreakpoint]);
+  useEffect(() => { onCursorRef.current = onCursorChange; }, [onCursorChange]);
 
   useEffect(() => {
     if (!hostRef.current) return undefined;
@@ -291,10 +488,14 @@ function CodeEditor({
         doc: value || '',
         extensions: editorExtensions(
           language,
-          (doc) => onChangeRef.current?.(doc),
+          {
+            onDocChange: (doc) => onChangeRef.current?.(doc),
+            onCursor: (line) => onCursorRef.current?.(line),
+          },
           readOnlyRef.current,
           onToggleRef,
           typeof onToggleRef.current === 'function',
+          assetsRef,
         ),
       }),
       parent: hostRef.current,
@@ -334,12 +535,38 @@ function CodeEditor({
 
   useEffect(() => {
     const view = viewRef.current;
-    if (!view) return;
-    const current = view.state.doc.toString();
-    if (value !== undefined && value !== current) {
-      view.dispatch({ changes: { from: 0, to: current.length, insert: value || '' } });
-    }
+    if (!view || value === undefined) return;
+    const change = minimalChange(view.state.doc.toString(), value || '');
+    if (change) view.dispatch({ changes: change, annotations: externalSync.of(true) });
   }, [value]);
+
+  // New Sammlung names: the warnings are re-judged at once (completion and
+  // hover read the ref on their own next query).
+  useEffect(() => {
+    assetsRef.current = assets;
+    const view = viewRef.current;
+    if (view && ASSET_LINT_LANGUAGES.includes(language)) {
+      view.dispatch({ effects: assetsChanged.of(null) });
+      forceLinting(view);
+    }
+  }, [assets, language]);
+
+  // A „Benutzt in" jump or an insertion: the caret at the end of the line.
+  const revealNonce = revealRequest ? revealRequest.nonce : null;
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !revealRequest || !Number.isInteger(revealRequest.line)) return;
+    const n = Math.min(Math.max(revealRequest.line, 1), view.state.doc.lines);
+    const caret = view.state.doc.line(n).to;
+    view.dispatch({
+      selection: EditorSelection.cursor(caret),
+      effects: EditorView.scrollIntoView(caret, { y: 'center' }),
+    });
+    // One reveal per nonce: the request object's identity and line are not
+    // the trigger, its nonce is (a repeated jump to the same line gets a new
+    // nonce from the page).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealNonce, path]);
 
   useEffect(() => {
     const view = viewRef.current;

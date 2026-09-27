@@ -30,7 +30,9 @@
 // stays empty: a missing Sammlung name is a fact the editor can know, a parse
 // failure is not.
 
-import { ASSET_CALLS, findAssetCalls } from './codeAssetUsage';
+import {
+  ASSET_CALLS, codeDefinedPlaceNames, findAssetCalls, scanCodeAssets,
+} from './codeAssetUsage';
 import { CODE_DE, formatCode } from './codeMessagesDe';
 
 /** The languages the asset warnings are ON for. */
@@ -195,4 +197,60 @@ export function assetHoverText(asset, name, known) {
     return missingReason('recording', name, k);
   }
   return null;
+}
+
+function timeOf(item) {
+  const t = Date.parse(item && item.created_at);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * What the editor helpers above know, built from what the page has: the code
+ * files, the document's Ziele store entries, the provider's recording list
+ * (`{status, items}`) and the object types of the catalog. Recordings are
+ * grouped by name — one row per recording, its newest version's duration and
+ * the version count — newest recording first. Counters and extra object names
+ * come from the program's own (non-comment) calls.
+ */
+export function buildCodeAssetKnowledge({
+  files, language, entries, trajectories, objectTypes,
+} = {}) {
+  const items = trajectories && Array.isArray(trajectories.items) ? trajectories.items : [];
+  const groups = new Map();
+  for (const item of items) {
+    const name = item && typeof item.name === 'string' ? item.name : '';
+    if (!name) continue;
+    const g = groups.get(name);
+    if (!g) groups.set(name, { newest: item, versions: 1 });
+    else {
+      g.versions += 1;
+      if (timeOf(item) > timeOf(g.newest)) g.newest = item;
+    }
+  }
+  const recordings = [...groups.entries()]
+    .sort((a, b) => timeOf(b[1].newest) - timeOf(a[1].newest))
+    .map(([name, g]) => ({
+      name,
+      duration_s: Number.isFinite(g.newest.duration_s) ? g.newest.duration_s : null,
+      versions: g.versions,
+    }));
+  const scan = files && typeof files === 'object' ? scanCodeAssets(files, language) : null;
+  const enabledNames = (map) => (map ? [...map.entries()]
+    .filter(([, rows]) => rows.some((r) => !r.inComment)).map(([n]) => n) : []);
+  const objects = [];
+  const seen = new Set();
+  for (const n of [...names(objectTypes), ...enabledNames(scan && scan.objects)]) {
+    if (!seen.has(n)) {
+      seen.add(n);
+      objects.push(n);
+    }
+  }
+  return {
+    recordings,
+    recordingsStatus: trajectories && typeof trajectories.status === 'string' ? trajectories.status : 'none',
+    places: (Array.isArray(entries) ? entries : []).filter((e) => e && typeof e.name === 'string'),
+    codePinnedNames: files && typeof files === 'object' ? codeDefinedPlaceNames(files, language) : [],
+    counters: enabledNames(scan && scan.counters),
+    objects,
+  };
 }

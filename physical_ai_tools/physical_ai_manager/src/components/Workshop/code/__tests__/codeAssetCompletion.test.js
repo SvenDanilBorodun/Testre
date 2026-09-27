@@ -21,6 +21,7 @@ import {
   assetDiagnostics,
   assetHoverText,
   assetOptions,
+  buildCodeAssetKnowledge,
 } from '../codeAssetCompletion';
 import { CODE_LINT_LANGUAGES } from '../parseMarkers';
 import { CODE_DE, formatCode } from '../codeMessagesDe';
@@ -155,5 +156,39 @@ describe('assetAtOffset + assetHoverText', () => {
     expect(assetHoverText('recording', 'Weg', KNOWN)).toBe(formatCode(CODE_DE.ASSET_MISSING_RECORDING, 'Weg'));
     expect(assetHoverText('recording', 'Weg', { ...KNOWN, recordingsStatus: 'loading' })).toBeNull();
     expect(assetHoverText('object', 'wuerfel', KNOWN)).toBeNull();
+  });
+});
+
+describe('buildCodeAssetKnowledge — what the editor helpers know', () => {
+  it('groups the recordings by name (newest first), takes the store, the code’s pins and counters, the object types', () => {
+    const k = buildCodeAssetKnowledge({
+      files: { 'main.py': 'import robot\nrobot.pin("Mitte", 0, 0, 0)\nrobot.counter_add("Punkte")\nrobot.sees("banane")\n' },
+      language: 'python',
+      entries: [{ id: 'd_1', name: 'Ablage', kind: 'pin', x: 0.1, y: 0, z: 0 }],
+      trajectories: {
+        status: 'ready',
+        items: [
+          { id: 't1', name: 'Winken', duration_s: 3, created_at: '2026-09-27T09:00:00Z' },
+          { id: 't2', name: 'Winken', duration_s: 4.2, created_at: '2026-09-27T10:00:00Z' },
+          { id: 't3', name: 'Tanz', duration_s: 1, created_at: '2026-09-27T08:00:00Z' },
+        ],
+      },
+      objectTypes: ['wuerfel'],
+    });
+    expect(k.recordingsStatus).toBe('ready');
+    expect(k.recordings).toEqual([
+      { name: 'Winken', duration_s: 4.2, versions: 2 },
+      { name: 'Tanz', duration_s: 1, versions: 1 },
+    ]);
+    expect(k.places.map((e) => e.name)).toEqual(['Ablage']);
+    expect(k.codePinnedNames).toEqual(['Mitte']);
+    expect(k.counters).toEqual(['Punkte']);
+    expect(k.objects).toEqual(['wuerfel', 'banane']);
+  });
+
+  it('is total on nothing', () => {
+    expect(buildCodeAssetKnowledge({})).toMatchObject({
+      recordings: [], recordingsStatus: 'none', places: [], codePinnedNames: [], counters: [], objects: [],
+    });
   });
 });

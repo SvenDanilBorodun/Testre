@@ -27,6 +27,12 @@ import robotApi from './robot_api.json';
 import { ENTRY_FILE } from './codeProject';
 import { codeOnlyText } from './codeAssetUsage';
 
+/**
+ * The drag-and-drop type of a Sammlung row dropped into the code editor: the
+ * drawer sets it, CodeEditor reads it. The payload is `{kind, name}` JSON.
+ */
+export const SNIPPET_MIME = 'application/x-edubotics-snippet';
+
 const METHODS = new Map((robotApi.methods || []).map((m) => [m.name, m]));
 // An asset name that can sit between double quotes in both languages as is.
 const SAFE_NAME_RE = /^[^"\\\n\r]+$/;
@@ -84,16 +90,10 @@ function codePart(line, language) {
   return codeOnlyText(line, language).replace(/\s+$/, '');
 }
 
-/**
- * Insert `lines` as new lines after line `afterLine` (1-based; 0 = before the
- * first line; clamped). Each line gets the indentation of the anchor line —
- * the nearest non-empty line at or above `afterLine` — plus one unit when that
- * line opens a block (ends with `:` or `{` outside strings and comments).
- * `opts.indent` overrides the computed indentation; `opts.language` picks the
- * comment syntax for the block test (default python).
- * @returns {{content: string, firstLine: number, lastLine: number}}
- */
-export function insertLinesAt(content, afterLine, lines, opts = {}) {
+// Where the lines go and how they are indented; shared by the string form
+// (insertLinesAt) and the editor-change form (insertionEdit), so the two can
+// never disagree.
+function planInsertion(content, afterLine, lines, opts) {
   const text = typeof content === 'string' ? content : '';
   const rows = text.split('\n');
   const body = Array.isArray(lines) ? lines : [];
@@ -114,8 +114,72 @@ export function insertLinesAt(content, afterLine, lines, opts = {}) {
   // A text ending in '\n' splits to a final '' row; inserting after the last
   // real line keeps that trailing newline where it was.
   const index = at === rows.length && rows[rows.length - 1] === '' ? rows.length - 1 : at;
+  return {
+    text, rows, inserted, index,
+  };
+}
+
+/**
+ * Insert `lines` as new lines after line `afterLine` (1-based; 0 = before the
+ * first line; clamped). Each line gets the indentation of the anchor line —
+ * the nearest non-empty line at or above `afterLine` — plus one unit when that
+ * line opens a block (ends with `:` or `{` outside strings and comments).
+ * `opts.indent` overrides the computed indentation; `opts.language` picks the
+ * comment syntax for the block test (default python).
+ * @returns {{content: string, firstLine: number, lastLine: number}}
+ */
+export function insertLinesAt(content, afterLine, lines, opts = {}) {
+  const { rows, inserted, index } = planInsertion(content, afterLine, lines, opts);
   const next = [...rows.slice(0, index), ...inserted, ...rows.slice(index)];
   return { content: next.join('\n'), firstLine: index + 1, lastLine: index + inserted.length };
+}
+
+/**
+ * The same insertion as ONE editor change `{from, insert, firstLine,
+ * lastLine}` (an insertion at `from`, nothing replaced), so the editor keeps
+ * its cursor and its undo history — applied to `content` it yields exactly
+ * `insertLinesAt(...).content`.
+ */
+export function insertionEdit(content, afterLine, lines, opts = {}) {
+  const {
+    text, rows, inserted, index,
+  } = planInsertion(content, afterLine, lines, opts);
+  const firstLine = index + 1;
+  const lastLine = index + inserted.length;
+  if (inserted.length === 0) {
+    return {
+      from: 0, insert: '', firstLine, lastLine,
+    };
+  }
+  if (index >= rows.length) {
+    return {
+      from: text.length, insert: `\n${inserted.join('\n')}`, firstLine, lastLine,
+    };
+  }
+  let from = 0;
+  for (let i = 0; i < index; i += 1) from += rows[i].length + 1;
+  return {
+    from, insert: `${inserted.join('\n')}\n`, firstLine, lastLine,
+  };
+}
+
+/**
+ * The smallest single replacement `{from, to, insert}` that turns `prev` into
+ * `next` (common prefix and suffix left alone), or null when they are equal.
+ * An edit made OUTSIDE the editor (a rename, an insertion from the drawer) is
+ * dispatched as this change, so the student's cursor survives wherever the
+ * text around it did not change, and Strg+Z undoes exactly that edit.
+ */
+export function minimalChange(prev, next) {
+  const a = typeof prev === 'string' ? prev : '';
+  const b = typeof next === 'string' ? next : '';
+  if (a === b) return null;
+  let start = 0;
+  const max = Math.min(a.length, b.length);
+  while (start < max && a.charCodeAt(start) === b.charCodeAt(start)) start += 1;
+  let end = 0;
+  while (end < max - start && a.charCodeAt(a.length - 1 - end) === b.charCodeAt(b.length - 1 - end)) end += 1;
+  return { from: start, to: a.length - end, insert: b.slice(start, b.length - end) };
 }
 
 function lastRealLine(text) {

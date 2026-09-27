@@ -388,6 +388,13 @@ function WorkshopPage({ isActive }) {
   // [label_de, type_name] pairs from GetObjectCatalog, threaded to SimScene's
   // object palette (the same source the Blockly dropdowns use).
   const [objectCatalog, setObjectCatalog] = useState([]);
+  // The catalog's type names, for the code editor's object-name completion.
+  const codeObjectTypes = useMemo(
+    () => (Array.isArray(objectCatalog)
+      ? objectCatalog.map((p) => (Array.isArray(p) ? p[1] : null)).filter((t) => typeof t === 'string' && t)
+      : []),
+    [objectCatalog],
+  );
   // Sim-stage render seam: { [type]: {height_m, width_m, color, max_instances} },
   // built from the parallel GetObjectCatalog srv arrays in the same fetch effect
   // and threaded to SimStage → SimScene → UrdfTwin so objects render at their real
@@ -1832,6 +1839,7 @@ function WorkshopPage({ isActive }) {
                           provider={sammlungProvider}
                           onCursorChange={handleCodeCursorChange}
                           revealRequest={codeRevealRequest}
+                          objectTypes={codeObjectTypes}
                         />
                       ) : (
                         <BlocklyWorkspace

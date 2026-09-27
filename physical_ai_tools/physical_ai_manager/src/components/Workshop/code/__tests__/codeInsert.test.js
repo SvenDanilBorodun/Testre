@@ -15,9 +15,12 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  SNIPPET_MIME,
   insertLinesAt,
+  insertionEdit,
   insertionTarget,
   mainBodyEnd,
+  minimalChange,
   snippetLines,
   stepsToCode,
 } from '../codeInsert';
@@ -146,5 +149,52 @@ describe('insertionTarget — the cursor, else the end of main', () => {
     expect(insertionTarget(files, 'python', null)).toEqual(expected);
     expect(insertionTarget(files, 'python', { file: 'weg.py', line: 1 })).toEqual(expected);
     expect(insertionTarget(files, 'python', { file: 'main.py', line: 99 })).toEqual(expected);
+  });
+});
+
+describe('insertionEdit — the same insertion as ONE editor change', () => {
+  it('yields exactly insertLinesAt’s content when applied', () => {
+    const cases = [
+      ['import robot\nfor i in range(3):\n    robot.home()\nprint(1)\n', 3, {}],
+      ['if x:\n    pass\n', 1, {}],
+      ['a\n', 99, {}],
+      ['a\n', 0, {}],
+      ['a', 1, {}],
+      ['', 0, {}],
+      ['    a\n', 1, { indent: '' }],
+      ['  void f() {\n  }\n', 1, { language: 'java' }],
+    ];
+    for (const [content, after, opts] of cases) {
+      const edit = insertionEdit(content, after, ['x()', 'y()'], opts);
+      const applied = content.slice(0, edit.from) + edit.insert + content.slice(edit.from);
+      expect(applied).toBe(insertLinesAt(content, after, ['x()', 'y()'], opts).content);
+      const ref = insertLinesAt(content, after, ['x()', 'y()'], opts);
+      expect([edit.firstLine, edit.lastLine]).toEqual([ref.firstLine, ref.lastLine]);
+    }
+  });
+});
+
+describe('minimalChange — an external edit as the smallest replacement', () => {
+  it('keeps the common prefix and suffix out of the change', () => {
+    expect(minimalChange('robot.move_to("Ablage")\nx = 1\n', 'robot.move_to("Tisch")\nx = 1\n'))
+      .toEqual({ from: 15, to: 21, insert: 'Tisch' });
+    expect(minimalChange('abc', 'abc')).toBeNull();
+    expect(minimalChange('', 'x')).toEqual({ from: 0, to: 0, insert: 'x' });
+    expect(minimalChange('aaa', 'aa')).toEqual({ from: 2, to: 3, insert: '' });
+    expect(minimalChange('abcabc', 'abc')).toEqual({ from: 3, to: 6, insert: '' });
+  });
+
+  it('always rebuilds the target text', () => {
+    const pairs = [['hallo welt', 'hallo schöne welt'], ['xyz', 'abc'], ['aXa', 'aYa'], ['a\nb\nc', 'a\nb\nb\nc']];
+    for (const [a, b] of pairs) {
+      const c = minimalChange(a, b);
+      expect(a.slice(0, c.from) + c.insert + a.slice(c.to)).toBe(b);
+    }
+  });
+});
+
+describe('SNIPPET_MIME', () => {
+  it('is the one drag type the drawer sets and the editor reads', () => {
+    expect(SNIPPET_MIME).toBe('application/x-edubotics-snippet');
   });
 });

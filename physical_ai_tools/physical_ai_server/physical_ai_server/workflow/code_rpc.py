@@ -72,9 +72,12 @@ supervisor, retired the instant the run ends), ``__line`` (status position,
 throttled at ``CODE_STATUS_MIN_INTERVAL_S``), ``__paused`` (a breakpoint hit:
 emits the locals as ``[VAR:]`` sentinels, sets the pause, and BLOCKS on the
 reader thread until the manager resumes — answering ``continue`` / ``step`` /
-``stop``), ``__vars`` (the runner's line sampler: the current frame's
+``stop``), ``__vars`` (the runner's line sampler: the program's module-level
 variables, emitted as ``[VAR:]`` sentinels ONLY for names whose rendered value
-changed since this run last showed them), ``__exit`` (the launcher's exit
+changed since this run last showed them; at most one frame per
+``VARS_MIN_INTERVAL_S`` is looked at — the rest are answered at once after the
+budget charge — and a frame over ``SHOWN_FRAME_MAX_NODES`` /
+``SHOWN_FRAME_MAX_CHARS`` in TOTAL is dropped before any rendering), ``__exit`` (the launcher's exit
 report, kept on the session for the program object that owns the run).
 ``register_object`` is validated from its row and registers a per-run type.
 
@@ -84,7 +87,11 @@ worker like a statement (so they wait while paused, are refused after Stopp
 and keep program order), and answered there by :meth:`RunSession._code_only`,
 which only ever calls ``ctx.log`` — never ``ctx.publisher``, the handler table
 or the motion lock (an AST fence in ``test_code_rpc_zeige_vars.py``). ``zeige``
-emits its ``[VAR:]`` sentinel on every call; ``__vars``, ``zeige`` and a
+is COALESCED: the latest value per name waits in a per-run map and is emitted
+at most ``SHOWN_EMITS_PER_S`` sentinels per second (burst
+``SHOWN_EMITS_BURST``) — flushed by the next call, by the worker's idle tick
+(``SHOWN_FLUSH_TICK_S``) and, whatever is left, when the run closes, so the
+last value of every name always arrives. ``__vars``, ``zeige`` and a
 breakpoint's locals share one per-run map of the last payload per name.
 
 **Replies.** ``{"id", "ok": true, "r"}`` or ``{"id", "ok": false, "k", "e"}``
@@ -197,6 +204,22 @@ SHOWN_VALUE_MAX_NODES = 5000
 # The per-run map of the last payload shown per name is bounded; past this a
 # NEW name is still shown, just not remembered (so it re-emits every change).
 SHOWN_VAR_NAMES_MAX = 256
+# Flood limits (2026-09-27 review round). Every frame is still charged against
+# the call budget BEFORE any of this (Rule §2, condition 1); these bound what
+# a charged frame may cost after that.
+# - `__vars`: the runner's sampler sends at most one frame per 0.5 s; one per
+#   VARS_MIN_INTERVAL_S is looked at, the rest are answered at once.
+VARS_MIN_INTERVAL_S = 0.4
+# - A frame's shown values in TOTAL (every value of a `__vars` / `__paused`
+#   dict, or one `zeige` value): nodes visited and string characters.
+SHOWN_FRAME_MAX_NODES = 5000
+SHOWN_FRAME_MAX_CHARS = 48 * 1024
+# - `[VAR:]` sentinels from `zeige`, per run: a token bucket; what does not
+#   fit waits (latest value per name) for the next call, the worker's idle
+#   tick or the end of the run.
+SHOWN_EMITS_PER_S = 20
+SHOWN_EMITS_BURST = 20
+SHOWN_FLUSH_TICK_S = 0.1
 
 # ── German replies ────────────────────────────────────────────────────────
 INTERNAL_ERROR_DE = 'Interner Fehler — bitte den Lehrer rufen.'
@@ -416,6 +439,52 @@ def shown_value_is_bad(v: Any) -> bool:
     return False
 
 
+def shown_values_exceed(values: Any, max_nodes: int, max_chars: int) -> bool:
+    """True when the JSON trees in ``values`` together visit more than
+    ``max_nodes`` nodes or hold more than ``max_chars`` string characters
+    (dict keys included). Iterative, and it stops at the first bound it
+    crosses — the cheap gate in front of any rendering."""
+    stack = list(values)
+    nodes = 0
+    chars = 0
+    while stack:
+        item = stack.pop()
+        nodes += 1
+        if nodes > max_nodes:
+            return True
+        if isinstance(item, str):
+            chars += len(item)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            for k, v in item.items():
+                if isinstance(k, str):
+                    chars += len(k)
+                stack.append(v)
+        if chars > max_chars:
+            return True
+    return False
+
+
+class _RateGate:
+    """A token bucket that never sleeps: ``try_take`` answers now."""
+
+    def __init__(self, rate_per_s: float, burst: float) -> None:
+        self._rate = float(rate_per_s)
+        self._burst = float(burst)
+        self._tokens = float(burst)
+        self._last = time.monotonic()
+
+    def try_take(self) -> bool:
+        now = time.monotonic()
+        self._tokens = min(self._burst, self._tokens + (now - self._last) * self._rate)
+        self._last = now
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        return False
+
+
 def validate_value(p: ApiParam, v: Any) -> str | None:
     """The German reason ``v`` is not a valid ``p``, or ``None`` when it is."""
     if v is None and p.nullable:
@@ -610,6 +679,12 @@ class RunSession:
         # and the worker (zeige) both write it.
         self._var_lock = threading.Lock()
         self._var_payloads: dict[str, str] = {}
+        # zeige's coalescing: name -> the latest payload not yet emitted, and
+        # the per-run emit budget (both under _var_lock).
+        self._shown_pending: dict[str, str] = {}
+        self._shown_gate = _RateGate(SHOWN_EMITS_PER_S, SHOWN_EMITS_BURST)
+        # __vars' floor (reader thread only).
+        self._vars_last_accept = float('-inf')
         self._worker = threading.Thread(target=self._worker_loop, daemon=True,
                                         name=f'code-rpc-worker-{self.token[:8]}')
         self._worker.start()
@@ -647,6 +722,9 @@ class RunSession:
                 pass
         self._queue.put(None)
         self._worker.join(CODE_RPC_WORKER_JOIN_S)
+        # Whatever zeige still holds is the last value of those names: it
+        # arrives before the run's final status, never dropped.
+        self._flush_shown(force=True)
 
     # ── the reader's half: validate, budget, hand to the worker ──────────
     def charge_call(self) -> bool:
@@ -658,6 +736,11 @@ class RunSession:
         method, args = frame.get('m'), frame.get('a')
         if not isinstance(method, str) or not isinstance(args, list):
             return _err(rid, 'protocol', BAD_REQUEST_DE)
+        # Already charged (the reader charges every decoded frame first). A
+        # `__vars` inside the floor is answered at once: nothing validated,
+        # rendered or emitted — the next accepted frame carries the values.
+        if method == '__vars' and not self._vars_floor_ok():
+            return _ok(rid, None)
         call = _lookup(method)
         if call is None:
             return _err(rid, 'method', _unknown_method_de(method))
@@ -752,36 +835,96 @@ class RunSession:
         is_paused = getattr(ctx, 'is_paused', None)
         return 'step' if callable(is_paused) and is_paused() else 'continue'
 
+    def _vars_floor_ok(self) -> bool:
+        """True for a `__vars` frame at least ``VARS_MIN_INTERVAL_S`` after the
+        last one this run looked at (reader thread; a plain timestamp)."""
+        now = time.monotonic()
+        if now - self._vars_last_accept < VARS_MIN_INTERVAL_S:
+            return False
+        self._vars_last_accept = now
+        return True
+
     def _emit_locals(self, local_vars: dict) -> None:
         """A breakpoint's locals: every one shown (and remembered)."""
-        for name, value in list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]:
+        items = list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]
+        if shown_values_exceed([v for _n, v in items], SHOWN_FRAME_MAX_NODES,
+                               SHOWN_FRAME_MAX_CHARS):
+            return
+        for name, value in items:
             self._emit_var(name, value, force=True)
 
     def _emit_changed_vars(self, local_vars: dict) -> None:
-        """``__vars``: only the names whose rendered value changed."""
-        for name, value in list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]:
+        """``__vars``: only the names whose rendered value changed — and
+        nothing of a frame whose values exceed the TOTAL bound."""
+        items = list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]
+        if shown_values_exceed([v for _n, v in items], SHOWN_FRAME_MAX_NODES,
+                               SHOWN_FRAME_MAX_CHARS):
+            return
+        for name, value in items:
             self._emit_var(name, value, force=False)
 
-    def _emit_var(self, name: Any, value: Any, *, force: bool) -> None:
-        """One ``[VAR:name=json]`` sentinel, rendered and capped exactly like
-        ``interpreter._set_variable``'s. An unshowable name (empty, only
-        whitespace, over 64 characters, a control character or the frame's
-        own ``=[]``) or an out-of-bounds value is skipped. ``force=False``
-        skips a name whose payload this run already showed. Only ``ctx.log``
-        is called — this is observability, never control — and nothing raises
-        out of it."""
+    @staticmethod
+    def _render_shown(name: Any, value: Any) -> str | None:
+        """The ``[VAR:]`` payload of ``name``/``value``, rendered and capped
+        exactly like ``interpreter._set_variable``'s, or ``None`` for an
+        unshowable name (empty, only whitespace, over 64 characters, a
+        control character or the frame's own ``=[]``) or an out-of-bounds
+        value (``shown_value_is_bad``: depth and nodes)."""
         if (not isinstance(name, str) or not name.strip() or len(name) > _MAX_NAME_CHARS
                 or any(c in name for c in _UNSHOWABLE_NAME_CHARS)
                 or any(ord(c) < 0x20 or c == '\x7f' for c in name)):
-            return
+            return None
         if shown_value_is_bad(value):
-            return
+            return None
         try:
             payload = json.dumps(_jsonable(value, _MAX_VAR_PAYLOAD_ITEMS))
         except Exception:  # noqa: BLE001 — observability never breaks a run
-            return
+            return None
         if len(payload) > _MAX_VAR_PAYLOAD_CHARS:
             payload = payload[:_MAX_VAR_PAYLOAD_CHARS] + ' …'
+        return payload
+
+    def _queue_shown(self, name: Any, value: Any) -> None:
+        """``zeige``: keep the latest payload per name, then emit what the
+        per-run budget allows now."""
+        if shown_values_exceed([value], SHOWN_FRAME_MAX_NODES, SHOWN_FRAME_MAX_CHARS):
+            return
+        payload = self._render_shown(name, value)
+        if payload is None:
+            return
+        with self._var_lock:
+            self._shown_pending.pop(name, None)
+            if len(self._shown_pending) < SHOWN_VAR_NAMES_MAX:
+                self._shown_pending[name] = payload
+        self._flush_shown()
+
+    def _flush_shown(self, *, force: bool = False) -> None:
+        """Emit pending ``zeige`` payloads, oldest first, while the budget
+        lasts (``force``: all of them — the end of the run). Only
+        ``ctx.log``; nothing raises out of it."""
+        lines = []
+        with self._var_lock:
+            while self._shown_pending and (force or self._shown_gate.try_take()):
+                name = next(iter(self._shown_pending))
+                payload = self._shown_pending.pop(name)
+                if name in self._var_payloads or len(self._var_payloads) < SHOWN_VAR_NAMES_MAX:
+                    self._var_payloads[name] = payload
+                lines.append(f'[VAR:{name}={payload}]')
+        for line in lines:
+            try:
+                self.ctx.log(line)
+            except Exception:  # noqa: BLE001 — observability never breaks a run
+                pass
+
+    def _emit_var(self, name: Any, value: Any, *, force: bool) -> None:
+        """One ``[VAR:name=json]`` sentinel now (``__vars``, a breakpoint's
+        locals): :meth:`_render_shown`'s payload, skipped when that refuses.
+        ``force=False`` skips a name whose payload this run already showed.
+        Only ``ctx.log`` is called — this is observability, never control —
+        and nothing raises out of it."""
+        payload = self._render_shown(name, value)
+        if payload is None:
+            return
         with self._var_lock:
             if not force and self._var_payloads.get(name) == payload:
                 return
@@ -797,7 +940,7 @@ class RunSession:
         """``zeige(name, wert)``: show the value in the Variablen panel. The
         args are validated against the row already. Nothing else is touched."""
         if call.name == 'zeige':
-            self._emit_var(args[0], args[1], force=True)
+            self._queue_shown(args[0], args[1])
             return _ok(rid, None)
         return _err(rid, 'internal', INTERNAL_ERROR_DE)
 
@@ -885,7 +1028,16 @@ class RunSession:
     # ── the worker ───────────────────────────────────────────────────────
     def _worker_loop(self) -> None:
         while True:
-            job = self._queue.get()
+            if self._shown_pending:
+                # A coalesced zeige is waiting: tick while idle so its latest
+                # value arrives without the next call.
+                try:
+                    job = self._queue.get(timeout=SHOWN_FLUSH_TICK_S)
+                except queue.Empty:
+                    self._flush_shown()
+                    continue
+            else:
+                job = self._queue.get()
             if job is None:
                 break
             try:

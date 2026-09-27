@@ -78,6 +78,13 @@ def test_the_shipped_bounds_are_the_numbers_we_chose():
     assert code_rpc.SHOWN_VALUE_MAX_DEPTH == 8
     assert code_rpc.SHOWN_VALUE_MAX_NODES == 5000
     assert code_rpc.SHOWN_VAR_NAMES_MAX == 256
+    # The flood limits of the 2026-09-27 review round (m7).
+    assert code_rpc.VARS_MIN_INTERVAL_S == 0.4
+    assert code_rpc.SHOWN_FRAME_MAX_NODES == 5000
+    assert code_rpc.SHOWN_FRAME_MAX_CHARS == 49152
+    assert code_rpc.SHOWN_EMITS_PER_S == 20
+    assert code_rpc.SHOWN_EMITS_BURST == 20
+    assert code_rpc.SHOWN_FLUSH_TICK_S == 0.1
 
 
 # ── the `value` kind ───────────────────────────────────────────────────────
@@ -233,7 +240,8 @@ def test_zeige_carries_its_position_into_the_running_status(server):
 
 # ── __vars ─────────────────────────────────────────────────────────────────
 
-def test_vars_emits_only_the_names_whose_value_changed(server):
+def test_vars_emits_only_the_names_whose_value_changed(server, monkeypatch):
+    monkeypatch.setattr(code_rpc, 'VARS_MIN_INTERVAL_S', 0.0)   # not the floor under test
     ctx = _ctx()
     session = server.open_run(ctx)
     c = _Client(server.socket_path, session.token)
@@ -247,9 +255,10 @@ def test_vars_emits_only_the_names_whose_value_changed(server):
     server.close_run(session)
 
 
-def test_a_zeige_and_a_pause_feed_the_same_change_map(server):
+def test_a_zeige_and_a_pause_feed_the_same_change_map(server, monkeypatch):
     """A value zeige or a breakpoint already showed is not re-emitted by the
     sampler; a changed one is."""
+    monkeypatch.setattr(code_rpc, 'VARS_MIN_INTERVAL_S', 0.0)   # not the floor under test
     ctx = _ctx()          # default wait_for_resume returns at once
     session = server.open_run(ctx)
     c = _Client(server.socket_path, session.token)
@@ -263,7 +272,8 @@ def test_a_zeige_and_a_pause_feed_the_same_change_map(server):
     server.close_run(session)
 
 
-def test_vars_is_validated_from_its_row_and_skips_unshowable_entries(server):
+def test_vars_is_validated_from_its_row_and_skips_unshowable_entries(server, monkeypatch):
+    monkeypatch.setattr(code_rpc, 'VARS_MIN_INTERVAL_S', 0.0)   # not the floor under test
     ctx = _ctx()
     session = server.open_run(ctx)
     c = _Client(server.socket_path, session.token)
@@ -276,9 +286,18 @@ def test_vars_is_validated_from_its_row_and_skips_unshowable_entries(server):
     assert r['ok'] is False and r['k'] == 'value'
     assert _vars(ctx) == []
     deep = 1
-    for _ in range(5000):
+    for _ in range(50):               # past the depth bound, few nodes
         deep = [deep]
     r = c.call('__vars', ['main.py', 1, {'a=b': 1, 'x' * 65: 1, '  ': 1, 'tief': deep, 'ok': 2}])
+    assert r['ok'] is True
+    assert _vars(ctx) == ['[VAR:ok=2]']
+    # A nesting far past Python's recursion limit is over the frame's TOTAL
+    # node bound: the whole frame is dropped by the iterative gate, and the
+    # reader answers normally (never a RecursionError).
+    very_deep = 1
+    for _ in range(5000):
+        very_deep = [very_deep]
+    r = c.call('__vars', ['main.py', 1, {'tief': very_deep, 'ok': 3}])
     assert r['ok'] is True
     assert _vars(ctx) == ['[VAR:ok=2]']
     server.close_run(session)
@@ -295,7 +314,8 @@ def test_vars_is_charged_against_the_call_budget(server):
     server.close_run(session)
 
 
-def test_the_change_map_is_bounded(server):
+def test_the_change_map_is_bounded(server, monkeypatch):
+    monkeypatch.setattr(code_rpc, 'VARS_MIN_INTERVAL_S', 0.0)   # not the floor under test
     ctx = _ctx()
     session = server.open_run(ctx)
     c = _Client(server.socket_path, session.token)
@@ -311,7 +331,8 @@ def test_nothing_in_the_zeige_and_vars_path_names_the_publisher_or_the_motion_lo
     import ast
     tree = ast.parse(open(code_rpc.__file__, encoding='utf-8').read())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'RunSession')
-    names = {'_code_only', '_emit_var', '_emit_changed_vars'}
+    names = {'_code_only', '_emit_var', '_emit_changed_vars', '_render_shown',
+             '_queue_shown', '_flush_shown', '_vars_floor_ok'}
     found = set()
     for node in ast.walk(cls):
         if isinstance(node, ast.FunctionDef) and node.name in names:
@@ -320,3 +341,89 @@ def test_nothing_in_the_zeige_and_vars_path_names_the_publisher_or_the_motion_lo
             for forbidden in ('publisher', 'motion_lock', 'handlers', '_trajectory'):
                 assert forbidden not in text, (node.name, forbidden)
     assert found == names
+
+
+# ── the flood limits (2026-09-27 review round, m7; Rule §2 intact) ─────────
+
+def test_vars_frames_past_the_floor_are_charged_then_dropped(server):
+    """The real sampler sends at most 2 frames/s; a flood of `__vars` still
+    costs a token each (condition 1) but only one per VARS_MIN_INTERVAL_S is
+    looked at — the rest are answered at once, with nothing emitted."""
+    ctx = _ctx()
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    before = session.frames_decoded
+    for i in range(10):
+        assert c.call('__vars', ['main.py', 1, {'i': i}])['ok'] is True
+    assert session.frames_decoded - before == 10
+    assert _vars(ctx) == ['[VAR:i=0]']
+    time.sleep(0.45)
+    assert c.call('__vars', ['main.py', 1, {'i': 99}])['ok'] is True
+    assert _vars(ctx) == ['[VAR:i=0]', '[VAR:i=99]']
+    server.close_run(session)
+
+
+def test_a_vars_frame_over_the_total_cap_emits_nothing(server):
+    """Each value within its own bound, the FRAME over the total: nothing of
+    it is rendered or emitted."""
+    ctx = _ctx()
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    per = code_rpc.SHOWN_FRAME_MAX_NODES // 25
+    wide = {f'v{i}': [0] * per for i in range(30)}
+    assert c.call('__vars', ['main.py', 1, wide])['ok'] is True
+    assert _vars(ctx) == []
+    server.close_run(session)
+    assert not code_rpc.shown_values_exceed([[0] * 10, 'abc'], 100, 100)
+    assert code_rpc.shown_values_exceed(['x' * 60, 'y' * 60], 1000, 100)
+    assert code_rpc.shown_values_exceed([[0] * 60, [0] * 60], 100, 10_000)
+
+
+def test_a_nine_deep_value_is_never_shown(server, monkeypatch):
+    """`__vars` validates its entries' VALUES nowhere but in _emit_var's own
+    bound: a 9-deep value (json-dumpable, few nodes) must still be refused
+    there (n6 — this fails if that check is removed)."""
+    monkeypatch.setattr(code_rpc, 'VARS_MIN_INTERVAL_S', 0.0)
+    ctx = _ctx()
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    nine = 1
+    for _ in range(9):
+        nine = [nine]
+    assert c.call('__vars', ['main.py', 1, {'tief': nine, 'ok': 2}])['ok'] is True
+    assert _vars(ctx) == ['[VAR:ok=2]']
+    server.close_run(session)
+
+
+def test_zeige_is_coalesced_per_name_and_emitted_at_a_bounded_rate(server):
+    ctx = _ctx()
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    t0 = time.monotonic()
+    for i in range(120):
+        assert c.call('zeige', ['a' if i % 2 else 'b', i])['ok'] is True
+    elapsed = time.monotonic() - t0
+    emitted = _vars(ctx)
+    allowed = code_rpc.SHOWN_EMITS_BURST + code_rpc.SHOWN_EMITS_PER_S * (elapsed + 0.2) + 2
+    assert len(emitted) <= allowed, (len(emitted), elapsed)
+    server.close_run(session)
+    # The LAST value of every name arrives — at the latest when the run ends.
+    last = {}
+    for line in _vars(ctx):
+        name, payload = line[len('[VAR:'):-1].split('=', 1)
+        last[name] = payload
+    assert last == {'a': '119', 'b': '118'}
+
+
+def test_a_coalesced_zeige_is_flushed_on_the_next_tick(server):
+    ctx = _ctx()
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    for i in range(code_rpc.SHOWN_EMITS_BURST + 10):
+        assert c.call('zeige', ['n', i])['ok'] is True
+    final = f'[VAR:n={code_rpc.SHOWN_EMITS_BURST + 9}]'
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and _vars(ctx)[-1:] != [final]:
+        time.sleep(0.02)
+    assert _vars(ctx)[-1] == final, 'the latest value waited for the run to end'
+    server.close_run(session)

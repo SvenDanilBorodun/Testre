@@ -72,17 +72,23 @@ const RENAME_ASSETS = Object.freeze({ recording: 'recording', place: 'place' });
 const PY_PREFIX_RE = /^(?:[rRuUbBfF]|[bBrR][rRbB]|[fFrR][rRfF])$/;
 const LITERAL_PREFIXES = new Set(['', 'r', 'R', 'u', 'U']);
 
+// Identifier characters: Python and Java both allow Unicode letters and
+// digits (`größe`, `Würfel`), so do the scanners (review m3).
+const IDENT_CHAR_RE = /[\p{L}\p{N}_]/u;
 function isIdentChar(ch) {
-  return /[A-Za-z0-9_]/.test(ch);
+  return IDENT_CHAR_RE.test(ch);
 }
 
 // End offset (exclusive) of a string opened at `i` with `quote` (single char)
 // — at the closing quote, or at the newline that ends an unterminated one.
-function endOfLineString(text, i, quote, raw) {
+// A backslash always skips the next character, in a RAW string too: Python's
+// lexer lets `\'` not end `r'…'` (it keeps the backslash in the value), so
+// `r'\''` is one string (review n1) — raw or not, termination is the same.
+function endOfLineString(text, i, quote) {
   let j = i + 1;
   while (j < text.length) {
     const ch = text[j];
-    if (ch === '\\' && !raw) {
+    if (ch === '\\') {
       j += 2;
       continue;
     }
@@ -93,10 +99,10 @@ function endOfLineString(text, i, quote, raw) {
   return text.length;
 }
 
-function endOfTripleString(text, i, triple, raw) {
+function endOfTripleString(text, i, triple) {
   let j = i + 3;
   while (j < text.length) {
-    if (text[j] === '\\' && !raw) {
+    if (text[j] === '\\') {
       j += 2;
       continue;
     }
@@ -165,7 +171,7 @@ export function tokenizeCode(content, language) {
       if (ch === '"') {
         flush(i);
         const triple = text.startsWith('"""', i);
-        const end = triple ? endOfTripleString(text, i, '"""', false) : endOfLineString(text, i, '"', false);
+        const end = triple ? endOfTripleString(text, i, '"""') : endOfLineString(text, i, '"');
         segs.push(stringSegment(text, i, i, end, '', triple));
         i = end;
         codeStart = i;
@@ -173,7 +179,7 @@ export function tokenizeCode(content, language) {
       }
       if (ch === "'") {
         flush(i);
-        const end = endOfLineString(text, i, "'", false);
+        const end = endOfLineString(text, i, "'");
         segs.push({ type: 'char', start: i, end });
         i = end;
         codeStart = i;
@@ -201,10 +207,9 @@ export function tokenizeCode(content, language) {
         flush(i);
         const quote = text[j];
         const triple = text.startsWith(quote.repeat(3), j);
-        const raw = /r/i.test(word);
         const end = triple
-          ? endOfTripleString(text, j, quote.repeat(3), raw)
-          : endOfLineString(text, j, quote, raw);
+          ? endOfTripleString(text, j, quote.repeat(3))
+          : endOfLineString(text, j, quote);
         segs.push(stringSegment(text, i, j, end, word, triple));
         i = end;
         codeStart = i;
@@ -216,7 +221,7 @@ export function tokenizeCode(content, language) {
     if (ch === '"' || ch === "'") {
       flush(i);
       const triple = text.startsWith(ch.repeat(3), i);
-      const end = triple ? endOfTripleString(text, i, ch.repeat(3), false) : endOfLineString(text, i, ch, false);
+      const end = triple ? endOfTripleString(text, i, ch.repeat(3)) : endOfLineString(text, i, ch);
       segs.push(stringSegment(text, i, i, end, '', triple));
       i = end;
       codeStart = i;
@@ -471,12 +476,20 @@ export function renameCodeAssetRefs(files, language, kind, from, to) {
   return { files: out || files, count };
 }
 
-/** The names the program itself defines with pin / pin_current, all files, first-seen order. */
-export function codeDefinedPlaceNames(files, language) {
+/**
+ * The names the program itself defines with pin / pin_current, all files,
+ * first-seen order. A call inside a comment defines nothing (review n2) —
+ * unless `includeComments`, which the auto-name RESERVATION uses: a
+ * commented-out pin keeps its name taken, as a disabled Blockly block does
+ * (destinationStore.takenDestinationNames), so un-commenting it later never
+ * collides with a Ziel taught meanwhile.
+ */
+export function codeDefinedPlaceNames(files, language, { includeComments = false } = {}) {
   const seen = new Set();
   const out = [];
   for (const [, content] of projectEntries(files)) {
     for (const call of findAssetCalls(content, language)) {
+      if (call.inComment && !includeComments) continue;
       if ((call.method === 'pin' || call.method === 'pin_current') && !seen.has(call.name)) {
         seen.add(call.name);
         out.push(call.name);
@@ -488,10 +501,20 @@ export function codeDefinedPlaceNames(files, language) {
 
 // ── variables (display only: the Variablen tab before a run) ───────────────
 
-const PY_ASSIGN_RE = /^[ \t]*([A-Za-z_]\w*(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*)[ \t]*(?:=(?!=)|\+=|-=|\*=|\/=|\/\/=|%=|\*\*=|\|=|&=|\^=)/gm;
-const PY_FOR_RE = /^[ \t]*(?:async[ \t]+)?for[ \t]+([A-Za-z_]\w*(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*)[ \t]+in\b/gm;
-const JAVA_TYPE = '(?:int|long|double|float|boolean|char|byte|short|String|var|[A-Z][A-Za-z0-9_]*(?:<[^;(){}]*?>)?)';
-const JAVA_DECL_RE = new RegExp(`\\b${JAVA_TYPE}(?:\\[\\])*\\s+([a-z_][A-Za-z0-9_]*)\\s*(?==(?!=)|;|,|:|\\))`, 'g');
+// Identifiers are Unicode (Python 3, Java): `größe`, `Würfel` (review m3).
+const ID = '[\\p{L}_][\\p{L}\\p{N}_]*';
+const PY_ASSIGN_RE = new RegExp(
+  `^[ \\t]*(${ID}(?:[ \\t]*,[ \\t]*${ID})*)[ \\t]*(?:=(?!=)|\\+=|-=|\\*=|\\/=|\\/\\/=|%=|\\*\\*=|\\|=|&=|\\^=)`, 'gmu',
+);
+const PY_FOR_RE = new RegExp(`^[ \\t]*(?:async[ \\t]+)?for[ \\t]+(${ID}(?:[ \\t]*,[ \\t]*${ID})*)[ \\t]+in(?![\\p{L}\\p{N}_])`, 'gmu');
+const JAVA_TYPE = '(?:int|long|double|float|boolean|char|byte|short|String|var|\\p{Lu}[\\p{L}\\p{N}_]*(?:<[^;(){}]*?>)?)';
+// A declared name starts lower-case (or `_`) — the Java convention that tells
+// `Würfel w` (type, name) from a statement.
+const JAVA_DECL_RE = new RegExp(
+  `(?<![\\p{L}\\p{N}_])${JAVA_TYPE}(?:\\[\\])*\\s+([\\p{Ll}_][\\p{L}\\p{N}_]*)\\s*(?==(?!=)|;|,|:|\\))`, 'gu',
+);
+const IDENT_RE = new RegExp(`^${ID}$`, 'u');
+const WORD_RE = new RegExp(`(?<![\\p{L}\\p{N}_.])${ID}`, 'gu');
 const PY_KEYWORDS = new Set([
   'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue',
   'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global', 'if', 'import', 'in',
@@ -550,8 +573,8 @@ function escapeRegExp(s) {
  */
 export function variableOccurrences(files, language, name) {
   const target = String(name ?? '');
-  if (!/^[A-Za-z_]\w*$/.test(target)) return [];
-  const re = new RegExp(`(?<![\\w.])${escapeRegExp(target)}(?!\\w)`, 'g');
+  if (!IDENT_RE.test(target)) return [];
+  const re = new RegExp(`(?<![\\p{L}\\p{N}_.])${escapeRegExp(target)}(?![\\p{L}\\p{N}_])`, 'gu');
   const out = [];
   for (const [file, content] of projectEntries(files)) {
     const code = codeOnlyText(content, language);
@@ -562,6 +585,32 @@ export function variableOccurrences(files, language, name) {
       const { line, col } = lineColAt(starts, m.index);
       out.push({ file, line, col });
       m = re.exec(code);
+    }
+  }
+  return out;
+}
+
+/**
+ * variableOccurrences for MANY names in one pass per file (review m8: the
+ * Variablen tab asked once per variable, re-tokenizing the whole project each
+ * time): `Map name → [{file, line, col}]`, every requested name present.
+ */
+export function variableOccurrencesAll(files, language, names) {
+  const out = new Map();
+  for (const n of Array.isArray(names) ? names : []) out.set(String(n), []);
+  if (out.size === 0) return out;
+  for (const [file, content] of projectEntries(files)) {
+    const code = codeOnlyText(content, language);
+    const starts = lineStarts(code);
+    WORD_RE.lastIndex = 0;
+    let m = WORD_RE.exec(code);
+    while (m !== null) {
+      const rows = out.get(m[0]);
+      if (rows) {
+        const { line, col } = lineColAt(starts, m.index);
+        rows.push({ file, line, col });
+      }
+      m = WORD_RE.exec(code);
     }
   }
   return out;

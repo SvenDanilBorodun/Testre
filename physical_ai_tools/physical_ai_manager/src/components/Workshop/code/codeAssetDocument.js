@@ -39,6 +39,7 @@ import {
   renameCodeAssetRefs,
   scanCodeAssets,
   variableOccurrences,
+  variableOccurrencesAll,
 } from './codeAssetUsage';
 import { insertAtTarget, insertionTarget, snippetLines, stepsToCode } from './codeInsert';
 import { CODE_DE } from './codeMessagesDe';
@@ -116,10 +117,12 @@ export function createCodeAssetDocument({
     const values = snapshot && snapshot.variableValues && typeof snapshot.variableValues === 'object'
       ? snapshot.variableValues : {};
     Object.keys(values).forEach(push);
+    // ONE scan for every name (review m8), not one per variable.
+    const uses = variableOccurrencesAll(project, language, names);
     return names.map((name) => ({
       id: name,
       name,
-      uses: variableOccurrences(project, language, name).length + (zeigeRows.get(name) || []).length,
+      uses: (uses.get(name) || []).length + (zeigeRows.get(name) || []).length,
     }));
   };
 
@@ -195,7 +198,8 @@ export function createCodeAssetDocument({
         }
       };
       (store ? store.getEntries() : []).forEach((e) => push(e.name));
-      codeDefinedPlaceNames(files(), language).forEach(push);
+      // A commented-out pin keeps its name reserved (a disabled block's does).
+      codeDefinedPlaceNames(files(), language, { includeComments: true }).forEach(push);
       return out;
     },
     renamePlace(entryId, toName) {

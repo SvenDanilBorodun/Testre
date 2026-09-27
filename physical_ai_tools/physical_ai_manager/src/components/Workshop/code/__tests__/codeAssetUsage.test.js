@@ -25,6 +25,7 @@ import {
   scanCodeAssets,
   tokenizeCode,
   variableOccurrences,
+  variableOccurrencesAll,
 } from '../codeAssetUsage';
 import { collectCodeReplayNames } from '../codeProject';
 
@@ -267,5 +268,42 @@ describe('variableOccurrences', () => {
   it('finds whole-word uses outside strings and comments, never an attribute', () => {
     const src = 'punkte = 0\npunkte += 1\nprint("punkte")\n# punkte\nobj.punkte = 3\nzeige(punkte2)\n';
     expect(variableOccurrences({ 'main.py': src }, 'python', 'punkte').map((o) => o.line)).toEqual([1, 2]);
+  });
+});
+
+describe('review round fixes (2026-09-27)', () => {
+  it('n1: a backslash escapes the quote in a RAW string too (r\'\\\'\' is one string)', () => {
+    const src = "x = r'\\''; robot.replay(\"Winken\")\n";
+    expect(findAssetCalls(src, 'python').map((c) => `${c.method}:${c.name}`)).toEqual(['replay:Winken']);
+    const triple = "y = r'''\\''' '''\nrobot.replay(\"Tanz\")\n";
+    expect(findAssetCalls(triple, 'python').map((c) => c.name)).toEqual(['Tanz']);
+  });
+
+  it('n2: a pin() inside a comment defines nothing — but its name stays reserved, like a disabled block', () => {
+    const files = { 'main.py': 'import robot\n# robot.pin("Ablage", 0.1, 0.2, 0)\nrobot.pin("Mitte", 0, 0, 0)\n' };
+    expect(codeDefinedPlaceNames(files, 'python')).toEqual(['Mitte']);
+    expect(codeDefinedPlaceNames(files, 'python', { includeComments: true })).toEqual(['Ablage', 'Mitte']);
+  });
+
+  it('m3: Unicode identifiers are variables too, in Python and in Java', () => {
+    const py = 'größe = 3\nPunkte = 0\nfor stück in range(größe):\n    Punkte += größe\n';
+    expect(collectCodeVariables({ 'main.py': py }, 'python').map((v) => v.name))
+      .toEqual(['größe', 'Punkte', 'stück']);
+    expect(variableOccurrences({ 'main.py': py }, 'python', 'größe').map((o) => o.line)).toEqual([1, 3, 4]);
+    expect(variableOccurrences({ 'main.py': 'xgröße = 1\ngröße2 = 2\n' }, 'python', 'größe')).toEqual([]);
+    const java = 'public class Main {\n  public static void main(String[] args) {\n    int größe = 3;\n    Würfel w = null;\n    größe += 1;\n  }\n}\n';
+    expect(collectCodeVariables({ 'Main.java': java }, 'java').map((v) => v.name)).toEqual(['args', 'größe', 'w']);
+    expect(variableOccurrences({ 'Main.java': java }, 'java', 'größe').map((o) => o.line)).toEqual([3, 5]);
+  });
+
+  it('m8: variableOccurrencesAll scans every name in one pass and agrees with the one-name scan', () => {
+    const files = {
+      'main.py': 'punkte = 0\ngröße = 2\npunkte += größe\nprint("punkte")\nobj.punkte = 1\n',
+      'hilfe.py': 'def f():\n    return größe\n',
+    };
+    const all = variableOccurrencesAll(files, 'python', ['punkte', 'größe', 'fehlt']);
+    for (const name of ['punkte', 'größe', 'fehlt']) {
+      expect(all.get(name)).toEqual(variableOccurrences(files, 'python', name));
+    }
   });
 });

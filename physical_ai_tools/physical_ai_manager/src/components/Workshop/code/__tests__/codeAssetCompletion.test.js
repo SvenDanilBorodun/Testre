@@ -192,3 +192,13 @@ describe('buildCodeAssetKnowledge — what the editor helpers know', () => {
     });
   });
 });
+
+describe('n2: a pin() in a comment does not satisfy a move_to', () => {
+  it('warns about the name and does not offer it', () => {
+    const files = { 'main.py': 'import robot\n# robot.pin("Ablage", 0.1, 0.2, 0)\nrobot.move_to("Ablage")\n' };
+    const known = buildCodeAssetKnowledge({ files, language: 'python' });
+    expect(known.codePinnedNames).toEqual([]);
+    const d = assetDiagnostics(files['main.py'], 'python', known, { cursorLine: 1 });
+    expect(d.map((x) => x.message)).toEqual([formatCode(CODE_DE.ASSET_MISSING_PLACE, 'Ablage')]);
+  });
+});

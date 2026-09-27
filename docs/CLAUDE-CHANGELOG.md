@@ -6,6 +6,62 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-09-27 (review round) — the sampler ran student code, and the O3 fallback shipped
+
+Two independent reviewers took the branch apart; the owner had every finding
+fixed (R-O3), majors to nits, each with a test that failed first. This entry
+supersedes the „VERDICT: SAFE, so the full variant shipped" of the entry
+below.
+
+**The O3 gate measured the wrong thing.** The probe proved that reading the
+main thread's `frame.f_locals` from the sampler thread gives exact values, no
+exception and no refcount creep. It never looked at the STUDENT's view of
+`locals()`: on CPython 3.12 that cross-thread read re-syncs the frame's own
+locals dict — the same dict `locals()` returns — so a student's
+`for k in locals():` inside a function raised „dictionary changed size during
+iteration" (reviewer A's repro; the conductor re-ran it: 0 errors without the
+sampler, a RuntimeError with it). On the host's 3.14 (PEP 667, `locals()` is
+a snapshot) the same test passes, which is why the gate's own runs looked
+clean — the runner ships 3.12.3. Reviewer B found the second half: the
+renderer called `repr()` on student objects every 0.5 s, so a `__repr__` with
+a side effect ran — four `robot.home()` calls in B's probe — and a big
+container's full `repr` cost +50–87 % runtime. The owner chose the agreed
+fallback (R-O1): live values are module-level only, and the sampler never
+runs student code — exact builtin types, a bounded walk, `<Klasse>` read
+through `type`'s own descriptor for everything else. The reviewers' repros are
+now tests (`SamplerNeverRunsStudentCode`, run under 3.12 in CI). The
+breakpoint path kept its `repr` rendering: it runs on the student's own
+stopped thread, and sharing the new renderer would have changed what a paused
+student sees without being strictly simpler.
+
+**The server bounds what a charged frame may cost.** Rule §2's first
+condition (every frame charged before validation) was already asserted; what
+a frame could cost after that was not bounded: a flood of `__vars` or `zeige`
+frames turned into one status publish per name per frame. Now one `__vars`
+per 0.4 s is looked at, a frame over 5000 nodes or 48 KiB of shown values in
+total is dropped before any rendering, and `zeige` is coalesced per name at
+≤ 20 sentinels/s with the latest value flushed by the worker's idle tick and
+at close.
+
+**An insertion wrote an IndentationError.** Insertion used a fixed 4 spaces;
+CodeMirror indents with 2 by default. Now the body line below an opener, else
+the file's own unit, else 4 spaces — also the editor's `indentUnit`. Without a
+cursor, the end of main stops before a trailing endless loop or `return` (Java
+refuses code after them as unreachable), a one-line Java `main` is opened up,
+and a Java program without `main` gets a German hint instead of code outside
+the class.
+
+**The rest**: a code save sends its Ziele only when there are any or they
+changed (so a Ziele-free program saves against an older API too); a document
+switch retires the last program's variable values; the tokenizer reads raw
+strings and Unicode identifiers; a commented-out `pin()` defines nothing but
+keeps its name reserved; the Variablen list scans once, not once per variable
+(93 ms → ~2.5 ms for 120 variables); `Robot.zeige("x", null)` compiles (one
+`Object` overload); a file switch no longer replays the previous file's caret;
+the editor's knowledge builder moved into the lazy editor chunk (entry
+−4.2 kB; the rest of the ~30 kB stays in the entry because the page creates
+the code document synchronously).
+
 ### Unreleased, 2026-09-27 — a Python student gets the Sammlung, and stored Ziele finally reach code
 
 The coding suite of 2026-09-20 gave Python and Java students a real editor and a

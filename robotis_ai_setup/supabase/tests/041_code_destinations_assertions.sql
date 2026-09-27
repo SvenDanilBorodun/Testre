@@ -3,7 +3,7 @@
 -- fresh LOCAL stack — never CI, never the linked project (it seeds rows):
 --   supabase start && supabase db reset --local   (scratch project copy)
 --   psql <local db url> < supabase/tests/041_code_destinations_assertions.sql
--- Expected: 20 PASS, 0 FAIL/ERROR (T1..T12, some with a/b/c halves).
+-- Expected: 21 PASS, 0 FAIL/ERROR (T1..T12, some with a/b/c/d halves).
 --
 -- NOTE: 040_code_programs_assertions.sql's T8 names the 4-argument
 -- update_workflow_code(uuid,uuid,jsonb,text), which 041 drops; after 041 that

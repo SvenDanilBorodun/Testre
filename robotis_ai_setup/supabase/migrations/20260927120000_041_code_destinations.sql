@@ -148,6 +148,10 @@ ALTER TABLE public.workflows ADD CONSTRAINT workflows_code_blockly_json_destinat
       ELSE (blockly_json - 'edubotics-destinations') = '{}'::jsonb
     END
   ) NOT VALID;
+-- NOT VALID + VALIDATE in the same transaction buys no lock relief here (the
+-- ACCESS EXCLUSIVE lock of the ADD is held to COMMIT anyway); it is kept
+-- because it reads as "add, then prove the existing rows", and on a
+-- classroom-sized workflows table the validating scan is milliseconds.
 ALTER TABLE public.workflows VALIDATE CONSTRAINT workflows_code_blockly_json_destinations_only;
 
 COMMENT ON CONSTRAINT workflows_code_blockly_json_destinations_only ON public.workflows IS

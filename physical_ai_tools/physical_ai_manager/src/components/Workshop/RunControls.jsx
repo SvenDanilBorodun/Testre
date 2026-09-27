@@ -50,6 +50,7 @@ import {
 } from './code/codeProject';
 import { CODE_DE } from './code/codeMessagesDe';
 import { isCodeBreakpointId } from './code/codeBreakpoints';
+import { scanCodeAssets } from './code/codeAssetUsage';
 
 const BUTTON_BASE =
   'inline-flex items-center justify-center min-h-[36px] '
@@ -90,6 +91,22 @@ const TECHNIK_PREFIX = '[TECHNIK] ';
 // phantom — the cloud's 404 „Bewegung nicht gefunden" — so the loop can drop it
 // without confusing it with a row that arrived and would not parse.
 const NO_SUCH_RECORDING = Symbol('no such recording');
+
+// Recordings belong to a SAVED workflow (the cloud keys them on its id), so a
+// program that replays one cannot run before its first save. One sentence for
+// both notations.
+const SAVE_FIRST_RECORDINGS_DE = 'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
+  + 'gehören zu einem gespeicherten Workflow.';
+
+// Whether a code program really CALLS replay("…") — the exact scanner, not the
+// run-time one: a replay inside a comment or a string must not stop an
+// unsaved program from running.
+function codeCallsReplay(files, language) {
+  for (const rows of scanCodeAssets(files, language).replay.values()) {
+    if (rows.some((r) => !r.inComment)) return true;
+  }
+  return false;
+}
 
 // ── Run-payload slimming ─────────────────────────────────────────────────────
 // The allowlist and the reasoning live in `utils/blocklyPayload.js`, shared with
@@ -138,6 +155,11 @@ function RunControls({
   // '' / null keep the Blockly path byte-for-byte.
   codeLanguage = '',
   codeFiles = null,
+  // The open document's Ziele/Positionen store (WorkshopPage `activeStore`):
+  // the workspace's own store for a Blockly program, the code document's
+  // detached one for Python/Java (migration 041). Absent → the workspace's
+  // store, else the serializer output, as before.
+  destinationStore = null,
 }) {
   const dispatch = useDispatch();
   const {
@@ -314,6 +336,13 @@ function RunControls({
         toast.error(projectError);
         return;
       }
+      // O9: an UNSAVED program that replays a recording would start and then
+      // abort on the robot („Unbekannte Aufnahme: …") — the recordings live
+      // under a saved workflow. The same refusal a block program gets.
+      if (!workflowId && codeCallsReplay(codeFiles, codeLanguage)) {
+        toast.error(SAVE_FIRST_RECORDINGS_DE);
+        return;
+      }
     } else if (!blocklyJson) {
       toast.error('Workflow ist leer.');
       return;
@@ -396,8 +425,7 @@ function RunControls({
       if (replayNames.length > 0 && !canFetchTrajectories && !skipUnknownNames) {
         toast.error(workflowId
           ? 'Aufgenommene Bewegungen können zurzeit nicht geladen werden.'
-          : 'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
-            + 'gehören zu einem gespeicherten Workflow.');
+          : SAVE_FIRST_RECORDINGS_DE);
         return;
       }
       if (replayNames.length > 0 && canFetchTrajectories) {
@@ -498,12 +526,14 @@ function RunControls({
       // authoritative (a deleted Ziel must not resolve to another student's
       // robot-local point). The live store is the freshest truth; the
       // serializer output is the fallback when no workspace is mounted. A code
-      // program has no Blockly document: it pins its own points in code.
+      // program (041) sends ITS document's store the same way; a `pin()` in the
+      // code still wins at run time, the precedence a „Ziel setzen" block has.
+      const store = destinationStore || (workspace ? getDestinationStore(workspace) : null);
       let destinationEntries = [];
-      if (!isCode) {
-        destinationEntries = workspace
-          ? getDestinationStore(workspace).getEntries()
-          : readDestinationEntries(blocklyJson);
+      if (store) {
+        destinationEntries = store.getEntries();
+      } else if (!isCode) {
+        destinationEntries = readDestinationEntries(blocklyJson);
       }
       const destinations = entriesForRunPayload(destinationEntries);
       const workflowJsonStr = simMode
@@ -570,6 +600,7 @@ function RunControls({
   }, [
     blocklyJson,
     workspace,
+    destinationStore,
     rsLeaderOn,
     simMode,
     simScene,

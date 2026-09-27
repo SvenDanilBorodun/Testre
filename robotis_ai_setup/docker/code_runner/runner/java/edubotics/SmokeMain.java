@@ -98,6 +98,31 @@ public final class SmokeMain {
         check(EduJson.encode(RpcClient.shownObject(new double[] {1.0, Double.NaN}))
                 .equals("[1.0,\"NaN\"]"), "zeige double[]");
         check(EduJson.encode(RpcClient.shownObject(new int[] {1, 2})).equals("[1,2]"), "zeige int[]");
+        // EVERY array type is a JSON list, never the JVM's "[J@1b6d3586"
+        // (review round 3, nb6); nested arrays nest, and past the depth "…".
+        check(EduJson.encode(RpcClient.shownObject(new long[] {1L, 2L})).equals("[1,2]"), "zeige long[]");
+        check(EduJson.encode(RpcClient.shownObject(new String[] {"a", "b"})).equals("[\"a\",\"b\"]"),
+              "zeige String[]");
+        check(EduJson.encode(RpcClient.shownObject(new boolean[] {true, false})).equals("[true,false]"),
+              "zeige boolean[]");
+        check(EduJson.encode(RpcClient.shownObject(new char[] {'a', 'b'})).equals("[\"a\",\"b\"]"),
+              "zeige char[]");
+        check(EduJson.encode(RpcClient.shownObject(new float[] {1.5f})).equals("[1.5]"), "zeige float[]");
+        check(EduJson.encode(RpcClient.shownObject(new short[] {3})).equals("[3]"), "zeige short[]");
+        check(EduJson.encode(RpcClient.shownObject(new byte[] {4})).equals("[4]"), "zeige byte[]");
+        check(EduJson.encode(RpcClient.shownObject(new Object[] {1, "x", null})).equals("[1,\"x\",null]"),
+              "zeige Object[]");
+        check(EduJson.encode(RpcClient.shownObject(new int[][] {{1, 2}, {3}})).equals("[[1,2],[3]]"),
+              "zeige int[][]");
+        check(EduJson.encode(RpcClient.shownObject(new int[][][][] {{{{1}}}})).equals("[[[\"…\"]]]"),
+              "zeige cuts past the depth");
+        check(EduJson.encode(RpcClient.shownObject(List.of(1, "a"))).equals("[1,\"a\"]"), "zeige list");
+        int[] viele = new int[80];
+        String cut = EduJson.encode(RpcClient.shownObject(viele));
+        check(cut.endsWith(",\"…\"]") && cut.split(",").length == RpcClient.SHOWN_MAX_ITEMS + 1,
+              "zeige caps an array at SHOWN_MAX_ITEMS");
+        String langArray = EduJson.encode(RpcClient.shownObject(new long[] {7L}));
+        check(!langArray.contains("@"), "zeige never shows an array's identity");
         // A list's items share ONE character budget: sixty 1000-character
         // texts stay a small frame, cut with "…".
         List<String> lang = new java.util.ArrayList<>();

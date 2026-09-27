@@ -262,9 +262,13 @@ def test_zeige_renders_in_both_stubs_and_the_asset_tag_in_neither():
         assert f'public static void zeige(String name, {jtype} wert)' in java, jtype
     assert java.count('public static void zeige(') == 6
     rpc = _RENDERED[robot_api.GENERATED_PATHS['java_rpc_client']]
-    for branch in ('instanceof String', 'instanceof double[]', 'instanceof int[]',
+    # Review round 3 (nb6): EVERY array type is a JSON list — the reflective
+    # walk, not one branch per array type (a long[] or String[] showed
+    # „[J@1b6d3586"); SmokeMain renders each type in the image build.
+    for branch in ('instanceof String', 'getClass().isArray()', 'java.lang.reflect.Array.get(o, i)',
                    'instanceof Iterable', 'instanceof Character'):
         assert branch in rpc, branch
+    assert 'instanceof double[]' not in rpc and 'instanceof int[]' not in rpc
     for rel in (robot_api.GENERATED_PATHS['java_robot'],
                 robot_api.GENERATED_PATHS['java_greifobjekt'],
                 robot_api.GENERATED_PATHS['java_rpc_client']):
@@ -418,7 +422,12 @@ def test_the_java_zeige_list_shares_one_character_budget():
     Python stub's budget."""
     rpc = _RENDERED[robot_api.GENERATED_PATHS['java_rpc_client']]
     assert f'static final int SHOWN_BUDGET_CHARS = {2 * robot_api.SHOWN_VALUE_MAX_CHARS};' in rpc
-    assert 'budget -= Math.max(n, 4);' in rpc
+    # One budget for the whole value (review round 3, nb6): every node costs
+    # 4 and a text its length, arrays and lists nest into it, as in Python.
+    assert 'budget[0] -= 4;' in rpc and 'budget[0] -= n;' in rpc
+    assert f'static final int SHOWN_MAX_DEPTH = {robot_api._SHOWN_MAX_DEPTH};' in rpc
+    assert f'static final int SHOWN_MAX_ITEMS = {robot_api._SHOWN_MAX_ITEMS};' in rpc
+    assert f'_SHOWN_MAX_DEPTH = {robot_api._SHOWN_MAX_DEPTH}\n' in _STUB
     assert 2 * robot_api.SHOWN_VALUE_MAX_CHARS <= robot_api.SHOWN_FRAME_MAX_CHARS
 
 

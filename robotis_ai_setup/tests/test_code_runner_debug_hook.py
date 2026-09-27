@@ -304,6 +304,23 @@ class SnapshotBounds(unittest.TestCase):
         self.assertEqual(self.dbg._jsonable(float('inf')), 'inf')
         self.assertEqual(self.dbg._jsonable(_Hostile()), '<?>')
 
+    def test_a_hostile_repr_inside_a_big_container_does_not_break_the_snapshot(self):
+        """Restored (review round 3, MB2h; removed with the sampler in round
+        2). A list too big for its structured rendering falls back to its
+        cut repr — which calls every item's __repr__ — on the student's own
+        stopped thread at a breakpoint. A raising one must cost the value,
+        never the pause."""
+        class _Hostile:
+            def __repr__(self):
+                raise RuntimeError('nope')
+
+        class _Frame:
+            f_locals = {'liste': ['x' * 900, 'y' * 900, _Hostile()], 'klein': 1}
+
+        out = self.dbg.snapshot_locals(_Frame(), 30)
+        self.assertEqual(out['liste'], '<?>')
+        self.assertEqual(out['klein'], 1)
+
     def test_a_breakpoint_frame_always_fits_and_every_name_still_shows(self):
         """30 locals of 999 emoji each are 30 000 characters but ~120 KB of
         UTF-8: the `__paused` frame used to exceed MAX_FRAME_BYTES, and the
@@ -758,6 +775,82 @@ class LiveValuesThroughTheStub(unittest.TestCase):
         run = _StubRun(self, 'punkte = 41\npunkte += 1\n')
         run.run()
         self.assertEqual([a[2] for _t, a in run.robot_srv.of('__vars')], [{'punkte': 42}])
+
+    def test_thirty_long_texts_still_show_every_name_before_the_call(self):
+        """Review round 3 (MB2e): `before_call` trims its snapshot with
+        fit_vars. Thirty globals of 1000 „€" are ~90 KB of UTF-8 — past the
+        stub's 64 KiB frame bound — so without the trim the stub refuses the
+        frame, the values switch off for the run, and not one arrives. The
+        frame that goes out BEFORE the robot call must carry all thirty
+        names, the largest as SHOWN_TOO_BIG."""
+        names = [f'text{i:02d}' for i in range(30)]
+        src = 'import robot\n' + ''.join(f'{n} = "€" * 1000\n' for n in names) + 'robot.move_to("A")\n'
+        run = _StubRun(self, src)
+        run.run()
+        frames = run.robot_srv.frames
+        first_vars = next(i for i, f in enumerate(frames) if f[1] == '__vars')
+        first_move = next(i for i, f in enumerate(frames) if f[1] == 'move_to')
+        self.assertLess(first_vars, first_move, 'the values ride BEFORE the robot call')
+        shown = frames[first_vars][2][2]
+        self.assertEqual(sorted(shown), names, 'every name still shows')
+        self.assertIn(run.dbg.SHOWN_TOO_BIG, shown.values())
+        self.assertIn('€' * 1000, shown.values(), 'what fits is shown whole')
+        self.assertTrue(run.live.enabled)
+
+    def test_the_final_send_never_holds_the_end_longer_than_one_interval(self):
+        """Review round 3 (nb7): another thread in the middle of its own
+        check used to hold the program's end for up to 4 × the interval
+        (2 s). Now one deadline covers both waits: a check held elsewhere
+        for the whole interval means the final send is skipped (that
+        thread is sending the same module values)."""
+        dbg = _load_hook()
+        rpc = _RecordingRpc()
+        tmp = tempfile.mkdtemp(prefix='edu-final-')
+        live = dbg.LiveValues(rpc, tmp, interval_s=0.3)
+        held = threading.Event()
+        release = threading.Event()
+
+        def other_thread_mid_check():
+            with live._busy:
+                held.set()
+                release.wait(5.0)
+        worker = threading.Thread(target=other_thread_mid_check, daemon=True)
+        worker.start()
+        self.assertTrue(held.wait(2.0))
+        t0 = time.monotonic()
+        live.final([{'punkte': 3}], ('main.py', 0))
+        elapsed = time.monotonic() - t0
+        release.set()
+        worker.join(2.0)
+        self.assertLess(elapsed, 0.3 + 0.2, 'at most one interval')
+        self.assertEqual([c for c in rpc.calls if c[0] == '__vars'], [])
+
+    def test_the_final_send_waits_out_a_check_that_just_ran_within_the_deadline(self):
+        """The other half of nb7: a check another thread finishes within the
+        interval is waited for, and the final values still go out — the
+        whole end held no longer than the one interval."""
+        dbg = _load_hook()
+        rpc = _RecordingRpc()
+        tmp = tempfile.mkdtemp(prefix='edu-final-')
+        live = dbg.LiveValues(rpc, tmp, interval_s=0.4)
+        held = threading.Event()
+
+        def other_thread_short_check():
+            with live._busy:
+                held.set()
+                time.sleep(0.25)
+                live._next_check = time.monotonic() + 0.4
+        worker = threading.Thread(target=other_thread_short_check, daemon=True)
+        worker.start()
+        self.assertTrue(held.wait(2.0))
+        t0 = time.monotonic()
+        live.final([{'punkte': 3}], ('main.py', 0))
+        elapsed = time.monotonic() - t0
+        worker.join(2.0)
+        # 0.25 s for the other check + a fresh 0.4 s floor wait would be
+        # 0.65 s: the two waits share ONE 0.4 s deadline instead.
+        self.assertLess(elapsed, 0.4 + 0.15, 'at most one interval')
+        self.assertEqual([c[1][2] for c in rpc.calls if c[0] == '__vars'], [{'punkte': 3}])
 
 
 class SamplerSendsOnlyTheLine(unittest.TestCase):

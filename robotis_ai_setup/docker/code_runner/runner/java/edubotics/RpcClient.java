@@ -240,12 +240,14 @@ public final class RpcClient {
     // ── zeige(): bounded, JSON-safe renderings of a shown value ─────────────
 
     static final int SHOWN_MAX_ITEMS = 50;
+    static final int SHOWN_MAX_DEPTH = 3;
     static final int SHOWN_MAX_CHARS = 1000;
-    // A list's items share ONE character budget (the Python stub's
-    // _SHOWN_BUDGET_CHARS): fifty long texts must not become a frame the
-    // robot cannot take — or one over MAX_FRAME_BYTES, refused in the
-    // student's own program.
+    // A value's texts and nodes share ONE character budget (the Python stub's
+    // _SHOWN_BUDGET_CHARS; every node costs at least 4): fifty long texts or
+    // a nested array must not become a frame the robot cannot take — or one
+    // over MAX_FRAME_BYTES, refused in the student's own program.
     static final int SHOWN_BUDGET_CHARS = 4000;
+    static final String SHOWN_CUT = "…";
 
     static Object shownDouble(double v) {
         if (Double.isNaN(v) || Double.isInfinite(v)) {
@@ -254,44 +256,26 @@ public final class RpcClient {
         return v;
     }
 
-    static String shownText(String s) {
-        if (s == null) {
-            return null;
-        }
-        return s.length() > SHOWN_MAX_CHARS ? s.substring(0, SHOWN_MAX_CHARS) : s;
-    }
-
-    static List<Object> shownDoubles(double[] a) {
-        if (a == null) {
-            return null;
-        }
-        int n = Math.min(a.length, SHOWN_MAX_ITEMS);
-        List<Object> out = new java.util.ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
-            out.add(shownDouble(a[i]));
-        }
-        return out;
-    }
-
-    static List<Object> shownInts(int[] a) {
-        if (a == null) {
-            return null;
-        }
-        int n = Math.min(a.length, SHOWN_MAX_ITEMS);
-        List<Object> out = new java.util.ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
-            out.add(a[i]);
-        }
-        return out;
-    }
-
     static Object shownObject(Object o) {
+        return shownValue(o, 0, new int[] {SHOWN_BUDGET_CHARS});
+    }
+
+    // One node of a shown value, charged to the shared budget like the
+    // Python stub's _shown_part. EVERY array type (int[], long[], String[],
+    // char[], Object[], an array of arrays …) and every Iterable is a JSON
+    // list — at most SHOWN_MAX_ITEMS items and SHOWN_MAX_DEPTH levels, cut
+    // with "…" — never the JVM's "[J@1b6d3586" (review round 3, nb6).
+    static Object shownValue(Object o, int depth, int[] budget) {
+        if (budget[0] <= 0) {
+            return SHOWN_CUT;
+        }
+        budget[0] -= 4;
         if (o == null || o instanceof Boolean || o instanceof Integer || o instanceof Long
                 || o instanceof Short || o instanceof Byte) {
             return o;
         }
         if (o instanceof String) {
-            return shownText((String) o);
+            return shownText((String) o, budget);
         }
         if (o instanceof Character) {
             return String.valueOf(o);
@@ -299,28 +283,39 @@ public final class RpcClient {
         if (o instanceof Number) {
             return shownDouble(((Number) o).doubleValue());
         }
-        if (o instanceof double[]) {
-            return shownDoubles((double[]) o);
-        }
-        if (o instanceof int[]) {
-            return shownInts((int[]) o);
-        }
-        if (o instanceof Iterable) {
+        boolean array = o.getClass().isArray();
+        if (array || o instanceof Iterable) {
+            if (depth >= SHOWN_MAX_DEPTH) {
+                return SHOWN_CUT;
+            }
             List<Object> out = new java.util.ArrayList<>();
-            int budget = SHOWN_BUDGET_CHARS;
-            for (Object item : (Iterable<?>) o) {
-                if (out.size() >= SHOWN_MAX_ITEMS || budget <= 0) {
-                    out.add("…");
-                    break;
+            if (array) {
+                int n = java.lang.reflect.Array.getLength(o);
+                for (int i = 0; i < n; i++) {
+                    if (out.size() >= SHOWN_MAX_ITEMS || budget[0] <= 0) {
+                        out.add(SHOWN_CUT);
+                        break;
+                    }
+                    out.add(shownValue(java.lang.reflect.Array.get(o, i), depth + 1, budget));
                 }
-                String text = String.valueOf(item);
-                int n = Math.min(text.length(), Math.min(SHOWN_MAX_CHARS, budget));
-                out.add(text.substring(0, n));
-                budget -= Math.max(n, 4);
+            } else {
+                for (Object item : (Iterable<?>) o) {
+                    if (out.size() >= SHOWN_MAX_ITEMS || budget[0] <= 0) {
+                        out.add(SHOWN_CUT);
+                        break;
+                    }
+                    out.add(shownValue(item, depth + 1, budget));
+                }
             }
             return out;
         }
-        return shownText(String.valueOf(o));
+        return shownText(String.valueOf(o), budget);
+    }
+
+    static String shownText(String s, int[] budget) {
+        int n = Math.max(0, Math.min(s.length(), Math.min(SHOWN_MAX_CHARS, budget[0])));
+        budget[0] -= n;
+        return s.substring(0, n);
     }
 
     static double[] asPoint(Object r) {

@@ -390,6 +390,49 @@ def test_vars_frames_past_the_floor_are_charged_then_dropped(server):
     server.close_run(session)
 
 
+def test_every_vars_frame_takes_a_token_before_anything_else(server):
+    """Condition 1 observed at the BUCKET (review round 3, MB2a): the tests
+    above count ``frames_decoded``, which the reader bumps whether or not
+    it then charges — a reader that let `__vars` through uncharged kept
+    them green. Here every token the run's call bucket hands out is
+    counted: a looked-at `__vars`, a floor-skipped one and an invalid one
+    each take exactly one, and a burst of them delays what follows."""
+    ctx = _ctx()
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)   # the hello is not charged
+    taken = []
+    real_take = session._calls.take
+
+    def counting_take(stop):
+        ok = real_take(stop)
+        if ok:
+            taken.append(time.monotonic())
+        return ok
+    session._calls.take = counting_take
+
+    replies = [c.call('__vars', ['main.py', 1, {'i': i}]) for i in range(10)]
+    assert [r['r'] for r in replies] == [None] + [robot_api.VARS_REPLY_SKIPPED] * 9
+    assert len(taken) == 10, 'a looked-at and a floor-skipped __vars each cost one token'
+    time.sleep(robot_api.VARS_MIN_INTERVAL_S + 0.05)       # past the floor: validated
+    bad = c.call('__vars', ['main.py', 1])                 # wrong arity: refused
+    assert bad['ok'] is False
+    assert len(taken) == 11, 'an invalid __vars costs its token before it is refused'
+
+    # The tokens are the run's real ones: with the burst spent on __vars,
+    # the next frames wait for the refill.
+    burst = robot_api.RPC_LIMITS.BURST
+    for _ in range(burst):
+        c.call('__vars', ['main.py', 1, {'x': 1}])
+    n = 40
+    t0 = time.monotonic()
+    for _ in range(n):
+        c.call('__vars', ['main.py', 1, {'x': 1}])
+    elapsed = time.monotonic() - t0
+    assert len(taken) == 11 + burst + n
+    assert elapsed >= (n - 3) / robot_api.RPC_LIMITS.MAX_CALLS_PER_S
+    server.close_run(session)
+
+
 def test_a_vars_frame_over_the_total_cap_shows_every_name(server):
     """Each value within its own bound, the FRAME over the total: the
     largest values become SHOWN_TOO_BIG until the rest fit — every name

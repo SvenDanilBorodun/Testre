@@ -624,18 +624,26 @@ class LiveValues:
             self._busy.release()
 
     def final(self, namespaces, fallback_position) -> None:
-        """The last values, once, before ``__exit``: waits out what is left
-        of the interval (at most ``interval_s``) when a check ran just now,
-        so the server looks at this frame. Never raises."""
-        if not self.enabled or not self._busy.acquire(timeout=4 * self._interval):
+        """The last values, once, before ``__exit``. Never raises, and never
+        holds the program's end for more than ONE ``interval_s`` (review
+        round 3, nb7): the wait for another thread's check in flight and the
+        wait for the server's floor share that one deadline. When another
+        thread holds the check for the whole interval, the final send is
+        skipped — that thread is sending the same module values right now.
+        A check that ran just now is waited out (within the deadline) so the
+        server looks at this frame instead of answering ``skipped``."""
+        if not self.enabled:
+            return
+        deadline = self._clock() + self._interval
+        if not self._busy.acquire(timeout=self._interval):
             return
         try:
             fitted = fit_vars(snapshot_namespaces(namespaces, self._max, self._exclude))
             if self._key(fitted) == self._sent_key:
                 return
-            wait = self._next_check - self._clock()
+            wait = min(self._next_check, deadline) - self._clock()
             if wait > 0:
-                self._sleep(min(wait, self._interval))
+                self._sleep(wait)
             self._send_if_changed(self._position or fallback_position, fitted)
         except Exception:  # noqa: BLE001 — the end of a run is never a crash
             self.enabled = False

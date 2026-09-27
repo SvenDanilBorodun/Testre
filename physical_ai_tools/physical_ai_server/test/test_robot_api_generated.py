@@ -428,6 +428,12 @@ def test_the_java_zeige_list_shares_one_character_budget():
     assert f'static final int SHOWN_MAX_DEPTH = {robot_api._SHOWN_MAX_DEPTH};' in rpc
     assert f'static final int SHOWN_MAX_ITEMS = {robot_api._SHOWN_MAX_ITEMS};' in rpc
     assert f'_SHOWN_MAX_DEPTH = {robot_api._SHOWN_MAX_DEPTH}\n' in _STUB
+    assert f'_SHOWN_MAX_ITEMS = {robot_api._SHOWN_MAX_ITEMS}\n' in _STUB
+    # The shipped values, as literals (test_constant_pins): both renderers
+    # read them, so a changed value would regenerate consistently and pass
+    # every fence above.
+    assert robot_api._SHOWN_MAX_DEPTH == 3
+    assert robot_api._SHOWN_MAX_ITEMS == 50
     assert 2 * robot_api.SHOWN_VALUE_MAX_CHARS <= robot_api.SHOWN_FRAME_MAX_CHARS
 
 

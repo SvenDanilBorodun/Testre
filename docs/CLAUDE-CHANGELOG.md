@@ -6,6 +6,108 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-09-27 — a Python student gets the Sammlung, and stored Ziele finally reach code
+
+The coding suite of 2026-09-20 gave Python and Java students a real editor and a
+real runtime, but not the Sammlung. Read in the code before anything was
+written: the drawer was gated on `!isCodeWorkflow`; the flyout cards live inside
+Blockly; `CodeWorkspace` received `language`, `files` and `onFilesChange` and
+nothing else; and `RunControls` hard-coded `destinations: []` for code — which
+the server, correctly, treats as the AUTHORITATIVE document, so
+`robot.move_to("Ablage")` worked only for names the program pinned itself.
+Three controls were visible in a code program and silently did nothing:
+„✋ Vormachen" (`TeachHost` returned on `!workspace`), the camera click-to-mark
+and the simulator's „Ziel setzen".
+
+**One contract, two documents — not a second drawer.** Everything that reached
+„the document" (the drawer and its detail views, the Vormachen overlay and its
+host) now reaches it through an asset document with one API: its Ziele store,
+the index the drawer draws, „Benutzt in" rows and the jump to one, taken
+names, a rename that rewrites the program, delete/restore, insertion, and where
+the drawer sits. The Blockly implementation is a thin wrapper over the calls
+the components made before, byte for byte, which is why every existing drawer,
+overlay and host test ran unmodified; the code implementation reads the files
+through the page. One test file runs the same assertions against both.
+
+**Where a code program's Ziele live (migration 041).** In the row's
+`blockly_json`, under the same `edubotics-destinations` key the Blockly
+serializer writes — one format for both notations, and the snapshot trigger
+versions it for free — and nothing else may be there: a CHECK is the floor, the
+RPC refuses with 22023, and the route answers in German first.
+`update_workflow_code` gained `p_blockly_json JSONB DEFAULT NULL` in the same
+UPDATE (`COALESCE`), so one save is one version, and an older API's four named
+arguments still resolve. Proven on a LOCAL Supabase stack only (a scratch copy
+of the project, because the squashed baseline is not replayable from scratch —
+`docs/KNOWN-ISSUES.md`): 21 assertions pass; the rollback restores 040's body
+byte-for-byte and 040's own 16 assertions pass on the rolled-back state; 041
+re-applied twice is idempotent and passes the 21 again; through local PostgREST
+the four-named-argument call resolves on 041, the five-argument probe answers
+PGRST202 without 041 (so an API deployed before its migration fails its own
+`/health`), and the anon key is refused (42501).
+
+**The page, where the ordering bug would have been.** A rename in the drawer
+rewrites the code and awaits a save in the same tick. With the code refs
+updated by an effect, that save sent the OLD text; so `applyCodeFiles` and the
+one opener, `openCodeDocument`, write the refs synchronously, and a mutation
+that moves the write back into an effect fails the same-tick test. The code
+document's Ziele store is detached (no workspace), created once per opened
+document — never `getDestinationStore(null)`, which would hand every code
+program the same store.
+
+**Names in code are an exact question.** A regex over raw text cannot tell a
+call from the same characters inside a string or a comment, so the scanner is
+a small tokenizer (Python's quotes, prefixes and triple quotes; Java's
+comments, strings, text blocks and chars) and counts a name only when a string
+literal is the WHOLE argument. A rename therefore rewrites only text it is sure
+of, never a `pin()`/`pin_current()` definition, and a call inside a comment is
+treated as Blockly treats a disabled block: listed as switched off, rewritten
+too. The method set and which argument is an asset come from new `asset` tags
+on `robot_api.py`'s rows, rendered into `robot_api.json` — never a second list.
+
+**The editor is fed, not rebuilt.** An external edit (a rename, a drawer
+insertion) used to replace the whole document, which threw the caret to line 1
+and echoed the text back to the page; it is now the smallest change, not
+echoed, and one Strg+Z undoes it. Completion inside `move_to("`, German
+warnings for a name the Sammlung lacks, a hover and a drop target are wired in
+from pure modules. The warnings needed their own ship switch: the parse
+markers stay OFF (`CODE_LINT_LANGUAGES = []`, the 2026-09-21 noise gate), while
+a missing Sammlung name is a fact the editor can know. One trap found on the
+way: `@codemirror/lint` prints a diagnostic's `source` in its tooltip, and the
+pure module's `source: 'asset'` would have been English on screen — the editor
+strips it. Another: `forceLinting` only hurries a lint that is already pending,
+so a changed Sammlung is signalled through the linter's `needsRefresh` first.
+
+**Variables (O3, O8).** `zeige(name, wert)` is a public code-only row with no
+block type (the 32-row bijection stays whole), rendered into both stubs and
+`robot_api.json`; Java gets overloads that encode through the existing JSON
+writer. For Python, the runner's line sampler — already a thread reading the
+main thread's frame — now also sends `__vars` when the snapshot changed. That
+rested on one question the spec made a gate: is reading `frame.f_locals` of the
+MAIN thread from another thread safe on CPython 3.12 while `sys.monitoring` is
+active? Measured, not argued, in the runner image built locally from
+`docker/code_runner/` (CPython 3.12.3, linux/arm64 under Docker Desktop; the
+host's CPython 3.12.13 agreed): a probe mutating locals,
+closures and module globals under the debugger's LINE callback, sampled from a
+second thread — 550 491 samples / 2 291 631 frame reads over 1 500 iterations
+with zero result mismatches, zero exceptions on either thread and a closure
+cell's reference count unchanged after the sampler was joined; and a
+student-shaped `main.py` (module-level loops, PEP 709 inlined comprehensions
+rebinding a global's name, closures) 3.37 M and 3.54 M samples with and
+without reading module-frame `f_locals`, zero mismatches. VERDICT: SAFE, so the
+full variant shipped (function locals, then module globals). The first host run
+said UNSAFE: the probe's own harness frame held the cell being counted — the
+sampler reads only project frames, and so does the corrected probe. Both new
+frame kinds sit inside Rule §2's four conditions: charged before validation,
+validated from their rows, answered by the server through `ctx.log` alone
+(AST-fenced), stop semantics and the uid split untouched.
+
+**What is proven where.** Unit and component tests (gui, cloud API, server,
+React) plus the local Supabase stack and the runner-image probe above. Nothing
+here has driven a real arm: a stored Ziel reaching `robot.move_to` on a
+calibrated rig, the plane-tracked height matching Blockly's, the drop position
+and the hover in a real WebView2, and the f_locals measurement on the amd64
+image are rig gates (`docs/KNOWN-ISSUES.md`, CS-R1…CS-R5).
+
 ### Unreleased, 2026-09-20 — Roboter Studio learns to run real Python and real Java
 
 The owner asked for „a full coding suite not just a add on to blocky" (A1). What

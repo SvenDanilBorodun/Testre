@@ -24,6 +24,7 @@ import {
 } from '../../../features/workshop/studioAssetsSlice';
 import { placeGripperState } from '../../../utils/armProfile';
 import { previewKeyForDestination } from '../../../utils/simPreview';
+import { CODE_DE } from '../code/codeMessagesDe';
 import { DE, formatDe } from '../blocks/messages_de';
 import { assetDocumentOf } from './assetDocument';
 import { sanitizeDestinationNameInput } from './destinationStore';
@@ -156,7 +157,9 @@ export default function DrawerPlace({
       <UsageList
         assetDoc={assetDoc}
         rows={rows}
-        nowhereText={isPose ? DE.DRAWER_USED_NOWHERE_POSE : DE.DRAWER_USED_NOWHERE_PLACE}
+        nowhereText={assetDoc && assetDoc.kind === 'code'
+          ? CODE_DE.USED_NOWHERE_INSERT
+          : (isPose ? DE.DRAWER_USED_NOWHERE_POSE : DE.DRAWER_USED_NOWHERE_PLACE)}
       />
       {confirm && (
         <InlineConfirm text={confirm.text} yesLabel={DE.CONFIRM_YES_DELETE} onYes={confirm.onYes} onNo={confirm.onNo} />

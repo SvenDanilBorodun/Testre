@@ -27,6 +27,7 @@ import {
   setRenameSplit,
 } from '../../../features/workshop/studioAssetsSlice';
 import { previewKeyForRecording } from '../../../utils/simPreview';
+import { CODE_DE } from '../code/codeMessagesDe';
 import { DE, formatDe } from '../blocks/messages_de';
 import {
   deleteRecordingRows,
@@ -95,6 +96,9 @@ export default function DrawerRecording({
 }) {
   const dispatch = useDispatch();
   const assetDoc = assetDocumentOf(assetDocProp, workspace);
+  // A code program has no block to drag: its „nowhere" points at „Einfügen".
+  const nowhereRecordingText = assetDoc && assetDoc.kind === 'code'
+    ? CODE_DE.USED_NOWHERE_INSERT : DE.DRAWER_USED_NOWHERE_RECORDING;
   const drawer = useSelector(selectDrawer);
   const lastPreviewResult = useSelector(selectLastPreviewResult);
   const previewTempo = (drawer && drawer.previewTempo) || 1.0;
@@ -227,7 +231,7 @@ export default function DrawerRecording({
     return (
       <div className="p-3">
         <h3 className="truncate text-base font-semibold text-gray-900" title={name}>{name}</h3>
-        <UsageList assetDoc={assetDoc} rows={rows} nowhereText={DE.DRAWER_USED_NOWHERE_RECORDING} />
+        <UsageList assetDoc={assetDoc} rows={rows} nowhereText={nowhereRecordingText} />
       </div>
     );
   }
@@ -293,7 +297,7 @@ export default function DrawerRecording({
           )}
         </section>
       )}
-      <UsageList assetDoc={assetDoc} rows={rows} nowhereText={DE.DRAWER_USED_NOWHERE_RECORDING} />
+      <UsageList assetDoc={assetDoc} rows={rows} nowhereText={nowhereRecordingText} />
       {older.length > 0 && (
         <section className="mt-3">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">{DE.DRAWER_OLDER_VERSIONS}</h4>

@@ -9,9 +9,13 @@
  */
 
 /**
- * Sammlung drawer detail of ONE Blockly variable. Renaming refuses a name
- * another variable already holds (Blockly would silently merge the two);
- * deleting goes through Blockly's own „Variable löschen", confirmation and all.
+ * Sammlung drawer detail of ONE variable. Of a Blockly variable: renaming
+ * refuses a name another variable already holds (Blockly would silently merge
+ * the two); deleting goes through Blockly's own „Variable löschen",
+ * confirmation and all. Of a Python/Java variable (owner decision O8): no
+ * rename, no delete — there is no language server (decision D7), so the
+ * drawer says the program is where that happens; „Benutzt in" lists the code
+ * lines, and Java says its values come only through Robot.zeige(…) (A8).
  *
  * The values come from the RUN (the [VAR:] sentinel): the last one with its age,
  * the last five (`workshop.variableHistory`, newest first), and — for a point
@@ -24,6 +28,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { setDrawerFocus } from '../../../features/workshop/studioAssetsSlice';
 import { DE, formatDe } from '../blocks/messages_de';
+import { CODE_DE } from '../code/codeMessagesDe';
 import { assetDocumentOf } from './assetDocument';
 import { displayValue, pointFromValue } from './assetIndex';
 import { DetailRow, RenameField, UsageList } from './drawerParts';
@@ -45,6 +50,8 @@ export default function DrawerVariable({
   const dispatch = useDispatch();
   const assetDoc = assetDocumentOf(assetDocProp, workspace);
   const rows = assetDoc ? assetDoc.usageRows('variable', card.assetId) : [];
+  const isCode = !!assetDoc && assetDoc.kind === 'code';
+  const editable = !!assetDoc && assetDoc.canEditVariables !== false;
   const name = card.assetName;
   const current = useSelector((s) => ownEntry(s.workshop && s.workshop.variables, name));
   const history = useSelector((s) => ownEntry(s.workshop && s.workshop.variableHistory, name));
@@ -85,7 +92,14 @@ export default function DrawerVariable({
 
   return (
     <div className="p-3">
-      <RenameField key={card.assetName} name={card.assetName} maxLength={64} onCommit={handleRename} />
+      {editable ? (
+        <RenameField key={card.assetName} name={card.assetName} maxLength={64} onCommit={handleRename} />
+      ) : (
+        <h3 className="truncate text-base font-semibold text-gray-900" title={card.assetName}>{card.assetName}</h3>
+      )}
+      {isCode && assetDoc.language === 'java' && (
+        <p className="mt-1 text-xs text-gray-600">{CODE_DE.VARIABLES_JAVA_NOTE}</p>
+      )}
       {hasValue ? (
         <dl className="mt-2 space-y-1">
           <DetailRow label={DE.DRAWER_LAST_VALUE}>
@@ -119,14 +133,22 @@ export default function DrawerVariable({
           </ul>
         </section>
       )}
-      <UsageList assetDoc={assetDoc} rows={rows} nowhereText={DE.DRAWER_USED_NOWHERE_VARIABLE} />
-      <button
-        type="button"
-        onClick={handleDelete}
-        className="mt-4 rounded border border-red-300 px-2 py-1 text-sm text-red-700 hover:bg-red-50"
-      >
-        {DE.DRAWER_DELETE_VARIABLE}
-      </button>
+      <UsageList
+        assetDoc={assetDoc}
+        rows={rows}
+        nowhereText={isCode ? CODE_DE.VARIABLE_USED_NOWHERE : DE.DRAWER_USED_NOWHERE_VARIABLE}
+      />
+      {editable ? (
+        <button
+          type="button"
+          onClick={handleDelete}
+          className="mt-4 rounded border border-red-300 px-2 py-1 text-sm text-red-700 hover:bg-red-50"
+        >
+          {DE.DRAWER_DELETE_VARIABLE}
+        </button>
+      ) : (
+        <p className="mt-4 text-xs text-gray-600">{CODE_DE.VARIABLES_EDIT_IN_CODE}</p>
+      )}
     </div>
   );
 }

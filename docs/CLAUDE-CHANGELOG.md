@@ -6,6 +6,90 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-09-27 (fix round 2) — live values ride the program's own robot calls, and the editor indents like the file
+
+Two more fresh reviewers (2-A adversarial, 2-B regression and delivery)
+re-read the branch after the first fix round; the owner decided four things
+(R2-O1…R2-O4) and had every finding fixed, each with a test that failed
+first. This entry supersedes the „sampled every 0.5 s" and „also the
+editor's `indentUnit`" of the entry below.
+
+**Live values almost never arrived (MA2).** The line sampler sent `__vars`
+only when the RPC lock was free, and a stub call holds that lock for its
+whole round trip: a program of 0.5 s robot calls sent **0** value frames in
+4.07 s, and the final values were never sent at all. The owner chose option
+B (R2-O1): the sampler goes back to the highlight alone (`__line`, and it
+reads only `f_code`/`f_lineno`/`f_back` — nothing reads a variable from
+another thread any more, which also retires the CPython-3.12 `locals()`
+hazard by construction), and the program's OWN thread sends the
+module-level values right before a public robot call (the stub's
+`_Rpc.before_call` → `edubotics_debug.LiveValues`), at most every 0.5 s and
+only when they changed, plus once before `__exit`. Any failure switches the
+values off for the run and never raises. In the rebuilt linux/arm64 runner
+image: eight `robot.wait(0.5)` calls deliver `punkte` 1…8 at 0.5 s spacing;
+150 short calls deliver 9 frames in 4.1 s; a value set after the last call
+arrives at the end; against the pre-branch server the values switch off
+silently while the program and the highlight carry on.
+
+**The renderer could still run student code (mi1).** Four constructed
+cases: `t in (list, tuple, …)` and the key-type check call a METACLASS
+`__eq__`; a class `__name__` that is a `str` subclass runs its `__format__`
+through the f-string; a `str`-subclass `co_filename` runs `startswith` and
+`__getitem__`. Now identity comparisons, `type(name) is str` and
+`type(path) is str`: student-code calls in the review's probe went from
+(1, 11) to (0, 0).
+
+**The two halves' bounds disagreed (mi4, mi5).** The runner's 100-node
+budget emitted about 197 nodes per value once the `'…'` markers counted, so
+thirty values passed the server's 5000-node total and the server dropped the
+whole frame while the runner believed it delivered; a breakpoint with twenty
+`[[0]*6]*50` locals showed 0 of 20 (the base showed 20). Dict keys were not
+charged at all: a 3.5 MB snapshot, and `fit_vars` re-measured the whole dict
+per cut. Now `robot_api` holds both halves' bounds and DERIVES the server's
+frame caps from them (15 030 nodes / 30 000 characters), the server trims the
+largest values to „<zu groß>" instead of dropping a frame, keys are charged,
+and `fit_vars`/`fit_shown_values` measure each value once.
+
+**The editor's `indentUnit` of 4 broke every 2-space program (MA1).** Enter
+after a `for` in a 2-space body put the caret at column 6 (an
+IndentationError) and Backspace could not step back one level. R2-O2: the
+unit is the FILE's own (`detectIndentUnit`, 4 for a file without one), held
+in a CodeMirror `Compartment` and re-derived as the file changes; Enter now
+lands at column 4 and Backspace at 2. The test drives the real commands in a
+2-space, a 4-space and a tab body and hands everything it typed to CPython.
+
+**Insertion guessed (mi2, mi3).** Across the review's cases the round-1
+insertion produced 6 Python syntax errors and 2 lines that never ran, and in
+Java 11 compile errors (code after a labelled loop, `throw`, `while (1 == 1)`,
+`try { while (true) … }`, an if/else that returns on both sides, a one-line
+`main` with a loop; a cursor on an import, a class line or inside call
+arguments), one line in a nested class's `main` that never ran, and three
+German hints for programs that had a `main`. Insertion now reads the
+program's STRUCTURE — the statement on the cursor's line, the body that runs
+last, javac's own „can complete normally" rule — and whatever it cannot place
+safely is a German hint. Every case is a fixture that CPython parses and runs
+and javac 21 compiles and runs to its marker line.
+
+**The rest.** A document switch while a program runs is refused with
+„Stoppe zuerst dein Programm." on every path that replaces the document
+(R2-O3; 17 tests failed first), and opening a saved program from an unsaved
+one now retires the old values (`openWorkflow`). `zeige` says once when it
+drops names past 256 (mi6), and a name `zeige` showed is no longer flipped
+back by the automatic values (ni3). An old runner against a new server no
+longer asks „Meintest du robot.zeige?" for `robot.zeige`; it says the two
+versions differ (mi8) — the other mixes are recorded in KNOWN-ISSUES
+(measured: a new runner's Java `zeige` on the old server ends with the old
+server's „Zeile 0 in : …"). The scanner reads keyword first arguments
+(`replay(name="W")`) and a Unicode boundary before the receiver (ni1, ni2);
+the stub's own names left the variable list; a CRLF file gets CRLF. The
+asset lint, forced on every deferred keystroke because `assetSources` got a
+new identity each render, is forced only when the names it judges by
+changed. The insertion code left the entry bundle (ni4:
+1754.25 kB → 1736.68 kB, below round 1's 1738.73 kB despite this round's new
+code). The SQL assertion headers say how to run them — the squashed baseline
+needs its one guarded line on a fresh database — and that 040's file run
+after 041 FAILs T4b as well as T8 (ni5, ni6; measured on a local stack).
+
 ### Unreleased, 2026-09-27 (review round) — the sampler ran student code, and the O3 fallback shipped
 
 Two independent reviewers took the branch apart; the owner had every finding

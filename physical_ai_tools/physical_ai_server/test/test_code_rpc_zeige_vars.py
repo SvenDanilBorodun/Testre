@@ -21,7 +21,10 @@ the handler table or the motion lock — they only ever call ``ctx.log``.
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
+import pathlib
 import tempfile
 import threading
 import time
@@ -77,14 +80,33 @@ def test_the_shipped_bounds_are_the_numbers_we_chose():
     assert robot_api.SHOWN_VALUE_MAX_CHARS == 2000
     assert code_rpc.SHOWN_VALUE_MAX_DEPTH == 8
     assert code_rpc.SHOWN_VALUE_MAX_NODES == 5000
-    assert code_rpc.SHOWN_VAR_NAMES_MAX == 256
-    # The flood limits of the 2026-09-27 review round (m7).
-    assert code_rpc.VARS_MIN_INTERVAL_S == 0.4
-    assert code_rpc.SHOWN_FRAME_MAX_NODES == 5000
-    assert code_rpc.SHOWN_FRAME_MAX_CHARS == 49152
+    assert robot_api.SHOWN_VAR_NAMES_MAX == 256
+    assert code_rpc.SHOWN_VAR_NAMES_MAX is robot_api.SHOWN_VAR_NAMES_MAX
+    # The flood limits of the 2026-09-27 review rounds (m7, then mi4: the
+    # per-frame caps are DERIVED from the runner's own bounds in robot_api —
+    # 30 × max(100 live nodes, 1000 // 2 + 1 breakpoint nodes) and
+    # 30 × 1000 characters — where they had been picked, 5000 / 48 KiB, and
+    # the runner's legal frames broke them).
+    assert robot_api.VARS_MIN_INTERVAL_S == 0.4
+    assert code_rpc.VARS_MIN_INTERVAL_S is robot_api.VARS_MIN_INTERVAL_S
+    assert robot_api.LIVE_VALUES_INTERVAL_S == 0.5
+    assert robot_api.LIVE_VALUE_MAX_NODES == 100
+    assert robot_api.LIVE_VALUE_MAX_CHARS == 1000
+    assert robot_api.PAUSED_VALUE_MAX_CHARS == 1000
+    assert robot_api.SHOWN_FRAME_MAX_NODES == 15030
+    assert robot_api.SHOWN_FRAME_MAX_CHARS == 30000
+    assert code_rpc.SHOWN_FRAME_MAX_NODES is robot_api.SHOWN_FRAME_MAX_NODES
+    assert code_rpc.SHOWN_FRAME_MAX_CHARS is robot_api.SHOWN_FRAME_MAX_CHARS
+    assert robot_api.SHOWN_TOO_BIG == '<zu groß>'
     assert code_rpc.SHOWN_EMITS_PER_S == 20
     assert code_rpc.SHOWN_EMITS_BURST == 20
     assert code_rpc.SHOWN_FLUSH_TICK_S == 0.1
+
+
+def test_the_runners_pace_is_slower_than_the_servers_floor():
+    """An honest runner is never skipped: it waits LIVE_VALUES_INTERVAL_S
+    after a REPLY, the server looks at one frame per VARS_MIN_INTERVAL_S."""
+    assert robot_api.LIVE_VALUES_INTERVAL_S > robot_api.VARS_MIN_INTERVAL_S
 
 
 # ── the `value` kind ───────────────────────────────────────────────────────
@@ -256,8 +278,9 @@ def test_vars_emits_only_the_names_whose_value_changed(server, monkeypatch):
 
 
 def test_a_zeige_and_a_pause_feed_the_same_change_map(server, monkeypatch):
-    """A value zeige or a breakpoint already showed is not re-emitted by the
-    sampler; a changed one is."""
+    """A value a breakpoint already showed is not re-emitted by the live
+    values; a changed one is. A name zeige showed is zeige's for the rest of
+    the run (review round 2, ni3 — `punkte` 6 below was shown before that)."""
     monkeypatch.setattr(code_rpc, 'VARS_MIN_INTERVAL_S', 0.0)   # not the floor under test
     ctx = _ctx()          # default wait_for_resume returns at once
     session = server.open_run(ctx)
@@ -267,8 +290,8 @@ def test_a_zeige_and_a_pause_feed_the_same_change_map(server, monkeypatch):
     before = len(_vars(ctx))
     assert c.call('__vars', ['main.py', 2, {'punkte': 5, 'i': 3}])['ok'] is True
     assert len(_vars(ctx)) == before
-    assert c.call('__vars', ['main.py', 2, {'punkte': 6, 'i': 3}])['ok'] is True
-    assert _vars(ctx)[-1] == '[VAR:punkte=6]'
+    assert c.call('__vars', ['main.py', 2, {'punkte': 6, 'i': 4}])['ok'] is True
+    assert _vars(ctx)[before:] == ['[VAR:i=4]']
     server.close_run(session)
 
 
@@ -291,15 +314,16 @@ def test_vars_is_validated_from_its_row_and_skips_unshowable_entries(server, mon
     r = c.call('__vars', ['main.py', 1, {'a=b': 1, 'x' * 65: 1, '  ': 1, 'tief': deep, 'ok': 2}])
     assert r['ok'] is True
     assert _vars(ctx) == ['[VAR:ok=2]']
-    # A nesting far past Python's recursion limit is over the frame's TOTAL
-    # node bound: the whole frame is dropped by the iterative gate, and the
-    # reader answers normally (never a RecursionError).
+    # A nesting far past Python's recursion limit: the iterative walks
+    # measure it (never a RecursionError out of the reader) and refuse THAT
+    # entry by its depth; the rest of the frame still shows (review round 2,
+    # mi4: a frame is never dropped whole — it was, before).
     very_deep = 1
     for _ in range(5000):
         very_deep = [very_deep]
     r = c.call('__vars', ['main.py', 1, {'tief': very_deep, 'ok': 3}])
     assert r['ok'] is True
-    assert _vars(ctx) == ['[VAR:ok=2]']
+    assert _vars(ctx) == ['[VAR:ok=2]', '[VAR:ok=3]']
     server.close_run(session)
 
 
@@ -332,7 +356,7 @@ def test_nothing_in_the_zeige_and_vars_path_names_the_publisher_or_the_motion_lo
     tree = ast.parse(open(code_rpc.__file__, encoding='utf-8').read())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'RunSession')
     names = {'_code_only', '_emit_var', '_emit_changed_vars', '_render_shown',
-             '_queue_shown', '_flush_shown', '_vars_floor_ok'}
+             '_queue_shown', '_flush_shown', '_vars_floor_ok', '_emit_locals'}
     found = set()
     for node in ast.walk(cls):
         if isinstance(node, ast.FunctionDef) and node.name in names:
@@ -353,30 +377,161 @@ def test_vars_frames_past_the_floor_are_charged_then_dropped(server):
     session = server.open_run(ctx)
     c = _Client(server.socket_path, session.token)
     before = session.frames_decoded
-    for i in range(10):
-        assert c.call('__vars', ['main.py', 1, {'i': i}])['ok'] is True
+    replies = [c.call('__vars', ['main.py', 1, {'i': i}]) for i in range(10)]
     assert session.frames_decoded - before == 10
+    assert all(r['ok'] is True for r in replies)
+    # The first is looked at; the rest are answered „skipped" — the runner,
+    # told so, sends its values again (R2-O1: the send is synchronous).
+    assert [r['r'] for r in replies] == [None] + [robot_api.VARS_REPLY_SKIPPED] * 9
     assert _vars(ctx) == ['[VAR:i=0]']
     time.sleep(0.45)
-    assert c.call('__vars', ['main.py', 1, {'i': 99}])['ok'] is True
+    assert c.call('__vars', ['main.py', 1, {'i': 99}])['r'] is None
     assert _vars(ctx) == ['[VAR:i=0]', '[VAR:i=99]']
     server.close_run(session)
 
 
-def test_a_vars_frame_over_the_total_cap_emits_nothing(server):
-    """Each value within its own bound, the FRAME over the total: nothing of
-    it is rendered or emitted."""
+def test_a_vars_frame_over_the_total_cap_shows_every_name(server):
+    """Each value within its own bound, the FRAME over the total: the
+    largest values become SHOWN_TOO_BIG until the rest fit — every name
+    still shows (review round 2, mi4: the whole frame used to be dropped
+    while the runner believed it delivered)."""
     ctx = _ctx()
     session = server.open_run(ctx)
     c = _Client(server.socket_path, session.token)
-    per = code_rpc.SHOWN_FRAME_MAX_NODES // 25
-    wide = {f'v{i}': [0] * per for i in range(30)}
+    big = code_rpc.SHOWN_VALUE_MAX_NODES - 1          # each value alone is valid
+    wide = {f'v{i}': [0] * big for i in range(5)}
+    wide['klein'] = 7
     assert c.call('__vars', ['main.py', 1, wide])['ok'] is True
-    assert _vars(ctx) == []
+    shown = dict(line[len('[VAR:'):-1].split('=', 1) for line in _vars(ctx))
+    assert set(shown) == set(wide)
+    assert shown['klein'] == '7'
+    too_big = json.dumps(robot_api.SHOWN_TOO_BIG)   # the [VAR:] payload is JSON
+    # 5 × 5000 nodes (a 4999-item list is 5000) + 1: the two largest go.
+    assert sum(1 for v in shown.values() if v == too_big) == 2
     server.close_run(session)
     assert not code_rpc.shown_values_exceed([[0] * 10, 'abc'], 100, 100)
     assert code_rpc.shown_values_exceed(['x' * 60, 'y' * 60], 1000, 100)
     assert code_rpc.shown_values_exceed([[0] * 60, [0] * 60], 100, 10_000)
+
+
+def test_fit_shown_values_is_a_no_op_within_the_caps_and_keeps_the_order():
+    items = [('a', [1, 2]), ('b', 'x' * 10)]
+    assert code_rpc.fit_shown_values(items) == items
+    fitted = code_rpc.fit_shown_values([('a', 'x' * 60), ('b', 'y' * 30), ('c', 1)],
+                                       max_nodes=100, max_chars=50)
+    assert [n for n, _v in fitted] == ['a', 'b', 'c']
+    assert fitted == [('a', robot_api.SHOWN_TOO_BIG), ('b', 'y' * 30), ('c', 1)]
+
+
+# ── the runner's worst case fits (review round 2, mi4) ─────────────────────
+
+_RUNNER_LIB = pathlib.Path(__file__).resolve().parents[3] / 'robotis_ai_setup' / 'docker' \
+    / 'code_runner' / 'runner' / 'lib'
+
+
+def _runner_debug():
+    spec = importlib.util.spec_from_file_location(
+        'edubotics_debug_under_test', _RUNNER_LIB / 'edubotics_debug.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _worst_case_values():
+    return [
+        [[[k for k in range(50)] for _ in range(50)] for _ in range(50)],   # the reviewer's cube
+        {('k%03d' % j) + 'x' * 995: {('q%03d' % m) + 'y' * 995: m for m in range(2)}
+         for j in range(50)},                                                # long keys
+        [[0] * 6] * 50,                                                      # the breakpoint grid
+        list(range(10_000)),
+        'ü' * 100_000,
+    ]
+
+
+def test_a_full_live_frame_the_runner_renders_is_never_trimmed(server):
+    """30 values rendered by the RUNNER's safe_render at their worst: the
+    server shows every one with its real value (the reviewer's cube once
+    rendered to 197 nodes a value, 5910 a frame, over the 5000 cap)."""
+    dbg = _runner_debug()
+    values = (_worst_case_values() * 6)[:robot_api.PAUSED_MAX_LOCALS]
+    snapshot = dbg.fit_vars({f'g{i:02d}': dbg.safe_render(v) for i, v in enumerate(values)})
+    assert robot_api.SHOWN_TOO_BIG not in snapshot.values()
+    assert not code_rpc.shown_values_exceed(list(snapshot.values()),
+                                            code_rpc.SHOWN_FRAME_MAX_NODES,
+                                            code_rpc.SHOWN_FRAME_MAX_CHARS)
+    items = list(snapshot.items())
+    assert code_rpc.fit_shown_values(items) == items
+
+
+def test_a_breakpoint_shows_every_variable_again(server):
+    """Base behaviour, restored (review round 2, mi4): 20 locals of
+    `[[0] * 6] * 50` were 0 of 20 shown under the round-1 total cap."""
+    dbg = _runner_debug()
+
+    class _Frame:
+        f_locals = {f'v{i}': [[0] * 6] * 50 for i in range(20)}
+    snapshot = dbg.snapshot_locals(_Frame(), robot_api.PAUSED_MAX_LOCALS)
+    ctx = _ctx()
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    assert c.call('__paused', ['main.py', 3, snapshot])['r'] == 'continue'
+    shown = dict(line[len('[VAR:'):-1].split('=', 1) for line in _vars(ctx))
+    assert set(shown) == set(snapshot)
+    assert all(v.startswith('[[0, 0, 0, 0, 0, 0]') for v in shown.values())
+    server.close_run(session)
+
+
+def test_thirty_worst_case_breakpoint_values_fit_the_caps():
+    dbg = _runner_debug()
+    values = (_worst_case_values() * 6)[:robot_api.PAUSED_MAX_LOCALS]
+
+    class _Frame:
+        f_locals = {f'v{i:02d}': v for i, v in enumerate(values)}
+    snapshot = dbg.snapshot_locals(_Frame(), robot_api.PAUSED_MAX_LOCALS)
+    assert len(snapshot) == robot_api.PAUSED_MAX_LOCALS
+    items = list(snapshot.items())
+    assert code_rpc.fit_shown_values(items) == items
+
+
+# ── zeige: the waiting-names bound and a name it claims (mi6, ni3) ─────────
+
+def test_zeige_says_once_when_too_many_names_wait_and_keeps_the_bound(server, monkeypatch):
+    """At most SHOWN_VAR_NAMES_MAX names wait for the emit budget; a NEW name
+    past it is dropped — and the run's log says so ONCE in German (review
+    round 2, mi6: it was silent, and a test without the bound stayed green)."""
+    monkeypatch.setattr(code_rpc, 'SHOWN_EMITS_PER_S', 0.001)
+    monkeypatch.setattr(code_rpc, 'SHOWN_EMITS_BURST', 0)
+    ctx = _ctx()
+    session = server.open_run(ctx)
+    for i in range(code_rpc.SHOWN_VAR_NAMES_MAX + 40):
+        session._queue_shown(f'n{i}', i)
+    assert len(session._shown_pending) <= code_rpc.SHOWN_VAR_NAMES_MAX
+    warnings = [line for line in ctx._test_logs if line.startswith('[WARNUNG]')]
+    assert warnings == [code_rpc.ZEIGE_TOO_MANY_NAMES_DE.format(n=code_rpc.SHOWN_VAR_NAMES_MAX)]
+    assert 'zeige' in warnings[0] and '256' in warnings[0]
+    # A name already waiting is still updated while the map is full.
+    session._queue_shown('n0', 'neu')
+    assert session._shown_pending['n0'] == '"neu"'
+    server.close_run(session)
+    names = {line[len('[VAR:'):].split('=', 1)[0] for line in _vars(ctx)}
+    assert len(names) == code_rpc.SHOWN_VAR_NAMES_MAX
+
+
+def test_a_name_zeige_shows_is_zeiges_for_the_rest_of_the_run(server, monkeypatch):
+    """A module variable and a zeige call with the same name used to flip
+    the panel between the two values on every frame (review round 2, ni3)."""
+    monkeypatch.setattr(code_rpc, 'VARS_MIN_INTERVAL_S', 0.0)
+    ctx = _ctx()
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    assert c.call('__vars', ['main.py', 1, {'punkte': 3, 'andere': 1}])['ok'] is True
+    assert c.call('zeige', ['punkte', 5])['ok'] is True
+    assert c.call('__vars', ['main.py', 2, {'punkte': 3, 'andere': 2}])['ok'] is True
+    assert c.call('zeige', ['punkte', 5])['ok'] is True
+    assert c.call('__vars', ['main.py', 3, {'punkte': 4, 'andere': 2}])['ok'] is True
+    assert _vars(ctx) == ['[VAR:punkte=3]', '[VAR:andere=1]', '[VAR:punkte=5]',
+                          '[VAR:andere=2]', '[VAR:punkte=5]']
+    server.close_run(session)
 
 
 def test_a_nine_deep_value_is_never_shown(server, monkeypatch):

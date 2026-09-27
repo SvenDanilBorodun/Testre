@@ -241,6 +241,11 @@ public final class RpcClient {
 
     static final int SHOWN_MAX_ITEMS = 50;
     static final int SHOWN_MAX_CHARS = 1000;
+    // A list's items share ONE character budget (the Python stub's
+    // _SHOWN_BUDGET_CHARS): fifty long texts must not become a frame the
+    // robot cannot take — or one over MAX_FRAME_BYTES, refused in the
+    // student's own program.
+    static final int SHOWN_BUDGET_CHARS = 4000;
 
     static Object shownDouble(double v) {
         if (Double.isNaN(v) || Double.isInfinite(v)) {
@@ -302,11 +307,16 @@ public final class RpcClient {
         }
         if (o instanceof Iterable) {
             List<Object> out = new java.util.ArrayList<>();
+            int budget = SHOWN_BUDGET_CHARS;
             for (Object item : (Iterable<?>) o) {
-                if (out.size() >= SHOWN_MAX_ITEMS) {
+                if (out.size() >= SHOWN_MAX_ITEMS || budget <= 0) {
+                    out.add("…");
                     break;
                 }
-                out.add(shownText(String.valueOf(item)));
+                String text = String.valueOf(item);
+                int n = Math.min(text.length(), Math.min(SHOWN_MAX_CHARS, budget));
+                out.add(text.substring(0, n));
+                budget -= Math.max(n, 4);
             }
             return out;
         }

@@ -72,14 +72,20 @@ supervisor, retired the instant the run ends), ``__line`` (status position,
 throttled at ``CODE_STATUS_MIN_INTERVAL_S``), ``__paused`` (a breakpoint hit:
 emits the locals as ``[VAR:]`` sentinels, sets the pause, and BLOCKS on the
 reader thread until the manager resumes — answering ``continue`` / ``step`` /
-``stop``), ``__vars`` (the runner's line sampler: the program's module-level
-variables, emitted as ``[VAR:]`` sentinels ONLY for names whose rendered value
-changed since this run last showed them; at most one frame per
-``VARS_MIN_INTERVAL_S`` is looked at — the rest are answered at once after the
-budget charge — and a frame over ``SHOWN_FRAME_MAX_NODES`` /
-``SHOWN_FRAME_MAX_CHARS`` in TOTAL is dropped before any rendering), ``__exit`` (the launcher's exit
-report, kept on the session for the program object that owns the run).
-``register_object`` is validated from its row and registers a per-run type.
+``stop``), ``__vars`` (the live values the student's own thread sends right
+before a robot call and once at the end, owner decision R2-O1: the program's
+module-level variables, emitted as ``[VAR:]`` sentinels ONLY for names whose
+rendered value changed since this run last showed them and that ``zeige`` has
+not claimed; at most one frame per ``VARS_MIN_INTERVAL_S`` is looked at — any
+other is answered ``VARS_REPLY_SKIPPED`` at once after the budget charge, so
+the runner knows to send again), ``__exit`` (the launcher's exit report, kept
+on the session for the program object that owns the run). The shown values
+of ONE ``__vars`` / ``__paused`` frame are held to ``SHOWN_FRAME_MAX_NODES`` /
+``SHOWN_FRAME_MAX_CHARS`` in TOTAL by :func:`fit_shown_values` before any
+rendering — the largest become ``SHOWN_TOO_BIG``, every name still shows (the
+caps are derived in ``robot_api`` from the runner's own bounds, so only a
+hand-made frame is ever trimmed). ``register_object`` is validated from its
+row and registers a per-run type.
 
 **The code-only rows** (``robot_api.CODE_ONLY_METHODS``: ``zeige``) are
 public calls with no block and no handler. They are queued to the run's one
@@ -91,8 +97,13 @@ is COALESCED: the latest value per name waits in a per-run map and is emitted
 at most ``SHOWN_EMITS_PER_S`` sentinels per second (burst
 ``SHOWN_EMITS_BURST``) — flushed by the next call, by the worker's idle tick
 (``SHOWN_FLUSH_TICK_S``) and, whatever is left, when the run closes, so the
-last value of every name always arrives. ``__vars``, ``zeige`` and a
-breakpoint's locals share one per-run map of the last payload per name.
+last value of every waiting name arrives. At most ``SHOWN_VAR_NAMES_MAX``
+names wait at once; a NEW name past that is dropped and the run's log says so
+once (``ZEIGE_TOO_MANY_NAMES_DE``). A name ``zeige`` has shown belongs to
+``zeige`` for the rest of the run: ``__vars`` no longer shows a module
+variable of the same name (it would flip the panel between the two).
+``__vars``, ``zeige`` and a breakpoint's locals share one per-run map of the
+last payload per name.
 
 **Replies.** ``{"id", "ok": true, "r"}`` or ``{"id", "ok": false, "k", "e"}``
 with a German ``e``. A ``WorkflowError`` from a handler is relayed verbatim
@@ -140,6 +151,12 @@ from physical_ai_server.workflow.robot_api import (
     MAX_CODE_PROJECT_BYTES,
     ROBOT_API_BY_NAME,
     RPC_LIMITS,
+    SHOWN_FRAME_MAX_CHARS,
+    SHOWN_FRAME_MAX_NODES,
+    SHOWN_TOO_BIG,
+    SHOWN_VAR_NAMES_MAX,
+    VARS_MIN_INTERVAL_S,
+    VARS_REPLY_SKIPPED,
     ApiCall,
     ApiParam,
 )
@@ -201,19 +218,19 @@ _UNSHOWABLE_NAME_CHARS = '=[]'
 # stubs render at most 3 levels, so a real program never meets either bound.
 SHOWN_VALUE_MAX_DEPTH = 8
 SHOWN_VALUE_MAX_NODES = 5000
-# The per-run map of the last payload shown per name is bounded; past this a
-# NEW name is still shown, just not remembered (so it re-emits every change).
-SHOWN_VAR_NAMES_MAX = 256
-# Flood limits (2026-09-27 review round). Every frame is still charged against
-# the call budget BEFORE any of this (Rule §2, condition 1); these bound what
-# a charged frame may cost after that.
-# - `__vars`: the runner's sampler sends at most one frame per 0.5 s; one per
-#   VARS_MIN_INTERVAL_S is looked at, the rest are answered at once.
-VARS_MIN_INTERVAL_S = 0.4
+# SHOWN_VAR_NAMES_MAX (robot_api): the per-run map of the last payload shown
+# per name is bounded; past it a NEW name is still shown by `__vars`, just not
+# remembered (so it re-emits every change) — and `zeige` keeps at most that
+# many names waiting.
+# Flood limits (2026-09-27 review rounds). Every frame is still charged
+# against the call budget BEFORE any of this (Rule §2, condition 1); these
+# bound what a charged frame may cost after that.
+# - `__vars`: the runner sends at most one frame per LIVE_VALUES_INTERVAL_S;
+#   one per VARS_MIN_INTERVAL_S (robot_api) is looked at, any other is
+#   answered VARS_REPLY_SKIPPED at once.
 # - A frame's shown values in TOTAL (every value of a `__vars` / `__paused`
-#   dict, or one `zeige` value): nodes visited and string characters.
-SHOWN_FRAME_MAX_NODES = 5000
-SHOWN_FRAME_MAX_CHARS = 48 * 1024
+#   dict, or one `zeige` value): SHOWN_FRAME_MAX_NODES / _CHARS (robot_api,
+#   derived from the runner's own bounds); fit_shown_values trims to them.
 # - `[VAR:]` sentinels from `zeige`, per run: a token bucket; what does not
 #   fit waits (latest value per name) for the next call, the worker's idle
 #   tick or the end of the run.
@@ -228,6 +245,9 @@ FRAME_TOO_BIG_DE = 'Die Nachricht an den Roboter ist zu groß.'
 BAD_FRAME_DE = 'Die Nachricht an den Roboter ist unverständlich.'
 BAD_REQUEST_DE = 'Der Aufruf ist unvollständig — Methode und Argumente fehlen.'
 RUN_STOPPED_DE = 'Programm wurde gestoppt.'
+# `zeige` with more names waiting than SHOWN_VAR_NAMES_MAX: said once per run.
+ZEIGE_TOO_MANY_NAMES_DE = ('[WARNUNG] robot.zeige: zu viele verschiedene Namen auf '
+                           'einmal — nur {n} werden angezeigt, weitere nicht.')
 # A student redefines a type under the same name with different values.
 REGISTER_OBJECT_REDEFINED_DE = ('Objekt „{name}“ ist in diesem Programm bereits '
                                 'anders definiert.')
@@ -437,6 +457,51 @@ def shown_value_is_bad(v: Any) -> bool:
         elif not (item is None or isinstance(item, (bool, int, float, str))):
             return True
     return False
+
+
+def _shown_cost(value: Any, max_nodes: int, max_chars: int) -> tuple[int, int]:
+    """``(nodes, chars)`` of one JSON tree — counted like
+    :func:`shown_values_exceed` and iteratively, stopping once either count
+    passes its bound (the caller only needs to know it is too big)."""
+    stack = [value]
+    nodes = 0
+    chars = 0
+    while stack and nodes <= max_nodes and chars <= max_chars:
+        item = stack.pop()
+        nodes += 1
+        if isinstance(item, str):
+            chars += len(item)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            for k, v in item.items():
+                if isinstance(k, str):
+                    chars += len(k)
+                stack.append(v)
+    return nodes, chars
+
+
+def fit_shown_values(items: list, max_nodes: int = SHOWN_FRAME_MAX_NODES,
+                     max_chars: int = SHOWN_FRAME_MAX_CHARS) -> list:
+    """``[(name, value)]`` whose values TOGETHER fit the frame caps: the
+    largest values are replaced by ``SHOWN_TOO_BIG`` until they do, so every
+    name still shows (a frame is never dropped whole — review round 2, mi4).
+    Each value is measured once, bounded by the caps: linear in the frame."""
+    costs = [_shown_cost(v, max_nodes, max_chars) for _n, v in items]
+    total_nodes = sum(n for n, _c in costs)
+    total_chars = sum(c for _n, c in costs)
+    if total_nodes <= max_nodes and total_chars <= max_chars:
+        return list(items)
+    out = list(items)
+    order = sorted(range(len(out)), reverse=True,
+                   key=lambda i: max(costs[i][0] / max_nodes, costs[i][1] / max_chars))
+    for i in order:
+        if total_nodes <= max_nodes and total_chars <= max_chars:
+            break
+        total_nodes += 1 - costs[i][0]
+        total_chars += len(SHOWN_TOO_BIG) - costs[i][1]
+        out[i] = (out[i][0], SHOWN_TOO_BIG)
+    return out
 
 
 def shown_values_exceed(values: Any, max_nodes: int, max_chars: int) -> bool:
@@ -683,6 +748,9 @@ class RunSession:
         # the per-run emit budget (both under _var_lock).
         self._shown_pending: dict[str, str] = {}
         self._shown_gate = _RateGate(SHOWN_EMITS_PER_S, SHOWN_EMITS_BURST)
+        # The names zeige has shown (bounded): `__vars` leaves them alone.
+        self._zeige_names: set[str] = set()
+        self._zeige_overflow_said = False
         # __vars' floor (reader thread only).
         self._vars_last_accept = float('-inf')
         self._worker = threading.Thread(target=self._worker_loop, daemon=True,
@@ -738,9 +806,9 @@ class RunSession:
             return _err(rid, 'protocol', BAD_REQUEST_DE)
         # Already charged (the reader charges every decoded frame first). A
         # `__vars` inside the floor is answered at once: nothing validated,
-        # rendered or emitted — the next accepted frame carries the values.
+        # rendered or emitted — and the runner, told so, sends again.
         if method == '__vars' and not self._vars_floor_ok():
-            return _ok(rid, None)
+            return _ok(rid, VARS_REPLY_SKIPPED)
         call = _lookup(method)
         if call is None:
             return _err(rid, 'method', _unknown_method_de(method))
@@ -845,22 +913,21 @@ class RunSession:
         return True
 
     def _emit_locals(self, local_vars: dict) -> None:
-        """A breakpoint's locals: every one shown (and remembered)."""
+        """A breakpoint's locals: every one shown (and remembered) — a value
+        the frame has no room for as ``SHOWN_TOO_BIG``."""
         items = list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]
-        if shown_values_exceed([v for _n, v in items], SHOWN_FRAME_MAX_NODES,
-                               SHOWN_FRAME_MAX_CHARS):
-            return
-        for name, value in items:
+        for name, value in fit_shown_values(items):
             self._emit_var(name, value, force=True)
 
     def _emit_changed_vars(self, local_vars: dict) -> None:
-        """``__vars``: only the names whose rendered value changed — and
-        nothing of a frame whose values exceed the TOTAL bound."""
+        """``__vars``: only the names whose rendered value changed and that
+        ``zeige`` has not claimed; a value the frame has no room for as
+        ``SHOWN_TOO_BIG``."""
         items = list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]
-        if shown_values_exceed([v for _n, v in items], SHOWN_FRAME_MAX_NODES,
-                               SHOWN_FRAME_MAX_CHARS):
-            return
-        for name, value in items:
+        with self._var_lock:
+            claimed = set(self._zeige_names)
+        items = [(n, v) for n, v in items if n not in claimed]
+        for name, value in fit_shown_values(items):
             self._emit_var(name, value, force=False)
 
     @staticmethod
@@ -886,16 +953,27 @@ class RunSession:
 
     def _queue_shown(self, name: Any, value: Any) -> None:
         """``zeige``: keep the latest payload per name, then emit what the
-        per-run budget allows now."""
-        if shown_values_exceed([value], SHOWN_FRAME_MAX_NODES, SHOWN_FRAME_MAX_CHARS):
-            return
+        per-run budget allows now. A value over the frame caps is shown as
+        ``SHOWN_TOO_BIG``; a NEW name while ``SHOWN_VAR_NAMES_MAX`` others
+        wait is dropped, and the run's log says so once."""
+        [(name, value)] = fit_shown_values([(name, value)])
         payload = self._render_shown(name, value)
         if payload is None:
             return
+        overflow = False
         with self._var_lock:
+            if name in self._zeige_names or len(self._zeige_names) < SHOWN_VAR_NAMES_MAX:
+                self._zeige_names.add(name)
             self._shown_pending.pop(name, None)
             if len(self._shown_pending) < SHOWN_VAR_NAMES_MAX:
                 self._shown_pending[name] = payload
+            elif not self._zeige_overflow_said:
+                self._zeige_overflow_said = overflow = True
+        if overflow:
+            try:
+                self.ctx.log(ZEIGE_TOO_MANY_NAMES_DE.format(n=SHOWN_VAR_NAMES_MAX))
+            except Exception:  # noqa: BLE001 — observability never breaks a run
+                pass
         self._flush_shown()
 
     def _flush_shown(self, *, force: bool = False) -> None:

@@ -187,6 +187,48 @@ RUN_TOKEN_RE = r'^[0-9a-f]{32}$'
 PAUSED_MAX_LOCALS = 30
 EXIT_INFO_MAX_KEYS = 8
 
+# ── Shown values: what the runner renders AND what the robot accepts ──────
+# One place for both halves (2026-09-27 review round 2, mi4), so the runner's
+# worst case provably fits the server's caps: a mismatch between the two once
+# made the server drop a whole `__vars` frame the runner believed delivered,
+# and showed none of a breakpoint's 20 variables.
+#
+# A LIVE value (`__vars`, rendered by the runner's edubotics_debug.safe_render
+# without running student code) holds at most LIVE_VALUE_MAX_NODES JSON nodes
+# (the `'…'` that ends a cut container included) and LIVE_VALUE_MAX_CHARS
+# characters of strings and dict keys, counted exactly as the server counts
+# them (code_rpc.shown_values_exceed).
+LIVE_VALUE_MAX_NODES = 100
+LIVE_VALUE_MAX_CHARS = 1000
+# A BREAKPOINT value (`__paused`, rendered on the stopped student thread) is
+# JSON text of at most PAUSED_VALUE_MAX_CHARS, else its repr cut to that many
+# characters — so it holds at most PAUSED_VALUE_MAX_CHARS // 2 + 1 nodes (a
+# node takes at least two characters of JSON: a digit and a separator).
+PAUSED_VALUE_MAX_CHARS = 1000
+# The server's caps on the values of ONE frame, derived from the two above: a
+# frame of PAUSED_MAX_LOCALS values the runner rendered never exceeds them,
+# so only a hand-made frame is ever trimmed (code_rpc.fit_shown_values).
+SHOWN_FRAME_MAX_NODES = PAUSED_MAX_LOCALS * max(LIVE_VALUE_MAX_NODES,
+                                                PAUSED_VALUE_MAX_CHARS // 2 + 1)
+SHOWN_FRAME_MAX_CHARS = PAUSED_MAX_LOCALS * max(LIVE_VALUE_MAX_CHARS,
+                                                PAUSED_VALUE_MAX_CHARS)
+# What stands in for a value there is no room for — on the runner and on the
+# server alike, so the name still shows and says why its value does not.
+SHOWN_TOO_BIG = '<zu groß>'
+# The live values' pace (owner decision R2-O1): the runner sends at most one
+# `__vars` per LIVE_VALUES_INTERVAL_S, measured from the previous REPLY; the
+# server looks at one per VARS_MIN_INTERVAL_S and answers any other with
+# VARS_REPLY_SKIPPED (charged, unrendered). The runner's pace is the slower,
+# so an honest runner is never skipped — and when it is, it learns so and
+# sends the values again at its next chance.
+LIVE_VALUES_INTERVAL_S = 0.5
+VARS_MIN_INTERVAL_S = 0.4
+VARS_REPLY_SKIPPED = 'skipped'
+# `zeige`: the latest value of at most this many names waits to be shown (the
+# emit budget is per run); a NEW name past it is dropped, with one German
+# warning per run (code_rpc.ZEIGE_TOO_MANY_NAMES_DE).
+SHOWN_VAR_NAMES_MAX = 256
+
 
 @dataclass(frozen=True)
 class ApiParam:
@@ -552,6 +594,13 @@ MAX_FRAME_BYTES = {MAX_FRAME_BYTES!r}
 _SOCKET_ENV = 'CODE_RPC_SOCKET'
 _TOKEN_ENV = 'CODE_RUN_TOKEN'
 
+# The public calls — the functions below. Right before each one the
+# launcher's live-values hook may report the program's variables (_Rpc.
+# before_call); the library's own `__` calls never trigger it.
+_PUBLIC_METHODS = frozenset({{
+{PUBLIC_METHODS}
+}})
+
 _NO_CONNECTION_DE = ('Keine Verbindung zum Roboter — das Programm muss über '
                      'Roboter Studio gestartet werden.')
 _CONNECTION_LOST_DE = 'Die Verbindung zum Roboter ist abgebrochen.'
@@ -613,7 +662,13 @@ class _Rpc:
 
     Every socket byte of this module is written or read here, and every
     write is preceded by the rate floor — a structural property the server
-    package's tests assert over this file."""
+    package's tests assert over this file.
+
+    ``before_call`` is the launcher's live-values hook (``None`` outside
+    Roboter Studio): called on the calling thread right before every public
+    call, it may send one ``__vars`` frame of its own. Whatever it does, the
+    call itself goes ahead unchanged: an exception out of it switches the hook
+    off for the rest of the run and never reaches the program."""
 
     def __init__(self):
         self._sock = None
@@ -622,6 +677,7 @@ class _Rpc:
         self._calls = _Bucket(MAX_CALLS_PER_S, BURST)
         self._perception = _Bucket(PERCEPTION_MAX_PER_S, PERCEPTION_BURST)
         self.project_root = None
+        self.before_call = None
 
     def connect(self, path, token, project_root=None):
         """Connect and greet; the launcher calls this, or the first call does
@@ -660,6 +716,10 @@ class _Rpc:
         except ValueError:
             return None, None
         path = frame.f_code.co_filename
+        if type(path) is not str:
+            # A code object compiled with a str SUBCLASS as its file name
+            # would run that subclass's own methods here.
+            return None, None
         if self.project_root and path.startswith(self.project_root):
             path = os.path.relpath(path, self.project_root)
         else:
@@ -667,6 +727,12 @@ class _Rpc:
         return path, int(frame.f_lineno)
 
     def call(self, method, args, kind):
+        hook = self.before_call
+        if hook is not None and method in _PUBLIC_METHODS:
+            try:
+                hook()
+            except Exception:  # noqa: BLE001 — the live values never break a call
+                self.before_call = None
         with self._lock:
             self._ensure_connected()
             self._rate_floor(kind)
@@ -842,6 +908,19 @@ class Greifobjekt:
 '''
 
 
+def _py_name_block(names) -> str:
+    """Sorted names as the lines of a set display, four spaces in, ≤ 79 wide."""
+    lines, line = [], '   '
+    for name in sorted(names):
+        item = f' {name!r},'
+        if len(line) + len(item) > 79:
+            lines.append(line)
+            line = '   '
+        line += item
+    lines.append(line)
+    return '\n'.join(lines)
+
+
 def render_python_stub() -> str:
     limits = dataclasses.asdict(RPC_LIMITS)
     head = _PY_STUB_HEAD.format(
@@ -853,6 +932,7 @@ def render_python_stub() -> str:
         MAX_FRAME_BYTES=limits['MAX_FRAME_BYTES'],
         SHOWN_VALUE_MAX_CHARS=SHOWN_VALUE_MAX_CHARS,
         SHOWN_BUDGET_CHARS=_SHOWN_BUDGET_CHARS,
+        PUBLIC_METHODS=_py_name_block(c.name for c in ROBOT_API + CODE_ONLY_METHODS),
     )
     methods = '\n'.join(_py_method(c) for c in ROBOT_API + CODE_ONLY_METHODS)
     row = INTERNAL_METHODS_BY_NAME['register_object']
@@ -1316,6 +1396,11 @@ public final class RpcClient {{
 
     static final int SHOWN_MAX_ITEMS = 50;
     static final int SHOWN_MAX_CHARS = {SHOWN_TEXT_MAX_CHARS};
+    // A list's items share ONE character budget (the Python stub's
+    // _SHOWN_BUDGET_CHARS): fifty long texts must not become a frame the
+    // robot cannot take — or one over MAX_FRAME_BYTES, refused in the
+    // student's own program.
+    static final int SHOWN_BUDGET_CHARS = {SHOWN_BUDGET_CHARS};
 
     static Object shownDouble(double v) {{
         if (Double.isNaN(v) || Double.isInfinite(v)) {{
@@ -1377,11 +1462,16 @@ public final class RpcClient {{
         }}
         if (o instanceof Iterable) {{
             List<Object> out = new java.util.ArrayList<>();
+            int budget = SHOWN_BUDGET_CHARS;
             for (Object item : (Iterable<?>) o) {{
-                if (out.size() >= SHOWN_MAX_ITEMS) {{
+                if (out.size() >= SHOWN_MAX_ITEMS || budget <= 0) {{
+                    out.add("…");
                     break;
                 }}
-                out.add(shownText(String.valueOf(item)));
+                String text = String.valueOf(item);
+                int n = Math.min(text.length(), Math.min(SHOWN_MAX_CHARS, budget));
+                out.add(text.substring(0, n));
+                budget -= Math.max(n, 4);
             }}
             return out;
         }}
@@ -1420,6 +1510,7 @@ def render_java_rpc_client() -> str:
         PERCEPTION_BURST=_java_literal(limits['PERCEPTION_BURST']),
         MAX_FRAME_BYTES=_java_literal(limits['MAX_FRAME_BYTES']),
         SHOWN_TEXT_MAX_CHARS=_java_literal(1000),
+        SHOWN_BUDGET_CHARS=_java_literal(_SHOWN_BUDGET_CHARS),
     )
 
 

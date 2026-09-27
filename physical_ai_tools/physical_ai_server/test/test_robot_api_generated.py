@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -372,6 +373,53 @@ def test_greifobjekt_subclass_registers_at_definition_time(tmp_path, monkeypatch
             tag_ids = [40]
             hoehe_m = 0.03
             greiftiefe_m = 0.01
+
+
+def test_the_live_values_hook_fires_before_every_public_call_and_only_those(tmp_path, monkeypatch):
+    """R2-O1: `_Rpc.before_call` runs on the caller's thread right before a
+    PUBLIC call (zeige included) — never before the library's own `__` calls
+    or register_object — and whatever it does, the call goes ahead: an
+    exception out of it switches it off and never reaches the program."""
+    monkeypatch.delenv('CODE_RPC_SOCKET', raising=False)
+    robot = _load_stub(tmp_path)
+    public = {c.name for c in robot_api.ROBOT_API + robot_api.CODE_ONLY_METHODS}
+    assert robot._PUBLIC_METHODS == frozenset(public)
+    assert not ({c.name for c in robot_api.INTERNAL_METHODS} & robot._PUBLIC_METHODS)
+    order = []
+    monkeypatch.setattr(robot._rpc, '_ensure_connected', lambda: None)
+    monkeypatch.setattr(robot._rpc, '_rate_floor', lambda kind: None)
+
+    class _Sock:
+        def sendall(self, data):
+            order.append(('send', json.loads(data[4:])['m']))
+    robot._rpc._sock = _Sock()
+    monkeypatch.setattr(robot._rpc, '_read_reply', lambda: {'ok': True, 'r': None})
+    robot._rpc.before_call = lambda: order.append(('hook', None))
+    robot.home()
+    robot.zeige('n', 1)
+    robot._rpc.call('__line', ['main.py', 3], 'call')
+    robot._rpc.call('register_object', [], 'perception')
+    assert order == [('hook', None), ('send', 'home'), ('hook', None), ('send', 'zeige'),
+                     ('send', '__line'), ('send', 'register_object')]
+
+    def broken():
+        raise RuntimeError('kaputt')
+    robot._rpc.before_call = broken
+    order.clear()
+    robot.move_to('Ablage')                       # no exception reaches the program
+    assert order == [('send', 'move_to')]
+    assert robot._rpc.before_call is None         # switched off for the rest of the run
+
+
+def test_the_java_zeige_list_shares_one_character_budget():
+    """Review round 2 (mi4): fifty 1000-character items were 50 000
+    characters — over the frame caps, and past MAX_FRAME_BYTES in UTF-8, a
+    RobotError inside the student's own program. The items now share the
+    Python stub's budget."""
+    rpc = _RENDERED[robot_api.GENERATED_PATHS['java_rpc_client']]
+    assert f'static final int SHOWN_BUDGET_CHARS = {2 * robot_api.SHOWN_VALUE_MAX_CHARS};' in rpc
+    assert 'budget -= Math.max(n, 4);' in rpc
+    assert 2 * robot_api.SHOWN_VALUE_MAX_CHARS <= robot_api.SHOWN_FRAME_MAX_CHARS
 
 
 def test_stub_compiles_under_the_runner_python_floor():

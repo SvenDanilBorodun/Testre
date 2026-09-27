@@ -10,10 +10,12 @@ project ever reaches this container, so a student file cannot shadow either.
 
 In order: lower this process's own rlimits, install the debugger hook, read
 the breakpoint channel, connect the RPC client with the run token (the
-``__hello`` frame), start the line sampler, run ``main.py`` as ``__main__``,
-report ``__exit`` and terminate with ``os._exit`` — the launcher owns the
-process's end, so a non-daemon student thread cannot keep the run alive after
-``main.py`` returned.
+``__hello`` frame), start the line sampler, wire the live values into the
+stub (``robot._rpc.before_call``: sent by the program's own thread right
+before each public robot call), run ``main.py`` as ``__main__``, send the
+last live values, report ``__exit`` and terminate with ``os._exit`` — the
+launcher owns the process's end, so a non-daemon student thread cannot keep
+the run alive after ``main.py`` returned.
 
 The exit report is the ``{kind, file, line, exc_type, name, detail_line}``
 dict ``code_rpc._EXIT_INFO_KEYS`` accepts; ``kind`` is one of
@@ -158,17 +160,27 @@ def main(argv: list[str]) -> int:
         connected = True
     except robot.RobotError as exc:
         sys.stderr.write(f'{exc}\n')
+    live = None
     if connected:
         edubotics_debug.start_line_sampler(robot._rpc, run_dir)
+        # `vars(robot)`: a name `from robot import *` bound to the library's
+        # own object is not one of the program's variables.
+        live = edubotics_debug.LiveValues(robot._rpc, run_dir,
+                                          max_vars=limits.PAUSED_MAX_LOCALS,
+                                          exclude=vars(robot))
+        robot._rpc.before_call = live.before_call
 
     code = 0
     info: dict | None = {'kind': 'ok'}
+    # The program's module dicts at its end, for the last live values.
+    namespaces: list = []
     os.chdir(run_dir)
     try:
-        runpy.run_path(os.path.join(run_dir, ENTRY_FILE), run_name='__main__')
+        namespaces = [runpy.run_path(os.path.join(run_dir, ENTRY_FILE), run_name='__main__')]
     except edubotics_debug.StopRequested:
         info = None
     except SystemExit as exc:
+        namespaces = edubotics_debug.project_namespaces(exc.__traceback__, run_dir)
         if exc.code is None:
             code = 0
         elif isinstance(exc.code, int):
@@ -177,6 +189,7 @@ def main(argv: list[str]) -> int:
             sys.stderr.write(f'{exc.code}\n')
             code = 1
     except BaseException as exc:  # noqa: BLE001 — every fault is reported
+        namespaces = edubotics_debug.project_namespaces(exc.__traceback__, run_dir)
         info = classify_exception(exc, run_dir, robot)
         code = 1
         traceback.print_exc()
@@ -187,6 +200,9 @@ def main(argv: list[str]) -> int:
         except OSError:
             pass
         if connected and info is not None:
+            if live is not None:
+                robot._rpc.before_call = None
+                live.final(namespaces, (ENTRY_FILE, 0))
             try:
                 robot._rpc.call('__exit', [info], 'call')
             except robot.RobotError as exc:

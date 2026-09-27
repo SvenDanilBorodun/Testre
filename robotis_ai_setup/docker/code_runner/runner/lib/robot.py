@@ -37,6 +37,18 @@ MAX_FRAME_BYTES = 65536
 _SOCKET_ENV = 'CODE_RPC_SOCKET'
 _TOKEN_ENV = 'CODE_RUN_TOKEN'
 
+# The public calls — the functions below. Right before each one the
+# launcher's live-values hook may report the program's variables (_Rpc.
+# before_call); the library's own `__` calls never trigger it.
+_PUBLIC_METHODS = frozenset({
+    'beep', 'close_gripper', 'close_on_object', 'count', 'counter_add',
+    'counter_get', 'counter_reset', 'descend_to', 'drop_at', 'find', 'grasp',
+    'home', 'is_holding', 'lift', 'log', 'mark_done', 'move_above', 'move_to',
+    'object_position', 'open_gripper', 'pickup', 'pin', 'pin_current',
+    'replay', 'sees', 'speak', 'toast', 'tone', 'wait', 'wait_until_held',
+    'wait_until_seen', 'zeige', 'ziel',
+})
+
 _NO_CONNECTION_DE = ('Keine Verbindung zum Roboter — das Programm muss über '
                      'Roboter Studio gestartet werden.')
 _CONNECTION_LOST_DE = 'Die Verbindung zum Roboter ist abgebrochen.'
@@ -98,7 +110,13 @@ class _Rpc:
 
     Every socket byte of this module is written or read here, and every
     write is preceded by the rate floor — a structural property the server
-    package's tests assert over this file."""
+    package's tests assert over this file.
+
+    ``before_call`` is the launcher's live-values hook (``None`` outside
+    Roboter Studio): called on the calling thread right before every public
+    call, it may send one ``__vars`` frame of its own. Whatever it does, the
+    call itself goes ahead unchanged: an exception out of it switches the hook
+    off for the rest of the run and never reaches the program."""
 
     def __init__(self):
         self._sock = None
@@ -107,6 +125,7 @@ class _Rpc:
         self._calls = _Bucket(MAX_CALLS_PER_S, BURST)
         self._perception = _Bucket(PERCEPTION_MAX_PER_S, PERCEPTION_BURST)
         self.project_root = None
+        self.before_call = None
 
     def connect(self, path, token, project_root=None):
         """Connect and greet; the launcher calls this, or the first call does
@@ -145,6 +164,10 @@ class _Rpc:
         except ValueError:
             return None, None
         path = frame.f_code.co_filename
+        if type(path) is not str:
+            # A code object compiled with a str SUBCLASS as its file name
+            # would run that subclass's own methods here.
+            return None, None
         if self.project_root and path.startswith(self.project_root):
             path = os.path.relpath(path, self.project_root)
         else:
@@ -152,6 +175,12 @@ class _Rpc:
         return path, int(frame.f_lineno)
 
     def call(self, method, args, kind):
+        hook = self.before_call
+        if hook is not None and method in _PUBLIC_METHODS:
+            try:
+                hook()
+            except Exception:  # noqa: BLE001 — the live values never break a call
+                self.before_call = None
         with self._lock:
             self._ensure_connected()
             self._rate_floor(kind)

@@ -98,6 +98,15 @@ public final class SmokeMain {
         check(EduJson.encode(RpcClient.shownObject(new double[] {1.0, Double.NaN}))
                 .equals("[1.0,\"NaN\"]"), "zeige double[]");
         check(EduJson.encode(RpcClient.shownObject(new int[] {1, 2})).equals("[1,2]"), "zeige int[]");
+        // A list's items share ONE character budget: sixty 1000-character
+        // texts stay a small frame, cut with "…".
+        List<String> lang = new java.util.ArrayList<>();
+        for (int i = 0; i < 60; i++) {
+            lang.add("ü".repeat(1000));
+        }
+        String bounded = EduJson.encode(RpcClient.shownObject(lang));
+        check(bounded.length() < 2 * RpcClient.SHOWN_BUDGET_CHARS && bounded.endsWith("\"…\"]"),
+              "zeige list shares one budget");
         check(RpcClient.asPoint(null) == null, "null point");
         check(RpcClient.asPoint(List.of(1.0, 2L, 3.5))[1] == 2.0, "point decode");
 

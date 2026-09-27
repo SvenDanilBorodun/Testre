@@ -50,6 +50,14 @@ SENTENCES: dict[str, str] = {
              'definiert oder anders geschrieben?'),
     'robot_method': ('Zeile {line} in {file}: robot.{name} gibt es nicht. '
                      'Meintest du robot.{suggestion}?'),
+    # The name IS a robot call — the runner's stub just does not have it: the
+    # runner image is older than the server's (mixed image tags). Never
+    # „Meintest du robot.zeige?" for robot.zeige.
+    'robot_method_version': ('Zeile {line} in {file}: robot.{name} kennt die '
+                             'Programmier-Umgebung noch nicht — sie ist älter als '
+                             'die Roboter-Software. Bitte die Umgebung neu starten, '
+                             'damit beide auf demselben Stand sind; hilft das '
+                             'nicht, den Lehrer rufen.'),
     'type': ('Zeile {line} in {file}: Ein Aufruf hat falsche oder fehlende '
              'Angaben — bitte die Werte prüfen.'),
     'zero_division': 'Zeile {line} in {file}: Division durch 0 ist nicht erlaubt.',
@@ -88,10 +96,14 @@ def sentence(kind: str, *, file: str = '', line: int = 0, name: str = '',
     """The German sentence for ``kind``.
 
     ``robot_method`` drops the „Meintest du …" clause when there is no
-    suggestion; ``robot`` prefixes the relayed (German-by-contract) text with
-    the position; ``other`` names the exception CLASS only. An unknown kind
-    falls back to ``other``.
+    suggestion, and says the two halves' versions differ when the suggestion
+    IS the name (the server knows the call, the runner's stub does not);
+    ``robot`` prefixes the relayed (German-by-contract) text with the
+    position; ``other`` names the exception CLASS only. An unknown kind falls
+    back to ``other``.
     """
+    if kind == 'robot_method' and suggestion and suggestion == name:
+        return SENTENCES['robot_method_version'].format(line=line, file=file, name=name)
     if kind == 'robot_method':
         base = (_POSITION_PREFIX + 'robot.{name} gibt es nicht.').format(
             line=line, file=file, name=name)

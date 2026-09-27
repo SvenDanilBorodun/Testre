@@ -303,12 +303,12 @@ describe('WorkshopPage — a code workflow', () => {
     const [token, id, body] = mockApi.updateWorkflow.mock.calls[0];
     expect(token).toBe('jwt');
     expect(id).toBe('wf-py');
-    // The code fields on the PATCH — and, since migration 041, the document's
-    // Ziele beside them as blockly_json: `{}` for a program without any (never
-    // the files: the SAVE allowlist would have deleted them had they ridden
-    // inside blockly_json, and the cloud refuses any other key there).
-    expect(Object.keys(body).sort()).toEqual(['blockly_json', 'code_files', 'code_language', 'sim_scene']);
-    expect(body.blockly_json).toEqual({});
+    // The code fields on the PATCH. A program that opened without Ziele and
+    // whose Ziele did not change sends NO blockly_json (review m1): an API
+    // from before migration 041 refuses any blockly_json on a code row, and
+    // there is nothing to say. (Never the files inside blockly_json either:
+    // the SAVE allowlist would delete them and the cloud refuses the key.)
+    expect(Object.keys(body).sort()).toEqual(['code_files', 'code_language', 'sim_scene']);
     expect(body.code_language).toBe('python');
     expect(body.code_files['main.py']).toContain('geändert');
     expect(body.code_files['hilfe.py']).toBe('x = 1\n');
@@ -642,5 +642,50 @@ describe('WorkshopPage — Vormachen for a code program (O4)', () => {
     expect(mockPage.teachHost.assetDoc.kind).toBe('code');
     await userEvent.click(screen.getByRole('button', { name: 'Galerie' }));
     expect(mockPage.teachHost.assetDoc).toBeNull();
+  });
+});
+
+describe('WorkshopPage — the Ziele ride a code PATCH only when there is something to say (review m1)', () => {
+  test('a Ziel added since opening is sent; clearing them all sends {}', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    const store = mockPage.assetDoc.getStore();
+    let added;
+    act(() => { added = store.add({ name: 'Neu', kind: 'pin', source: 'camera', x: 0.1, y: 0, z: 0 }); });
+    await userEvent.click(screen.getByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    let body = mockApi.updateWorkflow.mock.calls[0][2];
+    expect(body.blockly_json['edubotics-destinations'].entries.map((e) => e.name)).toEqual(['Neu']);
+
+    act(() => { store.remove(added.entry.id); });
+    await userEvent.click(screen.getByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(2));
+    body = mockApi.updateWorkflow.mock.calls[1][2];
+    expect(body.blockly_json).toEqual({});
+  });
+
+  test('a program that opened WITH Ziele always sends them, even unchanged', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW_ZIELE));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    expect(Object.keys(mockApi.updateWorkflow.mock.calls[0][2].blockly_json)).toEqual(['edubotics-destinations']);
+  });
+});
+
+describe('WorkshopPage — a new document retires the previous run’s values (review m4)', () => {
+  test('„Neu" clears the variables and counters, also from one unsaved document to the next', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    mockDispatch.mockClear();
+    await userEvent.click(screen.getByRole('button', { name: /^Neu/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Python/ }));
+    const types = mockDispatch.mock.calls.map((c) => c[0] && c[0].type);
+    expect(types).toContain('workshop/clearVariables');
+    expect(types).toContain('workshop/clearCounters');
   });
 });

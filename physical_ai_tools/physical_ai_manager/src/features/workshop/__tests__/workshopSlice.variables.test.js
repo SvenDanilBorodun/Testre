@@ -34,7 +34,9 @@
 // (verified by executing the real Interpreter against a workspace payload with
 // that variable table), so the name on the wire is the name the student typed.
 
-import reducer, { setVariable, clearVariables } from '../workshopSlice';
+import reducer, {
+  setVariable, clearVariables, setCounter, setSelectedWorkflowId,
+} from '../workshopSlice';
 import {
   BLOCKLY_REAL_NAMES,
   NAMES_THE_OLD_REGEX_DROPPED,
@@ -172,5 +174,36 @@ describe('clearVariables', () => {
   test('empties the inspector (RunControls does this on every „Start")', () => {
     const state = reducer(set(initial, 'meine Zahl', 7), clearVariables());
     expect(ownKeys(state)).toEqual([]);
+  });
+});
+
+describe('a document switch retires the run values (review m4)', () => {
+  const withValues = () => {
+    let state = reducer(undefined, setSelectedWorkflowId('wf-a'));
+    state = reducer(state, setVariable({ name: 'punkte', value: 3 }));
+    state = reducer(state, setVariable({ name: 'punkte', value: 4 }));
+    state = reducer(state, setCounter({ name: 'Runden', value: 2 }));
+    return state;
+  };
+
+  test('switching to another workflow clears variables, their history and the counters', () => {
+    const state = reducer(withValues(), setSelectedWorkflowId('wf-b'));
+    expect(state.variables).toEqual({});
+    expect(state.variableHistory).toEqual({});
+    expect(state.counters).toEqual({});
+  });
+
+  test('leaving a workflow for a new document clears them too', () => {
+    const state = reducer(withValues(), setSelectedWorkflowId(null));
+    expect(state.variables).toEqual({});
+    expect(state.counters).toEqual({});
+  });
+
+  test('saving a new document (null → id) and re-picking the same one keep them', () => {
+    let state = reducer(undefined, setVariable({ name: 'punkte', value: 3 }));
+    state = reducer(state, setSelectedWorkflowId('wf-new'));
+    expect(state.variables.punkte.value).toBe(3);
+    state = reducer(state, setSelectedWorkflowId('wf-new'));
+    expect(state.variables.punkte.value).toBe(3);
   });
 });

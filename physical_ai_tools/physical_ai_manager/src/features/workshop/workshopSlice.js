@@ -527,8 +527,21 @@ const workshopSlice = createSlice({
       //
       // Deliberately here and not in WorkshopPage.handlePickWorkflow: that is
       // one of three dispatchers, and a fourth added later would silently miss.
+      //
+      // The same event retires the run's shown VALUES (review m4): a
+      // variable, its last five values and a counter belong to the program
+      // that produced them, and a code document lists every name
+      // `workshop.variables` holds — so the previous program's names showed
+      // up in the next one's Variablen tab, „Nirgends" used. „Neu" from one
+      // UNSAVED document to the next (null → null) is the one switch this
+      // guard cannot see; WorkshopPage.handleNewProgram retires them there.
       const prev = state.selectedWorkflowId;
-      if (prev && prev !== next) state.breakpoints = [];
+      if (prev && prev !== next) {
+        state.breakpoints = [];
+        state.variables = {};
+        state.variableHistory = {};
+        state.counters = {};
+      }
       state.selectedWorkflowId = next;
     },
     setUnsavedBlocklyJson: (state, action) => {

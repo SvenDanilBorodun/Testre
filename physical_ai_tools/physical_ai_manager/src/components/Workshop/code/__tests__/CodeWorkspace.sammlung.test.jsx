@@ -207,3 +207,24 @@ describe('what the editor knows', () => {
     expect(editor.props.assets.places.map((e) => e.name)).toEqual(['Ablage', 'Hoch', 'Rand']);
   });
 });
+
+describe('a keystroke never undoes an edit the page applied a moment before (review n8)', () => {
+  test('the content change is built from the page’s latest files, not the rendered prop', async () => {
+    // A page-like owner: it applies a change to its ref at once (a drawer
+    // rename rewrote hilfe.py) while React has not re-rendered yet.
+    let latest = { ...FILES };
+    const onFilesChange = vi.fn((next) => {
+      latest = typeof next === 'function' ? next(latest) : next;
+    });
+    const redux = configureStore({ reducer: { workshop: workshopReducer, studioAssets: studioAssetsReducer } });
+    render(
+      <CodeWorkspace language="python" files={FILES} onFilesChange={onFilesChange} />,
+      { wrapper: ({ children }) => <Provider store={redux}>{children}</Provider> },
+    );
+    await screen.findByTestId('code-editor');
+    latest = { ...latest, 'hilfe.py': '# umbenannt\n' };      // applied, not yet rendered
+    act(() => { editor.props.onChange(`${FILES['main.py']}x = 1\n`); });
+    expect(latest['hilfe.py']).toBe('# umbenannt\n');
+    expect(latest['main.py']).toBe(`${FILES['main.py']}x = 1\n`);
+  });
+});

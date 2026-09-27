@@ -62,6 +62,8 @@ import { CODE_DE } from '../components/Workshop/code/codeMessagesDe';
 import { STARTER_FILES, isCodeLanguage, validateProject } from '../components/Workshop/code/codeProject';
 import { slimSavePayload } from '../utils/blocklyPayload';
 import {
+  clearCounters,
+  clearVariables,
   setUnsavedBlocklyJson,
   setSelectedWorkflowId,
   markWorkflowSaved,
@@ -343,10 +345,20 @@ function WorkshopPage({ isActive }) {
   // files with another's language or Ziele.
   const codeLanguageRef = useRef(codeLanguage);
   const codeStoreRef = useRef(null);
+  // `next` is the files, or an updater `(latest) => files` built from the
+  // ref — what CodeWorkspace's keystrokes use, so a keystroke landing before
+  // React re-rendered an edit applied here (a drawer rename) cannot rebuild
+  // the project from the stale prop and undo it (review n8).
   const applyCodeFiles = useCallback((next) => {
-    codeFilesRef.current = next;
-    setCodeFiles(next);
+    const files = typeof next === 'function' ? next(codeFilesRef.current) : next;
+    codeFilesRef.current = files;
+    setCodeFiles(files);
   }, []);
+  // Whether a code PATCH carries the Ziele (review m1): only when the
+  // document opened WITH Ziele or its store changed since opening (clearing
+  // them all then sends `{}`). A Ziele-free program sends no blockly_json at
+  // all, so it still saves against an API from before migration 041.
+  const codeZieleSendRef = useRef(false);
   // Where the student's cursor last was ({file, line}), reported by
   // CodeWorkspace — null until they click into the editor, which is what makes
   // an insertion go to the end of main instead (owner decision O6). A request
@@ -363,6 +375,9 @@ function WorkshopPage({ isActive }) {
     setCodeRevealRequest(null);
     if (isCodeLanguage(language)) {
       const store = createDetachedDestinationStore(readDestinationEntries(blocklyJson));
+      codeZieleSendRef.current = store.getEntries().length > 0;
+      // The store lives exactly as long as this document; so does this.
+      store.subscribe(() => { codeZieleSendRef.current = true; });
       codeLanguageRef.current = language;
       codeStoreRef.current = store;
       setCodeLanguage(language);
@@ -372,6 +387,7 @@ function WorkshopPage({ isActive }) {
     }
     codeLanguageRef.current = '';
     codeStoreRef.current = null;
+    codeZieleSendRef.current = false;
     setCodeLanguage('');
     applyCodeFiles(null);
     setCodeDestinationStore(null);
@@ -935,6 +951,11 @@ function WorkshopPage({ isActive }) {
   const handleNewProgram = useCallback((choice) => {
     documentChosenRef.current = true;
     dispatch(setSelectedWorkflowId(null));
+    // A new document shows no values of the last one — also from one
+    // unsaved document to the next, which setSelectedWorkflowId cannot see
+    // (review m4).
+    dispatch(clearVariables());
+    dispatch(clearCounters());
     dispatch(setUnsavedBlocklyJson(null));
     setEditorJson(null);
     setInitialJsonForEditor(null);
@@ -1205,13 +1226,20 @@ function WorkshopPage({ isActive }) {
         if (savingCode) {
           // The PATCH echoes the document's OWN language (the cloud answers
           // 409 on any other value; it is immutable after create) and carries
-          // the Ziele beside the files — never a Blockly key (041).
-          await updateWorkflow(token, targetId, {
-            code_language: saveLanguage,
-            code_files: saveFiles,
-            blockly_json: documentJson,
-            sim_scene: simSceneRef.current,
-          });
+          // the Ziele beside the files — never a Blockly key (041) — but only
+          // when there is something to say about them (codeZieleSendRef).
+          await updateWorkflow(token, targetId, codeZieleSendRef.current
+            ? {
+              code_language: saveLanguage,
+              code_files: saveFiles,
+              blockly_json: documentJson,
+              sim_scene: simSceneRef.current,
+            }
+            : {
+              code_language: saveLanguage,
+              code_files: saveFiles,
+              sim_scene: simSceneRef.current,
+            });
         } else {
           await updateWorkflow(token, targetId, {
             blockly_json: documentJson,

@@ -258,9 +258,15 @@ function CodeWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageRevealNonce]);
 
+  // An UPDATER, not `{...files}`: the page applies it to its latest files
+  // (codeFilesRef), so a keystroke landing between an edit the page applied
+  // (a drawer rename) and React's next render keeps that edit (review n8).
   const handleContentChange = useCallback((content) => {
     if (!files || files[active] === content) return;
-    onFilesChange({ ...files, [active]: content });
+    onFilesChange((latest) => {
+      const base = latest && typeof latest === 'object' ? latest : files;
+      return base[active] === content ? base : { ...base, [active]: content };
+    });
   }, [files, active, onFilesChange]);
 
   const handleNewFile = useCallback(() => {

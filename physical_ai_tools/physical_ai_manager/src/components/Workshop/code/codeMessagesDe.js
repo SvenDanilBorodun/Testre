@@ -87,6 +87,27 @@ export const CODE_DE = Object.freeze({
   // sentence LEADS; this label introduces the raw line beneath it.
   ERROR_TECHNIK_LABEL: 'Technische Meldung:',
 
+  // The Sammlung inside a code program (2026-09-27, owner decisions O4–O9):
+  // the editor's warnings and hover texts for asset names, the sidebar section,
+  // the „Neu" menu, insertion, and the Variablen notes. The warnings follow
+  // sammlung/referenceValidators.js: only a recording or a Ziel/Position the
+  // Sammlung verifiably lacks is marked, never an object type.
+  ASSET_MISSING_RECORDING: 'Eine Aufnahme „{0}“ gibt es in diesem Programm nicht — nimm sie mit '
+    + '„Vormachen“ auf oder wähle eine vorhandene.',
+  ASSET_MISSING_PLACE: '„{0}“ ist kein Ziel und keine Position deiner Sammlung und wird im Programm '
+    + 'auch nicht gesetzt — lege es an oder wähle ein vorhandenes.',
+  ASSET_KIND_PIN: 'Ziel',
+  ASSET_KIND_POSE: 'Position',
+  ASSET_KIND_CODE_PIN: 'Ziel, im Programm gesetzt',
+  ASSET_KIND_RECORDING: 'Aufnahme',
+  ASSET_KIND_COUNTER: 'Zähler',
+  ASSET_KIND_OBJECT: 'Objekt',
+  HOVER_PIN: 'Ziel „{0}“ · x {1} cm · y {2} cm',
+  HOVER_POSE: 'Position „{0}“ · x {1} cm · y {2} cm · z {3} cm',
+  HOVER_CODE_PIN: 'Ziel „{0}“ · wird im Programm mit pin gesetzt',
+  HOVER_RECORDING: 'Aufnahme „{0}“ · {1} s',
+  HOVER_RECORDING_VERSIONS: 'Aufnahme „{0}“ · {1} s · {2} Versionen',
+
   SUBMIT: 'Abgeben',
   SUBMIT_TITLE: 'Diesen Stand des Programms bei der Lehrkraft abgeben',
   SUBMIT_CONFIRM: 'Programm jetzt abgeben? Die Lehrkraft sieht danach genau diesen Stand.',

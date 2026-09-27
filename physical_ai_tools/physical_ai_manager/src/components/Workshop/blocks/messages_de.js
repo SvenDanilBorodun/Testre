@@ -349,6 +349,10 @@ export const DE = {
   // utils/simPreview.js::PREVIEW_BLOCK_TITLES_DE — why ▶ is refused client-side.
   PREVIEW_BLOCK_OFFLINE: 'Keine Verbindung zum Roboter-Dienst.',
   PREVIEW_BLOCK_RUNNING: 'Ein Programm läuft gerade – erst auf „Stopp" drücken.',
+  // Every action that replaces the open document (a gallery pick, „Öffnen",
+  // „Neu", a version restore, an opening clone) while a program runs or
+  // stands at a breakpoint (review round 2, owner decision R2-O3).
+  STOP_PROGRAM_FIRST: 'Stoppe zuerst dein Programm.',
   PREVIEW_BLOCK_TEACH: 'Erst Vormachen beenden.',
   PREVIEW_BLOCK_HANDGUIDE: 'Der Arm ist freigeschaltet – bitte zuerst festsetzen.',
   PREVIEW_BLOCK_TUTORIAL: 'Während eines Lernpfads kann der Simulator nicht geöffnet werden.',

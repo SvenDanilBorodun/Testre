@@ -8,10 +8,12 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, {
+  useEffect, useState, useCallback, useMemo, useRef,
+} from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
-import { setSelectedWorkflowId } from '../../features/workshop/workshopSlice';
+import { openWorkflow } from '../../features/workshop/workshopSlice';
 import { listWorkflows, cloneWorkflow } from '../../services/workflowApi';
 import { DE } from './blocks/messages_de';
 
@@ -30,7 +32,10 @@ function fmtDate(iso) {
  * button calls /workflows/{id}/clone, which produces a fresh non-
  * template copy under the caller's ownership.
  */
-function GalleryTab({ onPicked }) {
+// `lockedReason` (a program runs, R2-O3): a clone would replace the open
+// document, so every clone button is disabled and says why — and a clone that
+// finishes after a run started is created but not opened.
+function GalleryTab({ onPicked, lockedReason = null }) {
   const dispatch = useDispatch();
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
   // Audit fix: the Supabase user lives under `session.user`, not under
@@ -42,6 +47,8 @@ function GalleryTab({ onPicked }) {
   const [workflows, setWorkflows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [cloning, setCloning] = useState({});
+  const lockRef = useRef(lockedReason);
+  lockRef.current = lockedReason;
 
   const refresh = useCallback(async () => {
     if (!accessToken) return;
@@ -72,12 +79,16 @@ function GalleryTab({ onPicked }) {
 
   const handleClone = useCallback(
     async (wf) => {
-      if (!accessToken) return;
+      if (!accessToken || lockRef.current) return;
       setCloning((m) => ({ ...m, [wf.id]: true }));
       try {
         const created = await cloneWorkflow(accessToken, wf.id);
         if (created && created.id) {
-          dispatch(setSelectedWorkflowId(created.id));
+          if (lockRef.current) {
+            toast.error(lockRef.current);
+            return;
+          }
+          dispatch(openWorkflow(created.id));
           toast.success('Geklont und im Editor geöffnet.');
           if (typeof onPicked === 'function') {
             onPicked(created);
@@ -150,7 +161,8 @@ function GalleryTab({ onPicked }) {
               <button
                 type="button"
                 onClick={() => handleClone(wf)}
-                disabled={!!cloning[wf.id]}
+                disabled={!!cloning[wf.id] || !!lockedReason}
+                title={lockedReason || undefined}
                 className="w-full text-xs px-2 py-1.5 rounded-md bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-50"
               >
                 {cloning[wf.id] ? '…' : DE.GALLERY_CLONE}

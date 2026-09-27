@@ -544,6 +544,22 @@ const workshopSlice = createSlice({
       }
       state.selectedWorkflowId = next;
     },
+    // The student OPENS another document („Öffnen", a gallery clone): its
+    // breakpoints and shown values leave with the one it replaces — also
+    // from an UNSAVED document (null → id), which setSelectedWorkflowId must
+    // not treat as a switch, because its null → id is also the first save of
+    // an unsaved document, the same program getting its id (review round 2,
+    // mi7). Re-opening the open document changes nothing.
+    openWorkflow: (state, action) => {
+      const next = action.payload;
+      if (state.selectedWorkflowId !== next) {
+        state.breakpoints = [];
+        state.variables = {};
+        state.variableHistory = {};
+        state.counters = {};
+      }
+      state.selectedWorkflowId = next;
+    },
     setUnsavedBlocklyJson: (state, action) => {
       state.unsavedBlocklyJson = action.payload;
     },
@@ -663,6 +679,7 @@ export const {
   clearWorkflowError,
   setDebuggerWarnings,
   setSelectedWorkflowId,
+  openWorkflow,
   setUnsavedBlocklyJson,
   markWorkflowSaved,
   setActiveTutorial,

@@ -37,7 +37,10 @@ function fmtTs(iso) {
  * is on local-only autosave state). When clicked, it fetches the list
  * lazily and renders a popover.
  */
-function VersionHistoryDropdown({ workflowId, onRestore }) {
+// `lockedReason` (a program runs, R2-O3): a restore replaces the open
+// document, so it is refused BEFORE the cloud is asked — a restore the page
+// then refused to show would leave the cloud row and the editor apart.
+function VersionHistoryDropdown({ workflowId, onRestore, lockedReason = null }) {
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
   const [open, setOpen] = useState(false);
   const [versions, setVersions] = useState([]);
@@ -48,7 +51,7 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
   // accidental discovery that comes up in every QA run.
   const containerRef = useRef(null);
 
-  const disabled = !workflowId || !accessToken;
+  const disabled = !workflowId || !accessToken || !!lockedReason;
 
   useEffect(() => {
     if (!open) return undefined;
@@ -82,6 +85,10 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
   const handleRestore = useCallback(
     async (versionId) => {
       if (!accessToken || !workflowId) return;
+      if (lockedReason) {
+        toast.error(lockedReason);
+        return;
+      }
       setRestoringId(versionId);
       try {
         const updated = await restoreWorkflowVersion(
@@ -100,7 +107,7 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
         setRestoringId(null);
       }
     },
-    [accessToken, workflowId, onRestore]
+    [accessToken, workflowId, onRestore, lockedReason]
   );
 
   return (
@@ -109,6 +116,7 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
+        title={lockedReason || undefined}
         aria-expanded={open}
         aria-haspopup="menu"
         className={
@@ -146,7 +154,7 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
                   <button
                     type="button"
                     onClick={() => handleRestore(v.id)}
-                    disabled={restoringId === v.id}
+                    disabled={restoringId === v.id || !!lockedReason}
                     className="text-xs text-blue-600 hover:underline disabled:opacity-50"
                   >
                     {restoringId === v.id ? '…' : DE.VERSION_LOAD}

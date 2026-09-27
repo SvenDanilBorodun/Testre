@@ -14,7 +14,9 @@ import toast from 'react-hot-toast';
 import useSupabaseWorkflows from '../../hooks/useSupabaseWorkflows';
 import { cloneWorkflow } from '../../services/workflowApi';
 
-function TemplatePicker({ onPicked }) {
+// `lockedReason` (a program runs, R2-O3): nothing here may replace the open
+// document — every button is disabled and says why.
+function TemplatePicker({ onPicked, lockedReason = null }) {
   const { workflows, loading } = useSupabaseWorkflows();
   const session = useSelector((s) => s.auth.session);
   const accessToken = session?.access_token;
@@ -24,7 +26,7 @@ function TemplatePicker({ onPicked }) {
   const own = workflows.filter((w) => !w.is_template);
 
   const handleClone = async (workflowId) => {
-    if (!accessToken) return;
+    if (!accessToken || lockedReason) return;
     setBusyId(workflowId);
     try {
       const cloned = await cloneWorkflow(accessToken, workflowId);
@@ -61,7 +63,8 @@ function TemplatePicker({ onPicked }) {
                 <button
                   type="button"
                   onClick={() => handleClone(w.id)}
-                  disabled={busyId === w.id}
+                  disabled={busyId === w.id || !!lockedReason}
+                  title={lockedReason || undefined}
                   className="text-xs px-3 py-1.5 rounded-md bg-[var(--accent)] text-white hover:opacity-90 disabled:opacity-50"
                 >
                   Klonen
@@ -90,7 +93,9 @@ function TemplatePicker({ onPicked }) {
                 <button
                   type="button"
                   onClick={() => onPicked && onPicked(w)}
-                  className="text-xs px-3 py-1.5 rounded-md bg-[var(--accent-wash)] text-[var(--accent-ink)] hover:bg-[var(--accent)] hover:text-white"
+                  disabled={!!lockedReason}
+                  title={lockedReason || undefined}
+                  className="text-xs px-3 py-1.5 rounded-md bg-[var(--accent-wash)] text-[var(--accent-ink)] hover:bg-[var(--accent)] hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Öffnen
                 </button>

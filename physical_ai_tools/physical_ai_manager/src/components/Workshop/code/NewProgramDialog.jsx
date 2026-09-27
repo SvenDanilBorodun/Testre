@@ -26,7 +26,7 @@ const CHOICES = [
   { id: 'java', label: CODE_DE.LANG_JAVA, hint: CODE_DE.LANG_JAVA_HINT, icon: '☕' },
 ];
 
-function NewProgramDialog({ onCreate, disabled = false }) {
+function NewProgramDialog({ onCreate, disabled = false, disabledReason = null }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
   useEffect(() => {
@@ -45,7 +45,7 @@ function NewProgramDialog({ onCreate, disabled = false }) {
         aria-expanded={open}
         aria-label={CODE_DE.NEW_TITLE}
         disabled={disabled}
-        title={CODE_DE.NEW_TITLE}
+        title={(disabled && disabledReason) || CODE_DE.NEW_TITLE}
         className={
           'inline-flex items-center gap-1 min-h-[28px] px-3 py-1.5 rounded-md '
           + 'text-sm font-medium border border-[var(--line)] bg-white text-[var(--ink)] '

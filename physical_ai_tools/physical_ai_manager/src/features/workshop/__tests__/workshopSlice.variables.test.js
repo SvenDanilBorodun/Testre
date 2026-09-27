@@ -35,7 +35,7 @@
 // that variable table), so the name on the wire is the name the student typed.
 
 import reducer, {
-  setVariable, clearVariables, setCounter, setSelectedWorkflowId,
+  setVariable, clearVariables, setCounter, setSelectedWorkflowId, openWorkflow, addBreakpoint,
 } from '../workshopSlice';
 import {
   BLOCKLY_REAL_NAMES,
@@ -205,5 +205,31 @@ describe('a document switch retires the run values (review m4)', () => {
     expect(state.variables.punkte.value).toBe(3);
     state = reducer(state, setSelectedWorkflowId('wf-new'));
     expect(state.variables.punkte.value).toBe(3);
+  });
+});
+
+describe('opening another program retires the values — from an unsaved one too (review round 2, mi7)', () => {
+  const unsavedWithValues = () => {
+    let state = reducer(undefined, setVariable({ name: 'punkte', value: 3 }));
+    state = reducer(state, setCounter({ name: 'Runden', value: 2 }));
+    state = reducer(state, addBreakpoint('main.py:L3'));
+    return state;
+  };
+
+  test('null → B through openWorkflow clears variables, history, counters and breakpoints', () => {
+    const state = reducer(unsavedWithValues(), openWorkflow('wf-b'));
+    expect(state.selectedWorkflowId).toBe('wf-b');
+    expect(state.variables).toEqual({});
+    expect(state.variableHistory).toEqual({});
+    expect(state.counters).toEqual({});
+    expect(state.breakpoints).toEqual([]);
+  });
+
+  test('re-opening the open program keeps them; the first save (setSelectedWorkflowId) keeps them', () => {
+    let state = reducer(unsavedWithValues(), setSelectedWorkflowId('wf-new'));
+    expect(state.variables.punkte.value).toBe(3);
+    state = reducer(state, openWorkflow('wf-new'));
+    expect(state.variables.punkte.value).toBe(3);
+    expect(state.breakpoints).toEqual(['main.py:L3']);
   });
 });

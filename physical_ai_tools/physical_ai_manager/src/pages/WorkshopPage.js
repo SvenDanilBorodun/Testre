@@ -64,6 +64,8 @@ import { slimSavePayload } from '../utils/blocklyPayload';
 import {
   clearCounters,
   clearVariables,
+  openWorkflow,
+  selectWorkflowRunning,
   setUnsavedBlocklyJson,
   setSelectedWorkflowId,
   markWorkflowSaved,
@@ -215,7 +217,9 @@ const EMPTY_SIM_SCENE = { version: 1, objects: [], zones: [] };
 // of templates + own workflows) used to sit expanded in the top band, eating
 // vertical space in every view. It now opens in a popover so the band stays a
 // single slim row (density pass). Closes on pick or outside click.
-function OpenWorkflowPopover({ onPicked }) {
+// `lockedReason` (a program runs, R2-O3): the button is disabled and says why;
+// a popover already open keeps its list but every choice in it is disabled.
+function OpenWorkflowPopover({ onPicked, lockedReason = null }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
   useEffect(() => {
@@ -232,12 +236,13 @@ function OpenWorkflowPopover({ onPicked }) {
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        title="Vorlage oder gespeicherten Workflow öffnen"
+        disabled={!!lockedReason}
+        title={lockedReason || 'Vorlage oder gespeicherten Workflow öffnen'}
         className={
           'inline-flex items-center gap-1 min-h-[28px] px-3 py-1.5 rounded-md '
           + 'text-sm font-medium border border-[var(--line)] bg-white text-[var(--ink)] '
           + 'hover:bg-[var(--bg-sunk)] focus:outline-none focus-visible:ring-2 '
-          + 'focus-visible:ring-blue-500'
+          + 'focus-visible:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed'
         }
       >
         📂 {DE.DOCK_OPEN_WORKFLOW}
@@ -246,6 +251,7 @@ function OpenWorkflowPopover({ onPicked }) {
       {open && (
         <div className="absolute z-30 mt-1 left-0 w-80 max-h-[60vh] overflow-auto rounded-md border border-[var(--line)] bg-white shadow-lg p-3">
           <TemplatePicker
+            lockedReason={lockedReason}
             onPicked={(wf) => {
               setOpen(false);
               if (onPicked) onPicked(wf);
@@ -401,6 +407,20 @@ function WorkshopPage({ isActive }) {
   // while a sim run is in flight (mirrors LeaderToggle's run-guard).
   const runState = useSelector((s) => s.workshop.runState);
   const simRunActive = simMode && runState === 'running';
+  // No document switch while a program runs or stands at a breakpoint
+  // (owner decision R2-O3): every action that replaces the open document is
+  // disabled with this German reason, and the handlers refuse it too (a clone
+  // that finishes after the run started, a popover opened before). A run
+  // keeps reporting on the program that produced it.
+  const workflowRunning = useSelector(selectWorkflowRunning);
+  const switchLockReason = workflowRunning ? DE.STOP_PROGRAM_FIRST : null;
+  const switchLockRef = useRef(switchLockReason);
+  switchLockRef.current = switchLockReason;
+  const refuseSwitch = useCallback(() => {
+    if (!switchLockRef.current) return false;
+    toast.error(switchLockRef.current);
+    return true;
+  }, []);
   // [label_de, type_name] pairs from GetObjectCatalog, threaded to SimScene's
   // object palette (the same source the Blockly dropdowns use).
   const [objectCatalog, setObjectCatalog] = useState([]);
@@ -934,12 +954,15 @@ function WorkshopPage({ isActive }) {
   // TemplatePicker calls onPicked(workflowObject) — the full row, not
   // just the id. We extract the id and store it in Redux; the editor's
   // load effect picks up the change and hydrates initialJsonForEditor.
+  // `openWorkflow`, not setSelectedWorkflowId: opening another program from
+  // an UNSAVED one must retire the old values too (review round 2, mi7).
   const handlePickWorkflow = useCallback(
     (workflow) => {
       if (!workflow || !workflow.id) return;
-      dispatch(setSelectedWorkflowId(workflow.id));
+      if (refuseSwitch()) return;
+      dispatch(openWorkflow(workflow.id));
     },
-    [dispatch]
+    [dispatch, refuseSwitch]
   );
 
   // „Neu → Blöcke / Python / Java" (NewProgramDialog): the ONE moment a
@@ -949,6 +972,7 @@ function WorkshopPage({ isActive }) {
   // Nothing is created here: a student who changes their mind before saving
   // leaves no row behind.
   const handleNewProgram = useCallback((choice) => {
+    if (refuseSwitch()) return;
     documentChosenRef.current = true;
     dispatch(setSelectedWorkflowId(null));
     // A new document shows no values of the last one — also from one
@@ -964,7 +988,7 @@ function WorkshopPage({ isActive }) {
       ? { language: choice, files: { ...STARTER_FILES[choice] }, blocklyJson: null }
       : { language: '' });
     setEditorKey((k) => k + 1);
-  }, [dispatch, openCodeDocument]);
+  }, [dispatch, openCodeDocument, refuseSwitch]);
 
   // Camera click → Ziel, without a prompt. CameraFeedOverlay asks for the
   // label BEFORE it calls /workshop/mark_destination, so one point has one name
@@ -1768,10 +1792,11 @@ function WorkshopPage({ isActive }) {
                     view switch + „Öffnen". */}
                 <div className="px-3 sm:px-4 py-1.5 flex items-center gap-2 flex-wrap border-b border-[var(--line)] bg-white shrink-0">
                   {viewTabs}
-                  <OpenWorkflowPopover onPicked={handlePickWorkflow} />
+                  <OpenWorkflowPopover onPicked={handlePickWorkflow} lockedReason={switchLockReason} />
                 </div>
                 <div className="flex-1 min-h-0 p-3 sm:p-4 overflow-auto">
                   <GalleryTab
+                    lockedReason={switchLockReason}
                     onPicked={(wf) => {
                       handlePickWorkflow(wf);
                       setView('editor');
@@ -1791,8 +1816,12 @@ function WorkshopPage({ isActive }) {
                   leading={
                     <>
                       {viewTabs}
-                      <NewProgramDialog onCreate={handleNewProgram} disabled={runState === 'running'} />
-                      <OpenWorkflowPopover onPicked={handlePickWorkflow} />
+                      <NewProgramDialog
+                        onCreate={handleNewProgram}
+                        disabled={!!switchLockReason}
+                        disabledReason={switchLockReason}
+                      />
+                      <OpenWorkflowPopover onPicked={handlePickWorkflow} lockedReason={switchLockReason} />
                     </>
                   }
                   extra={
@@ -1812,8 +1841,9 @@ function WorkshopPage({ isActive }) {
                       </button>
                       <VersionHistoryDropdown
                         workflowId={selectedWorkflowId}
+                        lockedReason={switchLockReason}
                         onRestore={(updated) => {
-                          if (!updated) return;
+                          if (!updated || refuseSwitch()) return;
                           // A code version carries its files (migration 040)
                           // and its Ziele (041); a legacy version restores
                           // blocks only.

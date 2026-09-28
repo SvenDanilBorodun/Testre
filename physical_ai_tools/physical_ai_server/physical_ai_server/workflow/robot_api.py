@@ -975,7 +975,7 @@ _JAVA_ALTS = {
     # read (2026-09-27 review, n3). Every rendering is bounded and JSON-safe
     # (a non-finite double becomes text, arrays and lists are JSON lists
     # sharing one budget) before EduJson frames it.
-    'value': (('int', '{v}'), ('long', '{v}'), ('double', 'RpcClient.shownDouble({v})'),
+    'value': (('int', '{v}'), ('long', 'RpcClient.shownLong({v})'), ('double', 'RpcClient.shownDouble({v})'),
               ('boolean', '{v}'), ('char', 'String.valueOf({v})'),
               ('Object', 'RpcClient.shownObject({v})')),
 }
@@ -1410,6 +1410,12 @@ public final class RpcClient {{
     // over MAX_FRAME_BYTES, refused in the student's own program.
     static final int SHOWN_BUDGET_CHARS = {SHOWN_BUDGET_CHARS};
     static final String SHOWN_CUT = "…";
+    // What a value whose own code failed shows (the Python stub's '<?>').
+    static final String SHOWN_UNREADABLE = "<?>";
+    // JavaScript reads a JSON number as a double: past ±2^53 it silently
+    // rounds. Like the Python stub, a whole number beyond that is sent as a
+    // double — the student sees its size, never a wrong last digit.
+    static final long SHOWN_BIG_INT = 1L << 53;
 
     static Object shownDouble(double v) {{
         if (Double.isNaN(v) || Double.isInfinite(v)) {{
@@ -1418,23 +1424,48 @@ public final class RpcClient {{
         return v;
     }}
 
+    static Object shownLong(long v) {{
+        if (v >= -SHOWN_BIG_INT && v <= SHOWN_BIG_INT) {{
+            return v;
+        }}
+        return (double) v;
+    }}
+
     static Object shownObject(Object o) {{
         return shownValue(o, 0, new int[] {{SHOWN_BUDGET_CHARS}});
     }}
 
     // One node of a shown value, charged to the shared budget like the
-    // Python stub's _shown_part. EVERY array type (int[], long[], String[],
-    // char[], Object[], an array of arrays …) and every Iterable is a JSON
-    // list — at most SHOWN_MAX_ITEMS items and SHOWN_MAX_DEPTH levels, cut
-    // with "…" — never the JVM's "[J@1b6d3586" (review round 3, nb6).
+    // Python stub's _shown_part. NEVER throws into the student's program:
+    // a toString() or an iterator of the student's that fails (a
+    // ConcurrentModificationException included) shows "<?>", like the
+    // Python stub (review round 4, nc1).
     static Object shownValue(Object o, int depth, int[] budget) {{
+        try {{
+            return shownNode(o, depth, budget);
+        }} catch (Exception | StackOverflowError e) {{
+            return SHOWN_UNREADABLE;
+        }}
+    }}
+
+    // EVERY array type (int[], long[], String[], char[], Object[], an array
+    // of arrays …) and every Iterable is a JSON list — at most
+    // SHOWN_MAX_ITEMS items and SHOWN_MAX_DEPTH levels, cut with "…" — never
+    // the JVM's "[J@1b6d3586" (review round 3, nb6). A Path is its text, not
+    // the Iterable of its name parts; a whole number past ±2^53 a double; a
+    // BigInteger or BigDecimal too big for a double its own text, never
+    // "Infinity" (review round 4, nc1/nc2).
+    static Object shownNode(Object o, int depth, int[] budget) {{
         if (budget[0] <= 0) {{
             return SHOWN_CUT;
         }}
         budget[0] -= 4;
-        if (o == null || o instanceof Boolean || o instanceof Integer || o instanceof Long
+        if (o == null || o instanceof Boolean || o instanceof Integer
                 || o instanceof Short || o instanceof Byte) {{
             return o;
+        }}
+        if (o instanceof Long) {{
+            return shownLong((Long) o);
         }}
         if (o instanceof String) {{
             return shownText((String) o, budget);
@@ -1442,8 +1473,23 @@ public final class RpcClient {{
         if (o instanceof Character) {{
             return String.valueOf(o);
         }}
+        if (o instanceof java.math.BigInteger) {{
+            java.math.BigInteger big = (java.math.BigInteger) o;
+            if (big.bitLength() < 63) {{
+                return shownLong(big.longValue());
+            }}
+            double d = big.doubleValue();
+            return Double.isInfinite(d) ? shownText(big.toString(), budget) : d;
+        }}
+        if (o instanceof java.math.BigDecimal) {{
+            double d = ((java.math.BigDecimal) o).doubleValue();
+            return Double.isInfinite(d) ? shownText(o.toString(), budget) : d;
+        }}
         if (o instanceof Number) {{
             return shownDouble(((Number) o).doubleValue());
+        }}
+        if (o instanceof java.nio.file.Path) {{
+            return shownText(o.toString(), budget);
         }}
         boolean array = o.getClass().isArray();
         if (array || o instanceof Iterable) {{

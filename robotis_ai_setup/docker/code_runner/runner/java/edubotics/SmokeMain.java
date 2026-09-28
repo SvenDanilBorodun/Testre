@@ -132,6 +132,55 @@ public final class SmokeMain {
         String bounded = EduJson.encode(RpcClient.shownObject(lang));
         check(bounded.length() < 2 * RpcClient.SHOWN_BUDGET_CHARS && bounded.endsWith("\"…\"]"),
               "zeige list shares one budget");
+        // A value the student's own code cannot render never reaches the
+        // program as an exception: "<?>", like the Python stub (review round
+        // 4, nc1) — a failing toString(), a failing iterator, a
+        // ConcurrentModificationException.
+        Object boese = new Object() {
+            @Override
+            public String toString() {
+                throw new IllegalStateException("toString kaputt");
+            }
+        };
+        check("<?>".equals(RpcClient.shownObject(boese)), "zeige a failing toString");
+        List<Object> mitBoese = new java.util.ArrayList<>();
+        mitBoese.add(1);
+        mitBoese.add(boese);
+        check(EduJson.encode(RpcClient.shownObject(mitBoese)).equals("[1,\"<?>\"]"), "zeige a list with one");
+        Iterable<Integer> kaputt = () -> new java.util.Iterator<Integer>() {
+            @Override
+            public boolean hasNext() {
+                return true;
+            }
+
+            @Override
+            public Integer next() {
+                throw new java.util.ConcurrentModificationException();
+            }
+        };
+        check("<?>".equals(RpcClient.shownObject(kaputt)), "zeige a failing iterator");
+        boolean refusedBoese = false;
+        try {
+            Robot.zeige("x", boese);
+        } catch (RpcClient.RobotError e) {
+            refusedBoese = true;
+        }
+        check(refusedBoese, "zeige of a failing toString is refused for the SOCKET only");
+        // A Path is its text, not the Iterable of its parts; a number too big
+        // for a double its own text, never "Infinity" (nc1).
+        check("/tmp/ordner/datei.txt".equals(RpcClient.shownObject(java.nio.file.Path.of("/tmp/ordner/datei.txt"))),
+              "zeige Path");
+        String gross = "1" + "0".repeat(400);
+        check(gross.equals(RpcClient.shownObject(new java.math.BigInteger(gross))), "zeige huge BigInteger");
+        check("1E+400".equals(RpcClient.shownObject(new java.math.BigDecimal("1e400"))), "zeige huge BigDecimal");
+        check(Long.valueOf(12L).equals(RpcClient.shownObject(java.math.BigInteger.valueOf(12))), "zeige small BigInteger");
+        check(Double.valueOf(2.5).equals(RpcClient.shownObject(new java.math.BigDecimal("2.5"))), "zeige BigDecimal");
+        // A whole number past ±2^53 is a double (JavaScript would round it
+        // silently), within it exact — the Python stub's convention (nc2).
+        long grenze = 1L << 53;
+        check(Long.valueOf(grenze).equals(RpcClient.shownLong(grenze)), "zeige long at 2^53");
+        check(Double.valueOf((double) (grenze + 1)).equals(RpcClient.shownLong(grenze + 1)), "zeige long past 2^53");
+        check(Double.valueOf((double) Long.MIN_VALUE).equals(RpcClient.shownObject(Long.MIN_VALUE)), "zeige Long past -2^53");
         check(RpcClient.asPoint(null) == null, "null point");
         check(RpcClient.asPoint(List.of(1.0, 2L, 3.5))[1] == 2.0, "point decode");
 

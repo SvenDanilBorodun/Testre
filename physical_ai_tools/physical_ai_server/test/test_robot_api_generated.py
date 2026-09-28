@@ -269,6 +269,18 @@ def test_zeige_renders_in_both_stubs_and_the_asset_tag_in_neither():
                    'instanceof Iterable', 'instanceof Character'):
         assert branch in rpc, branch
     assert 'instanceof double[]' not in rpc and 'instanceof int[]' not in rpc
+    # Review round 4 (nc1/nc2): a value the student's own code fails to
+    # render is "<?>", never an exception in the program; a Path is its text;
+    # a whole number past 2^53 goes as a double, like the Python stub; a
+    # BigInteger/BigDecimal too big for a double is its text. SmokeMain runs
+    # each of them in the image build.
+    assert 'catch (Exception | StackOverflowError e)' in rpc
+    for branch in ('instanceof java.nio.file.Path', 'instanceof java.math.BigInteger',
+                   'instanceof java.math.BigDecimal', 'static Object shownLong(long v)',
+                   'SHOWN_BIG_INT = 1L << 53'):
+        assert branch in rpc, branch
+    assert 'public static void zeige(String name, long wert) {\n' \
+        '        RpcClient.call("zeige", new Object[] {name, RpcClient.shownLong(wert)}, "call");' in java
     for rel in (robot_api.GENERATED_PATHS['java_robot'],
                 robot_api.GENERATED_PATHS['java_greifobjekt'],
                 robot_api.GENERATED_PATHS['java_rpc_client']):

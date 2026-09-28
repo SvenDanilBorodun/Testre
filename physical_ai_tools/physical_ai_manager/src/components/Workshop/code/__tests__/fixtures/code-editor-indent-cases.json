@@ -312,6 +312,246 @@
    "hint": null
   },
   {
+   "name": "eof_row_drop_after_def_body",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_drop_after_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n    robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_drop_after_if_else",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nif True:\n    robot.home()\nelse:\n    robot.log(\"x\")\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_drop_after_try_except",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ntry:\n    robot.home()\nexcept Exception:\n    pass\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_drop_after_while",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nn = 0\nwhile n < 3:\n    n += 1\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_drop_crlf_after_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n    robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_drop_tab_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n\trobot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_drop_two_space_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n  robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_enter_after_def_body",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_enter_after_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n    robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_enter_after_if_else",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nif True:\n    robot.home()\nelse:\n    robot.log(\"x\")\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_enter_after_try_except",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ntry:\n    robot.home()\nexcept Exception:\n    pass\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_enter_after_while",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nn = 0\nwhile n < 3:\n    n += 1\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_enter_crlf_after_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n    robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_enter_tab_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n\trobot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_enter_two_space_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n  robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_vormachen_paste_after_def_body",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_vormachen_paste_after_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n    robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_vormachen_paste_after_if_else",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nif True:\n    robot.home()\nelse:\n    robot.log(\"x\")\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_vormachen_paste_after_try_except",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ntry:\n    robot.home()\nexcept Exception:\n    pass\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_vormachen_paste_after_while",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nn = 0\nwhile n < 3:\n    n += 1\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_vormachen_paste_crlf_after_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n    robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_vormachen_paste_tab_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n\trobot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
+   "name": "eof_row_vormachen_paste_two_space_for",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(3):\n  robot.home()\n\nrobot.replay(\"Winken\")",
+   "hint": null,
+   "runs": 1
+  },
+  {
    "name": "explicit_step_back_kept",
    "language": "python",
    "line": null,
@@ -384,6 +624,16 @@
    "hint": null
   },
   {
+   "name": "tab_empty_row_before_else",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    if True:\n        robot.home()\n        robot.replay(\"Winken\")\n    else:\n        robot.log(1)\nmain()\n",
+   "hint": null,
+   "runs": 1
+  },
+  {
    "name": "tab_one_unit_tab",
    "language": "python",
    "line": null,
@@ -436,6 +686,16 @@
    "input": null,
    "output": "import robot\ndef main():\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nmain()\n",
    "hint": null
+  },
+  {
+   "name": "ws_row_shallower_than_next_enter",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    if True:\n        robot.home()\n\n        robot.replay(\"Winken\")\n        robot.log(1)\nmain()\n",
+   "hint": null,
+   "runs": 1
   }
  ]
 }

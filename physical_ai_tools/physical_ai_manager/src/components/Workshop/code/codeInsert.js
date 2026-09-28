@@ -19,16 +19,22 @@
 //     CHECKS the chosen spot (`insertionTargetAt`) and refuses it with a short
 //     German reason when the line could not stand there or could never run:
 //     inside the file's leading block (docstring, comments, `from __future__`,
-//     imports), right below a decorator, on a match/case or switch/case line,
-//     inside a multi-line expression, a `\` continuation or a string, outside a
-//     Java method body, or below a statement that never lets the next line of
-//     its block run (return/raise/throw/break/continue, an exit call —
-//     sys.exit/exit/quit/os._exit/os.abort, System.exit, Runtime.exit/halt —
-//     an endless loop, an if/else or try whose every way out leaves, a try
-//     without a handler around a body that never completes, an `if` on a
-//     constant true, a match whose catch-all case and every other case leave).
-//     A `with suppress(…)` may swallow what its body raises, so the line after
-//     it runs. The line is NEVER moved somewhere else.
+//     imports), anywhere between a decorator and its def (a blank or comment
+//     row included), above a def's docstring, on a match/case or switch/case
+//     line, inside a multi-line expression, a `\` continuation or a string,
+//     outside a Java method body, or below a statement that never lets the
+//     next line of its block run (return/raise/throw/break/continue, an exit
+//     call — sys.exit/exit/quit/os._exit/os.abort, System.exit,
+//     Runtime.exit/halt — an endless loop, an if/else or try whose every way
+//     out leaves, a try without a handler around a body that never
+//     completes, a try whose body leaves without raising anything its
+//     handlers catch, an `if` on a constant true, a match whose catch-all case
+//     and every other case leave). A `with suppress(…)` may swallow what its
+//     body RAISES, so the line after it runs — but not a quiet return, break
+//     or continue. Java's constants are judged in Java's own arithmetic
+//     (integer division, int/long overflow, `?:`, the declared type). The
+//     empty row after a final line break is a row of its own. The line is
+//     NEVER moved somewhere else.
 //   * INDENTATION of the inserted line is what Enter at the end of the chosen
 //     line gives (`newlineIndentAt`, the function the editor's Enter uses):
 //     inside an existing block the block's OWN sibling indentation; a new
@@ -45,6 +51,10 @@
 // einfügen") call it. It is NOT in the entry bundle: the lazy editor imports
 // it, and the asset adapter loads it on demand (codeAssetDocument
 // .loadCodeInsert — review round 2, ni4).
+
+// Java's int and long constants are evaluated as BigInt (two's complement,
+// review round 5 md2); the react-app eslint preset predates the global.
+/* global BigInt */
 
 import robotApi from './robot_api.json';
 import { tokenizeCode } from './codeAssetUsage';
@@ -135,11 +145,6 @@ function rowContentEnd(text, starts, row) {
 
 function rowText(text, starts, row) {
   return text.slice(starts[row], rowContentEnd(text, starts, row));
-}
-
-// The last row that holds text (a final newline opens no row of its own).
-function lastRealRow(text, starts) {
-  return Math.max(0, text.endsWith('\n') ? starts.length - 2 : starts.length - 1);
 }
 
 // `text` with every non-code segment blanked (newlines and length kept).
@@ -715,6 +720,93 @@ function pyIfNever(stmts, i) {
   return null;
 }
 
+// The builtin exception names an `except`/`suppress(…)` may name that can
+// never catch SystemExit (it derives from BaseException, not Exception). Any
+// other name — BaseException, SystemExit, a class of the program's own — might.
+const PY_NOT_SYSTEM_EXIT = new Set(['Exception', 'ArithmeticError', 'AssertionError',
+  'AttributeError', 'BufferError', 'EOFError', 'ImportError', 'ModuleNotFoundError', 'LookupError',
+  'IndexError', 'KeyError', 'MemoryError', 'NameError', 'UnboundLocalError', 'OSError', 'IOError',
+  'EnvironmentError', 'ReferenceError', 'RuntimeError', 'NotImplementedError', 'RecursionError',
+  'StopIteration', 'StopAsyncIteration', 'SyntaxError', 'IndentationError', 'TabError', 'SystemError',
+  'TypeError', 'ValueError', 'UnicodeError', 'UnicodeDecodeError', 'UnicodeEncodeError',
+  'UnicodeTranslateError', 'ZeroDivisionError', 'FloatingPointError', 'OverflowError', 'TimeoutError',
+  'ConnectionError', 'FileNotFoundError', 'PermissionError', 'RobotError']);
+
+// The exception type names in `text` (`(A, b.C)` → ['A', 'C']), or null when
+// it is anything but a plain list of names (a call, an expression).
+function pyTypeNames(text) {
+  const inner = String(text || '').trim().replace(/^\(([\s\S]*)\)$/, '$1');
+  const names = inner.split(',').map((t) => t.trim()).filter(Boolean);
+  if (names.length === 0) return null;
+  const out = [];
+  for (const n of names) {
+    const m = /^(?:[\p{L}_][\p{L}\p{N}_]*\s*\.\s*)*([\p{L}_][\p{L}\p{N}_]*)$/u.exec(n);
+    if (!m) return null;
+    out.push(m[1]);
+  }
+  return out;
+}
+
+// Whether the types an `except …:` clause (`kind` 'except') or a
+// `suppress(…)` names can never catch SystemExit.
+function pyCannotCatchSystemExit(s, kind) {
+  let spec;
+  if (kind === 'except') {
+    const m = /^\s*except\*?\s*([\s\S]*?)(?:\s+as\s+[\p{L}_][\p{L}\p{N}_]*)?\s*:\s*$/u.exec(pyHeaderCode(s) + ':');
+    if (!m || m[1].trim() === '') return false; // a bare `except:` catches everything
+    spec = m[1];
+  } else {
+    const m = PY_SUPPRESS_RE.exec(pyHeaderCode(s));
+    if (!m) return false;
+    const code = pyHeaderCode(s);
+    const open = m.index + m[0].length - 1;
+    let depth = 0;
+    let close = -1;
+    for (let k = open; k < code.length; k += 1) {
+      if (code[k] === '(') depth += 1;
+      else if (code[k] === ')') {
+        depth -= 1;
+        if (depth === 0) {
+          close = k;
+          break;
+        }
+      }
+    }
+    if (close < 0) return false;
+    spec = code.slice(open + 1, close);
+  }
+  const names = pyTypeNames(spec);
+  return Boolean(names) && names.every((n) => PY_NOT_SYSTEM_EXIT.has(n));
+}
+
+// How the body of compound `i` leaves when it never completes, judged only
+// where nothing in it can raise first: 'quiet' — only `pass` and then a bare
+// `return`/`break`/`continue` (or one of a literal) or `os._exit`/`os.abort`
+// with literal arguments; 'systemexit' — the same, but the leaving statement
+// is `sys.exit`/`exit`/`quit`, which raises SystemExit. Null for anything
+// else: a call, a name, an expression — any of them may raise, and then a
+// handler (or a suppress) runs and the line after the compound does too.
+function pyQuietLeave(stmts, i) {
+  const s = stmts[i];
+  const bodies = s.opener ? pyChildren(stmts, i).map((c) => stmts[c]) : [{ code: inlineBody(s.code) }];
+  const literal = (expr) => expr.trim() === '' || pyConstValue(expr) !== undefined;
+  for (const child of bodies) {
+    if (child.opener || PY_COMPOUND.has(child.first)) return null;
+    for (const part of simpleParts(child.code)) {
+      const word = firstWord(part);
+      if (word === 'pass') continue;
+      if (word === 'return' || word === 'break' || word === 'continue') {
+        return literal(part.replace(/^\s*(?:return|break|continue)/, '')) ? 'quiet' : null;
+      }
+      const args = /\(([\s\S]*)\)\s*$/.exec(part);
+      if (PY_EXIT_CALL_RE.test(part)) return args && literal(args[1]) ? 'systemexit' : null;
+      if (PY_ABORT_CALL_RE.test(part)) return args && literal(args[1]) ? 'quiet' : null;
+      return null;
+    }
+  }
+  return null;
+}
+
 /**
  * Why statement `i` never lets the NEXT statement of its block run, or null:
  * 'return' | 'raise' | 'break' | 'continue' | 'exit' | 'abort' | 'loop' |
@@ -744,13 +836,33 @@ function pyNever(stmts, i) {
     // endless loop — review round 4, mc4).
     if (handlers.length === 0 && bodyEnds) return 'try';
     if (handlers.length > 0 && bodyEnds && handlers.every((c) => pyBodyNever(stmts, c))) return 'try';
+    // A body that leaves without raising anything a handler could catch:
+    // no handler ever runs, and neither does the else (review round 5, md3 —
+    // `try: return … except Exception: pass`, and `sys.exit` under an
+    // `except Exception`, SystemExit not being an Exception).
+    if (handlers.length > 0 && pyBodyNever(stmts, i)) {
+      const leave = pyQuietLeave(stmts, i);
+      if (leave === 'quiet') return 'try';
+      if (leave === 'systemexit' && handlers.every((c) => pyCannotCatchSystemExit(stmts[c], 'except'))) {
+        return 'try';
+      }
+    }
     return null;
   }
   if (s.first === 'with') {
     // `with suppress(…):` is `try: … except …: pass` — what its body raises
     // may be swallowed and the line after it runs (review round 4, mc6), the
-    // same rule a try with a handler that completes gets.
-    if (PY_SUPPRESS_RE.test(pyHeaderCode(s))) return null;
+    // same rule a try with a handler that completes gets. But it swallows
+    // only EXCEPTIONS: a body that leaves by `return`/`break`/`continue` (or
+    // an exit it does not name) with nothing raising first still leaves
+    // (review round 5, md3).
+    if (PY_SUPPRESS_RE.test(pyHeaderCode(s))) {
+      const leave = pyQuietLeave(stmts, i);
+      if (leave === 'quiet' || (leave === 'systemexit' && pyCannotCatchSystemExit(s, 'suppress'))) {
+        return pyBodyNever(stmts, i);
+      }
+      return null;
+    }
     return pyBodyNever(stmts, i);
   }
   if (s.first === 'match' && s.opener) {
@@ -880,7 +992,9 @@ function pyOpenAt(parsed, s, pos) {
  *     block's SIBLING indentation, whatever unit other blocks use.
  *   * On a blank or comment line the student's own indentation is kept when
  *     it is a level a statement may take there — a deliberate step back is
- *     only ever explicit, NON-EMPTY whitespace.
+ *     only ever explicit, NON-EMPTY whitespace, and only when the next
+ *     statement stands at that level or further out (review round 5, md4);
+ *     whitespace shallower than the next statement chose nothing.
  *   * An EMPTY row (or a comment at column 0) chose nothing: it takes the
  *     level the next statement needs — the level of the statement that
  *     follows it (inside a block: the previous statement's sibling level; in
@@ -928,9 +1042,16 @@ function pyNewlineIndent(text, pos, parsed = pythonStatements(text)) {
     if (blankRow && own.length > p.indent.length && own.startsWith(p.indent)) return own;
     return p.indent + pyContextUnit(parsed, stacks, prev, text);
   }
-  if (blankRow && own !== '' && stacks[prev].includes(own)) return own;
-  if (blankRow && own === '') {
-    const next = stmts.find((t) => t.startRow > row);
+  const next = blankRow ? stmts.find((t) => t.startRow > row) : undefined;
+  // Explicit whitespace is a step back only when the next statement really
+  // stands at that level or further out (review round 5, md4): 4 spaces
+  // between two 8-space statements chose nothing — a line typed at 4 would
+  // make the next one an unexpected indent.
+  if (blankRow && own !== '' && stacks[prev].includes(own)
+      && (!next || next.indent.length <= own.length)) {
+    return own;
+  }
+  if (blankRow && (own === '' || stacks[prev].includes(own))) {
     if (!next) return own;
     if (!PY_CLAUSE_WORDS.has(next.first) && next.indent.length <= p.indent.length
         && stacks[prev].includes(next.indent)) {
@@ -968,9 +1089,22 @@ function pyIndentStep(text, row, direction, parsed = pythonStatements(text)) {
     }
     return best;
   }
+  let deeper = levels.filter((l) => l.length > own.length && l.startsWith(own));
+  // On a blank row, Tab skips the levels a line could not take there — one
+  // that would cut the next `else:`/`except:`… off its compound, or make the
+  // next statement an unexpected indent — so it agrees with Enter (review
+  // round 5, md4: Tab on the empty row before an `else:` went to the else's
+  // own level).
+  if (rowText(text, starts, row).trim() === '') {
+    const next = stmts.find((t) => t.startRow > row);
+    const fits = (l) => !next || (PY_CLAUSE_WORDS.has(next.first)
+      ? next.indent.length < l.length
+      : next.indent.length <= l.length);
+    if (deeper.some(fits)) deeper = deeper.filter(fits);
+  }
   let best = null;
-  for (const l of levels) {
-    if (l.length > own.length && l.startsWith(own) && (best === null || l.length < best.length)) best = l;
+  for (const l of deeper) {
+    if (best === null || l.length < best.length) best = l;
   }
   return best;
 }
@@ -1058,14 +1192,21 @@ function pythonInsertionOp(text, row) {
   if (row < pyLeadingBlockEnd(stmts)) return notFound(CODE_DE.INSERT_LEADING_BLOCK_HINT);
   const idx = pyStatementAtOrBefore(stmts, row);
   const here = idx >= 0 && stmts[idx].endRow >= row ? stmts[idx] : null;
-  if (here && here.first === '@') return notFound(CODE_DE.INSERT_DECORATOR_HINT);
+  // The statement the new line would follow: the one on the chosen row, or —
+  // on a blank or comment row — the last one before it (review round 5, md1
+  // and nd1: a blank row between a decorator and its def, or between a def
+  // and its docstring, let the line through).
+  const follows = here ? idx : pyLastEndingBefore(stmts, row);
+  const f = follows >= 0 ? stmts[follows] : null;
+  // Nothing may stand between a decorator and its def/class.
+  if (f && f.first === '@') return notFound(CODE_DE.INSERT_DECORATOR_HINT);
   if (here && here.opener && (here.first === 'match' || here.first === 'case')) {
     return notFound(CODE_DE.INSERT_MATCH_HINT);
   }
   // Never above a def's or class's own description (its docstring).
-  if (here && here.opener && PY_SCOPE_WORDS.has(here.first)) {
-    const body = stmts[idx + 1];
-    if (body && body.onlyString && body.indent.length > here.indent.length) {
+  if (f && f.opener && PY_SCOPE_WORDS.has(f.first)) {
+    const body = stmts[follows + 1];
+    if (body && body.onlyString && body.indent.length > f.indent.length && body.startRow > row) {
       return notFound(CODE_DE.INSERT_DOCSTRING_HINT);
     }
   }
@@ -1199,20 +1340,83 @@ const and3 = (a, b) => (a === 'no' || b === 'no' ? 'no' : a === 'yes' && b === '
 
 // ── a constant condition (JLS §15.29) ─────────────────────────────────────
 
-const JAVA_CONST_TOKEN_RE = /\s*(?:(0[xX][\da-fA-F_]+[lL]?|\d[\d_]*\.?[\d_]*(?:[eE][-+]?\d+)?[lLdDfF]?)|([\p{L}_$][\p{L}\p{N}_$]*(?:\s*\.\s*[\p{L}_$][\p{L}\p{N}_$]*)*)|(&&|\|\||==|!=|<=|>=|[-+*/%<>()!]))/uy;
+const JAVA_CONST_TOKEN_RE = /\s*(?:(0[xX][\da-fA-F_]+[lL]?|0[bB][01_]+[lL]?|\d[\d_]*\.?[\d_]*(?:[eE][-+]?\d+)?[lLdDfF]?)|([\p{L}_$][\p{L}\p{N}_$]*(?:\s*\.\s*[\p{L}_$][\p{L}\p{N}_$]*)*)|(&&|\|\||==|!=|<=|>=|[-+*/%<>()!?:]))/uy;
+
+// ── Java's own arithmetic for a constant expression (review round 5, md2) ──
+// Values are typed: {t: 'int'|'long', v: BigInt} (two's complement, 32/64
+// bits — `2147483647 + 1` is negative), {t: 'float'|'double', v: Number},
+// {t: 'boolean', v}. `1 / 2` is integer division. A literal the compiler
+// would refuse (out of range, `08`) or an operation that throws
+// (`1 / 0`: not a constant expression) is undefined — never a guess.
+
+const JAVA_NUMERIC_RANK = Object.freeze({
+  int: 0, long: 1, float: 2, double: 3,
+});
+
+// The value of a Java number literal, or undefined. `2147483648` (and
+// `9223372036854775808L`) are legal only right after a unary minus: they
+// come back as {t: 'minlit'} for that one use.
+function javaNumberLiteral(raw) {
+  const s = String(raw).replace(/_/g, '');
+  const long = /[lL]$/.test(s);
+  const body = long ? s.slice(0, -1) : s;
+  const bits = long ? 64 : 32;
+  let radixValue = null;
+  if (/^0[xX][\da-fA-F]+$/.test(body) || /^0[bB][01]+$/.test(body)) radixValue = BigInt(body);
+  else if (/^0[0-7]+$/.test(body)) radixValue = BigInt(`0o${body.slice(1)}`);
+  else if (/^0\d+$/.test(body)) return undefined; // `08`: not an octal digit
+  if (radixValue !== null) {
+    // Hex, octal and binary literals span the whole unsigned range.
+    if (radixValue >= (1n << BigInt(bits))) return undefined;
+    return { t: long ? 'long' : 'int', v: BigInt.asIntN(bits, radixValue) };
+  }
+  if (/^\d+$/.test(body)) {
+    const v = BigInt(body);
+    const limit = 1n << BigInt(bits - 1);
+    if (v < limit) return { t: long ? 'long' : 'int', v };
+    return v === limit ? { t: 'minlit', bits } : undefined;
+  }
+  if (long) return undefined;
+  if (/^(?:\d+\.?\d*(?:[eE][-+]?\d+)?|\d+[eE][-+]?\d+)[fFdD]?$/.test(s)) {
+    const isFloat = /[fF]$/.test(s);
+    const v = Number(s.replace(/[fFdD]$/, ''));
+    if (!Number.isFinite(v)) return undefined;
+    return { t: isFloat ? 'float' : 'double', v: isFloat ? Math.fround(v) : v };
+  }
+  return undefined;
+}
+
+// `x` converted to numeric type `t` (widening or the promoted type), or
+// undefined.
+function javaAsType(x, t) {
+  if (!x || !(x.t in JAVA_NUMERIC_RANK) || !(t in JAVA_NUMERIC_RANK)) return undefined;
+  if (t === 'int' || t === 'long') {
+    if (x.t !== 'int' && x.t !== 'long') return undefined;
+    return { t, v: BigInt.asIntN(t === 'int' ? 32 : 64, x.v) };
+  }
+  const n = Number(x.v);
+  return { t, v: t === 'float' ? Math.fround(n) : n };
+}
+
+// Binary numeric promotion (JLS §5.6): the wider of the two.
+function javaPromoted(a, b) {
+  return JAVA_NUMERIC_RANK[a.t] >= JAVA_NUMERIC_RANK[b.t] ? a.t : b.t;
+}
 
 /**
  * What a Java expression is (JLS §15.29): 'var' (provably NOT a constant
- * expression — a call, an assignment, `new`, an array access, a conditional,
- * or at least ONE operand that is not a constant variable), `{value}` (a
- * constant expression; `value` is undefined when this evaluator cannot
- * compute it, e.g. a string or char literal, blanked in code-only text), or
- * null (it might be a constant this file cannot see: a name declared
- * elsewhere). `lookup(name)` answers a name the same way.
+ * expression — a call, an assignment, `new`, an array access, or at least
+ * ONE operand that is not a constant variable), `{value}` (a constant
+ * expression; `value` is its typed value, or undefined when this evaluator
+ * cannot compute it — a string or char literal, blanked in code-only text, a
+ * literal or operation the compiler would refuse), or null (it might be a
+ * constant this file cannot see: a name declared elsewhere). `lookup(name)`
+ * answers a name the same way. The conditional operator `?:` over constants
+ * IS a constant expression (review round 5, md2).
  */
 function javaExprVerdict(expr, lookup) {
   const src = String(expr).trim();
-  if (/\b(?:new|instanceof)\b|\+\+|--|[^=!<>]=(?!=)|[\p{L}\p{N}_$]\s*\(|\[|\?/u.test(src)) return 'var';
+  if (/\b(?:new|instanceof)\b|\+\+|--|[^=!<>]=(?!=)|[\p{L}\p{N}_$]\s*\(|\[/u.test(src)) return 'var';
   const toks = [];
   let unknown = false;
   let i = 0;
@@ -1228,11 +1432,10 @@ function javaExprVerdict(expr, lookup) {
     // same sticky regex.
     const next = JAVA_CONST_TOKEN_RE.lastIndex;
     if (m[1] !== undefined) {
-      const v = Number(m[1].replace(/_/g, '').replace(/[lLdDfF]$/, ''));
-      toks.push({ t: 'num', v: Number.isFinite(v) ? v : undefined });
+      toks.push({ t: 'num', v: javaNumberLiteral(m[1]) });
     } else if (m[2] !== undefined) {
       const name = m[2].replace(/\s+/g, '');
-      if (name === 'true' || name === 'false') toks.push({ t: 'bool', v: name === 'true' });
+      if (name === 'true' || name === 'false') toks.push({ t: 'bool', v: { t: 'boolean', v: name === 'true' } });
       else {
         const verdict = lookup(name);
         if (verdict === 'var') return 'var';
@@ -1259,25 +1462,62 @@ function javaConditionKind(cond, lookup) {
   const verdict = javaExprVerdict(cond, lookup);
   if (verdict === 'var') return 'var';
   if (verdict === null || verdict.value === undefined) return 'unsure';
-  if (verdict.value === true) return 'true';
-  return verdict.value === false ? 'var' : 'unsure';
+  if (verdict.value.t !== 'boolean') return 'unsure';
+  return verdict.value.v === true ? 'true' : 'var';
 }
 
-// Evaluate a token list of numbers/booleans/operators (Java precedence), or
-// undefined.
+// Evaluate a token list of typed numbers/booleans/operators with Java's
+// precedence and Java's arithmetic (see javaNumberLiteral), or undefined.
 function javaEvalTokens(toks) {
   let p = 0;
   const peek = () => toks[p];
   const isOp = (v) => peek() && peek().t === 'op' && peek().v === v;
   const fail = () => { throw new Error('not constant'); };
+  const isBool = (x) => x && x.t === 'boolean';
+  const isNum = (x) => x && x.t in JAVA_NUMERIC_RANK;
+  const bool = (v) => ({ t: 'boolean', v });
+  const arith = (op, a, b) => {
+    if (!isNum(a) || !isNum(b)) fail();
+    const t = javaPromoted(a, b);
+    const x = javaAsType(a, t);
+    const y = javaAsType(b, t);
+    if (t === 'int' || t === 'long') {
+      if ((op === '/' || op === '%') && y.v === 0n) fail(); // throws: not a constant
+      const r = op === '+' ? x.v + y.v : op === '-' ? x.v - y.v : op === '*' ? x.v * y.v
+        : op === '/' ? x.v / y.v : x.v % y.v; // BigInt: truncates toward zero, like Java
+      return { t, v: BigInt.asIntN(t === 'int' ? 32 : 64, r) };
+    }
+    const r = op === '+' ? x.v + y.v : op === '-' ? x.v - y.v : op === '*' ? x.v * y.v
+      : op === '/' ? x.v / y.v : x.v % y.v;
+    return { t, v: t === 'float' ? Math.fround(r) : r };
+  };
+  const compare = (op, a, b) => {
+    if (op === '==' || op === '!=') {
+      let same;
+      if (isBool(a) && isBool(b)) same = a.v === b.v;
+      else if (isNum(a) && isNum(b)) {
+        const t = javaPromoted(a, b);
+        same = javaAsType(a, t).v === javaAsType(b, t).v;
+      } else fail();
+      return bool(op === '==' ? same : !same);
+    }
+    if (!isNum(a) || !isNum(b)) fail();
+    const t = javaPromoted(a, b);
+    const x = javaAsType(a, t).v;
+    const y = javaAsType(b, t).v;
+    return bool(op === '<' ? x < y : op === '<=' ? x <= y : op === '>' ? x > y : x >= y);
+  };
   const atom = () => {
     const tok = toks[p];
     if (!tok) fail();
     p += 1;
-    if (tok.t === 'num' || tok.t === 'bool' || tok.t === 'const') return tok.v;
+    if (tok.t === 'num' || tok.t === 'bool' || tok.t === 'const') {
+      if (!tok.v || tok.v.t === 'minlit') fail();
+      return tok.v;
+    }
     if (tok.v === '(') {
       // eslint-disable-next-line no-use-before-define
-      const v = orExpr();
+      const v = condExpr();
       if (!isOp(')')) fail();
       p += 1;
       return v;
@@ -1288,15 +1528,23 @@ function javaEvalTokens(toks) {
     if (isOp('!')) {
       p += 1;
       const v = unary();
-      if (typeof v !== 'boolean') fail();
-      return !v;
+      if (!isBool(v)) fail();
+      return bool(!v.v);
     }
     if (isOp('-') || isOp('+')) {
       const neg = peek().v === '-';
       p += 1;
+      // `-2147483648`: the one place the minimum's own digits are legal.
+      const tok = toks[p];
+      if (neg && tok && tok.t === 'num' && tok.v && tok.v.t === 'minlit') {
+        p += 1;
+        return { t: tok.v.bits === 64 ? 'long' : 'int', v: -(1n << BigInt(tok.v.bits - 1)) };
+      }
       const v = unary();
-      if (typeof v !== 'number') fail();
-      return neg ? -v : v;
+      if (!isNum(v)) fail();
+      if (!neg) return v;
+      if (v.t === 'int' || v.t === 'long') return { t: v.t, v: BigInt.asIntN(v.t === 'int' ? 32 : 64, -v.v) };
+      return { t: v.t, v: -v.v };
     }
     return atom();
   };
@@ -1305,9 +1553,7 @@ function javaEvalTokens(toks) {
     while (isOp('*') || isOp('/') || isOp('%')) {
       const op = peek().v;
       p += 1;
-      const r = unary();
-      if (typeof v !== 'number' || typeof r !== 'number' || (op !== '*' && r === 0)) fail();
-      v = op === '*' ? v * r : op === '/' ? v / r : v % r;
+      v = arith(op, v, unary());
     }
     return v;
   };
@@ -1316,9 +1562,7 @@ function javaEvalTokens(toks) {
     while (isOp('+') || isOp('-')) {
       const op = peek().v;
       p += 1;
-      const r = mul();
-      if (typeof v !== 'number' || typeof r !== 'number') fail();
-      v = op === '+' ? v + r : v - r;
+      v = arith(op, v, mul());
     }
     return v;
   };
@@ -1327,9 +1571,7 @@ function javaEvalTokens(toks) {
     while (isOp('<') || isOp('<=') || isOp('>') || isOp('>=')) {
       const op = peek().v;
       p += 1;
-      const r = add();
-      if (typeof v !== 'number' || typeof r !== 'number') fail();
-      v = op === '<' ? v < r : op === '<=' ? v <= r : op === '>' ? v > r : v >= r;
+      v = compare(op, v, add());
     }
     return v;
   };
@@ -1338,9 +1580,7 @@ function javaEvalTokens(toks) {
     while (isOp('==') || isOp('!=')) {
       const op = peek().v;
       p += 1;
-      const r = rel();
-      if (typeof v !== typeof r) fail();
-      v = op === '==' ? v === r : v !== r;
+      v = compare(op, v, rel());
     }
     return v;
   };
@@ -1349,8 +1589,8 @@ function javaEvalTokens(toks) {
     while (isOp('&&')) {
       p += 1;
       const r = eq();
-      if (typeof v !== 'boolean' || typeof r !== 'boolean') fail();
-      v = v && r;
+      if (!isBool(v) || !isBool(r)) fail();
+      v = bool(v.v && r.v);
     }
     return v;
   };
@@ -1359,17 +1599,82 @@ function javaEvalTokens(toks) {
     while (isOp('||')) {
       p += 1;
       const r = andExpr();
-      if (typeof v !== 'boolean' || typeof r !== 'boolean') fail();
-      v = v || r;
+      if (!isBool(v) || !isBool(r)) fail();
+      v = bool(v.v || r.v);
     }
     return v;
   };
+  // `c ? a : b` (right-associative): a constant when all three are.
+  const condExpr = () => {
+    const c = orExpr();
+    if (!isOp('?')) return c;
+    p += 1;
+    const a = condExpr();
+    if (!isOp(':')) fail();
+    p += 1;
+    const b = condExpr();
+    if (!isBool(c)) fail();
+    if (isBool(a) && isBool(b)) return c.v ? a : b;
+    if (isNum(a) && isNum(b)) return javaAsType(c.v ? a : b, javaPromoted(a, b));
+    return fail();
+  };
   try {
-    const v = orExpr();
+    const v = condExpr();
     return p === toks.length ? v : undefined;
   } catch (_) {
     return undefined;
   }
+}
+
+const JAVA_SMALL_INT_RANGE = Object.freeze({
+  byte: [-128n, 127n], short: [-32768n, 32767n], char: [0n, 65535n],
+});
+
+/**
+ * A final variable's verdict given its declared type (JLS §4.12.4): it is a
+ * CONSTANT variable only when that type is a primitive or String and its
+ * initializer a constant expression, and then its value is the initializer's
+ * converted to that type (`static final long G = 2147483647;` makes `G + 1`
+ * long arithmetic). A boxed or object type (`final Boolean LAUF = true`) is
+ * never a constant: 'var'. An array: 'var'. A conversion the compiler would
+ * refuse: {value: undefined} (unsure).
+ */
+function javaConstantOfType(inner, type, array) {
+  if (inner === 'var' || inner === null) return inner;
+  if (array) return 'var';
+  const t = String(type || '').replace(/^java\s*\.\s*lang\s*\.\s*/, '');
+  const v = inner.value;
+  if (t === 'var') return inner;
+  if (t === 'String') return { value: undefined };
+  if (t === 'boolean') return { value: v && v.t === 'boolean' ? v : undefined };
+  if (JAVA_SMALL_INT_RANGE[t]) {
+    const [lo, hi] = JAVA_SMALL_INT_RANGE[t];
+    return { value: v && v.t === 'int' && v.v >= lo && v.v <= hi ? v : undefined };
+  }
+  if (t in JAVA_NUMERIC_RANK) {
+    if (!v || !(v.t in JAVA_NUMERIC_RANK) || JAVA_NUMERIC_RANK[v.t] > JAVA_NUMERIC_RANK[t]) return { value: undefined };
+    return { value: javaAsType(v, t) };
+  }
+  return 'var';
+}
+
+// Where a lambda body that starts after offset `pos` (just past its `->`)
+// ends: its block's closing brace, or — an expression body — the first `,`
+// / `;` or closing bracket at its own depth.
+function javaLambdaBodyEnd(code, pair, pos) {
+  const j = skipWs(code, pos);
+  if (code[j] === '{' && pair && pair.has(j)) return pair.get(j);
+  let depth = 0;
+  let k = j;
+  for (; k < code.length; k += 1) {
+    const c = code[k];
+    if (c === '(' || c === '[' || c === '{') depth += 1;
+    else if (c === ')' || c === ']' || c === '}') {
+      if (depth === 0) break;
+      depth -= 1;
+    } else if ((c === ',' || c === ';') && depth === 0) break;
+  }
+  return k;
 }
 
 /**
@@ -1413,7 +1718,7 @@ class JavaParser {
       const inner = this.block(i + 1, close);
       const last = inner.length ? inner[inner.length - 1] : null;
       return this.made(start, close + 1, last ? last.completes : 'yes', this.unionBreaks(inner),
-        false, last ? last.reason : null);
+        this.anyContinues(inner), last ? last.reason : null);
     }
     if (ch === ';') return this.made(start, i + 1, 'yes');
     if (ch === '@') {
@@ -1436,7 +1741,7 @@ class JavaParser {
       if (!inner) return null;
       const breaks = new Set(inner.breaks);
       const brokenOut = breaks.delete(word);
-      return this.made(start, inner.end, brokenOut ? 'yes' : inner.completes, breaks, false,
+      return this.made(start, inner.end, brokenOut ? 'yes' : inner.completes, breaks, inner.continues,
         brokenOut ? null : inner.reason);
     }
     switch (word) {
@@ -1450,12 +1755,16 @@ class JavaParser {
         const close = this.closeOf(after);
         if (close === null) return null;
         const inner = this.statement(skipWs(code, close + 1, to), to);
-        return inner ? this.made(start, inner.end, inner.completes, inner.breaks, false, inner.reason) : null;
+        return inner
+          ? this.made(start, inner.end, inner.completes, inner.breaks, inner.continues, inner.reason) : null;
       }
       case 'return': case 'throw': case 'yield':
         return this.made(start, this.toSemicolon(after, to), 'no', new Set(), false, word);
       case 'continue':
-        return this.made(start, this.toSemicolon(after, to), 'no', new Set(), true, 'continue');
+        // Only an UNLABELLED continue continues the innermost loop (JLS
+        // §14.22); a labelled one is left out — a refusal, never a guess.
+        return this.made(start, this.toSemicolon(after, to), 'no', new Set(), wordAt(code, after) === '',
+          'continue');
       case 'break': {
         const label = wordAt(code, after);
         return this.made(start, this.toSemicolon(after, to), 'no', new Set([label]), false, 'break');
@@ -1501,6 +1810,14 @@ class JavaParser {
     const out = new Set();
     for (const s of list) for (const b of s.breaks) out.add(b);
     return out;
+  }
+
+  // An unlabelled `continue` anywhere in these statements that is not
+  // inside a loop of their own (a loop consumes its own): it continues the
+  // enclosing loop — a do-while whose body ends in `return` still completes
+  // through `if (c) continue;` (review round 5, md5).
+  anyContinues(list) {
+    return list.some((s) => s && s.continues);
   }
 
   // Past the `;` that ends an expression/declaration statement (brackets,
@@ -1551,9 +1868,10 @@ class JavaParser {
       const other = this.body(j + 4, to);
       if (!other) return null;
       const completes = or3(then.completes, other.completes);
-      return this.made(start, other.end, completes, this.unionBreaks([then, other]), false, 'ifelse');
+      return this.made(start, other.end, completes, this.unionBreaks([then, other]),
+        this.anyContinues([then, other]), 'ifelse');
     }
-    return this.made(start, then.end, 'yes', then.breaks);
+    return this.made(start, then.end, 'yes', then.breaks, then.continues);
   }
 
   loop(start, end, condKind, body) {
@@ -1654,7 +1972,7 @@ class JavaParser {
       parts.push(block);
       end = block.end;
     }
-    return this.made(start, end, completes, this.unionBreaks(parts), false, reason);
+    return this.made(start, end, completes, this.unionBreaks(parts), this.anyContinues(parts), reason);
   }
 
   /**
@@ -1691,7 +2009,7 @@ class JavaParser {
       const last = items[items.length - 1];
       completes = last.label ? 'yes' : last.completes;
     }
-    return this.made(start, pair.get(open) + 1, completes, breaks, false, 'switch');
+    return this.made(start, pair.get(open) + 1, completes, breaks, this.anyContinues(items), 'switch');
   }
 
   // `at`: where the condition stands — a name means the declaration VISIBLE
@@ -1718,8 +2036,17 @@ class JavaParser {
     const key = `${name}@${at}`;
     if (this.declCache.has(key)) return this.declCache.get(key);
     const parts = name.split('.');
-    const decls = this.declarations(parts[0])
+    let decls = this.declarations(parts[0])
       .filter((d) => d.everywhere || (d.scopeFrom <= at && at <= d.scopeTo));
+    // A local or parameter in scope SHADOWS a field of the same name (Java
+    // allows no two locals of one name in one scope) — unless a class body
+    // nested inside the local's scope declares the field (review round 5,
+    // md5: a lambda parameter `(LAUF) ->` over a constant field `LAUF`).
+    const locals = decls.filter((d) => !d.field);
+    if (locals.length === 1
+        && !decls.some((d) => d.field && !d.everywhere && d.scopeFrom > locals[0].scopeFrom)) {
+      decls = locals;
+    }
     let verdict = null;
     if (parts.length > 1) {
       // A member of a declared variable is never a constant expression.
@@ -1727,11 +2054,14 @@ class JavaParser {
     } else if (decls.length > 0 && decls.every((d) => !d.final)) {
       verdict = 'var';
     } else if (decls.length === 1) {
-      const { init, pos } = decls[0];
+      const {
+        init, pos, type, array,
+      } = decls[0];
       if (init === null) verdict = 'var';
       else {
         const inner = javaExprVerdict(init, (n) => this.constantVerdict(n, depth + 1, pos));
-        verdict = inner;
+        // eslint-disable-next-line no-use-before-define
+        verdict = javaConstantOfType(inner, type, array);
       }
     }
     this.declCache.set(key, verdict);
@@ -1749,11 +2079,11 @@ class JavaParser {
    */
   declarationScope(termAt, interfaceField) {
     const { code, pair } = this;
-    if (interfaceField) return { everywhere: true };
+    if (interfaceField) return { everywhere: true, field: true };
     const stack = javaEnclosing(code, pair, termAt);
     const inner = stack[stack.length - 1];
     if (!inner) return { scopeFrom: 0, scopeTo: code.length };
-    if (inner.kind === 'class') return { scopeFrom: inner.open, scopeTo: pair.get(inner.open) };
+    if (inner.kind === 'class') return { scopeFrom: inner.open, scopeTo: pair.get(inner.open), field: true };
     if (inner.kind === 'block' || inner.kind === 'switch') return { scopeFrom: termAt, scopeTo: pair.get(inner.open) };
     if (inner.kind !== 'paren') return { scopeFrom: termAt, scopeTo: termAt };
     const close = pair.get(inner.open);
@@ -1778,29 +2108,34 @@ class JavaParser {
     return { scopeFrom: inner.open, scopeTo: k };
   }
 
-  // Every declaration of simple name `name` in the file: {final, init}. Its
-  // type is a name or a primitive — never another keyword: `return LAUF;`,
-  // `case STUFE:` and `x instanceof LAUF)` declare nothing (review round 4,
-  // mc5: they made a constant from another file look like a variable). A
-  // pattern binding (`o instanceof Integer LAUF`, `case Punkt LAUF ->`) IS a
-  // declaration of a variable and still counts.
+  // Every declaration of simple name `name` in the file: {final, init, type,
+  // array}. Its type is a name or a primitive — never another keyword:
+  // `return LAUF;`, `case STUFE:` and `x instanceof LAUF)` declare nothing
+  // (review round 4, mc5: they made a constant from another file look like a
+  // variable). A pattern binding (`o instanceof Integer LAUF`,
+  // `case Punkt LAUF ->`) IS a declaration of a variable and still counts, and
+  // so does a lambda's untyped parameter (`(LAUF) -> …`, `LAUF -> …`, review
+  // round 5, md5: it shadowed a constant field, and the insertion was refused).
   declarations(name) {
     if (!/^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(name)) return [];
     const { code } = this;
     const esc = name.replace(/\$/g, '\\$');
     const decl = new RegExp(
       `(?:^|[;{}(,])\\s*((?:(?:@[\\p{L}_$][\\p{L}\\p{N}_$.]*|[a-z]+)\\s+)*)`
-      + `([\\p{L}_$][\\p{L}\\p{N}_$.]*)(?:<[^;{}()]*>)?(?:\\s*\\[\\s*\\])*\\s+${esc}\\s*(=(?!=)|;|,|:|\\))`, 'gu',
+      + `([\\p{L}_$][\\p{L}\\p{N}_$.]*)(?:<[^;{}()]*>)?((?:\\s*\\[\\s*\\])*)\\s+${esc}\\s*(=(?!=)|;|,|:|\\))`,
+      'gu',
     );
     const out = [];
     for (const m of code.matchAll(decl)) {
       if (JAVA_KEYWORDS.has(m[2]) && !JAVA_TYPE_KEYWORDS.has(m[2])) continue;
       const at = m.index + m[0].length;
-      const termAt = at - m[3].length;
+      const termAt = at - m[4].length;
       const interfaceField = this.inInterfaceBody(m.index);
       let final = /\bfinal\b/.test(m[1]) || interfaceField;
       let init = null;
-      if (m[3].startsWith('=')) {
+      const type = m[2];
+      const array = m[3].includes('[');
+      if (m[4].startsWith('=')) {
         let depth = 0;
         let j = at;
         for (; j < code.length; j += 1) {
@@ -1812,12 +2147,34 @@ class JavaParser {
           } else if ((c === ';' || c === ',') && depth === 0) break;
         }
         init = code.slice(at, j);
-      } else if (m[3] === ':' || m[3] === ')') {
+      } else if (m[4] === ':' || m[4] === ')') {
         // An enhanced-for variable or a parameter: never a constant.
         final = false;
       }
       out.push({
-        final, init, pos: termAt, ...this.declarationScope(termAt, interfaceField),
+        final, init, type, array, pos: termAt, ...this.declarationScope(termAt, interfaceField),
+      });
+    }
+    // A lambda's untyped parameters: variables of the lambda's body. Never a
+    // `case LAUF ->` switch rule, which names a constant.
+    const ident = '[\\p{L}_$][\\p{L}\\p{N}_$]*';
+    const lambda = new RegExp(
+      `(?:\\(\\s*(?:${ident}\\s*,\\s*)*${esc}\\s*(?:,\\s*${ident}\\s*)*\\)|(?<![\\p{L}\\p{N}_$.])${esc})\\s*->`,
+      'gu',
+    );
+    for (const m of code.matchAll(lambda)) {
+      let b = m.index - 1;
+      while (b >= 0 && !';{}'.includes(code[b])) b -= 1;
+      if (/^\s*(?:case|default)\b/.test(code.slice(b + 1, m.index))) continue;
+      out.push({
+        final: false,
+        init: null,
+        type: null,
+        array: false,
+        pos: m.index,
+        scopeFrom: m.index,
+        // eslint-disable-next-line no-use-before-define
+        scopeTo: javaLambdaBodyEnd(code, this.pair, m.index + m[0].length),
       });
     }
     return out;
@@ -2101,9 +2458,14 @@ export function insertionTargetAt(content, language, line) {
   const text = typeof content === 'string' ? content : '';
   const starts = lineStarts(text);
   const n = Number.isInteger(line) ? line : 1;
-  const row = Math.min(Math.max(n - 1, 0), lastRealRow(text, starts));
+  // Every row the editor shows is a row of its own — the empty one after the
+  // file's final line break included (review round 5, MD1: it used to be
+  // clamped onto the row above, so „Einfügen" there wrote the line INTO the
+  // file's last block, while Enter on the same row gives column 0). A line
+  // past the end is the editor's last row. An all-blank file is judged like
+  // any other: directly below the chosen row, never at its end.
+  const row = Math.min(Math.max(n - 1, 0), starts.length - 1);
   if (language === 'java') return javaInsertionOp(text, row);
-  if (text.trim() === '') return { mode: 'after', at: text.length, indent: '' };
   return pythonInsertionOp(text, row);
 }
 

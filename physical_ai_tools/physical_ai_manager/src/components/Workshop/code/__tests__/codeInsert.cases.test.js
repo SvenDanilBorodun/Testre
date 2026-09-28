@@ -32,7 +32,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect } from 'vitest';
 import {
-  insertAtTarget, insertionTarget, snippetLines,
+  insertAtTarget, insertionTarget, newlineIndentAt, snippetLines,
 } from '../codeInsert';
 import { CODE_DE, formatCode } from '../codeMessagesDe';
 import { STARTER_FILES } from '../codeProject';
@@ -76,16 +76,45 @@ const J = (body, pre = '', post = '') => (
 const PY_STARTER = STARTER_FILES.python['main.py'];
 const JAVA_STARTER = STARTER_FILES.java['Main.java'];
 
-// [name, input, cursorLine | null, 'run' | hint key]
+// [name, input, cursorLine | null, 'run' | hint key, runs?] — `runs`: how
+// many times the inserted marker must run (CPython counts it, review round
+// 5); a case without it only has to reach the marker once.
 const PYTHON = [
   // ── valid spots: the line goes directly below, and runs ──
-  ['starter_below_import', PY_STARTER, 3, 'run'],
-  ['starter_blank_line', PY_STARTER, 4, 'run'],
-  ['starter_last_line', PY_STARTER, 6, 'run'],
-  ['plain_statement', 'import robot\nrobot.home()\n', 2, 'run'],
-  ['no_trailing_newline', 'import robot\nrobot.home()', 2, 'run'],
-  ['empty_file', '', 1, 'run'],
-  ['for_body_sibling', 'import robot\nfor i in range(2):\n    robot.home()\n', 3, 'run'],
+  ['starter_below_import', PY_STARTER, 3, 'run', 1],
+  ['starter_blank_line', PY_STARTER, 4, 'run', 1],
+  ['starter_last_line', PY_STARTER, 6, 'run', 1],
+  // The empty row after the starter's final line break is a row of its own.
+  ['starter_eof_row', PY_STARTER, 7, 'run', 1],
+  ['plain_statement', 'import robot\nrobot.home()\n', 2, 'run', 1],
+  ['no_trailing_newline', 'import robot\nrobot.home()', 2, 'run', 1],
+  ['empty_file', '', 1, 'run', 1],
+  ['for_body_sibling', 'import robot\nfor i in range(2):\n    robot.home()\n', 3, 'run', 2],
+  // Review round 5, MD1: the empty row after a file's final line break is its
+  // own row — the line goes below it at column 0, exactly where Enter puts
+  // it, and runs ONCE (it used to land in the last block: three times inside
+  // the loop, never inside a def or an else).
+  ['eof_row_after_for', 'import robot\nfor i in range(3):\n    robot.home()\n', 4, 'run', 1],
+  ['eof_row_after_def_body', 'import robot\ndef main():\n    robot.home()\n', 4, 'run', 1],
+  ['eof_row_after_if_else', 'import robot\nif True:\n    robot.home()\nelse:\n    robot.log("x")\n', 6, 'run', 1],
+  ['eof_row_after_while', 'import robot\nn = 0\nwhile n < 3:\n    n += 1\n', 5, 'run', 1],
+  ['eof_row_after_try_except', 'import robot\ntry:\n    robot.home()\nexcept Exception:\n    pass\n', 6, 'run', 1],
+  ['eof_row_crlf_after_for', 'import robot\r\nfor i in range(3):\r\n    robot.home()\r\n', 4, 'run', 1],
+  ['eof_row_two_space_for', 'import robot\nfor i in range(3):\n  robot.home()\n', 4, 'run', 1],
+  ['eof_row_tab_for', 'import robot\nfor i in range(3):\n\trobot.home()\n', 4, 'run', 1],
+  ['eof_row_after_main_call', 'import robot\ndef main():\n    robot.home()\nmain()\n', 5, 'run', 1],
+  ['blank_file_first_row', '\n\n\n', 1, 'run', 1],
+  // Review round 5, md4: whitespace shallower than the next statement is not
+  // a step back — the line takes the level that statement needs.
+  ['ws_row_shallower_than_next', 'import robot\ndef main():\n    if True:\n        robot.home()\n    \n        robot.log(1)\nmain()\n', 5, 'run', 1],
+  // Review round 5, md3: a handler or a suppress catches only what is RAISED
+  // — a call that raises first still lets the line after run.
+  ['after_with_suppress_call_then_return', 'import robot\nfrom contextlib import suppress\ndef main():\n    with suppress(ValueError):\n        int("x")\n        return\n    robot.log(1)\nmain()\n', 7, 'run', 1],
+  ['after_try_call_then_return_except', 'import robot\ndef main():\n    try:\n        int("x")\n        return\n    except ValueError:\n        pass\n    robot.log(1)\nmain()\n', 8, 'run', 1],
+  ['after_try_return_call_except', 'import robot\ndef main():\n    try:\n        return int("x")\n    except ValueError:\n        pass\n    robot.log(1)\nmain()\n', 7, 'run', 1],
+  ['after_try_sys_exit_except_base', 'import robot\nimport sys\ndef main():\n    try:\n        sys.exit(0)\n    except BaseException:\n        pass\n    robot.log(1)\nmain()\n', 8, 'run', 1],
+  ['after_try_sys_exit_except_systemexit', 'import robot\nimport sys\ndef main():\n    try:\n        sys.exit(0)\n    except SystemExit:\n        pass\n    robot.log(1)\nmain()\n', 8, 'run', 1],
+  ['after_try_sys_exit_bare_except', 'import robot\nimport sys\ndef main():\n    try:\n        sys.exit(0)\n    except:\n        pass\n    robot.log(1)\nmain()\n', 8, 'run', 1],
   ['for_header_body', 'import robot\nfor i in range(2):\n    robot.home()\n', 2, 'run'],
   ['two_space_inner', 'import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log("x")\n\nmain()\n', 5, 'run'],
   ['two_space_header', 'import robot\n\ndef main():\n  for i in range(3):\n    robot.home()\n  robot.log("x")\n\nmain()\n', 4, 'run'],
@@ -188,7 +217,10 @@ const PYTHON = [
   ['after_if_else_returns', 'import robot\n\ndef main():\n    robot.home()\n    if robot.sees("wuerfel"):\n        return\n    else:\n        return\n    # danach\n\nmain()\n', 9, 'ifelse'],
   ['after_try_finally_returns', 'import robot\ndef main():\n    try:\n        robot.home()\n    finally:\n        return\n    # danach\nmain()\n', 7, 'try'],
   ['explicit_level_before_else', 'import robot\ndef f():\n    if 1:\n        robot.home()\n    \n    else:\n        robot.log("x")\nf()\n', 5, 'clause'],
-  ['explicit_level_too_shallow', 'import robot\ndef f():\n    for i in range(1):\n        robot.home()\n    \n        robot.log("x")\nf()\n', 5, 'indent'],
+  // Review round 5, md4 (was refused as „Einrückung passt nicht"): 4 spaces
+  // between two 8-space statements are no step back — the next statement
+  // stands deeper — so the line takes the level that statement needs.
+  ['explicit_level_too_shallow', 'import robot\ndef f():\n    for i in range(1):\n        robot.home()\n    \n        robot.log("x")\nf()\n', 5, 'run', 1],
   ['inside_with_suppress_after_raise', 'import robot, contextlib\nwith contextlib.suppress(ValueError):\n    raise ValueError()\nrobot.home()\n', 3, 'raise'],
   ['after_with_nullcontext_raise', 'import robot\nimport contextlib\ndef f():\n    with contextlib.nullcontext():\n        raise ValueError()\n    # danach\ntry:\n    f()\nexcept ValueError:\n    pass\n', 6, 'raise'],
   // review round 4, mc4: a try without a handler whose body never completes.
@@ -200,6 +232,21 @@ const PYTHON = [
   ['after_if_true_return', 'import robot\ndef f():\n    if True:\n        return 1\n    # danach\nf()\n', 5, 'ifalways'],
   ['after_match_all_return', 'import robot\ndef f(x):\n    match x:\n        case 1:\n            return 1\n        case _:\n            return 2\n    # danach\nf(1)\n', 8, 'matchEnds'],
   ['after_os_abort', 'import robot, os\nrobot.home()\nos.abort()\n', 3, 'exit'],
+  // review round 5, md1 / nd1: nothing between a decorator and its def, and
+  // nothing above a def's docstring — a blank or comment row included.
+  ['blank_row_after_decorator', 'import robot\ndef deko(f):\n    return f\n@deko\n\ndef main():\n    robot.home()\nmain()\n', 5, 'deco'],
+  ['comment_row_after_decorator', 'import robot\ndef deko(f):\n    return f\n@deko\n# Notiz\ndef main():\n    robot.home()\nmain()\n', 5, 'deco'],
+  ['blank_row_before_def_docstring', 'import robot\ndef main():\n\n    """Doku."""\n    robot.home()\nmain()\n', 3, 'doc'],
+  ['blank_row_before_class_docstring', 'import robot\nclass A:\n\n    """Doku."""\n    x = 1\nrobot.home()\n', 3, 'doc'],
+  // review round 5, md3: a suppress swallows only EXCEPTIONS; a handler runs
+  // only when something is raised — SystemExit is no Exception.
+  ['after_with_suppress_return', 'import robot\nfrom contextlib import suppress\ndef main():\n    with suppress(Exception):\n        return\n    robot.log(1)\nmain()\n', 6, 'return'],
+  ['after_with_suppress_continue', 'import robot\nfrom contextlib import suppress\ndef main():\n    for i in range(2):\n        with suppress(Exception):\n            continue\n        robot.log(1)\nmain()\n', 7, 'continue'],
+  ['after_with_suppress_break', 'import robot\nfrom contextlib import suppress\ndef main():\n    for i in range(2):\n        with suppress(Exception):\n            break\n        robot.log(1)\nmain()\n', 7, 'break'],
+  ['after_try_return_except_pass', 'import robot\ndef main():\n    try:\n        return\n    except Exception:\n        pass\n    robot.log(1)\nmain()\n', 7, 'try'],
+  ['after_try_sys_exit_except_exception', 'import robot\nimport sys\ndef main():\n    try:\n        sys.exit(0)\n    except Exception:\n        pass\n    robot.log(1)\nmain()\n', 8, 'try'],
+  ['after_try_sys_exit_except_value_error', 'import robot\nimport sys\ndef main():\n    try:\n        sys.exit(0)\n    except (ValueError, KeyError) as e:\n        pass\n    robot.log(1)\nmain()\n', 8, 'try'],
+  ['eof_row_after_while_true', 'import robot\nwhile True:\n    robot.home()\n', 4, 'loop'],
   ['inconsistent_file', 'import robot\nif True:\n    robot.home()\n  robot.log("x")\n', 3, 'indentBroken'],
   ['unclosed_bracket', 'import robot\nrobot.home()\nx = (\n', 2, 'unclosed'],
   ['unclosed_triple_string', 'import robot\nrobot.home()\n"""\noffen\n', 2, 'unclosed'],
@@ -252,6 +299,17 @@ const JAVA = [
   ['after_one_line_colon_switch', J('        int x = 1;\n        switch (x) { case 1: Robot.home(); break; default: break; }\n'), 5, 'run'],
   // A constant from another file stays unknown, whatever reads it (mc5).
   ['after_return_constant_elsewhere', J('        int n = 0;\n        while (n < 3) {\n            n++;\n        }\n', '', '    static boolean pruefe() { return LAUF; }\n    static boolean LAUF = false;\n'), 7, 'run'],
+  // Review round 5, md2: Java's own arithmetic — `7 / 2` is 3.
+  ['after_for_integer_division_limit', J('        for (int i = 0; i < 7 / 2; i++) {\n            Robot.home();\n        }\n'), 6, 'run'],
+  // …and a boxed type is never a constant variable (JLS §4.12.4).
+  ['after_while_boxed_final_false', J('        while (LAUF) {\n            Robot.home();\n        }\n', '', '    static final Boolean LAUF = false;\n'), 6, 'run'],
+  // …and a long constant is long arithmetic: `I + 1` does not overflow.
+  ['after_do_long_constant', J('        do {\n            Robot.home();\n        } while (I + 1 < 0);\n', '', '    static final long I = 2147483647;\n'), 6, 'run'],
+  // Review round 5, md5: a lambda's parameter shadows the constant field …
+  ['lambda_param_shadows_constant', 'import edubotics.Robot;\nimport java.util.function.Consumer;\n\npublic class Main {\n    static final boolean LAUF = true;\n    public static void main(String[] args) {\n        Consumer<Boolean> c = (LAUF) -> {\n            while (LAUF) {\n                Robot.home();\n            }\n        };\n        c.accept(false);\n    }\n}\n', 10, 'run'],
+  ['lambda_bare_param_shadows_constant', 'import edubotics.Robot;\nimport java.util.function.Consumer;\n\npublic class Main {\n    static final boolean LAUF = true;\n    public static void main(String[] args) {\n        Consumer<Boolean> c = LAUF -> {\n            while (LAUF) {\n                Robot.home();\n            }\n        };\n        c.accept(false);\n    }\n}\n', 10, 'run'],
+  // … and a nested `continue` continues the do-while.
+  ['after_do_nested_continue_return', J('        int i = 0;\n        do {\n            i++;\n            if (i < 3) continue;\n            return;\n        } while (i < 2);\n'), 9, 'run'],
   // ── invalid spots ──
   ['no_cursor', J('        Robot.home();\n'), null, 'click'],
   ['starter_comment_line', JAVA_STARTER, 1, 'method'],
@@ -308,18 +366,70 @@ const JAVA = [
   ['unsure_constant_param_elsewhere', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static boolean f(boolean LAUF) { return LAUF; }\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 7, 'unsure'],
   ['unsure_constant_local_elsewhere', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static void g() {\n        boolean LAUF = false;\n    }\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 9, 'unsure'],
   ['unsure_constant_elsewhere', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 6, 'unsure'],
+  // Review round 5, md2: a constant condition in Java's own arithmetic —
+  // integer division, int overflow, a long constant, the conditional operator.
+  ['after_while_integer_division_const', J('        while (1 / 2 == 0) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_int_overflow_const', J('        while (2147483647 + 1 < 0) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_ternary_const', J('        while (true ? true : false) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_long_constant', J('        while (GROSS + 1 > 0) {\n            Robot.home();\n        }\n', '', '    static final long GROSS = 2147483647;\n'), 6, 'loop'],
+  ['after_while_octal_const', J('        while (010 == 8) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_binary_const', J('        while (0b101 == 5) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_int_min_minus_one', J('        while (-2147483648 - 1 > 0) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_long_overflow_const', J('        while (9223372036854775807L + 1 < 0) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_ternary_false_branch', J('        while (1 > 2 ? false : true) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_double_infinity', J('        while (1.0 / 0 > 1e308) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_float_sum', J('        while (0.1f + 0.2f == 0.3f) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_byte_constant', J('        while (K * 2 == 6) {\n            Robot.home();\n        }\n', '', '    static final byte K = 3;\n'), 6, 'loop'],
+  ['after_do_int_constant_overflow', J('        do {\n            Robot.home();\n        } while (I + 1 < 0);\n', '', '    static final int I = 2147483647;\n'), 6, 'loop'],
+  // Review round 5, MD4: a name means the declaration VISIBLE at the loop —
+  // the lookup is cached per position, a local's scope starts at itself, a
+  // field's is its class body. Same file (the constant is Einstellungen's) …
+  ['cache_two_scopes', 'import edubotics.Robot;\n\ninterface Einstellungen {\n    boolean LAUF = true;\n}\n\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        {\n            boolean LAUF = false;\n            while (LAUF) {\n                Robot.home();\n            }\n        }\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 17, 'loop'],
+  ['local_declared_after_loop', 'import edubotics.Robot;\n\ninterface Einstellungen {\n    boolean LAUF = true;\n}\n\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n        boolean LAUF = false;\n    }\n}\n', 11, 'loop'],
+  ['field_of_other_class', 'import edubotics.Robot;\n\ninterface Einstellungen {\n    boolean LAUF = true;\n}\n\nclass Helfer {\n    static boolean LAUF = false;\n}\n\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 15, 'loop'],
+  // … and review 5-A's own shape: the constant in another file stays unknown.
+  ['unsure_cache_two_scopes', 'import edubotics.Robot;\n\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        {\n            boolean LAUF = false;\n            while (LAUF) {\n                Robot.home();\n            }\n        }\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 13, 'unsure'],
+  ['unsure_local_declared_after_loop', 'import edubotics.Robot;\n\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n        boolean LAUF = false;\n    }\n}\n', 7, 'unsure'],
+  ['unsure_field_of_other_class', 'import edubotics.Robot;\n\nclass Helfer {\n    static boolean LAUF = false;\n}\n\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 11, 'unsure'],
+  // The empty row after the class's final line break is outside every method.
+  ['eof_row_after_class', JAVA_STARTER, 11, 'method'],
   ['unbalanced_braces', 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n', 4, 'unclosed'],
   ['unclosed_string', J('        String s = "offen;\n        Robot.home();\n'), 5, 'unreadable'],
 ];
+
+// The refusals that claim the line could NEVER run there.
+const NEVER_HINT_KEYS = ['return', 'raise', 'throw', 'break', 'continue', 'exit', 'loop', 'ifelse',
+  'ifalways', 'try', 'matchEnds', 'switchEnds'];
+const NEVER_HINTS = new Set(NEVER_HINT_KEYS.map((k) => H[k]));
+
+// Where row `line` (1-based) of `text` ends, before its line break.
+function rowEnd(text, line) {
+  const starts = [0];
+  for (let i = 0; i < text.length; i += 1) if (text[i] === '\n') starts.push(i + 1);
+  const row = Math.min(Math.max(line - 1, 0), starts.length - 1);
+  let end = row + 1 < starts.length ? starts[row + 1] - 1 : text.length;
+  if (end > starts[row] && text[end - 1] === '\r') end -= 1;
+  return end;
+}
 
 function compute() {
   const cases = [];
   for (const [language, table, file] of [['python', PYTHON, 'main.py'], ['java', JAVA, 'Main.java']]) {
     const lines = snippetLines({ kind: 'recording', name: 'Winken' }, language);
-    for (const [name, input, line, expect] of table) {
+    for (const [name, input, line, expect, runs] of table) {
       const cursor = line === null ? null : { file, line };
       const target = insertionTarget({ [file]: input }, language, cursor);
       const out = target.notFound ? null : insertAtTarget(input, target, lines, language).content;
+      // A refusal that says „this line would never run here" is checked by
+      // the real tools too (review round 5): the SHADOW is the line put there
+      // anyway, with Enter's indentation — CPython must never run its marker,
+      // javac must call it unreachable or never run it.
+      let shadow;
+      if (target.notFound && NEVER_HINTS.has(target.hint)) {
+        const at = rowEnd(input, line);
+        const indent = newlineIndentAt(input, at, language);
+        if (indent !== null) shadow = insertAtTarget(input, { mode: 'after', at, indent }, lines, language).content;
+      }
       cases.push({
         name,
         language,
@@ -328,6 +438,8 @@ function compute() {
         input,
         output: out,
         hint: target.notFound ? target.hint : null,
+        ...(runs !== undefined ? { runs } : {}),
+        ...(shadow !== undefined ? { shadow } : {}),
       });
     }
   }
@@ -360,6 +472,10 @@ describe('insertion at the spot the student chose (owner decision R3-O4)', () =>
       const [, , line, want] = EXPECTED.get(`${c.language}:${c.name}`);
       if (want !== 'run') {
         if (c.output !== null || c.hint !== H[want]) wrong.push([c.language, c.name, want, c.hint, c.output]);
+        // Every „never runs" refusal carries its shadow for the judge.
+        if (NEVER_HINT_KEYS.includes(want) && typeof c.shadow !== 'string') {
+          wrong.push([c.language, c.name, 'no shadow']);
+        }
         continue;
       }
       if (c.output === null) {

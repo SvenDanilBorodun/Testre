@@ -8,6 +8,14 @@ program to it. A case either inserted exactly that (reach 'run') or
 inserted NOTHING and carries its German reason (reach 'hint'): never a
 broken insertion, never a dead one.
 
+Review round 5 added two checks. A case with `runs` is run to its END and the
+marker must run exactly that many times (a marker inside the file's last
+loop reaches the marker too — three times). A refusal saying the line would
+NEVER run there carries a `shadow` — the line put there anyway, with Enter's
+indentation — which CPython must compile and never run, and javac must call
+„unreachable statement" or never run: a refusal of a spot where the line
+would run is a wrong refusal, and that is where it shows.
+
 The fixtures are written by the vitest files that compute them
 (`codeInsert.cases.test.js`, `CodeEditor.indent.test.jsx`), which compare
 the React code against them — so a change to the insertion or to the
@@ -280,6 +288,10 @@ class _OutOfSteps(BaseException):
     pass
 
 
+class _ProgramEnded(BaseException):
+    pass
+
+
 def _runs_to_the_marker(src: str, steps: int = 50_000) -> bool:
     """Run `src` with a fake `robot` whose replay("Winken") raises `_Reached`
     and a line budget (a program that loops before the marker never gets
@@ -318,6 +330,57 @@ def _runs_to_the_marker(src: str, steps: int = 50_000) -> bool:
         else:
             sys.modules['robot'] = saved
     return False
+
+
+def _count_marker_runs(src: str, steps: int = 50_000):
+    """Run `src` to its end with a fake `robot` whose replay("Winken") only
+    COUNTS (review round 5: a marker inside the file's last loop reached the
+    marker too — three times). Returns (count, how) — how the program ended:
+    'done', 'exit' (SystemExit), 'raised' (any other exception) or 'budget'
+    (the line budget ran out: it loops)."""
+    robot = types.ModuleType('robot')
+    count = [0]
+
+    def replay(name, speed=1.0):
+        if name == 'Winken':
+            count[0] += 1
+    robot.replay = replay
+    for n in ('home', 'log', 'move_to', 'open_gripper', 'close_gripper', 'beep'):
+        setattr(robot, n, lambda *a, **k: None)
+    saved = sys.modules.get('robot')
+    sys.modules['robot'] = robot
+    left = [steps]
+    # os._exit / os.abort end the PROGRAM — not this test run.
+    real_exit, real_abort = os._exit, os.abort
+
+    def _ended(*_a, **_k):
+        raise _ProgramEnded()
+
+    def tracer(frame, event, arg):
+        if frame.f_code.co_filename == 'main.py':
+            left[0] -= 1
+            if left[0] <= 0:
+                raise _OutOfSteps()
+        return tracer
+    how = 'done'
+    os._exit = os.abort = _ended
+    sys.settrace(tracer)
+    try:
+        exec(compile(src, 'main.py', 'exec'), {'__name__': '__main__', 'robot': robot})  # noqa: S102
+    except _OutOfSteps:
+        how = 'budget'
+    except (SystemExit, _ProgramEnded):
+        how = 'exit'
+    except BaseException:  # noqa: BLE001 — the program's own fault ends it
+        how = 'raised'
+    finally:
+        sys.settrace(None)
+        os._exit, os.abort = real_exit, real_abort
+        if saved is None:
+            sys.modules.pop('robot', None)
+        else:
+            sys.modules['robot'] = saved
+    return count[0], how
 
 
 def _python_cases():
@@ -383,6 +446,27 @@ class TheJudgeHasTeeth(unittest.TestCase):
         self.assertFalse(_runs_to_the_marker(f'while True:\n    pass\n{self._M}\n'))
         self.assertTrue(_runs_to_the_marker(f'try:\n    {self._M}\nexcept Exception:\n    pass\n'))
 
+    def test_the_count_tells_a_loop_body_from_the_line_after_it(self):
+        """Review round 5 (MD1): reaching the marker is not enough — one
+        inside the file's last loop reaches it too."""
+        self.assertEqual(_count_marker_runs(f'for i in range(3):\n    {self._M}\n'), (3, 'done'))
+        self.assertEqual(_count_marker_runs(f'for i in range(3):\n    pass\n{self._M}\n'), (1, 'done'))
+        self.assertEqual(_count_marker_runs(f'def f():\n    {self._M}\n'), (0, 'done'))
+        self.assertEqual(_count_marker_runs(f'import sys\nsys.exit(0)\n{self._M}\n'), (0, 'exit'))
+        self.assertEqual(_count_marker_runs(f'while True:\n    pass\n{self._M}\n'), (0, 'budget'))
+
+    def test_a_shadow_that_does_run_is_caught(self):
+        """A „never runs" refusal is checked by putting the line there anyway
+        (the fixture's `shadow`): a spot where the line DOES run fails."""
+        runs_after_a_raising_call = (
+            f'def f():\n    try:\n        int("x")\n        return\n    except ValueError:\n'
+            f'        pass\n    {self._M}\nf()\n')
+        self.assertEqual(_count_marker_runs(runs_after_a_raising_call)[0], 1)
+        never_after_a_quiet_return = (
+            f'from contextlib import suppress\ndef f():\n    with suppress(Exception):\n'
+            f'        return\n    {self._M}\nf()\n')
+        self.assertEqual(_count_marker_runs(never_after_a_quiet_return)[0], 0)
+
 
 class PythonCasesCompile(unittest.TestCase):
     def test_the_fixtures_exist_and_carry_cases(self):
@@ -417,6 +501,25 @@ class PythonCasesCompile(unittest.TestCase):
                 if case['reach'] == 'run':
                     self.assertTrue(_runs_to_the_marker(src),
                                     f'{case["name"]}: the program never runs the marker')
+                if 'runs' in case:
+                    count, how = _count_marker_runs(src)
+                    self.assertEqual((count, how), (case['runs'], 'done'),
+                                     f'{case["name"]}: the marker ran {count}× ({how}), '
+                                     f'expected {case["runs"]}×')
+
+    def test_every_never_runs_refusal_is_true_for_cpython(self):
+        """Review round 5: a „this line would never run here" refusal carries
+        its SHADOW — the line put there anyway, with Enter's indentation. It
+        must compile, and CPython must never run it: a refusal of a spot where
+        the line WOULD run is a wrong refusal, and this is where it shows."""
+        shadows = [(f, c) for f, c, _m in _python_cases() if c.get('shadow') is not None]
+        self.assertGreaterEqual(len(shadows), 30)
+        for fixture, case in shadows:
+            with self.subTest(fixture=fixture, case=case['name']):
+                self.assertEqual(case['reach'], 'hint')
+                compile(case['shadow'], 'main.py', 'exec')
+                count, how = _count_marker_runs(case['shadow'])
+                self.assertEqual(count, 0, f'{case["name"]}: the refused spot DOES run ({how})')
 
 
 def _find_javac():
@@ -468,6 +571,30 @@ class JavaCasesCompile(unittest.TestCase):
                 if case['output'] is None:
                     self.assertEqual(case['reach'], 'hint', case['name'])
                     self.assertTrue(case['hint'], case['name'])
+                    if case.get('shadow') is not None:
+                        # Review round 5: the refused spot really is dead —
+                        # javac calls the line unreachable, or it never runs.
+                        with self.subTest(case=case['name'], shadow=True):
+                            folder = os.path.join(tmp, case['name'] + '__shadow')
+                            os.makedirs(folder)
+                            with open(os.path.join(folder, 'Main.java'), 'w', encoding='utf-8',
+                                      newline='') as handle:
+                                handle.write(case['shadow'])
+                            built = subprocess.run(
+                                [javac, '-Xlint:none', '-encoding', 'UTF-8', '-cp', lib, '-d', folder,
+                                 os.path.join(folder, 'Main.java')],
+                                capture_output=True, text=True, timeout=120)
+                            if built.returncode != 0:
+                                self.assertIn('unreachable statement', built.stderr,
+                                              f'{case["name"]}: the shadow fails for another reason')
+                            else:
+                                try:
+                                    ran = subprocess.run([java, '-cp', lib + os.pathsep + folder, 'Main'],
+                                                         capture_output=True, text=True, timeout=10)
+                                    reached = 'MARKE ERREICHT' in ran.stdout
+                                except subprocess.TimeoutExpired:
+                                    reached = False  # it loops: the line never runs
+                                self.assertFalse(reached, f'{case["name"]}: the refused spot DOES run')
                     continue
                 with self.subTest(case=case['name']):
                     folder = os.path.join(tmp, case['name'])

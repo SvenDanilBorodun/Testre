@@ -128,9 +128,36 @@ describe('directly below the line the student chose (owner decision R3-O4)', () 
 
   it('keeps tabs as tabs, clamps the line to the file, and needs no final newline', () => {
     expect(at('if x:\n\tpass\n', 2, ['a()']).content).toBe('if x:\n\tpass\n\ta()\n');
-    expect(at('a\n', 99, ['b']).content).toBe('a\nb\n');
+    // A line past the end is the editor's last row: after a final line break
+    // that is the empty row, and the line goes below it (review round 5, MD1
+    // — it used to be clamped onto the last text row, 'a\nb\n').
+    expect(at('a\n', 99, ['b']).content).toBe('a\n\nb');
     expect(at('a', 1, ['b']).content).toBe('a\nb');
     expect(at('', 1, ['b']).content).toBe('b\n');
+  });
+
+  it('the empty row after the final line break is a row of its own: column 0, like Enter (review round 5, MD1)', () => {
+    // One final line break: the row after it is where the cursor stands.
+    // Enter there gives column 0, and so does the insertion — never the last
+    // block's indentation.
+    for (const [src, line] of [
+      ['for i in range(3):\n    a()\n', 3],
+      ['def f():\n    a()\n', 3],
+      ['if x:\n    a()\nelse:\n    b()\n', 5],
+      ['try:\n    a()\nexcept Exception:\n    pass\n', 5],
+      ['for i in range(3):\n\ta()\n', 3],
+    ]) {
+      expect([src, newlineIndentAt(src, src.length, 'python')]).toEqual([src, '']);
+      expect(insertionTargetAt(src, 'python', line)).toEqual({ mode: 'after', at: src.length, indent: '' });
+      expect(at(src, line, ['x()']).content).toBe(`${src}\nx()`);
+    }
+    expect(at('for i in range(3):\r\n    a()\r\n', 3, ['x()']).content)
+      .toBe('for i in range(3):\r\n    a()\r\n\r\nx()');
+    // An all-blank file is judged like any other: directly below the row.
+    expect(at('\n\n\n', 1, ['x()']).content).toBe('\nx()\n\n\n');
+    // The row after a Java class's closing brace is outside every method.
+    expect(hintAt('class Main {\n  static void main(String[] a) {\n    a();\n  }\n}\n', 6, 'java'))
+      .toBe(CODE_DE.NOT_IN_METHOD_HINT);
   });
 
   it('a refusal writes nothing — never a line moved somewhere else', () => {
@@ -252,9 +279,11 @@ describe('the spots a line may not take, each with its reason', () => {
     // back: a line there would cut the compound in two.
     expect(hintAt('def f():\n    if a:\n        b()\n    \n    else:\n        c()\n', 4))
       .toBe(CODE_DE.INSERT_CLAUSE_HINT);
-    // Explicit whitespace shallower than the next statement of its block.
-    expect(hintAt('def f():\n    for i in x:\n        a()\n    \n        b()\n', 4))
-      .toBe(CODE_DE.INSERT_INDENT_HINT);
+    // Explicit whitespace shallower than the next statement of its block is
+    // no step back (review round 5, md4 — this was refused as „Einrückung
+    // passt nicht"): the line takes the level that statement needs.
+    expect(at('def f():\n    for i in x:\n        a()\n    \n        b()\n', 4, ['x()']).content)
+      .toBe('def f():\n    for i in x:\n        a()\n    \n        x()\n        b()\n');
     expect(hintAt('if True:\n    a()\n  b()\n', 2)).toBe(CODE_DE.INSERT_INDENT_BROKEN_HINT);
   });
 
@@ -272,7 +301,9 @@ describe('the spots a line may not take, each with its reason', () => {
     // Between a body's end and the next statement further out: that one's level.
     expect(at('def f():\n    for i in y:\n        a()\n\n    b()\n', 4, ['x()']).content)
       .toBe('def f():\n    for i in y:\n        a()\n\n    x()\n    b()\n');
-    // At the end of the file nothing follows: column 0, after the loop.
+    // An empty row with nothing after it — here a real row, the file ending
+    // in TWO line breaks (the row after a single final break is the MD1 test
+    // above) — is column 0, after the loop.
     expect(at('while n < 3:\n    n += 1\n\n', 3, ['x()']).content).toBe('while n < 3:\n    n += 1\n\nx()\n');
     // Explicit whitespace stays the student's choice.
     expect(at('def f():\n    for i in y:\n        a()\n    \n    b()\n', 4, ['x()']).content)
@@ -369,6 +400,138 @@ describe('the spots a line may not take, each with its reason', () => {
       '  private static volatile boolean LAUF = true;\n']) {
       const src = main(decl, 'LAUF');
       expect(insertionTargetAt(src, 'java', rows(src)).notFound).toBeUndefined();
+    }
+  });
+
+  it('Python, review round 5: a decorator, a docstring, a suppress and a handler (md1, nd1, md3)', () => {
+    // Nothing between a decorator and its def — a blank or comment row too.
+    for (const between of ['\n', '# Notiz\n', '\n\n']) {
+      const src = `def deko(f):\n    return f\n@deko\n${between}def main():\n    pass\n`;
+      expect(hintAt(src, 4)).toBe(CODE_DE.INSERT_DECORATOR_HINT);
+    }
+    // Nothing above a def's or class's docstring — a blank row too.
+    expect(hintAt('def f():\n\n    """Doku."""\n    a()\n', 2)).toBe(CODE_DE.INSERT_DOCSTRING_HINT);
+    expect(hintAt('class A:\n\n    """Doku."""\n', 2)).toBe(CODE_DE.INSERT_DOCSTRING_HINT);
+    // Below the docstring the body is open.
+    expect(allowedAt('def f():\n\n    """Doku."""\n    a()\nf()\n', 3)).toBe(true);
+    // A suppress swallows only exceptions: a quiet way out still leaves.
+    const suppress = (body) => `from contextlib import suppress\ndef f():\n    for i in x:\n        with suppress(Exception):\n${body}        a()\n`;
+    expect(hintAt(suppress('            return\n'), 6)).toBe(NEVER('„return“'));
+    expect(hintAt(suppress('            continue\n'), 6)).toBe(NEVER('„continue“'));
+    expect(hintAt(suppress('            pass\n            break\n'), 7)).toBe(NEVER('„break“'));
+    expect(hintAt(suppress('            return 1\n'), 6)).toBe(NEVER('„return“'));
+    // … but what raises first may be swallowed, and then the line runs.
+    expect(allowedAt(suppress('            b()\n            return\n'), 7)).toBe(true);
+    expect(allowedAt(suppress('            return b()\n'), 6)).toBe(true);
+    expect(allowedAt(suppress('            raise ValueError()\n'), 6)).toBe(true);
+    // An exit raises SystemExit: suppress(Exception) lets it through,
+    // suppress(SystemExit) does not.
+    const exitIn = (types) => `import sys\nfrom contextlib import suppress\nwith suppress(${types}):\n    sys.exit(0)\na()\n`;
+    expect(hintAt(exitIn('Exception'), 5)).toBe(NEVER('ein Programmende (exit)'));
+    expect(allowedAt(exitIn('SystemExit'), 5)).toBe(true);
+    expect(allowedAt(exitIn('MeinFehler'), 5)).toBe(true);
+    // A handler runs only when something is raised.
+    const tryIn = (body, handler) => `import sys\ndef f():\n    try:\n${body}    ${handler}:\n        pass\n    a()\n`;
+    const TRY = NEVER('ein try, das in jedem Zweig endet');
+    const at7 = (src) => src.split('\n').indexOf('    a()') + 1;
+    for (const [body, handler] of [
+      ['        return\n', 'except Exception'],
+      ['        pass\n        return None\n', 'except (ValueError, KeyError) as e'],
+      ['        sys.exit(0)\n', 'except Exception'],
+      ['        sys.exit()\n', 'except robot.RobotError'],
+      ['        os._exit(1)\n', 'except BaseException'],
+    ]) {
+      const src = tryIn(body, handler);
+      expect([body, handler, hintAt(src, at7(src))]).toEqual([body, handler, TRY]);
+    }
+    for (const [body, handler] of [
+      ['        b()\n        return\n', 'except Exception'],
+      ['        return b()\n', 'except Exception'],
+      ['        sys.exit(0)\n', 'except BaseException'],
+      ['        sys.exit(0)\n', 'except SystemExit'],
+      ['        sys.exit(0)\n', 'except'],
+      ['        sys.exit(main())\n', 'except Exception'],
+      ['        sys.exit(0)\n', 'except MeinFehler'],
+    ]) {
+      const src = tryIn(body, handler);
+      expect([body, handler, allowedAt(src, at7(src))]).toEqual([body, handler, true]);
+    }
+  });
+
+  it('Python Tab on a blank row agrees with Enter (review round 5, md4)', () => {
+    // Before an `else:` the if-body's level, never the else's own.
+    const src = 'def f():\n    if a:\n        b()\n\n    else:\n        c()\n';
+    expect(indentStepAt(src, 'python', 4, 1)).toBe('        ');
+    expect(newlineIndentAt(src, src.indexOf('\n\n') + 1, 'python')).toBe('        ');
+    // Between two statements of a deeper body: that body's level.
+    expect(indentStepAt('def f():\n    if a:\n        b()\n\n        c()\n', 'python', 4, 1)).toBe('        ');
+    // Where the next statement stands further out, Tab still steps one level.
+    expect(indentStepAt('def f():\n    if a:\n        b()\n\nf()\n', 'python', 4, 1)).toBe('    ');
+    // A row with text keeps the plain next level.
+    expect(indentStepAt('def f():\n    if a:\n        b()\nc()\n', 'python', 4, 1)).toBe('    ');
+  });
+
+  it('Java, review round 5: Java\'s own arithmetic, a lambda parameter, a nested continue (md2, md5)', () => {
+    const loop = (cond, pre = '') => `class Main {\n${pre}  public static void main(String[] a) {\n    while (${cond}) {\n    }\n  }\n}\n`;
+    const after = (src) => src.split('\n').lastIndexOf('    }') + 1;
+    const LOOP = NEVER('eine Endlosschleife');
+    // Constant TRUE in Java's arithmetic: an endless loop.
+    for (const [cond, pre] of [
+      ['1 / 2 == 0', ''], ['7 % 2 == 1', ''], ['-7 / 2 == -3', ''], ['2147483647 + 1 < 0', ''],
+      ['-2147483648 - 1 > 0', ''], ['0x7fffffff + 1 < 0', ''], ['9223372036854775807L + 1 < 0', ''],
+      ['2147483647L + 1 > 0', ''], ['true ? true : false', ''], ['1 > 2 ? false : true', ''],
+      ['010 == 8', ''], ['0b101 == 5', ''], ['1.0 / 0 > 1e308', ''], ['0.1f + 0.2f == 0.3f', ''],
+      ['G + 1 > 0', '  static final long G = 2147483647;\n'],
+      ['K * 2 == 6', '  static final byte K = 3;\n'],
+      ['M ? true : false', '  static final boolean M = 1 / 2 == 0;\n'],
+    ]) {
+      const src = loop(cond, pre);
+      expect([cond, hintAt(src, after(src), 'java')]).toEqual([cond, LOOP]);
+    }
+    // Constant FALSE, or not a constant at all: the loop can end (a
+    // do-while, so that a constant-false condition still compiles).
+    const doCond = (cond, pre = '') => `class Main {\n${pre}  public static void main(String[] a) {\n    do {\n    } while (${cond});\n  }\n}\n`;
+    const doRow = (src) => src.split('\n').findIndex((r) => r.includes('} while')) + 1;
+    for (const [cond, pre] of [
+      ['a.length > 7 / 2', ''], ['I + 1 < 0', '  static final long I = 2147483647;\n'],
+      ['B', '  static final Boolean B = true;\n'], ['a.length == 0 ? true : false', ''],
+    ]) {
+      const src = doCond(cond, pre);
+      expect([cond, insertionTargetAt(src, 'java', doRow(src)).mode]).toEqual([cond, 'after']);
+    }
+    // … and the same do-while with a constant TRUE condition never ends.
+    const intOverflow = doCond('I + 1 < 0', '  static final int I = 2147483647;\n');
+    expect(hintAt(intOverflow, doRow(intOverflow), 'java')).toBe(LOOP);
+    // What the compiler would refuse, or what throws, is never a guess.
+    for (const cond of ['1 / 0 == 0', '08 == 8', '2147483648 > 0', '-(2147483648) < 0', '(int) 2.5 == 2']) {
+      const src = loop(cond);
+      expect([cond, hintAt(src, after(src), 'java')]).toEqual([cond, CODE_DE.INSERT_UNSURE_HINT]);
+    }
+    // A lambda's parameter shadows a constant field of the same name.
+    const lambda = (params) => `class Main {\n  static final boolean LAUF = true;\n  public static void main(String[] a) {\n    java.util.function.Consumer<Boolean> c = ${params} -> {\n      while (LAUF) {\n      }\n    };\n  }\n}\n`;
+    for (const params of ['(LAUF)', 'LAUF', '(Boolean LAUF)', '(var LAUF)']) {
+      expect([params, insertionTargetAt(lambda(params), 'java', 6).mode]).toEqual([params, 'after']);
+    }
+    // … a `case LAUF ->` rule names the constant: still an endless loop.
+    const rule = 'class Main {\n  static final int LAUF = 1;\n  public static void main(String[] a) {\n'
+      + '    switch (a.length) { case LAUF -> a(); default -> b(); }\n    while (LAUF == 1) {\n    }\n  }\n}\n';
+    expect(hintAt(rule, 6, 'java')).toBe(LOOP);
+    // An unlabelled continue nested in an if continues the do-while.
+    const doLoop = (body) => `class Main {\n  public static void main(String[] a) {\n    int i = 0;\n    do {\n${body}    } while (i < 2);\n  }\n}\n`;
+    const doEnd = (src) => src.split('\n').findIndex((r) => r.includes('} while')) + 1;
+    for (const body of ['      if (i++ < 3) continue;\n      return;\n',
+      '      try { if (i++ < 3) continue; } finally { }\n      return;\n',
+      '      switch (i++) { case 0: continue; default: break; }\n      return;\n',
+      '      { if (i++ < 3) { continue; } }\n      return;\n']) {
+      const src = doLoop(body);
+      expect([body, insertionTargetAt(src, 'java', doEnd(src)).mode]).toEqual([body, 'after']);
+    }
+    // … one inside an inner loop continues THAT loop, and a labelled one
+    // is left out: the do's body still ends in return.
+    for (const body of ['      for (int k = 0; k < 2; k++) { continue; }\n      return;\n',
+      '      aussen: for (;;) { continue aussen; }\n']) {
+      const src = doLoop(body);
+      expect(insertionTargetAt(src, 'java', doEnd(src)).notFound).toBe(true);
     }
   });
 });

@@ -145,9 +145,17 @@ const STYLES = [['zwei', '  '], ['vier', '    '], ['tab', '\t']];
 const program = (u) => `import robot\n\ndef f():\n${u}for i in range(3):\n${u}${u}robot.home()\n${u}robot.log("x")\n\nf()\n`;
 
 const produced = [];
-function record(name, output, reach = 'run') {
+// `runs`: how many times CPython must run the marker (review round 5).
+function record(name, output, reach = 'run', runs = undefined) {
   produced.push({
-    name, language: 'python', line: null, reach, input: null, output, hint: null,
+    name,
+    language: 'python',
+    line: null,
+    reach,
+    input: null,
+    output,
+    hint: null,
+    ...(runs !== undefined ? { runs } : {}),
   });
 }
 
@@ -562,6 +570,90 @@ describe('a paste goes in exactly as copied (owner decision R4-O1)', () => {
   });
 });
 
+// Review round 5, MD1: the empty row after a file's single final line break
+// is a row of its own. Enter there gives column 0 — and so do „Einfügen", a
+// Vormachen paste and a drop on that row: the line runs ONCE after the last
+// block (it used to land INSIDE it: three times in the loop, never in the
+// def or the else).
+const EOF_ROWS = {
+  after_for: ['import robot\nfor i in range(3):\n    robot.home()\n', 4],
+  after_def_body: ['import robot\ndef main():\n    robot.home()\n', 4],
+  after_if_else: ['import robot\nif True:\n    robot.home()\nelse:\n    robot.log("x")\n', 6],
+  after_while: ['import robot\nn = 0\nwhile n < 3:\n    n += 1\n', 5],
+  after_try_except: ['import robot\ntry:\n    robot.home()\nexcept Exception:\n    pass\n', 6],
+  crlf_after_for: ['import robot\r\nfor i in range(3):\r\n    robot.home()\r\n', 4],
+  two_space_for: ['import robot\nfor i in range(3):\n  robot.home()\n', 4],
+  tab_for: ['import robot\nfor i in range(3):\n\trobot.home()\n', 4],
+};
+
+describe('the empty row after the final line break (review round 5, MD1)', () => {
+  beforeEach(() => {
+    forgetVormachenCopy();
+    toast.error.mockClear();
+  });
+
+  test.each(Object.entries(EOF_ROWS))('%s — Enter, „Einfügen", a Vormachen paste and a drop agree', (name, [src, line]) => {
+    const flat = src.replace(/\r/g, '');
+    const expected = `${flat}\n${MARK}`;
+    // Enter, then typing.
+    const enter = mount(src).view;
+    expect(enter.state.doc.lines).toBe(line);
+    put(enter, enter.state.doc.length);
+    press(enter, 'Enter');
+    expect(caretCol(enter)).toBe(0);
+    type(enter, MARK);
+    expect(enter.state.doc.toString()).toBe(expected);
+    record(`eof_row_enter_${name}`, enter.state.doc.toString(), 'run', 1);
+    // „Einfügen" with the cursor on that row.
+    const target = insertionTargetAt(src, 'python', line);
+    expect(target).toMatchObject({ mode: 'after', indent: '' });
+    expect(insertAtTarget(src, target, [MARK], 'python').content.replace(/\r/g, '')).toBe(expected);
+    // Vormachen's copy, pasted with the cursor on that row.
+    const copied = rememberVormachenCopy('python', [MARK]);
+    const pasted = mount(src).view;
+    put(pasted, pasted.state.doc.length);
+    paste(pasted, copied);
+    expect(pasted.state.doc.toString()).toBe(expected);
+    record(`eof_row_vormachen_paste_${name}`, pasted.state.doc.toString(), 'run', 1);
+    // A Sammlung row dropped on that row.
+    const dropped = mount(src).view;
+    dropped.posAtCoords = () => dropped.state.doc.length;
+    const data = { [SNIPPET_MIME]: JSON.stringify({ kind: 'recording', name: 'Winken' }) };
+    fireEvent.drop(dropped.contentDOM, { dataTransfer: { types: Object.keys(data), getData: (t) => data[t] || '' } });
+    expect(dropped.state.doc.toString()).toBe(expected);
+    record(`eof_row_drop_${name}`, dropped.state.doc.toString(), 'run', 1);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('whitespace is a step back only when the next statement stands there (review round 5, md4)', () => {
+  test('4 spaces between two 8-space statements: Enter continues the 8-space body', () => {
+    const src = 'import robot\ndef main():\n    if True:\n        robot.home()\n    \n        robot.log(1)\nmain()\n';
+    const { view } = mount(src);
+    put(view, endOf(view, 5));
+    press(view, 'Enter');
+    expect(caretCol(view)).toBe(8);
+    type(view, MARK);
+    record('ws_row_shallower_than_next_enter', view.state.doc.toString(), 'run', 1);
+    // „Einfügen" on that row agrees.
+    expect(insertionTargetAt(src, 'python', 5)).toMatchObject({ mode: 'after', indent: '        ' });
+  });
+
+  test('Tab on the empty row before an `else:` goes where Enter does — the if-body', () => {
+    const src = 'import robot\ndef main():\n    if True:\n        robot.home()\n\n    else:\n        robot.log(1)\nmain()\n';
+    const { view } = mount(src);
+    put(view, view.state.doc.line(5).from);
+    press(view, 'Tab');
+    expect(caretCol(view)).toBe(8);
+    type(view, MARK);
+    record('tab_empty_row_before_else', view.state.doc.toString(), 'run', 1);
+    const second = mount(src).view;
+    put(second, endOf(second, 4));
+    press(second, 'Enter');
+    expect(caretCol(second)).toBe(8);
+  });
+});
+
 describe('a Sammlung row dropped where no line may stand (review round 4, mc9 — X2)', () => {
   test('writes nothing and says why, in German', () => {
     toast.error.mockClear();
@@ -606,7 +698,9 @@ describe('the fixture the Python test compiles', () => {
       marker: { python: MARK },
       cases: produced.slice().sort((a, b) => a.name.localeCompare(b.name)),
     };
-    expect(doc.cases.length).toBe(STYLES.length * 6 + 14 + Object.keys(EMPTY_ROWS).length + 5);
+    // … + review round 5: three per EOF row (Enter, a paste, a drop) and two md4 cases.
+    expect(doc.cases.length).toBe(STYLES.length * 6 + 14 + Object.keys(EMPTY_ROWS).length + 5
+      + Object.keys(EOF_ROWS).length * 3 + 2);
     if (REGEN) {
       fs.mkdirSync(path.dirname(FIXTURE), { recursive: true });
       fs.writeFileSync(FIXTURE, `${JSON.stringify(doc, null, 1)}\n`);

@@ -345,6 +345,11 @@ describe('the spots a line may not take, each with its reason', () => {
       const src = main(extra, cond);
       expect(insertionTargetAt(src, 'java', rows(src)).hint).toBe(CODE_DE.INSERT_UNSURE_HINT);
     }
+    // In the SAME scope as the loop a keyword still declares nothing: the
+    // case label reads the constant, it does not make it a variable.
+    const sameSwitch = 'class Main implements K {\n  public static void main(String[] a) {\n    switch (a.length) {\n'
+      + '      case STUFE:\n        while (STUFE > 0) {\n        }\n        break;\n    }\n  }\n}\n';
+    expect(insertionTargetAt(sameSwitch, 'java', 6).hint).toBe(CODE_DE.INSERT_UNSURE_HINT);
     // A same-named variable of ANOTHER method is not what the loop reads:
     // the parameter, the local and the other method's final constant are
     // out of scope, so the name stays another file's — unknown, refused.

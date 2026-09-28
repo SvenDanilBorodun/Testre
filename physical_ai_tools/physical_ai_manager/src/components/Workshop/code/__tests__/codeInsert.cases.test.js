@@ -302,6 +302,7 @@ const JAVA = [
   // K21b without them stays „unsicher" too).
   ['unsure_constant_read_by_return', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static boolean pruefe() { return LAUF; }\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 7, 'unsure'],
   ['unsure_constant_read_by_case', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static int f(int x) { switch (x) { case STUFE: return 1; default: return 0; } }\n    public static void main(String[] args) {\n        while (STUFE > 0) {\n            Robot.home();\n        }\n    }\n}\n', 7, 'unsure'],
+  ['unsure_constant_case_label_same_switch', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        switch (args.length) {\n            case STUFE:\n                while (STUFE > 0) {\n                    Robot.home();\n                }\n                break;\n        }\n    }\n}\n', 8, 'unsure'],
   // …nor does a same-named variable of ANOTHER method (javac rejected the
   // line as unreachable: the loop reads Einstellungen.LAUF).
   ['unsure_constant_param_elsewhere', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static boolean f(boolean LAUF) { return LAUF; }\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 7, 'unsure'],

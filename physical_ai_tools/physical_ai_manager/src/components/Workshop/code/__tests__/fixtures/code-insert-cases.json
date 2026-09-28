@@ -1807,6 +1807,15 @@
    "hint": "Ob die Zeile hier je läuft, lässt sich nicht sicher sagen – klicke an eine andere Stelle."
   },
   {
+   "name": "unsure_constant_case_label_same_switch",
+   "language": "java",
+   "line": 8,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        switch (args.length) {\n            case STUFE:\n                while (STUFE > 0) {\n                    Robot.home();\n                }\n                break;\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Ob die Zeile hier je läuft, lässt sich nicht sicher sagen – klicke an eine andere Stelle."
+  },
+  {
    "name": "unsure_constant_param_elsewhere",
    "language": "java",
    "line": 7,

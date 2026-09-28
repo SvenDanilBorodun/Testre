@@ -310,15 +310,49 @@ function WorkshopPage({ isActive }) {
   const debuggerWarnings = useSelector((s) => (s.workshop ? s.workshop.debuggerWarnings : null));
   const activeTutorialId = useSelector((s) => s.workshop.activeTutorialId);
 
-  const [editorJson, setEditorJson] = useState(null);
-  const [initialJsonForEditor, setInitialJsonForEditor] = useState(null);
+  // A Blockly document's content: the JSON it OPENED with, and the canvas's
+  // last reported edit since then (reset whenever another document opens —
+  // review round 5, MD5: the previous program's last edit outlived its
+  // document, so Start ran it under the next program's id and a save wrote
+  // it there). Refs beside the state, written in the same call, for the save.
+  const [editorJson, setEditorJsonState] = useState(null);
+  const editorJsonRef = useRef(null);
+  const setEditorJson = useCallback((json) => {
+    editorJsonRef.current = json || null;
+    setEditorJsonState(json || null);
+  }, []);
+  const [initialJsonForEditor, setInitialJsonState] = useState(null);
+  const initialJsonRef = useRef(null);
+  const setInitialJsonForEditor = useCallback((json) => {
+    initialJsonRef.current = json || null;
+    setInitialJsonState(json || null);
+  }, []);
+  // The store's copy of the last edit (it outlives a remount, and the crash-
+  // recovery autosave reads it). Mirrored into a ref for the save; every
+  // page path that REPLACES the document writes both at once through
+  // setUnsavedJson — an effect would update the ref only after React
+  // re-rendered, and a save in between wrote the previous program's last
+  // edit into the next one's row (review round 5).
+  const unsavedJsonRef = useRef(unsavedBlocklyJson);
+  useEffect(() => { unsavedJsonRef.current = unsavedBlocklyJson; }, [unsavedBlocklyJson]);
+  const setUnsavedJson = useCallback((json) => {
+    unsavedJsonRef.current = json || null;
+    dispatch(setUnsavedBlocklyJson(json || null));
+  }, [dispatch]);
   const [editorKey, setEditorKey] = useState(0);
   // True while a selected workflow's row is being fetched: NEITHER editor
   // mounts until the language is known, so a code workflow never flashes (and
   // never injects) the Blockly canvas, and a Blockly workflow never mounts a
   // blank canvas it will remount a moment later. Seeded from the props, not
   // `false`: the first render happens BEFORE the hydrate effect can say so.
-  const [hydrating, setHydrating] = useState(() => !!(selectedWorkflowId && accessToken));
+  const [hydrating, setHydratingState] = useState(() => !!(selectedWorkflowId && accessToken));
+  // Read by every save (review round 5, MD2): set in the same call as the
+  // state, so a save a moment after the pick is refused, not raced.
+  const documentLoadingRef = useRef(hydrating);
+  const setHydrating = useCallback((v) => {
+    documentLoadingRef.current = !!v;
+    setHydratingState(!!v);
+  }, []);
   const [workspace, setWorkspace] = useState(null);
   const [saving, setSaving] = useState(false);
   const [view, setView] = useState('editor'); // 'editor' | 'gallery'
@@ -375,11 +409,33 @@ function WorkshopPage({ isActive }) {
   // writes nothing and asks them to click first (owner decision R3-O4). A
   // request to show a line (a „Benutzt in" row, an insertion) travels as a prop.
   const codeCursorRef = useRef(null);
-  // The open code document's identity for an insertion still loading its
-  // module (review round 3, mb9): bumped the moment the page starts
-  // replacing the document — every code document opens through
-  // openCodeDocument, and every other workflow through the hydrate fetch.
-  const codeDocTokenRef = useRef(0);
+  // THE OPEN DOCUMENT'S IDENTITY (review round 5, MD2/MD3/MD5, owner decision
+  // R5-O1). `selectedWorkflowId` is the program the student ASKED for and moves
+  // the moment they pick one; the editor holds it only once its row arrived.
+  // In between — and after a load that failed — the page still holds another
+  // document, so everything that writes to the cloud or runs a program reads
+  // the identity of the document the editor HOLDS:
+  //   * `openDocId` — its cloud row (null: not saved yet, or a load that
+  //     failed), set when a row arrived, a save created one, or „Neu" opened;
+  //   * the document token — bumped the moment the page starts replacing the
+  //     document (a load, „Neu", a draft, a version restore), so a save, a
+  //     restore result, a run start or an insertion that began before can
+  //     tell it now belongs to something else.
+  // Both are written through the refs synchronously and mirrored into state
+  // for the render.
+  const [openDocId, setOpenDocIdState] = useState(null);
+  const openDocIdRef = useRef(null);
+  const setOpenDocId = useCallback((id) => {
+    openDocIdRef.current = id || null;
+    setOpenDocIdState(id || null);
+  }, []);
+  const docTokenRef = useRef(0);
+  const [docToken, setDocToken] = useState(0);
+  const bumpDocToken = useCallback(() => {
+    docTokenRef.current += 1;
+    setDocToken(docTokenRef.current);
+  }, []);
+  const getDocumentToken = useCallback(() => docTokenRef.current, []);
   const revealSeqRef = useRef(0);
   const [codeRevealRequest, setCodeRevealRequest] = useState(null);
   // The ONLY way a code document opens (hydrate, its failure, „Neu", a draft,
@@ -387,7 +443,7 @@ function WorkshopPage({ isActive }) {
   // `blockly_json` (`edubotics-destinations`). A non-code `language` closes
   // any open code document. The caller bumps editorKey, as before.
   const openCodeDocument = useCallback(({ language, files, blocklyJson } = {}) => {
-    codeDocTokenRef.current += 1;
+    bumpDocToken();
     codeCursorRef.current = null;
     setCodeRevealRequest(null);
     if (codeStoreUnsubscribeRef.current) {
@@ -412,7 +468,7 @@ function WorkshopPage({ isActive }) {
     setCodeLanguage('');
     applyCodeFiles(null);
     setCodeDestinationStore(null);
-  }, [applyCodeFiles]);
+  }, [applyCodeFiles, bumpDocToken]);
   // „Neu ▾" has been used this mount: the student has CHOSEN what the editor
   // holds, so a crash-recovery draft arriving a moment later must not overrule
   // them (the read is async; the click is not).
@@ -432,12 +488,37 @@ function WorkshopPage({ isActive }) {
   // retire must not lock the student out of every other program.
   const workflowRunning = useSelector(selectWorkflowRunning);
   const switchHeartbeat = useSelector((s) => s.tasks?.heartbeatStatus);
-  const switchLockReason = workflowRunning && switchHeartbeat === 'connected' ? DE.STOP_PROGRAM_FIRST : null;
-  const switchLockRef = useRef(switchLockReason);
-  switchLockRef.current = switchLockReason;
+  const runLockReason = workflowRunning && switchHeartbeat === 'connected' ? DE.STOP_PROGRAM_FIRST : null;
+  const runLockRef = useRef(runLockReason);
+  runLockRef.current = runLockReason;
+  // A version restore on its way (review round 3, nb2; round 5, MD3): no run,
+  // preview, save or document switch meanwhile — the cloud row and the editor
+  // would part. The ref is set in the same call as the state, so a click that
+  // arrives before React re-rendered is refused too.
+  const [versionRestoring, setVersionRestoringState] = useState(false);
+  const versionRestoringRef = useRef(false);
+  const handleRestoringChange = useCallback((v) => {
+    versionRestoringRef.current = !!v;
+    setVersionRestoringState(!!v);
+  }, []);
+  // From „Start" until the run is marked running or has failed (review round
+  // 5, MD5): RunControls reports it; nothing replaces the document meanwhile.
+  const [runStarting, setRunStartingState] = useState(false);
+  const runStartingRef = useRef(false);
+  const handleRunStarting = useCallback((v) => {
+    runStartingRef.current = !!v;
+    setRunStartingState(!!v);
+  }, []);
+  // Why no action may replace the open document right now, or null.
+  const switchLockReason = runLockReason
+    || (runStarting ? DE.PROGRAM_STARTING : null)
+    || (versionRestoring ? DE.VERSION_RESTORE_IN_FLIGHT : null);
   const refuseSwitch = useCallback(() => {
-    if (!switchLockRef.current) return false;
-    toast.error(switchLockRef.current);
+    const reason = runLockRef.current
+      || (runStartingRef.current ? DE.PROGRAM_STARTING : null)
+      || (versionRestoringRef.current ? DE.VERSION_RESTORE_IN_FLIGHT : null);
+    if (!reason) return false;
+    toast.error(reason);
     return true;
   }, []);
   // [label_de, type_name] pairs from GetObjectCatalog, threaded to SimScene's
@@ -461,10 +542,6 @@ function WorkshopPage({ isActive }) {
   // „Debug" tab) is replaced by SimStage, so RunControls' Debug button targets
   // this flag instead of the dock tab (see onToggleDebug wiring below).
   const [simDebugOpen, setSimDebugOpen] = useState(false);
-  // A version restore on its way to the cloud (review round 3, nb2): no run
-  // or preview starts meanwhile — a restore that lands while a program runs is
-  // refused by the switch lock, and the cloud row and the editor would part.
-  const [versionRestoring, setVersionRestoring] = useState(false);
   // Why Start may not start a run right now, or null: while the program the
   // student opened is still being fetched (review round 4, mc10 — Start would
   // run the OLD program's files and Ziele under the NEW program's id), and
@@ -501,6 +578,7 @@ function WorkshopPage({ isActive }) {
   const subscriptions = useRosTopicSubscription();
   const { getObjectCatalog, jogArm } = useRosServiceCaller();
   const workspaceRef = useRef(null);
+  const workspaceDocTokenRef = useRef(null);
   // Blockly 12 ties getSelected() to the FocusManager, and clicking the
   // camera overlay (a non-focusable div) blurs the block in Chromium →
   // selection is null by the time the camera onClick runs. So we remember
@@ -756,12 +834,20 @@ function WorkshopPage({ isActive }) {
     const token = accessTokenRef.current;
     if (selectedWorkflowId && token) {
       // Another document is on its way: an insertion still loading its
-      // module must not land in it (mb9).
-      codeDocTokenRef.current += 1;
+      // module must not land in it (mb9), and a save, a restore result or a
+      // run start that began before must not act on it (round 5).
+      bumpDocToken();
       setHydrating(true);
       getWorkflow(token, selectedWorkflowId)
         .then((w) => {
           if (cancelled) return;
+          // The editor holds THIS row from now on, and neither the page's nor
+          // the store's copy of the previous program's last edit may stand
+          // in for it (review round 5: a save before the canvas was ready,
+          // and Start, used the previous program's edit under this id).
+          setOpenDocId(selectedWorkflowId);
+          setEditorJson(null);
+          setUnsavedJson(null);
           setInitialJsonForEditor(w?.blockly_json || null);
           // Hydrate the persisted Sim-Szene (workflows.sim_scene); fall back to
           // an empty scene when absent/empty so a non-sim workflow clears it.
@@ -785,6 +871,11 @@ function WorkshopPage({ isActive }) {
         .catch((e) => {
           if (cancelled) return;
           toast.error(`Workflow konnte nicht geladen werden: ${e.message || e}`);
+          // What the editor shows now is NOT that row: it holds no cloud row,
+          // so a save creates one instead of overwriting the row that failed
+          // to load (review round 5, MD2).
+          setOpenDocId(null);
+          setEditorJson(null);
           setInitialJsonForEditor(unsavedBlocklyJson || null);
           openCodeDocument({ language: '' });
           setEditorKey((k) => k + 1);
@@ -792,6 +883,8 @@ function WorkshopPage({ isActive }) {
         });
       return () => { cancelled = true; };
     }
+    if (!selectedWorkflowId) setOpenDocId(null);
+    setEditorJson(null);
     setInitialJsonForEditor(unsavedBlocklyJson || null);
     setEditorKey((k) => k + 1);
     setHydrating(false);
@@ -806,13 +899,18 @@ function WorkshopPage({ isActive }) {
   const handleEditorChange = useCallback(
     (json) => {
       setEditorJson(json);
-      dispatch(setUnsavedBlocklyJson(json));
+      setUnsavedJson(json);
     },
-    [dispatch]
+    [setEditorJson, setUnsavedJson]
   );
 
   const handleWorkspaceReady = useCallback((ws) => {
     workspaceRef.current = ws;
+    // The document this canvas was mounted for: every document replacement
+    // bumps the token and then remounts the canvas, so a canvas whose token
+    // is behind still shows the PREVIOUS document until React unmounts it,
+    // and a save must not serialise it (review round 5).
+    workspaceDocTokenRef.current = ws ? docTokenRef.current : null;
     setWorkspace(ws);
     // ws is null on workspace teardown — drop the remembered pin so a stale
     // id can't survive a remount/editorKey bump.
@@ -859,11 +957,11 @@ function WorkshopPage({ isActive }) {
         },
         getCursor: () => codeCursorRef.current,
         setCursor: (at) => { codeCursorRef.current = at; },
-        getDocumentToken: () => codeDocTokenRef.current,
+        getDocumentToken,
       });
     }
     return workspace ? createBlocklyAssetDocument(workspace) : null;
-  }, [isCodeWorkflow, codeLanguage, codeDestinationStore, workspace, applyCodeFiles]);
+  }, [isCodeWorkflow, codeLanguage, codeDestinationStore, workspace, applyCodeFiles, getDocumentToken]);
   const assetDocRef = useRef(assetDoc);
   assetDocRef.current = assetDoc;
   // Vormachen teaches into the document only while its editor is on screen —
@@ -1014,7 +1112,8 @@ function WorkshopPage({ isActive }) {
     // (review m4).
     dispatch(clearVariables());
     dispatch(clearCounters());
-    dispatch(setUnsavedBlocklyJson(null));
+    setUnsavedJson(null);
+    setOpenDocId(null);
     setEditorJson(null);
     setInitialJsonForEditor(null);
     setSimScene(EMPTY_SIM_SCENE);
@@ -1022,7 +1121,8 @@ function WorkshopPage({ isActive }) {
       ? { language: choice, files: { ...STARTER_FILES[choice] }, blocklyJson: null }
       : { language: '' });
     setEditorKey((k) => k + 1);
-  }, [dispatch, openCodeDocument, refuseSwitch]);
+  }, [dispatch, openCodeDocument, refuseSwitch, setOpenDocId, setEditorJson, setInitialJsonForEditor,
+    setUnsavedJson]);
 
   // Camera click → Ziel, without a prompt. CameraFeedOverlay asks for the
   // label BEFORE it calls /workshop/mark_destination, so one point has one name
@@ -1153,11 +1253,15 @@ function WorkshopPage({ isActive }) {
     (state) => {
       if (selectedWorkflowId) return;  // server workflow takes precedence
       if (initialJsonForEditor) return;
+      // The draft replaces the (empty) unsaved document.
+      bumpDocToken();
+      setEditorJson(null);
       setInitialJsonForEditor(state);
       setEditorKey((k) => k + 1);
-      dispatch(setUnsavedBlocklyJson(state));
+      setUnsavedJson(state);
     },
-    [selectedWorkflowId, initialJsonForEditor, dispatch]
+    [selectedWorkflowId, initialJsonForEditor, bumpDocToken, setEditorJson, setInitialJsonForEditor,
+      setUnsavedJson]
   );
   const { lastSavedAt } = useAutosave({
     workspace,
@@ -1196,26 +1300,23 @@ function WorkshopPage({ isActive }) {
     onRestore: handleCodeAutosaveRestore,
   });
 
-  // ONE save path. The Speichern button, and later every caller that needs a
-  // saved workflow id (Vormachen, the Sammlung drawer), go through
+  // ONE save path. The Speichern button, Strg+S, and every caller that needs a
+  // saved workflow id (Vormachen, the Sammlung drawer, „Abgeben") go through
   // saveWorkflowNow. The document is serialised when a save STARTS (the live
-  // workspace first, the last onChange snapshot as the fallback), so nothing
-  // captured during an earlier round-trip is lost.
-  const selectedWorkflowIdRef = useRef(selectedWorkflowId);
+  // workspace first, the document's last reported edit, else what it opened
+  // with), so nothing captured during an earlier round-trip is lost — and it
+  // goes to the row of the document the editor HOLDS (openDocIdRef), never to
+  // the one merely selected (review round 5, MD2).
   const simSceneRef = useRef(simScene);
-  const editorJsonRef = useRef(editorJson);
-  const unsavedJsonRef = useRef(unsavedBlocklyJson);
-  useEffect(() => { selectedWorkflowIdRef.current = selectedWorkflowId; }, [selectedWorkflowId]);
   useEffect(() => { simSceneRef.current = simScene; }, [simScene]);
-  useEffect(() => { editorJsonRef.current = editorJson; }, [editorJson]);
-  useEffect(() => { unsavedJsonRef.current = unsavedBlocklyJson; }, [unsavedBlocklyJson]);
   // codeLanguageRef / codeFilesRef / codeStoreRef are written synchronously by
   // openCodeDocument and applyCodeFiles — their only writers — never by an
   // effect that could run late and put an older value back.
-  // followUpId: the workflow a queued follow-up belongs to, snapshotted when it
-  // is QUEUED (null = the document a create in flight is creating).
+  // followUpToken: the document a queued follow-up belongs to, snapshotted
+  // when it is QUEUED (a create in flight keeps its document's token when it
+  // stamps the new id, so its follow-up becomes the update).
   const saveStateRef = useRef({
-    inflight: null, followUp: null, followUpToast: false, followUpErrorToast: false, followUpId: null,
+    inflight: null, followUp: null, followUpToast: false, followUpErrorToast: false, followUpToken: null,
   });
 
   // Every failure returns its German reason as `error` (a caller that shows
@@ -1230,6 +1331,17 @@ function WorkshopPage({ isActive }) {
     if (!token) {
       return fail('Nicht angemeldet — Speichern nicht möglich.',
         new Error('Nicht angemeldet — Speichern nicht möglich.'));
+    }
+    // While the program the student opened is still loading, the editor holds
+    // the PREVIOUS one while the selected id already names the next; a save
+    // then wrote the old program into the new one's row (review round 5, MD2).
+    // Every caller comes through here — the button, Strg+S, a rename, a keep,
+    // „Abgeben" — so every one of them is refused, in German.
+    if (documentLoadingRef.current) return fail(DE.DOCUMENT_LOADING, new Error(DE.DOCUMENT_LOADING));
+    // A version restore on its way would land after this save and part the
+    // cloud row from the editor (review round 5, MD3).
+    if (versionRestoringRef.current) {
+      return fail(DE.VERSION_RESTORE_IN_FLIGHT, new Error(DE.VERSION_RESTORE_IN_FLIGHT));
     }
     // A CODE document: the project is the thing saved, and its blockly_json
     // carries its Ziele/Positionen and nothing else (migration 041) — the
@@ -1246,7 +1358,8 @@ function WorkshopPage({ isActive }) {
       if (projectError) return fail(projectError, new Error(projectError));
     }
     let json = null;
-    const ws = workspaceRef.current;
+    // The live canvas only while it still shows the open document.
+    const ws = workspaceDocTokenRef.current === docTokenRef.current ? workspaceRef.current : null;
     if (savingCode) {
       const entries = codeStoreRef.current ? codeStoreRef.current.getEntries() : [];
       json = entries.length > 0 ? { [DESTINATIONS_SERIALIZER_NAME]: serializeState(entries) } : {};
@@ -1257,7 +1370,11 @@ function WorkshopPage({ isActive }) {
         json = null;
       }
     }
-    if (!json) json = editorJsonRef.current || unsavedJsonRef.current;
+    // No live canvas (it is being mounted): the document's last reported edit
+    // (this page's, else the store's copy of it — cleared when a saved
+    // program opens), else what it opened with — never another document's
+    // leftover (review round 5).
+    if (!json) json = editorJsonRef.current || unsavedJsonRef.current || initialJsonRef.current;
     if (!json) return fail('Workflow ist leer.', new Error('Workflow ist leer.'));
     // The DOCUMENT — `blocks`, `variables`, the student's canvas notes
     // (`workspaceComments`) and the Ziele/Positionen (`edubotics-destinations`)
@@ -1276,9 +1393,14 @@ function WorkshopPage({ isActive }) {
     // and a one-line object literal reads as an unslimmed writer.
     const documentJson = slimSavePayload(json);
     setSaving(true);
-    // The id is taken with the document, at the same instant: a workflow picked
-    // while this save is in flight must not receive this document's blocks.
-    const targetId = selectedWorkflowIdRef.current;
+    // The id is taken with the document, at the same instant, and it is the
+    // id of the document the editor HOLDS (review round 5, MD2): a workflow
+    // picked while this save is in flight must not receive this document, and
+    // one merely selected — still loading, or a load that failed — is not
+    // what the editor holds. The token says whether that document is still
+    // the open one when the answer comes back.
+    const targetId = openDocIdRef.current;
+    const targetToken = docTokenRef.current;
     try {
       if (targetId) {
         if (savingCode) {
@@ -1304,7 +1426,7 @@ function WorkshopPage({ isActive }) {
             sim_scene: simSceneRef.current,
           });
         }
-        if (selectedWorkflowIdRef.current === targetId) dispatch(markWorkflowSaved());
+        if (docTokenRef.current === targetToken) dispatch(markWorkflowSaved());
         if (toastOnSuccess) toast.success('Gespeichert.');
         return { ok: true, workflowId: targetId, created: false };
       }
@@ -1328,14 +1450,13 @@ function WorkshopPage({ isActive }) {
           new Error('keine Workflow-ID erhalten.'));
       }
       // Stamp the new id only while the editor still shows the unsaved document
-      // it was created from. A workflow the student picked meanwhile keeps the
-      // editor; forcing the id over it would put that workflow's blocks under
-      // the new id at the next save.
-      if (selectedWorkflowIdRef.current === null) {
+      // it was created from — the same document (its token), not merely „an
+      // unsaved one": a workflow picked meanwhile keeps the editor, and so does
+      // a „Neu" document opened meanwhile (both unsaved, and forcing the id
+      // over it put THAT document under the new id at the next save).
+      if (docTokenRef.current === targetToken && openDocIdRef.current === null) {
         skipHydrateForIdRef.current = created.id;
-        selectedWorkflowIdRef.current = created.id;
-        const st = saveStateRef.current;
-        if (st.followUp && st.followUpId === null) st.followUpId = created.id;
+        setOpenDocId(created.id);
         dispatch(setSelectedWorkflowId(created.id));
         dispatch(markWorkflowSaved());
       }
@@ -1346,7 +1467,7 @@ function WorkshopPage({ isActive }) {
     } finally {
       setSaving(false);
     }
-  }, [dispatch]);
+  }, [dispatch, setOpenDocId]);
 
   // A save never JOINS a save in flight — a join reported `ok` for a document
   // it never sent. A caller arriving mid-save gets ONE coalesced follow-up that
@@ -1364,18 +1485,18 @@ function WorkshopPage({ isActive }) {
     st.followUpToast = st.followUpToast || toastOnSuccess;
     st.followUpErrorToast = st.followUpErrorToast || toastOnError;
     if (!st.followUp) {
-      st.followUpId = selectedWorkflowIdRef.current;
+      st.followUpToken = docTokenRef.current;
       st.followUp = st.inflight.then(() => {}, () => {}).then(() => {
         const toastFlag = st.followUpToast;
         const errorToastFlag = st.followUpErrorToast;
-        const queuedFor = st.followUpId;
+        const queuedFor = st.followUpToken;
         st.followUp = null;
         st.followUpToast = false;
         st.followUpErrorToast = false;
-        st.followUpId = null;
-        // Another workflow was opened while the follow-up waited: the document
-        // it would serialise now belongs to that workflow, not to this save.
-        if (selectedWorkflowIdRef.current !== queuedFor) {
+        st.followUpToken = null;
+        // Another document was opened while the follow-up waited: the one it
+        // would serialise now is not the one this save was asked for.
+        if (docTokenRef.current !== queuedFor) {
           return { ok: false, error: new Error('Inzwischen wurde ein anderer Workflow geöffnet.') };
         }
         return start(toastFlag, errorToastFlag);
@@ -1385,12 +1506,66 @@ function WorkshopPage({ isActive }) {
   }, [runSave]);
   const handleSave = useCallback(() => { saveWorkflowNow(); }, [saveWorkflowNow]);
 
+  // A version the cloud restored, applied to the editor — ONLY when it still
+  // belongs to the document that was open when the restore was asked for
+  // (review round 5, MD3: a restore of A landing after B was opened replaced
+  // B's editor, and the next save wrote A into B). This handler carries that
+  // identity: VersionHistoryDropdown calls the one it held at the click.
+  const restoreForId = openDocId;
+  const restoreForToken = docToken;
+  const handleVersionRestored = useCallback((updated) => {
+    if (!updated) return;
+    if (openDocIdRef.current !== restoreForId || docTokenRef.current !== restoreForToken
+        || (updated.id && updated.id !== restoreForId)) {
+      return;
+    }
+    // A run that started meanwhile keeps its program (R2-O3). The restore's own
+    // in-flight flag is no reason: it is still set while its result lands.
+    const runLock = runLockRef.current || (runStartingRef.current ? DE.PROGRAM_STARTING : null);
+    if (runLock) {
+      toast.error(runLock);
+      return;
+    }
+    // A code version carries its files (migration 040) and its Ziele (041); a
+    // legacy version restores blocks only.
+    if (isCodeLanguage(updated.code_language) && updated.code_files
+        && typeof updated.code_files === 'object') {
+      openCodeDocument({
+        language: updated.code_language,
+        files: updated.code_files,
+        blocklyJson: updated.blockly_json,
+      });
+      setEditorKey((k) => k + 1);
+      return;
+    }
+    if (updated.blockly_json) {
+      bumpDocToken();
+      setEditorJson(null);
+      setInitialJsonForEditor(updated.blockly_json);
+      setEditorKey((k) => k + 1);
+      setUnsavedJson(updated.blockly_json);
+    }
+  }, [restoreForId, restoreForToken, openCodeDocument, bumpDocToken, setEditorJson,
+    setInitialJsonForEditor, setUnsavedJson]);
+
+  // Why the history takes no restore right now, or null: a program runs or
+  // starts, the opened program is still loading (it would restore the ROW
+  // while the editor waits for another), or a save is on its way (a restore
+  // landing under it would part the cloud row from the editor). Its own
+  // restore in flight it handles itself.
+  const historyLockReason = runLockReason
+    || (runStarting ? DE.PROGRAM_STARTING : null)
+    || (hydrating ? DE.DOCUMENT_LOADING : null)
+    || (saving ? DE.SAVE_IN_FLIGHT : null);
+
   // The open workflow's recordings (studioAssets.trajectories): on open, when a
   // token first appears, and when the tab regains focus.
+  // Keyed on the document the editor HOLDS (review round 5): while the next
+  // program loads, the drawer still shows — and acts on — the open one's.
   const refetchTrajectories = useCallback(() => {
-    if (!isActive || !selectedWorkflowId || !accessTokenRef.current) return;
-    dispatch(fetchTrajectories({ accessToken: accessTokenRef.current, workflowId: selectedWorkflowId }));
-  }, [isActive, selectedWorkflowId, dispatch]);
+    if (!isActive || !openDocId || !accessTokenRef.current) return;
+    dispatch(fetchTrajectories({ accessToken: accessTokenRef.current, workflowId: openDocId }));
+  }, [isActive, openDocId, dispatch]);
   useEffect(() => { refetchTrajectories(); }, [refetchTrajectories, hasAccessToken]);
   useRefetchOnFocus(isActive ? refetchTrajectories : null);
 
@@ -1407,7 +1582,7 @@ function WorkshopPage({ isActive }) {
     workspace,
     destinationStore: activeStore,
     simScene,
-    workflowId: selectedWorkflowId,
+    workflowId: openDocId,
     accessToken,
     robotType,
     gates: {
@@ -1806,7 +1981,7 @@ function WorkshopPage({ isActive }) {
         workspace={workspace}
         assetDoc={teachAssetDoc}
         accessToken={accessToken}
-        workflowId={selectedWorkflowId}
+        workflowId={openDocId}
         robotType={robotType}
         caps={caps}
         heartbeatStatus={heartbeatStatus}
@@ -1876,30 +2051,10 @@ function WorkshopPage({ isActive }) {
                         {DE.TOOLBAR_TEACH}
                       </button>
                       <VersionHistoryDropdown
-                        workflowId={selectedWorkflowId}
-                        lockedReason={switchLockReason}
-                        onRestoringChange={setVersionRestoring}
-                        onRestore={(updated) => {
-                          if (!updated || refuseSwitch()) return;
-                          // A code version carries its files (migration 040)
-                          // and its Ziele (041); a legacy version restores
-                          // blocks only.
-                          if (isCodeLanguage(updated.code_language) && updated.code_files
-                              && typeof updated.code_files === 'object') {
-                            openCodeDocument({
-                              language: updated.code_language,
-                              files: updated.code_files,
-                              blocklyJson: updated.blockly_json,
-                            });
-                            setEditorKey((k) => k + 1);
-                            return;
-                          }
-                          if (updated.blockly_json) {
-                            setInitialJsonForEditor(updated.blockly_json);
-                            setEditorKey((k) => k + 1);
-                            dispatch(setUnsavedBlocklyJson(updated.blockly_json));
-                          }
-                        }}
+                        workflowId={openDocId}
+                        lockedReason={historyLockReason}
+                        onRestoringChange={handleRestoringChange}
+                        onRestore={handleVersionRestored}
                       />
                       {recalibrateButton}
                     </>
@@ -1959,7 +2114,7 @@ function WorkshopPage({ isActive }) {
                           workspace={workspace}
                           provider={sammlungProvider}
                           accessToken={accessToken}
-                          workflowId={selectedWorkflowId}
+                          workflowId={openDocId}
                           robotType={robotType}
                           onPreview={previewAsset}
                           saveWorkflowNow={saveWorkflowNow}
@@ -2056,7 +2211,7 @@ function WorkshopPage({ isActive }) {
                       >
                         <CodeView
                           workspace={workspace}
-                          changeToken={editorJson || unsavedBlocklyJson}
+                          changeToken={editorJson || unsavedBlocklyJson || initialJsonForEditor}
                         />
                       </Suspense>
                     )}
@@ -2064,8 +2219,8 @@ function WorkshopPage({ isActive }) {
                 </div>
                 )}
                 <RunControls
-                  workflowId={selectedWorkflowId}
-                  blocklyJson={editorJson || unsavedBlocklyJson}
+                  workflowId={openDocId}
+                  blocklyJson={editorJson || unsavedBlocklyJson || initialJsonForEditor}
                   workspace={workspace}
                   simMode={simMode}
                   simScene={simScene}
@@ -2073,6 +2228,8 @@ function WorkshopPage({ isActive }) {
                   codeFiles={codeFiles}
                   destinationStore={activeStore}
                   startBlockedReason={startBlockedReason}
+                  onStartingChange={handleRunStarting}
+                  getDocumentToken={getDocumentToken}
                   debugOpen={simMode ? simDebugOpen : dockOpen.includes('debug')}
                   onToggleDebug={() => {
                     if (simMode) setSimDebugOpen((v) => !v);

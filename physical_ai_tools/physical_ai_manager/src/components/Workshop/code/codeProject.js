@@ -186,11 +186,13 @@ export const MAX_CODE_REPLAY_NAMES = 16;
  * never throws on a malformed project.
  *
  * `exactNames` are the names the editor's exact scanner found
- * (`codeAssetUsage.scanCodeAssets(...).replay`): they come FIRST, so the cap
- * never cuts a real call for a loose hit in a comment, and they carry what
- * this one-line scan cannot see — `robot.replay(speed=2,` with `name="…"`
- * on the next line (review round 4, mc7: that run fetched nothing and
- * failed on the robot with „Unbekannte Aufnahme").
+ * (`codeAssetUsage.scanCodeAssets(...).replay`), in the caller's order: they
+ * come FIRST, and they carry what this one-line scan cannot see —
+ * `robot.replay(speed=2,` with `name="…"` on the next line (review round 4,
+ * mc7: that run fetched nothing and failed on the robot with „Unbekannte
+ * Aufnahme"). The cap cuts from the END, so RunControls passes the names a
+ * real call uses before the ones seen only in comments (review round 5, md6:
+ * sixteen commented names used to crowd out the one really played).
  *
  * @param {object|null} files - `{ path: content }`.
  * @param {string[]} [exactNames]

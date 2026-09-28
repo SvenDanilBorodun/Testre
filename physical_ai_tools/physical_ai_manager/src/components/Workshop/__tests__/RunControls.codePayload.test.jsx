@@ -115,7 +115,8 @@ async function clickStart(props) {
 
 beforeEach(() => {
   mockState = baseState();
-  mockDispatch.mockClear();
+  mockDispatch.mockReset();
+  mockRos.setWorkflowBreakpoints.mockReset();
   mockRos.callService.mockClear();
   mockToast.mockClear();
   mockToast.success.mockClear();
@@ -285,6 +286,75 @@ describe('RunControls — a code run carries the recordings its replay calls nam
     await clickStart();
     await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
     expect(workflowApi.getTrajectoryByName).not.toHaveBeenCalled();
+  });
+
+  test('sixteen names in comments never crowd out the one really played (review round 5, md6)', async () => {
+    // The fetch is capped at 16 (migration 034's per-workflow prune cap); the
+    // name a real call uses must come first, ahead of names seen only in
+    // comments — the order of the files does not decide.
+    const commented = Array.from({ length: 16 }, (_, i) => `# robot.replay("Alt${i}")`).join('\n');
+    workflowApi.getTrajectoryByName.mockImplementation((_t, _w, name) => (name === 'Echt'
+      ? Promise.resolve(ROW)
+      : Promise.reject(Object.assign(new Error('Bewegung nicht gefunden'), { status: 404 }))));
+    await clickStart({ codeFiles: { 'main.py': `import robot\n${commented}\nrobot.replay("Echt")\n` } });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    const asked = workflowApi.getTrajectoryByName.mock.calls.map(([, , n]) => n);
+    expect(asked).toHaveLength(16);
+    expect(asked[0]).toBe('Echt');
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    expect(Object.keys(parsed.trajectories)).toEqual(['Echt']);
+  });
+});
+
+describe('RunControls — the start window (review round 5, MD5)', () => {
+  test('it opens before the first await and closes once the run is marked running', async () => {
+    const events = [];
+    let release;
+    mockState.workshop.breakpoints = ['main.py:L2'];
+    mockRos.setWorkflowBreakpoints.mockImplementation(() => new Promise((r) => { release = r; }));
+    const onStartingChange = vi.fn((v) => events.push(v ? 'open' : 'close'));
+    mockDispatch.mockImplementation((a) => {
+      if (a && a.type === 'workshop/setRunState') events.push(`runState:${a.payload}`);
+      return a;
+    });
+    await clickStart({ onStartingChange, getDocumentToken: () => 7 });
+    // Still awaiting the breakpoints: the window is open, nothing is sent.
+    expect(events).toEqual(['open']);
+    expect(mockRos.callService).not.toHaveBeenCalled();
+    release();
+    await waitFor(() => expect(events).toContain('close'));
+    expect(events).toEqual(['open', 'runState:running', 'close']);
+  });
+
+  test('a start whose document was replaced while it waited is NOT sent, and says why in German', async () => {
+    let token = 1;
+    let release;
+    mockState.workshop.breakpoints = ['main.py:L2'];
+    mockRos.setWorkflowBreakpoints.mockImplementation(() => new Promise((r) => { release = r; }));
+    const onStartingChange = vi.fn();
+    await clickStart({ onStartingChange, getDocumentToken: () => token });
+    token = 2; // another program was opened while the start waited
+    release();
+    await waitFor(() => expect(onStartingChange).toHaveBeenLastCalledWith(false));
+    expect(mockRos.callService).not.toHaveBeenCalled();
+    expect(mockToast.error).toHaveBeenCalledWith('Inzwischen ist ein anderes Programm geöffnet – bitte noch einmal starten.');
+  });
+
+  test('a start refused before any await never opens the window', async () => {
+    const onStartingChange = vi.fn();
+    mockState = baseState({ ...FULL_CAPS, code_languages: [] });
+    await clickStart({ onStartingChange });
+    await new Promise((r) => { setTimeout(r, 20); });
+    expect(onStartingChange).not.toHaveBeenCalled();
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('a failed start closes the window too', async () => {
+    const onStartingChange = vi.fn();
+    mockRos.callService.mockImplementationOnce(() => Promise.resolve({ success: false, message: 'nein' }));
+    await clickStart({ onStartingChange, getDocumentToken: () => 1 });
+    await waitFor(() => expect(onStartingChange).toHaveBeenLastCalledWith(false));
+    expect(onStartingChange.mock.calls.map(([v]) => v)).toEqual([true, false]);
   });
 });
 

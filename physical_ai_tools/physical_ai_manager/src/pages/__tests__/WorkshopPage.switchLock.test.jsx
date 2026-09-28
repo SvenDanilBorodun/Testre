@@ -342,8 +342,13 @@ describe.each([
     expect(mockToast.error).toHaveBeenCalledWith(REASON);
     // A version the cloud already restored is not swapped in either —
     // observed after React flushed (MB2b: asserted synchronously, the check
-    // could not see a restore that DID land).
-    const restored = { id: 'wf-py', code_language: 'python', code_files: { 'main.py': 'x = 9\n' } };
+    // could not see a restore that DID land). It is a version of the OPEN
+    // program (its row's id): since review round 5 (MD3) a restore result
+    // applies only to the document it was asked for, so the positive control
+    // below restores that one.
+    const restored = {
+      id: over.selectedWorkflowId || undefined, code_language: 'python', code_files: { 'main.py': 'x = 9\n' },
+    };
     await act(async () => {
       mockPickers.history.onRestore(restored);
       await Promise.resolve();

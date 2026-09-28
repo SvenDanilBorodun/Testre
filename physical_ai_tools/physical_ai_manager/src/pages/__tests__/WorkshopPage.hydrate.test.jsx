@@ -226,6 +226,15 @@ const settle = async () => {
   });
 };
 
+// The student edits the program that just opened. The store holds what the
+// canvas reported: a program that opens holds none of it until the student
+// edits (the page clears the previous program's leftover when the row
+// arrives — review round 5), so an edit is a NEW store value after the row.
+const editTo = (rerender, over) => {
+  mockState = baseState(over);
+  rerender(<WorkshopPage isActive />);
+};
+
 function deferred() {
   let resolve;
   let reject;
@@ -327,10 +336,11 @@ describe('WorkshopPage — one save path, never a joined save', () => {
     mockApi.updateWorkflow
       .mockImplementationOnce(() => first.promise)
       .mockImplementation(() => Promise.resolve({}));
-    mockState = baseState({ selectedWorkflowId: 'wf-1', unsavedBlocklyJson: DOC('a') });
+    mockState = baseState({ selectedWorkflowId: 'wf-1' });
     const { rerender } = render(<WorkshopPage isActive />);
     const button = await screen.findByTestId('save-button');
     await settle();
+    editTo(rerender, { selectedWorkflowId: 'wf-1', unsavedBlocklyJson: DOC('a') });
 
     await userEvent.click(button);
     await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
@@ -381,10 +391,11 @@ describe('WorkshopPage — one save path, never a joined save', () => {
     mockApi.updateWorkflow
       .mockImplementationOnce(() => first.promise)
       .mockImplementation(() => Promise.resolve({}));
-    mockState = baseState({ selectedWorkflowId: 'wf-1', unsavedBlocklyJson: DOC('a') });
+    mockState = baseState({ selectedWorkflowId: 'wf-1' });
     const { rerender } = render(<WorkshopPage isActive />);
     const button = await screen.findByTestId('save-button');
     await settle();
+    editTo(rerender, { selectedWorkflowId: 'wf-1', unsavedBlocklyJson: DOC('a') });
     await userEvent.click(button);
     await userEvent.click(button);
     mockState = baseState({ selectedWorkflowId: 'wf-2', unsavedBlocklyJson: DOC('b') });
@@ -405,9 +416,10 @@ describe('WorkshopPage — one save path, never a joined save', () => {
     const button = await screen.findByTestId('save-button');
     await userEvent.click(button);
     await settle();
-    mockState = baseState({ selectedWorkflowId: 'wf-b', unsavedBlocklyJson: DOC('b') });
+    mockState = baseState({ selectedWorkflowId: 'wf-b' });
     rerender(<WorkshopPage isActive />);
     await settle();
+    editTo(rerender, { selectedWorkflowId: 'wf-b', unsavedBlocklyJson: DOC('b') });
 
     await act(async () => { create.resolve({ id: 'wf-new' }); });
     await settle();
@@ -424,9 +436,11 @@ describe('WorkshopPage — one save path, never a joined save', () => {
 
   test('toastOnError: false returns the German reason and toasts nothing', async () => {
     mockApi.updateWorkflow.mockImplementation(() => Promise.reject(new Error('Netz weg')));
-    mockState = baseState({ selectedWorkflowId: 'wf-1', unsavedBlocklyJson: DOC('a') });
-    render(<WorkshopPage isActive />);
+    mockState = baseState({ selectedWorkflowId: 'wf-1' });
+    const { unmount, rerender } = render(<WorkshopPage isActive />);
     await screen.findByTestId('teach-host');
+    await settle();
+    editTo(rerender, { selectedWorkflowId: 'wf-1', unsavedBlocklyJson: DOC('a') });
     let result;
     await act(async () => {
       result = await mockTeachProps.current.saveWorkflowNow({ toastOnSuccess: false, toastOnError: false });
@@ -435,9 +449,13 @@ describe('WorkshopPage — one save path, never a joined save', () => {
     expect(result.error.message).toBe('Netz weg');
     expect(toast.error).not.toHaveBeenCalled();
 
-    // An empty document still names its reason.
+    // An empty document still names its reason — once it has loaded (a save
+    // while it loads is refused with its own reason since review round 5,
+    // MD2, which WorkshopPage.documentIdentity.test.jsx pins).
+    unmount();
     mockState = baseState({ selectedWorkflowId: 'wf-1', unsavedBlocklyJson: null });
     render(<WorkshopPage isActive />);
+    await settle();
     await act(async () => {
       result = await mockTeachProps.current.saveWorkflowNow({ toastOnSuccess: false, toastOnError: false });
     });
@@ -450,9 +468,11 @@ describe('WorkshopPage — one save path, never a joined save', () => {
     mockApi.updateWorkflow
       .mockImplementationOnce(() => first.promise)
       .mockImplementation(() => Promise.resolve({}));
-    mockState = baseState({ selectedWorkflowId: 'wf-1', unsavedBlocklyJson: DOC('a') });
-    render(<WorkshopPage isActive />);
+    mockState = baseState({ selectedWorkflowId: 'wf-1' });
+    const { rerender } = render(<WorkshopPage isActive />);
     const button = await screen.findByTestId('save-button');
+    await settle();
+    editTo(rerender, { selectedWorkflowId: 'wf-1', unsavedBlocklyJson: DOC('a') });
     await userEvent.click(button);
     await userEvent.click(button);
     await act(async () => { first.reject(new Error('Netz weg')); });

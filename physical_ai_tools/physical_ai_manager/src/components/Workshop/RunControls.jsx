@@ -98,14 +98,23 @@ const NO_SUCH_RECORDING = Symbol('no such recording');
 const SAVE_FIRST_RECORDINGS_DE = 'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
   + 'gehören zu einem gespeicherten Workflow.';
 
+// The recordings a code program names through replay("…"), by the EXACT
+// scanner: `live` — at least one call outside a comment, what the program can
+// really run — and `commented` — named only inside comments.
+function codeReplayNames(files, language) {
+  const live = [];
+  const commented = [];
+  for (const [name, rows] of scanCodeAssets(files, language).replay) {
+    (rows.some((r) => !r.inComment) ? live : commented).push(name);
+  }
+  return { live, commented };
+}
+
 // Whether a code program really CALLS replay("…") — the exact scanner, not the
 // run-time one: a replay inside a comment or a string must not stop an
 // unsaved program from running.
 function codeCallsReplay(files, language) {
-  for (const rows of scanCodeAssets(files, language).replay.values()) {
-    if (rows.some((r) => !r.inComment)) return true;
-  }
-  return false;
+  return codeReplayNames(files, language).live.length > 0;
 }
 
 // ── Run-payload slimming ─────────────────────────────────────────────────────
@@ -163,6 +172,14 @@ function RunControls({
   // Why no run may start right now, or null (review round 3, nb2: a version
   // restore on its way). The Start button is disabled and says why.
   startBlockedReason = null,
+  // The start window (review round 5, MD5): Start awaits the breakpoints and
+  // the recordings before the run is marked running. `onStartingChange(true)`
+  // opens it — the page then refuses every document switch — and
+  // `onStartingChange(false)` closes it once the run is running or failed.
+  // `getDocumentToken()` names the open document: a start whose document
+  // was replaced anyway while it waited is not sent.
+  onStartingChange = null,
+  getDocumentToken = null,
 }) {
   const dispatch = useDispatch();
   const {
@@ -360,6 +377,10 @@ function RunControls({
       return;
     }
     setBusy(true);
+    // The start window opens here, before the first await, and closes in the
+    // `finally` — right after the run was marked running, or on any failure.
+    const startedFor = typeof getDocumentToken === 'function' ? getDocumentToken() : null;
+    if (typeof onStartingChange === 'function') onStartingChange(true);
     try {
       dispatch(clearWorkflowLog());
       dispatch(clearVariables());
@@ -413,8 +434,12 @@ function RunControls({
       // `robot.replay` — a full ROBOT_API row, in both stubs and in the
       // editor's autocomplete — reach nothing but the server's „Unbekannte
       // Aufnahme: …" and abort the run.
+      // The names a real call uses go FIRST (review round 5, md6): the fetch
+      // is capped at 16, and sixteen names seen only in comments used to
+      // crowd out the one recording the program really plays.
+      const codeNames = isCode ? codeReplayNames(codeFiles, codeLanguage) : null;
       const replayNames = isCode
-        ? collectCodeReplayNames(codeFiles, [...scanCodeAssets(codeFiles, codeLanguage).replay.keys()])
+        ? collectCodeReplayNames(codeFiles, [...codeNames.live, ...codeNames.commented])
         : collectReplayNames(blocklyJson);
       const trajectories = {};
       // A scan hit may be a comment or an unrelated string, so for a code
@@ -562,6 +587,13 @@ function RunControls({
         toast.error(RUN_PAYLOAD_TOO_BIG_RECORDINGS_DE);
         return;
       }
+      // The last moment a start can still be taken back: the payload above is
+      // the document open when Start was pressed, and it runs only if that
+      // document is still the open one (review round 5, MD5).
+      if (typeof getDocumentToken === 'function' && getDocumentToken() !== startedFor) {
+        toast.error(DE.PROGRAM_CHANGED_BEFORE_START);
+        return;
+      }
       const r = await callService(
         '/workflow/start',
         'physical_ai_interfaces/srv/StartWorkflow',
@@ -599,8 +631,11 @@ function RunControls({
       toast.error(`Service-Aufruf fehlgeschlagen: ${e.message || e}`);
     } finally {
       setBusy(false);
+      if (typeof onStartingChange === 'function') onStartingChange(false);
     }
   }, [
+    onStartingChange,
+    getDocumentToken,
     blocklyJson,
     workspace,
     destinationStore,

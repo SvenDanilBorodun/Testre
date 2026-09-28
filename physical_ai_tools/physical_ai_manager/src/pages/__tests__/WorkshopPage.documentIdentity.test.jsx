@@ -525,3 +525,26 @@ test('Blockly: a crash-recovery draft replaces the last edit — Start runs the 
   await waitFor(() => expect(screen.getByTestId('blockly-workspace').textContent).toContain('Entwurf'));
   expect(mockPage.run.blocklyJson).toEqual(draft);
 });
+
+test('a save queued behind another, then another program opens: the caller is told, never handed that program', async () => {
+  const { rerender } = await openFirst('wf-py', 'code-workspace');
+  let finish;
+  mockApi.updateWorkflow.mockImplementationOnce(() => new Promise((r) => { finish = r; }));
+  let queued;
+  await act(async () => {
+    mockPage.teach.saveWorkflowNow({ toastOnSuccess: false });
+    await Promise.resolve();
+  });
+  await act(async () => {
+    // Vormachen's keep: it needs the id of the program it saves.
+    queued = mockPage.teach.saveWorkflowNow({ toastOnSuccess: false });
+    await Promise.resolve();
+  });
+  mockState = baseState({ selectedWorkflowId: 'wf-py2' });
+  rerender(<WorkshopPage isActive />);
+  await waitFor(() => expect(screen.getByTestId('code-workspace').textContent).toContain('B'));
+  await act(async () => { finish({}); });
+  const result = await queued;
+  expect(result.ok).toBe(false);
+  expect(saves().map(([id]) => id)).toEqual(['wf-py']);
+});

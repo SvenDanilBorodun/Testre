@@ -18,23 +18,13 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import {
-  MdRefresh,
-  MdFolder,
-  MdFolderOpen,
-  MdDataset,
-  MdKeyboardArrowRight,
-  MdKeyboardArrowDown,
-  MdEdit,
-  MdSync,
-  MdErrorOutline,
-} from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { setUserList, setDatasetRepoId } from '../features/training/trainingSlice';
 import { setSelectedUser, setSelectedDataset } from '../features/training/trainingSlice';
 import useGroupDatasets from '../hooks/useGroupDatasets';
 import { syncDatasets } from '../services/datasetsApi';
 import { Pill } from './EbUI';
+import Icon from './icons/Icon';
 
 export default function DatasetSelector() {
   const dispatch = useDispatch();
@@ -370,7 +360,7 @@ export default function DatasetSelector() {
           )}
           disabled={isTraining}
         >
-          <MdEdit size={14} />
+          <Icon name="pencil" size={14} />
           {manualMode ? 'Durchsuchen' : 'Manuell'}
         </button>
       </div>
@@ -418,7 +408,7 @@ export default function DatasetSelector() {
                 'disabled:opacity-50 disabled:cursor-not-allowed'
               )}
             >
-              <MdSync className={syncing ? 'animate-spin' : ''} size={14} />
+              <Icon name="refresh" className={syncing ? 'animate-spin' : ''} size={14} />
               {syncing ? 'Synchronisiere…' : 'Datensätze synchronisieren'}
             </button>
           </div>
@@ -426,7 +416,7 @@ export default function DatasetSelector() {
 
         {cloudError && (
           <div className="flex items-start gap-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-md p-2 mb-2">
-            <MdErrorOutline className="shrink-0 mt-0.5" size={14} />
+            <Icon name="alertCircle" className="shrink-0 mt-0.5" size={14} />
             <div className="min-w-0 flex-1">
               <span>{cloudError}</span>
               <button
@@ -467,7 +457,7 @@ export default function DatasetSelector() {
                   )}
                   disabled={isTraining}
                 >
-                  <MdDataset className="text-green-600 shrink-0" />
+                  <Icon name="database" className="text-green-600 shrink-0" />
                   <div className="min-w-0 flex-1">
                     <div className="font-medium truncate">{d.name || dataset}</div>
                     <div className="text-[11px] text-gray-500 font-mono truncate">
@@ -541,7 +531,7 @@ export default function DatasetSelector() {
         onClick={fetchUsers}
         disabled={loadingUsers || isTraining}
       >
-        <MdRefresh className={loadingUsers ? 'animate-spin' : ''} />
+        <Icon name="refresh" className={loadingUsers ? 'animate-spin' : ''} />
         {loadingUsers ? 'Laden...' : 'Benutzer aktualisieren'}
       </button>
 
@@ -565,20 +555,20 @@ export default function DatasetSelector() {
                   {/* Expand/Collapse Arrow */}
                   <div className="mr-2">
                     {expandedUsers[user] ? (
-                      <MdKeyboardArrowDown className="text-gray-600" />
+                      <Icon name="chevronDown" className="text-gray-600" />
                     ) : (
-                      <MdKeyboardArrowRight className="text-gray-600" />
+                      <Icon name="chevronRight" className="text-gray-600" />
                     )}
                   </div>
 
                   {/* Folder Icon */}
                   <div className="mr-2">
                     {expandedUsers[user] ? (
-                      <MdFolderOpen
+                      <Icon name="folderOpen"
                         className={isSelectedUser ? 'text-teal-700' : 'text-teal-600'}
                       />
                     ) : (
-                      <MdFolder className={isSelectedUser ? 'text-teal-700' : 'text-teal-600'} />
+                      <Icon name="folder" className={isSelectedUser ? 'text-teal-700' : 'text-teal-600'} />
                     )}
                   </div>
 
@@ -600,14 +590,14 @@ export default function DatasetSelector() {
 
                   {/* Loading or Refresh Icon */}
                   {loadingDatasets[user] ? (
-                    <MdRefresh className="ml-auto animate-spin text-gray-500" />
+                    <Icon name="refresh" className="ml-auto animate-spin text-gray-500" />
                   ) : expandedUsers[user] ? (
                     <button
                       className={classRefreshIcon}
                       onClick={(e) => !isTraining && refreshUserDatasets(user, e)}
                       title="Refresh datasets"
                     >
-                      <MdRefresh className="text-gray-500" size={16} />
+                      <Icon name="refresh" className="text-gray-500" size={16} />
                     </button>
                   ) : null}
                 </div>
@@ -631,7 +621,7 @@ export default function DatasetSelector() {
                             onClick={() => !isTraining && handleDatasetSelection(user, dataset)}
                           >
                             <div className="mr-2">
-                              <MdDataset className="text-green-600" />
+                              <Icon name="database" className="text-green-600" />
                             </div>
                             <span>{dataset}</span>
                           </div>

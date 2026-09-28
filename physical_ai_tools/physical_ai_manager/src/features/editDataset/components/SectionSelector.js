@@ -17,7 +17,7 @@
 import React from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdOutlineFileUpload, MdOutlineFileDownload } from 'react-icons/md';
+import Icon from '../../../components/icons/Icon';
 
 const SectionSelector = ({
   activeSection,
@@ -47,7 +47,7 @@ const SectionSelector = ({
           aria-label="Switch to upload section"
         >
           <div className="flex items-center gap-2">
-            <MdOutlineFileUpload className="w-4 h-4" />
+            <Icon name="upload" className="w-4 h-4" />
             Upload
           </div>
         </button>
@@ -62,7 +62,7 @@ const SectionSelector = ({
           aria-label="Switch to download section"
         >
           <div className="flex items-center gap-2">
-            <MdOutlineFileDownload className="w-4 h-4" />
+            <Icon name="download" className="w-4 h-4" />
             Download
           </div>
         </button>

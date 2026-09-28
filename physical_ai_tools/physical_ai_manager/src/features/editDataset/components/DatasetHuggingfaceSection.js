@@ -18,7 +18,6 @@ import React, { useState, useCallback, useEffect } from 'react';
 import clsx from 'clsx';
 import { useSelector, useDispatch } from 'react-redux';
 import toast from 'react-hot-toast';
-import { MdFolderOpen, MdOutlineFileUpload, MdOutlineFileDownload } from 'react-icons/md';
 import {
   setHFUserId,
   setHFRepoIdUpload,
@@ -31,6 +30,7 @@ import { useHfUserList } from '../../../hooks/useHfUserList';
 import SectionSelector from './SectionSelector';
 import { DEFAULT_PATHS, TARGET_FOLDERS, TARGET_FILES } from '../../../constants/paths';
 import HFStatus from '../../../constants/HFStatus';
+import Icon from '../../../components/icons/Icon';
 
 // Constants
 const SECTION_NAME = {
@@ -130,7 +130,7 @@ const FolderBrowseButton = ({ onClick, disabled = false, ariaLabel }) => {
       aria-label={ariaLabel}
       disabled={disabled}
     >
-      <MdFolderOpen className="w-8 h-8" />
+      <Icon name="folderOpen" className="w-8 h-8" />
     </button>
   );
 };
@@ -448,7 +448,7 @@ const HuggingfaceSection = () => {
               {/* Upload Dataset Section Header */}
               <div className="w-full flex flex-col items-start justify-start gap-2 bg-gray-50 border border-gray-200 p-3 rounded-md">
                 <div className="w-full flex items-center rounded-md font-medium gap-2">
-                  <MdOutlineFileUpload className="text-lg text-green-600" />
+                  <Icon name="upload" className="text-lg text-green-600" />
                   Upload {hfDataType.charAt(0).toUpperCase() + hfDataType.slice(1)}
                 </div>
                 <div className="text-sm text-gray-600">
@@ -529,7 +529,10 @@ const HuggingfaceSection = () => {
                         </span>
                       </div>
                       {!uploadRepoValidation.isValid && hfRepoIdUpload && (
-                        <div className="text-red-500 mt-1">⚠️ {uploadRepoValidation.message}</div>
+                        <div className="flex items-center gap-1 text-red-500 mt-1">
+                          <Icon name="warning" />
+                          <span>{uploadRepoValidation.message}</span>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -554,7 +557,7 @@ const HuggingfaceSection = () => {
                     disabled={!uploadButtonEnabled}
                   >
                     <div className="flex items-center justify-center gap-2">
-                      <MdOutlineFileUpload className="w-6 h-6" />
+                      <Icon name="upload" className="w-6 h-6" />
                       Upload
                     </div>
                   </button>
@@ -574,7 +577,12 @@ const HuggingfaceSection = () => {
                   {/* Status */}
                   <div className="flex flex-row items-center justify-start">
                     <span className="text-sm text-gray-500">
-                      {isUploading && '⏳ Uploading...'}
+                      {isUploading && (
+                        <span className="inline-flex items-center gap-1">
+                          <Icon name="hourglass" />
+                          Wird hochgeladen …
+                        </span>
+                      )}
                       {!isUploading && hfStatus}
                     </span>
                   </div>
@@ -606,7 +614,7 @@ const HuggingfaceSection = () => {
               {/* Download Dataset Section Header */}
               <div className="w-full flex flex-col items-start justify-start gap-2 bg-gray-50 border border-gray-200 p-3 rounded-md">
                 <div className="w-full flex items-center rounded-md font-medium gap-2">
-                  <MdOutlineFileDownload className="text-lg text-blue-600" />
+                  <Icon name="download" className="text-lg text-blue-600" />
                   Download {hfDataType.charAt(0).toUpperCase() + hfDataType.slice(1)}
                 </div>
                 <div className="text-sm text-gray-600">
@@ -660,7 +668,10 @@ const HuggingfaceSection = () => {
                         </span>
                       </div>
                       {!downloadRepoValidation.isValid && hfRepoIdDownload && (
-                        <div className="text-red-500 mt-1">⚠️ {downloadRepoValidation.message}</div>
+                        <div className="flex items-center gap-1 text-red-500 mt-1">
+                          <Icon name="warning" />
+                          <span>{downloadRepoValidation.message}</span>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -670,7 +681,7 @@ const HuggingfaceSection = () => {
                 <div className="w-full flex flex-row items-center mt-1">
                   <span className="text-xs text-gray-600 flex items-center gap-1">
                     {/* The dataset will be saved in the following directory */}
-                    <MdFolderOpen className="inline-block w-4 h-4 text-blue-700 mr-1" />
+                    <Icon name="folderOpen" className="inline-block w-4 h-4 text-blue-700 mr-1" />
                     The {hfDataType} will be saved in{' '}
                     <span className="font-mono text-blue-700">
                       {hfDataType === 'dataset'
@@ -699,7 +710,7 @@ const HuggingfaceSection = () => {
                     disabled={!downloadButtonEnabled}
                   >
                     <div className="flex items-center justify-center gap-2">
-                      <MdOutlineFileDownload className="w-6 h-6" />
+                      <Icon name="download" className="w-6 h-6" />
                       Download
                     </div>
                   </button>
@@ -719,7 +730,12 @@ const HuggingfaceSection = () => {
                   {/* Status */}
                   <div className="flex flex-row items-center justify-start gap-2">
                     <span className="text-sm text-gray-500">
-                      {isDownloading && '⏳ Downloading...'}
+                      {isDownloading && (
+                        <span className="inline-flex items-center gap-1">
+                          <Icon name="hourglass" />
+                          Wird heruntergeladen …
+                        </span>
+                      )}
                       {!isDownloading && hfStatus}
                     </span>
                     {/* Spinner for model downloads - right next to status text */}
@@ -765,7 +781,7 @@ const HuggingfaceSection = () => {
           TARGET_FOLDERS.DATASET_VIDEO,
           TARGET_FOLDERS.DATASET_DATA,
         ]}
-        targetFileLabel="Dataset folder found! 🎯"
+        targetFileLabel="Datensatz-Ordner gefunden"
         initialPath={DEFAULT_PATHS.DATASET_PATH}
         defaultPath={DEFAULT_PATHS.DATASET_PATH}
         homePath=""
@@ -780,7 +796,7 @@ const HuggingfaceSection = () => {
         selectButtonText="Select"
         allowDirectorySelect={true}
         targetFileName={[TARGET_FILES.POLICY_MODEL]}
-        targetFileLabel="Policy file found! 🎯"
+        targetFileLabel="Modelldatei gefunden"
         initialPath={DEFAULT_PATHS.POLICY_MODEL_PATH}
         defaultPath={DEFAULT_PATHS.POLICY_MODEL_PATH}
         homePath=""

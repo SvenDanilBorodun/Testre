@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
 import toast from 'react-hot-toast';
-import { MdAdd, MdDelete } from 'react-icons/md';
 import Modal from './Modal';
 import { Avatar, Btn, Pill } from '../EbUI';
 import {
   addWorkgroupMember,
   removeWorkgroupMember,
 } from '../../services/workgroupsApi';
+import Icon from '../icons/Icon';
 
 const MAX_GROUP_SIZE = 10;
 
@@ -115,7 +115,7 @@ export default function WorkgroupMembersModal({
                     disabled={busy}
                     title="Entfernen"
                   >
-                    <MdDelete size={16} />
+                    <Icon name="trash" size={16} />
                   </Btn>
                 </li>
               ))}
@@ -157,7 +157,7 @@ export default function WorkgroupMembersModal({
                     disabled={busy || members.length >= MAX_GROUP_SIZE}
                     title="Hinzufügen"
                   >
-                    <MdAdd size={16} />
+                    <Icon name="plus" size={16} />
                   </Btn>
                 </li>
               ))}

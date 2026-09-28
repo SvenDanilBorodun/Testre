@@ -8,13 +8,6 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-import {
-  MdAdd,
-  MdLink,
-  MdLinkOff,
-  MdLockOpen,
-  MdRefresh,
-} from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import { Btn, Card, Pill } from '../EbUI';
 import {
@@ -34,6 +27,7 @@ import {
 } from '../../features/teacher/teacherSlice';
 import useTeacherJetsonRealtime from '../../hooks/useTeacherJetsonRealtime';
 import PairJetsonModal from './PairJetsonModal';
+import Icon from '../icons/Icon';
 
 // Online/offline badge logic lives server-side (Cloud API _is_online,
 // threshold 60 s); the client only renders the server's verdict.
@@ -241,7 +235,7 @@ export default function JetsonSection({ classroomId }) {
         padded
         right={
           <Btn variant="secondary" size="sm" onClick={refresh}>
-            <MdRefresh /> Erneut versuchen
+            <Icon name="refresh" /> Erneut versuchen
           </Btn>
         }
       >
@@ -261,7 +255,7 @@ export default function JetsonSection({ classroomId }) {
           padded
           right={
             <Btn variant="primary" onClick={() => setShowPairModal(true)}>
-              <MdAdd /> Jetson hinzufügen
+              <Icon name="plus" /> Jetson hinzufügen
             </Btn>
           }
         >
@@ -368,18 +362,18 @@ export default function JetsonSection({ classroomId }) {
 
         <div className="flex flex-wrap gap-2">
           <Btn variant="secondary" onClick={handleRegenerate} disabled={working}>
-            <MdRefresh /> Pairing-Code erneuern
+            <Icon name="refresh" /> Pairing-Code erneuern
           </Btn>
           {jetson.current_owner_user_id && (
             <Btn variant="secondary" onClick={handleForceRelease} disabled={working}>
-              <MdLockOpen /> Lock freigeben
+              <Icon name="lockOpen" /> Lock freigeben
             </Btn>
           )}
           <Btn variant="danger" onClick={handleUnpair} disabled={working}>
-            <MdLinkOff /> Vom Klassenzimmer trennen
+            <Icon name="unlink" /> Vom Klassenzimmer trennen
           </Btn>
           <div className="ml-auto flex items-center gap-1.5 text-xs text-[var(--ink-3)]">
-            <MdLink />
+            <Icon name="link" />
             <span className="font-mono">
               ws://{jetson.lan_ip || jetson.mdns_name || '—'}:9091
             </span>

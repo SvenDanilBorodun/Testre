@@ -15,7 +15,7 @@
     },
     {
       "title": "Workflow starten",
-      "body": "Drücke ▶ Start unter dem Editor. Wenn alles geklappt hat, hörst du den Roboter den Text vorlesen.",
+      "body": "Drücke „Start“ unter dem Editor. Wenn alles geklappt hat, hörst du den Roboter den Text vorlesen.",
       "allowed_blocks": ["edubotics_speak_de", "text"],
       "hints": [
         "Falls du nichts hörst, prüfe die Lautstärke des Computers."

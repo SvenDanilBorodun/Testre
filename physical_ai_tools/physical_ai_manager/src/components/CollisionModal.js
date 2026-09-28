@@ -36,6 +36,7 @@ import toast from 'react-hot-toast';
 import { useSelector } from 'react-redux';
 
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import Icon from './icons/Icon';
 
 // Show-the-remedy escalation (leLab-comparison PR-3): after repeated failed
 // homing attempts a 13-year-old needs a PICTURE of the fix, not another
@@ -151,9 +152,11 @@ export default function CollisionModal() {
         }`}
       >
         <div className="flex flex-col items-center gap-4 text-center">
-          <div className="text-5xl" aria-hidden="true">
-            {isHomed ? '🦾' : '⚠️'}
-          </div>
+          <Icon
+            name={isHomed ? 'robotArm' : 'warning'}
+            size="3rem"
+            className={isHomed ? 'text-amber-600' : 'text-red-600'}
+          />
           <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
             {isHomed ? 'Schritt 2 von 2' : 'Schritt 1 von 2'}
           </span>
@@ -199,7 +202,7 @@ export default function CollisionModal() {
                     title={`Gelenk ${i + 1}: noch ${deg}° bis zur Grundstellung`}
                   >
                     <span>G{i + 1}</span>
-                    <span>{done ? '✓' : `${deg}°`}</span>
+                    <span>{done ? <Icon name="check" /> : `${deg}°`}</span>
                   </div>
                 );
               })}

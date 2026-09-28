@@ -17,18 +17,8 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import {
-  MdRefresh,
-  MdFolder,
-  MdDescription,
-  MdHome,
-  MdArrowUpward,
-  MdKeyboardArrowRight,
-  MdCheck,
-  MdStar,
-  MdBookmark,
-} from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import Icon from './icons/Icon';
 
 /**
  * Format file size in bytes to human readable format
@@ -109,7 +99,7 @@ const FileBrowserHeader = ({
           className={classButton}
           title={homePath ? `Home: ${homePath}` : 'Home'}
         >
-          <MdHome size={20} />
+          <Icon name="home" size={20} />
         </button>
         {defaultPath && (
           <button
@@ -118,7 +108,7 @@ const FileBrowserHeader = ({
             className={classButton}
             title={`Default: ${defaultPath}`}
           >
-            <MdBookmark size={20} />
+            <Icon name="bookmark" size={20} />
           </button>
         )}
         <button
@@ -127,7 +117,7 @@ const FileBrowserHeader = ({
           className={classButtonWithDisabled}
           title="Parent Directory"
         >
-          <MdArrowUpward size={20} />
+          <Icon name="arrowUp" size={20} />
         </button>
         <button
           onClick={onRefresh}
@@ -135,7 +125,7 @@ const FileBrowserHeader = ({
           className={clsx(classButton, 'disabled:opacity-50')}
           title="Refresh"
         >
-          <MdRefresh size={20} className={clsx(loading && 'animate-spin')} />
+          <Icon name="refresh" size={20} className={clsx(loading && 'animate-spin')} />
         </button>
       </div>
     </div>
@@ -174,7 +164,7 @@ const PathInfo = ({ currentPath, homePath, defaultPath, targetFileName }) => {
       {defaultPath && (
         <div className={classDefaultRow}>
           <span className={classLabel}>
-            <MdBookmark size={20} />
+            <Icon name="bookmark" size={20} />
           </span>
           <span className={classDefaultBadge}>{defaultPath}</span>
         </div>
@@ -290,11 +280,11 @@ const FileItem = ({
       <div className={classIconContainer}>
         {item.is_directory ? (
           <>
-            <MdFolder className={classFolderIcon} />
-            {hasTarget && <MdStar className={classStarIcon} />}
+            <Icon name="folder" className={classFolderIcon} />
+            {hasTarget && <Icon name="star" className={classStarIcon} />}
           </>
         ) : (
-          <MdDescription className={classFileIcon} />
+          <Icon name="fileText" className={classFileIcon} />
         )}
       </div>
 
@@ -303,8 +293,9 @@ const FileItem = ({
           <div className={classNameContainer}>
             <p className={classItemName}>{item.name}</p>
             {hasTarget && (
-              <span className={classTargetBadge}>
-                {targetFileLabel || `Contains ${targetFileName}`}
+              <span className={`${classTargetBadge} inline-flex items-center gap-1`}>
+                <Icon name="checkCircle" />
+                {targetFileLabel || `Enthält ${targetFileName}`}
               </span>
             )}
           </div>
@@ -319,7 +310,7 @@ const FileItem = ({
                 {isSelected ? 'Ausgewählt' : 'Auswählen'}
               </button>
             )}
-            {isSelected && <MdCheck className={classCheckIcon} />}
+            {isSelected && <Icon name="check" className={classCheckIcon} />}
           </div>
         </div>
         <div className={classMetaRow}>
@@ -348,7 +339,7 @@ const FileItem = ({
       </div>
 
       {item.is_directory && !showSelectButton && (
-        <MdKeyboardArrowRight className={classArrowIcon} />
+        <Icon name="chevronRight" className={classArrowIcon} />
       )}
     </div>
   );
@@ -445,8 +436,8 @@ const SelectedItemInfo = ({
             <p className={classPath}>{selectedItem.full_path}</p>
             {isTargetDirectory && (
               <p className={classTargetInfo}>
-                <MdStar className={classStarIcon} />
-                {targetFileLabel || `This directory contains ${targetFileName}`}
+                <Icon name="star" className={classStarIcon} />
+                {targetFileLabel || `Dieser Ordner enthält ${targetFileName}`}
               </p>
             )}
           </>

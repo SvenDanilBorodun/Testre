@@ -17,13 +17,13 @@
 import React, { useCallback, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
-import { MdFolderOpen, MdDownload } from 'react-icons/md';
 import FileBrowserModal from './FileBrowserModal';
 import PolicyDownloadModal from './PolicyDownloadModal';
 import TaskPhase from '../constants/taskPhases';
 import { DEFAULT_PATHS, TARGET_FILES } from '../constants/paths';
 import { setTaskInfo } from '../features/tasks/taskSlice';
 import useSupabaseTrainings from '../hooks/useSupabaseTrainings';
+import Icon from './icons/Icon';
 
 const InferencePanel = () => {
   const dispatch = useDispatch();
@@ -171,10 +171,16 @@ const InferencePanel = () => {
         })}
       >
         {isEditable ? (
-          '✏️ Bearbeitungsmodus'
+          <span className="inline-flex items-center gap-1.5">
+            <Icon name="pencil" />
+            Bearbeitungsmodus
+          </span>
         ) : (
           <div className="leading-tight">
-            <div>🔒 Nur lesen</div>
+            <div className="flex items-center gap-1.5">
+              <Icon name="lock" />
+              Nur lesen
+            </div>
             <div className="text-xs mt-1 opacity-80">Aufgabe läuft oder Roboter nicht verbunden</div>
           </div>
         )}
@@ -250,7 +256,7 @@ const InferencePanel = () => {
               'w-fit'
             )}
           >
-            <MdFolderOpen size={16} />
+            <Icon name="folderOpen" size={16} />
             Modellpfad durchsuchen
           </button>
           {latestSucceededModel && !info.policyPath && (
@@ -281,7 +287,7 @@ const InferencePanel = () => {
               )}
               title={latestSucceededModel}
             >
-              <MdDownload size={16} />
+              <Icon name="download" size={16} />
               <span className="truncate max-w-[220px]">
                 Neuestes Modell laden: {latestSucceededModel.split('/').pop()}
               </span>
@@ -314,7 +320,7 @@ const InferencePanel = () => {
               'w-fit'
             )}
           >
-            <MdDownload size={16} />
+            <Icon name="download" size={16} />
             Modell herunterladen
           </button>
           <textarea
@@ -353,7 +359,7 @@ const InferencePanel = () => {
         selectButtonText="Auswählen"
         allowDirectorySelect={true}
         targetFileName={[TARGET_FILES.POLICY_MODEL]}
-        targetFileLabel="Modelldatei gefunden! 🎯"
+        targetFileLabel="Modelldatei gefunden"
         initialPath={DEFAULT_PATHS.POLICY_MODEL_PATH}
         defaultPath={DEFAULT_PATHS.POLICY_MODEL_PATH}
         homePath=""

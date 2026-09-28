@@ -16,6 +16,7 @@
 
 import React, { useState, useRef } from 'react';
 import clsx from 'clsx';
+import Icon from './icons/Icon';
 
 const TagInput = ({ tags, onChange, disabled, className }) => {
   const [inputValue, setInputValue] = useState('');
@@ -119,8 +120,10 @@ const TagInput = ({ tags, onChange, disabled, className }) => {
               type="button"
               onClick={() => removeTag(index)}
               className={clsx('ml-1', 'text-teal-600', 'hover:text-teal-800', 'focus:outline-none')}
+              aria-label={`${tag} entfernen`}
+              title={`${tag} entfernen`}
             >
-              ×
+              <Icon name="close" />
             </button>
           )}
         </span>

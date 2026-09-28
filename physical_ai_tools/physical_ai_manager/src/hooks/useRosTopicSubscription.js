@@ -65,6 +65,7 @@ import rosConnectionManager from '../utils/rosConnectionManager';
 import { isDisplayableVariableName, VAR_NAME_MAX_LEN } from '../utils/variableName';
 import { registerDataset } from '../services/datasetsApi';
 import { recordInferenceRun } from '../services/jetsonClient';
+import { toastIcon } from '../components/icons/toast';
 
 // Parse `capabilities_json` at most ONCE per distinct string (D10). Every
 // /task/status tick spreads a new taskStatus reference in the reducer, so a
@@ -143,13 +144,13 @@ export function useRosTopicSubscription() {
         oscillator.start(audioContext.currentTime);
         oscillator.stop(audioContext.currentTime + duration / 1000);
 
-        console.log('🔊 Beep played successfully');
+        console.log('Beep played successfully');
       } catch (error) {
         console.warn('Audio playback failed:', error);
         try {
           if (window.navigator && window.navigator.vibrate) {
             window.navigator.vibrate(FALLBACK_VIBRATION_PATTERN);
-            console.log('📳 Fallback to vibration');
+            console.log('Fallback to vibration');
           }
         } catch (vibrationError) {
           console.warn('Vibration fallback also failed:', vibrationError);
@@ -219,7 +220,7 @@ export function useRosTopicSubscription() {
         audioContext
           .resume()
           .then(() => {
-            console.log('🎵 Audio enabled by user gesture');
+            console.log('Audio enabled by user gesture');
           })
           .catch((error) => {
             console.warn('Failed to resume AudioContext on user gesture:', error);
@@ -351,7 +352,7 @@ export function useRosTopicSubscription() {
         const audioMuted = localStorage.getItem('edubotics_audio_muted') === '1';
 
         if (currentPhase === TaskPhase.RECORDING && previousPhase !== TaskPhase.RECORDING) {
-          console.log('🔊 Recording started - playing beep sound');
+          console.log('Recording started - playing beep sound');
           // New episode/session entering RECORDING — re-arm the 3-seconds
           // warning (the episode counter restarts per session, and a stale
           // ref from the previous session could suppress one warning).
@@ -363,7 +364,7 @@ export function useRosTopicSubscription() {
             }, BEEP_DELAY);
           }
 
-          toast.success('Aufnahme gestartet! 🎬');
+          toast.success('Aufnahme gestartet!', { icon: toastIcon('record') });
         }
 
         // Falling two-tone when the episode leaves RECORDING (auto-save or
@@ -1005,7 +1006,7 @@ export function useRosTopicSubscription() {
         } else if (level === 'error') {
           toast.error(text, opts);
         } else if (level === 'warning') {
-          toast(text, { ...opts, icon: '⚠️' });
+          toast(text, { ...opts, icon: toastIcon('warning') });
         } else {
           toast(text, opts);
         }

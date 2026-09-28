@@ -18,8 +18,6 @@ import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import clsx from 'clsx';
 import { useSelector, useDispatch } from 'react-redux';
 import toast from 'react-hot-toast';
-import { TbArrowMerge } from 'react-icons/tb';
-import { MdFolderOpen, MdDataset } from 'react-icons/md';
 import {
   setMergeDatasetList,
   setMergeOutputPath,
@@ -29,6 +27,7 @@ import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import FileBrowserModal from '../../../components/FileBrowserModal';
 import LocalDatasetQuickPick from './LocalDatasetQuickPick';
 import { DEFAULT_PATHS, TARGET_FOLDERS } from '../../../constants/paths';
+import Icon from '../../../components/icons/Icon';
 
 // Style Classes
 const STYLES = {
@@ -261,9 +260,10 @@ const DatasetListInput = ({
             type="button"
             onClick={() => datasetActions.remove(index)}
             className={STYLES.removeButton}
-            aria-label={`Remove dataset ${index + 1}`}
+            aria-label={`Datensatz ${index + 1} entfernen`}
+            title={`Datensatz ${index + 1} entfernen`}
           >
-            ×
+            <Icon name="close" />
           </button>
         )}
       </div>
@@ -273,7 +273,7 @@ const DatasetListInput = ({
         className="flex items-center justify-center w-10 h-10 text-blue-500 bg-gray-200 rounded-md hover:text-blue-700"
         aria-label={`Browse files for dataset ${index + 1}`}
       >
-        <MdFolderOpen className="w-8 h-8" />
+        <Icon name="folderOpen" className="w-8 h-8" />
       </button>
     </div>
   );
@@ -300,14 +300,14 @@ const DatasetListInput = ({
               type="button"
               onClick={datasetActions.deleteAll}
               className={STYLES.deleteAllButton}
-              aria-label="Delete all datasets"
+              aria-label="Alle Datensätze entfernen"
             >
-              <span className="text-base font-bold">×</span>
-              Delete All
+              <Icon name="close" />
+              Alle entfernen
             </button>
           </div>
           <div className="flex flex-row items-center justify-start gap-2 text-md text-green-600 mb-0.5 px-0 select-none">
-            <MdDataset className="w-5 h-5 text-green-600" />
+            <Icon name="database" className="w-5 h-5 text-green-600" />
             {localDatasets.length}
           </div>
         </div>
@@ -509,7 +509,7 @@ const MergeSection = ({ isEditable = true }) => {
           />
         </div>
         <div className="w-10 h-full flex flex-col items-center justify-center">
-          <TbArrowMerge className="w-12 h-12 rotate-90" />
+          <Icon name="merge" className="w-12 h-12 rotate-90" />
         </div>
         <div className="w-full min-w-72 bg-white p-5 rounded-md shadow-md">
           <div className="flex flex-col items-start justify-center gap-2">
@@ -532,7 +532,7 @@ const MergeSection = ({ isEditable = true }) => {
                 className="flex items-center justify-center w-10 h-10 text-blue-500 bg-gray-200 rounded-md hover:text-blue-700"
                 aria-label="Browse files for merge output path"
               >
-                <MdFolderOpen className="w-8 h-8" />
+                <Icon name="folderOpen" className="w-8 h-8" />
               </button>
             </div>
             <input
@@ -563,8 +563,8 @@ const MergeSection = ({ isEditable = true }) => {
       {hasEmptyDatasets && (
         <div className="w-full p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
           <div className="flex items-center gap-2 text-yellow-800 font-medium mb-2">
-            <span className="text-lg">⚠️</span>
-            Empty Dataset Paths Detected
+            <Icon name="warning" className="text-lg" />
+            Leere Datensatz-Pfade gefunden
           </div>
           <div className="text-yellow-700 text-sm">
             {mergeDatasetList.map(
@@ -587,8 +587,8 @@ const MergeSection = ({ isEditable = true }) => {
       {duplicateCheck.hasDuplicates && (
         <div className="w-full p-4 bg-red-50 border border-red-200 rounded-lg">
           <div className="flex items-center gap-2 text-red-800 font-medium mb-2">
-            <span className="text-lg">⚠️</span>
-            Duplicate Datasets Detected
+            <Icon name="warning" className="text-lg" />
+            Doppelte Datensätze gefunden
           </div>
           <div className="text-red-700 text-sm">
             {duplicateCheck.duplicates.map((dup, index) => (
@@ -608,8 +608,8 @@ const MergeSection = ({ isEditable = true }) => {
       {hasFolderConflict && (
         <div className="w-full p-4 bg-orange-50 border border-orange-200 rounded-lg">
           <div className="flex items-center gap-2 text-orange-800 font-medium mb-2">
-            <span className="text-lg">📁</span>
-            Folder Name Conflict
+            <Icon name="folder" className="text-lg" />
+            Ordnername schon vorhanden
           </div>
           <div className="text-orange-700 text-sm">
             <span className="font-mono bg-orange-100 px-1 rounded">{mergeOutputFolderName}</span>
@@ -659,7 +659,7 @@ const MergeSection = ({ isEditable = true }) => {
           TARGET_FOLDERS.DATASET_VIDEO,
           TARGET_FOLDERS.DATASET_DATA,
         ]}
-        targetFileLabel="Dataset folder found! 🎯"
+        targetFileLabel="Datensatz-Ordner gefunden"
         initialPath={DEFAULT_PATHS.DATASET_PATH}
         defaultPath={DEFAULT_PATHS.DATASET_PATH}
         homePath=""

@@ -11,16 +11,6 @@ import {
   YAxis,
 } from 'recharts';
 import clsx from 'clsx';
-import {
-  MdCloud,
-  MdOpenInNew,
-  MdCheckCircle,
-  MdError,
-  MdCancel,
-  MdHourglassEmpty,
-  MdRefresh,
-  MdBolt,
-} from 'react-icons/md';
 import { Pill } from './EbUI';
 import { setSelectedTrainingId } from '../features/training/trainingSlice';
 import {
@@ -37,6 +27,7 @@ import {
   progressPct,
   estimateEtaSeconds,
 } from './trainingLiveChartUtils';
+import Icon from './icons/Icon';
 
 // Re-exported so existing importers (TrainingPage + the gate test) keep working
 // after the pure helpers moved into trainingLiveChartUtils.
@@ -59,20 +50,19 @@ function useNow(active) {
 // ---------- small presentational bits ----------
 
 const STATUS_UI = {
-  queued: { tone: 'amber', label: 'Wird eingereiht', Icon: MdHourglassEmpty },
-  running: { tone: 'accent', label: 'Läuft', Icon: MdRefresh, spin: true },
-  succeeded: { tone: 'success', label: 'Erfolgreich', Icon: MdCheckCircle },
-  failed: { tone: 'danger', label: 'Fehlgeschlagen', Icon: MdError },
-  canceled: { tone: 'neutral', label: 'Abgebrochen', Icon: MdCancel },
+  queued: { tone: 'amber', label: 'Wird eingereiht', icon: 'hourglass' },
+  running: { tone: 'accent', label: 'Läuft', icon: 'refresh', spin: true },
+  succeeded: { tone: 'success', label: 'Erfolgreich', icon: 'checkCircle' },
+  failed: { tone: 'danger', label: 'Fehlgeschlagen', icon: 'alertCircle' },
+  canceled: { tone: 'neutral', label: 'Abgebrochen', icon: 'errorCircle' },
 };
 
 function StatusPill({ status }) {
   const ui = STATUS_UI[status] || STATUS_UI.queued;
-  const Icon = ui.Icon;
   return (
     <Pill tone={ui.tone} dot>
       <span className="inline-flex items-center gap-1.5">
-        <Icon size={12} className={ui.spin ? 'animate-spin' : ''} />
+        <Icon name={ui.icon} size={12} className={ui.spin ? 'animate-spin' : ''} />
         {ui.label}
       </span>
     </Pill>
@@ -90,7 +80,7 @@ function LiveChip({ isRealtime, ageSeconds }) {
         className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-[var(--amber-wash)] text-[color:var(--amber)]"
         title="Seit einer Weile kein neuer Fortschritt — Training läuft evtl. in einer ruhigen Phase oder die Verbindung ist langsam."
       >
-        <MdHourglassEmpty size={12} />
+        <Icon name="hourglass" size={12} />
         Letztes Update {ageStr}
       </span>
     );
@@ -130,7 +120,7 @@ function EmptyState() {
   return (
     <div className="flex flex-col md:flex-row gap-4 items-start p-4 md:p-6 rounded-[var(--radius)] bg-[var(--accent-wash)] border border-[color:var(--accent)]/20">
       <div className="flex items-center gap-2 text-[var(--accent-ink)] font-semibold text-base shrink-0">
-        <MdCloud size={22} />
+        <Icon name="cloud" size={22} />
         Cloud-Training
       </div>
       <div className="text-sm text-[var(--accent-ink)] leading-relaxed space-y-2">
@@ -315,7 +305,7 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
                   title={job.model_name}
                 >
                   {job.model_name}
-                  <MdOpenInNew size={14} className="shrink-0" />
+                  <Icon name="externalLink" size={14} className="shrink-0" />
                 </a>
               ) : (
                 <span className="font-semibold text-[var(--ink)] truncate" title={job.model_name}>
@@ -352,7 +342,7 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
             </div>
             {starting ? (
               <div className="flex items-center gap-2 mt-1.5 text-[var(--ink)] font-semibold text-lg">
-                <MdRefresh size={18} className="animate-spin text-[var(--accent)]" />
+                <Icon name="refresh" size={18} className="animate-spin text-[var(--accent)]" />
                 GPU-Worker startet…
               </div>
             ) : (
@@ -402,7 +392,7 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
       {/* Secondary: loss curve */}
       <div>
         <div className="flex items-center gap-2 mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
-          <MdBolt size={12} className="text-[var(--accent)]" />
+          <Icon name="zap" size={12} className="text-[var(--accent)]" />
           Loss-Verlauf
         </div>
         <LossChart

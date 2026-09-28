@@ -16,8 +16,8 @@
 
 import React from 'react';
 import clsx from 'clsx';
-import { MdOpenInFull } from 'react-icons/md';
 import { useSelector } from 'react-redux';
+import Icon from './icons/Icon';
 
 const CompactSystemStatus = ({
   label = 'System',
@@ -198,7 +198,7 @@ const CompactSystemStatus = ({
 
       {/* Expand Icon */}
       <div className="flex-shrink-0 ml-2">
-        <MdOpenInFull
+        <Icon name="fit"
           size={16}
           className="text-white/40 hover:text-white/70 transition-colors duration-200"
         />

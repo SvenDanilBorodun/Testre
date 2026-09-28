@@ -18,9 +18,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdRefresh, MdFolder, MdCheckCircle } from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { setModelWeightList, setSelectedModelWeight } from '../features/training/trainingSlice';
+import Icon from './icons/Icon';
 
 export default function ModelWeightSelector() {
   const dispatch = useDispatch();
@@ -166,7 +166,7 @@ export default function ModelWeightSelector() {
           disabled={loading || isTraining}
           className={classRefreshButton}
         >
-          <MdRefresh className={clsx('w-4', 'h-4', { 'animate-spin': loading })} />
+          <Icon name="refresh" className={clsx('w-4', 'h-4', { 'animate-spin': loading })} />
           {loading ? 'Laden...' : 'Modellgewichte aktualisieren'}
         </button>
 
@@ -181,9 +181,9 @@ export default function ModelWeightSelector() {
                   onClick={() => !isTraining && handleModelWeightSelection(modelWeightPath)}
                   className={classModelWeightItem(isSelected)}
                 >
-                  <MdFolder className={classModelWeightIcon(isSelected)} />
+                  <Icon name="folder" className={classModelWeightIcon(isSelected)} />
                   <span className={classModelWeightName(isSelected)}>{modelWeightPath}</span>
-                  {isSelected && <MdCheckCircle className={classSelectedIcon} />}
+                  {isSelected && <Icon name="checkCircle" className={classSelectedIcon} />}
                 </div>
               );
             })

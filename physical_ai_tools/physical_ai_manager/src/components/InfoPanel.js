@@ -23,6 +23,7 @@ import { useHfUserList } from '../hooks/useHfUserList';
 import TagInput from './TagInput';
 import TaskPhase from '../constants/taskPhases';
 import { setTaskInfo, setUseMultiTaskMode } from '../features/tasks/taskSlice';
+import Icon from './icons/Icon';
 
 const taskInfos = [
   {
@@ -355,10 +356,16 @@ const InfoPanel = () => {
         })}
       >
         {isEditable ? (
-          '✏️ Bearbeitungsmodus'
+          <span className="inline-flex items-center gap-1.5">
+            <Icon name="pencil" />
+            Bearbeitungsmodus
+          </span>
         ) : (
           <div className="leading-tight">
-            <div>🔒 Nur lesen</div>
+            <div className="flex items-center gap-1.5">
+              <Icon name="lock" />
+              Nur lesen
+            </div>
             <div className="text-xs mt-1 opacity-80">Aufgabe läuft oder Roboter nicht verbunden</div>
           </div>
         )}

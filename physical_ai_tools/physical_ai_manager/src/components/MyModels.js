@@ -2,32 +2,21 @@ import React, { useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import {
-  MdRefresh,
-  MdCheckCircle,
-  MdError,
-  MdHourglassEmpty,
-  MdCancel,
-  MdOutlineFileDownload,
-  MdContentCopy,
-  MdOpenInNew,
-  MdBolt,
-} from 'react-icons/md';
 import { cancelCloudTraining } from '../services/cloudTrainingApi';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { setSelectedTrainingId } from '../features/training/trainingSlice';
+import Icon from './icons/Icon';
 
 const STATUS_CONFIG = {
-  queued: { icon: MdHourglassEmpty, color: 'text-gray-500', bg: 'bg-gray-100', label: 'In Warteschlange' },
-  running: { icon: MdRefresh, color: 'text-teal-600', bg: 'bg-teal-50', label: 'Training läuft', spin: true },
-  succeeded: { icon: MdCheckCircle, color: 'text-green-600', bg: 'bg-green-50', label: 'Erfolgreich' },
-  failed: { icon: MdError, color: 'text-red-500', bg: 'bg-red-50', label: 'Fehlgeschlagen' },
-  canceled: { icon: MdCancel, color: 'text-gray-400', bg: 'bg-gray-50', label: 'Abgebrochen' },
+  queued: { icon: 'hourglass', color: 'text-gray-500', bg: 'bg-gray-100', label: 'In Warteschlange' },
+  running: { icon: 'refresh', color: 'text-teal-600', bg: 'bg-teal-50', label: 'Training läuft', spin: true },
+  succeeded: { icon: 'checkCircle', color: 'text-green-600', bg: 'bg-green-50', label: 'Erfolgreich' },
+  failed: { icon: 'alertCircle', color: 'text-red-500', bg: 'bg-red-50', label: 'Fehlgeschlagen' },
+  canceled: { icon: 'errorCircle', color: 'text-gray-400', bg: 'bg-gray-50', label: 'Abgebrochen' },
 };
 
 function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, selected, onSelect }) {
   const config = STATUS_CONFIG[job.status] || STATUS_CONFIG.queued;
-  const Icon = config.icon;
   const isActive = job.status === 'queued' || job.status === 'running';
   const isSucceeded = job.status === 'succeeded';
 
@@ -54,13 +43,13 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
       {/* Header: Status + Model Type */}
       <div className="flex items-center justify-between mb-3">
         <span className={clsx('inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold', config.bg, config.color)}>
-          <Icon size={14} className={config.spin ? 'animate-spin' : ''} />
+          <Icon name={config.icon} size={14} className={config.spin ? 'animate-spin' : ''} />
           {config.label}
         </span>
         <div className="flex items-center gap-2">
           {selected && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[var(--accent-wash)] text-[var(--accent-ink)]">
-              <MdBolt size={10} /> Live-Ansicht
+              <Icon name="zap" size={10} /> Live-Ansicht
             </span>
           )}
           <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full font-mono">
@@ -80,7 +69,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
             className="text-sm font-semibold text-teal-700 hover:text-teal-900 hover:underline flex items-center gap-1"
           >
             {job.model_name}
-            <MdOpenInNew size={14} className="flex-shrink-0" />
+            <Icon name="externalLink" size={14} className="flex-shrink-0" />
           </a>
         ) : (
           <span className="text-sm font-semibold text-gray-700">{job.model_name}</span>
@@ -153,7 +142,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
               )}
               title={rosConnected ? 'Modell auf Roboter herunterladen' : 'Roboter-Umgebung muss gestartet sein'}
             >
-              <MdOutlineFileDownload size={16} className={downloadingModel === job.model_name ? 'animate-pulse' : ''} />
+              <Icon name="download" size={16} className={downloadingModel === job.model_name ? 'animate-pulse' : ''} />
               {downloadingModel === job.model_name ? 'Lädt...' : 'Herunterladen'}
             </button>
             <a
@@ -162,7 +151,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
               rel="noopener noreferrer"
               className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
             >
-              <MdOpenInNew size={14} />
+              <Icon name="externalLink" size={14} />
               HuggingFace
             </a>
             <button
@@ -173,7 +162,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
               className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
               title="Modell-ID kopieren"
             >
-              <MdContentCopy size={14} />
+              <Icon name="copy" size={14} />
             </button>
           </>
         )}
@@ -182,7 +171,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
             onClick={() => onCancel(job.id)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-100 text-red-600 hover:bg-red-200 transition-colors"
           >
-            <MdCancel size={14} />
+            <Icon name="errorCircle" size={14} />
             Abbrechen
           </button>
         )}
@@ -274,7 +263,7 @@ export default function MyModels({ jobs = [], loading = false, refetch, isRealti
           disabled={loading}
           title="Aktualisieren"
         >
-          <MdRefresh size={20} className={loading ? 'animate-spin' : ''} />
+          <Icon name="refresh" size={20} className={loading ? 'animate-spin' : ''} />
         </button>
       </div>
 

@@ -16,12 +16,12 @@
 
 import React, { useCallback, useEffect, useRef } from 'react';
 import clsx from 'clsx';
-import { MdClose } from 'react-icons/md';
 import { useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import { STREAM_QUALITY } from '../constants/streamConfig';
 import rosConnectionManager from '../utils/rosConnectionManager';
 import { usePiMode, videoStreamBase } from '../utils/piMode';
+import Icon from './icons/Icon';
 
 // H1: during a classroom-Jetson inference session the Jetson's
 // web_video_server (:8080) is bound to loopback only and there is NO LAN
@@ -227,7 +227,7 @@ export default function ImageGridCell({
     >
       {topic && topic.trim() !== '' && (
         <button className={classImageGridCellButton} onClick={handleClose}>
-          <MdClose size={20} />
+          <Icon name="close" size={20} />
         </button>
       )}
       <div ref={containerRef} className="w-full h-full flex items-center justify-center">

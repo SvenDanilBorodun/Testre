@@ -838,6 +838,27 @@ class LiveValuesThroughTheStub(unittest.TestCase):
         self.assertLess(elapsed, 0.2, 'no wait for the other check')
         self.assertEqual([c[1][2] for c in rpc.calls if c[0] == '__vars'], [{'punkte': 3}])
 
+    def test_the_last_values_are_not_answered_skipped_by_the_servers_floor(self):
+        """Through the real stub against a robot that enforces the floor the
+        way `code_rpc` does (a `__vars` frame within VARS_MIN_INTERVAL_S of the
+        last one it looked at is answered `skipped`, unlooked-at): the values
+        sent before the robot call and the last ones right after it both
+        arrive — `final` waits out the floor counted from that send."""
+        floor_s = 0.4
+        looked = []
+
+        def policy(method, args):
+            if method == '__vars':
+                now = time.monotonic()
+                if looked and now - looked[-1][0] < floor_s:
+                    return {'ok': True, 'r': 'skipped'}
+                looked.append((now, args[2]))
+            return {'ok': True, 'r': None}
+        src = 'import robot\npunkte = 1\nrobot.move_to("A")\npunkte = 2\n'
+        run = _StubRun(self, src, policy=policy)
+        run.run()
+        self.assertEqual([v for _t, v in looked], [{'punkte': 1}, {'punkte': 2}])
+
     def test_the_final_send_waits_out_the_servers_floor_after_a_frame_that_just_went_out(self):
         """A `__vars` frame that went out less than one interval ago is waited
         out (within that interval), so the server's floor looks at the last

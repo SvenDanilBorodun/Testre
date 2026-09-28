@@ -255,6 +255,31 @@ public final class SmokeMain {
         Object textGezeigt = RpcClient.shownObject(langerText);
         check(textGezeigt instanceof String && ((String) textGezeigt).length() == RpcClient.SHOWN_MAX_CHARS,
               "zeige a CharSequence cut before it becomes text");
+        // Cut BEFORE: only the shown part is ever turned into text.
+        CharSequence nurTeile = new CharSequence() {
+            @Override
+            public int length() {
+                return 50_000_000;
+            }
+
+            @Override
+            public char charAt(int index) {
+                return 'y';
+            }
+
+            @Override
+            public CharSequence subSequence(int start, int end) {
+                return "y".repeat(end - start);
+            }
+
+            @Override
+            public String toString() {
+                throw new IllegalStateException("der ganze Text wird nie gebaut");
+            }
+        };
+        Object teileGezeigt = RpcClient.shownObject(nurTeile);
+        check(teileGezeigt instanceof String && ((String) teileGezeigt).length() == RpcClient.SHOWN_MAX_CHARS,
+              "zeige builds only the shown part of a CharSequence");
         check(RpcClient.asPoint(null) == null, "null point");
         check(RpcClient.asPoint(List.of(1.0, 2L, 3.5))[1] == 2.0, "point decode");
 

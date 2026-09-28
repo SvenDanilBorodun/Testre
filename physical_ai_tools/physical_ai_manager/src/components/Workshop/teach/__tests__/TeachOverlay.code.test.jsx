@@ -23,6 +23,7 @@ import TeachOverlay from '../TeachOverlay';
 import { DE } from '../../blocks/messages_de';
 import { CODE_DE, formatCode } from '../../code/codeMessagesDe';
 import { createCodeAssetDocument } from '../../code/codeAssetDocument';
+import { forgetVormachenCopy, vormachenPasteLines } from '../../code/vormachenClipboard';
 import { createDetachedDestinationStore } from '../../sammlung/destinationStore';
 import * as workflowApi from '../../../../services/workflowApi';
 
@@ -224,7 +225,17 @@ describe('TeachOverlay over a Python program', () => {
       act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
       fireEvent.click(screen.getByRole('button', { name: formatCode(CODE_DE.TEACH_INSERT_LINES, 2) }));
       await waitFor(() => expect(toast.success).toHaveBeenCalledWith(CODE_DE.COPIED_PASTE_HINT));
-      expect(writeText).toHaveBeenCalledWith('robot.replay("Bewegung 1")\nrobot.move_to("Position 1")');
+      // One per line AND a final line break (review round 4, mc2): pasted at
+      // the end of a line anywhere, the next statement starts on a line of
+      // its own.
+      const copied = 'robot.replay("Bewegung 1")\nrobot.move_to("Position 1")\n';
+      expect(writeText).toHaveBeenCalledWith(copied);
+      // Remembered for the editor's paste: exactly this text lands like
+      // „Einfügen" (owner decision R4-O1); an edited copy does not.
+      expect(vormachenPasteLines(copied, 'python'))
+        .toEqual(['robot.replay("Bewegung 1")', 'robot.move_to("Position 1")']);
+      expect(vormachenPasteLines(copied.replace('Bewegung 1', 'Bewegung 2'), 'python')).toBeNull();
+      expect(vormachenPasteLines(copied, 'java')).toBeNull();
       expect(CODE_DE.COPIED_PASTE_HINT).toBe('Kopiert – klicke in deinen Code und drücke Strg+V.');
       expect(main()).toBe('import robot\nrobot.home()\n');
       expect(toast.error).not.toHaveBeenCalled();
@@ -241,7 +252,8 @@ describe('TeachOverlay over a Python program', () => {
       expect(main()).toBe('import robot\nrobot.home()\n');
     });
 
-    test('a refused clipboard: the click-first hint as well', async () => {
+    test('a refused clipboard: the click-first hint as well, and nothing is remembered', async () => {
+      forgetVormachenCopy();
       Object.defineProperty(navigator, 'clipboard', {
         value: { writeText: vi.fn(async () => { throw new Error('nope'); }) }, configurable: true,
       });
@@ -250,6 +262,7 @@ describe('TeachOverlay over a Python program', () => {
       act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
       fireEvent.click(screen.getByRole('button', { name: CODE_DE.TEACH_INSERT_LINE_ONE }));
       await waitFor(() => expect(toast.error).toHaveBeenCalledWith(CODE_DE.CLICK_FIRST_HINT));
+      expect(vormachenPasteLines('robot.move_to("Position 1")\n', 'python')).toBeNull();
     });
   });
 

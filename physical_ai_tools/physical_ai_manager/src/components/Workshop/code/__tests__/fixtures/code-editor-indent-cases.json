@@ -330,15 +330,6 @@
    "hint": null
   },
   {
-   "name": "flat_paste_lines_up",
-   "language": "python",
-   "line": null,
-   "reach": "run",
-   "input": null,
-   "output": "import robot\ndef f():\n    robot.home()\n    robot.move_to(\"A\")\n    robot.close_gripper()\n    robot.replay(\"Winken\")\nf()\n",
-   "hint": null
-  },
-  {
    "name": "hand_typed_block_enter_in_four",
    "language": "python",
    "line": null,
@@ -417,6 +408,24 @@
    "reach": "run",
    "input": null,
    "output": "import robot\n\ndef f():\n  if True:\n    robot.replay(\"Winken\")\n\nf()\n",
+   "hint": null
+  },
+  {
+   "name": "vormachen_paste_4",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\n\ndef main():\n    robot.home()\n    robot.move_to(\"Ablage\")\n    robot.replay(\"Winken\")\n\n    robot.log(1)\n\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "vormachen_paste_5",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\n\ndef main():\n    robot.home()\n\n    robot.move_to(\"Ablage\")\n    robot.replay(\"Winken\")\n    robot.log(1)\n\nmain()\n",
    "hint": null
   },
   {

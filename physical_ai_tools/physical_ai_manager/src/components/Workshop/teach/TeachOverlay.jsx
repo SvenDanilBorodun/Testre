@@ -16,7 +16,9 @@
 // rename rewrites the program, and „Als Programm einfügen" builds blocks or
 // writes lines directly below the student's cursor line, checked by
 // codeInsert.js, with a toast that says where. Without a cursor nothing is
-// written: the lines go to the clipboard (owner decision R3-O4).
+// written: the lines go to the clipboard (owner decision R3-O4), one per line
+// and ending with a line break; pasted back into the program as they are,
+// they land like „Einfügen" (code/vormachenClipboard.js, owner decision R4-O1).
 //
 // Two rules here carry weight of their own:
 //   * No name is ever asked while the arm is limp: a capture/take gets an
@@ -39,6 +41,7 @@ import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import { selectTrajectoryList } from '../../../features/workshop/studioAssetsSlice';
 import { DE, formatDe } from '../blocks/messages_de';
 import { CODE_DE, formatCode } from '../code/codeMessagesDe';
+import { rememberVormachenCopy, vormachenClipboardText } from '../code/vormachenClipboard';
 import { useHomeGlide } from '../HomeGlidePrompt';
 import { nextAutoName, sanitizeDestinationNameInput } from '../sammlung/destinationStore';
 import { renameRecording } from '../sammlung/assetCommands';
@@ -55,13 +58,16 @@ import {
   buildProgramBlocks, buildProgramSteps, makeGripperStateOf, placeGripperState,
 } from './insertProgram';
 
-// Puts a program's lines on the clipboard, one per line; false when the
-// browser offers no clipboard (or refuses it).
-async function copyLines(lines) {
+// Puts a program's lines on the clipboard, one per line and ending with a
+// line break (a paste anywhere never joins two statements — review round 4,
+// mc2), and remembers them for the editor's paste (vormachenClipboard.js);
+// false when the browser offers no clipboard (or refuses it).
+async function copyLines(language, lines) {
   try {
     const clip = typeof navigator !== 'undefined' ? navigator.clipboard : null;
     if (!clip || typeof clip.writeText !== 'function') return false;
-    await clip.writeText(lines.join('\n'));
+    await clip.writeText(vormachenClipboardText(lines));
+    rememberVormachenCopy(language, lines);
     return true;
   } catch (_) {
     return false;
@@ -762,7 +768,7 @@ function TeachOverlay({
         // The student never clicked into the code (owner decision R3-O4):
         // nothing is written — the lines go to the clipboard, to paste where
         // they belong. No clipboard: the click-first hint.
-        if (await copyLines(result.lines)) toast.success(CODE_DE.COPIED_PASTE_HINT);
+        if (await copyLines(target.language, result.lines)) toast.success(CODE_DE.COPIED_PASTE_HINT);
         else toast.error(result.error || CODE_DE.CLICK_FIRST_HINT);
         refocus();
         return;

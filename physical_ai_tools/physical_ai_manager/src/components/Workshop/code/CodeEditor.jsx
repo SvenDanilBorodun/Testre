@@ -26,7 +26,9 @@
 // (codeAssetCompletion.js); a Sammlung row dropped onto the text becomes the
 // line(s) that use it (codeInsert.js); `revealRequest` puts the caret on a
 // line; `onCursorChange` tells the page where the student's cursor is, which
-// is where „Einfügen" writes.
+// is where „Einfügen" writes. A paste goes in exactly as copied — except the
+// lines Vormachen itself just put on the clipboard, which land like
+// „Einfügen" (vormachenClipboard.js, owner decision R4-O1).
 
 import React, { useEffect, useMemo, useRef } from 'react';
 import toast from 'react-hot-toast';
@@ -65,6 +67,7 @@ import {
   snippetLines,
 } from './codeInsert';
 import { SNIPPET_MIME } from './snippetMime';
+import { vormachenPasteLines } from './vormachenClipboard';
 
 const LANGUAGE_SUPPORT = { python, java };
 
@@ -204,14 +207,65 @@ function assetHover(language, knownRef) {
 }
 
 /**
+ * `lines` on lines of their own directly below line `line` (1-based), exactly
+ * as „Einfügen" places them (codeInsert.insertionTargetAt checks the spot and
+ * gives the block's indentation), as ONE change with the caret at the end of
+ * the last inserted line. A spot where a line cannot stand or never runs
+ * writes nothing and says why, in German. A drop and Vormachen's pasted lines
+ * both come here.
+ */
+export function insertLinesBelow(view, language, line, lines, userEvent) {
+  const doc = view.state.doc.toString();
+  const target = insertionTargetAt(doc, language, line);
+  if (target.notFound) {
+    toast.error(target.hint);
+    return false;
+  }
+  const res = insertionChange(doc, target, lines, language);
+  if (!res.change) return false;
+  // The caret at the end of the last inserted line (a line of the result).
+  const rows = res.content.split('\n');
+  let caret = 0;
+  for (let i = 0; i < res.lastLine; i += 1) caret += rows[i].length + (i < res.lastLine - 1 ? 1 : 0);
+  view.dispatch({
+    changes: res.change,
+    selection: EditorSelection.cursor(caret),
+    scrollIntoView: true,
+    userEvent,
+  });
+  return true;
+}
+
+/**
+ * A paste goes in EXACTLY as copied (owner decision R4-O1): CodeMirror's own
+ * handler, no re-indent — a multi-line string, a snippet's own structure
+ * stay byte for byte. The one exception is the text Vormachen itself just put
+ * on the clipboard (vormachenClipboard.js, exact match): it lands like
+ * „Einfügen", whole lines below the cursor line, checked the same way — or
+ * nothing and the German reason. It never joins the line the cursor is on.
+ */
+function vormachenPaste(language) {
+  return EditorView.domEventHandlers({
+    paste(event, view) {
+      if (view.state.readOnly) return false;
+      const data = event.clipboardData;
+      const lines = vormachenPasteLines(data ? data.getData('text/plain') : '', language);
+      if (!lines) return false;
+      event.preventDefault();
+      const line = view.state.doc.lineAt(view.state.selection.main.head).number;
+      insertLinesBelow(view, language, line, lines, 'input.paste');
+      return true;
+    },
+  });
+}
+
+/**
  * A Sammlung row dropped onto the text (the drawer's `SNIPPET_MIME` payload
  * `{kind, name}`) becomes the line(s) that use it, placed exactly as
- * „Einfügen" places them with the cursor on the drop line
- * (codeInsert.insertionTargetAt: the statement on that line, its body when it
- * opens one, before it when it never lets the next line run). Without drop
- * coordinates the cursor's line is the anchor. A drop where no statement may
- * stand (a Java import or class line) writes nothing and says why. Anything
- * else — ordinary text — is left to CodeMirror's own handler.
+ * „Einfügen" places them with the cursor on the drop line (insertLinesBelow).
+ * Without drop coordinates the cursor's line is the anchor. A drop where no
+ * statement may stand (a Java import or class line) writes nothing and says
+ * why. Anything else — ordinary text — is left to CodeMirror's own handler.
  */
 function snippetDrop(language) {
   return EditorView.domEventHandlers({
@@ -243,25 +297,7 @@ function snippetDrop(language) {
         at = null;
       }
       const pos = Number.isInteger(at) ? at : view.state.selection.main.head;
-      const dropLine = view.state.doc.lineAt(pos).number;
-      const doc = view.state.doc.toString();
-      const target = insertionTargetAt(doc, language, dropLine);
-      if (target.notFound) {
-        toast.error(target.hint);
-        return true;
-      }
-      const res = insertionChange(doc, target, lines, language);
-      if (!res.change) return true;
-      // The caret at the end of the last inserted line (a line of the result).
-      const rows = res.content.split('\n');
-      let caret = 0;
-      for (let i = 0; i < res.lastLine; i += 1) caret += rows[i].length + (i < res.lastLine - 1 ? 1 : 0);
-      view.dispatch({
-        changes: res.change,
-        selection: EditorSelection.cursor(caret),
-        scrollIntoView: true,
-        userEvent: 'input.drop',
-      });
+      insertLinesBelow(view, language, view.state.doc.lineAt(pos).number, lines, 'input.drop');
       return true;
     },
   });
@@ -450,9 +486,9 @@ export function fileIndentUnitExtensions(language, compartment, initialText) {
  *     stack (codeInsert.indentStepAt) — never to a column between two
  *     levels. Where the structure has no answer (inside brackets or a
  *     string, a multi-line selection, Java) the stock commands run.
- *   * Python only: a multi-line paste onto an indented empty position lines
- *     its following lines up with the first (Vormachen's „Kopiert – … Strg+V"
- *     lines arrive flat).
+ *   * A paste is NOT re-indented (owner decision R4-O1): it goes in exactly
+ *     as copied; only Vormachen's own copied lines are placed like
+ *     „Einfügen" (vormachenPaste).
  */
 export function structureIndentExtensions(language) {
   const service = indentService.of((cx, pos) => {
@@ -467,7 +503,6 @@ export function structureIndentExtensions(language) {
       { key: 'Tab', run: pythonIndentStep(1), shift: pythonIndentStep(-1) },
       { key: 'Backspace', run: pythonBackspace },
     ])),
-    pasteLinesUpWithTheCursor,
   ];
 }
 
@@ -542,38 +577,6 @@ export function pythonBackspace(view) {
   return true;
 }
 
-// A multi-line paste onto a position with only whitespace before it on its
-// line: the pasted lines after the first keep their shape relative to each
-// other and line up with that whitespace (the first line already stands
-// there). Anything else is pasted as it is.
-const pasteLinesUpWithTheCursor = EditorState.transactionFilter.of((tr) => {
-  if (!tr.docChanged || !tr.isUserEvent('input.paste')) return tr;
-  const changes = [];
-  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => changes.push({ fromA, toA, inserted }));
-  if (changes.length !== 1) return tr;
-  const { fromA, toA, inserted } = changes[0];
-  const text = inserted.toString();
-  if (!text.includes('\n')) return tr;
-  const line = tr.startState.doc.lineAt(fromA);
-  const prefix = tr.startState.doc.sliceString(line.from, fromA);
-  if (prefix === '' || /\S/.test(prefix)) return tr;
-  const rows = text.split('\n');
-  const rest = rows.slice(1);
-  const indents = rest.filter((r) => r.trim() !== '').map((r) => /^[ \t]*/.exec(r)[0]);
-  if (indents.length === 0) return tr;
-  const base = indents.reduce((a, b) => (b.length < a.length ? b : a));
-  if (!indents.every((i) => i.startsWith(base))) return tr;
-  const moved = rest.map((r) => (r.trim() === '' ? r : prefix + r.slice(base.length)));
-  const next = [rows[0], ...moved].join('\n');
-  if (next === text) return tr;
-  return {
-    changes: { from: fromA, to: toA, insert: next },
-    selection: EditorSelection.cursor(fromA + next.length),
-    scrollIntoView: true,
-    userEvent: 'input.paste',
-  };
-});
-
 function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef, withGutter, assetsRef,
   indentCompartment, initialText) {
   const parseLint = parseLintExtensions(language);
@@ -604,6 +607,7 @@ function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef,
     assetLintExtensions(language, assetsRef, parseLint.length === 0),
     assetHover(language, assetsRef),
     snippetDrop(language),
+    vormachenPaste(language),
     readOnlyCompartment.of(EditorState.readOnly.of(false)),
     EditorView.updateListener.of((update) => {
       const external = update.transactions.some((tr) => tr.annotation(externalSync));

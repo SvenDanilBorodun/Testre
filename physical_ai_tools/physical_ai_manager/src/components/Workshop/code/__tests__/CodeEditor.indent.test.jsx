@@ -27,7 +27,9 @@
 //     must compile too.
 //   * review round 4 (MC1): an EMPTY row inside a block (or a comment at
 //     column 0) chose nothing — Enter there continues the block, where it
-//     used to write column 0 and an IndentationError.
+//     used to write column 0 and an IndentationError. (R4-O1): a paste goes
+//     in exactly as copied; only the lines Vormachen itself just copied land
+//     like „Einfügen", below the cursor line, or not at all with the reason.
 //
 // Every Python program typed here is also written to fixtures/
 // code-editor-indent-cases.json, which robotis_ai_setup/tests/
@@ -43,11 +45,19 @@
 import fs from 'fs';
 import path from 'path';
 import React from 'react';
-import { render, act } from '@testing-library/react';
+import { render, act, fireEvent } from '@testing-library/react';
+import toast from 'react-hot-toast';
 import CodeEditor from '../CodeEditor';
 import {
-  CODE_INDENT_UNIT, detectIndentUnit, insertAtTarget, insertionTargetAt,
+  CODE_INDENT_UNIT, detectIndentUnit, insertAtTarget, insertionTargetAt, SNIPPET_MIME,
 } from '../codeInsert';
+import { CODE_DE } from '../codeMessagesDe';
+import { forgetVormachenCopy, rememberVormachenCopy } from '../vormachenClipboard';
+
+vi.mock('react-hot-toast', () => {
+  const t = Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn() });
+  return { __esModule: true, default: t };
+});
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'code-editor-indent-cases.json');
 const REGEN = !['', '0', undefined].includes(process.env.EDUBOTICS_REGEN_CODE_CASES);
@@ -117,9 +127,14 @@ const press = (view, key, shift = false) => act(() => {
   const handled = runScopeHandlers(view, new KeyboardEvent('keydown', { key, shiftKey: shift }), 'editor');
   expect(handled).toBe(true);
 });
-const paste = (view, text) => act(() => {
-  view.dispatch(view.state.replaceSelection(text), { userEvent: 'input.paste' });
-});
+// A paste as the browser delivers it: a `paste` event on the content, which
+// CodeMirror's own handler (and the editor's Vormachen handler) read.
+// (fireEvent wraps itself in act.)
+const paste = (view, text) => {
+  fireEvent.paste(view.contentDOM, {
+    clipboardData: { types: ['text/plain'], getData: (t) => (t === 'text/plain' ? text : '') },
+  });
+};
 const lineText = (view, line) => view.state.doc.line(line).text;
 const caretCol = (view) => {
   const head = view.state.selection.main.head;
@@ -371,16 +386,6 @@ describe('a block continues ITS OWN indentation, whatever the others use (review
     record('else_lines_up', view.state.doc.toString());
   });
 
-  test('a flat multi-line paste onto an indented empty line lines up (Vormachen’s clipboard)', () => {
-    const { view } = mount('import robot\ndef f():\n    robot.home()\nf()\n');
-    put(view, endOf(view, 3));
-    press(view, 'Enter');
-    paste(view, `robot.move_to("A")\nrobot.close_gripper()\n${MARK}`);
-    expect([lineText(view, 4), lineText(view, 5), lineText(view, 6)])
-      .toEqual(['    robot.move_to("A")', '    robot.close_gripper()', `    ${MARK}`]);
-    record('flat_paste_lines_up', view.state.doc.toString());
-  });
-
   test('„Einfügen" agrees with Enter in the mixed file', () => {
     const src = 'import robot\ndef f():\n    robot.home()\n\nf()\nif True:\n  robot.log("a")\n';
     for (const [line, indent] of [[3, '    '], [7, '  ']]) {
@@ -479,6 +484,97 @@ describe('an EMPTY row inside a block chose nothing: Enter continues the block (
   });
 });
 
+describe('a paste goes in exactly as copied (owner decision R4-O1)', () => {
+  beforeEach(() => {
+    forgetVormachenCopy();
+    toast.error.mockClear();
+  });
+
+  test('a multi-line string keeps its inner indentation byte for byte (4-A E6)', () => {
+    const src = 'import robot\ndef main():\n    robot.home()\n    \n';
+    const { view } = mount(src);
+    put(view, endOf(view, 4));
+    const text = 'hilfe = """Zeile 1\n  eingerueckt\nZeile 3"""';
+    paste(view, text);
+    expect(view.state.doc.toString()).toBe(`import robot\ndef main():\n    robot.home()\n    ${text}\n`);
+  });
+
+  test('a snippet keeps its own structure (4-A E7, E7b)', () => {
+    const src = 'import robot\ndef main():\n    robot.home()\n    \n';
+    for (const text of ['robot.log("a")\n    robot.log("b")', '    for i in range(2):\n        robot.log("a")\n']) {
+      const { view, unmount } = mount(src);
+      put(view, endOf(view, 4));
+      paste(view, text);
+      expect(view.state.doc.toString()).toBe(`import robot\ndef main():\n    robot.home()\n    ${text}\n`);
+      unmount();
+    }
+  });
+
+  test('Vormachen’s own copied lines land like „Einfügen": below the cursor line, never joined', () => {
+    const copied = rememberVormachenCopy('python', ['robot.move_to("Ablage")', MARK]);
+    const src = 'import robot\n\ndef main():\n    robot.home()\n\n    robot.log(1)\n\nmain()\n';
+    for (const [where, line] of [['end of a body line', 4], ['the empty row in the body', 5]]) {
+      const { view, unmount } = mount(src);
+      put(view, endOf(view, line));
+      paste(view, copied);
+      const rows = view.state.doc.toString().split('\n');
+      expect([where, rows[line - 1], rows[line], rows[line + 1]])
+        .toEqual([where, src.split('\n')[line - 1], '    robot.move_to("Ablage")', `    ${MARK}`]);
+      // The caret at the end of the last pasted line.
+      expect(view.state.doc.lineAt(view.state.selection.main.head).number).toBe(line + 2);
+      expect(toast.error).not.toHaveBeenCalled();
+      record(`vormachen_paste_${line}`, view.state.doc.toString());
+      unmount();
+    }
+  });
+
+  test('… as the Windows clipboard hands it back (CRLF) too', () => {
+    rememberVormachenCopy('python', [MARK]);
+    const { view } = mount('import robot\nif True:\n    robot.home()\n');
+    put(view, endOf(view, 3));
+    paste(view, `${MARK}\r\n`);
+    expect(view.state.doc.toString()).toBe(`import robot\nif True:\n    robot.home()\n    ${MARK}\n`);
+  });
+
+  test('… and at a spot where a line cannot stand, nothing is pasted and the reason is said', () => {
+    const copied = rememberVormachenCopy('python', [MARK]);
+    const src = 'import robot\nimport sys\nrobot.home()\n';
+    const { view } = mount(src);
+    put(view, endOf(view, 1));
+    paste(view, copied);
+    expect(view.state.doc.toString()).toBe(src);
+    expect(toast.error).toHaveBeenCalledWith(CODE_DE.INSERT_LEADING_BLOCK_HINT);
+  });
+
+  test('an edited copy, or one for the other language, is ordinary text: verbatim', () => {
+    const copied = rememberVormachenCopy('python', ['robot.move_to("Ablage")', MARK]);
+    const src = 'import robot\ndef main():\n    robot.home()\n    \n';
+    const edited = copied.replace('Ablage', 'Kiste');
+    const { view } = mount(src);
+    put(view, endOf(view, 4));
+    paste(view, edited);
+    expect(view.state.doc.toString()).toBe(`import robot\ndef main():\n    robot.home()\n    ${edited}\n`);
+    rememberVormachenCopy('java', ['Robot.home();']);
+    const java = mount('class Main {}\n').view;
+    put(java, 0);
+    paste(java, copied);
+    expect(java.state.doc.toString()).toBe(`${copied}class Main {}\n`);
+  });
+});
+
+describe('a Sammlung row dropped where no line may stand (review round 4, mc9 — X2)', () => {
+  test('writes nothing and says why, in German', () => {
+    toast.error.mockClear();
+    const src = 'import robot\nimport sys\nrobot.home()\n';
+    const { view } = mount(src);
+    view.posAtCoords = () => view.state.doc.line(1).from;
+    const data = { [SNIPPET_MIME]: JSON.stringify({ kind: 'recording', name: 'Winken' }) };
+    fireEvent.drop(view.contentDOM, { dataTransfer: { types: Object.keys(data), getData: (t) => data[t] || '' } });
+    expect(view.state.doc.toString()).toBe(src);
+    expect(toast.error).toHaveBeenCalledWith(CODE_DE.INSERT_LEADING_BLOCK_HINT);
+  });
+});
+
 describe('Java: Enter continues the block’s sibling indentation (review round 3, 3-B N1)', () => {
   test('a 2-space loop body in a 4-space starter stays at its own column', () => {
     const src = 'import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        for (int i = 0; i < 3; i++) {\n          Robot.log("x");\n        }\n    }\n}\n';
@@ -510,7 +606,7 @@ describe('the fixture the Python test compiles', () => {
       marker: { python: MARK },
       cases: produced.slice().sort((a, b) => a.name.localeCompare(b.name)),
     };
-    expect(doc.cases.length).toBe(STYLES.length * 6 + 15 + Object.keys(EMPTY_ROWS).length + 3);
+    expect(doc.cases.length).toBe(STYLES.length * 6 + 14 + Object.keys(EMPTY_ROWS).length + 5);
     if (REGEN) {
       fs.mkdirSync(path.dirname(FIXTURE), { recursive: true });
       fs.writeFileSync(FIXTURE, `${JSON.stringify(doc, null, 1)}\n`);

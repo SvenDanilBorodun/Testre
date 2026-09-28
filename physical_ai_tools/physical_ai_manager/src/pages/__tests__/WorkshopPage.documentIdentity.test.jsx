@@ -51,6 +51,7 @@ vi.mock('react-redux', () => ({
 
 const mockPage = vi.hoisted(() => ({
   blockly: null, code: null, run: null, history: null, template: null, gallery: null,
+  teach: null, autosave: null,
 }));
 vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
   __esModule: true,
@@ -105,7 +106,13 @@ vi.mock('../../components/Workshop/LeaderToggle', () => ({ __esModule: true, def
 vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
 vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, default: () => <div data-testid="debug-panel" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
-vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockPage.teach = props;
+    return <div data-testid="teach-host" />;
+  },
+}));
 vi.mock('../../components/Workshop/JogPanel', () => ({ __esModule: true, default: () => <div data-testid="jog-panel" /> }));
 vi.mock('../../hooks/useRsBridgeStatus', () => ({
   __esModule: true,
@@ -140,7 +147,10 @@ vi.mock('../../hooks/useRosTopicSubscription', () => ({
 }));
 vi.mock('../../components/Workshop/useAutosave', () => ({
   __esModule: true,
-  useAutosave: () => ({ lastSavedAt: null }),
+  useAutosave: (opts) => {
+    mockPage.autosave = opts;
+    return { lastSavedAt: null };
+  },
   autosaveSessionScope: () => 'session-1',
   formatAutosaveAge: () => '',
 }));
@@ -267,6 +277,8 @@ describe.each(NOTATIONS)('MD2 — no save while %s loads, and a save goes to the
     expect(mockApi.createWorkflow).not.toHaveBeenCalled();
     expect(mockToast.error).toHaveBeenCalledWith(DE.DOCUMENT_LOADING);
     expect(mockToast.error.mock.calls.filter(([m]) => m === DE.DOCUMENT_LOADING).length).toBe(2);
+    // No version of either program is restored meanwhile.
+    expect(mockPage.history.lockedReason).toBe(DE.DOCUMENT_LOADING);
     await act(async () => { pending[b].resolve(ROWS[b]); });
     await screen.findByTestId(testId);
     await act(async () => { pressCtrlS(); await Promise.resolve(); });
@@ -274,15 +286,35 @@ describe.each(NOTATIONS)('MD2 — no save while %s loads, and a save goes to the
     expect(saves()).toEqual([[b, content(ROWS[b])]]);
   });
 
-  test('a program that failed to load holds no cloud row: a save creates one and never overwrites it', async () => {
+  test('a program that failed to load holds no cloud row: a save creates one and overwrites neither', async () => {
     const { rerender } = await openFirst(a, testId);
     edit(testId, 'A-bearbeitet');
     pending[b] = true;
-    mockState = baseState({ selectedWorkflowId: b });
+    // What the editor falls back to after a failed load: the store's copy of
+    // the last canvas edit (for a code program, a leftover from earlier).
+    const leftover = { blocks: { blocks: [{ type: 'edubotics_home', id: 'Rest' }] } };
+    mockState = baseState({ selectedWorkflowId: b, unsavedBlocklyJson: leftover });
     rerender(<WorkshopPage isActive />);
     await act(async () => { pending[b].reject(new Error('offline')); });
+    // Nothing that writes to the cloud names either row.
+    expect(mockPage.run.workflowId).toBeNull();
+    expect(mockPage.history.workflowId).toBeNull();
+    expect(mockPage.teach.workflowId).toBeNull();
     await act(async () => { pressCtrlS(); await Promise.resolve(); await Promise.resolve(); });
-    expect(mockApi.updateWorkflow.mock.calls.map(([, id]) => id)).not.toContain(b);
+    expect(mockApi.updateWorkflow).not.toHaveBeenCalled();
+    expect(mockApi.createWorkflow).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(mockApi.createWorkflow.mock.calls[0][1].blockly_json)).toContain('Rest');
+  });
+
+  test('„Neu" while a saved program is open: the new document holds no row, and its save creates one', async () => {
+    await openFirst(a, testId);
+    await userEvent.click(screen.getByRole('button', { name: /^Neu/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Python/ }));
+    await screen.findByTestId('code-workspace');
+    expect(mockPage.run.workflowId).toBeNull();
+    await act(async () => { pressCtrlS(); await Promise.resolve(); await Promise.resolve(); });
+    expect(mockApi.updateWorkflow).not.toHaveBeenCalled();
+    expect(mockApi.createWorkflow).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -350,8 +382,23 @@ describe.each(NOTATIONS)('MD3 — a version restore of %s that lands after anoth
     const restoredB = testId === 'code-workspace'
       ? { id: b, code_language: 'python', blockly_json: {}, code_files: { 'main.py': 'import robot\nrobot.log("B-alt")\n' } }
       : { id: b, code_language: '', blockly_json: { blocks: { blocks: [{ type: 'edubotics_home', id: 'B-alt' }] } } };
+    edit(testId, 'B-bearbeitet');
     await act(async () => { mockPage.history.onRestore(restoredB); await Promise.resolve(); });
     expect(screen.getByTestId(testId).textContent).toContain('B-alt');
+    // …and a Start afterwards runs the restored version, not the edit before it
+    // (a code run sends its files, which the editor above shows).
+    const runs = testId === 'blockly-workspace' ? JSON.stringify(mockPage.run.blocklyJson) : JSON.stringify(mockPage.code.files);
+    expect(runs).toContain('B-alt');
+  });
+
+  test('a restore result that names another row is dropped', async () => {
+    await openFirst(a, testId);
+    const shownA = screen.getByTestId(testId).textContent;
+    const other = testId === 'code-workspace'
+      ? { id: 'wf-fremd', code_language: 'python', blockly_json: {}, code_files: { 'main.py': 'import robot\nrobot.log("fremd")\n' } }
+      : { id: 'wf-fremd', code_language: '', blockly_json: { blocks: { blocks: [{ type: 'edubotics_home', id: 'fremd' }] } } };
+    await act(async () => { mockPage.history.onRestore(other); await Promise.resolve(); });
+    expect(screen.getByTestId(testId).textContent).toBe(shownA);
   });
 
   test('while a restore is on its way no program is opened, created or restored, and nothing is saved', async () => {
@@ -430,4 +477,51 @@ test('Blockly: after another program opened, Start runs THAT program, never the 
   rerender(<WorkshopPage isActive />);
   await waitFor(() => expect(screen.getByTestId('blockly-workspace').textContent).toContain('"B"'));
   expect(mockPage.run.blocklyJson).toEqual(ROWS['wf-blk2'].blockly_json);
+});
+
+test('a „Neu" document opened while the unsaved one is being created does not receive its new id', async () => {
+  // An unsaved Blockly document: the first save creates its row.
+  mockState = baseState({ unsavedBlocklyJson: { blocks: { blocks: [{ type: 'edubotics_home', id: 'X' }] } } });
+  render(<WorkshopPage isActive />);
+  await screen.findByTestId('blockly-workspace');
+  let created;
+  mockApi.createWorkflow.mockImplementationOnce(() => new Promise((r) => { created = r; }));
+  await act(async () => { pressCtrlS(); await Promise.resolve(); });
+  expect(mockApi.createWorkflow).toHaveBeenCalledTimes(1);
+  // Meanwhile the student starts a new Python program — also unsaved.
+  await userEvent.click(screen.getByRole('button', { name: /^Neu/ }));
+  await userEvent.click(screen.getByRole('button', { name: /Python/ }));
+  await screen.findByTestId('code-workspace');
+  mockDispatch.mockClear();
+  await act(async () => { created({ id: 'wf-x' }); await Promise.resolve(); await Promise.resolve(); });
+  // X's row exists, but the Python program is not it.
+  const selected = mockDispatch.mock.calls.map(([x]) => x)
+    .filter((x) => x && x.type === 'workshop/setSelectedWorkflowId');
+  expect(selected).toEqual([]);
+  expect(mockPage.run.workflowId).toBeNull();
+  await act(async () => { pressCtrlS(); await Promise.resolve(); await Promise.resolve(); });
+  expect(mockApi.updateWorkflow).not.toHaveBeenCalled();
+  expect(mockApi.createWorkflow).toHaveBeenCalledTimes(2);
+});
+
+test('a cleared selection leaves the editor holding no row', async () => {
+  const { rerender } = await openFirst('wf-blk', 'blockly-workspace');
+  expect(mockPage.run.workflowId).toBe('wf-blk');
+  // The store stops naming a program (it was deleted, the student signed out).
+  mockState = baseState({ selectedWorkflowId: null });
+  rerender(<WorkshopPage isActive />);
+  await waitFor(() => expect(mockPage.run.workflowId).toBeNull());
+  expect(mockPage.history.workflowId).toBeNull();
+});
+
+test('Blockly: a crash-recovery draft replaces the last edit — Start runs the draft that is shown', async () => {
+  mockState = baseState();
+  render(<WorkshopPage isActive />);
+  await screen.findByTestId('blockly-workspace');
+  // The canvas reported an edit before the draft arrived (the read is async).
+  edit('blockly-workspace', 'vor-dem-Entwurf');
+  const draft = { blocks: { blocks: [{ type: 'edubotics_home', id: 'Entwurf' }] } };
+  act(() => { mockPage.autosave.onRestore(draft); });
+  await waitFor(() => expect(screen.getByTestId('blockly-workspace').textContent).toContain('Entwurf'));
+  expect(mockPage.run.blocklyJson).toEqual(draft);
 });

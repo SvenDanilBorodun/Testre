@@ -34,10 +34,13 @@ Installed by ``student_main.py`` into the student's own process before
   is the calling thread's own at that moment, so nothing waits for a lock a
   robot call holds (a sampler that waited for a free lock sent nothing while
   a program spent its time in robot calls), and nothing is read from another
-  thread. A failure — a robot that does not know ``__vars``, a lost
-  connection, an oversized frame — switches the live values off for the rest
-  of the run and never reaches the program: the robot call goes ahead
-  unchanged.
+  thread. :meth:`LiveValues.final` is the one send that waits (for another
+  thread's check, the server's floor, the RPC lock another thread's robot
+  call holds), and all of it within ONE ``LIVE_VALUES_INTERVAL_S``; what is
+  not free by then is skipped. A failure — a robot that does not know
+  ``__vars``, a lost connection, an oversized frame — switches the live
+  values off for the rest of the run and never reaches the program: the
+  robot call goes ahead unchanged.
 
   Every live value goes through :func:`safe_render`, which never runs
   student code: EXACT builtin types only (``type(v) is …``, compared by
@@ -624,14 +627,18 @@ class LiveValues:
             self._busy.release()
 
     def final(self, namespaces, fallback_position) -> None:
-        """The last values, once, before ``__exit``. Never raises, and never
-        holds the program's end for more than ONE ``interval_s`` (review
-        round 3, nb7): the wait for another thread's check in flight and the
-        wait for the server's floor share that one deadline. When another
-        thread holds the check for the whole interval, the final send is
-        skipped — that thread is sending the same module values right now.
-        A check that ran just now is waited out (within the deadline) so the
-        server looks at this frame instead of answering ``skipped``."""
+        """The last values, once, before ``__exit``. Never raises. Every WAIT
+        shares ONE deadline of ``interval_s`` (review round 3, nb7; round 4,
+        mc3): another thread's check in flight, the server's floor, and the
+        stub's RPC lock — which another thread inside a long robot call, or
+        one looping robot calls, may hold (the lock is not fair; the end was
+        measured held 5.7–29 s). The lock is taken with the time left, and
+        when it is not free by then the final send is skipped: that thread is
+        sending the same module values before its own calls. So the end waits
+        at most ``interval_s``, plus the one ``__vars`` round trip when the
+        lock did come free in time. A check that ran just now is waited out
+        (within the deadline) so the server looks at this frame instead of
+        answering ``skipped``."""
         if not self.enabled:
             return
         deadline = self._clock() + self._interval
@@ -644,7 +651,17 @@ class LiveValues:
             wait = min(self._next_check, deadline) - self._clock()
             if wait > 0:
                 self._sleep(wait)
-            self._send_if_changed(self._position or fallback_position, fitted)
+            rpc_lock = getattr(self._rpc, '_lock', None)
+            if rpc_lock is None:
+                self._send_if_changed(self._position or fallback_position, fitted)
+                return
+            if not rpc_lock.acquire(timeout=max(0.0, deadline - self._clock())):
+                return
+            try:
+                # The stub's own call takes this (re-entrant) lock again.
+                self._send_if_changed(self._position or fallback_position, fitted)
+            finally:
+                rpc_lock.release()
         except Exception:  # noqa: BLE001 — the end of a run is never a crash
             self.enabled = False
         finally:

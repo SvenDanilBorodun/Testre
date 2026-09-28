@@ -853,6 +853,91 @@ class LiveValuesThroughTheStub(unittest.TestCase):
         self.assertEqual([c[1][2] for c in rpc.calls if c[0] == '__vars'], [{'punkte': 3}])
 
 
+class TheFinalSendIsBoundedByTheRpcLock(unittest.TestCase):
+    """Review round 4 (mc3, 4-B F1): `final` waited on the stub's RPC lock
+    without a bound — another thread inside a long robot call, or one
+    looping robot calls (the lock is not fair), held the program's end for
+    5.7–29 s before the last values went out. The lock is now taken with
+    the time left of the one deadline, and the final send is skipped when it
+    is not free by then."""
+
+    class _LockingRpc:
+        """The stub's surface as `call` really uses it: under `_lock`."""
+
+        def __init__(self):
+            self._lock = threading.RLock()
+            self.calls = []
+
+        def call(self, method, args, kind):
+            with self._lock:
+                self.calls.append((method, args, kind))
+            return None
+
+    def test_a_thread_inside_a_long_call_cannot_hold_the_end(self):
+        dbg = _load_hook()
+        rpc = self._LockingRpc()
+        live = dbg.LiveValues(rpc, tempfile.mkdtemp(prefix='edu-final-'), interval_s=0.3)
+        held = threading.Event()
+        release = threading.Event()
+
+        def long_robot_call():
+            with rpc._lock:
+                held.set()
+                release.wait(5.0)
+        worker = threading.Thread(target=long_robot_call, daemon=True)
+        worker.start()
+        self.assertTrue(held.wait(2.0))
+        t0 = time.monotonic()
+        live.final([{'punkte': 3}], ('main.py', 0))
+        elapsed = time.monotonic() - t0
+        release.set()
+        worker.join(2.0)
+        self.assertLess(elapsed, 0.3 + 0.2, 'the lock wait shares the one deadline')
+        self.assertEqual([c for c in rpc.calls if c[0] == '__vars'], [], 'skipped, not sent late')
+        self.assertTrue(live.enabled)
+
+    def test_a_free_lock_still_sends_the_last_values(self):
+        dbg = _load_hook()
+        rpc = self._LockingRpc()
+        live = dbg.LiveValues(rpc, tempfile.mkdtemp(prefix='edu-final-'), interval_s=0.3)
+        live.final([{'punkte': 3}], ('main.py', 0))
+        self.assertEqual([c[1][2] for c in rpc.calls if c[0] == '__vars'], [{'punkte': 3}])
+
+    def test_through_the_real_stub_a_looping_thread_cannot_hold_the_end(self):
+        """The shape 4-B measured in the image: a worker thread looping robot
+        calls while the main program ends."""
+        # The main program itself makes no robot call: the stub's lock is
+        # not fair (docs/KNOWN-ISSUES.md), and its own call would be starved
+        # by the loop before the end is ever reached.
+        src = ('import robot, threading, time\n'
+               'punkte = 1\n'
+               'LAUF = [True]\n'
+               'def arbeiter():\n'
+               '    while LAUF[0]:\n'
+               '        robot.move_to("A")\n'
+               'threading.Thread(target=arbeiter, daemon=True).start()\n'
+               'time.sleep(0.2)\n'
+               'punkte = 2\n')
+        run = _StubRun(self, src, slow={'move_to': 0.05}, interval_s=0.3)
+        saved = sys.modules.get('robot')
+        sys.modules['robot'] = run.stub
+        try:
+            ns = runpy.run_path(os.path.join(run.tmp, 'main.py'), run_name='__main__')
+        finally:
+            if saved is None:
+                sys.modules.pop('robot', None)
+            else:
+                sys.modules['robot'] = saved
+        run.stub._rpc.before_call = None
+        t0 = time.monotonic()
+        run.live.final([ns], ('main.py', 0))
+        elapsed = time.monotonic() - t0
+        ns['LAUF'][0] = False
+        # One deadline, plus at most the one __vars round trip when the lock
+        # did come free in time (the fake robot answers __vars at once).
+        self.assertLess(elapsed, 0.3 + 0.25)
+
+
 class SamplerSendsOnlyTheLine(unittest.TestCase):
     """R2-O1: the background sampler is back to its v2.22.0 job, the `__line`
     highlight. With no cross-thread value reads left, what keeps it that way

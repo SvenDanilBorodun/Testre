@@ -20,7 +20,6 @@ import { DEFAULT_OBJECT_CATALOG } from '../components/Workshop/blocks/objectCata
 import RunControls from '../components/Workshop/RunControls';
 import CameraFeedOverlay from '../components/Workshop/CameraFeedOverlay';
 import SimStage from '../components/Workshop/SimStage';
-import TemplatePicker from '../components/Workshop/TemplatePicker';
 import ToolbarButtons from '../components/Workshop/ToolbarButtons';
 import DebugPanel from '../components/Workshop/DebugPanel';
 import GalleryTab from '../components/Workshop/GalleryTab';
@@ -54,7 +53,7 @@ import {
   TEACH_BLOCK_TITLES_DE, TEACH_KINDS, TEACH_KIND_ICON, TEACH_KIND_LABEL_DE, teachEntryBlockReason,
 } from '../components/Workshop/teach/teachGates';
 import MenuButton from '../components/Workshop/MenuButton';
-import Icon from '../components/icons/Icon';
+import OpenWorkflowPopover from '../components/Workshop/OpenWorkflowPopover';
 import { toastIcon } from '../components/icons/toast';
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
 import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
@@ -217,57 +216,6 @@ const SIM_DEFAULT_CATALOG = DEFAULT_OBJECT_CATALOG;
 // hydrate/save round-trip the whole sim_scene unchanged, so persisted zones ride
 // along in workflows.sim_scene.zones.
 const EMPTY_SIM_SCENE = { version: 1, objects: [], zones: [] };
-
-// Compact „Öffnen" control for the toolbar: the TemplatePicker (a full card list
-// of templates + own workflows) used to sit expanded in the top band, eating
-// vertical space in every view. It now opens in a popover so the band stays a
-// single slim row (density pass). Closes on pick or outside click.
-// `lockedReason` (a program runs, R2-O3): the button is disabled and says why;
-// a popover already open keeps its list but every choice in it is disabled.
-function OpenWorkflowPopover({ onPicked, lockedReason = null }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDoc = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [open]);
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        disabled={!!lockedReason}
-        title={lockedReason || 'Vorlage oder gespeicherten Workflow öffnen'}
-        className={
-          'inline-flex items-center gap-1 min-h-[28px] px-3 py-1.5 rounded-md '
-          + 'text-sm font-medium border border-[var(--line)] bg-white text-[var(--ink)] '
-          + 'hover:bg-[var(--bg-sunk)] focus:outline-none focus-visible:ring-2 '
-          + 'focus-visible:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed'
-        }
-      >
-        <Icon name="folderOpen" />
-        {DE.DOCK_OPEN_WORKFLOW}
-        <Icon name="chevronDown" size="0.85em" />
-      </button>
-      {open && (
-        <div className="absolute z-30 mt-1 left-0 w-80 max-h-[60vh] overflow-auto rounded-md border border-[var(--line)] bg-white shadow-lg p-3">
-          <TemplatePicker
-            lockedReason={lockedReason}
-            onPicked={(wf) => {
-              setOpen(false);
-              if (onPicked) onPicked(wf);
-            }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
 
 function WorkshopPage({ isActive }) {
   const dispatch = useDispatch();

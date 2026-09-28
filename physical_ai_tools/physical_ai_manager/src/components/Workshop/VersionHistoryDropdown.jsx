@@ -8,7 +8,9 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, {
+  useCallback, useEffect, useId, useRef, useState,
+} from 'react';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import {
@@ -17,6 +19,7 @@ import {
 } from '../../services/workflowApi';
 import { DE } from './blocks/messages_de';
 import Icon from '../icons/Icon';
+import usePopoverDismiss, { movePopoverFocus, usePopoverListFocus } from './usePopoverDismiss';
 
 function fmtTs(iso) {
   if (!iso) return '–';
@@ -48,6 +51,14 @@ function fmtTs(iso) {
 // round 4, mc8): while one is on its way every other „laden" is disabled and
 // says why, and a click that arrives anyway is refused — two overlapping
 // restores told the page [true, true, false] and unlocked it mid-restore.
+//
+// The popover behaves like every Roboter-Studio popover (usePopoverDismiss.js,
+// owner decision R1-O3): a pointerdown outside — a click into Blockly
+// included, heard in the capture phase — or focus leaving closes it; Esc closes
+// it and returns focus to the button; opening moves focus to the newest
+// „laden" once the list has loaded, and ArrowUp/ArrowDown/Home/End move between
+// the „laden" buttons. Those buttons, their titles and every refusal above are
+// unchanged; nothing here closes a list the lock arrives under.
 function VersionHistoryDropdown({
   workflowId, onRestore, lockedReason = null, onRestoringChange = null,
 }) {
@@ -58,24 +69,24 @@ function VersionHistoryDropdown({
   const [restoringId, setRestoringId] = useState(null);
   // Set synchronously by the click, before React re-renders the buttons.
   const inFlightRef = useRef(false);
-  // Audit §verhist-r1: ref-based click-outside handler. Without it the
-  // popover hangs around after the student clicks the workspace, an
-  // accidental discovery that comes up in every QA run.
+  // Audit §verhist-r1: without an outside-click close the popover hung around
+  // after the student clicked the workspace. usePopoverDismiss hears that
+  // click in the capture phase (Blockly swallows it before it bubbles).
   const containerRef = useRef(null);
+  const triggerRef = useRef(null);
+  const panelRef = useRef(null);
+  const panelId = useId();
 
   const disabled = !workflowId || !accessToken || !!lockedReason;
 
-  useEffect(() => {
-    if (!open) return undefined;
-    const handler = (event) => {
-      const root = containerRef.current;
-      if (!root) return;
-      if (event.target instanceof Node && root.contains(event.target)) return;
-      setOpen(false);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [open]);
+  const onDismiss = useCallback((reason) => {
+    setOpen(false);
+    if (reason === 'escape' && triggerRef.current) triggerRef.current.focus();
+  }, []);
+  usePopoverDismiss({ open, containerRef, onClose: onDismiss });
+  const focusList = usePopoverListFocus({
+    open, containerRef, panelRef, triggerRef,
+  });
 
   const refresh = useCallback(async () => {
     if (!workflowId || !accessToken) return;
@@ -130,15 +141,42 @@ function VersionHistoryDropdown({
     [accessToken, workflowId, onRestore, lockedReason, onRestoringChange]
   );
 
+  const onTriggerClick = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    focusList('first');
+  };
+
+  const onTriggerKeyDown = (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!open) setOpen(true);
+    focusList(e.key === 'ArrowUp' ? 'last' : 'first');
+  };
+
+  const onPanelKeyDown = (e) => {
+    if (movePopoverFocus(panelRef.current, e.key)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+
   return (
     <div className="relative inline-block" ref={containerRef}>
       <button
+        ref={triggerRef}
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={onTriggerClick}
+        onKeyDown={onTriggerKeyDown}
         disabled={disabled}
         title={lockedReason || undefined}
         aria-expanded={open}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
+        aria-controls={open ? panelId : undefined}
         className={
           'inline-flex items-center justify-center gap-1.5 min-h-[28px] '
           + 'px-3 py-1.5 rounded-md text-sm font-medium border border-[var(--line)] '
@@ -151,8 +189,13 @@ function VersionHistoryDropdown({
         {DE.VERSION_HISTORY}
       </button>
       {open && (
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
         <div
-          role="menu"
+          ref={panelRef}
+          id={panelId}
+          role="dialog"
+          aria-label={DE.VERSION_HISTORY}
+          onKeyDown={onPanelKeyDown}
           className="absolute right-0 mt-1 z-10 w-72 bg-white border border-[var(--line)] rounded-md shadow-lg max-h-80 overflow-auto"
         >
           {loading ? (
@@ -166,7 +209,6 @@ function VersionHistoryDropdown({
               {versions.map((v) => (
                 <li
                   key={v.id}
-                  role="menuitem"
                   className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-[var(--bg-sunk)]"
                 >
                   <span className="text-xs text-[var(--ink)] font-mono">
@@ -174,6 +216,7 @@ function VersionHistoryDropdown({
                   </span>
                   <button
                     type="button"
+                    data-popover-item=""
                     onClick={() => handleRestore(v.id)}
                     disabled={restoringId !== null}
                     title={lockedReason

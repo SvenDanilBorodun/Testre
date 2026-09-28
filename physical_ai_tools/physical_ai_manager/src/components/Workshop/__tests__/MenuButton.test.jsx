@@ -194,9 +194,69 @@ describe('MenuButton', () => {
     icons.forEach((svg) => expect(svg).toHaveAttribute('aria-hidden', 'true'));
   });
 
-  test('placement up opens above the trigger', () => {
-    const { trigger } = setup({ placement: 'up' });
+  test('placement up opens above the trigger, and its chevron points up', () => {
+    const { trigger, container } = setup({ placement: 'up' });
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(trigger.querySelector('svg[data-icon="chevronUp"]')).not.toBeNull();
     fireEvent.click(trigger);
     expect(screen.getByRole('menu').className).toMatch(/bottom-full/);
+    // eslint-disable-next-line testing-library/no-node-access, testing-library/no-container
+    expect(container.querySelector('svg[data-icon="chevronDown"]')).toBeNull();
+  });
+
+  test('placement down keeps the chevron pointing down', () => {
+    const { trigger } = setup();
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(trigger.querySelector('svg[data-icon="chevronDown"]')).not.toBeNull();
+  });
+
+  // Review round 1 (A4): holding Enter on the trigger opened the menu with the
+  // first item focused, and the key's auto-repeat then CHOSE that item.
+  test.each([['Enter'], [' ']])('a held %j (key auto-repeat) never chooses an item', (key) => {
+    const { trigger, onSelect } = setup();
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key });
+    expect(menuItems()[0]).toHaveFocus();
+    fireEvent.keyDown(menuItems()[0], { key, repeat: true });
+    fireEvent.keyDown(menuItems()[0], { key, repeat: true });
+    Object.values(onSelect).forEach((fn) => expect(fn).not.toHaveBeenCalled());
+    expect(menu()).not.toBeNull();
+    // A fresh press still chooses.
+    fireEvent.keyDown(menuItems()[0], { key });
+    expect(onSelect.a).toHaveBeenCalledTimes(1);
+  });
+
+  test('a repeated Enter on the closed trigger does not toggle it', () => {
+    const { trigger } = setup();
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: 'Enter', repeat: true });
+    expect(menu()).toBeNull();
+  });
+
+  test('focus moving OUTSIDE the component closes it; focus going nowhere does not', () => {
+    const { trigger } = setup();
+    fireEvent.click(trigger);
+    // A window switch / a control disabled under the menu: no relatedTarget.
+    fireEvent.focusOut(menuItems()[0], { relatedTarget: null });
+    expect(menu()).not.toBeNull();
+    // Inside (the trigger): stays open.
+    fireEvent.focusOut(menuItems()[0], { relatedTarget: trigger });
+    expect(menu()).not.toBeNull();
+    fireEvent.focusOut(menuItems()[0], { relatedTarget: screen.getByRole('button', { name: 'Danach' }) });
+    expect(menu()).toBeNull();
+  });
+
+  test('a pointerdown outside is heard in the capture phase, even when the target stops it', () => {
+    const { trigger } = setup();
+    const blocker = document.createElement('div');
+    blocker.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); });
+    document.body.appendChild(blocker);
+    try {
+      fireEvent.click(trigger);
+      fireEvent.pointerDown(blocker);
+      expect(menu()).toBeNull();
+    } finally {
+      blocker.remove();
+    }
   });
 });

@@ -16,7 +16,13 @@
 //     with the last.
 //   * Menu: role="menu" of role="menuitem" buttons (tabIndex -1, roving focus):
 //     ArrowUp/ArrowDown wrap, Home/End jump, Enter/Space choose, Esc closes and
-//     returns focus to the trigger, Tab and a pointerdown outside close.
+//     returns focus to the trigger, Tab closes. A held Enter or Space (key
+//     auto-repeat) never chooses: the press that opened the menu must not also
+//     pick its first item.
+//   * Dismissal is usePopoverDismiss.js, shared with „Öffnen" and „Verlauf": a
+//     pointerdown outside — heard in the CAPTURE phase, because Blockly's
+//     gesture stops a click into the workspace from ever bubbling — and focus
+//     moving outside both close it.
 //   * Choosing closes the menu, focuses the TRIGGER, then calls the item's
 //     onSelect — so a dialog the choice opens (Vormachen) restores focus to it.
 //   * Every key it handles is stopped here: Blockly's document-level shortcuts
@@ -26,9 +32,20 @@ import React, {
   useCallback, useEffect, useId, useRef, useState,
 } from 'react';
 import Icon from '../icons/Icon';
+import usePopoverDismiss from './usePopoverDismiss';
 
 const PLACEMENT = { down: 'top-full mt-1', up: 'bottom-full mb-1' };
-const ALIGN = { left: 'left-0', right: 'right-0', stretch: 'left-0 right-0' };
+// The menu's box and its items: `md` for the toolbar, `sm` for a narrow
+// sidebar — small text on one line, the menu as wide as its longest item but
+// never narrower than the trigger (review round 1, B5: „Ziel in der Kamera
+// setzen" wrapped in the 11rem code sidebar).
+const SIZE = {
+  md: { menu: 'min-w-[12rem]', item: 'px-3 py-1.5 text-sm' },
+  sm: { menu: 'min-w-full w-max', item: 'px-2.5 py-1.5 text-xs whitespace-nowrap' },
+};
+// The chevron points where the menu opens.
+const CHEVRON_ICON = { down: 'chevronDown', up: 'chevronUp' };
+const ALIGN = { left: 'left-0', right: 'right-0' };
 
 export default function MenuButton({
   label,
@@ -39,9 +56,11 @@ export default function MenuButton({
   title,
   placement = 'down',
   align = 'left',
+  size = 'md',
   className = '',
   buttonClassName = '',
 }) {
+  const sized = SIZE[size] || SIZE.md;
   const menuId = useId();
   const wrapRef = useRef(null);
   const triggerRef = useRef(null);
@@ -67,15 +86,10 @@ export default function MenuButton({
     if (el) el.focus();
   }, [open, focusIndex]);
 
-  // A pointerdown outside closes (without taking focus anywhere).
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDown = (e) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener('pointerdown', onDown);
-    return () => document.removeEventListener('pointerdown', onDown);
-  }, [open]);
+  // Outside pointerdown or focus leaving: close without taking focus
+  // anywhere. Esc: close and hand focus back to the trigger.
+  const onDismiss = useCallback((reason) => close(reason === 'escape'), [close]);
+  usePopoverDismiss({ open, containerRef: wrapRef, onClose: onDismiss });
 
   // A trigger that becomes disabled takes its menu with it.
   useEffect(() => {
@@ -89,6 +103,11 @@ export default function MenuButton({
 
   const onTriggerKeyDown = (e) => {
     if (disabled) return;
+    if (e.repeat && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
       e.preventDefault();
       e.stopPropagation();
@@ -117,11 +136,7 @@ export default function MenuButton({
       case 'ArrowUp': move(focusIndex - 1); break;
       case 'Home': move(0); break;
       case 'End': move(n - 1); break;
-      case 'Escape':
-        e.preventDefault();
-        e.stopPropagation();
-        close(true);
-        break;
+      // Esc is usePopoverDismiss's: it closes and hands focus back.
       case 'Tab':
         e.stopPropagation();
         setOpen(false);
@@ -130,6 +145,8 @@ export default function MenuButton({
       case ' ': {
         e.preventDefault();
         e.stopPropagation();
+        // Auto-repeat of the key that opened the menu: never a choice.
+        if (e.repeat) break;
         const index = itemRefs.current.indexOf(e.target);
         choose(items[index >= 0 ? index : focusIndex]);
         break;
@@ -160,7 +177,7 @@ export default function MenuButton({
       >
         {icon && <Icon name={icon} />}
         <span>{label}</span>
-        <Icon name="chevronDown" size="0.85em" />
+        <Icon name={CHEVRON_ICON[placement] || CHEVRON_ICON.down} size="0.85em" />
       </button>
       {open && (
         // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
@@ -171,7 +188,7 @@ export default function MenuButton({
           onKeyDown={onMenuKeyDown}
           onKeyUp={onMenuKeyUp}
           className={
-            `absolute z-30 min-w-[12rem] rounded-md border border-[var(--line)] bg-white py-1 shadow-lg ${
+            `absolute z-30 ${sized.menu} rounded-md border border-[var(--line)] bg-white py-1 shadow-lg ${
               PLACEMENT[placement] || PLACEMENT.down} ${ALIGN[align] || ALIGN.left}`
           }
         >
@@ -184,7 +201,7 @@ export default function MenuButton({
                 tabIndex={-1}
                 onClick={() => choose(item)}
                 className={
-                  'flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--ink)] '
+                  `flex w-full items-center gap-2 ${sized.item} text-left text-[var(--ink)] `
                   + 'hover:bg-[var(--bg-sunk)] focus:bg-[var(--bg-sunk)] focus:outline-none'
                 }
               >

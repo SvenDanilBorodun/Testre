@@ -181,6 +181,80 @@ public final class SmokeMain {
         check(Long.valueOf(grenze).equals(RpcClient.shownLong(grenze)), "zeige long at 2^53");
         check(Double.valueOf((double) (grenze + 1)).equals(RpcClient.shownLong(grenze + 1)), "zeige long past 2^53");
         check(Double.valueOf((double) Long.MIN_VALUE).equals(RpcClient.shownObject(Long.MIN_VALUE)), "zeige Long past -2^53");
+        // Review round 5 (nd2): ANY Throwable of the student's own code is
+        // "<?>" — an AssertionError from toString() reached the program — and
+        // only the JVM's own failures go on.
+        Object assertBoese = new Object() {
+            @Override
+            public String toString() {
+                throw new AssertionError("toString kaputt");
+            }
+        };
+        check("<?>".equals(RpcClient.shownObject(assertBoese)), "zeige an AssertionError in toString");
+        Object eigenerFehler = new Object() {
+            @Override
+            public String toString() {
+                throw new ExceptionInInitializerError("eigener Fehler");
+            }
+        };
+        check("<?>".equals(RpcClient.shownObject(eigenerFehler)), "zeige any other Error");
+        Object speicher = new Object() {
+            @Override
+            public String toString() {
+                throw new OutOfMemoryError("simuliert");
+            }
+        };
+        boolean vmFehler = false;
+        try {
+            RpcClient.shownObject(speicher);
+        } catch (OutOfMemoryError e) {
+            vmFehler = true;
+        }
+        check(vmFehler, "zeige lets the JVM's own failure go on");
+        // A Map is its entries, never its toString(); huge values are bounded
+        // BEFORE any text is built (nd2).
+        check(EduJson.encode(RpcClient.shownObject(Map.of("k", 1))).equals("{\"k\":1}"), "zeige Map");
+        Map<Object, Object> ohneText = new java.util.LinkedHashMap<Object, Object>() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public String toString() {
+                throw new IllegalStateException("nie aufgerufen");
+            }
+        };
+        ohneText.put(1, "eins");
+        check(EduJson.encode(RpcClient.shownObject(ohneText)).equals("{\"1\":\"eins\"}"),
+              "zeige a Map through its entries");
+        Map<Integer, Integer> riesig = new java.util.HashMap<>();
+        for (int i = 0; i < 1_000_000; i++) {
+            riesig.put(i, i);
+        }
+        long t0 = System.nanoTime();
+        Object riesigGezeigt = RpcClient.shownObject(riesig);
+        long mapMs = (System.nanoTime() - t0) / 1_000_000;
+        check(riesigGezeigt instanceof Map && ((Map<?, ?>) riesigGezeigt).size() == RpcClient.SHOWN_MAX_ITEMS + 1
+              && ((Map<?, ?>) riesigGezeigt).containsKey("…"), "zeige caps a Map and says so");
+        check(mapMs < 500, "zeige a Map of a million entries is cheap: " + mapMs + " ms");
+        java.math.BigInteger sehrGross = java.math.BigInteger.ONE.shiftLeft(1 << 22);
+        t0 = System.nanoTime();
+        Object grossGezeigt = RpcClient.shownObject(sehrGross);
+        long bigMs = (System.nanoTime() - t0) / 1_000_000;
+        check(RpcClient.SHOWN_TOO_BIG.equals(grossGezeigt), "zeige a BigInteger of millions of bits");
+        check(bigMs < 200, "zeige a BigInteger of millions of bits is cheap: " + bigMs + " ms");
+        check(RpcClient.SHOWN_TOO_BIG.equals(RpcClient.shownObject(new java.math.BigDecimal(sehrGross, 3))),
+              "zeige a BigDecimal of millions of bits");
+        String tausend = "1" + "0".repeat(999);
+        check(tausend.equals(RpcClient.shownObject(new java.math.BigInteger(tausend))),
+              "zeige a thousand-digit BigInteger is still its text");
+        check(RpcClient.SHOWN_TOO_BIG.equals(RpcClient.shownObject(java.math.BigInteger.TEN.pow(1001))),
+              "zeige past the text's thousand characters");
+        StringBuilder langerText = new StringBuilder();
+        for (int i = 0; i < 1_000_000; i++) {
+            langerText.append('x');
+        }
+        Object textGezeigt = RpcClient.shownObject(langerText);
+        check(textGezeigt instanceof String && ((String) textGezeigt).length() == RpcClient.SHOWN_MAX_CHARS,
+              "zeige a CharSequence cut before it becomes text");
         check(RpcClient.asPoint(null) == null, "null point");
         check(RpcClient.asPoint(List.of(1.0, 2L, 3.5))[1] == 2.0, "point decode");
 

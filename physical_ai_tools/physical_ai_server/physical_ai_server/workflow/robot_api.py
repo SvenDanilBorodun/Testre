@@ -519,6 +519,14 @@ def _comment_safe(text: str) -> str:
 # the cut the robot makes, not the stub's). Every string/key/scalar costs at
 # least 4, so the rendered JSON is O(budget), far below MAX_FRAME_BYTES.
 _SHOWN_BUDGET_CHARS = 2 * SHOWN_VALUE_MAX_CHARS
+# What a whole number too big to show stands for, in both stubs.
+_SHOWN_TOO_BIG_DE = 'sehr große Zahl'
+# A Java BigInteger / BigDecimal of more bits than this has more than
+# SHOWN_TEXT_MAX_CHARS decimal digits (1000 · log2(10) ≈ 3322): its text
+# would be cut anyway, and building it costs time quadratic in its size, so
+# it is shown as _SHOWN_TOO_BIG_DE without ever being converted (review
+# round 5, nd2).
+_SHOWN_BIG_BITS = 3322
 # How deep and how wide zeige() walks a value, in both stubs: a list/tuple/
 # set/dict (Python) or an array/Iterable (Java) at most this many levels and
 # items; past either, the rendering says so with '…'.
@@ -831,7 +839,7 @@ _SHOWN_BUDGET_CHARS = {SHOWN_BUDGET_CHARS!r}
 _SHOWN_MAX_DEPTH = {SHOWN_MAX_DEPTH!r}
 _SHOWN_MAX_ITEMS = {SHOWN_MAX_ITEMS!r}
 _SHOWN_BIG_INT = 2 ** 53
-_SHOWN_TOO_BIG_DE = 'sehr große Zahl'
+_SHOWN_TOO_BIG_DE = {SHOWN_TOO_BIG_DE!r}
 
 
 def _shown(value):
@@ -939,6 +947,7 @@ def render_python_stub() -> str:
         SHOWN_BUDGET_CHARS=_SHOWN_BUDGET_CHARS,
         SHOWN_MAX_DEPTH=_SHOWN_MAX_DEPTH,
         SHOWN_MAX_ITEMS=_SHOWN_MAX_ITEMS,
+        SHOWN_TOO_BIG_DE=_SHOWN_TOO_BIG_DE,
         PUBLIC_METHODS=_py_name_block(c.name for c in ROBOT_API + CODE_ONLY_METHODS),
     )
     methods = '\n'.join(_py_method(c) for c in ROBOT_API + CODE_ONLY_METHODS)
@@ -1413,9 +1422,14 @@ public final class RpcClient {{
     // What a value whose own code failed shows (the Python stub's '<?>').
     static final String SHOWN_UNREADABLE = "<?>";
     // JavaScript reads a JSON number as a double: past ±2^53 it silently
-    // rounds. Like the Python stub, a whole number beyond that is sent as a
-    // double — the student sees its size, never a wrong last digit.
+    // rounds. Like the Python stub, a whole number beyond that is SENT as a
+    // double, so what the student sees is that double — the number's size,
+    // not its exact last digits (review round 5, nd3).
     static final long SHOWN_BIG_INT = 1L << 53;
+    // More bits than this: more than SHOWN_MAX_CHARS decimal digits, shown
+    // as SHOWN_TOO_BIG without building its text (nd2).
+    static final int SHOWN_BIG_BITS = {SHOWN_BIG_BITS};
+    static final String SHOWN_TOO_BIG = "{SHOWN_TOO_BIG_DE}";
 
     static Object shownDouble(double v) {{
         if (Double.isNaN(v) || Double.isInfinite(v)) {{
@@ -1437,13 +1451,21 @@ public final class RpcClient {{
 
     // One node of a shown value, charged to the shared budget like the
     // Python stub's _shown_part. NEVER throws into the student's program:
-    // a toString() or an iterator of the student's that fails (a
-    // ConcurrentModificationException included) shows "<?>", like the
-    // Python stub (review round 4, nc1).
+    // a toString() or an iterator of the student's that fails — with any
+    // exception, a ConcurrentModificationException included (review round
+    // 4, nc1), or with any Error, an AssertionError included (round 5, nd2)
+    // — shows "<?>", like the Python stub. Only the JVM's own failures
+    // (VirtualMachineError: out of memory, an internal error) go on, except
+    // a StackOverflowError, which a self-referencing structure's toString()
+    // ends in.
     static Object shownValue(Object o, int depth, int[] budget) {{
         try {{
             return shownNode(o, depth, budget);
-        }} catch (Exception | StackOverflowError e) {{
+        }} catch (StackOverflowError e) {{
+            return SHOWN_UNREADABLE;
+        }} catch (VirtualMachineError e) {{
+            throw e;
+        }} catch (Throwable e) {{
             return SHOWN_UNREADABLE;
         }}
     }}
@@ -1451,10 +1473,16 @@ public final class RpcClient {{
     // EVERY array type (int[], long[], String[], char[], Object[], an array
     // of arrays …) and every Iterable is a JSON list — at most
     // SHOWN_MAX_ITEMS items and SHOWN_MAX_DEPTH levels, cut with "…" — never
-    // the JVM's "[J@1b6d3586" (review round 3, nb6). A Path is its text, not
-    // the Iterable of its name parts; a whole number past ±2^53 a double; a
-    // BigInteger or BigDecimal too big for a double its own text, never
-    // "Infinity" (review round 4, nc1/nc2).
+    // the JVM's "[J@1b6d3586" (review round 3, nb6). A Map is a JSON object
+    // of at most SHOWN_MAX_ITEMS entries (key: its text, at most 100
+    // characters, like the Python stub's str(k)[:100]), cut with a "…" key —
+    // never its toString(), which built the whole text of a map of millions
+    // of entries first (review round 5, nd2); a CharSequence is cut BEFORE
+    // it is turned into text. A Path is its text, not the Iterable of its
+    // name parts; a whole number past ±2^53 a double; a BigInteger or
+    // BigDecimal too big for a double its own text, never "Infinity"
+    // (review round 4, nc1/nc2) — and past SHOWN_BIG_BITS, SHOWN_TOO_BIG,
+    // decided on its bit length before any conversion (nd2).
     static Object shownNode(Object o, int depth, int[] budget) {{
         if (budget[0] <= 0) {{
             return SHOWN_CUT;
@@ -1478,18 +1506,51 @@ public final class RpcClient {{
             if (big.bitLength() < 63) {{
                 return shownLong(big.longValue());
             }}
+            if (big.bitLength() > SHOWN_BIG_BITS) {{
+                return shownText(SHOWN_TOO_BIG, budget);
+            }}
             double d = big.doubleValue();
             return Double.isInfinite(d) ? shownText(big.toString(), budget) : d;
         }}
         if (o instanceof java.math.BigDecimal) {{
-            double d = ((java.math.BigDecimal) o).doubleValue();
-            return Double.isInfinite(d) ? shownText(o.toString(), budget) : d;
+            java.math.BigDecimal dec = (java.math.BigDecimal) o;
+            if (dec.unscaledValue().bitLength() > SHOWN_BIG_BITS) {{
+                return shownText(SHOWN_TOO_BIG, budget);
+            }}
+            double d = dec.doubleValue();
+            return Double.isInfinite(d) ? shownText(dec.toString(), budget) : d;
         }}
         if (o instanceof Number) {{
             return shownDouble(((Number) o).doubleValue());
         }}
         if (o instanceof java.nio.file.Path) {{
             return shownText(o.toString(), budget);
+        }}
+        if (o instanceof CharSequence) {{
+            CharSequence cs = (CharSequence) o;
+            int n = Math.max(0, Math.min(cs.length(), Math.min(SHOWN_MAX_CHARS, budget[0])));
+            return shownText(cs.subSequence(0, n).toString(), budget);
+        }}
+        if (o instanceof Map) {{
+            if (depth >= SHOWN_MAX_DEPTH) {{
+                return SHOWN_CUT;
+            }}
+            Map<String, Object> out = new LinkedHashMap<>();
+            boolean cut = false;
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) o).entrySet()) {{
+                if (out.size() >= SHOWN_MAX_ITEMS || budget[0] <= 0) {{
+                    cut = true;
+                    break;
+                }}
+                String key = String.valueOf(entry.getKey());
+                key = key.substring(0, Math.min(key.length(), 100));
+                budget[0] -= key.length();
+                out.put(key, shownValue(entry.getValue(), depth + 1, budget));
+            }}
+            if (cut) {{
+                out.put(SHOWN_CUT, null);
+            }}
+            return out;
         }}
         boolean array = o.getClass().isArray();
         if (array || o instanceof Iterable) {{
@@ -1561,6 +1622,8 @@ def render_java_rpc_client() -> str:
         SHOWN_BUDGET_CHARS=_java_literal(_SHOWN_BUDGET_CHARS),
         SHOWN_MAX_DEPTH=_java_literal(_SHOWN_MAX_DEPTH),
         SHOWN_MAX_ITEMS=_java_literal(_SHOWN_MAX_ITEMS),
+        SHOWN_BIG_BITS=_java_literal(_SHOWN_BIG_BITS),
+        SHOWN_TOO_BIG_DE=_SHOWN_TOO_BIG_DE,
     )
 
 

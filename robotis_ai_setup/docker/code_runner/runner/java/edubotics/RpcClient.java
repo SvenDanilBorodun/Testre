@@ -251,9 +251,14 @@ public final class RpcClient {
     // What a value whose own code failed shows (the Python stub's '<?>').
     static final String SHOWN_UNREADABLE = "<?>";
     // JavaScript reads a JSON number as a double: past ±2^53 it silently
-    // rounds. Like the Python stub, a whole number beyond that is sent as a
-    // double — the student sees its size, never a wrong last digit.
+    // rounds. Like the Python stub, a whole number beyond that is SENT as a
+    // double, so what the student sees is that double — the number's size,
+    // not its exact last digits (review round 5, nd3).
     static final long SHOWN_BIG_INT = 1L << 53;
+    // More bits than this: more than SHOWN_MAX_CHARS decimal digits, shown
+    // as SHOWN_TOO_BIG without building its text (nd2).
+    static final int SHOWN_BIG_BITS = 3322;
+    static final String SHOWN_TOO_BIG = "sehr große Zahl";
 
     static Object shownDouble(double v) {
         if (Double.isNaN(v) || Double.isInfinite(v)) {
@@ -275,13 +280,21 @@ public final class RpcClient {
 
     // One node of a shown value, charged to the shared budget like the
     // Python stub's _shown_part. NEVER throws into the student's program:
-    // a toString() or an iterator of the student's that fails (a
-    // ConcurrentModificationException included) shows "<?>", like the
-    // Python stub (review round 4, nc1).
+    // a toString() or an iterator of the student's that fails — with any
+    // exception, a ConcurrentModificationException included (review round
+    // 4, nc1), or with any Error, an AssertionError included (round 5, nd2)
+    // — shows "<?>", like the Python stub. Only the JVM's own failures
+    // (VirtualMachineError: out of memory, an internal error) go on, except
+    // a StackOverflowError, which a self-referencing structure's toString()
+    // ends in.
     static Object shownValue(Object o, int depth, int[] budget) {
         try {
             return shownNode(o, depth, budget);
-        } catch (Exception | StackOverflowError e) {
+        } catch (StackOverflowError e) {
+            return SHOWN_UNREADABLE;
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (Throwable e) {
             return SHOWN_UNREADABLE;
         }
     }
@@ -289,10 +302,16 @@ public final class RpcClient {
     // EVERY array type (int[], long[], String[], char[], Object[], an array
     // of arrays …) and every Iterable is a JSON list — at most
     // SHOWN_MAX_ITEMS items and SHOWN_MAX_DEPTH levels, cut with "…" — never
-    // the JVM's "[J@1b6d3586" (review round 3, nb6). A Path is its text, not
-    // the Iterable of its name parts; a whole number past ±2^53 a double; a
-    // BigInteger or BigDecimal too big for a double its own text, never
-    // "Infinity" (review round 4, nc1/nc2).
+    // the JVM's "[J@1b6d3586" (review round 3, nb6). A Map is a JSON object
+    // of at most SHOWN_MAX_ITEMS entries (key: its text, at most 100
+    // characters, like the Python stub's str(k)[:100]), cut with a "…" key —
+    // never its toString(), which built the whole text of a map of millions
+    // of entries first (review round 5, nd2); a CharSequence is cut BEFORE
+    // it is turned into text. A Path is its text, not the Iterable of its
+    // name parts; a whole number past ±2^53 a double; a BigInteger or
+    // BigDecimal too big for a double its own text, never "Infinity"
+    // (review round 4, nc1/nc2) — and past SHOWN_BIG_BITS, SHOWN_TOO_BIG,
+    // decided on its bit length before any conversion (nd2).
     static Object shownNode(Object o, int depth, int[] budget) {
         if (budget[0] <= 0) {
             return SHOWN_CUT;
@@ -316,18 +335,51 @@ public final class RpcClient {
             if (big.bitLength() < 63) {
                 return shownLong(big.longValue());
             }
+            if (big.bitLength() > SHOWN_BIG_BITS) {
+                return shownText(SHOWN_TOO_BIG, budget);
+            }
             double d = big.doubleValue();
             return Double.isInfinite(d) ? shownText(big.toString(), budget) : d;
         }
         if (o instanceof java.math.BigDecimal) {
-            double d = ((java.math.BigDecimal) o).doubleValue();
-            return Double.isInfinite(d) ? shownText(o.toString(), budget) : d;
+            java.math.BigDecimal dec = (java.math.BigDecimal) o;
+            if (dec.unscaledValue().bitLength() > SHOWN_BIG_BITS) {
+                return shownText(SHOWN_TOO_BIG, budget);
+            }
+            double d = dec.doubleValue();
+            return Double.isInfinite(d) ? shownText(dec.toString(), budget) : d;
         }
         if (o instanceof Number) {
             return shownDouble(((Number) o).doubleValue());
         }
         if (o instanceof java.nio.file.Path) {
             return shownText(o.toString(), budget);
+        }
+        if (o instanceof CharSequence) {
+            CharSequence cs = (CharSequence) o;
+            int n = Math.max(0, Math.min(cs.length(), Math.min(SHOWN_MAX_CHARS, budget[0])));
+            return shownText(cs.subSequence(0, n).toString(), budget);
+        }
+        if (o instanceof Map) {
+            if (depth >= SHOWN_MAX_DEPTH) {
+                return SHOWN_CUT;
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            boolean cut = false;
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) o).entrySet()) {
+                if (out.size() >= SHOWN_MAX_ITEMS || budget[0] <= 0) {
+                    cut = true;
+                    break;
+                }
+                String key = String.valueOf(entry.getKey());
+                key = key.substring(0, Math.min(key.length(), 100));
+                budget[0] -= key.length();
+                out.put(key, shownValue(entry.getValue(), depth + 1, budget));
+            }
+            if (cut) {
+                out.put(SHOWN_CUT, null);
+            }
+            return out;
         }
         boolean array = o.getClass().isArray();
         if (array || o instanceof Iterable) {

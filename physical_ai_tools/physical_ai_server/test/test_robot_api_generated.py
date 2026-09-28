@@ -274,11 +274,27 @@ def test_zeige_renders_in_both_stubs_and_the_asset_tag_in_neither():
     # a whole number past 2^53 goes as a double, like the Python stub; a
     # BigInteger/BigDecimal too big for a double is its text. SmokeMain runs
     # each of them in the image build.
-    assert 'catch (Exception | StackOverflowError e)' in rpc
+    # Review round 5 (nd2): ANY Throwable of the student's code is "<?>" —
+    # an AssertionError from a toString() used to reach the program — and
+    # only the JVM's own failures (VirtualMachineError, bar a
+    # StackOverflowError) go on.
+    shown = rpc[rpc.index('static Object shownValue('):rpc.index('static Object shownNode(')]
+    catches = [line.strip() for line in shown.splitlines() if 'catch (' in line]
+    assert catches == ['} catch (StackOverflowError e) {', '} catch (VirtualMachineError e) {',
+                       '} catch (Throwable e) {'], catches
+    assert 'catch (VirtualMachineError e) {\n            throw e;' in shown
     for branch in ('instanceof java.nio.file.Path', 'instanceof java.math.BigInteger',
                    'instanceof java.math.BigDecimal', 'static Object shownLong(long v)',
-                   'SHOWN_BIG_INT = 1L << 53'):
+                   'SHOWN_BIG_INT = 1L << 53',
+                   # nd2: a Map is walked, never its toString(); a CharSequence
+                   # is cut before it becomes text; a huge number is judged by
+                   # its bit length before any conversion.
+                   'instanceof Map', 'entrySet()', 'instanceof CharSequence',
+                   'cs.subSequence(0, n)', f'SHOWN_BIG_BITS = {robot_api._SHOWN_BIG_BITS};',
+                   'bitLength() > SHOWN_BIG_BITS'):
         assert branch in rpc, branch
+    assert f'SHOWN_TOO_BIG = "{robot_api._SHOWN_TOO_BIG_DE}"' in rpc
+    assert f'_SHOWN_TOO_BIG_DE = {robot_api._SHOWN_TOO_BIG_DE!r}' in _STUB
     assert 'public static void zeige(String name, long wert) {\n' \
         '        RpcClient.call("zeige", new Object[] {name, RpcClient.shownLong(wert)}, "call");' in java
     for rel in (robot_api.GENERATED_PATHS['java_robot'],

@@ -28,10 +28,13 @@ import { registerSammlungCategories, SAMMLUNG_BUTTON_KEYS } from '../toolboxCate
 import { registerAssetCardInflater } from '../AssetCardInflater';
 import { registerDestinationSerializer } from '../destinationStore';
 import {
+  __resetDecorateWarningForTests,
   decorateFlyoutButton,
+  fontSizePx,
   ICON_BUTTON_FLYOUT_TYPE,
   ICON_BUTTON_ICON_GAP,
   ICON_BUTTON_ICON_SIZE,
+  iconMetricsForFont,
   IconButtonInflater,
   registerIconButtonInflater,
 } from '../IconButtonInflater';
@@ -307,3 +310,115 @@ describe('the decoration', () => {
     expect(inflater.base).toBeNull();
   });
 });
+
+describe('the icon follows the button text\'s size (review round 1, B7)', () => {
+  it('reads a CSS font size in px or pt', () => {
+    expect(fontSizePx('11pt')).toBeCloseTo(14.667, 3);
+    expect(fontSizePx('21.3333px')).toBeCloseTo(21.333, 3);
+    expect(fontSizePx(' 16 ')).toBe(16);
+    for (const bad of ['', null, undefined, 'medium', '0px', '-3px']) expect(fontSizePx(bad)).toBeNull();
+  });
+
+  it('is 14 + 4 at Blockly\'s 11 pt, about 20 + 6 at the high-contrast theme\'s 16 pt, clamped, 14 + 4 when unknown', () => {
+    expect(iconMetricsForFont((11 * 4) / 3)).toEqual({ size: 14, gap: 4 });
+    expect(iconMetricsForFont((16 * 4) / 3)).toEqual({ size: 20, gap: 6 });
+    expect(iconMetricsForFont(4)).toEqual({ size: 12, gap: 3 });
+    expect(iconMetricsForFont(200)).toEqual({ size: 32, gap: 9 });
+    for (const unknown of [null, undefined, NaN, 0, -1]) {
+      expect(iconMetricsForFont(unknown)).toEqual({ size: ICON_BUTTON_ICON_SIZE, gap: ICON_BUTTON_ICON_GAP });
+    }
+  });
+
+  it('a button whose text renders at 16 pt gets a 20 px icon and room for it', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.POSITIONEN);
+    const button = new Blockly.ButtonFlyoutInflater()
+      .load({ kind: 'button', text: DE.FLY_TEACH_POSE, callbackkey: 'K' }, flyout).getElement();
+    const text = button.getSvgRoot().querySelector(':scope > text');
+    text.style.fontSize = '16pt';
+    const width = button.width;
+    const x = Number(text.getAttribute('x'));
+    const g = decorateFlyoutButton(button, 'pose');
+    expect(g.getAttribute('transform')).toBe(
+      `translate(${Blockly.FlyoutButton.TEXT_MARGIN_X},${(button.height - 20) / 2}) scale(${20 / 24})`,
+    );
+    expect(button.width).toBe(width + 26);
+    expect(Number(text.getAttribute('x'))).toBe(x + 26);
+    button.dispose();
+  });
+});
+
+describe('a FlyoutButton whose DOM changed keeps the category working (review round 1, A5)', () => {
+  beforeEach(() => __resetDecorateWarningForTests());
+
+  it('load() warns ONCE and returns the plain button, still of the icon type and disposable', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.POSITIONEN);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const real = new Blockly.ButtonFlyoutInflater();
+    const inflater = new IconButtonInflater();
+    // A "future Blockly": the button grows a second <text>.
+    inflater.base = {
+      load: (state, fl) => {
+        const item = real.load(state, fl);
+        Blockly.utils.dom.createSvgElement('text', {}, item.getElement().getSvgRoot());
+        return item;
+      },
+      gapForItem: (state, gap) => real.gapForItem(state, gap),
+      disposeItem: (item) => real.disposeItem(item),
+    };
+    const plainWidth = real.load({ kind: 'button', text: 'X', callbackkey: 'K' }, flyout).getElement().width;
+    const items = [1, 2].map(() => inflater.load(
+      { kind: ICON_BUTTON_FLYOUT_TYPE, text: 'X', callbackkey: 'K', icon: 'pose' }, flyout,
+    ));
+    for (const item of items) {
+      expect(item.getType()).toBe(ICON_BUTTON_FLYOUT_TYPE);
+      const button = item.getElement();
+      expect(button).toBeInstanceOf(Blockly.FlyoutButton);
+      expect(iconGroupOf(button)).toBeNull();
+      expect(button.width).toBe(plainWidth);
+    }
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/IconButtonInflater/);
+    const root = items[0].getElement().getSvgRoot();
+    inflater.disposeItem(items[0]);
+    expect(root.isConnected).toBe(false);
+    inflater.disposeItem(items[1]);
+  });
+
+  it('an icon that fails half-drawn is removed again and the button is left exactly as Blockly built it', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.POSITIONEN);
+    const button = new Blockly.ButtonFlyoutInflater()
+      .load({ kind: 'button', text: 'X', callbackkey: 'K' }, flyout).getElement();
+    const root = button.getSvgRoot();
+    const before = { width: button.width, html: root.innerHTML };
+    const realCreate = Blockly.utils.dom.createSvgElement;
+    const create = vi.spyOn(Blockly.utils.dom, 'createSvgElement').mockImplementation((tag, attrs, parent) => {
+      if (tag === 'circle') throw new Error('boom');
+      return realCreate(tag, attrs, parent);
+    });
+    expect(() => decorateFlyoutButton(button, 'pose')).toThrow('boom');
+    create.mockRestore();
+    expect(button.width).toBe(before.width);
+    expect(root.innerHTML).toBe(before.html);
+    button.dispose();
+  });
+
+  it('the real Ziele category still opens, and a tap on its plain buttons still dispatches once', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const realCreate = Blockly.utils.dom.createSvgElement;
+    vi.spyOn(Blockly.utils.dom, 'createSvgElement').mockImplementation((tag, attrs, parent) => {
+      if (tag === 'g' && attrs && attrs['data-icon']) throw new Error('shape changed');
+      return realCreate(tag, attrs, parent);
+    });
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.ZIELE);
+    const buttons = iconButtonsOf(flyout);
+    expect(buttons.map((b) => b.getButtonText())).toEqual([DE.FLY_TEACH_ZIEL, DE.FLY_PIN_CAMERA]);
+    for (const b of buttons) expect(iconGroupOf(b)).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const root = buttons[0].getSvgRoot();
+    root.dispatchEvent(pointer('pointerdown', 41));
+    root.dispatchEvent(pointer('pointerup', 41));
+    await flushEvents();
+    expect(dispatched).toEqual([{ type: 'teach', kind: 'ziel' }]);
+  });
+});
+

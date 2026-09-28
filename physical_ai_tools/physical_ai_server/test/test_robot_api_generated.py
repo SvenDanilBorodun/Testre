@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import math
 import os
 import re
 import subprocess
@@ -294,6 +295,11 @@ def test_zeige_renders_in_both_stubs_and_the_asset_tag_in_neither():
                    'bitLength() > SHOWN_BIG_BITS'):
         assert branch in rpc, branch
     assert f'SHOWN_TOO_BIG = "{robot_api._SHOWN_TOO_BIG_DE}"' in rpc
+    # More bits than this is more than the 1000 characters a text shows:
+    # ceil(1000 · log2(10)) (test_constant_pins' rule: pinned to a literal).
+    assert robot_api._SHOWN_BIG_BITS == 3322
+    assert math.ceil(1000 * math.log2(10)) == 3322
+    assert robot_api._SHOWN_TOO_BIG_DE == 'sehr große Zahl'
     assert f'_SHOWN_TOO_BIG_DE = {robot_api._SHOWN_TOO_BIG_DE!r}' in _STUB
     assert 'public static void zeige(String name, long wert) {\n' \
         '        RpcClient.call("zeige", new Object[] {name, RpcClient.shownLong(wert)}, "call");' in java

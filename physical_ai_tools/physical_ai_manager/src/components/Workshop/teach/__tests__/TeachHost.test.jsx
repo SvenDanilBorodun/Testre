@@ -78,7 +78,7 @@ function hostProps(over = {}) {
 }
 
 function teachState(teach) {
-  mockState = { studioAssets: { teach: { open: false, requested: null, mode: null, focus: null, ...teach } } };
+  mockState = { studioAssets: { teach: { open: false, requested: null, mode: null, kind: null, ...teach } } };
 }
 
 const dispatched = (type) => mockDispatch.mock.calls.map((c) => c[0]).filter((a) => a && a.type === type);
@@ -95,7 +95,7 @@ beforeEach(() => {
 describe('TeachHost', () => {
   test('a request during a home glide is refused with the glide reason and never opens', () => {
     mockGlide.active = true;
-    teachState({ requested: { focus: null, token: 1 } });
+    teachState({ requested: { kind: 'recording', token: 1 } });
     render(<TeachHost {...hostProps()} />);
     expect(toast.error).toHaveBeenCalledWith(DE.TEACH_BLOCK_GLIDE);
     expect(dispatched('studioAssets/teachRequestHandled')).toHaveLength(1);
@@ -110,7 +110,7 @@ describe('TeachHost', () => {
     ['the simulator', { simMode: true }, DE.TEACH_BLOCK_SIM],
     ['a hand-guide in „Steuern"', { jogHandGuideOn: true }, DE.TEACH_BLOCK_JOG],
   ])('refuses during %s with its own text', (_label, over, text) => {
-    teachState({ requested: { focus: 'recording', token: 7 } });
+    teachState({ requested: { kind: 'recording', token: 7 } });
     const props = hostProps(over);
     render(<TeachHost {...props} />);
     expect(toast.error).toHaveBeenCalledWith(text);
@@ -119,14 +119,14 @@ describe('TeachHost', () => {
     expect(props.workspace.hideChaff).not.toHaveBeenCalled();
   });
 
-  test('a valid request closes Blockly\'s flyout and opens hand mode with the focus', () => {
-    teachState({ requested: { focus: 'pose', token: 3 } });
+  test('a valid request closes Blockly\'s flyout and opens hand mode with its kind', () => {
+    teachState({ requested: { kind: 'pose', token: 3 } });
     const props = hostProps();
     render(<TeachHost {...props} />);
     expect(props.workspace.hideChaff).toHaveBeenCalledTimes(1);
     const opened = dispatched('studioAssets/teachOpened');
     expect(opened).toHaveLength(1);
-    expect(opened[0].payload).toEqual({ mode: 'hand', focus: 'pose' });
+    expect(opened[0].payload).toEqual({ mode: 'hand', kind: 'pose' });
     expect(toast.error).not.toHaveBeenCalled();
   });
 
@@ -140,12 +140,12 @@ describe('TeachHost', () => {
     ['an unanswered bridge on a leader-less profile', { rsBridge: PENDING_BRIDGE, caps: { has_leader: false } }, 'hand'],
     ['the bridge itself saying has_leader false', { rsBridge: { ...IDLE_BRIDGE, followerOnly: true, hasLeader: false, probed: true }, caps: null }, 'hand'],
   ])('D8: %s opens %s mode, never a refusal', (_label, over, mode) => {
-    teachState({ requested: { focus: 'recording', token: 9 } });
+    teachState({ requested: { kind: 'recording', token: 9 } });
     render(<TeachHost {...hostProps(over)} />);
     expect(toast.error).not.toHaveBeenCalled();
     const opened = dispatched('studioAssets/teachOpened');
     expect(opened).toHaveLength(1);
-    expect(opened[0].payload).toEqual({ mode, focus: 'recording' });
+    expect(opened[0].payload).toEqual({ mode, kind: 'recording' });
   });
 
   // R7 (2026-09-15): a rig that may have a leader never opens silently in hand
@@ -157,16 +157,16 @@ describe('TeachHost', () => {
     ['no bridge at all', { rsBridge: null, caps: { has_leader: true } }],
     ['unknown caps and no answer', { rsBridge: PENDING_BRIDGE, caps: null }],
   ])('R7: %s opens UNRESOLVED (mode null), never a refusal', (_label, over) => {
-    teachState({ requested: { focus: 'pose', token: 11 } });
+    teachState({ requested: { kind: 'pose', token: 11 } });
     render(<TeachHost {...hostProps(over)} />);
     expect(toast.error).not.toHaveBeenCalled();
     const opened = dispatched('studioAssets/teachOpened');
     expect(opened).toHaveLength(1);
-    expect(opened[0].payload).toEqual({ mode: null, focus: 'pose' });
+    expect(opened[0].payload).toEqual({ mode: null, kind: 'pose' });
   });
 
   test('R7: an unresolved session renders the overlay as pending', () => {
-    teachState({ open: true, mode: null, focus: 'ziel' });
+    teachState({ open: true, mode: null, kind: 'ziel' });
     render(<TeachHost {...hostProps({ rsBridge: PENDING_BRIDGE, caps: { has_leader: true } })} />);
     expect(mockOverlay.props.mode).toBe('pending');
     expect(dispatched('studioAssets/teachModeResolved')).toHaveLength(0);
@@ -176,7 +176,7 @@ describe('TeachHost', () => {
     ['answered „follower only" → hand', { ...IDLE_BRIDGE, followerOnly: true, probed: true }, 'hand'],
     ['answered „leader on" → leader', { ...IDLE_BRIDGE, leaderOn: true, probed: true }, 'leader'],
   ])('R7: the bridge %s resolves the open session', (_label, answer, mode) => {
-    teachState({ open: true, mode: null, focus: null });
+    teachState({ open: true, mode: null, kind: 'recording' });
     const { rerender } = render(<TeachHost {...hostProps({ rsBridge: PENDING_BRIDGE, caps: { has_leader: true } })} />);
     rerender(<TeachHost {...hostProps({ rsBridge: DOWN_BRIDGE, caps: { has_leader: true } })} />);
     expect(dispatched('studioAssets/teachModeResolved')).toHaveLength(0);
@@ -187,10 +187,10 @@ describe('TeachHost', () => {
   });
 
   test('R7: the resolved mode REMOUNTS the overlay (a fresh session); a resolved session is never re-resolved', () => {
-    teachState({ open: true, mode: null });
+    teachState({ open: true, mode: null, kind: 'pose' });
     const { rerender } = render(<TeachHost {...hostProps({ rsBridge: PENDING_BRIDGE, caps: { has_leader: true } })} />);
     expect(mockOverlay.mounts).toBe(1);
-    teachState({ open: true, mode: 'hand' });
+    teachState({ open: true, mode: 'hand', kind: 'recording' });
     rerender(<TeachHost {...hostProps({ rsBridge: { ...IDLE_BRIDGE, followerOnly: true, probed: true }, caps: { has_leader: true } })} />);
     expect(mockOverlay.props.mode).toBe('hand');
     expect(mockOverlay.mounts).toBe(2);
@@ -203,13 +203,13 @@ describe('TeachHost', () => {
   });
 
   test('renders the overlay in leader mode when the slice says so', () => {
-    teachState({ open: true, mode: 'leader' });
+    teachState({ open: true, mode: 'leader', kind: 'recording' });
     render(<TeachHost {...hostProps({ rsBridge: { ...IDLE_BRIDGE, leaderOn: true } })} />);
     expect(mockOverlay.props.mode).toBe('leader');
   });
 
   test('a request with no editor on screen is dropped silently', () => {
-    teachState({ requested: { focus: null, token: 4 } });
+    teachState({ requested: { kind: 'pose', token: 4 } });
     render(<TeachHost {...hostProps({ workspace: null })} />);
     expect(dispatched('studioAssets/teachRequestHandled')).toHaveLength(1);
     expect(dispatched('studioAssets/teachOpened')).toHaveLength(0);
@@ -217,21 +217,21 @@ describe('TeachHost', () => {
   });
 
   test('each NEW token is a new request', () => {
-    teachState({ requested: { focus: null, token: 1 }, });
+    teachState({ requested: { kind: 'recording', token: 1 }, });
     const props = hostProps({ simMode: true });
     const { rerender } = render(<TeachHost {...props} />);
     expect(toast.error).toHaveBeenCalledTimes(1);
-    teachState({ requested: { focus: null, token: 2 } });
+    teachState({ requested: { kind: 'recording', token: 2 } });
     rerender(<TeachHost {...hostProps()} />);
     expect(dispatched('studioAssets/teachOpened')).toHaveLength(1);
   });
 
   test('renders the overlay while open, with the rig props, and its close dispatches teachClosed', () => {
-    teachState({ open: true, mode: 'hand', focus: 'ziel' });
+    teachState({ open: true, mode: 'hand', kind: 'ziel' });
     render(<TeachHost {...hostProps({ heartbeatStatus: 'connected' })} />);
     expect(screen.getByTestId('teach-overlay-stub')).toBeInTheDocument();
     expect(mockOverlay.props).toMatchObject({
-      mode: 'hand', focus: 'ziel', accessToken: 'jwt', workflowId: 'wf-1', robotType: 'omx_f', heartbeatOk: true,
+      mode: 'hand', kind: 'ziel', accessToken: 'jwt', workflowId: 'wf-1', robotType: 'omx_f', heartbeatOk: true,
     });
     mockDispatch.mockClear();
     act(() => { mockOverlay.props.onClose(); });
@@ -239,7 +239,7 @@ describe('TeachHost', () => {
   });
 
   test('offline, the overlay is told the heartbeat is gone', () => {
-    teachState({ open: true, mode: 'hand' });
+    teachState({ open: true, mode: 'hand', kind: 'recording' });
     render(<TeachHost {...hostProps({ heartbeatStatus: 'disconnected' })} />);
     expect(mockOverlay.props.heartbeatOk).toBe(false);
   });
@@ -249,8 +249,39 @@ describe('TeachHost', () => {
     expect(screen.queryByTestId('teach-overlay-stub')).toBeNull();
   });
 
+  test.each([
+    ['no kind', { token: 21 }],
+    ['a null kind', { kind: null, token: 22 }],
+    ['the retired focus field only', { focus: 'pose', token: 23 }],
+    ['an unknown kind', { kind: 'bogus', token: 24 }],
+  ])('a request with %s is dropped silently: no toast, no gate, no teachOpened', (_l, requested) => {
+    teachState({ requested });
+    const props = hostProps({ simMode: true });
+    render(<TeachHost {...props} />);
+    expect(dispatched('studioAssets/teachRequestHandled')).toHaveLength(1);
+    expect(dispatched('studioAssets/teachOpened')).toHaveLength(0);
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(props.workspace.hideChaff).not.toHaveBeenCalled();
+  });
+
+  test('an open state without a valid kind renders no overlay', () => {
+    teachState({ open: true, mode: 'hand', kind: null });
+    render(<TeachHost {...hostProps()} />);
+    expect(screen.queryByTestId('teach-overlay-stub')).toBeNull();
+  });
+
+  test('the pending → resolved remount keeps the kind', () => {
+    teachState({ open: true, mode: null, kind: 'ziel' });
+    const { rerender } = render(<TeachHost {...hostProps({ rsBridge: PENDING_BRIDGE, caps: { has_leader: true } })} />);
+    expect(mockOverlay.props).toMatchObject({ mode: 'pending', kind: 'ziel' });
+    teachState({ open: true, mode: 'hand', kind: 'ziel' });
+    rerender(<TeachHost {...hostProps({ rsBridge: { ...IDLE_BRIDGE, followerOnly: true, probed: true }, caps: { has_leader: true } })} />);
+    expect(mockOverlay.props).toMatchObject({ mode: 'hand', kind: 'ziel' });
+    expect(mockOverlay.mounts).toBe(2);
+  });
+
   test('unmounting while open dispatches teachClosed', () => {
-    teachState({ open: true, mode: 'hand' });
+    teachState({ open: true, mode: 'hand', kind: 'recording' });
     const { unmount } = render(<TeachHost {...hostProps()} />);
     mockDispatch.mockClear();
     unmount();
@@ -262,15 +293,15 @@ describe('TeachHost — a code program (owner decision O4)', () => {
   const codeDoc = () => ({ kind: 'code', hideChaff: vi.fn(), getStore: () => null });
 
   test('opens with an asset document and no Blockly workspace, and hands the document on', () => {
-    teachState({ requested: { focus: 'ziel', token: 11 } });
+    teachState({ requested: { kind: 'ziel', token: 11 } });
     const assetDoc = codeDoc();
     render(<TeachHost {...hostProps({ workspace: null, assetDoc })} />);
     const opened = dispatched('studioAssets/teachOpened');
     expect(opened).toHaveLength(1);
-    expect(opened[0].payload).toEqual({ mode: 'hand', focus: 'ziel' });
+    expect(opened[0].payload).toEqual({ mode: 'hand', kind: 'ziel' });
     expect(assetDoc.hideChaff).toHaveBeenCalledTimes(1);
 
-    teachState({ open: true, mode: 'hand', focus: 'ziel' });
+    teachState({ open: true, mode: 'hand', kind: 'ziel' });
     render(<TeachHost {...hostProps({ workspace: null, assetDoc })} />);
     expect(mockOverlay.props.assetDoc).toBe(assetDoc);
   });

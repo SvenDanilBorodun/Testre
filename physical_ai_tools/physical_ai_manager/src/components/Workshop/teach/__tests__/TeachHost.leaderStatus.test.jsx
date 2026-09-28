@@ -82,7 +82,7 @@ function mount(rsBridge, caps = { has_leader: true }) {
   const answer = (next, nextCaps = caps) => view.rerender(
     <Provider store={store}><TeachHost {...props} caps={nextCaps} rsBridge={next} /></Provider>,
   );
-  act(() => { store.dispatch(requestTeach({ focus: null })); });
+  act(() => { store.dispatch(requestTeach({ kind: 'recording' })); });
   return { store, answer, view };
 }
 

@@ -143,7 +143,7 @@ describe('„+ Neu"', () => {
       DE.FLY_TEACH_RECORDING, DE.FLY_TEACH_ZIEL, DE.FLY_PIN_CAMERA, DE.FLY_PIN_SIM, DE.FLY_TEACH_POSE,
     ]);
     fireEvent.click(within(menu).getByRole('menuitem', { name: DE.FLY_TEACH_ZIEL }));
-    expect(dispatchAction).toHaveBeenCalledWith({ type: 'teach', focus: 'ziel' });
+    expect(dispatchAction).toHaveBeenCalledWith({ type: 'teach', kind: 'ziel' });
     expect(screen.queryByRole('menu')).toBeNull();
   });
 

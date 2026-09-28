@@ -385,9 +385,9 @@ export function registerSammlungCategories(workspace, providerRef) {
     workspace.registerToolboxCategoryCallback(key, fn);
   }
   const buttons = [
-    [SAMMLUNG_BUTTON_KEYS.TEACH_RECORDING, () => ({ type: 'teach', focus: 'recording' })],
-    [SAMMLUNG_BUTTON_KEYS.TEACH_POSE, () => ({ type: 'teach', focus: 'pose' })],
-    [SAMMLUNG_BUTTON_KEYS.TEACH_ZIEL, () => ({ type: 'teach', focus: 'ziel' })],
+    [SAMMLUNG_BUTTON_KEYS.TEACH_RECORDING, () => ({ type: 'teach', kind: 'recording' })],
+    [SAMMLUNG_BUTTON_KEYS.TEACH_POSE, () => ({ type: 'teach', kind: 'pose' })],
+    [SAMMLUNG_BUTTON_KEYS.TEACH_ZIEL, () => ({ type: 'teach', kind: 'ziel' })],
     [SAMMLUNG_BUTTON_KEYS.PIN_CAMERA, () => ({ type: 'pinCamera' })],
     [SAMMLUNG_BUTTON_KEYS.PIN_SIM, () => ({ type: 'pinSim' })],
     [SAMMLUNG_BUTTON_KEYS.MANAGE_VARIABLEN, () => ({ type: 'manage', tab: 'variablen', focusId: null })],

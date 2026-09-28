@@ -130,7 +130,7 @@ function codeDoc(main, startCursor = null) {
 
 function props(assetDoc, over = {}) {
   return {
-    mode: 'hand', focus: null, onClose: vi.fn(), workspace: null, assetDoc, accessToken: 'jwt',
+    mode: 'hand', kind: 'pose', onClose: vi.fn(), workspace: null, assetDoc, accessToken: 'jwt',
     workflowId: 'wf-1', robotType: 'omx_f', caps: null, heartbeatOk: true,
     rsBridge: { available: true, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false },
     saveWorkflowNow: vi.fn(async () => ({ ok: true })), refetchTrajectories: vi.fn(), ...over,
@@ -154,6 +154,7 @@ beforeEach(() => {
 describe('TeachOverlay over a Python program', () => {
   test('a capture is named past the program’s own pins and lands in the document’s store', () => {
     const { doc, store } = codeDoc('import robot\nrobot.pin("Ziel 1", 0.1, 0.0, 0.0)\n');
+    // A Position window over the program (the namer serves both place kinds).
     render(<TeachOverlay {...props(doc)} />);
     expect(mockHook.namer('ziel')).toBe('Ziel 2');
     act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
@@ -178,7 +179,7 @@ describe('TeachOverlay over a Python program', () => {
     const { doc, main } = codeDoc('import robot\nrobot.replay("Bewegung 1")\n');
     workflowApi.createTrajectory.mockResolvedValue({ id: 't1' });
     workflowApi.renameTrajectory.mockResolvedValue({});
-    const p = props(doc);
+    const p = props(doc, { kind: 'recording' });
     const { rerender } = render(<TeachOverlay {...p} />);
     await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
     setState([{ id: 't1', name: 'Bewegung 1', robot_profile: 'omx_f', created_at: '2026-09-27T10:00:00Z' }]);
@@ -192,20 +193,31 @@ describe('TeachOverlay over a Python program', () => {
     expect(p.saveWorkflowNow).toHaveBeenCalled();
   });
 
-  test('„Als Programm einfügen" writes the round below the cursor’s line and says where', async () => {
+  test('„Als Programm einfügen" writes a Bewegung window\'s round below the cursor’s line and says where', async () => {
     const { doc, main, reveals } = codeDoc('import robot\nrobot.home()\n', { file: 'main.py', line: 2 });
     workflowApi.createTrajectory.mockResolvedValue({ id: 't1' });
-    render(<TeachOverlay {...props(doc)} />);
-    await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
-    act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
+    render(<TeachOverlay {...props(doc, { kind: 'recording' })} />);
+    await act(async () => { mockHook.props.onKeep(TAKE); mockHook.props.onKeep(TAKE); await flush(); });
     const button = screen.getByRole('button', { name: formatCode(CODE_DE.TEACH_INSERT_LINES, 2) });
     expect(button).toBeEnabled();
     fireEvent.click(button);
     // The insertion module loads on demand (review round 2, ni4).
     await waitFor(() => expect(main())
-      .toBe('import robot\nrobot.home()\nrobot.replay("Bewegung 1")\nrobot.move_to("Position 1")\n'));
+      .toBe('import robot\nrobot.home()\nrobot.replay("Bewegung 1")\nrobot.replay("Bewegung 2")\n'));
     expect(toast.success).toHaveBeenCalledWith(formatCode(CODE_DE.INSERTED_AT, 'main.py', 3));
     expect(reveals[reveals.length - 1]).toEqual({ file: 'main.py', line: 4 });
+  });
+
+  test('„Als Programm einfügen" writes a Position window\'s round the same way', async () => {
+    const { doc, main } = codeDoc('import robot\nrobot.home()\n', { file: 'main.py', line: 2 });
+    render(<TeachOverlay {...props(doc)} />);
+    act(() => {
+      mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE });
+      mockHook.props.onCapture({ kind: 'pose', name: 'Position 2', response: POSE });
+    });
+    fireEvent.click(screen.getByRole('button', { name: formatCode(CODE_DE.TEACH_INSERT_LINES, 2) }));
+    await waitFor(() => expect(main())
+      .toBe('import robot\nrobot.home()\nrobot.move_to("Position 1")\nrobot.move_to("Position 2")\n'));
   });
 
   describe('without a cursor, nothing is written (R3-O4)', () => {
@@ -219,22 +231,23 @@ describe('TeachOverlay over a Python program', () => {
       const writeText = vi.fn(async () => {});
       Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
       const { doc, main } = codeDoc('import robot\nrobot.home()\n');
-      workflowApi.createTrajectory.mockResolvedValue({ id: 't1' });
       render(<TeachOverlay {...props(doc)} />);
-      await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
-      act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE }); });
+      act(() => {
+        mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: POSE });
+        mockHook.props.onCapture({ kind: 'pose', name: 'Position 2', response: POSE });
+      });
       fireEvent.click(screen.getByRole('button', { name: formatCode(CODE_DE.TEACH_INSERT_LINES, 2) }));
       await waitFor(() => expect(toast.success).toHaveBeenCalledWith(CODE_DE.COPIED_PASTE_HINT));
       // One per line AND a final line break (review round 4, mc2): pasted at
       // the end of a line anywhere, the next statement starts on a line of
       // its own.
-      const copied = 'robot.replay("Bewegung 1")\nrobot.move_to("Position 1")\n';
+      const copied = 'robot.move_to("Position 1")\nrobot.move_to("Position 2")\n';
       expect(writeText).toHaveBeenCalledWith(copied);
       // Remembered for the editor's paste: exactly this text lands like
       // „Einfügen" (owner decision R4-O1); an edited copy does not.
       expect(vormachenPasteLines(copied, 'python'))
-        .toEqual(['robot.replay("Bewegung 1")', 'robot.move_to("Position 1")']);
-      expect(vormachenPasteLines(copied.replace('Bewegung 1', 'Bewegung 2'), 'python')).toBeNull();
+        .toEqual(['robot.move_to("Position 1")', 'robot.move_to("Position 2")']);
+      expect(vormachenPasteLines(copied.replace('Position 2', 'Position 3'), 'python')).toBeNull();
       expect(vormachenPasteLines(copied, 'java')).toBeNull();
       expect(CODE_DE.COPIED_PASTE_HINT).toBe('Kopiert – klicke in deinen Code und drücke Strg+V.');
       expect(main()).toBe('import robot\nrobot.home()\n');

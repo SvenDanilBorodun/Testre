@@ -8,6 +8,9 @@
 // useTeachSession — the Vormachen state machine against the REAL keyboard path
 // (document keydown in the capture phase) and deferred service mocks the tests
 // resolve explicitly, so every ordering claim is observed, not assumed.
+//
+// Every session is one focused window (owner decision D1): `kind` 'recording'
+// (the default here), 'pose' or 'ziel'. A key the window does not offer is dead.
 
 import { renderHook, act } from '@testing-library/react';
 import useTeachSession from '../useTeachSession';
@@ -67,7 +70,7 @@ function setup(overrides = {}) {
   let counter = 0;
   const namer = vi.fn((kind) => { counter += 1; return `${kind}-${counter}`; });
   const initialProps = {
-    enabled: true, mode: 'hand', heartbeatOk: true, collisionActive: false, leaderLive: false,
+    enabled: true, mode: 'hand', kind: 'recording', heartbeatOk: true, collisionActive: false, leaderLive: false,
     roundItemCount: 0, services: svc.services, sounds, subscribeFollowerJoints, ...cbs, ...overrides,
   };
   const view = renderHook((props) => useTeachSession(props), { initialProps });
@@ -211,8 +214,8 @@ describe('useTeachSession', () => {
       h.unmount();
     });
 
-    it('P and Z capture with a name chosen on the key press', async () => {
-      const h = setup();
+    it('Position window: P captures with a name chosen on the key press', async () => {
+      const h = setup({ kind: 'pose' });
       await h.press('p');
       expect(h.namer).toHaveBeenCalledWith('pose');
       expect(h.last('capturePose').args).toEqual(['pose-1']);
@@ -221,16 +224,77 @@ describe('useTeachSession', () => {
       expect(h.cbs.onCapture).toHaveBeenCalledWith({
         kind: 'pose', name: 'pose-1', response: { success: true, world_x: 0.1 },
       });
-      await h.press('z');
-      expect(h.last('capturePose').args).toEqual(['ziel-2']);
-      await h.resolve(h.last('capturePose'), { success: true });
-      expect(h.cbs.onCapture).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'ziel', name: 'ziel-2' }));
       expect(h.state).toBe('fest');
       h.unmount();
     });
 
+    it('Ziel window: Z captures with a name chosen on the key press', async () => {
+      const h = setup({ kind: 'ziel' });
+      await h.press('z');
+      expect(h.namer).toHaveBeenCalledWith('ziel');
+      expect(h.last('capturePose').args).toEqual(['ziel-1']);
+      await h.resolve(h.last('capturePose'), { success: true });
+      expect(h.cbs.onCapture).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'ziel', name: 'ziel-1' }));
+      expect(h.state).toBe('fest');
+      h.unmount();
+    });
+
+    it.each([
+      ['recording', ['p', 'z']],
+      ['pose', [' ', 'z', 'Enter', 'r', 'Delete']],
+      ['ziel', [' ', 'p', 'Enter', 'r', 'Delete']],
+    ])('the %s window: every other window\'s key is dead (prevented, no call, no countdown)', async (kind, keys) => {
+      const h = setup({ kind });
+      for (const key of keys) {
+        const e = await h.press(key); // eslint-disable-line no-await-in-loop
+        expect(e.defaultPrevented).toBe(true);
+        await h.advance(450); // eslint-disable-line no-await-in-loop
+      }
+      await h.advance(4000);
+      expect(h.calls).toHaveLength(0);
+      expect(h.namer).not.toHaveBeenCalled();
+      expect(h.state).toBe('fest');
+      expect(h.cbs.onError).not.toHaveBeenCalled();
+      h.unmount();
+    });
+
+    it('a button follows the same gate as its key', async () => {
+      const rec = setup();
+      act(() => { rec.cur.actions.capturePose(); rec.cur.actions.captureZiel(); });
+      await rec.advance(4000);
+      expect(rec.calls).toHaveLength(0);
+      rec.unmount();
+
+      const pose = setup({ kind: 'pose' });
+      act(() => { pose.cur.actions.space(); pose.cur.actions.captureZiel(); });
+      await pose.advance(4000);
+      expect(pose.state).toBe('fest');
+      expect(pose.calls).toHaveLength(0);
+      act(() => { pose.cur.actions.capturePose(); });
+      await act(async () => { await flush(); });
+      expect(pose.count('capturePose')).toBe(1);
+      pose.unmount();
+    });
+
+    it('no kind (never opened by TeachHost, but defended): only Esc works', async () => {
+      const h = setup({ kind: undefined, roundItemCount: 0 });
+      for (const key of [' ', 'f', 'p', 'z', 'Enter', 'r', 'Delete']) {
+        const e = await h.press(key); // eslint-disable-line no-await-in-loop
+        expect(e.defaultPrevented).toBe(true);
+      }
+      act(() => {
+        h.cur.actions.space(); h.cur.actions.toggleFree(); h.cur.actions.capturePose(); h.cur.actions.captureZiel();
+      });
+      await h.advance(4000);
+      expect(h.calls).toHaveLength(0);
+      expect(h.state).toBe('fest');
+      await h.press('Escape');
+      expect(h.cbs.onFinished).toHaveBeenCalledTimes(1);
+      h.unmount();
+    });
+
     it('a refused capture is reported, never stored', async () => {
-      const h = setup();
+      const h = setup({ kind: 'pose' });
       await h.press('p');
       await h.resolve(h.last('capturePose'), { success: false, message: 'Armstellung unbekannt.' });
       expect(h.cbs.onCapture).not.toHaveBeenCalled();
@@ -282,8 +346,8 @@ describe('useTeachSession', () => {
       h.unmount();
     });
 
-    it.each([['p', 'pose'], ['z', 'ziel']])('%s captures a %s', async (key, kind) => {
-      const h = setup();
+    it.each([['p', 'pose'], ['z', 'ziel']])('%s captures a %s in its own window', async (key, kind) => {
+      const h = setup({ kind });
       await toFrei(h);
       await h.press(key);
       expect(h.last('capturePose').args).toEqual([`${kind}-1`]);
@@ -323,25 +387,15 @@ describe('useTeachSession', () => {
       h.unmount();
     });
 
-    it('P captures a waypoint during the take', async () => {
-      const h = setup();
-      await toAufnahme(h);
-      await h.press('p');
-      expect(h.last('capturePose').args).toEqual(['pose-1']);
-      await h.resolve(h.last('capturePose'), { success: true });
-      expect(h.state).toBe('aufnahme');
-      expect(h.cbs.onCapture).toHaveBeenCalledTimes(1);
-      h.unmount();
-    });
-
-    it('Z is refused with a German hint and no call', async () => {
+    it.each([['p'], ['z']])('%s is dead during the take (no capture, no hint, still recording)', async (key) => {
       const h = setup();
       await toAufnahme(h);
       const before = h.calls.length;
-      const e = await h.press('z');
+      const e = await h.press(key);
       expect(e.defaultPrevented).toBe(true);
       expect(h.calls).toHaveLength(before);
-      expect(h.cbs.onError).toHaveBeenCalledWith(DE.TEACH_ZIEL_BLOCKED_REC);
+      expect(h.namer).not.toHaveBeenCalled();
+      expect(h.cbs.onError).not.toHaveBeenCalled();
       expect(h.state).toBe('aufnahme');
       h.unmount();
     });
@@ -706,6 +760,19 @@ describe('useTeachSession', () => {
   });
 
   describe('key table — abschluss', () => {
+    it('„Weiter vormachen" keeps the window\'s kind: the Position window captures again', async () => {
+      const h = setup({ kind: 'pose', roundItemCount: 1 });
+      await h.press('Escape');
+      expect(h.state).toBe('abschluss');
+      act(() => { h.cur.actions.continueTeaching(); });
+      expect(h.state).toBe('fest');
+      await h.press(' ');
+      expect(h.state).toBe('fest');
+      await h.press('p');
+      expect(h.count('capturePose')).toBe(1);
+      h.unmount();
+    });
+
     it('Esc closes; continueTeaching returns to fest', async () => {
       const h = setup({ roundItemCount: 2 });
       await h.press('Escape');
@@ -747,7 +814,7 @@ describe('useTeachSession', () => {
       ['abschluss', [' ', 'f', 'p', 'z', 'Enter', 'r', 'Delete']],
     ].flatMap(([state, keys]) => keys.map((key) => [state, key]));
 
-    it.each(DASH)('%s + %j: prevented, no call, state unchanged', async (state, key) => {
+    it.each(DASH)('Bewegung window, %s + %j: prevented, no call, state unchanged', async (state, key) => {
       const h = setup();
       await REACH[state](h);
       expect(h.state).toBe(state);
@@ -762,6 +829,38 @@ describe('useTeachSession', () => {
       expect(h.calls).toHaveLength(before);
       expect(h.state).toBe(stateNow);
       expect(h.cbs.onKeep).not.toHaveBeenCalled();
+      h.unmount();
+    });
+
+    // The Position and Ziel windows never reach aufnahme, pruefen or vorschau.
+    const REACH_PLACE = {
+      fest: async () => {},
+      countdown: async (h) => { await h.press('f'); },
+      frei: toFrei,
+      abschluss: async (h) => { h.rerender({ roundItemCount: 1 }); await h.press('Escape'); },
+    };
+    const PLACE_DASH = (own, other) => [
+      ['fest', [' ', other, 'Enter', 'r', 'Delete']],
+      ['countdown', [' ', own, other, 'Enter', 'r', 'Delete']],
+      ['frei', [' ', other, 'Enter', 'r', 'Delete']],
+      ['abschluss', [' ', 'f', own, other, 'Enter', 'r', 'Delete']],
+    ];
+    const PLACE_CELLS = [
+      ...PLACE_DASH('p', 'z').flatMap(([state, keys]) => keys.map((key) => ['pose', state, key])),
+      ...PLACE_DASH('z', 'p').flatMap(([state, keys]) => keys.map((key) => ['ziel', state, key])),
+    ];
+
+    it.each(PLACE_CELLS)('%s window, %s + %j: prevented, no call, state unchanged', async (kind, state, key) => {
+      const h = setup({ kind });
+      await REACH_PLACE[state](h);
+      expect(h.state).toBe(state);
+      await h.advance(450);
+      const before = h.calls.length;
+      const e = await h.press(key);
+      expect(e.defaultPrevented).toBe(true);
+      await h.advance(10);
+      expect(h.calls).toHaveLength(before);
+      expect(h.state).toBe(state);
       h.unmount();
     });
   });
@@ -783,14 +882,27 @@ describe('useTeachSession', () => {
       h.unmount();
     });
 
-    it('a record start waits for the pending capture', async () => {
-      const h = setup();
+    it('Position window: a lock waits for the pending capture', async () => {
+      const h = setup({ kind: 'pose' });
       await toFrei(h);
       await h.press('p');
-      await h.advance(450);
+      await h.press('f');
+      expect(h.count('handGuide', false)).toBe(0);
+      await h.resolve(h.last('capturePose'), { success: true });
+      expect(h.count('handGuide', false)).toBe(1);
+      await h.resolve(h.last('handGuide'), { success: true });
+      expect(h.state).toBe('fest');
+      h.unmount();
+    });
+
+    it('a record start waits for the in-flight keepalive', async () => {
+      const h = setup();
+      await toFrei(h);
+      await h.advance(15000);
+      expect(h.count('handGuide', true)).toBe(2);
       await h.press(' ');
       expect(h.count('recordControl', 'start')).toBe(0);
-      await h.resolve(h.last('capturePose'), { success: true });
+      await h.resolve(h.last('handGuide'), { success: true });
       expect(h.count('recordControl', 'start')).toBe(1);
       h.unmount();
     });
@@ -799,12 +911,9 @@ describe('useTeachSession', () => {
       const h = setup();
       await toAufnahme(h);
       await h.advance(500);
-      await h.press('p'); // capture in flight
-      await h.press('f'); // stop queued behind it
+      await h.press('f'); // stop in flight
       await h.advance(450);
-      await h.press(' '); // second stop queued
-      expect(h.count('recordControl', 'stop')).toBe(0);
-      await h.resolve(h.last('capturePose'), { success: true });
+      await h.press(' '); // second stop queued behind it
       expect(h.count('recordControl', 'stop')).toBe(1);
       await h.resolve(h.last('recordControl'), { success: true, points_json: points(3) });
       await h.resolve(h.last('handGuide'), { success: true });
@@ -835,7 +944,7 @@ describe('useTeachSession', () => {
     });
 
     it('is queued behind a capture spanning the tick, never skipped', async () => {
-      const h = setup();
+      const h = setup({ kind: 'pose' });
       await toFrei(h);
       await h.advance(14000);
       await h.press('p');
@@ -847,9 +956,9 @@ describe('useTeachSession', () => {
     });
 
     it('never queues two keepalives', async () => {
-      const h = setup();
+      const h = setup({ kind: 'ziel' });
       await toFrei(h);
-      await h.press('p');
+      await h.press('z');
       await h.advance(45000); // three ticks while the capture hangs
       await h.resolve(h.last('capturePose'), { success: true });
       expect(h.count('handGuide', true)).toBe(2);
@@ -1237,7 +1346,7 @@ describe('useTeachSession', () => {
     });
 
     it('a capture name is chosen before the service call', async () => {
-      const h = setup();
+      const h = setup({ kind: 'pose' });
       await h.press('p');
       expect(h.namer.mock.invocationCallOrder[0])
         .toBeLessThan(h.services.capturePose.mock.invocationCallOrder[0]);
@@ -1316,7 +1425,7 @@ describe('useTeachSession', () => {
     });
 
     it('a keepalive still QUEUED at teardown is never sent, and the close waits', async () => {
-      const h = setup();
+      const h = setup({ kind: 'pose' });
       await toFrei(h);
       await h.advance(14800);
       await h.press('p'); // capture in flight across the 15 s tick
@@ -1332,10 +1441,11 @@ describe('useTeachSession', () => {
     it('a start still QUEUED at teardown is never sent', async () => {
       const h = setup();
       await toFrei(h);
-      await h.press('p'); // capture in flight
+      await h.advance(15000); // keepalive in flight
+      const keepalive = h.last('handGuide');
       await h.press(' '); // start queued behind it
       h.unmount();
-      await h.resolve(h.last('capturePose'), { success: true });
+      await h.resolve(keepalive, { success: true });
       expect(h.count('recordControl', 'start')).toBe(0);
       expect(h.count('handGuide', false)).toBe(1);
     });
@@ -1452,14 +1562,30 @@ describe('useTeachSession — leader mode key table (D8)', () => {
     h.unmount();
   });
 
-  it('bereit + P and + Z capture (named on the key press)', async () => {
-    const h = leaderSetup();
-    await h.press('p');
+  it.each([['p', 'pose'], ['z', 'ziel']])('bereit + %s captures in the %s window (named on the key press)', async (key, kind) => {
+    const h = leaderSetup({ kind });
+    await h.press(key);
     await h.resolve(h.last('capturePose'), { success: true, world_z: 0.1 });
-    await h.press('z');
+    await h.press(key);
     await h.resolve(h.last('capturePose'), { success: true, world_z: 0.04 });
     expect(h.count('capturePose')).toBe(2);
-    expect(h.cbs.onCapture.mock.calls.map((c) => c[0].kind)).toEqual(['pose', 'ziel']);
+    expect(h.cbs.onCapture.mock.calls.map((c) => c[0].kind)).toEqual([kind, kind]);
+    h.unmount();
+  });
+
+  it.each([
+    ['recording', ['p', 'z', 'f']],
+    ['pose', [' ', 'z', 'f', 'Enter', 'r', 'Delete']],
+    ['ziel', [' ', 'p', 'f', 'Enter', 'r', 'Delete']],
+  ])('the leader %s window: every other key in bereit is dead', async (kind, keys) => {
+    const h = leaderSetup({ kind });
+    for (const k of keys) {
+      const e = await h.press(k); // eslint-disable-line no-await-in-loop
+      expect(e.defaultPrevented).toBe(true);
+      await h.advance(450); // eslint-disable-line no-await-in-loop
+    }
+    expect(h.calls).toHaveLength(0);
+    expect(h.state).toBe('bereit');
     h.unmount();
   });
 
@@ -1489,15 +1615,15 @@ describe('useTeachSession — leader mode key table (D8)', () => {
     h.unmount();
   });
 
-  it('aufnahme + P and + Z both capture (the follower stays torqued)', async () => {
+  it('aufnahme: P and Z are dead in a leader take (owner decision D4)', async () => {
     const h = leaderSetup();
     await leaderToAufnahme(h);
+    const before = h.calls.length;
     await h.press('p');
-    await h.resolve(h.last('capturePose'), { success: true });
     await h.press('z');
-    await h.resolve(h.last('capturePose'), { success: true });
-    expect(h.count('capturePose')).toBe(2);
-    expect(h.cbs.onError).not.toHaveBeenCalledWith(DE.TEACH_ZIEL_BLOCKED_REC);
+    expect(h.calls).toHaveLength(before);
+    expect(h.count('capturePose')).toBe(0);
+    expect(h.cbs.onError).not.toHaveBeenCalled();
     expect(h.state).toBe('aufnahme');
     h.unmount();
   });
@@ -1831,6 +1957,19 @@ describe('useTeachSession — leader mode gates and teardown (D8)', () => {
     h.unmount();
   });
 
+  it('activationBlocked, Position window: P sends nothing until activated', async () => {
+    const h = leaderSetup({ kind: 'pose', activationBlocked: true });
+    const e = await h.press('p');
+    expect(e.defaultPrevented).toBe(true);
+    act(() => { h.cur.actions.capturePose(); });
+    await act(async () => { await flush(); });
+    expect(h.calls).toHaveLength(0);
+    h.rerender({ activationBlocked: false });
+    await h.press('p');
+    expect(h.count('capturePose')).toBe(1);
+    h.unmount();
+  });
+
   it('activationBlocked: Space/P/Z send nothing, Esc finishes', async () => {
     const h = leaderSetup({ activationBlocked: true, roundItemCount: 0 });
     for (const k of [' ', 'p', 'z']) {
@@ -1924,27 +2063,29 @@ describe('useTeachSession — leader status unknown (R7)', () => {
     document.body.innerHTML = '';
   });
 
-  it('hand mode, fest: Space, F, P, Z and the buttons send nothing and start no countdown', async () => {
-    const h = setup({ leaderStatusUnknown: true });
+  it.each([
+    ['recording', 'space'], ['pose', 'capturePose'], ['ziel', 'captureZiel'],
+  ])('hand mode, fest, %s window: its key, F and the buttons send nothing and start no countdown', async (kind, action) => {
+    const h = setup({ kind, leaderStatusUnknown: true });
     for (const k of [' ', 'f', 'p', 'z']) {
       const e = await h.press(k); // eslint-disable-line no-await-in-loop
       expect(e.defaultPrevented).toBe(true);
       expect(h.state).toBe('fest');
+      await h.advance(450); // eslint-disable-line no-await-in-loop
     }
-    act(() => {
-      h.cur.actions.space(); h.cur.actions.toggleFree(); h.cur.actions.capturePose(); h.cur.actions.captureZiel();
-    });
+    act(() => { h.cur.actions[action](); h.cur.actions.toggleFree(); });
     await h.advance(4000);
     expect(h.state).toBe('fest');
     expect(h.calls).toHaveLength(0);
     // The answer arrives: teaching works again.
     h.rerender({ leaderStatusUnknown: false });
-    await h.press('p');
-    expect(h.count('capturePose')).toBe(1);
+    act(() => { h.cur.actions[action](); });
+    await h.advance(3000);
+    expect(h.calls).toHaveLength(1);
     h.unmount();
   });
 
-  it('a take in progress is NOT interrupted: P waits, Space still stops it (hand mode)', async () => {
+  it('a take in progress is NOT interrupted: Space still stops it (hand mode)', async () => {
     const h = setup();
     await toAufnahme(h);
     h.rerender({ leaderStatusUnknown: true });
@@ -1952,8 +2093,6 @@ describe('useTeachSession — leader status unknown (R7)', () => {
     expect(h.state).toBe('aufnahme');
     expect(h.count('recordControl', 'cancel')).toBe(0);
     expect(h.count('handGuide', false)).toBe(0);
-    await h.press('p');
-    expect(h.count('capturePose')).toBe(0);
     await h.press(' ');
     expect(h.count('recordControl', 'stop')).toBe(1);
     await h.resolve(h.last('recordControl'), {
@@ -1973,12 +2112,11 @@ describe('useTeachSession — leader status unknown (R7)', () => {
     h.unmount();
   });
 
-  it('frei: F still re-locks, Space and P wait (hand mode)', async () => {
-    const h = setup();
+  it.each([['recording', ' '], ['pose', 'p'], ['ziel', 'z']])('frei, %s window: F still re-locks, %j waits (hand mode)', async (kind, own) => {
+    const h = setup({ kind });
     await toFrei(h);
     h.rerender({ leaderStatusUnknown: true });
-    await h.press(' ');
-    await h.press('p');
+    await h.press(own);
     expect(h.count('recordControl', 'start')).toBe(0);
     expect(h.count('capturePose')).toBe(0);
     await h.press('f');
@@ -2006,16 +2144,13 @@ describe('useTeachSession — leader status unknown (R7)', () => {
     h.unmount();
   });
 
-  it('leader mode: a leader take keeps running and Space stops it; a new take, P and Z wait', async () => {
+  it('leader mode: a leader take keeps running and Space stops it; a new take waits', async () => {
     const h = leaderSetup();
     await leaderToAufnahme(h);
     h.rerender({ leaderStatusUnknown: true });
     await h.advance(1000);
     expect(h.state).toBe('aufnahme');
     expect(h.count('recordControl', 'cancel_leader')).toBe(0);
-    await h.press('p');
-    await h.press('z');
-    expect(h.count('capturePose')).toBe(0);
     await h.press(' ');
     expect(h.count('recordControl', 'stop_leader')).toBe(1);
     await h.resolve(h.last('recordControl'), { success: false, message: 'Aufnahme verworfen.' });

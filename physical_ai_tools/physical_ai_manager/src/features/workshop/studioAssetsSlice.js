@@ -28,6 +28,7 @@ import {
   setWorkflowStatus,
 } from './workshopSlice';
 import { previewMessageDe } from '../../utils/simPreview';
+import { isTeachKind } from '../../components/Workshop/teach/teachGates';
 
 const PREVIEW_TEMPOS = [0.5, 1.0, 2.0];
 const TERMINAL_PHASES = ['finished', 'stopped', 'error'];
@@ -41,7 +42,9 @@ const initialState = {
   // { key, kind, name, workflowId, startedAt, sawOwnStatus, lastError, unreachable, unreachableMessage }
   lastPreviewResult: {},
   // key -> { status: 'ok'|'stopped'|'refused', message, unreachable, unreachableMessage, ts }
-  teach: { open: false, requested: null, mode: null, focus: null },
+  // `kind` is the open window's kind (teach/teachGates.js::TEACH_KINDS); there
+  // is no kind-less window.
+  teach: { open: false, requested: null, mode: null, kind: null },
   highlight: null,
   renameSplit: null,
 };
@@ -178,16 +181,21 @@ const studioAssetsSlice = createSlice({
       state.preview.unreachable = true;
       state.preview.unreachableMessage = typeof message === 'string' ? message : '';
     },
+    // A request names the window it opens (owner decision D1). One without a
+    // valid kind is DROPPED here — no token, so TeachHost never sees it.
     requestTeach: (state, action) => {
-      const { focus } = action.payload || {};
-      state.teach.requested = { focus: focus || null, token: Date.now() };
+      const { kind } = action.payload || {};
+      if (!isTeachKind(kind)) return;
+      state.teach.requested = { kind, token: Date.now() };
     },
+    // Always consumes the request; opens only a window of a valid kind.
     teachOpened: (state, action) => {
-      const { mode, focus } = action.payload || {};
+      const { mode, kind } = action.payload || {};
+      state.teach.requested = null;
+      if (!isTeachKind(kind)) return;
       state.teach.open = true;
       state.teach.mode = mode || null;
-      state.teach.focus = focus || null;
-      state.teach.requested = null;
+      state.teach.kind = kind;
     },
     // R7: a session opened while the leader status was unknown (`mode: null`)
     // gets its mode once the bridge answers. Only an OPEN, still-unresolved
@@ -203,7 +211,7 @@ const studioAssetsSlice = createSlice({
     teachClosed: (state) => {
       state.teach.open = false;
       state.teach.mode = null;
-      state.teach.focus = null;
+      state.teach.kind = null;
     },
     setHighlight: (state, action) => {
       state.highlight = action.payload || null;

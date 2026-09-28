@@ -394,9 +394,12 @@ export const DE = {
   // Sammlung toolbox groups (blocks/toolbox.js + sammlung/toolboxCategories.js).
   CATEGORY_AUFNAHMEN: 'Aufnahmen',
   CATEGORY_POSITIONEN: 'Positionen',
-  FLY_TEACH_RECORDING: '✋ Bewegung vormachen',
-  FLY_TEACH_POSE: '✋ Position vormachen',
-  FLY_TEACH_ZIEL: '✋ Ziel vormachen',
+  // Also the window titles of the three focused Vormachen windows
+  // (teach/teachGates.js::TEACH_KIND_LABEL_DE); the kind icon is drawn beside
+  // them, never inside the text.
+  FLY_TEACH_RECORDING: 'Bewegung vormachen',
+  FLY_TEACH_POSE: 'Position vormachen',
+  FLY_TEACH_ZIEL: 'Ziel vormachen',
   FLY_MANAGE: 'Alle verwalten …',
   FLY_PIN_CAMERA: 'Ziel in der Kamera setzen',
   FLY_PIN_SIM: 'Ziel auf den Sim-Tisch setzen',
@@ -528,7 +531,6 @@ export const DE = {
   TEACH_BLOCK_NOT_ACTIVE: 'Aktiviere den Roboter auf der Startseite, bevor du ihn bewegst.',
   TEACH_NO_MOTION: 'Keine Bewegung aufgenommen — bitte den Arm während der Aufnahme bewegen.',
   TEACH_CAP_REACHED: 'Maximale Aufnahmedauer erreicht — Aufnahme wird beendet.',
-  TEACH_ZIEL_BLOCKED_REC: 'Erst Aufnahme beenden',
   TEACH_OFFLINE: 'Keine Verbindung zum Roboter-Dienst.',
   // A server that ANSWERED but gave no reason — never „Keine Verbindung".
   TEACH_FREE_FAILED: 'Arm konnte nicht freigeschaltet werden.',
@@ -561,14 +563,19 @@ export const DE = {
 
   // Vormachen overlay + host (teach/TeachOverlay.jsx, teach/TeachHost.jsx) and
   // the page surfaces it locks.
-  TOOLBAR_TEACH: '✋ Vormachen',
+  // The toolbar chooser (components/Workshop/MenuButton.jsx): one entry per
+  // kind, each opening its own focused window.
+  TOOLBAR_TEACH: 'Vormachen',
   TOOLBAR_TEACH_TITLE: 'Bewegungen, Positionen und Ziele am echten Roboter vormachen',
-  TEACH_TITLE: 'Vormachen',
+  TEACH_CHOOSER_MENU: 'Was möchtest du vormachen?',
   TEACH_MODE_HAND: 'Mit der Hand führen',
   TEACH_MODE_LEADER: 'Mit dem Leader-Arm führen',
   TEACH_STATE_LEADER_READY: 'Führe den Leader-Arm',
   TEACH_HINT_LEADER: 'Bewege den Leader-Arm — der Roboter macht mit. Leertaste startet die Aufnahme.',
   TEACH_HINT_LEADER_REC: 'Führe den Leader-Arm. Leertaste beendet die Aufnahme.',
+  TEACH_HINT_LEADER_POSE: 'Bewege den Leader-Arm — der Roboter macht mit. P merkt die Stellung.',
+  TEACH_HINT_LEADER_ZIEL:
+    'Bewege den Leader-Arm — der Roboter macht mit. Tippe den Tisch leicht an und drücke Z.',
   TEACH_STATE_LOCKED: 'Arm ist fest',
   TEACH_STATE_FREE: 'Arm ist frei — halte ihn fest',
   TEACH_STATE_REC: 'Aufnahme läuft',
@@ -577,7 +584,12 @@ export const DE = {
   TEACH_HINT_LOCKED: 'F gibt den Arm frei. Die Leertaste zählt herunter und startet die Aufnahme.',
   TEACH_HINT_FREE: 'Bring den Arm an den Start. Leertaste startet die Aufnahme.',
   TEACH_HINT_REC: 'Bewege den Arm. Drücke die Leertaste, bevor du loslässt.',
-  TEACH_HINT_DONE: 'Benenne deine Sachen mit ✎ um oder füge sie als Programm ein.',
+  // The Position and Ziel windows (hand mode): only their own key and F.
+  TEACH_HINT_LOCKED_POSE: 'Drücke P, um diese Stellung zu merken. F gibt den Arm frei.',
+  TEACH_HINT_FREE_POSE: 'Führe den Arm in die Stellung und drücke P. F setzt ihn wieder fest.',
+  TEACH_HINT_LOCKED_ZIEL: 'F gibt den Arm frei. Tippe mit der Greiferspitze auf den Tisch und drücke Z.',
+  TEACH_HINT_FREE_ZIEL: 'Tippe mit der Greiferspitze auf den Tisch und drücke Z. F setzt den Arm fest.',
+  TEACH_HINT_DONE: 'Du kannst deine Sachen umbenennen oder als Programm einfügen.',
   TEACH_KEY_REC: 'Aufnahme',
   TEACH_KEY_STOP: 'Stopp',
   TEACH_KEY_POSE: 'Position merken',
@@ -618,8 +630,8 @@ export const DE = {
   TEACH_DRIVE_BLOCKED: 'Erst Vormachen beenden, dann fahren.',
   TEACH_SIM_ENTRY_BLOCKED:
     'Während Vormachen kann der Simulator nicht gestartet werden — bitte Vormachen zuerst beenden.',
-  TEACH_JOG_HINT: 'Zum Vormachen oben ✋ Vormachen benutzen.',
-  TEACH_JOG_HINT_FREE: 'Arm ist freigeschaltet — zum Merken oben ✋ Vormachen benutzen.',
+  TEACH_JOG_HINT: 'Zum Vormachen oben „Vormachen" benutzen.',
+  TEACH_JOG_HINT_FREE: 'Arm ist freigeschaltet — zum Merken oben „Vormachen" benutzen.',
   // Vormachen review clean-up, Ziel by touch, „Als Programm einfügen".
   TEACH_TRIM_START: 'Warten am Anfang entfernt',
   TEACH_TRIM_END: 'Ende sieht nach Loslassen aus — gekürzt',

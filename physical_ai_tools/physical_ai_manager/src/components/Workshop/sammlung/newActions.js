@@ -21,13 +21,13 @@ const canTeach = (c) => !!(c.hardware && c.teach && !c.simMode);
 
 // tab → [label, action, capability test], in flyout order.
 const NEW_ACTIONS = Object.freeze({
-  aufnahmen: [[DE.FLY_TEACH_RECORDING, { type: 'teach', focus: 'recording' }, canTeach]],
+  aufnahmen: [[DE.FLY_TEACH_RECORDING, { type: 'teach', kind: 'recording' }, canTeach]],
   ziele: [
-    [DE.FLY_TEACH_ZIEL, { type: 'teach', focus: 'ziel' }, canTeach],
+    [DE.FLY_TEACH_ZIEL, { type: 'teach', kind: 'ziel' }, canTeach],
     [DE.FLY_PIN_CAMERA, { type: 'pinCamera' }, (c) => !!c.pinCamera],
     [DE.FLY_PIN_SIM, { type: 'pinSim' }, (c) => !!c.pinSim],
   ],
-  positionen: [[DE.FLY_TEACH_POSE, { type: 'teach', focus: 'pose' }, canTeach]],
+  positionen: [[DE.FLY_TEACH_POSE, { type: 'teach', kind: 'pose' }, canTeach]],
 });
 const TAB_ORDER = ['aufnahmen', 'ziele', 'positionen'];
 

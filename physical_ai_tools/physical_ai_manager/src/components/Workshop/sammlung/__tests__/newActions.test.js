@@ -22,9 +22,9 @@ describe('newActionsFor', () => {
   it('per tab, on a calibrated rig', () => {
     expect(newActionsFor(RIG, 'aufnahmen').map((a) => a.label)).toEqual([DE.FLY_TEACH_RECORDING]);
     expect(newActionsFor(RIG, 'ziele').map((a) => a.action)).toEqual([
-      { type: 'teach', focus: 'ziel' }, { type: 'pinCamera' }, { type: 'pinSim' },
+      { type: 'teach', kind: 'ziel' }, { type: 'pinCamera' }, { type: 'pinSim' },
     ]);
-    expect(newActionsFor(RIG, 'positionen').map((a) => a.action)).toEqual([{ type: 'teach', focus: 'pose' }]);
+    expect(newActionsFor(RIG, 'positionen').map((a) => a.action)).toEqual([{ type: 'teach', kind: 'pose' }]);
     expect(newActionsFor(RIG, 'variablen')).toEqual([]);
   });
 

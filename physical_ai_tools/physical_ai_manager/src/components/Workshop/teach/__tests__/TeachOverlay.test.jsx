@@ -9,6 +9,9 @@
 // its contract with the hook (the props it hands useTeachSession, and what it
 // renders for a given snapshot) through a controllable hook; the „real hook"
 // block wires both together over the actual keyboard path.
+//
+// Every overlay is ONE focused window (owner decision D1): `kind` 'recording'
+// (the default here), 'pose' or 'ziel'.
 
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -19,6 +22,7 @@ import { compactTrajectoryPoints } from '../../../../utils/trajectoryCompact';
 import { applyCleanup } from '../../../../utils/recordingCleanup';
 import * as workflowApi from '../../../../services/workflowApi';
 import { renamePlace, renameRecording } from '../../sammlung/assetCommands';
+import { TEACH_KIND_LABEL_DE } from '../teachGates';
 
 let mockState;
 vi.mock('react-redux', () => ({
@@ -143,7 +147,7 @@ function makeActions() {
 
 function baseProps(over = {}) {
   return {
-    mode: 'hand', focus: null, onClose: vi.fn(), workspace: { id: 'ws' }, accessToken: 'jwt',
+    mode: 'hand', kind: 'recording', onClose: vi.fn(), workspace: { id: 'ws' }, accessToken: 'jwt',
     workflowId: 'wf-1', robotType: 'omx_f', caps: null, heartbeatOk: true,
     rsBridge: { available: true, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false },
     saveWorkflowNow: vi.fn(), refetchTrajectories: vi.fn(), ...over,
@@ -199,8 +203,8 @@ describe('TeachOverlay — dialog, focus and the CollisionModal', () => {
     const { unmount } = render(<TeachOverlay {...baseProps()} />);
     const dialog = screen.getByRole('dialog');
     expect(dialog.getAttribute('aria-modal')).toBe('true');
-    // aria-labelledby resolves to the header title.
-    expect(screen.getByRole('dialog', { name: `✋ ${DE.TEACH_TITLE}` })).toBe(dialog);
+    // aria-labelledby resolves to the header title: the window's kind.
+    expect(screen.getByRole('dialog', { name: DE.FLY_TEACH_RECORDING })).toBe(dialog);
     expect(screen.getByText(DE.TEACH_MODE_HAND)).toBeInTheDocument();
     expect(dialog).toHaveFocus();
     unmount();
@@ -219,7 +223,7 @@ describe('TeachOverlay — dialog, focus and the CollisionModal', () => {
     fireEvent.keyDown(outside, { key: 'Tab' });
     expect(enabled()[0]).toHaveFocus();
 
-    const inside = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_POSE) });
+    const inside = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_REC) });
     inside.focus();
     inside.disabled = true;
     fireEvent.keyDown(inside, { key: 'Tab', shiftKey: true });
@@ -243,7 +247,7 @@ describe('TeachOverlay — dialog, focus and the CollisionModal', () => {
     try {
       withSnapshot({ state: 'fest' });
       render(<TeachOverlay {...baseProps()} />);
-      const btn = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_POSE) });
+      const btn = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_REC) });
       btn.focus();
       expect(btn).toHaveFocus();
       fireEvent.pointerUp(btn);
@@ -389,7 +393,7 @@ describe('TeachOverlay — captures go into the document store, named on the key
     mockStore.add.mockImplementation((input) => ({
       ok: true, entry: { id: 'd_1', name: input.name, kind: input.kind, x: input.x, y: input.y, z: input.z },
     }));
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
     act(() => {
       mockHook.props.onCapture({
         kind: 'pose', name: 'Position 1', response: { success: true, world_x: 0.2, world_y: -0.05, world_z: 0.118 },
@@ -411,7 +415,7 @@ describe('TeachOverlay — captures go into the document store, named on the key
     mockStore.add.mockImplementation((input) => ({
       ok: true, entry: { id: 'd_2', name: input.name, kind: input.kind, x: input.x, y: input.y, z: input.z },
     }));
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'ziel' })} />);
     act(() => {
       mockHook.props.onCapture({
         kind: 'ziel', name: 'Ziel 1', response: { success: true, world_x: 0.182, world_y: -0.064, world_z: 0.01 },
@@ -431,7 +435,7 @@ describe('TeachOverlay — captures go into the document store, named on the key
         joints: input.joints, joint_names: input.joint_names,
       },
     }));
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
     const names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
     act(() => {
       mockHook.props.onCapture({
@@ -460,7 +464,7 @@ describe('TeachOverlay — captures go into the document store, named on the key
     mockStore.add.mockImplementation((input) => ({
       ok: true, entry: { id: 'd_1', name: input.name, kind: input.kind, x: input.x, y: input.y, z: input.z },
     }));
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
     act(() => {
       mockHook.props.onCapture({
         kind: 'pose', name: 'Position 1', response: { success: true, world_x: 0.2, world_y: -0.05, world_z: 0.118, ...extra },
@@ -475,7 +479,7 @@ describe('TeachOverlay — captures go into the document store, named on the key
   test('a store refusal is toasted and lists nothing', () => {
     withSnapshot({ state: 'fest' });
     mockStore.add.mockReturnValue({ ok: false, error: 'Der Name „Position 1" ist schon vergeben.' });
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
     act(() => {
       mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: { success: true, world_x: 0, world_y: 0, world_z: 0 } });
     });
@@ -490,6 +494,29 @@ describe('TeachOverlay — captures go into the document store, named on the key
     expect(mockHook.namer('pose')).toBe('Position 2');
     expect(mockHook.namer('pose')).toBe('Position 3');
     expect(mockHook.namer('ziel')).toBe('Ziel 2');
+  });
+
+  // Defence in depth behind the engine's gate: a window's list takes only its
+  // own kind.
+  test('a Bewegung window stores no capture, and a Position window no take or Ziel', async () => {
+    withSnapshot({ state: 'fest' });
+    mockStore.add.mockImplementation((input) => ({ ok: true, entry: { id: 'x', name: input.name, kind: input.kind } }));
+    const { unmount: unmountRec } = render(<TeachOverlay {...baseProps()} />);
+    act(() => {
+      mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: { success: true, world_x: 0, world_y: 0, world_z: 0 } });
+      mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 1', response: { success: true, world_x: 0, world_y: 0, world_z: 0 } });
+    });
+    expect(mockStore.add).not.toHaveBeenCalled();
+    unmountRec();
+
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
+    await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
+    act(() => {
+      mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 1', response: { success: true, world_x: 0, world_y: 0, world_z: 0 } });
+    });
+    expect(workflowApi.createTrajectory).not.toHaveBeenCalled();
+    expect(mockStore.add).not.toHaveBeenCalled();
+    expect(screen.getByText(DE.TEACH_LIST_EMPTY)).toBeInTheDocument();
   });
 });
 
@@ -619,7 +646,7 @@ function addPose(name = 'Position 1') {
 describe('TeachOverlay — the summary and renaming (never while the arm is limp)', () => {
   test('abschluss shows the list with ✎ enabled and „Weiter vormachen" / „Schließen" — no action buttons', () => {
     const actions = withSnapshot({ state: 'abschluss' });
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
     addPose();
     expect(screen.getByText(DE.TEACH_STATE_DONE)).toBeInTheDocument();
     expect(screen.getByText(DE.TEACH_HINT_DONE)).toBeInTheDocument();
@@ -631,31 +658,41 @@ describe('TeachOverlay — the summary and renaming (never while the arm is limp
     expect(actions.finish).toHaveBeenCalledTimes(1);
   });
 
-  test.each(['frei', 'aufnahme', 'countdown', 'vorschau'])('✎ is disabled in %s with the „locked" title', (state) => {
+  // A kept, saved take in a Bewegung window (renamable once saved).
+  async function keepSaved() {
+    workflowApi.createTrajectory.mockResolvedValue({ id: 't1' });
+    await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
+  }
+
+  test.each([
+    ['pose', 'frei', 'Position 1'], ['pose', 'countdown', 'Position 1'],
+    ['recording', 'aufnahme', 'Bewegung 1'], ['recording', 'vorschau', 'Bewegung 1'],
+  ])('%s window: ✎ is disabled in %s with the „locked" title', async (kind, state, name) => {
     withSnapshot({ state, take: state === 'vorschau' ? TAKE : null, countdownLeft: 2 });
-    render(<TeachOverlay {...baseProps()} />);
-    addPose();
-    const pencil = screen.getByRole('button', { name: `${DE.DRAWER_RENAME}: Position 1` });
+    render(<TeachOverlay {...baseProps({ kind })} />);
+    if (kind === 'pose') addPose();
+    else await keepSaved();
+    const pencil = screen.getByRole('button', { name: `${DE.DRAWER_RENAME}: ${name}` });
     expect(pencil).toBeDisabled();
     expect(pencil.getAttribute('title')).toBe(DE.TEACH_RENAME_LOCKED);
   });
 
-  test('✎ is disabled in pruefen while the re-lock failed, enabled once it is ok', () => {
+  test('✎ is disabled in pruefen while the re-lock failed, enabled once it is ok', async () => {
     withSnapshot({ state: 'pruefen', relock: 'failed', take: TAKE });
     const { unmount } = render(<TeachOverlay {...baseProps()} />);
-    addPose();
-    expect(screen.getByRole('button', { name: `${DE.DRAWER_RENAME}: Position 1` })).toBeDisabled();
+    await keepSaved();
+    expect(screen.getByRole('button', { name: `${DE.DRAWER_RENAME}: Bewegung 1` })).toBeDisabled();
     unmount();
     withSnapshot({ state: 'pruefen', relock: 'ok', take: TAKE });
     render(<TeachOverlay {...baseProps()} />);
-    addPose();
-    expect(screen.getByRole('button', { name: `${DE.DRAWER_RENAME}: Position 1` })).toBeEnabled();
+    await keepSaved();
+    expect(screen.getByRole('button', { name: `${DE.DRAWER_RENAME}: Bewegung 1` })).toBeEnabled();
   });
 
   test('renaming a Position goes through renamePlace and relabels the row', async () => {
     withSnapshot({ state: 'fest' });
     renamePlace.mockReturnValue({ ok: true, oldName: 'Position 1', entry: { id: 'id-Position1', name: 'Kiste' } });
-    const props = baseProps();
+    const props = baseProps({ kind: 'pose' });
     render(<TeachOverlay {...props} />);
     addPose();
     fireEvent.click(screen.getByRole('button', { name: `${DE.DRAWER_RENAME}: Position 1` }));
@@ -692,7 +729,7 @@ describe('TeachOverlay — the summary and renaming (never while the arm is limp
   test('a refused rename is toasted and keeps the field open', async () => {
     withSnapshot({ state: 'fest' });
     renamePlace.mockReturnValue({ ok: false, error: 'Der Name „Kiste" ist schon vergeben.' });
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
     addPose();
     fireEvent.click(screen.getByRole('button', { name: `${DE.DRAWER_RENAME}: Position 1` }));
     fireEvent.change(screen.getByRole('textbox', { name: DE.DRAWER_NAME }), { target: { value: 'Kiste' } });
@@ -794,7 +831,7 @@ describe('TeachOverlay — with the real session hook', () => {
     mockStore.add.mockImplementation((input) => ({
       ok: true, entry: { id: 'd_9', name: input.name, kind: input.kind, x: input.x, y: input.y, z: input.z },
     }));
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
     key('p');
     await act(async () => { await flush(); });
     expect(mockRos.capturePose).toHaveBeenCalledWith('Position 2');
@@ -814,6 +851,21 @@ describe('TeachOverlay — with the real session hook', () => {
     expect(ev.defaultPrevented).toBe(false);
     expect(mockRos.recordControl).not.toHaveBeenCalled();
     expect(mockRos.handGuide).not.toHaveBeenCalled();
+  });
+
+  test('the Bewegung window ignores P and Z; the Position window ignores Space (real keys)', async () => {
+    const { unmount: unmountRec } = render(<TeachOverlay {...baseProps()} />);
+    expect(key('p').defaultPrevented).toBe(true);
+    expect(key('z').defaultPrevented).toBe(true);
+    await act(async () => { vi.advanceTimersByTime(4000); await flush(); });
+    expect(mockRos.capturePose).not.toHaveBeenCalled();
+    unmountRec();
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
+    expect(key(' ').defaultPrevented).toBe(true);
+    await act(async () => { vi.advanceTimersByTime(4000); await flush(); });
+    expect(mockRos.recordControl).not.toHaveBeenCalled();
+    expect(mockRos.handGuide).not.toHaveBeenCalled();
+    expect(screen.getByText(DE.TEACH_STATE_LOCKED)).toBeInTheDocument();
   });
 
   test('closing the overlay removes its keyboard listener', () => {
@@ -951,7 +1003,7 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
   test('the question names the height in cm, stores nothing yet, and focuses „Als Position speichern"', () => {
     withSnapshot({ state: 'frei' });
     storeEchoes();
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'ziel' })} />);
     captureHigh();
     const dialog = screen.getByRole('alertdialog');
     expect(within(dialog).getByText(formatDe(DE.TEACH_ZIEL_TOO_HIGH, '12,0'))).toBeInTheDocument();
@@ -960,10 +1012,10 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
     expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_ZIEL) })).toBeDisabled();
   });
 
-  test.each([['Enter'], ['Escape']])('%s stores a Position (measured z kept, named as a Position)', (key) => {
+  test.each([['Enter'], ['Escape']])('%s stores a Position (measured z kept, named as a Position) — in the Ziel window\'s list (D3)', (key) => {
     withSnapshot({ state: 'frei' });
     storeEchoes();
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'ziel' })} />);
     captureHigh();
     fireEvent.keyDown(screen.getByRole('dialog'), { key });
     expect(mockStore.add).toHaveBeenCalledTimes(1);
@@ -978,7 +1030,7 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
     withSnapshot({ state: 'frei' });
     storeEchoes();
     mockHook.onKeyDown = vi.fn();
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'ziel' })} />);
     captureHigh();
     const z = new KeyboardEvent('keydown', { key: 'z', bubbles: true, cancelable: true });
     act(() => { document.body.dispatchEvent(z); });
@@ -994,7 +1046,7 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
   test('„Trotzdem als Ziel" stores a Ziel under its own name', () => {
     withSnapshot({ state: 'frei' });
     storeEchoes();
-    render(<TeachOverlay {...baseProps()} />);
+    render(<TeachOverlay {...baseProps({ kind: 'ziel' })} />);
     captureHigh();
     fireEvent.click(screen.getByRole('button', { name: DE.TEACH_ZIEL_AS_PIN }));
     expect(mockStore.add).toHaveBeenCalledWith(expect.objectContaining({ name: 'Ziel 1', kind: 'pin', source: 'capture', z: 0.16 }));
@@ -1005,13 +1057,13 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
   test('a touch within 30 mm of the table is a Ziel without a question; the threshold is per arm', () => {
     withSnapshot({ state: 'frei' });
     storeEchoes();
-    const { unmount } = render(<TeachOverlay {...baseProps()} />);
+    const { unmount } = render(<TeachOverlay {...baseProps({ kind: 'ziel' })} />);
     act(() => { mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 1', response: { ...HIGH, world_z: 0.07 } }); });
     expect(screen.queryByRole('alertdialog')).toBeNull();
     expect(mockStore.add.mock.calls[0][0]).toMatchObject({ kind: 'pin', z: 0.07 });
     unmount();
     // Edu:6: the TCP is the fingertip, so the same 0.07 m is 70 mm up.
-    render(<TeachOverlay {...baseProps({ caps: { urdf_asset_id: 'edu6', arm_joints: 6 } })} />);
+    render(<TeachOverlay {...baseProps({ kind: 'ziel', caps: { urdf_asset_id: 'edu6', arm_joints: 6 } })} />);
     act(() => { mockHook.props.onCapture({ kind: 'ziel', name: 'Ziel 2', response: { ...HIGH, world_z: 0.07 } }); });
     expect(within(screen.getByRole('alertdialog')).getByText(formatDe(DE.TEACH_ZIEL_TOO_HIGH, '7,0'))).toBeInTheDocument();
   });
@@ -1019,10 +1071,12 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
   test('P is never questioned; closing with a question open keeps the capture as a Position', () => {
     withSnapshot({ state: 'frei' });
     storeEchoes();
-    const { unmount } = render(<TeachOverlay {...baseProps()} />);
+    const { unmount: unmountPose } = render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
     act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: HIGH }); });
     expect(screen.queryByRole('alertdialog')).toBeNull();
+    unmountPose();
     mockStore.taken = ['Position 1'];
+    const { unmount } = render(<TeachOverlay {...baseProps({ kind: 'ziel' })} />);
     captureHigh();
     unmount();
     expect(mockStore.add.mock.calls.map((c) => [c[0].name, c[0].kind])).toEqual([
@@ -1032,43 +1086,66 @@ describe('TeachOverlay — Ziel by touch: too high asks „Als Position speicher
 });
 
 describe('TeachOverlay — „Als Programm einfügen"', () => {
-  async function fillRound() {
+  // One kind per window: a round is two takes, or two captures.
+  async function fillTakes() {
     workflowApi.createTrajectory.mockResolvedValue({ id: 't' });
-    mockStore.add.mockImplementation((input) => ({
-      ok: true, entry: { id: 'd_p1', name: input.name, kind: input.kind, x: input.x, y: input.y, z: input.z },
-    }));
-    mockStore.getById.mockImplementation((id) => (id === 'd_p1' ? { id, name: 'Position 1' } : null));
-    await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
-    act(() => {
-      mockHook.props.onCapture({ kind: 'pose', name: 'Position 1', response: { success: true, world_x: 0.1, world_y: 0, world_z: 0.1 } });
+    await act(async () => {
+      mockHook.props.onKeep(TAKE);
+      mockHook.props.onKeep(TAKE);
+      await flush();
     });
   }
 
-  test.each(['fest', 'abschluss'])('in %s the button counts the insertable items and inserts them with a toast', async (state) => {
+  function fillPoses() {
+    mockStore.add.mockImplementation((input) => ({
+      ok: true, entry: { id: `d_${input.name}`, name: input.name, kind: input.kind, x: input.x, y: input.y, z: input.z },
+    }));
+    mockStore.getById.mockImplementation((id) => (id.startsWith('d_') ? { id, name: id.slice(2) } : null));
+    act(() => {
+      for (const name of ['Position 1', 'Position 2']) {
+        mockHook.props.onCapture({ kind: 'pose', name, response: { success: true, world_x: 0.1, world_y: 0, world_z: 0.1 } });
+      }
+    });
+  }
+
+  test.each(['fest', 'abschluss'])('Bewegung window in %s: the button counts the kept takes and inserts them with a toast', async (state) => {
     withSnapshot({ state });
     const props = baseProps();
     render(<TeachOverlay {...props} />);
     expect(screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 0) })).toBeDisabled();
-    await fillRound();
+    await fillTakes();
     const button = screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 2) });
     expect(button).toBeEnabled();
     mockInsert.fn.mockReturnValue({ blockId: 'b1', count: 2 });
     fireEvent.click(button);
     expect(mockInsert.fn).toHaveBeenCalledTimes(1);
-    const [ws, items, opts] = mockInsert.fn.mock.calls[0];
+    const [ws, items] = mockInsert.fn.mock.calls[0];
     expect(ws).toBe(props.workspace);
-    expect(items.map((it) => it.name)).toEqual(['Bewegung 1', 'Position 1']);
-    expect(opts.placeNameOf(items[1])).toBe('Position 1');
+    expect(items.map((it) => it.name)).toEqual(['Bewegung 1', 'Bewegung 2']);
     // The overlay awaits the result (a code document's insertion is async).
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(formatDe(DE.TEACH_INSERT_DONE, 2)));
+  });
+
+  test('Position window: the captures are inserted by their CURRENT store names', async () => {
+    withSnapshot({ state: 'fest' });
+    const props = baseProps({ kind: 'pose' });
+    render(<TeachOverlay {...props} />);
+    fillPoses();
+    const button = screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 2) });
+    mockInsert.fn.mockReturnValue({ blockId: 'b1', count: 2 });
+    fireEvent.click(button);
+    const [, items, opts] = mockInsert.fn.mock.calls[0];
+    expect(items.map((it) => it.name)).toEqual(['Position 1', 'Position 2']);
+    expect(opts.placeNameOf(items[1])).toBe('Position 2');
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith(formatDe(DE.TEACH_INSERT_DONE, 2)));
   });
 
   test('a place no longer in the store does not count', async () => {
     withSnapshot({ state: 'fest' });
-    render(<TeachOverlay {...baseProps()} />);
-    await fillRound();
-    mockStore.getById.mockReturnValue(null);
-    act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 2', response: { success: true, world_x: 0.1, world_y: 0, world_z: 0.1 } }); });
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
+    fillPoses();
+    mockStore.getById.mockImplementation((id) => (id === 'd_Position 1' ? { id, name: 'Position 1' } : null));
+    act(() => { mockHook.props.onCapture({ kind: 'pose', name: 'Position 3', response: { success: true, world_x: 0.1, world_y: 0, world_z: 0.1 } }); });
     // One block is „1 Block", never „1 Blöcke".
     expect(screen.getByRole('button', { name: DE.TEACH_INSERT_ONE })).toBeInTheDocument();
     expect(DE.TEACH_INSERT_ONE).toBe('Als Programm einfügen (1 Block)');
@@ -1077,7 +1154,7 @@ describe('TeachOverlay — „Als Programm einfügen"', () => {
 
   test('„Greifer merken": a changed captured gripper state adds a gripper block to the count and the insert', () => {
     withSnapshot({ state: 'fest' });
-    const props = baseProps();
+    const props = baseProps({ kind: 'pose' });
     render(<TeachOverlay {...props} />);
     const names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'];
     const entries = {};
@@ -1115,7 +1192,7 @@ describe('TeachOverlay — leader mode (D8)', () => {
   const LEADER_BRIDGE = { available: true, followerOnly: false, hasLeader: true, busy: false, leaderOn: true };
   const leaderProps = (over = {}) => baseProps({ mode: 'leader', caps: { has_leader: true }, rsBridge: LEADER_BRIDGE, ...over });
 
-  test('bereit: leader header, state and hint lines, no F button, the light-touch Z hint', () => {
+  test('bereit, Bewegung window: leader header, state and hint lines, only the record button', () => {
     withSnapshot({ state: 'bereit' });
     render(<TeachOverlay {...leaderProps()} />);
     expect(screen.getByText(DE.TEACH_MODE_LEADER)).toBeInTheDocument();
@@ -1124,22 +1201,35 @@ describe('TeachOverlay — leader mode (D8)', () => {
     expect(screen.getByText(DE.TEACH_HINT_LEADER)).toBeInTheDocument();
     expect(screen.queryByText(DE.TEACH_KEY_FREE)).toBeNull();
     expect(screen.queryByText(DE.TEACH_KEY_LOCK)).toBeNull();
+    expect(screen.queryByRole('button', { name: new RegExp(DE.TEACH_KEY_ZIEL) })).toBeNull();
+    expect(screen.queryByRole('button', { name: new RegExp(DE.TEACH_KEY_POSE) })).toBeNull();
+    expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_REC) })).toBeEnabled();
+    expect(mockHook.props).toMatchObject({ mode: 'leader', kind: 'recording', leaderGone: false, activationBlocked: false });
+  });
+
+  test('bereit, Ziel window: only Z, with the light-touch hint; the Position window only P', () => {
+    withSnapshot({ state: 'bereit' });
+    const { unmount: unmountZiel } = render(<TeachOverlay {...leaderProps({ kind: 'ziel' })} />);
     const z = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_ZIEL) });
     expect(within(z).getByText(DE.TEACH_LEADER_ZIEL_HINT)).toBeInTheDocument();
     expect(z).toBeEnabled();
-    expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_REC) })).toBeEnabled();
-    expect(mockHook.props).toMatchObject({ mode: 'leader', leaderGone: false, activationBlocked: false });
+    expect(screen.getByText(DE.TEACH_HINT_LEADER_ZIEL)).toBeInTheDocument();
+    expect(within(screen.getByTestId('teach-actions')).getAllByRole('button')).toHaveLength(1);
+    unmountZiel();
+    render(<TeachOverlay {...leaderProps({ kind: 'pose' })} />);
+    expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_POSE) })).toBeEnabled();
+    expect(screen.getByText(DE.TEACH_HINT_LEADER_POSE)).toBeInTheDocument();
+    expect(within(screen.getByTestId('teach-actions')).getAllByRole('button')).toHaveLength(1);
   });
 
-  test('aufnahme: the leader recording hint, Stop, P and Z enabled (no „Erst Aufnahme beenden")', () => {
+  test('aufnahme: the leader recording hint and Stop; no P or Z during a take (D4)', () => {
     withSnapshot({ state: 'aufnahme', elapsedS: 3 });
     render(<TeachOverlay {...leaderProps()} />);
     expect(screen.getByText(DE.TEACH_STATE_REC)).toBeInTheDocument();
     expect(screen.getByText(DE.TEACH_HINT_LEADER_REC)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_STOP) })).toBeEnabled();
-    const z = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_ZIEL) });
-    expect(z).toBeEnabled();
-    expect(z).not.toHaveAttribute('title', DE.TEACH_ZIEL_BLOCKED_REC);
+    expect(screen.queryByRole('button', { name: new RegExp(DE.TEACH_KEY_ZIEL) })).toBeNull();
+    expect(screen.queryByRole('button', { name: new RegExp(DE.TEACH_KEY_POSE) })).toBeNull();
   });
 
   test('the review never offers a real-arm replay, and keep waits out the grace window', () => {
@@ -1291,18 +1381,22 @@ describe('TeachOverlay — leader status unknown (R7)', () => {
   const btn = (label) => screen.getByRole('button', { name: new RegExp(label) });
   const notice = () => screen.queryByTestId('teach-leader-status');
 
-  test('pending session: „Roboterstatus wird geprüft …", no mode, no state line, teaching disabled, Fertig works', () => {
+  test.each([
+    ['recording', DE.TEACH_KEY_REC], ['pose', DE.TEACH_KEY_POSE], ['ziel', DE.TEACH_KEY_ZIEL],
+  ])('pending %s window: „Roboterstatus wird geprüft …", no mode, its one button disabled, no F, Fertig works', (kind, own) => {
     const actions = withSnapshot({ state: 'fest' });
-    render(<TeachOverlay {...baseProps({ mode: 'pending', caps: OMX_FULL, rsBridge: PENDING })} />);
+    render(<TeachOverlay {...baseProps({ kind, mode: 'pending', caps: OMX_FULL, rsBridge: PENDING })} />);
+    expect(screen.getByRole('dialog', { name: TEACH_KIND_LABEL_DE[kind] })).toBeInTheDocument();
     expect(notice()).toHaveTextContent('Roboterstatus wird geprüft …');
     expect(notice()).toHaveAttribute('role', 'status');
     expect(screen.queryByText(DE.TEACH_MODE_HAND)).toBeNull();
     expect(screen.queryByText(DE.TEACH_MODE_LEADER)).toBeNull();
     expect(screen.getByTestId('teach-state-line')).toHaveTextContent('');
     expect(screen.queryByText(DE.TEACH_HINT_LOCKED)).toBeNull();
-    expect(btn(DE.TEACH_KEY_REC)).toBeDisabled();
-    expect(btn(DE.TEACH_KEY_POSE)).toBeDisabled();
-    expect(btn(DE.TEACH_KEY_ZIEL)).toBeDisabled();
+    const buttons = within(screen.getByTestId('teach-actions')).getAllByRole('button');
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]).toHaveAccessibleName(new RegExp(own));
+    expect(buttons[0]).toBeDisabled();
     expect(screen.queryByText(DE.TEACH_KEY_FREE)).toBeNull();
     expect(mockHook.props).toMatchObject({ mode: 'pending', leaderStatusUnknown: true });
     const done = screen.getByRole('button', { name: `${DE.TEACH_DONE} (Esc)` });
@@ -1311,14 +1405,16 @@ describe('TeachOverlay — leader status unknown (R7)', () => {
     expect(actions.finish).toHaveBeenCalledTimes(1);
   });
 
-  test('hand mode, bridge answered unavailable (Windows): the EduBotics-program notice, new teaching disabled', () => {
+  test.each([
+    ['recording', DE.TEACH_KEY_REC], ['pose', DE.TEACH_KEY_POSE], ['ziel', DE.TEACH_KEY_ZIEL],
+  ])('hand mode, %s window, bridge answered unavailable (Windows): the EduBotics-program notice, new teaching disabled', (kind, own) => {
     withSnapshot({ state: 'fest' });
-    render(<TeachOverlay {...baseProps({ caps: OMX_FULL, rsBridge: DOWN })} />);
+    render(<TeachOverlay {...baseProps({ kind, caps: OMX_FULL, rsBridge: DOWN })} />);
     expect(notice()).toHaveTextContent(
       'Leader-Status unbekannt — das EduBotics-Programm auf diesem PC antwortet nicht. '
       + 'Vormachen ist gesperrt, bis es wieder antwortet.');
     expect(notice()).toHaveAttribute('role', 'alert');
-    for (const label of [DE.TEACH_KEY_REC, DE.TEACH_KEY_POSE, DE.TEACH_KEY_ZIEL, DE.TEACH_KEY_FREE]) {
+    for (const label of [own, DE.TEACH_KEY_FREE]) {
       expect(btn(label)).toBeDisabled();
     }
     expect(mockHook.props.leaderStatusUnknown).toBe(true);
@@ -1349,18 +1445,20 @@ describe('TeachOverlay — leader status unknown (R7)', () => {
 
   test.each(['omx_follower', 'edu6_studio', 'edu1_studio'])('%s (has_leader false): never blocked, no notice', () => {
     withSnapshot({ state: 'fest' });
-    render(<TeachOverlay {...baseProps({ caps: { has_leader: false }, rsBridge: PENDING })} />);
+    const { unmount: unmountRec } = render(<TeachOverlay {...baseProps({ caps: { has_leader: false }, rsBridge: PENDING })} />);
     expect(notice()).toBeNull();
     expect(btn(DE.TEACH_KEY_REC)).toBeEnabled();
-    expect(btn(DE.TEACH_KEY_POSE)).toBeEnabled();
     expect(mockHook.props.leaderStatusUnknown).toBe(false);
+    unmountRec();
+    render(<TeachOverlay {...baseProps({ kind: 'pose', caps: { has_leader: false }, rsBridge: PENDING })} />);
+    expect(btn(DE.TEACH_KEY_POSE)).toBeEnabled();
   });
 
-  test('an in-flight hand take is not interrupted: Stop stays enabled, a capture waits, review keep/discard stay', () => {
+  test('an in-flight hand take is not interrupted: Stop and F stay enabled, review keep/discard stay', () => {
     withSnapshot({ state: 'aufnahme', elapsedS: 4 });
     const { rerender } = render(<TeachOverlay {...baseProps({ caps: OMX_FULL, rsBridge: DOWN })} />);
     expect(btn(DE.TEACH_KEY_STOP)).toBeEnabled();
-    expect(btn(DE.TEACH_KEY_POSE)).toBeDisabled();
+    expect(screen.queryByRole('button', { name: new RegExp(DE.TEACH_KEY_POSE) })).toBeNull();
     expect(screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_LOCK) })).toBeEnabled();
     withSnapshot({ state: 'pruefen', take: TAKE, relock: 'ok' });
     rerender(<TeachOverlay {...baseProps({ caps: OMX_FULL, rsBridge: DOWN })} />);
@@ -1371,13 +1469,12 @@ describe('TeachOverlay — leader status unknown (R7)', () => {
     expect(within(review).getByRole('button', { name: DE.TEACH_REVIEW_ON_ROBOT })).toBeDisabled();
   });
 
-  test('an in-flight leader take is not interrupted: Stop enabled, P/Z wait, no leader-gone', () => {
+  test('an in-flight leader take is not interrupted: Stop enabled, no leader-gone', () => {
     withSnapshot({ state: 'aufnahme', elapsedS: 2 });
     render(<TeachOverlay {...baseProps({ mode: 'leader', caps: OMX_FULL, rsBridge: DOWN })} />);
     expect(notice()).toHaveTextContent(DE.TEACH_LEADER_STATUS_UNKNOWN);
     expect(btn(DE.TEACH_KEY_STOP)).toBeEnabled();
-    expect(btn(DE.TEACH_KEY_POSE)).toBeDisabled();
-    expect(btn(DE.TEACH_KEY_ZIEL)).toBeDisabled();
+    expect(within(screen.getByTestId('teach-actions')).getAllByRole('button')).toHaveLength(1);
     expect(mockHook.props).toMatchObject({ leaderGone: false, leaderStatusUnknown: true });
     expect(screen.queryByText(DE.TEACH_LEADER_GONE)).toBeNull();
   });
@@ -1434,5 +1531,99 @@ describe('TeachOverlay — leader status unknown with the real session hook (R7)
     key(' ');
     await act(async () => { vi.advanceTimersByTime(4000); await flush(); });
     expect(mockRos.recordControl).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+// The kind contract on screen (owner decision D1, D10): each window renders
+// only its own buttons, its own title with its kind icon, and hints that name
+// only its own keys.
+describe('TeachOverlay — one focused window per kind', () => {
+  const LEADER_BRIDGE = { available: true, followerOnly: false, hasLeader: true, busy: false, leaderOn: true };
+  const actionNames = () => within(screen.getByTestId('teach-actions')).getAllByRole('button')
+    .map((b) => b.textContent);
+
+  test.each([
+    ['recording', 'hand', 'fest', [DE.TEACH_KEY_REC, DE.TEACH_KEY_FREE]],
+    ['pose', 'hand', 'fest', [DE.TEACH_KEY_POSE, DE.TEACH_KEY_FREE]],
+    ['ziel', 'hand', 'fest', [DE.TEACH_KEY_ZIEL, DE.TEACH_KEY_FREE]],
+    ['pose', 'hand', 'frei', [DE.TEACH_KEY_POSE, DE.TEACH_KEY_LOCK]],
+    ['ziel', 'hand', 'frei', [DE.TEACH_KEY_ZIEL, DE.TEACH_KEY_LOCK]],
+    ['recording', 'leader', 'bereit', [DE.TEACH_KEY_REC]],
+    ['pose', 'leader', 'bereit', [DE.TEACH_KEY_POSE]],
+    ['ziel', 'leader', 'bereit', [DE.TEACH_KEY_ZIEL]],
+  ])('%s window, %s mode, %s: exactly %j', (kind, mode, state, labels) => {
+    withSnapshot({ state });
+    const over = mode === 'leader' ? { mode, caps: { has_leader: true }, rsBridge: LEADER_BRIDGE } : {};
+    render(<TeachOverlay {...baseProps({ kind, ...over })} />);
+    const names = actionNames();
+    expect(names).toHaveLength(labels.length);
+    labels.forEach((label, i) => expect(names[i]).toContain(label));
+    for (const b of within(screen.getByTestId('teach-actions')).getAllByRole('button')) {
+      expect(b).toBeEnabled();
+    }
+  });
+
+  test.each([['recording', 'record'], ['pose', 'pose'], ['ziel', 'ziel']])(
+    'the %s window is titled with its kind and carries the %s icon',
+    (kind, icon) => {
+      withSnapshot({ state: 'fest' });
+      render(<TeachOverlay {...baseProps({ kind })} />);
+      const dialog = screen.getByRole('dialog', { name: TEACH_KIND_LABEL_DE[kind] });
+      const title = within(dialog).getByRole('heading', { level: 2 });
+      // eslint-disable-next-line testing-library/no-node-access
+      expect(title.querySelector(`svg[data-icon="${icon}"]`)).not.toBeNull();
+      expect(title).toHaveTextContent(TEACH_KIND_LABEL_DE[kind]);
+    },
+  );
+
+  test.each([
+    ['recording', 'fest', DE.TEACH_HINT_LOCKED], ['recording', 'frei', DE.TEACH_HINT_FREE],
+    ['pose', 'fest', DE.TEACH_HINT_LOCKED_POSE], ['pose', 'frei', DE.TEACH_HINT_FREE_POSE],
+    ['ziel', 'fest', DE.TEACH_HINT_LOCKED_ZIEL], ['ziel', 'frei', DE.TEACH_HINT_FREE_ZIEL],
+  ])('%s window, %s: the hint %j', (kind, state, hint) => {
+    withSnapshot({ state });
+    render(<TeachOverlay {...baseProps({ kind })} />);
+    expect(screen.getByText(hint)).toBeInTheDocument();
+  });
+
+  test('every hint of a window names only its own keys', () => {
+    const noOther = {
+      recording: [/\bP\b/, /\bZ\b/],
+      pose: [/Leertaste/, /\bZ\b/],
+      ziel: [/Leertaste/, /\bP\b/],
+    };
+    const hints = {
+      recording: [DE.TEACH_HINT_LOCKED, DE.TEACH_HINT_FREE, DE.TEACH_HINT_REC, DE.TEACH_HINT_LEADER, DE.TEACH_HINT_LEADER_REC],
+      pose: [DE.TEACH_HINT_LOCKED_POSE, DE.TEACH_HINT_FREE_POSE, DE.TEACH_HINT_LEADER_POSE],
+      ziel: [DE.TEACH_HINT_LOCKED_ZIEL, DE.TEACH_HINT_FREE_ZIEL, DE.TEACH_HINT_LEADER_ZIEL],
+    };
+    for (const [kind, list] of Object.entries(hints)) {
+      for (const hint of list) {
+        expect(hint).toMatch(/\S/);
+        for (const re of noOther[kind]) expect(hint).not.toMatch(re);
+      }
+    }
+    expect(DE.TEACH_HINT_DONE).not.toMatch(/✎/);
+  });
+
+  test('no highlight ring: the retired `focus` cue is gone', () => {
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps({ kind: 'pose' })} />);
+    for (const b of screen.getAllByRole('button')) {
+      expect(b.className).not.toMatch(/ring-4/);
+    }
+  });
+
+  test('the mode badge carries the hand or the leader-arm icon', () => {
+    withSnapshot({ state: 'fest' });
+    const { unmount: unmountHand } = render(<TeachOverlay {...baseProps()} />);
+    const badge = screen.getByText(DE.TEACH_MODE_HAND).parentElement; // eslint-disable-line testing-library/no-node-access
+    expect(badge.querySelector('svg[data-icon="hand"]')).not.toBeNull(); // eslint-disable-line testing-library/no-node-access
+    unmountHand();
+    withSnapshot({ state: 'bereit' });
+    render(<TeachOverlay {...baseProps({ mode: 'leader', caps: { has_leader: true }, rsBridge: LEADER_BRIDGE })} />);
+    const leader = screen.getByText(DE.TEACH_MODE_LEADER).parentElement; // eslint-disable-line testing-library/no-node-access
+    expect(leader.querySelector('svg[data-icon="leaderArm"]')).not.toBeNull(); // eslint-disable-line testing-library/no-node-access
   });
 });

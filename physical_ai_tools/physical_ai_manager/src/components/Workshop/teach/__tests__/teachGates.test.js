@@ -7,6 +7,7 @@
 
 import { DE } from '../../blocks/messages_de';
 import {
+  isTeachKind, TEACH_KINDS, TEACH_KIND_ICON, TEACH_KIND_LABEL_DE, teachKeyOffered,
   resolveTeachMode, teachLeaderStatus, teachLeaderStatusNoticeDe,
   teachEntryBlockReason, teachModeFor, TEACH_BLOCK_TITLES_DE, TEACH_COUNTDOWN_S, TEACH_SPACE_DEBOUNCE_MS,
   TEACH_KEEPALIVE_MS, TEACH_RECORD_MAX_S, TEACH_MIN_POINTS, TEACH_ROBOT_PREVIEW_LEAD_IN_MAX_MS,
@@ -199,5 +200,70 @@ describe('teachLeaderStatus / resolveTeachMode', () => {
       + 'Vormachen ist gesperrt, bis er wieder antwortet.');
     expect(teachLeaderStatusNoticeDe('known', false)).toBeNull();
     expect(teachLeaderStatusNoticeDe('known', true)).toBeNull();
+  });
+});
+
+// The kind contract (owner decision D1): one window per kind, and ONE predicate
+// that says which keys (and so which buttons) that window offers. Esc always;
+// F only while teaching by hand; P only in the Position window; Z only in the
+// Ziel window; Space/Enter/R/Entf only in the Bewegung window. No kind → Esc only.
+describe('the kind contract', () => {
+  const KEYS = ['escape', 'f', 'p', 'z', 'space', 'enter', 'r', 'delete'];
+  const OFFERED = {
+    recording: { hand: ['escape', 'f', 'space', 'enter', 'r', 'delete'], leader: ['escape', 'space', 'enter', 'r', 'delete'] },
+    pose: { hand: ['escape', 'f', 'p'], leader: ['escape', 'p'] },
+    ziel: { hand: ['escape', 'f', 'z'], leader: ['escape', 'z'] },
+  };
+
+  it('has exactly three kinds, frozen, with a German window title and an icon each', () => {
+    expect(TEACH_KINDS).toEqual(['recording', 'pose', 'ziel']);
+    expect(Object.isFrozen(TEACH_KINDS)).toBe(true);
+    expect(TEACH_KIND_LABEL_DE).toEqual({
+      recording: DE.FLY_TEACH_RECORDING, pose: DE.FLY_TEACH_POSE, ziel: DE.FLY_TEACH_ZIEL,
+    });
+    expect(DE.FLY_TEACH_RECORDING).toBe('Bewegung vormachen');
+    expect(DE.FLY_TEACH_POSE).toBe('Position vormachen');
+    expect(DE.FLY_TEACH_ZIEL).toBe('Ziel vormachen');
+    // Owner decision D10: Bewegung LuCircleDot, Position LuMapPin, Ziel LuTarget.
+    expect(TEACH_KIND_ICON).toEqual({ recording: 'record', pose: 'pose', ziel: 'ziel' });
+  });
+
+  it.each([
+    ['recording', true], ['pose', true], ['ziel', true],
+    [null, false], [undefined, false], ['', false], ['Recording', false], ['toString', false], [7, false],
+  ])('isTeachKind(%j) is %s', (kind, ok) => {
+    expect(isTeachKind(kind)).toBe(ok);
+  });
+
+  const TABLE = [];
+  for (const kind of TEACH_KINDS) {
+    for (const mode of ['hand', 'leader']) {
+      for (const key of KEYS) TABLE.push([kind, mode, key, OFFERED[kind][mode].includes(key)]);
+    }
+  }
+  it.each(TABLE)('%s window, %s mode: %s offered = %s', (kind, mode, key, offered) => {
+    expect(teachKeyOffered({ kind, mode, key })).toBe(offered);
+  });
+
+  it.each(TEACH_KINDS)('a pending %s window offers its own key, never F', (kind) => {
+    const own = { recording: 'space', pose: 'p', ziel: 'z' }[kind];
+    expect(teachKeyOffered({ kind, mode: 'pending', key: own })).toBe(true);
+    expect(teachKeyOffered({ kind, mode: 'pending', key: 'f' })).toBe(false);
+    expect(teachKeyOffered({ kind, mode: 'pending', key: 'escape' })).toBe(true);
+  });
+
+  it.each([[null], [undefined], ['bogus']])('no valid kind (%j): Esc only', (kind) => {
+    for (const mode of ['hand', 'leader', 'pending']) {
+      for (const key of KEYS) {
+        expect(teachKeyOffered({ kind, mode, key })).toBe(key === 'escape');
+      }
+    }
+    expect(teachKeyOffered()).toBe(false);
+    expect(teachKeyOffered({ key: 'escape' })).toBe(true);
+  });
+
+  it('an unknown key is never offered', () => {
+    expect(teachKeyOffered({ kind: 'recording', mode: 'hand', key: 'x' })).toBe(false);
+    expect(teachKeyOffered({ kind: 'pose', mode: 'hand', key: null })).toBe(false);
   });
 });

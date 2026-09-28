@@ -32,6 +32,15 @@
 // that lands after the trip, and a returned take whose trip arrives within
 // TEACH_LEADER_COLLISION_GRACE_MS of its stop (keep is held until then).
 //
+// The kind contract (owner decision D1): every session is ONE focused window —
+// `kind` 'recording' (Bewegung), 'pose' (Position) or 'ziel' (Ziel). Every key
+// AND every button press goes through `handlerFor`, whose first step is
+// teachGates.js::teachKeyOffered: a key that is not a control of this window is
+// dead (still prevented, never handled). So a Bewegung window never captures
+// (P/Z are dead, also during a take) and a Position or Ziel window never
+// records (Space/Enter/R/Entf are dead). A session with no valid kind takes
+// Esc only; TeachHost never opens one.
+//
 // R7 (fixed 2026-09-15): `leaderStatusUnknown` (the leader-status bridge cannot
 // say whether the leader is on) and `mode === 'pending'` (a session TeachHost
 // opened before it could pick hand or leader) block every NEW teaching action —
@@ -51,7 +60,7 @@ import {
   TEACH_MIN_POINTS, TEACH_ROBOT_PREVIEW_NO_MOTION_HINT_MS, TEACH_ROBOT_PREVIEW_SETTLE_DELTA_RAD,
   TEACH_ROBOT_PREVIEW_SETTLE_STEP_MS, TEACH_ROBOT_PREVIEW_SETTLE_SAMPLES,
   TEACH_ROBOT_PREVIEW_FEED_STALE_MS, TEACH_ROBOT_PREVIEW_STOP_TAIL_MAX_MS, replayDriveEstimateMs,
-  TEACH_LEADER_COLLISION_GRACE_MS,
+  TEACH_LEADER_COLLISION_GRACE_MS, teachKeyOffered,
 } from './teachGates';
 
 // Server _assert_no_other_active('leader_teach') while a take is armed — from
@@ -747,16 +756,22 @@ export function createTeachEngine(getProps, publish) {
 
   // ---- captures ---------------------------------------------------------
 
-  function captureAllowed(kind) {
-    // Leader mode: the follower is torqued throughout, so a Ziel during a take
-    // is as safe as a Position (a light touch; a hard press trips the e-stop).
-    if (isLeader()) return r.state === 'bereit' || r.state === 'aufnahme';
-    if (kind === 'pose') return r.state === 'fest' || r.state === 'frei' || r.state === 'aufnahme';
+  // A capture happens only in the Position or Ziel window, which never records,
+  // so never during a take (owner decision D4: no P/Z during a take).
+  function captureAllowed() {
+    if (isLeader()) return r.state === 'bereit';
     return r.state === 'fest' || r.state === 'frei';
   }
 
+  // Defence in depth behind handlerFor's gate: a capture of a kind this window
+  // does not offer never reaches the server.
+  function captureOffered(kind) {
+    const p = getProps();
+    return teachKeyOffered({ kind: p.kind, mode: p.mode, key: kind === 'pose' ? 'p' : 'z' });
+  }
+
   function capture(kind) {
-    if (!captureAllowed(kind)) return;
+    if (!captureOffered(kind) || !captureAllowed()) return;
     // The name is chosen NOW, on the key press — never by a naming UI while
     // the arm is limp in the student's hand.
     let name = '';
@@ -766,7 +781,7 @@ export function createTeachEngine(getProps, publish) {
       name = '';
     }
     enqueue(async () => {
-      if (!captureAllowed(kind)) return;
+      if (!captureAllowed()) return;
       let res;
       try {
         res = await call('capturePose', name);
@@ -845,6 +860,8 @@ export function createTeachEngine(getProps, publish) {
   // rows a keep would store; absent or too short → the take as recorded.
   function previewOnRobot(cleanedRows) {
     const p = getProps();
+    // Only a Bewegung window has a take to replay.
+    if (p.kind !== 'recording') return;
     if (r.state !== 'pruefen' || !r.take || r.relock === 'failed' || p.heartbeatOk === false
         || r.queueCount > 0) return;
     // The SAME rows go into points_json and into the drive estimate.
@@ -1041,10 +1058,7 @@ export function createTeachEngine(getProps, publish) {
       space: () => runStart('record', 'frei', 'frei'), f: () => lock(),
       p: () => capture('pose'), z: () => capture('ziel'), escape: () => finish(),
     },
-    aufnahme: {
-      space: stop, f: stop, p: () => capture('pose'),
-      z: () => notify('onError', DE.TEACH_ZIEL_BLOCKED_REC), escape: () => finish(),
-    },
+    aufnahme: { space: stop, f: stop, escape: () => finish() },
     pruefen: {
       f: () => { if (r.relock === 'failed') lock(); },
       enter: () => keep(false), r: again, delete: discard, escape: () => finish(),
@@ -1058,16 +1072,18 @@ export function createTeachEngine(getProps, publish) {
     bereit: {
       space: startLeader, p: () => capture('pose'), z: () => capture('ziel'), escape: () => finish(),
     },
-    aufnahme: {
-      space: stop, p: () => capture('pose'), z: () => capture('ziel'), escape: () => finish(),
-    },
+    aufnahme: { space: stop, escape: () => finish() },
     pruefen: {
       enter: () => keep(false), r: again, delete: discard, escape: () => finish(),
     },
     abschluss: { escape: () => finish() },
   };
 
+  // THE gate of the kind contract: a key this window does not offer has no
+  // handler in any state — for the keyboard AND for press() (the buttons).
   function handlerFor(key) {
+    const p = getProps();
+    if (!teachKeyOffered({ kind: p.kind, mode: p.mode, key })) return undefined;
     const table = isLeader() ? LEADER_TABLE : TABLE;
     return (table[r.state] || {})[key];
   }
@@ -1164,6 +1180,9 @@ export function createTeachEngine(getProps, publish) {
 
 /**
  * Vormachen session (hand and leader mode). See createTeachEngine for the rules.
+ *
+ * kind: 'recording' | 'pose' | 'ziel' — the one window this session is
+ * (teachGates.js::teachKeyOffered decides which keys and buttons exist).
  *
  * Leader mode (`mode: 'leader'`) inputs: collisionActive (tasks.collision),
  * leaderGone (the bridge POSITIVELY reports follower-only — a failed probe is

@@ -5,10 +5,13 @@
  * you may not use this file except in compliance with the License.
  */
 
-// Vormachen host: turns a `studioAssets.teach.requested` (the toolbar button or
-// a Sammlung flyout „✋ … vormachen") into an open overlay — or into a German
-// refusal. The entry gates are judged HERE, when the request is processed,
-// because a request can be queued from a flyout while the rig changed.
+// Vormachen host: turns a `studioAssets.teach.requested` (the toolbar chooser,
+// a Sammlung flyout or drawer „… vormachen", a code sidebar row) into an open
+// overlay — one focused window of the requested kind (owner decision D1) — or
+// into a German refusal. The entry gates are judged HERE, when the request is
+// processed, because a request can be queued from a flyout while the rig
+// changed. A request without a valid kind is dropped silently: there is no
+// kind-less window (the slice already drops one; this is the second fence).
 //
 // It works on the page's asset document (`assetDoc`, sammlung/assetDocument.js)
 // — a Blockly workspace or a Python/Java program — so Vormachen opens for a
@@ -27,7 +30,9 @@ import {
 } from '../../../features/workshop/studioAssetsSlice';
 import { useHomeGlide } from '../HomeGlidePrompt';
 import { assetDocumentOf } from '../sammlung/assetDocument';
-import { TEACH_BLOCK_TITLES_DE, resolveTeachMode, teachEntryBlockReason } from './teachGates';
+import {
+  TEACH_BLOCK_TITLES_DE, isTeachKind, resolveTeachMode, teachEntryBlockReason,
+} from './teachGates';
 import TeachOverlay from './TeachOverlay';
 
 function TeachHost({
@@ -43,6 +48,11 @@ function TeachHost({
   useEffect(() => {
     if (token === null || token === undefined) return;
     if (teach.open) {
+      dispatch(teachRequestHandled());
+      return;
+    }
+    const kind = teach.requested ? teach.requested.kind : null;
+    if (!isTeachKind(kind)) {
       dispatch(teachRequestHandled());
       return;
     }
@@ -74,7 +84,7 @@ function TeachHost({
     // (`mode: null`) — the overlay shows the German notice and no teaching —
     // and the effect below resolves it when the bridge answers.
     const mode = resolveTeachMode({ rsBridge, caps });
-    dispatch(teachOpened({ mode, focus: teach.requested.focus || null }));
+    dispatch(teachOpened({ mode, kind }));
     // Only a NEW token is a new request; the gate inputs are read as they are now.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
@@ -83,7 +93,7 @@ function TeachHost({
   // hook re-polls every RS_STATUS_POLL_MS). Hand when the leader is proven off or
   // the rig follower-only, leader when it is on — exactly what an open with that
   // answer would have chosen. The overlay is keyed on the mode, so it remounts
-  // with a fresh session; the unresolved one never sent a call.
+  // with a fresh session (of the same kind); the unresolved one never sent a call.
   const resolvedMode = teach.open && !teach.mode ? resolveTeachMode({ rsBridge, caps }) : null;
   useEffect(() => {
     if (resolvedMode) dispatch(teachModeResolved({ mode: resolvedMode }));
@@ -93,12 +103,12 @@ function TeachHost({
   // has already released the arm by the time this runs.
   useEffect(() => () => { dispatch(teachClosed()); }, [dispatch]);
 
-  if (!teach.open || !isActive) return null;
+  if (!teach.open || !isActive || !isTeachKind(teach.kind)) return null;
   return (
     <TeachOverlay
       key={teach.mode || 'pending'}
       mode={teach.mode || 'pending'}
-      focus={teach.focus || null}
+      kind={teach.kind}
       onClose={() => dispatch(teachClosed())}
       workspace={workspace}
       assetDoc={doc}

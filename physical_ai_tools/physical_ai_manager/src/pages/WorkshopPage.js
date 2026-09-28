@@ -50,7 +50,10 @@ import { buildTwinMarkers, variablePointsFromValues } from '../components/Worksh
 import { ghostJointsFromEntry } from '../utils/armProfile';
 import SammlungDrawer from '../components/Workshop/sammlung/SammlungDrawer';
 import TeachHost from '../components/Workshop/teach/TeachHost';
-import { TEACH_BLOCK_TITLES_DE, teachEntryBlockReason } from '../components/Workshop/teach/teachGates';
+import {
+  TEACH_BLOCK_TITLES_DE, TEACH_KINDS, TEACH_KIND_ICON, TEACH_KIND_LABEL_DE, teachEntryBlockReason,
+} from '../components/Workshop/teach/teachGates';
+import MenuButton from '../components/Workshop/MenuButton';
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
 import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
@@ -1664,8 +1667,9 @@ function WorkshopPage({ isActive }) {
         // aufnahmen, pin → ziele, pose → positionen, variable → variablen).
         dispatch(openDrawer({ tab: action.tab, focusId: action.focusId ?? null }));
       } else if (action.type === 'teach') {
-        // TeachHost judges the gates (and a glide) when it processes the request.
-        dispatch(requestTeach({ focus: action.focus ?? null }));
+        // TeachHost judges the gates (and a glide) when it processes the
+        // request; the slice drops one that names no window kind.
+        dispatch(requestTeach({ kind: action.kind }));
       } else if (action.type === 'preview') {
         // The flyout ▶ always plays at tempo 1.0 (a variable: its marker).
         previewAsset(action.asset);
@@ -1717,6 +1721,12 @@ function WorkshopPage({ isActive }) {
   const jogDisabled =
     heartbeatStatus !== 'connected' || runState === 'running' || teachOpen;
   const teachReasonText = teachReason ? TEACH_BLOCK_TITLES_DE[teachReason] : null;
+  const teachChooserItems = TEACH_KINDS.map((kind) => ({
+    id: kind,
+    label: TEACH_KIND_LABEL_DE[kind],
+    icon: TEACH_KIND_ICON[kind],
+    onSelect: () => dispatch(requestTeach({ kind })),
+  }));
 
   // Editor/Galerie switch — shared by both views (in the editor toolbar, and as a
   // standalone strip in the gallery view where the toolbar is absent).
@@ -2037,19 +2047,21 @@ function WorkshopPage({ isActive }) {
                   }
                   extra={
                     <>
-                      <button
-                        type="button"
-                        onClick={() => dispatch(requestTeach({ focus: null }))}
+                      {/* One focused window per kind (owner decisions D1, D4):
+                          the chooser names the three. */}
+                      <MenuButton
+                        label={DE.TOOLBAR_TEACH}
+                        icon="hand"
+                        menuLabel={DE.TEACH_CHOOSER_MENU}
+                        items={teachChooserItems}
                         disabled={!!teachReason || teachOpen}
                         title={teachReasonText || DE.TOOLBAR_TEACH_TITLE}
-                        className={
+                        buttonClassName={
                           'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
                           + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
                           + 'border-[var(--accent)] hover:opacity-90'
                         }
-                      >
-                        {DE.TOOLBAR_TEACH}
-                      </button>
+                      />
                       <VersionHistoryDropdown
                         workflowId={openDocId}
                         lockedReason={historyLockReason}

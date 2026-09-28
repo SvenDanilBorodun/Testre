@@ -55,7 +55,7 @@ export const TRAJECTORY_BLOCKS = [
     colour: TRAJECTORY_COLOR,
     tooltip:
       'Spielt eine zuvor aufgenommene Bewegung ab (gleicher Name wie unter '
-      + '„Aufnahmen"). Mach die Bewegung zuerst mit „✋ Vormachen" vor '
+      + '„Aufnahmen"). Mach die Bewegung zuerst mit „Bewegung vormachen" vor '
       + 'und gib ihr genau diesen Namen.',
     extensions: ['edubotics_validate_trajectory_name'],
   },

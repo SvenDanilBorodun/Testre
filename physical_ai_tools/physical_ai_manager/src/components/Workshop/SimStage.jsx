@@ -41,6 +41,7 @@ import { useSelector } from 'react-redux';
 import SimScene from './SimScene';
 import DebugPanel from './DebugPanel';
 import { DE } from './blocks/messages_de';
+import Icon from '../icons/Icon';
 
 // Most-recent runtime log line that signals a no-go reroute. motion.py logs
 // „[WARNUNG] Sperrzone auf dem Weg — Ausweichroute wird gefahren." via ctx.log →
@@ -137,7 +138,8 @@ function SimStage({
           )}
           {warningCount > 0 && (
             <div className="text-red-700" role="status">
-              {`⚠ ${warningCount} Ziel(e) nicht erreichbar — siehe Markierungen an den Blöcken.`}
+              <Icon name="warning" className="mr-1 align-[-0.125em]" />
+              {`${warningCount} Ziel(e) nicht erreichbar — siehe Markierungen an den Blöcken.`}
             </div>
           )}
         </div>
@@ -172,7 +174,7 @@ function SimStage({
         >
           <div className="flex items-center justify-between gap-2 px-2.5 py-1 border-b border-[var(--line)] bg-[var(--bg-sunk)] shrink-0">
             <span className="text-xs font-semibold text-[var(--ink)] flex items-center gap-1.5">
-              <span aria-hidden="true">🔍</span>
+              <Icon name="debug" />
               {DE.DOCK_TAB_DEBUG}
             </span>
             <button
@@ -182,7 +184,7 @@ function SimStage({
               aria-label="Debug schließen"
               className="text-sm leading-none px-1.5 py-0.5 rounded text-[var(--ink-4)] hover:bg-[var(--bg-sunk)] hover:text-[var(--ink)]"
             >
-              ✕
+              <Icon name="close" />
             </button>
           </div>
           <div className="flex-1 min-h-0 overflow-auto p-2">

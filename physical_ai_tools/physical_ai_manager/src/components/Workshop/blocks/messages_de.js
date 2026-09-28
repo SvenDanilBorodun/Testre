@@ -336,7 +336,7 @@ export const DE = {
   // section heading / Ziel button (sammlung/DrawerRecording.jsx, DrawerPlace.jsx).
   PREVIEW_START: 'Im Simulator ansehen',
   // hooks/useSimPreview.js + RunControls.jsx (the preview in flight).
-  PREVIEW_PLAY: '▶ Abspielen',
+  PREVIEW_PLAY: 'Abspielen',
   PREVIEW_RUNNING: 'Vorschau läuft: %1',
   PREVIEW_DONE: 'Vorschau beendet.',
   PREVIEW_BANNER:

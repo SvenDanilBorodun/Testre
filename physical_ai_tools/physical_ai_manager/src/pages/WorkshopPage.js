@@ -54,6 +54,8 @@ import {
   TEACH_BLOCK_TITLES_DE, TEACH_KINDS, TEACH_KIND_ICON, TEACH_KIND_LABEL_DE, teachEntryBlockReason,
 } from '../components/Workshop/teach/teachGates';
 import MenuButton from '../components/Workshop/MenuButton';
+import Icon from '../components/icons/Icon';
+import { toastIcon } from '../components/icons/toast';
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
 import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
@@ -248,8 +250,9 @@ function OpenWorkflowPopover({ onPicked, lockedReason = null }) {
           + 'focus-visible:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed'
         }
       >
-        📂 {DE.DOCK_OPEN_WORKFLOW}
-        <span className="text-[10px]" aria-hidden="true">▾</span>
+        <Icon name="folderOpen" />
+        {DE.DOCK_OPEN_WORKFLOW}
+        <Icon name="chevronDown" size="0.85em" />
       </button>
       {open && (
         <div className="absolute z-30 mt-1 left-0 w-80 max-h-[60vh] overflow-auto rounded-md border border-[var(--line)] bg-white shadow-lg p-3">
@@ -1659,7 +1662,7 @@ function WorkshopPage({ isActive }) {
       if (action.type === 'pinCamera') {
         setDockCollapsed(false);
         setDockOpen((prev) => (prev.includes('camera') ? prev : addOpenTab(prev, 'camera', isTabBusy)));
-        toast(DE.FLY_PIN_CAMERA_HINT, { icon: '📷' });
+        toast(DE.FLY_PIN_CAMERA_HINT, { icon: toastIcon('camera') });
       } else if (action.type === 'jumpToBlock') {
         jumpToBlock(workspaceRef.current, action.blockId);
       } else if (action.type === 'manage') {
@@ -1790,7 +1793,7 @@ function WorkshopPage({ isActive }) {
     {
       id: 'camera',
       label: DE.DOCK_TAB_CAMERA,
-      icon: '📷',
+      icon: 'camera',
       // Only the feed: capturing the arm's pose moved into Vormachen („P").
       render: () => (
         <div className="flex flex-col gap-2 h-full">
@@ -1812,7 +1815,7 @@ function WorkshopPage({ isActive }) {
     {
       id: 'control',
       label: DE.DOCK_TAB_CONTROL,
-      icon: '🎮',
+      icon: 'gamepad',
       busy: jogHandGuideOn,
       render: () => (
         <JogPanel disabled={jogDisabled} onHandGuideChange={setJogHandGuideOn} />
@@ -1821,7 +1824,7 @@ function WorkshopPage({ isActive }) {
     {
       id: '3d',
       label: DE.DOCK_TAB_3D,
-      icon: '🧊',
+      icon: 'box',
       render: () => (
         <div className="flex flex-col gap-2 h-full">
           <div className="flex items-center gap-1.5 flex-wrap shrink-0">
@@ -1890,14 +1893,14 @@ function WorkshopPage({ isActive }) {
     {
       id: 'tutorial',
       label: DE.DOCK_TAB_TUTORIAL,
-      icon: '🎓',
+      icon: 'graduationCap',
       busy: !!activeTutorialId,
       render: () => <SkillmapPlayer />,
     },
     {
       id: 'debug',
       label: DE.DOCK_TAB_DEBUG,
-      icon: '🔍',
+      icon: 'debug',
       // The open document's language decides the „Haltepunkte" tab: a code
       // program has no blocks to Alt-click, and Java has no breakpoints at all
       // this round (A8). It is a page-level fact — the dock's panels are

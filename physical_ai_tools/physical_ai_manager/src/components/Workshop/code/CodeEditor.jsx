@@ -68,6 +68,7 @@ import {
 } from './codeInsert';
 import { SNIPPET_MIME } from './snippetMime';
 import { vormachenPasteLines } from './vormachenClipboard';
+import { appendSvgIcon, SVG_NS } from '../../icons/svg';
 
 const LANGUAGE_SUPPORT = { python, java };
 
@@ -388,11 +389,21 @@ class BreakpointMarker extends GutterMarker {
     return other.line === this.line && other.set === this.set;
   }
 
+  // A set breakpoint is the icon registry's `dot`, filled (components/icons:
+  // no text glyph, the same shape the Haltepunkte lists draw).
   toDOM() {
     const dot = document.createElement('span');
     dot.className = this.set ? 'cm-edubotics-bp cm-edubotics-bp-set' : 'cm-edubotics-bp';
     dot.dataset.line = String(this.line);
-    dot.textContent = this.set ? '●' : '';
+    if (this.set) {
+      const icon = document.createElementNS(SVG_NS, 'svg');
+      icon.setAttribute('viewBox', '0 0 24 24');
+      icon.setAttribute('width', '9');
+      icon.setAttribute('height', '9');
+      icon.setAttribute('aria-hidden', 'true');
+      appendSvgIcon(icon, 'dot', { fill: 'currentColor' });
+      dot.appendChild(icon);
+    }
     return dot;
   }
 }

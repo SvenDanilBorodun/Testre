@@ -14,9 +14,10 @@ import toast from 'react-hot-toast';
 import { DE } from './blocks/messages_de';
 import { formatAutosaveAge } from './useAutosave';
 import { THEME_KEYS, applyTheme } from './themes';
+import Icon from '../icons/Icon';
 
 const BUTTON_BASE =
-  'inline-flex items-center justify-center min-h-[28px] min-w-[28px] '
+  'inline-flex items-center justify-center gap-1.5 min-h-[28px] min-w-[28px] '
   + 'px-3 py-1.5 rounded-md text-sm font-medium border border-[var(--line)] '
   + 'bg-white text-[var(--ink)] hover:bg-[var(--bg-sunk)] '
   + 'disabled:opacity-50 disabled:cursor-not-allowed '
@@ -24,7 +25,7 @@ const BUTTON_BASE =
   + 'focus-visible:ring-offset-1';
 
 const PRIMARY_BUTTON =
-  'inline-flex items-center justify-center min-h-[28px] '
+  'inline-flex items-center justify-center gap-1.5 min-h-[28px] '
   + 'px-3 py-1.5 rounded-md text-sm font-medium '
   + 'bg-[var(--accent)] text-white hover:opacity-90 '
   + 'disabled:opacity-50 disabled:cursor-not-allowed '
@@ -216,7 +217,8 @@ function ToolbarButtons({
         title={`${DE.TOOLBAR_UNDO} (Strg+Z)`}
         aria-label={DE.TOOLBAR_UNDO}
       >
-        ↶ {DE.TOOLBAR_UNDO}
+        <Icon name="undo" />
+        {DE.TOOLBAR_UNDO}
       </button>
       <button
         type="button"
@@ -225,7 +227,8 @@ function ToolbarButtons({
         title={`${DE.TOOLBAR_REDO} (Strg+Y)`}
         aria-label={DE.TOOLBAR_REDO}
       >
-        ↷ {DE.TOOLBAR_REDO}
+        <Icon name="redo" />
+        {DE.TOOLBAR_REDO}
       </button>
       <button
         type="button"
@@ -234,7 +237,8 @@ function ToolbarButtons({
         title={DE.TOOLBAR_ZOOM_FIT}
         aria-label={DE.TOOLBAR_ZOOM_FIT}
       >
-        ⤢ {DE.TOOLBAR_ZOOM_FIT}
+        <Icon name="fit" />
+        {DE.TOOLBAR_ZOOM_FIT}
       </button>
 
       <span className="mx-1 h-6 w-px bg-[var(--line)]" aria-hidden="true" />
@@ -247,7 +251,8 @@ function ToolbarButtons({
         title={`${DE.TOOLBAR_SAVE} (Strg+S)`}
         aria-label={DE.TOOLBAR_SAVE}
       >
-        💾 {saving ? '…' : DE.TOOLBAR_SAVE}
+        <Icon name="save" />
+        {saving ? '…' : DE.TOOLBAR_SAVE}
       </button>
       <button
         type="button"
@@ -256,7 +261,8 @@ function ToolbarButtons({
         title={DE.TOOLBAR_EXPORT}
         aria-label={DE.TOOLBAR_EXPORT}
       >
-        ⇪ {DE.TOOLBAR_EXPORT}
+        <Icon name="fileExport" />
+        {DE.TOOLBAR_EXPORT}
       </button>
       <button
         type="button"
@@ -265,7 +271,8 @@ function ToolbarButtons({
         title={DE.TOOLBAR_IMPORT}
         aria-label={DE.TOOLBAR_IMPORT}
       >
-        ⇲ {DE.TOOLBAR_IMPORT}
+        <Icon name="fileImport" />
+        {DE.TOOLBAR_IMPORT}
       </button>
       {onExportPdf && (
         <button
@@ -275,7 +282,8 @@ function ToolbarButtons({
           title={DE.TOOLBAR_PDF_EXPORT}
           aria-label={DE.TOOLBAR_PDF_EXPORT}
         >
-          📄 PDF
+          <Icon name="fileText" />
+          PDF
         </button>
       )}
       {extra}
@@ -291,7 +299,7 @@ function ToolbarButtons({
 
       <label className="text-sm text-[var(--ink-3)] flex items-center gap-1.5">
         <span className="sr-only">{DE.TOOLBAR_THEME}</span>
-        <span aria-hidden="true">🎨</span>
+        <Icon name="palette" />
         <select
           value={theme}
           onChange={handleThemeChange}
@@ -306,7 +314,9 @@ function ToolbarButtons({
       </label>
 
       <span className="ml-auto text-xs text-[var(--ink-4)]" aria-live="polite">
-        <span aria-hidden="true">●</span> {DE.AUTOSAVE_LABEL}: {ageLabel}
+        <Icon name="dot" size="0.6em" fill="currentColor" className="align-middle" />
+        {' '}
+        {DE.AUTOSAVE_LABEL}: {ageLabel}
       </span>
     </div>
   );

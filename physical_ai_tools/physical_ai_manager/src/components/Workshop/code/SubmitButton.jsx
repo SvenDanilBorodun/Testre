@@ -19,6 +19,7 @@ import React, { useCallback, useState } from 'react';
 import toast from 'react-hot-toast';
 import { submitWorkflow } from '../../../services/workflowApi';
 import { CODE_DE, formatCode } from './codeMessagesDe';
+import Icon from '../../icons/Icon';
 
 function SubmitButton({ accessToken, saveWorkflowNow, running = false }) {
   const [busy, setBusy] = useState(false);
@@ -49,11 +50,12 @@ function SubmitButton({ accessToken, saveWorkflowNow, running = false }) {
       disabled={busy || running || !accessToken}
       title={CODE_DE.SUBMIT_TITLE}
       className={
-        'text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 disabled:cursor-not-allowed '
+        'inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 disabled:cursor-not-allowed '
         + 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]'
       }
     >
-      📤 {CODE_DE.SUBMIT}
+      <Icon name="send" />
+      {CODE_DE.SUBMIT}
     </button>
   );
 }

@@ -1010,7 +1010,9 @@ def test_paused_blocks_until_resume_and_emits_vars_and_status(server):
     assert paused['v'] is True
     assert '[VAR:x=1]' in ctx._test_logs and '[VAR:liste=[1, 2]]' in ctx._test_logs
     assert not any(l.startswith('[VAR:a=b') for l in ctx._test_logs)
-    assert any('Haltepunkt' in l for l in ctx._test_logs)
+    # The Protokoll line: plain German text, no glyph — the client draws the
+    # pause icon for it (RunControls.jsx::BREAKPOINT_LOG_PREFIX, lockstep-tested).
+    assert 'Haltepunkt erreicht: main.py:L12' in ctx._test_logs
     set_paused(False)
     resume.set()
     t.join(5.0)

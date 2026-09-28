@@ -20,6 +20,7 @@ import { updateTutorialProgress } from '../../services/tutorialApi';
 import useSupabaseTutorialProgress from '../../hooks/useSupabaseTutorialProgress';
 import { DE } from './blocks/messages_de';
 import { TUTORIAL_INDEX, loadTutorial } from './tutorialIndex';
+import Icon from '../icons/Icon';
 
 /**
  * Sidebar that lists the bundled tutorials and steps the student
@@ -163,7 +164,7 @@ function SkillmapPlayer() {
                   }
                   aria-hidden="true"
                 >
-                  {done ? '✓' : idx + 1}
+                  {done ? <Icon name="check" /> : idx + 1}
                 </span>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium truncate">{entry.title_de}</p>
@@ -173,8 +174,10 @@ function SkillmapPlayer() {
                   type="button"
                   onClick={() => handleStart(entry.id)}
                   className="text-xs px-2 py-1 rounded-md bg-[var(--accent)] text-white hover:opacity-90"
+                  aria-label={`${entry.title_de} starten`}
+                  title={`${entry.title_de} starten`}
                 >
-                  ▶
+                  <Icon name="play" />
                 </button>
               </li>
             );
@@ -257,7 +260,7 @@ function SkillmapPlayer() {
           onClick={handleNext}
           className="px-3 py-1.5 text-sm rounded-md bg-[var(--accent)] text-white hover:opacity-90"
         >
-          {activeStep + 1 >= totalSteps ? '✓' : DE.TUTORIAL_NEXT}
+          {activeStep + 1 >= totalSteps ? <Icon name="check" title="Fertig" /> : DE.TUTORIAL_NEXT}
         </button>
         <button
           type="button"

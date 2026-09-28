@@ -24,6 +24,7 @@ import { clearBreakpoints, removeBreakpoint } from '../../../features/workshop/w
 import { DE } from '../blocks/messages_de';
 import { isCodeBreakpointId } from './codeBreakpoints';
 import { CODE_DE, formatCode } from './codeMessagesDe';
+import Icon from '../../icons/Icon';
 
 /**
  * `language` is the OPEN workflow's ('python' | 'java'). The set it lists is
@@ -59,7 +60,7 @@ function CodeBreakpointPanel({ language }) {
                 key={id}
                 className="flex items-center gap-2 px-2 py-1 rounded-md bg-red-50 border border-red-200"
               >
-                <span className="text-red-500">●</span>
+                <Icon name="dot" size="0.6em" fill="currentColor" className="text-red-500" />
                 <span className="flex-1 truncate text-xs font-mono">{id}</span>
                 <button
                   type="button"
@@ -67,7 +68,7 @@ function CodeBreakpointPanel({ language }) {
                   className="text-xs text-red-700 hover:underline"
                   aria-label={formatCode(CODE_DE.DEBUG_BP_REMOVE, id)}
                 >
-                  ×
+                  <Icon name="close" />
                 </button>
               </li>
             ))}

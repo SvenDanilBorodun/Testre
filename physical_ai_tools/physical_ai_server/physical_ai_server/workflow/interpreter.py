@@ -840,7 +840,7 @@ class Interpreter:
         toggle the run-control buttons.
         """
         on_block_change(block_id, 'paused', 0.0)
-        ctx.log(f'⏸ Haltepunkt erreicht: {block_id}')
+        ctx.log(f'Haltepunkt erreicht: {block_id}')
         # Set pause flag if the manager hasn't already.
         if hasattr(ctx, 'set_paused') and callable(ctx.set_paused):
             ctx.set_paused(True)

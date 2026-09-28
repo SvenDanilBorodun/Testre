@@ -16,6 +16,7 @@ import IntrinsicCalibStep from './IntrinsicCalibStep';
 import HandEyeCalibStep from './HandEyeCalibStep';
 import TableTouchStep from './TableTouchStep';
 import AccuracyVerifyStep from './AccuracyVerifyStep';
+import Icon from '../icons/Icon';
 
 // WS4 (2026-06-17): scene-cam-only calibration. The two gripper-camera
 // steps (intrinsic + eye-in-hand) were removed — the gripper camera is not
@@ -133,7 +134,7 @@ function CalibrationWizard() {
                   }
                 >
                   <span className="inline-block w-5 mr-2 text-center">
-                    {done ? '✓' : idx + 1}
+                    {done ? <Icon name="check" className="text-emerald-600" /> : idx + 1}
                   </span>
                   {step.label}
                 </button>

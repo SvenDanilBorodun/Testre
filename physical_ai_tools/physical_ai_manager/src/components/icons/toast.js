@@ -24,6 +24,8 @@ const TOAST_ICONS = Object.freeze({
   camera: ['camera', 'text-slate-600'],
   save: ['save', 'text-slate-600'],
   record: ['record', 'text-red-600'],
+  stop: ['hand', 'text-slate-600'],
+  arm: ['robotArm', 'text-slate-600'],
   unplugged: ['unplugged', 'text-red-600'],
   timeout: ['alarm', 'text-amber-600'],
 });

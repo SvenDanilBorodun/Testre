@@ -37,6 +37,7 @@ import {
   deleteUsedText,
   showUndoToast,
 } from './drawerParts';
+import Icon from '../../icons/Icon';
 
 function sourceLabel(entry) {
   if (entry.source === 'camera') return DE.CARD_SOURCE_CAMERA;
@@ -138,9 +139,10 @@ export default function DrawerPlace({
             // Disabled until the leader-status bridge has answered once.
             disabled={previewPending}
             title={previewPending ? DE.PREVIEW_BLOCK_LEADER_PENDING : undefined}
-            className="rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {`▶ ${DE.PREVIEW_START}`}
+            <Icon name="play" />
+            <span>{DE.PREVIEW_START}</span>
           </button>
           {lastResult && lastResult.status === 'refused' && lastResult.message && (
             <p className="mt-1 text-sm text-red-700">{lastResult.message}</p>

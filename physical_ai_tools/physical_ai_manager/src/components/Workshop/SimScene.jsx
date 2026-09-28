@@ -67,6 +67,7 @@ import useSimObjects from '../../hooks/useSimObjects';
 import rosConnectionManager from '../../utils/rosConnectionManager';
 import { DE } from './blocks/messages_de';
 import { MARKER_COLORS } from './sammlung/markers';
+import { toastIcon } from '../icons/toast';
 
 const UrdfTwin = lazy(() => import('../UrdfTwin'));
 
@@ -485,7 +486,7 @@ function SimScene({
       // and the boundary is exactly where the server's approach-clearance floor
       // refuses to grasp. Say it happened.
       if (Math.abs(x - base.x) > 1e-6 || Math.abs(y - base.y) > 1e-6) {
-        toast('Objekt in den Greifbereich verschoben.', { icon: 'ℹ️' });
+        toast('Objekt in den Greifbereich verschoben.', { icon: toastIcon('info') });
       }
       const nextTag = objects.length
         ? Math.max(...objects.map((o) => (typeof o.tag_id === 'number' ? o.tag_id : -1))) + 1
@@ -595,7 +596,7 @@ function SimScene({
       // The visible half already happened — say that, rather than an error that
       // implies nothing did.
       toast('Simulator lokal zurückgesetzt — der Roboter-Dienst hat nicht geantwortet.',
-        { icon: 'ℹ️' });
+        { icon: toastIcon('info') });
     } finally {
       setResetting(false);
     }

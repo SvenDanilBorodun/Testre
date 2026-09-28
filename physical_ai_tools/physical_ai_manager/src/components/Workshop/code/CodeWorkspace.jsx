@@ -469,13 +469,14 @@ function CodeWorkspace({
                 onClick={() => open(path)}
                 title={path === entry ? CODE_DE.FILE_ENTRY_TITLE : path}
                 className={
-                  'w-full text-left truncate text-xs px-2 py-1 rounded '
+                  'flex w-full items-center gap-1 text-left text-xs px-2 py-1 rounded '
                   + (path === active
                     ? 'bg-[var(--accent)] text-white'
                     : 'text-[var(--ink)] hover:bg-white')
                 }
               >
-                {path === entry ? '▶ ' : ''}{path}
+                {path === entry && <Icon name="play" size="0.85em" />}
+                <span className="min-w-0 truncate">{path}</span>
               </button>
             </li>
           ))}

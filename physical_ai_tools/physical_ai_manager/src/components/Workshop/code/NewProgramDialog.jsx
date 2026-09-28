@@ -19,11 +19,12 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { CODE_DE } from './codeMessagesDe';
+import Icon from '../../icons/Icon';
 
 const CHOICES = [
-  { id: 'blocks', label: CODE_DE.LANG_BLOCKS, hint: CODE_DE.LANG_BLOCKS_HINT, icon: '🧩' },
-  { id: 'python', label: CODE_DE.LANG_PYTHON, hint: CODE_DE.LANG_PYTHON_HINT, icon: '🐍' },
-  { id: 'java', label: CODE_DE.LANG_JAVA, hint: CODE_DE.LANG_JAVA_HINT, icon: '☕' },
+  { id: 'blocks', label: CODE_DE.LANG_BLOCKS, hint: CODE_DE.LANG_BLOCKS_HINT, icon: 'blocks' },
+  { id: 'python', label: CODE_DE.LANG_PYTHON, hint: CODE_DE.LANG_PYTHON_HINT, icon: 'python' },
+  { id: 'java', label: CODE_DE.LANG_JAVA, hint: CODE_DE.LANG_JAVA_HINT, icon: 'java' },
 ];
 
 function NewProgramDialog({ onCreate, disabled = false, disabledReason = null }) {
@@ -53,8 +54,9 @@ function NewProgramDialog({ onCreate, disabled = false, disabledReason = null })
           + 'focus-visible:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed'
         }
       >
-        ✨ {CODE_DE.NEW}
-        <span className="text-[10px]" aria-hidden="true">▾</span>
+        <Icon name="sparkles" />
+        {CODE_DE.NEW}
+        <Icon name="chevronDown" size="0.85em" />
       </button>
       {open && (
         <div
@@ -74,7 +76,7 @@ function NewProgramDialog({ onCreate, disabled = false, disabledReason = null })
                   }}
                   className="w-full text-left flex items-start gap-2 px-2 py-1.5 rounded-md hover:bg-[var(--bg-sunk)]"
                 >
-                  <span className="text-base leading-5" aria-hidden="true">{c.icon}</span>
+                  <Icon name={c.icon} size="1.25em" className="mt-0.5 text-[var(--ink-3)]" />
                   <span className="min-w-0">
                     <span className="block text-sm font-medium text-[var(--ink)]">{c.label}</span>
                     <span className="block text-[11px] text-[var(--ink-3)]">{c.hint}</span>

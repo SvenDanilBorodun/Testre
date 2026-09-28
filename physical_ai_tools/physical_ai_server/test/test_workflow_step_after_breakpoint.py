@@ -264,3 +264,23 @@ def test_a_step_token_is_only_consumable_while_paused():
     mgr.resume()
     # „Fortsetzen" cleared the pause; the outstanding token must not fire.
     assert mgr._consume_step_token() is False
+
+
+def test_the_breakpoint_line_is_plain_text_the_client_draws_the_icon_for():
+    """The Protokoll line carries no glyph: the React client renders the pause
+    icon for every entry that starts with ``Haltepunkt erreicht: ``
+    (RunControls.jsx::BREAKPOINT_LOG_PREFIX; the prefix is lockstep-tested in
+    robotis_ai_setup/tests/test_breakpoint_log_prefix_lockstep.py)."""
+    mgr, status = _manager()
+    mgr.set_breakpoints(['b0'])
+    ok, msg, _ = mgr.start(_program(), 'wf-line')
+    assert ok, msg
+    try:
+        assert _wait_paused(mgr), 'the breakpoint never paused the run'
+        time.sleep(0.2)
+        lines = [e.get('log_message') for e in status
+                 if isinstance(e, dict) and e.get('log_message')]
+        assert 'Haltepunkt erreicht: b0' in lines, lines
+        assert not any('\u23f8' in line for line in lines), lines
+    finally:
+        mgr.stop()

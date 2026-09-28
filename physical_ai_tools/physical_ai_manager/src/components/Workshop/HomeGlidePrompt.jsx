@@ -14,6 +14,8 @@ import React, {
 import ReactDOM from 'react-dom';
 import toast from 'react-hot-toast';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
+import Icon from '../icons/Icon';
+import { toastIcon } from '../icons/toast';
 
 // The warned glide to the Grundstellung after a RE-LOCK.
 //
@@ -57,7 +59,7 @@ export function HomeGlideDialog({
     >
       <div className="mx-4 max-w-md rounded-2xl border-2 border-amber-500 bg-white p-6 shadow-2xl">
         <div className="flex flex-col items-center gap-3 text-center">
-          <div className="text-4xl" aria-hidden="true">⚠️</div>
+          <Icon name="warning" size="2.5rem" className="text-amber-600" />
           <h2 id="home-glide-title" className="text-xl font-bold text-amber-700">
             {moving
               ? 'Der Arm fährt in die Grundstellung …'
@@ -167,7 +169,7 @@ export function useHomeGlidePrompt() {
       if (res && res.success) {
         toast.success(res.message || 'Der Arm steht in der Grundstellung.');
       } else if (stopRequestedRef.current) {
-        toast((res && res.message) || 'Fahrt gestoppt.', { icon: '✋' });
+        toast((res && res.message) || 'Fahrt gestoppt.', { icon: toastIcon('stop') });
       } else {
         toast.error((res && res.message) || 'Fahrt in die Grundstellung nicht möglich.');
       }
@@ -198,7 +200,7 @@ export function useHomeGlidePrompt() {
   const stay = useCallback(() => {
     if (phaseRef.current !== 'countdown') return;
     setPhaseBoth('idle');
-    toast('Der Arm bleibt an seiner Position.', { icon: '🦾' });
+    toast('Der Arm bleibt an seiner Position.', { icon: toastIcon('arm') });
   }, [setPhaseBoth]);
 
   const stop = useCallback(async () => {

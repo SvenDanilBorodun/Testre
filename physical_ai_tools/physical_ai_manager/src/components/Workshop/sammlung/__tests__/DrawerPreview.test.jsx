@@ -103,6 +103,7 @@ function setup({ tab = 'aufnahmen', focus = 'Winken', preview = true, previewPen
 
 describe('DrawerRecording — preview', () => {
   it('plays the newest version at the drawer tempo', () => {
+    expect(DE.PREVIEW_PLAY).toBe('Abspielen');
     const { redux, onPreview } = setup();
     const section = screen.getByRole('region', { name: DE.PREVIEW_START });
     expect(within(section).getByRole('heading', { name: DE.PREVIEW_START })).toBeInTheDocument();
@@ -151,7 +152,11 @@ describe('DrawerRecording — preview', () => {
 describe('DrawerPlace — preview', () => {
   it('▶ Im Simulator ansehen plays the entry at the drawer tempo', () => {
     const { onPreview, pinId } = setup({ tab: 'ziele', focus: 'pin' });
-    fireEvent.click(screen.getByRole('button', { name: `▶ ${DE.PREVIEW_START}` }));
+    const play = screen.getByRole('button', { name: DE.PREVIEW_START });
+    // The play icon, drawn beside the words (never a glyph in them).
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(play.querySelector('svg[data-icon="play"]')).toHaveAttribute('aria-hidden', 'true');
+    fireEvent.click(play);
     expect(onPreview).toHaveBeenLastCalledWith({ kind: 'pin', id: pinId, name: 'Ablage' }, { tempo: 1.0 });
   });
 
@@ -202,13 +207,13 @@ describe('Drawer ▶ — waits for the first leader-status answer', () => {
 
   it('Ziel: ▶ Im Simulator ansehen is disabled with the hint, then enabled', () => {
     const { onPreview, pinId, provider } = setup({ tab: 'ziele', focus: 'pin', previewPending: true });
-    const btn = screen.getByRole('button', { name: `▶ ${DE.PREVIEW_START}` });
+    const btn = screen.getByRole('button', { name: DE.PREVIEW_START });
     expect(btn).toBeDisabled();
     expect(btn).toHaveAttribute('title', DE.PREVIEW_BLOCK_LEADER_PENDING);
     fireEvent.click(btn);
     expect(onPreview).not.toHaveBeenCalled();
     act(() => { provider.setSnapshot({ capabilities: { previewPending: false } }); });
-    const now = screen.getByRole('button', { name: `▶ ${DE.PREVIEW_START}` });
+    const now = screen.getByRole('button', { name: DE.PREVIEW_START });
     expect(now).toBeEnabled();
     expect(now).not.toHaveAttribute('title');
     fireEvent.click(now);

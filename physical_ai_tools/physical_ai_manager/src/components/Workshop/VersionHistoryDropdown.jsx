@@ -16,6 +16,7 @@ import {
   restoreWorkflowVersion,
 } from '../../services/workflowApi';
 import { DE } from './blocks/messages_de';
+import Icon from '../icons/Icon';
 
 function fmtTs(iso) {
   if (!iso) return '–';
@@ -139,14 +140,15 @@ function VersionHistoryDropdown({
         aria-expanded={open}
         aria-haspopup="menu"
         className={
-          'inline-flex items-center justify-center min-h-[28px] '
+          'inline-flex items-center justify-center gap-1.5 min-h-[28px] '
           + 'px-3 py-1.5 rounded-md text-sm font-medium border border-[var(--line)] '
           + 'bg-white text-[var(--ink)] hover:bg-[var(--bg-sunk)] '
           + 'disabled:opacity-50 disabled:cursor-not-allowed '
           + 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'
         }
       >
-        🕓 {DE.VERSION_HISTORY}
+        <Icon name="history" />
+        {DE.VERSION_HISTORY}
       </button>
       {open && (
         <div

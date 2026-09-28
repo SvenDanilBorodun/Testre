@@ -658,6 +658,34 @@ describe('WorkshopPage — an insertion never lands in another document (review 
   });
 });
 
+describe('WorkshopPage — an insertion never lands while another program is being fetched (review round 4, mc9 R24)', () => {
+  test('opening a saved program while the insertion module loads: nothing is written, the student is told', async () => {
+    // The page names a new document the moment it STARTS fetching it — the
+    // old document's files are still the page's until the row arrives, and a
+    // success toast for lines written into them would name a program that is
+    // about to disappear.
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    act(() => { mockPage.host.onCursorChange({ file: 'main.py', line: 2 }); });
+    const doc = mockPage.assetDoc;
+    expect(doc.usageRows('recording', 'Winken')).toEqual([]);
+    // The next program's row never arrives during this test.
+    mockApi.getWorkflow.mockImplementation(() => new Promise(() => {}));
+    const pending = doc.insertSnippet({ kind: 'recording', name: 'Winken' });
+    mockState = baseState({ selectedWorkflowId: 'wf-other' });
+    rerender(<WorkshopPage isActive />);
+    let result;
+    await act(async () => { result = await pending; });
+    expect(result).toEqual({ count: 0, error: 'Inzwischen ist ein anderes Programm offen – es wurde nichts eingefügt.' });
+    // Nothing was written into the old program's files either (the page's
+    // files, read through the old document).
+    expect(doc.usageRows('recording', 'Winken')).toEqual([]);
+    expect(mockApi.getWorkflow).toHaveBeenLastCalledWith('jwt', 'wf-other');
+  });
+});
+
 describe('WorkshopPage — the previous document’s Ziele store lets go (review round 3, nb5)', () => {
   test('a change to the OLD store after a switch does not mark the new document’s Ziele as changed', async () => {
     const other = {

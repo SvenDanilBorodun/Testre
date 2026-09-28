@@ -309,6 +309,29 @@ describe('the code document alone', () => {
     expect(applied).toBe(1);
   });
 
+  it('nc5: the next insertion goes BELOW the last one — the page’s cursor follows the revealed caret', async () => {
+    // The reveal moves the editor's caret programmatically, which the editor
+    // never reports as the student's cursor; setCursor is how the page learns
+    // it. Without it a second „Einfügen" landed ABOVE the first (review round
+    // 4, nc5 X6: the two lines came out in reverse order).
+    let files = { 'main.py': CODE };
+    let cursor = { file: 'main.py', line: 1 };
+    const doc = createCodeAssetDocument({
+      language: 'python',
+      store: createDetachedDestinationStore([]),
+      getFiles: () => files,
+      applyFiles: (next) => { files = next; },
+      requestReveal: () => {},
+      getCursor: () => cursor,
+      setCursor: (at) => { cursor = at; },
+    });
+    await doc.insertSnippet({ kind: 'recording', name: 'Erste' });
+    await doc.insertSnippet({ kind: 'recording', name: 'Zweite' });
+    expect(files['main.py'].split('\n').slice(0, 3))
+      .toEqual(['import robot', 'robot.replay("Erste")', 'robot.replay("Zweite")']);
+    expect(cursor).toEqual({ file: 'main.py', line: 3 });
+  });
+
   it('a variable use row covers assignments, reads and zeige calls', () => {
     let files = { 'main.py': 'import robot\npunkte = 0\npunkte += 1\nrobot.zeige("punkte", punkte)\n' };
     const doc = createCodeAssetDocument({

@@ -167,6 +167,33 @@ describe('„+ Neu"', () => {
     expect(dispatchAction).toHaveBeenCalledWith({ type: 'teach', kind: 'pose' });
   });
 
+  // Review round 1 (B5): sized for the 11rem sidebar — small text on one line,
+  // the menu as wide as its longest item, the chevron pointing where it opens.
+  test('is sized for the sidebar: one-line small items, never narrower than the trigger, chevron up', async () => {
+    await mount();
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(newButton().querySelector('svg[data-icon="chevronUp"]')).not.toBeNull();
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(newButton().querySelector('svg[data-icon="chevronDown"]')).toBeNull();
+    fireEvent.click(newButton());
+    const menu = screen.getByRole('menu', { name: CODE_DE.SAMMLUNG_NEW_MENU });
+    expect(menu.className).toMatch(/\bmin-w-full\b/);
+    expect(menu.className).toMatch(/\bw-max\b/);
+    expect(menu.className).not.toMatch(/min-w-\[12rem\]/);
+    for (const item of within(menu).getAllByRole('menuitem')) {
+      expect(item.className).toMatch(/\btext-xs\b/);
+      expect(item.className).toMatch(/\bwhitespace-nowrap\b/);
+    }
+  });
+
+  test('„Neue Datei" draws the plus icon, not a literal „+"', async () => {
+    await mount();
+    const neu = screen.getByRole('button', { name: CODE_DE.FILE_NEW });
+    expect(neu.textContent).toBe(CODE_DE.FILE_NEW);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(neu.querySelector('svg[data-icon="plus"]')).not.toBeNull();
+  });
+
   test('in the simulator it offers the Sim-Tisch only', async () => {
     await mount({ capabilities: { simMode: true, pinCamera: false } });
     fireEvent.click(newButton());
@@ -204,6 +231,16 @@ describe('the row buttons „… vormachen"', () => {
       expect(btn.querySelector('svg').getAttribute('data-icon')).toBe(icon);
       fireEvent.click(btn);
       expect(dispatchAction).toHaveBeenLastCalledWith({ type: 'teach', kind });
+    }
+  });
+
+  test('each row button is a 24 × 24 hit area around its small icon (review round 1, B5)', async () => {
+    await mount();
+    for (const label of [DE.FLY_TEACH_RECORDING, DE.FLY_TEACH_ZIEL, DE.FLY_TEACH_POSE]) {
+      const btn = rowButton(label);
+      expect(btn.className).toMatch(/\bh-6\b/);
+      expect(btn.className).toMatch(/\bw-6\b/);
+      expect(btn.className).toMatch(/\bshrink-0\b/);
     }
   });
 

@@ -153,12 +153,17 @@ function SammlungSection({
               {`${label} ${counts[tab] ?? 0}`}
             </button>
             {teach && (
+              // A 24×24 hit area around the ~14 px icon (review round 1, B5).
               <button
                 type="button"
                 onClick={() => onAction(teach.action)}
                 title={teach.label}
                 aria-label={teach.label}
-                className="shrink-0 rounded p-1 text-xs text-[var(--ink-3)] hover:bg-white hover:text-[var(--accent)]"
+                data-testid={`sammlung-teach-${tab}`}
+                className={
+                  'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-sm '
+                  + 'text-[var(--ink-3)] hover:bg-white hover:text-[var(--accent)]'
+                }
               >
                 <Icon name={teach.icon} />
               </button>
@@ -173,7 +178,7 @@ function SammlungSection({
             icon="plus"
             menuLabel={CODE_DE.SAMMLUNG_NEW_MENU}
             placement="up"
-            align="stretch"
+            size="sm"
             className="w-full"
             buttonClassName={`${buttonClass} w-full justify-center`}
             items={actions.map(({
@@ -487,8 +492,13 @@ function CodeWorkspace({
               {debuggable ? CODE_DE.DEBUG_BP_HINT_PY : CODE_DE.DEBUG_JAVA_NO_BREAKPOINTS}
             </p>
             <div className="p-1.5 flex flex-col gap-1 border-t border-[var(--line)]">
-              <button type="button" onClick={handleNewFile} className={smallButton}>
-                + {CODE_DE.FILE_NEW}
+              <button
+                type="button"
+                onClick={handleNewFile}
+                className={`${smallButton} inline-flex items-center justify-center gap-1.5`}
+              >
+                <Icon name="plus" />
+                <span>{CODE_DE.FILE_NEW}</span>
               </button>
               <div className="flex gap-1">
                 <button type="button" onClick={handleRename} disabled={active === entry} className={smallButton + ' flex-1'}>

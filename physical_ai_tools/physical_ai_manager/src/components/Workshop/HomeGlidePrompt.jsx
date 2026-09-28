@@ -21,7 +21,7 @@ import { toastIcon } from '../icons/toast';
 //
 // Three places hand the student a limp arm and then lock it again: „Tisch
 // vermessen" (touch-off solve), „Arm festsetzen" after „Arm freischalten", and
-// „✋ Vormachen" (offered ONCE at „Fertig", only after a confirmed re-lock of an
+// Vormachen's hand-mode windows (offered ONCE at „Fertig", only after a confirmed re-lock of an
 // arm the session released). The server now re-locks every one of them IN
 // PLACE (on the OMX the re-torque used to snap the arm back to the controller's
 // old setpoint in ~50 ms — the "jump to home"). Getting back to the

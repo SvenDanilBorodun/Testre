@@ -73,12 +73,16 @@ tested against both server f-strings. The Hugging Face toast was English
 plus an emoji around the worker's German sentence on every upload; the
 client now gets the sentence itself.
 
-**Cost, measured.** Student build entry chunk 1,743,411 → 1,770,516 bytes
-raw (+27,105), 479,565 → 482,968 gzip -9 (+3,403); about 94 Lucide trees in
-the bundle out of the set's 1,541 (tree-shaking works); no
-`renderToString`/`renderToStaticMarkup` in any chunk. Rolldown now splits
-React into its own `jsx-runtime-*.js` chunk (7.9 KB; the lazy CodeEditor
-imports the icon helper too), which `index.html` modulepreloads.
+**Cost, measured.** What a page load fetches before it runs is the entry
+chunk PLUS every chunk `index.html` modulepreloads, and this change added one
+of those: rolldown now splits React into its own `jsx-runtime-*.js` chunk
+(7,923 bytes raw; the lazy CodeEditor imports the icon helper too). Student
+build, entry + jsx-runtime: 1,743,411 → 1,778,439 bytes raw (+35,028),
+479,565 → 485,993 gzip -9 (+6,428); the entry alone grew +27,105 raw /
++3,403 gzip, which understated the cost. The other two preloaded chunks
+(`chunk-*.js`, `blockly_compressed-*.js`) are unchanged. About 94 Lucide
+trees in the bundle out of the set's 1,541 (tree-shaking works); no
+`renderToString`/`renderToStaticMarkup` in any chunk.
 
 **Fences.** `noIconGlyphs.test.js` (espree tokens, escapes and entities
 decoded, JSON walked) and `test_no_icon_glyphs.py` (Python string
@@ -97,6 +101,68 @@ type nobody inflates.
 
 Not verified here: any of it in a real WebView2 at the three scalings, on a
 rig, or by a screen reader — rig gate S-R13 and visual gate S-R14.
+
+**Review round 1 (same day).** Two fresh reviewers found no blocker and no
+major; the owner answered with four decisions (R1-O1: every remaining
+non-Lucide icon too; R1-O2: finish the German of every component this change
+touched; R1-O3: „Öffnen" and „Verlauf" behave like the new menus; R1-O4: no
+further review round after the fix) and a fix list of twenty items.
+
+- *A click into Blockly never closed a menu.* Reviewer A confirmed it:
+  Blockly's gesture calls `stopPropagation()` and `preventDefault()` on the
+  workspace's pointerdown, so the chooser's bubble-phase document listener
+  never heard it, and the open menu stayed over the editor. One hook,
+  `usePopoverDismiss`, now closes all four popovers (the chooser, „+ Neu",
+  „Öffnen", „Verlauf") on a pointerdown heard in the CAPTURE phase and on
+  focus leaving the component; Esc hands focus back. A test injects a real
+  workspace and proves the premise (the bubble listener never fires) and the
+  fix; moving the listener back to the bubble phase fails four tests. Holding
+  Enter on the chooser no longer picks its first item (key repeat ignored).
+- *The custom icons were two thirds the size of their neighbours*, and the
+  leader arm differed from the follower only by a 3-unit circle. They were
+  redrawn to fill the grid (a bounding-box test now requires ≥ 16 units on the
+  longer axis; the old test grew arcs by their radius and so could not have
+  measured this — it now samples each arc exactly); the leader arm ends in a
+  closed handle grip. The unused gripper icon is gone, and a new test fails on
+  any registry entry no source file references (search, arrowLeft, activity
+  and clapperboard were unused too; `merge` gave way to `mergeData`, one icon
+  per concept, and the „Abgebrochen"/„Fehlgeschlagen" icons are named
+  `cancel`/`failed` by meaning).
+- *Solid where the fill meant something*: Start, Pause, Schritt, Stopp and
+  Weiter are filled in the ControlPanel, the run bar and Vormachen alike, and
+  „Aufnahme läuft" shows the filled red dot again — decided once, in the
+  registry (`SOLID_ICON_NAMES`), so the three surfaces cannot disagree.
+- *Toasts in one style*: react-hot-toast's own animated check and cross were
+  still drawn for every bare `toast.success`/`toast.error`; the Toaster's
+  defaults are now the Lucide icons, and every toast icon takes the toast's
+  own text colour (a red icon had vanished on the red error toast).
+- *A future Blockly could have emptied a Sammlung category*: a throw in
+  `decorateFlyoutButton` propagated out of the inflater. It now warns once and
+  returns Blockly's plain button, and the decoration changes nothing until the
+  icon is drawn. The icon also follows the button text's size, so the
+  high-contrast theme's 16 pt buttons carry a 20 px icon, not 14 px.
+- *Four defence-in-depth guards had no test of their own* (a mutation of each
+  left every suite green): `capture()`'s kind check, `previewOnRobot`'s
+  Bewegung check, the absence of P/Z in a take's row, and the kind AND in the
+  overlay's button cells — each is now reached past the key gate and pinned.
+- *The glyph fences had blind spots*: ⓘ, ⟳/⟲ and the Braille spinner's
+  range were not banned, a glyph built by `String.fromCodePoint(…)` or
+  Python's `chr(…)` was invisible, and the arm container's own scripts
+  (whose `MSG_*` reach the Startseite) were not scanned. The widened ranges
+  immediately found RightDock's ⟨/⟩ collapse glyphs. A new rule allows an
+  inline `<svg>` only where a list says why (charts, illustrations, the
+  brand mark, Blockly images); ControlPanel's liveness spinner turns a
+  loader icon one step per status message instead of cycling Braille
+  characters (never a free-running spin, which would claim a liveness
+  nobody measured).
+- *German*: the merge, Hugging Face, delete and file-browser tools, the
+  instruction and tag inputs, the system gauges and the model lists are German
+  throughout, fenced by `germanUi.test.js`; the node's Hugging Face control
+  answers (busy, canceling, dispatched, failed) are German too, and an
+  unexpected exception is logged instead of echoed.
+
+Cost of the round: entry + jsx-runtime 1,781,183 bytes raw / 487,473 gzip -9
+(+2,744 raw / +1,480 gzip over the first round), teacher-web entry +299 raw.
 
 ### Unreleased, 2026-09-28 (fix round 5) — the page acts on the program it holds, and the last values arrive
 

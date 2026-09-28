@@ -1935,8 +1935,9 @@ function WorkshopPage({ isActive }) {
           </div>
         </div>
       </header>
-      {/* Vormachen: the full-screen teaching overlay, opened from the toolbar
-          button or a Sammlung flyout („✋ … vormachen"). */}
+      {/* Vormachen: the full-screen teaching overlay, one focused window per
+          kind, opened from the toolbar chooser or a Sammlung creation button
+          („Bewegung/Position/Ziel vormachen"). */}
       <TeachHost
         isActive={isActive}
         workspace={workspace}

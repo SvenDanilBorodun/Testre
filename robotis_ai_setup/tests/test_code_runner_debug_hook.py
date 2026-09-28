@@ -60,6 +60,14 @@ def _load_hook():
     return module
 
 
+def _load_student_main():
+    """The launcher as a module (it imports only the stdlib at module level)."""
+    spec = importlib.util.spec_from_file_location('edubotics_student_main', _STUDENT_MAIN)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_stub():
     """A fresh copy of the generated stub module (its own `_rpc`)."""
     spec = importlib.util.spec_from_file_location('robot', _STUB)
@@ -480,7 +488,11 @@ class SafeRendererBounds(unittest.TestCase):
         self.assertEqual(render(float('nan')), 'nan')
         self.assertEqual(render(float('inf')), 'inf')
         self.assertIs(render(True), True)
-        self.assertEqual(render({(1, 2): 'tupel-schlüssel', 'k': 1}), {'k': 1})
+        # A dict whose entry cannot be shown is not shown whole: it says so
+        # (review round 5, nd6 — it used to read as the empty dict below).
+        self.assertEqual(render({(1, 2): 'tupel-schlüssel', 'k': 1}), {'k': 1, '…': None})
+        self.assertEqual(render({(1, 2): 'nur ein Tupel'}), {'…': None})
+        self.assertEqual(render({}), {})
         self.assertEqual(render(2 ** 300), '<int>')
 
     def test_a_lone_surrogate_never_makes_the_frame_unsendable(self):
@@ -725,7 +737,8 @@ class LiveValuesThroughTheStub(unittest.TestCase):
         self.assertEqual(last['ding'], '<Laut>')          # the real name, not the metaclass's
         self.assertEqual(last['benannt'], '<?>')          # a str-subclass name is not asked
         self.assertEqual(last['liste'], [1, '<Laut>', 'a'])
-        self.assertEqual(last['zuordnung'], {'a': 1, '2': 'b', 'True': None})
+        # `Laut()` as a key is not shown, so the dict ends in '…' (nd6).
+        self.assertEqual(last['zuordnung'], {'a': 1, '2': 'b', 'True': None, '…': None})
         self.assertEqual(last['text'], '<MeinText>')
         self.assertEqual(last['eigen'], '<MeineListe>')
         self.assertEqual(last['riesig'], '<int>')
@@ -797,12 +810,12 @@ class LiveValuesThroughTheStub(unittest.TestCase):
         self.assertIn('€' * 1000, shown.values(), 'what fits is shown whole')
         self.assertTrue(run.live.enabled)
 
-    def test_the_final_send_never_holds_the_end_longer_than_one_interval(self):
-        """Review round 3 (nb7): another thread in the middle of its own
-        check used to hold the program's end for up to 4 × the interval
-        (2 s). Now one deadline covers both waits: a check held elsewhere
-        for the whole interval means the final send is skipped (that
-        thread is sending the same module values)."""
+    def test_another_threads_check_in_flight_neither_holds_the_end_nor_loses_the_last_values(self):
+        """Review round 5 (md7). Round 3 (nb7) made `final` wait at most one
+        interval for another thread's check and then SKIP the last values —
+        which were lost whenever a worker thread was busy. A check can send
+        only under the stub's RPC lock, which the launcher holds across
+        `final` and `__exit`, so `final` no longer waits for it at all."""
         dbg = _load_hook()
         rpc = _RecordingRpc()
         tmp = tempfile.mkdtemp(prefix='edu-final-')
@@ -822,79 +835,116 @@ class LiveValuesThroughTheStub(unittest.TestCase):
         elapsed = time.monotonic() - t0
         release.set()
         worker.join(2.0)
-        self.assertLess(elapsed, 0.3 + 0.2, 'at most one interval')
-        self.assertEqual([c for c in rpc.calls if c[0] == '__vars'], [])
+        self.assertLess(elapsed, 0.2, 'no wait for the other check')
+        self.assertEqual([c[1][2] for c in rpc.calls if c[0] == '__vars'], [{'punkte': 3}])
 
-    def test_the_final_send_waits_out_a_check_that_just_ran_within_the_deadline(self):
-        """The other half of nb7: a check another thread finishes within the
-        interval is waited for, and the final values still go out — the
-        whole end held no longer than the one interval."""
+    def test_the_final_send_waits_out_the_servers_floor_after_a_frame_that_just_went_out(self):
+        """A `__vars` frame that went out less than one interval ago is waited
+        out (within that interval), so the server's floor looks at the last
+        values instead of answering `skipped`."""
         dbg = _load_hook()
         rpc = _RecordingRpc()
-        tmp = tempfile.mkdtemp(prefix='edu-final-')
-        live = dbg.LiveValues(rpc, tmp, interval_s=0.4)
-        held = threading.Event()
-
-        def other_thread_short_check():
-            with live._busy:
-                held.set()
-                time.sleep(0.25)
-                live._next_check = time.monotonic() + 0.4
-        worker = threading.Thread(target=other_thread_short_check, daemon=True)
-        worker.start()
-        self.assertTrue(held.wait(2.0))
+        live = dbg.LiveValues(rpc, tempfile.mkdtemp(prefix='edu-final-'), interval_s=0.4)
+        live._last_send = time.monotonic()
         t0 = time.monotonic()
         live.final([{'punkte': 3}], ('main.py', 0))
         elapsed = time.monotonic() - t0
-        worker.join(2.0)
-        # 0.25 s for the other check + a fresh 0.4 s floor wait would be
-        # 0.65 s: the two waits share ONE 0.4 s deadline instead.
+        self.assertGreater(elapsed, 0.3, 'the floor is waited out')
         self.assertLess(elapsed, 0.4 + 0.15, 'at most one interval')
         self.assertEqual([c[1][2] for c in rpc.calls if c[0] == '__vars'], [{'punkte': 3}])
+        # No frame went out lately: nothing to wait for.
+        rpc.calls.clear()
+        live._last_send = float('-inf')
+        t0 = time.monotonic()
+        live.final([{'punkte': 4}], ('main.py', 0))
+        self.assertLess(time.monotonic() - t0, 0.1)
+        self.assertEqual([c[1][2] for c in rpc.calls if c[0] == '__vars'], [{'punkte': 4}])
 
 
-class TheFinalSendIsBoundedByTheRpcLock(unittest.TestCase):
-    """Review round 4 (mc3, 4-B F1): `final` waited on the stub's RPC lock
-    without a bound — another thread inside a long robot call, or one
-    looping robot calls (the lock is not fair), held the program's end for
-    5.7–29 s before the last values went out. The lock is now taken with
-    the time left of the one deadline, and the final send is skipped when it
-    is not free by then."""
+class TheLastValuesAndExitShareOneHoldOfTheRpcLock(unittest.TestCase):
+    """Review round 5 (md7). Round 4 (mc3) bounded `final`'s wait for the
+    stub's RPC lock and SKIPPED the last values when another thread held it
+    — while `__exit` then waited for the same lock without a bound anyway,
+    so a program with a worker thread ended showing stale values. The
+    launcher now takes the lock ONCE (the wait `__exit` always had) and
+    sends both frames inside it (`student_main.finish_run`): the values
+    arrive, nothing comes between them, and the end waits no longer than
+    `__exit` alone did."""
 
-    class _LockingRpc:
-        """The stub's surface as `call` really uses it: under `_lock`."""
+    class _DepthLock:
+        """An RLock that knows how deep its owner holds it."""
 
         def __init__(self):
             self._lock = threading.RLock()
+            self.depth = 0
+
+        def acquire(self, blocking=True, timeout=-1):
+            ok = self._lock.acquire(blocking, timeout)
+            if ok:
+                self.depth += 1
+            return ok
+
+        def release(self):
+            self.depth -= 1
+            self._lock.release()
+
+        __enter__ = acquire
+
+        def __exit__(self, *exc):
+            self.release()
+
+    class _LockingRpc:
+        """The stub's surface as `call` really uses it: under `_lock`; each
+        call records how deep the caller held the lock."""
+
+        def __init__(self, lock=None):
+            self._lock = lock if lock is not None else threading.RLock()
+            self.before_call = object()
             self.calls = []
 
         def call(self, method, args, kind):
             with self._lock:
-                self.calls.append((method, args, kind))
+                depth = getattr(self._lock, 'depth', None)
+                self.calls.append((method, args, kind, depth))
             return None
 
-    def test_a_thread_inside_a_long_call_cannot_hold_the_end(self):
+    def test_both_frames_go_out_inside_one_outer_hold(self):
         dbg = _load_hook()
+        sm = _load_student_main()
+        rpc = self._LockingRpc(self._DepthLock())
+        live = dbg.LiveValues(rpc, tempfile.mkdtemp(prefix='edu-final-'), interval_s=0.3)
+        sm.finish_run(rpc, live, [{'punkte': 3}], {'kind': 'ok'}, RuntimeError)
+        self.assertEqual([m for m, *_ in rpc.calls], ['__vars', '__exit'])
+        # Both inside the launcher's OUTER hold (depth ≥ 2 at the call): the
+        # lock was never released between them, so no other call came between.
+        self.assertTrue(all(d >= 2 for *_x, d in rpc.calls), rpc.calls)
+        self.assertEqual(rpc.calls[0][1][2], {'punkte': 3})
+        self.assertIsNone(rpc.before_call, 'the hook is unwired inside the same hold')
+
+    def test_a_thread_inside_a_long_call_delays_the_end_only_as_long_as_exit_waited_and_the_values_arrive(self):
+        dbg = _load_hook()
+        sm = _load_student_main()
         rpc = self._LockingRpc()
         live = dbg.LiveValues(rpc, tempfile.mkdtemp(prefix='edu-final-'), interval_s=0.3)
         held = threading.Event()
-        release = threading.Event()
+        done = []
 
         def long_robot_call():
             with rpc._lock:
                 held.set()
-                release.wait(5.0)
+                time.sleep(0.6)
+                done.append(time.monotonic())
         worker = threading.Thread(target=long_robot_call, daemon=True)
         worker.start()
         self.assertTrue(held.wait(2.0))
-        t0 = time.monotonic()
-        live.final([{'punkte': 3}], ('main.py', 0))
-        elapsed = time.monotonic() - t0
-        release.set()
+        sm.finish_run(rpc, live, [{'punkte': 3}], {'kind': 'ok'}, RuntimeError)
+        ended = time.monotonic()
         worker.join(2.0)
-        self.assertLess(elapsed, 0.3 + 0.2, 'the lock wait shares the one deadline')
-        self.assertEqual([c for c in rpc.calls if c[0] == '__vars'], [], 'skipped, not sent late')
-        self.assertTrue(live.enabled)
+        self.assertEqual([m for m, *_ in rpc.calls], ['__vars', '__exit'])
+        self.assertEqual(rpc.calls[0][1][2], {'punkte': 3}, 'the last values arrive')
+        # The end is the long call's end plus the two frames — the wait
+        # `__exit` always had, and nothing on top of it.
+        self.assertLess(ended - done[0], 0.15)
 
     def test_a_free_lock_still_sends_the_last_values(self):
         dbg = _load_hook()
@@ -903,39 +953,152 @@ class TheFinalSendIsBoundedByTheRpcLock(unittest.TestCase):
         live.final([{'punkte': 3}], ('main.py', 0))
         self.assertEqual([c[1][2] for c in rpc.calls if c[0] == '__vars'], [{'punkte': 3}])
 
-    def test_through_the_real_stub_a_looping_thread_cannot_hold_the_end(self):
-        """The shape 4-B measured in the image: a worker thread looping robot
-        calls while the main program ends."""
-        # The main program itself makes no robot call: the stub's lock is
-        # not fair (docs/KNOWN-ISSUES.md), and its own call would be starved
-        # by the loop before the end is ever reached.
-        src = ('import robot, threading, time\n'
-               'punkte = 1\n'
-               'LAUF = [True]\n'
-               'def arbeiter():\n'
-               '    while LAUF[0]:\n'
-               '        robot.move_to("A")\n'
-               'threading.Thread(target=arbeiter, daemon=True).start()\n'
-               'time.sleep(0.2)\n'
-               'punkte = 2\n')
-        run = _StubRun(self, src, slow={'move_to': 0.05}, interval_s=0.3)
-        saved = sys.modules.get('robot')
-        sys.modules['robot'] = run.stub
-        try:
-            ns = runpy.run_path(os.path.join(run.tmp, 'main.py'), run_name='__main__')
-        finally:
-            if saved is None:
-                sys.modules.pop('robot', None)
-            else:
-                sys.modules['robot'] = saved
-        run.stub._rpc.before_call = None
-        t0 = time.monotonic()
-        run.live.final([ns], ('main.py', 0))
-        elapsed = time.monotonic() - t0
-        ns['LAUF'][0] = False
-        # One deadline, plus at most the one __vars round trip when the lock
-        # did come free in time (the fake robot answers __vars at once).
-        self.assertLess(elapsed, 0.3 + 0.25)
+    def test_a_failing_exit_is_written_never_raised(self):
+        sm = _load_student_main()
+
+        class _Refusing(self._LockingRpc):
+            def call(self, method, args, kind):
+                raise RuntimeError('weg')
+        rpc = _Refusing()
+        sm.finish_run(rpc, None, [], {'kind': 'ok'}, RuntimeError)
+        self.assertIsNone(rpc.before_call)
+
+
+class TheLastValuesComeFromEveryProjectModule(unittest.TestCase):
+    """Review round 5 (md7, 5-B n3): the last values were read from
+    `main.py`'s module alone, so a value a helper module kept never
+    arrived."""
+
+    def setUp(self):
+        self.dbg = _load_hook()
+        self.tmp = tempfile.mkdtemp(prefix='edu-mods-')
+
+    def _module(self, name, path, **values):
+        import types
+        mod = types.ModuleType(name)
+        mod.__file__ = path
+        for k, v in values.items():
+            setattr(mod, k, v)
+        return mod
+
+    def test_project_modules_are_found_sorted_and_nothing_else(self):
+        helper = self._module('helfer', os.path.join(self.tmp, 'helfer.py'), modulwert=3)
+        deep = self._module('pkg.werte', os.path.join(self.tmp, 'pkg', 'werte.py'), tief=1)
+        outside = self._module('fremd', '/usr/lib/python3/fremd.py', nein=1)
+        nofile = self._module('ohne', None)
+        del nofile.__dict__['__file__']
+        mods = {'pkg.werte': deep, 'fremd': outside, 'helfer': helper, 'ohne': nofile, 'sys': sys}
+        spaces = self.dbg.project_module_namespaces(self.tmp, mods)
+        self.assertEqual(spaces, [vars(helper), vars(deep)])
+        snap = self.dbg.snapshot_namespaces([{'haupt': 2}] + spaces)
+        self.assertEqual(snap, {'haupt': 2, 'modulwert': 3, 'tief': 1})
+
+    def test_no_student_code_runs_while_the_modules_are_read(self):
+        import types
+        calls = []
+
+        class Swapped(types.ModuleType):
+            def __getattribute__(self, name):
+                calls.append(name)
+                return types.ModuleType.__getattribute__(self, name)
+        swapped = self._module('getauscht', os.path.join(self.tmp, 'getauscht.py'), x=1)
+        swapped.__class__ = Swapped
+
+        target = hash('__file__')
+
+        class Colliding:
+            def __hash__(self):
+                return target
+
+            def __eq__(self, other):
+                calls.append('eq')
+                return False
+        odd = types.ModuleType('kollision')
+        odd.__dict__.clear()
+        odd.__dict__[Colliding()] = 1
+        # Inserting `__file__` after the colliding key compares the two once
+        # (here, on the test's own account); a LOOKUP would do so again.
+        odd.__dict__['__file__'] = os.path.join(self.tmp, 'kollision.py')
+        odd.__dict__['wert'] = 5
+        calls.clear()
+
+        class Mods(dict):
+            def items(self):
+                calls.append('items')
+                return dict.items(self)
+        spaces = self.dbg.project_module_namespaces(self.tmp, {'getauscht': swapped, 'kollision': odd})
+        self.assertEqual(spaces, [vars(odd)], 'the swapped module is skipped, unread')
+        self.assertEqual(self.dbg.project_module_namespaces(self.tmp, Mods(kollision=odd)), [])
+        self.assertEqual(calls, [])
+
+    def test_the_real_sys_modules_is_read_by_default(self):
+        mod = self._module('edu_test_helfer_md7', os.path.join(self.tmp, 'helfer.py'), w=1)
+        sys.modules['edu_test_helfer_md7'] = mod
+        self.addCleanup(sys.modules.pop, 'edu_test_helfer_md7', None)
+        self.assertEqual(self.dbg.project_module_namespaces(self.tmp), [vars(mod)])
+
+
+@unittest.skipUnless(hasattr(sys, 'monitoring'), 'needs sys.monitoring (3.12+)')
+class TheLauncherEndsARunWithTheLastValues(unittest.TestCase):
+    """The launcher itself, run as the runner runs it (`python3 -I -u
+    student_main.py <run_dir>`) against a fake robot on a real socket — with
+    its own rlimits switched off, which a test host cannot take. A worker
+    thread loops robot calls while `main.py` ends, and a helper module keeps
+    a value: the last values of both modules arrive, and `__exit` is the
+    very next frame after them (review round 5, md7)."""
+
+    def _runner_copy(self):
+        import shutil
+        dst = pathlib.Path(tempfile.mkdtemp(prefix='edu-runner-'))
+        shutil.copy(_STUDENT_MAIN, dst / 'student_main.py')
+        shutil.copytree(_RUNNER / 'lib', dst / 'lib',
+                        ignore=shutil.ignore_patterns('__pycache__'))
+        limits = (_RUNNER / 'runner_limits.py').read_text(encoding='utf-8')
+        head = 'def apply_rlimits(language: str) -> None:\n'
+        self.assertIn(head, limits)
+        limits = limits.replace(head, head + '    return  # a test host keeps its limits\n', 1)
+        (dst / 'runner_limits.py').write_text(limits, encoding='utf-8')
+        return dst
+
+    def test_a_worker_thread_and_a_helper_module(self):
+        runner = self._runner_copy()
+        run_dir = tempfile.mkdtemp(prefix='edu-run-')
+        with open(os.path.join(run_dir, 'main.py'), 'w', encoding='utf-8') as handle:
+            handle.write('import robot, threading, time, helfer\n'
+                         'wert = 0\n'
+                         'def arbeiter():\n'
+                         '    for _ in range(40):\n'
+                         '        robot.wait(0.02)\n'
+                         'threading.Thread(target=arbeiter, daemon=True).start()\n'
+                         'helfer.lauf()\n'
+                         'time.sleep(0.2)\n'
+                         'wert = -1\n')
+        with open(os.path.join(run_dir, 'helfer.py'), 'w', encoding='utf-8') as handle:
+            handle.write('import robot\n'
+                         'modulwert = 0\n'
+                         'def lauf():\n'
+                         '    global modulwert\n'
+                         '    for i in range(3):\n'
+                         '        modulwert = i\n'
+                         '        robot.wait(0.05)\n'
+                         '    modulwert = 99\n')
+        sock_dir = tempfile.mkdtemp(prefix='edu-sock-')
+        robot_srv = _FakeRobot(os.path.join(sock_dir, 'rpc.sock'), slow={'wait': 0.02})
+        self.addCleanup(robot_srv.close)
+        env = dict(os.environ, CODE_RPC_SOCKET=robot_srv.path, CODE_RUN_TOKEN='a' * 32)
+        import subprocess
+        proc = subprocess.run([sys.executable, '-I', '-u', str(runner / 'student_main.py'), run_dir],
+                              env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        methods = [m for _t, m, _a in robot_srv.frames]
+        # (The worker's call waiting for the lock may still reach the socket
+        # after __exit; the robot has retired the run's token by then.)
+        self.assertEqual(methods.count('__exit'), 1)
+        end = methods.index('__exit')
+        self.assertEqual(methods[end - 1], '__vars', 'the last values come right before __exit')
+        last = robot_srv.frames[end - 1][2][2]
+        self.assertEqual(last.get('wert'), -1, 'main.py\'s last value')
+        self.assertEqual(last.get('modulwert'), 99, 'the helper module\'s last value')
 
 
 class SamplerSendsOnlyTheLine(unittest.TestCase):
@@ -1028,7 +1191,8 @@ class HookSource(unittest.TestCase):
 
     def test_the_launcher_wires_the_live_values_before_main_and_sends_the_last_before_exit(self):
         src = _STUDENT_MAIN.read_text(encoding='utf-8')
-        main = next(n for n in ast.walk(ast.parse(src))
+        tree = ast.parse(src)
+        main = next(n for n in ast.walk(tree)
                     if isinstance(n, ast.FunctionDef) and n.name == 'main')
         order = []
         for node in ast.walk(main):
@@ -1039,13 +1203,29 @@ class HookSource(unittest.TestCase):
                 text = ast.unparse(node.func)
                 if text == 'runpy.run_path':
                     order.append(('run', node.lineno))
-                if text == 'live.final':
-                    order.append(('final', node.lineno))
-                if text == 'robot._rpc.call' and node.args and \
-                        isinstance(node.args[0], ast.Constant) and node.args[0].value == '__exit':
-                    order.append(('exit', node.lineno))
+                if text == 'edubotics_debug.project_module_namespaces':
+                    order.append(('modules', node.lineno))
+                if text == 'finish_run':
+                    order.append(('finish', node.lineno))
         kinds = [k for k, _line in sorted(order, key=lambda kv: kv[1])]
-        self.assertEqual(kinds, ['wire', 'run', 'final', 'exit'])
+        self.assertEqual(kinds, ['wire', 'run', 'modules', 'finish'])
+        # finish_run: ONE `with` over the stub's lock holds the unwiring, the
+        # last values and __exit, in that order (review round 5, md7).
+        finish = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef) and n.name == 'finish_run')
+        withs = [n for n in finish.body if isinstance(n, ast.With)]
+        self.assertEqual(len(withs), 1)
+        self.assertIn('lock', ast.unparse(withs[0].items[0].context_expr))
+        inner = []
+        for node in ast.walk(withs[0]):
+            if isinstance(node, ast.Assign) and ast.unparse(node.targets[0]) == 'rpc.before_call':
+                inner.append(('unwire', node.lineno))
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == 'live.final':
+                inner.append(('final', node.lineno))
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == 'rpc.call' and \
+                    node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == '__exit':
+                inner.append(('exit', node.lineno))
+        self.assertEqual([k for k, _l in sorted(inner, key=lambda kv: kv[1])], ['unwire', 'final', 'exit'])
 
     def test_the_tool_id_is_the_debugger_slot(self):
         self.assertIn('DEBUGGER_ID = 3', self.src)

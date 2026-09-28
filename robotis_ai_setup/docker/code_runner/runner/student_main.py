@@ -13,7 +13,8 @@ the breakpoint channel, connect the RPC client with the run token (the
 ``__hello`` frame), start the line sampler, wire the live values into the
 stub (``robot._rpc.before_call``: sent by the program's own thread right
 before each public robot call), run ``main.py`` as ``__main__``, send the
-last live values, report ``__exit`` and terminate with ``os._exit`` — the
+last live values and report ``__exit`` under ONE hold of the stub's RPC lock
+(:func:`finish_run`), and terminate with ``os._exit`` — the
 launcher owns the process's end, so a non-daemon student thread cannot keep
 the run alive after ``main.py`` returned.
 
@@ -26,6 +27,7 @@ for the ``[TECHNIK]`` log line (decision A14).
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -107,6 +109,30 @@ def classify_exception(exc: BaseException, project_root: str, robot_module) -> d
     }
 
 
+def finish_run(rpc, live, namespaces, info, error_type) -> None:
+    """The last live values and ``__exit``, under ONE hold of the stub's RPC
+    lock (review round 5, md7).
+
+    ``__exit`` always had to wait for that lock: another thread inside a
+    long robot call, or one looping robot calls, holds it (and the lock is
+    not fair — ``docs/KNOWN-ISSUES.md``). Taking it ONCE, blocking, for both
+    frames therefore adds no wait of its own, and no other thread's call can
+    come between them: the last values are never skipped because the lock
+    was busy. Round 4 skipped them after one interval and then waited for
+    the same lock for ``__exit`` anyway, so a program with a worker thread
+    ended showing stale values. The live-values hook is unwired inside the
+    same hold. A failing ``__exit`` is written to stderr, never raised."""
+    lock = getattr(rpc, '_lock', None)
+    with lock if lock is not None else contextlib.nullcontext():
+        rpc.before_call = None
+        if live is not None:
+            live.final(namespaces, (ENTRY_FILE, 0))
+        try:
+            rpc.call('__exit', [info], 'call')
+        except error_type as exc:
+            sys.stderr.write(f'__exit: {exc}\n')
+
+
 def _read_breakpoint_channel(fd: int, hook, max_line: int) -> None:
     """Apply every ``{"lines": {...}}`` line the supervisor writes on the pipe."""
     buf = b''
@@ -172,7 +198,9 @@ def main(argv: list[str]) -> int:
 
     code = 0
     info: dict | None = {'kind': 'ok'}
-    # The program's module dicts at its end, for the last live values.
+    # The program's module dicts at its end, for the last live values:
+    # main.py's (or, after an exception, those of its traceback) — every
+    # other project module is added from sys.modules at the end.
     namespaces: list = []
     os.chdir(run_dir)
     try:
@@ -201,12 +229,11 @@ def main(argv: list[str]) -> int:
             pass
         if connected and info is not None:
             if live is not None:
-                robot._rpc.before_call = None
-                live.final(namespaces, (ENTRY_FILE, 0))
+                namespaces = namespaces + edubotics_debug.project_module_namespaces(run_dir)
             try:
-                robot._rpc.call('__exit', [info], 'call')
-            except robot.RobotError as exc:
-                sys.stderr.write(f'__exit: {exc}\n')
+                finish_run(robot._rpc, live, namespaces, info, robot.RobotError)
+            except Exception as exc:  # noqa: BLE001 — a program that broke the library itself
+                sys.stderr.write(f'__exit: {exc!r}\n')
         robot._rpc.close()
     return code
 

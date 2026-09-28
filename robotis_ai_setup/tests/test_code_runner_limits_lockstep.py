@@ -285,13 +285,21 @@ class ControlVocabulary(unittest.TestCase):
 
     def test_the_exit_report_rides_the_data_socket_as_the_server_reads_it(self):
         # The launcher calls __exit with ONE dict; the server takes args[0].
-        fn = _function(_tree(_STUDENT_MAIN), 'main')
+        # Since review round 5 (md7) the call sits in `finish_run`, which
+        # `main` hands the exit report as its `info`.
+        tree = _tree(_STUDENT_MAIN)
+        fn = _function(tree, 'finish_run')
         calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
-                 and ast.unparse(n.func) == 'robot._rpc.call'
+                 and ast.unparse(n.func) == 'rpc.call'
                  and n.args and isinstance(n.args[0], ast.Constant)
                  and n.args[0].value == '__exit']
         self.assertEqual(len(calls), 1)
         self.assertEqual(ast.unparse(calls[0].args[1]), '[info]')
+        self.assertEqual([a.arg for a in fn.args.args][3], 'info')
+        handoffs = [n for n in ast.walk(_function(tree, 'main')) if isinstance(n, ast.Call)
+                    and ast.unparse(n.func) == 'finish_run']
+        self.assertEqual(len(handoffs), 1)
+        self.assertEqual(ast.unparse(handoffs[0].args[3]), 'info')
 
 
 if __name__ == '__main__':

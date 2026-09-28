@@ -34,10 +34,11 @@ Installed by ``student_main.py`` into the student's own process before
   is the calling thread's own at that moment, so nothing waits for a lock a
   robot call holds (a sampler that waited for a free lock sent nothing while
   a program spent its time in robot calls), and nothing is read from another
-  thread. :meth:`LiveValues.final` is the one send that waits (for another
-  thread's check, the server's floor, the RPC lock another thread's robot
-  call holds), and all of it within ONE ``LIVE_VALUES_INTERVAL_S``; what is
-  not free by then is skipped. A failure — a robot that does not know
+  thread. :meth:`LiveValues.final` sends the last values of every project
+  module inside the launcher's one hold of the RPC lock, together with
+  ``__exit`` (``student_main.finish_run``), so no other thread's call comes
+  between them and nothing is skipped; its only wait of its own is the
+  server's floor, within one ``LIVE_VALUES_INTERVAL_S``. A failure — a robot that does not know
   ``__vars``, a lost connection, an oversized frame — switches the live
   values off for the rest of the run and never reaches the program: the
   robot call goes ahead unchanged.
@@ -65,6 +66,7 @@ boundary.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import math
@@ -224,7 +226,8 @@ def safe_render(value, _budget: list | None = None, _depth: int = 0):
     ``CONTAINER_MAX_DEPTH`` levels and ``CONTAINER_MAX_ITEMS`` items, its
     prefix copied in ONE C-level ``islice`` pass; a dict entry is kept only
     when its key is an exact builtin scalar, and its key text is charged to
-    the character budget. Anything else — a subclass of a builtin included —
+    the character budget (a dict with a skipped entry is not shown whole, so
+    it ends in the ``'…'`` too — never an empty ``{}``). Anything else — a subclass of a builtin included —
     is ``'<Klasse>'``. A container that could not be shown whole ends in one
     ``'…'``. The result holds at most :data:`LIVE_VALUE_MAX_NODES` nodes and
     :data:`LIVE_VALUE_MAX_CHARS` characters of strings and keys, both counted
@@ -261,7 +264,11 @@ def safe_render(value, _budget: list | None = None, _depth: int = 0):
             if t is dict:
                 key = _key_text(item[0])
                 if key is None:
-                    continue                 # not a shown key: the entry is skipped
+                    # Not a shown key: the entry is skipped, and the dict is
+                    # then not shown whole — it says so with the '…' below,
+                    # never as an empty `{}` (review round 5, nd6).
+                    cut = True
+                    continue
                 if budget[1] < len(key):
                     cut = True
                     break
@@ -393,6 +400,57 @@ def project_namespaces(tb, project_root: str) -> list:
     if not frames:
         return []
     return [frames[-1].f_globals, frames[0].f_globals]
+
+
+# At most this many entries of ``sys.modules`` are looked at for the last
+# values, and this many of a module's first dict entries for its ``__file__``
+# (set when the module is created, so among the first few).
+MODULES_SCAN_MAX = 4096
+_MODULE_HEAD_SCAN = 16
+# ``ModuleType``'s own ``__dict__`` slot: a module is read through it, never
+# through an attribute lookup a swapped ``__class__`` could answer.
+_MODULE_DICT = types.ModuleType.__dict__['__dict__'].__get__
+
+
+def project_module_namespaces(project_root: str, modules=None) -> list:
+    """The module dicts of every PROJECT module the program imported
+    (``helfer.py``, ``pkg/werte.py`` …), sorted by module name — for the last
+    values, which used to come from ``main.py`` alone, so a value a helper
+    module kept never arrived (review round 5, md7).
+
+    Read without running student code: ``modules`` (``sys.modules``) only
+    when it is an exact ``dict``; a module only when its type IS
+    ``types.ModuleType`` (a module whose ``__class__`` was swapped is
+    skipped), its dict through ``ModuleType``'s own slot; its ``__file__``
+    found by walking the dict's first entries for an exact ``str`` key (a
+    lookup could call a colliding key's ``__eq__``) and used only when it is
+    an exact ``str`` under the project. ``main.py`` itself is not among them
+    (``runpy`` ran it as a temporary ``__main__``): the caller passes its
+    dict first."""
+    mods = sys.modules if modules is None else modules
+    if type(mods) is not dict:
+        return []
+    root = os.path.abspath(project_root)
+    found = []
+    for name, mod in list(itertools.islice(dict.items(mods), MODULES_SCAN_MAX)):
+        if type(name) is not str or type(mod) is not types.ModuleType:
+            continue
+        try:
+            ns = _MODULE_DICT(mod)
+        except Exception:  # noqa: BLE001
+            continue
+        if type(ns) is not dict:
+            continue
+        path = None
+        for key, value in itertools.islice(dict.items(ns), _MODULE_HEAD_SCAN):
+            if type(key) is str and key == '__file__':
+                path = value
+                break
+        if project_relpath(path, root) is None:
+            continue
+        found.append((name, ns))
+    found.sort(key=lambda item: item[0])
+    return [ns for _name, ns in found]
 
 
 def fit_vars(snapshot: dict, budget_bytes: int = VARS_FRAME_BUDGET_BYTES) -> dict:
@@ -600,6 +658,10 @@ class LiveValues:
         self._sleep = sleep
         self._busy = threading.Lock()
         self._next_check = float('-inf')
+        # When the last ``__vars`` frame was handed to the stub: the
+        # server's floor counts from there (set BEFORE the call, so a thread
+        # that has since released the RPC lock has always set it).
+        self._last_send = float('-inf')
         self._sent_key = None
         self._position = None
         self.enabled = True
@@ -627,45 +689,40 @@ class LiveValues:
             self._busy.release()
 
     def final(self, namespaces, fallback_position) -> None:
-        """The last values, once, before ``__exit``. Never raises. Every WAIT
-        shares ONE deadline of ``interval_s`` (review round 3, nb7; round 4,
-        mc3): another thread's check in flight, the server's floor, and the
-        stub's RPC lock — which another thread inside a long robot call, or
-        one looping robot calls, may hold (the lock is not fair; the end was
-        measured held 5.7–29 s). The lock is taken with the time left, and
-        when it is not free by then the final send is skipped: that thread is
-        sending the same module values before its own calls. So the end waits
-        at most ``interval_s``, plus the one ``__vars`` round trip when the
-        lock did come free in time. A check that ran just now is waited out
-        (within the deadline) so the server looks at this frame instead of
-        answering ``skipped``."""
+        """The last values, once, right before ``__exit``. Never raises.
+
+        The launcher calls this INSIDE its one hold of the stub's RPC lock
+        and sends ``__exit`` in the same hold (``student_main.finish_run``;
+        review round 5, md7), so nothing here waits for a lock or skips
+        because one was busy: another thread's check can SEND only under that
+        lock, and after ``__exit`` it never will. (Round 4 skipped the final
+        send when the lock was not free within one interval — and ``__exit``
+        then waited for the same lock without a bound anyway, so a program
+        with a worker thread ended showing stale values.) Called on its own,
+        the RPC lock is taken here — re-entrantly, and blocking, which is the
+        wait ``__exit`` has anyway.
+
+        ``namespaces`` are module dicts, first wins: the launcher passes
+        ``main.py``'s, then every project module's
+        (:func:`project_module_namespaces`). The one wait of its own: when a
+        ``__vars`` frame went out less than ``interval_s`` ago, the rest of
+        that interval is waited out (at most ``interval_s``), so the
+        server's floor looks at this frame instead of answering
+        ``skipped``."""
         if not self.enabled:
             return
-        deadline = self._clock() + self._interval
-        if not self._busy.acquire(timeout=self._interval):
-            return
+        rpc_lock = getattr(self._rpc, '_lock', None)
         try:
-            fitted = fit_vars(snapshot_namespaces(namespaces, self._max, self._exclude))
-            if self._key(fitted) == self._sent_key:
-                return
-            wait = min(self._next_check, deadline) - self._clock()
-            if wait > 0:
-                self._sleep(wait)
-            rpc_lock = getattr(self._rpc, '_lock', None)
-            if rpc_lock is None:
+            with rpc_lock if rpc_lock is not None else contextlib.nullcontext():
+                fitted = fit_vars(snapshot_namespaces(namespaces, self._max, self._exclude))
+                if self._key(fitted) == self._sent_key:
+                    return
+                wait = min(self._last_send + self._interval - self._clock(), self._interval)
+                if wait > 0:
+                    self._sleep(wait)
                 self._send_if_changed(self._position or fallback_position, fitted)
-                return
-            if not rpc_lock.acquire(timeout=max(0.0, deadline - self._clock())):
-                return
-            try:
-                # The stub's own call takes this (re-entrant) lock again.
-                self._send_if_changed(self._position or fallback_position, fitted)
-            finally:
-                rpc_lock.release()
         except Exception:  # noqa: BLE001 — the end of a run is never a crash
             self.enabled = False
-        finally:
-            self._busy.release()
 
     @staticmethod
     def _key(fitted: dict) -> str:
@@ -675,6 +732,7 @@ class LiveValues:
         key = self._key(fitted)
         if key == self._sent_key:
             return
+        self._last_send = self._clock()
         reply = self._rpc.call('__vars', [pos[0], pos[1], fitted], 'call')
         self.sent += 1
         # The robot's floor answered without looking: send it again next time.

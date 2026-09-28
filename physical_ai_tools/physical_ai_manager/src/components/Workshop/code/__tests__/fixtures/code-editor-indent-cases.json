@@ -182,7 +182,7 @@
    "line": null,
    "reach": "run",
    "input": null,
-   "output": "import robot\ndef main():\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nmain()\n\n",
+   "output": "import robot\ndef main():\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nmain()\n",
    "hint": null
   },
   {

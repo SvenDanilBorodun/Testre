@@ -728,7 +728,10 @@ function CodeEditor({
   useEffect(() => {
     const view = viewRef.current;
     if (!view || value === undefined) return;
-    const change = minimalChange(view.state.doc.toString(), value || '');
+    // The document keeps "\n" between its lines whatever the file used: a
+    // CRLF value is compared as the same lines, or its smallest change would
+    // carry a stray "\r" in — one more line for CodeMirror.
+    const change = minimalChange(view.state.doc.toString(), (value || '').replace(/\r\n?/g, '\n'));
     if (change) view.dispatch({ changes: change, annotations: externalSync.of(true) });
   }, [value]);
 

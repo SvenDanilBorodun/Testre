@@ -154,6 +154,20 @@ describe('an external value arrives as the smallest change', () => {
     act(() => { undo(view); });
     expect(view.state.doc.toString()).toBe(PY);
   });
+
+  test('a file with Windows line breaks (CRLF) is the same lines — no extra line on mount or on a rename', () => {
+    // The editor keeps "\n" between its lines; a CRLF value compared
+    // character by character looked different, and its smallest change
+    // inserted a stray "\r" that CodeMirror read as one more line break.
+    const crlf = PY.replace(/\n/g, '\r\n');
+    const onChange = vi.fn();
+    const { view, show } = mount({ value: crlf, onChange });
+    expect(view.state.doc.toString()).toBe(PY);
+    const renamed = crlf.replace('robot.move_to("Ablage")', 'robot.move_to("Tischmitte")');
+    show({ value: renamed });
+    expect(view.state.doc.toString()).toBe(renamed.replace(/\r\n/g, '\n'));
+    expect(onChange).not.toHaveBeenCalled();
+  });
 });
 
 describe('onCursorChange', () => {

@@ -181,6 +181,40 @@ export function teachListMeta(item) {
   return formatDe(DE.TEACH_LIST_PLACE_META, formatMmDe(item.x), formatMmDe(item.y), DE.CARD_SOURCE_TOUCH);
 }
 
+/**
+ * Which of the four action buttons (Space, F, P, Z) is ENABLED now. Every
+ * cell is ANDed with the kind contract (teachGates.js::teachKeyOffered, the
+ * session's own gate), so a key the window does not offer is never enabled —
+ * even should its button ever be rendered (the grid renders only offered
+ * ones). `canStartNew`: online and the leader status known (R7); the stop /
+ * cancel / re-lock cells need only `online`.
+ */
+export function teachActionCells({
+  kind, mode, state, relock, online, canStartNew,
+}) {
+  const offered = (key) => teachKeyOffered({ kind, mode, key });
+  const stateCell = mode === 'leader' ? {
+    space: (canStartNew && state === 'bereit') || (online && state === 'aufnahme'),
+    f: false,
+    p: canStartNew && state === 'bereit',
+    z: canStartNew && state === 'bereit',
+  } : {
+    space: (canStartNew && ['fest', 'frei'].includes(state))
+      || (online && ['countdown', 'aufnahme'].includes(state)),
+    f: (canStartNew && state === 'fest')
+      || (online && (['countdown', 'frei', 'aufnahme'].includes(state)
+        || (state === 'pruefen' && relock === 'failed'))),
+    p: canStartNew && ['fest', 'frei'].includes(state),
+    z: canStartNew && ['fest', 'frei'].includes(state),
+  };
+  return {
+    space: offered('space') && stateCell.space,
+    f: offered('f') && stateCell.f,
+    p: offered('p') && stateCell.p,
+    z: offered('z') && stateCell.z,
+  };
+}
+
 /** A fresh take's clean-up: lead trimmed, the fall-onset end applied, pauses kept. */
 export function defaultCleanupChoice(take, analysis) {
   const last = Math.max(0, (Array.isArray(take && take.points) ? take.points.length : 0) - 1);
@@ -706,26 +740,9 @@ function TeachOverlay({
   // offer has no button (teachGates.js::teachKeyOffered, the hook's own gate).
   const canStartNew = online && !leaderStatusUnknown;
   const offered = (key) => teachKeyOffered({ kind, mode, key });
-  const stateCell = isLeaderMode ? {
-    space: (canStartNew && state === 'bereit') || (online && state === 'aufnahme'),
-    f: false,
-    p: canStartNew && state === 'bereit',
-    z: canStartNew && state === 'bereit',
-  } : {
-    space: (canStartNew && ['fest', 'frei'].includes(state))
-      || (online && ['countdown', 'aufnahme'].includes(state)),
-    f: (canStartNew && state === 'fest')
-      || (online && (['countdown', 'frei', 'aufnahme'].includes(state)
-        || (state === 'pruefen' && relock === 'failed'))),
-    p: canStartNew && ['fest', 'frei'].includes(state),
-    z: canStartNew && ['fest', 'frei'].includes(state),
-  };
-  const cell = {
-    space: offered('space') && stateCell.space,
-    f: offered('f') && stateCell.f,
-    p: offered('p') && stateCell.p,
-    z: offered('z') && stateCell.z,
-  };
+  const cell = teachActionCells({
+    kind, mode, state, relock, online, canStartNew,
+  });
   const kindLabel = TEACH_KIND_LABEL_DE[kind] || '';
   const kindIcon = TEACH_KIND_ICON[kind] || null;
   const fLocks = state === 'frei' || state === 'aufnahme' || state === 'pruefen';
@@ -958,7 +975,6 @@ function TeachOverlay({
                     label={DE.TEACH_KEY_ZIEL}
                     keyHint="Z"
                     disabled={!cell.z || zielPrompts.length > 0}
-                    hint={isLeaderMode ? DE.TEACH_LEADER_ZIEL_HINT : undefined}
                     onClick={actions.captureZiel}
                     onPointerUp={refocus}
                   />
@@ -1112,7 +1128,10 @@ function TeachOverlay({
   );
 }
 
-function ActionButton({ icon, label, hint, keyHint, disabled, onClick, onPointerUp }) {
+// The label may shrink (and hyphenate, the page is lang="de") so the key hint
+// never leaves the button: at 1366×768 and 150 % scaling (910 CSS px) the
+// Bewegung window's „Aufnahme" + „Leertaste" did not fit.
+function ActionButton({ icon, label, keyHint, disabled, onClick, onPointerUp }) {
   return (
     <button
       type="button"
@@ -1120,16 +1139,20 @@ function ActionButton({ icon, label, hint, keyHint, disabled, onClick, onPointer
       onPointerUp={onPointerUp}
       disabled={disabled}
       className={
-        'flex min-h-[64px] items-center gap-3 rounded-xl border border-[var(--line)] px-4 text-left text-lg '
-        + 'font-semibold disabled:cursor-not-allowed disabled:opacity-40 hover:bg-[var(--bg-sunk)]'
+        'flex min-h-[64px] min-w-0 items-center gap-2 rounded-xl border border-[var(--line)] px-3 text-left text-lg '
+        + 'font-semibold disabled:cursor-not-allowed disabled:opacity-40 hover:bg-[var(--bg-sunk)] lg:gap-3 lg:px-4'
       }
     >
       <Icon name={icon} size="1.35em" />
-      <span className="flex-1">
-        {label}
-        {hint && <span className="block text-sm font-normal text-[var(--ink-3)]">{hint}</span>}
-      </span>
-      <kbd className="rounded border border-[var(--line)] bg-[var(--bg-sunk)] px-2 py-0.5 text-sm font-normal">{keyHint}</kbd>
+      <span className="min-w-0 flex-1 break-words hyphens-auto" data-testid="teach-action-label">{label}</span>
+      <kbd
+        className={
+          'shrink-0 rounded border border-[var(--line)] bg-[var(--bg-sunk)] px-1.5 py-0.5 text-xs font-normal '
+          + 'lg:px-2 lg:text-sm'
+        }
+      >
+        {keyHint}
+      </kbd>
     </button>
   );
 }

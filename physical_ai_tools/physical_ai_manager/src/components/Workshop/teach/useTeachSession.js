@@ -1175,6 +1175,18 @@ export function createTeachEngine(getProps, publish) {
       finish: () => { if (!r.tornDown) finish(); },
       continueTeaching: () => { if (!r.tornDown) continueTeaching(); },
     },
+    // Tests only (review round 1, A2): the defence-in-depth guards sit BEHIND
+    // handlerFor's gate, so no key or button can reach them with a kind the
+    // window does not offer. This seam lets a test call the guarded internals
+    // directly and read which keys each state's table handles, so removing a
+    // guard — or putting P/Z back into a take's row — fails a test.
+    __testing: Object.freeze({
+      capture: (kind) => capture(kind),
+      tableKeys: () => Object.freeze({
+        hand: Object.fromEntries(Object.entries(TABLE).map(([st, row]) => [st, Object.keys(row)])),
+        leader: Object.fromEntries(Object.entries(LEADER_TABLE).map(([st, row]) => [st, Object.keys(row)])),
+      }),
+    }),
   };
 }
 

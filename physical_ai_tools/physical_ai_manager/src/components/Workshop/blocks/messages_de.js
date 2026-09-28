@@ -553,7 +553,6 @@ export const DE = {
   TEACH_LEADER_STATUS_UNKNOWN_PI:
     'Leader-Status unbekannt — der Roboter-Dienst antwortet nicht. Bitte die System-Seite prüfen. Vormachen ist gesperrt, bis er wieder antwortet.',
   TEACH_LEADER_DISCARD_OLD: 'Alte Aufnahme verwerfen',
-  TEACH_LEADER_ZIEL_HINT: 'Tippe den Tisch mit dem Leader-Arm nur leicht an.',
   TEACH_ROBOT_PREVIEW_RUNNING: 'Der Arm fährt die Bewegung ab — Abstand halten.',
   TEACH_ROBOT_PREVIEW_NO_MOTION:
     'Der Arm hat noch nicht angefangen — er kann jederzeit losfahren. Mit „Stopp“ abbrechen.',

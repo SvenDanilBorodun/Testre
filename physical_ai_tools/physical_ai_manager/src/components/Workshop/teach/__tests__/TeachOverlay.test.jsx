@@ -16,7 +16,9 @@
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import toast from 'react-hot-toast';
-import TeachOverlay, { teachListMeta, teachRenameEnabled, teachSlotsLine } from '../TeachOverlay';
+import TeachOverlay, {
+  teachActionCells, teachListMeta, teachRenameEnabled, teachSlotsLine,
+} from '../TeachOverlay';
 import { DE, formatDe } from '../../blocks/messages_de';
 import { compactTrajectoryPoints } from '../../../../utils/trajectoryCompact';
 import { applyCleanup } from '../../../../utils/recordingCleanup';
@@ -1211,9 +1213,12 @@ describe('TeachOverlay — leader mode (D8)', () => {
     withSnapshot({ state: 'bereit' });
     const { unmount: unmountZiel } = render(<TeachOverlay {...leaderProps({ kind: 'ziel' })} />);
     const z = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_ZIEL) });
-    expect(within(z).getByText(DE.TEACH_LEADER_ZIEL_HINT)).toBeInTheDocument();
     expect(z).toBeEnabled();
     expect(screen.getByText(DE.TEACH_HINT_LEADER_ZIEL)).toBeInTheDocument();
+    // Review round 1 (A6): the light touch is said ONCE — by the hint line,
+    // not again under the Z button.
+    expect(screen.getAllByText(/leicht an/)).toHaveLength(1);
+    expect(within(z).queryByText(/leicht an/)).toBeNull();
     expect(within(screen.getByTestId('teach-actions')).getAllByRole('button')).toHaveLength(1);
     unmountZiel();
     render(<TeachOverlay {...leaderProps({ kind: 'pose' })} />);
@@ -1605,6 +1610,62 @@ describe('TeachOverlay — one focused window per kind', () => {
       }
     }
     expect(DE.TEACH_HINT_DONE).not.toMatch(/✎/);
+  });
+
+  // Review round 1 (A3): the kind AND inside the cells is defence in depth
+  // (the grid renders only offered buttons), so it is pinned on its own.
+  describe('teachActionCells: a key the window does not offer is never enabled', () => {
+    const LIVE = { online: true, canStartNew: true, relock: 'none' };
+    test.each([
+      ['recording', 'hand', 'fest', { space: true, f: true, p: false, z: false }],
+      ['pose', 'hand', 'fest', { space: false, f: true, p: true, z: false }],
+      ['ziel', 'hand', 'frei', { space: false, f: true, p: false, z: true }],
+      ['recording', 'leader', 'bereit', { space: true, f: false, p: false, z: false }],
+      ['pose', 'leader', 'bereit', { space: false, f: false, p: true, z: false }],
+      ['ziel', 'leader', 'bereit', { space: false, f: false, p: false, z: true }],
+      ['recording', 'pending', 'fest', { space: false, f: false, p: false, z: false }],
+      [undefined, 'hand', 'fest', { space: false, f: false, p: false, z: false }],
+    ])('%s window, %s mode, %s', (kind, mode, state, expected) => {
+      expect(teachActionCells({
+        kind, mode, state, ...LIVE, canStartNew: mode === 'pending' ? false : LIVE.canStartNew,
+      })).toEqual(expected);
+    });
+
+    test('offline: only the stop-like cells may stay enabled, and never for a foreign key', () => {
+      expect(teachActionCells({
+        kind: 'pose', mode: 'hand', state: 'frei', relock: 'none', online: false, canStartNew: false,
+      })).toEqual({ space: false, f: false, p: false, z: false });
+      expect(teachActionCells({
+        kind: 'pose', mode: 'hand', state: 'aufnahme', relock: 'none', online: true, canStartNew: true,
+      })).toEqual({ space: false, f: true, p: false, z: false });
+    });
+  });
+
+  // Review round 1 (B2): the Stopp during a take is a SOLID square, like the
+  // run bar's and the ControlPanel's.
+  test('during a take the Stopp button draws the filled stop icon', () => {
+    withSnapshot({ state: 'aufnahme', elapsedS: 2 });
+    render(<TeachOverlay {...baseProps()} />);
+    const stop = screen.getByRole('button', { name: new RegExp(DE.TEACH_KEY_STOP) });
+    // eslint-disable-next-line testing-library/no-node-access
+    const svg = stop.querySelector('svg[data-icon="stop"]');
+    expect(svg).not.toBeNull();
+    expect(svg.getAttribute('fill')).toBe('currentColor');
+  });
+
+  // Review round 1 (B4): at 910 CSS px „Aufnahme" + „Leertaste" overflowed the
+  // button; the label may shrink and wrap, the key hint never.
+  test('an action button\'s label can shrink and its key hint cannot', () => {
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps()} />);
+    for (const b of within(screen.getByTestId('teach-actions')).getAllByRole('button')) {
+      expect(b.className).toMatch(/\bmin-w-0\b/);
+      const label = within(b).getByTestId('teach-action-label');
+      expect(label.className).toMatch(/\bmin-w-0\b/);
+      expect(label.className).toMatch(/\bbreak-words\b/);
+      // eslint-disable-next-line testing-library/no-node-access
+      expect(b.querySelector('kbd').className).toMatch(/\bshrink-0\b/);
+    }
   });
 
   test('no highlight ring: the retired `focus` cue is gone', () => {

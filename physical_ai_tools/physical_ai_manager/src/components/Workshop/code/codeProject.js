@@ -185,13 +185,28 @@ export const MAX_CODE_REPLAY_NAMES = 16;
  * de-duplicated, in first-seen order, capped at `MAX_CODE_REPLAY_NAMES`. Pure;
  * never throws on a malformed project.
  *
+ * `exactNames` are the names the editor's exact scanner found
+ * (`codeAssetUsage.scanCodeAssets(...).replay`): they come FIRST, so the cap
+ * never cuts a real call for a loose hit in a comment, and they carry what
+ * this one-line scan cannot see — `robot.replay(speed=2,` with `name="…"`
+ * on the next line (review round 4, mc7: that run fetched nothing and
+ * failed on the robot with „Unbekannte Aufnahme").
+ *
  * @param {object|null} files - `{ path: content }`.
+ * @param {string[]} [exactNames]
  * @returns {string[]}
  */
-export function collectCodeReplayNames(files) {
+export function collectCodeReplayNames(files, exactNames = []) {
   if (!files || typeof files !== 'object' || Array.isArray(files)) return [];
   const seen = new Set();
   const order = [];
+  for (const raw of Array.isArray(exactNames) ? exactNames : []) {
+    const name = typeof raw === 'string' ? raw.trim() : '';
+    if (name && REPLAY_NAME_RE.test(name) && !seen.has(name)) {
+      seen.add(name);
+      order.push(name);
+    }
+  }
   for (const content of Object.values(files)) {
     if (typeof content !== 'string') continue;
     REPLAY_CALL_RE.lastIndex = 0;

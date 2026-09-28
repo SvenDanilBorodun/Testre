@@ -414,7 +414,7 @@ function RunControls({
       // editor's autocomplete — reach nothing but the server's „Unbekannte
       // Aufnahme: …" and abort the run.
       const replayNames = isCode
-        ? collectCodeReplayNames(codeFiles)
+        ? collectCodeReplayNames(codeFiles, [...scanCodeAssets(codeFiles, codeLanguage).replay.keys()])
         : collectReplayNames(blocklyJson);
       const trajectories = {};
       // A scan hit may be a comment or an unrelated string, so for a code

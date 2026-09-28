@@ -259,6 +259,27 @@ describe('RunControls — a code run carries the recordings its replay calls nam
     expect(mockRos.callService).not.toHaveBeenCalled();
   });
 
+  test('a keyword name on a line of its own is fetched too (review round 4, mc7)', async () => {
+    // The loose run-time scan reads one line; the editor's exact scanner
+    // knows this call, and the run fetches every name that scanner reports.
+    workflowApi.getTrajectoryByName.mockResolvedValue(ROW);
+    await clickStart({ codeFiles: { 'main.py': 'import robot\nrobot.replay(speed=2,\n             name="Winken")\n' } });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    expect(workflowApi.getTrajectoryByName).toHaveBeenCalledWith('jwt-1', 'wf-1', 'Winken');
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    expect(Object.keys(parsed.trajectories)).toEqual(['Winken']);
+  });
+
+  test('… and so is a Java call split over lines', async () => {
+    workflowApi.getTrajectoryByName.mockResolvedValue(ROW);
+    await clickStart({
+      codeLanguage: 'java',
+      codeFiles: { 'Main.java': 'import edubotics.Robot;\npublic class Main {\n  public static void main(String[] a) {\n    Robot.replay(\n        "Winken");\n  }\n}\n' },
+    });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    expect(workflowApi.getTrajectoryByName).toHaveBeenCalledWith('jwt-1', 'wf-1', 'Winken');
+  });
+
   test('a project with no replay call fetches nothing', async () => {
     workflowApi.getTrajectoryByName.mockResolvedValue(ROW);
     await clickStart();

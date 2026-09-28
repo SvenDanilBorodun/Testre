@@ -319,6 +319,65 @@ describe('an inline <svg> only where the list says why (R1-O1)', () => {
   });
 });
 
+// A CSS-drawn spinner (a rounded border turned by `animate-spin`) is an icon
+// in another style: every spinner is <Icon name="loading" className="animate-spin" />.
+export function cssSpinnerHits(source) {
+  const ast = espree.parse(source, {
+    ecmaVersion: 'latest', sourceType: 'module', ecmaFeatures: { jsx: true }, loc: true,
+  });
+  const strings = (node, out = []) => {
+    if (!node || typeof node !== 'object') return out;
+    if (Array.isArray(node)) { node.forEach((n) => strings(n, out)); return out; }
+    if (node.type === 'Literal' && typeof node.value === 'string') out.push(node.value);
+    if (node.type === 'TemplateLiteral') node.quasis.forEach((q) => out.push(q.value.cooked));
+    for (const [k, v] of Object.entries(node)) {
+      if (k !== 'loc' && k !== 'range' && v && typeof v === 'object') strings(v, out);
+    }
+    return out;
+  };
+  const spins = (list) => list.some((t) => /(^|\s)animate-spin(\s|$)/.test(t));
+  const bordered = (list) => list.some((t) => /(^|\s)(rounded-full|border-[a-z0-9-/]+)(\s|$)/.test(t));
+  const hits = [];
+  walkAst(ast, (node) => {
+    if (node.type === 'JSXOpeningElement') {
+      const name = node.name && node.name.name;
+      const cls = node.attributes.find((a) => a.type === 'JSXAttribute' && a.name.name === 'className');
+      if (cls && name !== 'Icon' && spins(strings(cls.value)) && bordered(strings(cls.value))) {
+        hits.push(node.loc.start.line);
+      }
+    }
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'clsx') {
+      const list = strings(node.arguments);
+      if (spins(list) && bordered(list)) hits.push(node.loc.start.line);
+    }
+  });
+  return hits;
+}
+
+describe('no CSS-drawn spinner (R1-O1: one style for the loader too)', () => {
+  it('the detector sees a bordered spinning div and a clsx one, not an Icon', () => {
+    const src = [
+      'const a = <div className="animate-spin rounded-full h-4 w-4 border-b-2" />;',
+      "const b = clsx('animate-spin', 'rounded-full', 'border-b-2');",
+      'const c = <Icon name="loading" className="animate-spin text-teal-600" />;',
+      "const d = <Icon name=\"refresh\" className={busy ? 'animate-spin' : ''} />;",
+    ].join('\n');
+    expect(cssSpinnerHits(src)).toEqual([1, 2]);
+  });
+
+  it('no non-test src file draws one', () => {
+    const files = sourceFiles();
+    expect(files.length).toBeGreaterThan(200);
+    const violations = [];
+    for (const file of files) {
+      for (const line of cssSpinnerHits(fs.readFileSync(file, 'utf8'))) {
+        violations.push(`${path.relative(APP_ROOT, file)}:${line}`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
+
 describe('react-icons has exactly one importer (D7)', () => {
   const IMPORT_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)['"](react-icons(?:\/[^'"]*)?)['"]/gm;
 

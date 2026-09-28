@@ -374,7 +374,7 @@ export default function InferencePage({ isActive = true }) {
               role="status"
               aria-live="polite"
             >
-              <div className="h-10 w-10 animate-spin rounded-full border-4 border-white/25 border-t-white" />
+              <Icon name="loading" size={40} className="animate-spin text-white" />
               <span className="text-base font-semibold text-white">
                 Modell wird geladen &amp; Roboter verbindet …
               </span>

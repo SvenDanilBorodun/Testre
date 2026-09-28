@@ -496,7 +496,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
                         </span>
                         {/* Spinner for model downloads - right next to status text */}
                         {isDownloading && (
-                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-teal-600"></div>
+                          <Icon name="loading" size={16} className="animate-spin text-teal-600" />
                         )}
                       </div>
                     </div>

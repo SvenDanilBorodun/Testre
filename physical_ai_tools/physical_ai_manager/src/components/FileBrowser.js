@@ -362,20 +362,12 @@ function browseFailedDe(reason) {
 const LoadingState = () => {
   const classContainer = clsx('flex', 'items-center', 'justify-center', 'py-8');
 
-  const classSpinner = clsx(
-    'animate-spin',
-    'rounded-full',
-    'h-6',
-    'w-6',
-    'border-b-2',
-    'border-teal-600'
-  );
 
   const classText = clsx('ml-2', 'text-gray-600');
 
   return (
     <div className={classContainer}>
-      <div className={classSpinner}></div>
+      <Icon name="loading" size={24} className="animate-spin text-teal-600" />
       <span className={classText}>Wird geladen …</span>
     </div>
   );

@@ -53,6 +53,18 @@ describe('the icon registry', () => {
     expect(isIconName(undefined)).toBe(false);
   });
 
+  // Review round 1 (B3/B6): one icon per concept, named by meaning.
+  it('merges draw mergeData (lines flowing into one); the git-merge icon and the misnamed status icons are gone', () => {
+    expect(ICONS.mergeData.name).toBe('LuMerge');
+    for (const gone of ['merge', 'errorCircle', 'alertCircle', 'gripper', 'search', 'arrowLeft', 'activity', 'clapperboard']) {
+      expect(isIconName(gone)).toBe(false);
+    }
+    expect(ICONS.cancel.name).toBe('LuCircleX');
+    expect(ICONS.failed.name).toBe('LuCircleAlert');
+    const merge = fs.readFileSync(path.resolve(ICON_DIR, '../../features/editDataset/components/DatasetMergeSection.js'), 'utf8');
+    expect(merge).toMatch(/<Icon name="mergeData"/);
+  });
+
   it('carries the three Vormachen kind icons the owner chose (D10)', () => {
     expect(ICONS.record.name).toBe('LuCircleDot');
     expect(ICONS.pose.name).toBe('LuMapPin');

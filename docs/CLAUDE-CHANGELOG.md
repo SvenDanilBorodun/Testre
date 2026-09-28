@@ -161,8 +161,11 @@ further review round after the fix) and a fix list of twenty items.
   answers (busy, canceling, dispatched, failed) are German too, and an
   unexpected exception is logged instead of echoed.
 
-Cost of the round: entry + jsx-runtime 1,781,183 bytes raw / 487,473 gzip -9
-(+2,744 raw / +1,480 gzip over the first round), teacher-web entry +299 raw.
+Cost of the round (student build, entry + jsx-runtime, measured at the round's
+last commit): 1,781,088 bytes raw / 487,434 gzip -9, +2,649 raw / +1,441 gzip
+over the first round and +37,677 / +7,869 over the release before this
+change; teacher-web entry 1,312,695 raw / 350,799 gzip (+299 / +350). Still
+91 Lucide icons in the bundle and no `react-dom/server`.
 
 ### Unreleased, 2026-09-28 (fix round 5) — the page acts on the program it holds, and the last values arrive
 

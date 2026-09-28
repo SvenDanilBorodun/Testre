@@ -14,5 +14,7 @@
 
 export { default as Icon } from './Icon';
 export { ICONS, ICON_NAMES, isIconName } from './registry';
-export { appendSvgIcon, iconNodes, SVG_NS } from './svg';
+export {
+  appendSvgIcon, iconMarkup, iconNodes, SVG_NS,
+} from './svg';
 export { toastIcon, TOAST_ICON_KINDS } from './toast';

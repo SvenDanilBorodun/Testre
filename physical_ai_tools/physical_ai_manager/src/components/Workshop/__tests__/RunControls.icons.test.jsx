@@ -72,6 +72,7 @@ function state(over = {}) {
 
 const PROGRAM = { blocks: { blocks: [{ type: 'edubotics_home' }] } };
 const iconOf = (el) => el.querySelector('svg[data-icon]').getAttribute('data-icon');
+const fillOf = (el) => el.querySelector('svg[data-icon]').getAttribute('fill');
 
 beforeEach(() => {
   mockState = state();
@@ -89,6 +90,11 @@ describe('RunControls icons', () => {
     render(<RunControls workflowId="wf-1" blocklyJson={PROGRAM} simMode={false} simScene={null} />);
     expect(iconOf(screen.getByRole('button', { name: DE.RUN_START }))).toBe('play');
     expect(iconOf(screen.getByRole('button', { name: DE.RUN_STOP }))).toBe('stop');
+    // Media controls are solid (review round 1, B2), like ControlPanel and Vormachen.
+    for (const name of [DE.RUN_START, DE.RUN_STOP]) {
+      expect(fillOf(screen.getByRole('button', { name }))).toBe('currentColor');
+    }
+    expect(fillOf(screen.getByRole('button', { name: DE.DOCK_TAB_DEBUG }))).toBe('none');
     expect(iconOf(screen.getByRole('button', { name: new RegExp(DE.DOCK_LOG_LABEL) }))).toBe('chevronRight');
     expect(iconOf(screen.getByRole('button', { name: DE.DOCK_TAB_DEBUG }))).toBe('debug');
   });
@@ -98,10 +104,14 @@ describe('RunControls icons', () => {
     const { unmount } = render(<RunControls workflowId="wf-1" blocklyJson={PROGRAM} simMode={false} simScene={null} />);
     expect(iconOf(screen.getByRole('button', { name: DE.RUN_STEP }))).toBe('step');
     expect(iconOf(screen.getByRole('button', { name: DE.RUN_CONTINUE }))).toBe('play');
+    for (const name of [DE.RUN_STEP, DE.RUN_CONTINUE]) {
+      expect(fillOf(screen.getByRole('button', { name }))).toBe('currentColor');
+    }
     unmount();
     mockState = state({ runState: 'running', paused: false });
     render(<RunControls workflowId="wf-1" blocklyJson={PROGRAM} simMode={false} simScene={null} />);
     expect(iconOf(screen.getByRole('button', { name: DE.RUN_PAUSE }))).toBe('pause');
+    expect(fillOf(screen.getByRole('button', { name: DE.RUN_PAUSE }))).toBe('currentColor');
   });
 
   test('a breakpoint line in the Protokoll gets the pause icon; other lines none', async () => {

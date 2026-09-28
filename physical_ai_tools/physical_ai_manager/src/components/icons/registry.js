@@ -20,9 +20,7 @@
 // later redesign changes one line here and no call site.
 
 import {
-  LuActivity,
   LuAlarmClock,
-  LuArrowLeft,
   LuArrowRightLeft,
   LuArrowUp,
   LuBlocks,
@@ -41,7 +39,6 @@ import {
   LuCircleCheck,
   LuCircleDot,
   LuCircleX,
-  LuClapperboard,
   LuClipboardList,
   LuCloud,
   LuCloudUpload,
@@ -61,7 +58,6 @@ import {
   LuFolder,
   LuFolderOpen,
   LuGamepad2,
-  LuGitMerge,
   LuGraduationCap,
   LuHand,
   LuHistory,
@@ -91,7 +87,6 @@ import {
   LuRefreshCw,
   LuRotateCcw,
   LuSave,
-  LuSearch,
   LuSend,
   LuSettings,
   LuSkipForward,
@@ -115,7 +110,7 @@ import {
   LuX,
   LuZap,
 } from 'react-icons/lu';
-import { IconGripper, IconLeaderArm, IconPython, IconRobotArm } from './custom';
+import { IconLeaderArm, IconPython, IconRobotArm } from './custom';
 
 export const ICONS = Object.freeze({
   // Vormachen: the three kinds (owner decision D10) and the arm controls.
@@ -127,9 +122,10 @@ export const ICONS = Object.freeze({
   lockOpen: LuLockOpen,
   robotArm: IconRobotArm,
   leaderArm: IconLeaderArm,
-  gripper: IconGripper,
 
-  // Running, stepping, reviewing.
+  // Running, stepping, reviewing. The media controls are SOLID (see
+  // SOLID_ICON_NAMES below); `record` above is the Bewegung KIND, an outline,
+  // while `liveRecording` is the filled dot of a recording in progress.
   play: LuPlay,
   pause: LuPause,
   step: LuStepForward,
@@ -139,15 +135,15 @@ export const ICONS = Object.freeze({
   check: LuCheck,
   checkCircle: LuCircleCheck,
   close: LuX,
-  errorCircle: LuCircleX,
-  alertCircle: LuCircleAlert,
+  cancel: LuCircleX,
+  failed: LuCircleAlert,
   warning: LuTriangleAlert,
   info: LuInfo,
   dot: LuCircle,
+  liveRecording: LuCircle,
   loading: LuLoaderCircle,
   hourglass: LuHourglass,
   debug: LuBug,
-  search: LuSearch,
 
   // Editing.
   undo: LuUndo2,
@@ -168,7 +164,6 @@ export const ICONS = Object.freeze({
   chevronRight: LuChevronRight,
   chevronsLeft: LuChevronsLeft,
   chevronsRight: LuChevronsRight,
-  arrowLeft: LuArrowLeft,
   arrowUp: LuArrowUp,
   enterKey: LuCornerDownLeft,
   externalLink: LuExternalLink,
@@ -200,7 +195,6 @@ export const ICONS = Object.freeze({
   cloudUpload: LuCloudUpload,
   download: LuDownload,
   upload: LuUpload,
-  merge: LuGitMerge,
   mergeData: LuMerge,
   cpu: LuCpu,
   terminal: LuTerminal,
@@ -218,16 +212,26 @@ export const ICONS = Object.freeze({
   notebook: LuNotebookPen,
   piggyBank: LuPiggyBank,
   chart: LuChartLine,
-  activity: LuActivity,
   moveAcross: LuArrowRightLeft,
   task: LuClipboardList,
   widgets: LuBlocks,
   volumeOn: LuVolume2,
   volumeOff: LuVolumeX,
-  clapperboard: LuClapperboard,
 });
 
 export const ICON_NAMES = Object.freeze(Object.keys(ICONS));
+
+// Icons drawn FILLED wherever they appear: the media controls (a Stopp, Start
+// or Pause reads as a solid glyph, as it did before the outline set) and the
+// dots (a breakpoint, a status dot, the red dot of a recording in progress).
+// <Icon> and appendSvgIcon fill them with the stroke colour, so the three run
+// surfaces (ControlPanel, the run bar, Vormachen) can never disagree.
+export const SOLID_ICON_NAMES = Object.freeze(['play', 'pause', 'step', 'stop', 'skipForward', 'dot', 'liveRecording']);
+
+/** True when icon `name` is drawn filled (SOLID_ICON_NAMES). */
+export function isSolidIcon(name) {
+  return SOLID_ICON_NAMES.includes(name);
+}
 
 /** True when `name` is a registered icon. */
 export function isIconName(name) {

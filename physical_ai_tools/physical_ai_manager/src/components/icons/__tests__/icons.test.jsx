@@ -16,7 +16,9 @@ import React from 'react';
 import { render } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import Icon from '../Icon';
-import { ICONS, ICON_NAMES, isIconName } from '../registry';
+import {
+  ICONS, ICON_NAMES, isIconName, isSolidIcon, SOLID_ICON_NAMES,
+} from '../registry';
 import { CUSTOM_TREES } from '../custom';
 import { appendSvgIcon, iconNodes, SVG_NS } from '../svg';
 import { toastIcon, TOAST_ICON_KINDS } from '../toast';
@@ -34,8 +36,9 @@ describe('the icon registry', () => {
       expect(svg.getAttribute('focusable')).toBe('false');
       expect(svg.getAttribute('data-icon')).toBe(name);
       expect(svg.getAttribute('width')).toBe('1em');
-      // Lucide's paint: an outline drawn in the text colour.
-      expect(svg.getAttribute('fill')).toBe('none');
+      // Lucide's paint: an outline drawn in the text colour — filled in that
+      // colour for the solid media controls and dots.
+      expect(svg.getAttribute('fill')).toBe(isSolidIcon(name) ? 'currentColor' : 'none');
       expect(svg.getAttribute('stroke')).toBe('currentColor');
       expect(svg.children.length).toBeGreaterThan(0);
       unmount();
@@ -74,6 +77,21 @@ describe('the icon registry', () => {
     expect(svg.getAttribute('aria-label')).toBe('Achtung');
   });
 
+  // Review round 1 (B2): a Stopp, Start or Pause read as a solid glyph before
+  // the outline set; the fill carried meaning. One list, drawn filled by <Icon>
+  // AND appendSvgIcon, so ControlPanel, the run bar and Vormachen agree.
+  it('draws the media controls and the dots filled, everything else as an outline', () => {
+    expect(SOLID_ICON_NAMES).toEqual(['play', 'pause', 'step', 'stop', 'skipForward', 'dot', 'liveRecording']);
+    for (const name of SOLID_ICON_NAMES) expect(isIconName(name)).toBe(true);
+    expect(isSolidIcon('record')).toBe(false); // the Bewegung KIND stays an outline
+    expect(isSolidIcon('liveRecording')).toBe(true); // a recording in progress: the red dot
+    const { container } = render(<><Icon name="stop" /><Icon name="record" /><Icon name="stop" fill="none" /></>);
+    const [stop, record, override] = container.querySelectorAll('svg');
+    expect(stop.getAttribute('fill')).toBe('currentColor');
+    expect(record.getAttribute('fill')).toBe('none');
+    expect(override.getAttribute('fill')).toBe('none');
+  });
+
   it('passes size, className and fill through', () => {
     const { container } = render(<Icon name="dot" size={10} className="text-red-500" fill="currentColor" />);
     const svg = container.querySelector('svg');
@@ -83,9 +101,49 @@ describe('the icon registry', () => {
   });
 });
 
-// A conservative bounding box of an SVG path: every endpoint, every control
-// point (a Bézier stays inside their hull) and, for an arc, its endpoints
-// grown by its radius.
+// Points on an SVG elliptical arc (endpoint → centre parameterisation, SVG 1.1
+// §F.6.5), sampled finely: the bounding box of an arc is its sampled hull.
+function arcPoints(x1, y1, rxIn, ryIn, phiDeg, largeArc, sweep, x2, y2, n = 64) {
+  let rx = Math.abs(rxIn);
+  let ry = Math.abs(ryIn);
+  if (rx === 0 || ry === 0) return [[x2, y2]];
+  const phi = (phiDeg * Math.PI) / 180;
+  const cos = Math.cos(phi);
+  const sin = Math.sin(phi);
+  const dx = (x1 - x2) / 2;
+  const dy = (y1 - y2) / 2;
+  const x1p = cos * dx + sin * dy;
+  const y1p = -sin * dx + cos * dy;
+  const lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+  if (lambda > 1) {
+    rx *= Math.sqrt(lambda);
+    ry *= Math.sqrt(lambda);
+  }
+  const num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+  const den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+  const k = (largeArc === sweep ? -1 : 1) * Math.sqrt(Math.max(0, num / den));
+  const cxp = (k * rx * y1p) / ry;
+  const cyp = (-k * ry * x1p) / rx;
+  const cx = cos * cxp - sin * cyp + (x1 + x2) / 2;
+  const cy = sin * cxp + cos * cyp + (y1 + y2) / 2;
+  const angle = (ux, uy, vx, vy) => Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+  const t1 = angle(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+  let dt = angle((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+  if (!sweep && dt > 0) dt -= 2 * Math.PI;
+  else if (sweep && dt < 0) dt += 2 * Math.PI;
+  const pts = [];
+  for (let i = 0; i <= n; i += 1) {
+    const t = t1 + (dt * i) / n;
+    pts.push([
+      cx + rx * Math.cos(t) * cos - ry * Math.sin(t) * sin,
+      cy + rx * Math.cos(t) * sin + ry * Math.sin(t) * cos,
+    ]);
+  }
+  return pts;
+}
+
+// The points that bound an SVG path: every endpoint, every control point (a
+// Bézier stays inside their hull) and an arc sampled along its curve.
 function pathPoints(d) {
   const tokens = d.match(/[a-zA-Z]|-?\d*\.?\d+(?:e-?\d+)?/g);
   const pts = [];
@@ -115,14 +173,11 @@ function pathPoints(d) {
       cx = base[0] + c[4]; cy = base[1] + c[5];
       pts.push([cx, cy]);
     } else if (C === 'A') {
-      const r = Math.max(num(), num());
-      num(); num(); num();
+      const [rx, ry, rot, large, sweep] = [num(), num(), num(), num(), num()];
       const x = num(); const y = num();
       const [sx, sy] = [cx, cy];
       cx = rel ? cx + x : x; cy = rel ? cy + y : y;
-      for (const [px, py] of [[sx, sy], [cx, cy]]) {
-        pts.push([px - r, py - r], [px + r, py + r]);
-      }
+      pts.push(...arcPoints(sx, sy, rx, ry, rot, large, sweep, cx, cy));
     } else {
       throw new Error(`unhandled path command ${cmd}`);
     }
@@ -169,6 +224,50 @@ describe('the custom icons follow Lucide\'s rules', () => {
   it('every custom tree is a registered icon', () => {
     for (const name of Object.keys(CUSTOM_TREES)) expect(isIconName(name)).toBe(true);
   });
+
+  // Review round 1 (B1): the first drawings used about two thirds of the grid
+  // and read small beside Lucide's 18–20-unit icons. The geometry must now fill
+  // it: at least 16 units on the longer axis and 14 on the shorter.
+  it.each(Object.entries(CUSTOM_TREES))('%s fills the grid like its Lucide neighbours', (_name, tree) => {
+    const pts = tree.child.flatMap(treePoints);
+    const xs = pts.map(([x]) => x);
+    const ys = pts.map(([, y]) => y);
+    const w = Math.max(...xs) - Math.min(...xs);
+    const h = Math.max(...ys) - Math.min(...ys);
+    expect(Math.max(w, h)).toBeGreaterThanOrEqual(16);
+    expect(Math.min(w, h)).toBeGreaterThanOrEqual(14);
+  });
+
+  it('the arc sampler measures an arc exactly (a half circle of r 2 spans 4 × 2)', () => {
+    const pts = pathPoints('M2 10a2 2 0 0 1 4 0');
+    const xs = pts.map(([x]) => x);
+    const ys = pts.map(([, y]) => y);
+    expect(Math.min(...xs)).toBeCloseTo(2, 6);
+    expect(Math.max(...xs)).toBeCloseTo(6, 6);
+    expect(Math.min(...ys)).toBeCloseTo(8, 2);
+    expect(Math.max(...ys)).toBeCloseTo(10, 6);
+  });
+
+  it('the leader arm ends in a CLOSED grip where the follower\'s claw is open', () => {
+    const own = (tree, other) => tree.child.filter(
+      (c) => !other.child.some((o) => JSON.stringify(o) === JSON.stringify(c)),
+    );
+    const leaderOwn = own(CUSTOM_TREES.leaderArm, CUSTOM_TREES.robotArm);
+    const followerOwn = own(CUSTOM_TREES.robotArm, CUSTOM_TREES.leaderArm);
+    expect(leaderOwn.some((c) => c.tag === 'path' && /z\s*$/i.test(c.attr.d))).toBe(true);
+    expect(followerOwn.some((c) => c.tag === 'path' && /z\s*$/i.test(c.attr.d))).toBe(false);
+    // The grip is a tall shape (≥ 8 units), the claw a short open arch.
+    const height = (nodes) => {
+      const ys = nodes.flatMap(treePoints).map(([, y]) => y);
+      return Math.max(...ys) - Math.min(...ys);
+    };
+    expect(height(leaderOwn.filter((c) => /z\s*$/i.test(c.attr.d || '')))).toBeGreaterThanOrEqual(8);
+  });
+
+  it('gripper is gone from the registry (it was never used)', () => {
+    expect(isIconName('gripper')).toBe(false);
+    expect(Object.keys(CUSTOM_TREES).sort()).toEqual(['leaderArm', 'python', 'robotArm']);
+  });
 });
 
 describe('iconNodes / appendSvgIcon (SVG without react-dom)', () => {
@@ -205,6 +304,13 @@ describe('iconNodes / appendSvgIcon (SVG without react-dom)', () => {
     const circles = g.querySelectorAll('circle');
     expect(circles.length).toBe(3);
     for (const c of circles) expect(c.namespaceURI).toBe(SVG_NS);
+  });
+
+  it('fills a solid icon with its stroke colour on SVG surfaces too', () => {
+    const parent = document.createElementNS(SVG_NS, 'svg');
+    expect(appendSvgIcon(parent, 'play', { stroke: '#374151' }).getAttribute('fill')).toBe('#374151');
+    expect(appendSvgIcon(parent, 'more', { stroke: '#374151' }).getAttribute('fill')).toBe('none');
+    expect(appendSvgIcon(parent, 'play', { stroke: '#374151', fill: 'none' }).getAttribute('fill')).toBe('none');
   });
 
   it('uses the caller\'s element factory (Blockly passes createSvgElement)', () => {

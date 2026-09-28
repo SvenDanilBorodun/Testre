@@ -416,7 +416,7 @@ export default function DatasetSelector() {
 
         {cloudError && (
           <div className="flex items-start gap-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-md p-2 mb-2">
-            <Icon name="alertCircle" className="shrink-0 mt-0.5" size={14} />
+            <Icon name="failed" className="shrink-0 mt-0.5" size={14} />
             <div className="min-w-0 flex-1">
               <span>{cloudError}</span>
               <button

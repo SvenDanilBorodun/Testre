@@ -509,7 +509,7 @@ const MergeSection = ({ isEditable = true }) => {
           />
         </div>
         <div className="w-10 h-full flex flex-col items-center justify-center">
-          <Icon name="merge" className="w-12 h-12 rotate-90" />
+          <Icon name="mergeData" className="w-12 h-12 rotate-90 text-[var(--ink-3)]" />
         </div>
         <div className="w-full min-w-72 bg-white p-5 rounded-md shadow-md">
           <div className="flex flex-col items-start justify-center gap-2">

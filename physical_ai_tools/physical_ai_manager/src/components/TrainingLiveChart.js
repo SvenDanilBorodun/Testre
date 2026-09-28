@@ -53,8 +53,8 @@ const STATUS_UI = {
   queued: { tone: 'amber', label: 'Wird eingereiht', icon: 'hourglass' },
   running: { tone: 'accent', label: 'Läuft', icon: 'refresh', spin: true },
   succeeded: { tone: 'success', label: 'Erfolgreich', icon: 'checkCircle' },
-  failed: { tone: 'danger', label: 'Fehlgeschlagen', icon: 'alertCircle' },
-  canceled: { tone: 'neutral', label: 'Abgebrochen', icon: 'errorCircle' },
+  failed: { tone: 'danger', label: 'Fehlgeschlagen', icon: 'failed' },
+  canceled: { tone: 'neutral', label: 'Abgebrochen', icon: 'cancel' },
 };
 
 function StatusPill({ status }) {

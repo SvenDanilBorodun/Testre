@@ -16,6 +16,7 @@
 import * as Blockly from 'blockly/core';
 import 'blockly/blocks';
 import {
+  DRIVE_ICON,
   registerDestinationBlocks,
   setDriveToHandler,
   driveToFromBlock,
@@ -80,3 +81,25 @@ describe('destination_pin drive button field', () => {
     }
   });
 });
+
+// Review round 1 (R1-O1): the drive button draws the app's own solid play icon
+// (components/icons), not a hand-drawn triangle.
+describe('the drive button image', () => {
+  const svg = atob(DRIVE_ICON.replace(/^data:image\/svg\+xml;base64,/, ''));
+
+  test('is the Lucide play polygon, filled white on the teal chip', () => {
+    expect(svg).toMatch(/^<svg xmlns='http:\/\/www\.w3\.org\/2000\/svg' width='22' height='16'/);
+    expect(svg).toContain("fill='#0f766e'");
+    expect(svg).toContain('data-icon="play"');
+    expect(svg).toContain('<polygon points="6 3 20 12 6 21 6 3"></polygon>');
+    expect(svg).toMatch(/<g [^>]*fill="#ffffff" stroke="#ffffff"/);
+    expect(svg).not.toContain('M8 4 L15 8');
+  });
+
+  test('is well-formed SVG', () => {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    expect(doc.getElementsByTagName('parsererror')).toHaveLength(0);
+    expect(doc.querySelector('g[data-icon="play"] polygon')).not.toBeNull();
+  });
+});
+

@@ -11,6 +11,7 @@
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
 import { setEditValidator } from './fieldLoad';
+import { iconMarkup } from '../../icons/svg';
 
 const DEST_COLOR = '#f59e0b';
 
@@ -36,13 +37,15 @@ const UNPINNED = '—';
 // early-returns while no handler is registered (before WorkshopPage mounts /
 // after it unmounts), and (b) an un-pinned block's X/Y/Z read as the „—" sentinel
 // → NaN, which the registered handler REFUSES in German (the „— / NaN" guard in
-// WorkshopPage). The icon is an inline ASCII-only SVG (base64-safe, offline).
-const DRIVE_ICON =
+// WorkshopPage). The icon is the app's own solid play icon (components/icons,
+// review round 1 R1-O1) on the teal chip, as an inline ASCII-only SVG
+// (base64-safe, offline).
+export const DRIVE_ICON =
   'data:image/svg+xml;base64,'
   + btoa(
-    "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='16'>"
+    "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='16' viewBox='0 0 22 16'>"
     + "<rect x='0' y='0' width='22' height='16' rx='3' fill='#0f766e'/>"
-    + "<path d='M8 4 L15 8 L8 12 Z' fill='#ffffff'/></svg>",
+    + `${iconMarkup('play', { x: 6, y: 3, size: 10, stroke: '#ffffff' })}</svg>`,
   );
 
 let _driveToHandler = null;

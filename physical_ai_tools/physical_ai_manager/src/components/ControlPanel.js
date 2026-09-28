@@ -35,7 +35,7 @@ const phaseGuideMessages = {
   [TaskPhase.READY]: { icon: 'checkCircle', text: 'Bereit zum Starten' },
   [TaskPhase.WARMING_UP]: { icon: 'flame', text: 'Aufwärmphase läuft' },
   [TaskPhase.RESETTING]: { icon: 'home', text: 'Rücksetzung läuft' },
-  [TaskPhase.RECORDING]: { icon: 'record', text: 'Aufnahme läuft', className: 'text-red-500' },
+  [TaskPhase.RECORDING]: { icon: 'liveRecording', text: 'Aufnahme läuft', className: 'text-red-500' },
   [TaskPhase.SAVING]: { icon: 'save', text: 'Wird gespeichert …' },
   [TaskPhase.STOPPED]: { icon: 'stop', text: 'Aufgabe gestoppt' },
   [TaskPhase.INFERENCING]: { icon: 'hourglass', text: 'Inferenz läuft' },
@@ -69,7 +69,12 @@ const requiredFieldsForInferenceOnly = [
   { key: 'policyPath', label: 'Modellpfad' },
 ];
 
-const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+// The liveness indicator beside the phase line: the loader icon turned by ONE
+// step per /task/status message. It moves only while status messages arrive,
+// so a stalled server shows a still icon — never a free-running spin that
+// would claim a liveness nobody measured.
+const SPINNER_STEPS = 8;
+const SPINNER_STEP_DEG = 360 / SPINNER_STEPS;
 
 export default function ControlPanel() {
   const taskInfo = useSelector((state) => state.tasks.taskInfo);
@@ -208,7 +213,7 @@ export default function ControlPanel() {
   };
 
   const updateSpinnerFrame = () => {
-    setSpinnerIndex((prevIndex) => (prevIndex + 1) % spinnerFrames.length);
+    setSpinnerIndex((prevIndex) => (prevIndex + 1) % SPINNER_STEPS);
   };
 
   // Check if button should be enabled based on phase
@@ -679,10 +684,14 @@ export default function ControlPanel() {
           <div>
             {taskStatus.running && (
               <span
-                className="font-mono text-3xl"
+                className="inline-flex text-2xl"
                 style={{ color: 'var(--accent)' }}
+                data-testid="task-liveness"
               >
-                {spinnerFrames[spinnerIndex]}
+                <Icon
+                  name="loading"
+                  style={{ transform: `rotate(${spinnerIndex * SPINNER_STEP_DEG}deg)` }}
+                />
               </span>
             )}
           </div>

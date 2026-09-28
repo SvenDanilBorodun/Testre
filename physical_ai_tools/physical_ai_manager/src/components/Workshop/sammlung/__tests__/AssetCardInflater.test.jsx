@@ -342,7 +342,8 @@ describe('AssetCardInflater', () => {
     expect(playIcon).not.toBeNull();
     expect(playIcon.querySelector('polygon').getAttribute('points')).toBe('6 3 20 12 6 21 6 3');
     expect(playIcon.getAttribute('stroke')).toBe('#374151');
-    expect(playIcon.getAttribute('fill')).toBe('none');
+    // A media control: filled in its stroke colour (review round 1, B2).
+    expect(playIcon.getAttribute('fill')).toBe('#374151');
     expect(playIcon.getAttribute('transform')).toBe(`translate(5,5) scale(${14 / 24})`);
     expect(manage.querySelector('g[data-icon="more"]').querySelectorAll('circle')).toHaveLength(3);
     expect(play.querySelector('text')).toBeNull();
@@ -351,6 +352,7 @@ describe('AssetCardInflater', () => {
     const pending = inflater.load(cardState({ previewPending: true }), flyout).getElement();
     const greyed = pending.getSvgRoot().querySelector(`[role="button"][aria-label="${DE.PREVIEW_START}"]`);
     expect(greyed.querySelector('g[data-icon="play"]').getAttribute('stroke')).toBe('#9ca3af');
+    expect(greyed.querySelector('g[data-icon="play"]').getAttribute('fill')).toBe('#9ca3af');
     pending.dispose();
   });
 

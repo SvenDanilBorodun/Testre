@@ -11,8 +11,8 @@ const STATUS_CONFIG = {
   queued: { icon: 'hourglass', color: 'text-gray-500', bg: 'bg-gray-100', label: 'In Warteschlange' },
   running: { icon: 'refresh', color: 'text-teal-600', bg: 'bg-teal-50', label: 'Training läuft', spin: true },
   succeeded: { icon: 'checkCircle', color: 'text-green-600', bg: 'bg-green-50', label: 'Erfolgreich' },
-  failed: { icon: 'alertCircle', color: 'text-red-500', bg: 'bg-red-50', label: 'Fehlgeschlagen' },
-  canceled: { icon: 'errorCircle', color: 'text-gray-400', bg: 'bg-gray-50', label: 'Abgebrochen' },
+  failed: { icon: 'failed', color: 'text-red-500', bg: 'bg-red-50', label: 'Fehlgeschlagen' },
+  canceled: { icon: 'cancel', color: 'text-gray-400', bg: 'bg-gray-50', label: 'Abgebrochen' },
 };
 
 function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, selected, onSelect }) {
@@ -171,7 +171,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
             onClick={() => onCancel(job.id)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-100 text-red-600 hover:bg-red-200 transition-colors"
           >
-            <Icon name="errorCircle" size={14} />
+            <Icon name="cancel" size={14} />
             Abbrechen
           </button>
         )}

@@ -20,49 +20,20 @@ import { isCloudOnlyMode } from '../utils/cloudMode';
 import { usePiMode, PI_PORT_BLOCKED_HINT } from '../utils/piMode';
 import PageType from '../constants/pageType';
 import { moveToPage } from '../features/ui/uiSlice';
+import Icon from './icons/Icon';
 
 const STARTUP_TIMEOUT_MS = 90000;
 const SETTLE_DELAY_MS = 3000;
 const POLL_INTERVAL_MS = 500;
 
+// The waiting and done marks of a startup step (components/icons): the
+// loader turns while the step waits, the check replaces it once it is done.
 function Spinner() {
-  return (
-    <svg
-      className="animate-spin h-5 w-5 text-teal-500"
-      xmlns="http://www.w3.org/2000/svg"
-      fill="none"
-      viewBox="0 0 24 24"
-    >
-      <circle
-        className="opacity-25"
-        cx="12"
-        cy="12"
-        r="10"
-        stroke="currentColor"
-        strokeWidth="4"
-      />
-      <path
-        className="opacity-75"
-        fill="currentColor"
-        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-      />
-    </svg>
-  );
+  return <Icon name="loading" size={20} className="animate-spin text-teal-500" />;
 }
 
 function Checkmark() {
-  return (
-    <svg
-      className="h-5 w-5 text-green-500"
-      xmlns="http://www.w3.org/2000/svg"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth="2.5"
-    >
-      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-    </svg>
-  );
+  return <Icon name="check" size={20} className="text-green-500" />;
 }
 
 function ProgressStep({ label, done }) {

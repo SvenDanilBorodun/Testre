@@ -36,7 +36,7 @@ from physical_ai_server.workflow import robot_api
 from physical_ai_server.workflow.code_rpc import CodeRpcServer, validate_value
 from physical_ai_server.workflow.workflow_manager import WorkflowContext
 
-from test_code_rpc import _Client, _fake_handlers  # noqa: E402 — the shared harness
+from test_code_rpc import _RATE_SLACK_CALLS, _Client, _fake_handlers  # noqa: E402 — the shared harness
 
 
 def _ctx(**over) -> WorkflowContext:
@@ -194,25 +194,44 @@ def test_a_long_value_is_cut_to_the_interpreters_payload_cap(server):
     server.close_run(session)
 
 
+def _drain(c, frames, seconds):
+    """Send ``frames`` round-robin, reading every reply before the next call —
+    so socket backpressure cannot be what bounds the count — for ``seconds``;
+    return (calls served, elapsed). ``want_ok`` None: either answer."""
+    n = 0
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < seconds:
+        method, args, want_ok = frames[n % len(frames)]
+        reply = c.call(method, args)
+        assert want_ok is None or reply['ok'] is want_ok, reply
+        n += 1
+    return n, time.monotonic() - t0
+
+
+def _assert_policy_rate(n, elapsed):
+    """The draining fence of test_code_rpc (test_a_draining_client_is_served_
+    at_the_policy_rate): at most BURST + MAX_CALLS_PER_S × elapsed served.
+    A count that CPU load can only LOWER (review round 5, md8: the old
+    elapsed-time floor failed under load, because the bucket refilled while
+    the burst was still being spent)."""
+    limits = robot_api.RPC_LIMITS
+    allowed = limits.BURST + limits.MAX_CALLS_PER_S * elapsed
+    assert n <= allowed + _RATE_SLACK_CALLS, (
+        f'{n} frames served in {elapsed:.2f} s; the policy allows {allowed:.0f}')
+    assert n >= 50, 'the server was not serving at all'
+
+
 def test_zeige_is_charged_against_the_call_budget_before_validation(server):
-    """Condition 1: an INVALID zeige costs a token too. With the burst spent
-    on invalid frames, the next valid one waits for the refill."""
+    """Condition 1: an INVALID zeige costs a token too, and so does a valid
+    one. A draining client alternating the two is served at the policy rate:
+    a reader that let either through uncharged is served about twice it."""
     ctx = _ctx()
     session = server.open_run(ctx)
     c = _Client(server.socket_path, session.token)
-    burst = robot_api.RPC_LIMITS.BURST
     before = session.frames_decoded
-    for _ in range(burst):
-        assert c.call('zeige', ['a=b', 1])['ok'] is False
-    assert session.frames_decoded - before == burst
-    n = 40
-    t0 = time.monotonic()
-    for _ in range(n):
-        assert c.call('zeige', ['n', 1])['ok'] is True
-    elapsed = time.monotonic() - t0
-    # The hello + the invalid burst emptied the bucket: 40 more frames take
-    # at least (40 - slack) / MAX_CALLS_PER_S.
-    assert elapsed >= (n - 3) / robot_api.RPC_LIMITS.MAX_CALLS_PER_S
+    n, elapsed = _drain(c, [('zeige', ['a=b', 1], False), ('zeige', ['n', 1], True)], 1.5)
+    assert session.frames_decoded - before == n
+    _assert_policy_rate(n, elapsed)
     server.close_run(session)
 
 
@@ -418,18 +437,16 @@ def test_every_vars_frame_takes_a_token_before_anything_else(server):
     assert bad['ok'] is False
     assert len(taken) == 11, 'an invalid __vars costs its token before it is refused'
 
-    # The tokens are the run's real ones: with the burst spent on __vars,
-    # the next frames wait for the refill.
-    burst = robot_api.RPC_LIMITS.BURST
-    for _ in range(burst):
-        c.call('__vars', ['main.py', 1, {'x': 1}])
-    n = 40
-    t0 = time.monotonic()
-    for _ in range(n):
-        c.call('__vars', ['main.py', 1, {'x': 1}])
-    elapsed = time.monotonic() - t0
-    assert len(taken) == 11 + burst + n
-    assert elapsed >= (n - 3) / robot_api.RPC_LIMITS.MAX_CALLS_PER_S
+    # The tokens are the run's real ones: a draining client sending __vars
+    # frames (floor-skipped ones and invalid ones alike) is served at the
+    # policy rate, and every one of them took its token.
+    before = len(taken)
+    # (Inside the floor even a malformed one is answered `skipped`, unlooked-at:
+    # the floor comes before validation — the token before both.)
+    n, elapsed = _drain(c, [('__vars', ['main.py', 1, {'x': 1}], True),
+                            ('__vars', ['main.py', 1], None)], 1.5)
+    assert len(taken) - before == n
+    _assert_policy_rate(n, elapsed)
     server.close_run(session)
 
 

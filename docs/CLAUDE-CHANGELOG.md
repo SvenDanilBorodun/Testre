@@ -6,6 +6,98 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-09-28 — Vormachen opens one window per kind, and the whole app draws one icon style
+
+The owner asked for two things (docs/plans/2026-09-28-vormachen-einzeln):
+a record button wherever a kind of thing is listed — Aufnahmen, Ziele,
+Positionen, in Blöcke, Python and Java alike — opening a window that
+records ONLY that kind; and every emoji used as an icon, anywhere in the
+software, replaced by one good-looking icon set.
+
+**Why the old per-kind buttons were not enough.** Buttons „✋ Bewegung/
+Position/Ziel vormachen" already existed in the flyout, the code „+ Neu"
+menu and the code drawer, but each opened the same mixed window: the
+`focus` value only drew a two-second ring around one button, and every key
+still worked — P during a Bewegung take stored a Position. Owner decisions
+D1–D4 made the window the unit: „Bewegung vormachen" (Space, F, the
+review), „Position vormachen" (P, F), „Ziel vormachen" (Z, F), several
+items per window, the toolbar's „Vormachen" a chooser, and the mixed window
+gone — accepting that a student can no longer mix kinds in one session or
+press P/Z during a (leader) take.
+
+**One predicate for keys and buttons.** `teachGates.teachKeyOffered` is the
+contract, and it sits at the FRONT of `useTeachSession`'s `handlerFor`, the
+single function both the keyboard and every button press go through — so a
+key without its button is dead by construction, not by a second list that
+could drift. The overlay ANDs every button cell with the same predicate and
+renders only the offered buttons. `focus` was renamed `kind` end to end;
+the slice and TeachHost drop a request without a valid kind, so there is no
+kind-less window. The unreachable `aufnahme` rows for P and Z were deleted
+(and `TEACH_ZIEL_BLOCKED_REC` with them). Mutation: removing the gate turns
+12 engine tests red; the capture path's own re-check keeps the other P/Z
+tests green, which is the defence in depth it is there for.
+
+**One table of creation buttons.** `sammlung/newActions.js` now carries
+every creation button (id, tab, label, icon, action, when offered) and is
+read by the flyout, the drawer — which offers its „Neu" row for Blockly
+programs too now (D5) — and the code sidebar, whose Aufnahmen, Ziele and
+Positionen rows gained their own kind-icon record button. D9 fixed a
+disagreement on the way: the drawer offered „Ziel auf den Sim-Tisch setzen"
+outside the simulator while the flyout did not; now the Sim-Tisch exists
+only inside it and the camera pin only outside.
+
+**Icons inside Blockly without subclassing Blockly at import.** Nine page
+tests mock `blockly/core` with just `svgResize` and `Events`, and
+WorkshopPage reaches the flyout code through toolboxCategories, so a
+top-level `class … extends Blockly.ButtonFlyoutInflater` would have thrown
+at import and taken every page test down. `IconButtonInflater` composes
+instead: Blockly's own inflater (built lazily) makes a real `FlyoutButton`,
+so callbacks, keyboard navigation, focus and touch stay Blockly's, and the
+icon is added to its DOM afterwards (18 px wider, text shifted by 18 px,
+the icon group painted explicitly so the button's `fill` cannot leak in).
+It is held to the same six criteria as the asset cards in the real flyout.
+The icons themselves never go through `react-dom/server`: a react-icons
+component returns an element whose `props` already hold the icon's shapes,
+so `icons/svg.js` reads them off it.
+
+**Lucide everywhere.** One registry (`components/icons/registry.js`, the
+only importer of `react-icons/lu`), four custom icons in Lucide's own rules
+(robot arm, leader arm, gripper, a Python snake — to be approved by the
+owner on sight), 36 files moved off Material/Tabler/Octicons, and every
+remaining glyph in the app replaced — 164 inventory lines across 57 files
+by the plan's count; a fresh espree scan found 140 string tokens in 47
+files, all gone, plus one tutorial sentence and 26 Python strings. The
+breakpoint Protokoll line lost its ⏸ on the server; the client draws the
+pause icon for any line starting with `BREAKPOINT_LOG_PREFIX`, lockstep-
+tested against both server f-strings. The Hugging Face toast was English
+plus an emoji around the worker's German sentence on every upload; the
+client now gets the sentence itself.
+
+**Cost, measured.** Student build entry chunk 1,743,411 → 1,770,516 bytes
+raw (+27,105), 479,565 → 482,968 gzip -9 (+3,403); about 94 Lucide trees in
+the bundle out of the set's 1,541 (tree-shaking works); no
+`renderToString`/`renderToStaticMarkup` in any chunk. Rolldown now splits
+React into its own `jsx-runtime-*.js` chunk (7.9 KB; the lazy CodeEditor
+imports the icon helper too), which `index.html` modulepreloads.
+
+**Fences.** `noIconGlyphs.test.js` (espree tokens, escapes and entities
+decoded, JSON walked) and `test_no_icon_glyphs.py` (Python string
+constants) each failed on a deliberately reinserted glyph — a ■ in
+RunControls, a ▶ in the Sage tutorial, a ✓ in the GUI, a ⏸ in code_rpc —
+and the import rule failed on a reinserted `react-icons/md` import.
+
+**Deviations from the design, and why.** Debug is the bug icon (LuBug)
+everywhere rather than a magnifying glass, since the button says „Debug";
+„Alle verwalten …" stays a plain flyout button (it navigates, it creates
+nothing); German was applied to the whole UI element whose glyph changed
+(the merge section's headings and remove buttons), the rest of those boxes
+stays English and is listed in KNOWN-ISSUES; `registerSammlungCategories`
+also registers the icon inflater (idempotent) so its flyouts never emit a
+type nobody inflates.
+
+Not verified here: any of it in a real WebView2 at the three scalings, on a
+rig, or by a screen reader — rig gate S-R13 and visual gate S-R14.
+
 ### Unreleased, 2026-09-28 (fix round 5) — the page acts on the program it holds, and the last values arrive
 
 Two more fresh reviewers (5-A adversarial, 5-B regression and delivery)

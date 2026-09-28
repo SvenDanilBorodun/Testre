@@ -6,6 +6,103 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-09-28 (fix round 5) — the page acts on the program it holds, and the last values arrive
+
+Two more fresh reviewers (5-A adversarial, 5-B regression and delivery)
+read the branch after fix round 4. 5-B found no regression; 5-A found three
+PRE-EXISTING ways one program's content reached another. The owner decided
+to fix those three here for Blockly and code alike (R5-O1), to record the
+Java refusal gap instead of fixing it (R5-O2), and to end with one final
+fresh review (R5-O3). A fresh implementer reproduced every finding before
+fixing it, and proved each protecting test by mutation in a scratch copy of
+its commit: 74 mutations, every one red. Two first came back green (Java's
+int wrap-around, a queued save's switch check); each got the test it lacked.
+
+**A save while the next program loaded wrote the old one into it (MD2).**
+The page targeted `selectedWorkflowId`, which moves the moment the student
+picks a program, while the editor still held the previous one until the row
+arrived. „Speichern" or Strg+S in that window wrote program A into B's row
+(both notations; reproduced with the real toolbar), and after a load that
+FAILED a save overwrote the row that failed to load. The page now keeps the
+open document's identity itself (`openDocId` and a document token, written
+through refs), refuses every save while a program loads or a version
+restore is on its way, and a failed load holds no row, so a save creates
+one. Found on the way (also pre-existing): a Blockly program that just
+opened ran — on Start — and saved the PREVIOUS program's last canvas edit,
+because the page's copy of the last edit and the store's copy outlived the
+document; both are reset whenever a document is replaced, synchronously.
+
+**A version restore that landed late replaced another program (MD3).** A
+restore of A resolving after B was opened put A into B's editor, and the
+next save wrote A (with its Ziele since 041) into B. A restore result is now
+applied only while the document it was asked for is still open (its id and
+token), no document switch starts while a restore is on its way, and the
+history takes no restore while a save or a load is in flight.
+
+**A switch during Start ran the old program (MD5).** Start awaits the
+breakpoints and the recordings before the run is marked running, so the
+switch lock was not yet up: A's run started while B was shown, and A's
+highlights and values landed in B. RunControls now reports that window, the
+page refuses every switch in it („Das Programm startet gerade – bitte kurz
+warten."), and a start whose document changed anyway is not sent.
+
+**The insertion validator (MD1, MD4, md1–md5, nd1).** The empty row after a
+file's final line break was clamped onto the row above, so „Einfügen" there
+put the line INTO a trailing `for` while Enter gives column 0; it is its own
+row now. A blank row between a decorator and its `def` (a SyntaxError) and
+between a `def` and its docstring (it demotes the docstring) are refused. A
+`with suppress(…)` no longer swallows a quiet `return`, and a `try` whose
+body leaves quietly, or through `sys.exit` its `except Exception` cannot
+catch, no longer lets a dead line in. Java constants are evaluated in Java's
+own arithmetic (integer division, int/long wrap-around, `?:`, the declared
+type): JavaScript arithmetic judged `while (1 / 2 == 0)` completing, and
+javac rejected the „reachable" line. An untyped lambda parameter shadowing
+a constant field and a `continue` nested inside a `do … while` were wrongly
+refused. A whitespace-only row shallower than the statement after it no
+longer counts as a step back (Enter there gave an IndentationError), and
+Tab on a blank row agrees with Enter. Four hunks no test protected (5-A
+F3) got tests. The judge now also checks HOW OFTEN a marker runs (a line
+inside a loop is not the line after it) and proves every „never runs" hint
+by placing the line there anyway: 261 fixture cases (125 insertions, 136
+hints), every insertion compiled and run by CPython 3.12.3 and javac
+21.0.12 in the rebuilt runner image, and 74 editor cases.
+
+**The last live values (md7).** The launcher unwired the hook, `final`
+skipped the last values after one interval when another thread held the
+stub's RPC lock, and `__exit` then waited for the same lock without a bound
+anyway: a program with a worker thread ended showing stale values, and a
+value a helper module kept never arrived. The last values and `__exit` now
+go out under ONE hold of that lock, and come from every project module. In
+the rebuilt image: a daemon thread looping robot calls — `wert=-1` arrives
+(before: `wert=21`, stale), a helper module's `modulwert=99` (before: none),
+a 3 s call in flight — `wert=5` (before: `wert=0`); the end after the
+program's last statement was 3.01 s behind the 3 s call before and after,
+and 0.4–1.4 s behind a looping worker where it was 2.8–22 s (four runs of
+two programs each). The lock's unfairness stays (pre-existing, not changed).
+
+**Smaller (md6, md8, nd2–nd6).** A code run's recording fetch asked for
+names seen only in comments first, and sixteen of them crowded out the one
+really played. Two server budget tests measured elapsed time after the
+burst and failed under CPU load (1 of 10 runs, 36 busy processes on 18
+CPUs) because the bucket refilled meanwhile; they count what is served now
+(10 of 10 under the same load). Java `zeige`: a `toString()` throwing an
+`AssertionError` reached the program; a map of a million entries was
+rendered through its `toString()` first, and a 4-million-bit `BigInteger`
+spent 0.7–1.5 s being converted to text before being cut — both bounded now,
+and the comment claiming „never a wrong last digit" is corrected. The
+Vormachen clipboard memory is forgotten at sign-out, a paste over a
+selection is an ordinary paste, and a live-values dict with an unshowable
+key says so instead of reading as `{}`.
+
+**Deliberate test changes.** Page tests that modelled a student's edit as
+store content present BEFORE the row arrived now make the edit after it
+(that is what a canvas reports; the old shape passed only because the mock
+store never answered the page). The round-4 tests that pinned „`final`
+skips after one interval" pin the one hold instead, and the launcher's
+`__exit` is looked for in `finish_run`. Two fixture expectations changed on
+purpose (the explicit-too-shallow row now inserts; a line past a file's end
+goes below its last row).
+
 ### Unreleased, 2026-09-28 (fix round 4) — an empty row is not a step back, a paste is what was copied
 
 Two more fresh reviewers (4-A adversarial, 4-B regression and delivery) read

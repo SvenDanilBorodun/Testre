@@ -22,14 +22,20 @@
 //     imports), right below a decorator, on a match/case or switch/case line,
 //     inside a multi-line expression, a `\` continuation or a string, outside a
 //     Java method body, or below a statement that never lets the next line of
-//     its block run (return/raise/throw/break/continue, an exit call, an
-//     endless loop, an if/else or try whose every way out leaves). The line is
-//     NEVER moved somewhere else.
+//     its block run (return/raise/throw/break/continue, an exit call —
+//     sys.exit/exit/quit/os._exit/os.abort, System.exit, Runtime.exit/halt —
+//     an endless loop, an if/else or try whose every way out leaves, a try
+//     without a handler around a body that never completes, an `if` on a
+//     constant true, a match whose catch-all case and every other case leave).
+//     A `with suppress(…)` may swallow what its body raises, so the line after
+//     it runs. The line is NEVER moved somewhere else.
 //   * INDENTATION of the inserted line is what Enter at the end of the chosen
 //     line gives (`newlineIndentAt`, the function the editor's Enter uses):
 //     inside an existing block the block's OWN sibling indentation; a new
 //     block's first line the unit of the block its opener sits in, else the
 //     file's (`detectIndentUnit`, which only statement starts vote for), else 4.
+//     An EMPTY row (or a comment at column 0) takes the level the next
+//     statement needs; only explicit, non-empty whitespace is a step back.
 //     Python's Tab and Backspace go to the next / previous indentation level
 //     of the block structure (`indentStepAt`).
 //   * A CRLF file gets CRLF line breaks, and every line regex here is CRLF-safe.
@@ -172,8 +178,13 @@ const PY_COMPOUND = new Set(['if', 'elif', 'else', 'for', 'while', 'try', 'excep
 // The clause words that CONTINUE a compound statement at its own indentation.
 const PY_CLAUSE_WORDS = new Set(['elif', 'else', 'except', 'finally', 'case']);
 const PY_FIRST_RE = /^\s*(@|[\p{L}_][\p{L}\p{N}_]*)/u;
-// An exit call: the program ends there (sys.exit, exit, quit, os._exit).
-const PY_EXIT_CALL_RE = /^\s*(?:sys\s*\.\s*exit|os\s*\.\s*_exit|exit|quit)\s*\(/;
+// An exit call ends the program there: by raising SystemExit (sys.exit, exit,
+// quit) — `exit` — or outright, never as an exception (os._exit, os.abort —
+// review round 4, mc6) — `abort`.
+const PY_EXIT_CALL_RE = /^\s*(?:sys\s*\.\s*exit|exit|quit)\s*\(/;
+const PY_ABORT_CALL_RE = /^\s*os\s*\.\s*(?:_exit|abort)\s*\(/;
+// A `with` over contextlib.suppress(...) swallows what its body raises.
+const PY_SUPPRESS_RE = /(?<![\p{L}\p{N}_])suppress\s*\(/u;
 const PY_IMPORT_RE = /^\s*(?:import\s|from\s[\s\S]*\bimport\b)/;
 const PY_BREAK_RE = /(?<![\p{L}\p{N}_])break(?![\p{L}\p{N}_])/u;
 const PY_LOOP_WORDS = new Set(['for', 'while']);
@@ -268,14 +279,20 @@ function pythonStatements(text) {
     backslash = /\\\s*$/.test(row);
   }
   if (depth > 0) broken = true;
+  const source = { text, code, segs };
   for (const s of stmts) {
     s.code = codeRows.slice(s.startRow, s.endRow + 1).join('\n');
     s.first = firstWord(s.code);
     s.opener = /:\s*$/.test(s.code);
     s.onlyString = s.code.trim() === '';
+    // Where the statement stands in the FILE (offsets into `text`), for the
+    // few questions its string literals answer (a constant condition).
+    s.from = starts[s.startRow];
+    s.to = rowContentEnd(text, starts, s.endRow);
+    s.source = source;
   }
   return {
-    stmts, broken, starts, segs, code, rawRows, unreadable: hasUnclosedLineLiteral(text, segs),
+    stmts, broken, starts, segs, code, rawRows, text, unreadable: hasUnclosedLineLiteral(text, segs),
   };
 }
 
@@ -373,16 +390,51 @@ function pyConstTokens(src) {
   return out;
 }
 
-const truthy = (v) => v !== null && v !== false && v !== 0;
+// A plain string literal's value, or undefined when this module cannot know
+// it for sure: an f-string (its `{…}` decides), bytes (never equal to a str),
+// an unclosed literal, or an escape (a backslash-newline in a one-line string
+// makes an EMPTY value).
+function pyStringLiteralValue(seg) {
+  if (!seg || seg.type !== 'string' || !seg.closed) return undefined;
+  const prefix = String(seg.prefix || '').toLowerCase();
+  if (prefix.includes('f') || prefix.includes('b')) return undefined;
+  if (typeof seg.value !== 'string' || seg.value.includes('\\')) return undefined;
+  return seg.value;
+}
 
 /**
- * The value of a condition made only of literals (numbers, True/False/None)
- * and operators (not/and/or, comparisons, arithmetic), or undefined when it
- * is not such a constant (a name, a call, a string — strings are blanked in
- * code-only text — or anything this small evaluator does not know).
+ * The tokens of the file text `[from, to)` for the constant evaluator: its
+ * code through pyConstTokens, each string literal ONE `str` token (review
+ * round 4, mc6: `while "x":` is an endless loop), a comment nothing. Null
+ * when a piece is not something the evaluator reads.
+ */
+function pyRangeTokens(source, from, to) {
+  const out = [];
+  for (const seg of source.segs) {
+    if (seg.end <= from || seg.start >= to) continue;
+    if (seg.type === 'string') {
+      if (seg.start < from || seg.end > to) return null;
+      out.push({ t: 'str', v: pyStringLiteralValue(seg) });
+    } else if (seg.type === 'code') {
+      const part = pyConstTokens(source.text.slice(Math.max(seg.start, from), Math.min(seg.end, to)));
+      if (!part) return null;
+      out.push(...part);
+    }
+  }
+  return out;
+}
+
+const truthy = (v) => v !== null && v !== false && v !== 0 && v !== '';
+
+/**
+ * The value of a condition made only of literals (numbers, strings,
+ * True/False/None) and operators (not/and/or, comparisons, arithmetic), or
+ * undefined when it is not such a constant (a name, a call, an f-string, or
+ * anything this small evaluator does not know). `src` is code-only text, or
+ * the token list pyRangeTokens made.
  */
 function pyConstValue(src) {
-  const toks = pyConstTokens(src);
+  const toks = Array.isArray(src) ? src : pyConstTokens(src);
   if (!toks || toks.length === 0) return undefined;
   let p = 0;
   const peek = () => toks[p];
@@ -394,6 +446,7 @@ function pyConstValue(src) {
     if (!tok) fail();
     p += 1;
     if (tok.t === 'num') return tok.v;
+    if (tok.t === 'str') return tok.v === undefined ? fail() : tok.v;
     if (tok.t === 'name') {
       if (tok.v === 'True') return true;
       if (tok.v === 'False') return false;
@@ -481,6 +534,8 @@ function pyConstValue(src) {
       chained = true;
       const l = left;
       const r = right;
+      // A string's identity is the interpreter's business (interning).
+      if ((op === 'is' || op === 'is not') && (typeof l === 'string' || typeof r === 'string')) fail();
       let ok;
       if (op === 'is') ok = l === r;
       else if (op === 'is not') ok = l !== r;
@@ -532,19 +587,64 @@ function pyConstValue(src) {
   }
 }
 
-// The condition of a `while` header (code-only text between `while` and `:`).
-function pyWhileCondition(code) {
-  const m = /^\s*while\b/.exec(code);
+// Where the header of statement `s` has its text after `word` (`while`,
+// `if`, `elif`, `case`, `with`) up to the header's own top-level `:` — offsets
+// into the statement's code-only text — or null.
+function pyHeaderRange(s, word) {
+  const m = new RegExp(`^\\s*(?:async\\s+)?${word}(?![\\p{L}\\p{N}_])`, 'u').exec(s.code);
   if (!m) return null;
-  const rest = code.slice(m[0].length);
   let depth = 0;
-  for (let i = 0; i < rest.length; i += 1) {
-    const ch = rest[i];
+  for (let i = m[0].length; i < s.code.length; i += 1) {
+    const ch = s.code[i];
     if (ch === '(' || ch === '[' || ch === '{') depth += 1;
     else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
-    else if (ch === ':' && depth === 0 && rest[i + 1] !== '=') return rest.slice(0, i);
+    else if (ch === ':' && depth === 0 && s.code[i + 1] !== '=') return { from: m[0].length, to: i };
   }
   return null;
+}
+
+// The constant value of statement `s`'s header condition (`while <cond>:`,
+// `if <cond>:`, `elif <cond>:`), or undefined when it is not a constant —
+// string literals included (review round 4, mc6).
+function pyConditionValue(s, word) {
+  const range = pyHeaderRange(s, word);
+  if (!range) return undefined;
+  // Code-only text and the file text agree offset for offset on one row; a
+  // header spanning rows (brackets) is read from the file with its rows'
+  // own starts, so a CRLF break never shifts it.
+  const rows = s.code.slice(0, range.from).split('\n');
+  const toRows = s.code.slice(0, range.to).split('\n');
+  const { text } = s.source;
+  const rowFrom = (k) => {
+    let at = s.from;
+    for (let r = 0; r < k; r += 1) at = text.indexOf('\n', at) + 1;
+    return at;
+  };
+  const from = rowFrom(rows.length - 1) + rows[rows.length - 1].length;
+  const to = rowFrom(toRows.length - 1) + toRows[toRows.length - 1].length;
+  const toks = pyRangeTokens(s.source, from, to);
+  return toks ? pyConstValue(toks) : undefined;
+}
+
+// The header text of a compound statement up to its own top-level `:`.
+function pyHeaderCode(s) {
+  let depth = 0;
+  for (let i = 0; i < s.code.length; i += 1) {
+    const ch = s.code[i];
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
+    else if (ch === ':' && depth === 0 && s.code[i + 1] !== '=') return s.code.slice(0, i);
+  }
+  return s.code;
+}
+
+// A `case` whose pattern matches every value: a bare name (`_` or a
+// capture) with no guard. Anything else might not match, so the match
+// statement might end without running a case.
+function pyCaseIrrefutable(s) {
+  const range = pyHeaderRange(s, 'case');
+  if (!range) return false;
+  return /^[\p{L}_][\p{L}\p{N}_]*$/u.test(s.code.slice(range.from, range.to).trim());
 }
 
 // A `break` in the body of loop `i` that leaves THAT loop (not one of an
@@ -570,9 +670,7 @@ function pyLoopBreaksOut(stmts, i) {
 function pyIsEndlessLoopHead(stmts, i) {
   const s = stmts[i];
   if (s.first !== 'while') return false;
-  const cond = pyWhileCondition(s.code);
-  if (cond === null) return false;
-  const v = pyConstValue(cond);
+  const v = pyConditionValue(s, 'while');
   return v !== undefined && truthy(v) && !pyLoopBreaksOut(stmts, i);
 }
 
@@ -582,6 +680,7 @@ function pySimpleNever(code) {
     const m = PY_FIRST_RE.exec(part);
     if (m && PY_TERMINAL_WORDS.has(m[1])) return m[1];
     if (PY_EXIT_CALL_RE.test(part)) return 'exit';
+    if (PY_ABORT_CALL_RE.test(part)) return 'abort';
   }
   return null;
 }
@@ -598,10 +697,29 @@ function pyBodyNever(stmts, i) {
   return null;
 }
 
+// Why an if/elif/else chain headed by `i` never lets the next statement run,
+// or null. A branch whose condition is a constant false is never taken; one
+// whose condition is a constant true is always taken when reached, and the
+// branches after it never are (`if True: return` — review round 4, mc6).
+// The chain never falls through when every branch that can be taken never
+// completes AND some branch is always taken (an `else:`, or a constant true).
+function pyIfNever(stmts, i) {
+  for (const c of [i, ...pyClauses(stmts, i)]) {
+    const t = stmts[c];
+    if (t.first === 'else') return pyBodyNever(stmts, c) ? 'ifelse' : null;
+    const v = pyConditionValue(t, t.first);
+    if (v !== undefined && !truthy(v)) continue;
+    if (!pyBodyNever(stmts, c)) return null;
+    if (v !== undefined) return 'ifalways';
+  }
+  return null;
+}
+
 /**
  * Why statement `i` never lets the NEXT statement of its block run, or null:
- * 'return' | 'raise' | 'break' | 'continue' | 'exit' | 'loop' | 'ifelse' |
- * 'try'. A clause header answers null (its compound answers at its head).
+ * 'return' | 'raise' | 'break' | 'continue' | 'exit' | 'abort' | 'loop' |
+ * 'ifelse' | 'try' | 'match'. A clause header answers null (its compound
+ * answers at its head).
  */
 function pyNever(stmts, i) {
   const s = stmts[i];
@@ -613,11 +731,7 @@ function pyNever(stmts, i) {
     if (orElse === undefined || pyLoopBreaksOut(stmts, i)) return null;
     return pyBodyNever(stmts, orElse);
   }
-  if (s.first === 'if') {
-    const clauses = pyClauses(stmts, i);
-    if (!clauses.some((c) => stmts[c].first === 'else')) return null;
-    return [i, ...clauses].every((c) => pyBodyNever(stmts, c)) ? 'ifelse' : null;
-  }
+  if (s.first === 'if') return pyIfNever(stmts, i);
   if (s.first === 'try') {
     const clauses = pyClauses(stmts, i);
     const fin = clauses.find((c) => stmts[c].first === 'finally');
@@ -625,10 +739,27 @@ function pyNever(stmts, i) {
     const handlers = clauses.filter((c) => stmts[c].first === 'except');
     const orElse = clauses.find((c) => stmts[c].first === 'else');
     const bodyEnds = pyBodyNever(stmts, i) || (orElse !== undefined && pyBodyNever(stmts, orElse));
+    // Without a handler nothing catches: the `finally:` runs, and then the
+    // body's way out goes on (`try: return … finally: …`, a try around an
+    // endless loop — review round 4, mc4).
+    if (handlers.length === 0 && bodyEnds) return 'try';
     if (handlers.length > 0 && bodyEnds && handlers.every((c) => pyBodyNever(stmts, c))) return 'try';
     return null;
   }
-  if (s.first === 'with') return pyBodyNever(stmts, i);
+  if (s.first === 'with') {
+    // `with suppress(…):` is `try: … except …: pass` — what its body raises
+    // may be swallowed and the line after it runs (review round 4, mc6), the
+    // same rule a try with a handler that completes gets.
+    if (PY_SUPPRESS_RE.test(pyHeaderCode(s))) return null;
+    return pyBodyNever(stmts, i);
+  }
+  if (s.first === 'match' && s.opener) {
+    // Every case never completes and the last one matches anything: the
+    // match never falls through (review round 4, mc6).
+    const cases = pyChildren(stmts, i).filter((c) => stmts[c].first === 'case');
+    if (cases.length === 0 || !pyCaseIrrefutable(stmts[cases[cases.length - 1]])) return null;
+    return cases.every((c) => pyBodyNever(stmts, c)) ? 'match' : null;
+  }
   if (PY_COMPOUND.has(s.first) || s.opener || s.first === '@') return null;
   return pySimpleNever(s.code);
 }
@@ -748,7 +879,15 @@ function pyOpenAt(parsed, s, pos) {
  *   * After an ordinary statement: that statement's own indentation — the
  *     block's SIBLING indentation, whatever unit other blocks use.
  *   * On a blank or comment line the student's own indentation is kept when
- *     it is a level a statement may take there (a deliberate dedent).
+ *     it is a level a statement may take there — a deliberate step back is
+ *     only ever explicit, NON-EMPTY whitespace.
+ *   * An EMPTY row (or a comment at column 0) chose nothing: it takes the
+ *     level the next statement needs — the level of the statement that
+ *     follows it (inside a block: the previous statement's sibling level; in
+ *     front of an else/elif/except/finally the block it closes). Only at the
+ *     end of the file, with nothing after it, is it column 0 (review round 4,
+ *     MC1: an empty row between two statements of a body read as column 0,
+ *     so Enter there wrote an IndentationError and „Einfügen" refused).
  */
 function pyNewlineIndent(text, pos, parsed = pythonStatements(text)) {
   const { stmts, starts, segs } = parsed;
@@ -789,7 +928,15 @@ function pyNewlineIndent(text, pos, parsed = pythonStatements(text)) {
     if (blankRow && own.length > p.indent.length && own.startsWith(p.indent)) return own;
     return p.indent + pyContextUnit(parsed, stacks, prev, text);
   }
-  if (blankRow && stacks[prev].includes(own)) return own;
+  if (blankRow && own !== '' && stacks[prev].includes(own)) return own;
+  if (blankRow && own === '') {
+    const next = stmts.find((t) => t.startRow > row);
+    if (!next) return own;
+    if (!PY_CLAUSE_WORDS.has(next.first) && next.indent.length <= p.indent.length
+        && stacks[prev].includes(next.indent)) {
+      return next.indent;
+    }
+  }
   return p.indent;
 }
 
@@ -837,9 +984,12 @@ const NEVER_REASON_DE = Object.freeze({
   continue: '„continue“',
   yield: '„yield“',
   exit: 'ein Programmende (exit)',
+  abort: 'ein Programmende (exit)',
   loop: 'eine Endlosschleife',
   ifelse: 'ein if/else, das in jedem Zweig endet',
+  ifalways: 'ein if, das immer genommen wird und endet',
   try: 'ein try, das in jedem Zweig endet',
+  match: 'ein match, das in jedem Fall endet',
   switch: 'ein switch, das in jedem Fall endet',
 });
 
@@ -968,8 +1118,13 @@ const JAVA_TYPE_WORDS = new Set(['class', 'interface', 'enum', 'record']);
 const JAVA_MODIFIERS = new Set(['public', 'protected', 'private', 'static', 'final', 'abstract',
   'strictfp', 'sealed', 'non-sealed', 'synchronized', 'native', 'transient', 'volatile', 'default']);
 const JAVA_BLOCK_KEYWORDS = new Set(['if', 'while', 'for', 'catch', 'synchronized', 'try']);
-// `System.exit(…)` ends the program: nothing after it in its block runs.
-const JAVA_EXIT_RE = /^(?:java\s*\.\s*lang\s*\.\s*)?System\s*\.\s*exit\s*\(/;
+// `System.exit(…)` and `Runtime.getRuntime().exit/halt(…)` end the program:
+// nothing after them in their block runs (review round 4, mc6).
+const JAVA_EXIT_RE = new RegExp('^(?:java\\s*\\.\\s*lang\\s*\\.\\s*)?(?:System\\s*\\.\\s*exit'
+  + '|Runtime\\s*\\.\\s*getRuntime\\s*\\(\\s*\\)\\s*\\.\\s*(?:exit|halt))\\s*\\(');
+// The primitive types and `var`: keywords that ARE a declaration's type.
+const JAVA_TYPE_KEYWORDS = new Set(['boolean', 'byte', 'char', 'short', 'int', 'long', 'float',
+  'double', 'var']);
 
 function javaBrackets(code) {
   const pair = new Map();
@@ -1574,21 +1729,27 @@ class JavaParser {
     return verdict;
   }
 
-  // Every declaration of simple name `name` in the file: {final, init}.
+  // Every declaration of simple name `name` in the file: {final, init}. A
+  // declaration's modifiers are Java's own (final, static, …, annotations)
+  // and its type is a name or a primitive — never another keyword: `return
+  // LAUF;`, `case STUFE:` and `x instanceof T)` declare nothing (review round
+  // 4, mc5: they made a constant from another file look like a variable).
   declarations(name) {
     if (!/^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(name)) return [];
     const { code } = this;
     const esc = name.replace(/\$/g, '\\$');
     const decl = new RegExp(
-      `(?:^|[;{}(,])\\s*((?:(?:@[\\p{L}_$][\\p{L}\\p{N}_$.]*|[a-z]+)\\s+)*)`
-      + `[\\p{L}_$][\\p{L}\\p{N}_$.]*(?:<[^;{}()]*>)?(?:\\s*\\[\\s*\\])*\\s+${esc}\\s*(=(?!=)|;|,|:|\\))`, 'gu',
+      '(?:^|[;{}(,])\\s*((?:(?:@[\\p{L}_$][\\p{L}\\p{N}_$.]*'
+      + '|(?:final|static|private|public|protected|transient|volatile))\\s+)*)'
+      + `([\\p{L}_$][\\p{L}\\p{N}_$.]*)(?:<[^;{}()]*>)?(?:\\s*\\[\\s*\\])*\\s+${esc}\\s*(=(?!=)|;|,|:|\\))`, 'gu',
     );
     const out = [];
     for (const m of code.matchAll(decl)) {
+      if (JAVA_KEYWORDS.has(m[2]) && !JAVA_TYPE_KEYWORDS.has(m[2])) continue;
       const at = m.index + m[0].length;
       let final = /\bfinal\b/.test(m[1]) || this.inInterfaceBody(m.index);
       let init = null;
-      if (m[2].startsWith('=')) {
+      if (m[3].startsWith('=')) {
         let depth = 0;
         let j = at;
         for (; j < code.length; j += 1) {
@@ -1600,7 +1761,7 @@ class JavaParser {
           } else if ((c === ';' || c === ',') && depth === 0) break;
         }
         init = code.slice(at, j);
-      } else if (m[2] === ':' || m[2] === ')') {
+      } else if (m[3] === ':' || m[3] === ')') {
         // An enhanced-for variable or a parameter: never a constant.
         final = false;
       }
@@ -1756,7 +1917,28 @@ function javaNewlineIndent(text, pos, ctx = javaContext(text)) {
   return rowIndentAt(text, starts, inner.open) + javaContextUnit(text, code, pair, starts, inner.open);
 }
 
-const JAVA_SWITCH_ROW_RE = /^(?:case\b|default\s*(?::|->))|\bswitch\s*\(/;
+const JAVA_CASE_ROW_RE = /^(?:case\b|default\s*(?::|->))/;
+const JAVA_SWITCH_WORD_RE = /(?<![\p{L}\p{N}_$])switch\s*\(/gu;
+
+// A switch on the row [from, at) that is still open at the row's end: its
+// header or its body goes on below (`switch (x) {`). A switch that opens and
+// closes on the row — a one-line switch expression or statement — is a
+// complete statement, and a line below it stands and runs like after any
+// other (review round 4, mc6: every row naming a switch was refused).
+function javaSwitchLeftOpen(code, pair, from, at) {
+  JAVA_SWITCH_WORD_RE.lastIndex = 0;
+  const row = code.slice(from, at);
+  for (const m of row.matchAll(JAVA_SWITCH_WORD_RE)) {
+    const paren = from + m.index + m[0].length - 1;
+    const close = pair.get(paren);
+    if (close === undefined || close >= at) return true;
+    const brace = skipWs(code, close + 1);
+    if (brace >= at || code[brace] !== '{') return true;
+    const end = pair.get(brace);
+    if (end === undefined || end >= at) return true;
+  }
+  return false;
+}
 
 /** Validate the spot right below Java row `row` (0-based). */
 function javaInsertionOp(text, row) {
@@ -1768,7 +1950,10 @@ function javaInsertionOp(text, row) {
   if (hasUnclosedLineLiteral(text, segs)) return notFound(CODE_DE.INSERT_UNREADABLE_HINT);
   const at = rowContentEnd(text, starts, row);
   if (insideNonCode(text, segs, at)) return notFound(CODE_DE.INSERT_INSIDE_EXPRESSION_HINT);
-  if (JAVA_SWITCH_ROW_RE.test(code.slice(starts[row], at).trim())) return notFound(CODE_DE.INSERT_SWITCH_HINT);
+  if (JAVA_CASE_ROW_RE.test(code.slice(starts[row], at).trim())
+      || javaSwitchLeftOpen(code, pair, starts[row], at)) {
+    return notFound(CODE_DE.INSERT_SWITCH_HINT);
+  }
   const stack = javaEnclosing(code, pair, at);
   const inner = stack[stack.length - 1];
   if (!inner || inner.kind === 'class') return notFound(CODE_DE.NOT_IN_METHOD_HINT);

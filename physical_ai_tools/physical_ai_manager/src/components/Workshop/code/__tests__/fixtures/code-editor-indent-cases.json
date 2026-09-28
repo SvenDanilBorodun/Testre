@@ -150,6 +150,114 @@
    "hint": null
   },
   {
+   "name": "empty_row_end_of_file",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nn = 0\nwhile n < 3:\n    n += 1\n\nrobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_before_else",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nif True:\n    robot.home()\n\n    robot.replay(\"Winken\")\nelse:\n    pass\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_col0_comment",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    robot.home()\n# Kommentar\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_crlf_body",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nmain()\n\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_if_body_then_more",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nif True:\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nrobot.log(\"y\")\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_mid_for_body",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nfor i in range(1):\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_mid_function",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\n\ndef main():\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\n\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_mid_main_guard",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\n\nif __name__ == \"__main__\":\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_nested_body",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    for i in range(1):\n        robot.home()\n\n        robot.replay(\"Winken\")\n        robot.log(\"x\")\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_stock_program",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(1)\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_tab_body",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\nif True:\n\trobot.home()\n\n\trobot.replay(\"Winken\")\n\trobot.log(\"x\")\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_enter_two_space_body",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n  robot.home()\n\n  robot.replay(\"Winken\")\n  robot.log(\"x\")\nmain()\n",
+   "hint": null
+  },
+  {
    "name": "enter_after_opener_tab",
    "language": "python",
    "line": null,
@@ -201,6 +309,15 @@
    "reach": "run",
    "input": null,
    "output": "import robot\n\ndef f():\n  for i in range(3):\n    robot.home()\n    robot.replay(\"Winken\")\n  robot.log(\"x\")\n\nf()\n",
+   "hint": null
+  },
+  {
+   "name": "explicit_step_back_kept",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    for i in range(1):\n        robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nmain()\n",
    "hint": null
   },
   {
@@ -300,6 +417,15 @@
    "reach": "run",
    "input": null,
    "output": "import robot\n\ndef f():\n  if True:\n    robot.replay(\"Winken\")\n\nf()\n",
+   "hint": null
+  },
+  {
+   "name": "whitespace_line_enter_strips",
+   "language": "python",
+   "line": null,
+   "reach": "run",
+   "input": null,
+   "output": "import robot\ndef main():\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nmain()\n",
    "hint": null
   }
  ]

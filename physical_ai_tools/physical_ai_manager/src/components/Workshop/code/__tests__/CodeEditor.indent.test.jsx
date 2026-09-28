@@ -25,6 +25,9 @@
 //     block stack — never to a column no block uses. Each case below is a
 //     program that compiled before the keystroke; what the keystrokes made
 //     must compile too.
+//   * review round 4 (MC1): an EMPTY row inside a block (or a comment at
+//     column 0) chose nothing — Enter there continues the block, where it
+//     used to write column 0 and an IndentationError.
 //
 // Every Python program typed here is also written to fixtures/
 // code-editor-indent-cases.json, which robotis_ai_setup/tests/
@@ -57,6 +60,8 @@ let insertNewlineAndIndent;
 let indentMore;
 let deleteCharBackward;
 let indentUnitFacet;
+let startCompletion;
+let completionStatus;
 
 const hadRangeRects = typeof Range !== 'undefined' && typeof Range.prototype.getClientRects === 'function';
 beforeAll(async () => {
@@ -68,12 +73,15 @@ beforeAll(async () => {
       };
     };
   }
-  const [view, state, commands, language] = await Promise.all([
+  const [view, state, commands, language, autocomplete] = await Promise.all([
     import('@codemirror/view'),
     import('@codemirror/state'),
     import('@codemirror/commands'),
     import('@codemirror/language'),
+    import('@codemirror/autocomplete'),
   ]);
+  startCompletion = autocomplete.startCompletion;
+  completionStatus = autocomplete.completionStatus;
   EditorView = view.EditorView;
   runScopeHandlers = view.runScopeHandlers;
   EditorSelection = state.EditorSelection;
@@ -386,6 +394,91 @@ describe('a block continues ITS OWN indentation, whatever the others use (review
   });
 });
 
+// Review round 4, MC1: 4-A's P1…P37 and stock_out.json — each program
+// compiled before the keystroke. [program, the empty (or column-0 comment)
+// line Enter is pressed at the end of, the column Enter must give].
+const EMPTY_ROWS = {
+  stock_program: ['import robot\ndef main():\n    robot.home()\n\n    robot.log(1)\nmain()\n', 4, 4],
+  mid_function: ['import robot\n\ndef main():\n    robot.home()\n\n    robot.log("x")\n\nmain()\n', 5, 4],
+  mid_main_guard: ['import robot\n\nif __name__ == "__main__":\n    robot.home()\n\n    robot.log("x")\n', 5, 4],
+  mid_for_body: ['import robot\nfor i in range(1):\n    robot.home()\n\n    robot.log("x")\n', 4, 4],
+  col0_comment: ['import robot\ndef main():\n    robot.home()\n# Kommentar\n    robot.log("x")\nmain()\n', 4, 4],
+  tab_body: ['import robot\nif True:\n\trobot.home()\n\n\trobot.log("x")\n', 4, 1],
+  two_space_body: ['import robot\ndef main():\n  robot.home()\n\n  robot.log("x")\nmain()\n', 4, 2],
+  crlf_body: ['import robot\r\ndef main():\r\n    robot.home()\r\n\r\n    robot.log("x")\r\nmain()\r\n', 4, 4],
+  if_body_then_more: ['import robot\nif True:\n    robot.home()\n\n    robot.log("x")\nrobot.log("y")\n', 4, 4],
+  nested_body: ['import robot\ndef main():\n    for i in range(1):\n        robot.home()\n\n        robot.log("x")\nmain()\n', 5, 8],
+  before_else: ['import robot\nif True:\n    robot.home()\n\nelse:\n    pass\n', 4, 4],
+};
+
+describe('an EMPTY row inside a block chose nothing: Enter continues the block (review round 4, MC1)', () => {
+  test.each(Object.entries(EMPTY_ROWS))('%s — the key, then typing, compiles', (name, [src, line, col]) => {
+    const { view } = mount(src);
+    put(view, endOf(view, line));
+    press(view, 'Enter');
+    expect(caretCol(view)).toBe(col);
+    // The row the student stood on stays as it was.
+    expect(lineText(view, line)).toBe(src.replace(/\r/g, '').split('\n')[line - 1]);
+    type(view, MARK);
+    record(`empty_row_enter_${name}`, view.state.doc.toString());
+  });
+
+  test.each(Object.entries(EMPTY_ROWS))('%s — the stock command, and „Einfügen" agrees', (name, [src, line, col]) => {
+    const { view } = mount(src);
+    put(view, endOf(view, line));
+    run(view, insertNewlineAndIndent);
+    expect(caretCol(view)).toBe(col);
+    const target = insertionTargetAt(src.replace(/\r/g, ''), 'python', line);
+    expect([name, target.indent]).toEqual([name, lineText(view, line + 1)]);
+  });
+
+  test('a deliberate step back is explicit whitespace: it is kept', () => {
+    const src = 'import robot\ndef main():\n    for i in range(1):\n        robot.home()\n    \n    robot.log("x")\nmain()\n';
+    const { view } = mount(src);
+    put(view, endOf(view, 5));
+    press(view, 'Enter');
+    expect(caretCol(view)).toBe(4);
+    type(view, MARK);
+    record('explicit_step_back_kept', view.state.doc.toString());
+  });
+
+  test('at the end of the file nothing follows: column 0, after the block', () => {
+    const src = 'import robot\nn = 0\nwhile n < 3:\n    n += 1\n\n';
+    const { view } = mount(src);
+    put(view, endOf(view, 5));
+    press(view, 'Enter');
+    expect(caretCol(view)).toBe(0);
+    type(view, MARK);
+    record('empty_row_end_of_file', view.state.doc.toString());
+  });
+
+  test('Enter on a whitespace-only line leaves no trailing whitespace behind (nc5)', () => {
+    const src = 'import robot\ndef main():\n    robot.home()\n    \n    robot.log("x")\nmain()\n';
+    const { view } = mount(src);
+    put(view, endOf(view, 4));
+    press(view, 'Enter');
+    expect(lineText(view, 4)).toBe('');
+    expect(lineText(view, 5)).toBe('    ');
+    type(view, MARK);
+    record('whitespace_line_enter_strips', view.state.doc.toString());
+  });
+
+  test('an open completion list still takes Enter as „accept" (the completion keymap wins)', async () => {
+    const { view } = mount('import robot\nrobot.ho');
+    put(view, view.state.doc.length);
+    act(() => { startCompletion(view); });
+    for (let i = 0; i < 50 && completionStatus(view.state) !== 'active'; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => { await new Promise((r) => { setTimeout(r, 20); }); });
+    }
+    expect(completionStatus(view.state)).toBe('active');
+    // Past the completion's own interaction delay (75 ms), as a student is.
+    await act(async () => { await new Promise((r) => { setTimeout(r, 120); }); });
+    press(view, 'Enter');
+    expect(view.state.doc.toString()).toBe('import robot\nrobot.home()');
+  });
+});
+
 describe('Java: Enter continues the block’s sibling indentation (review round 3, 3-B N1)', () => {
   test('a 2-space loop body in a 4-space starter stays at its own column', () => {
     const src = 'import edubotics.Robot;\n\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        for (int i = 0; i < 3; i++) {\n          Robot.log("x");\n        }\n    }\n}\n';
@@ -417,7 +510,7 @@ describe('the fixture the Python test compiles', () => {
       marker: { python: MARK },
       cases: produced.slice().sort((a, b) => a.name.localeCompare(b.name)),
     };
-    expect(doc.cases.length).toBe(STYLES.length * 6 + 15);
+    expect(doc.cases.length).toBe(STYLES.length * 6 + 15 + Object.keys(EMPTY_ROWS).length + 3);
     if (REGEN) {
       fs.mkdirSync(path.dirname(FIXTURE), { recursive: true });
       fs.writeFileSync(FIXTURE, `${JSON.stringify(doc, null, 1)}\n`);

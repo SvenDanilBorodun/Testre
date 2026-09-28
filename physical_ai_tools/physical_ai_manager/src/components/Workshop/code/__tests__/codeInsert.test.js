@@ -52,6 +52,10 @@ const at = (content, line, lines, language = 'python') => insertAtTarget(
   content, insertionTargetAt(content, language, line), lines, language,
 );
 const hintAt = (content, line, language = 'python') => insertionTargetAt(content, language, line).hint;
+// A line may stand below `line` and run there.
+const allowedAt = (content, line, language = 'python') => (
+  insertionTargetAt(content, language, line).mode === 'after'
+);
 const NEVER = (what) => formatCode(CODE_DE.INSERT_NEVER_RUNS_HINT, what);
 
 describe('stepsToCode', () => {
@@ -244,9 +248,109 @@ describe('the spots a line may not take, each with its reason', () => {
   });
 
   it('no line between a block and its else/elif/except/finally, none where the indentation cannot fit', () => {
-    expect(hintAt('if a:\n    b()\n\nelse:\n    c()\n', 3)).toBe(CODE_DE.INSERT_CLAUSE_HINT);
-    expect(hintAt('def f():\n    a()\n\n    b()\n', 3)).toBe(CODE_DE.INSERT_INDENT_HINT);
+    // Explicit whitespace at the clause's own level is a deliberate step
+    // back: a line there would cut the compound in two.
+    expect(hintAt('def f():\n    if a:\n        b()\n    \n    else:\n        c()\n', 4))
+      .toBe(CODE_DE.INSERT_CLAUSE_HINT);
+    // Explicit whitespace shallower than the next statement of its block.
+    expect(hintAt('def f():\n    for i in x:\n        a()\n    \n        b()\n', 4))
+      .toBe(CODE_DE.INSERT_INDENT_HINT);
     expect(hintAt('if True:\n    a()\n  b()\n', 2)).toBe(CODE_DE.INSERT_INDENT_BROKEN_HINT);
+  });
+
+  it('an EMPTY row chose nothing: it takes the level the next statement needs (review round 4, MC1)', () => {
+    // Between two statements of a body: the body (this used to be column 0,
+    // and refused as „Einrückung passt nicht").
+    expect(at('def f():\n    a()\n\n    b()\n', 3, ['x()']).content)
+      .toBe('def f():\n    a()\n\n    x()\n    b()\n');
+    // A comment at column 0 inside the body chose nothing either.
+    expect(at('def f():\n    a()\n# Notiz\n    b()\n', 3, ['x()']).content)
+      .toBe('def f():\n    a()\n# Notiz\n    x()\n    b()\n');
+    // In front of an else: the block it closes.
+    expect(at('if a:\n    b()\n\nelse:\n    c()\n', 3, ['x()']).content)
+      .toBe('if a:\n    b()\n\n    x()\nelse:\n    c()\n');
+    // Between a body's end and the next statement further out: that one's level.
+    expect(at('def f():\n    for i in y:\n        a()\n\n    b()\n', 4, ['x()']).content)
+      .toBe('def f():\n    for i in y:\n        a()\n\n    x()\n    b()\n');
+    // At the end of the file nothing follows: column 0, after the loop.
+    expect(at('while n < 3:\n    n += 1\n\n', 3, ['x()']).content).toBe('while n < 3:\n    n += 1\n\nx()\n');
+    // Explicit whitespace stays the student's choice.
+    expect(at('def f():\n    for i in y:\n        a()\n    \n    b()\n', 4, ['x()']).content)
+      .toBe('def f():\n    for i in y:\n        a()\n    \n    x()\n    b()\n');
+    // Java already did this (E12): the sibling level.
+    const java = 'class Main {\n  static void main(String[] a) {\n    a();\n\n    b();\n  }\n}\n';
+    expect(insertionTargetAt(java, 'java', 4)).toMatchObject({ mode: 'after', indent: '    ' });
+  });
+
+  it('a try without a handler whose body never completes (review round 4, mc4)', () => {
+    const TRY = NEVER('ein try, das in jedem Zweig endet');
+    expect(hintAt('def f():\n    try:\n        return 1\n    finally:\n        pass\n    # danach\n', 6)).toBe(TRY);
+    expect(hintAt('try:\n    while True:\n        a()\nfinally:\n    b()\n\n', 6)).toBe(TRY);
+    // A handler may catch what the body raises: the line after it runs.
+    expect(allowedAt('try:\n    while True:\n        a()\nexcept Exception:\n    pass\n\n', 6)).toBe(true);
+    // A body that completes: the finally, then on.
+    expect(allowedAt('try:\n    a()\nfinally:\n    b()\n\n', 5)).toBe(true);
+  });
+
+  it('the remaining never-runs cases (review round 4, mc6)', () => {
+    expect(hintAt('def f():\n    if True:\n        return 1\n    # danach\n', 4))
+      .toBe(NEVER('ein if, das immer genommen wird und endet'));
+    expect(hintAt('def f():\n    if 0:\n        pass\n    elif 1 == 1:\n        return 2\n    # danach\n', 6))
+      .toBe(NEVER('ein if, das immer genommen wird und endet'));
+    // A constant FALSE branch is never taken: an else that returns ends it.
+    expect(hintAt('def f():\n    if False:\n        pass\n    else:\n        return 2\n    # danach\n', 6))
+      .toBe(NEVER('ein if/else, das in jedem Zweig endet'));
+    expect(allowedAt('def f():\n    if False:\n        return 1\n    # danach\n', 4)).toBe(true);
+    expect(hintAt('def f(x):\n    match x:\n        case 1:\n            return 1\n        case _:\n            return 2\n    # danach\n', 7))
+      .toBe(NEVER('ein match, das in jedem Fall endet'));
+    // Without a case that matches anything, a match may run no case at all.
+    expect(allowedAt('def f(x):\n    match x:\n        case 1:\n            return 1\n    # danach\n', 5)).toBe(true);
+    for (const cond of ['"x"', "'nicht leer'", '"a" == "a"', 'not ""']) {
+      expect(hintAt(`import robot\nwhile ${cond}:\n    robot.home()\n\n`, 4)).toBe(NEVER('eine Endlosschleife'));
+    }
+    for (const cond of ['""', '"a" == "b"', 'f"{x}"']) {
+      expect(allowedAt(`import robot\nwhile ${cond}:\n    robot.home()\n\n`, 4)).toBe(true);
+    }
+    expect(hintAt('import os\nos.abort()\n', 2)).toBe(NEVER('ein Programmende (exit)'));
+    // `with suppress(…)` may swallow what its body raises: the line after it runs …
+    expect(allowedAt('import contextlib\nwith contextlib.suppress(ValueError):\n    raise ValueError()\nx = 1\n', 4))
+      .toBe(true);
+    // … inside it, after the raise, it never does; nor after any other with.
+    expect(hintAt('import contextlib\nwith contextlib.suppress(ValueError):\n    raise ValueError()\nx = 1\n', 3))
+      .toBe(NEVER('„raise“'));
+    expect(hintAt('import contextlib\nwith contextlib.nullcontext():\n    raise ValueError()\nx = 1\n', 4))
+      .toBe(NEVER('„raise“'));
+    const java = (s) => `class Main {\n  static void main(String[] a) {\n    ${s}\n  }\n}\n`;
+    for (const call of ['Runtime.getRuntime().halt(0);', 'Runtime.getRuntime().exit(0);', 'java.lang.Runtime.getRuntime().halt(1);']) {
+      expect(hintAt(java(call), 3, 'java')).toBe(NEVER('ein Programmende (exit)'));
+    }
+    // A switch opened and closed on one row is a whole statement.
+    for (const row of ['int y = switch (a.length) { case 1 -> 2; default -> 3; };',
+      'switch (a.length) { case 1 -> b(); default -> c(); }',
+      'switch (a.length) { case 1: b(); break; default: break; }']) {
+      expect(insertionTargetAt(java(row), 'java', 3)).toMatchObject({ mode: 'after', indent: '    ' });
+    }
+    expect(hintAt(java('int y = switch (a.length) {\n      default -> 3;\n    };'), 3, 'java')).toBe(CODE_DE.INSERT_SWITCH_HINT);
+  });
+
+  it('a Java keyword is never a declaration: `return LAUF;`, `case STUFE:` (review round 4, mc5)', () => {
+    const main = (extra, cond) => `class Main implements K {\n${extra}  public static void main(String[] a) {\n    while (${cond}) {\n    }\n  }\n}\n`;
+    const rows = (src) => src.split('\n').lastIndexOf('    }') + 1;
+    for (const [extra, cond] of [
+      ['  static boolean f() { return LAUF; }\n', 'LAUF'],
+      ['  static int g(int x) { switch (x) { case STUFE: return 1; default: return 0; } }\n', 'STUFE > 0'],
+      ['  static boolean h(Object x) { return (x instanceof LAUF); }\n', 'LAUF'],
+      ['  static boolean k() { throw LAUF; }\n', 'LAUF'],
+    ]) {
+      const src = main(extra, cond);
+      expect(insertionTargetAt(src, 'java', rows(src)).hint).toBe(CODE_DE.INSERT_UNSURE_HINT);
+    }
+    // A real declaration still counts — a primitive, var, a class type, modifiers.
+    for (const decl of ['  static boolean LAUF = false;\n', '  static final Boolean LAUF = f();\n',
+      '  private static volatile boolean LAUF = true;\n']) {
+      const src = main(decl, 'LAUF');
+      expect(insertionTargetAt(src, 'java', rows(src)).notFound).toBeUndefined();
+    }
   });
 });
 

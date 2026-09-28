@@ -64,7 +64,9 @@ const H = {
   exit: NEVER('ein Programmende (exit)'),
   loop: NEVER('eine Endlosschleife'),
   ifelse: NEVER('ein if/else, das in jedem Zweig endet'),
+  ifalways: NEVER('ein if, das immer genommen wird und endet'),
   try: NEVER('ein try, das in jedem Zweig endet'),
+  matchEnds: NEVER('ein match, das in jedem Fall endet'),
   switchEnds: NEVER('ein switch, das in jedem Fall endet'),
 };
 
@@ -119,6 +121,33 @@ const PYTHON = [
   ['after_finite_while', 'import robot\nn = 0\nwhile n < 3:\n    n += 1\n\n', 5, 'run'],
   ['docstring_statement', '"""Mein Programm."""\nimport robot\nrobot.home()\n', 3, 'run'],
   ['future_then_code', '"""Doku."""\nfrom __future__ import annotations\nimport robot\nrobot.home()\n', 3, 'run'],
+  // An EMPTY row (or a comment at column 0) inside a block chose nothing: it
+  // takes the level the next statement needs (review round 4, MC1; 4-A's
+  // P1…P37 and the stock_out program).
+  ['empty_row_mid_function', 'import robot\n\ndef main():\n    robot.home()\n\n    robot.log("x")\n\nmain()\n', 5, 'run'],
+  ['empty_row_mid_main_guard', 'import robot\n\nif __name__ == "__main__":\n    robot.home()\n\n    robot.log("x")\n', 5, 'run'],
+  ['empty_row_mid_for_body', 'import robot\nfor i in range(1):\n    robot.home()\n\n    robot.log("x")\n', 4, 'run'],
+  ['col0_comment_mid_function', 'import robot\ndef main():\n    robot.home()\n# Kommentar\n    robot.log("x")\nmain()\n', 4, 'run'],
+  ['empty_row_tab_body', 'import robot\nif True:\n\trobot.home()\n\n\trobot.log("x")\n', 4, 'run'],
+  ['empty_row_two_space_body', 'import robot\ndef main():\n  robot.home()\n\n  robot.log("x")\nmain()\n', 4, 'run'],
+  ['empty_row_crlf_body', 'import robot\r\ndef main():\r\n    robot.home()\r\n\r\n    robot.log("x")\r\nmain()\r\n', 4, 'run'],
+  ['empty_row_if_body_then_more', 'import robot\nif True:\n    robot.home()\n\n    robot.log("x")\nrobot.log("y")\n', 4, 'run'],
+  ['empty_row_nested_body', 'import robot\ndef main():\n    for i in range(1):\n        robot.home()\n\n        robot.log("x")\nmain()\n', 5, 'run'],
+  ['empty_row_stock_program', 'import robot\ndef main():\n    robot.home()\n\n    robot.log(1)\nmain()\n', 4, 'run'],
+  ['empty_row_after_inner_block', 'import robot\ndef main():\n    for i in range(1):\n        robot.home()\n\n    robot.log("x")\nmain()\n', 5, 'run'],
+  // Two cases that used to be refused, now placed in the block they sit in:
+  // the empty row before `else:` belongs to the if-body, and the empty row in
+  // the middle of a body is that body.
+  ['before_else_clause', 'import robot\nif 1:\n    robot.home()\n\nelse:\n    robot.log("x")\n', 4, 'run'],
+  ['dedented_blank_mid_block', 'import robot\ndef f():\n    robot.home()\n\n    robot.log("x")\nf()\n', 4, 'run'],
+  ['empty_row_end_of_file', 'import robot\n\ndef main():\n    robot.home()\n\nmain()\n\n', 7, 'run'],
+  // A `with suppress(…)` may swallow what its body raises: the line after it
+  // runs (review round 4, mc6 — 4-A's P22 asked below the raise, INSIDE the
+  // with, where the line truly never runs).
+  ['after_with_suppress_raise', 'import robot, contextlib\nwith contextlib.suppress(ValueError):\n    raise ValueError()\nrobot.home()\n', 4, 'run'],
+  ['after_if_false_return', 'import robot\ndef f():\n    if False:\n        return 1\n    robot.home()\nf()\n', 5, 'run'],
+  ['after_match_without_wildcard', 'import robot\ndef f(x):\n    match x:\n        case 1:\n            return 1\n    robot.home()\nf(2)\n', 6, 'run'],
+  ['after_while_empty_string', 'import robot\nwhile "":\n    robot.home()\n\n', 4, 'run'],
   // ── invalid spots: nothing is inserted, and the reason is said ──
   ['no_cursor', 'import robot\nrobot.home()\n', null, 'click'],
   ['starter_comment_line', PY_STARTER, 1, 'lead'],
@@ -158,8 +187,19 @@ const PYTHON = [
   ['else_of_endless_loop', 'import robot\nwhile True:\n    robot.home()\nelse:\n    robot.log("x")\n', 5, 'loop'],
   ['after_if_else_returns', 'import robot\n\ndef main():\n    robot.home()\n    if robot.sees("wuerfel"):\n        return\n    else:\n        return\n    # danach\n\nmain()\n', 9, 'ifelse'],
   ['after_try_finally_returns', 'import robot\ndef main():\n    try:\n        robot.home()\n    finally:\n        return\n    # danach\nmain()\n', 7, 'try'],
-  ['before_else_clause', 'import robot\nif 1:\n    robot.home()\n\nelse:\n    robot.log("x")\n', 4, 'clause'],
-  ['dedented_blank_mid_block', 'import robot\ndef f():\n    robot.home()\n\n    robot.log("x")\nf()\n', 4, 'indent'],
+  ['explicit_level_before_else', 'import robot\ndef f():\n    if 1:\n        robot.home()\n    \n    else:\n        robot.log("x")\nf()\n', 5, 'clause'],
+  ['explicit_level_too_shallow', 'import robot\ndef f():\n    for i in range(1):\n        robot.home()\n    \n        robot.log("x")\nf()\n', 5, 'indent'],
+  ['inside_with_suppress_after_raise', 'import robot, contextlib\nwith contextlib.suppress(ValueError):\n    raise ValueError()\nrobot.home()\n', 3, 'raise'],
+  ['after_with_nullcontext_raise', 'import robot\nimport contextlib\ndef f():\n    with contextlib.nullcontext():\n        raise ValueError()\n    # danach\ntry:\n    f()\nexcept ValueError:\n    pass\n', 6, 'raise'],
+  // review round 4, mc4: a try without a handler whose body never completes.
+  ['after_try_finally_body_returns', 'import robot\ndef f():\n    try:\n        return 1\n    finally:\n        pass\n    # danach\nf()\n', 7, 'try'],
+  ['after_try_endless_finally', 'import robot\ntry:\n    while True:\n        robot.home()\nfinally:\n    robot.log("x")\n\n', 7, 'try'],
+  ['after_try_endless_finally_in_func', 'import robot\ndef main():\n    try:\n        while True:\n            robot.home()\n    finally:\n        robot.log("x")\n    # danach\nmain()\n', 8, 'try'],
+  // review round 4, mc6: the remaining never-runs holes.
+  ['after_while_string_constant', 'import robot\nwhile "x":\n    robot.home()\n\n', 4, 'loop'],
+  ['after_if_true_return', 'import robot\ndef f():\n    if True:\n        return 1\n    # danach\nf()\n', 5, 'ifalways'],
+  ['after_match_all_return', 'import robot\ndef f(x):\n    match x:\n        case 1:\n            return 1\n        case _:\n            return 2\n    # danach\nf(1)\n', 8, 'matchEnds'],
+  ['after_os_abort', 'import robot, os\nrobot.home()\nos.abort()\n', 3, 'exit'],
   ['inconsistent_file', 'import robot\nif True:\n    robot.home()\n  robot.log("x")\n', 3, 'indentBroken'],
   ['unclosed_bracket', 'import robot\nrobot.home()\nx = (\n', 2, 'unclosed'],
   ['unclosed_triple_string', 'import robot\nrobot.home()\n"""\noffen\n', 2, 'unclosed'],
@@ -204,6 +244,14 @@ const JAVA = [
   ['enum_main', 'import edubotics.Robot;\npublic enum Main {\n    A, B;\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 5, 'run'],
   ['interface_main', 'import edubotics.Robot;\npublic interface Main {\n    static void main(String[] args) {\n        Robot.home();\n    }\n}\n', 4, 'run'],
   ['after_final_local_non_constant', J('        final boolean lauf = args.length > 5;\n        while (lauf) {\n            Robot.home();\n        }\n'), 7, 'run'],
+  // An empty row keeps the sibling level (review round 4: 4-A's E12, J8).
+  ['empty_row_mid_body', J('        Robot.home();\n\n        Robot.beep();\n'), 5, 'run'],
+  // A switch opened and closed on its row is a whole statement (mc6).
+  ['after_one_line_switch_expression', J('        int x = 1;\n        int y = switch (x) { case 1 -> 2; default -> 3; };\n        Robot.home();\n'), 5, 'run'],
+  ['after_one_line_switch_statement', J('        int x = 1;\n        switch (x) { case 1 -> Robot.home(); default -> Robot.beep(); }\n'), 5, 'run'],
+  ['after_one_line_colon_switch', J('        int x = 1;\n        switch (x) { case 1: Robot.home(); break; default: break; }\n'), 5, 'run'],
+  // A constant from another file stays unknown, whatever reads it (mc5).
+  ['after_return_constant_elsewhere', J('        int n = 0;\n        while (n < 3) {\n            n++;\n        }\n', '', '    static boolean pruefe() { return LAUF; }\n    static boolean LAUF = false;\n'), 7, 'run'],
   // ── invalid spots ──
   ['no_cursor', J('        Robot.home();\n'), null, 'click'],
   ['starter_comment_line', JAVA_STARTER, 1, 'method'],
@@ -226,6 +274,9 @@ const JAVA = [
   ['after_return', J('        Robot.home();\n        return;\n'), 5, 'return'],
   ['after_throw', J('        Robot.home();\n        throw new RuntimeException("x");\n'), 5, 'throw'],
   ['after_system_exit', J('        Robot.home();\n        System.exit(0);\n'), 5, 'exit'],
+  ['after_runtime_halt', J('        Robot.home();\n        Runtime.getRuntime().halt(0);\n'), 5, 'exit'],
+  ['after_runtime_exit', J('        Robot.home();\n        Runtime.getRuntime().exit(0);\n'), 5, 'exit'],
+  ['switch_expression_header', J('        int x = 1;\n        int y = switch (x) {\n            case 1 -> 2;\n            default -> 3;\n        };\n'), 5, 'switch'],
   ['after_break_in_loop', J('        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            break;\n        }\n'), 6, 'break'],
   ['after_continue_in_loop', J('        for (int i = 0; i < 3; i++) {\n            Robot.home();\n            continue;\n        }\n'), 6, 'continue'],
   ['after_while_true', J('        Robot.home();\n        while (true) {\n            Robot.log("x");\n        }\n'), 7, 'loop'],
@@ -246,6 +297,12 @@ const JAVA = [
   ['in_text_block', J('        String s = """\n            text\n            """;\n        Robot.home();\n'), 5, 'inside'],
   ['in_block_comment', J('        /* ein\n           Kommentar */\n        Robot.home();\n'), 4, 'inside'],
   ['unsure_foreign_constant', J('        while (Konstanten.LAUF) {\n            Robot.home();\n        }\n'), 6, 'unsure'],
+  // review round 4, mc5: `return LAUF;` / `case STUFE:` declare nothing — the
+  // constant is another file's, so the loop may never end (4-A's K21, K21c;
+  // K21b without them stays „unsicher" too).
+  ['unsure_constant_read_by_return', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static boolean pruefe() { return LAUF; }\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 7, 'unsure'],
+  ['unsure_constant_read_by_case', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static int f(int x) { switch (x) { case STUFE: return 1; default: return 0; } }\n    public static void main(String[] args) {\n        while (STUFE > 0) {\n            Robot.home();\n        }\n    }\n}\n', 7, 'unsure'],
+  ['unsure_constant_elsewhere', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 6, 'unsure'],
   ['unbalanced_braces', 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n', 4, 'unclosed'],
   ['unclosed_string', J('        String s = "offen;\n        Robot.home();\n'), 5, 'unreadable'],
 ];

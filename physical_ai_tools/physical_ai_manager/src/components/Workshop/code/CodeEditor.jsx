@@ -471,7 +471,12 @@ export function structureIndentExtensions(language) {
   ];
 }
 
-/** Enter in a Python file: a line break plus the structure's exact indentation. */
+/**
+ * Enter in a Python file: a line break plus the structure's exact
+ * indentation. Whitespace that stood before the cursor on an otherwise empty
+ * line goes (it would stay behind as trailing whitespace on a blank line),
+ * exactly as the stock `insertNewlineAndIndent` does.
+ */
 export function pythonEnter(view) {
   const { state } = view;
   if (state.readOnly || state.selection.ranges.length !== 1 || !state.selection.main.empty) return false;

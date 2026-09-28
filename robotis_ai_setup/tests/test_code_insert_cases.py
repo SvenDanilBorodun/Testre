@@ -159,11 +159,54 @@ def _is_exit_call(stmt) -> bool:
     if isinstance(func, ast.Name):
         return func.id in ('exit', 'quit')
     return (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
-            and (func.value.id, func.attr) in (('sys', 'exit'), ('os', '_exit')))
+            and (func.value.id, func.attr) in (('sys', 'exit'), ('os', '_exit'), ('os', 'abort')))
 
 
 def _endless_loop(stmt) -> bool:
     return isinstance(stmt, ast.While) and _constant_true(stmt.test) and not _breaks_out(stmt)
+
+
+def _constant_value(test):
+    """(True, value) for a folded literal condition, else (False, None)."""
+    try:
+        return True, _fold(test)
+    except Exception:  # noqa: BLE001 — anything not a folded literal is not constant
+        return False, None
+
+
+def _if_never_falls_through(stmt) -> bool:
+    """An if/elif/else chain: a constant-false branch is never taken, a
+    constant-true one always is (and the ones after it never are)."""
+    node = stmt
+    while True:
+        known, value = _constant_value(node.test)
+        if not (known and not value):
+            if not _body_ends(node.body):
+                return False
+            if known:
+                return True
+        if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If) \
+                and getattr(node.orelse[0], 'lineno', None) is not None \
+                and node.orelse[0].col_offset == node.col_offset:
+            node = node.orelse[0]  # an `elif`
+            continue
+        return bool(node.orelse) and _body_ends(node.orelse)
+
+
+def _suppresses(item) -> bool:
+    """`with contextlib.suppress(…)` / `with suppress(…)` swallows what its
+    body raises: the statement after it may run."""
+    call = item.context_expr
+    if not isinstance(call, ast.Call):
+        return False
+    func = call.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, 'id', '')
+    return name == 'suppress'
+
+
+def _irrefutable(case) -> bool:
+    pattern = case.pattern
+    return case.guard is None and isinstance(pattern, ast.MatchAs) and pattern.pattern is None
 
 
 def _never_falls_through(stmt) -> bool:
@@ -176,14 +219,22 @@ def _never_falls_through(stmt) -> bool:
             return True
         return bool(stmt.orelse) and not _breaks_out(stmt) and _body_ends(stmt.orelse)
     if isinstance(stmt, ast.If):
-        return bool(stmt.orelse) and _body_ends(stmt.body) and _body_ends(stmt.orelse)
+        return _if_never_falls_through(stmt)
     if isinstance(stmt, (ast.Try, getattr(ast, 'TryStar', ast.Try))):
         if stmt.finalbody and _body_ends(stmt.finalbody):
             return True
         body_ends = _body_ends(stmt.body) or bool(stmt.orelse and _body_ends(stmt.orelse))
-        return bool(stmt.handlers) and body_ends and all(_body_ends(h.body) for h in stmt.handlers)
+        if not stmt.handlers:
+            # Nothing catches: the finally runs, then the body's way out goes on.
+            return body_ends
+        return body_ends and all(_body_ends(h.body) for h in stmt.handlers)
     if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        if any(_suppresses(item) for item in stmt.items):
+            return False
         return _body_ends(stmt.body)
+    if isinstance(stmt, getattr(ast, 'Match', ())):
+        return (bool(stmt.cases) and _irrefutable(stmt.cases[-1])
+                and all(_body_ends(c.body) for c in stmt.cases))
     return False
 
 
@@ -298,6 +349,14 @@ class TheJudgeHasTeeth(unittest.TestCase):
             f'def f():\n    try:\n        a()\n    finally:\n        return\n    {self._M}\n',
             f'while True:\n    pass\nelse:\n    {self._M}\n',
             f'for i in []:\n    pass\nelse:\n    exit()\n{self._M}\n',
+            # review round 4 (mc4, mc6)
+            f'def f():\n    try:\n        return 1\n    finally:\n        pass\n    {self._M}\n',
+            f'try:\n    while True:\n        pass\nfinally:\n    pass\n{self._M}\n',
+            f'def f():\n    if True:\n        return 1\n    {self._M}\n',
+            f'def f():\n    if 0:\n        pass\n    elif 1:\n        return\n    {self._M}\n',
+            f'def f(x):\n    match x:\n        case 1:\n            return 1\n        case _:\n            return 2\n    {self._M}\n',
+            f'while "x":\n    pass\n{self._M}\n',
+            f'import os\nos.abort()\n{self._M}\n',
         ]
         for src in dead:
             with self.subTest(src=src):
@@ -308,6 +367,12 @@ class TheJudgeHasTeeth(unittest.TestCase):
             f'while True:\n    for i in []:\n        break\n    break\n{self._M}\n',
             f'while True:\n    if x:\n        break\n{self._M}\n',
             f'def f():\n    if x:\n        return\n    {self._M}\n',
+            # review round 4 (mc6): a suppressing with, a constant-false
+            # branch, a match without a catch-all case, an empty string.
+            f'import contextlib\nwith contextlib.suppress(ValueError):\n    raise ValueError()\n{self._M}\n',
+            f'def f():\n    if False:\n        return 1\n    {self._M}\n',
+            f'def f(x):\n    match x:\n        case 1:\n            return 1\n    {self._M}\n',
+            f'while "":\n    pass\n{self._M}\n',
         ]
         for src in live:
             with self.subTest(src=src):

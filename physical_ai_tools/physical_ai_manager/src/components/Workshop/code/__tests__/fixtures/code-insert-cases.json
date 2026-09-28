@@ -385,6 +385,168 @@
    "hint": null
   },
   {
+   "name": "empty_row_mid_function",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot\n\ndef main():\n    robot.home()\n\n    robot.log(\"x\")\n\nmain()\n",
+   "output": "import robot\n\ndef main():\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\n\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_mid_main_guard",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot\n\nif __name__ == \"__main__\":\n    robot.home()\n\n    robot.log(\"x\")\n",
+   "output": "import robot\n\nif __name__ == \"__main__\":\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_mid_for_body",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\nfor i in range(1):\n    robot.home()\n\n    robot.log(\"x\")\n",
+   "output": "import robot\nfor i in range(1):\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\n",
+   "hint": null
+  },
+  {
+   "name": "col0_comment_mid_function",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\ndef main():\n    robot.home()\n# Kommentar\n    robot.log(\"x\")\nmain()\n",
+   "output": "import robot\ndef main():\n    robot.home()\n# Kommentar\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_tab_body",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\nif True:\n\trobot.home()\n\n\trobot.log(\"x\")\n",
+   "output": "import robot\nif True:\n\trobot.home()\n\n\trobot.replay(\"Winken\")\n\trobot.log(\"x\")\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_two_space_body",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\ndef main():\n  robot.home()\n\n  robot.log(\"x\")\nmain()\n",
+   "output": "import robot\ndef main():\n  robot.home()\n\n  robot.replay(\"Winken\")\n  robot.log(\"x\")\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_crlf_body",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\r\ndef main():\r\n    robot.home()\r\n\r\n    robot.log(\"x\")\r\nmain()\r\n",
+   "output": "import robot\r\ndef main():\r\n    robot.home()\r\n\r\n    robot.replay(\"Winken\")\r\n    robot.log(\"x\")\r\nmain()\r\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_if_body_then_more",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\nif True:\n    robot.home()\n\n    robot.log(\"x\")\nrobot.log(\"y\")\n",
+   "output": "import robot\nif True:\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nrobot.log(\"y\")\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_nested_body",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot\ndef main():\n    for i in range(1):\n        robot.home()\n\n        robot.log(\"x\")\nmain()\n",
+   "output": "import robot\ndef main():\n    for i in range(1):\n        robot.home()\n\n        robot.replay(\"Winken\")\n        robot.log(\"x\")\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_stock_program",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\ndef main():\n    robot.home()\n\n    robot.log(1)\nmain()\n",
+   "output": "import robot\ndef main():\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(1)\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_after_inner_block",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot\ndef main():\n    for i in range(1):\n        robot.home()\n\n    robot.log(\"x\")\nmain()\n",
+   "output": "import robot\ndef main():\n    for i in range(1):\n        robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nmain()\n",
+   "hint": null
+  },
+  {
+   "name": "before_else_clause",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\nif 1:\n    robot.home()\n\nelse:\n    robot.log(\"x\")\n",
+   "output": "import robot\nif 1:\n    robot.home()\n\n    robot.replay(\"Winken\")\nelse:\n    robot.log(\"x\")\n",
+   "hint": null
+  },
+  {
+   "name": "dedented_blank_mid_block",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\ndef f():\n    robot.home()\n\n    robot.log(\"x\")\nf()\n",
+   "output": "import robot\ndef f():\n    robot.home()\n\n    robot.replay(\"Winken\")\n    robot.log(\"x\")\nf()\n",
+   "hint": null
+  },
+  {
+   "name": "empty_row_end_of_file",
+   "language": "python",
+   "line": 7,
+   "reach": "run",
+   "input": "import robot\n\ndef main():\n    robot.home()\n\nmain()\n\n",
+   "output": "import robot\n\ndef main():\n    robot.home()\n\nmain()\n\nrobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "after_with_suppress_raise",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot, contextlib\nwith contextlib.suppress(ValueError):\n    raise ValueError()\nrobot.home()\n",
+   "output": "import robot, contextlib\nwith contextlib.suppress(ValueError):\n    raise ValueError()\nrobot.home()\nrobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
+   "name": "after_if_false_return",
+   "language": "python",
+   "line": 5,
+   "reach": "run",
+   "input": "import robot\ndef f():\n    if False:\n        return 1\n    robot.home()\nf()\n",
+   "output": "import robot\ndef f():\n    if False:\n        return 1\n    robot.home()\n    robot.replay(\"Winken\")\nf()\n",
+   "hint": null
+  },
+  {
+   "name": "after_match_without_wildcard",
+   "language": "python",
+   "line": 6,
+   "reach": "run",
+   "input": "import robot\ndef f(x):\n    match x:\n        case 1:\n            return 1\n    robot.home()\nf(2)\n",
+   "output": "import robot\ndef f(x):\n    match x:\n        case 1:\n            return 1\n    robot.home()\n    robot.replay(\"Winken\")\nf(2)\n",
+   "hint": null
+  },
+  {
+   "name": "after_while_empty_string",
+   "language": "python",
+   "line": 4,
+   "reach": "run",
+   "input": "import robot\nwhile \"\":\n    robot.home()\n\n",
+   "output": "import robot\nwhile \"\":\n    robot.home()\n\nrobot.replay(\"Winken\")\n",
+   "hint": null
+  },
+  {
    "name": "no_cursor",
    "language": "python",
    "line": null,
@@ -727,22 +889,103 @@
    "hint": "Hier würde die Zeile nie laufen – davor steht ein try, das in jedem Zweig endet. Klicke weiter oben."
   },
   {
-   "name": "before_else_clause",
+   "name": "explicit_level_before_else",
    "language": "python",
-   "line": 4,
+   "line": 5,
    "reach": "hint",
-   "input": "import robot\nif 1:\n    robot.home()\n\nelse:\n    robot.log(\"x\")\n",
+   "input": "import robot\ndef f():\n    if 1:\n        robot.home()\n    \n    else:\n        robot.log(\"x\")\nf()\n",
    "output": null,
    "hint": "Hier geht es nicht – vor einem else, elif, except oder finally darf keine Zeile stehen. Klicke in die Zeile darüber."
   },
   {
-   "name": "dedented_blank_mid_block",
+   "name": "explicit_level_too_shallow",
+   "language": "python",
+   "line": 5,
+   "reach": "hint",
+   "input": "import robot\ndef f():\n    for i in range(1):\n        robot.home()\n    \n        robot.log(\"x\")\nf()\n",
+   "output": null,
+   "hint": "Hier passt die Einrückung nicht zum Block – klicke an das Ende einer Zeile im selben Block."
+  },
+  {
+   "name": "inside_with_suppress_after_raise",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot, contextlib\nwith contextlib.suppress(ValueError):\n    raise ValueError()\nrobot.home()\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „raise“. Klicke weiter oben."
+  },
+  {
+   "name": "after_with_nullcontext_raise",
+   "language": "python",
+   "line": 6,
+   "reach": "hint",
+   "input": "import robot\nimport contextlib\ndef f():\n    with contextlib.nullcontext():\n        raise ValueError()\n    # danach\ntry:\n    f()\nexcept ValueError:\n    pass\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht „raise“. Klicke weiter oben."
+  },
+  {
+   "name": "after_try_finally_body_returns",
+   "language": "python",
+   "line": 7,
+   "reach": "hint",
+   "input": "import robot\ndef f():\n    try:\n        return 1\n    finally:\n        pass\n    # danach\nf()\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein try, das in jedem Zweig endet. Klicke weiter oben."
+  },
+  {
+   "name": "after_try_endless_finally",
+   "language": "python",
+   "line": 7,
+   "reach": "hint",
+   "input": "import robot\ntry:\n    while True:\n        robot.home()\nfinally:\n    robot.log(\"x\")\n\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein try, das in jedem Zweig endet. Klicke weiter oben."
+  },
+  {
+   "name": "after_try_endless_finally_in_func",
+   "language": "python",
+   "line": 8,
+   "reach": "hint",
+   "input": "import robot\ndef main():\n    try:\n        while True:\n            robot.home()\n    finally:\n        robot.log(\"x\")\n    # danach\nmain()\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein try, das in jedem Zweig endet. Klicke weiter oben."
+  },
+  {
+   "name": "after_while_string_constant",
    "language": "python",
    "line": 4,
    "reach": "hint",
-   "input": "import robot\ndef f():\n    robot.home()\n\n    robot.log(\"x\")\nf()\n",
+   "input": "import robot\nwhile \"x\":\n    robot.home()\n\n",
    "output": null,
-   "hint": "Hier passt die Einrückung nicht zum Block – klicke an das Ende einer Zeile im selben Block."
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben."
+  },
+  {
+   "name": "after_if_true_return",
+   "language": "python",
+   "line": 5,
+   "reach": "hint",
+   "input": "import robot\ndef f():\n    if True:\n        return 1\n    # danach\nf()\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein if, das immer genommen wird und endet. Klicke weiter oben."
+  },
+  {
+   "name": "after_match_all_return",
+   "language": "python",
+   "line": 8,
+   "reach": "hint",
+   "input": "import robot\ndef f(x):\n    match x:\n        case 1:\n            return 1\n        case _:\n            return 2\n    # danach\nf(1)\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein match, das in jedem Fall endet. Klicke weiter oben."
+  },
+  {
+   "name": "after_os_abort",
+   "language": "python",
+   "line": 3,
+   "reach": "hint",
+   "input": "import robot, os\nrobot.home()\nos.abort()\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein Programmende (exit). Klicke weiter oben."
   },
   {
    "name": "inconsistent_file",
@@ -1105,6 +1348,51 @@
    "hint": null
   },
   {
+   "name": "empty_row_mid_body",
+   "language": "java",
+   "line": 5,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n\n        Robot.beep();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n\n        Robot.replay(\"Winken\");\n        Robot.beep();\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_one_line_switch_expression",
+   "language": "java",
+   "line": 5,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        int y = switch (x) { case 1 -> 2; default -> 3; };\n        Robot.home();\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        int y = switch (x) { case 1 -> 2; default -> 3; };\n        Robot.replay(\"Winken\");\n        Robot.home();\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_one_line_switch_statement",
+   "language": "java",
+   "line": 5,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) { case 1 -> Robot.home(); default -> Robot.beep(); }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) { case 1 -> Robot.home(); default -> Robot.beep(); }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_one_line_colon_switch",
+   "language": "java",
+   "line": 5,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) { case 1: Robot.home(); break; default: break; }\n    }\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        switch (x) { case 1: Robot.home(); break; default: break; }\n        Robot.replay(\"Winken\");\n    }\n}\n",
+   "hint": null
+  },
+  {
+   "name": "after_return_constant_elsewhere",
+   "language": "java",
+   "line": 7,
+   "reach": "run",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int n = 0;\n        while (n < 3) {\n            n++;\n        }\n    }\n    static boolean pruefe() { return LAUF; }\n    static boolean LAUF = false;\n}\n",
+   "output": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int n = 0;\n        while (n < 3) {\n            n++;\n        }\n        Robot.replay(\"Winken\");\n    }\n    static boolean pruefe() { return LAUF; }\n    static boolean LAUF = false;\n}\n",
+   "hint": null
+  },
+  {
    "name": "no_cursor",
    "language": "java",
    "line": null,
@@ -1294,6 +1582,33 @@
    "hint": "Hier würde die Zeile nie laufen – davor steht ein Programmende (exit). Klicke weiter oben."
   },
   {
+   "name": "after_runtime_halt",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Runtime.getRuntime().halt(0);\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein Programmende (exit). Klicke weiter oben."
+  },
+  {
+   "name": "after_runtime_exit",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n        Runtime.getRuntime().exit(0);\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht ein Programmende (exit). Klicke weiter oben."
+  },
+  {
+   "name": "switch_expression_header",
+   "language": "java",
+   "line": 5,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        int x = 1;\n        int y = switch (x) {\n            case 1 -> 2;\n            default -> 3;\n        };\n    }\n}\n",
+   "output": null,
+   "hint": "Auf einer switch- oder case-Zeile geht es nicht – klicke in eine Zeile in einem case-Zweig oder unter die switch-Anweisung."
+  },
+  {
    "name": "after_break_in_loop",
    "language": "java",
    "line": 6,
@@ -1470,6 +1785,33 @@
    "line": 6,
    "reach": "hint",
    "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (Konstanten.LAUF) {\n            Robot.home();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Ob die Zeile hier je läuft, lässt sich nicht sicher sagen – klicke an eine andere Stelle."
+  },
+  {
+   "name": "unsure_constant_read_by_return",
+   "language": "java",
+   "line": 7,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static boolean pruefe() { return LAUF; }\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Ob die Zeile hier je läuft, lässt sich nicht sicher sagen – klicke an eine andere Stelle."
+  },
+  {
+   "name": "unsure_constant_read_by_case",
+   "language": "java",
+   "line": 7,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static int f(int x) { switch (x) { case STUFE: return 1; default: return 0; } }\n    public static void main(String[] args) {\n        while (STUFE > 0) {\n            Robot.home();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Ob die Zeile hier je läuft, lässt sich nicht sicher sagen – klicke an eine andere Stelle."
+  },
+  {
+   "name": "unsure_constant_elsewhere",
+   "language": "java",
+   "line": 6,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n",
    "output": null,
    "hint": "Ob die Zeile hier je läuft, lässt sich nicht sicher sagen – klicke an eine andere Stelle."
   },

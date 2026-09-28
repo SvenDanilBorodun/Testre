@@ -21,7 +21,9 @@
 // the robot (O9).
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import {
+  fireEvent, render, screen, waitFor,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import RunControls from '../RunControls';
 import * as workflowApi from '../../../services/workflowApi';
@@ -359,5 +361,34 @@ describe('RunControls — an unsaved code program that replays is told to save f
     await clickStart({ workflowId: null });
     await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
     expect(mockRos.callService.mock.calls[0][2].workflow_id).toMatch(/^local-/);
+  });
+});
+
+describe('RunControls — Start says why it cannot start (review round 4, MC2)', () => {
+  test('with a reason set, Start is disabled, names it in German, and a click sends nothing', async () => {
+    const reason = 'Eine frühere Version wird gerade wiederhergestellt – bitte kurz warten.';
+    render(
+      <RunControls
+        workflowId="wf-1"
+        blocklyJson={null}
+        simMode={false}
+        simScene={null}
+        codeLanguage="python"
+        codeFiles={FILES}
+        startBlockedReason={reason}
+      />,
+    );
+    const start = screen.getByRole('button', { name: /Start/ });
+    expect(start).toBeDisabled();
+    expect(start).toHaveAttribute('title', reason);
+    await userEvent.click(start);
+    fireEvent.click(start);
+    await new Promise((r) => { setTimeout(r, 20); });
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('without one, the same Start runs', async () => {
+    await clickStart({ startBlockedReason: null });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
   });
 });

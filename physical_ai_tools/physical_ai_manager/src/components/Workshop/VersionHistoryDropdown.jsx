@@ -43,7 +43,10 @@ function fmtTs(iso) {
 // history button is disabled then; a list opened before the program started
 // stays clickable and each „laden" says why (review round 3, MB2f — the same
 // as the „Neu" menu). `onRestoringChange(bool)` tells the page a restore is
-// on its way, so no run starts under it (nb2).
+// on its way, so no run starts under it (nb2). ONE restore at a time (review
+// round 4, mc8): while one is on its way every other „laden" is disabled and
+// says why, and a click that arrives anyway is refused — two overlapping
+// restores told the page [true, true, false] and unlocked it mid-restore.
 function VersionHistoryDropdown({
   workflowId, onRestore, lockedReason = null, onRestoringChange = null,
 }) {
@@ -52,6 +55,8 @@ function VersionHistoryDropdown({
   const [versions, setVersions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [restoringId, setRestoringId] = useState(null);
+  // Set synchronously by the click, before React re-renders the buttons.
+  const inFlightRef = useRef(false);
   // Audit §verhist-r1: ref-based click-outside handler. Without it the
   // popover hangs around after the student clicks the workspace, an
   // accidental discovery that comes up in every QA run.
@@ -95,6 +100,11 @@ function VersionHistoryDropdown({
         toast.error(lockedReason);
         return;
       }
+      if (inFlightRef.current) {
+        toast.error(DE.VERSION_RESTORE_IN_FLIGHT);
+        return;
+      }
+      inFlightRef.current = true;
       setRestoringId(versionId);
       if (typeof onRestoringChange === 'function') onRestoringChange(true);
       try {
@@ -111,6 +121,7 @@ function VersionHistoryDropdown({
       } catch (e) {
         toast.error(`Wiederherstellen fehlgeschlagen: ${e.message || e}`);
       } finally {
+        inFlightRef.current = false;
         setRestoringId(null);
         if (typeof onRestoringChange === 'function') onRestoringChange(false);
       }
@@ -162,8 +173,9 @@ function VersionHistoryDropdown({
                   <button
                     type="button"
                     onClick={() => handleRestore(v.id)}
-                    disabled={restoringId === v.id}
-                    title={lockedReason || undefined}
+                    disabled={restoringId !== null}
+                    title={lockedReason
+                      || (restoringId !== null && restoringId !== v.id ? DE.VERSION_RESTORE_IN_FLIGHT : undefined)}
                     className="text-xs text-blue-600 hover:underline disabled:opacity-50"
                   >
                     {restoringId === v.id ? '…' : DE.VERSION_LOAD}

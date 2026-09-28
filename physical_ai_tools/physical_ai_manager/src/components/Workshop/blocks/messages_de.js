@@ -356,6 +356,10 @@ export const DE = {
   // While a version restore is on its way (review round 3, nb2): no run and
   // no preview starts — the restore would land under a running program.
   VERSION_RESTORE_IN_FLIGHT: 'Eine frühere Version wird gerade wiederhergestellt – bitte kurz warten.',
+  // While the program the student opened is still being fetched (review
+  // round 4, mc10): the old program's files and Ziele must not run under the
+  // new program's id.
+  DOCUMENT_LOADING: 'Das Programm wird noch geladen – bitte kurz warten.',
   PREVIEW_BLOCK_TEACH: 'Erst Vormachen beenden.',
   PREVIEW_BLOCK_HANDGUIDE: 'Der Arm ist freigeschaltet – bitte zuerst festsetzen.',
   PREVIEW_BLOCK_TUTORIAL: 'Während eines Lernpfads kann der Simulator nicht geöffnet werden.',

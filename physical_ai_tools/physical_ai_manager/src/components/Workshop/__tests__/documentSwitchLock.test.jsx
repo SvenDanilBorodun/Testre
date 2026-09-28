@@ -17,7 +17,9 @@
 // finishes after the run started created but not opened.
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import {
+  act, fireEvent, render, screen, waitFor,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import TemplatePicker from '../TemplatePicker';
 import GalleryTab from '../GalleryTab';
@@ -152,5 +154,58 @@ test('nb2: the history tells the page a restore is on its way, and when it is ov
   onRestoringChange.mockClear();
   await userEvent.click(screen.getByRole('button', { name: /Verlauf|Versionen/ }));
   await userEvent.click(await screen.findByRole('button', { name: DE.VERSION_LOAD }));
+  await waitFor(() => expect(onRestoringChange.mock.calls).toEqual([[true], [false]]));
+});
+
+test('mc8: one restore at a time — a second „laden" waits, so the page never unlocks mid-restore', async () => {
+  // Review round 4 (4-A F8): two overlapping restores told the page
+  // [true, true, false] — Start and the previews unlocked while the first
+  // restore was still on its way.
+  mockApi.listWorkflowVersions.mockResolvedValue([
+    { id: 'v1', created_at: '2026-09-27T10:00:00Z' },
+    { id: 'v2', created_at: '2026-09-27T11:00:00Z' },
+  ]);
+  const finish = {};
+  mockApi.restoreWorkflowVersion.mockImplementation((_t, _w, vid) => new Promise((r) => { finish[vid] = r; }));
+  const onRestore = vi.fn();
+  const onRestoringChange = vi.fn();
+  render(<VersionHistoryDropdown workflowId="wf-1" onRestore={onRestore} onRestoringChange={onRestoringChange} />);
+  await userEvent.click(screen.getByRole('button', { name: /Verlauf|Versionen/ }));
+  const [first, second] = await screen.findAllByRole('button', { name: DE.VERSION_LOAD });
+  await userEvent.click(first);
+  // Every other „laden" is disabled while one runs, and says why …
+  const others = screen.getAllByRole('button', { name: DE.VERSION_LOAD });
+  expect(others).toHaveLength(1);
+  expect(others[0]).toBeDisabled();
+  expect(others[0].getAttribute('title')).toBe(DE.VERSION_RESTORE_IN_FLIGHT);
+  // … and a click that arrives anyway (before React re-rendered) is refused.
+  fireEvent.click(second);
+  expect(mockApi.restoreWorkflowVersion).toHaveBeenCalledTimes(1);
+  expect(onRestoringChange.mock.calls).toEqual([[true]]);
+  finish.v1({ id: 'wf-1', blockly_json: {} });
+  await waitFor(() => expect(onRestoringChange.mock.calls).toEqual([[true], [false]]));
+  expect(onRestore).toHaveBeenCalledTimes(1);
+});
+
+test('mc8: the in-flight guard itself — two clicks in one tick start ONE restore', async () => {
+  mockApi.listWorkflowVersions.mockResolvedValue([
+    { id: 'v1', created_at: '2026-09-27T10:00:00Z' },
+    { id: 'v2', created_at: '2026-09-27T11:00:00Z' },
+  ]);
+  let finish;
+  mockApi.restoreWorkflowVersion.mockImplementation(() => new Promise((r) => { finish = r; }));
+  const onRestoringChange = vi.fn();
+  render(<VersionHistoryDropdown workflowId="wf-1" onRestore={vi.fn()} onRestoringChange={onRestoringChange} />);
+  await userEvent.click(screen.getByRole('button', { name: /Verlauf|Versionen/ }));
+  const [first, second] = await screen.findAllByRole('button', { name: DE.VERSION_LOAD });
+  // Both handlers run before React re-renders (no disabled attribute yet).
+  act(() => {
+    first.click();
+    second.click();
+  });
+  expect(mockApi.restoreWorkflowVersion).toHaveBeenCalledTimes(1);
+  expect(onRestoringChange.mock.calls).toEqual([[true]]);
+  expect(mockToast.error).toHaveBeenCalledWith(DE.VERSION_RESTORE_IN_FLIGHT);
+  finish({ id: 'wf-1', blockly_json: {} });
   await waitFor(() => expect(onRestoringChange.mock.calls).toEqual([[true], [false]]));
 });

@@ -435,3 +435,35 @@ describe('nb2: no run and no preview starts while a version restore is on its wa
     expect(runControls().getAttribute('data-start-blocked')).toBe('');
   });
 });
+
+describe('mc10: no run and no preview while the opened program is still loading', () => {
+  test('Start and ▶ say why until the new program arrived; then they are free', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    const runControls = () => screen.getByTestId('run-controls');
+    expect(runControls().getAttribute('data-start-blocked')).toBe('');
+    const { provider } = mockPage.host;
+    // Another program is opened; its row is still on its way.
+    let arrive;
+    mockApi.getWorkflow.mockImplementation(() => new Promise((r) => {
+      arrive = () => r({ ...PYTHON_ROW, id: 'wf-2', code_files: { 'main.py': 'import robot\n' } });
+    }));
+    mockState = baseState({ selectedWorkflowId: 'wf-2' });
+    rerender(<WorkshopPage isActive />);
+    // The old program's files and Ziele are still the page's — Start must
+    // not run them under the new id.
+    expect(runControls().getAttribute('data-files')).toBe('main.py,hilfe.py');
+    expect(runControls().getAttribute('data-start-blocked'))
+      .toBe('Das Programm wird noch geladen – bitte kurz warten.');
+    mockToast.error.mockClear();
+    act(() => {
+      provider.dispatchAction({ type: 'preview', asset: { kind: 'pin', id: 'p1', name: 'Ablage' } });
+    });
+    expect(mockToast.error).toHaveBeenCalledWith('Das Programm wird noch geladen – bitte kurz warten.');
+    await act(async () => { arrive(); });
+    expect(runControls().getAttribute('data-start-blocked')).toBe('');
+    expect(runControls().getAttribute('data-files')).toBe('main.py');
+  });
+});

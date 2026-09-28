@@ -465,6 +465,13 @@ function WorkshopPage({ isActive }) {
   // or preview starts meanwhile — a restore that lands while a program runs is
   // refused by the switch lock, and the cloud row and the editor would part.
   const [versionRestoring, setVersionRestoring] = useState(false);
+  // Why Start may not start a run right now, or null: while the program the
+  // student opened is still being fetched (review round 4, mc10 — Start would
+  // run the OLD program's files and Ziele under the NEW program's id), and
+  // while a version restore is on its way (nb2). Previews read the same two.
+  const startBlockedReason = hydrating
+    ? DE.DOCUMENT_LOADING
+    : (versionRestoring ? DE.VERSION_RESTORE_IN_FLIGHT : null);
   // Batch 2b: rosbridge liveness gates the real-arm jog panel and Vormachen (the same
   // signal the rest of the app uses for „Roboter verbunden").
   const heartbeatStatus = useSelector((s) => s.tasks?.heartbeatStatus);
@@ -1407,6 +1414,7 @@ function WorkshopPage({ isActive }) {
       heartbeatStatus,
       runState,
       paused,
+      documentLoading: hydrating,
       versionRestoring,
       teachOpen,
       jogHandGuideOn,
@@ -2064,7 +2072,7 @@ function WorkshopPage({ isActive }) {
                   codeLanguage={codeLanguage}
                   codeFiles={codeFiles}
                   destinationStore={activeStore}
-                  startBlockedReason={versionRestoring ? DE.VERSION_RESTORE_IN_FLIGHT : null}
+                  startBlockedReason={startBlockedReason}
                   debugOpen={simMode ? simDebugOpen : dockOpen.includes('debug')}
                   onToggleDebug={() => {
                     if (simMode) setSimDebugOpen((v) => !v);

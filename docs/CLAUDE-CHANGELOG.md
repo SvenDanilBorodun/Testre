@@ -6,6 +6,107 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-09-28 (fix round 4) — an empty row is not a step back, a paste is what was copied
+
+Two more fresh reviewers (4-A adversarial, 4-B regression and delivery) read
+the branch after fix round 3. A fresh implementer fixed every finding; each
+fix has a test that failed first, and each protecting test was proven by
+mutation (its production hunk removed in a scratch copy of the commit: 37
+mutations, every one red; one hunk no test could tell apart was taken out
+instead). The owner decided two things (R4-O1, R4-O2) and
+the conductor three. This entry supersedes the round-3 sentence „a
+multi-line paste into a line's indentation keeps its relative shape at the
+cursor's column".
+
+**An empty row was read as column 0 (MC1).** Round 3's rule kept „the
+student's own indentation" on a blank line when it was a level a statement
+may take — and the empty string always is (the top level). So Enter on the
+empty line between two statements of a function body wrote a line at
+column 0: in `import robot / def main(): / robot.home() / (empty) /
+robot.log(1) / main()`, Enter on the empty line and `robot.beep()` gave a
+program CPython 3.12.13 refused with „IndentationError: unexpected indent",
+where stock CodeMirror gives the body's four spaces. „Einfügen", a drop and
+Vormachen refused the same spot with „Hier passt die Einrückung nicht zum
+Block". Now an empty row (or a column-0 comment) takes the level the next
+statement needs; only explicit, non-empty whitespace is a step back; at the
+end of the file, with nothing after it, column 0 stays. The fixture cases
+`dedented_blank_mid_block` and `before_else_clause` (the empty row before an
+`else:`) turned from refusals into insertions; the clause and indentation
+hints keep cases of their own with explicit whitespace.
+
+**A paste is what was copied (R4-O1, mc1, mc2).** Round 3's paste filter
+re-indented every multi-line paste onto an indented empty position, which
+changed a pasted multi-line string's content and a snippet's structure. It
+is gone. The one exception is the text Vormachen itself put on the
+clipboard, remembered in memory: pasted as it is, it lands like „Einfügen"
+— whole lines below the cursor line, checked by the same validator, or
+nothing and the German reason. The clipboard text now ends with a line
+break: following Vormachen's own „Strg+V" hint at a line's end used to give
+`robot.home()robot.move_to(…)`.
+
+**The validator's remaining holes (mc4, mc5, mc6).** A handler-less
+`try`/`finally` around a body that never completes (the „clean up on stop"
+pattern) let a dead line in; so did `if True: return`, a `match` whose
+catch-all case and every case return, `while "x":`, `os.abort()` and Java's
+`Runtime.getRuntime().halt(0)`. A `with suppress(…)` whose body raises was
+wrongly treated as never completing, and a Java row holding a whole
+one-line switch was refused. On the Java side a `return LAUF;` or `case
+STUFE:` was read as a declaration, so an interface constant from another
+file looked like a variable and javac rejected the „reachable" line as
+unreachable (4-A's K21/K21c). Proving that fix found the same broken outcome
+through a real declaration: a same-named PARAMETER of another method
+(javac 21: „unreachable statement"). The constant lookup now reads only the
+declaration whose scope holds the condition. The insertion fixture has 206
+cases (100 insertions, 106 German hints; 165 before this round); every
+insertion was compiled and run to its marker by CPython 3.12.3 and javac
+21.0.12 in the rebuilt runner image, and the editor fixture's 48 typed
+programs by CPython. 4-A's own 86 probes: 85 as the review expected; its Q14 (`try: while
+True: … except KeyboardInterrupt: pass`) stays allowed and dead in the
+runner, recorded in `docs/KNOWN-ISSUES.md`.
+
+**The final live values could hold the program's end for half a minute
+(mc3).** `LiveValues.final` bounded its waits for another thread's check and
+for the server's floor, then called the stub, whose RPC lock it waited for
+without a bound; that lock is not fair, and a thread looping robot calls
+kept it. In the rebuilt image a looping worker held the end 107.6 s (0.51 s
+now) and one 3 s call 2.8 s (0.51 s now). `final` takes the lock itself with
+the time left of its one deadline and skips the send when it is not free.
+The lock's unfairness itself is pre-existing and stays (the conductor's
+decision); it still delays `__exit`.
+
+**Java `zeige` (nc1, nc2).** A student's `toString()` or iterator that
+threw — a `ConcurrentModificationException` included — reached the program
+from `Robot.zeige`; it shows „<?>" now. A `Path` showed as nested „…"
+lists, a huge `BigInteger`/`BigDecimal` as „Infinity", and a `long` past
+2^53 went as an exact integer JavaScript then rounded without a sign; they
+show as text, text, and a double (the Python stub's convention). In the
+image, a Java program through the real launcher showed
+`[VAR:pfad="/tmp/ordner/datei.txt"]`, `[VAR:dezimal="1E+400"]`,
+`[VAR:boese="<?>"]`, `[VAR:lang=9007199254740992.0]` and ended normally.
+
+**The page (MC2, mc7, mc8, mc9, mc10, nc5).** Nothing failed when Start
+ignored its blocking reason (4-A's mutation R31); a RunControls test pins it.
+While the program the student opened was still being fetched, Start could
+run the OLD program's files and Ziele under the NEW id (pre-existing); Start
+and the previews now say „Das Programm wird noch geladen – bitte kurz
+warten.". Two overlapping version restores unlocked Start mid-restore; one
+restore runs at a time. A `replay` keyword call split over two lines was
+seen by the editor's scanner but not by the run's fetch, so the run failed
+with „Unbekannte Aufnahme"; the fetch takes the scanner's names too. Two
+hunks no test protected turned out load-bearing and got tests: the document
+token bumped when a fetch STARTS (an insertion finishing in that window
+wrote into a program about to disappear) and the cursor moved after an
+insertion (without it a second „Einfügen" landed above the first).
+
+**Found on the way.** A CRLF program gained one empty line at its end every
+time the editor synced an outside change (the minimal-diff sync compared
+LF lines with CRLF text and carried a stray `\r` in); the value is compared
+as lines now.
+
+**Historical note (nc6).** Commit 08cd983 of round 1 fails eslint on its own
+(an `act()` wrapper, fixed by the next commit 2939e9f); history was not
+rewritten.
+
 ### Unreleased, 2026-09-27 (fix round 3) — the student puts the line, the block keeps its indentation
 
 Two more fresh reviewers (3-A adversarial, 3-B regression and delivery)

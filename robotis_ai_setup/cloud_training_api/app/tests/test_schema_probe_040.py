@@ -84,18 +84,16 @@ class TestSchemaProbeKnows040(unittest.TestCase):
             self.columns,
         )
 
-    def test_update_workflow_code_is_probed_with_the_routes_signature(self) -> None:
+    def test_update_workflow_code_is_probed(self) -> None:
         # PostgREST resolves an RPC on (name, arg-name set): a probe with the
-        # wrong names reports the function as MISSING and aborts every deploy,
-        # so the shape is pinned exactly.
+        # wrong names reports the function as MISSING and aborts every deploy.
+        # Migration 041 widened the function to five arguments; the exact
+        # five-argument shape is pinned in test_schema_probe_041.py.
         self.assertIn("update_workflow_code", self.rpcs)
-        self.assertEqual(
-            ast.unparse(self.rpcs["update_workflow_code"]),
-            "{'p_workflow_id': dummy, 'p_user_id': dummy, "
-            "'p_code_files': {}, 'p_code_language': 'python'}",
-        )
 
-    def test_the_probe_arg_names_are_the_migrations_parameter_names(self) -> None:
+    def test_the_probe_still_names_every_040_parameter(self) -> None:
+        # 041 ADDS p_blockly_json (DEFAULT NULL) and keeps the four 040 names,
+        # which is what lets an older API's four named arguments resolve.
         with open(MIGRATION_040, encoding="utf-8") as fh:
             sql = fh.read()
         m = re.search(
@@ -107,7 +105,8 @@ class TestSchemaProbeKnows040(unittest.TestCase):
         probe = self.rpcs["update_workflow_code"]
         self.assertIsInstance(probe, ast.Dict)
         probe_params = {ast.literal_eval(k) for k in probe.keys}
-        self.assertEqual(probe_params, sql_params)
+        self.assertEqual(probe_params - sql_params, {"p_blockly_json"})
+        self.assertEqual(sql_params - probe_params, set())
 
 
 if __name__ == "__main__":

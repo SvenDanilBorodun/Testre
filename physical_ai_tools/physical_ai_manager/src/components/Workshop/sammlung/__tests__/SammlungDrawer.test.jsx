@@ -29,6 +29,7 @@ import { DE, formatDe } from '../../blocks/messages_de';
 import { getDestinationStore, registerDestinationSerializer } from '../destinationStore';
 import { createSammlungProvider } from '../provider';
 import SammlungDrawer from '../SammlungDrawer';
+import { CODE_DE } from '../../code/codeMessagesDe';
 import { jumpToBlock } from '../blockUsage';
 import * as workflowApi from '../../../../services/workflowApi';
 
@@ -78,7 +79,9 @@ const ITEMS = [
 const replay = (name, id) => ({ type: 'edubotics_replay_trajectory', id, fields: { NAME: name } });
 const ref = (name, id) => ({ type: 'edubotics_destination_ref', id, fields: { NAME: name } });
 
-function setup({ blocks = [], variables, drawer = {}, toolboxWidth = 118, pins = [] } = {}) {
+function setup({
+  blocks = [], variables, drawer = {}, toolboxWidth = 118, pins = [], capabilities = {},
+} = {}) {
   ws = new Blockly.Workspace();
   Blockly.serialization.workspaces.load({
     blocks: { languageVersion: 0, blocks: blocks.map((b, i) => ({ x: 0, y: i * 80, ...b })) },
@@ -92,7 +95,7 @@ function setup({ blocks = [], variables, drawer = {}, toolboxWidth = 118, pins =
   const store = getDestinationStore(ws);
   pins.forEach((p) => store.add(p));
   const provider = createSammlungProvider({
-    capabilities: { hardware: true, drawer: true },
+    capabilities: { hardware: true, drawer: true, ...capabilities },
     robotType: 'omx_f',
     trajectories: { status: 'ready', items: ITEMS },
   });
@@ -373,5 +376,20 @@ describe('SammlungDrawer: rename and delete', () => {
     // A failed rename keeps the focus on „Winken", so its buttons come back.
     await act(async () => { fail(new Error('offline')); });
     await waitFor(() => expect(screen.getByRole('button', { name: DE.DRAWER_DELETE_RECORDING })).toBeEnabled());
+  });
+});
+
+describe('SammlungDrawer over a Blockly workspace: the code-only affordances stay away (review n7)', () => {
+  it('no „Neu" group, no „Einfügen", no draggable rows — whatever the rig can do', () => {
+    setup({
+      pins: [PIN, POSE],
+      capabilities: { teach: true, pinCamera: true, pinSim: true },
+    });
+    for (const tab of ['Variablen', 'Aufnahmen', 'Ziele', 'Positionen']) {
+      fireEvent.click(screen.getByRole('tab', { name: new RegExp(tab) }));
+      expect(screen.queryByRole('group', { name: CODE_DE.SAMMLUNG_NEW })).toBeNull();
+      expect(screen.queryByRole('button', { name: new RegExp(`^${CODE_DE.SAMMLUNG_INSERT}`) })).toBeNull();
+      expect(screen.queryAllByRole('listitem').filter((li) => li.getAttribute('draggable') === 'true')).toEqual([]);
+    }
   });
 });

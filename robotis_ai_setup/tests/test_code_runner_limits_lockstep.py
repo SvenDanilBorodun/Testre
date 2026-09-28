@@ -11,6 +11,11 @@ What is fenced:
     supervisor re-validates the ``start`` envelope; the hook bounds the
     locals it sends) against the same file;
   * the two stdout bounds against ``code_rpc.py``;
+  * the live values' and the breakpoint's value bounds, the stand-in for a
+    value with no room, the runner's pace and the server's „skipped" answer
+    in ``lib/edubotics_debug.py`` against ``robot_api.py`` — and the server's
+    per-frame caps are DERIVED from those same numbers, so the runner's worst
+    case fits them by construction (review round 2, mi4);
   * the frame encoder: the supervisor's ``encode_frame_body`` is the SAME
     ``json.dumps(obj, ensure_ascii=False, separators=(',', ':'))`` call as
     ``code_rpc.encode_frame_body``'s, keyword for keyword — a project whose
@@ -34,6 +39,7 @@ _LIMITS = _RUNNER / 'runner_limits.py'
 _SUPERVISOR = _RUNNER / 'supervisor.py'
 _STUDENT_MAIN = _RUNNER / 'student_main.py'
 _STUB = _RUNNER / 'lib' / 'robot.py'
+_DEBUG = _RUNNER / 'lib' / 'edubotics_debug.py'
 _ROBOT_API = _WORKFLOW / 'robot_api.py'
 _CODE_RPC = _WORKFLOW / 'code_rpc.py'
 _CODE_PROGRAM = _WORKFLOW / 'code_program.py'
@@ -129,6 +135,51 @@ class RpcLimitsTwin(unittest.TestCase):
         for name in ('MAX_CALLS_PER_S', 'BURST', 'PERCEPTION_MAX_PER_S',
                      'PERCEPTION_BURST', 'MAX_FRAME_BYTES'):
             self.assertEqual(stub.get(name), self.runner[name], name)
+
+
+class ShownValueBoundsTwin(unittest.TestCase):
+    """The runner renders shown values within robot_api's per-value bounds;
+    the server trims a frame only past caps derived from the SAME bounds."""
+
+    _TWINS = ('PAUSED_MAX_LOCALS', 'PAUSED_VALUE_MAX_CHARS', 'LIVE_VALUE_MAX_NODES',
+              'LIVE_VALUE_MAX_CHARS', 'SHOWN_TOO_BIG', 'LIVE_VALUES_INTERVAL_S',
+              'VARS_REPLY_SKIPPED')
+
+    @classmethod
+    def setUpClass(cls):
+        cls.api_tree = _tree(_ROBOT_API)
+        cls.api = _module_constants(cls.api_tree)
+        cls.debug = _module_constants(_tree(_DEBUG))
+        cls.rpc = _module_constants(_tree(_CODE_RPC))
+
+    def test_the_runner_uses_robot_apis_numbers(self):
+        for name in self._TWINS:
+            self.assertIn(name, self.api, name)
+            self.assertEqual(self.debug.get(name), self.api[name], name)
+        self.assertEqual(self.debug['SHOWN_NAME_MAX_CHARS'], self.rpc['_MAX_NAME_CHARS'])
+
+    def test_the_servers_frame_caps_are_derived_from_them_and_hold_a_full_frame(self):
+        derived = {}
+        for name in ('SHOWN_FRAME_MAX_NODES', 'SHOWN_FRAME_MAX_CHARS'):
+            expr = ast.Expression(_assigned_value(self.api_tree, name))
+            derived[name] = eval(compile(expr, name, 'eval'),  # noqa: S307 — our own AST
+                                 {'__builtins__': {}, 'max': max}, dict(self.api))
+        n = self.api['PAUSED_MAX_LOCALS']
+        # A live frame: n values of at most LIVE_VALUE_MAX_NODES / _CHARS.
+        self.assertGreaterEqual(derived['SHOWN_FRAME_MAX_NODES'], n * self.api['LIVE_VALUE_MAX_NODES'])
+        self.assertGreaterEqual(derived['SHOWN_FRAME_MAX_CHARS'], n * self.api['LIVE_VALUE_MAX_CHARS'])
+        # A breakpoint frame: n values of JSON text ≤ PAUSED_VALUE_MAX_CHARS,
+        # each node at least two characters of it.
+        paused = self.api['PAUSED_VALUE_MAX_CHARS']
+        self.assertGreaterEqual(derived['SHOWN_FRAME_MAX_NODES'], n * (paused // 2 + 1))
+        self.assertGreaterEqual(derived['SHOWN_FRAME_MAX_CHARS'], n * paused)
+        # …and code_rpc imports them rather than picking its own.
+        self.assertNotIn('SHOWN_FRAME_MAX_NODES', self.rpc)
+        self.assertNotIn('SHOWN_FRAME_MAX_CHARS', self.rpc)
+
+    def test_an_honest_runner_is_never_skipped_by_the_servers_floor(self):
+        self.assertGreater(self.api['LIVE_VALUES_INTERVAL_S'], self.api['VARS_MIN_INTERVAL_S'])
+        self.assertNotIn('VARS_MIN_INTERVAL_S', self.rpc)
 
 
 class FrameEncoderTwin(unittest.TestCase):
@@ -234,13 +285,21 @@ class ControlVocabulary(unittest.TestCase):
 
     def test_the_exit_report_rides_the_data_socket_as_the_server_reads_it(self):
         # The launcher calls __exit with ONE dict; the server takes args[0].
-        fn = _function(_tree(_STUDENT_MAIN), 'main')
+        # Since review round 5 (md7) the call sits in `finish_run`, which
+        # `main` hands the exit report as its `info`.
+        tree = _tree(_STUDENT_MAIN)
+        fn = _function(tree, 'finish_run')
         calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
-                 and ast.unparse(n.func) == 'robot._rpc.call'
+                 and ast.unparse(n.func) == 'rpc.call'
                  and n.args and isinstance(n.args[0], ast.Constant)
                  and n.args[0].value == '__exit']
         self.assertEqual(len(calls), 1)
         self.assertEqual(ast.unparse(calls[0].args[1]), '[info]')
+        self.assertEqual([a.arg for a in fn.args.args][3], 'info')
+        handoffs = [n for n in ast.walk(_function(tree, 'main')) if isinstance(n, ast.Call)
+                    and ast.unparse(n.func) == 'finish_run']
+        self.assertEqual(len(handoffs), 1)
+        self.assertEqual(ast.unparse(handoffs[0].args[3]), 'info')
 
 
 if __name__ == '__main__':

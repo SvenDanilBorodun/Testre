@@ -212,6 +212,11 @@ function rewriteReplayGrouped(workspace, fromName, toName) {
  * cloud's new name — then only the saved document is behind, and saving again
  * (the advice in ERR_RENAME_SPLIT) really fixes it.
  *
+ * WHAT is rewritten is the caller's: `workspace` (its replay blocks, in one
+ * event group — the Blockly document) or `rewrite(from, to)` (a code program's
+ * `replay("…")` string arguments — code/codeAssetDocument.js). The order above
+ * is the same for both.
+ *
  * Replacing a clashing recording deletes its rows FIRST (fetched before the
  * delete, like deleteRecordingRows) and re-creates them whenever the rename does
  * not end ok but the cloud is back at `fromName` — „nothing else changed" has to
@@ -221,8 +226,11 @@ function rewriteReplayGrouped(workspace, fromName, toName) {
  * @returns {Promise<{ok:boolean, error?:string, cancelled?:boolean, persistent?:boolean}>}
  */
 export async function renameRecording({
-  workspace, api, accessToken, workflowId, fromName, toName, items, saveWorkflowNow, confirmReplace,
+  workspace, rewrite, api, accessToken, workflowId, fromName, toName, items, saveWorkflowNow, confirmReplace,
 }) {
+  const rewriteRefs = typeof rewrite === 'function'
+    ? rewrite
+    : (from, to) => rewriteReplayGrouped(workspace, from, to);
   // Trimmed FIRST: the cloud stores the trimmed form, so an untrimmed block
   // NAME would never match the renamed row.
   const to = String(toName ?? '').trim();
@@ -254,7 +262,7 @@ export async function renameRecording({
     return giveBackReplaced({ ok: false, error: formatDe(DE.ERR_RENAME_FAILED, messageOf(err)) });
   }
 
-  rewriteReplayGrouped(workspace, fromName, to);
+  rewriteRefs(fromName, to);
 
   let saved = null;
   try {
@@ -272,7 +280,7 @@ export async function renameRecording({
     // Cloud = `to`, blocks = `to`; only the saved document is behind.
     return { ok: false, persistent: true, error: formatDe(DE.ERR_RENAME_SPLIT, to) };
   }
-  rewriteReplayGrouped(workspace, to, fromName);
+  rewriteRefs(to, fromName);
   return giveBackReplaced({ ok: false, error: formatDe(DE.ERR_RENAME_FAILED, saveError) });
 }
 

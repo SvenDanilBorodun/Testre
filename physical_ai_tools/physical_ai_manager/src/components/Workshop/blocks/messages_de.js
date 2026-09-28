@@ -349,6 +349,26 @@ export const DE = {
   // utils/simPreview.js::PREVIEW_BLOCK_TITLES_DE — why ▶ is refused client-side.
   PREVIEW_BLOCK_OFFLINE: 'Keine Verbindung zum Roboter-Dienst.',
   PREVIEW_BLOCK_RUNNING: 'Ein Programm läuft gerade – erst auf „Stopp" drücken.',
+  // Every action that replaces the open document (a gallery pick, „Öffnen",
+  // „Neu", a version restore, an opening clone) while a program runs or
+  // stands at a breakpoint (review round 2, owner decision R2-O3).
+  STOP_PROGRAM_FIRST: 'Stoppe zuerst dein Programm.',
+  // While a version restore is on its way (review round 3, nb2): no run and
+  // no preview starts — the restore would land under a running program.
+  VERSION_RESTORE_IN_FLIGHT: 'Eine frühere Version wird gerade wiederhergestellt – bitte kurz warten.',
+  // While the program the student opened is still being fetched (review
+  // round 4, mc10): the old program's files and Ziele must not run under the
+  // new program's id.
+  DOCUMENT_LOADING: 'Das Programm wird noch geladen – bitte kurz warten.',
+  // From „Start" until the run is marked running (review round 5, MD5): the
+  // start still awaits the breakpoints and the recordings, and a switch then
+  // started the old program's run while the new one was shown.
+  PROGRAM_STARTING: 'Das Programm startet gerade – bitte kurz warten.',
+  // While a save is on its way (review round 5): a version restore landing
+  // under it would part the cloud row from the editor.
+  SAVE_IN_FLIGHT: 'Das Programm wird gerade gespeichert – bitte kurz warten.',
+  // A start whose program was replaced while it waited (review round 5, MD5).
+  PROGRAM_CHANGED_BEFORE_START: 'Inzwischen ist ein anderes Programm geöffnet – bitte noch einmal starten.',
   PREVIEW_BLOCK_TEACH: 'Erst Vormachen beenden.',
   PREVIEW_BLOCK_HANDGUIDE: 'Der Arm ist freigeschaltet – bitte zuerst festsetzen.',
   PREVIEW_BLOCK_TUTORIAL: 'Während eines Lernpfads kann der Simulator nicht geöffnet werden.',

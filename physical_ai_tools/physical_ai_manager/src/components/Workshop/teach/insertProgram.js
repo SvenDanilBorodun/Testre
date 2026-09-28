@@ -68,12 +68,12 @@ function safeGripperState(gripperStateOf, item) {
 
 const knownState = (v) => (v === 'open' || v === 'closed' ? v : null);
 
-function recordingStatement(item) {
+function recordingStep(item) {
   if (item.status !== 'saved' || typeof item.name !== 'string' || !item.name) return null;
-  return { type: 'edubotics_replay_trajectory', fields: { NAME: item.name } };
+  return { type: 'replay', name: item.name };
 }
 
-function placeStatement(item, placeNameOf) {
+function placeStep(item, placeNameOf) {
   let name = null;
   try {
     name = placeNameOf(item);
@@ -81,14 +81,17 @@ function placeStatement(item, placeNameOf) {
     name = null;
   }
   if (typeof name !== 'string' || !name) return null;
-  return {
-    type: 'edubotics_move_to',
-    inputs: { DESTINATION: { block: { type: 'edubotics_destination_ref', fields: { NAME: name } } } },
-  };
+  return { type: 'move_to', name };
 }
 
 /**
- * Pure. `items` are the overlay's „In dieser Runde" rows: recordings
+ * Pure. The round as language-neutral STEPS — `{type:'replay', name}`,
+ * `{type:'move_to', name}`, `{type:'close_gripper'}`, `{type:'open_gripper'}`
+ * — in capture order. One reading of the round for both notations: the
+ * Blockly stack (`buildProgramBlocks`) and a code program's lines
+ * (`code/codeInsert.js::stepsToCode`) are both rendered from it.
+ *
+ * `items` are the overlay's „In dieser Runde" rows: recordings
  * (`{kind:'recording', name, status}`) and places (`{kind:'pose'|'pin'|'ziel',
  * name, entryId}`).
  *
@@ -96,39 +99,64 @@ function placeStatement(item, placeNameOf) {
  *   no longer in the store (skipped). Default: the row's own name.
  * opts.gripperStateOf(item) → recordings `{ start, end }`, places `{ state }`
  *   ('open' | 'closed' | null each), or null. Default `() => null`: no gripper
- *   block. A place whose known state differs from the last known state gets
+ *   step. A place whose known state differs from the last known state gets
  *   „schließe/öffne Greifer" AFTER its move; the first known state never emits
  *   (nothing to compare it with), and an unknown state never emits nor resets.
  *   Only EMITTED items advance the state — a skipped item moves no arm.
  *
- * @returns {{ json: object|null, count: number }} `count` = top-level statements.
+ * @returns {Array<{type: string, name?: string}>}
  */
-export function buildProgramBlocks(items, opts = {}) {
+export function buildProgramSteps(items, opts = {}) {
   const placeNameOf = typeof opts.placeNameOf === 'function' ? opts.placeNameOf : (item) => item.name;
   const gripperStateOf = typeof opts.gripperStateOf === 'function' ? opts.gripperStateOf : () => null;
-  const statements = [];
+  const steps = [];
   let prev = null;
   for (const item of Array.isArray(items) ? items : []) {
     if (item && item.kind === 'recording') {
-      const s = recordingStatement(item);
+      const s = recordingStep(item);
       if (s) {
-        statements.push(s);
+        steps.push(s);
         const g = safeGripperState(gripperStateOf, item);
         prev = (g && knownState(g.end)) || prev;
       }
     } else if (item && (item.kind === 'pose' || item.kind === 'pin' || item.kind === 'ziel')) {
-      const s = placeStatement(item, placeNameOf);
+      const s = placeStep(item, placeNameOf);
       if (s) {
-        statements.push(s);
+        steps.push(s);
         const g = safeGripperState(gripperStateOf, item);
         const state = g && knownState(g.state);
         if (state && prev && state !== prev) {
-          statements.push({ type: state === 'closed' ? 'edubotics_close_gripper' : 'edubotics_open_gripper' });
+          steps.push({ type: state === 'closed' ? 'close_gripper' : 'open_gripper' });
         }
         prev = state || prev;
       }
     }
   }
+  return steps;
+}
+
+// One step → its block. Every step type buildProgramSteps emits has a row.
+function stepStatement(step) {
+  if (step.type === 'replay') {
+    return { type: 'edubotics_replay_trajectory', fields: { NAME: step.name } };
+  }
+  if (step.type === 'move_to') {
+    return {
+      type: 'edubotics_move_to',
+      inputs: { DESTINATION: { block: { type: 'edubotics_destination_ref', fields: { NAME: step.name } } } },
+    };
+  }
+  return { type: step.type === 'close_gripper' ? 'edubotics_close_gripper' : 'edubotics_open_gripper' };
+}
+
+/**
+ * Pure. The round (see buildProgramSteps) as ONE block stack, chained through
+ * `next`, in step order.
+ *
+ * @returns {{ json: object|null, count: number }} `count` = top-level statements.
+ */
+export function buildProgramBlocks(items, opts = {}) {
+  const statements = buildProgramSteps(items, opts).map(stepStatement);
   let json = null;
   for (let i = statements.length - 1; i >= 0; i -= 1) {
     json = json ? { ...statements[i], next: { block: json } } : { ...statements[i] };

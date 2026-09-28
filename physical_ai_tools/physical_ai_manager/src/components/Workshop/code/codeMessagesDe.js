@@ -87,6 +87,82 @@ export const CODE_DE = Object.freeze({
   // sentence LEADS; this label introduces the raw line beneath it.
   ERROR_TECHNIK_LABEL: 'Technische Meldung:',
 
+  // The Sammlung inside a code program (2026-09-27, owner decisions O4–O9):
+  // the editor's warnings and hover texts for asset names, the sidebar section,
+  // the „Neu" menu, insertion, and the Variablen notes. The warnings follow
+  // sammlung/referenceValidators.js: only a recording or a Ziel/Position the
+  // Sammlung verifiably lacks is marked, never an object type.
+  ASSET_MISSING_RECORDING: 'Eine Aufnahme „{0}“ gibt es in diesem Programm nicht — nimm sie mit '
+    + '„Vormachen“ auf oder wähle eine vorhandene.',
+  ASSET_MISSING_PLACE: '„{0}“ ist kein Ziel und keine Position deiner Sammlung und wird im Programm '
+    + 'auch nicht gesetzt — lege es an oder wähle ein vorhandenes.',
+  ASSET_KIND_PIN: 'Ziel',
+  ASSET_KIND_POSE: 'Position',
+  ASSET_KIND_CODE_PIN: 'Ziel, im Programm gesetzt',
+  ASSET_KIND_RECORDING: 'Aufnahme',
+  ASSET_KIND_COUNTER: 'Zähler',
+  ASSET_KIND_OBJECT: 'Objekt',
+  HOVER_PIN: 'Ziel „{0}“ · x {1} cm · y {2} cm',
+  HOVER_POSE: 'Position „{0}“ · x {1} cm · y {2} cm · z {3} cm',
+  HOVER_CODE_PIN: 'Ziel „{0}“ · wird im Programm mit pin gesetzt',
+  HOVER_RECORDING: 'Aufnahme „{0}“ · {1} s',
+  HOVER_RECORDING_VERSIONS: 'Aufnahme „{0}“ · {1} s · {2} Versionen',
+  SAMMLUNG_NEW: 'Neu',
+  SAMMLUNG_INSERT: 'Einfügen',
+  SAMMLUNG_INSERT_TITLE: 'Unter der Zeile einfügen, in der zuletzt der Cursor stand — '
+    + 'oder die Zeile in den Code ziehen.',
+  INSERTED_AT: 'In {0} ab Zeile {1} eingefügt.',
+  SAMMLUNG_INSERT_FAILED: 'Der Aufruf konnte nicht eingefügt werden. Bitte versuche es noch einmal.',
+  SAMMLUNG_OPEN_TAB: '„{0}“ in der Sammlung öffnen',
+  SAMMLUNG_NEW_MENU: 'Neu in der Sammlung',
+  TEACH_INSERT_LINES: 'Als Programm einfügen ({0} Zeilen)',
+  TEACH_INSERT_LINE_ONE: 'Als Programm einfügen (1 Zeile)',
+  TEACH_INSERT_FAILED: 'Die Zeilen konnten nicht eingefügt werden.',
+  // Where an inserted line goes is the student's choice (owner decision
+  // R3-O4): directly below the line the cursor is on. Without a cursor
+  // nothing is written; a spot where the line could not stand or never run
+  // is refused with one of the SHORT reasons below — never moved elsewhere.
+  CLICK_FIRST_HINT: 'Klicke zuerst in deinen Code, wo die Zeile hin soll.',
+  // Vormachen without a cursor: the lines go to the clipboard instead.
+  COPIED_PASTE_HINT: 'Kopiert – klicke in deinen Code und drücke Strg+V.',
+  // The student opened another program while the insertion was loading.
+  INSERT_DOCUMENT_CHANGED: 'Inzwischen ist ein anderes Programm offen – es wurde nichts eingefügt.',
+  // A Java cursor on an import, class or field line: statements only go
+  // inside a method (review round 2, mi3).
+  NOT_IN_METHOD_HINT: 'Hier kann kein Befehl stehen – klicke in eine Methode, zum Beispiel in main, '
+    + 'wo es eingefügt werden soll.',
+  // Only when the program really has an unclosed bracket or text (review
+  // round 3, nb1).
+  NO_SAFE_PLACE_HINT: 'Hier geht es nicht – im Programm ist eine Klammer oder ein Text nicht '
+    + 'geschlossen. Bitte zuerst schließen.',
+  INSERT_UNREADABLE_HINT: 'Diese Stelle lässt sich nicht sicher bestimmen – klicke in eine andere Zeile '
+    + 'mit einem Befehl.',
+  INSERT_LEADING_BLOCK_HINT: 'Hier geht es nicht – oben stehen die Imports (und die Beschreibung) des '
+    + 'Programms. Klicke in eine Zeile darunter.',
+  INSERT_INSIDE_EXPRESSION_HINT: 'Hier geht es nicht – die Zeile gehört noch zu einem Ausdruck oder Text '
+    + 'über mehrere Zeilen. Klicke in seine letzte Zeile.',
+  INSERT_DOCSTRING_HINT: 'Hier geht es nicht – direkt darunter steht die Beschreibung (Docstring). Klicke '
+    + 'in eine Zeile darunter.',
+  INSERT_DECORATOR_HINT: 'Hier geht es nicht – zwischen einem @-Dekorator und seiner Funktion darf nichts '
+    + 'stehen.',
+  INSERT_MATCH_HINT: 'Auf einer match- oder case-Zeile geht es nicht – klicke in eine Zeile in einem '
+    + 'case-Zweig.',
+  INSERT_SWITCH_HINT: 'Auf einer switch- oder case-Zeile geht es nicht – klicke in eine Zeile in einem '
+    + 'case-Zweig oder unter die switch-Anweisung.',
+  INSERT_CLAUSE_HINT: 'Hier geht es nicht – vor einem else, elif, except oder finally darf keine Zeile '
+    + 'stehen. Klicke in die Zeile darüber.',
+  INSERT_INDENT_HINT: 'Hier passt die Einrückung nicht zum Block – klicke an das Ende einer Zeile im '
+    + 'selben Block.',
+  INSERT_INDENT_BROKEN_HINT: 'Die Einrückung im Programm passt nicht zusammen – bitte zuerst korrigieren.',
+  // {0}: what stands before the spot („return“, eine Endlosschleife, …).
+  INSERT_NEVER_RUNS_HINT: 'Hier würde die Zeile nie laufen – davor steht {0}. Klicke weiter oben.',
+  INSERT_UNSURE_HINT: 'Ob die Zeile hier je läuft, lässt sich nicht sicher sagen – klicke an eine andere '
+    + 'Stelle.',
+  VARIABLES_EDIT_IN_CODE: 'Umbenennen und Löschen geht bei Code direkt im Programm.',
+  VARIABLES_JAVA_NOTE: 'Java zeigt Werte nur mit Robot.zeige("Name", wert); an.',
+  VARIABLE_USED_NOWHERE: 'Nirgends — der Name kommt im Programm nicht (mehr) vor.',
+  USED_NOWHERE_INSERT: 'Nirgends — „Einfügen“ schreibt den Aufruf ins Programm.',
+
   SUBMIT: 'Abgeben',
   SUBMIT_TITLE: 'Diesen Stand des Programms bei der Lehrkraft abgeben',
   SUBMIT_CONFIRM: 'Programm jetzt abgeben? Die Lehrkraft sieht danach genau diesen Stand.',

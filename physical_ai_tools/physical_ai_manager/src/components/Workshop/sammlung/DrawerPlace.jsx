@@ -24,9 +24,10 @@ import {
 } from '../../../features/workshop/studioAssetsSlice';
 import { placeGripperState } from '../../../utils/armProfile';
 import { previewKeyForDestination } from '../../../utils/simPreview';
+import { CODE_DE } from '../code/codeMessagesDe';
 import { DE, formatDe } from '../blocks/messages_de';
-import { deletePlace, renamePlace, usageRows } from './assetCommands';
-import { getDestinationStore, sanitizeDestinationNameInput } from './destinationStore';
+import { assetDocumentOf } from './assetDocument';
+import { sanitizeDestinationNameInput } from './destinationStore';
 import { formatMmDe, robotLongLabelDe } from './format';
 import {
   DetailRow,
@@ -47,12 +48,15 @@ function sourceLabel(entry) {
   return '—';
 }
 
-export default function DrawerPlace({ workspace, card, capabilities, onPreview }) {
+export default function DrawerPlace({
+  assetDoc: assetDocProp = null, workspace = null, card, capabilities, onPreview,
+}) {
   const dispatch = useDispatch();
+  const assetDoc = assetDocumentOf(assetDocProp, workspace);
   const [confirm, setConfirm] = useState(null);
   const entry = card.entry;
   const isPose = entry.kind === 'pose';
-  const rows = usageRows(workspace, entry.kind, entry.name);
+  const rows = assetDoc ? assetDoc.usageRows(entry.kind, entry.name) : [];
   const robot = robotLongLabelDe(entry.robot_type);
   const drawer = useSelector(selectDrawer);
   const results = useSelector(selectLastPreviewResult);
@@ -65,7 +69,7 @@ export default function DrawerPlace({ workspace, card, capabilities, onPreview }
   const gripper = isPose ? placeGripperState(entry, robotCaps) : null;
 
   const handleRename = (draft) => {
-    const result = renamePlace({ workspace, entryId: entry.id, toName: draft });
+    const result = assetDoc.renamePlace(entry.id, draft);
     if (!result.ok) {
       toast.error(result.error);
       return false;
@@ -77,14 +81,14 @@ export default function DrawerPlace({ workspace, card, capabilities, onPreview }
   };
 
   const remove = () => {
-    const result = deletePlace({ workspace, entryId: entry.id });
+    const result = assetDoc.deletePlace(entry.id);
     if (!result.ok) {
       toast.error(result.error);
       return;
     }
     dispatch(setDrawerFocus(null));
     showUndoToast(formatDe(DE.TOAST_DELETED, result.entry.name), () => {
-      const restored = getDestinationStore(workspace).restore(result.entry, result.index);
+      const restored = assetDoc.restorePlace(result.entry, result.index);
       if (!restored.ok) toast.error(restored.error);
     });
   };
@@ -151,9 +155,11 @@ export default function DrawerPlace({ workspace, card, capabilities, onPreview }
         </div>
       )}
       <UsageList
-        workspace={workspace}
+        assetDoc={assetDoc}
         rows={rows}
-        nowhereText={isPose ? DE.DRAWER_USED_NOWHERE_POSE : DE.DRAWER_USED_NOWHERE_PLACE}
+        nowhereText={assetDoc && assetDoc.kind === 'code'
+          ? CODE_DE.USED_NOWHERE_INSERT
+          : (isPose ? DE.DRAWER_USED_NOWHERE_POSE : DE.DRAWER_USED_NOWHERE_PLACE)}
       />
       {confirm && (
         <InlineConfirm text={confirm.text} yesLabel={DE.CONFIRM_YES_DELETE} onYes={confirm.onYes} onNo={confirm.onNo} />

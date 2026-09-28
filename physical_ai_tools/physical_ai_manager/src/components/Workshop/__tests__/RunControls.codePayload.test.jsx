@@ -12,9 +12,18 @@
 // image trips over loudly, the language the new server routes on, the files,
 // and the same siblings a Blockly run sends. Plus the fail-CLOSED capability
 // gate: a robot that has not said `code_languages` gets nothing sent.
+//
+// 2026-09-27 (migration 041): a code program's stored Ziele/Positionen ride the
+// `destinations` sibling exactly like a Blockly program's — the store the page
+// hands over (`destinationStore`); still `[]` when it hands none. And an
+// UNSAVED program that calls `replay("…")` is refused with the same „erst
+// speichern" sentence a block program gets, instead of starting and failing on
+// the robot (O9).
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import {
+  fireEvent, render, screen, waitFor,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import RunControls from '../RunControls';
 import * as workflowApi from '../../../services/workflowApi';
@@ -106,7 +115,8 @@ async function clickStart(props) {
 
 beforeEach(() => {
   mockState = baseState();
-  mockDispatch.mockClear();
+  mockDispatch.mockReset();
+  mockRos.setWorkflowBreakpoints.mockReset();
   mockRos.callService.mockClear();
   mockToast.mockClear();
   mockToast.success.mockClear();
@@ -250,11 +260,101 @@ describe('RunControls — a code run carries the recordings its replay calls nam
     expect(mockRos.callService).not.toHaveBeenCalled();
   });
 
+  test('a keyword name on a line of its own is fetched too (review round 4, mc7)', async () => {
+    // The loose run-time scan reads one line; the editor's exact scanner
+    // knows this call, and the run fetches every name that scanner reports.
+    workflowApi.getTrajectoryByName.mockResolvedValue(ROW);
+    await clickStart({ codeFiles: { 'main.py': 'import robot\nrobot.replay(speed=2,\n             name="Winken")\n' } });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    expect(workflowApi.getTrajectoryByName).toHaveBeenCalledWith('jwt-1', 'wf-1', 'Winken');
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    expect(Object.keys(parsed.trajectories)).toEqual(['Winken']);
+  });
+
+  test('… and so is a Java call split over lines', async () => {
+    workflowApi.getTrajectoryByName.mockResolvedValue(ROW);
+    await clickStart({
+      codeLanguage: 'java',
+      codeFiles: { 'Main.java': 'import edubotics.Robot;\npublic class Main {\n  public static void main(String[] a) {\n    Robot.replay(\n        "Winken");\n  }\n}\n' },
+    });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    expect(workflowApi.getTrajectoryByName).toHaveBeenCalledWith('jwt-1', 'wf-1', 'Winken');
+  });
+
   test('a project with no replay call fetches nothing', async () => {
     workflowApi.getTrajectoryByName.mockResolvedValue(ROW);
     await clickStart();
     await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
     expect(workflowApi.getTrajectoryByName).not.toHaveBeenCalled();
+  });
+
+  test('sixteen names in comments never crowd out the one really played (review round 5, md6)', async () => {
+    // The fetch is capped at 16 (migration 034's per-workflow prune cap); the
+    // name a real call uses must come first, ahead of names seen only in
+    // comments — the order of the files does not decide.
+    const commented = Array.from({ length: 16 }, (_, i) => `# robot.replay("Alt${i}")`).join('\n');
+    workflowApi.getTrajectoryByName.mockImplementation((_t, _w, name) => (name === 'Echt'
+      ? Promise.resolve(ROW)
+      : Promise.reject(Object.assign(new Error('Bewegung nicht gefunden'), { status: 404 }))));
+    await clickStart({ codeFiles: { 'main.py': `import robot\n${commented}\nrobot.replay("Echt")\n` } });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    const asked = workflowApi.getTrajectoryByName.mock.calls.map(([, , n]) => n);
+    expect(asked).toHaveLength(16);
+    expect(asked[0]).toBe('Echt');
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    expect(Object.keys(parsed.trajectories)).toEqual(['Echt']);
+  });
+});
+
+describe('RunControls — the start window (review round 5, MD5)', () => {
+  test('it opens before the first await and closes once the run is marked running', async () => {
+    const events = [];
+    let release;
+    mockState.workshop.breakpoints = ['main.py:L2'];
+    mockRos.setWorkflowBreakpoints.mockImplementation(() => new Promise((r) => { release = r; }));
+    const onStartingChange = vi.fn((v) => events.push(v ? 'open' : 'close'));
+    mockDispatch.mockImplementation((a) => {
+      if (a && a.type === 'workshop/setRunState') events.push(`runState:${a.payload}`);
+      return a;
+    });
+    await clickStart({ onStartingChange, getDocumentToken: () => 7 });
+    // Still awaiting the breakpoints: the window is open, nothing is sent.
+    expect(events).toEqual(['open']);
+    expect(mockRos.callService).not.toHaveBeenCalled();
+    release();
+    await waitFor(() => expect(events).toContain('close'));
+    expect(events).toEqual(['open', 'runState:running', 'close']);
+  });
+
+  test('a start whose document was replaced while it waited is NOT sent, and says why in German', async () => {
+    let token = 1;
+    let release;
+    mockState.workshop.breakpoints = ['main.py:L2'];
+    mockRos.setWorkflowBreakpoints.mockImplementation(() => new Promise((r) => { release = r; }));
+    const onStartingChange = vi.fn();
+    await clickStart({ onStartingChange, getDocumentToken: () => token });
+    token = 2; // another program was opened while the start waited
+    release();
+    await waitFor(() => expect(onStartingChange).toHaveBeenLastCalledWith(false));
+    expect(mockRos.callService).not.toHaveBeenCalled();
+    expect(mockToast.error).toHaveBeenCalledWith('Inzwischen ist ein anderes Programm geöffnet – bitte noch einmal starten.');
+  });
+
+  test('a start refused before any await never opens the window', async () => {
+    const onStartingChange = vi.fn();
+    mockState = baseState({ ...FULL_CAPS, code_languages: [] });
+    await clickStart({ onStartingChange });
+    await new Promise((r) => { setTimeout(r, 20); });
+    expect(onStartingChange).not.toHaveBeenCalled();
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('a failed start closes the window too', async () => {
+    const onStartingChange = vi.fn();
+    mockRos.callService.mockImplementationOnce(() => Promise.resolve({ success: false, message: 'nein' }));
+    await clickStart({ onStartingChange, getDocumentToken: () => 1 });
+    await waitFor(() => expect(onStartingChange).toHaveBeenLastCalledWith(false));
+    expect(onStartingChange.mock.calls.map(([v]) => v)).toEqual([true, false]);
   });
 });
 
@@ -281,5 +381,105 @@ describe('RunControls — the project caps are judged before anything is sent', 
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
     expect(mockToast.error.mock.calls[0][0]).toMatch(/keine Dateien/);
     expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+});
+
+describe('RunControls — a code run sends the document’s Ziele (041)', () => {
+  const ENTRIES = [
+    { id: 'd_1', name: 'Ablage', kind: 'pin', x: 0.2, y: -0.05, z: 0, source: 'camera' },
+    { id: 'd_2', name: 'Hoch', kind: 'pose', x: 0.1, y: 0.1, z: 0.15, source: 'capture', joints: [0, 1], joint_names: ['a', 'b'] },
+  ];
+  const store = { getEntries: () => ENTRIES };
+
+  test('the store’s entries ride the destinations sibling as {name, kind, x, y, z}', async () => {
+    await clickStart({ destinationStore: store });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    expect(parsed.destinations).toEqual([
+      { name: 'Ablage', kind: 'pin', x: 0.2, y: -0.05, z: 0 },
+      { name: 'Hoch', kind: 'pose', x: 0.1, y: 0.1, z: 0.15 },
+    ]);
+  });
+
+  test('in the simulator too', async () => {
+    await clickStart({ destinationStore: store, simMode: true, simScene: { objects: [], zones: [] } });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    const parsed = JSON.parse(mockRos.callService.mock.calls[0][2].workflow_json);
+    expect(parsed.destinations.map((d) => d.name)).toEqual(['Ablage', 'Hoch']);
+    expect(parsed.sim).toBeTruthy();
+  });
+});
+
+describe('RunControls — an unsaved code program that replays is told to save first (O9)', () => {
+  const SAVE_FIRST = 'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
+    + 'gehören zu einem gespeicherten Workflow.';
+
+  test('replay() without a workflow id refuses in German and sends nothing', async () => {
+    await clickStart({ workflowId: null, codeFiles: { 'main.py': 'import robot\nrobot.replay("Winken")\n' } });
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith(SAVE_FIRST));
+    expect(mockRos.callService).not.toHaveBeenCalled();
+    expect(workflowApi.getTrajectoryByName).not.toHaveBeenCalled();
+  });
+
+  test('the Java spelling is caught the same way', async () => {
+    await clickStart({
+      workflowId: null,
+      codeLanguage: 'java',
+      codeFiles: {
+        'Main.java': 'import edubotics.Robot;\npublic class Main {\n  public static void main(String[] a) {\n    Robot.replay("Winken");\n  }\n}\n',
+      },
+    });
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith(SAVE_FIRST));
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('the keyword form `replay(name="…")` is caught too (review round 2, ni1)', async () => {
+    await clickStart({ workflowId: null, codeFiles: { 'main.py': 'import robot\nrobot.replay(speed=2, name="Winken")\n' } });
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith(SAVE_FIRST));
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('a replay only inside a comment or a string does not block an unsaved run', async () => {
+    await clickStart({
+      workflowId: null,
+      codeFiles: { 'main.py': 'import robot\n# robot.replay("Alt")\nprint(\'robot.replay("x")\')\nrobot.home()\n' },
+    });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    expect(mockToast.error).not.toHaveBeenCalled();
+  });
+
+  test('an unsaved program without replay runs as before', async () => {
+    await clickStart({ workflowId: null });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
+    expect(mockRos.callService.mock.calls[0][2].workflow_id).toMatch(/^local-/);
+  });
+});
+
+describe('RunControls — Start says why it cannot start (review round 4, MC2)', () => {
+  test('with a reason set, Start is disabled, names it in German, and a click sends nothing', async () => {
+    const reason = 'Eine frühere Version wird gerade wiederhergestellt – bitte kurz warten.';
+    render(
+      <RunControls
+        workflowId="wf-1"
+        blocklyJson={null}
+        simMode={false}
+        simScene={null}
+        codeLanguage="python"
+        codeFiles={FILES}
+        startBlockedReason={reason}
+      />,
+    );
+    const start = screen.getByRole('button', { name: /Start/ });
+    expect(start).toBeDisabled();
+    expect(start).toHaveAttribute('title', reason);
+    await userEvent.click(start);
+    fireEvent.click(start);
+    await new Promise((r) => { setTimeout(r, 20); });
+    expect(mockRos.callService).not.toHaveBeenCalled();
+  });
+
+  test('without one, the same Start runs', async () => {
+    await clickStart({ startBlockedReason: null });
+    await waitFor(() => expect(mockRos.callService).toHaveBeenCalledTimes(1));
   });
 });

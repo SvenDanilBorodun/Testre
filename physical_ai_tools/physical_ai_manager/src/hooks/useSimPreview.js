@@ -54,6 +54,10 @@ import {
 // sent; the result is recorded per asset in `studioAssets.lastPreviewResult`.
 export default function useSimPreview({
   workspace,
+  // The open document's Ziele store (a Blockly workspace's, or a code
+  // document's detached one — WorkshopPage `activeStore`). Absent → the
+  // workspace's store, as before.
+  destinationStore = null,
   simScene,
   workflowId,
   accessToken,
@@ -69,7 +73,7 @@ export default function useSimPreview({
   // LATEST page state through this ref rather than a stale closure.
   const latest = useRef(null);
   latest.current = {
-    workspace, simScene, workflowId, accessToken, robotType, gates, ensureSimMode, callService,
+    workspace, destinationStore, simScene, workflowId, accessToken, robotType, gates, ensureSimMode, callService,
   };
   const resultsRef = useRef(lastPreviewResult);
   resultsRef.current = lastPreviewResult;
@@ -139,7 +143,9 @@ export default function useSimPreview({
         wid = previewWorkflowIdForRecording(asset.id);
         logTemplate = DE.PREVIEW_LOG_RECORDING;
       } else {
-        const entry = now.workspace ? getDestinationStore(now.workspace).getById(asset.id) : null;
+        const store = now.destinationStore
+          || (now.workspace ? getDestinationStore(now.workspace) : null);
+        const entry = store ? store.getById(asset.id) : null;
         if (!entry) return;
         name = entry.name;
         program = buildDestinationPreviewProgram({ entry, simScene: now.simScene, tempo });

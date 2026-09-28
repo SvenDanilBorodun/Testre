@@ -49,6 +49,7 @@ import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval';
 import toast from 'react-hot-toast';
 import { DE } from '../blocks/messages_de';
 import { autosaveSessionScope } from '../useAutosave';
+import { serializeState } from '../sammlung/destinationStore';
 import { isCodeLanguage } from './codeProject';
 
 const CODE_STORAGE_KEY = 'edubotics:workshop:code-autosave';
@@ -84,15 +85,20 @@ function idbSafe(run, onError) {
  * @param {object} options
  * @param {string} options.language - '' for a Blockly document.
  * @param {object|null} options.files - `{ path: content }`.
+ * @param {Array|null} options.destinations - the document's Ziele/Positionen
+ *   (the entries of its store, migration 041); written as the serializer's
+ *   state beside the files. Omitted (null) → the draft carries no key, the
+ *   shape an older draft has, which still restores.
  * @param {boolean} options.enabled
  * @param {string|null} options.scopeKey - the Supabase user id.
- * @param {({language, files}) => void} options.onRestore - the caller decides
+ * @param {({language, files, destinations?}) => void} options.onRestore - the caller decides
  *   whether to apply it (a selected cloud workflow takes precedence, exactly
  *   as it does for the Blockly draft).
  */
 export function useCodeAutosave({
   language = '',
   files = null,
+  destinations = null,
   enabled = true,
   scopeKey = null,
   onRestore = null,
@@ -114,9 +120,12 @@ export function useCodeAutosave({
   // reach.
   useEffect(() => {
     if (!enabled || !isCodeLanguage(language) || !isProject(files)) return undefined;
+    const state = Array.isArray(destinations)
+      ? { language, files, destinations: serializeState(destinations) }
+      : { language, files };
     const t = setTimeout(() => {
       idbSafe(
-        () => idbSet(storageKey, { state: { language, files }, ts: Date.now() }),
+        () => idbSet(storageKey, { state, ts: Date.now() }),
         (e) => {
           if ((e && e.name) === 'QuotaExceededError') {
             toast.error(DE.AUTOSAVE_QUOTA_FULL, { id: 'autosave-quota' });
@@ -127,7 +136,7 @@ export function useCodeAutosave({
       );
     }, DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [enabled, language, files, storageKey]);
+  }, [enabled, language, files, destinations, storageKey]);
 
   // Restore, once. `restoreSettled` is set on EVERY exit — a read that found
   // nothing, and a read that threw — because the delete below waits on it and
@@ -144,7 +153,12 @@ export function useCodeAutosave({
       if (cancelled) return;
       if (state && isCodeLanguage(state.language) && isProject(state.files)
           && typeof onRestore === 'function') {
-        onRestore({ language: state.language, files: state.files });
+        const draft = { language: state.language, files: state.files };
+        // An older draft has no Ziele: no key, and the page opens it with none.
+        if (state.destinations && typeof state.destinations === 'object') {
+          draft.destinations = state.destinations;
+        }
+        onRestore(draft);
       }
       setRestoreSettled(true);
     })();

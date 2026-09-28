@@ -11,7 +11,7 @@
 // block wires both together over the actual keyboard path.
 
 import React from 'react';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import toast from 'react-hot-toast';
 import TeachOverlay, { teachListMeta, teachRenameEnabled, teachSlotsLine } from '../TeachOverlay';
 import { DE, formatDe } from '../../blocks/messages_de';
@@ -1059,7 +1059,8 @@ describe('TeachOverlay — „Als Programm einfügen"', () => {
     expect(ws).toBe(props.workspace);
     expect(items.map((it) => it.name)).toEqual(['Bewegung 1', 'Position 1']);
     expect(opts.placeNameOf(items[1])).toBe('Position 1');
-    expect(toast.success).toHaveBeenCalledWith(formatDe(DE.TEACH_INSERT_DONE, 2));
+    // The overlay awaits the result (a code document's insertion is async).
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(formatDe(DE.TEACH_INSERT_DONE, 2)));
   });
 
   test('a place no longer in the store does not count', async () => {

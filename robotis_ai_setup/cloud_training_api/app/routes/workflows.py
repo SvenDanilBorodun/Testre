@@ -41,6 +41,23 @@ MAX_LIST_LIMIT = 500
 # only way a create or PATCH can mix them.
 _ONE_LANGUAGE_DE = "Ein Programm besteht entweder aus Blöcken oder aus Code, nicht aus beidem."
 _LANGUAGE_IMMUTABLE_DE = "Die Programmiersprache kann nach dem Anlegen nicht geändert werden."
+_CODE_ZIELE_NEED_FILES_DE = (
+    "Die Ziele und Positionen eines Code-Programms werden nur zusammen mit "
+    "seinen Dateien gespeichert."
+)
+
+# Migration 041 (owner decisions O1/O2): a code program keeps its Ziele and
+# Positionen where a Blockly program keeps them — the workspace serializer key
+# `edubotics-destinations` inside blockly_json — and NOTHING else there. The
+# DB CHECK workflows_code_blockly_json_destinations_only is the floor; this is
+# the gate that answers in German first.
+_CODE_BLOCKLY_KEYS = frozenset({"edubotics-destinations"})
+
+
+def _code_blockly_json_ok(doc: Any) -> bool:
+    """True when ``doc`` may be a code program's blockly_json: an object whose
+    keys are all in ``_CODE_BLOCKLY_KEYS`` (``{}`` included — no Ziele)."""
+    return isinstance(doc, dict) and set(doc) <= _CODE_BLOCKLY_KEYS
 
 
 # ---------- Models ----------
@@ -59,7 +76,8 @@ class WorkflowCreate(BaseModel):
     sim_scene: dict | None = None
     # Roboter Studio code programs (migration 040). '' = a Blockly program
     # (the column default); 'python' | 'java' = a code program whose
-    # blockly_json must be EMPTY and whose code_files carry the project.
+    # code_files carry the project and whose blockly_json carries at most its
+    # Ziele / Positionen (`edubotics-destinations`, migration 041).
     code_language: str = ""
     code_files: dict | None = None
 
@@ -77,8 +95,9 @@ class WorkflowUpdate(BaseModel):
     # Code programs. The language is IMMUTABLE after create: a client may echo
     # the document's own language, any other value is a 409 — never silently
     # ignored. code_files goes through the SECURITY DEFINER RPC
-    # update_workflow_code (see update_workflow) and never rides a PATCH that
-    # also carries blockly_json.
+    # update_workflow_code (see update_workflow); on a code program the same
+    # PATCH may carry blockly_json holding ONLY the Ziele (migration 041), and
+    # both reach that one RPC call.
     code_language: str | None = None
     code_files: dict | None = None
 
@@ -290,17 +309,18 @@ def create_workflow(
     validate_blockly_json(payload.blockly_json)
     if payload.sim_scene is not None:
         validate_sim_scene(payload.sim_scene)
-    # A code program (migration 040): files AND a language, and no blocks.
-    # Files without a language or a language without files are refused (the
-    # validator refuses an empty project); a Blockly program sends neither
-    # and its insert payload is unchanged from before 040 (column defaults).
+    # A code program (migration 040): files AND a language, and no blocks —
+    # its blockly_json may carry only its Ziele (migration 041). Files without
+    # a language or a language without files are refused (the validator
+    # refuses an empty project); a Blockly program sends neither and its
+    # insert payload is unchanged from before 040 (column defaults).
     code_language = payload.code_language or ""
     if payload.code_files and not code_language:
         raise HTTPException(
             status_code=400,
             detail="Für Programmdateien muss eine Programmiersprache angegeben werden.",
         )
-    if code_language and payload.blockly_json:
+    if code_language and not _code_blockly_json_ok(payload.blockly_json):
         raise HTTPException(status_code=400, detail=_ONE_LANGUAGE_DE)
     code_files = (
         validate_code_files(payload.code_files, code_language) if code_language else None
@@ -341,7 +361,11 @@ def update_workflow(
     # One workflow is one language (migration 040). A pre-040 row has no
     # code_language key at all: that is a Blockly program.
     stored_language = row.get("code_language") or ""
-    if payload.blockly_json is not None and payload.code_files is not None:
+    if (
+        payload.blockly_json is not None
+        and payload.code_files is not None
+        and not stored_language
+    ):
         raise HTTPException(status_code=400, detail=_ONE_LANGUAGE_DE)
     if payload.code_language is not None and payload.code_language != stored_language:
         raise HTTPException(status_code=409, detail=_LANGUAGE_IMMUTABLE_DE)
@@ -349,7 +373,14 @@ def update_workflow(
         # A Blockly program never becomes a code program through PATCH.
         raise HTTPException(status_code=409, detail=_LANGUAGE_IMMUTABLE_DE)
     if payload.blockly_json is not None and stored_language:
-        raise HTTPException(status_code=400, detail=_ONE_LANGUAGE_DE)
+        # Migration 041: a code program's blockly_json is its Ziele and
+        # nothing else, and it rides the SAME save as the files (one call to
+        # update_workflow_code = one version snapshot). The client always
+        # sends both; Ziele alone would need a second writer.
+        if not _code_blockly_json_ok(payload.blockly_json):
+            raise HTTPException(status_code=400, detail=_ONE_LANGUAGE_DE)
+        if payload.code_files is None:
+            raise HTTPException(status_code=400, detail=_CODE_ZIELE_NEED_FILES_DE)
     update_payload: dict[str, Any] = {}
     if payload.name is not None:
         update_payload["name"] = payload.name
@@ -375,6 +406,51 @@ def update_workflow(
         raise HTTPException(status_code=400, detail="Keine Änderungen angegeben.")
 
     supabase = get_supabase()
+    # Migration 040/041: a code save. Tested BEFORE the blockly branch below,
+    # because on a code program the same PATCH carries the Ziele as
+    # blockly_json — through update_workflow_blockly they would write
+    # blockly_json and never the code, in a second snapshot. Every other
+    # column of this PATCH goes through the plain owner-scoped update first
+    # (the RPC takes only the code columns and the Ziele), then the SECURITY
+    # DEFINER RPC update_workflow_code (owner-only, stamps saved_by on the
+    # version snapshot, code + Ziele in ONE UPDATE), then a re-SELECT so the
+    # response is the merged row. p_blockly_json is always sent, None when
+    # this PATCH carries no Ziele (the RPC then keeps the stored ones).
+    if "code_files" in update_payload:
+        plain = {
+            k: v for k, v in update_payload.items()
+            if k not in ("code_files", "blockly_json")
+        }
+        if plain:
+            supabase.table("workflows").update(plain).eq("id", workflow_id).eq(
+                "owner_user_id", user.id
+            ).execute()
+        try:
+            supabase.rpc(
+                "update_workflow_code",
+                {
+                    "p_workflow_id": workflow_id,
+                    "p_user_id": str(user.id),
+                    "p_code_files": update_payload["code_files"],
+                    "p_code_language": stored_language,
+                    "p_blockly_json": update_payload.get("blockly_json"),
+                },
+            ).execute()
+        except Exception as exc:
+            msg = str(exc)
+            if "P0002" in msg or "nicht gefunden" in msg:
+                raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
+            raise
+        final = (
+            supabase.table("workflows")
+            .select("*")
+            .eq("id", workflow_id)
+            .execute()
+        )
+        if not final.data:
+            raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
+        return WorkflowResponse(**final.data[0])
+
     # Audit A1: when blockly_json changes, route through the SECURITY
     # DEFINER RPC update_workflow_blockly so the BEFORE-UPDATE snapshot
     # trigger sees `current_setting('app.user_id', true)` = the caller's
@@ -411,42 +487,6 @@ def update_workflow(
                     "p_blockly_json": update_payload["blockly_json"],
                     "p_name": update_payload.get("name"),
                     "p_description": update_payload.get("description"),
-                },
-            ).execute()
-        except Exception as exc:
-            msg = str(exc)
-            if "P0002" in msg or "nicht gefunden" in msg:
-                raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
-            raise
-        final = (
-            supabase.table("workflows")
-            .select("*")
-            .eq("id", workflow_id)
-            .execute()
-        )
-        if not final.data:
-            raise HTTPException(status_code=404, detail="Workflow nicht gefunden")
-        return WorkflowResponse(**final.data[0])
-
-    # Migration 040: a code_files change mirrors the blockly branch above —
-    # every other column of this PATCH via the plain owner-scoped update
-    # first (the RPC takes only the two code columns), then the SECURITY
-    # DEFINER RPC update_workflow_code (owner-only, stamps saved_by on the
-    # version snapshot), then a re-SELECT so the response is the merged row.
-    if "code_files" in update_payload:
-        plain = {k: v for k, v in update_payload.items() if k != "code_files"}
-        if plain:
-            supabase.table("workflows").update(plain).eq("id", workflow_id).eq(
-                "owner_user_id", user.id
-            ).execute()
-        try:
-            supabase.rpc(
-                "update_workflow_code",
-                {
-                    "p_workflow_id": workflow_id,
-                    "p_user_id": str(user.id),
-                    "p_code_files": update_payload["code_files"],
-                    "p_code_language": stored_language,
                 },
             ).execute()
         except Exception as exc:

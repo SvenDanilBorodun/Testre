@@ -72,9 +72,38 @@ supervisor, retired the instant the run ends), ``__line`` (status position,
 throttled at ``CODE_STATUS_MIN_INTERVAL_S``), ``__paused`` (a breakpoint hit:
 emits the locals as ``[VAR:]`` sentinels, sets the pause, and BLOCKS on the
 reader thread until the manager resumes — answering ``continue`` / ``step`` /
-``stop``), ``__exit`` (the launcher's exit report, kept on the session for
-the program object that owns the run). ``register_object`` is validated from
-its row and refused until the catalog merge lands.
+``stop``), ``__vars`` (the live values the student's own thread sends right
+before a robot call and once at the end, owner decision R2-O1: the program's
+module-level variables, emitted as ``[VAR:]`` sentinels ONLY for names whose
+rendered value changed since this run last showed them and that ``zeige`` has
+not claimed; at most one frame per ``VARS_MIN_INTERVAL_S`` is looked at — any
+other is answered ``VARS_REPLY_SKIPPED`` at once after the budget charge, so
+the runner knows to send again), ``__exit`` (the launcher's exit report, kept
+on the session for the program object that owns the run). The shown values
+of ONE ``__vars`` / ``__paused`` frame are held to ``SHOWN_FRAME_MAX_NODES`` /
+``SHOWN_FRAME_MAX_CHARS`` in TOTAL by :func:`fit_shown_values` before any
+rendering — the largest become ``SHOWN_TOO_BIG``, every name still shows (the
+caps are derived in ``robot_api`` from the runner's own bounds, so only a
+hand-made frame is ever trimmed). ``register_object`` is validated from its
+row and registers a per-run type.
+
+**The code-only rows** (``robot_api.CODE_ONLY_METHODS``: ``zeige``) are
+public calls with no block and no handler. They are queued to the run's one
+worker like a statement (so they wait while paused, are refused after Stopp
+and keep program order), and answered there by :meth:`RunSession._code_only`,
+which only ever calls ``ctx.log`` — never ``ctx.publisher``, the handler table
+or the motion lock (an AST fence in ``test_code_rpc_zeige_vars.py``). ``zeige``
+is COALESCED: the latest value per name waits in a per-run map and is emitted
+at most ``SHOWN_EMITS_PER_S`` sentinels per second (burst
+``SHOWN_EMITS_BURST``) — flushed by the next call, by the worker's idle tick
+(``SHOWN_FLUSH_TICK_S``) and, whatever is left, when the run closes, so the
+last value of every waiting name arrives. At most ``SHOWN_VAR_NAMES_MAX``
+names wait at once; a NEW name past that is dropped and the run's log says so
+once (``ZEIGE_TOO_MANY_NAMES_DE``). A name ``zeige`` has shown belongs to
+``zeige`` for the rest of the run: ``__vars`` no longer shows a module
+variable of the same name (it would flip the panel between the two).
+``__vars``, ``zeige`` and a breakpoint's locals share one per-run map of the
+last payload per name.
 
 **Replies.** ``{"id", "ok": true, "r"}`` or ``{"id", "ok": false, "k", "e"}``
 with a German ``e``. A ``WorkflowError`` from a handler is relayed verbatim
@@ -114,6 +143,7 @@ from physical_ai_server.workflow.interpreter import (
     _jsonable,
 )
 from physical_ai_server.workflow.robot_api import (
+    CODE_ONLY_METHODS_BY_NAME,
     CODE_PATH_RE,
     INTERNAL_METHODS_BY_NAME,
     MAX_CODE_FILE_BYTES,
@@ -121,6 +151,12 @@ from physical_ai_server.workflow.robot_api import (
     MAX_CODE_PROJECT_BYTES,
     ROBOT_API_BY_NAME,
     RPC_LIMITS,
+    SHOWN_FRAME_MAX_CHARS,
+    SHOWN_FRAME_MAX_NODES,
+    SHOWN_TOO_BIG,
+    SHOWN_VAR_NAMES_MAX,
+    VARS_MIN_INTERVAL_S,
+    VARS_REPLY_SKIPPED,
     ApiCall,
     ApiParam,
 )
@@ -176,6 +212,31 @@ _EXIT_INFO_KEYS = {
 # interpreter's _UNSHOWABLE_NAME_CHARS, re-spelled here rather than imported
 # from a class attribute).
 _UNSHOWABLE_NAME_CHARS = '=[]'
+# A shown value (the `value` kind of `zeige`, every entry of `__vars`) is a
+# JSON tree bounded in depth and size before it is rendered — walked
+# iteratively, so a hostile nesting is a refusal, never a RecursionError. The
+# stubs render at most 3 levels, so a real program never meets either bound.
+SHOWN_VALUE_MAX_DEPTH = 8
+SHOWN_VALUE_MAX_NODES = 5000
+# SHOWN_VAR_NAMES_MAX (robot_api): the per-run map of the last payload shown
+# per name is bounded; past it a NEW name is still shown by `__vars`, just not
+# remembered (so it re-emits every change) — and `zeige` keeps at most that
+# many names waiting.
+# Flood limits (2026-09-27 review rounds). Every frame is still charged
+# against the call budget BEFORE any of this (Rule §2, condition 1); these
+# bound what a charged frame may cost after that.
+# - `__vars`: the runner sends at most one frame per LIVE_VALUES_INTERVAL_S;
+#   one per VARS_MIN_INTERVAL_S (robot_api) is looked at, any other is
+#   answered VARS_REPLY_SKIPPED at once.
+# - A frame's shown values in TOTAL (every value of a `__vars` / `__paused`
+#   dict, or one `zeige` value): SHOWN_FRAME_MAX_NODES / _CHARS (robot_api,
+#   derived from the runner's own bounds); fit_shown_values trims to them.
+# - `[VAR:]` sentinels from `zeige`, per run: a token bucket; what does not
+#   fit waits (latest value per name) for the next call, the worker's idle
+#   tick or the end of the run.
+SHOWN_EMITS_PER_S = 20
+SHOWN_EMITS_BURST = 20
+SHOWN_FLUSH_TICK_S = 0.1
 
 # ── German replies ────────────────────────────────────────────────────────
 INTERNAL_ERROR_DE = 'Interner Fehler — bitte den Lehrer rufen.'
@@ -184,6 +245,9 @@ FRAME_TOO_BIG_DE = 'Die Nachricht an den Roboter ist zu groß.'
 BAD_FRAME_DE = 'Die Nachricht an den Roboter ist unverständlich.'
 BAD_REQUEST_DE = 'Der Aufruf ist unvollständig — Methode und Argumente fehlen.'
 RUN_STOPPED_DE = 'Programm wurde gestoppt.'
+# `zeige` with more names waiting than SHOWN_VAR_NAMES_MAX: said once per run.
+ZEIGE_TOO_MANY_NAMES_DE = ('[WARNUNG] robot.zeige: zu viele verschiedene Namen auf '
+                           'einmal — nur {n} werden angezeigt, weitere nicht.')
 # A student redefines a type under the same name with different values.
 REGISTER_OBJECT_REDEFINED_DE = ('Objekt „{name}“ ist in diesem Programm bereits '
                                 'anders definiert.')
@@ -207,6 +271,7 @@ _KIND_TAGIDS_DE = '„{p}“ muss eine Liste mit 1 bis 16 Marker-IDs (0 bis 586)
 _KIND_OBJ_DE = ('„{p}“ muss ein Objekt-Name aus Buchstaben, Ziffern und Unterstrichen '
                 'sein (höchstens 24 Zeichen).')
 _KIND_DICT_DE = '„{p}“ muss eine Zuordnung mit höchstens {n} Einträgen sein.'
+_KIND_VALUE_DE = '„{p}“ ist zu tief verschachtelt oder zu groß zum Anzeigen.'
 _RANGE_DE = '„{p}“ muss zwischen {lo} und {hi} liegen.'
 _RANGE_OPEN_DE = '„{p}“ muss größer als {lo} und höchstens {hi} sein.'
 _TOO_LONG_DE = '„{p}“ ist zu lang (höchstens {n} Zeichen).'
@@ -371,6 +436,120 @@ def _point_error(p: ApiParam, v: Any, sentence: str) -> str | None:
     return None
 
 
+def shown_value_is_bad(v: Any) -> bool:
+    """True when ``v`` is not a JSON tree within ``SHOWN_VALUE_MAX_DEPTH`` /
+    ``SHOWN_VALUE_MAX_NODES`` (an explicit stack: no recursion)."""
+    stack = [(v, 0)]
+    nodes = 0
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if nodes > SHOWN_VALUE_MAX_NODES:
+            return True
+        if isinstance(item, (list, tuple)):
+            if depth >= SHOWN_VALUE_MAX_DEPTH:
+                return True
+            stack.extend((x, depth + 1) for x in item)
+        elif isinstance(item, dict):
+            if depth >= SHOWN_VALUE_MAX_DEPTH:
+                return True
+            stack.extend((x, depth + 1) for x in item.values())
+        elif not (item is None or isinstance(item, (bool, int, float, str))):
+            return True
+    return False
+
+
+def _shown_cost(value: Any, max_nodes: int, max_chars: int) -> tuple[int, int]:
+    """``(nodes, chars)`` of one JSON tree — counted like
+    :func:`shown_values_exceed` and iteratively, stopping once either count
+    passes its bound (the caller only needs to know it is too big)."""
+    stack = [value]
+    nodes = 0
+    chars = 0
+    while stack and nodes <= max_nodes and chars <= max_chars:
+        item = stack.pop()
+        nodes += 1
+        if isinstance(item, str):
+            chars += len(item)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            for k, v in item.items():
+                if isinstance(k, str):
+                    chars += len(k)
+                stack.append(v)
+    return nodes, chars
+
+
+def fit_shown_values(items: list, max_nodes: int = SHOWN_FRAME_MAX_NODES,
+                     max_chars: int = SHOWN_FRAME_MAX_CHARS) -> list:
+    """``[(name, value)]`` whose values TOGETHER fit the frame caps: the
+    largest values are replaced by ``SHOWN_TOO_BIG`` until they do, so every
+    name still shows (a frame is never dropped whole — review round 2, mi4).
+    Each value is measured once, bounded by the caps: linear in the frame."""
+    costs = [_shown_cost(v, max_nodes, max_chars) for _n, v in items]
+    total_nodes = sum(n for n, _c in costs)
+    total_chars = sum(c for _n, c in costs)
+    if total_nodes <= max_nodes and total_chars <= max_chars:
+        return list(items)
+    out = list(items)
+    order = sorted(range(len(out)), reverse=True,
+                   key=lambda i: max(costs[i][0] / max_nodes, costs[i][1] / max_chars))
+    for i in order:
+        if total_nodes <= max_nodes and total_chars <= max_chars:
+            break
+        total_nodes += 1 - costs[i][0]
+        total_chars += len(SHOWN_TOO_BIG) - costs[i][1]
+        out[i] = (out[i][0], SHOWN_TOO_BIG)
+    return out
+
+
+def shown_values_exceed(values: Any, max_nodes: int, max_chars: int) -> bool:
+    """True when the JSON trees in ``values`` together visit more than
+    ``max_nodes`` nodes or hold more than ``max_chars`` string characters
+    (dict keys included). Iterative, and it stops at the first bound it
+    crosses — the cheap gate in front of any rendering."""
+    stack = list(values)
+    nodes = 0
+    chars = 0
+    while stack:
+        item = stack.pop()
+        nodes += 1
+        if nodes > max_nodes:
+            return True
+        if isinstance(item, str):
+            chars += len(item)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            for k, v in item.items():
+                if isinstance(k, str):
+                    chars += len(k)
+                stack.append(v)
+        if chars > max_chars:
+            return True
+    return False
+
+
+class _RateGate:
+    """A token bucket that never sleeps: ``try_take`` answers now."""
+
+    def __init__(self, rate_per_s: float, burst: float) -> None:
+        self._rate = float(rate_per_s)
+        self._burst = float(burst)
+        self._tokens = float(burst)
+        self._last = time.monotonic()
+
+    def try_take(self) -> bool:
+        now = time.monotonic()
+        self._tokens = min(self._burst, self._tokens + (now - self._last) * self._rate)
+        self._last = now
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        return False
+
+
 def validate_value(p: ApiParam, v: Any) -> str | None:
     """The German reason ``v`` is not a valid ``p``, or ``None`` when it is."""
     if v is None and p.nullable:
@@ -426,6 +605,8 @@ def validate_value(p: ApiParam, v: Any) -> str | None:
                 or any(not isinstance(k, str) for k in v)):
             return _KIND_DICT_DE.format(p=p.name, n=cap)
         return None
+    if kind == 'value':
+        return _KIND_VALUE_DE.format(p=p.name) if shown_value_is_bad(v) else None
     return INTERNAL_ERROR_DE
 
 
@@ -442,7 +623,8 @@ def _validate_call(call: ApiCall, args: list) -> tuple[str, str] | None:
 
 
 def _lookup(method: str) -> ApiCall | None:
-    return ROBOT_API_BY_NAME.get(method) or INTERNAL_METHODS_BY_NAME.get(method)
+    return (ROBOT_API_BY_NAME.get(method) or INTERNAL_METHODS_BY_NAME.get(method)
+            or CODE_ONLY_METHODS_BY_NAME.get(method))
 
 
 def _unknown_method_de(name: str) -> str:
@@ -557,6 +739,20 @@ class RunSession:
                 pass
         self._handles: OrderedDict = handles
         self._next_handle = 0
+        # name -> the last [VAR:] payload this run showed (zeige, __vars, a
+        # breakpoint's locals). Its own lock: the reader (__vars, __paused)
+        # and the worker (zeige) both write it.
+        self._var_lock = threading.Lock()
+        self._var_payloads: dict[str, str] = {}
+        # zeige's coalescing: name -> the latest payload not yet emitted, and
+        # the per-run emit budget (both under _var_lock).
+        self._shown_pending: dict[str, str] = {}
+        self._shown_gate = _RateGate(SHOWN_EMITS_PER_S, SHOWN_EMITS_BURST)
+        # The names zeige has shown (bounded): `__vars` leaves them alone.
+        self._zeige_names: set[str] = set()
+        self._zeige_overflow_said = False
+        # __vars' floor (reader thread only).
+        self._vars_last_accept = float('-inf')
         self._worker = threading.Thread(target=self._worker_loop, daemon=True,
                                         name=f'code-rpc-worker-{self.token[:8]}')
         self._worker.start()
@@ -594,6 +790,9 @@ class RunSession:
                 pass
         self._queue.put(None)
         self._worker.join(CODE_RPC_WORKER_JOIN_S)
+        # Whatever zeige still holds is the last value of those names: it
+        # arrives before the run's final status, never dropped.
+        self._flush_shown(force=True)
 
     # ── the reader's half: validate, budget, hand to the worker ──────────
     def charge_call(self) -> bool:
@@ -605,6 +804,11 @@ class RunSession:
         method, args = frame.get('m'), frame.get('a')
         if not isinstance(method, str) or not isinstance(args, list):
             return _err(rid, 'protocol', BAD_REQUEST_DE)
+        # Already charged (the reader charges every decoded frame first). A
+        # `__vars` inside the floor is answered at once: nothing validated,
+        # rendered or emitted — and the runner, told so, sends again.
+        if method == '__vars' and not self._vars_floor_ok():
+            return _ok(rid, VARS_REPLY_SKIPPED)
         call = _lookup(method)
         if call is None:
             return _err(rid, 'method', _unknown_method_de(method))
@@ -630,6 +834,9 @@ class RunSession:
             return _ok(rid, None)
         if name == '__line':
             self._emit_running(args[0], args[1])
+            return _ok(rid, None)
+        if name == '__vars':
+            self._emit_changed_vars(args[2])
             return _ok(rid, None)
         if name == '__exit':
             self.exit_info = self._clean_exit_info(args[0])
@@ -696,18 +903,124 @@ class RunSession:
         is_paused = getattr(ctx, 'is_paused', None)
         return 'step' if callable(is_paused) and is_paused() else 'continue'
 
+    def _vars_floor_ok(self) -> bool:
+        """True for a `__vars` frame at least ``VARS_MIN_INTERVAL_S`` after the
+        last one this run looked at (reader thread; a plain timestamp)."""
+        now = time.monotonic()
+        if now - self._vars_last_accept < VARS_MIN_INTERVAL_S:
+            return False
+        self._vars_last_accept = now
+        return True
+
     def _emit_locals(self, local_vars: dict) -> None:
-        for name, value in list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]:
-            if (not isinstance(name, str) or not name or len(name) > _MAX_NAME_CHARS
-                    or any(c in name for c in _UNSHOWABLE_NAME_CHARS)):
-                continue
+        """A breakpoint's locals: every one shown (and remembered) — a value
+        the frame has no room for as ``SHOWN_TOO_BIG``."""
+        items = list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]
+        for name, value in fit_shown_values(items):
+            self._emit_var(name, value, force=True)
+
+    def _emit_changed_vars(self, local_vars: dict) -> None:
+        """``__vars``: only the names whose rendered value changed and that
+        ``zeige`` has not claimed; a value the frame has no room for as
+        ``SHOWN_TOO_BIG``."""
+        items = list(local_vars.items())[:robot_api.PAUSED_MAX_LOCALS]
+        with self._var_lock:
+            claimed = set(self._zeige_names)
+        items = [(n, v) for n, v in items if n not in claimed]
+        for name, value in fit_shown_values(items):
+            self._emit_var(name, value, force=False)
+
+    @staticmethod
+    def _render_shown(name: Any, value: Any) -> str | None:
+        """The ``[VAR:]`` payload of ``name``/``value``, rendered and capped
+        exactly like ``interpreter._set_variable``'s, or ``None`` for an
+        unshowable name (empty, only whitespace, over 64 characters, a
+        control character or the frame's own ``=[]``) or an out-of-bounds
+        value (``shown_value_is_bad``: depth and nodes)."""
+        if (not isinstance(name, str) or not name.strip() or len(name) > _MAX_NAME_CHARS
+                or any(c in name for c in _UNSHOWABLE_NAME_CHARS)
+                or any(ord(c) < 0x20 or c == '\x7f' for c in name)):
+            return None
+        if shown_value_is_bad(value):
+            return None
+        try:
+            payload = json.dumps(_jsonable(value, _MAX_VAR_PAYLOAD_ITEMS))
+        except Exception:  # noqa: BLE001 — observability never breaks a run
+            return None
+        if len(payload) > _MAX_VAR_PAYLOAD_CHARS:
+            payload = payload[:_MAX_VAR_PAYLOAD_CHARS] + ' …'
+        return payload
+
+    def _queue_shown(self, name: Any, value: Any) -> None:
+        """``zeige``: keep the latest payload per name, then emit what the
+        per-run budget allows now. A value over the frame caps is shown as
+        ``SHOWN_TOO_BIG``; a NEW name while ``SHOWN_VAR_NAMES_MAX`` others
+        wait is dropped, and the run's log says so once."""
+        [(name, value)] = fit_shown_values([(name, value)])
+        payload = self._render_shown(name, value)
+        if payload is None:
+            return
+        overflow = False
+        with self._var_lock:
+            if name in self._zeige_names or len(self._zeige_names) < SHOWN_VAR_NAMES_MAX:
+                self._zeige_names.add(name)
+            self._shown_pending.pop(name, None)
+            if len(self._shown_pending) < SHOWN_VAR_NAMES_MAX:
+                self._shown_pending[name] = payload
+            elif not self._zeige_overflow_said:
+                self._zeige_overflow_said = overflow = True
+        if overflow:
             try:
-                payload = json.dumps(_jsonable(value, _MAX_VAR_PAYLOAD_ITEMS))
-                if len(payload) > _MAX_VAR_PAYLOAD_CHARS:
-                    payload = payload[:_MAX_VAR_PAYLOAD_CHARS] + ' …'
-                self.ctx.log(f'[VAR:{name}={payload}]')
+                self.ctx.log(ZEIGE_TOO_MANY_NAMES_DE.format(n=SHOWN_VAR_NAMES_MAX))
             except Exception:  # noqa: BLE001 — observability never breaks a run
                 pass
+        self._flush_shown()
+
+    def _flush_shown(self, *, force: bool = False) -> None:
+        """Emit pending ``zeige`` payloads, oldest first, while the budget
+        lasts (``force``: all of them — the end of the run). Only
+        ``ctx.log``; nothing raises out of it."""
+        lines = []
+        with self._var_lock:
+            while self._shown_pending and (force or self._shown_gate.try_take()):
+                name = next(iter(self._shown_pending))
+                payload = self._shown_pending.pop(name)
+                if name in self._var_payloads or len(self._var_payloads) < SHOWN_VAR_NAMES_MAX:
+                    self._var_payloads[name] = payload
+                lines.append(f'[VAR:{name}={payload}]')
+        for line in lines:
+            try:
+                self.ctx.log(line)
+            except Exception:  # noqa: BLE001 — observability never breaks a run
+                pass
+
+    def _emit_var(self, name: Any, value: Any, *, force: bool) -> None:
+        """One ``[VAR:name=json]`` sentinel now (``__vars``, a breakpoint's
+        locals): :meth:`_render_shown`'s payload, skipped when that refuses.
+        ``force=False`` skips a name whose payload this run already showed.
+        Only ``ctx.log`` is called — this is observability, never control —
+        and nothing raises out of it."""
+        payload = self._render_shown(name, value)
+        if payload is None:
+            return
+        with self._var_lock:
+            if not force and self._var_payloads.get(name) == payload:
+                return
+            if name in self._var_payloads or len(self._var_payloads) < SHOWN_VAR_NAMES_MAX:
+                self._var_payloads[name] = payload
+        try:
+            self.ctx.log(f'[VAR:{name}={payload}]')
+        except Exception:  # noqa: BLE001 — observability never breaks a run
+            pass
+
+    # ── the code-only rows (the worker, after the pause/stop gate) ──────────
+    def _code_only(self, call: ApiCall, args: list, rid: int | None) -> dict:
+        """``zeige(name, wert)``: show the value in the Variablen panel. The
+        args are validated against the row already. Nothing else is touched."""
+        if call.name == 'zeige':
+            self._queue_shown(args[0], args[1])
+            return _ok(rid, None)
+        return _err(rid, 'internal', INTERNAL_ERROR_DE)
 
     # ── register_object (§3.10, A13) — the reader thread, perception budget ──
     def _register_object(self, args: list, rid: int | None) -> dict:
@@ -793,7 +1106,16 @@ class RunSession:
     # ── the worker ───────────────────────────────────────────────────────
     def _worker_loop(self) -> None:
         while True:
-            job = self._queue.get()
+            if self._shown_pending:
+                # A coalesced zeige is waiting: tick while idle so its latest
+                # value arrives without the next call.
+                try:
+                    job = self._queue.get(timeout=SHOWN_FLUSH_TICK_S)
+                except queue.Empty:
+                    self._flush_shown()
+                    continue
+            else:
+                job = self._queue.get()
             if job is None:
                 break
             try:
@@ -815,6 +1137,9 @@ class RunSession:
             # starts a handler in the window before close_run.
             if self.closed.is_set() or self.ctx.should_stop():
                 job.reply = _err(rid, 'robot', RUN_STOPPED_DE)
+                return
+            if job.call.table == 'code':
+                job.reply = self._code_only(job.call, job.args, rid)
                 return
             kwargs: dict[str, Any] = {}
             for p, v in zip(job.call.params, job.args):

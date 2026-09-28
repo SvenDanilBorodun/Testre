@@ -24,7 +24,9 @@
 // `json`.
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import {
+  render, screen, waitFor, act,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WorkshopPage from '../WorkshopPage';
 
@@ -268,11 +270,19 @@ describe('WorkshopPage — what the cloud SAVE actually ships', () => {
   });
 
   test('an UPDATE of an existing workflow is slimmed the same way', async () => {
+    // The program opens, then the student edits it: the store holds what the
+    // canvas reported, and a program that just opened holds none of it until
+    // then (the page clears the previous program's leftover when the row
+    // arrives — review round 5).
+    mockState = baseState({ selectedWorkflowId: 'wf-1' });
+    const { rerender } = render(<WorkshopPage isActive />);
+    await waitFor(() => expect(mockApi.getWorkflow).toHaveBeenCalledTimes(1));
+    await act(async () => { await Promise.resolve(); });
     mockState = baseState({
       unsavedBlocklyJson: FULL_EDITOR_JSON,
       selectedWorkflowId: 'wf-1',
     });
-    render(<WorkshopPage isActive />);
+    rerender(<WorkshopPage isActive />);
     await userEvent.click(await screen.findByTestId('save-button'));
     await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
 

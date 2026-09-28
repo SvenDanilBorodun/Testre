@@ -257,3 +257,21 @@ describe('TeachHost', () => {
     expect(dispatched('studioAssets/teachClosed')).toHaveLength(1);
   });
 });
+
+describe('TeachHost — a code program (owner decision O4)', () => {
+  const codeDoc = () => ({ kind: 'code', hideChaff: vi.fn(), getStore: () => null });
+
+  test('opens with an asset document and no Blockly workspace, and hands the document on', () => {
+    teachState({ requested: { focus: 'ziel', token: 11 } });
+    const assetDoc = codeDoc();
+    render(<TeachHost {...hostProps({ workspace: null, assetDoc })} />);
+    const opened = dispatched('studioAssets/teachOpened');
+    expect(opened).toHaveLength(1);
+    expect(opened[0].payload).toEqual({ mode: 'hand', focus: 'ziel' });
+    expect(assetDoc.hideChaff).toHaveBeenCalledTimes(1);
+
+    teachState({ open: true, mode: 'hand', focus: 'ziel' });
+    render(<TeachHost {...hostProps({ workspace: null, assetDoc })} />);
+    expect(mockOverlay.props.assetDoc).toBe(assetDoc);
+  });
+});

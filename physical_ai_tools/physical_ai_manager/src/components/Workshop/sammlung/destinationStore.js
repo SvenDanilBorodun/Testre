@@ -430,6 +430,22 @@ export function getDestinationStore(workspace) {
   return store;
 }
 
+/**
+ * The store of a CODE document (Python/Java): a document has no Blockly
+ * workspace to key a store on, so WorkshopPage owns ONE of these per open
+ * code document, preloaded with the entries its saved `blockly_json` carries
+ * (`readDestinationEntries`). It is the same DestinationStore — `fire_` is a
+ * no-op without a workspace, so no Blockly event and no undo step — and its
+ * callers learn about changes through `subscribe`. Never
+ * `getDestinationStore(null)`: that hands out a FRESH detached store on every
+ * call, so a Ziel added to one would vanish from the next.
+ */
+export function createDetachedDestinationStore(entries) {
+  const store = new DestinationStore(null);
+  store.replaceSilently(Array.isArray(entries) ? entries : []);
+  return store;
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /** The entries a serializer output carries (none when absent or invalid). */

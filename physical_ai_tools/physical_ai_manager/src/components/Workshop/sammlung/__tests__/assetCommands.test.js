@@ -634,3 +634,35 @@ describe('variables', () => {
     expect(ws.getVariableMap().getVariableById('va')).not.toBeNull();
   });
 });
+
+// A code program renames through a `rewrite(from, to)` callback instead of a
+// workspace (code/codeAssetDocument.js); the order and the compensation are
+// the same ones the Blockly path is held to above.
+describe('renameRecording with a rewrite callback (a code program)', () => {
+  it('renames the cloud, then rewrites, then saves', async () => {
+    const api = makeApi();
+    const rewrite = vi.fn();
+    const args = { ...renameArgs(api), workspace: undefined, rewrite };
+    const result = await renameRecording(args);
+    expect(result).toEqual({ ok: true });
+    expect(rewrite.mock.calls).toEqual([['Winken', 'Greifen']]);
+    expect(api.renameTrajectory.mock.invocationCallOrder[0]).toBeLessThan(rewrite.mock.invocationCallOrder[0]);
+    expect(rewrite.mock.invocationCallOrder[0]).toBeLessThan(args.saveWorkflowNow.mock.invocationCallOrder[0]);
+  });
+
+  it('a failed save compensates the CLOUD first, then rewrites back', async () => {
+    const api = makeApi();
+    const rewrite = vi.fn();
+    const args = {
+      ...renameArgs(api),
+      workspace: undefined,
+      rewrite,
+      saveWorkflowNow: vi.fn(async () => ({ ok: false, error: new Error('offline') })),
+    };
+    const result = await renameRecording(args);
+    expect(result.ok).toBe(false);
+    expect(rewrite.mock.calls).toEqual([['Winken', 'Greifen'], ['Greifen', 'Winken']]);
+    expect(api.renameTrajectory.mock.calls.map((c) => c[3])).toEqual(['Greifen', 'Winken']);
+    expect(api.renameTrajectory.mock.invocationCallOrder[1]).toBeLessThan(rewrite.mock.invocationCallOrder[1]);
+  });
+});

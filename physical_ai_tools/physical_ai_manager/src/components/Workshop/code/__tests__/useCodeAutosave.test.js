@@ -196,3 +196,42 @@ describe('the bucket exists only while the open document is code', () => {
     expect(idb.del).not.toHaveBeenCalled();
   });
 });
+
+// Migration 041: a code document's Ziele/Positionen are document content, so
+// the crash-recovery draft carries them beside the files.
+describe('the draft carries the Ziele', () => {
+  const ENTRY = Object.freeze({
+    id: 'd_0000abcd', name: 'Ablage', kind: 'pin', x: 0.2, y: 0, z: 0, source: 'camera',
+  });
+
+  it('writes the serializer state of the entries the page hands over', async () => {
+    renderHook(() => useCodeAutosave({
+      language: 'python', files: FILES, destinations: [ENTRY], scopeKey: 'u',
+    }));
+    await waitFor(() => expect(idb.set).toHaveBeenCalled());
+    expect(idb.set.mock.calls[0][1].state).toEqual({
+      language: 'python',
+      files: FILES,
+      destinations: { version: 1, entries: [{ ...ENTRY }] },
+    });
+  });
+
+  it('re-writes the draft when only the Ziele changed', async () => {
+    const { rerender } = renderHook((p) => useCodeAutosave(p), {
+      initialProps: { language: 'python', files: FILES, destinations: [], scopeKey: 'u' },
+    });
+    await waitFor(() => expect(idb.set).toHaveBeenCalledTimes(1));
+    rerender({ language: 'python', files: FILES, destinations: [ENTRY], scopeKey: 'u' });
+    await waitFor(() => expect(idb.set).toHaveBeenCalledTimes(2));
+    expect(idb.set.mock.calls[1][1].state.destinations.entries.map((e) => e.name)).toEqual(['Ablage']);
+  });
+
+  it('hands the stored Ziele back with the draft', async () => {
+    const saved = { version: 1, entries: [{ ...ENTRY }] };
+    idb.get.mockImplementation(async () => ({ state: { language: 'python', files: FILES, destinations: saved }, ts: 1 }));
+    const onRestore = vi.fn();
+    renderHook(() => useCodeAutosave({ language: '', files: null, scopeKey: 'u', onRestore }));
+    await waitFor(() => expect(onRestore).toHaveBeenCalledTimes(1));
+    expect(onRestore).toHaveBeenCalledWith({ language: 'python', files: FILES, destinations: saved });
+  });
+});

@@ -10,6 +10,16 @@
 // captured Positionen/Ziele in the document, and offers the home glide ONCE
 // at „Fertig". Every service call and every key rule lives in the hook.
 //
+// „The document" is an asset document (sammlung/assetDocument.js): a Blockly
+// workspace or a Python/Java program (owner decision O4). Captures go into its
+// Ziele store, automatic names skip the names the program pins itself, a
+// rename rewrites the program, and „Als Programm einfügen" builds blocks or
+// writes lines directly below the student's cursor line, checked by
+// codeInsert.js, with a toast that says where. Without a cursor nothing is
+// written: the lines go to the clipboard (owner decision R3-O4), one per line
+// and ending with a line break; pasted back into the program as they are,
+// they land like „Einfügen" (code/vormachenClipboard.js, owner decision R4-O1).
+//
 // Two rules here carry weight of their own:
 //   * No name is ever asked while the arm is limp: a capture/take gets an
 //     automatic name on the key press, and ✎ is enabled only while the arm is
@@ -30,14 +40,12 @@ import { compactTrajectoryPoints } from '../../../utils/trajectoryCompact';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import { selectTrajectoryList } from '../../../features/workshop/studioAssetsSlice';
 import { DE, formatDe } from '../blocks/messages_de';
+import { CODE_DE, formatCode } from '../code/codeMessagesDe';
+import { rememberVormachenCopy, vormachenClipboardText } from '../code/vormachenClipboard';
 import { useHomeGlide } from '../HomeGlidePrompt';
-import {
-  getDestinationStore,
-  nextAutoName,
-  sanitizeDestinationNameInput,
-  takenDestinationNames,
-} from '../sammlung/destinationStore';
-import { renamePlace, renameRecording } from '../sammlung/assetCommands';
+import { nextAutoName, sanitizeDestinationNameInput } from '../sammlung/destinationStore';
+import { renameRecording } from '../sammlung/assetCommands';
+import { assetDocumentOf } from '../sammlung/assetDocument';
 import { formatMmDe, formatSecondsDe } from '../sammlung/format';
 import { analyzeTake, applyCleanup } from '../../../utils/recordingCleanup';
 import useTeachSession, { classifyTeachKey } from './useTeachSession';
@@ -47,8 +55,24 @@ import LeaderActivationGate from './LeaderActivationGate';
 import { teachLeaderStatus, teachLeaderStatusNoticeDe } from './teachGates';
 import { formatCmDe, isZielTouchTooHigh, zielTouchHeightAboveTableMm } from './zielTouch';
 import {
-  buildProgramBlocks, insertProgram, makeGripperStateOf, placeGripperState,
+  buildProgramBlocks, buildProgramSteps, makeGripperStateOf, placeGripperState,
 } from './insertProgram';
+
+// Puts a program's lines on the clipboard, one per line and ending with a
+// line break (a paste anywhere never joins two statements — review round 4,
+// mc2), and remembers them for the editor's paste (vormachenClipboard.js);
+// false when the browser offers no clipboard (or refuses it).
+async function copyLines(language, lines) {
+  try {
+    const clip = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+    if (!clip || typeof clip.writeText !== 'function') return false;
+    await clip.writeText(vormachenClipboardText(lines));
+    rememberVormachenCopy(language, lines);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 // The cloud keeps at most 16 recording rows per workflow (SQL prune cap).
 export const TEACH_TRAJECTORY_SLOTS = 16;
@@ -156,7 +180,7 @@ export function rowsDurationS(rows) {
 }
 
 function TeachOverlay({
-  mode = 'hand', focus = null, onClose, workspace, accessToken, workflowId, robotType, caps = null,
+  mode = 'hand', focus = null, onClose, workspace, assetDoc = null, accessToken, workflowId, robotType, caps = null,
   heartbeatOk, rsBridge, saveWorkflowNow, refetchTrajectories,
 }) {
   const containerRef = useRef(null);
@@ -171,10 +195,16 @@ function TeachOverlay({
   const sounds = useMemo(() => createTeachSounds(), []);
   useEffect(() => () => { try { sounds.dispose(); } catch (_) { /* ignore */ } }, [sounds]);
 
+  // The document Vormachen writes into (sammlung/assetDocument.js): the
+  // page's asset document — a Blockly workspace or a Python/Java program — or,
+  // for a caller that hands a bare workspace, that workspace's document.
+  const doc = useMemo(() => assetDocumentOf(assetDoc, workspace), [assetDoc, workspace]);
+  const isCode = !!doc && doc.kind === 'code';
+
   // Latest values for callbacks that outlive a render (uploads, the hook).
   const latest = useRef({});
   latest.current = {
-    accessToken, workflowId, robotType, saveWorkflowNow, refetchTrajectories, workspace, onClose, caps,
+    accessToken, workflowId, robotType, saveWorkflowNow, refetchTrajectories, doc, onClose, caps,
   };
 
   // „In dieser Runde". The ref is written synchronously, so two keeps inside
@@ -206,7 +236,7 @@ function TeachOverlay({
   const issuedPlaceNames = useRef(new Set());
   const captureNamer = useCallback((kind) => {
     let taken = [];
-    try { taken = takenDestinationNames(latest.current.workspace); } catch (_) { taken = []; }
+    try { taken = latest.current.doc ? latest.current.doc.takenPlaceNames() : []; } catch (_) { taken = []; }
     const all = [...taken, ...issuedPlaceNames.current];
     const template = kind === 'pose' ? DE.TEACH_AUTO_NAME_POSE : DE.TEACH_AUTO_NAME_ZIEL;
     const name = nextAutoName(template, all);
@@ -308,7 +338,7 @@ function TeachOverlay({
     }
     let result;
     try {
-      result = getDestinationStore(latest.current.workspace).add(input);
+      result = latest.current.doc.getStore().add(input);
     } catch (err) {
       result = { ok: false, error: messageOf(err) || DE.ERR_COORDINATES };
     }
@@ -590,7 +620,8 @@ function TeachOverlay({
     const ctx = latest.current;
     if (item.kind === 'recording') {
       const result = await renameRecording({
-        workspace: ctx.workspace,
+        // {workspace} for a Blockly document, {rewrite} for a code program.
+        ...(ctx.doc ? ctx.doc.renameRecordingTarget() : {}),
         api: workflowApi,
         accessToken: ctx.accessToken,
         workflowId: ctx.workflowId,
@@ -608,7 +639,11 @@ function TeachOverlay({
       patchItem(item.key, { name: String(cur.draft).trim() });
       if (typeof ctx.refetchTrajectories === 'function') ctx.refetchTrajectories();
     } else {
-      const result = renamePlace({ workspace: ctx.workspace, entryId: item.entryId, toName: cur.draft });
+      if (!ctx.doc) {
+        setRenaming(null);
+        return;
+      }
+      const result = ctx.doc.renamePlace(item.entryId, cur.draft);
       if (!result.ok) {
         toast.error(result.error);
         return;
@@ -692,7 +727,7 @@ function TeachOverlay({
 
   // „Als Programm einfügen": a place counts only while it is still in the store.
   const placeNameOf = useCallback((item) => {
-    const store = getDestinationStore(latest.current.workspace);
+    const store = latest.current.doc ? latest.current.doc.getStore() : null;
     const entry = store && typeof store.getById === 'function' ? store.getById(item.entryId) : null;
     return entry ? entry.name : null;
   }, []);
@@ -701,25 +736,62 @@ function TeachOverlay({
   const gripperStateOf = useCallback((item) => makeGripperStateOf({
     caps: latest.current.caps,
     entryOf: (it) => {
-      const store = getDestinationStore(latest.current.workspace);
+      const store = latest.current.doc ? latest.current.doc.getStore() : null;
       return store && typeof store.getById === 'function' ? store.getById(it.entryId) : null;
     },
   })(item), []);
-  const insertCount = buildProgramBlocks(items, { placeNameOf, gripperStateOf }).count;
-  const handleInsert = () => {
-    let result;
+  // A code program counts LINES (one per step), a Blockly one blocks.
+  const insertCount = isCode
+    ? buildProgramSteps(items, { placeNameOf, gripperStateOf }).length
+    : buildProgramBlocks(items, { placeNameOf, gripperStateOf }).count;
+  const insertLabel = isCode
+    ? (insertCount === 1 ? CODE_DE.TEACH_INSERT_LINE_ONE : formatCode(CODE_DE.TEACH_INSERT_LINES, insertCount))
+    : (insertCount === 1 ? DE.TEACH_INSERT_ONE : formatDe(DE.TEACH_INSERT, insertCount));
+  // A code document's insertion may load its module first (async); a
+  // Blockly document answers at once — `await` takes both. One at a time
+  // (review round 3, nb4): a second click while it loaded inserted twice;
+  // the button is disabled from the first click on.
+  const [inserting, setInserting] = useState(false);
+  const handleInsert = async () => {
+    setInserting(true);
     try {
-      result = insertProgram(latest.current.workspace, itemsRef.current, { placeNameOf, gripperStateOf });
-    } catch (err) {
-      console.error('insertProgram failed:', err);
-      toast.error(INSERT_FAILED_DE);
-      return;
+      const target = latest.current.doc;
+      let result;
+      try {
+        result = await target.insertProgram(itemsRef.current, { placeNameOf, gripperStateOf });
+      } catch (err) {
+        console.error('insertProgram failed:', err);
+        toast.error(isCode ? CODE_DE.TEACH_INSERT_FAILED : INSERT_FAILED_DE);
+        return;
+      }
+      if (result && result.noCursor && Array.isArray(result.lines)) {
+        // The student never clicked into the code (owner decision R3-O4):
+        // nothing is written — the lines go to the clipboard, to paste where
+        // they belong. No clipboard: the click-first hint.
+        if (await copyLines(target.language, result.lines)) toast.success(CODE_DE.COPIED_PASTE_HINT);
+        else toast.error(result.error || CODE_DE.CLICK_FIRST_HINT);
+        refocus();
+        return;
+      }
+      if (result && result.error) {
+        // A spot where the lines cannot stand or never run: the reason.
+        toast.error(result.error);
+        refocus();
+        return;
+      }
+      if (result && result.count > 0) {
+        if (isCode) {
+          // Where the lines went: below the cursor's line.
+          toast.success(formatCode(CODE_DE.INSERTED_AT, result.file, result.firstLine));
+        } else {
+          toast.success(result.count === 1
+            ? DE.TEACH_INSERT_DONE_ONE : formatDe(DE.TEACH_INSERT_DONE, result.count));
+        }
+      }
+      refocus();
+    } finally {
+      setInserting(false);
     }
-    if (result && result.count > 0) {
-      toast.success(result.count === 1
-        ? DE.TEACH_INSERT_DONE_ONE : formatDe(DE.TEACH_INSERT_DONE, result.count));
-    }
-    refocus();
   };
 
   return (
@@ -985,10 +1057,11 @@ function TeachOverlay({
                 type="button"
                 onClick={handleInsert}
                 onPointerUp={refocus}
-                disabled={insertCount === 0 || !workspace}
+                disabled={insertCount === 0 || !doc || inserting}
+                aria-busy={inserting || undefined}
                 className="w-full rounded-lg border border-[var(--accent)] px-3 py-2 text-base font-semibold text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40 hover:bg-[var(--bg-sunk)]"
               >
-                {insertCount === 1 ? DE.TEACH_INSERT_ONE : formatDe(DE.TEACH_INSERT, insertCount)}
+                {insertLabel}
               </button>
             </div>
           </aside>

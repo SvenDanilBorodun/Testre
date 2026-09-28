@@ -37,18 +37,32 @@ function fmtTs(iso) {
  * is on local-only autosave state). When clicked, it fetches the list
  * lazily and renders a popover.
  */
-function VersionHistoryDropdown({ workflowId, onRestore }) {
+// `lockedReason` (a program runs, R2-O3): a restore replaces the open
+// document, so it is refused BEFORE the cloud is asked — a restore the page
+// then refused to show would leave the cloud row and the editor apart. The
+// history button is disabled then; a list opened before the program started
+// stays clickable and each „laden" says why (review round 3, MB2f — the same
+// as the „Neu" menu). `onRestoringChange(bool)` tells the page a restore is
+// on its way, so no run starts under it (nb2). ONE restore at a time (review
+// round 4, mc8): while one is on its way every other „laden" is disabled and
+// says why, and a click that arrives anyway is refused — two overlapping
+// restores told the page [true, true, false] and unlocked it mid-restore.
+function VersionHistoryDropdown({
+  workflowId, onRestore, lockedReason = null, onRestoringChange = null,
+}) {
   const accessToken = useSelector((s) => s.auth?.session?.access_token);
   const [open, setOpen] = useState(false);
   const [versions, setVersions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [restoringId, setRestoringId] = useState(null);
+  // Set synchronously by the click, before React re-renders the buttons.
+  const inFlightRef = useRef(false);
   // Audit §verhist-r1: ref-based click-outside handler. Without it the
   // popover hangs around after the student clicks the workspace, an
   // accidental discovery that comes up in every QA run.
   const containerRef = useRef(null);
 
-  const disabled = !workflowId || !accessToken;
+  const disabled = !workflowId || !accessToken || !!lockedReason;
 
   useEffect(() => {
     if (!open) return undefined;
@@ -82,7 +96,17 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
   const handleRestore = useCallback(
     async (versionId) => {
       if (!accessToken || !workflowId) return;
+      if (lockedReason) {
+        toast.error(lockedReason);
+        return;
+      }
+      if (inFlightRef.current) {
+        toast.error(DE.VERSION_RESTORE_IN_FLIGHT);
+        return;
+      }
+      inFlightRef.current = true;
       setRestoringId(versionId);
+      if (typeof onRestoringChange === 'function') onRestoringChange(true);
       try {
         const updated = await restoreWorkflowVersion(
           accessToken,
@@ -97,10 +121,12 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
       } catch (e) {
         toast.error(`Wiederherstellen fehlgeschlagen: ${e.message || e}`);
       } finally {
+        inFlightRef.current = false;
         setRestoringId(null);
+        if (typeof onRestoringChange === 'function') onRestoringChange(false);
       }
     },
-    [accessToken, workflowId, onRestore]
+    [accessToken, workflowId, onRestore, lockedReason, onRestoringChange]
   );
 
   return (
@@ -109,6 +135,7 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
+        title={lockedReason || undefined}
         aria-expanded={open}
         aria-haspopup="menu"
         className={
@@ -146,7 +173,9 @@ function VersionHistoryDropdown({ workflowId, onRestore }) {
                   <button
                     type="button"
                     onClick={() => handleRestore(v.id)}
-                    disabled={restoringId === v.id}
+                    disabled={restoringId !== null}
+                    title={lockedReason
+                      || (restoringId !== null && restoringId !== v.id ? DE.VERSION_RESTORE_IN_FLIGHT : undefined)}
                     className="text-xs text-blue-600 hover:underline disabled:opacity-50"
                   >
                     {restoringId === v.id ? '…' : DE.VERSION_LOAD}

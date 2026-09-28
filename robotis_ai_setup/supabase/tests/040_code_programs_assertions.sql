@@ -1,7 +1,22 @@
 -- Behavioural assertions for migration 040 (Roboter Studio code programs +
 -- „Abgeben"), run BY HAND against a fresh LOCAL stack — never CI, never the
--- linked project (it seeds rows and deletes a workflow):
---   supabase start && supabase db reset --local   (scratch project copy)
+-- linked project (it seeds rows and deletes a workflow).
+--
+-- The squashed baseline does NOT replay on a fresh database as shipped (its
+-- migration-005 body renames a runpod_job_id column its own CREATE TABLE never
+-- declares; docs/KNOWN-ISSUES.md, „baseline.sql is NOT replayable from
+-- scratch"). So run it in a SCRATCH copy of supabase/ whose baseline has that
+-- one line guarded:
+--   ALTER TABLE public.trainings RENAME COLUMN runpod_job_id TO cloud_job_id;
+-- becomes
+--   DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns
+--     WHERE table_schema='public' AND table_name='trainings'
+--       AND column_name='runpod_job_id')
+--   THEN ALTER TABLE public.trainings RENAME COLUMN runpod_job_id TO cloud_job_id;
+--   END IF; END $$;
+-- with the migrations only THROUGH 040 (after 041 this file is not the
+-- right check: see 041_code_destinations_assertions.sql), then
+--   supabase start   (in the scratch copy; it applies the migrations)
 --   psql <local db url> < supabase/tests/040_code_programs_assertions.sql
 -- Expected: 16 PASS, 0 FAIL/ERROR (T1..T10, some with a/b/c/d halves).
 \set ON_ERROR_STOP off

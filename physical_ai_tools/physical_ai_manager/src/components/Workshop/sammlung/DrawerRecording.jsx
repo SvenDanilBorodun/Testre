@@ -27,14 +27,15 @@ import {
   setRenameSplit,
 } from '../../../features/workshop/studioAssetsSlice';
 import { previewKeyForRecording } from '../../../utils/simPreview';
+import { CODE_DE } from '../code/codeMessagesDe';
 import { DE, formatDe } from '../blocks/messages_de';
 import {
   deleteRecordingRows,
   renameRecording,
   restoreKeepsPlayedTake,
   restoreRecordingRows,
-  usageRows,
 } from './assetCommands';
+import { assetDocumentOf } from './assetDocument';
 import {
   formatRecordedAtDe,
   formatSecondsDe,
@@ -82,7 +83,8 @@ function robotLabel(profile) {
 }
 
 export default function DrawerRecording({
-  workspace,
+  assetDoc: assetDocProp = null,
+  workspace = null,
   card,
   items,
   accessToken,
@@ -93,6 +95,10 @@ export default function DrawerRecording({
   refetchTrajectories,
 }) {
   const dispatch = useDispatch();
+  const assetDoc = assetDocumentOf(assetDocProp, workspace);
+  // A code program has no block to drag: its „nowhere" points at „Einfügen".
+  const nowhereRecordingText = assetDoc && assetDoc.kind === 'code'
+    ? CODE_DE.USED_NOWHERE_INSERT : DE.DRAWER_USED_NOWHERE_RECORDING;
   const drawer = useSelector(selectDrawer);
   const lastPreviewResult = useSelector(selectLastPreviewResult);
   const previewTempo = (drawer && drawer.previewTempo) || 1.0;
@@ -107,7 +113,7 @@ export default function DrawerRecording({
   const missing = card.assetKind === 'missingRecording';
   const versions = Array.isArray(card.versions) ? card.versions : [];
   const newest = versions[0] || null;
-  const rows = usageRows(workspace, 'recording', name);
+  const rows = assetDoc ? assetDoc.usageRows('recording', name) : [];
   const refetch = () => { if (typeof refetchTrajectories === 'function') refetchTrajectories(); };
 
   const ask = (text, yesLabel) => new Promise((resolve) => {
@@ -130,7 +136,9 @@ export default function DrawerRecording({
 
   const commitRename = async (draft) => {
     const result = await renameRecording({
-      workspace,
+      // Blockly: {workspace} (its replay blocks); code: {rewrite} (its
+      // replay("…") string arguments).
+      ...(assetDoc ? assetDoc.renameRecordingTarget() : { workspace }),
       api: workflowApi,
       accessToken,
       workflowId,
@@ -223,7 +231,7 @@ export default function DrawerRecording({
     return (
       <div className="p-3">
         <h3 className="truncate text-base font-semibold text-gray-900" title={name}>{name}</h3>
-        <UsageList workspace={workspace} rows={rows} nowhereText={DE.DRAWER_USED_NOWHERE_RECORDING} />
+        <UsageList assetDoc={assetDoc} rows={rows} nowhereText={nowhereRecordingText} />
       </div>
     );
   }
@@ -289,7 +297,7 @@ export default function DrawerRecording({
           )}
         </section>
       )}
-      <UsageList workspace={workspace} rows={rows} nowhereText={DE.DRAWER_USED_NOWHERE_RECORDING} />
+      <UsageList assetDoc={assetDoc} rows={rows} nowhereText={nowhereRecordingText} />
       {older.length > 0 && (
         <section className="mt-3">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">{DE.DRAWER_OLDER_VERSIONS}</h4>

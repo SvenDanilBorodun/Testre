@@ -14,10 +14,19 @@
 // `blockly_json`, whose SAVE allowlist would silently delete them), and its
 // PATCH echoes the document's own language — never a different one.
 //
+// Migration 041 (owner decisions O1/O2): a code program keeps its Ziele and
+// Positionen where a Blockly program keeps them — `blockly_json`'s
+// `edubotics-destinations` key, and nothing else there. So a code save now
+// sends `blockly_json` too: `{}` without Ziele, the serializer state with them.
+// Every path that opens a code document (hydrate, „Neu", a draft, a version
+// restore) loads them into ONE store per document (openCodeDocument).
+//
 // Same mocking idiom as WorkshopPage.savePayload.test.jsx.
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import {
+  act, fireEvent, render, screen, waitFor,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WorkshopPage from '../WorkshopPage';
 
@@ -41,41 +50,93 @@ vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
 }));
 
 // The code editor host: a stub that exposes what the page handed it and lets a
-// test edit the entry file through the page's own onChange.
+// test edit the entry file through the page's own onChange — and, through the
+// asset document the page hands it, rename a Ziel and save IN THE SAME TICK
+// (the drawer's rename does exactly that: rewrite the code, then await a save).
+const mockPage = vi.hoisted(() => ({
+  onSave: null, assetDoc: null, host: null, teachHost: null,
+}));
 vi.mock('../../components/Workshop/code/CodeWorkspace', () => ({
   __esModule: true,
-  default: function MockCodeWorkspace({ language, files, onFilesChange }) {
+  default: function MockCodeWorkspace(props) {
+    const {
+      language, files, onFilesChange, assetDoc,
+    } = props;
+    mockPage.assetDoc = assetDoc;
+    mockPage.host = props;
     return (
       <div data-testid="code-workspace" data-language={language}>
         <pre data-testid="code-files">{JSON.stringify(files)}</pre>
+        <pre data-testid="code-ziele">
+          {JSON.stringify(assetDoc ? assetDoc.getStore().getEntries().map((e) => e.name) : null)}
+        </pre>
         <button
           type="button"
           data-testid="code-edit"
           onClick={() => onFilesChange({ ...files, 'main.py': 'import robot\nrobot.log("geändert")\n' })}
+        />
+        <button
+          type="button"
+          data-testid="code-rename-and-save"
+          onClick={() => {
+            const entry = assetDoc.getStore().getByName('Ablage');
+            assetDoc.renamePlace(entry.id, 'Tisch');
+            mockPage.onSave();
+          }}
         />
       </div>
     );
   },
 }));
 
-vi.mock('../../components/Workshop/RightDock', () => ({ __esModule: true, default: () => <div data-testid="right-dock" /> }));
-vi.mock('../../components/Workshop/SimStage', () => ({ __esModule: true, default: () => <div data-testid="sim-stage" /> }));
+// RightDock renders ONLY the camera tab, so the page's CameraFeedOverlay wiring
+// is reachable (the camera click-to-mark of a code program).
+vi.mock('../../components/Workshop/RightDock', () => ({
+  __esModule: true,
+  default: ({ tabs }) => (
+    <div data-testid="right-dock">
+      {(tabs || []).filter((t) => t.id === 'camera').map((t) => <div key={t.id}>{t.render()}</div>)}
+    </div>
+  ),
+}));
+const mockSimStage = vi.hoisted(() => ({ props: null }));
+vi.mock('../../components/Workshop/SimStage', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockSimStage.props = props;
+    return <div data-testid="sim-stage" data-language={props.codeLanguage} />;
+  },
+}));
 vi.mock('../../components/Workshop/CalibrationWizard', () => ({ __esModule: true, default: () => <div data-testid="calib-wizard" /> }));
 vi.mock('../../components/Workshop/LeaderToggle', () => ({ __esModule: true, default: () => <div data-testid="leader-toggle" /> }));
 vi.mock('../../components/Workshop/RunControls', () => ({
   __esModule: true,
-  default: ({ codeLanguage, codeFiles }) => (
-    <div data-testid="run-controls" data-language={codeLanguage || ''} data-files={codeFiles ? Object.keys(codeFiles).join(',') : ''} />
+  default: ({ codeLanguage, codeFiles, destinationStore }) => (
+    <div
+      data-testid="run-controls"
+      data-language={codeLanguage || ''}
+      data-files={codeFiles ? Object.keys(codeFiles).join(',') : ''}
+      data-ziele={destinationStore ? destinationStore.getEntries().map((e) => e.name).join(',') : '-'}
+    />
   ),
 }));
-vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
+const mockOverlay = vi.hoisted(() => ({ props: null }));
+vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockOverlay.props = props;
+    return <div data-testid="camera-feed" />;
+  },
+}));
 vi.mock('../../components/Workshop/TemplatePicker', () => ({ __esModule: true, default: () => <div data-testid="template-picker" /> }));
 vi.mock('../../components/Workshop/ToolbarButtons', () => ({
   __esModule: true,
-  default: function MockToolbarButtons({ onSave, leading }) {
+  default: function MockToolbarButtons({ onSave, leading, extra }) {
+    mockPage.onSave = onSave;
     return (
       <div>
         {leading}
+        {extra}
         <button type="button" data-testid="save-button" onClick={() => onSave && onSave()} />
       </div>
     );
@@ -84,8 +145,21 @@ vi.mock('../../components/Workshop/ToolbarButtons', () => ({
 vi.mock('../../components/Workshop/DebugPanel', () => ({ __esModule: true, default: () => <div data-testid="debug-panel" /> }));
 vi.mock('../../components/Workshop/GalleryTab', () => ({ __esModule: true, default: () => <div data-testid="gallery-tab" /> }));
 vi.mock('../../components/Workshop/SkillmapPlayer', () => ({ __esModule: true, default: () => <div data-testid="skillmap" /> }));
-vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({ __esModule: true, default: () => <div data-testid="version-history" /> }));
-vi.mock('../../components/Workshop/teach/TeachHost', () => ({ __esModule: true, default: () => <div data-testid="teach-host" /> }));
+const mockHistory = vi.hoisted(() => ({ onRestore: null }));
+vi.mock('../../components/Workshop/VersionHistoryDropdown', () => ({
+  __esModule: true,
+  default: ({ onRestore }) => {
+    mockHistory.onRestore = onRestore;
+    return <div data-testid="version-history" />;
+  },
+}));
+vi.mock('../../components/Workshop/teach/TeachHost', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockPage.teachHost = props;
+    return <div data-testid="teach-host" />;
+  },
+}));
 vi.mock('../../hooks/useRsBridgeStatus', () => ({
   __esModule: true,
   default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false }),
@@ -231,9 +305,11 @@ describe('WorkshopPage — a code workflow', () => {
     const [token, id, body] = mockApi.updateWorkflow.mock.calls[0];
     expect(token).toBe('jwt');
     expect(id).toBe('wf-py');
-    // Two fields on the PATCH — and NO blockly_json beside them (the cloud
-    // refuses a PATCH that mixes the two, and the SAVE allowlist would have
-    // deleted the files had they ridden inside blockly_json).
+    // The code fields on the PATCH. A program that opened without Ziele and
+    // whose Ziele did not change sends NO blockly_json (review m1): an API
+    // from before migration 041 refuses any blockly_json on a code row, and
+    // there is nothing to say. (Never the files inside blockly_json either:
+    // the SAVE allowlist would delete them and the cloud refuses the key.)
     expect(Object.keys(body).sort()).toEqual(['code_files', 'code_language', 'sim_scene']);
     expect(body.code_language).toBe('python');
     expect(body.code_files['main.py']).toContain('geändert');
@@ -387,5 +463,307 @@ describe('WorkshopPage — the code document is autosaved locally', () => {
       idb.del.mock.calls.some(([k]) => String(k).includes('code-autosave')),
     ).toBe(true));
     expect(lastCodeDraft()).toBeNull();
+  });
+});
+
+// Migration 041: a code program keeps its Ziele/Positionen.
+const ZIELE_STATE = {
+  version: 1,
+  entries: [
+    { id: 'd_0000aaaa', name: 'Ablage', kind: 'pin', x: 0.2, y: 0, z: 0, source: 'camera' },
+    { id: 'd_0000bbbb', name: 'Hoch', kind: 'pose', x: 0.1, y: 0.1, z: 0.15, source: 'capture' },
+  ],
+};
+const PYTHON_ROW_ZIELE = {
+  ...PYTHON_ROW,
+  blockly_json: { 'edubotics-destinations': ZIELE_STATE },
+  code_files: { 'main.py': 'import robot\nrobot.move_to("Ablage")\n' },
+};
+
+describe('WorkshopPage — a code program’s Ziele (migration 041)', () => {
+  test('hydrate loads them into the document’s store, the run gets them, the save sends them back', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW_ZIELE));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual(['Ablage', 'Hoch']);
+    expect(screen.getByTestId('run-controls').getAttribute('data-ziele')).toBe('Ablage,Hoch');
+
+    await userEvent.click(screen.getByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    const body = mockApi.updateWorkflow.mock.calls[0][2];
+    expect(Object.keys(body.blockly_json)).toEqual(['edubotics-destinations']);
+    expect(body.blockly_json['edubotics-destinations'].entries.map((e) => e.name)).toEqual(['Ablage', 'Hoch']);
+  });
+
+  test('a rename that rewrites the code and saves in the SAME tick saves the rewritten code', async () => {
+    // applyCodeFiles sets the ref runSave reads synchronously — a ref updated
+    // in an effect would still hold the old text when the save starts.
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW_ZIELE));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByTestId('code-rename-and-save'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    const body = mockApi.updateWorkflow.mock.calls[0][2];
+    expect(body.code_files['main.py']).toBe('import robot\nrobot.move_to("Tisch")\n');
+    expect(body.blockly_json['edubotics-destinations'].entries.map((e) => e.name)).toEqual(['Tisch', 'Hoch']);
+  });
+
+  test('„Neu → Python" starts with an EMPTY store, never the previous program’s', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW_ZIELE));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByRole('button', { name: /^Neu/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Python/ }));
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual([]));
+  });
+
+  test('a version restore of a code program brings its Ziele back', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual([]);
+    act(() => { mockHistory.onRestore(PYTHON_ROW_ZIELE); });
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual(['Ablage', 'Hoch']));
+    expect(JSON.parse(screen.getByTestId('code-files').textContent)).toEqual(PYTHON_ROW_ZIELE.code_files);
+  });
+
+  test('the local draft carries the Ziele and a restored draft brings them back', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW_ZIELE));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    const view = render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByTestId('code-edit'));
+    await waitFor(() => expect(lastCodeDraft()).not.toBeNull(), { timeout: 4000 });
+    expect(lastCodeDraft().state.destinations.entries.map((e) => e.name)).toEqual(['Ablage', 'Hoch']);
+    view.unmount();
+
+    idb.get.mockImplementation(async (key) => (String(key).includes('code-autosave')
+      ? { state: { language: 'python', files: { 'main.py': 'import robot\n' }, destinations: ZIELE_STATE }, ts: 5 }
+      : undefined));
+    mockState = baseState();
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual(['Ablage', 'Hoch']));
+  });
+
+  test('an older draft without Ziele still restores', async () => {
+    idb.get.mockImplementation(async (key) => (String(key).includes('code-autosave')
+      ? { state: { language: 'python', files: { 'main.py': 'import robot\n' } }, ts: 5 }
+      : undefined));
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    expect(JSON.parse(screen.getByTestId('code-ziele').textContent)).toEqual([]);
+  });
+});
+
+describe('WorkshopPage — the simulator of a code program (O9)', () => {
+  test('SimStage receives the open program’s language for its Debug panel', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    const stage = await screen.findByTestId('sim-stage');
+    expect(stage.getAttribute('data-language')).toBe('python');
+  });
+});
+
+describe('WorkshopPage — creating Ziele in a code program (the three silent no-ops)', () => {
+  const PY_PINNED = {
+    ...PYTHON_ROW_ZIELE,
+    code_files: { 'main.py': 'import robot\nrobot.pin("Ziel 1", 0.1, 0.0, 0.0)\n' },
+  };
+
+  test('a camera click makes a new Ziel in the document’s store, named past the code’s own pins', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PY_PINNED));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await waitFor(() => expect(mockOverlay.props).not.toBeNull());
+    const resolved = mockOverlay.props.resolveMarkLabel();
+    expect(resolved).toEqual({ label: 'Ziel 2', target: 'store' });
+    let marked;
+    act(() => {
+      marked = mockOverlay.props.onMark({ ...resolved, world_x: 0.15, world_y: 0.02, world_z: 0.01 });
+    });
+    expect(marked).toMatchObject({ name: 'Ziel 2' });
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent))
+      .toEqual(['Ablage', 'Hoch', 'Ziel 2']));
+    expect(screen.getByTestId('run-controls').getAttribute('data-ziele')).toBe('Ablage,Hoch,Ziel 2');
+    // …and the overlay's inline rename renames it in that same store.
+    act(() => { mockOverlay.props.onRenameMark(marked.entryId, 'Tischkante'); });
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent))
+      .toEqual(['Ablage', 'Hoch', 'Tischkante']));
+  });
+
+  test('„Ziel setzen" on the sim table adds a pin at z 0 to the code document', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PY_PINNED));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    act(() => { mockSimStage.props.onCreateDestination({ x: 0.2, y: -0.1 }); });
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('code-ziele').textContent))
+      .toEqual(['Ablage', 'Hoch', 'Ziel 2']));
+    const pin = mockPage.assetDoc.getStore().getByName('Ziel 2');
+    expect(pin).toMatchObject({ kind: 'pin', source: 'sim', z: 0 });
+    // The sim stage's markers are the code document's entries.
+    expect(mockSimStage.props.markers.map((m) => m.label)).toEqual(expect.arrayContaining(['Ablage', 'Hoch', 'Ziel 2']));
+  });
+});
+
+describe('WorkshopPage — the code editor host gets the Sammlung (O4–O7)', () => {
+  test('the catalog’s object types, the page’s provider, and the cursor „Einfügen" writes below', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await waitFor(() => expect(mockPage.host.objectTypes).toEqual(['wuerfel']));
+    expect(typeof mockPage.host.provider.dispatchAction).toBe('function');
+
+    act(() => { mockPage.host.onCursorChange({ file: 'hilfe.py', line: 1 }); });
+    // The insertion module loads on demand (review round 2, ni4).
+    await act(async () => { await mockPage.assetDoc.insertSnippet({ kind: 'recording', name: 'Winken' }); });
+    const files = JSON.parse(screen.getByTestId('code-files').textContent);
+    expect(files['hilfe.py']).toBe('x = 1\nrobot.replay("Winken")\n');
+    expect(mockPage.host.revealRequest).toMatchObject({ file: 'hilfe.py', line: 2 });
+  });
+});
+
+describe('WorkshopPage — an insertion never lands in another document (review round 3, mb9)', () => {
+  test('„Neu" while the insertion module loads: the new program gets nothing, the student is told', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    act(() => { mockPage.host.onCursorChange({ file: 'main.py', line: 2 }); });
+    await userEvent.click(screen.getByRole('button', { name: /^Neu/ }));
+    const java = screen.getByRole('button', { name: /Java/ });
+    const doc = mockPage.assetDoc;
+    let pending;
+    // The click and the switch in the same tick: the module promise has not
+    // settled when „Neu → Java" replaces the document.
+    pending = doc.insertSnippet({ kind: 'recording', name: 'Winken' });
+    fireEvent.click(java);
+    let result;
+    await act(async () => { result = await pending; });
+    expect(result).toEqual({ count: 0, error: 'Inzwischen ist ein anderes Programm offen – es wurde nichts eingefügt.' });
+    expect(screen.getByTestId('code-workspace').getAttribute('data-language')).toBe('java');
+    expect(screen.getByTestId('code-files').textContent).not.toMatch(/Winken/);
+  });
+});
+
+describe('WorkshopPage — an insertion never lands while another program is being fetched (review round 4, mc9 R24)', () => {
+  test('opening a saved program while the insertion module loads: nothing is written, the student is told', async () => {
+    // The page names a new document the moment it STARTS fetching it — the
+    // old document's files are still the page's until the row arrives, and a
+    // success toast for lines written into them would name a program that is
+    // about to disappear.
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    act(() => { mockPage.host.onCursorChange({ file: 'main.py', line: 2 }); });
+    const doc = mockPage.assetDoc;
+    expect(doc.usageRows('recording', 'Winken')).toEqual([]);
+    // The next program's row never arrives during this test.
+    mockApi.getWorkflow.mockImplementation(() => new Promise(() => {}));
+    const pending = doc.insertSnippet({ kind: 'recording', name: 'Winken' });
+    mockState = baseState({ selectedWorkflowId: 'wf-other' });
+    rerender(<WorkshopPage isActive />);
+    let result;
+    await act(async () => { result = await pending; });
+    expect(result).toEqual({ count: 0, error: 'Inzwischen ist ein anderes Programm offen – es wurde nichts eingefügt.' });
+    // Nothing was written into the old program's files either (the page's
+    // files, read through the old document).
+    expect(doc.usageRows('recording', 'Winken')).toEqual([]);
+    expect(mockApi.getWorkflow).toHaveBeenLastCalledWith('jwt', 'wf-other');
+  });
+});
+
+describe('WorkshopPage — the previous document’s Ziele store lets go (review round 3, nb5)', () => {
+  test('a change to the OLD store after a switch does not mark the new document’s Ziele as changed', async () => {
+    const other = {
+      ...PYTHON_ROW, id: 'wf-py2', name: 'Anderes', code_files: { 'main.py': 'import robot\n' },
+    };
+    mockApi.getWorkflow.mockImplementation((_tok, id) => Promise.resolve(id === 'wf-py2' ? other : PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    const { rerender } = render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    const oldStore = mockPage.assetDoc.getStore();
+    mockState = baseState({ selectedWorkflowId: 'wf-py2' });
+    rerender(<WorkshopPage isActive />);
+    await waitFor(() => expect(mockPage.assetDoc.getStore()).not.toBe(oldStore));
+    // Something still holding the old store (a Vormachen overlay, an
+    // insertion in flight) changes it after the switch.
+    act(() => { oldStore.add({ name: 'Alt', kind: 'pin', source: 'camera', x: 0.1, y: 0, z: 0 }); });
+    await userEvent.click(screen.getByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    const [, id, body] = mockApi.updateWorkflow.mock.calls[0];
+    expect(id).toBe('wf-py2');
+    expect(Object.keys(body)).not.toContain('blockly_json');
+  });
+});
+
+describe('WorkshopPage — Vormachen for a code program (O4)', () => {
+  test('TeachHost gets the code document while its editor is on screen, and none in the gallery', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    expect(mockPage.teachHost.assetDoc).toBe(mockPage.assetDoc);
+    expect(mockPage.teachHost.assetDoc.kind).toBe('code');
+    await userEvent.click(screen.getByRole('button', { name: 'Galerie' }));
+    expect(mockPage.teachHost.assetDoc).toBeNull();
+  });
+});
+
+describe('WorkshopPage — the Ziele ride a code PATCH only when there is something to say (review m1)', () => {
+  test('a Ziel added since opening is sent; clearing them all sends {}', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    const store = mockPage.assetDoc.getStore();
+    let added;
+    act(() => { added = store.add({ name: 'Neu', kind: 'pin', source: 'camera', x: 0.1, y: 0, z: 0 }); });
+    await userEvent.click(screen.getByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    let body = mockApi.updateWorkflow.mock.calls[0][2];
+    expect(body.blockly_json['edubotics-destinations'].entries.map((e) => e.name)).toEqual(['Neu']);
+
+    act(() => { store.remove(added.entry.id); });
+    await userEvent.click(screen.getByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(2));
+    body = mockApi.updateWorkflow.mock.calls[1][2];
+    expect(body.blockly_json).toEqual({});
+  });
+
+  test('a program that opened WITH Ziele always sends them, even unchanged', async () => {
+    mockApi.getWorkflow.mockImplementation(() => Promise.resolve(PYTHON_ROW_ZIELE));
+    mockState = baseState({ selectedWorkflowId: 'wf-py' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('code-workspace');
+    await userEvent.click(screen.getByTestId('save-button'));
+    await waitFor(() => expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1));
+    expect(Object.keys(mockApi.updateWorkflow.mock.calls[0][2].blockly_json)).toEqual(['edubotics-destinations']);
+  });
+});
+
+describe('WorkshopPage — a new document retires the previous run’s values (review m4)', () => {
+  test('„Neu" clears the variables and counters, also from one unsaved document to the next', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    mockDispatch.mockClear();
+    await userEvent.click(screen.getByRole('button', { name: /^Neu/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Python/ }));
+    const types = mockDispatch.mock.calls.map((c) => c[0] && c[0].type);
+    expect(types).toContain('workshop/clearVariables');
+    expect(types).toContain('workshop/clearCounters');
   });
 });

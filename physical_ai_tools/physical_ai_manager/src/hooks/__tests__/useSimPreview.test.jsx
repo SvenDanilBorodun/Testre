@@ -363,3 +363,18 @@ describe('useSimPreview — late changes while the preview starts', () => {
     expect(types()).not.toContain('workshop/setRunState');
   });
 });
+
+describe('useSimPreview — a code document’s Ziele store (041)', () => {
+  test('a Ziel preview reads the store the page hands over, with no workspace', async () => {
+    const codeStore = { getById: vi.fn((id) => (id === ENTRY.id ? ENTRY : null)) };
+    const { result } = setup({ workspace: null, destinationStore: codeStore });
+    await act(async () => { await result.current.startPreview({ kind: 'pin', id: ENTRY.id, name: ENTRY.name }); });
+    expect(codeStore.getById).toHaveBeenCalledWith(ENTRY.id);
+    expect(mockStore.getById).not.toHaveBeenCalled();
+    expect(mockRos.callService).toHaveBeenCalledTimes(1);
+    const [, , req] = mockRos.callService.mock.calls[0];
+    expect(JSON.parse(req.workflow_json).destinations).toEqual([
+      { name: ENTRY.name, kind: ENTRY.kind, x: ENTRY.x, y: ENTRY.y, z: ENTRY.z },
+    ]);
+  });
+});

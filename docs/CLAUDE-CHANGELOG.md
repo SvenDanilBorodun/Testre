@@ -6,6 +6,543 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-09-28 (fix round 5) — the page acts on the program it holds, and the last values arrive
+
+Two more fresh reviewers (5-A adversarial, 5-B regression and delivery)
+read the branch after fix round 4. 5-B found no regression; 5-A found three
+PRE-EXISTING ways one program's content reached another. The owner decided
+to fix those three here for Blockly and code alike (R5-O1), to record the
+Java refusal gap instead of fixing it (R5-O2), and to end with one final
+fresh review (R5-O3). A fresh implementer reproduced every finding before
+fixing it, and proved each protecting test by mutation in a scratch copy of
+its commit: 74 mutations, every one red. Two first came back green (Java's
+int wrap-around, a queued save's switch check); each got the test it lacked.
+
+**A save while the next program loaded wrote the old one into it (MD2).**
+The page targeted `selectedWorkflowId`, which moves the moment the student
+picks a program, while the editor still held the previous one until the row
+arrived. „Speichern" or Strg+S in that window wrote program A into B's row
+(both notations; reproduced with the real toolbar), and after a load that
+FAILED a save overwrote the row that failed to load. The page now keeps the
+open document's identity itself (`openDocId` and a document token, written
+through refs), refuses every save while a program loads or a version
+restore is on its way, and a failed load holds no row, so a save creates
+one. Found on the way (also pre-existing): a Blockly program that just
+opened ran — on Start — and saved the PREVIOUS program's last canvas edit,
+because the page's copy of the last edit and the store's copy outlived the
+document; both are reset whenever a document is replaced, synchronously.
+
+**A version restore that landed late replaced another program (MD3).** A
+restore of A resolving after B was opened put A into B's editor, and the
+next save wrote A (with its Ziele since 041) into B. A restore result is now
+applied only while the document it was asked for is still open (its id and
+token), no document switch starts while a restore is on its way, and the
+history takes no restore while a save or a load is in flight.
+
+**A switch during Start ran the old program (MD5).** Start awaits the
+breakpoints and the recordings before the run is marked running, so the
+switch lock was not yet up: A's run started while B was shown, and A's
+highlights and values landed in B. RunControls now reports that window, the
+page refuses every switch in it („Das Programm startet gerade – bitte kurz
+warten."), and a start whose document changed anyway is not sent.
+
+**The insertion validator (MD1, MD4, md1–md5, nd1).** The empty row after a
+file's final line break was clamped onto the row above, so „Einfügen" there
+put the line INTO a trailing `for` while Enter gives column 0; it is its own
+row now. A blank row between a decorator and its `def` (a SyntaxError) and
+between a `def` and its docstring (it demotes the docstring) are refused. A
+`with suppress(…)` no longer swallows a quiet `return`, and a `try` whose
+body leaves quietly, or through `sys.exit` its `except Exception` cannot
+catch, no longer lets a dead line in. Java constants are evaluated in Java's
+own arithmetic (integer division, int/long wrap-around, `?:`, the declared
+type): JavaScript arithmetic judged `while (1 / 2 == 0)` completing, and
+javac rejected the „reachable" line. An untyped lambda parameter shadowing
+a constant field and a `continue` nested inside a `do … while` were wrongly
+refused. A whitespace-only row shallower than the statement after it no
+longer counts as a step back (Enter there gave an IndentationError), and
+Tab on a blank row agrees with Enter. Four hunks no test protected (5-A
+F3) got tests. The judge now also checks HOW OFTEN a marker runs (a line
+inside a loop is not the line after it) and proves every „never runs" hint
+by placing the line there anyway: 261 fixture cases (125 insertions, 136
+hints), every insertion compiled and run by CPython 3.12.3 and javac
+21.0.12 in the rebuilt runner image, and 74 editor cases.
+
+**The last live values (md7).** The launcher unwired the hook, `final`
+skipped the last values after one interval when another thread held the
+stub's RPC lock, and `__exit` then waited for the same lock without a bound
+anyway: a program with a worker thread ended showing stale values, and a
+value a helper module kept never arrived. The last values and `__exit` now
+go out under ONE hold of that lock, and come from every project module. In
+the rebuilt image: a daemon thread looping robot calls — `wert=-1` arrives
+(before: `wert=21`, stale), a helper module's `modulwert=99` (before: none),
+a 3 s call in flight — `wert=5` (before: `wert=0`); the end after the
+program's last statement was 3.01 s behind the 3 s call before and after,
+and 0.4–1.4 s behind a looping worker where it was 2.8–22 s (four runs of
+two programs each). The lock's unfairness stays (pre-existing, not changed).
+
+**Smaller (md6, md8, nd2–nd6).** A code run's recording fetch asked for
+names seen only in comments first, and sixteen of them crowded out the one
+really played. Two server budget tests measured elapsed time after the
+burst and failed under CPU load (1 of 10 runs, 36 busy processes on 18
+CPUs) because the bucket refilled meanwhile; they count what is served now
+(10 of 10 under the same load). Java `zeige`: a `toString()` throwing an
+`AssertionError` reached the program; a map of a million entries was
+rendered through its `toString()` first, and a 4-million-bit `BigInteger`
+spent 0.7–1.5 s being converted to text before being cut — both bounded now,
+and the comment claiming „never a wrong last digit" is corrected. The
+Vormachen clipboard memory is forgotten at sign-out, a paste over a
+selection is an ordinary paste, and a live-values dict with an unshowable
+key says so instead of reading as `{}`.
+
+**Deliberate test changes.** Page tests that modelled a student's edit as
+store content present BEFORE the row arrived now make the edit after it
+(that is what a canvas reports; the old shape passed only because the mock
+store never answered the page). The round-4 tests that pinned „`final`
+skips after one interval" pin the one hold instead, and the launcher's
+`__exit` is looked for in `finish_run`. Two fixture expectations changed on
+purpose (the explicit-too-shallow row now inserts; a line past a file's end
+goes below its last row).
+
+### Unreleased, 2026-09-28 (fix round 4) — an empty row is not a step back, a paste is what was copied
+
+Two more fresh reviewers (4-A adversarial, 4-B regression and delivery) read
+the branch after fix round 3. A fresh implementer fixed every finding; each
+fix has a test that failed first, and each protecting test was proven by
+mutation (its production hunk removed in a scratch copy of the commit: 37
+mutations, every one red; one hunk no test could tell apart was taken out
+instead). The owner decided two things (R4-O1, R4-O2) and
+the conductor three. This entry supersedes the round-3 sentence „a
+multi-line paste into a line's indentation keeps its relative shape at the
+cursor's column".
+
+**An empty row was read as column 0 (MC1).** Round 3's rule kept „the
+student's own indentation" on a blank line when it was a level a statement
+may take — and the empty string always is (the top level). So Enter on the
+empty line between two statements of a function body wrote a line at
+column 0: in `import robot / def main(): / robot.home() / (empty) /
+robot.log(1) / main()`, Enter on the empty line and `robot.beep()` gave a
+program CPython 3.12.13 refused with „IndentationError: unexpected indent",
+where stock CodeMirror gives the body's four spaces. „Einfügen", a drop and
+Vormachen refused the same spot with „Hier passt die Einrückung nicht zum
+Block". Now an empty row (or a column-0 comment) takes the level the next
+statement needs; only explicit, non-empty whitespace is a step back; at the
+end of the file, with nothing after it, column 0 stays. The fixture cases
+`dedented_blank_mid_block` and `before_else_clause` (the empty row before an
+`else:`) turned from refusals into insertions; the clause and indentation
+hints keep cases of their own with explicit whitespace.
+
+**A paste is what was copied (R4-O1, mc1, mc2).** Round 3's paste filter
+re-indented every multi-line paste onto an indented empty position, which
+changed a pasted multi-line string's content and a snippet's structure. It
+is gone. The one exception is the text Vormachen itself put on the
+clipboard, remembered in memory: pasted as it is, it lands like „Einfügen"
+— whole lines below the cursor line, checked by the same validator, or
+nothing and the German reason. The clipboard text now ends with a line
+break: following Vormachen's own „Strg+V" hint at a line's end used to give
+`robot.home()robot.move_to(…)`.
+
+**The validator's remaining holes (mc4, mc5, mc6).** A handler-less
+`try`/`finally` around a body that never completes (the „clean up on stop"
+pattern) let a dead line in; so did `if True: return`, a `match` whose
+catch-all case and every case return, `while "x":`, `os.abort()` and Java's
+`Runtime.getRuntime().halt(0)`. A `with suppress(…)` whose body raises was
+wrongly treated as never completing, and a Java row holding a whole
+one-line switch was refused. On the Java side a `return LAUF;` or `case
+STUFE:` was read as a declaration, so an interface constant from another
+file looked like a variable and javac rejected the „reachable" line as
+unreachable (4-A's K21/K21c). Proving that fix found the same broken outcome
+through a real declaration: a same-named PARAMETER of another method
+(javac 21: „unreachable statement"). The constant lookup now reads only the
+declaration whose scope holds the condition. The insertion fixture has 206
+cases (100 insertions, 106 German hints; 165 before this round); every
+insertion was compiled and run to its marker by CPython 3.12.3 and javac
+21.0.12 in the rebuilt runner image, and the editor fixture's 48 typed
+programs by CPython. 4-A's own 86 probes: 85 as the review expected; its Q14 (`try: while
+True: … except KeyboardInterrupt: pass`) stays allowed and dead in the
+runner, recorded in `docs/KNOWN-ISSUES.md`.
+
+**The final live values could hold the program's end for half a minute
+(mc3).** `LiveValues.final` bounded its waits for another thread's check and
+for the server's floor, then called the stub, whose RPC lock it waited for
+without a bound; that lock is not fair, and a thread looping robot calls
+kept it. In the rebuilt image a looping worker held the end 107.6 s (0.51 s
+now) and one 3 s call 2.8 s (0.51 s now). `final` takes the lock itself with
+the time left of its one deadline and skips the send when it is not free.
+The lock's unfairness itself is pre-existing and stays (the conductor's
+decision); it still delays `__exit`.
+
+**Java `zeige` (nc1, nc2).** A student's `toString()` or iterator that
+threw — a `ConcurrentModificationException` included — reached the program
+from `Robot.zeige`; it shows „<?>" now. A `Path` showed as nested „…"
+lists, a huge `BigInteger`/`BigDecimal` as „Infinity", and a `long` past
+2^53 went as an exact integer JavaScript then rounded without a sign; they
+show as text, text, and a double (the Python stub's convention). In the
+image, a Java program through the real launcher showed
+`[VAR:pfad="/tmp/ordner/datei.txt"]`, `[VAR:dezimal="1E+400"]`,
+`[VAR:boese="<?>"]`, `[VAR:lang=9007199254740992.0]` and ended normally.
+
+**The page (MC2, mc7, mc8, mc9, mc10, nc5).** Nothing failed when Start
+ignored its blocking reason (4-A's mutation R31); a RunControls test pins it.
+While the program the student opened was still being fetched, Start could
+run the OLD program's files and Ziele under the NEW id (pre-existing); Start
+and the previews now say „Das Programm wird noch geladen – bitte kurz
+warten.". Two overlapping version restores unlocked Start mid-restore; one
+restore runs at a time. A `replay` keyword call split over two lines was
+seen by the editor's scanner but not by the run's fetch, so the run failed
+with „Unbekannte Aufnahme"; the fetch takes the scanner's names too. Two
+hunks no test protected turned out load-bearing and got tests: the document
+token bumped when a fetch STARTS (an insertion finishing in that window
+wrote into a program about to disappear) and the cursor moved after an
+insertion (without it a second „Einfügen" landed above the first).
+
+**Found on the way.** A CRLF program gained one empty line at its end every
+time the editor synced an outside change (the minimal-diff sync compared
+LF lines with CRLF text and carried a stray `\r` in); the value is compared
+as lines now.
+
+**Historical note (nc6).** Commit 08cd983 of round 1 fails eslint on its own
+(an `act()` wrapper, fixed by the next commit 2939e9f); history was not
+rewritten.
+
+### Unreleased, 2026-09-27 (fix round 3) — the student puts the line, the block keeps its indentation
+
+Two more fresh reviewers (3-A adversarial, 3-B regression and delivery)
+re-read the branch after fix round 2. The owner had every finding fixed by a
+fresh implementer (R3-O1), pre-approved one CI line (R3-O2), deferred the
+command help (R3-O3), and, while the round ran, replaced every automatic
+insertion placement (R3-O4). Every fix got a test that failed first, and
+every protecting test was proven by mutation: removing its production hunk
+turns it red. This entry supersedes the „Insertion guessed" paragraph and
+the „the unit is the FILE's own" rule of the entry below.
+
+**Indentation was still guessed from the wrong lines (MB1).** Round 2's
+`detectIndentUnit` counted every positive indent step, including bracket
+continuations. A clean 2-space program with three aligned two-row list
+literals (the shape CodeMirror's own `delimitedIndent` writes) detected a
+FIVE-space unit, and Enter inside its `if` body produced a program CPython
+3.12.13 refused with „IndentationError: unexpected indent (line 10)". Mixed
+files flipped too: a 4-space snippet pasted into a 2-space file made Enter in
+the old block „unexpected indent", and one hand-typed 2-space block in a
+4-space file made Enter in the 4-space body „unindent does not match". Now
+only the step from a block opener to its first statement votes, and Enter
+does not ask the file at all inside an existing block: `newlineIndentAt`
+answers the block's own sibling indentation, and a new block's first line
+gets the unit of the block its opener sits in. Python's Enter, Tab,
+Shift-Tab and Backspace are bound above the default keymap to the block
+structure's levels, and a multi-line paste into a line's indentation keeps
+its relative shape at the cursor's column. On a 64 KiB program the
+indentation question behind one Enter takes about 2 ms and one typed
+character about 3.5 ms in a real view, the unit's re-detection on every
+change included (jsdom on an Apple M5 Pro, medians of 15).
+
+**The student places the line (R3-O4).** Round 2 placed a line without a
+cursor at the end of the body that runs last and moved a line at a bad
+cursor to the nearest safe spot. The reviewers still found lines above
+`import robot` (a NameError), lines put straight into a `match` or `switch`
+body, lines after `sys.exit(main())`, `while not False:`, `while 1 == 1:`, an
+if/else that returns on both sides or Java's `System.exit`, all compiled and
+never run, and a no-cursor Java insertion after `while (LAUF)` with an
+interface constant that javac rejected as unreachable. The owner decided the
+app should stop guessing: a line goes ONLY directly below the cursor line or
+the drop line, and nowhere without one. `insertionTargetAt` became a
+validator that answers either „here, at this indentation" or a short German
+reason; the no-cursor placer (`mainTarget`, the `__main__`/final-call
+descent, the Java `main` search, `NO_MAIN_HINT`) was deleted, not kept dead.
+Vormachen without a cursor puts its lines on the clipboard. The reachability
+analysis stayed, as the validator, with the review's corrections: Python
+folds literal conditions and knows exit calls and `break` out of the loop in
+question; Java treats interface fields as final (JLS §9.3) and a condition
+with one non-constant operand as non-constant (JLS §15.29), so `i <
+args.length` completes normally. Every line regex is CRLF-safe, and
+`new Foo<T>() {` is an anonymous class, not a bracket the hint blamed. The
+fixture has 165 cases (77 insertions, 88 German hints); each insertion is
+parsed and run to its marker by CPython 3.12 and compiled and run by javac
+21, and a case may not be both.
+
+**Tests that protected nothing (MB2).** Removing the production hunk left
+these green: the `__vars` budget charge (the test counted decoded frames),
+the page's version-restore refusal (asserted outside `act`), the „Neu"
+refusal (never reached), the history's pre-cloud refusal (masked by disabled
+buttons), `fit_vars` before a robot call, the Java class-closer hint for local
+and anonymous classes, and a breakpoint fence round 2 had deleted. Each now
+fails without its hunk. Across the round: 55 React mutations, 6 runner and
+server mutations and 1 scanner mutation, all red; for four of them the tests
+from before the fix, run against the same mutation, stayed green, which is
+the finding (one was this round's own: `test_constant_pins` caught that the
+new Java value width was fenced against the table but never pinned as a
+literal).
+
+**The rest.** The document-switch lock applied even when the robot link had
+died, so a run state nothing could retire locked the student out of every
+other program; it now needs a live link, like „Abmelden" (mb1). An insertion
+waiting for its module landed in whatever document was open when it
+arrived; it now checks the document it started in (mb9), and „Einfügen" is
+disabled while one runs, because a double click inserted twice (nb4). A
+restore racing a run start could leave the cloud row restored while the page
+refused to show it; a restore on its way now holds off Start and every
+preview (nb2). The old document's Ziele subscription could mark the next
+document as changed (nb5). A commented call's keyword argument counted only
+in first position (nb3). Java `zeige` showed „[J@15db9742" for a `long[]`
+and „[Ljava.lang.String;@6d6f6e28" for a `String[]`; every array and
+`Iterable` is now a JSON list, by reflection, under the Python stub's depth
+and width bounds (nb6). `LiveValues.final` could wait up to 2 s for another
+thread's check and then one more interval for the server's floor; both waits
+now share one 0.5 s deadline (nb7). A hostile raw-socket `zeige` flood costs
+about 2 ms of CPU per frame, close to half a core at the 200/s budget
+(measured with client and server in one process), recorded in CLAUDE.md as
+the surface's known ceiling (nb11). CI's `python-tests` sets
+`EDUBOTICS_REQUIRE_JAVAC=1` (nb10). The „about +28 kB" entry-bundle claim
+named no build conditions and was dropped (nb9), and CLAUDE.md's „hover
+docs" for `robot_api.json` was false (there is no hover help on a command;
+R3-O3 records that gap). The code-runner image was rebuilt for linux/arm64
+from a clean archive of the committed tree: `javac -Xlint:all -Werror`,
+SmokeMain and `selftest.py --build` pass, and in the image every array type
+renders as a list and the debug-hook suite passes on CPython 3.12.3.
+
+### Unreleased, 2026-09-27 (fix round 2) — live values ride the program's own robot calls, and the editor indents like the file
+
+Two more fresh reviewers (2-A adversarial, 2-B regression and delivery)
+re-read the branch after the first fix round; the owner decided four things
+(R2-O1…R2-O4) and had every finding fixed, each with a test that failed
+first. This entry supersedes the „sampled every 0.5 s" and „also the
+editor's `indentUnit`" of the entry below.
+
+**Live values almost never arrived (MA2).** The line sampler sent `__vars`
+only when the RPC lock was free, and a stub call holds that lock for its
+whole round trip: a program of 0.5 s robot calls sent **0** value frames in
+4.07 s, and the final values were never sent at all. The owner chose option
+B (R2-O1): the sampler goes back to the highlight alone (`__line`, and it
+reads only `f_code`/`f_lineno`/`f_back` — nothing reads a variable from
+another thread any more, which also retires the CPython-3.12 `locals()`
+hazard by construction), and the program's OWN thread sends the
+module-level values right before a public robot call (the stub's
+`_Rpc.before_call` → `edubotics_debug.LiveValues`), at most every 0.5 s and
+only when they changed, plus once before `__exit`. Any failure switches the
+values off for the run and never raises. In the rebuilt linux/arm64 runner
+image: eight `robot.wait(0.5)` calls deliver `punkte` 1…8 at 0.5 s spacing;
+150 short calls deliver 9 frames in 4.1 s; a value set after the last call
+arrives at the end; against the pre-branch server the values switch off
+silently while the program and the highlight carry on.
+
+**The renderer could still run student code (mi1).** Four constructed
+cases: `t in (list, tuple, …)` and the key-type check call a METACLASS
+`__eq__`; a class `__name__` that is a `str` subclass runs its `__format__`
+through the f-string; a `str`-subclass `co_filename` runs `startswith` and
+`__getitem__`. Now identity comparisons, `type(name) is str` and
+`type(path) is str`: student-code calls in the review's probe went from
+(1, 11) to (0, 0).
+
+**The two halves' bounds disagreed (mi4, mi5).** The runner's 100-node
+budget emitted about 197 nodes per value once the `'…'` markers counted, so
+thirty values passed the server's 5000-node total and the server dropped the
+whole frame while the runner believed it delivered; a breakpoint with twenty
+`[[0]*6]*50` locals showed 0 of 20 (the base showed 20). Dict keys were not
+charged at all: a 3.5 MB snapshot, and `fit_vars` re-measured the whole dict
+per cut. Now `robot_api` holds both halves' bounds and DERIVES the server's
+frame caps from them (15 030 nodes / 30 000 characters), the server trims the
+largest values to „<zu groß>" instead of dropping a frame, keys are charged,
+and `fit_vars`/`fit_shown_values` measure each value once.
+
+**The editor's `indentUnit` of 4 broke every 2-space program (MA1).** Enter
+after a `for` in a 2-space body put the caret at column 6 (an
+IndentationError) and Backspace could not step back one level. R2-O2: the
+unit is the FILE's own (`detectIndentUnit`, 4 for a file without one), held
+in a CodeMirror `Compartment` and re-derived as the file changes; Enter now
+lands at column 4 and Backspace at 2. The test drives the real commands in a
+2-space, a 4-space and a tab body and hands everything it typed to CPython.
+
+**Insertion guessed (mi2, mi3).** Across the review's cases the round-1
+insertion produced 6 Python syntax errors and 2 lines that never ran, and in
+Java 11 compile errors (code after a labelled loop, `throw`, `while (1 == 1)`,
+`try { while (true) … }`, an if/else that returns on both sides, a one-line
+`main` with a loop; a cursor on an import, a class line or inside call
+arguments), one line in a nested class's `main` that never ran, and three
+German hints for programs that had a `main`. Insertion now reads the
+program's STRUCTURE — the statement on the cursor's line, the body that runs
+last, javac's own „can complete normally" rule — and whatever it cannot place
+safely is a German hint. Every case is a fixture that CPython parses and runs
+and javac 21 compiles and runs to its marker line.
+
+**The rest.** A document switch while a program runs is refused with
+„Stoppe zuerst dein Programm." on every path that replaces the document
+(R2-O3; 17 tests failed first), and opening a saved program from an unsaved
+one now retires the old values (`openWorkflow`). `zeige` says once when it
+drops names past 256 (mi6), and a name `zeige` showed is no longer flipped
+back by the automatic values (ni3). An old runner against a new server no
+longer asks „Meintest du robot.zeige?" for `robot.zeige`; it says the two
+versions differ (mi8) — the other mixes are recorded in KNOWN-ISSUES
+(measured: a new runner's Java `zeige` on the old server ends with the old
+server's „Zeile 0 in : …"). The scanner reads keyword first arguments
+(`replay(name="W")`) and a Unicode boundary before the receiver (ni1, ni2);
+the stub's own names left the variable list; a CRLF file gets CRLF. The
+asset lint, forced on every deferred keystroke because `assetSources` got a
+new identity each render, is forced only when the names it judges by
+changed. The insertion code left the entry bundle (ni4:
+1754.25 kB → 1736.68 kB, below round 1's 1738.73 kB despite this round's new
+code; the student build's entry chunk, uncompressed, from a local `vite
+build` with placeholder env values). The SQL assertion headers say how to run them — the squashed baseline
+needs its one guarded line on a fresh database — and that 040's file run
+after 041 FAILs T4b as well as T8 (ni5, ni6; measured on a local stack).
+
+### Unreleased, 2026-09-27 (review round) — the sampler ran student code, and the O3 fallback shipped
+
+Two independent reviewers took the branch apart; the owner had every finding
+fixed (R-O3), majors to nits, each with a test that failed first. This entry
+supersedes the „VERDICT: SAFE, so the full variant shipped" of the entry
+below.
+
+**The O3 gate measured the wrong thing.** The probe proved that reading the
+main thread's `frame.f_locals` from the sampler thread gives exact values, no
+exception and no refcount creep. It never looked at the STUDENT's view of
+`locals()`: on CPython 3.12 that cross-thread read re-syncs the frame's own
+locals dict — the same dict `locals()` returns — so a student's
+`for k in locals():` inside a function raised „dictionary changed size during
+iteration" (reviewer A's repro; the conductor re-ran it: 0 errors without the
+sampler, a RuntimeError with it). On the host's 3.14 (PEP 667, `locals()` is
+a snapshot) the same test passes, which is why the gate's own runs looked
+clean — the runner ships 3.12.3. Reviewer B found the second half: the
+renderer called `repr()` on student objects every 0.5 s, so a `__repr__` with
+a side effect ran — four `robot.home()` calls in B's probe — and a big
+container's full `repr` cost +50–87 % runtime. The owner chose the agreed
+fallback (R-O1): live values are module-level only, and the sampler never
+runs student code — exact builtin types, a bounded walk, `<Klasse>` read
+through `type`'s own descriptor for everything else. The reviewers' repros are
+now tests (`SamplerNeverRunsStudentCode`, run under 3.12 in CI). The
+breakpoint path kept its `repr` rendering: it runs on the student's own
+stopped thread, and sharing the new renderer would have changed what a paused
+student sees without being strictly simpler.
+
+**The server bounds what a charged frame may cost.** Rule §2's first
+condition (every frame charged before validation) was already asserted; what
+a frame could cost after that was not bounded: a flood of `__vars` or `zeige`
+frames turned into one status publish per name per frame. Now one `__vars`
+per 0.4 s is looked at, a frame over 5000 nodes or 48 KiB of shown values in
+total is dropped before any rendering, and `zeige` is coalesced per name at
+≤ 20 sentinels/s with the latest value flushed by the worker's idle tick and
+at close.
+
+**An insertion wrote an IndentationError.** Insertion used a fixed 4 spaces;
+CodeMirror indents with 2 by default. Now the body line below an opener, else
+the file's own unit, else 4 spaces — also the editor's `indentUnit`. Without a
+cursor, the end of main stops before a trailing endless loop or `return` (Java
+refuses code after them as unreachable), a one-line Java `main` is opened up,
+and a Java program without `main` gets a German hint instead of code outside
+the class.
+
+**The rest**: a code save sends its Ziele only when there are any or they
+changed (so a Ziele-free program saves against an older API too); a document
+switch retires the last program's variable values; the tokenizer reads raw
+strings and Unicode identifiers; a commented-out `pin()` defines nothing but
+keeps its name reserved; the Variablen list scans once, not once per variable
+(93 ms → ~2.5 ms for 120 variables); `Robot.zeige("x", null)` compiles (one
+`Object` overload); a file switch no longer replays the previous file's caret;
+the editor's knowledge builder moved into the lazy editor chunk (entry
+−4.2 kB; the rest of the ~30 kB stays in the entry because the page creates
+the code document synchronously; the build conditions of these two numbers
+were not recorded).
+
+### Unreleased, 2026-09-27 — a Python student gets the Sammlung, and stored Ziele finally reach code
+
+The coding suite of 2026-09-20 gave Python and Java students a real editor and a
+real runtime, but not the Sammlung. Read in the code before anything was
+written: the drawer was gated on `!isCodeWorkflow`; the flyout cards live inside
+Blockly; `CodeWorkspace` received `language`, `files` and `onFilesChange` and
+nothing else; and `RunControls` hard-coded `destinations: []` for code — which
+the server, correctly, treats as the AUTHORITATIVE document, so
+`robot.move_to("Ablage")` worked only for names the program pinned itself.
+Three controls were visible in a code program and silently did nothing:
+„✋ Vormachen" (`TeachHost` returned on `!workspace`), the camera click-to-mark
+and the simulator's „Ziel setzen".
+
+**One contract, two documents — not a second drawer.** Everything that reached
+„the document" (the drawer and its detail views, the Vormachen overlay and its
+host) now reaches it through an asset document with one API: its Ziele store,
+the index the drawer draws, „Benutzt in" rows and the jump to one, taken
+names, a rename that rewrites the program, delete/restore, insertion, and where
+the drawer sits. The Blockly implementation is a thin wrapper over the calls
+the components made before, byte for byte, which is why every existing drawer,
+overlay and host test ran unmodified; the code implementation reads the files
+through the page. One test file runs the same assertions against both.
+
+**Where a code program's Ziele live (migration 041).** In the row's
+`blockly_json`, under the same `edubotics-destinations` key the Blockly
+serializer writes — one format for both notations, and the snapshot trigger
+versions it for free — and nothing else may be there: a CHECK is the floor, the
+RPC refuses with 22023, and the route answers in German first.
+`update_workflow_code` gained `p_blockly_json JSONB DEFAULT NULL` in the same
+UPDATE (`COALESCE`), so one save is one version, and an older API's four named
+arguments still resolve. Proven on a LOCAL Supabase stack only (a scratch copy
+of the project, because the squashed baseline is not replayable from scratch —
+`docs/KNOWN-ISSUES.md`): 21 assertions pass; the rollback restores 040's body
+byte-for-byte and 040's own 16 assertions pass on the rolled-back state; 041
+re-applied twice is idempotent and passes the 21 again; through local PostgREST
+the four-named-argument call resolves on 041, the five-argument probe answers
+PGRST202 without 041 (so an API deployed before its migration fails its own
+`/health`), and the anon key is refused (42501).
+
+**The page, where the ordering bug would have been.** A rename in the drawer
+rewrites the code and awaits a save in the same tick. With the code refs
+updated by an effect, that save sent the OLD text; so `applyCodeFiles` and the
+one opener, `openCodeDocument`, write the refs synchronously, and a mutation
+that moves the write back into an effect fails the same-tick test. The code
+document's Ziele store is detached (no workspace), created once per opened
+document — never `getDestinationStore(null)`, which would hand every code
+program the same store.
+
+**Names in code are an exact question.** A regex over raw text cannot tell a
+call from the same characters inside a string or a comment, so the scanner is
+a small tokenizer (Python's quotes, prefixes and triple quotes; Java's
+comments, strings, text blocks and chars) and counts a name only when a string
+literal is the WHOLE argument. A rename therefore rewrites only text it is sure
+of, never a `pin()`/`pin_current()` definition, and a call inside a comment is
+treated as Blockly treats a disabled block: listed as switched off, rewritten
+too. The method set and which argument is an asset come from new `asset` tags
+on `robot_api.py`'s rows, rendered into `robot_api.json` — never a second list.
+
+**The editor is fed, not rebuilt.** An external edit (a rename, a drawer
+insertion) used to replace the whole document, which threw the caret to line 1
+and echoed the text back to the page; it is now the smallest change, not
+echoed, and one Strg+Z undoes it. Completion inside `move_to("`, German
+warnings for a name the Sammlung lacks, a hover and a drop target are wired in
+from pure modules. The warnings needed their own ship switch: the parse
+markers stay OFF (`CODE_LINT_LANGUAGES = []`, the 2026-09-21 noise gate), while
+a missing Sammlung name is a fact the editor can know. One trap found on the
+way: `@codemirror/lint` prints a diagnostic's `source` in its tooltip, and the
+pure module's `source: 'asset'` would have been English on screen — the editor
+strips it. Another: `forceLinting` only hurries a lint that is already pending,
+so a changed Sammlung is signalled through the linter's `needsRefresh` first.
+
+**Variables (O3, O8).** `zeige(name, wert)` is a public code-only row with no
+block type (the 32-row bijection stays whole), rendered into both stubs and
+`robot_api.json`; Java gets overloads that encode through the existing JSON
+writer. For Python, the runner's line sampler — already a thread reading the
+main thread's frame — now also sends `__vars` when the snapshot changed. That
+rested on one question the spec made a gate: is reading `frame.f_locals` of the
+MAIN thread from another thread safe on CPython 3.12 while `sys.monitoring` is
+active? Measured, not argued, in the runner image built locally from
+`docker/code_runner/` (CPython 3.12.3, linux/arm64 under Docker Desktop; the
+host's CPython 3.12.13 agreed): a probe mutating locals,
+closures and module globals under the debugger's LINE callback, sampled from a
+second thread — 550 491 samples / 2 291 631 frame reads over 1 500 iterations
+with zero result mismatches, zero exceptions on either thread and a closure
+cell's reference count unchanged after the sampler was joined; and a
+student-shaped `main.py` (module-level loops, PEP 709 inlined comprehensions
+rebinding a global's name, closures) 3.37 M and 3.54 M samples with and
+without reading module-frame `f_locals`, zero mismatches. VERDICT: SAFE, so the
+full variant shipped (function locals, then module globals). The first host run
+said UNSAFE: the probe's own harness frame held the cell being counted — the
+sampler reads only project frames, and so does the corrected probe. Both new
+frame kinds sit inside Rule §2's four conditions: charged before validation,
+validated from their rows, answered by the server through `ctx.log` alone
+(AST-fenced), stop semantics and the uid split untouched.
+
+**What is proven where.** Unit and component tests (gui, cloud API, server,
+React) plus the local Supabase stack and the runner-image probe above. Nothing
+here has driven a real arm: a stored Ziel reaching `robot.move_to` on a
+calibrated rig, the plane-tracked height matching Blockly's, the drop position
+and the hover in a real WebView2, and the f_locals measurement on the amd64
+image are rig gates (`docs/KNOWN-ISSUES.md`, CS-R1…CS-R5).
+
 ### Unreleased, 2026-09-20 — Roboter Studio learns to run real Python and real Java
 
 The owner asked for „a full coding suite not just a add on to blocky" (A1). What

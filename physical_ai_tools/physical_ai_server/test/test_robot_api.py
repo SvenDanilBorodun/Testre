@@ -11,7 +11,10 @@ every fence here is about the table saying nothing the handlers do not do:
   ``counter_add(name, n)``-style lie: ``counters.add`` is hardcoded ``+1``);
 - every ``doc_de`` is German by the predicate the repo already lints with;
 - the seven interpreter-native block types have NO row (they are language
-  constructs in a text program, not calls).
+  constructs in a text program, not calls);
+- the code-only rows (``CODE_ONLY_METHODS``: ``zeige``) sit OUTSIDE the
+  bijection — no block type, no handler — and the asset tags the editor reads
+  (``ApiParam.asset``) are exactly the pinned map.
 """
 
 from __future__ import annotations
@@ -54,6 +57,32 @@ _PYTHON_SURFACE = frozenset({
     'wait_until_seen', 'wait_until_held', 'find', 'object_position',
     'is_holding', 'counter_get',
 })
+
+
+# 2026-09-27 (code Sammlung, O3): the code-only public surface. No block type,
+# no handler — the 32-row bijection above is untouched by it.
+_CODE_ONLY_SURFACE = frozenset({'zeige'})
+
+# The asset tags the editor reads (scanner, completion, lint, hover): every
+# tagged (method, parameter) and its tag. Every other parameter is untagged.
+_ASSET_TAGS = {
+    ('replay', 'name'): 'recording',
+    ('move_to', 'target'): 'place',
+    ('pickup', 'target'): 'place',
+    ('drop_at', 'target'): 'place',
+    ('ziel', 'name'): 'place',
+    ('pin', 'name'): 'place_def',
+    ('pin_current', 'name'): 'place_def',
+    ('counter_reset', 'name'): 'counter',
+    ('counter_add', 'name'): 'counter',
+    ('counter_get', 'name'): 'counter',
+    ('grasp', 'obj'): 'object',
+    ('sees', 'obj'): 'object',
+    ('count', 'obj'): 'object',
+    ('wait_until_seen', 'obj'): 'object',
+    ('find', 'obj'): 'object',
+    ('zeige', 'name'): 'variable',
+}
 
 
 def _load_gdl():
@@ -209,7 +238,7 @@ def test_the_three_point_takers_carry_the_arg_keys_the_handlers_read():
 
 
 def test_every_param_kind_is_a_declared_kind_and_every_row_is_well_formed():
-    for call in robot_api.ROBOT_API + robot_api.INTERNAL_METHODS:
+    for call in robot_api.ROBOT_API + robot_api.INTERNAL_METHODS + robot_api.CODE_ONLY_METHODS:
         assert call.budget in ('call', 'perception'), call.name
         assert call.returns in robot_api.RETURN_KINDS, call.name
         seen_default = False
@@ -226,7 +255,8 @@ def test_every_param_kind_is_a_declared_kind_and_every_row_is_well_formed():
 
 
 def test_perception_budget_is_the_b2_set():
-    perception = {c.name for c in robot_api.ROBOT_API + robot_api.INTERNAL_METHODS
+    perception = {c.name for c in (robot_api.ROBOT_API + robot_api.INTERNAL_METHODS
+                                   + robot_api.CODE_ONLY_METHODS)
                   if c.budget == 'perception'}
     assert perception == {'sees', 'count', 'find', 'wait_until_seen',
                           'object_position', 'register_object'}
@@ -234,7 +264,7 @@ def test_perception_budget_is_the_b2_set():
 
 def test_doc_de_is_german_by_the_shipped_predicate():
     gdl = _load_gdl()
-    for call in robot_api.ROBOT_API + robot_api.INTERNAL_METHODS:
+    for call in robot_api.ROBOT_API + robot_api.INTERNAL_METHODS + robot_api.CODE_ONLY_METHODS:
         assert call.doc_de.strip(), call.name
         assert _is_german(gdl, call.doc_de), (call.name, call.doc_de)
     # …and every German constant the module carries beside the table.
@@ -243,9 +273,11 @@ def test_doc_de_is_german_by_the_shipped_predicate():
             assert _is_german(gdl, value), (name, value)
 
 
-def test_internal_methods_carry_the_five_names_and_register_object_has_seven_params():
+def test_internal_methods_carry_the_six_names_and_register_object_has_seven_params():
+    # 2026-09-27 (code Sammlung, O3): `__vars` — the runner's live variable
+    # values — joined the protocol methods, validated from its row like the rest.
     assert [c.name for c in robot_api.INTERNAL_METHODS] == [
-        '__hello', '__paused', '__line', '__exit', 'register_object']
+        '__hello', '__paused', '__line', '__vars', '__exit', 'register_object']
     row = robot_api.INTERNAL_METHODS_BY_NAME['register_object']
     assert [p.name for p in row.params] == [
         'name', 'label', 'tag_ids', 'hoehe_m', 'greiftiefe_m',
@@ -297,7 +329,8 @@ def test_export_json_limits_is_rpc_limits_union_the_project_caps():
     expected.update(robot_api.CODE_PROJECT_LIMITS)
     assert doc['limits'] == expected
     assert 'MAX_FRAME_BYTES' in doc['limits'] and 'CONTROL_MAX_FRAME_BYTES' in doc['limits']
-    assert {m['name'] for m in doc['methods']} == _PYTHON_SURFACE
+    # The editor's methods are the handler rows plus the code-only rows.
+    assert {m['name'] for m in doc['methods']} == _PYTHON_SURFACE | _CODE_ONLY_SURFACE
     assert [m['name'] for m in doc['internal']] == [c.name for c in robot_api.INTERNAL_METHODS]
     for m in doc['methods'] + doc['internal']:
         assert m['doc_de']
@@ -329,6 +362,84 @@ def test_java_names_are_camel_case_and_never_collide_with_object_methods():
     compile), so the Java surface must not reuse a ``java.lang.Object`` name."""
     object_methods = {'wait', 'notify', 'notifyAll', 'equals', 'hashCode',
                       'toString', 'getClass', 'clone', 'finalize'}
-    for call in robot_api.ROBOT_API:
+    for call in robot_api.ROBOT_API + robot_api.CODE_ONLY_METHODS:
         assert re.match(r'^[a-z][A-Za-z0-9]*$', call.java_name), call.java_name
         assert call.java_name not in object_methods, call.java_name
+
+
+# ── 2026-09-27 (code Sammlung): asset tags, CODE_ONLY_METHODS, __vars ──────
+
+def test_asset_tags_are_exactly_the_pinned_map():
+    found = {}
+    for call in robot_api.ROBOT_API + robot_api.INTERNAL_METHODS + robot_api.CODE_ONLY_METHODS:
+        for p in call.params:
+            if p.asset is not None:
+                found[(call.name, p.name)] = p.asset
+    assert found == _ASSET_TAGS
+    assert set(_ASSET_TAGS.values()) <= robot_api.ASSET_KINDS
+
+
+def test_asset_tags_sit_only_on_parameters_that_can_carry_a_name():
+    for call in robot_api.ROBOT_API + robot_api.CODE_ONLY_METHODS:
+        for p in call.params:
+            if p.asset is not None:
+                assert p.kind in ('str', 'target', 'obj'), (call.name, p.name, p.kind)
+
+
+def test_code_only_methods_are_the_zeige_row_outside_the_bijection():
+    assert [c.name for c in robot_api.CODE_ONLY_METHODS] == ['zeige']
+    row = robot_api.CODE_ONLY_METHODS_BY_NAME['zeige']
+    assert (row.java_name, row.block_type, row.table, row.returns, row.budget) == (
+        'zeige', None, 'code', 'none', 'call')
+    assert [(p.name, p.kind) for p in row.params] == [('name', 'str'), ('wert', 'value')]
+    assert row.params[0].max_len == 40
+    assert row.params[0].pattern == robot_api.SHOWN_NAME_RE
+    assert all(p.required for p in row.params)
+    # Outside the handler bijection: no block type the dispatch tables know.
+    assert len(robot_api.ROBOT_API) == 32
+    assert row.block_type not in set(STATEMENT_HANDLERS) | set(VALUE_EVALUATORS)
+    # One namespace for the three tables: no name collides.
+    names = ([c.name for c in robot_api.ROBOT_API] + [c.name for c in robot_api.INTERNAL_METHODS]
+             + [c.name for c in robot_api.CODE_ONLY_METHODS])
+    assert len(names) == len(set(names))
+    assert 'value' in robot_api.KINDS
+
+
+def test_the_shown_name_rule_is_the_sentinel_rule():
+    """A `zeige` name rides the [VAR:name=json] sentinel: no `=`, `[`, `]`, no
+    control character, not only whitespace, at most 40 characters (React's
+    isDisplayableVariableName allows 64, so every accepted name is shown)."""
+    rx = re.compile(robot_api.SHOWN_NAME_RE)
+    for good in ('punkte', 'Anzahl Würfel', 'x', 'a' * 40, 'Wert (cm)'):
+        assert rx.fullmatch(good), good
+    for bad in ('', '   ', 'a=b', 'liste[0]', 'a]', 'a\nb', 'a\x7fb', 'a' * 41):
+        assert not rx.fullmatch(bad), bad
+
+
+def test_vars_row_is_file_line_and_a_bounded_dict():
+    row = robot_api.INTERNAL_METHODS_BY_NAME['__vars']
+    assert [(p.name, p.kind) for p in row.params] == [
+        ('file', 'str'), ('line', 'int'), ('locals', 'dict')]
+    assert row.params[0].pattern == robot_api.CODE_PATH_RE
+    assert row.params[2].max_len == robot_api.PAUSED_MAX_LOCALS
+    assert robot_api.PAUSED_MAX_LOCALS == 30
+    assert row.budget == 'call' and row.table == 'internal' and row.block_type is None
+
+
+def test_zeige_and_vars_share_the_var_payload_caps_of_the_interpreter():
+    from physical_ai_server.workflow import interpreter
+    assert robot_api.SHOWN_VALUE_MAX_CHARS == interpreter._MAX_VAR_PAYLOAD_CHARS
+
+
+def test_export_json_carries_the_asset_tags_and_the_code_only_row():
+    doc = json.loads(robot_api.export_json())
+    by_name = {m['name']: m for m in doc['methods']}
+    assert by_name['zeige']['table'] == 'code' and by_name['zeige']['block_type'] is None
+    for (method, param), tag in _ASSET_TAGS.items():
+        if method in by_name:
+            p = next(x for x in by_name[method]['params'] if x['name'] == param)
+            assert p['asset'] == tag, (method, param)
+    untagged = [p for m in doc['methods'] + doc['internal'] for p in m['params']
+                if (m['name'], p['name']) not in _ASSET_TAGS]
+    assert untagged and all('asset' not in p for p in untagged)
+    assert [m['name'] for m in doc['methods']][-1] == 'zeige'

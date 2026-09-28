@@ -86,3 +86,25 @@ def test_error_kinds_cover_the_faulting_exits_and_exclude_the_clean_ones():
     # student process may report about itself through __exit.
     assert 'runner_crashed' in ce.SENTENCES
     assert 'runner_crashed' not in ce.ERROR_KINDS
+
+
+def test_a_call_the_robot_knows_but_the_runner_lacks_names_the_version_gap():
+    """Review round 2 (mi8): an OLD runner (no `zeige` in its stub) against a
+    NEW server raised AttributeError → kind robot_method, and the difflib
+    suggestion WAS the name: „robot.zeige gibt es nicht. Meintest du
+    robot.zeige?". When the suggestion is the name itself, the two halves'
+    versions differ, and the sentence says so with a next step."""
+    from physical_ai_server.workflow import robot_api
+    gdl = _gdl()
+    for name in robot_api.PYTHON_NAMES:
+        assert robot_api.suggest(name) == name, name
+    s = ce.sentence('robot_method', file='main.py', line=3, name='zeige',
+                    suggestion=robot_api.suggest('zeige'))
+    assert 'Meintest du' not in s
+    assert s.startswith('Zeile 3 in main.py: robot.zeige ')
+    assert 'Programmier-Umgebung' in s and 'neu starten' in s
+    assert _is_german(gdl, s) and '{' not in s
+    # A real misspelling still gets its suggestion.
+    assert 'Meintest du robot.zeige?' in ce.sentence(
+        'robot_method', file='main.py', line=3, name='zeigen',
+        suggestion=robot_api.suggest('zeigen'))

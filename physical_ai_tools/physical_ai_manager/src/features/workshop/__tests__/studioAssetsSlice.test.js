@@ -42,6 +42,7 @@ import {
   markWorkflowSaved,
   setRunState,
   setSelectedWorkflowId,
+  openWorkflow,
   setWorkflowStatus,
 } from '../workshopSlice';
 import { signedOut } from '../../session/sessionActions';
@@ -105,6 +106,15 @@ describe('studioAssets — the open document changes identity', () => {
     expect(next.lastPreviewResult).toEqual({});
     expect(next.highlight).toBeNull();
     expect(next.renameSplit).toBeNull();
+  });
+
+  test('opening another program (openWorkflow) retires them the same way — from an unsaved one too', () => {
+    let s = run(init(), setDrawerFocus('A'), setHighlight({ kind: 'pin', id: 'd_1' }));
+    s = run(s, openWorkflow('wf-9'));
+    expect(s.trajectories).toEqual({ workflowId: 'wf-9', status: 'idle', items: [], error: null, fetchedAt: 0 });
+    expect(s.drawer.focusId).toBeNull();
+    expect(s.highlight).toBeNull();
+    expect(reducer(s, openWorkflow('wf-9'))).toBe(s);
   });
 
   test('the same id is a no-op', () => {

@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
+import math
 import os
 import re
 import subprocess
@@ -164,7 +166,7 @@ def test_the_socket_fence_bites_on_a_module_level_sender():
 def test_every_api_method_in_the_stub_goes_through_rpc_call():
     tree = ast.parse(_STUB)
     defs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-    for call in robot_api.ROBOT_API:
+    for call in robot_api.ROBOT_API + robot_api.CODE_ONLY_METHODS:
         fn = defs[call.name]
         args = [a.arg for a in fn.args.args]
         assert args == [p.name for p in call.params], call.name
@@ -244,6 +246,108 @@ def test_java_robot_has_every_row_and_the_object_overloads():
     assert 'replay(String name, double speed)' in java and 'replay(String name)' in java
 
 
+def test_zeige_renders_in_both_stubs_and_the_asset_tag_in_neither():
+    """2026-09-27 (O3): `zeige` is public in the Python stub and in Robot.java
+    with one overload per Java value type; the asset tags are JSON-only, so no
+    stub carries the word."""
+    tree = ast.parse(_STUB)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'zeige')
+    assert [a.arg for a in fn.args.args] == ['name', 'wert']
+    assert 'asset' not in _STUB
+    java = _RENDERED[robot_api.GENERATED_PATHS['java_robot']]
+    # 2026-09-27 review round (n3): primitives plus ONE reference overload.
+    # Two or more reference-typed overloads (String, double[], int[],
+    # Greifziel …) made `Robot.zeige("x", null)` a compile error („reference
+    # to zeige is ambiguous"); Object dispatches at run time instead.
+    for jtype in ('int', 'long', 'double', 'boolean', 'char', 'Object'):
+        assert f'public static void zeige(String name, {jtype} wert)' in java, jtype
+    assert java.count('public static void zeige(') == 6
+    rpc = _RENDERED[robot_api.GENERATED_PATHS['java_rpc_client']]
+    # Review round 3 (nb6): EVERY array type is a JSON list — the reflective
+    # walk, not one branch per array type (a long[] or String[] showed
+    # „[J@1b6d3586"); SmokeMain renders each type in the image build.
+    for branch in ('instanceof String', 'getClass().isArray()', 'java.lang.reflect.Array.get(o, i)',
+                   'instanceof Iterable', 'instanceof Character'):
+        assert branch in rpc, branch
+    assert 'instanceof double[]' not in rpc and 'instanceof int[]' not in rpc
+    # Review round 4 (nc1/nc2): a value the student's own code fails to
+    # render is "<?>", never an exception in the program; a Path is its text;
+    # a whole number past 2^53 goes as a double, like the Python stub; a
+    # BigInteger/BigDecimal too big for a double is its text. SmokeMain runs
+    # each of them in the image build.
+    # Review round 5 (nd2): ANY Throwable of the student's code is "<?>" —
+    # an AssertionError from a toString() used to reach the program — and
+    # only the JVM's own failures (VirtualMachineError, bar a
+    # StackOverflowError) go on.
+    shown = rpc[rpc.index('static Object shownValue('):rpc.index('static Object shownNode(')]
+    catches = [line.strip() for line in shown.splitlines() if 'catch (' in line]
+    assert catches == ['} catch (StackOverflowError e) {', '} catch (VirtualMachineError e) {',
+                       '} catch (Throwable e) {'], catches
+    assert 'catch (VirtualMachineError e) {\n            throw e;' in shown
+    for branch in ('instanceof java.nio.file.Path', 'instanceof java.math.BigInteger',
+                   'instanceof java.math.BigDecimal', 'static Object shownLong(long v)',
+                   'SHOWN_BIG_INT = 1L << 53',
+                   # nd2: a Map is walked, never its toString(); a CharSequence
+                   # is cut before it becomes text; a huge number is judged by
+                   # its bit length before any conversion.
+                   'instanceof Map', 'entrySet()', 'instanceof CharSequence',
+                   'cs.subSequence(0, n)', f'SHOWN_BIG_BITS = {robot_api._SHOWN_BIG_BITS};',
+                   'bitLength() > SHOWN_BIG_BITS'):
+        assert branch in rpc, branch
+    assert f'SHOWN_TOO_BIG = "{robot_api._SHOWN_TOO_BIG_DE}"' in rpc
+    # More bits than this is more than the 1000 characters a text shows:
+    # ceil(1000 · log2(10)) (test_constant_pins' rule: pinned to a literal).
+    assert robot_api._SHOWN_BIG_BITS == 3322
+    assert math.ceil(1000 * math.log2(10)) == 3322
+    assert robot_api._SHOWN_TOO_BIG_DE == 'sehr große Zahl'
+    assert f'_SHOWN_TOO_BIG_DE = {robot_api._SHOWN_TOO_BIG_DE!r}' in _STUB
+    assert 'public static void zeige(String name, long wert) {\n' \
+        '        RpcClient.call("zeige", new Object[] {name, RpcClient.shownLong(wert)}, "call");' in java
+    for rel in (robot_api.GENERATED_PATHS['java_robot'],
+                robot_api.GENERATED_PATHS['java_greifobjekt'],
+                robot_api.GENERATED_PATHS['java_rpc_client']):
+        assert 'asset' not in _RENDERED[rel], rel
+
+
+def test_the_python_zeige_value_is_bounded_and_json_safe(tmp_path, monkeypatch):
+    """`_shown` renders any value into a bounded JSON-safe shape without a
+    second json.dumps in the stub (the encoder fence above pins exactly one):
+    non-finite floats and huge ints become text, containers are capped, a
+    hostile __repr__ cannot break the call, and the rendered frame stays far
+    below MAX_FRAME_BYTES whatever the student hands over."""
+    monkeypatch.delenv('CODE_RPC_SOCKET', raising=False)
+    robot = _load_stub(tmp_path)
+    sent = []
+    monkeypatch.setattr(robot._rpc, 'call', lambda m, a, k: sent.append((m, a, k)))
+
+    class Boese:
+        def __repr__(self):
+            raise RuntimeError('nope')
+
+    import json as _json
+    import math as _math
+    robot.zeige('a', 3)
+    robot.zeige('b', _math.nan)
+    robot.zeige('c', 10 ** 5000)
+    robot.zeige('d', [[['x' * 5000] * 80] * 80] * 80)
+    robot.zeige('e', Boese())
+    robot.zeige('f', {'x': (1, 2.5, None, True)})
+    robot.zeige('g', robot.Greifziel(4))
+    assert [m for m, _a, _k in sent] == ['zeige'] * 7
+    assert all(k == 'call' for _m, _a, k in sent)
+    values = {a[0]: a[1] for _m, a, _k in sent}
+    assert values['a'] == 3
+    assert values['b'] == 'nan'
+    assert isinstance(values['c'], str)
+    assert values['e'] == '<?>'
+    assert values['f'] == {'x': [1, 2.5, None, True]}
+    assert values['g'] == 'Greifziel(4)'
+    for _m, a, _k in sent:
+        body = _json.dumps({'id': 1, 'm': 'zeige', 'a': a}, ensure_ascii=False,
+                           allow_nan=False).encode('utf-8')
+        assert len(body) < robot_api.RPC_LIMITS.MAX_FRAME_BYTES // 4, len(body)
+
+
 # ── the stub as a Python module ───────────────────────────────────────────
 
 def _load_stub(tmp_path: Path):
@@ -307,6 +411,64 @@ def test_greifobjekt_subclass_registers_at_definition_time(tmp_path, monkeypatch
             tag_ids = [40]
             hoehe_m = 0.03
             greiftiefe_m = 0.01
+
+
+def test_the_live_values_hook_fires_before_every_public_call_and_only_those(tmp_path, monkeypatch):
+    """R2-O1: `_Rpc.before_call` runs on the caller's thread right before a
+    PUBLIC call (zeige included) — never before the library's own `__` calls
+    or register_object — and whatever it does, the call goes ahead: an
+    exception out of it switches it off and never reaches the program."""
+    monkeypatch.delenv('CODE_RPC_SOCKET', raising=False)
+    robot = _load_stub(tmp_path)
+    public = {c.name for c in robot_api.ROBOT_API + robot_api.CODE_ONLY_METHODS}
+    assert robot._PUBLIC_METHODS == frozenset(public)
+    assert not ({c.name for c in robot_api.INTERNAL_METHODS} & robot._PUBLIC_METHODS)
+    order = []
+    monkeypatch.setattr(robot._rpc, '_ensure_connected', lambda: None)
+    monkeypatch.setattr(robot._rpc, '_rate_floor', lambda kind: None)
+
+    class _Sock:
+        def sendall(self, data):
+            order.append(('send', json.loads(data[4:])['m']))
+    robot._rpc._sock = _Sock()
+    monkeypatch.setattr(robot._rpc, '_read_reply', lambda: {'ok': True, 'r': None})
+    robot._rpc.before_call = lambda: order.append(('hook', None))
+    robot.home()
+    robot.zeige('n', 1)
+    robot._rpc.call('__line', ['main.py', 3], 'call')
+    robot._rpc.call('register_object', [], 'perception')
+    assert order == [('hook', None), ('send', 'home'), ('hook', None), ('send', 'zeige'),
+                     ('send', '__line'), ('send', 'register_object')]
+
+    def broken():
+        raise RuntimeError('kaputt')
+    robot._rpc.before_call = broken
+    order.clear()
+    robot.move_to('Ablage')                       # no exception reaches the program
+    assert order == [('send', 'move_to')]
+    assert robot._rpc.before_call is None         # switched off for the rest of the run
+
+
+def test_the_java_zeige_list_shares_one_character_budget():
+    """Review round 2 (mi4): fifty 1000-character items were 50 000
+    characters — over the frame caps, and past MAX_FRAME_BYTES in UTF-8, a
+    RobotError inside the student's own program. The items now share the
+    Python stub's budget."""
+    rpc = _RENDERED[robot_api.GENERATED_PATHS['java_rpc_client']]
+    assert f'static final int SHOWN_BUDGET_CHARS = {2 * robot_api.SHOWN_VALUE_MAX_CHARS};' in rpc
+    # One budget for the whole value (review round 3, nb6): every node costs
+    # 4 and a text its length, arrays and lists nest into it, as in Python.
+    assert 'budget[0] -= 4;' in rpc and 'budget[0] -= n;' in rpc
+    assert f'static final int SHOWN_MAX_DEPTH = {robot_api._SHOWN_MAX_DEPTH};' in rpc
+    assert f'static final int SHOWN_MAX_ITEMS = {robot_api._SHOWN_MAX_ITEMS};' in rpc
+    assert f'_SHOWN_MAX_DEPTH = {robot_api._SHOWN_MAX_DEPTH}\n' in _STUB
+    assert f'_SHOWN_MAX_ITEMS = {robot_api._SHOWN_MAX_ITEMS}\n' in _STUB
+    # The shipped values, as literals (test_constant_pins): both renderers
+    # read them, so a changed value would regenerate consistently and pass
+    # every fence above.
+    assert robot_api._SHOWN_MAX_DEPTH == 3
+    assert robot_api._SHOWN_MAX_ITEMS == 50
+    assert 2 * robot_api.SHOWN_VALUE_MAX_CHARS <= robot_api.SHOWN_FRAME_MAX_CHARS
 
 
 def test_stub_compiles_under_the_runner_python_floor():

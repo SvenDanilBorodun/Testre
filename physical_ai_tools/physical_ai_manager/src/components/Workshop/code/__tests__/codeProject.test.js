@@ -255,6 +255,19 @@ describe('collectCodeReplayNames — which recordings a code run has to carry', 
     const tooLong = 'B'.repeat(41);
     expect(collectCodeReplayNames({ 'main.py': `robot.replay("${tooLong}")` })).toEqual([]);
   });
+
+  test('the exact scanner’s names come first and join the loose ones (review round 4, mc7)', () => {
+    const files = { 'main.py': '# robot.replay("Alt")\nrobot.replay(speed=2,\n    name="Winken")\n' };
+    // The loose scan alone misses the call split over two lines …
+    expect(collectCodeReplayNames(files)).toEqual(['Alt']);
+    // … the exact names carry it, first, and a loose hit stays.
+    expect(collectCodeReplayNames(files, ['Winken', ' Winken ', '', 'B'.repeat(41), 7])).toEqual(['Winken', 'Alt']);
+    // The cap never cuts an exact name for a loose hit.
+    const loose = Array.from({ length: MAX_CODE_REPLAY_NAMES }, (_, i) => `# robot.replay("L${i}")`).join('\n');
+    const names = collectCodeReplayNames({ 'main.py': loose }, ['Echt']);
+    expect(names).toHaveLength(MAX_CODE_REPLAY_NAMES);
+    expect(names[0]).toBe('Echt');
+  });
 });
 
 describe('the module is pure and reads only robot_api.json', () => {

@@ -527,8 +527,37 @@ const workshopSlice = createSlice({
       //
       // Deliberately here and not in WorkshopPage.handlePickWorkflow: that is
       // one of three dispatchers, and a fourth added later would silently miss.
+      //
+      // The same event retires the run's shown VALUES (review m4): a
+      // variable, its last five values and a counter belong to the program
+      // that produced them, and a code document lists every name
+      // `workshop.variables` holds — so the previous program's names showed
+      // up in the next one's Variablen tab, „Nirgends" used. „Neu" from one
+      // UNSAVED document to the next (null → null) is the one switch this
+      // guard cannot see; WorkshopPage.handleNewProgram retires them there.
       const prev = state.selectedWorkflowId;
-      if (prev && prev !== next) state.breakpoints = [];
+      if (prev && prev !== next) {
+        state.breakpoints = [];
+        state.variables = {};
+        state.variableHistory = {};
+        state.counters = {};
+      }
+      state.selectedWorkflowId = next;
+    },
+    // The student OPENS another document („Öffnen", a gallery clone): its
+    // breakpoints and shown values leave with the one it replaces — also
+    // from an UNSAVED document (null → id), which setSelectedWorkflowId must
+    // not treat as a switch, because its null → id is also the first save of
+    // an unsaved document, the same program getting its id (review round 2,
+    // mi7). Re-opening the open document changes nothing.
+    openWorkflow: (state, action) => {
+      const next = action.payload;
+      if (state.selectedWorkflowId !== next) {
+        state.breakpoints = [];
+        state.variables = {};
+        state.variableHistory = {};
+        state.counters = {};
+      }
       state.selectedWorkflowId = next;
     },
     setUnsavedBlocklyJson: (state, action) => {
@@ -650,6 +679,7 @@ export const {
   clearWorkflowError,
   setDebuggerWarnings,
   setSelectedWorkflowId,
+  openWorkflow,
   setUnsavedBlocklyJson,
   markWorkflowSaved,
   setActiveTutorial,

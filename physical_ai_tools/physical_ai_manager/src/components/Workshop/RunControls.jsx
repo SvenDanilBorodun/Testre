@@ -50,6 +50,7 @@ import {
 } from './code/codeProject';
 import { CODE_DE } from './code/codeMessagesDe';
 import { isCodeBreakpointId } from './code/codeBreakpoints';
+import { scanCodeAssets } from './code/codeAssetUsage';
 
 const BUTTON_BASE =
   'inline-flex items-center justify-center min-h-[36px] '
@@ -90,6 +91,31 @@ const TECHNIK_PREFIX = '[TECHNIK] ';
 // phantom — the cloud's 404 „Bewegung nicht gefunden" — so the loop can drop it
 // without confusing it with a row that arrived and would not parse.
 const NO_SUCH_RECORDING = Symbol('no such recording');
+
+// Recordings belong to a SAVED workflow (the cloud keys them on its id), so a
+// program that replays one cannot run before its first save. One sentence for
+// both notations.
+const SAVE_FIRST_RECORDINGS_DE = 'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
+  + 'gehören zu einem gespeicherten Workflow.';
+
+// The recordings a code program names through replay("…"), by the EXACT
+// scanner: `live` — at least one call outside a comment, what the program can
+// really run — and `commented` — named only inside comments.
+function codeReplayNames(files, language) {
+  const live = [];
+  const commented = [];
+  for (const [name, rows] of scanCodeAssets(files, language).replay) {
+    (rows.some((r) => !r.inComment) ? live : commented).push(name);
+  }
+  return { live, commented };
+}
+
+// Whether a code program really CALLS replay("…") — the exact scanner, not the
+// run-time one: a replay inside a comment or a string must not stop an
+// unsaved program from running.
+function codeCallsReplay(files, language) {
+  return codeReplayNames(files, language).live.length > 0;
+}
 
 // ── Run-payload slimming ─────────────────────────────────────────────────────
 // The allowlist and the reasoning live in `utils/blocklyPayload.js`, shared with
@@ -138,6 +164,22 @@ function RunControls({
   // '' / null keep the Blockly path byte-for-byte.
   codeLanguage = '',
   codeFiles = null,
+  // The open document's Ziele/Positionen store (WorkshopPage `activeStore`):
+  // the workspace's own store for a Blockly program, the code document's
+  // detached one for Python/Java (migration 041). Absent → the workspace's
+  // store, else the serializer output, as before.
+  destinationStore = null,
+  // Why no run may start right now, or null (review round 3, nb2: a version
+  // restore on its way). The Start button is disabled and says why.
+  startBlockedReason = null,
+  // The start window (review round 5, MD5): Start awaits the breakpoints and
+  // the recordings before the run is marked running. `onStartingChange(true)`
+  // opens it — the page then refuses every document switch — and
+  // `onStartingChange(false)` closes it once the run is running or failed.
+  // `getDocumentToken()` names the open document: a start whose document
+  // was replaced anyway while it waited is not sent.
+  onStartingChange = null,
+  getDocumentToken = null,
 }) {
   const dispatch = useDispatch();
   const {
@@ -314,6 +356,13 @@ function RunControls({
         toast.error(projectError);
         return;
       }
+      // O9: an UNSAVED program that replays a recording would start and then
+      // abort on the robot („Unbekannte Aufnahme: …") — the recordings live
+      // under a saved workflow. The same refusal a block program gets.
+      if (!workflowId && codeCallsReplay(codeFiles, codeLanguage)) {
+        toast.error(SAVE_FIRST_RECORDINGS_DE);
+        return;
+      }
     } else if (!blocklyJson) {
       toast.error('Workflow ist leer.');
       return;
@@ -328,6 +377,10 @@ function RunControls({
       return;
     }
     setBusy(true);
+    // The start window opens here, before the first await, and closes in the
+    // `finally` — right after the run was marked running, or on any failure.
+    const startedFor = typeof getDocumentToken === 'function' ? getDocumentToken() : null;
+    if (typeof onStartingChange === 'function') onStartingChange(true);
     try {
       dispatch(clearWorkflowLog());
       dispatch(clearVariables());
@@ -381,8 +434,12 @@ function RunControls({
       // `robot.replay` — a full ROBOT_API row, in both stubs and in the
       // editor's autocomplete — reach nothing but the server's „Unbekannte
       // Aufnahme: …" and abort the run.
+      // The names a real call uses go FIRST (review round 5, md6): the fetch
+      // is capped at 16, and sixteen names seen only in comments used to
+      // crowd out the one recording the program really plays.
+      const codeNames = isCode ? codeReplayNames(codeFiles, codeLanguage) : null;
       const replayNames = isCode
-        ? collectCodeReplayNames(codeFiles)
+        ? collectCodeReplayNames(codeFiles, [...codeNames.live, ...codeNames.commented])
         : collectReplayNames(blocklyJson);
       const trajectories = {};
       // A scan hit may be a comment or an unrelated string, so for a code
@@ -396,8 +453,7 @@ function RunControls({
       if (replayNames.length > 0 && !canFetchTrajectories && !skipUnknownNames) {
         toast.error(workflowId
           ? 'Aufgenommene Bewegungen können zurzeit nicht geladen werden.'
-          : 'Bitte zuerst den Workflow speichern — aufgenommene Bewegungen '
-            + 'gehören zu einem gespeicherten Workflow.');
+          : SAVE_FIRST_RECORDINGS_DE);
         return;
       }
       if (replayNames.length > 0 && canFetchTrajectories) {
@@ -498,12 +554,14 @@ function RunControls({
       // authoritative (a deleted Ziel must not resolve to another student's
       // robot-local point). The live store is the freshest truth; the
       // serializer output is the fallback when no workspace is mounted. A code
-      // program has no Blockly document: it pins its own points in code.
+      // program (041) sends ITS document's store the same way; a `pin()` in the
+      // code still wins at run time, the precedence a „Ziel setzen" block has.
+      const store = destinationStore || (workspace ? getDestinationStore(workspace) : null);
       let destinationEntries = [];
-      if (!isCode) {
-        destinationEntries = workspace
-          ? getDestinationStore(workspace).getEntries()
-          : readDestinationEntries(blocklyJson);
+      if (store) {
+        destinationEntries = store.getEntries();
+      } else if (!isCode) {
+        destinationEntries = readDestinationEntries(blocklyJson);
       }
       const destinations = entriesForRunPayload(destinationEntries);
       const workflowJsonStr = simMode
@@ -527,6 +585,13 @@ function RunControls({
       }
       if (Object.keys(trajectories).length > 0 && exceedsRunPayloadCap(workflowJsonStr)) {
         toast.error(RUN_PAYLOAD_TOO_BIG_RECORDINGS_DE);
+        return;
+      }
+      // The last moment a start can still be taken back: the payload above is
+      // the document open when Start was pressed, and it runs only if that
+      // document is still the open one (review round 5, MD5).
+      if (typeof getDocumentToken === 'function' && getDocumentToken() !== startedFor) {
+        toast.error(DE.PROGRAM_CHANGED_BEFORE_START);
         return;
       }
       const r = await callService(
@@ -566,10 +631,14 @@ function RunControls({
       toast.error(`Service-Aufruf fehlgeschlagen: ${e.message || e}`);
     } finally {
       setBusy(false);
+      if (typeof onStartingChange === 'function') onStartingChange(false);
     }
   }, [
+    onStartingChange,
+    getDocumentToken,
     blocklyJson,
     workspace,
+    destinationStore,
     rsLeaderOn,
     simMode,
     simScene,
@@ -695,10 +764,10 @@ function RunControls({
           <button
             type="button"
             onClick={handleStart}
-            disabled={busy || (rsLeaderOn && !simMode)}
-            title={rsLeaderOn && !simMode
+            disabled={busy || (rsLeaderOn && !simMode) || !!startBlockedReason}
+            title={startBlockedReason || (rsLeaderOn && !simMode
               ? 'Bitte zuerst „Leader abschalten" (oben), bevor du das Programm ausführst.'
-              : undefined}
+              : undefined)}
             className={
               BUTTON_BASE
               + ' bg-[var(--accent)] text-white hover:opacity-90 '

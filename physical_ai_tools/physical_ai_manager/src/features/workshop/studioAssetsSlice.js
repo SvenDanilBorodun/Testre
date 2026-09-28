@@ -22,6 +22,7 @@ import * as workflowApi from '../../services/workflowApi';
 import { signedOut } from '../session/sessionActions';
 import {
   markWorkflowSaved,
+  openWorkflow,
   setRunState,
   setSelectedWorkflowId,
   setWorkflowStatus,
@@ -88,6 +89,27 @@ function finalizePreview(state, phase) {
     ts: Date.now(),
   };
   state.preview = null;
+}
+
+// A document switch: the recording list, the drawer focus, the preview
+// results, the highlight and a rename split belong to the document that was
+// open.
+function retireDocument(state, action) {
+  const next = action.payload === undefined ? null : action.payload;
+  // Same document (re-pick, or the page's own create stamping the id the
+  // list already belongs to): nothing is stale, nothing is cleared.
+  if (next === state.trajectories.workflowId) return;
+  state.trajectories = {
+    workflowId: next,
+    status: next ? 'idle' : 'none',
+    items: [],
+    error: null,
+    fetchedAt: 0,
+  };
+  state.drawer.focusId = null;
+  state.lastPreviewResult = {};
+  state.highlight = null;
+  state.renameSplit = null;
 }
 
 const studioAssetsSlice = createSlice({
@@ -193,23 +215,9 @@ const studioAssetsSlice = createSlice({
   extraReducers: (builder) => {
     builder
       .addCase(signedOut, () => freshState())
-      .addCase(setSelectedWorkflowId, (state, action) => {
-        const next = action.payload === undefined ? null : action.payload;
-        // Same document (re-pick, or the page's own create stamping the id the
-        // list already belongs to): nothing is stale, nothing is cleared.
-        if (next === state.trajectories.workflowId) return;
-        state.trajectories = {
-          workflowId: next,
-          status: next ? 'idle' : 'none',
-          items: [],
-          error: null,
-          fetchedAt: 0,
-        };
-        state.drawer.focusId = null;
-        state.lastPreviewResult = {};
-        state.highlight = null;
-        state.renameSplit = null;
-      })
+      .addCase(setSelectedWorkflowId, retireDocument)
+      // Opening another program (review round 2, mi7) is the same switch.
+      .addCase(openWorkflow, retireDocument)
       // The saved document now carries the cloud name (§ WP6 rename split).
       .addCase(markWorkflowSaved, (state) => {
         state.renameSplit = null;

@@ -356,6 +356,25 @@ describe('signOutStudent — no trace of the previous student', () => {
       expect(localStorage.getItem(key)).toBeNull();
     }
   });
+
+  it('forgets the lines Vormachen last copied (review round 5, nd4)', async () => {
+    // Module memory, not a slice: the next student's paste of the same text
+    // must be an ordinary paste, not the previous student's „Einfügen".
+    const { store, signOutStudent } = await freshStore();
+    const clip = await import('../../components/Workshop/code/vormachenClipboard');
+    const copied = clip.rememberVormachenCopy('python', ['robot.move_to("Ablage")']);
+    // Not vacuous: before the sign-out the copy is recognised.
+    expect(clip.vormachenPasteLines(copied, 'python')).toEqual(['robot.move_to("Ablage")']);
+    // … and forgotten while the revoke is still in flight (local first).
+    let during = 'unset';
+    signOutMock.mockImplementation(() => {
+      during = clip.vormachenPasteLines(copied, 'python');
+      return Promise.resolve({ error: null });
+    });
+    await store.dispatch(signOutStudent({ reload: false }));
+    expect(during).toBeNull();
+    expect(clip.vormachenPasteLines(copied, 'python')).toBeNull();
+  });
 });
 
 describe('signOutStudent — the local teardown finishes before the remote call', () => {

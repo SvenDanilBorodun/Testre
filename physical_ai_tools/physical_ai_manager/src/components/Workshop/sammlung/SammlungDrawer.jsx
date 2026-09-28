@@ -19,11 +19,22 @@
  * the drawer. It never changes the editor box's size: no svgResize, no
  * remount. z-20 is above the editor only because the BlocklyWorkspace host
  * isolates Blockly's stacking context (the toolbox is z-index 70).
+ *
+ * ONE DRAWER FOR BOTH NOTATIONS. It reaches the document only through an
+ * asset document (`assetDoc`, sammlung/assetDocument.js): a Blockly workspace
+ * or a Python/Java program. A caller that hands a bare `workspace` gets that
+ * workspace's Blockly document. Over a CODE program the drawer opens beside
+ * the file sidebar, rows can be put into the program — „Einfügen", or dragged
+ * into the editor as a `SNIPPET_MIME` snippet — and, since a code program has
+ * no flyout cards, the drawer itself offers „Neu" through the page's own
+ * provider actions (Vormachen, a camera click, the simulator table).
  */
 
-import React, { useEffect, useReducer } from 'react';
+import React, {
+  useEffect, useMemo, useReducer, useState,
+} from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import * as Blockly from 'blockly/core';
+import toast from 'react-hot-toast';
 import {
   closeDrawer,
   selectDrawer,
@@ -32,9 +43,11 @@ import {
   setDrawerTab,
 } from '../../../features/workshop/studioAssetsSlice';
 import { DE, formatDe } from '../blocks/messages_de';
+import { CODE_DE, formatCode } from '../code/codeMessagesDe';
+import { SNIPPET_MIME } from '../code/snippetMime';
+import { newActionsFor } from './newActions';
 import { EMPTY_SAMMLUNG_PROVIDER } from './provider';
-import { getDestinationStore } from './destinationStore';
-import { buildWorkspaceAssetIndex } from './toolboxCategories';
+import { assetDocumentOf } from './assetDocument';
 import DrawerRecording from './DrawerRecording';
 import DrawerPlace from './DrawerPlace';
 import DrawerVariable from './DrawerVariable';
@@ -45,6 +58,12 @@ export const DRAWER_TABS = Object.freeze([
   { id: 'ziele', label: DE.CATEGORY_ZIELE },
   { id: 'positionen', label: DE.CATEGORY_POSITIONEN },
 ]);
+
+/** The drag-and-drop type of a Sammlung row dropped into the code editor. */
+export { SNIPPET_MIME };
+
+// The row kinds a code program can take as a line of code.
+const SNIPPET_KINDS = new Set(['recording', 'pin', 'pose']);
 
 const CHIP_CLASSES = {
   ok: 'bg-green-100 text-green-800',
@@ -67,14 +86,6 @@ function cardsForTab(index, tab) {
   return [];
 }
 
-function toolboxWidthOf(workspace) {
-  try {
-    return Math.max(0, Math.round(workspace?.getToolbox?.()?.getWidth?.() || 0));
-  } catch (_) {
-    return 0;
-  }
-}
-
 function isTextInput(target) {
   if (!target || !target.tagName) return false;
   const tag = target.tagName.toUpperCase();
@@ -82,7 +93,8 @@ function isTextInput(target) {
 }
 
 export default function SammlungDrawer({
-  workspace,
+  assetDoc: assetDocProp = null,
+  workspace = null,
   provider = EMPTY_SAMMLUNG_PROVIDER,
   accessToken,
   workflowId,
@@ -95,48 +107,27 @@ export default function SammlungDrawer({
   const drawer = useSelector(selectDrawer);
   const renameSplit = useSelector(selectRenameSplit);
   const [, rerender] = useReducer((n) => n + 1, 0);
+  const assetDoc = useMemo(() => assetDocumentOf(assetDocProp, workspace), [assetDocProp, workspace]);
 
   // Re-render on every change the lists depend on: the destination store, the
-  // provider snapshot and the program itself (usages, variables).
+  // provider snapshot and the program itself (usages, variables). A selected
+  // toolbox category (Blockly) takes this area: the drawer closes.
   useEffect(() => {
-    const unsubscribeStore = workspace ? getDestinationStore(workspace).subscribe(rerender) : () => {};
+    const unsubscribeDoc = assetDoc
+      ? assetDoc.subscribe(rerender, { onFlyoutOpened: () => dispatch(closeDrawer()) })
+      : () => {};
     const unsubscribeProvider = provider && typeof provider.subscribe === 'function'
       ? provider.subscribe(rerender) : () => {};
-    let listener = null;
-    if (workspace && typeof workspace.addChangeListener === 'function') {
-      listener = (e) => {
-        if (!e) return;
-        // The student opened a toolbox category: its flyout takes this area.
-        // `clearSelection()` below fires one with an EMPTY newItem — ignored.
-        if (e.type === Blockly.Events.TOOLBOX_ITEM_SELECT) {
-          if (e.newItem) dispatch(closeDrawer());
-          return;
-        }
-        if (!e.isUiEvent) rerender();
-      };
-      workspace.addChangeListener(listener);
-    }
     return () => {
-      unsubscribeStore();
+      unsubscribeDoc();
       unsubscribeProvider();
-      if (listener) {
-        try {
-          workspace.removeChangeListener(listener);
-        } catch (_) {
-          // A workspace disposed before the drawer.
-        }
-      }
     };
-  }, [workspace, provider, dispatch]);
+  }, [assetDoc, provider, dispatch]);
 
   // Opening the drawer closes an open flyout (same area).
   useEffect(() => {
-    try {
-      workspace?.getToolbox?.()?.clearSelection?.();
-    } catch (_) {
-      // Headless or read-only workspace without a toolbox.
-    }
-  }, [workspace]);
+    if (assetDoc) assetDoc.closeFlyout();
+  }, [assetDoc]);
 
   let snapshot = null;
   try {
@@ -144,14 +135,49 @@ export default function SammlungDrawer({
   } catch (_) {
     snapshot = null;
   }
-  const index = workspace ? buildWorkspaceAssetIndex(workspace, snapshot || undefined) : null;
+  const index = assetDoc ? assetDoc.buildIndex(snapshot || undefined) : null;
   const capabilities = (snapshot && snapshot.capabilities) || {};
   const items = (snapshot && snapshot.trajectories && Array.isArray(snapshot.trajectories.items))
     ? snapshot.trajectories.items : [];
   const tab = DRAWER_TABS.some((t) => t.id === drawer.tab) ? drawer.tab : 'aufnahmen';
   const cards = index ? cardsForTab(index, tab) : [];
   const focused = cards.find((c) => focusIdOf(c) === drawer.focusId) || null;
-  const toolboxWidth = toolboxWidthOf(workspace);
+  const anchorLeft = assetDoc ? assetDoc.anchorLeft() : 0;
+  const isCode = !!assetDoc && assetDoc.kind === 'code';
+  const canInsert = !!assetDoc && assetDoc.canInsertSnippets === true;
+  const newActions = isCode ? newActionsFor(capabilities, tab) : [];
+  const snippetable = (card) => canInsert && SNIPPET_KINDS.has(card.assetKind);
+
+  // A code document's insertion may load its module first (async); a
+  // Blockly document answers at once — `await` takes both. One at a time
+  // (review round 3, nb4): a second click while the module loaded inserted
+  // the line twice. The buttons are disabled from the first click on (a
+  // click is a discrete event: React renders before the next one).
+  const [inserting, setInserting] = useState(false);
+  const insert = async (card) => {
+    setInserting(true);
+    try {
+      let result;
+      try {
+        result = await assetDoc.insertSnippet({ kind: card.assetKind, name: card.assetName });
+      } catch (err) {
+        // The insertion module loads on demand (review round 2, ni4); a
+        // failed load wrote nothing.
+        console.error('insertSnippet failed:', err);
+        toast.error(CODE_DE.SAMMLUNG_INSERT_FAILED);
+        return;
+      }
+      if (result && result.error) {
+        toast.error(result.error);
+        return;
+      }
+      if (result && result.count > 0) {
+        toast.success(formatCode(CODE_DE.INSERTED_AT, result.file, result.firstLine));
+      }
+    } finally {
+      setInserting(false);
+    }
+  };
 
   const handleKeyDown = (e) => {
     if (e.key !== 'Escape' || isTextInput(e.target)) return;
@@ -162,7 +188,9 @@ export default function SammlungDrawer({
   const renderDetail = () => {
     if (!focused) return null;
     const key = `${tab}:${drawer.focusId}`;
-    const common = { workspace, card: focused, capabilities, onPreview };
+    const common = {
+      assetDoc, workspace, card: focused, capabilities, onPreview,
+    };
     if (tab === 'variablen') return <DrawerVariable key={key} {...common} />;
     if (tab === 'aufnahmen') {
       return (
@@ -187,7 +215,7 @@ export default function SammlungDrawer({
       aria-label={DE.SAMMLUNG_TITLE}
       onKeyDown={handleKeyDown}
       className="absolute inset-y-0 z-20 flex flex-col bg-white border-r border-[var(--line)] shadow-xl"
-      style={{ left: toolboxWidth, width: `min(22rem, calc(100% - ${toolboxWidth}px))` }}
+      style={{ left: anchorLeft, width: `min(22rem, calc(100% - ${anchorLeft}px))` }}
     >
       <header className="flex items-center justify-between border-b border-[var(--line)] px-3 py-2">
         <h2 className="text-base font-semibold text-gray-900">{DE.SAMMLUNG_TITLE}</h2>
@@ -226,6 +254,25 @@ export default function SammlungDrawer({
           {formatDe(DE.ERR_RENAME_SPLIT, renameSplit.cloudName)}
         </div>
       )}
+      {newActions.length > 0 && (
+        <div
+          role="group"
+          aria-label={CODE_DE.SAMMLUNG_NEW}
+          className="flex flex-wrap items-center gap-1 border-b border-[var(--line)] px-2 py-1.5"
+        >
+          <span className="text-xs font-semibold text-gray-500">{CODE_DE.SAMMLUNG_NEW}</span>
+          {newActions.map(({ label, action }) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => provider.dispatchAction(action)}
+              className="rounded border border-[var(--line)] px-2 py-0.5 text-xs text-gray-800 hover:bg-gray-50"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {cards.length === 0 ? (
           <p className="p-3 text-sm text-gray-600">{DE.DRAWER_EMPTY_TAB}</p>
@@ -234,13 +281,25 @@ export default function SammlungDrawer({
             {cards.map((card) => {
               const id = focusIdOf(card);
               const selected = id === drawer.focusId;
+              const insertable = snippetable(card);
               return (
-                <li key={`${card.assetKind}:${id}`}>
+                <li
+                  key={`${card.assetKind}:${id}`}
+                  className={insertable ? 'flex items-stretch' : undefined}
+                  draggable={insertable ? 'true' : undefined}
+                  onDragStart={insertable ? (e) => {
+                    e.dataTransfer.setData(
+                      SNIPPET_MIME, JSON.stringify({ kind: card.assetKind, name: card.assetName }),
+                    );
+                    e.dataTransfer.effectAllowed = 'copy';
+                  } : undefined}
+                >
                   <button
                     type="button"
                     aria-pressed={selected}
                     onClick={() => dispatch(setDrawerFocus(selected ? null : id))}
-                    className={'w-full px-3 py-2 text-left ' + (selected ? 'bg-gray-100' : 'hover:bg-gray-50')}
+                    className={(insertable ? 'min-w-0 flex-1 ' : 'w-full ') + 'px-3 py-2 text-left '
+                      + (selected ? 'bg-gray-100' : 'hover:bg-gray-50')}
                   >
                     <span className="block truncate text-sm font-semibold text-gray-900" title={card.assetName}>
                       {card.assetName}
@@ -256,6 +315,19 @@ export default function SammlungDrawer({
                       </span>
                     )}
                   </button>
+                  {insertable && (
+                    <button
+                      type="button"
+                      aria-label={`${CODE_DE.SAMMLUNG_INSERT}: ${card.assetName}`}
+                      title={CODE_DE.SAMMLUNG_INSERT_TITLE}
+                      onClick={() => insert(card)}
+                      disabled={inserting}
+                      aria-busy={inserting || undefined}
+                      className="shrink-0 px-2 text-xs font-medium text-[var(--accent)] hover:bg-gray-50 disabled:cursor-wait disabled:opacity-50"
+                    >
+                      {CODE_DE.SAMMLUNG_INSERT}
+                    </button>
+                  )}
                 </li>
               );
             })}

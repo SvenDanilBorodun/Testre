@@ -9,8 +9,13 @@
 // a Sammlung flyout „✋ … vormachen") into an open overlay — or into a German
 // refusal. The entry gates are judged HERE, when the request is processed,
 // because a request can be queued from a flyout while the rig changed.
+//
+// It works on the page's asset document (`assetDoc`, sammlung/assetDocument.js)
+// — a Blockly workspace or a Python/Java program — so Vormachen opens for a
+// code program too (owner decision O4). A caller that still hands a bare
+// `workspace` gets that workspace's Blockly document.
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import {
@@ -21,14 +26,16 @@ import {
   teachRequestHandled,
 } from '../../../features/workshop/studioAssetsSlice';
 import { useHomeGlide } from '../HomeGlidePrompt';
+import { assetDocumentOf } from '../sammlung/assetDocument';
 import { TEACH_BLOCK_TITLES_DE, resolveTeachMode, teachEntryBlockReason } from './teachGates';
 import TeachOverlay from './TeachOverlay';
 
 function TeachHost({
-  isActive, workspace, accessToken, workflowId, robotType, caps, heartbeatStatus, runState, paused,
+  isActive, workspace, assetDoc = null, accessToken, workflowId, robotType, caps, heartbeatStatus, runState, paused,
   simMode, jogHandGuideOn, previewActive, rsBridge, saveWorkflowNow, refetchTrajectories,
 }) {
   const dispatch = useDispatch();
+  const doc = useMemo(() => assetDocumentOf(assetDoc, workspace), [assetDoc, workspace]);
   const teach = useSelector(selectTeachState) || {};
   const { homeGlideActive } = useHomeGlide();
   const token = teach.requested ? teach.requested.token : null;
@@ -40,7 +47,7 @@ function TeachHost({
       return;
     }
     // No editor on screen (calibration, gallery): nothing to teach into.
-    if (!isActive || !workspace) {
+    if (!isActive || !doc) {
       dispatch(teachRequestHandled());
       return;
     }
@@ -57,8 +64,9 @@ function TeachHost({
       dispatch(teachRequestHandled());
       return;
     }
-    // Close the flyout the request came from, so Blockly holds no focus.
-    try { workspace.hideChaff(); } catch (_) { /* a disposed workspace */ }
+    // Close the flyout the request came from, so Blockly holds no focus (a
+    // code document has none: a no-op).
+    try { doc.hideChaff(); } catch (_) { /* a disposed workspace */ }
     // D8: a live leader (a POSITIVE bridge answer) on a leader-capable profile
     // teaches with the leader arm; the mode is fixed for the whole session.
     // R7: while the bridge cannot report the leader state (not answered yet, or
@@ -93,6 +101,7 @@ function TeachHost({
       focus={teach.focus || null}
       onClose={() => dispatch(teachClosed())}
       workspace={workspace}
+      assetDoc={doc}
       accessToken={accessToken}
       workflowId={workflowId}
       robotType={robotType}

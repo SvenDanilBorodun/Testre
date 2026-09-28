@@ -349,8 +349,15 @@ const FileItem = ({
   );
 };
 
-// Shown when the robot could not list a folder and sent no reason of its own.
+// What a student reads when a folder could not be listed. The robot's own
+// reason (file_browse_utils, English) and a transport error go to the console
+// only (Rule §1: German UI, English logs).
 const BROWSE_FAILED_DE = 'Der Ordner konnte nicht geöffnet werden.';
+
+function browseFailedDe(reason) {
+  if (reason) console.warn('FileBrowser: browse failed:', reason);
+  return BROWSE_FAILED_DE;
+}
 
 const LoadingState = () => {
   const classContainer = clsx('flex', 'items-center', 'justify-center', 'py-8');
@@ -532,11 +539,12 @@ export default function FileBrowser({
             setDirectoriesWithTarget(new Set());
           }
         } else {
-          setError(result.message || BROWSE_FAILED_DE);
-          toast.error(result.message || BROWSE_FAILED_DE);
+          const message = browseFailedDe(result.message);
+          setError(message);
+          toast.error(message);
         }
       } catch (err) {
-        const errorMessage = err.message || BROWSE_FAILED_DE;
+        const errorMessage = browseFailedDe(err && err.message);
         setError(errorMessage);
         toast.error(errorMessage);
       } finally {
@@ -652,11 +660,12 @@ export default function FileBrowser({
             setDirectoriesWithTarget(new Set());
           }
         } else {
-          setError(result.message || BROWSE_FAILED_DE);
-          toast.error(result.message || BROWSE_FAILED_DE);
+          const message = browseFailedDe(result.message);
+          setError(message);
+          toast.error(message);
         }
       } catch (err) {
-        const errorMessage = err.message || BROWSE_FAILED_DE;
+        const errorMessage = browseFailedDe(err && err.message);
         setError(errorMessage);
         toast.error(errorMessage);
       } finally {

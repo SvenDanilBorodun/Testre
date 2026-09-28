@@ -1386,13 +1386,15 @@ function javaNumberLiteral(raw) {
   return undefined;
 }
 
-// `x` converted to numeric type `t` (widening or the promoted type), or
-// undefined.
+// `x` converted to numeric type `t` — only ever a WIDENING (the promoted or
+// the declared type), which never changes an int/long value: the wrap-around
+// happens where a value is made (a literal, an operation), nowhere else.
+// Undefined for anything else.
 function javaAsType(x, t) {
   if (!x || !(x.t in JAVA_NUMERIC_RANK) || !(t in JAVA_NUMERIC_RANK)) return undefined;
   if (t === 'int' || t === 'long') {
-    if (x.t !== 'int' && x.t !== 'long') return undefined;
-    return { t, v: BigInt.asIntN(t === 'int' ? 32 : 64, x.v) };
+    if (x.t !== 'int' && (x.t !== 'long' || t !== 'long')) return undefined;
+    return { t, v: x.v };
   }
   const n = Number(x.v);
   return { t, v: t === 'float' ? Math.fround(n) : n };

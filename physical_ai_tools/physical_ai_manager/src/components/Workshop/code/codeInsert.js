@@ -1571,7 +1571,7 @@ class JavaParser {
     if (close === null) return null;
     const body = this.body(close + 1, to);
     if (!body) return null;
-    return this.loop(start, body.end, this.condKind(this.code.slice(paren + 1, close)), body);
+    return this.loop(start, body.end, this.condKind(this.code.slice(paren + 1, close), paren + 1), body);
   }
 
   doStatement(start, after, to) {
@@ -1584,7 +1584,7 @@ class JavaParser {
     const close = this.closeOf(paren);
     if (close === null) return null;
     const end = this.toSemicolon(close + 1, to);
-    const kind = this.condKind(code.slice(paren + 1, close));
+    const kind = this.condKind(code.slice(paren + 1, close), paren + 1);
     const breaks = new Set(body.breaks);
     const brokenOut = breaks.delete('');
     let completes;
@@ -1622,7 +1622,7 @@ class JavaParser {
       return this.made(start, body.end, 'yes', breaks);
     }
     const cond = parts[1].trim();
-    return this.loop(start, body.end, cond === '' ? 'true' : this.condKind(cond), body);
+    return this.loop(start, body.end, cond === '' ? 'true' : this.condKind(cond, paren + 1), body);
   }
 
   tryStatement(start, after, to) {
@@ -1694,23 +1694,32 @@ class JavaParser {
     return this.made(start, pair.get(open) + 1, completes, breaks, false, 'switch');
   }
 
-  condKind(cond) {
-    return javaConditionKind(cond, (name) => this.constantVerdict(name));
+  // `at`: where the condition stands — a name means the declaration VISIBLE
+  // there, never a same-named one elsewhere in the file.
+  condKind(cond, at) {
+    return javaConditionKind(cond, (name) => this.constantVerdict(name, 0, at));
   }
 
   /**
-   * What a name in a condition is: 'var' (provably not a constant variable:
+   * What a name at offset `at` is: 'var' (provably not a constant variable:
    * a variable never declared `final` — an interface field is implicitly
    * final — a parameter, a member of a variable like `args.length`, or a
    * final one whose initializer is not constant), `{value}` (a constant
    * variable declared in this file), or null (declared elsewhere, or declared
    * here more than once in ways that disagree: it might be a constant).
+   * Only declarations whose SCOPE holds `at` count (a local or parameter of
+   * another method, a field of a class `at` is not in): a same-named
+   * parameter elsewhere once made another file's constant look variable, and
+   * javac rejected the „reachable" line as unreachable. An interface's
+   * constants count everywhere (a class reaches them by `implements`).
    */
-  constantVerdict(name, depth = 0) {
+  constantVerdict(name, depth = 0, at = 0) {
     if (depth > 8) return null;
-    if (this.declCache.has(name)) return this.declCache.get(name);
+    const key = `${name}@${at}`;
+    if (this.declCache.has(key)) return this.declCache.get(key);
     const parts = name.split('.');
-    const decls = this.declarations(parts[0]);
+    const decls = this.declarations(parts[0])
+      .filter((d) => d.everywhere || (d.scopeFrom <= at && at <= d.scopeTo));
     let verdict = null;
     if (parts.length > 1) {
       // A member of a declared variable is never a constant expression.
@@ -1718,36 +1727,78 @@ class JavaParser {
     } else if (decls.length > 0 && decls.every((d) => !d.final)) {
       verdict = 'var';
     } else if (decls.length === 1) {
-      const { init } = decls[0];
+      const { init, pos } = decls[0];
       if (init === null) verdict = 'var';
       else {
-        const inner = javaExprVerdict(init, (n) => this.constantVerdict(n, depth + 1));
+        const inner = javaExprVerdict(init, (n) => this.constantVerdict(n, depth + 1, pos));
         verdict = inner;
       }
     }
-    this.declCache.set(name, verdict);
+    this.declCache.set(key, verdict);
     return verdict;
   }
 
-  // Every declaration of simple name `name` in the file: {final, init}. A
-  // declaration's modifiers are Java's own (final, static, …, annotations)
-  // and its type is a name or a primitive — never another keyword: `return
-  // LAUF;`, `case STUFE:` and `x instanceof T)` declare nothing (review round
-  // 4, mc5: they made a constant from another file look like a variable).
+  /**
+   * Where a declaration whose name ends before offset `termAt` can be named:
+   * `{scopeFrom, scopeTo}` (offsets), or `{everywhere: true}` for an
+   * interface's constant. A field: its class body. A local: from itself to
+   * the end of its block. A parameter, a for/catch/resource variable or a
+   * pattern binding: the method, loop or statement its parentheses head —
+   * never wider (a smaller scope can only make a name unknown, and an
+   * unknown name is refused as „unsicher", never allowed).
+   */
+  declarationScope(termAt, interfaceField) {
+    const { code, pair } = this;
+    if (interfaceField) return { everywhere: true };
+    const stack = javaEnclosing(code, pair, termAt);
+    const inner = stack[stack.length - 1];
+    if (!inner) return { scopeFrom: 0, scopeTo: code.length };
+    if (inner.kind === 'class') return { scopeFrom: inner.open, scopeTo: pair.get(inner.open) };
+    if (inner.kind === 'block' || inner.kind === 'switch') return { scopeFrom: termAt, scopeTo: pair.get(inner.open) };
+    if (inner.kind !== 'paren') return { scopeFrom: termAt, scopeTo: termAt };
+    const close = pair.get(inner.open);
+    let j = skipWs(code, close + 1);
+    if (wordAt(code, j) === 'throws') {
+      while (j < code.length && code[j] !== '{' && code[j] !== ';') j += 1;
+    }
+    if (code[j] === '-' && code[j + 1] === '>') j = skipWs(code, j + 2);
+    if (code[j] === '{' && pair.has(j)) return { scopeFrom: inner.open, scopeTo: pair.get(j) };
+    // A single statement follows (`for (…) x();`, `if (o instanceof T t) …;`):
+    // up to its `;`, or the bracket that closes around it.
+    let depth = 0;
+    let k = j;
+    for (; k < code.length; k += 1) {
+      const c = code[k];
+      if (c === '(' || c === '[' || c === '{') depth += 1;
+      else if (c === ')' || c === ']' || c === '}') {
+        if (depth === 0) break;
+        depth -= 1;
+      } else if (c === ';' && depth === 0) break;
+    }
+    return { scopeFrom: inner.open, scopeTo: k };
+  }
+
+  // Every declaration of simple name `name` in the file: {final, init}. Its
+  // type is a name or a primitive — never another keyword: `return LAUF;`,
+  // `case STUFE:` and `x instanceof LAUF)` declare nothing (review round 4,
+  // mc5: they made a constant from another file look like a variable). A
+  // pattern binding (`o instanceof Integer LAUF`, `case Punkt LAUF ->`) IS a
+  // declaration of a variable and still counts.
   declarations(name) {
     if (!/^[\p{L}_$][\p{L}\p{N}_$]*$/u.test(name)) return [];
     const { code } = this;
     const esc = name.replace(/\$/g, '\\$');
     const decl = new RegExp(
-      '(?:^|[;{}(,])\\s*((?:(?:@[\\p{L}_$][\\p{L}\\p{N}_$.]*'
-      + '|(?:final|static|private|public|protected|transient|volatile))\\s+)*)'
+      `(?:^|[;{}(,])\\s*((?:(?:@[\\p{L}_$][\\p{L}\\p{N}_$.]*|[a-z]+)\\s+)*)`
       + `([\\p{L}_$][\\p{L}\\p{N}_$.]*)(?:<[^;{}()]*>)?(?:\\s*\\[\\s*\\])*\\s+${esc}\\s*(=(?!=)|;|,|:|\\))`, 'gu',
     );
     const out = [];
     for (const m of code.matchAll(decl)) {
       if (JAVA_KEYWORDS.has(m[2]) && !JAVA_TYPE_KEYWORDS.has(m[2])) continue;
       const at = m.index + m[0].length;
-      let final = /\bfinal\b/.test(m[1]) || this.inInterfaceBody(m.index);
+      const termAt = at - m[3].length;
+      const interfaceField = this.inInterfaceBody(m.index);
+      let final = /\bfinal\b/.test(m[1]) || interfaceField;
       let init = null;
       if (m[3].startsWith('=')) {
         let depth = 0;
@@ -1765,7 +1816,9 @@ class JavaParser {
         // An enhanced-for variable or a parameter: never a constant.
         final = false;
       }
-      out.push({ final, init });
+      out.push({
+        final, init, pos: termAt, ...this.declarationScope(termAt, interfaceField),
+      });
     }
     return out;
   }

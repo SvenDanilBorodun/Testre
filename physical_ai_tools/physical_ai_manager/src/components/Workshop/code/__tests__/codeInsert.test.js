@@ -345,6 +345,20 @@ describe('the spots a line may not take, each with its reason', () => {
       const src = main(extra, cond);
       expect(insertionTargetAt(src, 'java', rows(src)).hint).toBe(CODE_DE.INSERT_UNSURE_HINT);
     }
+    // A same-named variable of ANOTHER method is not what the loop reads:
+    // the parameter, the local and the other method's final constant are
+    // out of scope, so the name stays another file's — unknown, refused.
+    for (const extra of ['  static boolean f(boolean LAUF) { return LAUF; }\n',
+      '  static void g() { boolean LAUF = false; }\n',
+      '  static void h() { final boolean LAUF = false; }\n',
+      '  static void k(Object o) { if (o instanceof Boolean LAUF) { return; } }\n']) {
+      const src = main(extra, 'LAUF');
+      expect([extra, insertionTargetAt(src, 'java', rows(src)).hint]).toEqual([extra, CODE_DE.INSERT_UNSURE_HINT]);
+    }
+    // In scope they are what the loop reads: main's own local, a field of Main.
+    const own = 'class Main implements K {\n  public static void main(String[] a) {\n    boolean LAUF = a.length > 0;\n'
+      + '    while (LAUF) {\n    }\n  }\n}\n';
+    expect(insertionTargetAt(own, 'java', 5).mode).toBe('after');
     // A real declaration still counts — a primitive, var, a class type, modifiers.
     for (const decl of ['  static boolean LAUF = false;\n', '  static final Boolean LAUF = f();\n',
       '  private static volatile boolean LAUF = true;\n']) {

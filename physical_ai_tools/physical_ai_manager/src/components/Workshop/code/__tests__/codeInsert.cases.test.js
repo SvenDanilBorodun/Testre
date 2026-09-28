@@ -302,6 +302,10 @@ const JAVA = [
   // K21b without them stays „unsicher" too).
   ['unsure_constant_read_by_return', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static boolean pruefe() { return LAUF; }\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 7, 'unsure'],
   ['unsure_constant_read_by_case', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static int f(int x) { switch (x) { case STUFE: return 1; default: return 0; } }\n    public static void main(String[] args) {\n        while (STUFE > 0) {\n            Robot.home();\n        }\n    }\n}\n', 7, 'unsure'],
+  // …nor does a same-named variable of ANOTHER method (javac rejected the
+  // line as unreachable: the loop reads Einstellungen.LAUF).
+  ['unsure_constant_param_elsewhere', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static boolean f(boolean LAUF) { return LAUF; }\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 7, 'unsure'],
+  ['unsure_constant_local_elsewhere', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    static void g() {\n        boolean LAUF = false;\n    }\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 9, 'unsure'],
   ['unsure_constant_elsewhere', 'import edubotics.Robot;\npublic class Main implements Einstellungen {\n    public static void main(String[] args) {\n        while (LAUF) {\n            Robot.home();\n        }\n    }\n}\n', 6, 'unsure'],
   ['unbalanced_braces', 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n', 4, 'unclosed'],
   ['unclosed_string', J('        String s = "offen;\n        Robot.home();\n'), 5, 'unreadable'],

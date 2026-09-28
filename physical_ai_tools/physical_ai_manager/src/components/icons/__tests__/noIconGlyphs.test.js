@@ -9,7 +9,7 @@
  */
 
 // The fence that keeps emoji and symbol glyphs out of the UI for good (owner
-// decision D7: one icon style, components/icons). Two rules:
+// decision D7: one icon style, components/icons). Three rules:
 //
 //   1. No shipped source string — a String, Template or JSX text/attribute
 //      token of any non-test src/**/*.{js,jsx}, after decoding \u / \u{} / \x
@@ -18,8 +18,16 @@
 //      token that is nothing but „×" is an icon too. Comments are not tokens,
 //      so they may still name a glyph. Typography stays allowed: ← ↑ → ↓ ↔,
 //      „×" inside text, … · — „ ".
+//      Nor may a glyph be BUILT from a number (`String.fromCodePoint(0x25B6)`,
+//      `String.fromCharCode(…)` with a literal in the ranges), be written into
+//      the page HTML (index.html, public/**/*.html), or be a CSS `content:`
+//      value in src/**/*.css.
 //   2. Only src/components/icons/** imports react-icons, and only its /lu and
 //      /lib entry points (the registry is the one importer of /lu).
+//   3. An inline <svg> (JSX, markup, or a data:image/svg URI in a string)
+//      appears only in the files listed in INLINE_SVG_ALLOWED — each a chart,
+//      an illustration, the brand mark or a Blockly image — never as a
+//      hand-drawn icon beside the icon set (review round 1, R1-O1).
 //
 // Tokenised with espree (the parser eslint itself uses), so a glyph can hide
 // in no string the parser sees.
@@ -46,6 +54,9 @@ export const BANNED_RANGES = Object.freeze([
   [0x22EF, 0x22EF], // ⋯
   [0xFE0F, 0xFE0F], // emoji presentation selector
   [0x20E3, 0x20E3], // combining keycap
+  [0x2460, 0x24FF], // enclosed alphanumerics (ⓘ ① …)
+  [0x27C0, 0x27FF], // misc. mathematical symbols A + supplemental arrows A (⟳ ⟲ …)
+  [0x2800, 0x28FF], // Braille patterns (the old ⠋⠙⠹ spinner)
 ]);
 
 export function bannedCodePoints(text) {
@@ -116,6 +127,51 @@ export function glyphHitsInSource(source) {
   return hits;
 }
 
+const inBanned = (cp) => BANNED_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi);
+
+function walkAst(node, visit) {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) { node.forEach((n) => walkAst(n, visit)); return; }
+  if (typeof node.type === 'string') visit(node);
+  for (const [k, v] of Object.entries(node)) {
+    if (k !== 'loc' && k !== 'range' && v && typeof v === 'object') walkAst(v, visit);
+  }
+}
+
+/**
+ * `String.fromCodePoint(…)` / `String.fromCharCode(…)` calls whose literal
+ * argument lands in an icon range: `[{line, codePoints}]`.
+ */
+export function builtGlyphHits(source) {
+  const ast = espree.parse(source, {
+    ecmaVersion: 'latest', sourceType: 'module', ecmaFeatures: { jsx: true }, loc: true,
+  });
+  const hits = [];
+  walkAst(ast, (node) => {
+    if (node.type !== 'CallExpression' || node.callee.type !== 'MemberExpression') return;
+    const { object, property } = node.callee;
+    if (object.type !== 'Identifier' || object.name !== 'String') return;
+    const method = property.type === 'Identifier' ? property.name : property.value;
+    if (method !== 'fromCodePoint' && method !== 'fromCharCode') return;
+    const codePoints = node.arguments
+      .filter((a) => a.type === 'Literal' && typeof a.value === 'number' && inBanned(a.value))
+      .map((a) => `U+${a.value.toString(16).toUpperCase()}`);
+    if (codePoints.length) hits.push({ line: node.loc.start.line, codePoints });
+  });
+  return hits;
+}
+
+// CSS escapes (`\25B6 `, `\1F600`) in a `content:` value.
+export function cssContentGlyphs(css) {
+  const hits = [];
+  for (const m of String(css).matchAll(/content\s*:\s*(["'])((?:\\.|(?!\1).)*)\1/g)) {
+    const value = m[2].replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_x, hex) => String.fromCodePoint(parseInt(hex, 16)));
+    const codePoints = bannedCodePoints(value);
+    if (codePoints.length) hits.push({ value: m[2], codePoints });
+  }
+  return hits;
+}
+
 function jsonStrings(value, at, out) {
   if (typeof value === 'string') out.push({ at, value });
   else if (Array.isArray(value)) value.forEach((v, i) => jsonStrings(v, `${at}[${i}]`, out));
@@ -159,6 +215,53 @@ describe('no icon glyph in the shipped UI (D7)', () => {
     expect(violations).toEqual([]);
   });
 
+  it('the detector sees a glyph built from a number and one in a CSS content value', () => {
+    const src = [
+      'const a = String.fromCodePoint(0x25B6);',
+      'const b = String.fromCharCode(10003);',
+      'const c = String.fromCodePoint(0x2800 + i);',
+      "const d = String['fromCodePoint'](0x24D8);",
+      'const e = String.fromCodePoint(65, 0x1F600);',
+      'const f = String.fromCharCode(0x2192);',
+    ].join('\n');
+    expect(builtGlyphHits(src).map((h) => h.line)).toEqual([1, 2, 4, 5]);
+    expect(cssContentGlyphs(".a::before { content: '\\25B6'; } .b::after { content: \"→\"; }"))
+      .toEqual([{ value: '\\25B6', codePoints: ['U+25B6'] }]);
+    expect(cssContentGlyphs('.c::before { content: ""; }')).toEqual([]);
+    expect(bannedCodePoints('\u24D8 \u27F3 \u280B')).toEqual(['U+24D8', 'U+27F3', 'U+280B']);
+  });
+
+  it('no non-test src file BUILDS a glyph from a number (String.fromCodePoint / fromCharCode)', () => {
+    const files = sourceFiles();
+    expect(files.length).toBeGreaterThan(200);
+    const violations = [];
+    for (const file of files) {
+      for (const h of builtGlyphHits(fs.readFileSync(file, 'utf8'))) {
+        violations.push(`${path.relative(APP_ROOT, file)}:${h.line} ${h.codePoints.join(',')}`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('the page HTML and every src/**/*.css `content:` value hold no icon glyph', () => {
+    // Vite's page is the app-root index.html (public/ holds static assets).
+    const pages = [path.join(APP_ROOT, 'index.html'), ...walk(path.join(APP_ROOT, 'public'), (p) => p.endsWith('.html'))];
+    expect(fs.existsSync(pages[0])).toBe(true);
+    for (const page of pages) {
+      expect(`${path.relative(APP_ROOT, page)} ${bannedCodePoints(decodeSourceText(fs.readFileSync(page, 'utf8')))}`)
+        .toBe(`${path.relative(APP_ROOT, page)} `);
+    }
+    const cssFiles = walk(SRC, (p) => p.endsWith('.css'));
+    expect(cssFiles.length).toBeGreaterThan(0);
+    const violations = [];
+    for (const file of cssFiles) {
+      for (const h of cssContentGlyphs(fs.readFileSync(file, 'utf8'))) {
+        violations.push(`${path.relative(APP_ROOT, file)} ${h.codePoints.join(',')} ${JSON.stringify(h.value)}`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
   it('no string in src/**/*.json or public/tutorials/*.json holds an icon glyph', () => {
     const files = [
       ...walk(SRC, (p) => p.endsWith('.json') && !isTestFile(p)),
@@ -175,6 +278,44 @@ describe('no icon glyph in the shipped UI (D7)', () => {
       }
     }
     expect(violations).toEqual([]);
+  });
+});
+
+// Where an inline <svg> may stand, and why. Everything else draws its icons
+// through components/icons (review round 1, R1-O1).
+export const INLINE_SVG_ALLOWED = Object.freeze({
+  'src/components/EbUI.js': 'the EduBotics brand mark (LogoMark), not an icon',
+  'src/components/CollisionModal.js': 'the remedy illustration (RemedyDiagram)',
+  'src/components/CompactSystemStatus.js': 'the circular usage gauge, a chart',
+  'src/components/Home/RobotHero.jsx': 'the Startseite illustration',
+  'src/components/Workshop/SimScene.jsx': 'the 2D simulator scene',
+  'src/components/Workshop/CameraFeedOverlay.jsx': 'the marker overlay on the camera image',
+  'src/components/Workshop/teach/ReviewStrip.jsx': 'the review chart of a take',
+  'src/components/Workshop/blocks/control.js':
+    '@blockly/block-plus-minus\'s own ⊕/⊖ field images, byte-identical to the plugin\'s other blocks',
+  'src/components/Workshop/blocks/destinations.js': 'the drive chip, whose play glyph IS iconMarkup(\'play\')',
+});
+
+function hasInlineSvg(source) {
+  const tokens = espree.tokenize(source, {
+    ecmaVersion: 'latest', sourceType: 'module', ecmaFeatures: { jsx: true },
+  });
+  for (let i = 0; i < tokens.length; i += 1) {
+    const t = tokens[i];
+    if (t.type === 'JSXIdentifier' && t.value === 'svg' && tokens[i - 1] && tokens[i - 1].value === '<') return true;
+    if ((t.type === 'String' || t.type === 'Template') && /<svg[\s>]|data:image\/svg/i.test(t.value)) return true;
+  }
+  return false;
+}
+
+describe('an inline <svg> only where the list says why (R1-O1)', () => {
+  it('no other non-test src file draws an inline svg, and every allowed file still does', () => {
+    const files = sourceFiles().filter((f) => !f.startsWith(ICONS_DIR + path.sep));
+    const drawing = files.filter((f) => hasInlineSvg(fs.readFileSync(f, 'utf8')))
+      .map((f) => path.relative(APP_ROOT, f).split(path.sep).join('/'));
+    expect(drawing.filter((f) => !Object.prototype.hasOwnProperty.call(INLINE_SVG_ALLOWED, f))).toEqual([]);
+    // A stale entry (the file no longer draws one) must be removed from the list.
+    expect(Object.keys(INLINE_SVG_ALLOWED).filter((f) => !drawing.includes(f))).toEqual([]);
   });
 });
 

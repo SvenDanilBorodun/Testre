@@ -236,9 +236,7 @@ function RightDock({
           aria-label={collapsed ? DE.DOCK_EXPAND : DE.DOCK_COLLAPSE}
           className="flex items-center justify-center md:w-full px-2 md:px-1 py-1.5 rounded-md border border-[var(--line)] bg-white text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
-          <span className="text-sm leading-none" aria-hidden="true">
-            {collapsed ? '⟨' : '⟩'}
-          </span>
+          <Icon name={collapsed ? 'chevronLeft' : 'chevronRight'} size={16} />
         </button>
         {visibleTabs.map(railButton)}
       </div>

@@ -376,6 +376,9 @@ const JAVA = [
   ['after_while_binary_const', J('        while (0b101 == 5) {\n            Robot.home();\n        }\n'), 6, 'loop'],
   ['after_while_int_min_minus_one', J('        while (-2147483648 - 1 > 0) {\n            Robot.home();\n        }\n'), 6, 'loop'],
   ['after_while_long_overflow_const', J('        while (9223372036854775807L + 1 < 0) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  // An overflow is kept through the next operation: (MAX + 1) / 2 is negative.
+  ['after_while_overflow_then_divide', J('        while ((2147483647 + 1) / 2 < 0) {\n            Robot.home();\n        }\n'), 6, 'loop'],
+  ['after_while_min_divided_by_minus_one', J('        while (-2147483648 / -1 < 0) {\n            Robot.home();\n        }\n'), 6, 'loop'],
   ['after_while_ternary_false_branch', J('        while (1 > 2 ? false : true) {\n            Robot.home();\n        }\n'), 6, 'loop'],
   ['after_while_double_infinity', J('        while (1.0 / 0 > 1e308) {\n            Robot.home();\n        }\n'), 6, 'loop'],
   ['after_while_float_sum', J('        while (0.1f + 0.2f == 0.3f) {\n            Robot.home();\n        }\n'), 6, 'loop'],

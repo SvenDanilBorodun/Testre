@@ -2318,6 +2318,26 @@
    "shadow": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (9223372036854775807L + 1 < 0) {\n            Robot.home();\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n"
   },
   {
+   "name": "after_while_overflow_then_divide",
+   "language": "java",
+   "line": 6,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while ((2147483647 + 1) / 2 < 0) {\n            Robot.home();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben.",
+   "shadow": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while ((2147483647 + 1) / 2 < 0) {\n            Robot.home();\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n"
+  },
+  {
+   "name": "after_while_min_divided_by_minus_one",
+   "language": "java",
+   "line": 6,
+   "reach": "hint",
+   "input": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (-2147483648 / -1 < 0) {\n            Robot.home();\n        }\n    }\n}\n",
+   "output": null,
+   "hint": "Hier würde die Zeile nie laufen – davor steht eine Endlosschleife. Klicke weiter oben.",
+   "shadow": "import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        while (-2147483648 / -1 < 0) {\n            Robot.home();\n        }\n        Robot.replay(\"Winken\");\n    }\n}\n"
+  },
+  {
    "name": "after_while_ternary_false_branch",
    "language": "java",
    "line": 6,

@@ -77,7 +77,7 @@ class HuggingFaceProgressTqdm(tqdm):
                 # Use logging for better visibility in multiprocessing
                 import logging
                 logger = logging.getLogger('hf_progress')
-                progress_msg = f'📥 {self.n}/{self.total} files ({percentage:.1f}%)'
+                progress_msg = f'{self.n}/{self.total} files ({percentage:.1f}%)'
                 logger.info(progress_msg)
             self.last_update = current_time
 
@@ -204,14 +204,14 @@ class HuggingFaceLogCapture(io.StringIO):
                         # Determine current stage for display
                         if (committed_current == committed_total and
                                 committed_total > 0):
-                            stage = '✅ Upload Complete'
+                            stage = 'Upload Complete'
                             current_files = total_files  # Show 100% completion
                         elif committed_current > 0:
-                            stage = '📤 Committing'
+                            stage = 'Committing'
                         elif pre_uploaded_current > 0:
-                            stage = '⬆️ Uploading'
+                            stage = 'Uploading'
                         else:
-                            stage = '🔄 Hashing'
+                            stage = 'Hashing'
 
                         progress_data = {
                             'type': 'upload_progress',
@@ -221,7 +221,7 @@ class HuggingFaceLogCapture(io.StringIO):
                         }
 
                         self.progress_queue.put(progress_data)
-                        print('📊 Upload Progress: '
+                        print('Upload Progress: '
                               f'{composite_percent:.1f}% - {stage}: '
                               f'{current_files}/{total_files} files')
 

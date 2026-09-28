@@ -1444,7 +1444,7 @@ class EduBoticsApp:
         except Exception:
             existing = None
         if existing:
-            self.hf_token_status_var.set("✓ Token gespeichert")
+            self.hf_token_status_var.set("Token gespeichert")
         else:
             self.hf_token_status_var.set("Kein Token gespeichert")
 

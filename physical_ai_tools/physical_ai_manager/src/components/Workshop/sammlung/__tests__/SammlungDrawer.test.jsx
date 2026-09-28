@@ -117,7 +117,7 @@ function setup({
       />
     </Provider>,
   );
-  return { ...utils, redux, toolbox, listeners, store, saveWorkflowNow, refetchTrajectories };
+  return { ...utils, redux, toolbox, listeners, store, provider, saveWorkflowNow, refetchTrajectories };
 }
 
 const PIN = { name: 'Ablage', kind: 'pin', source: 'camera', robot_type: 'omx_f', x: 0.182, y: -0.064, z: 0.012 };
@@ -379,17 +379,51 @@ describe('SammlungDrawer: rename and delete', () => {
   });
 });
 
-describe('SammlungDrawer over a Blockly workspace: the code-only affordances stay away (review n7)', () => {
-  it('no „Neu" group, no „Einfügen", no draggable rows — whatever the rig can do', () => {
+describe('SammlungDrawer over a Blockly workspace: „Neu" yes, the code-only affordances no (D5, review n7)', () => {
+  it('no „Einfügen" and no draggable rows — whatever the rig can do', () => {
     setup({
       pins: [PIN, POSE],
       capabilities: { teach: true, pinCamera: true, pinSim: true },
     });
     for (const tab of ['Variablen', 'Aufnahmen', 'Ziele', 'Positionen']) {
       fireEvent.click(screen.getByRole('tab', { name: new RegExp(tab) }));
-      expect(screen.queryByRole('group', { name: CODE_DE.SAMMLUNG_NEW })).toBeNull();
       expect(screen.queryByRole('button', { name: new RegExp(`^${CODE_DE.SAMMLUNG_INSERT}`) })).toBeNull();
       expect(screen.queryAllByRole('listitem').filter((li) => li.getAttribute('draggable') === 'true')).toEqual([]);
+    }
+  });
+
+  it('offers the „Neu" row per tab (the newActions table), dispatching through the page', () => {
+    const { provider } = setup({ capabilities: { teach: true, pinCamera: true, pinSim: true } });
+    const dispatched = [];
+    provider.setActionHandler((a) => dispatched.push(a));
+    const newRow = () => screen.queryByRole('group', { name: CODE_DE.SAMMLUNG_NEW });
+    fireEvent.click(screen.getByRole('tab', { name: /Variablen/ }));
+    expect(newRow()).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: /Aufnahmen/ }));
+    fireEvent.click(within(newRow()).getByRole('button', { name: DE.FLY_TEACH_RECORDING }));
+    fireEvent.click(screen.getByRole('tab', { name: /Ziele/ }));
+    expect(within(newRow()).getAllByRole('button').map((b) => b.textContent))
+      .toEqual([DE.FLY_TEACH_ZIEL, DE.FLY_PIN_CAMERA]);
+    fireEvent.click(screen.getByRole('tab', { name: /Positionen/ }));
+    const pose = within(newRow()).getByRole('button', { name: DE.FLY_TEACH_POSE });
+    // The kind icon beside the words (D10), decorative.
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(pose.querySelector('svg[data-icon="pose"]')).toHaveAttribute('aria-hidden', 'true');
+    fireEvent.click(pose);
+    expect(dispatched).toEqual([{ type: 'teach', kind: 'recording' }, { type: 'teach', kind: 'pose' }]);
+  });
+
+  it('D9: in the simulator the Ziele tab offers only the Sim-Tisch', () => {
+    setup({ drawer: { tab: 'ziele' }, capabilities: { teach: true, pinCamera: true, pinSim: true, simMode: true } });
+    const group = screen.getByRole('group', { name: CODE_DE.SAMMLUNG_NEW });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual([DE.FLY_PIN_SIM]);
+  });
+
+  it('the teacher page (no hardware) offers no „Neu" at all', () => {
+    setup({ capabilities: { hardware: false, teach: true, pinCamera: true } });
+    for (const tab of ['Aufnahmen', 'Ziele', 'Positionen']) {
+      fireEvent.click(screen.getByRole('tab', { name: new RegExp(tab) }));
+      expect(screen.queryByRole('group', { name: CODE_DE.SAMMLUNG_NEW })).toBeNull();
     }
   });
 });

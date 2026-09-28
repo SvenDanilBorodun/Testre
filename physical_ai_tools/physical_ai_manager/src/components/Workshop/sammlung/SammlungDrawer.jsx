@@ -24,10 +24,12 @@
  * asset document (`assetDoc`, sammlung/assetDocument.js): a Blockly workspace
  * or a Python/Java program. A caller that hands a bare `workspace` gets that
  * workspace's Blockly document. Over a CODE program the drawer opens beside
- * the file sidebar, rows can be put into the program — „Einfügen", or dragged
- * into the editor as a `SNIPPET_MIME` snippet — and, since a code program has
- * no flyout cards, the drawer itself offers „Neu" through the page's own
- * provider actions (Vormachen, a camera click, the simulator table).
+ * the file sidebar and rows can be put into the program — „Einfügen", or
+ * dragged into the editor as a `SNIPPET_MIME` snippet. In BOTH notations the
+ * drawer offers „Neu" for its tab (owner decision D5): the creation buttons of
+ * sammlung/newActions.js — the table the Blockly flyout and the code sidebar
+ * read too — through the page's own provider actions (Vormachen, a camera
+ * click, the simulator table).
  */
 
 import React, {
@@ -51,6 +53,7 @@ import { assetDocumentOf } from './assetDocument';
 import DrawerRecording from './DrawerRecording';
 import DrawerPlace from './DrawerPlace';
 import DrawerVariable from './DrawerVariable';
+import Icon from '../../icons/Icon';
 
 export const DRAWER_TABS = Object.freeze([
   { id: 'variablen', label: DE.CATEGORY_VARIABLEN },
@@ -143,9 +146,8 @@ export default function SammlungDrawer({
   const cards = index ? cardsForTab(index, tab) : [];
   const focused = cards.find((c) => focusIdOf(c) === drawer.focusId) || null;
   const anchorLeft = assetDoc ? assetDoc.anchorLeft() : 0;
-  const isCode = !!assetDoc && assetDoc.kind === 'code';
   const canInsert = !!assetDoc && assetDoc.canInsertSnippets === true;
-  const newActions = isCode ? newActionsFor(capabilities, tab) : [];
+  const newActions = newActionsFor(capabilities, tab);
   const snippetable = (card) => canInsert && SNIPPET_KINDS.has(card.assetKind);
 
   // A code document's insertion may load its module first (async); a
@@ -226,7 +228,7 @@ export default function SammlungDrawer({
           onClick={() => dispatch(closeDrawer())}
           className="rounded px-2 py-1 text-gray-600 hover:bg-gray-100"
         >
-          ✕
+          <Icon name="close" />
         </button>
       </header>
       <div role="tablist" aria-label={DE.SAMMLUNG_TITLE} className="flex flex-wrap gap-1 border-b border-[var(--line)] px-2 py-1">
@@ -261,14 +263,15 @@ export default function SammlungDrawer({
           className="flex flex-wrap items-center gap-1 border-b border-[var(--line)] px-2 py-1.5"
         >
           <span className="text-xs font-semibold text-gray-500">{CODE_DE.SAMMLUNG_NEW}</span>
-          {newActions.map(({ label, action }) => (
+          {newActions.map(({ id, label, icon, action }) => (
             <button
-              key={label}
+              key={id}
               type="button"
               onClick={() => provider.dispatchAction(action)}
-              className="rounded border border-[var(--line)] px-2 py-0.5 text-xs text-gray-800 hover:bg-gray-50"
+              className="inline-flex items-center gap-1 rounded border border-[var(--line)] px-2 py-0.5 text-xs text-gray-800 hover:bg-gray-50"
             >
-              {label}
+              <Icon name={icon} />
+              <span>{label}</span>
             </button>
           ))}
         </div>

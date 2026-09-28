@@ -135,26 +135,98 @@ describe('the Sammlung section', () => {
 });
 
 describe('„+ Neu"', () => {
-  test('offers what the rig can do and dispatches it through the page’s provider', async () => {
+  const newButton = () => within(sammlung()).queryByRole('button', { name: CODE_DE.SAMMLUNG_NEW });
+
+  test('offers what the rig can do, with icons, and dispatches it through the page’s provider', async () => {
     const { dispatchAction } = await mount();
-    fireEvent.click(within(sammlung()).getByRole('button', { name: `+ ${CODE_DE.SAMMLUNG_NEW}` }));
+    expect(newButton()).toHaveAttribute('aria-haspopup', 'menu');
+    fireEvent.click(newButton());
     const menu = screen.getByRole('menu', { name: CODE_DE.SAMMLUNG_NEW_MENU });
+    // D9: outside the simulator, no Sim-Tisch.
     expect(within(menu).getAllByRole('menuitem').map((m) => m.textContent)).toEqual([
-      DE.FLY_TEACH_RECORDING, DE.FLY_TEACH_ZIEL, DE.FLY_PIN_CAMERA, DE.FLY_PIN_SIM, DE.FLY_TEACH_POSE,
+      DE.FLY_TEACH_RECORDING, DE.FLY_TEACH_ZIEL, DE.FLY_PIN_CAMERA, DE.FLY_TEACH_POSE,
     ]);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(within(menu).getAllByRole('menuitem').map((m) => m.querySelector('svg').getAttribute('data-icon')))
+      .toEqual(['record', 'ziel', 'camera', 'pose']);
     fireEvent.click(within(menu).getByRole('menuitem', { name: DE.FLY_TEACH_ZIEL }));
     expect(dispatchAction).toHaveBeenCalledWith({ type: 'teach', kind: 'ziel' });
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
+  test('opens upwards and works from the keyboard (ArrowUp → the last item)', async () => {
+    const { dispatchAction } = await mount();
+    const trigger = newButton();
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: 'ArrowUp' });
+    const menu = screen.getByRole('menu', { name: CODE_DE.SAMMLUNG_NEW_MENU });
+    expect(menu.className).toMatch(/bottom-full/);
+    const items = within(menu).getAllByRole('menuitem');
+    expect(items[items.length - 1]).toHaveFocus();
+    fireEvent.keyDown(items[items.length - 1], { key: 'Enter' });
+    expect(dispatchAction).toHaveBeenCalledWith({ type: 'teach', kind: 'pose' });
+  });
+
+  test('in the simulator it offers the Sim-Tisch only', async () => {
+    await mount({ capabilities: { simMode: true, pinCamera: false } });
+    fireEvent.click(newButton());
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((m) => m.textContent))
+      .toEqual([DE.FLY_PIN_SIM]);
+  });
+
   test('is not offered in a read-only editor', async () => {
     await mount({ readOnly: true });
-    expect(within(sammlung()).queryByRole('button', { name: `+ ${CODE_DE.SAMMLUNG_NEW}` })).toBeNull();
+    expect(newButton()).toBeNull();
   });
 
   test('is not offered when the rig can do nothing', async () => {
     await mount({ capabilities: { hardware: false, pinCamera: false, pinSim: false } });
-    expect(within(sammlung()).queryByRole('button', { name: `+ ${CODE_DE.SAMMLUNG_NEW}` })).toBeNull();
+    expect(newButton()).toBeNull();
+  });
+});
+
+// Owner decision D5: each Sammlung row has its own record button, carrying
+// the kind icon (D10), that opens only that kind's window.
+describe('the row buttons „… vormachen"', () => {
+  const rowButton = (label) => within(sammlung()).queryByRole('button', { name: label });
+
+  test('Aufnahmen, Ziele and Positionen each carry their kind icon and dispatch their own kind', async () => {
+    const { dispatchAction } = await mount();
+    for (const [label, icon, kind] of [
+      [DE.FLY_TEACH_RECORDING, 'record', 'recording'],
+      [DE.FLY_TEACH_ZIEL, 'ziel', 'ziel'],
+      [DE.FLY_TEACH_POSE, 'pose', 'pose'],
+    ]) {
+      const btn = rowButton(label);
+      expect(btn).toHaveAttribute('title', label);
+      expect(btn).toBeEnabled();
+      // eslint-disable-next-line testing-library/no-node-access
+      expect(btn.querySelector('svg').getAttribute('data-icon')).toBe(icon);
+      fireEvent.click(btn);
+      expect(dispatchAction).toHaveBeenLastCalledWith({ type: 'teach', kind });
+    }
+  });
+
+  test('sits beside its count in the same row; Variablen has none', async () => {
+    await mount();
+    const count = within(sammlung()).getByRole('button', { name: 'Ziele 1' });
+    // eslint-disable-next-line testing-library/no-node-access
+    const row = count.parentElement;
+    expect(within(row).getByRole('button', { name: DE.FLY_TEACH_ZIEL })).toBeInTheDocument();
+    // eslint-disable-next-line testing-library/no-node-access
+    const variablen = within(sammlung()).getByRole('button', { name: 'Variablen 1' }).parentElement;
+    expect(within(variablen).getAllByRole('button')).toHaveLength(1);
+  });
+
+  test('none in a read-only editor, none in the simulator, none without hardware', async () => {
+    const { unmount } = await mount({ readOnly: true });
+    expect(rowButton(DE.FLY_TEACH_RECORDING)).toBeNull();
+    unmount();
+    const sim = await mount({ capabilities: { simMode: true } });
+    expect(rowButton(DE.FLY_TEACH_POSE)).toBeNull();
+    sim.unmount();
+    await mount({ capabilities: { hardware: false } });
+    expect(rowButton(DE.FLY_TEACH_ZIEL)).toBeNull();
   });
 });
 

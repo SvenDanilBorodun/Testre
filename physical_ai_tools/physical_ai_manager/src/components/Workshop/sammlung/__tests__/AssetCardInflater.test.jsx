@@ -332,6 +332,28 @@ describe('AssetCardInflater', () => {
     expect(highlightAssetFor({ assetKind: 'programPin', assetId: 'b1' })).toBeNull();
   });
 
+  it('draws its play and more controls as icon SVG (no text glyph), greyed when disabled', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN);
+    const inflater = new AssetCardInflater();
+    const card = inflater.load(cardState(), flyout).getElement();
+    const play = card.getSvgRoot().querySelector(`[role="button"][aria-label="${DE.PREVIEW_START}"]`);
+    const manage = card.getSvgRoot().querySelector(`[role="button"][aria-label="${DE.CARD_MANAGE}"]`);
+    const playIcon = play.querySelector('g[data-icon="play"]');
+    expect(playIcon).not.toBeNull();
+    expect(playIcon.querySelector('polygon').getAttribute('points')).toBe('6 3 20 12 6 21 6 3');
+    expect(playIcon.getAttribute('stroke')).toBe('#374151');
+    expect(playIcon.getAttribute('fill')).toBe('none');
+    expect(playIcon.getAttribute('transform')).toBe(`translate(5,5) scale(${14 / 24})`);
+    expect(manage.querySelector('g[data-icon="more"]').querySelectorAll('circle')).toHaveLength(3);
+    expect(play.querySelector('text')).toBeNull();
+    expect(manage.querySelector('text')).toBeNull();
+    card.dispose();
+    const pending = inflater.load(cardState({ previewPending: true }), flyout).getElement();
+    const greyed = pending.getSvgRoot().querySelector(`[role="button"][aria-label="${DE.PREVIEW_START}"]`);
+    expect(greyed.querySelector('g[data-icon="play"]').getAttribute('stroke')).toBe('#9ca3af');
+    pending.dispose();
+  });
+
   it('draws no ▶ when the asset cannot be previewed, and sizes by chips', () => {
     const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN);
     const card = new AssetCardInflater().load(cardState({ canPreview: false, chips: [] }), flyout).getElement();

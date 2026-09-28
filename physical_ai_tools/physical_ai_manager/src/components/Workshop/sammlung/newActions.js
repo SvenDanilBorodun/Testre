@@ -8,41 +8,75 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-// „Neu" for a code program (owner decision O4). A Blockly document creates
-// Sammlung items from its flyout cards; a code program has no flyout, so the
-// Sammlung drawer (per tab) and the code sidebar's „+ Neu" menu (all tabs)
-// offer the same creation buttons, as actions the page's provider already
-// dispatches (`provider.dispatchAction`), gated by the same capabilities the
-// flyout reads (sammlung/toolboxCategories.js).
+// „Neu": THE table of Sammlung creation buttons (owner decision D5). The
+// Blockly flyout (sammlung/toolboxCategories.js, as icon buttons), the
+// Sammlung drawer (both notations) and the code sidebar (its row buttons and
+// „+ Neu") all read these rows, so a button, its words, its icon and when it is
+// offered are decided once. Every action is dispatched through the page's
+// provider (`provider.dispatchAction`).
+//
+// When a row is offered (owner decision D9): Vormachen and the camera pin need
+// the real rig OUTSIDE the simulator; the Sim-Tisch pin exists only INSIDE it.
 
 import { DE } from '../blocks/messages_de';
 
-const canTeach = (c) => !!(c.hardware && c.teach && !c.simMode);
+const onRig = (c) => !!c.hardware && !c.simMode;
 
-// tab → [label, action, capability test], in flyout order.
-const NEW_ACTIONS = Object.freeze({
-  aufnahmen: [[DE.FLY_TEACH_RECORDING, { type: 'teach', kind: 'recording' }, canTeach]],
-  ziele: [
-    [DE.FLY_TEACH_ZIEL, { type: 'teach', kind: 'ziel' }, canTeach],
-    [DE.FLY_PIN_CAMERA, { type: 'pinCamera' }, (c) => !!c.pinCamera],
-    [DE.FLY_PIN_SIM, { type: 'pinSim' }, (c) => !!c.pinSim],
-  ],
-  positionen: [[DE.FLY_TEACH_POSE, { type: 'teach', kind: 'pose' }, canTeach]],
-});
-const TAB_ORDER = ['aufnahmen', 'ziele', 'positionen'];
+export const NEW_ACTION_ROWS = Object.freeze([
+  Object.freeze({
+    id: 'teachRecording',
+    tab: 'aufnahmen',
+    label: DE.FLY_TEACH_RECORDING,
+    icon: 'record',
+    action: Object.freeze({ type: 'teach', kind: 'recording' }),
+    allowed: (c) => onRig(c) && !!c.teach,
+  }),
+  Object.freeze({
+    id: 'teachZiel',
+    tab: 'ziele',
+    label: DE.FLY_TEACH_ZIEL,
+    icon: 'ziel',
+    action: Object.freeze({ type: 'teach', kind: 'ziel' }),
+    allowed: (c) => onRig(c) && !!c.teach,
+  }),
+  Object.freeze({
+    id: 'pinCamera',
+    tab: 'ziele',
+    label: DE.FLY_PIN_CAMERA,
+    icon: 'camera',
+    action: Object.freeze({ type: 'pinCamera' }),
+    allowed: (c) => onRig(c) && !!c.pinCamera,
+  }),
+  Object.freeze({
+    id: 'pinSim',
+    tab: 'ziele',
+    label: DE.FLY_PIN_SIM,
+    icon: 'box',
+    action: Object.freeze({ type: 'pinSim' }),
+    allowed: (c) => !!c.pinSim && !!c.simMode,
+  }),
+  Object.freeze({
+    id: 'teachPose',
+    tab: 'positionen',
+    label: DE.FLY_TEACH_POSE,
+    icon: 'pose',
+    action: Object.freeze({ type: 'teach', kind: 'pose' }),
+    allowed: (c) => onRig(c) && !!c.teach,
+  }),
+]);
 
 /**
- * The creation actions the rig can do now: for one drawer `tab`, or every tab
- * when `tab` is omitted. `[{label, action}]`.
+ * The creation buttons the page can offer now: for one Sammlung `tab`, or every
+ * tab (in flyout order) when `tab` is omitted. `[{id, label, icon, action}]`.
  */
 export function newActionsFor(capabilities, tab) {
   if (!capabilities || typeof capabilities !== 'object') return [];
-  const tabs = tab === undefined ? TAB_ORDER : [tab];
-  const out = [];
-  for (const t of tabs) {
-    for (const [label, action, allowed] of NEW_ACTIONS[t] || []) {
-      if (allowed(capabilities)) out.push({ label, action });
-    }
-  }
-  return out;
+  return NEW_ACTION_ROWS
+    .filter((row) => (tab === undefined || row.tab === tab) && row.allowed(capabilities))
+    .map(({ id, label, icon, action }) => ({ id, label, icon, action }));
+}
+
+/** The one Vormachen button of a tab (a code sidebar row's), or null. */
+export function teachActionFor(capabilities, tab) {
+  return newActionsFor(capabilities, tab).find((a) => a.action.type === 'teach') || null;
 }

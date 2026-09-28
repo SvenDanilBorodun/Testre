@@ -243,11 +243,14 @@ export function insertLinesBelow(view, language, line, lines, userEvent) {
  * on the clipboard (vormachenClipboard.js, exact match): it lands like
  * „Einfügen", whole lines below the cursor line, checked the same way — or
  * nothing and the German reason. It never joins the line the cursor is on.
+ * Only onto a bare cursor: over a selection it is an ordinary paste and
+ * replaces the selection verbatim, like any other text (review round 5, nd5).
  */
 function vormachenPaste(language) {
   return EditorView.domEventHandlers({
     paste(event, view) {
       if (view.state.readOnly) return false;
+      if (view.state.selection.ranges.some((r) => !r.empty)) return false;
       const data = event.clipboardData;
       const lines = vormachenPasteLines(data ? data.getData('text/plain') : '', language);
       if (!lines) return false;

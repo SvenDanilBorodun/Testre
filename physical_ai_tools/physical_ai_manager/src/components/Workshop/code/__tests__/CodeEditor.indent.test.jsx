@@ -568,6 +568,27 @@ describe('a paste goes in exactly as copied (owner decision R4-O1)', () => {
     paste(java, copied);
     expect(java.state.doc.toString()).toBe(`${copied}class Main {}\n`);
   });
+
+  test('a PYTHON copy pasted into a Java program is ordinary text: verbatim (review round 5, MD4)', () => {
+    // The copy is the one remembered — only the language differs.
+    const copied = rememberVormachenCopy('python', ['robot.move_to("Ablage")', MARK]);
+    const src = 'import edubotics.Robot;\npublic class Main {\n    public static void main(String[] args) {\n        Robot.home();\n    }\n}\n';
+    const { view } = mount(src, 'java');
+    put(view, endOf(view, 4));
+    paste(view, copied);
+    expect(view.state.doc.toString()).toBe(src.replace('Robot.home();', `Robot.home();${copied}`));
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  test('over a selection the copy replaces the selection verbatim, like any paste (review round 5, nd5)', () => {
+    const copied = rememberVormachenCopy('python', [MARK]);
+    const src = 'import robot\ndef main():\n    robot.home()\n    robot.log(1)\nmain()\n';
+    const { view } = mount(src);
+    const from = src.indexOf('robot.log(1)');
+    act(() => { view.dispatch({ selection: EditorSelection.range(from, from + 'robot.log(1)'.length) }); });
+    paste(view, copied);
+    expect(view.state.doc.toString()).toBe(src.replace('robot.log(1)', copied));
+  });
 });
 
 // Review round 5, MD1: the empty row after a file's single final line break

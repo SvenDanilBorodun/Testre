@@ -59,6 +59,7 @@
 import { supabase } from '../lib/supabaseClient';
 import { signedOut } from '../features/session/sessionActions';
 import { resetJetsonOnLogout } from '../features/jetson/sessionReset';
+import { forgetVormachenCopy } from '../components/Workshop/code/vormachenClipboard';
 import { clearStudentScopedStorage, clearSupabaseSessionKeys } from './sessionScope';
 
 /**
@@ -90,6 +91,10 @@ export const signOutStudent = ({ reload = true } = {}) => async (dispatch, getSt
 
   resetJetsonOnLogout(dispatch, accessToken, jetsonId);
   dispatch(signedOut());
+  // The one piece of student content held in module memory instead of a
+  // slice: the lines Vormachen last put on the clipboard (review round 5,
+  // nd4) — the next student's paste of the same text must be ordinary text.
+  forgetVormachenCopy();
   clearStudentScopedStorage();
 
   let revokeFailed = false;

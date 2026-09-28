@@ -247,7 +247,7 @@ const DatasetListInput = ({
           value={dataset}
           onChange={(e) => datasetActions.update(index, e.target.value)}
           disabled={disabled}
-          placeholder={`Dataset ${index + 1}`}
+          placeholder={`Datensatz ${index + 1}`}
           className={clsx(STYLES.datasetTextarea, {
             'bg-gray-100 cursor-not-allowed': disabled,
             'bg-white': !disabled,
@@ -271,7 +271,8 @@ const DatasetListInput = ({
         type="button"
         onClick={() => datasetActions.selectFile(index)}
         className="flex items-center justify-center w-10 h-10 text-blue-500 bg-gray-200 rounded-md hover:text-blue-700"
-        aria-label={`Browse files for dataset ${index + 1}`}
+        aria-label={`Ordner für Datensatz ${index + 1} auswählen`}
+        title={`Ordner für Datensatz ${index + 1} auswählen`}
       >
         <Icon name="folderOpen" className="w-8 h-8" />
       </button>
@@ -291,10 +292,9 @@ const DatasetListInput = ({
               type="button"
               onClick={datasetActions.add}
               className={STYLES.addButton}
-              aria-label="Add new dataset"
             >
-              <span className="text-base font-bold">+</span>
-              Add Dataset
+              <Icon name="plus" />
+              Datensatz hinzufügen
             </button>
             <button
               type="button"
@@ -402,11 +402,11 @@ const MergeSection = ({ isEditable = true }) => {
 
         if (duplicateCheck.hasDuplicates) {
           const duplicateList = duplicateCheck.duplicates
-            .map((dup) => `"${dup.path}" (positions: ${dup.indices.map((i) => i + 1).join(', ')})`)
+            .map((dup) => `„${dup.path}“ (Positionen: ${dup.indices.map((i) => i + 1).join(', ')})`)
             .join('\n');
 
           toast.error(
-            `Duplicate datasets detected:\n${duplicateList}\n\nPlease remove duplicates before merging.`,
+            `Doppelte Datensätze gefunden:\n${duplicateList}\n\nBitte entferne die doppelten Einträge vor dem Zusammenführen.`,
             {
               duration: 6000,
               style: {
@@ -423,7 +423,7 @@ const MergeSection = ({ isEditable = true }) => {
 
         if (hasFolderConflict) {
           toast.error(
-            `Folder "${mergeOutputFolderName}" already exists in the output directory.\nPlease choose a different folder name.`,
+            `Den Ordner „${mergeOutputFolderName}“ gibt es im Zielordner schon.\nBitte wähle einen anderen Ordnernamen.`,
             {
               duration: 5000,
               style: {
@@ -513,7 +513,7 @@ const MergeSection = ({ isEditable = true }) => {
         </div>
         <div className="w-full min-w-72 bg-white p-5 rounded-md shadow-md">
           <div className="flex flex-col items-start justify-center gap-2">
-            <span className="text-xl font-bold">Enter Output Path</span>
+            <span className="text-xl font-bold">Zielordner</span>
             <div className="flex flex-row items-center justify-start gap-2 w-full">
               <input
                 className={clsx(STYLES.textInput, {
@@ -521,7 +521,7 @@ const MergeSection = ({ isEditable = true }) => {
                   'bg-white': isEditable,
                 })}
                 type="text"
-                placeholder="Enter output directory"
+                placeholder="Zielordner eingeben"
                 value={mergeOutputPath || ''}
                 onChange={(e) => dispatch(setMergeOutputPath(e.target.value))}
                 disabled={!isEditable}
@@ -530,7 +530,8 @@ const MergeSection = ({ isEditable = true }) => {
                 type="button"
                 onClick={() => setShowMergeOutputPathBrowserModal(true)}
                 className="flex items-center justify-center w-10 h-10 text-blue-500 bg-gray-200 rounded-md hover:text-blue-700"
-                aria-label="Browse files for merge output path"
+                aria-label="Zielordner auswählen"
+                title="Zielordner auswählen"
               >
                 <Icon name="folderOpen" className="w-8 h-8" />
               </button>
@@ -541,14 +542,14 @@ const MergeSection = ({ isEditable = true }) => {
                 'bg-white': isEditable,
               })}
               type="text"
-              placeholder="Enter output folder name"
+              placeholder="Name des neuen Ordners"
               value={mergeOutputFolderName || ''}
               onChange={(e) => dispatch(setMergeOutputFolderName(e.target.value))}
               disabled={!isEditable}
             />
             <div className="flex flex-row items-center justify-start gap-2 w-full">
               <span className="min-w-24 text-sm text-white font-bold bg-blue-400 py-1 px-2 rounded-full shadow-sm">
-                Output path
+                Neuer Pfad
               </span>
               <span className="text-sm text-blue-600 break-all">
                 {/* Remove trailing slash from mergeOutputPath before displaying */}
@@ -572,13 +573,13 @@ const MergeSection = ({ isEditable = true }) => {
                 (!dataset || dataset.trim() === '') && (
                   <div key={index} className="mb-1">
                     <span className="font-medium">Position {index + 1}:</span>
-                    <span className="ml-2 text-yellow-600">Empty dataset path</span>
+                    <span className="ml-2 text-yellow-600">Kein Datensatz-Pfad angegeben</span>
                   </div>
                 )
             )}
           </div>
           <div className="text-yellow-600 text-sm mt-2">
-            Please fill in all dataset paths before merging.
+            Bitte trage vor dem Zusammenführen alle Datensatz-Pfade ein.
           </div>
         </div>
       )}
@@ -595,12 +596,12 @@ const MergeSection = ({ isEditable = true }) => {
               <div key={index} className="mb-1">
                 <span className="font-mono bg-red-100 px-1 rounded">{dup.path}</span>
                 <span className="text-red-600 ml-2">
-                  (positions: {dup.indices.map((i) => i + 1).join(', ')})
+                  (Positionen: {dup.indices.map((i) => i + 1).join(', ')})
                 </span>
               </div>
             ))}
           </div>
-          <div className="text-red-600 text-sm mt-2">Please remove duplicates before merging.</div>
+          <div className="text-red-600 text-sm mt-2">Bitte entferne die doppelten Einträge vor dem Zusammenführen.</div>
         </div>
       )}
 
@@ -613,14 +614,14 @@ const MergeSection = ({ isEditable = true }) => {
           </div>
           <div className="text-orange-700 text-sm">
             <span className="font-mono bg-orange-100 px-1 rounded">{mergeOutputFolderName}</span>
-            <span className="ml-2">already exists in the output directory</span>
+            <span className="ml-2">gibt es im Zielordner schon.</span>
           </div>
           <div className="text-orange-600 text-sm mt-2">
-            Please choose a different folder name to avoid overwriting existing data.
+            Bitte wähle einen anderen Ordnernamen, damit keine vorhandenen Daten überschrieben werden.
           </div>
           {existingFolders.length > 0 && (
             <div className="text-orange-600 text-sm mt-2">
-              <span className="font-medium">Existing folders:</span>
+              <span className="font-medium">Vorhandene Ordner:</span>
               <div className="mt-1 flex flex-wrap gap-1">
                 {existingFolders.slice(0, 10).map((folder, index) => (
                   <span key={index} className="font-mono bg-orange-100 px-1 rounded text-xs">
@@ -629,7 +630,7 @@ const MergeSection = ({ isEditable = true }) => {
                 ))}
                 {existingFolders.length > 10 && (
                   <span className="text-xs text-orange-500">
-                    +{existingFolders.length - 10} more...
+                    +{existingFolders.length - 10} weitere …
                   </span>
                 )}
               </div>
@@ -643,7 +644,7 @@ const MergeSection = ({ isEditable = true }) => {
         onClick={operations.mergeDataset}
         disabled={isMergeDisabled}
       >
-        Merge
+        Zusammenführen
       </button>
 
       {/* File Browser Modals */}
@@ -651,8 +652,8 @@ const MergeSection = ({ isEditable = true }) => {
         isOpen={showDatasetFileBrowserModal}
         onClose={() => setShowDatasetFileBrowserModal(false)}
         onFileSelect={handlers.datasetFileSelect}
-        title="Select Dataset Path"
-        selectButtonText="Select"
+        title="Datensatz-Ordner auswählen"
+        selectButtonText="Auswählen"
         allowDirectorySelect={false}
         targetFolderName={[
           TARGET_FOLDERS.DATASET_METADATA,
@@ -669,8 +670,8 @@ const MergeSection = ({ isEditable = true }) => {
         isOpen={showMergeOutputPathBrowserModal}
         onClose={() => setShowMergeOutputPathBrowserModal(false)}
         onFileSelect={handlers.mergeOutputPathSelect}
-        title="Select Merge Output Directory"
-        selectButtonText="Select"
+        title="Zielordner auswählen"
+        selectButtonText="Auswählen"
         allowDirectorySelect={true}
         allowFileSelect={false}
         initialPath={DEFAULT_PATHS.DATASET_PATH}

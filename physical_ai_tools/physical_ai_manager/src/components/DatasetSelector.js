@@ -70,16 +70,16 @@ export default function DatasetSelector() {
       if (result && result.user_list) {
         if (result.success) {
           dispatch(setUserList(result.user_list));
-          toast.success('User list loaded successfully');
+          toast.success('Benutzerliste geladen.');
         } else {
-          toast.error('Failed to get user list: ' + result.message);
+          toast.error(`Benutzerliste konnte nicht geladen werden: ${result.message}`);
         }
       } else {
-        toast.error('Failed to get user list: Invalid response');
+        toast.error('Benutzerliste konnte nicht geladen werden: ungültige Antwort.');
       }
     } catch (error) {
       console.error('Error fetching users:', error);
-      toast.error(`Failed to get user list: ${error.message}`);
+      toast.error(`Benutzerliste konnte nicht geladen werden: ${error.message}`);
     } finally {
       setLoadingUsers(false);
     }
@@ -99,16 +99,16 @@ export default function DatasetSelector() {
               ...prev,
               [userId]: result.dataset_list,
             }));
-            toast.success(`Dataset list loaded for user: ${userId}`);
+            toast.success(`Datensätze von ${userId} geladen.`);
           } else {
-            toast.error('Failed to get dataset list: ' + result.message);
+            toast.error(`Datensätze konnten nicht geladen werden: ${result.message}`);
           }
         } else {
-          toast.error('Failed to get dataset list: Invalid response');
+          toast.error('Datensätze konnten nicht geladen werden: ungültige Antwort.');
         }
       } catch (error) {
         console.error('Error fetching datasets:', error);
-        toast.error(`Failed to get dataset list: ${error.message}`);
+        toast.error(`Datensätze konnten nicht geladen werden: ${error.message}`);
       } finally {
         setLoadingDatasets((prev) => ({ ...prev, [userId]: false }));
       }
@@ -595,7 +595,8 @@ export default function DatasetSelector() {
                     <button
                       className={classRefreshIcon}
                       onClick={(e) => !isTraining && refreshUserDatasets(user, e)}
-                      title="Refresh datasets"
+                      title="Datensätze neu laden"
+                      aria-label="Datensätze neu laden"
                     >
                       <Icon name="refresh" className="text-gray-500" size={16} />
                     </button>

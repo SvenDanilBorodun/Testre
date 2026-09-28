@@ -20,7 +20,7 @@ import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { useHfUserList } from '../hooks/useHfUserList';
-import HFStatus from '../constants/HFStatus';
+import HFStatus, { hfStatusLabelDe } from '../constants/HFStatus';
 import { DEFAULT_PATHS } from '../constants/paths';
 import Icon from './icons/Icon';
 
@@ -387,7 +387,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
                 <div className="w-full bg-white p-4 rounded-md flex flex-col items-start justify-center gap-2 shadow-md">
                   <div className="w-full flex flex-col gap-3">
                     <div className="w-full flex flex-col gap-2">
-                      <span className="text-lg font-bold">Repository ID</span>
+                      <span className="text-lg font-bold">Repository-ID</span>
                       <div className="relative">
                         <div
                           className={clsx(
@@ -492,7 +492,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
                               Wird heruntergeladen …
                             </span>
                           )}
-                          {!isDownloading && hfStatus}{' '}
+                          {!isDownloading && hfStatusLabelDe(hfStatus)}{' '}
                         </span>
                         {/* Spinner for model downloads - right next to status text */}
                         {isDownloading && (

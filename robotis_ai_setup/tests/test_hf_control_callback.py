@@ -377,6 +377,61 @@ def _returns_in_finally(path):
     return sorted(set(hits))
 
 
+class EveryAnswerIsGerman(unittest.TestCase):
+    """Review round 1 (owner decision R1-O2): the callback's `message` reaches
+    the student (the Daten tab and the model download toast it), so every
+    branch answers in German. The logger lines stay English (Rule §1)."""
+
+    _ENGLISH = ('HF API', 'Worker', 'currently', 'busy', 'canceling',
+                'Cancellation', 'request', 'Failed', 'Error in')
+
+    def _assert_german(self, message):
+        self.assertTrue(message, 'the answer is silent')
+        for word in self._ENGLISH:
+            self.assertNotIn(word, message, f'English in a student-facing answer: {message!r}')
+
+    def test_a_busy_worker_answers_in_german(self):
+        node = _Node(worker=_Worker(alive=True, busy=True))
+        resp = _call(node, _request('download'))
+        self.assertFalse(resp.success)
+        self._assert_german(resp.message)
+        self.assertIn('beschäftigt', resp.message)
+        # The developer log keeps its English line.
+        self.assertTrue(any('busy' in w for w in node.get_logger().warnings))
+
+    def test_a_cancel_in_progress_answers_in_german(self):
+        node = _Node(worker=_Worker(), cancel_in_progress=True)
+        resp = _call(node, _request('download'))
+        self.assertFalse(resp.success)
+        self._assert_german(resp.message)
+
+    def test_a_started_cancel_answers_in_german(self):
+        node = _Node(worker=_Worker())
+        resp = _call(node, _request('cancel'))
+        self.assertTrue(resp.success)
+        self._assert_german(resp.message)
+
+    def test_a_dispatch_answers_in_german_either_way(self):
+        ok = _call(_Node(worker=_Worker(accept=True)), _request('download'))
+        self.assertTrue(ok.success)
+        self._assert_german(ok.message)
+        refused = _call(_Node(worker=_Worker(accept=False)), _request('download'))
+        self.assertFalse(refused.success)
+        self._assert_german(refused.message)
+
+    def test_an_unexpected_error_answers_in_german_without_the_raw_exception(self):
+        class _Exploding(_Worker):
+            def is_busy(self):
+                raise RuntimeError('internal detail xyz')
+
+        node = _Node(worker=_Exploding())
+        resp = _call(node, _request('download'))
+        self.assertFalse(resp.success)
+        self._assert_german(resp.message)
+        self.assertNotIn('internal detail xyz', resp.message)
+        self.assertTrue(any('internal detail xyz' in e for e in node.get_logger().errors))
+
+
 class NoReturnSitsInAFinally(unittest.TestCase):
     """Structural fence, version-independent.
 

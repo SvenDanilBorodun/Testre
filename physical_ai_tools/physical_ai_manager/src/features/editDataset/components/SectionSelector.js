@@ -29,7 +29,7 @@ const SectionSelector = ({
     if (canChangeSection) {
       onSectionChange(section);
     } else if (!canChangeSection && activeSection !== section) {
-      toast.error('Cannot switch sections while upload/download is in progress');
+      toast.error('Während eines Hoch- oder Herunterladens kannst du nicht wechseln.');
     }
   };
 
@@ -44,11 +44,11 @@ const SectionSelector = ({
           })}
           onClick={() => handleSectionClick('upload')}
           disabled={!canChangeSection && activeSection !== 'upload'}
-          aria-label="Switch to upload section"
+          aria-label="Zum Hochladen wechseln"
         >
           <div className="flex items-center gap-2">
             <Icon name="upload" className="w-4 h-4" />
-            Upload
+            Hochladen
           </div>
         </button>
         <button
@@ -59,11 +59,11 @@ const SectionSelector = ({
           })}
           onClick={() => handleSectionClick('download')}
           disabled={!canChangeSection && activeSection !== 'download'}
-          aria-label="Switch to download section"
+          aria-label="Zum Herunterladen wechseln"
         >
           <div className="flex items-center gap-2">
             <Icon name="download" className="w-4 h-4" />
-            Download
+            Herunterladen
           </div>
         </button>
       </div>

@@ -97,7 +97,8 @@ const FileBrowserHeader = ({
           onClick={onGoHome}
           disabled={loading}
           className={classButton}
-          title={homePath ? `Home: ${homePath}` : 'Home'}
+          title={homePath ? `Startordner: ${homePath}` : 'Startordner'}
+          aria-label="Zum Startordner"
         >
           <Icon name="home" size={20} />
         </button>
@@ -106,7 +107,8 @@ const FileBrowserHeader = ({
             onClick={onGoDefault}
             disabled={loading}
             className={classButton}
-            title={`Default: ${defaultPath}`}
+            title={`Standardordner: ${defaultPath}`}
+            aria-label="Zum Standardordner"
           >
             <Icon name="bookmark" size={20} />
           </button>
@@ -115,7 +117,8 @@ const FileBrowserHeader = ({
           onClick={onGoParent}
           disabled={loading || !parentPath}
           className={classButtonWithDisabled}
-          title="Parent Directory"
+          title="Übergeordneter Ordner"
+          aria-label="Übergeordneter Ordner"
         >
           <Icon name="arrowUp" size={20} />
         </button>
@@ -123,7 +126,8 @@ const FileBrowserHeader = ({
           onClick={onRefresh}
           disabled={loading}
           className={clsx(classButton, 'disabled:opacity-50')}
-          title="Refresh"
+          title="Neu laden"
+          aria-label="Neu laden"
         >
           <Icon name="refresh" size={20} className={clsx(loading && 'animate-spin')} />
         </button>
@@ -152,19 +156,19 @@ const PathInfo = ({ currentPath, homePath, defaultPath, targetFileName }) => {
   return (
     <div className={classContainer}>
       <div className={classPathRow}>
-        <span className={classLabel}>Path:</span>
+        <span className={classLabel}>Pfad:</span>
         <span className={classPathValue}>{currentPath || '/'}</span>
       </div>
       {homePath && (
         <div className={classHomeRow}>
-          <span className={classLabel}>Home:</span>
+          <span className={classLabel}>Startordner:</span>
           <span className={classHomeBadge}>{homePath}</span>
         </div>
       )}
       {defaultPath && (
         <div className={classDefaultRow}>
           <span className={classLabel}>
-            <Icon name="bookmark" size={20} />
+            <Icon name="bookmark" size={20} title="Standardordner" />
           </span>
           <span className={classDefaultBadge}>{defaultPath}</span>
         </div>
@@ -305,7 +309,7 @@ const FileItem = ({
               <button
                 onClick={handleSelectClick}
                 className={`${classSelectButton} select-button`}
-                title={`Select this ${item.is_directory ? 'folder' : 'file'}`}
+                title={item.is_directory ? 'Diesen Ordner auswählen' : 'Diese Datei auswählen'}
               >
                 {isSelected ? 'Ausgewählt' : 'Auswählen'}
               </button>
@@ -320,19 +324,19 @@ const FileItem = ({
           {canSelectDirectory && (
             <>
               <span className="mx-2">•</span>
-              <span className="text-teal-600 font-medium">Selectable folder</span>
+              <span className="text-teal-600 font-medium">Auswählbarer Ordner</span>
             </>
           )}
           {item.is_directory && !allowDirectorySelect && (
             <>
               <span className="mx-2">•</span>
-              <span className="text-gray-400 font-medium">Navigation only</span>
+              <span className="text-gray-400 font-medium">Nur zum Öffnen</span>
             </>
           )}
           {!item.is_directory && !allowFileSelect && (
             <>
               <span className="mx-2">•</span>
-              <span className="text-gray-400 font-medium">File selection disabled</span>
+              <span className="text-gray-400 font-medium">Dateien sind hier nicht auswählbar</span>
             </>
           )}
         </div>
@@ -344,6 +348,9 @@ const FileItem = ({
     </div>
   );
 };
+
+// Shown when the robot could not list a folder and sent no reason of its own.
+const BROWSE_FAILED_DE = 'Der Ordner konnte nicht geöffnet werden.';
 
 const LoadingState = () => {
   const classContainer = clsx('flex', 'items-center', 'justify-center', 'py-8');
@@ -362,7 +369,7 @@ const LoadingState = () => {
   return (
     <div className={classContainer}>
       <div className={classSpinner}></div>
-      <span className={classText}>Laden...</span>
+      <span className={classText}>Wird geladen …</span>
     </div>
   );
 };
@@ -372,7 +379,7 @@ const EmptyState = () => {
 
   return (
     <div className={classContainer}>
-      <span>No items found</span>
+      <span>Dieser Ordner ist leer.</span>
     </div>
   );
 };
@@ -432,7 +439,7 @@ const SelectedItemInfo = ({
       <div className={classContent}>
         {selectedItem.is_directory ? (
           <>
-            <p className={classLabel}>Selected Directory:</p>
+            <p className={classLabel}>Ausgewählter Ordner:</p>
             <p className={classPath}>{selectedItem.full_path}</p>
             {isTargetDirectory && (
               <p className={classTargetInfo}>
@@ -443,7 +450,7 @@ const SelectedItemInfo = ({
           </>
         ) : (
           <>
-            <p className={classFileLabel}>Selected File:</p>
+            <p className={classFileLabel}>Ausgewählte Datei:</p>
             <p className={classFilePath}>{selectedItem.full_path}</p>
           </>
         )}
@@ -461,7 +468,7 @@ export default function FileBrowser({
   initialPath = '',
   fileFilter = null,
   className = '',
-  title = 'File Browser',
+  title = 'Dateien',
   targetFileName = null,
   targetFolderName = null,
   onDirectorySelect = null,
@@ -525,11 +532,11 @@ export default function FileBrowser({
             setDirectoriesWithTarget(new Set());
           }
         } else {
-          setError(result.message || 'Failed to browse directory');
-          toast.error(result.message || 'Failed to browse directory');
+          setError(result.message || BROWSE_FAILED_DE);
+          toast.error(result.message || BROWSE_FAILED_DE);
         }
       } catch (err) {
-        const errorMessage = err.message || 'Failed to browse directory';
+        const errorMessage = err.message || BROWSE_FAILED_DE;
         setError(errorMessage);
         toast.error(errorMessage);
       } finally {
@@ -645,11 +652,11 @@ export default function FileBrowser({
             setDirectoriesWithTarget(new Set());
           }
         } else {
-          setError(result.message || 'Failed to browse directory');
-          toast.error(result.message || 'Failed to browse directory');
+          setError(result.message || BROWSE_FAILED_DE);
+          toast.error(result.message || BROWSE_FAILED_DE);
         }
       } catch (err) {
-        const errorMessage = err.message || 'Failed to browse directory';
+        const errorMessage = err.message || BROWSE_FAILED_DE;
         setError(errorMessage);
         toast.error(errorMessage);
       } finally {

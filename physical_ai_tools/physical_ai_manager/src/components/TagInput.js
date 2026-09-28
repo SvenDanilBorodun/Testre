@@ -137,7 +137,7 @@ const TagInput = ({ tags, onChange, disabled, className }) => {
         onChange={handleInputChange}
         onKeyDown={handleKeyDown}
         disabled={disabled}
-        placeholder={tags.length === 0 ? 'Add tags' : ''}
+        placeholder={tags.length === 0 ? 'Tags hinzufügen' : ''}
         className={clsx(
           'w-auto',
           'min-w-12',

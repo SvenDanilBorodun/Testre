@@ -170,7 +170,7 @@ const DeleteSection = ({ isEditable = true }) => {
   const fetchDatasetInfo = useCallback(
     async (datasetPath) => {
       if (!datasetPath || datasetPath === '') {
-        toast.error('Dataset path is empty');
+        toast.error('Bitte zuerst einen Datensatz-Pfad angeben.');
         return;
       }
 
@@ -189,11 +189,11 @@ const DeleteSection = ({ isEditable = true }) => {
             })
           );
         } else {
-          toast.error('Failed to get dataset info: ' + result.message);
+          toast.error(`Datensatz-Infos konnten nicht geladen werden: ${result.message}`);
         }
       } catch (error) {
         console.error('Error fetching dataset info:', error);
-        toast.error('Failed to get dataset info: ' + error.message);
+        toast.error(`Datensatz-Infos konnten nicht geladen werden: ${error.message}`);
       }
     },
     [getDatasetInfo, dispatch]

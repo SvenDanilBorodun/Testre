@@ -44,11 +44,11 @@ export default function ModelWeightSelector() {
         dispatch(setModelWeightList(result.model_weight_list));
         toast.success('Modellgewichtliste erfolgreich geladen');
       } else {
-        toast.error('Failed to get model weight list: Invalid response');
+        toast.error('Modellgewichte konnten nicht geladen werden: ungültige Antwort.');
       }
     } catch (error) {
       console.error('Error fetching model weights:', error);
-      toast.error(`Failed to get model weight list: ${error.message}`);
+      toast.error(`Modellgewichte konnten nicht geladen werden: ${error.message}`);
     } finally {
       setLoading(false);
     }

@@ -53,7 +53,7 @@ export function clockFrame(anchor, nowMs, lastTickAt, { reducedMotion = false, f
  * @param opts.reducedMotion  whole-second steps
  * @param opts.getLastTickAt  arrival (performance.now) of the latest status;
  *                            defaults to the store's taskStatus.receivedAt
- * @returns {{subscribe: function(function): function, secondsLeft: number, elapsed: number}}
+ * @returns {{subscribe: function(function): function, secondsLeft: number, elapsed: number, instance: ?number}}
  */
 export default function useSmoothPhaseClock(anchor, { frozen = false, reducedMotion = false, getLastTickAt } = {}) {
   // The context, not useStore(): a caller that passes getLastTickAt needs no
@@ -68,7 +68,7 @@ export default function useSmoothPhaseClock(anchor, { frozen = false, reducedMot
       : store?.getState().tasks?.taskStatus?.receivedAt ?? null),
     [getLastTickAt, store],
   );
-  const [shown, setShown] = useState({ secondsLeft: 0, elapsed: 0 });
+  const [shown, setShown] = useState({ secondsLeft: 0, elapsed: 0, instance: null });
 
   const emit = useCallback((frame) => {
     frameRef.current = frame;
@@ -77,9 +77,10 @@ export default function useSmoothPhaseClock(anchor, { frozen = false, reducedMot
     });
     const secondsLeft = Math.ceil(frame.remaining - 1e-9);
     const elapsed = Math.floor(frame.elapsed + 1e-9);
-    setShown((prev) => (prev.secondsLeft === secondsLeft && prev.elapsed === elapsed
+    const instance = frame.instance || null;
+    setShown((prev) => (prev.secondsLeft === secondsLeft && prev.elapsed === elapsed && prev.instance === instance
       ? prev
-      : { secondsLeft, elapsed }));
+      : { secondsLeft, elapsed, instance }));
   }, []);
 
   useEffect(() => {
@@ -120,5 +121,7 @@ export default function useSmoothPhaseClock(anchor, { frozen = false, reducedMot
     return () => { subscribersRef.current.delete(fn); };
   }, []);
 
-  return { subscribe, secondsLeft: shown.secondsLeft, elapsed: shown.elapsed };
+  // `instance` names the anchor instance the whole seconds belong to: for one
+  // render after a phase change they still describe the previous instance.
+  return { subscribe, secondsLeft: shown.secondsLeft, elapsed: shown.elapsed, instance: shown.instance };
 }

@@ -227,12 +227,14 @@ describe('Benutzer-ID (ported from InfoPanel)', () => {
 });
 
 describe('the countdown ticks', () => {
+  const instanceOf = (store) => store.getState().tasks.phaseAnchor.instance;
+
   it('700 Hz at 3, 2 and 1 s left of a warm-up — not before, not at 0', () => {
     const store = makeStore();
     const { rerender } = mount(store);
     act(() => { store.dispatch(recordTick({ phase: TaskPhase.WARMING_UP, totalTime: 5 })); });
     for (const left of [5, 4, 3, 2, 1, 0]) {
-      mockClock = { ...mockClock, secondsLeft: left, elapsed: 5 - left };
+      mockClock = { ...mockClock, secondsLeft: left, elapsed: 5 - left, instance: instanceOf(store) };
       rerender();
     }
     expect(mockSounds.tick).toHaveBeenCalledTimes(3);
@@ -243,9 +245,26 @@ describe('the countdown ticks', () => {
     const { rerender } = mount(store);
     act(() => { store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20 })); });
     for (const left of [4, 3, 2, 1]) {
-      mockClock = { ...mockClock, secondsLeft: left };
+      mockClock = { ...mockClock, secondsLeft: left, instance: instanceOf(store) };
       rerender();
     }
+    expect(mockSounds.tick).not.toHaveBeenCalled();
+  });
+
+  it('never for the previous phase\'s seconds (a redo with 3 s left, then Zurücksetzen)', () => {
+    const store = makeStore();
+    const { rerender } = mount(store);
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20, proceedTime: 17 })); });
+    mockClock = { ...mockClock, secondsLeft: 3, instance: instanceOf(store) };
+    rerender();
+    const recordingInstance = instanceOf(store);
+    // the reset begins; for one render the clock still shows the recording's 3 s
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RESETTING, totalTime: 5 })); });
+    expect(instanceOf(store)).not.toBe(recordingInstance);
+    rerender();
+    expect(mockSounds.tick).not.toHaveBeenCalled();
+    mockClock = { ...mockClock, secondsLeft: 5, instance: instanceOf(store) };
+    rerender();
     expect(mockSounds.tick).not.toHaveBeenCalled();
   });
 
@@ -256,7 +275,7 @@ describe('the countdown ticks', () => {
     act(() => { result.current.onPhaseTick((e) => heard.push(e.secondsLeft)); });
     act(() => { store.dispatch(recordTick({ phase: TaskPhase.RESETTING, totalTime: 3, currentEpisodeNumber: 1 })); });
     for (const left of [3, 2, 1]) {
-      mockClock = { ...mockClock, secondsLeft: left };
+      mockClock = { ...mockClock, secondsLeft: left, instance: instanceOf(store) };
       rerender();
     }
     expect(heard).toEqual(expect.arrayContaining([2, 1]));

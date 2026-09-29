@@ -223,7 +223,9 @@ export default function useRecordController({ isActive = true } = {}) {
     collision,
     session,
     nowWallMs: now.wall,
-    elapsedS: clock.elapsed,
+    // Never ahead of the robot's own count: for one render after a phase
+    // change the clock still holds the previous phase's seconds.
+    elapsedS: Math.min(clock.elapsed, Number(status.proceedTime) || 0),
     secondsLeft: clock.secondsLeft,
     busy,
     disk,
@@ -371,20 +373,23 @@ export default function useRecordController({ isActive = true } = {}) {
   // --- phase ticks: listeners + the 700 Hz countdown ----------------------------
   const tickListenersRef = useRef(new Set());
   const lastTickRef = useRef(null);
-  const instance = anchor ? anchor.instance : null;
+  const instance = clock.instance;
+  const anchorInstance = anchor ? anchor.instance : null;
   const anchorTotal = anchor ? anchor.total : 0;
   useEffect(() => {
     const prev = lastTickRef.current;
     const cur = { view, secondsLeft: clock.secondsLeft, instance };
     lastTickRef.current = cur;
-    if (!prev || !TIMED_VIEWS.has(view)) return;
+    // Only seconds that belong to the running phase (not the previous one's,
+    // which the clock still shows for one render after a change).
+    if (!prev || !TIMED_VIEWS.has(view) || instance !== anchorInstance) return;
     if (prev.secondsLeft === cur.secondsLeft && prev.instance === cur.instance && prev.view === cur.view) return;
     const event = { ...cur, last3: cur.secondsLeft >= 1 && cur.secondsLeft <= 3 };
     tickListenersRef.current.forEach((fn) => {
       try { fn(event); } catch { /* a listener must not break the page */ }
     });
     if (COUNTDOWN_VIEWS.has(view) && anchorTotal >= 1 && event.last3) soundsRef.current.tick();
-  }, [view, clock.secondsLeft, instance, anchorTotal]);
+  }, [view, clock.secondsLeft, instance, anchorInstance, anchorTotal]);
 
   const onPhaseTick = useCallback((fn) => {
     tickListenersRef.current.add(fn);

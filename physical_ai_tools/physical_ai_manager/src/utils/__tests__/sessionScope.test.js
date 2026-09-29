@@ -246,8 +246,8 @@ describe('clearStudentScopedStorage', () => {
   it('lists the exact machine keys by name', () => {
     expect([...MACHINE_SCOPED_KEYS].sort()).toEqual([
       'edubotics_audio_muted',
+      'edubotics_record_view',
       'edubotics_robotType',
-      'edubotics_urdf_open',
       'edubotics_workshop_dock_collapsed',
       'edubotics_workshop_dock_open',
       'edubotics_workshop_dock_split',

@@ -410,7 +410,9 @@ function StudentApp() {
     .filter((n) => isCapabilityVisible(n, { jetsonConnected, caps }))
     .filter((n) => piMode || !n.piOnly);
 
-  const isDarkPage = page === PageType.RECORD || page === PageType.INFERENCE;
+  // Aufnahme 2.0 is a light page in the Startseite language around its own
+  // dark stage; only Inferenz keeps the dark shell.
+  const isDarkPage = page === PageType.INFERENCE;
 
   // Who is signed in. On a shared Windows account this is the only answer to
   // "am I signed in as me?", so it is rendered as TEXT beside the control and

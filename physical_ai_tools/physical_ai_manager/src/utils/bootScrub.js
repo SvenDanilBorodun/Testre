@@ -20,7 +20,7 @@
 // IndexedDB, so deleting it destroyed the Blockly crash-recovery autosave and
 // every MACHINE_SCOPED_KEYS entry — `edubotics_robotType`, whose own comment
 // says clearing it costs the next student an arm re-scan, the four dock keys,
-// `edubotics_urdf_open`, `edubotics_audio_muted`. It also fired for a student
+// `edubotics_record_view`, `edubotics_audio_muted`. It also fired for a student
 // who merely closed the window and re-opened it mid-lesson. utils/sessionScope
 // already expresses exactly the partition this needs, so the scrub is that
 // partition — the person's keys and the Supabase session go, the rig's stay.

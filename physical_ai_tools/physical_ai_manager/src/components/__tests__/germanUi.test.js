@@ -25,7 +25,6 @@ export const GERMAN_FILES = Object.freeze([
   'components/DatasetSelector.js',
   'components/FileBrowser.js',
   'components/FileBrowserModal.js',
-  'components/InfoPanel.js',
   'components/ModelWeightSelector.js',
   'components/PolicyDownloadModal.js',
   // Aufnahme 2.0 (spec §3.15): every component of the new page. Their words
@@ -46,9 +45,9 @@ export const GERMAN_FILES = Object.freeze([
   'components/Record/StageCard.jsx',
   'components/Record/StageViewSwitch.jsx',
   'components/Record/TaskCard.jsx',
+  'components/Record/model/recordCopy.js',
   'components/SystemStatus.js',
   'components/TagInput.js',
-  'components/TaskInstructionInput.js',
   'constants/HFStatus.js',
   'features/editDataset/components/DatasetDeleteSection.js',
   'features/editDataset/components/DatasetHuggingfaceSection.js',

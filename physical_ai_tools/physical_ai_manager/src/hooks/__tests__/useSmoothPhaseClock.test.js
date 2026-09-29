@@ -69,9 +69,9 @@ describe('useSmoothPhaseClock', () => {
   it('runs a frame loop, feeds subscribers, and changes state only per whole second', () => {
     now = 1000;
     const getLastTickAt = () => now;
-    let renders = 0;
+    let hookRuns = 0;
     const { result } = renderHook(() => {
-      renders += 1;
+      hookRuns += 1;
       return useSmoothPhaseClock(anchor(), { getLastTickAt });
     });
     expect(result.current.secondsLeft).toBe(5);
@@ -79,12 +79,12 @@ describe('useSmoothPhaseClock', () => {
     let unsubscribe;
     act(() => { unsubscribe = result.current.subscribe((f) => frames.push(f)); });
     expect(frames).toHaveLength(1); // the latest frame, at once
-    const before = renders;
+    const runsBefore = hookRuns;
     runFrame(1200);
     runFrame(1400);
     expect(frames.map((f) => f.elapsed)).toEqual([0, 0.2, 0.4]);
     expect(frames[2].frac).toBeCloseTo(0.08, 6);
-    expect(renders).toBe(before); // still 5 s left: no re-render
+    expect(hookRuns).toBe(runsBefore); // still 5 s left: no re-render
     unsubscribe();
     runFrame(1600);
     expect(frames).toHaveLength(3);

@@ -220,6 +220,11 @@ class CollisionMonitorMixin:
         # defensively coupled to _collision_active, which _assert_no_other_active blocks on).
         self._collision_interrupted_recording = False
         self._collision_interrupted_mode = None
+        # F1 (Aufnahme 2.0, owner-approved): a FORCED recovery ends an interrupted
+        # recording like FINISH (finalize + upload per the DataManager's own guards)
+        # instead of leaving it unfinalized. Set by force_resume_teleop, consumed by
+        # _on_resync_complete.
+        self._collision_end_recording = False
         # Relax-in-place delivery state (see RELAX_* constants).
         self._relax_timer = None
         self._relax_sends = 0
@@ -960,8 +965,10 @@ class CollisionMonitorMixin:
         # Cancel any stray relax/glide timer so nothing fires mid-resync.
         self._cancel_relax_timer()
         self._cancel_glide_timer()
-        # A forced recovery ends the interrupted recording (do NOT auto-resume it): clearing
-        # the marker makes _on_resync_complete take the plain cleared-status (READY) path.
+        # A forced recovery ends the interrupted recording (do NOT auto-resume it). The
+        # session is FINISHED — finalized and uploaded per the existing guards — at resync
+        # completion (_end_interrupted_recording), never left unfinalized (F1).
+        self._collision_end_recording = bool(self._collision_interrupted_recording)
         self._collision_interrupted_recording = False
         self._collision_interrupted_mode = None
         start = {j: self._collision_follower_pos.get(j, self._collision_leader_pos.get(j, 0.0))
@@ -998,17 +1005,57 @@ class CollisionMonitorMixin:
         # that on the shared /task/status topic and flicker the React UI back to "Bereit"
         # (re-enabling the Start button). The CollisionModal still closes correctly because it
         # dismisses on the first NON-collision phase tick, which RESETTING satisfies.
+        # A FORCED recovery instead ends that session (F1): its terminating READY is
+        # published by _end_interrupted_recording, so the plain one is skipped there too.
         resumed = False
+        ended = False
         if self._collision_interrupted_recording:
             resumed = self._resume_interrupted_recording()
+        elif getattr(self, '_collision_end_recording', False):
+            ended = self._end_interrupted_recording()
+        self._collision_end_recording = False
         self._collision_interrupted_recording = False
         self._collision_interrupted_mode = None
         if resumed:
             self.get_logger().info(
                 '[KOLLISION] Teleoperation wiederhergestellt — Aufnahme wird fortgesetzt.')
+        elif ended:
+            self.get_logger().info(
+                '[KOLLISION] Notentriegelung — Aufnahme beendet und gespeichert.')
         else:
             self._publish_cleared_status()
             self.get_logger().info('[KOLLISION] Teleoperation wiederhergestellt.')
+
+    def _end_interrupted_recording(self):
+        """F1: finish the session a FORCED recovery interrupted and publish its
+        terminating READY status.
+
+        The DataManager finalizes and hands the upload off per its own guards
+        (end_session_now drives its finish branch synchronously; the record timer
+        stays stopped and on_recording stays False). The READY carries the saved
+        count, and a `[WARNUNG]` iff the upload was blocked — the same invariant as
+        the record timer's terminating tick. Returns True when that status was
+        published; False lets the caller publish the plain cleared READY."""
+        data_manager = getattr(self, 'data_manager', None)
+        end = getattr(data_manager, 'end_session_now', None)
+        if end is None:
+            return False
+        try:
+            end()
+            status = data_manager.get_current_record_status()
+            status.phase = TaskStatus.READY
+            status.total_time = 0
+            status.proceed_time = 0
+            reason = getattr(data_manager, '_upload_blocked_reason_de', '') or ''
+            status.error = f'[WARNUNG] {reason}' if reason else ''
+            self._stamp_identity(status)
+            self._collision_status_pub.publish(status)
+            self._last_task_status_mono = time.monotonic()
+            return True
+        except Exception as exc:  # noqa: BLE001 - never let the recovery crash the guard
+            self.get_logger().error(
+                f'[KOLLISION] Aufnahme konnte nicht beendet werden: {exc}')
+            return False
 
     def _resume_interrupted_recording(self):
         """Re-arm the recording the collision interrupted, keeping the SAME DataManager.

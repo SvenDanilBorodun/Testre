@@ -19,6 +19,7 @@ import toast from 'react-hot-toast';
 import { useDispatch, useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import TaskPhase from '../constants/taskPhases';
+import PageType from '../constants/pageType';
 import {
   setTaskStatus,
   setTaskInfo,
@@ -28,6 +29,9 @@ import {
   setMultiTaskIndex,
   setCollision,
   isValidCapabilities,
+  recordNoticeSet,
+  recordUploadStatus,
+  recordRegisterStatus,
 } from '../features/tasks/taskSlice';
 import {
   setIsTraining,
@@ -315,6 +319,10 @@ export function useRosTopicSubscription() {
               // progress strip. Pre-rebuild server images omit the field —
               // default to [] so the modal simply hides the strip.
               jointDistToHome: Array.from(msg.joint_dist_to_home ?? []),
+              // When the trip was seen — the Aufnahme session gives the
+              // discarded episode its duration from it (recordSession R12).
+              receivedAt: performance.now(),
+              receivedWallMs: Date.now(),
             })
           );
           previousPhaseRef.current = msg.phase;
@@ -330,15 +338,42 @@ export function useRosTopicSubscription() {
           );
         }
 
+        // Aufnahme 2.0 (spec §3.3, owner decision F3). A RECORD tick's
+        // `[WARNUNG]` is a warning, not a failure: it becomes a page notice and
+        // the tick is processed like any other (with `error: ''`), so the page
+        // keeps its phase and the terminating READY tick can carry the reason
+        // an upload was blocked. Every other error — a hard record error, any
+        // Inferenz tick, a warning outside a recording — keeps HEAD's path: red
+        // toast and the tick is dropped. On the Aufnahme page a hard error of
+        // the page's own session is shown by the page instead of a toast.
+        // `taskStatus.error` therefore stays '' for every dispatched tick
+        // (H18: the HealthCard reads it).
+        const isWarn = msg.error.startsWith('[WARNUNG]');
+        const recordTickMsg = msg.task_info?.task_type === 'record';
+        const st = store.getState();
+        const rs = st.tasks?.recordSession;
+        const recordActive = !!(rs?.active || rs?.pendingStart);
+        const onRecord = st.ui?.currentPage === PageType.RECORD;
+        let recordWarn = '';
         if (msg.error !== '') {
           console.log('error:', msg.error);
-          // An error while a Jetson inference run is in flight is that
-          // run's exit reason (PR-5b).
-          if (inferenceRunRef.current) {
-            finalizeInferenceRun('error', msg.error);
+          if (isWarn && recordTickMsg) {
+            recordWarn = msg.error.replace(/^\[WARNUNG\]\s*/, '');
+            dispatch(recordNoticeSet({ kind: 'warn', text: recordWarn, at: Date.now() }));
+            if (!onRecord) toast(recordWarn, { icon: toastIcon('warning') });
+            // fall through: this tick is processed like any other
+          } else {
+            if (recordActive) {
+              dispatch(recordNoticeSet({ kind: 'error', text: msg.error, at: Date.now() }));
+            }
+            // An error while a Jetson inference run is in flight is that
+            // run's exit reason (PR-5b).
+            if (inferenceRunRef.current) {
+              finalizeInferenceRun('error', msg.error);
+            }
+            if (!(recordActive && onRecord)) toast.error(msg.error);
+            return;
           }
-          toast.error(msg.error);
-          return;
         }
 
         const currentPhase = msg.phase;
@@ -364,7 +399,9 @@ export function useRosTopicSubscription() {
             }, BEEP_DELAY);
           }
 
-          toast.success('Aufnahme gestartet!', { icon: toastIcon('record') });
+          // The Aufnahme page shows the start itself („Los!"); elsewhere the
+          // toast is still the only sign of it.
+          if (!onRecord) toast.success('Aufnahme gestartet!', { icon: toastIcon('record') });
         }
 
         // Falling two-tone when the episode leaves RECORDING (auto-save or
@@ -484,8 +521,22 @@ export function useRosTopicSubscription() {
           usedCpu: msg.used_cpu || 0,
           usedRamSize: msg.used_ram_size || 0,
           totalRamSize: msg.total_ram_size || 0,
-          error: msg.error || '',
+          // Always '' (H18, F3): a dispatched tick never carries an error; a
+          // record warning travels in `recordWarn` and the page notice.
+          error: '',
           topicReceived: true,
+          // Aufnahme 2.0 (spec §3.2): the running task's plan off the wire and
+          // when this tick arrived. Additive — nothing else reads them.
+          taskType: msg.task_info?.task_type || '',
+          fps: msg.task_info?.fps || 0,
+          numEpisodes: msg.task_info?.num_episodes || 0,
+          episodeTime: msg.task_info?.episode_time_s || 0,
+          warmupTime: msg.task_info?.warmup_time_s || 0,
+          resetTime: msg.task_info?.reset_time_s || 0,
+          pushToHub: msg.task_info?.push_to_hub === true,
+          recordWarn,
+          receivedAt: performance.now(),
+          receivedWallMs: Date.now(),
         };
 
         // Robot profile id + capability manifest ride the same wire (D2). Add
@@ -760,8 +811,13 @@ export function useRosTopicSubscription() {
   // time (this runs inside a ROS topic callback, not a render), so it has no
   // reactive deps. Best-effort by contract — never throws into the caller.
   const registerUploadedDataset = useCallback((repoId) => {
+    // The Aufnahme finish card's third step follows this registration
+    // (recordSession R15): pending → done | failed | skipped.
+    const at = () => Date.now();
+    dispatch(recordRegisterStatus({ repoId, state: 'pending', at: at() }));
     const accessToken = store.getState().auth.session?.access_token;
     if (!accessToken) {
+      dispatch(recordRegisterStatus({ repoId, state: 'skipped', at: at() }));
       // No cloud session. Since the student login gate (utils/authGate) this
       // branch is reachable ONLY through the „Ohne Anmeldung fortfahren"
       // offline escape — which is also the behaviour change worth stating: with
@@ -785,7 +841,9 @@ export function useRosTopicSubscription() {
 
     const RETRY_DELAY_MS = 1500;
     const attempt = (retriesLeft) => {
-      registerDataset(accessToken, payload).catch((err) => {
+      registerDataset(accessToken, payload).then(() => {
+        dispatch(recordRegisterStatus({ repoId, state: 'done', at: at() }));
+      }).catch((err) => {
         const status = err?.status;
         // A 4xx (already-registered 409, auth 401/403, validation 422) won't
         // be fixed by retrying — only retry transient (5xx / network) once.
@@ -802,12 +860,14 @@ export function useRosTopicSubscription() {
         // dataset IS in the registry. Don't alarm them.
         if (status === 409) {
           console.warn('[datasets] already registered (409) — treating as ok');
+          dispatch(recordRegisterStatus({ repoId, state: 'done', at: at() }));
           return;
         }
         console.warn(
           '[datasets] register failed (final):',
           err?.message || err
         );
+        dispatch(recordRegisterStatus({ repoId, state: 'failed', at: at() }));
         toast.error(
           'Datensatz konnte nicht automatisch registriert werden – im ' +
             'Training-Tab „Datensätze synchronisieren" klicken.',
@@ -816,7 +876,7 @@ export function useRosTopicSubscription() {
       });
     };
     attempt(1);
-  }, []);
+  }, [dispatch]);
 
   const subscribeHFStatus = useCallback(async () => {
     try {
@@ -847,10 +907,29 @@ export function useRosTopicSubscription() {
         const progressTotal = msg.progress_total;
         const progressPercentage = msg.progress_percentage;
 
+        // The Aufnahme finish card follows its own upload (recordSession
+        // R14) and says what a toast would; on that page the toast for the
+        // session's repo is skipped. Every other upload/download still toasts.
+        let finishShowsIt = false;
+        if (operation === 'upload') {
+          dispatch(recordUploadStatus({
+            repoId,
+            status,
+            percentage: Number(progressPercentage) || 0,
+            message: message || '',
+            at: Date.now(),
+          }));
+          const hfState = store.getState();
+          const finish = hfState.tasks?.recordSession?.finish;
+          const sessionRepo = finish?.expectedRepoId || finish?.repoId;
+          finishShowsIt = hfState.ui?.currentPage === PageType.RECORD
+            && !!repoId && repoId === sessionRepo;
+        }
+
         if (status === 'Failed') {
-          toast.error(message);
+          if (!finishShowsIt) toast.error(message);
         } else if (status === 'Success') {
-          toast.success(message);
+          if (!finishShowsIt) toast.success(message);
           // Register the freshly-uploaded HF dataset in the cloud
           // registry so group siblings can discover it. Best-effort:
           // failure here doesn't break recording. Hardened (vs the old

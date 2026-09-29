@@ -1,0 +1,225 @@
+{
+ "_comment": "Shared by robotis_ai_setup/tests/test_dataset_name_transliteration.py (server) and src/utils/__tests__/datasetName.test.js (client). task = data_manager.safe_dataset_task_name(in), user = safe_dataset_user_id(in). Generated from the server reference; both sides must reproduce every row byte for byte.",
+ "cases": [
+  {
+   "in": "Würfel in die Schale",
+   "task": "Wuerfel-in-die-Schale",
+   "user": "W-rfel-in-die-Schale"
+  },
+  {
+   "in": "Wuerfel",
+   "task": "Wuerfel",
+   "user": "Wuerfel"
+  },
+  {
+   "in": "Äpfel Öl Übung",
+   "task": "Aepfel-Oel-Uebung",
+   "user": "pfel--l--bung"
+  },
+  {
+   "in": "Straße",
+   "task": "Strasse",
+   "user": "Stra-e"
+  },
+  {
+   "in": "große Grüße",
+   "task": "grosse-Gruesse",
+   "user": "gro-e-Gr--e"
+  },
+  {
+   "in": "über",
+   "task": "ueber",
+   "user": "u-ber"
+  },
+  {
+   "in": "Ärger",
+   "task": "Aerger",
+   "user": "A-rger"
+  },
+  {
+   "in": "ẞ",
+   "task": "SS",
+   "user": "unknown-user"
+  },
+  {
+   "in": "GROẞE",
+   "task": "GROSSE",
+   "user": "GRO-E"
+  },
+  {
+   "in": "  leading and trailing  ",
+   "task": "leading-and-trailing",
+   "user": "leading-and-trailing"
+  },
+  {
+   "in": "---a---",
+   "task": "a",
+   "user": "a"
+  },
+  {
+   "in": "a  b",
+   "task": "a-b",
+   "user": "a--b"
+  },
+  {
+   "in": "a/b\\c",
+   "task": "a-b-c",
+   "user": "a-b-c"
+  },
+  {
+   "in": "..",
+   "task": ".",
+   "user": "unknown-user"
+  },
+  {
+   "in": "...",
+   "task": ".",
+   "user": "unknown-user"
+  },
+  {
+   "in": ".",
+   "task": ".",
+   "user": "unknown-user"
+  },
+  {
+   "in": "--",
+   "task": "",
+   "user": "unknown-user"
+  },
+  {
+   "in": "a--b",
+   "task": "a-b",
+   "user": "a--b"
+  },
+  {
+   "in": "a..b",
+   "task": "a.b",
+   "user": "a..b"
+  },
+  {
+   "in": "a.-.b",
+   "task": "a.-.b",
+   "user": "a.-.b"
+  },
+  {
+   "in": "x-.-y",
+   "task": "x-.-y",
+   "user": "x-.-y"
+  },
+  {
+   "in": "",
+   "task": "",
+   "user": "unknown-user"
+  },
+  {
+   "in": "   ",
+   "task": "",
+   "user": "unknown-user"
+  },
+  {
+   "in": "Würfel 🎲 stapeln",
+   "task": "Wuerfel-stapeln",
+   "user": "W-rfel---stapeln"
+  },
+  {
+   "in": "日本語",
+   "task": "",
+   "user": "unknown-user"
+  },
+  {
+   "in": "Café Crème",
+   "task": "Cafe-Creme",
+   "user": "Caf--Cr-me"
+  },
+  {
+   "in": "café crème",
+   "task": "cafe-creme",
+   "user": "caf--cr-me"
+  },
+  {
+   "in": "Crème brûlée",
+   "task": "Creme-brulee",
+   "user": "Cr-me-br-l-e"
+  },
+  {
+   "in": "naïve Façade",
+   "task": "naive-Facade",
+   "user": "na-ve-Fa-ade"
+  },
+  {
+   "in": "Ångström",
+   "task": "Angstroem",
+   "user": "ngstr-m"
+  },
+  {
+   "in": "ﬁnal",
+   "task": "final",
+   "user": "nal"
+  },
+  {
+   "in": "Ǆ",
+   "task": "DZ",
+   "user": "unknown-user"
+  },
+  {
+   "in": "Ø Æ œ",
+   "task": "",
+   "user": "unknown-user"
+  },
+  {
+   "in": "Würfel – Turm",
+   "task": "Wuerfel-Turm",
+   "user": "W-rfel---Turm"
+  },
+  {
+   "in": "tab\tnew\nline",
+   "task": "tab-new-line",
+   "user": "tab-new-line"
+  },
+  {
+   "in": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "task": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "user": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+   "in": "Klötzchen-Turm_v2.1",
+   "task": "Kloetzchen-Turm_v2.1",
+   "user": "Kl-tzchen-Turm_v2.1"
+  },
+  {
+   "in": "ÄÖÜäöüß",
+   "task": "AeOeUeaeoeuess",
+   "user": "unknown-user"
+  },
+  {
+   "in": "-Ü-",
+   "task": "Ue",
+   "user": "unknown-user"
+  },
+  {
+   "in": "😀",
+   "task": "",
+   "user": "unknown-user"
+  },
+  {
+   "in": "Ö",
+   "task": "Oe",
+   "user": "unknown-user"
+  },
+  {
+   "in": "robot_arm 01",
+   "task": "robot_arm-01",
+   "user": "robot_arm-01"
+  },
+  {
+   "in": "Übung 2.0..",
+   "task": "Uebung-2.0.",
+   "user": "bung-2.0.."
+  },
+  {
+   "in": "a . b",
+   "task": "a-.-b",
+   "user": "a-.-b"
+  }
+ ]
+}

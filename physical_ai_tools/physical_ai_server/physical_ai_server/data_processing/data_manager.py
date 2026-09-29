@@ -21,11 +21,13 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import unicodedata
 
 import cv2
 from geometry_msgs.msg import Twist
@@ -61,6 +63,63 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory
 
 
+# Student-facing German camera names for record-path sentences (Aufnahme 2.0).
+# The config keys stay `gripper`/`scene`; only the words a student reads change.
+CAMERA_NAME_DE = {'gripper': 'Greifer-Kamera', 'scene': 'Szenen-Kamera'}
+
+
+def camera_name_de(name) -> str:
+    return CAMERA_NAME_DE.get(str(name), f'Kamera „{name}“')
+
+
+# Dataset repo names (Aufnahme 2.0, owner decision Q2). A German task name used
+# to reach the Hub mangled („Würfel“ -> `W-rfel`), and a double space, an emoji
+# or an accented letter left `--`/`..` runs that huggingface_hub's repo-id
+# validator refuses. The React page predicts the same name
+# (utils/datasetName.js); both sides reproduce the shared fixture
+# physical_ai_manager/src/utils/__tests__/datasetName.cases.json byte for byte,
+# and THIS module is the reference it is generated from. Stdlib only, and no new
+# sibling module: the deps-free test loaders give the package no __path__.
+_DE_TRANSLITERATION = (
+    ('ä', 'ae'), ('ö', 'oe'), ('ü', 'ue'),
+    ('Ä', 'Ae'), ('Ö', 'Oe'), ('Ü', 'Ue'),
+    ('ß', 'ss'), ('ẞ', 'SS'),
+)
+_UNSAFE_NAME_CHARS = re.compile(r'[^a-zA-Z0-9._-]')
+_DASH_RUN = re.compile(r'-{2,}')
+_DOT_RUN = re.compile(r'\.{2,}')
+
+
+def safe_dataset_task_name(task_name) -> str:
+    """NFC -> German pairs -> NFKD accent fold -> sanitise -> collapse runs -> strip `-`.
+
+    The order is part of the contract (the client mirrors it). Combining marks
+    are Unicode category M* (the same predicate as the Unicode property M in JS).
+    """
+    text = unicodedata.normalize('NFC', str(task_name or ''))
+    for src, dst in _DE_TRANSLITERATION:
+        text = text.replace(src, dst)
+    text = ''.join(ch for ch in unicodedata.normalize('NFKD', text)
+                   if not unicodedata.category(ch).startswith('M'))
+    text = _UNSAFE_NAME_CHARS.sub('-', text)
+    text = _DOT_RUN.sub('.', _DASH_RUN.sub('-', text))
+    return text.strip('-')
+
+
+def safe_dataset_user_id(user_id) -> str:
+    """HEAD's rule, deliberately unchanged: no transliteration, no collapse.
+
+    The upload namespace guard compares this part to the names whoami returns,
+    so it must stay the HF account name as sent. `-` and `.` survive the
+    sanitiser, so `..` does too; HF user ids cannot be dot-only, and anything
+    that is becomes a safe placeholder rather than a traversal.
+    """
+    safe = _UNSAFE_NAME_CHARS.sub('-', str(user_id or '')).strip('-')
+    if not safe or set(safe) <= {'.'}:
+        safe = 'unknown-user'
+    return safe
+
+
 class DataManager:
     RECORDING = False
     RECORD_COMPLETED = True
@@ -76,8 +135,7 @@ class DataManager:
             task_info,
             upload_callback=None):
         self._robot_type = robot_type
-        import re
-        safe_task_name = re.sub(r'[^a-zA-Z0-9._-]', '-', task_info.task_name).strip('-')
+        safe_task_name = safe_dataset_task_name(task_info.task_name)
         # `user_id` is CLIENT-SUPPLIED and was the ONE component here that was
         # never sanitised, while `task_name` beside it always was. That matters
         # because `_save_path` reaches a `shutil.rmtree` in
@@ -87,12 +145,7 @@ class DataManager:
         # user_id turned a per-frame recording check into an arbitrary
         # directory delete. Same sanitiser as task_name, then `..`-collapse,
         # then a confine() that PROVES the result stayed under the root.
-        safe_user_id = re.sub(r'[^a-zA-Z0-9._-]', '-', str(task_info.user_id or '')).strip('-')
-        # `-` and `.` survive the sanitiser above, so `..` does too. HF user
-        # ids cannot be dot-only; anything that is becomes a safe placeholder
-        # rather than a traversal.
-        if not safe_user_id or set(safe_user_id) <= {'.'}:
-            safe_user_id = 'unknown-user'
+        safe_user_id = safe_dataset_user_id(task_info.user_id)
         self._save_repo_name = f'{safe_user_id}/{robot_type}_{safe_task_name}'
         self._save_path = save_root_path / self._save_repo_name
         # Belt as well as braces: prove it, rather than trusting the sanitiser.

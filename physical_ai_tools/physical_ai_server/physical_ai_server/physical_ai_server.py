@@ -1619,7 +1619,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         'Prüfe die Internetverbindung, schalte unter „Erweitert“ '
                         'das Hochladen aus oder wähle einen anderen Aufgabennamen.'
                     )
-                self.get_logger().info('Dataset init failed')
+                self.get_logger().info(
+                    'Dataset init failed for '
+                    f"{getattr(self.data_manager, '_save_repo_name', '?')}")
 
             if error_msg:
                 self.on_recording = False

@@ -496,13 +496,17 @@ vi.mock('three', () => {
     Vector3,
   };
 });
+// viewPreset (Aufnahme 2.0): what the preset effect writes into the controls.
+const mockTargetCopy = vi.fn();
+const mockTargetSet = vi.fn();
+const mockControlsUpdate = vi.fn(() => false);
 vi.mock('three/examples/jsm/controls/OrbitControls', () => ({
   __esModule: true,
   OrbitControls: function OrbitControls() {
     return {
       enableDamping: false,
       dampingFactor: 0,
-      target: { set: () => {}, copy: () => {} },
+      target: { set: mockTargetSet, copy: mockTargetCopy },
       // Records handlers so a test can fire the real 'start' event (pointer-down
       // on the canvas) and assert the camera latch. `update: () => false` is the
       // at-rest return of the real control, which is what makes the render loop
@@ -510,7 +514,7 @@ vi.mock('three/examples/jsm/controls/OrbitControls', () => ({
       addEventListener: (type, fn) => {
         (mockControlListeners[type] || (mockControlListeners[type] = [])).push(fn);
       },
-      update: () => false,
+      update: mockControlsUpdate,
       dispose: () => {},
     };
   },
@@ -571,6 +575,9 @@ beforeEach(() => {
   mockMeshDone.length = 0;
   mockRender.mockClear();
   mockCameraPositionSet.mockClear();
+  mockTargetCopy.mockClear();
+  mockTargetSet.mockClear();
+  mockControlsUpdate.mockClear();
   Object.keys(mockControlListeners).forEach((k) => delete mockControlListeners[k]);
   mockTcpUrdf = null;
   mockState = { ros: { rosbridgeUrl: 'ws://student-pc:9090', rosHost: 'student-pc' } };
@@ -1747,5 +1754,94 @@ describe('UrdfTwin — ghost arm (a Position\'s captured joints)', () => {
     expect(removedAt).toBeLessThan(traversedAt);
     expect(mat.dispose).toHaveBeenCalledTimes(1);
     ghost.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled());
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// viewPreset (Aufnahme 2.0, owner decision Q6): the Aufnahme stage's
+// „Perspektive / Vorne / Seite / Oben" buttons. Additive — the default null
+// leaves every other page's twin exactly as before. The preset camera sits on
+// the framed centre at the framed distance, and it must REQUEST a render: this
+// renderer paints on demand, and `needsRender` is local to the mount effect, so
+// only the stored requestRender can wake it (a preset that moved the camera
+// without it would change nothing on screen until the arm moved).
+// ---------------------------------------------------------------------------
+describe('UrdfTwin — viewPreset', () => {
+  // The Box3 mock frames centre (0,0,0) with maxDim 0.3 → frameRobot's camera at
+  // (0.6, 0.42, 0.6); the stored distance is that point's distance from centre.
+  const FRAMED_DIST = 0.6 * Math.hypot(1, 0.7, 1);
+  const along = (x, y, z) => {
+    const n = Math.hypot(x, y, z);
+    return [x / n * FRAMED_DIST, y / n * FRAMED_DIST, z / n * FRAMED_DIST];
+  };
+  const lastCameraSet = () => mockCameraPositionSet.mock.calls[mockCameraPositionSet.mock.calls.length - 1];
+  const expectClose = (got, want) => want.forEach((v, i) => expect(got[i]).toBeCloseTo(v, 6));
+
+  async function mountLoaded(ui) {
+    const utils = render(ui);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    await settleFrames();
+    return utils;
+  }
+
+  test('the default (no preset) touches nothing: mount + one framing, as before', async () => {
+    await mountLoaded(<UrdfTwin />);
+    expect(mockCameraPositionSet.mock.calls.length).toBe(2);
+    expect(mockTargetCopy).toHaveBeenCalledTimes(1); // frameRobot's own
+  });
+
+  test('„Vorne" moves the camera onto the framed centre along +x, and requests a render', async () => {
+    const { rerender } = await mountLoaded(<UrdfTwin viewPreset="persp" />);
+    const idle = mockRender.mock.calls.length;
+    const updatesBefore = mockControlsUpdate.mock.calls.length;
+
+    rerender(<UrdfTwin viewPreset="front" />);
+    expectClose(lastCameraSet(), along(1, 0.25, 0));
+    expect(mockTargetCopy).toHaveBeenLastCalledWith(expect.objectContaining({ x: 0, y: 0, z: 0 }));
+    expect(mockControlsUpdate.mock.calls.length).toBeGreaterThan(updatesBefore);
+    await waitFor(() => expect(mockRender.mock.calls.length).toBeGreaterThan(idle));
+  });
+
+  test('each preset has its own direction; „Perspektive" is the framed view itself', async () => {
+    const { rerender } = await mountLoaded(<UrdfTwin viewPreset="persp" />);
+    expectClose(lastCameraSet(), [0.6, 0.42, 0.6]);
+    rerender(<UrdfTwin viewPreset="side" />);
+    expectClose(lastCameraSet(), along(0, 0.25, 1));
+    rerender(<UrdfTwin viewPreset="top" />);
+    expectClose(lastCameraSet(), along(0.001, 1, 0));
+    rerender(<UrdfTwin viewPreset="persp" />);
+    expectClose(lastCameraSet(), [0.6, 0.42, 0.6]);
+  });
+
+  test('a preset chosen before the meshes land is re-applied once the arm is framed', async () => {
+    render(<UrdfTwin viewPreset="top" />);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    await settleFrames();
+    // The framing pass ran, and then the chosen preset won over it.
+    expectClose(lastCameraSet(), along(0.001, 1, 0));
+  });
+
+  test('a student who orbited mid-load keeps their view; a NEW preset click still applies', async () => {
+    const { rerender } = render(<UrdfTwin viewPreset="persp" />);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    act(() => { (mockControlListeners.start || []).forEach((fn) => fn()); });
+    const before = mockCameraPositionSet.mock.calls.length;
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    await settleFrames();
+    expect(mockCameraPositionSet.mock.calls.length).toBe(before);
+
+    rerender(<UrdfTwin viewPreset="side" />);
+    expect(mockCameraPositionSet.mock.calls.length).toBe(before + 1);
+  });
+
+  test('an unknown preset is ignored, and unmounting with a preset is clean', async () => {
+    const { rerender, unmount } = await mountLoaded(<UrdfTwin viewPreset="persp" />);
+    const before = mockCameraPositionSet.mock.calls.length;
+    rerender(<UrdfTwin viewPreset="sideways" />);
+    expect(mockCameraPositionSet.mock.calls.length).toBe(before);
+    expect(() => unmount()).not.toThrow();
   });
 });

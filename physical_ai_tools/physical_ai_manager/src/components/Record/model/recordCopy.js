@@ -299,7 +299,9 @@ export const RECORD_COPY = Object.freeze({
       ended: 'Beim Beenden verworfen',
     }),
     discardedSub: (n, hhmm) => `Episode ${n} · ${hhmm}`,
-    adopted: (k) => `${k} ${episodes(k)} wurden vor dem Neuladen gespeichert.`,
+    adopted: (k) => (k === 1
+      ? '1 Episode wurde vor dem Neuladen gespeichert.'
+      : `${k} Episoden wurden vor dem Neuladen gespeichert.`),
     sumLeft: (k, N) => `${k} von ${N} ${episodes(N)}`,
     sumRight: (mmssText) => `Gesamt ${mmssText} min`,
   }),
@@ -324,6 +326,7 @@ export const RECORD_COPY = Object.freeze({
     unknown: 'Der Stand des Hochladens ist unbekannt, weil die Verbindung unterbrochen war. Prüfe den '
       + 'Datensatz im Tab Daten.',
     collisionEnd: COLLISION_END_NOTE_DE,
+    saved: 'Gespeichert als',
     savedPrivate: 'Privat gespeichert als',
     savedPublic: 'Öffentlich gespeichert als',
     savedLocal: 'Auf diesem Rechner gespeichert als',

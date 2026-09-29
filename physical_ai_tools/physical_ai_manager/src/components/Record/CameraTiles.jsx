@@ -77,7 +77,7 @@ function Tile({ tile, index, label, badge, fallbackText, isActive, answered }) {
       <div className="rec-tl">
         {badge ? <span className={`rec-dot ${DOT[badge.verdict] || ''}`.trim()} data-verdict={badge.verdict} /> : null}
         <span>{label}</span>
-        {badge ? <span className="rec-hz">{formatHz(badge.hz)}</span> : null}
+        {badge ? <span className="rec-hz">{typeof badge.hzText === 'string' ? badge.hzText : formatHz(badge.hz)}</span> : null}
       </div>
     </div>
   );

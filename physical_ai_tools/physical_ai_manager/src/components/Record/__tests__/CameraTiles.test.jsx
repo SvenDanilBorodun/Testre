@@ -117,5 +117,17 @@ describe('CameraTiles', () => {
     const [grip, scene] = tiles();
     expect(grip.querySelector('.rec-dot')).toHaveAttribute('data-verdict', 'ok'); // eslint-disable-line testing-library/no-node-access
     expect(scene.querySelector('.rec-dot')).toHaveClass('warn'); // eslint-disable-line testing-library/no-node-access
+    // The controller's own badge text wins (German decimal comma).
+    rerender(
+      <CameraTiles
+        connected
+        fetchTopics={OK(['/gripper/image_raw', '/scene/image_raw'])}
+        roles={['gripper', 'scene']}
+        labelFor={labelFor}
+        signal={signal.map((s) => ({ ...s, hzText: s.name === 'scene' ? '11,2 Hz' : '—' }))}
+      />
+    );
+    expect(screen.getByText('11,2 Hz')).toBeInTheDocument();
+    expect(screen.getAllByText('—')).toHaveLength(1);
   });
 });

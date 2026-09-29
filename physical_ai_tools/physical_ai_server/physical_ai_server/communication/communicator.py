@@ -186,6 +186,15 @@ class Communicator:
 
         self.rosbag_service_available = False
 
+        # Aufnahme 2.0 — per-source arrival counters for /edubotics/signal_status
+        # (the node's 1 Hz tick turns them into rates and ages). One entry per
+        # subscription init_subscribers() actually creates, in registration order:
+        # 'camera:<name>', 'follower:<name>', 'leader:<name>'. Never reset by
+        # clear_latest_data() — the rate is measured across the whole boot.
+        self._source_counts: Dict[str, int] = {}
+        self._source_last_mono: Dict[str, Optional[float]] = {}
+        self._source_meta: Dict[str, Tuple[str, str, str]] = {}
+
         # Audit fix 7 — a raise partway through the init_* registration
         # sequence used to LEAK the already-registered ROS entities:
         # physical_ai_server binds self.communicator only AFTER this ctor
@@ -264,6 +273,8 @@ class Communicator:
                 qos_profile=camera_qos,
             )
             self.camera_topic_msgs[name] = None
+            if self.multi_subscriber.is_source_enabled(self.SOURCE_CAMERA):
+                self._register_source(self.SOURCE_CAMERA, name, topic)
             self.node.get_logger().info(f'Camera subscriber: {name} -> {topic}')
 
         # Initialize joint subscribers with appropriate message types and callbacks
@@ -299,6 +310,8 @@ class Communicator:
                 msg_type=msg_type,
                 callback=callback
             )
+            if self.multi_subscriber.is_source_enabled(category):
+                self._register_source(category, name, topic)
             self.node.get_logger().info(
                 f'Joint subscriber: {name} -> {topic} ({msg_type.__name__})')
 
@@ -484,7 +497,47 @@ class Communicator:
             )
         )
 
+    def _register_source(self, kind: str, name: str, topic: str) -> None:
+        # A camera is reported by its stream, not its transport.
+        if kind == self.SOURCE_CAMERA and topic.endswith('/compressed'):
+            topic = topic[:-len('/compressed')]
+        source_id = f'{kind}:{name}'
+        self._source_counts[source_id] = 0
+        self._source_last_mono[source_id] = None
+        self._source_meta[source_id] = (kind, name, topic)
+
+    def _note_arrival(self, source_id: str) -> None:
+        # Guarded: tests (and helpers) build a Communicator via __new__ without
+        # the counters; a callback there must keep doing its real job.
+        counts = getattr(self, '_source_counts', None)
+        if counts is None or source_id not in counts:
+            return
+        counts[source_id] += 1
+        self._source_last_mono[source_id] = time.monotonic()
+
+    def source_counters(self) -> List[Dict[str, Any]]:
+        """Arrival counters for /edubotics/signal_status, registration order.
+
+        Each entry: {'id', 'kind', 'name', 'topic', 'count', 'last_mono'}
+        (last_mono is time.monotonic() of the last message, None until one
+        arrived). Returns fresh dicts; the caller may keep or mutate them.
+        """
+        counts = getattr(self, '_source_counts', None) or {}
+        out = []
+        for source_id, count in list(counts.items()):
+            kind, name, topic = self._source_meta[source_id]
+            out.append({
+                'id': source_id,
+                'kind': kind,
+                'name': name,
+                'topic': topic,
+                'count': int(count),
+                'last_mono': self._source_last_mono.get(source_id),
+            })
+        return out
+
     def _camera_callback(self, name: str, msg: CompressedImage) -> None:
+        self._note_arrival(f'{self.SOURCE_CAMERA}:{name}')
         self.camera_topic_msgs[name] = msg
         # Audit F18: track receive monotonic time + header stamp so
         # workflow / recording can detect a stale or low-fps stream
@@ -543,6 +596,7 @@ class Communicator:
         return (len(in_window) - 1) / span
 
     def _follower_callback(self, name: str, msg: JointState) -> None:
+        self._note_arrival(f'{self.SOURCE_FOLLOWER}:{name}')
         self.follower_topic_msgs[name] = msg
         self._follower_last_arrival_mono = time.monotonic()
 
@@ -556,6 +610,7 @@ class Communicator:
         return time.monotonic() - self._follower_last_arrival_mono
 
     def _leader_callback(self, name: str, msg: JointTrajectory) -> None:
+        self._note_arrival(f'{self.SOURCE_LEADER}:{name}')
         self.leader_topic_msgs[name] = msg
 
     def get_latest_bgr_frame(self, camera: str):

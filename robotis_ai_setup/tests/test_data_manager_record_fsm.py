@@ -18,6 +18,7 @@
 # test_data_manager_* files).
 
 import importlib.util
+import shutil
 import sys
 import tempfile
 import types
@@ -247,6 +248,14 @@ class _TaskInfo:
         self.record_rosbag2 = False
 
 
+_TEMP_ROOTS = []
+
+
+def tearDownModule():
+    for root in _TEMP_ROOTS:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def make(drop=False, upload_raises=False, **kw):
     uploads = []
 
@@ -256,6 +265,7 @@ def make(drop=False, upload_raises=False, **kw):
         uploads.append(repo)
 
     root = Path(tempfile.mkdtemp(prefix='dm_fsm_'))
+    _TEMP_ROOTS.append(root)
     dm = DataManager(root, 'omx_f', _TaskInfo(**kw), upload_callback=_upload)
     dm._lerobot_dataset = _FakeDataset(drop_on_save=drop)
     dm.create_frame = lambda images, state, action: {'x': 1}

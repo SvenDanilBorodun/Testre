@@ -19,6 +19,7 @@
 
 import importlib.util
 import json
+import shutil
 import sys
 import tempfile
 import types
@@ -189,6 +190,7 @@ class DatasetNameTransliterationTest(unittest.TestCase):
 
     def test_save_repo_name_uses_both_functions(self):
         root = Path(tempfile.mkdtemp(prefix='dm_names_'))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         dm = self.mod.DataManager(
             root, 'omx_f', _TaskInfo('Würfel in die Schale', 'maxmuster'),
             upload_callback=None)
@@ -198,6 +200,7 @@ class DatasetNameTransliterationTest(unittest.TestCase):
 
     def test_dot_only_user_id_still_becomes_a_placeholder(self):
         root = Path(tempfile.mkdtemp(prefix='dm_names_'))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         dm = self.mod.DataManager(
             root, 'omx_f', _TaskInfo('Würfel', '..'), upload_callback=None)
         self.assertEqual(dm._save_repo_name, 'unknown-user/omx_f_Wuerfel')

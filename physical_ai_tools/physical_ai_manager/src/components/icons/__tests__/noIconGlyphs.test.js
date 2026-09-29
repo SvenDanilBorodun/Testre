@@ -288,6 +288,8 @@ export const INLINE_SVG_ALLOWED = Object.freeze({
   'src/components/CollisionModal.js': 'the remedy illustration (RemedyDiagram)',
   'src/components/CompactSystemStatus.js': 'the circular usage gauge, a chart',
   'src/components/Home/RobotHero.jsx': 'the Startseite illustration',
+  'src/components/Record/PhaseOverlay.jsx':
+    'the Aufnahme countdown ring and the warm-up/reset pictograms (illustrations)',
   'src/components/Workshop/SimScene.jsx': 'the 2D simulator scene',
   'src/components/Workshop/CameraFeedOverlay.jsx': 'the marker overlay on the camera image',
   'src/components/Workshop/teach/ReviewStrip.jsx': 'the review chart of a take',

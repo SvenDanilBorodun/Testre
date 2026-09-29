@@ -214,7 +214,17 @@ export default function useRecordController({ isActive = true } = {}) {
   }, [fresh, signal.payload]);
 
   const frozen = !TIMED_VIEWS.has(view0);
-  const clock = useSmoothPhaseClock(anchor, { frozen, reducedMotion });
+  const rawClock = useSmoothPhaseClock(anchor, { frozen, reducedMotion });
+  // For one render after a phase change the clock's whole seconds still belong
+  // to the previous instance; until it catches up, the robot's own count
+  // (floored seconds) stands in.
+  const clockCurrent = rawClock.instance === (anchor ? anchor.instance : null);
+  const proceed = Number(status.proceedTime) || 0;
+  const clock = useMemo(() => (clockCurrent ? rawClock : {
+    ...rawClock,
+    elapsed: proceed,
+    secondsLeft: Math.max(0, Math.ceil((Number(status.totalTime) || 0) - proceed)),
+  }), [clockCurrent, rawClock, proceed, status.totalTime]);
 
   const model = useMemo(() => deriveRecordView({
     heartbeat,
@@ -223,16 +233,15 @@ export default function useRecordController({ isActive = true } = {}) {
     collision,
     session,
     nowWallMs: now.wall,
-    // Never ahead of the robot's own count: for one render after a phase
-    // change the clock still holds the previous phase's seconds.
-    elapsedS: Math.min(clock.elapsed, Number(status.proceedTime) || 0),
+    // Never ahead of the robot's own count („Jetzt speichern" from 1 s on).
+    elapsedS: Math.min(clock.elapsed, proceed),
     secondsLeft: clock.secondsLeft,
     busy,
     disk,
     verdicts,
     bridge,
     activation,
-  }), [heartbeat, status, formRaw, collision, session, now.wall, clock.elapsed, clock.secondsLeft, busy,
+  }), [heartbeat, status, formRaw, collision, session, now.wall, clock.elapsed, clock.secondsLeft, proceed, busy,
     disk, verdicts, bridge, activation]);
   const { view } = model;
   const currentEpisode = model.episode.current;
@@ -373,12 +382,12 @@ export default function useRecordController({ isActive = true } = {}) {
   // --- phase ticks: listeners + the 700 Hz countdown ----------------------------
   const tickListenersRef = useRef(new Set());
   const lastTickRef = useRef(null);
-  const instance = clock.instance;
+  const instance = rawClock.instance;
   const anchorInstance = anchor ? anchor.instance : null;
   const anchorTotal = anchor ? anchor.total : 0;
   useEffect(() => {
     const prev = lastTickRef.current;
-    const cur = { view, secondsLeft: clock.secondsLeft, instance };
+    const cur = { view, secondsLeft: rawClock.secondsLeft, instance };
     lastTickRef.current = cur;
     // Only seconds that belong to the running phase (not the previous one's,
     // which the clock still shows for one render after a change).
@@ -389,7 +398,7 @@ export default function useRecordController({ isActive = true } = {}) {
       try { fn(event); } catch { /* a listener must not break the page */ }
     });
     if (COUNTDOWN_VIEWS.has(view) && anchorTotal >= 1 && event.last3) soundsRef.current.tick();
-  }, [view, clock.secondsLeft, instance, anchorInstance, anchorTotal]);
+  }, [view, rawClock.secondsLeft, instance, anchorInstance, anchorTotal]);
 
   const onPhaseTick = useCallback((fn) => {
     tickListenersRef.current.add(fn);

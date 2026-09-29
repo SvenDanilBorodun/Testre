@@ -268,6 +268,19 @@ describe('the countdown ticks', () => {
     expect(mockSounds.tick).not.toHaveBeenCalled();
   });
 
+  it('c.clock stands in the robot\'s own count while the clock still shows the previous phase', () => {
+    const store = makeStore();
+    const { result, rerender } = mount(store);
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RESETTING, totalTime: 5, proceedTime: 1 })); });
+    mockClock = { ...mockClock, secondsLeft: 3, elapsed: 17, instance: -1 };
+    rerender();
+    expect(result.current.clock).toMatchObject({ secondsLeft: 4, elapsed: 1 });
+    expect(result.current.model.pill.sub).toBe('noch 4 s · dann Episode 1');
+    mockClock = { ...mockClock, secondsLeft: 4, elapsed: 1.5, instance: instanceOf(store) };
+    rerender();
+    expect(result.current.clock).toMatchObject({ secondsLeft: 4, elapsed: 1.5 });
+  });
+
   it('onPhaseTick listeners hear every whole-second change', () => {
     const store = makeStore();
     const { result, rerender } = mount(store);

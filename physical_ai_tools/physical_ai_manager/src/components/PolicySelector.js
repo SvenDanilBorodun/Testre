@@ -16,7 +16,6 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import clsx from 'clsx';
-import { MdRefresh } from 'react-icons/md';
 import { useSelector, useDispatch } from 'react-redux';
 import {
   selectPolicyType,
@@ -25,6 +24,7 @@ import {
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { getPolicies } from '../services/cloudTrainingApi';
 import toast from 'react-hot-toast';
+import Icon from './icons/Icon';
 
 // Env-gated allowlist — students only see ACT, admin/dev builds override via
 // REACT_APP_ALLOWED_POLICIES=tdmpc,diffusion,act,vqbet,pi0,pi0_fast,pi05,smolvla.
@@ -200,7 +200,7 @@ export default function PolicySelector({ readonly = false }) {
             disabled={fetching || loading || isTraining || readonly}
           >
             <div className="flex items-center justify-center gap-2">
-              <MdRefresh size={16} className={fetching ? 'animate-spin' : ''} />
+              <Icon name="refresh" size={16} className={fetching ? 'animate-spin' : ''} />
               {fetching ? 'Laden...' : `Aktualisieren`}
             </div>
           </button>

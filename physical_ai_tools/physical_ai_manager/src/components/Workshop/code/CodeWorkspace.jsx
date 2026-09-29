@@ -21,8 +21,10 @@
 //
 // The code Sammlung (owner decisions O4–O7), when the page hands an asset
 // document (`assetDoc`) and its Sammlung provider: a „Sammlung" section under
-// the files — four counts that open the drawer on their tab, and „+ Neu" with
-// the creation actions the flyout cards offer a Blockly program — plus the
+// the files — four counts that open the drawer on their tab, a kind-icon
+// button on the Aufnahmen/Ziele/Positionen rows that opens that kind's focused
+// Vormachen window (owner decision D5), and „+ Neu" with every creation action
+// (both from sammlung/newActions.js, the table the flyout reads) — plus the
 // cursor „Einfügen" writes below. The last cursor line is remembered PER FILE
 // (in memory, never stored) and reported to the page as `{file, line}`; a file
 // the student opened but never clicked into reports null, so an insertion then
@@ -40,7 +42,9 @@ import { addBreakpoint, removeBreakpoint } from '../../../features/workshop/work
 import { openDrawer } from '../../../features/workshop/studioAssetsSlice';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import { DE } from '../blocks/messages_de';
-import { newActionsFor } from '../sammlung/newActions';
+import { newActionsFor, teachActionFor } from '../sammlung/newActions';
+import MenuButton from '../MenuButton';
+import Icon from '../../icons/Icon';
 import { breakpointLinesForFile, codeBreakpointId, parseCodeBreakpointId } from './codeBreakpoints';
 import { CODE_DE, formatCode } from './codeMessagesDe';
 import { CODE_LIMITS, ENTRY_FILE, validateProjectPath } from './codeProject';
@@ -121,10 +125,13 @@ function snapshotOf(provider) {
 
 /**
  * The „Sammlung" section of the sidebar: the counts (each opens the drawer on
- * its tab) and „+ Neu". Rendered only with an asset document.
+ * its tab), a row's own „… vormachen" icon button (`teachActions[tab]`; never
+ * disabled — TeachHost refuses in German, like the flyout), and „+ Neu".
+ * Rendered only with an asset document.
  */
-function SammlungSection({ counts, actions, onOpen, onAction, buttonClass }) {
-  const [menuOpen, setMenuOpen] = useState(false);
+function SammlungSection({
+  counts, actions, teachActions, onOpen, onAction, buttonClass,
+}) {
   return (
     <section
       aria-label={DE.SAMMLUNG_TITLE}
@@ -133,51 +140,53 @@ function SammlungSection({ counts, actions, onOpen, onAction, buttonClass }) {
       <div className="px-1 pb-1 text-[11px] font-semibold text-[var(--ink-3)] uppercase tracking-wide">
         {DE.SAMMLUNG_TITLE}
       </div>
-      {SAMMLUNG_ROWS.map(([tab, label]) => (
-        <button
-          key={tab}
-          type="button"
-          onClick={() => onOpen(tab)}
-          title={formatCode(CODE_DE.SAMMLUNG_OPEN_TAB, label)}
-          className="w-full text-left text-xs px-2 py-0.5 rounded text-[var(--ink)] hover:bg-white"
-        >
-          {`${label} ${counts[tab] ?? 0}`}
-        </button>
-      ))}
-      {actions.length > 0 && (
-        <div className="relative px-1 pt-1">
-          <button
-            type="button"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((v) => !v)}
-            className={buttonClass + ' w-full'}
-          >
-            {`+ ${CODE_DE.SAMMLUNG_NEW}`}
-          </button>
-          {menuOpen && (
-            <ul
-              role="menu"
-              aria-label={CODE_DE.SAMMLUNG_NEW_MENU}
-              className="absolute left-1 right-1 bottom-full mb-1 z-10 rounded-md border border-[var(--line)] bg-white py-1 shadow"
+      {SAMMLUNG_ROWS.map(([tab, label]) => {
+        const teach = teachActions[tab] || null;
+        return (
+          <div key={tab} className="flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={() => onOpen(tab)}
+              title={formatCode(CODE_DE.SAMMLUNG_OPEN_TAB, label)}
+              className="min-w-0 flex-1 truncate text-left text-xs px-2 py-0.5 rounded text-[var(--ink)] hover:bg-white"
             >
-              {actions.map(({ label, action }) => (
-                <li key={label} role="none">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      onAction(action);
-                    }}
-                    className="w-full text-left text-xs px-2 py-1 text-[var(--ink)] hover:bg-[var(--bg-sunk)]"
-                  >
-                    {label}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+              {`${label} ${counts[tab] ?? 0}`}
+            </button>
+            {teach && (
+              // A 24×24 hit area around the ~14 px icon (review round 1, B5).
+              <button
+                type="button"
+                onClick={() => onAction(teach.action)}
+                title={teach.label}
+                aria-label={teach.label}
+                data-testid={`sammlung-teach-${tab}`}
+                className={
+                  'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-sm '
+                  + 'text-[var(--ink-3)] hover:bg-white hover:text-[var(--accent)]'
+                }
+              >
+                <Icon name={teach.icon} />
+              </button>
+            )}
+          </div>
+        );
+      })}
+      {actions.length > 0 && (
+        <div className="px-1 pt-1">
+          <MenuButton
+            label={CODE_DE.SAMMLUNG_NEW}
+            icon="plus"
+            menuLabel={CODE_DE.SAMMLUNG_NEW_MENU}
+            placement="up"
+            size="sm"
+            className="w-full"
+            buttonClassName={`${buttonClass} w-full justify-center`}
+            items={actions.map(({
+              id, label: itemLabel, icon, action,
+            }) => ({
+              id, label: itemLabel, icon, onSelect: () => onAction(action),
+            }))}
+          />
         </div>
       )}
     </section>
@@ -430,6 +439,15 @@ function CodeWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [readOnly, assetDoc, provider, sammlungTick],
   );
+  // Each row's own „… vormachen" (never on a read-only editor).
+  const teachActions = useMemo(() => {
+    if (readOnly || !assetDoc) return {};
+    const caps = (snapshotOf(provider) || {}).capabilities;
+    const out = {};
+    for (const [tab] of SAMMLUNG_ROWS) out[tab] = teachActionFor(caps, tab);
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readOnly, assetDoc, provider, sammlungTick]);
   const openSammlungTab = useCallback((tab) => {
     dispatch(openDrawer({ tab, focusId: null }));
   }, [dispatch]);
@@ -456,13 +474,14 @@ function CodeWorkspace({
                 onClick={() => open(path)}
                 title={path === entry ? CODE_DE.FILE_ENTRY_TITLE : path}
                 className={
-                  'w-full text-left truncate text-xs px-2 py-1 rounded '
+                  'flex w-full items-center gap-1 text-left text-xs px-2 py-1 rounded '
                   + (path === active
                     ? 'bg-[var(--accent)] text-white'
                     : 'text-[var(--ink)] hover:bg-white')
                 }
               >
-                {path === entry ? '▶ ' : ''}{path}
+                {path === entry && <Icon name="play" size="0.85em" />}
+                <span className="min-w-0 truncate">{path}</span>
               </button>
             </li>
           ))}
@@ -473,8 +492,13 @@ function CodeWorkspace({
               {debuggable ? CODE_DE.DEBUG_BP_HINT_PY : CODE_DE.DEBUG_JAVA_NO_BREAKPOINTS}
             </p>
             <div className="p-1.5 flex flex-col gap-1 border-t border-[var(--line)]">
-              <button type="button" onClick={handleNewFile} className={smallButton}>
-                + {CODE_DE.FILE_NEW}
+              <button
+                type="button"
+                onClick={handleNewFile}
+                className={`${smallButton} inline-flex items-center justify-center gap-1.5`}
+              >
+                <Icon name="plus" />
+                <span>{CODE_DE.FILE_NEW}</span>
               </button>
               <div className="flex gap-1">
                 <button type="button" onClick={handleRename} disabled={active === entry} className={smallButton + ' flex-1'}>
@@ -491,6 +515,7 @@ function CodeWorkspace({
           <SammlungSection
             counts={sammlungCounts}
             actions={newActions}
+            teachActions={teachActions}
             onOpen={openSammlungTab}
             onAction={dispatchSammlungAction}
             buttonClass={smallButton}

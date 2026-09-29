@@ -25,9 +25,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
-import { MdRefresh } from 'react-icons/md';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import { DEFAULT_PATHS } from '../../../constants/paths';
+import Icon from '../../../components/icons/Icon';
+import { toastIcon } from '../../../components/icons/toast';
 
 const SELECT_CLASS =
   'text-sm h-9 px-2 border border-gray-300 rounded-md bg-white ' +
@@ -52,7 +53,7 @@ export default function LocalDatasetQuickPick({ onPick, disabled = false }) {
       if (result?.success && Array.isArray(result.user_list)) {
         setUsers(result.user_list);
         if (result.user_list.length === 0) {
-          toast('Noch keine lokalen Datensätze aufgenommen.', { icon: 'ℹ️' });
+          toast('Noch keine lokalen Datensätze aufgenommen.', { icon: toastIcon('info') });
         }
       } else {
         toast.error('Benutzerliste konnte nicht geladen werden.');
@@ -74,7 +75,7 @@ export default function LocalDatasetQuickPick({ onPick, disabled = false }) {
         if (result?.success && Array.isArray(result.dataset_list)) {
           setDatasets(result.dataset_list);
           if (result.dataset_list.length === 0) {
-            toast(`Keine Datensätze für „${user}" gefunden.`, { icon: 'ℹ️' });
+            toast(`Keine Datensätze für „${user}" gefunden.`, { icon: toastIcon('info') });
           }
         } else {
           toast.error('Datensatzliste konnte nicht geladen werden.');
@@ -150,7 +151,7 @@ export default function LocalDatasetQuickPick({ onPick, disabled = false }) {
         aria-label="Listen aktualisieren"
         title="Listen aktualisieren"
       >
-        <MdRefresh className="w-6 h-6" />
+        <Icon name="refresh" className="w-6 h-6" />
       </button>
     </div>
   );

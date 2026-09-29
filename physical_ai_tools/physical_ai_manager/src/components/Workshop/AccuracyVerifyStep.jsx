@@ -28,6 +28,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import { setAccuracyResult, finishVerify } from '../../features/workshop/workshopSlice';
+import Icon from '../icons/Icon';
 
 const MIN_POINTS = 4;
 
@@ -258,7 +259,10 @@ function AccuracyVerifyStep() {
           </div>
         ) : (
           <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm rounded-md p-3 mb-4">
-            <p className="font-medium mb-1">Korrektur berechnet ✓</p>
+            <p className="font-medium mb-1 flex items-center gap-1.5">
+              Korrektur berechnet
+              <Icon name="check" />
+            </p>
             <p className="text-xs font-mono">
               Mittlere Abweichung: {fmt(accuracyResult.residual_mm_mean)} mm,
               {' '}max. {fmt(accuracyResult.residual_mm_max)} mm

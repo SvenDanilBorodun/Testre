@@ -51,6 +51,7 @@ import {
   showRenameSplitToast,
   showUndoToast,
 } from './drawerParts';
+import Icon from '../../icons/Icon';
 
 const isFiniteNumber = (v) => typeof v === 'number' && Number.isFinite(v);
 
@@ -269,9 +270,10 @@ export default function DrawerRecording({
               onClick={() => playVersion(newest)}
               disabled={previewPending}
               title={previewPending ? DE.PREVIEW_BLOCK_LEADER_PENDING : undefined}
-              className="rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {DE.PREVIEW_PLAY}
+              <Icon name="play" />
+              <span>{DE.PREVIEW_PLAY}</span>
             </button>
             <div className="inline-flex items-center gap-1" role="group" aria-label={DE.RUN_TEMPO_LABEL}>
               {PREVIEW_TEMPO_BUTTONS.map((t) => (
@@ -316,7 +318,7 @@ export default function DrawerRecording({
                     onClick={() => playVersion(row)}
                     className="rounded px-2 py-0.5 text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    ▶
+                    <Icon name="play" />
                   </button>
                 )}
                 <button

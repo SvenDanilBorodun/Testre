@@ -51,9 +51,11 @@ import {
 import { CODE_DE } from './code/codeMessagesDe';
 import { isCodeBreakpointId } from './code/codeBreakpoints';
 import { scanCodeAssets } from './code/codeAssetUsage';
+import Icon from '../icons/Icon';
+import { toastIcon } from '../icons/toast';
 
 const BUTTON_BASE =
-  'inline-flex items-center justify-center min-h-[36px] '
+  'inline-flex items-center justify-center gap-1.5 min-h-[36px] '
   + 'px-4 py-2 rounded-md text-sm font-medium '
   + 'focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 '
   + 'disabled:opacity-50 disabled:cursor-not-allowed';
@@ -85,6 +87,13 @@ function clampTempo(value) {
 // The sentinel `workflow/code_program.py::_raise_error` prefixes the runner's
 // own last output line with (decision A14). Spelled once, here and there.
 const TECHNIK_PREFIX = '[TECHNIK] ';
+
+// The Protokoll line a breakpoint hit writes (workflow/interpreter.py::
+// _pause_for_breakpoint and workflow/code_rpc.py::RunSession._paused): plain
+// text; the pause icon in front of it is drawn HERE. The server's f-string
+// prefixes are pinned equal to this constant by
+// robotis_ai_setup/tests/test_breakpoint_log_prefix_lockstep.py.
+export const BREAKPOINT_LOG_PREFIX = 'Haltepunkt erreicht: ';
 
 // A code run's replay names come from a TEXT scan, so one may be a comment or
 // an unrelated string. This marks the one answer that proves such a name is a
@@ -623,7 +632,7 @@ function RunControls({
       if (warnings.length > 0) {
         // German plural — `Block` (singular) vs `Blöcke` (plural).
         const noun = warnings.length === 1 ? 'Block' : 'Blöcke';
-        toast(`${warnings.length} ${noun} markiert: außerhalb des Arbeitsbereichs.`, { icon: '⚠️' });
+        toast(`${warnings.length} ${noun} markiert: außerhalb des Arbeitsbereichs.`, { icon: toastIcon('warning') });
       } else {
         toast.success(r.message);
       }
@@ -775,7 +784,7 @@ function RunControls({
             }
             aria-label={DE.RUN_START}
           >
-            ▶ {DE.RUN_START}
+            <Icon name="play" /> {DE.RUN_START}
           </button>
         ) : !paused ? (
           <button
@@ -789,7 +798,7 @@ function RunControls({
             }
             aria-label={DE.RUN_PAUSE}
           >
-            ⏸ {DE.RUN_PAUSE}
+            <Icon name="pause" /> {DE.RUN_PAUSE}
           </button>
         ) : (
           <>
@@ -804,7 +813,7 @@ function RunControls({
               }
               aria-label={DE.RUN_STEP}
             >
-              ↪ {DE.RUN_STEP}
+              <Icon name="step" /> {DE.RUN_STEP}
             </button>
             <button
               type="button"
@@ -817,7 +826,7 @@ function RunControls({
               }
               aria-label={DE.RUN_CONTINUE}
             >
-              ▶ {DE.RUN_CONTINUE}
+              <Icon name="play" /> {DE.RUN_CONTINUE}
             </button>
           </>
         )}
@@ -832,7 +841,7 @@ function RunControls({
           }
           aria-label={DE.RUN_STOP}
         >
-          ■ {DE.RUN_STOP}
+          <Icon name="stop" /> {DE.RUN_STOP}
         </button>
         <span
           className={
@@ -898,7 +907,7 @@ function RunControls({
               + 'hover:bg-[var(--bg-sunk)] focus-visible:ring-blue-500'
             }
           >
-            {logOpen ? '▾' : '▸'} {DE.DOCK_LOG_LABEL}
+            <Icon name={logOpen ? 'chevronDown' : 'chevronRight'} /> {DE.DOCK_LOG_LABEL}
             {!logOpen && log.length > 0 && (
               <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-[var(--bg-sunk)] text-[10px] text-[var(--ink-3)]">
                 {log.length}
@@ -915,7 +924,7 @@ function RunControls({
               + 'hover:bg-[var(--bg-sunk)] focus-visible:ring-blue-500'
             }
           >
-            🔍 Debug
+            <Icon name="debug" /> {DE.DOCK_TAB_DEBUG}
           </button>
         </div>
       </div>
@@ -991,6 +1000,9 @@ function RunControls({
                 <span className="text-[var(--ink-4)] mr-2">
                   {new Date(entry.ts).toLocaleTimeString('de-DE')}
                 </span>
+                {typeof entry.text === 'string' && entry.text.startsWith(BREAKPOINT_LOG_PREFIX) && (
+                  <Icon name="pause" className="mr-1 align-[-0.125em] text-amber-600" />
+                )}
                 {entry.text}
               </div>
             ))

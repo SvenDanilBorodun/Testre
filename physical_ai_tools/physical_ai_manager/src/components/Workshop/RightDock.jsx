@@ -10,6 +10,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { DE } from './blocks/messages_de';
+import Icon from '../icons/Icon';
 
 // Roboter Studio right dock — the tabbed, collapsible tool panel that replaced
 // the tall stacked right column (camera + jog + record + 3D + Lernpfad, all
@@ -126,7 +127,7 @@ function RightDock({
             : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
         }
       >
-        <span className="text-base leading-none" aria-hidden="true">{tab.icon}</span>
+        <Icon name={tab.icon} className="text-base" />
         <span className="hidden md:block leading-tight">{tab.label}</span>
         {tab.busy && (
           <span
@@ -195,7 +196,7 @@ function RightDock({
                 >
                   <div className="flex items-center justify-between gap-2 px-2.5 py-1 border-b border-[var(--line)] bg-[var(--bg-sunk)] shrink-0">
                     <span className="text-xs font-semibold text-[var(--ink)] truncate flex items-center gap-1.5">
-                      <span aria-hidden="true">{tab.icon}</span>
+                      <Icon name={tab.icon} />
                       {tab.label}
                     </span>
                     <button
@@ -206,7 +207,7 @@ function RightDock({
                       aria-label={`${tab.label} ${DE.DOCK_CLOSE_PANEL}`}
                       className="text-sm leading-none px-1.5 py-0.5 rounded text-[var(--ink-4)] hover:bg-[var(--bg-sunk)] hover:text-[var(--ink)] disabled:opacity-30 disabled:cursor-not-allowed"
                     >
-                      ✕
+                      <Icon name="close" />
                     </button>
                   </div>
                   <div className="flex-1 min-h-0 overflow-auto p-2">
@@ -235,9 +236,7 @@ function RightDock({
           aria-label={collapsed ? DE.DOCK_EXPAND : DE.DOCK_COLLAPSE}
           className="flex items-center justify-center md:w-full px-2 md:px-1 py-1.5 rounded-md border border-[var(--line)] bg-white text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
-          <span className="text-sm leading-none" aria-hidden="true">
-            {collapsed ? '⟨' : '⟩'}
-          </span>
+          <Icon name={collapsed ? 'chevronLeft' : 'chevronRight'} size={16} />
         </button>
         {visibleTabs.map(railButton)}
       </div>

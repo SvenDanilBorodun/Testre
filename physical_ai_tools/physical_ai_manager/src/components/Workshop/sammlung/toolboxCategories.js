@@ -22,6 +22,10 @@
  * `toolbox.js::filterContents`, so each block item is checked against the
  * snapshot's list with exactly that function's rule — an EMPTY list is
  * unrestricted. Cards, labels and buttons are never restricted.
+ *
+ * The creation buttons („Bewegung vormachen", „Ziel in der Kamera setzen", …)
+ * come from ONE table, sammlung/newActions.js, the drawer and the code sidebar
+ * read too, and are drawn as icon buttons (sammlung/IconButtonInflater.js).
  */
 
 import * as Blockly from 'blockly/core';
@@ -37,6 +41,8 @@ import {
   manageActionFor,
   previewAssetFor,
 } from './AssetCardInflater';
+import { ICON_BUTTON_FLYOUT_TYPE, registerIconButtonInflater } from './IconButtonInflater';
+import { NEW_ACTION_ROWS, newActionsFor } from './newActions';
 
 // 'cards' (custom flyout items) or 'plan-b' (labels + buttons). The spike
 // outcome is recorded in docs/KNOWN-ISSUES.md („Sammlung flyout: cards vs Plan B").
@@ -59,6 +65,16 @@ export const SAMMLUNG_BUTTON_KEYS = Object.freeze({
   MANAGE_POSITIONEN: 'EDU_SAMMLUNG_MANAGE_POSITIONEN',
   CARD_PREVIEW: 'EDU_SAMMLUNG_CARD_PREVIEW',
   CARD_MANAGE: 'EDU_SAMMLUNG_CARD_MANAGE',
+});
+
+// newActions.js row id → its flyout button callback key (the keys predate the
+// table and stay as they were).
+export const NEW_ACTION_BUTTON_KEYS = Object.freeze({
+  teachRecording: SAMMLUNG_BUTTON_KEYS.TEACH_RECORDING,
+  teachZiel: SAMMLUNG_BUTTON_KEYS.TEACH_ZIEL,
+  pinCamera: SAMMLUNG_BUTTON_KEYS.PIN_CAMERA,
+  pinSim: SAMMLUNG_BUTTON_KEYS.PIN_SIM,
+  teachPose: SAMMLUNG_BUTTON_KEYS.TEACH_POSE,
 });
 
 const REFRESH_DEBOUNCE_MS = 150;
@@ -100,6 +116,14 @@ function dispatch(workspace, action) {
 
 const label = (text) => ({ kind: 'label', text });
 const button = (text, callbackkey) => ({ kind: 'button', text, callbackkey });
+const iconButton = (text, callbackkey, icon, extra = {}) => ({
+  kind: ICON_BUTTON_FLYOUT_TYPE, text, callbackkey, icon, ...extra,
+});
+
+// The creation buttons of one Sammlung tab, from the one table.
+function newButtons(c, tab) {
+  return newActionsFor(c, tab).map((a) => iconButton(a.label, NEW_ACTION_BUTTON_KEYS[a.id], a.icon));
+}
 
 function restrictionOf(snapshot) {
   const list = snapshot.restrictedBlocks;
@@ -132,19 +156,9 @@ function cardItems(vm, c = null) {
     // Plan B (a test seam, never shipped) draws no disabled state: a press while
     // the bridge is pending is refused by useSimPreview with the same title.
     if (vm.canPreview) {
-      items.push({
-        kind: 'button',
-        text: `▶ ${DE.PREVIEW_START}`,
-        callbackkey: SAMMLUNG_BUTTON_KEYS.CARD_PREVIEW,
-        ...assetAttrs,
-      });
+      items.push(iconButton(DE.PREVIEW_START, SAMMLUNG_BUTTON_KEYS.CARD_PREVIEW, 'play', assetAttrs));
     }
-    items.push({
-      kind: 'button',
-      text: `⋯ ${DE.CARD_MANAGE}`,
-      callbackkey: SAMMLUNG_BUTTON_KEYS.CARD_MANAGE,
-      ...assetAttrs,
-    });
+    items.push(iconButton(DE.CARD_MANAGE, SAMMLUNG_BUTTON_KEYS.CARD_MANAGE, 'more', assetAttrs));
     return items;
   }
   return [{
@@ -198,10 +212,6 @@ function caps(snapshot) {
     ? snapshot.capabilities : DEFAULT_SAMMLUNG_SNAPSHOT.capabilities;
 }
 
-function canTeach(c) {
-  return !!(c.hardware && c.teach && !c.simMode);
-}
-
 export function variablenFlyout(workspace) {
   const snapshot = snapshotOf(workspace);
   const c = caps(snapshot);
@@ -247,8 +257,7 @@ export function aufnahmenFlyout(workspace) {
   const restricted = restrictionOf(snapshot);
   const replayAllowed = !restricted || restricted.has(REPLAY_BLOCK_TYPE);
   const index = buildWorkspaceAssetIndex(workspace, snapshot);
-  const items = [label(recordingsStatusLabel(snapshot))];
-  if (canTeach(c)) items.push(button(DE.FLY_TEACH_RECORDING, SAMMLUNG_BUTTON_KEYS.TEACH_RECORDING));
+  const items = [label(recordingsStatusLabel(snapshot)), ...newButtons(c, 'aufnahmen')];
   if (c.drawer) items.push(button(DE.FLY_MANAGE, SAMMLUNG_BUTTON_KEYS.MANAGE_AUFNAHMEN));
   let prefilled = 0;
   for (const vm of index.recordings) {
@@ -279,12 +288,10 @@ export function zieleFlyout(workspace) {
   const restricted = restrictionOf(snapshot);
   const allowedType = (type) => !restricted || restricted.has(type);
   const index = buildWorkspaceAssetIndex(workspace, snapshot);
-  const items = [...countLabel(index.counts.ziele, 'FLY_COUNT_ZIELE_ONE', 'FLY_COUNT_ZIELE')];
-  if (canTeach(c)) items.push(button(DE.FLY_TEACH_ZIEL, SAMMLUNG_BUTTON_KEYS.TEACH_ZIEL));
-  if (c.hardware && c.pinCamera && !c.simMode) {
-    items.push(button(DE.FLY_PIN_CAMERA, SAMMLUNG_BUTTON_KEYS.PIN_CAMERA));
-  }
-  if (c.pinSim && c.simMode) items.push(button(DE.FLY_PIN_SIM, SAMMLUNG_BUTTON_KEYS.PIN_SIM));
+  const items = [
+    ...countLabel(index.counts.ziele, 'FLY_COUNT_ZIELE_ONE', 'FLY_COUNT_ZIELE'),
+    ...newButtons(c, 'ziele'),
+  ];
   if (c.drawer) items.push(button(DE.FLY_MANAGE, SAMMLUNG_BUTTON_KEYS.MANAGE_ZIELE));
   for (const type of DESTINATION_GENERIC_BLOCKS) {
     if (allowedType(type)) items.push({ kind: 'block', type });
@@ -308,8 +315,10 @@ export function positionenFlyout(workspace) {
   const restricted = restrictionOf(snapshot);
   const refAllowed = !restricted || restricted.has(REF_TYPE);
   const index = buildWorkspaceAssetIndex(workspace, snapshot);
-  const items = [...countLabel(index.counts.positionen, 'FLY_COUNT_POSITIONEN_ONE', 'FLY_COUNT_POSITIONEN')];
-  if (canTeach(c)) items.push(button(DE.FLY_TEACH_POSE, SAMMLUNG_BUTTON_KEYS.TEACH_POSE));
+  const items = [
+    ...countLabel(index.counts.positionen, 'FLY_COUNT_POSITIONEN_ONE', 'FLY_COUNT_POSITIONEN'),
+    ...newButtons(c, 'positionen'),
+  ];
   if (c.drawer) items.push(button(DE.FLY_MANAGE, SAMMLUNG_BUTTON_KEYS.MANAGE_POSITIONEN));
   if (index.poses.length === 0) items.push(label(DE.FLY_POSES_EMPTY));
   for (const vm of index.poses) {
@@ -378,6 +387,9 @@ const VARIABLE_EVENTS = () => [
  */
 export function registerSammlungCategories(workspace, providerRef) {
   if (!workspace) return () => {};
+  // The flyouts below emit icon buttons: their inflater must exist (idempotent;
+  // BlocklyWorkspace registers it too, beside the card inflater).
+  registerIconButtonInflater();
   const ref = providerRef && typeof providerRef === 'object' ? providerRef : { current: null };
   providerRefs.set(workspace, ref);
 
@@ -385,11 +397,8 @@ export function registerSammlungCategories(workspace, providerRef) {
     workspace.registerToolboxCategoryCallback(key, fn);
   }
   const buttons = [
-    [SAMMLUNG_BUTTON_KEYS.TEACH_RECORDING, () => ({ type: 'teach', focus: 'recording' })],
-    [SAMMLUNG_BUTTON_KEYS.TEACH_POSE, () => ({ type: 'teach', focus: 'pose' })],
-    [SAMMLUNG_BUTTON_KEYS.TEACH_ZIEL, () => ({ type: 'teach', focus: 'ziel' })],
-    [SAMMLUNG_BUTTON_KEYS.PIN_CAMERA, () => ({ type: 'pinCamera' })],
-    [SAMMLUNG_BUTTON_KEYS.PIN_SIM, () => ({ type: 'pinSim' })],
+    // The creation buttons: one callback per newActions.js row.
+    ...NEW_ACTION_ROWS.map((row) => [NEW_ACTION_BUTTON_KEYS[row.id], () => ({ ...row.action })]),
     [SAMMLUNG_BUTTON_KEYS.MANAGE_VARIABLEN, () => ({ type: 'manage', tab: 'variablen', focusId: null })],
     [SAMMLUNG_BUTTON_KEYS.MANAGE_AUFNAHMEN, () => ({ type: 'manage', tab: 'aufnahmen', focusId: null })],
     [SAMMLUNG_BUTTON_KEYS.MANAGE_ZIELE, () => ({ type: 'manage', tab: 'ziele', focusId: null })],

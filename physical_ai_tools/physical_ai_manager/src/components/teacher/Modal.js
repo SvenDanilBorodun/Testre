@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom';
-import { MdClose } from 'react-icons/md';
+import Icon from '../icons/Icon';
 
 export default function Modal({ title, onClose, children, footer, widthClass = 'max-w-md' }) {
   return ReactDOM.createPortal(
@@ -21,7 +21,7 @@ export default function Modal({ title, onClose, children, footer, widthClass = '
             onClick={onClose}
             aria-label="Schließen"
           >
-            <MdClose size={20} />
+            <Icon name="close" size={20} />
           </button>
         </div>
         <div className="px-6 py-5 overflow-y-auto flex-1">{children}</div>

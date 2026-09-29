@@ -11,7 +11,8 @@
 /**
  * Asset cards in a Blockly flyout: a custom flyout item (inflater type
  * `edubotics_asset_card`) that draws one Sammlung asset — name, a German second
- * line, status chips, ▶ (simulator preview) and ⋯ (manage).
+ * line, status chips, a play control (simulator preview) and a more control
+ * (manage), both drawn as components/icons SVG (appendSvgIcon).
  *
  * THE CONTRACT A FLYOUT ITEM ELEMENT MUST MEET (Blockly 12.5.1):
  *   IBoundedElement  getBoundingRectangle, moveBy
@@ -35,6 +36,7 @@
 
 import * as Blockly from 'blockly/core';
 import { DE } from '../blocks/messages_de';
+import { appendSvgIcon } from '../../icons/svg';
 // A cycle with toolboxCategories.js, read only inside functions at event time.
 import { getProviderForWorkspace } from './toolboxCategories';
 
@@ -45,6 +47,7 @@ const CARD_BASE_HEIGHT = 38;
 const CARD_CHIP_ROW_HEIGHT = 20;
 const STRIPE_WIDTH = 4;
 const HIT_SIZE = 24;
+const HIT_ICON_SIZE = 14;
 
 const CHIP_COLOURS = Object.freeze({
   ok: { fill: '#dcfce7', text: '#166534' },
@@ -191,19 +194,19 @@ export class AssetCard {
       // change, so the answer brings back an enabled ▶ (a card never updates in
       // place).
       this.previewPending = this.state.previewPending === true;
-      this.previewEl = this.hitArea_(this.width - 2 * HIT_SIZE - 8, '▶', DE.PREVIEW_START,
+      this.previewEl = this.hitArea_(this.width - 2 * HIT_SIZE - 8, 'play', DE.PREVIEW_START,
         this.previewPending ? DE.PREVIEW_BLOCK_LEADER_PENDING : null);
     } else {
       this.previewPending = false;
       this.previewEl = null;
     }
-    this.manageEl = this.hitArea_(this.width - HIT_SIZE - 4, '⋯', DE.CARD_MANAGE);
+    this.manageEl = this.hitArea_(this.width - HIT_SIZE - 4, 'more', DE.CARD_MANAGE);
   }
 
   // `disabledReason`: a non-empty string draws the control disabled
   // (`aria-disabled`, greyed) with that reason as an SVG <title> — the tooltip
   // and, next to the aria-label, the accessible description.
-  hitArea_(x, glyph, label, disabledReason = null) {
+  hitArea_(x, iconName, label, disabledReason = null) {
     const { Svg } = Blockly.utils;
     const disabled = typeof disabledReason === 'string' && disabledReason !== '';
     const attrs = {
@@ -222,9 +225,10 @@ export class AssetCard {
     svg(Svg.RECT, {
       width: HIT_SIZE, height: HIT_SIZE, rx: 4, ry: 4, fill: disabled ? '#f9fafb' : '#f3f4f6',
     }, g);
-    textNode(g, {
-      x: HIT_SIZE / 2, y: 16, 'font-size': 12, fill: disabled ? '#9ca3af' : '#374151', 'text-anchor': 'middle',
-    }, glyph);
+    const inset = (HIT_SIZE - HIT_ICON_SIZE) / 2;
+    appendSvgIcon(g, iconName, {
+      x: inset, y: inset, size: HIT_ICON_SIZE, stroke: disabled ? '#9ca3af' : '#374151', create: svg,
+    });
     return g;
   }
 

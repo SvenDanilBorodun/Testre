@@ -7,13 +7,6 @@ import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import {
-  MdKeyboardDoubleArrowLeft,
-  MdKeyboardDoubleArrowRight,
-  MdTask,
-  MdViewInAr,
-  MdClose,
-} from 'react-icons/md';
 import ControlPanel from '../components/ControlPanel';
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import ImageGrid from '../components/ImageGrid';
@@ -21,6 +14,7 @@ import InfoPanel from '../components/InfoPanel';
 import { addTag } from '../features/tasks/taskSlice';
 import { setIsFirstLoadFalse, moveToPage } from '../features/ui/uiSlice';
 import PageType from '../constants/pageType';
+import Icon from '../components/icons/Icon';
 
 // The 3D follower twin pulls in three.js (~600 KB) + urdf-loader. Load it as a
 // LAZY chunk so it stays out of the entry bundle the white-screen CI greps, and
@@ -151,7 +145,7 @@ export default function RecordPage({ isActive = true }) {
           title={isUrdfOpen ? '3D-Ansicht schließen' : '3D-Ansicht öffnen'}
           aria-pressed={isUrdfOpen}
         >
-          <MdViewInAr size={16} />
+          <Icon name="box" size={16} />
           3D-Ansicht
         </button>
         <div className="flex-1" />
@@ -161,7 +155,7 @@ export default function RecordPage({ isActive = true }) {
             className="w-10 h-10 bg-white/[0.08] border border-white/15 rounded-full flex items-center justify-center text-white/80 backdrop-blur-md hover:bg-white/15"
             title="Panel öffnen"
           >
-            <MdKeyboardDoubleArrowLeft size={22} />
+            <Icon name="chevronsLeft" size={22} />
           </button>
         )}
       </div>
@@ -181,7 +175,7 @@ export default function RecordPage({ isActive = true }) {
                 className="absolute top-2 right-2 z-20 w-7 h-7 bg-black/50 text-white rounded-full flex items-center justify-center hover:bg-black/70"
                 title="3D-Ansicht schließen"
               >
-                <MdClose size={16} />
+                <Icon name="close" size={16} />
               </button>
               <Suspense
                 fallback={
@@ -202,7 +196,7 @@ export default function RecordPage({ isActive = true }) {
                   className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider mb-0.5"
                   style={{ color: 'var(--accent)' }}
                 >
-                  <MdTask />
+                  <Icon name="task" />
                   Aktuelle Aufgabe
                   {multiTaskIndex !== undefined && (
                     <span className="opacity-80">
@@ -234,7 +228,7 @@ export default function RecordPage({ isActive = true }) {
             className="absolute -left-4 top-2 w-9 h-9 bg-white/95 border border-[var(--line)] rounded-full flex items-center justify-center shadow-pop text-[var(--ink-2)] hover:text-[var(--ink)] z-30 backdrop-blur"
             title="Einklappen"
           >
-            <MdKeyboardDoubleArrowRight size={20} />
+            <Icon name="chevronsRight" size={20} />
           </button>
           <InfoPanel />
         </div>

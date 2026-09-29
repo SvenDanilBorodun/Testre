@@ -16,12 +16,12 @@
 
 import React, { useCallback, useEffect, useRef } from 'react';
 import clsx from 'clsx';
-import { MdClose } from 'react-icons/md';
 import { useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import { STREAM_QUALITY } from '../constants/streamConfig';
 import rosConnectionManager from '../utils/rosConnectionManager';
 import { usePiMode, videoStreamBase } from '../utils/piMode';
+import Icon from './icons/Icon';
 
 // H1: during a classroom-Jetson inference session the Jetson's
 // web_video_server (:8080) is bound to loopback only and there is NO LAN
@@ -226,12 +226,12 @@ export default function ImageGridCell({
       style={{ cursor: !topic ? 'pointer' : 'default', aspectRatio: aspect, ...style }}
     >
       {topic && topic.trim() !== '' && (
-        <button className={classImageGridCellButton} onClick={handleClose}>
-          <MdClose size={20} />
+        <button className={classImageGridCellButton} onClick={handleClose} aria-label="Kamera entfernen" title="Kamera entfernen">
+          <Icon name="close" size={20} />
         </button>
       )}
       <div ref={containerRef} className="w-full h-full flex items-center justify-center">
-        {(!topic || !isActive) && <div className="text-6xl text-gray-400 font-light">+</div>}
+        {(!topic || !isActive) && <Icon name="plus" size="3.75rem" className="text-gray-400" strokeWidth={1.5} />}
       </div>
     </div>
   );

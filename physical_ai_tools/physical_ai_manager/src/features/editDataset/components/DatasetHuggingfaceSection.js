@@ -18,7 +18,6 @@ import React, { useState, useCallback, useEffect } from 'react';
 import clsx from 'clsx';
 import { useSelector, useDispatch } from 'react-redux';
 import toast from 'react-hot-toast';
-import { MdFolderOpen, MdOutlineFileUpload, MdOutlineFileDownload } from 'react-icons/md';
 import {
   setHFUserId,
   setHFRepoIdUpload,
@@ -30,7 +29,8 @@ import FileBrowserModal from '../../../components/FileBrowserModal';
 import { useHfUserList } from '../../../hooks/useHfUserList';
 import SectionSelector from './SectionSelector';
 import { DEFAULT_PATHS, TARGET_FOLDERS, TARGET_FILES } from '../../../constants/paths';
-import HFStatus from '../../../constants/HFStatus';
+import HFStatus, { hfStatusLabelDe } from '../../../constants/HFStatus';
+import Icon from '../../../components/icons/Icon';
 
 // Constants
 const SECTION_NAME = {
@@ -46,7 +46,7 @@ const validateHfRepoName = (repoName) => {
   if (repoName.length > 96) {
     return {
       isValid: false,
-      message: 'Repository name must be 96 characters or less',
+      message: 'Der Repository-Name darf höchstens 96 Zeichen lang sein.',
     };
   }
 
@@ -59,7 +59,7 @@ const validateHfRepoName = (repoName) => {
   ) {
     return {
       isValid: false,
-      message: 'Repository name cannot start or end with "-" or "."',
+      message: 'Der Repository-Name darf nicht mit „-“ oder „.“ beginnen oder enden.',
     };
   }
 
@@ -67,7 +67,7 @@ const validateHfRepoName = (repoName) => {
   if (repoName.includes('--') || repoName.includes('..')) {
     return {
       isValid: false,
-      message: 'Repository name cannot contain "--" or ".."',
+      message: 'Der Repository-Name darf kein „--“ und kein „..“ enthalten.',
     };
   }
 
@@ -76,7 +76,7 @@ const validateHfRepoName = (repoName) => {
   if (!allowedPattern.test(repoName)) {
     return {
       isValid: false,
-      message: 'Repository name can only contain letters, numbers, "-", "_", and "."',
+      message: 'Der Repository-Name darf nur Buchstaben, Ziffern, „-“, „_“ und „.“ enthalten.',
     };
   }
 
@@ -130,7 +130,7 @@ const FolderBrowseButton = ({ onClick, disabled = false, ariaLabel }) => {
       aria-label={ariaLabel}
       disabled={disabled}
     >
-      <MdFolderOpen className="w-8 h-8" />
+      <Icon name="folderOpen" className="w-8 h-8" />
     </button>
   );
 };
@@ -359,7 +359,7 @@ const HuggingfaceSection = () => {
   return (
     <div className="w-full flex flex-col items-start justify-start bg-gray-100 p-10 gap-4 rounded-xl">
       <div className="w-full flex items-center justify-start">
-        <span className="text-2xl font-bold mb-4">Hugging Face Upload & Download</span>
+        <span className="text-2xl font-bold mb-4">Hugging Face: hochladen und herunterladen</span>
       </div>
 
       <div className="w-full flex flex-row items-start justify-start gap-4">
@@ -367,7 +367,7 @@ const HuggingfaceSection = () => {
           {/* User ID Selection */}
           <div className="bg-white p-5 rounded-md flex flex-col items-start justify-center gap-4 shadow-md">
             <div className="w-full flex items-center justify-start">
-              <span className="text-lg font-bold">User ID Configuration</span>
+              <span className="text-lg font-bold">Benutzer-ID</span>
             </div>
             <div
               className={clsx('w-full flex flex-row gap-3', {
@@ -380,7 +380,7 @@ const HuggingfaceSection = () => {
                 onChange={(e) => dispatch(setHFUserId(e.target.value))}
                 disabled={isDownloading || isUploading}
               >
-                <option value="">Select User ID</option>
+                <option value="">Benutzer-ID wählen</option>
                 {hfUserList.map((userId) => (
                   <option key={userId} value={userId}>
                     {userId}
@@ -397,13 +397,13 @@ const HuggingfaceSection = () => {
                   }}
                   disabled={isLoading}
                 >
-                  {isLoading ? 'Loading...' : 'Load'}
+                  {isLoading ? 'Wird geladen …' : 'Laden'}
                 </button>
               </div>
             </div>
             {/* Data Type Selection */}
             <div className="w-full flex items-center justify-start">
-              <span className="text-lg font-bold">Data Type</span>
+              <span className="text-lg font-bold">Art der Daten</span>
             </div>
             <div className="w-full flex flex-row items-center justify-start">
               <div className="flex items-center bg-gray-200 rounded-lg p-1">
@@ -415,7 +415,7 @@ const HuggingfaceSection = () => {
                   } ${!canChangeDataType ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                   onClick={() => dispatch(setHFDataType('dataset'))}
                 >
-                  Dataset
+                  Datensatz
                 </button>
                 <button
                   className={`px-6 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -425,7 +425,7 @@ const HuggingfaceSection = () => {
                   } ${!canChangeDataType ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                   onClick={() => dispatch(setHFDataType('model'))}
                 >
-                  Model
+                  Modell
                 </button>
               </div>
             </div>
@@ -448,12 +448,14 @@ const HuggingfaceSection = () => {
               {/* Upload Dataset Section Header */}
               <div className="w-full flex flex-col items-start justify-start gap-2 bg-gray-50 border border-gray-200 p-3 rounded-md">
                 <div className="w-full flex items-center rounded-md font-medium gap-2">
-                  <MdOutlineFileUpload className="text-lg text-green-600" />
-                  Upload {hfDataType.charAt(0).toUpperCase() + hfDataType.slice(1)}
+                  <Icon name="upload" className="text-lg text-green-600" />
+                  {hfDataType === 'model' ? 'Modell hochladen' : 'Datensatz hochladen'}
                 </div>
                 <div className="text-sm text-gray-600">
                   <div className="mb-1">
-                    Uploads {hfDataType} from local directory to Hugging Face hub
+                    {hfDataType === 'model'
+                      ? 'Lädt ein Modell aus einem Ordner auf diesem Rechner zu Hugging Face hoch.'
+                      : 'Lädt einen Datensatz aus einem Ordner auf diesem Rechner zu Hugging Face hoch.'}
                   </div>
                 </div>
               </div>
@@ -462,7 +464,7 @@ const HuggingfaceSection = () => {
               <div className="w-full flex flex-col gap-3">
                 {/* Local Directory Input */}
                 <div className="w-full flex flex-col gap-2">
-                  <span className="text-lg font-bold">Local Directory</span>
+                  <span className="text-lg font-bold">Ordner auf diesem Rechner</span>
                   <div className="w-full flex flex-row items-center justify-start gap-2">
                     <FolderBrowseButton
                       onClick={() =>
@@ -471,7 +473,7 @@ const HuggingfaceSection = () => {
                           : setShowHfLocalModelDirBrowserModal(true)
                       }
                       disabled={isDownloading}
-                      ariaLabel="Browse files for local directory"
+                      ariaLabel="Ordner auswählen"
                     />
                     <input
                       className={clsx(STYLES.textInput, 'flex-1', {
@@ -479,7 +481,7 @@ const HuggingfaceSection = () => {
                         'bg-white': !isDownloading,
                       })}
                       type="text"
-                      placeholder="Enter local directory path or browse"
+                      placeholder="Ordnerpfad eingeben oder auswählen"
                       value={hfLocalDirUpload || ''}
                       onChange={(e) => setHfLocalDirUpload(e.target.value)}
                       disabled={isDownloading}
@@ -489,7 +491,7 @@ const HuggingfaceSection = () => {
 
                 {/* Repo ID Input */}
                 <div className="w-full flex flex-col gap-2">
-                  <span className="text-lg font-bold">Repository ID</span>
+                  <span className="text-lg font-bold">Repository-ID</span>
                   <div className="relative">
                     <div
                       className={clsx(
@@ -503,7 +505,7 @@ const HuggingfaceSection = () => {
                       )}
                     >
                       <div className="px-3 py-2 bg-gray-50 border-r border-gray-300 text-gray-700 font-medium flex items-center">
-                        <span className="text-sm">{userId || 'username'}</span>
+                        <span className="text-sm">{userId || 'Benutzername'}</span>
                         <span className="mx-1 text-gray-400">/</span>
                       </div>
                       <input
@@ -515,7 +517,7 @@ const HuggingfaceSection = () => {
                           }
                         )}
                         type="text"
-                        placeholder="Enter repository id"
+                        placeholder="Repository-ID eingeben"
                         value={hfRepoIdUpload || ''}
                         onChange={(e) => handleUploadRepoIdChange(e.target.value)}
                         disabled={isUploading}
@@ -523,13 +525,16 @@ const HuggingfaceSection = () => {
                     </div>
                     <div className="mt-1 text-xs">
                       <div className="text-gray-500">
-                        Full repository path:{' '}
+                        Vollständiger Repository-Pfad:{' '}
                         <span className="font-mono text-blue-600">
                           {userId || ''}/{hfRepoIdUpload || ''}
                         </span>
                       </div>
                       {!uploadRepoValidation.isValid && hfRepoIdUpload && (
-                        <div className="text-red-500 mt-1">⚠️ {uploadRepoValidation.message}</div>
+                        <div className="flex items-center gap-1 text-red-500 mt-1">
+                          <Icon name="warning" />
+                          <span>{uploadRepoValidation.message}</span>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -554,8 +559,8 @@ const HuggingfaceSection = () => {
                     disabled={!uploadButtonEnabled}
                   >
                     <div className="flex items-center justify-center gap-2">
-                      <MdOutlineFileUpload className="w-6 h-6" />
-                      Upload
+                      <Icon name="upload" className="w-6 h-6" />
+                      Hochladen
                     </div>
                   </button>
 
@@ -568,14 +573,19 @@ const HuggingfaceSection = () => {
                     onClick={operations.cancelOperation}
                     disabled={!isUploading}
                   >
-                    Cancel
+                    Abbrechen
                   </button>
 
                   {/* Status */}
                   <div className="flex flex-row items-center justify-start">
                     <span className="text-sm text-gray-500">
-                      {isUploading && '⏳ Uploading...'}
-                      {!isUploading && hfStatus}
+                      {isUploading && (
+                        <span className="inline-flex items-center gap-1">
+                          <Icon name="hourglass" />
+                          Wird hochgeladen …
+                        </span>
+                      )}
+                      {!isUploading && hfStatusLabelDe(hfStatus)}
                     </span>
                   </div>
 
@@ -606,12 +616,14 @@ const HuggingfaceSection = () => {
               {/* Download Dataset Section Header */}
               <div className="w-full flex flex-col items-start justify-start gap-2 bg-gray-50 border border-gray-200 p-3 rounded-md">
                 <div className="w-full flex items-center rounded-md font-medium gap-2">
-                  <MdOutlineFileDownload className="text-lg text-blue-600" />
-                  Download {hfDataType.charAt(0).toUpperCase() + hfDataType.slice(1)}
+                  <Icon name="download" className="text-lg text-blue-600" />
+                  {hfDataType === 'model' ? 'Modell herunterladen' : 'Datensatz herunterladen'}
                 </div>
                 <div className="text-sm text-gray-600">
                   <div className="mb-1">
-                    Downloads {hfDataType} from Hugging Face hub to local cache directory
+                    {hfDataType === 'model'
+                      ? 'Lädt ein Modell von Hugging Face auf diesen Rechner.'
+                      : 'Lädt einen Datensatz von Hugging Face auf diesen Rechner.'}
                   </div>
                 </div>
               </div>
@@ -620,7 +632,7 @@ const HuggingfaceSection = () => {
               <div className="w-full flex flex-col gap-3">
                 {/* Repo ID Input */}
                 <div className="w-full flex flex-col gap-2">
-                  <span className="text-lg font-bold">Repository ID</span>
+                  <span className="text-lg font-bold">Repository-ID</span>
                   <div className="relative">
                     <div
                       className={clsx(
@@ -634,7 +646,7 @@ const HuggingfaceSection = () => {
                       )}
                     >
                       <div className="px-3 py-2 bg-gray-50 border-r border-gray-300 text-gray-700 font-medium flex items-center">
-                        <span className="text-sm">{userId || 'username'}</span>
+                        <span className="text-sm">{userId || 'Benutzername'}</span>
                         <span className="mx-1 text-gray-400">/</span>
                       </div>
                       <input
@@ -646,7 +658,7 @@ const HuggingfaceSection = () => {
                           }
                         )}
                         type="text"
-                        placeholder="Enter repository id"
+                        placeholder="Repository-ID eingeben"
                         value={hfRepoIdDownload || ''}
                         onChange={(e) => handleDownloadRepoIdChange(e.target.value)}
                         disabled={isDownloading}
@@ -654,13 +666,16 @@ const HuggingfaceSection = () => {
                     </div>
                     <div className="mt-1 text-xs">
                       <div className="text-gray-500">
-                        Full repository path:{' '}
+                        Vollständiger Repository-Pfad:{' '}
                         <span className="font-mono text-blue-600">
                           {userId || ''}/{hfRepoIdDownload || ''}
                         </span>
                       </div>
                       {!downloadRepoValidation.isValid && hfRepoIdDownload && (
-                        <div className="text-red-500 mt-1">⚠️ {downloadRepoValidation.message}</div>
+                        <div className="flex items-center gap-1 text-red-500 mt-1">
+                          <Icon name="warning" />
+                          <span>{downloadRepoValidation.message}</span>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -670,8 +685,8 @@ const HuggingfaceSection = () => {
                 <div className="w-full flex flex-row items-center mt-1">
                   <span className="text-xs text-gray-600 flex items-center gap-1">
                     {/* The dataset will be saved in the following directory */}
-                    <MdFolderOpen className="inline-block w-4 h-4 text-blue-700 mr-1" />
-                    The {hfDataType} will be saved in{' '}
+                    <Icon name="folderOpen" className="inline-block w-4 h-4 text-blue-700 mr-1" />
+                    {hfDataType === 'model' ? 'Das Modell wird gespeichert in' : 'Der Datensatz wird gespeichert in'}{' '}
                     <span className="font-mono text-blue-700">
                       {hfDataType === 'dataset'
                         ? DEFAULT_PATHS.DATASET_PATH
@@ -699,8 +714,8 @@ const HuggingfaceSection = () => {
                     disabled={!downloadButtonEnabled}
                   >
                     <div className="flex items-center justify-center gap-2">
-                      <MdOutlineFileDownload className="w-6 h-6" />
-                      Download
+                      <Icon name="download" className="w-6 h-6" />
+                      Herunterladen
                     </div>
                   </button>
 
@@ -713,18 +728,23 @@ const HuggingfaceSection = () => {
                     onClick={operations.cancelOperation}
                     disabled={!isDownloading}
                   >
-                    Cancel
+                    Abbrechen
                   </button>
 
                   {/* Status */}
                   <div className="flex flex-row items-center justify-start gap-2">
                     <span className="text-sm text-gray-500">
-                      {isDownloading && '⏳ Downloading...'}
-                      {!isDownloading && hfStatus}
+                      {isDownloading && (
+                        <span className="inline-flex items-center gap-1">
+                          <Icon name="hourglass" />
+                          Wird heruntergeladen …
+                        </span>
+                      )}
+                      {!isDownloading && hfStatusLabelDe(hfStatus)}
                     </span>
                     {/* Spinner for model downloads - right next to status text */}
                     {isDownloading && hfDataType.toLowerCase() === 'model' && (
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+                      <Icon name="loading" size={16} className="animate-spin text-blue-600" />
                     )}
                   </div>
 
@@ -757,15 +777,15 @@ const HuggingfaceSection = () => {
         isOpen={showHfLocalDirBrowserModal}
         onClose={() => setShowHfLocalDirBrowserModal(false)}
         onFileSelect={handleHfLocalDirSelect}
-        title="Select Local Directory for Upload"
-        selectButtonText="Select"
+        title="Ordner zum Hochladen auswählen"
+        selectButtonText="Auswählen"
         allowDirectorySelect={true}
         targetFolderName={[
           TARGET_FOLDERS.DATASET_METADATA,
           TARGET_FOLDERS.DATASET_VIDEO,
           TARGET_FOLDERS.DATASET_DATA,
         ]}
-        targetFileLabel="Dataset folder found! 🎯"
+        targetFileLabel="Datensatz-Ordner gefunden"
         initialPath={DEFAULT_PATHS.DATASET_PATH}
         defaultPath={DEFAULT_PATHS.DATASET_PATH}
         homePath=""
@@ -776,11 +796,11 @@ const HuggingfaceSection = () => {
         isOpen={showHfLocalModelDirBrowserModal}
         onClose={() => setShowHfLocalModelDirBrowserModal(false)}
         onFileSelect={handleHfLocalDirSelect}
-        title="Select Local Directory for Upload"
-        selectButtonText="Select"
+        title="Ordner zum Hochladen auswählen"
+        selectButtonText="Auswählen"
         allowDirectorySelect={true}
         targetFileName={[TARGET_FILES.POLICY_MODEL]}
-        targetFileLabel="Policy file found! 🎯"
+        targetFileLabel="Modelldatei gefunden"
         initialPath={DEFAULT_PATHS.POLICY_MODEL_PATH}
         defaultPath={DEFAULT_PATHS.POLICY_MODEL_PATH}
         homePath=""

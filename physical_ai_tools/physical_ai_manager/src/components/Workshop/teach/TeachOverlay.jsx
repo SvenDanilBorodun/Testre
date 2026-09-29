@@ -10,6 +10,13 @@
 // captured Positionen/Ziele in the document, and offers the home glide ONCE
 // at „Fertig". Every service call and every key rule lives in the hook.
 //
+// It is ONE focused window per kind (owner decision D1): „Bewegung vormachen"
+// (Space records, F frees — and the review), „Position vormachen" (P, F) or
+// „Ziel vormachen" (Z, F). The buttons it renders and enables ask the same
+// predicate the hook's keys do (teachGates.js::teachKeyOffered), and its list
+// only takes its own kind — except the Ziel window's „Als Position speichern"
+// answer, which stores a Position (owner decision D3).
+//
 // „The document" is an asset document (sammlung/assetDocument.js): a Blockly
 // workspace or a Python/Java program (owner decision O4). Captures go into its
 // Ziele store, automatic names skip the names the program pins itself, a
@@ -52,7 +59,11 @@ import useTeachSession, { classifyTeachKey } from './useTeachSession';
 import { createTeachSounds } from './teachSounds';
 import ReviewStrip from './ReviewStrip';
 import LeaderActivationGate from './LeaderActivationGate';
-import { teachLeaderStatus, teachLeaderStatusNoticeDe } from './teachGates';
+import {
+  TEACH_KIND_ICON, TEACH_KIND_LABEL_DE, isTeachKind, teachKeyOffered, teachLeaderStatus,
+  teachLeaderStatusNoticeDe,
+} from './teachGates';
+import Icon from '../../icons/Icon';
 import { formatCmDe, isZielTouchTooHigh, zielTouchHeightAboveTableMm } from './zielTouch';
 import {
   buildProgramBlocks, buildProgramSteps, makeGripperStateOf, placeGripperState,
@@ -77,7 +88,6 @@ async function copyLines(language, lines) {
 // The cloud keeps at most 16 recording rows per workflow (SQL prune cap).
 export const TEACH_TRAJECTORY_SLOTS = 16;
 const SLOTS_LOW_FROM = 14;
-const FOCUS_HIGHLIGHT_MS = 2000;
 const NOT_SIGNED_IN_DE = 'Nicht angemeldet — Speichern nicht möglich.';
 const INSERT_FAILED_DE = 'Die Blöcke konnten nicht eingefügt werden.';
 const COLLISION_BUTTON_SELECTOR =
@@ -95,20 +105,36 @@ const STATE_LINE = {
   bereit: DE.TEACH_STATE_LEADER_READY,
 };
 
-const HINT_LINE = {
-  fest: DE.TEACH_HINT_LOCKED,
-  frei: DE.TEACH_HINT_FREE,
-  aufnahme: DE.TEACH_HINT_REC,
-  abschluss: DE.TEACH_HINT_DONE,
-};
+// The hint under the state line, per window kind and state. Each names only
+// the keys its window offers.
+const HINT_LINE = Object.freeze({
+  recording: {
+    fest: DE.TEACH_HINT_LOCKED,
+    frei: DE.TEACH_HINT_FREE,
+    aufnahme: DE.TEACH_HINT_REC,
+    abschluss: DE.TEACH_HINT_DONE,
+  },
+  pose: {
+    fest: DE.TEACH_HINT_LOCKED_POSE,
+    frei: DE.TEACH_HINT_FREE_POSE,
+    abschluss: DE.TEACH_HINT_DONE,
+  },
+  ziel: {
+    fest: DE.TEACH_HINT_LOCKED_ZIEL,
+    frei: DE.TEACH_HINT_FREE_ZIEL,
+    abschluss: DE.TEACH_HINT_DONE,
+  },
+});
 
-const LEADER_HINT_LINE = {
-  bereit: DE.TEACH_HINT_LEADER,
-  aufnahme: DE.TEACH_HINT_LEADER_REC,
-  abschluss: DE.TEACH_HINT_DONE,
-};
-
-const FOCUS_KEY = { recording: 'space', pose: 'p', ziel: 'z' };
+const LEADER_HINT_LINE = Object.freeze({
+  recording: {
+    bereit: DE.TEACH_HINT_LEADER,
+    aufnahme: DE.TEACH_HINT_LEADER_REC,
+    abschluss: DE.TEACH_HINT_DONE,
+  },
+  pose: { bereit: DE.TEACH_HINT_LEADER_POSE, abschluss: DE.TEACH_HINT_DONE },
+  ziel: { bereit: DE.TEACH_HINT_LEADER_ZIEL, abschluss: DE.TEACH_HINT_DONE },
+});
 
 function mmss(seconds) {
   const s = Math.max(0, Math.floor(Number(seconds) || 0));
@@ -155,6 +181,40 @@ export function teachListMeta(item) {
   return formatDe(DE.TEACH_LIST_PLACE_META, formatMmDe(item.x), formatMmDe(item.y), DE.CARD_SOURCE_TOUCH);
 }
 
+/**
+ * Which of the four action buttons (Space, F, P, Z) is ENABLED now. Every
+ * cell is ANDed with the kind contract (teachGates.js::teachKeyOffered, the
+ * session's own gate), so a key the window does not offer is never enabled —
+ * even should its button ever be rendered (the grid renders only offered
+ * ones). `canStartNew`: online and the leader status known (R7); the stop /
+ * cancel / re-lock cells need only `online`.
+ */
+export function teachActionCells({
+  kind, mode, state, relock, online, canStartNew,
+}) {
+  const offered = (key) => teachKeyOffered({ kind, mode, key });
+  const stateCell = mode === 'leader' ? {
+    space: (canStartNew && state === 'bereit') || (online && state === 'aufnahme'),
+    f: false,
+    p: canStartNew && state === 'bereit',
+    z: canStartNew && state === 'bereit',
+  } : {
+    space: (canStartNew && ['fest', 'frei'].includes(state))
+      || (online && ['countdown', 'aufnahme'].includes(state)),
+    f: (canStartNew && state === 'fest')
+      || (online && (['countdown', 'frei', 'aufnahme'].includes(state)
+        || (state === 'pruefen' && relock === 'failed'))),
+    p: canStartNew && ['fest', 'frei'].includes(state),
+    z: canStartNew && ['fest', 'frei'].includes(state),
+  };
+  return {
+    space: offered('space') && stateCell.space,
+    f: offered('f') && stateCell.f,
+    p: offered('p') && stateCell.p,
+    z: offered('z') && stateCell.z,
+  };
+}
+
 /** A fresh take's clean-up: lead trimmed, the fall-onset end applied, pauses kept. */
 export function defaultCleanupChoice(take, analysis) {
   const last = Math.max(0, (Array.isArray(take && take.points) ? take.points.length : 0) - 1);
@@ -180,7 +240,7 @@ export function rowsDurationS(rows) {
 }
 
 function TeachOverlay({
-  mode = 'hand', focus = null, onClose, workspace, assetDoc = null, accessToken, workflowId, robotType, caps = null,
+  mode = 'hand', kind = null, onClose, workspace, assetDoc = null, accessToken, workflowId, robotType, caps = null,
   heartbeatOk, rsBridge, saveWorkflowNow, refetchTrajectories,
 }) {
   const containerRef = useRef(null);
@@ -204,7 +264,7 @@ function TeachOverlay({
   // Latest values for callbacks that outlive a render (uploads, the hook).
   const latest = useRef({});
   latest.current = {
-    accessToken, workflowId, robotType, saveWorkflowNow, refetchTrajectories, doc, onClose, caps,
+    accessToken, workflowId, robotType, saveWorkflowNow, refetchTrajectories, doc, onClose, caps, kind,
   };
 
   // „In dieser Runde". The ref is written synchronously, so two keeps inside
@@ -302,8 +362,10 @@ function TeachOverlay({
     if (typeof refetch === 'function') refetch();
   }, [patchItem]);
 
+  // Only a Bewegung window keeps takes (the engine never produces one
+  // elsewhere; this is the list's own fence).
   const onKeep = useCallback((take) => {
-    if (!take) return;
+    if (!take || latest.current.kind !== 'recording') return;
     const name = nextAutoName(DE.TEACH_AUTO_NAME_RECORDING, recordingNames());
     keySeq.current += 1;
     const key = `rec-${keySeq.current}`;
@@ -388,9 +450,13 @@ function TeachOverlay({
 
   // Only successful captures arrive here; the hook toasts a refusal itself.
   // The list is the feedback, so a stored capture shows no toast.
+  // Only a capture of this window's own kind is stored (the engine never sends
+  // another; the too-high Ziel's „Als Position speichern" goes through
+  // resolveZielPrompt, not here).
   const onCapture = useCallback(({ kind, name, response }) => {
     if (!response || !response.success) return;
-    if (kind !== 'pose' && isZielTouchTooHigh(response.world_z, latest.current.caps)) {
+    if (kind !== latest.current.kind || !isTeachKind(kind) || kind === 'recording') return;
+    if (kind === 'ziel' && isZielTouchTooHigh(response.world_z, latest.current.caps)) {
       // The name stays issued until the student answers.
       keySeq.current += 1;
       updatePrompts((list) => [...list, {
@@ -465,6 +531,7 @@ function TeachOverlay({
   const session = useTeachSession({
     enabled: true,
     mode,
+    kind,
     heartbeatOk: heartbeatOk !== false,
     collisionActive,
     leaderGone,
@@ -592,14 +659,6 @@ function TeachOverlay({
     }
   };
 
-  // A flyout's „✋ … vormachen" pre-highlights its action for 2 s.
-  const [highlightKey, setHighlightKey] = useState(FOCUS_KEY[focus] || null);
-  useEffect(() => {
-    if (!highlightKey) return undefined;
-    const t = setTimeout(() => setHighlightKey(null), FOCUS_HIGHLIGHT_MS);
-    return () => clearTimeout(t);
-  }, [highlightKey]);
-
   const leaderOn = !!(rsBridge && rsBridge.leaderOn);
   const [leaderTurnedOn, setLeaderTurnedOn] = useState(false);
   // Hand mode only: in leader mode a live leader is the point, and in a pending
@@ -665,7 +724,8 @@ function TeachOverlay({
       ...items.filter((it) => it.kind === 'recording').map((it) => it.name),
     ])
     : '';
-  const hintLine = isPendingMode ? null : ((isLeaderMode ? LEADER_HINT_LINE : HINT_LINE)[state] || null);
+  const hintTable = (isLeaderMode ? LEADER_HINT_LINE : HINT_LINE)[kind] || {};
+  const hintLine = isPendingMode ? null : (hintTable[state] || null);
   // Leader mode: the teaching content waits behind the activation gate.
   const maybeGated = (content) => (isLeaderMode
     ? <LeaderActivationGate onBlockedChange={setActivationBlocked}>{content}</LeaderActivationGate>
@@ -676,21 +736,15 @@ function TeachOverlay({
     : (STATE_LINE[state] || ''));
   // R7: a cell that STARTS something also needs a known leader status; the
   // stop/cancel/re-lock cells do not (the session hook applies the same split).
+  // Every cell is ANDed with the kind contract: a key this window does not
+  // offer has no button (teachGates.js::teachKeyOffered, the hook's own gate).
   const canStartNew = online && !leaderStatusUnknown;
-  const cell = isLeaderMode ? {
-    space: (canStartNew && state === 'bereit') || (online && state === 'aufnahme'),
-    f: false,
-    p: canStartNew && ['bereit', 'aufnahme'].includes(state),
-    z: canStartNew && ['bereit', 'aufnahme'].includes(state),
-  } : {
-    space: (canStartNew && ['fest', 'frei'].includes(state))
-      || (online && ['countdown', 'aufnahme'].includes(state)),
-    f: (canStartNew && state === 'fest')
-      || (online && (['countdown', 'frei', 'aufnahme'].includes(state)
-        || (state === 'pruefen' && relock === 'failed'))),
-    p: canStartNew && ['fest', 'frei', 'aufnahme'].includes(state),
-    z: canStartNew && ['fest', 'frei'].includes(state),
-  };
+  const offered = (key) => teachKeyOffered({ kind, mode, key });
+  const cell = teachActionCells({
+    kind, mode, state, relock, online, canStartNew,
+  });
+  const kindLabel = TEACH_KIND_LABEL_DE[kind] || '';
+  const kindIcon = TEACH_KIND_ICON[kind] || null;
   const fLocks = state === 'frei' || state === 'aufnahme' || state === 'pruefen';
   const showRelockBanner = relock === 'failed' && (state === 'frei' || state === 'pruefen');
   const previewDisabled = state !== 'pruefen' || busy || homeGlideActive || !online || relock === 'failed'
@@ -808,12 +862,14 @@ function TeachOverlay({
     >
       <div className="mx-auto flex h-full w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
         <header className="flex flex-wrap items-center gap-3 border-b border-[var(--line)] px-4 py-3">
-          <h2 id="teach-title" className="text-xl font-semibold text-[var(--ink)]">
-            {`✋ ${DE.TEACH_TITLE}`}
+          <h2 id="teach-title" className="flex items-center gap-2 text-xl font-semibold text-[var(--ink)]">
+            {kindIcon && <Icon name={kindIcon} className="text-[var(--accent)]" />}
+            <span>{kindLabel}</span>
           </h2>
           {!isPendingMode && (
-            <span className="rounded-full bg-[var(--bg-sunk)] px-2.5 py-0.5 text-sm text-[var(--ink-3)]">
-              {isLeaderMode ? DE.TEACH_MODE_LEADER : DE.TEACH_MODE_HAND}
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--bg-sunk)] px-2.5 py-0.5 text-sm text-[var(--ink-3)]">
+              <Icon name={isLeaderMode ? 'leaderArm' : 'hand'} />
+              <span>{isLeaderMode ? DE.TEACH_MODE_LEADER : DE.TEACH_MODE_HAND}</span>
             </span>
           )}
           <button
@@ -892,39 +948,40 @@ function TeachOverlay({
               />
             )}
             {state !== 'abschluss' && (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <ActionButton
-                  icon={state === 'aufnahme' ? '■' : '⏺'}
-                  label={state === 'aufnahme' ? DE.TEACH_KEY_STOP : DE.TEACH_KEY_REC}
-                  keyHint="Leertaste"
-                  disabled={!cell.space}
-                  highlighted={highlightKey === 'space'}
-                  onClick={actions.space}
-                  onPointerUp={refocus}
-                />
-                <ActionButton
-                  icon="📍"
-                  label={DE.TEACH_KEY_POSE}
-                  keyHint="P"
-                  disabled={!cell.p}
-                  highlighted={highlightKey === 'p'}
-                  onClick={actions.capturePose}
-                  onPointerUp={refocus}
-                />
-                <ActionButton
-                  icon="🎯"
-                  label={DE.TEACH_KEY_ZIEL}
-                  keyHint="Z"
-                  disabled={!cell.z || zielPrompts.length > 0}
-                  title={!isLeaderMode && state === 'aufnahme' ? DE.TEACH_ZIEL_BLOCKED_REC : undefined}
-                  hint={isLeaderMode ? DE.TEACH_LEADER_ZIEL_HINT : undefined}
-                  highlighted={highlightKey === 'z'}
-                  onClick={actions.captureZiel}
-                  onPointerUp={refocus}
-                />
-                {!isLeaderMode && !isPendingMode && (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="teach-actions">
+                {offered('space') && (
                   <ActionButton
-                    icon={fLocks ? '🔒' : '✋'}
+                    icon={state === 'aufnahme' ? 'stop' : 'record'}
+                    label={state === 'aufnahme' ? DE.TEACH_KEY_STOP : DE.TEACH_KEY_REC}
+                    keyHint="Leertaste"
+                    disabled={!cell.space}
+                    onClick={actions.space}
+                    onPointerUp={refocus}
+                  />
+                )}
+                {offered('p') && (
+                  <ActionButton
+                    icon="pose"
+                    label={DE.TEACH_KEY_POSE}
+                    keyHint="P"
+                    disabled={!cell.p}
+                    onClick={actions.capturePose}
+                    onPointerUp={refocus}
+                  />
+                )}
+                {offered('z') && (
+                  <ActionButton
+                    icon="ziel"
+                    label={DE.TEACH_KEY_ZIEL}
+                    keyHint="Z"
+                    disabled={!cell.z || zielPrompts.length > 0}
+                    onClick={actions.captureZiel}
+                    onPointerUp={refocus}
+                  />
+                )}
+                {offered('f') && (
+                  <ActionButton
+                    icon={fLocks ? 'lock' : 'lockOpen'}
                     label={fLocks ? DE.TEACH_KEY_LOCK : DE.TEACH_KEY_FREE}
                     keyHint="F"
                     disabled={!cell.f}
@@ -1001,9 +1058,9 @@ function TeachOverlay({
                     // Leader mode: a trip within the grace window still discards this take.
                     <SmallKeyButton label={DE.TEACH_LIST_REVIEWING} keyHint="Enter" disabled onClick={actions.keep} onPointerUp={refocus} />
                   ) : (
-                    <SmallKeyButton label={`✓ ${DE.TEACH_REVIEW_KEEP}`} keyHint="Enter" disabled={state !== 'pruefen' || !online} onClick={actions.keep} onPointerUp={refocus} />
+                    <SmallKeyButton icon="check" label={DE.TEACH_REVIEW_KEEP} keyHint="Enter" disabled={state !== 'pruefen' || !online} onClick={actions.keep} onPointerUp={refocus} />
                   )}
-                  <SmallKeyButton label={`↺ ${DE.TEACH_REVIEW_AGAIN}`} keyHint="R" disabled={state !== 'pruefen' || !canStartNew} onClick={actions.again} onPointerUp={refocus} />
+                  <SmallKeyButton icon="again" label={DE.TEACH_REVIEW_AGAIN} keyHint="R" disabled={state !== 'pruefen' || !canStartNew} onClick={actions.again} onPointerUp={refocus} />
                   <SmallKeyButton label={DE.TEACH_REVIEW_DISCARD} keyHint="Entf" disabled={state !== 'pruefen' || !online} onClick={actions.discard} onPointerUp={refocus} />
                   {!isLeaderMode && (
                     <SmallKeyButton label={DE.TEACH_REVIEW_ON_ROBOT} disabled={previewDisabled} onClick={handlePreviewOnRobot} onPointerUp={refocus} />
@@ -1071,31 +1128,36 @@ function TeachOverlay({
   );
 }
 
-function ActionButton({ icon, label, hint, keyHint, disabled, highlighted, title, onClick, onPointerUp }) {
+// The label may shrink (and hyphenate, the page is lang="de") so the key hint
+// never leaves the button: at 1366×768 and 150 % scaling (910 CSS px) the
+// Bewegung window's „Aufnahme" + „Leertaste" did not fit.
+function ActionButton({ icon, label, keyHint, disabled, onClick, onPointerUp }) {
   return (
     <button
       type="button"
       onClick={onClick}
       onPointerUp={onPointerUp}
       disabled={disabled}
-      title={title}
       className={
-        'flex min-h-[64px] items-center gap-3 rounded-xl border px-4 text-left text-lg font-semibold '
-        + 'disabled:cursor-not-allowed disabled:opacity-40 hover:bg-[var(--bg-sunk)] '
-        + (highlighted ? 'border-[var(--accent)] ring-4 ring-[var(--accent)]/40' : 'border-[var(--line)]')
+        'flex min-h-[64px] min-w-0 items-center gap-2 rounded-xl border border-[var(--line)] px-3 text-left text-lg '
+        + 'font-semibold disabled:cursor-not-allowed disabled:opacity-40 hover:bg-[var(--bg-sunk)] lg:gap-3 lg:px-4'
       }
     >
-      <span aria-hidden="true">{icon}</span>
-      <span className="flex-1">
-        {label}
-        {hint && <span className="block text-sm font-normal text-[var(--ink-3)]">{hint}</span>}
-      </span>
-      <kbd className="rounded border border-[var(--line)] bg-[var(--bg-sunk)] px-2 py-0.5 text-sm font-normal">{keyHint}</kbd>
+      <Icon name={icon} size="1.35em" />
+      <span className="min-w-0 flex-1 break-words hyphens-auto" data-testid="teach-action-label">{label}</span>
+      <kbd
+        className={
+          'shrink-0 rounded border border-[var(--line)] bg-[var(--bg-sunk)] px-1.5 py-0.5 text-xs font-normal '
+          + 'lg:px-2 lg:text-sm'
+        }
+      >
+        {keyHint}
+      </kbd>
     </button>
   );
 }
 
-function SmallKeyButton({ label, keyHint, disabled, primary, onClick, onPointerUp }) {
+function SmallKeyButton({ icon, label, keyHint, disabled, primary, onClick, onPointerUp }) {
   return (
     <button
       type="button"
@@ -1109,6 +1171,7 @@ function SmallKeyButton({ label, keyHint, disabled, primary, onClick, onPointerU
           : 'border-[var(--line)] hover:bg-[var(--bg-sunk)]')
       }
     >
+      {icon && <Icon name={icon} />}
       <span>{label}</span>
       {keyHint && <kbd className="rounded border border-current/30 px-1.5 text-xs">{keyHint}</kbd>}
     </button>
@@ -1154,9 +1217,9 @@ function ListRow({ item, renameOk, editing, onStartRename, onDraft, onCommit, on
           disabled={!canRename}
           title={renameOk ? DE.DRAWER_RENAME : DE.TEACH_RENAME_LOCKED}
           aria-label={`${DE.DRAWER_RENAME}: ${item.name}`}
-          className="rounded px-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-40 hover:bg-white"
+          className="rounded px-1.5 py-1 text-sm disabled:cursor-not-allowed disabled:opacity-40 hover:bg-white"
         >
-          ✎
+          <Icon name="pencil" />
         </button>
       </div>
       <p className="text-xs text-[var(--ink-3)]">{teachListMeta(item)}</p>

@@ -17,7 +17,7 @@
 import React from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdOutlineFileUpload, MdOutlineFileDownload } from 'react-icons/md';
+import Icon from '../../../components/icons/Icon';
 
 const SectionSelector = ({
   activeSection,
@@ -29,7 +29,7 @@ const SectionSelector = ({
     if (canChangeSection) {
       onSectionChange(section);
     } else if (!canChangeSection && activeSection !== section) {
-      toast.error('Cannot switch sections while upload/download is in progress');
+      toast.error('Während eines Hoch- oder Herunterladens kannst du nicht wechseln.');
     }
   };
 
@@ -44,11 +44,11 @@ const SectionSelector = ({
           })}
           onClick={() => handleSectionClick('upload')}
           disabled={!canChangeSection && activeSection !== 'upload'}
-          aria-label="Switch to upload section"
+          aria-label="Zum Hochladen wechseln"
         >
           <div className="flex items-center gap-2">
-            <MdOutlineFileUpload className="w-4 h-4" />
-            Upload
+            <Icon name="upload" className="w-4 h-4" />
+            Hochladen
           </div>
         </button>
         <button
@@ -59,11 +59,11 @@ const SectionSelector = ({
           })}
           onClick={() => handleSectionClick('download')}
           disabled={!canChangeSection && activeSection !== 'download'}
-          aria-label="Switch to download section"
+          aria-label="Zum Herunterladen wechseln"
         >
           <div className="flex items-center gap-2">
-            <MdOutlineFileDownload className="w-4 h-4" />
-            Download
+            <Icon name="download" className="w-4 h-4" />
+            Herunterladen
           </div>
         </button>
       </div>

@@ -886,7 +886,7 @@ class RunSession:
         block_id = f'{file}:L{line}'
         try:
             self.on_block_change(block_id, 'paused', 0.0)
-            ctx.log(f'⏸ Haltepunkt erreicht: {block_id}')
+            ctx.log(f'Haltepunkt erreicht: {block_id}')
         except Exception:  # noqa: BLE001
             _log.debug('paused status raised', exc_info=True)
         self._emit_locals(local_vars)

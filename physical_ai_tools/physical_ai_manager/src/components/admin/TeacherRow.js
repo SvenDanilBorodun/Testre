@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdCheck, MdClose, MdDelete, MdEdit, MdKey } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   deleteTeacher,
@@ -11,6 +10,7 @@ import {
 import { removeTeacher, upsertTeacher } from '../../features/admin/adminSlice';
 import PasswordResetModal from '../teacher/PasswordResetModal';
 import { Avatar, Btn } from '../EbUI';
+import Icon from '../icons/Icon';
 
 export default function TeacherRow({ teacher }) {
   const dispatch = useDispatch();
@@ -103,7 +103,7 @@ export default function TeacherRow({ teacher }) {
               className="w-7 h-7 rounded-[var(--radius-sm)] text-[var(--accent-ink)] hover:bg-[var(--accent-wash)] flex items-center justify-center transition"
               title="Speichern"
             >
-              <MdCheck size={16} />
+              <Icon name="check" size={16} />
             </button>
             <button
               onClick={() => {
@@ -113,7 +113,7 @@ export default function TeacherRow({ teacher }) {
               className="w-7 h-7 rounded-[var(--radius-sm)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] flex items-center justify-center transition"
               title="Abbrechen"
             >
-              <MdClose size={16} />
+              <Icon name="close" size={16} />
             </button>
           </div>
         ) : (
@@ -126,7 +126,7 @@ export default function TeacherRow({ teacher }) {
               className="text-[var(--ink-4)] hover:text-[var(--ink)] transition"
               title="Credits anpassen"
             >
-              <MdEdit size={14} />
+              <Icon name="pencil" size={14} />
             </button>
           </div>
         )}
@@ -153,7 +153,7 @@ export default function TeacherRow({ teacher }) {
             onClick={() => setShowPwModal(true)}
             title="Passwort zurücksetzen"
           >
-            <MdKey size={18} />
+            <Icon name="key" size={18} />
           </Btn>
           <Btn
             variant="ghost"
@@ -162,7 +162,7 @@ export default function TeacherRow({ teacher }) {
             disabled={busy}
             title="Lehrer löschen"
           >
-            <MdDelete size={18} />
+            <Icon name="trash" size={18} />
           </Btn>
         </div>
       </td>

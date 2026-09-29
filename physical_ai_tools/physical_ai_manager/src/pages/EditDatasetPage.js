@@ -17,11 +17,11 @@
 import React, { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import { MdCloudUpload, MdMerge, MdDeleteSweep } from 'react-icons/md';
 import HuggingfaceSection from '../features/editDataset/components/DatasetHuggingfaceSection';
 import MergeSection from '../features/editDataset/components/DatasetMergeSection';
 import DeleteSection from '../features/editDataset/components/DatasetDeleteSection';
 import { SectionHeader } from '../components/EbUI';
+import Icon from '../components/icons/Icon';
 
 const TOAST_LIMIT = 3;
 
@@ -34,17 +34,17 @@ const SECTION_TYPES = {
 const SECTION_CONFIG = {
   [SECTION_TYPES.HUGGINGFACE]: {
     label: 'Hoch- & herunterladen',
-    icon: MdCloudUpload,
+    icon: 'cloudUpload',
     description: 'Hugging Face',
   },
   [SECTION_TYPES.MERGE]: {
     label: 'Zusammenführen',
-    icon: MdMerge,
+    icon: 'mergeData',
     description: 'Mehrere Datensätze kombinieren',
   },
   [SECTION_TYPES.DELETE]: {
     label: 'Episoden löschen',
-    icon: MdDeleteSweep,
+    icon: 'trash',
     description: 'Einzelne Episoden entfernen',
   },
 };
@@ -90,7 +90,6 @@ export default function EditDatasetPage() {
         {/* Tool switcher (segmented) */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {Object.entries(SECTION_CONFIG).map(([sectionType, config]) => {
-            const IconComponent = config.icon;
             const isActive = activeSection === sectionType;
             return (
               <button
@@ -111,7 +110,7 @@ export default function EditDatasetPage() {
                       : 'bg-[var(--bg-sunk)] text-[var(--ink-3)]'
                   )}
                 >
-                  <IconComponent size={22} />
+                  <Icon name={config.icon} size={22} />
                 </div>
                 <div
                   className={clsx(

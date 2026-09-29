@@ -1,14 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-import {
-  MdAdd,
-  MdDelete,
-  MdEdit,
-  MdEventNote,
-  MdGroups,
-  MdPeople,
-  MdSavings,
-} from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import { Btn, Card, Pill, Progress } from '../EbUI';
 import {
@@ -25,6 +16,7 @@ import { setSelectedClassroom } from '../../features/teacher/teacherSlice';
 import CreateWorkgroupModal from './CreateWorkgroupModal';
 import WorkgroupMembersModal from './WorkgroupMembersModal';
 import WorkgroupCreditsModal from './WorkgroupCreditsModal';
+import Icon from '../icons/Icon';
 
 /**
  * Sidebar+detail panel rendered inside a classroom's tab area.
@@ -254,7 +246,7 @@ export default function WorkgroupsPanel({
         <div className="md:w-64 md:border-r border-[var(--line)] bg-[var(--bg-sunk)] p-3 flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-[var(--ink)]">
-              <MdGroups />
+              <Icon name="users" />
               <span className="text-sm font-semibold">Arbeitsgruppen</span>
             </div>
             <Btn
@@ -263,7 +255,7 @@ export default function WorkgroupsPanel({
               onClick={() => setShowCreate(true)}
               title="Neue Gruppe erstellen"
             >
-              <MdAdd /> Neu
+              <Icon name="plus" /> Neu
             </Btn>
           </div>
           {loading ? (
@@ -353,7 +345,7 @@ export default function WorkgroupsPanel({
                       className="text-[var(--ink-4)] hover:text-[var(--ink)] transition"
                       title="Umbenennen"
                     >
-                      <MdEdit size={16} />
+                      <Icon name="pencil" size={16} />
                     </button>
                   </div>
                 )}
@@ -364,7 +356,7 @@ export default function WorkgroupsPanel({
                     onClick={() => setShowMembers(true)}
                     title="Mitglieder verwalten"
                   >
-                    <MdPeople /> Mitglieder
+                    <Icon name="users" /> Mitglieder
                   </Btn>
                   <Btn
                     variant="secondary"
@@ -372,7 +364,7 @@ export default function WorkgroupsPanel({
                     onClick={() => setShowCredits(true)}
                     title="Geteilte Credits anpassen"
                   >
-                    <MdSavings /> Credits
+                    <Icon name="piggyBank" /> Credits
                   </Btn>
                   {onShowGroupProgress && (
                     <Btn
@@ -381,7 +373,7 @@ export default function WorkgroupsPanel({
                       onClick={() => onShowGroupProgress(detail)}
                       title="Tägliche Fortschrittsnotizen für diese Gruppe"
                     >
-                      <MdEventNote /> Fortschritt
+                      <Icon name="notebook" /> Fortschritt
                     </Btn>
                   )}
                   <button
@@ -389,7 +381,7 @@ export default function WorkgroupsPanel({
                     className="w-9 h-9 rounded-[var(--radius-sm)] text-[var(--ink-3)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] flex items-center justify-center transition"
                     title="Gruppe löschen"
                   >
-                    <MdDelete size={18} />
+                    <Icon name="trash" size={18} />
                   </button>
                 </div>
               </div>

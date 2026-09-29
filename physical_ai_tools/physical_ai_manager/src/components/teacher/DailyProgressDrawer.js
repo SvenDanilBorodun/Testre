@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdAdd, MdClose, MdDelete, MdEdit, MdSave } from 'react-icons/md';
 import { useSelector } from 'react-redux';
 import {
   createProgressEntry,
@@ -11,6 +10,7 @@ import {
 } from '../../services/teacherApi';
 import useRefetchOnFocus from '../../hooks/useRefetchOnFocus';
 import { Avatar, Btn, Pill } from '../EbUI';
+import Icon from '../icons/Icon';
 
 function formatDateLong(iso) {
   if (!iso) return '';
@@ -183,7 +183,7 @@ export default function DailyProgressDrawer({
                   background: 'var(--accent)',
                 }}
               >
-                ★
+                <Icon name="star" fill="currentColor" size={18} />
               </span>
             ) : isGroupScope ? (
               <span
@@ -195,7 +195,7 @@ export default function DailyProgressDrawer({
                 }}
                 title="Arbeitsgruppe"
               >
-                ⌒
+                <Icon name="users" size={18} />
               </span>
             ) : (
               <Avatar name={student.full_name || student.username} />
@@ -214,7 +214,7 @@ export default function DailyProgressDrawer({
             className="w-9 h-9 rounded-[var(--radius-sm)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] hover:text-[var(--ink)] flex items-center justify-center transition shrink-0"
             aria-label="Schließen"
           >
-            <MdClose size={20} />
+            <Icon name="close" size={20} />
           </button>
         </div>
 
@@ -265,7 +265,7 @@ export default function DailyProgressDrawer({
               onClick={handleCreate}
               disabled={saving || !draftNote.trim()}
             >
-              <MdAdd size={16} />{' '}
+              <Icon name="plus" size={16} />{' '}
               {saving ? 'Speichern…' : 'Eintrag speichern'}
             </Btn>
           </div>
@@ -311,7 +311,7 @@ export default function DailyProgressDrawer({
                           onClick={() => handleStartEdit(entry)}
                           title="Bearbeiten"
                         >
-                          <MdEdit size={16} />
+                          <Icon name="pencil" size={16} />
                         </Btn>
                         <Btn
                           variant="ghost"
@@ -319,7 +319,7 @@ export default function DailyProgressDrawer({
                           onClick={() => handleDelete(entry)}
                           title="Löschen"
                         >
-                          <MdDelete size={16} />
+                          <Icon name="trash" size={16} />
                         </Btn>
                       </div>
                     )}
@@ -350,7 +350,7 @@ export default function DailyProgressDrawer({
                             editBusy || !editDraft.trim() || editDraft === entry.note
                           }
                         >
-                          <MdSave size={16} />{' '}
+                          <Icon name="save" size={16} />{' '}
                           {editBusy ? 'Speichern…' : 'Speichern'}
                         </Btn>
                       </div>

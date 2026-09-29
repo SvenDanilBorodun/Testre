@@ -217,14 +217,15 @@ describe('SammlungDrawer over a Python program', () => {
     const group = screen.getByRole('group', { name: CODE_DE.SAMMLUNG_NEW });
     fireEvent.click(within(group).getByRole('button', { name: DE.FLY_TEACH_ZIEL }));
     fireEvent.click(within(group).getByRole('button', { name: DE.FLY_PIN_CAMERA }));
-    fireEvent.click(within(group).getByRole('button', { name: DE.FLY_PIN_SIM }));
+    // D9: the Sim-Tisch only inside the simulator.
+    expect(within(group).queryByRole('button', { name: DE.FLY_PIN_SIM })).toBeNull();
     expect(dispatchAction.mock.calls.map((c) => c[0])).toEqual([
-      { type: 'teach', focus: 'ziel' }, { type: 'pinCamera' }, { type: 'pinSim' },
+      { type: 'teach', kind: 'ziel' }, { type: 'pinCamera' },
     ]);
     fireEvent.click(screen.getByRole('tab', { name: /Aufnahmen/ }));
     fireEvent.click(within(screen.getByRole('group', { name: CODE_DE.SAMMLUNG_NEW }))
       .getByRole('button', { name: DE.FLY_TEACH_RECORDING }));
-    expect(dispatchAction).toHaveBeenLastCalledWith({ type: 'teach', focus: 'recording' });
+    expect(dispatchAction).toHaveBeenLastCalledWith({ type: 'teach', kind: 'recording' });
   });
 
   it('hides a „Neu" the rig cannot do (the simulator: no Vormachen, no camera)', () => {

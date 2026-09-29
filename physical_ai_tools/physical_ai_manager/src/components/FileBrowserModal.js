@@ -16,8 +16,8 @@
 
 import React, { useState, useCallback } from 'react';
 import clsx from 'clsx';
-import { MdClose, MdFolderOpen } from 'react-icons/md';
 import FileBrowser from './FileBrowser';
+import Icon from './icons/Icon';
 
 export default function FileBrowserModal({
   isOpen,
@@ -25,8 +25,8 @@ export default function FileBrowserModal({
   onFileSelect,
   initialPath = '',
   fileFilter = null,
-  title = 'Select File',
-  selectButtonText = 'Select',
+  title = 'Datei auswählen',
+  selectButtonText = 'Auswählen',
   allowDirectorySelect = false,
   allowFileSelect = true,
   targetFileName = null,
@@ -180,8 +180,14 @@ export default function FileBrowserModal({
         <div className={classModal}>
           <div className={classHeader}>
             <h2 className={classTitle}>{title}</h2>
-            <button onClick={handleCancel} className={classCloseButton}>
-              <MdClose size={24} />
+            <button
+              type="button"
+              onClick={handleCancel}
+              className={classCloseButton}
+              aria-label="Schließen"
+              title="Schließen"
+            >
+              <Icon name="close" size={24} />
             </button>
           </div>
 
@@ -208,27 +214,27 @@ export default function FileBrowserModal({
             <div className={classStatusContainer}>
               {selectedItem ? (
                 <div className={classStatusRow}>
-                  <MdFolderOpen className={classIcon} />
-                  <span className={classLabel}>Selected:</span>
+                  <Icon name="folderOpen" className={classIcon} />
+                  <span className={classLabel}>Ausgewählt:</span>
                   <span className={classValue}>{selectedItem.name}</span>
                 </div>
               ) : allowDirectorySelect && currentPath && !targetFileName && !targetFolderName ? (
                 <div className={classStatusRow}>
-                  <MdFolderOpen className={classIcon} />
-                  <span className={classLabel}>Current Directory:</span>
+                  <Icon name="folderOpen" className={classIcon} />
+                  <span className={classLabel}>Aktueller Ordner:</span>
                   <span className={classValue}>{currentPath}</span>
                 </div>
               ) : (
                 <span>
                   {targetFileName || targetFolderName
-                    ? `Select a directory containing ${targetFileName || targetFolderName}`
+                    ? `Wähle einen Ordner, der ${[].concat(targetFileName || targetFolderName).join(', ')} enthält.`
                     : allowDirectorySelect && allowFileSelect
-                    ? 'Select a file or folder, or use current directory'
+                    ? 'Wähle eine Datei oder einen Ordner – oder nimm den aktuellen Ordner.'
                     : allowDirectorySelect
-                    ? 'Select a folder or use current directory'
+                    ? 'Wähle einen Ordner – oder nimm den aktuellen Ordner.'
                     : allowFileSelect
-                    ? 'Select a file to continue'
-                    : 'Navigation only'}
+                    ? 'Wähle eine Datei, um fortzufahren.'
+                    : 'Hier kannst du nur Ordner öffnen.'}
                 </span>
               )}
             </div>

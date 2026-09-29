@@ -18,7 +18,6 @@ import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import { MdRefresh } from 'react-icons/md';
 import DatasetSelector from '../components/DatasetSelector';
 import PolicySelector from '../components/PolicySelector';
 import TrainingOutputFolderInput from '../components/TrainingOutputFolderInput';
@@ -36,6 +35,7 @@ import {
 import { getQuota } from '../services/cloudTrainingApi';
 import useSupabaseTrainings from '../hooks/useSupabaseTrainings';
 import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
+import Icon from '../components/icons/Icon';
 
 function statusSubtitle(status) {
   switch (status) {
@@ -160,7 +160,7 @@ export default function TrainingPage() {
           <p className="text-sm text-[var(--ink-3)] mb-5">{profileError}</p>
           <div className="flex items-center justify-center gap-3">
             <Btn variant="primary" onClick={() => dispatch(requestProfileRefetch())}>
-              <MdRefresh /> Erneut versuchen
+              <Icon name="refresh" /> Erneut versuchen
             </Btn>
           </div>
         </Card>

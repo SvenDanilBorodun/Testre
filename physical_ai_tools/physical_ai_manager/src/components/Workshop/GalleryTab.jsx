@@ -16,6 +16,7 @@ import toast from 'react-hot-toast';
 import { openWorkflow } from '../../features/workshop/workshopSlice';
 import { listWorkflows, cloneWorkflow } from '../../services/workflowApi';
 import { DE } from './blocks/messages_de';
+import Icon from '../icons/Icon';
 
 function fmtDate(iso) {
   if (!iso) return '–';
@@ -120,9 +121,14 @@ function GalleryTab({ onPicked, lockedReason = null }) {
           type="button"
           onClick={refresh}
           disabled={loading}
-          className="text-xs text-[var(--ink-3)] hover:underline disabled:opacity-50"
+          className="inline-flex items-center gap-1 text-xs text-[var(--ink-3)] hover:underline disabled:opacity-50"
         >
-          {loading ? '…' : '↻ aktualisieren'}
+          {loading ? '…' : (
+            <>
+              <Icon name="refresh" />
+              <span>aktualisieren</span>
+            </>
+          )}
         </button>
       </div>
 

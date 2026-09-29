@@ -18,16 +18,6 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSelector } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import {
-  MdPlayArrow,
-  MdStop,
-  MdReplay,
-  MdSkipNext,
-  MdCheck,
-  MdNavigateNext,
-  MdVolumeUp,
-  MdVolumeOff,
-} from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import CompactSystemStatus from './CompactSystemStatus';
 import EpisodeStatus from './EpisodeStatus';
@@ -37,15 +27,18 @@ import Tooltip from './Tooltip';
 import PageType from '../constants/pageType';
 import TaskPhase from '../constants/taskPhases';
 import FullTaskStatus from './FullTaskStatus';
+import Icon from './icons/Icon';
+import { toastIcon } from './icons/toast';
 
+// The phase line under the controls: an icon (components/icons) and German text.
 const phaseGuideMessages = {
-  [TaskPhase.READY]: '📍 Bereit zum Starten',
-  [TaskPhase.WARMING_UP]: '🔥 Aufwärmphase läuft',
-  [TaskPhase.RESETTING]: '🏠 Rücksetzung läuft',
-  [TaskPhase.RECORDING]: '🔴 Aufnahme läuft',
-  [TaskPhase.SAVING]: '💾 Wird gespeichert...',
-  [TaskPhase.STOPPED]: '◼️ Aufgabe gestoppt',
-  [TaskPhase.INFERENCING]: '⏳ Inferenz läuft',
+  [TaskPhase.READY]: { icon: 'checkCircle', text: 'Bereit zum Starten' },
+  [TaskPhase.WARMING_UP]: { icon: 'flame', text: 'Aufwärmphase läuft' },
+  [TaskPhase.RESETTING]: { icon: 'home', text: 'Rücksetzung läuft' },
+  [TaskPhase.RECORDING]: { icon: 'liveRecording', text: 'Aufnahme läuft', className: 'text-red-500' },
+  [TaskPhase.SAVING]: { icon: 'save', text: 'Wird gespeichert …' },
+  [TaskPhase.STOPPED]: { icon: 'stop', text: 'Aufgabe gestoppt' },
+  [TaskPhase.INFERENCING]: { icon: 'hourglass', text: 'Inferenz läuft' },
 };
 
 const requiredFieldsForRecord = [
@@ -76,7 +69,12 @@ const requiredFieldsForInferenceOnly = [
   { key: 'policyPath', label: 'Modellpfad' },
 ];
 
-const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+// The liveness indicator beside the phase line: the loader icon turned by ONE
+// step per /task/status message. It moves only while status messages arrive,
+// so a stalled server shows a still icon — never a free-running spin that
+// would claim a liveness nobody measured.
+const SPINNER_STEPS = 8;
+const SPINNER_STEP_DEG = 360 / SPINNER_STEPS;
 
 export default function ControlPanel() {
   const taskInfo = useSelector((state) => state.tasks.taskInfo);
@@ -112,7 +110,7 @@ export default function ControlPanel() {
     {
       label: 'Start',
       displayLabel: 'Start',
-      icon: MdPlayArrow,
+      icon: 'play',
       color: '#1976d2',
       description: page === PageType.RECORD ? 'Aufnahme starten' : 'Inferenz starten',
       shortcut: 'Space',
@@ -120,7 +118,7 @@ export default function ControlPanel() {
     {
       label: 'Stop',
       displayLabel: 'Stopp',
-      icon: MdStop,
+      icon: 'stop',
       color: '#d32f2f',
       description:
         page === PageType.RECORD
@@ -133,7 +131,7 @@ export default function ControlPanel() {
     {
       label: 'Skip\nTask',
       displayLabel: 'Aufgabe\nüberspringen',
-      icon: MdNavigateNext,
+      icon: 'chevronsRight',
       color: '#388e3c',
       description: page === PageType.RECORD ? 'Aktuelle Aufgabe überspringen' : '',
       shortcut: 'Ctrl+Shift+N',
@@ -141,7 +139,7 @@ export default function ControlPanel() {
     {
       label: 'Retry',
       displayLabel: 'Wiederholen',
-      icon: MdReplay,
+      icon: 'again',
       color: '#fbc02d',
       description:
         page === PageType.RECORD
@@ -154,7 +152,7 @@ export default function ControlPanel() {
     {
       label: 'Next',
       displayLabel: 'Weiter',
-      icon: MdSkipNext,
+      icon: 'skipForward',
       color: '#388e3c',
       description:
         page === PageType.RECORD
@@ -167,7 +165,7 @@ export default function ControlPanel() {
     {
       label: 'Finish',
       displayLabel: 'Fertig',
-      icon: MdCheck,
+      icon: 'check',
       color: '#388e3c',
       description:
         page === PageType.RECORD
@@ -215,7 +213,7 @@ export default function ControlPanel() {
   };
 
   const updateSpinnerFrame = () => {
-    setSpinnerIndex((prevIndex) => (prevIndex + 1) % spinnerFrames.length);
+    setSpinnerIndex((prevIndex) => (prevIndex + 1) % SPINNER_STEPS);
   };
 
   // Check if button should be enabled based on phase
@@ -393,11 +391,13 @@ export default function ControlPanel() {
           errorMessage.includes('ROS connection timeout') ||
           errorMessage.includes('WebSocket')
         ) {
-          toast.error(`🔌 ROS-Verbindung fehlgeschlagen: Rosbridge-Server läuft nicht (${rosHost})`);
+          toast.error(`ROS-Verbindung fehlgeschlagen: Rosbridge-Server läuft nicht (${rosHost})`,
+            { icon: toastIcon('unplugged') });
         } else if (errorMessage.includes('timeout')) {
-          toast.error(`⏰ Befehlsausführung Zeitüberschreitung [${cmd}]: Server hat nicht geantwortet`);
+          toast.error(`Befehlsausführung Zeitüberschreitung [${cmd}]: Server hat nicht geantwortet`,
+            { icon: toastIcon('timeout') });
         } else {
-          toast.error(`❌ Befehlsausführung fehlgeschlagen [${cmd}]: ${errorMessage}`);
+          toast.error(`Befehlsausführung fehlgeschlagen [${cmd}]: ${errorMessage}`);
         }
 
         // Continue execution even after error - don't block UI
@@ -608,7 +608,7 @@ export default function ControlPanel() {
   return (
     <div className={classControlPanelBody} style={controlPanelBodyStyle}>
       <div className="flex flex-[2_2_320px] min-w-[280px] w-full h-[104px] gap-2 md:gap-3">
-        {buttons.map(({ label, displayLabel, icon: Icon, color, description, shortcut }) => {
+        {buttons.map(({ label, displayLabel, icon, color, description, shortcut }) => {
           const isDisabled = !isButtonEnabled(label);
 
           const tooltipContent = (
@@ -652,8 +652,9 @@ export default function ControlPanel() {
                 <span className="h-[30%] w-full flex items-center justify-center"></span>
                 <span className={classControlPanelButtonIcon}>
                   <Icon
-                    style={{ fontSize: 'clamp(1rem, 3vw, 2.8rem)' }}
-                    color={isDisabled ? 'rgba(255,255,255,0.35)' : color}
+                    name={icon}
+                    style={{ fontSize: 'clamp(1rem, 3vw, 2.8rem)', opacity: isDisabled ? 0.35 : undefined }}
+                    color={isDisabled ? '#ffffff' : color}
                   />
                 </span>
                 <span className="text-center whitespace-pre-line leading-tight text-ellipsis overflow-hidden block w-full h-full flex items-center justify-center">
@@ -670,15 +671,27 @@ export default function ControlPanel() {
             className="flex min-w-0 text-center items-center gap-2 font-semibold"
             style={{ fontSize: 'clamp(0.9rem, 1.6vw, 1.6rem)' }}
           >
-            {phaseGuideMessages[taskStatus.phase]}
+            {phaseGuideMessages[taskStatus.phase] && (
+              <>
+                <Icon
+                  name={phaseGuideMessages[taskStatus.phase].icon}
+                  className={phaseGuideMessages[taskStatus.phase].className || ''}
+                />
+                <span>{phaseGuideMessages[taskStatus.phase].text}</span>
+              </>
+            )}
           </div>
           <div>
             {taskStatus.running && (
               <span
-                className="font-mono text-3xl"
+                className="inline-flex text-2xl"
                 style={{ color: 'var(--accent)' }}
+                data-testid="task-liveness"
               >
-                {spinnerFrames[spinnerIndex]}
+                <Icon
+                  name="loading"
+                  style={{ transform: `rotate(${spinnerIndex * SPINNER_STEP_DEG}deg)` }}
+                />
               </span>
             )}
           </div>
@@ -689,7 +702,7 @@ export default function ControlPanel() {
             aria-label={audioMuted ? 'Ton einschalten' : 'Ton ausschalten'}
             title={audioMuted ? 'Ton einschalten' : 'Ton ausschalten'}
           >
-            {audioMuted ? <MdVolumeOff size={20} /> : <MdVolumeUp size={20} />}
+            {audioMuted ? <Icon name="volumeOff" size={20} /> : <Icon name="volumeOn" size={20} />}
           </button>
         </div>
         {!useMultiTaskMode && (

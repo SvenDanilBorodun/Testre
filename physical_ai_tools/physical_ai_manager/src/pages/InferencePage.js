@@ -7,15 +7,6 @@ import React, { useState, useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
-import {
-  MdKeyboardDoubleArrowLeft,
-  MdKeyboardDoubleArrowRight,
-  MdMemory,
-  MdLink,
-  MdLinkOff,
-  MdSchool,
-  MdRefresh,
-} from 'react-icons/md';
 import ControlPanel from '../components/ControlPanel';
 import TaskPhase from '../constants/taskPhases';
 import HeartbeatStatus from '../components/HeartbeatStatus';
@@ -26,6 +17,7 @@ import { addTag } from '../features/tasks/taskSlice';
 import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
 import { useJetsonConnection } from '../hooks/useJetsonConnection';
 import { useCameraLiveness } from '../hooks/useCameraLiveness';
+import Icon from '../components/icons/Icon';
 
 const TOAST_LIMIT = 3;
 
@@ -140,7 +132,7 @@ export default function InferencePage({ isActive = true }) {
   if (!classroomId) {
     return (
       <StateScreen
-        icon={<MdSchool size={44} className="text-amber-500" />}
+        icon={<Icon name="graduationCap" size={44} className="text-amber-500" />}
         title="Du bist keiner Klasse zugeordnet"
         body={
           <>
@@ -169,7 +161,7 @@ export default function InferencePage({ isActive = true }) {
   if (jetsonStatus === 'no_jetson') {
     return (
       <StateScreen
-        icon={<MdMemory size={44} className="text-gray-400" />}
+        icon={<Icon name="cpu" size={44} className="text-gray-400" />}
         title="Kein Klassen-Jetson eingerichtet"
         body={
           <>
@@ -193,7 +185,7 @@ export default function InferencePage({ isActive = true }) {
   if (jetsonStatus === 'error') {
     return (
       <StateScreen
-        icon={<MdLinkOff size={44} className="text-red-500" />}
+        icon={<Icon name="unlink" size={44} className="text-red-500" />}
         title="Verbindung zum Klassen-Jetson fehlgeschlagen"
         body={
           <>
@@ -206,7 +198,7 @@ export default function InferencePage({ isActive = true }) {
           </>
         }
         identity={{ username, fullName }}
-        primaryAction={{ label: 'Erneut versuchen', onClick: () => window.location.reload(), icon: <MdRefresh /> }}
+        primaryAction={{ label: 'Erneut versuchen', onClick: () => window.location.reload(), icon: <Icon name="refresh" /> }}
       />
     );
   }
@@ -216,7 +208,7 @@ export default function InferencePage({ isActive = true }) {
     const who = jetsonOwnerFullName || jetsonOwnerUsername || 'einem anderen Schüler';
     return (
       <StateScreen
-        icon={<MdLink size={44} className="text-amber-500" />}
+        icon={<Icon name="link" size={44} className="text-amber-500" />}
         title="Klassen-Jetson belegt"
         body={
           <>
@@ -237,7 +229,7 @@ export default function InferencePage({ isActive = true }) {
   if (jetsonStatus === 'available') {
     return (
       <StateScreen
-        icon={<MdMemory size={44} className="text-emerald-500" />}
+        icon={<Icon name="cpu" size={44} className="text-emerald-500" />}
         title={jetsonOnline ? 'Klassen-Jetson bereit' : 'Klassen-Jetson offline'}
         body={
           jetsonOnline ? (
@@ -271,7 +263,7 @@ export default function InferencePage({ isActive = true }) {
             ? {
                 label: 'Verbinde mit Klassen-Jetson',
                 onClick: connect,
-                icon: <MdLink />,
+                icon: <Icon name="link" />,
                 tone: 'accent',
               }
             : null
@@ -368,7 +360,7 @@ export default function InferencePage({ isActive = true }) {
             className="w-10 h-10 bg-white/[0.08] border border-white/15 rounded-full flex items-center justify-center text-white/80 backdrop-blur-md hover:bg-white/15"
             title="Panel öffnen"
           >
-            <MdKeyboardDoubleArrowLeft size={22} />
+            <Icon name="chevronsLeft" size={22} />
           </button>
         )}
       </div>
@@ -382,7 +374,7 @@ export default function InferencePage({ isActive = true }) {
               role="status"
               aria-live="polite"
             >
-              <div className="h-10 w-10 animate-spin rounded-full border-4 border-white/25 border-t-white" />
+              <Icon name="loading" size={40} className="animate-spin text-white" />
               <span className="text-base font-semibold text-white">
                 Modell wird geladen &amp; Roboter verbindet …
               </span>
@@ -406,7 +398,7 @@ export default function InferencePage({ isActive = true }) {
             className="absolute -left-4 top-2 w-9 h-9 bg-white/95 border border-[var(--line)] rounded-full flex items-center justify-center shadow-pop text-[var(--ink-2)] hover:text-[var(--ink)] z-30 backdrop-blur"
             title="Einklappen"
           >
-            <MdKeyboardDoubleArrowRight size={20} />
+            <Icon name="chevronsRight" size={20} />
           </button>
           <InferencePanel />
         </div>
@@ -424,15 +416,7 @@ export default function InferencePage({ isActive = true }) {
 function CenteredSpinner({ label, sublabel }) {
   return (
     <div className="flex flex-col items-center justify-center h-full w-full gap-4 px-6 text-center" style={{ background: 'var(--bg)' }}>
-      <svg
-        className="animate-spin h-8 w-8 text-[color:var(--accent)]"
-        xmlns="http://www.w3.org/2000/svg"
-        fill="none"
-        viewBox="0 0 24 24"
-      >
-        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-      </svg>
+      <Icon name="loading" size={32} className="animate-spin text-[color:var(--accent)]" />
       <div className="text-[var(--ink)] text-base font-medium">{label}</div>
       {sublabel && <div className="text-[var(--ink-3)] text-sm max-w-md">{sublabel}</div>}
     </div>

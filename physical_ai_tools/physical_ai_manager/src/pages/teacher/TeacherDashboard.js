@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdAdd, MdMenu, MdClose } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   createClassroom,
@@ -22,6 +21,7 @@ import {
   StatBig,
   TopBar,
 } from '../../components/EbUI';
+import Icon from '../../components/icons/Icon';
 
 export default function TeacherDashboard({ onLogout }) {
   const dispatch = useDispatch();
@@ -112,7 +112,7 @@ export default function TeacherDashboard({ onLogout }) {
           className="lg:hidden w-9 h-9 rounded-[var(--radius-sm)] text-[var(--ink-2)] hover:bg-[var(--bg-sunk)] flex items-center justify-center transition"
           title={sidebarOpen ? 'Klassenliste schließen' : 'Klassenliste öffnen'}
         >
-          {sidebarOpen ? <MdClose size={20} /> : <MdMenu size={20} />}
+          {sidebarOpen ? <Icon name="close" size={20} /> : <Icon name="menu" size={20} />}
         </button>
         <StatBig label="Pool" value={poolTotal ?? '—'} sub="Credits insgesamt" />
         <Divider className="hidden md:block" />
@@ -174,7 +174,7 @@ export default function TeacherDashboard({ onLogout }) {
               Klassen
             </span>
             <Btn variant="primary" size="sm" onClick={() => setShowCreate(true)}>
-              <MdAdd /> Neu
+              <Icon name="plus" /> Neu
             </Btn>
           </div>
           <div className="flex-1 overflow-y-auto">

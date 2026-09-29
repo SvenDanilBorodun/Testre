@@ -5,8 +5,9 @@
  * you may not use this file except in compliance with the License.
  */
 
-// Vormachen (teaching on the real arm) — the pure entry gate and the timing
-// constants useTeachSession runs on. Every number that mirrors a server value
+// Vormachen (teaching on the real arm) — the pure entry gate, the kind
+// contract of the three focused windows, and the timing constants
+// useTeachSession runs on. Every number that mirrors a server value
 // names its source; the ones a server change could silently invalidate are
 // pinned by robotis_ai_setup/tests/test_teach_preview_velocity_floor.py.
 
@@ -29,6 +30,56 @@ export function teachEntryBlockReason({
   if (jogHandGuideOn) return 'handguide';
   return null;
 }
+
+/*
+ * The kind contract (owner decision D1). Vormachen opens as ONE focused window
+ * per kind — a Bewegung, a Position or a Ziel — and a window offers only its own
+ * controls. `teachKeyOffered` is the single predicate both the engine
+ * (useTeachSession: every key AND every button press) and the overlay (the
+ * buttons it renders and enables) ask, so a key without its button is dead and
+ * a button without its key cannot exist. There is no kind-less session: a
+ * request without a valid kind is dropped (studioAssetsSlice.requestTeach,
+ * TeachHost).
+ */
+export const TEACH_KINDS = Object.freeze(['recording', 'pose', 'ziel']);
+
+/** True for one of TEACH_KINDS. */
+export function isTeachKind(kind) {
+  return typeof kind === 'string' && TEACH_KINDS.includes(kind);
+}
+
+const RECORDING_KEYS = Object.freeze(['space', 'enter', 'r', 'delete']);
+
+/**
+ * Is `key` (a useTeachSession.classifyTeachKey column) a control of the
+ * `kind` window at all, in `mode` ('hand' | 'leader' | 'pending')? Esc always
+ * (it closes every window); F only while teaching by hand (never leader, never
+ * a pending session); P only in the Position window; Z only in the Ziel window;
+ * Space/Enter/R/Entf only in the Bewegung window. No valid kind → Esc only.
+ * Whether an offered key may act NOW (state, offline, R7) is the engine's call.
+ */
+export function teachKeyOffered({ kind, mode, key } = {}) {
+  if (key === 'escape') return true;
+  if (!isTeachKind(kind)) return false;
+  if (key === 'f') return mode === 'hand';
+  if (key === 'p') return kind === 'pose';
+  if (key === 'z') return kind === 'ziel';
+  return kind === 'recording' && RECORDING_KEYS.includes(key);
+}
+
+/** The window title per kind (the same words as its entry buttons). */
+export const TEACH_KIND_LABEL_DE = Object.freeze({
+  recording: DE.FLY_TEACH_RECORDING,
+  pose: DE.FLY_TEACH_POSE,
+  ziel: DE.FLY_TEACH_ZIEL,
+});
+
+/** The icon (components/icons registry name) per kind (owner decision D10). */
+export const TEACH_KIND_ICON = Object.freeze({
+  recording: 'record',
+  pose: 'pose',
+  ziel: 'ziel',
+});
 
 export const TEACH_BLOCK_TITLES_DE = Object.freeze({
   offline: DE.TEACH_BLOCK_OFFLINE,

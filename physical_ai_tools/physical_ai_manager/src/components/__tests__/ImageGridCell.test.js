@@ -152,3 +152,22 @@ describe('ImageGridCell — Pi-mode stream gating (piModeResolved)', () => {
     expect(img.getAttribute('src')).not.toContain(':8080');
   });
 });
+
+describe('ImageGridCell — icons and names (final review, minor 3)', () => {
+  beforeEach(() => {
+    mockState = { ros: { rosHost: 'pc', rosbridgeUrl: 'ws://pc/rosbridge' }, jetson: { status: 'available' } };
+  });
+
+  test('the close button of a camera cell has a German name', () => {
+    renderCell('/gripper/image_raw');
+    expect(screen.getByRole('button', { name: 'Kamera entfernen' })).toBeInTheDocument();
+  });
+
+  test('an empty cell shows the plus icon, not a typed "+"', () => {
+    const { container } = render(
+      <ImageGridCell topic="" idx={0} isActive={false} onClose={noop} onPlusClick={noop} />
+    );
+    expect(container.querySelector('svg[data-icon="plus"]')).not.toBeNull(); // eslint-disable-line testing-library/no-node-access, testing-library/no-container
+    expect(screen.queryByText('+')).toBeNull();
+  });
+});

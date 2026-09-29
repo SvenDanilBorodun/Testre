@@ -18,11 +18,11 @@ import React, { useState, useCallback, useEffect } from 'react';
 import clsx from 'clsx';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
-import { MdOutlineFileDownload, MdClose } from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { useHfUserList } from '../hooks/useHfUserList';
-import HFStatus from '../constants/HFStatus';
+import HFStatus, { hfStatusLabelDe } from '../constants/HFStatus';
 import { DEFAULT_PATHS } from '../constants/paths';
+import Icon from './icons/Icon';
 
 // HuggingFace repository name validation
 const validateHfRepoName = (repoName) => {
@@ -311,17 +311,19 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
             {/* Modal Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
               <div className="flex items-center gap-3">
-                <MdOutlineFileDownload className="text-2xl text-teal-600" />
+                <Icon name="download" className="text-2xl text-teal-600" />
                 <h2 className="text-xl font-semibold text-gray-900">
                   Modell von Hugging Face herunterladen
                 </h2>
               </div>
               <button
                 onClick={onClose}
+                aria-label="Schließen"
+                title="Schließen"
                 className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
                 disabled={!canCloseModal}
               >
-                <MdClose className="w-6 h-6" />
+                <Icon name="close" className="w-6 h-6" />
               </button>
             </div>
 
@@ -330,7 +332,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
               {/* Download Policy Section Header */}
               <div className="w-full flex flex-col items-start justify-start gap-2 bg-gray-50 border border-gray-200 p-3 mb-2 rounded-md">
                 <div className="w-full flex items-center rounded-md font-medium gap-2">
-                  <MdOutlineFileDownload className="text-lg text-teal-600" />
+                  <Icon name="download" className="text-lg text-teal-600" />
                   Modell herunterladen
                 </div>
                 <div className="text-sm text-gray-600">
@@ -387,7 +389,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
                 <div className="w-full bg-white p-4 rounded-md flex flex-col items-start justify-center gap-2 shadow-md">
                   <div className="w-full flex flex-col gap-3">
                     <div className="w-full flex flex-col gap-2">
-                      <span className="text-lg font-bold">Repository ID</span>
+                      <span className="text-lg font-bold">Repository-ID</span>
                       <div className="relative">
                         <div
                           className={clsx(
@@ -427,7 +429,10 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
                             </span>
                           </div>
                           {!repoValidation.isValid && hfRepoId && (
-                            <div className="text-red-500 mt-1">⚠️ {repoValidation.message}</div>
+                            <div className="flex items-center gap-1 text-red-500 mt-1">
+                              <Icon name="warning" />
+                              <span>{repoValidation.message}</span>
+                            </div>
                           )}
                         </div>
                       </div>
@@ -436,7 +441,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
                     {/* Info message: Policy save path with folder icon */}
                     <div className="w-full flex flex-row items-center mt-1">
                       <span className="text-xs text-gray-600 flex items-center gap-1">
-                        <MdOutlineFileDownload className="inline-block w-4 h-4 text-teal-700 mr-1" />
+                        <Icon name="download" className="inline-block w-4 h-4 text-teal-700 mr-1" />
                         Das Modell wird gespeichert in{' '}
                         <span className="font-mono text-teal-700">
                           {DEFAULT_PATHS.POLICY_MODEL_PATH}
@@ -463,7 +468,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
                         disabled={!downloadButtonEnabled}
                       >
                         <div className="flex items-center justify-center gap-2">
-                          <MdOutlineFileDownload className="w-6 h-6" />
+                          <Icon name="download" className="w-6 h-6" />
                           Herunterladen
                         </div>
                       </button>
@@ -483,12 +488,17 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
                       {/* Status */}
                       <div className="flex flex-row items-center justify-start gap-2">
                         <span className="text-sm text-gray-500">
-                          {isDownloading && '⏳ Wird heruntergeladen...'}
-                          {!isDownloading && hfStatus}{' '}
+                          {isDownloading && (
+                            <span className="inline-flex items-center gap-1">
+                              <Icon name="hourglass" />
+                              Wird heruntergeladen …
+                            </span>
+                          )}
+                          {!isDownloading && hfStatusLabelDe(hfStatus)}{' '}
                         </span>
                         {/* Spinner for model downloads - right next to status text */}
                         {isDownloading && (
-                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-teal-600"></div>
+                          <Icon name="loading" size={16} className="animate-spin text-teal-600" />
                         )}
                       </div>
                     </div>

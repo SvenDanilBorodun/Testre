@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import toast from 'react-hot-toast';
-import { MdAdd, MdRemove } from 'react-icons/md';
 import Modal from './Modal';
 import { Btn } from '../EbUI';
 import { adjustWorkgroupCredits } from '../../services/workgroupsApi';
+import Icon from '../icons/Icon';
 
 const inputClass =
   'w-full h-10 px-3 bg-white border border-[var(--line)] rounded-[var(--radius-sm)] text-sm font-mono text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-wash)] transition';
@@ -122,7 +122,7 @@ export default function WorkgroupCreditsModal({
                   : `Max. ${remaining} abziehbar`
               }
             >
-              <MdRemove size={18} />
+              <Icon name="minus" size={18} />
             </button>
             <input
               type="number"
@@ -146,7 +146,7 @@ export default function WorkgroupCreditsModal({
               className="w-9 h-10 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
               title="Hinzufügen"
             >
-              <MdAdd size={18} />
+              <Icon name="plus" size={18} />
             </button>
           </div>
           <div className="flex items-center gap-1 mt-2">
@@ -164,7 +164,7 @@ export default function WorkgroupCreditsModal({
             ))}
           </div>
           <p className="text-[11px] text-[var(--ink-3)] mt-2 leading-snug">
-            <span className="font-mono">↩ Enter</span> fügt Credits hinzu · Schnellbuttons fügen sofort hinzu · Beim Reduzieren darf der neue Wert nicht unter die bereits verbrauchten Credits fallen.
+            <span className="inline-flex items-center gap-0.5 font-mono"><Icon name="enterKey" /> Enter</span> fügt Credits hinzu · Schnellbuttons fügen sofort hinzu · Beim Reduzieren darf der neue Wert nicht unter die bereits verbrauchten Credits fallen.
           </p>
         </label>
       </div>

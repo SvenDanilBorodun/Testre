@@ -19,18 +19,18 @@ import RightDock from '../RightDock';
 
 function makeTabs(opts = {}) {
   return [
-    { id: 'camera', label: 'Kamera', icon: '📷', render: () => <div>CAMERA_BODY</div> },
+    { id: 'camera', label: 'Kamera', icon: 'camera', render: () => <div>CAMERA_BODY</div> },
     {
       id: 'control',
       label: 'Steuern',
-      icon: '🎮',
+      icon: 'gamepad',
       busy: !!opts.controlBusy,
       render: () => <div>CONTROL_BODY</div>,
     },
     {
       id: 'record',
       label: 'Aufnehmen',
-      icon: '⏺',
+      icon: 'record',
       hidden: !!opts.recordHidden,
       render: () => <div>RECORD_BODY</div>,
     },
@@ -46,6 +46,10 @@ describe('RightDock', () => {
     expect(screen.getByRole('button', { name: 'Steuern' })).toBeInTheDocument();
     // A hidden tab has no rail button.
     expect(screen.queryByRole('button', { name: 'Aufnehmen' })).toBeNull();
+    // Each rail button draws its registry icon, decorative.
+    // eslint-disable-next-line testing-library/no-node-access
+    const icon = screen.getByRole('button', { name: 'Kamera' }).querySelector('svg[data-icon="camera"]');
+    expect(icon).toHaveAttribute('aria-hidden', 'true');
   });
 
   test('a rail click reports the toggle intent', async () => {

@@ -16,6 +16,7 @@
 
 import React, { useState, useEffect } from 'react';
 import clsx from 'clsx';
+import Icon from './icons/Icon';
 
 const TaskInstructionInput = ({ instructions = [''], onChange, disabled, className }) => {
   const [localInstructions, setLocalInstructions] = useState(() => {
@@ -66,7 +67,7 @@ const TaskInstructionInput = ({ instructions = [''], onChange, disabled, classNa
                 value={instruction}
                 onChange={(e) => updateInstruction(index, e.target.value)}
                 disabled={disabled}
-                placeholder={`Task instruction ${index + 1}`}
+                placeholder={`Aufgabenanweisung ${index + 1}`}
                 className={clsx(
                   'w-full',
                   'p-2',
@@ -111,8 +112,10 @@ const TaskInstructionInput = ({ instructions = [''], onChange, disabled, classNa
                     'text-sm',
                     'font-medium'
                   )}
+                  aria-label="Anweisung entfernen"
+                  title="Anweisung entfernen"
                 >
-                  ×
+                  <Icon name="close" />
                 </button>
               )}
             </div>
@@ -142,13 +145,11 @@ const TaskInstructionInput = ({ instructions = [''], onChange, disabled, classNa
               'font-medium'
             )}
           >
-            <span className="text-base font-bold">+</span>
-            Add Instruction
+            <Icon name="plus" />
+            Anweisung hinzufügen
           </button>
           <span className="block text-xs text-gray-600 mb-0.5 px-0 select-none">
-            <span role="img" aria-label="task">
-              📝
-            </span>{' '}
+            <Icon name="notebook" title="Anweisungen" className="align-[-0.125em]" />{' '}
             {localInstructions.length}
           </span>
         </div>

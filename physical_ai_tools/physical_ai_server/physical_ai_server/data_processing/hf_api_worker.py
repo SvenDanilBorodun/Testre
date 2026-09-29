@@ -244,25 +244,26 @@ class HfApiWorker:
             task_result = self.get_result(block=False, timeout=0.1)
             if task_result:
                 status, message = task_result
+                # The client toasts `message` verbatim (useRosTopicSubscription
+                # /huggingface/status), so it gets the worker's own German
+                # sentence; the English wrapper goes to the log only (Rule §1).
                 if status == 'success':
-                    log_message = f'✅ HF API task completed successfully:\n{message}'
-                    self.logger.info(log_message)
+                    self.logger.info(f'HF API task completed successfully:\n{message}')
                     self.is_processing = False
                     self.current_task = None
 
                     result['operation'] = mode
                     result['status'] = 'Success'
-                    result['message'] = log_message
+                    result['message'] = message
                     return result
                 elif status == 'error':
-                    log_message = f'❌ HF API task failed:\n{message}'
-                    self.logger.error(log_message)
+                    self.logger.error(f'HF API task failed:\n{message}')
                     self.is_processing = False
                     self.current_task = None
 
                     result['operation'] = mode
                     result['status'] = 'Failed'
-                    result['message'] = log_message
+                    result['message'] = message
                     return result
 
             # Still processing - return appropriate status message
@@ -292,11 +293,13 @@ class HfApiWorker:
             return result
 
         except Exception as e:
-            log_message = f'Error checking HF API task status: {str(e)}'
-            self.logger.error(log_message)
+            self.logger.error(f'Error checking HF API task status: {str(e)}')
             result['operation'] = mode if mode else 'Unknown'
             result['status'] = 'Failed'
-            result['message'] = log_message
+            result['message'] = (
+                'Der Status der Hugging Face-Aufgabe konnte nicht gelesen werden: '
+                f'{str(e)}'
+            )
             return result
 
     def is_busy(self):
@@ -388,7 +391,7 @@ class HfApiWorker:
                             )
                             if result:
                                 message = f'Hugging Face-Upload abgeschlossen: {repo_id}'
-                                logger.info(f'✅ Upload completed: {repo_id}')
+                                logger.info(f'Upload completed: {repo_id}')
                                 output_queue.put(('success', message))
                             else:
                                 reason = DataManager._last_hf_failure_reason_de
@@ -398,7 +401,7 @@ class HfApiWorker:
                                     f'\nBitte Internetverbindung und Repo-Namen '
                                     f'prüfen und erneut versuchen.'
                                 )
-                                logger.error(f'❌ Upload failed: {repo_id}')
+                                logger.error(f'Upload failed: {repo_id}')
                                 output_queue.put(('error', message))
 
                         elif mode == 'download':
@@ -409,7 +412,7 @@ class HfApiWorker:
                             )
                             if result:
                                 message = f'Hugging Face-Download abgeschlossen: {repo_id}'
-                                logger.info(f'✅ Download completed: {repo_id}')
+                                logger.info(f'Download completed: {repo_id}')
                                 output_queue.put(('success', message))
                             else:
                                 reason = DataManager._last_hf_failure_reason_de
@@ -419,7 +422,7 @@ class HfApiWorker:
                                     f'\nBitte Internetverbindung und Repo-Namen '
                                     f'prüfen und erneut versuchen.'
                                 )
-                                logger.error(f'❌ Download failed: {repo_id}')
+                                logger.error(f'Download failed: {repo_id}')
                                 output_queue.put(('error', message))
 
                         elif mode == 'delete':
@@ -428,8 +431,8 @@ class HfApiWorker:
                                 repo_id=repo_id,
                                 repo_type=repo_type
                             )
-                            message = f'Deleted Hugging Face repo: {repo_id}'
-                            logger.info(f'✅ Delete completed: {repo_id}')
+                            message = f'Hugging Face-Repo gelöscht: {repo_id}'
+                            logger.info(f'Delete completed: {repo_id}')
                             output_queue.put(('success', message))
 
                         elif mode == 'get_dataset_list':
@@ -438,8 +441,8 @@ class HfApiWorker:
                                 author=author,
                                 data_type='dataset'
                             )
-                            message = f'Got dataset list for author: {author}'
-                            logger.info(f'✅ Dataset list fetch completed: {author}')
+                            message = f'Datensatzliste von {author} geladen.'
+                            logger.info(f'Dataset list fetch completed: {author}')
                             output_queue.put(('success', message))
 
                         elif mode == 'get_model_list':
@@ -448,30 +451,27 @@ class HfApiWorker:
                                 author=author,
                                 data_type='model'
                             )
-                            message = f'Got model list for author: {author}'
-                            logger.info(f'✅ Model list fetch completed: {author}')
+                            message = f'Modellliste von {author} geladen.'
+                            logger.info(f'Model list fetch completed: {author}')
                             output_queue.put(('success', message))
 
                         else:
-                            error_msg = f'Unknown mode: {mode}'
-                            logger.error(error_msg)
-                            output_queue.put(('error', error_msg))
+                            logger.error(f'Unknown mode: {mode}')
+                            output_queue.put(('error', f'Unbekannte Hugging Face-Aktion: {mode}'))
 
                     except queue.Empty:
                         continue
 
                 except Exception as e:
-                    error_msg = f'HF API operation error: {str(e)}'
-                    logger.error(error_msg)
+                    logger.error(f'HF API operation error: {str(e)}')
                     import traceback
                     logger.error(f'Traceback: {traceback.format_exc()}')
-                    output_queue.put(('error', error_msg))
+                    output_queue.put(('error', f'Die Hugging Face-Aktion ist fehlgeschlagen: {str(e)}'))
 
         except Exception as e:
-            error_msg = f'HF API worker initialization error: {str(e)}'
-            logger.error(error_msg)
+            logger.error(f'HF API worker initialization error: {str(e)}')
             import traceback
             logger.error(f'Traceback: {traceback.format_exc()}')
-            output_queue.put(('error', error_msg))
+            output_queue.put(('error', f'Der Hugging Face-Dienst konnte nicht starten: {str(e)}'))
 
         logger.info('HF API worker process shutting down')

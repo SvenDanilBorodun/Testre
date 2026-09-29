@@ -34,6 +34,7 @@ import reducer, {
   setHighlight,
   setPreviewTempo,
   setRenameSplit,
+  teachClosed,
   teachOpened,
   teachModeResolved,
   openDrawer,
@@ -65,7 +66,7 @@ describe('studioAssets — initial state and sign-out', () => {
       drawer: { open: false, tab: 'aufnahmen', focusId: null, previewTempo: 1.0 },
       preview: null,
       lastPreviewResult: {},
-      teach: { open: false, requested: null, mode: null, focus: null },
+      teach: { open: false, requested: null, mode: null, kind: null },
       highlight: null,
       renameSplit: null,
     });
@@ -76,7 +77,7 @@ describe('studioAssets — initial state and sign-out', () => {
       started(),
       setSelectedWorkflowId('wf-1'),
       openDrawer({ tab: 'ziele', focusId: 'd_1' }),
-      teachOpened({ mode: 'hand', focus: 'pose' }),
+      teachOpened({ mode: 'hand', kind: 'pose' }),
       setHighlight({ kind: 'pin', id: 'd_1' }),
       setRenameSplit({ cloudName: 'Greifen' }),
       previewStarted({ key: KEY, kind: 'pin', name: 'Ablage', workflowId: OWN }),
@@ -293,10 +294,10 @@ describe('studioAssets — small reducers', () => {
   });
 
   test('R7: teachOpened with no mode opens UNRESOLVED; teachModeResolved sets it once', () => {
-    const open = reducer(reducer(init(), requestTeach({ focus: 'pose' })), teachOpened({ mode: null, focus: 'pose' }));
-    expect(open.teach).toEqual({ open: true, requested: null, mode: null, focus: 'pose' });
+    const open = reducer(reducer(init(), requestTeach({ kind: 'pose' })), teachOpened({ mode: null, kind: 'pose' }));
+    expect(open.teach).toEqual({ open: true, requested: null, mode: null, kind: 'pose' });
     const resolved = reducer(open, teachModeResolved({ mode: 'leader' }));
-    expect(resolved.teach).toEqual({ open: true, requested: null, mode: 'leader', focus: 'pose' });
+    expect(resolved.teach).toEqual({ open: true, requested: null, mode: 'leader', kind: 'pose' });
     // A resolved session never changes mode, a closed one is never resolved,
     // and only a real mode resolves.
     expect(reducer(resolved, teachModeResolved({ mode: 'hand' })).teach.mode).toBe('leader');
@@ -307,11 +308,29 @@ describe('studioAssets — small reducers', () => {
   });
 
   test('requestTeach stamps a token; teachOpened consumes the request', () => {
-    const s = reducer(init(), requestTeach({ focus: 'ziel' }));
-    expect(s.teach.requested).toMatchObject({ focus: 'ziel' });
+    const s = reducer(init(), requestTeach({ kind: 'ziel' }));
+    expect(s.teach.requested).toMatchObject({ kind: 'ziel' });
     expect(typeof s.teach.requested.token).toBe('number');
-    const opened = reducer(s, teachOpened({ mode: 'hand', focus: 'ziel' }));
-    expect(opened.teach).toEqual({ open: true, requested: null, mode: 'hand', focus: 'ziel' });
+    const opened = reducer(s, teachOpened({ mode: 'hand', kind: 'ziel' }));
+    expect(opened.teach).toEqual({ open: true, requested: null, mode: 'hand', kind: 'ziel' });
+    const closed = reducer(opened, teachClosed());
+    expect(closed.teach).toEqual({ open: false, requested: null, mode: null, kind: null });
+  });
+
+  test.each([
+    ['no payload', undefined], ['no kind', {}], ['a null kind', { kind: null }],
+    ['the retired focus field', { focus: 'pose' }], ['an unknown kind', { kind: 'bogus' }],
+  ])('requestTeach drops a request with %s (no kind-less window)', (_l, payload) => {
+    const s = reducer(init(), requestTeach(payload));
+    expect(s.teach).toEqual(init().teach);
+  });
+
+  test('teachOpened with an invalid kind consumes the request but opens nothing', () => {
+    const requested = reducer(init(), requestTeach({ kind: 'pose' }));
+    for (const payload of [{ mode: 'hand' }, { mode: 'hand', kind: 'x' }, undefined]) {
+      const next = reducer(requested, teachOpened(payload));
+      expect(next.teach).toEqual({ open: false, requested: null, mode: null, kind: null });
+    }
   });
 });
 
@@ -322,7 +341,7 @@ describe('studioAssets — selectors are safe on partial states', () => {
     expect(selectPreview(st)).toBeNull();
     expect(selectPreviewActive(st)).toBe(false);
     expect(selectTeachOpen(st)).toBe(false);
-    expect(selectTeachState(st)).toEqual({ open: false, requested: null, mode: null, focus: null });
+    expect(selectTeachState(st)).toEqual({ open: false, requested: null, mode: null, kind: null });
     expect(selectDrawer(st).tab).toBe('aufnahmen');
     expect(selectLastPreviewResult(st)).toEqual({});
     expect(selectHighlight(st)).toBeNull();

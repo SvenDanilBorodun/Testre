@@ -17,18 +17,8 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import {
-  MdRefresh,
-  MdFolder,
-  MdDescription,
-  MdHome,
-  MdArrowUpward,
-  MdKeyboardArrowRight,
-  MdCheck,
-  MdStar,
-  MdBookmark,
-} from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
+import Icon from './icons/Icon';
 
 /**
  * Format file size in bytes to human readable format
@@ -107,35 +97,39 @@ const FileBrowserHeader = ({
           onClick={onGoHome}
           disabled={loading}
           className={classButton}
-          title={homePath ? `Home: ${homePath}` : 'Home'}
+          title={homePath ? `Startordner: ${homePath}` : 'Startordner'}
+          aria-label="Zum Startordner"
         >
-          <MdHome size={20} />
+          <Icon name="home" size={20} />
         </button>
         {defaultPath && (
           <button
             onClick={onGoDefault}
             disabled={loading}
             className={classButton}
-            title={`Default: ${defaultPath}`}
+            title={`Standardordner: ${defaultPath}`}
+            aria-label="Zum Standardordner"
           >
-            <MdBookmark size={20} />
+            <Icon name="bookmark" size={20} />
           </button>
         )}
         <button
           onClick={onGoParent}
           disabled={loading || !parentPath}
           className={classButtonWithDisabled}
-          title="Parent Directory"
+          title="Übergeordneter Ordner"
+          aria-label="Übergeordneter Ordner"
         >
-          <MdArrowUpward size={20} />
+          <Icon name="arrowUp" size={20} />
         </button>
         <button
           onClick={onRefresh}
           disabled={loading}
           className={clsx(classButton, 'disabled:opacity-50')}
-          title="Refresh"
+          title="Neu laden"
+          aria-label="Neu laden"
         >
-          <MdRefresh size={20} className={clsx(loading && 'animate-spin')} />
+          <Icon name="refresh" size={20} className={clsx(loading && 'animate-spin')} />
         </button>
       </div>
     </div>
@@ -162,19 +156,19 @@ const PathInfo = ({ currentPath, homePath, defaultPath, targetFileName }) => {
   return (
     <div className={classContainer}>
       <div className={classPathRow}>
-        <span className={classLabel}>Path:</span>
+        <span className={classLabel}>Pfad:</span>
         <span className={classPathValue}>{currentPath || '/'}</span>
       </div>
       {homePath && (
         <div className={classHomeRow}>
-          <span className={classLabel}>Home:</span>
+          <span className={classLabel}>Startordner:</span>
           <span className={classHomeBadge}>{homePath}</span>
         </div>
       )}
       {defaultPath && (
         <div className={classDefaultRow}>
           <span className={classLabel}>
-            <MdBookmark size={20} />
+            <Icon name="bookmark" size={20} title="Standardordner" />
           </span>
           <span className={classDefaultBadge}>{defaultPath}</span>
         </div>
@@ -290,11 +284,11 @@ const FileItem = ({
       <div className={classIconContainer}>
         {item.is_directory ? (
           <>
-            <MdFolder className={classFolderIcon} />
-            {hasTarget && <MdStar className={classStarIcon} />}
+            <Icon name="folder" className={classFolderIcon} />
+            {hasTarget && <Icon name="star" className={classStarIcon} />}
           </>
         ) : (
-          <MdDescription className={classFileIcon} />
+          <Icon name="fileText" className={classFileIcon} />
         )}
       </div>
 
@@ -303,8 +297,9 @@ const FileItem = ({
           <div className={classNameContainer}>
             <p className={classItemName}>{item.name}</p>
             {hasTarget && (
-              <span className={classTargetBadge}>
-                {targetFileLabel || `Contains ${targetFileName}`}
+              <span className={`${classTargetBadge} inline-flex items-center gap-1`}>
+                <Icon name="checkCircle" />
+                {targetFileLabel || `Enthält ${targetFileName}`}
               </span>
             )}
           </div>
@@ -314,12 +309,12 @@ const FileItem = ({
               <button
                 onClick={handleSelectClick}
                 className={`${classSelectButton} select-button`}
-                title={`Select this ${item.is_directory ? 'folder' : 'file'}`}
+                title={item.is_directory ? 'Diesen Ordner auswählen' : 'Diese Datei auswählen'}
               >
                 {isSelected ? 'Ausgewählt' : 'Auswählen'}
               </button>
             )}
-            {isSelected && <MdCheck className={classCheckIcon} />}
+            {isSelected && <Icon name="check" className={classCheckIcon} />}
           </div>
         </div>
         <div className={classMetaRow}>
@@ -329,49 +324,51 @@ const FileItem = ({
           {canSelectDirectory && (
             <>
               <span className="mx-2">•</span>
-              <span className="text-teal-600 font-medium">Selectable folder</span>
+              <span className="text-teal-600 font-medium">Auswählbarer Ordner</span>
             </>
           )}
           {item.is_directory && !allowDirectorySelect && (
             <>
               <span className="mx-2">•</span>
-              <span className="text-gray-400 font-medium">Navigation only</span>
+              <span className="text-gray-400 font-medium">Nur zum Öffnen</span>
             </>
           )}
           {!item.is_directory && !allowFileSelect && (
             <>
               <span className="mx-2">•</span>
-              <span className="text-gray-400 font-medium">File selection disabled</span>
+              <span className="text-gray-400 font-medium">Dateien sind hier nicht auswählbar</span>
             </>
           )}
         </div>
       </div>
 
       {item.is_directory && !showSelectButton && (
-        <MdKeyboardArrowRight className={classArrowIcon} />
+        <Icon name="chevronRight" className={classArrowIcon} />
       )}
     </div>
   );
 };
 
+// What a student reads when a folder could not be listed. The robot's own
+// reason (file_browse_utils, English) and a transport error go to the console
+// only (Rule §1: German UI, English logs).
+const BROWSE_FAILED_DE = 'Der Ordner konnte nicht geöffnet werden.';
+
+function browseFailedDe(reason) {
+  if (reason) console.warn('FileBrowser: browse failed:', reason);
+  return BROWSE_FAILED_DE;
+}
+
 const LoadingState = () => {
   const classContainer = clsx('flex', 'items-center', 'justify-center', 'py-8');
 
-  const classSpinner = clsx(
-    'animate-spin',
-    'rounded-full',
-    'h-6',
-    'w-6',
-    'border-b-2',
-    'border-teal-600'
-  );
 
   const classText = clsx('ml-2', 'text-gray-600');
 
   return (
     <div className={classContainer}>
-      <div className={classSpinner}></div>
-      <span className={classText}>Laden...</span>
+      <Icon name="loading" size={24} className="animate-spin text-teal-600" />
+      <span className={classText}>Wird geladen …</span>
     </div>
   );
 };
@@ -381,7 +378,7 @@ const EmptyState = () => {
 
   return (
     <div className={classContainer}>
-      <span>No items found</span>
+      <span>Dieser Ordner ist leer.</span>
     </div>
   );
 };
@@ -441,18 +438,18 @@ const SelectedItemInfo = ({
       <div className={classContent}>
         {selectedItem.is_directory ? (
           <>
-            <p className={classLabel}>Selected Directory:</p>
+            <p className={classLabel}>Ausgewählter Ordner:</p>
             <p className={classPath}>{selectedItem.full_path}</p>
             {isTargetDirectory && (
               <p className={classTargetInfo}>
-                <MdStar className={classStarIcon} />
-                {targetFileLabel || `This directory contains ${targetFileName}`}
+                <Icon name="star" className={classStarIcon} />
+                {targetFileLabel || `Dieser Ordner enthält ${targetFileName}`}
               </p>
             )}
           </>
         ) : (
           <>
-            <p className={classFileLabel}>Selected File:</p>
+            <p className={classFileLabel}>Ausgewählte Datei:</p>
             <p className={classFilePath}>{selectedItem.full_path}</p>
           </>
         )}
@@ -470,7 +467,7 @@ export default function FileBrowser({
   initialPath = '',
   fileFilter = null,
   className = '',
-  title = 'File Browser',
+  title = 'Dateien',
   targetFileName = null,
   targetFolderName = null,
   onDirectorySelect = null,
@@ -534,11 +531,12 @@ export default function FileBrowser({
             setDirectoriesWithTarget(new Set());
           }
         } else {
-          setError(result.message || 'Failed to browse directory');
-          toast.error(result.message || 'Failed to browse directory');
+          const message = browseFailedDe(result.message);
+          setError(message);
+          toast.error(message);
         }
       } catch (err) {
-        const errorMessage = err.message || 'Failed to browse directory';
+        const errorMessage = browseFailedDe(err && err.message);
         setError(errorMessage);
         toast.error(errorMessage);
       } finally {
@@ -654,11 +652,12 @@ export default function FileBrowser({
             setDirectoriesWithTarget(new Set());
           }
         } else {
-          setError(result.message || 'Failed to browse directory');
-          toast.error(result.message || 'Failed to browse directory');
+          const message = browseFailedDe(result.message);
+          setError(message);
+          toast.error(message);
         }
       } catch (err) {
-        const errorMessage = err.message || 'Failed to browse directory';
+        const errorMessage = browseFailedDe(err && err.message);
         setError(errorMessage);
         toast.error(errorMessage);
       } finally {

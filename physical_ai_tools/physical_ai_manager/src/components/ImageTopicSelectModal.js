@@ -16,6 +16,7 @@
 
 import React, { useState } from 'react';
 import clsx from 'clsx';
+import Icon from './icons/Icon';
 
 const ImageTopicSelectModal = ({
   topicList,
@@ -62,7 +63,10 @@ const ImageTopicSelectModal = ({
         {/* Error message display */}
         {errorMessage && !isLoading && (
           <div className="mb-4 p-3 bg-red-100 border border-red-300 rounded-md">
-            <div className="text-red-800 text-sm font-medium">⚠️ {errorMessage}</div>
+            <div className="flex items-center gap-1.5 text-red-800 text-sm font-medium">
+              <Icon name="warning" />
+              <span>{errorMessage}</span>
+            </div>
           </div>
         )}
 

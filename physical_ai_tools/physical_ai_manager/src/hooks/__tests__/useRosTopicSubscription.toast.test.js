@@ -24,6 +24,7 @@
 import { renderHook, act } from '@testing-library/react';
 import toast from 'react-hot-toast';
 import { useRosTopicSubscription } from '../useRosTopicSubscription';
+import { toastIcon } from '../../components/icons/toast';
 
 // --- react-redux: no-op dispatch + a fixed rosbridgeUrl (non-empty so the
 //     subscribe path doesn't early-return). ---
@@ -121,7 +122,7 @@ describe('useRosTopicSubscription — [TOAST] sentinel interception', () => {
 
     // warning → plain toast + a warning icon.
     act(() => cb({ log_message: '[TOAST:warning:3:Achtung]', phase: 'running' }));
-    expect(toast).toHaveBeenLastCalledWith('Achtung', { duration: 3000, icon: '⚠️' });
+    expect(toast).toHaveBeenLastCalledWith('Achtung', { duration: 3000, icon: toastIcon('warning') });
 
     // success → toast.success.
     act(() => cb({ log_message: '[TOAST:success:5:Erledigt]', phase: 'running' }));
@@ -143,7 +144,7 @@ describe('useRosTopicSubscription — [TOAST] sentinel interception', () => {
     // The backend strips ']' so the sentinel's closing bracket is unambiguous;
     // a normal message body therefore carries no brackets and renders verbatim.
     act(() => cb({ log_message: '[TOAST:warning:4:Greifer 1 von 3]', phase: 'running' }));
-    expect(toast).toHaveBeenCalledWith('Greifer 1 von 3', { duration: 4000, icon: '⚠️' });
+    expect(toast).toHaveBeenCalledWith('Greifer 1 von 3', { duration: 4000, icon: toastIcon('warning') });
   });
 
   test('empty text yields an empty-string toast', async () => {

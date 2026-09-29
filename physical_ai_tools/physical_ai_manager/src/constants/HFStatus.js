@@ -28,4 +28,22 @@ const HFStatus = {
   FAILED: 'Failed',
 };
 
+// What a student reads for each status (the values above are the wire values
+// the server sends and the code compares; they stay English).
+const HF_STATUS_DE = Object.freeze({
+  [HFStatus.IDLE]: 'Bereit',
+  [HFStatus.UPLOADING]: 'Wird hochgeladen',
+  [HFStatus.DOWNLOADING]: 'Wird heruntergeladen',
+  [HFStatus.DELETING]: 'Wird gelöscht',
+  [HFStatus.FETCHING]: 'Wird abgerufen',
+  [HFStatus.PROCESSING]: 'Wird verarbeitet',
+  [HFStatus.SUCCESS]: 'Erfolgreich',
+  [HFStatus.FAILED]: 'Fehlgeschlagen',
+});
+
+/** The German label of an HF status; an unknown status is shown as it came. */
+export function hfStatusLabelDe(status) {
+  return Object.prototype.hasOwnProperty.call(HF_STATUS_DE, status) ? HF_STATUS_DE[status] : status;
+}
+
 export default HFStatus;

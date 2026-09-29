@@ -2493,7 +2493,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
             if self.hf_cancel_on_progress:
                 response.success = False
-                response.message = 'HF API Worker is currently canceling'
+                response.message = (
+                    'Ein Abbruch läuft gerade. Bitte kurz warten und dann '
+                    'erneut versuchen.'
+                )
                 return response
 
             if mode == 'cancel':
@@ -2510,7 +2513,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     self.hf_cancel_on_progress = True
                     self._cleanup_hf_api_worker_with_threading()
                     response.success = True
-                    response.message = 'Cancellation started.'
+                    response.message = 'Wird abgebrochen …'
                 except Exception as e:
                     self.get_logger().error(f'Error during cancel: {e}')
                     response.success = False
@@ -2529,7 +2532,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if self.hf_api_worker.is_busy():
                 self.get_logger().warning('HF API Worker is currently busy with another task')
                 response.success = False
-                response.message = 'HF API Worker is currently busy with another task'
+                response.message = (
+                    'Hugging Face ist gerade mit einer anderen Aufgabe '
+                    'beschäftigt. Bitte warten, bis sie fertig ist.'
+                )
                 return response
             # CONFINE local_dir before it reaches the worker. This is the
             # highest-blast-radius client path on the whole rosbridge surface
@@ -2573,16 +2579,24 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if self.hf_api_worker.send_request(request_data):
                 self.get_logger().info(f'HF API request sent successfully: {mode} for {repo_id}')
                 response.success = True
-                response.message = f'HF API request started: {mode} for {repo_id}'
+                response.message = f'Hugging Face-Auftrag gestartet ({repo_id}).'
             else:
                 self.get_logger().error('Failed to send request to HF API Worker')
                 response.success = False
-                response.message = 'Failed to send request to HF API Worker'
+                response.message = (
+                    'Der Auftrag konnte nicht an Hugging Face übergeben werden. '
+                    'Bitte erneut versuchen.'
+                )
             return response
         except Exception as e:
             self.get_logger().error(f'Error in HF server callback: {str(e)}')
             response.success = False
-            response.message = f'Error in HF server callback: {str(e)}'
+            # The raw exception stays in the log: it is English and may name
+            # internals.
+            response.message = (
+                'Die Hugging Face-Anfrage ist fehlgeschlagen. Bitte erneut '
+                'versuchen.'
+            )
             return response
 
     # ------------------------------------------------------------------

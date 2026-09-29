@@ -1,19 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import {
-  MdDelete,
-  MdKey,
-  MdHistory,
-  MdEdit,
-  MdMoveDown,
-  MdAdd,
-  MdRemove,
-  MdTune,
-  MdEventNote,
-  MdGroups,
-  MdTerminal,
-} from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   adjustStudentCredits,
@@ -30,6 +17,7 @@ import { updateTeacherPool } from '../../features/auth/authSlice';
 import PasswordResetModal from './PasswordResetModal';
 import StudentProgramsDrawer from './StudentProgramsDrawer';
 import { Avatar, Btn, Pill, Progress } from '../EbUI';
+import Icon from '../icons/Icon';
 
 function RenameInline({ student, onSave, onCancel }) {
   const [value, setValue] = useState(student.full_name || '');
@@ -110,7 +98,7 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
               : `Max. ${remaining} abziehbar`
           }
         >
-          <MdRemove size={16} />
+          <Icon name="minus" size={16} />
         </button>
         <input
           ref={inputRef}
@@ -135,7 +123,7 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
           className="w-8 h-9 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
           title="Hinzufügen"
         >
-          <MdAdd size={16} />
+          <Icon name="plus" size={16} />
         </button>
       </div>
       <div className="flex items-center gap-1 mt-2">
@@ -153,7 +141,7 @@ function CreditDeltaPopover({ student, onApply, onClose, busy }) {
         ))}
       </div>
       <div className="text-[10px] text-[var(--ink-3)] mt-2 leading-snug font-mono">
-        <span className="text-[var(--ink-2)]">↩ Enter</span> = hinzufügen · Aktuell <span className="text-[var(--ink)]">{total}</span> · verbraucht {used} · max. ±1000
+        <span className="inline-flex items-center gap-0.5 text-[var(--ink-2)]"><Icon name="enterKey" /> Enter</span> = hinzufügen · Aktuell <span className="text-[var(--ink)]">{total}</span> · verbraucht {used} · max. ±1000
       </div>
     </div>
   );
@@ -345,12 +333,12 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
                   className="text-[var(--ink-4)] hover:text-[var(--ink)] transition"
                   title="Namen ändern"
                 >
-                  <MdEdit size={14} />
+                  <Icon name="pencil" size={14} />
                 </button>
                 {student.workgroup_id && student.workgroup_name && (
                   <Pill tone="success" title="In Arbeitsgruppe">
                     <span className="inline-flex items-center gap-1">
-                      <MdGroups size={12} />
+                      <Icon name="users" size={12} />
                       {student.workgroup_name}
                     </span>
                   </Pill>
@@ -399,7 +387,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
                 className="w-7 h-7 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] text-[var(--ink-2)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
                 title="Credit entziehen"
               >
-                <MdRemove size={16} />
+                <Icon name="minus" size={16} />
               </button>
               <button
                 onClick={() => handleDelta(1)}
@@ -407,7 +395,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
                 className="w-7 h-7 rounded-[var(--radius-sm)] bg-[var(--accent-wash)] hover:brightness-95 text-[var(--accent-ink)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
                 title="Credit hinzufügen"
               >
-                <MdAdd size={16} />
+                <Icon name="plus" size={16} />
               </button>
               <button
                 onClick={() => setCustomOpen((v) => !v)}
@@ -420,7 +408,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
                 )}
                 title="Beliebigen Betrag anpassen"
               >
-                <MdTune size={14} />
+                <Icon name="sliders" size={14} />
               </button>
               {customOpen && (
                 <CreditDeltaPopover
@@ -457,7 +445,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
               onClick={() => onShowProgress?.(student)}
               title="Fortschritt · tägliche Notizen"
             >
-              <MdEventNote size={18} />
+              <Icon name="notebook" size={18} />
             </Btn>
             <Btn
               variant="ghost"
@@ -465,7 +453,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
               onClick={() => setShowPrograms(true)}
               title="Programme · Abgaben"
             >
-              <MdTerminal size={18} />
+              <Icon name="terminal" size={18} />
             </Btn>
             <Btn
               variant="ghost"
@@ -473,7 +461,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
               onClick={() => onShowHistory(student)}
               title="Trainings-Historie"
             >
-              <MdHistory size={18} />
+              <Icon name="history" size={18} />
             </Btn>
             <Btn
               variant="ghost"
@@ -481,7 +469,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
               onClick={() => setShowPwModal(true)}
               title="Passwort zurücksetzen"
             >
-              <MdKey size={18} />
+              <Icon name="key" size={18} />
             </Btn>
             <Btn
               variant="ghost"
@@ -494,7 +482,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
                   : 'In andere Klasse verschieben'
               }
             >
-              <MdMoveDown size={18} />
+              <Icon name="moveAcross" size={18} />
             </Btn>
             <Btn
               variant="ghost"
@@ -503,7 +491,7 @@ export default function StudentRow({ student, classrooms, onShowHistory, onShowP
               disabled={busy}
               title="Schüler löschen"
             >
-              <MdDelete size={18} />
+              <Icon name="trash" size={18} />
             </Btn>
           </div>
         )}

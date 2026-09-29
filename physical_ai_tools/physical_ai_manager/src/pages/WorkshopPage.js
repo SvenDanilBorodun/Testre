@@ -20,7 +20,6 @@ import { DEFAULT_OBJECT_CATALOG } from '../components/Workshop/blocks/objectCata
 import RunControls from '../components/Workshop/RunControls';
 import CameraFeedOverlay from '../components/Workshop/CameraFeedOverlay';
 import SimStage from '../components/Workshop/SimStage';
-import TemplatePicker from '../components/Workshop/TemplatePicker';
 import ToolbarButtons from '../components/Workshop/ToolbarButtons';
 import DebugPanel from '../components/Workshop/DebugPanel';
 import GalleryTab from '../components/Workshop/GalleryTab';
@@ -50,7 +49,12 @@ import { buildTwinMarkers, variablePointsFromValues } from '../components/Worksh
 import { ghostJointsFromEntry } from '../utils/armProfile';
 import SammlungDrawer from '../components/Workshop/sammlung/SammlungDrawer';
 import TeachHost from '../components/Workshop/teach/TeachHost';
-import { TEACH_BLOCK_TITLES_DE, teachEntryBlockReason } from '../components/Workshop/teach/teachGates';
+import {
+  TEACH_BLOCK_TITLES_DE, TEACH_KINDS, TEACH_KIND_ICON, TEACH_KIND_LABEL_DE, teachEntryBlockReason,
+} from '../components/Workshop/teach/teachGates';
+import MenuButton from '../components/Workshop/MenuButton';
+import OpenWorkflowPopover from '../components/Workshop/OpenWorkflowPopover';
+import { toastIcon } from '../components/icons/toast';
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
 import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
@@ -212,56 +216,6 @@ const SIM_DEFAULT_CATALOG = DEFAULT_OBJECT_CATALOG;
 // hydrate/save round-trip the whole sim_scene unchanged, so persisted zones ride
 // along in workflows.sim_scene.zones.
 const EMPTY_SIM_SCENE = { version: 1, objects: [], zones: [] };
-
-// Compact „Öffnen" control for the toolbar: the TemplatePicker (a full card list
-// of templates + own workflows) used to sit expanded in the top band, eating
-// vertical space in every view. It now opens in a popover so the band stays a
-// single slim row (density pass). Closes on pick or outside click.
-// `lockedReason` (a program runs, R2-O3): the button is disabled and says why;
-// a popover already open keeps its list but every choice in it is disabled.
-function OpenWorkflowPopover({ onPicked, lockedReason = null }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDoc = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [open]);
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        disabled={!!lockedReason}
-        title={lockedReason || 'Vorlage oder gespeicherten Workflow öffnen'}
-        className={
-          'inline-flex items-center gap-1 min-h-[28px] px-3 py-1.5 rounded-md '
-          + 'text-sm font-medium border border-[var(--line)] bg-white text-[var(--ink)] '
-          + 'hover:bg-[var(--bg-sunk)] focus:outline-none focus-visible:ring-2 '
-          + 'focus-visible:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed'
-        }
-      >
-        📂 {DE.DOCK_OPEN_WORKFLOW}
-        <span className="text-[10px]" aria-hidden="true">▾</span>
-      </button>
-      {open && (
-        <div className="absolute z-30 mt-1 left-0 w-80 max-h-[60vh] overflow-auto rounded-md border border-[var(--line)] bg-white shadow-lg p-3">
-          <TemplatePicker
-            lockedReason={lockedReason}
-            onPicked={(wf) => {
-              setOpen(false);
-              if (onPicked) onPicked(wf);
-            }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
 
 function WorkshopPage({ isActive }) {
   const dispatch = useDispatch();
@@ -1656,7 +1610,7 @@ function WorkshopPage({ isActive }) {
       if (action.type === 'pinCamera') {
         setDockCollapsed(false);
         setDockOpen((prev) => (prev.includes('camera') ? prev : addOpenTab(prev, 'camera', isTabBusy)));
-        toast(DE.FLY_PIN_CAMERA_HINT, { icon: '📷' });
+        toast(DE.FLY_PIN_CAMERA_HINT, { icon: toastIcon('camera') });
       } else if (action.type === 'jumpToBlock') {
         jumpToBlock(workspaceRef.current, action.blockId);
       } else if (action.type === 'manage') {
@@ -1664,8 +1618,9 @@ function WorkshopPage({ isActive }) {
         // aufnahmen, pin → ziele, pose → positionen, variable → variablen).
         dispatch(openDrawer({ tab: action.tab, focusId: action.focusId ?? null }));
       } else if (action.type === 'teach') {
-        // TeachHost judges the gates (and a glide) when it processes the request.
-        dispatch(requestTeach({ focus: action.focus ?? null }));
+        // TeachHost judges the gates (and a glide) when it processes the
+        // request; the slice drops one that names no window kind.
+        dispatch(requestTeach({ kind: action.kind }));
       } else if (action.type === 'preview') {
         // The flyout ▶ always plays at tempo 1.0 (a variable: its marker).
         previewAsset(action.asset);
@@ -1717,6 +1672,12 @@ function WorkshopPage({ isActive }) {
   const jogDisabled =
     heartbeatStatus !== 'connected' || runState === 'running' || teachOpen;
   const teachReasonText = teachReason ? TEACH_BLOCK_TITLES_DE[teachReason] : null;
+  const teachChooserItems = TEACH_KINDS.map((kind) => ({
+    id: kind,
+    label: TEACH_KIND_LABEL_DE[kind],
+    icon: TEACH_KIND_ICON[kind],
+    onSelect: () => dispatch(requestTeach({ kind })),
+  }));
 
   // Editor/Galerie switch — shared by both views (in the editor toolbar, and as a
   // standalone strip in the gallery view where the toolbar is absent).
@@ -1780,7 +1741,7 @@ function WorkshopPage({ isActive }) {
     {
       id: 'camera',
       label: DE.DOCK_TAB_CAMERA,
-      icon: '📷',
+      icon: 'camera',
       // Only the feed: capturing the arm's pose moved into Vormachen („P").
       render: () => (
         <div className="flex flex-col gap-2 h-full">
@@ -1802,7 +1763,7 @@ function WorkshopPage({ isActive }) {
     {
       id: 'control',
       label: DE.DOCK_TAB_CONTROL,
-      icon: '🎮',
+      icon: 'gamepad',
       busy: jogHandGuideOn,
       render: () => (
         <JogPanel disabled={jogDisabled} onHandGuideChange={setJogHandGuideOn} />
@@ -1811,7 +1772,7 @@ function WorkshopPage({ isActive }) {
     {
       id: '3d',
       label: DE.DOCK_TAB_3D,
-      icon: '🧊',
+      icon: 'box',
       render: () => (
         <div className="flex flex-col gap-2 h-full">
           <div className="flex items-center gap-1.5 flex-wrap shrink-0">
@@ -1880,14 +1841,14 @@ function WorkshopPage({ isActive }) {
     {
       id: 'tutorial',
       label: DE.DOCK_TAB_TUTORIAL,
-      icon: '🎓',
+      icon: 'graduationCap',
       busy: !!activeTutorialId,
       render: () => <SkillmapPlayer />,
     },
     {
       id: 'debug',
       label: DE.DOCK_TAB_DEBUG,
-      icon: '🔍',
+      icon: 'debug',
       // The open document's language decides the „Haltepunkte" tab: a code
       // program has no blocks to Alt-click, and Java has no breakpoints at all
       // this round (A8). It is a page-level fact — the dock's panels are
@@ -1974,8 +1935,9 @@ function WorkshopPage({ isActive }) {
           </div>
         </div>
       </header>
-      {/* Vormachen: the full-screen teaching overlay, opened from the toolbar
-          button or a Sammlung flyout („✋ … vormachen"). */}
+      {/* Vormachen: the full-screen teaching overlay, one focused window per
+          kind, opened from the toolbar chooser or a Sammlung creation button
+          („Bewegung/Position/Ziel vormachen"). */}
       <TeachHost
         isActive={isActive}
         workspace={workspace}
@@ -2037,19 +1999,21 @@ function WorkshopPage({ isActive }) {
                   }
                   extra={
                     <>
-                      <button
-                        type="button"
-                        onClick={() => dispatch(requestTeach({ focus: null }))}
+                      {/* One focused window per kind (owner decisions D1, D4):
+                          the chooser names the three. */}
+                      <MenuButton
+                        label={DE.TOOLBAR_TEACH}
+                        icon="hand"
+                        menuLabel={DE.TEACH_CHOOSER_MENU}
+                        items={teachChooserItems}
                         disabled={!!teachReason || teachOpen}
                         title={teachReasonText || DE.TOOLBAR_TEACH_TITLE}
-                        className={
+                        buttonClassName={
                           'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
                           + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
                           + 'border-[var(--accent)] hover:opacity-90'
                         }
-                      >
-                        {DE.TOOLBAR_TEACH}
-                      </button>
+                      />
                       <VersionHistoryDropdown
                         workflowId={openDocId}
                         lockedReason={historyLockReason}

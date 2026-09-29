@@ -18,7 +18,6 @@ import React, { useState, useCallback, useMemo } from 'react';
 import clsx from 'clsx';
 import { useSelector, useDispatch } from 'react-redux';
 import toast from 'react-hot-toast';
-import { MdFolderOpen, MdRefresh } from 'react-icons/md';
 import {
   setDatasetToDeleteEpisode,
   setDeleteEpisodeNums,
@@ -28,6 +27,7 @@ import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import FileBrowserModal from '../../../components/FileBrowserModal';
 import LocalDatasetQuickPick from './LocalDatasetQuickPick';
 import { DEFAULT_PATHS, TARGET_FOLDERS } from '../../../constants/paths';
+import Icon from '../../../components/icons/Icon';
 
 // Style Classes
 const STYLES = {
@@ -170,7 +170,7 @@ const DeleteSection = ({ isEditable = true }) => {
   const fetchDatasetInfo = useCallback(
     async (datasetPath) => {
       if (!datasetPath || datasetPath === '') {
-        toast.error('Dataset path is empty');
+        toast.error('Bitte zuerst einen Datensatz-Pfad angeben.');
         return;
       }
 
@@ -189,11 +189,11 @@ const DeleteSection = ({ isEditable = true }) => {
             })
           );
         } else {
-          toast.error('Failed to get dataset info: ' + result.message);
+          toast.error(`Datensatz-Infos konnten nicht geladen werden: ${result.message}`);
         }
       } catch (error) {
         console.error('Error fetching dataset info:', error);
-        toast.error('Failed to get dataset info: ' + error.message);
+        toast.error(`Datensatz-Infos konnten nicht geladen werden: ${error.message}`);
       }
     },
     [getDatasetInfo, dispatch]
@@ -270,7 +270,7 @@ const DeleteSection = ({ isEditable = true }) => {
               onClick={() => fetchDatasetInfo(datasetToDeleteEpisode)}
               className="flex items-center justify-center text-blue-500 rounded-md p-1 hover:text-blue-700 hover:bg-gray-200"
             >
-              <MdRefresh className="w-8 h-8" />
+              <Icon name="refresh" className="w-8 h-8" />
             </button>
           </div>
           <div className="flex items-center justify-center gap-2 w-full">
@@ -292,7 +292,7 @@ const DeleteSection = ({ isEditable = true }) => {
               className="flex items-center justify-center w-12 h-12 text-blue-500 bg-gray-200 rounded-md hover:text-blue-700"
               aria-label="Datensatz-Ordner durchsuchen"
             >
-              <MdFolderOpen className="w-10 h-10" />
+              <Icon name="folderOpen" className="w-10 h-10" />
             </button>
           </div>
         </div>
@@ -334,7 +334,7 @@ const DeleteSection = ({ isEditable = true }) => {
           TARGET_FOLDERS.DATASET_VIDEO,
           TARGET_FOLDERS.DATASET_DATA,
         ]}
-        targetFileLabel="Dataset folder found! 🎯"
+        targetFileLabel="Datensatz-Ordner gefunden"
         initialPath={DEFAULT_PATHS.DATASET_PATH}
         defaultPath={DEFAULT_PATHS.DATASET_PATH}
         homePath=""

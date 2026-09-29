@@ -14,6 +14,7 @@ import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval';
 import toast from 'react-hot-toast';
 import { DE } from './blocks/messages_de';
 import { slimSavePayload } from '../../utils/blocklyPayload';
+import { toastIcon } from '../icons/toast';
 
 const STORAGE_KEY = 'edubotics:workshop:autosave';
 // Names the BROWSER SESSION, so the un-signed-in autosave bucket is per-session
@@ -276,7 +277,7 @@ export function useAutosave({
           } finally {
             loadingFlagRef.current = false;
           }
-          toast(DE.AUTOSAVE_RESTORED, { icon: '💾' });
+          toast(DE.AUTOSAVE_RESTORED, { icon: toastIcon('save') });
         }
         setLastSavedAt(cached.ts || null);
         setHasRestored(true);

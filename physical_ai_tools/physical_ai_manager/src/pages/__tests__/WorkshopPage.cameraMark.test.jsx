@@ -22,6 +22,7 @@ import React from 'react';
 import { act, render, waitFor } from '@testing-library/react';
 import toast from 'react-hot-toast';
 import WorkshopPage from '../WorkshopPage';
+import { toastIcon } from '../../components/icons/toast';
 import { DE } from '../../components/Workshop/blocks/messages_de';
 
 // ── react-redux: selector-aware stub over a mutable module-level state. ──
@@ -390,14 +391,14 @@ describe('WorkshopPage — the Sammlung „Ziele" group points at the camera', (
     expect(snap.trajectories.status).toBe('none');
   });
 
-  test('a flyout „✋ … vormachen" action requests Vormachen with its focus', async () => {
+  test('a flyout „… vormachen" action requests Vormachen with its kind', async () => {
     await mountWith(makeWorkspace());
     const provider = mockWorkspace.sammlungProvider;
     mockDispatch.mockClear();
-    act(() => { provider.dispatchAction({ type: 'teach', focus: 'pose' }); });
+    act(() => { provider.dispatchAction({ type: 'teach', kind: 'pose' }); });
     const requested = mockDispatch.mock.calls.map((c) => c[0]).filter((x) => x && x.type === 'studioAssets/requestTeach');
     expect(requested).toHaveLength(1);
-    expect(requested[0].payload).toEqual({ focus: 'pose' });
+    expect(requested[0].payload).toEqual({ kind: 'pose' });
   });
 
   test('„Ziel in der Kamera setzen" opens the Kamera tab and says where to click', async () => {
@@ -410,7 +411,7 @@ describe('WorkshopPage — the Sammlung „Ziele" group points at the camera', (
       await waitFor(() => expect(mockDock.openIds).toEqual(['control']));
       act(() => { mockWorkspace.sammlungProvider.dispatchAction({ type: 'pinCamera' }); });
       await waitFor(() => expect(mockDock.openIds).toEqual(['control', 'camera']));
-      expect(toast).toHaveBeenCalledWith(DE.FLY_PIN_CAMERA_HINT, { icon: '📷' });
+      expect(toast).toHaveBeenCalledWith(DE.FLY_PIN_CAMERA_HINT, { icon: toastIcon('camera') });
     } finally {
       window.localStorage.removeItem('edubotics_workshop_dock_open');
     }

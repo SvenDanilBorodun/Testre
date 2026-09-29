@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import toast from 'react-hot-toast';
-import { MdClose } from 'react-icons/md';
 import { useSelector } from 'react-redux';
 import {
   listStudentTrainings,
@@ -9,6 +8,7 @@ import {
   listTrainingCheckpoints,
 } from '../../services/teacherApi';
 import { Avatar, Pill } from '../EbUI';
+import Icon from '../icons/Icon';
 
 const STATUS_TONE = {
   queued: 'neutral',
@@ -98,7 +98,7 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
             onClick={onClose}
             aria-label="Schließen"
           >
-            <MdClose size={20} />
+            <Icon name="close" size={20} />
           </button>
         </div>
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-3">
@@ -160,10 +160,11 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
                     href={t.log_url}
                     target="_blank"
                     rel="noreferrer"
-                    className="mt-2 inline-block text-[11px] font-medium text-[var(--accent)] hover:underline"
+                    className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-[var(--accent)] hover:underline"
                     title="Vollständiges Trainingsprotokoll (training_log.txt im privaten HF-Repo)"
                   >
-                    Vollständiges Protokoll öffnen ↗
+                    Vollständiges Protokoll öffnen
+                    <Icon name="externalLink" />
                   </a>
                 )}
                 {(t.status === 'succeeded' || t.status === 'running') && (

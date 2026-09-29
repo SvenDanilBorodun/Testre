@@ -1,13 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-import {
-  MdAdd,
-  MdDelete,
-  MdEdit,
-  MdEventNote,
-  MdConstruction,
-  MdGroups,
-} from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   createStudent,
@@ -32,6 +24,7 @@ import WorkgroupsPanel from './WorkgroupsPanel';
 import JetsonSection from './JetsonSection';
 import WorkflowTemplatesPage from '../../pages/teacher/WorkflowTemplatesPage';
 import { Btn, Card } from '../EbUI';
+import Icon from '../icons/Icon';
 
 export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
   const dispatch = useDispatch();
@@ -169,7 +162,7 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
                   className="text-[var(--ink-4)] hover:text-[var(--ink)] transition"
                   title="Klasse umbenennen"
                 >
-                  <MdEdit size={16} />
+                  <Icon name="pencil" size={16} />
                 </button>
                 <span className="text-sm text-[var(--ink-3)] font-mono">
                   {students.length} / 30 Schüler
@@ -183,35 +176,35 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
               onClick={() => setShowClassProgress(true)}
               title="Klassen-Fortschritt · tägliche Notizen für die ganze Klasse"
             >
-              <MdEventNote /> Klassen-Fortschritt
+              <Icon name="notebook" /> Klassen-Fortschritt
             </Btn>
             <Btn
               variant="secondary"
               onClick={() => setShowWorkgroups((v) => !v)}
               title="Arbeitsgruppen verwalten"
             >
-              <MdGroups /> {showWorkgroups ? 'Gruppen ausblenden' : 'Arbeitsgruppen'}
+              <Icon name="users" /> {showWorkgroups ? 'Gruppen ausblenden' : 'Arbeitsgruppen'}
             </Btn>
             <Btn
               variant="secondary"
               onClick={() => setShowWorkflowTemplates((v) => !v)}
               title="Roboter-Studio-Vorlagen für diese Klasse veröffentlichen"
             >
-              <MdConstruction /> {showWorkflowTemplates ? 'Vorlagen ausblenden' : 'Workflow-Vorlagen'}
+              <Icon name="construction" /> {showWorkflowTemplates ? 'Vorlagen ausblenden' : 'Workflow-Vorlagen'}
             </Btn>
             <Btn
               variant="primary"
               onClick={() => setShowCreateStudent(true)}
               disabled={full}
             >
-              <MdAdd /> Schüler hinzufügen
+              <Icon name="plus" /> Schüler hinzufügen
             </Btn>
             <button
               onClick={handleDeleteClassroom}
               className="w-9 h-9 rounded-[var(--radius-sm)] text-[var(--ink-3)] hover:bg-[var(--danger-wash)] hover:text-[color:var(--danger)] flex items-center justify-center transition"
               title="Klasse löschen"
             >
-              <MdDelete size={20} />
+              <Icon name="trash" size={20} />
             </button>
           </div>
         </div>
@@ -240,7 +233,7 @@ export default function ClassroomDetail({ classroomId, onClassroomsChanged }) {
             <div className="flex flex-col items-center justify-center h-full text-[var(--ink-3)] p-8 md:p-10 text-center">
               <p className="mb-4">Noch keine Schüler in dieser Klasse.</p>
               <Btn variant="primary" onClick={() => setShowCreateStudent(true)}>
-                <MdAdd /> Ersten Schüler hinzufügen
+                <Icon name="plus" /> Ersten Schüler hinzufügen
               </Btn>
             </div>
           ) : (

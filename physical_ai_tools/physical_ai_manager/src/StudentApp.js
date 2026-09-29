@@ -16,16 +16,6 @@
 
 import React, { useCallback, useEffect, useRef } from 'react';
 import clsx from 'clsx';
-import {
-  MdHome,
-  MdVideocam,
-  MdMemory,
-  MdWidgets,
-  MdConstruction,
-  MdSettings,
-  MdLogout,
-} from 'react-icons/md';
-import { GoGraph } from 'react-icons/go';
 import toast from 'react-hot-toast';
 import './App.css';
 import HomePage from './pages/HomePage';
@@ -66,6 +56,7 @@ import {
 import { isCapabilityVisible, robotGateDecision } from './utils/navGating';
 import { studentAuthGateDecision } from './utils/authGate';
 import { usePiMode } from './utils/piMode';
+import Icon from './components/icons/Icon';
 
 function StudentApp() {
   const dispatch = useDispatch();
@@ -394,25 +385,25 @@ function StudentApp() {
   // hide NOTHING, and the whole capability filter is SKIPPED in Jetson mode
   // (D9) — caps describe the LOCAL rig, so Training stays visible on a Jetson.
   const navItems = [
-    { key: PageType.HOME, label: 'Start', Icon: MdHome, onClick: handleHomePageNavigation },
-    { key: PageType.RECORD, label: 'Aufnahme', Icon: MdVideocam, onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'recordable' },
-    { key: PageType.TRAINING, label: 'Training', Icon: GoGraph, onClick: handleTrainingPageNavigation, capabilityKey: 'trainable' },
+    { key: PageType.HOME, label: 'Start', icon: 'home', onClick: handleHomePageNavigation },
+    { key: PageType.RECORD, label: 'Aufnahme', icon: 'video', onClick: handleRecordPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'recordable' },
+    { key: PageType.TRAINING, label: 'Training', icon: 'chart', onClick: handleTrainingPageNavigation, capabilityKey: 'trainable' },
     // Inferenz carries NO capabilityKey — it is ALWAYS visible (documented
     // invariant): hiding it would also hide the classroom-Jetson claim UI that a
     // cloud/follower-only student needs. edu6_studio is inferable=false, yet the
     // tab MUST stay so that student can still claim a classroom Jetson; its local
     // inference start is refused downstream (no-GPU gate), not by this nav filter.
     // The capability filter must never gate it.
-    { key: PageType.INFERENCE, label: 'Inferenz', Icon: MdMemory, onClick: handleInferencePageNavigation },
-    { key: PageType.EDIT_DATASET, label: 'Daten', Icon: MdWidgets, onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true, capabilityKey: 'editable' },
-    { key: PageType.WORKSHOP, label: 'Roboter Studio', Icon: MdConstruction, onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'roboter_studio' },
+    { key: PageType.INFERENCE, label: 'Inferenz', icon: 'cpu', onClick: handleInferencePageNavigation },
+    { key: PageType.EDIT_DATASET, label: 'Daten', icon: 'widgets', onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true, capabilityKey: 'editable' },
+    { key: PageType.WORKSHOP, label: 'Roboter Studio', icon: 'construction', onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'roboter_studio' },
     // Pi-only: the in-browser setup wizard (arms/cameras/token, Umgebung
     // starten, Update, Reset, Protokoll, Netzwerk-Check). Not hardwareOnly
     // (its own „Cloud-Modus" checkbox handles that) and not jetsonIncompatible
     // (it controls the Pi itself, independent of a Jetson claim). It carries no
     // capabilityKey, so isCapabilityVisible always keeps it — the piMode filter
     // is its sole gate.
-    { key: PageType.SYSTEM, label: 'System', Icon: MdSettings, onClick: handleSystemPageNavigation, sep: true, piOnly: true },
+    { key: PageType.SYSTEM, label: 'System', icon: 'settings', onClick: handleSystemPageNavigation, sep: true, piOnly: true },
   ]
     .filter((n) => !cloudOnly || !n.hardwareOnly)
     .filter((n) => !jetsonConnected || !n.jetsonIncompatible)
@@ -481,7 +472,6 @@ function StudentApp() {
             <LogoMark size={22} />
           </div>
           {navItems.map((n) => {
-            const Icon = n.Icon;
             const active = page === n.key;
             return (
               <React.Fragment key={n.key}>
@@ -513,7 +503,7 @@ function StudentApp() {
                       active && (isDarkPage ? 'bg-white/10' : 'bg-white/60')
                     )}
                   >
-                    <Icon size={20} />
+                    <Icon name={n.icon} size={20} />
                   </span>
                   <span className="hidden md:block text-[11px] font-medium">{n.label}</span>
                 </button>
@@ -563,7 +553,7 @@ function StudentApp() {
             >
               <Avatar name={identity} size={26} />
               <span className="hidden md:flex items-center gap-1 text-[11px] font-medium">
-                <MdLogout size={13} /> Abmelden
+                <Icon name="logout" size={13} /> Abmelden
               </span>
             </button>
           )}
@@ -632,7 +622,7 @@ function StudentApp() {
                     : 'text-[var(--ink-2)] hover:bg-[var(--bg-sunk)]'
                 )}
               >
-                <MdLogout size={16} />
+                <Icon name="logout" size={16} />
                 <span className="text-xs">Abmelden</span>
               </button>
             )}
@@ -700,7 +690,6 @@ function StudentApp() {
           )}
         >
           {navItems.map((n) => {
-            const Icon = n.Icon;
             const active = page === n.key;
             return (
               <button
@@ -717,7 +706,7 @@ function StudentApp() {
                     : 'text-[var(--ink-3)]'
                 )}
               >
-                <Icon size={20} />
+                <Icon name={n.icon} size={20} />
                 <span className="text-[10px] font-medium truncate px-1">{n.label}</span>
               </button>
             );

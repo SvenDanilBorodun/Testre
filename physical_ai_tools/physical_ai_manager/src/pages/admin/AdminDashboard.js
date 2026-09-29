@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
-import { MdAdd } from 'react-icons/md';
 import { useDispatch, useSelector } from 'react-redux';
 import { createTeacher, listTeachers } from '../../services/adminApi';
 import {
@@ -20,6 +19,7 @@ import {
   StatBig,
   TopBar,
 } from '../../components/EbUI';
+import Icon from '../../components/icons/Icon';
 
 export default function AdminDashboard({ onLogout }) {
   const dispatch = useDispatch();
@@ -110,7 +110,7 @@ export default function AdminDashboard({ onLogout }) {
         />
         <div className="ml-auto shrink-0">
           <Btn variant="primary" onClick={() => setShowCreate(true)}>
-            <MdAdd /> Neuer Lehrer
+            <Icon name="plus" /> Neuer Lehrer
           </Btn>
         </div>
       </div>
@@ -170,7 +170,7 @@ export default function AdminDashboard({ onLogout }) {
                 onClick={() => setShowCreate(true)}
                 className="mx-auto"
               >
-                <MdAdd /> Ersten Lehrer erstellen
+                <Icon name="plus" /> Ersten Lehrer erstellen
               </Btn>
             </div>
           ) : (

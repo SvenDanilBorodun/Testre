@@ -16,7 +16,7 @@
 // test exercises only the layout swap.
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WorkshopPage from '../WorkshopPage';
 import toast from 'react-hot-toast';
@@ -471,17 +471,42 @@ describe('WorkshopPage — simulator previews', () => {
 });
 
 describe('WorkshopPage — Vormachen wiring', () => {
-  test('the toolbar „✋ Vormachen" requests Vormachen with no focus', async () => {
+  test('the toolbar „Vormachen" is a chooser: three windows, and choosing one requests only that kind', async () => {
     render(<WorkshopPage isActive />);
     await screen.findByTestId('blockly-workspace');
     const btn = screen.getByRole('button', { name: DE.TOOLBAR_TEACH });
     expect(btn).toBeEnabled();
+    expect(btn).toHaveAttribute('aria-haspopup', 'menu');
     expect(btn.getAttribute('title')).toBe(DE.TOOLBAR_TEACH_TITLE);
     mockDispatch.mockClear();
     await userEvent.click(btn);
+    const menu = screen.getByRole('menu', { name: DE.TEACH_CHOOSER_MENU });
+    const items = within(menu).getAllByRole('menuitem');
+    expect(items.map((i) => i.textContent)).toEqual([
+      DE.FLY_TEACH_RECORDING, DE.FLY_TEACH_POSE, DE.FLY_TEACH_ZIEL,
+    ]);
+    // Opening the menu requests nothing.
+    const requestsOf = () => mockDispatch.mock.calls.map((c) => c[0])
+      .filter((a) => a && a.type === 'studioAssets/requestTeach');
+    expect(requestsOf()).toHaveLength(0);
+    await userEvent.click(within(menu).getByRole('menuitem', { name: DE.FLY_TEACH_POSE }));
+    expect(requestsOf()).toHaveLength(1);
+    expect(requestsOf()[0].payload).toEqual({ kind: 'pose' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(btn).toHaveFocus();
+  });
+
+  test('the chooser works from the keyboard (ArrowDown, End, Enter → Ziel)', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const btn = screen.getByRole('button', { name: DE.TOOLBAR_TEACH });
+    btn.focus();
+    mockDispatch.mockClear();
+    await userEvent.keyboard('{ArrowDown}');
+    expect(screen.getAllByRole('menuitem')[0]).toHaveFocus();
+    await userEvent.keyboard('{End}{Enter}');
     const requested = mockDispatch.mock.calls.map((c) => c[0]).filter((a) => a && a.type === 'studioAssets/requestTeach');
-    expect(requested).toHaveLength(1);
-    expect(requested[0].payload).toEqual({ focus: null });
+    expect(requested.map((a) => a.payload)).toEqual([{ kind: 'ziel' }]);
   });
 
   test('offline the toolbar button is disabled and names the reason', async () => {

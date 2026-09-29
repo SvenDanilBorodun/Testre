@@ -6,6 +6,7 @@
 
 import React from 'react';
 import clsx from 'clsx';
+import Icon from './icons/Icon';
 
 export const Pill = ({ tone = 'neutral', children, dot, className }) => {
   const toneMap = {
@@ -257,20 +258,7 @@ export const TopBar = ({
           className="flex items-center gap-1.5 h-9 px-3 rounded-[var(--radius-sm)] text-[var(--ink-2)] hover:bg-[var(--bg-sunk)] text-sm transition"
           title="Abmelden"
         >
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M14 8V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2v-2" />
-            <polyline points="17 16 21 12 17 8" />
-            <line x1="21" y1="12" x2="9" y2="12" />
-          </svg>
+          <Icon name="logout" size={18} />
           Abmelden
         </button>
       )}

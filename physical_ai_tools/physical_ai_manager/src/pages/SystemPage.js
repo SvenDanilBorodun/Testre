@@ -23,6 +23,8 @@ import toast from 'react-hot-toast';
 import { Card, Btn, Pill, SectionHeader } from '../components/EbUI';
 import { usePiMode } from '../utils/piMode';
 import { useAgentUpdate } from '../hooks/useAgentUpdate';
+import { toastIcon } from '../components/icons/toast';
+import Icon from '../components/icons/Icon';
 
 // ── same-origin agent fetch helper ───────────────────────────────────────────
 
@@ -297,7 +299,7 @@ export default function SystemPage() {
           if (c.path) seed[c.path] = c.role || '';
         });
         setRoles((prev) => ({ ...seed, ...prev }));
-        if (data.cameras.length === 0) toast('Keine Kamera gefunden.', { icon: 'ℹ️' });
+        if (data.cameras.length === 0) toast('Keine Kamera gefunden.', { icon: toastIcon('info') });
       } else {
         toast.error('Kameras konnten nicht gesucht werden.');
       }
@@ -856,7 +858,11 @@ export default function SystemPage() {
         <Step
           n="D"
           title="Hugging Face Token"
-          right={tokenSaved ? <Pill tone="success" dot>✓ Token gespeichert</Pill> : null}
+          right={tokenSaved ? (
+            <Pill tone="success" dot>
+              <span className="inline-flex items-center gap-1"><Icon name="check" /> Token gespeichert</span>
+            </Pill>
+          ) : null}
         >
           <p className="text-sm text-[var(--ink-3)] mb-2">
             Nötig zum Hochladen von Datensätzen und für das Training.

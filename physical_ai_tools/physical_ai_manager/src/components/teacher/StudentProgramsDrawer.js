@@ -26,7 +26,6 @@
 // Blockly preview is lazy for the same reason.
 
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
-import { MdClose } from 'react-icons/md';
 import { useSelector } from 'react-redux';
 import {
   getStudentSubmission,
@@ -35,6 +34,7 @@ import {
   listStudentWorkflows,
 } from '../../services/teacherApi';
 import { Avatar, Pill } from '../EbUI';
+import Icon from '../icons/Icon';
 
 const CodeViewer = lazy(() => import('./CodeViewer'));
 const BlocklyPreview = lazy(() => import('../Workshop/BlocklyWorkspace'));
@@ -260,7 +260,7 @@ export default function StudentProgramsDrawer({ student, onClose }) {
             onClick={onClose}
             aria-label={DE.CLOSE}
           >
-            <MdClose size={20} />
+            <Icon name="close" size={20} />
           </button>
         </div>
 

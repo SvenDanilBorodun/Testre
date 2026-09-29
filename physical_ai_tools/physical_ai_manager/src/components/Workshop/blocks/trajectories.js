@@ -13,7 +13,7 @@ import { DE } from './messages_de';
 import { setEditValidator } from './fieldLoad';
 
 // Batch 2b — recorded-motion replay. A student shows a hand-guided motion in
-// „✋ Vormachen" (teach/TeachOverlay; saved as a named trajectory on the cloud
+// „Bewegung vormachen" (teach/TeachOverlay; saved as a named trajectory on the cloud
 // workflow), then
 // drops this block to replay it inside a program. The block carries only the
 // trajectory NAME (a free-text field); the run bar (RunControls) collects every
@@ -55,7 +55,7 @@ export const TRAJECTORY_BLOCKS = [
     colour: TRAJECTORY_COLOR,
     tooltip:
       'Spielt eine zuvor aufgenommene Bewegung ab (gleicher Name wie unter '
-      + '„Aufnahmen"). Mach die Bewegung zuerst mit „✋ Vormachen" vor '
+      + '„Aufnahmen"). Mach die Bewegung zuerst mit „Bewegung vormachen" vor '
       + 'und gib ihr genau diesen Namen.',
     extensions: ['edubotics_validate_trajectory_name'],
   },

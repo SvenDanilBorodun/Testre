@@ -31,6 +31,8 @@ import ROSLIB from 'roslib';
 import TaskPhase from '../../constants/taskPhases';
 import rosConnectionManager from '../../utils/rosConnectionManager';
 import { rsControlBase, usePiMode } from '../../utils/piMode';
+import Icon from '../icons/Icon';
+import { toastIcon } from '../icons/toast';
 
 // Switching the leader on/off recreates the open_manipulator container, which
 // blips /joint_states + the camera topics. Doing that DURING an active
@@ -234,7 +236,7 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
         // running. Nothing here may activate it — that has to be a student's
         // own press on the Startseite — so say so once, where they are.
         toast('Aktiviere den Roboter auf der Startseite, bevor du ihn bewegst.',
-          { icon: 'ℹ️' });
+          { icon: toastIcon('info') });
         // The POST returns when the arm container STARTS, not when it is ready
         // (it still re-homes + the camera reconnects). Enter the „preparing"
         // phase and HOLD the blocking overlay until the arm is genuinely back
@@ -369,7 +371,8 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
       ) : (
         <>
           <span style={{ color: '#1a7f37', fontWeight: 600 }}>
-            ● Leader abgeschaltet — Roboter Studio aktiv
+            <Icon name="dot" size="0.6em" fill="currentColor" style={{ marginRight: 6, verticalAlign: 'middle' }} />
+            Leader abgeschaltet — Roboter Studio aktiv
           </span>
           <button
             type="button"

@@ -23,6 +23,7 @@ import { useHfUserList } from '../hooks/useHfUserList';
 import TagInput from './TagInput';
 import TaskPhase from '../constants/taskPhases';
 import { setTaskInfo, setUseMultiTaskMode } from '../features/tasks/taskSlice';
+import Icon from './icons/Icon';
 
 const taskInfos = [
   {
@@ -355,10 +356,16 @@ const InfoPanel = () => {
         })}
       >
         {isEditable ? (
-          '✏️ Bearbeitungsmodus'
+          <span className="inline-flex items-center gap-1.5">
+            <Icon name="pencil" />
+            Bearbeitungsmodus
+          </span>
         ) : (
           <div className="leading-tight">
-            <div>🔒 Nur lesen</div>
+            <div className="flex items-center gap-1.5">
+              <Icon name="lock" />
+              Nur lesen
+            </div>
             <div className="text-xs mt-1 opacity-80">Aufgabe läuft oder Roboter nicht verbunden</div>
           </div>
         )}
@@ -518,7 +525,7 @@ const InfoPanel = () => {
                 onClick={() => setShowUserIdDropdown(false)}
                 disabled={!isEditable}
               >
-                Manual Input
+                Manuell eingeben
               </button>
             )}
           </div>
@@ -699,7 +706,7 @@ const InfoPanel = () => {
             </span>
           </div>
           {useMultiTaskMode && (
-            <span className="text-xs text-teal-600 ml-1">(Auto-enabled in Multi-Task mode)</span>
+            <span className="text-xs text-teal-600 ml-1">(bei Mehrfachaufgaben automatisch an)</span>
           )}
         </div>
       </div>
@@ -722,7 +729,7 @@ const InfoPanel = () => {
             </span>
           </div>
           {useMultiTaskMode && (
-            <span className="text-xs text-teal-600 ml-1">(Auto-disabled in Multi-Task mode)</span>
+            <span className="text-xs text-teal-600 ml-1">(bei Mehrfachaufgaben automatisch aus)</span>
           )}
         </div>
       </div>
@@ -746,14 +753,14 @@ const InfoPanel = () => {
           onClick={() => setShowPopup(true)}
           disabled={!isEditable}
         >
-          Load Previous Task Info
+          Frühere Aufgabeninformationen laden
         </button>
       </div>
 
       {showPopup && (
         <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
           <div className="bg-white p-6 rounded-lg shadow-lg max-w-2xl w-full">
-            <div className="mb-4 font-bold text-lg">Select Task Info</div>
+            <div className="mb-4 font-bold text-lg">Aufgabeninformationen auswählen</div>
             <div className="grid grid-cols-2 gap-4">
               {taskInfoList.map((item, idx) => (
                 <div

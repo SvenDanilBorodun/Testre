@@ -18,6 +18,7 @@ import {
 } from '../../features/workshop/workshopSlice';
 import { DE } from './blocks/messages_de';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
+import Icon from '../icons/Icon';
 
 function blockLabel(workspace, id) {
   if (!workspace || !id) return id;
@@ -140,7 +141,7 @@ function BreakpointList({ workspace }) {
                 key={id}
                 className="flex items-center gap-2 px-2 py-1 rounded-md bg-red-50 border border-red-200"
               >
-                <span className="text-red-500">●</span>
+                <Icon name="dot" size="0.6em" fill="currentColor" className="text-red-500" />
                 <span className="flex-1 truncate text-xs font-mono">
                   {blockLabel(workspace, id)}
                 </span>
@@ -150,7 +151,7 @@ function BreakpointList({ workspace }) {
                   className="text-xs text-red-700 hover:underline"
                   aria-label={`Haltepunkt entfernen: ${id}`}
                 >
-                  ×
+                  <Icon name="close" />
                 </button>
               </li>
             ))}

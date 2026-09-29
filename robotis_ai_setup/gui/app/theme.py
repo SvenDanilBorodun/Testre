@@ -95,7 +95,8 @@ def step_style_for(text: str) -> str:
     line = (text or "").strip().lower()
     if not line:
         return STEP_PENDING
-    if line.startswith(("gefunden", "wiederhergestellt", "✓")):
+    # „Kein Token gespeichert" starts with „kein", so it stays PENDING.
+    if line.startswith(("gefunden", "wiederhergestellt", "token gespeichert")):
         return STEP_OK
     if line.startswith("nicht gefunden") or "fehlgeschlagen" in line:
         return STEP_ERROR

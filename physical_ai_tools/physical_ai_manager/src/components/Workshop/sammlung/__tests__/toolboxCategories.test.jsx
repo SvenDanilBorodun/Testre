@@ -118,6 +118,8 @@ function seed(ws) {
 const flyoutOf = (ws, key) => ws.getToolboxCategoryCallback(key)(ws);
 const label = (text) => ({ kind: 'label', text });
 const button = (text, callbackkey) => ({ kind: 'button', text, callbackkey });
+// A creation button from sammlung/newActions.js, drawn with its icon.
+const iconButton = (text, callbackkey, icon) => ({ kind: 'edubotics_icon_button', text, callbackkey, icon });
 const card = (fields) => ({ kind: 'edubotics_asset_card', gap: 4, ...fields });
 
 describe('Sammlung toolbox groups', () => {
@@ -142,7 +144,7 @@ describe('Sammlung toolbox groups', () => {
 
     expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.AUFNAHMEN)).toEqual([
       label('2 von 16'),
-      button(DE.FLY_TEACH_RECORDING, 'EDU_SAMMLUNG_TEACH_RECORDING'),
+      iconButton(DE.FLY_TEACH_RECORDING, 'EDU_SAMMLUNG_TEACH_RECORDING', 'record'),
       button(DE.FLY_MANAGE, 'EDU_SAMMLUNG_MANAGE_AUFNAHMEN'),
       card({
         assetKind: 'recording', assetId: 'traj-2', assetName: 'Tanz', title: 'Tanz',
@@ -161,8 +163,8 @@ describe('Sammlung toolbox groups', () => {
 
     expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.ZIELE)).toEqual([
       label('1 Ziel'),
-      button(DE.FLY_TEACH_ZIEL, 'EDU_SAMMLUNG_TEACH_ZIEL'),
-      button(DE.FLY_PIN_CAMERA, 'EDU_SAMMLUNG_PIN_CAMERA'),
+      iconButton(DE.FLY_TEACH_ZIEL, 'EDU_SAMMLUNG_TEACH_ZIEL', 'ziel'),
+      iconButton(DE.FLY_PIN_CAMERA, 'EDU_SAMMLUNG_PIN_CAMERA', 'camera'),
       button(DE.FLY_MANAGE, 'EDU_SAMMLUNG_MANAGE_ZIELE'),
       { kind: 'block', type: 'edubotics_destination_pin' },
       { kind: 'block', type: 'edubotics_destination_ref' },
@@ -183,7 +185,7 @@ describe('Sammlung toolbox groups', () => {
 
     expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.POSITIONEN)).toEqual([
       label('1 Position'),
-      button(DE.FLY_TEACH_POSE, 'EDU_SAMMLUNG_TEACH_POSE'),
+      iconButton(DE.FLY_TEACH_POSE, 'EDU_SAMMLUNG_TEACH_POSE', 'pose'),
       button(DE.FLY_MANAGE, 'EDU_SAMMLUNG_MANAGE_POSITIONEN'),
       card({
         assetKind: 'pose', assetId: pose.id, assetName: 'Oben', title: 'Oben',
@@ -223,13 +225,17 @@ describe('Sammlung toolbox groups', () => {
     };
     expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.AUFNAHMEN).slice(3)).toEqual([
       { kind: 'label', text: 'Tanz · 4,2 s · 105 Punkte · 1× benutzt · 2 Versionen', 'web-class': 'eduSammlungCardLabel' },
-      { kind: 'button', text: '▶ Im Simulator ansehen', callbackkey: 'EDU_SAMMLUNG_CARD_PREVIEW', ...asset },
-      { kind: 'button', text: '⋯ Verwalten', callbackkey: 'EDU_SAMMLUNG_CARD_MANAGE', ...asset },
+      {
+        kind: 'edubotics_icon_button', text: 'Im Simulator ansehen', callbackkey: 'EDU_SAMMLUNG_CARD_PREVIEW', icon: 'play', ...asset,
+      },
+      {
+        kind: 'edubotics_icon_button', text: 'Verwalten', callbackkey: 'EDU_SAMMLUNG_CARD_MANAGE', icon: 'more', ...asset,
+      },
       { kind: 'block', type: 'edubotics_replay_trajectory', fields: { NAME: 'Tanz' } },
       label(DE.FLY_SECTION_MISSING),
       { kind: 'label', text: 'Fehlt · fehlt · 1 Block sucht diese Aufnahme', 'web-class': 'eduSammlungCardLabel' },
       {
-        kind: 'button', text: '⋯ Verwalten', callbackkey: 'EDU_SAMMLUNG_CARD_MANAGE',
+        kind: 'edubotics_icon_button', text: 'Verwalten', callbackkey: 'EDU_SAMMLUNG_CARD_MANAGE', icon: 'more',
         'web-class': 'eduSammlungCardButton',
         'edu-asset-kind': 'missingRecording', 'edu-asset-id': '', 'edu-asset-name': 'Fehlt',
       },
@@ -247,6 +253,54 @@ describe('Sammlung toolbox groups', () => {
       { type: 'manage', tab: 'aufnahmen', focusId: 'Tanz' },
     ]);
     second.unmount();
+  });
+});
+
+// The creation buttons come from ONE table (sammlung/newActions.js): the same
+// words, icons and conditions as the drawer and the code sidebar.
+describe('Sammlung groups — the creation buttons', () => {
+  it.each([
+    ['EDU_SAMMLUNG_TEACH_RECORDING', { type: 'teach', kind: 'recording' }],
+    ['EDU_SAMMLUNG_TEACH_POSE', { type: 'teach', kind: 'pose' }],
+    ['EDU_SAMMLUNG_TEACH_ZIEL', { type: 'teach', kind: 'ziel' }],
+    ['EDU_SAMMLUNG_PIN_CAMERA', { type: 'pinCamera' }],
+    ['EDU_SAMMLUNG_PIN_SIM', { type: 'pinSim' }],
+  ])('%s dispatches %j through the provider', async (key, action) => {
+    const dispatched = [];
+    const provider = fixtureProvider();
+    provider.setActionHandler((a) => dispatched.push(a));
+    const { ws, unmount } = await mountEditor({ sammlungProvider: provider });
+    ws.getButtonCallback(key)({ info: {} });
+    expect(dispatched).toEqual([action]);
+    unmount();
+  });
+
+  it('D9: „Ziel auf den Sim-Tisch setzen" only inside the simulator, Vormachen and the camera only outside', async () => {
+    const provider = fixtureProvider({ capabilities: { ...FULL_CAPS, pinSim: true } });
+    const { ws, unmount } = await mountEditor({ sammlungProvider: provider });
+    const creation = () => flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.ZIELE)
+      .filter((it) => it.kind === 'edubotics_icon_button').map((it) => it.callbackkey);
+    expect(creation()).toEqual(['EDU_SAMMLUNG_TEACH_ZIEL', 'EDU_SAMMLUNG_PIN_CAMERA']);
+    provider.setSnapshot({ capabilities: { ...FULL_CAPS, pinSim: true, simMode: true } });
+    expect(creation()).toEqual(['EDU_SAMMLUNG_PIN_SIM']);
+    expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.AUFNAHMEN).some((it) => it.kind === 'edubotics_icon_button')).toBe(false);
+    unmount();
+  });
+
+  it('the flyout offers exactly what the drawer offers, per tab', async () => {
+    const { newActionsFor } = await import('../newActions');
+    const provider = fixtureProvider({ capabilities: { ...FULL_CAPS, pinSim: true } });
+    const { ws, unmount } = await mountEditor({ sammlungProvider: provider });
+    for (const [tab, key] of [
+      ['aufnahmen', SAMMLUNG_CATEGORY_KEYS.AUFNAHMEN],
+      ['ziele', SAMMLUNG_CATEGORY_KEYS.ZIELE],
+      ['positionen', SAMMLUNG_CATEGORY_KEYS.POSITIONEN],
+    ]) {
+      const flyout = flyoutOf(ws, key).filter((it) => it.kind === 'edubotics_icon_button')
+        .map((it) => [it.text, it.icon]);
+      expect(flyout).toEqual(newActionsFor(provider.getSnapshot().capabilities, tab).map((a) => [a.label, a.icon]));
+    }
+    unmount();
   });
 });
 
@@ -339,6 +393,7 @@ describe('Sammlung groups — restriction, counts, teacher page', () => {
     const all = Object.values(SAMMLUNG_CATEGORY_KEYS).flatMap((k) => flyoutOf(ws, k));
     expect(all.filter((it) => it.kind === 'button').map((it) => it.callbackkey))
       .toEqual(['CREATE_VARIABLE']);
+    expect(all.filter((it) => it.kind === 'edubotics_icon_button')).toEqual([]);
     const aufnahmen = flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.AUFNAHMEN);
     expect(aufnahmen[0]).toEqual(label(DE.FLY_RECORDINGS_TEACHER));
     expect(aufnahmen[aufnahmen.length - 1]).toEqual({ kind: 'block', type: 'edubotics_replay_trajectory' });

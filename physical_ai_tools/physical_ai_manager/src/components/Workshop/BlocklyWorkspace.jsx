@@ -30,6 +30,7 @@ import { registerProcedureCallArgumentFix } from './blocks/procedures';
 import { attachSavedValueWarnings } from './blocks/savedValueWarnings';
 import { registerDestinationSerializer } from './sammlung/destinationStore';
 import { registerAssetCardInflater } from './sammlung/AssetCardInflater';
+import { registerIconButtonInflater } from './sammlung/IconButtonInflater';
 import { registerSammlungCategories } from './sammlung/toolboxCategories';
 import { attachAssetReferenceValidators } from './sammlung/referenceValidators';
 import { EMPTY_SAMMLUNG_PROVIDER } from './sammlung/provider';
@@ -50,8 +51,10 @@ function registerAllBlocksOnce() {
   // Explicit, never at module import: blocklyPayload.test.js pins the CORE
   // serializer inventory and page tests mock `blockly/core` minimally.
   registerDestinationSerializer();
-  // The Sammlung flyout card item (a registry CLASS, instantiated per flyout).
+  // The Sammlung flyout card item and the icon button (registry CLASSES,
+  // instantiated per flyout).
   registerAssetCardInflater();
+  registerIconButtonInflater();
   blankNonGermanHelpUrls();
   blocksRegistered = true;
 }

@@ -22,6 +22,7 @@ import TaskCommand from '../constants/taskCommand';
 import TrainingCommand from '../constants/trainingCommand';
 import EditDatasetCommand from '../constants/commands';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { forceRecordTaskInfo } from '../utils/recordTaskInfo';
 
 export function useRosServiceCaller() {
   const taskInfo = useSelector((state) => state.tasks.taskInfo);
@@ -121,28 +122,35 @@ export function useRosServiceCaller() {
           taskType = 'inference';
         }
 
-        const task_instruction = taskInfo.taskInstruction.filter(
+        // H7 (Aufnahme 2.0): the Aufnahme page no longer offers optimized
+        // save, rosbag2, inference recording or multi-task instructions, but
+        // the /task/status adopt path can still write any of them into the
+        // store from the robot's last task. So every RECORD-page command
+        // forces them HERE, at send time. Inferenz sends the store as before.
+        const info = page === PageType.RECORD ? forceRecordTaskInfo(taskInfo) : taskInfo;
+
+        const task_instruction = info.taskInstruction.filter(
           (instruction) => instruction.trim() !== ''
         );
 
         const request = {
           task_info: {
-            task_name: String(taskInfo.taskName || ''),
+            task_name: String(info.taskName || ''),
             task_type: String(taskType),
-            user_id: String(taskInfo.userId || ''),
+            user_id: String(info.userId || ''),
             task_instruction: task_instruction,
-            policy_path: String(taskInfo.policyPath || ''),
-            record_inference_mode: Boolean(taskInfo.recordInferenceMode),
-            fps: Number(taskInfo.fps) || 0,
-            tags: taskInfo.tags || [],
-            warmup_time_s: Number(taskInfo.warmupTime) || 0,
-            episode_time_s: Number(taskInfo.episodeTime) || 0,
-            reset_time_s: Number(taskInfo.resetTime) || 0,
-            num_episodes: Number(taskInfo.numEpisodes) || 0,
-            push_to_hub: Boolean(taskInfo.pushToHub),
-            private_mode: Boolean(taskInfo.privateMode),
-            use_optimized_save_mode: Boolean(taskInfo.useOptimizedSave),
-            record_rosbag2: Boolean(taskInfo.recordRosBag2),
+            policy_path: String(info.policyPath || ''),
+            record_inference_mode: Boolean(info.recordInferenceMode),
+            fps: Number(info.fps) || 0,
+            tags: info.tags || [],
+            warmup_time_s: Number(info.warmupTime) || 0,
+            episode_time_s: Number(info.episodeTime) || 0,
+            reset_time_s: Number(info.resetTime) || 0,
+            num_episodes: Number(info.numEpisodes) || 0,
+            push_to_hub: Boolean(info.pushToHub),
+            private_mode: Boolean(info.privateMode),
+            use_optimized_save_mode: Boolean(info.useOptimizedSave),
+            record_rosbag2: Boolean(info.recordRosBag2),
           },
           command: Number(command_enum),
         };

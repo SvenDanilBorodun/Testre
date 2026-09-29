@@ -529,6 +529,8 @@
 /* ---------- action bar ---------- */
 .rec-actionbar {
   flex: none;
+  container-type: inline-size;
+  container-name: recbar;
   display: flex;
   align-items: center;
   gap: 16px;
@@ -538,7 +540,7 @@
   padding: 12px 14px;
   min-height: 80px;
 }
-.rec-phasepill { display: flex; align-items: center; gap: 10px; min-width: 188px; }
+.rec-phasepill { display: flex; align-items: center; gap: 10px; min-width: 188px; flex: none; }
 .rec-pp-ico {
   width: 42px;
   height: 42px;
@@ -552,7 +554,9 @@
 .rec-pp-t { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
 .rec-pp-t b { font-size: 15px; }
 .rec-pp-t span { font-size: 13px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.rec-eps { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.rec-pp-t b,
+.rec-pp-t span { white-space: nowrap; }
+.rec-eps { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
 .rec-eps .lbl { font-size: 12px; color: var(--ink-3); margin-right: 4px; }
 .rec-epd {
   position: relative;
@@ -587,8 +591,9 @@
   place-items: center;
   border: 2px solid #fff;
 }
-.rec-spacer { flex: 1; }
-.rec-btns { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+/* Right-aligned by margin, not by a spacer element: a spacer costs one more
+ * 16 px flex gap, which is exactly what the recording row lacks at 1440 px. */
+.rec-btns { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; justify-content: flex-end; flex: none; margin-left: auto; }
 .rec-btn {
   font: inherit;
   display: inline-flex;
@@ -623,7 +628,9 @@
 .rec-btn.warn .rec-kbd,
 .rec-btn.end .rec-kbd,
 .rec-btn:disabled .rec-kbd { background: var(--bg-sunk); border-color: var(--line-2); color: var(--ink-3); }
+.rec-btns + .rec-mute { margin-left: 0; }
 .rec-mute {
+  margin-left: auto;
   width: 40px;
   height: 40px;
   border-radius: 10px;
@@ -636,9 +643,28 @@
   flex: none;
 }
 .rec-confirm { display: flex; align-items: center; gap: 12px; flex: 1; flex-wrap: wrap; }
-.rec-confirm .q { flex: 1; min-width: 220px; }
+.rec-confirm .q { flex: 1 1 0; min-width: 200px; }
 .rec-confirm .q b { display: block; font-size: 15px; }
 .rec-confirm .q span { font-size: 13px; color: var(--ink-3); }
+
+/* A compact bar. With three buttons (Aufnehmen: Wiederholen, Jetzt speichern,
+ * Beenden) and five or more episode dots the mockup's row is wider than the
+ * stage column at 1440 and 1366 px, because „Strg+Umschalt+X" is spelled out
+ * (H9). Rather than wrap single buttons onto a second row, the bar sheds what
+ * is repeated elsewhere, in this order: the dots' label and size, then the
+ * long key label of Beenden, then the arrow key labels. The shortcuts still
+ * work and stay announced (aria-keyshortcuts) and named in the button title. */
+@container recbar (max-width: 1100px) {
+  .rec-eps .lbl:first-child { display: none; }
+  .rec-eps { gap: 4px; }
+  .rec-epd { width: 22px; height: 22px; font-size: 10px; }
+  .rec-btns:has(> .rec-btn:nth-child(3)) .rec-btn[data-action="end"] .rec-kbd { display: none; }
+}
+@container recbar (max-width: 900px) {
+  .rec-btns:has(> .rec-btn:nth-child(3)) .rec-kbd { display: none; }
+  .rec-btns:has(> .rec-btn:nth-child(3)) .rec-btn.md { padding: 0 13px; }
+  .rec-phasepill { min-width: 0; }
+}
 
 /* ---------- cards (right column) ---------- */
 .rec-card { background: var(--bg-raised); border: 1px solid var(--line); border-radius: 16px; flex: none; }
@@ -867,7 +893,6 @@
     bottom: 0;
     z-index: 9;
     box-shadow: 0 -10px 24px -18px rgba(0, 0, 0, .4);
-    flex-wrap: wrap;
   }
   .rec-right { overflow: visible; display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
   .rec-ov-inner { gap: 22px; }
@@ -877,6 +902,8 @@
 
 @container rec (max-width: 760px) {
   .rec-right { grid-template-columns: minmax(0, 1fr); }
+  .rec-actionbar { flex-wrap: wrap; }
+  .rec-btns { flex-wrap: wrap; }
   .rec-ov-inner { flex-direction: column; text-align: center; }
   .rec-ov-text { align-items: center; }
 }

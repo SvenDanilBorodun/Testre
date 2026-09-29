@@ -24,7 +24,7 @@
 // On a narrow window (≤ 1150 px of page, e.g. 1093 px at 125 % scaling)
 // record.css turns this into one scrolling column with a sticky action bar.
 
-import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { shallowEqual, useSelector } from 'react-redux';
 import toast, { useToasterStore } from 'react-hot-toast';
 
@@ -83,6 +83,8 @@ function writeRecordView(v) {
 }
 
 const OVERLAY_PHASE = { [VIEW.WARMUP]: 'warmup', [VIEW.RESETTING]: 'reset' };
+// The views in which the student is looking at the arm, not at the form.
+const STAGE_VIEWS = new Set([VIEW.STARTING, VIEW.WARMUP, VIEW.RECORDING, VIEW.COLLISION, VIEW.FINISHING]);
 
 export default function RecordPage({ isActive = true }) {
   const c = useRecordController({ isActive });
@@ -103,6 +105,22 @@ export default function RecordPage({ isActive = true }) {
       .filter((_, i) => i >= TOAST_LIMIT)
       .forEach((t) => toast.dismiss(t.id));
   }, [toasts]);
+
+  // On a narrow window the page scrolls, and the task card sits BELOW the
+  // stage: a student who typed the task name and pressed Start (the action bar
+  // sticks to the bottom) would record with the stage scrolled out of sight.
+  // Entering a session brings the page back to the top. (On a wide window
+  // .rec-main does not scroll, so this does nothing.)
+  const mainRef = useRef(null);
+  const wasStageViewRef = useRef(STAGE_VIEWS.has(view));
+  useEffect(() => {
+    const isStage = STAGE_VIEWS.has(view);
+    const was = wasStageViewRef.current;
+    wasStageViewRef.current = isStage;
+    const main = mainRef.current;
+    if (!isStage || was || !main || typeof main.scrollTo !== 'function' || main.scrollTop === 0) return;
+    main.scrollTo({ top: 0, behavior: c.reducedMotion ? 'auto' : 'smooth' });
+  }, [view, c.reducedMotion]);
 
   const [recordView, setRecordView] = useState(readRecordView);
   const chooseView = (v) => {
@@ -213,7 +231,7 @@ export default function RecordPage({ isActive = true }) {
 
   return (
     <div className={c.reducedMotion ? 'rec-page rec-reduced' : 'rec-page'} data-testid="rec-page" data-view={view}>
-      <div className="rec-main">
+      <div className="rec-main" ref={mainRef}>
         <RecordHeader
           eyebrow={copy.header.eyebrow}
           title={title}

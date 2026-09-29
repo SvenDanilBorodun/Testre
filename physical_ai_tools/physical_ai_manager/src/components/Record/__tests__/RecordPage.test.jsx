@@ -291,7 +291,7 @@ describe('RecordPage — rate badges', () => {
       },
     };
     renderPage(makeStore());
-    await waitFor(() => expect(screen.getByText('29,8 Hz')).toBeInTheDocument());
+    expect(await screen.findByText('29,8 Hz')).toBeInTheDocument();
     expect(screen.getByText('29,9 Hz')).toBeInTheDocument();
   });
 });

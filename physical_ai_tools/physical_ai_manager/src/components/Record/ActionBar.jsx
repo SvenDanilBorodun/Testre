@@ -30,7 +30,7 @@ function BarButton({ b, onAction }) {
       type="button"
       className={clsx('rec-btn', b.size || 'md', b.variant || 'ghost')}
       disabled={!!b.disabled}
-      title={b.title || undefined}
+      title={b.title || b.kbd || undefined}
       aria-keyshortcuts={b.shortcut || undefined}
       onClick={() => onAction && onAction(b.id)}
       data-action={b.id}
@@ -115,7 +115,6 @@ export default function ActionBar({
         </div>
       ) : null}
       {dots}
-      <div className="rec-spacer" />
       {buttons.length ? (
         <div className="rec-btns">
           {buttons.map((b) => <BarButton key={b.id} b={b} onAction={onAction} />)}

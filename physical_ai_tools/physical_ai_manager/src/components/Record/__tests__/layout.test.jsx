@@ -13,7 +13,7 @@
 import fs from 'fs';
 import path from 'path';
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 
@@ -115,5 +115,29 @@ describe('the rendered page', () => {
     expect(right).toHaveClass('rec-right');
     expect(right).toContainElement(screen.getByTestId('rec-session-card'));
     expect(barEl.style.position).toBe('');
+  });
+});
+
+describe('the narrow page scrolls back to the stage when a session starts', () => {
+  it('Start from a scrolled page brings .rec-main to the top; staying in READY does not', () => {
+    const store = configureStore({
+      reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer, jetson: jetsonReducer },
+    });
+    store.dispatch(setHeartbeatStatus('connected'));
+    store.dispatch(setTaskStatus({ phase: TaskPhase.READY, running: false, topicReceived: true, robotType: 'omx_f' }));
+    render(<Provider store={store}><RecordPage /></Provider>);
+    const main = screen.getByTestId('rec-page').firstChild; // eslint-disable-line testing-library/no-node-access
+    main.scrollTo = vi.fn();
+    main.scrollTop = 400;
+    act(() => {
+      store.dispatch(setTaskStatus({ phase: TaskPhase.READY, running: false, topicReceived: true, usedCpu: 1 }));
+    });
+    expect(main.scrollTo).not.toHaveBeenCalled();
+    act(() => {
+      store.dispatch(setTaskStatus({
+        phase: TaskPhase.WARMING_UP, running: true, topicReceived: true, taskType: 'record', totalTime: 5, numEpisodes: 3,
+      }));
+    });
+    expect(main.scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 0 }));
   });
 });

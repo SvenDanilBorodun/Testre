@@ -69,6 +69,12 @@ const classImageGridCellButton = clsx(
   'z-10'
 );
 
+// The Aufnahme stage's tile (spec §3.12): the stage draws its own label, badge
+// and fallback text, so a BARE cell is only a dark box the image fills.
+const CLASS_BARE_CELL = 'relative w-full h-full overflow-hidden bg-[#111618]';
+const CLASS_BARE_IMG = 'absolute inset-0 w-full h-full object-cover';
+const CLASS_IMG = 'w-full h-full object-cover rounded-3xl bg-gray-100';
+
 export default function ImageGridCell({
   topic,
   aspect,
@@ -77,6 +83,12 @@ export default function ImageGridCell({
   onPlusClick,
   isActive = true,
   style = {},
+  // Aufnahme 2.0: no close button, no plus, no aspect ratio, no rounded frame.
+  // The stream (URL, Jetson path, Pi proxy, the F26 cancel token) is the same.
+  bare = false,
+  // Optional: called when the <img> stream fails, so a parent can show its own
+  // German fallback. Undefined (the default) changes nothing.
+  onStreamError,
 }) {
   const rosHost = useSelector((state) => state.ros.rosHost);
   // H1: when connected to the classroom Jetson the camera feed must ride
@@ -88,6 +100,9 @@ export default function ImageGridCell({
   const { piMode, piModeResolved } = usePiMode();
   const containerRef = useRef(null);
   const currentImgRef = useRef(null);
+  // Read by the (long-lived) stream effect without re-running it.
+  const onStreamErrorRef = useRef(onStreamError);
+  useEffect(() => { onStreamErrorRef.current = onStreamError; }, [onStreamError]);
 
   // Completely remove img element from DOM
   const destroyImage = useCallback(() => {
@@ -143,7 +158,7 @@ export default function ImageGridCell({
 
       const img = document.createElement('img');
       img.alt = topic;
-      img.className = 'w-full h-full object-cover rounded-3xl bg-gray-100';
+      img.className = bare ? CLASS_BARE_IMG : CLASS_IMG;
       img.onclick = (e) => e.stopPropagation();
 
       if (jetsonConnected) {
@@ -187,6 +202,7 @@ export default function ImageGridCell({
         img.onerror = () => {
           if (cancelled) return;
           console.error(`Image stream error for idx ${idx}, topic: ${topic}`);
+          if (typeof onStreamErrorRef.current === 'function') onStreamErrorRef.current();
         };
         if (cancelled || !containerRef.current) return;
         containerRef.current.appendChild(img);
@@ -204,7 +220,7 @@ export default function ImageGridCell({
       }
       destroyImage();
     };
-  }, [topic, isActive, rosHost, idx, destroyImage, jetsonConnected, rosbridgeUrl, piMode, piModeResolved]);
+  }, [topic, isActive, rosHost, idx, destroyImage, jetsonConnected, rosbridgeUrl, piMode, piModeResolved, bare]);
 
   // Force cleanup on unmount
   useEffect(() => {
@@ -218,6 +234,14 @@ export default function ImageGridCell({
     destroyImage();
     onClose(idx);
   };
+
+  if (bare) {
+    return (
+      <div className={CLASS_BARE_CELL} style={style}>
+        <div ref={containerRef} className="absolute inset-0" />
+      </div>
+    );
+  }
 
   return (
     <div

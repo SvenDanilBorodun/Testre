@@ -108,9 +108,13 @@ from physical_ai_interfaces.srv import (
 )
 
 from physical_ai_server import robot_profiles
+from physical_ai_server import signal_status
 from physical_ai_server.communication.communicator import Communicator
 from physical_ai_server.data_processing import dataset_paths
-from physical_ai_server.data_processing.data_manager import DataManager
+from physical_ai_server.data_processing.data_manager import (
+    camera_name_de,
+    DataManager,
+)
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
 from physical_ai_server.inference.inference_manager import InferenceManager
 from physical_ai_server.safety.collision_monitor import CollisionMonitorMixin
@@ -132,7 +136,7 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, String
 
 
 # Roboter Studio Batch 2b — manual hand-guide recording (/workshop/record).
@@ -874,6 +878,67 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
 
+        # Aufnahme 2.0 — /edubotics/signal_status: FACTS about every recording
+        # source (measured rate, age of the last message) and the dataset disk,
+        # for the Aufnahme page's badges and problem banner (schema v1, see
+        # signal_status.py). Latched (the activation_agent QoS) AND re-published
+        # at 1 Hz, always — idle, recording, collision. Created at boot; the tick
+        # publishes nothing until the Communicator is wired. Its own
+        # MutuallyExclusiveCallbackGroup (heartbeat pattern), so a blocking
+        # default-group callback cannot stall it.
+        signal_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._signal_status_pub = self.create_publisher(
+            String, signal_status.TOPIC, signal_qos)
+        self._signal_status_seq = 0
+        self._signal_status_boot_mono = time.monotonic()
+        self._signal_rates = signal_status.RateTracker()
+        self._signal_status_timer = self.create_timer(
+            signal_status.PUBLISH_PERIOD_S,
+            self._signal_status_tick,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+
+    def _signal_status_tick(self):
+        """Publish one /edubotics/signal_status message (schema v1).
+
+        Facts only; the page judges (it knows the fps being recorded). The
+        leader is listed only when the robot profile has one (the server cannot
+        know about the runtime follower-only flip; the page asks the bridge).
+        Never raises — a failure is logged at most once per 30 s.
+        """
+        try:
+            communicator = getattr(self, 'communicator', None)
+            if communicator is None:
+                return
+            now = time.monotonic()
+            counters = communicator.source_counters()
+            rates = self._signal_rates.update(
+                now, {c['id']: c['count'] for c in counters})
+            caps = getattr(getattr(self, '_arm_profile', None), 'capabilities', None)
+            include_leader = bool(getattr(caps, 'has_leader', False))
+            self._signal_status_seq += 1
+            payload = signal_status.build_payload(
+                seq=self._signal_status_seq,
+                uptime_s=now - self._signal_status_boot_mono,
+                recording=bool(getattr(self, 'on_recording', False)),
+                sources=signal_status.source_entries(
+                    counters, rates, now, include_leader=include_leader),
+                free_bytes=signal_status.disk_free_bytes(self.DEFAULT_SAVE_ROOT_PATH),
+            )
+            msg = String()
+            msg.data = signal_status.encode_payload(payload)
+            self._signal_status_pub.publish(msg)
+        except Exception as e:  # noqa: BLE001 — a status topic must never kill the node
+            now = time.monotonic()
+            last = getattr(self, '_signal_status_last_error_log', None)
+            if last is None or now - last >= 30.0:
+                self._signal_status_last_error_log = now
+                self.get_logger().warning(f'signal_status tick failed: {e}')
+
     def _heartbeat_timer_callback(self):
         # Node-level liveness beacon (1 Hz). Independent of the data-pipeline
         # state / recording so the React heartbeat watchdog reports "Verbunden"
@@ -1381,151 +1446,196 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     def _data_collection_timer_callback(self):
         error_msg = ''
         current_status = TaskStatus()
-        camera_msgs, follower_msgs, leader_msgs = self.communicator.get_latest_data()
-        # Throttle the "waiting for X data" info logs to once per second
-        # per source. At 30Hz timer firing this used to print 90
-        # lines/sec while a topic was lagging (audit §3.20).
-        now = time.perf_counter()
-        if not hasattr(self, '_last_waiting_log'):
-            self._last_waiting_log = {}
-        # Audit F17 (re-armed): camera-fps sanity check every 5 s during
-        # recording. Was one-shot at +1.5 s; that missed mid-recording
-        # USB starvation / thermal throttling / hub contention, and the
-        # dataset silently grew with the same frame repeated N times
-        # (`camera_topic_msgs[name]` overwrite-in-place is what feeds
-        # convert_msgs_to_raw_datas — a stale cache reads the same
-        # CompressedImage twice). Strobing dataset trains a jittery ACT
-        # policy. 5 s cadence + 3 s observation window catches typical
-        # degradations within the same episode and re-fires the German
-        # warning, while staying out of the way of momentary jitter.
-        last_check_t = getattr(self, '_camera_fps_last_check_t', 0.0)
-        now_t = time.perf_counter()
-        if (
-            self.start_recording_time > 0
-            and (now_t - self.start_recording_time) > 1.5
-            and (now_t - last_check_t) > 5.0
-        ):
-            self._camera_fps_last_check_t = now_t
+        # Aufnahme 2.0 (H14): a FINISHING session (FINISH/STOP received, the
+        # DataManager saving, finalizing and handing off the upload) writes no
+        # more frames, so it must not wait for sensor data either. Before, a
+        # camera unplugged right after „Beenden“ turned the FINISH into the 5 s
+        # "no data" error stop — which never finalizes. The finish/stop branches
+        # of DataManager.record() never touch images, hence the None arguments.
+        finishing = (self.data_manager is not None
+                     and self.data_manager.get_status() in ('finish', 'stop'))
+        if finishing:
+            camera_data = follower_data = leader_data = None
+        else:
+            camera_msgs, follower_msgs, leader_msgs = self.communicator.get_latest_data()
+            # Throttle the "waiting for X data" info logs to once per second
+            # per source. At 30Hz timer firing this used to print 90
+            # lines/sec while a topic was lagging (audit §3.20).
+            now = time.perf_counter()
+            if not hasattr(self, '_last_waiting_log'):
+                self._last_waiting_log = {}
+            # Audit F17 (re-armed): camera-fps sanity check every 5 s during
+            # recording. Was one-shot at +1.5 s; that missed mid-recording
+            # USB starvation / thermal throttling / hub contention, and the
+            # dataset silently grew with the same frame repeated N times
+            # (`camera_topic_msgs[name]` overwrite-in-place is what feeds
+            # convert_msgs_to_raw_datas — a stale cache reads the same
+            # CompressedImage twice). Strobing dataset trains a jittery ACT
+            # policy. 5 s cadence + 3 s observation window catches typical
+            # degradations within the same episode and re-fires the German
+            # warning, while staying out of the way of momentary jitter.
+            last_check_t = getattr(self, '_camera_fps_last_check_t', 0.0)
+            now_t = time.perf_counter()
+            if (
+                self.start_recording_time > 0
+                and (now_t - self.start_recording_time) > 1.5
+                and (now_t - last_check_t) > 5.0
+            ):
+                self._camera_fps_last_check_t = now_t
+                try:
+                    target_fps = float(getattr(self.task_info, 'fps', 0) or 0)
+                    if target_fps > 0 and hasattr(self.communicator, 'get_camera_observed_hz'):
+                        for cam_name in self.communicator.camera_topic_msgs.keys():
+                            observed = self.communicator.get_camera_observed_hz(cam_name, 3.0)
+                            # Threshold 0.9 (was 0.8): the documented real case is
+                            # the Innomaker MSMF ~25 Hz ceiling against a 30 fps
+                            # recording — ratio 0.833, which sat silently under
+                            # 0.8 while ~17% of frames duplicated. 0.9 catches it
+                            # with margin while tolerating ±10% window jitter.
+                            if observed is not None and observed < target_fps * 0.9:
+                                warning = (
+                                    f'Die {camera_name_de(cam_name)} liefert nur '
+                                    f'{observed:.0f} statt {target_fps:.0f} Bilder '
+                                    f'pro Sekunde. Der Datensatz enthält wiederholte '
+                                    f'Bilder. Steck die Kamera direkt am PC ein oder '
+                                    f'prüfe das Kabel.'
+                                )
+                                self.get_logger().warning(
+                                    f'Camera {cam_name!r} delivers {observed:.1f} Hz, '
+                                    f'the recording expects {target_fps:.0f} Hz')
+                                try:
+                                    # Stash on data_manager so the status
+                                    # publisher surfaces it as a banner.
+                                    if self.data_manager is not None:
+                                        self.data_manager._last_warning_message = warning
+                                except Exception:
+                                    pass
+                except Exception as e:
+                    self.get_logger().warning(f'camera fps check failed: {e}')
+
+            def _log_waiting(source: str, msg: str) -> None:
+                last = self._last_waiting_log.get(source, 0.0)
+                if now - last > 1.0:
+                    self.get_logger().info(msg)
+                    self._last_waiting_log[source] = now
+
+            # Topic-availability gates: when a stream is missing we either
+            # wait (still inside DEFAULT_TOPIC_TIMEOUT) or hard-fail. Falling
+            # through with a None message used to call convert_msgs_to_raw_datas
+            # with image_msgs=None — convert is None-safe, but check_lerobot_dataset
+            # would then create the dataset object with NO observation.images.*
+            # features at all, permanently corrupting `self._lerobot_dataset`
+            # for the rest of the session. Always halt the tick once we set
+            # error_msg, then surface it via TaskStatus below. The published
+            # sentence is German per source (F6a vocabulary); the log stays
+            # English.
+            missing_source_stop_de = {
+                'camera': (
+                    'Die Kameras senden keine Bilder, die Aufnahme wurde '
+                    'gestoppt. Prüfe die Kabel und starte die Umgebung neu, '
+                    'wenn es so bleibt.'),
+                'follower': (
+                    'Der Follower-Arm sendet keine Daten, die Aufnahme wurde '
+                    'gestoppt. Prüfe Kabel und Stromversorgung des '
+                    'Follower-Arms.'),
+                'leader': (
+                    'Der Leader-Arm sendet keine Daten, die Aufnahme wurde '
+                    'gestoppt. Ist der Roboter auf der Startseite aktiviert und '
+                    'der Leader-Arm eingeschaltet?'),
+            }
+
+            def _missing_or_wait(source: str, label: str) -> str | None:
+                if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
+                    self.get_logger().error(
+                        f'{label} data not received within timeout period')
+                    return missing_source_stop_de[source]
+                _log_waiting(source, f'Waiting for {source} data...')
+                return ''  # signal "still waiting, skip this tick"
+
+            if camera_msgs is None:
+                error_msg = _missing_or_wait('camera', 'Camera')
+                if not error_msg:
+                    return
+            elif follower_msgs is None:
+                error_msg = _missing_or_wait('follower', 'Follower')
+                if not error_msg:
+                    return
+            elif leader_msgs is None:
+                error_msg = _missing_or_wait('leader', 'Leader')
+                if not error_msg:
+                    return
+
+            if error_msg:
+                self.on_recording = False
+                current_status.phase = TaskStatus.READY
+                current_status.error = error_msg
+                self.communicator.publish_status(status=current_status)
+                self.timer_manager.stop(timer_name=self.operation_mode)
+                return
+
             try:
-                target_fps = float(getattr(self.task_info, 'fps', 0) or 0)
-                if target_fps > 0 and hasattr(self.communicator, 'get_camera_observed_hz'):
-                    for cam_name in self.communicator.camera_topic_msgs.keys():
-                        observed = self.communicator.get_camera_observed_hz(cam_name, 3.0)
-                        # Threshold 0.9 (was 0.8): the documented real case is
-                        # the Innomaker MSMF ~25 Hz ceiling against a 30 fps
-                        # recording — ratio 0.833, which sat silently under
-                        # 0.8 while ~17% of frames duplicated. 0.9 catches it
-                        # with margin while tolerating ±10% window jitter.
-                        if observed is not None and observed < target_fps * 0.9:
-                            warning = (
-                                f'Kamera "{cam_name}" liefert nur '
-                                f'{observed:.1f} Hz, Aufnahme erwartet '
-                                f'{target_fps:.0f} Hz. Datensatz enthaelt '
-                                f'wiederholte Frames — bitte Aufloesung '
-                                f'reduzieren oder Kabel pruefen.'
-                            )
-                            self.get_logger().warning(warning)
-                            try:
-                                # Stash on data_manager so the status
-                                # publisher surfaces it as a banner.
-                                if self.data_manager is not None:
-                                    self.data_manager._last_warning_message = warning
-                            except Exception:
-                                pass
+                camera_data, follower_data, leader_data = (
+                    self.data_manager.convert_msgs_to_raw_datas(
+                        camera_msgs,
+                        follower_msgs,
+                        self.total_joint_order,
+                        leader_msgs,
+                        self.joint_order))
+
             except Exception as e:
-                self.get_logger().warning(f'camera fps check failed: {e}')
-        def _log_waiting(source: str, msg: str) -> None:
-            last = self._last_waiting_log.get(source, 0.0)
-            if now - last > 1.0:
-                self.get_logger().info(msg)
-                self._last_waiting_log[source] = now
-
-        # Topic-availability gates: when a stream is missing we either
-        # wait (still inside DEFAULT_TOPIC_TIMEOUT) or hard-fail. Falling
-        # through with a None message used to call convert_msgs_to_raw_datas
-        # with image_msgs=None — convert is None-safe, but check_lerobot_dataset
-        # would then create the dataset object with NO observation.images.*
-        # features at all, permanently corrupting `self._lerobot_dataset`
-        # for the rest of the session. Always halt the tick once we set
-        # error_msg, then surface it via TaskStatus below.
-        def _missing_or_wait(source: str, label: str) -> str | None:
-            if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
-                msg = f'{label} data not received within timeout period'
-                self.get_logger().error(msg)
-                return msg
-            _log_waiting(source, f'Waiting for {source} data...')
-            return ''  # signal "still waiting, skip this tick"
-
-        if camera_msgs is None:
-            error_msg = _missing_or_wait('camera', 'Camera')
-            if not error_msg:
-                return
-        elif follower_msgs is None:
-            error_msg = _missing_or_wait('follower', 'Follower')
-            if not error_msg:
-                return
-        elif leader_msgs is None:
-            error_msg = _missing_or_wait('leader', 'Leader')
-            if not error_msg:
+                self.get_logger().error(f'Failed to convert messages: {e}')
+                error_msg = (
+                    'Die Sensordaten konnten nicht gelesen werden, die Aufnahme '
+                    'wurde gestoppt. Bitte starte die Umgebung neu.'
+                )
+                self.on_recording = False
+                current_status.phase = TaskStatus.READY
+                current_status.error = error_msg
+                self.communicator.publish_status(status=current_status)
+                self.timer_manager.stop(timer_name=self.operation_mode)
                 return
 
-        if error_msg:
-            self.on_recording = False
-            current_status.phase = TaskStatus.READY
-            current_status.error = error_msg
-            self.communicator.publish_status(status=current_status)
-            self.timer_manager.stop(timer_name=self.operation_mode)
-            return
+            if not self.data_manager.check_lerobot_dataset(
+                    camera_data,
+                    self.total_joint_order):
+                # check_lerobot_dataset returns False on any dataset-init
+                # failure. If a lower layer left a German warning in
+                # _last_warning_message, prefer it over the generic fallback.
+                # (It does NOT specifically validate camera names against a
+                # resumed dataset — a feature mismatch on resume surfaces later,
+                # from add_frame inside record(), which is why record() below is
+                # exception-guarded.) The fallback is cause-neutral: the usual
+                # cause is the HuggingFace existence check failing offline with
+                # the upload switched on, not the name.
+                specific = getattr(self.data_manager, '_last_warning_message', '')
+                if specific:
+                    error_msg = specific
+                    # Consume so it isn't re-surfaced by the next
+                    # get_current_record_status() tick.
+                    self.data_manager._last_warning_message = ''
+                else:
+                    error_msg = (
+                        'Der Datensatz konnte nicht angelegt oder geöffnet werden. '
+                        'Prüfe die Internetverbindung, schalte unter „Erweitert“ '
+                        'das Hochladen aus oder wähle einen anderen Aufgabennamen.'
+                    )
+                self.get_logger().info('Dataset init failed')
 
-        try:
-            camera_data, follower_data, leader_data = self.data_manager.convert_msgs_to_raw_datas(
-                camera_msgs,
-                follower_msgs,
-                self.total_joint_order,
-                leader_msgs,
-                self.joint_order)
+            if error_msg:
+                self.on_recording = False
+                current_status.phase = TaskStatus.READY
+                current_status.error = error_msg
+                self.communicator.publish_status(status=current_status)
+                self.timer_manager.stop(timer_name=self.operation_mode)
+                return
 
-        except Exception as e:
-            error_msg = f'Failed to convert messages: {str(e)}, please check the robot type again!'
-            self.on_recording = False
-            current_status.phase = TaskStatus.READY
-            current_status.error = error_msg
-            self.communicator.publish_status(status=current_status)
-            self.timer_manager.stop(timer_name=self.operation_mode)
-            return
+            if self.communicator.joystick_state['updated']:
+                self.handle_joystick_trigger(
+                    joystick_mode=self.communicator.joystick_state['mode'])
+                self.communicator.joystick_state['updated'] = False
 
-        if not self.data_manager.check_lerobot_dataset(
-                camera_data,
-                self.total_joint_order):
-            # check_lerobot_dataset returns False on any dataset-init
-            # failure. If a lower layer left a German warning in
-            # _last_warning_message, prefer it over the generic English
-            # fallback. (It does NOT specifically validate camera names
-            # against a resumed dataset — a feature mismatch on resume
-            # surfaces later, from add_frame inside record(), which is why
-            # record() below is exception-guarded.)
-            specific = getattr(self.data_manager, '_last_warning_message', '')
-            if specific:
-                error_msg = specific
-                # Consume so it isn't re-surfaced by the next
-                # get_current_record_status() tick.
-                self.data_manager._last_warning_message = ''
-            else:
-                error_msg = 'Invalid repository name, Please change the repository name'
-            self.get_logger().info(error_msg)
-
-        if error_msg:
-            self.on_recording = False
-            current_status.phase = TaskStatus.READY
-            current_status.error = error_msg
-            self.communicator.publish_status(status=current_status)
-            self.timer_manager.stop(timer_name=self.operation_mode)
-            return
-
-        if self.communicator.joystick_state['updated']:
-            self.handle_joystick_trigger(
-                joystick_mode=self.communicator.joystick_state['mode'])
-            self.communicator.joystick_state['updated'] = False
+            # Aufnahme 2.0 — end the session before the disk fills (1 Hz).
+            self._check_recording_disk_floor()
 
         try:
             record_completed = self.data_manager.record(
@@ -1539,14 +1649,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # streaming-encoder thread (disk full, av error). Uncaught, the
             # exception escapes the timer callback and kills the whole node
             # (main() catches only KeyboardInterrupt) — turn it into a
-            # German stop like the convert-error handler above.
+            # German stop like the convert-error handler above. The exception
+            # text goes to the log only (it is English and often a path).
             self.get_logger().error(f'record() failed: {e}')
             error_msg = (
-                f'Aufnahme gestoppt: Frame konnte nicht gespeichert werden '
-                f'({e}). Häufige Ursachen: Der Datensatz wurde mit anderen '
-                f'Kameras/Gelenken begonnen (Fortsetzen auf geändertem '
-                f'Aufbau) oder der Speicher ist voll. Bitte Aufbau prüfen '
-                f'oder einen neuen Datensatz-Namen wählen.'
+                'Aufnahme gestoppt: Frame konnte nicht gespeichert werden. '
+                'Häufige Ursachen: Der Datensatz wurde mit anderen '
+                'Kameras/Gelenken begonnen (Fortsetzen auf geändertem '
+                'Aufbau) oder der Speicher ist voll. Bitte Aufbau prüfen '
+                'oder einen neuen Datensatz-Namen wählen.'
             )
             self.on_recording = False
             current_status.phase = TaskStatus.READY
@@ -1566,10 +1677,45 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             current_status.phase = TaskStatus.READY
             current_status.proceed_time = int(0)
             current_status.total_time = int(0)
+            # Invariant (Aufnahme 2.0): the terminating READY carries a
+            # [WARNUNG] iff the finished dataset was NOT uploaded (finalize
+            # failure, namespace refusal, enqueue failure). Every other warning
+            # rode the SAVING tick just published; the READY no longer inherits
+            # it (the page reads this tick as the upload's fate).
+            reason = getattr(self.data_manager, '_upload_blocked_reason_de', '') or ''
+            current_status.error = f'[WARNUNG] {reason}' if reason else ''
             self.communicator.publish_status(status=current_status)
             self.on_recording = False
             self.timer_manager.stop(timer_name=self.operation_mode)
             return
+
+    def _check_recording_disk_floor(self):
+        """Aufnahme 2.0 — finish a recording before the dataset disk fills.
+
+        At most once per DISK_CHECK_INTERVAL_S, only while nothing is being
+        saved (warm-up, run, reset): below DISK_CRITICAL_FLOOR_BYTES the session
+        is finished like FINISH (the phase-neutral German sentence rides the
+        next status tick). An unreadable disk never stops a recording. Never
+        raises.
+        """
+        try:
+            now = time.monotonic()
+            last = getattr(self, '_disk_check_last_mono', None)
+            if last is not None and now - last < signal_status.DISK_CHECK_INTERVAL_S:
+                return
+            self._disk_check_last_mono = now
+            data_manager = self.data_manager
+            if data_manager is None or data_manager.get_status() not in (
+                    'warmup', 'run', 'reset'):
+                return
+            free = signal_status.disk_free_bytes(self.DEFAULT_SAVE_ROOT_PATH)
+            if free is None or free >= signal_status.DISK_CRITICAL_FLOOR_BYTES:
+                return
+            if data_manager.finish_for_low_disk(signal_status.disk_critical_stop_de(free)):
+                self.get_logger().warning(
+                    f'Recording finished: only {free} bytes free on the dataset disk')
+        except Exception as e:  # noqa: BLE001 — a disk probe must never stop a tick
+            self.get_logger().warning(f'disk floor check failed: {e}')
 
     def _eager_load_policy(self):
         """Background policy load kicked by START_INFERENCE.
@@ -1729,13 +1875,33 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 'Roboter-Initialisierung fehlgeschlagen — bitte die '
                 'Umgebung neu starten (Details im Protokoll).')
             return response
+        # Aufnahme 2.0 (F3): the Aufnahme page sends task_type 'record' on every
+        # command and reads these answers; they are German there. Any other
+        # caller (the Inferenz page's ControlPanel reaches FINISH and the
+        # not-recording answer too) keeps HEAD's text byte for byte.
+        rec = getattr(getattr(request, 'task_info', None), 'task_type', '') == 'record'
         try:
             if request.command == SendCommand.Request.START_RECORD:
                 if self.on_recording:
                     self.get_logger().info('Restarting the recording.')
                     self.data_manager.re_record()
                     response.success = True
-                    response.message = 'Restarting the recording.'
+                    response.message = (
+                        'Die laufende Episode wird neu aufgenommen.' if rec
+                        else 'Restarting the recording.')
+                    return response
+
+                # Aufnahme 2.0 — disk start floor, checked BEFORE the _mode_lock
+                # claim so a refusal claims nothing. An unreadable disk allows
+                # the start (refuse on proof only); the critical floor stops a
+                # running session (_check_recording_disk_floor).
+                free = signal_status.disk_free_bytes(self.DEFAULT_SAVE_ROOT_PATH)
+                if free is not None and free < signal_status.DISK_START_FLOOR_BYTES:
+                    self.get_logger().warning(
+                        f'START_RECORD refused: only {free} bytes free on the '
+                        f'dataset disk')
+                    response.success = False
+                    response.message = signal_status.disk_start_refusal_de(free)
                     return response
 
                 # F1 — atomic claim: hold _mode_lock around the ownership check AND
@@ -1777,7 +1943,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 # only (see DataManager._session_marker_enabled).
                 self.data_manager._session_marker_enabled = True
                 response.success = True
-                response.message = 'Recording started'
+                response.message = 'Aufnahme gestartet.' if rec else 'Recording started'
 
             elif request.command == SendCommand.Request.START_INFERENCE:
                 # F1 — atomic claim under _mode_lock (see START_RECORD). on_inference
@@ -1987,46 +2153,89 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             else:
                 if not self.on_recording and not self.on_inference:
                     response.success = False
-                    response.message = 'Not currently recording'
+                    response.message = (
+                        'Gerade läuft keine Aufnahme.' if rec
+                        else 'Not currently recording')
                 else:
                     if request.command == SendCommand.Request.STOP:
                         self.get_logger().info('Stopping recording')
                         self.data_manager.record_stop()
                         response.success = True
-                        response.message = 'Recording stopped'
+                        response.message = 'Aufnahme gestoppt.' if rec else 'Recording stopped'
 
                     elif request.command == SendCommand.Request.MOVE_TO_NEXT:
                         self.get_logger().info('Moving to next episode')
                         if len(request.task_info.task_instruction) > 1:
+                            # Multi-task: unchanged (unreachable from the page).
                             self.data_manager.record_next_episode()
+                            response.success = True
+                            response.message = 'Moved to next episode'
+                        elif rec:
+                            # Skip a warm-up/reset, or save the running episode;
+                            # a refusal changes nothing and says why.
+                            outcome = self.data_manager.record_early_save()
+                            if outcome == 'run':
+                                response.success = True
+                                response.message = 'Die Aufnahme startet jetzt.'
+                            elif outcome == 'save':
+                                response.success = True
+                                response.message = 'Die Episode wird gespeichert.'
+                            elif outcome == 'too_early':
+                                response.success = False
+                                response.message = (
+                                    'Die Episode läuft erst seit weniger als einer '
+                                    'Sekunde.')
+                            else:
+                                response.success = False
+                                response.message = (
+                                    'Gerade gibt es nichts zu überspringen oder zu '
+                                    'speichern.')
                         else:
                             self.data_manager.record_early_save()
-                        response.success = True
-                        response.message = 'Moved to next episode'
+                            response.success = True
+                            response.message = 'Moved to next episode'
 
                     elif request.command == SendCommand.Request.RERECORD:
                         self.get_logger().info('Re-recording current episode')
-                        self.data_manager.re_record()
-                        response.success = True
-                        response.message = 'Re-recording current episode'
+                        if rec:
+                            # Refused once save() committed the episode; the
+                            # accepted time starts the FINISH window (Q4).
+                            if self.data_manager.rerecord_from_command():
+                                response.success = True
+                                response.message = 'Die Episode wird wiederholt.'
+                            else:
+                                response.success = False
+                                response.message = (
+                                    'Die Episode ist schon gespeichert und kann '
+                                    'nicht mehr verworfen werden.')
+                        else:
+                            self.data_manager.re_record()
+                            response.success = True
+                            response.message = 'Re-recording current episode'
 
                     elif request.command == SendCommand.Request.FINISH:
                         self.get_logger().info('Terminating all operations')
                         self.data_manager.record_finish()
                         self.on_inference = False
                         response.success = True
-                        response.message = 'All operations terminated'
+                        response.message = (
+                            'Wird beendet.' if rec else 'All operations terminated')
 
                     elif request.command == SendCommand.Request.SKIP_TASK:
                         self.get_logger().info('Skipping task')
                         self.data_manager.record_skip_task()
                         response.success = True
-                        response.message = 'Task skipped successfully'
+                        response.message = (
+                            'Aufgabe übersprungen.' if rec
+                            else 'Task skipped successfully')
 
         except Exception as e:
             self.get_logger().error(f'Error in user interaction: {str(e)}')
             response.success = False
-            response.message = f'Error in user interaction: {str(e)}'
+            response.message = (
+                'Der Befehl konnte nicht ausgeführt werden. Bitte versuch es noch '
+                'einmal.' if rec
+                else f'Error in user interaction: {str(e)}')
             return response
         return response
 

@@ -19,12 +19,20 @@
 export const MUTE_KEY = 'edubotics_audio_muted';
 export const TICK = Object.freeze({ frequencyHz: 700, durationMs: 80, gain: 0.15, releaseMs: 10 });
 
-function isMuted() {
+/** The „Ton" switch, read fresh (the Aufnahme page and the hook's beeps share it). */
+export function isMuted() {
   try {
     return window.localStorage.getItem(MUTE_KEY) === '1';
   } catch {
     return false;
   }
+}
+
+/** Flip the „Ton" switch; storage that refuses (private mode) is not an error. */
+export function setMuted(muted) {
+  try {
+    window.localStorage.setItem(MUTE_KEY, muted ? '1' : '0');
+  } catch { /* private mode / quota */ }
 }
 
 export function createRecordSounds() {

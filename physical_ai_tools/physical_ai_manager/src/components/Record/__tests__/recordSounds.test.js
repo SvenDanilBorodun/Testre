@@ -6,7 +6,7 @@
 // The Aufnahme countdown tick (spec §3.7): 700 Hz sine, 80 ms, gain 0.15 with
 // a 10 ms release; muted by the existing „Ton" key, read on every call.
 
-import { MUTE_KEY, TICK, createRecordSounds } from '../recordSounds';
+import { MUTE_KEY, TICK, createRecordSounds, isMuted, setMuted } from '../recordSounds';
 
 class FakeParam {
   constructor() { this.events = []; this.value = 0; }
@@ -101,6 +101,16 @@ describe('createRecordSounds', () => {
     const s2 = createRecordSounds();
     expect(() => s2.tick()).not.toThrow();
     spy.mockRestore();
+  });
+
+  it('isMuted / setMuted share the key', () => {
+    expect(isMuted()).toBe(false);
+    setMuted(true);
+    expect(localStorage.getItem(MUTE_KEY)).toBe('1');
+    expect(isMuted()).toBe(true);
+    setMuted(false);
+    expect(localStorage.getItem(MUTE_KEY)).toBe('0');
+    expect(isMuted()).toBe(false);
   });
 
   it('dispose() closes the context', () => {

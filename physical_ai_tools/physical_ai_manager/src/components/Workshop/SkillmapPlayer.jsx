@@ -251,9 +251,9 @@ function SkillmapPlayer() {
           type="button"
           onClick={handlePrev}
           disabled={activeStep === 0}
-          className="px-3 py-1.5 text-sm rounded-md border border-[var(--line)] hover:bg-[var(--bg-sunk)] disabled:opacity-50"
+          className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-md border border-[var(--line)] hover:bg-[var(--bg-sunk)] disabled:opacity-50"
         >
-          ← {DE.TUTORIAL_PREV}
+          <Icon name="chevronLeft" /> {DE.TUTORIAL_PREV}
         </button>
         <button
           type="button"

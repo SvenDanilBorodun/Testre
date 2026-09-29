@@ -226,12 +226,12 @@ export default function ImageGridCell({
       style={{ cursor: !topic ? 'pointer' : 'default', aspectRatio: aspect, ...style }}
     >
       {topic && topic.trim() !== '' && (
-        <button className={classImageGridCellButton} onClick={handleClose}>
+        <button className={classImageGridCellButton} onClick={handleClose} aria-label="Kamera entfernen" title="Kamera entfernen">
           <Icon name="close" size={20} />
         </button>
       )}
       <div ref={containerRef} className="w-full h-full flex items-center justify-center">
-        {(!topic || !isActive) && <div className="text-6xl text-gray-400 font-light">+</div>}
+        {(!topic || !isActive) && <Icon name="plus" size="3.75rem" className="text-gray-400" strokeWidth={1.5} />}
       </div>
     </div>
   );

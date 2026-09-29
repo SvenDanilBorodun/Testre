@@ -76,3 +76,14 @@ test('the liveness icon turns one step per status message, never on its own', ()
   // No glyph of the old Braille spinner anywhere.
   expect(document.body.textContent).not.toMatch(/[⠀-⣿]/);
 });
+
+// Final review, minor 1: a disabled button dims its icon with OPACITY. A
+// semi-transparent colour painted a solid icon's fill AND stroke at 35 %, and
+// the overlap drew a bright ring round a dimmed Stopp/Weiter.
+test('a disabled button dims its icon by opacity, never by a translucent colour', () => {
+  mount({ phase: TaskPhase.READY, running: false });
+  const stop = iconIn(screen.getByRole('button', { name: /Stopp/ }));
+  expect(screen.getByRole('button', { name: /Stopp/ })).toBeDisabled();
+  expect(stop.style.opacity).toBe('0.35');
+  expect(stop.style.color).not.toMatch(/rgba/);
+});

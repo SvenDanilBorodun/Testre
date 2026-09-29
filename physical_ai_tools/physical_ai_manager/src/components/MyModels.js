@@ -9,7 +9,7 @@ import Icon from './icons/Icon';
 
 const STATUS_CONFIG = {
   queued: { icon: 'hourglass', color: 'text-gray-500', bg: 'bg-gray-100', label: 'In Warteschlange' },
-  running: { icon: 'refresh', color: 'text-teal-600', bg: 'bg-teal-50', label: 'Training läuft', spin: true },
+  running: { icon: 'loading', color: 'text-teal-600', bg: 'bg-teal-50', label: 'Training läuft', spin: true },
   succeeded: { icon: 'checkCircle', color: 'text-green-600', bg: 'bg-green-50', label: 'Erfolgreich' },
   failed: { icon: 'failed', color: 'text-red-500', bg: 'bg-red-50', label: 'Fehlgeschlagen' },
   canceled: { icon: 'cancel', color: 'text-gray-400', bg: 'bg-gray-50', label: 'Abgebrochen' },

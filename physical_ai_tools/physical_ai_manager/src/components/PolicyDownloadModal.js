@@ -318,6 +318,8 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
               </div>
               <button
                 onClick={onClose}
+                aria-label="Schließen"
+                title="Schließen"
                 className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
                 disabled={!canCloseModal}
               >

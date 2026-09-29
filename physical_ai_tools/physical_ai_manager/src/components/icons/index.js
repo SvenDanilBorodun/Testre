@@ -8,7 +8,7 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-// The app's one icon style (owner decision D7): Lucide plus four custom icons
+// The app's one icon style (owner decision D7): Lucide plus three custom icons
 // drawn in its rules. React UI uses <Icon>; Blockly and CodeMirror SVG use
 // appendSvgIcon/iconNodes; toasts use toastIcon.
 

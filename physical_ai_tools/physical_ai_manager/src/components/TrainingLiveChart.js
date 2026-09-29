@@ -51,7 +51,7 @@ function useNow(active) {
 
 const STATUS_UI = {
   queued: { tone: 'amber', label: 'Wird eingereiht', icon: 'hourglass' },
-  running: { tone: 'accent', label: 'Läuft', icon: 'refresh', spin: true },
+  running: { tone: 'accent', label: 'Läuft', icon: 'loading', spin: true },
   succeeded: { tone: 'success', label: 'Erfolgreich', icon: 'checkCircle' },
   failed: { tone: 'danger', label: 'Fehlgeschlagen', icon: 'failed' },
   canceled: { tone: 'neutral', label: 'Abgebrochen', icon: 'cancel' },
@@ -342,7 +342,7 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
             </div>
             {starting ? (
               <div className="flex items-center gap-2 mt-1.5 text-[var(--ink)] font-semibold text-lg">
-                <Icon name="refresh" size={18} className="animate-spin text-[var(--accent)]" />
+                <Icon name="loading" size={18} className="animate-spin text-[var(--accent)]" />
                 GPU-Worker startet…
               </div>
             ) : (

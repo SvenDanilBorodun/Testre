@@ -102,4 +102,3 @@ describe('the drive button image', () => {
     expect(doc.querySelector('g[data-icon="play"] polygon')).not.toBeNull();
   });
 });
-

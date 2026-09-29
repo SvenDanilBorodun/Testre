@@ -123,4 +123,3 @@ export function iconMarkup(name, {
     + `stroke="${escapeAttr(stroke)}" stroke-width="${strokeWidth}" stroke-linecap="round" `
     + `stroke-linejoin="round" data-icon="${escapeAttr(name)}">${nodesMarkup(nodes)}</g>`;
 }
-

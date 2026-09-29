@@ -30,7 +30,7 @@ export const TOAST_ICONS = Object.freeze({
   success: 'checkCircle',
   camera: 'camera',
   save: 'save',
-  record: 'liveRecording',
+  record: 'record',
   stop: 'hand',
   arm: 'robotArm',
   unplugged: 'unplugged',

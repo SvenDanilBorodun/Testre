@@ -421,4 +421,3 @@ describe('a FlyoutButton whose DOM changed keeps the category working (review ro
     expect(dispatched).toEqual([{ type: 'teach', kind: 'ziel' }]);
   });
 });
-

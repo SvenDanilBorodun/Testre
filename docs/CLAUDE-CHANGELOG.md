@@ -167,6 +167,20 @@ over the first round and +37,677 / +7,869 over the release before this
 change; teacher-web entry 1,312,695 raw / 350,799 gzip (+299 / +350). Still
 91 Lucide icons in the bundle and no `react-dom/server`.
 
+**Final review (one fresh reviewer, owner's choice).** Ready for a PR, no
+blocker or major; 27 mutation probes, all red. Its leftovers were fixed by the
+conductor, each pinned by a test: a disabled ControlPanel button dims its icon
+by opacity (a 35 %-alpha colour painted a solid icon's fill and stroke twice,
+drawing a bright ring round a dimmed Stopp); the tutorial's „Vorheriger
+Schritt" draws the chevron instead of a typed ←, which the glyph fence cannot
+see because it allows ← → as key names; the empty camera cell shows the plus
+icon and its close button, like the policy download's, has a German name; the
+„Aufnahme gestartet!" toast shows the record symbol, not a plain white dot on
+green; a spinner that only says „läuft" is the loader icon (a refresh BUTTON
+may still turn its arrows while it reloads). The pre-existing clipping of
+ControlPanel's „Wiederholen" at narrow widths is identical at the release and
+unchanged here.
+
 ### Unreleased, 2026-09-28 (fix round 5) — the page acts on the program it holds, and the last values arrive
 
 Two more fresh reviewers (5-A adversarial, 5-B regression and delivery)

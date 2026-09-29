@@ -9,7 +9,7 @@
  */
 
 // THE icon table: one semantic name per meaning, one Lucide component each
-// (owner decision D7: Lucide everywhere, plus four custom Lucide-style icons in
+// (owner decision D7: Lucide everywhere, plus three custom Lucide-style icons in
 // custom.js). This is the ONLY module that imports `react-icons/lu`, and no
 // module in src/ may import any other react-icons set
 // (components/icons/__tests__/noIconGlyphs.test.js fences both). Named imports

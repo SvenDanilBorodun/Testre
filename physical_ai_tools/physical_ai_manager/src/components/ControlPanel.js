@@ -653,8 +653,8 @@ export default function ControlPanel() {
                 <span className={classControlPanelButtonIcon}>
                   <Icon
                     name={icon}
-                    style={{ fontSize: 'clamp(1rem, 3vw, 2.8rem)' }}
-                    color={isDisabled ? 'rgba(255,255,255,0.35)' : color}
+                    style={{ fontSize: 'clamp(1rem, 3vw, 2.8rem)', opacity: isDisabled ? 0.35 : undefined }}
+                    color={isDisabled ? '#ffffff' : color}
                   />
                 </span>
                 <span className="text-center whitespace-pre-line leading-tight text-ellipsis overflow-hidden block w-full h-full flex items-center justify-center">

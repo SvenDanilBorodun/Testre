@@ -590,7 +590,7 @@ export default function DatasetSelector() {
 
                   {/* Loading or Refresh Icon */}
                   {loadingDatasets[user] ? (
-                    <Icon name="refresh" className="ml-auto animate-spin text-gray-500" />
+                    <Icon name="loading" className="ml-auto animate-spin text-gray-500" />
                   ) : expandedUsers[user] ? (
                     <button
                       className={classRefreshIcon}

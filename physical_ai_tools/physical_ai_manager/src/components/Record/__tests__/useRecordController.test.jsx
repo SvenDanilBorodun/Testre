@@ -31,7 +31,8 @@ vi.mock('../../../hooks/useRosServiceCaller', () => ({
 
 let mockClock = { subscribe: () => () => {}, secondsLeft: 0, elapsed: 0 };
 vi.mock('../../../hooks/useSmoothPhaseClock', () => ({ __esModule: true, default: () => mockClock }));
-vi.mock('../../../hooks/useSignalStatus', () => ({ __esModule: true, default: () => ({ payload: null, receivedAt: null }) }));
+let mockSignal = { payload: null, receivedAt: null };
+vi.mock('../../../hooks/useSignalStatus', () => ({ __esModule: true, default: () => mockSignal }));
 vi.mock('../../../hooks/useRsBridgeStatus', () => ({
   __esModule: true,
   default: () => ({ available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false, probed: true }),
@@ -107,6 +108,7 @@ beforeEach(() => {
   mockSounds.prime.mockClear();
   mockSounds.tick.mockClear();
   mockClock = { subscribe: () => () => {}, secondsLeft: 0, elapsed: 0 };
+  mockSignal = { payload: null, receivedAt: null };
   try { localStorage.removeItem('edubotics_audio_muted'); } catch { /* none */ }
 });
 
@@ -293,6 +295,57 @@ describe('the countdown ticks', () => {
     }
     expect(heard).toEqual(expect.arrayContaining([2, 1]));
     expect(mockSounds.tick).toHaveBeenCalled();
+  });
+});
+
+describe('signal facts', () => {
+  const payload = (patch = {}) => ({
+    v: 1, seq: 1, uptime_s: 30, recording: false,
+    sources: [
+      { kind: 'camera', name: 'gripper', topic: '/gripper/image_raw', hz: 29.8, age_s: 0.03 },
+      { kind: 'camera', name: 'scene', topic: '/scene/image_raw', hz: 11.2, age_s: 0.05 },
+      { kind: 'follower', name: 'follower', topic: '/joint_states', hz: 99, age_s: 0.01 },
+      { kind: 'leader', name: 'leader', topic: '/leader/joint_trajectory', hz: null, age_s: null },
+    ],
+    disk: { free_bytes: 5e10, start_floor_bytes: 3e9, critical_floor_bytes: 1e9 },
+    ...patch,
+  });
+
+  it('no payload (an older image): no badges, no banner, no block', () => {
+    const store = makeStore();
+    const { result } = mount(store);
+    expect(result.current.signal).toBeNull();
+    expect(result.current.problem).toBeNull();
+    expect(result.current.model.startBlock).toBeNull();
+  });
+
+  it('badges per source; a silent leader refuses Start with its reason', () => {
+    mockSignal = { payload: payload(), receivedAt: performance.now() };
+    const store = makeStore();
+    const { result } = mount(store);
+    expect(result.current.signal).toEqual([
+      { kind: 'camera', name: 'gripper', labelDe: 'Greifer-Kamera', hz: 29.8, hzText: '29,8 Hz', verdict: 'ok' },
+      { kind: 'camera', name: 'scene', labelDe: 'Szenen-Kamera', hz: 11.2, hzText: '11,2 Hz', verdict: 'slow' },
+      { kind: 'follower', name: 'follower', labelDe: 'Follower-Arm', hz: 99, hzText: '99 Hz', verdict: 'ok' },
+      { kind: 'leader', name: 'leader', labelDe: 'Leader-Arm', hz: null, hzText: '—', verdict: 'stalled' },
+    ]);
+    expect(result.current.model.startBlock.kind).toBe('source');
+    expect(result.current.problem.textDe)
+      .toBe('Der Leader-Arm sendet keine Daten. Prüfe Kabel und Stromversorgung des Leader-Arms.');
+    press(' ');
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('low disk refuses Start first', () => {
+    mockSignal = {
+      payload: payload({ disk: { free_bytes: 2e9, start_floor_bytes: 3e9, critical_floor_bytes: 1e9 } }),
+      receivedAt: performance.now(),
+    };
+    const store = makeStore();
+    const { result } = mount(store);
+    expect(result.current.model.startBlock.kind).toBe('disk');
+    expect(result.current.model.buttons[0].disabled).toBe(true);
+    expect(result.current.problem.kind).toBe('bad');
   });
 });
 

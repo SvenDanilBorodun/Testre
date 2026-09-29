@@ -15,7 +15,7 @@
 //   c.view, c.model (deriveRecordView), c.clock ({subscribe, secondsLeft, elapsed}),
 //   c.problem ({kind, textDe, linkToHome?} | null), c.question | null, c.closeQuestion(),
 //   c.act(actionId), c.busy, c.form, c.setField(field, value), c.editable, c.lockedReason,
-//   c.hfUsers ({list, reload(), loading}), c.signal ([{kind, name, labelDe, hz, verdict}] | null),
+//   c.hfUsers ({list, reload(), loading}), c.signal ([{kind, name, labelDe, hz, hzText, verdict}] | null),
 //   c.finish (finishSteps), c.session (sessionView), c.dismissFinish(), c.goToTraining(),
 //   c.goToHome(), c.muted, c.toggleMute(), c.estimate ({totalS, parts, text}),
 //   c.repoPreview (string), c.onPhaseTick(fn) → unsubscribe
@@ -73,7 +73,7 @@ import {
 import { datasetIdOf, finishSteps, sessionView } from './model/finishModel';
 import { VIEW, deriveRecordView, deriveView } from './model/phaseModel';
 import { firstProblem } from './model/problems';
-import RECORD_COPY, { armNameDe, cameraNameDe } from './model/recordCopy';
+import RECORD_COPY, { armNameDe, cameraNameDe, numberDe } from './model/recordCopy';
 import { runRecordAction } from './model/recordCommands';
 import { keyToAction } from './model/recordKeys';
 import { createRecordSounds, isMuted, setMuted as writeMuted } from './recordSounds';
@@ -487,6 +487,8 @@ export default function useRecordController({ isActive = true } = {}) {
       name: v.name,
       labelDe: v.kind === 'camera' ? cameraNameDe(v.name) : armNameDe(v.kind),
       hz: v.hz,
+      // the tile badge's text: „29,8 Hz", or „—" before a rate is measurable
+      hzText: v.hz === null || v.hz === undefined ? '—' : `${numberDe(v.hz)} Hz`,
       verdict: v.verdict,
     }))
     : null), [verdicts]);

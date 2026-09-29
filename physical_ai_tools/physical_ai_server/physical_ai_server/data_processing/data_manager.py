@@ -120,6 +120,22 @@ def safe_dataset_user_id(user_id) -> str:
     return safe
 
 
+# Aufnahme 2.0 record-FSM constants (module constants, NOT env vars — a new
+# EDUBOTICS_* knob would need a compose forward).
+# MOVE_TO_NEXT inside the first second of a run answers `too_early`, and FINISH
+# drops a run that short (owner decision Q3): it was never a real attempt.
+EARLY_SAVE_MIN_S = 1.0
+# The server remembers a RERECORD received from the wire for this long; a
+# following FINISH drops any run that STARTED after it (owner decision Q4), so
+# „Verwerfen und beenden“ keeps nothing however slow the link or short the reset.
+RERECORD_FINISH_WINDOW_S = 5.0
+# Terminating-tick reason when the finished dataset could not be handed to the
+# upload worker (see _upload_blocked_reason_de).
+UPLOAD_NOT_STARTED_DE = (
+    'Das Hochladen konnte nicht gestartet werden. Du kannst den Datensatz '
+    'später im Tab Daten hochladen.')
+
+
 class DataManager:
     RECORDING = False
     RECORD_COMPLETED = True
@@ -184,6 +200,26 @@ class DataManager:
         self._start_time_s = 0
         self._proceed_time = 0
         self._status = 'warmup'
+        # Aufnahme 2.0 bookkeeping. The contract tests build DataManager via
+        # __new__ with a fixed attribute set, so every reader of these uses
+        # getattr(self, name, <default>).
+        #   _run_entered_at        perf_counter() of the last entry into 'run'
+        #   _wire_rerecord_at      perf_counter() of the last RERECORD off the wire
+        #   _finish_count_pending  FINISH met an episode save() already committed
+        #   _finish_drops_run      FINISH must discard the run in flight (Q3/Q4)
+        #   _stop_count_pending    STOP committed a real episode (count only that)
+        #   _disk_stop_requested   the low-disk stop fired (once per session)
+        #   _upload_blocked_reason_de  German reason the finished dataset was NOT
+        #                          uploaded; the node puts it on the terminating tick
+        #   _last_stale_warn_mono  throttle for the recording stale-camera warning
+        self._run_entered_at = None
+        self._wire_rerecord_at = None
+        self._finish_count_pending = False
+        self._finish_drops_run = False
+        self._stop_count_pending = False
+        self._disk_stop_requested = False
+        self._upload_blocked_reason_de = ''
+        self._last_stale_warn_mono = 0.0
         self._cpu_checker = CPUChecker()
         self.data_converter = DataConverter()
         # Propagate the task fps into the action-duration setter so
@@ -366,7 +402,12 @@ class DataManager:
                     if self._lerobot_dataset.check_video_encoding_completed():
                         self._on_saving = False
                         self._episode_reset()
-                        self._record_episode_count += 1
+                        # Count only an episode save() really committed: a STOP
+                        # with nothing in flight (warm-up, reset) used to count
+                        # one too many. Default True keeps a DataManager built
+                        # without __init__ on HEAD's behaviour.
+                        if getattr(self, '_stop_count_pending', True):
+                            self._record_episode_count += 1
                         self._write_session_marker()
                         self._get_current_scenario_number()
                         self._current_task += 1
@@ -389,15 +430,29 @@ class DataManager:
                     # save() returns False when it discarded the episode for
                     # re-recording (streaming frame drop); _status is now
                     # 'reset', so do NOT latch _on_saving.
+                    committing = self._buffer_has_frames()
                     if self.save():
+                        self._stop_count_pending = committing
                         self._proceed_time = 0
                         self._on_saving = True
             return self.RECORDING
 
         elif self._status == 'finish':
             if self._on_saving:
-                if self._lerobot_dataset.check_video_encoding_completed():
+                # A FINISH before the first record tick has no dataset at all:
+                # nothing to wait for, nothing to finalize.
+                if (self._lerobot_dataset is None
+                        or self._lerobot_dataset.check_video_encoding_completed()):
                     self._on_saving = False
+                    if getattr(self, '_finish_count_pending', False):
+                        # The episode this FINISH committed (or found committed
+                        # by a latched 'save') is counted exactly like the
+                        # normal save-completion branch counts it — HEAD saved
+                        # it locally and never counted, so it was not uploaded.
+                        self._finish_count_pending = False
+                        self._verify_saved_video_files()
+                        self._record_episode_count += 1
+                        self._write_session_marker()
                     self._episode_reset()
                     # v0.5.1: close the data ParquetWriter + flush the episode
                     # metadata buffer to disk BEFORE upload — without this the
@@ -409,13 +464,32 @@ class DataManager:
                             self._task_info.tags,
                             self._task_info.private_mode)
                     return self.RECORD_COMPLETED
+            elif getattr(self, '_finish_drops_run', False):
+                # Q3/Q4: the run in flight is shorter than EARLY_SAVE_MIN_S or
+                # started after a wire RERECORD <= RERECORD_FINISH_WINDOW_S ago.
+                # Discard it and finish with what is already saved.
+                self._finish_drops_run = False
+                self._drop_in_progress_episode()
+                self._proceed_time = 0
+                self._on_saving = True
             else:
-                # save() returns False when it discarded the episode for
-                # re-recording (streaming frame drop); _status is now 'reset',
-                # so do NOT latch _on_saving or kick off encoding.
+                committing = self._buffer_has_frames()
                 if self.save():
+                    self._finish_count_pending = committing
                     if not self._single_task:
                         self._lerobot_dataset.video_encoding()
+                    self._proceed_time = 0
+                    self._on_saving = True
+                else:
+                    # save() discarded the episode (streaming frame drop) and
+                    # routed to 'reset'. A FINISH is not re-recorded: end the
+                    # session with the episodes already saved and say why
+                    # (HEAD silently continued the session instead).
+                    self._status = 'finish'
+                    self._last_warning_message = (
+                        f'Episode {self._record_episode_count + 1}: Kamera-Bilder '
+                        f'gingen beim Speichern verloren, die Episode wurde verworfen. '
+                        f'Die Aufnahme endet mit den schon gespeicherten Episoden.')
                     self._proceed_time = 0
                     self._on_saving = True
 
@@ -444,7 +518,10 @@ class DataManager:
         when this returns True — a False return has already routed the state
         machine back to 'reset'.
         """
-        if self._lerobot_dataset.episode_buffer is None:
+        # An EMPTY buffer is nothing to commit. LeRobot 0.5.1's writer starts
+        # with a size-0 buffer (not None) and save_episode() RAISES on it, which
+        # turned a FINISH/MOVE_TO_NEXT in the first warm-up into an error stop.
+        if not self._buffer_has_frames():
             return True
         # Validate the buffer BEFORE save() consumes it. Logs to stderr only —
         # validation never blocks the actual save.
@@ -547,6 +624,7 @@ class DataManager:
                 'ist unvollständig und muss neu aufgenommen werden.'
             )
             self._last_warning_message = warning
+            self._upload_blocked_reason_de = warning
             print(f'[FEHLER] {warning} ({e})', file=sys.stderr, flush=True)
             return False
 
@@ -663,17 +741,151 @@ class DataManager:
         ]
         return frame
 
-    def record_early_save(self):
-        if self._lerobot_dataset.episode_buffer is not None:
+    def _buffer_has_frames(self) -> bool:
+        ds = getattr(self, '_lerobot_dataset', None)
+        buf = getattr(ds, 'episode_buffer', None) if ds is not None else None
+        if buf is None:
+            return False
+        try:
+            return int(buf.get('size', 0) or 0) > 0
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    def _run_age_s(self) -> float:
+        entered = getattr(self, '_run_entered_at', None)
+        if entered is None:
+            return float('inf')
+        return time.perf_counter() - entered
+
+    def _enter_run(self) -> None:
+        self._status = 'run'
+        self._start_time_s = 0
+        self._proceed_time = 0
+        self._run_entered_at = time.perf_counter()
+
+    def _drop_in_progress_episode(self) -> None:
+        try:
+            self._lerobot_dataset.cancel_streaming_episode()
+        except Exception:  # noqa: BLE001 — discard must never block the finish
+            pass
+        self._episode_reset()
+
+    def record_early_save(self) -> str:
+        """MOVE_TO_NEXT (single task) and the joystick right tact.
+
+        Returns what happened, for the node's German answer:
+          'run'       a warm-up/reset was skipped, the next run starts now;
+          'save'      the running episode (>= EARLY_SAVE_MIN_S) is saved now;
+          'too_early' the run is younger than EARLY_SAVE_MIN_S, nothing changed;
+          ''          nothing to skip or save (saving, finishing), nothing changed.
+        """
+        if self._status in ('warmup', 'reset'):
+            self._enter_run()
+            return 'run'
+        if self._status == 'run' and self._buffer_has_frames():
+            if self._run_age_s() < EARLY_SAVE_MIN_S:
+                return 'too_early'
             self._status = 'save'
+            return 'save'
+        return ''
+
+    def rerecord_from_command(self) -> bool:
+        """RERECORD from the wire („Wiederholen“, „Verwerfen und beenden“).
+
+        Refused (False, nothing changed) while finishing/stopping and once
+        save() has committed the episode — it can no longer be discarded.
+        Otherwise re_record() and remember WHEN, for the FINISH window (Q4).
+        """
+        if self._status in ('finish', 'stop'):
+            return False
+        if self._status == 'save' and getattr(self, '_on_saving', False):
+            return False
+        self.re_record()
+        self._wire_rerecord_at = time.perf_counter()
+        return True
+
+    def _run_started_after_wire_rerecord(self) -> bool:
+        rerec = getattr(self, '_wire_rerecord_at', None)
+        entered = getattr(self, '_run_entered_at', None)
+        if rerec is None or entered is None:
+            return False
+        return (time.perf_counter() - rerec <= RERECORD_FINISH_WINDOW_S
+                and entered >= rerec)
+
+    def finish_for_low_disk(self, message_de: str) -> bool:
+        """End the session because the disk is nearly full (once per session).
+
+        Only while nothing is being saved: warm-up, run or reset. The German
+        sentence rides the next status tick as a [WARNUNG].
+        """
+        if getattr(self, '_disk_stop_requested', False):
+            return False
+        if self._status not in ('warmup', 'run', 'reset'):
+            return False
+        self._disk_stop_requested = True
+        self._last_warning_message = message_de
+        self.record_finish()
+        return True
+
+    def end_session_now(self) -> bool:
+        """F1: finish the session synchronously (forced collision recovery).
+
+        The record timer is stopped at that point, so the finish/stop branches
+        are driven here; they never touch images, hence the None arguments.
+        Returns whether the session completed (finalized, upload handed off
+        per the usual guards).
+        """
+        if self._status not in ('finish', 'stop'):
+            self.record_finish()
+        for _ in range(4):
+            if self.record(None, None, None) == self.RECORD_COMPLETED:
+                return True
+        return False
 
     def record_stop(self):
         self._status = 'stop'
 
     def record_finish(self):
+        status = self._status
+        if status in ('finish', 'stop'):
+            return
+        if status == 'save' and getattr(self, '_on_saving', False):
+            # Committed by 'save', not yet counted: the finish branch counts it.
+            self._finish_count_pending = True
+        in_flight = status == 'run' or (
+            status == 'save' and not getattr(self, '_on_saving', False))
+        self._finish_drops_run = in_flight and (
+            (status == 'run' and self._run_age_s() < EARLY_SAVE_MIN_S)
+            or self._run_started_after_wire_rerecord())
         self._status = 'finish'
 
     def re_record(self):
+        # F7b (owner-approved collision-path change): a session that is already
+        # finishing/stopping is never reopened — a collision during the finish
+        # lets the finish complete normally.
+        if self._status in ('finish', 'stop'):
+            return
+        # Q7 (owner-approved): a collision between save()'s commit and the
+        # count (status 'save', _on_saving latched) used to leave the episode on
+        # disk but uncounted. Complete the count exactly as the normal
+        # save-completion branch does, THEN rewind as before. The collision
+        # still halts and resumes the same session; nothing new is discarded.
+        # (The buffer reset of that branch is the rewind's own _episode_reset.)
+        # When that was the LAST episode, finish as that branch does: a rewind
+        # to 'reset' would start a run the session has no room for, and the
+        # cap-reached check would then finalize with a frame in flight.
+        if self._status == 'save' and getattr(self, '_on_saving', False):
+            self._verify_saved_video_files()
+            self._record_episode_count += 1
+            self._write_session_marker()
+            self._get_current_scenario_number()
+            self._current_task += 1
+            if self._record_episode_count >= self._task_info.num_episodes:
+                self._stop_save_completed = False
+                self._on_saving = False
+                self._episode_reset()
+                self._status = 'finish'
+                return
         self._stop_save_completed = False
         # Abandon any in-flight save: re_record means "discard the current episode and
         # restart it". If a collision (or a manual Wiederholen) fires while _status=='save'
@@ -839,14 +1051,32 @@ class DataManager:
                 # event. (The inference path currently has NO stale-
                 # camera halt of its own — this warning fires there too
                 # via convert_msgs_to_raw_datas, but is warn-only.)
-                warning = (
-                    f'Kamera "{stale}" liefert seit über '
-                    f'{self._stale_halt_threshold_s:.0f}s dasselbe Bild. '
-                    f'Aufnahme läuft weiter — bitte prüfen, ob die '
-                    f'Szene wirklich statisch ist oder die Kamera hängt.'
-                )
-                self._last_warning_message = warning
-                print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
+                if getattr(self, '_session_marker_enabled', False):
+                    # A RECORDING session (the marker is armed for
+                    # START_RECORD only): the Aufnahme page shows this in its
+                    # problem banner, so say it in its words and at most once
+                    # per 5 s instead of on every tick.
+                    now_mono = time.monotonic()
+                    last = getattr(self, '_last_stale_warn_mono', 0.0)
+                    if now_mono - last >= 5.0:
+                        self._last_stale_warn_mono = now_mono
+                        warning = (
+                            f'Die {camera_name_de(stale)} zeigt seit über '
+                            f'{self._stale_halt_threshold_s:.0f} s dasselbe Bild. Die '
+                            f'Aufnahme läuft weiter – prüfe, ob die Kamera hängt.'
+                        )
+                        self._last_warning_message = warning
+                        print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
+                else:
+                    # Inference keeps HEAD's sentence byte for byte (F3).
+                    warning = (
+                        f'Kamera "{stale}" liefert seit über '
+                        f'{self._stale_halt_threshold_s:.0f}s dasselbe Bild. '
+                        f'Aufnahme läuft weiter — bitte prüfen, ob die '
+                        f'Szene wirklich statisch ist oder die Kamera hängt.'
+                    )
+                    self._last_warning_message = warning
+                    print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
         if follower_msgs is not None:
             for key, value in follower_msgs.items():
                 if value is not None:
@@ -917,6 +1147,8 @@ class DataManager:
             self._status = next_status
             self._start_time_s = 0
             self._proceed_time = 0
+            if next_status == 'run':
+                self._run_entered_at = time.perf_counter()
             return True
         else:
             return False
@@ -1073,6 +1305,7 @@ class DataManager:
                 'HuggingFace-Konto hochladen. Bitte die „Benutzer-ID“ prüfen '
                 'und erneut anmelden.'
             )
+            self._upload_blocked_reason_de = self._last_warning_message
             print(
                 f'[FEHLER] Upload REFUSED: repo namespace {namespace!r} is not '
                 f'owned by this rig\'s HuggingFace token (owns: {sorted(allowed)})',
@@ -1087,6 +1320,7 @@ class DataManager:
                     private,
                 )
             except Exception as e:
+                self._upload_blocked_reason_de = UPLOAD_NOT_STARTED_DE
                 print(
                     f'[WARNUNG] Upload konnte nicht eingereiht werden: {e}',
                     file=sys.stderr, flush=True,

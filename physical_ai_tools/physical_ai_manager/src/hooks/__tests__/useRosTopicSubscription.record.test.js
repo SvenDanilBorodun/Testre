@@ -27,7 +27,7 @@ import TaskPhase from '../../constants/taskPhases';
 import PageType from '../../constants/pageType';
 import realStore from '../../store/store';
 import { moveToPage } from '../../features/ui/uiSlice';
-import { recordIntent, recordSessionDismiss } from '../../features/tasks/taskSlice';
+import { recordIntent, recordSessionDismiss, setTaskStatus } from '../../features/tasks/taskSlice';
 import { setSession } from '../../features/auth/authSlice';
 import { signedOut } from '../../features/session/sessionActions';
 import { registerDataset } from '../../services/datasetsApi';
@@ -293,6 +293,36 @@ describe('/huggingface/status and the cloud registration', () => {
     progress_total: 4,
     progress_percentage: 25,
     ...overrides,
+  });
+
+  it('on the Aufnahme page the finish card speaks for its own upload — until it is dismissed', async () => {
+    realStore.dispatch(moveToPage(PageType.RECORD));
+    startSessionInRealStore();
+    const base = {
+      taskType: 'record', taskName: 'Würfel', robotType: 'omx_f', numEpisodes: 5, episodeTime: 20,
+      pushToHub: true, topicReceived: true,
+    };
+    realStore.dispatch(setTaskStatus({
+      ...base, running: true, phase: TaskPhase.SAVING, currentEpisodeNumber: 1,
+      receivedAt: 1, receivedWallMs: Date.now() - 10,
+    }));
+    realStore.dispatch(setTaskStatus({
+      ...base, running: false, phase: TaskPhase.READY, currentEpisodeNumber: 1,
+      receivedAt: 2, receivedWallMs: Date.now() - 5,
+    }));
+    expect(realStore.getState().tasks.recordSession.finish).toMatchObject({
+      state: 'uploading', expectedRepoId: 'schule-A/omx_f_Wuerfel',
+    });
+    const { hfCb } = await mount();
+    act(() => hfCb(hf({ repo_id: 'schule-A/omx_f_Wuerfel', status: 'Failed', message: 'Fehlgeschlagen.' })));
+    expect(toast.error).not.toHaveBeenCalled();
+    // another repo still toasts
+    act(() => hfCb(hf({ repo_id: 'schule-A/omx_f_anders', status: 'Failed', message: 'Anderes.' })));
+    expect(toast.error).toHaveBeenCalledWith('Anderes.');
+    // after „Neue Aufnahme" nothing on the page shows it: toast again
+    realStore.dispatch(recordSessionDismiss());
+    act(() => hfCb(hf({ repo_id: 'schule-A/omx_f_Wuerfel', status: 'Failed', message: 'Fehlgeschlagen.' })));
+    expect(toast.error).toHaveBeenCalledWith('Fehlgeschlagen.');
   });
 
   it('every upload status reaches the session tracker', async () => {

@@ -922,8 +922,10 @@ export function useRosTopicSubscription() {
           const hfState = store.getState();
           const finish = hfState.tasks?.recordSession?.finish;
           const sessionRepo = finish?.expectedRepoId || finish?.repoId;
+          // Only while the card is on screen: after „Neue Aufnahme" the upload
+          // is still tracked but nothing shows it, so the toast does.
           finishShowsIt = hfState.ui?.currentPage === PageType.RECORD
-            && !!repoId && repoId === sessionRepo;
+            && !finish?.dismissed && !!repoId && repoId === sessionRepo;
         }
 
         if (status === 'Failed') {

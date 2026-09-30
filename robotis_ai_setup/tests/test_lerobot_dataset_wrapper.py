@@ -61,6 +61,16 @@ class _FakeLeRobotDataset:
     def add_frame(self, frame):  # upstream v0.5.1: single positional dict
         self.added_frames.append(frame)
 
+    def clear_episode_buffer(self, delete_images=True):
+        # Upstream v0.5.1 (public): cancels the streaming encoder at once, then
+        # replaces the buffer; with delete_images it reads the buffer's
+        # episode_index, so a None buffer raises there.
+        calls = self.__dict__.setdefault('clear_calls', [])
+        calls.append(delete_images)
+        if delete_images and self.writer.episode_buffer is None:
+            raise TypeError("'NoneType' object is not subscriptable")
+        self.writer.episode_buffer = {'size': 0, 'task': [], 'episode_index': 0}
+
     @classmethod
     def create(cls, *args, **kwargs):
         obj = cls.__new__(cls)
@@ -176,6 +186,29 @@ class LeRobotDatasetWrapperBridgeTest(unittest.TestCase):
     def test_start_image_writer_noop_without_writer(self):
         w = self._bare_wrapper(with_writer=False)
         w.start_image_writer(num_processes=1, num_threads=1)  # must not raise
+
+    # ---- discard_episode: LeRobot's own discard (Aufnahme 2.0 round 3) ----
+
+    def test_discard_episode_calls_the_public_clear_episode_buffer(self):
+        w = self._bare_wrapper()
+        w.writer.episode_buffer = {'size': 12, 'task': [], 'episode_index': 3}
+        w.discard_episode()
+        self.assertEqual(w.clear_calls, [True])
+        self.assertEqual(w.writer.episode_buffer['size'], 0)
+
+    def test_discard_episode_after_the_buffer_was_dropped(self):
+        # DataManager drops the buffer at discard time; the cancel follows a
+        # tick later. No buffer means no episode index to clean images for.
+        w = self._bare_wrapper()
+        w.writer.episode_buffer = None
+        w.discard_episode()                       # must not raise
+        self.assertEqual(w.clear_calls, [False])
+        self.assertEqual(w.writer.episode_buffer['size'], 0)
+
+    def test_discard_episode_without_a_writer_is_a_noop(self):
+        w = self._bare_wrapper(with_writer=False)
+        w.discard_episode()                       # read-only dataset: nothing to do
+        self.assertNotIn('clear_calls', w.__dict__)
 
     # ---- no-op shims used by the data_manager state machine ----
 

@@ -189,6 +189,25 @@ class LeRobotDatasetWrapper(LeRobotDataset):
             except Exception:  # noqa: BLE001 — discard must never raise
                 pass
 
+    def discard_episode(self) -> None:
+        """Discard the in-flight take the way LeRobot's own record loop does
+        (scripts/lerobot_record.py, between takes): the PUBLIC
+        clear_episode_buffer() cancels the streaming encoder immediately and
+        leaves a fresh, empty buffer.
+
+        DataManager calls this in the record tick right after a discard (a reset
+        or discard tick, no frame recorded), so the cancel's wait for the encoder
+        threads (~0.9 s: they poll their queue with a 1 s timeout) never falls
+        into the next take — before, start_episode() cancelled the stale encoder
+        lazily on that take's first frame. No-op on a read-only dataset.
+        """
+        writer = getattr(self, 'writer', None)
+        if writer is None:
+            return
+        # delete_images reads the buffer's episode_index; DataManager may already
+        # have dropped the buffer (streaming video leaves no temp images anyway).
+        self.clear_episode_buffer(delete_images=writer.episode_buffer is not None)
+
     # ---------- Multi-task / batched-encode no-ops ----------
     # EduBotics v2.5.0 is single-task per recording session (Modal Cloud
     # handles multi-task model training). The wrapper's pre-v2.5.0 multi-task

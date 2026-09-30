@@ -22,6 +22,7 @@ import { datasetRepoId } from '../../../utils/datasetName';
 import { isFinishTracking } from '../../../features/tasks/recordSession';
 import RECORD_COPY from './recordCopy';
 import { diskProblem, sourcesWith, stalledSourceProblem } from './problems';
+import { UPLOAD_START_GRACE_MS } from './finishModel';
 
 export const VIEW = Object.freeze({
   OFFLINE: 'OFFLINE',
@@ -230,19 +231,34 @@ function dotsFor(view, { episode, session }) {
   return { label: C.dots.label, items, more, color };
 }
 
+// Is this finish an upload the page can still SEE running? Only then may it
+// hold Start back: an upload whose state became unknown (the link dropped, a
+// terminal HF status was missed), that never began, or that already finished
+// (registering) must never keep Start off until a reload (V2-R2-2).
+function uploadStillRunning(finish, nowWallMs) {
+  if (!finish || finish.state !== 'uploading' || finish.linkLost) return false;
+  const neverBegan = !finish.repoId && !(finish.uploadPct > 0)
+    && Number.isFinite(finish.endedAt) && Number.isFinite(nowWallMs)
+    && nowWallMs - finish.endedAt >= UPLOAD_START_GRACE_MS;
+  return !neverBegan;
+}
+
 /**
  * Why Start is refused, first match (Q5): the disk, a stalled source (camera →
- * follower → leader), or the same dataset still uploading. Validation is not a
- * block — it runs on the click.
+ * follower → leader), or the same dataset still visibly uploading. Validation
+ * is not a block — it runs on the click.
  * @returns {null | {kind: 'disk'|'source'|'uploading', problem}}
  */
-export function deriveStartBlock({ disk = null, verdicts = null, bridge = null, activation = null, session = null, form = {}, robotType = '' } = {}) {
+export function deriveStartBlock({
+  disk = null, verdicts = null, bridge = null, activation = null, session = null, form = {}, robotType = '',
+  nowWallMs = Date.now(),
+} = {}) {
   const diskP = diskProblem(disk, { running: false });
   if (diskP) return { kind: 'disk', problem: diskP };
   const stalled = sourcesWith(verdicts, 'stalled')[0];
   if (stalled) return { kind: 'source', problem: stalledSourceProblem(stalled, { bridge, activation }) };
   const finish = session?.finish;
-  if (isFinishTracking(finish)) {
+  if (isFinishTracking(finish) && uploadStillRunning(finish, nowWallMs)) {
     const uploadingRepo = finish.expectedRepoId || finish.repoId;
     if (uploadingRepo && uploadingRepo === datasetRepoId(form.userId, robotType, form.taskName)) {
       return { kind: 'uploading', problem: { kind: 'bad', textDe: C.problem.startUploading } };
@@ -303,7 +319,7 @@ export function deriveRecordView({
 
   const connected = heartbeat === 'connected';
   const startBlock = deriveStartBlock({
-    disk, verdicts, bridge, activation, session, form, robotType: status.robotType,
+    disk, verdicts, bridge, activation, session, form, robotType: status.robotType, nowWallMs,
   });
   const segments = segmentsFor(view, { status, plan, episode, session });
   const idleText = view === VIEW.FINISHING ? C.track.allDone : C.track.idle;

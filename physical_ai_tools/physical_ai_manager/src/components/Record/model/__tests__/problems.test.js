@@ -127,6 +127,19 @@ describe('deriveProblems — the order', () => {
       .toEqual([]);
   });
 
+  it('a start block the other rules do not cover is shown too — the reason Start is off (V2-R2-2)', () => {
+    const startBlock = { kind: 'uploading', problem: { kind: 'bad', textDe: P.startUploading } };
+    expect(deriveProblems({ view: 'READY', startBlock, nowWallMs: NOW })).toEqual([
+      { kind: 'bad', textDe: P.startUploading },
+    ]);
+    // only where Start is offered
+    expect(deriveProblems({ view: 'RECORDING', running: true, startBlock, nowWallMs: NOW })).toEqual([]);
+    // disk and source blocks already have their own rows — never twice
+    const disk = { verdict: 'low', free: 2e9, startFloor: 3e9, criticalFloor: 1e9 };
+    const diskBlock = { kind: 'disk', problem: diskProblem(disk) };
+    expect(deriveProblems({ view: 'READY', startBlock: diskBlock, disk, nowWallMs: NOW })).toHaveLength(1);
+  });
+
   it('without facts there is no banner', () => {
     expect(firstProblem({ view: 'READY', nowWallMs: NOW })).toBeNull();
     expect(firstProblem(everything).textDe).toBe('Harter Fehler.');

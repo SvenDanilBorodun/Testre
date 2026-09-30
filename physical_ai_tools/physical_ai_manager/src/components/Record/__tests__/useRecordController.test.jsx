@@ -14,7 +14,9 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 
-import tasksReducer, { setHeartbeatStatus, setTaskInfo, setTaskStatus } from '../../../features/tasks/taskSlice';
+import tasksReducer, {
+  recordUploadStatus, setHeartbeatStatus, setTaskInfo, setTaskStatus,
+} from '../../../features/tasks/taskSlice';
 import uiReducer, { moveToPage } from '../../../features/ui/uiSlice';
 import rosReducer from '../../../features/ros/rosSlice';
 import trainingReducer from '../../../features/training/trainingSlice';
@@ -440,6 +442,30 @@ describe('form, mute and the finish actions', () => {
     act(() => result.current.dismissFinish());
     expect(store.getState().tasks.recordSession.finish.dismissed).toBe(true);
     expect(store.getState().tasks.recordNotice).toBeNull();
+  });
+
+  it('„Neue Aufnahme" with the same name while it still uploads: Start is off AND the banner says why', async () => {
+    const store = makeStore();
+    const { result } = mount(store);
+    act(() => { pageAct(result, 'start'); });
+    await waitFor(() => expect(result.current.busy).toBe(false));
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20 })); });
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.SAVING, totalTime: 0, currentEpisodeNumber: 1 })); });
+    act(() => {
+      store.dispatch(recordTick({ phase: TaskPhase.READY, running: false, currentEpisodeNumber: 1, receivedWallMs: Date.now() }));
+    });
+    const repoId = 'schule-A/omx_f_Wuerfel-in-die-Schale';
+    act(() => { store.dispatch(recordUploadStatus({ repoId, status: 'Uploading', percentage: 30, message: '', at: Date.now() + 1 })); });
+    act(() => result.current.dismissFinish());
+    expect(result.current.view).toBe(VIEW.READY);
+    expect(result.current.model.buttons[0].disabled).toBe(true);
+    expect(result.current.problem).toEqual({ kind: 'bad', textDe: result.current.copy.problem.startUploading });
+    // the link drops while it uploads: the state is unknown, Start is free again
+    act(() => { store.dispatch(setHeartbeatStatus('timeout')); });
+    act(() => { store.dispatch(setHeartbeatStatus('connected')); });
+    expect(store.getState().tasks.recordSession.finish.linkLost).toBe(true);
+    expect(result.current.model.startBlock).toBeNull();
+    expect(result.current.model.buttons[0].disabled).toBe(false);
   });
 
   it('a recordable=false manifest leaves the page', () => {

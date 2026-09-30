@@ -72,6 +72,8 @@ export function sourcesWith(verdicts, verdict) {
  *   3. the link lost while running
  *   4. disk low / critical
  *   5. stalled sources
+ *   5b. any other reason Start is refused (the same dataset still uploading) —
+ *       where Start is offered; disk and source blocks are rows 4 and 5 already
  *   6. a record [WARNUNG] notice, ≤ 12 s old
  *   7. slow sources
  *   8. a transient info note
@@ -89,6 +91,7 @@ export function deriveProblems({
   bridge = null,
   activation = null,
   fps = 0,
+  startBlock = null,
   nowWallMs = Date.now(),
 } = {}) {
   const out = [];
@@ -112,6 +115,10 @@ export function deriveProblems({
   if (diskP) out.push(diskP);
   for (const s of sourcesWith(verdicts, 'stalled')) {
     out.push(stalledSourceProblem(s, { bridge, activation }));
+  }
+  // Start is off for a reason the rows above do not name (V2-R2-2): say it.
+  if (view === 'READY' && startBlock?.problem && startBlock.kind !== 'disk' && startBlock.kind !== 'source') {
+    out.push(startBlock.problem);
   }
   if (notice?.kind === 'warn' && notice.text && Number.isFinite(notice.at)
       && nowWallMs - notice.at <= WARN_NOTICE_MS && !cardShows.includes(notice.text)) {

@@ -285,6 +285,22 @@ describe('start blocks (Q5)', () => {
     expect(deriveStartBlock({ verdicts: [verdict('camera', 'scene', 'slow')], disk: { verdict: 'unknown' } })).toBeNull();
   });
 
+  it('an upload whose state is unknown, never began, or already finished does not block (V2-R2-2)', () => {
+    const tracked = (patch) => ({
+      ...EMPTY_RECORD_SESSION,
+      finish: { ...EMPTY_FINISH, state: 'uploading', expectedRepoId: 'schule-A/omx_f_Wuerfel', dismissed: true, endedAt: NOW - 1000, ...patch },
+    });
+    const block = (patch, nowWallMs = NOW) => deriveStartBlock({
+      session: tracked(patch), form: FORM, robotType: 'omx_f', nowWallMs,
+    });
+    expect(block({ uploadPct: 10, repoId: 'schule-A/omx_f_Wuerfel' })).toMatchObject({ kind: 'uploading' });
+    expect(block({ linkLost: true })).toBeNull();
+    expect(block({ state: 'registering', repoId: 'schule-A/omx_f_Wuerfel' })).toBeNull();
+    // no status 15 s after the end: it never began, nothing to wait for
+    expect(block({}, NOW - 1000 + 14999)).toMatchObject({ kind: 'uploading' });
+    expect(block({}, NOW - 1000 + 15000)).toBeNull();
+  });
+
   it('the same dataset still uploading blocks; another does not', () => {
     const session = { ...EMPTY_RECORD_SESSION, finish: { ...EMPTY_FINISH, state: 'uploading', expectedRepoId: 'schule-A/omx_f_Wuerfel', dismissed: true } };
     const b = deriveStartBlock({ session, form: FORM, robotType: 'omx_f' });

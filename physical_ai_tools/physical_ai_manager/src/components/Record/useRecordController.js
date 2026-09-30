@@ -258,8 +258,10 @@ export default function useRecordController({ isActive = true } = {}) {
     bridge,
     activation,
     fps: expectedHz,
+    startBlock: model.startBlock,
     nowWallMs: now.wall,
-  }), [view, running, heartbeat, notice, transient, session, disk, verdicts, bridge, activation, expectedHz, now.wall]);
+  }), [view, running, heartbeat, notice, transient, session, disk, verdicts, bridge, activation, expectedHz,
+    model.startBlock, now.wall]);
 
   const invalid = transient && transient.field && Date.now() < transient.until
     ? { field: transient.field, messageDe: transient.textDe }

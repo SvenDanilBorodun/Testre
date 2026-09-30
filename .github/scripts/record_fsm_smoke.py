@@ -8,7 +8,10 @@ its streaming h264 encoder (PyAV). No network: push_to_hub is False.
 
 Each scenario drives DataManager.record() in real time with synthetic frames
 and asserts what ends up ON DISK, which is the one thing the stub-based unit
-tests cannot see. Exit code 0 = all scenarios passed.
+tests cannot see: FINISH in the first warm-up, FINISH < 1 s into a run (Q3),
+MOVE_TO_NEXT skipping the warm-up, „Verwerfen und beenden“ (Q4),
+„Wiederholen“ in the first episode of a new dataset, one normal episode.
+Exit code 0 = all scenarios passed.
 
 Robust on a slow or noisy runner by construction:
   * ticks are paced by DEADLINE on a monotonic 30 Hz schedule (a slow record()

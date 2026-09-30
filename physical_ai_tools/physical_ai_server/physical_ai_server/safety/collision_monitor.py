@@ -1028,20 +1028,28 @@ class CollisionMonitorMixin:
 
     def _end_interrupted_recording(self):
         """F1: finish the session a FORCED recovery interrupted and publish its
-        terminating READY status.
+        record status, then its terminating READY status.
 
         The DataManager finalizes and hands the upload off per its own guards
         (end_session_now drives its finish branch synchronously; the record timer
-        stays stopped and on_recording stays False). The READY carries the saved
-        count, and a `[WARNUNG]` iff the upload was blocked — the same invariant as
-        the record timer's terminating tick. Returns True when that status was
-        published; False lets the caller publish the plain cleared READY."""
+        stays stopped and on_recording stays False). As on the record timer's
+        last tick, the record status (SAVING) goes out FIRST and carries any
+        warning the finish raised (a frame loss on save, a missing video file);
+        the READY after it carries the saved count, and a `[WARNUNG]` iff the
+        upload was blocked. Returns True when the READY was published; False lets
+        the caller publish the plain cleared READY."""
         data_manager = getattr(self, 'data_manager', None)
         end = getattr(data_manager, 'end_session_now', None)
         if end is None:
             return False
         try:
             end()
+            record_status = data_manager.get_current_record_status()
+            self._stamp_identity(record_status)
+            self._collision_status_pub.publish(record_status)
+            # A second read, not a mutation of the one just published: the
+            # warning above was cleared on read, and a publisher that keeps a
+            # reference (a test double) must see the SAVING tick as it went out.
             status = data_manager.get_current_record_status()
             status.phase = TaskStatus.READY
             status.total_time = 0

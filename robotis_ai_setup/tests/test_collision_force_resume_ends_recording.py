@@ -91,6 +91,38 @@ class ForceResumeEndsRecordingTest(unittest.TestCase):
         self.assertEqual(host.pub_for('/task/status').published[-1].error,
                          '[WARNUNG] Upload abgelehnt: …')
 
+    def test_the_record_status_with_its_warning_goes_out_before_the_ready(self):
+        # Verifier V1-3 (owner: send them first). A warning the finishing session
+        # raised (the frame-loss-on-save sentence, a missing video file) rides a
+        # SAVING tick published BEFORE the terminating READY, exactly as the
+        # record timer does; the READY then carries only a blocked upload.
+        h = self.h
+        host = self._host()
+        warning = ('[WARNUNG] Episode 3: Kamera-Bilder gingen beim Speichern '
+                   'verloren, die Episode wurde verworfen.')
+        issued = []
+
+        def _fresh_status():
+            st = h._TaskStatus()
+            st.phase = 4                       # SAVING — the DataManager's 'finish'
+            st.current_episode_number = 2
+            st.total_time = 0
+            st.proceed_time = 0
+            st.error = warning if not issued else ''   # clear-on-read
+            issued.append(st)
+            return st
+
+        host.data_manager.get_current_record_status = _fresh_status
+        before = len(host.pub_for('/task/status').published)
+        host.force_resume_teleop()
+        host.fire_pending_timers()
+        tail = host.pub_for('/task/status').published[before:]
+        self.assertEqual([s.phase for s in tail[-2:]], [4, h._TaskStatus.READY])
+        self.assertEqual(tail[-2].error, warning)
+        self.assertEqual(tail[-1].error, '')
+        self.assertEqual(tail[-1].current_episode_number, 2)
+        self.assertEqual(host.calls, ['re_record', 'end'])
+
     def test_plain_resume_still_rearms_the_same_session(self):
         h = self.h
         host = self._host()

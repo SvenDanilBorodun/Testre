@@ -771,6 +771,21 @@ class CollisionPathTest(_FsmTestCase):
         self.assertEqual(dm._lerobot_dataset.committed, 1)
         self.assertEqual(len(up), 1)
 
+    def test_forced_recovery_keeps_the_frame_loss_warning_for_the_status(self):
+        # Verifier V1-3: end_session_now leaves the warning for the ONE record
+        # status the collision monitor publishes before its READY.
+        dm, up = make()
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        dm._lerobot_dataset.drop_on_save = True
+        self.assertTrue(dm.end_session_now())
+        st = dm.get_current_record_status()
+        self.assertEqual(st.phase, _TaskStatus.SAVING)
+        self.assertTrue(st.error.startswith(
+            '[WARNUNG] Episode 1: Kamera-Bilder gingen beim Speichern verloren'))
+        self.assertEqual(dm._record_episode_count, 0)
+        self.assertEqual(up, [])
+
     def test_end_session_now_without_a_dataset(self):
         dm, up = make()
         dm._lerobot_dataset = None

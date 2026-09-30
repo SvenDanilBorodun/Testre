@@ -57,6 +57,7 @@ import { isCapabilityVisible, robotGateDecision } from './utils/navGating';
 import { studentAuthGateDecision } from './utils/authGate';
 import { usePiMode } from './utils/piMode';
 import Icon from './components/icons/Icon';
+import { releasePointerFocus } from './components/Record/ActionBar';
 
 function StudentApp() {
   const dispatch = useDispatch();
@@ -343,6 +344,17 @@ function StudentApp() {
     });
   };
 
+  // A nav button clicked with the mouse gives the focus back to the page: on
+  // the Aufnahme page Space means „Aufnahme starten", and a focused „Aufnahme"
+  // button would take the Space instead (the browser presses the focused
+  // button). A keyboard click (Enter/Space, `detail === 0`) keeps the focus, so
+  // Tab navigation and its visible focus ring are unchanged (Aufnahme 2.0
+  // review, V2-R2-1).
+  const navClick = (n) => (event) => {
+    releasePointerFocus(event);
+    n.onClick();
+  };
+
   const handleHomePageNavigation = () => {
     isFirstLoad.current = false;
     dispatch(moveToPage(PageType.HOME));
@@ -496,7 +508,7 @@ function StudentApp() {
                   />
                 )}
                 <button
-                  onClick={n.onClick}
+                  onClick={navClick(n)}
                   title={n.label}
                   className={clsx(
                     'group w-12 md:w-[68px] py-2.5 md:py-3 rounded-[var(--radius)] flex flex-col items-center gap-1 md:gap-1.5 transition',
@@ -706,7 +718,7 @@ function StudentApp() {
             return (
               <button
                 key={n.key}
-                onClick={n.onClick}
+                onClick={navClick(n)}
                 className={clsx(
                   'flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 transition',
                   active

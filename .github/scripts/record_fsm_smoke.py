@@ -244,6 +244,32 @@ def discard_then_finish(attempt):
         f'count={s.dm._record_episode_count} disk={d}'
 
 
+def redo_then_keep(attempt):
+    # „Wiederholen“ in the FIRST episode of a new dataset, then the redone run is
+    # saved by MOVE_TO_NEXT: only the frames fed AFTER the RERECORD may be on
+    # disk. (A fresh LeRobotDataset is falsy — len() counts saved frames — and a
+    # truthiness test once kept the discarded frames in the writer's buffer.)
+    s = Session(ROOT, f'smoke redo keep {attempt}', warmup=0, episode=10, reset=0, n=3)
+    s.until('run')
+    s.run_while(lambda: s.fed < 30)
+    discarded = s.fed
+    accepted = s.dm.rerecord_from_command()
+    s.run_while(lambda: s.dm.get_status() != 'run' or s.fed - discarded < 45)
+    age = s.run_age()
+    if s.dm.get_status() != 'run' or age < EARLY_SAVE_MIN_S:
+        return False, False, f'status={s.dm.get_status()} run_age={age:.3f}s'
+    kept = s.fed - discarded
+    outcome = s.dm.record_early_save()
+    s.run_while(lambda: s.dm.get_status() != 'reset', limit_s=10.0)
+    ok = s.finish()
+    d = s.on_disk()
+    return True, (accepted and outcome == 'save' and ok and s.dm._record_episode_count == 1
+                  and d['episodes'] == 1 and d['frames'] == kept
+                  and len(d['mp4_sizes']) == 2 and min(d['mp4_sizes']) > 0), \
+        f'accepted={accepted} outcome={outcome} discarded={discarded} kept={kept} ' \
+        f'completed={ok} count={s.dm._record_episode_count} disk={d}'
+
+
 def normal_episode(attempt):
     # One ordinary episode to completion: finalize writes a readable dataset
     # holding every fed frame.
@@ -263,6 +289,7 @@ def main():
     scenario('finish_under_1s', finish_under_1s)
     scenario('skip_then_keep', skip_then_keep)
     scenario('discard_then_finish', discard_then_finish)
+    scenario('redo_then_keep', redo_then_keep)
     scenario('normal_episode', normal_episode)
     print('SMOKE RESULT:', 'PASS' if not FAILURES else f'FAIL {FAILURES}', flush=True)
     return 0 if not FAILURES else 1

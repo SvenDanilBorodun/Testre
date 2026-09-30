@@ -886,8 +886,9 @@ jobs:
           echo "OK: ${SERVER_IMAGE} was built from ${GOT_SHA} (== this run's sha)"
       - name: Record-FSM smoke test with the real LeRobot 0.5.1 writer (Aufnahme 2.0)
         # The recorder's state machine (FINISH in the first warm-up, FINISH < 1 s
-        # into a run, skipping a warm-up, „Verwerfen und beenden“, one normal
-        # episode) driven through the SHIPPED DataManager + LeRobot writer +
+        # into a run, skipping a warm-up, „Verwerfen und beenden“, „Wiederholen“
+        # in the first episode, one normal episode) driven through the SHIPPED
+        # DataManager + LeRobot writer +
         # streaming h264 encoder, asserting what lands ON DISK — the one thing
         # the stub-based unit tests cannot see. No network (push_to_hub off),
         # datasets in a temp dir inside the throwaway container. Jetson is

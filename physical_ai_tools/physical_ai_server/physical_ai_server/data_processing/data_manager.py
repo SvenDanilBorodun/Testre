@@ -212,6 +212,9 @@ class DataManager:
         #   _upload_blocked_reason_de  German reason the finished dataset was NOT
         #                          uploaded; the node puts it on the terminating tick
         #   _last_stale_warn_mono  throttle for the recording stale-camera warning
+        #   _discard_pending       a discarded take's streaming encoder still has
+        #                          to be cancelled (next record tick, see
+        #                          _cancel_discarded_take)
         self._run_entered_at = None
         self._wire_rerecord_at = None
         self._finish_count_pending = False
@@ -220,6 +223,7 @@ class DataManager:
         self._disk_stop_requested = False
         self._upload_blocked_reason_de = ''
         self._last_stale_warn_mono = 0.0
+        self._discard_pending = False
         self._cpu_checker = CPUChecker()
         self.data_converter = DataConverter()
         # Propagate the task fps into the action-duration setter so
@@ -320,6 +324,15 @@ class DataManager:
             images,
             state,
             action):
+
+        # A take discarded since the last tick (Wiederholen, a collision, the
+        # frame-drop re-record, a dropped FINISH run): cancel its streaming
+        # encoder NOW, in this reset/discard tick, before any frame of the next
+        # take — never lazily inside that take's first frame. Before the start
+        # stamp, so a reset timer does not count the cancel.
+        if getattr(self, '_discard_pending', False):
+            self._discard_pending = False
+            self._cancel_discarded_take()
 
         if self._start_time_s == 0:
             self._start_time_s = time.perf_counter()
@@ -1130,7 +1143,45 @@ class DataManager:
         else:
             raise ValueError(f'Unsupported message type: {type(msg_data)}')
 
+    def _cancel_discarded_take(self) -> None:
+        """Cancel a discarded take's streaming encoder the way LeRobot's own
+        record loop does: through the public clear_episode_buffer() (the
+        wrapper's discard_episode), which cancels the encoder at once and leaves
+        a fresh buffer.
+
+        Why not lazily: DataManager used to only drop the buffer, so LeRobot's
+        start_episode() cancelled the stale encoder on the FIRST FRAME of the
+        next take. That cancel waits for the encoder threads' 1 s queue timeout
+        (measured ~0.9 s), and it landed inside the recording: the take's first
+        two frames were ~0.9 s apart in real time but 1/30 s apart in the
+        dataset.
+
+        Why in the record tick and not where the discard happens: RERECORD
+        arrives on /task/command and a collision trips in the gpio callback,
+        and both share the node's default MutuallyExclusiveCallbackGroup with
+        the collision detector and its relax-in-place timer — ~0.9 s there
+        would delay the relax after a trip. The tick right after the discard is
+        a reset (or discard) tick that records no frame. Never raises: at worst
+        the next take's start_episode() cancels lazily, as before.
+        """
+        ds = getattr(self, '_lerobot_dataset', None)
+        discard = getattr(ds, 'discard_episode', None) if ds is not None else None
+        if discard is None:
+            return
+        try:
+            discard()
+        except Exception as e:  # noqa: BLE001 — a failed cancel must not stop the tick
+            print(f'[WARNUNG] Die verworfene Episode konnte nicht sofort '
+                  f'abgebrochen werden, die nächste holt das nach: {e}',
+                  file=sys.stderr, flush=True)
+
     def _episode_reset(self):
+        # An unsaved take is being thrown away: its streaming encoder is
+        # cancelled at the top of the next record tick (_cancel_discarded_take).
+        # After a save the buffer is fresh and the encoder already finished, so
+        # the save path is untouched.
+        if self._buffer_has_frames():
+            self._discard_pending = True
         # `is not None`, never truthiness: LeRobotDataset.__len__ is the number
         # of SAVED frames, so a fresh dataset is falsy until its first episode
         # is saved — and every discard in that first episode (Wiederholen, a

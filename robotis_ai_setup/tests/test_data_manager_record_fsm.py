@@ -190,6 +190,8 @@ class _FakeDataset:
         self.committed = 0
         self.committed_sizes = []
         self.cancelled = 0
+        self.discarded = 0
+        self.events = []          # (event, tick number) in call order
         self.finalized = False
         self.finalize_raises = False
         self.drop_on_save = drop_on_save
@@ -203,6 +205,7 @@ class _FakeDataset:
         self._buf = value
 
     def add_frame_without_write_image(self, frame, task):
+        self.events.append(('add', _TICK_NO[0]))
         if self._buf is None:
             self._buf = {'size': 0, 'task': [], 'timestamp': []}
         self._buf['size'] += 1
@@ -213,6 +216,7 @@ class _FakeDataset:
             raise ValueError(
                 'You must add one or several frames with `add_frame` before '
                 'calling `add_episode`.')
+        self.events.append(('save', _TICK_NO[0]))
         self.committed += 1
         self.committed_sizes.append(self._buf['size'])
         self._buf = {'size': 0, 'task': [], 'timestamp': []}
@@ -228,7 +232,16 @@ class _FakeDataset:
         return 3 if self.drop_on_save else 0
 
     def cancel_streaming_episode(self):
+        self.events.append(('cancel', _TICK_NO[0]))
         self.cancelled += 1
+
+    def discard_episode(self):
+        # The wrapper's discard: LeRobot's clear_episode_buffer() — cancels the
+        # streaming encoder at once (the slow part, ~0.9 s on the real writer)
+        # and leaves a fresh, empty buffer.
+        self.events.append(('discard', _TICK_NO[0]))
+        self.discarded += 1
+        self._buf = {'size': 0, 'task': [], 'timestamp': []}
 
     def check_video_encoding_completed(self):
         return True
@@ -281,8 +294,12 @@ def make(drop=False, upload_raises=False, **kw):
     return dm, uploads
 
 
+_TICK_NO = [0]
+
+
 def tick(dm, dt=1 / 30):
     _Clock.t += dt
+    _TICK_NO[0] += 1
     return dm.record(images={}, state=[], action=[])
 
 
@@ -920,6 +937,133 @@ _MATRIX_COMMANDS = {
     'F1_END': lambda dm: dm.end_session_now(),
     'LOW_DISK': lambda dm: dm.finish_for_low_disk('Speicher fast voll.'),
 }
+
+
+class DiscardCancelsTheEncoderTest(_FsmTestCase):
+    """Round 3 (owner: do it the way LeRobot does). Discarding an unsaved take
+    must cancel LeRobot's streaming encoder through its public
+    clear_episode_buffer() (the wrapper's discard_episode) BEFORE the next
+    take's first frame — never lazily inside that frame, where the ~0.9 s
+    cancel left a hole the dataset's timestamps do not know about.
+
+    The cancel runs in the record tick right after the discard (the reset or
+    discard tick, where no frame is recorded), never synchronously in the
+    command or collision callback: those share the node's default callback
+    group with the collision detector and its relax-in-place timer.
+    """
+
+    def _events(self, dm, kind):
+        return [t for e, t in dm._lerobot_dataset.events if e == kind]
+
+    def _assert_cancel_before_the_new_take(self, dm, discard_tick):
+        discards = self._events(dm, 'discard')
+        self.assertEqual(len(discards), 1)
+        adds_after = [t for t in self._events(dm, 'add') if t > discard_tick]
+        self.assertTrue(adds_after, 'the new take recorded no frame')
+        # Strictly earlier tick: the slow cancel shares no tick with a frame.
+        self.assertLess(discards[0], adds_after[0])
+        return discards[0]
+
+    def _mid_run(self, **kw):
+        dm, up = make(**kw)
+        run_until(dm, 'run')
+        ticks(dm, 40)
+        return dm, up
+
+    def test_wire_rerecord_cancels_in_the_next_tick_not_in_the_command(self):
+        for reset in (0, 2):
+            with self.subTest(reset=reset):
+                dm, _ = self._mid_run(reset=reset)
+                self.assertTrue(dm.rerecord_from_command())
+                self.assertEqual(dm._lerobot_dataset.discarded, 0)   # not in the callback
+                at = _TICK_NO[0]
+                run_until(dm, 'run')
+                ticks(dm, 3)
+                cancel_tick = self._assert_cancel_before_the_new_take(dm, at)
+                self.assertEqual(cancel_tick, at + 1)                # the very next tick
+
+    def test_collision_discard_never_blocks_the_collision_callback(self):
+        dm, _ = self._mid_run(reset=0)
+        dm.re_record()                                    # the collision trip
+        self.assertEqual(dm._lerobot_dataset.discarded, 0)
+        at = _TICK_NO[0]
+        run_until(dm, 'run')                              # the resumed timer
+        ticks(dm, 3)
+        self.assertEqual(self._assert_cancel_before_the_new_take(dm, at), at + 1)
+
+    def test_frame_drop_rerecord_cancels_in_the_save_tick(self):
+        dm, _ = self._mid_run(drop=True, reset=0)
+        self.assertEqual(dm.record_early_save(), 'save')
+        tick(dm)                                          # save() sees the drop
+        drop_tick = _TICK_NO[0]
+        self.assertEqual(self._events(dm, 'cancel'), [drop_tick])
+        dm._lerobot_dataset.drop_on_save = False
+        run_until(dm, 'run')
+        ticks(dm, 3)
+        self._assert_cancel_before_the_new_take(dm, drop_tick - 1)
+
+    def test_a_finish_that_drops_its_run_cancels_in_the_finish_tick(self):
+        dm, up = make(warmup=0)
+        run_until(dm, 'run')
+        ticks(dm, 10)                                     # < EARLY_SAVE_MIN_S
+        dm.record_finish()
+        tick(dm)
+        self.assertEqual(self._events(dm, 'cancel'), [_TICK_NO[0]])
+        self.assertIn(True, ticks(dm, 3))
+        self.assertEqual(up, [])
+
+    def test_move_to_next_right_after_a_discard_still_cancels_before_the_frame(self):
+        # Within the same tick window: RERECORD, then „Jetzt starten“ skips the
+        # reset. The cancel runs first in that tick, the frame after it.
+        dm, _ = self._mid_run(reset=5)
+        dm.rerecord_from_command()
+        self.assertEqual(dm.record_early_save(), 'run')
+        tick(dm)
+        kinds = [e for e, t in dm._lerobot_dataset.events if t == _TICK_NO[0]]
+        self.assertEqual(kinds, ['discard', 'add'])
+
+    def test_discard_then_finish_cancels_and_keeps_nothing(self):
+        dm, up = self._mid_run(reset=0)
+        dm.rerecord_from_command()
+        dm.record_finish()
+        self.assertIn(True, ticks(dm, 4))
+        self.assertEqual(dm._lerobot_dataset.discarded, 1)
+        self.assertEqual(dm._lerobot_dataset.committed, 0)
+        self.assertEqual(up, [])
+
+    def test_the_save_path_never_discards(self):
+        dm, _ = make(n=2, reset=0)
+        for _ in range(2000):
+            if tick(dm):
+                break
+        self.assertEqual(dm._lerobot_dataset.committed, 2)
+        self.assertEqual(dm._lerobot_dataset.discarded, 0)
+        self.assertEqual(dm._lerobot_dataset.cancelled, 0)
+
+    def test_nothing_to_cancel_after_a_save_or_in_the_warmup(self):
+        dm, _ = make(n=3)
+        run_until(dm, 'save')
+        tick(dm)                                          # committed + latched
+        dm.re_record()                                    # Q7: count, rewind
+        ticks(dm, 3)
+        self.assertEqual(dm._lerobot_dataset.discarded, 0)
+        dm, _ = make()
+        tick(dm)
+        dm.rerecord_from_command()                        # in the warm-up
+        ticks(dm, 3)
+        self.assertEqual(dm._lerobot_dataset.discarded, 0)
+
+    def test_a_failing_discard_never_breaks_the_tick(self):
+        dm, _ = self._mid_run(reset=0)
+
+        def _boom():
+            raise RuntimeError('encoder cancel failed')
+
+        dm._lerobot_dataset.discard_episode = _boom
+        dm.rerecord_from_command()
+        run_until(dm, 'run')
+        ticks(dm, 3)                                      # must not raise
+        self.assertEqual(dm.get_status(), 'run')
 
 
 class CommandMatrixTest(_FsmTestCase):

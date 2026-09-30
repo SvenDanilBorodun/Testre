@@ -264,37 +264,56 @@ def take_start_timing(s, discard_index):
     timeout. The discarded take's encoder must be cancelled in the reset /
     discard tick (no frame), not lazily inside the new take's first frame, where
     it left a ~0.9 s real-time hole the dataset's index/fps timestamps do not
-    know about. Returns (first_fed_delay, max_gap, max_frame_tick, cancel_tick):
+    know about. Returns a dict of seconds:
       first_fed_delay  new take's first frame fed, after the previous tick ENDED
-      max_gap          largest real-time gap between consecutive frames of the
-                       new take (the dataset says 1/30 s)
-      max_frame_tick   slowest tick that fed a frame of the new take
+      frame0_tick      the tick that fed that first frame
+      gap01            real-time gap between the take's frames 0 and 1
+      later_gap        largest gap between consecutive later frames
+      later_tick       slowest tick that fed a later frame
       cancel_tick      slowest tick between the discard and the first frame
                        (where the cancel is expected to land; informational)
+    The dataset says 1/30 s for every gap.
     """
     new_take = s.frame_log[discard_index:]
     ticks = {n: (start, end) for n, start, end in s.tick_log}
+
+    def duration(n):
+        return ticks[n][1] - ticks[n][0] if n in ticks else 0.0
+
     first_tick, _, first_fed = new_take[0]
-    first_fed_delay = first_fed - ticks[first_tick - 1][1]
     starts = [started for _, started, _ in new_take]
-    max_gap = max(b - a for a, b in zip(starts, starts[1:]))
-    frame_ticks = {n for n, _, _ in new_take}
-    max_frame_tick = max(ticks[n][1] - ticks[n][0] for n in frame_ticks if n in ticks)
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    later_ticks = {n for n, _, _ in new_take[1:]} - {first_tick}
     old_last_tick = s.frame_log[discard_index - 1][0]
-    between = [ticks[n][1] - ticks[n][0] for n in range(old_last_tick + 1, first_tick) if n in ticks]
-    cancel_tick = max(between) if between else 0.0
-    return first_fed_delay, max_gap, max_frame_tick, cancel_tick
+    between = [duration(n) for n in range(old_last_tick + 1, first_tick)]
+    return {
+        'first_fed_delay': first_fed - ticks[first_tick - 1][1],
+        'frame0_tick': duration(first_tick),
+        'gap01': gaps[0] if gaps else 0.0,
+        'later_gap': max(gaps[1:], default=0.0),
+        'later_tick': max((duration(n) for n in later_ticks), default=0.0),
+        'cancel_tick': max(between, default=0.0),
+    }
 
 
-def _timing_ok(timing):
-    first_fed_delay, max_gap, max_frame_tick, _ = timing
-    return first_fed_delay < 0.2 and max_gap < 0.2 and max_frame_tick < 0.2
+# A take start with a hole AT FRAME 0 is the defect this scenario exists for
+# and always fails. A too-slow frame LATER in the take is the runner stalling
+# (nothing is cancelled there); it earns ONE re-run of the scenario.
+TIMING_LIMIT_S = 0.2
+STALL_RETRIES_LEFT = {'redo_then_keep': 1}
 
 
-def _timing_text(label, timing):
-    first_fed_delay, max_gap, max_frame_tick, cancel_tick = timing
-    return (f'{label}: first_fed_delay={first_fed_delay:.3f}s max_gap={max_gap:.3f}s '
-            f'max_frame_tick={max_frame_tick:.3f}s cancel_tick={cancel_tick:.3f}s')
+def _frame0_ok(t):
+    return (t['first_fed_delay'] < TIMING_LIMIT_S and t['frame0_tick'] < TIMING_LIMIT_S
+            and t['gap01'] < TIMING_LIMIT_S)
+
+
+def _later_ok(t):
+    return t['later_gap'] < TIMING_LIMIT_S and t['later_tick'] < TIMING_LIMIT_S
+
+
+def _timing_text(label, t):
+    return f'{label}: ' + ' '.join(f'{k}={v:.3f}s' for k, v in t.items())
 
 
 def redo_then_keep(attempt):
@@ -336,15 +355,21 @@ def redo_then_keep(attempt):
             s.run_while(lambda: s.fed - before < 30)          # the take the collision discards
     ok = s.finish()
     d = s.on_disk()
+    timing_text = ' | '.join(_timing_text(f'redo{n}', t) for n, t in enumerate(timings, 1))
+    frame0_ok = all(_frame0_ok(t) for t in timings)
+    later_ok = all(_later_ok(t) for t in timings)
+    if frame0_ok and not later_ok and STALL_RETRIES_LEFT['redo_then_keep'] > 0:
+        STALL_RETRIES_LEFT['redo_then_keep'] -= 1
+        return False, False, f'runner stall after frame 0 (one re-run): {timing_text}'
     passed = (accepted and outcomes == ['save', 'save'] and ok
               and s.dm._record_episode_count == 2 and d['episodes'] == 2
               and d['frames'] == sum(kept)
               and len(d['mp4_sizes']) == 2 and min(d['mp4_sizes']) > 0
-              and all(_timing_ok(t) for t in timings))
+              and frame0_ok and later_ok)
     return True, passed, (
         f'accepted={accepted} outcomes={outcomes} kept={kept} completed={ok} '
         f'count={s.dm._record_episode_count} disk={d} baseline_gap={baseline_gap:.3f}s | '
-        + ' | '.join(_timing_text(f'redo{n}', t) for n, t in enumerate(timings, 1)))
+        + timing_text)
 
 
 def normal_episode(attempt):

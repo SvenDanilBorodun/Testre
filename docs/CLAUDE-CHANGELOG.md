@@ -74,13 +74,22 @@ mutation-checking the smoke test: `_episode_reset` tested the writer by truthine
 dataset „Wiederholen", a collision discard, the frame-drop re-record and a dropped FINISH run left
 their frames in the buffer and the next saved episode carried them (real writer: 30 discarded +
 40 new = 70 frames saved). Now `is not None`, and the smoke test has a „Wiederholen in the first
-episode" scenario that fails against the old test. On the page: at 1093×550 the problem banner
+episode" scenario that fails against the old test. The second verification round's recorder find: after a discard the next take's first frame
+waited ~0.9 s — the DataManager only dropped the buffer, so LeRobot's `start_episode()`
+cancelled the stale streaming encoder lazily on that frame, and the cancel waits for the encoder
+threads' 1 s queue timeout. The owner chose LeRobot's official way over a private stop sentinel:
+`discard_episode()` calls the public `clear_episode_buffer()` in the next, frameless record tick,
+as `scripts/lerobot_record.py` does between takes, and the smoke test fences where the cancel
+lands. On the page: at 1093×550 the problem banner
 slid under the sticky action bar and the finish card lost its top (banner and bar are now one
 sticky footer; cards centre with auto margins; the narrow finish card joins the flow); a mouse
 click left the focus on a stepper or switch, so Space pressed it again instead of starting (the
-page's buttons now give the focus back after a pointer click); the page re-rendered ~60 times a
+page's buttons now give the focus back after a pointer click — and, found in the second
+verification round, so do the sidebar and bottom-navigation buttons: a student arriving by a
+click on „Aufnahme" had that nav button focused, and Space pressed it again instead of starting); the page re-rendered ~60 times a
 second because the shell subscribed to the whole `taskStatus`/`taskInfo` (memoised page, a
-narrowed shell, reference-stable selectors and reducer); and the action bar shed the dots' label
+narrowed shell, reference-stable selectors and reducer; measured afterwards ~4/s while
+recording and ~2.4/s idle, i.e. a few times a second, never per tick); and the action bar shed the dots' label
 in every phase at 1440/1366 (it now measures and sheds only when three command buttons do not fit).
 
 ### Unreleased, 2026-09-28 — Vormachen opens one window per kind, and the whole app draws one icon style

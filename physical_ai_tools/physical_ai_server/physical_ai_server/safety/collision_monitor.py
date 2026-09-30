@@ -989,6 +989,20 @@ class CollisionMonitorMixin:
         if self._collision_resync_timer is not None:
             self._collision_resync_timer.cancel()
             self._collision_resync_timer = None
+        # Aufnahme 2.0 round 4 (owner-approved): the slow recording work runs NOW,
+        # while the arm is still frozen, and only then is teleop released. The
+        # record timer, this monitor's callbacks and /task/command share the
+        # node's default callback group, so ~0.9 s of encoder cancel or finalize
+        # AFTER /collision_flag=False would leave the detector deaf just as the
+        # student moves the arm again. A plain resume cancels the discarded
+        # take's streaming encoder (idempotent: the next record tick does not
+        # repeat it); a forced one (F1) ends the session. Their statuses are
+        # published after the release, as before.
+        end_ok = None
+        if self._collision_interrupted_recording:
+            self._cancel_discarded_take_before_release()
+        elif getattr(self, '_collision_end_recording', False):
+            end_ok = self._end_session_before_release()
         # Clear local state BEFORE publishing False so the watchdog can't re-assert True.
         self._collision_active = False
         self._collision_recovery_failed = False
@@ -1012,7 +1026,7 @@ class CollisionMonitorMixin:
         if self._collision_interrupted_recording:
             resumed = self._resume_interrupted_recording()
         elif getattr(self, '_collision_end_recording', False):
-            ended = self._end_interrupted_recording()
+            ended = self._end_interrupted_recording(end_ok)
         self._collision_end_recording = False
         self._collision_interrupted_recording = False
         self._collision_interrupted_mode = None
@@ -1026,11 +1040,43 @@ class CollisionMonitorMixin:
             self._publish_cleared_status()
             self.get_logger().info('[KOLLISION] Teleoperation wiederhergestellt.')
 
-    def _end_interrupted_recording(self):
-        """F1: finish the session a FORCED recovery interrupted and publish its
-        record status, then its terminating READY status.
+    def _cancel_discarded_take_before_release(self):
+        """Round 4: cancel the discarded take's streaming encoder while the arm is
+        still frozen (see _on_resync_complete). Best effort: a DataManager
+        without the hook, or a failure, leaves the cancel to the next record
+        tick as before — the recovery itself must never fail on it."""
+        cancel = getattr(getattr(self, 'data_manager', None), 'cancel_pending_discard', None)
+        if cancel is None:
+            return
+        try:
+            cancel()
+        except Exception as exc:  # noqa: BLE001 - never let the recovery crash the guard
+            self.get_logger().error(
+                f'[KOLLISION] Verworfene Episode konnte nicht abgebrochen werden: {exc}')
 
-        The DataManager finalizes and hands the upload off per its own guards
+    def _end_session_before_release(self):
+        """F1, round 4: end the interrupted session (finalize + upload hand-off per
+        the DataManager's own guards) while the arm is still frozen. Returns None
+        when the DataManager has no end_session_now, False when it raised, True
+        otherwise; _end_interrupted_recording publishes the statuses after the
+        release."""
+        end = getattr(getattr(self, 'data_manager', None), 'end_session_now', None)
+        if end is None:
+            return None
+        try:
+            end()
+            return True
+        except Exception as exc:  # noqa: BLE001 - never let the recovery crash the guard
+            self.get_logger().error(
+                f'[KOLLISION] Aufnahme konnte nicht beendet werden: {exc}')
+            return False
+
+    def _end_interrupted_recording(self, end_ok=True):
+        """F1: publish the record status, then the terminating READY status of the
+        session a FORCED recovery ended (_end_session_before_release did the work
+        before the arm was released; ``end_ok`` is its result).
+
+        The DataManager finalized and handed the upload off per its own guards
         (end_session_now drives its finish branch synchronously; the record timer
         stays stopped and on_recording stays False). As on the record timer's
         last tick, the record status (SAVING) goes out FIRST and carries any
@@ -1038,12 +1084,10 @@ class CollisionMonitorMixin:
         the READY after it carries the saved count, and a `[WARNUNG]` iff the
         upload was blocked. Returns True when the READY was published; False lets
         the caller publish the plain cleared READY."""
-        data_manager = getattr(self, 'data_manager', None)
-        end = getattr(data_manager, 'end_session_now', None)
-        if end is None:
+        if not end_ok:
             return False
+        data_manager = getattr(self, 'data_manager', None)
         try:
-            end()
             record_status = data_manager.get_current_record_status()
             self._stamp_identity(record_status)
             self._collision_status_pub.publish(record_status)

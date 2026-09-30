@@ -123,6 +123,96 @@ class ForceResumeEndsRecordingTest(unittest.TestCase):
         self.assertEqual(tail[-1].current_episode_number, 2)
         self.assertEqual(host.calls, ['re_record', 'end'])
 
+    # ---- round 4: the slow recording work happens while the arm is frozen ----
+    # /collision_flag=False hands teleop back; the record timer, the collision
+    # detector and /task/command share one callback group, so a ~0.9 s encoder
+    # cancel AFTER the release would leave the detector deaf right when the
+    # student moves again. Owner-approved: do it before the release.
+
+    def _log_order(self, host):
+        order = []
+        flag = host.pub_for(self.h.CM.COLLISION_FLAG_TOPIC)
+        status = host.pub_for('/task/status')
+        flag_publish, status_publish = flag.publish, status.publish
+
+        def _flag(msg):
+            order.append(('flag', msg.data))
+            flag_publish(msg)
+
+        def _status(msg):
+            order.append(('status', msg.phase))
+            status_publish(msg)
+
+        flag.publish, status.publish = _flag, _status
+        return order, flag
+
+    def test_plain_resume_cancels_the_discarded_take_before_releasing_the_arm(self):
+        h = self.h
+        host = self._host()
+        order, flag = self._log_order(host)
+        host.data_manager.cancel_pending_discard = (
+            lambda: order.append(('cancel', flag.published[-1].data)) or True)
+        host._collision_homed = True
+        host._collision_leader_pos = {
+            j: v for j, v in zip(h.CM.ARM_JOINT_NAMES, h.CM.SAFE_HOME_ARM)}
+        host._collision_leader_pos.update(
+            {j: 0.0 for j in h.CM.LEADER_JOINTS if j not in host._collision_leader_pos})
+        self.assertTrue(host.resume_teleop()[0])
+        host.fire_pending_timers()
+        cancel = order.index(('cancel', True))           # the arm was still frozen
+        release = order.index(('flag', False))
+        self.assertLess(cancel, release)
+        self.assertEqual([e for e in order if e[0] == 'cancel'], [('cancel', True)])
+        self.assertEqual(host.timer_start_calls, ['collection'])   # same session resumes
+        self.assertTrue(host.on_recording)
+
+    def test_forced_recovery_ends_the_session_before_releasing_the_arm(self):
+        host = self._host()
+        order, flag = self._log_order(host)
+        host.data_manager.end_session_now = (
+            lambda: order.append(('end', flag.published[-1].data)) or True)
+        host.force_resume_teleop()
+        host.fire_pending_timers()
+        end = order.index(('end', True))
+        release = order.index(('flag', False))
+        self.assertLess(end, release)
+        # The session's statuses still follow the release, SAVING then READY.
+        after = [e for e in order[release + 1:] if e[0] == 'status']
+        self.assertEqual(after[-1], ('status', self.h._TaskStatus.READY))
+        self.assertEqual(host.timer_start_calls, [])
+        self.assertFalse(host.on_recording)
+
+    def test_a_failing_pre_release_cancel_still_resumes(self):
+        h = self.h
+        host = self._host()
+
+        def _boom():
+            raise RuntimeError('cancel failed')
+
+        host.data_manager.cancel_pending_discard = _boom
+        host._collision_homed = True
+        host._collision_leader_pos = {
+            j: v for j, v in zip(h.CM.ARM_JOINT_NAMES, h.CM.SAFE_HOME_ARM)}
+        host._collision_leader_pos.update(
+            {j: 0.0 for j in h.CM.LEADER_JOINTS if j not in host._collision_leader_pos})
+        host.resume_teleop()
+        host.fire_pending_timers()                       # must not raise
+        self.assertFalse(host.pub_for(h.CM.COLLISION_FLAG_TOPIC).published[-1].data)
+        self.assertEqual(host.timer_start_calls, ['collection'])
+
+    def test_an_older_data_manager_without_the_hook_still_resumes(self):
+        h = self.h
+        host = self._host()                               # SimpleNamespace: no hook
+        self.assertFalse(hasattr(host.data_manager, 'cancel_pending_discard'))
+        host._collision_homed = True
+        host._collision_leader_pos = {
+            j: v for j, v in zip(h.CM.ARM_JOINT_NAMES, h.CM.SAFE_HOME_ARM)}
+        host._collision_leader_pos.update(
+            {j: 0.0 for j in h.CM.LEADER_JOINTS if j not in host._collision_leader_pos})
+        host.resume_teleop()
+        host.fire_pending_timers()
+        self.assertEqual(host.timer_start_calls, ['collection'])
+
     def test_plain_resume_still_rearms_the_same_session(self):
         h = self.h
         host = self._host()

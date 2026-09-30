@@ -6,6 +6,83 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-09-29/30 — Aufnahme 2.0: the recorder's ends made honest, and a new Aufnahme page
+
+The owner asked for Cyclo parity on the Aufnahme tab (docs/plans/2026-09-29-cyclo-parity): a
+timed-only page in the Startseite language with animated warm-up/reset, per-phase buttons and
+keys, a problem banner that appears only for a real problem, and a finish flow. Building it
+exposed how the recorder's FSM actually ended a session, and most of the work below is the
+server being made to match what the page promises. The invariants are in `CLAUDE.md`
+(„Recording FSM", the collision recovery, „The Aufnahme page"); rig gates A-R1…A-R5 are in
+`docs/KNOWN-ISSUES.md`.
+
+**Why FINISH needed rules at all (H1–H5).** At HEAD, FINISH or „Jetzt starten" during the first
+warm-up crashed the recording: LeRobot 0.5.1's writer starts with an EMPTY buffer (not `None`),
+`record_early_save` set `'save'`, and the next tick raised `ValueError(You must add one or
+several frames …)` — reproduced with the real writer, which is why the CI smoke test exists.
+FINISH never counted the partial episode (saved locally, never uploaded), STOP counted one too
+many with nothing in progress, and FINISH during a frame drop re-routed to `'reset'`, so the
+session simply continued. Each is fixed in `data_manager.py` and pinned by
+`test_data_manager_record_fsm.py`; an empty buffer is now nothing to commit.
+
+**Q3 / Q4 / Q8 — the RERECORD→FINISH window.** „Verwerfen und beenden" is two commands,
+RERECORD then FINISH. Between them the server may already have started the next run (with
+Zurücksetzen = 0 there is not even a RESETTING tick, H15), and FINISH would then save a
+fragment the student had just asked to throw away. Rev. 1 of the spec answered with a 1-s
+minimum reset; the second architect's probe E showed a 1.1-s run still saved when FINISH came
+2.2 s later on a slow link, so a timer only moved the race. The owner chose a rule that does not
+depend on timing: the server remembers a RERECORD received from the wire for
+`RERECORD_FINISH_WINDOW_S` (5 s), and a FINISH drops any run that STARTED after it (Q4); a
+FINISH also drops any run shorter than `EARLY_SAVE_MIN_S` (1 s, Q3 — it was never a real
+attempt). The accepted edge: a student who presses „Wiederholen", starts again at once and then
+chooses „Behalten und beenden" inside those 5 s loses that run. The owner kept the rule and
+asked that the page say so (Q8): the client knows both times — its own RERECORD send and the
+RECORDING phase anchor — so `recordCommands` shows „Diese Episode war zu kurz nach dem
+Wiederholen und wird nicht gespeichert." exactly when the server will drop it.
+
+**F7b — a collision never reopens a finishing session.** The collision path calls
+`re_record()`, which used to rewind unconditionally. The second architect's probe B: FINISH
+latched, then a collision → the session rewound to `'reset'` and never completed; the finish the
+student had asked for silently turned into „keep recording". `re_record()` is now a no-op in
+`finish`/`stop`: the collision still halts and discards nothing new, and the finish completes
+(owner-approved change to a collision path).
+
+**F1 — „Notentriegelung" ends the recording like FINISH.** `FORCE_RESUME_TELEOP` used to clear
+the interrupted-recording marker, so completion published a bare READY: the DataManager was
+never finalized, nothing was uploaded, the crash marker stayed, and a page tracking the session
+would have reported „Das Hochladen hat nicht begonnen". Now `_end_interrupted_recording` calls
+`end_session_now` (finalize + upload per the existing guards). The first version published only
+the terminating READY, so a warning the finish raised (frame loss on save, a missing video file)
+never reached the page; the verification round made it publish the record status (SAVING, with
+that warning) first, as the record timer's last tick does.
+
+**Q7 — a collision between commit and count.** `save()` commits an episode one tick before the
+count; a collision in that window let `re_record()` clear the latch, leaving the episode on disk
+and uploaded but uncounted (probe V19: `committed_on_disk=1, count=0`) — the session then
+recorded one episode more than asked, and the page showed „Kollision, verworfen" for an
+episode that was kept. The owner chose to count first, exactly like the save-completion branch,
+and then rewind; the contact happened after the episode's frames ended (SAVING records nothing).
+On the LAST episode a rewind was first assumed to start a run with no room; measured, a literal
+rewind adds no frame, but it publishes a phantom RESETTING („Episode N+1 von N") for the whole
+Zurücksetzen time and a RECORDING tick before READY — so that case goes to `finish` instead.
+
+**What the verification round found on top.** A STOP during a latched save stopped counting the
+committed episode (HEAD counted it; the owner: count it). A session ending before any dataset
+existed left its crash marker. And, pre-existing since before this work and found only by
+mutation-checking the smoke test: `_episode_reset` tested the writer by truthiness, but
+`LeRobotDataset.__len__` is the number of SAVED frames, so in the first episode of every new
+dataset „Wiederholen", a collision discard, the frame-drop re-record and a dropped FINISH run left
+their frames in the buffer and the next saved episode carried them (real writer: 30 discarded +
+40 new = 70 frames saved). Now `is not None`, and the smoke test has a „Wiederholen in the first
+episode" scenario that fails against the old test. On the page: at 1093×550 the problem banner
+slid under the sticky action bar and the finish card lost its top (banner and bar are now one
+sticky footer; cards centre with auto margins; the narrow finish card joins the flow); a mouse
+click left the focus on a stepper or switch, so Space pressed it again instead of starting (the
+page's buttons now give the focus back after a pointer click); the page re-rendered ~60 times a
+second because the shell subscribed to the whole `taskStatus`/`taskInfo` (memoised page, a
+narrowed shell, reference-stable selectors and reducer); and the action bar shed the dots' label
+in every phase at 1440/1366 (it now measures and sheds only when three command buttons do not fit).
+
 ### Unreleased, 2026-09-28 — Vormachen opens one window per kind, and the whole app draws one icon style
 
 The owner asked for two things (docs/plans/2026-09-28-vormachen-einzeln):

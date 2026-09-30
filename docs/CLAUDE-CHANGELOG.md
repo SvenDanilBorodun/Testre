@@ -78,9 +78,14 @@ episode" scenario that fails against the old test. The second verification round
 waited ~0.9 s — the DataManager only dropped the buffer, so LeRobot's `start_episode()`
 cancelled the stale streaming encoder lazily on that frame, and the cancel waits for the encoder
 threads' 1 s queue timeout. The owner chose LeRobot's official way over a private stop sentinel:
-`discard_episode()` calls the public `clear_episode_buffer()` in the next, frameless record tick,
-as `scripts/lerobot_record.py` does between takes, and the smoke test fences where the cancel
-lands. On the page: at 1093×550 the problem banner
+`discard_episode()` calls the public `clear_episode_buffer()` in the next, frameless record tick
+(at the start of Zurücksetzen; `scripts/lerobot_record.py` clears after its reset loop, right
+before the next take), and the smoke test fences where the cancel lands. A deeper review then
+showed the ~1 s still blinds the collision detector — the record timer and every collision
+callback share the node's default callback group, exactly as main's lazy cancel did at the next
+take's first frame — so round 4 runs the pending cancel or the F1 finalize in
+`_on_resync_complete` before `/collision_flag=False`, arm still frozen, and leaves a separate
+callback group for the monitor (which needs a DataManager lock) to a later round. On the page: at 1093×550 the problem banner
 slid under the sticky action bar and the finish card lost its top (banner and bar are now one
 sticky footer; cards centre with auto margins; the narrow finish card joins the flow); a mouse
 click left the focus on a stepper or switch, so Space pressed it again instead of starting (the

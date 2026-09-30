@@ -10,7 +10,9 @@ Each scenario drives DataManager.record() in real time with synthetic frames
 and asserts what ends up ON DISK, which is the one thing the stub-based unit
 tests cannot see: FINISH in the first warm-up, FINISH < 1 s into a run (Q3),
 MOVE_TO_NEXT skipping the warm-up, „Verwerfen und beenden“ (Q4),
-„Wiederholen“ in the first episode of a new dataset, one normal episode.
+„Wiederholen“ and a collision discard with Zurücksetzen 0 (no discarded frame
+kept; the next take starts without a real-time hole — the discarded take's
+encoder is cancelled before it), one normal episode.
 Exit code 0 = all scenarios passed.
 
 Robust on a slow or noisy runner by construction:
@@ -87,22 +89,30 @@ class Session:
         # DataManager builds its LeRobot dataset lazily, exactly like the node's
         # record tick does before calling record().
         assert self.dm.check_lerobot_dataset(frame(0), JOINTS), 'dataset init failed'
-        # Count the frames the writer really receives (recording path only).
+        # Count the frames the writer really receives (recording path only),
+        # and when: (tick number, monotonic time the feed started, returned).
         self.fed = 0
+        self.frame_log = []
+        self.tick_log = []        # (tick number, started, ended)
         dataset = self.dm._lerobot_dataset
         add_frame = dataset.add_frame_without_write_image
 
         def counted(*args, **kwargs):
             self.fed += 1
-            return add_frame(*args, **kwargs)
+            started = time.monotonic()
+            result = add_frame(*args, **kwargs)
+            self.frame_log.append((self.i, started, time.monotonic()))
+            return result
 
         dataset.add_frame_without_write_image = counted
         self._next_tick = time.monotonic()
 
     def tick(self):
         self.i += 1
+        started = time.monotonic()
         state = [0.01 * self.i] * len(JOINTS)
         r = self.dm.record(images=frame(self.i), state=state, action=state)
+        self.tick_log.append((self.i, started, time.monotonic()))
         if r == DataManager.RECORD_COMPLETED:
             self.completed = True
         # Deadline pacing: target 30 Hz on a monotonic schedule.
@@ -247,30 +257,94 @@ def discard_then_finish(attempt):
         f'count={s.dm._record_episode_count} disk={d}'
 
 
+def take_start_timing(s, discard_index):
+    """How the take that starts after a discard begins, from the logs.
+
+    LeRobot's encoder threads notice a cancel only after their 1 s queue
+    timeout. The discarded take's encoder must be cancelled in the reset /
+    discard tick (no frame), not lazily inside the new take's first frame, where
+    it left a ~0.9 s real-time hole the dataset's index/fps timestamps do not
+    know about. Returns (first_fed_delay, max_gap, max_frame_tick, cancel_tick):
+      first_fed_delay  new take's first frame fed, after the previous tick ENDED
+      max_gap          largest real-time gap between consecutive frames of the
+                       new take (the dataset says 1/30 s)
+      max_frame_tick   slowest tick that fed a frame of the new take
+      cancel_tick      slowest tick between the discard and the first frame
+                       (where the cancel is expected to land; informational)
+    """
+    new_take = s.frame_log[discard_index:]
+    ticks = {n: (start, end) for n, start, end in s.tick_log}
+    first_tick, _, first_fed = new_take[0]
+    first_fed_delay = first_fed - ticks[first_tick - 1][1]
+    starts = [started for _, started, _ in new_take]
+    max_gap = max(b - a for a, b in zip(starts, starts[1:]))
+    frame_ticks = {n for n, _, _ in new_take}
+    max_frame_tick = max(ticks[n][1] - ticks[n][0] for n in frame_ticks if n in ticks)
+    old_last_tick = s.frame_log[discard_index - 1][0]
+    between = [ticks[n][1] - ticks[n][0] for n in range(old_last_tick + 1, first_tick) if n in ticks]
+    cancel_tick = max(between) if between else 0.0
+    return first_fed_delay, max_gap, max_frame_tick, cancel_tick
+
+
+def _timing_ok(timing):
+    first_fed_delay, max_gap, max_frame_tick, _ = timing
+    return first_fed_delay < 0.2 and max_gap < 0.2 and max_frame_tick < 0.2
+
+
+def _timing_text(label, timing):
+    first_fed_delay, max_gap, max_frame_tick, cancel_tick = timing
+    return (f'{label}: first_fed_delay={first_fed_delay:.3f}s max_gap={max_gap:.3f}s '
+            f'max_frame_tick={max_frame_tick:.3f}s cancel_tick={cancel_tick:.3f}s')
+
+
 def redo_then_keep(attempt):
-    # „Wiederholen“ in the FIRST episode of a new dataset, then the redone run is
-    # saved by MOVE_TO_NEXT: only the frames fed AFTER the RERECORD may be on
-    # disk. (A fresh LeRobotDataset is falsy — len() counts saved frames — and a
-    # truthiness test once kept the discarded frames in the writer's buffer.)
+    # Two re-records with Zurücksetzen = 0 s, each followed by a take that is
+    # kept (MOVE_TO_NEXT saves it): a wire RERECORD („Wiederholen“) in the FIRST
+    # episode of a new dataset, and the collision-path re_record() in the
+    # second. On disk: exactly the frames fed after each discard. (A fresh
+    # LeRobotDataset is falsy — len() counts saved frames — and a truthiness
+    # test once kept the discarded frames in the writer's buffer.) And each new
+    # take starts without a real-time hole (see take_start_timing).
     s = Session(ROOT, f'smoke redo keep {attempt}', warmup=0, episode=10, reset=0, n=3)
     s.until('run')
     s.run_while(lambda: s.fed < 30)
-    discarded = s.fed
-    accepted = s.dm.rerecord_from_command()
-    s.run_while(lambda: s.dm.get_status() != 'run' or s.fed - discarded < 45)
-    age = s.run_age()
-    if s.dm.get_status() != 'run' or age < EARLY_SAVE_MIN_S:
-        return False, False, f'status={s.dm.get_status()} run_age={age:.3f}s'
-    kept = s.fed - discarded
-    outcome = s.dm.record_early_save()
-    s.run_while(lambda: s.dm.get_status() != 'reset', limit_s=10.0)
+    old_take = [started for _, started, _ in s.frame_log]
+    baseline_gap = max(b - a for a, b in zip(old_take, old_take[1:]))
+    if baseline_gap >= 0.2:
+        return False, False, f'runner too slow: baseline frame gap {baseline_gap:.3f}s'
+    kept = []
+    timings = []
+    accepted = None
+    outcomes = []
+    for episode in (1, 2):
+        discard_index = s.fed
+        if episode == 1:
+            accepted = s.dm.rerecord_from_command()
+        else:
+            s.dm.re_record()
+        s.run_while(lambda: s.dm.get_status() != 'run' or s.fed - discard_index < 45)
+        age = s.run_age()
+        if s.dm.get_status() != 'run' or age < EARLY_SAVE_MIN_S:
+            return False, False, f'episode {episode}: status={s.dm.get_status()} run_age={age:.3f}s'
+        kept.append(s.fed - discard_index)
+        timings.append(take_start_timing(s, discard_index))
+        outcomes.append(s.dm.record_early_save())
+        s.run_while(lambda: s.dm.get_status() != 'reset', limit_s=10.0)
+        if episode == 1:
+            s.run_while(lambda: s.dm.get_status() != 'run')
+            before = s.fed
+            s.run_while(lambda: s.fed - before < 30)          # the take the collision discards
     ok = s.finish()
     d = s.on_disk()
-    return True, (accepted and outcome == 'save' and ok and s.dm._record_episode_count == 1
-                  and d['episodes'] == 1 and d['frames'] == kept
-                  and len(d['mp4_sizes']) == 2 and min(d['mp4_sizes']) > 0), \
-        f'accepted={accepted} outcome={outcome} discarded={discarded} kept={kept} ' \
-        f'completed={ok} count={s.dm._record_episode_count} disk={d}'
+    passed = (accepted and outcomes == ['save', 'save'] and ok
+              and s.dm._record_episode_count == 2 and d['episodes'] == 2
+              and d['frames'] == sum(kept)
+              and len(d['mp4_sizes']) == 2 and min(d['mp4_sizes']) > 0
+              and all(_timing_ok(t) for t in timings))
+    return True, passed, (
+        f'accepted={accepted} outcomes={outcomes} kept={kept} completed={ok} '
+        f'count={s.dm._record_episode_count} disk={d} baseline_gap={baseline_gap:.3f}s | '
+        + ' | '.join(_timing_text(f'redo{n}', t) for n, t in enumerate(timings, 1)))
 
 
 def normal_episode(attempt):

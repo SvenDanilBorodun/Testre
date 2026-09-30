@@ -856,25 +856,6 @@ jobs:
             exit 1
           fi
           echo "OK: ${{ matrix.server_repo }} has ROS_DISTRO=jazzy"
-      - name: Record-FSM smoke test with the real LeRobot 0.5.1 writer (Aufnahme 2.0)
-        # The recorder's state machine (FINISH in the first warm-up, FINISH < 1 s
-        # into a run, skipping a warm-up, „Verwerfen und beenden“, one normal
-        # episode) driven through the SHIPPED DataManager + LeRobot writer +
-        # streaming h264 encoder, asserting what lands ON DISK — the one thing
-        # the stub-based unit tests cannot see. No network (push_to_hub off),
-        # datasets in a temp dir inside the throwaway container. Jetson is
-        # excluded: it never records. opi inherits the job's continue-on-error.
-        # The image name goes through env: (no expression inside run:).
-        if: matrix.platform == 'amd64' || matrix.platform == 'opi'
-        timeout-minutes: 10
-        env:
-          SERVER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
-        run: |
-          set -e
-          docker run --rm --entrypoint bash \
-            -v "$GITHUB_WORKSPACE/.github/scripts/record_fsm_smoke.py:/tmp/record_fsm_smoke.py:ro" \
-            "$SERVER_IMAGE" \
-            -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && python3 /tmp/record_fsm_smoke.py'
       - name: Assert the pulled image is THIS run's build (not a stale retag)
         # Everything else in this job asserts PROPERTIES of an image (has ROS,
         # has the bundle env, is under the size ceiling) — none of it asserts
@@ -903,6 +884,27 @@ jobs:
             exit 1
           fi
           echo "OK: ${SERVER_IMAGE} was built from ${GOT_SHA} (== this run's sha)"
+      - name: Record-FSM smoke test with the real LeRobot 0.5.1 writer (Aufnahme 2.0)
+        # The recorder's state machine (FINISH in the first warm-up, FINISH < 1 s
+        # into a run, skipping a warm-up, „Verwerfen und beenden“, one normal
+        # episode) driven through the SHIPPED DataManager + LeRobot writer +
+        # streaming h264 encoder, asserting what lands ON DISK — the one thing
+        # the stub-based unit tests cannot see. No network (push_to_hub off),
+        # datasets in a temp dir inside the throwaway container. Jetson is
+        # excluded: it never records. opi inherits the job's continue-on-error.
+        # The image name goes through env: (no expression inside run:). Runs
+        # only after the revision check above, so it never exercises a stale
+        # retag.
+        if: matrix.platform == 'amd64' || matrix.platform == 'opi'
+        timeout-minutes: 10
+        env:
+          SERVER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
+        run: |
+          set -e
+          docker run --rm --entrypoint bash \
+            -v "$GITHUB_WORKSPACE/.github/scripts/record_fsm_smoke.py:/tmp/record_fsm_smoke.py:ro" \
+            "$SERVER_IMAGE" \
+            -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && python3 /tmp/record_fsm_smoke.py'
       - name: Assert amd64 server image is CUDA-slimmed (real size ceiling)
         if: matrix.platform == 'amd64'
         # The CUDA slim (build-images.sh flatten of the amd64 image) must keep

@@ -9,6 +9,18 @@ its streaming h264 encoder (PyAV). No network: push_to_hub is False.
 Each scenario drives DataManager.record() in real time with synthetic frames
 and asserts what ends up ON DISK, which is the one thing the stub-based unit
 tests cannot see. Exit code 0 = all scenarios passed.
+
+Robust on a slow or noisy runner by construction:
+  * ticks are paced by DEADLINE on a monotonic 30 Hz schedule (a slow record()
+    call eats into the next wait instead of stretching every period; a runner
+    that falls more than one period behind re-anchors instead of bursting);
+  * frame counts are compared with the frames the writer was actually FED (a
+    counter around add_frame), never with a wall-clock guess;
+  * every timing precondition a scenario relies on (still in the warm-up; a run
+    shorter / longer than EARLY_SAVE_MIN_S; inside the RERECORD window) is read
+    off the DataManager's own clocks right before the command and, if a stall
+    broke it, the scenario is re-run on a fresh dataset (up to ATTEMPTS times)
+    instead of asserting something it did not set up.
 """
 import json
 import os
@@ -25,11 +37,16 @@ os.environ['HF_LEROBOT_HOME'] = str(ROOT)
 import numpy as np  # noqa: E402
 
 from physical_ai_interfaces.msg import TaskInfo  # noqa: E402
+from physical_ai_server.data_processing import data_manager as dm_module  # noqa: E402
 from physical_ai_server.data_processing.data_manager import DataManager  # noqa: E402
 
 FPS = 30
+PERIOD_S = 1.0 / FPS
 H, W = 120, 160          # small frames keep the smoke test fast; same code path
 JOINTS = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1']
+EARLY_SAVE_MIN_S = dm_module.EARLY_SAVE_MIN_S
+RERECORD_FINISH_WINDOW_S = dm_module.RERECORD_FINISH_WINDOW_S
+ATTEMPTS = 3
 FAILURES = []
 
 
@@ -67,6 +84,17 @@ class Session:
         # DataManager builds its LeRobot dataset lazily, exactly like the node's
         # record tick does before calling record().
         assert self.dm.check_lerobot_dataset(frame(0), JOINTS), 'dataset init failed'
+        # Count the frames the writer really receives (recording path only).
+        self.fed = 0
+        dataset = self.dm._lerobot_dataset
+        add_frame = dataset.add_frame_without_write_image
+
+        def counted(*args, **kwargs):
+            self.fed += 1
+            return add_frame(*args, **kwargs)
+
+        dataset.add_frame_without_write_image = counted
+        self._next_tick = time.monotonic()
 
     def tick(self):
         self.i += 1
@@ -74,7 +102,13 @@ class Session:
         r = self.dm.record(images=frame(self.i), state=state, action=state)
         if r == DataManager.RECORD_COMPLETED:
             self.completed = True
-        time.sleep(1.0 / FPS)
+        # Deadline pacing: target 30 Hz on a monotonic schedule.
+        self._next_tick += PERIOD_S
+        delay = self._next_tick - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        elif delay < -PERIOD_S:
+            self._next_tick = time.monotonic()
         return r
 
     def run_for(self, seconds):
@@ -82,11 +116,17 @@ class Session:
         while time.monotonic() < end and not self.completed:
             self.tick()
 
-    def until(self, status, limit_s=15.0):
+    def run_while(self, condition, limit_s=15.0):
         end = time.monotonic() + limit_s
-        while self.dm.get_status() != status and time.monotonic() < end:
+        while condition() and not self.completed and time.monotonic() < end:
             self.tick()
-        return self.dm.get_status() == status
+        return not condition()
+
+    def until(self, status, limit_s=15.0):
+        return self.run_while(lambda: self.dm.get_status() != status, limit_s)
+
+    def run_age(self):
+        return self.dm._run_age_s()
 
     def finish(self):
         self.dm.record_finish()
@@ -109,62 +149,121 @@ def check(name, cond, detail):
         FAILURES.append(name)
 
 
-def main():
-    root = ROOT
+def scenario(name, body):
+    """Run body(attempt) -> (precondition_met, passed, detail); re-run on a fresh
+    dataset while a stall broke the precondition, then report."""
+    detail = ''
+    for attempt in range(1, ATTEMPTS + 1):
+        precondition_met, passed, detail = body(attempt)
+        if precondition_met:
+            check(name, passed, detail + (f' (attempt {attempt})' if attempt > 1 else ''))
+            return
+        print(f'[RETRY] {name}: precondition not met ({detail})', flush=True)
+    check(name, False, f'precondition not met in {ATTEMPTS} attempts: {detail}')
 
-    # 1. FINISH during the FIRST warm-up (HEAD raised ValueError from save_episode).
-    s = Session(root, 'smoke finish warmup', warmup=5, episode=10, reset=2, n=3)
+
+def finish_in_warmup(attempt):
+    # FINISH during the FIRST warm-up (HEAD raised ValueError from save_episode).
+    s = Session(ROOT, f'smoke finish warmup {attempt}', warmup=5, episode=10, reset=2, n=3)
     s.run_for(0.3)
+    if s.dm.get_status() != 'warmup':
+        return False, False, f'status {s.dm.get_status()} before FINISH'
     ok = s.finish()
     d = s.on_disk()
-    check('finish_in_warmup', ok and s.dm._record_episode_count == 0 and d['episodes'] == 0,
-          f'completed={ok} count={s.dm._record_episode_count} disk={d}')
+    return True, (ok and s.dm._record_episode_count == 0 and s.fed == 0
+                  and d['episodes'] == 0 and d['frames'] == 0), \
+        f'completed={ok} count={s.dm._record_episode_count} fed={s.fed} disk={d}'
 
-    # 2. FINISH less than 1 s into a run: the stub is dropped, nothing kept.
-    s = Session(root, 'smoke finish short', warmup=0, episode=10, reset=2, n=3)
+
+def finish_under_1s(attempt):
+    # FINISH while a run with real frames in flight is younger than
+    # EARLY_SAVE_MIN_S: the run is dropped, nothing is kept (Q3).
+    s = Session(ROOT, f'smoke finish short {attempt}', warmup=0, episode=10, reset=2, n=3)
     s.until('run')
-    s.run_for(0.4)
+    s.run_while(lambda: s.fed < 5)
+    age = s.run_age()
+    if s.dm.get_status() != 'run' or s.fed < 5 or age >= EARLY_SAVE_MIN_S:
+        return False, False, f'status={s.dm.get_status()} fed={s.fed} run_age={age:.3f}s'
+    fed = s.fed
     ok = s.finish()
     d = s.on_disk()
-    check('finish_under_1s', ok and s.dm._record_episode_count == 0 and d['episodes'] == 0,
-          f'completed={ok} count={s.dm._record_episode_count} disk={d}')
+    return True, (ok and s.dm._record_episode_count == 0 and d['episodes'] == 0
+                  and d['frames'] == 0), \
+        f'completed={ok} fed_in_dropped_run={fed} run_age={age:.3f}s ' \
+        f'count={s.dm._record_episode_count} disk={d}'
 
-    # 3. MOVE_TO_NEXT in warm-up skips to run; a 1.5 s run kept by FINISH.
-    s = Session(root, 'smoke skip', warmup=5, episode=10, reset=2, n=3)
+
+def skip_then_keep(attempt):
+    # MOVE_TO_NEXT in the warm-up starts the run; a run of 45 fed frames
+    # (1.5 s at 30 fps) is kept by FINISH, every fed frame on disk.
+    s = Session(ROOT, f'smoke skip {attempt}', warmup=5, episode=10, reset=2, n=3)
     s.run_for(0.3)
+    if s.dm.get_status() != 'warmup':
+        return False, False, f'status {s.dm.get_status()} before MOVE_TO_NEXT'
     outcome = s.dm.record_early_save()
-    s.run_for(1.5)
+    s.run_while(lambda: s.fed < 45)
+    age = s.run_age()
+    if s.dm.get_status() != 'run' or s.fed < 45 or age < EARLY_SAVE_MIN_S:
+        return False, False, f'status={s.dm.get_status()} fed={s.fed} run_age={age:.3f}s'
+    fed = s.fed
     ok = s.finish()
     d = s.on_disk()
-    check('skip_then_keep', outcome == 'run' and ok and s.dm._record_episode_count == 1
-          and d['episodes'] == 1 and d['frames'] >= 30 and len(d['mp4_sizes']) == 2
-          and min(d['mp4_sizes']) > 0,
-          f'outcome={outcome} completed={ok} count={s.dm._record_episode_count} disk={d}')
+    return True, (outcome == 'run' and ok and s.dm._record_episode_count == 1
+                  and d['episodes'] == 1 and d['frames'] == fed
+                  and len(d['mp4_sizes']) == 2 and min(d['mp4_sizes']) > 0), \
+        f'outcome={outcome} completed={ok} fed={fed} run_age={age:.3f}s ' \
+        f'count={s.dm._record_episode_count} disk={d}'
 
-    # 4. „Verwerfen und beenden" with Zurücksetzen = 0 s and a SLOW link:
-    #    RERECORD, then FINISH 2.2 s later — the run that started after the
-    #    RERECORD must not be kept (reviewer probe E).
-    s = Session(root, 'smoke discard finish', warmup=0, episode=10, reset=0, n=3)
+
+def discard_then_finish(attempt):
+    # „Verwerfen und beenden“ with Zurücksetzen = 0 s and a SLOW link: RERECORD,
+    # a new run that is already OLDER than EARLY_SAVE_MIN_S (so Q3 alone would
+    # keep it), then FINISH inside the RERECORD window — the run that started
+    # after the RERECORD must not be kept (Q4, reviewer probe E).
+    s = Session(ROOT, f'smoke discard finish {attempt}', warmup=0, episode=10, reset=0, n=3)
     s.until('run')
-    s.run_for(1.5)
+    s.run_while(lambda: s.fed < 30)
     accepted = s.dm.rerecord_from_command()
-    s.run_for(2.2)
+    fed_before = s.fed
+    s.run_while(lambda: s.dm.get_status() != 'run'
+                or s.run_age() < EARLY_SAVE_MIN_S + 0.2)
+    age = s.run_age()
+    since_rerecord = time.perf_counter() - s.dm._wire_rerecord_at
+    new_run_fed = s.fed - fed_before
+    if (s.dm.get_status() != 'run' or age < EARLY_SAVE_MIN_S or new_run_fed < 1
+            or since_rerecord >= RERECORD_FINISH_WINDOW_S
+            or s.dm._run_entered_at < s.dm._wire_rerecord_at):
+        return False, False, (f'status={s.dm.get_status()} run_age={age:.3f}s '
+                              f'since_rerecord={since_rerecord:.3f}s new_run_fed={new_run_fed}')
     ok = s.finish()
     d = s.on_disk()
-    check('discard_then_finish', accepted and ok and s.dm._record_episode_count == 0
-          and d['episodes'] == 0,
-          f'accepted={accepted} completed={ok} count={s.dm._record_episode_count} disk={d}')
+    return True, (accepted and ok and s.dm._record_episode_count == 0
+                  and d['episodes'] == 0 and d['frames'] == 0), \
+        f'accepted={accepted} completed={ok} run_age={age:.3f}s ' \
+        f'since_rerecord={since_rerecord:.3f}s new_run_fed={new_run_fed} ' \
+        f'count={s.dm._record_episode_count} disk={d}'
 
-    # 5. One ordinary episode to completion: finalize writes a readable dataset.
-    s = Session(root, 'smoke normal', warmup=0, episode=2, reset=0, n=1)
+
+def normal_episode(attempt):
+    # One ordinary episode to completion: finalize writes a readable dataset
+    # holding every fed frame.
+    s = Session(ROOT, f'smoke normal {attempt}', warmup=0, episode=2, reset=0, n=1)
     end = time.monotonic() + 20
     while not s.completed and time.monotonic() < end:
         s.tick()
     d = s.on_disk()
-    check('normal_episode', s.completed and s.dm._record_episode_count == 1 and d['episodes'] == 1
-          and len(d['mp4_sizes']) == 2,
-          f'completed={s.completed} count={s.dm._record_episode_count} disk={d}')
+    return True, (s.completed and s.dm._record_episode_count == 1 and d['episodes'] == 1
+                  and s.fed >= 10 and d['frames'] == s.fed
+                  and len(d['mp4_sizes']) == 2 and min(d['mp4_sizes']) > 0), \
+        f'completed={s.completed} count={s.dm._record_episode_count} fed={s.fed} disk={d}'
 
+
+def main():
+    scenario('finish_in_warmup', finish_in_warmup)
+    scenario('finish_under_1s', finish_under_1s)
+    scenario('skip_then_keep', skip_then_keep)
+    scenario('discard_then_finish', discard_then_finish)
+    scenario('normal_episode', normal_episode)
     print('SMOKE RESULT:', 'PASS' if not FAILURES else f'FAIL {FAILURES}', flush=True)
     return 0 if not FAILURES else 1
 

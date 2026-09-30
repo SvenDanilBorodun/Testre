@@ -188,6 +188,7 @@ class _FakeDataset:
     def __init__(self, drop_on_save=False):
         self._buf = {'size': 0, 'task': [], 'timestamp': []}   # writer starts EMPTY
         self.committed = 0
+        self.committed_sizes = []
         self.cancelled = 0
         self.finalized = False
         self.finalize_raises = False
@@ -213,7 +214,15 @@ class _FakeDataset:
                 'You must add one or several frames with `add_frame` before '
                 'calling `add_episode`.')
         self.committed += 1
+        self.committed_sizes.append(self._buf['size'])
         self._buf = {'size': 0, 'task': [], 'timestamp': []}
+
+    def __len__(self):
+        # LeRobotDataset.__len__ is the number of SAVED frames, so a fresh
+        # dataset is FALSY until its first episode is saved — exactly like
+        # the real 0.5.1 class. `if dataset:` is therefore never an existence
+        # test.
+        return sum(self.committed_sizes)
 
     def streaming_dropped_frame_count(self):
         return 3 if self.drop_on_save else 0
@@ -785,6 +794,41 @@ class CollisionPathTest(_FsmTestCase):
             '[WARNUNG] Episode 1: Kamera-Bilder gingen beim Speichern verloren'))
         self.assertEqual(dm._record_episode_count, 0)
         self.assertEqual(up, [])
+
+    def test_a_discard_in_the_first_episode_really_empties_the_buffer(self):
+        # A fresh LeRobotDataset is falsy (len == saved frames == 0), and
+        # _episode_reset used `if self._lerobot_dataset and …`, so in the FIRST
+        # episode of every new dataset „Wiederholen“, a collision discard and
+        # the frame-drop discard left the discarded frames in the buffer: the
+        # next saved episode carried them (measured with the real writer: 30
+        # discarded + 40 new = 70 frames saved).
+        for discard in ('rerecord', 'collision'):
+            with self.subTest(discard=discard):
+                dm, _ = make(reset=0, episode=10)
+                run_until(dm, 'run')
+                ticks(dm, 30)
+                self.assertEqual(len(dm._lerobot_dataset), 0)      # falsy
+                if discard == 'rerecord':
+                    self.assertTrue(dm.rerecord_from_command())
+                else:
+                    dm.re_record()
+                buf = dm._lerobot_dataset.episode_buffer
+                self.assertTrue(buf is None or buf['size'] == 0)
+                run_until(dm, 'run')
+                ticks(dm, 40)
+                self.assertEqual(dm.record_early_save(), 'save')
+                ticks(dm, 3)
+                self.assertEqual(dm._lerobot_dataset.committed_sizes, [40])
+
+    def test_a_frame_drop_discard_in_the_first_episode_empties_the_buffer(self):
+        dm, _ = make(drop=True, reset=0, episode=10)
+        run_until(dm, 'run')
+        ticks(dm, 40)
+        self.assertEqual(dm.record_early_save(), 'save')
+        tick(dm)                                  # save() sees the drop, discards
+        self.assertEqual(dm.get_status(), 'reset')
+        buf = dm._lerobot_dataset.episode_buffer
+        self.assertTrue(buf is None or buf['size'] == 0)
 
     def test_end_session_now_without_a_dataset(self):
         dm, up = make()

@@ -1131,8 +1131,16 @@ class DataManager:
             raise ValueError(f'Unsupported message type: {type(msg_data)}')
 
     def _episode_reset(self):
+        # `is not None`, never truthiness: LeRobotDataset.__len__ is the number
+        # of SAVED frames, so a fresh dataset is falsy until its first episode
+        # is saved — and every discard in that first episode (Wiederholen, a
+        # collision, the frame-drop re-record, a dropped FINISH run) used to
+        # leave its frames in the writer's buffer, to be saved with the next
+        # episode. A fresh buffer also makes the writer restart the streaming
+        # encoder (start_episode cancels the stale one), so video and parquet
+        # stay in step.
         if (
-            self._lerobot_dataset
+            self._lerobot_dataset is not None
             and (hasattr(self._lerobot_dataset, 'episode_buffer')
                  or self._current_task == 0)
         ):

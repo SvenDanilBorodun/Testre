@@ -149,10 +149,11 @@ export function finishSteps(session, { nowWallMs = Date.now(), heartbeat = 'conn
         ...base,
         eyebrow: F.eyebrowFinalizeFailed,
         title: F.titleFinalizeFailed,
+        // The steps that will not happen are skipped, never „still to come".
         steps: [
           step('finalize', F.stepFinalize, 'failed', f.message || ''),
-          hub ? step('upload', upLabel) : step('upload', F.stepUpload, 'skipped', F.uploadOff),
-          step('register', F.stepRegister, hub ? '' : 'skipped'),
+          hub ? step('upload', upLabel, 'skipped') : step('upload', F.stepUpload, 'skipped', F.uploadOff),
+          step('register', F.stepRegister, 'skipped'),
         ],
         actions: [NEW()],
       };

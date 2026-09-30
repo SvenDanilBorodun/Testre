@@ -130,8 +130,11 @@ describe('finishSteps', () => {
     expect(local.title).not.toBe(F.titleDone);
     expect(local.savedAs).toBeNull();
     expect(actionIds(local)).toEqual(['newRecording']);
+    // upload ON: the steps that will not happen are skipped, not „still to come"
     const hub = finishSteps(session({ state: 'finalize_failed', message: why }));
-    expect(states(hub)).toEqual(['finalize:failed', 'upload:', 'register:']);
+    expect(states(hub)).toEqual(['finalize:failed', 'upload:skipped', 'register:skipped']);
+    expect(hub.steps[1].label).toBe('Zu Hugging Face hochladen (privat)');
+    expect(hub.steps[1].detail).toBe('');
   });
 
   it('the title counts right (V2-4): one episode, several, none', () => {

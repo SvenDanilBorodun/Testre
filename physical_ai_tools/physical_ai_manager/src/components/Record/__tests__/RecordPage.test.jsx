@@ -201,6 +201,27 @@ describe('RecordPage — Start', () => {
   });
 });
 
+describe('RecordPage — Space means „Aufnahme starten" after a mouse click on a helper (V2-3)', () => {
+  it.each([
+    ['the Episoden stepper', () => screen.getByRole('button', { name: 'Episoden erhöhen' })],
+    ['the view switch', () => screen.getByRole('button', { name: 'Beides' })],
+    ['the sound switch', () => screen.getByRole('button', { name: /Ton (aus|ein)schalten/ })],
+    ['„Erweitert"', () => screen.getByRole('button', { name: 'Erweitert' })],
+  ])('%s: the click does its job, then Space starts and presses nothing else', async (_name, getButton) => {
+    const store = makeStore();
+    renderPage(store);
+    const button = getButton();
+    button.focus();
+    fireEvent.click(button, { detail: 1 });
+    expect(button).not.toHaveFocus();
+    const episodes = store.getState().tasks.taskInfo.numEpisodes;
+    // The focus is back on the page, so the key lands on <body>.
+    fireEvent.keyDown(document.body, { key: ' ' });
+    await waitFor(() => expect(commandsSent()).toEqual(['start_record']));
+    expect(store.getState().tasks.taskInfo.numEpisodes).toBe(episodes);
+  });
+});
+
 describe('RecordPage — during a session', () => {
   function inRecording({ proceed = 6, elapsed = 6, left = 14 } = {}) {
     const store = makeStore();
@@ -313,13 +334,28 @@ describe('RecordPage — view switch and the 3D tile', () => {
 });
 
 describe('RecordPage — the finish', () => {
-  async function recordOneAndEnd(store, { pushToHub }) {
+  async function recordOneAndEnd(store, { pushToHub, endWarn = '' }) {
     mockClock = { ...mockClock, secondsLeft: 10, elapsed: 10 };
     dispatch(store, recordTick({ phase: TaskPhase.RECORDING, totalTime: 20, proceedTime: 10, pushToHub }));
     dispatch(store, recordTick({ phase: TaskPhase.SAVING, totalTime: 0, proceedTime: 0, pushToHub }));
     dispatch(store, recordTick({ phase: TaskPhase.RESETTING, totalTime: 5, proceedTime: 0, currentEpisodeNumber: 1, pushToHub }));
-    dispatch(store, idleTick({ currentEpisodeNumber: 1 }));
+    dispatch(store, idleTick({ currentEpisodeNumber: 1, recordWarn: endWarn }));
   }
+
+  it('a failed finalize: step 1 failed, only „Neue Aufnahme", and the form says the recording is over', async () => {
+    const store = makeStore({ form: { ...FORM, pushToHub: false } });
+    renderPage(store);
+    await recordOneAndEnd(store, {
+      pushToHub: false,
+      endWarn: 'Datensatz konnte nicht abgeschlossen werden: die Videodatei fehlt.',
+    });
+    const card = await screen.findByTestId('rec-finish-card');
+    expect(within(card).getByTestId('rec-step-finalize')).toHaveAttribute('data-state', 'failed');
+    expect(card).toHaveTextContent('die Videodatei fehlt');
+    expect(within(card).getAllByRole('button').map((b) => b.textContent)).toEqual(['Neue Aufnahme']);
+    expect(screen.getByTestId('rec-locked')).toHaveTextContent('Die Aufnahme ist beendet.');
+    expect(screen.getByTestId('rec-locked')).not.toHaveTextContent('Während der Aufnahme gesperrt.');
+  });
 
   it('upload on: uploading → done, then „Weiter zum Training" opens the dataset there', async () => {
     const store = makeStore();

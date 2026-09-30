@@ -124,3 +124,62 @@ describe('EpisodeDots', () => {
     expect(screen.queryByRole('group', { name: 'Episoden' })).toBeNull();
   });
 });
+
+// Review V2-3: a mouse click must not leave the focus on a button, or Space
+// („Aufnahme starten") presses that button again. Keyboard focus stays.
+describe('ActionBar — focus after a click', () => {
+  it('a pointer click gives the focus back; a keyboard click keeps it', () => {
+    render(<ActionBar ariaLabel="Aufnahmesteuerung" pill={PILL} buttons={RECORDING_BUTTONS} onAction={() => {}} mute={MUTE(false)} />);
+    const redo = screen.getByRole('button', { name: /Wiederholen/ });
+    redo.focus();
+    fireEvent.click(redo, { detail: 1 });
+    expect(redo).not.toHaveFocus();
+    redo.focus();
+    fireEvent.click(redo, { detail: 0 });
+    expect(redo).toHaveFocus();
+    const mute = screen.getByRole('button', { name: 'Ton ausschalten' });
+    mute.focus();
+    fireEvent.click(mute, { detail: 1 });
+    expect(mute).not.toHaveFocus();
+  });
+});
+
+// Review V2-7: the bar sheds only when its row really does not fit — measured
+// after layout (jsdom measures nothing, so the measurement is injected here).
+describe('ActionBar — shedding only when the row does not fit', () => {
+  const TWO = [
+    { id: 'skip', label: 'Jetzt weiter', icon: 'skipForward', kbd: '→', variant: 'primary' },
+    { id: 'end', label: 'Beenden', icon: 'stop', kbd: 'Strg+Umschalt+X', variant: 'end' },
+  ];
+  const bar = () => screen.getByTestId('rec-actionbar');
+
+  it('a row that fits sheds nothing: the dots keep their label and size', () => {
+    render(<ActionBar ariaLabel="Aufnahmesteuerung" pill={PILL} buttons={RECORDING_BUTTONS} fitsOneRow={() => true} />);
+    expect(bar()).not.toHaveAttribute('data-shed');
+  });
+
+  it('three buttons that do not fit shed the Beenden key first, then the other keys, then label and dots', () => {
+    const { rerender } = render(
+      <ActionBar ariaLabel="Aufnahmesteuerung" pill={PILL} buttons={RECORDING_BUTTONS} fitsOneRow={(_el, step) => step >= 1} />
+    );
+    expect(bar()).toHaveAttribute('data-shed', 'endKey');
+    expect(bar()).toHaveClass('rec-shed-endkey');
+    rerender(<ActionBar ariaLabel="Aufnahmesteuerung" pill={PILL} buttons={RECORDING_BUTTONS} fitsOneRow={(_el, step) => step >= 3} />);
+    // A new measurement function is not a content change; the key is.
+    rerender(
+      <ActionBar
+        ariaLabel="Aufnahmesteuerung"
+        pill={{ ...PILL, sub: 'Episode 1 von 3 · noch 11 s' }}
+        buttons={RECORDING_BUTTONS}
+        fitsOneRow={(_el, step) => step >= 3}
+      />
+    );
+    expect(bar()).toHaveAttribute('data-shed', 'endKey keys label');
+  });
+
+  it('with two buttons nothing is ever shed (the dots may wrap, like the mockup)', () => {
+    render(<ActionBar ariaLabel="Aufnahmesteuerung" pill={PILL} buttons={TWO} fitsOneRow={() => false} />);
+    expect(bar()).not.toHaveAttribute('data-shed');
+    expect(screen.getByRole('button', { name: /Beenden/ })).toHaveTextContent('Strg+Umschalt+X');
+  });
+});

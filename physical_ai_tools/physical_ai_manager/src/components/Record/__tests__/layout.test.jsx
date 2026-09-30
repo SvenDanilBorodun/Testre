@@ -3,11 +3,13 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 //
-// The page layout (spec §3.12): the page is the `rec` size container, the
-// action bar is a FLOW sibling after the stage (never absolute or fixed, so
-// nothing can slide under it), the narrow layout (≤ 1150 px of page) makes it
-// sticky at the bottom of its column, and the phase colours are defined on the
-// page. Read from record.css itself (jsdom computes no container queries) and
+// The page layout (spec §3.12, review V2-1): the page is the `rec` size
+// container; the problem banner and the action bar are ONE footer group, a
+// FLOW sibling after the stage (never absolute or fixed); the narrow layout
+// (≤ 1150 px of page) makes that group sticky at the bottom of its column, so
+// the banner can never slide under the bar; a stage card centres its content
+// safely (its top is always reachable); and the phase colours are defined on
+// the page. Read from record.css itself (jsdom computes no container queries) and
 // from the rendered DOM order.
 
 import fs from 'fs';
@@ -76,24 +78,40 @@ describe('record.css', () => {
     expect(rule(CSS, '.rec-grid')).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)\s+360px/);
   });
 
-  it('the action bar is never absolute or fixed, anywhere', () => {
+  it('neither the action bar nor the footer is ever absolute or fixed, and the bar is never sticky on its own', () => {
     const bars = [...CSS.matchAll(/\.rec-actionbar\s*\{([^}]*)\}/g)].map((m) => m[1]);
     expect(bars.length).toBeGreaterThan(0);
-    bars.forEach((b) => expect(b).not.toMatch(/position:\s*(absolute|fixed)/));
+    bars.forEach((b) => expect(b).not.toMatch(/position:\s*(absolute|fixed|sticky)/));
+    const footers = [...CSS.matchAll(/\.rec-footer\s*\{([^}]*)\}/g)].map((m) => m[1]);
+    expect(footers.length).toBeGreaterThan(0);
+    footers.forEach((b) => expect(b).not.toMatch(/position:\s*(absolute|fixed)/));
   });
 
-  it('narrow (≤ 1150 px of page): one column, a 470 px stage at most, the bar sticky at the bottom', () => {
+  it('narrow (≤ 1150 px of page): one column, a 470 px stage at most, banner + bar sticky together', () => {
     const narrow = containerBlock(CSS, 'rec (max-width: 1150px)');
     expect(narrow).not.toBeNull();
     expect(narrow).toMatch(/\.rec-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
     expect(narrow).toMatch(/\.rec-stage\s*\{[^}]*470px/);
-    expect(narrow).toMatch(/\.rec-actionbar\s*\{[^}]*position:\s*sticky[^}]*bottom:\s*0/);
+    expect(narrow).toMatch(/\.rec-footer\s*\{[^}]*position:\s*sticky[^}]*bottom:\s*0[^}]*background:\s*var\(--bg\)/);
     expect(narrow).toMatch(/\.rec-main\s*\{[^}]*overflow:\s*auto/);
+    // A banner takes room from the stage, not from under the footer.
+    expect(narrow).toMatch(/\.rec-left:has\(> \.rec-footer > \.rec-banner\) > \.rec-stage\s*\{[^}]*height:/);
+    // The finish card joins the flow and the stage grows with it.
+    expect(narrow).toMatch(/\.rec-finishcard\s*\{[^}]*position:\s*relative/);
+    expect(narrow).toMatch(/\.rec-stage:has\(> \.rec-finishcard\)\s*\{[^}]*height:\s*auto/);
+  });
+
+  it('a stage card centres its content safely: its top never leaves the card', () => {
+    const card = rule(CSS, '.rec-statecard');
+    expect(card).not.toMatch(/justify-content:\s*center/);
+    expect(card).toMatch(/overflow:\s*auto/);
+    expect(rule(CSS, '.rec-statecard > :first-child')).toMatch(/margin-top:\s*auto/);
+    expect(rule(CSS, '.rec-statecard > :last-child')).toMatch(/margin-bottom:\s*auto/);
   });
 });
 
 describe('the rendered page', () => {
-  it('stage, banner slot and action bar are siblings in that order in the left column; the cards on the right', () => {
+  it('the stage, then ONE footer with the banner slot and the action bar, in the left column; the cards on the right', () => {
     const store = configureStore({
       reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer, jetson: jetsonReducer },
     });
@@ -107,10 +125,13 @@ describe('the rendered page', () => {
     const barEl = screen.getByTestId('rec-actionbar');
     const left = stage.parentElement; // eslint-disable-line testing-library/no-node-access
     expect(left).toHaveClass('rec-left');
-    expect(barEl.parentElement).toBe(left); // eslint-disable-line testing-library/no-node-access
+    const footer = screen.getByTestId('rec-footer');
+    expect(footer.parentElement).toBe(left); // eslint-disable-line testing-library/no-node-access
+    expect(barEl.parentElement).toBe(footer); // eslint-disable-line testing-library/no-node-access
     const kids = [...left.children]; // eslint-disable-line testing-library/no-node-access
-    expect(kids.indexOf(barEl)).toBeGreaterThan(kids.indexOf(stage));
-    expect(kids[kids.length - 1]).toBe(barEl);
+    expect(kids).toEqual([stage, footer]);
+    const inFooter = [...footer.children]; // eslint-disable-line testing-library/no-node-access
+    expect(inFooter[inFooter.length - 1]).toBe(barEl);
     const right = screen.getByTestId('rec-task-card').parentElement; // eslint-disable-line testing-library/no-node-access
     expect(right).toHaveClass('rec-right');
     expect(right).toContainElement(screen.getByTestId('rec-session-card'));

@@ -17,12 +17,14 @@
 //     <div class="rec-grid">                  minmax(0,1fr) 360px
 //       <section class="rec-left">
 //         <RecordStage>   Phasenleiste + view switch · tiles · overlay layers
-//         <ProblemBanner/>                    only while there is a problem
-//         <ActionBar/>                        a flow sibling, never absolute
+//         <div class="rec-footer">            one group, sticky on a narrow page
+//           <ProblemBanner/>                  only while there is a problem
+//           <ActionBar/>                      a flow sibling, never absolute
 //       <aside class="rec-right"> <TaskCard/> <SessionCard/>
 //
 // On a narrow window (≤ 1150 px of page, e.g. 1093 px at 125 % scaling)
-// record.css turns this into one scrolling column with a sticky action bar.
+// record.css turns this into one scrolling column with a sticky footer (banner
+// + action bar together, so the banner can never slide under the bar).
 
 import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { shallowEqual, useSelector } from 'react-redux';
@@ -86,7 +88,7 @@ const OVERLAY_PHASE = { [VIEW.WARMUP]: 'warmup', [VIEW.RESETTING]: 'reset' };
 // The views in which the student is looking at the arm, not at the form.
 const STAGE_VIEWS = new Set([VIEW.STARTING, VIEW.WARMUP, VIEW.RECORDING, VIEW.COLLISION, VIEW.FINISHING]);
 
-export default function RecordPage({ isActive = true }) {
+function RecordPage({ isActive = true }) {
   const c = useRecordController({ isActive });
   const copy = c.copy;
   const { view, model } = c;
@@ -278,29 +280,32 @@ export default function RecordPage({ isActive = true }) {
               {stageCard ? <StageCard {...stageCard} /> : null}
               {showFinish ? <FinishCard {...c.finish} onAction={onFinishAction} /> : null}
             </RecordStage>
-            <ProblemBanner problem={c.problem} homeLabel={copy.problem.homeLabel} onGoHome={c.goToHome} />
-            <ActionBar
-              ariaLabel={copy.actionbar.aria}
-              pill={model.pill}
-              dots={(
-                <EpisodeDots
-                  label={model.dots.label}
-                  dots={model.dots.items}
-                  more={model.dots.more}
-                  color={model.dots.color}
-                />
-              )}
-              buttons={model.buttons}
-              question={c.question}
-              onAction={c.act}
-              onAnswer={c.act}
-              mute={{
-                muted: c.muted,
-                onToggle: c.toggleMute,
-                labelOff: copy.mute.labelOff,
-                labelOn: copy.mute.labelOn,
-              }}
-            />
+            <div className="rec-footer" data-testid="rec-footer">
+              <ProblemBanner problem={c.problem} homeLabel={copy.problem.homeLabel} onGoHome={c.goToHome} />
+              <ActionBar
+                ariaLabel={copy.actionbar.aria}
+                pill={model.pill}
+                dotCount={model.dots.items.length}
+                dots={(
+                  <EpisodeDots
+                    label={model.dots.label}
+                    dots={model.dots.items}
+                    more={model.dots.more}
+                    color={model.dots.color}
+                  />
+                )}
+                buttons={model.buttons}
+                question={c.question}
+                onAction={c.act}
+                onAnswer={c.act}
+                mute={{
+                  muted: c.muted,
+                  onToggle: c.toggleMute,
+                  labelOff: copy.mute.labelOff,
+                  labelOn: copy.mute.labelOn,
+                }}
+              />
+            </div>
           </section>
           <aside className="rec-right">
             <TaskCard
@@ -330,3 +335,7 @@ export default function RecordPage({ isActive = true }) {
     </div>
   );
 }
+
+// Memoised: StudentApp re-renders with every store change it reads; the page
+// has its own subscriptions and needs no re-render from its parent (V2-2).
+export default React.memo(RecordPage);

@@ -446,7 +446,10 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* Centred SAFELY: auto margins on the first and last child centre the
+   * content while it fits and let it start at the top (and scroll) when it
+   * does not; plain flex centring would push its top out of reach. */
+  justify-content: flex-start;
   gap: 10px;
   text-align: center;
   color: var(--dark-ink);
@@ -454,6 +457,8 @@
   z-index: 8;
   overflow: auto;
 }
+.rec-statecard > :first-child { margin-top: auto; }
+.rec-statecard > :last-child { margin-bottom: auto; }
 .rec-statecard h2 { margin: 0; font-size: 20px; font-weight: 700; }
 .rec-statecard p { margin: 0; color: var(--dark-ink-2); max-width: 50ch; }
 .rec-statecard .rec-card-icon { color: var(--dark-ink-2); }
@@ -493,8 +498,10 @@
 .rec-step.done .rec-sdot { background: var(--success); border-color: var(--success); }
 .rec-step.failed { color: #7A1616; }
 .rec-step.failed .rec-sdot { background: var(--danger); border-color: var(--danger); }
-.rec-step.unknown .rec-sdot,
-.rec-step.skipped .rec-sdot { border-style: dashed; }
+.rec-step.skipped { color: var(--ink-3); }
+.rec-step.skipped .rec-sdot { background: var(--bg-sunk); border-color: var(--line-2); color: var(--ink-3); }
+.rec-step.unknown { color: #5C3D06; }
+.rec-step.unknown .rec-sdot { background: var(--amber-wash); border-color: var(--amber); color: var(--amber); }
 .rec-bar { height: 6px; border-radius: 99px; background: var(--bg-sunk); overflow: hidden; }
 .rec-bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
 .rec-finish-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
@@ -526,11 +533,12 @@
   cursor: pointer;
 }
 
+/* ---------- footer: the problem banner and the action bar, one group ---------- */
+.rec-footer { flex: none; display: flex; flex-direction: column; gap: 10px; }
+
 /* ---------- action bar ---------- */
 .rec-actionbar {
   flex: none;
-  container-type: inline-size;
-  container-name: recbar;
   display: flex;
   align-items: center;
   gap: 16px;
@@ -647,24 +655,17 @@
 .rec-confirm .q b { display: block; font-size: 15px; }
 .rec-confirm .q span { font-size: 13px; color: var(--ink-3); }
 
-/* A compact bar. With three buttons (Aufnehmen: Wiederholen, Jetzt speichern,
- * Beenden) and five or more episode dots the mockup's row is wider than the
- * stage column at 1440 and 1366 px, because „Strg+Umschalt+X" is spelled out
- * (H9). Rather than wrap single buttons onto a second row, the bar sheds what
- * is repeated elsewhere, in this order: the dots' label and size, then the
- * long key label of Beenden, then the arrow key labels. The shortcuts still
- * work and stay announced (aria-keyshortcuts) and named in the button title. */
-@container recbar (max-width: 1100px) {
-  .rec-eps .lbl:first-child { display: none; }
-  .rec-eps { gap: 4px; }
-  .rec-epd { width: 22px; height: 22px; font-size: 10px; }
-  .rec-btns:has(> .rec-btn:nth-child(3)) .rec-btn[data-action="end"] .rec-kbd { display: none; }
-}
-@container recbar (max-width: 900px) {
-  .rec-btns:has(> .rec-btn:nth-child(3)) .rec-kbd { display: none; }
-  .rec-btns:has(> .rec-btn:nth-child(3)) .rec-btn.md { padding: 0 13px; }
-  .rec-phasepill { min-width: 0; }
-}
+/* Shedding (ActionBar.jsx measures): only when the row does not fit in one
+ * line of its normal height, one step at a time. The two key steps exist
+ * only on a bar with three command buttons. */
+.rec-actionbar.rec-shed-endkey .rec-btn[data-action="end"] .rec-kbd { display: none; }
+.rec-actionbar.rec-shed-keys .rec-btns .rec-kbd { display: none; }
+.rec-actionbar.rec-shed-keys .rec-btns .rec-btn.md { padding: 0 13px; }
+.rec-actionbar.rec-shed-label .rec-eps .lbl:first-child { display: none; }
+.rec-actionbar.rec-shed-label .rec-phasepill { min-width: 0; }
+.rec-actionbar.rec-shed-dots .rec-eps { gap: 4px; }
+.rec-actionbar.rec-shed-dots .rec-epd { width: 22px; height: 22px; font-size: 10px; }
+
 
 /* ---------- cards (right column) ---------- */
 .rec-card { background: var(--bg-raised); border: 1px solid var(--line); border-radius: 16px; flex: none; }
@@ -879,21 +880,35 @@
 .rec-sumline { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--ink-3); padding-top: 8px; }
 .rec-empty { color: var(--ink-3); font-size: 13px; padding: 10px 0; }
 
-/* ---------- narrow: the page scrolls, one column, the action bar sticks ----------
- * The stage is 470 px tall, but never so tall that the action bar under it
- * starts below the fold at a short window (1093×550 at 125 % scaling): the
- * header, paddings and the bar take ~210 px. The bar sticks to the bottom only
- * while its own column is on screen, like the mockup. */
+/* ---------- narrow: the page scrolls, one column, the footer sticks ----------
+ * The stage is 470 px tall, but never so tall that the footer under it starts
+ * below the fold at a short window (1093×550 at 125 % scaling): the header,
+ * paddings and the action bar take ~210 px, a problem banner ~80 more. The
+ * banner and the bar stick TOGETHER (one footer group, on the page's own
+ * background), so the banner can never slide under the bar; the group sticks
+ * only while its own column is on screen, like the mockup. The finish card
+ * joins the flow here and the stage grows with it, so its top and its buttons
+ * are always on the page (the page scrolls, not the card), and the footer
+ * then stays in the flow below it. */
 @container rec (max-width: 1150px) {
   .rec-main { overflow: auto; }
   .rec-grid { grid-template-columns: minmax(0, 1fr); flex: none; }
   .rec-stage { flex: none; height: clamp(300px, calc(100vh - 210px), 470px); }
-  .rec-actionbar {
+  .rec-left:has(> .rec-footer > .rec-banner) > .rec-stage { height: clamp(260px, calc(100vh - 300px), 470px); }
+  .rec-footer {
     position: sticky;
     bottom: 0;
     z-index: 9;
+    background: var(--bg);
+    border-radius: 16px;
     box-shadow: 0 -10px 24px -18px rgba(0, 0, 0, .4);
   }
+  .rec-stage:has(> .rec-finishcard) { height: auto; min-height: clamp(260px, calc(100vh - 300px), 470px); }
+  /* With the finish card the bar has no command to offer, and a sticky footer
+   * would cover the card's buttons at the fold: it stays in the flow. */
+  .rec-left:has(> .rec-stage > .rec-finishcard) > .rec-footer { position: static; box-shadow: none; }
+  .rec-stage:has(> .rec-finishcard) > .rec-tiles { display: none; }
+  .rec-finishcard { position: relative; inset: auto; flex: 1; padding: 12px; }
   .rec-right { overflow: visible; display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
   .rec-ov-inner { gap: 22px; }
   .rec-ringbox { width: 170px; height: 170px; }

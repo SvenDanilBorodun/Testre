@@ -186,4 +186,24 @@ describe('TaskCard', () => {
     expect(screen.getByLabelText('Aufgabenname')).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByText('Bitte gib einen Aufgabennamen ein.')).toBeInTheDocument();
   });
+
+  it('a mouse click on +/−, „Erweitert" or the switches gives the focus back (Space starts, V2-3)', () => {
+    renderCard();
+    const plus = screen.getByRole('button', { name: 'Episoden erhöhen' });
+    plus.focus();
+    fireEvent.click(plus, { detail: 1 });
+    expect(plus).not.toHaveFocus();
+    const adv = screen.getByRole('button', { name: 'Erweitert' });
+    adv.focus();
+    fireEvent.click(adv, { detail: 1 });
+    expect(adv).not.toHaveFocus();
+    const sw = screen.getByRole('switch', { name: 'Nach dem Beenden hochladen' });
+    sw.focus();
+    fireEvent.click(sw, { detail: 1 });
+    expect(sw).not.toHaveFocus();
+    // Keyboard: Tab focus stays where the student put it.
+    plus.focus();
+    fireEvent.click(plus, { detail: 0 });
+    expect(plus).toHaveFocus();
+  });
 });

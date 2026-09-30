@@ -14,13 +14,16 @@
 // whenever the page says so: not connected, a session running or finishing.
 //
 // Presentational: the values, the limits, the German words and the change
-// handler come from the page. Validation runs when Start is pressed, not here;
+// handler come from the page. Its buttons give the focus back to the page
+// after a mouse click, so Space still starts a recording instead of pressing
+// „+" once more (keyboard focus stays where the student put it). Validation runs when Start is pressed, not here;
 // a refused field is only marked.
 
 import React, { useState } from 'react';
 import clsx from 'clsx';
 import Icon from '../icons/Icon';
 import TagInput from '../TagInput';
+import { releasePointerFocus } from './ActionBar';
 
 function Stepper({ s, value, disabled, onChange, labels }) {
   const v = Number.isFinite(Number(value)) ? Number(value) : s.min;
@@ -33,7 +36,7 @@ function Stepper({ s, value, disabled, onChange, labels }) {
           type="button"
           disabled={disabled || v <= s.min}
           aria-label={labels.dec(s.label)}
-          onClick={() => set(v - 1)}
+          onClick={(e) => { releasePointerFocus(e); set(v - 1); }}
         >
           <Icon name="minus" size={16} />
         </button>
@@ -45,7 +48,7 @@ function Stepper({ s, value, disabled, onChange, labels }) {
           type="button"
           disabled={disabled || v >= s.max}
           aria-label={labels.inc(s.label)}
-          onClick={() => set(v + 1)}
+          onClick={(e) => { releasePointerFocus(e); set(v + 1); }}
         >
           <Icon name="plus" size={16} />
         </button>
@@ -152,7 +155,7 @@ export default function TaskCard({
           className="rec-adv-t"
           aria-expanded={advOpen ? 'true' : 'false'}
           aria-controls="rec-adv"
-          onClick={() => setAdvOpen((o) => !o)}
+          onClick={(e) => { releasePointerFocus(e); setAdvOpen((o) => !o); }}
         >
           <Icon name="chevronRight" size={14} />
           {labels.advanced}
@@ -168,7 +171,7 @@ export default function TaskCard({
                 aria-checked={form.pushToHub ? 'true' : 'false'}
                 aria-labelledby="rec-adv-upload"
                 disabled={locked}
-                onClick={() => change('pushToHub', !form.pushToHub)}
+                onClick={(e) => { releasePointerFocus(e); change('pushToHub', !form.pushToHub); }}
               />
             </div>
             <div className="rec-arow">
@@ -178,7 +181,7 @@ export default function TaskCard({
                   type="button"
                   aria-pressed={form.privateMode !== false}
                   disabled={locked || !form.pushToHub}
-                  onClick={() => change('privateMode', true)}
+                  onClick={(e) => { releasePointerFocus(e); change('privateMode', true); }}
                 >
                   {labels.private}
                 </button>
@@ -186,7 +189,7 @@ export default function TaskCard({
                   type="button"
                   aria-pressed={form.privateMode === false}
                   disabled={locked || !form.pushToHub}
-                  onClick={() => change('privateMode', false)}
+                  onClick={(e) => { releasePointerFocus(e); change('privateMode', false); }}
                 >
                   {labels.public}
                 </button>
@@ -214,7 +217,7 @@ export default function TaskCard({
                   type="button"
                   className="rec-linkbtn"
                   disabled={typeof hfUsers.reload !== 'function' || hfUsers.loading}
-                  onClick={() => hfUsers.reload && hfUsers.reload()}
+                  onClick={(e) => { releasePointerFocus(e); if (hfUsers.reload) hfUsers.reload(); }}
                 >
                   <Icon name="refresh" size={13} className={hfUsers.loading ? 'animate-spin' : ''} />
                   {labels.reload}

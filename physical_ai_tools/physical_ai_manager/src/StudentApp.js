@@ -35,7 +35,7 @@ import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import { useHfUserList } from './hooks/useHfUserList';
 import { useHeartbeatWatchdog } from './hooks/useHeartbeatWatchdog';
 import rosConnectionManager from './utils/rosConnectionManager';
-import { useDispatch, useSelector } from 'react-redux';
+import { shallowEqual, useDispatch, useSelector } from 'react-redux';
 import { setRosHost } from './features/ros/rosSlice';
 import { clearCapabilities } from './features/tasks/taskSlice';
 import { moveToPage } from './features/ui/uiSlice';
@@ -60,8 +60,18 @@ import Icon from './components/icons/Icon';
 
 function StudentApp() {
   const dispatch = useDispatch();
-  const taskStatus = useSelector((state) => state.tasks.taskStatus);
-  const taskInfo = useSelector((state) => state.tasks.taskInfo);
+  // Only the fields this shell reads. The whole taskStatus / taskInfo objects
+  // are replaced with every /task/status tick (~30 Hz while a task runs), and
+  // subscribing to them re-rendered the shell — and with it the open page — on
+  // every tick (Aufnahme 2.0 review, V2-2).
+  const taskStatus = useSelector(
+    (state) => ({
+      running: state.tasks.taskStatus.running,
+      topicReceived: state.tasks.taskStatus.topicReceived,
+    }),
+    shallowEqual,
+  );
+  const taskType = useSelector((state) => state.tasks.taskInfo.taskType);
   const trainingTopicReceived = useSelector((state) => state.training.topicReceived);
   const session = useSelector((state) => state.auth.session);
   const role = useSelector((state) => state.auth.role);
@@ -301,9 +311,9 @@ function StudentApp() {
       // Auto-rejoin a task that was in flight when the browser (re)loaded — but
       // respect the capability manifest: a stale in-flight task_type on a
       // type-switched rig must not jump into a page that type can't do.
-      if (taskInfo?.taskType === PageType.RECORD && caps?.recordable !== false) {
+      if (taskType === PageType.RECORD && caps?.recordable !== false) {
         dispatch(moveToPage(PageType.RECORD));
-      } else if (taskInfo?.taskType === PageType.INFERENCE && caps?.inferable !== false) {
+      } else if (taskType === PageType.INFERENCE && caps?.inferable !== false) {
         dispatch(moveToPage(PageType.INFERENCE));
       }
       isFirstLoad.current = false;
@@ -311,7 +321,7 @@ function StudentApp() {
       dispatch(moveToPage(PageType.TRAINING));
       isFirstLoad.current = false;
     }
-  }, [page, taskInfo?.taskType, taskStatus.topicReceived, trainingTopicReceived, caps, dispatch]);
+  }, [page, taskType, taskStatus.topicReceived, trainingTopicReceived, caps, dispatch]);
 
   const requireRobotOrRedirect = (targetPage) => {
     const decision = robotGateDecision({

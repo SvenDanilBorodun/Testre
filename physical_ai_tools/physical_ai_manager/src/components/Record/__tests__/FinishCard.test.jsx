@@ -65,4 +65,46 @@ describe('FinishCard', () => {
     expect(screen.getByTestId('rec-finish-note')).toHaveTextContent('Die Aufnahme wurde nach der Kollision beendet.');
     expect(screen.getByText('Das Hochladen hat nicht begonnen.')).toBeInTheDocument();
   });
+
+  it('every step state has its own mark: failed is not a check, skipped is not an empty circle', () => {
+    render(
+      <FinishCard
+        eyebrow="Fertig"
+        title="Dein Datensatz ist bereit"
+        steps={[
+          { key: 'finalize', label: 'Datensatz abschließen', state: 'done' },
+          { key: 'upload', label: 'Zu Hugging Face hochladen', state: 'unknown', detail: 'Der Stand des Hochladens ist unbekannt.' },
+          { key: 'register', label: 'In deiner Datensatzliste eintragen', state: 'failed' },
+        ]}
+      />
+    );
+    const icon = (key) => screen.getByTestId(`rec-step-${key}`).querySelector('svg')?.getAttribute('data-icon'); // eslint-disable-line testing-library/no-node-access
+    expect(icon('finalize')).toBe('check');
+    expect(icon('upload')).toBe('info');
+    expect(icon('register')).toBe('failed');
+  });
+
+  it('a skipped step shows the skip mark; a finalize failure offers only „Neue Aufnahme"', () => {
+    const onAction = vi.fn();
+    render(
+      <FinishCard
+        eyebrow="Nicht abgeschlossen"
+        title="Der Datensatz konnte nicht abgeschlossen werden"
+        steps={[
+          { key: 'finalize', label: 'Datensatz abschließen', state: 'failed', detail: 'Der Datensatz ist unvollständig.' },
+          { key: 'upload', label: 'Zu Hugging Face hochladen', state: 'skipped', detail: 'Nicht hochgeladen (Hochladen ist ausgeschaltet)' },
+          { key: 'register', label: 'In deiner Datensatzliste eintragen', state: 'skipped' },
+        ]}
+        actions={[{ id: 'newRecording', label: 'Neue Aufnahme', variant: 'ghost' }]}
+        onAction={onAction}
+      />
+    );
+    const icon = (key) => screen.getByTestId(`rec-step-${key}`).querySelector('svg')?.getAttribute('data-icon'); // eslint-disable-line testing-library/no-node-access
+    expect(icon('finalize')).toBe('failed');
+    expect(icon('upload')).toBe('minus');
+    expect(icon('register')).toBe('minus');
+    expect(screen.getAllByRole('button')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Neue Aufnahme' }));
+    expect(onAction).toHaveBeenCalledWith('newRecording');
+  });
 });

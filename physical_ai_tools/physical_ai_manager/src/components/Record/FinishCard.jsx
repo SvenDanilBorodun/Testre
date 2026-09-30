@@ -15,8 +15,11 @@
 import React from 'react';
 import clsx from 'clsx';
 import Icon from '../icons/Icon';
+import { releasePointerFocus } from './ActionBar';
 
-const STEP_ICON = { done: 'check', failed: 'failed', now: 'loading' };
+// Every state has its own mark: a failed step is never a check, a skipped
+// one never an empty „still to come" circle, an unknown one says so.
+const STEP_ICON = { done: 'check', failed: 'failed', now: 'loading', skipped: 'minus', unknown: 'info' };
 
 function StepDot({ state }) {
   const name = STEP_ICON[state];
@@ -25,8 +28,8 @@ function StepDot({ state }) {
     <span className="rec-sdot">
       <Icon
         name={name}
-        size={state === 'now' ? 14 : 12}
-        strokeWidth={3}
+        size={state === 'now' || state === 'failed' || state === 'unknown' ? 14 : 12}
+        strokeWidth={state === 'failed' || state === 'unknown' ? 2.5 : 3}
         className={state === 'now' ? 'animate-spin' : ''}
       />
     </span>
@@ -45,7 +48,7 @@ export default function FinishCard({
   onAction,
 }) {
   return (
-    <div className="rec-statecard" data-testid="rec-finish-card">
+    <div className="rec-statecard rec-finishcard" data-testid="rec-finish-card">
       <div className="rec-finish" role="status" aria-live="polite">
         <div>
           <div className="rec-eyebrow">{eyebrow}</div>
@@ -54,7 +57,13 @@ export default function FinishCard({
         </div>
         <div className="rec-steps">
           {steps.map((s) => (
-            <div key={s.key} className={clsx('rec-step', s.state)} data-state={s.state || 'upcoming'} data-step={s.key}>
+            <div
+              key={s.key}
+              className={clsx('rec-step', s.state)}
+              data-state={s.state || 'upcoming'}
+              data-step={s.key}
+              data-testid={`rec-step-${s.key}`}
+            >
               <StepDot state={s.state} />
               <span className="rec-step-label">
                 {s.label}
@@ -86,7 +95,10 @@ export default function FinishCard({
                 key={a.id}
                 type="button"
                 className={clsx('rec-btn md', a.variant || 'ghost')}
-                onClick={() => onAction && onAction(a.id)}
+                onClick={(e) => {
+                  releasePointerFocus(e);
+                  if (onAction) onAction(a.id);
+                }}
               >
                 {a.label}
               </button>

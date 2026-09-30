@@ -399,7 +399,9 @@ class DataManager:
         elif self._status == 'stop':
             if not self._stop_save_completed:
                 if self._on_saving:
-                    if self._lerobot_dataset.check_video_encoding_completed():
+                    # A STOP before the first record tick has no dataset at all.
+                    if (self._lerobot_dataset is None
+                            or self._lerobot_dataset.check_video_encoding_completed()):
                         self._on_saving = False
                         self._episode_reset()
                         # Count only an episode save() really committed: a STOP
@@ -607,10 +609,17 @@ class DataManager:
 
         Returns True when the dataset is finalized (or was already); False when
         finalize() raised — in which case the caller MUST skip the upload, since
-        the on-disk files would be incomplete.
+        the on-disk files would be incomplete — or when no dataset exists (then
+        there is nothing to upload either).
         """
         ds = self._lerobot_dataset
         if ds is None:
+            # No dataset was ever created: the session ended (FINISH, STOP or a
+            # forced collision recovery) while the node still waited for sensor
+            # data. Nothing to finalize or upload — but the crash marker the
+            # first record tick wrote must go, or the next boot reports a
+            # crashed session that never recorded anything.
+            self._clear_session_marker()
             return False
         try:
             ds.finalize()
@@ -843,6 +852,16 @@ class DataManager:
         return False
 
     def record_stop(self):
+        status = self._status
+        if status in ('save', 'finish') and getattr(self, '_on_saving', False):
+            # The 'stop' branch finds _on_saving latched and goes straight to
+            # completion: count the episode save() already committed (a latched
+            # 'save' always did; a latched 'finish' only when it committed one).
+            # HEAD counted and uploaded it; without this it stayed on disk,
+            # uncounted and never uploaded.
+            self._stop_count_pending = (
+                status == 'save' or getattr(self, '_finish_count_pending', False))
+            self._finish_count_pending = False
         self._status = 'stop'
 
     def record_finish(self):
@@ -871,9 +890,10 @@ class DataManager:
         # save-completion branch does, THEN rewind as before. The collision
         # still halts and resumes the same session; nothing new is discarded.
         # (The buffer reset of that branch is the rewind's own _episode_reset.)
-        # When that was the LAST episode, finish as that branch does: a rewind
-        # to 'reset' would start a run the session has no room for, and the
-        # cap-reached check would then finalize with a frame in flight.
+        # When that was the LAST episode, finish as that branch does: a literal
+        # rewind to 'reset' records no frame, but it publishes a phantom
+        # RESETTING („Episode N+1 von N“) for the whole Zurücksetzen time and a
+        # RECORDING tick before the session completes.
         if self._status == 'save' and getattr(self, '_on_saving', False):
             self._verify_saved_video_files()
             self._record_episode_count += 1

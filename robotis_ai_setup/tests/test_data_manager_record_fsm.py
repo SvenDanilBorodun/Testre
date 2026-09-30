@@ -323,6 +323,61 @@ class StopTest(_FsmTestCase):
         self.assertEqual(dm._lerobot_dataset.committed, 1)
         self.assertEqual(up, ['maxmuster/omx_f_Wuerfel-in-die-Schale'])
 
+    def test_stop_during_a_latched_save_counts_the_committed_episode(self):
+        # Verifier V1-1 (owner: count it). save() already committed the episode;
+        # HEAD counted and uploaded it, the first cut of Aufnahme 2.0 did not.
+        for n in (3, 1):
+            with self.subTest(num_episodes=n):
+                dm, up = make(n=n)
+                run_until(dm, 'save')
+                tick(dm)
+                self.assertTrue(dm._on_saving)
+                dm.record_stop()
+                results = ticks(dm, 5)
+                self.assertIn(True, results)
+                self.assertEqual(dm._lerobot_dataset.committed, 1)
+                self.assertEqual(dm._record_episode_count, 1)
+                self.assertEqual(len(up), 1)
+
+    def test_stop_after_a_committed_finish_counts_it(self):
+        for n in (3, 1):
+            with self.subTest(num_episodes=n):
+                dm, up = make(n=n)
+                run_until(dm, 'run')
+                ticks(dm, 45)
+                dm.record_finish()
+                tick(dm)                        # FINISH committed the episode
+                self.assertTrue(dm._on_saving)
+                self.assertEqual(dm.get_status(), 'finish')
+                dm.record_stop()
+                results = ticks(dm, 5)
+                self.assertIn(True, results)
+                self.assertEqual(dm._lerobot_dataset.committed, 1)
+                self.assertEqual(dm._record_episode_count, 1)
+                self.assertEqual(len(up), 1)
+
+    def test_stop_after_a_finish_that_committed_nothing_counts_nothing(self):
+        dm, up = make()
+        tick(dm)
+        dm.record_finish()
+        tick(dm)                                # finish latched, nothing committed
+        self.assertTrue(dm._on_saving)
+        dm.record_stop()
+        results = ticks(dm, 5)
+        self.assertIn(True, results)
+        self.assertEqual(dm._record_episode_count, 0)
+        self.assertEqual(dm._lerobot_dataset.committed, 0)
+        self.assertEqual(up, [])
+
+    def test_stop_before_the_first_tick_without_a_dataset(self):
+        dm, up = make()
+        dm._lerobot_dataset = None
+        dm.record_stop()
+        results = ticks(dm, 4)
+        self.assertIn(True, results)
+        self.assertEqual(dm._record_episode_count, 0)
+        self.assertEqual(up, [])
+
 
 class FinishTest(_FsmTestCase):
 
@@ -651,6 +706,20 @@ class CollisionPathTest(_FsmTestCase):
             buffer_sizes.append(0 if buf is None else buf['size'])
         self.assertEqual(buffer_sizes, [0, 0, 0])   # no frame recorded after it
         self.assertIn(True, results)
+        # A literal rewind to 'reset' would publish a phantom RESETTING
+        # („Episode 2 von 1“) and a RECORDING tick before READY (verifier V1-7).
+        dm, _ = make(n=1, reset=2)
+        run_until(dm, 'save')
+        tick(dm)
+        dm.re_record()
+        phases = set()
+        for _ in range(200):
+            done = tick(dm)
+            phases.add(dm.get_current_record_status().phase)
+            if done:
+                break
+        self.assertTrue(done)
+        self.assertEqual(phases, {_TaskStatus.SAVING})
         self.assertEqual(dm._record_episode_count, 1)
         self.assertEqual(dm._lerobot_dataset.committed, 1)
         self.assertEqual(len(up), 1)
@@ -745,6 +814,130 @@ class UploadBlockedReasonTest(_FsmTestCase):
         ticks(dm, 80)
         self.assertEqual(dm._upload_blocked_reason_de, '')
         self.assertEqual(len(up), 1)
+
+
+def _reach(state, n):
+    """A DataManager in `state` (the verifier's matrix states)."""
+    dm, up = make(n=n)
+    if state == 'warmup':
+        tick(dm)
+    elif state == 'run_short':
+        run_until(dm, 'run')
+        ticks(dm, 10)
+    elif state == 'run_long':
+        run_until(dm, 'run')
+        ticks(dm, 45)
+    elif state == 'save_unlatched':
+        run_until(dm, 'save')
+    elif state == 'save_latched':
+        run_until(dm, 'save')
+        tick(dm)
+    elif state == 'reset':
+        run_until(dm, 'reset')
+    elif state == 'finish_unlatched':
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        dm.record_finish()
+    elif state == 'finish_latched':
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        dm.record_finish()
+        tick(dm)
+    elif state == 'stop':
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        dm.record_stop()
+    return dm, up
+
+
+_MATRIX_STATES = ('warmup', 'run_short', 'run_long', 'save_unlatched', 'save_latched',
+                  'reset', 'finish_unlatched', 'finish_latched', 'stop')
+_MATRIX_COMMANDS = {
+    'MOVE_TO_NEXT': lambda dm: dm.record_early_save(),
+    'RERECORD': lambda dm: dm.rerecord_from_command(),
+    'FINISH': lambda dm: dm.record_finish(),
+    'STOP': lambda dm: dm.record_stop(),
+    'COLLISION': lambda dm: dm.re_record(),
+    'F1_END': lambda dm: dm.end_session_now(),
+    'LOW_DISK': lambda dm: dm.finish_for_low_disk('Speicher fast voll.'),
+}
+
+
+class CommandMatrixTest(_FsmTestCase):
+    """Every command in every recorder state (verifier V1 matrix): the session
+    completes without raising, what is on disk is exactly what is counted, and
+    the upload happens iff something was counted."""
+
+    def test_every_command_in_every_state_keeps_disk_and_count_equal(self):
+        for n in (3, 1):
+            for state in _MATRIX_STATES:
+                if n == 1 and state == 'reset':
+                    continue                      # unreachable: n=1 goes to finish
+                for name, command in _MATRIX_COMMANDS.items():
+                    with self.subTest(num_episodes=n, state=state, command=name):
+                        dm, up = _reach(state, n)
+                        out = command(dm)
+                        done = name == 'F1_END' and out is True
+                        for _ in range(3000):
+                            if done:
+                                break
+                            done = tick(dm)
+                        self.assertTrue(done)
+                        committed = dm._lerobot_dataset.committed
+                        self.assertEqual(committed, dm._record_episode_count)
+                        self.assertEqual(bool(up), dm._record_episode_count > 0)
+
+
+class SessionMarkerTest(_FsmTestCase):
+    """Verifier V1-4: a session that ends before any dataset exists (FINISH or a
+    forced recovery during the <= 5 s wait for sensor data) still removes the
+    crash marker its first tick wrote — else the next boot reports a crashed
+    session that never recorded anything."""
+
+    def _dm_without_dataset(self):
+        dm, up = make()
+        dm._lerobot_dataset = None
+        dm._session_marker_enabled = True
+        return dm, up
+
+    def _finishing_ticks(self, dm):
+        for _ in range(4):
+            _Clock.t += 1 / 30
+            if dm.record(None, None, None):
+                return True
+        return False
+
+    def test_finish_without_a_dataset_clears_the_marker(self):
+        dm, up = self._dm_without_dataset()
+        dm.record_finish()
+        _Clock.t += 1 / 30
+        self.assertFalse(dm.record(None, None, None))   # first tick writes it
+        self.assertTrue(dm._session_marker_path().exists())
+        self.assertTrue(self._finishing_ticks(dm))
+        self.assertFalse(dm._session_marker_path().exists())
+        self.assertEqual(up, [])
+
+    def test_forced_recovery_without_a_dataset_clears_the_marker(self):
+        dm, up = self._dm_without_dataset()
+        self.assertTrue(dm.end_session_now())
+        self.assertFalse(dm._session_marker_path().exists())
+        self.assertEqual(up, [])
+
+    def test_stop_without_a_dataset_clears_the_marker(self):
+        dm, _ = self._dm_without_dataset()
+        dm.record_stop()
+        self.assertTrue(self._finishing_ticks(dm))
+        self.assertFalse(dm._session_marker_path().exists())
+
+    def test_a_normal_finish_still_clears_the_marker(self):
+        dm, _ = make()
+        dm._session_marker_enabled = True
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        self.assertTrue(dm._session_marker_path().exists())
+        dm.record_finish()
+        self.assertIn(True, ticks(dm, 3))
+        self.assertFalse(dm._session_marker_path().exists())
 
 
 class _SameFrameConverter:

@@ -144,6 +144,7 @@ export const RECORD_COPY = Object.freeze({
     done: 'Fertig',
     doneSub: (k) => `${k} ${episodes(k)} gespeichert`,
     stopped: 'Aufnahme gestoppt',
+    finalizeFailed: 'Mit Fehler beendet',
     offline: 'Nicht verbunden',
     connecting: 'Verbinde …',
     inference: 'Inferenz läuft (Aufnahme nicht möglich)',
@@ -283,6 +284,7 @@ export const RECORD_COPY = Object.freeze({
     running: 'Während der Aufnahme gesperrt.',
     offline: 'Nicht verbunden. Du kannst die Aufgabe bearbeiten, sobald der Roboter verbunden ist.',
     inference: 'Gesperrt, solange eine Inferenz läuft.',
+    finished: 'Die Aufnahme ist beendet. Klicke „Neue Aufnahme“, um die nächste Aufgabe einzugeben.',
   }),
 
   session: Object.freeze({
@@ -309,10 +311,15 @@ export const RECORD_COPY = Object.freeze({
   finish: Object.freeze({
     eyebrowRunning: 'Wird abgeschlossen',
     eyebrowDone: 'Fertig',
-    titleRunning: (k) => `${k} ${episodes(k)} werden gespeichert`,
+    titleRunning: (k) => {
+      if (!(k > 0)) return 'Aufnahme wird abgeschlossen …';
+      return k === 1 ? '1 Episode wird gespeichert' : `${k} Episoden werden gespeichert`;
+    },
     titleDone: 'Dein Datensatz ist bereit',
     titleFailed: 'Hochladen fehlgeschlagen',
     titleStopped: 'Die Aufnahme wurde gestoppt',
+    eyebrowFinalizeFailed: 'Mit Fehler beendet',
+    titleFinalizeFailed: 'Datensatz unvollständig',
     stepFinalize: 'Datensatz abschließen',
     stepUpload: 'Zu Hugging Face hochladen',
     stepUploadPrivate: 'Zu Hugging Face hochladen (privat)',

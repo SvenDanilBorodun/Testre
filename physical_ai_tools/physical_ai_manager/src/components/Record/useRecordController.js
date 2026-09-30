@@ -14,7 +14,7 @@
 //   const c = useRecordController({ isActive });
 //   c.view, c.model (deriveRecordView), c.clock ({subscribe, secondsLeft, elapsed}),
 //   c.problem ({kind, textDe, linkToHome?} | null), c.question | null, c.closeQuestion(),
-//   c.act(actionId), c.busy, c.form, c.setField(field, value), c.editable, c.lockedReason,
+//   c.act(actionId), c.busy, c.form, c.setField(field, value), c.editable, c.lockedReason, c.lockedKind,
 //   c.hfUsers ({list, reload(), loading}), c.signal ([{kind, name, labelDe, hz, hzText, verdict}] | null),
 //   c.finish (finishSteps), c.session (sessionView), c.dismissFinish(), c.goToTraining(),
 //   c.goToHome(), c.muted, c.toggleMute(), c.estimate ({totalS, parts, text}),
@@ -576,6 +576,8 @@ export default function useRecordController({ isActive = true } = {}) {
     setField,
     editable: model.editable,
     lockedReason: model.lockedReason,
+    // 'offline' | 'inference' | 'finished' | 'running' | null (V2-8)
+    lockedKind: model.lockedKind,
     hfUsers,
     signal: signalRows,
     finish,

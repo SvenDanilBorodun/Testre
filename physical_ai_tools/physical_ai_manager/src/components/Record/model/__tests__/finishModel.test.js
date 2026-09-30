@@ -85,9 +85,13 @@ describe('finishSteps', () => {
     expect(c.actions[0]).toMatchObject({ label: 'Weiter zum Training', variant: 'primary' });
   });
 
-  it('done but not registered: the hint', () => {
+  it('done but not registered: step 3 says so, with the hint (V2-5)', () => {
     const c = finishSteps(session({ state: 'done', repoId: REPO, registerState: 'skipped' }));
     expect(c.hint).toBe(F.registerHint);
+    expect(states(c)).toEqual(['finalize:done', 'upload:done', 'register:skipped']);
+    const failed = finishSteps(session({ state: 'done', repoId: REPO, registerState: 'failed' }));
+    expect(states(failed)).toEqual(['finalize:done', 'upload:done', 'register:failed']);
+    expect(failed.hint).toBe(F.registerHint);
     const pub = finishSteps(session({ state: 'done', repoId: REPO }, { snapshot: { ...SNAP, privateMode: false } }));
     expect(pub.savedAs.label).toBe('Öffentlich gespeichert als');
     expect(pub.steps[1].label).toBe('Zu Hugging Face hochladen (öffentlich)');
@@ -115,6 +119,33 @@ describe('finishSteps', () => {
     expect(states(c)).toEqual(['finalize:failed', 'upload:', 'register:']);
     expect(c.steps[0].detail).toBe('Die Kameras senden keine Bilder.');
     expect(actionIds(c)).toEqual(['newRecording']);
+  });
+
+  it('finalize_failed (V1-2): step 1 failed with the server text, nothing uploaded, nothing claimed ready', () => {
+    const why = 'Datensatz konnte nicht abgeschlossen werden — die Aufnahme ist unvollständig und muss neu aufgenommen werden.';
+    const local = finishSteps(session({ state: 'finalize_failed', message: why }, { snapshot: { ...SNAP, pushToHub: false } }));
+    expect(states(local)).toEqual(['finalize:failed', 'upload:skipped', 'register:skipped']);
+    expect(local.steps[0].detail).toBe(why);
+    expect(local.title).toBe('Datensatz unvollständig');
+    expect(local.title).not.toBe(F.titleDone);
+    expect(local.savedAs).toBeNull();
+    expect(actionIds(local)).toEqual(['newRecording']);
+    const hub = finishSteps(session({ state: 'finalize_failed', message: why }));
+    expect(states(hub)).toEqual(['finalize:failed', 'upload:', 'register:']);
+  });
+
+  it('the title counts right (V2-4): one episode, several, none', () => {
+    expect(finishSteps(session({ state: 'finalizing' }, { savedCount: 1 })).title).toBe('1 Episode wird gespeichert');
+    expect(finishSteps(session({ state: 'finalizing' }, { savedCount: 3 })).title).toBe('3 Episoden werden gespeichert');
+    expect(finishSteps(session({ state: 'finalizing' }, { savedCount: 0 })).title).toBe('Aufnahme wird abgeschlossen …');
+  });
+
+  it('after an end the link did not see, the upload is unknown — never „nicht begonnen" (V2-6)', () => {
+    const c = finishSteps(session({ state: 'uploading', expectedRepoId: REPO, endedAt: NOW, linkLost: true }), {
+      nowWallMs: NOW + 60000, heartbeat: 'connected',
+    });
+    expect(states(c)).toEqual(['finalize:done', 'upload:unknown', 'register:']);
+    expect(c.steps[1].detail).not.toBe(F.notStarted);
   });
 
   it('the end note is one line under the title', () => {

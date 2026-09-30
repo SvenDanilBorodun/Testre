@@ -168,6 +168,7 @@ function pillFor(view, { form, session, episode, secondsLeft, nowWallMs }) {
     case VIEW.FINISHING: {
       const state = session?.finish?.state;
       if (state === 'stopped_error') return { title: C.pill.stopped, sub: '', icon: 'failed', color };
+      if (state === 'finalize_failed') return { title: C.pill.finalizeFailed, sub: '', icon: 'failed', color };
       if (state === 'finalizing') return { title: C.pill.finishing, sub: '', icon: 'save', color };
       if (isFinishTracking(session?.finish)) {
         return { title: C.pill.finishing, sub: C.pill.doneSub(k), icon: 'cloudUpload', color };
@@ -309,12 +310,17 @@ export function deriveRecordView({
 
   const editable = connected && !!status.topicReceived && status.phase === TaskPhase.READY && !running
     && view !== VIEW.STARTING && view !== VIEW.FINISHING;
-  let lockedReason = '';
+  // Why the form is locked: 'offline' | 'inference' | 'finished' (the session
+  // ended and its finish card is up, V2-8) | 'running' (the recording, incl.
+  // STARTING and a finish still finalizing on the robot) | null.
+  let lockedKind = null;
   if (!editable) {
-    if (!connected || !status.topicReceived) lockedReason = C.locked.offline;
-    else if (view === VIEW.INFERENCE_BUSY) lockedReason = C.locked.inference;
-    else lockedReason = C.locked.running;
+    if (!connected || !status.topicReceived) lockedKind = 'offline';
+    else if (view === VIEW.INFERENCE_BUSY) lockedKind = 'inference';
+    else if (view === VIEW.FINISHING && !running && session?.finish?.state !== 'finalizing') lockedKind = 'finished';
+    else lockedKind = 'running';
   }
+  const lockedReason = lockedKind ? C.locked[lockedKind] : '';
 
   return {
     view,
@@ -330,6 +336,7 @@ export function deriveRecordView({
     dots: dotsFor(view, { episode, session }),
     startBlock,
     editable,
+    lockedKind,
     lockedReason,
     secondsLeft: left,
   };

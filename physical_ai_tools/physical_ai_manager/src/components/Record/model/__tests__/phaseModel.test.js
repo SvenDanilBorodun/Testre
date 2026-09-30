@@ -307,6 +307,24 @@ describe('the form lock (F6b)', () => {
       .toBe(RECORD_COPY.locked.offline);
   });
 
+  it('after the session ended the reason is not „während der Aufnahme" (V2-8)', () => {
+    for (const state of ['done', 'upload_failed', 'local_done', 'finalize_failed', 'uploading', 'registering', 'stopped_error']) {
+      const session = { ...activeSession({ active: false, savedCount: 1 }), finish: { ...EMPTY_FINISH, state } };
+      const m = model({ session });
+      expect(m.view).toBe(VIEW.FINISHING);
+      expect(m.editable).toBe(false);
+      expect(m.lockedKind).toBe('finished');
+      expect(m.lockedReason).toBe(RECORD_COPY.locked.finished);
+      expect(m.lockedReason).not.toBe(RECORD_COPY.locked.running);
+    }
+    // still finishing on the robot: it is still the recording
+    const finalizing = { ...activeSession({ savedCount: 1 }), finish: { ...EMPTY_FINISH, state: 'finalizing' } };
+    const m = model({ status: rec({ phase: TaskPhase.SAVING }), session: finalizing });
+    expect(m).toMatchObject({ lockedKind: 'running', lockedReason: RECORD_COPY.locked.running });
+    expect(model()).toMatchObject({ lockedKind: null, lockedReason: '' });
+    expect(model({ heartbeat: 'timeout' }).lockedKind).toBe('offline');
+  });
+
   it('locked while running, STARTING and FINISHING', () => {
     expect(model({ status: rec({ phase: TaskPhase.RECORDING }), session: activeSession() }).lockedReason)
       .toBe('Während der Aufnahme gesperrt.');
@@ -333,6 +351,7 @@ describe('the pill', () => {
     const s = (state) => ({ ...activeSession({ active: false, savedCount: 1 }), finish: { ...EMPTY_FINISH, state } });
     expect(model({ session: s('done') }).pill).toMatchObject({ title: 'Fertig', sub: '1 Episode gespeichert' });
     expect(model({ session: s('stopped_error') }).pill).toMatchObject({ title: 'Aufnahme gestoppt' });
+    expect(model({ session: s('finalize_failed') }).pill).toMatchObject({ title: 'Mit Fehler beendet', icon: 'failed' });
     expect(model({ heartbeat: 'timeout' }).pill.title).toBe('Nicht verbunden');
     expect(model({ status: { ...IDLE_STATUS, topicReceived: false } }).pill.title).toBe('Verbinde …');
   });

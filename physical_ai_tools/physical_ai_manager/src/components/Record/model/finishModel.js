@@ -11,7 +11,9 @@
 //
 // finishSteps → {visible, state, eyebrow, title, note, steps, barPct, savedAs, hint, actions}
 //   steps: [{key: 'finalize'|'upload'|'register', label, state, detail, pct}]
-//   state: 'done' | 'now' | 'failed' | 'skipped' | 'unknown' | '' (still to come)
+//   state: 'done' | 'now' | 'failed' | 'skipped' | 'unknown' | '' (still to come);
+//   step 3 is 'failed' / 'skipped' when the cloud registration failed / was
+//   skipped after a successful upload (V2-5)
 // sessionView → {title, chip, rows, emptyText, note, sum, raw}
 
 import { datasetRepoId, safeTaskName } from '../../../utils/datasetName';
@@ -119,7 +121,8 @@ export function finishSteps(session, { nowWallMs = Date.now(), heartbeat = 'conn
         eyebrow: F.eyebrowDone,
         title: F.titleDone,
         steps: [step('finalize', F.stepFinalize, 'done'), step('upload', upLabel, 'done'),
-          step('register', F.stepRegister, 'done')],
+          // V2-5: a registration that failed or was skipped is not a green check
+          step('register', F.stepRegister, registerFailed ? f.registerState : 'done')],
         savedAs: { label, repoId: datasetIdOf(session) },
         hint: registerFailed ? F.registerHint : '',
         actions: [TRAINING(), NEW()],
@@ -137,6 +140,23 @@ export function finishSteps(session, { nowWallMs = Date.now(), heartbeat = 'conn
         savedAs: localSaved,
         actions: [NEW()],
       };
+
+    case 'finalize_failed': {
+      // V1-2: the dataset on disk is incomplete — nothing was uploaded and
+      // nothing is „bereit".
+      const hub = session.snapshot ? session.snapshot.pushToHub !== false : true;
+      return {
+        ...base,
+        eyebrow: F.eyebrowFinalizeFailed,
+        title: F.titleFinalizeFailed,
+        steps: [
+          step('finalize', F.stepFinalize, 'failed', f.message || ''),
+          hub ? step('upload', upLabel) : step('upload', F.stepUpload, 'skipped', F.uploadOff),
+          step('register', F.stepRegister, hub ? '' : 'skipped'),
+        ],
+        actions: [NEW()],
+      };
+    }
 
     case 'local_done':
       return {

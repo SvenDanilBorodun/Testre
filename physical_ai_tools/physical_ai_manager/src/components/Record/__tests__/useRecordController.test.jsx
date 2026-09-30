@@ -428,6 +428,9 @@ describe('form, mute and the finish actions', () => {
     });
     expect(result.current.view).toBe(VIEW.FINISHING);
     expect(result.current.finish).toMatchObject({ visible: true, state: 'uploading' });
+    // the session is over: the form is locked for that reason, not „während der Aufnahme"
+    expect(result.current).toMatchObject({ editable: false, lockedKind: 'finished' });
+    expect(result.current.lockedReason).toBe(result.current.copy.locked.finished);
     act(() => result.current.goToTraining());
     const st = store.getState();
     expect(st.training.selectedUser).toBe('schule-A');

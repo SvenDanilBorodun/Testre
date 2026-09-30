@@ -34,11 +34,20 @@ export const END_NOTE_WINDOW_MS = 5000;
 export const RERECORD_FINISH_WINDOW_MS = 5000;
 /** A run shorter than this was never a real attempt (Q3). */
 export const MIN_ATTEMPT_S = 1;
+/**
+ * How the server's finalize-failure reason begins
+ * (data_manager.DataManager._finalize_dataset). With upload ON the terminating
+ * tick's warning can also be a namespace refusal or an enqueue failure; this
+ * prefix tells the finalize failure apart. If the server ever words it
+ * differently the page falls back to „Hochladen fehlgeschlagen" — still a
+ * failure, never „bereit".
+ */
+export const FINALIZE_FAILED_PREFIX_DE = 'Datensatz konnte nicht abgeschlossen werden';
 
 export const OUTCOMES = Object.freeze(['saved', 'redo', 'collision', 'drop', 'ended']);
 export const FINISH_STATES = Object.freeze([
   'idle', 'finalizing', 'uploading', 'registering', 'done', 'upload_failed', 'local_done',
-  'stopped_error', 'nothing',
+  'finalize_failed', 'stopped_error', 'nothing',
 ]);
 
 export const EMPTY_FINISH = Object.freeze({
@@ -332,10 +341,16 @@ function endSession(s, next, E) {
   let finish;
   if (out.savedCount === 0) {
     finish = { ...EMPTY_FINISH, state: 'nothing', endedAt: endedWallMs };
+  } else if (warn) {
+    // The terminating tick carries a warning iff the upload was blocked. With
+    // upload OFF the only cause is a failed finalize (V1-2); with it ON, the
+    // finalize sentence says which.
+    const finalizeFailed = !snapshot.pushToHub || warn.startsWith(FINALIZE_FAILED_PREFIX_DE);
+    finish = {
+      ...EMPTY_FINISH, state: finalizeFailed ? 'finalize_failed' : 'upload_failed', message: warn, endedAt: endedWallMs,
+    };
   } else if (!snapshot.pushToHub) {
     finish = { ...EMPTY_FINISH, state: 'local_done', endedAt: endedWallMs };
-  } else if (warn) {
-    finish = { ...EMPTY_FINISH, state: 'upload_failed', message: warn, endedAt: endedWallMs };
   } else {
     finish = {
       ...EMPTY_FINISH,
@@ -352,6 +367,10 @@ function endSession(s, next, E) {
     endNote = out.lastWarn.text;
   }
   finish.endNote = endNote;
+  // V2-6: a session ended by a tick that is not its own terminating record
+  // tick (the idle identity tick after a link loss across the end) never saw
+  // the end — what the upload did since is unknown, not „nicht begonnen".
+  finish.linkLost = next.taskType !== 'record';
   return {
     ...out,
     active: false,
@@ -494,18 +513,20 @@ export function applyUploadStatus(s, { repoId, status, percentage, message, at }
   if (Number.isFinite(f.endedAt) && Number.isFinite(at) && at < f.endedAt) return s;
   const matches = f.expectedRepoId ? repoId === f.expectedRepoId : (!f.repoId || repoId === f.repoId);
   if (!repoId || !matches) return s;
+  // A status of this upload that arrives is the link seeing it again: the
+  // state is known once more (R16 / V2-6 set linkLost while it was not).
   if (status === 'Uploading') {
     if (f.state !== 'uploading') return s;
     const pct = Math.max(0, Math.min(100, Math.round(num(percentage))));
-    if (pct === f.uploadPct && f.repoId === repoId) return s;
-    return { ...s, finish: { ...f, uploadPct: pct, repoId } };
+    if (pct === f.uploadPct && f.repoId === repoId && !f.linkLost) return s;
+    return { ...s, finish: { ...f, uploadPct: pct, repoId, linkLost: false } };
   }
   if (status === 'Success') {
     if (f.state !== 'uploading') return s;
-    return { ...s, finish: { ...f, state: 'registering', repoId, uploadPct: 100 } };
+    return { ...s, finish: { ...f, state: 'registering', repoId, uploadPct: 100, linkLost: false } };
   }
   if (status === 'Failed') {
-    return { ...s, finish: { ...f, state: 'upload_failed', repoId, message: message || '' } };
+    return { ...s, finish: { ...f, state: 'upload_failed', repoId, message: message || '', linkLost: false } };
   }
   return s;
 }

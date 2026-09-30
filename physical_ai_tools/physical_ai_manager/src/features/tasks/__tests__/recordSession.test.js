@@ -567,6 +567,62 @@ describe('ending (R9, R13)', () => {
     r.idle();
     expect(r.s.active).toBe(false);
     expect(r.s.finish.state).toBe('uploading');
+    // V2-6: the end itself was not seen, so what the upload did is unknown
+    expect(r.s.finish.linkLost).toBe(true);
+  });
+
+  it('… until a status of that upload arrives: then it is known again', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0);
+    r.saving(1);
+    r.idle();
+    expect(r.s.finish.linkLost).toBe(true);
+    r.upload({ repoId: REPO, status: 'Uploading', percentage: 40 });
+    expect(r.s.finish).toMatchObject({ linkLost: false, uploadPct: 40 });
+    // a status for someone else's repo says nothing about ours
+    const q = sim();
+    q.start();
+    q.phase(RECORDING, 10);
+    q.saving(0);
+    q.saving(1);
+    q.idle();
+    q.upload({ repoId: 'x/other', status: 'Uploading', percentage: 40 });
+    expect(q.s.finish.linkLost).toBe(true);
+  });
+
+  it('the terminating record tick itself knows the end: no lost link', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0);
+    r.saving(1);
+    r.ready({ currentEpisodeNumber: 1 });
+    expect(r.s.finish.linkLost).toBe(false);
+  });
+
+  it('V1-2: with upload OFF a warning on the terminating tick is a failed finalize', () => {
+    const r = sim({ snapshot: { ...SNAPSHOT, pushToHub: false } });
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0);
+    r.saving(1);
+    const why = 'Datensatz konnte nicht abgeschlossen werden — die Aufnahme ist unvollständig und muss neu aufgenommen werden.';
+    r.notice({ kind: 'warn', text: why });
+    r.ready({ currentEpisodeNumber: 1, recordWarn: why });
+    expect(r.s.finish).toMatchObject({ state: 'finalize_failed', message: why, endNote: null });
+  });
+
+  it('… and with upload ON, the server\'s finalize sentence is a failed finalize too', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0);
+    r.saving(1);
+    const why = 'Datensatz konnte nicht abgeschlossen werden — die Aufnahme ist unvollständig und muss neu aufgenommen werden.';
+    r.ready({ currentEpisodeNumber: 1, recordWarn: why });
+    expect(r.s.finish).toMatchObject({ state: 'finalize_failed', message: why });
   });
 });
 

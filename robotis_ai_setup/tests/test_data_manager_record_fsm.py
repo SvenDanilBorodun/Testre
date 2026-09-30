@@ -191,6 +191,7 @@ class _FakeDataset:
         self.committed_sizes = []
         self.cancelled = 0
         self.discarded = 0
+        self.discard_cost_s = 0.0  # the real cancel waits ~0.9 s
         self.events = []          # (event, tick number) in call order
         self.finalized = False
         self.finalize_raises = False
@@ -241,6 +242,7 @@ class _FakeDataset:
         # and leaves a fresh, empty buffer.
         self.events.append(('discard', _TICK_NO[0]))
         self.discarded += 1
+        _Clock.t += self.discard_cost_s
         self._buf = {'size': 0, 'task': [], 'timestamp': []}
 
     def check_video_encoding_completed(self):
@@ -1051,6 +1053,43 @@ class DiscardCancelsTheEncoderTest(_FsmTestCase):
         tick(dm)
         dm.rerecord_from_command()                        # in the warm-up
         ticks(dm, 3)
+        self.assertEqual(dm._lerobot_dataset.discarded, 0)
+
+    def test_the_run_clock_starts_after_the_cancel(self):
+        # Round 4: „Jetzt starten“ between a RERECORD and the next tick sets the
+        # run clock BEFORE the ~0.9 s cancel; the take really starts after it.
+        # Else Q3 (< 1 s is dropped) and „too_early“ saw a run ~1 s too old.
+        dm, _ = self._mid_run(reset=5)
+        dm._lerobot_dataset.discard_cost_s = 0.9
+        self.assertTrue(dm.rerecord_from_command())
+        self.assertEqual(dm.record_early_save(), 'run')
+        tick(dm)                                          # cancel, then frame 0
+        self.assertEqual([e for e, t in dm._lerobot_dataset.events
+                          if t == _TICK_NO[0]], ['discard', 'add'])
+        self.assertLess(dm._run_age_s(), 0.1)
+        ticks(dm, 14)                                     # ~0.5 s of the new take
+        self.assertEqual(dm.record_early_save(), 'too_early')
+        dm.record_finish()                                # Q3: dropped
+        self.assertIn(True, ticks(dm, 4))
+        self.assertEqual(dm._lerobot_dataset.committed_sizes, [])
+
+    def test_the_resync_cancel_is_not_repeated_by_the_next_tick(self):
+        # Round 4: the collision monitor cancels the discarded take while the
+        # arm is still frozen (cancel_pending_discard); the next record tick
+        # must not cancel again.
+        dm, _ = self._mid_run(reset=0)
+        dm.re_record()
+        self.assertTrue(dm.cancel_pending_discard())
+        self.assertEqual(dm._lerobot_dataset.discarded, 1)
+        self.assertFalse(dm.cancel_pending_discard())     # idempotent
+        run_until(dm, 'run')
+        ticks(dm, 3)
+        self.assertEqual(dm._lerobot_dataset.discarded, 1)
+        self.assertEqual(self._events(dm, 'add')[-1], _TICK_NO[0])   # recording again
+
+    def test_cancel_pending_discard_without_a_pending_discard(self):
+        dm, _ = self._mid_run()
+        self.assertFalse(dm.cancel_pending_discard())
         self.assertEqual(dm._lerobot_dataset.discarded, 0)
 
     def test_a_failing_discard_never_breaks_the_tick(self):

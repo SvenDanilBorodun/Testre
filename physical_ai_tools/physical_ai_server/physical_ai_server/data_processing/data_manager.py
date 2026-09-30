@@ -329,10 +329,9 @@ class DataManager:
         # frame-drop re-record, a dropped FINISH run): cancel its streaming
         # encoder NOW, in this reset/discard tick, before any frame of the next
         # take — never lazily inside that take's first frame. Before the start
-        # stamp, so a reset timer does not count the cancel.
-        if getattr(self, '_discard_pending', False):
-            self._discard_pending = False
-            self._cancel_discarded_take()
+        # stamp, so a reset timer does not count the cancel. (After a collision
+        # the monitor has already done it, before releasing the arm.)
+        self.cancel_pending_discard()
 
         if self._start_time_s == 0:
             self._start_time_s = time.perf_counter()
@@ -1142,6 +1141,26 @@ class DataManager:
             return self.data_converter.twist2tensor_array(msg_data)
         else:
             raise ValueError(f'Unsupported message type: {type(msg_data)}')
+
+    def cancel_pending_discard(self) -> bool:
+        """Cancel a discarded take's streaming encoder now, if one is pending.
+
+        Called at the top of every record tick, and by the collision monitor in
+        _on_resync_complete BEFORE it releases the arm (/collision_flag=False),
+        so the ~0.9 s never lands after teleop resumed — the record timer and
+        the collision detector share one callback group. Idempotent: returns
+        True only when it cancelled; a second call (the next tick) is a no-op.
+        """
+        if not getattr(self, '_discard_pending', False):
+            return False
+        self._discard_pending = False
+        self._cancel_discarded_take()
+        # „Jetzt starten“ may have entered 'run' between the discard and now:
+        # the take really starts after the cancel, so its clock starts here —
+        # else Q3 (< 1 s is dropped) and 'too_early' see a run ~1 s too old.
+        if self._status == 'run':
+            self._run_entered_at = time.perf_counter()
+        return True
 
     def _cancel_discarded_take(self) -> None:
         """Cancel a discarded take's streaming encoder the way LeRobot's own

@@ -196,6 +196,39 @@ describe('the key listener', () => {
   });
 });
 
+describe('render budget (V2-2)', () => {
+  it('30 identical running ticks — status plus the adopt path\'s fresh arrays — cause no render', () => {
+    const store = makeStore();
+    let hookRuns = 0;
+    const wrapper = ({ children }) => <Provider store={store}>{children}</Provider>;
+    renderHook(() => { hookRuns += 1; return useRecordController(); }, { wrapper });
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20, proceedTime: 3 })); });
+    act(() => { store.dispatch(setTaskInfo({ taskInstruction: ['Greife den Würfel.'], tags: ['omx_f', 'edubotics'] })); });
+    const runsBefore = hookRuns;
+    act(() => {
+      for (let i = 0; i < 30; i += 1) {
+        store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20, proceedTime: 3 }));
+        // what useRosTopicSubscription's adopt path sends on every running tick
+        store.dispatch(setTaskInfo({
+          taskName: 'Würfel in die Schale',
+          taskInstruction: ['Greife den Würfel.'],
+          tags: ['omx_f', 'edubotics'],
+          fps: 30,
+          episodeTime: 20,
+          resetTime: 5,
+          numEpisodes: 3,
+          pushToHub: true,
+          warmupTime: 5,
+        }));
+      }
+    });
+    expect(hookRuns).toBe(runsBefore);
+    // a real change still renders
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20, proceedTime: 4 })); });
+    expect(hookRuns).toBeGreaterThan(runsBefore);
+  });
+});
+
 describe('Benutzer-ID (ported from InfoPanel)', () => {
   it('an empty list reloads silently; an unchosen id picks the first account', async () => {
     const store = makeStore({ form: { ...VALID_FORM, userId: undefined } });

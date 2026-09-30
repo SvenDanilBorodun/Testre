@@ -199,6 +199,16 @@ const initialState = {
   },
 };
 
+// Equal for the form: the same primitive, or two arrays with the same items.
+function sameFieldValue(a, b) {
+  if (Object.is(a, b)) return true;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (!Object.is(a[i], b[i])) return false;
+  }
+  return true;
+}
+
 // The pure session/anchor functions compare and return plain objects; hand
 // them the base object behind an immer draft so an unchanged result is the
 // very object the store already holds.
@@ -209,7 +219,15 @@ const taskSlice = createSlice({
   initialState,
   reducers: {
     setTaskInfo: (state, action) => {
-      state.taskInfo = { ...state.taskInfo, ...action.payload };
+      // Field by field, and only what really changed (arrays by content): the
+      // /task/status adopt path dispatches this on EVERY running tick with
+      // freshly built task_instruction / tags arrays, and a new taskInfo per
+      // tick re-rendered every subscriber (the Aufnahme page, the service
+      // caller) at 30 Hz (V2-2). Same merge semantics as a spread.
+      const payload = action.payload || {};
+      for (const [key, value] of Object.entries(payload)) {
+        if (!sameFieldValue(state.taskInfo[key], value)) state.taskInfo[key] = value;
+      }
       // Persist the Benutzer-ID like robotType so it survives a full reload.
       // Only on a truthy value — never clobber the saved id with '' (the
       // /task/status handler is also guarded not to send an empty userId).

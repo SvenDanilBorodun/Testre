@@ -8,6 +8,7 @@
 // sign-out takes the student's session with it but leaves the rig's anchor.
 
 import reducer, {
+  setTaskInfo,
   recordIntent,
   recordNoticeClear,
   recordNoticeSet,
@@ -214,5 +215,49 @@ describe('recordSelectors', () => {
     expect(sel.selectRecordSession(s)).toBe(s.tasks.recordSession);
     expect(sel.selectRecordNotice(s)).toBe(s.tasks.recordNotice);
     expect(sel.selectRecordForm(s)).toMatchObject({ fps: 30, episodeTime: 20, privateMode: true });
+  });
+});
+
+describe('reference stability across identical ticks (V2-2)', () => {
+  // The /task/status adopt path dispatches setTaskInfo on EVERY running tick
+  // with freshly built arrays (task_instruction, tags). Identical content must
+  // leave the store's objects alone, or every subscriber re-renders at 30 Hz.
+  const adopt = () => setTaskInfo({
+    taskName: 'Würfel',
+    taskInstruction: ['Greife den Würfel.'],
+    tags: ['omx_f', 'edubotics'],
+    fps: 30,
+    episodeTime: 20,
+    pushToHub: true,
+  });
+
+  it('setTaskInfo with equal content keeps taskInfo and its arrays', () => {
+    const s1 = reducer(reducer(undefined, { type: '@@init' }), adopt());
+    const s2 = reducer(s1, adopt());
+    expect(s2.taskInfo).toBe(s1.taskInfo);
+    expect(s2.taskInfo.tags).toBe(s1.taskInfo.tags);
+    expect(s2.taskInfo.taskInstruction).toBe(s1.taskInfo.taskInstruction);
+    const s3 = reducer(s2, setTaskInfo({ tags: ['omx_f'] }));
+    expect(s3.taskInfo).not.toBe(s2.taskInfo);
+    expect(s3.taskInfo.tags).toEqual(['omx_f']);
+    expect(s3.taskInfo.taskInstruction).toBe(s1.taskInfo.taskInstruction);
+  });
+
+  it('selectRecordForm returns the same object for equal content, even from new arrays', () => {
+    const base = reducer(undefined, { type: '@@init' });
+    const a = sel.selectRecordForm({ tasks: { ...base, taskInfo: { ...base.taskInfo, tags: ['x'], taskInstruction: ['y'] } } });
+    const b = sel.selectRecordForm({ tasks: { ...base, taskInfo: { ...base.taskInfo, tags: ['x'], taskInstruction: ['y'] } } });
+    expect(b).toBe(a);
+    const c = sel.selectRecordForm({ tasks: { ...base, taskInfo: { ...base.taskInfo, tags: ['x', 'z'], taskInstruction: ['y'] } } });
+    expect(c).not.toBe(b);
+    expect(c.tags).toEqual(['x', 'z']);
+  });
+
+  it('selectRecordStatus returns the same object across ticks that differ only in their arrival', () => {
+    const s1 = { tasks: started() };
+    const s2 = { tasks: reducer(s1.tasks, recordTick({ receivedAt: 1033, receivedWallMs: WALL0 + 1033 })) };
+    expect(sel.selectRecordStatus(s2)).toBe(sel.selectRecordStatus(s1));
+    const s3 = { tasks: reducer(s2.tasks, recordTick({ proceedTime: 1, receivedAt: 2000 })) };
+    expect(sel.selectRecordStatus(s3)).not.toBe(sel.selectRecordStatus(s2));
   });
 });

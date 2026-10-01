@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from physical_ai_server import signal_status as real_signal_status
+from physical_ai_server.data_processing import record_texts_de
 
 _SERVER_PY = (
     Path(__file__).resolve().parents[1] / 'physical_ai_server' / 'physical_ai_server.py'
@@ -100,22 +101,29 @@ _ERROR_STOP_SAVED_DE = (
     'hochladen.')
 
 
+class _SlotConvertError(Exception):
+    pass
+
+
 def _namespace():
     ss = types.SimpleNamespace(**{k: getattr(real_signal_status, k)
                                   for k in dir(real_signal_status)
                                   if not k.startswith('__')})
     ss.disk_free_bytes = _disk_free_bytes
     return {'TaskStatus': _TaskStatus, 'time': _Clock, 'signal_status': ss,
-            'camera_name_de': _camera_name_de, 'contextlib': contextlib,
-            'ERROR_STOP_SAVED_DE': _ERROR_STOP_SAVED_DE}
+            'contextlib': contextlib, 'record_texts_de': record_texts_de,
+            '_SlotConvertError': _SlotConvertError, 'json': __import__('json'),
+            'ON_TIME_TICK_PERIODS': _module_constant('ON_TIME_TICK_PERIODS')}
 
 
 _NS = _namespace()
 _TICK = _load('_data_collection_timer_callback', _NS)
 _DISK = _load('_check_recording_disk_floor', _NS)
-_OWNS = _load('_record_tick_owns_session', _NS)
-_PUBLISH = _load('_publish_record_status', _NS)
-_END_ERROR = _load('_end_record_with_error', _NS)
+_HELPERS = {name: _load(name, _NS) for name in (
+    '_record_tick_owns_session', '_publish_record_status', '_end_record_with_error',
+    '_record_tick_on_time', '_decide_due_slots', '_stopped_required_source',
+    '_missing_source_name', '_open_take_if_new', '_close_take_if_done', '_log_take',
+    '_record_decided_slots')}
 
 
 class _Logger:
@@ -145,6 +153,9 @@ class _Comm:
         # A real publish serialises NOW; the node mutates the same object into
         # the terminating READY right after, so keep a snapshot.
         self.published.append(copy.copy(status))
+
+    def source_counters(self):
+        return []
 
     def get_camera_observed_hz(self, name, window_s):
         return self.observed_hz
@@ -182,6 +193,9 @@ class _DM:
 
     def saved_episode_count(self):
         return self.saved
+
+    def commit_count(self):
+        return 0
 
     def get_status(self):
         return self.status
@@ -235,9 +249,8 @@ class _Node:
         self._record_session_gen = 0
         self._collision_trip_pending = None
         self._check_recording_disk_floor = types.MethodType(_DISK, self)
-        self._record_tick_owns_session = types.MethodType(_OWNS, self)
-        self._publish_record_status = types.MethodType(_PUBLISH, self)
-        self._end_record_with_error = types.MethodType(_END_ERROR, self)
+        for name, fn in _HELPERS.items():
+            setattr(self, name, types.MethodType(fn, self))
 
     def get_logger(self):
         return self.logger

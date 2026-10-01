@@ -187,8 +187,13 @@ def test_camera_names_go_through_camera_name_de():
     # (The record tick's dead camera-fps sentence was deleted in round 5, R5-4d.)
     convert = ast.unparse(_function(_DM_SRC, 'convert_msgs_to_raw_datas'))
     assert 'camera_name_de(stale)' in convert
+    # Round 5: the node's record-path sentences (a source that stops, the busy
+    # answer, the error-stop note) come from the one module of German record
+    # texts, whose camera_name_de is the same vocabulary.
     tree = ast.parse(_SERVER_SRC)
     imported = [a.name for n in tree.body if isinstance(n, ast.ImportFrom)
-                and n.module == 'physical_ai_server.data_processing.data_manager'
+                and n.module == 'physical_ai_server.data_processing'
                 for a in n.names]
-    assert 'camera_name_de' in imported
+    assert 'record_texts_de' in imported
+    timer = ast.unparse(_function(_SERVER_SRC, '_data_collection_timer_callback'))
+    assert 'record_texts_de.source_stop_de(' in timer

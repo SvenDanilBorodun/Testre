@@ -112,12 +112,11 @@ from physical_ai_interfaces.srv import (
 
 from physical_ai_server import robot_profiles
 from physical_ai_server import signal_status
+from physical_ai_server.communication.capture_timeline import SlotSampler, TakeIntegrity
 from physical_ai_server.communication.communicator import Communicator
 from physical_ai_server.data_processing import dataset_paths
-from physical_ai_server.data_processing.data_manager import (
-    camera_name_de,
-    DataManager,
-)
+from physical_ai_server.data_processing import record_texts_de
+from physical_ai_server.data_processing.data_manager import DataManager
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
 from physical_ai_server.inference.inference_manager import InferenceManager
 from physical_ai_server.safety.collision_monitor import CollisionMonitorMixin
@@ -241,14 +240,19 @@ _REINIT_MAX_ATTEMPTS = 3
 
 # Aufnahme 2.0 round 5 (O6): /task/command never blocks the default callback
 # group on the recorder lock. Every record-command branch takes it with a
-# bounded try-acquire; on timeout it changes nothing and answers BUSY_DE. The
-# longest holder is the official ~1 s discard cancel after „Wiederholen“.
+# bounded try-acquire; on timeout it changes nothing and answers
+# record_texts_de.BUSY_DE. The longest holder is the official ~1 s discard
+# cancel after „Wiederholen“.
 COMMAND_LOCK_TIMEOUT_S = 0.25
-BUSY_DE = 'Die Aufnahme ist gerade beschäftigt. Bitte versuch es gleich noch einmal.'
-# D5: an error stop that finalized saved episodes says so on the READY.
-ERROR_STOP_SAVED_DE = (
-    'Die schon gespeicherten Episoden sind gesichert; du kannst sie im Tab Daten '
-    'hochladen.')
+# R5-2: the stopped-source rules judge only an ON-TIME record tick (one that
+# started at most this many periods after the previous one), so a stall of the
+# server process itself is never mistaken for a silent source.
+ON_TIME_TICK_PERIODS = 1.5
+
+
+class _SlotConvertError(Exception):
+    """A decided slot's messages could not be converted (the record tick's
+    sensor-data error stop, not the add_frame one)."""
 
 
 class PhysicalAIServer(CollisionMonitorMixin, Node):
@@ -278,12 +282,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     # SENSOR_FAIL_LIMIT executor failures inside SENSOR_FAIL_WINDOW_S end the
     # PROCESS with SENSOR_EXIT_CODE, so s6 respawns the node: a dead sensor
     # thread would otherwise leave recording stalled and the collision detector
-    # deaf behind a node that still answers its heartbeat. INGEST_ALIVE_S is the
-    # liveness threshold /edubotics/signal_status reports.
+    # deaf behind a node that still answers its heartbeat. Its liveness rides
+    # /edubotics/signal_status (signal_status.ingest_status).
     SENSOR_FAIL_LIMIT = 3
     SENSOR_FAIL_WINDOW_S = 10.0
     SENSOR_EXIT_CODE = 70
-    INGEST_ALIVE_S = 1.0
 
     class RosbagNotReadyException(Exception):
         """Exception raised when rosbag recording cannot start yet."""
@@ -896,16 +899,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             except Exception:  # noqa: BLE001
                 pass
 
-    def _ingest_liveness(self, now):
-        """The additive ``ingest`` entry of /edubotics/signal_status:
-        ``{'alive': age < INGEST_ALIVE_S, 'age_s': age}`` where age is the time
-        since the sensor loop last turned; None without a sensor executor."""
-        alive_mono = getattr(self, '_sensor_alive_mono', None)
-        if alive_mono is None:
-            return None
-        age = max(0.0, float(now) - float(alive_mono))
-        return {'alive': age < self.INGEST_ALIVE_S, 'age_s': round(age, 2)}
-
     def _init_core_components(self):
         # D8 — monotonic() of the last /task/status publish, updated after EVERY
         # publish in BOTH sites (communicator.publish_status AND the collision
@@ -1084,6 +1077,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             caps = getattr(getattr(self, '_arm_profile', None), 'capabilities', None)
             include_leader = bool(getattr(caps, 'has_leader', False))
             self._signal_status_seq += 1
+            # Round 5: the additive trailing `ingest` key — the sensor-ingest
+            # thread's liveness (absent without a sensor executor).
+            ingest = None
+            if getattr(self, '_sensor_executor', None) is not None:
+                ingest = signal_status.ingest_status(
+                    getattr(self, '_sensor_alive_mono', None), now)
             payload = signal_status.build_payload(
                 seq=self._signal_status_seq,
                 uptime_s=now - self._signal_status_boot_mono,
@@ -1091,6 +1090,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 sources=signal_status.source_entries(
                     counters, rates, now, include_leader=include_leader),
                 free_bytes=signal_status.disk_free_bytes(self.DEFAULT_SAVE_ROOT_PATH),
+                ingest=ingest,
             )
             msg = String()
             msg.data = signal_status.encode_payload(payload)
@@ -1492,6 +1492,20 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             callback_group=(self._record_cb_group
                             if self.operation_mode == 'collection' else None),
         )
+        # Round 5 (spec §3): every dataset frame of a take is decided from the
+        # timestamped sensor histories by the slot sampler; the take's facts
+        # are collected by its capture integrity. Collection only.
+        self._slot_sampler = None
+        self._take_integrity = None
+        self._take_entry = None
+        self._take_open = False
+        self._take_commits = 0
+        self._last_record_tick_mono = None
+        self._record_fps = float(getattr(task_info, 'fps', 0) or 0)
+        if self.operation_mode == 'collection' and self._record_fps > 0:
+            cameras = list(self.communicator.camera_topic_msgs.keys())
+            self._slot_sampler = SlotSampler(self._record_fps, cameras)
+            self._take_integrity = TakeIntegrity(cameras, self._record_fps)
         self.timer_manager.start(timer_name=self.operation_mode)
         self.get_logger().info(
             'Robot control parameters initialized successfully')
@@ -1667,7 +1681,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         if end_after_error is not None:
             try:
                 if end_after_error() and data_manager.saved_episode_count() > 0:
-                    sentence = f'{error_msg} {ERROR_STOP_SAVED_DE}'
+                    sentence = f'{error_msg} {record_texts_de.ERROR_STOP_SAVED_DE}'
             except Exception as e:  # noqa: BLE001 — the error stop must still go out
                 self.get_logger().error(f'error stop: finalize failed: {e}')
         status = TaskStatus()
@@ -1677,6 +1691,165 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         with self._record_publish_lock:
             self.on_recording = False
         self.timer_manager.stop(timer_name=self.operation_mode)
+
+    # ── Round 5: the slot sampler, the take's integrity, the source rules ────
+
+    def _record_tick_on_time(self, now) -> bool:
+        """R5-2: is this tick ON TIME (started at most ON_TIME_TICK_PERIODS
+        periods after the previous record tick)? Only on-time ticks judge a
+        stopped source, so a stall of this process (a VM hiccup, a long
+        callback) is never mistaken for a silent source: by the next tick the
+        sensor thread has refreshed the ages, while a real death keeps them
+        growing."""
+        previous = getattr(self, '_last_record_tick_mono', None)
+        self._last_record_tick_mono = now
+        fps = float(getattr(self, '_record_fps', 0) or 0)
+        if previous is None or fps <= 0:
+            return False
+        return (now - previous) <= ON_TIME_TICK_PERIODS / fps
+
+    def _decide_due_slots(self, now):
+        """The slot sampler's decisions for this tick (spec §3.3), taken from
+        the timestamped histories BEFORE the recorder lock (pure, well under
+        1 ms) in every phase, so the per-camera phase locks stay warm through
+        warm-up and reset. None without a sampler, or when it failed (the tick
+        then records the latest frames, the pre-round-5 behaviour)."""
+        sampler = getattr(self, '_slot_sampler', None)
+        if sampler is None:
+            return None
+        try:
+            return sampler.decide_due(now, *self.communicator.history_snapshots())
+        except Exception as e:  # noqa: BLE001 — a sampler bug must not kill the tick
+            last = getattr(self, '_slot_sampler_error_mono', None)
+            if last is None or now - last >= 5.0:
+                self._slot_sampler_error_mono = now
+                self.get_logger().error(f'slot sampler failed: {e!r}')
+            return None
+
+    def _stopped_required_source(self, now):
+        """(kind, name) of the required source silent longest, when that is
+        at least signal_status.SOURCE_STOPPED_S (by server-side arrival); else
+        None. Required = every registered camera, follower and leader."""
+        stopped = None
+        for counter in self.communicator.source_counters():
+            kind = counter.get('kind')
+            last = counter.get('last_mono')
+            if kind not in ('camera', 'follower', 'leader') or last is None:
+                continue
+            age = now - float(last)
+            if age >= signal_status.SOURCE_STOPPED_S and (
+                    stopped is None or age > stopped[2]):
+                stopped = (kind, counter.get('name'), age)
+        return None if stopped is None else stopped[:2]
+
+    def _missing_source_name(self, kind):
+        """The first configured source of ``kind`` with no message (rule 3)."""
+        msgs = {
+            'camera': self.communicator.camera_topic_msgs,
+            'follower': self.communicator.follower_topic_msgs,
+            'leader': self.communicator.leader_topic_msgs,
+        }.get(kind) or {}
+        return next((name for name, msg in msgs.items() if msg is None),
+                    next(iter(msgs), None))
+
+    def _open_take_if_new(self, data_manager):
+        """A new run entry starts a new take: its capture integrity begins at
+        the run entry (lost slots before it are not the take's). A take still
+        open at that point was discarded (Wiederholen, a collision)."""
+        if data_manager.get_status() != 'run':
+            return
+        entry = getattr(data_manager, 'run_entered_mono', None)
+        if entry is None or entry == getattr(self, '_take_entry', None):
+            return
+        integrity = getattr(self, '_take_integrity', None)
+        if getattr(self, '_take_open', False) and getattr(integrity, 'frames', 0) > 0:
+            self._log_take(data_manager, 'discarded')
+        self._take_entry = entry
+        self._take_open = True
+        self._take_commits = data_manager.commit_count()
+        if integrity is not None:
+            integrity.reset(start_mono=entry)
+
+    def _close_take_if_done(self, data_manager):
+        """After every record step: a take that was committed logs its English
+        integrity line and — when no other warning waits — puts its German C5
+        warning on THIS tick, which is a SAVING tick (F3: warn only). A take
+        that left 'run' without a commit was discarded or dropped."""
+        if not getattr(self, '_take_open', False):
+            return
+        status = data_manager.get_status()
+        if data_manager.commit_count() != getattr(self, '_take_commits', 0):
+            self._take_open = False
+            warning = self._log_take(data_manager, 'saved')
+            if warning and not getattr(data_manager, '_last_warning_message', ''):
+                data_manager._last_warning_message = warning
+            return
+        if status == 'run' and getattr(data_manager, 'run_entered_mono', None) == \
+                getattr(self, '_take_entry', None):
+            return
+        if status in ('save', 'finish', 'stop') and not getattr(data_manager, '_on_saving', False):
+            return          # the take is about to be saved by the next record step
+        self._take_open = False
+        self._log_take(data_manager, 'discarded')
+
+    def _log_take(self, data_manager, outcome) -> str:
+        """One English line per take; returns the take's German C5 warning
+        ('' when clean)."""
+        integrity = getattr(self, '_take_integrity', None)
+        if integrity is None:
+            return ''
+        episode = data_manager.saved_episode_count() + 1
+        try:
+            facts = integrity.as_log_dict()
+            sampler = getattr(self, '_slot_sampler', None)
+            facts['outcome'] = outcome
+            facts['lost_total'] = getattr(sampler, 'lost', None)
+            self.get_logger().info(f'capture take ep={episode} {json.dumps(facts)}')
+            return integrity.warning_de(episode) if outcome == 'saved' else ''
+        except Exception as e:  # noqa: BLE001 — a log line must never stop a tick
+            self.get_logger().warning(f'capture take log failed: {e!r}')
+            return ''
+
+    def _record_decided_slots(self, data_manager, decisions):
+        """The take's frames: one record() per slot the sampler decided at or
+        after the take's run entry, in order, until the take ends (spec §3.3).
+        The chosen camera messages are decoded here; the latest frames are not
+        decoded during a take."""
+        # The official discard of a take thrown away since the last tick runs
+        # NOW, before this take's first frame, and re-stamps the run entry —
+        # slots decided before or during the ~1 s cancel are not part of it.
+        data_manager.cancel_pending_discard()
+        self._open_take_if_new(data_manager)
+        entry = getattr(data_manager, 'run_entered_mono', None)
+        follower_name, leader_name = self.communicator.history_source_names()
+        integrity = getattr(self, '_take_integrity', None)
+        note_take_gap = getattr(data_manager, 'note_take_gap', None)
+        completed = False
+        for decision in decisions:
+            if (data_manager.get_status() != 'run'
+                    or getattr(self, '_collision_trip_pending', None) is not None):
+                break
+            if entry is None or decision['g'] < entry:
+                continue
+            camera_msgs = {name: chosen['item'][3]
+                           for name, chosen in decision['cams'].items()}
+            follower_msgs = {follower_name: decision['fol'][3]}
+            leader_msgs = None
+            if decision.get('lea') is not None and leader_name is not None:
+                leader_msgs = {leader_name: decision['lea'][3]}
+            try:
+                images, state, action = data_manager.convert_msgs_to_raw_datas(
+                    camera_msgs, follower_msgs, self.total_joint_order,
+                    leader_msgs, self.joint_order)
+            except Exception as e:
+                raise _SlotConvertError(str(e)) from e
+            if data_manager.record(images=images, state=state, action=action):
+                completed = True
+            if integrity is not None and data_manager.added_frame():
+                integrity.add(decision)
+                if note_take_gap is not None:
+                    note_take_gap(integrity.gap_source())
+        return completed
 
     def _data_collection_timer_callback(self):
         # Round 5: the record timer runs in its OWN callback group, concurrent
@@ -1690,17 +1863,25 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         data_manager = self.data_manager
         if data_manager is None:
             return
+        tick_mono = time.monotonic()
+        on_time = self._record_tick_on_time(tick_mono)
+        decisions = self._decide_due_slots(tick_mono)
         error_msg = ''
+        source_stop = None
         # Aufnahme 2.0 (H14): a FINISHING session (FINISH/STOP received, the
         # DataManager saving, finalizing and handing off the upload) writes no
         # more frames, so it must not wait for sensor data either. Before, a
         # camera unplugged right after „Beenden“ turned the FINISH into the 5 s
         # "no data" error stop — which never finalizes. The finish/stop branches
         # of DataManager.record() never touch images, hence the None arguments.
-        finishing = data_manager.get_status() in ('finish', 'stop')
-        if finishing:
-            camera_data = follower_data = leader_data = None
-        else:
+        status = data_manager.get_status()
+        finishing = status in ('finish', 'stop')
+        has_dataset = getattr(data_manager, '_lerobot_dataset', None) is not None
+        # During a take the frames come from the decided slots; the latest
+        # frames are not decoded (round 5).
+        take_running = decisions is not None and status == 'run' and has_dataset
+        camera_data = follower_data = leader_data = None
+        if not finishing:
             camera_msgs, follower_msgs, leader_msgs = self.communicator.get_latest_data()
             # Throttle the "waiting for X data" info logs to once per second
             # per source. At 30Hz timer firing this used to print 90
@@ -1716,15 +1897,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     self._last_waiting_log[source] = now
 
             # Topic-availability gates: when a stream is missing we either
-            # wait (still inside DEFAULT_TOPIC_TIMEOUT) or hard-fail. Falling
+            # wait (still inside DEFAULT_TOPIC_TIMEOUT) or stop. Falling
             # through with a None message used to call convert_msgs_to_raw_datas
             # with image_msgs=None — convert is None-safe, but check_lerobot_dataset
             # would then create the dataset object with NO observation.images.*
             # features at all, permanently corrupting `self._lerobot_dataset`
-            # for the rest of the session. Always halt the tick once we set
-            # error_msg, then surface it via TaskStatus below. The published
-            # sentence is German per source (F6a vocabulary); the log stays
-            # English.
+            # for the rest of the session. The published sentence is German per
+            # source (F6a vocabulary); the log stays English.
             missing_source_stop_de = {
                 'camera': (
                     'Die Kameras senden keine Bilder, die Aufnahme wurde '
@@ -1739,83 +1918,86 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     'gestoppt. Ist der Roboter auf der Startseite aktiviert und '
                     'der Leader-Arm eingeschaltet?'),
             }
-
-            def _missing_or_wait(source: str, label: str) -> str | None:
-                if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
-                    self.get_logger().error(
-                        f'{label} data not received within timeout period')
-                    return missing_source_stop_de[source]
-                _log_waiting(source, f'Waiting for {source} data...')
-                return ''  # signal "still waiting, skip this tick"
-
+            missing = None
             if camera_msgs is None:
-                error_msg = _missing_or_wait('camera', 'Camera')
-                if not error_msg:
-                    return
+                missing = ('camera', 'Camera')
             elif follower_msgs is None:
-                error_msg = _missing_or_wait('follower', 'Follower')
-                if not error_msg:
-                    return
+                missing = ('follower', 'Follower')
             elif leader_msgs is None:
-                error_msg = _missing_or_wait('leader', 'Leader')
-                if not error_msg:
+                missing = ('leader', 'Leader')
+            if missing is not None:
+                kind, label = missing
+                if now - self.start_recording_time <= self.DEFAULT_TOPIC_TIMEOUT:
+                    _log_waiting(kind, f'Waiting for {kind} data...')
+                    return  # still waiting, skip this tick
+                self.get_logger().error(f'{label} data not received within timeout period')
+                if has_dataset:
+                    # R5-2 rule 3: once a dataset exists (e.g. a source that never
+                    # returns after a collision resume) the session ends like
+                    # „Beenden“, keeping the saved episodes, instead of the
+                    # error stop.
+                    source_stop = (kind, self._missing_source_name(kind))
+                else:
+                    self._end_record_with_error(missing_source_stop_de[kind], gen)
                     return
 
-            if error_msg:
-                self._end_record_with_error(error_msg, gen)
-                return
+            if source_stop is None:
+                if not take_running:
+                    try:
+                        camera_data, follower_data, leader_data = (
+                            data_manager.convert_msgs_to_raw_datas(
+                                camera_msgs,
+                                follower_msgs,
+                                self.total_joint_order,
+                                leader_msgs,
+                                self.joint_order))
+                    except Exception as e:
+                        self.get_logger().error(f'Failed to convert messages: {e}')
+                        self._end_record_with_error(
+                            'Die Sensordaten konnten nicht gelesen werden, die Aufnahme '
+                            'wurde gestoppt. Bitte starte die Umgebung neu.', gen)
+                        return
 
-            try:
-                camera_data, follower_data, leader_data = (
-                    data_manager.convert_msgs_to_raw_datas(
-                        camera_msgs,
-                        follower_msgs,
-                        self.total_joint_order,
-                        leader_msgs,
-                        self.joint_order))
-            except Exception as e:
-                self.get_logger().error(f'Failed to convert messages: {e}')
-                self._end_record_with_error(
-                    'Die Sensordaten konnten nicht gelesen werden, die Aufnahme '
-                    'wurde gestoppt. Bitte starte die Umgebung neu.', gen)
-                return
-
-            # The dataset's slow first creation (hub check, download, create)
-            # runs here, WITHOUT the recorder lock (round 5); check_lerobot_dataset
-            # installs the dataset under it.
-            if not data_manager.check_lerobot_dataset(
-                    camera_data,
-                    self.total_joint_order):
-                # check_lerobot_dataset returns False on any dataset-init
-                # failure. If a lower layer left a German warning in
-                # _last_warning_message, prefer it over the generic fallback.
-                # The fallback is cause-neutral: the usual cause is the
-                # HuggingFace existence check failing offline with the upload
-                # switched on, not the name.
-                specific = getattr(data_manager, '_last_warning_message', '')
-                if specific:
-                    error_msg = specific
-                    # Consume so it isn't re-surfaced by the next
-                    # get_current_record_status() tick.
-                    data_manager._last_warning_message = ''
-                else:
-                    error_msg = (
-                        'Der Datensatz konnte nicht angelegt oder geöffnet werden. '
-                        'Prüfe die Internetverbindung, schalte unter „Erweitert“ '
-                        'das Hochladen aus oder wähle einen anderen Aufgabennamen.'
-                    )
-                self.get_logger().info(
-                    'Dataset init failed for '
-                    f"{getattr(data_manager, '_save_repo_name', '?')}")
-                self._end_record_with_error(error_msg, gen)
-                return
+                # The dataset's slow first creation (hub check, download, create)
+                # runs here, WITHOUT the recorder lock (round 5);
+                # check_lerobot_dataset installs the dataset under it.
+                if not data_manager.check_lerobot_dataset(
+                        camera_data,
+                        self.total_joint_order):
+                    # check_lerobot_dataset returns False on any dataset-init
+                    # failure. If a lower layer left a German warning in
+                    # _last_warning_message (D4 resume, D7 hub check), prefer it
+                    # over the generic, cause-neutral fallback.
+                    specific = getattr(data_manager, '_last_warning_message', '')
+                    if specific:
+                        error_msg = specific
+                        # Consume so it isn't re-surfaced by the next
+                        # get_current_record_status() tick.
+                        data_manager._last_warning_message = ''
+                    else:
+                        error_msg = (
+                            'Der Datensatz konnte nicht angelegt oder geöffnet werden. '
+                            'Prüfe die Internetverbindung, schalte unter „Erweitert“ '
+                            'das Hochladen aus oder wähle einen anderen Aufgabennamen.'
+                        )
+                    self.get_logger().info(
+                        'Dataset init failed for '
+                        f"{getattr(data_manager, '_save_repo_name', '?')}")
+                    self._end_record_with_error(error_msg, gen)
+                    return
 
         with data_manager.locked():
             # F5: re-check AFTER taking the recorder lock — a trip, a new START or
             # an end may have landed while this tick waited for it.
             if not self._record_tick_owns_session(gen):
                 return
-            if not finishing:
+            if source_stop is not None:
+                kind, name = source_stop
+                if data_manager.end_for_source_stop(record_texts_de.source_stop_de(
+                        kind, name, take_dropped=data_manager.get_status() == 'run')):
+                    self.get_logger().warning(
+                        f'Recording ended: {kind} {name!r} sent nothing since the resume')
+            elif not finishing:
                 if self.communicator.joystick_state['updated']:
                     self.handle_joystick_trigger(
                         joystick_mode=self.communicator.joystick_state['mode'])
@@ -1824,11 +2006,34 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 # Aufnahme 2.0 — end the session before the disk fills (1 Hz).
                 self._check_recording_disk_floor()
 
+                # R5-2 rule 1: a required source silent for SOURCE_STOPPED_S
+                # ends the session like „Beenden“ — judged only on an on-time
+                # tick, only in warm-up/run/reset.
+                current = data_manager.get_status()
+                if on_time and current in ('warmup', 'run', 'reset'):
+                    stopped = self._stopped_required_source(tick_mono)
+                    if stopped is not None and data_manager.end_for_source_stop(
+                            record_texts_de.source_stop_de(
+                                stopped[0], stopped[1], take_dropped=current == 'run')):
+                        self.get_logger().warning(
+                            f'Recording ended: {stopped[0]} {stopped[1]!r} stopped')
+
             try:
-                record_completed = data_manager.record(
-                    images=camera_data,
-                    state=follower_data,
-                    action=leader_data)
+                if decisions is not None and data_manager.get_status() == 'run' \
+                        and getattr(data_manager, '_lerobot_dataset', None) is not None:
+                    record_completed = self._record_decided_slots(data_manager, decisions)
+                else:
+                    record_completed = data_manager.record(
+                        images=camera_data,
+                        state=follower_data,
+                        action=leader_data)
+                    self._open_take_if_new(data_manager)
+            except _SlotConvertError as e:
+                self.get_logger().error(f'Failed to convert messages: {e}')
+                self._end_record_with_error(
+                    'Die Sensordaten konnten nicht gelesen werden, die Aufnahme '
+                    'wurde gestoppt. Bitte starte die Umgebung neu.', gen)
+                return
             except Exception as e:
                 # add_frame raises from inside upstream lerobot on (a) a feature
                 # mismatch when resuming an existing dataset on a changed rig
@@ -1846,6 +2051,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     'oder einen neuen Datensatz-Namen wählen.', gen)
                 return
 
+            self._close_take_if_done(data_manager)
             current_status = data_manager.get_current_record_status()
 
         if not self._publish_record_status(current_status, gen):
@@ -2080,7 +2286,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     with self._record_command_lock() as acquired:
                         if not acquired:
                             response.success = False
-                            response.message = BUSY_DE
+                            response.message = record_texts_de.BUSY_DE
                             return response
                         self.data_manager.re_record()
                     response.success = True
@@ -2363,7 +2569,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 with self._record_command_lock() as acquired:
                     if not acquired:
                         response.success = False
-                        response.message = BUSY_DE
+                        response.message = record_texts_de.BUSY_DE
                         return response
                     if request.command == SendCommand.Request.STOP:
                         self.get_logger().info('Stopping recording')

@@ -269,6 +269,27 @@ def test_publishes_schema_v1_with_rates_after_a_second():
                               'critical_floor_bytes': 1_000_000_000}
 
 
+def test_no_ingest_key_without_a_sensor_executor():
+    node = _TickNode()
+    _tick(node)
+    assert 'ingest' not in _payloads(node)[-1]
+
+
+def test_the_sensor_threads_liveness_rides_as_the_trailing_ingest_key():
+    # Round 5 (F3): additive, trailing; v stays 1 and the v1 keys keep their order.
+    node = _TickNode()
+    node._sensor_executor = object()
+    node._sensor_alive_mono = _Clock.t - 0.01
+    _tick(node)
+    payload = _payloads(node)[-1]
+    assert payload['v'] == 1
+    assert list(payload)[-1] == 'ingest'
+    assert payload['ingest'] == {'alive': True, 'age_s': 0.01}
+    node._sensor_alive_mono = _Clock.t - 2.5
+    _tick(node)
+    assert _payloads(node)[-1]['ingest'] == {'alive': False, 'age_s': 2.5}
+
+
 def test_compact_utf8_json():
     node = _TickNode()
     _tick(node)

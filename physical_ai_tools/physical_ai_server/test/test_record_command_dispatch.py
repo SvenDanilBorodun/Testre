@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from physical_ai_server import signal_status as real_signal_status
+from physical_ai_server.data_processing import record_texts_de
 
 _SERVER_PY = (
     Path(__file__).resolve().parents[1] / 'physical_ai_server' / 'physical_ai_server.py'
@@ -83,7 +84,7 @@ def _load(names=('user_interaction_callback', '_record_command_lock')):
         'contextlib': contextlib,
         'signal_status': _signal_status_ns(),
         'COMMAND_LOCK_TIMEOUT_S': _module_constant('COMMAND_LOCK_TIMEOUT_S'),
-        'BUSY_DE': _BUSY_DE,
+        'record_texts_de': record_texts_de,
     }
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in names:
@@ -376,7 +377,7 @@ def test_outer_except_keeps_heads_text_outside_the_record_page():
 def test_the_command_lock_timeout_is_a_quarter_second():
     COMMAND_LOCK_TIMEOUT_S = _module_constant('COMMAND_LOCK_TIMEOUT_S')
     assert COMMAND_LOCK_TIMEOUT_S == 0.25
-    assert _module_constant('BUSY_DE') == _BUSY_DE
+    assert record_texts_de.BUSY_DE == _BUSY_DE
 
 
 def _hold(dm):

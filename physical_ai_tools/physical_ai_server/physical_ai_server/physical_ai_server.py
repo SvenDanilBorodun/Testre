@@ -16,6 +16,8 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim
 
+import collections
+import gc
 import json
 import logging
 import math
@@ -129,6 +131,7 @@ from physical_ai_server.utils.parameter_utils import (
 
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -258,6 +261,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     # raw value — React compares ints (taskPhases.js); enum-parity CI keeps
     # the literal in sync with the .msg.
     PHASE_INFERENCE_LOADING = getattr(TaskStatus, 'INFERENCE_LOADING', 10)
+
+    # Aufnahme 2.0 round 5 (F3): the sensor-ingest executor's supervision.
+    # SENSOR_FAIL_LIMIT executor failures inside SENSOR_FAIL_WINDOW_S end the
+    # PROCESS with SENSOR_EXIT_CODE, so s6 respawns the node: a dead sensor
+    # thread would otherwise leave recording stalled and the collision detector
+    # deaf behind a node that still answers its heartbeat. INGEST_ALIVE_S is the
+    # liveness threshold /edubotics/signal_status reports.
+    SENSOR_FAIL_LIMIT = 3
+    SENSOR_FAIL_WINDOW_S = 10.0
+    SENSOR_EXIT_CODE = 70
+    INGEST_ALIVE_S = 1.0
 
     class RosbagNotReadyException(Exception):
         """Exception raised when rosbag recording cannot start yet."""
@@ -411,6 +425,28 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         self.start_recording_time: float = 0.0
 
+        # Aufnahme 2.0 round 5. The record timer runs in its OWN group
+        # (collection only; the inference timer stays in the default group), so
+        # a slow record step never blocks /task/command, the collision trip
+        # hand-over or the watchdog. _record_publish_lock is held only around
+        # [check the session, publish / flip on_recording] — never across work.
+        # _record_session_gen is bumped by START and by a collision trip; a
+        # record tick captures it at entry and neither adds a frame nor
+        # publishes once it moved (F5). _collision_trip_pending is the C1-A
+        # latch the sensor thread sets when it detects a trip (cleared by the
+        # main executor's hand-over callback).
+        self._record_cb_group = MutuallyExclusiveCallbackGroup()
+        self._record_publish_lock = threading.Lock()
+        self._record_session_gen = 0
+        self._collision_trip_pending = None
+        # The sensor-ingest node + its supervised executor (_ensure_sensor_executor).
+        self._sensor_node = None
+        self._sensor_executor = None
+        self._sensor_thread = None
+        self._sensor_stop = False
+        self._sensor_alive_mono = None
+        self._sensor_failures = collections.deque()
+
         # Retained for legacy mode-arbitration in _assert_no_other_active;
         # the value is never flipped to True after on-device training was
         # removed in v2.5.0, so the training branch there is dead but
@@ -438,6 +474,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._resolved_profile_stash = robot_profiles.resolve(
             os.environ.get('EDUBOTICS_ROBOT_TYPE'))
         self._arm_profile = self._resolved_profile_stash
+
+        # Aufnahme 2.0 round 5: the sensor-ingest node and its supervised
+        # SingleThreadedExecutor come up BEFORE the collision monitor, whose
+        # three subscriptions (and the Communicator's camera/follower/leader
+        # ones) live on it. The node's MultiThreadedExecutor cost ~2.2 ms of CPU
+        # per delivered message; a SingleThreadedExecutor dispatches one in
+        # ~0.18 ms. Never put a high-rate subscription back on the main node.
+        self._ensure_sensor_executor()
 
         # EduBotics teleop force/collision e-stop (Rule §2 software guard, teleop-only).
         # Arms the read-only force monitor + the safe-home/resync orchestration.
@@ -742,6 +786,113 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception:
             pass
         self._reinit_timer = None
+
+    # ── Sensor ingest (Aufnahme 2.0 round 5, F3) ──────────────────────────────
+
+    def _ensure_sensor_executor(self):
+        """Bring up the sensor-ingest node and its supervised executor (idempotent).
+
+        A second node, ``physical_ai_server_sensors``, carries every high-rate
+        subscription (the recorder's cameras, follower and leader, and the
+        collision monitor's three). It is spun by a SingleThreadedExecutor on
+        one daemon thread (``sensor-exec``) running ``_sensor_loop``.
+
+        ``use_global_arguments=False`` is load-bearing: the launch passes
+        ``-r __node:=physical_ai_server``, which would otherwise rename this
+        node too (two nodes with one name). The degraded-boot re-init path
+        calls this again; it is a no-op once the node exists. A failure to
+        create it is logged and leaves ``_sensor_node`` None, so every
+        subscription falls back to the main node (the pre-round-5 behaviour)
+        instead of raising out of __init__.
+        """
+        if getattr(self, '_sensor_node', None) is not None:
+            return
+        try:
+            sensor_node = rclpy.create_node(
+                'physical_ai_server_sensors', use_global_arguments=False)
+            sensor_executor = SingleThreadedExecutor()
+            sensor_executor.add_node(sensor_node)
+        except Exception as e:  # noqa: BLE001 — degrade to the main node, never crash
+            self._sensor_node = None
+            self._sensor_executor = None
+            self.get_logger().error(
+                f'sensor executor could not be created, subscriptions stay on the '
+                f'main node: {e!r}')
+            return
+        self._sensor_node = sensor_node
+        self._sensor_executor = sensor_executor
+        self._sensor_stop = False
+        self._sensor_failures = collections.deque()
+        self._sensor_alive_mono = time.monotonic()
+        self._sensor_thread = threading.Thread(
+            target=self._sensor_loop, name='sensor-exec', daemon=True)
+        self._sensor_thread.start()
+
+    def _sensor_loop(self):
+        """The sensor thread's supervisor loop.
+
+        Every sensor callback guards its own body, so a raising ``spin_once``
+        is an executor-level failure; it is logged and counted, and
+        SENSOR_FAIL_LIMIT of them inside SENSOR_FAIL_WINDOW_S end the process
+        (``_note_sensor_failure``). Without this a single exception killed the
+        thread silently (measured: thread dead, heartbeat still ticking).
+        """
+        executor = self._sensor_executor
+        while rclpy.ok() and not self._sensor_stop:
+            self._sensor_alive_mono = time.monotonic()
+            try:
+                executor.spin_once(timeout_sec=0.1)
+            except (ExternalShutdownException, KeyboardInterrupt):
+                return
+            except Exception as e:  # noqa: BLE001 — counted, then os._exit
+                if self._sensor_stop:
+                    return
+                self._note_sensor_failure(e)
+
+    def _note_sensor_failure(self, error):
+        """Count one sensor-executor failure; too many in the window end the
+        process so s6 respawns the node (compose ``restart`` and the s6 longrun
+        are unchanged). ``os._exit`` on purpose: a raise here would only end
+        the sensor thread, which is exactly the silent failure this prevents."""
+        now = time.monotonic()
+        failures = self._sensor_failures
+        failures.append(now)
+        while failures and failures[0] < now - self.SENSOR_FAIL_WINDOW_S:
+            failures.popleft()
+        self.get_logger().error(f'sensor executor failure {len(failures)}: {error!r}')
+        if len(failures) >= self.SENSOR_FAIL_LIMIT:
+            self.get_logger().fatal('sensor executor keeps failing: exiting for respawn')
+            os._exit(self.SENSOR_EXIT_CODE)
+
+    def _shutdown_sensor_executor(self):
+        """Stop the sensor loop, shut its executor down, destroy its node.
+        Called from main()'s ``finally`` BEFORE the main node is destroyed.
+        Idempotent; never raises."""
+        self._sensor_stop = True
+        executor = getattr(self, '_sensor_executor', None)
+        sensor_node = getattr(self, '_sensor_node', None)
+        self._sensor_executor = None
+        self._sensor_node = None
+        if executor is not None:
+            try:
+                executor.shutdown()
+            except Exception:  # noqa: BLE001 — shutdown must never raise
+                pass
+        if sensor_node is not None:
+            try:
+                sensor_node.destroy_node()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _ingest_liveness(self, now):
+        """The additive ``ingest`` entry of /edubotics/signal_status:
+        ``{'alive': age < INGEST_ALIVE_S, 'age_s': age}`` where age is the time
+        since the sensor loop last turned; None without a sensor executor."""
+        alive_mono = getattr(self, '_sensor_alive_mono', None)
+        if alive_mono is None:
+            return None
+        age = max(0.0, float(now) - float(alive_mono))
+        return {'alive': age < self.INGEST_ALIVE_S, 'age_s': round(age, 2)}
 
     def _init_core_components(self):
         # D8 — monotonic() of the last /task/status publish, updated after EVERY
@@ -1207,13 +1358,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         log_parameters(self, self.params)
         log_parameters(self, self.joint_order)
 
-        # Initialize observation manager
+        # Initialize observation manager. Its camera/follower/leader
+        # subscriptions live on the sensor-ingest node (round 5); idempotent, so
+        # the degraded-boot re-init path is safe.
+        self._ensure_sensor_executor()
         self.communicator = Communicator(
             node=self,
             operation_mode=self.operation_mode,
             params=self.params,
             follower_joint_order=getattr(
                 getattr(self, '_arm_profile', None), 'joint_names', None),
+            sensor_node=getattr(self, '_sensor_node', None),
         )
 
         # NOTE: the 1 Hz liveness heartbeat is no longer created here — it is
@@ -1313,10 +1468,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.communicator.clear_latest_data()
 
         self.timer_manager = TimerManager(node=self)
+        # The record timer runs in its OWN MutuallyExclusiveCallbackGroup
+        # (round 5): a slow record step (a save, the official ~1 s discard
+        # cancel, the dataset's first creation) no longer blocks /task/command,
+        # the collision trip hand-over or the watchdog in the default group.
+        # The inference timer stays in the default group (unchanged, C3/D5).
         self.timer_manager.set_timer(
             timer_name=self.operation_mode,
             timer_frequency=task_info.fps,
-            callback_function=self.timer_callback_dict[self.operation_mode]
+            callback_function=self.timer_callback_dict[self.operation_mode],
+            callback_group=(self._record_cb_group
+                            if self.operation_mode == 'collection' else None),
         )
         self.timer_manager.start(timer_name=self.operation_mode)
         self.get_logger().info(
@@ -7418,9 +7580,19 @@ def main(args=None):
     # reports. 6 threads gives true parallel decode (cv2 releases the
     # GIL during JPEG decode) and leaves headroom for services. Python
     # GIL-bound for pure-Python callbacks; yields better under contention.
+    #
+    # Aufnahme 2.0 round 5: 8 threads (the record timer now has its own group
+    # and holds one thread most of the time); the high-rate sensor
+    # subscriptions are no longer on this executor at all (the supervised
+    # sensor-ingest executor, see _ensure_sensor_executor).
     from rclpy.executors import MultiThreadedExecutor
-    executor = MultiThreadedExecutor(num_threads=6)
+    executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
+    # Move the import-time heap (~460 k objects) out of the cyclic GC's reach:
+    # a full collection there took 73-105 ms and held the GIL, pausing every
+    # thread incl. the collision callbacks. No explicit gc.collect() remains on
+    # the recording path.
+    gc.freeze()
     try:
         executor.spin()
     except KeyboardInterrupt:
@@ -7428,6 +7600,9 @@ def main(args=None):
     finally:
         # Cleanup HF API Worker before destroying node
         node._cleanup_hf_api_worker()
+        # The sensor executor and its node go first: stop flag, executor
+        # shutdown, sensor node destroyed — all before the main node.
+        node._shutdown_sensor_executor()
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()

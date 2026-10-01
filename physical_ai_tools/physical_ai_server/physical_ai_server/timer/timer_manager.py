@@ -26,12 +26,18 @@ class TimerManager:
         self._timer = {}
         self._timer_frequency = {}
         self._timer_callback = {}
+        # Callback group per timer (None = the node's default group). The
+        # record timer runs in its own group (Aufnahme 2.0 round 5); start()
+        # recreates a stopped timer in the SAME group, which the collision
+        # monitor's seamless resume relies on.
+        self._timer_group = {}
 
     def start(self, timer_name):
         if self._timer[timer_name] is None:
             self._timer[timer_name] = self._node.create_timer(
                 1.0/self._timer_frequency[timer_name],
-                self._timer_callback[timer_name])
+                self._timer_callback[timer_name],
+                callback_group=self._timer_group.get(timer_name))
 
     def stop(self, timer_name):
         if self._timer[timer_name] is not None:
@@ -42,7 +48,9 @@ class TimerManager:
         for timer_name in self._timer:
             self.stop(timer_name)
 
-    def set_timer(self, timer_name, timer_frequency, callback_function):
+    def set_timer(self, timer_name, timer_frequency, callback_function,
+                  callback_group=None):
         self._timer[timer_name] = None
         self._timer_frequency[timer_name] = timer_frequency
         self._timer_callback[timer_name] = callback_function
+        self._timer_group[timer_name] = callback_group

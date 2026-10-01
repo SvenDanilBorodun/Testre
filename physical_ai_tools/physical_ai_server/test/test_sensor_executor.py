@@ -192,7 +192,7 @@ def _load(names):
 
 
 _METHODS = ('_ensure_sensor_executor', '_sensor_loop', '_note_sensor_failure',
-            '_shutdown_sensor_executor', '_ingest_liveness')
+            '_shutdown_sensor_executor')
 _NS = _load(_METHODS)
 
 
@@ -200,7 +200,6 @@ class _Host:
     SENSOR_FAIL_LIMIT = _class_constant('SENSOR_FAIL_LIMIT')
     SENSOR_FAIL_WINDOW_S = _class_constant('SENSOR_FAIL_WINDOW_S')
     SENSOR_EXIT_CODE = _class_constant('SENSOR_EXIT_CODE')
-    INGEST_ALIVE_S = _class_constant('INGEST_ALIVE_S')
 
     def __init__(self):
         self.logger = _Logger()
@@ -236,7 +235,6 @@ def test_the_contract_constants():
     assert _Host.SENSOR_FAIL_LIMIT == 3
     assert _Host.SENSOR_FAIL_WINDOW_S == 10.0
     assert _Host.SENSOR_EXIT_CODE == 70
-    assert _Host.INGEST_ALIVE_S == 1.0
 
 
 def test_the_sensor_node_ignores_the_launch_remap():
@@ -336,17 +334,6 @@ def test_the_loop_stamps_its_liveness_every_turn():
     host = _host_with_executor([(0.5, 'ok'), (0.5, 'ok'), 'stop'])
     host._sensor_loop()
     assert host._sensor_alive_mono == _Clock.t
-
-
-def test_ingest_liveness():
-    host = _Host()
-    host._ensure_sensor_executor()
-    host._sensor_alive_mono = _Clock.t - 0.01
-    assert host._ingest_liveness(_Clock.t) == {'alive': True, 'age_s': 0.01}
-    host._sensor_alive_mono = _Clock.t - 2.5
-    assert host._ingest_liveness(_Clock.t) == {'alive': False, 'age_s': 2.5}
-    host._sensor_alive_mono = None
-    assert host._ingest_liveness(_Clock.t) is None
 
 
 def test_shutdown_stops_the_executor_then_destroys_the_node():
@@ -568,6 +555,80 @@ def test_guarded_callbacks_still_do_their_job(comm_module):
     assert comm.camera_topic_msgs['scene'] is msg
     assert comm.follower_topic_msgs['follower'] is msg
     assert comm.leader_topic_msgs['leader'] is msg
+
+
+# ── the timestamped histories (spec §2.3) ────────────────────────────────────
+
+def test_every_registered_source_has_a_pre_created_history(comm_module):
+    comm = comm_module.Communicator(node=_CommNode('main'), operation_mode='collection',
+                                    params=dict(_PARAMS), sensor_node=_CommNode('s'))
+    assert sorted(comm._histories) == ['camera:gripper', 'camera:scene',
+                                       'follower:follower', 'leader:leader']
+    assert comm_module.CAMERA_HISTORY_LEN == 64
+    assert comm_module.JOINT_HISTORY_LEN == 256
+    assert comm._histories['camera:scene']._items.maxlen == 64
+    assert comm._histories['follower:follower']._items.maxlen == 256
+    assert comm._histories['leader:leader']._items.maxlen == 256
+
+
+def test_inference_has_no_leader_history(comm_module):
+    comm = comm_module.Communicator(node=_CommNode('main'), operation_mode='inference',
+                                    params=dict(_PARAMS), sensor_node=_CommNode('s'))
+    cams, follower, leader = comm.history_snapshots()
+    assert sorted(cams) == ['gripper', 'scene']
+    assert follower == []
+    assert leader is None
+
+
+def _stamped(sec, nanosec=0):
+    return types.SimpleNamespace(header=types.SimpleNamespace(
+        stamp=types.SimpleNamespace(sec=sec, nanosec=nanosec)))
+
+
+def test_callbacks_append_arrival_first_then_the_old_work(comm_module):
+    comm = comm_module.Communicator(node=_CommNode('main'), operation_mode='collection',
+                                    params=dict(_PARAMS), sensor_node=_CommNode('s'))
+    clock = types.SimpleNamespace(t=100.0)
+    real_time = comm_module.time
+    comm_module.time = types.SimpleNamespace(
+        monotonic=lambda: clock.t, time=lambda: clock.t, perf_counter=lambda: clock.t)
+    try:
+        cam_msg, fol_msg, lea_msg = _stamped(50), _stamped(50, 5_000_000), _stamped(0)
+        comm._camera_callback('scene', cam_msg)
+        clock.t = 100.004
+        comm._follower_callback('follower', fol_msg)
+        clock.t = 100.010
+        comm._leader_callback('leader', lea_msg)
+    finally:
+        comm_module.time = real_time
+    cams, follower, leader = comm.history_snapshots()
+    (seq, arrival, t, msg), = cams['scene']
+    assert (seq, arrival, msg) == (1, 100.0, cam_msg)
+    assert t == 100.0                     # first sample: the stamp maps to its arrival
+    assert follower[0][1] == 100.004 and follower[0][3] is fol_msg
+    assert leader[0][1:] == (100.010, 100.010, lea_msg)   # unstamped: t = arrival
+    assert cams['gripper'] == []
+    assert comm.camera_topic_msgs['scene'] is cam_msg      # the old work still runs
+    assert comm.history_source_names() == ('follower', 'leader')
+
+
+def test_clear_latest_data_clears_the_histories(comm_module):
+    comm = comm_module.Communicator(node=_CommNode('main'), operation_mode='collection',
+                                    params=dict(_PARAMS), sensor_node=_CommNode('s'))
+    comm._camera_callback('scene', _stamped(1))
+    comm._leader_callback('leader', _stamped(0))
+    comm.clear_latest_data()
+    cams, follower, leader = comm.history_snapshots()
+    assert cams['scene'] == [] and leader == []
+    comm._camera_callback('scene', _stamped(2))
+    assert comm.history_snapshots()[0]['scene'][0][0] == 2   # seq keeps counting
+
+
+def test_a_communicator_built_without_init_still_takes_messages(comm_module):
+    comm = object.__new__(comm_module.Communicator)
+    comm.follower_topic_msgs = {}
+    comm._follower_callback('follower', _stamped(1))
+    assert comm.follower_topic_msgs['follower'] is not None
 
 
 def test_partial_is_still_how_the_callbacks_are_bound():

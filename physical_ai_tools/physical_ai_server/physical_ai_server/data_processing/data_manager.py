@@ -18,6 +18,8 @@
 
 from contextlib import contextmanager
 import functools
+import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -34,8 +36,6 @@ import cv2
 from geometry_msgs.msg import Twist
 from huggingface_hub import (
     CommitOperationDelete,
-    DatasetCard,
-    DatasetCardData,
     HfApi,
     ModelCard,
     ModelCardData,
@@ -59,9 +59,27 @@ from physical_ai_server.data_processing.progress_tracker import (
 from physical_ai_server.device_manager.cpu_checker import CPUChecker
 from physical_ai_server.device_manager.ram_checker import RAMChecker
 from physical_ai_server.device_manager.storage_checker import StorageChecker
-import requests
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory
+
+
+def _sibling(name):
+    """A stdlib-only sibling module of this package (round 5): by package name
+    in the image, by file path when a deps-free test loader gave the package
+    no __path__ (the reason this file had no sibling imports before)."""
+    try:
+        return importlib.import_module(f'physical_ai_server.data_processing.{name}')
+    except ImportError:
+        spec = importlib.util.spec_from_file_location(
+            f'_edubotics_dm_{name}', str(Path(__file__).with_name(f'{name}.py')))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+record_texts_de = _sibling('record_texts_de')
+hf_errors = _sibling('hf_errors')
+dataset_card = _sibling('dataset_card')
 
 
 # Student-facing German camera names for record-path sentences (Aufnahme 2.0).
@@ -135,6 +153,31 @@ RERECORD_FINISH_WINDOW_S = 5.0
 UPLOAD_NOT_STARTED_DE = (
     'Das Hochladen konnte nicht gestartet werden. Du kannst den Datensatz '
     'später im Tab Daten hochladen.')
+# Round 5 caps, per episode number (reset when that episode is saved). O2: a
+# take with a source gap >= SOURCE_GAP_S on the source's own timeline is
+# re-recorded at most this often, then SAVED with a warning. C7: a frame loss
+# in the encoder re-records at most this often, then the session ends like
+# „Beenden“ (the take dropped, saved episodes kept, finalize + upload).
+MAX_GAP_REDOS_PER_EPISODE = 2
+MAX_FRAME_LOSS_REDOS_PER_EPISODE = 2
+# Post-save length check (LeRobot's train-time FrameTimestampError condition):
+# a saved episode's video span may differ from length / fps by this many frames.
+SAVED_LENGTH_TOLERANCE_FRAMES = 0.5
+
+
+def _resume_compatibility_check(dataset, robot_type, fps, features):
+    """D4: LeRobot's OWN resume check (lerobot.utils.control_utils.
+    sanity_check_dataset_robot_compatibility) — raises ValueError naming the
+    first mismatching field: robot_type, fps or features. Imported lazily: it
+    is only needed when an existing dataset is opened."""
+    from types import SimpleNamespace
+    from lerobot.utils.control_utils import sanity_check_dataset_robot_compatibility
+    sanity_check_dataset_robot_compatibility(
+        dataset, SimpleNamespace(robot_type=robot_type), int(fps), features)
+
+
+class HubCheckRefused(Exception):
+    """D7: the logged-in existence check on the hub could not answer."""
 
 
 def _recorder_locked(method):
@@ -255,6 +298,21 @@ class DataManager:
         self._collision_discard_requested = False
         self._save_count_pending = True
         self.run_entered_mono = None
+        # Round 5 session rules.
+        #   _source_stop_requested  R5-2: a stopped source ended the session (once)
+        #   _take_gap_source        O2/C6: (kind, name) of the source whose gap
+        #                           makes the running take a re-record (the
+        #                           node's capture integrity; cleared per take)
+        #   _gap_redos / _frame_loss_redos  re-records per episode number (caps)
+        #   _commit_count           takes committed to disk (the node closes the
+        #                           take's integrity on a change)
+        #   _frame_added            the last record() call added a frame
+        self._source_stop_requested = False
+        self._take_gap_source = None
+        self._gap_redos = {}
+        self._frame_loss_redos = {}
+        self._commit_count = 0
+        self._frame_added = False
         self._cpu_checker = CPUChecker()
         self.data_converter = DataConverter()
         # Propagate the task fps into the action-duration setter so
@@ -357,6 +415,7 @@ class DataManager:
             state,
             action):
 
+        self._frame_added = False
         # A collision discard that arrived since the last step (the trip never
         # waits for the lock; normally the holder drains it at release).
         self._drain_collision_request_locked()
@@ -395,6 +454,13 @@ class DataManager:
                 return self.RECORDING
             fps = self._record_fps()
             n_target = max(1, int(round(float(self._task_info.episode_time_s) * fps)))
+            if not self._buffer_has_frames():
+                # The take's first frame: re-arm the frame-drop watch (LeRobot's
+                # public "Encoder queue full" warning), so save() judges this
+                # take only.
+                arm = getattr(self._lerobot_dataset, 'arm_frame_drop_watch', None)
+                if arm is not None:
+                    arm()
             frame = self.create_frame(images, state, action)
             if self._task_info.use_optimized_save_mode:
                 self._lerobot_dataset.add_frame_without_write_image(
@@ -404,6 +470,7 @@ class DataManager:
                 self._lerobot_dataset.add_frame(
                     frame,
                     self.current_instruction)
+            self._frame_added = True
             size = self._buffer_size()
             self._proceed_time = size / fps
             if size >= n_target:
@@ -498,14 +565,18 @@ class DataManager:
                                 self._task_info.private_mode)
                         return self.RECORD_COMPLETED
                 else:
-                    # save() returns False when it discarded the episode for
-                    # re-recording (streaming frame drop); _status is now
-                    # 'reset', so do NOT latch _on_saving.
                     committing = self._buffer_has_frames()
                     if self.save():
                         self._stop_count_pending = committing
                         self._proceed_time = 0
                         self._on_saving = True
+                    else:
+                        # save() discarded the take (a frame loss or a source
+                        # gap). A STOP is not re-recorded: complete it with the
+                        # episodes already saved, like FINISH below.
+                        self._finish_after_discard()
+                        self._status = 'stop'
+                        self._stop_count_pending = False
             return self.RECORDING
 
         elif self._status == 'finish':
@@ -552,17 +623,11 @@ class DataManager:
                     self._proceed_time = 0
                     self._on_saving = True
                 else:
-                    # save() discarded the episode (streaming frame drop) and
-                    # routed to 'reset'. A FINISH is not re-recorded: end the
-                    # session with the episodes already saved and say why
-                    # (HEAD silently continued the session instead).
-                    self._status = 'finish'
-                    self._last_warning_message = (
-                        f'Episode {self._record_episode_count + 1}: Kamera-Bilder '
-                        f'gingen beim Speichern verloren, die Episode wurde verworfen. '
-                        f'Die Aufnahme endet mit den schon gespeicherten Episoden.')
-                    self._proceed_time = 0
-                    self._on_saving = True
+                    # save() discarded the take (a frame loss or a source gap).
+                    # A FINISH is not re-recorded: end the session with the
+                    # episodes already saved and say why (HEAD silently
+                    # continued the session instead).
+                    self._finish_after_discard()
 
         if self._record_episode_count >= self._task_info.num_episodes:
             if self._lerobot_dataset.check_video_encoding_completed():
@@ -594,23 +659,45 @@ class DataManager:
         # turned a FINISH/MOVE_TO_NEXT in the first warm-up into an error stop.
         if not self._buffer_has_frames():
             return True
+        self._last_discard_cause = None
+        episode_no = self._record_episode_count + 1
         # Streaming frame-drop guard: with streaming_encoding=True the encoder
         # silently drops camera frames under CPU overload while add_frame still
         # appended a parquet row each tick — so the encoded video would be
         # SHORTER than the data parquet and LeRobot would raise
-        # FrameTimestampError at train time. The encoder's per-episode drop
-        # counter is still valid here (start_episode cleared it on this episode's
-        # first frame; finish_episode hasn't run yet), so detect it BEFORE
-        # save_episode() commits and re-record the episode instead of shipping a
-        # desynced one. (This is detect-before-commit — strictly safer than the
-        # post-commit warning in _verify_saved_video_files.)
+        # FrameTimestampError at train time. Round 5: detected through
+        # LeRobot's PUBLIC warning (the wrapper's frame-drop watch, re-armed at
+        # the take's first frame), BEFORE save_episode() commits.
         try:
             dropped = self._lerobot_dataset.streaming_dropped_frame_count()
         except Exception:  # noqa: BLE001 — detection must never block recording
             dropped = 0
         if dropped > 0:
+            redos = self._frame_loss_redos.get(episode_no, 0) \
+                if hasattr(self, '_frame_loss_redos') else 0
+            if redos >= MAX_FRAME_LOSS_REDOS_PER_EPISODE:
+                self._end_for_frame_loss(episode_no)
+                return False
+            if hasattr(self, '_frame_loss_redos'):
+                self._frame_loss_redos[episode_no] = redos + 1
             self._discard_episode_for_redo(dropped)
             return False
+        # O2 + C6: a source was silent >= SOURCE_GAP_S on its own timeline
+        # inside this take (the node's capture integrity noted it): re-record,
+        # at most MAX_GAP_REDOS_PER_EPISODE times per episode, then keep it with
+        # a warning.
+        gap = getattr(self, '_take_gap_source', None)
+        if gap is not None:
+            redos = self._gap_redos.get(episode_no, 0) if hasattr(self, '_gap_redos') else 0
+            if redos < MAX_GAP_REDOS_PER_EPISODE:
+                if hasattr(self, '_gap_redos'):
+                    self._gap_redos[episode_no] = redos + 1
+                self._discard_episode_for_gap(gap, episode_no)
+                return False
+            kind, name = gap
+            self._last_warning_message = record_texts_de.source_gap_kept_de(
+                kind, name, episode_no)
+            print(f'[WARNUNG] {self._last_warning_message}', file=sys.stderr, flush=True)
         # v2.5.0: with streaming_encoding=True + parallel_encoding=False the
         # video files are fully written by the time save_episode() returns, so
         # there is no async encoder snapshot to take here. The mp4s are checked
@@ -624,7 +711,62 @@ class DataManager:
         else:
             if self._lerobot_dataset.episode_buffer['size'] > 0:
                 self._lerobot_dataset.save_episode()
+        self._commit_count = getattr(self, '_commit_count', 0) + 1
+        for caps in ('_gap_redos', '_frame_loss_redos'):
+            if hasattr(self, caps):
+                getattr(self, caps).pop(episode_no, None)
         return True
+
+    def _discard_episode_for_gap(self, gap, episode_no) -> None:
+        """O2 + C6: discard the take for its source gap and route to
+        re-recording the same episode (like the frame-drop re-record)."""
+        kind, name = gap
+        warning = record_texts_de.source_gap_de(kind, name, episode_no)
+        self._last_warning_message = warning
+        self._last_discard_cause = ('gap', kind, name, episode_no)
+        print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
+        self._stop_save_completed = False
+        self._on_saving = False
+        self._episode_reset()
+        self._status = 'reset'
+
+    def _end_for_frame_loss(self, episode_no) -> None:
+        """C7: the third frame loss of the same episode ends the session like
+        „Beenden“: the take is dropped (official discard in the next record
+        step), saved episodes are kept, finalize + upload per the usual guards
+        (the finish branch)."""
+        warning = record_texts_de.frame_loss_end_de(episode_no)
+        self._last_warning_message = warning
+        self._last_discard_cause = ('frame_loss_end', episode_no)
+        print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
+        self._stop_save_completed = False
+        self._finish_count_pending = False
+        self._finish_drops_run = False
+        self._episode_reset()
+        self._status = 'finish'
+        self._proceed_time = 0
+        self._on_saving = True
+
+    def _finish_after_discard(self) -> None:
+        """A FINISH (or STOP) whose take save() discarded is not re-recorded:
+        complete with the episodes already saved, and say why."""
+        cause = getattr(self, '_last_discard_cause', None) or ('frame_loss',)
+        if cause[0] == 'gap':
+            _, kind, name, episode_no = cause
+            self._last_warning_message = (
+                f'{record_texts_de.SOURCE_GAP_PREFIX_DE}'
+                f'{record_texts_de.source_subject_de(kind, name)} hat in Episode '
+                f'{episode_no} kurz keine Daten geliefert. Die Episode wurde '
+                f'verworfen, die Aufnahme endet mit den schon gespeicherten Episoden.')
+        elif cause[0] != 'frame_loss_end':
+            self._last_warning_message = (
+                f'Episode {self._record_episode_count + 1}: Kamera-Bilder '
+                f'gingen beim Speichern verloren, die Episode wurde verworfen. '
+                f'Die Aufnahme endet mit den schon gespeicherten Episoden.')
+        self._status = 'finish'
+        self._finish_count_pending = False
+        self._proceed_time = 0
+        self._on_saving = True
 
     def _discard_episode_for_redo(self, dropped_frames: int) -> None:
         """Discard the current in-flight episode and route to re-recording it.
@@ -637,14 +779,12 @@ class DataManager:
         re_record()'s transition.
         """
         episode_no = self._record_episode_count + 1
-        warning = (
-            f'Episode {episode_no}: {dropped_frames} Kamera-Bild(er) gingen '
-            f'beim Speichern verloren (Video-Encoder überlastet). Video und '
-            f'Daten wären nicht synchron und das Training würde abbrechen — '
-            f'die Episode wird automatisch neu aufgenommen.'
-        )
+        # The count is a lower bound (LeRobot logs the 1st drop, then every
+        # 10th), so the sentence names no number.
+        warning = record_texts_de.frame_loss_redo_de(episode_no)
         self._last_warning_message = warning
-        print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
+        self._last_discard_cause = ('frame_loss', episode_no)
+        print(f'[WARNUNG] {warning} ({dropped_frames}+ dropped)', file=sys.stderr, flush=True)
         # Official discard only (round 5, O6): _episode_reset leaves
         # _discard_pending and the next record step (the reset tick, no frame)
         # cancels the take through the wrapper's discard_episode().
@@ -742,6 +882,46 @@ class DataManager:
                 f'muss neu aufgenommen werden, sonst ist das Training '
                 f'unbrauchbar.'
             )
+            self._last_warning_message = warning
+            print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
+            return
+        self._verify_saved_lengths(meta, video_keys)
+
+    def _verify_saved_lengths(self, meta, video_keys):
+        """Round 5 post-save length check (detect + inform, like the missing-
+        video check above): every camera's video span of the episode just
+        saved (``meta.latest_episode``: to_timestamp - from_timestamp) must
+        equal length / fps within half a frame — exactly LeRobot's train-time
+        FrameTimestampError condition. Never raises, never blocks the save."""
+        try:
+            latest = getattr(meta, 'latest_episode', None)
+            if not latest:
+                return
+            fps = float(getattr(meta, 'fps', 0) or self._record_fps())
+
+            def _first(value):
+                return value[0] if isinstance(value, (list, tuple)) else value
+
+            length = float(_first(latest['length']))
+            expected = length / fps
+            mismatched = []
+            for key in video_keys:
+                start = latest.get(f'videos/{key}/from_timestamp')
+                end = latest.get(f'videos/{key}/to_timestamp')
+                if start is None or end is None:
+                    continue
+                span = float(_first(end)) - float(_first(start))
+                if abs(span - expected) > SAVED_LENGTH_TOLERANCE_FRAMES / fps:
+                    mismatched.append(key.replace('observation.images.', ''))
+        except Exception as e:  # noqa: BLE001 — a check must never break the save
+            print(f'saved-length check skipped: {e}', file=sys.stderr, flush=True)
+            return
+        if mismatched:
+            names = ', '.join(camera_name_de(name) for name in mismatched)
+            warning = (
+                f'Episode {self._record_episode_count + 1}: Video und Daten der '
+                f'Kamera(s) {names} sind nicht gleich lang. Diese Episode muss neu '
+                f'aufgenommen werden, sonst bricht das Training ab.')
             self._last_warning_message = warning
             print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
 
@@ -971,6 +1151,44 @@ class DataManager:
         self._last_warning_message = message_de
         self.record_finish()
         return True
+
+    @_recorder_locked
+    def end_for_source_stop(self, message_de: str) -> bool:
+        """R5-2: a required source stopped (no message for SOURCE_STOPPED_S):
+        end the session like „Verwerfen und beenden“ — the take in flight is
+        dropped whatever its length, saved episodes are kept, finalize + upload
+        by the usual guards. Once per session, only in warm-up/run/reset; the
+        German sentence rides the next status tick as a [WARNUNG]."""
+        if getattr(self, '_source_stop_requested', False):
+            return False
+        if self._status not in ('warmup', 'run', 'reset'):
+            return False
+        self._source_stop_requested = True
+        self._last_warning_message = message_de
+        in_flight = self._status == 'run'
+        self.record_finish()
+        if in_flight:
+            self._finish_drops_run = True
+        return True
+
+    @_recorder_locked
+    def note_take_gap(self, gap) -> None:
+        """O2 + C6: the node's capture integrity names the source whose gap
+        (on its own timeline, >= SOURCE_GAP_S) makes the running take a
+        re-record — ``(kind, name)`` or None. Read by save() before the commit;
+        cleared with the take (_episode_reset)."""
+        if getattr(self, '_on_saving', False):
+            return
+        if self._status in ('run', 'save', 'finish', 'stop'):
+            self._take_gap_source = tuple(gap) if gap is not None else None
+
+    def added_frame(self) -> bool:
+        """Did the last record() call add a frame to the take?"""
+        return bool(getattr(self, '_frame_added', False))
+
+    def commit_count(self) -> int:
+        """Takes committed to disk so far (a change closes the take)."""
+        return int(getattr(self, '_commit_count', 0))
 
     @_recorder_locked
     def end_session_now(self) -> bool:
@@ -1358,6 +1576,7 @@ class DataManager:
                 self._lerobot_dataset.episode_buffer.clear()
             self._lerobot_dataset.episode_buffer = None
         self._start_time_s = 0
+        self._take_gap_source = None
         # Drop the stale-camera hashes so a re-recorded episode starts
         # fresh — otherwise the very first frame of the new episode would
         # always be flagged "same as last frame of previous episode" and
@@ -1406,14 +1625,33 @@ class DataManager:
                 shutil.rmtree(root)
 
         if self._task_info.push_to_hub:
-            # Huggingface dataset check
-            url = f'https://huggingface.co/api/datasets/{repo_id}'
-            response = requests.get(url, timeout=(5, 10))
-            url_exist_code = 200
-
-            if response.status_code == url_exist_code:
+            # D7 (round 5): a LOGGED-IN existence check. The anonymous request
+            # this replaces answered 401/404 for a PRIVATE repo, which read as
+            # „absent“: a fresh local dataset was created and the end-of-session
+            # upload + orphan sweep then overwrote the student's private hub
+            # dataset. repo_exists() swallows only RepositoryNotFound/Gated;
+            # ANY failure to ask (network, 401/403/429/5xx, no or invalid
+            # token) refuses the start in German, never „absent“. Runs outside
+            # the recorder lock (check_lerobot_dataset).
+            try:
+                api = HfApi()       # the rig's stored token
+                api.whoami()
+                exists = api.repo_exists(repo_id, repo_type='dataset')
+            except Exception as e:  # noqa: BLE001 — every failure is a refusal
+                print(f'Hub existence check failed for {repo_id} '
+                      f'({hf_errors.classify_hf_error(e) or "unclassified"}): {e!r}',
+                      file=sys.stderr, flush=True)
+                self._last_warning_message = record_texts_de.HUB_CHECK_REFUSED_DE
+                raise HubCheckRefused(repo_id) from e
+            if exists:
                 print(f'Dataset {repo_id} exists on Huggingface, downloading...')
-                self._download_dataset(repo_id)
+                try:
+                    self._download_dataset(repo_id)
+                except Exception as e:  # noqa: BLE001 — never fall back to „new“
+                    self._last_warning_message = (
+                        hf_errors.hf_error_sentence_de(e)
+                        or record_texts_de.HUB_CHECK_REFUSED_DE)
+                    raise HubCheckRefused(repo_id) from e
                 return True
 
         return False
@@ -1437,6 +1675,13 @@ class DataManager:
                         self._save_repo_name,
                         self._save_path
                     )
+                    # D4 (round 5): resuming an existing dataset is checked by
+                    # LeRobot's own compatibility check BEFORE the robot type is
+                    # stamped — another fps, another camera/joint set or another
+                    # robot is refused in German instead of being appended
+                    # (another fps silently stretched/compressed the timeline).
+                    if not self._resume_is_compatible(dataset, images, joint_list):
+                        return False
                 else:
                     dataset = self._create_dataset(
                         self._save_repo_name,
@@ -1458,12 +1703,43 @@ class DataManager:
             print(f'Error checking lerobot dataset: {e}')
             return False
 
-    def _create_dataset(
-            self,
-            repo_id,
-            images,
-            joint_list) -> LeRobotDatasetWrapper:
+    def _resume_is_compatible(self, dataset, images, joint_list) -> bool:
+        features = self._dataset_features(images or {}, joint_list)
+        try:
+            _resume_compatibility_check(
+                dataset, self._robot_type, self._record_fps(), features)
+            return True
+        except ValueError as e:
+            name = str(getattr(self._task_info, 'task_name', '') or '').strip() \
+                or self._save_repo_name
+            print(f'Resume refused for {self._save_repo_name}: {e}',
+                  file=sys.stderr, flush=True)
+            self._last_warning_message = self._resume_refusal_de(str(e), name, dataset)
+            return False
 
+    @staticmethod
+    def _resume_refusal_de(message, name, dataset) -> str:
+        """German by the FIRST mismatching field LeRobot names (it lists them
+        as ``robot_type: …``, ``fps: …``, ``features: …``)."""
+        for line in str(message).splitlines():
+            field = line.split(':', 1)[0].strip()
+            if field == 'fps':
+                # LeRobot writes "fps: expected <present>, got <dataset's>".
+                got = re.search(r'got\s+([0-9.]+)', line)
+                try:
+                    dataset_fps = float(getattr(dataset, 'fps', None) or got.group(1))
+                except Exception:  # noqa: BLE001 — the number is a courtesy
+                    return record_texts_de.resume_features_de(name)
+                return record_texts_de.resume_fps_de(name, round(dataset_fps))
+            if field == 'features':
+                return record_texts_de.resume_features_de(name)
+            if field == 'robot_type':
+                return record_texts_de.resume_robot_de(name)
+        return record_texts_de.resume_features_de(name)
+
+    def _dataset_features(self, images, joint_list) -> dict:
+        """Exactly what _create_dataset builds from the current frames (the D4
+        check compares an existing dataset against it)."""
         features = DEFAULT_FEATURES.copy()
         for camera_name, image in images.items():
             features[f'observation.images.{camera_name}'] = {
@@ -1471,18 +1747,25 @@ class DataManager:
                 'names': ['height', 'width', 'channels'],
                 'shape': image.shape
             }
-
         features['observation.state'] = {
             'dtype': 'float32',
             'names': joint_list,
             'shape': (len(joint_list),)
         }
-
         features['action'] = {
             'dtype': 'float32',
             'names': joint_list,
             'shape': (len(joint_list),)
         }
+        return features
+
+    def _create_dataset(
+            self,
+            repo_id,
+            images,
+            joint_list) -> LeRobotDatasetWrapper:
+
+        features = self._dataset_features(images, joint_list)
         return LeRobotDatasetWrapper.create(
                 repo_id=repo_id,
                 fps=self._task_info.fps,
@@ -1829,64 +2112,24 @@ class DataManager:
         cls._progress_queue = progress_queue
 
     @staticmethod
-    def _create_dataset_card(local_dir, readme_path):
-        """
-        Create DatasetCard README for dataset repository.
-
-        Args:
-        ----
-        local_dir: Local directory path containing dataset
-        readme_path: Path where README.md will be saved
-
-        """
-        # Load meta/info.json for dataset structure info
+    def _create_dataset_card(local_dir, readme_path, repo_id, private=True):
+        """Write the dataset README: LeRobot's OWN dataset card (O5, round 5),
+        built from meta/info.json, naming the repo_id (D6); a PUBLIC dataset's
+        card carries an explicit apache-2.0 licence. Our forked template is
+        gone (it was never even installed into the image)."""
         info_path = Path(local_dir) / 'meta' / 'info.json'
         dataset_info = None
         if info_path.exists():
             with open(info_path, 'r', encoding='utf-8') as f:
                 dataset_info = json.load(f)
-
-        # Prepare tags
-        tags = ['robotis', 'LeRobot']
-        robot_type = DataManager.get_robot_type_from_info_json(info_path)
-        if robot_type and robot_type != '':
+        tags = ['robotis']
+        robot_type = (dataset_info or {}).get('robot_type') or ''
+        if robot_type:
             tags.append(robot_type)
-
-        # Create DatasetCardData
-        card_data = DatasetCardData(
-            license='apache-2.0',
-            tags=tags,
-            task_categories=['robotics'],
-            configs=[
-                {
-                    'config_name': 'default',
-                    'data_files': 'data/*/*.parquet',
-                }
-            ],
-        )
-
-        # Prepare dataset structure section
-        dataset_structure = ''
-        if dataset_info:
-            dataset_structure = '[meta/info.json](meta/info.json):\n'
-            dataset_structure += '```json\n'
-            info_json = json.dumps(dataset_info, indent=4)
-            dataset_structure += f'{info_json}\n'
-            dataset_structure += '```\n'
-
-        # Get template path
-        template_dir = Path(__file__).parent
-        template_path = str(template_dir / 'dataset_card_template.md')
-
-        # Create card from template
-        card = DatasetCard.from_template(
-            card_data,
-            template_path=template_path,
-            dataset_structure=dataset_structure,
-            license='apache-2.0',
-        )
-        card.save(str(readme_path))
-        print('Dataset README.md created using HuggingFace Hub')
+        text = dataset_card.build_dataset_card(
+            repo_id, dataset_info, tags, public=not bool(private))
+        Path(readme_path).write_text(text, encoding='utf-8')
+        print('Dataset README.md written from the LeRobot dataset card')
 
     @staticmethod
     def _create_model_card(local_dir, readme_path):
@@ -1967,24 +2210,28 @@ class DataManager:
         print('Model README.md created using HuggingFace Hub')
 
     @staticmethod
-    def _create_readme_if_not_exists(local_dir, repo_type):
+    def _create_readme_if_not_exists(local_dir, repo_type, repo_id=None, private=True):
         """
-        Create README.md file if it doesn't exist in the folder.
+        Write the repo's README.md before an upload.
 
-        Uses HuggingFace Hub's DatasetCard or ModelCard.
+        A DATASET's README is rebuilt on EVERY upload (round 5, O5), so a
+        resumed dataset's card matches its info.json; other repo types keep an
+        existing README.
 
         """
         readme_path = Path(local_dir) / 'README.md'
 
-        if readme_path.exists():
+        if readme_path.exists() and repo_type != 'dataset':
             print(f'README.md already exists in {local_dir}')
             return
 
-        print(f'Creating README.md in {local_dir}')
+        print(f'Writing README.md in {local_dir}')
 
         try:
             if repo_type == 'dataset':
-                DataManager._create_dataset_card(local_dir, readme_path)
+                DataManager._create_dataset_card(
+                    local_dir, readme_path, repo_id or Path(local_dir).name,
+                    private=private)
         except Exception as e:
             print(f'Warning: Failed to create README.md: {e}')
             import traceback
@@ -2008,22 +2255,12 @@ class DataManager:
     _last_hf_failure_reason_de = None
 
     @staticmethod
-    def _classify_hf_failure_de(error_text):
-        """Map an HF exception text to a precise German reason (or None)."""
-        lowered = str(error_text).lower()
-        auth_markers = (
-            '401',
-            'unauthorized',
-            'authentication',
-            'authenticated',
-            'invalid user token',
-            'invalid token',
-            'huggingfacehub_token',
-            'token is required',
-        )
-        if any(marker in lowered for marker in auth_markers):
-            return DataManager.HF_AUTH_ERROR_DE
-        return None
+    def _classify_hf_failure_de(error):
+        """The German reason for a Hugging Face failure by its CAUSE (round 5,
+        R5-4b: hf_errors walks the exception chain — auth / network / busy /
+        server), or None for the worker's generic sentence. An unreachable hub
+        is no longer reported as „Token ungültig“."""
+        return hf_errors.hf_error_sentence_de(error)
 
     @staticmethod
     def upload_huggingface_repo(
@@ -2043,9 +2280,10 @@ class DataManager:
             except Exception as auth_e:
                 print(f'Authentication failed: {auth_e}')
                 print('Please make sure you are authenticated with HuggingFace')
-                # whoami failing IS the auth failure — no substring guessing.
+                # Round 5 (R5-4b): by its cause — a dead network or a rate
+                # limit used to be reported as an invalid token too.
                 DataManager._last_hf_failure_reason_de = (
-                    DataManager.HF_AUTH_ERROR_DE
+                    DataManager._classify_hf_failure_de(auth_e)
                 )
                 return False
 
@@ -2075,9 +2313,9 @@ class DataManager:
             # Delete .cache folder before upload
             DataManager._delete_dot_cache_folder_before_upload(local_dir)
 
-            # Create README.md if it doesn't exist
+            # The README: for a dataset LeRobot's card, rebuilt every upload
             DataManager._create_readme_if_not_exists(
-                local_dir, repo_type
+                local_dir, repo_type, repo_id=repo_id, private=private
             )
 
             print(f'Uploading folder {local_dir} to repository {repo_id}')

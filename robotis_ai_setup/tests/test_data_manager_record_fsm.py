@@ -1546,19 +1546,451 @@ class OfficialDiscardOnlyTest(_FsmTestCase):
 
     _PRIVATE = ('_streaming_encoder', '_dropped_frames', '_frame_queues', '_stop_events')
 
-    def test_data_manager_names_no_private_encoder_attribute(self):
+    def test_the_recording_path_names_no_private_encoder_attribute(self):
         import ast
-        tree = ast.parse(DATA_MANAGER_PATH.read_text(encoding='utf-8'))
-        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        names |= {n.value for n in ast.walk(tree)
-                  if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-        for private in self._PRIVATE:
-            self.assertNotIn(private, names)
+        wrapper = DATA_MANAGER_PATH.with_name('lerobot_dataset_wrapper.py')
+        for path in (DATA_MANAGER_PATH, wrapper):
+            with self.subTest(path=path.name):
+                tree = ast.parse(path.read_text(encoding='utf-8'))
+                names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+                names |= {n.value for n in ast.walk(tree)
+                          if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+                for private in self._PRIVATE:
+                    self.assertNotIn(private, names)
+
+    def test_the_forked_card_template_is_gone(self):
+        self.assertFalse(DATA_MANAGER_PATH.with_name('dataset_card_template.md').exists())
 
     def test_no_gc_collect_on_the_recording_path(self):
         source = DATA_MANAGER_PATH.read_text(encoding='utf-8')
         self.assertNotIn('gc.collect', source)
         self.assertNotIn('_validate_episode_buffer', source)
+
+
+def _texts():
+    return MOD.record_texts_de
+
+
+class GapRedoTest(_FsmTestCase):
+    """O2 + C6: a take whose source was silent >= SOURCE_GAP_S on its own
+    timeline (the node's capture integrity notes it) is not committed but
+    re-recorded — at most twice per episode, the third gapped take of the same
+    episode is SAVED with GAP_KEPT_DE. Under FINISH it ends with the saved."""
+
+    def _gapped_take(self, dm, gap=('leader', None)):
+        run_until(dm, 'run')
+        ticks(dm, 40)
+        dm.note_take_gap(gap)
+        dm.record_early_save()
+        tick(dm)                                   # save() judges
+
+    def test_two_redos_then_the_third_is_kept_with_the_warning(self):
+        dm, up = make(n=2, reset=0)
+        self._gapped_take(dm)
+        self.assertEqual(dm.get_status(), 'reset')
+        self.assertEqual(dm._lerobot_dataset.committed, 0)
+        self.assertEqual(dm.get_current_record_status().error,
+                         '[WARNUNG] ' + _texts().source_gap_de('leader', None, 1))
+        self._gapped_take(dm)
+        self.assertEqual(dm._lerobot_dataset.committed, 0)
+        self._gapped_take(dm, gap=('camera', 'scene'))
+        self.assertEqual(dm._lerobot_dataset.committed, 1)   # the third is kept
+        self.assertEqual(dm.get_current_record_status().error,
+                         '[WARNUNG] ' + _texts().source_gap_kept_de('camera', 'scene', 1))
+
+    def test_the_cap_restarts_for_the_next_episode(self):
+        dm, _ = make(n=3, reset=0)
+        for _ in range(3):
+            self._gapped_take(dm)
+        ticks(dm, 2)                                # episode 1 counted
+        self.assertEqual(dm._record_episode_count, 1)
+        self._gapped_take(dm)                       # episode 2's first gap: a redo
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+        self.assertEqual(dm.get_status(), 'reset')
+
+    def test_a_take_without_a_gap_commits(self):
+        dm, _ = make(n=2, reset=0)
+        run_until(dm, 'run')
+        ticks(dm, 40)
+        dm.note_take_gap(None)
+        dm.record_early_save()
+        tick(dm)
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+
+    def test_the_gap_belongs_to_one_take(self):
+        dm, _ = make(n=2, reset=0)
+        run_until(dm, 'run')
+        ticks(dm, 40)
+        dm.note_take_gap(('follower', None))
+        dm.rerecord_from_command()                  # the take is discarded anyway
+        run_until(dm, 'run')
+        ticks(dm, 40)
+        dm.record_early_save()
+        tick(dm)
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+
+    def test_a_note_after_the_commit_is_ignored(self):
+        dm, _ = make(n=2)
+        run_until(dm, 'save')
+        tick(dm)                                    # committed, latched
+        dm.note_take_gap(('leader', None))
+        self.assertIsNone(dm._take_gap_source)
+
+    def test_a_gap_under_finish_ends_with_the_saved_episodes(self):
+        dm, up = make(n=3, reset=0)
+        run_until(dm, 'reset')                      # episode 1 saved
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        dm.note_take_gap(('camera', 'gripper'))
+        dm.record_finish()
+        statuses = status_seq(dm, 6)
+        self.assertIn('DONE', statuses)
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+        self.assertEqual(dm._record_episode_count, 1)
+        warnings = [e for st in statuses if st != 'DONE' for e in [st[2]] if e]
+        self.assertTrue(any(w.startswith('[WARNUNG] Signalaussetzer: Die Greifer-Kamera hat '
+                                         'in Episode 2 kurz keine Daten geliefert. Die Episode '
+                                         'wurde verworfen') for w in warnings), warnings)
+        self.assertEqual(len(up), 1)
+
+
+class FrameLossCapTest(_FsmTestCase):
+    """C7: a frame loss re-records the take (FRAME_LOSS_REDO_DE); the third of
+    the same episode ends the session like „Beenden“ (FRAME_LOSS_END_DE), saved
+    episodes kept, finalized and uploaded."""
+
+    def _lossy_take(self, dm):
+        run_until(dm, 'run')
+        ticks(dm, 40)
+        dm.record_early_save()
+        tick(dm)
+
+    def test_two_redos_then_the_session_ends(self):
+        dm, up = make(n=3, reset=0)
+        run_until(dm, 'reset')                       # episode 1 saved cleanly
+        dm._lerobot_dataset.drop_on_save = True
+        self._lossy_take(dm)
+        self.assertEqual(dm.get_status(), 'reset')
+        self.assertEqual(dm.get_current_record_status().error,
+                         '[WARNUNG] ' + _texts().frame_loss_redo_de(2))
+        self._lossy_take(dm)
+        self.assertEqual(dm.get_status(), 'reset')
+        self._lossy_take(dm)                         # the third: end
+        self.assertEqual(dm.get_status(), 'finish')
+        self.assertEqual(dm.get_current_record_status().error,
+                         '[WARNUNG] ' + _texts().frame_loss_end_de(2))
+        self.assertIn(True, ticks(dm, 4))
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+        self.assertEqual(dm._record_episode_count, 1)
+        self.assertTrue(dm._lerobot_dataset.finalized)
+        self.assertEqual(len(up), 1)
+
+    def test_the_frame_loss_check_comes_before_the_gap_cap(self):
+        # A gapped take that may be kept is still never kept with lost frames.
+        dm, _ = make(n=3, reset=0)
+        dm._gap_redos[1] = 2                         # the gap cap is reached
+        dm._lerobot_dataset.drop_on_save = True
+        run_until(dm, 'run')
+        ticks(dm, 40)
+        dm.note_take_gap(('leader', None))
+        dm.record_early_save()
+        tick(dm)
+        self.assertEqual(dm._lerobot_dataset.committed, 0)
+        self.assertEqual(dm.get_status(), 'reset')
+
+    def test_a_loss_under_stop_completes_the_stop(self):
+        dm, up = make(n=3, reset=0)
+        run_until(dm, 'reset')
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        dm._lerobot_dataset.drop_on_save = True
+        dm.record_stop()
+        self.assertIn(True, ticks(dm, 4))
+        self.assertEqual(dm._record_episode_count, 1)
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+
+
+class SourceStopTest(_FsmTestCase):
+    """R5-2: a required source that stops ends the session like „Verwerfen und
+    beenden“ — the running take dropped whatever its length, saved kept,
+    finalize + upload by the usual guards, once per session."""
+
+    def test_mid_run_the_take_is_dropped_and_the_saved_kept(self):
+        dm, up = make(n=3, reset=0)
+        run_until(dm, 'reset')
+        run_until(dm, 'run')
+        ticks(dm, 60)                                # 2 s: FINISH alone would keep it
+        sentence = _texts().source_stop_de('camera', 'scene', take_dropped=True)
+        self.assertTrue(dm.end_for_source_stop(sentence))
+        self.assertEqual(dm.get_current_record_status().error, '[WARNUNG] ' + sentence)
+        self.assertIn(True, ticks(dm, 4))
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+        self.assertEqual(dm._record_episode_count, 1)
+        self.assertEqual(len(up), 1)
+
+    def test_once_per_session_and_only_in_warmup_run_reset(self):
+        dm, _ = make()
+        tick(dm)
+        self.assertTrue(dm.end_for_source_stop('Aufnahme beendet: x'))
+        self.assertFalse(dm.end_for_source_stop('Aufnahme beendet: y'))
+        for state in ('save_unlatched', 'save_latched', 'finish_unlatched', 'stop'):
+            with self.subTest(state=state):
+                dm, _ = _reach(state, 3)
+                self.assertFalse(dm.end_for_source_stop('Aufnahme beendet: z'))
+
+    def test_in_reset_it_finishes_without_a_take(self):
+        dm, up = make(n=3, reset=2)
+        run_until(dm, 'reset')
+        self.assertTrue(dm.end_for_source_stop('Aufnahme beendet: x'))
+        self.assertIn(True, ticks(dm, 4))
+        self.assertEqual(dm._record_episode_count, 1)
+
+
+class _OpenedDataset:
+    def __init__(self, repo_id=None, root=None, fps=30):
+        self.fps = fps
+        self.robot_type = None
+
+    def set_robot_type(self, robot_type):
+        self.robot_type = robot_type
+
+    def start_image_writer(self, **kw):
+        pass
+
+
+class _Img:
+    shape = (480, 640, 3)
+
+
+class ResumeCompatibilityTest(_FsmTestCase):
+    """D4: resuming an existing dataset goes through LeRobot's OWN
+    compatibility check; a mismatch is refused in German by its first field,
+    the dataset is not installed and nothing is written."""
+
+    def setUp(self):
+        self._saved = (MOD._resume_compatibility_check, MOD.LeRobotDatasetWrapper)
+        MOD.LeRobotDatasetWrapper = lambda repo, root: _OpenedDataset(fps=25)
+        self.checks = []
+
+    def tearDown(self):
+        MOD._resume_compatibility_check, MOD.LeRobotDatasetWrapper = self._saved
+
+    def _dm(self, error=None):
+        dm, _ = make()
+        dm._lerobot_dataset = None
+        dm._check_dataset_exists = lambda repo, root: True
+
+        def _check(dataset, robot_type, fps, features):
+            self.checks.append((robot_type, fps, sorted(features)))
+            if error:
+                raise ValueError(error)
+        MOD._resume_compatibility_check = _check
+        return dm
+
+    def test_same_rig_resumes(self):
+        dm = self._dm()
+        self.assertTrue(dm.check_lerobot_dataset({'scene': _Img()}, ['j1', 'j2']))
+        self.assertIsNotNone(dm._lerobot_dataset)
+        self.assertEqual(dm._lerobot_dataset.robot_type, 'omx_f')
+        robot_type, fps, features = self.checks[0]
+        self.assertEqual((robot_type, fps), ('omx_f', 30.0))
+        self.assertIn('observation.images.scene', features)
+        self.assertIn('observation.state', features)
+
+    def test_another_fps_is_refused_naming_the_datasets_fps(self):
+        dm = self._dm('Dataset metadata compatibility check failed with mismatches:\n'
+                      'fps: expected 30, got 25')
+        self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+        self.assertIsNone(dm._lerobot_dataset)
+        self.assertEqual(dm._last_warning_message,
+                         _texts().resume_fps_de('Würfel in die Schale', 25))
+
+    def test_other_features_or_robot_are_refused(self):
+        for line, expected in (
+                ("features: expected {...}, got {...}",
+                 _texts().resume_features_de('Würfel in die Schale')),
+                ('robot_type: expected omx_f, got edu6_studio',
+                 _texts().resume_robot_de('Würfel in die Schale'))):
+            with self.subTest(line=line):
+                dm = self._dm('Dataset metadata compatibility check failed with '
+                              'mismatches:\n' + line)
+                self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+                self.assertEqual(dm._last_warning_message, expected)
+
+    def test_the_first_mismatching_field_decides(self):
+        dm = self._dm('Dataset metadata compatibility check failed with mismatches:\n'
+                      'robot_type: expected omx_f, got x\nfps: expected 30, got 25')
+        dm.check_lerobot_dataset({'scene': _Img()}, ['j1'])
+        self.assertEqual(dm._last_warning_message,
+                         _texts().resume_robot_de('Würfel in die Schale'))
+
+
+class _FakeHub:
+    def __init__(self, *, whoami_error=None, exists=False, exists_error=None):
+        self.whoami_error = whoami_error
+        self.exists = exists
+        self.exists_error = exists_error
+        self.calls = []
+
+    def __call__(self, *a, **k):
+        return self
+
+    def whoami(self):
+        self.calls.append('whoami')
+        if self.whoami_error:
+            raise self.whoami_error
+        return {'name': 'maxmuster', 'orgs': []}
+
+    def repo_exists(self, repo_id, repo_type=None):
+        self.calls.append(('repo_exists', repo_id, repo_type))
+        if self.exists_error:
+            raise self.exists_error
+        return self.exists
+
+
+class HubExistenceCheckTest(_FsmTestCase):
+    """D7: a LOGGED-IN existence check; any failure to ask refuses the start in
+    German — never read as „absent“ (a fresh dataset would later overwrite a
+    private hub dataset)."""
+
+    def setUp(self):
+        self._saved = (MOD.HfApi, MOD.LeRobotDatasetWrapper)
+        MOD.LeRobotDatasetWrapper = lambda repo, root: _OpenedDataset()
+        MOD._resume_compatibility_check, self._saved_check = (
+            lambda *a, **k: None, MOD._resume_compatibility_check)
+
+    def tearDown(self):
+        MOD.HfApi, MOD.LeRobotDatasetWrapper = self._saved
+        MOD._resume_compatibility_check = self._saved_check
+
+    def _dm(self, hub, push=True):
+        MOD.HfApi = hub
+        dm, _ = make(push=push)
+        dm._lerobot_dataset = None
+        self.created = []
+        self.downloaded = []
+        dm._create_dataset = lambda repo, images, joints: self.created.append(repo) or \
+            _OpenedDataset()
+        dm._download_dataset = lambda repo: self.downloaded.append(repo)
+        return dm
+
+    def test_an_unreachable_hub_refuses_before_any_dataset_exists(self):
+        for error in (ConnectionError('refused'), RuntimeError('401 Unauthorized'),
+                      TimeoutError('timed out')):
+            with self.subTest(error=error):
+                dm = self._dm(_FakeHub(whoami_error=error))
+                self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+                self.assertIsNone(dm._lerobot_dataset)
+                self.assertEqual(self.created, [])
+                self.assertEqual(dm._last_warning_message,
+                                 _texts().HUB_CHECK_REFUSED_DE)
+
+    def test_a_failing_existence_query_refuses_too(self):
+        dm = self._dm(_FakeHub(exists_error=RuntimeError('503')))
+        self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+        self.assertEqual(self.created, [])
+
+    def test_absent_creates_a_new_dataset(self):
+        hub = _FakeHub(exists=False)
+        dm = self._dm(hub)
+        self.assertTrue(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+        self.assertEqual(self.created, ['maxmuster/omx_f_Wuerfel-in-die-Schale'])
+        self.assertEqual(hub.calls[0], 'whoami')
+        self.assertEqual(hub.calls[1], ('repo_exists', 'maxmuster/omx_f_Wuerfel-in-die-Schale',
+                                        'dataset'))
+
+    def test_present_downloads_and_resumes(self):
+        dm = self._dm(_FakeHub(exists=True))
+        self.assertTrue(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+        self.assertEqual(self.downloaded, ['maxmuster/omx_f_Wuerfel-in-die-Schale'])
+        self.assertEqual(self.created, [])
+
+    def test_a_failed_download_refuses_instead_of_creating(self):
+        dm = self._dm(_FakeHub(exists=True))
+
+        def _boom(repo):
+            raise ConnectionError('reset by peer')
+        dm._download_dataset = _boom
+        self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+        self.assertEqual(self.created, [])
+        self.assertTrue(dm._last_warning_message)
+
+    def test_upload_off_never_asks_the_hub(self):
+        hub = _FakeHub(whoami_error=ConnectionError('no network'))
+        dm = self._dm(hub, push=False)
+        self.assertTrue(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+        self.assertEqual(hub.calls, [])
+
+
+class SavedLengthCheckTest(_FsmTestCase):
+    """The post-save length check: a camera whose saved video span differs from
+    length / fps by more than half a frame is named in German (detect + inform,
+    LeRobot's train-time FrameTimestampError condition)."""
+
+    def _dm(self, spans, length=90):
+        dm, _ = make()
+        latest = {'length': [length]}
+        for key, (a, b) in spans.items():
+            latest[f'videos/{key}/from_timestamp'] = [a]
+            latest[f'videos/{key}/to_timestamp'] = [b]
+        meta = types.SimpleNamespace(latest_episode=latest, fps=30,
+                                     video_keys=list(spans))
+        dm._verify_saved_lengths(meta, list(spans))
+        return dm
+
+    def test_matching_spans_say_nothing(self):
+        dm = self._dm({'observation.images.scene': (6.0, 9.0),
+                       'observation.images.gripper': (6.0, 9.01)})
+        self.assertEqual(dm._last_warning_message, '')
+
+    def test_a_short_video_is_named(self):
+        dm = self._dm({'observation.images.scene': (6.0, 8.9),
+                       'observation.images.gripper': (6.0, 9.0)})
+        self.assertEqual(
+            dm._last_warning_message,
+            'Episode 1: Video und Daten der Kamera(s) Szenen-Kamera sind nicht gleich '
+            'lang. Diese Episode muss neu aufgenommen werden, sonst bricht das Training ab.')
+
+    def test_no_latest_episode_is_no_check(self):
+        dm, _ = make()
+        dm._verify_saved_lengths(types.SimpleNamespace(latest_episode=None), ['x'])
+        self.assertEqual(dm._last_warning_message, '')
+
+
+class DatasetCardAndHfReasonTest(_FsmTestCase):
+    """O5/D6: the dataset README is LeRobot's card, rebuilt on EVERY upload
+    (dataset_card.build_dataset_card: repo_id, info.json, tags, public iff not
+    private). R5-4b: an upload failure is reported by its cause."""
+
+    def test_the_readme_is_rebuilt_every_upload(self):
+        calls = []
+        saved = MOD.dataset_card.build_dataset_card
+        MOD.dataset_card.build_dataset_card = (
+            lambda repo_id, info, tags, public: calls.append(
+                (repo_id, info, tags, public)) or f'---\nrepo: {repo_id}\n---\n')
+        try:
+            root = Path(tempfile.mkdtemp(prefix='dm_card_'))
+            _TEMP_ROOTS.append(root)
+            (root / 'meta').mkdir()
+            (root / 'meta' / 'info.json').write_text('{"robot_type": "omx_f", "fps": 30}')
+            (root / 'README.md').write_text('old')
+            DataManager._create_readme_if_not_exists(root, 'dataset', repo_id='u/r',
+                                                     private=False)
+            self.assertEqual((root / 'README.md').read_text(), '---\nrepo: u/r\n---\n')
+            DataManager._create_readme_if_not_exists(root, 'dataset', repo_id='u/r')
+        finally:
+            MOD.dataset_card.build_dataset_card = saved
+        self.assertEqual(calls[0], ('u/r', {'robot_type': 'omx_f', 'fps': 30},
+                                    ['robotis', 'omx_f'], True))
+        self.assertFalse(calls[1][3])                 # private (the default): no licence
+
+    def test_hf_failures_are_classified_by_cause(self):
+        self.assertEqual(DataManager._classify_hf_failure_de(ConnectionError('refused')),
+                         _texts().HF_NETWORK_ERROR_DE)
+        self.assertEqual(DataManager._classify_hf_failure_de(RuntimeError('401 Unauthorized')),
+                         _texts().HF_AUTH_ERROR_DE)
+        self.assertIsNone(DataManager._classify_hf_failure_de(RuntimeError('odd')))
+        self.assertEqual(DataManager.HF_AUTH_ERROR_DE, _texts().HF_AUTH_ERROR_DE)
 
 
 if __name__ == '__main__':

@@ -35,6 +35,16 @@ Schema v1 (``std_msgs/String``, JSON in ``.data``; published latched AND at
 ``hz`` is null while not measurable yet; ``age_s`` is null while nothing has
 arrived since boot; ``disk`` is null when statvfs failed.
 
+Round 5 adds ONE trailing key, ``"ingest": {"alive": bool, "age_s": float}``:
+the liveness of the sensor-ingest thread (``alive`` = its loop ran within the
+last second; ``age_s`` null before it ran once). ``v`` stays 1 and the keys
+before it keep their order; a page that does not know the key ignores it.
+
+The two recorder thresholds live here too, because the page judges „steht“ with
+the same 2 s (``utils/signalStatus.js::STALLED_AFTER_S``, lockstep-tested):
+``SOURCE_STOPPED_S`` (a required source silent this long ends the session like
+„Beenden“) and ``SOURCE_GAP_S`` (a gap this long inside a take re-records it).
+
 Disk floors (measured, see the Aufnahme 2.0 spec §2.5): two cameras record at
 about 1 MB/s (worst case 3.6 MB/s), and a save re-muxes a 200 MB video chunk
 through /tmp (~0.45 GB transient). The CRITICAL floor covers that transient
@@ -61,6 +71,13 @@ RATE_WINDOW_S = 2.0
 DISK_START_FLOOR_BYTES = 3_000_000_000
 DISK_CRITICAL_FLOOR_BYTES = 1_000_000_000
 DISK_CHECK_INTERVAL_S = 1.0
+
+# Recorder thresholds (spec-r5 §2.2, final spec §6.1/§6.2).
+SOURCE_STOPPED_S = 2.0
+SOURCE_GAP_S = 0.25
+
+# The sensor-ingest thread counts as alive when its loop ran this recently.
+INGEST_ALIVE_S = 1.0
 
 # A rate over less than this many seconds is too noisy to publish.
 _MIN_RATE_SPAN_S = 0.9
@@ -169,9 +186,19 @@ def source_entries(counters: Iterable[dict], rates: Dict[str, Optional[float]],
     return entries
 
 
+def ingest_status(last_alive_mono: Optional[float], now: float) -> dict:
+    """``{"alive": bool, "age_s": float | None}`` of the sensor-ingest loop."""
+    if last_alive_mono is None:
+        return {'alive': False, 'age_s': None}
+    age = max(0.0, float(now) - float(last_alive_mono))
+    return {'alive': age < INGEST_ALIVE_S, 'age_s': round(age, 2)}
+
+
 def build_payload(*, seq: int, uptime_s: float, recording: bool,
-                  sources: Iterable[dict], free_bytes: Optional[int]) -> dict:
-    """Exactly schema v1 (key order included)."""
+                  sources: Iterable[dict], free_bytes: Optional[int],
+                  ingest: Optional[dict] = None) -> dict:
+    """Exactly schema v1 (key order included), plus the optional trailing
+    ``ingest`` key when the caller knows the sensor thread's liveness."""
     disk = None
     if free_bytes is not None:
         disk = {
@@ -179,7 +206,7 @@ def build_payload(*, seq: int, uptime_s: float, recording: bool,
             'start_floor_bytes': DISK_START_FLOOR_BYTES,
             'critical_floor_bytes': DISK_CRITICAL_FLOOR_BYTES,
         }
-    return {
+    payload = {
         'v': SCHEMA_VERSION,
         'seq': int(seq),
         'uptime_s': round(float(uptime_s), 1),
@@ -196,6 +223,12 @@ def build_payload(*, seq: int, uptime_s: float, recording: bool,
         ],
         'disk': disk,
     }
+    if ingest is not None:
+        payload['ingest'] = {
+            'alive': bool(ingest.get('alive')),
+            'age_s': ingest.get('age_s'),
+        }
+    return payload
 
 
 def encode_payload(payload: dict) -> str:

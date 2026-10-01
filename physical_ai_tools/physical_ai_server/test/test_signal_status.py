@@ -28,6 +28,9 @@ def test_contract_constants():
     assert ss.DISK_START_FLOOR_BYTES == 3_000_000_000
     assert ss.DISK_CRITICAL_FLOOR_BYTES == 1_000_000_000
     assert ss.DISK_CHECK_INTERVAL_S == 1.0
+    assert ss.SOURCE_STOPPED_S == 2.0
+    assert ss.SOURCE_GAP_S == 0.25
+    assert ss.INGEST_ALIVE_S == 1.0
 
 
 def test_module_is_stdlib_only():
@@ -213,6 +216,31 @@ def test_build_payload_is_exactly_schema_v1():
                                'critical_floor_bytes': 1_000_000_000}
     for src in payload['sources']:
         assert list(src) == ['kind', 'name', 'topic', 'hz', 'age_s']
+
+
+def test_build_payload_is_v1_order_plus_an_optional_trailing_ingest():
+    sources = ss.source_entries(_COUNTERS, {}, now=100.0, include_leader=True)
+    payload = ss.build_payload(seq=1, uptime_s=1.0, recording=True, sources=sources,
+                               free_bytes=None, ingest={'alive': True, 'age_s': 0.01})
+    assert list(payload) == ['v', 'seq', 'uptime_s', 'recording', 'sources', 'disk', 'ingest']
+    assert payload['v'] == 1
+    assert payload['ingest'] == {'alive': True, 'age_s': 0.01}
+    # without the caller's liveness the payload is exactly v1
+    plain = ss.build_payload(seq=1, uptime_s=1.0, recording=True, sources=sources,
+                             free_bytes=None)
+    assert list(plain) == ['v', 'seq', 'uptime_s', 'recording', 'sources', 'disk']
+    assert json.loads(ss.encode_payload(payload))['ingest']['alive'] is True
+
+
+@pytest.mark.parametrize('last,now,expected', [
+    (None, 5.0, {'alive': False, 'age_s': None}),
+    (99.99, 100.0, {'alive': True, 'age_s': 0.01}),
+    (99.0, 100.0, {'alive': False, 'age_s': 1.0}),
+    (98.5, 100.0, {'alive': False, 'age_s': 1.5}),
+    (101.0, 100.0, {'alive': True, 'age_s': 0.0}),
+])
+def test_ingest_status(last, now, expected):
+    assert ss.ingest_status(last, now) == expected
 
 
 def test_build_payload_disk_null_when_statvfs_failed():

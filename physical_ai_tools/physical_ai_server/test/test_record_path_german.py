@@ -184,8 +184,7 @@ def test_arm_vocabulary():
 
 
 def test_camera_names_go_through_camera_name_de():
-    timer = ast.unparse(_function(_SERVER_SRC, '_data_collection_timer_callback'))
-    assert 'camera_name_de(cam_name)' in timer
+    # (The record tick's dead camera-fps sentence was deleted in round 5, R5-4d.)
     convert = ast.unparse(_function(_DM_SRC, 'convert_msgs_to_raw_datas'))
     assert 'camera_name_de(stale)' in convert
     tree = ast.parse(_SERVER_SRC)

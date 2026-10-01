@@ -513,8 +513,9 @@ def test_recorder_subscriptions_live_on_the_sensor_node_with_depth_32(comm_modul
         ('follower', 'follower', '/joint_states'),
         ('leader', 'leader', '/leader/joint_trajectory'),
     ]
+    assert comm_module.SENSOR_QOS_DEPTH == 32
     for category, name, _topic, qos in subscriber.added:
-        assert qos['depth'] == comm_module.SENSOR_QOS_DEPTH == 32, (category, name)
+        assert qos['depth'] == 32, (category, name)
         assert qos['reliability'] == 2               # BEST_EFFORT
         assert qos['history'] == 1                   # KEEP_LAST
 

@@ -11,14 +11,23 @@ by ``ast`` and execs them onto a stub node. Covers:
   blocked (``_upload_blocked_reason_de``), and ``''`` otherwise;
 * the 1 Hz critical-disk check: throttled, only in warmup/run/reset, skipped
   while finishing, never raises;
-* every error stop and the camera-rate warning in German (no exception text).
+* every error stop in German (no exception text); with a dataset an error stop
+  finalizes what was saved and says so (D5, round 5);
+* round 5: the tick runs in its own callback group, so it captures the session
+  generation at entry, returns at once while not recording or while a
+  collision trip is being handed over, and RE-CHECKS all three after taking
+  the recorder lock (F5); the status is published only while the session
+  still owns /task/status (the publish guard), and a consumed [WARNUNG] that
+  could not be published is re-armed.
 """
 
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
 import textwrap
+import threading
 import types
 from pathlib import Path
 
@@ -77,18 +86,36 @@ def _load(name, ns):
     raise AssertionError(f'{name} not found')
 
 
+def _module_constant(name):
+    tree = ast.parse(_SERVER_PY.read_text(encoding='utf-8'))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == name):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f'{name} not found')
+
+
+_ERROR_STOP_SAVED_DE = (
+    'Die schon gespeicherten Episoden sind gesichert; du kannst sie im Tab Daten '
+    'hochladen.')
+
+
 def _namespace():
     ss = types.SimpleNamespace(**{k: getattr(real_signal_status, k)
                                   for k in dir(real_signal_status)
                                   if not k.startswith('__')})
     ss.disk_free_bytes = _disk_free_bytes
     return {'TaskStatus': _TaskStatus, 'time': _Clock, 'signal_status': ss,
-            'camera_name_de': _camera_name_de}
+            'camera_name_de': _camera_name_de, 'contextlib': contextlib,
+            'ERROR_STOP_SAVED_DE': _ERROR_STOP_SAVED_DE}
 
 
 _NS = _namespace()
 _TICK = _load('_data_collection_timer_callback', _NS)
 _DISK = _load('_check_recording_disk_floor', _NS)
+_OWNS = _load('_record_tick_owns_session', _NS)
+_PUBLISH = _load('_publish_record_status', _NS)
+_END_ERROR = _load('_end_record_with_error', _NS)
 
 
 class _Logger:
@@ -134,6 +161,27 @@ class _DM:
         self.convert_raises = False
         self.dataset_ok = True
         self.record_raises = False
+        self.lock = threading.RLock()
+        self.locked_entries = 0
+        self.on_lock = None             # run when the tick takes the lock
+        self.error_stops = []
+        self.finalizes = True
+        self.saved = 0
+
+    @contextlib.contextmanager
+    def locked(self):
+        with self.lock:
+            self.locked_entries += 1
+            if self.on_lock is not None:
+                self.on_lock()
+            yield self
+
+    def end_after_error(self):
+        self.error_stops.append(self.status)
+        return self.finalizes
+
+    def saved_episode_count(self):
+        return self.saved
 
     def get_status(self):
         return self.status
@@ -177,14 +225,19 @@ class _Node:
         self.on_recording = True
         self.operation_mode = 'collection'
         self.start_recording_time = _Clock.t
-        self.task_info = types.SimpleNamespace(fps=30)
         self.total_joint_order = ['j1']
         self.joint_order = {'joint_order.leader': ['j1']}
         self.timer_stops = []
         self.timer_manager = types.SimpleNamespace(
             stop=lambda timer_name: self.timer_stops.append(timer_name))
         self.logger = _Logger()
+        self._record_publish_lock = threading.Lock()
+        self._record_session_gen = 0
+        self._collision_trip_pending = None
         self._check_recording_disk_floor = types.MethodType(_DISK, self)
+        self._record_tick_owns_session = types.MethodType(_OWNS, self)
+        self._publish_record_status = types.MethodType(_PUBLISH, self)
+        self._end_record_with_error = types.MethodType(_END_ERROR, self)
 
     def get_logger(self):
         return self.logger
@@ -394,15 +447,192 @@ def test_record_exception_is_german_without_the_exception():
     assert any('/dev/full' in line for line in node.logger.lines)
 
 
-def test_camera_rate_warning_is_german():
+def test_the_dead_camera_rate_check_is_gone():
+    # It read self.task_info, which the node never sets: it never ran (R5-4d).
+    # The page's amber banner (/edubotics/signal_status) is the slow-camera
+    # warning; the per-take integrity line reports repeats.
+    source = _SERVER_PY.read_text(encoding='utf-8')
+    assert '_camera_fps_last_check_t' not in source
+    assert '_camera_fps_checked' not in source
+    assert 'get_camera_observed_hz' not in source
+
+
+# ── D5: an error stop with a dataset finalizes what was saved ─────────────────
+
+def test_a_record_failure_with_saved_episodes_finalizes_and_says_so():
     dm = _DM()
-    comm = _Comm()
-    comm.camera_topic_msgs = {'gripper': None}
-    comm.observed_hz = 11.2
-    node = _Node(dm, comm)
-    node.start_recording_time = _Clock.t - 2.0
+    dm.record_raises = True
+    dm.saved = 2
+    node = _Node(dm)
     _tick(node)
-    assert dm._last_warning_message == (
-        'Die Greifer-Kamera liefert nur 11 statt 30 Bilder pro Sekunde. Der '
-        'Datensatz enthält wiederholte Bilder. Steck die Kamera direkt am PC ein '
-        'oder prüfe das Kabel.')
+    assert dm.error_stops == ['run']
+    last = node.communicator.published[-1]
+    assert last.phase == _TaskStatus.READY
+    assert last.error.startswith('Aufnahme gestoppt: Frame konnte nicht gespeichert werden. ')
+    assert last.error.endswith(' ' + _ERROR_STOP_SAVED_DE)
+    assert node.on_recording is False
+    assert node.timer_stops == ['collection']
+
+
+def test_an_error_stop_without_saved_episodes_adds_no_promise():
+    dm = _DM()
+    dm.convert_raises = True
+    node = _Node(dm)
+    _tick(node)
+    assert dm.error_stops == ['run']
+    assert not node.communicator.published[-1].error.endswith(_ERROR_STOP_SAVED_DE)
+
+
+def test_a_failed_finalize_adds_no_promise():
+    dm = _DM()
+    dm.record_raises = True
+    dm.saved = 3
+    dm.finalizes = False
+    node = _Node(dm)
+    _tick(node)
+    assert not node.communicator.published[-1].error.endswith(_ERROR_STOP_SAVED_DE)
+
+
+def test_a_data_manager_without_the_error_stop_keeps_heads_behaviour():
+    dm = _DM()
+    dm.record_raises = True
+    del dm.error_stops
+    dm.end_after_error = None
+    node = _Node(dm)
+    _tick(node)
+    assert node.communicator.published[-1].error.startswith('Aufnahme gestoppt')
+    assert node.on_recording is False
+
+
+# ── round 5: session ownership (F5) and the publish guard ────────────────────
+
+def test_a_tick_while_not_recording_does_nothing():
+    dm = _DM()
+    node = _Node(dm)
+    node.on_recording = False
+    _tick(node)
+    assert node.communicator.get_latest_data_calls == 0
+    assert dm.record_calls == [] and dm.locked_entries == 0
+
+
+def test_a_tick_during_a_trip_hand_over_does_nothing():
+    dm = _DM()
+    node = _Node(dm)
+    node._collision_trip_pending = object()
+    _tick(node)
+    assert node.communicator.get_latest_data_calls == 0
+    assert dm.record_calls == [] and node.communicator.published == []
+
+
+@pytest.mark.parametrize('what', ['trip', 'generation', 'ended'])
+def test_the_tick_rechecks_the_session_after_taking_the_lock(what):
+    # The record timer has its own callback group: a collision trip, a new
+    # START or an end can land while this tick waits for the recorder lock.
+    dm = _DM()
+    node = _Node(dm)
+
+    def _while_waiting():
+        if what == 'trip':
+            node._collision_trip_pending = object()
+        elif what == 'generation':
+            node._record_session_gen += 1
+        else:
+            node.on_recording = False
+    dm.on_lock = _while_waiting
+    _tick(node)
+    assert dm.locked_entries == 1
+    assert dm.record_calls == []
+    assert node.communicator.published == []
+    assert dm.low_disk == [] and _Disk.calls == 0
+
+
+def test_the_record_step_runs_under_the_recorder_lock():
+    dm = _DM()
+    node = _Node(dm)
+    seen = []
+    original = dm.record
+
+    def _record(images, state, action):
+        seen.append(dm.lock._is_owned())
+        return original(images, state, action)
+    dm.record = _record
+    _tick(node)
+    assert seen == [True]
+
+
+def test_no_publish_once_the_session_moved_mid_step():
+    dm = _DM()
+    node = _Node(dm)
+    original = dm.record
+
+    def _record_then_trip(images, state, action):
+        result = original(images, state, action)
+        node._collision_trip_pending = object()     # detected on the sensor thread
+        return result
+    dm.record = _record_then_trip
+    _tick(node)
+    assert dm.record_calls                          # the step itself completed
+    assert node.communicator.published == []        # ... but nothing went out
+
+
+def test_an_unpublished_warning_is_re_armed():
+    dm = _DM()
+    node = _Node(dm)
+    status = _TaskStatus()
+    status.error = '[WARNUNG] Speicher fast voll.'
+    node._collision_trip_pending = object()
+    assert node._publish_record_status(status, node._record_session_gen) is False
+    assert dm._last_warning_message == 'Speicher fast voll.'
+    # A warning the DataManager already holds again is not overwritten.
+    dm._last_warning_message = 'Neuer.'
+    assert node._publish_record_status(status, node._record_session_gen) is False
+    assert dm._last_warning_message == 'Neuer.'
+
+
+def test_publish_guard_publishes_while_the_session_owns_the_topic():
+    dm = _DM()
+    node = _Node(dm)
+    status = _TaskStatus()
+    assert node._publish_record_status(status, 0) is True
+    assert node.communicator.published[-1] is not None
+    assert node._publish_record_status(status, 1) is False      # stale generation
+
+
+def test_the_completing_tick_flips_on_recording_under_the_publish_lock():
+    dm = _DM(status='finish', completes=True)
+    node = _Node(dm)
+    held = []
+
+    class _SpyLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+
+        def __enter__(self):
+            self._lock.acquire()
+            held.append(('enter', node.on_recording))
+            return self
+
+        def __exit__(self, *exc):
+            held.append(('exit', node.on_recording))
+            self._lock.release()
+            return False
+    node._record_publish_lock = _SpyLock()
+    _tick(node)
+    assert ('exit', False) in held
+    assert node.on_recording is False
+
+
+def test_an_error_stop_for_a_session_that_moved_does_nothing():
+    dm = _DM()
+    dm.convert_raises = True
+    node = _Node(dm)
+    original = dm.convert_msgs_to_raw_datas
+
+    def _convert_then_trip(*a, **k):
+        node._collision_trip_pending = object()
+        return original(*a, **k)
+    dm.convert_msgs_to_raw_datas = _convert_then_trip
+    _tick(node)
+    assert dm.error_stops == []
+    assert node.communicator.published == []
+    assert node.on_recording is True       # the collision path owns the session now

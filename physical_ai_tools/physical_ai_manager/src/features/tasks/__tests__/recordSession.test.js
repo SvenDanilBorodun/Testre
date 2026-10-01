@@ -13,6 +13,9 @@ import {
   COLLISION_END_NOTE_DE,
   EMPTY_FINISH,
   EMPTY_RECORD_SESSION,
+  OUTCOMES,
+  SOURCE_GAP_PREFIX_DE,
+  SOURCE_STOP_PREFIX_DE,
   advanceRecordSession,
   applyRecordIntent,
   applyRegisterStatus,
@@ -755,5 +758,167 @@ describe('R17 dismiss', () => {
     const before = r.s;
     r.dismiss(true);
     expect(r.s).toBe(before);
+  });
+});
+
+// Aufnahme 2.0 round 5 (spec-r5-final §9 = spec-r5 §2.2/§2.3): the collision in
+// the save window, a short „Behalten", and the two new row outcomes.
+const SOURCE_STOP_DE = `${SOURCE_STOP_PREFIX_DE}Die Szenen-Kamera sendet keine Bilder mehr. Gespeicherte `
+  + 'Episoden bleiben erhalten, die laufende Episode wurde verworfen. Prüfe das Kabel.';
+const GAP_DE = `${SOURCE_GAP_PREFIX_DE}Der Leader-Arm hat in Episode 1 kurz keine Daten geliefert. Die `
+  + 'Episode wird neu aufgenommen.';
+
+describe('round 5: the collision in the save window (§2.3-1)', () => {
+  it('Q7-last: the counted SAVING tick settles the provisional row — one „Gespeichert"', () => {
+    const r = sim({ snapshot: { ...SNAPSHOT, numEpisodes: 1 } });
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0, 1);
+    r.collide();
+    expect(r.s.episodes[0].provisional).toBe(true);
+    // the last episode: the robot counts it while it is still SAVING / finishing
+    r.saving(1, 3);
+    expect(outcomes(r.s)).toEqual(['1:saved']);
+    expect(r.s.episodes[0].provisional).toBe(false);
+    expect(r.s.savedCount).toBe(1);
+    r.ready({ currentEpisodeNumber: 1 });
+    expect(outcomes(r.s)).toEqual(['1:saved']);
+    expect(r.s.finish.state).toBe('uploading');
+  });
+
+  it('a late pre-trip SAVING tick with the old count leaves the row provisional', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0, 1);
+    r.collide();
+    // a tick published before the trip, delivered after it (two publishers)
+    r.saving(0, 1);
+    expect(outcomes(r.s)).toEqual(['1:saved']);
+    expect(r.s.episodes[0].provisional).toBe(true);
+    r.phase(RESETTING, 1, { currentEpisodeNumber: 1 });
+    expect(outcomes(r.s)).toEqual(['1:saved']);
+    expect(r.s.episodes[0].provisional).toBe(false);
+  });
+
+  it('… and settled as „Kollision, verworfen" by a non-SAVING tick without the count', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0, 1);
+    r.collide();
+    r.saving(0, 1);
+    r.phase(RESETTING, 1, { currentEpisodeNumber: 0 });
+    expect(outcomes(r.s)).toEqual(['1:collision']);
+  });
+});
+
+describe('round 5: „Behalten und beenden" measured to the press (§2.3-2)', () => {
+  it('0.6 s at the press leaves no row, however long the finish takes', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0);
+    r.phase(RESETTING, 1, { currentEpisodeNumber: 1 });
+    r.phase(RECORDING, 0.6, { currentEpisodeNumber: 1 });
+    r.intent({ kind: 'keep_end' });
+    r.advance(2000); // a slow finish: 2.6 s to the READY
+    r.saving(1);
+    r.ready({ currentEpisodeNumber: 1 });
+    expect(outcomes(r.s)).toEqual(['1:saved']);
+  });
+
+  it('1.2 s at the press that the robot did not count is „Bildverlust, verworfen", 1.2 s long', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 1.2);
+    r.intent({ kind: 'keep_end' });
+    r.advance(2000);
+    r.saving(0);
+    r.ready({ currentEpisodeNumber: 0 });
+    expect(outcomes(r.s)).toEqual(['1:drop']);
+    expect(r.s.episodes[0].durationS).toBeCloseTo(1.2, 1);
+  });
+});
+
+describe('round 5: a source that stops, a short gap (§2.2)', () => {
+  it('the outcomes include the two new rows', () => {
+    expect(OUTCOMES).toEqual(['saved', 'redo', 'collision', 'drop', 'ended', 'source', 'gap']);
+    expect(SOURCE_STOP_PREFIX_DE).toBe('Aufnahme beendet: ');
+    expect(SOURCE_GAP_PREFIX_DE).toBe('Signalaussetzer: ');
+  });
+
+  it('the robot ended the session for a silent source: the running take is „Abgebrochen, verworfen"', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0);
+    r.phase(RESETTING, 1, { currentEpisodeNumber: 1 });
+    r.phase(RECORDING, 3, { currentEpisodeNumber: 1 });
+    r.notice({ kind: 'warn', text: SOURCE_STOP_DE });
+    r.saving(1);
+    r.ready({ currentEpisodeNumber: 1 });
+    expect(outcomes(r.s)).toEqual(['1:saved', '2:source']);
+    expect(r.s.finish).toMatchObject({ state: 'uploading', endNote: SOURCE_STOP_DE });
+  });
+
+  it('a source stop under the page\'s own end intent keeps that intent\'s outcome', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 3);
+    r.intent({ kind: 'keep_end' });
+    r.notice({ kind: 'warn', text: SOURCE_STOP_DE });
+    r.saving(0);
+    r.ready({ currentEpisodeNumber: 0 });
+    expect(outcomes(r.s)).toEqual(['1:drop']);
+  });
+
+  it('a source stop warning older than the window is a plain „drop"', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 3);
+    r.notice({ kind: 'warn', text: SOURCE_STOP_DE });
+    r.advance(6000);
+    r.saving(0);
+    r.ready({ currentEpisodeNumber: 0 });
+    expect(outcomes(r.s)).toEqual(['1:drop']);
+  });
+
+  it('R6 after a gap warning is „Signalaussetzer, wiederholt"; after another warning „drop"', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.notice({ kind: 'warn', text: GAP_DE });
+    r.saving(0);
+    r.phase(RESETTING, 1);
+    expect(outcomes(r.s)).toEqual(['1:gap']);
+    r.phase(RECORDING, 10);
+    r.notice({ kind: 'warn', text: 'Episode 1: Kamera-Bilder gingen beim Speichern verloren (der Rechner war '
+      + 'überlastet). Die Episode wird automatisch neu aufgenommen.' });
+    r.saving(0);
+    r.phase(RESETTING, 1);
+    expect(outcomes(r.s)).toEqual(['1:gap', '1:drop']);
+  });
+
+  it('H15: a gap redo with Zurücksetzen = 0 (SAVING → RECORDING) is „gap" too', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.notice({ kind: 'warn', text: GAP_DE });
+    r.saving(0);
+    r.phase(RECORDING, 1);
+    expect(outcomes(r.s)).toEqual(['1:gap']);
+    expect(r.s.run).toMatchObject({ episode: 1, resolved: false });
+  });
+
+  it('a gap warning older than the window does not name a later frame drop', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.notice({ kind: 'warn', text: GAP_DE });
+    r.advance(6000);
+    r.saving(0);
+    r.phase(RESETTING, 1);
+    expect(outcomes(r.s)).toEqual(['1:drop']);
   });
 });

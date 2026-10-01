@@ -9,10 +9,12 @@
 // honest notice when „Behalten und beenden" will be dropped).
 
 import TaskPhase from '../../../../constants/taskPhases';
+import { BUSY_DE } from '../../../../features/tasks/recordSession';
 import RECORD_COPY, { KEEP_DROPPED_AFTER_REDO } from '../recordCopy';
 import {
   PRECONDITIONS,
   RERECORD_FINISH_WINDOW_MS,
+  isBusyAnswer,
   keepEndDropsAfterRedo,
   runRecordAction,
   transportMessageDe,
@@ -229,5 +231,53 @@ describe('transportMessageDe', () => {
     expect(transportMessageDe(new Error('Service call timeout for /task/command')))
       .toBe('Der Roboter hat nicht rechtzeitig geantwortet. Bitte versuch es noch einmal.');
     expect(transportMessageDe(new Error('boom'))).toBe('Keine Verbindung zum Roboter.');
+  });
+});
+
+// O6 (round 5): the robot answers a command it cannot take right now (its
+// recorder is busy, e.g. during the ~1 s official discard) with BUSY_DE and
+// changes nothing. That answer is never silent, and in „Verwerfen und beenden"
+// a busy RERECORD is not „already saved": FINISH would keep the take.
+describe('the busy answer (O6)', () => {
+  const BUSY = { success: false, message: BUSY_DE };
+
+  it('isBusyAnswer recognises exactly the robot\'s busy refusal', () => {
+    expect(isBusyAnswer(BUSY)).toBe(true);
+    expect(isBusyAnswer({ success: false, message: ` ${BUSY_DE} ` })).toBe(true);
+    expect(isBusyAnswer({ success: true, message: BUSY_DE })).toBe(false);
+    expect(isBusyAnswer({ success: false, message: 'schon gespeichert' })).toBe(false);
+    expect(isBusyAnswer(null)).toBe(false);
+  });
+
+  it('„Verwerfen und beenden": a busy RERECORD sends NO finish, clears the intent and says so', async () => {
+    const h = harness({ status: recording(), answers: { rerecord: BUSY } });
+    expect(await runRecordAction('discardAndEnd', h.ctx)).toEqual({ ok: false, messageDe: BUSY_DE });
+    expect(h.log).toEqual(['intent:discard_end', 'send:rerecord', 'intent:clear']);
+    expect(h.send.mock.calls.map(([c]) => c)).not.toContain('finish');
+  });
+
+  it('„Verwerfen und beenden": a busy FINISH after the discard clears the intent and says so', async () => {
+    const h = harness({ status: recording(), answers: { finish: BUSY } });
+    expect(await runRecordAction('discardAndEnd', h.ctx)).toEqual({ ok: false, messageDe: BUSY_DE });
+    expect(h.log).toEqual(['intent:discard_end', 'send:rerecord', 'intent:discard_ack', 'send:finish', 'intent:clear']);
+  });
+
+  it('„Jetzt speichern" and „Jetzt starten/weiter" show a busy answer (F4 silence is for refusals only)', async () => {
+    const save = harness({ status: recording(), answers: { next: BUSY } });
+    expect(await runRecordAction('saveNow', save.ctx)).toEqual({ ok: false, messageDe: BUSY_DE });
+    const skip = harness({ status: { ...recording(), phase: TaskPhase.RESETTING }, answers: { next: BUSY } });
+    expect(await runRecordAction('skip', skip.ctx)).toEqual({ ok: false, messageDe: BUSY_DE });
+  });
+
+  it('„Wiederholen", „Beenden" and „Behalten und beenden" show it and change nothing', async () => {
+    const redo = harness({ status: recording(), answers: { rerecord: BUSY } });
+    expect(await runRecordAction('redo', redo.ctx)).toEqual({ ok: false, messageDe: BUSY_DE });
+    expect(redo.dispatch).not.toHaveBeenCalled();
+    const end = harness({ status: { ...recording(), phase: TaskPhase.RESETTING }, answers: { finish: BUSY } });
+    expect(await runRecordAction('end', end.ctx)).toEqual({ ok: false, messageDe: BUSY_DE });
+    expect(end.log).toEqual(['intent:end', 'send:finish', 'intent:clear']);
+    const keep = harness({ status: recording(), answers: { finish: BUSY } });
+    expect(await runRecordAction('keepAndEnd', keep.ctx)).toEqual({ ok: false, messageDe: BUSY_DE });
+    expect(keep.log).toEqual(['intent:keep_end', 'send:finish', 'intent:clear']);
   });
 });

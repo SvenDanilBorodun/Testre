@@ -8,6 +8,7 @@
 // uses the page's vocabulary (F6a): „Leader-Arm" / „Follower-Arm", never
 // Leitarm/Folgearm; key labels as words, never ⇧/⌘ (H9).
 
+import { OUTCOMES } from '../../../../features/tasks/recordSession';
 import RECORD_COPY, {
   KEEP_DROPPED_AFTER_REDO,
   armNameDe,
@@ -128,5 +129,22 @@ describe('recordCopy', () => {
       .toBe('Die Greifer-Kamera sendet keine Bilder. Prüfe das Kabel. Hilft das nicht, starte die Umgebung neu.');
     expect(RECORD_COPY.problem.armSlow('leader', 40, 30))
       .toBe('Der Leader-Arm meldet nur 40 statt mindestens 30 Messungen pro Sekunde. Die Aufnahme kann ruckeln.');
+  });
+});
+
+describe('round 5 rows and notes', () => {
+  it('every discarded outcome has its own label', () => {
+    for (const outcome of OUTCOMES.filter((o) => o !== 'saved')) {
+      expect(RECORD_COPY.session.outcome[outcome]).toEqual(expect.any(String));
+    }
+    expect(RECORD_COPY.session.outcome.source).toBe('Abgebrochen, verworfen');
+    expect(RECORD_COPY.session.outcome.gap).toBe('Signalaussetzer, wiederholt');
+  });
+
+  it('the Q8 reason and „nothing saved" in one sentence', () => {
+    expect(RECORD_COPY.note.nothingSavedAfterRedo).toBe(
+      'Beendet. Diese Episode war zu kurz nach dem Wiederholen und wird nicht gespeichert. Es wurde '
+      + 'keine Episode gespeichert, also wird nichts hochgeladen.',
+    );
   });
 });

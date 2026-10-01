@@ -233,6 +233,9 @@ export const RECORD_COPY = Object.freeze({
   note: Object.freeze({
     redo: (n) => `Episode ${n} wird wiederholt.`,
     nothingSaved: 'Beendet. Es wurde keine Episode gespeichert, also wird nichts hochgeladen.',
+    // Q8 + „nothing saved" in one line: the end must not replace the reason.
+    nothingSavedAfterRedo: 'Beendet. Diese Episode war zu kurz nach dem Wiederholen und wird nicht '
+      + 'gespeichert. Es wurde keine Episode gespeichert, also wird nichts hochgeladen.',
     alreadySaved: 'Die Episode war schon fertig und wurde gespeichert.',
     // Q8: the run started too soon after „Wiederholen" — the robot drops it.
     keepDroppedAfterRedo: 'Diese Episode war zu kurz nach dem Wiederholen und wird nicht gespeichert.',
@@ -299,6 +302,10 @@ export const RECORD_COPY = Object.freeze({
       collision: 'Kollision, verworfen',
       drop: 'Bildverlust, verworfen',
       ended: 'Beim Beenden verworfen',
+      // round 5: the robot ended the session (a source stopped, repeated frame loss)
+      source: 'Abgebrochen, verworfen',
+      // round 5: a short source gap, the robot records the episode again
+      gap: 'Signalaussetzer, wiederholt',
     }),
     discardedSub: (n, hhmm) => `Episode ${n} · ${hhmm}`,
     adopted: (k) => (k === 1

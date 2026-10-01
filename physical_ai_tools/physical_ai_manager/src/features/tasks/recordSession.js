@@ -44,7 +44,16 @@ export const MIN_ATTEMPT_S = 1;
  */
 export const FINALIZE_FAILED_PREFIX_DE = 'Datensatz konnte nicht abgeschlossen werden';
 
-export const OUTCOMES = Object.freeze(['saved', 'redo', 'collision', 'drop', 'ended']);
+// Aufnahme 2.0 round 5 — byte-equal with the server's
+// data_processing/record_texts_de.py (robotis_ai_setup/tests/test_record_r5_lockstep.py).
+/** The robot ended the session itself: a source stopped (R5-2) or repeated frame loss (C7). */
+export const SOURCE_STOP_PREFIX_DE = 'Aufnahme beendet: ';
+/** A short source gap inside a take: the robot re-records it (O2). */
+export const SOURCE_GAP_PREFIX_DE = 'Signalaussetzer: ';
+/** The robot's answer to a command while the recorder is busy (O6). */
+export const BUSY_DE = 'Die Aufnahme ist gerade beschäftigt. Bitte versuch es gleich noch einmal.';
+
+export const OUTCOMES = Object.freeze(['saved', 'redo', 'collision', 'drop', 'ended', 'source', 'gap']);
 export const FINISH_STATES = Object.freeze([
   'idle', 'finalizing', 'uploading', 'registering', 'done', 'upload_failed', 'local_done',
   'finalize_failed', 'stopped_error', 'nothing',
@@ -163,10 +172,29 @@ function unresolvedOutcome(s) {
   return 'redo';
 }
 
+// The latest warning, when it is no older than END_NOTE_WINDOW_MS at `atWall`
+// and begins with `prefix`.
+function recentWarnStartsWith(s, prefix, atWall) {
+  const w = s.lastWarn;
+  if (!w || typeof w.text !== 'string' || !w.text.startsWith(prefix)) return false;
+  if (!Number.isFinite(w.at) || !Number.isFinite(atWall)) return false;
+  return atWall - w.at <= END_NOTE_WINDOW_MS;
+}
+
+// A save the robot did not count and did not keep: a short source gap (O2,
+// „Signalaussetzer, wiederholt") when that is what the robot just said, else a
+// frame drop („Bildverlust, verworfen").
+function discardedSaveOutcome(s, atWall) {
+  return recentWarnStartsWith(s, SOURCE_GAP_PREFIX_DE, atWall) ? 'gap' : 'drop';
+}
+
 // A collision during SAVING is recorded „Gespeichert" (owner decision Q7) —
 // provisionally, because the client cannot see whether the save was already
-// committed. The next tick that is not a SAVING tick settles it: the robot's
-// count went up (the server counted it) or it did not (it was discarded).
+// committed. The first record tick after the collision that shows the count
+// above it (counted — in any phase, SAVING included: the last episode is
+// counted while the robot is still saving) or that is not a SAVING tick
+// settles it. A SAVING tick with the old count leaves it provisional: it can be
+// a pre-trip tick delivered late across the two /task/status publishers.
 function settleProvisional(s, next) {
   const idx = s.episodes.findIndex((e) => e.provisional);
   if (idx < 0) return s;
@@ -219,9 +247,11 @@ export function advanceRecordSession(s, prev, next) {
   const phase = next.phase;
   const RECORDING = TaskPhase.RECORDING;
 
-  // Q7 — settle a provisional „Gespeichert" on the first non-SAVING record tick
-  // (or the end tick).
-  if (isRecordish && phase !== TaskPhase.SAVING && out.episodes.some((e) => e.provisional)) {
+  // Q7 — settle a provisional „Gespeichert" on the first record tick that
+  // counted it or is not SAVING (or the end tick). Runs before R3, so the
+  // increment is consumed once.
+  if (isRecordish && (phase !== TaskPhase.SAVING || count > out.savedCount)
+      && out.episodes.some((e) => e.provisional)) {
     out = settleProvisional(out, next);
   }
 
@@ -262,10 +292,12 @@ export function advanceRecordSession(s, prev, next) {
     out = resolveRun(out, unresolvedOutcome(out), runSeconds(out.run, next.receivedAt, E), next.receivedWallMs);
   }
 
-  // R6 — SAVING → RESETTING without a count: the save was discarded for a frame drop.
+  // R6 — SAVING → RESETTING without a count: the save was discarded for a
+  // frame drop, or re-recorded for a short source gap.
   if (recordTick && out.run && !out.run.resolved && p.phase === TaskPhase.SAVING
       && phase === TaskPhase.RESETTING) {
-    out = resolveRun(out, 'drop', out.run.durationS ?? runSeconds(out.run, next.receivedAt, E), next.receivedWallMs);
+    out = resolveRun(out, discardedSaveOutcome(out, next.receivedWallMs),
+      out.run.durationS ?? runSeconds(out.run, next.receivedAt, E), next.receivedWallMs);
   }
 
   // R7 — a new run starts: the phase entered RECORDING, the time ran backwards
@@ -280,7 +312,7 @@ export function advanceRecordSession(s, prev, next) {
   )) {
     if (out.run && !out.run.resolved) {
       // H15: a redo with Zurücksetzen = 0 publishes no RESETTING.
-      const outcome = out.run.sawSaving ? 'drop' : unresolvedOutcome(out);
+      const outcome = out.run.sawSaving ? discardedSaveOutcome(out, next.receivedWallMs) : unresolvedOutcome(out);
       const dur = out.run.sawSaving ? (out.run.durationS ?? 0) : runSeconds(out.run, next.receivedAt, E);
       out = resolveRun(out, outcome, dur, next.receivedWallMs);
     }
@@ -319,7 +351,12 @@ function endSession(s, next, E) {
   const endedWallMs = next.receivedWallMs ?? null;
   if (out.run && !out.run.resolved) {
     const run = out.run;
-    const dur = run.durationS ?? runSeconds(run, next.receivedAt, E);
+    // „Behalten und beenden": the run lasted until the PRESS. The server judges
+    // the same run at receipt (press + RTT), so a run the client measures
+    // ≥ 1 s is always kept by the server, and only one under 1 s can be dropped.
+    const dur = out.intent?.kind === 'keep_end' && Number.isFinite(out.intent.at)
+      ? runSecondsWall(run, out.intent.at, E)
+      : run.durationS ?? runSeconds(run, next.receivedAt, E);
     let outcome;
     if (out.intent?.kind === 'discard_end') {
       // The run the page discarded → „Beim Beenden verworfen"; a run that only
@@ -329,6 +366,8 @@ function endSession(s, next, E) {
       outcome = null; // never a real attempt (Q3)
     } else if (out.intent?.kind === 'keep_end' && keepEndDropsRun(out, run)) {
       outcome = 'ended'; // Q8: too soon after „Wiederholen"
+    } else if (!out.intent && recentWarnStartsWith(out, SOURCE_STOP_PREFIX_DE, endedWallMs)) {
+      outcome = 'source'; // the robot ended the session: a source stopped (R5-2) or C7
     } else {
       outcome = 'drop'; // FINISH met a frame drop, or an F1 end
     }

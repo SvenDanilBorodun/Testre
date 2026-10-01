@@ -19,8 +19,15 @@
 // Result: `{ok, messageDe?, note?, silent?}` — `messageDe` is a failure the
 // banner shows (8 s), `note` a short info line, `silent` a refusal the page
 // does not comment on (F4: the phase display is the truth).
+//
+// O6 (round 5): the robot answers a command it cannot take right now (its
+// recorder is busy, e.g. during the ~1 s official discard) with `BUSY_DE` and
+// changes nothing. That answer is never silent — the student has to press
+// again — and in „Verwerfen und beenden" a busy RERECORD is not „already
+// saved": sending FINISH then would KEEP the take the student discarded.
 
 import TaskPhase from '../../../constants/taskPhases';
+import { BUSY_DE } from '../../../features/tasks/recordSession';
 import { recordIntent } from '../../../features/tasks/taskSlice';
 import RECORD_COPY, { KEEP_DROPPED_AFTER_REDO } from './recordCopy';
 
@@ -62,6 +69,12 @@ export const PRECONDITIONS = Object.freeze({
 });
 
 const refusedText = (result) => (result && result.message) || RECORD_COPY.problem.noConnection;
+
+/** The robot's „busy, nothing changed" refusal (O6). */
+export function isBusyAnswer(result) {
+  return !!result && result.success === false && typeof result.message === 'string'
+    && result.message.trim() === BUSY_DE;
+}
 
 // send → {result} | {error}
 async function trySend(send, command) {
@@ -110,6 +123,7 @@ export async function runRecordAction(action, { send, getStatus, dispatch, now =
     case 'saveNow': {
       const { result, error } = await trySend(send, 'next');
       if (error) return { ok: false, messageDe: transportMessageDe(error) };
+      if (isBusyAnswer(result)) return { ok: false, messageDe: BUSY_DE };
       if (result && result.success === false) return { ok: false, silent: true }; // F4
       return { ok: true };
     }
@@ -147,6 +161,11 @@ export async function runRecordAction(action, { send, getStatus, dispatch, now =
       if (redo.error) {
         dispatch(recordIntent({ kind: 'clear', at: now() }));
         return { ok: false, messageDe: transportMessageDe(redo.error) };
+      }
+      if (isBusyAnswer(redo.result)) {
+        // Nothing was discarded: no FINISH (it would keep the take).
+        dispatch(recordIntent({ kind: 'clear', at: now() }));
+        return { ok: false, messageDe: BUSY_DE };
       }
       let note;
       if (redo.result && redo.result.success === false) {

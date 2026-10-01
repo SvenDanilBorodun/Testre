@@ -73,7 +73,9 @@ import {
 import { datasetIdOf, finishSteps, sessionView } from './model/finishModel';
 import { VIEW, deriveRecordView, deriveView } from './model/phaseModel';
 import { firstProblem } from './model/problems';
-import RECORD_COPY, { armNameDe, cameraNameDe, numberDe } from './model/recordCopy';
+import RECORD_COPY, {
+  KEEP_DROPPED_AFTER_REDO, armNameDe, cameraNameDe, numberDe,
+} from './model/recordCopy';
 import { runRecordAction } from './model/recordCommands';
 import { keyToAction } from './model/recordKeys';
 import { createRecordSounds, isMuted, setMuted as writeMuted } from './recordSounds';
@@ -181,6 +183,9 @@ export default function useRecordController({ isActive = true } = {}) {
   const showTransient = useCallback((kind, textDe, ms, extra = {}) => {
     setTransient({ kind, textDe, until: Date.now() + ms, ...extra });
   }, []);
+  // Wall time of the last Q8 answer („Behalten und beenden" too soon after
+  // „Wiederholen"): the end that follows keeps its reason (spec-r5 §2.3-6).
+  const q8AtRef = useRef(null);
 
   // --- the view, the verdicts, the model -------------------------------------
   const view0 = deriveView({ heartbeat, status, collision, session });
@@ -304,14 +309,21 @@ export default function useRecordController({ isActive = true } = {}) {
       });
       if (result?.messageDe) {
         showTransient('bad', result.messageDe, TRANSIENT_MS);
+      } else if (result?.note === KEEP_DROPPED_AFTER_REDO
+          && store.getState().tasks.recordSession?.finish?.state === 'nothing') {
+        // The session already ended with nothing saved before this answer came
+        // back: one sentence with both facts.
+        q8AtRef.current = null;
+        showTransient('info', RECORD_COPY.note.nothingSavedAfterRedo, NOTE_LONG_MS);
       } else if (result?.note) {
+        if (result.note === KEEP_DROPPED_AFTER_REDO) q8AtRef.current = Date.now();
         showTransient('info', result.note, action === 'redo' ? NOTE_SHORT_MS : NOTE_LONG_MS);
       }
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
-  }, [dispatch, getStatus, sendRecordCommand, showTransient]);
+  }, [dispatch, getStatus, sendRecordCommand, showTransient, store]);
 
   const act = useCallback((actionId) => {
     if (actionId === 'closeQuestion' || actionId === 'back') {
@@ -414,7 +426,11 @@ export default function useRecordController({ isActive = true } = {}) {
     const prev = prevFinishRef.current;
     prevFinishRef.current = { id: session?.id, state: finishState };
     if (finishState === 'nothing' && (prev.state !== 'nothing' || prev.id !== session?.id)) {
-      showTransient('info', RECORD_COPY.note.nothingSaved, NOTE_LONG_MS);
+      const q8At = q8AtRef.current;
+      q8AtRef.current = null;
+      const afterRedo = Number.isFinite(q8At) && Date.now() - q8At <= NOTE_LONG_MS;
+      showTransient('info', afterRedo ? RECORD_COPY.note.nothingSavedAfterRedo : RECORD_COPY.note.nothingSaved,
+        NOTE_LONG_MS);
     }
   }, [finishState, session?.id, showTransient]);
 

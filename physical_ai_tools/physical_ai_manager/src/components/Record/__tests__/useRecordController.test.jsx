@@ -24,6 +24,7 @@ import PageType from '../../../constants/pageType';
 import TaskPhase from '../../../constants/taskPhases';
 import useRecordController from '../useRecordController';
 import { VIEW } from '../model/phaseModel';
+import RECORD_COPY, { KEEP_DROPPED_AFTER_REDO } from '../model/recordCopy';
 
 const mockSend = vi.fn();
 const mockGetHfUsers = vi.fn();
@@ -479,5 +480,81 @@ describe('form, mute and the finish actions', () => {
       }));
     });
     expect(store.getState().ui.currentPage).toBe(PageType.HOME);
+  });
+});
+
+// spec-r5 §2.3-6: the Q8 reason must survive the end. A fast finish lands the
+// terminating READY within a few hundred ms of „Behalten und beenden"; the
+// „nothing saved" note used to REPLACE the Q8 note shown a moment earlier.
+describe('the Q8 note survives the end', () => {
+  async function recordThenRedo(store, result) {
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20, proceedTime: 4 })); });
+    act(() => pageAct(result, 'redo'));
+    await waitFor(() => expect(mockSend).toHaveBeenCalledWith('rerecord'));
+    await waitFor(() => expect(result.current.busy).toBe(false));
+    // the robot's new run, started after the RERECORD
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20, proceedTime: 0 })); });
+  }
+
+  const endTick = () => recordTick({ running: false, phase: TaskPhase.READY, totalTime: 0, currentEpisodeNumber: 0 });
+
+  it('Q8 answered first, the READY 100 ms later: the combined sentence', async () => {
+    const store = makeStore();
+    const { result } = mount(store);
+    await recordThenRedo(store, result);
+    act(() => pageAct(result, 'end'));
+    act(() => pageAct(result, 'keepAndEnd'));
+    await waitFor(() => expect(mockSend).toHaveBeenCalledWith('finish'));
+    await waitFor(() => expect(result.current.problem).toEqual({ kind: 'info', textDe: KEEP_DROPPED_AFTER_REDO }));
+    act(() => { store.dispatch(endTick()); });
+    expect(store.getState().tasks.recordSession.finish.state).toBe('nothing');
+    expect(result.current.problem).toEqual({ kind: 'info', textDe: RECORD_COPY.note.nothingSavedAfterRedo });
+  });
+
+  it('the READY before the FINISH answer: the combined sentence too', async () => {
+    const store = makeStore();
+    const { result } = mount(store);
+    await recordThenRedo(store, result);
+    let answerFinish;
+    mockSend.mockImplementation((command) => (command === 'finish'
+      ? new Promise((resolve) => { answerFinish = () => resolve({ success: true, message: '' }); })
+      : Promise.resolve({ success: true, message: '' })));
+    act(() => pageAct(result, 'end'));
+    act(() => pageAct(result, 'keepAndEnd'));
+    await waitFor(() => expect(answerFinish).toBeTypeOf('function'));
+    act(() => { store.dispatch(endTick()); });
+    await act(async () => { answerFinish(); });
+    await waitFor(() => expect(result.current.problem)
+      .toEqual({ kind: 'info', textDe: RECORD_COPY.note.nothingSavedAfterRedo }));
+  });
+
+  it('an end with nothing saved and no Q8 keeps the plain sentence', async () => {
+    const store = makeStore();
+    const { result } = mount(store);
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.WARMING_UP, totalTime: 5 })); });
+    act(() => pageAct(result, 'end'));
+    await waitFor(() => expect(mockSend).toHaveBeenCalledWith('finish'));
+    await waitFor(() => expect(result.current.busy).toBe(false));
+    act(() => { store.dispatch(endTick()); });
+    expect(result.current.problem).toEqual({ kind: 'info', textDe: RECORD_COPY.note.nothingSaved });
+  });
+});
+
+// O6 (round 5): a busy answer is shown, and a busy RERECORD in „Verwerfen und
+// beenden" sends no FINISH.
+describe('the busy answer', () => {
+  it('„Verwerfen und beenden" with a busy RERECORD: no FINISH, the sentence is shown', async () => {
+    const BUSY_TEXT = 'Die Aufnahme ist gerade beschäftigt. Bitte versuch es gleich noch einmal.';
+    mockSend.mockImplementation(async (command) => (command === 'rerecord'
+      ? { success: false, message: BUSY_TEXT } : { success: true, message: '' }));
+    const store = makeStore();
+    const { result } = mount(store);
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20, proceedTime: 3 })); });
+    act(() => pageAct(result, 'end'));
+    act(() => pageAct(result, 'discardAndEnd'));
+    await waitFor(() => expect(result.current.problem).toEqual({ kind: 'bad', textDe: BUSY_TEXT }));
+    expect(mockSend.mock.calls.map((c) => c[0])).toEqual(['rerecord']);
+    expect(store.getState().tasks.recordSession.intent).toBeNull();
+    expect(store.getState().tasks.recordSession.finish.state).toBe('idle');
   });
 });

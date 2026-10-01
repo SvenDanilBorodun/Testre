@@ -16,6 +16,12 @@
 // No payload, or a payload older than SIGNAL_STALE_MS, means "no facts": an
 // older server image has no such topic, and a dead link publishes nothing. The
 // page then shows no badge, no banner and refuses nothing on these grounds.
+//
+// Round 5 adds one trailing key, `ingest: {alive, age_s}` (the server's
+// sensor-ingest thread). The parser ignores it: a dead thread already shows
+// every source as „steht" through the ages. STALLED_AFTER_S is the server's
+// SOURCE_STOPPED_S, at which a recording ends itself (lockstep-tested,
+// robotis_ai_setup/tests/test_record_r5_lockstep.py).
 
 export const SIGNAL_STATUS_TOPIC = '/edubotics/signal_status';
 export const SCHEMA_VERSION = 1;

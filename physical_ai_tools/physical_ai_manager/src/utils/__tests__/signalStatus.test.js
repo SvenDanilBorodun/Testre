@@ -69,6 +69,15 @@ describe('parseSignalStatus', () => {
     expect(parseSignalStatus(data)).toBeNull();
   });
 
+  it('round 5: the additive trailing `ingest` key is tolerated and ignored', () => {
+    const withIngest = parseSignalStatus(raw({ ingest: { alive: true, age_s: 0.01 } }));
+    expect(withIngest).toEqual(parseSignalStatus(raw()));
+    expect(withIngest).not.toHaveProperty('ingest');
+    // a dead sensor thread already shows every source as „steht": nothing new to read
+    expect(parseSignalStatus(raw({ ingest: { alive: false, age_s: 7.2 } }))).toEqual(parseSignalStatus(raw()));
+    expect(parseSignalStatus(raw({ ingest: 'garbage' }))).toEqual(parseSignalStatus(raw()));
+  });
+
   it('drops malformed source rows and keeps the rest', () => {
     const p = parseSignalStatus(raw({
       sources: [

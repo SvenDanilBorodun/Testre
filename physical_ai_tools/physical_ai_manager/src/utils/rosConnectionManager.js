@@ -17,6 +17,36 @@
 import ROSLIB from 'roslib';
 
 /**
+ * The longest wait between two reconnect attempts to the LOCAL rosbridge
+ * (spec-r5 §2.3-3). Local = the same-origin nginx proxy `ws(s)://<host>/rosbridge`
+ * of the student PC and the Orange Pi; it comes back with the environment, so
+ * the page retries every 2 s and never gives up — a page that lost its link
+ * during a recording then sees the session's end within ~4 s, not ~30 s. The
+ * Jetson proxy (`ws://<ip>:9091`) keeps the exponential backoff and its cap.
+ */
+export const LOCAL_RECONNECT_MAX_DELAY_MS = 2000;
+const REMOTE_RECONNECT_MAX_DELAY_MS = 30000;
+const JETSON_PROXY_PORT = '9091';
+
+/** True for the local same-origin rosbridge (path `/rosbridge`, not the Jetson proxy port). */
+export function isLocalRosbridgeUrl(url) {
+  if (typeof url !== 'string' || !url) return false;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return parsed.pathname.replace(/\/+$/, '') === '/rosbridge' && parsed.port !== JETSON_PROXY_PORT;
+}
+
+/** The wait before reconnect attempt `attempt` (0-based) to `url`. */
+export function reconnectDelayMs(url, attempt) {
+  const cap = isLocalRosbridgeUrl(url) ? LOCAL_RECONNECT_MAX_DELAY_MS : REMOTE_RECONNECT_MAX_DELAY_MS;
+  return Math.min(1000 * Math.pow(2, Math.max(0, attempt)), cap);
+}
+
+/**
  * Singleton pattern for managing global ROS connection
  */
 class RosConnectionManager {
@@ -179,14 +209,17 @@ class RosConnectionManager {
    */
   _scheduleReconnect() {
     if (this.intentionalDisconnect || !this.url) return;
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+    // The local rosbridge has no attempt cap (it returns with the environment).
+    const local = isLocalRosbridgeUrl(this.url);
+    if (!local && this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.log(`Max reconnect attempts (${this.maxReconnectAttempts}) reached, giving up`);
       return;
     }
 
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+    const delay = reconnectDelayMs(this.url, this.reconnectAttempts);
     this.reconnectAttempts++;
-    console.log(`Scheduling reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
+    console.log(`Scheduling reconnect attempt ${this.reconnectAttempts}${local ? '' : `/${this.maxReconnectAttempts}`} `
+      + `in ${delay}ms`);
 
     this.reconnectTimer = setTimeout(async () => {
       if (this.intentionalDisconnect) return;

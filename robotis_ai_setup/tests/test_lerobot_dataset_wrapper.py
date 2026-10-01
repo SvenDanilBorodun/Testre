@@ -210,6 +210,14 @@ class LeRobotDatasetWrapperBridgeTest(unittest.TestCase):
         w.discard_episode()                       # read-only dataset: nothing to do
         self.assertNotIn('clear_calls', w.__dict__)
 
+    def test_cancel_streaming_episode_is_the_official_discard(self):
+        # Round 5 (O6): no private encoder cancel; the old name is an alias.
+        w = self._bare_wrapper()
+        w.writer.episode_buffer = {'size': 4, 'task': [], 'episode_index': 1}
+        w.cancel_streaming_episode()
+        self.assertEqual(w.clear_calls, [True])
+        self.assertEqual(w.writer.episode_buffer['size'], 0)
+
     # ---- no-op shims used by the data_manager state machine ----
 
     def test_video_encoding_shims(self):

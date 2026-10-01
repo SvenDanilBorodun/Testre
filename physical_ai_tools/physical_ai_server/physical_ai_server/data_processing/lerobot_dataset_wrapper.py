@@ -176,18 +176,10 @@ class LeRobotDatasetWrapper(LeRobotDataset):
             return 0
 
     def cancel_streaming_episode(self) -> None:
-        """Discard the in-flight streaming episode (its temp mp4 + encoder
-        threads) so a dropped-frame episode can be cleanly re-recorded. Safe
-        no-op when streaming is disabled. The next episode's start_episode would
-        also cancel a stale active episode, but doing it here frees the threads
-        and temp file promptly."""
-        writer = getattr(self, 'writer', None)
-        enc = getattr(writer, '_streaming_encoder', None) if writer is not None else None
-        if enc is not None and hasattr(enc, 'cancel_episode'):
-            try:
-                enc.cancel_episode()
-            except Exception:  # noqa: BLE001 — discard must never raise
-                pass
+        """Alias of discard_episode() (Aufnahme 2.0 round 5, owner O6: LeRobot's
+        official cancel only — no private encoder attribute anywhere on the
+        recording path)."""
+        self.discard_episode()
 
     def discard_episode(self) -> None:
         """Discard the in-flight take the way LeRobot's own record loop does

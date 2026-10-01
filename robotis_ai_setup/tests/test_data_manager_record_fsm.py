@@ -431,7 +431,10 @@ class FinishTest(_FsmTestCase):
         self.assertIn(True, results)
         self.assertEqual(dm._lerobot_dataset.committed, 0)
         self.assertEqual(dm._record_episode_count, 0)
-        self.assertGreaterEqual(dm._lerobot_dataset.cancelled, 1)
+        # Official discard only (round 5, O6): the dropped run is cancelled by
+        # the wrapper's discard_episode(), never by a private encoder cancel.
+        self.assertGreaterEqual(dm._lerobot_dataset.discarded, 1)
+        self.assertEqual(dm._lerobot_dataset.cancelled, 0)
         self.assertEqual(up, [])
 
     def test_finish_mid_run_saves_counts_and_uploads(self):
@@ -993,25 +996,33 @@ class DiscardCancelsTheEncoderTest(_FsmTestCase):
         ticks(dm, 3)
         self.assertEqual(self._assert_cancel_before_the_new_take(dm, at), at + 1)
 
-    def test_frame_drop_rerecord_cancels_in_the_save_tick(self):
+    def test_frame_drop_rerecord_discards_in_the_next_record_step(self):
+        # Round 5 (O6, official cancel only): the redo leaves _discard_pending and
+        # the next record step (the reset tick, no frame) runs the wrapper's
+        # discard_episode(); no private encoder cancel anywhere.
         dm, _ = self._mid_run(drop=True, reset=0)
         self.assertEqual(dm.record_early_save(), 'save')
         tick(dm)                                          # save() sees the drop
         drop_tick = _TICK_NO[0]
-        self.assertEqual(self._events(dm, 'cancel'), [drop_tick])
+        self.assertEqual(self._events(dm, 'cancel'), [])
+        self.assertEqual(self._events(dm, 'discard'), [])
         dm._lerobot_dataset.drop_on_save = False
         run_until(dm, 'run')
         ticks(dm, 3)
-        self._assert_cancel_before_the_new_take(dm, drop_tick - 1)
+        self.assertEqual(self._assert_cancel_before_the_new_take(dm, drop_tick),
+                         drop_tick + 1)
 
-    def test_a_finish_that_drops_its_run_cancels_in_the_finish_tick(self):
+    def test_a_finish_that_drops_its_run_discards_before_the_finalize(self):
         dm, up = make(warmup=0)
         run_until(dm, 'run')
         ticks(dm, 10)                                     # < EARLY_SAVE_MIN_S
         dm.record_finish()
-        tick(dm)
-        self.assertEqual(self._events(dm, 'cancel'), [_TICK_NO[0]])
+        tick(dm)                                          # the run is dropped
+        drop_tick = _TICK_NO[0]
+        self.assertEqual(self._events(dm, 'cancel'), [])
         self.assertIn(True, ticks(dm, 3))
+        self.assertEqual(self._events(dm, 'discard'), [drop_tick + 1])
+        self.assertTrue(dm._lerobot_dataset.finalized)
         self.assertEqual(up, [])
 
     def test_move_to_next_right_after_a_discard_still_cancels_before_the_frame(self):
@@ -1238,6 +1249,316 @@ class StaleCameraWarningTest(_FsmTestCase):
         self.assertEqual(MOD.camera_name_de('gripper'), 'Greifer-Kamera')
         self.assertEqual(MOD.camera_name_de('scene'), 'Szenen-Kamera')
         self.assertEqual(MOD.camera_name_de('wrist'), 'Kamera „wrist“')
+
+
+class RecorderLockTest(_FsmTestCase):
+    """Round 5 (O1, spec §4): one recorder lock. The record tick holds it for a
+    whole record step, commands for one transition; a collision's discard never
+    waits for it (applied at once when the lock is free, else by the holder at
+    release — with a re-check so a request landing between the holder's last
+    drain and its release is never lost)."""
+
+    _MUTATORS = ('record', 're_record', 'rerecord_from_command', 'record_finish',
+                 'record_stop', 'record_early_save', 'record_skip_task',
+                 'record_next_episode', 'finish_for_low_disk', 'end_session_now',
+                 'cancel_pending_discard', 'get_current_record_status', 'end_after_error')
+
+    def test_every_public_mutator_holds_the_lock(self):
+        for name in self._MUTATORS:
+            with self.subTest(name=name):
+                self.assertTrue(getattr(getattr(DataManager, name), 'edubotics_recorder_locked',
+                                        False))
+
+    def _hold_in_thread(self, dm, body):
+        """Run body() in another thread while it holds dm.lock."""
+        import threading
+        entered, release = threading.Event(), threading.Event()
+
+        def _holder():
+            with dm.locked():
+                entered.set()
+                release.wait(5)
+                body()
+
+        t = threading.Thread(target=_holder)
+        t.start()
+        self.assertTrue(entered.wait(5))
+        return t, release
+
+    def test_a_collision_discard_with_a_free_lock_applies_now(self):
+        dm, _ = make()
+        run_until(dm, 'run')
+        ticks(dm, 10)
+        self.assertTrue(dm.request_collision_discard())
+        self.assertEqual(dm.get_status(), 'reset')
+        self.assertFalse(dm._collision_discard_requested)
+
+    def test_a_collision_discard_never_waits_and_the_holder_applies_it(self):
+        import time as real_time
+        dm, _ = make()
+        run_until(dm, 'run')
+        ticks(dm, 10)
+        t, release = self._hold_in_thread(dm, lambda: None)
+        started = real_time.monotonic()
+        self.assertFalse(dm.request_collision_discard())
+        self.assertLess(real_time.monotonic() - started, 0.1)
+        self.assertEqual(dm.get_status(), 'run')          # not applied yet
+        release.set()
+        t.join(5)
+        self.assertEqual(dm.get_status(), 'reset')        # applied at the release
+
+    def test_a_request_between_the_last_drain_and_the_release_is_applied(self):
+        dm, _ = make()
+        run_until(dm, 'run')
+        ticks(dm, 10)
+        original = dm._drain_collision_request_locked
+        state = {'first': True}
+
+        def _drain_then_request():
+            original()
+            if state['first']:                # the holder's own (empty) drain ...
+                state['first'] = False
+                dm._collision_discard_requested = True   # ... then the trip lands
+        dm._drain_collision_request_locked = _drain_then_request
+        with dm.locked():
+            pass
+        self.assertEqual(dm.get_status(), 'reset')
+        self.assertFalse(dm._collision_discard_requested)
+
+    def test_a_drain_never_runs_inside_a_record_step(self):
+        dm, _ = make()
+        run_until(dm, 'run')
+        ticks(dm, 10)
+        fake = dm._lerobot_dataset
+        add = fake.add_frame_without_write_image
+        seen = []
+
+        def _add_while_the_trip_lands(frame, task):
+            add(frame, task)
+            dm._collision_discard_requested = True       # the trip, mid-step
+            seen.append(dm.get_status())
+        fake.add_frame_without_write_image = _add_while_the_trip_lands
+        tick(dm)
+        self.assertEqual(seen, ['run'])                  # the frame step completed
+        self.assertEqual(dm.get_status(), 'reset')       # then the discard applied
+
+    def test_try_locked_answers_busy_within_the_timeout(self):
+        import time as real_time
+        dm, _ = make()
+        t, release = self._hold_in_thread(dm, lambda: None)
+        started = real_time.monotonic()
+        with dm.try_locked(0.25) as got:
+            self.assertFalse(got)
+        elapsed = real_time.monotonic() - started
+        self.assertGreaterEqual(elapsed, 0.2)
+        self.assertLess(elapsed, 0.3 + 0.2)
+        release.set()
+        t.join(5)
+        with dm.try_locked(0.25) as got:
+            self.assertTrue(got)
+            self.assertTrue(dm.lock._is_owned())
+        self.assertFalse(dm.lock._is_owned())
+
+    def test_try_locked_drains_at_its_release(self):
+        dm, _ = make()
+        run_until(dm, 'run')
+        ticks(dm, 10)
+        with dm.try_locked(0.25) as got:
+            self.assertTrue(got)
+            dm._collision_discard_requested = True
+        self.assertEqual(dm.get_status(), 'reset')
+
+    def test_a_data_manager_built_without_init_still_locks(self):
+        # The deps-free contract tests build DataManager via __new__.
+        bare = DataManager.__new__(DataManager)
+        with bare.locked():
+            pass
+        with bare.try_locked(0.1) as got:
+            self.assertTrue(got)
+
+
+class FrameCountTakeTest(_FsmTestCase):
+    """Round 5 (spec §3.3): a take ends by FRAME COUNT, never by wall clock:
+    n_target = max(1, round(episode_time_s * fps)) frames, then 'save'. A tick
+    without images adds nothing. run_entered_mono is stamped at every run
+    entry, like _run_entered_at."""
+
+    def test_a_take_has_exactly_episode_time_times_fps_frames(self):
+        for dt in (0.0, 1 / 30, 0.5):
+            with self.subTest(dt=dt):
+                dm, _ = make(warmup=0, episode=2, n=1)
+                run_until(dm, 'run')
+                while dm.get_status() == 'run':
+                    _Clock.t += dt
+                    dm.record(images={}, state=[], action=[])
+                self.assertEqual(dm._lerobot_dataset.episode_buffer['size'], 60)
+
+    def test_images_none_adds_nothing(self):
+        dm, _ = make(warmup=0, episode=1, n=1)
+        run_until(dm, 'run')
+        before = dm._lerobot_dataset.episode_buffer['size']
+        for _ in range(100):
+            _Clock.t += 1.0
+            dm.record(images=None, state=None, action=None)
+        self.assertEqual(dm.get_status(), 'run')
+        self.assertEqual(dm._lerobot_dataset.episode_buffer['size'], before)
+
+    def test_proceed_time_is_frames_over_fps(self):
+        dm, _ = make(warmup=0, episode=3, n=1)
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        self.assertAlmostEqual(dm._proceed_time,
+                               dm._lerobot_dataset.episode_buffer['size'] / 30.0)
+
+    def test_run_entered_mono_at_every_run_entry(self):
+        dm, _ = make(warmup=1, reset=1)
+        self.assertIsNone(dm.run_entered_mono)
+        run_until(dm, 'run')                               # warm-up -> run
+        self.assertEqual(dm.run_entered_mono, _Clock.t)
+        run_until(dm, 'reset')
+        _Clock.t += 0.2
+        self.assertEqual(dm.record_early_save(), 'run')    # „Jetzt starten“
+        self.assertEqual(dm.run_entered_mono, _Clock.t)
+        ticks(dm, 30)
+        dm.rerecord_from_command()
+        self.assertEqual(dm.record_early_save(), 'run')
+        _Clock.t += 0.4
+        self.assertTrue(dm.cancel_pending_discard())       # the re-stamp
+        self.assertEqual(dm.run_entered_mono, _Clock.t)
+
+
+class SaveCountPendingTest(_FsmTestCase):
+    """R5-3 / I2j: a latched save that committed NOTHING is not an episode — the
+    old-client multi-task MOVE_TO_NEXT in the first warm-up used to count one
+    (robot 2 / disk 1). _save_count_pending is read at all four sites."""
+
+    def _empty_latched_save(self, n=3):
+        dm, up = make(n=n)
+        tick(dm)                                          # warm-up
+        dm.record_next_episode()                          # old multi-task NEXT
+        tick(dm)                                          # 'save' latches, nothing saved
+        return dm, up
+
+    def test_the_save_completion_branch_counts_nothing(self):
+        dm, up = self._empty_latched_save()
+        ticks(dm, 3)
+        self.assertEqual(dm._record_episode_count, 0)
+        self.assertEqual(dm._lerobot_dataset.committed, 0)
+        self.assertEqual(dm.get_current_record_status().current_episode_number, 0)
+
+    def test_stop_after_an_empty_latched_save_counts_nothing(self):
+        dm, up = make(n=3)
+        tick(dm)
+        dm.record_next_episode()
+        tick(dm)                                          # save latched, empty
+        self.assertTrue(dm._on_saving)
+        dm.record_stop()
+        self.assertIn(True, ticks(dm, 4))
+        self.assertEqual(dm._record_episode_count, 0)
+        self.assertEqual(up, [])
+
+    def test_finish_after_an_empty_latched_save_counts_nothing(self):
+        dm, up = make(n=3)
+        tick(dm)
+        dm.record_next_episode()
+        tick(dm)
+        dm.record_finish()
+        self.assertIn(True, ticks(dm, 4))
+        self.assertEqual(dm._record_episode_count, 0)
+        self.assertEqual(up, [])
+
+    def test_a_collision_after_an_empty_latched_save_counts_nothing(self):
+        dm, _ = make(n=3)
+        tick(dm)
+        dm.record_next_episode()
+        tick(dm)
+        dm.re_record()                                    # Q7 branch
+        self.assertEqual(dm._record_episode_count, 0)
+
+    def test_a_real_latched_save_still_counts_everywhere(self):
+        dm, _ = make(n=3)
+        run_until(dm, 'save')
+        tick(dm)
+        dm.re_record()
+        self.assertEqual(dm._record_episode_count, 1)
+
+
+class ErrorStopFinalizesTest(_FsmTestCase):
+    """D5 (owner): every error stop with a dataset keeps the saved episodes,
+    drops the running take through the official discard BEFORE finalize,
+    finalizes, clears the crash marker, and uploads NOTHING."""
+
+    def test_an_error_stop_mid_take_finalizes_what_was_saved(self):
+        dm, up = make(n=3, reset=0)
+        dm._session_marker_enabled = True
+        run_until(dm, 'reset')
+        run_until(dm, 'run')
+        ticks(dm, 20)
+        self.assertTrue(dm.end_after_error())
+        fake = dm._lerobot_dataset
+        self.assertEqual(fake.committed, 1)
+        self.assertEqual(dm._record_episode_count, 1)
+        discard = [t for e, t in fake.events if e == 'discard']
+        self.assertEqual(len(discard), 1)
+        self.assertTrue(fake.finalized)
+        self.assertFalse(dm._session_marker_path().exists())
+        self.assertEqual(up, [])
+        # inert afterwards: a stray tick changes nothing
+        self.assertFalse(tick(dm))
+        self.assertEqual(fake.committed, 1)
+
+    def test_a_latched_uncounted_save_is_counted_by_the_error_stop(self):
+        dm, up = make(n=3)
+        run_until(dm, 'save')
+        tick(dm)                                          # committed, latched
+        self.assertTrue(dm.end_after_error())
+        self.assertEqual(dm._record_episode_count, 1)
+        self.assertEqual(up, [])
+
+    def test_without_a_dataset_nothing_happens(self):
+        dm, up = make()
+        dm._lerobot_dataset = None
+        self.assertFalse(dm.end_after_error())
+        self.assertEqual(up, [])
+
+    def test_a_failing_finalize_still_clears_the_marker_and_reports(self):
+        dm, up = make(n=3)
+        dm._session_marker_enabled = True
+        run_until(dm, 'run')
+        ticks(dm, 10)
+        dm._lerobot_dataset.finalize_raises = True
+        self.assertFalse(dm.end_after_error())
+        self.assertFalse(dm._session_marker_path().exists())
+        self.assertTrue(dm._upload_blocked_reason_de)
+        self.assertEqual(up, [])
+
+    def test_saved_episode_count_survives_for_the_sentence(self):
+        dm, _ = make(n=3, reset=0)
+        run_until(dm, 'reset')
+        self.assertTrue(dm.end_after_error())
+        self.assertEqual(dm.saved_episode_count(), 1)
+
+
+class OfficialDiscardOnlyTest(_FsmTestCase):
+    """O6: the recording path cancels a take only through LeRobot's public
+    clear_episode_buffer() (the wrapper's discard_episode); cancel_streaming_episode
+    is an alias of it. data_manager.py names no private encoder attribute."""
+
+    _PRIVATE = ('_streaming_encoder', '_dropped_frames', '_frame_queues', '_stop_events')
+
+    def test_data_manager_names_no_private_encoder_attribute(self):
+        import ast
+        tree = ast.parse(DATA_MANAGER_PATH.read_text(encoding='utf-8'))
+        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        names |= {n.value for n in ast.walk(tree)
+                  if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        for private in self._PRIVATE:
+            self.assertNotIn(private, names)
+
+    def test_no_gc_collect_on_the_recording_path(self):
+        source = DATA_MANAGER_PATH.read_text(encoding='utf-8')
+        self.assertNotIn('gc.collect', source)
+        self.assertNotIn('_validate_episode_buffer', source)
 
 
 if __name__ == '__main__':

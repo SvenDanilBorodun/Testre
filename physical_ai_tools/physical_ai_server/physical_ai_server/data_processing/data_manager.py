@@ -16,7 +16,8 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim
 
-import gc
+from contextlib import contextmanager
+import functools
 import json
 import os
 from pathlib import Path
@@ -136,6 +137,22 @@ UPLOAD_NOT_STARTED_DE = (
     'später im Tab Daten hochladen.')
 
 
+def _recorder_locked(method):
+    """Run a public DataManager mutator under the recorder lock (round 5, O1).
+
+    Re-entrant (an RLock), so the record tick's outer section and the inner
+    calls compose. Every release applies a collision discard that arrived
+    meanwhile (see DataManager._release_and_drain); such a drain always lands
+    BETWEEN DataManager operations, never inside one.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self.locked():
+            return method(self, *args, **kwargs)
+    wrapper.edubotics_recorder_locked = True
+    return wrapper
+
+
 class DataManager:
     RECORDING = False
     RECORD_COMPLETED = True
@@ -224,6 +241,20 @@ class DataManager:
         self._upload_blocked_reason_de = ''
         self._last_stale_warn_mono = 0.0
         self._discard_pending = False
+        # Round 5 (O1). One recorder lock: the record tick holds it for a whole
+        # record step, /task/command for one transition (bounded try-acquire,
+        # never blocking the default group), the resync for its recording work.
+        # A collision trip NEVER waits for it: request_collision_discard() sets
+        # _collision_discard_requested and the lock holder applies it at release.
+        #   _save_count_pending  the latched 'save' really committed frames (an
+        #                        empty save is not an episode, I2j)
+        #   run_entered_mono     time.monotonic() of the last run entry, stamped
+        #                        wherever _run_entered_at is (the slot sampler's
+        #                        take boundary)
+        self.lock = threading.RLock()
+        self._collision_discard_requested = False
+        self._save_count_pending = True
+        self.run_entered_mono = None
         self._cpu_checker = CPUChecker()
         self.data_converter = DataConverter()
         # Propagate the task fps into the action-duration setter so
@@ -319,11 +350,16 @@ class DataManager:
         except Exception:  # noqa: BLE001 — telemetry must never block
             pass
 
+    @_recorder_locked
     def record(
             self,
             images,
             state,
             action):
+
+        # A collision discard that arrived since the last step (the trip never
+        # waits for the lock; normally the holder drains it at release).
+        self._drain_collision_request_locked()
 
         # A take discarded since the last tick (Wiederholen, a collision, the
         # frame-drop re-record, a dropped FINISH run): cancel its streaming
@@ -348,20 +384,32 @@ class DataManager:
                 return self.RECORDING
 
         elif self._status == 'run':
-            # v2.5.0: streaming_encoding=True bounds the in-RAM episode buffer
-            # at upstream's frame_index/None placeholder level, so the v2.4
-            # in-RAM safety valve is no longer needed — the container can
-            # record arbitrarily long episodes.
-            if not self._check_time(self._task_info.episode_time_s, 'save'):
-                frame = self.create_frame(images, state, action)
-                if self._task_info.use_optimized_save_mode:
-                    self._lerobot_dataset.add_frame_without_write_image(
-                        frame,
-                        self.current_instruction)
-                else:
-                    self._lerobot_dataset.add_frame(
-                        frame,
-                        self.current_instruction)
+            # Round 5 (spec §3.3): a take ends by FRAME COUNT, never by wall
+            # clock. The slot sampler hands the tick one decided frame per grid
+            # slot (and catches up after a late tick), so the take is exactly
+            # n_target frames and the dataset's frame_index / fps timestamps are
+            # true. A call without images (a tick with no decided slot) adds
+            # nothing. streaming_encoding=True (v2.5.0) bounds the in-RAM
+            # buffer, so takes of any length are fine.
+            if images is None:
+                return self.RECORDING
+            fps = self._record_fps()
+            n_target = max(1, int(round(float(self._task_info.episode_time_s) * fps)))
+            frame = self.create_frame(images, state, action)
+            if self._task_info.use_optimized_save_mode:
+                self._lerobot_dataset.add_frame_without_write_image(
+                    frame,
+                    self.current_instruction)
+            else:
+                self._lerobot_dataset.add_frame(
+                    frame,
+                    self.current_instruction)
+            size = self._buffer_size()
+            self._proceed_time = size / fps
+            if size >= n_target:
+                self._status = 'save'
+                self._start_time_s = 0
+                self._proceed_time = 0
 
         elif self._status == 'save':
             if self._on_saving:
@@ -372,12 +420,19 @@ class DataManager:
                         and self._lerobot_dataset.check_append_buffer_completed()
                     )
                 ):
-                    self._verify_saved_video_files()
+                    # I2j: count only a save that committed frames. An empty
+                    # latched save (an old client's multi-task MOVE_TO_NEXT in
+                    # the first warm-up) is not an episode: no verify, no count,
+                    # no scenario/task advance.
+                    committed = getattr(self, '_save_count_pending', True)
+                    if committed:
+                        self._verify_saved_video_files()
                     self._episode_reset()
-                    self._record_episode_count += 1
-                    self._write_session_marker()
-                    self._get_current_scenario_number()
-                    self._current_task += 1
+                    if committed:
+                        self._record_episode_count += 1
+                        self._write_session_marker()
+                        self._get_current_scenario_number()
+                        self._current_task += 1
                     self._on_saving = False
 
                     # Check if we've reached the target episode count
@@ -393,7 +448,9 @@ class DataManager:
                 # save() returns False when it discarded the episode for
                 # re-recording (streaming frame drop) — it has already set
                 # _status='reset', so do NOT latch _on_saving.
+                committing = self._buffer_has_frames()
                 if self.save():
+                    self._save_count_pending = committing
                     self._on_saving = True
 
         elif self._status == 'reset':
@@ -537,15 +594,6 @@ class DataManager:
         # turned a FINISH/MOVE_TO_NEXT in the first warm-up into an error stop.
         if not self._buffer_has_frames():
             return True
-        # Validate the buffer BEFORE save() consumes it. Logs to stderr only —
-        # validation never blocks the actual save.
-        try:
-            self._validate_episode_buffer()
-        except Exception as e:
-            print(
-                f'[WARNUNG] Episode-Prüfung fehlgeschlagen (nicht kritisch): {e}',
-                file=sys.stderr, flush=True,
-            )
         # Streaming frame-drop guard: with streaming_encoding=True the encoder
         # silently drops camera frames under CPU overload while add_frame still
         # appended a parquet row each tick — so the encoded video would be
@@ -597,10 +645,9 @@ class DataManager:
         )
         self._last_warning_message = warning
         print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
-        try:
-            self._lerobot_dataset.cancel_streaming_episode()
-        except Exception:  # noqa: BLE001 — discard must never block recording
-            pass
+        # Official discard only (round 5, O6): _episode_reset leaves
+        # _discard_pending and the next record step (the reset tick, no frame)
+        # cancels the take through the wrapper's discard_episode().
         self._stop_save_completed = False
         self._on_saving = False
         self._episode_reset()
@@ -698,54 +745,6 @@ class DataManager:
             self._last_warning_message = warning
             print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
 
-    def _validate_episode_buffer(self):
-        """Inspect the in-memory episode buffer for silent data loss.
-
-        Checks frame timestamp gaps larger than 2x the expected frame interval —
-        usually a camera publisher hiccup or callback starvation.
-
-        Findings are logged in German for the student-facing operator UI;
-        they never block the save.
-        """
-        buf = self._lerobot_dataset.episode_buffer
-        if buf is None:
-            return
-
-        episode_no = self._record_episode_count + 1
-        fps = getattr(self._task_info, 'fps', None)
-        expected_dt = (1.0 / fps) if fps and fps > 0 else None
-
-        # Timestamp gaps inside the buffer.
-        timestamps = buf.get('timestamp')
-        if (
-            expected_dt is not None
-            and isinstance(timestamps, list)
-            and len(timestamps) >= 2
-        ):
-            threshold = 2.0 * expected_dt
-            gaps = []
-            for i in range(1, len(timestamps)):
-                try:
-                    dt = float(timestamps[i]) - float(timestamps[i - 1])
-                except (TypeError, ValueError):
-                    continue
-                if dt > threshold:
-                    gaps.append((i, dt))
-            if gaps:
-                # Limit the report to the worst few so we don't spam stderr.
-                gaps.sort(key=lambda g: g[1], reverse=True)
-                worst = gaps[:3]
-                summary = ', '.join(
-                    f'Frame {idx}: {dt * 1000:.0f} ms' for idx, dt in worst
-                )
-                print(
-                    f'[WARNUNG] Episode {episode_no}: {len(gaps)} '
-                    f'Zeitlücken erkannt (erwartet ~{expected_dt * 1000:.0f} ms '
-                    f'pro Frame). Größte Lücken: {summary}. '
-                    f'Mögliche Ursache: Kamera oder Sensor hat Frames verloren.',
-                    file=sys.stderr, flush=True,
-                )
-
     def create_frame(
             self,
             images: dict,
@@ -762,15 +761,25 @@ class DataManager:
         ]
         return frame
 
-    def _buffer_has_frames(self) -> bool:
+    def _buffer_size(self) -> int:
         ds = getattr(self, '_lerobot_dataset', None)
         buf = getattr(ds, 'episode_buffer', None) if ds is not None else None
         if buf is None:
-            return False
+            return 0
         try:
-            return int(buf.get('size', 0) or 0) > 0
+            return int(buf.get('size', 0) or 0)
         except (AttributeError, TypeError, ValueError):
-            return False
+            return 0
+
+    def _buffer_has_frames(self) -> bool:
+        return self._buffer_size() > 0
+
+    def _record_fps(self) -> float:
+        try:
+            fps = float(getattr(self._task_info, 'fps', 0) or 0)
+        except (TypeError, ValueError):
+            fps = 0.0
+        return fps if fps > 0 else 30.0
 
     def _run_age_s(self) -> float:
         entered = getattr(self, '_run_entered_at', None)
@@ -778,19 +787,132 @@ class DataManager:
             return float('inf')
         return time.perf_counter() - entered
 
+    def _stamp_run_entry(self) -> None:
+        """A run starts NOW: _run_entered_at (perf_counter, the Q3/Q4 and
+        'too_early' clock) and run_entered_mono (monotonic, the slot sampler's
+        take boundary) are always stamped together."""
+        self._run_entered_at = time.perf_counter()
+        self.run_entered_mono = time.monotonic()
+
     def _enter_run(self) -> None:
         self._status = 'run'
         self._start_time_s = 0
         self._proceed_time = 0
-        self._run_entered_at = time.perf_counter()
+        self._stamp_run_entry()
 
     def _drop_in_progress_episode(self) -> None:
-        try:
-            self._lerobot_dataset.cancel_streaming_episode()
-        except Exception:  # noqa: BLE001 — discard must never block the finish
-            pass
+        # Official discard only (round 5, O6): _episode_reset leaves
+        # _discard_pending; the next record step's cancel_pending_discard runs
+        # the wrapper's discard_episode() (before the finish branch finalizes).
         self._episode_reset()
 
+    # ── The recorder lock (round 5, O1) ───────────────────────────────────────
+
+    def _recorder_lock(self):
+        lock = getattr(self, 'lock', None)
+        if lock is None:
+            # A DataManager built via __new__ (the deps-free contract tests).
+            lock = threading.RLock()
+            self.lock = lock
+        return lock
+
+    @contextmanager
+    def locked(self):
+        """Hold the recorder lock; on release, apply a collision discard that
+        arrived meanwhile (the trip never waits for the lock)."""
+        lock = self._recorder_lock()
+        lock.acquire()
+        try:
+            yield self
+        finally:
+            self._release_and_drain(lock)
+
+    @contextmanager
+    def try_locked(self, timeout):
+        """The command path's bounded acquire (O6): yields True while the lock
+        is held, or False — having changed nothing — when it could not be taken
+        within ``timeout`` (a record step in flight, e.g. the official ~1 s
+        discard cancel); /task/command then answers „beschäftigt“ instead of
+        blocking the default callback group. Drains at release like locked()."""
+        lock = self._recorder_lock()
+        if not lock.acquire(timeout=max(0.0, float(timeout))):
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            self._release_and_drain(lock)
+
+    def _release_and_drain(self, lock):
+        # Drain, release, and re-check: a request set between the holder's last
+        # drain and its release (the trip's non-blocking acquire failed) is
+        # applied by whoever re-acquires here, never lost.
+        while True:
+            try:
+                self._drain_collision_request_locked()
+            finally:
+                lock.release()
+            if not getattr(self, '_collision_discard_requested', False):
+                break
+            if not lock.acquire(blocking=False):
+                break
+
+    def request_collision_discard(self) -> bool:
+        """The collision trip's discard; NEVER blocks the caller.
+
+        Applied now (True) when the recorder lock is free, else (False) by the
+        holder when it releases — at the end of the record step in flight. Same
+        semantics as re_record() (F7b, Q7 unchanged)."""
+        self._collision_discard_requested = True
+        lock = self._recorder_lock()
+        if lock.acquire(blocking=False):
+            self._release_and_drain(lock)
+            return True
+        return False
+
+    def _drain_collision_request_locked(self) -> None:
+        if getattr(self, '_collision_discard_requested', False):
+            self._collision_discard_requested = False
+            self.re_record()
+
+    def saved_episode_count(self) -> int:
+        return int(getattr(self, '_record_episode_count', 0))
+
+    @_recorder_locked
+    def end_after_error(self) -> bool:
+        """D5 (owner): an error stop ends the session WITHOUT losing what was
+        saved. With a dataset: count an episode a latched save already
+        committed (the Q7/STOP rule), drop the running take through the
+        official discard, finalize, clear the crash marker — and upload
+        NOTHING (the student uploads from the Daten tab). Afterwards the
+        DataManager is inert. Returns True when the dataset was finalized;
+        False without a dataset (nothing changes, as before) or when finalize
+        failed (its German reason is on _upload_blocked_reason_de)."""
+        if getattr(self, '_lerobot_dataset', None) is None:
+            return False
+        status = self._status
+        if getattr(self, '_on_saving', False) and (
+                (status == 'save' and getattr(self, '_save_count_pending', True))
+                or (status == 'finish' and getattr(self, '_finish_count_pending', False))
+                or (status == 'stop' and not getattr(self, '_stop_save_completed', False)
+                    and getattr(self, '_stop_count_pending', False))):
+            self._verify_saved_video_files()
+            self._record_episode_count += 1
+            self._write_session_marker()
+        self._finish_count_pending = False
+        self._stop_count_pending = False
+        self._finish_drops_run = False
+        self._on_saving = False
+        self._episode_reset()
+        self.cancel_pending_discard()
+        self._status = 'stop'
+        self._stop_save_completed = True
+        self._upload_enqueued = True          # never upload after an error stop
+        finalized = self._finalize_dataset()
+        self._clear_session_marker()
+        return finalized
+
+    @_recorder_locked
     def record_early_save(self) -> str:
         """MOVE_TO_NEXT (single task) and the joystick right tact.
 
@@ -810,6 +932,7 @@ class DataManager:
             return 'save'
         return ''
 
+    @_recorder_locked
     def rerecord_from_command(self) -> bool:
         """RERECORD from the wire („Wiederholen“, „Verwerfen und beenden“).
 
@@ -833,6 +956,7 @@ class DataManager:
         return (time.perf_counter() - rerec <= RERECORD_FINISH_WINDOW_S
                 and entered >= rerec)
 
+    @_recorder_locked
     def finish_for_low_disk(self, message_de: str) -> bool:
         """End the session because the disk is nearly full (once per session).
 
@@ -848,6 +972,7 @@ class DataManager:
         self.record_finish()
         return True
 
+    @_recorder_locked
     def end_session_now(self) -> bool:
         """F1: finish the session synchronously (forced collision recovery).
 
@@ -863,6 +988,7 @@ class DataManager:
                 return True
         return False
 
+    @_recorder_locked
     def record_stop(self):
         status = self._status
         if status in ('save', 'finish') and getattr(self, '_on_saving', False):
@@ -872,17 +998,20 @@ class DataManager:
             # HEAD counted and uploaded it; without this it stayed on disk,
             # uncounted and never uploaded.
             self._stop_count_pending = (
-                status == 'save' or getattr(self, '_finish_count_pending', False))
+                (status == 'save' and getattr(self, '_save_count_pending', True))
+                or getattr(self, '_finish_count_pending', False))
             self._finish_count_pending = False
         self._status = 'stop'
 
+    @_recorder_locked
     def record_finish(self):
         status = self._status
         if status in ('finish', 'stop'):
             return
         if status == 'save' and getattr(self, '_on_saving', False):
-            # Committed by 'save', not yet counted: the finish branch counts it.
-            self._finish_count_pending = True
+            # Committed by 'save', not yet counted: the finish branch counts it
+            # (I2j: only when that save really committed frames).
+            self._finish_count_pending = getattr(self, '_save_count_pending', True)
         in_flight = status == 'run' or (
             status == 'save' and not getattr(self, '_on_saving', False))
         self._finish_drops_run = in_flight and (
@@ -890,6 +1019,7 @@ class DataManager:
             or self._run_started_after_wire_rerecord())
         self._status = 'finish'
 
+    @_recorder_locked
     def re_record(self):
         # F7b (owner-approved collision-path change): a session that is already
         # finishing/stopping is never reopened — a collision during the finish
@@ -906,7 +1036,8 @@ class DataManager:
         # rewind to 'reset' records no frame, but it publishes a phantom
         # RESETTING („Episode N+1 von N“) for the whole Zurücksetzen time and a
         # RECORDING tick before the session completes.
-        if self._status == 'save' and getattr(self, '_on_saving', False):
+        if (self._status == 'save' and getattr(self, '_on_saving', False)
+                and getattr(self, '_save_count_pending', True)):
             self._verify_saved_video_files()
             self._record_episode_count += 1
             self._write_session_marker()
@@ -928,6 +1059,7 @@ class DataManager:
         self._episode_reset()
         self._status = 'reset'
 
+    @_recorder_locked
     def record_skip_task(self):
         self._stop_save_completed = False
         self._episode_reset()
@@ -935,9 +1067,11 @@ class DataManager:
         self._get_current_scenario_number()
         self._current_task += 1
 
+    @_recorder_locked
     def record_next_episode(self):
         self._status = 'save'
 
+    @_recorder_locked
     def get_current_record_status(self):
         current_status = TaskStatus()
         current_status.robot_type = self._robot_type
@@ -1142,6 +1276,7 @@ class DataManager:
         else:
             raise ValueError(f'Unsupported message type: {type(msg_data)}')
 
+    @_recorder_locked
     def cancel_pending_discard(self) -> bool:
         """Cancel a discarded take's streaming encoder now, if one is pending.
 
@@ -1157,9 +1292,10 @@ class DataManager:
         self._cancel_discarded_take()
         # „Jetzt starten“ may have entered 'run' between the discard and now:
         # the take really starts after the cancel, so its clock starts here —
-        # else Q3 (< 1 s is dropped) and 'too_early' see a run ~1 s too old.
+        # else Q3 (< 1 s is dropped) and 'too_early' see a run ~1 s too old,
+        # and the slot sampler's take boundary would include the cancel.
         if self._status == 'run':
-            self._run_entered_at = time.perf_counter()
+            self._stamp_run_entry()
         return True
 
     def _cancel_discarded_take(self) -> None:
@@ -1237,7 +1373,10 @@ class DataManager:
         # warning is cleared in get_current_record_status() after it has
         # been copied onto TaskStatus.error, which guarantees the student
         # sees it at least once.
-        gc.collect()
+        # Round 5: no explicit full garbage collection here any more (it ran on
+        # every save, reset and discard): collecting the node's heap took
+        # 73-105 ms holding the GIL, pausing every thread incl. the collision
+        # callbacks. Refcounting frees the buffer; main() freezes the import heap.
 
     def _check_time(self, limit_time, next_status):
         self._proceed_time = time.perf_counter() - self._start_time_s
@@ -1246,7 +1385,7 @@ class DataManager:
             self._start_time_s = 0
             self._proceed_time = 0
             if next_status == 'run':
-                self._run_entered_at = time.perf_counter()
+                self._stamp_run_entry()
             return True
         else:
             return False
@@ -1269,7 +1408,7 @@ class DataManager:
         if self._task_info.push_to_hub:
             # Huggingface dataset check
             url = f'https://huggingface.co/api/datasets/{repo_id}'
-            response = requests.get(url)
+            response = requests.get(url, timeout=(5, 10))
             url_exist_code = 200
 
             if response.status_code == url_exist_code:
@@ -1280,26 +1419,40 @@ class DataManager:
         return False
 
     def check_lerobot_dataset(self, images, joint_list):
+        """Open or create the session's dataset on the first tick.
+
+        Round 5: the slow I/O (the hub existence check, a download, the
+        dataset creation) runs WITHOUT the recorder lock, and the dataset is
+        installed under it — a command or a collision discard that arrives
+        meanwhile is applied by the next record(). Only the record tick calls
+        this, one at a time (its own callback group).
+        """
         try:
-            if self._lerobot_dataset is None:
+            dataset = self._lerobot_dataset
+            if dataset is None:
                 if self._check_dataset_exists(
                         self._save_repo_name,
                         self._save_path):
-                    self._lerobot_dataset = LeRobotDatasetWrapper(
+                    dataset = LeRobotDatasetWrapper(
                         self._save_repo_name,
                         self._save_path
                     )
                 else:
-                    self._lerobot_dataset = self._create_dataset(
+                    dataset = self._create_dataset(
                         self._save_repo_name,
                         images, joint_list)
 
                 if not self._task_info.use_optimized_save_mode:
-                    self._lerobot_dataset.start_image_writer(
+                    dataset.start_image_writer(
                             num_processes=1,
                             num_threads=1
                         )
-            self._lerobot_dataset.set_robot_type(self._robot_type)
+                dataset.set_robot_type(self._robot_type)
+                with self.locked():
+                    if self._lerobot_dataset is None:
+                        self._lerobot_dataset = dataset
+                return True
+            dataset.set_robot_type(self._robot_type)
             return True
         except Exception as e:
             print(f'Error checking lerobot dataset: {e}')

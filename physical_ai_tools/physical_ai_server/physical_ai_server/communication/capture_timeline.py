@@ -475,22 +475,28 @@ class SlotSampler:
         return out
 
 
+_TEXTS = None
+
+
 def _load_texts():
     """``record_texts_de`` (the one module of German record sentences).
 
     Imported by package name in the image; by file path when this module was
     loaded on its own (the deps-free test loaders give the package no
-    ``__path__``)."""
-    try:
-        from physical_ai_server.data_processing import record_texts_de
-        return record_texts_de
-    except ImportError:
-        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            'data_processing', 'record_texts_de.py')
-        spec = importlib.util.spec_from_file_location('_edubotics_record_texts_de', path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
+    ``__path__``). Loaded once."""
+    global _TEXTS
+    if _TEXTS is None:
+        try:
+            from physical_ai_server.data_processing import record_texts_de
+            _TEXTS = record_texts_de
+        except ImportError:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                'data_processing', 'record_texts_de.py')
+            spec = importlib.util.spec_from_file_location('_edubotics_record_texts_de', path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _TEXTS = module
+    return _TEXTS
 
 
 class TakeIntegrity:
@@ -553,7 +559,7 @@ class TakeIntegrity:
             self.start = float(d['g']) - self.T
         self.frames += 1
         self.lost += sum(1 for g in d.get('lost_before') or () if g >= self.start)
-        if late if late is not None else d.get('late'):
+        if (late if late is not None else d.get('late')):
             self.late += 1
         if d.get('timed_out'):
             self.timed_out += 1

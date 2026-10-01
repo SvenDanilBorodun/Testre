@@ -140,16 +140,24 @@ def classify_hf_error(exc: BaseException) -> Optional[str]:
     return None
 
 
+_TEXTS = None
+
+
 def _load_texts():
-    try:
-        from physical_ai_server.data_processing import record_texts_de
-        return record_texts_de
-    except ImportError:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'record_texts_de.py')
-        spec = importlib.util.spec_from_file_location('_edubotics_record_texts_de', path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
+    """``record_texts_de``: by package name in the image, by path when this
+    module was loaded on its own (deps-free loaders). Loaded once."""
+    global _TEXTS
+    if _TEXTS is None:
+        try:
+            from physical_ai_server.data_processing import record_texts_de
+            _TEXTS = record_texts_de
+        except ImportError:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'record_texts_de.py')
+            spec = importlib.util.spec_from_file_location('_edubotics_record_texts_de', path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _TEXTS = module
+    return _TEXTS
 
 
 def hf_error_sentence_de(exc: BaseException) -> Optional[str]:

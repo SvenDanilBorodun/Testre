@@ -35,14 +35,80 @@
 #      stalled silently. Now: detect the (dead worker + still
 #      processing) state, emit ONE Failed event with a German message,
 #      reset internal state so subsequent ticks report Idle.
+#
+#   3. Aufnahme 2.0 round 5 (F7, spec-r5-final §7.4): an upload that stopped
+#      moving. huggingface_hub's upload_large_folder retries a failing LFS
+#      pre-upload or commit FOREVER, and its report line does not move while
+#      one large file is on the wire, so a dead network left the page at
+#      „Hochladen … 30 %" for good. The child forwards the library's public
+#      ERROR lines (progress_tracker.install_upload_error_forwarder); the
+#      parent drains EVERY queue item and ends an upload with no progress for
+#      UPLOAD_STALL_S while it logs errors, or with no progress at all for
+#      UPLOAD_HARD_STALL_S: the child is terminated, ONE Failed carries
+#      UPLOAD_STALL_DE. The local dataset is untouched (the worker only reads
+#      it), and the node starts a new worker on the next request. Byte or
+#      socket counters cannot replace this: /proc/<pid>/io does not count
+#      send() (4 MB sent, 96 bytes counted), the container's NIC counters
+#      carry video and DDS, and hf_xet uploads outside httpx.
 
+import importlib.util
 import logging
 import multiprocessing
 import os
 import queue
 import time
+from typing import List, Optional
 
 from physical_ai_server.data_processing.data_manager import DataManager
+
+try:
+    from physical_ai_server.data_processing.record_texts_de import UPLOAD_STALL_DE
+except ImportError:  # loaded by path (deps-free tests): read the sibling directly
+    _texts_spec = importlib.util.spec_from_file_location(
+        '_edubotics_record_texts_de',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'record_texts_de.py'))
+    _texts = importlib.util.module_from_spec(_texts_spec)
+    _texts_spec.loader.exec_module(_texts)
+    UPLOAD_STALL_DE = _texts.UPLOAD_STALL_DE
+
+# F7: no upload progress for this long while the library logs upload errors.
+UPLOAD_STALL_S = 120.0
+# F7: no upload progress for this long at all.
+UPLOAD_HARD_STALL_S = 1800.0
+UPLOAD_ERROR_ITEM_TYPE = 'upload_error'
+
+
+class UploadStallWatch:
+    """Is an upload still moving? Pure; the caller passes the monotonic clock.
+
+    Progress = the (current, total, percentage) triple changed. Stalled = no
+    progress for ``UPLOAD_STALL_S`` with at least one upload error in the last
+    ``UPLOAD_STALL_S``, or no progress for ``UPLOAD_HARD_STALL_S``."""
+
+    def __init__(self, now: float):
+        self.reset(now)
+
+    def reset(self, now: float) -> None:
+        self.last_progress_mono = float(now)
+        self._last_key = None
+        self.error_times: List[float] = []
+
+    def note_progress(self, item: dict, now: float) -> None:
+        key = (item.get('current'), item.get('total'), item.get('percentage'))
+        if key != self._last_key:
+            self._last_key = key
+            self.last_progress_mono = float(now)
+
+    def note_error(self, now: float) -> None:
+        self.error_times.append(float(now))
+
+    def stalled(self, now: float) -> bool:
+        now = float(now)
+        self.error_times = [t for t in self.error_times if t >= now - UPLOAD_STALL_S]
+        idle = now - self.last_progress_mono
+        if idle >= UPLOAD_HARD_STALL_S:
+            return True
+        return idle >= UPLOAD_STALL_S and bool(self.error_times)
 
 
 # Use the 'spawn' start method explicitly. Linux's default 'fork' causes
@@ -82,6 +148,8 @@ class HfApiWorker:
             'repo_type': ''
         }
         self.last_logged_current_progress = -1  # Track last logged current value
+        # F7: the upload stall watchdog (round 5)
+        self.stall_watch = UploadStallWatch(time.monotonic())
 
         # Basic config for the main process logger
         logging.basicConfig(
@@ -156,6 +224,7 @@ class HfApiWorker:
             self.is_processing = True
             self.current_task = request_data
             self.start_time = time.time()
+            self.stall_watch.reset(time.monotonic())
             return True
         else:
             self.logger.error('Cannot send request, HF API worker process is not running.')
@@ -266,6 +335,10 @@ class HfApiWorker:
                     result['message'] = message
                     return result
 
+            # F7: an upload that stopped moving ends here, once.
+            if mode == 'upload' and self.stall_watch.stalled(time.monotonic()):
+                return self._fail_stalled_upload(result)
+
             # Still processing - return appropriate status message
             if mode:
                 if mode == 'upload':
@@ -307,20 +380,64 @@ class HfApiWorker:
         return self.is_processing
 
     def get_progress_from_progress_queue(self):
-        """Get the latest progress information from worker process and clear queue."""
+        """Drain EVERY item of the progress queue (F7): progress items feed the
+        stall watch and the latest one is returned; an upload-error item (from
+        the child's forwarder) is time-stamped, never mistaken for progress."""
         latest_progress = None
+        now = time.monotonic()
         try:
-            # Drain the queue and keep only the latest progress data
             while True:
                 try:
-                    latest_progress = self.progress_queue.get(block=False, timeout=0.01)
+                    item = self.progress_queue.get(block=False, timeout=0.01)
                 except queue.Empty:
                     break
+                if not isinstance(item, dict):
+                    continue
+                if item.get('type') == UPLOAD_ERROR_ITEM_TYPE:
+                    self.stall_watch.note_error(now)
+                    continue
+                latest_progress = item
+                self.stall_watch.note_progress(item, now)
         except Exception as e:
             self.logger.error(f'Error updating progress from worker: {e}')
 
         # Return the latest progress or current progress if no new data
         return latest_progress if latest_progress else self.current_progress
+
+    def _fail_stalled_upload(self, result: dict) -> dict:
+        """Terminate the child and report ONE Failed with the German sentence."""
+        idle = time.monotonic() - self.stall_watch.last_progress_mono
+        self.logger.error(
+            f'HF upload made no progress for {idle:.0f} s '
+            f'({len(self.stall_watch.error_times)} upload error(s) in the last '
+            f'{UPLOAD_STALL_S:.0f} s): terminating the worker.')
+        self._terminate_worker()
+        result['operation'] = 'upload'
+        result['status'] = 'Failed'
+        result['message'] = UPLOAD_STALL_DE
+        return result
+
+    def _terminate_worker(self) -> None:
+        """Kill the child at once (it is stuck inside upload_large_folder and
+        reads no shutdown signal) and reset the task state. The queues a killed
+        process may have been writing to are replaced."""
+        process: Optional[multiprocessing.Process] = self.process
+        try:
+            if process is not None and process.is_alive():
+                process.kill()
+                process.join(1.0)
+        except Exception as e:
+            self.logger.error(f'Error terminating HF API worker process: {e}')
+        finally:
+            self.process = None
+            self.is_processing = False
+            self.current_task = None
+            self.start_time = None
+            for name in ('input_queue', 'output_queue', 'progress_queue'):
+                try:
+                    setattr(self, name, _MP_CTX.Queue())
+                except Exception as e:  # noqa: BLE001
+                    self.logger.error(f'Could not renew {name}: {e}')
 
     @staticmethod
     def _worker_process_loop(input_queue, output_queue, progress_queue):
@@ -336,6 +453,16 @@ class HfApiWorker:
 
             # Set progress queue for DataManager
             DataManager.set_progress_queue(progress_queue)
+
+            # F7: forward upload_large_folder's ERROR lines to the parent's
+            # stall watchdog. Never fatal: without it only the hard cap applies.
+            try:
+                from physical_ai_server.data_processing.progress_tracker import (
+                    install_upload_error_forwarder,
+                )
+                install_upload_error_forwarder(progress_queue)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f'Upload error forwarder not installed: {e}')
 
             request_count = 0
             last_log_time = time.time()

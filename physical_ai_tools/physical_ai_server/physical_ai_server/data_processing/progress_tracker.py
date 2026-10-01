@@ -17,11 +17,63 @@
 # Author: Kiwoong Park
 
 import io
+import logging
 import re
 import sys
+import threading
 import time
 
 from tqdm import tqdm
+
+# F7 (Aufnahme 2.0 round 5, spec-r5-final §7.4): huggingface_hub's
+# upload_large_folder logs every failed step of an upload on this logger at
+# ERROR („Failed to preupload LFS", „Failed to commit", „Failed to get upload
+# mode", „Failed to compute sha256") and then retries it FOREVER. The child
+# forwards each such record to the parent, whose stall watchdog
+# (hf_api_worker.UploadStallWatch) ends an upload that keeps failing without
+# moving.
+UPLOAD_ERROR_LOGGER = 'huggingface_hub._upload_large_folder'
+UPLOAD_ERROR_ITEM_TYPE = 'upload_error'
+_FORWARDER_LOCK = threading.Lock()
+
+
+class UploadErrorForwarder(logging.Handler):
+    """Puts ``{'type': 'upload_error'}`` on the progress queue for every ERROR
+    record of ``huggingface_hub._upload_large_folder``; nothing else."""
+
+    # recognised across module reloads
+    edubotics_upload_error_forwarder = True
+
+    def __init__(self, progress_queue):
+        super().__init__(level=logging.ERROR)
+        self.progress_queue = progress_queue
+
+    def emit(self, record):
+        if record.name != UPLOAD_ERROR_LOGGER or record.levelno < logging.ERROR:
+            return
+        try:
+            self.progress_queue.put({'type': UPLOAD_ERROR_ITEM_TYPE}, block=False)
+        except Exception:  # noqa: BLE001 - a full queue must never break the upload
+            pass
+
+
+def install_upload_error_forwarder(progress_queue, logger_name='huggingface_hub'):
+    """Attach the forwarder to huggingface_hub's root logger once (a second
+    call re-points it at ``progress_queue``) and make sure the upload logger
+    still creates ERROR records under a stricter ``HF_HUB_VERBOSITY``."""
+    logger = logging.getLogger(logger_name)
+    with _FORWARDER_LOCK:
+        forwarder = next((h for h in logger.handlers
+                          if getattr(h, 'edubotics_upload_error_forwarder', False)), None)
+        if forwarder is None:
+            forwarder = UploadErrorForwarder(progress_queue)
+            logger.addHandler(forwarder)
+        else:
+            forwarder.progress_queue = progress_queue
+        upload_logger = logging.getLogger(UPLOAD_ERROR_LOGGER)
+        if upload_logger.getEffectiveLevel() > logging.ERROR:
+            upload_logger.setLevel(logging.ERROR)
+        return forwarder
 
 
 class HuggingFaceProgressTqdm(tqdm):

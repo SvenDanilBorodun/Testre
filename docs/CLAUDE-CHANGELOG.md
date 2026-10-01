@@ -6,6 +6,153 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-01 — Aufnahme 2.0 round 5: every frame decided from timestamps, and the recorder off the GIL's critical path
+
+The Docker end-to-end run after round 4 (119 PASS / 10 FAIL / 2 SKIP) showed what the earlier
+rounds had not reached: the datasets themselves were unclean. A 10 s take at 30 fps kept 350–451
+of its 600 frames, 15–24 % of the kept frames repeated the previous image, 40–97 % skipped one,
+and the take's real length drifted 2.8–4.3 s from what its `frame_index / fps` timestamps claim.
+The owner asked for the most reliable fix (R5-1) and a dedicated capture architect designed it
+(`docs/plans/2026-09-29-cyclo-parity/spec-r5-capture.md`, folded into `spec-r5-final.md`). The
+invariants are in `CLAUDE.md` („Recording FSM", „Callback-group rule", Rule §2's recording-side
+guards, the teleop collision e-stop, `/edubotics/signal_status`, „HF uploads", the Aufnahme page);
+the open rig gates G1–G5 and A-R6/A-R7 are in `docs/KNOWN-ISSUES.md`.
+
+**Two causes, compounding.** (1) The recorder sampled whatever was cached when its tick ran: a
+tick landing just before a camera frame took the old one (a repeat) and the next took the one
+after (a skip), the pair picker walked back up to 7 frames to find a „synced" pair, and a late
+tick lost its slot entirely, so the timeline compressed. (2) The node's
+`MultiThreadedExecutor` saturated the GIL: 2.23 ms of CPU per delivered message (cameras at
+30 Hz, both arms at 100 Hz), the main thread 87–97 % idle waiting for it, so every record step and
+the encoder thread waited too. Either half alone was measured insufficient: the executor alone
+kept 15–43 % repeats; the sampler alone 2–7 % skips and up to 1.3 s timeline error.
+
+**The sensor node.** Every camera, follower and leader subscription and the collision monitor's
+three now live on a second node, `physical_ai_server_sensors`, spun by a `SingleThreadedExecutor`
+on its own thread (0.18 ms per message). `use_global_arguments=False` is load-bearing: the launch's
+`-r __node:=physical_ai_server` would otherwise rename it too (two nodes with one name, measured).
+The thread is supervised (F3): every callback body is guarded, and three executor failures within
+10 s end the process with `os._exit` so s6 respawns it (measured with an injected fault: three
+failure lines, the FATAL line, pid 111 → 267, the next take clean); before, one exception killed
+the thread silently while the main node kept answering — recording stalled and the collision
+detector was deaf. `/edubotics/signal_status` gained one trailing key, `ingest`.
+
+**The slot sampler.** Every source callback appends `(seq, arrival, t, msg)` to a ring, where
+`t` is the header stamp mapped onto the server's monotonic clock (running minimum of
+arrival − stamp over 2 s), so a late callback keeps its true time. Slot k is the instant
+`t0 + k/fps`; the sampler decides it once, from history, when it is PROVABLY complete (a newer
+sample of every source has arrived; streams arrive in order) or 0.1 s after its earliest
+decision time. Per camera it tracks the frame phase relative to the grid with a second-order
+predictor (the measured rate predicts the per-slot drift; without it a camera 1–1.5 % off the fps
+produced up to 11 % excess repeat+skip, with it ≤ 0.07 %) and hysteresis (one honest repeat or
+skip per drift cycle). `LOCK_TOL` 0.06 (not the capture spec's 0.02) locks a 26 Hz camera at
+25 fps (excess 7.75 % → 0.23 %). The unstamped leader is back-dated inside a delivery burst
+(action-age p99 70 → 15 ms under process stalls). A take now ends by frame count, not by wall
+clock. Rejected, with evidence (spec-r5-capture §5): a fixed-deadline fresh wait + pair pick
+(aliases up to 9.6 % at the bad phase, and a late tick still loses its slot), the literal closest
+pair, a FIFO jitter buffer, master-camera clocking, arrival-only times (2.2 % vs 0.1 %), deeper
+queues on the old executor, interpolation, LeRobot's own loop (3–12 % repeats, 5–20 % skips,
+0.7–1.2 s error per 10 s), LeRobot 0.6.x (samples the same way).
+
+**Measured on the full build, same host session** (real server, real LeRobot writer, a
+time-coded mock, 2 × 10 s takes per cell; HEAD in brackets): independent 30/29.97 Hz cameras 600/600
+frames, 0 % repeats, 0 % skips, 24 ms max timeline error (HEAD 367/600, 15.0 %, 78.5 %, 4321 ms);
+5 ms jitter + 1 % spikes 600/600, 0.33/0.33 %, 26 ms (350/600, 24.1, 96.7, 4346 ms); 29.55 Hz at
+30 fps 600/600, 1.42 % repeats (honest 1.5), 0 skips (451/600, 10.3, 41.8, 2815 ms); 25 Hz at 30 fps
+600/600, 16.67 % repeats = honest, 0.08 % skips (363/600); 26 Hz at 25 fps 500/500, 4.30 % skips
+(honest 3.85); a host with 2 CPUs and two busy loops 600/600, 0.08 %, 0 %, 41 ms (433/600, 23.1,
+61.9, 2983 ms). Image-vs-state skew SD 5–14 ms, max action age 11–22 ms. The event model of the
+final module (6 seeds × 60 s): indep 0.09/0.00 %, drift 0.20/0.19, stalls 0.08/0.00, compression
+≤ 0.02 %, timeline error ≤ 67 ms.
+
+**The recorder lock, and commands that never wait (O1, O6, F5, F9).** The record timer runs in its
+own callback group, so one `DataManager` lock (`locked()` / `try_locked()`) serialises the record
+tick, the commands and the collision path. A collision trip never waits for it (it only requests
+the discard), and a record step that would run after a trip or into another session returns
+without touching the DataManager (the session generation is re-checked after taking the lock: the
+reviewer's c1a probe without that re-check let a straggler step skip a „Zurücksetzen" after a
+resume). Every record command takes the lock for at most 0.25 s and otherwise answers „Die Aufnahme
+ist gerade beschäftigt. Bitte versuch es gleich noch einmal." with nothing changed (measured: during
+the ~1 s official cancel after „Wiederholen", three MOVE_TO_NEXT answered „beschäftigt" in
+252–261 ms, all others in 2–9 ms). The page never answers a busy refusal with silence, and in
+„Verwerfen und beenden" a busy RERECORD no longer falls through to FINISH — which would have KEPT
+the take the student discarded. START sets its clock before the timer starts (with the recorder in
+its own group the first tick could otherwise time out at once).
+
+**The discard stays LeRobot's official one (O6).** Every discard goes through the public
+`clear_episode_buffer()`; a private wake of the encoder threads was built and measured (~15 ms) and
+rejected by the owner („no private LeRobot internals anywhere"). Its cost is the encoder threads'
+1 s queue timeout: the take after a redo starts ~1.0 s later (`recordingAgainAfterMs 1014`, first
+frames step 1, no hole).
+
+**Collision detection moved to the sensor thread (C1-A, Rule §2, approved).** The pose and gpio
+callbacks run on the sensor executor; a trip is latched (`_collision_trip_pending`, with a session
+generation bump, under the publish lock) and handed to the main executor through a guard
+condition, where `_on_trip_gc` performs the unchanged stop. The detector is serialised by its own
+lock, and the 5 Hz watchdog does nothing while a trip is pending, so a stray False can never
+follow a pending trip. E-stop latency 146–151 ms (HEAD 151 ms, same session). The detector, its
+gating, thresholds, relax/home/resync and the round-4 resync ordering are unchanged; the
+monitor's own callback group (O4) stays deferred, with its trigger in KNOWN-ISSUES.
+
+**Session ends that keep what was saved (R5-2, O2, C6, C7, D5).** A required source silent for
+2 s ends the session like „Beenden" with a German sentence naming it (the take in flight dropped,
+saved episodes finalized and uploaded). A take during which a source was silent ≥ 0.25 s on its
+OWN timeline is re-recorded („Signalaussetzer: …"), at most twice per episode, then kept with a
+warning; an unstamped leader's gap counts only when the follower's delivery shows no pause in
+the same interval (a server stall delays both). A frame lost in the encoder re-records the take,
+detected through LeRobot's public warning „Encoder queue full for …" (owner Q2; the count is a
+lower bound, detection exact: hevc 120 = 120, h264 1 vs 5), at most twice, then the session ends.
+Every error stop now finalizes what was saved and clears the crash marker (D5), without uploading.
+
+**Datasets that cannot be overwritten or silently stretched (D7, D4, O5/D6).** With „Hochladen" on,
+the existence check asks the Hub logged in (`whoami()` + `repo_exists()`); any failure refuses the
+start in German, because a fresh local dataset would later be uploaded with an orphan sweep over a
+private Hub dataset the anonymous check had read as „absent" (measured: `requests.get` answers
+401/404 for a private repo; a dead endpoint raises `httpx.ConnectError`). A resumed dataset must
+pass LeRobot's own `sanity_check_dataset_robot_compatibility` (fps, features, robot type), each
+mismatch a German sentence; before, a resume at another fps silently stretched or compressed the
+episodes. The README is LeRobot's dataset card, rebuilt on every upload (repo_id included;
+`license: apache-2.0` only for a public dataset), and our fork of the template is deleted.
+
+**Uploads that cannot hang (F7) and say why they failed (R5-4b).** `upload_large_folder` retries a
+failing LFS pre-upload or commit forever and its report line does not move during one large file,
+so a dead network left the page at „Hochladen … 30 %". The child now forwards the library's
+public ERROR lines; the parent ends an upload with no progress for 120 s while it logs errors, or
+for 30 min at all, kills the child and says „Das Hochladen kommt nicht mehr voran …"; the local
+dataset is untouched. Byte counters were measured useless (`/proc/<pid>/io` does not count
+`send()`: 4 MB sent, 96 bytes counted; the NIC carries video and DDS; `hf_xet` uploads outside
+httpx). Upload failures are classified by cause through the exception chain (auth / network /
+busy / server) instead of guessing from the text.
+
+**The page.** A collision in the save window settles on the first tick that counted it (the last
+episode is counted while still saving: one „Gespeichert", not „Kollision" + „Gespeichert");
+„Behalten und beenden" measures the run to the press; two new rows („Abgebrochen, verworfen",
+„Signalaussetzer, wiederholt"); the Q8 reason survives a fast end; the local rosbridge reconnects
+every ≤ 2 s without an attempt cap, so a stale RECORDING view after a link loss lasts ≤ ~4 s.
+
+**Not changed, on purpose.** Inference keeps its observation rule (C3: the picker's walk-back can
+hand the policy a pair up to 7 frames ≈ 233 ms old — documented); the fps default stays 30 with no
+refusal for a slower camera (F2: its repeats are honest, the amber banner warns); camera exposure
+waits for rig gate G4 (C4); LeRobot stays 0.5.1 (O3).
+
+**What building the module found beyond the prototype.** Three of the capture prototype's choices
+did not survive the pure tests, each fixed in `capture_timeline.py` and pinned there: (1) a camera's
+rate was estimated from whatever had arrived when the slot was decided, and the 64-frame ring
+shortened that window for a slot decided late, so a slot decided after a 300 ms stall could choose
+a different frame than the same slot decided on time — the rate now comes from the sampler's own
+per-camera series bounded by the slot time, and the stall test asserts identical camera and follower
+choices; (2) the leader's period was the median interval of its last 40 samples, and a 300 ms stall
+puts ~30 burst intervals of a few µs into that window, so the median collapsed and nothing was
+back-dated (29 samples off) — burst intervals are now ignored; (3) a phase wrap could move a
+camera's boundary back by a few ms and choose an OLDER frame than the previous slot's, a time
+reversal in the dataset — a chosen frame is now never older than the last. The event-model
+regression (the architect's scenarios, 2 seeds × 20 s, in `test_capture_timeline.py`) reproduces the
+T4 numbers after these changes (indep 0.09/0.11 % repeats, cam25@30 17.02 %, stalls action-age p99
+12 ms). Two spec test bounds were refined rather than met as written: the two-camera spread is
+within one period + 3σ for 95 % of the frames, not always (the hysteresis band allows up to 1.5
+periods while a drifting camera sits in it), and the worst-phase no-alias test uses 8 ms of DELIVERY
+jitter (8 ms of capture-stamp jitter does alias).
+
 ### Unreleased, 2026-09-29/30 — Aufnahme 2.0: the recorder's ends made honest, and a new Aufnahme page
 
 The owner asked for Cyclo parity on the Aufnahme tab (docs/plans/2026-09-29-cyclo-parity): a

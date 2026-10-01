@@ -6,7 +6,7 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 
 | File | Holds | Read it when |
 |---|---|---|
-| `docs/KNOWN-ISSUES.md` | Living status: rig gates R1-R16 / E1-E9, open work, dead code, deliberate non-fixes | The task touches edu6/edu1 bring-up, Orange-Pi parity, or you need to know what is currently broken or unproven |
+| `docs/KNOWN-ISSUES.md` | Living status: rig gates R1-R16 / E1-E11, open work, dead code, deliberate non-fixes | The task touches edu6/edu1 bring-up, Orange-Pi parity, or you need to know what is currently broken or unproven |
 | `docs/CLAUDE-CHANGELOG.md` | Dated narratives: why each rule exists, what it cost, the measurements behind it | You need the history behind a rule before changing it |
 | `docs/plans/` | Gitignored throwaway spec-before-code one-pagers | Starting a multi-layer feature |
 
@@ -292,7 +292,7 @@ modal run -m modal_app::smoke_test    # optional
 
 ### edu1_studio: the 5-DOF Feetech „Edu:1"
 
-6 × STS3215/STS3250 on the same CH343P adapter (USB `1A86:55D3`), follower-only, **Roboter Studio only** (`has_leader` false). Geometry from the `5dof_assembly_urdf2` SolidWorks export, shipped as `public/edu1-urdf/edu1.urdf`. **Rig gates E1-E9 are open; nothing below is hardware-validated**, every number derives from CAD + shipped meshes.
+6 × STS3215/STS3250 on the same CH343P adapter (USB `1A86:55D3`), follower-only, **Roboter Studio only** (`has_leader` false). Geometry from the `5dof_assembly_urdf2` SolidWorks export, shipped as `public/edu1-urdf/edu1.urdf`. **Rig gates E1-E11 are open; nothing below is hardware-validated**, every number derives from CAD + shipped meshes.
 
 - **One Feetech driver serves both arms.** `edu6_arm_node.py` keeps its name and gains an `if IS_EDU1:` block that rebinds `SERVO_IDS` / `JOINT_NAMES` / `HOME_JOINTS_RAD` / `GRIPPER_OPEN_RAD` / `JOINT_LIMITS_RAD` / `_DEFAULT_SIGNS` / `TORQUE_SERVICE` / `GEOMETRY_SPEC` from `_EDU1_*` literals. The edu6 constants stay plain literals under their historic names (the deps-free suite executes module-level assignments in order and `test_edu6_geometry.py` `literal_eval`s `HOME_JOINTS_RAD`). The override must stay ABOVE `JOINT_SIGNS = _parse_signs(...)`; `N_ARM_JOINTS` is derived from `JOINT_NAMES`. The per-rig knobs are the existing `EDUBOTICS_EDU6_*` env vars (one arm per rig). `entrypoint_omx.sh` decides the family once in a `case` (`FEETECH_ARM`).
 - **`edu1` is its own arm family, USB-indistinguishable from `edu6`** (same adapter, VID:PID, by-id strings, servo models on ids 1..6). `_ARM_MARKERS['edu6'] is _ARM_MARKERS['edu1']`, so `serial_path_family_conflict` can never claim a stored Feetech port belongs to the other Feetech family. **The only discriminator is the servo count**: the prober takes `--servos=N` and asserts it exactly (every id up to N answers, id N+1 does not); a bus of another supported length returns that family's cross-probe token. Six answering servos are ambiguous by construction (a healthy Edu:1 vs an edu6 whose gripper dropped off), and the German sentence owns that ambiguity.

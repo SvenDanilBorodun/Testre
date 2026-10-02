@@ -6,11 +6,67 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-02 — Aufnahme 2.0 round 6: „Beenden" is never refused, and an error stop tells the truth about the dataset
+
+Two final verifiers ran the round-5 build (verifier 1: the capture harness, the e-stop and the
+smoke under load; verifier 2: the page through every new state at 1440/1366/1093 px) and found
+what the owner then decided (`plan.md`, „Round-6 owner answers"). The invariants are in
+`CLAUDE.md` (Rule §2's recording-side guards, the collision e-stop, „One recorder lock", „A dataset
+is never overwritten", the Aufnahme page); the open gates in `docs/KNOWN-ISSUES.md`.
+
+**F1 — „Verwerfen und beenden" could keep recording.** „Wiederholen" starts the official ~1 s
+discard, which holds the recorder lock; the FINISH that „Verwerfen und beenden" sends a moment
+later found the lock taken and answered „beschäftigt", and the page — correctly, for a busy
+RERECORD — left the session running. The owner chose to queue the end on the server for every
+client: `DataManager.request_end('finish'|'stop')` never waits, it is applied at once or the moment
+the holder releases the lock (after a pending collision discard; Q3/Q4 judged when applied), and
+`/task/command` answers success, with `FINISH_QUEUED_DE` on a record session when it was queued.
+Measured: 0 of 24 direct and 0 of 12 old-client FINISHes busy, 20 page runs each ending with
+exactly one episode; the smoke test gained `queued_finish_during_discard` with the real writer.
+
+**F2 — the collision path shared the command queue.** With detection on the sensor thread
+(C1-A), the trip still had to be PERFORMED on the default group, behind any queued `/task/command`
+— the O4 trigger was met in verification. Both owner options were taken: the remaining record
+commands wait at most `COMMAND_LOCK_TIMEOUT_S` = 0.05 s (was 0.25 s), and the trip hand-over and
+the 5 Hz watchdog run in their own `_collision_cb_group`; because the watchdog no longer shares a
+group with the resync completion, both now publish the flag under `_collision_flag_lock`, so a
+watchdog True can never land after the resync's False. E-stop with four commands queued:
+148–154 ms.
+
+**F3 — a red cross beside „gesichert".** The D5 error stop finalized and then cleared the crash
+marker whatever the finalize said, and the page drew the error-stop card with step 1 failed while
+the sentence under it said the episodes were safe. Now the marker is cleared only by a successful
+finalize, a failed one ends with `ERROR_STOP_INCOMPLETE_DE`, and the page reads the robot's
+sentence: ✓ and „Auf diesem Rechner gespeichert" when safe, „Datensatz unvollständig" when not,
+nothing claimed when nothing was saved. The verifiers' disk-fill case now ends through the 1 GB
+floor with a successful finalize instead of an error stop.
+
+**F4 — a bad token refused every recording.** D7's logged-in hub check refused the start on any
+failure, so a school whose stored token had expired could not record at all, and a black-holed
+hub held START for as long as the network stack waited. Now the check runs in a thread joined
+after `HUB_CHECK_TIMEOUT_S` (15 s), a missing token or one the hub refuses at `whoami()` starts the
+session WITHOUT upload (nothing can be overwritten) with a German notice the page turns into „Hochladen ist
+für diese Aufnahme aus …" and a local finish naming the reason, a refused repo query names the
+token („… oder schalte unter „Erweitert" das Hochladen aus"), and only an unreachable hub still
+refuses with `HUB_CHECK_REFUSED_DE`.
+
+**Corrections.** C5: a camera at the full rate whose stamps jitter ~6–7 ms with a slow drift
+produced up to 10 repeat/skip PAIRS per 300-frame take (verifier 1), and the per-take warning read
+them as „zu wenige Bilder"; `TakeIntegrity.excess_repeats` now nets the skips first (7 ms stamp
+jitter at 30.02 Hz, 10 seeds: the round-5 rule fired on 3, the round-6 rule on none). One shared
+re-record cap, `MAX_REDOS_PER_EPISODE` (2), for gaps and frame loss together, so a C7 end is
+reachable after any mix. A gap in the take „Beenden" ended is „Signalaussetzer, verworfen", not
+„Bildverlust". The upload-stall card said „später im Tab Daten hochladen" twice. The data
+manager's last inline sentences moved into `record_texts_de.py`. Docs: the D5-vs-stopped-source
+wording, the honest-rate claims qualified by „stamp jitter ≲ 2 ms (G3)", the private LeRobot name
+(`dataset_tools._copy_and_reindex_videos`, not our `_force_recorder_vcodec`), and HEAD's repeat
+range (10–24 %, not 15–24 %).
+
 ### Unreleased, 2026-10-01 — Aufnahme 2.0 round 5: every frame decided from timestamps, and the recorder off the GIL's critical path
 
 The Docker end-to-end run after round 4 (119 PASS / 10 FAIL / 2 SKIP) showed what the earlier
 rounds had not reached: the datasets themselves were unclean. A 10 s take at 30 fps kept 350–451
-of its 600 frames, 15–24 % of the kept frames repeated the previous image, 40–97 % skipped one,
+of its 600 frames, 10–24 % of the kept frames repeated the previous image, 40–97 % skipped one,
 and the take's real length drifted 2.8–4.3 s from what its `frame_index / fps` timestamps claim.
 The owner asked for the most reliable fix (R5-1) and a dedicated capture architect designed it
 (`docs/plans/2026-09-29-cyclo-parity/spec-r5-capture.md`, folded into `spec-r5-final.md`). The

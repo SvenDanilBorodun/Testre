@@ -368,6 +368,16 @@ def test_init_creates_the_sensor_executor_before_the_collision_monitor():
     assert order.index('_ensure_sensor_executor') < order.index('_init_collision_monitor')
 
 
+def test_init_creates_the_collision_group_before_the_collision_monitor():
+    # Round 6 (F2): the trip hand-over and the watchdog run in their own group,
+    # which must exist when _init_collision_monitor creates them.
+    init = next(n for n in _CLASS.body
+                if isinstance(n, ast.FunctionDef) and n.name == '__init__')
+    src = ast.get_source_segment(_SRC, init)
+    assert ('self._collision_cb_group = MutuallyExclusiveCallbackGroup()' in src)
+    assert src.index('self._collision_cb_group =') < src.index('self._init_collision_monitor()')
+
+
 # ── the Communicator's subscriptions live on the sensor node ────────────────
 
 def _stub(name, **attrs):

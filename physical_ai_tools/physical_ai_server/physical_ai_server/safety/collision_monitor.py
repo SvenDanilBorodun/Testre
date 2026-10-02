@@ -275,6 +275,12 @@ class CollisionMonitorMixin:
         self._collision_detector_lock = _DetectorLock()
         self._collision_trip_pending = None
         self._trip_gc = None
+        # Round 6 (F2): the watchdog no longer shares the default group with the
+        # resync completion, so [read the state, publish the flag] (watchdog)
+        # and [clear the state, publish False] (_on_resync_complete) are each
+        # done under this lock — a watchdog True can never land after the
+        # resync's False.
+        self._collision_flag_lock = _DetectorLock()
 
         self._collision_resume_tol = _env_float(
             'EDUBOTICS_COLLISION_RESUME_TOL_RAD', DEFAULT_RESUME_TOL_RAD)
@@ -337,8 +343,12 @@ class CollisionMonitorMixin:
         self._collision_status_pub = self.create_publisher(TaskStatus, '/task/status', 10)
 
         # 5 Hz watchdog: re-assert the latch + re-publish the banner while stopped.
+        # Round 6 (F2): in the node's own collision group with the trip
+        # hand-over (mutually exclusive with it), not queued behind
+        # /task/command callbacks in the default group.
         self._collision_watchdog = self.create_timer(
-            WATCHDOG_PERIOD_S, self._collision_watchdog_cb)
+            WATCHDOG_PERIOD_S, self._collision_watchdog_cb,
+            **self._collision_group_kwargs())
 
         # Always know the follower/leader poses (needed for relax/home/resync).
         # C1-A: on the sensor-ingest node (its own SingleThreadedExecutor
@@ -367,7 +377,8 @@ class CollisionMonitorMixin:
         # inline instead (_hand_over_trip).
         create_guard_condition = getattr(self, 'create_guard_condition', None)
         if create_guard_condition is not None:
-            self._trip_gc = create_guard_condition(self._on_trip_gc)
+            self._trip_gc = create_guard_condition(
+                self._on_trip_gc, **self._collision_group_kwargs())
         sensor_node.create_subscription(
             GpioStateMsg, gpio_topic, self._gpio_states_cb, SENSOR_QOS_DEPTH)
         self.get_logger().info(
@@ -479,6 +490,13 @@ class CollisionMonitorMixin:
         except Exception as exc:  # noqa: BLE001 - guard must never crash the node
             self.get_logger().error(
                 f'[KOLLISION] gpio state processing failed (ignored): {exc}')
+
+    def _collision_group_kwargs(self):
+        """``callback_group=`` for the trip hand-over and the watchdog: the
+        node's own collision group (round 6, F2); none on a host without it
+        (unit-test doubles), which keeps the default group."""
+        group = getattr(self, '_collision_cb_group', None)
+        return {'callback_group': group} if group is not None else {}
 
     def _detector_reset(self):
         """Reset the detector under its lock (C1-A): update() runs on the
@@ -957,6 +975,11 @@ class CollisionMonitorMixin:
         self._last_task_status_mono = time.monotonic()
 
     def _collision_watchdog_cb(self):
+        lock = getattr(self, '_collision_flag_lock', None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            self._collision_watchdog_locked()
+
+    def _collision_watchdog_locked(self):
         if self._collision_active:
             # Re-assert the latch (broadcaster never self-clears) and the stage banner
             # (late page loads land in the correct modal step).
@@ -1110,14 +1133,17 @@ class CollisionMonitorMixin:
             self._cancel_discarded_take_before_release()
         elif getattr(self, '_collision_end_recording', False):
             end_ok = self._end_session_before_release()
-        # Clear local state BEFORE publishing False so the watchdog can't re-assert True.
-        self._collision_active = False
-        self._collision_recovery_failed = False
-        self._collision_homing = False
-        self._collision_homed = False
-        self._collision_overload_joints = []
-        self._detector_reset()
-        self._publish_collision_flag(False)
+        # Clear local state BEFORE publishing False so the watchdog can't re-assert True
+        # (round 6: under the flag lock — the watchdog runs in its own group now).
+        flag_lock = getattr(self, '_collision_flag_lock', None)
+        with (flag_lock if flag_lock is not None else contextlib.nullcontext()):
+            self._collision_active = False
+            self._collision_recovery_failed = False
+            self._collision_homing = False
+            self._collision_homed = False
+            self._collision_overload_joints = []
+            self._detector_reset()
+            self._publish_collision_flag(False)
 
         # Seamlessly resume a recording the collision interrupted: re-arm the SAME session so
         # the student continues where they left off. We deliberately do NOT publish the cleared

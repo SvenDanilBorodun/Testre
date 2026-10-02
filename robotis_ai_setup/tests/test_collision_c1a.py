@@ -128,8 +128,9 @@ class _FakePublisher:
 
 
 class _FakeTimer:
-    def __init__(self, callback):
+    def __init__(self, callback, group=None):
         self.callback = callback
+        self.group = group
         self.cancelled = False
 
     def cancel(self):
@@ -137,8 +138,9 @@ class _FakeTimer:
 
 
 class _FakeGuardCondition:
-    def __init__(self, callback):
+    def __init__(self, callback, group=None):
         self.callback = callback
+        self.group = group
         self.triggers = 0
 
     def trigger(self):
@@ -246,7 +248,7 @@ class _Host(CM.CollisionMonitorMixin):
     """PhysicalAIServer stand-in with the round-5 surface: a sensor node, a
     guard-condition factory on the MAIN node and the record publish lock."""
 
-    def __init__(self, *, guard=True, sensor=True, dm=None):
+    def __init__(self, *, guard=True, sensor=True, dm=None, group=True):
         self.publishers = []
         self.timers = []
         self.guards = []
@@ -266,6 +268,8 @@ class _Host(CM.CollisionMonitorMixin):
         self._sensor_node = _SensorNode() if sensor else None
         if not guard:
             self.create_guard_condition = None
+        if group:
+            self._collision_cb_group = _COLLISION_GROUP
         self.data_manager = dm if dm is not None else _DataManager()
         self.timer_manager = types.SimpleNamespace(
             stop=lambda timer_name: setattr(self, 'timer_stops', self.timer_stops + 1),
@@ -278,8 +282,8 @@ class _Host(CM.CollisionMonitorMixin):
         self.publishers.append(pub)
         return pub
 
-    def create_timer(self, period, callback):
-        timer = _FakeTimer(callback)
+    def create_timer(self, period, callback, callback_group=None):
+        timer = _FakeTimer(callback, callback_group)
         self.timers.append(timer)
         return timer
 
@@ -288,7 +292,7 @@ class _Host(CM.CollisionMonitorMixin):
         return object()
 
     def create_guard_condition(self, callback, callback_group=None):
-        gc = _FakeGuardCondition(callback)
+        gc = _FakeGuardCondition(callback, callback_group)
         self.guards.append(gc)
         return gc
 
@@ -297,6 +301,9 @@ class _Host(CM.CollisionMonitorMixin):
 
     def pub_for(self, topic):
         return next(p for p in self.publishers if p.topic == topic)
+
+
+_COLLISION_GROUP = object()      # stands in for the node's own callback group
 
 
 class _IV:
@@ -480,6 +487,73 @@ class WatchdogRaceTest(unittest.TestCase):
         host._on_trip_gc()
         host._collision_watchdog_cb()
         self.assertTrue(flag.published[-1].data)
+
+
+class CollisionGroupTest(unittest.TestCase):
+    """Round 6 (F2, owner-approved): the trip hand-over and the 5 Hz watchdog
+    run in the node's OWN collision callback group — mutually exclusive with
+    each other, no longer queued behind /task/command in the default group.
+    Nothing else moves: relax, glide and resync timers stay in the default
+    group."""
+
+    def test_the_trip_hand_over_and_the_watchdog_share_the_collision_group(self):
+        host = _Host()
+        self.assertIs(host._trip_gc.group, _COLLISION_GROUP)
+        watchdog = next(t for t in host.timers if t.callback == host._collision_watchdog_cb)
+        self.assertIs(watchdog.group, _COLLISION_GROUP)
+
+    def test_every_other_collision_timer_stays_in_the_default_group(self):
+        host = _Host()
+        host.timers = [t for t in host.timers if t.callback != host._collision_watchdog_cb]
+        host.on_recording = True
+        _press_until_pending(host)
+        host._on_trip_gc()                              # schedules the relax
+        host._collision_homed = True
+        host._collision_leader_pos = {j: 0.0 for j in CM.LEADER_JOINTS}
+        host._collision_follower_pos = dict(zip(CM.ARM_JOINT_NAMES, CM.SAFE_HOME_ARM))
+        host._collision_follower_pos['gripper_joint_1'] = 0.0
+        host._collision_leader_pos.update(dict(zip(CM.ARM_JOINT_NAMES, CM.SAFE_HOME_ARM)))
+        host.resume_teleop()                            # schedules the resync
+        self.assertTrue(host.timers)
+        self.assertTrue(all(t.group is None for t in host.timers))
+
+    def test_a_host_without_the_group_keeps_the_default_group(self):
+        host = _Host(group=False)
+        self.assertIsNone(host._trip_gc.group)
+        watchdog = next(t for t in host.timers if t.callback == host._collision_watchdog_cb)
+        self.assertIsNone(watchdog.group)
+
+    def test_the_watchdog_true_never_lands_after_the_resyncs_false(self):
+        # With the watchdog in its own group, the resync completion (default
+        # group) can run beside it: a watchdog that read „active“ just before
+        # the resync cleared it must not publish its True AFTER the resync's
+        # False (the broadcaster would freeze until the next tick).
+        host = _Host()
+        host._collision_follower_pos = {j: 0.0 for j in CM.LEADER_JOINTS}
+        _press_until_pending(host)
+        host._on_trip_gc()
+        flag = host.pub_for(CM.COLLISION_FLAG_TOPIC)
+        in_publish, release = threading.Event(), threading.Event()
+        original = host._publish_collision_flag
+
+        def _slow_true(value):
+            if value and threading.current_thread().name == 'watchdog':
+                in_publish.set()
+                release.wait(5)
+            original(value)
+        host._publish_collision_flag = _slow_true
+        watchdog = threading.Thread(target=host._collision_watchdog_cb, name='watchdog')
+        watchdog.start()
+        self.assertTrue(in_publish.wait(5))
+        resync = threading.Thread(target=host._on_resync_complete, name='resync')
+        resync.start()
+        resync.join(0.2)
+        self.assertTrue(resync.is_alive())          # waits for the watchdog's publish
+        release.set()
+        watchdog.join(5)
+        resync.join(5)
+        self.assertFalse(host._collision_active)
+        self.assertFalse(flag.published[-1].data)
 
 
 class DetectorLockTest(unittest.TestCase):

@@ -605,9 +605,17 @@ class TakeIntegrity:
         return self._rate_sum[camera] / n if n else None
 
     def excess_repeats(self, camera: str) -> float:
+        """Repeats the camera's rate does not explain, after netting its skips.
+
+        A repeat paid back by a skip is timestamp jitter around a boundary (a
+        repeat/skip pair), not a camera that delivered too few images (round 6,
+        verifier F5: a camera at the full rate with jittering stamps once said
+        „zu wenige Bilder"). Skips are counted beyond the locked decimation
+        step, so a faster camera's honest skips are not netted twice."""
         rate = self.rate_hz(camera)
         honest = 0.0 if rate is None else max(0.0, self.frames * (1.0 - rate / self.fps))
-        return self.repeats.get(camera, 0) - honest
+        net = max(0, self.repeats.get(camera, 0) - self.skips.get(camera, 0))
+        return net - honest
 
     def spread_p95_s(self) -> Optional[float]:
         if not self._spreads:

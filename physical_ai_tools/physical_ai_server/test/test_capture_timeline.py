@@ -870,3 +870,52 @@ def test_integrity_without_a_start_ignores_what_came_before_the_first_frame():
         ti.add(d)
     assert ti.gap_source() is None
     assert ti.lost == 0
+
+
+# ── round 6: C5 counts skips against repeats (verifier 1, F5) ────────────────
+
+def test_jitter_pairs_at_full_rate_never_say_too_few_images():
+    # A camera at the full rate whose STAMPS jitter (7 ms here) produces
+    # repeat+skip pairs: each repeat is paid back by a skip, so the camera did
+    # NOT deliver too few images. The round-5 rule (repeats beyond the rate
+    # alone) fired on these takes; the round-6 rule nets the skips first.
+    old_rule_fired = 0
+    for seed in range(10):
+        cam = _delivery_jitter_events(30.02, 13, phase=(seed / 10) / 30, stamp_jit=0.007,
+                                      arrival_jit=0.003, seed=300 + seed)
+        decisions, _s = _run(30.0, {'scene': cam}, _joint_events(13, seed=seed + 1),
+                             _joint_events(13, stamped=False, seed=seed + 2), 12.0,
+                             tick_jit=0.002)
+        ti = ct.TakeIntegrity(['scene'], 30.0)
+        ti.reset(start_mono=1.0)
+        for d in [d for d in decisions if d['g'] >= 1.0][:300]:
+            ti.add(d)
+        honest = max(0.0, ti.frames * (1.0 - ti.rate_hz('scene') / 30.0))
+        if ti.repeats['scene'] - honest > max(2, 0.02 * ti.frames):
+            old_rule_fired += 1
+        assert ti.skips['scene'] >= ti.repeats['scene'] - 2
+        assert ti.excess_repeats('scene') < 2
+        assert ti.warning_de(1) == ''
+    assert old_rule_fired >= 3          # the case is real, not vacuous
+
+
+def test_excess_repeats_net_the_skips():
+    ti = ct.TakeIntegrity(['scene'], 30.0)
+    ti.reset(start_mono=0.0)
+    seq = 0
+    for k in range(100):
+        # alternate: a repeat every 10th slot, a skip of one frame 5 slots later
+        if k % 10 == 0 and k:
+            pass                         # repeat
+        elif k % 10 == 5 and k > 5:
+            seq += 2                     # skip one frame
+        else:
+            seq += 1
+        it = (seq, k / 30, k / 30, None)
+        ti.add({'k': k, 'g': k / 30, 'r': k / 30,
+                'cams': {'scene': {'item': it, 'rate': 30.0, 'step': 1}},
+                'fol': (k, k / 30, k / 30, None), 'lea': (k, k / 30, k / 30, None),
+                'gaps': {}, 'lost_before': []})
+    assert ti.repeats['scene'] == 9 and ti.skips['scene'] == 9
+    assert ti.excess_repeats('scene') == 0
+    assert ti.warning_de(2) == ''

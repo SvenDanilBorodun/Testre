@@ -174,15 +174,21 @@ class VerifySavedVideoFilesTest(unittest.TestCase):
         # Only one camera produced a video.
         self._write_video('observation.images.gripper')
         self.dm._verify_saved_video_files()
-        self.assertIn('scene', self.dm._last_warning_message)
-        self.assertNotIn('gripper', self.dm._last_warning_message)
+        # Round 7: the camera is named in German (record_texts_de), not as a
+        # Python list repr of raw keys.
+        self.assertEqual(self.dm._last_warning_message,
+                         self.mod.record_texts_de.missing_video_de(1, ['scene']))
+        self.assertIn('Szenen-Kamera', self.dm._last_warning_message)
+        self.assertNotIn('Greifer-Kamera', self.dm._last_warning_message)
+        self.assertNotIn("['", self.dm._last_warning_message)
 
     def test_flags_zero_byte_mp4(self):
         keys = ['observation.images.gripper']
         self.dm._lerobot_dataset = _FakeDataset(self.tmp, keys)
         self._write_video('observation.images.gripper', content=b'')
         self.dm._verify_saved_video_files()
-        self.assertIn('gripper', self.dm._last_warning_message)
+        self.assertEqual(self.dm._last_warning_message,
+                         self.mod.record_texts_de.missing_video_de(1, ['gripper']))
 
     def test_noop_when_no_dataset(self):
         self.dm._lerobot_dataset = None

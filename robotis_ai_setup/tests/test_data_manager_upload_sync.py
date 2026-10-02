@@ -245,6 +245,7 @@ class TestSyncDatasetRepoAfterUpload(unittest.TestCase):
         reason = self.DataManager._last_hf_failure_reason_de
         self.assertIsNotNone(reason)
         self.assertIn('Versions-Tag', reason)
+        self.assertEqual(reason, self.dm_module.record_texts_de.HUB_TAG_FAILED_DE)
 
     def test_orphan_listing_failure_fails_the_upload_with_german_reason(self):
         api = _FakeApi(list_error=RuntimeError('503'))
@@ -254,6 +255,7 @@ class TestSyncDatasetRepoAfterUpload(unittest.TestCase):
         reason = self.DataManager._last_hf_failure_reason_de
         self.assertIsNotNone(reason)
         self.assertIn('Hugging Face', reason)
+        self.assertEqual(reason, self.dm_module.record_texts_de.HUB_SYNC_FAILED_DE)
         # Tag must NOT have been touched after a failed sweep — the tag may
         # only ever point at a fully synced state.
         self.assertNotIn('delete_tag', api.calls)

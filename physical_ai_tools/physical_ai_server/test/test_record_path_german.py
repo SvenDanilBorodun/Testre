@@ -186,7 +186,11 @@ def test_arm_vocabulary():
 def test_camera_names_go_through_camera_name_de():
     # (The record tick's dead camera-fps sentence was deleted in round 5, R5-4d.)
     convert = ast.unparse(_function(_DM_SRC, 'convert_msgs_to_raw_datas'))
-    assert 'camera_name_de(stale)' in convert
+    # Round 7: the recording sentence is built by record_texts_de (which names
+    # the camera through its camera_name_de); the data manager's camera_name_de
+    # is that same function.
+    assert 'record_texts_de.stale_camera_recording_de(stale' in convert
+    assert 'camera_name_de = record_texts_de.camera_name_de' in _DM_SRC
     # Round 5: the node's record-path sentences (a source that stops, the busy
     # answer, the error-stop note) come from the one module of German record
     # texts, whose camera_name_de is the same vocabulary.

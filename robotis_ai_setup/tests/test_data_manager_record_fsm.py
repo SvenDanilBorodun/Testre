@@ -873,6 +873,9 @@ class UploadBlockedReasonTest(_FsmTestCase):
         self.assertEqual(up, [])
         self.assertTrue(dm._upload_blocked_reason_de.startswith(
             'Upload abgelehnt: Der Roboter darf nicht'))
+        # Round 7: the sentence is record_texts_de's, not an inline copy.
+        self.assertEqual(dm._upload_blocked_reason_de,
+                         _texts().NAMESPACE_REFUSED_DE)
 
     def test_enqueue_failure_sets_the_not_started_sentence(self):
         dm, up = make(n=1, episode=1, warmup=0, upload_raises=True)
@@ -880,6 +883,8 @@ class UploadBlockedReasonTest(_FsmTestCase):
         self.assertIn(True, results)
         self.assertEqual(dm._upload_blocked_reason_de, MOD.UPLOAD_NOT_STARTED_DE)
         self.assertIn('später im Tab Daten', MOD.UPLOAD_NOT_STARTED_DE)
+        # Round 7: the module name stays (callers read it) and IS the text's.
+        self.assertIs(MOD.UPLOAD_NOT_STARTED_DE, _texts().UPLOAD_NOT_STARTED_DE)
 
     def test_finalize_failure_sets_the_blocked_reason_and_skips_upload(self):
         dm, up = make(n=1, episode=1, warmup=0)
@@ -1228,6 +1233,9 @@ class StaleCameraWarningTest(_FsmTestCase):
             warnings[0][1],
             '[WARNUNG] Die Szenen-Kamera zeigt seit über 5 s dasselbe Bild. '
             'Die Aufnahme läuft weiter – prüfe, ob die Kamera hängt.')
+        # Round 7: built by record_texts_de, not an inline copy.
+        self.assertEqual(warnings[0][1],
+                         '[WARNUNG] ' + _texts().stale_camera_recording_de('scene', 5.0))
         # At most once per 5 s.
         times = [t for t, _ in warnings]
         for a, b in zip(times, times[1:]):
@@ -1249,6 +1257,38 @@ class StaleCameraWarningTest(_FsmTestCase):
         self.assertEqual(MOD.camera_name_de('gripper'), 'Greifer-Kamera')
         self.assertEqual(MOD.camera_name_de('scene'), 'Szenen-Kamera')
         self.assertEqual(MOD.camera_name_de('wrist'), 'Kamera „wrist“')
+
+
+class InlineSentencesMovedTest(unittest.TestCase):
+    """Round 7: the last student-facing sentences of the recording path live
+    in record_texts_de.py; the data manager keeps no inline copy (the parser
+    folds implicit concatenation and f-string parts into Constant nodes). The
+    inference stale-camera sentence stays inline on purpose (F3)."""
+
+    MOVED = (
+        'Das Hochladen konnte nicht gestartet werden',
+        'Upload abgelehnt',
+        'Alte Dateien auf Hugging Face',
+        'Der Versions-Tag des Datensatzes',
+        'zeigt seit über',
+        'keine Video-Datei gespeichert',
+    )
+
+    def test_no_inline_copy_is_left(self):
+        import ast
+        src = Path(DATA_MANAGER_PATH).read_text(encoding="utf-8")
+        constants = [node.value for node in ast.walk(ast.parse(src))
+                     if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+        for fragment in self.MOVED:
+            hits = [c for c in constants if fragment in c]
+            self.assertEqual(hits, [], fragment)
+
+    def test_the_names_are_referenced(self):
+        src = Path(DATA_MANAGER_PATH).read_text(encoding="utf-8")
+        for name in ('UPLOAD_NOT_STARTED_DE', 'NAMESPACE_REFUSED_DE',
+                     'HUB_SYNC_FAILED_DE', 'HUB_TAG_FAILED_DE',
+                     'stale_camera_recording_de', 'missing_video_de'):
+            self.assertIn(f'record_texts_de.{name}', src, name)
 
 
 class RecorderLockTest(_FsmTestCase):
@@ -1752,9 +1792,28 @@ class SharedRedoCapTest(_FsmTestCase):
         self.assertEqual(dm.get_status(), 'finish')
         self.assertEqual(dm.get_current_record_status().error,
                          '[WARNUNG] ' + _texts().frame_loss_end_de(1))
+        # Round 7: one frame loss after two gaps — the end sentence counts
+        # nothing it cannot know.
+        self.assertNotIn('dreimal', dm.get_current_record_status().error)
         self.assertIn(True, ticks(dm, 4))
         self.assertEqual(dm._lerobot_dataset.committed, 0)
         self.assertEqual(up, [])
+
+    def test_drop_drop_gap_keeps_the_third_without_a_wrong_wieder(self):
+        # Round 7: the third take is the FIRST gap; the kept sentence must not
+        # say „wieder“ nor count one kind.
+        dm, _ = make(n=2, reset=0)
+        self._take(dm, drop=True)
+        self.assertEqual(dm.get_status(), 'reset')
+        self._take(dm, drop=True)
+        self.assertEqual(dm.get_status(), 'reset')
+        self._take(dm, gap=True)
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+        error = dm.get_current_record_status().error
+        self.assertEqual(error,
+                         '[WARNUNG] ' + _texts().source_gap_kept_de('leader', None, 1))
+        self.assertNotIn('wieder ', error)
+        self.assertNotIn('dreimal', error)
 
     def test_drop_gap_drop_ends_the_session(self):
         dm, _ = make(n=2, reset=0)

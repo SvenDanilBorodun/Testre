@@ -84,11 +84,9 @@ dataset_card = _sibling('dataset_card')
 
 # Student-facing German camera names for record-path sentences (Aufnahme 2.0).
 # The config keys stay `gripper`/`scene`; only the words a student reads change.
-CAMERA_NAME_DE = {'gripper': 'Greifer-Kamera', 'scene': 'Szenen-Kamera'}
-
-
-def camera_name_de(name) -> str:
-    return CAMERA_NAME_DE.get(str(name), f'Kamera „{name}“')
+# One vocabulary: these names are record_texts_de's (round 7).
+CAMERA_NAME_DE = record_texts_de.CAMERA_NAME_DE
+camera_name_de = record_texts_de.camera_name_de
 
 
 # Dataset repo names (Aufnahme 2.0, owner decision Q2). A German task name used
@@ -149,10 +147,9 @@ EARLY_SAVE_MIN_S = 1.0
 # „Verwerfen und beenden“ keeps nothing however slow the link or short the reset.
 RERECORD_FINISH_WINDOW_S = 5.0
 # Terminating-tick reason when the finished dataset could not be handed to the
-# upload worker (see _upload_blocked_reason_de).
-UPLOAD_NOT_STARTED_DE = (
-    'Das Hochladen konnte nicht gestartet werden. Du kannst den Datensatz '
-    'später im Tab Daten hochladen.')
+# upload worker (see _upload_blocked_reason_de). The text lives in
+# record_texts_de; this name stays for its readers.
+UPLOAD_NOT_STARTED_DE = record_texts_de.UPLOAD_NOT_STARTED_DE
 # ONE re-record cap per episode number (round 6; reset when that episode is
 # saved), shared by both automatic re-records: a take with a source gap >=
 # SOURCE_GAP_S on the source's own timeline (O2/C6) and a take the encoder
@@ -739,10 +736,11 @@ class DataManager:
         self._status = 'reset'
 
     def _end_for_frame_loss(self, episode_no) -> None:
-        """C7: the third frame loss of the same episode ends the session like
+        """C7: a frame loss once the episode's shared re-record cap is spent
+        (any mix of gaps and losses before it) ends the session like
         „Beenden“: the take is dropped (official discard in the next record
         step), saved episodes are kept, finalize + upload per the usual guards
-        (the finish branch)."""
+        (the finish branch). The sentence counts no kind (round 7)."""
         warning = record_texts_de.frame_loss_end_de(episode_no)
         self._last_warning_message = warning
         self._last_discard_cause = ('frame_loss_end', episode_no)
@@ -876,12 +874,8 @@ class DataManager:
             if not has_video:
                 missing.append(key.replace('observation.images.', ''))
         if missing:
-            warning = (
-                f'Episode {self._record_episode_count + 1}: Für Kamera(s) '
-                f'{missing} wurde keine Video-Datei gespeichert. Diese Episode '
-                f'muss neu aufgenommen werden, sonst ist das Training '
-                f'unbrauchbar.'
-            )
+            warning = record_texts_de.missing_video_de(
+                self._record_episode_count + 1, missing)
             self._last_warning_message = warning
             print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
             return
@@ -1477,11 +1471,8 @@ class DataManager:
                     last = getattr(self, '_last_stale_warn_mono', 0.0)
                     if now_mono - last >= 5.0:
                         self._last_stale_warn_mono = now_mono
-                        warning = (
-                            f'Die {camera_name_de(stale)} zeigt seit über '
-                            f'{self._stale_halt_threshold_s:.0f} s dasselbe Bild. Die '
-                            f'Aufnahme läuft weiter – prüfe, ob die Kamera hängt.'
-                        )
+                        warning = record_texts_de.stale_camera_recording_de(
+                            stale, self._stale_halt_threshold_s)
                         self._last_warning_message = warning
                         print(f'[WARNUNG] {warning}', file=sys.stderr, flush=True)
                 else:
@@ -1935,11 +1926,7 @@ class DataManager:
             # operator still gets the exact value on stderr below.
             # Quotes are typographic („…“), never straight, per the German
             # string rules.
-            self._last_warning_message = (
-                'Upload abgelehnt: Der Roboter darf nicht in dieses '
-                'HuggingFace-Konto hochladen. Bitte die „Benutzer-ID“ prüfen '
-                'und erneut anmelden.'
-            )
+            self._last_warning_message = record_texts_de.NAMESPACE_REFUSED_DE
             self._upload_blocked_reason_de = self._last_warning_message
             print(
                 f'[FEHLER] Upload REFUSED: repo namespace {namespace!r} is not '
@@ -2511,11 +2498,7 @@ class DataManager:
         except Exception as e:
             print(f'Error syncing remote dataset files for {repo_id}: {e}')
             DataManager._last_hf_failure_reason_de = (
-                'Alte Dateien auf Hugging Face konnten nicht entfernt '
-                'werden. Ohne Bereinigung würde das Training gelöschte '
-                'Episoden weiterverwenden — bitte den Upload erneut '
-                'versuchen.'
-            )
+                record_texts_de.HUB_SYNC_FAILED_DE)
             return False
 
         try:
@@ -2531,10 +2514,7 @@ class DataManager:
         except Exception as e:
             print(f'Error re-pointing version tag for {repo_id}: {e}')
             DataManager._last_hf_failure_reason_de = (
-                'Der Versions-Tag des Datensatzes konnte nicht aktualisiert '
-                'werden. Ohne aktuellen Tag trainiert die Cloud auf einem '
-                'alten Stand — bitte den Upload erneut versuchen.'
-            )
+                record_texts_de.HUB_TAG_FAILED_DE)
             return False
         return True
 

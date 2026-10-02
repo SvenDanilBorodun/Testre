@@ -58,6 +58,10 @@ def _all_texts():
     out['take_lost_slots_de'] = t.take_lost_slots_de(4, 3, 300, 0.1)
     out['take_excess_repeats_de'] = t.take_excess_repeats_de(4, 'scene', 12.4)
     out['take_arm_late_de'] = t.take_arm_late_de(4, 151.2)
+    for kind, name in (('camera', 'scene'), ('leader', None)):
+        out[f'source_gap_finish_de({kind})'] = t.source_gap_finish_de(kind, name, 2)
+    out['frame_loss_finish_de'] = t.frame_loss_finish_de(2)
+    out['saved_length_mismatch_de'] = t.saved_length_mismatch_de(3, ['gripper', 'scene'])
     return out
 
 
@@ -217,3 +221,56 @@ def test_templates_name_only_english_placeholders():
             continue
         fields = {f for _lit, f, _spec, _conv in string.Formatter().parse(text) if f}
         assert all(re.fullmatch(r'[a-z_]+', f) for f in fields), (name, fields)
+
+
+# ── round 6 ──────────────────────────────────────────────────────────────────
+
+def test_round6_finalize_and_error_stop_sentences():
+    # the long-standing finalize sentence, now in this module; the page keys
+    # on its first words (recordSession.js::FINALIZE_FAILED_PREFIX_DE)
+    assert t.FINALIZE_FAILED_DE == (
+        'Datensatz konnte nicht abgeschlossen werden — die Aufnahme ist unvollständig und '
+        'muss neu aufgenommen werden.')
+    assert t.FINALIZE_FAILED_DE.startswith(t.FINALIZE_FAILED_PREFIX_DE)
+    # D5 + F3: an error stop whose finalize FAILED (the crash marker stays)
+    assert t.ERROR_STOP_INCOMPLETE_DE == (
+        'Der Datensatz ist unvollständig: Er konnte nicht abgeschlossen werden. Nimm die '
+        'Episoden neu auf.')
+    assert t.ERROR_STOP_SAVED_DE != t.ERROR_STOP_INCOMPLETE_DE
+
+
+def test_round6_hub_check_and_upload_off_sentences():
+    # F4/D7: the hub refused the rig's token
+    assert t.HUB_CHECK_AUTH_DE == (
+        'Hugging Face lehnt den Token des Roboters ab (ungültig oder abgelaufen). Speichere '
+        'in der EduBotics-App unter „Schritt D: HuggingFace-Token“ einen gültigen Token oder '
+        'schalte unter „Erweitert“ das Hochladen aus.')
+    # F4: a session that runs WITHOUT upload because the rig has no usable token
+    assert t.UPLOAD_OFF_PREFIX_DE == 'Aufnahme ohne Hochladen: '
+    assert t.UPLOAD_OFF_NO_TOKEN_DE == (
+        'Aufnahme ohne Hochladen: Auf dem Roboter ist kein Hugging-Face-Token gespeichert. '
+        'Der Datensatz bleibt auf dem Roboter; speichere einen Token in der EduBotics-App '
+        'unter „Schritt D: HuggingFace-Token“ und lade ihn später im Tab Daten hoch.')
+    assert t.UPLOAD_OFF_TOKEN_INVALID_DE == (
+        'Aufnahme ohne Hochladen: Hugging Face lehnt den Token des Roboters ab (ungültig oder '
+        'abgelaufen). Der Datensatz bleibt auf dem Roboter; speichere einen gültigen Token in '
+        'der EduBotics-App unter „Schritt D: HuggingFace-Token“ und lade ihn später im Tab '
+        'Daten hoch.')
+    for text in (t.UPLOAD_OFF_NO_TOKEN_DE, t.UPLOAD_OFF_TOKEN_INVALID_DE):
+        assert text.startswith(t.UPLOAD_OFF_PREFIX_DE)
+    # F1: a FINISH accepted while the recorder was busy, applied after the discard
+    assert t.FINISH_QUEUED_DE == (
+        'Die Aufnahme wird beendet, sobald die verworfene Episode aufgeräumt ist.')
+
+
+def test_round6_sentences_moved_in_from_the_data_manager():
+    assert t.source_gap_finish_de('camera', 'scene', 2) == (
+        'Signalaussetzer: Die Szenen-Kamera hat in Episode 2 kurz keine Daten geliefert. Die '
+        'Episode wurde verworfen, die Aufnahme endet mit den schon gespeicherten Episoden.')
+    assert t.source_gap_finish_de('leader', None, 2).startswith(t.SOURCE_GAP_PREFIX_DE)
+    assert t.frame_loss_finish_de(2) == (
+        'Episode 2: Kamera-Bilder gingen beim Speichern verloren, die Episode wurde verworfen. '
+        'Die Aufnahme endet mit den schon gespeicherten Episoden.')
+    assert t.saved_length_mismatch_de(3, ['gripper', 'scene']) == (
+        'Episode 3: Video und Daten der Kamera(s) Greifer-Kamera, Szenen-Kamera sind nicht '
+        'gleich lang. Diese Episode muss neu aufgenommen werden, sonst bricht das Training ab.')

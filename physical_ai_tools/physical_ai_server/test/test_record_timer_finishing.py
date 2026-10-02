@@ -496,14 +496,30 @@ def test_an_error_stop_without_saved_episodes_adds_no_promise():
     assert not node.communicator.published[-1].error.endswith(_ERROR_STOP_SAVED_DE)
 
 
-def test_a_failed_finalize_adds_no_promise():
+def test_a_failed_finalize_says_the_dataset_is_incomplete():
+    # F3 (round 6): the crash marker stays and the READY says so.
     dm = _DM()
     dm.record_raises = True
     dm.saved = 3
     dm.finalizes = False
     node = _Node(dm)
     _tick(node)
-    assert not node.communicator.published[-1].error.endswith(_ERROR_STOP_SAVED_DE)
+    error = node.communicator.published[-1].error
+    assert not error.endswith(_ERROR_STOP_SAVED_DE)
+    assert error.endswith(' ' + record_texts_de.ERROR_STOP_INCOMPLETE_DE)
+    assert record_texts_de.ERROR_STOP_INCOMPLETE_DE == (
+        'Der Datensatz ist unvollständig: Er konnte nicht abgeschlossen werden. '
+        'Nimm die Episoden neu auf.')
+
+
+def test_an_error_stop_without_a_dataset_adds_nothing():
+    dm = _DM()
+    dm.record_raises = True
+    dm.finalizes = None
+    node = _Node(dm)
+    _tick(node)
+    error = node.communicator.published[-1].error
+    assert error.endswith('einen neuen Datensatz-Namen wählen.')
 
 
 def test_a_data_manager_without_the_error_stop_keeps_heads_behaviour():

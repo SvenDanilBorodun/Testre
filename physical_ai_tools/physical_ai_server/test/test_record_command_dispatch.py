@@ -74,7 +74,7 @@ def _module_constant(name):
 _BUSY_DE = 'Die Aufnahme ist gerade beschäftigt. Bitte versuch es gleich noch einmal.'
 
 
-def _load(names=('user_interaction_callback', '_record_command_lock')):
+def _load(names=('user_interaction_callback', '_record_command_lock', '_request_record_end')):
     source = _SERVER_PY.read_text(encoding='utf-8')
     tree = ast.parse(source)
     ns = {
@@ -192,6 +192,7 @@ class _Node:
         self.init_saw = []
         self.operation_mode = 'collection'
         self._record_command_lock = types.MethodType(_NS['_record_command_lock'], self)
+        self._request_record_end = types.MethodType(_NS['_request_record_end'], self)
 
     def get_logger(self):
         return self.logger
@@ -374,9 +375,10 @@ def test_outer_except_keeps_heads_text_outside_the_record_page():
 
 # ── round 5: the busy answer (O6) and F9 ──────────────────────────────────────
 
-def test_the_command_lock_timeout_is_a_quarter_second():
+def test_the_command_lock_timeout_is_fifty_milliseconds():
+    # Round 6 (F2): a command waits at most this long in the default group.
     COMMAND_LOCK_TIMEOUT_S = _module_constant('COMMAND_LOCK_TIMEOUT_S')
-    assert COMMAND_LOCK_TIMEOUT_S == 0.25
+    assert COMMAND_LOCK_TIMEOUT_S == 0.05
     assert record_texts_de.BUSY_DE == _BUSY_DE
 
 
@@ -393,8 +395,7 @@ def _hold(dm):
     return t, release
 
 
-@pytest.mark.parametrize('command', [
-    _Req.STOP, _Req.MOVE_TO_NEXT, _Req.RERECORD, _Req.FINISH, _Req.SKIP_TASK])
+@pytest.mark.parametrize('command', [_Req.MOVE_TO_NEXT, _Req.RERECORD, _Req.SKIP_TASK])
 def test_a_held_recorder_lock_answers_busy_and_changes_nothing(command):
     dm = _DM()
     node = _Node(recording=True, dm=dm)
@@ -407,8 +408,67 @@ def test_a_held_recorder_lock_answers_busy_and_changes_nothing(command):
         release.set()
         t.join(5)
     assert (r.success, r.message) == (False, _BUSY_DE)
-    assert elapsed < 0.3
+    assert elapsed < 0.15
     assert dm.calls == []
+
+
+class _QueueingDM(_DM):
+    """The DataManager's request_end contract: applied now when the lock is
+    free (True), else queued for the holder's release (False)."""
+
+    def request_end(self, kind):
+        self.calls.append(f'request_end:{kind}')
+        if self.lock.acquire(blocking=False):
+            self.lock.release()
+            return True
+        return False
+
+
+_QUEUED_DE = 'Die Aufnahme wird beendet, sobald die verworfene Episode aufgeräumt ist.'
+
+
+@pytest.mark.parametrize('command,kind', [(_Req.FINISH, 'finish'), (_Req.STOP, 'stop')])
+def test_an_end_while_the_recorder_is_busy_is_accepted_at_once(command, kind):
+    # F1 (round 6): never „beschäftigt“ — queued and applied at the release.
+    dm = _QueueingDM()
+    node = _Node(recording=True, dm=dm)
+    t, release = _hold(dm)
+    try:
+        started = time.monotonic()
+        r = _call(node, _request(command))
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        t.join(5)
+    assert (r.success, r.message) == (True, _QUEUED_DE)
+    assert record_texts_de.FINISH_QUEUED_DE == _QUEUED_DE
+    assert elapsed < 0.05
+    assert dm.calls == [f'request_end:{kind}']
+
+
+@pytest.mark.parametrize('command,german,head', [
+    (_Req.FINISH, 'Wird beendet.', 'All operations terminated'),
+    (_Req.STOP, 'Aufnahme gestoppt.', 'Recording stopped'),
+])
+def test_an_end_with_a_free_lock_keeps_its_answers(command, german, head):
+    node = _Node(recording=True, dm=_QueueingDM())
+    assert (_call(node, _request(command)).message) == german
+    node = _Node(inferring=True, dm=_QueueingDM())
+    r = _call(node, _request(command, task_type='inference'))
+    assert (r.success, r.message) == (True, head)
+
+
+def test_a_queued_finish_outside_the_record_page_keeps_heads_text():
+    dm = _QueueingDM()
+    node = _Node(inferring=True, dm=dm)
+    t, release = _hold(dm)
+    try:
+        r = _call(node, _request(_Req.FINISH, task_type='inference'))
+    finally:
+        release.set()
+        t.join(5)
+    assert (r.success, r.message) == (True, 'All operations terminated')
+    assert node.on_inference is False
 
 
 def test_start_while_recording_answers_busy_and_changes_nothing():
@@ -427,9 +487,9 @@ def test_start_while_recording_answers_busy_and_changes_nothing():
 def test_a_free_lock_is_held_for_the_transition():
     dm = _DM()
     seen = []
-    dm.record_finish = lambda: seen.append(dm.lock._is_owned())
+    dm.record_skip_task = lambda: seen.append(dm.lock._is_owned())
     node = _Node(recording=True, dm=dm)
-    r = _call(node, _request(_Req.FINISH))
+    r = _call(node, _request(_Req.SKIP_TASK))
     assert r.success is True
     assert seen == [True]
     assert not dm.lock._is_owned()

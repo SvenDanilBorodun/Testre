@@ -239,11 +239,13 @@ _REINIT_RETRY_PERIOD_S = 30.0
 _REINIT_MAX_ATTEMPTS = 3
 
 # Aufnahme 2.0 round 5 (O6): /task/command never blocks the default callback
-# group on the recorder lock. Every record-command branch takes it with a
-# bounded try-acquire; on timeout it changes nothing and answers
-# record_texts_de.BUSY_DE. The longest holder is the official ~1 s discard
-# cancel after „Wiederholen“.
-COMMAND_LOCK_TIMEOUT_S = 0.25
+# group on the recorder lock. MOVE_TO_NEXT, RERECORD, SKIP_TASK and START while
+# recording take it with a bounded try-acquire; on timeout they change nothing
+# and answer record_texts_de.BUSY_DE. The longest holder is the official ~1 s
+# discard cancel after „Wiederholen“. Round 6 (F2): 50 ms, so commands queued
+# behind each other never hold the default group long. FINISH and STOP never
+# wait at all (F1: DataManager.request_end queues them for the release).
+COMMAND_LOCK_TIMEOUT_S = 0.05
 # R5-2: the stopped-source rules judge only an ON-TIME record tick (one that
 # started at most this many periods after the previous one), so a stall of the
 # server process itself is never mistaken for a silent source.
@@ -454,6 +456,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._record_publish_lock = threading.Lock()
         self._record_session_gen = 0
         self._collision_trip_pending = None
+        # Round 6 (F2, owner-approved collision-path change): the collision
+        # trip hand-over (_on_trip_gc) and the 5 Hz watchdog run in this OWN
+        # MutuallyExclusiveCallbackGroup — mutually exclusive with each other
+        # (a watchdog False can never race the trip), and no longer queued
+        # behind /task/command callbacks in the default group.
+        self._collision_cb_group = MutuallyExclusiveCallbackGroup()
         # The sensor-ingest node + its supervised executor (_ensure_sensor_executor).
         self._sensor_node = None
         self._sensor_executor = None
@@ -1680,8 +1688,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         end_after_error = getattr(data_manager, 'end_after_error', None)
         if end_after_error is not None:
             try:
-                if end_after_error() and data_manager.saved_episode_count() > 0:
+                finalized = end_after_error()
+                if finalized is True and data_manager.saved_episode_count() > 0:
                     sentence = f'{error_msg} {record_texts_de.ERROR_STOP_SAVED_DE}'
+                elif finalized is False:
+                    # F3 (round 6): finalize failed — the crash marker stays and
+                    # the student learns the dataset is incomplete.
+                    sentence = f'{error_msg} {record_texts_de.ERROR_STOP_INCOMPLETE_DE}'
             except Exception as e:  # noqa: BLE001 — the error stop must still go out
                 self.get_logger().error(f'error stop: finalize failed: {e}')
         status = TaskStatus()
@@ -2261,6 +2274,20 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return contextlib.nullcontext(True)
         return try_locked(COMMAND_LOCK_TIMEOUT_S)
 
+    def _request_record_end(self, kind) -> bool:
+        """F1 (round 6): FINISH/STOP through DataManager.request_end — never
+        waits for the recorder lock: True when applied at once, False when
+        queued for the lock holder's release (a discard in flight). A
+        DataManager without it is ended directly (True)."""
+        request_end = getattr(self.data_manager, 'request_end', None)
+        if request_end is not None:
+            return bool(request_end(kind))
+        if kind == 'stop':
+            self.data_manager.record_stop()
+        else:
+            self.data_manager.record_finish()
+        return True
+
     def user_interaction_callback(self, request, response):
         # Audit fix 2 — degraded-boot guard (same pattern as the jog/capture-pose
         # guards): with communicator=None, START_RECORD would reach
@@ -2563,6 +2590,28 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         'Gerade läuft keine Aufnahme.' if rec
                         else 'Not currently recording')
                     return response
+                if request.command in (SendCommand.Request.STOP,
+                                       SendCommand.Request.FINISH):
+                    # F1 (round 6, owner: the server queues the end): FINISH
+                    # and STOP are ACCEPTED at once, even while a record step
+                    # (the official discard after „Wiederholen“) holds the
+                    # recorder lock — applied the moment it releases, so
+                    # „Verwerfen und beenden“ always ends the session.
+                    is_stop = request.command == SendCommand.Request.STOP
+                    self.get_logger().info(
+                        'Stopping recording' if is_stop else 'Terminating all operations')
+                    applied = self._request_record_end('stop' if is_stop else 'finish')
+                    if not is_stop:
+                        self.on_inference = False
+                    response.success = True
+                    if rec and not applied:
+                        response.message = record_texts_de.FINISH_QUEUED_DE
+                    elif is_stop:
+                        response.message = 'Aufnahme gestoppt.' if rec else 'Recording stopped'
+                    else:
+                        response.message = (
+                            'Wird beendet.' if rec else 'All operations terminated')
+                    return response
                 # Round 5 (O6): bounded — never block the default group behind a
                 # record step (the official ~1 s discard cancel); on timeout
                 # change nothing and say „beschäftigt“.
@@ -2571,13 +2620,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         response.success = False
                         response.message = record_texts_de.BUSY_DE
                         return response
-                    if request.command == SendCommand.Request.STOP:
-                        self.get_logger().info('Stopping recording')
-                        self.data_manager.record_stop()
-                        response.success = True
-                        response.message = 'Aufnahme gestoppt.' if rec else 'Recording stopped'
-
-                    elif request.command == SendCommand.Request.MOVE_TO_NEXT:
+                    if request.command == SendCommand.Request.MOVE_TO_NEXT:
                         self.get_logger().info('Moving to next episode')
                         if len(request.task_info.task_instruction) > 1:
                             # Multi-task: unchanged (unreachable from the page).
@@ -2626,14 +2669,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                             self.data_manager.re_record()
                             response.success = True
                             response.message = 'Re-recording current episode'
-
-                    elif request.command == SendCommand.Request.FINISH:
-                        self.get_logger().info('Terminating all operations')
-                        self.data_manager.record_finish()
-                        self.on_inference = False
-                        response.success = True
-                        response.message = (
-                            'Wird beendet.' if rec else 'All operations terminated')
 
                     elif request.command == SendCommand.Request.SKIP_TASK:
                         self.get_logger().info('Skipping task')

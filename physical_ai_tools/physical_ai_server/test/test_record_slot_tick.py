@@ -233,7 +233,7 @@ class _DM:
         return False
 
     def end_after_error(self):
-        return False
+        return None                 # the D5 stub: as without a dataset
 
     def get_current_record_status(self):
         st = _TaskStatus()

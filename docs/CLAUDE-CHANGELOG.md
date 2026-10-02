@@ -6,6 +6,49 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-02 (later) — Aufnahme 2.0 round 7: sentences that stay true, and a card that agrees with its rows
+
+A fresh verification of round 6 (scratch `fresh1/`, `fresh2/` with screenshots) found no broken
+recording, but texts and cards that could say something false. The owner's decisions are in
+`plan.md`; the invariants in `CLAUDE.md`, the accepted residuals in `docs/KNOWN-ISSUES.md`.
+
+**Texts under the shared cap.** Round 6 made one re-record cap of 2 per episode for gaps and
+frame loss together, but the two end sentences still assumed one kind: after gap + gap + frame
+loss, `FRAME_LOSS_END_DE` said the episode had lost frames „dreimal", and after frame loss twice
+and then a gap, `GAP_KEPT_DE` said the source had failed „wieder". Both now say what is true after
+any mix („… konnte auch nach zwei Wiederholungen nicht ohne Bildverlust gespeichert werden …",
+„… nicht ohne Signal- oder Bildverlust aufgenommen werden und wurde trotzdem gespeichert …"); the
+lost-slot warning says „1 von 301 Bildern fehlt" in the singular. Every remaining record sentence
+of `data_manager.py` now comes from `record_texts_de.py` (the missing-video warning names the
+camera in German instead of a Python list); the inference stale-camera sentence stays HEAD's (F3).
+
+**The queued end, answered honestly.** A FINISH queued behind an ordinary record step — about
+half of all presses — answered „wird beendet, sobald die verworfene Episode aufgeräumt ist"
+although nothing was being discarded; now that sentence comes only while a discard is really in
+flight (`DataManager.discard_in_flight()`). The source-dead end is documented against the owner's
+bound: ≤ 3.5 s from the source's last message (2 s silence + the ~1 s official discard).
+
+**The page.** After a collision in the save window of the LAST episode the robot counts the
+episode and finishes; the finish card still added „Die Aufnahme wurde nach der Kollision beendet."
+and the stage card behind the CollisionModal said „Episode N wurde verworfen" beside a row that
+said „Gespeichert". The row now carries `inCollision`, the stage card says „Episode N wurde vor der
+Kollision gespeichert …", and the counted last episode clears `collisionOpen`. A failed upload
+showed step 3 as still to come (now skipped); a short session without upload showed its reason
+twice, in the banner and on the card (now once, as the card's note); with „Datensatz
+unvollständig" every row still claimed „Gespeichert" (now „Gespeichert, Datensatz unvollständig");
+the header pill said „Timeout" (now „Zeitüberschreitung"). One item needs a file outside the page's
+own: the red registration-failed toast that repeats the card's hint (`KNOWN-ISSUES`).
+
+**Documented, not fixed (owner).** „Verwerfen und beenden" within ~1 s after „Wiederholen" keeps
+the retake (the RERECORD meets the running discard and answers busy, so the page sends no FINISH;
+workaround: wait a moment or press „Beenden" again). A session switched to upload-off followed by a
+Daten-tab upload can overwrite a private hub dataset of the same name (that upload path has no
+existence check). Rig gate G3 gets its acceptance, timestamp jitter SD ≤ 4 ms, with the measured
+table (≤ 4 ms ≈ 0, 5 ms 0.26 %, 6 ms 0.94 %, 7 ms 2.6 %, 8 ms ~5 % + 5 %), and the capture path its
+stall bound (≤ 0.30 s loses nothing; 320 ms lost one slot in 7 of 50 takes, 340–500 ms in 70–85 %;
+each loss counted and warned; action age 113 ms at 350 ms). Docs: the smoke test runs in the amd64
+and opi images, not Jetson.
+
 ### Unreleased, 2026-10-02 — Aufnahme 2.0 round 6: „Beenden" is never refused, and an error stop tells the truth about the dataset
 
 Two final verifiers ran the round-5 build (verifier 1: the capture harness, the e-stop and the
@@ -57,7 +100,8 @@ jitter at 30.02 Hz, 10 seeds: the round-5 rule fired on 3, the round-6 rule on n
 re-record cap, `MAX_REDOS_PER_EPISODE` (2), for gaps and frame loss together, so a C7 end is
 reachable after any mix. A gap in the take „Beenden" ended is „Signalaussetzer, verworfen", not
 „Bildverlust". The upload-stall card said „später im Tab Daten hochladen" twice. The data
-manager's last inline sentences moved into `record_texts_de.py`. Docs: the D5-vs-stopped-source
+manager's inline sentences of these paths moved into `record_texts_de.py` (the rest followed in
+round 7; the inference stale-camera sentence stays HEAD's by design, F3). Docs: the D5-vs-stopped-source
 wording, the honest-rate claims qualified by „stamp jitter ≲ 2 ms (G3)", the private LeRobot name
 (`dataset_tools._copy_and_reindex_videos`, not our `_force_recorder_vcodec`), and HEAD's repeat
 range (10–24 %, not 15–24 %).

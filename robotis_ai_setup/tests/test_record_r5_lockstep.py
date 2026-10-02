@@ -84,7 +84,7 @@ class TheSharedSentencesAreByteEqual(unittest.TestCase):
         self.assertNotIn("beschäftigt", commands)
 
     def test_the_c7_end_reads_as_a_source_stop(self):
-        # „Episode n hat dreimal Kamera-Bilder verloren" ends the session like a
+        # „Episode n konnte auch nach zwei Wiederholungen nicht …" (C7) ends the session like a
         # silent source: the page must draw the same „Abgebrochen, verworfen" row
         py = _py_constants(TEXTS_PY)
         self.assertTrue(py["FRAME_LOSS_END_DE"].startswith(py["SOURCE_STOP_PREFIX_DE"]))

@@ -104,9 +104,11 @@ def test_the_owner_sentences_verbatim():
     assert t.frame_loss_redo_de(2) == (
         'Episode 2: Kamera-Bilder gingen beim Speichern verloren (der Rechner war '
         'überlastet). Die Episode wird automatisch neu aufgenommen.')
+    # round 7: true after ANY mix under the shared cap of 2 (gap+gap+drop too)
     assert t.frame_loss_end_de(2) == (
-        'Aufnahme beendet: Episode 2 hat dreimal Kamera-Bilder verloren, der Rechner ist '
-        'überlastet. Gespeicherte Episoden bleiben erhalten.')
+        'Aufnahme beendet: Episode 2 konnte auch nach zwei Wiederholungen nicht ohne '
+        'Bildverlust gespeichert werden (der Rechner ist überlastet). Gespeicherte Episoden '
+        'bleiben erhalten.')
     assert t.resume_fps_de('Würfel', 25) == (
         'Der Datensatz „Würfel“ wurde mit 25 Bildern pro Sekunde aufgenommen. Stell unter '
         '„Erweitert“ 25 Bilder pro Sekunde ein oder wähle einen neuen Aufgabennamen.')
@@ -145,9 +147,12 @@ def test_gap_sentences():
     assert t.source_gap_de('leader', None, 1) == (
         'Signalaussetzer: Der Leader-Arm hat in Episode 1 kurz keine Daten geliefert. Die '
         'Episode wird neu aufgenommen.')
+    # round 7: no „wieder" (drop+drop+gap is the FIRST gap); the cap is two
+    # re-records in all
     assert t.source_gap_kept_de('follower', None, 5) == (
-        'Signalaussetzer: Der Follower-Arm hat in Episode 5 wieder kurz keine Daten '
-        'geliefert. Die Episode wurde trotzdem gespeichert; nimm sie neu auf, wenn sie '
+        'Signalaussetzer: Der Follower-Arm hat in Episode 5 kurz keine Daten geliefert. Die '
+        'Episode konnte auch nach zwei Wiederholungen nicht ohne Signal- oder Bildverlust '
+        'aufgenommen werden und wurde trotzdem gespeichert; nimm sie neu auf, wenn sie '
         'wichtig ist.')
     for text in (t.source_gap_de('camera', 'gripper', 1), t.source_gap_kept_de('leader', None, 1)):
         assert text.startswith(t.SOURCE_GAP_PREFIX_DE)
@@ -159,6 +164,9 @@ def test_c5_sentences():
     assert t.take_lost_slots_de(4, 3, 300, 0.1) == (
         'Episode 4: Der Rechner kam nicht hinterher, 3 von 300 Bildern fehlen (0,1 s). Die '
         'Episode wurde gespeichert; nimm sie neu auf, wenn sie wichtig ist.')
+    # round 7: singular
+    assert t.take_lost_slots_de(4, 1, 301, 0.0333).startswith(
+        'Episode 4: Der Rechner kam nicht hinterher, 1 von 301 Bildern fehlt (0,03 s).')
     assert t.take_excess_repeats_de(4, 'gripper', 12.4) == (
         'Episode 4: Die Greifer-Kamera hat zu wenige Bilder geliefert, 12 % der Bilder sind '
         'Wiederholungen. Mehr Licht hilft oft.')
@@ -274,3 +282,41 @@ def test_round6_sentences_moved_in_from_the_data_manager():
     assert t.saved_length_mismatch_de(3, ['gripper', 'scene']) == (
         'Episode 3: Video und Daten der Kamera(s) Greifer-Kamera, Szenen-Kamera sind nicht '
         'gleich lang. Diese Episode muss neu aufgenommen werden, sonst bricht das Training ab.')
+
+
+# ── round 7: the last inline sentences of data_manager.py get names ──────────
+
+def test_round7_names_for_the_remaining_inline_sentences():
+    assert t.UPLOAD_NOT_STARTED_DE == (
+        'Das Hochladen konnte nicht gestartet werden. Du kannst den Datensatz später im Tab '
+        'Daten hochladen.')
+    assert t.stale_camera_recording_de('scene', 5.0) == (
+        'Die Szenen-Kamera zeigt seit über 5 s dasselbe Bild. Die Aufnahme läuft weiter – '
+        'prüfe, ob die Kamera hängt.')
+    assert t.missing_video_de(3, ['gripper']) == (
+        'Episode 3: Für die Greifer-Kamera wurde keine Video-Datei gespeichert. Diese Episode '
+        'muss neu aufgenommen werden, sonst ist das Training unbrauchbar.')
+    assert t.missing_video_de(3, ['gripper', 'scene']).startswith(
+        'Episode 3: Für die Greifer-Kamera, Szenen-Kamera wurde keine Video-Datei gespeichert.')
+    assert t.NAMESPACE_REFUSED_DE == (
+        'Upload abgelehnt: Der Roboter darf nicht in dieses HuggingFace-Konto hochladen. '
+        'Bitte die „Benutzer-ID“ prüfen und erneut anmelden.')
+    assert t.HUB_SYNC_FAILED_DE == (
+        'Alte Dateien auf Hugging Face konnten nicht entfernt werden. Ohne Bereinigung würde '
+        'das Training gelöschte Episoden weiterverwenden — bitte den Upload erneut versuchen.')
+    assert t.HUB_TAG_FAILED_DE == (
+        'Der Versions-Tag des Datensatzes konnte nicht aktualisiert werden. Ohne aktuellen Tag '
+        'trainiert die Cloud auf einem alten Stand — bitte den Upload erneut versuchen.')
+
+
+def test_round7_the_inline_copies_are_byte_identical_while_they_exist():
+    """A moves these into record_texts_de.py; while a copy stays inline in the
+    data manager it must say exactly the same (the parser folds implicit
+    string concatenation, so the AST constant is the whole sentence)."""
+    src = _DM.read_text(encoding='utf-8')
+    constants = {node.value for node in ast.walk(ast.parse(src))
+                 if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    for name in ('UPLOAD_NOT_STARTED_DE', 'NAMESPACE_REFUSED_DE', 'HUB_SYNC_FAILED_DE',
+                 'HUB_TAG_FAILED_DE'):
+        text = getattr(t, name)
+        assert text in constants or f'record_texts_de.{name}' in src, name

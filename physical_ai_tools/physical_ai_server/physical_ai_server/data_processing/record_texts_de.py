@@ -82,9 +82,13 @@ def source_stop_de(kind: str, name=None, take_dropped: bool = True) -> str:
 SOURCE_GAP_DE = (SOURCE_GAP_PREFIX_DE + '{source} hat in Episode {n} kurz keine Daten '
                  'geliefert. Die Episode wird neu aufgenommen.')
 
-GAP_KEPT_DE = (SOURCE_GAP_PREFIX_DE + '{source} hat in Episode {n} wieder kurz keine Daten '
-               'geliefert. Die Episode wurde trotzdem gespeichert; nimm sie neu auf, wenn '
-               'sie wichtig ist.')
+# Round 7: the re-record cap (2 per episode) is SHARED by gaps and frame loss,
+# so these two sentences must stay true after any mix (gap+gap+drop,
+# drop+drop+gap): no count of one kind, no „wieder".
+GAP_KEPT_DE = (SOURCE_GAP_PREFIX_DE + '{source} hat in Episode {n} kurz keine Daten geliefert. '
+               'Die Episode konnte auch nach zwei Wiederholungen nicht ohne Signal- oder '
+               'Bildverlust aufgenommen werden und wurde trotzdem gespeichert; nimm sie neu '
+               'auf, wenn sie wichtig ist.')
 
 
 def source_gap_de(kind: str, name, episode: int) -> str:
@@ -100,8 +104,9 @@ def source_gap_kept_de(kind: str, name, episode: int) -> str:
 FRAME_LOSS_REDO_DE = ('Episode {n}: Kamera-Bilder gingen beim Speichern verloren (der '
                       'Rechner war überlastet). Die Episode wird automatisch neu aufgenommen.')
 
-FRAME_LOSS_END_DE = (SOURCE_STOP_PREFIX_DE + 'Episode {n} hat dreimal Kamera-Bilder verloren, '
-                     'der Rechner ist überlastet. Gespeicherte Episoden bleiben erhalten.')
+FRAME_LOSS_END_DE = (SOURCE_STOP_PREFIX_DE + 'Episode {n} konnte auch nach zwei Wiederholungen '
+                     'nicht ohne Bildverlust gespeichert werden (der Rechner ist überlastet). '
+                     'Gespeicherte Episoden bleiben erhalten.')
 
 
 def frame_loss_redo_de(episode: int) -> str:
@@ -142,6 +147,28 @@ SAVED_LENGTH_MISMATCH_DE = ('Episode {n}: Video und Daten der Kamera(s) {cameras
 def saved_length_mismatch_de(episode: int, cameras) -> str:
     names = ', '.join(camera_name_de(c) for c in cameras)
     return SAVED_LENGTH_MISMATCH_DE.format(n=int(episode), cameras=names)
+
+
+# The post-save video check: a camera's episode has no video file at all.
+MISSING_VIDEO_DE = ('Episode {n}: Für die {cameras} wurde keine Video-Datei gespeichert. Diese '
+                    'Episode muss neu aufgenommen werden, sonst ist das Training unbrauchbar.')
+
+
+def missing_video_de(episode: int, cameras) -> str:
+    names = ', '.join(camera_name_de(c) for c in cameras)
+    return MISSING_VIDEO_DE.format(n=int(episode), cameras=names)
+
+
+# A camera that shows the same image for a while during a RECORDING (warning
+# only; a static scene is legitimate). The inference path keeps HEAD's own
+# sentence (F3) and does not use this one.
+STALE_CAMERA_RECORDING_DE = ('Die {camera} zeigt seit über {s} s dasselbe Bild. Die Aufnahme '
+                             'läuft weiter – prüfe, ob die Kamera hängt.')
+
+
+def stale_camera_recording_de(camera, seconds: float) -> str:
+    return STALE_CAMERA_RECORDING_DE.format(camera=camera_name_de(camera),
+                                            s=f'{float(seconds):.0f}')
 
 
 # ── commands and error stops (O6, D5) ─────────────────────────────────────────
@@ -217,6 +244,23 @@ def resume_robot_de(name) -> str:
 
 # ── upload (F7, R5-4b) ────────────────────────────────────────────────────────
 
+# The end-of-session upload could not be handed to the worker.
+UPLOAD_NOT_STARTED_DE = ('Das Hochladen konnte nicht gestartet werden. Du kannst den Datensatz '
+                         'später im Tab Daten hochladen.')
+
+# The namespace guard: the rig's token does not own the target account. Names
+# neither namespace nor repo (an arbitrary-text oracle otherwise).
+NAMESPACE_REFUSED_DE = ('Upload abgelehnt: Der Roboter darf nicht in dieses HuggingFace-Konto '
+                        'hochladen. Bitte die „Benutzer-ID“ prüfen und erneut anmelden.')
+
+# The two load-bearing hub-maintenance steps after an upload.
+HUB_SYNC_FAILED_DE = ('Alte Dateien auf Hugging Face konnten nicht entfernt werden. Ohne '
+                      'Bereinigung würde das Training gelöschte Episoden weiterverwenden — bitte '
+                      'den Upload erneut versuchen.')
+HUB_TAG_FAILED_DE = ('Der Versions-Tag des Datensatzes konnte nicht aktualisiert werden. Ohne '
+                     'aktuellen Tag trainiert die Cloud auf einem alten Stand — bitte den Upload '
+                     'erneut versuchen.')
+
 UPLOAD_STALL_DE = ('Das Hochladen kommt nicht mehr voran. Prüfe die Internetverbindung des '
                    'Roboters. Der Datensatz bleibt auf dem Roboter gespeichert; du kannst ihn '
                    'später im Tab Daten hochladen.')
@@ -248,7 +292,7 @@ HF_ERROR_SENTENCES_DE = {
 
 # ── per-take integrity (C5, warn only) ────────────────────────────────────────
 
-TAKE_LOST_SLOTS_DE = ('Episode {n}: Der Rechner kam nicht hinterher, {x} von {y} Bildern fehlen '
+TAKE_LOST_SLOTS_DE = ('Episode {n}: Der Rechner kam nicht hinterher, {x} von {y} Bildern {verb} '
                       '({s} s). Die Episode wurde gespeichert; nimm sie neu auf, wenn sie '
                       'wichtig ist.')
 
@@ -267,6 +311,7 @@ def format_seconds_de(seconds: float) -> str:
 
 def take_lost_slots_de(episode: int, lost: int, planned: int, seconds: float) -> str:
     return TAKE_LOST_SLOTS_DE.format(n=int(episode), x=int(lost), y=int(planned),
+                                     verb='fehlt' if int(lost) == 1 else 'fehlen',
                                      s=format_seconds_de(seconds))
 
 

@@ -153,13 +153,16 @@ RERECORD_FINISH_WINDOW_S = 5.0
 UPLOAD_NOT_STARTED_DE = (
     'Das Hochladen konnte nicht gestartet werden. Du kannst den Datensatz '
     'später im Tab Daten hochladen.')
-# Round 5 caps, per episode number (reset when that episode is saved). O2: a
-# take with a source gap >= SOURCE_GAP_S on the source's own timeline is
-# re-recorded at most this often, then SAVED with a warning. C7: a frame loss
-# in the encoder re-records at most this often, then the session ends like
-# „Beenden“ (the take dropped, saved episodes kept, finalize + upload).
-MAX_GAP_REDOS_PER_EPISODE = 2
-MAX_FRAME_LOSS_REDOS_PER_EPISODE = 2
+# ONE re-record cap per episode number (round 6; reset when that episode is
+# saved), shared by both automatic re-records: a take with a source gap >=
+# SOURCE_GAP_S on the source's own timeline (O2/C6) and a take the encoder
+# dropped frames from (C7). Once reached, a gapped take is SAVED with a warning
+# and a lossy take ends the session like „Beenden“ (the take dropped, saved
+# episodes kept, finalize + upload).
+MAX_REDOS_PER_EPISODE = 2
+# D7 (round 6): the logged-in hub existence check (whoami + repo_exists) is
+# bounded; a hub that does not answer within this time counts as unreachable.
+HUB_CHECK_TIMEOUT_S = 15.0
 # Post-save length check (LeRobot's train-time FrameTimestampError condition):
 # a saved episode's video span may differ from length / fps by this many frames.
 SAVED_LENGTH_TOLERANCE_FRAMES = 0.5
@@ -303,14 +306,19 @@ class DataManager:
         #   _take_gap_source        O2/C6: (kind, name) of the source whose gap
         #                           makes the running take a re-record (the
         #                           node's capture integrity; cleared per take)
-        #   _gap_redos / _frame_loss_redos  re-records per episode number (caps)
+        #   _redos                  automatic re-records per episode number (the
+        #                           shared cap MAX_REDOS_PER_EPISODE)
+        #   _end_requested          F1: a FINISH/STOP that arrived while the
+        #                           recorder lock was held, applied at release
+        #   _upload_off_notice_de   F4: why this session runs without upload
         #   _commit_count           takes committed to disk (the node closes the
         #                           take's integrity on a change)
         #   _frame_added            the last record() call added a frame
         self._source_stop_requested = False
         self._take_gap_source = None
-        self._gap_redos = {}
-        self._frame_loss_redos = {}
+        self._redos = {}
+        self._end_requested = None
+        self._upload_off_notice_de = ''
         self._commit_count = 0
         self._frame_added = False
         self._cpu_checker = CPUChecker()
@@ -416,9 +424,11 @@ class DataManager:
             action):
 
         self._frame_added = False
-        # A collision discard that arrived since the last step (the trip never
-        # waits for the lock; normally the holder drains it at release).
+        # A collision discard or an end that arrived since the last step (the
+        # trip and FINISH never wait for the lock; normally the holder applies
+        # them at release).
         self._drain_collision_request_locked()
+        self._drain_end_request_locked()
 
         # A take discarded since the last tick (Wiederholen, a collision, the
         # frame-drop re-record, a dropped FINISH run): cancel its streaming
@@ -672,26 +682,25 @@ class DataManager:
             dropped = self._lerobot_dataset.streaming_dropped_frame_count()
         except Exception:  # noqa: BLE001 — detection must never block recording
             dropped = 0
+        redos = self._redos.get(episode_no, 0) if hasattr(self, '_redos') else 0
         if dropped > 0:
-            redos = self._frame_loss_redos.get(episode_no, 0) \
-                if hasattr(self, '_frame_loss_redos') else 0
-            if redos >= MAX_FRAME_LOSS_REDOS_PER_EPISODE:
+            # Never kept with lost frames: once the shared cap is reached the
+            # session ends (C7).
+            if redos >= MAX_REDOS_PER_EPISODE:
                 self._end_for_frame_loss(episode_no)
                 return False
-            if hasattr(self, '_frame_loss_redos'):
-                self._frame_loss_redos[episode_no] = redos + 1
+            if hasattr(self, '_redos'):
+                self._redos[episode_no] = redos + 1
             self._discard_episode_for_redo(dropped)
             return False
         # O2 + C6: a source was silent >= SOURCE_GAP_S on its own timeline
-        # inside this take (the node's capture integrity noted it): re-record,
-        # at most MAX_GAP_REDOS_PER_EPISODE times per episode, then keep it with
-        # a warning.
+        # inside this take (the node's capture integrity noted it): re-record
+        # while the shared cap allows, then keep it with a warning.
         gap = getattr(self, '_take_gap_source', None)
         if gap is not None:
-            redos = self._gap_redos.get(episode_no, 0) if hasattr(self, '_gap_redos') else 0
-            if redos < MAX_GAP_REDOS_PER_EPISODE:
-                if hasattr(self, '_gap_redos'):
-                    self._gap_redos[episode_no] = redos + 1
+            if redos < MAX_REDOS_PER_EPISODE:
+                if hasattr(self, '_redos'):
+                    self._redos[episode_no] = redos + 1
                 self._discard_episode_for_gap(gap, episode_no)
                 return False
             kind, name = gap
@@ -712,9 +721,8 @@ class DataManager:
             if self._lerobot_dataset.episode_buffer['size'] > 0:
                 self._lerobot_dataset.save_episode()
         self._commit_count = getattr(self, '_commit_count', 0) + 1
-        for caps in ('_gap_redos', '_frame_loss_redos'):
-            if hasattr(self, caps):
-                getattr(self, caps).pop(episode_no, None)
+        if hasattr(self, '_redos'):
+            self._redos.pop(episode_no, None)
         return True
 
     def _discard_episode_for_gap(self, gap, episode_no) -> None:
@@ -753,16 +761,11 @@ class DataManager:
         cause = getattr(self, '_last_discard_cause', None) or ('frame_loss',)
         if cause[0] == 'gap':
             _, kind, name, episode_no = cause
-            self._last_warning_message = (
-                f'{record_texts_de.SOURCE_GAP_PREFIX_DE}'
-                f'{record_texts_de.source_subject_de(kind, name)} hat in Episode '
-                f'{episode_no} kurz keine Daten geliefert. Die Episode wurde '
-                f'verworfen, die Aufnahme endet mit den schon gespeicherten Episoden.')
+            self._last_warning_message = record_texts_de.source_gap_finish_de(
+                kind, name, episode_no)
         elif cause[0] != 'frame_loss_end':
-            self._last_warning_message = (
-                f'Episode {self._record_episode_count + 1}: Kamera-Bilder '
-                f'gingen beim Speichern verloren, die Episode wurde verworfen. '
-                f'Die Aufnahme endet mit den schon gespeicherten Episoden.')
+            self._last_warning_message = record_texts_de.frame_loss_finish_de(
+                self._record_episode_count + 1)
         self._status = 'finish'
         self._finish_count_pending = False
         self._proceed_time = 0
@@ -827,10 +830,7 @@ class DataManager:
             self._clear_session_marker()
             return True
         except Exception as e:
-            warning = (
-                'Datensatz konnte nicht abgeschlossen werden — die Aufnahme '
-                'ist unvollständig und muss neu aufgenommen werden.'
-            )
+            warning = record_texts_de.FINALIZE_FAILED_DE
             self._last_warning_message = warning
             self._upload_blocked_reason_de = warning
             print(f'[FEHLER] {warning} ({e})', file=sys.stderr, flush=True)
@@ -917,11 +917,8 @@ class DataManager:
             print(f'saved-length check skipped: {e}', file=sys.stderr, flush=True)
             return
         if mismatched:
-            names = ', '.join(camera_name_de(name) for name in mismatched)
-            warning = (
-                f'Episode {self._record_episode_count + 1}: Video und Daten der '
-                f'Kamera(s) {names} sind nicht gleich lang. Diese Episode muss neu '
-                f'aufgenommen werden, sonst bricht das Training ab.')
+            warning = record_texts_de.saved_length_mismatch_de(
+                self._record_episode_count + 1, mismatched)
             self._last_warning_message = warning
             print(f'[FEHLER] {warning}', file=sys.stderr, flush=True)
 
@@ -1025,14 +1022,18 @@ class DataManager:
 
     def _release_and_drain(self, lock):
         # Drain, release, and re-check: a request set between the holder's last
-        # drain and its release (the trip's non-blocking acquire failed) is
-        # applied by whoever re-acquires here, never lost.
+        # drain and its release (the requester's non-blocking acquire failed)
+        # is applied by whoever re-acquires here, never lost. The collision
+        # discard goes first: a take a collision interrupted is discarded,
+        # never saved by an end queued beside it (Rule §2).
         while True:
             try:
                 self._drain_collision_request_locked()
+                self._drain_end_request_locked()
             finally:
                 lock.release()
-            if not getattr(self, '_collision_discard_requested', False):
+            if not (getattr(self, '_collision_discard_requested', False)
+                    or getattr(self, '_end_requested', None)):
                 break
             if not lock.acquire(blocking=False):
                 break
@@ -1055,21 +1056,45 @@ class DataManager:
             self._collision_discard_requested = False
             self.re_record()
 
+    def request_end(self, kind='finish') -> bool:
+        """F1 (round 6, owner: the server queues the end): FINISH or STOP
+        from /task/command; NEVER waits for the recorder lock and is never
+        refused as busy. Applied now (True) when the lock is free, else (False)
+        queued and applied the moment the holder releases it — e.g. right after
+        the official ~1 s discard that „Wiederholen“ started, so „Verwerfen und
+        beenden“ always ends the session (Q3/Q4 judged when it is applied)."""
+        self._end_requested = 'stop' if kind == 'stop' else 'finish'
+        lock = self._recorder_lock()
+        if lock.acquire(blocking=False):
+            self._release_and_drain(lock)
+            return True
+        return False
+
+    def _drain_end_request_locked(self) -> None:
+        kind = getattr(self, '_end_requested', None)
+        if kind:
+            self._end_requested = None
+            if kind == 'stop':
+                self.record_stop()
+            else:
+                self.record_finish()
+
     def saved_episode_count(self) -> int:
         return int(getattr(self, '_record_episode_count', 0))
 
     @_recorder_locked
-    def end_after_error(self) -> bool:
+    def end_after_error(self):
         """D5 (owner): an error stop ends the session WITHOUT losing what was
         saved. With a dataset: count an episode a latched save already
         committed (the Q7/STOP rule), drop the running take through the
-        official discard, finalize, clear the crash marker — and upload
-        NOTHING (the student uploads from the Daten tab). Afterwards the
-        DataManager is inert. Returns True when the dataset was finalized;
-        False without a dataset (nothing changes, as before) or when finalize
-        failed (its German reason is on _upload_blocked_reason_de)."""
+        official discard, finalize — and upload NOTHING (the student uploads
+        from the Daten tab). Afterwards the DataManager is inert. Returns True
+        when the dataset was finalized (the crash marker is cleared by the
+        finalize); False when finalize failed (F3, round 6: the marker STAYS —
+        the dataset is incomplete — and the German reason is on
+        _upload_blocked_reason_de); None without a dataset (nothing changes)."""
         if getattr(self, '_lerobot_dataset', None) is None:
-            return False
+            return None
         status = self._status
         if getattr(self, '_on_saving', False) and (
                 (status == 'save' and getattr(self, '_save_count_pending', True))
@@ -1088,9 +1113,7 @@ class DataManager:
         self._status = 'stop'
         self._stop_save_completed = True
         self._upload_enqueued = True          # never upload after an error stop
-        finalized = self._finalize_dataset()
-        self._clear_session_marker()
-        return finalized
+        return self._finalize_dataset()
 
     @_recorder_locked
     def record_early_save(self) -> str:
@@ -1625,25 +1648,36 @@ class DataManager:
                 shutil.rmtree(root)
 
         if self._task_info.push_to_hub:
-            # D7 (round 5): a LOGGED-IN existence check. The anonymous request
-            # this replaces answered 401/404 for a PRIVATE repo, which read as
+            # D7: a LOGGED-IN existence check. The anonymous request this
+            # replaced answered 401/404 for a PRIVATE repo, which read as
             # „absent“: a fresh local dataset was created and the end-of-session
             # upload + orphan sweep then overwrote the student's private hub
-            # dataset. repo_exists() swallows only RepositoryNotFound/Gated;
-            # ANY failure to ask (network, 401/403/429/5xx, no or invalid
-            # token) refuses the start in German, never „absent“. Runs outside
-            # the recorder lock (check_lerobot_dataset).
-            try:
-                api = HfApi()       # the rig's stored token
-                api.whoami()
-                exists = api.repo_exists(repo_id, repo_type='dataset')
-            except Exception as e:  # noqa: BLE001 — every failure is a refusal
-                print(f'Hub existence check failed for {repo_id} '
-                      f'({hf_errors.classify_hf_error(e) or "unclassified"}): {e!r}',
-                      file=sys.stderr, flush=True)
-                self._last_warning_message = record_texts_de.HUB_CHECK_REFUSED_DE
-                raise HubCheckRefused(repo_id) from e
-            if exists:
+            # dataset. A failure to ask is never „absent“ (round 6, F4):
+            #   no token / a token the hub refuses at whoami -> the session runs
+            #     WITHOUT upload (nothing can be overwritten), with a notice;
+            #   the hub refuses the repo query (401/403) -> refused, naming the
+            #     token (HUB_CHECK_AUTH_DE);
+            #   anything else (network, 429, 5xx, no answer within
+            #     HUB_CHECK_TIMEOUT_S) -> refused, HUB_CHECK_REFUSED_DE.
+            # Runs outside the recorder lock (check_lerobot_dataset).
+            verdict, error = self._hub_existence(repo_id)
+            if verdict in ('no_token', 'token_refused'):
+                self._task_info.push_to_hub = False
+                self._upload_off_notice_de = (
+                    record_texts_de.UPLOAD_OFF_NO_TOKEN_DE if verdict == 'no_token'
+                    else record_texts_de.UPLOAD_OFF_TOKEN_INVALID_DE)
+                print(f'Hub existence check for {repo_id}: {verdict} ({error!r}); '
+                      f'this session records WITHOUT upload', file=sys.stderr, flush=True)
+                return False
+            if verdict in ('auth_refused', 'unreachable'):
+                print(f'Hub existence check failed for {repo_id}: {verdict} '
+                      f'({hf_errors.classify_hf_error(error) if error else "timeout"}): '
+                      f'{error!r}', file=sys.stderr, flush=True)
+                self._last_warning_message = (
+                    record_texts_de.HUB_CHECK_AUTH_DE if verdict == 'auth_refused'
+                    else record_texts_de.HUB_CHECK_REFUSED_DE)
+                raise HubCheckRefused(repo_id) from error
+            if verdict == 'exists':
                 print(f'Dataset {repo_id} exists on Huggingface, downloading...')
                 try:
                     self._download_dataset(repo_id)
@@ -1655,6 +1689,54 @@ class DataManager:
                 return True
 
         return False
+
+    @staticmethod
+    def _is_no_token(error) -> bool:
+        seen = 0
+        while error is not None and seen < 8:
+            if type(error).__name__ == 'LocalTokenNotFoundError':
+                return True
+            error = error.__cause__ or error.__context__
+            seen += 1
+        return False
+
+    def _hub_existence(self, repo_id):
+        """D7: ask the hub, logged in, whether ``repo_id`` exists — bounded by
+        HUB_CHECK_TIMEOUT_S (a thread joined with a timeout: a black-holed hub
+        must not hang „Start“). Returns (verdict, error), verdict one of
+        'exists', 'absent', 'no_token', 'token_refused' (whoami refused the
+        token), 'auth_refused' (the repo query was refused) or 'unreachable'
+        (network, 429, 5xx, unclassified, or no answer in time)."""
+        result = {}
+
+        def _ask():
+            try:
+                api = HfApi()       # the rig's stored token
+                try:
+                    api.whoami()
+                except Exception as e:  # noqa: BLE001 — classified below
+                    result['stage'], result['error'] = 'whoami', e
+                    return
+                result['exists'] = bool(api.repo_exists(repo_id, repo_type='dataset'))
+            except Exception as e:  # noqa: BLE001 — classified below
+                result['stage'], result['error'] = 'exists', e
+
+        worker = threading.Thread(target=_ask, name='hub-existence-check', daemon=True)
+        worker.start()
+        worker.join(HUB_CHECK_TIMEOUT_S)
+        if worker.is_alive():
+            return 'unreachable', None
+        error = result.get('error')
+        if error is None:
+            return ('exists' if result.get('exists') else 'absent'), None
+        kind = hf_errors.classify_hf_error(error)
+        if result.get('stage') == 'whoami':
+            if self._is_no_token(error):
+                return 'no_token', error
+            if kind == 'auth':
+                return 'token_refused', error
+            return 'unreachable', error
+        return ('auth_refused' if kind == 'auth' else 'unreachable'), error
 
     def check_lerobot_dataset(self, images, joint_list):
         """Open or create the session's dataset on the first tick.
@@ -1696,6 +1778,11 @@ class DataManager:
                 with self.locked():
                     if self._lerobot_dataset is None:
                         self._lerobot_dataset = dataset
+                    notice = getattr(self, '_upload_off_notice_de', '')
+                    if notice and not self._last_warning_message:
+                        # F4: the page learns the session runs without upload
+                        # from the next status tick's [WARNUNG].
+                        self._last_warning_message = notice
                 return True
             dataset.set_robot_type(self._robot_type)
             return True

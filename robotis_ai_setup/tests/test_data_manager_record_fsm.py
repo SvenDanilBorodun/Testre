@@ -1518,18 +1518,20 @@ class ErrorStopFinalizesTest(_FsmTestCase):
     def test_without_a_dataset_nothing_happens(self):
         dm, up = make()
         dm._lerobot_dataset = None
-        self.assertFalse(dm.end_after_error())
+        self.assertIsNone(dm.end_after_error())
         self.assertEqual(up, [])
 
-    def test_a_failing_finalize_still_clears_the_marker_and_reports(self):
+    def test_a_failing_finalize_keeps_the_marker_and_reports(self):
+        # F3 (round 6): the crash marker is cleared ONLY when finalize
+        # succeeded; an incomplete dataset keeps it (the next boot says so).
         dm, up = make(n=3)
         dm._session_marker_enabled = True
         run_until(dm, 'run')
         ticks(dm, 10)
         dm._lerobot_dataset.finalize_raises = True
-        self.assertFalse(dm.end_after_error())
-        self.assertFalse(dm._session_marker_path().exists())
-        self.assertTrue(dm._upload_blocked_reason_de)
+        self.assertIs(dm.end_after_error(), False)
+        self.assertTrue(dm._session_marker_path().exists())
+        self.assertEqual(dm._upload_blocked_reason_de, _texts().FINALIZE_FAILED_DE)
         self.assertEqual(up, [])
 
     def test_saved_episode_count_survives_for_the_sentence(self):
@@ -1686,9 +1688,10 @@ class FrameLossCapTest(_FsmTestCase):
         self.assertEqual(len(up), 1)
 
     def test_the_frame_loss_check_comes_before_the_gap_cap(self):
-        # A gapped take that may be kept is still never kept with lost frames.
+        # A gapped take that may be kept is still never kept with lost frames:
+        # with the cap reached, the loss ends the session instead.
         dm, _ = make(n=3, reset=0)
-        dm._gap_redos[1] = 2                         # the gap cap is reached
+        dm._redos[1] = 2                             # the shared cap is reached
         dm._lerobot_dataset.drop_on_save = True
         run_until(dm, 'run')
         ticks(dm, 40)
@@ -1696,7 +1699,7 @@ class FrameLossCapTest(_FsmTestCase):
         dm.record_early_save()
         tick(dm)
         self.assertEqual(dm._lerobot_dataset.committed, 0)
-        self.assertEqual(dm.get_status(), 'reset')
+        self.assertEqual(dm.get_status(), 'finish')
 
     def test_a_loss_under_stop_completes_the_stop(self):
         dm, up = make(n=3, reset=0)
@@ -1708,6 +1711,187 @@ class FrameLossCapTest(_FsmTestCase):
         self.assertIn(True, ticks(dm, 4))
         self.assertEqual(dm._record_episode_count, 1)
         self.assertEqual(dm._lerobot_dataset.committed, 1)
+
+
+class SharedRedoCapTest(_FsmTestCase):
+    """Round 6: ONE re-record cap of MAX_REDOS_PER_EPISODE (2) per episode,
+    shared by source-gap and frame-loss discards. A third gapped take is kept
+    with GAP_KEPT_DE; a third lossy take ends the session (C7) — reachable
+    whatever mix led there."""
+
+    def _take(self, dm, *, gap=False, drop=False):
+        run_until(dm, 'run')
+        ticks(dm, 40)
+        dm._lerobot_dataset.drop_on_save = drop
+        if gap:
+            dm.note_take_gap(('leader', None))
+        dm.record_early_save()
+        tick(dm)
+        dm._lerobot_dataset.drop_on_save = False
+
+    def test_the_cap_is_two(self):
+        MAX_REDOS_PER_EPISODE = MOD.MAX_REDOS_PER_EPISODE
+        self.assertEqual(MAX_REDOS_PER_EPISODE, 2)
+
+    def test_gap_drop_gap_keeps_the_third(self):
+        dm, _ = make(n=2, reset=0)
+        self._take(dm, gap=True)
+        self.assertEqual(dm.get_status(), 'reset')
+        self._take(dm, drop=True)
+        self.assertEqual(dm.get_status(), 'reset')
+        self._take(dm, gap=True)
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+        self.assertEqual(dm.get_current_record_status().error,
+                         '[WARNUNG] ' + _texts().source_gap_kept_de('leader', None, 1))
+
+    def test_gap_gap_drop_ends_the_session(self):
+        dm, up = make(n=2, reset=0)
+        self._take(dm, gap=True)
+        self._take(dm, gap=True)
+        self._take(dm, drop=True)
+        self.assertEqual(dm.get_status(), 'finish')
+        self.assertEqual(dm.get_current_record_status().error,
+                         '[WARNUNG] ' + _texts().frame_loss_end_de(1))
+        self.assertIn(True, ticks(dm, 4))
+        self.assertEqual(dm._lerobot_dataset.committed, 0)
+        self.assertEqual(up, [])
+
+    def test_drop_gap_drop_ends_the_session(self):
+        dm, _ = make(n=2, reset=0)
+        self._take(dm, drop=True)
+        self._take(dm, gap=True)
+        self._take(dm, drop=True)
+        self.assertEqual(dm.get_status(), 'finish')
+
+    def test_a_saved_episode_restarts_the_count(self):
+        dm, _ = make(n=3, reset=0)
+        self._take(dm, gap=True)
+        self._take(dm, drop=True)
+        self._take(dm)                                # saved: episode 1 done
+        ticks(dm, 2)
+        self.assertEqual(dm._record_episode_count, 1)
+        self._take(dm, drop=True)                     # episode 2's first: a redo
+        self.assertEqual(dm.get_status(), 'reset')
+
+
+class _BlockingDiscardDataset(_FakeDataset):
+    """The official discard waits (like LeRobot's ~1 s cancel) until released."""
+
+    def __init__(self):
+        super().__init__()
+        import threading
+        self.in_discard = threading.Event()
+        self.release = threading.Event()
+
+    def discard_episode(self):
+        self.in_discard.set()
+        self.release.wait(5)
+        super().discard_episode()
+
+
+class QueuedEndTest(_FsmTestCase):
+    """F1 (round 6, owner: the server queues the end): FINISH/STOP never wait
+    for the recorder lock and are never refused as busy. Applied at once when
+    the lock is free, else the moment the holder releases it (like the
+    collision discard) — so „Verwerfen und beenden“ (RERECORD, then FINISH while
+    the official discard runs) always ends the session with the discarded take
+    dropped; a run that started after the RERECORD is still dropped (Q4)."""
+
+    def _discarding(self, reset):
+        import threading
+        dm, up = make(n=3, reset=reset)
+        dm._lerobot_dataset = _BlockingDiscardDataset()
+        run_until(dm, 'reset')                        # episode 1 saved
+        run_until(dm, 'run')
+        ticks(dm, 45)                                 # 1.5 s into episode 2
+        self.assertTrue(dm.rerecord_from_command())
+        tick_thread = threading.Thread(target=tick, args=(dm,))
+        tick_thread.start()                           # the tick runs the discard
+        self.assertTrue(dm._lerobot_dataset.in_discard.wait(5))
+        return dm, up, tick_thread
+
+    def test_finish_during_the_discard_is_accepted_and_ends_the_session(self):
+        import time as real_time
+        for reset in (0, 2):
+            with self.subTest(reset=reset):
+                dm, up, tick_thread = self._discarding(reset)
+                started = real_time.monotonic()
+                self.assertFalse(dm.request_end('finish'))     # queued, not refused
+                self.assertLess(real_time.monotonic() - started, 0.05)
+                self.assertNotEqual(dm.get_status(), 'finish')
+                dm._lerobot_dataset.release.set()
+                tick_thread.join(5)
+                self.assertEqual(dm.get_status(), 'finish')
+                self.assertIn(True, ticks(dm, 6))
+                self.assertEqual(dm._lerobot_dataset.committed, 1)   # only episode 1
+                self.assertEqual(dm._record_episode_count, 1)
+                self.assertEqual(len(up), 1)
+
+    def test_stop_is_queued_the_same_way(self):
+        dm, up, tick_thread = self._discarding(0)
+        self.assertFalse(dm.request_end('stop'))
+        dm._lerobot_dataset.release.set()
+        tick_thread.join(5)
+        self.assertEqual(dm.get_status(), 'stop')
+        self.assertIn(True, ticks(dm, 6))
+        self.assertEqual(dm._record_episode_count, 1)
+
+    def test_a_free_lock_applies_the_end_now(self):
+        dm, _ = make()
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        self.assertTrue(dm.request_end('finish'))
+        self.assertEqual(dm.get_status(), 'finish')
+
+    def test_q4_still_drops_a_run_that_started_after_the_rerecord(self):
+        import threading
+        dm, up = make(n=3, reset=0)
+        run_until(dm, 'reset')
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        dm.rerecord_from_command()
+        run_until(dm, 'run')
+        ticks(dm, 40)                                 # > 1 s: Q3 alone would keep it
+        held, release = threading.Event(), threading.Event()
+
+        def _holder():
+            with dm.locked():
+                held.set()
+                release.wait(5)
+        t = threading.Thread(target=_holder)
+        t.start()
+        self.assertTrue(held.wait(5))
+        self.assertFalse(dm.request_end('finish'))
+        release.set()
+        t.join(5)
+        self.assertEqual(dm.get_status(), 'finish')
+        self.assertIn(True, ticks(dm, 6))
+        self.assertEqual(dm._record_episode_count, 1)
+        self.assertEqual(dm._lerobot_dataset.committed, 1)
+
+    def test_a_collision_queued_with_the_end_discards_first(self):
+        # Rule §2: the take a collision interrupted is discarded, never saved
+        # by a FINISH that happened to be queued beside it.
+        import threading
+        dm, up = make(n=3, reset=0)
+        run_until(dm, 'run')
+        ticks(dm, 45)
+        held, release = threading.Event(), threading.Event()
+
+        def _holder():
+            with dm.locked():
+                held.set()
+                release.wait(5)
+        t = threading.Thread(target=_holder)
+        t.start()
+        self.assertTrue(held.wait(5))
+        self.assertFalse(dm.request_end('finish'))
+        self.assertFalse(dm.request_collision_discard())
+        release.set()
+        t.join(5)
+        self.assertIn(True, ticks(dm, 6))
+        self.assertEqual(dm._lerobot_dataset.committed, 0)
+        self.assertEqual(up, [])
 
 
 class SourceStopTest(_FsmTestCase):
@@ -1826,10 +2010,11 @@ class ResumeCompatibilityTest(_FsmTestCase):
 
 
 class _FakeHub:
-    def __init__(self, *, whoami_error=None, exists=False, exists_error=None):
+    def __init__(self, *, whoami_error=None, exists=False, exists_error=None, hang=None):
         self.whoami_error = whoami_error
         self.exists = exists
         self.exists_error = exists_error
+        self.hang = hang                     # an Event the whoami waits on (a black hole)
         self.calls = []
 
     def __call__(self, *a, **k):
@@ -1837,6 +2022,8 @@ class _FakeHub:
 
     def whoami(self):
         self.calls.append('whoami')
+        if self.hang is not None:
+            self.hang.wait(10)
         if self.whoami_error:
             raise self.whoami_error
         return {'name': 'maxmuster', 'orgs': []}
@@ -1846,6 +2033,12 @@ class _FakeHub:
         if self.exists_error:
             raise self.exists_error
         return self.exists
+
+
+def _http_error(code):
+    error = RuntimeError(f'HTTP {code}')
+    error.response = types.SimpleNamespace(status_code=code)
+    return error
 
 
 class HubExistenceCheckTest(_FsmTestCase):
@@ -1875,8 +2068,8 @@ class HubExistenceCheckTest(_FsmTestCase):
         return dm
 
     def test_an_unreachable_hub_refuses_before_any_dataset_exists(self):
-        for error in (ConnectionError('refused'), RuntimeError('401 Unauthorized'),
-                      TimeoutError('timed out')):
+        for error in (ConnectionError('refused'), TimeoutError('timed out'),
+                      _http_error(503), _http_error(429)):
             with self.subTest(error=error):
                 dm = self._dm(_FakeHub(whoami_error=error))
                 self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
@@ -1889,6 +2082,65 @@ class HubExistenceCheckTest(_FsmTestCase):
         dm = self._dm(_FakeHub(exists_error=RuntimeError('503')))
         self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
         self.assertEqual(self.created, [])
+        self.assertEqual(dm._last_warning_message, _texts().HUB_CHECK_REFUSED_DE)
+
+    def test_a_refused_existence_query_names_the_token(self):
+        # The token passed whoami but the hub refuses the repo query (401/403).
+        dm = self._dm(_FakeHub(exists_error=_http_error(403)))
+        self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+        self.assertEqual(self.created, [])
+        self.assertEqual(dm._last_warning_message, _texts().HUB_CHECK_AUTH_DE)
+
+    def test_no_token_starts_without_upload_and_says_so(self):
+        # F4 (round 6): no token stored -> the session records, upload OFF.
+        error = type('LocalTokenNotFoundError', (Exception,), {})('Token is required')
+        dm = self._dm(_FakeHub(whoami_error=error))
+        self.assertTrue(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+        self.assertEqual(self.created, ['maxmuster/omx_f_Wuerfel-in-die-Schale'])
+        self.assertFalse(dm._task_info.push_to_hub)
+        self.assertEqual(dm.get_current_record_status().error,
+                         '[WARNUNG] ' + _texts().UPLOAD_OFF_NO_TOKEN_DE)
+
+    def test_an_expired_token_starts_without_upload_and_says_so(self):
+        for error in (_http_error(401), RuntimeError('401 Unauthorized')):
+            with self.subTest(error=error):
+                dm = self._dm(_FakeHub(whoami_error=error))
+                self.assertTrue(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+                self.assertFalse(dm._task_info.push_to_hub)
+                self.assertEqual(dm.get_current_record_status().error,
+                                 '[WARNUNG] ' + _texts().UPLOAD_OFF_TOKEN_INVALID_DE)
+
+    def test_a_session_without_upload_never_uploads(self):
+        dm = self._dm(_FakeHub(whoami_error=_http_error(401)))
+        uploads = []
+        dm._upload_callback = lambda *a: uploads.append(a)
+        self.assertTrue(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+        dm._lerobot_dataset = _FakeDataset()
+        dm.create_frame = lambda images, state, action: {'x': 1}
+        for _ in range(3000):
+            if tick(dm):
+                break
+        self.assertEqual(dm._record_episode_count, 3)
+        self.assertEqual(uploads, [])
+
+    def test_a_black_holed_hub_is_refused_within_the_bound(self):
+        import threading
+        import time as real_time
+        self.assertEqual(MOD.HUB_CHECK_TIMEOUT_S, 15.0)
+        saved = MOD.HUB_CHECK_TIMEOUT_S
+        MOD.HUB_CHECK_TIMEOUT_S = 0.3
+        hang = threading.Event()
+        try:
+            dm = self._dm(_FakeHub(hang=hang))
+            started = real_time.monotonic()
+            self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+            elapsed = real_time.monotonic() - started
+        finally:
+            MOD.HUB_CHECK_TIMEOUT_S = saved
+            hang.set()
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(self.created, [])
+        self.assertEqual(dm._last_warning_message, _texts().HUB_CHECK_REFUSED_DE)
 
     def test_absent_creates_a_new_dataset(self):
         hub = _FakeHub(exists=False)

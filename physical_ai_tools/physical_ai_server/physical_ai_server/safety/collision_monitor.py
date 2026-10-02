@@ -22,9 +22,14 @@
 #        BEST_EFFORT; a one-shot message can drop — and re-sending converges: once motion
 #        stops, commanded pose == measured pose). The arm does NOT auto-home.
 #     3. if recording: discard the in-progress (contaminated) episode via
-#        data_manager.re_record() and halt capture — nothing after the trip is recorded
-#        (Rule §2). Prior saved episodes are kept, and the fact that a recording was in flight
-#        is remembered so RESUME_TELEOP can continue the SAME session (see below).
+#        data_manager.request_collision_discard() (never waits; the record step in flight
+#        applies it) and halt capture — nothing after the trip is recorded (Rule §2). Prior
+#        saved episodes are kept, and the fact that a recording was in flight is remembered
+#        so RESUME_TELEOP can continue the SAME session (see below).
+#
+# Threads (round 5, C1-A): the three subscriptions run on the server's sensor-ingest thread;
+# a trip detected there is latched (_collision_trip_pending, under the record publish lock)
+# and performed on the main executor by _on_trip_gc. Relax/home/resync are unchanged.
 #     4. surface phase=COLLISION on /task/status (re-asserted by the watchdog for late page
 #        loads). The React CollisionModal shows step 1: "Hindernis entfernen" + button
 #        „Follower in Grundstellung fahren".
@@ -66,6 +71,7 @@
 # (no leader), and hand-guiding presses the arm by hand at ~0 velocity (looks like a collision),
 # so a trip would freeze/relax against a non-existent leader with no recovery path.
 
+import contextlib
 import os
 import threading
 import time
@@ -178,6 +184,16 @@ LEADER_ACTIVE_FRESH_WINDOW_S = 2.0
 # leaving the guard armed for genuine teleop/recording collisions.
 COLLISION_SETTLE_WINDOW_S = 0.5
 
+# C1-A (Aufnahme 2.0 round 5): the three monitor subscriptions live on the
+# server's sensor-ingest node with this history depth — the same value as
+# communicator.SENSOR_QOS_DEPTH. Their reliability is unchanged (the default
+# RELIABLE profile): /leader/joint_states delivery is safety-load-bearing.
+SENSOR_QOS_DEPTH = 32
+
+# The detector lock's type, bound at import (tests swap this module's
+# `threading` for a stub while they drive the recovery thread).
+_DetectorLock = threading.Lock
+
 COLLISION_MESSAGE_DE = (
     'STOPP — Kollision erkannt: Der Arm wurde gegen ein Hindernis gedrückt und angehalten. '
     'Entferne zuerst das Hindernis und klicke dann auf „Follower in Grundstellung fahren".'
@@ -220,6 +236,11 @@ class CollisionMonitorMixin:
         # defensively coupled to _collision_active, which _assert_no_other_active blocks on).
         self._collision_interrupted_recording = False
         self._collision_interrupted_mode = None
+        # F1 (Aufnahme 2.0, owner-approved): a FORCED recovery ends an interrupted
+        # recording like FINISH (finalize + upload per the DataManager's own guards)
+        # instead of leaving it unfinalized. Set by force_resume_teleop, consumed by
+        # _on_resync_complete.
+        self._collision_end_recording = False
         # Relax-in-place delivery state (see RELAX_* constants).
         self._relax_timer = None
         self._relax_sends = 0
@@ -243,6 +264,23 @@ class CollisionMonitorMixin:
         # F5 — monotonic() until which detection is suppressed after a gated mode
         # (on_manual / on_workflow) or a re-torque; 0.0 = not settling.
         self._collision_settle_until_mono = 0.0
+
+        # C1-A (round 5, owner-approved): detection runs on the sensor-ingest
+        # thread; the trip is handed to the main executor. _collision_trip_pending
+        # is the latch the sensor thread sets (under the server's
+        # _record_publish_lock, with a session-generation bump) before it
+        # triggers _trip_gc; _on_trip_gc performs the trip and clears it. The
+        # detector lock serialises update() (sensor thread) with every reset()
+        # (sensor-thread gates and the main thread's resync alike).
+        self._collision_detector_lock = _DetectorLock()
+        self._collision_trip_pending = None
+        self._trip_gc = None
+        # Round 6 (F2): the watchdog no longer shares the default group with the
+        # resync completion, so [read the state, publish the flag] (watchdog)
+        # and [clear the state, publish False] (_on_resync_complete) are each
+        # done under this lock — a watchdog True can never land after the
+        # resync's False.
+        self._collision_flag_lock = _DetectorLock()
 
         self._collision_resume_tol = _env_float(
             'EDUBOTICS_COLLISION_RESUME_TOL_RAD', DEFAULT_RESUME_TOL_RAD)
@@ -305,14 +343,23 @@ class CollisionMonitorMixin:
         self._collision_status_pub = self.create_publisher(TaskStatus, '/task/status', 10)
 
         # 5 Hz watchdog: re-assert the latch + re-publish the banner while stopped.
+        # Round 6 (F2): in the node's own collision group with the trip
+        # hand-over (mutually exclusive with it), not queued behind
+        # /task/command callbacks in the default group.
         self._collision_watchdog = self.create_timer(
-            WATCHDOG_PERIOD_S, self._collision_watchdog_cb)
+            WATCHDOG_PERIOD_S, self._collision_watchdog_cb,
+            **self._collision_group_kwargs())
 
         # Always know the follower/leader poses (needed for relax/home/resync).
-        self.create_subscription(
-            JointState, JOINT_STATES_TOPIC, self._collision_follower_state_cb, 10)
-        self.create_subscription(
-            JointState, LEADER_JOINT_STATES_TOPIC, self._collision_leader_state_cb, 10)
+        # C1-A: on the sensor-ingest node (its own SingleThreadedExecutor
+        # thread), depth SENSOR_QOS_DEPTH; the main node when there is none.
+        sensor_node = getattr(self, '_sensor_node', None) or self
+        sensor_node.create_subscription(
+            JointState, JOINT_STATES_TOPIC, self._collision_follower_state_cb,
+            SENSOR_QOS_DEPTH)
+        sensor_node.create_subscription(
+            JointState, LEADER_JOINT_STATES_TOPIC, self._collision_leader_state_cb,
+            SENSOR_QOS_DEPTH)
 
         if not _HAVE_GPIO_STATE_MSG:
             self.get_logger().warning(
@@ -324,8 +371,16 @@ class CollisionMonitorMixin:
             self.get_logger().info(
                 '[KOLLISION] Teleop collision guard disabled via EDUBOTICS_COLLISION_ENABLED=0.')
             return
-        self.create_subscription(
-            GpioStateMsg, gpio_topic, self._gpio_states_cb, 10)
+        # C1-A: the trip is handed from the sensor thread to the MAIN node's
+        # default group (where all trip handling ran before) by this guard
+        # condition. A host without guard conditions (unit-test doubles) trips
+        # inline instead (_hand_over_trip).
+        create_guard_condition = getattr(self, 'create_guard_condition', None)
+        if create_guard_condition is not None:
+            self._trip_gc = create_guard_condition(
+                self._on_trip_gc, **self._collision_group_kwargs())
+        sensor_node.create_subscription(
+            GpioStateMsg, gpio_topic, self._gpio_states_cb, SENSOR_QOS_DEPTH)
         self.get_logger().info(
             f'[KOLLISION] Teleop collision guard armed (gpio topic: {gpio_topic}, '
             f'debounce {self._collision_detector.debounce_ticks} ticks, '
@@ -419,7 +474,8 @@ class CollisionMonitorMixin:
     # ---- detection -----------------------------------------------------------------------
 
     def _gpio_states_cb(self, msg):
-        # This subscription runs continuously (~100 Hz) on the executor and parses
+        # This subscription runs continuously (~100 Hz) on the sensor-ingest executor
+        # (round 5; the main node when there is none) and parses
         # mixed-model Dynamixel gpio data (XL430 'Present Load' + XL330 'Present
         # Current' + 'Hardware Error Status'). An unhandled exception here would
         # propagate out of MultiThreadedExecutor.spin() and KILL the node — main()
@@ -435,9 +491,63 @@ class CollisionMonitorMixin:
             self.get_logger().error(
                 f'[KOLLISION] gpio state processing failed (ignored): {exc}')
 
+    def _collision_group_kwargs(self):
+        """``callback_group=`` for the trip hand-over and the watchdog: the
+        node's own collision group (round 6, F2); none on a host without it
+        (unit-test doubles), which keeps the default group."""
+        group = getattr(self, '_collision_cb_group', None)
+        return {'callback_group': group} if group is not None else {}
+
+    def _detector_reset(self):
+        """Reset the detector under its lock (C1-A): update() runs on the
+        sensor thread, a reset may come from either thread."""
+        lock = getattr(self, '_collision_detector_lock', None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            self._collision_detector.reset()
+
+    def _detector_update(self, efforts, velocities, err_bits):
+        lock = getattr(self, '_collision_detector_lock', None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            return self._collision_detector.update(
+                efforts, velocities, err_bits, mode_is_inference=self.on_inference)
+
+    def _hand_over_trip(self, result):
+        """C1-A, sensor thread: latch the trip and wake the main executor.
+
+        Under the server's _record_publish_lock (µs, never held across work):
+        set _collision_trip_pending and bump _record_session_gen. From that
+        instant no record tick adds a frame or publishes a status (the tick and
+        its publish guard check both), so nothing after the trip is recorded.
+        Then trigger _trip_gc; _on_trip_gc performs the trip on the main
+        executor. A host without a guard condition trips inline (as before)."""
+        guard = getattr(self, '_trip_gc', None)
+        if guard is None:
+            self._trigger_collision_stop(result)
+            return
+        plock = getattr(self, '_record_publish_lock', None)
+        with (plock if plock is not None else contextlib.nullcontext()):
+            self._collision_trip_pending = result
+            self._record_session_gen = getattr(self, '_record_session_gen', 0) + 1
+        guard.trigger()
+
+    def _on_trip_gc(self):
+        """C1-A, main executor (default group): perform the trip the sensor
+        thread handed over, once, then clear the latch. Never raises into the
+        executor (main() catches only KeyboardInterrupt)."""
+        result = getattr(self, '_collision_trip_pending', None)
+        if result is None:
+            return
+        try:
+            if not self._collision_active:
+                self._trigger_collision_stop(result)
+        except Exception as exc:  # noqa: BLE001 - the guard must never crash the node
+            self.get_logger().error(f'[KOLLISION] trip hand-over failed: {exc}')
+        finally:
+            self._collision_trip_pending = None
+
     def _process_gpio_states(self, msg):
-        if self._collision_active:
-            return  # already stopped; ignore until resume
+        if self._collision_active or getattr(self, '_collision_trip_pending', None) is not None:
+            return  # already stopped, or a trip in hand-over; ignore until resume
         # Rule §2 scope: the teleop force/collision guard is teleop/recording-ONLY.
         # During a Roboter-Studio workflow run (on_workflow=True, on_inference=False)
         # the follower presses on the table at ~0 velocity by DESIGN (a `pickup`
@@ -457,7 +567,7 @@ class CollisionMonitorMixin:
         # velocity, which is indistinguishable from a collision. Gate it off exactly
         # like on_workflow/on_inference: no detection, reset the debounce counters.
         if getattr(self, 'on_workflow', False) or getattr(self, 'on_manual', False):
-            self._collision_detector.reset()
+            self._detector_reset()
             # F5 — keep the settle window armed WHILE gated so the FIRST ticks
             # AFTER the mode ends (a re-torque holding-current spike) are also
             # suppressed, not just the gated ticks themselves.
@@ -468,7 +578,7 @@ class CollisionMonitorMixin:
         # a short window so a transient re-torque holding-current spike can't trip
         # the leader-requiring recovery (which cannot run in follower-only mode).
         if time.monotonic() < self._collision_settle_until_mono:
-            self._collision_detector.reset()
+            self._detector_reset()
             return
         efforts, err_bits = {}, {}
         # Jazzy DynamicInterfaceGroupValues names its groups 'interface_groups'; the legacy
@@ -494,8 +604,7 @@ class CollisionMonitorMixin:
                 err_bits[joint] = int(round(float(raw_err)))
         velocities = {j: self._collision_follower_vel.get(j, 0.0) for j in ARM_JOINT_NAMES}
 
-        result = self._collision_detector.update(
-            efforts, velocities, err_bits, mode_is_inference=self.on_inference)
+        result = self._detector_update(efforts, velocities, err_bits)
         if result.tripped:
             # F5 — never arm the LEADER-REQUIRING two-step recovery when no leader
             # is live (follower-only mode). The recovery freezes the arm and waits
@@ -511,9 +620,9 @@ class CollisionMonitorMixin:
             # this guard. test_press_trips_in_teleop_recording_mode is the
             # regression guard that a live leader keeps the recovery armed.
             if not self.leader_appears_active():
-                self._collision_detector.reset()
+                self._detector_reset()
                 return
-            self._trigger_collision_stop(result)
+            self._hand_over_trip(result)
 
     def note_collision_resettle(self, window_s=COLLISION_SETTLE_WINDOW_S):
         """F5 — arm the collision settle window (suppress detection briefly).
@@ -565,19 +674,34 @@ class CollisionMonitorMixin:
         #    two-step recovery can SEAMLESSLY resume the SAME session on RESUME_TELEOP — the
         #    DataManager/TimerManager objects are kept (not rebuilt), re_record() rewinds the
         #    FSM to 'reset' WITHOUT counting the episode, so capture resumes with the
-        #    Rücksetzzeit and re-records that very episode. Stop the timer BEFORE re_record()
-        #    so the gpio-thread FSM rewind can't be interleaved by a new recording tick on the
-        #    timer thread (no new tick starts once the timer is destroyed).
+        #    Rücksetzzeit and re-records that very episode. Stop the timer BEFORE the discard
+        #    request so no new tick starts; a tick already in flight sees on_recording False
+        #    and the moved session generation, adds no frame and publishes nothing, and
+        #    applies the discard when it releases the recorder lock.
         if getattr(self, 'on_recording', False):
             self._collision_interrupted_recording = True
             self._collision_interrupted_mode = getattr(self, 'operation_mode', 'collection')
-            self.on_recording = False
+            # Round 5: on_recording flips under the server's record publish lock,
+            # so no record tick in flight publishes a status after COLLISION (the
+            # CollisionModal closes on the first non-collision phase).
+            plock = getattr(self, '_record_publish_lock', None)
+            with (plock if plock is not None else contextlib.nullcontext()):
+                self.on_recording = False
             try:
                 self.timer_manager.stop(timer_name=self.operation_mode)
             except Exception as exc:  # noqa: BLE001
                 self.get_logger().error(f'[KOLLISION] timer stop failed: {exc}')
+            # The discard NEVER waits (round 5, O1): the record tick holds the
+            # recorder lock for a whole record step in its own callback group;
+            # request_collision_discard() applies the discard at once when the
+            # lock is free, else the holder applies it when it releases. A
+            # DataManager without it (older doubles) is rewound directly.
             try:
-                self.data_manager.re_record()
+                request = getattr(self.data_manager, 'request_collision_discard', None)
+                if request is not None:
+                    request()
+                else:
+                    self.data_manager.re_record()
             except Exception as exc:  # noqa: BLE001 - never let cleanup crash the guard
                 self.get_logger().error(f'[KOLLISION] re_record failed: {exc}')
 
@@ -851,21 +975,31 @@ class CollisionMonitorMixin:
         self._last_task_status_mono = time.monotonic()
 
     def _collision_watchdog_cb(self):
+        lock = getattr(self, '_collision_flag_lock', None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            self._collision_watchdog_locked()
+
+    def _collision_watchdog_locked(self):
         if self._collision_active:
             # Re-assert the latch (broadcaster never self-clears) and the stage banner
             # (late page loads land in the correct modal step).
             self._publish_collision_flag(True)
             self._publish_collision_status()
+        elif getattr(self, '_collision_trip_pending', None) is not None:
+            # C1-A: the sensor thread has latched a trip and the main executor
+            # has not performed it yet. Publish NOTHING: a False here could land
+            # after the detection and before the trip's True.
+            return
         else:
             # Self-heal the freeze latch while idle (issue #19 finding #4): the broadcaster
             # is a VOLATILE subscriber that never self-clears collision_detected_, so a stale
             # /collision_flag=True latched before a respawn (respawn=True) would freeze the
             # follower forever with no active collision to recover from. Asserting False keeps
             # the broadcaster converged to "no collision" within one tick of the node coming
-            # up. Idempotent on the broadcaster (a plain atomic store); the gpio callback and
-            # this watchdog share the node default MutuallyExclusiveCallbackGroup, so a trip
-            # (which sets _collision_active=True before the next tick) can never race a False
-            # out here.
+            # up. Idempotent on the broadcaster (a plain atomic store). Round 5 (C1-A): the
+            # gpio callback now runs on the sensor thread, so this watchdog no longer shares
+            # its group; the trip-pending latch above is what keeps a False from racing a
+            # detected-but-not-yet-performed trip.
             # Edge case (accepted): if the node respawned MID-collision, _collision_active is
             # lost and this briefly un-freezes a still-pressed obstacle — but the fresh
             # detector re-trips on the next gpio frame (~10 ms) and re-freezes, which is
@@ -960,8 +1094,10 @@ class CollisionMonitorMixin:
         # Cancel any stray relax/glide timer so nothing fires mid-resync.
         self._cancel_relax_timer()
         self._cancel_glide_timer()
-        # A forced recovery ends the interrupted recording (do NOT auto-resume it): clearing
-        # the marker makes _on_resync_complete take the plain cleared-status (READY) path.
+        # A forced recovery ends the interrupted recording (do NOT auto-resume it). The
+        # session is FINISHED — finalized and uploaded per the existing guards — at resync
+        # completion (_end_interrupted_recording), never left unfinalized (F1).
+        self._collision_end_recording = bool(self._collision_interrupted_recording)
         self._collision_interrupted_recording = False
         self._collision_interrupted_mode = None
         start = {j: self._collision_follower_pos.get(j, self._collision_leader_pos.get(j, 0.0))
@@ -982,14 +1118,32 @@ class CollisionMonitorMixin:
         if self._collision_resync_timer is not None:
             self._collision_resync_timer.cancel()
             self._collision_resync_timer = None
-        # Clear local state BEFORE publishing False so the watchdog can't re-assert True.
-        self._collision_active = False
-        self._collision_recovery_failed = False
-        self._collision_homing = False
-        self._collision_homed = False
-        self._collision_overload_joints = []
-        self._collision_detector.reset()
-        self._publish_collision_flag(False)
+        # Aufnahme 2.0 round 4 (owner-approved): the slow recording work runs NOW,
+        # while the arm is still frozen, and only then is teleop released. This
+        # completion runs in the node's default callback group with /task/command
+        # and the trip hand-over, so ~1 s of the official encoder cancel or a
+        # finalize AFTER /collision_flag=False would delay a new trip just as the
+        # student moves the arm again (round 5: under the recorder lock, which is
+        # free — the record timer is stopped since the trip). A plain resume cancels the discarded
+        # take's streaming encoder (idempotent: the next record tick does not
+        # repeat it); a forced one (F1) ends the session. Their statuses are
+        # published after the release, as before.
+        end_ok = None
+        if self._collision_interrupted_recording:
+            self._cancel_discarded_take_before_release()
+        elif getattr(self, '_collision_end_recording', False):
+            end_ok = self._end_session_before_release()
+        # Clear local state BEFORE publishing False so the watchdog can't re-assert True
+        # (round 6: under the flag lock — the watchdog runs in its own group now).
+        flag_lock = getattr(self, '_collision_flag_lock', None)
+        with (flag_lock if flag_lock is not None else contextlib.nullcontext()):
+            self._collision_active = False
+            self._collision_recovery_failed = False
+            self._collision_homing = False
+            self._collision_homed = False
+            self._collision_overload_joints = []
+            self._detector_reset()
+            self._publish_collision_flag(False)
 
         # Seamlessly resume a recording the collision interrupted: re-arm the SAME session so
         # the student continues where they left off. We deliberately do NOT publish the cleared
@@ -998,17 +1152,105 @@ class CollisionMonitorMixin:
         # that on the shared /task/status topic and flicker the React UI back to "Bereit"
         # (re-enabling the Start button). The CollisionModal still closes correctly because it
         # dismisses on the first NON-collision phase tick, which RESETTING satisfies.
+        # A FORCED recovery instead ends that session (F1): its terminating READY is
+        # published by _end_interrupted_recording, so the plain one is skipped there too.
         resumed = False
+        ended = False
         if self._collision_interrupted_recording:
             resumed = self._resume_interrupted_recording()
+        elif getattr(self, '_collision_end_recording', False):
+            ended = self._end_interrupted_recording(end_ok)
+        self._collision_end_recording = False
         self._collision_interrupted_recording = False
         self._collision_interrupted_mode = None
         if resumed:
             self.get_logger().info(
                 '[KOLLISION] Teleoperation wiederhergestellt — Aufnahme wird fortgesetzt.')
+        elif ended:
+            self.get_logger().info(
+                '[KOLLISION] Notentriegelung — Aufnahme beendet und gespeichert.')
         else:
             self._publish_cleared_status()
             self.get_logger().info('[KOLLISION] Teleoperation wiederhergestellt.')
+
+    def _cancel_discarded_take_before_release(self):
+        """Round 4: cancel the discarded take's streaming encoder while the arm is
+        still frozen (see _on_resync_complete). Best effort: a DataManager
+        without the hook, or a failure, leaves the cancel to the next record
+        tick as before — the recovery itself must never fail on it."""
+        cancel = getattr(getattr(self, 'data_manager', None), 'cancel_pending_discard', None)
+        if cancel is None:
+            return
+        try:
+            with self._recorder_section():
+                cancel()
+        except Exception as exc:  # noqa: BLE001 - never let the recovery crash the guard
+            self.get_logger().error(
+                f'[KOLLISION] Verworfene Episode konnte nicht abgebrochen werden: {exc}')
+
+    def _end_session_before_release(self):
+        """F1, round 4: end the interrupted session (finalize + upload hand-off per
+        the DataManager's own guards) while the arm is still frozen. Returns None
+        when the DataManager has no end_session_now, False when it raised, True
+        otherwise; _end_interrupted_recording publishes the statuses after the
+        release."""
+        end = getattr(getattr(self, 'data_manager', None), 'end_session_now', None)
+        if end is None:
+            return None
+        try:
+            with self._recorder_section():
+                end()
+            return True
+        except Exception as exc:  # noqa: BLE001 - never let the recovery crash the guard
+            self.get_logger().error(
+                f'[KOLLISION] Aufnahme konnte nicht beendet werden: {exc}')
+            return False
+
+    def _recorder_section(self):
+        """The recorder lock around the resync's recording work (round 5): the
+        DataManager's locked() when it has one, else a no-op context (older
+        doubles). The record timer has been stopped since the trip, so the lock
+        is free; this only orders the work against a stray command."""
+        locked = getattr(getattr(self, 'data_manager', None), 'locked', None)
+        return locked() if locked is not None else contextlib.nullcontext()
+
+    def _end_interrupted_recording(self, end_ok=True):
+        """F1: publish the record status, then the terminating READY status of the
+        session a FORCED recovery ended (_end_session_before_release did the work
+        before the arm was released; ``end_ok`` is its result).
+
+        The DataManager finalized and handed the upload off per its own guards
+        (end_session_now drives its finish branch synchronously; the record timer
+        stays stopped and on_recording stays False). As on the record timer's
+        last tick, the record status (SAVING) goes out FIRST and carries any
+        warning the finish raised (a frame loss on save, a missing video file);
+        the READY after it carries the saved count, and a `[WARNUNG]` iff the
+        upload was blocked. Returns True when the READY was published; False lets
+        the caller publish the plain cleared READY."""
+        if not end_ok:
+            return False
+        data_manager = getattr(self, 'data_manager', None)
+        try:
+            record_status = data_manager.get_current_record_status()
+            self._stamp_identity(record_status)
+            self._collision_status_pub.publish(record_status)
+            # A second read, not a mutation of the one just published: the
+            # warning above was cleared on read, and a publisher that keeps a
+            # reference (a test double) must see the SAVING tick as it went out.
+            status = data_manager.get_current_record_status()
+            status.phase = TaskStatus.READY
+            status.total_time = 0
+            status.proceed_time = 0
+            reason = getattr(data_manager, '_upload_blocked_reason_de', '') or ''
+            status.error = f'[WARNUNG] {reason}' if reason else ''
+            self._stamp_identity(status)
+            self._collision_status_pub.publish(status)
+            self._last_task_status_mono = time.monotonic()
+            return True
+        except Exception as exc:  # noqa: BLE001 - never let the recovery crash the guard
+            self.get_logger().error(
+                f'[KOLLISION] Aufnahme konnte nicht beendet werden: {exc}')
+            return False
 
     def _resume_interrupted_recording(self):
         """Re-arm the recording the collision interrupted, keeping the SAME DataManager.
@@ -1035,7 +1277,10 @@ class CollisionMonitorMixin:
             # tick (with momentarily-empty caches) does not instantly trip the timeout and kill
             # the recording.
             self.start_recording_time = time.perf_counter()
-            self.on_recording = True
+            # Round 5: under the record publish lock, like every on_recording flip.
+            plock = getattr(self, '_record_publish_lock', None)
+            with (plock if plock is not None else contextlib.nullcontext()):
+                self.on_recording = True
             # TimerManager kept the freq+callback from set_timer at record start; start()
             # recreates the timer destroyed at trip time.
             timer_manager.start(timer_name=mode)

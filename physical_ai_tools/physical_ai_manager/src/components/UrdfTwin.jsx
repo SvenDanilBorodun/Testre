@@ -331,6 +331,11 @@ export default function UrdfTwin({
   // while this component is unmounted (the student switched to the camera
   // view), so it owns hooks/useJointLiveness instead. See that file.
   showChrome = true,
+  // Aufnahme 2.0 (owner decision Q6): a named camera preset — 'persp' |
+  // 'front' | 'side' | 'top' (VIEW_PRESET_DIRECTIONS). The camera goes onto the
+  // framed centre at the framed distance along that direction. null (the
+  // default) never touches the camera, so every other page is unchanged.
+  viewPreset = null,
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
   // Read by the release handler, which must land a mesh on the SERVER's released
@@ -365,6 +370,15 @@ export default function UrdfTwin({
   // re-running when the scene rebuilds.
   const robotRef = useRef(null);
   const requestRenderRef = useRef(() => {});
+  // viewPreset: the live camera + controls (set by the mount effect, null after
+  // its teardown), the last framing (centre + camera distance; before the first
+  // framing, the mount's own default view), whether the student has orbited
+  // since, and which preset was last applied.
+  const cameraRef = useRef(null);
+  const controlsRef = useRef(null);
+  const viewFrameRef = useRef(DEFAULT_VIEW_FRAME);
+  const userTookCameraRef = useRef(false);
+  const appliedPresetRef = useRef(null);
 
   // Phase-3 sim layer refs. All stay empty/unused for the default-prop call, so
   // RecordPage (no objects / no table / no held / no onEndEffector) constructs
@@ -575,6 +589,9 @@ export default function UrdfTwin({
     controls.dampingFactor = 0.12;
     controls.target.set(0, 0.12, 0);
     controls.addEventListener('change', () => { needsRender = true; });
+    cameraRef.current = camera;
+    controlsRef.current = controls;
+    viewFrameRef.current = DEFAULT_VIEW_FRAME;
     // Has the student taken the camera themselves? OrbitControls fires 'start'
     // on pointer-down, i.e. only on a real gesture — 'change' is no good here
     // because frameRobot's own controls.update() dispatches one. With the arm
@@ -583,8 +600,9 @@ export default function UrdfTwin({
     // STL lands, and the onLoad re-frame would yank their view back. Measured:
     // hold the STLs at the network layer, orbit, release — the student's view is
     // replaced. So the re-frame yields to them.
-    let userTookTheCamera = false;
-    controls.addEventListener('start', () => { userTookTheCamera = true; });
+    // (A ref, not a local: the viewPreset effect below must see it too.)
+    userTookCameraRef.current = false;
+    controls.addEventListener('start', () => { userTookCameraRef.current = true; });
 
     const requestRender = () => { needsRender = true; };
     requestRenderRef.current = requestRender;
@@ -670,7 +688,10 @@ export default function UrdfTwin({
         // camera — their view wins over ours, and on the OMX the pre-load view
         // they would be stuck with is now the sane default rather than the 1 cm
         // over-zoom, because onComplete no longer frames anything.
-        if (!userTookTheCamera) frameRobot(camera, controls, robot);
+        if (!userTookCameraRef.current) {
+          const framed = frameRobot(camera, controls, robot);
+          if (framed) viewFrameRef.current = framed;
+        }
         if (showShadowsRef.current && typeof robot.traverse === 'function') {
           robot.traverse((obj) => {
             if (obj && obj.isMesh) obj.castShadow = true;
@@ -770,6 +791,8 @@ export default function UrdfTwin({
       disposed = true;
       requestRenderRef.current = () => {};
       robotRef.current = null;
+      cameraRef.current = null;
+      controlsRef.current = null;
       window.removeEventListener('resize', onResize);
       if (resizeObserver) resizeObserver.disconnect();
       if (animationId !== null) window.cancelAnimationFrame(animationId);
@@ -825,6 +848,32 @@ export default function UrdfTwin({
     // (caps normally settle before the twin first opens) and the cleanup
     // above already disposes everything. stepPose is stable (refs only).
   }, [asset, stepPose]);
+
+  // ---- viewPreset (Aufnahme 2.0) --------------------------------------------
+  // Declared AFTER the mount effect so the camera exists on the first run. A
+  // NEW preset is the student's explicit choice and always applies. The same
+  // preset re-runs when the arm has just been framed (robotReadyTick): the
+  // framing pass put the camera on the default view, so the chosen preset is
+  // put back — unless the student orbited, in which case onLoad did not frame
+  // and their view wins, exactly as it does without a preset.
+  useEffect(() => {
+    if (!viewPreset) {
+      appliedPresetRef.current = null;
+      return;
+    }
+    const dir = VIEW_PRESET_DIRECTIONS[viewPreset];
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!dir || !camera || !controls) return;
+    const isNewChoice = appliedPresetRef.current !== viewPreset;
+    if (!isNewChoice && userTookCameraRef.current) return;
+    appliedPresetRef.current = viewPreset;
+    userTookCameraRef.current = false;
+    applyViewPreset(camera, controls, viewFrameRef.current, dir);
+    // needsRender is local to the mount effect; the stored requestRender is
+    // the only way to wake this paint-on-demand loop from here.
+    requestRenderRef.current();
+  }, [viewPreset, robotReadyTick]);
 
   // ---- Phase-3: sim objects + table layer (built/diffed on demand) ----------
   // Lazily creates a THREE.Group the first time there is something to show, then
@@ -1557,10 +1606,12 @@ function emitEndEffector(robot, gripperValue, cb) {
 }
 
 // Frame the camera + orbit target on the robot's bounding box so the whole arm
-// is visible regardless of mesh extents.
+// is visible regardless of mesh extents. Returns the framing it applied
+// (`{cx, cy, cz, dist}`, dist = the camera's distance from the centre) for the
+// viewPreset effect, or null when there was nothing to frame.
 function frameRobot(camera, controls, robot) {
   const box = new THREE.Box3().setFromObject(robot);
-  if (box.isEmpty()) return;
+  if (box.isEmpty()) return null;
   const center = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z) || 0.3;
@@ -1570,6 +1621,33 @@ function frameRobot(camera, controls, robot) {
   camera.near = Math.max(maxDim / 100, 0.001);
   camera.far = maxDim * 100;
   camera.updateProjectionMatrix();
+  controls.update();
+  return { cx: center.x, cy: center.y, cz: center.z, dist: dist * Math.hypot(1, 0.7, 1) };
+}
+
+// Aufnahme 2.0 viewPreset directions, in three.js space (+y up; the arm faces
+// +x after the URDF up-axis fix). 'persp' is frameRobot's own view, so the
+// preset and the automatic framing agree. 'top' keeps a hair of +x so the
+// orbit camera's up vector is never parallel to the view direction.
+const VIEW_PRESET_DIRECTIONS = Object.freeze({
+  persp: [1, 0.7, 1],
+  front: [1, 0.25, 0],
+  side: [0, 0.25, 1],
+  top: [0.001, 1, 0],
+});
+
+// The mount's own default view (camera (0.45, 0.35, 0.45) looking at
+// (0, 0.12, 0)), used until the first framing pass has measured the arm.
+const DEFAULT_VIEW_FRAME = Object.freeze({
+  cx: 0, cy: 0.12, cz: 0, dist: Math.hypot(0.45, 0.35 - 0.12, 0.45),
+});
+
+// Put the camera on `frame`'s centre at its distance along direction `dir`.
+function applyViewPreset(camera, controls, frame, dir) {
+  const n = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+  const k = frame.dist / n;
+  camera.position.set(frame.cx + dir[0] * k, frame.cy + dir[1] * k, frame.cz + dir[2] * k);
+  controls.target.copy({ x: frame.cx, y: frame.cy, z: frame.cz });
   controls.update();
 }
 

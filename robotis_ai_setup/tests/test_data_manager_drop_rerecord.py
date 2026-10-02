@@ -176,7 +176,10 @@ class _DropRerecordTest(unittest.TestCase):
         committed = dm.save()
         self.assertFalse(committed)               # NOT committed
         self.assertEqual(fake.saved, [])          # save_episode* never called
-        self.assertEqual(fake.cancel_calls, 1)    # streaming episode discarded
+        # Official discard only (round 5, O6): no cancel inside save(); the
+        # take is left to the next record step's discard_episode().
+        self.assertEqual(fake.cancel_calls, 0)
+        self.assertTrue(dm._discard_pending)
         self.assertEqual(dm._status, 'reset')     # routed to re-record
         self.assertFalse(dm._on_saving)
         self.assertEqual(dm._record_episode_count, 2)  # count NOT incremented

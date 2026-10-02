@@ -16,6 +16,9 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim
 
+import collections
+import contextlib
+import gc
 import json
 import logging
 import math
@@ -108,8 +111,11 @@ from physical_ai_interfaces.srv import (
 )
 
 from physical_ai_server import robot_profiles
+from physical_ai_server import signal_status
+from physical_ai_server.communication.capture_timeline import SlotSampler, TakeIntegrity
 from physical_ai_server.communication.communicator import Communicator
 from physical_ai_server.data_processing import dataset_paths
+from physical_ai_server.data_processing import record_texts_de
 from physical_ai_server.data_processing.data_manager import DataManager
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
 from physical_ai_server.inference.inference_manager import InferenceManager
@@ -125,6 +131,7 @@ from physical_ai_server.utils.parameter_utils import (
 
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -132,7 +139,7 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, String
 
 
 # Roboter Studio Batch 2b — manual hand-guide recording (/workshop/record).
@@ -231,6 +238,24 @@ _MANUAL_IDLE_WATCHDOG_PERIOD_S = 5.0
 _REINIT_RETRY_PERIOD_S = 30.0
 _REINIT_MAX_ATTEMPTS = 3
 
+# Aufnahme 2.0 round 5 (O6): /task/command never blocks the default callback
+# group on the recorder lock. MOVE_TO_NEXT, RERECORD, SKIP_TASK and START while
+# recording take it with a bounded try-acquire; on timeout they change nothing
+# and answer record_texts_de.BUSY_DE. The longest holder is the official ~1 s
+# discard cancel after „Wiederholen“. Round 6 (F2): 50 ms, so commands queued
+# behind each other never hold the default group long. FINISH and STOP never
+# wait at all (F1: DataManager.request_end queues them for the release).
+COMMAND_LOCK_TIMEOUT_S = 0.05
+# R5-2: the stopped-source rules judge only an ON-TIME record tick (one that
+# started at most this many periods after the previous one), so a stall of the
+# server process itself is never mistaken for a silent source.
+ON_TIME_TICK_PERIODS = 1.5
+
+
+class _SlotConvertError(Exception):
+    """A decided slot's messages could not be converted (the record tick's
+    sensor-data error stop, not the add_frame one)."""
+
 
 class PhysicalAIServer(CollisionMonitorMixin, Node):
     # Define operation modes (constants taken from Communicator)
@@ -254,6 +279,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     # raw value — React compares ints (taskPhases.js); enum-parity CI keeps
     # the literal in sync with the .msg.
     PHASE_INFERENCE_LOADING = getattr(TaskStatus, 'INFERENCE_LOADING', 10)
+
+    # Aufnahme 2.0 round 5 (F3): the sensor-ingest executor's supervision.
+    # SENSOR_FAIL_LIMIT executor failures inside SENSOR_FAIL_WINDOW_S end the
+    # PROCESS with SENSOR_EXIT_CODE, so s6 respawns the node: a dead sensor
+    # thread would otherwise leave recording stalled and the collision detector
+    # deaf behind a node that still answers its heartbeat. Its liveness rides
+    # /edubotics/signal_status (signal_status.ingest_status).
+    SENSOR_FAIL_LIMIT = 3
+    SENSOR_FAIL_WINDOW_S = 10.0
+    SENSOR_EXIT_CODE = 70
 
     class RosbagNotReadyException(Exception):
         """Exception raised when rosbag recording cannot start yet."""
@@ -407,6 +442,34 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
         self.start_recording_time: float = 0.0
 
+        # Aufnahme 2.0 round 5. The record timer runs in its OWN group
+        # (collection only; the inference timer stays in the default group), so
+        # a slow record step never blocks /task/command, the collision trip
+        # hand-over or the watchdog. _record_publish_lock is held only around
+        # [check the session, publish / flip on_recording] — never across work.
+        # _record_session_gen is bumped by START and by a collision trip; a
+        # record tick captures it at entry and neither adds a frame nor
+        # publishes once it moved (F5). _collision_trip_pending is the C1-A
+        # latch the sensor thread sets when it detects a trip (cleared by the
+        # main executor's hand-over callback).
+        self._record_cb_group = MutuallyExclusiveCallbackGroup()
+        self._record_publish_lock = threading.Lock()
+        self._record_session_gen = 0
+        self._collision_trip_pending = None
+        # Round 6 (F2, owner-approved collision-path change): the collision
+        # trip hand-over (_on_trip_gc) and the 5 Hz watchdog run in this OWN
+        # MutuallyExclusiveCallbackGroup — mutually exclusive with each other
+        # (a watchdog False can never race the trip), and no longer queued
+        # behind /task/command callbacks in the default group.
+        self._collision_cb_group = MutuallyExclusiveCallbackGroup()
+        # The sensor-ingest node + its supervised executor (_ensure_sensor_executor).
+        self._sensor_node = None
+        self._sensor_executor = None
+        self._sensor_thread = None
+        self._sensor_stop = False
+        self._sensor_alive_mono = None
+        self._sensor_failures = collections.deque()
+
         # Retained for legacy mode-arbitration in _assert_no_other_active;
         # the value is never flipped to True after on-device training was
         # removed in v2.5.0, so the training branch there is dead but
@@ -434,6 +497,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._resolved_profile_stash = robot_profiles.resolve(
             os.environ.get('EDUBOTICS_ROBOT_TYPE'))
         self._arm_profile = self._resolved_profile_stash
+
+        # Aufnahme 2.0 round 5: the sensor-ingest node and its supervised
+        # SingleThreadedExecutor come up BEFORE the collision monitor, whose
+        # three subscriptions (and the Communicator's camera/follower/leader
+        # ones) live on it. The node's MultiThreadedExecutor cost ~2.2 ms of CPU
+        # per delivered message; a SingleThreadedExecutor dispatches one in
+        # ~0.18 ms. Never put a high-rate subscription back on the main node.
+        self._ensure_sensor_executor()
 
         # EduBotics teleop force/collision e-stop (Rule §2 software guard, teleop-only).
         # Arms the read-only force monitor + the safe-home/resync orchestration.
@@ -739,6 +810,103 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             pass
         self._reinit_timer = None
 
+    # ── Sensor ingest (Aufnahme 2.0 round 5, F3) ──────────────────────────────
+
+    def _ensure_sensor_executor(self):
+        """Bring up the sensor-ingest node and its supervised executor (idempotent).
+
+        A second node, ``physical_ai_server_sensors``, carries every high-rate
+        subscription (the recorder's cameras, follower and leader, and the
+        collision monitor's three). It is spun by a SingleThreadedExecutor on
+        one daemon thread (``sensor-exec``) running ``_sensor_loop``.
+
+        ``use_global_arguments=False`` is load-bearing: the launch passes
+        ``-r __node:=physical_ai_server``, which would otherwise rename this
+        node too (two nodes with one name). The degraded-boot re-init path
+        calls this again; it is a no-op once the node exists. A failure to
+        create it is logged and leaves ``_sensor_node`` None, so every
+        subscription falls back to the main node (the pre-round-5 behaviour)
+        instead of raising out of __init__.
+        """
+        if getattr(self, '_sensor_node', None) is not None:
+            return
+        try:
+            sensor_node = rclpy.create_node(
+                'physical_ai_server_sensors', use_global_arguments=False)
+            sensor_executor = SingleThreadedExecutor()
+            sensor_executor.add_node(sensor_node)
+        except Exception as e:  # noqa: BLE001 — degrade to the main node, never crash
+            self._sensor_node = None
+            self._sensor_executor = None
+            self.get_logger().error(
+                f'sensor executor could not be created, subscriptions stay on the '
+                f'main node: {e!r}')
+            return
+        self._sensor_node = sensor_node
+        self._sensor_executor = sensor_executor
+        self._sensor_stop = False
+        self._sensor_failures = collections.deque()
+        self._sensor_alive_mono = time.monotonic()
+        self._sensor_thread = threading.Thread(
+            target=self._sensor_loop, name='sensor-exec', daemon=True)
+        self._sensor_thread.start()
+
+    def _sensor_loop(self):
+        """The sensor thread's supervisor loop.
+
+        Every sensor callback guards its own body, so a raising ``spin_once``
+        is an executor-level failure; it is logged and counted, and
+        SENSOR_FAIL_LIMIT of them inside SENSOR_FAIL_WINDOW_S end the process
+        (``_note_sensor_failure``). Without this a single exception killed the
+        thread silently (measured: thread dead, heartbeat still ticking).
+        """
+        executor = self._sensor_executor
+        while rclpy.ok() and not self._sensor_stop:
+            self._sensor_alive_mono = time.monotonic()
+            try:
+                executor.spin_once(timeout_sec=0.1)
+            except (ExternalShutdownException, KeyboardInterrupt):
+                return
+            except Exception as e:  # noqa: BLE001 — counted, then os._exit
+                if self._sensor_stop:
+                    return
+                self._note_sensor_failure(e)
+
+    def _note_sensor_failure(self, error):
+        """Count one sensor-executor failure; too many in the window end the
+        process so s6 respawns the node (compose ``restart`` and the s6 longrun
+        are unchanged). ``os._exit`` on purpose: a raise here would only end
+        the sensor thread, which is exactly the silent failure this prevents."""
+        now = time.monotonic()
+        failures = self._sensor_failures
+        failures.append(now)
+        while failures and failures[0] < now - self.SENSOR_FAIL_WINDOW_S:
+            failures.popleft()
+        self.get_logger().error(f'sensor executor failure {len(failures)}: {error!r}')
+        if len(failures) >= self.SENSOR_FAIL_LIMIT:
+            self.get_logger().fatal('sensor executor keeps failing: exiting for respawn')
+            os._exit(self.SENSOR_EXIT_CODE)
+
+    def _shutdown_sensor_executor(self):
+        """Stop the sensor loop, shut its executor down, destroy its node.
+        Called from main()'s ``finally`` BEFORE the main node is destroyed.
+        Idempotent; never raises."""
+        self._sensor_stop = True
+        executor = getattr(self, '_sensor_executor', None)
+        sensor_node = getattr(self, '_sensor_node', None)
+        self._sensor_executor = None
+        self._sensor_node = None
+        if executor is not None:
+            try:
+                executor.shutdown()
+            except Exception:  # noqa: BLE001 — shutdown must never raise
+                pass
+        if sensor_node is not None:
+            try:
+                sensor_node.destroy_node()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _init_core_components(self):
         # D8 — monotonic() of the last /task/status publish, updated after EVERY
         # publish in BOTH sites (communicator.publish_status AND the collision
@@ -873,6 +1041,74 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self._idle_status_tick,
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
+
+        # Aufnahme 2.0 — /edubotics/signal_status: FACTS about every recording
+        # source (measured rate, age of the last message) and the dataset disk,
+        # for the Aufnahme page's badges and problem banner (schema v1, see
+        # signal_status.py). Latched (the activation_agent QoS) AND re-published
+        # at 1 Hz, always — idle, recording, collision. Created at boot; the tick
+        # publishes nothing until the Communicator is wired. Its own
+        # MutuallyExclusiveCallbackGroup (heartbeat pattern), so a blocking
+        # default-group callback cannot stall it.
+        signal_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._signal_status_pub = self.create_publisher(
+            String, signal_status.TOPIC, signal_qos)
+        self._signal_status_seq = 0
+        self._signal_status_boot_mono = time.monotonic()
+        self._signal_rates = signal_status.RateTracker()
+        self._signal_status_timer = self.create_timer(
+            signal_status.PUBLISH_PERIOD_S,
+            self._signal_status_tick,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+
+    def _signal_status_tick(self):
+        """Publish one /edubotics/signal_status message (schema v1).
+
+        Facts only; the page judges (it knows the fps being recorded). The
+        leader is listed only when the robot profile has one (the server cannot
+        know about the runtime follower-only flip; the page asks the bridge).
+        Never raises — a failure is logged at most once per 30 s.
+        """
+        try:
+            communicator = getattr(self, 'communicator', None)
+            if communicator is None:
+                return
+            now = time.monotonic()
+            counters = communicator.source_counters()
+            rates = self._signal_rates.update(
+                now, {c['id']: c['count'] for c in counters})
+            caps = getattr(getattr(self, '_arm_profile', None), 'capabilities', None)
+            include_leader = bool(getattr(caps, 'has_leader', False))
+            self._signal_status_seq += 1
+            # Round 5: the additive trailing `ingest` key — the sensor-ingest
+            # thread's liveness (absent without a sensor executor).
+            ingest = None
+            if getattr(self, '_sensor_executor', None) is not None:
+                ingest = signal_status.ingest_status(
+                    getattr(self, '_sensor_alive_mono', None), now)
+            payload = signal_status.build_payload(
+                seq=self._signal_status_seq,
+                uptime_s=now - self._signal_status_boot_mono,
+                recording=bool(getattr(self, 'on_recording', False)),
+                sources=signal_status.source_entries(
+                    counters, rates, now, include_leader=include_leader),
+                free_bytes=signal_status.disk_free_bytes(self.DEFAULT_SAVE_ROOT_PATH),
+                ingest=ingest,
+            )
+            msg = String()
+            msg.data = signal_status.encode_payload(payload)
+            self._signal_status_pub.publish(msg)
+        except Exception as e:  # noqa: BLE001 — a status topic must never kill the node
+            now = time.monotonic()
+            last = getattr(self, '_signal_status_last_error_log', None)
+            if last is None or now - last >= 30.0:
+                self._signal_status_last_error_log = now
+                self.get_logger().warning(f'signal_status tick failed: {e}')
 
     def _heartbeat_timer_callback(self):
         # Node-level liveness beacon (1 Hz). Independent of the data-pipeline
@@ -1142,13 +1378,17 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         log_parameters(self, self.params)
         log_parameters(self, self.joint_order)
 
-        # Initialize observation manager
+        # Initialize observation manager. Its camera/follower/leader
+        # subscriptions live on the sensor-ingest node (round 5); idempotent, so
+        # the degraded-boot re-init path is safe.
+        self._ensure_sensor_executor()
         self.communicator = Communicator(
             node=self,
             operation_mode=self.operation_mode,
             params=self.params,
             follower_joint_order=getattr(
                 getattr(self, '_arm_profile', None), 'joint_names', None),
+            sensor_node=getattr(self, '_sensor_node', None),
         )
 
         # NOTE: the 1 Hz liveness heartbeat is no longer created here — it is
@@ -1248,11 +1488,32 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.communicator.clear_latest_data()
 
         self.timer_manager = TimerManager(node=self)
+        # The record timer runs in its OWN MutuallyExclusiveCallbackGroup
+        # (round 5): a slow record step (a save, the official ~1 s discard
+        # cancel, the dataset's first creation) no longer blocks /task/command,
+        # the collision trip hand-over or the watchdog in the default group.
+        # The inference timer stays in the default group (unchanged, C3/D5).
         self.timer_manager.set_timer(
             timer_name=self.operation_mode,
             timer_frequency=task_info.fps,
-            callback_function=self.timer_callback_dict[self.operation_mode]
+            callback_function=self.timer_callback_dict[self.operation_mode],
+            callback_group=(self._record_cb_group
+                            if self.operation_mode == 'collection' else None),
         )
+        # Round 5 (spec §3): every dataset frame of a take is decided from the
+        # timestamped sensor histories by the slot sampler; the take's facts
+        # are collected by its capture integrity. Collection only.
+        self._slot_sampler = None
+        self._take_integrity = None
+        self._take_entry = None
+        self._take_open = False
+        self._take_commits = 0
+        self._last_record_tick_mono = None
+        self._record_fps = float(getattr(task_info, 'fps', 0) or 0)
+        if self.operation_mode == 'collection' and self._record_fps > 0:
+            cameras = list(self.communicator.camera_topic_msgs.keys())
+            self._slot_sampler = SlotSampler(self._record_fps, cameras)
+            self._take_integrity = TakeIntegrity(cameras, self._record_fps)
         self.timer_manager.start(timer_name=self.operation_mode)
         self.get_logger().info(
             'Robot control parameters initialized successfully')
@@ -1378,187 +1639,439 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 f'previous status: {previous_status}')
         self.communicator.stop_and_delete_rosbag()
 
-    def _data_collection_timer_callback(self):
-        error_msg = ''
-        current_status = TaskStatus()
-        camera_msgs, follower_msgs, leader_msgs = self.communicator.get_latest_data()
-        # Throttle the "waiting for X data" info logs to once per second
-        # per source. At 30Hz timer firing this used to print 90
-        # lines/sec while a topic was lagging (audit §3.20).
-        now = time.perf_counter()
-        if not hasattr(self, '_last_waiting_log'):
-            self._last_waiting_log = {}
-        # Audit F17 (re-armed): camera-fps sanity check every 5 s during
-        # recording. Was one-shot at +1.5 s; that missed mid-recording
-        # USB starvation / thermal throttling / hub contention, and the
-        # dataset silently grew with the same frame repeated N times
-        # (`camera_topic_msgs[name]` overwrite-in-place is what feeds
-        # convert_msgs_to_raw_datas — a stale cache reads the same
-        # CompressedImage twice). Strobing dataset trains a jittery ACT
-        # policy. 5 s cadence + 3 s observation window catches typical
-        # degradations within the same episode and re-fires the German
-        # warning, while staying out of the way of momentary jitter.
-        last_check_t = getattr(self, '_camera_fps_last_check_t', 0.0)
-        now_t = time.perf_counter()
-        if (
-            self.start_recording_time > 0
-            and (now_t - self.start_recording_time) > 1.5
-            and (now_t - last_check_t) > 5.0
-        ):
-            self._camera_fps_last_check_t = now_t
+    # ── The record tick (Aufnahme 2.0; round 5 below) ─────────────────────────
+
+    def _record_tick_owns_session(self, gen) -> bool:
+        """Does the record session the tick started for still own /task/status?
+
+        No once a collision trip is latched or performed (on_recording False /
+        _collision_trip_pending set; both under _record_publish_lock), once the
+        session ended, or once a new START moved the generation (F5)."""
+        return (bool(self.on_recording)
+                and getattr(self, '_collision_trip_pending', None) is None
+                and getattr(self, '_record_session_gen', 0) == gen)
+
+    def _publish_record_status(self, status, gen) -> bool:
+        """The publish guard: publish a record-tick status only while the
+        session still owns /task/status, checked and published under
+        _record_publish_lock (held for exactly that, never across work).
+
+        With the recorder in its own callback group, a tick in flight at a
+        trip would otherwise publish SAVING/RECORDING after the COLLISION
+        status, and the CollisionModal closes on the first non-collision phase.
+        A status not published re-arms its consumed [WARNUNG] (the DataManager's
+        warning is clear-on-read), unless a newer one is waiting."""
+        with self._record_publish_lock:
+            if self._record_tick_owns_session(gen):
+                self.communicator.publish_status(status=status)
+                return True
+        error = getattr(status, 'error', '') or ''
+        data_manager = getattr(self, 'data_manager', None)
+        if (error.startswith('[WARNUNG] ') and data_manager is not None
+                and not getattr(data_manager, '_last_warning_message', '')):
+            data_manager._last_warning_message = error[len('[WARNUNG] '):]
+        return False
+
+    def _end_record_with_error(self, error_msg, gen):
+        """Every error stop of a recording goes through here.
+
+        D5 (round 5): with a dataset, the DataManager keeps the saved episodes,
+        drops the running take (official discard), finalizes and clears the
+        crash marker — no automatic upload — and the READY says the saved
+        episodes are safe. Without one, as before. Nothing is done for a session
+        this tick no longer owns (a collision took it over meanwhile; on resume
+        the tick meets the same error again)."""
+        if not self._record_tick_owns_session(gen):
+            return
+        sentence = error_msg
+        data_manager = self.data_manager
+        end_after_error = getattr(data_manager, 'end_after_error', None)
+        if end_after_error is not None:
             try:
-                target_fps = float(getattr(self.task_info, 'fps', 0) or 0)
-                if target_fps > 0 and hasattr(self.communicator, 'get_camera_observed_hz'):
-                    for cam_name in self.communicator.camera_topic_msgs.keys():
-                        observed = self.communicator.get_camera_observed_hz(cam_name, 3.0)
-                        # Threshold 0.9 (was 0.8): the documented real case is
-                        # the Innomaker MSMF ~25 Hz ceiling against a 30 fps
-                        # recording — ratio 0.833, which sat silently under
-                        # 0.8 while ~17% of frames duplicated. 0.9 catches it
-                        # with margin while tolerating ±10% window jitter.
-                        if observed is not None and observed < target_fps * 0.9:
-                            warning = (
-                                f'Kamera "{cam_name}" liefert nur '
-                                f'{observed:.1f} Hz, Aufnahme erwartet '
-                                f'{target_fps:.0f} Hz. Datensatz enthaelt '
-                                f'wiederholte Frames — bitte Aufloesung '
-                                f'reduzieren oder Kabel pruefen.'
-                            )
-                            self.get_logger().warning(warning)
-                            try:
-                                # Stash on data_manager so the status
-                                # publisher surfaces it as a banner.
-                                if self.data_manager is not None:
-                                    self.data_manager._last_warning_message = warning
-                            except Exception:
-                                pass
+                finalized = end_after_error()
+                if finalized is True and data_manager.saved_episode_count() > 0:
+                    sentence = f'{error_msg} {record_texts_de.ERROR_STOP_SAVED_DE}'
+                elif finalized is False:
+                    # F3 (round 6): finalize failed — the crash marker stays and
+                    # the student learns the dataset is incomplete.
+                    sentence = f'{error_msg} {record_texts_de.ERROR_STOP_INCOMPLETE_DE}'
+            except Exception as e:  # noqa: BLE001 — the error stop must still go out
+                self.get_logger().error(f'error stop: finalize failed: {e}')
+        status = TaskStatus()
+        status.phase = TaskStatus.READY
+        status.error = sentence
+        self._publish_record_status(status, gen)
+        with self._record_publish_lock:
+            self.on_recording = False
+        self.timer_manager.stop(timer_name=self.operation_mode)
+
+    # ── Round 5: the slot sampler, the take's integrity, the source rules ────
+
+    def _record_tick_on_time(self, now) -> bool:
+        """R5-2: is this tick ON TIME (started at most ON_TIME_TICK_PERIODS
+        periods after the previous record tick)? Only on-time ticks judge a
+        stopped source, so a stall of this process (a VM hiccup, a long
+        callback) is never mistaken for a silent source: by the next tick the
+        sensor thread has refreshed the ages, while a real death keeps them
+        growing."""
+        previous = getattr(self, '_last_record_tick_mono', None)
+        self._last_record_tick_mono = now
+        fps = float(getattr(self, '_record_fps', 0) or 0)
+        if previous is None or fps <= 0:
+            return False
+        return (now - previous) <= ON_TIME_TICK_PERIODS / fps
+
+    def _decide_due_slots(self, now):
+        """The slot sampler's decisions for this tick (spec §3.3), taken from
+        the timestamped histories BEFORE the recorder lock (pure, well under
+        1 ms) in every phase, so the per-camera phase locks stay warm through
+        warm-up and reset. None without a sampler, or when it failed (the tick
+        then records the latest frames, the pre-round-5 behaviour)."""
+        sampler = getattr(self, '_slot_sampler', None)
+        if sampler is None:
+            return None
+        try:
+            return sampler.decide_due(now, *self.communicator.history_snapshots())
+        except Exception as e:  # noqa: BLE001 — a sampler bug must not kill the tick
+            last = getattr(self, '_slot_sampler_error_mono', None)
+            if last is None or now - last >= 5.0:
+                self._slot_sampler_error_mono = now
+                self.get_logger().error(f'slot sampler failed: {e!r}')
+            return None
+
+    def _stopped_required_source(self, now):
+        """(kind, name) of the required source silent longest, when that is
+        at least signal_status.SOURCE_STOPPED_S (by server-side arrival); else
+        None. Required = every registered camera, follower and leader."""
+        stopped = None
+        for counter in self.communicator.source_counters():
+            kind = counter.get('kind')
+            last = counter.get('last_mono')
+            if kind not in ('camera', 'follower', 'leader') or last is None:
+                continue
+            age = now - float(last)
+            if age >= signal_status.SOURCE_STOPPED_S and (
+                    stopped is None or age > stopped[2]):
+                stopped = (kind, counter.get('name'), age)
+        return None if stopped is None else stopped[:2]
+
+    def _missing_source_name(self, kind):
+        """The first configured source of ``kind`` with no message (rule 3)."""
+        msgs = {
+            'camera': self.communicator.camera_topic_msgs,
+            'follower': self.communicator.follower_topic_msgs,
+            'leader': self.communicator.leader_topic_msgs,
+        }.get(kind) or {}
+        return next((name for name, msg in msgs.items() if msg is None),
+                    next(iter(msgs), None))
+
+    def _open_take_if_new(self, data_manager):
+        """A new run entry starts a new take: its capture integrity begins at
+        the run entry (lost slots before it are not the take's). A take still
+        open at that point was discarded (Wiederholen, a collision)."""
+        if data_manager.get_status() != 'run':
+            return
+        entry = getattr(data_manager, 'run_entered_mono', None)
+        if entry is None or entry == getattr(self, '_take_entry', None):
+            return
+        integrity = getattr(self, '_take_integrity', None)
+        if getattr(self, '_take_open', False) and getattr(integrity, 'frames', 0) > 0:
+            self._log_take(data_manager, 'discarded')
+        self._take_entry = entry
+        self._take_open = True
+        self._take_commits = data_manager.commit_count()
+        if integrity is not None:
+            integrity.reset(start_mono=entry)
+
+    def _close_take_if_done(self, data_manager):
+        """After every record step: a take that was committed logs its English
+        integrity line and — when no other warning waits — puts its German C5
+        warning on THIS tick, which is a SAVING tick (F3: warn only). A take
+        that left 'run' without a commit was discarded or dropped."""
+        if not getattr(self, '_take_open', False):
+            return
+        status = data_manager.get_status()
+        if data_manager.commit_count() != getattr(self, '_take_commits', 0):
+            self._take_open = False
+            warning = self._log_take(data_manager, 'saved')
+            if warning and not getattr(data_manager, '_last_warning_message', ''):
+                data_manager._last_warning_message = warning
+            return
+        if status == 'run' and getattr(data_manager, 'run_entered_mono', None) == \
+                getattr(self, '_take_entry', None):
+            return
+        if status in ('save', 'finish', 'stop') and not getattr(data_manager, '_on_saving', False):
+            return          # the take is about to be saved by the next record step
+        self._take_open = False
+        self._log_take(data_manager, 'discarded')
+
+    def _log_take(self, data_manager, outcome) -> str:
+        """One English line per take; returns the take's German C5 warning
+        ('' when clean)."""
+        integrity = getattr(self, '_take_integrity', None)
+        if integrity is None:
+            return ''
+        episode = data_manager.saved_episode_count() + 1
+        try:
+            facts = integrity.as_log_dict()
+            sampler = getattr(self, '_slot_sampler', None)
+            facts['outcome'] = outcome
+            facts['lost_total'] = getattr(sampler, 'lost', None)
+            self.get_logger().info(f'capture take ep={episode} {json.dumps(facts)}')
+            return integrity.warning_de(episode) if outcome == 'saved' else ''
+        except Exception as e:  # noqa: BLE001 — a log line must never stop a tick
+            self.get_logger().warning(f'capture take log failed: {e!r}')
+            return ''
+
+    def _record_decided_slots(self, data_manager, decisions):
+        """The take's frames: one record() per slot the sampler decided at or
+        after the take's run entry, in order, until the take ends (spec §3.3).
+        The chosen camera messages are decoded here; the latest frames are not
+        decoded during a take."""
+        # The official discard of a take thrown away since the last tick runs
+        # NOW, before this take's first frame, and re-stamps the run entry —
+        # slots decided before or during the ~1 s cancel are not part of it.
+        data_manager.cancel_pending_discard()
+        self._open_take_if_new(data_manager)
+        entry = getattr(data_manager, 'run_entered_mono', None)
+        follower_name, leader_name = self.communicator.history_source_names()
+        integrity = getattr(self, '_take_integrity', None)
+        note_take_gap = getattr(data_manager, 'note_take_gap', None)
+        completed = False
+        for decision in decisions:
+            if (data_manager.get_status() != 'run'
+                    or getattr(self, '_collision_trip_pending', None) is not None):
+                break
+            if entry is None or decision['g'] < entry:
+                continue
+            camera_msgs = {name: chosen['item'][3]
+                           for name, chosen in decision['cams'].items()}
+            follower_msgs = {follower_name: decision['fol'][3]}
+            leader_msgs = None
+            if decision.get('lea') is not None and leader_name is not None:
+                leader_msgs = {leader_name: decision['lea'][3]}
+            try:
+                images, state, action = data_manager.convert_msgs_to_raw_datas(
+                    camera_msgs, follower_msgs, self.total_joint_order,
+                    leader_msgs, self.joint_order)
             except Exception as e:
-                self.get_logger().warning(f'camera fps check failed: {e}')
-        def _log_waiting(source: str, msg: str) -> None:
-            last = self._last_waiting_log.get(source, 0.0)
-            if now - last > 1.0:
-                self.get_logger().info(msg)
-                self._last_waiting_log[source] = now
+                raise _SlotConvertError(str(e)) from e
+            if data_manager.record(images=images, state=state, action=action):
+                completed = True
+            if integrity is not None and data_manager.added_frame():
+                integrity.add(decision)
+                if note_take_gap is not None:
+                    note_take_gap(integrity.gap_source())
+        return completed
 
-        # Topic-availability gates: when a stream is missing we either
-        # wait (still inside DEFAULT_TOPIC_TIMEOUT) or hard-fail. Falling
-        # through with a None message used to call convert_msgs_to_raw_datas
-        # with image_msgs=None — convert is None-safe, but check_lerobot_dataset
-        # would then create the dataset object with NO observation.images.*
-        # features at all, permanently corrupting `self._lerobot_dataset`
-        # for the rest of the session. Always halt the tick once we set
-        # error_msg, then surface it via TaskStatus below.
-        def _missing_or_wait(source: str, label: str) -> str | None:
-            if now - self.start_recording_time > self.DEFAULT_TOPIC_TIMEOUT:
-                msg = f'{label} data not received within timeout period'
-                self.get_logger().error(msg)
-                return msg
-            _log_waiting(source, f'Waiting for {source} data...')
-            return ''  # signal "still waiting, skip this tick"
+    def _data_collection_timer_callback(self):
+        # Round 5: the record timer runs in its OWN callback group, concurrent
+        # with /task/command, the collision hand-over and the sensor thread. The
+        # tick captures the session generation now, returns at once while not
+        # recording or while a collision trip is being handed over, and
+        # re-checks all three after taking the recorder lock (F5).
+        if not self.on_recording or getattr(self, '_collision_trip_pending', None) is not None:
+            return
+        gen = getattr(self, '_record_session_gen', 0)
+        data_manager = self.data_manager
+        if data_manager is None:
+            return
+        tick_mono = time.monotonic()
+        on_time = self._record_tick_on_time(tick_mono)
+        decisions = self._decide_due_slots(tick_mono)
+        error_msg = ''
+        source_stop = None
+        # Aufnahme 2.0 (H14): a FINISHING session (FINISH/STOP received, the
+        # DataManager saving, finalizing and handing off the upload) writes no
+        # more frames, so it must not wait for sensor data either. Before, a
+        # camera unplugged right after „Beenden“ turned the FINISH into the 5 s
+        # "no data" error stop — which never finalizes. The finish/stop branches
+        # of DataManager.record() never touch images, hence the None arguments.
+        status = data_manager.get_status()
+        finishing = status in ('finish', 'stop')
+        has_dataset = getattr(data_manager, '_lerobot_dataset', None) is not None
+        # During a take the frames come from the decided slots; the latest
+        # frames are not decoded (round 5).
+        take_running = decisions is not None and status == 'run' and has_dataset
+        camera_data = follower_data = leader_data = None
+        if not finishing:
+            camera_msgs, follower_msgs, leader_msgs = self.communicator.get_latest_data()
+            # Throttle the "waiting for X data" info logs to once per second
+            # per source. At 30Hz timer firing this used to print 90
+            # lines/sec while a topic was lagging (audit §3.20).
+            now = time.perf_counter()
+            if not hasattr(self, '_last_waiting_log'):
+                self._last_waiting_log = {}
 
-        if camera_msgs is None:
-            error_msg = _missing_or_wait('camera', 'Camera')
-            if not error_msg:
+            def _log_waiting(source: str, msg: str) -> None:
+                last = self._last_waiting_log.get(source, 0.0)
+                if now - last > 1.0:
+                    self.get_logger().info(msg)
+                    self._last_waiting_log[source] = now
+
+            # Topic-availability gates: when a stream is missing we either
+            # wait (still inside DEFAULT_TOPIC_TIMEOUT) or stop. Falling
+            # through with a None message used to call convert_msgs_to_raw_datas
+            # with image_msgs=None — convert is None-safe, but check_lerobot_dataset
+            # would then create the dataset object with NO observation.images.*
+            # features at all, permanently corrupting `self._lerobot_dataset`
+            # for the rest of the session. The published sentence is German per
+            # source (F6a vocabulary); the log stays English.
+            missing_source_stop_de = {
+                'camera': (
+                    'Die Kameras senden keine Bilder, die Aufnahme wurde '
+                    'gestoppt. Prüfe die Kabel und starte die Umgebung neu, '
+                    'wenn es so bleibt.'),
+                'follower': (
+                    'Der Follower-Arm sendet keine Daten, die Aufnahme wurde '
+                    'gestoppt. Prüfe Kabel und Stromversorgung des '
+                    'Follower-Arms.'),
+                'leader': (
+                    'Der Leader-Arm sendet keine Daten, die Aufnahme wurde '
+                    'gestoppt. Ist der Roboter auf der Startseite aktiviert und '
+                    'der Leader-Arm eingeschaltet?'),
+            }
+            missing = None
+            if camera_msgs is None:
+                missing = ('camera', 'Camera')
+            elif follower_msgs is None:
+                missing = ('follower', 'Follower')
+            elif leader_msgs is None:
+                missing = ('leader', 'Leader')
+            if missing is not None:
+                kind, label = missing
+                if now - self.start_recording_time <= self.DEFAULT_TOPIC_TIMEOUT:
+                    _log_waiting(kind, f'Waiting for {kind} data...')
+                    return  # still waiting, skip this tick
+                self.get_logger().error(f'{label} data not received within timeout period')
+                if has_dataset:
+                    # R5-2 rule 3: once a dataset exists (e.g. a source that never
+                    # returns after a collision resume) the session ends like
+                    # „Beenden“, keeping the saved episodes, instead of the
+                    # error stop.
+                    source_stop = (kind, self._missing_source_name(kind))
+                else:
+                    self._end_record_with_error(missing_source_stop_de[kind], gen)
+                    return
+
+            if source_stop is None:
+                if not take_running:
+                    try:
+                        camera_data, follower_data, leader_data = (
+                            data_manager.convert_msgs_to_raw_datas(
+                                camera_msgs,
+                                follower_msgs,
+                                self.total_joint_order,
+                                leader_msgs,
+                                self.joint_order))
+                    except Exception as e:
+                        self.get_logger().error(f'Failed to convert messages: {e}')
+                        self._end_record_with_error(
+                            'Die Sensordaten konnten nicht gelesen werden, die Aufnahme '
+                            'wurde gestoppt. Bitte starte die Umgebung neu.', gen)
+                        return
+
+                # The dataset's slow first creation (hub check, download, create)
+                # runs here, WITHOUT the recorder lock (round 5);
+                # check_lerobot_dataset installs the dataset under it.
+                if not data_manager.check_lerobot_dataset(
+                        camera_data,
+                        self.total_joint_order):
+                    # check_lerobot_dataset returns False on any dataset-init
+                    # failure. If a lower layer left a German warning in
+                    # _last_warning_message (D4 resume, D7 hub check), prefer it
+                    # over the generic, cause-neutral fallback.
+                    specific = getattr(data_manager, '_last_warning_message', '')
+                    if specific:
+                        error_msg = specific
+                        # Consume so it isn't re-surfaced by the next
+                        # get_current_record_status() tick.
+                        data_manager._last_warning_message = ''
+                    else:
+                        error_msg = (
+                            'Der Datensatz konnte nicht angelegt oder geöffnet werden. '
+                            'Prüfe die Internetverbindung, schalte unter „Erweitert“ '
+                            'das Hochladen aus oder wähle einen anderen Aufgabennamen.'
+                        )
+                    self.get_logger().info(
+                        'Dataset init failed for '
+                        f"{getattr(data_manager, '_save_repo_name', '?')}")
+                    self._end_record_with_error(error_msg, gen)
+                    return
+
+        with data_manager.locked():
+            # F5: re-check AFTER taking the recorder lock — a trip, a new START or
+            # an end may have landed while this tick waited for it.
+            if not self._record_tick_owns_session(gen):
                 return
-        elif follower_msgs is None:
-            error_msg = _missing_or_wait('follower', 'Follower')
-            if not error_msg:
+            if source_stop is not None:
+                kind, name = source_stop
+                if data_manager.end_for_source_stop(record_texts_de.source_stop_de(
+                        kind, name, take_dropped=data_manager.get_status() == 'run')):
+                    self.get_logger().warning(
+                        f'Recording ended: {kind} {name!r} sent nothing since the resume')
+            elif not finishing:
+                if self.communicator.joystick_state['updated']:
+                    self.handle_joystick_trigger(
+                        joystick_mode=self.communicator.joystick_state['mode'])
+                    self.communicator.joystick_state['updated'] = False
+
+                # Aufnahme 2.0 — end the session before the disk fills (1 Hz).
+                self._check_recording_disk_floor()
+
+                # R5-2 rule 1: a required source silent for SOURCE_STOPPED_S
+                # ends the session like „Beenden“ — judged only on an on-time
+                # tick, only in warm-up/run/reset. The end lands ≤ 3.5 s after
+                # the source fell silent (owner bound; 2 s + the ~1 s discard).
+                current = data_manager.get_status()
+                if on_time and current in ('warmup', 'run', 'reset'):
+                    stopped = self._stopped_required_source(tick_mono)
+                    if stopped is not None and data_manager.end_for_source_stop(
+                            record_texts_de.source_stop_de(
+                                stopped[0], stopped[1], take_dropped=current == 'run')):
+                        self.get_logger().warning(
+                            f'Recording ended: {stopped[0]} {stopped[1]!r} stopped')
+
+            try:
+                if decisions is not None and data_manager.get_status() == 'run' \
+                        and getattr(data_manager, '_lerobot_dataset', None) is not None:
+                    record_completed = self._record_decided_slots(data_manager, decisions)
+                else:
+                    record_completed = data_manager.record(
+                        images=camera_data,
+                        state=follower_data,
+                        action=leader_data)
+                    self._open_take_if_new(data_manager)
+            except _SlotConvertError as e:
+                self.get_logger().error(f'Failed to convert messages: {e}')
+                self._end_record_with_error(
+                    'Die Sensordaten konnten nicht gelesen werden, die Aufnahme '
+                    'wurde gestoppt. Bitte starte die Umgebung neu.', gen)
                 return
-        elif leader_msgs is None:
-            error_msg = _missing_or_wait('leader', 'Leader')
-            if not error_msg:
+            except Exception as e:
+                # add_frame raises from inside upstream lerobot on (a) a feature
+                # mismatch when resuming an existing dataset on a changed rig
+                # and (b) a dead streaming-encoder thread (disk full, av error).
+                # Uncaught, the exception escapes the timer callback and kills
+                # the whole node (main() catches only KeyboardInterrupt) — turn
+                # it into a German stop. The exception text goes to the log only
+                # (it is English and often a path).
+                self.get_logger().error(f'record() failed: {e}')
+                self._end_record_with_error(
+                    'Aufnahme gestoppt: Frame konnte nicht gespeichert werden. '
+                    'Häufige Ursachen: Der Datensatz wurde mit anderen '
+                    'Kameras/Gelenken begonnen (Fortsetzen auf geändertem '
+                    'Aufbau) oder der Speicher ist voll. Bitte Aufbau prüfen '
+                    'oder einen neuen Datensatz-Namen wählen.', gen)
                 return
 
-        if error_msg:
-            self.on_recording = False
-            current_status.phase = TaskStatus.READY
-            current_status.error = error_msg
-            self.communicator.publish_status(status=current_status)
-            self.timer_manager.stop(timer_name=self.operation_mode)
+            self._close_take_if_done(data_manager)
+            current_status = data_manager.get_current_record_status()
+
+        if not self._publish_record_status(current_status, gen):
             return
 
-        try:
-            camera_data, follower_data, leader_data = self.data_manager.convert_msgs_to_raw_datas(
-                camera_msgs,
-                follower_msgs,
-                self.total_joint_order,
-                leader_msgs,
-                self.joint_order)
-
-        except Exception as e:
-            error_msg = f'Failed to convert messages: {str(e)}, please check the robot type again!'
-            self.on_recording = False
-            current_status.phase = TaskStatus.READY
-            current_status.error = error_msg
-            self.communicator.publish_status(status=current_status)
-            self.timer_manager.stop(timer_name=self.operation_mode)
-            return
-
-        if not self.data_manager.check_lerobot_dataset(
-                camera_data,
-                self.total_joint_order):
-            # check_lerobot_dataset returns False on any dataset-init
-            # failure. If a lower layer left a German warning in
-            # _last_warning_message, prefer it over the generic English
-            # fallback. (It does NOT specifically validate camera names
-            # against a resumed dataset — a feature mismatch on resume
-            # surfaces later, from add_frame inside record(), which is why
-            # record() below is exception-guarded.)
-            specific = getattr(self.data_manager, '_last_warning_message', '')
-            if specific:
-                error_msg = specific
-                # Consume so it isn't re-surfaced by the next
-                # get_current_record_status() tick.
-                self.data_manager._last_warning_message = ''
-            else:
-                error_msg = 'Invalid repository name, Please change the repository name'
-            self.get_logger().info(error_msg)
-
-        if error_msg:
-            self.on_recording = False
-            current_status.phase = TaskStatus.READY
-            current_status.error = error_msg
-            self.communicator.publish_status(status=current_status)
-            self.timer_manager.stop(timer_name=self.operation_mode)
-            return
-
-        if self.communicator.joystick_state['updated']:
-            self.handle_joystick_trigger(
-                joystick_mode=self.communicator.joystick_state['mode'])
-            self.communicator.joystick_state['updated'] = False
-
-        try:
-            record_completed = self.data_manager.record(
-                images=camera_data,
-                state=follower_data,
-                action=leader_data)
-        except Exception as e:
-            # add_frame raises from inside upstream lerobot on (a) a feature
-            # mismatch when resuming an existing dataset on a changed rig
-            # (different camera set/names or joint count) and (b) a dead
-            # streaming-encoder thread (disk full, av error). Uncaught, the
-            # exception escapes the timer callback and kills the whole node
-            # (main() catches only KeyboardInterrupt) — turn it into a
-            # German stop like the convert-error handler above.
-            self.get_logger().error(f'record() failed: {e}')
-            error_msg = (
-                f'Aufnahme gestoppt: Frame konnte nicht gespeichert werden '
-                f'({e}). Häufige Ursachen: Der Datensatz wurde mit anderen '
-                f'Kameras/Gelenken begonnen (Fortsetzen auf geändertem '
-                f'Aufbau) oder der Speicher ist voll. Bitte Aufbau prüfen '
-                f'oder einen neuen Datensatz-Namen wählen.'
-            )
-            self.on_recording = False
-            current_status.phase = TaskStatus.READY
-            current_status.error = error_msg
-            self.communicator.publish_status(status=current_status)
-            self.timer_manager.stop(timer_name=self.operation_mode)
-            return
-
-        current_status = self.data_manager.get_current_record_status()
-        self.communicator.publish_status(status=current_status)
-
-        if self.data_manager.should_record_rosbag2():
+        if data_manager.should_record_rosbag2():
             self.handle_rosbag_recording()
 
         if record_completed:
@@ -1566,10 +2079,46 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             current_status.phase = TaskStatus.READY
             current_status.proceed_time = int(0)
             current_status.total_time = int(0)
-            self.communicator.publish_status(status=current_status)
-            self.on_recording = False
+            # Invariant (Aufnahme 2.0): the terminating READY carries a
+            # [WARNUNG] iff the finished dataset was NOT uploaded (finalize
+            # failure, namespace refusal, enqueue failure). Every other warning
+            # rode the SAVING tick just published; the READY no longer inherits
+            # it (the page reads this tick as the upload's fate).
+            reason = getattr(data_manager, '_upload_blocked_reason_de', '') or ''
+            current_status.error = f'[WARNUNG] {reason}' if reason else ''
+            self._publish_record_status(current_status, gen)
+            with self._record_publish_lock:
+                self.on_recording = False
             self.timer_manager.stop(timer_name=self.operation_mode)
             return
+
+    def _check_recording_disk_floor(self):
+        """Aufnahme 2.0 — finish a recording before the dataset disk fills.
+
+        At most once per DISK_CHECK_INTERVAL_S, only while nothing is being
+        saved (warm-up, run, reset): below DISK_CRITICAL_FLOOR_BYTES the session
+        is finished like FINISH (the phase-neutral German sentence rides the
+        next status tick). An unreadable disk never stops a recording. Never
+        raises.
+        """
+        try:
+            now = time.monotonic()
+            last = getattr(self, '_disk_check_last_mono', None)
+            if last is not None and now - last < signal_status.DISK_CHECK_INTERVAL_S:
+                return
+            self._disk_check_last_mono = now
+            data_manager = self.data_manager
+            if data_manager is None or data_manager.get_status() not in (
+                    'warmup', 'run', 'reset'):
+                return
+            free = signal_status.disk_free_bytes(self.DEFAULT_SAVE_ROOT_PATH)
+            if free is None or free >= signal_status.DISK_CRITICAL_FLOOR_BYTES:
+                return
+            if data_manager.finish_for_low_disk(signal_status.disk_critical_stop_de(free)):
+                self.get_logger().warning(
+                    f'Recording finished: only {free} bytes free on the dataset disk')
+        except Exception as e:  # noqa: BLE001 — a disk probe must never stop a tick
+            self.get_logger().warning(f'disk floor check failed: {e}')
 
     def _eager_load_policy(self):
         """Background policy load kicked by START_INFERENCE.
@@ -1716,6 +2265,30 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         )
         return response
 
+    def _record_command_lock(self):
+        """The recorder lock for one /task/command record transition (O6): the
+        DataManager's bounded try_locked(COMMAND_LOCK_TIMEOUT_S), yielding False
+        when a record step holds it longer; a no-op context (True) for a
+        DataManager without it."""
+        try_locked = getattr(self.data_manager, 'try_locked', None)
+        if try_locked is None:
+            return contextlib.nullcontext(True)
+        return try_locked(COMMAND_LOCK_TIMEOUT_S)
+
+    def _request_record_end(self, kind) -> bool:
+        """F1 (round 6): FINISH/STOP through DataManager.request_end — never
+        waits for the recorder lock: True when applied at once, False when
+        queued for the lock holder's release (a discard in flight). A
+        DataManager without it is ended directly (True)."""
+        request_end = getattr(self.data_manager, 'request_end', None)
+        if request_end is not None:
+            return bool(request_end(kind))
+        if kind == 'stop':
+            self.data_manager.record_stop()
+        else:
+            self.data_manager.record_finish()
+        return True
+
     def user_interaction_callback(self, request, response):
         # Audit fix 2 — degraded-boot guard (same pattern as the jog/capture-pose
         # guards): with communicator=None, START_RECORD would reach
@@ -1729,13 +2302,38 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 'Roboter-Initialisierung fehlgeschlagen — bitte die '
                 'Umgebung neu starten (Details im Protokoll).')
             return response
+        # Aufnahme 2.0 (F3): the Aufnahme page sends task_type 'record' on every
+        # command and reads these answers; they are German there. Any other
+        # caller (the Inferenz page's ControlPanel reaches FINISH and the
+        # not-recording answer too) keeps HEAD's text byte for byte.
+        rec = getattr(getattr(request, 'task_info', None), 'task_type', '') == 'record'
         try:
             if request.command == SendCommand.Request.START_RECORD:
                 if self.on_recording:
                     self.get_logger().info('Restarting the recording.')
-                    self.data_manager.re_record()
+                    with self._record_command_lock() as acquired:
+                        if not acquired:
+                            response.success = False
+                            response.message = record_texts_de.BUSY_DE
+                            return response
+                        self.data_manager.re_record()
                     response.success = True
-                    response.message = 'Restarting the recording.'
+                    response.message = (
+                        'Die laufende Episode wird neu aufgenommen.' if rec
+                        else 'Restarting the recording.')
+                    return response
+
+                # Aufnahme 2.0 — disk start floor, checked BEFORE the _mode_lock
+                # claim so a refusal claims nothing. An unreadable disk allows
+                # the start (refuse on proof only); the critical floor stops a
+                # running session (_check_recording_disk_floor).
+                free = signal_status.disk_free_bytes(self.DEFAULT_SAVE_ROOT_PATH)
+                if free is not None and free < signal_status.DISK_START_FLOOR_BYTES:
+                    self.get_logger().warning(
+                        f'START_RECORD refused: only {free} bytes free on the '
+                        f'dataset disk')
+                    response.success = False
+                    response.message = signal_status.disk_start_refusal_de(free)
                     return response
 
                 # F1 — atomic claim: hold _mode_lock around the ownership check AND
@@ -1756,6 +2354,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().info('Start recording')
                 self.operation_mode = 'collection'
                 task_info = request.task_info
+                # Round 5: a new session owns /task/status from here — a
+                # straggler of an older one can no longer publish (F5).
+                with self._record_publish_lock:
+                    self._record_session_gen = getattr(self, '_record_session_gen', 0) + 1
+                # F9: the data-gate clock starts BEFORE the timer does. With the
+                # recorder in its own callback group the first tick can run
+                # before an assignment after init, which read the previous
+                # session's time and timed the gate out at once.
+                self.start_recording_time = time.perf_counter()
                 try:
                     self.init_robot_control_parameters_from_user_task(
                         task_info
@@ -1765,19 +2372,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     self.on_recording = False
                     raise
 
-                self.start_recording_time = time.perf_counter()
-                # Audit F17 (re-armed): zero the throttle timestamp so
-                # the first 5 s check window starts fresh per episode.
-                # Legacy `_camera_fps_checked` kept for back-compat with
-                # any other reader; new logic uses _camera_fps_last_check_t.
-                self._camera_fps_checked = False
-                self._camera_fps_last_check_t = 0.0
                 # on_recording already claimed under _mode_lock above.
                 # Arm the crash-recovery session marker — RECORDING sessions
                 # only (see DataManager._session_marker_enabled).
                 self.data_manager._session_marker_enabled = True
                 response.success = True
-                response.message = 'Recording started'
+                response.message = 'Aufnahme gestartet.' if rec else 'Recording started'
 
             elif request.command == SendCommand.Request.START_INFERENCE:
                 # F1 — atomic claim under _mode_lock (see START_RECORD). on_inference
@@ -1987,46 +2587,110 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             else:
                 if not self.on_recording and not self.on_inference:
                     response.success = False
-                    response.message = 'Not currently recording'
-                else:
-                    if request.command == SendCommand.Request.STOP:
-                        self.get_logger().info('Stopping recording')
-                        self.data_manager.record_stop()
-                        response.success = True
-                        response.message = 'Recording stopped'
-
-                    elif request.command == SendCommand.Request.MOVE_TO_NEXT:
+                    response.message = (
+                        'Gerade läuft keine Aufnahme.' if rec
+                        else 'Not currently recording')
+                    return response
+                if request.command in (SendCommand.Request.STOP,
+                                       SendCommand.Request.FINISH):
+                    # F1 (round 6, owner: the server queues the end): FINISH
+                    # and STOP are ACCEPTED at once, even while a record step
+                    # (the official discard after „Wiederholen“) holds the
+                    # recorder lock — applied the moment it releases, so
+                    # „Verwerfen und beenden“ always ends the session.
+                    is_stop = request.command == SendCommand.Request.STOP
+                    self.get_logger().info(
+                        'Stopping recording' if is_stop else 'Terminating all operations')
+                    applied = self._request_record_end('stop' if is_stop else 'finish')
+                    if not is_stop:
+                        self.on_inference = False
+                    response.success = True
+                    # Round 7: the queued sentence only while a discarded take is
+                    # really being cleaned up; behind an ordinary record step
+                    # (about half of all presses) the normal answer.
+                    discard_in_flight = getattr(self.data_manager, 'discard_in_flight', None)
+                    if rec and not applied and discard_in_flight is not None \
+                            and discard_in_flight():
+                        response.message = record_texts_de.FINISH_QUEUED_DE
+                    elif is_stop:
+                        response.message = 'Aufnahme gestoppt.' if rec else 'Recording stopped'
+                    else:
+                        response.message = (
+                            'Wird beendet.' if rec else 'All operations terminated')
+                    return response
+                # Round 5 (O6): bounded — never block the default group behind a
+                # record step (the official ~1 s discard cancel); on timeout
+                # change nothing and say „beschäftigt“.
+                with self._record_command_lock() as acquired:
+                    if not acquired:
+                        response.success = False
+                        response.message = record_texts_de.BUSY_DE
+                        return response
+                    if request.command == SendCommand.Request.MOVE_TO_NEXT:
                         self.get_logger().info('Moving to next episode')
                         if len(request.task_info.task_instruction) > 1:
+                            # Multi-task: unchanged (unreachable from the page).
                             self.data_manager.record_next_episode()
+                            response.success = True
+                            response.message = 'Moved to next episode'
+                        elif rec:
+                            # Skip a warm-up/reset, or save the running episode;
+                            # a refusal changes nothing and says why.
+                            outcome = self.data_manager.record_early_save()
+                            if outcome == 'run':
+                                response.success = True
+                                response.message = 'Die Aufnahme startet jetzt.'
+                            elif outcome == 'save':
+                                response.success = True
+                                response.message = 'Die Episode wird gespeichert.'
+                            elif outcome == 'too_early':
+                                response.success = False
+                                response.message = (
+                                    'Die Episode läuft erst seit weniger als einer '
+                                    'Sekunde.')
+                            else:
+                                response.success = False
+                                response.message = (
+                                    'Gerade gibt es nichts zu überspringen oder zu '
+                                    'speichern.')
                         else:
                             self.data_manager.record_early_save()
-                        response.success = True
-                        response.message = 'Moved to next episode'
+                            response.success = True
+                            response.message = 'Moved to next episode'
 
                     elif request.command == SendCommand.Request.RERECORD:
                         self.get_logger().info('Re-recording current episode')
-                        self.data_manager.re_record()
-                        response.success = True
-                        response.message = 'Re-recording current episode'
-
-                    elif request.command == SendCommand.Request.FINISH:
-                        self.get_logger().info('Terminating all operations')
-                        self.data_manager.record_finish()
-                        self.on_inference = False
-                        response.success = True
-                        response.message = 'All operations terminated'
+                        if rec:
+                            # Refused once save() committed the episode; the
+                            # accepted time starts the FINISH window (Q4).
+                            if self.data_manager.rerecord_from_command():
+                                response.success = True
+                                response.message = 'Die Episode wird wiederholt.'
+                            else:
+                                response.success = False
+                                response.message = (
+                                    'Die Episode ist schon gespeichert und kann '
+                                    'nicht mehr verworfen werden.')
+                        else:
+                            self.data_manager.re_record()
+                            response.success = True
+                            response.message = 'Re-recording current episode'
 
                     elif request.command == SendCommand.Request.SKIP_TASK:
                         self.get_logger().info('Skipping task')
                         self.data_manager.record_skip_task()
                         response.success = True
-                        response.message = 'Task skipped successfully'
+                        response.message = (
+                            'Aufgabe übersprungen.' if rec
+                            else 'Task skipped successfully')
 
         except Exception as e:
             self.get_logger().error(f'Error in user interaction: {str(e)}')
             response.success = False
-            response.message = f'Error in user interaction: {str(e)}'
+            response.message = (
+                'Der Befehl konnte nicht ausgeführt werden. Bitte versuch es noch '
+                'einmal.' if rec
+                else f'Error in user interaction: {str(e)}')
             return response
         return response
 
@@ -7207,9 +7871,19 @@ def main(args=None):
     # reports. 6 threads gives true parallel decode (cv2 releases the
     # GIL during JPEG decode) and leaves headroom for services. Python
     # GIL-bound for pure-Python callbacks; yields better under contention.
+    #
+    # Aufnahme 2.0 round 5: 8 threads (the record timer now has its own group
+    # and holds one thread most of the time); the high-rate sensor
+    # subscriptions are no longer on this executor at all (the supervised
+    # sensor-ingest executor, see _ensure_sensor_executor).
     from rclpy.executors import MultiThreadedExecutor
-    executor = MultiThreadedExecutor(num_threads=6)
+    executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
+    # Move the import-time heap (~460 k objects) out of the cyclic GC's reach:
+    # a full collection there took 73-105 ms and held the GIL, pausing every
+    # thread incl. the collision callbacks. No explicit gc.collect() remains on
+    # the recording path.
+    gc.freeze()
     try:
         executor.spin()
     except KeyboardInterrupt:
@@ -7217,6 +7891,9 @@ def main(args=None):
     finally:
         # Cleanup HF API Worker before destroying node
         node._cleanup_hf_api_worker()
+        # The sensor executor and its node go first: stop flag, executor
+        # shutdown, sensor node destroyed — all before the main node.
+        node._shutdown_sensor_executor()
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()

@@ -6,6 +6,344 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-02 (later) — Aufnahme 2.0 round 7: sentences that stay true, and a card that agrees with its rows
+
+A fresh verification of round 6 (scratch `fresh1/`, `fresh2/` with screenshots) found no broken
+recording, but texts and cards that could say something false. The owner's decisions are in
+`plan.md`; the invariants in `CLAUDE.md`, the accepted residuals in `docs/KNOWN-ISSUES.md`.
+
+**Texts under the shared cap.** Round 6 made one re-record cap of 2 per episode for gaps and
+frame loss together, but the two end sentences still assumed one kind: after gap + gap + frame
+loss, `FRAME_LOSS_END_DE` said the episode had lost frames „dreimal", and after frame loss twice
+and then a gap, `GAP_KEPT_DE` said the source had failed „wieder". Both now say what is true after
+any mix („… konnte auch nach zwei Wiederholungen nicht ohne Bildverlust gespeichert werden …",
+„… nicht ohne Signal- oder Bildverlust aufgenommen werden und wurde trotzdem gespeichert …"); the
+lost-slot warning says „1 von 301 Bildern fehlt" in the singular. Every remaining record sentence
+of `data_manager.py` now comes from `record_texts_de.py` (the missing-video warning names the
+camera in German instead of a Python list); the inference stale-camera sentence stays HEAD's (F3).
+
+**The queued end, answered honestly.** A FINISH queued behind an ordinary record step — about
+half of all presses — answered „wird beendet, sobald die verworfene Episode aufgeräumt ist"
+although nothing was being discarded; now that sentence comes only while a discard is really in
+flight (`DataManager.discard_in_flight()`). The source-dead end is documented against the owner's
+bound: ≤ 3.5 s from the source's last message (2 s silence + the ~1 s official discard).
+
+**The page.** After a collision in the save window of the LAST episode the robot counts the
+episode and finishes; the finish card still added „Die Aufnahme wurde nach der Kollision beendet."
+and the stage card behind the CollisionModal said „Episode N wurde verworfen" beside a row that
+said „Gespeichert". The row now carries `inCollision`, the stage card says „Episode N wurde vor der
+Kollision gespeichert …", and the counted last episode clears `collisionOpen`. A failed upload
+showed step 3 as still to come (now skipped); a short session without upload showed its reason
+twice, in the banner and on the card (now once, as the card's note); with „Datensatz
+unvollständig" every row still claimed „Gespeichert" (now „Gespeichert, Datensatz unvollständig");
+the header pill said „Timeout" (now „Zeitüberschreitung"). One item needs a file outside the page's
+own: the red registration-failed toast that repeats the card's hint (`KNOWN-ISSUES`).
+
+**Documented, not fixed (owner).** „Verwerfen und beenden" within ~1 s after „Wiederholen" keeps
+the retake (the RERECORD meets the running discard and answers busy, so the page sends no FINISH;
+workaround: wait a moment or press „Beenden" again). A session switched to upload-off followed by a
+Daten-tab upload can overwrite a private hub dataset of the same name (that upload path has no
+existence check). Rig gate G3 gets its acceptance, timestamp jitter SD ≤ 4 ms, with the measured
+table (≤ 4 ms ≈ 0, 5 ms 0.26 %, 6 ms 0.94 %, 7 ms 2.6 %, 8 ms ~5 % + 5 %), and the capture path its
+stall bound (≤ 0.30 s loses nothing; 320 ms lost one slot in 7 of 50 takes, 340–500 ms in 70–85 %;
+each loss counted and warned; action age 113 ms at 350 ms). Docs: the smoke test runs in the amd64
+and opi images, not Jetson.
+
+### Unreleased, 2026-10-02 — Aufnahme 2.0 round 6: „Beenden" is never refused, and an error stop tells the truth about the dataset
+
+Two final verifiers ran the round-5 build (verifier 1: the capture harness, the e-stop and the
+smoke under load; verifier 2: the page through every new state at 1440/1366/1093 px) and found
+what the owner then decided (`plan.md`, „Round-6 owner answers"). The invariants are in
+`CLAUDE.md` (Rule §2's recording-side guards, the collision e-stop, „One recorder lock", „A dataset
+is never overwritten", the Aufnahme page); the open gates in `docs/KNOWN-ISSUES.md`.
+
+**F1 — „Verwerfen und beenden" could keep recording.** „Wiederholen" starts the official ~1 s
+discard, which holds the recorder lock; the FINISH that „Verwerfen und beenden" sends a moment
+later found the lock taken and answered „beschäftigt", and the page — correctly, for a busy
+RERECORD — left the session running. The owner chose to queue the end on the server for every
+client: `DataManager.request_end('finish'|'stop')` never waits, it is applied at once or the moment
+the holder releases the lock (after a pending collision discard; Q3/Q4 judged when applied), and
+`/task/command` answers success, with `FINISH_QUEUED_DE` on a record session when it was queued.
+Measured: 0 of 24 direct and 0 of 12 old-client FINISHes busy, 20 page runs each ending with
+exactly one episode; the smoke test gained `queued_finish_during_discard` with the real writer.
+
+**F2 — the collision path shared the command queue.** With detection on the sensor thread
+(C1-A), the trip still had to be PERFORMED on the default group, behind any queued `/task/command`
+— the O4 trigger was met in verification. Both owner options were taken: the remaining record
+commands wait at most `COMMAND_LOCK_TIMEOUT_S` = 0.05 s (was 0.25 s), and the trip hand-over and
+the 5 Hz watchdog run in their own `_collision_cb_group`; because the watchdog no longer shares a
+group with the resync completion, both now publish the flag under `_collision_flag_lock`, so a
+watchdog True can never land after the resync's False. E-stop with four commands queued:
+148–154 ms.
+
+**F3 — a red cross beside „gesichert".** The D5 error stop finalized and then cleared the crash
+marker whatever the finalize said, and the page drew the error-stop card with step 1 failed while
+the sentence under it said the episodes were safe. Now the marker is cleared only by a successful
+finalize, a failed one ends with `ERROR_STOP_INCOMPLETE_DE`, and the page reads the robot's
+sentence: ✓ and „Auf diesem Rechner gespeichert" when safe, „Datensatz unvollständig" when not,
+nothing claimed when nothing was saved. The verifiers' disk-fill case now ends through the 1 GB
+floor with a successful finalize instead of an error stop.
+
+**F4 — a bad token refused every recording.** D7's logged-in hub check refused the start on any
+failure, so a school whose stored token had expired could not record at all, and a black-holed
+hub held START for as long as the network stack waited. Now the check runs in a thread joined
+after `HUB_CHECK_TIMEOUT_S` (15 s), a missing token or one the hub refuses at `whoami()` starts the
+session WITHOUT upload (nothing can be overwritten) with a German notice the page turns into „Hochladen ist
+für diese Aufnahme aus …" and a local finish naming the reason, a refused repo query names the
+token („… oder schalte unter „Erweitert" das Hochladen aus"), and only an unreachable hub still
+refuses with `HUB_CHECK_REFUSED_DE`.
+
+**Corrections.** C5: a camera at the full rate whose stamps jitter ~6–7 ms with a slow drift
+produced up to 10 repeat/skip PAIRS per 300-frame take (verifier 1), and the per-take warning read
+them as „zu wenige Bilder"; `TakeIntegrity.excess_repeats` now nets the skips first (7 ms stamp
+jitter at 30.02 Hz, 10 seeds: the round-5 rule fired on 3, the round-6 rule on none). One shared
+re-record cap, `MAX_REDOS_PER_EPISODE` (2), for gaps and frame loss together, so a C7 end is
+reachable after any mix. A gap in the take „Beenden" ended is „Signalaussetzer, verworfen", not
+„Bildverlust". The upload-stall card said „später im Tab Daten hochladen" twice. The data
+manager's inline sentences of these paths moved into `record_texts_de.py` (the rest followed in
+round 7; the inference stale-camera sentence stays HEAD's by design, F3). Docs: the D5-vs-stopped-source
+wording, the honest-rate claims qualified by „stamp jitter ≲ 2 ms (G3)", the private LeRobot name
+(`dataset_tools._copy_and_reindex_videos`, not our `_force_recorder_vcodec`), and HEAD's repeat
+range (10–24 %, not 15–24 %).
+
+### Unreleased, 2026-10-01 — Aufnahme 2.0 round 5: every frame decided from timestamps, and the recorder off the GIL's critical path
+
+The Docker end-to-end run after round 4 (119 PASS / 10 FAIL / 2 SKIP) showed what the earlier
+rounds had not reached: the datasets themselves were unclean. A 10 s take at 30 fps kept 350–451
+of its 600 frames, 10–24 % of the kept frames repeated the previous image, 40–97 % skipped one,
+and the take's real length drifted 2.8–4.3 s from what its `frame_index / fps` timestamps claim.
+The owner asked for the most reliable fix (R5-1) and a dedicated capture architect designed it
+(`docs/plans/2026-09-29-cyclo-parity/spec-r5-capture.md`, folded into `spec-r5-final.md`). The
+invariants are in `CLAUDE.md` („Recording FSM", „Callback-group rule", Rule §2's recording-side
+guards, the teleop collision e-stop, `/edubotics/signal_status`, „HF uploads", the Aufnahme page);
+the open rig gates G1–G5 and A-R6/A-R7 are in `docs/KNOWN-ISSUES.md`.
+
+**Two causes, compounding.** (1) The recorder sampled whatever was cached when its tick ran: a
+tick landing just before a camera frame took the old one (a repeat) and the next took the one
+after (a skip), the pair picker walked back up to 7 frames to find a „synced" pair, and a late
+tick lost its slot entirely, so the timeline compressed. (2) The node's
+`MultiThreadedExecutor` saturated the GIL: 2.23 ms of CPU per delivered message (cameras at
+30 Hz, both arms at 100 Hz), the main thread 87–97 % idle waiting for it, so every record step and
+the encoder thread waited too. Either half alone was measured insufficient: the executor alone
+kept 15–43 % repeats; the sampler alone 2–7 % skips and up to 1.3 s timeline error.
+
+**The sensor node.** Every camera, follower and leader subscription and the collision monitor's
+three now live on a second node, `physical_ai_server_sensors`, spun by a `SingleThreadedExecutor`
+on its own thread (0.18 ms per message). `use_global_arguments=False` is load-bearing: the launch's
+`-r __node:=physical_ai_server` would otherwise rename it too (two nodes with one name, measured).
+The thread is supervised (F3): every callback body is guarded, and three executor failures within
+10 s end the process with `os._exit` so s6 respawns it (measured with an injected fault: three
+failure lines, the FATAL line, pid 111 → 267, the next take clean); before, one exception killed
+the thread silently while the main node kept answering — recording stalled and the collision
+detector was deaf. `/edubotics/signal_status` gained one trailing key, `ingest`.
+
+**The slot sampler.** Every source callback appends `(seq, arrival, t, msg)` to a ring, where
+`t` is the header stamp mapped onto the server's monotonic clock (running minimum of
+arrival − stamp over 2 s), so a late callback keeps its true time. Slot k is the instant
+`t0 + k/fps`; the sampler decides it once, from history, when it is PROVABLY complete (a newer
+sample of every source has arrived; streams arrive in order) or 0.1 s after its earliest
+decision time. Per camera it tracks the frame phase relative to the grid with a second-order
+predictor (the measured rate predicts the per-slot drift; without it a camera 1–1.5 % off the fps
+produced up to 11 % excess repeat+skip, with it ≤ 0.07 %) and hysteresis (one honest repeat or
+skip per drift cycle). `LOCK_TOL` 0.06 (not the capture spec's 0.02) locks a 26 Hz camera at
+25 fps (excess 7.75 % → 0.23 %). The unstamped leader is back-dated inside a delivery burst
+(action-age p99 70 → 15 ms under process stalls). A take now ends by frame count, not by wall
+clock. Rejected, with evidence (spec-r5-capture §5): a fixed-deadline fresh wait + pair pick
+(aliases up to 9.6 % at the bad phase, and a late tick still loses its slot), the literal closest
+pair, a FIFO jitter buffer, master-camera clocking, arrival-only times (2.2 % vs 0.1 %), deeper
+queues on the old executor, interpolation, LeRobot's own loop (3–12 % repeats, 5–20 % skips,
+0.7–1.2 s error per 10 s), LeRobot 0.6.x (samples the same way).
+
+**Measured on the full build, same host session** (real server, real LeRobot writer, a
+time-coded mock, 2 × 10 s takes per cell; HEAD in brackets): independent 30/29.97 Hz cameras 600/600
+frames, 0 % repeats, 0 % skips, 24 ms max timeline error (HEAD 367/600, 15.0 %, 78.5 %, 4321 ms);
+5 ms jitter + 1 % spikes 600/600, 0.33/0.33 %, 26 ms (350/600, 24.1, 96.7, 4346 ms); 29.55 Hz at
+30 fps 600/600, 1.42 % repeats (honest 1.5), 0 skips (451/600, 10.3, 41.8, 2815 ms); 25 Hz at 30 fps
+600/600, 16.67 % repeats = honest, 0.08 % skips (363/600); 26 Hz at 25 fps 500/500, 4.30 % skips
+(honest 3.85); a host with 2 CPUs and two busy loops 600/600, 0.08 %, 0 %, 41 ms (433/600, 23.1,
+61.9, 2983 ms). Image-vs-state skew SD 5–14 ms, max action age 11–22 ms. The event model of the
+final module (6 seeds × 60 s): indep 0.09/0.00 %, drift 0.20/0.19, stalls 0.08/0.00, compression
+≤ 0.02 %, timeline error ≤ 67 ms.
+
+**The recorder lock, and commands that never wait (O1, O6, F5, F9).** The record timer runs in its
+own callback group, so one `DataManager` lock (`locked()` / `try_locked()`) serialises the record
+tick, the commands and the collision path. A collision trip never waits for it (it only requests
+the discard), and a record step that would run after a trip or into another session returns
+without touching the DataManager (the session generation is re-checked after taking the lock: the
+reviewer's c1a probe without that re-check let a straggler step skip a „Zurücksetzen" after a
+resume). Every record command takes the lock for at most 0.25 s and otherwise answers „Die Aufnahme
+ist gerade beschäftigt. Bitte versuch es gleich noch einmal." with nothing changed (measured: during
+the ~1 s official cancel after „Wiederholen", three MOVE_TO_NEXT answered „beschäftigt" in
+252–261 ms, all others in 2–9 ms). The page never answers a busy refusal with silence, and in
+„Verwerfen und beenden" a busy RERECORD no longer falls through to FINISH — which would have KEPT
+the take the student discarded. START sets its clock before the timer starts (with the recorder in
+its own group the first tick could otherwise time out at once).
+
+**The discard stays LeRobot's official one (O6).** Every discard goes through the public
+`clear_episode_buffer()`; a private wake of the encoder threads was built and measured (~15 ms) and
+rejected by the owner („no private LeRobot internals anywhere"). Its cost is the encoder threads'
+1 s queue timeout: the take after a redo starts ~1.0 s later (`recordingAgainAfterMs 1014`, first
+frames step 1, no hole).
+
+**Collision detection moved to the sensor thread (C1-A, Rule §2, approved).** The pose and gpio
+callbacks run on the sensor executor; a trip is latched (`_collision_trip_pending`, with a session
+generation bump, under the publish lock) and handed to the main executor through a guard
+condition, where `_on_trip_gc` performs the unchanged stop. The detector is serialised by its own
+lock, and the 5 Hz watchdog does nothing while a trip is pending, so a stray False can never
+follow a pending trip. E-stop latency 146–151 ms (HEAD 151 ms, same session). The detector, its
+gating, thresholds, relax/home/resync and the round-4 resync ordering are unchanged; the
+monitor's own callback group (O4) stays deferred, with its trigger in KNOWN-ISSUES.
+
+**Session ends that keep what was saved (R5-2, O2, C6, C7, D5).** A required source silent for
+2 s ends the session like „Beenden" with a German sentence naming it (the take in flight dropped,
+saved episodes finalized and uploaded). A take during which a source was silent ≥ 0.25 s on its
+OWN timeline is re-recorded („Signalaussetzer: …"), at most twice per episode, then kept with a
+warning; an unstamped leader's gap counts only when the follower's delivery shows no pause in
+the same interval (a server stall delays both). A frame lost in the encoder re-records the take,
+detected through LeRobot's public warning „Encoder queue full for …" (owner Q2; the count is a
+lower bound, detection exact: hevc 120 = 120, h264 1 vs 5), at most twice, then the session ends.
+Every error stop now finalizes what was saved and clears the crash marker (D5), without uploading.
+
+**Datasets that cannot be overwritten or silently stretched (D7, D4, O5/D6).** With „Hochladen" on,
+the existence check asks the Hub logged in (`whoami()` + `repo_exists()`); any failure refuses the
+start in German, because a fresh local dataset would later be uploaded with an orphan sweep over a
+private Hub dataset the anonymous check had read as „absent" (measured: `requests.get` answers
+401/404 for a private repo; a dead endpoint raises `httpx.ConnectError`). A resumed dataset must
+pass LeRobot's own `sanity_check_dataset_robot_compatibility` (fps, features, robot type), each
+mismatch a German sentence; before, a resume at another fps silently stretched or compressed the
+episodes. The README is LeRobot's dataset card, rebuilt on every upload (repo_id included;
+`license: apache-2.0` only for a public dataset), and our fork of the template is deleted.
+
+**Uploads that cannot hang (F7) and say why they failed (R5-4b).** `upload_large_folder` retries a
+failing LFS pre-upload or commit forever and its report line does not move during one large file,
+so a dead network left the page at „Hochladen … 30 %". The child now forwards the library's
+public ERROR lines; the parent ends an upload with no progress for 120 s while it logs errors, or
+for 30 min at all, kills the child and says „Das Hochladen kommt nicht mehr voran …"; the local
+dataset is untouched. Byte counters were measured useless (`/proc/<pid>/io` does not count
+`send()`: 4 MB sent, 96 bytes counted; the NIC carries video and DDS; `hf_xet` uploads outside
+httpx). Upload failures are classified by cause through the exception chain (auth / network /
+busy / server) instead of guessing from the text.
+
+**The page.** A collision in the save window settles on the first tick that counted it (the last
+episode is counted while still saving: one „Gespeichert", not „Kollision" + „Gespeichert");
+„Behalten und beenden" measures the run to the press; two new rows („Abgebrochen, verworfen",
+„Signalaussetzer, wiederholt"); the Q8 reason survives a fast end; the local rosbridge reconnects
+every ≤ 2 s without an attempt cap, so a stale RECORDING view after a link loss lasts ≤ ~4 s.
+
+**Not changed, on purpose.** Inference keeps its observation rule (C3: the picker's walk-back can
+hand the policy a pair up to 7 frames ≈ 233 ms old — documented); the fps default stays 30 with no
+refusal for a slower camera (F2: its repeats are honest, the amber banner warns); camera exposure
+waits for rig gate G4 (C4); LeRobot stays 0.5.1 (O3).
+
+**What building the module found beyond the prototype.** Three of the capture prototype's choices
+did not survive the pure tests, each fixed in `capture_timeline.py` and pinned there: (1) a camera's
+rate was estimated from whatever had arrived when the slot was decided, and the 64-frame ring
+shortened that window for a slot decided late, so a slot decided after a 300 ms stall could choose
+a different frame than the same slot decided on time — the rate now comes from the sampler's own
+per-camera series bounded by the slot time, and the stall test asserts identical camera and follower
+choices; (2) the leader's period was the median interval of its last 40 samples, and a 300 ms stall
+puts ~30 burst intervals of a few µs into that window, so the median collapsed and nothing was
+back-dated (29 samples off) — burst intervals are now ignored; (3) a phase wrap could move a
+camera's boundary back by a few ms and choose an OLDER frame than the previous slot's, a time
+reversal in the dataset — a chosen frame is now never older than the last. The event-model
+regression (the architect's scenarios, 2 seeds × 20 s, in `test_capture_timeline.py`) reproduces the
+T4 numbers after these changes (indep 0.09/0.11 % repeats, cam25@30 17.02 %, stalls action-age p99
+12 ms). Two spec test bounds were refined rather than met as written: the two-camera spread is
+within one period + 3σ for 95 % of the frames, not always (the hysteresis band allows up to 1.5
+periods while a drifting camera sits in it), and the worst-phase no-alias test uses 8 ms of DELIVERY
+jitter (8 ms of capture-stamp jitter does alias).
+
+### Unreleased, 2026-09-29/30 — Aufnahme 2.0: the recorder's ends made honest, and a new Aufnahme page
+
+The owner asked for Cyclo parity on the Aufnahme tab (docs/plans/2026-09-29-cyclo-parity): a
+timed-only page in the Startseite language with animated warm-up/reset, per-phase buttons and
+keys, a problem banner that appears only for a real problem, and a finish flow. Building it
+exposed how the recorder's FSM actually ended a session, and most of the work below is the
+server being made to match what the page promises. The invariants are in `CLAUDE.md`
+(„Recording FSM", the collision recovery, „The Aufnahme page"); rig gates A-R1…A-R5 are in
+`docs/KNOWN-ISSUES.md`.
+
+**Why FINISH needed rules at all (H1–H5).** At HEAD, FINISH or „Jetzt starten" during the first
+warm-up crashed the recording: LeRobot 0.5.1's writer starts with an EMPTY buffer (not `None`),
+`record_early_save` set `'save'`, and the next tick raised `ValueError(You must add one or
+several frames …)` — reproduced with the real writer, which is why the CI smoke test exists.
+FINISH never counted the partial episode (saved locally, never uploaded), STOP counted one too
+many with nothing in progress, and FINISH during a frame drop re-routed to `'reset'`, so the
+session simply continued. Each is fixed in `data_manager.py` and pinned by
+`test_data_manager_record_fsm.py`; an empty buffer is now nothing to commit.
+
+**Q3 / Q4 / Q8 — the RERECORD→FINISH window.** „Verwerfen und beenden" is two commands,
+RERECORD then FINISH. Between them the server may already have started the next run (with
+Zurücksetzen = 0 there is not even a RESETTING tick, H15), and FINISH would then save a
+fragment the student had just asked to throw away. Rev. 1 of the spec answered with a 1-s
+minimum reset; the second architect's probe E showed a 1.1-s run still saved when FINISH came
+2.2 s later on a slow link, so a timer only moved the race. The owner chose a rule that does not
+depend on timing: the server remembers a RERECORD received from the wire for
+`RERECORD_FINISH_WINDOW_S` (5 s), and a FINISH drops any run that STARTED after it (Q4); a
+FINISH also drops any run shorter than `EARLY_SAVE_MIN_S` (1 s, Q3 — it was never a real
+attempt). The accepted edge: a student who presses „Wiederholen", starts again at once and then
+chooses „Behalten und beenden" inside those 5 s loses that run. The owner kept the rule and
+asked that the page say so (Q8): the client knows both times — its own RERECORD send and the
+RECORDING phase anchor — so `recordCommands` shows „Diese Episode war zu kurz nach dem
+Wiederholen und wird nicht gespeichert." exactly when the server will drop it.
+
+**F7b — a collision never reopens a finishing session.** The collision path calls
+`re_record()`, which used to rewind unconditionally. The second architect's probe B: FINISH
+latched, then a collision → the session rewound to `'reset'` and never completed; the finish the
+student had asked for silently turned into „keep recording". `re_record()` is now a no-op in
+`finish`/`stop`: the collision still halts and discards nothing new, and the finish completes
+(owner-approved change to a collision path).
+
+**F1 — „Notentriegelung" ends the recording like FINISH.** `FORCE_RESUME_TELEOP` used to clear
+the interrupted-recording marker, so completion published a bare READY: the DataManager was
+never finalized, nothing was uploaded, the crash marker stayed, and a page tracking the session
+would have reported „Das Hochladen hat nicht begonnen". Now `_end_interrupted_recording` calls
+`end_session_now` (finalize + upload per the existing guards). The first version published only
+the terminating READY, so a warning the finish raised (frame loss on save, a missing video file)
+never reached the page; the verification round made it publish the record status (SAVING, with
+that warning) first, as the record timer's last tick does.
+
+**Q7 — a collision between commit and count.** `save()` commits an episode one tick before the
+count; a collision in that window let `re_record()` clear the latch, leaving the episode on disk
+and uploaded but uncounted (probe V19: `committed_on_disk=1, count=0`) — the session then
+recorded one episode more than asked, and the page showed „Kollision, verworfen" for an
+episode that was kept. The owner chose to count first, exactly like the save-completion branch,
+and then rewind; the contact happened after the episode's frames ended (SAVING records nothing).
+On the LAST episode a rewind was first assumed to start a run with no room; measured, a literal
+rewind adds no frame, but it publishes a phantom RESETTING („Episode N+1 von N") for the whole
+Zurücksetzen time and a RECORDING tick before READY — so that case goes to `finish` instead.
+
+**What the verification round found on top.** A STOP during a latched save stopped counting the
+committed episode (HEAD counted it; the owner: count it). A session ending before any dataset
+existed left its crash marker. And, pre-existing since before this work and found only by
+mutation-checking the smoke test: `_episode_reset` tested the writer by truthiness, but
+`LeRobotDataset.__len__` is the number of SAVED frames, so in the first episode of every new
+dataset „Wiederholen", a collision discard, the frame-drop re-record and a dropped FINISH run left
+their frames in the buffer and the next saved episode carried them (real writer: 30 discarded +
+40 new = 70 frames saved). Now `is not None`, and the smoke test has a „Wiederholen in the first
+episode" scenario that fails against the old test. The second verification round's recorder find: after a discard the next take's first frame
+waited ~0.9 s — the DataManager only dropped the buffer, so LeRobot's `start_episode()`
+cancelled the stale streaming encoder lazily on that frame, and the cancel waits for the encoder
+threads' 1 s queue timeout. The owner chose LeRobot's official way over a private stop sentinel:
+`discard_episode()` calls the public `clear_episode_buffer()` in the next, frameless record tick
+(at the start of Zurücksetzen; `scripts/lerobot_record.py` clears after its reset loop, right
+before the next take), and the smoke test fences where the cancel lands. A deeper review then
+showed the ~1 s still blinds the collision detector — the record timer and every collision
+callback share the node's default callback group, exactly as main's lazy cancel did at the next
+take's first frame — so round 4 runs the pending cancel or the F1 finalize in
+`_on_resync_complete` before `/collision_flag=False`, arm still frozen, and leaves a separate
+callback group for the monitor (which needs a DataManager lock) to a later round. On the page: at 1093×550 the problem banner
+slid under the sticky action bar and the finish card lost its top (banner and bar are now one
+sticky footer; cards centre with auto margins; the narrow finish card joins the flow); a mouse
+click left the focus on a stepper or switch, so Space pressed it again instead of starting (the
+page's buttons now give the focus back after a pointer click — and, found in the second
+verification round, so do the sidebar and bottom-navigation buttons: a student arriving by a
+click on „Aufnahme" had that nav button focused, and Space pressed it again instead of starting); the page re-rendered ~60 times a
+second because the shell subscribed to the whole `taskStatus`/`taskInfo` (memoised page, a
+narrowed shell, reference-stable selectors and reducer; measured afterwards ~4/s while
+recording and ~2.4/s idle, i.e. a few times a second, never per tick); and the action bar shed the dots' label
+in every phase at 1440/1366 (it now measures and sheds only when three command buttons do not fit).
+
 ### Unreleased, 2026-09-28 — Vormachen opens one window per kind, and the whole app draws one icon style
 
 The owner asked for two things (docs/plans/2026-09-28-vormachen-einzeln):

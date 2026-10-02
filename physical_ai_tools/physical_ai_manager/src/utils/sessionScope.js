@@ -132,9 +132,10 @@ export const MACHINE_SCOPED_KEYS = Object.freeze([
   'edubotics_workshop_dock_collapsed',
   'edubotics_workshop_dock_width',
   'edubotics_workshop_dock_split',
-  // The Record page's URDF panel toggle: a view of the RIG, and layout like the
-  // dock keys above.
-  'edubotics_urdf_open',
+  // The Aufnahme stage's view („Kameras" | „3D" | „Beides"): a view of the RIG,
+  // and layout like the dock keys above. It replaced `edubotics_urdf_open`, the
+  // old floating 3D panel's toggle (Aufnahme 2.0).
+  'edubotics_record_view',
 ]);
 
 /**

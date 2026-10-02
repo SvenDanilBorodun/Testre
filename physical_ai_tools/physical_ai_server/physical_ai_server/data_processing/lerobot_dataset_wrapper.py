@@ -25,9 +25,34 @@ class, _LazyDecodeBuffer, per-camera FFmpegEncoder thread management, and
 compute_episode_stats_buffer are GONE. Upstream LeRobot v0.5.1 owns all of it.
 """
 
+import importlib
+import importlib.util
 import os
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+
+def _load_encoder_drop_watch():
+    """encoder_drop_watch (stdlib only): by package name in the image, by
+    path when a deps-free test loader gave the package no __path__."""
+    try:
+        return importlib.import_module(
+            'physical_ai_server.data_processing.encoder_drop_watch')
+    except ImportError:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'encoder_drop_watch.py')
+        spec = importlib.util.spec_from_file_location('_edubotics_encoder_drop_watch', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+# Round 5 (owner Q2): frame drops are detected through LeRobot's PUBLIC logged
+# warning („Encoder queue full for <key>, dropped N frame(s)“, logger
+# lerobot.datasets.video_utils), never through the encoder's private counter.
+# One handler for the process; the thin Dockerfile asserts the message text is
+# still in StreamingVideoEncoder.feed_frame (the tripwire for a LeRobot bump).
+_FRAME_DROP_WATCH = _load_encoder_drop_watch().install()
 
 
 # v0.5.1 vcodec allowed set: {'auto','h264','hevc','libsvtav1', plus HW encoders}.
@@ -155,39 +180,45 @@ class LeRobotDatasetWrapper(LeRobotDataset):
     # only logs a warning; meanwhile add_frame still appends a parquet row (with
     # a None video placeholder), so a dropped frame leaves the encoded video
     # SHORTER than the data parquet for that episode. At train time LeRobot then
-    # raises FrameTimestampError. The encoder exposes a per-camera drop counter
-    # (_dropped_frames), reset at each episode's first frame (start_episode) and
-    # NOT cleared by finish_episode — so it must be read BEFORE save_episode()
-    # commits, which data_manager.save() does to discard + re-record the episode.
+    # raises FrameTimestampError. Round 5: the take's drops are read from that
+    # PUBLIC warning (the frame-drop watch, re-armed by DataManager at the take's
+    # first frame), BEFORE save_episode() commits — data_manager.save() then
+    # discards + re-records the episode.
+
+    def arm_frame_drop_watch(self) -> None:
+        """A new take starts: forget earlier drop reports."""
+        _FRAME_DROP_WATCH.arm()
 
     def streaming_dropped_frame_count(self) -> int:
-        """Total frames the streaming encoder dropped for the CURRENT (in-flight)
-        episode, summed across cameras. Returns 0 when streaming is disabled or
-        the encoder internals are unavailable — i.e. "no detection" rather than a
-        false positive."""
-        writer = getattr(self, 'writer', None)
-        enc = getattr(writer, '_streaming_encoder', None) if writer is not None else None
-        dropped = getattr(enc, '_dropped_frames', None) if enc is not None else None
-        if not dropped:
-            return 0
-        try:
-            return int(sum(int(v) for v in dropped.values()))
-        except (TypeError, ValueError, AttributeError):
-            return 0
+        """Frames LeRobot reported dropped since the take's first frame (> 0
+        is exact; the count is a lower bound: LeRobot logs the 1st drop and then
+        every 10th)."""
+        return int(_FRAME_DROP_WATCH.dropped())
 
     def cancel_streaming_episode(self) -> None:
-        """Discard the in-flight streaming episode (its temp mp4 + encoder
-        threads) so a dropped-frame episode can be cleanly re-recorded. Safe
-        no-op when streaming is disabled. The next episode's start_episode would
-        also cancel a stale active episode, but doing it here frees the threads
-        and temp file promptly."""
+        """Alias of discard_episode() (Aufnahme 2.0 round 5, owner O6: LeRobot's
+        official cancel only — no private encoder attribute anywhere on the
+        recording path)."""
+        self.discard_episode()
+
+    def discard_episode(self) -> None:
+        """Discard the in-flight take the way LeRobot's own record loop does
+        (scripts/lerobot_record.py, between takes): the PUBLIC
+        clear_episode_buffer() cancels the streaming encoder immediately and
+        leaves a fresh, empty buffer.
+
+        DataManager calls this in the record tick right after a discard (a reset
+        or discard tick, no frame recorded), so the cancel's wait for the encoder
+        threads (~0.9 s: they poll their queue with a 1 s timeout) never falls
+        into the next take — before, start_episode() cancelled the stale encoder
+        lazily on that take's first frame. No-op on a read-only dataset.
+        """
         writer = getattr(self, 'writer', None)
-        enc = getattr(writer, '_streaming_encoder', None) if writer is not None else None
-        if enc is not None and hasattr(enc, 'cancel_episode'):
-            try:
-                enc.cancel_episode()
-            except Exception:  # noqa: BLE001 — discard must never raise
-                pass
+        if writer is None:
+            return
+        # delete_images reads the buffer's episode_index; DataManager may already
+        # have dropped the buffer (streaming video leaves no temp images anyway).
+        self.clear_episode_buffer(delete_images=writer.episode_buffer is not None)
 
     # ---------- Multi-task / batched-encode no-ops ----------
     # EduBotics v2.5.0 is single-task per recording session (Modal Cloud

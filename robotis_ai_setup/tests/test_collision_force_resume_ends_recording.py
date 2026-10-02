@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+#
+# F1 (Aufnahme 2.0, owner-approved collision-path change): FORCE_RESUME_TELEOP
+# („Trotzdem fortsetzen“) during a recording ENDS the session like FINISH — the
+# DataManager finalizes and hands the upload off per its own guards — and the
+# terminating READY carries the saved count plus a `[WARNUNG]` iff the upload was
+# blocked. Before, the forced path left the dataset unfinalized, never uploaded
+# it and kept the crash marker. A plain RESUME_TELEOP still re-arms the SAME
+# session (unchanged).
+#
+# The fake node host and the collision stubs are the ones of
+# test_collision_monitor_contract.py, loaded from that file by path (tests/ has
+# no __init__.py) so both files drive the monitor through one harness. The
+# existing contract test is deliberately not edited: its SimpleNamespace
+# DataManager has no end_session_now, which keeps the plain READY path covered.
+
+import importlib.util
+import types
+import unittest
+from pathlib import Path
+
+_CONTRACT_PATH = Path(__file__).with_name('test_collision_monitor_contract.py')
+H = None
+
+
+def _harness():
+    global H
+    if H is None:
+        spec = importlib.util.spec_from_file_location(
+            '_edubotics_collision_contract_harness', str(_CONTRACT_PATH))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        H = module
+    return H
+
+
+class ForceResumeEndsRecordingTest(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.h = _harness()
+
+    def _host(self, *, end=None):
+        h = self.h
+        host = h._Host()
+        calls = []
+        status = h._TaskStatus()
+        status.current_episode_number = 2
+        status.total_time = 5
+        status.proceed_time = 3
+
+        def _end():
+            calls.append('end')
+            if end is not None:
+                return end()
+            return True
+
+        host.data_manager = types.SimpleNamespace(
+            re_record=lambda: calls.append('re_record'),
+            end_session_now=_end,
+            get_current_record_status=lambda: status,
+            _upload_blocked_reason_de='')
+        host.calls = calls
+        host.timers = [t for t in host.timers if t.callback != host._collision_watchdog_cb]
+        host._collision_follower_pos = dict(h.CONTACT_POSE)
+        host.on_recording = True
+        h._trip(host)
+        host._collision_leader_pos = {**h.CONTACT_POSE}
+        return host
+
+    def test_force_resume_mid_recording_finishes_the_session(self):
+        host = self._host()
+        self.assertTrue(host.force_resume_teleop()[0])
+        host.fire_pending_timers()
+        self.assertEqual(host.calls, ['re_record', 'end'])
+        self.assertEqual(host.timer_start_calls, [])      # NOT re-armed
+        self.assertFalse(host.on_recording)
+        last = host.pub_for('/task/status').published[-1]
+        self.assertEqual(last.phase, self.h._TaskStatus.READY)
+        self.assertEqual(last.current_episode_number, 2)
+        self.assertEqual(last.total_time, 0)
+        self.assertEqual(last.proceed_time, 0)
+        self.assertEqual(last.error, '')
+        self.assertFalse(host._collision_end_recording)   # consumed
+
+    def test_blocked_upload_reason_rides_the_terminating_tick(self):
+        host = self._host()
+        host.data_manager._upload_blocked_reason_de = 'Upload abgelehnt: …'
+        host.force_resume_teleop()
+        host.fire_pending_timers()
+        self.assertEqual(host.pub_for('/task/status').published[-1].error,
+                         '[WARNUNG] Upload abgelehnt: …')
+
+    def test_the_record_status_with_its_warning_goes_out_before_the_ready(self):
+        # Verifier V1-3 (owner: send them first). A warning the finishing session
+        # raised (the frame-loss-on-save sentence, a missing video file) rides a
+        # SAVING tick published BEFORE the terminating READY, exactly as the
+        # record timer does; the READY then carries only a blocked upload.
+        h = self.h
+        host = self._host()
+        warning = ('[WARNUNG] Episode 3: Kamera-Bilder gingen beim Speichern '
+                   'verloren, die Episode wurde verworfen.')
+        issued = []
+
+        def _fresh_status():
+            st = h._TaskStatus()
+            st.phase = 4                       # SAVING — the DataManager's 'finish'
+            st.current_episode_number = 2
+            st.total_time = 0
+            st.proceed_time = 0
+            st.error = warning if not issued else ''   # clear-on-read
+            issued.append(st)
+            return st
+
+        host.data_manager.get_current_record_status = _fresh_status
+        before = len(host.pub_for('/task/status').published)
+        host.force_resume_teleop()
+        host.fire_pending_timers()
+        tail = host.pub_for('/task/status').published[before:]
+        self.assertEqual([s.phase for s in tail[-2:]], [4, h._TaskStatus.READY])
+        self.assertEqual(tail[-2].error, warning)
+        self.assertEqual(tail[-1].error, '')
+        self.assertEqual(tail[-1].current_episode_number, 2)
+        self.assertEqual(host.calls, ['re_record', 'end'])
+
+    # ---- round 4: the slow recording work happens while the arm is frozen ----
+    # /collision_flag=False hands teleop back; the record timer, the collision
+    # detector and /task/command share one callback group, so a ~0.9 s encoder
+    # cancel AFTER the release would leave the detector deaf right when the
+    # student moves again. Owner-approved: do it before the release.
+
+    def _log_order(self, host):
+        order = []
+        flag = host.pub_for(self.h.CM.COLLISION_FLAG_TOPIC)
+        status = host.pub_for('/task/status')
+        flag_publish, status_publish = flag.publish, status.publish
+
+        def _flag(msg):
+            order.append(('flag', msg.data))
+            flag_publish(msg)
+
+        def _status(msg):
+            order.append(('status', msg.phase))
+            status_publish(msg)
+
+        flag.publish, status.publish = _flag, _status
+        return order, flag
+
+    def test_plain_resume_cancels_the_discarded_take_before_releasing_the_arm(self):
+        h = self.h
+        host = self._host()
+        order, flag = self._log_order(host)
+        host.data_manager.cancel_pending_discard = (
+            lambda: order.append(('cancel', flag.published[-1].data)) or True)
+        host._collision_homed = True
+        host._collision_leader_pos = {
+            j: v for j, v in zip(h.CM.ARM_JOINT_NAMES, h.CM.SAFE_HOME_ARM)}
+        host._collision_leader_pos.update(
+            {j: 0.0 for j in h.CM.LEADER_JOINTS if j not in host._collision_leader_pos})
+        self.assertTrue(host.resume_teleop()[0])
+        host.fire_pending_timers()
+        cancel = order.index(('cancel', True))           # the arm was still frozen
+        release = order.index(('flag', False))
+        self.assertLess(cancel, release)
+        self.assertEqual([e for e in order if e[0] == 'cancel'], [('cancel', True)])
+        self.assertEqual(host.timer_start_calls, ['collection'])   # same session resumes
+        self.assertTrue(host.on_recording)
+
+    def test_forced_recovery_ends_the_session_before_releasing_the_arm(self):
+        host = self._host()
+        order, flag = self._log_order(host)
+        host.data_manager.end_session_now = (
+            lambda: order.append(('end', flag.published[-1].data)) or True)
+        host.force_resume_teleop()
+        host.fire_pending_timers()
+        end = order.index(('end', True))
+        release = order.index(('flag', False))
+        self.assertLess(end, release)
+        # The session's statuses still follow the release, SAVING then READY.
+        after = [e for e in order[release + 1:] if e[0] == 'status']
+        self.assertEqual(after[-1], ('status', self.h._TaskStatus.READY))
+        self.assertEqual(host.timer_start_calls, [])
+        self.assertFalse(host.on_recording)
+
+    def test_a_failing_pre_release_cancel_still_resumes(self):
+        h = self.h
+        host = self._host()
+
+        def _boom():
+            raise RuntimeError('cancel failed')
+
+        host.data_manager.cancel_pending_discard = _boom
+        host._collision_homed = True
+        host._collision_leader_pos = {
+            j: v for j, v in zip(h.CM.ARM_JOINT_NAMES, h.CM.SAFE_HOME_ARM)}
+        host._collision_leader_pos.update(
+            {j: 0.0 for j in h.CM.LEADER_JOINTS if j not in host._collision_leader_pos})
+        host.resume_teleop()
+        host.fire_pending_timers()                       # must not raise
+        self.assertFalse(host.pub_for(h.CM.COLLISION_FLAG_TOPIC).published[-1].data)
+        self.assertEqual(host.timer_start_calls, ['collection'])
+
+    def test_an_older_data_manager_without_the_hook_still_resumes(self):
+        h = self.h
+        host = self._host()                               # SimpleNamespace: no hook
+        self.assertFalse(hasattr(host.data_manager, 'cancel_pending_discard'))
+        host._collision_homed = True
+        host._collision_leader_pos = {
+            j: v for j, v in zip(h.CM.ARM_JOINT_NAMES, h.CM.SAFE_HOME_ARM)}
+        host._collision_leader_pos.update(
+            {j: 0.0 for j in h.CM.LEADER_JOINTS if j not in host._collision_leader_pos})
+        host.resume_teleop()
+        host.fire_pending_timers()
+        self.assertEqual(host.timer_start_calls, ['collection'])
+
+    def test_plain_resume_still_rearms_the_same_session(self):
+        h = self.h
+        host = self._host()
+        host._collision_homed = True
+        host._collision_leader_pos = {
+            j: v for j, v in zip(h.CM.ARM_JOINT_NAMES, h.CM.SAFE_HOME_ARM)}
+        host._collision_leader_pos.update(
+            {j: 0.0 for j in h.CM.LEADER_JOINTS if j not in host._collision_leader_pos})
+        self.assertTrue(host.resume_teleop()[0])
+        host.fire_pending_timers()
+        self.assertNotIn('end', host.calls)
+        self.assertEqual(host.timer_start_calls, ['collection'])
+
+    def test_force_resume_without_a_recording_publishes_plain_ready(self):
+        h = self.h
+        host = h._Host()
+        host.timers = [t for t in host.timers if t.callback != host._collision_watchdog_cb]
+        host._collision_follower_pos = dict(h.CONTACT_POSE)
+        host.on_recording = False
+        h._trip(host)
+        host._collision_leader_pos = {**h.CONTACT_POSE}
+        self.assertTrue(host.force_resume_teleop()[0])
+        self.assertFalse(host._collision_end_recording)
+        host.fire_pending_timers()
+        last = host.pub_for('/task/status').published[-1]
+        self.assertEqual(last.phase, h._TaskStatus.READY)
+
+    def test_a_failing_end_falls_back_to_plain_ready_and_never_raises(self):
+        def _boom():
+            raise RuntimeError('finalize exploded')
+
+        host = self._host(end=_boom)
+        host.force_resume_teleop()
+        host.fire_pending_timers()               # must not raise
+        self.assertIn('end', host.calls)
+        last = host.pub_for('/task/status').published[-1]
+        self.assertEqual(last.phase, self.h._TaskStatus.READY)
+        self.assertFalse(host.on_recording)
+        self.assertEqual(host.timer_start_calls, [])
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -29,8 +29,9 @@
 //      `useRosServiceCaller` sends exactly that value as `user_id` on
 //      START_RECORD. Storage-only meant the next student recorded under the
 //      previous student's Hugging Face account — and their first keystroke in
-//      InfoPanel re-dispatched `setTaskInfo`, whose reducer re-persists a
-//      truthy `userId`, writing the deleted key straight back.
+//      the recording form (then InfoPanel, now the Aufnahme page's TaskCard via
+//      useRecordController) re-dispatched `setTaskInfo`, whose reducer
+//      re-persists a truthy `userId`, writing the deleted key straight back.
 //      It runs BEFORE the await, not after: while `auth.isAuthenticated` was
 //      still true and storage was already scrubbed, one `/task/status` tick
 //      (~2 s cadence, against a revoke of hundreds of ms) re-adopted the id
@@ -183,8 +184,9 @@ export const LOGOUT_BLOCK_TITLES_DE = Object.freeze({
  * A stale report is not evidence, so the gate keys on whether the report can
  * still be OBSERVED. The alternative — clearing `running` on the
  * connected→disconnected edge — was rejected: `taskStatus.running` is read by
- * `beforeunload`, by the InfoPanel/InferencePanel editability gates and by
- * the recording page, and the server-side recorder keeps recording whether or not the
+ * `beforeunload`, by the Aufnahme page (useRecordController) and InferencePanel
+ * editability gates and by the recording page, and the server-side recorder keeps
+ * recording whether or not the
  * browser can see it, so publishing "no task is running" to all of them would
  * be a lie told to widen one button's availability.
  *

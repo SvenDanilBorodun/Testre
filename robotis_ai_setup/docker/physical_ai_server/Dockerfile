@@ -542,6 +542,20 @@ RUN set -e && \
 #      removed. A rename here fails loud (TypeError on unexpected kwarg), so
 #      this assert only moves the failure earlier — but it costs nothing and
 #      documents the seam next to its silent sibling.
+#
+# Aufnahme 2.0 round 5 adds the PUBLIC LeRobot behaviour the recorder relies on
+# (owner: no private LeRobot internals on the recording path):
+#   3. the frame-drop watch (data_processing/encoder_drop_watch.py) parses the
+#      warning StreamingVideoEncoder.feed_frame logs on logger
+#      lerobot.datasets.video_utils („Encoder queue full for <key>, dropped N
+#      frame(s)“). A reworded message would make every frame drop SILENT (the
+#      encoded video shorter than the parquet, FrameTimestampError at train
+#      time) — fail the BUILD instead (owner Q2 A; the CI smoke's
+#      frame_drop_rerecord proves it end to end).
+#   4. every discard is the public clear_episode_buffer() (O6), D4 resumes go
+#      through sanity_check_dataset_robot_compatibility, the dataset README is
+#      create_lerobot_dataset_card (O5), and the CI smoke forces drops through
+#      the public create(encoder_queue_maxsize=...).
 RUN python3 -c "\
 import inspect; \
 import lerobot; print(f'lerobot=={lerobot.__version__}'); \
@@ -565,7 +579,20 @@ assert hasattr(dataset_tools, '_copy_and_reindex_videos'), \
     'lerobot renamed dataset_tools._copy_and_reindex_videos: data_editor_v3._force_recorder_vcodec would SILENTLY fall back to upstream lossy AV1 on every dataset edit'; \
 assert 'streaming_encoding' in inspect.signature(LeRobotDataset.create).parameters, \
     'lerobot dropped LeRobotDataset.create(streaming_encoding=...): lerobot_dataset_wrapper would lose the recording RAM bound'; \
-print('all v0.5.1 imports OK; codebase_version=v3.0; private-API seams intact')"
+from lerobot.datasets import video_utils; \
+from lerobot.datasets.video_utils import StreamingVideoEncoder; \
+from lerobot.datasets.utils import create_lerobot_dataset_card; \
+from lerobot.utils.control_utils import sanity_check_dataset_robot_compatibility; \
+_feed = inspect.getsource(StreamingVideoEncoder.feed_frame); \
+assert 'Encoder queue full for' in _feed and 'dropped' in _feed, \
+    'lerobot reworded the encoder frame-drop warning: encoder_drop_watch would miss every frame drop'; \
+assert video_utils.logger.name == 'lerobot.datasets.video_utils', \
+    f'lerobot moved the encoder logger to {video_utils.logger.name}: encoder_drop_watch listens on lerobot.datasets.video_utils'; \
+assert callable(getattr(LeRobotDataset, 'clear_episode_buffer', None)), \
+    'lerobot dropped LeRobotDataset.clear_episode_buffer: every discarded take would stay in the writer'; \
+assert 'encoder_queue_maxsize' in inspect.signature(LeRobotDataset.create).parameters, \
+    'lerobot dropped LeRobotDataset.create(encoder_queue_maxsize=...): the CI frame-drop smoke can no longer force a drop'; \
+print('all v0.5.1 imports OK; codebase_version=v3.0; seams intact (private: _copy_and_reindex_videos; public: drop warning, clear_episode_buffer, card, resume check)')"
 
 # Build-time NODE-import smoke test (v2.5.1 audit). The policy smoke test above
 # imports lerobot.policies.* but NEVER imports physical_ai_server itself, so it

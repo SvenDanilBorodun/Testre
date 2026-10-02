@@ -16,7 +16,9 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim, Kiwoong Park
 
+import importlib.util
 import json
+import math
 import os
 import subprocess
 import sys
@@ -58,6 +60,45 @@ from rosbag_recorder.srv import SendCommand
 from sensor_msgs.msg import CompressedImage, JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory
+
+
+# Aufnahme 2.0 round 5: every recorder subscription (cameras, follower, leader)
+# lives on the sensor-ingest node with this KEEP_LAST depth (BEST_EFFORT). Its
+# SingleThreadedExecutor dispatches a message in ~0.18 ms, so the depth is
+# cheap, and a burst after a process stall arrives COMPLETE — the capture
+# timeline (the per-source gap rule, the leader's back-dating) relies on it.
+SENSOR_QOS_DEPTH = 32
+
+
+def _load_capture_timeline():
+    """capture_timeline (stdlib only): by package name in the image, by path
+    when a deps-free test loader gave the package no __path__."""
+    try:
+        from physical_ai_server.communication import capture_timeline
+        return capture_timeline
+    except ImportError:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'capture_timeline.py')
+        spec = importlib.util.spec_from_file_location('_edubotics_capture_timeline', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+_capture_timeline = _load_capture_timeline()
+SourceHistory = _capture_timeline.SourceHistory
+CAMERA_HISTORY_LEN = _capture_timeline.CAMERA_HISTORY_LEN
+JOINT_HISTORY_LEN = _capture_timeline.JOINT_HISTORY_LEN
+
+
+def _stamp_seconds(msg) -> float:
+    """A message's header stamp in seconds; 0.0 when it has none (the
+    capture timeline then places the sample at its arrival)."""
+    try:
+        stamp = msg.header.stamp
+        seconds = int(stamp.sec) + int(stamp.nanosec) * 1e-9
+    except Exception:  # noqa: BLE001 — no header / a malformed one: no stamp
+        return 0.0
+    return seconds if math.isfinite(seconds) else 0.0
 
 
 class Communicator:
@@ -106,8 +147,14 @@ class Communicator:
         operation_mode: str,
         params: Dict[str, Any],
         follower_joint_order: Optional[tuple] = None,
+        sensor_node: Optional[Node] = None,
     ):
         self.node = node
+        # The node the recorder's camera/follower/leader subscriptions are
+        # created on: the sensor-ingest node when the server has one (round 5),
+        # else the main node. Everything else (publishers, services, the
+        # joystick subscription) stays on the main node.
+        self.sensor_node = sensor_node if sensor_node is not None else node
         self.operation_mode = operation_mode
         self.params = params
         # ArmProfile seam (§16.4 2d): the canonical follower joint order becomes
@@ -133,8 +180,8 @@ class Communicator:
         # Determine which sources to enable based on operation mode
         self.enabled_sources = self._get_enabled_sources_for_mode(self.operation_mode)
 
-        # Initialize MultiSubscriber with enabled sources
-        self.multi_subscriber = MultiSubscriber(self.node, self.enabled_sources)
+        # Initialize MultiSubscriber with enabled sources, on the sensor node.
+        self.multi_subscriber = MultiSubscriber(self.sensor_node, self.enabled_sources)
 
         # Initialize DataEditor for dataset editing
         self.data_editor = DataEditor()
@@ -185,6 +232,21 @@ class Communicator:
         self._follower_last_arrival_mono: float = 0.0
 
         self.rosbag_service_available = False
+
+        # Aufnahme 2.0 — per-source arrival counters for /edubotics/signal_status
+        # (the node's 1 Hz tick turns them into rates and ages). One entry per
+        # subscription init_subscribers() actually creates, in registration order:
+        # 'camera:<name>', 'follower:<name>', 'leader:<name>'. Never reset by
+        # clear_latest_data() — the rate is measured across the whole boot.
+        self._source_counts: Dict[str, int] = {}
+        self._source_last_mono: Dict[str, Optional[float]] = {}
+        self._source_meta: Dict[str, Tuple[str, str, str]] = {}
+        # Round 5 (spec §2.3): the timestamped history of every registered
+        # source, PRE-created at registration (never lazily inside a callback,
+        # which would race the recorder's snapshot). Cameras keep
+        # CAMERA_HISTORY_LEN frames, follower and leader JOINT_HISTORY_LEN.
+        # The record tick's slot sampler decides every dataset frame from these.
+        self._histories: Dict[str, Any] = {}
 
         # Audit fix 7 — a raise partway through the init_* registration
         # sequence used to LEAK the already-registered ROS entities:
@@ -239,17 +301,18 @@ class Communicator:
         return enabled_sources
 
     def init_subscribers(self):
-        # Camera-specific QoS: depth=10 absorbs ~333 ms of subscriber-side
-        # stall before frame loss. multi_subscriber.add_subscriber's
-        # default is depth=1 — a single GC pause or executor-thread
-        # contention during a 33 ms tick at 30 Hz silently overwrites
-        # the in-flight frame at the DDS layer. depth=10 gives the
-        # executor a real chance to drain even when callbacks queue
-        # behind a recording-tick decode (~20 ms) or a rosbridge
-        # service call. Joint subs intentionally stay at the depth=1
-        # default — state topics genuinely want latest-only semantics.
+        # Round 5: cameras AND joints use SENSOR_QOS_DEPTH (32), BEST_EFFORT,
+        # KEEP_LAST, on the sensor-ingest node. The old depth=1 joint
+        # subscriptions ("latest only") lost every sample but the newest after a
+        # stall; the capture timeline needs the burst complete (the follower's
+        # own-timeline gap rule, the leader's back-dating inside a burst).
         camera_qos = QoSProfile(
-            depth=10,
+            depth=SENSOR_QOS_DEPTH,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        joint_qos = QoSProfile(
+            depth=SENSOR_QOS_DEPTH,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
         )
@@ -264,6 +327,8 @@ class Communicator:
                 qos_profile=camera_qos,
             )
             self.camera_topic_msgs[name] = None
+            if self.multi_subscriber.is_source_enabled(self.SOURCE_CAMERA):
+                self._register_source(self.SOURCE_CAMERA, name, topic)
             self.node.get_logger().info(f'Camera subscriber: {name} -> {topic}')
 
         # Initialize joint subscribers with appropriate message types and callbacks
@@ -297,8 +362,11 @@ class Communicator:
                 name=name,
                 topic=topic,
                 msg_type=msg_type,
-                callback=callback
+                callback=callback,
+                qos_profile=joint_qos,
             )
+            if self.multi_subscriber.is_source_enabled(category):
+                self._register_source(category, name, topic)
             self.node.get_logger().info(
                 f'Joint subscriber: {name} -> {topic} ({msg_type.__name__})')
 
@@ -484,7 +552,87 @@ class Communicator:
             )
         )
 
+    def _register_source(self, kind: str, name: str, topic: str) -> None:
+        # A camera is reported by its stream, not its transport.
+        if kind == self.SOURCE_CAMERA and topic.endswith('/compressed'):
+            topic = topic[:-len('/compressed')]
+        source_id = f'{kind}:{name}'
+        self._source_counts[source_id] = 0
+        self._source_last_mono[source_id] = None
+        self._source_meta[source_id] = (kind, name, topic)
+        histories = getattr(self, '_histories', None)
+        if histories is not None and source_id not in histories:
+            histories[source_id] = SourceHistory(
+                CAMERA_HISTORY_LEN if kind == self.SOURCE_CAMERA else JOINT_HISTORY_LEN)
+
+    def _note_arrival(self, source_id: str) -> None:
+        # Guarded: tests (and helpers) build a Communicator via __new__ without
+        # the counters; a callback there must keep doing its real job.
+        counts = getattr(self, '_source_counts', None)
+        if counts is None or source_id not in counts:
+            return
+        counts[source_id] += 1
+        self._source_last_mono[source_id] = time.monotonic()
+
+    def source_counters(self) -> List[Dict[str, Any]]:
+        """Arrival counters for /edubotics/signal_status, registration order.
+
+        Each entry: {'id', 'kind', 'name', 'topic', 'count', 'last_mono'}
+        (last_mono is time.monotonic() of the last message, None until one
+        arrived). Returns fresh dicts; the caller may keep or mutate them.
+        """
+        counts = getattr(self, '_source_counts', None) or {}
+        out = []
+        for source_id, count in list(counts.items()):
+            kind, name, topic = self._source_meta[source_id]
+            out.append({
+                'id': source_id,
+                'kind': kind,
+                'name': name,
+                'topic': topic,
+                'count': int(count),
+                'last_mono': self._source_last_mono.get(source_id),
+            })
+        return out
+
+    # ── Sensor callbacks (round 5, F3) ───────────────────────────────────────
+    # They run on the sensor-ingest executor's thread. Each public callback is a
+    # thin guard around its body: a callback NEVER raises into that executor (a
+    # raise there counts as an executor failure, and repeated ones end the
+    # process for a respawn). A failure is counted and logged — the first five,
+    # then every 100th.
+
+    _SENSOR_CB_LOG_FIRST = 5
+    _SENSOR_CB_LOG_EVERY = 100
+
+    def _sensor_callback_failed(self, which: str, error: Exception) -> None:
+        count = getattr(self, '_sensor_cb_errors', 0) + 1
+        self._sensor_cb_errors = count
+        if count <= self._SENSOR_CB_LOG_FIRST or count % self._SENSOR_CB_LOG_EVERY == 0:
+            try:
+                self.node.get_logger().error(
+                    f'{which} failed ({count} sensor callback failures): {error!r}')
+            except Exception:  # noqa: BLE001 — a log failure must not raise either
+                pass
+
     def _camera_callback(self, name: str, msg: CompressedImage) -> None:
+        try:
+            self._camera_callback_body(name, msg)
+        except Exception as e:  # noqa: BLE001 — never raise into the sensor executor
+            self._sensor_callback_failed('_camera_callback', e)
+
+    def _append_history(self, source_id: str, arrival: float, stamp_s: float, msg) -> None:
+        histories = getattr(self, '_histories', None)
+        history = histories.get(source_id) if histories else None
+        if history is not None:
+            history.append(arrival, stamp_s, msg)
+
+    def _camera_callback_body(self, name: str, msg: CompressedImage) -> None:
+        # Round 5: the arrival time FIRST, then the timestamped history, then
+        # the existing work (latest cache, F65 rings for inference, counters).
+        arrival = time.monotonic()
+        self._append_history(f'{self.SOURCE_CAMERA}:{name}', arrival, _stamp_seconds(msg), msg)
+        self._note_arrival(f'{self.SOURCE_CAMERA}:{name}')
         self.camera_topic_msgs[name] = msg
         # Audit F18: track receive monotonic time + header stamp so
         # workflow / recording can detect a stale or low-fps stream
@@ -543,6 +691,16 @@ class Communicator:
         return (len(in_window) - 1) / span
 
     def _follower_callback(self, name: str, msg: JointState) -> None:
+        try:
+            self._follower_callback_body(name, msg)
+        except Exception as e:  # noqa: BLE001 — never raise into the sensor executor
+            self._sensor_callback_failed('_follower_callback', e)
+
+    def _follower_callback_body(self, name: str, msg: JointState) -> None:
+        arrival = time.monotonic()
+        self._append_history(
+            f'{self.SOURCE_FOLLOWER}:{name}', arrival, _stamp_seconds(msg), msg)
+        self._note_arrival(f'{self.SOURCE_FOLLOWER}:{name}')
         self.follower_topic_msgs[name] = msg
         self._follower_last_arrival_mono = time.monotonic()
 
@@ -556,6 +714,17 @@ class Communicator:
         return time.monotonic() - self._follower_last_arrival_mono
 
     def _leader_callback(self, name: str, msg: JointTrajectory) -> None:
+        try:
+            self._leader_callback_body(name, msg)
+        except Exception as e:  # noqa: BLE001 — never raise into the sensor executor
+            self._sensor_callback_failed('_leader_callback', e)
+
+    def _leader_callback_body(self, name: str, msg: JointTrajectory) -> None:
+        # The leader broadcaster's JointTrajectory carries stamp 0 by design:
+        # its time is its arrival (back-dated by the sampler inside a burst).
+        arrival = time.monotonic()
+        self._append_history(f'{self.SOURCE_LEADER}:{name}', arrival, 0.0, msg)
+        self._note_arrival(f'{self.SOURCE_LEADER}:{name}')
         self.leader_topic_msgs[name] = msg
 
     def get_latest_bgr_frame(self, camera: str):
@@ -719,6 +888,35 @@ class Communicator:
             raise NotImplementedError(
                 f'Operation mode {self.operation_mode} is not supported')
 
+    def history_snapshots(self):
+        """``(cams, follower, leader)`` snapshots of the timestamped histories
+        for the record tick's slot sampler (round 5): ``cams`` maps each camera
+        name to its ``[(seq, arrival, t, msg), …]``; ``follower`` and ``leader``
+        are the first registered follower's / leader's lists. ``leader`` is None
+        when no leader source is registered (a session that reads none)."""
+        histories = getattr(self, '_histories', None) or {}
+        cams = {}
+        for name in self.camera_topic_msgs:
+            history = histories.get(f'{self.SOURCE_CAMERA}:{name}')
+            if history is not None:
+                cams[name] = history.snapshot()
+        follower_name, leader_name = self.history_source_names()
+        follower = histories[f'{self.SOURCE_FOLLOWER}:{follower_name}'].snapshot() \
+            if follower_name is not None else []
+        leader = histories[f'{self.SOURCE_LEADER}:{leader_name}'].snapshot() \
+            if leader_name is not None else None
+        return cams, follower, leader
+
+    def history_source_names(self):
+        """Names of the follower and leader whose histories history_snapshots()
+        returns (registration order); None when there is none."""
+        histories = getattr(self, '_histories', None) or {}
+        follower = next((sid.split(':', 1)[1] for sid in histories
+                         if sid.startswith(f'{self.SOURCE_FOLLOWER}:')), None)
+        leader = next((sid.split(':', 1)[1] for sid in histories
+                       if sid.startswith(f'{self.SOURCE_LEADER}:')), None)
+        return follower, leader
+
     def clear_latest_data(self):
         for key in self.camera_topic_msgs.keys():
             self.camera_topic_msgs[key] = None
@@ -737,6 +935,10 @@ class Communicator:
         # prevent. clear() is atomic under the GIL.
         for ring in self._camera_recent_msgs.values():
             ring.clear()
+        # Round 5: and the timestamped histories (a resumed session never
+        # samples a frame captured before the recovery motion).
+        for history in (getattr(self, '_histories', None) or {}).values():
+            history.clear()
         self.node.get_logger().info('Cleared latest data from communicator')
 
     def publish_action(self, joint_msg_datas: Dict[str, Any]):

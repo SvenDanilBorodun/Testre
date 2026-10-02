@@ -171,3 +171,58 @@ describe('ImageGridCell — icons and names (final review, minor 3)', () => {
     expect(screen.queryByText('+')).toBeNull();
   });
 });
+
+// Aufnahme 2.0 (spec §3.12): the Aufnahme stage draws its own tile chrome, so a
+// camera cell there is BARE — a dark box the image fills, with no close button,
+// no plus and no aspect ratio. The stream itself (URL, Jetson path, Pi proxy,
+// the F26 cancel token) is the same code; only the frame around it differs.
+describe('ImageGridCell — bare (Aufnahme stage tiles)', () => {
+  beforeEach(() => {
+    mockState = { ros: { rosHost: 'pc', rosbridgeUrl: 'ws://pc/rosbridge' }, jetson: { status: 'available' } };
+  });
+
+  test('a bare cell fills its box, has no close button and no aspect ratio', async () => {
+    const { container } = render(
+      <ImageGridCell bare topic="/scene/image_raw" idx={1} isActive aspect="16 / 9" onClose={noop} onPlusClick={noop} />
+    );
+    const img = await screen.findByRole('img');
+    expect(img.getAttribute('src')).toContain('/video/stream');
+    expect(img.getAttribute('src')).toContain('topic=/scene/image_raw');
+    expect(img.className).toContain('object-cover');
+    expect(img.className).not.toContain('rounded-3xl');
+    expect(screen.queryByRole('button', { name: 'Kamera entfernen' })).toBeNull();
+    const cell = container.firstChild; // eslint-disable-line testing-library/no-node-access
+    expect(cell.className).toContain('h-full');
+    expect(cell.className).toContain('overflow-hidden');
+    expect(cell.className).toContain('bg-[#111618]');
+    expect(cell.style.aspectRatio).toBe('');
+  });
+
+  test('a bare cell without a stream draws no plus and is not a button', () => {
+    const onPlusClick = vi.fn();
+    const { container } = render(
+      <ImageGridCell bare topic="" idx={0} isActive={false} onClose={noop} onPlusClick={onPlusClick} />
+    );
+    expect(container.querySelector('svg[data-icon="plus"]')).toBeNull(); // eslint-disable-line testing-library/no-node-access, testing-library/no-container
+    const cell = container.firstChild; // eslint-disable-line testing-library/no-node-access
+    act(() => { cell.click(); });
+    expect(onPlusClick).not.toHaveBeenCalled();
+  });
+
+  test('a failing stream is reported through onStreamError (both modes)', async () => {
+    const onStreamError = vi.fn();
+    render(
+      <ImageGridCell bare topic="/gripper/image_raw" idx={1} isActive onStreamError={onStreamError} onClose={noop} onPlusClick={noop} />
+    );
+    const img = await screen.findByRole('img');
+    act(() => { img.onerror(); });
+    expect(onStreamError).toHaveBeenCalledTimes(1);
+  });
+
+  test('the default (not bare) cell is unchanged: close button, rounded image', async () => {
+    renderCell('/gripper/image_raw');
+    const img = await screen.findByRole('img');
+    expect(img.className).toContain('rounded-3xl');
+    expect(screen.getByRole('button', { name: 'Kamera entfernen' })).toBeInTheDocument();
+  });
+});

@@ -35,7 +35,7 @@ import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import { useHfUserList } from './hooks/useHfUserList';
 import { useHeartbeatWatchdog } from './hooks/useHeartbeatWatchdog';
 import rosConnectionManager from './utils/rosConnectionManager';
-import { useDispatch, useSelector } from 'react-redux';
+import { shallowEqual, useDispatch, useSelector } from 'react-redux';
 import { setRosHost } from './features/ros/rosSlice';
 import { clearCapabilities } from './features/tasks/taskSlice';
 import { moveToPage } from './features/ui/uiSlice';
@@ -57,11 +57,22 @@ import { isCapabilityVisible, robotGateDecision } from './utils/navGating';
 import { studentAuthGateDecision } from './utils/authGate';
 import { usePiMode } from './utils/piMode';
 import Icon from './components/icons/Icon';
+import { releasePointerFocus } from './components/Record/ActionBar';
 
 function StudentApp() {
   const dispatch = useDispatch();
-  const taskStatus = useSelector((state) => state.tasks.taskStatus);
-  const taskInfo = useSelector((state) => state.tasks.taskInfo);
+  // Only the fields this shell reads. The whole taskStatus / taskInfo objects
+  // are replaced with every /task/status tick (~30 Hz while a task runs), and
+  // subscribing to them re-rendered the shell — and with it the open page — on
+  // every tick (Aufnahme 2.0 review, V2-2).
+  const taskStatus = useSelector(
+    (state) => ({
+      running: state.tasks.taskStatus.running,
+      topicReceived: state.tasks.taskStatus.topicReceived,
+    }),
+    shallowEqual,
+  );
+  const taskType = useSelector((state) => state.tasks.taskInfo.taskType);
   const trainingTopicReceived = useSelector((state) => state.training.topicReceived);
   const session = useSelector((state) => state.auth.session);
   const role = useSelector((state) => state.auth.role);
@@ -301,9 +312,9 @@ function StudentApp() {
       // Auto-rejoin a task that was in flight when the browser (re)loaded — but
       // respect the capability manifest: a stale in-flight task_type on a
       // type-switched rig must not jump into a page that type can't do.
-      if (taskInfo?.taskType === PageType.RECORD && caps?.recordable !== false) {
+      if (taskType === PageType.RECORD && caps?.recordable !== false) {
         dispatch(moveToPage(PageType.RECORD));
-      } else if (taskInfo?.taskType === PageType.INFERENCE && caps?.inferable !== false) {
+      } else if (taskType === PageType.INFERENCE && caps?.inferable !== false) {
         dispatch(moveToPage(PageType.INFERENCE));
       }
       isFirstLoad.current = false;
@@ -311,7 +322,7 @@ function StudentApp() {
       dispatch(moveToPage(PageType.TRAINING));
       isFirstLoad.current = false;
     }
-  }, [page, taskInfo?.taskType, taskStatus.topicReceived, trainingTopicReceived, caps, dispatch]);
+  }, [page, taskType, taskStatus.topicReceived, trainingTopicReceived, caps, dispatch]);
 
   const requireRobotOrRedirect = (targetPage) => {
     const decision = robotGateDecision({
@@ -331,6 +342,17 @@ function StudentApp() {
     toast.error('Verbindung zum Roboter wird hergestellt – bitte einen Moment warten.', {
       duration: 4000,
     });
+  };
+
+  // A nav button clicked with the mouse gives the focus back to the page: on
+  // the Aufnahme page Space means „Aufnahme starten", and a focused „Aufnahme"
+  // button would take the Space instead (the browser presses the focused
+  // button). A keyboard click (Enter/Space, `detail === 0`) keeps the focus, so
+  // Tab navigation and its visible focus ring are unchanged (Aufnahme 2.0
+  // review, V2-R2-1).
+  const navClick = (n) => (event) => {
+    releasePointerFocus(event);
+    n.onClick();
   };
 
   const handleHomePageNavigation = () => {
@@ -410,7 +432,9 @@ function StudentApp() {
     .filter((n) => isCapabilityVisible(n, { jetsonConnected, caps }))
     .filter((n) => piMode || !n.piOnly);
 
-  const isDarkPage = page === PageType.RECORD || page === PageType.INFERENCE;
+  // Aufnahme 2.0 is a light page in the Startseite language around its own
+  // dark stage; only Inferenz keeps the dark shell.
+  const isDarkPage = page === PageType.INFERENCE;
 
   // Who is signed in. On a shared Windows account this is the only answer to
   // "am I signed in as me?", so it is rendered as TEXT beside the control and
@@ -484,7 +508,7 @@ function StudentApp() {
                   />
                 )}
                 <button
-                  onClick={n.onClick}
+                  onClick={navClick(n)}
                   title={n.label}
                   className={clsx(
                     'group w-12 md:w-[68px] py-2.5 md:py-3 rounded-[var(--radius)] flex flex-col items-center gap-1 md:gap-1.5 transition',
@@ -694,7 +718,7 @@ function StudentApp() {
             return (
               <button
                 key={n.key}
-                onClick={n.onClick}
+                onClick={navClick(n)}
                 className={clsx(
                   'flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 transition',
                   active

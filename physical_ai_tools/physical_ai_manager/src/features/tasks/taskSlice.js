@@ -16,9 +16,21 @@
  * Author: Kiwoong Park
  */
 
-import { createSlice } from '@reduxjs/toolkit';
+import { createSlice, isDraft, original } from '@reduxjs/toolkit';
 import TaskPhase from '../../constants/taskPhases';
 import { signedOut } from '../session/sessionActions';
+import { nextPhaseAnchor } from './phaseAnchor';
+import {
+  EMPTY_RECORD_SESSION,
+  advanceRecordSession,
+  applyRecordIntent,
+  applyRegisterStatus,
+  applyUploadStatus,
+  dismissRecordSession,
+  noteCollision,
+  noteLink,
+  noteRecordNotice,
+} from './recordSession';
 
 const savedRobotType = (() => {
   try { return localStorage.getItem('edubotics_robotType') || ''; }
@@ -28,7 +40,8 @@ const savedRobotType = (() => {
 // Benutzer-ID (the HF account/org the student records under). Persisted like
 // robotType so it survives a full page reload (e.g. the GUI WebView reload on
 // restart), not just tab switches. `undefined` when never set, so the
-// InfoPanel auto-select can still pick the first account on first run.
+// Aufnahme page's auto-select (useRecordController) can still pick the first
+// account on first run.
 const savedUserId = (() => {
   try { return localStorage.getItem('edubotics_userId') || undefined; }
   catch { return undefined; }
@@ -60,8 +73,9 @@ const defaultTaskInfo = {
   taskInstruction: [],
   policyPath: '',
   recordInferenceMode: false,
-  // `undefined`, not '': InfoPanel's auto-select tests for it, so the next
-  // student gets the first Benutzer-ID offered rather than a blank field.
+  // `undefined`, not '': useRecordController's auto-select tests for it, so
+  // the next student gets the first Benutzer-ID offered rather than a blank
+  // field.
   userId: undefined,
   fps: 30,
   tags: [],
@@ -71,9 +85,10 @@ const defaultTaskInfo = {
   numEpisodes: 5,
   token: '',
   pushToHub: true,
-  // User-selectable via the "Privater Modus" toggle, which is rendered ONLY
-  // by InfoPanel.js (the recording form) — an earlier version of this comment
-  // also named InferencePanel.js, which has never referenced privateMode.
+  // User-selectable via the „Sichtbarkeit“ switch, which is rendered ONLY by
+  // the Aufnahme page's TaskCard (under „Erweitert“, wired through
+  // useRecordController) — an earlier version of this comment also named
+  // InferencePanel.js, which has never referenced privateMode.
   // Sent on the wire as TaskInfo.private_mode and threaded through the
   // server-side data_manager overlay → HfApiWorker → create_repo(private=…).
   //
@@ -84,9 +99,9 @@ const defaultTaskInfo = {
   // to a world-readable HuggingFace repo. Nothing about the classroom setup
   // makes that recoverable — the upload has happened by the time anyone
   // notices, and the people in the video did not choose it. Public stays one
-  // click away and the toggle still labels the two states „Privat
-  // (empfohlen)“ / „Öffentlich“, so the student still makes the call; they
-  // just have to make it on purpose.
+  // click away („Sichtbarkeit“: „Privat“ / „Öffentlich“ under „Erweitert“, and
+  // the save-name line says ÖFFENTLICH in capitals), so the student still
+  // makes the call; they just have to make it on purpose.
   //
   // This is NOT the same knob as TaskInfo.msg's `bool private_mode true`, and
   // they now AGREE rather than being deliberately opposite. This value is
@@ -136,7 +151,30 @@ const initialState = {
     totalRamSize: 0,
     error: '',
     topicReceived: false,
+    // Aufnahme 2.0 (spec §3.2): the running task's own plan, off the wire
+    // (`task_info.*`, 0 / '' outside a task), the stripped text of a record
+    // tick's `[WARNUNG]`, and when the tick arrived (`performance.now()` for
+    // the phase clock, `Date.now()` for ordering). `error` stays '' for every
+    // dispatched tick — warnings travel in `recordWarn` / `recordNotice`.
+    taskType: '',
+    fps: 0,
+    numEpisodes: 0,
+    episodeTime: 0,
+    warmupTime: 0,
+    resetTime: 0,
+    pushToHub: false,
+    recordWarn: '',
+    receivedAt: null,
+    receivedWallMs: null,
   },
+  // Where the current phase instance stood on the robot's floored clock — the
+  // RIG's, like taskStatus, so a sign-out leaves it alone (phaseAnchor.js).
+  phaseAnchor: null,
+  // The student's recording session („Diese Sitzung" + the finish card) and
+  // the last notice derived from a /task/status error. Both are the
+  // STUDENT's: reset on session/signedOut.
+  recordSession: EMPTY_RECORD_SESSION,
+  recordNotice: null,
   availableRobots: [],
   availableCameras: [],
   policyList: [],
@@ -161,12 +199,35 @@ const initialState = {
   },
 };
 
+// Equal for the form: the same primitive, or two arrays with the same items.
+function sameFieldValue(a, b) {
+  if (Object.is(a, b)) return true;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (!Object.is(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+// The pure session/anchor functions compare and return plain objects; hand
+// them the base object behind an immer draft so an unchanged result is the
+// very object the store already holds.
+const base = (value) => (isDraft(value) ? original(value) : value);
+
 const taskSlice = createSlice({
   name: 'tasks',
   initialState,
   reducers: {
     setTaskInfo: (state, action) => {
-      state.taskInfo = { ...state.taskInfo, ...action.payload };
+      // Field by field, and only what really changed (arrays by content): the
+      // /task/status adopt path dispatches this on EVERY running tick with
+      // freshly built task_instruction / tags arrays, and a new taskInfo per
+      // tick re-rendered every subscriber (the Aufnahme page, the service
+      // caller) at 30 Hz (V2-2). Same merge semantics as a spread.
+      const payload = action.payload || {};
+      for (const [key, value] of Object.entries(payload)) {
+        if (!sameFieldValue(state.taskInfo[key], value)) state.taskInfo[key] = value;
+      }
       // Persist the Benutzer-ID like robotType so it survives a full reload.
       // Only on a truthy value — never clobber the saved id with '' (the
       // /task/status handler is also guarded not to send an empty userId).
@@ -192,6 +253,15 @@ const taskSlice = createSlice({
       // string) is re-adopted by the SAME reference, so this stays
       // identity-stable.
       const { robotType, robotProfile, capabilities, ...rest } = action.payload;
+      const before = state.taskStatus;
+      const prevStatus = {
+        phase: before.phase,
+        running: before.running,
+        currentEpisodeNumber: before.currentEpisodeNumber,
+        proceedTime: before.proceedTime,
+        receivedAt: before.receivedAt,
+        receivedWallMs: before.receivedWallMs,
+      };
       state.taskStatus = { ...state.taskStatus, ...rest };
       if (robotType) {
         state.taskStatus.robotType = robotType;
@@ -203,6 +273,11 @@ const taskSlice = createSlice({
       if (isValidCapabilities(capabilities)) {
         state.taskStatus.capabilities = capabilities;
       }
+      // Aufnahme 2.0: both are pure and hand back the SAME object when this
+      // tick changed nothing they record, so a 30 Hz feed leaves them alone.
+      const next = state.taskStatus;
+      state.phaseAnchor = nextPhaseAnchor(base(state.phaseAnchor), next);
+      state.recordSession = advanceRecordSession(base(state.recordSession), prevStatus, next);
     },
     resetTaskStatus: (state) => {
       state.taskStatus = initialState.taskStatus;
@@ -243,6 +318,7 @@ const taskSlice = createSlice({
     },
     setHeartbeatStatus: (state, action) => {
       state.heartbeatStatus = action.payload;
+      state.recordSession = noteLink(base(state.recordSession), action.payload);
     },
     setLastHeartbeatTime: (state, action) => {
       state.lastHeartbeatTime = action.payload;
@@ -254,7 +330,47 @@ const taskSlice = createSlice({
       state.multiTaskIndex = action.payload;
     },
     setCollision: (state, action) => {
+      const wasActive = state.collision.active;
       state.collision = { ...state.collision, ...action.payload };
+      const status = state.taskStatus; // still the pre-collision phase (the hook returns early)
+      state.recordSession = noteCollision(
+        base(state.recordSession),
+        { phase: status.phase, episodeTime: status.episodeTime },
+        { ...action.payload, wasActive },
+      );
+    },
+    // The Aufnahme page's own intents and acknowledgements (recordSession R13).
+    // `start` also retires the previous notice: a fresh attempt must not stand
+    // under the last attempt's error.
+    recordIntent: (state, action) => {
+      state.recordSession = applyRecordIntent(base(state.recordSession), action.payload);
+      if (action.payload?.kind === 'start') state.recordNotice = null;
+    },
+    // A notice derived from a /task/status error ({kind: 'warn'|'error', text,
+    // at}). An identical notice within a second is the same notice (the robot
+    // repeats a warning on consecutive ticks).
+    recordNoticeSet: (state, action) => {
+      const notice = action.payload;
+      if (!notice) return;
+      const cur = state.recordNotice;
+      const duplicate = cur && cur.kind === notice.kind && cur.text === notice.text
+        && Number.isFinite(cur.at) && Number.isFinite(notice.at) && notice.at - cur.at < 1000;
+      if (!duplicate) state.recordNotice = { kind: notice.kind, text: notice.text, at: notice.at };
+      state.recordSession = noteRecordNotice(base(state.recordSession), notice);
+    },
+    recordNoticeClear: (state) => {
+      state.recordNotice = null;
+    },
+    recordUploadStatus: (state, action) => {
+      state.recordSession = applyUploadStatus(base(state.recordSession), action.payload);
+    },
+    recordRegisterStatus: (state, action) => {
+      state.recordSession = applyRegisterStatus(base(state.recordSession), action.payload);
+    },
+    recordSessionDismiss: (state) => {
+      state.recordSession = dismissRecordSession(base(state.recordSession), {
+        running: state.taskStatus.running,
+      });
     },
   },
   extraReducers: (builder) => {
@@ -266,6 +382,10 @@ const taskSlice = createSlice({
       // `userId`, a mirror of the running task's owner.
       state.taskInfo = { ...defaultTaskInfo };
       state.taskStatus.userId = '';
+      // The session and its notice are the student's; the phase anchor is the
+      // rig's clock and stays.
+      state.recordSession = EMPTY_RECORD_SESSION;
+      state.recordNotice = null;
     });
   },
 });
@@ -287,6 +407,12 @@ export const {
   setUseMultiTaskMode,
   setMultiTaskIndex,
   setCollision,
+  recordIntent,
+  recordNoticeSet,
+  recordNoticeClear,
+  recordUploadStatus,
+  recordRegisterStatus,
+  recordSessionDismiss,
 } = taskSlice.actions;
 
 export default taskSlice.reducer;

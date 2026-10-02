@@ -1836,6 +1836,22 @@ class QueuedEndTest(_FsmTestCase):
         self.assertIn(True, ticks(dm, 6))
         self.assertEqual(dm._record_episode_count, 1)
 
+    def test_discard_in_flight_only_while_a_discard_is_pending_or_running(self):
+        # Round 7: what tells the command path to answer FINISH_QUEUED_DE.
+        dm, up, tick_thread = self._discarding(2)
+        self.assertTrue(dm.discard_in_flight())          # inside the discard
+        dm._lerobot_dataset.release.set()
+        tick_thread.join(5)
+        self.assertFalse(dm.discard_in_flight())
+        dm2, _ = make(n=3)
+        run_until(dm2, 'run')
+        ticks(dm2, 45)
+        self.assertFalse(dm2.discard_in_flight())
+        dm2.rerecord_from_command()
+        self.assertTrue(dm2.discard_in_flight())         # pending, next tick runs it
+        tick(dm2)
+        self.assertFalse(dm2.discard_in_flight())
+
     def test_a_free_lock_applies_the_end_now(self):
         dm, _ = make()
         run_until(dm, 'run')

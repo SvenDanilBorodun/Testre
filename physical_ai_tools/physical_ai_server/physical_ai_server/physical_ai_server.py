@@ -2021,7 +2021,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
                 # R5-2 rule 1: a required source silent for SOURCE_STOPPED_S
                 # ends the session like „Beenden“ — judged only on an on-time
-                # tick, only in warm-up/run/reset.
+                # tick, only in warm-up/run/reset. The end lands ≤ 3.5 s after
+                # the source fell silent (owner bound; 2 s + the ~1 s discard).
                 current = data_manager.get_status()
                 if on_time and current in ('warmup', 'run', 'reset'):
                     stopped = self._stopped_required_source(tick_mono)
@@ -2604,7 +2605,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     if not is_stop:
                         self.on_inference = False
                     response.success = True
-                    if rec and not applied:
+                    # Round 7: the queued sentence only while a discarded take is
+                    # really being cleaned up; behind an ordinary record step
+                    # (about half of all presses) the normal answer.
+                    discard_in_flight = getattr(self.data_manager, 'discard_in_flight', None)
+                    if rec and not applied and discard_in_flight is not None \
+                            and discard_in_flight():
                         response.message = record_texts_de.FINISH_QUEUED_DE
                     elif is_stop:
                         response.message = 'Aufnahme gestoppt.' if rec else 'Recording stopped'

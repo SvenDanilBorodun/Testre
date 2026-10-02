@@ -1070,6 +1070,14 @@ class DataManager:
             return True
         return False
 
+    def discard_in_flight(self) -> bool:
+        """A discarded take still has to be cancelled, or its official cancel
+        is running right now (round 7: the only case the command path answers
+        a queued FINISH with FINISH_QUEUED_DE). Read without the lock: two
+        plain flags, a snapshot is enough for the answer's wording."""
+        return bool(getattr(self, '_discard_pending', False)
+                    or getattr(self, '_discarding', False))
+
     def _drain_end_request_locked(self) -> None:
         kind = getattr(self, '_end_requested', None)
         if kind:
@@ -1178,7 +1186,9 @@ class DataManager:
     @_recorder_locked
     def end_for_source_stop(self, message_de: str) -> bool:
         """R5-2: a required source stopped (no message for SOURCE_STOPPED_S):
-        end the session like „Verwerfen und beenden“ — the take in flight is
+        end the session like „Verwerfen und beenden“ — measured 2.99–3.03 s
+        after the source fell silent (2 s silence + the ~1 s official discard of
+        the running take); the owner's bound is ≤ 3.5 s. The take in flight is
         dropped whatever its length, saved episodes are kept, finalize + upload
         by the usual guards. Once per session, only in warm-up/run/reset; the
         German sentence rides the next status tick as a [WARNUNG]."""
@@ -1530,7 +1540,11 @@ class DataManager:
         if not getattr(self, '_discard_pending', False):
             return False
         self._discard_pending = False
-        self._cancel_discarded_take()
+        self._discarding = True
+        try:
+            self._cancel_discarded_take()
+        finally:
+            self._discarding = False
         # „Jetzt starten“ may have entered 'run' between the discard and now:
         # the take really starts after the cancel, so its clock starts here —
         # else Q3 (< 1 s is dropped) and 'too_early' see a run ~1 s too old,

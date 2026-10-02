@@ -416,6 +416,11 @@ class _QueueingDM(_DM):
     """The DataManager's request_end contract: applied now when the lock is
     free (True), else queued for the holder's release (False)."""
 
+    discarding = True
+
+    def discard_in_flight(self):
+        return self.discarding
+
     def request_end(self, kind):
         self.calls.append(f'request_end:{kind}')
         if self.lock.acquire(blocking=False):
@@ -428,8 +433,9 @@ _QUEUED_DE = 'Die Aufnahme wird beendet, sobald die verworfene Episode aufgeräu
 
 
 @pytest.mark.parametrize('command,kind', [(_Req.FINISH, 'finish'), (_Req.STOP, 'stop')])
-def test_an_end_while_the_recorder_is_busy_is_accepted_at_once(command, kind):
-    # F1 (round 6): never „beschäftigt“ — queued and applied at the release.
+def test_an_end_while_a_discard_runs_is_accepted_at_once(command, kind):
+    # F1 (round 6): never „beschäftigt“ — queued and applied at the release;
+    # the queued sentence only while a discard really runs (round 7).
     dm = _QueueingDM()
     node = _Node(recording=True, dm=dm)
     t, release = _hold(dm)
@@ -456,6 +462,37 @@ def test_an_end_with_a_free_lock_keeps_its_answers(command, german, head):
     node = _Node(inferring=True, dm=_QueueingDM())
     r = _call(node, _request(command, task_type='inference'))
     assert (r.success, r.message) == (True, head)
+
+
+@pytest.mark.parametrize('command,german', [
+    (_Req.FINISH, 'Wird beendet.'), (_Req.STOP, 'Aufnahme gestoppt.')])
+def test_an_end_queued_behind_an_ordinary_record_step_keeps_its_answer(command, german):
+    # Round 7: a plain record tick holds the lock about half the time; the end
+    # is queued the same way, but nothing is being discarded — no
+    # „sobald die verworfene Episode aufgeräumt ist“.
+    dm = _QueueingDM()
+    dm.discarding = False
+    node = _Node(recording=True, dm=dm)
+    t, release = _hold(dm)
+    try:
+        r = _call(node, _request(command))
+    finally:
+        release.set()
+        t.join(5)
+    assert (r.success, r.message) == (True, german)
+
+
+def test_a_data_manager_without_the_discard_probe_answers_normally():
+    dm = _QueueingDM()
+    dm.discard_in_flight = None
+    node = _Node(recording=True, dm=dm)
+    t, release = _hold(dm)
+    try:
+        r = _call(node, _request(_Req.FINISH))
+    finally:
+        release.set()
+        t.join(5)
+    assert (r.success, r.message) == (True, 'Wird beendet.')
 
 
 def test_a_queued_finish_outside_the_record_page_keeps_heads_text():

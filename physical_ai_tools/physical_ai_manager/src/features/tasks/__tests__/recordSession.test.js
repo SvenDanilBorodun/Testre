@@ -971,7 +971,8 @@ describe('round 6 (F4): a session that runs without upload says so and ends loca
     r.notice({ kind: 'warn', text: UPLOAD_OFF_DE });
     r.ready({ currentEpisodeNumber: 1, recordWarn: UPLOAD_OFF_DE });
     expect(r.s.finish.state).toBe('local_done');
-    expect(r.s.finish.endNote).toBeNull();
+    // round 7: the reason is said once, as the card's note (the banner leaves it out)
+    expect(r.s.finish.endNote).toBe(UPLOAD_OFF_DE);
   });
 
   it('a finalize failure still reads as a failed finalize', () => {
@@ -1005,5 +1006,33 @@ describe('round 6 (F4): a session that runs without upload says so and ends loca
     r.dismiss();
     r.start();
     expect(r.s.uploadOff).toBeNull();
+  });
+});
+
+// Aufnahme 2.0 round 7.
+describe('round 7: a counted save-window collision', () => {
+  it('on the LAST episode the session ends normally: no collision end note', () => {
+    const r = sim({ snapshot: { ...SNAPSHOT, numEpisodes: 1 } });
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0, 1);
+    r.collide();
+    expect(r.s.collisionOpen).toBe(true);
+    r.saving(1, 2);                       // counted while still saving: the robot finishes
+    expect(r.s.episodes[0]).toMatchObject({ outcome: 'saved', provisional: false, inCollision: true });
+    expect(r.s.collisionOpen).toBe(false);
+    r.ready({ currentEpisodeNumber: 1 });
+    expect(r.s.finish).toMatchObject({ state: 'uploading', endNote: null });
+  });
+
+  it('on an earlier episode the recovery is still ahead: the collision stays open', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0, 1);
+    r.collide();
+    r.saving(1, 1);
+    expect(r.s.episodes[0]).toMatchObject({ outcome: 'saved', inCollision: true });
+    expect(r.s.collisionOpen).toBe(true);
   });
 });

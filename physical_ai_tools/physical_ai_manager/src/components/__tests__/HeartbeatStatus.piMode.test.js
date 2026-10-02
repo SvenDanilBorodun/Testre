@@ -52,3 +52,12 @@ describe('HeartbeatStatus — Pi network-aware disconnect', () => {
     expect(screen.queryByText(/Verbindung zum Roboter blockiert/)).not.toBeInTheDocument();
   });
 });
+
+describe('HeartbeatStatus — German label for a late heartbeat (round 7)', () => {
+  it('says „Zeitüberschreitung", never the English „Timeout"', () => {
+    mockState = { tasks: { heartbeatStatus: 'timeout', lastHeartbeatTime: 0 } };
+    render(<HeartbeatStatus />);
+    expect(screen.getByText('Zeitüberschreitung')).toBeInTheDocument();
+    expect(screen.queryByText('Timeout')).not.toBeInTheDocument();
+  });
+});

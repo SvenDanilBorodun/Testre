@@ -198,6 +198,9 @@ export const RECORD_COPY = Object.freeze({
       + 'führt dich in zwei Schritten zurück. Danach geht es mit Zurücksetzen und derselben Episode weiter.',
     collisionBody: (n) => `Episode ${n} wurde verworfen. Das Kollisionsfenster führt dich in zwei Schritten `
       + 'zurück. Danach geht es mit Zurücksetzen und derselben Episode weiter.',
+    // round 7: a collision in the save window kept the episode (Q7)
+    collisionBodySaved: (n) => `Episode ${n} wurde vor der Kollision gespeichert. Das Kollisionsfenster führt dich `
+      + 'in zwei Schritten zurück. Danach geht es mit Zurücksetzen und der nächsten Episode weiter.',
   }),
 
   // Problem banner sentences (spec §3.9). The first sentence is the problem,
@@ -300,6 +303,8 @@ export const RECORD_COPY = Object.freeze({
     episode: (n) => `Episode ${n}`,
     saved: (hhmm) => `Gespeichert · ${hhmm}`,
     savedEarly: (hhmm) => `Gespeichert (vorzeitig) · ${hhmm}`,
+    // round 7: the dataset could not be finalized, the rows say so
+    savedIncomplete: (hhmm) => `Gespeichert, Datensatz unvollständig · ${hhmm}`,
     outcome: Object.freeze({
       redo: 'Wiederholt, verworfen',
       collision: 'Kollision, verworfen',
@@ -340,6 +345,8 @@ export const RECORD_COPY = Object.freeze({
     pct: (p) => `${p} %`,
     notStarted: 'Das Hochladen hat nicht begonnen.',
     uploadOff: 'Nicht hochgeladen (Hochladen ist ausgeschaltet)',
+    // round 7 (F4): the robot ran this session without upload; the card's note says why
+    uploadOffSession: 'Nicht hochgeladen (Hochladen war für diese Aufnahme aus)',
     background: 'Das Hochladen läuft im Hintergrund weiter.',
     later: 'Du kannst den Datensatz später im Tab Daten hochladen.',
     unknown: 'Der Stand des Hochladens ist unbekannt, weil die Verbindung unterbrochen war. Prüfe den '

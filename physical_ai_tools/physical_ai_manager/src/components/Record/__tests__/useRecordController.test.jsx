@@ -15,7 +15,7 @@ import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 
 import tasksReducer, {
-  recordNoticeSet, recordUploadStatus, setHeartbeatStatus, setTaskInfo, setTaskStatus,
+  recordNoticeSet, recordUploadStatus, setCollision, setHeartbeatStatus, setTaskInfo, setTaskStatus,
 } from '../../../features/tasks/taskSlice';
 import uiReducer, { moveToPage } from '../../../features/ui/uiSlice';
 import rosReducer from '../../../features/ros/rosSlice';
@@ -581,6 +581,34 @@ describe('a session without upload', () => {
     expect(RECORD_COPY.save.uploadOff).toBe(
       'Hochladen ist für diese Aufnahme aus (kein gültiger Hugging-Face-Token). Wird nur auf diesem Rechner '
       + 'gespeichert als',
+    );
+  });
+});
+
+// Round 7: the stage card behind the CollisionModal agrees with the row: a
+// collision in the save window kept the episode („Gespeichert"), so the card
+// must not say it was thrown away.
+describe('the collision stage card', () => {
+  it('a collision while recording: „wurde verworfen"', () => {
+    const store = makeStore();
+    const { result } = mount(store);
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20, proceedTime: 3 })); });
+    act(() => { store.dispatch(setCollision({ active: true, receivedAt: performance.now(), receivedWallMs: Date.now() })); });
+    expect(result.current.copy.card.collisionBody(1)).toMatch(/^Episode 1 wurde verworfen\./);
+  });
+
+  it('a collision in the save window: the episode was saved', () => {
+    const store = makeStore();
+    const { result } = mount(store);
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RECORDING, totalTime: 20, proceedTime: 3 })); });
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.SAVING, totalTime: 0 })); });
+    act(() => { store.dispatch(setCollision({ active: true, receivedAt: performance.now(), receivedWallMs: Date.now() })); });
+    // the robot counts it after the trip (the model's current episode moves on)
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.RESETTING, totalTime: 5, currentEpisodeNumber: 1 })); });
+    expect(result.current.copy.card.collisionBody(2)).toBe(RECORD_COPY.card.collisionBodySaved(1));
+    expect(RECORD_COPY.card.collisionBodySaved(1)).toBe(
+      'Episode 1 wurde vor der Kollision gespeichert. Das Kollisionsfenster führt dich in zwei Schritten '
+      + 'zurück. Danach geht es mit Zurücksetzen und der nächsten Episode weiter.',
     );
   });
 });

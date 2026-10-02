@@ -62,7 +62,7 @@ describe('finishSteps', () => {
     const s = session({ state: 'uploading', expectedRepoId: REPO, endedAt: NOW });
     expect(states(finishSteps(s, { nowWallMs: NOW + UPLOAD_START_GRACE_MS - 1 }))).toEqual(['finalize:done', 'upload:now', 'register:']);
     const c = finishSteps(s, { nowWallMs: NOW + UPLOAD_START_GRACE_MS });
-    expect(states(c)).toEqual(['finalize:done', 'upload:failed', 'register:']);
+    expect(states(c)).toEqual(['finalize:done', 'upload:failed', 'register:skipped']);
     expect(c.steps[1].detail).toBe('Das Hochladen hat nicht begonnen.');
     expect(actionIds(c)).toEqual(['newRecording']);
     // not while the link is down — then nothing is known
@@ -101,7 +101,8 @@ describe('finishSteps', () => {
 
   it('upload_failed: the server text and where to upload later', () => {
     const c = finishSteps(session({ state: 'upload_failed', message: 'Dieser Namensraum gehört nicht zu deinem Konto.' }));
-    expect(states(c)).toEqual(['finalize:done', 'upload:failed', 'register:']);
+    // round 7: step 3 will not happen, so it is skipped, never „still to come"
+    expect(states(c)).toEqual(['finalize:done', 'upload:failed', 'register:skipped']);
     expect(c.steps[1].detail)
       .toBe('Dieser Namensraum gehört nicht zu deinem Konto. Du kannst den Datensatz später im Tab Daten hochladen.');
     expect(c.title).toBe('Hochladen fehlgeschlagen');
@@ -157,12 +158,18 @@ describe('finishSteps', () => {
     expect(c.steps[1].detail).toBe(stall);
   });
 
-  it('F4: local_done for a session that ran without upload names why', () => {
+  it('F4: local_done for a session that ran without upload names why, once (in the note)', () => {
     const off = 'Aufnahme ohne Hochladen: Auf dem Roboter ist kein Hugging-Face-Token gespeichert.';
-    const c = finishSteps(session({ state: 'local_done', uploadOff: off }));
+    const c = finishSteps(session({ state: 'local_done', uploadOff: off, endNote: off }));
     expect(states(c)).toEqual(['finalize:done', 'upload:skipped', 'register:skipped']);
-    expect(c.steps[1].detail).toBe(off);
+    expect(c.note).toBe(off);
+    expect(c.steps[1].detail).toBe('Nicht hochgeladen (Hochladen war für diese Aufnahme aus)');
     expect(c.steps[1].label).toBe('Zu Hugging Face hochladen');
+  });
+
+  it('round 7: an upload that never began skips step 3 too', () => {
+    const c = finishSteps(session({ state: 'uploading', endedAt: NOW - UPLOAD_START_GRACE_MS - 1 }), { nowWallMs: NOW });
+    expect(states(c)).toEqual(['finalize:done', 'upload:failed', 'register:skipped']);
   });
 
   it('finalize_failed (V1-2): step 1 failed with the server text, nothing uploaded, nothing claimed ready', () => {
@@ -266,5 +273,27 @@ describe('sessionView', () => {
       const v = sessionView({ ...EMPTY_RECORD_SESSION, episodes: [{ n: 1, outcome, durationS: 3, wallMs: NOW }] });
       expect(v.rows[0].title).toBe(label);
     }
+  });
+});
+
+describe('sessionView, round 7: an incomplete dataset', () => {
+  const rows = (finish, patch = {}) => sessionView(session(finish, {
+    episodes: [
+      { n: 1, outcome: 'saved', durationS: 20, wallMs: NOW - 60000, early: false },
+      { n: 2, outcome: 'saved', durationS: 8, wallMs: NOW - 30000, early: true },
+    ],
+    ...patch,
+  }), { nowWallMs: NOW }).rows.map((r) => r.sub);
+
+  it('a failed finalize marks every saved row', () => {
+    const subs = rows({ state: 'finalize_failed', message: 'Datensatz konnte nicht abgeschlossen werden …' });
+    expect(subs.every((t) => t.startsWith('Gespeichert, Datensatz unvollständig'))).toBe(true);
+  });
+
+  it('an error stop whose finalize failed marks them too; a safe one does not', () => {
+    const bad = rows({ state: 'stopped_error' }, { errorText: `Gestoppt. ${ERROR_STOP_INCOMPLETE_DE}` });
+    expect(bad.every((t) => t.startsWith('Gespeichert, Datensatz unvollständig'))).toBe(true);
+    const ok = rows({ state: 'stopped_error' }, { errorText: `Gestoppt. ${ERROR_STOP_SAVED_DE}` });
+    expect(ok.some((t) => t.includes('unvollständig'))).toBe(false);
   });
 });

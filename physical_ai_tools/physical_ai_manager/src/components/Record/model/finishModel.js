@@ -106,7 +106,7 @@ export function finishSteps(session, { nowWallMs = Date.now(), heartbeat = 'conn
           eyebrow: F.eyebrowDone,
           title: F.titleFailed,
           steps: [step('finalize', F.stepFinalize, 'done'), step('upload', upLabel, 'failed', F.notStarted),
-            step('register', F.stepRegister)],
+            step('register', F.stepRegister, 'skipped')],
           savedAs: localSaved,
         };
       }
@@ -155,7 +155,8 @@ export function finishSteps(session, { nowWallMs = Date.now(), heartbeat = 'conn
         steps: [step('finalize', F.stepFinalize, 'done'),
           step('upload', upLabel, 'failed',
             [f.message, SAYS_UPLOAD_LATER.test(f.message || '') ? '' : F.later].filter(Boolean).join(' ')),
-          step('register', F.stepRegister)],
+          // round 7: it will not happen — skipped, never „still to come"
+          step('register', F.stepRegister, 'skipped')],
         savedAs: localSaved,
         actions: [NEW()],
       };
@@ -183,8 +184,10 @@ export function finishSteps(session, { nowWallMs = Date.now(), heartbeat = 'conn
         ...base,
         eyebrow: F.eyebrowDone,
         title: F.titleDone,
-        // F4: a session the robot ran without upload says why
-        steps: [step('finalize', F.stepFinalize, 'done'), step('upload', F.stepUpload, 'skipped', f.uploadOff || F.uploadOff),
+        // F4: a session the robot ran without upload says why — once, in the
+        // card's note (endNote); the step only says it was off
+        steps: [step('finalize', F.stepFinalize, 'done'),
+          step('upload', F.stepUpload, 'skipped', f.uploadOff ? F.uploadOffSession : F.uploadOff),
           step('register', F.stepRegister, 'skipped')],
         savedAs: localSaved,
         actions: [NEW()],
@@ -227,9 +230,21 @@ export function finishSteps(session, { nowWallMs = Date.now(), heartbeat = 'conn
 }
 
 /** The „Diese Sitzung" card: rows newest first, the chip and the sum line. */
+/** Round 7: the session's dataset could not be finalized (its rows say so). */
+export function datasetIncomplete(session) {
+  const state = session?.finish?.state;
+  if (state === 'finalize_failed') return true;
+  return state === 'stopped_error' && errorStopParts(session?.errorText).kind === 'incomplete';
+}
+
 export function sessionView(session, { numEpisodes = 0, nowWallMs = Date.now() } = {}) {
   const s = session || {};
   const episodes = Array.isArray(s.episodes) ? s.episodes : [];
+  const incomplete = datasetIncomplete(s);
+  const savedSub = (e, hhmm) => {
+    if (incomplete) return S.savedIncomplete(hhmm);
+    return e.early ? S.savedEarly(hhmm) : S.saved(hhmm);
+  };
   const rows = episodes.map((e, i) => {
     const saved = e.outcome === 'saved';
     const hhmm = clockDe(e.wallMs);
@@ -237,7 +252,7 @@ export function sessionView(session, { numEpisodes = 0, nowWallMs = Date.now() }
       key: `${s.id || 0}:${i}`,
       num: saved ? String(e.n) : '–',
       title: saved ? S.episode(e.n) : (S.outcome[e.outcome] || S.outcome.redo),
-      sub: saved ? (e.early ? S.savedEarly(hhmm) : S.saved(hhmm)) : S.discardedSub(e.n, hhmm),
+      sub: saved ? savedSub(e, hhmm) : S.discardedSub(e.n, hhmm),
       duration: formatMinSec(e.durationS),
       discarded: !saved,
       outcome: e.outcome,

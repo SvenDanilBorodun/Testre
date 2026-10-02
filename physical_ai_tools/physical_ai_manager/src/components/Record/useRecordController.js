@@ -570,6 +570,20 @@ export default function useRecordController({ isActive = true } = {}) {
     });
   }, []);
 
+  // Round 7: the stage card behind the CollisionModal agrees with the row — a
+  // collision in the save window kept that episode (Q7: „Gespeichert"), so the
+  // card names it as saved instead of „wurde verworfen".
+  const episodes = session?.episodes;
+  const collisionSavedRow = useMemo(() => {
+    if (!session?.collisionOpen || !Array.isArray(episodes) || !episodes.length) return null;
+    const last = episodes[episodes.length - 1];
+    return last && last.inCollision && last.outcome === 'saved' ? last : null;
+  }, [session?.collisionOpen, episodes]);
+  const copy = useMemo(() => (collisionSavedRow ? {
+    ...RECORD_COPY,
+    card: { ...RECORD_COPY.card, collisionBody: () => RECORD_COPY.card.collisionBodySaved(collisionSavedRow.n) },
+  } : RECORD_COPY), [collisionSavedRow]);
+
   const questionModel = question ? {
     kind: question.kind,
     episode: question.episode,
@@ -610,7 +624,7 @@ export default function useRecordController({ isActive = true } = {}) {
     repoPreview,
     onPhaseTick,
     // conveniences
-    copy: RECORD_COPY,
+    copy,
     steppers: RECORD_STEPPERS,
     saveName,
     invalid,

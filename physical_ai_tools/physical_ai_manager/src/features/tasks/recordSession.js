@@ -215,7 +215,13 @@ function settleProvisional(s, next) {
   episodes[idx] = counted
     ? { ...episodes[idx], provisional: false }
     : { ...episodes[idx], provisional: false, outcome: 'collision', early: false };
-  return { ...s, episodes, savedCount: counted ? s.savedCount + 1 : s.savedCount };
+  const savedCount = counted ? s.savedCount + 1 : s.savedCount;
+  // Round 7: the LAST episode counted in the save window ends the session
+  // normally (the robot finishes instead of rewinding), so the collision no
+  // longer explains the end („nach der Kollision beendet" would be false).
+  const N = numEpisodesOf(s, next);
+  const lastDone = counted && N > 0 && savedCount >= N;
+  return { ...s, episodes, savedCount, collisionOpen: lastDone ? false : s.collisionOpen };
 }
 
 /**
@@ -423,6 +429,10 @@ function endSession(s, next, E) {
   let endNote = null;
   if (out.collisionOpen) {
     endNote = COLLISION_END_NOTE_DE;
+  } else if (uploadOff && (finish.state === 'local_done' || finish.state === 'nothing')) {
+    // F4, round 7: the reason is said ONCE — as the card's note, which the
+    // problem banner then leaves out (problems.js cardShows).
+    endNote = uploadOff;
   } else if (out.lastWarn && out.lastWarn.text !== warn && out.lastWarn.text !== uploadOff
       && Number.isFinite(endedWallMs)
       && endedWallMs - out.lastWarn.at <= END_NOTE_WINDOW_MS) {
@@ -473,7 +483,9 @@ export function noteCollision(s, taskStatus, payload) {
       ...out,
       run: { ...run, resolved: true },
       episodes: [...out.episodes, row(run.episode, 'saved', durationS, wallMs, {
-        provisional: true, early: E > 0 && durationS < E - 0.5,
+        // inCollision: the stage card behind the CollisionModal says this
+        // episode was saved, not thrown away (round 7)
+        provisional: true, inCollision: true, early: E > 0 && durationS < E - 0.5,
       })],
     };
   } else {

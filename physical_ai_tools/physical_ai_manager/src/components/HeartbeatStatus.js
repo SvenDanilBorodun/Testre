@@ -64,7 +64,7 @@ export default function HeartbeatStatus({
       case 'timeout':
         return {
           color: 'var(--amber)',
-          label: 'Timeout',
+          label: 'Zeitüberschreitung',
           tone: 'amber',
         };
       case 'disconnected':

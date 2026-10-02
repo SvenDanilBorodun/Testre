@@ -35,7 +35,11 @@ SESSION_JS = SRC / "features" / "tasks" / "recordSession.js"
 COMMANDS_JS = SRC / "components" / "Record" / "model" / "recordCommands.js"
 SIGNAL_JS = SRC / "utils" / "signalStatus.js"
 
-SHARED = ("SOURCE_STOP_PREFIX_DE", "SOURCE_GAP_PREFIX_DE", "BUSY_DE")
+SHARED = ("SOURCE_STOP_PREFIX_DE", "SOURCE_GAP_PREFIX_DE", "BUSY_DE",
+          # round 6: the error stop's two dataset sentences (D5/F3), the
+          # upload-off notice's prefix (F4), the finalize failure's prefix
+          "ERROR_STOP_SAVED_DE", "ERROR_STOP_INCOMPLETE_DE", "UPLOAD_OFF_PREFIX_DE",
+          "FINALIZE_FAILED_PREFIX_DE")
 
 
 def _py_constants(path):
@@ -46,10 +50,11 @@ def _py_constants(path):
 
 
 def _js_const(path, name):
+    """A string constant, also when written as concatenated literals."""
     text = path.read_text(encoding="utf-8")
-    matches = re.findall(rf"export const {name} = '([^'\\]*)';", text)
+    matches = re.findall(rf"export const {name} = ((?:'[^'\\]*'\s*\+?\s*)+);", text)
     assert len(matches) == 1, (path.name, name, matches)
-    return matches[0]
+    return "".join(re.findall(r"'([^'\\]*)'", matches[0]))
 
 
 def _js_number(path, name):

@@ -531,16 +531,17 @@ export default function useRecordController({ isActive = true } = {}) {
       ? datasetRepoId(formRaw.userId, status.robotType, formRaw.taskName)
       : `${safeUserId(formRaw.userId)}/${status.robotType}_…`;
   }, [formRaw.taskName, formRaw.userId, status.robotType]);
+  // Round 6 (F4): the robot said this session runs WITHOUT upload (no usable
+  // token); the save name says so, and why, for the rest of the session.
+  const sessionUploadOff = !!(session?.active && session.uploadOff);
   const saveName = useMemo(() => {
-    const local = !formRaw.pushToHub;
+    const local = !formRaw.pushToHub || sessionUploadOff;
     const isPublic = !local && formRaw.privateMode === false;
-    return {
-      text: local ? RECORD_COPY.save.local : isPublic ? RECORD_COPY.save.public : RECORD_COPY.save.private,
-      repoId: repoPreview,
-      public: isPublic,
-      local,
-    };
-  }, [formRaw.pushToHub, formRaw.privateMode, repoPreview]);
+    let text = isPublic ? RECORD_COPY.save.public : RECORD_COPY.save.private;
+    if (sessionUploadOff) text = RECORD_COPY.save.uploadOff;
+    else if (local) text = RECORD_COPY.save.local;
+    return { text, repoId: repoPreview, public: isPublic, local };
+  }, [formRaw.pushToHub, formRaw.privateMode, repoPreview, sessionUploadOff]);
 
   // --- navigation / finish actions ---------------------------------------------------
   const dismissFinish = useCallback(() => {

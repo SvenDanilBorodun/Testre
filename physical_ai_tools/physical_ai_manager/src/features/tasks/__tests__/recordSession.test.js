@@ -16,6 +16,7 @@ import {
   OUTCOMES,
   SOURCE_GAP_PREFIX_DE,
   SOURCE_STOP_PREFIX_DE,
+  UPLOAD_OFF_PREFIX_DE,
   advanceRecordSession,
   applyRecordIntent,
   applyRegisterStatus,
@@ -843,7 +844,7 @@ describe('round 5: „Behalten und beenden" measured to the press (§2.3-2)', ()
 
 describe('round 5: a source that stops, a short gap (§2.2)', () => {
   it('the outcomes include the two new rows', () => {
-    expect(OUTCOMES).toEqual(['saved', 'redo', 'collision', 'drop', 'ended', 'source', 'gap']);
+    expect(OUTCOMES).toEqual(['saved', 'redo', 'collision', 'drop', 'ended', 'source', 'gap', 'gap_end']);
     expect(SOURCE_STOP_PREFIX_DE).toBe('Aufnahme beendet: ');
     expect(SOURCE_GAP_PREFIX_DE).toBe('Signalaussetzer: ');
   });
@@ -920,5 +921,89 @@ describe('round 5: a source that stops, a short gap (§2.2)', () => {
     r.saving(0);
     r.phase(RESETTING, 1);
     expect(outcomes(r.s)).toEqual(['1:drop']);
+  });
+});
+
+// Aufnahme 2.0 round 6.
+const GAP_FINISH_DE = `${SOURCE_GAP_PREFIX_DE}Die Szenen-Kamera hat in Episode 1 kurz keine Daten geliefert. `
+  + 'Die Episode wurde verworfen, die Aufnahme endet mit den schon gespeicherten Episoden.';
+const UPLOAD_OFF_DE = `${UPLOAD_OFF_PREFIX_DE}Auf dem Roboter ist kein Hugging-Face-Token gespeichert. Der `
+  + 'Datensatz bleibt auf dem Roboter; speichere einen Token in der EduBotics-App unter „Schritt D: '
+  + 'HuggingFace-Token“ und lade ihn später im Tab Daten hoch.';
+
+describe('round 6: a gap under FINISH ends the take, it is not re-recorded', () => {
+  it('„Behalten und beenden" during a take with a source gap: „Signalaussetzer, verworfen"', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.saving(0);
+    r.phase(RESETTING, 1, { currentEpisodeNumber: 1 });
+    r.phase(RECORDING, 4, { currentEpisodeNumber: 1 });
+    r.intent({ kind: 'keep_end' });
+    r.notice({ kind: 'warn', text: GAP_FINISH_DE });
+    r.saving(1);
+    r.ready({ currentEpisodeNumber: 1 });
+    expect(outcomes(r.s)).toEqual(['1:saved', '2:gap_end']);
+  });
+});
+
+describe('round 6 (F4): a session that runs without upload says so and ends local', () => {
+  it('the notice during the session: the finish is local, with the reason, never „uploading"', () => {
+    const r = sim();
+    r.start();
+    r.phase(WARMING_UP, 1, { totalTime: 5 });
+    r.notice({ kind: 'warn', text: UPLOAD_OFF_DE });
+    expect(r.s.uploadOff).toBe(UPLOAD_OFF_DE);
+    r.phase(RECORDING, 10);
+    r.saving(0);
+    r.saving(1);
+    r.ready({ currentEpisodeNumber: 1 });
+    expect(r.s.finish).toMatchObject({ state: 'local_done', uploadOff: UPLOAD_OFF_DE });
+  });
+
+  it('the notice on the terminating tick (the upload was skipped for it) is not a failed upload', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.notice({ kind: 'warn', text: UPLOAD_OFF_DE });
+    r.saving(0);
+    r.saving(1);
+    r.notice({ kind: 'warn', text: UPLOAD_OFF_DE });
+    r.ready({ currentEpisodeNumber: 1, recordWarn: UPLOAD_OFF_DE });
+    expect(r.s.finish.state).toBe('local_done');
+    expect(r.s.finish.endNote).toBeNull();
+  });
+
+  it('a finalize failure still reads as a failed finalize', () => {
+    const r = sim();
+    r.start();
+    r.phase(RECORDING, 10);
+    r.notice({ kind: 'warn', text: UPLOAD_OFF_DE });
+    r.saving(0);
+    r.saving(1);
+    const why = 'Datensatz konnte nicht abgeschlossen werden — die Aufnahme ist unvollständig und muss neu aufgenommen werden.';
+    r.notice({ kind: 'warn', text: why });
+    r.ready({ currentEpisodeNumber: 1, recordWarn: why });
+    expect(r.s.finish).toMatchObject({ state: 'finalize_failed', message: why });
+  });
+
+  it('a notice that arrives with the very first record tick is kept', () => {
+    const r = sim();
+    r.start();
+    r.notice({ kind: 'warn', text: UPLOAD_OFF_DE });   // dispatched before the tick
+    r.phase(WARMING_UP, 1, { totalTime: 5 });
+    expect(r.s.uploadOff).toBe(UPLOAD_OFF_DE);
+  });
+
+  it('a new start forgets it', () => {
+    const r = sim();
+    r.start();
+    r.phase(WARMING_UP, 1, { totalTime: 5 });
+    r.notice({ kind: 'warn', text: UPLOAD_OFF_DE });
+    r.saving(0);
+    r.ready({ currentEpisodeNumber: 0 });
+    r.dismiss();
+    r.start();
+    expect(r.s.uploadOff).toBeNull();
   });
 });

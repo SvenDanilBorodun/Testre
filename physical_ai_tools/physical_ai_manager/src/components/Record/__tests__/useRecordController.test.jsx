@@ -15,7 +15,7 @@ import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 
 import tasksReducer, {
-  recordUploadStatus, setHeartbeatStatus, setTaskInfo, setTaskStatus,
+  recordNoticeSet, recordUploadStatus, setHeartbeatStatus, setTaskInfo, setTaskStatus,
 } from '../../../features/tasks/taskSlice';
 import uiReducer, { moveToPage } from '../../../features/ui/uiSlice';
 import rosReducer from '../../../features/ros/rosSlice';
@@ -556,5 +556,31 @@ describe('the busy answer', () => {
     expect(mockSend.mock.calls.map((c) => c[0])).toEqual(['rerecord']);
     expect(store.getState().tasks.recordSession.intent).toBeNull();
     expect(store.getState().tasks.recordSession.finish.state).toBe('idle');
+  });
+});
+
+// Round 6 (F4): a session the robot runs without upload says so where the page
+// names the dataset, for the whole session.
+describe('a session without upload', () => {
+  it('the save name says local and why while the session runs', async () => {
+    const store = makeStore();
+    const { result } = mount(store);
+    act(() => pageAct(result, 'start'));
+    await waitFor(() => expect(mockSend).toHaveBeenCalledWith('start_record'));
+    act(() => { store.dispatch(recordTick({ phase: TaskPhase.WARMING_UP, totalTime: 5 })); });
+    act(() => {
+      store.dispatch(recordNoticeSet({
+        kind: 'warn',
+        text: 'Aufnahme ohne Hochladen: Auf dem Roboter ist kein Hugging-Face-Token gespeichert.',
+        at: Date.now(),
+      }));
+    });
+    expect(result.current.saveName).toMatchObject({
+      text: RECORD_COPY.save.uploadOff, local: true, public: false,
+    });
+    expect(RECORD_COPY.save.uploadOff).toBe(
+      'Hochladen ist für diese Aufnahme aus (kein gültiger Hugging-Face-Token). Wird nur auf diesem Rechner '
+      + 'gespeichert als',
+    );
   });
 });

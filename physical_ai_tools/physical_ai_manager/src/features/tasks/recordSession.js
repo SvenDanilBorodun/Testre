@@ -52,8 +52,16 @@ export const SOURCE_STOP_PREFIX_DE = 'Aufnahme beendet: ';
 export const SOURCE_GAP_PREFIX_DE = 'Signalaussetzer: ';
 /** The robot's answer to a command while the recorder is busy (O6). */
 export const BUSY_DE = 'Die Aufnahme ist gerade beschäftigt. Bitte versuch es gleich noch einmal.';
+/** Round 6 (D5/F3): how an error stop says the saved episodes are safe … */
+export const ERROR_STOP_SAVED_DE = 'Die schon gespeicherten Episoden sind gesichert; du kannst sie im Tab Daten '
+  + 'hochladen.';
+/** … and how it says the dataset could not be finalized (the crash marker stays). */
+export const ERROR_STOP_INCOMPLETE_DE = 'Der Datensatz ist unvollständig: Er konnte nicht abgeschlossen werden. '
+  + 'Nimm die Episoden neu auf.';
+/** Round 6 (F4): the session runs WITHOUT upload (no or refused token); the reason follows. */
+export const UPLOAD_OFF_PREFIX_DE = 'Aufnahme ohne Hochladen: ';
 
-export const OUTCOMES = Object.freeze(['saved', 'redo', 'collision', 'drop', 'ended', 'source', 'gap']);
+export const OUTCOMES = Object.freeze(['saved', 'redo', 'collision', 'drop', 'ended', 'source', 'gap', 'gap_end']);
 export const FINISH_STATES = Object.freeze([
   'idle', 'finalizing', 'uploading', 'registering', 'done', 'upload_failed', 'local_done',
   'finalize_failed', 'stopped_error', 'nothing',
@@ -70,6 +78,8 @@ export const EMPTY_FINISH = Object.freeze({
   linkLost: false,
   dismissed: false,
   endNote: null,
+  // round 6 (F4): the reason a session ran without upload (its local finish names it)
+  uploadOff: null,
   // true while `finalizing` came only from one of the page's end intents, so a
   // failed command (`clear`) can take it back.
   fromIntent: false,
@@ -94,6 +104,8 @@ export const EMPTY_RECORD_SESSION = Object.freeze({
   episodes: [], // { n, outcome, durationS, wallMs, early, provisional? }
   collisionOpen: false,
   lastWarn: null,
+  // round 6 (F4): the robot's „Aufnahme ohne Hochladen: …" notice for this session
+  uploadOff: null,
   finish: EMPTY_FINISH,
   errorText: null,
 });
@@ -236,6 +248,8 @@ export function advanceRecordSession(s, prev, next) {
       snapshot,
       savedCount: count,
       adoptedSavedCount: count > 0 ? count : 0,
+      // a notice dispatched just before the first record tick (F4)
+      uploadOff: fromHere ? out.uploadOff : null,
       finish: carry ? out.finish : EMPTY_FINISH,
     };
   }
@@ -368,6 +382,8 @@ function endSession(s, next, E) {
       outcome = 'ended'; // Q8: too soon after „Wiederholen"
     } else if (!out.intent && recentWarnStartsWith(out, SOURCE_STOP_PREFIX_DE, endedWallMs)) {
       outcome = 'source'; // the robot ended the session: a source stopped (R5-2) or C7
+    } else if (recentWarnStartsWith(out, SOURCE_GAP_PREFIX_DE, endedWallMs)) {
+      outcome = 'gap_end'; // a source gap in the take FINISH ended: discarded, not re-recorded
     } else {
       outcome = 'drop'; // FINISH met a frame drop, or an F1 end
     }
@@ -376,7 +392,12 @@ function endSession(s, next, E) {
       : { ...out, run: { ...run, resolved: true } };
   }
   const snapshot = out.snapshot || {};
-  const warn = next.recordWarn || '';
+  // F4: a session the robot ran without upload ends local; its notice on the
+  // terminating tick (the upload it skipped) is not a blocked upload.
+  const uploadOff = typeof out.uploadOff === 'string' && out.uploadOff ? out.uploadOff : null;
+  const rawWarn = next.recordWarn || '';
+  const warn = uploadOff && rawWarn.startsWith(UPLOAD_OFF_PREFIX_DE) ? '' : rawWarn;
+  const pushToHub = !!snapshot.pushToHub && !uploadOff;
   let finish;
   if (out.savedCount === 0) {
     finish = { ...EMPTY_FINISH, state: 'nothing', endedAt: endedWallMs };
@@ -384,11 +405,11 @@ function endSession(s, next, E) {
     // The terminating tick carries a warning iff the upload was blocked. With
     // upload OFF the only cause is a failed finalize (V1-2); with it ON, the
     // finalize sentence says which.
-    const finalizeFailed = !snapshot.pushToHub || warn.startsWith(FINALIZE_FAILED_PREFIX_DE);
+    const finalizeFailed = !pushToHub || warn.startsWith(FINALIZE_FAILED_PREFIX_DE);
     finish = {
       ...EMPTY_FINISH, state: finalizeFailed ? 'finalize_failed' : 'upload_failed', message: warn, endedAt: endedWallMs,
     };
-  } else if (!snapshot.pushToHub) {
+  } else if (!pushToHub) {
     finish = { ...EMPTY_FINISH, state: 'local_done', endedAt: endedWallMs };
   } else {
     finish = {
@@ -398,10 +419,12 @@ function endSession(s, next, E) {
       endedAt: endedWallMs,
     };
   }
+  if (uploadOff) finish.uploadOff = uploadOff;
   let endNote = null;
   if (out.collisionOpen) {
     endNote = COLLISION_END_NOTE_DE;
-  } else if (out.lastWarn && out.lastWarn.text !== warn && Number.isFinite(endedWallMs)
+  } else if (out.lastWarn && out.lastWarn.text !== warn && out.lastWarn.text !== uploadOff
+      && Number.isFinite(endedWallMs)
       && endedWallMs - out.lastWarn.at <= END_NOTE_WINDOW_MS) {
     endNote = out.lastWarn.text;
   }
@@ -485,8 +508,12 @@ export function noteRecordNotice(s, notice) {
     if (s.pendingStart) return { ...s, pendingStart: null };
     return s;
   }
-  if (notice.kind === 'warn' && s.active) {
-    return { ...s, lastWarn: { text: notice.text || '', at: notice.at ?? null } };
+  if (notice.kind === 'warn' && (s.active || s.pendingStart)) {
+    const text = notice.text || '';
+    let out = s;
+    if (text.startsWith(UPLOAD_OFF_PREFIX_DE) && s.uploadOff !== text) out = { ...out, uploadOff: text };
+    if (s.active) out = { ...out, lastWarn: { text, at: notice.at ?? null } };
+    return out;
   }
   return s;
 }

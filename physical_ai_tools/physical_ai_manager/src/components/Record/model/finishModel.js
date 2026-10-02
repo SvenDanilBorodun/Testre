@@ -16,6 +16,7 @@
 //   skipped after a successful upload (V2-5)
 // sessionView → {title, chip, rows, emptyText, note, sum, raw}
 
+import { ERROR_STOP_INCOMPLETE_DE, ERROR_STOP_SAVED_DE } from '../../../features/tasks/recordSession';
 import { datasetRepoId, safeTaskName } from '../../../utils/datasetName';
 import { formatMinSec } from '../../../utils/recordTaskInfo';
 import RECORD_COPY, { clockDe } from './recordCopy';
@@ -49,6 +50,23 @@ export function datasetIdOf(session) {
 }
 
 const step = (key, label, state = '', detail = '', pct = '') => ({ key, label, state, detail, pct });
+
+// A failure sentence that already says where to upload later needs no second one.
+const SAYS_UPLOAD_LATER = /im Tab Daten hoch(laden|\.)/;
+
+/**
+ * What an error stop's sentence says about the dataset (D5/F3, round 6):
+ * 'saved' (finalized, the saved episodes are safe), 'incomplete' (finalize
+ * failed) or '' (nothing was said: nothing saved, or an older robot), and the
+ * stop's own reason without that sentence.
+ */
+export function errorStopParts(text) {
+  const raw = String(text || '');
+  for (const [kind, sentence] of [['saved', ERROR_STOP_SAVED_DE], ['incomplete', ERROR_STOP_INCOMPLETE_DE]]) {
+    if (raw.includes(sentence)) return { kind, reason: raw.replace(sentence, '').trim() };
+  }
+  return { kind: '', reason: raw.trim() };
+}
 const NEW = () => ({ id: 'newRecording', label: F.newRecording, variant: 'ghost' });
 const TRAINING = () => ({ id: 'toTraining', label: F.toTraining, variant: 'primary' });
 
@@ -135,7 +153,8 @@ export function finishSteps(session, { nowWallMs = Date.now(), heartbeat = 'conn
         eyebrow: F.eyebrowDone,
         title: F.titleFailed,
         steps: [step('finalize', F.stepFinalize, 'done'),
-          step('upload', upLabel, 'failed', [f.message, F.later].filter(Boolean).join(' ')),
+          step('upload', upLabel, 'failed',
+            [f.message, SAYS_UPLOAD_LATER.test(f.message || '') ? '' : F.later].filter(Boolean).join(' ')),
           step('register', F.stepRegister)],
         savedAs: localSaved,
         actions: [NEW()],
@@ -164,21 +183,43 @@ export function finishSteps(session, { nowWallMs = Date.now(), heartbeat = 'conn
         ...base,
         eyebrow: F.eyebrowDone,
         title: F.titleDone,
-        steps: [step('finalize', F.stepFinalize, 'done'), step('upload', F.stepUpload, 'skipped', F.uploadOff),
+        // F4: a session the robot ran without upload says why
+        steps: [step('finalize', F.stepFinalize, 'done'), step('upload', F.stepUpload, 'skipped', f.uploadOff || F.uploadOff),
           step('register', F.stepRegister, 'skipped')],
         savedAs: localSaved,
         actions: [NEW()],
       };
 
-    case 'stopped_error':
+    case 'stopped_error': {
+      // D5/F3: an error stop finalizes what was saved; the card shows what the
+      // robot said about the dataset, never a contradictory red cross.
+      const { kind, reason } = errorStopParts(session.errorText);
+      const stopped = { ...base, eyebrow: RECORD_COPY.pill.stopped, title: F.titleStopped, note: reason, actions: [NEW()] };
+      if (kind === 'saved') {
+        return {
+          ...stopped,
+          steps: [step('finalize', F.stepFinalize, 'done'), step('upload', upLabel, 'skipped', ERROR_STOP_SAVED_DE),
+            step('register', F.stepRegister, 'skipped')],
+          savedAs: localSaved,
+        };
+      }
+      if (kind === 'incomplete') {
+        return {
+          ...stopped,
+          eyebrow: F.eyebrowFinalizeFailed,
+          title: F.titleFinalizeFailed,
+          steps: [step('finalize', F.stepFinalize, 'failed', ERROR_STOP_INCOMPLETE_DE), step('upload', upLabel, 'skipped'),
+            step('register', F.stepRegister, 'skipped')],
+        };
+      }
+      // Nothing said: nothing was saved (nothing to finalize), or an older
+      // robot that did not report it (then the state is unknown).
       return {
-        ...base,
-        eyebrow: RECORD_COPY.pill.stopped,
-        title: F.titleStopped,
-        steps: [step('finalize', F.stepFinalize, 'failed', session.errorText || ''), step('upload', upLabel),
-          step('register', F.stepRegister)],
-        actions: [NEW()],
+        ...stopped,
+        steps: [step('finalize', F.stepFinalize, k > 0 ? 'unknown' : 'skipped'), step('upload', upLabel, 'skipped'),
+          step('register', F.stepRegister, 'skipped')],
       };
+    }
 
     default:
       return HIDDEN;

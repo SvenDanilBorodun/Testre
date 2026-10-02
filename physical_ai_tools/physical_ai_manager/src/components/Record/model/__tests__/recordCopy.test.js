@@ -139,6 +139,7 @@ describe('round 5 rows and notes', () => {
     }
     expect(RECORD_COPY.session.outcome.source).toBe('Abgebrochen, verworfen');
     expect(RECORD_COPY.session.outcome.gap).toBe('Signalaussetzer, wiederholt');
+    expect(RECORD_COPY.session.outcome.gap_end).toBe('Signalaussetzer, verworfen');
   });
 
   it('the Q8 reason and „nothing saved" in one sentence', () => {

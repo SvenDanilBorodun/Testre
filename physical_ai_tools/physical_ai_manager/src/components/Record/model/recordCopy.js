@@ -281,6 +281,9 @@ export const RECORD_COPY = Object.freeze({
     private: 'Wird privat auf Hugging Face gespeichert als',
     public: 'Wird ÖFFENTLICH auf Hugging Face gespeichert als',
     local: 'Wird nur auf diesem Rechner gespeichert als',
+    // round 6 (F4): the robot runs this session without upload (no usable token)
+    uploadOff: 'Hochladen ist für diese Aufnahme aus (kein gültiger Hugging-Face-Token). Wird nur auf diesem '
+      + 'Rechner gespeichert als',
   }),
 
   locked: Object.freeze({
@@ -306,6 +309,8 @@ export const RECORD_COPY = Object.freeze({
       source: 'Abgebrochen, verworfen',
       // round 5: a short source gap, the robot records the episode again
       gap: 'Signalaussetzer, wiederholt',
+      // round 6: a source gap in the take „Beenden" ended: discarded, not repeated
+      gap_end: 'Signalaussetzer, verworfen',
     }),
     discardedSub: (n, hhmm) => `Episode ${n} · ${hhmm}`,
     adopted: (k) => (k === 1

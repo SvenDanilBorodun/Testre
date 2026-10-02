@@ -281,3 +281,25 @@ describe('the busy answer (O6)', () => {
     expect(keep.log).toEqual(['intent:keep_end', 'send:finish', 'intent:clear']);
   });
 });
+
+// F1 (round 6): the server ACCEPTS a FINISH while the recorder is busy (the
+// official ~1 s discard) and applies it the moment the discard releases. That
+// answer is success: no busy banner, the end intent stays, nothing cleared.
+describe('a FINISH accepted while the robot is busy (F1)', () => {
+  const QUEUED = { success: true, message: 'Die Aufnahme wird beendet, sobald die verworfene Episode aufgeräumt ist.' };
+
+  it('„Verwerfen und beenden": RERECORD ok, FINISH queued → ok, the intent stays', async () => {
+    const h = harness({ status: recording(), answers: { finish: QUEUED } });
+    expect(await runRecordAction('discardAndEnd', h.ctx)).toEqual({ ok: true });
+    expect(h.log).toEqual(['intent:discard_end', 'send:rerecord', 'intent:discard_ack', 'send:finish']);
+  });
+
+  it('„Behalten und beenden" and „Beenden" queued → ok, no message', async () => {
+    const keep = harness({ status: recording(), answers: { finish: QUEUED } });
+    expect(await runRecordAction('keepAndEnd', keep.ctx)).toEqual({ ok: true });
+    expect(keep.log).toEqual(['intent:keep_end', 'send:finish']);
+    const end = harness({ status: { ...recording(), phase: TaskPhase.RESETTING }, answers: { finish: QUEUED } });
+    expect(await runRecordAction('end', end.ctx)).toEqual({ ok: true });
+    expect(end.log).toEqual(['intent:end', 'send:finish']);
+  });
+});

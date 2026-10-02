@@ -5,7 +5,9 @@
 
 // The finish card (spec §3.11 table) and „Diese Sitzung" (§3.10).
 
-import { EMPTY_FINISH, EMPTY_RECORD_SESSION, COLLISION_END_NOTE_DE } from '../../../../features/tasks/recordSession';
+import {
+  EMPTY_FINISH, EMPTY_RECORD_SESSION, COLLISION_END_NOTE_DE, ERROR_STOP_INCOMPLETE_DE, ERROR_STOP_SAVED_DE,
+} from '../../../../features/tasks/recordSession';
 import RECORD_COPY from '../recordCopy';
 import { UPLOAD_START_GRACE_MS, datasetIdOf, finishSteps, sessionView } from '../finishModel';
 
@@ -114,11 +116,53 @@ describe('finishSteps', () => {
     expect(c.savedAs.repoId).toBe(REPO);
   });
 
-  it('stopped_error: step 1 failed with the reason', () => {
-    const c = finishSteps(session({ state: 'stopped_error' }, { errorText: 'Die Kameras senden keine Bilder.' }));
-    expect(states(c)).toEqual(['finalize:failed', 'upload:', 'register:']);
-    expect(c.steps[0].detail).toBe('Die Kameras senden keine Bilder.');
+  it('stopped_error with nothing saved: the reason, nothing claimed failed or done', () => {
+    const c = finishSteps(session({ state: 'stopped_error' }, { savedCount: 0, errorText: 'Die Kameras senden keine Bilder.' }));
+    expect(states(c)).toEqual(['finalize:skipped', 'upload:skipped', 'register:skipped']);
+    expect(c.note).toBe('Die Kameras senden keine Bilder.');
+    expect(c.title).toBe('Die Aufnahme wurde gestoppt');
     expect(actionIds(c)).toEqual(['newRecording']);
+  });
+
+  it('F3: stopped_error whose saved episodes are safe: finalize ✓, upload skipped with where to do it', () => {
+    const why = 'Aufnahme gestoppt: Frame konnte nicht gespeichert werden.';
+    const c = finishSteps(session({ state: 'stopped_error' }, { errorText: `${why} ${ERROR_STOP_SAVED_DE}` }));
+    expect(states(c)).toEqual(['finalize:done', 'upload:skipped', 'register:skipped']);
+    expect(c.note).toBe(why);
+    expect(c.steps[1].detail).toBe(ERROR_STOP_SAVED_DE);
+    expect(c.steps.some((x) => x.state === 'failed')).toBe(false);
+    expect(c.savedAs).toEqual({ label: 'Auf diesem Rechner gespeichert als', repoId: REPO });
+  });
+
+  it('F3: stopped_error whose finalize failed: a clear incomplete dataset', () => {
+    const why = 'Aufnahme gestoppt: Frame konnte nicht gespeichert werden.';
+    const c = finishSteps(session({ state: 'stopped_error' }, { errorText: `${why} ${ERROR_STOP_INCOMPLETE_DE}` }));
+    expect(states(c)).toEqual(['finalize:failed', 'upload:skipped', 'register:skipped']);
+    expect(c.title).toBe('Datensatz unvollständig');
+    expect(c.steps[0].detail).toBe(ERROR_STOP_INCOMPLETE_DE);
+    expect(c.note).toBe(why);
+    expect(c.savedAs).toBeNull();
+  });
+
+  it('stopped_error from an older robot with saved episodes: the dataset state is unknown, not failed', () => {
+    const c = finishSteps(session({ state: 'stopped_error' }, { errorText: 'Die Kameras senden keine Bilder.' }));
+    expect(states(c)).toEqual(['finalize:unknown', 'upload:skipped', 'register:skipped']);
+    expect(c.note).toBe('Die Kameras senden keine Bilder.');
+  });
+
+  it('upload_failed whose sentence already says where to upload later: said once', () => {
+    const stall = 'Das Hochladen kommt nicht mehr voran. Prüfe die Internetverbindung des Roboters. Der Datensatz '
+      + 'bleibt auf dem Roboter gespeichert; du kannst ihn später im Tab Daten hochladen.';
+    const c = finishSteps(session({ state: 'upload_failed', message: stall }));
+    expect(c.steps[1].detail).toBe(stall);
+  });
+
+  it('F4: local_done for a session that ran without upload names why', () => {
+    const off = 'Aufnahme ohne Hochladen: Auf dem Roboter ist kein Hugging-Face-Token gespeichert.';
+    const c = finishSteps(session({ state: 'local_done', uploadOff: off }));
+    expect(states(c)).toEqual(['finalize:done', 'upload:skipped', 'register:skipped']);
+    expect(c.steps[1].detail).toBe(off);
+    expect(c.steps[1].label).toBe('Zu Hugging Face hochladen');
   });
 
   it('finalize_failed (V1-2): step 1 failed with the server text, nothing uploaded, nothing claimed ready', () => {

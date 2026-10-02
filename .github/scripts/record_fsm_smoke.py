@@ -19,7 +19,9 @@ histories with burnt-in frame counters (two cameras off 30 Hz, jitter, a
 PUBLIC warning (re-recorded twice, the third ends the session — C7), an old
 client's multi-task MOVE_TO_NEXT in the first warm-up (no phantom count), the
 source-gap re-record (two redos, the third kept), and the official discard's
-duration.
+duration. Round 6 adds a FINISH that lands while the official discard after
+„Wiederholen“ holds the recorder lock: accepted at once (queued) and applied
+at the release, ending the session with the discarded take dropped.
 Exit code 0 = all scenarios passed.
 
 Robust on a slow or noisy runner by construction:
@@ -504,9 +506,15 @@ def slot_sampler_take(attempt):
         return False, False, f'status {s.dm.get_status()} after the warm-up'
     pool = [frame(i) for i in range(4)]
     recorded, ei, k, stall_ticked = 0, 0, 0, False
+    wall0 = time.monotonic()
     while s.dm.get_status() == 'run':
         k += 1
         now = k * PERIOD_S + abs(rnd.gauss(0.0, 0.002))
+        # Feed the REAL encoder in real time (the simulated clock runs at wall
+        # speed): a burst producer would overrun its queue on a loaded runner.
+        lag = (wall0 + now) - time.monotonic()
+        if lag > 0:
+            time.sleep(lag)
         if stall[0] <= now < stall[1]:
             if stall_ticked:
                 continue                       # the timer skips the periods it missed
@@ -531,6 +539,9 @@ def slot_sampler_take(attempt):
                 recorded += 1
                 integrity.add(d)
     ok = s.finish()
+    lossy = record_texts_de.frame_loss_finish_de(1)
+    if any(w == f'[WARNUNG] {lossy}' for w in s.warnings):
+        return False, False, 'the encoder dropped a frame on this runner (overload), re-run'
     d = s.on_disk()
     rows = _state_columns(s.dm)
     steps = {name: [int(b[i] - a[i]) for a, b in zip(rows, rows[1:])]
@@ -655,6 +666,44 @@ def official_discard_timing(attempt):
         f'no_frame_in_it={s.fed == fed}')
 
 
+def queued_finish_during_discard(attempt):
+    # F1 (round 6): „Verwerfen und beenden“ = RERECORD, then FINISH while the
+    # official ~1 s discard holds the recorder lock. The FINISH is accepted at
+    # once (queued, never refused as busy) and applied at the release: the
+    # session ends with the first episode only — the discarded take is gone and
+    # no new take is kept.
+    import threading
+    s = Session(ROOT, f'smoke queued finish {attempt}', warmup=0, episode=1.5, reset=0, n=3)
+    s.until('reset')
+    first = s.fed
+    s.run_while(lambda: s.dm.get_status() != 'run')
+    start = s.fed
+    s.run_while(lambda: s.fed - start < 30)
+    if s.dm._record_episode_count != 1 or not s.dm.rerecord_from_command():
+        return False, False, f'count={s.dm._record_episode_count} before the RERECORD'
+    answer = {}
+
+    def _finish_meanwhile():
+        time.sleep(0.3)                       # the next tick is inside the discard
+        t0 = time.monotonic()
+        answer['applied'] = s.dm.request_end('finish')
+        answer['ms'] = 1000 * (time.monotonic() - t0)
+    helper = threading.Thread(target=_finish_meanwhile)
+    helper.start()
+    s.tick()                                  # the official discard (~1 s)
+    helper.join(5)
+    if answer.get('applied', True):
+        return False, False, f'the FINISH did not land inside the discard: {answer}'
+    end = time.monotonic() + 15.0
+    while not s.completed and time.monotonic() < end:
+        s.tick()
+    d = s.on_disk()
+    passed = (s.completed and answer['ms'] < 50 and s.dm._record_episode_count == 1
+              and d['episodes'] == 1 and d['frames'] == first)
+    return True, passed, (f'completed={s.completed} queued_in={answer["ms"]:.1f}ms '
+                          f'count={s.dm._record_episode_count} first_take={first} disk={d}')
+
+
 def main():
     # LeRobot's encoder warnings must reach the frame-drop watch (WARNING).
     logging.getLogger('lerobot.datasets.video_utils').setLevel(logging.WARNING)
@@ -668,6 +717,7 @@ def main():
     scenario('multitask_next_first_warmup', multitask_next_first_warmup)
     scenario('source_gap_redo', source_gap_redo)
     scenario('official_discard_timing', official_discard_timing)
+    scenario('queued_finish_during_discard', queued_finish_during_discard)
     scenario('frame_drop_rerecord', frame_drop_rerecord)
     print('SMOKE RESULT:', 'PASS' if not FAILURES else f'FAIL {FAILURES}', flush=True)
     return 0 if not FAILURES else 1

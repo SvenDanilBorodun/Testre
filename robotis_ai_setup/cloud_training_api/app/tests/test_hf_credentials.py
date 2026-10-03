@@ -2,7 +2,8 @@
 handling and the Hub check (migration 042, a student's own Hugging Face token).
 
 The module imports `cryptography` and `huggingface_hub` lazily, so this file
-needs the former (CI installs it in python-tests) and a FAKE of the latter that
+needs the former (CI's python-tests pip line must list `cryptography`; the
+owner adds it when merging) and a FAKE of the latter that
 it patches into sys.modules per test.
 
 Fixtures are deliberately low-entropy and are never assigned to a name that

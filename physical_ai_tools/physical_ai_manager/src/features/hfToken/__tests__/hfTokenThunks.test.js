@@ -452,6 +452,24 @@ describe('pushHfTokenToRobot', () => {
     expect(hf(store).sync).toMatchObject({ phase: 'idle', failures: 2 });
   });
 
+  it('a reveal that answers 404 or 422 reads the account again instead of retrying blindly', async () => {
+    const store = readyToPush();
+    api.getHfToken.mockResolvedValue({ stored: false });
+    api.revealHfToken.mockRejectedValueOnce(apiError(404, 'weg'));
+    await store.dispatch(pushHfTokenToRobot({ automatic: false }));
+    await vi.waitFor(() => expect(hf(store).account.status).toBe('none'));
+    expect(setRobotToken).not.toHaveBeenCalled();
+    expect(hf(store).sync).toMatchObject({ phase: 'idle', failures: 1 });
+  });
+
+  it('a reveal that fails with a server error does not re-read the account', async () => {
+    const store = readyToPush();
+    api.getHfToken.mockClear();
+    api.revealHfToken.mockRejectedValueOnce(apiError(500, 'x'));
+    await store.dispatch(pushHfTokenToRobot({ automatic: false }));
+    expect(api.getHfToken).not.toHaveBeenCalled();
+  });
+
   it('is single-flight: a second push while one is in flight does not start', async () => {
     const store = readyToPush();
     const gate = deferred();

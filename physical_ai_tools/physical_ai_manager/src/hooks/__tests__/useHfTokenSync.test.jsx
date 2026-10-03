@@ -280,6 +280,20 @@ describe('useHfTokenSync — M11: a different student in the same tab', () => {
     expect(api.getHfToken).toHaveBeenLastCalledWith('jwt-2');
   });
 
+  it('empties the Benutzer-ID list of the previous student too', async () => {
+    const store = makeStore({ heartbeat: 'disconnected', userId: 'student-a' });
+    mount(store);
+    await settle();
+    await act(async () => { store.dispatch(setHfUserList(['anna'])); });
+    expect(store.getState().ui.hfUserList).toEqual(['anna']);
+    api.getHfToken.mockResolvedValue({ stored: false });
+    await act(async () => {
+      store.dispatch(setSession({ access_token: 'jwt-2', user: { id: 'student-b' } }));
+    });
+    await settle();
+    expect(store.getState().ui.hfUserList).toEqual([]);
+  });
+
   it('does not reset on the first login or on a token refresh of the same student', async () => {
     const store = makeStore({ heartbeat: 'disconnected', userId: 'student-a' });
     mount(store);

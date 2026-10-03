@@ -147,7 +147,12 @@ export default function useHfTokenSync({ onRobotTokenReady } = {}) {
   useEffect(() => {
     const previous = prevUserRef.current;
     prevUserRef.current = userId;
-    if (previous && previous !== userId) dispatch(identityChanged());
+    if (previous && previous !== userId) {
+      dispatch(identityChanged());
+      // The Benutzer-ID list describes the PREVIOUS student's token; only a
+      // sign-out clears it otherwise, and an in-place session swap is none.
+      dispatch(setHfUserList([]));
+    }
   }, [userId, dispatch]);
 
   // ── 1. the account half ───────────────────────────────────────────────────

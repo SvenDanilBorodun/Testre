@@ -138,7 +138,7 @@ describe('the token\'s code path has no way to leak it', () => {
 // ── 2. the Redux sentinel ────────────────────────────────────────────────────
 // Sequential letters, low entropy on purpose: the repository's secret scan runs
 // over the whole history and flags a random-looking `hf_…` literal.
-const SENTINEL = 'hf_' + 'abcdefghijklmnopqrstuvwxyzABCDEFGH';
+const SENTINEL = ['hf_', 'abcdefghijklmnopqrstuvwxyzABCDEFGH'].join('');
 const SENTINEL_FP = '006da5aabd66bbc9';
 const PIECES = [SENTINEL, SENTINEL.slice(3), SENTINEL.slice(5, 25), SENTINEL.slice(12)];
 

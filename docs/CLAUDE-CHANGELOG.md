@@ -101,7 +101,9 @@ the student token this round.
   (owner decision) and names that in its message only when it happened.
 - `main.py`: boot probe 15/11/21, a malformed key refuses to boot while an absent one only warns, method-pinned per-user rate
   rules, a `PUT` body-size limit. `cryptography==49.0.0` pinned (a cp311 manylinux wheel was verified to resolve); the one
-  `ci.yml` edit is that package in the `python-tests` install line.
+  `ci.yml` edit this needs is NOT in the commits (the pushing GitHub App may not touch workflow files): the owner adds
+  `cryptography` to the `python-tests` pip install line when merging, otherwise the cloud tests that exercise the
+  AES-GCM envelope error out on the runner.
 
 **Robot (`physical_ai_server`).**
 - `/register_hf_user` no longer runs `huggingface-cli login` (token in argv, token files in the persisted `huggingface_cache`

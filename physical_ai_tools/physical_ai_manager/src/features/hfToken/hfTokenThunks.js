@@ -286,9 +286,15 @@ export const pushHfTokenToRobot = ({ automatic = true } = {}) => async (dispatch
     }
     dispatch(syncFailed({ message: scrub(result?.message) }));
     return { ok: false };
-  } catch {
+  } catch (err) {
     token = null;
-    if (alive()) dispatch(syncFailed({ message: null }));
+    if (alive()) {
+      dispatch(syncFailed({ message: null }));
+      // The row is gone or no longer decryptable (deleted in another tab, key
+      // lost): read the account again instead of retrying a reveal that cannot
+      // succeed until some focus event happens to refresh it.
+      if (err?.status === 404 || err?.status === 422) dispatch(refreshHfTokenAccount());
+    }
     return { ok: false };
   } finally {
     token = null;

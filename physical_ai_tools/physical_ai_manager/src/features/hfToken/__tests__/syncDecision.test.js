@@ -18,6 +18,7 @@ import {
   START_BLOCK,
   SYNC_WATCHDOG_MS,
   WAIT_RECHECK_MS,
+  WRITE_SETTLE_MS,
   backoffDelayMs,
   decideSync,
   hfTokenStartBlock,
@@ -139,6 +140,7 @@ describe('the retry schedule', () => {
 
   it('pins the other tuning constants the hook and the card rely on', () => {
     expect(WAIT_RECHECK_MS).toBe(5000);
+    expect(WRITE_SETTLE_MS).toBe(2500);
     expect(FAILED_VISIBLE_AFTER).toBe(2);
     expect(BREAKER_MAX_WRITES).toBe(3);
     expect(BREAKER_WINDOW_MS).toBe(60000);

@@ -51,10 +51,13 @@ vi.mock('../robotChannel', () => ({
 const SRC = path.resolve(__dirname, '..', '..', '..');
 
 // ── 1. the source fence ──────────────────────────────────────────────────────
-// Everything in the token's path. B-2 adds hooks/useHfTokenSync.js and
-// components/Home/HfTokenCard.jsx to this list when it creates them.
+// Everything in the token's path: the cloud service, the whole of
+// features/hfToken (below), the hook that runs the loop and the card the
+// student types it into.
 const FENCED_FILES = [
   'services/hfTokenApi.js',
+  'hooks/useHfTokenSync.js',
+  'components/Home/HfTokenCard.jsx',
 ];
 const FENCED_DIRS = [
   'features/hfToken',
@@ -106,6 +109,8 @@ describe('the token\'s code path has no way to leak it', () => {
       'features/hfToken/robotChannel.js',
       'features/hfToken/syncDecision.js',
       'services/hfTokenApi.js',
+      'hooks/useHfTokenSync.js',
+      'components/Home/HfTokenCard.jsx',
     ]) {
       expect(FILES).toContain(must);
     }

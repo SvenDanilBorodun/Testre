@@ -61,7 +61,6 @@ beforeEach(() => {
       robot_tier_up: false,
       arms_identified: { leader: null, follower: null, both: false },
       cameras: [],
-      hf_token_saved: false,
       images: { age_days: null, is_stale: true },
     },
   };
@@ -122,6 +121,20 @@ describe('SystemPage', () => {
     // arms.both is false in the base snapshot → start disabled.
     expect(screen.getByRole('button', { name: 'Umgebung starten' })).toBeDisabled();
   });
+
+  it('has no Hugging-Face-Token field any more: the token is the student\'s own, set on the Startseite', () => {
+    // „Schritt D" stored ONE token per robot in /etc/edubotics/.env, so every
+    // student at a shared Pi used whatever the last person typed. The token now
+    // follows the cloud account (Startseite card), and the Pi agent has no
+    // /hf-token route. A field here would be a second, unauthenticated way in.
+    render(<SystemPage />);
+    expect(screen.queryByText(/Hugging Face Token/)).toBeNull();
+    expect(screen.queryByText(/Schritt D/)).toBeNull();
+    expect(screen.queryByPlaceholderText('hf_...')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Token speichern' })).toBeNull();
+    const fetched = global.fetch.mock.calls.map(([url]) => String(url));
+    expect(fetched.filter((u) => u.includes('hf-token'))).toEqual([]);
+  });
 });
 
 // ── System-files drift banner ───────────────────────────────────────────────
@@ -151,7 +164,6 @@ function agentStatusFixture(overrides = {}) {
     arms_identified: { leader: null, follower: null, both: false },
     cameras: [],
     follower_only: false,
-    hf_token_saved: false,
     images: { age_days: null, is_stale: true },
     ...overrides,
   };

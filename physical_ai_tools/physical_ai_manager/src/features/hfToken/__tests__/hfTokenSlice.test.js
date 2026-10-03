@@ -40,7 +40,7 @@ import {
   selectHfSync,
   selectHfSyncFailed,
 } from '../hfTokenSelectors';
-import { BREAKER_MAX_WRITES, BREAKER_WINDOW_MS } from '../syncDecision';
+import { BREAKER_MAX_WRITES, BREAKER_WINDOW_MS, WRITE_SETTLE_MS } from '../syncDecision';
 import { signedOut } from '../../session/sessionActions';
 
 const A = 'aaaaaaaaaaaaaaaa';
@@ -250,8 +250,18 @@ describe('hfToken slice — sync bookkeeping', () => {
   it('a successful push remembers my fingerprint and forgets failures', () => {
     const s = run(initial(), syncFailed({ message: 'x' }), syncPhaseSet('pushing'), syncPushed({ fp: A }));
     expect(s.sync).toMatchObject({
-      phase: 'idle', failures: 0, nextAttemptAt: null, lastOwnFp: A, clearedFp: null, lastMessage: null,
+      phase: 'idle', failures: 0, lastOwnFp: A, clearedFp: null, lastMessage: null,
     });
+  });
+
+  it('after a successful write the reconcile pauses until the robot\'s state has caught up', () => {
+    const pushed = reducer(initial(), syncPushed({ fp: A }, 50_000));
+    expect(pushed.sync.nextAttemptAt).toBe(50_000 + WRITE_SETTLE_MS);
+    const cleared = reducer(initial(), syncCleared({ fp: B }, 50_000));
+    expect(cleared.sync.nextAttemptAt).toBe(50_000 + WRITE_SETTLE_MS);
+    // ... and the pause ends the moment a state message shows my token.
+    const seen = run(initial(), stored(A), syncPushed({ fp: A }, 50_000), robotMsg({ present: true, fp: A }));
+    expect(seen.sync.nextAttemptAt).toBeNull();
   });
 
   it('a successful clear remembers what it cleared and forgets my own fingerprint', () => {

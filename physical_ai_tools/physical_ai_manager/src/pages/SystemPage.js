@@ -24,7 +24,6 @@ import { Card, Btn, Pill, SectionHeader } from '../components/EbUI';
 import { usePiMode } from '../utils/piMode';
 import { useAgentUpdate } from '../hooks/useAgentUpdate';
 import { toastIcon } from '../components/icons/toast';
-import Icon from '../components/icons/Icon';
 
 // ── same-origin agent fetch helper ───────────────────────────────────────────
 
@@ -103,10 +102,6 @@ export default function SystemPage() {
   const [roles, setRoles] = useState({}); // path -> 'gripper'|'scene'|''
   const [savingRoles, setSavingRoles] = useState(false);
   const [previewDevice, setPreviewDevice] = useState(null);
-
-  const [hfToken, setHfToken] = useState('');
-  const [hfJustSaved, setHfJustSaved] = useState(false);
-  const [savingToken, setSavingToken] = useState(false);
 
   const [startingEnv, setStartingEnv] = useState(false);
   const [stoppingEnv, setStoppingEnv] = useState(false);
@@ -334,29 +329,6 @@ export default function SystemPage() {
     }
   }, [roles, allowedCameraRoles, stopPreview, refreshAgentStatus]);
 
-  // ── Schritt D — HF-Token ───────────────────────────────────────────────────
-  const handleSaveToken = useCallback(async () => {
-    setSavingToken(true);
-    try {
-      const { ok, data } = await sysFetch('/hf-token', { method: 'POST', body: { token: hfToken } });
-      if (ok && data.saved) {
-        setHfJustSaved(true);
-        setHfToken('');
-        toast.success('Token gespeichert.');
-      } else if (ok) {
-        setHfJustSaved(false);
-        toast.success(data.message || 'Token entfernt.');
-      } else {
-        toast.error(data.message || 'Token konnte nicht gespeichert werden.');
-      }
-    } catch {
-      toast.error('Der Agent ist nicht erreichbar.');
-    } finally {
-      setSavingToken(false);
-      refreshAgentStatus();
-    }
-  }, [hfToken, refreshAgentStatus]);
-
   // ── Umgebung starten / stoppen ─────────────────────────────────────────────
   const handleStartEnv = useCallback(async () => {
     setStartingEnv(true);
@@ -457,7 +429,6 @@ export default function SystemPage() {
   const armsBoth = !!arms.both;
   const robotTierUp = !!agentStatus?.robot_tier_up;
   const managerUp = !!agentStatus?.manager_up;
-  const tokenSaved = hfJustSaved || !!agentStatus?.hf_token_saved;
   // PROFILE-AWARE readiness, computed by the agent against the selected
   // ArmProfile (`agent.py::_hardware_ready`). `arms_identified.both` answers a
   // DIFFERENT question — are two arms present — and a follower-only rig is
@@ -853,34 +824,6 @@ export default function SystemPage() {
             </Step>
           </>
         )}
-
-        {/* Schritt D — HF-Token */}
-        <Step
-          n="D"
-          title="Hugging Face Token"
-          right={tokenSaved ? (
-            <Pill tone="success" dot>
-              <span className="inline-flex items-center gap-1"><Icon name="check" /> Token gespeichert</span>
-            </Pill>
-          ) : null}
-        >
-          <p className="text-sm text-[var(--ink-3)] mb-2">
-            Nötig zum Hochladen von Datensätzen und für das Training.
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              type="password"
-              value={hfToken}
-              onChange={(e) => setHfToken(e.target.value)}
-              placeholder="hf_..."
-              aria-label="Hugging Face Token"
-              className="h-10 flex-1 min-w-[200px] rounded-[var(--radius-sm)] border border-[var(--line)] bg-white px-3 font-mono text-sm"
-            />
-            <Btn variant="primary" onClick={handleSaveToken} disabled={savingToken || !hfToken.trim()}>
-              {savingToken ? 'Wird gespeichert …' : 'Token speichern'}
-            </Btn>
-          </div>
-        </Step>
 
         {/* Umgebung starten / stoppen */}
         <Card title="Roboter-Umgebung" className="mb-4">

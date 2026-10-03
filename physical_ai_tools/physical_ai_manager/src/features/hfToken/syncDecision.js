@@ -109,6 +109,14 @@ export function hfTokenStartBlock({
 export const BACKOFF_MS = Object.freeze([2000, 5000, 15000, 30000]);
 /** While the robot is busy (recording / a Hugging-Face transfer) look again after this long. */
 export const WAIT_RECHECK_MS = 5000;
+/**
+ * After a SUCCESSFUL push or clear the robot's own state message still shows
+ * the old slot for a moment (it is published right after the write, then
+ * throttled to 2 per second on its way through rosbridge). Without a pause the
+ * reconcile would read that stale state and write a second time. The pause ends
+ * early the instant a state message shows the student's token.
+ */
+export const WRITE_SETTLE_MS = 2500;
 /** failures >= this => the card and the start block say „fehlgeschlagen" (no red flash on one busy race). */
 export const FAILED_VISIBLE_AFTER = 2;
 export const backoffDelayMs = (failures) => BACKOFF_MS[Math.min(Math.max(failures, 1), BACKOFF_MS.length) - 1];

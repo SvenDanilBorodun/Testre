@@ -29,6 +29,11 @@ import authReducer, { setProfile } from '../../features/auth/authSlice';
 import rosReducer from '../../features/ros/rosSlice';
 import uiReducer from '../../features/ui/uiSlice';
 import workshopReducer from '../../features/workshop/workshopSlice';
+import hfTokenReducer, {
+  accountLoaded,
+  robotStateReceived,
+} from '../../features/hfToken/hfTokenSlice';
+import { HF_TOKEN_COPY } from '../../features/hfToken/hfTokenCopy';
 import HomePage from '../HomePage';
 
 // three.js has no WebGL in jsdom, and the twin has its own suite. The hero
@@ -88,13 +93,17 @@ vi.mock('../../services/cloudTrainingApi', () => ({
   getQuota: () => (mockQuota ? Promise.resolve(mockQuota) : reject()),
 }));
 
-function makeStore() {
+function makeStore({ withHfToken = false } = {}) {
   return configureStore({
     reducer: {
       tasks: tasksReducer, auth: authReducer, ros: rosReducer, ui: uiReducer,
       // ActivationCard refuses to move the arm while a Roboter-Studio program
       // runs, so the page now reads this slice too.
       workshop: workshopReducer,
+      // The token card reads its slice through tolerant selectors, so the
+      // default store (like every other page test's) has none: the card must
+      // render, as „unknown", without it.
+      ...(withHfToken ? { hfToken: hfTokenReducer } : {}),
     },
   });
 }
@@ -110,11 +119,14 @@ function fullCaps(overrides = {}) {
   };
 }
 
-function renderHome({ caps = fullCaps(), connected = true, status = {}, profile = null } = {}) {
-  const store = makeStore();
+function renderHome({
+  caps = fullCaps(), connected = true, status = {}, profile = null, withHfToken = false, hfActions = [],
+} = {}) {
+  const store = makeStore({ withHfToken });
   store.dispatch(setHeartbeatStatus(connected ? 'connected' : 'disconnected'));
   store.dispatch(setTaskStatus({ robotType: 'omx_f', capabilities: caps, ...status }));
   if (profile) store.dispatch(setProfile(profile));
+  hfActions.forEach((a) => store.dispatch(a));
   render(<Provider store={store}><HomePage /></Provider>);
   return store;
 }
@@ -179,6 +191,80 @@ describe('HomePage — the activation button, on every profile', () => {
   it('is not offered when the bridge is down', () => {
     renderHome({ connected: false });
     expect(screen.getByRole('button', { name: 'Roboter aktivieren' })).toBeDisabled();
+  });
+});
+
+// ── the second control: the student's own Hugging-Face token ───────────────
+
+describe('HomePage — the Hugging-Face-Token card', () => {
+  // Like „Roboter aktivieren" it navigates nowhere and is gated on no
+  // capability: every profile needs a namespace to upload to. The „Aufnahme
+  // starten" fence above stays, and this card adds no recording entry point.
+  const cases = [
+    ['omx_full', fullCaps()],
+    ['omx_follower (recordable false)', fullCaps({ recordable: false, has_leader: false })],
+    ['unknown capabilities (null)', null],
+    ['a PARTIAL manifest, which is never adopted', { recordable: false }],
+  ];
+
+  it.each(cases)('is on the page on %s, next to the activation button', (_label, caps) => {
+    renderHome({ caps });
+    expect(screen.getByText(HF_TOKEN_COPY['card.title'])).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Roboter aktivieren' })).toBeInTheDocument();
+  });
+
+  it('renders as „unknown" in a store with no hfToken slice, and offers no recording entry point', () => {
+    renderHome({});
+    expect(screen.getByText(HF_TOKEN_COPY['card.unknown'])).toBeInTheDocument();
+    expect(screen.queryByText(/Aufnahme starten/)).toBeNull();
+  });
+
+  it('sits directly after the activation card, before the Health-Check', () => {
+    renderHome({});
+    const text = document.body.textContent;
+    const activation = text.indexOf('Roboter aktivieren');
+    const token = text.indexOf(HF_TOKEN_COPY['card.title']);
+    const health = text.indexOf('Roboter-Zustand');
+    expect(activation).toBeGreaterThanOrEqual(0);
+    expect(token).toBeGreaterThan(activation);
+    expect(health).toBeGreaterThan(token);
+  });
+
+  it('asks for a token when the account has none: the steps, a password field and „Token speichern"', () => {
+    renderHome({ withHfToken: true, hfActions: [accountLoaded({ status: 'none' })] });
+    expect(screen.getByText(HF_TOKEN_COPY['card.none.body'])).toBeInTheDocument();
+    expect(screen.getByLabelText(HF_TOKEN_COPY['card.input.aria'])).toHaveAttribute('type', 'password');
+    expect(screen.getByRole('button', { name: HF_TOKEN_COPY['card.save'] })).toBeDisabled();
+  });
+
+  it('shows who the token connects, and that the robot holds it, once both agree', () => {
+    renderHome({
+      withHfToken: true,
+      hfActions: [
+        accountLoaded({
+          status: 'stored', hfUsername: 'anna', hint: 'hf_…aaaa', fp: 'c1770a7966b0771e', role: 'write',
+          validatedAt: '2026-10-03T10:05:00Z',
+        }),
+        robotStateReceived(
+          { v: 1, seq: 1, accepts: true, present: true, fp: 'c1770a7966b0771e', busy: false },
+          1,
+        ),
+      ],
+    });
+    expect(screen.getByText('anna')).toBeInTheDocument();
+    expect(screen.getByText(HF_TOKEN_COPY['card.pill.active'])).toBeInTheDocument();
+  });
+
+  it('is not on the page in cloud-only mode, where there is no robot to give a token to', () => {
+    const before = window.location.href;
+    window.history.pushState({}, '', '/?cloud=1');
+    try {
+      renderHome({ withHfToken: true, hfActions: [accountLoaded({ status: 'none' })] });
+      expect(screen.queryByText(HF_TOKEN_COPY['card.title'])).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Roboter aktivieren' })).toBeNull();
+    } finally {
+      window.history.pushState({}, '', before);
+    }
   });
 });
 

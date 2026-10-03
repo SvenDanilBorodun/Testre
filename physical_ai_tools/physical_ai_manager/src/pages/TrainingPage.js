@@ -211,9 +211,10 @@ export default function TrainingPage() {
 
         {/* Cloud-login vs HF-token clarification. The single most common
             student confusion: "ich habe den HF-Token gesetzt, warum geht
-            Training nicht?" — the HF token (GUI Schritt D) drives recording
-            uploads; cloud Training needs THIS separate cloud login. Also
-            surfaces the linked Benutzer-ID so a mis-link is visible. */}
+            Training nicht?" — the HF token (entered once on the Startseite,
+            stored with the account) drives recording uploads; cloud Training
+            needs THIS separate cloud login. Also surfaces the linked
+            Benutzer-ID so a mis-link is visible. */}
         <div
           className={clsx(
             'rounded-[var(--radius)] border px-4 py-3 text-sm leading-snug',
@@ -225,8 +226,8 @@ export default function TrainingPage() {
           <p>
             Cloud-Training läuft über deine <strong>Cloud-Anmeldung</strong>{' '}
             (angemeldet als {session?.user?.email || 'dein Konto'}) — das
-            ist getrennt vom HuggingFace-Token, den du im Setup („Schritt D")
-            für Aufnahme-Uploads eingegeben hast.
+            ist getrennt vom Hugging-Face-Token, das du auf der Startseite
+            hinterlegt hast.
           </p>
           {hfUsername ? (
             <p className="mt-1.5">
@@ -236,9 +237,9 @@ export default function TrainingPage() {
             </p>
           ) : (
             <p className="mt-1.5">
-              Es ist noch keine HuggingFace-ID mit deinem Konto verknüpft. Wähle
-              im Aufnahme-Tab deine Benutzer-ID — sie wird dann automatisch
-              verknüpft, damit deine Datensätze hier erscheinen.
+              Es ist noch kein Hugging-Face-Konto mit deinem Konto verknüpft.
+              Hinterlege dein Token auf der Startseite, dann wird es
+              automatisch verknüpft und deine Datensätze erscheinen hier.
             </p>
           )}
         </div>

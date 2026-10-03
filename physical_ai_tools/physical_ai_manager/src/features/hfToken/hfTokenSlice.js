@@ -28,7 +28,12 @@
 import { createSlice } from '@reduxjs/toolkit';
 
 import { signedOut } from '../session/sessionActions';
-import { BREAKER_MAX_WRITES, BREAKER_WINDOW_MS, backoffDelayMs } from './syncDecision';
+import {
+  BREAKER_MAX_WRITES,
+  BREAKER_WINDOW_MS,
+  WRITE_SETTLE_MS,
+  backoffDelayMs,
+} from './syncDecision';
 
 // Module-level frozen constants: selectors on a store WITHOUT this slice (every
 // page test builds its own) return these, so a selector never allocates and a
@@ -240,7 +245,9 @@ const hfTokenSlice = createSlice({
         const { fp, automatic, at } = action.payload;
         const s = state.sync;
         s.failures = 0;
-        s.nextAttemptAt = null;
+        // Hold off until the robot's own state message has caught up with the
+        // write (WRITE_SETTLE_MS); an in-sync message ends the pause early.
+        s.nextAttemptAt = at + WRITE_SETTLE_MS;
         s.lastMessage = null;
         s.lastOwnFp = typeof fp === 'string' && fp ? fp : null;
         s.clearedFp = null;
@@ -257,7 +264,7 @@ const hfTokenSlice = createSlice({
         const { fp, automatic, at } = action.payload;
         const s = state.sync;
         s.failures = 0;
-        s.nextAttemptAt = null;
+        s.nextAttemptAt = at + WRITE_SETTLE_MS;
         s.lastMessage = null;
         s.clearedFp = typeof fp === 'string' && fp ? fp : null;
         s.lastOwnFp = null;

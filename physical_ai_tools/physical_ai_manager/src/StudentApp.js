@@ -33,6 +33,8 @@ import { Avatar, LogoMark } from './components/EbUI';
 import packageJson from '../package.json';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import { useHfUserList } from './hooks/useHfUserList';
+import useHfTokenSync from './hooks/useHfTokenSync';
+import { selectHfListReloadAllowed } from './features/hfToken/hfTokenSelectors';
 import { useHeartbeatWatchdog } from './hooks/useHeartbeatWatchdog';
 import rosConnectionManager from './utils/rosConnectionManager';
 import { shallowEqual, useDispatch, useSelector } from 'react-redux';
@@ -162,11 +164,14 @@ function StudentApp() {
     rosConnectionManager.setOnConnected(rosSubscriptionControls.initializeSubscriptions);
   }
 
-  // Fetch the HuggingFace Benutzer-ID list ONCE when the local ROS connection
-  // comes up, and cache it in Redux so it survives tab switches. The token now
-  // comes from $HF_TOKEN in the container env (set once in the GUI), so this
-  // succeeds with no in-app token entry. Re-fires only if the list is still
-  // empty on a later (re)connect.
+  // The HuggingFace Benutzer-ID list: the account + organisations the token in
+  // the ROBOT's slot can push to, cached in Redux so it survives tab switches.
+  // That slot holds the SIGNED-IN student's own token (stored with their account,
+  // entered once on the Startseite and put there by useHfTokenSync below), so
+  // the list is only asked for while the slot is provably theirs —
+  // `useHfUserList().reload` enforces that at its one choke point, and the
+  // effect below mirrors it so it re-runs the moment the gate opens. Re-fires
+  // only if the list is still empty.
   const { reload: reloadHfUsers } = useHfUserList();
 
   // App-global liveness watchdog: drive the heartbeat 'connected'->'timeout'->
@@ -183,12 +188,15 @@ function StudentApp() {
 
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
   const hfUserListLen = useSelector((state) => state.ui.hfUserList.length);
+  // False while the robot's slot may hold ANOTHER student's token (or its state
+  // is not known yet): see features/hfToken/hfTokenSelectors.
+  const hfListReloadAllowed = useSelector(selectHfListReloadAllowed);
   useEffect(() => {
     if (cloudOnly) return;
-    if (heartbeatStatus === 'connected' && hfUserListLen === 0) {
+    if (heartbeatStatus === 'connected' && hfUserListLen === 0 && hfListReloadAllowed) {
       reloadHfUsers();
     }
-  }, [cloudOnly, heartbeatStatus, hfUserListLen, reloadHfUsers]);
+  }, [cloudOnly, heartbeatStatus, hfUserListLen, hfListReloadAllowed, reloadHfUsers]);
 
   useEffect(() => {
     return () => {
@@ -246,9 +254,9 @@ function StudentApp() {
   }, [dispatch]);
 
   // Robust /me load (retry/backoff + 401/403 sign-out + 404/5xx error state)
-  // and the HF-identity auto-link live in useMeProfile. The only student-app-
-  // specific piece is the wrong-role bounce below; everything else (incl. the
-  // refetch the Training tab's "Erneut versuchen" button calls) is shared.
+  // lives in useMeProfile. The only student-app-specific piece is the
+  // wrong-role bounce below; everything else (incl. the refetch the Training
+  // tab's "Erneut versuchen" button calls) is shared.
   const handleProfile = useCallback(
     (me) => {
       if (me.role !== 'student') {
@@ -264,7 +272,15 @@ function StudentApp() {
     },
     [dispatch]
   );
-  useMeProfile({ onProfile: handleProfile, enableHfLink: true });
+  useMeProfile({ onProfile: handleProfile });
+
+  // Keeps the robot's token slot equal to the signed-in student's account:
+  // reads GET /me/hf-token, subscribes to the robot's slot state and pushes or
+  // clears the token (never stored here). Inert until the profile has loaded;
+  // off in cloud-only mode and while a classroom Jetson is claimed. When the
+  // robot first holds exactly this student's token the Benutzer-ID list can be
+  // loaded, so it hands `reloadHfUsers` over for that moment.
+  useHfTokenSync({ onRobotTokenReady: reloadHfUsers });
 
   // Student-initiated sign-out. Until now the ONLY "Abmelden" controls in the
   // student app lived on the Training and Inferenz pages, so a student sitting

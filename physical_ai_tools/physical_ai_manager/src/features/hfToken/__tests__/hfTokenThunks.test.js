@@ -505,18 +505,36 @@ describe('pushHfTokenToRobot', () => {
     const store = readyToPush();
     api.revealHfToken.mockResolvedValue({ token: TOKEN, fp: FP });
     setRobotToken.mockResolvedValue({ success: true, message: '' });
-    for (let i = 0; i < 3; i += 1) {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      for (let i = 0; i < 3; i += 1) {
+        await expect(store.dispatch(pushHfTokenToRobot())).resolves.toEqual({ ok: true });
+        // the pause after a write (WRITE_SETTLE_MS) has to pass between two of them
+        vi.setSystemTime(Date.now() + 3000);
+      }
+      expect(hf(store).sync.breakerOpen).toBe(true);
+      await expect(store.dispatch(pushHfTokenToRobot())).resolves.toEqual({ ok: false, skipped: 'breaker' });
+      expect(setRobotToken).toHaveBeenCalledTimes(3);
+      // the student's own push is never held back by it
+      await expect(store.dispatch(pushHfTokenToRobot({ automatic: false }))).resolves.toEqual({ ok: true });
+      // and „Erneut übertragen" closes it
+      store.dispatch(forceRetransfer());
+      expect(hf(store).sync.breakerOpen).toBe(false);
       await expect(store.dispatch(pushHfTokenToRobot())).resolves.toEqual({ ok: true });
+    } finally {
+      vi.useRealTimers();
     }
-    expect(hf(store).sync.breakerOpen).toBe(true);
-    await expect(store.dispatch(pushHfTokenToRobot())).resolves.toEqual({ ok: false, skipped: 'breaker' });
-    expect(setRobotToken).toHaveBeenCalledTimes(3);
-    // the student's own push is never held back by it
-    await expect(store.dispatch(pushHfTokenToRobot({ automatic: false }))).resolves.toEqual({ ok: true });
-    // and „Erneut übertragen" closes it
-    store.dispatch(forceRetransfer());
-    expect(hf(store).sync.breakerOpen).toBe(false);
+  });
+
+  it('pauses after a successful write until the robot\'s state has caught up', async () => {
+    const store = readyToPush();
+    api.revealHfToken.mockResolvedValue({ token: TOKEN, fp: FP });
+    setRobotToken.mockResolvedValue({ success: true, message: '' });
     await expect(store.dispatch(pushHfTokenToRobot())).resolves.toEqual({ ok: true });
+    // The robot still reports an empty slot (its state message is on its way):
+    // a second automatic push now would be a pointless duplicate write.
+    await expect(store.dispatch(pushHfTokenToRobot())).resolves.toEqual({ ok: false, skipped: 'backoff' });
+    expect(setRobotToken).toHaveBeenCalledTimes(1);
   });
 
   it('does nothing without a session or without the slice', async () => {
@@ -586,8 +604,9 @@ describe('clearHfTokenOnRobot', () => {
   it('counts an automatic clear towards the breaker', async () => {
     const store = holdingForeignToken();
     setRobotToken.mockResolvedValue({ success: true, message: '' });
-    store.dispatch(syncPushed({ fp: FP }));
-    store.dispatch(syncPushed({ fp: FP }));
+    // two earlier automatic writes, long enough ago for the post-write pause to be over
+    store.dispatch(syncPushed({ fp: FP }, Date.now() - 20_000));
+    store.dispatch(syncPushed({ fp: FP }, Date.now() - 10_000));
     await store.dispatch(clearHfTokenOnRobot());
     expect(hf(store).sync.breakerOpen).toBe(true);
   });

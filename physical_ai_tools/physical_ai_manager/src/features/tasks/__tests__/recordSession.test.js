@@ -928,8 +928,8 @@ describe('round 5: a source that stops, a short gap (§2.2)', () => {
 const GAP_FINISH_DE = `${SOURCE_GAP_PREFIX_DE}Die Szenen-Kamera hat in Episode 1 kurz keine Daten geliefert. `
   + 'Die Episode wurde verworfen, die Aufnahme endet mit den schon gespeicherten Episoden.';
 const UPLOAD_OFF_DE = `${UPLOAD_OFF_PREFIX_DE}Auf dem Roboter ist kein Hugging-Face-Token gespeichert. Der `
-  + 'Datensatz bleibt auf dem Roboter; speichere einen Token in der EduBotics-App unter „Schritt D: '
-  + 'HuggingFace-Token“ und lade ihn später im Tab Daten hoch.';
+  + 'Datensatz bleibt auf dem Roboter; hinterlege dein Token auf der Startseite und lade ihn später im '
+  + 'Tab Daten hoch.';
 
 describe('round 6: a gap under FINISH ends the take, it is not re-recorded', () => {
   it('„Behalten und beenden" during a take with a source gap: „Signalaussetzer, verworfen"', () => {

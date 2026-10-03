@@ -231,6 +231,21 @@ export const RECORD_COPY = Object.freeze({
     timeout: 'Der Roboter hat nicht rechtzeitig geantwortet. Bitte versuch es noch einmal.',
     noConnection: 'Keine Verbindung zum Roboter.',
     homeLabel: 'Startseite',
+    // Why Start is off for the student's own Hugging-Face token (hfTokenProblem).
+    // Every sentence but `transfer` NAMES the Startseite, which ProblemBanner
+    // turns into the link (it links the LAST occurrence); `transfer` resolves
+    // by itself in a moment and names no page.
+    hfToken: Object.freeze({
+      none: 'Hinterlege zuerst dein Hugging-Face-Token auf der Startseite.',
+      unusable: 'Dein gespeichertes Hugging-Face-Token funktioniert nicht mehr. Speichere es neu auf der '
+        + 'Startseite.',
+      transfer: 'Dein Hugging-Face-Token wird gerade auf den Roboter übertragen. Einen Moment, dann geht es '
+        + 'weiter.',
+      failed: 'Das Hugging-Face-Token konnte nicht auf den Roboter übertragen werden. Versuche es auf der '
+        + 'Startseite erneut.',
+      takenOver: 'Ein anderes Konto hat sein Token auf diesen Roboter gelegt. Übertrage deins erneut auf der '
+        + 'Startseite.',
+    }),
   }),
 
   note: Object.freeze({

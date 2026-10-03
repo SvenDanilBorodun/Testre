@@ -17,10 +17,10 @@ const initialState = {
   // logic falls back to the per-user path. workgroupName is shown in chips.
   workgroupId: null,
   workgroupName: null,
-  // The student's linked HuggingFace "Benutzer-ID" (from /me.hf_username).
-  // Null until the cloud profile has been linked to the HF identity. The
-  // Training tab links it automatically once both the cloud login and the
-  // ROS whoami Benutzer-ID are known (StudentApp auto-link effect).
+  // The student's HuggingFace account name (from /me.hf_username). It is PROVEN:
+  // the cloud sets it from the stored token's own whoami when the student saves
+  // the token on the Startseite (PUT /me/hf-token). Null until a token has been
+  // stored, and again after sign-out.
   hfUsername: null,
   profileLoaded: false,
   // Set when GET /me fails in a NON-auth way (404 = JWT valid but no
@@ -102,9 +102,10 @@ const authSlice = createSlice({
         state.groupCreditsTotal = p.group_credits_total ?? 0;
       }
     },
-    // Update just the linked HF Benutzer-ID after a successful PATCH /me
-    // (the StudentApp auto-link effect). Kept separate from setProfile so
-    // the link can be reflected without re-applying the whole profile.
+    // Update just the proven HF account name after a successful PUT
+    // /me/hf-token (features/hfToken/hfTokenThunks::saveHfToken). Kept separate
+    // from setProfile so the change can be reflected without re-applying the
+    // whole profile.
     setHfUsername: (state, action) => {
       state.hfUsername = action.payload ?? null;
     },

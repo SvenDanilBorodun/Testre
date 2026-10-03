@@ -39,6 +39,7 @@ import {
 
 const signOutMock = vi.fn(() => Promise.resolve({ error: null }));
 const resetJetsonMock = vi.fn();
+const clearRobotHfTokenMock = vi.fn(() => Promise.resolve(true));
 
 vi.mock('../../lib/supabaseClient', () => ({
   __esModule: true,
@@ -49,6 +50,16 @@ vi.mock('../../lib/supabaseClient', () => ({
 vi.mock('../../features/jetson/sessionReset', () => ({
   __esModule: true,
   resetJetsonOnLogout: resetJetsonMock,
+}));
+
+// The robot's token slot is a rosbridge service call, not a reducer — mocked so
+// the order assertion can observe it and a robot that never answers can be
+// simulated. The real channel's contract (never rejects, bounded) is tested in
+// features/hfToken/__tests__/robotChannel.test.js.
+vi.mock('../../features/hfToken/robotChannel', () => ({
+  __esModule: true,
+  CLEAR_BOUND_MS: 2000,
+  clearRobotHfToken: clearRobotHfTokenMock,
 }));
 
 const SENTINEL = 'SENTINEL-A';
@@ -101,6 +112,8 @@ beforeEach(() => {
   signOutMock.mockImplementation(() => Promise.resolve({ error: null }));
   resetJetsonMock.mockClear();
   resetJetsonMock.mockImplementation(() => {});
+  clearRobotHfTokenMock.mockReset();
+  clearRobotHfTokenMock.mockImplementation(() => Promise.resolve(true));
   localStorage.clear();
   reloadMock = vi.fn();
   originalLocation = Object.getOwnPropertyDescriptor(window, 'location');
@@ -587,5 +600,143 @@ describe('signOutStudent — ordering and failure modes', () => {
 
     expect(store.getState().tasks.taskInfo.userId).toBeUndefined();
     expect(localStorage.getItem('edubotics_userId')).toBeNull();
+  });
+});
+
+describe('signOutStudent — the robot\'s token slot', () => {
+  const freshAuthedStore = async (claimJetson = null) => {
+    const ctx = await freshStore();
+    ctx.store.dispatch(ctx.auth.setSession({ access_token: 'jwt-abc' }));
+    if (claimJetson) {
+      const { setJetsonInfo, setJetsonStatus } = await import('../../store/jetsonSlice');
+      ctx.store.dispatch(setJetsonInfo({ jetson_id: 'jetson-1' }));
+      ctx.store.dispatch(setJetsonStatus(claimJetson));
+    }
+    return ctx;
+  };
+
+  it('starts the clear after the Jetson reset and before the revoke resolves', async () => {
+    const order = [];
+    resetJetsonMock.mockImplementation(() => order.push('jetson'));
+    clearRobotHfTokenMock.mockImplementation(() => {
+      order.push('hfClear');
+      return Promise.resolve(true);
+    });
+    signOutMock.mockImplementation(() => {
+      order.push('signOut');
+      return Promise.resolve({ error: null });
+    });
+
+    const { store, signOutStudent } = await freshAuthedStore();
+    await store.dispatch(signOutStudent({ reload: false }));
+
+    expect(order).toEqual(['jetson', 'hfClear', 'signOut']);
+    expect(clearRobotHfTokenMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('has already started the clear while the revoke is still in flight', async () => {
+    const { store, signOutStudent } = await freshAuthedStore();
+    let startedDuringRevoke = null;
+    let release;
+    signOutMock.mockImplementation(() => new Promise((resolve) => {
+      startedDuringRevoke = clearRobotHfTokenMock.mock.calls.length;
+      release = () => resolve({ error: null });
+    }));
+    const pending = store.dispatch(signOutStudent({ reload: false }));
+    await Promise.resolve();
+    release();
+    await pending;
+    expect(startedDuringRevoke).toBe(1);
+  });
+
+  it('waits for the robot\'s answer before the final scrub and the reload', async () => {
+    const { store, signOutStudent } = await freshAuthedStore();
+    let answer;
+    clearRobotHfTokenMock.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    const pending = store.dispatch(signOutStudent());
+    // The revoke is a resolved promise; give the thunk time to reach the wait.
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    expect(reloadMock).not.toHaveBeenCalled();
+    answer(true);
+    await pending;
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a clear that never answers delays the sign-out by the 2 s bound and not a millisecond more', async () => {
+    const { store, signOutStudent, tasks } = await freshAuthedStore();
+    clearRobotHfTokenMock.mockImplementation(() => new Promise(() => {}));
+    // Something the await window re-persists: the second scrub must still run.
+    signOutMock.mockImplementation(() => {
+      store.dispatch(tasks.setTaskInfo({ userId: 'schule-A' }));
+      return Promise.resolve({ error: null });
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      let settled = false;
+      const pending = store.dispatch(signOutStudent()).then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(settled).toBe(false);
+      expect(reloadMock).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2);
+      await pending;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    // neither the second scrub nor the reload was skipped
+    expect(localStorage.getItem('edubotics_userId')).toBeNull();
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not hold the sign-out when the clear answers at once', async () => {
+    const { store, signOutStudent } = await freshAuthedStore();
+    const started = Date.now();
+    await store.dispatch(signOutStudent({ reload: false }));
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('swallows a clear that rejects or throws', async () => {
+    const { store, signOutStudent } = await freshAuthedStore();
+    clearRobotHfTokenMock.mockRejectedValue(new Error('robot gone'));
+    await expect(store.dispatch(signOutStudent({ reload: false }))).resolves.toBeUndefined();
+    clearRobotHfTokenMock.mockImplementation(() => { throw new Error('sync boom'); });
+    await expect(store.dispatch(signOutStudent({ reload: false }))).resolves.toBeUndefined();
+    expect(store.getState().auth.session).toBeNull();
+  });
+
+  it('is skipped while a classroom Jetson is claimed: its proxy keeps its own token', async () => {
+    const { store, signOutStudent } = await freshAuthedStore('connected');
+    await store.dispatch(signOutStudent({ reload: false }));
+    expect(clearRobotHfTokenMock).not.toHaveBeenCalled();
+  });
+
+  it('is NOT skipped for a Jetson that was merely discovered (available or busy)', async () => {
+    // `jetsonId` is set for every paired classroom Jetson, claimed or not. Keying
+    // the skip on it would leave the previous student\'s token on the local robot
+    // for everyone in a classroom that owns a Jetson.
+    for (const status of ['available', 'busy', 'unknown']) {
+      clearRobotHfTokenMock.mockClear();
+      const { store, signOutStudent } = await freshAuthedStore(status);
+      await store.dispatch(signOutStudent({ reload: false }));
+      expect(clearRobotHfTokenMock).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('empties the Benutzer-ID list and resets the hfToken slice with everything else', async () => {
+    const { store, signOutStudent } = await freshAuthedStore();
+    const { setHfUserList } = await import('../../features/ui/uiSlice');
+    const hf = await import('../../features/hfToken/hfTokenSlice');
+    store.dispatch(setHfUserList(['anna']));
+    store.dispatch(hf.accountLoaded({ status: 'stored', fp: 'aaaaaaaaaaaaaaaa', hfUsername: 'anna' }));
+    store.dispatch(hf.robotStateReceived({ v: 1, seq: 1, accepts: true, present: true, fp: 'aaaaaaaaaaaaaaaa', busy: false }, 1));
+    expect(store.getState().ui.hfUserList).toEqual(['anna']);
+
+    await store.dispatch(signOutStudent({ reload: false }));
+
+    expect(store.getState().ui.hfUserList).toEqual([]);
+    expect(store.getState().hfToken.account.status).toBe('unknown');
+    expect(store.getState().hfToken.account.fp).toBeNull();
+    expect(store.getState().hfToken.sync.lastOwnFp).toBeNull();
+    expect(store.getState().hfToken.epoch).toBe(1);
   });
 });

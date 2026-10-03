@@ -50,6 +50,7 @@ import {
   setSelectedDataset,
   setSelectedUser,
 } from '../../features/training/trainingSlice';
+import { selectHfStartBlock } from '../../features/hfToken/hfTokenSelectors';
 import { useHfUserList } from '../../hooks/useHfUserList';
 import useRobotActivation from '../../hooks/useRobotActivation';
 import useRsBridgeStatus from '../../hooks/useRsBridgeStatus';
@@ -158,6 +159,11 @@ export default function useRecordController({ isActive = true } = {}) {
   const signal = useSignalStatus({ enabled: connected });
   const bridge = useRsBridgeStatus({ enabled: status.capabilities?.has_leader !== false });
   const activation = useRobotActivation({ enabled: connected }).status;
+  // Why Start is off for the student's OWN Hugging-Face token, or null. A
+  // primitive from tolerant selectors: null without the feature's slice (test
+  // stores), while the account or the robot has not answered, and under a
+  // claimed Jetson — unknown never blocks.
+  const hfTokenBlock = useSelector(selectHfStartBlock);
 
   const [reducedMotion, setReducedMotion] = useState(readReducedMotion);
   useEffect(() => {
@@ -246,8 +252,9 @@ export default function useRecordController({ isActive = true } = {}) {
     verdicts,
     bridge,
     activation,
+    hfToken: hfTokenBlock,
   }), [heartbeat, status, formRaw, collision, session, now.wall, clock.elapsed, clock.secondsLeft, proceed, busy,
-    disk, verdicts, bridge, activation]);
+    disk, verdicts, bridge, activation, hfTokenBlock]);
   const { view } = model;
   const currentEpisode = model.episode.current;
 

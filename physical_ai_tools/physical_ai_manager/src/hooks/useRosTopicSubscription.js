@@ -487,11 +487,15 @@ export function useRosTopicSubscription() {
         //
         // So the gate is an IDENTITY comparison, not a session check. The one
         // student-scoped identity in the store is `auth.hfUsername`, and it is
-        // the SAME id space as `task_info.user_id`: `useMeProfile`'s auto-link
-        // PATCHes `/me` with the selected Benutzer-ID, i.e. with the very value
-        // the recorder sends. Fail-safe by construction — `hfUsername` is null
-        // until `/me` resolves and is cleared by `signedOut`, and a null never
-        // equals a non-empty id, so an unknown identity adopts nothing.
+        // the SAME id space as `task_info.user_id` for the student's own
+        // account: the cloud sets it from the stored token's own `whoami`
+        // (PUT /me/hf-token, put on the robot by useHfTokenSync), and the
+        // recorder sends the Benutzer-ID that same token reports. Fail-safe by
+        // construction — `hfUsername` is null until `/me` resolves and is
+        // cleared by `signedOut`, and a null never equals a non-empty id, so an
+        // unknown identity adopts nothing. (A student who uploads under an
+        // ORGANISATION from the Benutzer-ID list is not named by it; the task
+        // then simply is not re-adopted after a reload.)
         //
         // Accepted cost: a student on the „Ohne Anmeldung fortfahren" offline
         // escape — since the student login gate (utils/authGate) the only way

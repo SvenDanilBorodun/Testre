@@ -13,6 +13,7 @@ import {
   deriveProblems,
   diskProblem,
   firstProblem,
+  hfTokenProblem,
   slowSourceProblem,
   stalledSourceProblem,
 } from '../problems';
@@ -65,6 +66,32 @@ describe('source sentences', () => {
   });
 });
 
+describe('hfTokenProblem', () => {
+  it('is a red problem for each reason, with the sentence from the copy table', () => {
+    expect(hfTokenProblem('none')).toEqual({ kind: 'bad', textDe: P.hfToken.none, linkToHome: true });
+    expect(hfTokenProblem('unusable')).toEqual({ kind: 'bad', textDe: P.hfToken.unusable, linkToHome: true });
+    expect(hfTokenProblem('failed')).toEqual({ kind: 'bad', textDe: P.hfToken.failed, linkToHome: true });
+    expect(hfTokenProblem('transfer')).toEqual({ kind: 'bad', textDe: P.hfToken.transfer, linkToHome: false });
+  });
+
+  it('maps the decision\'s taken_over to the copy\'s takenOver (both spellings)', () => {
+    expect(hfTokenProblem('taken_over').textDe).toBe(P.hfToken.takenOver);
+    expect(hfTokenProblem('takenOver').textDe).toBe(P.hfToken.takenOver);
+  });
+
+  it('links to the Startseite for every reason but the transfer', () => {
+    const linked = ['none', 'unusable', 'failed', 'taken_over'].map((r) => hfTokenProblem(r).linkToHome);
+    expect(linked).toEqual([true, true, true, true]);
+    expect(hfTokenProblem('transfer').linkToHome).toBe(false);
+  });
+
+  it('answers null for a reason it does not know', () => {
+    expect(hfTokenProblem('unbekannt')).toBeNull();
+    expect(hfTokenProblem(null)).toBeNull();
+    expect(hfTokenProblem(undefined)).toBeNull();
+  });
+});
+
 describe('deriveProblems — the order', () => {
   const everything = {
     view: 'RECORDING',
@@ -109,6 +136,17 @@ describe('deriveProblems — the order', () => {
       verdicts: [v('camera', 'scene', 'slow', 10)], fps: 30 };
     expect(deriveProblems(info).map((p) => p.kind)).toEqual(['warn', 'info']);
     expect(deriveProblems({ ...info, nowWallMs: NOW + 1 }).map((p) => p.kind)).toEqual(['warn']);
+  });
+
+  it('a token start block is shown where Start is offered, and only there', () => {
+    const startBlock = { kind: 'hftoken', reason: 'none', problem: hfTokenProblem('none') };
+    expect(deriveProblems({ view: 'READY', startBlock, nowWallMs: NOW })).toEqual([hfTokenProblem('none')]);
+    expect(deriveProblems({ view: 'RECORDING', running: true, startBlock, nowWallMs: NOW })).toEqual([]);
+    // behind a stalled source it comes later, never twice
+    const both = deriveProblems({
+      view: 'READY', startBlock, verdicts: [v('leader', 'leader', 'stalled')], nowWallMs: NOW,
+    });
+    expect(both.map((p) => p.textDe)).toEqual([P.leaderStalled, P.hfToken.none]);
   });
 
   it('link lost matters only while running', () => {

@@ -6,6 +6,72 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-03 (later) — closing the student window clears the robot's token
+
+**Why.** „Abmelden" clears the robot's token slot (`signOutStudent` → `clearRobotHfToken`), but a student who just closes the
+window never signs out, so the next person at the PC started on the previous student's token until their own login replaced it.
+The Windows GUI is the one party that SEES the window end (the `webview_window` watcher thread), so it now asks the robot to
+clear the slot. Windows GUI only: no change to the server package, compose, images, React, cloud API or the Pi agent.
+
+**Mechanism: three options, one chosen.**
+- (a) `docker exec … rm -f $HF_TOKEN_PATH` — rejected. The Dockerfile's `HF_TOKEN_PATH` gate proves `get_token()` re-reads the file on every call
+  and returns None right after deletion, so a running `upload_large_folder` retries its failing call until the F7 stall watchdog
+  (`UPLOAD_STALL_S`) kills the child and the student's upload ends „Failed". It also skips `_hf_token_lock`,
+  `DataManager.invalidate_hf_namespace_cache()` (the class-level cache would keep the previous namespaces) and the immediate state publish.
+- (b) the node's own service — chosen. `_apply_hf_token_request` succeeds for empty + nothing stored, REFUSES with the file untouched
+  while `on_recording` or `hf_api_worker.is_busy()`, and otherwise clears, invalidates and publishes. The GUI calls `/register_hf_user`
+  with an empty token from `docker_manager._HF_CLEAR_SCRIPT`, a fixed script run through `wsl_bridge.run` (the repo's carrier for
+  multi-line WSL scripts; nested quotes through `wsl.exe` argv are the failure `_docker_cmd` documents), after a read-only `test -s` of
+  the slot so the ordinary case (the student signed out first) starts no ROS process. The shape follows `entrypoint_omx.sh::disable_torque`
+  (`timeout N ros2 service call`) and the `pas()` helper of `docs/COLLISION_ESTOP_WINDOWS_VALIDATION.md` (the two `source` lines).
+- (c) "remove the file when the node does not answer" — rejected: a hung node can still own an upload child.
+
+**Deliberate versus not.** Only an end that `destroy_all` did NOT cause is reported. Every `destroy_all` caller (`_on_close`,
+`_stop_environment._do_stop`, `_run_prerequisite_checks_body`, `_scan_arms._do_scan`, and `_launch_installer_and_exit`'s tuple) is
+followed by a container stop or a process exit, which already drops the tmpfs; a clear there would only race `compose down`. The
+mark is per Popen (`_edubotics_deliberate`, set under `_lock` before WM_CLOSE or terminate), because the global `_deliberate_stop` is
+cleared by the NEXT spawn: a watcher that wakes late and read it would classify the wrong spawn. The global stays for the legacy
+`_runtime_missing` branch and tests pin it. The watcher now receives the Popen and the generation captured under `_lock`
+(`args=(_process,)` read the global after the lock, which a racing `destroy_all` had already set to None).
+
+**Race analysis.** Every new student session (a spawn, a refused spawn, `_webview_fallback`; not the live-child short-circuit) bumps
+`webview_window._generation`, and the retry loop asks `is_current_generation` after each sleep, again once the single-flight lock is
+held, and so right before the attempt. Ordering therefore holds by construction except for one case: an attempt that started BEFORE
+student B's window opened may still be in flight when B's token lands. B needs window boot plus a typed login (`bootScrub` removed A's
+session), the attempt is hard-bounded (8 + 1 s in the container, 15 s outside), and it self-heals anyway: `decideSync` with the slot
+absent and the account `stored` returns PUSH (`present` false skips `taken_over`; the breaker needs three writes within 60 s).
+Reopening already costs a re-login, so the clear adds no step the student sees.
+
+**Outcomes and the one line.** `cleared`, `empty` and `no_container` end silently (the ordinary path logs nothing). `refused` and
+`unreachable` retry after 15, 45, 120 and 300 s (five attempts, about 8.5 min; a window closed mid-recording is where a refusal is
+normal, and the file is never forced). Only an exhausted budget with the window still current logs ONE line: `HF_CLEAR_REFUSED_DE`
+(`[INFO]`, the token stays because a recording or transfer runs) or `HF_CLEAR_UNREACHABLE_DE` (`[WARNUNG]`). Decisions taken with the
+owner: retry on refusal yes, no `rm -f` fallback, no success line, no node-side watchdog now.
+
+**Evidence.** `tests/test_gui_robot_token_clear.py` (77 tests): the watcher with a blocking fake child (rc 0 reports once with
+the spawn's generation; `destroy_all` never reports, also when the child is released after the next spawn cleared the global
+flag; rc 3 reports AND flags the runtime; a raising hook ends the watcher without an uncaught thread exception); the generation
+bumps; a blocking hook does not hold up `open_student_window`, `has_live_window` or `destroy_all`; the script is fixed, has no
+`rm`, `unlink`, `tee`, `/run/edubotics-hf` or redirect to a file, and its service and type equal `robotChannel.js`; the sentinel
+mapping for all five outcomes and every failure shape; the script EXECUTED under a real `bash` against stub `docker`, `ros2`,
+`timeout` and `nice`, including the exact `ros2` argv `service call /register_hf_user physical_ai_interfaces/srv/SetHFUser
+{token: ""}`; the retry loop with injected attempt, sleep and `is_current` (one attempt on `cleared`, none when superseded, a
+silent stop between attempts, five attempts and the delays on a refusal, one line, no overlap of two threads); the `gui_app`
+wiring on the AST and on the shipped method source; and a subprocess import with `tkinter`, `webview` and `clr` blocked. 19
+hand-made mutants (no deliberate check, the global flag instead of the per-Popen mark, no bump at a spawn or at the fallback, a
+bump at the short-circuit, a late generation read, the check after the sleep or inside the lock removed, no single-flight lock,
+a log line for a superseded window, `check=True`, three delays instead of four, a non-empty token in the script, `refused`
+mapped to `cleared`, an unbounded CLI, a hook exception escaping the watcher, the hook not registered, an always-current
+predicate) were run against the suite: 17 were killed at once and the other two (a late generation read, an escaping hook
+exception) got a test and are killed too. Setup suite: 1948 → 2025 tests, the same 5 `test_gui_theme` errors without tkinter (0
+with a stub), skipped 81 → 81.
+
+**Not run (no Windows, WSL or ROS here).** `wsl -d EduBotics -- bash` with the script on stdin and a nested `docker exec`; Jazzy's
+real `ros2 service call` output and `timeout`/`nice` in the image; an X-click producing exit code 0 and `proc.wait()` returning at
+once; the cost of the `ros2` CLI (about 100 MB, one DDS participant) inside the 6 GB server container while it records or uploads
+(rig check: close the window mid-recording, watch for „Signalaussetzer", frame loss, OOM). Residuals and the node-side watchdog
+trigger: `docs/KNOWN-ISSUES.md`, „A token can outlive a closed window".
+
 ### Unreleased, 2026-10-03 — Per-student Hugging Face token: entered once on the Startseite, stored with the account
 
 **Why.** The student's Hugging Face token was a property of the PC: one slot in `%LOCALAPPDATA%\EduBotics\.env` (GUI

@@ -261,13 +261,11 @@ services:
     # The `-opi` compose deliberately KEEPS its publishes (debug/rollback).
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
-      # Student's HuggingFace token, set ONCE in the Windows GUI (Schritt D)
-      # and stored in %LOCALAPPDATA%\EduBotics\.env (config_generator.upsert_env_var).
-      # huggingface_hub reads $HF_TOKEN automatically, so recording upload,
-      # whoami (Benutzer-ID list) and local policy download all authenticate
-      # with no in-app re-entry. Empty default keeps cloud-only / no-token
-      # starts working without a compose warning.
-      - HF_TOKEN=${HF_TOKEN:-}
+      # Per-student Hugging Face token (042): the SPA pushes it over /register_hf_user
+      # into a file on a tmpfs (below). huggingface_hub re-reads that file on every
+      # call, so no consumer changes. NEVER add HF_TOKEN / HUGGING_FACE_HUB_TOKEN here:
+      # an environment token outranks the file and would silence every personal token.
+      - HF_TOKEN_PATH=/run/edubotics-hf/token
       # Recording video codec (v2.5.0 / LeRobot v0.5.1). Default 'h264'
       # (software libx264 under the hood) — fast CPU decode on Win10
       # student PCs in the React preview. Upstream LeRobot defaults to
@@ -507,6 +505,13 @@ services:
       # runner.sock (0600). No depends_on on the runner: without it every
       # code run is refused in German and Blockly is untouched.
       - code_runner_ipc:/run/edubotics/code
+    tmpfs:
+      # The per-student Hugging Face token slot ($HF_TOKEN_PATH above). A tmpfs
+      # survives a node respawn (same container) but vanishes with the container,
+      # so a stack stop is a full handover scrub, and the token never reaches the
+      # persistent huggingface_cache volume. Only this service gets one: the
+      # code_runner sandbox must not see it.
+      - /run/edubotics-hf:size=1m,mode=0700
     mem_limit: 6g
     pids_limit: 1024
     healthcheck:

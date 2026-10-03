@@ -640,6 +640,30 @@ out = CvBridge().compressed_imgmsg_to_cv2(m, desired_encoding=\"rgb8\"); \
 assert out.shape == (48, 64, 3), out.shape; \
 print(f\"cv_bridge functional decode gate OK (numpy {np.__version__})\")'"
 
+# Build-time PERSONAL-TOKEN gate (042). The per-student token reaches the rig as
+# a file at $HF_TOKEN_PATH that huggingface_hub must re-read on EVERY call. This
+# pins the three facts the whole design rests on, on every flavor (amd64, Jetson,
+# opi — one thin Dockerfile): the constant honours the env var, a rewritten file
+# is seen at once, a deleted file means no token, and nothing disables the
+# implicit token. huggingface_hub is not pinned here (lerobot's >=1,<2 range).
+# The Python source below starts in COLUMN 0 on purpose: a continuation line that
+# keeps an indent makes the -c script an IndentationError (tests/test_hf_token_compose.py
+# compiles it).
+RUN env -u HF_TOKEN -u HUGGING_FACE_HUB_TOKEN HF_TOKEN_PATH=/tmp/edubotics-hf-gate-token python3 -c "\
+import os, huggingface_hub; \
+from huggingface_hub import constants, get_token; \
+p = '/tmp/edubotics-hf-gate-token'; \
+assert constants.HF_TOKEN_PATH == p, 'huggingface_hub ignores HF_TOKEN_PATH: the per-student token slot would never be read'; \
+assert not getattr(constants, 'HF_HUB_DISABLE_IMPLICIT_TOKEN', False), 'HF_HUB_DISABLE_IMPLICIT_TOKEN is set: HfApi() would never send the personal token'; \
+assert get_token() is None, 'get_token() found a token with no env var and no file'; \
+open(p, 'w').write('hf_gateprobe_aaaaaaaaaaaaaaaaaaaa'); \
+assert get_token() == 'hf_gateprobe_aaaaaaaaaaaaaaaaaaaa', 'get_token() did not read the file at HF_TOKEN_PATH'; \
+open(p, 'w').write('hf_gateprobe_bbbbbbbbbbbbbbbbbbbb'); \
+assert get_token() == 'hf_gateprobe_bbbbbbbbbbbbbbbbbbbb', 'get_token() caches the file: a replaced token would never reach the rig'; \
+os.remove(p); \
+assert get_token() is None, 'get_token() still answers after the file was deleted'; \
+print('[HF-TOKEN] HF_TOKEN_PATH gate OK', huggingface_hub.__version__)"
+
 # Scrub upstream-base ENV leaks that the sed of /root/.bashrc above can't
 # touch (image-config ENV directives are independent of interactive-shell
 # rc files). Two classes:

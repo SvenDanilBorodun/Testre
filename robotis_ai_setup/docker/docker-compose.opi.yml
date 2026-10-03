@@ -7,12 +7,12 @@
 #   * FROM the student docker-compose.yml: the full ~50-entry EDUBOTICS_*
 #     `environment:` forwarding surface (recording / calibration /
 #     collision / Roboter-Studio all fail-open without it — the Jetson
-#     file forwards only ROS_DOMAIN_ID + HF_TOKEN), the
+#     file forwards only ROS_DOMAIN_ID + its own classroom HF_TOKEN), the
 #     ai_workspace / huggingface_cache / edubotics_calib volume set (the
 #     Jetson file has jetson_* names and NO calib volume — miss it and
 #     every container recreate wipes Roboter-Studio calibration AND the
 #     factory-reset volume-suffix rm mismatches), the `.env`-driven
-#     reference style (${ROS_DOMAIN_ID:-30}, HF_TOKEN=${HF_TOKEN:-} — the
+#     reference style (${ROS_DOMAIN_ID:-30} — the
 #     Jetson file's bare host-passthrough + HF_TOKEN=${EDUBOTICS_HF_TOKEN}
 #     would detach compose from the agent-managed .env), full LEADER
 #     support (LEADER_PORT + `.env`-driven EDUBOTICS_FOLLOWER_ONLY, never
@@ -376,14 +376,13 @@ services:
       - "127.0.0.1:9090:9090"
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-30}
-      # Student's HuggingFace token, set ONCE via the System window
-      # (Schritt D) and stored as the deliberately-UNMANAGED HF_TOKEN key
-      # in /etc/edubotics/.env (config_generator.upsert_env_var).
-      # huggingface_hub reads $HF_TOKEN automatically. Empty default keeps
-      # cloud-only / no-token starts working without a compose warning.
-      # (The Jetson file's HF_TOKEN=${EDUBOTICS_HF_TOKEN} form is NOT used
-      # — the ported config_generator writes the key HF_TOKEN.)
-      - HF_TOKEN=${HF_TOKEN:-}
+      # Per-student Hugging Face token (042): the SPA pushes it over /register_hf_user
+      # into a file on a tmpfs (below). huggingface_hub re-reads that file on every
+      # call, so no consumer changes. NEVER add HF_TOKEN / HUGGING_FACE_HUB_TOKEN here:
+      # an environment token outranks the file and would silence every personal token.
+      # (The Jetson file's HF_TOKEN=${EDUBOTICS_HF_TOKEN} form is NOT used: that
+      # is the classroom Jetson's own read-only token.)
+      - HF_TOKEN_PATH=/run/edubotics-hf/token
       # Recording video codec (LeRobot v0.5.1). Default 'h264' (software
       # libx264 — hardware H.264 encode is not available in mainline ffmpeg
       # on RK3588S; see §9). Read by lerobot_dataset_wrapper.py.
@@ -610,6 +609,13 @@ services:
       # runner.sock (0600). No depends_on on the runner: without it every
       # code run is refused in German and Blockly is untouched.
       - code_runner_ipc:/run/edubotics/code
+    tmpfs:
+      # The per-student Hugging Face token slot ($HF_TOKEN_PATH above). A tmpfs
+      # survives a node respawn (same container) but vanishes with the container,
+      # so a stack stop is a full handover scrub, and the token never reaches the
+      # persistent huggingface_cache volume. Only this service gets one: the
+      # code_runner sandbox must not see it.
+      - /run/edubotics-hf:size=1m,mode=0700
     # Resource cap tuned for the 8 GB board (student file: 6g). No local
     # policy loads on the Pi (Jetson-only inference), so recording peak
     # (streaming h264 encode) stays well under 5g — §9.

@@ -2,9 +2,10 @@
 
 Port of ``robotis_ai_setup/gui/app/config_generator.py`` — the same
 managed-key model (atomic temp-file + ``os.replace`` + ``fsync`` writes,
-operator overrides preserved verbatim across regenerates, ``HF_TOKEN``
-deliberately UNMANAGED so it survives regenerate/factory-reset with
-``upsert_env_var`` as its sole writer). Differences from the GUI:
+operator overrides preserved verbatim across regenerates, except the legacy
+``HF_TOKEN`` / ``HF_TOKEN_MACHINE`` pair, which every regenerate drops: the
+student's token lives with the cloud account now and reaches the robot over
+rosbridge, so this file never carries one). Differences from the GUI:
 
   - The ``.env`` lives at ``/etc/edubotics/.env`` (root systemd agent), not
     ``%LOCALAPPDATA%\\EduBotics\\.env``.
@@ -313,19 +314,32 @@ def _atomic_write(path: str, content: str) -> None:
             os.fsync(f.fileno())
         except OSError:
             pass  # fsync unsupported (e.g. some network filesystems)
-    # The .env holds the student's HF_TOKEN. setup.sh chmods it 600 at seed
+    # The .env can hold secrets (a legacy HF_TOKEN until the first regenerate
+    # drops it, plus whatever an operator adds). setup.sh chmods it 600 at seed
     # time, but os.replace adopts the tmp file's mode (umask 0644 by default),
     # which would silently re-widen it to world-readable on every regenerate.
-    # Pin 0600 on the tmp inode so the secret never leaks after a rewrite.
+    # Pin 0600 on the tmp inode so a secret never leaks after a rewrite.
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+# The student's HuggingFace token used to live in this .env (``HF_TOKEN``, set
+# by the wizard's old Schritt D, with ``HF_TOKEN_MACHINE`` as a stamp on the
+# Windows twin). It belongs to the cloud account now, so neither key is ever
+# carried across a regenerate. There is deliberately no boot-time purge on the
+# Pi: the next regenerate (agent boot writes the cloud-only .env) is the purge.
+_LEGACY_HF_KEYS = ("HF_TOKEN", "HF_TOKEN_MACHINE")
 
 
 def _read_unmanaged_lines(path: str) -> list[str]:
     """Return non-managed lines (comments, blanks, unknown KEY=VALUE) from an
     existing .env so a regenerate doesn't wipe operator-added overrides like
-    EDUBOTICS_CAMERA_PIXEL_FORMAT, EDUBOTICS_VCODEC, the calibration knobs, or
-    the per-rig HF_TOKEN.
+    EDUBOTICS_CAMERA_PIXEL_FORMAT, EDUBOTICS_VCODEC or the calibration knobs.
+
+    ONE exception to "everything unmanaged is preserved verbatim": the legacy
+    ``HF_TOKEN`` / ``HF_TOKEN_MACHINE`` pair is ALWAYS dropped (see
+    ``_LEGACY_HF_KEYS``), so a token an earlier wizard stored here is gone after
+    the first regenerate and can never be forwarded by compose again.
 
     Returns an empty list when the file doesn't exist yet.
     """
@@ -354,6 +368,8 @@ def _read_unmanaged_lines(path: str) -> list[str]:
         key = stripped.split("=", 1)[0].strip()
         if _is_managed_key(key):
             continue
+        if key in _LEGACY_HF_KEYS:
+            continue
         preserved.append(text)
     # Strip leading blank lines: generate_env_file always re-adds a single
     # separating blank before the marker, so carrying leading blanks here would
@@ -367,8 +383,8 @@ def read_env_var(key: str, path: str = ENV_FILE) -> Optional[str]:
     """Return the value of ``key`` from the .env at ``path``, or None if absent.
 
     Tolerates the quoting written by _quote() and surrounding whitespace. Used
-    to show a "token already saved" state WITHOUT re-displaying the secret, and
-    to carry sticky managed keys (LAN_OPEN / ROS_NET_SUBNET) forward.
+    to read back the persisted wizard choices (arm ports, camera roles, robot
+    type) and to carry sticky managed keys (LAN_OPEN / ROS_NET_SUBNET) forward.
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -390,11 +406,12 @@ def upsert_env_var(key: str, value: str, path: str = ENV_FILE,
     """Insert or replace ``key=value`` in the .env at ``path``, preserving every
     other line (managed keys, comments, operator overrides) verbatim.
 
-    This is the SOLE writer of HF_TOKEN. HF_TOKEN is deliberately NOT a
-    MANAGED_KEY: generate_env_file() carries it across hardware-rescan rewrites
-    via _read_unmanaged_lines(), and this helper is how the agent sets it once
-    (Schritt D). An empty ``value`` removes the key (token clear). The value is
-    quoted via _quote() so a token with shell-special chars is safe.
+    A key that is not one of the MANAGED_KEYS is carried across
+    generate_env_file() rewrites by _read_unmanaged_lines(), so an operator
+    override written here survives a hardware re-scan. (The legacy HF_TOKEN pair
+    is the one exception: it is never carried, see _LEGACY_HF_KEYS.) An empty
+    ``value`` removes the key. The value is quoted via _quote(), so a value with
+    shell-special characters is safe.
 
     ``quote=False`` writes the value RAW, matching the unquoted form the managed
     emitters use. It exists for EDUBOTICS_ROBOT_TYPE, which the wizard must be
@@ -630,7 +647,8 @@ def generate_cloud_only_env(output_path: str = ENV_FILE,
     ``EDUBOTICS_BIND_HOST`` and compose reads ``REGISTRY`` / ``IMAGE_TAG`` /
     ``EDUBOTICS_ROS_NET_SUBNET``). ``robot_type`` is emitted for MANAGED-key
     symmetry with :func:`generate_env_file` (a stale hand-pinned value is
-    superseded here too). Operator overrides + HF_TOKEN are preserved.
+    superseded here too). Operator overrides are preserved; the legacy HF_TOKEN
+    pair is dropped.
     """
     domain_id = _resolve_ros_domain_id()
     preserved = _read_unmanaged_lines(output_path)

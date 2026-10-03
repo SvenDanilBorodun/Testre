@@ -127,7 +127,7 @@ _LOOPBACK_HOST = "127.0.0.1"
 _GATEWAY_BIND_INTERVAL_S = 5.0
 
 # Bound on the request body we read for a POST — the legitimate bodies are a few
-# bytes of JSON (roles map, token, flags). Mirrors roboter_studio_control's cap.
+# bytes of JSON (roles map, robot type, flags). Mirrors roboter_studio_control's cap.
 _MAX_BODY_BYTES = 256 * 1024
 
 # Recent-log ring depth for the Protokoll SSE panel.
@@ -173,7 +173,7 @@ _PREVIEW_HANDOFF_TIMEOUT_S = 2.0
 # How long a MUTATING wizard request waits for _lifecycle_lock before answering
 # 503. Bounded on purpose: „Umgebung starten" holds the lock across a resilient
 # multi-GB image pull, so a blocking acquire would make „Stoppen", „Arme
-# scannen", the camera roles, the HF token and Factory Reset hang for as long as
+# scannen", the camera roles, the robot type and Factory Reset hang for as long as
 # that pull runs — with nginx's proxy_read_timeout at 3600 s, no 504 rescues
 # them, so every wizard control simply stops answering. A distinguishing 503 is
 # what _busy_updating already gives an urgent request during an update; the same
@@ -842,7 +842,6 @@ class AgentApp:
             "hardware_ready": self._hardware_ready(robot_type),
             "cameras": cameras,
             "follower_only": str(follower_only_raw).strip() == "1",
-            "hf_token_saved": bool(config_generator.read_env_var("HF_TOKEN", self.env_file)),
             "images": docker_manager.get_last_pull_status(),
         }
 
@@ -1216,32 +1215,6 @@ class AgentApp:
             if srv is not None:
                 srv.shutdown()
         return 200, {"ok": True, "running": False, "message": "Handy-Kamera-Empfang gestoppt."}
-
-    # ── POST: /hf-token ──────────────────────────────────────────────────────
-
-    def handle_hf_token(self, body: dict) -> "tuple[int, dict]":
-        """Store (or clear) the Hugging Face token. ``HF_TOKEN`` is deliberately
-        UNMANAGED — ``upsert_env_var`` is its sole writer, so it survives every
-        .env regenerate and Factory Reset. The token is never echoed back."""
-        if self._update_in_flight():
-            return self._busy_updating()
-        token = body.get("token")
-        if token is None:
-            return 400, {"ok": False, "message": "Kein Token angegeben."}
-        # Serialize with every other .env writer (scan/roles/start): the atomic
-        # os.replace is safe, but two concurrent writers could still race the
-        # token against a regenerate that carries it forward.
-        if not self._acquire_lifecycle():
-            return self._busy_lifecycle()
-        try:
-            config_generator.upsert_env_var("HF_TOKEN", str(token), self.env_file)
-        except Exception as e:  # noqa: BLE001
-            return 500, {"ok": False, "message": f"Token konnte nicht gespeichert werden: {e}"}
-        finally:
-            self._lifecycle_lock.release()
-        if str(token).strip():
-            return 200, {"ok": True, "saved": True, "message": "Token gespeichert."}
-        return 200, {"ok": True, "saved": False, "message": "Token entfernt."}
 
     # ── POST: /robot-type ────────────────────────────────────────────────────
 
@@ -2372,8 +2345,6 @@ class AgentApp:
                     self._send_json(200, {"ok": True})
                 elif path == "/phone/toggle":
                     self._send_json(*app.handle_phone_toggle(body))
-                elif path == "/hf-token":
-                    self._send_json(*app.handle_hf_token(body))
                 elif path == "/robot-type":
                     self._send_json(*app.handle_set_robot_type(body))
                 elif path == "/environment/start":

@@ -1220,10 +1220,6 @@ class TestUpdateBusyFastFail(_EnvTempBase):
             {"cameras": [{"path": "/dev/video0", "role": "scene"}]})
         self._assert_busy(code, payload)
 
-    def test_hf_token_fast_fails(self):
-        code, payload = self.app.handle_hf_token({"token": "hf_x"})
-        self._assert_busy(code, payload)
-
     def test_read_only_endpoints_stay_available(self):
         # /status and /update/status must keep answering during the update.
         with patch.object(agent.docker_manager, "get_container_status", return_value={}):

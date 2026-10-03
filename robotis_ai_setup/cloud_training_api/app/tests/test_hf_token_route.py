@@ -177,7 +177,7 @@ class _RouteCase(unittest.TestCase):
         self.env.__exit__(None, None, None)
 
     def put(self, token=TOK, profile=None):
-        return route.put_hf_token(body=route.HfTokenBody(token=token), profile=profile or _profile())
+        return route.put_hf_token(body={"token": token}, profile=profile or _profile())
 
     def assertHttp(self, status, call, *args, **kwargs):
         with self.assertRaises(HTTPException) as cm:
@@ -282,6 +282,17 @@ class TestRoundTrip(_RouteCase):
 class TestPutRejections(_RouteCase):
     def _no_hub_call(self):
         self.assertEqual(self.sb.rpc_calls, [])
+        self.assertEqual(self.sb.credentials, {})
+
+    def test_a_body_that_is_not_an_object_is_the_german_422_and_never_reaches_the_hub(self) -> None:
+        # A JSON string/array body used to reach FastAPI's own validation, whose 422
+        # carries the offending `input` - i.e. the token. Now it is read by hand.
+        for body in (TOK, [TOK], None, 5, {"other": TOK}, {"token": None}):
+            with patch.object(hc, "validate_with_hub") as hub:
+                exc = self.assertHttp(422, route.put_hf_token, body=body, profile=_profile())
+                hub.assert_not_called()
+            self.assertIn("Das sieht nicht nach einem Hugging-Face-Token aus", exc.detail)
+            self.assertNotIn(TOK, repr(exc.detail))
         self.assertEqual(self.sb.credentials, {})
 
     def test_shape_errors_are_422_and_never_echo_the_token(self) -> None:
@@ -456,6 +467,31 @@ class TestDeleteAndVerify(_RouteCase):
         for call in (route.reveal_hf_token, route.verify_hf_token):
             exc = self.assertHttp(422, call, profile=_profile())
             self.assertIn("nicht mehr entschlüsselt", exc.detail)
+
+    def test_verify_does_not_resurrect_a_token_removed_while_the_hub_was_asked(self) -> None:
+        self.put()
+
+        def hub_then_delete(_token):
+            route.delete_hf_token(profile=_profile())  # the student presses „Entfernen“ meanwhile
+            return {"name": "alice", "role": "write"}
+
+        self.hub.side_effect = hub_then_delete
+        exc = self.assertHttp(409, route.verify_hf_token, profile=_profile())
+        self.assertIn("geändert oder entfernt", exc.detail)
+        self.assertEqual(self.sb.credentials, {})
+
+    def test_verify_does_not_overwrite_a_token_saved_while_the_hub_was_asked(self) -> None:
+        self.put()
+        other = "hf_" + "b" * 34
+
+        def hub_then_replace(_token):
+            self.hub.side_effect = None
+            self.put(token=other)  # a newer PUT lands while verify waits for the Hub
+            return {"name": "alice", "role": "write"}
+
+        self.hub.side_effect = hub_then_replace
+        self.assertHttp(409, route.verify_hf_token, profile=_profile())
+        self.assertEqual(_content(route.reveal_hf_token(profile=_profile()))["token"], other)
 
     def test_verify_when_the_hub_has_since_revoked_the_token(self) -> None:
         self.put()

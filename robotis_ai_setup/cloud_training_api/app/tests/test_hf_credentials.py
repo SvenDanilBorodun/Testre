@@ -138,6 +138,15 @@ class TestKeyHandling(unittest.TestCase):
             for value in env.values():
                 self.assertNotIn(value.strip(), message)
 
+    def test_a_stray_character_inside_a_key_is_refused_not_dropped(self) -> None:
+        # b64decode WITHOUT validate=True silently discards characters outside the
+        # alphabet, so a key with a typo in it would still decode to 32 bytes and
+        # quietly become a DIFFERENT key (every stored token then reads as unusable).
+        good = _b64(SEQ_A)
+        for bad in (good[:10] + "!" + good[10:], good[:10] + " " + good[10:], good[:10] + "\n" + good[10:]):
+            with self.assertRaises(RuntimeError):
+                hc.load_keys({hc.KEY_ENV: bad})
+
 
 class TestEnvelope(unittest.TestCase):
     def test_the_published_vector_is_reproduced_bit_for_bit(self) -> None:

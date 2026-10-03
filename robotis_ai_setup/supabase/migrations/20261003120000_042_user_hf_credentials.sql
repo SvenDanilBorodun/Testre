@@ -2,9 +2,10 @@
 -- account (encrypted by the cloud API), so the robot gets it automatically at
 -- login instead of every student on a PC sharing one token in the PC's .env.
 --
--- Proven on a fresh local stack before it ships (a SCRATCH copy of supabase/,
--- see supabase/tests/042_user_hf_credentials_assertions.sql -> 19 PASS; rollback,
--- re-apply twice, assertions again -> 19 PASS).
+-- Proven on a scratch PostgreSQL 16 with Supabase-like roles and default
+-- privileges (supabase/tests/042_user_hf_credentials_assertions.sql -> 19 PASS;
+-- rollback, re-apply twice, assertions again -> 19 PASS). NOT yet run on a real
+-- `supabase start` stack: do that once before the first production push.
 -- Rollback: rollback/20261003120000_042_user_hf_credentials_rollback.sql
 -- (roll the cloud API back FIRST: the 042 API probes this table and calls the RPC).
 --

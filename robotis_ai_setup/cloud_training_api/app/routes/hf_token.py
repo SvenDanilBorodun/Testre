@@ -11,9 +11,11 @@ Conventions that are easy to undo by accident (see CLAUDE.md, Cloud stack):
   * Token-semantics errors are 422, never 401/403: the SPA signs the student out
     on those from `/me`. 502 = Hub unreachable, 503 = no encryption key on this
     server, 404 = nothing stored.
-  * The request model has NO pydantic constraints. FastAPI's default 422 echoes
-    the offending `input`, i.e. the token; the shape is checked by hand, and no
-    handler formats, logs or raises the token, its fingerprint or its ciphertext.
+  * `PUT` takes its body as an untyped `Body(default=None)` and reads the token by
+    hand: FastAPI's default 422 echoes the offending `input`, i.e. the token, for
+    ANY typed model and for a non-object body (a JSON string or array, text/plain).
+    The shape is checked by hand, and no handler formats, logs or raises the
+    token, its fingerprint or its ciphertext.
   * Plain `def` handlers (the Hub call blocks for up to HUB_TIMEOUT_S, so they
     belong in the threadpool, like routes/datasets.py).
   * Every success carries `Cache-Control: no-store`. No route takes a user id:
@@ -29,9 +31,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 from app.auth import get_current_profile
 from app.services import hf_credentials
@@ -45,11 +46,6 @@ router = APIRouter(prefix="/me/hf-token", tags=["hf-token"])
 _TABLE = "user_hf_credentials"
 _COLUMNS_STATUS = "token_ciphertext, token_fp, token_hint, hf_username, token_role, validated_at"
 _COLUMNS_SECRET = "token_ciphertext, token_fp"
-
-
-class HfTokenBody(BaseModel):
-    # Deliberately unconstrained: see the module docstring.
-    token: Any = None
 
 
 def _ok(content: dict) -> JSONResponse:
@@ -263,11 +259,11 @@ def get_hf_token_status(profile=Depends(get_current_profile)):
 
 
 @router.put("")
-def put_hf_token(body: HfTokenBody, profile=Depends(get_current_profile)):
+def put_hf_token(body: Any = Body(default=None), profile=Depends(get_current_profile)):
     """Prove the pasted token with the Hub, then store it encrypted."""
     _require_student(profile)
     _require_key()
-    token = body.token
+    token = body.get("token") if isinstance(body, dict) else None
     _require_shape(token)
     name, role, account_changed = _hub_checks(token, profile)
     uid = str(profile["id"])
@@ -316,8 +312,18 @@ def verify_hf_token(profile=Depends(get_current_profile)):
     _require_student(profile)
     _require_key()
     uid = str(profile["id"])
-    token = _decrypt_own(uid, _read_secret_row(uid))
+    row = _read_secret_row(uid)
+    token = _decrypt_own(uid, row)
     name, role, account_changed = _hub_checks(token, profile, stored=True)
+    # The Hub call above takes up to HUB_TIMEOUT_S. A student who removed the token
+    # or saved another one meanwhile must not get the OLD one written back by the
+    # blind upsert in _store: re-read the fingerprint and stand down on a change.
+    current = _read_rows(uid, "token_fp")
+    if not current or current[0].get("token_fp") != row.get("token_fp"):
+        raise HTTPException(
+            status_code=409,
+            detail="Dein Token wurde inzwischen geändert oder entfernt. Bitte lade die Seite neu.",
+        )
     response = _store(uid, token, name, role, account_changed)
     logger.info("hf-token verified user=%s", uid)
     return response

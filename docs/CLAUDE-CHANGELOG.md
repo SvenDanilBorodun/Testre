@@ -96,7 +96,7 @@ the student token this round.
 - `routes/hf_token.py`: `GET` status, `PUT` (shape → `HfApi(token).whoami()` → name checks → read-only refused → encrypt → RPC),
   `DELETE`, `POST /reveal` (the plaintext only ever leaves here, to its owner), `POST /verify` (re-asks the Hub and re-encrypts
   under the current key). Token-semantics errors are 422, never 401/403 (the SPA signs out on those from `/me`). The request
-  model carries no pydantic constraints, so FastAPI's default 422 cannot echo a token; nothing logs a token, fingerprint or
+  body is an untyped `Body(default=None)` read by hand, so FastAPI's default 422 cannot echo a token (the first version used a typed model and still echoed a non-object body; fixed in the final verification round); `verify` stands down with 409 when the stored fingerprint changed during its Hub call; nothing logs a token, fingerprint or
   ciphertext. `PATCH /me` answers 409 once a credential exists; `POST /me/delete` removes the caller's stored token best effort
   (owner decision) and names that in its message only when it happened.
 - `main.py`: boot probe 15/11/21, a malformed key refuses to boot while an absent one only warns, method-pinned per-user rate

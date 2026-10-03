@@ -786,7 +786,7 @@ _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
     ("POST", "/workflows"),
     ("PATCH", "/workflows"),
     ("POST", "/teacher/classrooms"),  # covers workflow-templates path too
-    ("PUT", "/me/hf-token"),  # 042 — the token itself is bounded by its 256-char shape
+    ("PUT", "/me/hf-token"),  # 042 — a token is 256 chars at most; this stops a huge body being read
 )
 
 

@@ -175,6 +175,12 @@ class TestRateLimitRulesUnchanged(unittest.TestCase):
         ("POST", "/jetson/", 30, 60.0),
         ("PATCH", "/me/tutorial-progress", 30, 60.0),
         ("GET", "/me/export", 3, 3600.0),
+        # 042 — per-student Hugging Face token, appended in this order.
+        ("GET", "/me/hf-token", 60, 60.0),
+        ("PUT", "/me/hf-token", 6, 60.0),
+        ("DELETE", "/me/hf-token", 10, 60.0),
+        ("POST", "/me/hf-token/reveal", 20, 60.0),
+        ("POST", "/me/hf-token/verify", 6, 60.0),
     ]
 
     def _rules(self) -> list:

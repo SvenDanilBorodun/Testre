@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.auth import get_current_profile, get_user_profile
+from app.services import hf_credentials
 from app.services.hf_identity import is_denied_author, normalize_hf_username
 from app.services.modal_client import cancel_training_job
 from app.services.supabase_client import get_supabase
@@ -23,8 +24,9 @@ class MyProfile(BaseModel):
     username: str | None
     full_name: str | None
     # Migration 030: the student's linked HuggingFace username (Benutzer-ID).
-    # The anchor for dataset discovery; None until the React app auto-links it
-    # from the ROS whoami or the student sets it via PATCH /me.
+    # The anchor for dataset discovery. Since migration 042 it is set from the
+    # stored token's whoami (PROVEN) when the student saves a token; PATCH /me
+    # stays as the self-asserted path for an account without a stored token.
     hf_username: str | None = None
     classroom_id: str | None
     workgroup_id: str | None = None
@@ -114,9 +116,12 @@ async def update_me(
     """Link (or update) the caller's HuggingFace username (Benutzer-ID).
 
     Self-only: the row is keyed to the JWT-verified profile id, never to a
-    body field (Rule §4). The React app calls this automatically from the ROS
-    whoami Benutzer-ID (StudentApp auto-link); a student can also set it by
-    hand. The value is the SOLE anchor the dataset_sweep + POST /datasets/sync
+    body field (Rule §4). Since migration 042 the React app no longer calls
+    this automatically: the account name comes from the stored token's
+    whoami (routes/hf_token.py). This route remains for old clients and for an
+    account WITHOUT a stored token, and answers 409 once one exists (the name
+    is proven then and must not drift from the token the robot uploads with).
+    The value is the SOLE anchor the dataset_sweep + POST /datasets/sync
     use to discover this student's datasets, so it is format-validated and
     deny-listed against upstream/system namespaces.
     """
@@ -134,6 +139,30 @@ async def update_me(
             ),
         )
     supabase = get_supabase()
+    # Migration 042: once a stored token has PROVEN the account name, the
+    # self-asserted PATCH must not overwrite it (the name and the token the
+    # robot uploads with would drift apart). The student removes the token
+    # first. `has_credential` reads only through `.select().eq().execute()`.
+    try:
+        has_token = hf_credentials.has_credential(supabase, profile["id"])
+    except Exception as exc:
+        logger.error(
+            "hf credential lookup failed in PATCH /me for user=%s: %s",
+            profile["id"], type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Benutzer-ID konnte nicht gespeichert werden.",
+        ) from None
+    if has_token:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Dein Hugging-Face-Konto ist über dein gespeichertes Token "
+                "festgelegt. Entferne zuerst das Token auf der Startseite, wenn "
+                "du ein anderes Konto verwenden möchtest."
+            ),
+        )
     try:
         result = (
             supabase.table("users")
@@ -323,6 +352,9 @@ async def delete_my_account(profile=Depends(get_current_profile)):
       2. Records deletion_requested_at on the users row. If that write
          fails the endpoint returns 500 — silently returning success
          used to mean an admin would never see the request.
+      3. Deletes the caller's stored Hugging Face token (user_hf_credentials,
+         migration 042), best effort: a failure is logged by class and never
+         blocks the request.
     """
     if profile["role"] == "admin":
         return JSONResponse(
@@ -404,6 +436,24 @@ async def delete_my_account(profile=Depends(get_current_profile)):
                 uid, exc,
             )
 
+    # 2b. Migration 042: take the student's own Hugging Face token out of the
+    #     cloud. Best-effort like the steps above: a failure here must never
+    #     block the deletion request (the FK ON DELETE CASCADE removes the row
+    #     for good when the account itself is erased), so only the exception
+    #     CLASS is logged. `removed` feeds the message below so it names only
+    #     what really took effect.
+    hf_token_removed = False
+    try:
+        removed_rows = (
+            supabase.table("user_hf_credentials").delete().eq("user_id", uid).execute()
+        )
+        hf_token_removed = bool(getattr(removed_rows, "data", None))
+    except Exception as exc:
+        logger.warning(
+            "Stored HF token removal failed in /me/delete for %s: %s",
+            uid, type(exc).__name__,
+        )
+
     # 3. Record the deletion request. Migration 007 guarantees the
     #    column exists; a failure here is a real DB / network error and
     #    must be surfaced — silently returning success used to mean an
@@ -433,9 +483,17 @@ async def delete_my_account(profile=Depends(get_current_profile)):
         "Deletion request from user=%s role=%s (canceled %d active trainings)",
         uid, profile["role"], len(cancelled_ids),
     )
+    # Named only when it really happened (see step 2b): the same honesty rule
+    # as the rest of this message.
+    token_note = (
+        " Außerdem wurde dein gespeichertes Hugging-Face-Token vom Server entfernt."
+        if hf_token_removed
+        else ""
+    )
     return {
         "status": "requested",
         "canceled_trainings": cancelled_ids,
+        "hf_token_removed": hf_token_removed,
         # German (Rule §1 — this is read by a student) and HONEST about what
         # just happened. The previous English text said an administrator "will
         # process it within 30 days", which overstated the mechanism twice
@@ -454,7 +512,8 @@ async def delete_my_account(profile=Depends(get_current_profile)):
             "KEINE Daten gelöscht — die Anfrage muss von einer Lehrkraft oder "
             "einem Administrator manuell ausgeführt werden. Sofort wirksam "
             f"sind: {len(cancelled_ids)} laufende Training(s) wurden "
-            "abgebrochen und die Arbeitsgruppen-Zuordnung wurde aufgehoben. "
+            "abgebrochen und die Arbeitsgruppen-Zuordnung wurde aufgehoben."
+            f"{token_note} "
             "Aufnahmen im eigenen HuggingFace-Konto müssen dort selbst "
             "gelöscht werden. Über „Meine Daten exportieren“ kann jederzeit "
             "eine Kopie heruntergeladen werden."

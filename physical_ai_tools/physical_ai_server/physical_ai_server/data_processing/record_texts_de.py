@@ -201,23 +201,38 @@ HUB_CHECK_REFUSED_DE = ('Hugging Face ist gerade nicht erreichbar. Ohne diese Pr
                         'ein Datensatz auf Hugging Face überschrieben werden. Schalte unter '
                         '„Erweitert“ das Hochladen aus oder versuche es später.')
 
-# F4/D7 (round 6): the hub answered, and refused the rig's token.
+# F4/D7 (round 6): the hub answered, and refused the rig's token. Since 042 the
+# token is the student's own and is replaced on the Startseite.
 HUB_CHECK_AUTH_DE = ('Hugging Face lehnt den Token des Roboters ab (ungültig oder abgelaufen). '
-                     'Speichere in der EduBotics-App unter „Schritt D: HuggingFace-Token“ einen '
-                     'gültigen Token oder schalte unter „Erweitert“ das Hochladen aus.')
+                     'Ersetze dein Token auf der Startseite oder schalte unter „Erweitert“ das '
+                     'Hochladen aus.')
 
 # F4 (round 6): a session started WITHOUT upload because the rig has no usable
 # token. The page recognises the notice by its prefix (lockstep-tested).
 UPLOAD_OFF_PREFIX_DE = 'Aufnahme ohne Hochladen: '
 UPLOAD_OFF_NO_TOKEN_DE = (UPLOAD_OFF_PREFIX_DE + 'Auf dem Roboter ist kein Hugging-Face-Token '
-                          'gespeichert. Der Datensatz bleibt auf dem Roboter; speichere einen '
-                          'Token in der EduBotics-App unter „Schritt D: HuggingFace-Token“ und '
-                          'lade ihn später im Tab Daten hoch.')
+                          'gespeichert. Der Datensatz bleibt auf dem Roboter; hinterlege dein '
+                          'Token auf der Startseite und lade ihn später im Tab Daten hoch.')
 UPLOAD_OFF_TOKEN_INVALID_DE = (UPLOAD_OFF_PREFIX_DE + 'Hugging Face lehnt den Token des Roboters '
                                'ab (ungültig oder abgelaufen). Der Datensatz bleibt auf dem '
-                               'Roboter; speichere einen gültigen Token in der EduBotics-App '
-                               'unter „Schritt D: HuggingFace-Token“ und lade ihn später im Tab '
-                               'Daten hoch.')
+                               'Roboter; ersetze dein Token auf der Startseite und lade ihn '
+                               'später im Tab Daten hoch.')
+
+# 042: the answers of /register_hf_user (the per-student token slot, see
+# data_processing/hf_token_store.py). The reply is read by the SPA's token
+# relay, which turns a refusal into the card's own wording, so these are the
+# robot-side explanation (logs, a raw service call). None of them carries a
+# token, a fingerprint or an exception text.
+HF_TOKEN_SET_OK_DE = 'Dein Hugging-Face-Token ist auf dem Roboter aktiv.'
+HF_TOKEN_CLEARED_DE = 'Das Hugging-Face-Token wurde vom Roboter entfernt.'
+HF_TOKEN_NONE_DE = 'Auf dem Roboter ist kein Hugging-Face-Token gespeichert.'
+# is_busy() is true for downloads, list fetches and uploads alike (audit M4).
+HF_TOKEN_BUSY_DE = ('Während einer Aufnahme oder einer Übertragung zu oder von Hugging Face kann '
+                    'das Token nicht geändert werden. Bitte versuche es danach noch einmal.')
+HF_TOKEN_SHAPE_DE = ('Das ist kein gültiges Hugging-Face-Token. Es beginnt mit „hf_“ und enthält '
+                     'keine Leerzeichen.')
+HF_TOKEN_UNSUPPORTED_DE = 'Dieser Roboter verwendet ein eigenes Token und nimmt kein persönliches an.'
+HF_TOKEN_WRITE_FAILED_DE = 'Das Token konnte nicht auf dem Roboter gespeichert werden.'
 
 RESUME_FPS_DE = ('Der Datensatz „{name}“ wurde mit {d} Bildern pro Sekunde aufgenommen. '
                  'Stell unter „Erweitert“ {d} Bilder pro Sekunde ein oder wähle einen neuen '
@@ -265,13 +280,13 @@ UPLOAD_STALL_DE = ('Das Hochladen kommt nicht mehr voran. Prüfe die Internetver
                    'Roboters. Der Datensatz bleibt auf dem Roboter gespeichert; du kannst ihn '
                    'später im Tab Daten hochladen.')
 
-# Byte-identical with DataManager.HF_AUTH_ERROR_DE (it MUST point at the GUI
-# token field „Schritt D“, never at `hf auth login`); fenced by
-# test_record_texts_de.py.
+# Byte-identical with DataManager.HF_AUTH_ERROR_DE (it MUST point at the
+# Startseite, where the student replaces the token, never at `hf auth login`);
+# fenced by test_record_texts_de.py. No „restart the environment" any more: a
+# replaced token applies at once (042).
 HF_AUTH_ERROR_DE = (
-    'Hugging Face-Token ungültig oder abgelaufen. Bitte in der '
-    'EduBotics-App unter „Schritt D: HuggingFace-Token" einen gültigen '
-    'Token speichern und die Umgebung neu starten.'
+    'Hugging Face-Token ungültig oder abgelaufen. Ersetze dein Token auf der '
+    'Startseite der EduBotics-App.'
 )
 HF_NETWORK_ERROR_DE = ('Hugging Face ist gerade nicht erreichbar. Prüfe die '
                        'Internetverbindung des Roboters.')

@@ -191,8 +191,8 @@ def test_hf_sentences_and_the_auth_sentence_is_the_data_managers():
         'server': ('Hugging Face meldet gerade einen Serverfehler. Bitte versuche es später '
                    'erneut.'),
     }
-    # the long-standing „Schritt D“ sentence, byte for byte (it points at the
-    # GUI token field, never at `hf auth login`)
+    # the auth sentence, byte for byte in both places (042: it points at the
+    # Startseite, where the student replaces the token, never at `hf auth login`)
     src = _DM.read_text(encoding='utf-8')
     for node in ast.walk(ast.parse(src)):
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -204,7 +204,12 @@ def test_hf_sentences_and_the_auth_sentence_is_the_data_managers():
     else:
         # data_manager may take it from this module instead of keeping a copy
         assert 'HF_AUTH_ERROR_DE' in src
-    assert 'Schritt D' in t.HF_AUTH_ERROR_DE and 'hf auth login' not in t.HF_AUTH_ERROR_DE
+    assert t.HF_AUTH_ERROR_DE == (
+        'Hugging Face-Token ungültig oder abgelaufen. Ersetze dein Token auf der Startseite '
+        'der EduBotics-App.')
+    assert 'Startseite' in t.HF_AUTH_ERROR_DE and 'Schritt D' not in t.HF_AUTH_ERROR_DE
+    assert 'hf auth login' not in t.HF_AUTH_ERROR_DE
+    assert 'neu starten' not in t.HF_AUTH_ERROR_DE  # a replaced token applies at once
 
 
 def test_camera_names_match_the_data_managers_vocabulary():
@@ -249,23 +254,48 @@ def test_round6_finalize_and_error_stop_sentences():
 
 def test_round6_hub_check_and_upload_off_sentences():
     # F4/D7: the hub refused the rig's token
+    # (042: the token is the student's own and is replaced on the Startseite)
     assert t.HUB_CHECK_AUTH_DE == (
-        'Hugging Face lehnt den Token des Roboters ab (ungültig oder abgelaufen). Speichere '
-        'in der EduBotics-App unter „Schritt D: HuggingFace-Token“ einen gültigen Token oder '
-        'schalte unter „Erweitert“ das Hochladen aus.')
+        'Hugging Face lehnt den Token des Roboters ab (ungültig oder abgelaufen). Ersetze dein '
+        'Token auf der Startseite oder schalte unter „Erweitert“ das Hochladen aus.')
     # F4: a session that runs WITHOUT upload because the rig has no usable token
     assert t.UPLOAD_OFF_PREFIX_DE == 'Aufnahme ohne Hochladen: '
     assert t.UPLOAD_OFF_NO_TOKEN_DE == (
         'Aufnahme ohne Hochladen: Auf dem Roboter ist kein Hugging-Face-Token gespeichert. '
-        'Der Datensatz bleibt auf dem Roboter; speichere einen Token in der EduBotics-App '
-        'unter „Schritt D: HuggingFace-Token“ und lade ihn später im Tab Daten hoch.')
+        'Der Datensatz bleibt auf dem Roboter; hinterlege dein Token auf der Startseite und '
+        'lade ihn später im Tab Daten hoch.')
     assert t.UPLOAD_OFF_TOKEN_INVALID_DE == (
         'Aufnahme ohne Hochladen: Hugging Face lehnt den Token des Roboters ab (ungültig oder '
-        'abgelaufen). Der Datensatz bleibt auf dem Roboter; speichere einen gültigen Token in '
-        'der EduBotics-App unter „Schritt D: HuggingFace-Token“ und lade ihn später im Tab '
-        'Daten hoch.')
+        'abgelaufen). Der Datensatz bleibt auf dem Roboter; ersetze dein Token auf der '
+        'Startseite und lade ihn später im Tab Daten hoch.')
     for text in (t.UPLOAD_OFF_NO_TOKEN_DE, t.UPLOAD_OFF_TOKEN_INVALID_DE):
         assert text.startswith(t.UPLOAD_OFF_PREFIX_DE)
+    for text in (t.HUB_CHECK_AUTH_DE, t.UPLOAD_OFF_NO_TOKEN_DE, t.UPLOAD_OFF_TOKEN_INVALID_DE):
+        assert 'Startseite' in text and 'Schritt D' not in text
+
+
+def test_042_token_slot_sentences():
+    """The answers of /register_hf_user (the per-student token slot)."""
+    assert t.HF_TOKEN_SET_OK_DE == 'Dein Hugging-Face-Token ist auf dem Roboter aktiv.'
+    assert t.HF_TOKEN_CLEARED_DE == 'Das Hugging-Face-Token wurde vom Roboter entfernt.'
+    assert t.HF_TOKEN_NONE_DE == 'Auf dem Roboter ist kein Hugging-Face-Token gespeichert.'
+    # M4: is_busy() is true for downloads and list fetches, not only uploads
+    assert t.HF_TOKEN_BUSY_DE == (
+        'Während einer Aufnahme oder einer Übertragung zu oder von Hugging Face kann das Token '
+        'nicht geändert werden. Bitte versuche es danach noch einmal.')
+    assert t.HF_TOKEN_SHAPE_DE == (
+        'Das ist kein gültiges Hugging-Face-Token. Es beginnt mit „hf_“ und enthält keine '
+        'Leerzeichen.')
+    assert t.HF_TOKEN_UNSUPPORTED_DE == (
+        'Dieser Roboter verwendet ein eigenes Token und nimmt kein persönliches an.')
+    assert t.HF_TOKEN_WRITE_FAILED_DE == 'Das Token konnte nicht auf dem Roboter gespeichert werden.'
+    names = ['HF_TOKEN_SET_OK_DE', 'HF_TOKEN_CLEARED_DE', 'HF_TOKEN_NONE_DE', 'HF_TOKEN_BUSY_DE',
+             'HF_TOKEN_SHAPE_DE', 'HF_TOKEN_UNSUPPORTED_DE', 'HF_TOKEN_WRITE_FAILED_DE']
+    assert len({getattr(t, n) for n in names}) == len(names)
+    # none of them can carry a token, a fingerprint or an exception text
+    for n in names:
+        text = getattr(t, n)
+        assert '{' not in text and 'hf_' not in text.replace('„hf_“', '')
     # F1: a FINISH accepted while the recorder was busy, applied after the discard
     assert t.FINISH_QUEUED_DE == (
         'Die Aufnahme wird beendet, sobald die verworfene Episode aufgeräumt ist.')

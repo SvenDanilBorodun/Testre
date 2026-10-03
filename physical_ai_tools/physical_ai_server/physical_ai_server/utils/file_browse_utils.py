@@ -27,7 +27,8 @@ the wire has none — and it had no root confinement at all:
 ``handle_go_parent_action`` walked to ``/`` one call at a time and
 ``handle_browse_action`` accepted any absolute path, so the whole container
 filesystem was enumerable (it even un-hid ``.cache`` specifically, which is
-where the HuggingFace login token lives).
+where the HuggingFace login token lived; since 042 a personal token sits on a
+tmpfs slot instead and the node purges the legacy files at boot).
 
 Every public entry point now routes its client-supplied path through
 ``_confine``. The root itself IS browsable — listing the per-student folders is
@@ -475,7 +476,7 @@ class FileBrowseUtils:
                         # datasets; the browser now STARTS inside
                         # ~/.cache/huggingface/lerobot and cannot leave it, so
                         # the exception is dead — and it was also what exposed
-                        # the directory holding the huggingface-cli token.
+                        # the directory that held the huggingface-cli token.
                         if name.startswith('.'):
                             continue
 

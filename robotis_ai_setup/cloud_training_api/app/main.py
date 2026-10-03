@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.routes.admin import router as admin_router
 from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
+from app.routes.hf_token import router as hf_token_router
 from app.routes.jetson import router as jetson_router
 from app.routes.jetson import teacher_router as jetson_teacher_router
 from app.routes.me import router as me_router
@@ -67,6 +68,24 @@ def _validate_required_secrets() -> None:
 _validate_required_secrets()
 
 
+def _validate_hf_token_key() -> None:
+    """Refuse to boot with a PRESENT but malformed token-encryption key.
+
+    EDUBOTICS_HF_TOKEN_KEY (and the optional rotation key
+    EDUBOTICS_HF_TOKEN_KEY_PREVIOUS) must be standard base64 of exactly 32
+    bytes. An ABSENT key is not fatal: the /me/hf-token routes answer 503 and
+    _warn_optional_secrets logs a WARNING. A half-configured key must stop the
+    deploy rather than degrade into "no key" and silently turn the feature
+    off. The RuntimeError names the variable only, never the value.
+    """
+    from app.services import hf_credentials
+
+    hf_credentials.load_keys()
+
+
+_validate_hf_token_key()
+
+
 def _warn_optional_secrets() -> None:
     """Log WARNING at boot for env vars that aren't strictly required but
     silently disable specific routes when missing. Migration 019 added
@@ -85,6 +104,14 @@ def _warn_optional_secrets() -> None:
         (
             "HF_TOKEN",
             "dataset reconciliation sweep + GDPR Art. 17 cleanup disabled.",
+        ),
+        # Migration 042 — per-student Hugging Face token storage. Without the
+        # key every /me/hf-token route except DELETE answers 503, so students
+        # cannot hand their own token to the robot.
+        (
+            "EDUBOTICS_HF_TOKEN_KEY",
+            "/me/hf-token routes will return 503 — students cannot store a personal "
+            "Hugging Face token. Generate 32 random bytes (base64) and set it on Railway.",
         ),
         # GUI_VERSION / GUI_DOWNLOAD_URL feed /version which the student
         # installer polls on every launch. When missing, the update gate
@@ -260,6 +287,7 @@ def _validate_required_schema() -> None:
         "progress_entries",
         "jetsons",  # 019 — classroom Jetson Orin Nano support
         "workflow_submissions",  # 040 — Roboter Studio „Abgeben" snapshots
+        "user_hf_credentials",  # 042 — a student's own HF token, AES-GCM encrypted
     )
     missing_tables: list[str] = []
     for table in required_tables:
@@ -317,6 +345,11 @@ def _validate_required_schema() -> None:
         ("workflow_versions", "code_files, code_language"),
         ("workflow_submissions",
          "id, student_user_id, workflow_id, classroom_id, code_language, submitted_at"),
+        # Migration 042 — the encrypted per-student HF token. routes/hf_token.py
+        # selects exactly these columns; a deploy landing the code before the
+        # migration would 500 every /me/hf-token call — fail the deploy fast.
+        ("user_hf_credentials",
+         "user_id, token_ciphertext, token_fp, token_hint, hf_username, token_role, validated_at"),
     )
     for table, cols in required_columns:
         try:
@@ -470,6 +503,18 @@ def _validate_required_schema() -> None:
             "p_code_files": {},
             "p_code_language": "python",
             "p_blockly_json": None,
+        }),
+        # Migration 042 — the SECURITY DEFINER writer behind PUT and POST
+        # /verify on /me/hf-token. Its first action is SELECT ... FROM users
+        # FOR UPDATE, which raises P0002 for the dummy id BEFORE any write, so
+        # the probe proves the six-argument shape exists without touching a row.
+        ("store_user_hf_credential", {
+            "p_user_id": dummy,
+            "p_ciphertext": "_probe",
+            "p_fp": "_probe",
+            "p_hint": "_probe",
+            "p_hf_username": "_probe",
+            "p_role": "_probe",
         }),
     )
     missing_rpcs: list[str] = []
@@ -628,6 +673,16 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # GDPR export — large response (full per-user JSON bundle), no
     # reason to allow more than a couple per hour.
     ("GET", "/me/export", 3, 3600.0),
+    # Per-student Hugging Face token (042). Method-pinned so each verb has its
+    # own budget: /reveal is what the Startseite calls on every login and
+    # rosbridge reconnect; PUT and /verify call the Hub, so they are the
+    # tightest. Per-user keyed (_PER_USER_RATE_LIMIT_PREFIXES): a classroom
+    # shares one NAT IP.
+    ("GET", "/me/hf-token", 60, 60.0),
+    ("PUT", "/me/hf-token", 6, 60.0),
+    ("DELETE", "/me/hf-token", 10, 60.0),
+    ("POST", "/me/hf-token/reveal", 20, 60.0),
+    ("POST", "/me/hf-token/verify", 6, 60.0),
 ]
 
 # Sort rules longest-prefix-first so a more-specific rule (e.g.
@@ -712,7 +767,10 @@ def _user_key_from_jwt(request: Request) -> str | None:
 # clone_workflow, restore_workflow_version, create_trajectory), so a JWT is
 # always present and there is no no-JWT/beacon fallback to regress. The IP
 # fallback still covers any (unreachable) missing-header case.
-_PER_USER_RATE_LIMIT_PREFIXES = ("/jetson/", "/trainings/", "/workflows")
+#
+# /me/hf-token (042) is per-user for the same NAT reason: every route under it
+# requires Depends(get_current_profile), so a JWT is always present.
+_PER_USER_RATE_LIMIT_PREFIXES = ("/jetson/", "/trainings/", "/workflows", "/me/hf-token")
 
 
 # Audit A2: hard upper bound on workflow-write request bodies.
@@ -728,6 +786,7 @@ _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
     ("POST", "/workflows"),
     ("PATCH", "/workflows"),
     ("POST", "/teacher/classrooms"),  # covers workflow-templates path too
+    ("PUT", "/me/hf-token"),  # 042 — a token is 256 chars at most; this stops a huge body being read
 )
 
 
@@ -846,6 +905,7 @@ app.include_router(health_router)
 app.include_router(version_router)
 app.include_router(training_router)
 app.include_router(me_router)
+app.include_router(hf_token_router)
 app.include_router(teacher_router)
 app.include_router(workgroups_router)
 app.include_router(datasets_router)

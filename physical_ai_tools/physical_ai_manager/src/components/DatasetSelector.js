@@ -217,7 +217,7 @@ export default function DatasetSelector() {
         // hf_username not linked yet.
         toast.error(
           'Es ist noch keine HuggingFace-ID mit deinem Konto verknüpft. ' +
-            'Wähle im Aufnahme-Tab deine Benutzer-ID, dann erneut synchronisieren.'
+            'Hinterlege dein Token auf der Startseite, dann erneut synchronisieren.'
         );
       } else if (err?.status === 502) {
         toast.error(
@@ -432,8 +432,8 @@ export default function DatasetSelector() {
 
         {!hfUsername && !cloudError && (
           <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 mb-2 leading-snug">
-            Noch keine HuggingFace-ID verknüpft. Wähle im Aufnahme-Tab deine
-            Benutzer-ID — danach erscheinen deine Datensätze hier automatisch.
+            Noch kein Hugging-Face-Konto verknüpft. Hinterlege dein Token auf
+            der Startseite, danach erscheinen deine Datensätze hier automatisch.
           </p>
         )}
 

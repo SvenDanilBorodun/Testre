@@ -52,6 +52,29 @@ export function stalledSourceProblem(source, { bridge = null, activation = null 
   return { kind: 'bad', textDe: P.leaderStalled };
 }
 
+// features/hfToken/syncDecision::START_BLOCK spells one kind in snake_case.
+const HF_TOKEN_REASON_KEY = Object.freeze({
+  none: 'none',
+  unusable: 'unusable',
+  transfer: 'transfer',
+  failed: 'failed',
+  taken_over: 'takenOver',
+  takenOver: 'takenOver',
+});
+
+/**
+ * Why Start is refused for the student's own Hugging-Face token (the robot does
+ * not hold it yet): 'none' | 'unusable' | 'transfer' | 'failed' | 'taken_over'.
+ * Every reason but `transfer` sends the student to the Startseite — that one
+ * resolves by itself in a moment — so only the others get the link.
+ * Returns null for a reason it does not know.
+ */
+export function hfTokenProblem(reason) {
+  const key = HF_TOKEN_REASON_KEY[reason];
+  if (!key) return null;
+  return { kind: 'bad', textDe: P.hfToken[key], linkToHome: key !== 'transfer' };
+}
+
 /** The sentence for one slow source. */
 export function slowSourceProblem(source, fps) {
   if (!source) return null;

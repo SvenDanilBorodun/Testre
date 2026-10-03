@@ -142,7 +142,7 @@ describe('DatasetSelector — Datensätze synchronisieren', () => {
     );
   });
 
-  test('a 400 (HF not linked) shows the German "Benutzer-ID verknüpfen" prompt', async () => {
+  test('a 400 (HF not linked) sends the student to the Startseite, where the token is entered', async () => {
     const err = new Error('not linked');
     err.status = 400;
     mockSync.mockRejectedValue(err);
@@ -158,6 +158,11 @@ describe('DatasetSelector — Datensätze synchronisieren', () => {
         expect.stringContaining('keine HuggingFace-ID')
       )
     );
+    // The Benutzer-ID is no longer chosen on the Aufnahme page to link the
+    // account: the token entered on the Startseite proves it.
+    const shown = mockToast.error.mock.calls[0][0];
+    expect(shown).toContain('Hinterlege dein Token auf der Startseite');
+    expect(shown).not.toContain('Aufnahme-Tab');
   });
 
   test('surfaces the cloud list error in the selector', async () => {

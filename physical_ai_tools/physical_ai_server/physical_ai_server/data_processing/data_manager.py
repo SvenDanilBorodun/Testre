@@ -26,7 +26,6 @@ from pathlib import Path
 import queue
 import re
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -1986,7 +1985,8 @@ class DataManager:
     # Cached at CLASS level because it is a property of the RIG's token, not of
     # a recording: whoami is an 8 s-bounded network call and _upload_dataset
     # runs on the end-of-recording save path, which is already busy.
-    # Invalidated by register_huggingface_token.
+    # Invalidated by the node's /register_hf_user callback after every set or
+    # clear of the per-student token slot (hf_token_store, 042).
     _hf_namespace_cache = None
 
     @classmethod
@@ -2015,8 +2015,12 @@ class DataManager:
         two reasons above are untouched by that, so the fail-open stays exactly
         as correct as it was — and the guard's LOGIC is deliberately unchanged.
 
-        This is a REFUSE-ON-PROOF gate, matching hf_token_is_foreign's
-        treatment of an absent stamp.
+        This is a REFUSE-ON-PROOF gate: it only ever refuses a namespace it
+        can demonstrably show the rig's token does not own.
+
+        Since 042 the token is the signed-in student's own (the Startseite
+        pushes it into the tmpfs slot hf_token_store manages), so this guard is
+        defence in depth behind the SPA's start block, not the primary fence.
         """
         if cls._hf_namespace_cache is not None:
             return cls._hf_namespace_cache
@@ -2083,60 +2087,6 @@ class DataManager:
         except queue.Empty:
             print('HuggingFace whoami timed out after 8 seconds')
             return None
-
-    @staticmethod
-    def register_huggingface_token(hf_token):
-        def validate_token():
-            api = HfApi(token=hf_token)
-            try:
-                user_info = api.whoami()
-                user_name = user_info['name']
-                print(f'Successfully validated HuggingFace token for user: {user_name}')
-                return True
-            except Exception as e:
-                print(f'Token is invalid, please check hf token: {e}')
-                return False
-
-        # Use queue to get result from thread
-        result_queue = queue.Queue()
-
-        def worker():
-            result = validate_token()
-            result_queue.put(result)
-
-        # Start thread and wait with timeout
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
-
-        try:
-            # Wait for result with 1.5 second timeout
-            is_valid = result_queue.get(timeout=1.5)
-            if not is_valid:
-                return False
-        except queue.Empty:
-            print('Token validation timed out after 1.5 seconds')
-            return False
-
-        try:
-            result = subprocess.run([
-                'huggingface-cli', 'login', '--token', hf_token
-            ], capture_output=True, text=True, check=True)
-
-            # The rig's identity just changed, so the cached namespace
-            # allowlist in _rig_hf_namespaces is stale. Without this a token
-            # swap would keep refusing (or keep permitting) against the old
-            # account for the life of the node.
-            DataManager.invalidate_hf_namespace_cache()
-            print('Successfully logged in to HuggingFace Hub')
-            return result
-
-        except subprocess.CalledProcessError as e:
-            print(f'Failed to login with huggingface-cli: {e}')
-            print(f'Error output: {e.stderr}')
-            return False
-        except FileNotFoundError:
-            print('huggingface-cli not found. Please install package.')
-            return False
 
     @staticmethod
     def download_huggingface_repo(
@@ -2326,13 +2276,14 @@ class DataManager:
             print(f'Traceback: {traceback.format_exc()}')
 
     # Student-facing German explanation for an invalid/expired HF token —
-    # MUST point at the GUI token field ("Schritt D"), never at `hf auth
-    # login` (the token lives in the host .env, set once in the GUI; there
-    # is deliberately NO in-app token UI). leLab-comparison PR-1.
+    # MUST point at the Startseite, never at `hf auth login`: since 042 the
+    # token is the signed-in student's own, pasted once on the Startseite and
+    # pushed to the robot's tmpfs slot, so replacing it there applies at once
+    # (no environment restart). leLab-comparison PR-1. Byte-identical with
+    # record_texts_de.HF_AUTH_ERROR_DE (fenced by test_record_texts_de.py).
     HF_AUTH_ERROR_DE = (
-        'Hugging Face-Token ungültig oder abgelaufen. Bitte in der '
-        'EduBotics-App unter „Schritt D: HuggingFace-Token" einen gültigen '
-        'Token speichern und die Umgebung neu starten.'
+        'Hugging Face-Token ungültig oder abgelaufen. Ersetze dein Token auf der '
+        'Startseite der EduBotics-App.'
     )
 
     # German failure reason of the most recent upload/download attempt.

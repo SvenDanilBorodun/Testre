@@ -19,6 +19,7 @@
 import { createSlice } from '@reduxjs/toolkit';
 
 import PageType from '../../constants/pageType';
+import { signedOut } from '../session/sessionActions';
 
 const initialState = {
   isLoading: false,
@@ -27,11 +28,14 @@ const initialState = {
   sidebarOpen: false,
   modalOpen: false,
   notifications: [],
-  // HuggingFace Benutzer-ID list (account + orgs from whoami). Fetched ONCE
-  // on ROS connect (StudentApp) and shared via Redux so it survives tab
-  // switches — the dropdown options used to live in per-component useState
-  // and reset to [] on every unmount, which is why the Benutzer-ID looked
-  // "wiped" when switching tabs.
+  // HuggingFace Benutzer-ID list (account + orgs from whoami of the token in
+  // the ROBOT's slot). Fetched when the local ROS connection comes up and
+  // shared via Redux so it survives tab switches — the dropdown options used to
+  // live in per-component useState and reset to [] on every unmount, which is
+  // why the Benutzer-ID looked "wiped" when switching tabs. It belongs to the
+  // STUDENT whose token filled the slot, so `session/signedOut` empties it
+  // (extraReducers below) and hooks/useHfUserList only loads it while the slot
+  // is provably this student's (features/hfToken/hfTokenSelectors).
   hfUserList: [],
   isFirstLoad: {
     home: true,
@@ -88,6 +92,13 @@ const uiSlice = createSlice({
     setIsFirstLoadTrue: (state, action) => {
       state.isFirstLoad[action.payload] = true;
     },
+  },
+  extraReducers: (builder) => {
+    // The list is the previous student's accounts and organisations; the next
+    // student must not inherit it. Which tab is open stays (not student data).
+    builder.addCase(signedOut, (state) => {
+      state.hfUserList = [];
+    });
   },
 });
 

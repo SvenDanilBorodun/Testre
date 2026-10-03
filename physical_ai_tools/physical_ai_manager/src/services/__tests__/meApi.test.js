@@ -3,9 +3,10 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 //
-// Locks the /me wire shape, incl. the new PATCH that links the HF
-// "Benutzer-ID" to the cloud profile (StudentApp auto-link). A regression
-// here silently breaks the dataset-visibility reconciliation.
+// Locks the /me wire shape, incl. the PATCH that links an HF "Benutzer-ID" to
+// the cloud profile. Nothing in the app calls the PATCH any more (the cloud
+// proves the name from the stored token instead and answers 409 once one is
+// stored); the wire shape stays pinned for older clients.
 
 import { getMe, patchMyHfUsername } from '../meApi';
 

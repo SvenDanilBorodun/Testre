@@ -47,7 +47,20 @@
 //      while presenting a completed handover. `scope: 'local'` is not an
 //      escape hatch — `_signOut` calls `admin.signOut()` before it looks at
 //      the scope. So a reported failure sweeps the key itself.
-//   5. the scrub AGAIN, for whatever the await window re-persisted.
+//   5. the robot's token slot is cleared — see below — and the scrub runs AGAIN,
+//      for whatever the await window re-persisted.
+//
+// THE ROBOT'S TOKEN SLOT. The student's Hugging-Face token lives in ONE slot on
+// the robot (features/hfToken/robotChannel), and the next student at a shared PC
+// must not find it there. The clear is STARTED right after the Jetson reset and
+// before anything else, so it overlaps the revoke instead of adding to it; it is
+// AWAITED only after the revoke, for at most CLEAR_BOUND_MS (2 s), and every
+// failure is swallowed — a robot that is gone, busy (recording or uploading) or
+// slow must never keep a student signed in. A clear that did not happen leaves
+// the token in the slot until the next login reconciles it, and Aufnahme refuses
+// Start until the robot holds the NEW student's token. Skipped while a classroom
+// Jetson is claimed: its rosbridge is the Jetson proxy, which keeps its own
+// token and is never sent a personal one.
 //
 // Step 2 is ONE action every slice answers for itself
 // (`features/session/sessionActions`), not a list of resets kept here: a list
@@ -60,8 +73,22 @@
 import { supabase } from '../lib/supabaseClient';
 import { signedOut } from '../features/session/sessionActions';
 import { resetJetsonOnLogout } from '../features/jetson/sessionReset';
+import { CLEAR_BOUND_MS, clearRobotHfToken } from '../features/hfToken/robotChannel';
 import { forgetVormachenCopy } from '../components/Workshop/code/vormachenClipboard';
 import { clearStudentScopedStorage, clearSupabaseSessionKeys } from './sessionScope';
+
+// Begin clearing the robot's token slot and hand back a promise that NEVER
+// rejects. `clearRobotHfToken` already promises that; the guard exists because
+// this promise is created long before it is awaited (across the revoke), and a
+// rejection with no handler attached yet is an unhandled-rejection event.
+function startRobotTokenClear(jetsonClaimed) {
+  if (jetsonClaimed) return Promise.resolve(false);
+  try {
+    return Promise.resolve(clearRobotHfToken()).catch(() => false);
+  } catch (_) {
+    return Promise.resolve(false);
+  }
+}
 
 /**
  * Drop every scrap of the signed-in student and end the session.
@@ -89,8 +116,13 @@ export const signOutStudent = ({ reload = true } = {}) => async (dispatch, getSt
   const state = getState() || {};
   const accessToken = state.auth?.session?.access_token ?? null;
   const jetsonId = state.jetson?.jetsonId ?? null;
+  // CLAIMED, not merely discovered: `jetsonId` is also set for an available or
+  // busy classroom Jetson this student never connected to.
+  const jetsonClaimed = state.jetson?.status === 'connected';
 
   resetJetsonOnLogout(dispatch, accessToken, jetsonId);
+  // Started now, awaited after the revoke (see „THE ROBOT'S TOKEN SLOT").
+  const hfClear = startRobotTokenClear(jetsonClaimed);
   dispatch(signedOut());
   // The one piece of student content held in module memory instead of a
   // slice: the lines Vormachen last put on the clipboard (review round 5,
@@ -110,6 +142,17 @@ export const signOutStudent = ({ reload = true } = {}) => async (dispatch, getSt
   }
   if (revokeFailed) {
     clearSupabaseSessionKeys();
+  }
+  // Wait for the robot's answer, but never longer than the bound: the sign-out
+  // is local first and this is a courtesy to the NEXT student, not a gate.
+  let boundTimer;
+  const bound = new Promise((resolve) => { boundTimer = setTimeout(resolve, CLEAR_BOUND_MS); });
+  try {
+    await Promise.race([hfClear, bound]);
+  } catch (_) {
+    /* swallowed on purpose */
+  } finally {
+    clearTimeout(boundTimer);
   }
   // The await window is over; re-scrub. Redux was already clean and the
   // `/task/status` adopt is identity-gated, but `setTaskInfo` re-persists a

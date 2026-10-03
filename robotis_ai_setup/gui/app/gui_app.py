@@ -783,14 +783,18 @@ class EduBoticsApp:
         # .env value, so the badge never claims "ready" during the restart.
         self._rs_switch_in_flight = False
 
-        # BEFORE _build_ui, because Schritt D's status label is built inside it
-        # and reads the .env: a token this PC can prove belongs to another one
-        # has to be gone from the file by then, so the label says „Kein Token
-        # gespeichert" and the student is re-prompted exactly as on a fresh
-        # install. Safe to log from here — _log defers through root.after(0),
-        # which cannot fire before mainloop() and therefore not before
-        # self.log_text exists.
-        self._bind_hf_token()
+        # The HuggingFace token is entered once on the Startseite of the web
+        # interface and stored with the student's account, so a token the old
+        # Schritt D left in this PC's .env has to go. Done BEFORE _build_ui and
+        # the prerequisite checks, so nothing below can read or forward it. Safe
+        # to log from here: _log defers through root.after(0), which cannot fire
+        # before mainloop() and therefore not before self.log_text exists.
+        self._purge_legacy_hf_token()
+
+        # A student who closes the web window without „Abmelden" leaves their
+        # token on the robot. The window's watcher reports the end to this hook
+        # (never for a window `destroy_all` closed: those paths stop the stack).
+        webview_window.set_exit_callback(self._on_student_window_closed)
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -802,7 +806,7 @@ class EduBoticsApp:
         """Return a frame whose content can exceed the window height and stay
         reachable via a vertical scrollbar / mouse wheel.
 
-        The whole form (Modus + Schritte A-D + Start-Buttons + Protokoll) is
+        The whole form (Modus + Schritte A-C + Start-Buttons + Protokoll) is
         taller than a small student laptop screen. Without this, the bottom
         (the Start button, the Protokoll) is clipped off-screen and unreachable.
         Everything is packed into the returned inner frame exactly as before."""
@@ -942,15 +946,15 @@ class EduBoticsApp:
         """Colour a Schritt status label from the text its StringVar carries.
 
         A TRACE, not a call at each write site, and that is the load-bearing
-        part: the three status vars are written from `_scan_arms._do_scan`,
-        `_try_rehydrate_arms` and `_refresh_hf_token_status`, and the first two
-        are SOURCE-EXTRACTED by the test suite against owners built from
-        `types.SimpleNamespace` — a new `self.<anything>` reference in either is
-        an AttributeError there, with nothing about the scan actually changed.
+        part: the two status vars are written from `_scan_arms._do_scan` and
+        `_try_rehydrate_arms`, which are SOURCE-EXTRACTED by the test suite
+        against owners built from `types.SimpleNamespace` — a new
+        `self.<anything>` reference in either is an AttributeError there, with
+        nothing about the scan actually changed.
         Tracing the variable covers every writer, including future ones, and
         changes neither method by a byte.
 
-        Schritt A-D were uniformly grey before this whether they said „Nicht
+        Schritt A-C were uniformly grey before this whether they said „Nicht
         gescannt", „Gefunden: …" or „Nicht gefunden" (17 greys, one green and
         one #0A6 in the whole file), so nothing on screen said which steps were
         done and which had failed."""
@@ -1135,39 +1139,6 @@ class EduBoticsApp:
             "im Browser öffnest. Das Handybild erscheint dann als zusätzliche "
             "Kamera /phone (für Roboter-Studio und die Vorschau). Das Handy "
             "muss im selben WLAN sein.")
-
-        # ── Schritt D: HuggingFace Token ──
-        # One-time token entry. Stored on THIS PC in %LOCALAPPDATA%\EduBotics\.env
-        # (config_generator.upsert_env_var) and forwarded into the container via
-        # docker-compose --env-file, so Aufnahme/Training/Inferenz all pick it up
-        # from $HF_TOKEN without the student re-entering it anywhere.
-        hf_frame = ttk.LabelFrame(main, text="Schritt D: HuggingFace Token", padding=10)
-        hf_frame.pack(fill=tk.X, pady=5)
-        self.hf_frame = hf_frame
-        self._hint_label(
-            hf_frame,
-            "Einmalig dein HuggingFace-Token eingeben. Es wird auf diesem PC "
-            "gespeichert und für Aufnahme, Training und Inferenz verwendet — "
-            "du musst es später nirgends erneut eingeben.",
-            pady=(0, 0))
-        hf_row = ttk.Frame(hf_frame)
-        hf_row.pack(fill=tk.X, pady=5)
-        self.hf_token_var = tk.StringVar()
-        self.hf_token_entry = ttk.Entry(
-            hf_row, textvariable=self.hf_token_var, show="•", width=42,
-        )
-        self.hf_token_entry.pack(side=tk.LEFT)
-        self.btn_save_token = ttk.Button(
-            hf_row, text="Token speichern", command=self._save_hf_token,
-        )
-        self.btn_save_token.pack(side=tk.LEFT, padx=8)
-        self.hf_token_status_var = tk.StringVar()
-        self.hf_token_status_label = ttk.Label(
-            hf_row, textvariable=self.hf_token_status_var)
-        self.hf_token_status_label.pack(side=tk.LEFT, padx=4)
-        self._bind_step_state(self.hf_token_status_var,
-                              self.hf_token_status_label)
-        self._refresh_hf_token_status()
 
         # ── Start-Button ──
         btn_frame = ttk.Frame(main)
@@ -1393,92 +1364,60 @@ class EduBoticsApp:
                 self._set_status("Bereit — Hardware scannen, um zu beginnen")
         self._update_start_button()
 
-    # ── HuggingFace token ────────────────────────────────────────────
+    # ── Legacy HuggingFace token ─────────────────────────────────────
 
-    def _bind_hf_token(self):
-        """Judge the stored HuggingFace token against THIS PC, and say so.
+    def _purge_legacy_hf_token(self):
+        """Remove the HuggingFace token the old Schritt D stored in the .env.
 
-        %LOCALAPPDATA%\\EduBotics\\.env travels — roaming profile, FSLogix
-        container, AppData redirection, or a golden image captured after a first
-        launch — and it carries HF_TOKEN, which compose forwards into
-        physical_ai_server. So a copied profile would upload one student's
-        recordings under another's HuggingFace account. The decision and the
-        deletion live in ``config_generator.bind_hf_token_to_this_machine``; this
-        method exists to put the outcome in the Protokoll, because removing a
-        credential the student entered must not happen silently.
+        The token now belongs to the student's cloud account and is entered once
+        on the Startseite of the web interface; this PC keeps none. The removal
+        itself is ``config_generator.purge_legacy_hf_token`` (``HF_TOKEN`` and
+        its machine stamp, one atomic write); this method exists to put the
+        outcome in the Protokoll, because taking away a credential the student
+        entered must not happen silently, and to point to where it lives now.
 
-        Never raises: an unreadable/unwritable .env is reported and the launch
-        continues. The regenerate-side filter in
-        ``config_generator._read_unmanaged_lines`` still keeps a foreign token out
+        The log line is the fixed sentence below and NOTHING else: no token, no
+        length, no .env line, and on a failure only the exception CLASS, because
+        an exception raised while the .env is being read or rewritten may carry
+        a line of it. Never raises: an unreadable or unwritable .env is reported
+        and the launch continues. The regenerate-side filter in
+        ``config_generator._read_unmanaged_lines`` still keeps the old token out
         of the .env compose reads, so a failure here costs the report and the
         early deletion, not the protection.
         """
         try:
-            verdict = config_generator.bind_hf_token_to_this_machine(ENV_FILE)
+            removed = config_generator.purge_legacy_hf_token(ENV_FILE)
         except Exception as e:  # noqa: BLE001 — a diagnostic must not block startup
             self._log(
-                f"[WARNUNG] Das gespeicherte HuggingFace-Token konnte nicht "
-                f"geprüft werden: {e}"
+                "[WARNUNG] Das alte HuggingFace-Token konnte nicht von diesem "
+                f"PC entfernt werden ({type(e).__name__})."
             )
             return
-        if verdict == config_generator.HF_TOKEN_FOREIGN:
+        if removed:
             self._log(
-                "[WARNUNG] Das gespeicherte HuggingFace-Token stammt von einem "
-                "anderen PC — die EduBotics-Konfiguration wurde offenbar "
-                "mitkopiert. Das Token wurde von diesem PC gelöscht, damit "
-                "Aufnahmen nicht unter einem fremden HuggingFace-Konto landen. "
-                "Bitte in Schritt D dein eigenes Token eingeben."
-            )
-        elif verdict == config_generator.HF_TOKEN_ADOPTED:
-            self._log(
-                "HuggingFace-Token wurde diesem PC zugeordnet und bleibt "
-                "gespeichert — eine erneute Eingabe ist nicht nötig."
+                "Das alte HuggingFace-Token wurde von diesem PC entfernt. "
+                "Hinterlege dein Token jetzt einmalig auf der Startseite der "
+                "Web-Oberfläche."
             )
 
-    def _refresh_hf_token_status(self):
-        """Reflect whether a token is already saved on this PC — without
-        revealing the secret. Read from the .env each time so it stays
-        accurate after a save or an external edit."""
+    def _on_student_window_closed(self, generation: int) -> None:
+        """The student's web window ended on its own: clear the robot's token.
+
+        Registered with ``webview_window.set_exit_callback`` and called on that
+        window's WATCHER THREAD (a daemon, one per window), never on the Tk
+        thread, so it may block for the retry budget and must touch no widget
+        and no Tk variable: the only UI channel is ``_log``, which defers
+        through ``root.after``. ``generation`` is the session the window
+        belonged to; the clear stops silently as soon as a newer window or the
+        browser fallback has superseded it (``begin_session``). All of the
+        mechanism, the outcomes and the one German line are in
+        ``docker_manager.clear_robot_hf_token_after_window_close``. Never raises.
+        """
         try:
-            existing = config_generator.read_env_var("HF_TOKEN", ENV_FILE)
-        except Exception:
-            existing = None
-        if existing:
-            self.hf_token_status_var.set("Token gespeichert")
-        else:
-            self.hf_token_status_var.set("Kein Token gespeichert")
-
-    def _save_hf_token(self):
-        """Persist the entered HF token to %LOCALAPPDATA%\\EduBotics\\.env.
-
-        The token is cleared from the widget afterwards so the secret isn't
-        left on screen; the status label confirms it's saved. Takes effect in
-        the container on the next 'Umgebung starten' (--force-recreate)."""
-        token = self.hf_token_var.get().strip()
-        if not token:
-            messagebox.showwarning(
-                "Kein Token",
-                "Bitte gib dein HuggingFace-Token ein (beginnt mit 'hf_').",
-            )
-            return
-        try:
-            # write_hf_token, not upsert_env_var: it stamps HF_TOKEN_MACHINE in
-            # the same breath, so a stored token can never exist unstamped and
-            # be mistaken for a legacy one on a machine that copied this .env.
-            config_generator.write_hf_token(token, ENV_FILE)
-        except Exception as e:
-            messagebox.showerror(
-                "Fehler", f"Token konnte nicht gespeichert werden: {e}"
-            )
-            return
-        self.hf_token_var.set("")
-        self._refresh_hf_token_status()
-        self._log("HuggingFace-Token auf diesem PC gespeichert.")
-        messagebox.showinfo(
-            "Gespeichert",
-            "HuggingFace-Token wurde gespeichert. Es wird beim nächsten "
-            "„Umgebung starten“ aktiv.",
-        )
+            docker_manager.clear_robot_hf_token_after_window_close(
+                generation, webview_window.is_current_generation, log=self._log)
+        except Exception:  # noqa: BLE001 — a watcher-thread hook must not raise
+            pass
 
     # ── Logging ──────────────────────────────────────────────────────
 
@@ -4220,12 +4159,9 @@ class EduBoticsApp:
         # be released first (PR-4; the leLab 5-revert contention class).
         self._stop_camera_previews()
         is_cloud_only = self.cloud_only.get()
-        # Capture on the main thread — tk StringVar reads from the worker
-        # thread below are not thread-safe. Empty means "leave the saved
-        # token untouched" (generate_env_file preserves the existing one).
-        hf_token = self.hf_token_var.get().strip()
-        # Phone-as-3rd-camera toggle — captured here for the same thread-safety
-        # reason. Only meaningful on the native_bridge (Windows) path.
+        # Phone-as-3rd-camera toggle — captured on the main thread, because tk
+        # StringVar/BooleanVar reads from the worker thread below are not
+        # thread-safe. Only meaningful on the native_bridge (Windows) path.
         phone_enabled = bool(self.phone_camera_enabled.get()) and not is_cloud_only
         # Robot type is HARDSET at start (MANAGED .env key EDUBOTICS_ROBOT_TYPE).
         # Read it on the main thread; the worker below, the .env regen, the
@@ -4296,23 +4232,6 @@ class EduBoticsApp:
                     except Exception as e:
                         self._log(f"[WARNUNG] Serielle Ports konnten nicht validiert werden: {e}")
                         self._log("Fahre trotzdem fort — Container versuchen erneut auf Geräte zuzugreifen.")
-
-                # 0.5 Persist a freshly-typed HF token (if any) BEFORE the .env
-                # is regenerated, so generate_env_file() carries it through as
-                # an unmanaged key. An already-saved token (empty field) is
-                # left untouched and preserved by the regenerate. write_hf_token
-                # stamps HF_TOKEN_MACHINE with it, so the token the student just
-                # typed is bound to THIS PC before the .env can be copied
-                # anywhere — writing it here unstamped would make it look like a
-                # legacy token on every clone.
-                if hf_token:
-                    try:
-                        config_generator.write_hf_token(hf_token, ENV_FILE)
-                        self._log("HuggingFace-Token gespeichert.")
-                        self.root.after(0, lambda: self.hf_token_var.set(""))
-                        self.root.after(0, self._refresh_hf_token_status)
-                    except Exception as e:
-                        self._log(f"[WARNUNG] HF-Token konnte nicht gespeichert werden: {e}")
 
                 # 1. .env generieren
                 self._set_status("Konfiguration wird erstellt...")
@@ -4715,6 +4634,10 @@ class EduBoticsApp:
 
     def _webview_fallback(self, url: str):
         """Open the system browser as a last-resort fallback."""
+        # A browser tab is a new student session no watcher follows: supersede
+        # any clear still queued for the window that just failed, or its retry
+        # could reach a token pushed from this tab.
+        webview_window.begin_session()
         self._log("[WARNUNG] WebView2 nicht verfügbar — System-Browser wird geöffnet.")
         messagebox.showwarning(
             "WebView2 nicht verfügbar",

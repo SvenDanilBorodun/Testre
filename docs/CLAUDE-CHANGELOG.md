@@ -6,6 +6,161 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-03 (later) — closing the student window clears the robot's token
+
+**Why.** „Abmelden" clears the robot's token slot (`signOutStudent` → `clearRobotHfToken`), but a student who just closes the
+window never signs out, so the next person at the PC started on the previous student's token until their own login replaced it.
+The Windows GUI is the one party that SEES the window end (the `webview_window` watcher thread), so it now asks the robot to
+clear the slot. Windows GUI only: no change to the server package, compose, images, React, cloud API or the Pi agent.
+
+**Mechanism: three options, one chosen.**
+- (a) `docker exec … rm -f $HF_TOKEN_PATH` — rejected. The Dockerfile's `HF_TOKEN_PATH` gate proves `get_token()` re-reads the file on every call
+  and returns None right after deletion, so a running `upload_large_folder` retries its failing call until the F7 stall watchdog
+  (`UPLOAD_STALL_S`) kills the child and the student's upload ends „Failed". It also skips `_hf_token_lock`,
+  `DataManager.invalidate_hf_namespace_cache()` (the class-level cache would keep the previous namespaces) and the immediate state publish.
+- (b) the node's own service — chosen. `_apply_hf_token_request` succeeds for empty + nothing stored, REFUSES with the file untouched
+  while `on_recording` or `hf_api_worker.is_busy()`, and otherwise clears, invalidates and publishes. The GUI calls `/register_hf_user`
+  with an empty token from `docker_manager._HF_CLEAR_SCRIPT`, a fixed script run through `wsl_bridge.run` (the repo's carrier for
+  multi-line WSL scripts; nested quotes through `wsl.exe` argv are the failure `_docker_cmd` documents), after a read-only `test -s` of
+  the slot so the ordinary case (the student signed out first) starts no ROS process. The shape follows `entrypoint_omx.sh::disable_torque`
+  (`timeout N ros2 service call`) and the `pas()` helper of `docs/COLLISION_ESTOP_WINDOWS_VALIDATION.md` (the two `source` lines).
+- (c) "remove the file when the node does not answer" — rejected: a hung node can still own an upload child.
+
+**Deliberate versus not.** Only an end that `destroy_all` did NOT cause is reported. Every `destroy_all` caller (`_on_close`,
+`_stop_environment._do_stop`, `_run_prerequisite_checks_body`, `_scan_arms._do_scan`, and `_launch_installer_and_exit`'s tuple) is
+followed by a container stop or a process exit, which already drops the tmpfs; a clear there would only race `compose down`. The
+mark is per Popen (`_edubotics_deliberate`, set under `_lock` before WM_CLOSE or terminate), because the global `_deliberate_stop` is
+cleared by the NEXT spawn: a watcher that wakes late and read it would classify the wrong spawn. The global stays for the legacy
+`_runtime_missing` branch and tests pin it. The watcher now receives the Popen and the generation captured under `_lock`
+(`args=(_process,)` read the global after the lock, which a racing `destroy_all` had already set to None).
+
+**Race analysis.** Every new student session (a spawn, a refused spawn, `_webview_fallback`; not the live-child short-circuit) bumps
+`webview_window._generation`, and the retry loop asks `is_current_generation` after each sleep, again once the single-flight lock is
+held, and so right before the attempt. Ordering therefore holds by construction except for one case: an attempt that started BEFORE
+student B's window opened may still be in flight when B's token lands. B needs window boot plus a typed login (`bootScrub` removed A's
+session), the attempt is hard-bounded (8 + 1 s in the container, 15 s outside), and it self-heals anyway: `decideSync` with the slot
+absent and the account `stored` returns PUSH (`present` false skips `taken_over`; the breaker needs three writes within 60 s).
+Reopening already costs a re-login, so the clear adds no step the student sees.
+
+**Outcomes and the one line.** `cleared`, `empty` and `no_container` end silently (the ordinary path logs nothing). `refused` and
+`unreachable` retry after 15, 45, 120 and 300 s (five attempts, about 8.5 min; a window closed mid-recording is where a refusal is
+normal, and the file is never forced). Only an exhausted budget with the window still current logs ONE line: `HF_CLEAR_REFUSED_DE`
+(`[INFO]`, the token stays because a recording or transfer runs) or `HF_CLEAR_UNREACHABLE_DE` (`[WARNUNG]`). Decisions taken with the
+owner: retry on refusal yes, no `rm -f` fallback, no success line, no node-side watchdog now.
+
+**Evidence.** `tests/test_gui_robot_token_clear.py` (77 tests): the watcher with a blocking fake child (rc 0 reports once with
+the spawn's generation; `destroy_all` never reports, also when the child is released after the next spawn cleared the global
+flag; rc 3 reports AND flags the runtime; a raising hook ends the watcher without an uncaught thread exception); the generation
+bumps; a blocking hook does not hold up `open_student_window`, `has_live_window` or `destroy_all`; the script is fixed, has no
+`rm`, `unlink`, `tee`, `/run/edubotics-hf` or redirect to a file, and its service and type equal `robotChannel.js`; the sentinel
+mapping for all five outcomes and every failure shape; the script EXECUTED under a real `bash` against stub `docker`, `ros2`,
+`timeout` and `nice`, including the exact `ros2` argv `service call /register_hf_user physical_ai_interfaces/srv/SetHFUser
+{token: ""}`; the retry loop with injected attempt, sleep and `is_current` (one attempt on `cleared`, none when superseded, a
+silent stop between attempts, five attempts and the delays on a refusal, one line, no overlap of two threads); the `gui_app`
+wiring on the AST and on the shipped method source; and a subprocess import with `tkinter`, `webview` and `clr` blocked. 19
+hand-made mutants (no deliberate check, the global flag instead of the per-Popen mark, no bump at a spawn or at the fallback, a
+bump at the short-circuit, a late generation read, the check after the sleep or inside the lock removed, no single-flight lock,
+a log line for a superseded window, `check=True`, three delays instead of four, a non-empty token in the script, `refused`
+mapped to `cleared`, an unbounded CLI, a hook exception escaping the watcher, the hook not registered, an always-current
+predicate) were run against the suite: 17 were killed at once and the other two (a late generation read, an escaping hook
+exception) got a test and are killed too. Setup suite: 1948 → 2025 tests, the same 5 `test_gui_theme` errors without tkinter (0
+with a stub), skipped 81 → 81.
+
+**Not run (no Windows, WSL or ROS here).** `wsl -d EduBotics -- bash` with the script on stdin and a nested `docker exec`; Jazzy's
+real `ros2 service call` output and `timeout`/`nice` in the image; an X-click producing exit code 0 and `proc.wait()` returning at
+once; the cost of the `ros2` CLI (about 100 MB, one DDS participant) inside the 6 GB server container while it records or uploads
+(rig check: close the window mid-recording, watch for „Signalaussetzer", frame loss, OOM). Residuals and the node-side watchdog
+trigger: `docs/KNOWN-ISSUES.md`, „A token can outlive a closed window".
+
+### Unreleased, 2026-10-03 — Per-student Hugging Face token: entered once on the Startseite, stored with the account
+
+**Why.** The student's Hugging Face token was a property of the PC: one slot in `%LOCALAPPDATA%\EduBotics\.env` (GUI
+„Schritt D"), one in the Pi's `/etc/edubotics/.env` (System tab), forwarded to the robot as `HF_TOKEN`. On a PC shared by many
+students everyone recorded under whatever the last person typed (the P0-3/P0-4 attribution defect in
+`docs/KNOWN-ISSUES.md`), and the machine stamp, `hf_token_is_foreign` and `EDUBOTICS_HF_TOKEN_ANY_MACHINE` were three layers of
+bookkeeping around that one wrong ownership. The owner wanted the token to belong to the ACCOUNT: pasted once on the Startseite
+after the mandatory cloud login, delivered to any robot the student sits at, gone when they leave. The platform token
+(`HF_TOKEN` on Railway + the Modal secret) and the classroom Jetson's read-only token are unchanged; cloud and Modal do not use
+the student token this round.
+
+**Cloud (migration 042, `cloud_training_api`).**
+- `public.user_hf_credentials` (service-role-only: RLS on, no policies, every grant to anon/authenticated revoked, not in
+  Realtime) holds `token_ciphertext` (CHECK: only a `v1.<kid>.<base64url>` envelope can be stored), `token_fp`, `token_hint`,
+  the proven `hf_username`, `token_role` (CHECK: never `read`). The one writer is `store_user_hf_credential`
+  (SECURITY DEFINER, `FOR UPDATE` on the `users` row like `register_dataset_safe`): it upserts the credential AND sets
+  `users.hf_username` to the proven name in one transaction. Hand-run assertions: 19 PASS, rollback, re-apply, 19 PASS again,
+  on a scratch PostgreSQL 16 with a non-superuser owner and Supabase-like default privileges.
+- `services/hf_credentials.py`: AES-256-GCM, envelope `v1.<kid>.<b64url(nonce‖ct‖tag)>`, key `EDUBOTICS_HF_TOKEN_KEY` (+ optional
+  `…_PREVIOUS` for rotation), AAD = user id; a fingerprint `sha256("edubotics-hf-token-fp:"+token)[:16]`; the shape rule is
+  `fullmatch` (a `$`-anchored `re.match` accepts a trailing newline). `cryptography` is imported lazily.
+- `routes/hf_token.py`: `GET` status, `PUT` (shape → `HfApi(token).whoami()` → name checks → read-only refused → encrypt → RPC),
+  `DELETE`, `POST /reveal` (the plaintext only ever leaves here, to its owner), `POST /verify` (re-asks the Hub and re-encrypts
+  under the current key). Token-semantics errors are 422, never 401/403 (the SPA signs out on those from `/me`). The request
+  body is an untyped `Body(default=None)` read by hand, so FastAPI's default 422 cannot echo a token (the first version used a typed model and still echoed a non-object body; fixed in the final verification round); `verify` stands down with 409 when the stored fingerprint changed during its Hub call; nothing logs a token, fingerprint or
+  ciphertext. `PATCH /me` answers 409 once a credential exists; `POST /me/delete` removes the caller's stored token best effort
+  (owner decision) and names that in its message only when it happened.
+- `main.py`: boot probe 15/11/21, a malformed key refuses to boot while an absent one only warns, method-pinned per-user rate
+  rules, a `PUT` body-size limit. `cryptography==49.0.0` pinned (a cp311 manylinux wheel was verified to resolve); the one
+  `ci.yml` edit this needs is NOT in the commits (the pushing GitHub App may not touch workflow files): the owner adds
+  `cryptography` to the `python-tests` pip install line when merging, otherwise the cloud tests that exercise the
+  AES-GCM envelope error out on the runner.
+
+**Robot (`physical_ai_server`).**
+- `/register_hf_user` no longer runs `huggingface-cli login` (token in argv, token files in the persisted `huggingface_cache`
+  volume). `_apply_hf_token_request` sets, replaces or clears ONE file at `$HF_TOKEN_PATH` (compose: `/run/edubotics-hf/token`, a
+  private 1 MB tmpfs on `physical_ai_server` only) through the stdlib-only `hf_token_store.py` (atomic, 0600). `huggingface_hub`
+  re-reads that file on every call and the spawned upload child inherits the variable, so no consumer changed. A change is refused
+  while recording or while the HF worker is busy; the same token again is a no-op success; `user_id_list` is always empty.
+- `/edubotics/hf_token_state` (latched + 1 Hz, own callback group, published even when `accepts` is false) carries a fingerprint
+  and three booleans, never the token; the legacy `token`/`stored_tokens` files are purged at boot.
+- `hf_…` is scrubbed from the HF/HTTP loggers and every handler: installed at node import, again after `HfApiWorker` ran
+  `basicConfig`, and inside `hf_api_worker._worker_process_loop`, because that spawned child never imports the node (the spec's
+  logger-level-only scrubber missed it, and missed child loggers, tracebacks and exception arguments — fixed here).
+- The thin Dockerfile gate pins the three facts the design rests on (the constant honours the env var, a rewritten file is seen
+  at once, a deleted file means no token) plus „nothing disables the implicit token", for amd64, Jetson and opi alike. Its Python
+  starts in column 0: the first draft's two-space indent was an `IndentationError` at BUILD time, found by the audit, now
+  compiled out of the Dockerfile text by `tests/test_hf_token_compose.py` (with negative controls). The gate script was also run
+  against a real `huggingface_hub` 1.33.0.
+- Compose: `HF_TOKEN=${HF_TOKEN:-}` is gone from the student and opi composes (an environment token outranks the file). The Jetson
+  compose is untouched, so its image reports `accepts:false`.
+
+**SPA (Stream B, summarised from the contract).** A reconcile loop, not a push-once: `decideSync` compares the cloud fingerprint
+with the robot's on login, rosbridge connect and focus and answers `push | clear | noop | wait | taken_over`; the plaintext lives
+in browser memory only (plain thunks, never `createAsyncThunk`); sign-out clears the robot (bounded, errors swallowed); the
+Aufnahme start is blocked only on a POSITIVE „no token / transfer pending / failed / taken over" answer. Audit S1 closed the one
+real hole in the first design: the Benutzer-ID list was reloaded from whatever token the robot still held, so the previous
+student's list could load for the next one; the gate now sits at the single choke point `useHfUserList.reload`.
+
+**Removed.** The `.env` token and `HF_TOKEN_MACHINE`, `config_generator.write_hf_token` / `bind_hf_token_to_this_machine` /
+`hf_token_is_foreign` / `EDUBOTICS_HF_TOKEN_ANY_MACHINE`, the GUI's Schritt D, the Pi's `handle_hf_token` + `POST /hf-token` +
+`/status.hf_token_saved` + the System tab's token step, `DataManager.register_huggingface_token`, the SPA's unverified
+`hf_username` auto-link (`useMeProfile`) and `registerHFUser` (which `console.log`ged the token and had no caller).
+
+**Corrections to the plan (the spec's A.1/A.2 and the audit).** `fp` is 16 hex characters, not 8; `get_token()` reads the
+environment per call, not at import, but `HF_TOKEN_PATH` itself is an import-time constant (compose sets it, so fine); the new
+publisher cannot live in `_init_ros_publisher` (`test_signal_status_node_wiring` execs it with a fixed namespace) and sits between
+`_init_ros_publisher` and `_init_ros_service` in its own method; the slice count is ten answering `signedOut` and two exempt
+(`ros`, `jetson`), not nine; the GUI's Protokoll line must not use an en dash (`test_gui_log_levels`); `HF_TOKEN_BUSY_DE` names
+transfers, not only uploads (`is_busy()` is true for downloads and list fetches too); two students on one Pi flipped the slot
+forever in a simulation, hence the `taken_over` dampener and, after the audit's randomized run reached 59 writes, a circuit
+breaker. A stale `.token.tmp` could outlive a clear (SIGKILL between fsync and replace): `clear()` now removes it.
+
+**Not done, on purpose.** Cloud/Modal using the student token (private-dataset registration and training still answer „Worker hat
+keinen Zugriff"); an organisation/school namespace model; a teacher „Token hinterlegt" view; authenticating rosbridge; the
+`unverified` start block (the owner kept „unknown never blocks"); and migration 043 for the pre-existing direct PostgREST UPDATE
+hole on `public.users` — documented with the exact proposal in `docs/KNOWN-ISSUES.md`, unconfirmed on the live database.
+
+**Verification and what still needs a rig.** Run here: the SQL assertions (19 PASS, twice), the cloud suite (382 → 463), the
+deps-free suite (1921 → 1945 tests, only the 6 baseline `test_gui_theme.py` tkinter errors), the Pi (594) and Jetson (30) suites, the
+`physical_ai_server` pytest run (2751 passed, 6 skipped, against a baseline of 2658; the only 2 failures are the known Python-3.11-only ones, `test_stub_compiles_under_the_runner_python_floor` and `test_vars_is_validated_from_its_row_and_skips_unshowable_entries`), `docker compose config` on
+the student, opi, twin and Jetson composes, the Dockerfile gate against a real `huggingface_hub`, the pinned gitleaks, and the
+router under real FastAPI/pydantic. NOT run: a real `docker build`, a Docker daemon, a real Supabase project, a live Hugging Face
+token (the real `whoami` role values), rclpy (TRANSIENT_LOCAL delivery through rosbridge, a real node respawn), and the
+two-account end-to-end on a rig (read-token rejection, push latency, upload lands in the right namespace, a restart returns the
+token, sign-out clears it, B never uploads under A, nothing with `hf_` in `docker inspect` / robot logs / the browser console /
+Railway logs). Golden order for the release: set `EDUBOTICS_HF_TOKEN_KEY` on Railway → migration 042 → cloud API → web → images →
+installer; rollback is the previous release plus `rollback/20261003120000_042_user_hf_credentials_rollback.sql`, cloud API first.
+
 ### Unreleased, 2026-10-02 (later) — Aufnahme 2.0 round 7: sentences that stay true, and a card that agrees with its rows
 
 A fresh verification of round 6 (scratch `fresh1/`, `fresh2/` with screenshots) found no broken

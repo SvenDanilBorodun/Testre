@@ -380,13 +380,70 @@ class TestGenerateEnvFollowerOnly(_TmpEnvBase):
         self.assertIn("EDUBOTICS_FOLLOWER_ONLY=1", content)
 
 
+class TestLegacyHfTokenIsPurged(_TmpEnvBase):
+    """The student's HuggingFace token lives with the cloud account now and
+    reaches the robot over rosbridge; this .env never carries one. An .env from
+    before that still holds ``HF_TOKEN`` (and ``HF_TOKEN_MACHINE`` when the file
+    travelled from a Windows profile), and every regenerate drops both. There is
+    no boot-time purge on the Pi: the regenerate IS the purge.
+
+    Low-entropy placeholders on purpose; no real-looking token literal belongs
+    in the repository.
+    """
+
+    TOKEN = "hf_" + "a" * 34
+    STAMP = "0123456789abcdef" * 4
+
+    def _seed_legacy(self):
+        generate_env_file(_both_arms(), self.path)
+        upsert_env_var("HF_TOKEN", self.TOKEN, self.path)
+        upsert_env_var("HF_TOKEN_MACHINE", self.STAMP, self.path)
+        upsert_env_var("MY_OVERRIDE", "keep_me", self.path)
+
+    def _assert_purged(self, content):
+        for key in ("HF_TOKEN", "HF_TOKEN_MACHINE"):
+            self.assertIsNone(read_env_var(key, self.path), key)
+            self.assertNotIn(f"{key}=", content)
+        self.assertNotIn(self.TOKEN, content)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertNotIn(self.TOKEN, fh.read())
+        # The operator's own overrides are not collateral.
+        self.assertEqual(read_env_var("MY_OVERRIDE", self.path), "keep_me")
+
+    def test_a_hardware_regenerate_drops_the_legacy_token(self):
+        self._seed_legacy()
+        self._assert_purged(generate_env_file(_both_arms(), self.path))
+
+    def test_the_cloud_only_boot_regenerate_drops_it_too(self):
+        """``boot()`` writes the cloud-only .env before any scan, so a fielded Pi
+        loses the old token on its first boot after the update."""
+        self._seed_legacy()
+        self._assert_purged(generate_cloud_only_env(self.path))
+
+    def test_it_stays_gone_across_repeated_regenerates(self):
+        self._seed_legacy()
+        for _ in range(3):
+            content = generate_env_file(_both_arms(), self.path)
+        self._assert_purged(content)
+        self.assertLessEqual(content.count(cg._PRESERVE_MARKER), 1)
+
+    def test_keys_match_exactly(self):
+        """``HF_TOKEN`` is a prefix of ``HF_TOKEN_MACHINE`` and of any sibling an
+        operator might add; only the two legacy names are dropped."""
+        self._seed_legacy()
+        upsert_env_var("HF_TOKEN_EXTRA", "x", self.path)
+        generate_env_file(_both_arms(), self.path)
+        self.assertEqual(read_env_var("HF_TOKEN_EXTRA", self.path), "x")
+        self.assertIsNone(read_env_var("HF_TOKEN", self.path))
+
+    def test_upsert_env_var_is_still_the_generic_writer(self):
+        """The helper itself is key-agnostic and still writes any key; it is the
+        regenerate, not the writer, that refuses to keep the legacy pair."""
+        upsert_env_var("HF_TOKEN", self.TOKEN, self.path)
+        self.assertEqual(read_env_var("HF_TOKEN", self.path), self.TOKEN)
+
+
 class TestStickyAndPreserved(_TmpEnvBase):
-    def test_hf_token_survives_regenerate(self):
-        generate_env_file(_both_arms(), self.path)
-        upsert_env_var("HF_TOKEN", "hf_secret123", self.path)
-        # A hardware re-scan regenerate must preserve HF_TOKEN (UNMANAGED).
-        generate_env_file(_both_arms(), self.path)
-        self.assertEqual(read_env_var("HF_TOKEN", self.path), "hf_secret123")
 
     def test_operator_override_preserved(self):
         generate_env_file(_both_arms(), self.path)

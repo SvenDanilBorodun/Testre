@@ -84,6 +84,22 @@ describe('recordCopy', () => {
     expect(hits).toEqual([]);
   });
 
+  it('the token sentences: German, and every one but the transfer names the Startseite for the banner link', () => {
+    const T = RECORD_COPY.problem.hfToken;
+    expect(Object.keys(T).sort()).toEqual(['failed', 'none', 'takenOver', 'transfer', 'unusable']);
+    // ProblemBanner links the LAST „Startseite" of the sentence.
+    for (const key of ['none', 'unusable', 'failed', 'takenOver']) {
+      expect(`${key}: ${T[key].includes(RECORD_COPY.problem.homeLabel)}`).toBe(`${key}: true`);
+      expect(`${key}: ${T[key].endsWith(`${RECORD_COPY.problem.homeLabel}.`) || T[key].endsWith(`${RECORD_COPY.problem.homeLabel} erneut.`)}`)
+        .toBe(`${key}: true`);
+    }
+    expect(T.transfer).not.toContain(RECORD_COPY.problem.homeLabel);
+    expect(T.none).toBe('Hinterlege zuerst dein Hugging-Face-Token auf der Startseite.');
+    // the scans above already cover English words, glyphs and transliterations of these paths
+    expect(STRINGS.filter(({ path }) => path.startsWith('RECORD_COPY.problem.hfToken')))
+      .toHaveLength(5);
+  });
+
   it('names the keys as words (H9)', () => {
     expect(RECORD_COPY.kbd).toEqual({
       space: 'Leertaste', right: '→', left: '←', end: 'Strg+Umschalt+X', esc: 'Esc',

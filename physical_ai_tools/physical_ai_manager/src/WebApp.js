@@ -46,8 +46,7 @@ function WebApp() {
   }, [dispatch]);
 
   // Shared robust /me loader: retry/backoff, 401/403 → sign-out, 404/5xx →
-  // profileError (no sign-out). Teacher web doesn't link an HF identity, so
-  // enableHfLink stays off. The only web-specific piece is bouncing a
+  // profileError (no sign-out). The only web-specific piece is bouncing a
   // wrong-role (student) account back to the desktop app.
   const handleProfile = useCallback(
     (me) => {

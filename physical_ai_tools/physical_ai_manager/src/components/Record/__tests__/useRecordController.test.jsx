@@ -20,6 +20,12 @@ import tasksReducer, {
 import uiReducer, { moveToPage } from '../../../features/ui/uiSlice';
 import rosReducer from '../../../features/ros/rosSlice';
 import trainingReducer from '../../../features/training/trainingSlice';
+import hfTokenReducer, {
+  accountFailed,
+  accountLoaded,
+  robotStateReceived,
+  syncFailed,
+} from '../../../features/hfToken/hfTokenSlice';
 import PageType from '../../../constants/pageType';
 import TaskPhase from '../../../constants/taskPhases';
 import useRecordController from '../useRecordController';
@@ -78,10 +84,16 @@ const recordTick = (patch = {}) => idleTick({
   warmupTime: 5, resetTime: 5, fps: 30, pushToHub: true, ...patch,
 });
 
-function makeStore({ form = VALID_FORM, connected = true } = {}) {
+function makeStore({ form = VALID_FORM, connected = true, hfActions = null } = {}) {
   const store = configureStore({
-    reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer },
+    reducer: {
+      tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer,
+      // Only the token tests have the slice; every other test is a store
+      // WITHOUT it, which must behave exactly as before.
+      ...(hfActions ? { hfToken: hfTokenReducer } : {}),
+    },
   });
+  if (hfActions) hfActions.forEach((a) => store.dispatch(a));
   store.dispatch(moveToPage(PageType.RECORD));
   store.dispatch(setTaskInfo(form));
   if (connected) store.dispatch(setHeartbeatStatus('connected'));
@@ -261,6 +273,147 @@ describe('Benutzer-ID (ported from InfoPanel)', () => {
     mount(store);
     await act(async () => { await Promise.resolve(); });
     expect(mockGetHfUsers).not.toHaveBeenCalled();
+  });
+});
+
+// ── the student's OWN Hugging-Face token ────────────────────────────────────
+const FP_A = 'a'.repeat(16);
+const FP_B = 'b'.repeat(16);
+const robotHolds = (fp, o = {}) => robotStateReceived(
+  { v: 1, seq: 1, accepts: true, present: fp !== null, fp, busy: false, ...o },
+  1,
+);
+const accountStored = (fp = FP_A) => accountLoaded({ status: 'stored', fp, hfUsername: 'schule-A' });
+
+describe('the Benutzer-ID list never comes from another student\'s token (audit S1)', () => {
+  it('robot A is still in the slot and this student has no token: the robot is NOT asked, no id is chosen', async () => {
+    const store = makeStore({
+      form: { ...VALID_FORM, userId: undefined },
+      hfActions: [accountLoaded({ status: 'none' }), robotHolds(FP_B)],
+    });
+    const { result } = mount(store);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(mockGetHfUsers).not.toHaveBeenCalled();
+    expect(store.getState().tasks.taskInfo.userId).toBeUndefined();
+    expect(result.current.hfUsers.list).toEqual([]);
+    // ... and the manual „Neu laden" button is refused at the same choke point
+    let reloaded;
+    await act(async () => { reloaded = await result.current.hfUsers.reload(); });
+    expect(reloaded).toBeNull();
+    expect(mockGetHfUsers).not.toHaveBeenCalled();
+  });
+
+  it('the account state could not be read (a cloud blip): still not asked', async () => {
+    const store = makeStore({
+      form: { ...VALID_FORM, userId: undefined },
+      hfActions: [accountFailed('error'), robotHolds(FP_B)],
+    });
+    mount(store);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(mockGetHfUsers).not.toHaveBeenCalled();
+    expect(store.getState().tasks.taskInfo.userId).toBeUndefined();
+  });
+
+  it('this student\'s token is on its way (the slot holds another one): not asked yet', async () => {
+    const store = makeStore({
+      form: { ...VALID_FORM, userId: undefined },
+      hfActions: [accountStored(FP_A), robotHolds(FP_B)],
+    });
+    mount(store);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(mockGetHfUsers).not.toHaveBeenCalled();
+  });
+
+  it('the robot state has not arrived yet (the offline escape, the first second): not asked', async () => {
+    const store = makeStore({ form: { ...VALID_FORM, userId: undefined }, hfActions: [] });
+    mount(store);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(mockGetHfUsers).not.toHaveBeenCalled();
+  });
+
+  it('the slot holds exactly this student\'s token: asked, and the first account chosen', async () => {
+    const store = makeStore({
+      form: { ...VALID_FORM, userId: undefined },
+      hfActions: [accountStored(FP_A), robotHolds(FP_A)],
+    });
+    mount(store);
+    await waitFor(() => expect(mockGetHfUsers).toHaveBeenCalled());
+    await waitFor(() => expect(store.getState().tasks.taskInfo.userId).toBe('schule-A'));
+  });
+});
+
+describe('Start and the student\'s own Hugging-Face token', () => {
+  it('no token stored: Start is off, the banner names the Startseite and links to it', () => {
+    const store = makeStore({ hfActions: [accountLoaded({ status: 'none' }), robotHolds(null)] });
+    const { result } = mount(store);
+    expect(result.current.model.startBlock).toMatchObject({ kind: 'hftoken', reason: 'none' });
+    expect(result.current.model.buttons[0]).toMatchObject({ id: 'start', disabled: true });
+    expect(result.current.problem).toEqual({
+      kind: 'bad',
+      textDe: 'Hinterlege zuerst dein Hugging-Face-Token auf der Startseite.',
+      linkToHome: true,
+    });
+    press(' ');
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('the token is on its way to the robot: Start waits, with no link (it resolves by itself)', () => {
+    const store = makeStore({ hfActions: [accountStored(FP_A), robotHolds(null)] });
+    const { result } = mount(store);
+    expect(result.current.model.startBlock.reason).toBe('transfer');
+    expect(result.current.problem.linkToHome).toBe(false);
+    expect(result.current.problem.textDe).toMatch(/wird gerade auf den Roboter übertragen/);
+    press(' ');
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('two failed transfers: the sentence says it failed and links to the Startseite', () => {
+    const store = makeStore({
+      hfActions: [accountStored(FP_A), robotHolds(null), syncFailed({}), syncFailed({})],
+    });
+    const { result } = mount(store);
+    expect(result.current.model.startBlock.reason).toBe('failed');
+    expect(result.current.problem.linkToHome).toBe(true);
+  });
+
+  it('another account took the slot: its own sentence', () => {
+    const store = makeStore({
+      hfActions: [accountStored(FP_A), robotHolds(FP_A), robotHolds(FP_B, { seq: 2 })],
+    });
+    const { result } = mount(store);
+    expect(result.current.model.startBlock.reason).toBe('taken_over');
+    expect(result.current.problem.textDe).toMatch(/Ein anderes Konto/);
+  });
+
+  it('the robot holds this student\'s token: nothing blocks, Space starts', async () => {
+    const store = makeStore({ hfActions: [accountStored(FP_A), robotHolds(FP_A)] });
+    const { result } = mount(store);
+    expect(result.current.model.startBlock).toBeNull();
+    press(' ');
+    await waitFor(() => expect(mockSend).toHaveBeenCalledWith('start_record'));
+  });
+
+  it('UNKNOWN NEVER BLOCKS: an account that has not answered, a robot that has not spoken, no slice at all', () => {
+    for (const hfActions of [
+      [],                                         // nothing known yet
+      [accountFailed('error'), robotHolds(null)], // the cloud could not be asked
+      [accountLoaded({ status: 'none' })],        // the robot has not said it takes a token
+      null,                                       // a store without the feature
+    ]) {
+      const store = makeStore({ hfActions });
+      const view = mount(store);
+      expect(view.result.current.model.startBlock).toBeNull();
+      expect(view.result.current.model.buttons[0].disabled).toBe(false);
+      view.unmount();
+    }
+  });
+
+  it('a robot that takes no personal token (the Jetson image) is never blocked', () => {
+    const store = makeStore({
+      hfActions: [accountLoaded({ status: 'none' }), robotHolds(null, { accepts: false })],
+    });
+    const { result } = mount(store);
+    expect(result.current.model.startBlock).toBeNull();
   });
 });
 

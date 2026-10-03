@@ -227,26 +227,11 @@ export function useRosServiceCaller() {
     }
   }, [callService]);
 
-  const registerHFUser = useCallback(
-    async (token) => {
-      try {
-        console.log('Calling service /register_hf_user with request:', { token: token });
-
-        const result = await callService(
-          '/register_hf_user',
-          'physical_ai_interfaces/srv/SetHFUser',
-          { token: token }
-        );
-
-        console.log('registerHFUser service response:', result);
-        return result;
-      } catch (error) {
-        console.error('Failed to register HF user:', error);
-        throw new Error(`${error.message || error}`);
-      }
-    },
-    [callService]
-  );
+  // The Hugging-Face token is NOT set from here. `callService` logs every
+  // request it sends (and every response), which for /register_hf_user is the
+  // student's token. The one caller of that service is
+  // features/hfToken/robotChannel.js, which uses ROSLIB.Service directly and
+  // logs nothing.
 
   const getRegisteredHFUser = useCallback(async () => {
     try {
@@ -891,7 +876,6 @@ export function useRosServiceCaller() {
     resumeTeleop,
     forceResumeTeleop,
     getImageTopicList,
-    registerHFUser,
     getRegisteredHFUser,
     getUserList,
     getDatasetList,

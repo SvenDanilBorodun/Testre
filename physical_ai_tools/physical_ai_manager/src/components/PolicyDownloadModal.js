@@ -172,7 +172,7 @@ const PolicyDownloadModal = ({ isOpen, onClose, onDownloadComplete, initialRepoI
       if (list && list.length > 0) {
         toast.success('Benutzer-ID-Liste erfolgreich geladen!');
       } else {
-        toast.error('Keine Benutzer-ID gefunden. Bitte HuggingFace-Token in EduBotics setzen.');
+        toast.error('Keine Benutzer-ID gefunden. Hinterlege dein Hugging-Face-Token auf der Startseite.');
       }
     } finally {
       setIsLoading(false);

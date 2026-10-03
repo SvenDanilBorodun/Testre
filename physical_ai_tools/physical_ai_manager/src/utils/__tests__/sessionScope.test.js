@@ -715,6 +715,14 @@ describe('sign-out lives in exactly one place', () => {
 // is: a bare name tells the next reader nothing about whether they may
 // re-classify it. It follows `.github/scripts/compose_env_parity.py`'s
 // INTENTIONAL allowlist, including its rule that a STALE entry is an error too.
+//
+// EXACTLY TWO slices are exempt (`jetson`, `ros`); the other ten answer. `ui`
+// used to be on this list on the ground that `ui.hfUserList` „describes the
+// machine, not the person". It did not: the list is the accounts and
+// organisations reachable with the token in the ROBOT's slot, and since that
+// slot belongs to whichever student last filled it (the per-student
+// Hugging-Face token, migration 042) the list is the previous student's. `ui`
+// now empties it on `signedOut`, and the `hfToken` slice is new and answers too.
 const SIGNED_OUT_EXEMPT = Object.freeze({
   jetson:
     'Handled IMPERATIVELY and FIRST, not reactively: features/jetson/'
@@ -728,16 +736,6 @@ const SIGNED_OUT_EXEMPT = Object.freeze({
     + 'would tear down the connection the next student needs. The Jetson '
     + 'override is not student state either: resetJetsonOnLogout points '
     + 'rosbridge back at the local rig itself.',
-  ui:
-    'Which tab is open, plus ui.hfUserList — and the list is the giveaway. It is '
-    + 'the accounts and orgs reachable with THIS RIG\'s $HF_TOKEN, fetched once '
-    + 'per ROS connect, so it describes the machine and not the person. It is '
-    + 'also what keeps the signed-out recording path working: recording needs a '
-    + 'Benutzer-ID and no cloud login, so clearing the list on sign-out would '
-    + 'empty the selector for a student working without a session. Since the '
-    + 'student login gate (utils/authGate) that population is narrower — only '
-    + 'the „Ohne Anmeldung fortfahren" offline escape reaches it — but the '
-    + 'primary ground above is untouched by the gate and the entry STAYS.',
 });
 
 describe('every slice in the real store answers session/signedOut', () => {
@@ -787,6 +785,17 @@ describe('every slice in the real store answers session/signedOut', () => {
       if (!handles && !exempt) missing.push(`${key} (${rel})`);
     }
     expect(missing).toEqual([]);
+  });
+
+  it('exempts exactly jetson and ros: ui and hfToken answer for themselves', () => {
+    // Pinned by name. The reason-map above cannot contradict itself, so without
+    // this a `ui` entry could be re-added with a fresh reason and the suite
+    // would only notice that `ui` both handles the action and is exempted.
+    expect(Object.keys(SIGNED_OUT_EXEMPT).sort()).toEqual(['jetson', 'ros']);
+    const answering = [...sliceFiles.keys()].filter((key) => !(key in SIGNED_OUT_EXEMPT));
+    expect(answering).toHaveLength(10);
+    expect(answering).toContain('ui');
+    expect(answering).toContain('hfToken');
   });
 
   it('has no stale exemption, and every reason is written out', () => {

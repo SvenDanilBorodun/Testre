@@ -44,6 +44,7 @@ import { useSelector } from 'react-redux';
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import { Pill, SectionHeader } from '../components/EbUI';
 import ActivationCard from '../components/Home/ActivationCard';
+import HfTokenCard from '../components/Home/HfTokenCard';
 import RobotHero from '../components/Home/RobotHero';
 import HealthCard from '../components/Home/HealthCard';
 import WorkCard from '../components/Home/WorkCard';
@@ -100,15 +101,24 @@ export default function HomePage() {
         )}
 
         <div className="grid grid-cols-12 gap-4 md:gap-6">
-          {/* The ONE control on this page, and the reason the page is allowed
-              one: bringing the environment up no longer moves the arm, so
-              something has to. It navigates nowhere and is gated on no
-              capability — every profile has to be activated — which is why the
-              „no recording entry point" invariant this page documents is
-              untouched. In cloud mode there is no robot to activate. */}
+          {/* The TWO controls on this page, and the reason the page is allowed
+              them. „Roboter aktivieren": bringing the environment up no longer
+              moves the arm, so something has to. „Hugging-Face-Token": the
+              token belongs to the student's account (cloud migration 042), and
+              this is the one place it is entered, once. Neither navigates
+              anywhere and neither is gated on a capability — every profile has
+              to be activated and every recording needs a namespace to upload
+              to — which is why the „no recording entry point" invariant this
+              page documents is untouched. In cloud mode there is no robot to
+              activate and none to give a token to. */}
           {!cloudOnly && (
             <div className="col-span-12">
               <ActivationCard />
+            </div>
+          )}
+          {!cloudOnly && (
+            <div className="col-span-12">
+              <HfTokenCard />
             </div>
           )}
 

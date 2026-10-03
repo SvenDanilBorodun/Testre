@@ -103,11 +103,10 @@ def _unquote(value: str) -> str:
 def _value_in_lines(lines: list[str], key: str) -> str | None:
     """The value of ``key`` among ALREADY-READ .env lines, or None if absent.
 
-    Factored out of ``read_env_var`` so ``_read_unmanaged_lines`` can consult a
-    second key (``HF_TOKEN_MACHINE``) without a second file read and without a
-    second place that knows the ``KEY=VALUE`` shape. Keys match EXACTLY, which
-    is what keeps ``HF_TOKEN`` and ``HF_TOKEN_MACHINE`` from shadowing one
-    another.
+    Factored out of ``read_env_var`` so a caller that already holds the lines
+    does not read the file a second time, and so there is one place that knows
+    the ``KEY=VALUE`` shape. Keys match EXACTLY, so a key that is a prefix of
+    another (``HF_TOKEN`` and ``HF_TOKEN_MACHINE``) never shadows it.
     """
     for line in lines:
         stripped = line.strip()
@@ -246,120 +245,20 @@ def _read_machine_id() -> str | None:
     return "\x00".join(parts)
 
 
-# ── HuggingFace token: bound to the machine it was entered on ────────────
-# %LOCALAPPDATA%\EduBotics\.env holds HF_TOKEN, and that directory TRAVELS — a
-# roaming profile, an FSLogix container, AppData redirection, or a golden image
-# captured after a first launch all carry it to another PC. The token is
-# deliberately UNMANAGED so it survives every regenerate and Factory Reset,
-# which is precisely why nothing stopped a copied profile from handing one
-# student's HuggingFace credential to every PC in the school: compose forwards
-# `HF_TOKEN=${HF_TOKEN:-}` into physical_ai_server out of the --env-file, so the
-# clone would upload its recordings under the first student's account.
+# ── Legacy HuggingFace token: removed from this PC ───────────────────────
+# The token used to be typed into this GUI (Schritt D) and stored here as
+# HF_TOKEN, with HF_TOKEN_MACHINE beside it as a machine fingerprint. That
+# directory TRAVELS (roaming profile, FSLogix, a golden image), so the token
+# could follow a copied profile onto another PC. The token now belongs to the
+# student's ACCOUNT in the cloud and reaches the robot from the web interface's
+# Startseite; this file never carries one again.
 #
-# Same shape as the ROS_DOMAIN_ID derivation below, and deliberately the SAME
-# machine-identity notion: `_read_machine_id()`. A sha256 of it is stored beside
-# the token as HF_TOKEN_MACHINE — the identifier itself never lands on disk. On
-# a PC whose stamp does not match, the token is not merely ignored, it is
-# DELETED (see bind_hf_token_to_this_machine).
-#
-# HF_TOKEN_MACHINE is UNMANAGED TOO, and that is what makes it work: the pair
-# has to travel TOGETHER so the copy carries the ORIGIN's stamp and this PC can
-# tell the difference. Two consequences worth stating: MANAGED_KEYS is unchanged
-# (still 9 keys + the two prefixes), and nothing forwards HF_TOKEN_MACHINE into
-# a container — no compose file references the name — so it is a host-side
-# annotation, never an env var the robot sees.
-HF_TOKEN_KEY = "HF_TOKEN"
-HF_TOKEN_MACHINE_KEY = "HF_TOKEN_MACHINE"
-
-# bind_hf_token_to_this_machine's three outcomes.
-HF_TOKEN_OK = "ok"            # ours, unjudgeable, or nothing stored
-HF_TOKEN_ADOPTED = "adopted"  # stored before stamping existed -> stamped now
-HF_TOKEN_FOREIGN = "foreign"  # provably another PC's -> deleted
-
-# The documented one-variable opt-out, read at CALL time exactly like
-# EDUBOTICS_ROS_DOMAIN / EDUBOTICS_MACHINE_ID and never persisted.
-HF_TOKEN_ANY_MACHINE_ENV = "EDUBOTICS_HF_TOKEN_ANY_MACHINE"
-
-
-def _hf_token_any_machine() -> bool:
-    """True when the operator has opted OUT of binding the token to this PC.
-
-    The legitimate workflow this exists for: a school deliberately enters ONE
-    service account's token, captures a golden Windows image, and clones it onto
-    30 PCs. Every clone would otherwise carry the master's stamp, read as
-    foreign, and re-prompt Schritt D on 30 machines — so the fingerprint has to
-    be switchable off, in the repo's own idiom (an ``EDUBOTICS_*`` env var read
-    at call time, documented as the rollback).
-
-    WHAT IT GIVES UP, stated plainly: with this set there is no protection left
-    at all. A profile copied from ONE STUDENT's PC is accepted just as readily as
-    the intended service account, so every rig sharing that image uploads under
-    whichever account the image happens to carry. It must stay set on the clones
-    — clearing it later makes every clone re-prompt, which is the correct
-    behaviour once the opt-out is withdrawn.
-
-    Truthiness is the ``.strip().lower()`` form used by
-    ``constants.cameras_use_native_bridge`` and ``win_camera``, deliberately
-    case-INsensitive: an ops knob a teacher types into a Windows environment
-    dialog should accept ``TRUE``. (``constants.SKIP_AUTO_PULL`` spells the same
-    value set with ``.strip()`` alone and would not — that is the one place the
-    GUI's two boolean spellings differ, and this side is the forgiving one.)
-    """
-    return os.environ.get(HF_TOKEN_ANY_MACHINE_ENV, "").strip().lower() in (
-        "1", "true", "yes")
-
-
-def _hf_token_fingerprint() -> str | None:
-    """sha256 of this machine's identity, or None when none can be read.
-
-    A HASH, never the identifier. The .env is the file support asks for and the
-    GUI echoes it line-by-line into the on-screen Protokoll, so a machine guid
-    must not be sitting in it — and equality against one stored value is all this
-    is ever used for, which a hash answers exactly as well.
-
-    Named for its ONE purpose rather than generically: ``_machine_fingerprint``
-    is asserted ABSENT by tests/test_ros_domain_twin_lockstep.py and
-    tests/test_config_generator.py, because a fingerprint under that name is how
-    the deleted ROS_DOMAIN_ID cache would come back. This is not that cache — it
-    stamps a credential the student typed, not a value the resolver could
-    re-derive — and it is deliberately unreachable from _resolve_ros_domain_id.
-    """
-    machine_id = _read_machine_id()
-    if not machine_id:
-        return None
-    return hashlib.sha256(machine_id.encode()).hexdigest()
-
-
-def hf_token_is_foreign(stamped: str | None) -> bool:
-    """True only when ``stamped`` PROVES the stored token came from another PC.
-
-    THE single predicate — both the on-disk purge and the regenerate filter ask
-    this, so there is one place that decides. It refuses on PROOF only; all
-    three fail-open branches are load-bearing:
-
-      * the opt-out wins outright, before anything else is even read;
-      * NO STAMP AT ALL IS LEGACY, NOT FOREIGN. Every install in the field today
-        has a token and no stamp, so reading absence as a mismatch would
-        re-prompt Schritt D on 100 % of the fleet. **This is the OPPOSITE call
-        from the deleted ROS_DOMAIN_ID cache, whose legacy handling was simply to
-        re-derive, and the asymmetry is the reason: re-deriving a domain id costs
-        nothing and nobody notices, while re-prompting costs every student a trip
-        to huggingface.co for a token they already entered once.** Do not
-        "harmonise" the two.
-      * an UNRESOLVABLE fingerprint cannot judge anything. On a PC where the
-        registry probe fails (and on every non-Windows host, i.e. the whole
-        deps-free test suite) the answer is "keep working", never "delete the
-        student's credential" — the same refuse-only-on-proof stance
-        ``device_manager.serial_path_family_conflict`` takes.
-    """
-    if _hf_token_any_machine():
-        return False
-    if not stamped:
-        return False
-    ours = _hf_token_fingerprint()
-    if not ours:
-        return False
-    return stamped != ours
+# Both keys stay UNMANAGED (MANAGED_KEYS is unchanged) but are never preserved:
+# ``_read_unmanaged_lines`` drops them on every regenerate, including the
+# runtime one (gui_app.py::_rs_set_leader_mode), so a legacy token can not reach
+# the --env-file compose reads. ``purge_legacy_hf_token`` is the half that
+# removes them from an EXISTING file, once per launch, and reports it.
+_LEGACY_HF_KEYS = ("HF_TOKEN", "HF_TOKEN_MACHINE")
 
 
 def _resolve_ros_domain_id() -> int:
@@ -437,12 +336,14 @@ def _atomic_write(path: str, content: str) -> None:
 def _read_unmanaged_lines(path: str) -> list[str]:
     """Return non-managed lines (comments, blanks, unknown KEY=VALUE)
     from an existing .env so a regenerate doesn't wipe operator-added
-    overrides like EDUBOTICS_CAMERA_PIXEL_FORMAT, EDUBOTICS_ROS_DOMAIN,
-    EDUBOTICS_REGISTRY, or the student's HF_TOKEN.
+    overrides like EDUBOTICS_CAMERA_PIXEL_FORMAT, EDUBOTICS_ROS_DOMAIN or
+    EDUBOTICS_REGISTRY.
 
-    ONE exception to "everything unmanaged is preserved verbatim": an
-    ``HF_TOKEN`` + ``HF_TOKEN_MACHINE`` pair whose stamp PROVES it came from
-    another PC is dropped — see the comment on ``drop_hf_token`` below.
+    ONE exception to "everything unmanaged is preserved verbatim": the legacy
+    ``HF_TOKEN`` / ``HF_TOKEN_MACHINE`` pair is ALWAYS dropped (see
+    ``_LEGACY_HF_KEYS``). The student's token lives with the cloud account now,
+    and a stale copy left in this file could be picked up by the robot instead
+    of the account's token.
 
     Returns an empty list when the file doesn't exist yet.
     """
@@ -452,24 +353,13 @@ def _read_unmanaged_lines(path: str) -> list[str]:
     except (OSError, UnicodeDecodeError):
         return []
 
-    # THE structural half of the machine binding: a token this PC can PROVE came
-    # from another one is never carried forward. Every .env compose reads is one
-    # a generator just wrote through this helper, so putting the filter here is
-    # what makes "a foreign token cannot reach HF_TOKEN=${HF_TOKEN:-}" true by
-    # construction rather than by remembering to call something first. The
-    # on-disk purge (bind_hf_token_to_this_machine) runs from the GUI's startup
-    # and is the half that DELETES and reports; generate_env_file has callers
-    # that never pass through startup — gui_app.py::_rs_set_leader_mode
-    # regenerates at RUNTIME, on the :8769 control-server thread, for the
-    # Roboter-Studio leader toggle and again on its rollback.
-    #
-    # Judged off the lines already read, so it costs no second file read. The
-    # STAMP goes with the token: leaving it behind would let the next
-    # bind_hf_token_to_this_machine judge a freshly entered token against the
-    # previous owner's fingerprint.
-    drop_hf_token = hf_token_is_foreign(
-        _value_in_lines(raw, HF_TOKEN_MACHINE_KEY))
-
+    # Dropping here, and not only in the launch-time purge, is what makes "no
+    # legacy token reaches the --env-file" true by construction: every .env
+    # compose reads is one a generator just wrote through this helper, and
+    # generate_env_file has callers that never pass through startup
+    # (gui_app.py::_rs_set_leader_mode regenerates at RUNTIME, on the :8769
+    # control-server thread, for the Roboter-Studio leader toggle and again on
+    # its rollback).
     preserved: list[str] = []
     for line in raw:
         stripped = line.strip()
@@ -493,7 +383,7 @@ def _read_unmanaged_lines(path: str) -> list[str]:
         key = stripped.split("=", 1)[0].strip()
         if _is_managed_key(key):
             continue
-        if drop_hf_token and key in (HF_TOKEN_KEY, HF_TOKEN_MACHINE_KEY):
+        if key in _LEGACY_HF_KEYS:
             continue
         preserved.append(text)
     # Strip leading blank lines: generate_env_file always re-adds a single
@@ -508,9 +398,7 @@ def read_env_var(key: str, path: str = ENV_FILE) -> str | None:
     """Return the value of ``key`` from the .env at ``path``, or None if absent.
 
     Tolerates the quoting written by _quote() and surrounding whitespace.
-    The GUI uses this to show a "token already saved on this PC" state
-    WITHOUT re-displaying the secret value. Returns None when the file is
-    missing/unreadable.
+    Returns None when the file is missing/unreadable.
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -524,12 +412,12 @@ def upsert_env_var(key: str, value: str, path: str = ENV_FILE) -> None:
     """Insert or replace ``key=value`` in the .env at ``path``, preserving
     every other line (managed keys, comments, operator overrides) verbatim.
 
-    The underlying writer of HF_TOKEN, but the GUI goes through
-    ``write_hf_token`` instead — a stored token must never exist without its
-    HF_TOKEN_MACHINE stamp. HF_TOKEN is deliberately NOT a MANAGED_KEY:
-    generate_env_file() carries it across hardware-rescan rewrites via
-    _read_unmanaged_lines(). An empty ``value`` removes the key (token clear).
-    Value is quoted via _quote() so a token with shell-special chars is safe.
+    A key that is not one of the MANAGED_KEYS is carried across
+    generate_env_file() rewrites by _read_unmanaged_lines(), so an operator
+    override written here survives a hardware rescan. (The legacy HF_TOKEN pair
+    is the one exception: it is never carried, see _LEGACY_HF_KEYS.) An empty
+    ``value`` removes the key. The value is quoted via _quote(), so a value with
+    shell-special characters is safe.
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -562,71 +450,49 @@ def upsert_env_var(key: str, value: str, path: str = ENV_FILE) -> None:
     _atomic_write(path, content)
 
 
-def write_hf_token(token: str, path: str = ENV_FILE) -> None:
-    """Store (or clear) the student's HuggingFace token AND stamp this machine.
+def purge_legacy_hf_token(path: str = ENV_FILE) -> bool:
+    """Remove the legacy ``HF_TOKEN`` and ``HF_TOKEN_MACHINE`` from the .env.
 
-    The GUI's sole writer of HF_TOKEN — both Schritt D's „Token speichern" and
-    the „Umgebung starten" path that persists a freshly typed one. Stamping HERE
-    rather than lazily on the next launch is what makes "a stored token always
-    carries a stamp" true from the instant it is stored, which in turn means the
-    adopt-legacy branch of bind_hf_token_to_this_machine only ever describes
-    .env files written by a build that predates this function.
+    Returns True only when a NON-EMPTY ``HF_TOKEN`` was present and removed,
+    which is what the caller tells the student about. A leftover stamp, or an
+    empty ``HF_TOKEN=`` line, is removed silently and returns False: there was
+    no credential to announce. A missing or unreadable file returns False and
+    writes nothing (an unreadable file is never rewritten, so a transient read
+    error can not turn into a truncated .env). Idempotent.
 
-    An empty ``token`` clears BOTH keys — a cleared token has nothing to stamp,
-    and a stamp left behind would be judged against a token the student may
-    later enter on a different machine.
-
-    An unresolvable fingerprint writes NO stamp (the key is removed), so the
-    token reads as legacy and keeps working. Fail-open, same reason as
-    hf_token_is_foreign's third branch.
+    One atomic write for both keys, every other line kept verbatim (line endings
+    are normalised to LF, as ``upsert_env_var`` does). The value is read only to
+    decide whether it was empty; it is never returned, logged or stored.
     """
-    upsert_env_var(HF_TOKEN_KEY, token, path)
-    stamp = (_hf_token_fingerprint() or "") if token else ""
-    upsert_env_var(HF_TOKEN_MACHINE_KEY, stamp, path)
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.readlines()
+    except (OSError, UnicodeDecodeError):
+        return False
 
+    kept: list[str] = []
+    removed = False
+    had_token = False
+    for line in raw:
+        text = line.rstrip("\r\n")
+        stripped = text.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            key, _, value = stripped.partition("=")
+            key = key.strip()
+            if key in _LEGACY_HF_KEYS:
+                removed = True
+                if key == "HF_TOKEN" and _unquote(value):
+                    had_token = True
+                continue
+        kept.append(text)
+    if not removed:
+        return False
 
-def bind_hf_token_to_this_machine(path: str = ENV_FILE) -> str:
-    """Judge the stored HF_TOKEN against THIS machine and act on the verdict.
-
-    Returns one of HF_TOKEN_OK / HF_TOKEN_ADOPTED / HF_TOKEN_FOREIGN so the
-    caller can report in German; the Protokoll line lives in
-    ``gui_app.py::_bind_hf_token``, because deleting a credential must be
-    something the student can read afterwards.
-
-    * FOREIGN — the .env came from another PC. The token is DELETED, not just
-      ignored: it is unmanaged, so refusing to *use* it would leave it sitting in
-      the file for compose to forward on the next start.
-    * ADOPTED — a token with no stamp, i.e. every install upgrading into this
-      change. Stamped in place; the token is KEPT. See hf_token_is_foreign for
-      why absence is legacy and not a mismatch.
-    * OK — ours, unjudgeable, or nothing stored. Nothing is written.
-
-    THE WRITE ORDER ON THE FOREIGN PATH IS LOAD-BEARING. The token goes first: a
-    crash between the two writes then leaves no token and a stale stamp, which
-    the "nothing stored" branch cleans up on the next launch. Reversed, the crash
-    window leaves an UNSTAMPED foreign token — which the adopt branch would
-    happily claim as this machine's own.
-
-    Two writes rather than one because upsert_env_var is the file's single-key
-    writer and each call is already atomic; both intermediate states above are
-    self-healing, so a combined write would buy nothing.
-    """
-    token = read_env_var(HF_TOKEN_KEY, path)
-    stamped = read_env_var(HF_TOKEN_MACHINE_KEY, path)
-    if not token:
-        if stamped:
-            upsert_env_var(HF_TOKEN_MACHINE_KEY, "", path)
-        return HF_TOKEN_OK
-    if hf_token_is_foreign(stamped):
-        upsert_env_var(HF_TOKEN_KEY, "", path)
-        upsert_env_var(HF_TOKEN_MACHINE_KEY, "", path)
-        return HF_TOKEN_FOREIGN
-    if not stamped:
-        ours = _hf_token_fingerprint()
-        if ours:
-            upsert_env_var(HF_TOKEN_MACHINE_KEY, ours, path)
-            return HF_TOKEN_ADOPTED
-    return HF_TOKEN_OK
+    content = "\n".join(kept).rstrip("\n")
+    if content:
+        content += "\n"
+    _atomic_write(path, content)
+    return had_token
 
 
 def _phone_camera_names_line() -> str:

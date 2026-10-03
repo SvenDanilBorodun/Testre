@@ -2126,92 +2126,119 @@ class PreflightAccountScopeTest(unittest.TestCase):
                             "all is almost certainly transliterated")
 
 
-class HfTokenBindingWiringTest(unittest.TestCase):
-    """gui_app's half of the machine-bound HuggingFace token.
+class LegacyHfTokenPurgeWiringTest(unittest.TestCase):
+    """gui_app's half of the legacy HuggingFace token removal.
 
-    The DECISION and the deletion are ``config_generator``'s and are covered by
-    ``tests/test_config_generator.py::TestHfTokenMachineBinding``. What can only
-    be pinned here is the WIRING, and all three parts of it rot silently:
+    The token now belongs to the student's cloud account and is entered on the
+    Startseite of the web interface, so a token the old Schritt D left in this
+    PC's .env is removed once. The removal itself is ``config_generator``'s and
+    is covered by ``tests/test_config_generator.py::TestLegacyHfTokenPurge``.
+    What can only be pinned here is the WIRING, and it rots silently:
 
-      * ``_bind_hf_token`` runs BEFORE ``_build_ui``, or Schritt D's status label
-        reads a .env the purge has not touched yet and reports a deleted token as
-        saved — i.e. no re-prompt;
-      * removing a credential the student entered is REPORTED in German, because
-        a silent deletion is indistinguishable from a bug;
-      * the two GUI writers go through ``write_hf_token``, so a stored token can
-        never exist without its HF_TOKEN_MACHINE stamp.
+      * ``_purge_legacy_hf_token`` runs from ``__init__``, before ``_build_ui``,
+        so nothing built or generated afterwards can see the old token;
+      * removing a credential the student entered is REPORTED in German, once,
+        with where the token lives now, because a silent deletion is
+        indistinguishable from a bug;
+      * the line is the fixed sentence and nothing else (no token, no length, no
+        .env line), and a failure names the exception CLASS only, because an
+        exception raised while the .env is being read or rewritten may carry a
+        line of it;
+      * the GUI has no token surface left: no entry field, no writer, no binding.
     """
 
-    _NS_KEYS = ("config_generator", "ENV_FILE")
+    _SENTENCE = (
+        "Das alte HuggingFace-Token wurde von diesem PC entfernt. "
+        "Hinterlege dein Token jetzt einmalig auf der Startseite der "
+        "Web-Oberfläche."
+    )
 
-    def _make(self, verdict=None, raises=None, env_file="/tmp/x/.env"):
-        """`_bind_hf_token` bound to a stub owner, with a stubbed generator."""
+    def _make(self, removed=None, raises=None, env_file="/tmp/x/.env"):
+        """`_purge_legacy_hf_token` bound to a stub owner, with a stubbed generator."""
         calls = {"log": [], "paths": []}
 
-        def _bind(path):
+        def _purge(path):
             calls["paths"].append(path)
             if raises is not None:
                 raise raises
-            return verdict
+            return removed
 
-        cg = types.SimpleNamespace(
-            bind_hf_token_to_this_machine=_bind,
-            HF_TOKEN_OK="ok", HF_TOKEN_ADOPTED="adopted",
-            HF_TOKEN_FOREIGN="foreign",
-        )
+        cg = types.SimpleNamespace(purge_legacy_hf_token=_purge)
         ns = {"config_generator": cg, "ENV_FILE": env_file,
               "__package__": "gui.app"}
-        method = _load_method("_bind_hf_token", ns)
+        method = _load_method("_purge_legacy_hf_token", ns)
         owner = types.SimpleNamespace(_log=calls["log"].append)
         return method, owner, calls
 
-    def test_a_foreign_token_deletion_is_reported_in_german(self):
-        method, owner, calls = self._make(verdict="foreign")
+    def test_a_removed_token_is_reported_once_in_plain_german(self):
+        method, owner, calls = self._make(removed=True)
         method(owner)
         self.assertEqual(len(calls["log"]), 1, calls["log"])
         line = calls["log"][0]
-        self.assertIn("[WARNUNG]", line)
-        # It must say what happened AND what to do — a student who is not told to
-        # re-enter the token just sees recordings stop uploading.
-        for phrase in ("anderen PC", "gelöscht", "Schritt D"):
+        # Untagged: nothing was lost or broken, so it is information and not a
+        # warning (the Protokoll's four markers all open with a bracket).
+        self.assertFalse(line.lstrip().startswith("["), line)
+        # It must say what happened AND where to go on: a student who is not
+        # told where the token lives now just sees recordings stop uploading.
+        for phrase in ("entfernt", "Startseite"):
             self.assertIn(phrase, line)
-        # ...and it must not be transliterated (CLAUDE.md §1). This is also the
-        # only guard: ci.yml::german-strings-lint's grep sees this line (it
-        # carries a literal [WARNUNG]) but only for its own word denylist.
-        for bad in ("geloescht", "fuer", "gehoert", "pruefen", "ueber "):
+        # The fixed sentence, byte for byte (owner copy, B7).
+        self.assertEqual(line, self._SENTENCE)
+        # ... never transliterated (CLAUDE.md rule 1) and no en-dash in a GUI
+        # string (test_gui_log_levels pins the same for every shipped string).
+        for bad in ("Oberflaeche", "\u2013"):
             self.assertNotIn(bad, line)
         self.assertTrue(any(ch in line for ch in "äöüß"))
 
-    def test_a_legacy_adoption_is_reported_without_alarming_anyone(self):
-        """Once per install, on the first launch after the upgrade. It explains a
-        new .env key — but nothing was lost, so it must not be a warning."""
-        method, owner, calls = self._make(verdict="adopted")
-        method(owner)
-        self.assertEqual(len(calls["log"]), 1, calls["log"])
-        line = calls["log"][0]
-        self.assertNotIn("[WARNUNG]", line)
-        self.assertIn("HuggingFace-Token", line)
-        self.assertTrue(any(ch in line for ch in "äöüß"))
-
-    def test_the_ordinary_case_says_nothing(self):
-        """Every launch on the student's own PC takes this path. A line here
-        would be noise on 100 % of starts."""
-        method, owner, calls = self._make(verdict="ok")
+    def test_an_ordinary_launch_says_nothing(self):
+        """Every launch after the first takes this path. A line here would be
+        noise on 100 % of starts."""
+        method, owner, calls = self._make(removed=False)
         method(owner)
         self.assertEqual(calls["log"], [])
         self.assertEqual(calls["paths"], ["/tmp/x/.env"])
 
-    def test_a_raising_check_cannot_block_the_launch(self):
+    def test_a_raising_purge_cannot_block_the_launch_and_leaks_nothing(self):
         """It runs from ``__init__`` with no wrapper of its own: an escaping
         exception would take the whole window with it, so an unreadable or
-        unwritable .env has to degrade to a German line."""
-        method, owner, calls = self._make(raises=OSError("kein Zugriff"))
+        unwritable .env has to degrade to a German line. The exception text can
+        carry the .env line being rewritten, so only its class may be logged."""
+        secret = "HF_TOKEN=" + "a" * 8
+        method, owner, calls = self._make(raises=OSError(secret))
         method(owner)   # must not raise
         self.assertEqual(len(calls["log"]), 1, calls["log"])
-        self.assertIn("[WARNUNG]", calls["log"][0])
-        self.assertIn("kein Zugriff", calls["log"][0])
+        line = calls["log"][0]
+        self.assertEqual(
+            line,
+            "[WARNUNG] Das alte HuggingFace-Token konnte nicht von diesem PC "
+            "entfernt werden (OSError).")
+        self.assertNotIn(secret, line)
+        self.assertNotIn("HF_TOKEN=", line)
+        self.assertNotIn("\u2013", line)
 
-    def test_it_runs_before_the_ui_that_reads_the_token_status(self):
+    def test_the_method_formats_only_the_exception_class_name(self):
+        """AST fence on the M16 rule: of everything the method could interpolate
+        into a log line (the exception, ``str(e)``, the path, the result), the one
+        thing allowed is ``type(e).__name__``."""
+        import ast
+        tree = ast.parse(_read(_GUI_SRC))
+        fn = next(
+            fn for cls in tree.body
+            if isinstance(cls, ast.ClassDef) and cls.name == "EduBoticsApp"
+            for fn in cls.body
+            if isinstance(fn, ast.FunctionDef)
+            and fn.name == "_purge_legacy_hf_token")
+        interpolated = [ast.unparse(node.value) for node in ast.walk(fn)
+                        if isinstance(node, ast.FormattedValue)]
+        self.assertEqual(interpolated, ["type(e).__name__"])
+        # ... and the exception object itself is never read for its text.
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                        else getattr(node.func, "id", None))
+                self.assertNotIn(name, ("str", "repr", "format"), ast.unparse(node))
+
+    def test_it_runs_before_the_ui_is_built(self):
         """Statement ORDER inside ``__init__``, via AST — never a string index.
         ``ast`` drops comments, and the comment above the call names ``_build_ui``
         precisely to explain the ordering, so an ``index()`` comparison would be
@@ -2227,47 +2254,44 @@ class HfTokenBindingWiringTest(unittest.TestCase):
         order = {}
         for i, stmt in enumerate(init.body):
             text = ast.unparse(stmt)
-            for name in ("self._bind_hf_token()", "self._build_ui()"):
+            for name in ("self._purge_legacy_hf_token()", "self._build_ui()"):
                 if name in text:
                     order.setdefault(name, i)
-        self.assertEqual(sorted(order), ["self._bind_hf_token()",
-                                         "self._build_ui()"],
+        self.assertEqual(sorted(order), ["self._build_ui()",
+                                         "self._purge_legacy_hf_token()"],
                          f"__init__ no longer calls both: {order}")
         self.assertLess(
-            order["self._bind_hf_token()"], order["self._build_ui()"],
-            "Schritt D's status label is built inside _build_ui and reads the "
-            ".env — the token must already be judged, or a deleted token is "
-            "still reported as saved and the student is never re-prompted")
+            order["self._purge_legacy_hf_token()"], order["self._build_ui()"],
+            "the legacy token has to be gone from the .env before anything the "
+            "constructor builds or generates can read or forward it")
 
-    def test_no_gui_writer_stores_the_token_without_its_stamp(self):
-        """``upsert_env_var("HF_TOKEN", …)`` is the underlying writer, but a GUI
-        call site using it directly leaves an UNSTAMPED token — which reads as
-        legacy on every machine that copies the profile, i.e. the whole binding
-        silently off. AST over the whole file, so a comment mentioning either
-        name (there is one) cannot satisfy or break it."""
+    def test_the_gui_has_no_token_surface_left(self):
+        """No Schritt D, no writer, no machine binding: the token is the web
+        interface's business now. Names are checked on the source text (a stale
+        comment naming one is as misleading as a call), the .env writer on the
+        AST (a call to ``upsert_env_var("HF_TOKEN", …)`` is the one way the old
+        behaviour could come back without any of those names)."""
         import ast
-        tree = ast.parse(_read(_GUI_SRC))
-        raw_writes, stamped_writes = [], []
-        for node in ast.walk(tree):
+        src = _read(_GUI_SRC)
+        for gone in ("write_hf_token", "hf_token_var", "_bind_hf_token",
+                     "hf_token_entry", "hf_token_status", "_save_hf_token",
+                     "_refresh_hf_token_status", "bind_hf_token_to_this_machine",
+                     "btn_save_token", "Schritt D:"):
+            self.assertNotIn(gone, src, f"gui_app.py names {gone!r} again")
+        raw_writes = []
+        for node in ast.walk(ast.parse(src)):
             if not isinstance(node, ast.Call):
                 continue
             name = (node.func.attr if isinstance(node.func, ast.Attribute)
                     else getattr(node.func, "id", None))
-            if name == "write_hf_token":
-                stamped_writes.append(node.lineno)
-            elif name == "upsert_env_var" and node.args:
+            if name == "upsert_env_var" and node.args:
                 first = node.args[0]
-                if isinstance(first, ast.Constant) and first.value == "HF_TOKEN":
+                if (isinstance(first, ast.Constant)
+                        and str(first.value).startswith("HF_TOKEN")):
                     raw_writes.append(node.lineno)
         self.assertEqual(raw_writes, [],
-                         "gui_app writes HF_TOKEN through upsert_env_var — use "
-                         "config_generator.write_hf_token, which stamps "
-                         "HF_TOKEN_MACHINE in the same breath")
-        self.assertGreaterEqual(
-            len(stamped_writes), 2,
-            'expected both GUI token writers (Schritt D\'s „Token speichern" '
-            'and the „Umgebung starten" persist) to call write_hf_token; found '
-            f"{stamped_writes}")
+                         "gui_app writes the HuggingFace token into the .env "
+                         "again — it belongs to the cloud account now")
 
 
 class RootCauseGuardTest(unittest.TestCase):

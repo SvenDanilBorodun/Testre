@@ -19,6 +19,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Optional
 
@@ -1552,6 +1553,166 @@ def factory_reset(log=None) -> tuple[bool, str]:
 PROJECT_CONTAINERS = (
     "open_manipulator", "physical_ai_server", "physical_ai_manager", "code_runner",
 )
+
+
+# ── The robot's Hugging Face token after the student's window closed ─────────
+#
+# The token slot is the physical_ai_server node's: the SPA puts the signed-in
+# student's token there over `/register_hf_user` and clears it on „Abmelden".
+# A student who just closes the window never signs out, so the GUI, which is the
+# one party that SEES the window end (webview_window's watcher), asks the node
+# to clear the slot. It asks the NODE, never the file: the node refuses while a
+# recording or a Hugging Face transfer is running (so the upload in flight keeps
+# its token), drops its cached namespaces and publishes the new state; a `rm`
+# from outside would skip all three and make a running `upload_large_folder`
+# retry a failing call until the stall watchdog kills it. The tmpfs file never
+# leaves the container, so a stopped stack needs no clear at all.
+
+# Must stay equal to `robotChannel.js` SET_SERVICE / SERVICE_TYPE (the same wire
+# the SPA calls); `tests/test_gui_robot_token_clear.py` compares them.
+HF_CLEAR_SERVICE = "/register_hf_user"
+HF_CLEAR_SERVICE_TYPE = "physical_ai_interfaces/srv/SetHFUser"
+
+# The script prints exactly one `EDUBOTICS_HF_CLEAR=<outcome>` line; the GUI
+# reads nothing else (not stderr, not the exit code).
+HF_CLEAR_SENTINEL = "EDUBOTICS_HF_CLEAR="
+HF_CLEAR_CLEARED = "cleared"              # the node cleared the slot
+HF_CLEAR_EMPTY = "empty"                  # nothing was stored
+HF_CLEAR_NO_CONTAINER = "no_container"    # the server container is not running
+HF_CLEAR_REFUSED = "refused"              # the node said no (recording / transfer)
+HF_CLEAR_UNREACHABLE = "unreachable"      # no answer (node down, WSL, timeout)
+HF_CLEAR_SUPERSEDED = "superseded"        # a newer session began; nothing was done
+_HF_CLEAR_TERMINAL = (HF_CLEAR_CLEARED, HF_CLEAR_EMPTY, HF_CLEAR_NO_CONTAINER)
+_HF_CLEAR_ANSWERS = _HF_CLEAR_TERMINAL + (HF_CLEAR_REFUSED, HF_CLEAR_UNREACHABLE)
+
+# One attempt is bounded inside the container (`timeout -k 1 8`) and from the
+# outside by this many seconds for the whole `wsl.exe` round trip.
+HF_CLEAR_EXEC_TIMEOUT_S = 15
+# Pauses between the attempts of one window close: 5 attempts, about 8.5 min in
+# all. A window closed mid-recording is where a refusal is normal; the slot is
+# never forced.
+HF_CLEAR_RETRY_DELAYS_S = (15, 45, 120, 300)
+
+# Student-visible, logged at most once per closed window and only when the whole
+# budget ended without the slot being cleared. No token, fingerprint or command
+# output is ever part of a line.
+HF_CLEAR_REFUSED_DE = (
+    "[INFO] Das Hugging-Face-Token des geschlossenen Fensters bleibt auf dem "
+    "Roboter, weil gerade eine Aufnahme oder eine Übertragung läuft. Es wird "
+    "beim nächsten Anmelden ersetzt und beim Stoppen der Umgebung gelöscht."
+)
+HF_CLEAR_UNREACHABLE_DE = (
+    "[WARNUNG] Das Hugging-Face-Token des geschlossenen Fensters konnte nicht "
+    "vom Roboter entfernt werden. Es wird beim nächsten Anmelden ersetzt und "
+    "beim Stoppen der Umgebung gelöscht."
+)
+
+# Attempts are single-flight: two closed windows never run two ros2 CLI
+# processes inside the 6 GB server container at once.
+_hf_clear_lock = threading.Lock()
+
+# Fixed text, nothing interpolated, no token in it. Run through
+# `wsl_bridge.run` (stdin to `bash`), the repo's carrier for multi-line WSL
+# scripts: nested quotes through `wsl.exe` argv are the failure `_docker_cmd`'s
+# callers avoid. Every `docker exec` reads `/dev/null` so it cannot swallow the
+# rest of the script from stdin. The `test -s` pre-check keeps the common case
+# (the student signed out first, the slot is empty) free of a ros2 CLI process;
+# the CLI runs `nice`d and bounded. The service call carries an EMPTY token: it
+# is the node's clear request, the same one the SPA sends on sign-out.
+_HF_CLEAR_SCRIPT = r"""c=physical_ai_server
+if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" != "true" ]; then echo EDUBOTICS_HF_CLEAR=no_container; exit 0; fi
+slot=$(docker exec "$c" sh -c 'if [ -s "$HF_TOKEN_PATH" ]; then echo present; else echo empty; fi' </dev/null 2>/dev/null)
+case "$slot" in present) ;; empty) echo EDUBOTICS_HF_CLEAR=empty; exit 0;; *) echo EDUBOTICS_HF_CLEAR=unreachable; exit 0;; esac
+out=$(docker exec "$c" bash -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && timeout -k 1 8 nice -n 19 ros2 service call /register_hf_user physical_ai_interfaces/srv/SetHFUser "{token: \"\"}"' </dev/null 2>&1)
+case "$out" in *success=True*) echo EDUBOTICS_HF_CLEAR=cleared;; *success=False*) echo EDUBOTICS_HF_CLEAR=refused;; *) echo EDUBOTICS_HF_CLEAR=unreachable;; esac
+"""
+
+
+def _hf_clear_outcome(stdout) -> str:
+    """The outcome named by the script's sentinel line; anything else is unreachable."""
+    if not isinstance(stdout, str):
+        return HF_CLEAR_UNREACHABLE
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith(HF_CLEAR_SENTINEL):
+            outcome = line[len(HF_CLEAR_SENTINEL):].strip()
+            return outcome if outcome in _HF_CLEAR_ANSWERS else HF_CLEAR_UNREACHABLE
+    return HF_CLEAR_UNREACHABLE
+
+
+def clear_robot_hf_token(timeout: int = HF_CLEAR_EXEC_TIMEOUT_S) -> str:
+    """Ask the running server node to clear the robot's Hugging Face token slot.
+
+    One attempt. Returns "cleared" / "empty" / "no_container" / "refused" /
+    "unreachable". Reads ONLY the stdout sentinel of ``_HF_CLEAR_SCRIPT``, maps
+    every failure (a timed-out or missing WSL, an OSError, anything) to
+    "unreachable", never raises and never logs or returns command output.
+    """
+    try:
+        result = wsl_bridge.run(_HF_CLEAR_SCRIPT, timeout=timeout, check=False)
+        return _hf_clear_outcome(getattr(result, "stdout", None))
+    except Exception:  # noqa: BLE001 — the contract is "never raises"
+        return HF_CLEAR_UNREACHABLE
+
+
+def _hf_clear_is_current(is_current, generation) -> bool:
+    """`is_current(generation)`; a hook that cannot answer reads as superseded."""
+    try:
+        return bool(is_current(generation))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def clear_robot_hf_token_after_window_close(
+    generation: int,
+    is_current,
+    log=None,
+    *,
+    attempt=None,
+    sleep=time.sleep,
+    delays=HF_CLEAR_RETRY_DELAYS_S,
+) -> str:
+    """Clear the robot's token for a window that ended on its own, with retries.
+
+    ``generation`` is the student session the window belonged to and
+    ``is_current(generation)`` says whether anything has superseded it
+    (``webview_window.is_current_generation``). It is asked after every sleep,
+    again once the single-flight lock is held and so right before the attempt:
+    a newer session, whose student may already have put a token on the robot,
+    always wins and this returns "superseded" without a log line.
+
+    cleared / empty / no_container end it silently (the ordinary path writes
+    nothing). refused / unreachable are retried after each of ``delays`` (5
+    attempts in all); when the budget ends with the window still current ONE
+    German line is logged. ``attempt`` defaults to ``clear_robot_hf_token``,
+    resolved at call time. Never raises: a failing ``attempt`` is an
+    unreachable answer and a failing ``log`` is ignored.
+    """
+    do_attempt = attempt if attempt is not None else clear_robot_hf_token
+    outcome = HF_CLEAR_UNREACHABLE
+    for index in range(len(delays) + 1):
+        if index:
+            sleep(delays[index - 1])
+        if not _hf_clear_is_current(is_current, generation):
+            return HF_CLEAR_SUPERSEDED
+        with _hf_clear_lock:
+            if not _hf_clear_is_current(is_current, generation):
+                return HF_CLEAR_SUPERSEDED
+            try:
+                outcome = do_attempt()
+            except Exception:  # noqa: BLE001
+                outcome = HF_CLEAR_UNREACHABLE
+        if outcome in _HF_CLEAR_TERMINAL:
+            return outcome
+        if outcome != HF_CLEAR_REFUSED:
+            outcome = HF_CLEAR_UNREACHABLE
+    if log is not None and _hf_clear_is_current(is_current, generation):
+        try:
+            log(HF_CLEAR_REFUSED_DE if outcome == HF_CLEAR_REFUSED
+                else HF_CLEAR_UNREACHABLE_DE)
+        except Exception:  # noqa: BLE001 — a diagnostic must not break the thread
+            pass
+    return outcome
 
 
 def get_container_status() -> dict[str, str]:

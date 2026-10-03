@@ -67,6 +67,15 @@ _BEARER_SCRUBBER = _BearerTokenScrubber()
 for _log_name in ('urllib3', 'urllib3.connectionpool', 'requests', 'http.client'):
     logging.getLogger(_log_name).addFilter(_BEARER_SCRUBBER)
 
+# 042: the same idea for the student's own Hugging Face token (`hf_…`) on the
+# HF/HTTP loggers, plus the handlers every propagated record passes. stdlib
+# only, so it is safe to import before the ROS interfaces. The spawned upload
+# child never imports this module and installs it itself
+# (hf_api_worker._worker_process_loop). Stays in the module-level block so it is
+# active before any logging below.
+from physical_ai_server.data_processing import hf_token_store  # noqa: E402
+hf_token_store.install_log_scrubber()
+
 from physical_ai_interfaces.msg import (
     Detection,
     HFOperationStatus,
@@ -477,9 +486,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # some other code path reads it during transition).
         self.is_training = False
 
+        # 042: per-student Hugging Face token slot. The lock serialises the
+        # /register_hf_user decision (its callback group is reentrant); the rest
+        # is the state-topic bookkeeping (_init_hf_token_state fills the publisher).
+        self._hf_token_lock = threading.Lock()
+        self._hf_token_seq = 0
+        self._hf_token_state_pub = None
+        self._hf_token_last_error_log = None
+
         self._init_core_components()
 
         self._init_ros_publisher()
+        try:
+            self._init_hf_token_state()
+        except Exception as e:
+            # A token-state failure must never stop the node from booting.
+            self.get_logger().error(f'hf token state not started: {type(e).__name__}')
         self._init_ros_service()
 
         # Pure identity hoist (edu6 §4.1): resolve() is NON-RAISING by
@@ -1518,28 +1540,152 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.get_logger().info(
             'Robot control parameters initialized successfully')
 
-    def set_hf_user_callback(self, request, response):
-        request_hf_token = request.token
-        try:
-            if DataManager.register_huggingface_token(request_hf_token):
-                self.get_logger().info('Hugging Face user token registered successfully')
-                response.user_id_list = DataManager.get_huggingface_user_id()
-                response.success = True
-                response.message = 'Hugging Face user token registered successfully'
-            else:
-                self.get_logger().error('Failed to register Hugging Face user token')
-                response.user_id_list = []
-                response.success = False
-                response.message = 'Failed to register token, Please check your token'
-        except Exception as e:
-            self.get_logger().error(f'Error in set_hf_user_callback: {str(e)}')
-            response.user_id_list = []
-            response.success = False
-            # Audit §3.21 — don't leak the raw exception text to the
-            # client (paths / stack-trace fragments would land in the
-            # React toast). Log it server-side, return generic German.
-            response.message = 'Hugging-Face-Token konnte nicht registriert werden.'
+    # ── per-student Hugging Face token slot (042) ────────────────────────────
+    # The signed-in student's own token reaches the robot over /register_hf_user
+    # (relayed by the SPA, which got it from the cloud API) and lives in ONE file
+    # on a tmpfs, $HF_TOKEN_PATH, that huggingface_hub re-reads on every call —
+    # no consumer passes a token, and the spawned upload child inherits the env.
+    # The node never reads the token back to a client: it publishes a fingerprint
+    # and three booleans on /edubotics/hf_token_state (hf_token_store.py).
+    # Nothing here may log the token, its fingerprint or a library message.
 
+    def _init_hf_token_state(self):
+        """Publisher + 1 Hz timer for /edubotics/hf_token_state, the boot purge of
+        the legacy `huggingface-cli` token files, and the scrubber re-install.
+
+        Deliberately NOT part of _init_ros_publisher: test_signal_status_node_wiring
+        execs that method with a fixed namespace. The topic is published even when
+        this image takes no personal token (accepts=False), so the SPA can tell a
+        Jetson image from an old image that has no topic at all.
+        """
+        state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._hf_token_state_pub = self.create_publisher(
+            String, hf_token_store.STATE_TOPIC, state_qos)
+        # Its own group (the signal_status / heartbeat pattern): a blocking
+        # default-group callback cannot stall the state tick.
+        self._hf_state_group = MutuallyExclusiveCallbackGroup()
+        self._hf_token_state_timer = self.create_timer(
+            hf_token_store.PUBLISH_PERIOD_S,
+            self._hf_token_state_tick,
+            callback_group=self._hf_state_group,
+        )
+        removed = hf_token_store.purge_legacy()
+        if removed:
+            self.get_logger().info(
+                f'Removed {len(removed)} legacy Hugging Face token file(s) from the cache volume')
+        if hf_token_store.accepts() and (
+                os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')):
+            self.get_logger().warning(
+                'A Hugging Face token is set in the environment; it outranks the personal '
+                'token file, so a token pushed from the web app would not take effect.')
+        # HfApiWorker.__init__ (in _init_core_components) ran logging.basicConfig,
+        # which created the root handler: attach the scrubber to it now.
+        hf_token_store.install_log_scrubber()
+
+    def _hf_token_busy(self) -> bool:
+        """True while the token must stay stable: a recording, or the HF worker
+        downloading / listing / uploading. A worker that is absent or dead, or
+        that cannot be asked, counts as NOT busy (it self-shuts after 5 idle
+        cycles). Inference and Roboter-Studio programs never touch the hub."""
+        if bool(getattr(self, 'on_recording', False)):
+            return True
+        try:
+            worker = getattr(self, 'hf_api_worker', None)
+            if worker is None or not worker.is_alive():
+                return False
+            return bool(worker.is_busy())
+        except Exception:  # noqa: BLE001 — a status question must never raise
+            return False
+
+    def _publish_hf_token_state(self):
+        """One /edubotics/hf_token_state message (schema v1). Never raises; a
+        failure is logged at most once per 30 s, by exception class only."""
+        try:
+            publisher = getattr(self, '_hf_token_state_pub', None)
+            if publisher is None:
+                return
+            self._hf_token_seq += 1
+            payload = hf_token_store.state_payload(self._hf_token_seq, self._hf_token_busy())
+            msg = String()
+            msg.data = hf_token_store.encode_payload(payload)
+            publisher.publish(msg)
+        except Exception as e:  # noqa: BLE001 — a status topic must never kill the node
+            now = time.monotonic()
+            last = getattr(self, '_hf_token_last_error_log', None)
+            if last is None or now - last >= 30.0:
+                self._hf_token_last_error_log = now
+                self.get_logger().warning(
+                    f'hf_token_state publish failed: {type(e).__name__}')
+
+    def _hf_token_state_tick(self):
+        self._publish_hf_token_state()
+
+    def _apply_hf_token_request(self, token):
+        """Decide and apply one /register_hf_user request; returns
+        (success, german_message). Called with self._hf_token_lock held.
+
+        Order is the contract (a non-empty token equal to the stored one is a
+        no-op success EVEN while busy; busy is judged before the shape):
+          1. an image without a token slot refuses;
+          2. empty + nothing stored, or the stored token again -> success;
+          3. busy (recording / HF worker) -> refused, the file is untouched;
+          4. empty -> clear;  5. bad shape -> refused;  6. otherwise write.
+        No network, no subprocess, no whoami: the cloud already proved the token.
+        """
+        if not hf_token_store.accepts():
+            return False, record_texts_de.HF_TOKEN_UNSUPPORTED_DE
+        if not isinstance(token, str):
+            token = ''
+        try:
+            stored = hf_token_store.read()
+            if token == '' and stored is None:
+                # Nothing valid is stored; still sweep a garbage or half-written
+                # file, which huggingface_hub would otherwise send as a token.
+                # Best effort: "nothing to remove" must stay a success.
+                try:
+                    hf_token_store.clear()
+                except OSError:
+                    pass
+                return True, record_texts_de.HF_TOKEN_NONE_DE
+            if token != '' and token == stored:
+                return True, record_texts_de.HF_TOKEN_SET_OK_DE
+            if self._hf_token_busy():
+                return False, record_texts_de.HF_TOKEN_BUSY_DE
+            if token == '':
+                hf_token_store.clear()
+                message = record_texts_de.HF_TOKEN_CLEARED_DE
+            elif not hf_token_store.valid_shape(token):
+                return False, record_texts_de.HF_TOKEN_SHAPE_DE
+            else:
+                hf_token_store.write(token)
+                message = record_texts_de.HF_TOKEN_SET_OK_DE
+            # The rig's identity just changed: the cached namespace allowlist
+            # (DataManager._rig_hf_namespaces) is stale, and so is the state topic.
+            DataManager.invalidate_hf_namespace_cache()
+            self._publish_hf_token_state()
+            return True, message
+        except Exception as e:  # noqa: BLE001 — class only: the message could quote the token
+            self.get_logger().error(f'hf token slot update failed: {type(e).__name__}')
+            return False, record_texts_de.HF_TOKEN_WRITE_FAILED_DE
+
+    def set_hf_user_callback(self, request, response):
+        """/register_hf_user — since 042 it sets, replaces or clears the robot's
+        per-student token slot. `user_id_list` is always empty (the SPA reads the
+        Benutzer-ID list with /get_registered_hf_user); the .srv is unchanged."""
+        response.user_id_list = []
+        try:
+            # request.token is only ever handed to the decision helper below.
+            token = request.token
+            with self._hf_token_lock:
+                response.success, response.message = self._apply_hf_token_request(token)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'set_hf_user_callback failed: {type(e).__name__}')
+            response.success = False
+            response.message = record_texts_de.HF_TOKEN_WRITE_FAILED_DE
         return response
 
     def get_hf_user_callback(self, request, response):

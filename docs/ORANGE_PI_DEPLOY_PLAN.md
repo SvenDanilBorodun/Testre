@@ -313,6 +313,8 @@ PowerShell), `update_checker`'s cloud `/version` + SHA-256 gate,
 and the v4l2 enumeration + identical-serial dedup logic from
 `wsl_bridge.list_video_devices` (run natively, no `wsl -d` wrapping).
 
+> **[SUPERSEDED 2026-10-03 — per-student Hugging Face token (042).]** `HF_TOKEN` is no longer an unmanaged `.env` key and `upsert_env_var` is no longer its writer on the Pi: the token belongs to the student's account, is entered on the Startseite and lives only on the robot's tmpfs slot (`HF_TOKEN_PATH`). `pi_agent/config_generator._read_unmanaged_lines` drops a legacy `HF_TOKEN` on the next regenerate.
+
 **Deleted on the Pi** (Windows/WSL artifacts): `usbipd_resolver.py` and
 all usbipd attach/bind, `wsl_bridge`'s distro tunneling, keepalive,
 `win_camera.py` (MSMF), `camera_bridge.py` (:5557), `webview_window.py`
@@ -325,7 +327,7 @@ nginx at `/api/system/` (works identically on-device and over LAN, no
 CORS/Origin dance): status (INCLUDING the Pi's LAN IP — reuse the
 Jetson agent's LAN-IP detection, `agent.py:504`; the System window
 displays it, §6), scan-arms, camera scan/roles/MJPEG-previews,
-phone-camera toggle, HF token, start/stop environment, update
+phone-camera toggle, HF token [SUPERSEDED 2026-10-03: removed, see 042], start/stop environment, update
 (image pull + agent self-update from a SHA-256-verified release tarball),
 factory reset (double-confirm), Protokoll (SSE, with the existing secret
 redaction), a **„Netzwerk-Check"** (tests FROM the Pi the things that
@@ -463,6 +465,7 @@ env surface. Explicit merge checklist:
   no leader device at all, and the Roboter-Studio leader toggle
   DEPENDS on regenerating exactly that key; tzdata ro-mounts,
   `.s6-keep` mount, `pids_limit`, `SYS_NICE`/rtprio.
+  *[SUPERSEDED 2026-10-03: the opi compose no longer forwards `HF_TOKEN=${HF_TOKEN:-}`; `physical_ai_server` gets `HF_TOKEN_PATH=/run/edubotics-hf/token` and a private tmpfs there instead, and compose must never set an environment token (it would outrank the file). The Jetson's `HF_TOKEN=${EDUBOTICS_HF_TOKEN}` is unchanged.]*
 - **New in this file**: the manager as a third service (per the
   lifecycle model above), the `${EDUBOTICS_BIND_HOST:-…}` port
   binding, the pinned-but-configurable `ros_net` IPAM block (proxy
@@ -554,7 +557,7 @@ Feature-for-feature parity with `EduBotics.exe`:
 | Schritt A/B „Arme scannen" + guided repair | scan via scanner container + `identify_arm.py`; repairs = udev/group checks; leader/follower ports persisted as managed keys; fast-rehydrate on revisit |
 | Schritt C Kameras: Scan, Rollen (Greifer/Szene), Vorschau | v4l2 by-id/by-path enumeration incl. identical-serial dedup; MJPEG `<img>` previews from the agent; previews stop before the stack claims devices |
 | Handy als 3. Kamera (:8444) | **⚠ OFFEN — owner decision pending, do NOT implement in P3 until decided.** The receiver itself ports cleanly (`0.0.0.0:8444` HTTPS, openssl cert), but on the Pi's `usb_cam` path there is NO consumer: `entrypoint_omx.sh` starts `camera_ingest_node.py` only in the `native_bridge` branch (`:528/:535`), so phone frames reach no ROS topic. The ingest node is a TCP SERVER the Windows GUI dials into at `127.0.0.1:5557` — a working Pi port would need an agent-side sender AND the ingest node running beside `usb_cam`. Note the phone is preview-only even on Windows (recording/inference out of scope per `phone_camera.py`'s own docstring). Options when decided: drop from Pi v1, or run the ingest node alongside `usb_cam` with an agent-side sender. |
-| Schritt D HF-Token | same upsert, same „Token gespeichert" semantics |
+| HF-Token | per-student on the Startseite (042); the Pi stores none |
 | „Umgebung starten"/„Stoppen" + start-gate | same gating (prerequisites ∧ both arms identified ∨ cloud-only) |
 | Update-Gate | cloud `/version` check (needs the new `pi_agent_*` fields, §7); image pulls via digest pre-check + agent tarball self-update replace the `.exe` download; manager recreated last — brief SPA reload, `useVersionCheck` self-heals (requires the §4 buildId stamp); the update POST/SSE ride through the manager being recreated — agent ACKs early with a job id, UI re-attaches by polling (§5) |
 | „Web-Oberfläche öffnen" | not needed — the user is already in the browser |

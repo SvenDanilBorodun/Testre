@@ -21,7 +21,7 @@ import TaskPhase from '../../../constants/taskPhases';
 import { datasetRepoId } from '../../../utils/datasetName';
 import { isFinishTracking } from '../../../features/tasks/recordSession';
 import RECORD_COPY from './recordCopy';
-import { diskProblem, sourcesWith, stalledSourceProblem } from './problems';
+import { diskProblem, hfTokenProblem, sourcesWith, stalledSourceProblem } from './problems';
 import { UPLOAD_START_GRACE_MS } from './finishModel';
 
 export const VIEW = Object.freeze({
@@ -245,18 +245,26 @@ function uploadStillRunning(finish, nowWallMs) {
 
 /**
  * Why Start is refused, first match (Q5): the disk, a stalled source (camera →
- * follower → leader), or the same dataset still visibly uploading. Validation
- * is not a block — it runs on the click.
- * @returns {null | {kind: 'disk'|'source'|'uploading', problem}}
+ * follower → leader), the student's own Hugging-Face token (not stored, not
+ * usable, or not on the robot yet), or the same dataset still visibly
+ * uploading. Validation is not a block — it runs on the click.
+ *
+ * `hfToken` is `features/hfToken/hfTokenSelectors::selectHfStartBlock`'s answer.
+ * UNKNOWN NEVER BLOCKS: an account state that has not answered, a robot that
+ * has not said it takes a personal token (older image, Jetson) and a store
+ * without the feature all arrive as null.
+ * @returns {null | {kind: 'disk'|'source'|'hftoken'|'uploading', reason?, problem}}
  */
 export function deriveStartBlock({
   disk = null, verdicts = null, bridge = null, activation = null, session = null, form = {}, robotType = '',
-  nowWallMs = Date.now(),
+  hfToken = null, nowWallMs = Date.now(),
 } = {}) {
   const diskP = diskProblem(disk, { running: false });
   if (diskP) return { kind: 'disk', problem: diskP };
   const stalled = sourcesWith(verdicts, 'stalled')[0];
   if (stalled) return { kind: 'source', problem: stalledSourceProblem(stalled, { bridge, activation }) };
+  const hfProblem = hfToken ? hfTokenProblem(hfToken) : null;
+  if (hfProblem) return { kind: 'hftoken', reason: hfToken, problem: hfProblem };
   const finish = session?.finish;
   if (isFinishTracking(finish) && uploadStillRunning(finish, nowWallMs)) {
     const uploadingRepo = finish.expectedRepoId || finish.repoId;
@@ -282,6 +290,7 @@ export function deriveStartBlock({
  * @param input.verdicts    sourceVerdicts output | null
  * @param input.bridge      useRsBridgeStatus output | null
  * @param input.activation  useRobotActivation status | null
+ * @param input.hfToken     null | 'none' | 'unusable' | 'transfer' | 'failed' | 'taken_over'
  */
 export function deriveRecordView({
   heartbeat = 'disconnected',
@@ -297,6 +306,7 @@ export function deriveRecordView({
   verdicts = null,
   bridge = null,
   activation = null,
+  hfToken = null,
 } = {}) {
   const view = deriveView({ heartbeat, status, collision, session });
   const running = !!status.running;
@@ -319,7 +329,7 @@ export function deriveRecordView({
 
   const connected = heartbeat === 'connected';
   const startBlock = deriveStartBlock({
-    disk, verdicts, bridge, activation, session, form, robotType: status.robotType, nowWallMs,
+    disk, verdicts, bridge, activation, session, form, robotType: status.robotType, hfToken, nowWallMs,
   });
   const segments = segmentsFor(view, { status, plan, episode, session });
   const idleText = view === VIEW.FINISHING ? C.track.allDone : C.track.idle;

@@ -23,6 +23,9 @@ const SRC = path.resolve(__dirname, '../..');
 export const GERMAN_FILES = Object.freeze([
   'components/CompactSystemStatus.js',
   'components/DatasetSelector.js',
+  // The per-student Hugging-Face-Token card on the Startseite and its table of
+  // sentences (the JSX itself carries none: every string comes from the table).
+  'components/Home/HfTokenCard.jsx',
   'components/FileBrowser.js',
   'components/FileBrowserModal.js',
   'components/ModelWeightSelector.js',
@@ -49,6 +52,7 @@ export const GERMAN_FILES = Object.freeze([
   'components/SystemStatus.js',
   'components/TagInput.js',
   'constants/HFStatus.js',
+  'features/hfToken/hfTokenCopy.js',
   'features/editDataset/components/DatasetDeleteSection.js',
   'features/editDataset/components/DatasetHuggingfaceSection.js',
   'features/editDataset/components/DatasetMergeSection.js',

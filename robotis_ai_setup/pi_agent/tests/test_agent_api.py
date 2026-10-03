@@ -200,6 +200,9 @@ class TestRouting(_ServerBase):
         self.assertEqual(code, 200)
         self.assertIn("lan_ip", payload)
         self.assertIn("arms_identified", payload)
+        # The student's token lives with the cloud account now; the wizard has
+        # no "token saved" state to show any more.
+        self.assertNotIn("hf_token_saved", payload)
 
     def test_unknown_get_404(self):
         code, payload = self._get("/does-not-exist")
@@ -247,6 +250,18 @@ class TestRouting(_ServerBase):
     def test_unknown_post_404(self):
         code, payload = self._post("/nope", origin=None)
         self.assertEqual(code, 404)
+
+    def test_the_hf_token_route_is_gone(self):
+        """The wizard used to POST the student's token here. The token lives with
+        the cloud account now and reaches the robot over rosbridge, so the agent
+        must neither accept nor store one: an old client posting to the removed
+        route gets an unknown-route 404 and nothing is written."""
+        with patch.object(agent.config_generator, "upsert_env_var") as write:
+            code, payload = self._post("/hf-token", {"token": "hf_x"}, origin=None)
+        self.assertEqual(code, 404)
+        self.assertFalse(payload["ok"])
+        write.assert_not_called()
+        self.assertFalse(hasattr(self.app, "handle_hf_token"))
 
     def test_camera_preview_rejects_ssrf_device(self):
         # A URL device would turn cv2.VideoCapture into an SSRF vector; the GET
@@ -343,7 +358,6 @@ class TestLifecycleLockIsBounded(_ServerBase):
             ("/environment/start", {}),
             ("/scan-arms", {}),
             ("/cameras/roles", {"cameras": [{"path": "/dev/video0", "role": "scene"}]}),
-            ("/hf-token", {"token": "hf_x"}),
             ("/robot-type", {"robot_type": "omx_full"}),
             ("/factory-reset", {"confirm": True, "confirm_again": True}),
         ):
@@ -362,7 +376,9 @@ class TestLifecycleLockIsBounded(_ServerBase):
         # A raise from inside it.
         with patch.object(agent.config_generator, "upsert_env_var",
                           side_effect=RuntimeError("disk full")):
-            self.assertEqual(self._post("/hf-token", {"token": "x"}, origin=None)[0], 500)
+            self.assertEqual(
+                self._post("/robot-type", {"robot_type": "omx_full"}, origin=None)[0],
+                500)
         self.assertTrue(self.app._lifecycle_lock.acquire(timeout=1))
         self.app._lifecycle_lock.release()
 

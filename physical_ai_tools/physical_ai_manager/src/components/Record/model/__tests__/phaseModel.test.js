@@ -281,6 +281,50 @@ describe('start blocks (Q5)', () => {
     expect(deriveStartBlock({ verdicts: leader }).problem.textDe).toBe(RECORD_COPY.problem.leaderStalled);
   });
 
+  it('then the student\'s own Hugging-Face token: not stored, unusable, on its way, failed, taken over', () => {
+    expect(deriveStartBlock({ hfToken: 'none' })).toEqual({
+      kind: 'hftoken',
+      reason: 'none',
+      problem: { kind: 'bad', textDe: RECORD_COPY.problem.hfToken.none, linkToHome: true },
+    });
+    expect(deriveStartBlock({ hfToken: 'unusable' }).problem.textDe).toBe(RECORD_COPY.problem.hfToken.unusable);
+    expect(deriveStartBlock({ hfToken: 'failed' }).problem.textDe).toBe(RECORD_COPY.problem.hfToken.failed);
+    expect(deriveStartBlock({ hfToken: 'taken_over' }).problem.textDe).toBe(RECORD_COPY.problem.hfToken.takenOver);
+    // the transfer resolves by itself: no link
+    expect(deriveStartBlock({ hfToken: 'transfer' }).problem).toEqual({
+      kind: 'bad', textDe: RECORD_COPY.problem.hfToken.transfer, linkToHome: false,
+    });
+  });
+
+  it('the order is disk, then source, then token, then an upload still running', () => {
+    const disk = { verdict: 'low', free: 1.2e9, startFloor: 3e9, criticalFloor: 1e9 };
+    const stalled = [verdict('camera', 'scene', 'stalled')];
+    const uploading = {
+      ...EMPTY_RECORD_SESSION,
+      finish: { ...EMPTY_FINISH, state: 'uploading', expectedRepoId: 'schule-A/omx_f_Wuerfel', dismissed: true },
+    };
+    const all = { disk, verdicts: stalled, hfToken: 'none', session: uploading, form: FORM, robotType: 'omx_f' };
+    expect(deriveStartBlock(all).kind).toBe('disk');
+    expect(deriveStartBlock({ ...all, disk: null }).kind).toBe('source');
+    expect(deriveStartBlock({ ...all, disk: null, verdicts: null }).kind).toBe('hftoken');
+    expect(deriveStartBlock({ ...all, disk: null, verdicts: null, hfToken: null }).kind).toBe('uploading');
+  });
+
+  it('UNKNOWN NEVER BLOCKS: no token verdict, or one it does not know, is no block', () => {
+    expect(deriveStartBlock({ hfToken: null })).toBeNull();
+    expect(deriveStartBlock({})).toBeNull();
+    expect(deriveStartBlock({ hfToken: 'unbekannt' })).toBeNull();
+    expect(deriveStartBlock({ hfToken: '' })).toBeNull();
+  });
+
+  it('the page view refuses Start for the token and offers the banner reason at READY', () => {
+    const m = model({ hfToken: 'none' });
+    expect(m.startBlock).toMatchObject({ kind: 'hftoken', reason: 'none' });
+    expect(m.buttons[0]).toMatchObject({ id: 'start', disabled: true });
+    expect(model({ hfToken: null }).startBlock).toBeNull();
+    expect(model({}).buttons[0].disabled).toBe(false);
+  });
+
   it('slow sources and an unknown disk do not block', () => {
     expect(deriveStartBlock({ verdicts: [verdict('camera', 'scene', 'slow')], disk: { verdict: 'unknown' } })).toBeNull();
   });

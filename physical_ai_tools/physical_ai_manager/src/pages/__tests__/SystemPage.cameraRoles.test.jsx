@@ -98,7 +98,6 @@ function statusFixture(overrides = {}) {
     hardware_ready: false,
     cameras: [],
     follower_only: false,
-    hf_token_saved: false,
     images: { age_days: null, is_stale: true },
     ...overrides,
   };

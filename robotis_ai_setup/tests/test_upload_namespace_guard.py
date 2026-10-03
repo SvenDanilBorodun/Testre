@@ -18,8 +18,11 @@ WHY IT MUST FAIL OPEN, and this is the half that is easy to get wrong. "Cannot
 judge" — no token, whoami timed out, HF down, a malformed reply — must ALLOW,
 on TWO grounds: with no token the upload fails on its own and nothing is
 published, and turning a network blip into a destroyed upload is a worse outcome
-than the case the guard exists for. It is a REFUSE-ON-PROOF gate, the same
-stance ``hf_token_is_foreign`` takes on an absent stamp.
+than the case the guard exists for. It is a REFUSE-ON-PROOF gate: it refuses
+only a namespace it can demonstrably show the rig's token does not own. Since
+042 the token is the signed-in student's own (the Startseite pushes it into the
+robot's tmpfs slot), so this guard is defence in depth behind the SPA's start
+block, and its logic is unchanged.
 
 A THIRD ground used to head that list — "recording with NO cloud login is a
 fully supported path (only Training and Inferenz gate on a session)" — and it is

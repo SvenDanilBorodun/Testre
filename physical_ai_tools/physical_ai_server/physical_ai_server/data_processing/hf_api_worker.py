@@ -454,6 +454,15 @@ class HfApiWorker:
             # Set progress queue for DataManager
             DataManager.set_progress_queue(progress_queue)
 
+            # 042: this spawned child never imports the node module, so the
+            # node's token scrubber is NOT active here. Attach it to the named
+            # HF/HTTP loggers (and the root handlers basicConfig just made).
+            try:
+                from physical_ai_server.data_processing import hf_token_store
+                hf_token_store.install_log_scrubber()
+            except Exception as e:  # noqa: BLE001
+                logger.error(f'Token log scrubber not installed: {type(e).__name__}')
+
             # F7: forward upload_large_folder's ERROR lines to the parent's
             # stall watchdog. Never fatal: without it only the hard cap applies.
             try:
@@ -504,7 +513,8 @@ class HfApiWorker:
                         # TaskStatus.error and surface verbatim as a student
                         # toast — German per Rule §1. When the DataManager
                         # call classified the failure (e.g. invalid HF token
-                        # -> the "Schritt D" hint), surface that precise
+                        # -> the "ersetze dein Token auf der Startseite"
+                        # hint), surface that precise
                         # reason instead of the generic line. The reason
                         # side-channel is same-process: this worker loop is
                         # single-threaded and reads it right after the call.

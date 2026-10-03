@@ -3,15 +3,15 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 //
-// Covers the robust /me loader + HF auto-link — the heart of this PR.
-// Cases: success, 401 → sign-out, 404 → profileError (NO sign-out), and the
-// HF auto-link (PATCH /me once with the Benutzer-ID, including the case where
-// the Benutzer-ID arrives AFTER /me).
+// Covers the robust /me loader. Cases: success, 401 → sign-out, 404 →
+// profileError (NO sign-out), and that the old HF auto-link is GONE: the hook
+// never PATCHes /me with a Benutzer-ID any more (the cloud proves the name from
+// the stored token instead, PUT /me/hf-token).
 //
 // Backed by a REAL Redux store (auth + ui reducers) + <Provider>, so
-// dispatched actions properly re-render the subscribed selectors and re-run
-// the auto-link effect — exactly like the live app, minus the rest of the
-// store. Only the network/auth side effects are mocked.
+// dispatched actions properly re-render the subscribed selectors — exactly like
+// the live app, minus the rest of the store. Only the network/auth side
+// effects are mocked.
 
 import React from 'react';
 import { renderHook, act, waitFor } from '@testing-library/react';
@@ -62,29 +62,6 @@ function makeStore({ accessToken = 'jwt-1', hfUserList = [] } = {}) {
 
 function wrapperFor(store) {
   return ({ children }) => <Provider store={store}>{children}</Provider>;
-}
-
-// This jsdom config runs WITHOUT a backing localStorage file, so the real
-// `localStorage.setItem` throws (the hook's resolveBenutzerId() try/catches
-// this — safe in prod). For the persisted-Benutzer-ID test we install a tiny
-// in-memory Storage so the read path is exercised; helper installs/clears it.
-function withMemoryLocalStorage(entries) {
-  const map = new Map(Object.entries(entries));
-  const fake = {
-    getItem: (k) => (map.has(k) ? map.get(k) : null),
-    setItem: (k, v) => map.set(k, String(v)),
-    removeItem: (k) => map.delete(k),
-    clear: () => map.clear(),
-  };
-  const original = Object.getOwnPropertyDescriptor(window, 'localStorage');
-  Object.defineProperty(window, 'localStorage', {
-    value: fake,
-    configurable: true,
-  });
-  return () => {
-    if (original) Object.defineProperty(window, 'localStorage', original);
-    else delete window.localStorage;
-  };
 }
 
 beforeEach(() => {
@@ -142,33 +119,31 @@ describe('useMeProfile — load + error branches', () => {
   });
 });
 
-describe('useMeProfile — HF identity auto-link', () => {
-  test('links once when profile loads with null hf_username and a sole whoami entry', async () => {
+describe('useMeProfile — no HF identity auto-link any more', () => {
+  // It used to PATCH /me with whatever Benutzer-ID the ROBOT's token reported:
+  // an unverified name, on a shared PC the previous student's. The cloud now
+  // sets users.hf_username from the token's own whoami (PUT /me/hf-token) and
+  // answers PATCH /me with 409 once a token is stored.
+  test('never PATCHes /me, whatever the robot reports and whatever the profile says', async () => {
     const store = makeStore({ hfUserList: ['student42'] });
     mockGetMe.mockResolvedValue({ role: 'student', hf_username: null });
-    mockPatchHf.mockResolvedValue({ role: 'student', hf_username: 'student42' });
 
-    renderHook(() => useMeProfile({ enableHfLink: true }), {
-      wrapper: wrapperFor(store),
+    renderHook(() => useMeProfile({}), { wrapper: wrapperFor(store) });
+
+    await waitFor(() => expect(store.getState().auth.profileLoaded).toBe(true));
+    await act(async () => {
+      store.dispatch(setHfUserList(['late-id']));
+      await Promise.resolve();
     });
-
-    await waitFor(() =>
-      expect(mockPatchHf).toHaveBeenCalledWith('jwt-1', 'student42')
-    );
-    await waitFor(() =>
-      expect(store.getState().auth.hfUsername).toBe('student42')
-    );
-    // Exactly once — the one-shot guard prevents a loop.
-    expect(mockPatchHf).toHaveBeenCalledTimes(1);
+    expect(mockPatchHf).not.toHaveBeenCalled();
+    expect(store.getState().auth.hfUsername).toBeNull();
   });
 
-  test('does NOT link when hf_username is already set', async () => {
+  test('ignores the retired enableHfLink option', async () => {
     const store = makeStore({ hfUserList: ['student42'] });
-    mockGetMe.mockResolvedValue({ role: 'student', hf_username: 'already' });
+    mockGetMe.mockResolvedValue({ role: 'student', hf_username: null });
 
-    renderHook(() => useMeProfile({ enableHfLink: true }), {
-      wrapper: wrapperFor(store),
-    });
+    renderHook(() => useMeProfile({ enableHfLink: true }), { wrapper: wrapperFor(store) });
 
     await waitFor(() => expect(store.getState().auth.profileLoaded).toBe(true));
     await act(async () => {
@@ -177,64 +152,13 @@ describe('useMeProfile — HF identity auto-link', () => {
     expect(mockPatchHf).not.toHaveBeenCalled();
   });
 
-  test('links the persisted Benutzer-ID even before the whoami list resolves', async () => {
-    const restore = withMemoryLocalStorage({
-      edubotics_userId: 'persisted-id',
-    });
-    try {
-      const store = makeStore({ hfUserList: [] }); // whoami not loaded yet
-      mockGetMe.mockResolvedValue({ role: 'student', hf_username: null });
-      mockPatchHf.mockResolvedValue({
-        role: 'student',
-        hf_username: 'persisted-id',
-      });
+  test('takes the linked name from /me and from nowhere else', async () => {
+    const store = makeStore();
+    mockGetMe.mockResolvedValue({ role: 'student', hf_username: 'anna-hf' });
 
-      renderHook(() => useMeProfile({ enableHfLink: true }), {
-        wrapper: wrapperFor(store),
-      });
+    renderHook(() => useMeProfile({}), { wrapper: wrapperFor(store) });
 
-      await waitFor(() =>
-        expect(mockPatchHf).toHaveBeenCalledWith('jwt-1', 'persisted-id')
-      );
-    } finally {
-      restore();
-    }
-  });
-
-  test('auto-links when the whoami list arrives AFTER /me (sole entry)', async () => {
-    const store = makeStore({ hfUserList: [] }); // empty at load
-    mockGetMe.mockResolvedValue({ role: 'student', hf_username: null });
-    mockPatchHf.mockResolvedValue({ role: 'student', hf_username: 'late-id' });
-
-    renderHook(() => useMeProfile({ enableHfLink: true }), {
-      wrapper: wrapperFor(store),
-    });
-
-    await waitFor(() => expect(store.getState().auth.profileLoaded).toBe(true));
-    expect(mockPatchHf).not.toHaveBeenCalled(); // nothing to link yet
-
-    // Benutzer-ID resolves later (ROS whoami) → the effect must react.
-    act(() => {
-      store.dispatch(setHfUserList(['late-id']));
-    });
-
-    await waitFor(() =>
-      expect(mockPatchHf).toHaveBeenCalledWith('jwt-1', 'late-id')
-    );
-  });
-
-  test('does not auto-link when enableHfLink is false (teacher web)', async () => {
-    const store = makeStore({ hfUserList: ['student42'] });
-    mockGetMe.mockResolvedValue({ role: 'teacher', hf_username: null });
-
-    renderHook(() => useMeProfile({ enableHfLink: false }), {
-      wrapper: wrapperFor(store),
-    });
-
-    await waitFor(() => expect(store.getState().auth.profileLoaded).toBe(true));
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await waitFor(() => expect(store.getState().auth.hfUsername).toBe('anna-hf'));
     expect(mockPatchHf).not.toHaveBeenCalled();
   });
 });

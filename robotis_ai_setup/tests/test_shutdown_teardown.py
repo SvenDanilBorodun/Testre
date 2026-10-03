@@ -637,6 +637,17 @@ class StoppingTheEnvironmentAlsoClosesTheBrowserWindow(unittest.TestCase):
         `_confirm_arm_scan_closes_window`, only ASKS — it must never appear in
         this set, because a function that both prompts and closes could not
         offer a decline that changes nothing.
+
+        THESE FOUR (and `_launch_installer_and_exit`'s tuple reference) ARE THE
+        DELIBERATE CLOSES, and that is what keeps the robot's Hugging Face
+        token out of their way: `destroy_all` marks its own Popen, the window's
+        watcher reports only an end it did NOT cause
+        (`webview_window.set_exit_callback`), and every path above is followed
+        by a container stop or a process exit that already drops the token's
+        tmpfs. A NEW caller that closes the window and does NOT stop the
+        containers or exit must clear the token itself
+        (`docker_manager.clear_robot_hf_token_after_window_close`), or the
+        previous student's token stays on the robot (`test_gui_robot_token_clear.py`).
         """
         self.assertEqual(
             _destroy_all_call_sites(self.tree),

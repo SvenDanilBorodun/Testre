@@ -791,6 +791,11 @@ class EduBoticsApp:
         # before mainloop() and therefore not before self.log_text exists.
         self._purge_legacy_hf_token()
 
+        # A student who closes the web window without „Abmelden" leaves their
+        # token on the robot. The window's watcher reports the end to this hook
+        # (never for a window `destroy_all` closed: those paths stop the stack).
+        webview_window.set_exit_callback(self._on_student_window_closed)
+
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._check_prerequisites()
@@ -1394,6 +1399,25 @@ class EduBoticsApp:
                 "Hinterlege dein Token jetzt einmalig auf der Startseite der "
                 "Web-Oberfläche."
             )
+
+    def _on_student_window_closed(self, generation: int) -> None:
+        """The student's web window ended on its own: clear the robot's token.
+
+        Registered with ``webview_window.set_exit_callback`` and called on that
+        window's WATCHER THREAD (a daemon, one per window), never on the Tk
+        thread, so it may block for the retry budget and must touch no widget
+        and no Tk variable: the only UI channel is ``_log``, which defers
+        through ``root.after``. ``generation`` is the session the window
+        belonged to; the clear stops silently as soon as a newer window or the
+        browser fallback has superseded it (``begin_session``). All of the
+        mechanism, the outcomes and the one German line are in
+        ``docker_manager.clear_robot_hf_token_after_window_close``. Never raises.
+        """
+        try:
+            docker_manager.clear_robot_hf_token_after_window_close(
+                generation, webview_window.is_current_generation, log=self._log)
+        except Exception:  # noqa: BLE001 — a watcher-thread hook must not raise
+            pass
 
     # ── Logging ──────────────────────────────────────────────────────
 
@@ -4610,6 +4634,10 @@ class EduBoticsApp:
 
     def _webview_fallback(self, url: str):
         """Open the system browser as a last-resort fallback."""
+        # A browser tab is a new student session no watcher follows: supersede
+        # any clear still queued for the window that just failed, or its retry
+        # could reach a token pushed from this tab.
+        webview_window.begin_session()
         self._log("[WARNUNG] WebView2 nicht verfügbar — System-Browser wird geöffnet.")
         messagebox.showwarning(
             "WebView2 nicht verfügbar",

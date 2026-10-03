@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from .constants import WEBVIEW_PROFILE_DIR
 
@@ -40,6 +40,27 @@ _lock = threading.Lock()
 _process: Optional[subprocess.Popen] = None
 _runtime_missing = threading.Event()
 _deliberate_stop = threading.Event()
+
+# STUDENT-SESSION GENERATION. One counter, bumped by `begin_session()`: every
+# new student session (a freshly spawned window, a refused spawn, the system
+# browser fallback) supersedes whatever clean-up the previous window left
+# queued. The watcher hands the generation it was spawned under to the exit
+# callback, and the callback asks `is_current_generation` before it acts, so a
+# retry loop that outlives its window can never act on the NEXT student's
+# session. Its own lock (not `_lock`): lock order is `_lock` -> `_gen_lock`
+# only, and `_gen_lock` is never held across anything but the counter.
+_gen_lock = threading.Lock()
+_generation = 0
+
+# Called as `callback(generation)` on the watcher thread when a window ENDS ON
+# ITS OWN (see `_watch_subprocess`). Registered once by the GUI; None in every
+# context that does not care (tests, `--webview` child, headless tools).
+_exit_callback: Optional[Callable[[int], None]] = None
+
+# Attribute `destroy_all` stamps on the Popen it is about to close. Per Popen,
+# deliberately not the global `_deliberate_stop`: that event is cleared by the
+# NEXT spawn, so a watcher that wakes late would read the wrong spawn's answer.
+_DELIBERATE_ATTR = "_edubotics_deliberate"
 
 # Sentinel argv flag that main.py listens for to run the webview loop in-process.
 WEBVIEW_FLAG = "--webview"
@@ -63,6 +84,49 @@ def is_available() -> bool:
 def runtime_missing() -> bool:
     """Signal set when the webview subprocess crashed (missing runtime, etc.)."""
     return _runtime_missing.is_set()
+
+
+def set_exit_callback(callback: Optional[Callable[[int], None]]) -> None:
+    """Register (or, with None, remove) the hook for a window that ends on its own.
+
+    `callback(generation)` runs on the watcher thread, never on a UI thread,
+    once per window whose child exits WITHOUT `destroy_all` having closed it:
+    the student closed the window, or it crashed late. It does NOT run for a
+    deliberate close, because every `destroy_all` caller is followed by a
+    container stop or a process exit that ends the session anyway; a caller
+    that closes the window and does neither must run its own clean-up.
+
+    The callback may block (the GUI's retries for minutes): it holds no lock of
+    this module and the watcher is a dedicated daemon thread per window, so it
+    cannot delay `open_student_window`, `has_live_window` or `destroy_all`.
+    """
+    global _exit_callback
+    _exit_callback = callback
+
+
+def begin_session() -> int:
+    """Start a new student session and return its generation.
+
+    Called by `open_student_window` for every spawn attempt (a live-child
+    short-circuit is not a new session) and by the GUI's system-browser
+    fallback. Every clean-up queued under an earlier generation is superseded.
+    """
+    global _generation
+    with _gen_lock:
+        _generation += 1
+        return _generation
+
+
+def current_generation() -> int:
+    """The generation of the most recent student session."""
+    with _gen_lock:
+        return _generation
+
+
+def is_current_generation(generation: int) -> bool:
+    """True while `generation` is still the newest session (nothing superseded it)."""
+    with _gen_lock:
+        return generation == _generation
 
 
 def has_live_window() -> bool:
@@ -123,10 +187,16 @@ def open_student_window(url: str, icon_path: Optional[Path] = None) -> bool:
     already running). Returns False only if pywebview/pythonnet are missing
     from this environment — in that case the caller should fall back to the
     system browser.
+
+    Every call that does not short-circuit onto a live child starts a new
+    student session (`begin_session`), including the refusals that end in the
+    browser fallback, so clean-up queued by a previous window can no longer
+    act on this one. The watcher is handed that session's generation.
     """
     global _process
 
     if not is_available():
+        begin_session()
         return False
 
     with _lock:
@@ -134,11 +204,13 @@ def open_student_window(url: str, icon_path: Optional[Path] = None) -> bool:
             # Already running. We can't easily navigate the existing window
             # without an IPC channel; relaunching would stack windows.
             # Accept this limitation: the existing window stays foremost.
+            # Not a new session either, so the generation is left alone.
             log.info("WebView-Subprozess läuft bereits (PID %d).", _process.pid)
             return True
 
         _runtime_missing.clear()
         _deliberate_stop.clear()
+        generation = begin_session()
         icon_str = str(icon_path) if icon_path else None
         cmd = _build_launch_cmd(url, icon_str)
 
@@ -148,8 +220,9 @@ def open_student_window(url: str, icon_path: Optional[Path] = None) -> bool:
                 # CREATE_NO_WINDOW keeps a stray console from flashing when
                 # running as a python interpreter (harmless in frozen EXE).
                 creationflags = subprocess.CREATE_NO_WINDOW
-            _process = subprocess.Popen(cmd, creationflags=creationflags)
-            log.info("WebView-Subprozess gestartet (PID %d): %s", _process.pid, cmd)
+            proc = subprocess.Popen(cmd, creationflags=creationflags)
+            _process = proc
+            log.info("WebView-Subprozess gestartet (PID %d): %s", proc.pid, cmd)
         except Exception as exc:
             log.error("Konnte WebView-Subprozess nicht starten: %s", exc)
             _runtime_missing.set()
@@ -157,10 +230,12 @@ def open_student_window(url: str, icon_path: Optional[Path] = None) -> bool:
             return False
 
     # Watch the subprocess: a non-zero exit within ~3s usually means the
-    # WebView2 Evergreen runtime is missing on the host machine.
+    # WebView2 Evergreen runtime is missing on the host machine. `proc` and
+    # `generation` were captured under the lock: reading the module global here
+    # would see None after a racing `destroy_all`.
     threading.Thread(
         target=_watch_subprocess,
-        args=(_process,),
+        args=(proc, generation),
         daemon=True,
         name="edubotics-webview-watchdog",
     ).start()
@@ -168,7 +243,7 @@ def open_student_window(url: str, icon_path: Optional[Path] = None) -> bool:
     return True
 
 
-def _watch_subprocess(proc: subprocess.Popen) -> None:
+def _watch_subprocess(proc: subprocess.Popen, generation: int = 0) -> None:
     rc = proc.wait()
     # Exit code 0   = user closed the window normally.
     # Non-zero      = either a real crash (e.g. missing WebView2 runtime) OR
@@ -177,6 +252,22 @@ def _watch_subprocess(proc: subprocess.Popen) -> None:
     if rc != 0 and not _deliberate_stop.is_set():
         log.warning("WebView-Subprozess endete unerwartet mit Code %d", rc)
         _runtime_missing.set()
+
+    # A window that ended on its own (closed by the student, or a late crash)
+    # is reported to the registered hook; one `destroy_all` closed is not. The
+    # mark is per Popen and was set BEFORE the close was requested, so it is
+    # visible by the time `wait()` returns. A hook that raises must not take
+    # the watcher down with it.
+    if getattr(proc, _DELIBERATE_ATTR, False):
+        return
+    callback = _exit_callback
+    if callback is None:
+        return
+    try:
+        callback(generation)
+    except Exception as exc:  # noqa: BLE001 — a hook must never break the watcher
+        log.warning("Aufräumen nach dem Schließen des Fensters fehlgeschlagen (%s).",
+                    type(exc).__name__)
 
 
 # How long the child gets to close itself after WM_CLOSE before we terminate it.
@@ -273,6 +364,14 @@ def destroy_all() -> None:
         proc = _process
         if proc and proc.poll() is None:
             _deliberate_stop.set()
+            # Per-Popen mark, BEFORE the close is requested: the watcher of
+            # this child reads it to tell this end from a student closing the
+            # window. Every caller of this function is followed by a container
+            # stop or a process exit, which already ends the session.
+            try:
+                setattr(proc, _DELIBERATE_ATTR, True)
+            except Exception:  # noqa: BLE001 — an unmarkable Popen reads as not deliberate
+                pass
             try:
                 if _post_close_to_pid(proc.pid) > 0:
                     deadline = time.monotonic() + GRACEFUL_CLOSE_TIMEOUT_S

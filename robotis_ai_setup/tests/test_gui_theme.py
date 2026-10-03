@@ -92,7 +92,7 @@ class TheThemeExistsAndIsUsed(unittest.TestCase):
 
 
 class StepStateIsVisible(unittest.TestCase):
-    """Schritt A-D said nothing about being done, pending or failed."""
+    """Schritt A-C said nothing about being done, pending or failed."""
 
     def test_the_style_is_derived_from_the_status_TEXT(self):
         from gui.app import theme
@@ -100,26 +100,14 @@ class StepStateIsVisible(unittest.TestCase):
                          theme.STEP_OK)
         self.assertEqual(theme.step_style_for("Wiederhergestellt: OpenRB-150"),
                          theme.STEP_OK)
-        self.assertEqual(theme.step_style_for("Token gespeichert"),
-                         theme.STEP_OK)
         self.assertEqual(theme.step_style_for("Nicht gefunden"),
                          theme.STEP_ERROR)
         self.assertEqual(theme.step_style_for("Nicht gescannt"),
                          theme.STEP_PENDING)
-        self.assertEqual(theme.step_style_for("Kein Token gespeichert"),
+        # Schritt D is gone: „Token gespeichert" is no longer a status line any
+        # step writes, so it must not be painted green by a leftover prefix.
+        self.assertEqual(theme.step_style_for("Token gespeichert"),
                          theme.STEP_PENDING)
-
-    def test_the_token_line_is_plain_text_and_still_reads_as_done(self):
-        """The GUI writes „Token gespeichert" (no ✓ glyph, owner decision D7)
-        and the step still turns green; the dead glyph prefix is gone."""
-        import pathlib
-        from gui.app import theme
-        src = (pathlib.Path(theme.__file__).parent / "gui_app.py").read_text(encoding="utf-8")
-        self.assertIn('self.hf_token_status_var.set("Token gespeichert")', src)
-        self.assertNotIn("\u2713", src)
-        self.assertEqual(theme.step_style_for("Token gespeichert"), theme.STEP_OK)
-        self.assertEqual(theme.step_style_for("  token gespeichert"), theme.STEP_OK)
-        self.assertEqual(theme.step_style_for("\u2713 Token gespeichert"), theme.STEP_PENDING)
 
     def test_a_leaderless_profile_reads_as_PENDING_not_as_an_ERROR(self):
         """„Für diesen Robotertyp nicht nötig" is the correct outcome of a
@@ -148,11 +136,10 @@ class StepStateIsVisible(unittest.TestCase):
                 self.assertNotIn("_bind_step_state",
                                  ast.unparse(_func(tree, method)))
 
-    def test_all_three_step_vars_are_bound(self):
+    def test_both_step_vars_are_bound(self):
         build = ast.unparse(_func(ast.parse(
             _GUI_APP.read_text(encoding="utf-8")), "_build_ui"))
-        for var in ("leader_status_var", "follower_status_var",
-                    "hf_token_status_var"):
+        for var in ("leader_status_var", "follower_status_var"):
             with self.subTest(var):
                 self.assertIn(f"self._bind_step_state(self.{var}", build)
 

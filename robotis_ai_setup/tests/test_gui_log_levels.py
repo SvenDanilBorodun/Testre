@@ -13,7 +13,7 @@ DELIBERATE DEVIATION from the plan, recorded here because it reverses a
 recommendation: severity stays an INLINE MARKER and `_log` gained no `level=`
 parameter. Five methods that call `self._log` are source-extracted by this
 suite against a bare `list.append` double (`_scan_arms._do_scan`,
-`_try_rehydrate_arms`, `_bind_hf_token`, `_run_prerequisite_checks_body`,
+`_try_rehydrate_arms`, `_purge_legacy_hf_token`, `_run_prerequisite_checks_body`,
 `_prompt_finalize_install`), so a keyword argument in any of them is a
 TypeError waiting for the next person who adds a log line — and `_log` would
 have had two call conventions, one per method, decided by whether a test
@@ -22,9 +22,9 @@ instead, which also colours the PowerShell-produced lines that no parameter
 could reach.
 
 Three assertions in `test_gui_install_lifecycle` constrain this and must keep
-passing untouched: `_bind_hf_token`'s foreign-token line MUST contain the
-literal „[WARNUNG]", its legacy-adoption line MUST NOT, and the ordinary path
-must log NOTHING at all.
+passing untouched: `_purge_legacy_hf_token`'s failure line MUST contain the
+literal „[WARNUNG]", its one report line (the legacy token was removed) MUST NOT
+open with a bracket, and the ordinary path must log NOTHING at all.
 """
 
 import ast

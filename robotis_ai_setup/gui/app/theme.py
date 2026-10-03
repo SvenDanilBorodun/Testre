@@ -37,7 +37,7 @@ COLOR_OK = "#1e8449"
 COLOR_WARN = "#b9770e"
 COLOR_ERROR = "#c0392b"
 
-# Step-status styles. Schritt A-D used to be uniformly grey whether they said
+# Step-status styles. Schritt A-C used to be uniformly grey whether they said
 # „Nicht gescannt", „Gefunden: …" or „Nicht gefunden" — 17 greys, one green and
 # one #0A6 in the whole file, so nothing on screen said which steps were done.
 STEP_OK = "StepOk.TLabel"
@@ -82,12 +82,12 @@ def apply_theme(root: tk.Misc) -> "ttk.Style":
 def step_style_for(text: str) -> str:
     """Which step style a status line deserves, from the line itself.
 
-    Text-driven ON PURPOSE. The three status StringVars are written from
-    `_scan_arms._do_scan`, `_try_rehydrate_arms` and `_refresh_hf_token_status`,
-    and the first two are SOURCE-EXTRACTED by the test suite against owners of
-    hand-built doubles — so a new `self.<something>` reference in either is an
-    AttributeError there. Binding a `trace_add` to the variable instead means
-    every writer, present and future, is covered with no changes to any of them.
+    Text-driven ON PURPOSE. The two status StringVars are written from
+    `_scan_arms._do_scan` and `_try_rehydrate_arms`, which are SOURCE-EXTRACTED
+    by the test suite against owners of hand-built doubles — so a new
+    `self.<something>` reference in either is an AttributeError there. Binding a
+    `trace_add` to the variable instead means every writer, present and future,
+    is covered with no changes to any of them.
 
     Pure and total: an unrecognised line is PENDING, never guessed into a green
     „done" or a red „broken".
@@ -95,8 +95,7 @@ def step_style_for(text: str) -> str:
     line = (text or "").strip().lower()
     if not line:
         return STEP_PENDING
-    # „Kein Token gespeichert" starts with „kein", so it stays PENDING.
-    if line.startswith(("gefunden", "wiederhergestellt", "token gespeichert")):
+    if line.startswith(("gefunden", "wiederhergestellt")):
         return STEP_OK
     if line.startswith("nicht gefunden") or "fehlgeschlagen" in line:
         return STEP_ERROR

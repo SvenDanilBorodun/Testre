@@ -615,7 +615,6 @@ class ArmFamilyMismatchWordingTest(unittest.TestCase):
             owner = types.SimpleNamespace(
                 _stop_camera_previews=lambda: None,
                 cloud_only=types.SimpleNamespace(get=lambda: False),
-                hf_token_var=types.SimpleNamespace(get=lambda: ""),
                 phone_camera_enabled=types.SimpleNamespace(get=lambda: False),
                 _selected_robot_profile=lambda: profile,
                 _hardware_ready=lambda *a: False,   # every case here is a refusal

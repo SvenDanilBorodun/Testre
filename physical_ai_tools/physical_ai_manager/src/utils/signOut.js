@@ -59,9 +59,12 @@
 // before anything else, so it overlaps the revoke instead of adding to it; it is
 // AWAITED only after the revoke, for at most CLEAR_BOUND_MS (2 s), and every
 // failure is swallowed — a robot that is gone, busy (recording or uploading) or
-// slow must never keep a student signed in. A clear that did not happen leaves
-// the token in the slot until the next login reconciles it, and Aufnahme refuses
-// Start until the robot holds the NEW student's token. Skipped while a classroom
+// slow must never keep a student signed in. A clear the robot refused because
+// it was busy is remembered by the node and applied once it is idle
+// (physical_ai_server.py::_apply_pending_hf_token_clear); a clear that never
+// reached the robot leaves the token in the slot until the next login
+// reconciles it, and Aufnahme refuses Start until the robot holds the NEW
+// student's token. Skipped while a classroom
 // Jetson is claimed: its rosbridge is the Jetson proxy, which keeps its own
 // token and is never sent a personal one.
 //

@@ -226,9 +226,16 @@ UPLOAD_OFF_TOKEN_INVALID_DE = (UPLOAD_OFF_PREFIX_DE + 'Hugging Face lehnt den To
 HF_TOKEN_SET_OK_DE = 'Dein Hugging-Face-Token ist auf dem Roboter aktiv.'
 HF_TOKEN_CLEARED_DE = 'Das Hugging-Face-Token wurde vom Roboter entfernt.'
 HF_TOKEN_NONE_DE = 'Auf dem Roboter ist kein Hugging-Face-Token gespeichert.'
-# is_busy() is true for downloads, list fetches and uploads alike (audit M4).
-HF_TOKEN_BUSY_DE = ('Während einer Aufnahme oder einer Übertragung zu oder von Hugging Face kann '
-                    'das Token nicht geändert werden. Bitte versuche es danach noch einmal.')
+# is_busy() is true for downloads, list fetches and uploads alike (audit M4),
+# so the sentence names all three beside the recording (review e).
+HF_TOKEN_BUSY_DE = ('Während der Roboter aufnimmt, etwas hoch- oder herunterlädt oder eine Liste '
+                    'bei Hugging Face abfragt, kann das Token nicht geändert werden. Bitte versuche '
+                    'es danach noch einmal.')
+# A clear refused while busy is not forgotten: the node applies it by itself
+# once the robot is idle (physical_ai_server.py::_apply_pending_hf_token_clear).
+HF_TOKEN_CLEAR_QUEUED_DE = ('Während der Roboter aufnimmt, etwas hoch- oder herunterlädt oder eine '
+                            'Liste bei Hugging Face abfragt, kann das Token nicht entfernt werden. Der '
+                            'Roboter entfernt es von selbst, sobald er damit fertig ist.')
 HF_TOKEN_SHAPE_DE = ('Das ist kein gültiges Hugging-Face-Token. Es beginnt mit „hf_“ und enthält '
                      'keine Leerzeichen.')
 HF_TOKEN_UNSUPPORTED_DE = 'Dieser Roboter verwendet ein eigenes Token und nimmt kein persönliches an.'
@@ -279,6 +286,13 @@ HUB_TAG_FAILED_DE = ('Der Versions-Tag des Datensatzes konnte nicht aktualisiert
 UPLOAD_STALL_DE = ('Das Hochladen kommt nicht mehr voran. Prüfe die Internetverbindung des '
                    'Roboters. Der Datensatz bleibt auf dem Roboter gespeichert; du kannst ihn '
                    'später im Tab Daten hochladen.')
+
+# Item g (2026-10-04): a download with no progress, or a list fetch / delete
+# that never answers, is ended like an upload stall.
+DOWNLOAD_STALL_DE = ('Das Herunterladen von Hugging Face kommt nicht mehr voran. Prüfe die '
+                     'Internetverbindung des Roboters und versuche es danach noch einmal.')
+HUB_QUERY_STALL_DE = ('Hugging Face hat nicht rechtzeitig geantwortet. Prüfe die '
+                      'Internetverbindung des Roboters und versuche es danach noch einmal.')
 
 # Byte-identical with DataManager.HF_AUTH_ERROR_DE (it MUST point at the
 # Startseite, where the student replaces the token, never at `hf auth login`);

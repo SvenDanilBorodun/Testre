@@ -25,6 +25,17 @@
 // is the student's explicit choice („Erneut übertragen"). The same holds for a
 // clear (`clearedFp`): a token I removed that comes back is contested, not mine
 // to remove a second time.
+//
+// NOT FROM A STATE OLDER THAN MY PUSH (`awaitingOwnFp`). `lastOwnFp` is set
+// the moment a push succeeds — the simulation below diverges without that —
+// but the robot's state still shows the OLD slot for half a second or more
+// (published right after the write, throttled on its way through rosbridge).
+// Read naively, that stale state is „someone took the slot" and the card and
+// the Aufnahme page flashed „taken over" after every push (review c,
+// 2026-10-04). So while the push still waits to be SEEN (`awaitingOwnFp` equals
+// the account's fingerprint; it ends when a state shows it or after
+// WRITE_SETTLE_MS), a foreign slot proves nothing and the decision is
+// WAIT/PUSH; the reconcile holds still until the wait ends.
 
 export const DECISION = Object.freeze({
   NOOP: 'noop', PUSH: 'push', CLEAR: 'clear', WAIT: 'wait', TAKEN_OVER: 'taken_over',
@@ -38,8 +49,10 @@ const isPresent = (robot) => robot.present === true && typeof robot.fp === 'stri
  * @param {object}  input.robot          `{known, accepts, present, fp, busy}` (hfToken.robot)
  * @param {string}  input.accountStatus  hfToken.account.status
  * @param {?string} input.accountFp      the account's fingerprint
- * @param {?string} input.lastOwnFp      the fingerprint of MY token the last time I saw it in the slot
+ * @param {?string} input.lastOwnFp      the fingerprint of MY token the last time I saw it in the slot,
+ *                                       or the one I just pushed (see awaitingOwnFp)
  * @param {?string} input.clearedFp      the fingerprint I removed from the slot last
+ * @param {?string} input.awaitingOwnFp  the fingerprint I pushed and have not SEEN in the slot yet
  * @returns {'noop'|'push'|'clear'|'wait'|'taken_over'}
  */
 export function decideSync({
@@ -49,13 +62,15 @@ export function decideSync({
   accountFp = null,
   lastOwnFp = null,
   clearedFp = null,
+  awaitingOwnFp = null,
 } = {}) {
   if (!enabled) return DECISION.NOOP;
   if (!robot || robot.known !== true || robot.accepts !== true) return DECISION.NOOP;
   const present = isPresent(robot);
   if (accountStatus === 'stored') {
     if (present && robot.fp === accountFp) return DECISION.NOOP;
-    if (present && lastOwnFp && lastOwnFp === accountFp) return DECISION.TAKEN_OVER;
+    const pushNotSeenYet = Boolean(awaitingOwnFp) && awaitingOwnFp === accountFp;
+    if (present && lastOwnFp && lastOwnFp === accountFp && !pushNotSeenYet) return DECISION.TAKEN_OVER;
     return robot.busy === true ? DECISION.WAIT : DECISION.PUSH;
   }
   if (accountStatus === 'none' || accountStatus === 'unusable') {
@@ -68,7 +83,12 @@ export function decideSync({
 }
 
 export const START_BLOCK = Object.freeze({
-  NONE: 'none', UNUSABLE: 'unusable', TRANSFER: 'transfer', FAILED: 'failed', TAKEN_OVER: 'taken_over',
+  NONE: 'none',
+  UNUSABLE: 'unusable',
+  TRANSFER: 'transfer',
+  BUSY: 'busy',
+  FAILED: 'failed',
+  TAKEN_OVER: 'taken_over',
 });
 
 /**
@@ -81,7 +101,11 @@ export const START_BLOCK = Object.freeze({
  * kept honest at its own choke point (hooks/useHfUserList), not by blocking
  * Start on a guess (owner decision C-1).
  *
- * @returns {null|'none'|'unusable'|'transfer'|'failed'|'taken_over'}
+ * `busy` (review b, 2026-10-04): the robot is recording or talking to Hugging
+ * Face and refuses a token change for now (the reconcile WAITs); it is not
+ * „being transferred" and nothing on the Startseite can speed it up.
+ *
+ * @returns {null|'none'|'unusable'|'transfer'|'busy'|'failed'|'taken_over'}
  */
 export function hfTokenStartBlock({
   accountStatus = 'unknown',
@@ -90,6 +114,7 @@ export function hfTokenStartBlock({
   syncPhase = 'idle',
   lastOwnFp = null,
   clearedFp = null,
+  awaitingOwnFp = null,
 } = {}) {
   if (!robot || robot.known !== true || robot.accepts !== true) return null;
   const present = isPresent(robot);
@@ -99,8 +124,12 @@ export function hfTokenStartBlock({
   }
   if (accountStatus !== 'stored') return null;
   if (present && robot.fp === accountFp) return null;
-  const d = decideSync({ enabled: true, robot, accountStatus, accountFp, lastOwnFp, clearedFp });
+  const d = decideSync({
+    enabled: true, robot, accountStatus, accountFp, lastOwnFp, clearedFp, awaitingOwnFp,
+  });
   if (d === DECISION.TAKEN_OVER) return START_BLOCK.TAKEN_OVER;
+  // While busy a failed count is moot: nothing is tried until the robot is idle.
+  if (d === DECISION.WAIT) return START_BLOCK.BUSY;
   if (syncPhase === 'failed') return START_BLOCK.FAILED;
   return START_BLOCK.TRANSFER;
 }

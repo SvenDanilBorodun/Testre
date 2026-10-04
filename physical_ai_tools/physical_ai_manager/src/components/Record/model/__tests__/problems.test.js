@@ -13,6 +13,7 @@ import {
   deriveProblems,
   diskProblem,
   firstProblem,
+  hfTokenHintProblem,
   hfTokenProblem,
   slowSourceProblem,
   stalledSourceProblem,
@@ -79,10 +80,43 @@ describe('hfTokenProblem', () => {
     expect(hfTokenProblem('takenOver').textDe).toBe(P.hfToken.takenOver);
   });
 
-  it('links to the Startseite for every reason but the transfer', () => {
+  it('links to the Startseite for every reason but transfer and busy', () => {
     const linked = ['none', 'unusable', 'failed', 'taken_over'].map((r) => hfTokenProblem(r).linkToHome);
     expect(linked).toEqual([true, true, true, true]);
     expect(hfTokenProblem('transfer').linkToHome).toBe(false);
+    expect(hfTokenProblem('busy').linkToHome).toBe(false);
+  });
+
+  it('busy has its own sentence and still refuses Start (review b)', () => {
+    expect(hfTokenProblem('busy')).toEqual({ kind: 'bad', textDe: P.hfToken.busy, linkToHome: false });
+    expect(P.hfToken.busy).not.toBe(P.hfToken.transfer);
+  });
+});
+
+describe('hfTokenHintProblem — the non-blocking hint (S2)', () => {
+  it('is a warning with a Startseite link for each undecidable account state', () => {
+    for (const reason of ['offline', 'error', 'unavailable', 'unsupported']) {
+      expect(hfTokenHintProblem(reason)).toEqual({ kind: 'warn', textDe: P.hfTokenHint[reason], linkToHome: true });
+    }
+  });
+
+  it('answers null for everything else', () => {
+    for (const reason of [null, undefined, 'none', 'stored', 'transfer', 'unbekannt']) {
+      expect(hfTokenHintProblem(reason)).toBeNull();
+    }
+  });
+
+  it('is shown only where Start is offered, after a real block, and never instead of a token block', () => {
+    expect(deriveProblems({ view: 'READY', hfTokenHint: 'error', nowWallMs: NOW }))
+      .toEqual([hfTokenHintProblem('error')]);
+    expect(deriveProblems({ view: 'RECORDING', running: true, hfTokenHint: 'error', nowWallMs: NOW })).toEqual([]);
+    const block = { kind: 'hftoken', reason: 'none', problem: hfTokenProblem('none') };
+    expect(deriveProblems({ view: 'READY', startBlock: block, hfTokenHint: 'offline', nowWallMs: NOW }))
+      .toEqual([hfTokenProblem('none')]);
+    const stalled = deriveProblems({
+      view: 'READY', hfTokenHint: 'offline', verdicts: [v('leader', 'leader', 'stalled')], nowWallMs: NOW,
+    });
+    expect(stalled.map((p) => p.textDe)).toEqual([P.leaderStalled, P.hfTokenHint.offline]);
   });
 
   it('answers null for a reason it does not know', () => {

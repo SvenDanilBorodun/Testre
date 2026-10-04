@@ -109,6 +109,17 @@ class HfUsernameUpdate(BaseModel):
     hf_username: str = Field(..., min_length=1, max_length=96)
 
 
+def _proven_name_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail=(
+            "Dein Hugging-Face-Konto ist über dein gespeichertes Token "
+            "festgelegt. Entferne zuerst das Token auf der Startseite, wenn "
+            "du ein anderes Konto verwenden möchtest."
+        ),
+    )
+
+
 @router.patch("", response_model=MyProfile)
 async def update_me(
     body: HfUsernameUpdate, profile=Depends(get_current_profile)
@@ -121,6 +132,10 @@ async def update_me(
     whoami (routes/hf_token.py). This route remains for old clients and for an
     account WITHOUT a stored token, and answers 409 once one exists (the name
     is proven then and must not drift from the token the robot uploads with).
+    The `has_credential` check below is the friendly early answer; the
+    guarantee is the database's (migration 044's users trigger raises P0044
+    for any hf_username change that differs from a stored credential's name),
+    so a token saved between the check and the UPDATE still ends in the 409.
     The value is the SOLE anchor the dataset_sweep + POST /datasets/sync
     use to discover this student's datasets, so it is format-validated and
     deny-listed against upstream/system namespaces.
@@ -155,14 +170,7 @@ async def update_me(
             detail="Benutzer-ID konnte nicht gespeichert werden.",
         ) from None
     if has_token:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Dein Hugging-Face-Konto ist über dein gespeichertes Token "
-                "festgelegt. Entferne zuerst das Token auf der Startseite, wenn "
-                "du ein anderes Konto verwenden möchtest."
-            ),
-        )
+        raise _proven_name_conflict()
     try:
         result = (
             supabase.table("users")
@@ -173,6 +181,9 @@ async def update_me(
         if not result.data:
             raise RuntimeError("update returned no rows")
     except Exception as exc:
+        if "P0044" in str(exc):
+            # A token was stored between the check above and this UPDATE.
+            raise _proven_name_conflict() from None
         logger.error(
             "hf_username update failed for user=%s: %s", profile["id"], exc
         )

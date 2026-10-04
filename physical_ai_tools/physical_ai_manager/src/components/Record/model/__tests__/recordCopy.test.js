@@ -84,9 +84,9 @@ describe('recordCopy', () => {
     expect(hits).toEqual([]);
   });
 
-  it('the token sentences: German, and every one but the transfer names the Startseite for the banner link', () => {
+  it('the token sentences: German, and every one but transfer and busy names the Startseite for the banner link', () => {
     const T = RECORD_COPY.problem.hfToken;
-    expect(Object.keys(T).sort()).toEqual(['failed', 'none', 'takenOver', 'transfer', 'unusable']);
+    expect(Object.keys(T).sort()).toEqual(['busy', 'failed', 'none', 'takenOver', 'transfer', 'unusable']);
     // ProblemBanner links the LAST „Startseite" of the sentence.
     for (const key of ['none', 'unusable', 'failed', 'takenOver']) {
       expect(`${key}: ${T[key].includes(RECORD_COPY.problem.homeLabel)}`).toBe(`${key}: true`);
@@ -94,10 +94,29 @@ describe('recordCopy', () => {
         .toBe(`${key}: true`);
     }
     expect(T.transfer).not.toContain(RECORD_COPY.problem.homeLabel);
+    // busy (review b): the robot finishes by itself; its words follow the card's
+    // „wartet auf den Roboter" note and name no page
+    expect(T.busy).not.toContain(RECORD_COPY.problem.homeLabel);
+    // review e: every cause of a busy robot, downloads and list fetches included
+    expect(T.busy).toBe('Der Roboter ist gerade beschäftigt: Er nimmt auf, lädt etwas hoch oder herunter '
+      + 'oder fragt eine Liste bei Hugging Face ab. Dein Hugging-Face-Token wird danach übertragen, dann geht '
+      + 'es weiter.');
     expect(T.none).toBe('Hinterlege zuerst dein Hugging-Face-Token auf der Startseite.');
     // the scans above already cover English words, glyphs and transliterations of these paths
-    expect(STRINGS.filter(({ path }) => path.startsWith('RECORD_COPY.problem.hfToken')))
-      .toHaveLength(5);
+    expect(STRINGS.filter(({ path }) => path.startsWith('RECORD_COPY.problem.hfToken.')))
+      .toHaveLength(6);
+  });
+
+  it('the non-blocking token hints (S2) each name their cause and the Startseite, last', () => {
+    const H = RECORD_COPY.problem.hfTokenHint;
+    expect(Object.keys(H).sort()).toEqual(['error', 'offline', 'unavailable', 'unsupported']);
+    for (const [key, text] of Object.entries(H)) {
+      // ProblemBanner links the LAST „Startseite"; nothing after it may need a link
+      expect(`${key}: ${text.includes(RECORD_COPY.problem.homeLabel)}`).toBe(`${key}: true`);
+      expect(`${key}: ${text.includes('Benutzer-ID')}`).toBe(`${key}: true`);
+    }
+    expect(H.offline).toContain('Ohne Anmeldung');
+    expect(STRINGS.filter(({ path }) => path.startsWith('RECORD_COPY.problem.hfTokenHint.'))).toHaveLength(4);
   });
 
   it('names the keys as words (H9)', () => {

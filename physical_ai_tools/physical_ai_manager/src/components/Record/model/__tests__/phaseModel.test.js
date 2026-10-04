@@ -291,6 +291,12 @@ describe('start blocks (Q5)', () => {
     expect(deriveStartBlock({ hfToken: 'failed' }).problem.textDe).toBe(RECORD_COPY.problem.hfToken.failed);
     expect(deriveStartBlock({ hfToken: 'taken_over' }).problem.textDe).toBe(RECORD_COPY.problem.hfToken.takenOver);
     // the transfer resolves by itself: no link
+    // review b: the robot is busy — its own reason, still a block, still no link
+    expect(deriveStartBlock({ hfToken: 'busy' })).toEqual({
+      kind: 'hftoken',
+      reason: 'busy',
+      problem: { kind: 'bad', textDe: RECORD_COPY.problem.hfToken.busy, linkToHome: false },
+    });
     expect(deriveStartBlock({ hfToken: 'transfer' }).problem).toEqual({
       kind: 'bad', textDe: RECORD_COPY.problem.hfToken.transfer, linkToHome: false,
     });

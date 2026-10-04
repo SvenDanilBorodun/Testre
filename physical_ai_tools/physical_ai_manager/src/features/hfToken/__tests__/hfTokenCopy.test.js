@@ -78,3 +78,26 @@ describe('hfTokenCopy', () => {
     expect(Object.isFrozen(HF_TOKEN_COPY)).toBe(true);
   });
 });
+
+describe('hfTokenCopy — what the card says (review c, e)', () => {
+  it('says what an account switch really changes since migration 043', () => {
+    // register_dataset_safe accepts the stored token's PROVEN account as a
+    // second anchor, so new recordings register; dataset_sweep and
+    // POST /datasets/sync enumerate only the current account, so the old
+    // account's rows stay but nothing new of it is found automatically.
+    const text = HF_TOKEN_COPY['card.accountChanged'];
+    expect(text).toBe(
+      'Dieses Token gehört zu einem anderen Hugging-Face-Konto als bisher. Neue Aufnahmen werden ab jetzt in '
+      + 'diesem Konto gespeichert und für das Training angemeldet. Datensätze deines alten Kontos, die schon '
+      + 'in deiner Liste stehen, bleiben dort; weitere werden nicht mehr automatisch gefunden.',
+    );
+    expect(text).not.toMatch(/möglicherweise|nicht mehr für das Training/);
+  });
+
+  it('names every cause of a busy robot, downloads and list fetches included', () => {
+    expect(HF_TOKEN_COPY['card.waitingNote']).toBe(
+      'Der Roboter ist gerade beschäftigt: Er nimmt auf, lädt etwas hoch oder herunter oder fragt eine Liste '
+      + 'bei Hugging Face ab. Das Token wird danach übertragen.',
+    );
+  });
+});

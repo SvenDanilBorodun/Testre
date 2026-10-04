@@ -6,6 +6,83 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-04 (later) — students write no table directly (046), and the verification's small fixes
+
+**Why.** Verifying the token review, the owner confirmed on the live project that role `authenticated` still held
+INSERT/UPDATE/DELETE on `public.trainings` with own-row write policies, and that `datasets`, `workflows` and
+`tutorial_progress` carried own-row write policies too (`anon` holding the same table grants, stopped only by RLS). Credits are
+derived from `trainings.status`, so 044 had closed only one of two „free GPU time" paths; its header and KNOWN-ISSUES read as if
+it had closed the hole.
+
+**What was measured, and what changed.**
+- *The hole, reproduced.* On the local `supabase start` stack (Postgres 17, migrations through 045), inside a rolled-back
+  transaction as `authenticated` with a student's JWT claims: an own training `UPDATE … SET status = 'canceled'`, a `DELETE` of
+  another own training and a `datasets` INSERT of a foreign `hf_repo_id` all succeeded.
+- *The audit before the revoke* found no legitimate request-role writer of the four tables: the cloud API builds only the
+  service-role client; every SQL function that writes them is SECURITY DEFINER owned by `postgres` (queried from `pg_proc`, not
+  grepped); the triggers on them are SECURITY INVOKER `touch_*` (NEW.updated_at only) and the definer snapshot trigger; FK cascades
+  run as the table owner; the Modal worker's only call is `update_training_progress`; Jetson/Pi agents and the GUI make no
+  PostgREST call; the SPA (both builds) reads trainings and only subscribes to the other three.
+- *046* revokes INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES and TRIGGER from `anon` and `authenticated`, drops the twelve write
+  policies, and checks `has_table_privilege` afterwards (a PUBLIC `GRANT INSERT ON public.datasets` made the migration abort and
+  roll back, measured). Assertions: 27 PASS before and after rollback → re-apply twice; after each rollback the grants, policies,
+  publication and policy comments diff byte-equal to the pre-046 snapshot; 043/044/045's assertions stay 12/16/12 PASS on top. A
+  teeth run of the 046 file against the pre-046 database failed 22 of its checks.
+- *042, 043, 044, 045 on a real stack.* All four sets of hand-run assertions were run on a real `supabase start` stack (Postgres 17,
+  migrations through 045 applied with psql as `postgres`): 042's 19 PASS before and after its rollback and a double re-apply, then
+  043 12 / 044 16 / 045 12 PASS. 042's migration file is applied in production and is not edited; its header still says it was not
+  run on such a stack — this entry is the record.
+- *Small fixes.* (a) A token set the node REFUSED (busy, bad shape, failed write) cancelled the queued clear and left the previous
+  student's token in place; only a written (or already stored) token cancels it now, and a clear re-queued because the robot
+  turned busy inside the tick is kept. (b) The GUI's closed-window line said the token waits for the next login; it now says the
+  robot removes it by itself. (c) The account-switch note says what 043 does. (d) A fine-grained token passes with ANY `repo*.write`
+  permission, not only today's two names. (e) Every busy sentence names the recording, the upload, the download and the list
+  fetch; a py↔js test holds all five to the four causes. (f) 043-045's headers record the real-stack run. (g) The Aufnahme token hint
+  shows only while no Benutzer-ID is on screen.
+
+**Still open.** `jetsons` and `workflow_versions` keep request-role write policies (KNOWN-ISSUES); nothing here ran against the
+live project, on a rig or with real fine-grained tokens.
+
+### Unreleased, 2026-10-04 — the review of the per-student Hugging Face token (043-045, S1-S3, items a-k)
+
+**Why.** A zero-trust review of #33 (042, the token stored with the account) found three owner-level questions and a list of
+smaller defects. The owner decided: refuse fine-grained tokens that provably cannot write (S1), make the encryption key a required
+boot secret with a non-blocking Aufnahme hint for an undecidable account state (S2), count the proven account name as a second
+dataset anchor (S3), and close the `public.users` column hole the 042 audit had found but not fixed.
+
+**What the review measured, and what changed.**
+- *The users hole was real.* On a scratch `public.ecr.aws/supabase/postgres:17.6.1.106` (the image the local stack uses), with the
+  guarded baseline and every migration through 042, an `authenticated` own-row `UPDATE public.users SET role = 'admin',
+  training_credits = 999` returned the new row. The owner confirmed the same grants and policy on the live project. 044's BEFORE
+  UPDATE trigger refuses it (42501) for `authenticated`/`anon`; the audit of every function that writes `public.users` (five
+  SECURITY DEFINER service-role-only RPCs in the baseline, 042's writer) and of the SPA (no `.from('users')` write) showed no
+  legitimate path writes those columns as a request role. The guard is SECURITY INVOKER on purpose (`current_user` must be the
+  request role) and revoking EXECUTE on it from `authenticated` does not stop it firing (assertion T7 runs as `authenticated`).
+- *PATCH /me's 409 was not atomic,* and 042's header claimed the users-row lock made it so: PATCH /me never took that lock. Rule 2
+  of the same trigger (P0044, every caller) closes it in SQL; a two-session run (an UPDATE arriving while the writer held the row)
+  ended P0044 with the proven name kept.
+- *Verify could resurrect a removed token:* its re-read and the writer's unconditional upsert left a gap. 045 adds
+  `p_expected_fp`, compared under `SELECT … FOR UPDATE` on the credential row (DELETE takes no users-row lock, so the users lock
+  alone would not have closed it). Both race orders ran in two psql sessions; the token was gone both times. The six-argument
+  overload is dropped (one overload, no PostgREST ambiguity); the probe names the seventh argument.
+- *The whoami call had no request timeout:* `HfApi.whoami` sets none, so a black-holed connection left a thread nobody reaped
+  behind the 10 s `join`. It is a direct httpx GET of `/api/whoami-v2` now, with the same classification.
+- *Fine-grained scopes ARE in whoami.* KNOWN-ISSUES said detecting a read-only fine-grained token "needs a Hub call with side
+  effects". The Hub's own OpenAPI document (`/.well-known/openapi.json`, `GET /api/whoami-v2`) types
+  `auth.accessToken.fineGrained.scoped[].{entity{_id,type,name?}, permissions[]}`; huggingface.js's `api-who-am-i.ts` simply omits
+  the block. The check fails open on any shape it does not recognise.
+- *A false „taken over" flash after every push:* `syncPushed` set `lastOwnFp` before any state showed the token. Setting it only on
+  observation was tried first in thought and rejected — the existing multi-client simulation (`syncDecision.test.js`) records that
+  observation-only diverges (80 writes). So the dampener's memory is still set at the push and a separate `awaitingOwnFp` excuses a
+  foreign slot until the push is seen or `WRITE_SETTLE_MS` passes; a mutation check showed the six new tests fail without it.
+- *Smaller:* a busy robot read as „wird übertragen" (own `busy` reason now); a clear refused while busy was forgotten (the node
+  remembers it); a hung HF download/list blocked every token change (bounded); `verifyHfToken` never refreshed `auth.hfUsername`;
+  the offline escape showed „wird geladen" for ever; the token field invited password managers on shared profiles.
+
+**Proof and what is still open.** Assertions 043 / 044 / 045: 12 / 16 / 12 PASS on the scratch database, again after rolling all
+three back (042's assertions: 19 PASS, i.e. the rollbacks restore 042 exactly) and re-applying twice. Not run on a real
+`supabase start` stack or against the live project; nothing here was run on a rig, a real WebView2 or with real fine-grained tokens.
+
 ### Unreleased, 2026-10-03 (later) — closing the student window clears the robot's token
 
 **Why.** „Abmelden" clears the robot's token slot (`signOutStudent` → `clearRobotHfToken`), but a student who just closes the

@@ -110,6 +110,10 @@ jobs:
           export SUPABASE_SERVICE_ROLE_KEY=ci_test
           export MODAL_TOKEN_ID=ci_test
           export MODAL_TOKEN_SECRET=ci_test
+          # Required since 2026-10-04 (owner decision S2). A DUMMY: 32 zero
+          # bytes, standard base64 - low entropy on purpose (gitleaks), never a
+          # real key. The tests set their own keys where they need one.
+          export EDUBOTICS_HF_TOKEN_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
           python -m unittest discover -s app/tests -v
 
       - name: Jetson agent unit tests (migration 019 client side)
@@ -975,6 +979,8 @@ jobs:
           export SUPABASE_SERVICE_ROLE_KEY=ci-fake
           export MODAL_TOKEN_ID=ci-fake
           export MODAL_TOKEN_SECRET=ci-fake
+          # Dummy (32 zero bytes, base64): a required secret since 2026-10-04.
+          export EDUBOTICS_HF_TOKEN_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
           export ALLOWED_ORIGINS=http://localhost
           export EDUBOTICS_SKIP_SCHEMA_CHECK=1
           cd robotis_ai_setup/cloud_training_api

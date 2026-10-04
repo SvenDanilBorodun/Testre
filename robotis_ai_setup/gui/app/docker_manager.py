@@ -1595,11 +1595,15 @@ HF_CLEAR_RETRY_DELAYS_S = (15, 45, 120, 300)
 
 # Student-visible, logged at most once per closed window and only when the whole
 # budget ended without the slot being cleared. No token, fingerprint or command
-# output is ever part of a line.
+# output is ever part of a line. A refusal means the robot was busy, and since
+# 2026-10-04 the node remembers a refused clear and applies it on its own once
+# it is idle (physical_ai_server.py::_apply_pending_hf_token_clear); the slot
+# is a tmpfs of the server container, so stopping the environment is the floor.
 HF_CLEAR_REFUSED_DE = (
     "[INFO] Das Hugging-Face-Token des geschlossenen Fensters bleibt auf dem "
-    "Roboter, weil gerade eine Aufnahme oder eine Übertragung läuft. Es wird "
-    "beim nächsten Anmelden ersetzt und beim Stoppen der Umgebung gelöscht."
+    "Roboter, solange er aufnimmt, etwas hoch- oder herunterlädt oder eine "
+    "Liste bei Hugging Face abfragt. Danach entfernt der Roboter es von selbst, "
+    "spätestens beim Stoppen der Umgebung."
 )
 HF_CLEAR_UNREACHABLE_DE = (
     "[WARNUNG] Das Hugging-Face-Token des geschlossenen Fensters konnte nicht "

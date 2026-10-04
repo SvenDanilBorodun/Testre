@@ -1,7 +1,8 @@
 """A student's own Hugging Face token, stored with the account (migration 042).
 
 The student pastes the token once on the Startseite. This router proves it with
-the Hub (`whoami`), refuses read-only tokens, stores it AES-256-GCM encrypted in
+the Hub (`whoami`), refuses read-only tokens and fine-grained tokens that cannot
+write to the student's own repositories, stores it AES-256-GCM encrypted in
 the service-role-only `user_hf_credentials` table (the proven account name also
 becomes `users.hf_username`, atomically, inside the `store_user_hf_credential`
 RPC) and hands the plaintext back ONLY to its owner, through `POST /reveal`, so
@@ -166,7 +167,10 @@ def _hub_checks(token: str, profile, *, stored: bool = False):
             status_code=422,
             detail="Dieses Konto ist nicht zulässig (System- oder Beispielkonto).",
         )
-    # Deny-only: every role other than "read" (an unknown one included) passes.
+    # Deny-only: every role other than "read" (an unknown one included) passes,
+    # except a fine-grained token whose scopes PROVABLY grant no write to the
+    # student's own repositories (hf_credentials.fine_grained_repo_write: an
+    # unrecognised scope block is None and passes - fail open).
     if info["role"] == "read":
         raise HTTPException(
             status_code=422,
@@ -177,13 +181,48 @@ def _hub_checks(token: str, profile, *, stored: bool = False):
                 "und füge es hier ein."
             ),
         )
+    if info["role"] == hf_credentials.FINE_GRAINED_ROLE and info.get("repo_write") is False:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Dieses Token darf nicht in deine eigenen Repositories schreiben. "
+                "Zum Hochladen braucht EduBotics Schreibrechte. Erstelle auf "
+                "huggingface.co unter „Settings“ und „Access Tokens“ ein neues "
+                "Token vom Typ „Write“ – oder erlaube bei deinem Token unter "
+                "„Repositories“ den Schreibzugriff („Write access“) auf alle "
+                "Repositories in deinem eigenen Konto – und füge es hier ein."
+            ),
+        )
     previous = profile.get("hf_username")
     account_changed = bool(previous) and previous.lower() != name.lower()
     return name, info["role"], account_changed
 
 
-def _store(uid: str, token: str, name: str, role: str, account_changed: bool) -> JSONResponse:
-    """Encrypt under the CURRENT key and write through the one RPC."""
+def _changed_meanwhile() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail="Dein Token wurde inzwischen geändert oder entfernt. Bitte lade die Seite neu.",
+    )
+
+
+def _store(
+    uid: str,
+    token: str,
+    name: str,
+    role: str,
+    account_changed: bool,
+    *,
+    expected_fp: str | None = None,
+) -> JSONResponse:
+    """Encrypt under the CURRENT key and write through the one RPC.
+
+    `expected_fp` (POST /verify) makes the write conditional, atomically, in
+    the database (migration 045): the RPC locks the credential row and refuses
+    with P0045 unless it still holds exactly that fingerprint, so a token the
+    student removed or replaced while the Hub was asked is never written back.
+    PUT passes None (replace unconditionally). The key is ALWAYS sent, so the
+    boot schema probe, which names it, proves the seven-argument writer exists.
+    """
     try:
         ciphertext = hf_credentials.encrypt(uid, token)
     except hf_credentials.HfCredentialError:
@@ -200,9 +239,12 @@ def _store(uid: str, token: str, name: str, role: str, account_changed: bool) ->
                 "p_hint": hint,
                 "p_hf_username": name,
                 "p_role": role,
+                "p_expected_fp": expected_fp,
             },
         ).execute()
     except Exception as exc:  # noqa: BLE001 - classified below; never log str(exc)
+        if "P0045" in str(exc):
+            raise _changed_meanwhile() from None
         if "P0002" in str(exc) or "Benutzer nicht gefunden" in str(exc):
             raise HTTPException(status_code=404, detail="Benutzerkonto nicht gefunden.") from None
         logger.error("hf-token store failed user=%s: %s", uid, type(exc).__name__)
@@ -316,14 +358,10 @@ def verify_hf_token(profile=Depends(get_current_profile)):
     token = _decrypt_own(uid, row)
     name, role, account_changed = _hub_checks(token, profile, stored=True)
     # The Hub call above takes up to HUB_TIMEOUT_S. A student who removed the token
-    # or saved another one meanwhile must not get the OLD one written back by the
-    # blind upsert in _store: re-read the fingerprint and stand down on a change.
-    current = _read_rows(uid, "token_fp")
-    if not current or current[0].get("token_fp") != row.get("token_fp"):
-        raise HTTPException(
-            status_code=409,
-            detail="Dein Token wurde inzwischen geändert oder entfernt. Bitte lade die Seite neu.",
-        )
-    response = _store(uid, token, name, role, account_changed)
+    # or saved another one meanwhile must not get the OLD one written back: the
+    # write is conditional on the fingerprint we decrypted, compared under the
+    # row lock inside the RPC (045). A Python re-read here would leave the gap
+    # between the read and the write open (it did, until 2026-10-04).
+    response = _store(uid, token, name, role, account_changed, expected_fp=row["token_fp"])
     logger.info("hf-token verified user=%s", uid)
     return response

@@ -30,6 +30,7 @@ import {
   WAIT_RECHECK_MS,
   WRITE_SETTLE_MS,
 } from '../../features/hfToken/syncDecision';
+import { selectHfDecision, selectHfStartBlock } from '../../features/hfToken/hfTokenSelectors';
 import useHfTokenSync, { LEGACY_GRACE_MS } from '../useHfTokenSync';
 
 vi.mock('../../services/hfTokenApi', () => ({
@@ -358,6 +359,51 @@ describe('useHfTokenSync — the reconcile', () => {
     // the robot caught up: the pause ends, no further write is ever needed
     await emit(robotSays({ seq: 3, present: true, fp: FP }));
     await advance(WRITE_SETTLE_MS * 2);
+    expect(setRobotToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('no „taken over" flash after a hand-over push, and no second write (review c)', async () => {
+    vi.useFakeTimers();
+    const store = makeStore();
+    mount(store);
+    await settle();
+    await emit(robotSays({ present: true, fp: OTHER }));   // the previous student's token
+    await settle();
+    expect(setRobotToken).toHaveBeenCalledTimes(1);
+    const seen = [];
+    const unsubscribe = store.subscribe(() => {
+      seen.push(selectHfStartBlock(store.getState()), selectHfDecision(store.getState()));
+    });
+    // the robot's state still shows the old slot for a while after the write
+    await advance(500);
+    await emit(robotSays({ seq: 2, present: true, fp: OTHER }));
+    await advance(1000);
+    await emit(robotSays({ seq: 3, present: true, fp: OTHER }));
+    expect(seen).not.toContain('taken_over');
+    expect(selectHfStartBlock(store.getState())).toBe('transfer');
+    // ... and then it shows the student's token: in sync, no flash ever happened
+    await emit(robotSays({ seq: 4, present: true, fp: FP }));
+    await advance(WRITE_SETTLE_MS * 2);
+    unsubscribe();
+    expect(seen).not.toContain('taken_over');
+    expect(selectHfStartBlock(store.getState())).toBeNull();
+    expect(setRobotToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('a push the robot never shows ends in the dampener after the wait, not in a write loop', async () => {
+    vi.useFakeTimers();
+    const store = makeStore();
+    mount(store);
+    await settle();
+    await emit(robotSays({ present: true, fp: OTHER }));
+    await settle();
+    expect(setRobotToken).toHaveBeenCalledTimes(1);
+    await advance(WRITE_SETTLE_MS - 200);
+    expect(selectHfDecision(store.getState())).toBe('push');   // still waiting to see it
+    await advance(400);                                       // the wait is over
+    expect(hf(store).sync.awaitingOwnFp).toBeNull();
+    expect(selectHfDecision(store.getState())).toBe('taken_over');
+    await advance(WRITE_SETTLE_MS * 4);
     expect(setRobotToken).toHaveBeenCalledTimes(1);
   });
 

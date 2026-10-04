@@ -14,12 +14,11 @@
 //
 // WHAT THIS CARD NEVER DOES. It never keeps the token. The input is local
 // component state, emptied the instant the student presses „Token speichern"
-// (before the request is even sent), `type="password"` with
-// `autoComplete="new-password"` (Chrome ignores `off` on a password field),
-// not inside a <form> and never persisted. The word „Token" reaches Redux only
-// as a fingerprint and a 4-character hint (features/hfToken). Every sentence
-// comes from features/hfToken/hfTokenCopy, so the German is reviewable in one
-// place and the JSX carries none.
+// (before the request is even sent), not inside a <form> and never persisted,
+// and it is not a password field to a password manager (TokenInput, review j).
+// The word „Token" reaches Redux only as a fingerprint and a 4-character hint
+// (features/hfToken). Every sentence comes from features/hfToken/hfTokenCopy,
+// so the German is reviewable in one place and the JSX carries none.
 //
 // THREE-STATE, like the rest of the page. `unknown`/`loading` means the cloud
 // has not answered: the card says so and offers nothing, and nothing else
@@ -38,6 +37,7 @@ import {
   selectHfAccount,
   selectHfDecision,
   selectHfInSync,
+  selectHfOfflineEscape,
   selectHfRobot,
   selectHfSync,
   selectHfSyncFailed,
@@ -102,10 +102,45 @@ export function robotView({ robot, heartbeatConnected, jetsonConnected, inSync, 
   return { tone: 'amber', pill: 'card.pill.working', note: null, retry: false, badNote: false };
 }
 
+/**
+ * Can this browser mask a TEXT field (`-webkit-text-security`)? Chrome, Edge
+ * and Safari always could, Firefox since 114 (MDN browser-compat-data,
+ * css.properties.-webkit-text-security). Evaluated per render, so a test can
+ * stub `window.CSS`.
+ */
+export function canMaskTextField() {
+  try {
+    return typeof CSS !== 'undefined' && typeof CSS.supports === 'function'
+      && CSS.supports('-webkit-text-security', 'disc');
+  } catch {
+    return false;
+  }
+}
+
+// WHY NOT `type="password"` (review j, 2026-10-04). Browsers and password-
+// manager extensions offer to SAVE whatever is typed into a password field once
+// it disappears after a request — with or without a <form> — and a Pi's or a
+// classroom PC's browser profile is shared, so the next student would find the
+// token in the saved passwords. A plain text field masked with
+// `-webkit-text-security: disc` looks the same on screen but is not a password
+// field to the browser's manager; `autoComplete="off"` (honoured on a text
+// field) and the ignore attributes of the common extensions (1Password,
+// LastPass, Bitwarden, Dashlane) keep those away too. A browser that cannot
+// mask a text field falls back to `type="password"`: a visible token on a
+// classroom screen is worse than a save offer the student can decline.
+const PASSWORD_MANAGER_IGNORE = Object.freeze({
+  'data-1p-ignore': 'true',
+  'data-lpignore': 'true',
+  'data-bwignore': 'true',
+  'data-form-type': 'other',
+});
+
 function TokenInput({ value, onChange, onSubmit, disabled }) {
+  const masked = canMaskTextField();
   return (
     <input
-      type="password"
+      type={masked ? 'text' : 'password'}
+      style={masked ? { WebkitTextSecurity: 'disc' } : undefined}
       value={value}
       onChange={(event) => onChange(event.target.value)}
       onKeyDown={(event) => {
@@ -116,10 +151,12 @@ function TokenInput({ value, onChange, onSubmit, disabled }) {
       }}
       placeholder={hfCopy('card.input.placeholder')}
       aria-label={hfCopy('card.input.aria')}
-      autoComplete="new-password"
+      autoComplete={masked ? 'off' : 'new-password'}
       autoCapitalize="off"
       autoCorrect="off"
       spellCheck={false}
+      name="edubotics-hf-access"
+      {...PASSWORD_MANAGER_IGNORE}
       disabled={disabled}
       className="h-10 flex-1 min-w-[200px] rounded-[var(--radius-sm)] border border-[var(--line)] bg-white px-3 font-mono text-sm"
     />
@@ -135,6 +172,9 @@ export default function HfTokenCard() {
   const inSync = useSelector(selectHfInSync);
   const failed = useSelector(selectHfSyncFailed);
   const jetsonConnected = useSelector((s) => s.jetson?.status === 'connected');
+  // „Ohne Anmeldung fortfahren": the account half is off without a JWT, so the
+  // state would read „wird geladen" for ever (review i).
+  const offline = useSelector(selectHfOfflineEscape);
   const heartbeatConnected = useSelector((s) => s.tasks?.heartbeatStatus === 'connected');
 
   // The token lives in this state for as long as it takes to press the button.
@@ -233,7 +273,9 @@ export default function HfTokenCard() {
   ) : null;
 
   let body;
-  if (status === 'unknown' || status === 'loading') {
+  if ((status === 'unknown' || status === 'loading') && offline) {
+    body = <p className={NOTE}>{hfCopy('card.offline')}</p>;
+  } else if (status === 'unknown' || status === 'loading') {
     body = <p className={NOTE}>{hfCopy('card.unknown')}</p>;
   } else if (status === 'unsupported') {
     body = <p className={NOTE}>{hfCopy('card.unsupported')}</p>;

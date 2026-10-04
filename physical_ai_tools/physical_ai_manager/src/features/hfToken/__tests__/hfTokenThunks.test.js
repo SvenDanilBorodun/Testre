@@ -10,7 +10,7 @@
 
 import { configureStore } from '@reduxjs/toolkit';
 
-import authReducer, { setSession } from '../../auth/authSlice';
+import authReducer, { setHfUsername, setSession } from '../../auth/authSlice';
 import uiReducer, { setHfUserList } from '../../ui/uiSlice';
 import hfReducer, {
   accountLoaded,
@@ -362,6 +362,33 @@ describe('removeHfToken / verifyHfToken', () => {
     api.verifyHfToken.mockResolvedValue(storedBody({ validated_at: '2026-10-04T08:00:00Z' }));
     await expect(store.dispatch(verifyHfToken())).resolves.toEqual({ ok: true, error: null });
     expect(hf(store).account.validatedAt).toBe('2026-10-04T08:00:00Z');
+  });
+
+  it('verify: the proven name the cloud re-pointed reaches auth.hfUsername too (review h)', async () => {
+    const store = readyToPush();
+    store.dispatch(setHfUsername('anna'));
+    api.verifyHfToken.mockResolvedValue(storedBody({ hf_username: 'anna-renamed' }));
+    await expect(store.dispatch(verifyHfToken())).resolves.toEqual({ ok: true, error: null });
+    expect(store.getState().auth.hfUsername).toBe('anna-renamed');
+    expect(hf(store).account.hfUsername).toBe('anna-renamed');
+  });
+
+  it('verify: a 409 (removed or replaced meanwhile) reads the account again at once (review h)', async () => {
+    const store = readyToPush();
+    const detail = 'Dein Token wurde inzwischen geändert oder entfernt. Bitte lade die Seite neu.';
+    api.verifyHfToken.mockRejectedValue(apiError(409, detail));
+    api.getHfToken.mockResolvedValue({ stored: false });
+    const result = await store.dispatch(verifyHfToken());
+    expect(result).toEqual({ ok: false, error: detail });
+    await vi.waitFor(() => expect(hf(store).account.status).toBe('none'));
+    expect(api.getHfToken).toHaveBeenCalledWith('jwt-1');
+  });
+
+  it('verify: any other failure does not trigger a re-read', async () => {
+    const store = readyToPush();
+    api.verifyHfToken.mockRejectedValue(apiError(502, 'Hugging Face ist gerade nicht erreichbar.'));
+    await store.dispatch(verifyHfToken());
+    expect(api.getHfToken).not.toHaveBeenCalled();
   });
 
   it('verify: a rejected token is the server\'s German sentence, and the account stays', async () => {

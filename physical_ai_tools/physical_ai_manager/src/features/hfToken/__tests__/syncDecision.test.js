@@ -125,6 +125,35 @@ describe('hfTokenStartBlock', () => {
     expect(sb({ accountStatus: 'stored', robot: other, lastOwnFp: A, syncPhase: 'failed' }))
       .toBe(START_BLOCK.TAKEN_OVER);
   });
+
+  it('stored: "busy" while the robot refuses a change for now, before "failed" (review b)', () => {
+    expect(START_BLOCK.BUSY).toBe('busy');
+    const busyOther = R({ present: true, fp: B, busy: true });
+    expect(sb({ accountStatus: 'stored', robot: busyOther })).toBe(START_BLOCK.BUSY);
+    expect(sb({ accountStatus: 'stored', robot: R({ busy: true }) })).toBe(START_BLOCK.BUSY);
+    expect(sb({ accountStatus: 'stored', robot: busyOther, syncPhase: 'failed' })).toBe(START_BLOCK.BUSY);
+    expect(sb({ accountStatus: 'stored', robot: busyOther, lastOwnFp: A })).toBe(START_BLOCK.TAKEN_OVER);
+    expect(sb({ accountStatus: 'stored', robot: R({ present: true, fp: A, busy: true }) })).toBeNull();
+  });
+
+  it('stored: a push not SEEN yet is "transfer", never "taken_over" (review c)', () => {
+    const other = R({ present: true, fp: B });
+    expect(sb({ accountStatus: 'stored', robot: other, lastOwnFp: A, awaitingOwnFp: A }))
+      .toBe(START_BLOCK.TRANSFER);
+    // a wait for ANOTHER fingerprint (the account changed meanwhile) excuses nothing
+    expect(sb({ accountStatus: 'stored', robot: other, lastOwnFp: A, awaitingOwnFp: C }))
+      .toBe(START_BLOCK.TAKEN_OVER);
+  });
+});
+
+describe('decideSync while a push waits to be seen (review c)', () => {
+  it('a foreign slot right after my push is push/wait, not taken_over', () => {
+    const base = { enabled: true, accountStatus: 'stored', accountFp: A, lastOwnFp: A, awaitingOwnFp: A };
+    expect(decideSync({ ...base, robot: R({ present: true, fp: B }) })).toBe('push');
+    expect(decideSync({ ...base, robot: R({ present: true, fp: B, busy: true }) })).toBe('wait');
+    expect(decideSync({ ...base, robot: R({ present: true, fp: A }) })).toBe('noop');
+    expect(decideSync({ ...base, awaitingOwnFp: null, robot: R({ present: true, fp: B }) })).toBe('taken_over');
+  });
 });
 
 describe('the retry schedule', () => {

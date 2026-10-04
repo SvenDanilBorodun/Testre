@@ -50,6 +50,10 @@ jobs:
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       MODAL_TOKEN_ID: ci-probe
       MODAL_TOKEN_SECRET: ci-probe
+      # A required secret since 2026-10-04 (owner decision S2). The probe never
+      # decrypts anything, so a DUMMY (32 zero bytes, base64) satisfies the
+      # boot check; production reads the real key from Railway.
+      EDUBOTICS_HF_TOKEN_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       ALLOWED_ORIGINS: http://localhost
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

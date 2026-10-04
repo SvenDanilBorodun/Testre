@@ -84,6 +84,15 @@ class _Rpc:
         if self.sb.fail_rpc is not None:
             raise self.sb.fail_rpc
         p = self.params
+        # Migration 045: a non-NULL p_expected_fp makes the write conditional,
+        # atomically, on the row still holding exactly that fingerprint.
+        expected = p.get("p_expected_fp")
+        if expected is not None:
+            current = self.sb.credentials.get(p["p_user_id"])
+            if current is None or current["token_fp"] != expected:
+                raise RuntimeError(
+                    "{'code': 'P0045', 'message': 'Das Token wurde inzwischen geändert oder entfernt.'}"
+                )
         row = {
             "user_id": p["p_user_id"],
             "token_ciphertext": p["p_ciphertext"],
@@ -230,7 +239,7 @@ class TestRoundTrip(_RouteCase):
         self.assertEqual(params["p_user_id"], UID)  # keyed to the JWT-verified profile
         self.assertEqual(
             sorted(params),
-            ["p_ciphertext", "p_fp", "p_hf_username", "p_hint", "p_role", "p_user_id"],
+            ["p_ciphertext", "p_expected_fp", "p_fp", "p_hf_username", "p_hint", "p_role", "p_user_id"],
         )
         self.assertNotIn(TOK, json.dumps(params))
 
@@ -317,6 +326,26 @@ class TestPutRejections(_RouteCase):
         for role in ("write", "fineGrained", "god", "unknown", "admin"):
             self.hub.return_value = {"name": "alice", "role": role}
             self.assertEqual(_content(self.put())["role"], role)
+
+    def test_a_fine_grained_token_that_cannot_write_to_the_own_account_gets_the_how_to(self) -> None:
+        self.hub.return_value = {"name": "alice", "role": "fineGrained", "repo_write": False}
+        exc = self.assertHttp(422, self.put)
+        self.assertIn("nicht in deine eigenen Repositories schreiben", exc.detail)
+        self.assertIn("„Write“", exc.detail)
+        self.assertIn("„Repositories“", exc.detail)
+        self.assertIn("„Settings“", exc.detail)
+        self._no_hub_call()
+
+    def test_a_fine_grained_token_that_can_write_or_cannot_be_judged_is_stored(self) -> None:
+        # Fail OPEN: an unrecognised scope block (None) must never lock a student out.
+        for verdict in (True, None):
+            self.hub.return_value = {"name": "alice", "role": "fineGrained", "repo_write": verdict}
+            self.assertEqual(_content(self.put())["role"], "fineGrained", verdict)
+
+    def test_only_a_fine_grained_token_is_judged_by_its_scopes(self) -> None:
+        # A write token never carries a verdict; even a stray False does not refuse it.
+        self.hub.return_value = {"name": "alice", "role": "write", "repo_write": False}
+        self.assertEqual(_content(self.put())["role"], "write")
 
     def test_a_denied_author_is_refused(self) -> None:
         for name in ("RobotisSW", "lerobot", "HuggingFace"):
@@ -493,6 +522,36 @@ class TestDeleteAndVerify(_RouteCase):
         self.assertHttp(409, route.verify_hf_token, profile=_profile())
         self.assertEqual(_content(route.reveal_hf_token(profile=_profile()))["token"], other)
 
+    def test_put_writes_unconditionally_and_verify_names_the_fingerprint_it_decrypted(self) -> None:
+        self.put()
+        fn, params = self.sb.rpc_calls[-1]
+        self.assertEqual(fn, "store_user_hf_credential")
+        self.assertIn("p_expected_fp", params)          # always sent: the probe names it
+        self.assertIsNone(params["p_expected_fp"])
+        route.verify_hf_token(profile=_profile())
+        self.assertEqual(self.sb.rpc_calls[-1][1]["p_expected_fp"], "c1770a7966b0771e")
+
+    def test_the_conditional_write_lives_in_the_rpc_not_in_a_python_re_read(self) -> None:
+        # The old re-read left the gap between the read and the write open: a
+        # DELETE landing in it was resurrected by the blind upsert (owner item d).
+        self.put()
+        reads = []
+        real = route._read_rows
+
+        def counting(uid, columns):
+            reads.append(columns)
+            return real(uid, columns)
+
+        with patch.object(route, "_read_rows", side_effect=counting):
+            route.verify_hf_token(profile=_profile())
+        self.assertEqual(reads, [route._COLUMNS_SECRET])
+
+    def test_the_rpcs_p0045_is_the_german_409(self) -> None:
+        self.put()
+        self.sb.fail_rpc = RuntimeError("{'code': 'P0045', 'message': 'x'}")
+        exc = self.assertHttp(409, route.verify_hf_token, profile=_profile())
+        self.assertIn("geändert oder entfernt", exc.detail)
+
     def test_verify_when_the_hub_has_since_revoked_the_token(self) -> None:
         self.put()
         self.hub.side_effect = hc.HfCredentialError("rejected")
@@ -578,6 +637,25 @@ class TestPatchMe(unittest.TestCase):
             "verwenden möchtest.",
         )
         self.assertEqual(self.sb.updated, [])
+
+    def test_a_token_stored_between_the_check_and_the_update_is_still_the_409(self) -> None:
+        # Migration 044's users trigger raises P0044 when hf_username would leave
+        # the stored credential's name; the check-then-write is atomic in SQL.
+        real_table = self.sb.table
+
+        def table(name):
+            query = real_table(name)
+            if name == "users":
+                def execute():
+                    raise RuntimeError("{'code': 'P0044', 'message': 'Dein Hugging-Face-Konto ...'}")
+                query.execute = execute
+            return query
+
+        with patch.object(self.sb, "table", side_effect=table):
+            with self.assertRaises(HTTPException) as cm:
+                self._call("someone-else")
+        self.assertEqual(cm.exception.status_code, 409)
+        self.assertIn("über dein gespeichertes Token festgelegt", cm.exception.detail)
 
     def test_still_200_without_a_credential(self) -> None:
         result = self._call("alice")
@@ -758,7 +836,34 @@ class TestMainWiring(unittest.TestCase):
         exec(compile(ast.Module(body=[fn], type_ignores=[]), MAIN_PY, "exec"), ns)  # noqa: S102
         return ns["_validate_hf_token_key"]
 
-    def test_a_malformed_key_refuses_to_boot_and_an_absent_one_does_not(self) -> None:
+    def _required_fn(self):
+        fn = next(n for n in self.tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "_validate_required_secrets")
+        ns: dict = {"os": os}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), MAIN_PY, "exec"), ns)  # noqa: S102
+        return ns["_validate_required_secrets"]
+
+    def test_an_absent_or_empty_key_stops_the_boot_like_every_required_secret(self) -> None:
+        # Owner decision S2 (2026-10-04): without the key no student can store a
+        # token, so the deploy must fail instead of booting into a 503 for all.
+        required = self._required_fn()
+        base = {"SUPABASE_URL": "http://ci.test", "SUPABASE_SERVICE_ROLE_KEY": "x",
+                "MODAL_TOKEN_ID": "x", "MODAL_TOKEN_SECRET": "x"}
+        for key_value in (None, ""):
+            env = dict(base)
+            if key_value is not None:
+                env[hc.KEY_ENV] = key_value
+            with patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(RuntimeError) as cm:
+                    required()
+            self.assertIn(hc.KEY_ENV, str(cm.exception))
+        with patch.dict(os.environ, {**base, hc.KEY_ENV: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                        clear=True):
+            required()
+
+    def test_the_key_check_on_its_own_tolerates_absence_and_refuses_a_malformed_key(self) -> None:
+        # _validate_hf_token_key is the malformed-key half; absence is the
+        # required-secrets check's job (above), so on its own it stays quiet.
         validate = self._validate_fn()
         for env in ({}, {hc.KEY_ENV: ""}):
             with _Env():
@@ -773,10 +878,13 @@ class TestMainWiring(unittest.TestCase):
         with _Env(SEQ_A):
             validate()
 
-    def test_the_missing_key_warning_names_the_variable(self) -> None:
-        fn = next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == "_warn_optional_secrets")
-        strings = [n.value for n in ast.walk(fn) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-        self.assertIn("EDUBOTICS_HF_TOKEN_KEY", strings)
+    def test_the_key_is_a_required_secret_and_no_longer_an_optional_warning(self) -> None:
+        def strings_of(name):
+            fn = next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            return [n.value for n in ast.walk(fn) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+
+        self.assertIn("EDUBOTICS_HF_TOKEN_KEY", strings_of("_validate_required_secrets"))
+        self.assertNotIn("EDUBOTICS_HF_TOKEN_KEY", strings_of("_warn_optional_secrets"))
 
 
 if __name__ == "__main__":

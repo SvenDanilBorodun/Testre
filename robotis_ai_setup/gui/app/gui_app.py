@@ -1389,13 +1389,13 @@ class EduBoticsApp:
             removed = config_generator.purge_legacy_hf_token(ENV_FILE)
         except Exception as e:  # noqa: BLE001 — a diagnostic must not block startup
             self._log(
-                "[WARNUNG] Das alte HuggingFace-Token konnte nicht von diesem "
+                "[WARNUNG] Das alte Hugging-Face-Token konnte nicht von diesem "
                 f"PC entfernt werden ({type(e).__name__})."
             )
             return
         if removed:
             self._log(
-                "Das alte HuggingFace-Token wurde von diesem PC entfernt. "
+                "Das alte Hugging-Face-Token wurde von diesem PC entfernt. "
                 "Hinterlege dein Token jetzt einmalig auf der Startseite der "
                 "Web-Oberfläche."
             )

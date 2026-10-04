@@ -241,10 +241,30 @@ export const RECORD_COPY = Object.freeze({
         + 'Startseite.',
       transfer: 'Dein Hugging-Face-Token wird gerade auf den Roboter übertragen. Einen Moment, dann geht es '
         + 'weiter.',
+      // review b: the robot refuses a token change while it records or talks to
+      // Hugging Face (upload, download, list fetch: review e names all of them);
+      // like `transfer` it resolves by itself and names no page.
+      busy: 'Der Roboter ist gerade beschäftigt: Er nimmt auf, lädt etwas hoch oder herunter oder fragt '
+        + 'eine Liste bei Hugging Face ab. Dein Hugging-Face-Token wird danach übertragen, dann geht es '
+        + 'weiter.',
       failed: 'Das Hugging-Face-Token konnte nicht auf den Roboter übertragen werden. Versuche es auf der '
         + 'Startseite erneut.',
       takenOver: 'Ein anderes Konto hat sein Token auf diesen Roboter gelegt. Übertrage deins erneut auf der '
         + 'Startseite.',
+    }),
+    // A NON-blocking hint (owner decision S2): the account state answers
+    // nothing usable, so no Benutzer-ID can be offered — Start stays allowed
+    // („unknown never blocks"), the sentence names the cause. Each one NAMES the
+    // Startseite, which ProblemBanner turns into the link.
+    hfTokenHint: Object.freeze({
+      offline: 'Ohne Anmeldung bekommt der Roboter dein Hugging-Face-Token nicht, deshalb gibt es keine '
+        + 'Benutzer-ID. Melde dich an; dein Token findest du dann auf der Startseite.',
+      error: 'Dein Hugging-Face-Token konnte nicht geladen werden, deshalb gibt es keine Benutzer-ID. Lade '
+        + 'es auf der Startseite erneut.',
+      unavailable: 'Der Server kann dein Hugging-Face-Token gerade nicht bereitstellen, deshalb gibt es keine '
+        + 'Benutzer-ID. Mehr dazu auf der Startseite; sag deiner Lehrkraft Bescheid.',
+      unsupported: 'Dieser Server kann dein Hugging-Face-Token noch nicht speichern, deshalb gibt es keine '
+        + 'Benutzer-ID. Mehr dazu auf der Startseite.',
     }),
   }),
 

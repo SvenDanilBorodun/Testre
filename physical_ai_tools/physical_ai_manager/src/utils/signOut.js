@@ -10,12 +10,15 @@
 // useMeProfile ×1), whose ORDER was documented as prose in two other modules
 // and enforced nowhere.
 //
-// THE ORDERING RULE: everything LOCAL and SYNCHRONOUS completes before the one
-// remote call, and the remote call's own failure is handled rather than assumed
-// away. The single `await` is a window in which the whole document keeps
-// running — every timer, socket callback and pending promise — so anything left
-// on the far side of it is state the previous student's browser can re-establish
-// while the sign-out is still in flight.
+// THE ORDERING RULE: everything LOCAL and SYNCHRONOUS completes before the
+// first remote await, and each remote call's own failure is handled rather than
+// assumed away. There are TWO awaits since 042: the revoke
+// (`supabase.auth.signOut()`), then the robot's token clear, bounded by
+// CLEAR_BOUND_MS (started before the revoke, so the two overlap). Each await is
+// a window in which the whole document keeps running — every timer, socket
+// callback and pending promise — so anything left on the far side of them is
+// state the previous student's browser can re-establish while the sign-out is
+// still in flight; hence the second scrub after both.
 //
 //   1. `resetJetsonOnLogout` FIRST, and it is the ONE step that must precede
 //      the revoke for a reason of its own: the beacon-style Jetson release is
@@ -32,7 +35,7 @@
 //      the recording form (then InfoPanel, now the Aufnahme page's TaskCard via
 //      useRecordController) re-dispatched `setTaskInfo`, whose reducer
 //      re-persists a truthy `userId`, writing the deleted key straight back.
-//      It runs BEFORE the await, not after: while `auth.isAuthenticated` was
+//      It runs BEFORE the awaits, not after: while `auth.isAuthenticated` was
 //      still true and storage was already scrubbed, one `/task/status` tick
 //      (~2 s cadence, against a revoke of hundreds of ms) re-adopted the id
 //      into Redux AND back into storage, and the reload then re-hydrated it.
@@ -47,8 +50,8 @@
 //      while presenting a completed handover. `scope: 'local'` is not an
 //      escape hatch — `_signOut` calls `admin.signOut()` before it looks at
 //      the scope. So a reported failure sweeps the key itself.
-//   5. the robot's token slot is cleared — see below — and the scrub runs AGAIN,
-//      for whatever the await window re-persisted.
+//   5. the robot's token slot clear is awaited (bounded) — see below — and the
+//      scrub runs AGAIN, for whatever the two await windows re-persisted.
 //
 // THE ROBOT'S TOKEN SLOT. The student's Hugging-Face token lives in ONE slot on
 // the robot (features/hfToken/robotChannel), and the next student at a shared PC
@@ -56,9 +59,12 @@
 // before anything else, so it overlaps the revoke instead of adding to it; it is
 // AWAITED only after the revoke, for at most CLEAR_BOUND_MS (2 s), and every
 // failure is swallowed — a robot that is gone, busy (recording or uploading) or
-// slow must never keep a student signed in. A clear that did not happen leaves
-// the token in the slot until the next login reconciles it, and Aufnahme refuses
-// Start until the robot holds the NEW student's token. Skipped while a classroom
+// slow must never keep a student signed in. A clear the robot refused because
+// it was busy is remembered by the node and applied once it is idle
+// (physical_ai_server.py::_apply_pending_hf_token_clear); a clear that never
+// reached the robot leaves the token in the slot until the next login
+// reconciles it, and Aufnahme refuses Start until the robot holds the NEW
+// student's token. Skipped while a classroom
 // Jetson is claimed: its rosbridge is the Jetson proxy, which keeps its own
 // token and is never sent a personal one.
 //
@@ -154,10 +160,10 @@ export const signOutStudent = ({ reload = true } = {}) => async (dispatch, getSt
   } finally {
     clearTimeout(boundTimer);
   }
-  // The await window is over; re-scrub. Redux was already clean and the
+  // Both await windows are over; re-scrub. Redux was already clean and the
   // `/task/status` adopt is identity-gated, but `setTaskInfo` re-persists a
   // truthy `userId` from whatever object ITS caller captured, and every pending
-  // handler in the document survived the await. Closing the window costs five
+  // handler in the document survived the awaits. Closing the window costs five
   // `removeItem` calls; reasoning about which callers are still alive does not
   // stay correct.
   clearStudentScopedStorage();

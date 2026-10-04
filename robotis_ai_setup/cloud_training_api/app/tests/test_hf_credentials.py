@@ -1,10 +1,9 @@
 """services/hf_credentials.py: shape, fingerprint, AES-256-GCM envelope, key
 handling and the Hub check (migration 042, a student's own Hugging Face token).
 
-The module imports `cryptography` and `huggingface_hub` lazily, so this file
-needs the former (CI's python-tests pip line must list `cryptography`; the
-owner adds it when merging) and a FAKE of the latter that
-it patches into sys.modules per test.
+The module imports `cryptography` and `httpx` lazily, so this file needs the
+former (CI's python-tests pip line lists `cryptography`) and a FAKE of the
+latter that it patches into sys.modules per test.
 
 Fixtures are deliberately low-entropy and are never assigned to a name that
 says token/key/secret next to a long literal (gitleaks scans the history).
@@ -261,42 +260,91 @@ class TestEnvelope(unittest.TestCase):
             self.assertFalse(hc.usable(VECTOR_ENVELOPE))
 
 
-class _HubError(Exception):
-    def __init__(self, status, message="boom"):
-        super().__init__(message)
-        self.response = SimpleNamespace(status_code=status)
+def _fake_httpx(*, status=200, body=None, error=None, block=None, json_error=False):
+    """A stand-in `httpx` whose Client.get answers/raises/blocks like the Hub."""
+    mod = types.ModuleType("httpx")
+    seen: dict = {}
 
+    class Timeout:
+        def __init__(self, value, **_kw):
+            self.value = value
 
-def _fake_hub(*, info=None, error=None, block=None):
-    """A stand-in `huggingface_hub` whose HfApi.whoami answers/raises/blocks."""
-    mod = types.ModuleType("huggingface_hub")
-    seen = {}
+    class _Response:
+        status_code = status
 
-    class HfApi:
-        def __init__(self, token=None, **_kw):
-            seen["token"] = token
+        def json(self):
+            if json_error:
+                raise ValueError("Expecting value: line 1 column 1")
+            return body
 
-        def whoami(self, *_a, **_kw):
+    class Client:
+        def __init__(self, timeout=None, follow_redirects=True, **_kw):
+            seen["timeout"] = timeout
+            seen["follow_redirects"] = follow_redirects
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            seen["closed"] = True
+            return False
+
+        def get(self, url, headers=None, **_kw):
+            seen["url"] = url
+            seen["headers"] = dict(headers or {})
             if block is not None:
                 block.wait(10)
             if error is not None:
                 raise error
-            return info
+            return _Response()
 
-    mod.HfApi = HfApi
+    mod.Timeout = Timeout
+    mod.Client = Client
     mod.seen = seen
     return mod
 
 
+def _whoami(name="alice", role="write", **extra):
+    access = {"role": role, "displayName": "edubotics"}
+    access.update(extra)
+    return {"id": "6512a0b1c2d3e4f5a6b7c8d9", "type": "user", "name": name,
+            "auth": {"type": "access_token", "accessToken": access}}
+
+
+def _scoped(*entries, **block):
+    return {"scoped": list(entries), **block}
+
+
+def _user_entry(perms, name="alice", _id="6512a0b1c2d3e4f5a6b7c8d9"):
+    entity = {"type": "user"}
+    if name is not None:
+        entity["name"] = name
+    if _id is not None:
+        entity["_id"] = _id
+    return {"entity": entity, "permissions": list(perms)}
+
+
 class TestValidateWithHub(unittest.TestCase):
-    def _ask(self, hub):
-        with patch.dict(sys.modules, {"huggingface_hub": hub}):
+    def _ask(self, fake, environ=None):
+        with patch.dict(sys.modules, {"httpx": fake}), patch.dict(os.environ, environ or {}):
+            if environ is None:
+                os.environ.pop("HF_ENDPOINT", None)
             return hc.validate_with_hub(TOK)
 
-    def test_returns_name_and_role_and_passes_the_token_to_the_client(self) -> None:
-        hub = _fake_hub(info={"name": "alice", "auth": {"accessToken": {"role": "write"}}})
-        self.assertEqual(self._ask(hub), {"name": "alice", "role": "write"})
-        self.assertEqual(hub.seen["token"], TOK)
+    def test_asks_whoami_v2_with_the_token_as_a_bearer_and_a_bounded_client(self) -> None:
+        fake = _fake_httpx(body=_whoami())
+        self.assertEqual(self._ask(fake), {"name": "alice", "role": "write", "repo_write": None})
+        self.assertEqual(fake.seen["url"], "https://huggingface.co/api/whoami-v2")
+        self.assertEqual(fake.seen["headers"], {"Authorization": "Bearer " + TOK})
+        # The REQUEST is bounded (audit f): huggingface_hub's whoami set no timeout.
+        self.assertEqual(fake.seen["timeout"].value, hc.HUB_TIMEOUT_S)
+        self.assertIs(fake.seen["follow_redirects"], False)
+        self.assertTrue(fake.seen["closed"])
+
+    def test_hf_endpoint_is_honoured_like_huggingface_hub_does(self) -> None:
+        fake = _fake_httpx(body=_whoami())
+        self._ask(fake, environ={"HF_ENDPOINT": "https://hub.example.test/"})
+        self.assertEqual(fake.seen["url"], "https://hub.example.test/api/whoami-v2")
 
     def test_a_missing_role_is_unknown_not_a_rejection(self) -> None:
         for info in (
@@ -305,47 +353,148 @@ class TestValidateWithHub(unittest.TestCase):
             {"name": "alice", "auth": {"accessToken": {}}},
             {"name": "alice", "auth": {"accessToken": {"role": ""}}},
             {"name": "alice", "auth": {"accessToken": {"role": 7}}},
+            {"name": "alice", "auth": "x"},
+            {"name": "alice", "auth": {"accessToken": "x"}},
         ):
-            self.assertEqual(self._ask(_fake_hub(info=info)), {"name": "alice", "role": "unknown"})
+            self.assertEqual(self._ask(_fake_httpx(body=info)),
+                             {"name": "alice", "role": "unknown", "repo_write": None}, repr(info))
 
     def test_the_hub_refusing_the_token_is_rejected(self) -> None:
         for status in (401, 403):
             with self.assertRaises(hc.HfCredentialError) as cm:
-                self._ask(_fake_hub(error=_HubError(status)))
+                self._ask(_fake_httpx(status=status, body={"error": "Invalid credentials"}))
             self.assertEqual(cm.exception.code, "rejected", status)
 
-    def test_throttling_server_errors_and_network_trouble_are_unreachable(self) -> None:
-        for error in (_HubError(429), _HubError(500), _HubError(503), ConnectionError("down"), OSError("x")):
+    def test_throttling_server_errors_odd_statuses_and_network_trouble_are_unreachable(self) -> None:
+        for fake in (
+            _fake_httpx(status=429), _fake_httpx(status=500), _fake_httpx(status=503),
+            _fake_httpx(status=404), _fake_httpx(status=302),
+            _fake_httpx(error=ConnectionError("down")), _fake_httpx(error=OSError("x")),
+            _fake_httpx(error=TimeoutError("read timed out")),
+        ):
             with self.assertRaises(hc.HfCredentialError) as cm:
-                self._ask(_fake_hub(error=error))
-            self.assertEqual(cm.exception.code, "unreachable", repr(error))
+                self._ask(fake)
+            self.assertEqual(cm.exception.code, "unreachable")
 
     def test_a_hub_that_never_answers_is_unreachable_after_the_timeout(self) -> None:
         release = threading.Event()
         try:
             with patch.object(hc, "HUB_TIMEOUT_S", 0.05):
                 with self.assertRaises(hc.HfCredentialError) as cm:
-                    self._ask(_fake_hub(info={"name": "alice"}, block=release))
+                    self._ask(_fake_httpx(body=_whoami(), block=release))
             self.assertEqual(cm.exception.code, "unreachable")
         finally:
             release.set()
 
     def test_an_answer_without_a_usable_name_is_a_bad_reply(self) -> None:
-        for info in (None, {}, {"name": ""}, {"name": 5}, ["alice"], {"fullname": "x"}):
+        for body in (None, {}, {"name": ""}, {"name": 5}, ["alice"], {"fullname": "x"}):
             with self.assertRaises(hc.HfCredentialError) as cm:
-                self._ask(_fake_hub(info=info))
-            self.assertEqual(cm.exception.code, "bad_reply", repr(info))
+                self._ask(_fake_httpx(body=body))
+            self.assertEqual(cm.exception.code, "bad_reply", repr(body))
+        with self.assertRaises(hc.HfCredentialError) as cm:
+            self._ask(_fake_httpx(json_error=True))
+        self.assertEqual(cm.exception.code, "bad_reply")
 
     def test_logs_carry_the_class_and_status_but_never_the_token(self) -> None:
-        leaky = _HubError(401, "Invalid token " + TOK)
-        with self.assertLogs("app.services.hf_credentials", level="DEBUG") as logs:
-            with self.assertRaises(hc.HfCredentialError):
-                self._ask(_fake_hub(error=leaky))
-        text = "\n".join(logs.output)
-        self.assertIn("_HubError", text)
-        self.assertIn("401", text)
-        self.assertNotIn(TOK, text)
-        self.assertNotIn("Invalid token", text)
+        for fake, marker in (
+            (_fake_httpx(error=ConnectionError("Invalid token " + TOK)), "ConnectionError"),
+            (_fake_httpx(status=401, body={"error": "Invalid token " + TOK}), "401"),
+        ):
+            with self.assertLogs("app.services.hf_credentials", level="DEBUG") as logs:
+                with self.assertRaises(hc.HfCredentialError):
+                    self._ask(fake)
+            text = "\n".join(logs.output)
+            self.assertIn(marker, text)
+            self.assertNotIn(TOK, text)
+            self.assertNotIn("Invalid token", text)
+
+    def test_a_fine_grained_token_carries_its_repo_write_verdict(self) -> None:
+        cases = (
+            (_scoped(_user_entry(["repo.content.read", "repo.write"])), True),
+            (_scoped(_user_entry(["repo.content.read"])), False),
+            ({"note": "an unrecognised shape"}, None),
+        )
+        for block, verdict in cases:
+            info = _whoami(role="fineGrained", fineGrained=block)
+            self.assertEqual(self._ask(_fake_httpx(body=info))["repo_write"], verdict, repr(block))
+        # Only a fine-grained token is judged: a write token never carries a verdict.
+        info = _whoami(role="write", fineGrained=_scoped(_user_entry([])))
+        self.assertIsNone(self._ask(_fake_httpx(body=info))["repo_write"])
+
+
+class TestFineGrainedRepoWrite(unittest.TestCase):
+    """The Hub's OpenAPI schema for GET /api/whoami-v2 auth.accessToken.fineGrained."""
+
+    def verdict(self, block, **who):
+        return hc.fine_grained_repo_write(_whoami(role="fineGrained", fineGrained=block, **who)
+                                          if block is not ... else _whoami(role="fineGrained"))
+
+    def test_write_to_the_own_account_is_true(self) -> None:
+        for perms in (["repo.write"], ["repo.content.read", "repo.content.write"],
+                      ["repo.content.read", "repo.write", "discussion.write"]):
+            self.assertIs(self.verdict(_scoped(_user_entry(perms))), True, perms)
+
+    def test_any_repository_write_permission_counts_not_only_todays_two_names(self) -> None:
+        # review d: a future Hugging Face rename of a repository write permission
+        # must not refuse a token that can upload (a permission that starts
+        # with "repo" and ends in ".write" is a repository write).
+        for perms in (["repo.contents.write"], ["repos.write"], ["repo.settings.write"],
+                      ["REPO.WRITE"], ["repo.content.read", "repo.new-name.write"]):
+            self.assertIs(self.verdict(_scoped(_user_entry(perms))), True, perms)
+        for name in hc.REPO_WRITE_PERMISSIONS:
+            self.assertTrue(hc.is_repo_write_permission(name), name)
+
+    def test_a_write_outside_the_repositories_never_counts(self) -> None:
+        for perms in (["discussion.write"], ["post.write"], ["inference.write"], ["collection.write"],
+                      ["discussion.write", "post.write", "repo.content.read"], ["write"], ["repo"],
+                      ["repo.read"], ["repo.write.read"], [".write"], [None, 7, {"repo": "write"}]):
+            self.assertIs(self.verdict(_scoped(_user_entry(perms))), False, perms)
+        for odd in (None, 7, "", "repowrite", "discussion.write"):
+            self.assertFalse(hc.is_repo_write_permission(odd), repr(odd))
+
+    def test_the_owner_is_matched_by_name_case_insensitively_or_by_id(self) -> None:
+        self.assertIs(self.verdict(_scoped(_user_entry(["repo.write"], name="ALICE"))), True)
+        self.assertIs(self.verdict(_scoped(_user_entry(["repo.write"], name=None))), True)
+
+    def test_parseable_and_no_own_write_is_false(self) -> None:
+        org = {"entity": {"type": "org", "name": "school", "_id": "a" * 24}, "permissions": ["repo.write"]}
+        repo = {"entity": {"type": "dataset", "name": "alice/wuerfel", "_id": "b" * 24},
+                "permissions": ["repo.write"]}
+        other_user = _user_entry(["repo.write"], name="mallory", _id="c" * 24)
+        for block in (
+            _scoped(),                                             # nothing scoped at all
+            _scoped(_user_entry(["repo.content.read"])),           # read only
+            _scoped(_user_entry([])),                              # an empty permission list
+            _scoped(org),                                          # writes to an organisation only
+            _scoped(repo),                                         # one repository, not new datasets
+            _scoped(other_user),
+            {"scoped": [], "global": ["discussion.write", "post.write"]},  # global never writes a repo
+            {"scoped": [_user_entry(["repo.content.read"])], "canReadGatedRepos": True},
+        ):
+            self.assertIs(self.verdict(block), False, repr(block))
+
+    def test_anything_unrecognised_fails_open(self) -> None:
+        for block in (
+            "fine",                                               # not a dict
+            {},                                                   # no scoped
+            {"scoped": "all"},                                    # scoped not a list
+            {"scoped": ["repo.write"]},                           # an entry that is not a dict
+            {"scoped": [{"entity": "user", "permissions": []}]},  # entity not a dict
+            {"scoped": [{"entity": {"type": "user"}, "permissions": "repo.write"}]},
+            {"scoped": [{"entity": {"type": "user"}, "permissions": []}]},  # cannot attribute
+        ):
+            self.assertIsNone(self.verdict(block), repr(block))
+        self.assertIsNone(self.verdict(...))                     # the block is missing
+        self.assertIsNone(hc.fine_grained_repo_write(None))
+        self.assertIsNone(hc.fine_grained_repo_write({"name": "alice"}))
+        no_name = _whoami(role="fineGrained", fineGrained=_scoped(_user_entry(["repo.write"])))
+        no_name["name"] = ""
+        self.assertIsNone(hc.fine_grained_repo_write(no_name))
+
+    def test_an_unattributable_user_entity_without_an_owner_id_fails_open(self) -> None:
+        info = _whoami(role="fineGrained", fineGrained=_scoped(_user_entry(["repo.content.read"], name=None)))
+        del info["id"]
+        self.assertIsNone(hc.fine_grained_repo_write(info))
 
 
 class TestHasCredential(unittest.TestCase):

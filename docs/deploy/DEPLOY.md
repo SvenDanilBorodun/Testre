@@ -14,7 +14,7 @@ One-page reference. Pair with `APPLY_MIGRATIONS.sql` / `ROLLBACK_MIGRATIONS.sql`
 5. git push                ← CI runs guardrails (10 jobs)
 ```
 
-Per-student token storage (migration 042) adds one step before step 3: set `EDUBOTICS_HF_TOKEN_KEY` on Railway BEFORE the cloud deploy (see the optional variables below), then 1 → 2 → 3 as above; rollback is the previous release plus `rollback/20261003120000_042_user_hf_credentials_rollback.sql`, cloud API first.
+Per-student token storage (migration 042) adds one step before step 3: set `EDUBOTICS_HF_TOKEN_KEY` on Railway BEFORE the cloud deploy (a required variable, see below), then 1 → 2 → 3 as above; rollback is the previous release plus `rollback/20261003120000_042_user_hf_credentials_rollback.sql`, cloud API first.
 
 Skip step 1 → Railway boot fails. Skip step 2 → student training spawns fail (Modal app not deployed). Push images before Railway → student calls hit routes that don't exist yet.
 
@@ -89,9 +89,9 @@ git push
 # If "EDUBOTICS_SCHEMA_CHECK FAILED" → step 1 didn't land
 ```
 
-**Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`.
+**Required env vars** (Railway dashboard): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `EDUBOTICS_HF_TOKEN_KEY` (per-student Hugging Face token storage, migration 042: 32 random bytes as standard base64, generate with `python -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())"`; absent, empty or malformed → the API refuses to boot (required since 2026-10-04); optional `EDUBOTICS_HF_TOKEN_KEY_PREVIOUS` for rotation; **set it BEFORE the cloud deploy**; losing it makes every stored token unusable and each student pastes theirs again).
 
-**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `EDUBOTICS_HF_TOKEN_KEY` (+ optional `EDUBOTICS_HF_TOKEN_KEY_PREVIOUS` for rotation; per-student Hugging Face token storage, migration 042: 32 random bytes as standard base64, generate with `python -c "import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())"`; absent → the `/me/hf-token` routes answer 503 and students cannot store their token, present but malformed → the API refuses to boot; **set it BEFORE the cloud deploy**; losing it makes every stored token unusable and each student pastes theirs again), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `EDUBOTICS_JETSON_HF_TOKEN` (read-only HF token returned to Jetson agents at `/jetson/register` — REQUIRED if any classroom has a paired Jetson; otherwise `/jetson/register` returns 503).
+**Production-relevant optional:** `ALLOWED_ORIGINS`, `GUI_VERSION` + `GUI_DOWNLOAD_URL` + `GUI_RELEASE_REPO` (drives student `.exe` auto-update — normally set automatically by `release.yml` W6 on a `vX.Y.Z` tag; `GUI_DOWNLOAD_URL` is optional and derived from `GUI_VERSION` + `GUI_RELEASE_REPO` when unset), `HF_TOKEN` (GDPR + dataset sweep), `MAX_TRAINING_TIMEOUT_HOURS`, `STALLED_WORKER_MINUTES`, `EDUBOTICS_JETSON_HF_TOKEN` (read-only HF token returned to Jetson agents at `/jetson/register` — REQUIRED if any classroom has a paired Jetson; otherwise `/jetson/register` returns 503).
 
 **Never** set `EDUBOTICS_SKIP_SCHEMA_CHECK=1` on Railway.
 

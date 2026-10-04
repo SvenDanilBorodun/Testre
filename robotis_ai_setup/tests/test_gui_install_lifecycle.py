@@ -2148,7 +2148,7 @@ class LegacyHfTokenPurgeWiringTest(unittest.TestCase):
     """
 
     _SENTENCE = (
-        "Das alte HuggingFace-Token wurde von diesem PC entfernt. "
+        "Das alte Hugging-Face-Token wurde von diesem PC entfernt. "
         "Hinterlege dein Token jetzt einmalig auf der Startseite der "
         "Web-Oberfläche."
     )
@@ -2210,7 +2210,7 @@ class LegacyHfTokenPurgeWiringTest(unittest.TestCase):
         line = calls["log"][0]
         self.assertEqual(
             line,
-            "[WARNUNG] Das alte HuggingFace-Token konnte nicht von diesem PC "
+            "[WARNUNG] Das alte Hugging-Face-Token konnte nicht von diesem PC "
             "entfernt werden (OSError).")
         self.assertNotIn(secret, line)
         self.assertNotIn("HF_TOKEN=", line)

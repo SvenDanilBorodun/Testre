@@ -56,9 +56,14 @@ export const HF_TOKEN_COPY = Object.freeze({
   'card.offline':
     'Ohne Anmeldung kann dein Token nicht geladen werden. Melde dich an, dann bekommt der Roboter es '
     + 'automatisch.',
+  // Since migration 043 register_dataset_safe accepts the stored token's PROVEN
+  // account beside the oldest dataset's author, so new recordings register;
+  // dataset_sweep and POST /datasets/sync list only the CURRENT account, so the
+  // old account's registered rows stay and nothing new of it is found.
   'card.accountChanged':
-    'Dieses Token gehört zu einem anderen Hugging-Face-Konto als bisher. Neue Datensätze lassen sich dann '
-    + 'möglicherweise nicht mehr für das Training anmelden. Frag deine Lehrkraft.',
+    'Dieses Token gehört zu einem anderen Hugging-Face-Konto als bisher. Neue Aufnahmen werden ab jetzt in '
+    + 'diesem Konto gespeichert und für das Training angemeldet. Datensätze deines alten Kontos, die schon '
+    + 'in deiner Liste stehen, bleiben dort; weitere werden nicht mehr automatisch gefunden.',
 
   // The robot half (pills).
   'card.pill.active': 'auf dem Roboter aktiv',

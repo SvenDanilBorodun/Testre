@@ -4,8 +4,9 @@
 -- Proven on a scratch PostgreSQL 17 (public.ecr.aws/supabase/postgres:17.6.1.106,
 -- the guarded baseline + every migration through 045) with
 -- supabase/tests/043_register_dataset_proven_anchor_assertions.sql -> 12 PASS;
--- rollback, re-apply, assertions again -> 12 PASS. NOT yet run on a real
--- `supabase start` stack.
+-- rollback, re-apply, assertions again -> 12 PASS. Run again on 2026-10-04 on
+-- a real `supabase start` stack (Postgres 17, migrations through 045 applied
+-- with psql as `postgres`): 12 PASS.
 -- Rollback: rollback/20261004120000_043_register_dataset_proven_anchor_rollback.sql
 -- (restores 026's body verbatim; no cloud API change depends on 043).
 --

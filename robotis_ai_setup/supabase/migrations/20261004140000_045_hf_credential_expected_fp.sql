@@ -9,9 +9,10 @@
 -- also run in two concurrent psql sessions there (a DELETE arriving while
 -- verify holds the locks; verify arriving while a DELETE holds the row): the
 -- token was gone afterwards both times, and the second order answered P0045.
--- NOT yet run on a real `supabase start` stack. After 045, 042's assertion file is no longer the
--- right check for the writer: its T4 (six arguments) and T5a/T5b (the
--- six-argument regprocedure) fail by design.
+-- Run again on 2026-10-04 on a real `supabase start` stack (Postgres 17,
+-- migrations through 045 applied with psql as `postgres`): 12 PASS. After 045,
+-- 042's assertion file is no longer the right check for the writer: its T4
+-- (six arguments) and T5a/T5b (the six-argument regprocedure) fail by design.
 -- Rollback: rollback/20261004140000_045_hf_credential_expected_fp_rollback.sql
 -- (roll the cloud API back FIRST: the 045 API always sends p_expected_fp, and
 -- against the six-argument function every PUT and verify fails with PGRST202;

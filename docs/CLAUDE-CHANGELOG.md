@@ -6,6 +6,43 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-04 (later) — students write no table directly (046), and the verification's small fixes
+
+**Why.** Verifying the token review, the owner confirmed on the live project that role `authenticated` still held
+INSERT/UPDATE/DELETE on `public.trainings` with own-row write policies, and that `datasets`, `workflows` and
+`tutorial_progress` carried own-row write policies too (`anon` holding the same table grants, stopped only by RLS). Credits are
+derived from `trainings.status`, so 044 had closed only one of two „free GPU time" paths; its header and KNOWN-ISSUES read as if
+it had closed the hole.
+
+**What was measured, and what changed.**
+- *The hole, reproduced.* On the local `supabase start` stack (Postgres 17, migrations through 045), inside a rolled-back
+  transaction as `authenticated` with a student's JWT claims: an own training `UPDATE … SET status = 'canceled'`, a `DELETE` of
+  another own training and a `datasets` INSERT of a foreign `hf_repo_id` all succeeded.
+- *The audit before the revoke* found no legitimate request-role writer of the four tables: the cloud API builds only the
+  service-role client; every SQL function that writes them is SECURITY DEFINER owned by `postgres` (queried from `pg_proc`, not
+  grepped); the triggers on them are SECURITY INVOKER `touch_*` (NEW.updated_at only) and the definer snapshot trigger; FK cascades
+  run as the table owner; the Modal worker's only call is `update_training_progress`; Jetson/Pi agents and the GUI make no
+  PostgREST call; the SPA (both builds) reads trainings and only subscribes to the other three.
+- *046* revokes INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES and TRIGGER from `anon` and `authenticated`, drops the twelve write
+  policies, and checks `has_table_privilege` afterwards (a PUBLIC `GRANT INSERT ON public.datasets` made the migration abort and
+  roll back, measured). Assertions: 27 PASS before and after rollback → re-apply twice; after each rollback the grants, policies,
+  publication and policy comments diff byte-equal to the pre-046 snapshot; 043/044/045's assertions stay 12/16/12 PASS on top. A
+  teeth run of the 046 file against the pre-046 database failed 22 of its checks.
+- *042, 043, 044, 045 on a real stack.* All four sets of hand-run assertions were run on a real `supabase start` stack (Postgres 17,
+  migrations through 045 applied with psql as `postgres`): 042's 19 PASS before and after its rollback and a double re-apply, then
+  043 12 / 044 16 / 045 12 PASS. 042's migration file is applied in production and is not edited; its header still says it was not
+  run on such a stack — this entry is the record.
+- *Small fixes.* (a) A token set the node REFUSED (busy, bad shape, failed write) cancelled the queued clear and left the previous
+  student's token in place; only a written (or already stored) token cancels it now, and a clear re-queued because the robot
+  turned busy inside the tick is kept. (b) The GUI's closed-window line said the token waits for the next login; it now says the
+  robot removes it by itself. (c) The account-switch note says what 043 does. (d) A fine-grained token passes with ANY `repo*.write`
+  permission, not only today's two names. (e) Every busy sentence names the recording, the upload, the download and the list
+  fetch; a py↔js test holds all five to the four causes. (f) 043-045's headers record the real-stack run. (g) The Aufnahme token hint
+  shows only while no Benutzer-ID is on screen.
+
+**Still open.** `jetsons` and `workflow_versions` keep request-role write policies (KNOWN-ISSUES); nothing here ran against the
+live project, on a rig or with real fine-grained tokens.
+
 ### Unreleased, 2026-10-04 — the review of the per-student Hugging Face token (043-045, S1-S3, items a-k)
 
 **Why.** A zero-trust review of #33 (042, the token stored with the account) found three owner-level questions and a list of

@@ -11,7 +11,9 @@
 -- succeeded before this migration), and rule (2)'s race was run in two
 -- concurrent psql sessions (a service_role UPDATE of hf_username arriving while
 -- store_user_hf_credential held the users row: P0044 after the commit, the
--- proven name kept). NOT yet run on a real `supabase start` stack.
+-- proven name kept). Run again on 2026-10-04 on a real `supabase start` stack
+-- (Postgres 17, migrations through 045 applied with psql as `postgres`):
+-- 16 PASS.
 -- Rollback: rollback/20261004130000_044_users_protected_columns_rollback.sql
 -- (re-opens the hole; roll the cloud API back first only if it depends on P0044,
 -- which the 044 API maps to its existing 409 — an older API simply answers 500).
@@ -22,10 +24,12 @@
 --   (baseline, re-created by 024), is row-level: USING/WITH CHECK
 --   id = auth.uid(), no column restriction. So any signed-in student could
 --   `PATCH /rest/v1/users?id=eq.<own id>` with {"role": "admin"} (every API
---   route trusts users.role), {"training_credits": 999} (free GPU time),
---   another student's {"hf_username": ...} (the dataset-discovery anchor), or a
---   foreign {"classroom_id"/"workgroup_id"} (another teacher's class or group,
---   and with it that group's shared credits).
+--   route trusts users.role), {"training_credits": 999} (free GPU time — one
+--   of two paths to it: a student's own trainings rows, set to
+--   'canceled'/'failed' or deleted, refunded the credit too and stayed open
+--   until 046), another student's {"hf_username": ...} (the dataset-discovery
+--   anchor), or a foreign {"classroom_id"/"workgroup_id"} (another teacher's
+--   class or group, and with it that group's shared credits).
 --
 -- THE FIX: one BEFORE UPDATE trigger, two rules.
 --   (1) current_user IN ('authenticated', 'anon') and any of role,

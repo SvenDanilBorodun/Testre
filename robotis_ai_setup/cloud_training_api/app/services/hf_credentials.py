@@ -214,8 +214,24 @@ WHOAMI_PATH = "/api/whoami-v2"
 # repository write. huggingface.js
 # (packages/hub/src/types/api/api-who-am-i.ts) types accessToken without the
 # `fineGrained` block, so the OpenAPI document is the authority.
+#
+# The check does NOT match those two names exactly (review d, 2026-10-04): any
+# permission whose name starts with "repo" and ends in ".write" is a repository
+# write (is_repo_write_permission), so a renamed or added repository write
+# permission still passes. A write outside the repositories ("discussion.write",
+# "post.write", …) cannot upload a dataset and never counts.
 FINE_GRAINED_ROLE = "fineGrained"
-REPO_WRITE_PERMISSIONS = frozenset({"repo.write", "repo.content.write"})
+REPO_WRITE_PERMISSIONS = frozenset({"repo.write", "repo.content.write"})  # today's names
+
+
+def is_repo_write_permission(permission) -> bool:
+    """A fine-grained permission that writes to repositories: a string that
+    starts with "repo" and ends in ".write" (compared lower-case). Today's names
+    are REPO_WRITE_PERMISSIONS; anything else of that shape counts too."""
+    if not isinstance(permission, str):
+        return False
+    name = permission.strip().lower()
+    return name.startswith("repo") and name.endswith(".write")
 
 
 def _status_of(exc: Exception):
@@ -232,7 +248,8 @@ def fine_grained_repo_write(info) -> bool | None:
 
     True: a `scoped` entry for the owner's user entity (matched by name,
     case-insensitively, or by `_id` against whoami's top-level `id`) carries a
-    repository write permission. False: the block PARSES and no such entry
+    repository write permission (is_repo_write_permission: any `repo*.write`,
+    not only today's two names). False: the block PARSES and no such entry
     exists — the token can read, or write elsewhere (an organisation, single
     repositories), but EduBotics uploads every new dataset to the student's own
     namespace. None: anything unrecognised — the block missing, not a dict,
@@ -273,7 +290,7 @@ def fine_grained_repo_write(info) -> bool | None:
             return None
         if not ((name_known and name.lower() == owner_name.lower()) or (id_known and eid == owner_id)):
             continue
-        if any(isinstance(p, str) and p in REPO_WRITE_PERMISSIONS for p in permissions):
+        if any(is_repo_write_permission(p) for p in permissions):
             return True
     return False
 

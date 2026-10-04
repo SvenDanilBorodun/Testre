@@ -434,6 +434,24 @@ class TestFineGrainedRepoWrite(unittest.TestCase):
                       ["repo.content.read", "repo.write", "discussion.write"]):
             self.assertIs(self.verdict(_scoped(_user_entry(perms))), True, perms)
 
+    def test_any_repository_write_permission_counts_not_only_todays_two_names(self) -> None:
+        # review d: a future Hugging Face rename of a repository write permission
+        # must not refuse a token that can upload (a permission that starts
+        # with "repo" and ends in ".write" is a repository write).
+        for perms in (["repo.contents.write"], ["repos.write"], ["repo.settings.write"],
+                      ["REPO.WRITE"], ["repo.content.read", "repo.new-name.write"]):
+            self.assertIs(self.verdict(_scoped(_user_entry(perms))), True, perms)
+        for name in hc.REPO_WRITE_PERMISSIONS:
+            self.assertTrue(hc.is_repo_write_permission(name), name)
+
+    def test_a_write_outside_the_repositories_never_counts(self) -> None:
+        for perms in (["discussion.write"], ["post.write"], ["inference.write"], ["collection.write"],
+                      ["discussion.write", "post.write", "repo.content.read"], ["write"], ["repo"],
+                      ["repo.read"], ["repo.write.read"], [".write"], [None, 7, {"repo": "write"}]):
+            self.assertIs(self.verdict(_scoped(_user_entry(perms))), False, perms)
+        for odd in (None, 7, "", "repowrite", "discussion.write"):
+            self.assertFalse(hc.is_repo_write_permission(odd), repr(odd))
+
     def test_the_owner_is_matched_by_name_case_insensitively_or_by_id(self) -> None:
         self.assertIs(self.verdict(_scoped(_user_entry(["repo.write"], name="ALICE"))), True)
         self.assertIs(self.verdict(_scoped(_user_entry(["repo.write"], name=None))), True)

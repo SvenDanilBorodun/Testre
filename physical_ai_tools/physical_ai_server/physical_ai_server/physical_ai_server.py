@@ -1652,8 +1652,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             try:
                 if not self._hf_token_clear_pending or self._hf_token_busy():
                     return
-                success, _message = self._apply_hf_token_request('')
-                self._hf_token_clear_pending = False
+                success, message = self._apply_hf_token_request('')
+                # The helper re-queues a clear that found the robot busy again
+                # (a recording started between the checks above and its own):
+                # keep that one. Every other outcome settles the clear.
+                if message != record_texts_de.HF_TOKEN_CLEAR_QUEUED_DE:
+                    self._hf_token_clear_pending = False
                 if success:
                     self.get_logger().info(
                         'Applied the Hugging Face token removal that waited for the robot to be idle')
@@ -1673,17 +1677,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
           2. empty + nothing stored, or the stored token again -> success;
           3. busy (recording / HF worker) -> refused, the file is untouched; a
              refused CLEAR is remembered and applied by the state tick once the
-             robot is idle (_apply_pending_hf_token_clear), and any non-empty
-             request cancels that memory (the newer set wins);
+             robot is idle (_apply_pending_hf_token_clear);
           4. empty -> clear;  5. bad shape -> refused;  6. otherwise write.
+        Only a set that really put its token in the slot (6), or found it there
+        already (2), cancels a remembered clear: a REFUSED set (busy, bad shape,
+        a failed write) leaves the previous token in place, so its removal must
+        still happen once the robot is idle.
         No network, no subprocess, no whoami: the cloud already proved the token.
         """
         if not hf_token_store.accepts():
             return False, record_texts_de.HF_TOKEN_UNSUPPORTED_DE
         if not isinstance(token, str):
             token = ''
-        if token != '':
-            self._hf_token_clear_pending = False
         try:
             stored = hf_token_store.read()
             if token == '' and stored is None:
@@ -1697,6 +1702,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     pass
                 return True, record_texts_de.HF_TOKEN_NONE_DE
             if token != '' and token == stored:
+                self._hf_token_clear_pending = False
                 return True, record_texts_de.HF_TOKEN_SET_OK_DE
             if self._hf_token_busy():
                 if token == '':
@@ -1711,6 +1717,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 return False, record_texts_de.HF_TOKEN_SHAPE_DE
             else:
                 hf_token_store.write(token)
+                self._hf_token_clear_pending = False
                 message = record_texts_de.HF_TOKEN_SET_OK_DE
             # The rig's identity just changed: the cached namespace allowlist
             # (DataManager._rig_hf_namespaces) is stale, and so is the state topic.

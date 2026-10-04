@@ -422,13 +422,49 @@ class TestPendingClear(_Base):
         node._hf_token_state_tick()
         self.assertEqual(self.stored(), OTHER)
 
-    def test_even_a_set_refused_while_busy_cancels_it(self):
+    def test_a_set_refused_while_busy_keeps_it(self):
+        # A refused set wrote nothing, so the previous student's token is
+        # still in the slot: the clear must still land once the robot is idle
+        # (the SPA pushes the newer token again afterwards).
         node = self.busy_node_with_a_refused_clear()
         self.assertEqual(node.request(OTHER).message, texts.HF_TOKEN_BUSY_DE)
-        self.assertFalse(node._hf_token_clear_pending)
+        self.assertTrue(node._hf_token_clear_pending)
         node.on_recording = False
         node._hf_token_state_tick()
+        self.assertIsNone(self.stored())
+        self.assertFalse(node._hf_token_clear_pending)
+
+    def test_a_set_refused_for_its_shape_keeps_it(self):
+        node = self.busy_node_with_a_refused_clear()
+        node.on_recording = False                    # idle, the tick has not run yet
+        self.assertEqual(node.request('hf_short').message, texts.HF_TOKEN_SHAPE_DE)
+        self.assertTrue(node._hf_token_clear_pending)
         self.assertEqual(self.stored(), TOK)
+        node._hf_token_state_tick()
+        self.assertIsNone(self.stored())
+
+    def test_a_set_whose_write_fails_keeps_it(self):
+        node = self.busy_node_with_a_refused_clear()
+        node.on_recording = False
+        with patch.object(store, 'write', side_effect=OSError('tmpfs full')):
+            response = node.request(OTHER)
+        self.assertEqual(response.message, texts.HF_TOKEN_WRITE_FAILED_DE)
+        self.assertTrue(node._hf_token_clear_pending)
+        node._hf_token_state_tick()
+        self.assertIsNone(self.stored())
+        self.assertFalse(node._hf_token_clear_pending)
+
+    def test_a_robot_that_turns_busy_again_inside_the_tick_keeps_it(self):
+        # The tick's own busy check passes, then a recording starts before the
+        # request helper judges busy again: the helper re-queues the clear, and
+        # the tick must not forget it.
+        node = self.busy_node_with_a_refused_clear()
+        node.on_recording = False
+        answers = iter([False, False, True])
+        node._hf_token_busy = lambda: next(answers, True)
+        node._hf_token_state_tick()
+        self.assertEqual(self.stored(), TOK)
+        self.assertTrue(node._hf_token_clear_pending)
 
     def test_the_same_token_again_cancels_it(self):
         node = self.busy_node_with_a_refused_clear()

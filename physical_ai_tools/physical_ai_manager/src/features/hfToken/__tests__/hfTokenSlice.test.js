@@ -547,6 +547,20 @@ describe('selectHfRecordHint — the non-blocking Aufnahme hint (owner decision 
     expect(selectHfRecordHint(wrap(initial(), offline))).toBe('offline');
   });
 
+  it('only while the Benutzer-ID list on screen is empty (review g)', () => {
+    // The hint says why there is NO Benutzer-ID. A list loaded earlier stays
+    // on screen (state.ui.hfUserList) and is still usable, so the hint would
+    // contradict it: it says nothing then, in every state it would name.
+    const err = accepting(run(initial(), accountFailed('error')));
+    expect(selectHfRecordHint(wrap(err, signedIn, { ui: { hfUserList: ['anna'] } }))).toBeNull();
+    expect(selectHfRecordHint(wrap(initial(), offline, { ui: { hfUserList: ['anna', 'schule'] } }))).toBeNull();
+    // an empty, absent or malformed list is "no Benutzer-ID": the hint stays
+    expect(selectHfRecordHint(wrap(err, signedIn, { ui: { hfUserList: [] } }))).toBe('error');
+    expect(selectHfRecordHint(wrap(err, signedIn, { ui: {} }))).toBe('error');
+    expect(selectHfRecordHint(wrap(err, signedIn, { ui: { hfUserList: null } }))).toBe('error');
+    expect(selectHfRecordHint(wrap(initial(), offline, { ui: { hfUserList: [] } }))).toBe('offline');
+  });
+
   it('never without the slice, and never under a claimed Jetson', () => {
     expect(selectHfRecordHint({ auth: offline })).toBeNull();
     const err = accepting(run(initial(), accountFailed('error')));

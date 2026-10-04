@@ -17,7 +17,7 @@ import { configureStore } from '@reduxjs/toolkit';
 import tasksReducer, {
   recordNoticeSet, recordUploadStatus, setCollision, setHeartbeatStatus, setTaskInfo, setTaskStatus,
 } from '../../../features/tasks/taskSlice';
-import uiReducer, { moveToPage } from '../../../features/ui/uiSlice';
+import uiReducer, { moveToPage, setHfUserList } from '../../../features/ui/uiSlice';
 import rosReducer from '../../../features/ros/rosSlice';
 import trainingReducer from '../../../features/training/trainingSlice';
 import hfTokenReducer, {
@@ -449,6 +449,17 @@ describe('Start and the student\'s own Hugging-Face token', () => {
     expect(result.current.problem).toEqual({
       kind: 'warn', textDe: RECORD_COPY.problem.hfTokenHint.offline, linkToHome: true,
     });
+  });
+
+  it('S2 / review g: no hint while a Benutzer-ID loaded earlier is still on screen', () => {
+    for (const kind of ['error', 'unavailable', 'unsupported']) {
+      const store = makeStore({ hfActions: [accountFailed(kind), robotHolds(null)] });
+      store.dispatch(setHfUserList(['schule-A']));
+      const view = mount(store);
+      expect(view.result.current.hfUsers.list).toEqual(['schule-A']);
+      expect(view.result.current.problem).toBeNull();
+      view.unmount();
+    }
   });
 
   it('S2: no hint for a signed-in student whose state is fine, or before the robot spoke', () => {

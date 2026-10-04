@@ -132,9 +132,16 @@ export const selectHfOfflineEscape = (s) => Boolean(s.auth)
  * robot half is off, so the state never arrives, and the list is held back
  * either way. The other three need a robot that is known to take a personal
  * token. A primitive; null without the slice and under a claimed Jetson.
+ *
+ * Only while that list IS empty (review g, 2026-10-04): every sentence says
+ * „deshalb gibt es keine Benutzer-ID", and a list loaded earlier stays on screen
+ * (state.ui.hfUserList, cleared on sign-out) and is still a usable Benutzer-ID —
+ * Start is allowed either way, so there is nothing to explain then.
  */
 export const selectHfRecordHint = (s) => {
   if (!s.hfToken || jetsonClaimed(s)) return null;
+  const shown = s.ui?.hfUserList;
+  if (Array.isArray(shown) && shown.length > 0) return null;
   if (selectHfOfflineEscape(s)) return 'offline';
   const r = selectHfRobot(s);
   if (r.known !== true || r.accepts !== true) return null;

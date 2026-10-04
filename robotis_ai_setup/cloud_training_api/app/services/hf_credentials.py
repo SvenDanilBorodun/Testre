@@ -85,9 +85,11 @@ _cache: dict | None = None
 def load_keys(environ=None) -> dict:
     """{'current': (kid, key) | None, 'previous': (kid, key) | None}.
 
-    Absent variable -> None (the routes answer 503). PRESENT but malformed ->
-    RuntimeError: a half-configured key must stop the deploy, never degrade into
-    "no key" and silently turn the feature off.
+    Absent variable -> None (the routes answer 503; since 2026-10-04 an absent
+    current key already stops the boot in main.py::_validate_required_secrets,
+    so this is the belt). PRESENT but malformed -> RuntimeError: a
+    half-configured key must stop the deploy, never degrade into "no key" and
+    silently turn the feature off.
     """
     env = os.environ if environ is None else environ
     out: dict = {"current": None, "previous": None}

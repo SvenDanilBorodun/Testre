@@ -50,12 +50,19 @@ def _validate_required_secrets() -> None:
     bypass RLS for admin/teacher operations; SUPABASE_URL is the project
     URL; MODAL_TOKEN_ID + MODAL_TOKEN_SECRET let the Modal SDK dispatch
     training jobs (Modal picks them up automatically via os.environ).
+    EDUBOTICS_HF_TOKEN_KEY (migration 042) encrypts every student's own
+    Hugging Face token: without it no student can store a token, so recording
+    with upload is impossible for the whole fleet. That is an outage, not a
+    degraded feature, and it must stop the deploy like the others (owner
+    decision S2, 2026-10-04). Every place that imports app.main without the
+    Railway variables (CI, the pre-deploy schema probe) sets a dummy key.
     """
     required = (
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE_KEY",
         "MODAL_TOKEN_ID",
         "MODAL_TOKEN_SECRET",
+        "EDUBOTICS_HF_TOKEN_KEY",
     )
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
@@ -69,14 +76,16 @@ _validate_required_secrets()
 
 
 def _validate_hf_token_key() -> None:
-    """Refuse to boot with a PRESENT but malformed token-encryption key.
+    """Refuse to boot with a malformed token-encryption key.
 
     EDUBOTICS_HF_TOKEN_KEY (and the optional rotation key
     EDUBOTICS_HF_TOKEN_KEY_PREVIOUS) must be standard base64 of exactly 32
-    bytes. An ABSENT key is not fatal: the /me/hf-token routes answer 503 and
-    _warn_optional_secrets logs a WARNING. A half-configured key must stop the
-    deploy rather than degrade into "no key" and silently turn the feature
-    off. The RuntimeError names the variable only, never the value.
+    bytes. An ABSENT current key already stopped the boot in
+    _validate_required_secrets; this check covers a PRESENT but malformed one
+    (and a PREVIOUS without a current one), which must stop the deploy rather
+    than degrade into "no key". The routes keep their 503 branch for a key that
+    is somehow missing at request time. The RuntimeError names the variable
+    only, never the value.
     """
     from app.services import hf_credentials
 
@@ -104,14 +113,6 @@ def _warn_optional_secrets() -> None:
         (
             "HF_TOKEN",
             "dataset reconciliation sweep + GDPR Art. 17 cleanup disabled.",
-        ),
-        # Migration 042 — per-student Hugging Face token storage. Without the
-        # key every /me/hf-token route except DELETE answers 503, so students
-        # cannot hand their own token to the robot.
-        (
-            "EDUBOTICS_HF_TOKEN_KEY",
-            "/me/hf-token routes will return 503 — students cannot store a personal "
-            "Hugging Face token. Generate 32 random bytes (base64) and set it on Railway.",
         ),
         # GUI_VERSION / GUI_DOWNLOAD_URL feed /version which the student
         # installer polls on every launch. When missing, the update gate

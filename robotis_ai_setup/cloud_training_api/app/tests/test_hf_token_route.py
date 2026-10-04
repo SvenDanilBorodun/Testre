@@ -778,7 +778,34 @@ class TestMainWiring(unittest.TestCase):
         exec(compile(ast.Module(body=[fn], type_ignores=[]), MAIN_PY, "exec"), ns)  # noqa: S102
         return ns["_validate_hf_token_key"]
 
-    def test_a_malformed_key_refuses_to_boot_and_an_absent_one_does_not(self) -> None:
+    def _required_fn(self):
+        fn = next(n for n in self.tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "_validate_required_secrets")
+        ns: dict = {"os": os}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), MAIN_PY, "exec"), ns)  # noqa: S102
+        return ns["_validate_required_secrets"]
+
+    def test_an_absent_or_empty_key_stops_the_boot_like_every_required_secret(self) -> None:
+        # Owner decision S2 (2026-10-04): without the key no student can store a
+        # token, so the deploy must fail instead of booting into a 503 for all.
+        required = self._required_fn()
+        base = {"SUPABASE_URL": "http://ci.test", "SUPABASE_SERVICE_ROLE_KEY": "x",
+                "MODAL_TOKEN_ID": "x", "MODAL_TOKEN_SECRET": "x"}
+        for key_value in (None, ""):
+            env = dict(base)
+            if key_value is not None:
+                env[hc.KEY_ENV] = key_value
+            with patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(RuntimeError) as cm:
+                    required()
+            self.assertIn(hc.KEY_ENV, str(cm.exception))
+        with patch.dict(os.environ, {**base, hc.KEY_ENV: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                        clear=True):
+            required()
+
+    def test_the_key_check_on_its_own_tolerates_absence_and_refuses_a_malformed_key(self) -> None:
+        # _validate_hf_token_key is the malformed-key half; absence is the
+        # required-secrets check's job (above), so on its own it stays quiet.
         validate = self._validate_fn()
         for env in ({}, {hc.KEY_ENV: ""}):
             with _Env():
@@ -793,10 +820,13 @@ class TestMainWiring(unittest.TestCase):
         with _Env(SEQ_A):
             validate()
 
-    def test_the_missing_key_warning_names_the_variable(self) -> None:
-        fn = next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == "_warn_optional_secrets")
-        strings = [n.value for n in ast.walk(fn) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-        self.assertIn("EDUBOTICS_HF_TOKEN_KEY", strings)
+    def test_the_key_is_a_required_secret_and_no_longer_an_optional_warning(self) -> None:
+        def strings_of(name):
+            fn = next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            return [n.value for n in ast.walk(fn) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+
+        self.assertIn("EDUBOTICS_HF_TOKEN_KEY", strings_of("_validate_required_secrets"))
+        self.assertNotIn("EDUBOTICS_HF_TOKEN_KEY", strings_of("_warn_optional_secrets"))
 
 
 if __name__ == "__main__":

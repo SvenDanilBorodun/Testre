@@ -363,9 +363,11 @@ def sync_datasets(user=Depends(get_current_user)) -> DatasetSyncResult:
     so the author anchor is set/enforced and a peer's repo can never be pulled
     in once the anchor exists.
 
-    hf_username must be linked first (PATCH /me); the React app auto-links it
-    from the ROS whoami Benutzer-ID. Returns the discovery tallies so the UI can
-    say "N neue Datensätze synchronisiert".
+    hf_username must be linked first: since migration 042 it is set from the
+    student's stored token (PUT /me/hf-token writes the name Hugging Face
+    reported for it); PATCH /me is the self-asserted path for an account
+    without a stored token. Returns the discovery tallies so the UI can say
+    "N neue Datensätze synchronisiert".
     """
     profile = get_user_profile(str(user.id))
     hf_username = profile.get("hf_username")

@@ -6,6 +6,46 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-04 — the review of the per-student Hugging Face token (043-045, S1-S3, items a-k)
+
+**Why.** A zero-trust review of #33 (042, the token stored with the account) found three owner-level questions and a list of
+smaller defects. The owner decided: refuse fine-grained tokens that provably cannot write (S1), make the encryption key a required
+boot secret with a non-blocking Aufnahme hint for an undecidable account state (S2), count the proven account name as a second
+dataset anchor (S3), and close the `public.users` column hole the 042 audit had found but not fixed.
+
+**What the review measured, and what changed.**
+- *The users hole was real.* On a scratch `public.ecr.aws/supabase/postgres:17.6.1.106` (the image the local stack uses), with the
+  guarded baseline and every migration through 042, an `authenticated` own-row `UPDATE public.users SET role = 'admin',
+  training_credits = 999` returned the new row. The owner confirmed the same grants and policy on the live project. 044's BEFORE
+  UPDATE trigger refuses it (42501) for `authenticated`/`anon`; the audit of every function that writes `public.users` (five
+  SECURITY DEFINER service-role-only RPCs in the baseline, 042's writer) and of the SPA (no `.from('users')` write) showed no
+  legitimate path writes those columns as a request role. The guard is SECURITY INVOKER on purpose (`current_user` must be the
+  request role) and revoking EXECUTE on it from `authenticated` does not stop it firing (assertion T7 runs as `authenticated`).
+- *PATCH /me's 409 was not atomic,* and 042's header claimed the users-row lock made it so: PATCH /me never took that lock. Rule 2
+  of the same trigger (P0044, every caller) closes it in SQL; a two-session run (an UPDATE arriving while the writer held the row)
+  ended P0044 with the proven name kept.
+- *Verify could resurrect a removed token:* its re-read and the writer's unconditional upsert left a gap. 045 adds
+  `p_expected_fp`, compared under `SELECT … FOR UPDATE` on the credential row (DELETE takes no users-row lock, so the users lock
+  alone would not have closed it). Both race orders ran in two psql sessions; the token was gone both times. The six-argument
+  overload is dropped (one overload, no PostgREST ambiguity); the probe names the seventh argument.
+- *The whoami call had no request timeout:* `HfApi.whoami` sets none, so a black-holed connection left a thread nobody reaped
+  behind the 10 s `join`. It is a direct httpx GET of `/api/whoami-v2` now, with the same classification.
+- *Fine-grained scopes ARE in whoami.* KNOWN-ISSUES said detecting a read-only fine-grained token "needs a Hub call with side
+  effects". The Hub's own OpenAPI document (`/.well-known/openapi.json`, `GET /api/whoami-v2`) types
+  `auth.accessToken.fineGrained.scoped[].{entity{_id,type,name?}, permissions[]}`; huggingface.js's `api-who-am-i.ts` simply omits
+  the block. The check fails open on any shape it does not recognise.
+- *A false „taken over" flash after every push:* `syncPushed` set `lastOwnFp` before any state showed the token. Setting it only on
+  observation was tried first in thought and rejected — the existing multi-client simulation (`syncDecision.test.js`) records that
+  observation-only diverges (80 writes). So the dampener's memory is still set at the push and a separate `awaitingOwnFp` excuses a
+  foreign slot until the push is seen or `WRITE_SETTLE_MS` passes; a mutation check showed the six new tests fail without it.
+- *Smaller:* a busy robot read as „wird übertragen" (own `busy` reason now); a clear refused while busy was forgotten (the node
+  remembers it); a hung HF download/list blocked every token change (bounded); `verifyHfToken` never refreshed `auth.hfUsername`;
+  the offline escape showed „wird geladen" for ever; the token field invited password managers on shared profiles.
+
+**Proof and what is still open.** Assertions 043 / 044 / 045: 12 / 16 / 12 PASS on the scratch database, again after rolling all
+three back (042's assertions: 19 PASS, i.e. the rollbacks restore 042 exactly) and re-applying twice. Not run on a real
+`supabase start` stack or against the live project; nothing here was run on a rig, a real WebView2 or with real fine-grained tokens.
+
 ### Unreleased, 2026-10-03 (later) — closing the student window clears the robot's token
 
 **Why.** „Abmelden" clears the robot's token slot (`signOutStudent` → `clearRobotHfToken`), but a student who just closes the

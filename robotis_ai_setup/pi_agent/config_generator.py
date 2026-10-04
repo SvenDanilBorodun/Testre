@@ -323,11 +323,15 @@ def _atomic_write(path: str, content: str) -> None:
     os.replace(tmp, path)
 
 
-# The student's HuggingFace token used to live in this .env (``HF_TOKEN``, set
+# The student's Hugging Face token used to live in this .env (``HF_TOKEN``, set
 # by the wizard's old Schritt D, with ``HF_TOKEN_MACHINE`` as a stamp on the
 # Windows twin). It belongs to the cloud account now, so neither key is ever
 # carried across a regenerate. There is deliberately no boot-time purge on the
-# Pi: the next regenerate (agent boot writes the cloud-only .env) is the purge.
+# Pi, and agent boot is NOT the purge either: ``agent.py::boot`` writes the
+# cloud-only .env only when NO .env exists. The purge is the next REGENERATE
+# (``generate_env_file``: „Umgebung starten", an arm scan, a camera-role or
+# robot-type change); until then a stale line is inert (compose no longer
+# forwards the key) but a plaintext secret at rest (docs/KNOWN-ISSUES.md).
 _LEGACY_HF_KEYS = ("HF_TOKEN", "HF_TOKEN_MACHINE")
 
 

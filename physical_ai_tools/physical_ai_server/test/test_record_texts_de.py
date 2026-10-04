@@ -279,10 +279,12 @@ def test_042_token_slot_sentences():
     assert t.HF_TOKEN_SET_OK_DE == 'Dein Hugging-Face-Token ist auf dem Roboter aktiv.'
     assert t.HF_TOKEN_CLEARED_DE == 'Das Hugging-Face-Token wurde vom Roboter entfernt.'
     assert t.HF_TOKEN_NONE_DE == 'Auf dem Roboter ist kein Hugging-Face-Token gespeichert.'
-    # M4: is_busy() is true for downloads and list fetches, not only uploads
+    # M4 / review e: is_busy() is true for downloads and list fetches, not
+    # only uploads, so the sentence names all of them beside the recording
     assert t.HF_TOKEN_BUSY_DE == (
-        'Während einer Aufnahme oder einer Übertragung zu oder von Hugging Face kann das Token '
-        'nicht geändert werden. Bitte versuche es danach noch einmal.')
+        'Während der Roboter aufnimmt, etwas hoch- oder herunterlädt oder eine Liste bei '
+        'Hugging Face abfragt, kann das Token nicht geändert werden. Bitte versuche es danach '
+        'noch einmal.')
     assert t.HF_TOKEN_SHAPE_DE == (
         'Das ist kein gültiges Hugging-Face-Token. Es beginnt mit „hf_“ und enthält keine '
         'Leerzeichen.')
@@ -291,8 +293,9 @@ def test_042_token_slot_sentences():
     assert t.HF_TOKEN_WRITE_FAILED_DE == 'Das Token konnte nicht auf dem Roboter gespeichert werden.'
     # 2026-10-04 (review a): a refused clear is applied once the robot is idle
     assert t.HF_TOKEN_CLEAR_QUEUED_DE == (
-        'Während einer Aufnahme oder einer Übertragung zu oder von Hugging Face kann das Token '
-        'nicht entfernt werden. Der Roboter entfernt es von selbst, sobald er damit fertig ist.')
+        'Während der Roboter aufnimmt, etwas hoch- oder herunterlädt oder eine Liste bei '
+        'Hugging Face abfragt, kann das Token nicht entfernt werden. Der Roboter entfernt es von '
+        'selbst, sobald er damit fertig ist.')
     names = ['HF_TOKEN_SET_OK_DE', 'HF_TOKEN_CLEARED_DE', 'HF_TOKEN_NONE_DE', 'HF_TOKEN_BUSY_DE',
              'HF_TOKEN_SHAPE_DE', 'HF_TOKEN_UNSUPPORTED_DE', 'HF_TOKEN_WRITE_FAILED_DE',
              'HF_TOKEN_CLEAR_QUEUED_DE']

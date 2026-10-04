@@ -72,8 +72,11 @@ export const HF_TOKEN_COPY = Object.freeze({
   'card.pill.stored': 'gespeichert',
 
   // Notes under the pills.
+  // Every cause of a busy robot (the node's _hf_token_busy): a recording, or
+  // the Hugging Face worker uploading, downloading or fetching a list.
   'card.waitingNote':
-    'Der Roboter lädt gerade etwas hoch oder nimmt auf. Das Token wird danach übertragen.',
+    'Der Roboter ist gerade beschäftigt: Er nimmt auf, lädt etwas hoch oder herunter oder fragt eine Liste '
+    + 'bei Hugging Face ab. Das Token wird danach übertragen.',
   'card.takenOverNote':
     'Ein anderes Konto hat sein Token auf diesen Roboter gelegt. Drücke „Erneut übertragen“, wenn du wieder dran bist.',
   'card.failedNote':

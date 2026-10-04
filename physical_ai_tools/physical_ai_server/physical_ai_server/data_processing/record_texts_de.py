@@ -226,14 +226,16 @@ UPLOAD_OFF_TOKEN_INVALID_DE = (UPLOAD_OFF_PREFIX_DE + 'Hugging Face lehnt den To
 HF_TOKEN_SET_OK_DE = 'Dein Hugging-Face-Token ist auf dem Roboter aktiv.'
 HF_TOKEN_CLEARED_DE = 'Das Hugging-Face-Token wurde vom Roboter entfernt.'
 HF_TOKEN_NONE_DE = 'Auf dem Roboter ist kein Hugging-Face-Token gespeichert.'
-# is_busy() is true for downloads, list fetches and uploads alike (audit M4).
-HF_TOKEN_BUSY_DE = ('Während einer Aufnahme oder einer Übertragung zu oder von Hugging Face kann '
-                    'das Token nicht geändert werden. Bitte versuche es danach noch einmal.')
+# is_busy() is true for downloads, list fetches and uploads alike (audit M4),
+# so the sentence names all three beside the recording (review e).
+HF_TOKEN_BUSY_DE = ('Während der Roboter aufnimmt, etwas hoch- oder herunterlädt oder eine Liste '
+                    'bei Hugging Face abfragt, kann das Token nicht geändert werden. Bitte versuche '
+                    'es danach noch einmal.')
 # A clear refused while busy is not forgotten: the node applies it by itself
 # once the robot is idle (physical_ai_server.py::_apply_pending_hf_token_clear).
-HF_TOKEN_CLEAR_QUEUED_DE = ('Während einer Aufnahme oder einer Übertragung zu oder von Hugging Face '
-                            'kann das Token nicht entfernt werden. Der Roboter entfernt es von selbst, '
-                            'sobald er damit fertig ist.')
+HF_TOKEN_CLEAR_QUEUED_DE = ('Während der Roboter aufnimmt, etwas hoch- oder herunterlädt oder eine '
+                            'Liste bei Hugging Face abfragt, kann das Token nicht entfernt werden. Der '
+                            'Roboter entfernt es von selbst, sobald er damit fertig ist.')
 HF_TOKEN_SHAPE_DE = ('Das ist kein gültiges Hugging-Face-Token. Es beginnt mit „hf_“ und enthält '
                      'keine Leerzeichen.')
 HF_TOKEN_UNSUPPORTED_DE = 'Dieser Roboter verwendet ein eigenes Token und nimmt kein persönliches an.'

@@ -242,9 +242,11 @@ export const RECORD_COPY = Object.freeze({
       transfer: 'Dein Hugging-Face-Token wird gerade auf den Roboter übertragen. Einen Moment, dann geht es '
         + 'weiter.',
       // review b: the robot refuses a token change while it records or talks to
-      // Hugging Face; like `transfer` it resolves by itself and names no page.
-      busy: 'Der Roboter lädt gerade etwas hoch oder nimmt auf. Dein Hugging-Face-Token wird danach '
-        + 'übertragen, dann geht es weiter.',
+      // Hugging Face (upload, download, list fetch: review e names all of them);
+      // like `transfer` it resolves by itself and names no page.
+      busy: 'Der Roboter ist gerade beschäftigt: Er nimmt auf, lädt etwas hoch oder herunter oder fragt '
+        + 'eine Liste bei Hugging Face ab. Dein Hugging-Face-Token wird danach übertragen, dann geht es '
+        + 'weiter.',
       failed: 'Das Hugging-Face-Token konnte nicht auf den Roboter übertragen werden. Versuche es auf der '
         + 'Startseite erneut.',
       takenOver: 'Ein anderes Konto hat sein Token auf diesen Roboter gelegt. Übertrage deins erneut auf der '

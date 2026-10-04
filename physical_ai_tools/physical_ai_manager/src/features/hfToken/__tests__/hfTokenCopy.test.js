@@ -78,3 +78,12 @@ describe('hfTokenCopy', () => {
     expect(Object.isFrozen(HF_TOKEN_COPY)).toBe(true);
   });
 });
+
+describe('hfTokenCopy — what the card says (review c, e)', () => {
+  it('names every cause of a busy robot, downloads and list fetches included', () => {
+    expect(HF_TOKEN_COPY['card.waitingNote']).toBe(
+      'Der Roboter ist gerade beschäftigt: Er nimmt auf, lädt etwas hoch oder herunter oder fragt eine Liste '
+      + 'bei Hugging Face ab. Das Token wird danach übertragen.',
+    );
+  });
+});

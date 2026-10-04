@@ -97,8 +97,10 @@ describe('recordCopy', () => {
     // busy (review b): the robot finishes by itself; its words follow the card's
     // „wartet auf den Roboter" note and name no page
     expect(T.busy).not.toContain(RECORD_COPY.problem.homeLabel);
-    expect(T.busy).toBe('Der Roboter lädt gerade etwas hoch oder nimmt auf. Dein Hugging-Face-Token wird danach '
-      + 'übertragen, dann geht es weiter.');
+    // review e: every cause of a busy robot, downloads and list fetches included
+    expect(T.busy).toBe('Der Roboter ist gerade beschäftigt: Er nimmt auf, lädt etwas hoch oder herunter '
+      + 'oder fragt eine Liste bei Hugging Face ab. Dein Hugging-Face-Token wird danach übertragen, dann geht '
+      + 'es weiter.');
     expect(T.none).toBe('Hinterlege zuerst dein Hugging-Face-Token auf der Startseite.');
     // the scans above already cover English words, glyphs and transliterations of these paths
     expect(STRINGS.filter(({ path }) => path.startsWith('RECORD_COPY.problem.hfToken.')))

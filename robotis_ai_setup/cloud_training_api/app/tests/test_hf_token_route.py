@@ -84,6 +84,15 @@ class _Rpc:
         if self.sb.fail_rpc is not None:
             raise self.sb.fail_rpc
         p = self.params
+        # Migration 045: a non-NULL p_expected_fp makes the write conditional,
+        # atomically, on the row still holding exactly that fingerprint.
+        expected = p.get("p_expected_fp")
+        if expected is not None:
+            current = self.sb.credentials.get(p["p_user_id"])
+            if current is None or current["token_fp"] != expected:
+                raise RuntimeError(
+                    "{'code': 'P0045', 'message': 'Das Token wurde inzwischen geändert oder entfernt.'}"
+                )
         row = {
             "user_id": p["p_user_id"],
             "token_ciphertext": p["p_ciphertext"],
@@ -230,7 +239,7 @@ class TestRoundTrip(_RouteCase):
         self.assertEqual(params["p_user_id"], UID)  # keyed to the JWT-verified profile
         self.assertEqual(
             sorted(params),
-            ["p_ciphertext", "p_fp", "p_hf_username", "p_hint", "p_role", "p_user_id"],
+            ["p_ciphertext", "p_expected_fp", "p_fp", "p_hf_username", "p_hint", "p_role", "p_user_id"],
         )
         self.assertNotIn(TOK, json.dumps(params))
 
@@ -513,6 +522,36 @@ class TestDeleteAndVerify(_RouteCase):
         self.assertHttp(409, route.verify_hf_token, profile=_profile())
         self.assertEqual(_content(route.reveal_hf_token(profile=_profile()))["token"], other)
 
+    def test_put_writes_unconditionally_and_verify_names_the_fingerprint_it_decrypted(self) -> None:
+        self.put()
+        fn, params = self.sb.rpc_calls[-1]
+        self.assertEqual(fn, "store_user_hf_credential")
+        self.assertIn("p_expected_fp", params)          # always sent: the probe names it
+        self.assertIsNone(params["p_expected_fp"])
+        route.verify_hf_token(profile=_profile())
+        self.assertEqual(self.sb.rpc_calls[-1][1]["p_expected_fp"], "c1770a7966b0771e")
+
+    def test_the_conditional_write_lives_in_the_rpc_not_in_a_python_re_read(self) -> None:
+        # The old re-read left the gap between the read and the write open: a
+        # DELETE landing in it was resurrected by the blind upsert (owner item d).
+        self.put()
+        reads = []
+        real = route._read_rows
+
+        def counting(uid, columns):
+            reads.append(columns)
+            return real(uid, columns)
+
+        with patch.object(route, "_read_rows", side_effect=counting):
+            route.verify_hf_token(profile=_profile())
+        self.assertEqual(reads, [route._COLUMNS_SECRET])
+
+    def test_the_rpcs_p0045_is_the_german_409(self) -> None:
+        self.put()
+        self.sb.fail_rpc = RuntimeError("{'code': 'P0045', 'message': 'x'}")
+        exc = self.assertHttp(409, route.verify_hf_token, profile=_profile())
+        self.assertIn("geändert oder entfernt", exc.detail)
+
     def test_verify_when_the_hub_has_since_revoked_the_token(self) -> None:
         self.put()
         self.hub.side_effect = hc.HfCredentialError("rejected")
@@ -598,6 +637,25 @@ class TestPatchMe(unittest.TestCase):
             "verwenden möchtest.",
         )
         self.assertEqual(self.sb.updated, [])
+
+    def test_a_token_stored_between_the_check_and_the_update_is_still_the_409(self) -> None:
+        # Migration 044's users trigger raises P0044 when hf_username would leave
+        # the stored credential's name; the check-then-write is atomic in SQL.
+        real_table = self.sb.table
+
+        def table(name):
+            query = real_table(name)
+            if name == "users":
+                def execute():
+                    raise RuntimeError("{'code': 'P0044', 'message': 'Dein Hugging-Face-Konto ...'}")
+                query.execute = execute
+            return query
+
+        with patch.object(self.sb, "table", side_effect=table):
+            with self.assertRaises(HTTPException) as cm:
+                self._call("someone-else")
+        self.assertEqual(cm.exception.status_code, 409)
+        self.assertIn("über dein gespeichertes Token festgelegt", cm.exception.detail)
 
     def test_still_200_without_a_credential(self) -> None:
         result = self._call("alice")

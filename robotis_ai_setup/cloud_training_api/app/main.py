@@ -508,7 +508,10 @@ def _validate_required_schema() -> None:
         # Migration 042 — the SECURITY DEFINER writer behind PUT and POST
         # /verify on /me/hf-token. Its first action is SELECT ... FROM users
         # FOR UPDATE, which raises P0002 for the dummy id BEFORE any write, so
-        # the probe proves the six-argument shape exists without touching a row.
+        # the probe proves the shape exists without touching a row. Migration
+        # 045 gave it a seventh argument, p_expected_fp (the atomic verify), and
+        # the route always sends it: the probe names it too, so a database
+        # without 045 answers PGRST202 and the deploy aborts.
         ("store_user_hf_credential", {
             "p_user_id": dummy,
             "p_ciphertext": "_probe",
@@ -516,6 +519,7 @@ def _validate_required_schema() -> None:
             "p_hint": "_probe",
             "p_hf_username": "_probe",
             "p_role": "_probe",
+            "p_expected_fp": None,
         }),
     )
     missing_rpcs: list[str] = []

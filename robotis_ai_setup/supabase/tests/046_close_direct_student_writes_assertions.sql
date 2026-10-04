@@ -18,8 +18,10 @@
 -- PostgREST runs it: SET LOCAL ROLE plus the JWT claims as settings (both
 -- spellings auth.uid() has read over the years). The Modal worker is
 -- simulated as `anon`, which holds EXECUTE on update_training_progress.
--- Expected: 27 PASS, 0 FAIL/ERROR (T1..T15; T6, T7, T8 and T10 with a/b/c/d
--- halves, one per table).
+-- Expected: 27 PASS, 0 FAIL/ERROR (T1..T15; T6, T7, T8 and T10 in four parts
+-- a..d, one per table). Against a database WITHOUT 046 the same file passes
+-- only T2, T4, T5, T11 and T12 (measured: the direct writes succeed there and
+-- destroy the seeded rows).
 \set ON_ERROR_STOP off
 \pset pager off
 

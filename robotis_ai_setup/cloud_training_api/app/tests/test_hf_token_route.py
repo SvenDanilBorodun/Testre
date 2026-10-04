@@ -318,6 +318,26 @@ class TestPutRejections(_RouteCase):
             self.hub.return_value = {"name": "alice", "role": role}
             self.assertEqual(_content(self.put())["role"], role)
 
+    def test_a_fine_grained_token_that_cannot_write_to_the_own_account_gets_the_how_to(self) -> None:
+        self.hub.return_value = {"name": "alice", "role": "fineGrained", "repo_write": False}
+        exc = self.assertHttp(422, self.put)
+        self.assertIn("nicht in deine eigenen Repositories schreiben", exc.detail)
+        self.assertIn("„Write“", exc.detail)
+        self.assertIn("„Repositories“", exc.detail)
+        self.assertIn("„Settings“", exc.detail)
+        self._no_hub_call()
+
+    def test_a_fine_grained_token_that_can_write_or_cannot_be_judged_is_stored(self) -> None:
+        # Fail OPEN: an unrecognised scope block (None) must never lock a student out.
+        for verdict in (True, None):
+            self.hub.return_value = {"name": "alice", "role": "fineGrained", "repo_write": verdict}
+            self.assertEqual(_content(self.put())["role"], "fineGrained", verdict)
+
+    def test_only_a_fine_grained_token_is_judged_by_its_scopes(self) -> None:
+        # A write token never carries a verdict; even a stray False does not refuse it.
+        self.hub.return_value = {"name": "alice", "role": "write", "repo_write": False}
+        self.assertEqual(_content(self.put())["role"], "write")
+
     def test_a_denied_author_is_refused(self) -> None:
         for name in ("RobotisSW", "lerobot", "HuggingFace"):
             self.hub.return_value = {"name": name, "role": "write"}

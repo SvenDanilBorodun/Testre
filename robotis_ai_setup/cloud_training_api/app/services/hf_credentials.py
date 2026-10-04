@@ -3,9 +3,9 @@
 Cloud half of the 042 feature. The robot half (`hf_token_store.py` in the
 physical_ai_server package) carries a byte-identical `fingerprint()` and the
 same shape rule; `tests/test_hf_token_fp_lockstep.py` holds both to one vector
-table. Stdlib at import time: `cryptography` and `huggingface_hub` are imported
-INSIDE the functions that need them, so the stub-based route tests and the boot
-import probe never need either installed.
+table. Stdlib at import time: `cryptography` and `httpx` are imported INSIDE the
+functions that need them, so the stub-based route tests and the boot import
+probe never need either installed.
 
 Nothing here ever logs, formats or raises a token: errors carry a stable
 `code` and the caller picks the German sentence.
@@ -192,25 +192,121 @@ def decrypt(user_id: str, envelope: str) -> str:
 
 # ------------------------------------------------------------- the Hub's answer
 
+# The Hub's identity endpoint (what `huggingface_hub.HfApi.whoami` calls), read
+# with httpx directly so the REQUEST is bounded: `HfApi.whoami` sets no timeout
+# of its own, so a black-holed connection used to outlive the 10 s `join` below
+# as a thread nobody would ever reap. HF_ENDPOINT is honoured exactly as
+# huggingface_hub honours it (a mirror or a staging Hub).
+DEFAULT_HUB_ENDPOINT = "https://huggingface.co"
+WHOAMI_PATH = "/api/whoami-v2"
+
+# Fine-grained token permissions that let the token write to the repositories
+# of an entity it is scoped to. Source: the Hub's own OpenAPI document
+# (https://huggingface.co/.well-known/openapi.json, GET /api/whoami-v2, schema
+# auth.accessToken: `role` is one of read | write | god | fineGrained, and
+# `fineGrained` is {"scoped": [{"entity": {"_id", "type", "name"?},
+# "permissions": [...]}], "global": [...], "canReadGatedRepos"}; the permission
+# enum, read 2026-10-04, names "repo.write" (contents and settings) and
+# "repo.content.write" among its repository permissions). `global` only ever
+# carries "discussion.write" / "post.write" there, so it can never grant a
+# repository write. huggingface.js
+# (packages/hub/src/types/api/api-who-am-i.ts) types accessToken without the
+# `fineGrained` block, so the OpenAPI document is the authority.
+FINE_GRAINED_ROLE = "fineGrained"
+REPO_WRITE_PERMISSIONS = frozenset({"repo.write", "repo.content.write"})
+
+
 def _status_of(exc: Exception):
     return getattr(getattr(exc, "response", None), "status_code", None)
 
 
-def validate_with_hub(token: str) -> dict:
-    """`HfApi(token=token).whoami()` in a thread, bounded by HUB_TIMEOUT_S.
+def _hub_endpoint() -> str:
+    raw = os.environ.get("HF_ENDPOINT") or DEFAULT_HUB_ENDPOINT
+    return raw.strip().rstrip("/")
 
-    Returns {"name": str, "role": str}. Raises HfCredentialError with code
-    'rejected' (401/403: the Hub refused the token), 'unreachable' (timeout,
-    network, 429, 5xx) or 'bad_reply' (no usable name). Logs the exception CLASS
-    and HTTP status only, never str(exc).
+
+def fine_grained_repo_write(info) -> bool | None:
+    """Can a fine-grained token write to its OWNER's own repositories?
+
+    True: a `scoped` entry for the owner's user entity (matched by name,
+    case-insensitively, or by `_id` against whoami's top-level `id`) carries a
+    repository write permission. False: the block PARSES and no such entry
+    exists — the token can read, or write elsewhere (an organisation, single
+    repositories), but EduBotics uploads every new dataset to the student's own
+    namespace. None: anything unrecognised — the block missing, not a dict,
+    `scoped` not a list, an entry of an unknown shape, an owner we cannot
+    identify. The caller refuses only on False (fail OPEN: an unknown shape must
+    never lock a student out because Hugging Face changed a field).
+    """
+    if not isinstance(info, dict):
+        return None
+    access = (info.get("auth") or {}).get("accessToken") if isinstance(info.get("auth"), dict) else None
+    if not isinstance(access, dict):
+        return None
+    block = access.get("fineGrained")
+    if not isinstance(block, dict):
+        return None
+    scoped = block.get("scoped")
+    if not isinstance(scoped, list):
+        return None
+    owner_name = info.get("name")
+    owner_id = info.get("id")
+    if not isinstance(owner_name, str) or not owner_name:
+        return None
+    for entry in scoped:
+        if not isinstance(entry, dict):
+            return None
+        entity = entry.get("entity")
+        permissions = entry.get("permissions")
+        if not isinstance(entity, dict) or not isinstance(permissions, list):
+            return None
+        if entity.get("type") != "user":
+            continue
+        name = entity.get("name")
+        eid = entity.get("_id")
+        name_known = isinstance(name, str)
+        id_known = isinstance(eid, str) and isinstance(owner_id, str)
+        if not name_known and not id_known:
+            # A user entity we cannot attribute: say nothing rather than guess.
+            return None
+        if not ((name_known and name.lower() == owner_name.lower()) or (id_known and eid == owner_id)):
+            continue
+        if any(isinstance(p, str) and p in REPO_WRITE_PERMISSIONS for p in permissions):
+            return True
+    return False
+
+
+def validate_with_hub(token: str) -> dict:
+    """GET /api/whoami-v2 with the student's token, bounded by HUB_TIMEOUT_S.
+
+    Returns {"name": str, "role": str, "repo_write": bool | None}; `repo_write`
+    is `fine_grained_repo_write(...)` for a fine-grained token and None for every
+    other role. Raises HfCredentialError with code 'rejected' (401/403: the Hub
+    refused the token), 'unreachable' (timeout, network, 429, 5xx, any other
+    non-200) or 'bad_reply' (no usable name). Logs the exception CLASS and HTTP
+    status only, never str(exc), the URL's headers or the body.
+
+    Two bounds: the httpx client's own timeout ends the request (connect, read,
+    write and pool phases each), and the caller stops waiting after
+    HUB_TIMEOUT_S whatever the thread is doing.
     """
     result: dict = {}
 
     def _ask():
         try:
-            from huggingface_hub import HfApi
+            import httpx
 
-            result["info"] = HfApi(token=token).whoami()
+            with httpx.Client(timeout=httpx.Timeout(HUB_TIMEOUT_S), follow_redirects=False) as client:
+                response = client.get(
+                    _hub_endpoint() + WHOAMI_PATH,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            result["status"] = response.status_code
+            if response.status_code == 200:
+                try:
+                    result["info"] = response.json()
+                except ValueError:
+                    result["info"] = None
         except Exception as exc:  # noqa: BLE001 - classified below
             result["error"] = exc
 
@@ -222,8 +318,11 @@ def validate_with_hub(token: str) -> dict:
         raise HfCredentialError("unreachable")
     if "error" in result:
         exc = result["error"]
-        status = _status_of(exc)
-        logger.warning("hf whoami failed: %s status=%s", type(exc).__name__, status)
+        logger.warning("hf whoami failed: %s status=%s", type(exc).__name__, _status_of(exc))
+        raise HfCredentialError("unreachable")
+    status = result.get("status")
+    if status != 200:
+        logger.warning("hf whoami failed: status=%s", status)
         if status in (401, 403):
             raise HfCredentialError("rejected")
         raise HfCredentialError("unreachable")
@@ -231,9 +330,12 @@ def validate_with_hub(token: str) -> dict:
     name = info.get("name") if isinstance(info, dict) else None
     if not isinstance(name, str) or not name:
         raise HfCredentialError("bad_reply")
-    access = ((info.get("auth") or {}).get("accessToken") or {}) if isinstance(info, dict) else {}
+    auth = info.get("auth")
+    access = auth.get("accessToken") if isinstance(auth, dict) else None
+    access = access if isinstance(access, dict) else {}
     role = access.get("role") if isinstance(access.get("role"), str) and access.get("role") else "unknown"
-    return {"name": name, "role": role}
+    repo_write = fine_grained_repo_write(info) if role == FINE_GRAINED_ROLE else None
+    return {"name": name, "role": role, "repo_write": repo_write}
 
 
 def has_credential(supabase, user_id: str) -> bool:

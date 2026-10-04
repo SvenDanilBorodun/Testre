@@ -1,7 +1,8 @@
 """A student's own Hugging Face token, stored with the account (migration 042).
 
 The student pastes the token once on the Startseite. This router proves it with
-the Hub (`whoami`), refuses read-only tokens, stores it AES-256-GCM encrypted in
+the Hub (`whoami`), refuses read-only tokens and fine-grained tokens that cannot
+write to the student's own repositories, stores it AES-256-GCM encrypted in
 the service-role-only `user_hf_credentials` table (the proven account name also
 becomes `users.hf_username`, atomically, inside the `store_user_hf_credential`
 RPC) and hands the plaintext back ONLY to its owner, through `POST /reveal`, so
@@ -166,7 +167,10 @@ def _hub_checks(token: str, profile, *, stored: bool = False):
             status_code=422,
             detail="Dieses Konto ist nicht zulässig (System- oder Beispielkonto).",
         )
-    # Deny-only: every role other than "read" (an unknown one included) passes.
+    # Deny-only: every role other than "read" (an unknown one included) passes,
+    # except a fine-grained token whose scopes PROVABLY grant no write to the
+    # student's own repositories (hf_credentials.fine_grained_repo_write: an
+    # unrecognised scope block is None and passes - fail open).
     if info["role"] == "read":
         raise HTTPException(
             status_code=422,
@@ -175,6 +179,18 @@ def _hub_checks(token: str, profile, *, stored: bool = False):
                 "ein Token mit Schreibrechten. Erstelle auf huggingface.co unter "
                 "„Settings“ und „Access Tokens“ ein neues Token vom Typ „Write“ "
                 "und füge es hier ein."
+            ),
+        )
+    if info["role"] == hf_credentials.FINE_GRAINED_ROLE and info.get("repo_write") is False:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Dieses Token darf nicht in deine eigenen Repositories schreiben. "
+                "Zum Hochladen braucht EduBotics Schreibrechte. Erstelle auf "
+                "huggingface.co unter „Settings“ und „Access Tokens“ ein neues "
+                "Token vom Typ „Write“ – oder erlaube bei deinem Token unter "
+                "„Repositories“ den Schreibzugriff („Write access“) auf alle "
+                "Repositories in deinem eigenen Konto – und füge es hier ein."
             ),
         )
     previous = profile.get("hf_username")

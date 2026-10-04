@@ -32,8 +32,13 @@
 --     public.tutorial_progress  "Tutorial progress owner insert/update/delete"
 --   Credits are DERIVED from trainings.status (every credit check counts
 --   status NOT IN ('failed','canceled')), so a student who PATCHed their own
---   training to 'canceled' or 'failed', or DELETEd it, got the credit back
---   while the Modal job kept running: free GPU time. 044 closed the direct
+--   training to 'canceled' or 'failed', or DELETEd it, got the credit back.
+--   On a FINISHED training that is free GPU time outright (a succeeded run
+--   flipped to 'failed' keeps its model); on a running one the worker stops
+--   at its next progress write (P0001). One path to the running case stays
+--   open after 046: the row's worker_token is readable through the trainings
+--   SELECT and update_training_progress is executable by both request roles
+--   (docs/KNOWN-ISSUES.md). 044 closed the direct
 --   `users.training_credits` write only; this was the second half. A direct
 --   datasets INSERT skipped register_dataset_safe's HF-author anchor (any
 --   hf_repo_id under the student's own owner_user_id); a direct workflows

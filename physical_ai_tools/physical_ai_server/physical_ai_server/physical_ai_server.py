@@ -493,6 +493,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self._hf_token_seq = 0
         self._hf_token_state_pub = None
         self._hf_token_last_error_log = None
+        # A clear refused while busy (recording / HF transfer) is remembered and
+        # applied by the 1 Hz state tick once the robot is idle, unless a newer
+        # set arrived meanwhile (_apply_pending_hf_token_clear). Guarded by
+        # _hf_token_lock.
+        self._hf_token_clear_pending = False
 
         self._init_core_components()
 
@@ -1622,7 +1627,41 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     f'hf_token_state publish failed: {type(e).__name__}')
 
     def _hf_token_state_tick(self):
+        # The pending clear first, so the message right after it shows the
+        # empty slot. It exists only while the robot was busy, so the first
+        # idle tick is the busy -> idle edge.
+        if getattr(self, '_hf_token_clear_pending', False):
+            self._apply_pending_hf_token_clear()
         self._publish_hf_token_state()
+
+    def _apply_pending_hf_token_clear(self):
+        """Apply a clear that /register_hf_user had to refuse while the robot was
+        busy (a sign-out or a closed window during a recording or an upload):
+        without this it was forgotten and the token stayed until the next login.
+
+        Runs on the state tick's own group. Never waits long for the lock (the
+        service callback holds it only around file I/O) and never raises; a
+        failure other than "still busy" drops the pending clear with one log
+        line by class, so a broken tmpfs cannot log once a second.
+        """
+        try:
+            if self._hf_token_busy():
+                return
+            if not self._hf_token_lock.acquire(timeout=0.5):
+                return
+            try:
+                if not self._hf_token_clear_pending or self._hf_token_busy():
+                    return
+                success, _message = self._apply_hf_token_request('')
+                self._hf_token_clear_pending = False
+                if success:
+                    self.get_logger().info(
+                        'Applied the Hugging Face token removal that waited for the robot to be idle')
+            finally:
+                self._hf_token_lock.release()
+        except Exception as e:  # noqa: BLE001 — a status tick must never raise
+            self._hf_token_clear_pending = False
+            self.get_logger().error(f'pending hf token clear failed: {type(e).__name__}')
 
     def _apply_hf_token_request(self, token):
         """Decide and apply one /register_hf_user request; returns
@@ -1632,7 +1671,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         no-op success EVEN while busy; busy is judged before the shape):
           1. an image without a token slot refuses;
           2. empty + nothing stored, or the stored token again -> success;
-          3. busy (recording / HF worker) -> refused, the file is untouched;
+          3. busy (recording / HF worker) -> refused, the file is untouched; a
+             refused CLEAR is remembered and applied by the state tick once the
+             robot is idle (_apply_pending_hf_token_clear), and any non-empty
+             request cancels that memory (the newer set wins);
           4. empty -> clear;  5. bad shape -> refused;  6. otherwise write.
         No network, no subprocess, no whoami: the cloud already proved the token.
         """
@@ -1640,12 +1682,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             return False, record_texts_de.HF_TOKEN_UNSUPPORTED_DE
         if not isinstance(token, str):
             token = ''
+        if token != '':
+            self._hf_token_clear_pending = False
         try:
             stored = hf_token_store.read()
             if token == '' and stored is None:
                 # Nothing valid is stored; still sweep a garbage or half-written
                 # file, which huggingface_hub would otherwise send as a token.
                 # Best effort: "nothing to remove" must stay a success.
+                self._hf_token_clear_pending = False
                 try:
                     hf_token_store.clear()
                 except OSError:
@@ -1654,9 +1699,13 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             if token != '' and token == stored:
                 return True, record_texts_de.HF_TOKEN_SET_OK_DE
             if self._hf_token_busy():
+                if token == '':
+                    self._hf_token_clear_pending = True
+                    return False, record_texts_de.HF_TOKEN_CLEAR_QUEUED_DE
                 return False, record_texts_de.HF_TOKEN_BUSY_DE
             if token == '':
                 hf_token_store.clear()
+                self._hf_token_clear_pending = False
                 message = record_texts_de.HF_TOKEN_CLEARED_DE
             elif not hf_token_store.valid_shape(token):
                 return False, record_texts_de.HF_TOKEN_SHAPE_DE

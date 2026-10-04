@@ -50,6 +50,16 @@
 #      socket counters cannot replace this: /proc/<pid>/io does not count
 #      send() (4 MB sent, 96 bytes counted), the container's NIC counters
 #      carry video and DDS, and hf_xet uploads outside httpx.
+#
+#   4. 2026-10-04 (review of the per-student token, item g): the other modes
+#      had no bound at all, and is_busy() is what /register_hf_user asks
+#      before it changes the token, so a hung download or list fetch blocked
+#      every token change for ever. A download now ends after
+#      DOWNLOAD_STALL_S without any progress (its progress is per FILE, so a
+#      single large file legitimately shows none for a while; the bound is the
+#      upload's hard cap), a list fetch or a delete after HUB_QUERY_TIMEOUT_S in
+#      total. Same ending as an upload stall: the child is killed, ONE Failed
+#      with a German sentence, a fresh worker on the next request.
 
 import importlib.util
 import logging
@@ -62,7 +72,11 @@ from typing import List, Optional
 from physical_ai_server.data_processing.data_manager import DataManager
 
 try:
-    from physical_ai_server.data_processing.record_texts_de import UPLOAD_STALL_DE
+    from physical_ai_server.data_processing.record_texts_de import (
+        DOWNLOAD_STALL_DE,
+        HUB_QUERY_STALL_DE,
+        UPLOAD_STALL_DE,
+    )
 except ImportError:  # loaded by path (deps-free tests): read the sibling directly
     _texts_spec = importlib.util.spec_from_file_location(
         '_edubotics_record_texts_de',
@@ -70,12 +84,20 @@ except ImportError:  # loaded by path (deps-free tests): read the sibling direct
     _texts = importlib.util.module_from_spec(_texts_spec)
     _texts_spec.loader.exec_module(_texts)
     UPLOAD_STALL_DE = _texts.UPLOAD_STALL_DE
+    DOWNLOAD_STALL_DE = _texts.DOWNLOAD_STALL_DE
+    HUB_QUERY_STALL_DE = _texts.HUB_QUERY_STALL_DE
 
 # F7: no upload progress for this long while the library logs upload errors.
 UPLOAD_STALL_S = 120.0
 # F7: no upload progress for this long at all.
 UPLOAD_HARD_STALL_S = 1800.0
 UPLOAD_ERROR_ITEM_TYPE = 'upload_error'
+# Item g: a download with no progress for this long (= the upload's hard cap;
+# snapshot_download reports per file, so one big file shows no progress).
+DOWNLOAD_STALL_S = UPLOAD_HARD_STALL_S
+# Item g: a list fetch or a delete (no progress reports at all) in total.
+HUB_QUERY_TIMEOUT_S = 120.0
+HUB_QUERY_MODES = frozenset({'get_dataset_list', 'get_model_list', 'delete'})
 
 
 class UploadStallWatch:
@@ -148,8 +170,9 @@ class HfApiWorker:
             'repo_type': ''
         }
         self.last_logged_current_progress = -1  # Track last logged current value
-        # F7: the upload stall watchdog (round 5)
+        # F7: the upload stall watchdog (round 5); item g: the other modes
         self.stall_watch = UploadStallWatch(time.monotonic())
+        self.task_started_mono = time.monotonic()
 
         # Basic config for the main process logger
         logging.basicConfig(
@@ -224,7 +247,8 @@ class HfApiWorker:
             self.is_processing = True
             self.current_task = request_data
             self.start_time = time.time()
-            self.stall_watch.reset(time.monotonic())
+            self.task_started_mono = time.monotonic()
+            self.stall_watch.reset(self.task_started_mono)
             return True
         else:
             self.logger.error('Cannot send request, HF API worker process is not running.')
@@ -336,8 +360,16 @@ class HfApiWorker:
                     return result
 
             # F7: an upload that stopped moving ends here, once.
-            if mode == 'upload' and self.stall_watch.stalled(time.monotonic()):
+            now = time.monotonic()
+            if mode == 'upload' and self.stall_watch.stalled(now):
                 return self._fail_stalled_upload(result)
+            # Item g: a download that stopped moving, or a list fetch / delete
+            # that never answers, ends the same way (is_busy() must not stay
+            # true for ever: it blocks every token change on the robot).
+            if mode == 'download' and now - self.stall_watch.last_progress_mono >= DOWNLOAD_STALL_S:
+                return self._fail_stalled_task(result, mode, DOWNLOAD_STALL_DE)
+            if mode in HUB_QUERY_MODES and now - self.task_started_mono >= HUB_QUERY_TIMEOUT_S:
+                return self._fail_stalled_task(result, mode, HUB_QUERY_STALL_DE)
 
             # Still processing - return appropriate status message
             if mode:
@@ -415,6 +447,19 @@ class HfApiWorker:
         result['operation'] = 'upload'
         result['status'] = 'Failed'
         result['message'] = UPLOAD_STALL_DE
+        return result
+
+    def _fail_stalled_task(self, result: dict, mode: str, message_de: str) -> dict:
+        """Item g: a download / list fetch / delete that does not end. Same ending
+        as an upload stall (kill the child, ONE Failed, a fresh worker next time)."""
+        elapsed = time.monotonic() - self.task_started_mono
+        self.logger.error(
+            f'HF {mode} did not finish ({elapsed:.0f} s since it started): '
+            f'terminating the worker.')
+        self._terminate_worker()
+        result['operation'] = mode
+        result['status'] = 'Failed'
+        result['message'] = message_de
         return result
 
     def _terminate_worker(self) -> None:

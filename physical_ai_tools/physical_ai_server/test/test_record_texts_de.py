@@ -289,8 +289,13 @@ def test_042_token_slot_sentences():
     assert t.HF_TOKEN_UNSUPPORTED_DE == (
         'Dieser Roboter verwendet ein eigenes Token und nimmt kein persönliches an.')
     assert t.HF_TOKEN_WRITE_FAILED_DE == 'Das Token konnte nicht auf dem Roboter gespeichert werden.'
+    # 2026-10-04 (review a): a refused clear is applied once the robot is idle
+    assert t.HF_TOKEN_CLEAR_QUEUED_DE == (
+        'Während einer Aufnahme oder einer Übertragung zu oder von Hugging Face kann das Token '
+        'nicht entfernt werden. Der Roboter entfernt es von selbst, sobald er damit fertig ist.')
     names = ['HF_TOKEN_SET_OK_DE', 'HF_TOKEN_CLEARED_DE', 'HF_TOKEN_NONE_DE', 'HF_TOKEN_BUSY_DE',
-             'HF_TOKEN_SHAPE_DE', 'HF_TOKEN_UNSUPPORTED_DE', 'HF_TOKEN_WRITE_FAILED_DE']
+             'HF_TOKEN_SHAPE_DE', 'HF_TOKEN_UNSUPPORTED_DE', 'HF_TOKEN_WRITE_FAILED_DE',
+             'HF_TOKEN_CLEAR_QUEUED_DE']
     assert len({getattr(t, n) for n in names}) == len(names)
     # none of them can carry a token, a fingerprint or an exception text
     for n in names:

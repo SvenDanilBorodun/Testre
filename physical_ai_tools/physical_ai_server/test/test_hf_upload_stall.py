@@ -14,6 +14,9 @@ network used to leave the page at „Hochladen … 30 %" for good. The rule:
 * then the child is terminated and ONE ``Failed`` with ``UPLOAD_STALL_DE`` is
   emitted; the worker reports Idle afterwards. The local dataset is untouched
   (the worker only ever reads it).
+* item g (2026-10-04): a download with no progress for ``DOWNLOAD_STALL_S`` and
+  a list fetch / delete running longer than ``HUB_QUERY_TIMEOUT_S`` end the
+  same way, because ``is_busy()`` gates every change of the robot's token.
 
 ``hf_api_worker`` imports ``DataManager`` (a large ROS/cv2/HF tree), so it is
 loaded by path with that one import stubbed for the duration of each test.
@@ -216,11 +219,91 @@ def test_a_result_that_arrives_wins_over_the_stall(mod):
     assert not w.process.killed
 
 
-def test_downloads_are_not_judged(mod):
+# ── item g (2026-10-04): the other modes are bounded too ─────────────────────
+# is_busy() is what /register_hf_user asks before it changes the token, so a
+# download or a list fetch that never ends used to block every token change.
+
+def test_the_bounds_of_the_other_modes(mod):
+    assert mod.DOWNLOAD_STALL_S == mod.UPLOAD_HARD_STALL_S == 1800.0
+    assert mod.HUB_QUERY_TIMEOUT_S == 120.0
+    assert mod.HUB_QUERY_MODES == frozenset({'get_dataset_list', 'get_model_list', 'delete'})
+    assert mod.DOWNLOAD_STALL_DE == record_texts_de.DOWNLOAD_STALL_DE
+    assert mod.HUB_QUERY_STALL_DE == record_texts_de.HUB_QUERY_STALL_DE
+
+
+def test_a_download_is_judged_by_progress_only_and_upload_errors_do_not_count(mod):
     w = _worker(mod, mode='download')
     w.progress_queue.put({'current': 1, 'total': 10, 'percentage': 10.0, 'is_downloading': True})
-    statuses = _poll(mod, w, 2000.0, step=10.0, each=lambda i: _error(w))
+    # stray upload-error items never shorten a download's bound
+    statuses = _poll(mod, w, 1790.0, step=10.0, each=lambda i: _error(w))
     assert all(s['status'] == 'Downloading' for s in statuses)
+    assert not w.process.killed
+
+
+def test_a_download_without_progress_for_1800_s_fails_once_and_frees_the_worker(mod):
+    w = _worker(mod, mode='download')
+    w.progress_queue.put({'current': 1, 'total': 10, 'percentage': 10.0, 'is_downloading': True})
+    proc = w.process
+    statuses = _poll(mod, w, 1810.0, step=10.0)
+    failed = [s for s in statuses if s['status'] == 'Failed']
+    assert len(failed) == 1
+    assert failed[0]['operation'] == 'download'
+    assert failed[0]['message'] == record_texts_de.DOWNLOAD_STALL_DE
+    assert failed[0]['repo_id'] == 'alice/wuerfel'
+    assert proc.killed is True
+    assert w.is_busy() is False                     # a token change is possible again
+    assert w.check_task_status()['status'] == 'Idle'
+
+
+def test_a_download_that_keeps_moving_is_never_killed(mod):
+    w = _worker(mod, mode='download')
+    count = {'n': 0}
+
+    def each(i):
+        if i % 60 == 0:             # a new file every 10 minutes
+            count['n'] += 1
+            w.progress_queue.put({'current': count['n'], 'total': 100,
+                                  'percentage': float(count['n']), 'is_downloading': True})
+
+    statuses = _poll(mod, w, 4000.0, step=10.0, each=each)
+    assert all(s['status'] == 'Downloading' for s in statuses)
+
+
+@pytest.mark.parametrize('mode', ['get_dataset_list', 'get_model_list', 'delete'])
+def test_a_hub_query_that_never_answers_ends_after_120_s(mod, mode):
+    w = _worker(mod, mode=mode)
+    proc = w.process
+    statuses = _poll(mod, w, 119.0)
+    assert all(s['status'] in ('Fetching', 'Deleting') for s in statuses)
+    assert not proc.killed
+    statuses = _poll(mod, w, 2.0)
+    failed = [s for s in statuses if s['status'] == 'Failed']
+    assert len(failed) == 1
+    assert failed[0]['operation'] == mode
+    assert failed[0]['message'] == record_texts_de.HUB_QUERY_STALL_DE
+    assert proc.killed is True
+    assert w.is_busy() is False
+    assert w.check_task_status()['status'] == 'Idle'
+
+
+def test_a_hub_query_answer_wins_over_its_bound(mod):
+    w = _worker(mod, mode='get_dataset_list')
+    _poll(mod, w, 100.0)
+    mod._test_clock.t += 30.0
+    w.output_queue.put(('success', 'Datensatzliste von alice geladen.'))
+    status = w.check_task_status()
+    assert status['status'] == 'Success'
+    assert not w.process.killed
+
+
+def test_each_request_gets_its_own_query_window(mod):
+    w = _worker(mod, mode='get_model_list')
+    _poll(mod, w, 110.0)
+    w.output_queue.put(('success', 'ok'))
+    assert w.check_task_status()['status'] == 'Success'
+    assert w.send_request({'mode': 'get_dataset_list', 'author': 'alice'})
+    statuses = _poll(mod, w, 60.0)
+    assert all(s['status'] == 'Fetching' for s in statuses)
 
 
 def test_a_new_request_starts_a_fresh_window(mod):

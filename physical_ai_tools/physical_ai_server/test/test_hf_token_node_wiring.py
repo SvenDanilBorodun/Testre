@@ -98,7 +98,8 @@ def _load(name, store_module=store):
 
 _METHODS = {n: _load(n) for n in (
     '_init_hf_token_state', '_hf_token_busy', '_publish_hf_token_state',
-    '_hf_token_state_tick', '_apply_hf_token_request', 'set_hf_user_callback')}
+    '_hf_token_state_tick', '_apply_pending_hf_token_clear', '_apply_hf_token_request',
+    'set_hf_user_callback')}
 
 
 class _Worker:
@@ -137,6 +138,7 @@ class _Node:
         self._hf_token_seq = 0
         self._hf_token_state_pub = None
         self._hf_token_last_error_log = None
+        self._hf_token_clear_pending = False
         self.log = _Logger()
         self.publishers = []
         self.timers = []
@@ -275,14 +277,15 @@ class TestRegisterHfUser(_Base):
         self.assertFalse(node.states()[-1]['present'])
         self.assertIsNone(node.states()[-1]['fp'])
 
-    def test_clearing_while_busy_is_refused(self):
+    def test_clearing_while_busy_is_refused_and_remembered(self):
         node = self.node()
         node.request(TOK)
         node.on_recording = True
         response = node.request('')
         self.assertFalse(response.success)
-        self.assertEqual(response.message, texts.HF_TOKEN_BUSY_DE)
+        self.assertEqual(response.message, texts.HF_TOKEN_CLEAR_QUEUED_DE)
         self.assertEqual(self.stored(), TOK)
+        self.assertTrue(node._hf_token_clear_pending)
 
     def test_empty_with_nothing_stored_is_success_even_when_busy(self):
         for busy in (False, True):
@@ -371,6 +374,119 @@ class TestRegisterHfUser(_Base):
             t.join()
         self.assertIn(self.stored(), tokens)
         self.assertEqual(os.listdir(os.path.dirname(self.slot)), ['token'])
+
+
+# ── a clear refused while busy (review a, 2026-10-04) ────────────────────────
+
+class TestPendingClear(_Base):
+    def busy_node_with_a_refused_clear(self, **kw):
+        node = self.node(**kw)
+        node.request(TOK)
+        node.on_recording = True
+        self.assertFalse(node.request('').success)
+        return node
+
+    def test_the_tick_applies_it_on_the_busy_to_idle_edge(self):
+        node = self.busy_node_with_a_refused_clear()
+        node._hf_token_state_tick()                  # still recording: nothing happens
+        self.assertEqual(self.stored(), TOK)
+        self.assertTrue(node._hf_token_clear_pending)
+        self.assertTrue(node.states()[-1]['present'])
+        node.on_recording = False
+        _DataManager.invalidations = 0
+        node._hf_token_state_tick()                  # idle: the clear lands
+        self.assertIsNone(self.stored())
+        self.assertFalse(os.path.exists(self.slot))
+        self.assertFalse(node._hf_token_clear_pending)
+        self.assertEqual(_DataManager.invalidations, 1)
+        self.assertFalse(node.states()[-1]['present'])
+        self.assertIsNone(node.states()[-1]['fp'])
+        self.assertIn('waited for the robot to be idle', '\n'.join(node.log.lines))
+
+    def test_a_busy_hf_worker_holds_it_too(self):
+        worker = _Worker(busy=True)
+        node = self.node(worker=worker)
+        store.write(TOK, self.slot)
+        self.assertEqual(node.request('').message, texts.HF_TOKEN_CLEAR_QUEUED_DE)
+        node._hf_token_state_tick()
+        self.assertEqual(self.stored(), TOK)
+        worker.busy = False
+        node._hf_token_state_tick()
+        self.assertIsNone(self.stored())
+
+    def test_a_newer_set_cancels_the_pending_clear(self):
+        node = self.busy_node_with_a_refused_clear()
+        node.on_recording = False
+        self.assertTrue(node.request(OTHER).success)  # the next student's push
+        self.assertFalse(node._hf_token_clear_pending)
+        node._hf_token_state_tick()
+        self.assertEqual(self.stored(), OTHER)
+
+    def test_even_a_set_refused_while_busy_cancels_it(self):
+        node = self.busy_node_with_a_refused_clear()
+        self.assertEqual(node.request(OTHER).message, texts.HF_TOKEN_BUSY_DE)
+        self.assertFalse(node._hf_token_clear_pending)
+        node.on_recording = False
+        node._hf_token_state_tick()
+        self.assertEqual(self.stored(), TOK)
+
+    def test_the_same_token_again_cancels_it(self):
+        node = self.busy_node_with_a_refused_clear()
+        self.assertTrue(node.request(TOK).success)    # no-op success, even while busy
+        self.assertFalse(node._hf_token_clear_pending)
+        node.on_recording = False
+        node._hf_token_state_tick()
+        self.assertEqual(self.stored(), TOK)
+
+    def test_an_explicit_clear_after_idle_settles_it(self):
+        node = self.busy_node_with_a_refused_clear()
+        node.on_recording = False
+        self.assertTrue(node.request('').success)
+        self.assertFalse(node._hf_token_clear_pending)
+
+    def test_a_failing_clear_is_dropped_with_one_class_only_log_line(self):
+        node = self.busy_node_with_a_refused_clear()
+        node.on_recording = False
+        with patch.object(store, 'clear', side_effect=OSError('tmpfs gone ' + TOK)):
+            node._hf_token_state_tick()
+            node._hf_token_state_tick()
+        self.assertFalse(node._hf_token_clear_pending)
+        text = '\n'.join(node.log.lines)
+        self.assertEqual(text.count('OSError'), 1)
+        self.assertNotIn(TOK, text)
+
+    def test_a_held_lock_defers_it_to_the_next_tick(self):
+        node = self.busy_node_with_a_refused_clear()
+        node.on_recording = False
+        real = node._hf_token_lock
+        waits = []
+
+        class _Held:
+            """The service callback holds the lock: acquire times out."""
+
+            def acquire(self, timeout=None):
+                waits.append(timeout)
+                return False
+
+            def release(self):
+                raise AssertionError('released a lock it never got')
+
+        node._hf_token_lock = _Held()
+        node._hf_token_state_tick()
+        self.assertEqual(waits, [0.5])                 # bounded, never a blocking wait
+        self.assertEqual(self.stored(), TOK)
+        self.assertTrue(node._hf_token_clear_pending)
+        node._hf_token_lock = real
+        node._hf_token_state_tick()
+        self.assertIsNone(self.stored())
+
+    def test_no_pending_clear_means_the_tick_never_touches_the_slot(self):
+        node = self.node()
+        node.request(TOK)
+        with patch.object(store, 'clear') as clear:
+            node._hf_token_state_tick()
+        clear.assert_not_called()
+        self.assertEqual(self.stored(), TOK)
 
 
 # ── the state topic ──────────────────────────────────────────────────────────
@@ -532,7 +648,8 @@ class TestAstFences(unittest.TestCase):
         banned = {'token', 'request', 'stored', 'message', 'e'}
         checked = 0
         for name in ('set_hf_user_callback', '_apply_hf_token_request',
-                     '_publish_hf_token_state', '_init_hf_token_state'):
+                     '_publish_hf_token_state', '_init_hf_token_state',
+                     '_apply_pending_hf_token_clear'):
             for call in _logger_calls(_function_node(name)):
                 checked += 1
                 for arg in call.args:
@@ -579,7 +696,7 @@ class TestAstFences(unittest.TestCase):
                             and t.value.id == 'self'):
                         assigned.setdefault(t.attr, i)
         for attr in ('_hf_token_lock', '_hf_token_seq', '_hf_token_state_pub',
-                     '_hf_token_last_error_log'):
+                     '_hf_token_last_error_log', '_hf_token_clear_pending'):
             self.assertLess(assigned[attr], core, attr)
 
     def test_the_module_installs_the_scrubber_right_after_the_bearer_loop(self):

@@ -73,6 +73,12 @@ export const SYNC_INITIAL = Object.freeze({
   nextAttemptAt: null,
   lastOwnFp: null,
   clearedFp: null,
+  // The fingerprint of a SUCCESSFUL push that no robot state has shown yet, and
+  // until when the browser waits to see it (review c): a state older than the
+  // push must not read as „taken over". Cleared by an in-sync state, by
+  // `syncSettleElapsed` and by every reset of the bookkeeping.
+  awaitingOwnFp: null,
+  awaitingUntil: null,
   lastMessage: null, // the robot's own German answer to the last failed call
   autoWrites: Object.freeze([]), // timestamps of recent successful automatic writes
   breakerOpen: false,
@@ -104,6 +110,12 @@ function resetLoopBookkeeping(sync) {
   sync.lastMessage = null;
   sync.autoWrites = [];
   sync.breakerOpen = false;
+  stopAwaiting(sync);
+}
+
+function stopAwaiting(sync) {
+  sync.awaitingOwnFp = null;
+  sync.awaitingUntil = null;
 }
 
 function recordAutoWrite(sync, at) {
@@ -210,6 +222,7 @@ const hfTokenSlice = createSlice({
           s.failures = 0;
           s.nextAttemptAt = null;
           s.lastMessage = null;
+          stopAwaiting(s); // the push has been SEEN
           if (IN_FLIGHT.has(s.phase)) s.attempt += 1; // the in-flight call is moot now
           settleIdle(s);
         }
@@ -249,7 +262,13 @@ const hfTokenSlice = createSlice({
         // write (WRITE_SETTLE_MS); an in-sync message ends the pause early.
         s.nextAttemptAt = at + WRITE_SETTLE_MS;
         s.lastMessage = null;
+        // The dampener's memory is set NOW (the multi-client simulation in
+        // syncDecision.test.js diverges otherwise) ...
         s.lastOwnFp = typeof fp === 'string' && fp ? fp : null;
+        // ... but until a state SHOWS it, a foreign slot is a state older than
+        // this push, never a takeover (review c).
+        s.awaitingOwnFp = s.lastOwnFp;
+        s.awaitingUntil = s.lastOwnFp ? at + WRITE_SETTLE_MS : null;
         s.clearedFp = null;
         settleIdle(s);
         if (automatic) recordAutoWrite(s, at);
@@ -268,12 +287,25 @@ const hfTokenSlice = createSlice({
         s.lastMessage = null;
         s.clearedFp = typeof fp === 'string' && fp ? fp : null;
         s.lastOwnFp = null;
+        stopAwaiting(s);
         settleIdle(s);
         if (automatic) recordAutoWrite(s, at);
       },
       prepare: ({ fp = null, automatic = true } = {}, at = Date.now()) => ({
         payload: { fp, automatic, at },
       }),
+    },
+    // The wait to SEE a push ended without the robot ever showing it (useHfTokenSync
+    // fires this at `awaitingUntil`). From here a foreign slot is a takeover again.
+    // A no-op before the deadline (a stale timer) and when nothing is awaited.
+    syncSettleElapsed: {
+      reducer: (state, action) => {
+        const s = state.sync;
+        if (s.awaitingOwnFp === null) return;
+        if (s.awaitingUntil !== null && action.payload.at < s.awaitingUntil) return;
+        stopAwaiting(s);
+      },
+      prepare: (at = Date.now()) => ({ payload: { at } }),
     },
     // payload: {message} — the robot's own German sentence, or none
     syncFailed: {
@@ -333,6 +365,7 @@ export const {
   syncPhaseSet,
   syncPushed,
   syncCleared,
+  syncSettleElapsed,
   syncFailed,
   syncWatchdogFired,
   syncForceRetransfer,

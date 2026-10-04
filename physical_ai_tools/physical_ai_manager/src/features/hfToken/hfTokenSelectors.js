@@ -71,6 +71,7 @@ export const selectHfDecision = (s) => {
     accountFp: a.fp,
     lastOwnFp: y.lastOwnFp,
     clearedFp: y.clearedFp,
+    awaitingOwnFp: y.awaitingOwnFp ?? null,
   });
 };
 
@@ -82,7 +83,7 @@ export const selectHfSyncFailed = (s) => {
 
 /**
  * Why the Aufnahme page must refuse Start for the token's sake:
- * null | 'none' | 'unusable' | 'transfer' | 'failed' | 'taken_over'.
+ * null | 'none' | 'unusable' | 'transfer' | 'busy' | 'failed' | 'taken_over'.
  * A primitive, so a `useSelector` on it only re-renders when it changes.
  * Unknown (no slice, robot state not seen, Jetson claimed) is null: it never blocks.
  */
@@ -97,5 +98,46 @@ export const selectHfStartBlock = (s) => {
     syncPhase: selectHfSyncFailed(s) ? 'failed' : 'idle',
     lastOwnFp: y.lastOwnFp,
     clearedFp: y.clearedFp,
+    awaitingOwnFp: y.awaitingOwnFp ?? null,
   });
+};
+
+/**
+ * True while the browser waits to SEE its own successful push in the robot's
+ * state (review c). The reconcile holds still meanwhile; a primitive.
+ */
+export const selectHfAwaitingOwnPush = (s) => Boolean(selectHfSync(s).awaitingOwnFp);
+
+// The account states that answer nothing a decision could use (S2): the start
+// block treats them as „unknown never blocks", so the page explains instead.
+const UNDECIDABLE_ACCOUNT = new Set(['error', 'unavailable', 'unsupported']);
+
+/**
+ * The student signed in with „Ohne Anmeldung fortfahren": the auth service
+ * resolved (not loading) with no session. Only reachable behind the student
+ * login gate's offline escape (utils/authGate), where the account half of the
+ * token feature is off (useHfTokenSync's accountEnabled needs a JWT).
+ */
+export const selectHfOfflineEscape = (s) => Boolean(s.auth)
+  && s.auth.isLoading === false && s.auth.isAuthenticated !== true;
+
+/**
+ * A NON-blocking hint for the Aufnahme page (owner decision S2, 2026-10-04):
+ * null | 'offline' | 'error' | 'unavailable' | 'unsupported'.
+ *
+ * Start is never refused for these („unknown never blocks"), but without a
+ * usable account state the Benutzer-ID list stays empty (selectHfListReloadAllowed)
+ * and the page used to say only „Keine Benutzer-ID gefunden". The hint names
+ * the cause. 'offline' is answered without the robot's state: in that mode the
+ * robot half is off, so the state never arrives, and the list is held back
+ * either way. The other three need a robot that is known to take a personal
+ * token. A primitive; null without the slice and under a claimed Jetson.
+ */
+export const selectHfRecordHint = (s) => {
+  if (!s.hfToken || jetsonClaimed(s)) return null;
+  if (selectHfOfflineEscape(s)) return 'offline';
+  const r = selectHfRobot(s);
+  if (r.known !== true || r.accepts !== true) return null;
+  const { status } = selectHfAccount(s);
+  return UNDECIDABLE_ACCOUNT.has(status) ? status : null;
 };

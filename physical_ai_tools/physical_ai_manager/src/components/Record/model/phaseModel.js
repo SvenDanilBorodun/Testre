@@ -290,7 +290,7 @@ export function deriveStartBlock({
  * @param input.verdicts    sourceVerdicts output | null
  * @param input.bridge      useRsBridgeStatus output | null
  * @param input.activation  useRobotActivation status | null
- * @param input.hfToken     null | 'none' | 'unusable' | 'transfer' | 'failed' | 'taken_over'
+ * @param input.hfToken     null | 'none' | 'unusable' | 'transfer' | 'busy' | 'failed' | 'taken_over'
  */
 export function deriveRecordView({
   heartbeat = 'disconnected',

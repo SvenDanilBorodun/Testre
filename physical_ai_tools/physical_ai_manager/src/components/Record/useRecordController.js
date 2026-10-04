@@ -50,7 +50,7 @@ import {
   setSelectedDataset,
   setSelectedUser,
 } from '../../features/training/trainingSlice';
-import { selectHfStartBlock } from '../../features/hfToken/hfTokenSelectors';
+import { selectHfRecordHint, selectHfStartBlock } from '../../features/hfToken/hfTokenSelectors';
 import { useHfUserList } from '../../hooks/useHfUserList';
 import useRobotActivation from '../../hooks/useRobotActivation';
 import useRsBridgeStatus from '../../hooks/useRsBridgeStatus';
@@ -164,6 +164,10 @@ export default function useRecordController({ isActive = true } = {}) {
   // stores), while the account or the robot has not answered, and under a
   // claimed Jetson — unknown never blocks.
   const hfTokenBlock = useSelector(selectHfStartBlock);
+  // ... and, when the account state answers nothing usable (or the student is
+  // signed in through the offline escape), a NON-blocking hint that names the
+  // cause instead of only „Keine Benutzer-ID gefunden" (owner decision S2).
+  const hfTokenHint = useSelector(selectHfRecordHint);
 
   const [reducedMotion, setReducedMotion] = useState(readReducedMotion);
   useEffect(() => {
@@ -271,9 +275,10 @@ export default function useRecordController({ isActive = true } = {}) {
     activation,
     fps: expectedHz,
     startBlock: model.startBlock,
+    hfTokenHint,
     nowWallMs: now.wall,
   }), [view, running, heartbeat, notice, transient, session, disk, verdicts, bridge, activation, expectedHz,
-    model.startBlock, now.wall]);
+    model.startBlock, hfTokenHint, now.wall]);
 
   const invalid = transient && transient.field && Date.now() < transient.until
     ? { field: transient.field, messageDe: transient.textDe }

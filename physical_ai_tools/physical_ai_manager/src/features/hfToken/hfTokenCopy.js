@@ -52,6 +52,10 @@ export const HF_TOKEN_COPY = Object.freeze({
     'Das Speichern des Tokens ist auf dem Server noch nicht eingerichtet. Sag deiner Lehrkraft Bescheid.',
   'card.loadError': 'Der Token-Status konnte nicht geladen werden.',
   'card.unknown': 'Der Token-Status wird geladen …',
+  // „Ohne Anmeldung fortfahren": without a login the account cannot be asked.
+  'card.offline':
+    'Ohne Anmeldung kann dein Token nicht geladen werden. Melde dich an, dann bekommt der Roboter es '
+    + 'automatisch.',
   'card.accountChanged':
     'Dieses Token gehört zu einem anderen Hugging-Face-Konto als bisher. Neue Datensätze lassen sich dann '
     + 'möglicherweise nicht mehr für das Training anmelden. Frag deine Lehrkraft.',

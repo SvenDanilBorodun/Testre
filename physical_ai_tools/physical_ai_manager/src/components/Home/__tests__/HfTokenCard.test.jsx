@@ -10,12 +10,12 @@
 // that the card never holds, shows or logs the token.
 
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 
-import authReducer, { setSession } from '../../../features/auth/authSlice';
+import authReducer, { setIsLoading, setSession } from '../../../features/auth/authSlice';
 import tasksReducer, { setHeartbeatStatus } from '../../../features/tasks/taskSlice';
 import jetsonReducer, { setJetsonStatus } from '../../../store/jetsonSlice';
 import uiReducer from '../../../features/ui/uiSlice';
@@ -28,10 +28,11 @@ import hfReducer, {
   syncFailed,
   syncPhaseSet,
   syncPushed,
+  syncSettleElapsed,
 } from '../../../features/hfToken/hfTokenSlice';
 import * as api from '../../../services/hfTokenApi';
 import { HF_TOKEN_COPY as T } from '../../../features/hfToken/hfTokenCopy';
-import HfTokenCard, { formatChecked, robotView } from '../HfTokenCard';
+import HfTokenCard, { canMaskTextField, formatChecked, robotView } from '../HfTokenCard';
 
 vi.mock('../../../services/hfTokenApi', () => ({
   __esModule: true,
@@ -133,7 +134,7 @@ describe('HfTokenCard — the account half', () => {
     expect(store.getState().hfToken.kick).toBe(1);
   });
 
-  it('shows the steps, a hardened password field and a disabled save button when no token is stored', () => {
+  it('shows the steps, a hardened field and a disabled save button when no token is stored', () => {
     setup([accountLoaded({ status: 'none' })]);
     expect(screen.getByText(T['card.none.body'])).toBeInTheDocument();
     for (const step of ['step1', 'step2', 'step3', 'step4']) {
@@ -141,15 +142,60 @@ describe('HfTokenCard — the account half', () => {
     }
     expect(screen.getByText(T['card.pill.none'])).toBeInTheDocument();
     const field = input();
-    expect(field).toHaveAttribute('type', 'password');
-    // Chrome ignores autocomplete="off" on a password field (audit M8).
-    expect(field).toHaveAttribute('autocomplete', 'new-password');
     expect(field).toHaveAttribute('spellcheck', 'false');
     expect(field).toHaveAttribute('autocapitalize', 'off');
     expect(field).toHaveAttribute('placeholder', T['card.input.placeholder']);
+    // the common password-manager extensions are told to keep away (review j)
+    expect(field).toHaveAttribute('data-1p-ignore', 'true');
+    expect(field).toHaveAttribute('data-lpignore', 'true');
+    expect(field).toHaveAttribute('data-bwignore', 'true');
+    expect(field).toHaveAttribute('data-form-type', 'other');
+    expect(field.getAttribute('name') || '').not.toMatch(/pass|token/i);
     // no <form> anywhere: the password manager must not be offered a submit
     expect(document.body.innerHTML).not.toContain('<form');
     expect(button(T['card.save'])).toBeDisabled();
+  });
+
+  describe('the field is no password field to a password manager, and still masked (review j)', () => {
+    const realCss = globalThis.CSS;
+    afterEach(() => { globalThis.CSS = realCss; });
+
+    it('a browser that masks a text field gets type="text" + -webkit-text-security, autocomplete off', () => {
+      globalThis.CSS = { supports: (prop, value) => prop === '-webkit-text-security' && value === 'disc' };
+      expect(canMaskTextField()).toBe(true);
+      setup([accountLoaded({ status: 'none' })]);
+      const field = input();
+      expect(field).toHaveAttribute('type', 'text');
+      expect(field).toHaveAttribute('autocomplete', 'off');
+    });
+
+    it('a browser that cannot falls back to a password field (masked beats a visible token)', () => {
+      globalThis.CSS = { supports: () => false };
+      expect(canMaskTextField()).toBe(false);
+      setup([accountLoaded({ status: 'none' })]);
+      const field = input();
+      expect(field).toHaveAttribute('type', 'password');
+      // Chrome ignores autocomplete="off" on a password field (audit M8).
+      expect(field).toHaveAttribute('autocomplete', 'new-password');
+    });
+
+    it('no CSS object at all, or one that throws, is "cannot"', () => {
+      globalThis.CSS = undefined;
+      expect(canMaskTextField()).toBe(false);
+      globalThis.CSS = { supports: () => { throw new Error('nope'); } };
+      expect(canMaskTextField()).toBe(false);
+    });
+  });
+
+  it('the offline login escape says why the status never loads (review i)', () => {
+    const { store } = setup([]);
+    expect(screen.getByText(T['card.unknown'])).toBeInTheDocument();
+    act(() => {
+      store.dispatch(setSession(null));
+      store.dispatch(setIsLoading(false));
+    });
+    expect(screen.getByText(T['card.offline'])).toBeInTheDocument();
+    expect(screen.queryByText(T['card.unknown'])).toBeNull();
   });
 
   it('shows the explanatory sentence and an input on an unusable token, and lets the student remove it', async () => {
@@ -273,7 +319,11 @@ describe('HfTokenCard — the stored view and its robot pill', () => {
   });
 
   it('taken over: another account\'s token is in the slot, and „Erneut übertragen" takes it back', async () => {
-    const { store } = setup([stored(), syncPushed({ fp: FP }), robot({ present: true, fp: OTHER })]);
+    // A takeover needs my push to have been SEEN first; a state older than the
+    // push is not one (review c, the next test).
+    const { store } = setup([
+      stored(), syncPushed({ fp: FP }), robot({ present: true, fp: FP }), robot({ present: true, fp: OTHER }),
+    ]);
     expect(pill('card.pill.takenOver')).toBeInTheDocument();
     expect(screen.getByText(T['card.takenOverNote'])).toBeInTheDocument();
     await userEvent.click(button(T['card.retry']));
@@ -306,10 +356,24 @@ describe('HfTokenCard — the stored view and its robot pill', () => {
     expect(button(T['card.retry'])).toBeInTheDocument();
   });
 
+  it('no „taken over" flash after a push the robot has not shown yet (review c)', () => {
+    // The previous student's token is still in the slot when my push succeeds:
+    // until a state shows mine, that slot proves nothing.
+    const { store } = setup([stored(), robot({ present: true, fp: OTHER }), syncPushed({ fp: FP }, 1000)]);
+    expect(screen.queryByText(T['card.pill.takenOver'])).toBeNull();
+    expect(pill('card.pill.working')).toBeInTheDocument();
+    act(() => { store.dispatch(robot({ present: true, fp: OTHER })); }); // a stale state after the push
+    expect(screen.queryByText(T['card.pill.takenOver'])).toBeNull();
+    act(() => { store.dispatch(robot({ present: true, fp: FP })); });    // the robot shows it
+    expect(pill('card.pill.active')).toBeInTheDocument();
+  });
+
   it('taken over wins over failed: the sentence has to name the cause', () => {
     setup([
       stored(), robot({ present: true, fp: OTHER }),
       syncPushed({ fp: FP }, 1), syncPushed({ fp: FP }, 2), syncPushed({ fp: FP }, 3),
+      // the robot never showed any of the three pushes within the wait
+      syncSettleElapsed(10_000),
     ]);
     expect(pill('card.pill.takenOver')).toBeInTheDocument();
   });

@@ -84,13 +84,15 @@ const recordTick = (patch = {}) => idleTick({
   warmupTime: 5, resetTime: 5, fps: 30, pushToHub: true, ...patch,
 });
 
-function makeStore({ form = VALID_FORM, connected = true, hfActions = null } = {}) {
+function makeStore({ form = VALID_FORM, connected = true, hfActions = null, auth = null } = {}) {
   const store = configureStore({
     reducer: {
       tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer,
       // Only the token tests have the slice; every other test is a store
       // WITHOUT it, which must behave exactly as before.
       ...(hfActions ? { hfToken: hfTokenReducer } : {}),
+      // A fixed auth state for the offline-escape hint (S2); absent elsewhere.
+      ...(auth ? { auth: () => auth } : {}),
     },
   });
   if (hfActions) hfActions.forEach((a) => store.dispatch(a));
@@ -404,6 +406,56 @@ describe('Start and the student\'s own Hugging-Face token', () => {
       const view = mount(store);
       expect(view.result.current.model.startBlock).toBeNull();
       expect(view.result.current.model.buttons[0].disabled).toBe(false);
+      view.unmount();
+    }
+  });
+
+  it('the robot is recording or uploading: Start waits with its own sentence and no link (review b)', () => {
+    const store = makeStore({ hfActions: [accountStored(FP_A), robotHolds(FP_B, { busy: true })] });
+    const { result } = mount(store);
+    expect(result.current.model.startBlock.reason).toBe('busy');
+    expect(result.current.model.buttons[0]).toMatchObject({ id: 'start', disabled: true });
+    expect(result.current.problem).toEqual({
+      kind: 'bad', textDe: RECORD_COPY.problem.hfToken.busy, linkToHome: false,
+    });
+    expect(result.current.problem.textDe).not.toMatch(/wird gerade auf den Roboter übertragen/);
+  });
+
+  it('S2: an account state that answers nothing usable is a hint, never a block', async () => {
+    for (const kind of ['error', 'unavailable', 'unsupported']) {
+      const store = makeStore({
+        form: { ...VALID_FORM, userId: undefined },
+        hfActions: [accountFailed(kind), robotHolds(null)],
+      });
+      const view = mount(store);
+      expect(view.result.current.model.startBlock).toBeNull();
+      expect(view.result.current.model.buttons[0].disabled).toBe(false);
+      expect(view.result.current.problem).toEqual({
+        kind: 'warn', textDe: RECORD_COPY.problem.hfTokenHint[kind], linkToHome: true,
+      });
+      view.unmount();
+    }
+  });
+
+  it('S2: the offline login escape names itself instead of only „Keine Benutzer-ID gefunden"', () => {
+    const store = makeStore({
+      form: { ...VALID_FORM, userId: undefined },
+      hfActions: [],
+      auth: { isLoading: false, isAuthenticated: false },
+    });
+    const { result } = mount(store);
+    expect(result.current.model.startBlock).toBeNull();
+    expect(result.current.model.buttons[0].disabled).toBe(false);
+    expect(result.current.problem).toEqual({
+      kind: 'warn', textDe: RECORD_COPY.problem.hfTokenHint.offline, linkToHome: true,
+    });
+  });
+
+  it('S2: no hint for a signed-in student whose state is fine, or before the robot spoke', () => {
+    for (const hfActions of [[accountStored(FP_A), robotHolds(FP_A)], [accountFailed('error')]]) {
+      const store = makeStore({ hfActions, auth: { isLoading: false, isAuthenticated: true } });
+      const view = mount(store);
+      expect(view.result.current.problem).toBeNull();
       view.unmount();
     }
   });

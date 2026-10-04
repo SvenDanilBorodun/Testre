@@ -192,7 +192,15 @@ export const removeHfToken = () => async (dispatch, getState) => {
   }
 };
 
-/** POST /me/hf-token/verify: ask Hugging Face again. Resolves to `{ok, error}`. */
+/**
+ * POST /me/hf-token/verify: ask Hugging Face again. Resolves to `{ok, error}`.
+ *
+ * The cloud re-points `users.hf_username` to the account Hugging Face reports
+ * NOW (the account behind a token can be renamed), so a success updates
+ * `auth.hfUsername` like a save does (review h). A 409 means the token was
+ * removed or replaced meanwhile (in another tab, on another PC): the account
+ * state on this page is stale, so it is read again at once.
+ */
 export const verifyHfToken = () => async (dispatch, getState) => {
   const state = getState();
   const accessToken = accessTokenOf(state);
@@ -210,10 +218,12 @@ export const verifyHfToken = () => async (dispatch, getState) => {
       accountChanged: body.account_changed === true,
       usable: mapped.status === 'stored',
     }));
+    if (mapped.hfUsername) dispatch(setHfUsername(mapped.hfUsername));
     dispatch(kicked());
     return { ok: true, error: null };
   } catch (err) {
     mutationGeneration += 1;
+    if (err?.status === 409 && !epochMoved(getState, epoch)) dispatch(refreshHfTokenAccount());
     return { ok: false, error: sentenceFromError(err) };
   }
 };

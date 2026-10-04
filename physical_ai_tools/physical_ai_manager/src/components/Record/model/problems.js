@@ -57,22 +57,39 @@ const HF_TOKEN_REASON_KEY = Object.freeze({
   none: 'none',
   unusable: 'unusable',
   transfer: 'transfer',
+  busy: 'busy',
   failed: 'failed',
   taken_over: 'takenOver',
   takenOver: 'takenOver',
 });
 
+// The two reasons that resolve by themselves: nothing on the Startseite helps.
+const HF_TOKEN_NO_LINK = new Set(['transfer', 'busy']);
+
 /**
  * Why Start is refused for the student's own Hugging-Face token (the robot does
- * not hold it yet): 'none' | 'unusable' | 'transfer' | 'failed' | 'taken_over'.
- * Every reason but `transfer` sends the student to the Startseite — that one
- * resolves by itself in a moment — so only the others get the link.
+ * not hold it yet): 'none' | 'unusable' | 'transfer' | 'busy' | 'failed' |
+ * 'taken_over'. Every reason but `transfer` and `busy` sends the student to the
+ * Startseite — those two resolve by themselves — so only the others get the link.
  * Returns null for a reason it does not know.
  */
 export function hfTokenProblem(reason) {
   const key = HF_TOKEN_REASON_KEY[reason];
   if (!key) return null;
-  return { kind: 'bad', textDe: P.hfToken[key], linkToHome: key !== 'transfer' };
+  return { kind: 'bad', textDe: P.hfToken[key], linkToHome: !HF_TOKEN_NO_LINK.has(key) };
+}
+
+const HF_TOKEN_HINT_KEYS = new Set(['offline', 'error', 'unavailable', 'unsupported']);
+
+/**
+ * The NON-blocking token hint (owner decision S2): 'offline' | 'error' |
+ * 'unavailable' | 'unsupported' (features/hfToken/hfTokenSelectors::
+ * selectHfRecordHint). A `warn`, never `bad`: it refuses nothing, it explains
+ * the empty Benutzer-ID list and links to the Startseite card. Null otherwise.
+ */
+export function hfTokenHintProblem(reason) {
+  if (!HF_TOKEN_HINT_KEYS.has(reason)) return null;
+  return { kind: 'warn', textDe: P.hfTokenHint[reason], linkToHome: true };
 }
 
 /** The sentence for one slow source. */
@@ -97,6 +114,7 @@ export function sourcesWith(verdicts, verdict) {
  *   5. stalled sources
  *   5b. any other reason Start is refused (the same dataset still uploading) —
  *       where Start is offered; disk and source blocks are rows 4 and 5 already
+ *   5c. the non-blocking Hugging-Face-Token hint (S2), where Start is offered
  *   6. a record [WARNUNG] notice, ≤ 12 s old
  *   7. slow sources
  *   8. a transient info note
@@ -115,6 +133,7 @@ export function deriveProblems({
   activation = null,
   fps = 0,
   startBlock = null,
+  hfTokenHint = null,
   nowWallMs = Date.now(),
 } = {}) {
   const out = [];
@@ -143,6 +162,9 @@ export function deriveProblems({
   if (view === 'READY' && startBlock?.problem && startBlock.kind !== 'disk' && startBlock.kind !== 'source') {
     out.push(startBlock.problem);
   }
+  // Start is NOT off for this one: it only says why the Benutzer-ID list is empty.
+  const hintP = view === 'READY' && startBlock?.kind !== 'hftoken' ? hfTokenHintProblem(hfTokenHint) : null;
+  if (hintP) out.push(hintP);
   if (notice?.kind === 'warn' && notice.text && Number.isFinite(notice.at)
       && nowWallMs - notice.at <= WARN_NOTICE_MS && !cardShows.includes(notice.text)) {
     out.push({ kind: 'warn', textDe: notice.text });

@@ -43,10 +43,12 @@ import {
   robotLegacyConfirmed,
   robotStateLost,
   robotStateReceived,
+  syncSettleElapsed,
   syncWatchdogFired,
 } from '../features/hfToken/hfTokenSlice';
 import {
   selectHfAccount,
+  selectHfAwaitingOwnPush,
   selectHfDecision,
   selectHfEpoch,
   selectHfInSync,
@@ -110,6 +112,8 @@ export default function useHfTokenSync({ onRobotTokenReady } = {}) {
   const syncFailures = useSelector((s) => selectHfSync(s).failures);
   const nextAttemptAt = useSelector((s) => selectHfSync(s).nextAttemptAt);
   const breakerOpen = useSelector((s) => selectHfSync(s).breakerOpen);
+  const awaitingOwnPush = useSelector(selectHfAwaitingOwnPush);
+  const awaitingUntil = useSelector((s) => selectHfSync(s).awaitingUntil ?? null);
   const kick = useSelector(selectHfKick);
   const epoch = useSelector(selectHfEpoch);
 
@@ -242,6 +246,9 @@ export default function useHfTokenSync({ onRobotTokenReady } = {}) {
     if (decision !== 'push' && decision !== 'clear') return undefined;
     // single-flight, and a breaker that waits for the student
     if (syncPhase === 'pushing' || syncPhase === 'clearing' || breakerOpen) return undefined;
+    // A push that no state has shown yet (review c): the foreign slot this
+    // decision rests on may be older than the push. Effect 3b ends the wait.
+    if (awaitingOwnPush) return undefined;
     const pause = nextAttemptAt === null ? 0 : nextAttemptAt - Date.now();
     if (pause > 0) {
       const timer = setTimeout(wakeReconcile, pause + TIMER_SLACK_MS);
@@ -253,8 +260,19 @@ export default function useHfTokenSync({ onRobotTokenReady } = {}) {
     // a reason to look again: a failure moves `nextAttemptAt`, a kick is an
     // explicit request, a nudge is this effect's own timer, and a new epoch is a
     // new student.
-  }, [robotEnabled, decision, syncPhase, breakerOpen, nextAttemptAt, syncFailures, kick, nudge, epoch,
-    wakeReconcile, dispatch]);
+  }, [robotEnabled, decision, syncPhase, breakerOpen, awaitingOwnPush, nextAttemptAt, syncFailures, kick,
+    nudge, epoch, wakeReconcile, dispatch]);
+
+  // ── 3b. the end of the wait to SEE a push (review c) ──────────────────────
+  // An in-sync state ends it at once (the slice); this ends it when the robot
+  // never showed the push within WRITE_SETTLE_MS. Then a foreign slot is a
+  // takeover again (the dampener) and an empty one is pushed once more.
+  useEffect(() => {
+    if (awaitingUntil === null) return undefined;
+    const delay = Math.max(0, awaitingUntil - Date.now()) + TIMER_SLACK_MS;
+    const timer = setTimeout(() => dispatch(syncSettleElapsed()), delay);
+    return () => clearTimeout(timer);
+  }, [awaitingUntil, dispatch]);
 
   // ── 4. the watchdog (audit M10) ───────────────────────────────────────────
   // A push or clear stays „in flight" until the thunk's `finally` says

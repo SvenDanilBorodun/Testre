@@ -26,15 +26,19 @@ import reducer, {
   syncPhaseSet,
   syncPushed,
   syncReset,
+  syncSettleElapsed,
   syncWatchdogFired,
 } from '../hfTokenSlice';
 import {
   selectHfAccount,
+  selectHfAwaitingOwnPush,
   selectHfDecision,
   selectHfEpoch,
   selectHfInSync,
   selectHfKick,
   selectHfListReloadAllowed,
+  selectHfOfflineEscape,
+  selectHfRecordHint,
   selectHfRobot,
   selectHfStartBlock,
   selectHfSync,
@@ -68,7 +72,8 @@ describe('hfToken slice — initial state', () => {
     });
     expect(s.sync).toEqual({
       phase: 'idle', phaseSince: null, attempt: 0, failures: 0, nextAttemptAt: null, lastOwnFp: null,
-      clearedFp: null, lastMessage: null, autoWrites: [], breakerOpen: false,
+      clearedFp: null, awaitingOwnFp: null, awaitingUntil: null, lastMessage: null, autoWrites: [],
+      breakerOpen: false,
     });
     expect(s.epoch).toBe(0);
     expect(s.kick).toBe(0);
@@ -426,6 +431,127 @@ describe('selectHfInSync / selectHfDecision / selectHfStartBlock on real state',
   it('start block "failed" follows the failure count', () => {
     const base = run(initial(), stored(A), robotMsg({ present: true, fp: B }), syncFailed({}), syncFailed({}));
     expect(selectHfStartBlock(wrap(base))).toBe('failed');
+  });
+});
+
+describe('no „taken over" from a state older than my push (review c, 2026-10-04)', () => {
+  const wrap = (hfToken, extra = {}) => ({ hfToken, ...extra });
+  // The previous student's token B is in the slot; I push A at t = 50 s.
+  const pushedOverB = () => run(initial(), stored(A), robotMsg({ present: true, fp: B }), syncPushed({ fp: A }, 50_000));
+
+  it('a successful push waits to be SEEN, and keeps the dampener memory', () => {
+    const s = pushedOverB();
+    expect(s.sync).toMatchObject({ lastOwnFp: A, awaitingOwnFp: A, awaitingUntil: 50_000 + WRITE_SETTLE_MS });
+    expect(selectHfAwaitingOwnPush(wrap(s))).toBe(true);
+  });
+
+  it('the stale slot right after the push is neither taken over on the card nor on the Aufnahme page', () => {
+    const s = pushedOverB();
+    expect(selectHfDecision(wrap(s))).toBe('push');
+    expect(selectHfStartBlock(wrap(s))).toBe('transfer');
+    // ... nor after another stale state message
+    const again = reducer(s, robotMsg({ present: true, fp: B }));
+    expect(selectHfDecision(wrap(again))).toBe('push');
+    expect(selectHfStartBlock(wrap(again))).toBe('transfer');
+  });
+
+  it('a state that shows my token ends the wait, and a later foreign slot IS a takeover at once', () => {
+    const seen = reducer(pushedOverB(), robotMsg({ present: true, fp: A }));
+    expect(seen.sync).toMatchObject({ awaitingOwnFp: null, awaitingUntil: null, lastOwnFp: A });
+    expect(selectHfDecision(wrap(seen))).toBe('noop');
+    const taken = reducer(seen, robotMsg({ present: true, fp: B }));
+    expect(selectHfDecision(wrap(taken))).toBe('taken_over');
+    expect(selectHfStartBlock(wrap(taken))).toBe('taken_over');
+  });
+
+  it('a push never shown within the wait turns into the dampener, not into another write', () => {
+    const s = pushedOverB();
+    const early = reducer(s, syncSettleElapsed(50_000 + WRITE_SETTLE_MS - 1)); // a stale timer
+    expect(early.sync.awaitingOwnFp).toBe(A);
+    const late = reducer(s, syncSettleElapsed(50_000 + WRITE_SETTLE_MS));
+    expect(late.sync).toMatchObject({ awaitingOwnFp: null, awaitingUntil: null, lastOwnFp: A });
+    expect(selectHfDecision(wrap(late))).toBe('taken_over');
+  });
+
+  it('every reset of the bookkeeping ends the wait', () => {
+    for (const action of [syncCleared({ fp: B }), syncForceRetransfer(), accountRemoved(), signedOut(),
+      identityChanged(), syncReset()]) {
+      const s = reducer(pushedOverB(), action);
+      expect(s.sync.awaitingOwnFp ?? null).toBeNull();
+      expect(s.sync.awaitingUntil ?? null).toBeNull();
+    }
+  });
+
+  it('settling with nothing awaited is a no-op', () => {
+    const s = run(initial(), stored(A));
+    expect(reducer(s, syncSettleElapsed(1)).sync).toEqual(s.sync);
+  });
+});
+
+describe('the busy start block (review b, 2026-10-04)', () => {
+  const wrap = (hfToken, extra = {}) => ({ hfToken, ...extra });
+
+  it('a robot that refuses for now (recording / transfer) is "busy", not "transfer"', () => {
+    const s = run(initial(), stored(A), robotMsg({ present: true, fp: B, busy: true }));
+    expect(selectHfDecision(wrap(s))).toBe('wait');
+    expect(selectHfStartBlock(wrap(s))).toBe('busy');
+    const empty = run(initial(), stored(A), robotMsg({ busy: true }));
+    expect(selectHfStartBlock(wrap(empty))).toBe('busy');
+  });
+
+  it('busy wins over a failure count (nothing is tried while busy), taken over wins over busy', () => {
+    const failed = run(initial(), stored(A), robotMsg({ present: true, fp: B, busy: true }),
+      syncFailed({}), syncFailed({}));
+    expect(selectHfStartBlock(wrap(failed))).toBe('busy');
+    const taken = run(initial(), stored(A), robotMsg({ present: true, fp: A }),
+      robotMsg({ present: true, fp: B, busy: true }));
+    expect(selectHfStartBlock(wrap(taken))).toBe('taken_over');
+  });
+
+  it('in sync while busy blocks nothing', () => {
+    const s = run(initial(), stored(A), robotMsg({ present: true, fp: A, busy: true }));
+    expect(selectHfStartBlock(wrap(s))).toBeNull();
+  });
+});
+
+describe('selectHfRecordHint — the non-blocking Aufnahme hint (owner decision S2)', () => {
+  const signedIn = { isLoading: false, isAuthenticated: true };
+  const offline = { isLoading: false, isAuthenticated: false };
+  const wrap = (hfToken, auth = signedIn, extra = {}) => ({ hfToken, auth, ...extra });
+  const accepting = (state) => reducer(state, robotMsg({ accepts: true }));
+
+  it('names an account state that answers nothing a decision could use', () => {
+    expect(selectHfRecordHint(wrap(accepting(run(initial(), accountFailed('error')))))).toBe('error');
+    expect(selectHfRecordHint(wrap(accepting(run(initial(), accountFailed('unavailable')))))).toBe('unavailable');
+    expect(selectHfRecordHint(wrap(accepting(run(initial(), accountFailed('unsupported')))))).toBe('unsupported');
+  });
+
+  it('says nothing for a usable account state or one still loading', () => {
+    for (const s of [accepting(run(initial(), stored(A))), accepting(run(initial(), accountLoaded({ status: 'none' }))),
+      accepting(initial()), accepting(run(initial(), accountLoading()))]) {
+      expect(selectHfRecordHint(wrap(s))).toBeNull();
+    }
+  });
+
+  it('needs a robot known to take a personal token (except offline)', () => {
+    const err = run(initial(), accountFailed('error'));
+    expect(selectHfRecordHint(wrap(err))).toBeNull();                                  // robot unknown
+    expect(selectHfRecordHint(wrap(reducer(err, robotMsg({ accepts: false }))))).toBeNull();
+  });
+
+  it('the offline login escape is its own hint, robot state or not', () => {
+    expect(selectHfOfflineEscape({ auth: offline })).toBe(true);
+    expect(selectHfOfflineEscape({ auth: { isLoading: true, isAuthenticated: false } })).toBe(false);
+    expect(selectHfOfflineEscape({ auth: signedIn })).toBe(false);
+    expect(selectHfOfflineEscape({})).toBe(false);
+    expect(selectHfRecordHint(wrap(initial(), offline))).toBe('offline');
+  });
+
+  it('never without the slice, and never under a claimed Jetson', () => {
+    expect(selectHfRecordHint({ auth: offline })).toBeNull();
+    const err = accepting(run(initial(), accountFailed('error')));
+    expect(selectHfRecordHint(wrap(err, signedIn, { jetson: { status: 'connected' } }))).toBeNull();
+    expect(selectHfRecordHint(wrap(initial(), offline, { jetson: { status: 'connected' } }))).toBeNull();
   });
 });
 

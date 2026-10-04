@@ -53,7 +53,10 @@ class FilesAndOrder(unittest.TestCase):
         for path in (M043, M044, M045, R043, R044, R045):
             self.assertTrue(path.is_file(), path)
         names = sorted(p.name for p in _MIG.glob('*.sql'))
-        self.assertEqual(names[-4:], [M042.name, M043.name, M044.name, M045.name])
+        # 042..045 in this order, nothing between them (a later migration, 046
+        # onwards, may follow; test_supabase_046.py fences its own place).
+        start = names.index(M042.name)
+        self.assertEqual(names[start:start + 4], [M042.name, M043.name, M044.name, M045.name])
 
     def test_037_is_still_skipped(self):
         self.assertFalse(any('_037_' in p.name for p in _MIG.glob('*.sql')))

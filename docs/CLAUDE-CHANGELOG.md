@@ -55,8 +55,8 @@ log (V1-6). Each with its test (vitest, mutation-checked) and the touched screen
 (Playwright: computed styles, the ⋮ position on every card variant, the dialogs, the banners, the
 toasts, the delete and download sequences sampled every 30 ms).
 
-**Numbers on the page branch.** React 238 files / 4222 passed + 2 expected fail, twice (integrated
-branch 236 / 4165); eslint clean; the production entry chunk +3.4 KB raw (+1.2 KB gzip), no
+**Numbers on the page branch.** React 238 files / 4224 passed + 2 expected fail, twice (integrated
+branch 236 / 4165); eslint clean; the production entry chunk +3.5 KB raw (+1.2 KB gzip), no
 CodeMirror or three.js runtime token; `nginx -t` clean on both configs; `robotis_ai_setup/tests`
 2218 OK (python3, unchanged). The Aufnahme form still starts private (N7, the owner's own change).
 

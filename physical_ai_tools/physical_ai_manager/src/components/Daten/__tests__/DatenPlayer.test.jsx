@@ -325,11 +325,11 @@ describe('the tools (§G6, §J.3, R-9)', () => {
     finishJob();
     await waitFor(() => expect(actionToast()).toBeDefined());
     const [body, opts] = actionToast();
-    const t = render(body({ id: 't1' }));
-    expect(t.container.textContent).toContain(UPLOAD_TOAST);
-    expect(within(t.container).getByRole('button', { name: COPY.toast.uploadAction })).toBeInTheDocument();
+    const view = render(body({ id: 't1' }));
+    expect(view.container.textContent).toContain(UPLOAD_TOAST);
+    expect(within(view.container).getByRole('button', { name: COPY.toast.uploadAction })).toBeInTheDocument();
     expect(opts).toEqual({ duration: 8000 });
-    fireEvent.click(within(t.container).getByRole('button', { name: COPY.toast.uploadAction }));
+    fireEvent.click(within(view.container).getByRole('button', { name: COPY.toast.uploadAction }));
     const dlg = await screen.findByRole('dialog');
     await within(dlg).findByText(fill(COPY.upload.newTitle, { name: 'omx_f_w' }));
   });
@@ -343,32 +343,36 @@ describe('the tools (§G6, §J.3, R-9)', () => {
       : realFetch(url)));
     finishJob();
     await waitFor(() => expect(actionToast()).toBeDefined());
-    const t = render(actionToast()[0]({ id: 't2' }));
-    expect(t.container.textContent).toContain(UPLOAD_TOAST);
+    const view = render(actionToast()[0]({ id: 't2' }));
+    expect(view.container.textContent).toContain(UPLOAD_TOAST);
   });
 
-  it.each([
-    ['only here (local)', { state: 'local', head: null }, 'local'],
-    ['a newer hub copy (now both sides changed)', { state: 'newer', head: 'h' }, 'conflict'],
-  ])('%s: the plain toast — nothing invites a plain upload', async (_label, before, after) => {
-    world.sync = { [W]: before };
-    const { store } = await openPlayerView();
-    if (before.state === 'newer') {
-      key('Delete');
-      fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: COPY.newer.anyway }));
-      await waitFor(() => expect(store.getState().editDataset.marks[W].indices).toEqual([0]));
-      fireEvent.click(await screen.findByRole('button', { name: COPY.player.deleteMarked }));
-      fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '1 Episode löschen' }));
-      await waitFor(() => expect(commandCalls('edit')).toHaveLength(1));
-    } else {
-      await deleteFirstEpisode();
-    }
+  async function plainToastAfter(after, head) {
     world.local = [local(W, { total_episodes: 2, meta_digest: 'd-after' })];
-    world.sync = { [W]: { state: after, head: before.head } };
+    world.sync = { [W]: { state: after, head } };
     world.summaries[W] = summary(W, 2, { meta_digest: 'd-after' });
     finishJob();
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('1 Episode gelöscht.', expect.anything()));
     expect(actionToast()).toBeUndefined();
+  }
+
+  it('only here (local): the plain toast', async () => {
+    world.sync = { [W]: { state: 'local', head: null } };
+    await openPlayerView();
+    await deleteFirstEpisode();
+    await plainToastAfter('local', null);
+  });
+
+  it('a newer hub copy edited anyway (now both sides changed): the plain toast — nothing invites a plain upload', async () => {
+    world.sync = { [W]: { state: 'newer', head: 'h' } };
+    const { store } = await openPlayerView();
+    key('Delete');
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: COPY.newer.anyway }));
+    await waitFor(() => expect(store.getState().editDataset.marks[W].indices).toEqual([0]));
+    fireEvent.click(await screen.findByRole('button', { name: COPY.player.deleteMarked }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '1 Episode löschen' }));
+    await waitFor(() => expect(commandCalls('edit')).toHaveLength(1));
+    await plainToastAfter('conflict', 'h');
   });
 
   it('a failed job: its German message, the dialog closes', async () => {

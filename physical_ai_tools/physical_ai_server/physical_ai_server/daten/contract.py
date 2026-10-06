@@ -44,7 +44,11 @@ CLIP_CACHE_MAX_BYTES = 96 * 2 ** 20
 MAX_CONNECTIONS = 32
 SOCKET_TIMEOUT_S = 30
 MEDIA_WORKERS = 2
-MEDIA_QUEUE_MAX = 16
+# T2-6: as deep as the connection cap, so the queue is never the binding limit: a media
+# request the cap admits WAITS (at most MEDIA_WAIT_S) — a library's cold thumbnails and the
+# player's clips never meet a full queue; the hostile-client limits are the connection cap,
+# MEDIA_WORKERS and MEDIA_WAIT_S.
+MEDIA_QUEUE_MAX = 32                     # = MAX_CONNECTIONS (a test pins the relation)
 MEDIA_WAIT_S = 20
 HUB_WORKERS = 2
 HUB_QUEUE_MAX = 8

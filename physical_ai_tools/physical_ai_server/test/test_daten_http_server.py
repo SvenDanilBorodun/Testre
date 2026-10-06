@@ -5,8 +5,11 @@ wrong-scope token are 403 with their codes; a ``ds`` token reads only the
 dataset it names (the URL carries none); ``..``/absolute/symlinked ids are
 refused; no body ever contains the dataset root; every answer is JSON or media
 with ``nosniff``. The pools: with both media slots busy a third media request
-WAITS and is answered when a slot frees; the 17th waiter is ``503 overloaded``
-with ``Retry-After``; a waiter past ``MEDIA_WAIT_S`` (patched) is 503; a hub
+WAITS and is answered when a slot frees — every media request the connection
+cap admits waits (T2-6: the queue is as deep as the cap, so a library's cold
+thumbnails or the player's clips never meet a full queue), a full queue of a
+smaller pool is still ``503 overloaded`` with ``Retry-After``; a waiter past
+``MEDIA_WAIT_S`` (patched) is 503; a hub
 request is answered while both media slots are busy; N parallel GETs of one
 thumbnail build it once and all end 200; connection 33 is 503; an idle socket
 is closed after the (patched) timeout. An unaligned episode's clip is
@@ -288,7 +291,10 @@ def _background(srv, path, out):
     return t
 
 
-def test_media_requests_wait_for_a_slot_and_the_17th_waiter_is_refused(root, tmp_path):
+def test_every_media_request_the_connection_cap_admits_waits_for_a_slot(root, tmp_path):
+    """T2-6: both media slots busy and every other connection but one waiting
+    for media — none is refused; a hub request still gets the last connection
+    and is answered while the media slots are busy; released, all end 200."""
     srv = Running(root, tmp_path)
     try:
         gate = Gate(srv.library)
@@ -296,11 +302,10 @@ def test_media_requests_wait_for_a_slot_and_the_17th_waiter_is_refused(root, tmp
         out = []
         threads = [_background(srv, url, out) for _ in range(C.MEDIA_WORKERS)]
         assert gate.wait_entered(C.MEDIA_WORKERS)
-        threads += [_background(srv, url, out) for _ in range(C.MEDIA_QUEUE_MAX)]
-        assert _wait(lambda: srv.server.sidecar.media._waiting == C.MEDIA_QUEUE_MAX)
-        status, headers, body = srv.get(url)                           # the 17th waiter
-        assert (status, json.loads(body), headers['retry-after']) == (503, {'error': 'overloaded'}, '2')
-        # a hub request is answered while both media slots are busy
+        waiting = C.MAX_CONNECTIONS - C.MEDIA_WORKERS - 1             # one connection left for the hub request
+        threads += [_background(srv, url, out) for _ in range(waiting)]
+        assert _wait(lambda: srv.server.sidecar.media._waiting == waiting)
+        assert out == [], 'nobody was refused'
         srv.api.add(f'{NS}/omx_f_found', head='f1')
         t0 = time.monotonic()
         assert srv.get(f'{lib_url()}/hub/probe?repo={NS}/omx_f_found')[0] == 200
@@ -309,7 +314,35 @@ def test_media_requests_wait_for_a_slot_and_the_17th_waiter_is_refused(root, tmp
         gate.release.set()
         for t in threads:
             t.join(30)
-        assert [r[0] for r in out] == [200] * (C.MEDIA_WORKERS + C.MEDIA_QUEUE_MAX)
+        assert [r[0] for r in out] == [200] * (C.MEDIA_WORKERS + waiting)
+    finally:
+        srv.close()
+
+
+def test_the_media_queue_is_never_the_binding_limit():
+    """T2-6: a media request is refused only past MEDIA_WAIT_S or beyond the
+    connection cap (the hostile-client limits), never by a queue shallower than
+    the connections that could be waiting in it."""
+    assert C.MEDIA_QUEUE_MAX >= C.MAX_CONNECTIONS - C.MEDIA_WORKERS
+
+
+def test_a_full_queue_is_still_refused_with_retry_after(root, tmp_path):
+    """The Pool's queue bound itself (a smaller pool than the contract's)."""
+    srv = Running(root, tmp_path, media=HS.Pool(C.MEDIA_WORKERS, 3, C.MEDIA_WAIT_S))
+    try:
+        gate = Gate(srv.library)
+        url = f'{ds(NS + "/omx_f_ok")}/episode/0/data'
+        out = []
+        threads = [_background(srv, url, out) for _ in range(C.MEDIA_WORKERS)]
+        assert gate.wait_entered(C.MEDIA_WORKERS)
+        threads += [_background(srv, url, out) for _ in range(3)]
+        assert _wait(lambda: srv.server.sidecar.media._waiting == 3)
+        status, headers, body = srv.get(url)                           # the 4th waiter
+        assert (status, json.loads(body), headers['retry-after']) == (503, {'error': 'overloaded'}, '2')
+        gate.release.set()
+        for t in threads:
+            t.join(30)
+        assert [r[0] for r in out] == [200] * (C.MEDIA_WORKERS + 3)
     finally:
         srv.close()
 
@@ -427,7 +460,7 @@ def test_the_load_limits_are_the_specs():
     assert C.MAX_CONNECTIONS == 32
     assert C.SOCKET_TIMEOUT_S == 30
     assert C.MEDIA_WORKERS == 2
-    assert C.MEDIA_QUEUE_MAX == 16
+    assert C.MEDIA_QUEUE_MAX == 32 == C.MAX_CONNECTIONS
     assert C.MEDIA_WAIT_S == 20
     assert C.HUB_WORKERS == 2
     assert C.HUB_QUEUE_MAX == 8

@@ -39,7 +39,9 @@ Load limits (§B8, R-3, R-21): at most ``MAX_CONNECTIONS`` sockets (beyond:
 ``503 overloaded``, ``Retry-After: 2``, closed), each with a
 ``SOCKET_TIMEOUT_S`` timeout; a media pool (``MEDIA_WORKERS`` at once,
 ``MEDIA_QUEUE_MAX`` waiting up to ``MEDIA_WAIT_S``) for anything that reads
-parquet or video; its own hub pool (``HUB_WORKERS``/``HUB_QUEUE_MAX``/
+parquet or video — its queue is as deep as the connection cap, so a media
+request the cap admits waits for a slot and is refused only past
+``MEDIA_WAIT_S`` (T2-6); its own hub pool (``HUB_WORKERS``/``HUB_QUEUE_MAX``/
 ``HUB_WAIT_S``) so a slow Hugging Face never holds a media slot; byte serving
 from the clip cache is not gated.
 

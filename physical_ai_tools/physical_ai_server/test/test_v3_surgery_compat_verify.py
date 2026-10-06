@@ -201,6 +201,7 @@ def test_verify_loads_with_lerobot_and_decodes_the_first_and_last_frame_of_every
     root = build_dataset(tmp_path / 'lena' / 'omx_f_v', lengths=(20, 21, 22))
     assert V.verify(root, _self_parts(root)) == []
     assert lerobot_calls['load'] == [('verify/check', root.resolve())]
+    assert V.DECODE_TOLERANCE_S == 1e-4                     # LeRobot's train-time tolerance_s
     fps = V.Source(root).info['fps']
     want = []
     for ep, length in enumerate((20, 21, 22)):

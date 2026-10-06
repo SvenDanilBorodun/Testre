@@ -284,15 +284,15 @@ HUB_TAG_FAILED_DE = ('Der Versions-Tag des Datensatzes konnte nicht aktualisiert
 # (components/Record/model/finishModel.js::POINTS_TO_DATEN_TAB).
 
 # §E2 step 3/6: the hub moved between the decision and the commit (Hugging Face
-# refused the commit's stale parent, or our read-back found other data). The
-# „Beide behalten" sentence states G-2 (V1-5): the new episodes of BOTH sides
-# are kept; what either side deleted or replaced since the last sync stays gone
-# (the page's „Beide behalten" tip says the same, datenCopy.js).
+# refused the commit's stale parent, or our read-back found other data). R2-1:
+# the sentence makes no promise about what „Beide behalten" keeps, because that
+# depends on the dataset (three-way with a sync record, the union without one);
+# it points to the Daten tab, whose per-dataset tip states it exactly
+# (datenCopy.js keepBoth.tip / keepBoth.tipNoBase).
 HUB_CHANGED_SINCE_CHECK_DE = ('Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde '
                               'nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version '
-                              'du behalten willst. „Beide behalten“ behält alle neuen Episoden von hier '
-                              'und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite '
-                              'gelöscht oder ersetzt wurde, bleibt weg.')
+                              'du behalten willst. Dort steht auch, was „Beide behalten“ bei diesem '
+                              'Datensatz behält.')
 # §E2 step 0 (audit M3): a crash marker — a running session, or one never finalized.
 # T1-3: both local-gate refusals happen before anything reaches the hub, also for
 # a copy that was never uploaded (no online version): neither sentence assumes one.

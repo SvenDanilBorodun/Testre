@@ -220,6 +220,16 @@ describe('the player (§F)', () => {
     expect(poseSource().version).not.toBe(f.version);
   });
 
+  it('the open dataset turns crashed (a session into it ended unfinished): the player stays, without a sync badge (V2-12)', async () => {
+    await openPlayerView();
+    expect(document.querySelector('.dat-pl-meta [data-sync]')).not.toBeNull();
+    world.local = [local(W, { total_episodes: 3, state: 'in_session' })];
+    act(() => setDaten({ busy: [{ id: W, kind: 'record' }] }));
+    act(() => setDaten({ busy: [] }));
+    await waitFor(() => expect(document.querySelector('.dat-pl-meta [data-sync]')).toBeNull());
+    expect(screen.getByText(COPY.player.eyebrow)).toBeInTheDocument();
+  });
+
   it('the twin is not mounted while the robot link is down', async () => {
     const store = makeStore({ connected: false });
     store.dispatch(openPlayer(W));

@@ -245,7 +245,9 @@ function PlayerView({
           <h1 className="dat-title">{model.title}</h1>
           <div className="dat-pl-meta">
             <span className="dat-mono">{id}</span>
-            <SyncBadge state={model.badge.state} reason={model.badge.reason} overlay={model.badge.overlay} ownerName={model.badge.ownerName} />
+            {model.badge ? (
+              <SyncBadge state={model.badge.state} reason={model.badge.reason} overlay={model.badge.overlay} ownerName={model.badge.ownerName} />
+            ) : null}
             {ownerName ? <span className="dat-owner"><Icon name="users" size={13} />{fill(COPY.player.groupOwner, { name: ownerName })}</span> : null}
           </div>
         </div>

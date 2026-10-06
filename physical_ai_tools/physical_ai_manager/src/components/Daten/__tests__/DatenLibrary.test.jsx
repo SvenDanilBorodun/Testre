@@ -228,6 +228,8 @@ describe('cards (§C3, §G10, H-1, H-3, §G14)', () => {
     expect(cardText(id('hp'))).toContain(COPY.lib.hintsPending);
     expect(cardText(id('cur'))).toContain('2 von 12 Episoden mit Hinweisen');
     expect(cardText(id('bad'))).toContain(COPY.card.unsupported);
+    // a dataset this page cannot open or upload shows no sync badge (V2-12)
+    expect(card(id('bad')).querySelector('[data-sync]')).toBeNull();
     expect(within(card(id('bad'))).queryByText(COPY.card.view)).toBeNull();
     expect(within(card(id('bad'))).getByText(COPY.card.deleteWhole)).toBeInTheDocument();
     expect(cardText(`${PARTNER}/omx_f_p`)).toContain('Max Weber');
@@ -401,6 +403,23 @@ describe('the crashed card (H-1, T-1, U-3, U-4)', () => {
     const buttons = within(card(K).querySelector('.dat-card-actions')).getAllByRole('button').map((b) => b.textContent);
     expect(buttons).toEqual(expect.arrayContaining([COPY.card.loadOnline, COPY.card.deleteWhole]));
     expect(buttons.some((t) => t === COPY.card.view || t === COPY.card.upload)).toBe(false);
+  });
+
+  // V2-12: the line says upload is impossible, so no sync badge may say
+  // „Hier geändert – nicht hochgeladen" (or „Nur hier") beside it.
+  it.each([
+    ['changed', { state: 'changed', head: `head-${K}` }],
+    ['local', { state: 'local', head: null }],
+    ['unknown', { state: 'unknown', reason: 'not_asked', head: null }],
+  ])('the crashed card carries no sync badge (robot verdict %s)', async (_s, sync) => {
+    world.sync = { [K]: sync };
+    await mount();
+    await waitFor(() => expect(card(K)).not.toBeNull());
+    act(() => setDaten({ busy: [] }));
+    await waitFor(() => expect(cardText(K)).toContain(COPY.card.crashed));
+    expect(card(K).querySelector('[data-sync]')).toBeNull();
+    expect(cardText(K)).not.toContain(COPY.sync.changedLabel);
+    expect(within(card(K)).queryByText(COPY.sync.refresh)).toBeNull();
   });
 
   it('a live recording of the same id shows „Wird gerade aufgenommen", never the crashed line', async () => {

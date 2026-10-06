@@ -93,15 +93,17 @@ export default function DatasetCard({
         {m.thumb === 'online' ? (
           <div className="dat-veil"><span><Icon name="cloud" size={14} />{COPY.card.previewAfterLoad}</span></div>
         ) : null}
-        <div className="dat-badge-wrap">
-          <SyncBadge
-            state={m.badge.state}
-            reason={m.badge.reason}
-            overlay={m.badge.overlay}
-            ownerName={m.badge.ownerName}
-            onRefresh={onRefreshSync}
-          />
-        </div>
+        {m.badge ? (
+          <div className="dat-badge-wrap">
+            <SyncBadge
+              state={m.badge.state}
+              reason={m.badge.reason}
+              overlay={m.badge.overlay}
+              ownerName={m.badge.ownerName}
+              onRefresh={onRefreshSync}
+            />
+          </div>
+        ) : null}
         {m.mergePick ? (
           <button
             type="button"

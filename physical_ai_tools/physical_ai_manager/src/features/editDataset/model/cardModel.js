@@ -15,6 +15,10 @@
 //   crashed     a session left it unfinished (H-1): its line, „Online-Version
 //               laden" (only with a proven hub copy) and „Ganzen Datensatz löschen"
 //   broken      incomplete / old format / unsupported: its line, delete only
+//
+// A crashed or broken card carries NO sync badge (`badge: null`, V2-12): its
+// line says it cannot be uploaded, so „Hier geändert – nicht hochgeladen" or
+// „Nur hier" beside it would invite an upload the robot refuses.
 //   online      only on Hugging Face: „Laden und ansehen"
 //   ok          the seven sync states, with the busy overlays of daten_state
 //
@@ -196,6 +200,7 @@ export function cardModel(card, ctx) {
     return {
       ...base,
       kind: 'crashed',
+      badge: null,
       thumb: 'none',
       hint: { kind: 'bad', text: COPY.card.crashed, icon: 'failed' },
       actions,
@@ -210,6 +215,7 @@ export function cardModel(card, ctx) {
     return {
       ...base,
       kind: 'broken',
+      badge: null,
       thumb: 'none',
       hint: { kind: 'bad', text, icon: 'failed' },
       actions: [{ id: 'delete_whole', label: COPY.card.deleteWhole, icon: 'trash', variant: 'danger' }],

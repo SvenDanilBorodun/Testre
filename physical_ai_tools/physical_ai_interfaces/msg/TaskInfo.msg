@@ -17,11 +17,10 @@ bool push_to_hub
 # This default protects ONLY an OMITTING client. React never omits the field:
 # useRosServiceCaller sends `private_mode: Boolean(taskInfo.privateMode)`
 # EXPLICITLY on every recording, so the UI path never reads this default and
-# takes its value from taskSlice.defaultTaskInfo.privateMode, which is now
-# `true` too. The old wording here said "React always sends true" — that
-# described the UI's value rather than its behaviour and stopped being true
-# when the checkbox default moved. Keep in lockstep with
-# data_manager._upload_dataset's `private=True`.
+# takes its value from taskSlice.defaultTaskInfo.privateMode, which is `false`
+# (the page starts on „Öffentlich", owner decision N7, Daten 2.0) — the two
+# defaults are deliberately opposite. Never flip this one to match the page.
+# Keep in lockstep with data_manager._upload_dataset's `private=True`.
 bool private_mode true
 bool use_optimized_save_mode
 bool record_inference_mode

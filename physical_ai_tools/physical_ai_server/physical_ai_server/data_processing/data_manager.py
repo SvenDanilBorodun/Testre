@@ -2168,9 +2168,8 @@ class DataManager:
         ``private_mode: Boolean(taskInfo.privateMode)`` EXPLICITLY on every
         recording — so the UI path never reads the ``.msg`` default at all and
         gets ``taskSlice.defaultTaskInfo.privateMode`` instead. That UI default
-        is now ``true`` as well. The old wording here ("React always sends
-        ``private_mode: true``") described the UI's value, not its behaviour,
-        and was false the moment the checkbox default moved; the durable fact
+        is ``false`` (the page starts on „Öffentlich", owner decision N7,
+        Daten 2.0), deliberately opposite to this fail-safe; the durable fact
         is that React always sends the field EXPLICITLY.
         """
         private = bool(private)

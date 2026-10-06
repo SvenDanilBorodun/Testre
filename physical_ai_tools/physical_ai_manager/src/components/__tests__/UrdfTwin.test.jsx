@@ -1845,3 +1845,110 @@ describe('UrdfTwin — viewPreset', () => {
     expect(() => unmount()).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// poseSource (Daten 2.0, spec §F7, §G5, G-17): the player drives the twin with
+// a RECORDED pose — the follower state as the arm, the leader's action as a
+// translucent ghost in the legend's violet. While a source is set no rosbridge
+// subscription is opened; its ghost is a clone of its own, so neither ghost
+// layer's cleanup can remove the other's.
+// ---------------------------------------------------------------------------
+describe('UrdfTwin — poseSource (Daten 2.0)', () => {
+  const LEADER = '#7A6FE0';
+  async function mountLoaded(ui) {
+    const utils = render(ui);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    return utils;
+  }
+  const source = (version, ghost = null) => () => ({
+    version,
+    pose: { names: ['joint1', 'joint2', 'not_a_joint'], positions: [0.2, -0.3, 9] },
+    ghost,
+  });
+  const GHOST = { names: ['joint1', 'joint2'], positions: [0.25, -0.35], color: LEADER };
+  const sourceGhostMaterials = () => mockStandardMaterials.filter((m) => m.opts && m.opts.color === LEADER);
+
+  test('opens no rosbridge subscription and moves the arm to the source pose', async () => {
+    await mountLoaded(<UrdfTwin poseSource={source(1)} showChrome={false} />);
+    await settleFrames();
+    expect(mockTopicCtor).not.toHaveBeenCalled();
+    expect(mockRobot.applied).toContainEqual(['joint1', 0.2]);
+    expect(mockRobot.applied).toContainEqual(['joint2', -0.3]);
+    expect(mockRobot.applied.some(([n]) => n === 'not_a_joint')).toBe(false);
+  });
+
+  test('applies a pose only when its version changes', async () => {
+    let version = 1;
+    let calls = 0;
+    const src = () => { calls += 1; return { version, pose: { names: ['joint1'], positions: [version / 10] }, ghost: null }; };
+    await mountLoaded(<UrdfTwin poseSource={src} />);
+    await settleFrames();
+    const applied = mockRobot.applied.length;
+    await settleFrames();
+    expect(calls).toBeGreaterThan(0);
+    expect(mockRobot.applied.length).toBe(applied);
+    version = 2;
+    await settleFrames();
+    expect(mockRobot.applied[mockRobot.applied.length - 1]).toEqual(['joint1', 0.2]);
+  });
+
+  test('with a ghost it builds exactly one clone, in the source\'s colour', async () => {
+    await mountLoaded(<UrdfTwin poseSource={source(1, GHOST)} />);
+    await settleFrames();
+    expect(mockRobot.clone).toHaveBeenCalledTimes(1);
+    const [ghost] = mockGhosts;
+    expect(mockSceneOps).toContainEqual(['add', ghost]);
+    const [mat] = sourceGhostMaterials();
+    expect(mat.opts).toEqual({ color: LEADER, transparent: true, opacity: 0.35, depthWrite: false });
+    expect(ghost.setJointValue).toHaveBeenCalledWith('joint1', 0.25);
+    await settleFrames();
+    expect(mockRobot.clone).toHaveBeenCalledTimes(1);
+  });
+
+  test('ghost: null removes the source ghost and frees its one material', async () => {
+    let ghostOn = true;
+    let version = 1;
+    const src = () => ({ version, pose: { names: ['joint1'], positions: [0.1] }, ghost: ghostOn ? GHOST : null });
+    await mountLoaded(<UrdfTwin poseSource={src} />);
+    await settleFrames();
+    const [ghost] = mockGhosts;
+    const [mat] = sourceGhostMaterials();
+    ghostOn = false;
+    version = 2;
+    await settleFrames();
+    expect(mockSceneOps).toContainEqual(['remove', ghost]);
+    expect(mat.dispose).toHaveBeenCalledTimes(1);
+    ghost.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled());
+  });
+
+  test('the ghostJoints cleanup leaves a source-built ghost alone, and vice versa', async () => {
+    const POS = { names: ['joint1'], positions: [0.7] };
+    let ghostOn = true;
+    let version = 1;
+    const src = () => ({ version, pose: { names: ['joint1'], positions: [0.1] }, ghost: ghostOn ? GHOST : null });
+    const { rerender } = await mountLoaded(<UrdfTwin poseSource={src} ghostJoints={POS} />);
+    await settleFrames();
+    expect(mockGhosts.length).toBe(2);
+    const posGhost = mockGhosts.find((g) => g.setJointValue.mock.calls.some(([, v]) => v === 0.7));
+    const srcGhost = mockGhosts.find((g) => g !== posGhost);
+    // the ghostJoints layer goes away: only its own clone leaves the scene
+    rerender(<UrdfTwin poseSource={src} ghostJoints={null} />);
+    expect(mockSceneOps).toContainEqual(['remove', posGhost]);
+    expect(mockSceneOps).not.toContainEqual(['remove', srcGhost]);
+    // and the reverse: the source ghost goes, a new ghostJoints clone stays
+    rerender(<UrdfTwin poseSource={src} ghostJoints={POS} />);
+    const posGhost2 = mockGhosts[mockGhosts.length - 1];
+    ghostOn = false;
+    version = 2;
+    await settleFrames();
+    expect(mockSceneOps).toContainEqual(['remove', srcGhost]);
+    expect(mockSceneOps).not.toContainEqual(['remove', posGhost2]);
+  });
+
+  test('without poseSource nothing changes: the live subscription opens as before', async () => {
+    render(<UrdfTwin />);
+    await waitFor(() => expect(mockTopicCtor).toHaveBeenCalledTimes(1));
+  });
+});
+

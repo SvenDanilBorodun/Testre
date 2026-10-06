@@ -6,6 +6,57 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-06 (later) — Daten 2.0 fix round 2: the minors after the targeted verification
+
+**Why.** Both targeted verifiers of fix round 1 passed with minors only (T1-1…T1-4, T2-1…T2-6,
+`docs/plans/2026-10-05-daten-2/fix-round-2.md`, gitignored); the owner had them fixed by one fresh
+fixer per side (`feat/daten-2-fix2-robot`, `feat/daten-2-fix2-page`), with T2-1 decided as „remember
+the state first".
+
+**The robot side.** A dataset uploaded before Daten 2.0 has no sync record; deleting an episode then
+read „Hier und online verschieden", and the default „Beide behalten" (no base: the union) brought the
+deleted episode back (T2-1). The sidecar now writes the record of such a dataset in the background
+the first time a decision proves it identical to its hub copy (`hub_sync.remember_identical`, every
+file hashed against the hub, under the stage lock), so a later edit reads „Hier geändert". The media
+queue was shallower than the connection cap, so 2 of 20 and 12 of 30 cold parallel thumbnails were
+refused with 503 once fix round 1 removed the accidental backlog throttle (T2-6); it is now as deep
+as the cap (`MEDIA_QUEUE_MAX` = `MAX_CONNECTIONS` = 32: 20 and 30 cold thumbnails and 30 cold clips
+all 200 through both manager configs). `stage_lock` re-opens its lock file on every attempt and waits
+up to 1 s, so the remember step never refuses an edit, a download or a delete. The upload refusals
+no longer speak of an online version a never-uploaded copy does not have, and an upload refused
+during a recording says so instead of naming editing (`BUSY_RECORD_UPLOAD_DE`, T1-3). Two
+account-lookup guards no test caught are pinned (T1-2). Spec §E2 states the whole local gate before
+`create_repo` for a new repo. Suites on that branch: `robotis_ai_setup` 2324 (venv 3.12; 5 tkinter
+errors, 67 skipped) and 2251 OK / 83 skipped (python3); server pytest 2983 / 20 skipped (3.12) and
+2830 / 22 skipped (python3 without PyAV); the thin opi image with every gate, `daten_smoke` ok, the
+in-image LeRobot step 66 passed.
+
+**The page side.** nginx still logged link tokens: a request rejected before a location is picked
+(a header too large) went to the access log with its whole request line, a Referer naming a Daten
+URL was logged verbatim, and every error of the `/daten-api/` location (a refused method, the sidecar
+down) carried the request line into the error log (T1-1; measured with the real nginx image: 13
+access and 9 error lines with a token over 31 request shapes). The location's errors now go to
+`/dev/null` and the server logs in a token-free format; 0 tokens in either log afterwards, through
+both manager configs and the real sidecar, and each half alone lets its lines back. A dataset that
+crashed while its player was open still offered „Jetzt hochladen" and every tool (T2-2); the player
+now shows its card's state for a live, crashed or broken dataset and opens again only after the
+robot's re-read. A copy fetched from Hugging Face read „–" for all four numbers during the download
+(T2-4) and now shows the fetch dialog's numbers. `Number(null)` is 0, so an online card the hub could
+not read just now read „Episoden 0 · Dauer 0:00", and the 5 s hint poll turned its badge into a
+confident „Nur online" (T2-5); unknown numbers are „–" everywhere, the compare and fetch dialogs
+included, and the card keeps „Online-Stand unbekannt". „Beide behalten"'s tip said deleted episodes
+stay deleted also for a dataset without a sync record, where the merge is the union (T2-1, page
+half); such a dataset gets its own sentence. `CLAUDE.md` now describes the guarded commit's order for
+a new repo, the node's background account lookup, the old page's upload under the Daten lease and the
+remember step (T2-3). Each with its test (vitest, mutation-checked) and, through the harness in a
+real browser, T2-2 (a recording into the open dataset, the node killed mid-way), T2-4, T2-5 and the
+keep-both tip.
+
+**Numbers on the page branch.** React 238 files / 4262 passed + 2 expected fail, twice (fix round 1:
+238 / 4224); eslint clean; the production entry chunk +2.7 KB raw (+0.8 KB gzip) against fix round
+1's head, no CodeMirror or three.js runtime token, the same three modulepreloads; `nginx -t` clean on
+both configs.
+
 ### Unreleased, 2026-10-06 — Daten 2.0 fix round 1: what the two verifiers found
 
 **Why.** Two fresh verifiers ran the integrated `feat/daten-2` (one against the real Hugging Face, one

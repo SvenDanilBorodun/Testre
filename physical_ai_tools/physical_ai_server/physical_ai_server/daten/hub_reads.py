@@ -384,7 +384,7 @@ class HubReads:
 
     def probe(self, repo):
         base = {'v': C.SCHEMA_VERSION, 'repo_id': repo, 'found': False, 'refusal': None}
-        if not isinstance(repo, str) or not _REPO_ID.match(repo):
+        if not isinstance(repo, str) or not _REPO_ID.fullmatch(repo):
             return dict(base, refusal='invalid')
         token, _ = self.token()
         if not token:

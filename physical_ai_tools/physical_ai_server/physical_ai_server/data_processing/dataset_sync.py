@@ -122,7 +122,7 @@ def listed_names(base) -> list:
     out = []
     for name in os.listdir(base):
         p = base / name
-        if (DATASET_PART_RE.match(name) and not name.endswith(RESERVED_SUFFIXES)
+        if (DATASET_PART_RE.fullmatch(name) and not name.endswith(RESERVED_SUFFIXES)
                 and p.is_dir() and not p.is_symlink()):
             out.append(name)
     return out

@@ -334,6 +334,12 @@ def test_another_robots_dataset_is_hidden_and_a_transient_probe_is_unreachable(a
     assert hub.probe(ONLINE)['found'] is True                # the failure was not cached
 
 
+def test_a_repo_id_with_a_trailing_newline_is_invalid(api):
+    hub, _ = make_hub(api)
+    assert hub.probe(ONLINE + '\n')['refusal'] == 'invalid'          # `$` alone would let it through
+    assert api.calls['dataset_info'] == 0
+
+
 def test_transient_is_the_network_a_5xx_or_a_429_only():
     assert all(HR.transient(e) for e in (HttpStatusError(502), HttpStatusError(429), TimeoutError('t'),
                                          ConnectionError('c')))

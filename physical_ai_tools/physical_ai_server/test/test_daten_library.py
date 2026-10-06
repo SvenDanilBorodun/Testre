@@ -323,6 +323,12 @@ def _mirror(api, repo, path, head='h1', drop=()):
     return api.add(repo, head=head, files=files)
 
 
+def test_a_trailing_newline_is_never_a_valid_id():
+    assert L.is_valid_id(f'{NS}/omx_f_a')
+    assert not L.is_valid_id(f'{NS}/omx_f_a\n') and not L.is_valid_id(f'{NS}\n/omx_f_a')
+    assert not L.valid_part('omx_f_a\n')
+
+
 def test_sync_map_reasons_and_states(tmp_path):
     ns = tmp_path / NS
     a = build_dataset(ns / 'omx_f_a', lengths=(20, 21))

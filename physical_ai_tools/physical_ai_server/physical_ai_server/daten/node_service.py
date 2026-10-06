@@ -124,7 +124,7 @@ def _invalid(message=T.UNKNOWN_MODE_DE):
 def valid_id(dataset_id) -> bool:
     if not isinstance(dataset_id, str) or dataset_id.count('/') != 1:
         return False
-    return all(_PART.match(p) and not p.endswith(C.RESERVED_SUFFIXES) for p in dataset_id.split('/'))
+    return all(_PART.fullmatch(p) and not p.endswith(C.RESERVED_SUFFIXES) for p in dataset_id.split('/'))
 
 
 def _now_iso():
@@ -729,7 +729,7 @@ class DatenService:
     def _target(self, args, sources):
         new_name, owner_ns = args.get('new_name'), args.get('owner_ns')
         if not isinstance(new_name, str) or not new_name.strip() or not isinstance(owner_ns, str) \
-                or not _PART.match(owner_ns):
+                or not _PART.fullmatch(owner_ns):
             raise _invalid()
         account = self._account()
         if account is not None and owner_ns != account:
@@ -947,7 +947,7 @@ class DatenService:
             raise _invalid()
         expected = args.get('expected_hub_sha', HS.UNSET)
         if expected is not HS.UNSET and expected is not None and not (isinstance(expected, str)
-                                                                       and _SHA.match(expected)):
+                                                                       and _SHA.fullmatch(expected)):
             raise _invalid()
         path = self._existing(dataset_id)
         state = self._state(path)
@@ -1019,8 +1019,8 @@ class DatenService:
     def _download(self, args):
         repo_id, revision, target_id = args.get('repo_id'), args.get('revision'), args.get('target')
         mode, display = args.get('mode'), args.get('display_name')
-        if not isinstance(repo_id, str) or not _REPO.match(repo_id) or not isinstance(revision, str) \
-                or not _SHA.match(revision) or not valid_id(target_id) or mode not in C.DOWNLOAD_MODES \
+        if not isinstance(repo_id, str) or not _REPO.fullmatch(repo_id) or not isinstance(revision, str) \
+                or not _SHA.fullmatch(revision) or not valid_id(target_id) or mode not in C.DOWNLOAD_MODES \
                 or (display is not None and not isinstance(display, str)):
             raise _invalid()
         digest = args.get('meta_digest')
@@ -1130,7 +1130,7 @@ class DatenService:
     # keep_both (§E10)
     def _keep_both(self, args):
         dataset_id, head, digest = args.get('dataset'), args.get('expected_hub_sha'), args.get('meta_digest')
-        if not valid_id(dataset_id) or not isinstance(head, str) or not _SHA.match(head):
+        if not valid_id(dataset_id) or not isinstance(head, str) or not _SHA.fullmatch(head):
             raise _invalid()
         path = self._existing(dataset_id)
         self._digest_ok(path, digest)
@@ -1308,7 +1308,7 @@ class DatenService:
             return []
         found = []
         for ns in sorted(self.root.iterdir()):
-            if ns.is_dir() and not ns.is_symlink() and _PART.match(ns.name):
+            if ns.is_dir() and not ns.is_symlink() and _PART.fullmatch(ns.name):
                 found += [ns / name for name in sorted(self._leftover_names(ns))]
         with_journal = [p for p in found if S.journal_path(p).exists()]
         done = []
@@ -1331,7 +1331,7 @@ class DatenService:
                 names.add(entry[1:-len('.journal.json')])
             if entry.startswith('.') and entry.endswith('.sync.next.json'):
                 names.add(entry[1:-len('.sync.next.json')])
-        return {n for n in names if _PART.match(n)}
+        return {n for n in names if _PART.fullmatch(n)}
 
     def _recover_one(self, path):
         partner = None

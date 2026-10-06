@@ -256,6 +256,34 @@ class TheContentDecision(_Tmp):
         self.write(SESSION1, OTHER2)                                            # one base, two sessions
         self.assertEqual(S.decide(self.root, None, repo.view()), ('conflict', None, None))
 
+    def test_an_extra_session_beside_a_differing_common_file_is_never_changed(self):
+        """V1-2 / R-5: local = base + its own file-001 (A') + session C (file-002);
+        hub = base + another file-001 (B). Local has MORE episode files than
+        the hub, but not every hub file is equal locally: not a descendant. As
+        `changed` an UNSET upload would overwrite B with A'."""
+        repo = FakeRepo()
+        h1 = repo.commit(SESSION1)
+        repo.commit(SESSION2, keep_from=h1)                                     # B on the hub
+        session_c = {'data/chunk-000/file-002.parquet': b'data-c' * 40,
+                     'meta/episodes/chunk-000/file-002.parquet': b'ep-c' * 20,
+                     'videos/observation.images.scene/chunk-000/file-002.mp4': b'\x00video-C' * 200}
+        self.write(SESSION1, OTHER2, session_c)                                 # A' and C locally
+        self.assertEqual(S.decide(self.root, None, repo.view()), ('conflict', None, None))
+
+    def test_a_same_size_json_that_differs_is_never_equal(self):
+        """V1-2 / R-1: a non-LFS file (meta/stats.json) of the SAME size but other
+        bytes: its git sha1 differs from the hub's blob_id, so the decision is
+        never `current`."""
+        repo = FakeRepo()
+        repo.commit(SESSION1)
+        self.write(SESSION1, {'meta/stats.json': b'{"s": 7}'})
+        self.assertEqual(len(b'{"s": 7}'), len(SESSION1['meta/stats.json']))
+        self.assertNotEqual(S.decide(self.root, None, repo.view())[0], 'current')
+        entry = repo.view()['files']()['meta/stats.json']
+        self.assertFalse(S.file_equal_exact(self.root, 'meta/stats.json', entry))
+        self.write({'meta/stats.json': SESSION1['meta/stats.json']})
+        self.assertTrue(S.file_equal_exact(self.root, 'meta/stats.json', entry))
+
     def test_a_record_without_hub_sha_and_tag_ok_false_reads_changed(self):
         repo = FakeRepo()
         repo.commit(SESSION1)
@@ -341,6 +369,12 @@ class TheRecord(_Tmp):
         self.assertIsNone(S.read_record(self.root))
         p.write_text('[1, 2]')
         self.assertIsNone(S.read_record(self.root))
+
+    def test_a_folder_name_with_a_trailing_newline_is_never_listed(self):
+        base = self.base / 'ns'
+        for name in ('omx_f_a', 'omx_f_b\n', 'omx_f_c.tmp_edit'):
+            (base / name).mkdir(parents=True)
+        self.assertEqual(S.listed_names(base), ['omx_f_a'])
 
     def test_a_record_belongs_to_its_own_dataset_only(self):
         self.write(SESSION1)

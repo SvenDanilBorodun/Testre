@@ -160,6 +160,112 @@ def test_integrity_refuses_a_truncated_video(tmp_path, lerobot_or_stub):
     assert e.value.code == 'broken'
 
 
+# ── the sub-checks no other test pins (V1-2), on a recording stand-in for LeRobot ──
+
+@pytest.fixture()
+def lerobot_calls(monkeypatch):
+    """A RECORDING stand-in for the two LeRobot entry points verify/integrity
+    call, installed whether LeRobot exists or not: these tests judge OUR calls
+    into it (that the loader runs, that every episode is decoded twice), which
+    a stand-in that accepts everything cannot show."""
+    calls = {'load': [], 'decode': [], 'load_error': None, 'decode_error_on': None}
+
+    def loader(repo_id, root=None, **kw):
+        calls['load'].append((repo_id, Path(root).resolve()))
+        if calls['load_error'] is not None:
+            raise calls['load_error']
+
+    def decode(path, timestamps, tolerance_s=None, backend=None, **kw):
+        calls['decode'].append((Path(path).name, Path(path).parent.parent.name, list(timestamps),
+                                tolerance_s, backend))
+        if calls['decode_error_on'] is not None and len(calls['decode']) == calls['decode_error_on']:
+            raise RuntimeError('cannot decode')
+    for name in ('lerobot', 'lerobot.datasets'):
+        if name not in sys.modules:
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    ld = types.ModuleType('lerobot.datasets.lerobot_dataset')
+    ld.LeRobotDataset = loader
+    vu = types.ModuleType('lerobot.datasets.video_utils')
+    vu.decode_video_frames = decode
+    monkeypatch.setitem(sys.modules, 'lerobot.datasets.lerobot_dataset', ld)
+    monkeypatch.setitem(sys.modules, 'lerobot.datasets.video_utils', vu)
+    return calls
+
+
+def _self_parts(root):
+    src = V.Source(root)
+    return [(src, e) for e in range(len(src.episodes))]
+
+
+def test_verify_loads_with_lerobot_and_decodes_the_first_and_last_frame_of_every_episode(tmp_path, lerobot_calls):
+    root = build_dataset(tmp_path / 'lena' / 'omx_f_v', lengths=(20, 21, 22))
+    assert V.verify(root, _self_parts(root)) == []
+    assert lerobot_calls['load'] == [('verify/check', root.resolve())]
+    fps = V.Source(root).info['fps']
+    want = []
+    for ep, length in enumerate((20, 21, 22)):
+        r = V.Source(root).episodes[ep]
+        for k in ('observation.images.gripper', 'observation.images.scene'):
+            fo = r[f'videos/{k}/from_timestamp']
+            want += [('file-000.mp4', k, [fo], V.DECODE_TOLERANCE_S, 'pyav'),
+                     ('file-000.mp4', k, [fo + (length - 1) / fps], V.DECODE_TOLERANCE_S, 'pyav')]
+    assert lerobot_calls['decode'] == want
+
+
+def test_a_loader_or_a_decoder_failure_is_a_problem_never_an_exception(tmp_path, lerobot_calls):
+    root = build_dataset(tmp_path / 'lena' / 'omx_f_v', lengths=(20, 21))
+    lerobot_calls['decode_error_on'] = 3                     # episode 0, the scene camera's first frame
+    assert V.verify(root, _self_parts(root)) == [(0, 'error:RuntimeError')]
+    lerobot_calls['decode_error_on'] = None
+    lerobot_calls['load_error'] = RuntimeError('does not load')
+    assert V.verify(root, _self_parts(root)) == [('load', 'RuntimeError')]
+
+
+def test_verify_counts_an_episode_no_part_accounts_for(tmp_path, lerobot_calls):
+    """The totals: an output holding one episode more than its parts (every
+    other check passes — the data, the row order and each listed episode are
+    right) is `total_episodes` AND `total_frames`."""
+    root = build_dataset(tmp_path / 'lena' / 'omx_f_v', lengths=(20, 21, 22))
+    assert V.verify(root, _self_parts(root)[:-1]) == ['total_episodes', 'total_frames']
+
+
+def test_integrity_runs_lerobots_loader_last(tmp_path, lerobot_calls):
+    root = build_dataset(tmp_path / 'lena' / 'omx_f_i')
+    assert len(V.integrity(root).episodes) == 3
+    assert lerobot_calls['load'] == [('integrity/check', root.resolve())]
+    lerobot_calls['load_error'] = RuntimeError('does not load')
+    with pytest.raises(V.SurgeryError) as e:
+        V.integrity(root)
+    assert (e.value.code, e.value.detail) == ('broken', 'RuntimeError')
+
+
+def test_integrity_refuses_a_hole_in_the_global_index(tmp_path, lerobot_calls):
+    """Every row is there and every episode has its length, but the data files'
+    `index` columns are not 0..total_frames-1 (LeRobot addresses frames by it)."""
+    root = build_dataset(tmp_path / 'lena' / 'omx_f_i')
+    f = next((root / 'data').rglob('*.parquet'))
+    t = pq.read_table(f)
+    idx = t['index'].to_pylist()
+    idx[-1] += 5
+    pq.write_table(t.set_column(t.column_names.index('index'), 'index', pa.array(idx, type=t['index'].type)), f)
+    with pytest.raises(V.SurgeryError) as e:
+        V.integrity(root)
+    assert (e.value.code, e.value.detail) == ('broken', 'data index')
+    assert lerobot_calls['load'] == [], 'refused before the loader'
+
+
+@pytest.mark.parametrize('field', ['total_episodes', 'total_frames'])
+def test_integrity_refuses_totals_that_disagree_with_the_episodes(tmp_path, lerobot_calls, field):
+    root = build_dataset(tmp_path / 'lena' / f'omx_f_{field}')
+    p = root / 'meta' / 'info.json'
+    info = json.loads(p.read_text())
+    info[field] += 1
+    p.write_text(json.dumps(info))
+    with pytest.raises(V.SurgeryError) as e:
+        V.integrity(root)
+    assert (e.value.code, e.value.detail) == ('broken', field)
+
+
 # ── with LeRobot (the server image) ─────────────────────────────────────────
 
 @pytest.fixture(scope='module')
@@ -287,6 +393,45 @@ def test_integrity_with_the_real_loader(tmp_path, real):
     with pytest.raises(V.SurgeryError) as e:
         V.integrity(root)
     assert e.value.code == 'broken'
+
+
+def _v21(root):
+    p = root / 'meta' / 'info.json'
+    info = json.loads(p.read_text())
+    info['codebase_version'] = 'v2.1'                        # only LeRobot's own loader refuses this
+    p.write_text(json.dumps(info, indent=4))
+
+
+@needs_lerobot
+def test_integrity_and_verify_refuse_what_only_lerobots_loader_refuses(tmp_path, real):
+    """V1-2: the REAL loader runs inside both: a copy every check of ours
+    passes and LeRobot 0.5.1 will not load (another codebase version)."""
+    root = tmp_path / 'lena' / 'omx_f_v21'
+    shutil.copytree(real, root)
+    _v21(root)
+    with pytest.raises(V.SurgeryError) as e:
+        V.integrity(root)
+    assert (e.value.code, e.value.detail) == ('broken', 'BackwardCompatibilityError')
+    out, parts = _assembled(tmp_path, real, [0, 1])
+    assert V.verify(out, parts) == []
+    _v21(out)
+    assert V.verify(out, parts) == [('load', 'BackwardCompatibilityError')]
+
+
+@needs_lerobot
+def test_verify_decodes_with_lerobots_decoder(tmp_path, real, monkeypatch):
+    import lerobot.datasets.video_utils as vu
+    calls = []
+    real_decode = vu.decode_video_frames
+
+    def spy(path, timestamps, *a, **k):
+        calls.append((Path(path).name, list(timestamps), k.get('backend')))
+        return real_decode(path, timestamps, *a, **k)
+    monkeypatch.setattr(vu, 'decode_video_frames', spy)
+    out, parts = _assembled(tmp_path, real, [0, 3, 1])
+    assert V.verify(out, parts) == []
+    assert len(calls) == 2 * len(parts) * len(V.Source(out).video_keys)
+    assert {c[2] for c in calls} == {'pyav'}
 
 
 def test_motion_helper_is_deterministic():

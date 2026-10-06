@@ -121,7 +121,7 @@ def check_layout(info, episodes):
     features = info.get('features')
     if not isinstance(features, dict) or not features:
         raise SurgeryError('unsupported', 'features')
-    if not all(isinstance(k, str) and FEATURE_KEY_RE.match(k) for k in features):
+    if not all(isinstance(k, str) and FEATURE_KEY_RE.fullmatch(k) for k in features):
         raise SurgeryError('unsupported', 'feature key')
     videos = video_keys_of(info)
     if videos and info.get('video_path') != DEFAULT_VIDEO_PATH:

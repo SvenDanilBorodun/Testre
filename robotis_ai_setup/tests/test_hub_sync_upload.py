@@ -393,6 +393,52 @@ class NeverTrustTheNoOpReturn(HubCase):
         self.assertEqual(self.S.read_record(self.root)['hub_sha'], self.main())
 
 
+    def test_a_legacy_dataset_whose_card_commit_lands_is_success(self):
+        """V1-2 / S-a: a legacy hub copy (no marker anywhere), the local copy
+        equal; our upload writes the dataset card, so a README-only commit
+        LANDS. The read-back finds neither our marker nor changed trees: the
+        third acceptance (main's data is ours unchanged) makes it a success."""
+        write_tree(self.root, BASE)
+        self.FS.put_tree(REPO, self.root, private=False, title='Add files using upload-large-folder tool')
+        before = self.main()
+
+        def card(root, repo, private):
+            (pathlib.Path(root) / 'README.md').write_text('---\nlicense: apache-2.0\n---\n# card by EduBotics\n')
+        r = self.H.upload(self.root, REPO, api=self.api, write_card=card)
+        self.assertNotEqual(self.main(), before, 'the card commit landed')
+        self.assertEqual(r['commit'], self.main())
+        self.assertTrue(r['tag_ok'])
+        self.assertEqual(self.S.read_record(self.root)['hub_sha'], self.main())
+        self.assertEqual(self.tag(), self.main())
+
+
+class TheDownloadedFileSet(HubCase):
+    """V1-2 / m5: the downloaded tmp holds exactly the listed files."""
+
+    def listing(self, files):
+        return {rel: {'size': len(data), 'blob_id': self.S.git_sha1_bytes(data), 'lfs_sha256': None}
+                for rel, data in files.items()}
+
+    def test_an_extra_file_is_broken(self):
+        files = {'meta/info.json': b'{}', 'data/chunk-000/file-000.parquet': b'd' * 10}
+        tmp = write_tree(self.base / 'tmp_extra', files, {'data/chunk-000/file-009.parquet': b'x'})
+        with self.assertRaises(self.H.Refused) as e:
+            self.H._verify_against_listing(tmp, self.listing(files))
+        self.assertEqual(e.exception.code, 'broken')
+
+    def test_a_missing_file_is_broken_never_a_raw_error(self):
+        files = {'meta/info.json': b'{}', 'data/chunk-000/file-000.parquet': b'd' * 10}
+        tmp = write_tree(self.base / 'tmp_missing', {'meta/info.json': b'{}'})
+        with self.assertRaises(self.H.Refused) as e:
+            self.H._verify_against_listing(tmp, self.listing(files))
+        self.assertEqual(e.exception.code, 'broken')
+
+    def test_the_listed_set_passes_and_the_cache_is_ignored(self):
+        files = {'meta/info.json': b'{}', 'data/chunk-000/file-000.parquet': b'd' * 10}
+        tmp = write_tree(self.base / 'tmp_ok', files, {'.cache/huggingface/x.lock': b''})
+        self.assertEqual(sorted(self.H._verify_against_listing(tmp, self.listing(files))), sorted(files))
+
+
 class FailuresAreClassifiedByTheHub(HubCase):
 
     def test_a_lost_response_after_the_commit_landed_is_success(self):
@@ -488,6 +534,25 @@ class ThePermission(HubCase):
         with self.assertRaises(self.H.Refused) as e:
             self.H.upload(self.root, REPO, api=self.api)
         self.assertEqual(e.exception.code, 'hub_differs')
+        self.assertEqual(self.main(), head)
+        self.assertEqual(self.audit('create_commit'), [])
+
+    def test_the_exact_check_alone_stops_a_same_size_flipped_video(self):
+        """V1-2 / S-1: a record-less copy equal to the hub except ONE byte of a
+        same-size video (meta identical): the content decision says `current`
+        (videos compared by size), so only the exact check stops the upload
+        from overwriting the hub's video."""
+        write_tree(self.root, BASE)
+        self.FS.put_tree(REPO, self.root, private=False, title='legacy')
+        vid = 'videos/observation.images.scene/chunk-000/file-000.mp4'
+        b = bytearray(BASE[vid])
+        b[100] ^= 0xFF
+        write_tree(self.root, {vid: bytes(b)})
+        self.assertEqual(self.S.decide(self.root, None, self.H.hub_view(self.api, REPO))[0], 'current')
+        head = self.main()
+        with self.assertRaises(self.H.Refused) as e:
+            self.H.upload(self.root, REPO, api=self.api)
+        self.assertEqual((e.exception.code, str(e.exception.detail)), ('hub_differs', f'exact check {vid}'))
         self.assertEqual(self.main(), head)
         self.assertEqual(self.audit('create_commit'), [])
 

@@ -322,6 +322,26 @@ class TheSurface(ServiceCase):
                      'invalid')
         self.refused(self.cmd('cancel', what='everything'), 'invalid')
 
+    def test_a_trailing_newline_never_passes_an_id_rule(self):
+        """Python's ``$`` also matches before a final newline: every anchored id
+        rule is a FULL match (as the page's JavaScript twins already are), so a
+        raw request cannot name a folder, a repo or a commit ``…\\n``."""
+        self.dataset('lena/omx_f_a')
+        digest = self.digest(self.root / 'lena/omx_f_a')
+        self.assertFalse(NS.valid_id('lena/omx_f_a\n'))
+        self.assertFalse(NS.valid_id('lena\n/omx_f_a'))
+        self.refused(self.cmd('download', repo_id='lehrer/omx_f_demo', revision=HEAD, target='lena/omx_f_neu\n',
+                              mode='new'), 'invalid')
+        self.refused(self.cmd('download', repo_id='lehrer/omx_f_demo\n', revision=HEAD, target='lena/omx_f_neu',
+                              mode='new'), 'invalid')
+        self.refused(self.cmd('download', repo_id='lehrer/omx_f_demo', revision=HEAD + '\n', target='lena/omx_f_neu',
+                              mode='new'), 'invalid')
+        self.refused(self.cmd('keep_both', dataset='lena/omx_f_a', expected_hub_sha=HEAD + '\n', meta_digest=digest),
+                     'invalid')
+        self.refused(self.cmd('upload', dataset='lena/omx_f_a', expected_hub_sha=HEAD + '\n'), 'invalid')
+        self.assertEqual((self.procs, self.hf.sent), ([], []))
+        self.assertFalse((self.root / 'lena' / 'omx_f_neu\n').exists())
+
     def test_link_mints_tokens_for_what_exists(self):
         self.dataset('lena/omx_f_a')
         out = self.cmd('link', library=True, datasets=['lena/omx_f_a', 'lena/omx_f_gone'])

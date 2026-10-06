@@ -76,7 +76,7 @@ class LibraryError(Exception):
 
 
 def valid_part(part) -> bool:
-    return (isinstance(part, str) and bool(_PART.match(part))
+    return (isinstance(part, str) and bool(_PART.fullmatch(part))
             and not part.endswith(C.RESERVED_SUFFIXES))
 
 

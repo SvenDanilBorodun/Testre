@@ -167,9 +167,12 @@ export default function useDatenSession({
    * its numbers (the robot reads an online-only `info.json` only for the whole
    * list — a whole delete with a hub copy) reads the whole list right away, in
    * the same tick, so the card shows „loading" and then its values, never „–"
-   * (V2-14). The whole list never asks again: no loop.
+   * (V2-14). A whole-list read already on its way may have been answered
+   * before the change, so ONE more follows it then. The whole list never asks
+   * again by itself: no loop.
    */
   const fullHubLoadsRef = useRef(0);
+  const refullRef = useRef(false);
   const loadRef = useRef(null);
   const loadLibrary = useCallback(async ({ hub = false, ids = null } = {}) => {
     const seq = ++seqRef.current;
@@ -196,9 +199,9 @@ export default function useDatenSession({
           setStatus('ready');
           const localIds = Array.isArray(reply.local) ? reply.local.map((e) => e.id).filter(Boolean) : [];
           mintMissing(localIds);
-          if (req.hub && req.ids && fullHubLoadsRef.current === 0
-              && onlineCardsWithoutNumbers(latestRef.current, req.ids).length) {
-            loadRef.current({ hub: true });
+          if (req.hub && req.ids && onlineCardsWithoutNumbers(latestRef.current, req.ids).length) {
+            if (fullHubLoadsRef.current === 0) loadRef.current({ hub: true });
+            else refullRef.current = true;
           }
           return true;
         } catch (err) {
@@ -213,7 +216,12 @@ export default function useDatenSession({
     } finally {
       if (full) {
         fullHubLoadsRef.current -= 1;
-        if (aliveRef.current && fullHubLoadsRef.current === 0) setHubLoading(false);
+        if (fullHubLoadsRef.current === 0 && refullRef.current && aliveRef.current) {
+          refullRef.current = false;
+          loadRef.current({ hub: true });
+        } else if (aliveRef.current && fullHubLoadsRef.current === 0) {
+          setHubLoading(false);
+        }
       }
     }
   }, [libToken, mintMissing, now, dispatch]);

@@ -164,8 +164,10 @@ describe('finishSteps', () => {
   // the Daten tab is said once — no second „später im Tab Daten hochladen".
   // The robot's sentences (record_texts_de, spec §J.6 [R]) verbatim.
   it.each([
-    // V1-5: the truth of G-2, the core sentence the page's „Beide behalten" tip shares
-    ['HUB_CHANGED_SINCE_CHECK_DE', 'Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version du behalten willst. „Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.'],
+    // R2-1: true with AND without a sync record — it promises nothing about what
+    // „Beide behalten" keeps and points to the Daten tab, whose per-dataset tip
+    // says it (keepBoth.tip / keepBoth.tipNoBase)
+    ['HUB_CHANGED_SINCE_CHECK_DE', 'Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version du behalten willst. Dort steht auch, was „Beide behalten“ bei diesem Datensatz behält.'],
     ['UPLOAD_HUB_DIFFERS_DE', 'Auf Hugging Face gibt es diesen Datensatz schon in einer anderen Version. Es wurde nichts überschrieben. Öffne den Tab Daten, vergleiche beide Versionen und entscheide dort.'],
     // T1-3: neither assumes an online version (the local gate refuses a copy that was never uploaded too)
     ['UPLOAD_IN_SESSION_DE', 'Nicht hochgeladen: Die Aufnahme dieses Datensatzes wurde unterbrochen und nicht sauber beendet. Auf Hugging Face wurde nichts verändert. Lösche ihn im Tab Daten oder lade dort die Online-Version, falls es eine gibt.'],

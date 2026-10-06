@@ -120,32 +120,42 @@ def mint(secret: bytes, scope: str, ttl_s: int = TOKEN_TTL_S, now: Optional[floa
     return f'{TOKEN_VERSION}.{payload}.{_mac(secret, payload)}'
 
 
-def verify(secret: bytes, token, scope: str, now: Optional[float] = None) -> Tuple[bool, Optional[str]]:
-    """``(True, None)`` when ``token`` is genuine, unexpired and for ``scope``;
-    else ``(False, code)`` with ``token_invalid`` (malformed or a wrong MAC),
-    ``token_expired`` or ``scope``. Never raises."""
+def read_scope(secret: bytes, token, now: Optional[float] = None) -> Tuple[Optional[str], Optional[str]]:
+    """``(scope, None)`` for a genuine, unexpired token; else ``(None, code)``
+    with ``token_invalid`` (malformed or a wrong MAC) or ``token_expired``. The
+    payload is decoded only once its MAC is proven ours. Never raises."""
     if not isinstance(token, str) or not token or len(token) > _MAX_TOKEN_CHARS:
-        return False, TOKEN_INVALID
+        return None, TOKEN_INVALID
     parts = token.split('.')
     if len(parts) != 3 or parts[0] != TOKEN_VERSION:
-        return False, TOKEN_INVALID
+        return None, TOKEN_INVALID
     payload, mac = parts[1], parts[2]
     try:
         expected = _mac(secret, payload)
     except (UnicodeEncodeError, TypeError, ValueError):
-        return False, TOKEN_INVALID
-    # Constant time on the MAC; the payload is only decoded once it is proven ours.
+        return None, TOKEN_INVALID
+    # Constant time on the MAC.
     if not hmac.compare_digest(expected.encode('ascii'), mac.encode('ascii', 'replace')):
-        return False, TOKEN_INVALID
+        return None, TOKEN_INVALID
     try:
         claims = json.loads(_unb64(payload).decode('ascii'))
         token_scope, exp = claims['s'], claims['e']
     except (ValueError, KeyError, TypeError, UnicodeDecodeError):
-        return False, TOKEN_INVALID
+        return None, TOKEN_INVALID
     if not isinstance(token_scope, str) or type(exp) is not int:
-        return False, TOKEN_INVALID
+        return None, TOKEN_INVALID
     if (time.time() if now is None else now) >= exp:
-        return False, TOKEN_EXPIRED
+        return None, TOKEN_EXPIRED
+    return token_scope, None
+
+
+def verify(secret: bytes, token, scope: str, now: Optional[float] = None) -> Tuple[bool, Optional[str]]:
+    """``(True, None)`` when ``token`` is genuine, unexpired and for ``scope``;
+    else ``(False, code)`` with ``token_invalid`` (malformed or a wrong MAC),
+    ``token_expired`` or ``scope``. Never raises."""
+    token_scope, error = read_scope(secret, token, now)
+    if error:
+        return False, error
     if not hmac.compare_digest(token_scope.encode('utf-8'), str(scope).encode('utf-8')):
         return False, SCOPE
     return True, None

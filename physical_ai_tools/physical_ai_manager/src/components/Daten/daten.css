@@ -37,7 +37,10 @@
   line-height: 1.45;
 }
 .dat-page *, .dat-page *::before, .dat-page *::after { box-sizing: border-box; }
-.dat-page button, .dat-page input { font: inherit; color: inherit; }
+/* The reset carries no class weight (`:where`): every `.dat-btn…` rule wins over
+   it (V2-4: `.dat-page button` at 0,1,1 once beat `.dat-btn-primary` at 0,1,0,
+   leaving dark ink on teal and danger buttons without their red). */
+:where(.dat-page) button, :where(.dat-page) input { font: inherit; color: inherit; }
 .dat-page :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .dat-main { padding: 20px 24px 28px; position: relative; max-width: 1400px; margin: 0 auto; }

@@ -9,7 +9,9 @@ import {
   EMPTY_FINISH, EMPTY_RECORD_SESSION, COLLISION_END_NOTE_DE, ERROR_STOP_INCOMPLETE_DE, ERROR_STOP_SAVED_DE,
 } from '../../../../features/tasks/recordSession';
 import RECORD_COPY from '../recordCopy';
-import { UPLOAD_START_GRACE_MS, datasetIdOf, finishSteps, sessionView } from '../finishModel';
+import {
+  POINTS_TO_DATEN_TAB, UPLOAD_START_GRACE_MS, datasetIdOf, finishSteps, sessionView,
+} from '../finishModel';
 
 const NOW = 1_700_000_000_000;
 const F = RECORD_COPY.finish;
@@ -156,6 +158,35 @@ describe('finishSteps', () => {
       + 'bleibt auf dem Roboter gespeichert; du kannst ihn später im Tab Daten hochladen.';
     const c = finishSteps(session({ state: 'upload_failed', message: stall }));
     expect(c.steps[1].detail).toBe(stall);
+  });
+
+  // G-9 (Daten 2.0): every failure sentence that already sends the student to
+  // the Daten tab is said once — no second „später im Tab Daten hochladen".
+  // The robot's sentences (record_texts_de, spec §J.6 [R]) verbatim.
+  it.each([
+    ['HUB_CHANGED_SINCE_CHECK_DE', 'Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version du behalten willst – „Beide behalten“ verliert nichts.'],
+    ['UPLOAD_HUB_DIFFERS_DE', 'Auf Hugging Face gibt es diesen Datensatz schon in einer anderen Version. Es wurde nichts überschrieben. Öffne den Tab Daten, vergleiche beide Versionen und entscheide dort.'],
+    ['UPLOAD_IN_SESSION_DE', 'Nicht hochgeladen: Die Aufnahme dieses Datensatzes wurde unterbrochen und nicht sauber beendet; hochgeladen würde er die Version auf Hugging Face beschädigen. Lösche ihn im Tab Daten oder lade dort die Online-Version.'],
+    ['UPLOAD_BROKEN_DE', 'Nicht hochgeladen: Der Datensatz auf dem Roboter ist unvollständig oder beschädigt. Die Version auf Hugging Face bleibt, wie sie ist. Lösche ihn im Tab Daten oder lade dort die Online-Version.'],
+    ['SYNC_CONFLICT_DE', 'Dieser Datensatz wurde hier geändert, und auf Hugging Face gibt es inzwischen eine neuere Version. Entscheide im Tab Daten, welche du behalten willst, und starte dann die Aufnahme neu.'],
+    ['SYNC_UNKNOWN_DE', 'Der Datensatz hier und der auf Hugging Face sind verschieden, und EduBotics kann nicht erkennen, welcher neuer ist. Entscheide im Tab Daten, welche Version du behalten willst, und starte dann die Aufnahme neu.'],
+    ['AUTO_UPLOAD_NO_WORKER_DE', 'Automatisches Hochladen fehlgeschlagen: Der Hugging-Face-Dienst des Roboters konnte nicht starten. Lade den Datensatz später im Tab Daten hoch.'],
+    ['AUTO_UPLOAD_BUSY_DE', 'Automatisches Hochladen übersprungen: Gerade läuft ein anderer Hugging-Face-Vorgang. Wenn er beendet ist, lade den Datensatz im Tab Daten hoch.'],
+    ['AUTO_UPLOAD_REFUSED_DE', 'Automatisches Hochladen fehlgeschlagen: Der Hugging-Face-Dienst des Roboters hat die Anfrage abgelehnt. Lade den Datensatz später im Tab Daten hoch.'],
+    ['AUTO_UPLOAD_FAILED_DE', 'Automatisches Hochladen fehlgeschlagen. Lade den Datensatz später im Tab Daten hoch.'],
+    ['sync_disk_de', 'Die neuere Version von Hugging Face braucht 2,1 GB, frei sind 1,4 GB, und für Aufnahmen müssen 3 GB frei bleiben. Die Aufnahme wurde nicht gestartet. Lösche zuerst alte Datensätze im Tab Daten.'],
+  ])('upload_failed with %s: the sentence alone, no second „später hochladen"', (_name, sentence) => {
+    expect(POINTS_TO_DATEN_TAB.test(sentence)).toBe(true);
+    const c = finishSteps(session({ state: 'upload_failed', message: sentence }));
+    expect(c.steps[1].detail).toBe(sentence);
+    expect(c.steps[1].detail).not.toContain(F.later);
+  });
+
+  it('G-9: every sentence the old rule matched still matches', () => {
+    expect(POINTS_TO_DATEN_TAB.test('… du kannst ihn später im Tab Daten hochladen.')).toBe(true);
+    expect(POINTS_TO_DATEN_TAB.test('Lade den Datensatz später im Tab Daten hoch.')).toBe(true);
+    expect(POINTS_TO_DATEN_TAB.test('Dieser Namensraum gehört nicht zu deinem Konto.')).toBe(false);
+    expect(POINTS_TO_DATEN_TAB.test('Datentab')).toBe(false);
   });
 
   it('F4: local_done for a session that ran without upload names why, once (in the note)', () => {

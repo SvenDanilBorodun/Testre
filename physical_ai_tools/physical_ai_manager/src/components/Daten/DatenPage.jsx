@@ -611,7 +611,7 @@ export default function DatenPage() {
             onClose={close}
             onPull={(head) => { close(); runDownload(c, { mode: 'replace', revision: head, open: false }); }}
             onKeepBoth={(head) => { close(); runKeepBoth(c, head); }}
-            onUpload={(head) => { close(); runUpload(c, { expected_hub_sha: head, private: false }); }}
+            onUpload={(head, priv) => { close(); runUpload(c, { expected_hub_sha: head, private: !!priv }); }}
           />
         );
         break;

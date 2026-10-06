@@ -80,7 +80,7 @@ export default function PullNewerDialog({
             partnerNote={partnerNote}
             onKeepBoth={() => onKeepBoth(head)}
             onLoadOnline={() => onPull(head)}
-            onUploadHere={() => onUpload(head)}
+            onUploadHere={() => onUpload(head, !!(data && data.new_repo_private))}
           />
           <div className="dat-acts">
             <button type="button" className="dat-btn" onClick={run(onClose)}>{COPY.tool.cancel}</button>

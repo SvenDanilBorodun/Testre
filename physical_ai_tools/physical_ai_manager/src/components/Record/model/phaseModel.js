@@ -145,7 +145,9 @@ function buttonsFor(view, { startBlock, busy, connected, elapsedS }) {
   }
 }
 
-function pillFor(view, { form, session, episode, secondsLeft, nowWallMs }) {
+function pillFor(view, {
+  form, session, episode, secondsLeft, nowWallMs, waitingForUpload = false,
+}) {
   const color = VIEW_COLOR[view];
   const k = session?.savedCount ?? 0;
   switch (view) {
@@ -154,7 +156,12 @@ function pillFor(view, { form, session, episode, secondsLeft, nowWallMs }) {
     case VIEW.STARTING: {
       const since = nowWallMs - num(session?.pendingStart?.at);
       const slow = Number.isFinite(since) && since >= STARTING_SLOW_MS;
-      return { title: C.pill.starting, sub: slow ? C.pill.startingSlow : C.pill.startingSub, icon: 'loading', color, slow };
+      // R-8 (Daten 2.0): the robot waits for the same dataset's upload before
+      // it checks Hugging Face — say so; after 8 s the existing line, as today.
+      let sub = C.pill.startingSub;
+      if (slow) sub = C.pill.startingSlow;
+      else if (waitingForUpload) sub = C.pill.waitUpload;
+      return { title: C.pill.starting, sub, icon: 'loading', color, slow };
     }
     case VIEW.WARMUP:
       return { title: C.pill.warmup, sub: C.pill.warmupSub(secondsLeft), icon: 'hand', color };
@@ -291,6 +298,7 @@ export function deriveStartBlock({
  * @param input.bridge      useRsBridgeStatus output | null
  * @param input.activation  useRobotActivation status | null
  * @param input.hfToken     null | 'none' | 'unusable' | 'transfer' | 'busy' | 'failed' | 'taken_over'
+ * @param input.waitingForUpload  the robot still uploads the dataset being started (R-8)
  */
 export function deriveRecordView({
   heartbeat = 'disconnected',
@@ -307,6 +315,7 @@ export function deriveRecordView({
   bridge = null,
   activation = null,
   hfToken = null,
+  waitingForUpload = false,
 } = {}) {
   const view = deriveView({ heartbeat, status, collision, session });
   const running = !!status.running;
@@ -354,7 +363,9 @@ export function deriveRecordView({
     isLastEpisode: isLast,
     phaseColor: VIEW_COLOR[view],
     phaseKind: VIEW_KIND[view] || null,
-    pill: pillFor(view, { form, session, episode, secondsLeft: left, nowWallMs }),
+    pill: pillFor(view, {
+      form, session, episode, secondsLeft: left, nowWallMs, waitingForUpload,
+    }),
     buttons: buttonsFor(view, { startBlock, busy, connected, elapsedS }),
     segments,
     idleText,

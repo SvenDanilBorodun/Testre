@@ -130,6 +130,9 @@ export const RECORD_COPY = Object.freeze({
     starting: 'Startet …',
     startingSub: 'Aufnahme wird vorbereitet',
     startingSlow: 'Dauert länger als gewohnt …',
+    // rec.waitUpload (Daten 2.0, R-8): a Start right after a session waits
+    // for that session's upload to finish.
+    waitUpload: 'Wartet, bis das Hochladen fertig ist …',
     warmup: 'Aufwärmen',
     warmupSub: (s) => `noch ${s} s · dann Episode 1`,
     recording: 'Aufnahme',

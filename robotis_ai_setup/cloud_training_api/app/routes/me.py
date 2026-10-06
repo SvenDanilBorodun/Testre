@@ -633,3 +633,70 @@ async def update_tutorial_progress_endpoint(
         completed_at=row.get("completed_at"),
         updated_at=row.get("updated_at"),
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /me/group-members — whose datasets the Daten tab lists (spec §E6)
+# ---------------------------------------------------------------------------
+
+GROUP_MEMBERS_FAILED_DE = "Gruppenmitglieder konnten nicht geladen werden."
+
+
+class GroupMember(BaseModel):
+    # The display name and the Hugging Face account name ONLY: no login
+    # username and no user id (a classmate's login is not the page's business).
+    full_name: str | None = None
+    hf_username: str | None = None
+    is_me: bool = False
+
+
+class GroupMembers(BaseModel):
+    workgroup_id: str | None = None
+    members: list[GroupMember] = []
+
+
+def _group_member(row: dict, me_id: str) -> dict:
+    return {
+        "full_name": row.get("full_name"),
+        "hf_username": row.get("hf_username"),
+        "is_me": row.get("id") == me_id,
+    }
+
+
+@router.get("/group-members", response_model=GroupMembers)
+async def read_my_group_members(profile=Depends(get_current_profile)):
+    """The members of the CALLER's current workgroup (any role).
+
+    Rule §4: the workgroup comes from the caller's own profile (resolved from
+    the JWT), never from the request, so there is no id to tamper with; the
+    service-role query is scoped by it. A caller in no workgroup (every
+    teacher, a student working alone) gets themself only. UI scoping for the
+    Daten tab's library, not a security boundary.
+    """
+    me_id = profile["id"]
+    self_row = _group_member(profile, me_id)
+    workgroup_id = profile.get("workgroup_id")
+    if not workgroup_id:
+        return {"workgroup_id": None, "members": [self_row]}
+    try:
+        result = (
+            get_supabase()
+            .table("users")
+            .select("id, full_name, hf_username")
+            .eq("workgroup_id", workgroup_id)
+            .order("full_name")
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning(
+            "group-members lookup failed for user=%s group=%s: %s",
+            me_id, workgroup_id, type(exc).__name__,
+        )
+        raise HTTPException(status_code=500, detail=GROUP_MEMBERS_FAILED_DE) from exc
+    rows = [r for r in (result.data or []) if isinstance(r, dict)]
+    members = [_group_member(r, me_id) for r in rows]
+    if not any(m["is_me"] for m in members):
+        # The caller's own row always belongs to the answer (a row the query
+        # did not return — a membership change in flight — is still „me").
+        members.insert(0, self_row)
+    return {"workgroup_id": workgroup_id, "members": members}

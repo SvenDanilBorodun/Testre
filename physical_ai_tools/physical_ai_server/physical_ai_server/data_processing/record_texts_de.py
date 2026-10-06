@@ -197,10 +197,6 @@ FINISH_QUEUED_DE = 'Die Aufnahme wird beendet, sobald die verworfene Episode auf
 
 # ── dataset existence and resume (D7, D4) ─────────────────────────────────────
 
-HUB_CHECK_REFUSED_DE = ('Hugging Face ist gerade nicht erreichbar. Ohne diese Prüfung könnte '
-                        'ein Datensatz auf Hugging Face überschrieben werden. Schalte unter '
-                        '„Erweitert“ das Hochladen aus oder versuche es später.')
-
 # F4/D7 (round 6): the hub answered, and refused the rig's token. Since 042 the
 # token is the student's own and is replaced on the Startseite.
 HUB_CHECK_AUTH_DE = ('Hugging Face lehnt den Token des Roboters ab (ungültig oder abgelaufen). '
@@ -275,10 +271,8 @@ UPLOAD_NOT_STARTED_DE = ('Das Hochladen konnte nicht gestartet werden. Du kannst
 NAMESPACE_REFUSED_DE = ('Upload abgelehnt: Der Roboter darf nicht in dieses HuggingFace-Konto '
                         'hochladen. Bitte die „Benutzer-ID“ prüfen und erneut anmelden.')
 
-# The two load-bearing hub-maintenance steps after an upload.
-HUB_SYNC_FAILED_DE = ('Alte Dateien auf Hugging Face konnten nicht entfernt werden. Ohne '
-                      'Bereinigung würde das Training gelöschte Episoden weiterverwenden — bitte '
-                      'den Upload erneut versuchen.')
+# The training pointer (`v3.0`) could not be moved to the uploaded commit
+# (Daten 2.0 §E2 step 7: the data is on the hub, the tag is not).
 HUB_TAG_FAILED_DE = ('Der Versions-Tag des Datensatzes konnte nicht aktualisiert werden. Ohne '
                      'aktuellen Tag trainiert die Cloud auf einem alten Stand — bitte den Upload '
                      'erneut versuchen.')

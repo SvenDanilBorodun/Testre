@@ -61,6 +61,12 @@
 #      total. Same ending as an upload stall: the child is killed, ONE Failed
 #      with a German sentence, a fresh worker on the next request.
 
+#   5. Daten 2.0 (2026-10-05, spec §C4/§E2): an upload request may carry
+#      `expected_hub_sha`, passed to DataManager.upload_huggingface_repo ONLY
+#      when the key is present; the guarded upload's status extras (repo_type,
+#      info_json, the unconfirmed-commit sentence) reach the parent on the
+#      progress queue. The ('success'|'error', message) tuples are unchanged.
+
 import importlib.util
 import logging
 import multiprocessing
@@ -92,6 +98,13 @@ UPLOAD_STALL_S = 120.0
 # F7: no upload progress for this long at all.
 UPLOAD_HARD_STALL_S = 1800.0
 UPLOAD_ERROR_ITEM_TYPE = 'upload_error'
+# Daten 2.0 (§E2 step 9): the child hands the upload's status extras
+# (DataManager._last_upload_extras: repo_type, info_json, a success sentence)
+# to the parent on the progress queue, BEFORE the result tuple; the parent
+# waits at most this long for it once the result is there. The result tuples
+# keep their ('success'|'error', message) shape.
+UPLOAD_EXTRAS_ITEM_TYPE = 'upload_extras'
+UPLOAD_EXTRAS_WAIT_S = 1.0
 # Item g: a download with no progress for this long (= the upload's hard cap;
 # snapshot_download reports per file, so one big file shows no progress).
 DOWNLOAD_STALL_S = UPLOAD_HARD_STALL_S
@@ -170,6 +183,8 @@ class HfApiWorker:
             'repo_type': ''
         }
         self.last_logged_current_progress = -1  # Track last logged current value
+        # Daten 2.0: the running upload's status extras (repo_type, info_json)
+        self.last_upload_extras = None
         # F7: the upload stall watchdog (round 5); item g: the other modes
         self.stall_watch = UploadStallWatch(time.monotonic())
         self.task_started_mono = time.monotonic()
@@ -244,6 +259,7 @@ class HfApiWorker:
     def send_request(self, request_data):
         if self.is_alive():
             self.input_queue.put(request_data)
+            self.last_upload_extras = None
             self.is_processing = True
             self.current_task = request_data
             self.start_time = time.time()
@@ -283,6 +299,7 @@ class HfApiWorker:
             result['operation'] = mode
             result['repo_id'] = self.current_task.get('repo_id', '')
             result['local_path'] = self.current_task.get('local_path', '')
+            result['repo_type'] = self.current_task.get('repo_type', '') or ''
 
         # Dead-worker recovery. If the worker process was killed (OOM,
         # SIGSEGV, external kill) while a task was in flight, the
@@ -337,6 +354,12 @@ class HfApiWorker:
             task_result = self.get_result(block=False, timeout=0.1)
             if task_result:
                 status, message = task_result
+                if mode == 'upload':
+                    extras = self._await_upload_extras()
+                    if extras.get('repo_type'):
+                        result['repo_type'] = extras['repo_type']
+                    if status == 'success' and extras.get('info_json'):
+                        result['info_json'] = extras['info_json']
                 # The client toasts `message` verbatim (useRosTopicSubscription
                 # /huggingface/status), so it gets the worker's own German
                 # sentence; the English wrapper goes to the log only (Rule §1).
@@ -428,6 +451,9 @@ class HfApiWorker:
                 if item.get('type') == UPLOAD_ERROR_ITEM_TYPE:
                     self.stall_watch.note_error(now)
                     continue
+                if item.get('type') == UPLOAD_EXTRAS_ITEM_TYPE:
+                    self.last_upload_extras = item.get('extras') or {}
+                    continue
                 latest_progress = item
                 self.stall_watch.note_progress(item, now)
         except Exception as e:
@@ -435,6 +461,28 @@ class HfApiWorker:
 
         # Return the latest progress or current progress if no new data
         return latest_progress if latest_progress else self.current_progress
+
+    def _await_upload_extras(self) -> dict:
+        """The finished upload's extras: already drained, or still in flight on
+        the progress queue (a feeder thread per queue: the result tuple can
+        overtake it). Bounded by UPLOAD_EXTRAS_WAIT_S; never raises."""
+        extras = getattr(self, 'last_upload_extras', None)
+        progress_queue = getattr(self, 'progress_queue', None)
+        deadline = time.monotonic() + UPLOAD_EXTRAS_WAIT_S
+        while extras is None and progress_queue is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                item = progress_queue.get(block=True, timeout=remaining)
+            except queue.Empty:
+                break
+            except Exception:  # noqa: BLE001
+                break
+            if isinstance(item, dict) and item.get('type') == UPLOAD_EXTRAS_ITEM_TYPE:
+                extras = item.get('extras') or {}
+        self.last_upload_extras = None
+        return extras or {}
 
     def _fail_stalled_upload(self, result: dict) -> dict:
         """Terminate the child and report ONE Failed with the German sentence."""
@@ -565,14 +613,22 @@ class HfApiWorker:
                         # single-threaded and reads it right after the call.
                         if mode == 'upload':
                             logger.info(f'Starting upload for repo: {repo_id}')
-                            result = DataManager.upload_huggingface_repo(
-                                repo_id=repo_id,
-                                repo_type=repo_type,
-                                local_dir=local_dir,
-                                private=private
-                            )
+                            kwargs = {'repo_id': repo_id, 'repo_type': repo_type,
+                                      'local_dir': local_dir, 'private': private}
+                            # Daten 2.0 (§C4): passed ONLY when the request names
+                            # it — an absent key reaches the function's own
+                            # default (decide at upload time), never None.
+                            if 'expected_hub_sha' in data:
+                                kwargs['expected_hub_sha'] = data['expected_hub_sha']
+                            result = DataManager.upload_huggingface_repo(**kwargs)
+                            extras = getattr(DataManager, '_last_upload_extras', None) or {}
+                            try:
+                                progress_queue.put({'type': UPLOAD_EXTRAS_ITEM_TYPE, 'extras': extras})
+                            except Exception as e:  # noqa: BLE001 — the status works without them
+                                logger.error(f'Upload extras not forwarded: {type(e).__name__}')
                             if result:
-                                message = f'Hugging Face-Upload abgeschlossen: {repo_id}'
+                                message = (extras.get('message_de')
+                                           or f'Hugging Face-Upload abgeschlossen: {repo_id}')
                                 logger.info(f'Upload completed: {repo_id}')
                                 output_queue.put(('success', message))
                             else:

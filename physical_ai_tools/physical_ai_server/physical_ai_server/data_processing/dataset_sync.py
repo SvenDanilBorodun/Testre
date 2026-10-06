@@ -54,6 +54,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 
 RECORD_VERSION = 1
 SYNC_DIRS = ('data', 'meta', 'videos')
@@ -63,6 +64,12 @@ MARKER_PREFIX = '[edubotics:'                          # = contract.MARKER_PREFI
 SESSION_MARKER_SUFFIX = '.session.json'                # = DataManager.SESSION_MARKER_SUFFIX
 RECORD_SUFFIX = '.sync.json'
 LFS_EXT = ('.parquet', '.mp4')                         # the hub stores these as LFS (P11)
+# = contract.DATASET_PART_RE / RESERVED_SUFFIXES (lockstep-tested): a dataset
+# folder (and a namespace folder) is one component of this shape; a name with a
+# reserved suffix is a transaction's tmp/bak/trash directory, never a dataset.
+DATASET_PART_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$')
+RESERVED_SUFFIXES = ('.tmp_edit', '.bak_edit', '.tmp_sync', '.bak_sync', '.tmp_keep', '.tmp_base',
+                     '.trash_edit')
 _CHUNK = 1 << 20
 
 
@@ -104,6 +111,21 @@ def journal_path(root) -> Path:
     """``<ns>/.<name>.journal.json``: a split's two promotions as one transaction."""
     root = Path(root)
     return root.parent / f'.{root.name}.journal.json'
+
+
+def listed_names(base) -> list:
+    """R-28: the folder names under ``base`` a list may show, in directory
+    order — a valid dataset/namespace name only: no hidden sibling (a lock, a
+    journal, a next record), no record or marker file, no tmp/bak/trash
+    directory of a running or broken transaction, no symlink."""
+    base = Path(base)
+    out = []
+    for name in os.listdir(base):
+        p = base / name
+        if (DATASET_PART_RE.match(name) and not name.endswith(RESERVED_SUFFIXES)
+                and p.is_dir() and not p.is_symlink()):
+            out.append(name)
+    return out
 
 
 def now_iso() -> str:

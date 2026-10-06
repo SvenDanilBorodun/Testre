@@ -34,15 +34,12 @@ import unicodedata
 import cv2
 from geometry_msgs.msg import Twist
 from huggingface_hub import (
-    CommitOperationDelete,
     HfApi,
     ModelCard,
     ModelCardData,
     snapshot_download,
-    upload_large_folder
 )
-from huggingface_hub.errors import LocalTokenNotFoundError, RevisionNotFoundError
-from lerobot.datasets.dataset_metadata import CODEBASE_VERSION
+from huggingface_hub.errors import LocalTokenNotFoundError
 from lerobot.datasets.utils import DEFAULT_FEATURES
 from nav_msgs.msg import Odometry
 import numpy as np
@@ -79,6 +76,10 @@ def _sibling(name):
 record_texts_de = _sibling('record_texts_de')
 hf_errors = _sibling('hf_errors')
 dataset_card = _sibling('dataset_card')
+# Daten 2.0: the sync record and the ONE decision (stdlib only). hub_sync (the
+# guarded upload, the hub view) is reached inside the functions that use it
+# (A18: the deps-free loaders stub huggingface_hub with a fixed attribute set).
+dataset_sync = _sibling('dataset_sync')
 
 
 # Student-facing German camera names for record-path sentences (Aufnahme 2.0).
@@ -162,6 +163,19 @@ HUB_CHECK_TIMEOUT_S = 15.0
 # Post-save length check (LeRobot's train-time FrameTimestampError condition):
 # a saved episode's video span may differ from length / fps by this many frames.
 SAVED_LENGTH_TOLERANCE_FRAMES = 0.5
+# Daten 2.0, D14 (spec §C4). `_sync_base` is the hub head the Start decision saw
+# (a 40-hex sha), None (the hub holds no dataset) or this sentinel: the Start
+# could not ask (upload off, an unreachable hub, a download stub that returned
+# no revision) — the upload then decides at its own time. A string, never an
+# object(): the deps-free loaders execute this module more than once.
+SYNC_UNCHECKED = 'unchecked'
+# How often a Start that waits for this dataset's upload (or for its sync
+# download) looks again (= daten.contract.START_UPLOAD_POLL_S, lockstep-tested).
+START_UPLOAD_POLL_S = 0.5
+_HEAD_SHA = re.compile(r'^[0-9a-f]{40}$')
+# upload_huggingface_repo's „no expectation given“: the guarded upload then
+# decides at upload time (§E2 step 3). Never passed on to hub_sync.
+_UNSET = object()
 
 
 def _resume_compatibility_check(dataset, robot_type, fps, features):
@@ -176,7 +190,26 @@ def _resume_compatibility_check(dataset, robot_type, fps, features):
 
 
 class HubCheckRefused(Exception):
-    """D7: the logged-in existence check on the hub could not answer."""
+    """The Start check refused the session (``_last_warning_message`` says why)."""
+
+
+class StartAbandoned(Exception):
+    """A FINISH/STOP arrived while the Start waited (an upload, a sync download):
+    the session ends without a dataset and without an error text."""
+
+
+def _daten_texts():
+    """``daten/texts_de`` (the Daten tab's [D] sentences): by package name in the
+    image, by file path for the deps-free loaders."""
+    try:
+        return importlib.import_module('physical_ai_server.daten.texts_de')
+    except ImportError:
+        spec = importlib.util.spec_from_file_location(
+            '_edubotics_dm_daten_texts_de',
+            str(Path(__file__).resolve().parent.parent / 'daten' / 'texts_de.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
 
 def _recorder_locked(method):
@@ -317,6 +350,26 @@ class DataManager:
         self._upload_off_notice_de = ''
         self._commit_count = 0
         self._frame_added = False
+        # Daten 2.0 (spec §C4, D14). Every reader uses getattr with these
+        # defaults (the contract tests build DataManager via __new__).
+        #   _sync_base         the hub head the Start decision saw, None (no
+        #                      dataset online) or SYNC_UNCHECKED; handed to the
+        #                      end-of-session upload as expected_hub_sha
+        #   _start_abandoned   a FINISH/STOP ended the Start's wait: no dataset is
+        #                      created and no error is shown
+        #   _dataset_lease     injected by the node (DatenService.claim_record_lease):
+        #                      root -> the busy kind of that dataset, or None after
+        #                      registering this session's `record` lease
+        #   _sync_download     injected by the node (DatenService.start_sync_download):
+        #                      (repo_id, revision, root, token_fp) -> a handle with
+        #                      poll() -> None | result dict and cancel()
+        #   _start_notice_de   a notice for the first record tick (OFFLINE_START_DE)
+        self._sync_base = SYNC_UNCHECKED
+        self._start_abandoned = False
+        self._dataset_lease = None
+        self._sync_download = None
+        self._lease_logged = False
+        self._start_notice_de = ''
         self._cpu_checker = CPUChecker()
         self.data_converter = DataConverter()
         # Propagate the task fps into the action-duration setter so
@@ -1637,62 +1690,259 @@ class DataManager:
             return False
 
     def _check_dataset_exists(self, repo_id, root):
-        # Local dataset check
-        if os.path.exists(root):
-            dataset_necessary_folders = ['meta', 'videos', 'data']
-            invalid_foler = False
-            for folder in dataset_necessary_folders:
-                if not os.path.exists(os.path.join(root, folder)):
-                    print(f'Dataset {repo_id} is incomplete, missing {folder} folder.')
-                    invalid_foler = True
-            if not invalid_foler:
-                return True
-            else:
-                print(f'Dataset {repo_id} is incomplete, re-creating dataset.')
-                shutil.rmtree(root)
+        """D14 at recording start (spec §C4). True = open the local dataset,
+        False = create one (or, with ``_start_abandoned``, neither); a refusal
+        sets ``_last_warning_message`` and raises HubCheckRefused. Runs in the
+        record tick's own group, outside the recorder lock."""
+        # 0. The dataset's lease: an upload of THIS dataset (the previous
+        # session's auto-upload, a Daten upload, „Beide behalten“'s upload
+        # stage) is waited for (R-8); an edit, a delete or a download refuses.
+        reason = self._lease_reason(root)
+        while reason == 'upload':
+            if self.get_status() in ('finish', 'stop'):
+                self._start_abandoned = True
+                return False
+            time.sleep(START_UPLOAD_POLL_S)
+            reason = self._lease_reason(root)
+        if reason in ('edit', 'delete', 'download'):
+            print(f'Start refused for {repo_id}: the dataset is busy ({reason})',
+                  file=sys.stderr, flush=True)
+            self._last_warning_message = record_texts_de.DATASET_BUSY_START_DE
+            raise HubCheckRefused(repo_id)
 
+        # 1./2. The local copy.
+        if os.path.exists(root):
+            missing = [f for f in ('meta', 'videos', 'data') if not os.path.exists(os.path.join(root, f))]
+            if not missing:
+                if not self._task_info.push_to_hub:
+                    return True
+                return self._resume_against_hub(repo_id, root)
+            print(f'Dataset {repo_id} is incomplete (missing {missing}), re-creating dataset.')
+            shutil.rmtree(root)
+
+        # 3. No local copy: D7, a LOGGED-IN existence check. A failure to ask is
+        # never „absent“ (round 6, F4): no token / a token the hub refuses at
+        # whoami -> the session runs WITHOUT upload; the repo query refused
+        # (401/403) -> refused (HUB_CHECK_AUTH_DE). An UNREACHABLE hub (network,
+        # 429, 5xx, no answer within HUB_CHECK_TIMEOUT_S) no longer refuses
+        # (D14): the session records a new local dataset, the first tick says
+        # OFFLINE_START_DE, and the guarded upload decides at the end.
         if self._task_info.push_to_hub:
-            # D7: a LOGGED-IN existence check. The anonymous request this
-            # replaced answered 401/404 for a PRIVATE repo, which read as
-            # „absent“: a fresh local dataset was created and the end-of-session
-            # upload + orphan sweep then overwrote the student's private hub
-            # dataset. A failure to ask is never „absent“ (round 6, F4):
-            #   no token / a token the hub refuses at whoami -> the session runs
-            #     WITHOUT upload (nothing can be overwritten), with a notice;
-            #   the hub refuses the repo query (401/403) -> refused, naming the
-            #     token (HUB_CHECK_AUTH_DE);
-            #   anything else (network, 429, 5xx, no answer within
-            #     HUB_CHECK_TIMEOUT_S) -> refused, HUB_CHECK_REFUSED_DE.
-            # Runs outside the recorder lock (check_lerobot_dataset).
             verdict, error = self._hub_existence(repo_id)
             if verdict in ('no_token', 'token_refused'):
-                self._task_info.push_to_hub = False
-                self._upload_off_notice_de = (
-                    record_texts_de.UPLOAD_OFF_NO_TOKEN_DE if verdict == 'no_token'
-                    else record_texts_de.UPLOAD_OFF_TOKEN_INVALID_DE)
-                print(f'Hub existence check for {repo_id}: {verdict} ({error!r}); '
-                      f'this session records WITHOUT upload', file=sys.stderr, flush=True)
+                self._upload_off(verdict, error, repo_id)
                 return False
-            if verdict in ('auth_refused', 'unreachable'):
-                print(f'Hub existence check failed for {repo_id}: {verdict} '
-                      f'({hf_errors.classify_hf_error(error) if error else "timeout"}): '
-                      f'{error!r}', file=sys.stderr, flush=True)
-                self._last_warning_message = (
-                    record_texts_de.HUB_CHECK_AUTH_DE if verdict == 'auth_refused'
-                    else record_texts_de.HUB_CHECK_REFUSED_DE)
+            if verdict == 'auth_refused':
+                print(f'Hub existence check refused for {repo_id}: {error!r}', file=sys.stderr, flush=True)
+                self._last_warning_message = record_texts_de.HUB_CHECK_AUTH_DE
                 raise HubCheckRefused(repo_id) from error
+            if verdict == 'unreachable':
+                self._start_offline(repo_id, error)
+                return False
             if verdict == 'exists':
-                print(f'Dataset {repo_id} exists on Huggingface, downloading...')
+                print(f'Dataset {repo_id} exists on Hugging Face, downloading...')
                 try:
-                    self._download_dataset(repo_id)
+                    revision = self._download_dataset(repo_id)
+                except StartAbandoned:
+                    self._start_abandoned = True
+                    return False
+                except HubCheckRefused:
+                    raise
                 except Exception as e:  # noqa: BLE001 — never fall back to „new“
                     self._last_warning_message = (
-                        hf_errors.hf_error_sentence_de(e)
-                        or record_texts_de.HUB_CHECK_REFUSED_DE)
+                        hf_errors.hf_error_sentence_de(e) or record_texts_de.SYNC_DOWNLOAD_FAILED_DE)
                     raise HubCheckRefused(repo_id) from e
+                if isinstance(revision, str) and _HEAD_SHA.match(revision):
+                    self._sync_base = revision
                 return True
-
+            self._sync_base = None                        # absent: the hub holds no dataset
         return False
+
+    def _lease_reason(self, root):
+        """The busy kind of this dataset from the injected Daten lease, or None.
+        A missing lease (no Daten) or ANY exception from it is „no lease“ with
+        one log line: recording never depends on Daten (R-18)."""
+        lease = getattr(self, '_dataset_lease', None)
+        try:
+            if lease is None:
+                raise LookupError('no Daten lease injected')
+            return lease(root)
+        except Exception as e:  # noqa: BLE001
+            if not getattr(self, '_lease_logged', False):
+                self._lease_logged = True
+                print(f'Daten lease not consulted ({type(e).__name__}: {e}); recording proceeds',
+                      file=sys.stderr, flush=True)
+            return None
+
+    def _upload_off(self, verdict, error, repo_id):
+        """F4 (round 6): no token / a refused token -> this session records
+        WITHOUT upload (nothing on the hub can be overwritten), with a notice."""
+        self._task_info.push_to_hub = False
+        self._upload_off_notice_de = (
+            record_texts_de.UPLOAD_OFF_NO_TOKEN_DE if verdict == 'no_token'
+            else record_texts_de.UPLOAD_OFF_TOKEN_INVALID_DE)
+        print(f'Hub check for {repo_id}: {verdict} ({error!r}); this session records WITHOUT upload',
+              file=sys.stderr, flush=True)
+
+    def _start_offline(self, repo_id, error):
+        """D14's offline class: the session records, `_sync_base` stays
+        SYNC_UNCHECKED and the end-of-session upload decides by itself."""
+        self._start_notice_de = record_texts_de.OFFLINE_START_DE
+        print(f'Hub check for {repo_id}: unreachable '
+              f'({hf_errors.classify_hf_error(error) if error else "timeout"}: {error!r}); '
+              f'recording offline, the upload decides at the end', file=sys.stderr, flush=True)
+
+    def _resume_against_hub(self, repo_id, root):
+        """A complete local copy with upload on: the ONE decision against the
+        hub (spec §C4), bounded by HUB_CHECK_TIMEOUT_S. True = resume."""
+        verdict = self._hub_decision(repo_id, root)
+        kind = verdict['kind']
+        if kind in ('no_token', 'token_refused'):
+            self._upload_off(kind, verdict.get('error'), repo_id)
+            return True
+        if kind == 'auth_refused':
+            print(f'Hub check refused for {repo_id}: {verdict.get("error")!r}', file=sys.stderr, flush=True)
+            self._last_warning_message = record_texts_de.HUB_CHECK_AUTH_DE
+            raise HubCheckRefused(repo_id)
+        if kind == 'unreachable':
+            self._start_offline(repo_id, verdict.get('error'))
+            return True
+        state, view, record = verdict['state'], verdict['view'], verdict['record']
+        present = view.get('state') == 'present'
+        head = view.get('head') if present else None
+        print(f'Hub decision for {repo_id}: {state} (head {head})', flush=True)
+        if state == 'local':
+            if present or view.get('complete'):
+                self._sync_base = None                    # no dataset online (an empty repo, or none)
+            return True
+        if state == 'unknown':                            # a namespace this token cannot see whole
+            return True
+        if state == 'current':
+            self._sync_base = head
+            repair = verdict.get('repair')
+            if repair and (record or {}).get('hub_sha'):
+                try:
+                    dataset_sync.update_record(root, repo_id, **repair)
+                except Exception as e:  # noqa: BLE001 — the next decision repairs it again
+                    print(f'Record repair for {repo_id} failed: {e}', file=sys.stderr, flush=True)
+            return True
+        if state == 'changed':
+            if present:
+                self._sync_base = head
+            return True
+        if state == 'newer':
+            try:
+                revision = self._run_sync_download(repo_id, head, root)
+            except StartAbandoned:
+                self._start_abandoned = True
+                return False
+            self._sync_base = revision if isinstance(revision, str) and _HEAD_SHA.match(revision) else head
+            return True
+        self._last_warning_message = (
+            record_texts_de.SYNC_CONFLICT_DE if (record or {}).get('hub_sha')
+            else record_texts_de.SYNC_UNKNOWN_DE)
+        raise HubCheckRefused(repo_id)
+
+    def _hub_decision(self, repo_id, root):
+        """Every network step of the resume decision in ONE worker thread joined
+        after HUB_CHECK_TIMEOUT_S (a black-holed hub cannot hang the Start):
+        whoami; the hub view at main's head (not-found FIRST: a
+        RepositoryNotFoundError of any status is „absent“); the record; for a
+        record-less dataset the recursive listing and the content decision.
+        Returns {'kind': 'decided'|'no_token'|'token_refused'|'auth_refused'|
+        'unreachable', 'state', 'view', 'record', 'repair', 'error'}."""
+        result = {}
+
+        def _ask():
+            try:
+                hub_sync = _sibling('hub_sync')
+                api = HfApi()       # the rig's stored token
+                try:
+                    account = api.whoami()['name']
+                except Exception as e:  # noqa: BLE001 — classified below
+                    result.update(stage='whoami', error=e)
+                    return
+                complete = repo_id.split('/')[0] == account
+                try:
+                    view = hub_sync.hub_view(api, repo_id, complete=complete, strict=True)
+                except Exception as e:  # noqa: BLE001
+                    if not hub_sync.is_not_found(e):
+                        result.update(stage='view', error=e)
+                        return
+                    view = {'state': 'absent', 'complete': complete}
+                record = dataset_sync.own_record(root, repo_id)
+                try:
+                    state, _, repair = dataset_sync.decide(root, record, view)
+                except Exception as e:  # noqa: BLE001 — the content decision's listing failed
+                    result.update(stage='view', error=e)
+                    return
+                result.update(stage='done', state=state, view=view, record=record, repair=repair)
+            except Exception as e:  # noqa: BLE001 — classified below
+                result.update(stage='view', error=e)
+
+        worker = threading.Thread(target=_ask, name='hub-sync-check', daemon=True)
+        worker.start()
+        worker.join(HUB_CHECK_TIMEOUT_S)
+        if worker.is_alive():
+            return {'kind': 'unreachable', 'error': None}
+        error = result.get('error')
+        if result.get('stage') == 'done':
+            return dict(result, kind='decided')
+        kind = hf_errors.classify_hf_error(error)
+        if result.get('stage') == 'whoami':
+            if self._is_no_token(error):
+                return {'kind': 'no_token', 'error': error}
+            return {'kind': 'token_refused' if kind == 'auth' else 'unreachable', 'error': error}
+        return {'kind': 'auth_refused' if kind == 'auth' else 'unreachable', 'error': error}
+
+    def _run_sync_download(self, repo_id, revision, root):
+        """The sync download (S-2): the Daten download WORKER fetches
+        ``revision`` (None = main's head, resolved by the worker) into ``root``
+        (replace-or-create, the record written). Waited for in the R-8 loop;
+        a FINISH/STOP cancels it (StartAbandoned). Returns the revision it
+        downloaded; a failure refuses the Start in German."""
+        start = getattr(self, '_sync_download', None)
+        if start is None:
+            print(f'Sync download of {repo_id} impossible: Daten is not running', file=sys.stderr, flush=True)
+            self._last_warning_message = record_texts_de.SYNC_DOWNLOAD_FAILED_DE
+            raise HubCheckRefused(repo_id)
+        job = start(repo_id, revision, str(root), self._token_fp())
+        while True:
+            result = job.poll()
+            if result is not None:
+                break
+            if self.get_status() in ('finish', 'stop'):
+                job.cancel()
+                raise StartAbandoned(repo_id)
+            time.sleep(START_UPLOAD_POLL_S)
+        if result.get('ok'):
+            return result.get('revision')
+        code = result.get('code') or ''
+        print(f'Sync download of {repo_id} failed: {code}', file=sys.stderr, flush=True)
+        if code == 'disk' and result.get('free') is not None and result.get('need') is not None:
+            message = record_texts_de.sync_disk_de(result['free'], result['need'])
+        elif code in ('stalled', 'timeout'):
+            message = record_texts_de.DOWNLOAD_STALL_DE
+        elif code in ('auth', 'unreachable', 'not_found'):
+            message = record_texts_de.HF_ERROR_SENTENCES_DE.get(
+                {'auth': 'auth', 'unreachable': 'network'}.get(code, ''),
+                record_texts_de.SYNC_DOWNLOAD_FAILED_DE)
+        elif code in ('old_format', 'other_robot', 'unsupported'):
+            message = record_texts_de.SYNC_HUB_UNUSABLE_DE
+        else:
+            message = record_texts_de.SYNC_DOWNLOAD_FAILED_DE
+        self._last_warning_message = message
+        raise HubCheckRefused(repo_id)
+
+    @staticmethod
+    def _token_fp():
+        """The fingerprint of the token in the robot's slot ('' when empty)."""
+        try:
+            store = _sibling('hf_token_store')
+            token = store.read()
+            return store.fingerprint(token) if token else ''
+        except Exception:  # noqa: BLE001
+            return ''
 
     @staticmethod
     def _is_no_token(error) -> bool:
@@ -1754,9 +2004,12 @@ class DataManager:
         try:
             dataset = self._lerobot_dataset
             if dataset is None:
-                if self._check_dataset_exists(
-                        self._save_repo_name,
-                        self._save_path):
+                exists = self._check_dataset_exists(self._save_repo_name, self._save_path)
+                if getattr(self, '_start_abandoned', False):
+                    # A FINISH/STOP ended the Start's wait (G-8): never create a
+                    # dataset for a session that is already over, and say nothing.
+                    return False
+                if exists:
                     dataset = LeRobotDatasetWrapper(
                         self._save_repo_name,
                         self._save_path
@@ -1772,6 +2025,7 @@ class DataManager:
                     dataset = self._create_dataset(
                         self._save_repo_name,
                         images, joint_list)
+                    self._write_create_record()
 
                 if not self._task_info.use_optimized_save_mode:
                     dataset.start_image_writer(
@@ -1782,10 +2036,12 @@ class DataManager:
                 with self.locked():
                     if self._lerobot_dataset is None:
                         self._lerobot_dataset = dataset
-                    notice = getattr(self, '_upload_off_notice_de', '')
+                    notice = (getattr(self, '_upload_off_notice_de', '')
+                              or getattr(self, '_start_notice_de', ''))
                     if notice and not self._last_warning_message:
                         # F4: the page learns the session runs without upload
-                        # from the next status tick's [WARNUNG].
+                        # (or, D14, that the hub could not be asked) from the
+                        # next status tick's [WARNUNG].
                         self._last_warning_message = notice
                 return True
             dataset.set_robot_type(self._robot_type)
@@ -1793,6 +2049,21 @@ class DataManager:
         except Exception as e:
             print(f'Error checking lerobot dataset: {e}')
             return False
+
+    def _write_create_record(self):
+        """Daten 2.0 (§C2): a dataset this session CREATED gets a record with
+        its display name (the raw task name) and the session's visibility,
+        nothing else. Best-effort: a failed write only logs."""
+        if not Path(self._save_path).is_dir():
+            return
+        try:
+            dataset_sync.update_record(
+                self._save_path, self._save_repo_name,
+                display_name=str(getattr(self._task_info, 'task_name', '') or '').strip() or None,
+                private=bool(getattr(self._task_info, 'private_mode', True)))
+        except Exception as e:  # noqa: BLE001
+            print(f'Could not write the sync record of {self._save_repo_name}: {e}',
+                  file=sys.stderr, flush=True)
 
     def _resume_is_compatible(self, dataset, images, joint_list) -> bool:
         features = self._dataset_features(images or {}, joint_list)
@@ -1875,8 +2146,8 @@ class DataManager:
         /datasets/register on the Cloud API — without that registration,
         Modal training cannot discover the dataset.
 
-        Falls back to a direct push_to_hub when no callback was wired
-        (tests, standalone import). ``private`` is forwarded from the
+        Without a wired callback nothing is uploaded and the terminating tick
+        says so (UPLOAD_NOT_STARTED_DE). ``private`` is forwarded from the
         student's "Privater Modus" choice in the React UI (TaskInfo
         .private_mode). It defaults to True so a missing/garbled flag
         fails safe to private — classroom recordings can contain
@@ -1933,39 +2204,33 @@ class DataManager:
                 file=sys.stderr, flush=True,
             )
             return
-        if self._upload_callback is not None:
-            try:
-                self._upload_callback(
-                    self._save_repo_name,
-                    str(self._save_path),
-                    private,
-                )
-            except Exception as e:
-                self._upload_blocked_reason_de = UPLOAD_NOT_STARTED_DE
-                print(
-                    f'[WARNUNG] Upload konnte nicht eingereiht werden: {e}',
-                    file=sys.stderr, flush=True,
-                )
+        if self._upload_callback is None:
+            # Daten 2.0 (§E2): the guarded single commit in the HF worker is the
+            # ONLY dataset upload there is. The standalone push_to_hub fallback
+            # (an unguarded multi-commit upload) is gone: without a worker the
+            # session says so and uploads nothing.
+            self._upload_blocked_reason_de = UPLOAD_NOT_STARTED_DE
+            print(f'[WARNUNG] No upload worker wired; {self._save_repo_name} stays local',
+                  file=sys.stderr, flush=True)
             return
-
-        # Standalone fallback — no progress events, no auto-register.
         try:
-            self._lerobot_dataset.push_to_hub(
-                tags=tags,
-                private=private,
-                upload_large_folder=True)
+            self._upload_callback(
+                self._save_repo_name,
+                str(self._save_path),
+                private,
+            )
         except Exception as e:
+            self._upload_blocked_reason_de = UPLOAD_NOT_STARTED_DE
             print(
-                f'[WARNUNG] Direkter Hub-Upload fehlgeschlagen: {e}',
+                f'[WARNUNG] Upload konnte nicht eingereiht werden: {e}',
                 file=sys.stderr, flush=True,
             )
 
     def _download_dataset(self, repo_id):
-        snapshot_download(
-            repo_id,
-            repo_type='dataset',
-            local_dir=self._save_path,
-        )
+        """D7 „exists“: the sync download of main's head (resolved by the Daten
+        download worker) into the session's folder; returns the revision it
+        downloaded. One-argument shape kept (the record-FSM tests stub it)."""
+        return self._run_sync_download(repo_id, None, self._save_path)
 
     def convert_action_to_joint_trajectory_msg(self, action):
         joint_trajectory_msgs = self.data_converter.tensor_array2joint_trajectory(
@@ -1981,7 +2246,7 @@ class DataManager:
             self._task_info.num_episodes = 1_000_000
             self._task_info.episode_time_s = 1_000_000
 
-    # Namespaces the rig's own HF token may write to (its account + orgs).
+    # Namespaces the rig's own HF token may write to (its account; R-10: no orgs).
     # Cached at CLASS level because it is a property of the RIG's token, not of
     # a recording: whoami is an 8 s-bounded network call and _upload_dataset
     # runs on the end-of-recording save path, which is already busy.
@@ -2041,14 +2306,15 @@ class DataManager:
 
     @staticmethod
     def get_huggingface_user_id():
+        """The token's ACCOUNT, as a one-element list (R-10, Daten 2.0): no
+        organisations. The Benutzer-ID list (/get_hf_user), the namespace
+        guard (_rig_hf_namespaces) and the guarded upload all know the account
+        alone — nothing is recorded into an organisation."""
         def api_call():
             api = HfApi()
             try:
                 user_info = api.whoami()
-                user_ids = [user_info['name']]
-                for org_info in user_info['orgs']:
-                    user_ids.append(org_info['name'])
-                return user_ids
+                return [user_info['name']]
             except LocalTokenNotFoundError as e:
                 print(f'No registered HuggingFace token found: {e}')
                 raise Exception('No registered HuggingFace token found')
@@ -2112,9 +2378,21 @@ class DataManager:
         if save_path is None:
             raise ValueError(f'Invalid repo type: {repo_type}')
 
-        save_dir = save_path / repo_id
-
         DataManager._last_hf_failure_reason_de = None
+        # `repo_id` comes off the wire: `save_path / repo_id` with an absolute
+        # right-hand side discarded the root. safe_under proves where it lands.
+        try:
+            save_dir = dataset_paths.safe_under(save_path, repo_id)
+        except dataset_paths.DatasetPathError as e:
+            print(f'Download refused (target outside the root): {repo_id!r}: {e}')
+            DataManager._last_hf_failure_reason_de = str(e)
+            return False
+        if repo_type == 'dataset' and save_dir.exists():
+            # Daten 2.0 (§E3): the old page's dataset download never mixes files
+            # into an existing dataset; a newer version is loaded in the Daten tab.
+            print(f'Download refused: {repo_id} exists locally')
+            DataManager._last_hf_failure_reason_de = _daten_texts().DOWNLOAD_EXISTS_DE
+            return False
         try:
             print(f'Starting download of {repo_id} ({repo_type})...')
 
@@ -2301,73 +2579,134 @@ class DataManager:
         is no longer reported as „Token ungültig“."""
         return hf_errors.hf_error_sentence_de(error)
 
+    # Daten 2.0 (§E2 step 9): the status extras of the most recent upload
+    # ({'repo_type', 'info_json', 'message_de'}), read by the HF worker in the
+    # same process right after the call — the side channel beside
+    # _last_hf_failure_reason_de — and forwarded to the node.
+    _last_upload_extras = None
+
+    # The guarded upload's refusals (hub_sync.Refused codes), in German.
+    _UPLOAD_REFUSALS_DE = {
+        'in_session': record_texts_de.UPLOAD_IN_SESSION_DE,
+        'local_broken': record_texts_de.UPLOAD_BROKEN_DE,
+        'namespace': record_texts_de.NAMESPACE_REFUSED_DE,
+        'hub_changed': record_texts_de.HUB_CHANGED_SINCE_CHECK_DE,
+        'hub_differs': record_texts_de.UPLOAD_HUB_DIFFERS_DE,
+    }
+
     @staticmethod
     def upload_huggingface_repo(
         repo_id,
         repo_type,
         local_dir,
         private=True,
+        expected_hub_sha=_UNSET,
     ):
+        """Upload in the HF worker child. A DATASET goes through the ONE guarded
+        single commit (``hub_sync.upload``, spec §E2) — every gate is inside it,
+        so no caller can skip one; ``expected_hub_sha`` is the head the caller's
+        decision saw (a sha), None (the hub must hold no dataset) or absent
+        (decide at upload time). A MODEL keeps its upload_large_folder path.
+        Returns True/False; the German reason of a failure is
+        ``_last_hf_failure_reason_de``, the status extras ``_last_upload_extras``."""
         DataManager._last_hf_failure_reason_de = None
-        try:
-            api = HfApi()
+        DataManager._last_upload_extras = {'repo_type': repo_type or ''}
+        if repo_type == 'dataset':
+            return DataManager._upload_dataset_guarded(repo_id, local_dir, private, expected_hub_sha)
+        return DataManager._upload_model(repo_id, repo_type, local_dir, private)
 
-            # Verify authentication first
+    @staticmethod
+    def _upload_dataset_guarded(repo_id, local_dir, private, expected_hub_sha):
+        hub_sync = _sibling('hub_sync')
+        root = Path(local_dir)
+        kwargs = {
+            'private': bool(private),
+            'progress': DataManager._report_upload_progress,
+            'write_card': lambda r, repo, real_private: DataManager._create_readme_if_not_exists(
+                r, 'dataset', repo_id=repo, private=real_private),
+        }
+        if expected_hub_sha is not _UNSET:
+            kwargs['expected'] = expected_hub_sha
+        print(f'Guarded upload of {local_dir} to {repo_id} (private={bool(private)}, '
+              f'expected={kwargs.get("expected", "decide now")})')
+        try:
+            result = hub_sync.upload(root, repo_id, **kwargs)
+        except Exception as e:  # noqa: BLE001 — classified below
+            code = getattr(e, 'code', None) if type(e).__name__ == 'Refused' else None
+            if code is not None:
+                print(f'Upload of {repo_id} refused: {e}')
+                DataManager._last_hf_failure_reason_de = DataManager._UPLOAD_REFUSALS_DE.get(code)
+                DataManager._last_upload_extras['code'] = code
+                return False
+            print(f'Error uploading {repo_id}: {e}')
+            import traceback
+            print(f'Detailed error traceback:\n{traceback.format_exc()}')
+            DataManager._last_hf_failure_reason_de = DataManager._classify_hf_failure_de(e)
+            return False
+        DataManager._last_upload_extras['info_json'] = DataManager._upload_info_json(
+            root, repo_id, result.get('private'))
+        if result.get('tag') == 'failed':
+            # The data is there, the training pointer is not (§E2 step 7).
+            DataManager._last_hf_failure_reason_de = record_texts_de.HUB_TAG_FAILED_DE
+            DataManager._last_upload_extras['code'] = 'tag_failed'
+            return False
+        if result.get('unconfirmed'):
+            # G-13: a landed commit is never reported as „nothing uploaded“.
+            DataManager._last_upload_extras['message_de'] = record_texts_de.UPLOAD_UNCONFIRMED_DE
+        print(f'Upload of {repo_id} committed {result.get("commit")} (tag {result.get("tag")})')
+        return True
+
+    @staticmethod
+    def _upload_info_json(root, repo_id, private):
+        """§E2 step 9: what the page registers the dataset with."""
+        try:
+            info = json.loads((Path(root) / 'meta' / 'info.json').read_text(encoding='utf-8'))
+        except Exception:  # noqa: BLE001
+            info = {}
+        record = dataset_sync.own_record(root, repo_id)
+        return {'fps': info.get('fps'), 'total_episodes': info.get('total_episodes'),
+                'total_frames': info.get('total_frames'), 'robot_type': info.get('robot_type'),
+                'display_name': record.get('display_name'), 'private': bool(private)}
+
+    @staticmethod
+    def _report_upload_progress(done, total):
+        """Per pre-uploaded file: the HF worker's progress items (they also feed
+        its stall watch)."""
+        queue_ = DataManager._progress_queue
+        if queue_ is None:
+            return
+        try:
+            queue_.put({'current': int(done), 'total': int(total),
+                        'percentage': round(100.0 * done / total, 1) if total else 0.0}, block=False)
+        except Exception:  # noqa: BLE001 — progress is a courtesy
+            pass
+
+    @staticmethod
+    def _upload_model(repo_id, repo_type, local_dir, private):
+        """A MODEL's upload (no caller in Daten 2.0): its upload_large_folder
+        path, unchanged."""
+        try:
+            from huggingface_hub import upload_large_folder
+            api = HfApi()
             try:
                 user_info = api.whoami()
                 print(f'Authenticated as: {user_info["name"]}')
             except Exception as auth_e:
                 print(f'Authentication failed: {auth_e}')
-                print('Please make sure you are authenticated with HuggingFace')
-                # Round 5 (R5-4b): by its cause — a dead network or a rate
-                # limit used to be reported as an invalid token too.
                 DataManager._last_hf_failure_reason_de = (
                     DataManager._classify_hf_failure_de(auth_e)
                 )
                 return False
-
-            # Repository visibility follows the student's "Privater Modus"
-            # choice (forwarded from TaskInfo.private_mode). Defaults to
-            # PRIVATE so a missing flag fails safe: student recordings may
-            # contain faces, classroom audio, or other data that must not
-            # leak to the public HF index (GDPR / school DPA). When the
-            # student opts public, the repo is created public; teachers can
-            # still flip any repo's visibility later from the HF dashboard.
-            # NOTE: exist_ok=True only verifies an existing repo — it does
-            # not retroactively change visibility, so the flag only takes
-            # effect on the first (creating) upload of a given repo_id.
             private = bool(private)
-            print(
-                f'Creating HuggingFace repository: {repo_id} '
-                f'(private={private})'
-            )
-            url = api.create_repo(
-                repo_id,
-                repo_type=repo_type,
-                private=private,
-                exist_ok=True,
-            )
+            url = api.create_repo(repo_id, repo_type=repo_type, private=private, exist_ok=True)
             print(f'Repository created/verified: {url}')
-
-            # Delete .cache folder before upload
             DataManager._delete_dot_cache_folder_before_upload(local_dir)
-
-            # The README: for a dataset LeRobot's card, rebuilt every upload
-            DataManager._create_readme_if_not_exists(
-                local_dir, repo_type, repo_id=repo_id, private=private
-            )
-
+            DataManager._create_readme_if_not_exists(local_dir, repo_type, repo_id=repo_id, private=private)
             print(f'Uploading folder {local_dir} to repository {repo_id}')
-
-            # Capture stdout for logging
             from contextlib import redirect_stdout
             from .progress_tracker import HuggingFaceLogCapture
-
-            # Use log capture with progress queue
             log_capture = HuggingFaceLogCapture(progress_queue=DataManager._progress_queue)
-
             with redirect_stdout(log_capture):
-                # Upload folder contents
                 upload_large_folder(
                     repo_id=repo_id,
                     folder_path=local_dir,
@@ -2375,99 +2714,15 @@ class DataManager:
                     print_report=True,
                     print_report_every=1,
                 )
-
-            # Post-upload maintenance for dataset repos: remote-orphan
-            # sweep + version-tag re-point. Both are LOAD-BEARING for
-            # training correctness, so a failure fails the whole upload
-            # (the student retries; upload_large_folder resumes cheaply).
-            if repo_type == 'dataset':
-                if not DataManager._sync_dataset_repo_after_upload(
-                        api, repo_id, local_dir):
-                    return False
-
             return True
         except Exception as e:
             print(f'Error Uploading HuggingFace repo: {e}')
-            # Print more detailed error information
             import traceback
             print(f'Detailed error traceback:\n{traceback.format_exc()}')
             DataManager._last_hf_failure_reason_de = (
                 DataManager._classify_hf_failure_de(e)
             )
             return False
-
-    # Remote paths the orphan sweep may delete under. Everything else
-    # (README.md, .gitattributes, hub-managed files) is off-limits.
-    _DATASET_CONTENT_PREFIXES = ('data/', 'meta/', 'videos/')
-
-    @staticmethod
-    def _sync_dataset_repo_after_upload(api, repo_id, local_dir):
-        """Make the hub dataset trainable-correct after upload_large_folder.
-
-        1. Delete remote files that no longer exist locally.
-           upload_large_folder only adds/updates files; after an episode
-           delete the removed data/video files survive on the hub, and
-           LeRobot v3.0 loads data parquet by GLOB (io_utils.load_nested_
-           dataset) — an orphaned file can occupy row positions of live
-           episodes and silently corrupt training.
-        2. Re-point the version tag. LeRobot 0.5.1 trains at revision
-           CODEBASE_VERSION ('v3.0'); a bare create_tag 409s on the second
-           upload of a repo, leaving the tag pinned to the FIRST upload's
-           commit — every re-upload (edit, appended episodes) would be
-           invisible to training. Mirrors upstream push_to_hub
-           (delete_tag + create_tag, lerobot_dataset.py).
-
-        Returns True on success. On failure sets the German reason
-        side-channel and returns False — the upload must NOT be reported
-        successful, or training would silently use a stale/mixed state.
-        """
-        try:
-            local_files = {
-                p.relative_to(local_dir).as_posix()
-                for p in Path(local_dir).rglob('*')
-                if p.is_file()
-            }
-            remote_files = api.list_repo_files(repo_id, repo_type='dataset')
-            orphans = [
-                f for f in remote_files
-                if f.startswith(DataManager._DATASET_CONTENT_PREFIXES)
-                and f not in local_files
-            ]
-            if orphans:
-                print(
-                    f'Deleting {len(orphans)} remote file(s) no longer '
-                    f'present locally (first few: {orphans[:5]})'
-                )
-                api.create_commit(
-                    repo_id=repo_id,
-                    repo_type='dataset',
-                    operations=[
-                        CommitOperationDelete(path_in_repo=f) for f in orphans
-                    ],
-                    commit_message='Remove files deleted locally (EduBotics sync)',
-                )
-        except Exception as e:
-            print(f'Error syncing remote dataset files for {repo_id}: {e}')
-            DataManager._last_hf_failure_reason_de = (
-                record_texts_de.HUB_SYNC_FAILED_DE)
-            return False
-
-        try:
-            print(f'Re-pointing tag "{CODEBASE_VERSION}" for {repo_id}')
-            try:
-                api.delete_tag(
-                    repo_id=repo_id, tag=CODEBASE_VERSION,
-                    repo_type='dataset')
-            except RevisionNotFoundError:
-                pass  # first upload of this repo: no tag yet
-            api.create_tag(
-                repo_id=repo_id, tag=CODEBASE_VERSION, repo_type='dataset')
-        except Exception as e:
-            print(f'Error re-pointing version tag for {repo_id}: {e}')
-            DataManager._last_hf_failure_reason_de = (
-                record_texts_de.HUB_TAG_FAILED_DE)
-            return False
-        return True
 
     @staticmethod
     def _delete_dot_cache_folder_before_upload(local_dir):

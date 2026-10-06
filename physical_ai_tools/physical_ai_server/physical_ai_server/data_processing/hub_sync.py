@@ -222,6 +222,20 @@ def recover(target):
 
 # ── the hub view ───────────────────────────────────────────────────────────────
 
+def is_not_found(error) -> bool:
+    """R-12: „not there / no access“ — a ``RepositoryNotFoundError`` of ANY
+    status (401 anonymous, 404 with a token; ``GatedRepoError`` is one) anywhere
+    in the cause chain. By class name, so a stubbed huggingface_hub (the
+    deps-free loaders) needs no such class."""
+    seen = 0
+    while error is not None and seen < 8:
+        if any(c.__name__ == 'RepositoryNotFoundError' for c in type(error).__mro__):
+            return True
+        error = error.__cause__ or error.__context__
+        seen += 1
+    return False
+
+
 def head_of(api, repo):
     """main's head commit (``list_repo_refs``); raises the library's error,
     ``RepositoryNotFoundError`` included."""
@@ -259,12 +273,11 @@ def hub_view(api, repo, *, complete=True, head=None, strict=False):
     ``RepositoryNotFoundError`` of ANY status, 401 included (R-12) — unless
     ``strict`` (the upload: the caller classifies the library's own error). The
     recursive ``files`` listing is fetched lazily, at most once."""
-    from huggingface_hub.errors import RepositoryNotFoundError
     try:
         head = head or head_of(api, repo)
         view = tree_view(api, repo, head)
-    except RepositoryNotFoundError:
-        if strict:
+    except Exception as e:  # noqa: BLE001 — not-found FIRST (R-12); everything else is the caller's
+        if strict or not is_not_found(e):
             raise
         return {'state': 'absent', 'complete': complete}
     cache = {}

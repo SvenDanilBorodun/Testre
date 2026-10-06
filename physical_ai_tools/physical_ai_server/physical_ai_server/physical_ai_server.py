@@ -124,8 +124,9 @@ from physical_ai_server import signal_status
 from physical_ai_server.communication.capture_timeline import SlotSampler, TakeIntegrity
 from physical_ai_server.communication.communicator import Communicator
 from physical_ai_server.data_processing import dataset_paths
+from physical_ai_server.data_processing import dataset_sync
 from physical_ai_server.data_processing import record_texts_de
-from physical_ai_server.data_processing.data_manager import DataManager
+from physical_ai_server.data_processing.data_manager import DataManager, SYNC_UNCHECKED
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
 from physical_ai_server.inference.inference_manager import InferenceManager
 from physical_ai_server.safety.collision_monitor import CollisionMonitorMixin
@@ -1512,6 +1513,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             task_info=task_info,
             upload_callback=self._enqueue_dataset_upload,
         )
+        # Daten 2.0 (§C4, §D3): the Start check consults this dataset's lease
+        # (it waits for an upload, refuses an edit/delete/download) and fetches
+        # a newer hub version through the ONE Daten download worker. Injected
+        # only when Daten runs: recording never depends on it (R-18).
+        daten = getattr(self, 'daten', None)
+        if daten is not None:
+            self.data_manager._dataset_lease = daten.claim_record_lease
+            self.data_manager._sync_download = daten.start_sync_download
         self.communicator.clear_latest_data()
 
         self.timer_manager = TimerManager(node=self)
@@ -2179,6 +2188,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 if not data_manager.check_lerobot_dataset(
                         camera_data,
                         self.total_joint_order):
+                    if getattr(data_manager, '_start_abandoned', False):
+                        # D14: a FINISH/STOP ended the Start's wait (an upload of
+                        # this dataset, its sync download). No dataset, no error:
+                        # the next tick is `finishing` and ends the session the
+                        # way a session without a dataset ends.
+                        return
                     # check_lerobot_dataset returns False on any dataset-init
                     # failure. If a lower layer left a German warning in
                     # _last_warning_message (D4 resume, D7 hub check), prefer it
@@ -2923,10 +2938,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.message = f'Path {self.DEFAULT_SAVE_ROOT_PATH} does not exist.'
                 return response
 
-            folder_names = [
-                name for name in os.listdir(self.DEFAULT_SAVE_ROOT_PATH)
-                if (self.DEFAULT_SAVE_ROOT_PATH / name).is_dir()
-            ]
+            # R-28: namespace folders only (no hidden or transaction siblings).
+            folder_names = dataset_sync.listed_names(self.DEFAULT_SAVE_ROOT_PATH)
 
             response.user_list = folder_names
             response.success = True
@@ -2965,10 +2978,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 response.message = f"User ID '{user_id}' does not exist at path: {user_path}"
                 return response
 
-            dataset_names = [
-                name for name in os.listdir(user_path)
-                if (user_path / name).is_dir()
-            ]
+            # R-28: datasets only — a Daten transaction's .tmp_sync/.bak_sync/
+            # .trash_edit directory, a lock or a record never reaches the
+            # Training list.
+            dataset_names = dataset_sync.listed_names(user_path)
 
             response.dataset_list = dataset_names
             response.success = True
@@ -3252,22 +3265,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().error(
                     f'HF API Worker failed to start; auto-upload skipped: {repo_id}')
                 self._publish_synthetic_upload_failed(
-                    repo_id,
-                    'Automatischer Upload fehlgeschlagen: HF-Worker konnte '
-                    'nicht gestartet werden. Bitte über "Datensatz '
-                    'bearbeiten" manuell hochladen.',
-                )
+                    repo_id, record_texts_de.AUTO_UPLOAD_NO_WORKER_DE)
                 return
 
             if self.hf_api_worker.is_busy():
                 self.get_logger().warning(
                     f'HF API Worker busy; auto-upload skipped: {repo_id}')
                 self._publish_synthetic_upload_failed(
-                    repo_id,
-                    'Automatischer Upload übersprungen: Ein anderer HF-Vorgang '
-                    'läuft gerade. Bitte über "Datensatz bearbeiten" manuell '
-                    'hochladen, wenn er beendet ist.',
-                )
+                    repo_id, record_texts_de.AUTO_UPLOAD_BUSY_DE)
                 return
 
             request_data = {
@@ -3278,25 +3283,24 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 'author': '',
                 'private': bool(private),
             }
+            # D14 (§C4): the hub head the Start decision saw (a sha, or None =
+            # „no dataset online“) guards the commit; a Start that could not ask
+            # sends no key and the guarded upload decides at its own time.
+            sync_base = getattr(getattr(self, 'data_manager', None), '_sync_base', SYNC_UNCHECKED)
+            if sync_base != SYNC_UNCHECKED:
+                request_data['expected_hub_sha'] = sync_base
             if self.hf_api_worker.send_request(request_data):
                 self.get_logger().info(f'Auto-upload enqueued: {repo_id}')
             else:
                 self.get_logger().error(
                     f'Failed to enqueue auto-upload: {repo_id}')
                 self._publish_synthetic_upload_failed(
-                    repo_id,
-                    'Automatischer Upload fehlgeschlagen: HF-Worker hat die '
-                    'Anfrage abgelehnt. Bitte über "Datensatz bearbeiten" '
-                    'manuell hochladen.',
-                )
+                    repo_id, record_texts_de.AUTO_UPLOAD_REFUSED_DE)
         except Exception as e:
             self.get_logger().error(
                 f'Error enqueuing auto-upload for {repo_id}: {str(e)}')
             self._publish_synthetic_upload_failed(
-                repo_id,
-                f'Automatischer Upload fehlgeschlagen: {e}. Bitte über '
-                f'"Datensatz bearbeiten" manuell hochladen.',
-            )
+                repo_id, record_texts_de.AUTO_UPLOAD_FAILED_DE)
 
     def _publish_hf_operation_status_msg(self, status):
         status_msg = HFOperationStatus()
@@ -3311,6 +3315,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         status_msg.progress_current = progress_progress.get('current', 0)
         status_msg.progress_total = progress_progress.get('total', 0)
         status_msg.progress_percentage = progress_progress.get('percentage', 0.0)
+        # Daten 2.0 (§H2): what the page registers an uploaded dataset with.
+        status_msg.repo_type = str(status.get('repo_type') or '')
+        info = status.get('info_json')
+        status_msg.info_json = json.dumps(info, ensure_ascii=False) if info else ''
 
         # self.get_logger().info(f'HF API Status: {status_msg}')
         self.hf_status_publisher.publish(status_msg)

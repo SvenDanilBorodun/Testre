@@ -101,20 +101,10 @@ def install_client_factory(bound_s=C.HUB_CALL_TIMEOUT_S):
 
 # ── classification ─────────────────────────────────────────────────────────────
 
-def _is_not_found(error) -> bool:
-    seen = 0
-    while error is not None and seen < 8:
-        if type(error).__name__ in ('RepositoryNotFoundError', 'GatedRepoError') or \
-                any(c.__name__ == 'RepositoryNotFoundError' for c in type(error).__mro__):
-            return True
-        error = error.__cause__ or error.__context__
-        seen += 1
-    return False
-
-
 def classify(error) -> str:
-    """``not_found`` (FIRST, any status) | ``auth`` | ``unreachable``."""
-    if _is_not_found(error):
+    """``not_found`` (FIRST, any status: ``hub_sync.is_not_found``) | ``auth`` |
+    ``unreachable``."""
+    if HS.is_not_found(error):
         return 'not_found'
     return 'auth' if hf_errors.classify_hf_error(error) == 'auth' else 'unreachable'
 

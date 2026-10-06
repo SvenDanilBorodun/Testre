@@ -22,7 +22,7 @@ import {
   fill, fillParts, fmtBytes, fmtBytesProgress, fmtDate, fmtDay, fmtFps, fmtGB, fmtKnown, fmtNum, fmtTime, joinAnd,
   knownNumber, plural,
 } from '../model/format';
-import { cardModel } from '../model/cardModel';
+import { cardModel, keepBothTip } from '../model/cardModel';
 import { hintBand, hintText, hintTick } from '../model/hintText';
 import { syncBadge } from '../model/syncBadge';
 import { mergeChecks } from '../model/mergeChecks';
@@ -49,6 +49,21 @@ describe('„Beide behalten" says what it does (V1-5, G-2)', () => {
   it('no Daten sentence promises that nothing is lost', () => {
     const promises = all.filter((t) => /verliert nichts|Behält alle Episoden|bleibt gelöscht\./.test(t));
     expect(promises).toEqual([]);
+  });
+
+  // T2-1: without a recorded sync there is no base, the merge is the union and
+  // a deleted episode comes back; the tip says exactly that, and only there
+  // „alle Episoden" is true.
+  it('a dataset with no recorded sync: the union, and its tip says deleted episodes come back', () => {
+    expect(COPY.keepBoth.tipNoBase).toContain('behält alle Episoden von hier und von Hugging Face');
+    expect(COPY.keepBoth.tipNoBase).toContain('kommen auch Episoden zurück, die auf einer Seite gelöscht wurden');
+    expect(COPY.keepBoth.tipNoBase).not.toContain('bleibt weg');
+    const card = (record) => ({ local: { record } });
+    expect(keepBothTip(card(null))).toBe(COPY.keepBoth.tipNoBase);
+    expect(keepBothTip(card({ hub_sha: null }))).toBe(COPY.keepBoth.tipNoBase);
+    expect(keepBothTip({ local: null })).toBe(COPY.keepBoth.tipNoBase);
+    expect(keepBothTip(card({ hub_sha: 'abc' }))).toBe(COPY.keepBoth.tip);
+    expect(all.filter((t) => t.includes('alle Episoden von hier')).length).toBe(1);
   });
 });
 

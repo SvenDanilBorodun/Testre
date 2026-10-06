@@ -640,8 +640,10 @@ describe('whole-dataset delete (§D6, U-4): both variants, every card kind sends
 
 describe('conflict: „Beide behalten" first and default (§E10)', () => {
   const C = `${OWN}/omx_f_con`;
+  // A conflict with a recorded sync: the three-way merge (G-2)
+  const SYNCED = { hub_sha: 'head-base', synced_at: '2026-10-02T10:00:00Z', source_repo: null, private: false, tag_ok: true };
   beforeEach(() => {
-    world.local = [local(C)];
+    world.local = [local(C, { record: SYNCED })];
     world.hub = [hubEntry(C)];
     world.sync = { [C]: { state: 'conflict', head: 'head-card' } };
     world.hubstate = (hid) => ({
@@ -706,6 +708,40 @@ describe('conflict: „Beide behalten" first and default (§E10)', () => {
     await waitFor(() => expect(document.activeElement).toBe(keep));
     fireEvent.click(within(dlg).getByRole('button', { name: COPY.conflict.uploadHere }));
     await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: C, expected_hub_sha: 'head-dialog', private: false }]));
+  });
+
+  // T2-1: a dataset with no sync record (uploaded before Daten 2.0, never found
+  // identical to its hub copy since) has no base; „Beide behalten" is then the
+  // union, and a deleted episode comes back. Every surface says so — and the
+  // three-way sentence („… bleibt weg") appears nowhere.
+  it.each([
+    ['no record at all', null],
+    ['a record without a hub commit (never uploaded or downloaded)', { hub_sha: null, synced_at: null, source_repo: null, private: null, tag_ok: true }],
+  ])('%s: the card, both dialogs and the tip say deleted episodes come back (T2-1)', async (_k, record) => {
+    world.local = [local(C, { record })];
+    await mount();
+    await waitFor(() => expect(card(C)).not.toBeNull());
+    const keepOnCard = within(card(C)).getByRole('button', { name: COPY.card.keepBoth });
+    expect(keepOnCard.getAttribute('title')).toBe(COPY.keepBoth.tipNoBase);
+    for (const opener of [COPY.card.uploadHere, COPY.card.loadOnline]) {
+      fireEvent.click(within(card(C)).getByText(opener));
+      // eslint-disable-next-line no-await-in-loop
+      const dlg = await screen.findByRole('dialog');
+      // eslint-disable-next-line no-await-in-loop
+      const keep = await within(dlg).findByRole('button', { name: COPY.keepBoth.button });
+      expect(keep.getAttribute('title')).toBe(COPY.keepBoth.tipNoBase);
+      expect(dlg.textContent).toContain(COPY.keepBoth.tipNoBase);
+      expect(dlg.textContent).not.toContain('bleibt weg');
+      fireEvent.click(within(dlg).getByRole('button', { name: COPY.tool.cancel }));
+      // eslint-disable-next-line no-await-in-loop
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    }
+  });
+
+  it('a recorded sync: the three-way sentence on the card too', async () => {
+    await mount();
+    await waitFor(() => expect(card(C)).not.toBeNull());
+    expect(within(card(C)).getByRole('button', { name: COPY.card.keepBoth }).getAttribute('title')).toBe(COPY.keepBoth.tip);
   });
 });
 

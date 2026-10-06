@@ -8,10 +8,12 @@
 
 // The three ways out of a conflict (owner decisions N1, F-3, G-2; spec §E10),
 // in this order and with „Beide behalten" the default (focused): keep both
-// (a three-way merge: nothing is lost, what was deleted since the last sync
-// stays deleted), load the online version, upload this one — the last two
-// each saying what they lose. On a partner's dataset only „Online-Version
-// laden" remains (H-3); the sentence why stands in place of the other two.
+// (a three-way merge: every new episode of both sides stays, what was deleted
+// since the last sync stays deleted — or, for a dataset with no recorded sync,
+// the union, where deleted episodes come back: `tip` says which, T2-1), load
+// the online version, upload this one — the last two each saying what they
+// lose. On a partner's dataset only „Online-Version laden" remains (H-3); the
+// sentence why stands in place of the other two.
 
 import React from 'react';
 import Icon from '../../icons/Icon';
@@ -20,6 +22,7 @@ import COPY from '../../../features/editDataset/datenCopy';
 
 export default function ConflictChoices({
   partnerNote = null, onKeepBoth, onLoadOnline, onUploadHere, disabledTitle = '', inDialog = false,
+  tip = COPY.keepBoth.tip,
 }) {
   const off = !!disabledTitle;
   const run = (fn) => (e) => { releasePointerFocus(e); fn(); };
@@ -33,13 +36,13 @@ export default function ConflictChoices({
             data-autofocus={inDialog ? '' : undefined}
             data-action="keep_both"
             disabled={off}
-            title={disabledTitle || COPY.keepBoth.tip}
+            title={disabledTitle || tip}
             onClick={run(onKeepBoth)}
           >
             <Icon name="keepBoth" size={16} />
             {COPY.keepBoth.button}
           </button>
-          <small>{COPY.keepBoth.tip}</small>
+          <small>{tip}</small>
         </div>
       )}
       <div className="dat-keep">

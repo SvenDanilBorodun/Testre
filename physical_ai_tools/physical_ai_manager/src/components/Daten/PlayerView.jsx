@@ -48,7 +48,7 @@ import useEpisodePlayer from '../../features/editDataset/hooks/useEpisodePlayer'
 import { driverCamera, orderCameras } from '../../features/editDataset/model/labels';
 import { frameAt, lastFrame, shiftTarget, stepTarget } from '../../features/editDataset/model/playerClock';
 import { fill } from '../../features/editDataset/model/format';
-import { hubLink, trainingBlock } from '../../features/editDataset/model/cardModel';
+import { hubLink, keepBothTip, trainingBlock } from '../../features/editDataset/model/cardModel';
 
 const EMPTY = Object.freeze([]);
 
@@ -344,6 +344,7 @@ function PlayerView({
             own={model.own}
             partnerNote={model.own ? null : fill(COPY.card.partnerNote, { name: ownerName })}
             hfOff={hfOff}
+            keepBothTip={keepBothTip(card)}
             onAction={onBanner}
           />
         </>

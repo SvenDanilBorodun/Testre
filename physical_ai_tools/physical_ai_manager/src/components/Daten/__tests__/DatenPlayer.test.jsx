@@ -279,6 +279,18 @@ describe('the player (§F)', () => {
     expect(within(dlg).getByRole('heading').textContent).toBe(COPY.confirm.deleteDatasetTitle);
   });
 
+  it.each([
+    ['no recorded sync (T2-1)', null, COPY.keepBoth.tipNoBase],
+    ['a recorded sync', { hub_sha: 'head-base', synced_at: null, source_repo: null, private: false, tag_ok: true }, COPY.keepBoth.tip],
+  ])('the conflict banner, %s: „Beide behalten" says what it will do', async (_k, record, tip) => {
+    world.local = [local(W, { total_episodes: 3, record })];
+    world.sync = { [W]: { state: 'conflict', head: `head-${W}` } };
+    await openPlayerView();
+    const banner = document.querySelector('[data-banner="conflict"]');
+    expect(within(banner).getByRole('button', { name: COPY.keepBoth.button }).getAttribute('title')).toBe(tip);
+    expect(banner.textContent).toContain(tip);
+  });
+
   it('a crashed dataset repaired while open („Online-Version laden" landed): the player comes back', async () => {
     await openPlayerView();
     world.local = [local(W, { total_episodes: 3, state: 'in_session' })];

@@ -23,6 +23,7 @@ import useHubState from './useHubState';
 import Icon from '../../icons/Icon';
 import { releasePointerFocus } from '../../Record/ActionBar';
 import COPY from '../../../features/editDataset/datenCopy';
+import { keepBothTip } from '../../../features/editDataset/model/cardModel';
 import { fmtDate, knownNumber, plural } from '../../../features/editDataset/model/format';
 
 // An unknown count is „–", never 0 (T2-5).
@@ -83,6 +84,7 @@ export default function PullNewerDialog({
           <ConflictChoices
             inDialog
             partnerNote={partnerNote}
+            tip={keepBothTip(card)}
             onKeepBoth={() => onKeepBoth(head)}
             onLoadOnline={() => onPull(head)}
             onUploadHere={() => onUpload(head, !!(data && data.new_repo_private))}

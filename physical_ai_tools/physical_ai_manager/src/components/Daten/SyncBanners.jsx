@@ -23,7 +23,7 @@ import { fill, fmtDate } from '../../features/editDataset/model/format';
 const B = COPY.banner;
 
 export default function SyncBanners({
-  syncState, hub, newerAcked, partnerNote, hfOff, own, onAction,
+  syncState, hub, newerAcked, partnerNote, hfOff, own, onAction, keepBothTip = COPY.keepBoth.tip,
 }) {
   const click = (id) => (e) => { releasePointerFocus(e); onAction(id); };
   const hfTitle = hfOff ? COPY.lib.tokenNotActive : undefined;
@@ -63,6 +63,7 @@ export default function SyncBanners({
         <ConflictChoices
           partnerNote={partnerNote}
           disabledTitle={hfTitle || ''}
+          tip={keepBothTip}
           onKeepBoth={() => onAction('keep_both')}
           onLoadOnline={() => onAction('load_online')}
           onUploadHere={() => onAction('upload_here')}

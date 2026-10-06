@@ -31,6 +31,7 @@ import useHubState from './useHubState';
 import Icon from '../../icons/Icon';
 import { releasePointerFocus } from '../../Record/ActionBar';
 import COPY from '../../../features/editDataset/datenCopy';
+import { keepBothTip } from '../../../features/editDataset/model/cardModel';
 import {
   fill, fmtDate, fmtKnown, fmtTime, knownNumber, plural,
 } from '../../../features/editDataset/model/format';
@@ -129,6 +130,7 @@ export default function UploadCompareDialog({
           <p>{COPY.banner.conflict}</p>
           <ConflictChoices
             inDialog
+            tip={keepBothTip(card)}
             onKeepBoth={() => onKeepBoth(head)}
             onLoadOnline={() => onPull(head)}
             onUploadHere={() => onUpload({ expected_hub_sha: head, private: privateNew })}

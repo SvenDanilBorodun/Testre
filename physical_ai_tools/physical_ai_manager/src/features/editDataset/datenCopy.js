@@ -198,6 +198,8 @@ const DATEN_COPY = deepFreeze({
     eyebrow: 'Episoden ansehen',
     groupOwner: '{name} · Gruppe',
     loading: 'Episoden werden geladen …',
+    // T2-2: the open dataset is being recorded right now (its card: „Erst nach der Aufnahme")
+    live: 'Dieser Datensatz wird gerade aufgenommen. Ansehen und Bearbeiten gehen erst nach der Aufnahme.',
     loadFailed: 'Diese Episode konnte nicht geladen werden.',
     retry: 'Erneut versuchen',
     unplayable: 'Diese Episode kann hier nicht abgespielt werden: Ihr Video ist nicht an der Episodengrenze geschnitten.',

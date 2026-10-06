@@ -21,6 +21,7 @@ import toast from 'react-hot-toast';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import DatenPage from '../DatenPage';
+import { nextPlayerShown } from '../PlayerView';
 import COPY from '../../../features/editDataset/datenCopy';
 import { fill, fmtDate } from '../../../features/editDataset/model/format';
 import { openPlayer } from '../../../features/editDataset/editDatasetSlice';
@@ -231,12 +232,99 @@ describe('the player (§F)', () => {
     expect(screen.getByText(COPY.player.eyebrow)).toBeInTheDocument();
   });
 
+  // T2-2: the player shows what the card shows when its dataset cannot be
+  // viewed or edited right now — never „Hier geändert … Jetzt hochladen" or the
+  // edit tools beside a dataset the robot refuses to upload or edit.
+  it('the open dataset is recorded, then the session ends unfinished: the card\'s sentence and actions, no tools (T2-2)', async () => {
+    world.sync = { [W]: { state: 'changed', head: `head-${W}` } };
+    const { store } = await openPlayerView();
+    expect(document.querySelector('[data-banner="changed"]')).not.toBeNull();
+    expect(screen.getByRole('toolbar', { name: COPY.tools.label })).toBeInTheDocument();
+    const summaries = () => global.fetch.mock.calls.filter(([u]) => String(u).endsWith('/summary')).length;
+    const asked = summaries();
+
+    // a recording into it starts: the live state
+    world.local = [local(W, { total_episodes: 3, state: 'in_session', meta_digest: 'd-rec' })];
+    delete world.summaries[W];
+    act(() => setDaten({ busy: [{ id: W, kind: 'record' }] }));
+    await waitFor(() => expect(document.querySelector('[data-player-state="live"]')).not.toBeNull());
+    expect(document.querySelector('[data-player-state="live"]').textContent).toBe(COPY.player.live);
+    expect(screen.queryByRole('toolbar', { name: COPY.tools.label })).toBeNull();
+    expect(document.querySelector('[data-banner]')).toBeNull();
+    expect(document.querySelectorAll('.dat-ep-row').length).toBe(0);
+
+    // the session ends unfinished (the marker stays, no live recording): crashed
+    act(() => setDaten({ busy: [] }));
+    await waitFor(() => expect(document.querySelector('[data-player-state="crashed"]')).not.toBeNull());
+    const state = document.querySelector('[data-player-state="crashed"]');
+    expect(state.textContent).toContain(COPY.card.crashed);
+    expect(within(state).getAllByRole('button').map((b) => b.textContent)).toEqual([COPY.card.loadOnline, COPY.card.deleteWhole]);
+    expect(screen.queryByRole('toolbar', { name: COPY.tools.label })).toBeNull();
+    expect(document.querySelector('[data-banner]')).toBeNull();
+    expect(document.body.textContent).not.toContain(COPY.banner.changedButton);
+    expect(document.body.textContent).not.toContain(COPY.tools.deleteEpisodes);
+    expect(document.body.textContent).not.toContain(COPY.http.generic);
+    expect(document.querySelector('.dat-pl-meta [data-sync]')).toBeNull();
+    expect(screen.getByText(COPY.player.eyebrow)).toBeInTheDocument();
+    // no summary was asked for a dataset the robot answers 409 for, and no key marks
+    key('Delete');
+    key('ArrowDown');
+    expect(store.getState().editDataset.marks[W]).toBeUndefined();
+    await new Promise((r) => { setTimeout(r, 50); });
+    expect(summaries()).toBe(asked);
+
+    // the card's actions: „Ganzen Datensatz löschen" opens the whole-delete confirm
+    fireEvent.click(within(state).getByRole('button', { name: COPY.card.deleteWhole }));
+    const dlg = await screen.findByRole('dialog');
+    expect(within(dlg).getByRole('heading').textContent).toBe(COPY.confirm.deleteDatasetTitle);
+  });
+
+  it('a crashed dataset repaired while open („Online-Version laden" landed): the player comes back', async () => {
+    await openPlayerView();
+    world.local = [local(W, { total_episodes: 3, state: 'in_session' })];
+    act(() => setDaten({ busy: [{ id: W, kind: 'record' }] }));
+    act(() => setDaten({ busy: [] }));
+    await waitFor(() => expect(document.querySelector('[data-player-state="crashed"]')).not.toBeNull());
+    world.local = [local(W, { total_episodes: 4, meta_digest: 'd-pulled' })];
+    world.summaries[W] = summary(W, 4, { meta_digest: 'd-pulled' });
+    act(() => setDaten({ busy: [{ id: W, kind: 'download' }] }));
+    act(() => setDaten({ busy: [] }));
+    await waitFor(() => expect(document.querySelectorAll('.dat-ep-row').length).toBe(4));
+    expect(document.querySelector('[data-player-state]')).toBeNull();
+    expect(screen.getByRole('toolbar', { name: COPY.tools.label })).toBeInTheDocument();
+  });
+
   it('the twin is not mounted while the robot link is down', async () => {
     const store = makeStore({ connected: false });
     store.dispatch(openPlayer(W));
     render(wrap(store, <DatenPage />));
     await screen.findByText(COPY.lib.offline);
     expect(mockTwinProps.length).toBe(0);
+  });
+});
+
+describe('nextPlayerShown (T2-2): a blocked player opens again only after the robot\'s re-read', () => {
+  const run = (kinds, start = 'ok') => kinds.reduce((s, k) => nextPlayerShown(s, k), { kind: start, reread: false }).kind;
+  it.each([
+    [['live'], 'live'],
+    [['live', 'ok'], 'live'], // the busy change renders once with the reply from before it
+    [['live', 'ok', 'refreshing'], 'live'],
+    [['live', 'ok', 'refreshing', 'crashed'], 'crashed'],
+    [['live', 'refreshing', 'ok'], 'ok'], // a recording that ended cleanly
+    [['crashed', 'busy', 'refreshing', 'ok'], 'ok'], // „Online-Version laden" landed
+    [['refreshing', 'ok'], 'ok'],
+    [['busy', 'ok'], 'ok'],
+    [['broken', 'ok'], 'broken'],
+  ])('%j → %s', (kinds, shown) => {
+    expect(run(kinds)).toBe(shown);
+  });
+  it('the same object when nothing changes (no render loop)', () => {
+    const s = { kind: 'ok', reread: false };
+    expect(nextPlayerShown(s, 'ok')).toBe(s);
+    expect(nextPlayerShown(s, 'refreshing')).toBe(s);
+    const b = { kind: 'crashed', reread: false };
+    expect(nextPlayerShown(b, 'crashed')).toBe(b);
+    expect(nextPlayerShown(b, 'ok')).toBe(b);
   });
 });
 

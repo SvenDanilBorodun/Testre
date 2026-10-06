@@ -45,7 +45,7 @@ import useDatenSession from '../../features/editDataset/hooks/useDatenSession';
 import useDatenState, { busyMap } from '../../features/editDataset/hooks/useDatenState';
 import useDatenJobs, { stepOfStage } from '../../features/editDataset/hooks/useDatenJobs';
 import useGroupNamespaces from '../../features/editDataset/hooks/useGroupNamespaces';
-import { libraryCards } from '../../features/editDataset/model/libraryState';
+import { libraryCards, syncAfterLocalEdit } from '../../features/editDataset/model/libraryState';
 import { cardModel } from '../../features/editDataset/model/cardModel';
 import { fill, fmtBytes, plural } from '../../features/editDataset/model/format';
 import { selectHfAccount, selectHfInSync } from '../../features/hfToken/hfTokenSelectors';
@@ -127,8 +127,9 @@ export default function DatenPage() {
   const [query, setQuery] = useState('');
   const [newerAck, setNewerAck] = useState({});
   const cancelledRef = useRef(new Set());
-  const libRef = useRef(session.lib);
-  libRef.current = session.lib;
+  // The library as of the last reply — after an awaited `loadLibrary` the
+  // reply it waited for, never the state of the last render (V2-5).
+  const getLib = session.getLib;
 
   const own = group.own;
   const robotType = session.lib.robotType || statusRobotType || 'omx_f';
@@ -253,9 +254,11 @@ export default function DatenPage() {
       steps: [COPY.keepBoth.stepDownload, COPY.keepBoth.stepMerge, COPY.keepBoth.stepUpload],
       onDone: () => {
         dispatch(removeTransfer(card.id));
-        session.loadLibrary({ hub: true, ids: [card.id] }).then(() => {
-          const e = libRef.current.local[card.id];
-          toastOk(fill(COPY.keepBoth.done, { n: e ? e.total_episodes : '–' }));
+        session.loadLibrary({ hub: true, ids: [card.id] }).then((landed) => {
+          const e = landed ? getLib().local[card.id] : null;
+          toastOk(e && Number.isFinite(Number(e.total_episodes))
+            ? fill(COPY.keepBoth.done, { n: e.total_episodes })
+            : COPY.keepBoth.doneNoCount);
         });
       },
       onFailed: (row) => {
@@ -264,7 +267,7 @@ export default function DatenPage() {
         refetch([card.id]);
       },
     });
-  }, [run, trackJob, dispatch, session, refetch]);
+  }, [run, trackJob, dispatch, session, getLib, refetch]);
 
   const runUpload = useCallback(async (card, args) => {
     const r = await run('upload', { dataset: card.id, ...args }, { staleIds: [card.id] });
@@ -312,7 +315,8 @@ export default function DatenPage() {
       onDone: (row) => {
         dispatch(clearMarks(card.id));
         const outputs = (row.outputs && row.outputs.length ? row.outputs : r.result.outputs) || [];
-        session.loadLibrary({ hub: true, ids: [...new Set([card.id, ...outputs])] }).then(() => ui.onDone(outputs));
+        session.loadLibrary({ hub: true, ids: [...new Set([card.id, ...outputs])] })
+          .then((landed) => ui.onDone(outputs, landed));
       },
       onFailed: (row) => {
         toastError(row.message || COPY.http.generic);
@@ -328,7 +332,7 @@ export default function DatenPage() {
       dispatch(removeTransfer(repoId));
       if (t.via === 'keep_both') return; // the job says it
       if (cancelledRef.current.has(repoId)) { cancelledRef.current.delete(repoId); return; }
-      const card = libRef.current.local[t.id || repoId];
+      const card = getLib().local[t.id || repoId];
       const name = card ? (card.display_name || card.name) : repoId.split('/')[1];
       if (t.result.status === 'Success') {
         toastOk(PLAIN_UPLOAD_SUCCESS.test(t.result.message) || !t.result.message
@@ -339,7 +343,7 @@ export default function DatenPage() {
       }
       refetch([t.id || repoId]);
     });
-  }, [transfers, dispatch, refetch]);
+  }, [transfers, dispatch, refetch, getLib]);
 
   // ---- the open dataset left the list (deleted elsewhere): back to the library
   const openCard = openId ? cards.find((c) => c.id === openId) || null : null;
@@ -470,11 +474,15 @@ export default function DatenPage() {
       title: COPY.progress.deleteTitle,
       sub: COPY.progress.wait,
       steps: COPY.progress.deleteSteps,
-      onDone: () => {
-        const e = libRef.current.local[card.id];
-        const sync = libRef.current.sync[card.id];
+      onDone: (_outputs, landed) => {
+        // The state AFTER the edit (V2-5): the robot's re-read when it landed,
+        // else what a local edit always makes of the state before it.
+        const lib = getLib();
+        const e = lib.local[card.id] || null;
+        const reRead = landed ? lib.sync[card.id] : null;
+        const sync = reRead || { ...(card.sync || {}), state: syncAfterLocalEdit(card.sync && card.sync.state), reason: null };
         const count = plural(indices.length, COPY.count.episodeOne, COPY.count.episodeMany);
-        if (sync && sync.state === 'changed' && card.ns === own) {
+        if (sync.state === 'changed' && card.ns === own) {
           toastOk(fill(COPY.toast.episodesDeletedUpload, { count }), {
             label: COPY.toast.uploadAction,
             onClick: () => setDialog({ type: 'upload', card: { ...card, local: e || card.local, sync } }),
@@ -484,7 +492,7 @@ export default function DatenPage() {
         }
       },
     });
-  }, [runEdit, own]);
+  }, [runEdit, own, getLib]);
 
   const runSplit = useCallback((card, summary, { indices, name, target }) => {
     runEdit(card, {
@@ -493,9 +501,9 @@ export default function DatenPage() {
       title: COPY.progress.splitTitle,
       sub: COPY.progress.wait,
       steps: COPY.progress.splitSteps,
-      onDone: (outputs) => {
+      onDone: (outputs, landed) => {
         const newId = outputs.find((o) => o !== card.id) || target;
-        const orig = libRef.current.local[card.id];
+        const orig = landed ? getLib().local[card.id] : null;
         toastOk(fill(COPY.toast.split, {
           a: nameOf(card),
           na: plural(orig ? orig.total_episodes : (summary.episodes.length - indices.length), COPY.count.episodeOne, COPY.count.episodeMany),
@@ -504,7 +512,7 @@ export default function DatenPage() {
         }), { label: COPY.toast.splitAction, onClick: () => dispatch(openPlayer(newId)) });
       },
     });
-  }, [runEdit, own, dispatch]);
+  }, [runEdit, own, dispatch, getLib]);
 
   // ---- the open player's props, stable by content ---------------------------
   const openModel = useStableValue(openCard ? models[openCard.id] : null);

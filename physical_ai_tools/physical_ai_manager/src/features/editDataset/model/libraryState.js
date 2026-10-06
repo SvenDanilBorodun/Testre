@@ -178,6 +178,19 @@ export function applyLibraryReply(prev, reply, req, { accountFp = null, nowMs = 
   return next;
 }
 
+// What a LOCAL edit (delete, split, „Beide behalten" aside) makes of a sync
+// state when the robot's re-read is not there to say it (V2-5): the copy here
+// changed, so a synced copy reads `changed` — and `conflict` when the hub had
+// moved too (`newer`). `local` and `unknown` stay what they were.
+const AFTER_LOCAL_EDIT = Object.freeze({
+  current: 'changed', changed: 'changed', newer: 'conflict', conflict: 'conflict',
+});
+
+/** The sync state a dataset has after a local edit, from the one it had before (no re-read). */
+export function syncAfterLocalEdit(state) {
+  return AFTER_LOCAL_EDIT[state] || state || 'unknown';
+}
+
 /** Stamp a busy change for `ids` at the page's current request number (T-1 a). */
 export function stampBusyChange(state, ids, seq) {
   if (!ids || !ids.length) return state;

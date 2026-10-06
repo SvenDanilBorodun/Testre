@@ -525,9 +525,13 @@ describe('conflict: „Beide behalten" first and default (§E10)', () => {
     expect(dlg.querySelector('[data-step-state="pending"] [data-icon="stepPending"]')).not.toBeNull();
     act(() => setDaten({ jobs: [{ job_id: 'job-1', op: 'keep_both', state: 'running', datasets: [C], outputs: [C], stage: 'upload', done: 2, total: 3, unit: 'steps' }] }));
     await waitFor(() => expect([...document.querySelectorAll('[data-step-state]')].map((li) => li.getAttribute('data-step-state'))).toEqual(['done', 'done', 'now']));
+    // the robot's state after the job: both versions in one, uploaded (the
+    // toast counts THAT, never the copy from before the job)
+    world.local = [local(C, { total_episodes: 15, meta_digest: 'd-merged' })];
+    world.sync = { [C]: { state: 'current', head: 'head-new' } };
     act(() => setDaten({ jobs: [{ job_id: 'job-1', op: 'keep_both', state: 'done', datasets: [C], outputs: [C], stage: null, done: 3, total: 3, unit: 'steps' }] }));
     await waitFor(() => expect(screen.queryByTestId('dat-progress')).toBeNull());
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Beide Versionen sind zusammengeführt und hochgeladen (12 Episoden).', expect.anything()));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Beide Versionen sind zusammengeführt und hochgeladen (15 Episoden).', expect.anything()));
   });
 
   it('the upload compare dialog: „Beide behalten" first and FOCUSED, sending the dialog\'s head', async () => {

@@ -323,6 +323,8 @@ const DATEN_COPY = deepFreeze({
     stepMerge: 'Zusammenführen',
     stepUpload: 'Hochladen',
     done: 'Beide Versionen sind zusammengeführt und hochgeladen ({n} Episoden).',
+    // the re-read after the job did not land: no count rather than „–"
+    doneNoCount: 'Beide Versionen sind zusammengeführt und hochgeladen.',
   },
 
   conflict: {

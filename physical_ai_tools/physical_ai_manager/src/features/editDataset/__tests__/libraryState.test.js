@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  applyLibraryReply, busyChanges, cardPhase, emptyLibrary, libraryCards, stampBusyChange,
+  applyLibraryReply, busyChanges, cardPhase, emptyLibrary, libraryCards, stampBusyChange, syncAfterLocalEdit,
 } from '../model/libraryState';
 
 const FP = 'fp-lena';
@@ -178,5 +178,17 @@ describe('the crashed card (H-1, T-1, U-3)', () => {
     const entry = lib.local['lena/omx_f_k'];
     expect(entry.state).toBe('ok');
     expect(cardPhase(entry, { busyKind: null, stateSeen: true, stamp: lib.stamps['lena/omx_f_k'], entrySeq: lib.entrySeq['lena/omx_f_k'] })).toBeNull();
+  });
+});
+
+describe('syncAfterLocalEdit (V2-5): a local edit without the robot\'s re-read', () => {
+  it('a synced copy becomes changed, a newer one a conflict; local and unknown stay', () => {
+    expect(syncAfterLocalEdit('current')).toBe('changed');
+    expect(syncAfterLocalEdit('changed')).toBe('changed');
+    expect(syncAfterLocalEdit('newer')).toBe('conflict');
+    expect(syncAfterLocalEdit('conflict')).toBe('conflict');
+    expect(syncAfterLocalEdit('local')).toBe('local');
+    expect(syncAfterLocalEdit('unknown')).toBe('unknown');
+    expect(syncAfterLocalEdit(undefined)).toBe('unknown');
   });
 });

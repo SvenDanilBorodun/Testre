@@ -62,7 +62,19 @@ const tokenFresh = (t, nowMs) => !!(t && t.token && t.expiresAt - nowMs > (1 - R
 export default function useDatenSession({
   enabled, command, namespaces, inSync, accountFp, datenState, now = Date.now,
 }) {
-  const [lib, dispatch] = useReducer(reducer, undefined, emptyLibrary);
+  const [lib, rawDispatch] = useReducer(reducer, undefined, emptyLibrary);
+  // The library as of the LAST action, before React renders it: a caller that
+  // awaited `loadLibrary` reads the reply it waited for through `getLib()`
+  // (a `lib` captured by the page is one render behind — V2-5's toast once
+  // read the state from before the edit). The same pure reducer runs here and
+  // in React, in the same order, so both arrive at the same state.
+  const latestRef = useRef(null);
+  if (latestRef.current === null) latestRef.current = lib;
+  const dispatch = useCallback((action) => {
+    latestRef.current = reducer(latestRef.current, action);
+    rawDispatch(action);
+  }, []);
+  const getLib = useCallback(() => latestRef.current, []);
   const [status, setStatus] = useState('idle');
   const [hubLoading, setHubLoading] = useState(false);
   const seqRef = useRef(0);
@@ -185,7 +197,7 @@ export default function useDatenSession({
     } finally {
       if (hub && !req.ids && aliveRef.current) setHubLoading(false);
     }
-  }, [libToken, mintMissing, now]);
+  }, [libToken, mintMissing, now, dispatch]);
 
   /** „Aktualisieren", opening the tab, after a job: the whole list, the hub too when the token is this student's. */
   const refresh = useCallback(() => loadLibrary({ hub: !!inSyncRef.current }), [loadLibrary]);
@@ -272,7 +284,7 @@ export default function useDatenSession({
       dispatch({ type: 'stamp', ids: changed, seq: seqRef.current });
       refetchIds(changed);
     }
-  }, [enabled, received, payload, refetchIds]);
+  }, [enabled, received, payload, refetchIds, dispatch]);
 
   // A local dataset the library reports in_session AFTER the first message (a
   // card that appeared later) is stamped too, so it is judged by a fresh reply.
@@ -285,7 +297,7 @@ export default function useDatenSession({
       dispatch({ type: 'stamp', ids: unstamped, seq: seqRef.current });
       refetchIds(unstamped);
     }
-  }, [enabled, lib.stateSeen, lib.local, lib.stamps, refetchIds]);
+  }, [enabled, lib.stateSeen, lib.local, lib.stamps, refetchIds, dispatch]);
 
   // Reset when the page is disabled (signed out, link lost).
   useEffect(() => {
@@ -294,7 +306,7 @@ export default function useDatenSession({
     prevBusyRef.current = null;
     pollStartRef.current = null;
     setStatus((s) => (s === 'old_image' ? s : 'idle'));
-  }, [enabled]);
+  }, [enabled, dispatch]);
 
   // ---- per-dataset reads ---------------------------------------------------
   /** GET `/ds/<T>/<path>` with one re-mint on a token error. */
@@ -338,6 +350,7 @@ export default function useDatenSession({
   return {
     status,
     lib,
+    getLib,
     hubLoading,
     refresh,
     refetchIds,

@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import DatenPage from '../DatenPage';
 import COPY from '../../../features/editDataset/datenCopy';
+import { fill } from '../../../features/editDataset/model/format';
 import { openPlayer } from '../../../features/editDataset/editDatasetSlice';
 import { setRenderProbeForTests } from '../../../features/editDataset/renderProbe';
 import {
@@ -299,6 +300,75 @@ describe('the tools (§G6, §J.3, R-9)', () => {
     act(() => setDaten({ jobs: [{ job_id: 'job-1', op: 'delete', state: 'done', datasets: [W], outputs: [W], stage: null, done: 3, total: 3, unit: 'steps' }] }));
     await waitFor(() => expect(screen.queryByTestId('dat-progress')).toBeNull());
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('1 Episode gelöscht.', expect.anything()));
+  });
+
+  // V2-5: the toast is decided by the state AFTER the edit — the mockup's
+  // „… Lade den Datensatz hoch, damit das Training die neue Version nutzt." with
+  // „Jetzt hochladen" for a dataset whose hub copy is now behind.
+  async function deleteFirstEpisode() {
+    key('Delete');
+    fireEvent.click(await screen.findByRole('button', { name: COPY.player.deleteMarked }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '1 Episode löschen' }));
+    await waitFor(() => expect(commandCalls('edit')).toHaveLength(1));
+  }
+  const finishJob = () => act(() => setDaten({ jobs: [{ job_id: 'job-1', op: 'delete', state: 'done', datasets: [W], outputs: [W], stage: null, done: 3, total: 3, unit: 'steps' }] }));
+  const actionToast = () => toast.success.mock.calls.find(([body]) => typeof body === 'function');
+  const UPLOAD_TOAST = '1 Episode gelöscht. Lade den Datensatz hoch, damit das Training die neue Version nutzt.';
+
+  it('an uploaded (current) dataset: the robot re-reads it as changed → the upload toast with „Jetzt hochladen" (V2-5)', async () => {
+    await openPlayerView();
+    await deleteFirstEpisode();
+    // what the robot answers once the edit is done
+    world.local = [local(W, { total_episodes: 2, meta_digest: 'd-after' })];
+    world.sync = { [W]: { state: 'changed', head: `head-${W}` } };
+    world.summaries[W] = summary(W, 2, { meta_digest: 'd-after' });
+    finishJob();
+    await waitFor(() => expect(actionToast()).toBeDefined());
+    const [body, opts] = actionToast();
+    const t = render(body({ id: 't1' }));
+    expect(t.container.textContent).toContain(UPLOAD_TOAST);
+    expect(within(t.container).getByRole('button', { name: COPY.toast.uploadAction })).toBeInTheDocument();
+    expect(opts).toEqual({ duration: 8000 });
+    fireEvent.click(within(t.container).getByRole('button', { name: COPY.toast.uploadAction }));
+    const dlg = await screen.findByRole('dialog');
+    await within(dlg).findByText(fill(COPY.upload.newTitle, { name: 'omx_f_w' }));
+  });
+
+  it('the re-read did not land: an uploaded dataset is still judged changed (an edit always changes it here)', async () => {
+    await openPlayerView();
+    await deleteFirstEpisode();
+    const realFetch = global.fetch;
+    global.fetch = vi.fn((url) => (String(url).includes('/library')
+      ? Promise.resolve({ ok: false, status: 502, headers: { get: () => null }, json: () => Promise.reject(new Error('x')) })
+      : realFetch(url)));
+    finishJob();
+    await waitFor(() => expect(actionToast()).toBeDefined());
+    const t = render(actionToast()[0]({ id: 't2' }));
+    expect(t.container.textContent).toContain(UPLOAD_TOAST);
+  });
+
+  it.each([
+    ['only here (local)', { state: 'local', head: null }, 'local'],
+    ['a newer hub copy (now both sides changed)', { state: 'newer', head: 'h' }, 'conflict'],
+  ])('%s: the plain toast — nothing invites a plain upload', async (_label, before, after) => {
+    world.sync = { [W]: before };
+    const { store } = await openPlayerView();
+    if (before.state === 'newer') {
+      key('Delete');
+      fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: COPY.newer.anyway }));
+      await waitFor(() => expect(store.getState().editDataset.marks[W].indices).toEqual([0]));
+      fireEvent.click(await screen.findByRole('button', { name: COPY.player.deleteMarked }));
+      fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '1 Episode löschen' }));
+      await waitFor(() => expect(commandCalls('edit')).toHaveLength(1));
+    } else {
+      await deleteFirstEpisode();
+    }
+    world.local = [local(W, { total_episodes: 2, meta_digest: 'd-after' })];
+    world.sync = { [W]: { state: after, head: before.head } };
+    world.summaries[W] = summary(W, 2, { meta_digest: 'd-after' });
+    finishJob();
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('1 Episode gelöscht.', expect.anything()));
+    expect(actionToast()).toBeUndefined();
   });
 
   it('a failed job: its German message, the dialog closes', async () => {

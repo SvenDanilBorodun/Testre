@@ -58,7 +58,7 @@ export function playerKeyAllowed(e, blocked) {
 }
 
 function PlayerView({
-  card, model, api, connected, hfOff, keysBlocked, newerAcked, actions,
+  card, hubFacts = null, model, api, connected, hfOff, keysBlocked, newerAcked, actions,
 }) {
   countRender('PlayerView');
   const dispatch = useDispatch();
@@ -264,7 +264,7 @@ function PlayerView({
       />
       <SyncBanners
         syncState={syncState}
-        hub={card.hub}
+        hub={hubFacts}
         newerAcked={newerAcked}
         own={model.own}
         partnerNote={model.own ? null : fill(COPY.card.partnerNote, { name: ownerName })}

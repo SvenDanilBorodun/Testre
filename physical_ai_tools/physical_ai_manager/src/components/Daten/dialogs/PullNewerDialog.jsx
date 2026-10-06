@@ -6,7 +6,9 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-// „Neuere Version laden?" (the mockup's pullNewer, spec §E3, §G14 T-1 b): the
+// „Neuere Version laden?" (the mockup's pullNewer, spec §E3, §G14 T-1 b) —
+// „Online-Version laden?" when it is opened for a conflict or a crashed card
+// (`online`), whose hub copy is different, not newer (V2-15): the
 // two versions side by side, and — when the copy here has changes of its own
 // (changed, conflict, or a crashed session's leftovers) — „Deine Änderungen
 // von hier gehen dabei verloren." The download sends the head the dialog
@@ -26,7 +28,7 @@ import { fmtDate, plural } from '../../../features/editDataset/model/format';
 const eps = (n) => plural(n ?? 0, COPY.count.episodeOne, COPY.count.episodeMany);
 
 export default function PullNewerDialog({
-  card, crashed = false, partnerNote = null, fetchHubState, onPull, onKeepBoth, onUpload, onClose,
+  card, crashed = false, online = false, partnerNote = null, fetchHubState, onPull, onKeepBoth, onUpload, onClose,
 }) {
   const { status, data } = useHubState(fetchHubState, card.id);
   const hub = data && data.hub;
@@ -34,11 +36,13 @@ export default function PullNewerDialog({
   const syncState = (data && data.sync && data.sync.state) || (card.sync && card.sync.state);
   const conflict = syncState === 'conflict' && !crashed;
   const losesHere = crashed || syncState === 'changed' || syncState === 'conflict';
+  const neutral = online || crashed || syncState === 'conflict';
+  const title = neutral ? COPY.pull.titleOnline : COPY.pull.title;
   const run = (fn) => (e) => { releasePointerFocus(e); fn(); };
 
   if (status === 'loading') {
     return (
-      <Dialog focusKey={status} title={COPY.pull.title} icon="cloudDownload" iconTone="sky" onClose={onClose}>
+      <Dialog focusKey={status} title={title} icon="cloudDownload" iconTone="sky" onClose={onClose}>
         <p className="dat-small"><Icon name="loading" size={14} className="animate-spin" /> {COPY.upload.checking}</p>
         <div className="dat-acts">
           <button type="button" className="dat-btn" data-autofocus onClick={run(onClose)}>{COPY.tool.cancel}</button>
@@ -48,7 +52,7 @@ export default function PullNewerDialog({
   }
   if (!hub || !hub.exists || !hub.head) {
     return (
-      <Dialog focusKey={status} title={COPY.pull.title} icon="cloudDownload" iconTone="sky" onClose={onClose}>
+      <Dialog focusKey={status} title={title} icon="cloudDownload" iconTone="sky" onClose={onClose}>
         <p>{status === 'ready' ? COPY.fetch.notFound : COPY.fetch.unreachable}</p>
         <div className="dat-acts">
           <button type="button" className="dat-btn" data-autofocus onClick={run(onClose)}>{COPY.tool.cancel}</button>
@@ -58,7 +62,7 @@ export default function PullNewerDialog({
   }
   const head = hub.head;
   return (
-    <Dialog focusKey={status} title={COPY.pull.title} icon="cloudDownload" iconTone="sky" onClose={onClose} wide={conflict}>
+    <Dialog focusKey={status} title={title} icon="cloudDownload" iconTone="sky" onClose={onClose} wide={conflict}>
       <div className="dat-cmp">
         <div>
           <small><Icon name="hardDrive" size={14} />{COPY.pull.here}</small>
@@ -71,7 +75,7 @@ export default function PullNewerDialog({
           <span>{fmtDate(hub.last_modified)}</span>
         </div>
       </div>
-      <p>{COPY.pull.replaces}</p>
+      <p>{neutral ? COPY.pull.replacesOnline : COPY.pull.replaces}</p>
       {losesHere && !conflict ? <p data-loses-here=""><b>{COPY.conflict.losesHere}</b></p> : null}
       {conflict ? (
         <>

@@ -426,9 +426,13 @@ const DATEN_COPY = deepFreeze({
 
   pull: {
     title: 'Neuere Version laden?',
+    // „Online-Version laden" of a conflict or a crashed card: the hub copy is
+    // not newer, only different (V2-15)
+    titleOnline: 'Online-Version laden?',
     here: 'Hier',
     onHub: 'Auf Hugging Face',
     replaces: 'Die Version hier wird durch die neuere von Hugging Face ersetzt.',
+    replacesOnline: 'Die Version hier wird durch die Version von Hugging Face ersetzt.',
     button: 'Laden',
   },
 

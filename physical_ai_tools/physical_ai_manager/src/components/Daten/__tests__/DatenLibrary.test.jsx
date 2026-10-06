@@ -677,6 +677,10 @@ describe('conflict: „Beide behalten" first and default (§E10)', () => {
     await waitFor(() => expect(card(C)).not.toBeNull());
     fireEvent.click(within(card(C)).getByText(COPY.card.loadOnline));
     const dlg = await screen.findByRole('dialog');
+    // V2-15: nothing says the hub copy of a conflict is NEWER
+    expect(within(dlg).getByRole('heading').textContent).toBe(COPY.pull.titleOnline);
+    expect(dlg.textContent).not.toContain(COPY.pull.title);
+    await within(dlg).findByText(COPY.pull.replacesOnline);
     const keep = await within(dlg).findByRole('button', { name: COPY.keepBoth.button });
     await waitFor(() => expect(document.activeElement).toBe(keep));
     fireEvent.click(within(dlg).getByRole('button', { name: COPY.conflict.uploadHere }));
@@ -808,7 +812,8 @@ describe('upload dialogs (§E2, N7)', () => {
     fireEvent.keyDown(within(card(N)).getByRole('menu'), { key: 'Escape' });
     fireEvent.click(within(card(N)).getByText(COPY.card.pullNewer));
     const pull = await screen.findByRole('dialog');
-    expect(pull.textContent).toContain(COPY.pull.title);
+    expect(within(pull).getByRole('heading').textContent).toBe(COPY.pull.title);
+    await within(pull).findByText(COPY.pull.replaces);
     fireEvent.click(await within(pull).findByRole('button', { name: COPY.pull.button }));
     await waitFor(() => expect(commandCalls('download')).toEqual([
       { repo_id: N, revision: 'head-x', target: N, mode: 'replace', display_name: null, meta_digest: `d-${N}` },

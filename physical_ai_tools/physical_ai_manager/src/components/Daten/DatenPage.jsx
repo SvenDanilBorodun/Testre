@@ -349,6 +349,32 @@ export default function DatenPage() {
 
   // ---- the open dataset left the list (deleted elsewhere): back to the library
   const openCard = openId ? cards.find((c) => c.id === openId) || null : null;
+
+  // ---- the hub copy's numbers for the open dataset (V2-15) -------------------
+  // The newer/changed banners and the newerWarn dialog name the hub copy's
+  // episodes and date, as the mockup does. The library lists a LOCAL dataset's
+  // hub entry without numbers, so the page asks `hubstate` once per dataset,
+  // hub head and local version; until it answers (or when it cannot) the
+  // sentences go without numbers.
+  const fetchHubState = session.fetchHubState;
+  const openSync = openCard && openCard.sync ? openCard.sync.state : null;
+  const factsKey = view === 'player' && openCard && openCard.local && (openSync === 'newer' || openSync === 'changed')
+    ? `${openCard.id}|${openCard.sync.head || ''}|${openCard.local.meta_digest || ''}` : null;
+  const [hubFacts, setHubFacts] = useState({ key: null, hub: null });
+  useEffect(() => {
+    if (!factsKey || !openId) return undefined;
+    let cancelled = false;
+    fetchHubState(openId).then((data) => {
+      const h = data && data.hub && data.hub.exists ? data.hub : null;
+      if (!cancelled) {
+        setHubFacts({ key: factsKey, hub: h ? { total_episodes: h.total_episodes, last_modified: h.last_modified } : null });
+      }
+    }).catch(() => {
+      if (!cancelled) setHubFacts({ key: factsKey, hub: null });
+    });
+    return () => { cancelled = true; };
+  }, [factsKey, openId, fetchHubState]);
+  const openHubFacts = useStableValue(hubFacts.key && hubFacts.key === factsKey ? hubFacts.hub : null);
   useEffect(() => {
     if (view === 'player' && session.lib.loaded && openId && !(openCard && openCard.local)) dispatch(showLibrary());
   }, [view, openId, openCard, session.lib.loaded, dispatch]);
@@ -375,7 +401,9 @@ export default function DatenPage() {
         toastWarn(fill(COPY.toast.partnerUpload, { name: (m && m.ownerName) || card.ns }));
         break;
       case 'pull': setDialog({ type: 'pull', card }); break;
-      case 'load_online': setDialog({ type: 'pull', card, crashed: !!(m && m.kind === 'crashed') }); break;
+      case 'load_online': setDialog({
+        type: 'pull', card, crashed: !!(m && m.kind === 'crashed'), online: true,
+      }); break;
       case 'keep_both': runKeepBoth(card, card.sync && card.sync.head ? card.sync.head : (card.hub && card.hub.head)); break;
       case 'load_view':
         runDownload(card, { mode: 'new', revision: (card.sync && card.sync.head) || (card.hub && card.hub.head), open: true });
@@ -545,6 +573,7 @@ export default function DatenPage() {
         <PlayerView
           key={stableCard.id}
           card={stableCard}
+          hubFacts={openHubFacts}
           model={openModel}
           api={api}
           connected={connected}
@@ -616,6 +645,7 @@ export default function DatenPage() {
           <PullNewerDialog
             card={c}
             crashed={!!dialog.crashed}
+            online={!!dialog.online}
             partnerNote={c.ns !== own ? fill(COPY.card.partnerNote, { name: (m && m.ownerName) || c.ns }) : null}
             fetchHubState={session.fetchHubState}
             onClose={close}
@@ -629,6 +659,7 @@ export default function DatenPage() {
         dlg = (
           <NewerWarnDialog
             card={c}
+            hubFacts={c.id === openId ? openHubFacts : null}
             onClose={close}
             onPull={() => setDialog({ type: 'pull', card: c })}
             onAnyway={() => {

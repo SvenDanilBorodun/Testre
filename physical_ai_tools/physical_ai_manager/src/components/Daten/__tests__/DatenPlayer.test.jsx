@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import DatenPage from '../DatenPage';
 import COPY from '../../../features/editDataset/datenCopy';
-import { fill } from '../../../features/editDataset/model/format';
+import { fill, fmtDate } from '../../../features/editDataset/model/format';
 import { openPlayer } from '../../../features/editDataset/editDatasetSlice';
 import { setRenderProbeForTests } from '../../../features/editDataset/renderProbe';
 import {
@@ -112,6 +112,7 @@ async function openPlayerView(storeOpts = {}) {
   return { store, ...utils };
 }
 const frameText = () => document.querySelector('[data-frame]').textContent;
+const requestsHubstate = () => global.fetch.mock.calls.filter(([u]) => String(u).endsWith('/hubstate')).length;
 const currentRow = () => document.querySelector('.dat-ep-open[aria-current="true"]').closest('[data-episode]').getAttribute('data-episode');
 const key = (code, extra = {}) => fireEvent.keyDown(window, { code, ...extra });
 const commandCalls = (action) => mockCommand.mock.calls.filter(([a]) => a === action).map(([, args]) => args);
@@ -412,6 +413,49 @@ describe('the tools (§G6, §J.3, R-9)', () => {
     await waitFor(() => expect(document.querySelectorAll('.dat-ep-row').length).toBe(2));
     await waitFor(() => expect(store.getState().editDataset.marks[W]).toBeUndefined());
     expect(toast).toHaveBeenCalledWith(COPY.marks.cleared, expect.anything());
+  });
+
+  // V2-15: the banners and the newerWarn dialog name the counts and dates the
+  // mockup shows — from the robot's hubstate (the library lists a local
+  // dataset's hub entry without numbers); without it, the sentence without them.
+  const HUB_AT = '2026-10-05T08:15:00Z';
+  const withHubState = (state, n = 11) => {
+    world.hubstate = (hid) => ({
+      v: 1, id: hid, sync: { state, reason: null },
+      hub: { exists: true, private: false, head: 'h', last_modified: HUB_AT, total_episodes: n, duration_s: 220 },
+      local: { total_episodes: 3 }, new_repo_private: false,
+    });
+  };
+
+  it('the newer banner: „(11 Episoden, <date>)"; the newerWarn dialog: the bold count, its date, „Hier sind es 3."', async () => {
+    world.sync = { [W]: { state: 'newer', head: 'h' } };
+    world.local = [local(W, { total_episodes: 3, display_name: 'Würfel' })];
+    withHubState('newer');
+    await openPlayerView();
+    const banner = document.querySelector('[data-banner="newer"]');
+    await waitFor(() => expect(banner.textContent).toContain(fill(COPY.banner.newer, { n: 11, date: fmtDate(HUB_AT) })));
+    key('Delete');
+    const dlg = await screen.findByRole('dialog');
+    expect(dlg.textContent).toContain(`Auf Hugging Face liegt eine neuere Version von „Würfel“: 11 Episoden (${fmtDate(HUB_AT)}). Hier sind es 3.`);
+    expect(within(dlg).getByText('11 Episoden').tagName).toBe('B');
+  });
+
+  it('the changed banner: „Das Training nutzt noch die alte Version (10 Episoden)."', async () => {
+    world.sync = { [W]: { state: 'changed', head: 'h' } };
+    withHubState('changed', 10);
+    await openPlayerView();
+    await waitFor(() => expect(document.querySelector('[data-banner="changed"]').textContent).toContain(fill(COPY.banner.changed, { n: 10 })));
+  });
+
+  it('hubstate unavailable: the banner without numbers, never „–"', async () => {
+    world.sync = { [W]: { state: 'newer', head: 'h' } };
+    world.hubstate = () => ({ v: 1, sync: { state: 'unknown', reason: 'unreachable' }, hub: null, local: {} });
+    await openPlayerView();
+    const banner = document.querySelector('[data-banner="newer"]');
+    await waitFor(() => expect(requestsHubstate()).toBeGreaterThan(0));
+    await act(async () => { await Promise.resolve(); });
+    expect(banner.textContent).toContain(COPY.banner.newerShort);
+    expect(banner.textContent).not.toMatch(/\(–|– Episoden|Episoden, –/);
   });
 
   it('a NEWER hub copy: marking asks first („Trotzdem hier bearbeiten" goes on, once)', async () => {

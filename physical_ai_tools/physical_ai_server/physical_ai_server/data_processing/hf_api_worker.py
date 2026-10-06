@@ -360,6 +360,8 @@ class HfApiWorker:
                         result['repo_type'] = extras['repo_type']
                     if status == 'success' and extras.get('info_json'):
                         result['info_json'] = extras['info_json']
+                    if extras.get('code'):
+                        result['upload_code'] = extras['code']      # the Daten keep_both job reads it
                 # The client toasts `message` verbatim (useRosTopicSubscription
                 # /huggingface/status), so it gets the worker's own German
                 # sentence; the English wrapper goes to the log only (Rule §1).

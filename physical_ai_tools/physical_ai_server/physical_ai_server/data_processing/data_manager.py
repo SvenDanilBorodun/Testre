@@ -2642,6 +2642,9 @@ class DataManager:
             import traceback
             print(f'Detailed error traceback:\n{traceback.format_exc()}')
             DataManager._last_hf_failure_reason_de = DataManager._classify_hf_failure_de(e)
+            kind = hf_errors.classify_hf_error(e)
+            DataManager._last_upload_extras['code'] = (
+                'auth' if kind == 'auth' else 'unreachable' if kind else 'internal')
             return False
         DataManager._last_upload_extras['info_json'] = DataManager._upload_info_json(
             root, repo_id, result.get('private'))

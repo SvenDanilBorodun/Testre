@@ -180,8 +180,22 @@ def test_no_hf_hub_download_in_daten():
     assert offenders == []
 
 
-def test_the_telemetry_switch_is_what_the_launch_sets():
-    launch = (PKG_PARENT / 'launch' / 'physical_ai_server_bringup.launch.py')
-    if 'HF_HUB_DISABLE_TELEMETRY' not in launch.read_text(encoding='utf-8'):
-        pytest.skip('the bringup launch gains the switch in the node-wiring step (§J.A step 10)')
-    assert "SetEnvironmentVariable('HF_HUB_DISABLE_TELEMETRY', '1')" in launch.read_text(encoding='utf-8')
+def test_the_telemetry_switch_is_the_launchs_first_action():
+    tree = ast.parse((PKG_PARENT / 'launch' / 'physical_ai_server_bringup.launch.py').read_text(encoding='utf-8'))
+    ld = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, 'id', '') == 'LaunchDescription')
+    first = ld.args[0].elts[0]
+    assert ast.unparse(first) == "SetEnvironmentVariable('HF_HUB_DISABLE_TELEMETRY', '1')"
+
+
+def test_the_sidecar_is_started_niced_by_the_launch_never_by_os_nice():
+    src = (PKG_PARENT / 'launch' / 'physical_ai_server_bringup.launch.py').read_text(encoding='utf-8')
+    tree = ast.parse(src)
+    call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, 'id', '') == 'ExecuteProcess')
+    kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
+    assert kw['cmd'] == "[sys.executable, '-m', 'physical_ai_server.daten.http_server']"
+    assert (kw['name'], kw['prefix'], kw['respawn']) == ("'daten_http'", "'nice -n 10'", 'True')
+    assert (kw['respawn_delay'], kw['sigterm_timeout'], kw['output']) == ('2.0', "'3'", "'screen'")
+    for path in sorted(DATEN.glob('*.py')):
+        calls = [n for n in ast.walk(ast.parse(path.read_text(encoding='utf-8'))) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute) and n.func.attr == 'nice']
+        assert calls == [], path.name

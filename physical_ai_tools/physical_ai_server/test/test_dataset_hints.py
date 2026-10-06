@@ -210,3 +210,21 @@ def test_degenerate_inputs_never_raise():
     S, A = episode(seconds=0.2)
     H.episode_hints(S, A, FPS, OMX)
     assert H.dataset_hints([], FPS, OMX) == []
+
+
+def test_the_thresholds_are_the_specs():
+    """§F6's numbers, pinned as literals (a mutation of a shipped threshold
+    fails here even where a behavioural test is phrased relative to it)."""
+    assert H.ALGO == 'hints-v1'
+    assert H.IDLE_DEG_S == 2.0
+    assert H.WIN_S == 0.25
+    assert H.IDLE_START_S == 3.0
+    assert H.IDLE_END_S == 4.0
+    assert H.STILL_DEG == 10.0
+    assert H.GRIP_DEG == 8.0
+    assert H.LAG_DEG == 20.0
+    assert H.LAG_WIN_S == 0.5
+    assert H.LAG_MAX_SHIFT_S == 0.6
+    assert H.SHORT_RATIO == 0.6
+    assert H.LONG_RATIO == 1.6
+    assert H.MIN_EPISODES == 4

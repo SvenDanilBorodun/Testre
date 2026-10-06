@@ -509,6 +509,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # A token-state failure must never stop the node from booting.
             self.get_logger().error(f'hf token state not started: {type(e).__name__}')
         self._init_ros_service()
+        # Daten 2.0 (§D3): /daten/command, /edubotics/daten_state, the dataset
+        # leases, the edit and download job runners and boot recovery. Not on
+        # the Communicator, so it exists when the node boots degraded; a failure
+        # logs and the node lives on without Daten (recording never depends on it).
+        self.daten = None
+        try:
+            from physical_ai_server.daten.node_service import DatenService
+            self.daten = DatenService(self)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'Daten service not started: {type(e).__name__}: {e}')
 
         # Pure identity hoist (edu6 §4.1): resolve() is NON-RAISING by
         # construction (strip + dict lookup with a default fallback), so the
@@ -3187,6 +3197,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         try:
             status = self.hf_api_worker.check_task_status()
             self._publish_hf_operation_status_msg(status)
+            daten = getattr(self, 'daten', None)
+            if daten is not None:
+                # „Beide behalten“'s upload stage waits for its upload's result.
+                daten.on_hf_status(status)
 
             # Log status changes (avoid spamming logs)
             last_status = self._last_hf_status.get('status', 'Unknown') \

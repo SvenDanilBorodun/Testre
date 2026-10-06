@@ -555,7 +555,8 @@ def _link_base_videos(api, repo, base, root, keep_dir, bdir, token):
 
 
 def download(api, repo, revision, target, *, mode, robot_type=None, display_name=None, progress=None,
-             meta_digest=None, token=None, disk_floor=DISK_START_FLOOR_BYTES, after_check=None):
+             meta_digest=None, token=None, disk_floor=DISK_START_FLOOR_BYTES, after_check=None,
+             on_total=None, before_swap=None):
     """The ONE dataset download. ``mode``: the page's ``new`` | ``replace`` |
     ``copy``; the recorder's ``sync`` (D14 „newer", D7 „exists":
     replace-or-create, record written); „Beide behalten"'s ``keep`` (the hub copy
@@ -565,7 +566,10 @@ def download(api, repo, revision, target, *, mode, robot_type=None, display_name
     the hashes match, else fetched; no record). ``revision`` None = main's head,
     resolved here. ``replace`` must carry the ``meta_digest`` of the local copy
     the page showed (T-1 c, checked under the dataset's lock). Every request is
-    made with ``token``. ``after_check(tmp)`` (tests) runs after the check.
+    made with ``token``. ``after_check(tmp)`` (tests) runs after the check;
+    ``on_total(bytes)`` once the size is known; ``before_swap()`` right before
+    the swap of a swapping mode (the worker's exit guard: a token watch that
+    fires then waits for the swap instead of removing a tmp mid-rename).
 
     Returns ``{'revision', 'dir', 'files', 'trees', 'private', 'fetched'}`` (+
     ``'no_base': True`` for a base the hub no longer has). Raises ``Refused``
@@ -611,6 +615,8 @@ def download(api, repo, revision, target, *, mode, robot_type=None, display_name
         free = _disk_free(target.parent)
         if disk_floor is not None and free - need < disk_floor:
             raise Refused('disk', free=free, need=need)
+        if on_total is not None:
+            on_total(need)
         shutil.rmtree(tmp, ignore_errors=True)
         listing = _listing(api, repo, revision, allow)
         snapshot_download(repo, repo_type='dataset', revision=revision, local_dir=str(tmp),
@@ -659,6 +665,8 @@ def download(api, repo, revision, target, *, mode, robot_type=None, display_name
                 rec['display_name'] = display_name
         else:
             rec = None
+        if before_swap is not None:
+            before_swap()
         swap_in(tmp, target, rec, '.tmp_sync', '.bak_sync')
         return {'revision': revision, 'dir': target, 'files': sha, 'trees': trees, 'private': private,
                 'fetched': 0}

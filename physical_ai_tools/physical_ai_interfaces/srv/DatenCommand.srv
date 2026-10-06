@@ -1,0 +1,9 @@
+# Daten 2.0: every mutating Daten action of the student page (spec §J.3). The page and the
+# node share the action names, argument and result shapes; message is German (Rule §1).
+string action      # link | edit | delete_dataset | upload | download | keep_both | cancel | state
+string args_json   # a JSON object, per action
+---
+bool success
+string code        # '' on success, else a code from daten/contract.py::COMMAND_CODES
+string message     # German, student-facing
+string result_json # a JSON object, per action

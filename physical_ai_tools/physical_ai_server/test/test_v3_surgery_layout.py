@@ -392,6 +392,7 @@ def test_the_templates_and_key_rule_are_the_contract_s():
     spec.loader.exec_module(c)
     assert V.FEATURE_KEY_RE.pattern == c.FEATURE_KEY_RE
     assert V.MAX_INDEX == c.MAX_INDEX
+    assert V.MAX_INDEX == 1000000
     assert V.MERGE_CHECKS == c.MERGE_CHECKS
 
 

@@ -62,6 +62,7 @@ from physical_ai_server.data_processing import dataset_sync as S
 from physical_ai_server.data_processing import v3_surgery as V
 
 _PART = re.compile(C.DATASET_PART_RE)
+_UNREAD = object()
 THUMB_WIDTH = 320
 CAMERA_PREFIX = 'observation.images.'
 
@@ -95,6 +96,36 @@ def is_valid_id(dataset_id) -> bool:
     except LibraryError:
         return False
     return True
+
+
+def dataset_state(path, info=_UNREAD) -> str:
+    """A local dataset's state (§J.4.1, H-1): ``in_session`` FIRST (a running
+    first session has no meta/episodes yet), then ``old_format``,
+    ``unsupported``, ``incomplete``, ``ok``. The library and the DatenService's
+    refusals ask this one function."""
+    path = Path(path)
+    if S.session_marker_path(path).exists():
+        return 'in_session'
+    if info is _UNREAD:
+        info = _read_info(path)
+    if info is None:
+        return 'incomplete'
+    if str(info.get('codebase_version', '')).startswith('v2'):
+        return 'old_format'
+    try:
+        V.check_layout(info, [])
+    except V.SurgeryError:
+        return 'unsupported'
+    if not isinstance(info.get('total_episodes'), int) or info.get('total_episodes') < 1:
+        return 'incomplete'
+    episodes = path / 'meta' / 'episodes'
+    if not episodes.is_dir() or not any(episodes.rglob('*.parquet')):
+        return 'incomplete'
+    try:
+        V.Source(path)
+    except V.SurgeryError as e:
+        return 'unsupported' if e.code == 'unsupported' else 'incomplete'
+    return 'ok'
 
 
 def _iso(ts) -> str:
@@ -262,28 +293,7 @@ class Library:
     # ── the library ───────────────────────────────────────────────────────
 
     def state_of(self, path: Path, info) -> str:
-        """``in_session`` FIRST (a running first session has no meta/episodes yet),
-        then ``old_format``, ``unsupported``, ``incomplete``, ``ok`` (H-1)."""
-        if S.session_marker_path(path).exists():
-            return 'in_session'
-        if info is None:
-            return 'incomplete'
-        if str(info.get('codebase_version', '')).startswith('v2'):
-            return 'old_format'
-        try:
-            V.check_layout(info, [])
-        except V.SurgeryError:
-            return 'unsupported'
-        if not isinstance(info.get('total_episodes'), int) or info.get('total_episodes') < 1:
-            return 'incomplete'
-        episodes = path / 'meta' / 'episodes'
-        if not episodes.is_dir() or not any(episodes.rglob('*.parquet')):
-            return 'incomplete'
-        try:
-            V.Source(path)
-        except V.SurgeryError as e:
-            return 'unsupported' if e.code == 'unsupported' else 'incomplete'
-        return 'ok'
+        return dataset_state(path, info)
 
     def _static_entry(self, dataset_id, path, digest):
         key = (dataset_id, digest)

@@ -373,3 +373,28 @@ def test_connection_33_is_refused_and_an_idle_socket_is_closed(root, tmp_path, m
         for s in held:
             s.close()
         srv.close()
+
+
+def test_the_load_limits_are_the_specs():
+    """§B8's numbers and the contract values the sidecar enforces, as literals."""
+    assert C.HTTP_PORT == 8095
+    assert C.MAX_CONNECTIONS == 32
+    assert C.SOCKET_TIMEOUT_S == 30
+    assert C.MEDIA_WORKERS == 2
+    assert C.MEDIA_QUEUE_MAX == 16
+    assert C.MEDIA_WAIT_S == 20
+    assert C.HUB_WORKERS == 2
+    assert C.HUB_QUEUE_MAX == 8
+    assert C.HUB_WAIT_S == 20
+    assert C.HUB_CACHE_MAX == 512
+    assert C.HUB_CALL_TIMEOUT_S == 10
+    assert C.MAX_LINK_DATASETS == 200
+    assert C.TOKEN_TTL_S == 1800
+    assert C.CLIP_CACHE_MAX_BYTES == 100663296
+    assert C.DOWNLOAD_POLL_S == 0.5
+    assert C.DOWNLOAD_STALL_S == 120
+    assert C.DOWNLOAD_TIMEOUT_S == 21600
+    assert C.EDIT_TIMEOUT_S == 3600
+    assert C.JOB_KEEP_S == 600
+    assert C.JOB_KEEP_MAX == 10
+    assert L.THUMB_WIDTH == 320

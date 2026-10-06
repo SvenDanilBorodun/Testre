@@ -410,8 +410,8 @@ describe('overlays from /edubotics/daten_state', () => {
   // V2-14: the label and the percentage never disagree („1 MB von 4 MB 0 %").
   it.each([
     [5e3, 4e6, 'Wird geladen … 0,0 MB von 4,0 MB', '0 %'],
-    [3.66e6, 4e6, 'Wird geladen … 3,6 MB von 4,0 MB', '91 %'],
-    [0.5e9, 1.08e9, 'Wird geladen … 0,5 GB von 1,1 GB', '46 %'],
+    [3.66e6, 4e6, 'Wird geladen … 3,6 MB von 4,0 MB', '90 %'],
+    [0.5e9, 1.08e9, 'Wird geladen … 0,5 GB von 1,1 GB', '45 %'],
     [540e6, 540e6, 'Wird geladen … 540 MB von 540 MB', '100 %'],
   ])('a download of %d of %d bytes: one unit, the same rounding as its percentage', async (done, total, label, pct) => {
     await mount();
@@ -422,6 +422,25 @@ describe('overlays from /edubotics/daten_state', () => {
     }));
     await waitFor(() => expect(cardText(W)).toContain(label));
     expect(card(W).querySelector('.dat-prog .dat-mono').textContent).toBe(pct);
+  });
+
+  // V2-14: the robot reports a download's bytes as the bytes in its tmp, which
+  // reads 0 for a moment when the finished tmp is swapped into place — a job's
+  // progress on the card never runs backwards
+  it('a download\'s progress never runs backwards (the finished tmp swapped away reads 0 bytes)', async () => {
+    await mount();
+    await waitFor(() => expect(card(W)).not.toBeNull());
+    const row = (done) => ({ job_id: 'd', op: 'download', state: 'running', datasets: [W], outputs: [W], stage: 'download', done, total: 4.5e6, unit: 'bytes' });
+    act(() => setDaten({ busy: [{ id: W, kind: 'download' }], jobs: [row(2.3e6)] }));
+    await waitFor(() => expect(cardText(W)).toContain('Wird geladen … 2,3 MB von 4,5 MB'));
+    act(() => setDaten({ busy: [{ id: W, kind: 'download' }], jobs: [row(4.5e6)] }));
+    await waitFor(() => expect(card(W).querySelector('.dat-prog .dat-mono').textContent).toBe('100 %'));
+    act(() => setDaten({ busy: [{ id: W, kind: 'download' }], jobs: [row(0)] }));
+    expect(cardText(W)).toContain('Wird geladen … 4,5 MB von 4,5 MB');
+    expect(card(W).querySelector('.dat-prog .dat-mono').textContent).toBe('100 %');
+    // another job starts from its own 0
+    act(() => setDaten({ busy: [{ id: W, kind: 'download' }], jobs: [{ ...row(0.5e6), job_id: 'e' }] }));
+    await waitFor(() => expect(cardText(W)).toContain('Wird geladen … 0,5 MB von 4,5 MB'));
   });
 
   it('an upload → „Wird hochgeladen …" with the HF percentage and a cancel', async () => {

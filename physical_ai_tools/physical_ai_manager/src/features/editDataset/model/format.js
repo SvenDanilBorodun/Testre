@@ -93,8 +93,9 @@ export function fmtBytes(bytes) {
  * A progress pair „{done} von {total}" and its percentage that never disagree
  * (V2-14: „1 MB von 4 MB 0 %"): both numbers in the TOTAL's unit (GB from
  * 1 GB, else MB) with one decimal below ten units, whole units above; `done`
- * and the percentage are rounded DOWN (neither claims more than arrived),
- * `done` is never more than `total`.
+ * is rounded DOWN (it never claims more than arrived) and the percentage is
+ * the one of the two numbers SHOWN, so what the student reads adds up. Only a
+ * complete transfer reads 100 % — with both numbers equal.
  * @returns {{done: string, total: string, pct: number}}
  */
 export function fmtBytesProgress(done, total) {
@@ -105,12 +106,12 @@ export function fmtBytesProgress(done, total) {
   const label = unit === GB ? 'GB' : 'MB';
   const digits = t / unit < 10 ? 1 : 0;
   const k = 10 ** digits;
-  const show = (x, round) => `${fmtNum(round((x / unit) * k + 1e-9) / k, digits)} ${label}`;
-  return {
-    done: show(d, Math.floor),
-    total: show(t, Math.round),
-    pct: Math.floor((d / t) * 100 + 1e-9),
-  };
+  const shownTotal = Math.round((t / unit) * k + 1e-9) / k;
+  const shownDone = d >= t ? shownTotal : Math.min(Math.floor((d / unit) * k + 1e-9) / k, shownTotal);
+  const text = (x) => `${fmtNum(x, digits)} ${label}`;
+  let pct = 100;
+  if (d < t) pct = shownTotal > 0 ? Math.min(99, Math.floor((shownDone / shownTotal) * 100 + 1e-9)) : 0;
+  return { done: text(shownDone), total: text(shownTotal), pct };
 }
 
 /** Bytes as „{x,y} GB" always (the free-disk chip). */

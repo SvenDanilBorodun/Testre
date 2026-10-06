@@ -216,9 +216,15 @@ describe('format (§J.6 numbers)', () => {
 
   it('a progress pair: one unit, done and percent rounded down, never past the total (V2-14)', () => {
     expect(fmtBytesProgress(5e3, 4e6)).toEqual({ done: '0,0 MB', total: '4,0 MB', pct: 0 });
-    expect(fmtBytesProgress(3.66e6, 4e6)).toEqual({ done: '3,6 MB', total: '4,0 MB', pct: 91 });
+    expect(fmtBytesProgress(3.66e6, 4e6)).toEqual({ done: '3,6 MB', total: '4,0 MB', pct: 90 });
+    // the percentage is the SHOWN numbers' (0,09 MB of 4,5 MB is „0,0 MB … 0 %", never „2 %")
+    expect(fmtBytesProgress(0.09e6, 4.5e6)).toEqual({ done: '0,0 MB', total: '4,5 MB', pct: 0 });
+    // not complete: never 100 %, and done never reads as the total
+    expect(fmtBytesProgress(4.46e6, 4.464e6)).toEqual({ done: '4,4 MB', total: '4,5 MB', pct: 97 });
+    // complete: both the same
     expect(fmtBytesProgress(120e6, 540e6)).toEqual({ done: '120 MB', total: '540 MB', pct: 22 });
-    expect(fmtBytesProgress(0.5e9, 1.08e9)).toEqual({ done: '0,5 GB', total: '1,1 GB', pct: 46 });
+    expect(fmtBytesProgress(0.5e9, 1.08e9)).toEqual({ done: '0,5 GB', total: '1,1 GB', pct: 45 });
+    expect(fmtBytesProgress(4.464e6, 4.464e6)).toEqual({ done: '4,5 MB', total: '4,5 MB', pct: 100 });
     expect(fmtBytesProgress(12e9, 12e9)).toEqual({ done: '12 GB', total: '12 GB', pct: 100 });
     expect(fmtBytesProgress(9e9, 4e6)).toEqual({ done: '4,0 MB', total: '4,0 MB', pct: 100 });
     expect(fmtBytesProgress(1, 0)).toEqual({ done: '–', total: '–', pct: 0 });

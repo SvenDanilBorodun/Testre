@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import useDatenState, { busyKindsById, parseDatenState, resetDatenStateForTests } from '../hooks/useDatenState';
 import useDatenStartWait, { isUploading } from '../hooks/useDatenStartWait';
 import useGroupNamespaces, { resetGroupNamespacesCache } from '../hooks/useGroupNamespaces';
+import { withMonotonicBytes } from '../hooks/useDatenJobs';
 import { getGroupMembers } from '../../../services/meApi';
 
 const mockTopics = [];
@@ -164,6 +165,22 @@ describe('useDatenStartWait (R-8, F-5)', () => {
     expect(isUploading(msg([{ id: 'x/y', kind: 'upload' }]), 'lena-schmidt/omx_f_wuerfel')).toBe(false);
     expect(isUploading(msg([{ id: 'lena-schmidt/omx_f_wuerfel', kind: 'record' }]), 'lena-schmidt/omx_f_wuerfel')).toBe(false);
     expect(isUploading(null, 'a/b')).toBe(false);
+  });
+});
+
+describe('withMonotonicBytes (V2-14)', () => {
+  const job = (id, done, patch = {}) => ({ job_id: id, op: 'download', state: 'running', unit: 'bytes', done, total: 100, ...patch });
+  it('a running byte job never goes backwards; other jobs and finished ones are left alone; gone jobs are forgotten', () => {
+    const peaks = new Map();
+    const p1 = { v: 1, jobs: [job('a', 60), job('k', 1, { unit: 'steps', op: 'keep_both' })] };
+    expect(withMonotonicBytes(p1, peaks)).toBe(p1);
+    const p2 = { v: 1, jobs: [job('a', 0)] };
+    expect(withMonotonicBytes(p2, peaks).jobs[0].done).toBe(60);
+    expect(p2.jobs[0].done).toBe(0); // never mutated
+    expect(withMonotonicBytes(p2, peaks).jobs[0].done).toBe(60); // idempotent
+    expect(withMonotonicBytes({ v: 1, jobs: [job('a', 100, { state: 'done' })] }, peaks).jobs[0].done).toBe(100);
+    expect(peaks.has('a')).toBe(false);
+    expect(withMonotonicBytes(null, peaks)).toBeNull();
   });
 });
 

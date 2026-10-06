@@ -648,6 +648,55 @@ class Downloads(ServiceCase):
         self.assertFalse(tmp.exists())
         self.assertEqual(recovered, [True], 'recover ran while the tmp still told the swap state (U-1)')
 
+    def test_a_result_behind_an_unfinished_progress_bar_is_still_the_result(self):
+        """V1-1: the worker's own watch printed its result while
+        snapshot_download's bar (stderr, merged into the same pipe, no newline)
+        stood unfinished: the line read ``<bar>DL_RESULT::{...}``. It is the
+        result, not a worker that ended without one (``internal``)."""
+        bar = 'Fetching 9 files:  22%|██▏       | 2/9 [00:01<00:04,  1.60it/s]'
+        job_id = self.start()['result']['job_id']
+        self.assertTrue(wait_for(lambda: self.procs and self.procs[0].request))
+        proc = self.procs[0]
+        proc.emit(bar + 'DL_PROGRESS::' + json.dumps({'stage': 'download', 'total': 4000}))
+        self.assertTrue(wait_for(lambda: self.job(job_id)['total'] == 4000))
+        proc.emit(bar + 'DL_RESULT::' + json.dumps({'ok': False, 'code': 'token_changed'}))
+        proc.end(3)
+        job = self.wait_job(job_id)
+        self.assertEqual((job['state'], job['code'], job['message']),
+                         ('failed', 'token_changed', T.DOWNLOAD_TOKEN_CHANGED_DE))
+
+    def test_parse_marked(self):
+        r = 'DL_RESULT::'
+        ok = {'ok': False, 'code': 'token_changed'}
+        cases = [('DL_RESULT::' + json.dumps(ok), ok),
+                 ('Fetching 9 files:  22%|██▏ | 2/9 [...]DL_RESULT::' + json.dumps(ok) + '\n', ok),
+                 ('DL_RESULT::' + json.dumps(ok) + ' 22%|██▏ | 2/9', ok),            # anything after the object
+                 ('DL_RESULT::{"code": "a"}DL_RESULT::{"code": "b"}', {'code': 'b'}),   # the last marker
+                 ('DL_RESULT::{"ok": tru', None), ('DL_RESULT::[1, 2]', None), ('DL_RESULT:: {}', None),
+                 ('DL_PROGRESS::{"total": 1}', None), ('', None), ('Fetching 9 files', None)]
+        for line, want in cases:
+            with self.subTest(line=line):
+                self.assertEqual(NS.parse_marked(line, r), want)
+
+    def test_the_worker_writes_each_protocol_line_on_its_own_line_in_one_write(self):
+        dw = _load('_daten_download_worker_under_test', PKG / 'daten' / 'download_worker.py')
+        self.assertEqual((dw.RESULT_PREFIX, dw.PROGRESS_PREFIX), (NS.DL_RESULT, NS.DL_PROGRESS))
+        writes = []
+
+        class Out:
+            def write(self, text):
+                writes.append(text)
+
+            def flush(self):
+                writes.append(None)
+        saved = sys.stdout
+        sys.stdout = Out()
+        try:
+            dw._say(dw.RESULT_PREFIX, {'ok': False, 'code': 'token_changed'})
+        finally:
+            sys.stdout = saved
+        self.assertEqual(writes, ['\nDL_RESULT::{"ok": false, "code": "token_changed"}\n', None])
+
     def test_a_stall_and_a_cancel(self):
         self.svc.download_stall_s = 0.15
         job = self.wait_job(self.start()['result']['job_id'])

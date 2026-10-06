@@ -78,8 +78,15 @@ def _sibling(package, name):
 
 
 def _say(prefix, obj):
+    """One protocol line, on a line of its own. The supervisor merges stderr
+    into this pipe, and snapshot_download's progress bar (``\\r`` + text, no
+    newline while it runs) may stand unfinished when the watch prints its result
+    from another thread (V1-1): the leading newline ends that line, so the
+    marker starts its own. The whole line goes out in ONE write (atomic on a
+    pipe below PIPE_BUF), so nothing lands inside it."""
     try:
-        print(prefix + json.dumps(obj), flush=True)
+        sys.stdout.write('\n' + prefix + json.dumps(obj) + '\n')
+        sys.stdout.flush()
     except (BrokenPipeError, OSError, ValueError):          # R-19: a closed pipe never kills the transaction
         pass
 

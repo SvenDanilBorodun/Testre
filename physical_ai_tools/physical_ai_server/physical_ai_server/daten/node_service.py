@@ -96,6 +96,8 @@ _PART = re.compile(C.DATASET_PART_RE)
 _REPO = re.compile(C.REPO_ID_RE)
 _SHA = re.compile(r'^[0-9a-f]{40}$')
 DOWNLOAD_WORKER_MODULE = 'physical_ai_server.daten.download_worker'
+DL_RESULT = 'DL_RESULT::'             # = download_worker.RESULT_PREFIX / PROGRESS_PREFIX
+DL_PROGRESS = 'DL_PROGRESS::'
 UPLOAD_STATUS_GRACE_S = 3.0          # the HF worker idle with no status for this long: the upload is lost
 
 # (code, message) of each busy kind
@@ -126,6 +128,24 @@ def valid_id(dataset_id) -> bool:
 
 def _now_iso():
     return S.now_iso()
+
+
+def parse_marked(line, marker):
+    """The JSON object after the LAST ``marker`` in one output line, else None.
+
+    The worker's stderr shares the pipe, and the hub library's progress bar
+    (``\\r`` + text, never a newline while it runs) can stand unfinished on the
+    line the worker's own watch prints its result into: ``Fetching 9 files:
+    22%|██▏ | 2/9 [...]DL_RESULT::{...}`` (V1-1). So the marker counts wherever
+    it stands, and anything after the object is ignored."""
+    i = line.rfind(marker)
+    if i < 0:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(line, i + len(marker))
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
 
 
 def _tree_bytes(path):
@@ -195,22 +215,18 @@ class DownloadProcess:
     def _read(self):
         try:
             for line in self.p.stdout:
-                line = line.rstrip('\n')
-                if line.startswith('DL_RESULT::'):
-                    try:
-                        self.result = json.loads(line[len('DL_RESULT::'):])
-                    except ValueError:
-                        pass
-                elif line.startswith('DL_PROGRESS::'):
-                    try:
-                        p = json.loads(line[len('DL_PROGRESS::'):])
-                    except ValueError:
-                        continue
-                    if 'total' in p:
-                        self.total = int(p.get('total') or 0)
-                    if 'done' in p:
-                        self.verify_done = int(p.get('done') or 0)
-        except (OSError, ValueError):
+                result = parse_marked(line, DL_RESULT)
+                if result is not None:
+                    self.result = result
+                    continue
+                p = parse_marked(line, DL_PROGRESS)
+                if p is None:
+                    continue
+                if 'total' in p:
+                    self.total = int(p.get('total') or 0)
+                if 'done' in p:
+                    self.verify_done = int(p.get('done') or 0)
+        except (OSError, ValueError, TypeError):
             pass
 
     def kill(self, code):

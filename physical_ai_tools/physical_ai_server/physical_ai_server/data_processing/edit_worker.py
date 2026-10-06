@@ -88,10 +88,15 @@ def _hub_sync():
 
 
 def _say(line: str) -> None:
-    """One protocol line; a closed pipe never kills the transaction (R-19)."""
+    """One protocol line, on a line of its own and in ONE write; a closed pipe
+    never kills the transaction (R-19). The parent merges stderr into this
+    pipe, so a library's progress bar (``\\r`` + text, no newline while it
+    runs) may stand unfinished: the leading newline ends it (the download
+    worker's rule, V1-1)."""
     try:
-        print(line, flush=True)
-    except (BrokenPipeError, OSError):
+        sys.stdout.write('\n' + line + '\n')
+        sys.stdout.flush()
+    except (BrokenPipeError, OSError, ValueError):
         pass
 
 
@@ -259,30 +264,34 @@ def build_command(python_exe: str, nice_level: str = '19') -> List[str]:
     ]
 
 
+def _marked(line: str, marker: str) -> Optional[dict]:
+    """The JSON object after the LAST ``marker`` in one line, else None. The
+    marker counts wherever it stands (text a progress bar left unfinished may
+    precede it) and anything after the object is ignored."""
+    i = line.rfind(marker)
+    if i < 0:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(line, i + len(marker))
+    except (ValueError, TypeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
 def parse_output(stdout: str) -> Optional[dict]:
     """The LAST ``RESULT_MARKER`` line of the worker's stdout, decoded; None when
     no valid marker was found (the worker died before emitting one)."""
     result = None
     for line in (stdout or '').splitlines():
-        line = line.strip()
-        if line.startswith(RESULT_MARKER):
-            try:
-                result = json.loads(line[len(RESULT_MARKER):])
-            except (ValueError, TypeError):
-                continue
+        parsed = _marked(line, RESULT_MARKER)
+        if parsed is not None:
+            result = parsed
     return result
 
 
 def parse_progress(line: str) -> Optional[dict]:
     """One ``EDIT_PROGRESS::`` line decoded, else None."""
-    line = (line or '').strip()
-    if not line.startswith(PROGRESS_MARKER):
-        return None
-    try:
-        p = json.loads(line[len(PROGRESS_MARKER):])
-    except (ValueError, TypeError):
-        return None
-    return p if isinstance(p, dict) else None
+    return _marked(line or '', PROGRESS_MARKER)
 
 
 def main() -> int:

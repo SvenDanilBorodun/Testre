@@ -20,3 +20,14 @@ export async function getMe(accessToken) {
 export async function patchMyHfUsername(accessToken, hfUsername) {
   return apiRequest('/me', 'PATCH', accessToken, { hf_username: hfUsername });
 }
+
+/**
+ * The members of the caller's own workgroup (Daten 2.0, spec §E6):
+ * `{workgroup_id, members: [{full_name, hf_username, is_me}]}` — the display
+ * name and the Hugging Face account name only. Keyed to the JWT server-side
+ * (no client-supplied group id); a student in no group gets only themself.
+ * The Daten tab asks once per session (hooks/useGroupNamespaces caches it).
+ */
+export async function getGroupMembers(accessToken) {
+  return apiRequest('/me/group-members', 'GET', accessToken);
+}

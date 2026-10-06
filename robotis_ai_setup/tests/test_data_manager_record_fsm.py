@@ -25,6 +25,8 @@ import types
 import unittest
 from pathlib import Path
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_MANAGER_PATH = (
     REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
@@ -163,7 +165,7 @@ def _ensure_loaded():
     return MOD
 
 
-class _FsmTestCase(unittest.TestCase):
+class _FsmTestCase(BoundedTestCase):
     @classmethod
     def setUpClass(cls):
         _ensure_loaded()
@@ -1259,7 +1261,7 @@ class StaleCameraWarningTest(_FsmTestCase):
         self.assertEqual(MOD.camera_name_de('wrist'), 'Kamera „wrist“')
 
 
-class InlineSentencesMovedTest(unittest.TestCase):
+class InlineSentencesMovedTest(BoundedTestCase):
     """Round 7: the last student-facing sentences of the recording path live
     in record_texts_de.py; the data manager keeps no inline copy (the parser
     folds implicit concatenation and f-string parts into Constant nodes). The
@@ -1285,8 +1287,11 @@ class InlineSentencesMovedTest(unittest.TestCase):
 
     def test_the_names_are_referenced(self):
         src = Path(DATA_MANAGER_PATH).read_text(encoding="utf-8")
+        # Daten 2.0: HUB_SYNC_FAILED_DE is removed (the orphan deletes are in
+        # the upload's ONE commit); the guarded upload's mapping still names
+        # NAMESPACE_REFUSED_DE and HUB_TAG_FAILED_DE.
         for name in ('UPLOAD_NOT_STARTED_DE', 'NAMESPACE_REFUSED_DE',
-                     'HUB_SYNC_FAILED_DE', 'HUB_TAG_FAILED_DE',
+                     'HUB_TAG_FAILED_DE',
                      'stale_camera_recording_de', 'missing_video_de'):
             self.assertIn(f'record_texts_de.{name}', src, name)
 
@@ -2117,9 +2122,11 @@ def _http_error(code):
 
 
 class HubExistenceCheckTest(_FsmTestCase):
-    """D7: a LOGGED-IN existence check; any failure to ask refuses the start in
-    German — never read as „absent“ (a fresh dataset would later overwrite a
-    private hub dataset)."""
+    """D7: a LOGGED-IN existence check; a failure to ask is never read as
+    „absent“. Daten 2.0 (D14, §C4): an UNREACHABLE hub no longer refuses — the
+    session records a new local dataset with OFFLINE_START_DE, `_sync_base`
+    stays SYNC_UNCHECKED, and the guarded end-of-session upload decides by
+    itself (it never overwrites a differing hub dataset)."""
 
     def setUp(self):
         self._saved = (MOD.HfApi, MOD.LeRobotDatasetWrapper)
@@ -2142,22 +2149,22 @@ class HubExistenceCheckTest(_FsmTestCase):
         dm._download_dataset = lambda repo: self.downloaded.append(repo)
         return dm
 
-    def test_an_unreachable_hub_refuses_before_any_dataset_exists(self):
+    def _assert_offline(self, dm):
+        self.assertTrue(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+        self.assertEqual(self.created, ['maxmuster/omx_f_Wuerfel-in-die-Schale'])
+        self.assertTrue(dm._task_info.push_to_hub)               # the upload still runs, guarded
+        self.assertEqual(dm._sync_base, MOD.SYNC_UNCHECKED)
+        self.assertEqual(dm.get_current_record_status().error,
+                         '[WARNUNG] ' + _texts().OFFLINE_START_DE)
+
+    def test_an_unreachable_hub_records_offline(self):
         for error in (ConnectionError('refused'), TimeoutError('timed out'),
                       _http_error(503), _http_error(429)):
             with self.subTest(error=error):
-                dm = self._dm(_FakeHub(whoami_error=error))
-                self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
-                self.assertIsNone(dm._lerobot_dataset)
-                self.assertEqual(self.created, [])
-                self.assertEqual(dm._last_warning_message,
-                                 _texts().HUB_CHECK_REFUSED_DE)
+                self._assert_offline(self._dm(_FakeHub(whoami_error=error)))
 
-    def test_a_failing_existence_query_refuses_too(self):
-        dm = self._dm(_FakeHub(exists_error=RuntimeError('503')))
-        self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
-        self.assertEqual(self.created, [])
-        self.assertEqual(dm._last_warning_message, _texts().HUB_CHECK_REFUSED_DE)
+    def test_a_failing_existence_query_records_offline_too(self):
+        self._assert_offline(self._dm(_FakeHub(exists_error=RuntimeError('503'))))
 
     def test_a_refused_existence_query_names_the_token(self):
         # The token passed whoami but the hub refuses the repo query (401/403).
@@ -2198,7 +2205,7 @@ class HubExistenceCheckTest(_FsmTestCase):
         self.assertEqual(dm._record_episode_count, 3)
         self.assertEqual(uploads, [])
 
-    def test_a_black_holed_hub_is_refused_within_the_bound(self):
+    def test_a_black_holed_hub_records_offline_within_the_bound(self):
         import threading
         import time as real_time
         self.assertEqual(MOD.HUB_CHECK_TIMEOUT_S, 15.0)
@@ -2208,14 +2215,12 @@ class HubExistenceCheckTest(_FsmTestCase):
         try:
             dm = self._dm(_FakeHub(hang=hang))
             started = real_time.monotonic()
-            self.assertFalse(dm.check_lerobot_dataset({'scene': _Img()}, ['j1']))
+            self._assert_offline(dm)
             elapsed = real_time.monotonic() - started
         finally:
             MOD.HUB_CHECK_TIMEOUT_S = saved
             hang.set()
         self.assertLess(elapsed, 1.5)
-        self.assertEqual(self.created, [])
-        self.assertEqual(dm._last_warning_message, _texts().HUB_CHECK_REFUSED_DE)
 
     def test_absent_creates_a_new_dataset(self):
         hub = _FakeHub(exists=False)

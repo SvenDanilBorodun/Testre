@@ -1068,9 +1068,10 @@ class Communicator:
                 response.items.append(item)
 
         except Exception as e:
-            self.node.get_logger().error(f'Error in browse file handler: {str(e)}')
+            self.node.get_logger().error(f'Error in browse file handler: {e!r}')
             response.success = False
-            response.message = f'Error: {str(e)}'
+            # German (R-27): the English exception stays in the log.
+            response.message = self._record_texts_de().BROWSE_FAILED_DE
             response.current_path = ''
             response.parent_path = ''
             response.selected_path = ''
@@ -1079,15 +1080,30 @@ class Communicator:
         return response
 
     def dataset_edit_callback(self, request, response):
-        # A dataset edit (delete/merge) re-encodes video and can saturate every
-        # CPU core for minutes on legacy AV1 datasets. We run it out-of-process
-        # at nice 19 (or in-process when EDUBOTICS_DATASET_EDIT_SUBPROCESS=0) so
-        # the ROS executor keeps answering services and the dashboard stays
-        # alive. The routing (v3-vs-legacy / delete-vs-merge, leLab PR-1) lives
-        # in edit_worker.run_edit, shared by both paths.
+        # The old page's /dataset/edit (delete/merge). Daten 2.0: when the node
+        # runs the Daten service it does the edit — the same single-flight,
+        # the same leases (a dataset that records, uploads or downloads is
+        # refused), the same lossless engine — and answers German. Asked for as
+        # getattr(self.node, 'daten', None): the node may run without Daten
+        # (then the old path below runs), and the deps-free tests build a bare
+        # node. Without it the edit runs out-of-process at nice 19 (or
+        # in-process when EDUBOTICS_DATASET_EDIT_SUBPROCESS=0); the routing
+        # (v3-vs-legacy / delete-vs-merge) lives in edit_worker.run_edit.
+        daten = getattr(self.node, 'daten', None)
+        if daten is not None:
+            try:
+                payload = self._build_edit_payload(request)
+                result = daten.run_edit_blocking(payload)
+                response.success = bool(result.get('success'))
+                response.message = str(result.get('message', ''))
+            except Exception as e:  # noqa: BLE001
+                self.node.get_logger().error(f'Error in dataset_edit_callback (Daten): {e!r}')
+                response.success = False
+                response.message = self._texts_de().RUN_EDIT_FAILED_DE
+            return response
 
         # Single-flight: a long edit can outlive the React client timeout; reject
-        # a concurrent retry instead of stacking a second multi-minute encode.
+        # a concurrent retry instead of stacking a second edit.
         if not self._edit_lock.acquire(blocking=False):
             response.success = False
             response.message = (
@@ -1107,12 +1123,41 @@ class Communicator:
             response.message = str(result.get('message', ''))
             return response
         except Exception as e:
-            self.node.get_logger().error(f'Error in dataset_edit_callback: {e}')
+            self.node.get_logger().error(f'Error in dataset_edit_callback: {e!r}')
             response.success = False
-            response.message = f'Error: {e}'
+            response.message = self._texts_de().RUN_EDIT_FAILED_DE
             return response
         finally:
             self._edit_lock.release()
+
+    @staticmethod
+    def _texts_de():
+        """The Daten sentences, loaded on first use (A18, H-14 a: the deps-free
+        loaders exec this file with a package stub that has no __path__)."""
+        try:
+            from physical_ai_server.daten import texts_de
+            return texts_de
+        except ImportError:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                'daten', 'texts_de.py')
+            spec = importlib.util.spec_from_file_location('_edubotics_daten_texts_de', path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+    @staticmethod
+    def _record_texts_de():
+        """record_texts_de, loaded on first use (A18, H-14 a)."""
+        try:
+            from physical_ai_server.data_processing import record_texts_de
+            return record_texts_de
+        except ImportError:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                'data_processing', 'record_texts_de.py')
+            spec = importlib.util.spec_from_file_location('_edubotics_record_texts_de', path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
 
     def _build_edit_payload(self, request):
         """Translate an EditDataset request into edit_worker's JSON payload.
@@ -1222,9 +1267,10 @@ class Communicator:
             return response
 
         except Exception as e:
-            self.node.get_logger().error(f'Error in get_dataset_info_callback: {str(e)}')
+            self.node.get_logger().error(f'Error in get_dataset_info_callback: {e!r}')
             response.success = False
-            response.message = f'Error: {str(e)}'
+            # German (R-27): the English exception stays in the log.
+            response.message = self._record_texts_de().DATASET_INFO_FAILED_DE
             response.dataset_info = DatasetInfo()
             return response
 

@@ -130,6 +130,9 @@ export const RECORD_COPY = Object.freeze({
     starting: 'Startet …',
     startingSub: 'Aufnahme wird vorbereitet',
     startingSlow: 'Dauert länger als gewohnt …',
+    // rec.waitUpload (Daten 2.0, R-8): a Start right after a session waits
+    // for that session's upload to finish.
+    waitUpload: 'Wartet, bis das Hochladen fertig ist …',
     warmup: 'Aufwärmen',
     warmupSub: (s) => `noch ${s} s · dann Episode 1`,
     recording: 'Aufnahme',
@@ -226,8 +229,6 @@ export const RECORD_COPY = Object.freeze({
       + 'nicht am USB-Hub.',
     armSlow: (kind, hz, fps) => `Der ${armNameDe(kind)} meldet nur ${numberDe(hz)} statt mindestens `
       + `${numberDe(fps)} Messungen pro Sekunde. Die Aufnahme kann ruckeln.`,
-    startUploading: 'Dieser Datensatz wird gerade noch hochgeladen. Warte, bis das Hochladen fertig ist, oder '
-      + 'wähle einen anderen Aufgabennamen.',
     timeout: 'Der Roboter hat nicht rechtzeitig geantwortet. Bitte versuch es noch einmal.',
     noConnection: 'Keine Verbindung zum Roboter.',
     homeLabel: 'Startseite',

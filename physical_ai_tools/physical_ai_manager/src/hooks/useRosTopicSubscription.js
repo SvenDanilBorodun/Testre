@@ -45,10 +45,8 @@ import {
 } from '../features/training/trainingSlice';
 import {
   setHFStatus,
-  setDownloadStatus,
-  setHFUserId,
-  setHFRepoIdUpload,
-  setHFRepoIdDownload,
+  setTransferResult,
+  removeTransfer,
   setUploadStatus,
 } from '../features/editDataset/editDatasetSlice';
 import {
@@ -82,6 +80,29 @@ import { toastIcon } from '../components/icons/toast';
 // identities per tick on the Workshop page. One cache serves both instances.
 let _capsCache = { str: '', obj: null };
 
+
+// `HFOperationStatus.info_json` (Daten 2.0, spec §H2): '' or a JSON object
+// {fps, total_episodes, total_frames, robot_type, display_name, private}. An
+// older image sends no such field; anything that does not parse is ignored.
+function parseInfoJson(text) {
+  if (typeof text !== 'string' || !text) return null;
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// Does the Aufnahme finish card show `repoId` right now? Only while the card
+// is on screen: after „Neue Aufnahme" the upload is still tracked but nothing
+// shows it, so a toast does.
+function finishCardShowsRepo(state, repoId) {
+  const finish = state.tasks?.recordSession?.finish;
+  const sessionRepo = finish?.expectedRepoId || finish?.repoId;
+  return state.ui?.currentPage === PageType.RECORD
+    && !finish?.dismissed && !!repoId && repoId === sessionRepo;
+}
 
 export function useRosTopicSubscription() {
   const taskStatusTopicRef = useRef(null);
@@ -619,8 +640,8 @@ export function useRosTopicSubscription() {
             pushToHub: msg.task_info.push_to_hub || false,
             // privateMode intentionally NOT set here — see the robotNamesMe
             // gate below. Adopting it unconditionally let a task left behind
-            // by the PREVIOUS student silently un-tick the next student's
-            // private-by-default box.
+            // by the PREVIOUS student silently set the next student's
+            // „Sichtbarkeit“ to that student's choice.
             useOptimizedSave: msg.task_info.use_optimized_save_mode || false,
             recordRosBag2: msg.task_info.record_rosbag2 || false,
           };
@@ -645,14 +666,14 @@ export function useRosTopicSubscription() {
             // The ROS node keeps `task_info` for the life of a task, so it
             // survives a handover exactly like user_id does (see the block
             // above). With this ungated, one tick carrying the previous
-            // student's finished PUBLIC task overwrote the new student's
-            // private-by-default value — in a form field that is read-only
-            // while a task runs, so they could not even see it change before
-            // pressing record.
+            // student's finished task overwrote the new student's choice
+            // (public by default since owner decision N7) — in a form field
+            // that is read-only while a task runs, so they could not even see
+            // it change before pressing record.
             //
-            // `!== false`, not `|| false`: an absent or garbled flag keeps the
-            // private default instead of failing open to public. That matches
-            // TaskInfo.msg's own `bool private_mode true`.
+            // `!== false`, not `|| false`: an absent or garbled flag on the
+            // student's OWN task reads as private instead of failing open to
+            // public. That matches TaskInfo.msg's own `bool private_mode true`.
             infoUpdate.privateMode = msg.task_info.private_mode !== false;
           }
 
@@ -814,7 +835,14 @@ export function useRosTopicSubscription() {
   // failure. Reads the access token + task context from the store at call
   // time (this runs inside a ROS topic callback, not a render), so it has no
   // reactive deps. Best-effort by contract — never throws into the caller.
-  const registerUploadedDataset = useCallback((repoId) => {
+  //
+  // Daten 2.0 (spec §E5): the metadata comes from the upload itself
+  // (`HFOperationStatus.info_json`: fps, episodes, frames, robot type, display
+  // name, the repo's real visibility). The Aufnahme form's task name is used
+  // only for the repo the record session itself expects — a Daten upload is
+  // named by its own `display_name` (else the repo leaf), never by whatever the
+  // Aufnahme form holds.
+  const registerUploadedDataset = useCallback((repoId, msg = {}) => {
     // The Aufnahme finish card's third step follows this registration
     // (recordSession R15): pending → done | failed | skipped.
     const at = () => Date.now();
@@ -833,15 +861,27 @@ export function useRosTopicSubscription() {
       console.warn('[datasets] skip auto-register: not signed in');
       return;
     }
-    const taskInfo = store.getState().tasks?.taskInfo || {};
+    const st = store.getState();
+    const taskInfo = st.tasks?.taskInfo || {};
+    const finish = st.tasks?.recordSession?.finish;
+    const isRecordSession = !!repoId && !!finish?.expectedRepoId && repoId === finish.expectedRepoId;
+    const info = parseInfoJson(msg.info_json);
     const repoLeaf = repoId.split('/').slice(1).join('/') || repoId;
+    const name = isRecordSession
+      ? (taskInfo.taskName || repoLeaf)
+      : ((info && info.display_name) || repoLeaf);
+    const positive = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : undefined);
     const payload = {
       hf_repo_id: repoId,
-      name: taskInfo.taskName || repoLeaf,
+      name,
       description: '',
-      fps: taskInfo.fps || undefined,
-      robot_type: store.getState().tasks?.taskStatus?.robotType || undefined,
+      fps: positive(info && info.fps) ?? (taskInfo.fps || undefined),
+      robot_type: (info && info.robot_type) || st.tasks?.taskStatus?.robotType || undefined,
     };
+    const episodes = positive(info && info.total_episodes);
+    const frames = positive(info && info.total_frames);
+    if (episodes !== undefined) payload.episode_count = episodes;
+    if (frames !== undefined) payload.total_frames = frames;
 
     const RETRY_DELAY_MS = 1500;
     const attempt = (retriesLeft) => {
@@ -872,6 +912,10 @@ export function useRosTopicSubscription() {
           err?.message || err
         );
         dispatch(recordRegisterStatus({ repoId, state: 'failed', at: at() }));
+        // While the Aufnahme finish card shows this repo, its third step
+        // already says the registration failed (and how to fix it): no second
+        // voice (spec §E5, the round-7 KNOWN-ISSUES item).
+        if (finishCardShowsRepo(store.getState(), repoId)) return;
         toast.error(
           'Datensatz konnte nicht automatisch registriert werden – im ' +
             'Training-Tab „Datensätze synchronisieren" klicken.',
@@ -910,6 +954,8 @@ export function useRosTopicSubscription() {
         const progressCurrent = msg.progress_current;
         const progressTotal = msg.progress_total;
         const progressPercentage = msg.progress_percentage;
+        // Daten 2.0 (spec §H2): an old image sends neither field.
+        const repoType = msg.repo_type || '';
 
         // The Aufnahme finish card follows its own upload (recordSession
         // R14) and says what a toast would; on that page the toast for the
@@ -923,19 +969,27 @@ export function useRosTopicSubscription() {
             message: message || '',
             at: Date.now(),
           }));
-          const hfState = store.getState();
-          const finish = hfState.tasks?.recordSession?.finish;
-          const sessionRepo = finish?.expectedRepoId || finish?.repoId;
-          // Only while the card is on screen: after „Neue Aufnahme" the upload
-          // is still tracked but nothing shows it, so the toast does.
-          finishShowsIt = hfState.ui?.currentPage === PageType.RECORD
-            && !finish?.dismissed && !!repoId && repoId === sessionRepo;
+          finishShowsIt = finishCardShowsRepo(store.getState(), repoId);
+        }
+
+        // A transfer the Daten page started: that page shows the mockup's
+        // toast, so this hook does not (spec §E5). Its terminal result is
+        // left for the page; off the page nothing would show it, so the hook
+        // toasts the robot's sentence then and forgets the transfer.
+        const hfState = store.getState();
+        const datenTransfer = repoId ? hfState.editDataset?.transfers?.[repoId] : null;
+        const terminal = status === 'Failed' || status === 'Success';
+        let quiet = finishShowsIt;
+        if (datenTransfer && terminal && operation === datenTransfer.kind) {
+          dispatch(setTransferResult({ repoId, status, message }));
+          if (hfState.ui?.currentPage === PageType.EDIT_DATASET) quiet = true;
+          else dispatch(removeTransfer(repoId));
         }
 
         if (status === 'Failed') {
-          if (!finishShowsIt) toast.error(message);
+          if (!quiet) toast.error(message);
         } else if (status === 'Success') {
-          if (!finishShowsIt) toast.success(message);
+          if (!quiet) toast.success(message);
           // Register the freshly-uploaded HF dataset in the cloud
           // registry so group siblings can discover it. Best-effort:
           // failure here doesn't break recording. Hardened (vs the old
@@ -943,8 +997,14 @@ export function useRosTopicSubscription() {
           // retry once on a transient failure, and on FINAL failure show
           // a German warning toast pointing at the manual sync button —
           // so a dropped registration is visible, not silently lost.
-          if (operation === 'upload' && repoId && repoId.includes('/')) {
-            registerUploadedDataset(repoId);
+          // A MODEL upload is never a dataset (spec §E5), and a PRIVATE
+          // Daten upload is not registered: the platform token cannot read
+          // it, so the registration would always fail with „nicht gefunden".
+          const info = parseInfoJson(msg.info_json);
+          const privateDaten = !!datenTransfer && !!info && info.private === true;
+          if (operation === 'upload' && repoId && repoId.includes('/')
+              && repoType !== 'model' && !privateDaten) {
+            registerUploadedDataset(repoId, msg);
           }
         }
 
@@ -969,29 +1029,9 @@ export function useRosTopicSubscription() {
             setUploadStatus({
               current: progressCurrent,
               total: progressTotal,
-              percentage: progressPercentage.toFixed(2),
+              percentage: Number(progressPercentage || 0).toFixed(2),
             })
           );
-        } else if (operation === 'download') {
-          dispatch(
-            setDownloadStatus({
-              current: progressCurrent,
-              total: progressTotal,
-              percentage: progressPercentage.toFixed(2),
-            })
-          );
-        }
-        const userId = repoId.split('/')[0];
-        const repoName = repoId.split('/')[1];
-
-        if (userId?.trim() && repoName?.trim()) {
-          dispatch(setHFUserId(userId));
-
-          if (operation === 'upload') {
-            dispatch(setHFRepoIdUpload(repoName));
-          } else if (operation === 'download') {
-            dispatch(setHFRepoIdDownload(repoName));
-          }
         }
       });
 

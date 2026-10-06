@@ -29,3 +29,14 @@ b0b601fac9e3b30b1e9288425c91d0f3eb30f793:physical_ai_tools/lerobot/README.md:aws
 #    this line, 0. The VALUE cannot change: `runner_limits.RUN_TOKEN_RE` pins
 #    32 lowercase hex.
 dc16314b45a64df1947222f0c023fa3307d17fb9:robotis_ai_setup/docker/code_runner/runner/selftest.py:generic-api-key:48
+#
+# 4. Daten 2.0 (2026-10-06): a SYNTHETIC Daten link token in the nginx config
+#    test — payload {"s":"ds:lena/omx_f_wuerfel"}, signature the hex pattern
+#    "abcdef12…" — used only to prove the log maps redact /daten-api/ paths.
+#    Never minted by any key; generic-api-key false positive.
+2ff597201324cd95dfa1fa025f5eebbf8024df43:physical_ai_tools/physical_ai_manager/src/features/editDataset/__tests__/datenNginx.test.js:generic-api-key:58
+#
+# 5. Daten 2.0 (2026-10-06): `token=LENA_TOKEN` in the hub-sync test passes the
+#    test module's fake harness token constant (a made-up hf_harness… string
+#    the fake hub maps to the fictional account "lena"). Not a credential.
+0f66ef1bdeb2bbeb8a5dff1d5b93a375f273b3bf:robotis_ai_setup/tests/test_hub_sync_upload.py:generic-api-key:785

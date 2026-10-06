@@ -17,10 +17,11 @@
 # Author: Dongyun Kim
 
 import os
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import ExecuteProcess, IncludeLaunchDescription, SetEnvironmentVariable
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
@@ -75,9 +76,34 @@ def generate_launch_description():
         respawn_delay=2.0,
     )
 
+    # Daten 2.0 (spec §B1, §H4): the read-only Daten sidecar — every
+    # byte-serving, parquet-reading, PyAV-muxing, hint-computing and hub-reading
+    # step runs in this separate process, so it can never take the node's GIL.
+    # Its priority comes from the `nice` PREFIX (every thread of the process
+    # inherits 10), never from os.nice (R-15: that changes only the calling
+    # thread, after the module imports started theirs). It inherits this
+    # launch's environment (the colcon PYTHONPATH, HF_TOKEN_PATH,
+    # EDUBOTICS_ROBOT_TYPE). Port 8095 inside the container; the manager's nginx
+    # reaches it over ros_net; no compose publishes it.
+    daten_sidecar = ExecuteProcess(
+        cmd=[sys.executable, '-m', 'physical_ai_server.daten.http_server'],
+        name='daten_http',
+        prefix='nice -n 10',
+        output='screen',
+        respawn=True,
+        respawn_delay=2.0,
+        sigterm_timeout='3',
+    )
+
     return LaunchDescription([
+        # FIRST, so every process below inherits it (§H4): huggingface_hub
+        # otherwise makes one hidden request (up to 3 s) before the first hub
+        # call of every process — the node's Start check, the sidecar's
+        # bounded calls, the HF worker and the download worker.
+        SetEnvironmentVariable('HF_HUB_DISABLE_TELEMETRY', '1'),
         physical_ai_server_launch,
         rosbridge_websocket_node,
         rosbag_recorder_node,
-        web_video_server_node
+        web_video_server_node,
+        daten_sidecar,
     ])

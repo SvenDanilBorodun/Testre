@@ -233,6 +233,48 @@ function validGhostJoints(g) {
   return { names, positions };
 }
 
+// A translucent clone of the LOADED robot for a ghost layer, or null when the
+// robot cannot be cloned. `robot.clone(true)` runs urdf-loader's URDFRobot.copy,
+// which rebuilds the clone's joints/links/mimic maps, so setJointValue drives the
+// clone alone. The clone SHARES every geometry with the live robot: whoever
+// removes it disposes ONLY the one material returned here, never a geometry.
+// Used by both ghost layers — the `ghostJoints` prop and the `poseSource` ghost
+// (Daten 2.0, spec §G5) — so the two can never build it differently.
+function buildGhostClone(robot, color) {
+  if (!robot || typeof robot.clone !== 'function') return null;
+  const ghost = robot.clone(true);
+  const material = new THREE.MeshStandardMaterial({
+    color, transparent: true, opacity: 0.35, depthWrite: false,
+  });
+  const strays = [];
+  if (typeof ghost.traverse === 'function') {
+    ghost.traverse((obj) => {
+      if (!obj || obj === ghost) return;
+      // A held sim object and the „Achsen" triads hang under the live robot's
+      // links; the clone copied them, but they are not part of the arm.
+      if (obj.userData && obj.userData.simId !== undefined) {
+        strays.push(obj);
+      } else if (obj.isMesh) {
+        obj.material = material;
+        obj.castShadow = false;
+        obj.receiveShadow = false;
+      } else if (obj.isLine || obj.isLineSegments || obj.isPoints || obj.isSprite) {
+        strays.push(obj);
+      }
+    });
+  }
+  strays.forEach((obj) => { if (obj.parent) obj.parent.remove(obj); });
+  ghost.rotation.x = robot.rotation.x;
+  ghost.rotation.z = robot.rotation.z;
+  return { ghost, material };
+}
+
+// `{names, positions}` of equal-length arrays (names non-empty strings,
+// positions finite numbers), else null — the poseSource's pose and ghost.
+function validPose(p) {
+  return validGhostJoints(p);
+}
+
 // ── Sim-object render constants ──────────────────────────────────────────────
 // Objects are sized/coloured PER TYPE from the `catalogDims` prop (the sim-stage
 // catalog seam); a type absent from the map falls back to a fixed amber cube. The
@@ -336,6 +378,13 @@ export default function UrdfTwin({
   // framed centre at the framed distance along that direction. null (the
   // default) never touches the camera, so every other page is unchanged.
   viewPreset = null,
+  // Daten 2.0 (spec §F7, §G5): a RECORDED pose instead of the live stream —
+  // a function returning `{ version, pose: {names, positions}, ghost:
+  // {names, positions, color} | null }`. While it is a function this twin opens
+  // no rosbridge subscription; the render loop calls it once per frame and
+  // applies `pose` (and the translucent `ghost`, in `color`, default the teal
+  // GHOST_COLOR) whenever `version` changed. null (the default) changes nothing.
+  poseSource = null,
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
   // Read by the release handler, which must land a mesh on the SERVER's released
@@ -402,6 +451,18 @@ export default function UrdfTwin({
   const robotReadyRef = useRef(null);
   const ghostRef = useRef(null);
   const ghostMaterialRef = useRef(null);
+  // The poseSource layer: the latest source function (read by the render
+  // loop), what it last applied ({robot, version}), and its OWN ghost clone —
+  // kept apart from the ghostJoints clone, so neither layer's cleanup can remove
+  // the other's (G-17).
+  const poseDriven = typeof poseSource === 'function';
+  const poseSourceRef = useRef(poseSource);
+  poseSourceRef.current = poseDriven ? poseSource : null;
+  const sourceAppliedRef = useRef({ robot: null, version: undefined });
+  const sourceGhostRef = useRef(null);
+  const sourceGhostMaterialRef = useRef(null);
+  const sourceGhostColorRef = useRef(null);
+  const sourceSeenRef = useRef(false);
   // Latest onEndEffector callback, read by the (stable) subscription closure.
   const onEndEffectorRef = useRef(onEndEffector);
   useEffect(() => {
@@ -514,6 +575,84 @@ export default function UrdfTwin({
     if (cb) emitEndEffector(robot, pose.get(gripperJointRef.current), cb);
     return true;
   }, []);
+
+  // Remove the poseSource ghost (detached first, then its one material freed).
+  const dropSourceGhost = useCallback((scene) => {
+    if (sourceGhostRef.current && scene) scene.remove(sourceGhostRef.current);
+    if (sourceGhostMaterialRef.current) sourceGhostMaterialRef.current.dispose();
+    sourceGhostRef.current = null;
+    sourceGhostMaterialRef.current = null;
+    sourceGhostColorRef.current = null;
+  }, []);
+
+  // The source went away: its ghost goes with it, and a later source starts
+  // from scratch.
+  useEffect(() => {
+    if (poseDriven) return;
+    if (sourceGhostRef.current) {
+      dropSourceGhost(sceneRef.current);
+      requestRenderRef.current();
+    }
+    sourceAppliedRef.current = { robot: null, version: undefined };
+  }, [poseDriven, dropSourceGhost]);
+
+  // Advance the model to the poseSource's pose (spec §G5): called by the render
+  // loop every frame while a source is set; returns true when it changed the
+  // model. Reads refs only, hence stable.
+  const stepSource = useCallback(() => {
+    const source = poseSourceRef.current;
+    const robot = robotRef.current;
+    if (!source || !robot) return false;
+    let frame;
+    try {
+      frame = source();
+    } catch (err) {
+      return false;
+    }
+    if (!frame) return false;
+    const applied = sourceAppliedRef.current;
+    if (applied.robot === robot && applied.version === frame.version) return false;
+    const jointSet = jointSetRef.current;
+    const pose = validPose(frame.pose);
+    if (pose) {
+      pose.names.forEach((name, i) => {
+        if (jointSet.has(name)) robot.setJointValue(name, pose.positions[i]);
+      });
+      if (!sourceSeenRef.current) {
+        sourceSeenRef.current = true;
+        setHasJointData(true);
+      }
+    }
+    const scene = sceneRef.current;
+    const ghostPose = frame.ghost ? validPose(frame.ghost) : null;
+    if (!ghostPose) {
+      dropSourceGhost(scene);
+    } else if (scene && robotReadyRef.current === robot) {
+      const color = (frame.ghost && frame.ghost.color) || GHOST_COLOR;
+      if (sourceGhostRef.current && sourceGhostColorRef.current !== color) dropSourceGhost(scene);
+      if (!sourceGhostRef.current) {
+        const built = buildGhostClone(robot, color);
+        if (built) {
+          scene.add(built.ghost);
+          sourceGhostRef.current = built.ghost;
+          sourceGhostMaterialRef.current = built.material;
+          sourceGhostColorRef.current = color;
+        }
+      }
+      const ghost = sourceGhostRef.current;
+      if (ghost) {
+        ghostPose.names.forEach((name, i) => {
+          if (jointSet.has(name)) ghost.setJointValue(name, ghostPose.positions[i]);
+        });
+      }
+    } else {
+      // The meshes have not all landed: no clone yet, and the version is not
+      // marked applied, so the next frame tries again.
+      return !!pose;
+    }
+    sourceAppliedRef.current = { robot, version: frame.version };
+    return true;
+  }, [dropSourceGhost]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -780,6 +919,7 @@ export default function UrdfTwin({
       // motion this dirties every frame (60 fps motion from ~30 Hz data); at rest
       // it returns false and the loop idles as before.
       if (stepPose(performance.now())) needsRender = true;
+      if (poseSourceRef.current && stepSource()) needsRender = true;
       if (needsRender || controlsUpdated) {
         renderer.render(scene, camera);
         needsRender = false;
@@ -811,6 +951,8 @@ export default function UrdfTwin({
       if (ghostMaterialRef.current) ghostMaterialRef.current.dispose();
       ghostRef.current = null;
       ghostMaterialRef.current = null;
+      dropSourceGhost(scene);
+      sourceAppliedRef.current = { robot: null, version: undefined };
       robotReadyRef.current = null;
       // Dispose every geometry/material reachable from the scene (three leaks
       // GPU memory otherwise), then the shared link material + renderer. This
@@ -846,8 +988,9 @@ export default function UrdfTwin({
     // asset: a profile change (the capability manifest naming a different
     // urdf_asset_id) rebuilds the whole viewer with the right URDF — rare
     // (caps normally settle before the twin first opens) and the cleanup
-    // above already disposes everything. stepPose is stable (refs only).
-  }, [asset, stepPose]);
+    // above already disposes everything. stepPose, stepSource and
+    // dropSourceGhost are stable (refs only).
+  }, [asset, stepPose, stepSource, dropSourceGhost]);
 
   // ---- viewPreset (Aufnahme 2.0) --------------------------------------------
   // Declared AFTER the mount effect so the camera exists on the first run. A
@@ -1142,34 +1285,14 @@ export default function UrdfTwin({
     if (!scene || !robot || robotReadyRef.current !== robot) return;
     let ghost = ghostRef.current;
     if (!ghost) {
-      if (typeof robot.clone !== 'function') return;
-      ghost = robot.clone(true);
-      const ghostMaterial = new THREE.MeshStandardMaterial({
-        color: GHOST_COLOR, transparent: true, opacity: 0.35, depthWrite: false,
-      });
-      const strays = [];
-      if (typeof ghost.traverse === 'function') {
-        ghost.traverse((obj) => {
-          if (!obj || obj === ghost) return;
-          // A held sim object and the „Achsen" triads hang under the live robot's
-          // links; the clone copied them, but they are not part of the arm.
-          if (obj.userData && obj.userData.simId !== undefined) {
-            strays.push(obj);
-          } else if (obj.isMesh) {
-            obj.material = ghostMaterial;
-            obj.castShadow = false;
-            obj.receiveShadow = false;
-          } else if (obj.isLine || obj.isLineSegments || obj.isPoints || obj.isSprite) {
-            strays.push(obj);
-          }
-        });
-      }
-      strays.forEach((obj) => { if (obj.parent) obj.parent.remove(obj); });
-      ghost.rotation.x = robot.rotation.x;
-      ghost.rotation.z = robot.rotation.z;
+      // Only THIS layer's clone lives in ghostRef; the poseSource ghost is
+      // another clone in its own ref, which this effect never touches (G-17).
+      const built = buildGhostClone(robot, GHOST_COLOR);
+      if (!built) return;
+      ghost = built.ghost;
       scene.add(ghost);
       ghostRef.current = ghost;
-      ghostMaterialRef.current = ghostMaterial;
+      ghostMaterialRef.current = built.material;
     }
     const jointNames = jointSetRef.current;
     ghostPose.names.forEach((name, i) => {
@@ -1293,7 +1416,8 @@ export default function UrdfTwin({
   // passes the sim-only /sim/joint_states so the virtual arm never collides with
   // the real joint_state_broadcaster.
   useEffect(() => {
-    if (!rosbridgeUrl) return undefined;
+    // A recorded pose drives this twin (Daten 2.0): no live subscription.
+    if (!rosbridgeUrl || poseDriven) return undefined;
 
     let cancelled = false;
     let subscription = null;
@@ -1358,7 +1482,7 @@ export default function UrdfTwin({
         subscription = null;
       }
     };
-  }, [rosbridgeUrl, jointTopic, jointThrottleMs, stepPose]);
+  }, [rosbridgeUrl, jointTopic, jointThrottleMs, stepPose, poseDriven]);
 
   return (
     <div className="relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden bg-[#1a1d23]">

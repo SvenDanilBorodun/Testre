@@ -18,11 +18,9 @@
 //   dots     {label, items: [{n, done, current, redo}], more, color} → EpisodeDots
 
 import TaskPhase from '../../../constants/taskPhases';
-import { datasetRepoId } from '../../../utils/datasetName';
 import { isFinishTracking } from '../../../features/tasks/recordSession';
 import RECORD_COPY from './recordCopy';
 import { diskProblem, hfTokenProblem, sourcesWith, stalledSourceProblem } from './problems';
-import { UPLOAD_START_GRACE_MS } from './finishModel';
 
 export const VIEW = Object.freeze({
   OFFLINE: 'OFFLINE',
@@ -145,7 +143,9 @@ function buttonsFor(view, { startBlock, busy, connected, elapsedS }) {
   }
 }
 
-function pillFor(view, { form, session, episode, secondsLeft, nowWallMs }) {
+function pillFor(view, {
+  form, session, episode, secondsLeft, nowWallMs, waitingForUpload = false,
+}) {
   const color = VIEW_COLOR[view];
   const k = session?.savedCount ?? 0;
   switch (view) {
@@ -154,7 +154,12 @@ function pillFor(view, { form, session, episode, secondsLeft, nowWallMs }) {
     case VIEW.STARTING: {
       const since = nowWallMs - num(session?.pendingStart?.at);
       const slow = Number.isFinite(since) && since >= STARTING_SLOW_MS;
-      return { title: C.pill.starting, sub: slow ? C.pill.startingSlow : C.pill.startingSub, icon: 'loading', color, slow };
+      // R-8 (Daten 2.0): the robot waits for the same dataset's upload before
+      // it checks Hugging Face — say so; after 8 s the existing line, as today.
+      let sub = C.pill.startingSub;
+      if (slow) sub = C.pill.startingSlow;
+      else if (waitingForUpload) sub = C.pill.waitUpload;
+      return { title: C.pill.starting, sub, icon: 'loading', color, slow };
     }
     case VIEW.WARMUP:
       return { title: C.pill.warmup, sub: C.pill.warmupSub(secondsLeft), icon: 'hand', color };
@@ -231,33 +236,26 @@ function dotsFor(view, { episode, session }) {
   return { label: C.dots.label, items, more, color };
 }
 
-// Is this finish an upload the page can still SEE running? Only then may it
-// hold Start back: an upload whose state became unknown (the link dropped, a
-// terminal HF status was missed), that never began, or that already finished
-// (registering) must never keep Start off until a reload (V2-R2-2).
-function uploadStillRunning(finish, nowWallMs) {
-  if (!finish || finish.state !== 'uploading' || finish.linkLost) return false;
-  const neverBegan = !finish.repoId && !(finish.uploadPct > 0)
-    && Number.isFinite(finish.endedAt) && Number.isFinite(nowWallMs)
-    && nowWallMs - finish.endedAt >= UPLOAD_START_GRACE_MS;
-  return !neverBegan;
-}
-
 /**
  * Why Start is refused, first match (Q5): the disk, a stalled source (camera →
- * follower → leader), the student's own Hugging-Face token (not stored, not
- * usable, or not on the robot yet), or the same dataset still visibly
- * uploading. Validation is not a block — it runs on the click.
+ * follower → leader), or the student's own Hugging-Face token (not stored, not
+ * usable, or not on the robot yet). Validation is not a block — it runs on the
+ * click.
+ *
+ * The SAME dataset still uploading is no block (Daten 2.0, R-8, owner decision
+ * V2-3): the robot waits for that upload by itself before it checks Hugging
+ * Face, and the STARTING pill says „Wartet, bis das Hochladen fertig ist …"
+ * (`waitingForUpload`). A refusal here would make that wait unreachable from
+ * the tab that just recorded.
  *
  * `hfToken` is `features/hfToken/hfTokenSelectors::selectHfStartBlock`'s answer.
  * UNKNOWN NEVER BLOCKS: an account state that has not answered, a robot that
  * has not said it takes a personal token (older image, Jetson) and a store
  * without the feature all arrive as null.
- * @returns {null | {kind: 'disk'|'source'|'hftoken'|'uploading', reason?, problem}}
+ * @returns {null | {kind: 'disk'|'source'|'hftoken', reason?, problem}}
  */
 export function deriveStartBlock({
-  disk = null, verdicts = null, bridge = null, activation = null, session = null, form = {}, robotType = '',
-  hfToken = null, nowWallMs = Date.now(),
+  disk = null, verdicts = null, bridge = null, activation = null, hfToken = null,
 } = {}) {
   const diskP = diskProblem(disk, { running: false });
   if (diskP) return { kind: 'disk', problem: diskP };
@@ -265,13 +263,6 @@ export function deriveStartBlock({
   if (stalled) return { kind: 'source', problem: stalledSourceProblem(stalled, { bridge, activation }) };
   const hfProblem = hfToken ? hfTokenProblem(hfToken) : null;
   if (hfProblem) return { kind: 'hftoken', reason: hfToken, problem: hfProblem };
-  const finish = session?.finish;
-  if (isFinishTracking(finish) && uploadStillRunning(finish, nowWallMs)) {
-    const uploadingRepo = finish.expectedRepoId || finish.repoId;
-    if (uploadingRepo && uploadingRepo === datasetRepoId(form.userId, robotType, form.taskName)) {
-      return { kind: 'uploading', problem: { kind: 'bad', textDe: C.problem.startUploading } };
-    }
-  }
   return null;
 }
 
@@ -291,6 +282,7 @@ export function deriveStartBlock({
  * @param input.bridge      useRsBridgeStatus output | null
  * @param input.activation  useRobotActivation status | null
  * @param input.hfToken     null | 'none' | 'unusable' | 'transfer' | 'busy' | 'failed' | 'taken_over'
+ * @param input.waitingForUpload  the robot still uploads the dataset being started (R-8)
  */
 export function deriveRecordView({
   heartbeat = 'disconnected',
@@ -307,6 +299,7 @@ export function deriveRecordView({
   bridge = null,
   activation = null,
   hfToken = null,
+  waitingForUpload = false,
 } = {}) {
   const view = deriveView({ heartbeat, status, collision, session });
   const running = !!status.running;
@@ -329,7 +322,7 @@ export function deriveRecordView({
 
   const connected = heartbeat === 'connected';
   const startBlock = deriveStartBlock({
-    disk, verdicts, bridge, activation, session, form, robotType: status.robotType, hfToken, nowWallMs,
+    disk, verdicts, bridge, activation, hfToken,
   });
   const segments = segmentsFor(view, { status, plan, episode, session });
   const idleText = view === VIEW.FINISHING ? C.track.allDone : C.track.idle;
@@ -354,7 +347,9 @@ export function deriveRecordView({
     isLastEpisode: isLast,
     phaseColor: VIEW_COLOR[view],
     phaseKind: VIEW_KIND[view] || null,
-    pill: pillFor(view, { form, session, episode, secondsLeft: left, nowWallMs }),
+    pill: pillFor(view, {
+      form, session, episode, secondsLeft: left, nowWallMs, waitingForUpload,
+    }),
     buttons: buttonsFor(view, { startBlock, busy, connected, elapsedS }),
     segments,
     idleText,

@@ -31,7 +31,7 @@ import TaskPhase from '../../constants/taskPhases';
 import realStore from '../../store/store';
 // The recording form's own default, asserted next to the gate that
 // protects it — the gate is meaningless without knowing what it defends.
-import tasksReducer from '../../features/tasks/taskSlice';
+import tasksReducer, { setTaskInfo } from '../../features/tasks/taskSlice';
 import { setJetsonStatus, clearJetson } from '../../store/jetsonSlice';
 import { setSession, setProfile } from '../../features/auth/authSlice';
 import { signedOut } from '../../features/session/sessionActions';
@@ -115,10 +115,10 @@ function status(overrides = {}) {
       reset_time_s: 0,
       num_episodes: 0,
       push_to_hub: false,
-      // `true`, matching both TaskInfo.msg's field default and the SPA's
-      // private-by-default. A `false` here is a PUBLIC recording, and a
-      // fixture that ships one quietly pins the old default into every test
-      // that reuses this builder.
+      // `true`, matching TaskInfo.msg's field default (the wire stays private
+      // for a client that says nothing). The PAGE starts public (owner
+      // decision N7); a fixture value here is the ROBOT's task, never the
+      // form's default, which the visibility tests below assert separately.
       private_mode: true,
       use_optimized_save_mode: false,
       record_rosbag2: false,
@@ -406,18 +406,20 @@ describe('useRosTopicSubscription — the robot may only name the student it bel
   });
 });
 
-describe('useRosTopicSubscription — a recording is PRIVATE unless the student says otherwise', () => {
-  // Two halves of one property: pressing record and touching nothing else must
-  // not publish classmates' faces and voices to a world-readable HF repo.
+describe('useRosTopicSubscription — a recording\'s visibility is the signed-in student\'s own choice', () => {
+  // Two halves of one property:
   //
-  //   1. the form STARTS private (taskSlice.defaultTaskInfo.privateMode);
-  //   2. no /task/status tick may quietly take that back.
+  //   1. the form STARTS public (taskSlice.defaultTaskInfo.privateMode, owner
+  //      decision N7: the cloud training's platform token must be able to read
+  //      a dataset recorded with the defaults);
+  //   2. no /task/status tick may quietly replace the student's choice with
+  //      another student's.
   //
   // (2) is not hypothetical: the ROS node keeps `task_info` for the life of a
   // task, so it survives a handover exactly like `user_id` does. The previous
-  // student's finished PUBLIC task would arrive on the next tick and un-tick
-  // the new student's box — in a field that is read-only while a task runs, so
-  // they could not see it happen.
+  // student's finished task would arrive on the next tick and set the new
+  // student's switch to THAT student's choice — in a field that is read-only
+  // while a task runs, so they could not see it happen.
   const runningWith = (userId, taskInfo = {}) => status({
     phase: TaskPhase.RECORDING,
     task_info: {
@@ -438,9 +440,24 @@ describe('useRosTopicSubscription — a recording is PRIVATE unless the student 
     realStore.dispatch(signedOut());
   });
 
-  it('the recording form starts PRIVATE', async () => {
+  it('the recording form starts PUBLIC (owner decision N7)', async () => {
     const state = tasksReducer(undefined, { type: '@@INIT' });
-    expect(state.taskInfo.privateMode).toBe(true);
+    expect(state.taskInfo.privateMode).toBe(false);
+  });
+
+  it('a session reset brings the form back to PUBLIC, never a module-load snapshot', async () => {
+    realStore.dispatch(setTaskInfo({ privateMode: true }));
+    expect(realStore.getState().tasks.taskInfo.privateMode).toBe(true);
+    realStore.dispatch(signedOut());
+    expect(realStore.getState().tasks.taskInfo.privateMode).toBe(false);
+  });
+
+  it('a PRIVATE task the robot does NOT attribute to this student cannot switch it either', async () => {
+    const cb = await mountAndGetCallback();
+    signIn('schule-B');
+    mockDispatch.mockClear();
+    act(() => cb(runningWith('schule-A', { private_mode: true })));
+    expect('privateMode' in dispatchedByType('tasks/setTaskInfo')[0].payload).toBe(false);
   });
 
   it('a task the robot does NOT attribute to this student cannot un-tick it', async () => {

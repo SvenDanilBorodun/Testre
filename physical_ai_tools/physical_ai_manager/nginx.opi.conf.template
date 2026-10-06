@@ -100,9 +100,43 @@ map $http_host $edubotics_host_is_own {
     "~*^[a-z0-9-]+(\.[a-z0-9-]+)*\.local(:[0-9]+)?$" 1;
 }
 
+# Daten 2.0 link tokens never reach a log. Every /daten-api/ URL carries a
+# 30-minute link token in its PATH (/daten-api/v1/ds/<token>/…). The location
+# itself logs nothing (see there), but a request nginx answers BEFORE it picks a
+# location — a header or URI too large, a malformed request line, a missing
+# Host, TRACE — goes to the server's access log with its whole request line, a
+# /DATEN-API/… spelling falls through to the SPA (locations match
+# case-sensitively), and a Referer can name such a URL (the location answers
+# `Referrer-Policy: no-referrer`, so a tab opened at one sends none; a client
+# can still send one by hand). So this server logs in its own format: the
+# image's `main` with the request line and the Referer replaced whenever they
+# name the Daten API, in any case. A client that percent-encodes the path on
+# purpose is the token's holder; the page never does. One residual: nginx's
+# error_log format is fixed and ends in `referrer: "…"`, so a request that
+# carries a Daten URL as its Referer by hand and fails in ANOTHER location
+# writes that token into the error log; the page's own requests never do.
+map $request $edubotics_log_request {
+    default         $request;
+    "~*daten-api"   "$request_method /daten-api/<link token redacted>";
+}
+
+map $http_referer $edubotics_log_referer {
+    default         $http_referer;
+    ''              "-";
+    "~*daten-api"   "<daten-api link redacted>";
+}
+
+log_format edubotics_tokenless '$remote_addr - $remote_user [$time_local] "$edubotics_log_request" '
+                               '$status $body_bytes_sent "$edubotics_log_referer" '
+                               '"$http_user_agent" "$http_x_forwarded_for"';
+
 server {
     listen 80;
     server_name localhost;
+
+    # Replaces the http-level `main` log for this server (the token-free format
+    # above); a second `access_log` at http level would log every line twice.
+    access_log /var/log/nginx/access.log edubotics_tokenless;
 
     # ── Security headers ─────────────────────────────────────────────────────
     # The opi manager is the ONLY one of the three manager builds published on
@@ -128,7 +162,8 @@ server {
     # `add_header` only inherits into a location that declares NO add_header of
     # its own, so every location below that sets Cache-Control MUST re-declare
     # these four. The proxy locations (/api/system/, /rosbridge, /video/) and the
-    # SPA catch-all set none, so they inherit these correctly.
+    # SPA catch-all set none, so they inherit these correctly. /daten-api/
+    # answers its own Referrer-Policy and re-declares the other three.
     add_header X-Frame-Options "DENY" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -433,6 +468,43 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         chunked_transfer_encoding off;
+    }
+
+    # Daten 2.0: read-only dataset media + data from the physical_ai_server
+    # sidecar (daten/http_server.py, port 8095). Token-gated by the sidecar, not
+    # Origin-gated: a <video>/<img> GET carries no Origin. GET/HEAD only.
+    # No log at all: every URL here carries a 30-minute link token in its path
+    # (/daten-api/v1/ds/<token>/…), a session makes hundreds of requests, and
+    # nginx appends the request line to EVERY error it logs for a request (the
+    # sidecar down or unresolvable, a refused method, a too-large body). So the
+    # access log is off and this location's errors go to /dev/null, which the
+    # `limit_except` block inherits. A failing sidecar still shows: on the page
+    # („Die Daten-Ansicht des Roboters antwortet gerade nicht …") and in the
+    # server container's own log (the launch respawns `daten_http`).
+    location /daten-api/ {
+        limit_except GET HEAD { deny all; }
+        access_log off;
+        error_log /dev/null;
+        # A document opened at a token URL (a clip, a picture or a JSON answer
+        # opened in a tab of its own) never sends that URL on as the Referer of
+        # its next request: no-referrer. This block now declares its own
+        # add_header, so nothing inherits from the server level and the other
+        # three security headers are re-declared here, unchanged.
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+        set $edubotics_daten physical_ai_server;
+        proxy_pass http://$edubotics_daten:8095;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
     }
 
     # Hashed JS/CSS bundles from CRA are content-addressed and safe to cache.

@@ -71,6 +71,7 @@ RUN set -e && \
     test -f "$install_root/srv/_workflow_set_breakpoints.py" && \
     test -f "$install_root/srv/_workflow_step.py" && \
     test -f "$install_root/msg/_sensor_snapshot.py" && \
+    test -f "$install_root/srv/_daten_command.py" && \
     rm -rf /tmp/interfaces_src && \
     echo "physical_ai_interfaces re-built with audit additions"
 
@@ -522,20 +523,17 @@ RUN set -e && \
 # these fail (a future LeRobot release reorganises modules without bumping
 # our pin via PyPI's preview channel), the image build aborts loudly.
 #
-# The last two asserts guard our two LeRobot PRIVATE-API seams. Both are
-# load-bearing, and one of them fails SILENTLY, which is why they belong here
-# rather than in a unit test (no test in this repo can see the real lerobot —
-# the deps-free suites sys.modules-stub it):
+# The asserts below guard the LeRobot API the image leans on, which is why they
+# belong here rather than in a unit test (no test in this repo can see the real
+# lerobot — the deps-free suites sys.modules-stub it). Daten 2.0 (spec §H3):
+# the dataset edits no longer touch any private LeRobot name (the engine,
+# data_processing/v3_surgery.py, stream-copies), so the former
+# dataset_tools._copy_and_reindex_videos seam is gone; the public
+# LeRobotDatasetMetadata API the engine writes through is asserted instead.
 #
-#   1. dataset_tools._copy_and_reindex_videos — upstream's real default is
-#      vcodec='libsvtav1'. data_editor_v3._force_recorder_vcodec scope-patches
-#      that helper to the recorder's h264 for the duration of an edit. On an
-#      upstream RENAME the patch's getattr(..., None) misses, it logs an English
-#      warning and yields anyway (deliberate — an edit must not die because of
-#      it), so every mixed kept/deleted video file silently re-encodes as lossy
-#      AV1 on a software SVT-AV1 encode that pegs every core. That is exactly
-#      the 2026-06-07 scar the scope-patch exists to prevent, restored without
-#      a single failing signal. Fail the BUILD instead.
+#   1. LeRobotDatasetMetadata.create(...) with the parameters v3_surgery.assemble
+#      passes, save_episode, save_episode_tasks, finalize, get_task_index, and
+#      video_utils.decode_video_frames (v3_surgery.verify's two-call decode).
 #   2. LeRobotDataset.create(streaming_encoding=...) — upstream's real default
 #      is False. lerobot_dataset_wrapper setdefault()s it to True, and that is
 #      the ONLY thing bounding recording RAM since the JPEG-in-RAM valve was
@@ -571,12 +569,16 @@ from lerobot.utils.control_utils import predict_action; \
 from lerobot.policies.factory import make_pre_post_processors; \
 from lerobot.datasets.feature_utils import validate_frame; \
 from lerobot.datasets.io_utils import write_info, write_episodes, write_stats; \
-from lerobot.datasets.dataset_metadata import CODEBASE_VERSION; \
-from lerobot.datasets import dataset_tools; \
+from lerobot.datasets.dataset_metadata import CODEBASE_VERSION, LeRobotDatasetMetadata; \
 from lerobot.datasets.lerobot_dataset import LeRobotDataset; \
+from lerobot.datasets.video_utils import decode_video_frames; \
 assert CODEBASE_VERSION == 'v3.0', f'unexpected codebase_version: {CODEBASE_VERSION}'; \
-assert hasattr(dataset_tools, '_copy_and_reindex_videos'), \
-    'lerobot renamed dataset_tools._copy_and_reindex_videos: data_editor_v3._force_recorder_vcodec would SILENTLY fall back to upstream lossy AV1 on every dataset edit'; \
+_meta_create = set(inspect.signature(LeRobotDatasetMetadata.create).parameters); \
+assert {'repo_id', 'fps', 'features', 'robot_type', 'root', 'use_videos', 'chunks_size', 'data_files_size_in_mb', 'video_files_size_in_mb'} <= _meta_create, \
+    f'lerobot changed LeRobotDatasetMetadata.create: the Daten edit engine (v3_surgery.assemble) passes parameters it no longer takes ({sorted(_meta_create)})'; \
+assert all(callable(getattr(LeRobotDatasetMetadata, _m, None)) for _m in ('save_episode', 'save_episode_tasks', 'finalize', 'get_task_index')), \
+    'lerobot dropped a LeRobotDatasetMetadata method the Daten edit engine writes through'; \
+assert callable(decode_video_frames), 'lerobot dropped video_utils.decode_video_frames: v3_surgery.verify decodes through it'; \
 assert 'streaming_encoding' in inspect.signature(LeRobotDataset.create).parameters, \
     'lerobot dropped LeRobotDataset.create(streaming_encoding=...): lerobot_dataset_wrapper would lose the recording RAM bound'; \
 from lerobot.datasets import video_utils; \
@@ -592,7 +594,7 @@ assert callable(getattr(LeRobotDataset, 'clear_episode_buffer', None)), \
     'lerobot dropped LeRobotDataset.clear_episode_buffer: every discarded take would stay in the writer'; \
 assert 'encoder_queue_maxsize' in inspect.signature(LeRobotDataset.create).parameters, \
     'lerobot dropped LeRobotDataset.create(encoder_queue_maxsize=...): the CI frame-drop smoke can no longer force a drop'; \
-print('all v0.5.1 imports OK; codebase_version=v3.0; seams intact (private: _copy_and_reindex_videos; public: drop warning, clear_episode_buffer, card, resume check)')"
+print('all v0.5.1 imports OK; codebase_version=v3.0; public API intact (metadata writer, decode, drop warning, clear_episode_buffer, card, resume check)')"
 
 # Build-time NODE-import smoke test (v2.5.1 audit). The policy smoke test above
 # imports lerobot.policies.* but NEVER imports physical_ai_server itself, so it
@@ -608,6 +610,23 @@ RUN bash -c "set -e && \
     source /opt/ros/jazzy/setup.bash && \
     source /root/ros2_ws/install/setup.bash && \
     python3 -c 'import physical_ai_server.physical_ai_server; print(\"physical_ai_server node module imports OK\")'"
+
+# Build-time Daten 2.0 gate: the sidecar, the download worker and the edit/sync modules import, and
+# v3_surgery's layout templates are LeRobot's (R-2: a LeRobot bump that moves the layout fails the
+# build, not a classroom). Sourced: physical_ai_server resolves only through the colcon workspace.
+RUN bash -c "set -e && \
+    source /opt/ros/jazzy/setup.bash && \
+    source /root/ros2_ws/install/setup.bash && \
+    python3 -c '\
+import av, pyarrow; \
+import physical_ai_server.daten.http_server, physical_ai_server.daten.download_worker; \
+from physical_ai_server.data_processing import dataset_sync, hub_sync, v3_surgery; \
+from lerobot.datasets.utils import DEFAULT_DATA_PATH, DEFAULT_VIDEO_PATH; \
+from huggingface_hub.utils._http import default_client_factory; \
+assert callable(default_client_factory), \"huggingface_hub moved default_client_factory: the sidecar uses its fallback client\"; \
+assert v3_surgery.DEFAULT_DATA_PATH == DEFAULT_DATA_PATH, \"v3_surgery data template differs from LeRobot\"; \
+assert v3_surgery.DEFAULT_VIDEO_PATH == DEFAULT_VIDEO_PATH, \"v3_surgery video template differs from LeRobot\"; \
+print(\"[DATEN] modules import, v3_surgery templates == LeRobot defaults\")'"
 
 # Build-time COLLISION-GUARD gate. The node-import test above CANNOT catch a
 # missing control_msgs: collision_monitor.py guards the import (fail-open ->

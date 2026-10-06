@@ -20,14 +20,12 @@ import ROSLIB from 'roslib';
 import PageType from '../constants/pageType';
 import TaskCommand from '../constants/taskCommand';
 import TrainingCommand from '../constants/trainingCommand';
-import EditDatasetCommand from '../constants/commands';
 import rosConnectionManager from '../utils/rosConnectionManager';
 import { forceRecordTaskInfo } from '../utils/recordTaskInfo';
 
 export function useRosServiceCaller() {
   const taskInfo = useSelector((state) => state.tasks.taskInfo);
   const trainingInfo = useSelector((state) => state.training.trainingInfo);
-  const editDatasetInfo = useSelector((state) => state.editDataset);
   const page = useSelector((state) => state.ui.currentPage);
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
 
@@ -424,80 +422,21 @@ export function useRosServiceCaller() {
     [callService]
   );
 
-  const sendEditDatasetCommand = useCallback(
-    async (command) => {
-      try {
-        console.log('Calling service /dataset/edit with request:', {
-          command: command,
-          edit_dataset_info: editDatasetInfo,
-        });
-
-        let command_enum;
-        switch (command) {
-          case 'merge':
-            command_enum = EditDatasetCommand.MERGE;
-            break;
-          case 'delete':
-            command_enum = EditDatasetCommand.DELETE;
-            break;
-          default:
-            throw new Error(`Unknown command: ${command}`);
-        }
-
-        console.log('editDatasetInfo:', editDatasetInfo);
-
-        // Remove trailing slash from mergeOutputPath if present
-        let mergeOutputPath = editDatasetInfo.mergeOutputPath;
-        if (mergeOutputPath.endsWith('/')) {
-          mergeOutputPath = mergeOutputPath.slice(0, -1);
-        }
-        const output_path = `${mergeOutputPath}/${editDatasetInfo.mergeOutputFolderName}`;
-
-        const result = await callService(
-          '/dataset/edit',
-          'physical_ai_interfaces/srv/EditDataset',
-          {
-            mode: command_enum,
-            merge_dataset_list: editDatasetInfo.mergeDatasetList,
-            delete_dataset_path: editDatasetInfo.datasetToDeleteEpisode,
-            output_path: output_path,
-            delete_episode_num: editDatasetInfo.deleteEpisodeNums,
-            upload_huggingface: editDatasetInfo.uploadHuggingface,
-          },
-          // 300 s: a delete/merge re-encodes video server-side (seconds for
-          // h264, minutes for legacy AV1). The server now runs it in a nice'd
-          // subprocess so the rest of the UI stays live regardless; this just
-          // keeps the client from giving up on a normal-size edit. A very large
-          // legacy-AV1 edit may still exceed this — it completes server-side and
-          // the dataset list reflects it on refresh (the single-flight lock
-          // makes a retry a safe no-op).
-          300000
-        );
-
-        console.log('sendEditDatasetCommand service response:', result);
-        return result;
-      } catch (error) {
-        console.error('Failed to send edit dataset command:', error);
-        throw new Error(`${error.message || error}`);
-      }
-    },
-    [callService, editDatasetInfo]
-  );
-
-  const getDatasetInfo = useCallback(
-    async (datasetPath) => {
-      try {
-        const result = await callService(
-          '/dataset/get_info',
-          'physical_ai_interfaces/srv/GetDatasetInfo',
-          { dataset_path: datasetPath }
-        );
-        console.log('getDatasetInfo service response:', result);
-        return result;
-      } catch (error) {
-        console.error('Failed to get dataset info:', error);
-        throw new Error(`${error.message || error}`);
-      }
+  // Daten 2.0 (spec §H1, §J.3): the ONE command surface of the Daten tab —
+  // `/daten/command` with a string action and a JSON object of arguments; the
+  // answer is `{success, code, message (German), result_json}`. Every action
+  // answers at once (the node never blocks on the network in it), so the
+  // ordinary 10 s timeout holds. An image without the service makes rosbridge
+  // answer „Service /daten/command does not exist" (P10), which reaches the
+  // caller as the thrown error's message (hooks/useDatenCommand reads it).
+  const datenCommand = useCallback(
+    async (action, args = {}) => {
+      const result = await callService(
+        '/daten/command',
+        'physical_ai_interfaces/srv/DatenCommand',
+        { action: String(action), args_json: JSON.stringify(args || {}) }
+      );
+      return result;
     },
     [callService]
   );
@@ -883,8 +822,7 @@ export function useRosServiceCaller() {
     getModelWeightList,
     sendTrainingCommand,
     browseFile,
-    sendEditDatasetCommand,
-    getDatasetInfo,
+    datenCommand,
     controlHfServer,
     getTrainingInfo,
     startCalibration,

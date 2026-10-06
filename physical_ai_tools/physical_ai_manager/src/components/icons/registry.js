@@ -20,10 +20,11 @@
 // later redesign changes one line here and no call site.
 
 import {
+  LuActivity,
   LuAlarmClock,
+  LuArrowLeft,
   LuArrowRightLeft,
   LuArrowUp,
-  LuBlocks,
   LuBookmark,
   LuBox,
   LuBug,
@@ -33,18 +34,21 @@ import {
   LuChevronDown,
   LuChevronLeft,
   LuChevronRight,
-  LuChevronUp,
   LuChevronsLeft,
   LuChevronsRight,
+  LuChevronUp,
   LuCircle,
   LuCircleAlert,
   LuCircleCheck,
   LuCircleDot,
+  LuCircleHelp,
   LuCircleX,
   LuClipboardList,
   LuCloud,
+  LuCloudDownload,
   LuCloudUpload,
   LuCoffee,
+  LuCombine,
   LuConstruction,
   LuCopy,
   LuCornerDownLeft,
@@ -52,6 +56,7 @@ import {
   LuDatabase,
   LuDownload,
   LuEllipsis,
+  LuEllipsisVertical,
   LuExternalLink,
   LuFileDown,
   LuFileText,
@@ -60,14 +65,18 @@ import {
   LuFolder,
   LuFolderOpen,
   LuGamepad2,
+  LuGitCompareArrows,
   LuGraduationCap,
   LuHand,
+  LuHardDrive,
   LuHistory,
   LuHourglass,
   LuHouse,
   LuInfo,
   LuKeyRound,
   LuLink,
+  LuList,
+  LuListFilter,
   LuLoaderCircle,
   LuLock,
   LuLockOpen,
@@ -87,15 +96,20 @@ import {
   LuPuzzle,
   LuRedo2,
   LuRefreshCw,
+  LuRotate3D,
   LuRotateCcw,
   LuSave,
+  LuSearch,
   LuSend,
   LuSettings,
   LuSkipForward,
   LuSlidersHorizontal,
   LuSparkles,
+  LuSplit,
   LuSquare,
+  LuSquareCheck,
   LuStar,
+  LuStepBack,
   LuStepForward,
   LuTarget,
   LuTerminal,
@@ -104,7 +118,6 @@ import {
   LuUndo2,
   LuUnlink,
   LuUnplug,
-  LuUpload,
   LuUsers,
   LuVideo,
   LuVolume2,
@@ -112,7 +125,7 @@ import {
   LuX,
   LuZap,
 } from 'react-icons/lu';
-import { IconLeaderArm, IconPython, IconRobotArm } from './custom';
+import { IconCloudSynced, IconLeaderArm, IconPython, IconRobotArm } from './custom';
 
 export const ICONS = Object.freeze({
   // Vormachen: the three kinds (owner decision D10) and the arm controls.
@@ -131,6 +144,7 @@ export const ICONS = Object.freeze({
   play: LuPlay,
   pause: LuPause,
   step: LuStepForward,
+  stepBack: LuStepBack,
   stop: LuSquare,
   skipForward: LuSkipForward,
   again: LuRotateCcw,
@@ -198,7 +212,6 @@ export const ICONS = Object.freeze({
   cloud: LuCloud,
   cloudUpload: LuCloudUpload,
   download: LuDownload,
-  upload: LuUpload,
   mergeData: LuMerge,
   cpu: LuCpu,
   terminal: LuTerminal,
@@ -218,9 +231,30 @@ export const ICONS = Object.freeze({
   chart: LuChartLine,
   moveAcross: LuArrowRightLeft,
   task: LuClipboardList,
-  widgets: LuBlocks,
   volumeOn: LuVolume2,
   volumeOff: LuVolumeX,
+
+  // Daten 2.0 (spec §G7): the dataset library, its sync badges and the player.
+  hardDrive: LuHardDrive,
+  cloudDownload: LuCloudDownload,
+  cloudSynced: IconCloudSynced,
+  syncConflict: LuGitCompareArrows,
+  syncUnknown: LuCircleHelp,
+  keepBoth: LuCombine,
+  split: LuSplit,
+  rotate3d: LuRotate3D,
+  list: LuList,
+  listFilter: LuListFilter,
+  jointCurves: LuActivity,
+  moreVertical: LuEllipsisVertical,
+  find: LuSearch,
+  back: LuArrowLeft,
+  // The episode checkbox is an OUTLINE square (the solid `stop` is the same
+  // glyph filled) and the progress dialogs' pending step an OUTLINE circle
+  // (the solid `dot` is the same glyph filled).
+  markOff: LuSquare,
+  markOn: LuSquareCheck,
+  stepPending: LuCircle,
 });
 
 export const ICON_NAMES = Object.freeze(Object.keys(ICONS));
@@ -230,7 +264,7 @@ export const ICON_NAMES = Object.freeze(Object.keys(ICONS));
 // dots (a breakpoint, a status dot, the red dot of a recording in progress).
 // <Icon> and appendSvgIcon fill them with the stroke colour, so the three run
 // surfaces (ControlPanel, the run bar, Vormachen) can never disagree.
-export const SOLID_ICON_NAMES = Object.freeze(['play', 'pause', 'step', 'stop', 'skipForward', 'dot', 'liveRecording']);
+export const SOLID_ICON_NAMES = Object.freeze(['play', 'pause', 'step', 'stepBack', 'stop', 'skipForward', 'dot', 'liveRecording']);
 
 /** True when icon `name` is drawn filled (SOLID_ICON_NAMES). */
 export function isSolidIcon(name) {

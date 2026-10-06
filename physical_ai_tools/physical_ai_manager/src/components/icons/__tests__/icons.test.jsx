@@ -61,7 +61,8 @@ describe('the icon registry', () => {
     }
     expect(ICONS.cancel.name).toBe('LuCircleX');
     expect(ICONS.failed.name).toBe('LuCircleAlert');
-    const merge = fs.readFileSync(path.resolve(ICON_DIR, '../../features/editDataset/components/DatasetMergeSection.js'), 'utf8');
+    // Daten 2.0 (spec §G9): the merge panel of the new Daten page draws it.
+    const merge = fs.readFileSync(path.resolve(ICON_DIR, '../Daten/MergePanel.jsx'), 'utf8');
     expect(merge).toMatch(/<Icon name="mergeData"/);
   });
 
@@ -93,7 +94,7 @@ describe('the icon registry', () => {
   // the outline set; the fill carried meaning. One list, drawn filled by <Icon>
   // AND appendSvgIcon, so ControlPanel, the run bar and Vormachen agree.
   it('draws the media controls and the dots filled, everything else as an outline', () => {
-    expect(SOLID_ICON_NAMES).toEqual(['play', 'pause', 'step', 'stop', 'skipForward', 'dot', 'liveRecording']);
+    expect(SOLID_ICON_NAMES).toEqual(['play', 'pause', 'step', 'stepBack', 'stop', 'skipForward', 'dot', 'liveRecording']);
     for (const name of SOLID_ICON_NAMES) expect(isIconName(name)).toBe(true);
     expect(isSolidIcon('record')).toBe(false); // the Bewegung KIND stays an outline
     expect(isSolidIcon('liveRecording')).toBe(true); // a recording in progress: the red dot
@@ -278,7 +279,7 @@ describe('the custom icons follow Lucide\'s rules', () => {
 
   it('gripper is gone from the registry (it was never used)', () => {
     expect(isIconName('gripper')).toBe(false);
-    expect(Object.keys(CUSTOM_TREES).sort()).toEqual(['leaderArm', 'python', 'robotArm']);
+    expect(Object.keys(CUSTOM_TREES).sort()).toEqual(['cloudSynced', 'leaderArm', 'python', 'robotArm']);
   });
 });
 

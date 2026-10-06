@@ -72,6 +72,7 @@ import {
   sourceVerdicts,
 } from '../../utils/signalStatus';
 import { datasetIdOf, finishSteps, sessionView } from './model/finishModel';
+import useDatenStartWait from '../../features/editDataset/hooks/useDatenStartWait';
 import { VIEW, deriveRecordView, deriveView } from './model/phaseModel';
 import { firstProblem } from './model/problems';
 import RECORD_COPY, {
@@ -228,6 +229,16 @@ export default function useRecordController({ isActive = true } = {}) {
     };
   }, [fresh, signal.payload]);
 
+  // R-8 (Daten 2.0): while the Start waits, is the robot still uploading the
+  // very dataset being started? A boolean from a subscription that exists
+  // ONLY in STARTING and changes only when the answer does — never a render
+  // per /edubotics/daten_state message (the Aufnahme render invariant, F-5).
+  const startSnap = (session && session.pendingStart && session.pendingStart.snapshot) || null;
+  const startRepoId = view0 === VIEW.STARTING && startSnap && startSnap.userId
+    ? datasetRepoId(startSnap.userId, startSnap.robotType || status.robotType, startSnap.taskName)
+    : '';
+  const waitingForUpload = useDatenStartWait(startRepoId, view0 === VIEW.STARTING);
+
   const frozen = !TIMED_VIEWS.has(view0);
   const rawClock = useSmoothPhaseClock(anchor, { frozen, reducedMotion });
   // For one render after a phase change the clock's whole seconds still belong
@@ -257,8 +268,9 @@ export default function useRecordController({ isActive = true } = {}) {
     bridge,
     activation,
     hfToken: hfTokenBlock,
+    waitingForUpload,
   }), [heartbeat, status, formRaw, collision, session, now.wall, clock.elapsed, clock.secondsLeft, proceed, busy,
-    disk, verdicts, bridge, activation, hfTokenBlock]);
+    disk, verdicts, bridge, activation, hfTokenBlock, waitingForUpload]);
   const { view } = model;
   const currentEpisode = model.episode.current;
 
@@ -479,8 +491,13 @@ export default function useRecordController({ isActive = true } = {}) {
   useEffect(() => {
     if (connected && hfUserList.length === 0) reload();
   }, [connected, hfUserList.length, reload]);
+  // R-10 (Daten 2.0): the list holds the token's own account only, so a stored
+  // id it does not contain — an organisation chosen before 2026-10-05, kept by
+  // the STUDENT-scoped `edubotics_userId` — is replaced by the account; nothing
+  // is recorded into an organisation any more.
   useEffect(() => {
-    if (editable && formRaw.userId === undefined && hfUserList.length > 0) {
+    if (!editable || hfUserList.length === 0) return;
+    if (formRaw.userId === undefined || !hfUserList.includes(formRaw.userId)) {
       dispatch(setTaskInfo({ userId: hfUserList[0] }));
     }
   }, [editable, formRaw.userId, hfUserList, dispatch]);

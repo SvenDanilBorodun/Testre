@@ -25,6 +25,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/CalibrationStatus.srv"
   "srv/CancelCalibration.srv"
   "srv/ControlHfServer.srv"
+  "srv/DatenCommand.srv"
   "srv/EditDataset.srv"
   "srv/ExecuteCalibrationPose.srv"
   "srv/GetDatasetInfo.srv"

@@ -6,6 +6,245 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-06 (latest) — owner decision N7: the Aufnahme form starts public
+
+**Why.** Owner decision N7 (2026-10-05, Daten 2.0): the cloud training reads a dataset with the platform
+token, which cannot read a student's private repo, so a recording made with the defaults must be public
+to be trainable. The owner was told that classroom video is then public on the internet by default and
+accepted it. The implementation session's permission policy had refused the change; the owner then
+gave the conductor explicit permission to make it.
+
+**What.** `taskSlice.defaultTaskInfo.privateMode` `true` → `false` (it had started private since
+2026-08-31). The wire default `TaskInfo.msg` `bool private_mode true` is unchanged and must stay. The
+adopt gate in `useRosTopicSubscription` is unchanged: another student's task never sets this student's
+switch, now in both directions (a new test feeds a foreign PRIVATE task). Tests: the form starts public;
+`signedOut` brings it back to public; `taskSlice.record.test.js` reads the new default. vitest 238 files,
+4264 passed + 2 expected failures. Datasets already on the hub keep their visibility.
+
+### Unreleased, 2026-10-06 (evening) — Daten 2.0 fix round 3: the R2 minors
+
+**Why.** The targeted verification of fix round 2 passed with five minors (R2-1…R2-5,
+`docs/plans/2026-10-05-daten-2/verify3t-findings.md`, gitignored); the owner had all five fixed, one
+fresh fixer per side (`feat/daten-2-fix3-robot`, `feat/daten-2-fix3-page`).
+
+**What changed.** R2-1: `HUB_CHANGED_SINCE_CHECK_DE` promised that „Beide behalten" keeps deletions
+deleted also for a dataset without a sync record, where it is the union and a deleted episode came
+back (hub 7 episodes); the sentence now promises nothing about it and sends the student to the Daten
+tab, whose per-dataset tip says it (robot string, the page's pin in `finishModel.test.js`). R2-2: a
+raw `keep_both` on a dataset whose own record already named the hub head ran the union and committed
+a deleted episode back; `node_service._keep_both` refuses it `stale`, re-checked in the job after
+the download. R2-3: nginx's `error_log` format is fixed and ends in `referrer:`, so the round-2 claim
+„0 tokens in either log" was wrong for a Referer naming a Daten URL sent by hand to another failing
+location (measured: `/video/stream` with web_video_server down logs the token, its access line is
+redacted). `location /daten-api/` now answers `Referrer-Policy: no-referrer` in both manager configs
+(and re-declares the other three security headers, measured on 200, 403 and 502 through nginx
+1.27.5), so a document opened at a token URL sends no Referer; the hand-made case is documented as
+the residual. R2-4: a Daten upload during that dataset's recording answered the crash-marker sentence
+(„… Lösche ihn …"); `node_service._upload` checks the live `record` lease first. R2-5: `CLAUDE.md`
+now says that ANY local change before the Daten tab first sees a dataset identical to its hub copy
+leaves it without a sync record, not only an edit before the remember step ran.
+
+**Numbers on the page branch.** React 238 files / 4266 passed + 2 expected fail, twice (fix round 2:
+4262; the four new tests are the `/daten-api/` header set per config and its teeth, each mutation-
+checked); eslint clean; the production entry chunk has no CodeMirror or three.js runtime token (the
+only `src` change is a comment); `nginx -t` clean on both configs (nginx 1.27.5).
+
+### Unreleased, 2026-10-06 (later) — Daten 2.0 fix round 2: the minors after the targeted verification
+
+**Why.** Both targeted verifiers of fix round 1 passed with minors only (T1-1…T1-4, T2-1…T2-6,
+`docs/plans/2026-10-05-daten-2/fix-round-2.md`, gitignored); the owner had them fixed by one fresh
+fixer per side (`feat/daten-2-fix2-robot`, `feat/daten-2-fix2-page`), with T2-1 decided as „remember
+the state first".
+
+**The robot side.** A dataset uploaded before Daten 2.0 has no sync record; deleting an episode then
+read „Hier und online verschieden", and the default „Beide behalten" (no base: the union) brought the
+deleted episode back (T2-1). The sidecar now writes the record of such a dataset in the background
+the first time a decision proves it identical to its hub copy (`hub_sync.remember_identical`, every
+file hashed against the hub, under the stage lock), so a later edit reads „Hier geändert". The media
+queue was shallower than the connection cap, so 2 of 20 and 12 of 30 cold parallel thumbnails were
+refused with 503 once fix round 1 removed the accidental backlog throttle (T2-6); it is now as deep
+as the cap (`MEDIA_QUEUE_MAX` = `MAX_CONNECTIONS` = 32: 20 and 30 cold thumbnails and 30 cold clips
+all 200 through both manager configs). `stage_lock` re-opens its lock file on every attempt and waits
+up to 1 s, so the remember step never refuses an edit, a download or a delete. The upload refusals
+no longer speak of an online version a never-uploaded copy does not have, and an upload refused
+during a recording says so instead of naming editing (`BUSY_RECORD_UPLOAD_DE`, T1-3). Two
+account-lookup guards no test caught are pinned (T1-2). Spec §E2 states the whole local gate before
+`create_repo` for a new repo. Suites on that branch: `robotis_ai_setup` 2324 (venv 3.12; 5 tkinter
+errors, 67 skipped) and 2251 OK / 83 skipped (python3); server pytest 2983 / 20 skipped (3.12) and
+2830 / 22 skipped (python3 without PyAV); the thin opi image with every gate, `daten_smoke` ok, the
+in-image LeRobot step 66 passed.
+
+**The page side.** nginx still logged link tokens: a request rejected before a location is picked
+(a header too large) went to the access log with its whole request line, a Referer naming a Daten
+URL was logged verbatim, and every error of the `/daten-api/` location (a refused method, the sidecar
+down) carried the request line into the error log (T1-1; measured with the real nginx image: 13
+access and 9 error lines with a token over 31 request shapes). The location's errors now go to
+`/dev/null` and the server logs in a token-free format; afterwards no token in the access log and
+none in the error log from the page's own requests, through both manager configs and the real
+sidecar, and each half alone lets its lines back. (Corrected in fix round 3, R2-3: a Referer naming a
+Daten URL, sent by hand to ANOTHER location that fails, still reaches the error log.) A dataset that
+crashed while its player was open still offered „Jetzt hochladen" and every tool (T2-2); the player
+now shows its card's state for a live, crashed or broken dataset and opens again only after the
+robot's re-read. A copy fetched from Hugging Face read „–" for all four numbers during the download
+(T2-4) and now shows the fetch dialog's numbers. `Number(null)` is 0, so an online card the hub could
+not read just now read „Episoden 0 · Dauer 0:00", and the 5 s hint poll turned its badge into a
+confident „Nur online" (T2-5); unknown numbers are „–" everywhere, the compare and fetch dialogs
+included, and the card keeps „Online-Stand unbekannt". „Beide behalten"'s tip said deleted episodes
+stay deleted also for a dataset without a sync record, where the merge is the union (T2-1, page
+half); such a dataset gets its own sentence. `CLAUDE.md` now describes the guarded commit's order for
+a new repo, the node's background account lookup, the old page's upload under the Daten lease and the
+remember step (T2-3). Each with its test (vitest, mutation-checked) and, through the harness in a
+real browser, T2-2 (a recording into the open dataset, the node killed mid-way), T2-4, T2-5 and the
+keep-both tip.
+
+**Numbers on the page branch.** React 238 files / 4262 passed + 2 expected fail, twice (fix round 1:
+238 / 4224); eslint clean; the production entry chunk +2.7 KB raw (+0.8 KB gzip) against fix round
+1's head, no CodeMirror or three.js runtime token, the same three modulepreloads; `nginx -t` clean on
+both configs.
+
+### Unreleased, 2026-10-06 — Daten 2.0 fix round 1: what the two verifiers found
+
+**Why.** Two fresh verifiers ran the integrated `feat/daten-2` (one against the real Hugging Face, one
+through the page in the spec's harness) and the conductor ran every suite; the owner approved fixing
+every finding (`docs/plans/2026-10-05-daten-2/fix-round-1.md`, gitignored), removing the Aufnahme
+page's own refusal of a Start whose dataset still uploads (V2-3) and running the LeRobot-only engine
+tests inside the built images (C-3). Two fixers worked in parallel: the robot side
+(`feat/daten-2-fix-robot`) and the page side (`feat/daten-2-fix-page`).
+
+**The robot side.** The sidecar listened with socketserver's backlog of 5 against 32 allowed
+connections: on Linux a burst of thumbnails overflowed the accept queue (SYN retransmits, 1–2 s for
+part of them) and the connection-cap test failed (V2-1); it now listens with twice the cap, at least
+64. A token change during a download was sometimes reported as an internal failure, because the
+worker's result line landed behind snapshot_download's unfinished progress bar on the merged pipe
+(V1-1); every protocol line is now one newline-first write and the reader finds the last marker
+anywhere in a line. A Python without PyAV aborted the whole server pytest collection (C-1); the
+dependent modules skip through `pytest.importorskip`. The LeRobot-only tests run in the smoke-test
+of both server images (C-3); fifteen guards no test caught are pinned with mutation proofs, and every
+anchored id rule became a full match (V1-2); waiting tests fail within a per-test limit instead of
+hanging (V1-3). The old page's `/huggingface/control` upload takes the Daten `upload` lease, and a
+broken never-uploaded dataset is refused before any hub repo is created (V1-6). One transient failure
+reading an online dataset's `info.json` no longer hides its card (V2-10). A raw „Beide behalten" or
+upload on a partner's dataset is refused `namespace` at once (V2-16). `HUB_CHANGED_SINCE_CHECK_DE`
+says what „Beide behalten" keeps (V1-5). The harness: the fake hub answers the sidecar's raw file GET
+(V2-17), `realhub_pc2.py` judges `.cache` relative to the dataset (V1-4).
+
+**The page side.** A never-uploaded dataset's upload dialog showed no visibility line, because the
+robot's `hub: null` + decided `local` was read as „could not ask" — a public repo appeared without the
+student being told (V2-2, N7). „Neue Aufnahme" → Start with the same task stayed disabled for the
+whole previous upload (54 s measured), so R-8's wait could not be reached from the tab that had just
+recorded (V2-3); measured after the fix through the page: Start enabled at once, „Wartet, bis das
+Hochladen fertig ist …" from 1 s, „Dauert länger als gewohnt …" from 9 s, recording after the first
+upload, two single commits. `daten.css`'s page reset (0,1,1) beat every button class: dark ink on teal
+(3.8:1) and danger buttons without red (V2-4; now `:where`, measured white 600 on teal, 4.85:1, 13 px and 12.5 px small).
+Toasts after a job read the library ref one render behind the re-read they awaited: deleting from an
+uploaded dataset said only „2 Episoden gelöscht." (V2-5), and the „Beide behalten" toast named the
+count from before the job. The page kept the last busy kind per id (C-2). A failed online list showed
+„… wurde noch nicht geprüft" (V2-9). A dataset without a display name proposed „omx_f_deckel gesamt" →
+`omx_f_omx_f_deckel-gesamt` (V2-11, merge and split). The crashed card carried „Hier geändert – nicht
+hochgeladen" (V2-12). The conflict card's ⋮ wrapped onto its own row (V2-13). After a whole delete
+the „Nur online" card read „–" (the robot's re-read of one id carries no numbers), the download card
+could say „0,0 MB von 4,5 MB 2 %" and fell from 100 % to 0 % when the tmp was swapped in, and the
+header said „0 Datensätze" while loading (V2-14). The banners and the newerWarn dialog had no counts,
+and the conflict's „Online-Version laden" dialog was titled „Neuere Version laden?" (V2-15). The
+„Beide behalten" tip promised every episode (V1-5). The 30-minute link tokens reached nginx's access
+log (V1-6). Each with its test (vitest, mutation-checked) and the touched screens through the harness
+(Playwright: computed styles, the ⋮ position on every card variant, the dialogs, the banners, the
+toasts, the delete and download sequences sampled every 30 ms).
+
+**Numbers on the page branch.** React 238 files / 4224 passed + 2 expected fail, twice (integrated
+branch 236 / 4165); eslint clean; the production entry chunk +3.5 KB raw (+1.2 KB gzip), no
+CodeMirror or three.js runtime token; `nginx -t` clean on both configs; `robotis_ai_setup/tests`
+2218 OK (python3, unchanged). The Aufnahme form still starts private (N7, the owner's own change).
+
+### Unreleased, 2026-10-05 / 06 — Daten 2.0: the Daten tab rebuilt as a library and a player, on a lossless edit engine and a guarded hub sync
+
+**Why.** The old Daten tab took typed folder paths, re-encoded every edit through a private LeRobot
+helper (KNOWN-ISSUES Q1), mixed models into a dataset tool and could not show an episode. The owner
+asked for Cyclo's review and edit options in our design language, approved a clickable mockup first
+(D7) and answered 14 scope questions (D1–D14) plus four review rounds (`docs/plans/2026-10-05-daten-2/decisions.md`,
+gitignored). The ones that shape the page: ONE list of the student's datasets on the robot AND on
+Hugging Face, pulled on demand, with six sync badges (D8, N1); the student's own account plus the
+CURRENT workgroup's members, as UI scoping only (D2); datasets only — models stay in Inferenz (D5); a
+frame-accurate player with all cameras on one clock, joint charts (follower state vs leader action)
+and a 3D replay with a translucent action ghost; hints per episode that never block; delete by
+marking or by typed numbers (D9), split (D11), merge with a compatibility check, „Ganzen Datensatz
+löschen" (D1); „Von Hugging Face holen" by repo id (D12); „Beide behalten" as the default of every
+conflict; and D14, a stale local copy at recording start that silently rolled back a hub dataset
+recorded on another PC, fixed this round („load newer first").
+
+**What was proven before code, by running** (spec §0, P1–P35; the prototypes live in the spec's
+appendix). Stream copy at episode boundaries is lossless through LeRobot 0.5.1's public API (every
+frame of every kept episode decodes at `from_timestamp + i/fps` within 1e-4 s, pixels equal) and 77×
+faster than today's re-encode (0.40 s vs 30.72 s for 20 × 20 s, two cameras; the re-encode was 0/34
+bit-exact, PSNR 45.4 dB). Seeking to `i/fps` landed one frame early 52/300 times in Chrome; to
+`(i + 0.5)/fps` 0/300 on both cameras, also through the real manager nginx (P6, P9). Two cameras
+paired by vsync stay at 0 frames apart at every speed, and rate nudging made it worse, hence hard
+resync only (P7); after `ended` the shown frame can be 1–2 short, so the player seeks to the last
+frame itself (P8). rosbridge answers an unknown service in 27 ms, which is how an older image is
+named (P10). The hints flagged 32 of 489 real OMX episodes (P12). The sync model and the guarded
+single-commit upload passed 28/28 scenarios against a fake hub running huggingface_hub 1.23's own
+`create_commit` (P16), the two-PC overlap race lands exactly one commit in both orders (P17), and
+„Beide behalten" is a three-way merge that brings back no deleted episode (P18). What was NOT run: a
+write to the real Hugging Face (§K.11 RH0 is the verifiers' first step), real WebView2/Firefox/Safari
+playback, real camera bitrates, an Orange Pi's CPU and storage (rig gates D-R1…D-R5).
+
+**The robot half (`feat/daten-2-robot`).** Edits are one engine, `data_processing/v3_surgery.py::assemble`:
+stream copy at episode boundaries through LeRobot's public `LeRobotDatasetMetadata` writer, one
+decode-order cutter, only LeRobot's default layout and every path confined (a dataset that names its
+own `video_path` made an unchecked engine REWRITE another dataset's videos: 7/7 such attacks are
+refused, P19), seven merge checks, a verify that sees the physical row order and the per-episode
+statistics, a journal for split and a three-way „Beide behalten". The private
+`_copy_and_reindex_videos` monkeypatch and its Dockerfile assert are gone (Q1 closed). The sync
+model (`dataset_sync.decide`) is one decision for the badge, the Start and the upload, kept in a
+sibling record per dataset. Every dataset upload is one `create_commit(parent_commit=…)` after the
+local gate and per-file `preupload_lfs_files`, read back because huggingface_hub's no-op path returns
+main's head with no parent check; `v3.0` follows main only while main holds our data;
+`upload_large_folder`, the unguarded `push_to_hub` fallback and the orphan sweep after it are gone for
+datasets. D14: the Start asks the hub about a complete local copy, loads a newer version first and
+refuses a conflict; an unreachable hub no longer refuses a Start (`OFFLINE_START_DE`; the upload
+decides). New processes: the read-only sidecar (`daten/http_server.py`, `nice -n 10`, no ROS, no
+LeRobot), the ONE download worker (`daten/download_worker.py`, xet off, its own token watch) and the
+node's `DatenService` (`/daten/command`, `/edubotics/daten_state`, leases, jobs, boot recovery).
+`get_huggingface_user_id` returns the account only, so nothing is recorded into or uploaded to an
+organisation any more. CI: `python-tests` installs `pyarrow==25.0.0 av==15.1.0
+huggingface_hub==1.23.0`; `docker-publish.yml::smoke-test` runs `daten_smoke.py` in the amd64 and opi
+server images against the real LeRobot 0.5.1 writer. At that branch's head: the `test_daten*` files
+90 tests OK, the deps-free suite 2218 OK (83 skipped), the server pytest suite 2946 passed / 18
+skipped; the rebuilt image's package byte-identical to the staging tree. The one write the round
+could not run is a write to the real Hugging Face (D-R5).
+
+**The page half (`feat/daten-2-page`).** `pages/EditDatasetPage.js` is a thin shell around
+`components/Daten/` (library, card, merge panel, player, dialogs); the logic is eight hooks under
+`features/editDataset/hooks/`, the decisions pure models under `features/editDataset/model/`, every
+German string one module (`datenCopy.js`, the approved mockup's copy with the owner's N4 corrections),
+and the wire constants a verbatim copy of the spec's shared table (`datenContract.js`). The old
+section's components and `constants/commands.js` are deleted. The player's clock is the video
+(`requestVideoFrameCallback`, a rAF + virtual-clock fallback), published through refs: measured with
+the `REACT_APP_DATEN_RENDER_PROBE` build key, 100 driver frames re-render none of `PlayerView`,
+`Stage`, `Transport`, `JointCharts`, `EpisodeList` (mutation-checked: a per-frame `setState` makes the
+test fail). `UrdfTwin` gained `poseSource` (a recorded pose plus its own ghost clone). The Aufnahme page
+names an upload of the same dataset while a Start waits (one boolean, subscribed only in STARTING:
+30 status messages → 0 renders), replaces a stored organisation Benutzer-ID by the account, and
+stops adding „später hochladen" after a sentence that already points at the Daten tab.
+`useRosTopicSubscription` no longer toasts a Daten-started transfer on the Daten page, never registers a
+model upload or a private Daten upload, and skips the registration-failed toast while the finish
+card shows that repo (closing the round-7 item). Both manager nginx configs gained
+`location /daten-api/` (GET/HEAD, token-gated by the sidecar, `nginx -t` clean on both); the cloud
+gained `GET /me/group-members` (the caller's workgroup only, three keys per member, 30/min per user).
+The tab is `hardwareOnly`.
+
+**Numbers at the page branch's head.** React 236 files / 4165 passed + 2 expected fail (main: 225 /
+3888 + 2; 11 new test files); eslint clean over `.js,.jsx`; the production build's entry chunk holds
+no CodeMirror (`cm-content`, `cm-scroller`) and no three.js (`WebGLRenderer`, `URDFLoader`) runtime
+token; cloud API 498 tests OK (main 487; `test_me_group_members.py` +11). One full-suite run saw
+`StudentProgramsDrawer.test.jsx` time out on a lazy import under load and pass alone and on the
+re-run (a file this round does not touch).
+
+**Not done in this round, deliberately or by refusal.** Owner decision N7 (the Aufnahme form starts
+PUBLIC) is not in the code: the implementation session's permission policy refused a change that
+makes recordings public by default, so it is left to the owner (KNOWN-ISSUES, Daten 2.0 entry). No
+version bump.
+
 ### Unreleased, 2026-10-04 (later) — students write no table directly (046), and the verification's small fixes
 
 **Why.** Verifying the token review, the owner confirmed on the live project that role `authenticated` still held

@@ -36,6 +36,10 @@ import { getQuota } from '../services/cloudTrainingApi';
 import useSupabaseTrainings from '../hooks/useSupabaseTrainings';
 import useRefetchOnFocus from '../hooks/useRefetchOnFocus';
 import Icon from '../components/icons/Icon';
+import useDatasetLocalChanges from '../features/editDataset/hooks/useDatasetLocalChanges';
+import DATEN_COPY from '../features/editDataset/datenCopy';
+import { moveToPage } from '../features/ui/uiSlice';
+import PageType from '../constants/pageType';
 
 function statusSubtitle(status) {
   switch (status) {
@@ -274,6 +278,12 @@ export default function TrainingPage() {
           </div>
         </div>
 
+        {/* Daten 2.0 (owner decision D6, spec §E9): the picked dataset was
+            changed here and not uploaded, or lives only on this robot —
+            the cloud trains on Hugging Face's version. Silent on anything
+            that is not proof. */}
+        <DatenWarning />
+
         {/* Monitor rail (full width) */}
         <Card
           title="Trainingsverlauf"
@@ -311,6 +321,30 @@ export default function TrainingPage() {
           </div>
         </Card>
       </div>
+    </div>
+  );
+}
+
+function DatenWarning() {
+  const dispatch = useDispatch();
+  const repoId = useSelector((state) => state.training.trainingInfo.datasetRepoId);
+  const warning = useDatasetLocalChanges(repoId);
+  if (!warning) return null;
+  return (
+    <div
+      className="flex items-center gap-3 flex-wrap rounded-[var(--radius)] border px-4 py-3 text-sm leading-snug bg-amber-50 border-amber-200 text-amber-800"
+      role="status"
+      data-daten-warning={warning}
+    >
+      <Icon name="warning" size={16} />
+      <span className="flex-1 min-w-[200px]">
+        {warning === 'local' ? DATEN_COPY.train.localWarning : DATEN_COPY.train.changedWarning}
+      </span>
+      {warning === 'changed' ? (
+        <Btn variant="ghost" onClick={() => dispatch(moveToPage(PageType.EDIT_DATASET))}>
+          {DATEN_COPY.train.toDaten}
+        </Btn>
+      ) : null}
     </div>
   );
 }

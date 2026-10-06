@@ -229,8 +229,6 @@ export const RECORD_COPY = Object.freeze({
       + 'nicht am USB-Hub.',
     armSlow: (kind, hz, fps) => `Der ${armNameDe(kind)} meldet nur ${numberDe(hz)} statt mindestens `
       + `${numberDe(fps)} Messungen pro Sekunde. Die Aufnahme kann ruckeln.`,
-    startUploading: 'Dieser Datensatz wird gerade noch hochgeladen. Warte, bis das Hochladen fertig ist, oder '
-      + 'wähle einen anderen Aufgabennamen.',
     timeout: 'Der Roboter hat nicht rechtzeitig geantwortet. Bitte versuch es noch einmal.',
     noConnection: 'Keine Verbindung zum Roboter.',
     homeLabel: 'Startseite',

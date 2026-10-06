@@ -302,7 +302,7 @@ describe('start blocks (Q5)', () => {
     });
   });
 
-  it('the order is disk, then source, then token, then an upload still running', () => {
+  it('the order is disk, then source, then token; the same dataset still uploading comes last as NO block (R-8)', () => {
     const disk = { verdict: 'low', free: 1.2e9, startFloor: 3e9, criticalFloor: 1e9 };
     const stalled = [verdict('camera', 'scene', 'stalled')];
     const uploading = {
@@ -313,7 +313,7 @@ describe('start blocks (Q5)', () => {
     expect(deriveStartBlock(all).kind).toBe('disk');
     expect(deriveStartBlock({ ...all, disk: null }).kind).toBe('source');
     expect(deriveStartBlock({ ...all, disk: null, verdicts: null }).kind).toBe('hftoken');
-    expect(deriveStartBlock({ ...all, disk: null, verdicts: null, hfToken: null }).kind).toBe('uploading');
+    expect(deriveStartBlock({ ...all, disk: null, verdicts: null, hfToken: null })).toBeNull();
   });
 
   it('UNKNOWN NEVER BLOCKS: no token verdict, or one it does not know, is no block', () => {
@@ -335,7 +335,9 @@ describe('start blocks (Q5)', () => {
     expect(deriveStartBlock({ verdicts: [verdict('camera', 'scene', 'slow')], disk: { verdict: 'unknown' } })).toBeNull();
   });
 
-  it('an upload whose state is unknown, never began, or already finished does not block (V2-R2-2)', () => {
+  // R-8 (owner decision V2-3): the robot waits for the same dataset's upload
+  // by itself; the page never refuses Start for it, whatever the upload's state.
+  it('no upload of the same dataset blocks Start — running, unknown, never began or finished (R-8)', () => {
     const tracked = (patch) => ({
       ...EMPTY_RECORD_SESSION,
       finish: { ...EMPTY_FINISH, state: 'uploading', expectedRepoId: 'schule-A/omx_f_Wuerfel', dismissed: true, endedAt: NOW - 1000, ...patch },
@@ -343,19 +345,20 @@ describe('start blocks (Q5)', () => {
     const block = (patch, nowWallMs = NOW) => deriveStartBlock({
       session: tracked(patch), form: FORM, robotType: 'omx_f', nowWallMs,
     });
-    expect(block({ uploadPct: 10, repoId: 'schule-A/omx_f_Wuerfel' })).toMatchObject({ kind: 'uploading' });
+    expect(block({ uploadPct: 10, repoId: 'schule-A/omx_f_Wuerfel' })).toBeNull();
     expect(block({ linkLost: true })).toBeNull();
     expect(block({ state: 'registering', repoId: 'schule-A/omx_f_Wuerfel' })).toBeNull();
-    // no status 15 s after the end: it never began, nothing to wait for
-    expect(block({}, NOW - 1000 + 14999)).toMatchObject({ kind: 'uploading' });
+    expect(block({}, NOW - 1000 + 14999)).toBeNull();
     expect(block({}, NOW - 1000 + 15000)).toBeNull();
   });
 
-  it('the same dataset still uploading blocks; another does not', () => {
-    const session = { ...EMPTY_RECORD_SESSION, finish: { ...EMPTY_FINISH, state: 'uploading', expectedRepoId: 'schule-A/omx_f_Wuerfel', dismissed: true } };
-    const b = deriveStartBlock({ session, form: FORM, robotType: 'omx_f' });
-    expect(b).toEqual({ kind: 'uploading', problem: { kind: 'bad', textDe: RECORD_COPY.problem.startUploading } });
-    expect(deriveStartBlock({ session, form: { ...FORM, taskName: 'Anders' }, robotType: 'omx_f' })).toBeNull();
+  it('the page view offers Start while the same dataset still uploads (R-8)', () => {
+    const session = { ...EMPTY_RECORD_SESSION, finish: { ...EMPTY_FINISH, state: 'uploading', expectedRepoId: 'schule-A/omx_f_Wuerfel', uploadPct: 30, dismissed: true } };
+    const m = model({ session });
+    expect(m.view).toBe(VIEW.READY);
+    expect(m.startBlock).toBeNull();
+    expect(m.buttons[0]).toMatchObject({ id: 'start', disabled: false });
+    expect(RECORD_COPY.problem.startUploading).toBeUndefined();
   });
 });
 

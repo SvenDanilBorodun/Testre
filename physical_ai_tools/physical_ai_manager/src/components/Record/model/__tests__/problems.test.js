@@ -200,9 +200,12 @@ describe('deriveProblems — the order', () => {
   });
 
   it('a start block the other rules do not cover is shown too — the reason Start is off (V2-R2-2)', () => {
-    const startBlock = { kind: 'uploading', problem: { kind: 'bad', textDe: P.startUploading } };
+    // (R-8 removed the one such block the page had — the same dataset still
+    // uploading; the rule stays for any block a later rule adds.)
+    const reason = 'Ein Grund, den keine andere Zeile nennt.';
+    const startBlock = { kind: 'other', problem: { kind: 'bad', textDe: reason } };
     expect(deriveProblems({ view: 'READY', startBlock, nowWallMs: NOW })).toEqual([
-      { kind: 'bad', textDe: P.startUploading },
+      { kind: 'bad', textDe: reason },
     ]);
     // only where Start is offered
     expect(deriveProblems({ view: 'RECORDING', running: true, startBlock, nowWallMs: NOW })).toEqual([]);

@@ -27,7 +27,8 @@ import TaskPhase from '../../constants/taskPhases';
 import PageType from '../../constants/pageType';
 import realStore from '../../store/store';
 import { moveToPage } from '../../features/ui/uiSlice';
-import { recordIntent, recordSessionDismiss, setTaskStatus } from '../../features/tasks/taskSlice';
+import { recordIntent, recordSessionDismiss, setTaskInfo, setTaskStatus } from '../../features/tasks/taskSlice';
+import { addTransfer, removeTransfer } from '../../features/editDataset/editDatasetSlice';
 import { setSession } from '../../features/auth/authSlice';
 import { signedOut } from '../../features/session/sessionActions';
 import { registerDataset } from '../../services/datasetsApi';
@@ -373,3 +374,153 @@ describe('/huggingface/status and the cloud registration', () => {
     expect(toast.error).toHaveBeenCalled(); // the German register warning stays
   });
 });
+
+// Daten 2.0 (spec §E5): the registration's metadata comes from the upload,
+// models are never registered, a Daten transfer is toasted by the Daten page,
+// and the finish card speaks for its own repo's registration too.
+describe('/huggingface/status — Daten 2.0 registration and toasts (spec §E5)', () => {
+  const INFO = JSON.stringify({
+    fps: 15, total_episodes: 6, total_frames: 2250, robot_type: 'omx_f',
+    display_name: 'Würfel stapeln', private: false,
+  });
+  const hf = (overrides = {}) => ({
+    status: 'Success',
+    operation: 'upload',
+    repo_id: 'schule-A/omx_f_stapeln',
+    local_path: '',
+    message: 'Hochgeladen.',
+    progress_current: 4,
+    progress_total: 4,
+    progress_percentage: 100,
+    repo_type: 'dataset',
+    info_json: INFO,
+    ...overrides,
+  });
+  const signedIn = () => realStore.dispatch(setSession({ access_token: 'jwt', user: { id: 'u1' } }));
+  const settle = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve(); }); };
+
+  afterEach(() => {
+    realStore.dispatch(removeTransfer('schule-A/omx_f_stapeln'));
+    realStore.dispatch(setTaskInfo({ taskName: '' }));
+  });
+
+  it('a MODEL upload is never registered (and still toasts)', async () => {
+    signedIn();
+    const { hfCb } = await mount();
+    await act(async () => { hfCb(hf({ repo_type: 'model', repo_id: 'schule-A/act_model', info_json: '' })); });
+    await settle();
+    expect(registerDataset).not.toHaveBeenCalled();
+    expect(dispatched('tasks/recordRegisterStatus')).toHaveLength(0);
+    expect(toast.success).toHaveBeenCalledWith('Hochgeladen.');
+  });
+
+  it('a Daten upload registers with the values of info_json, not the Aufnahme form', async () => {
+    signedIn();
+    realStore.dispatch(setTaskInfo({ taskName: 'Etwas ganz anderes', fps: 30 }));
+    realStore.dispatch(addTransfer({ repoId: 'schule-A/omx_f_stapeln', kind: 'upload' }));
+    const { hfCb } = await mount();
+    await act(async () => { hfCb(hf()); });
+    await settle();
+    expect(registerDataset).toHaveBeenCalledTimes(1);
+    expect(registerDataset.mock.calls[0][1]).toEqual({
+      hf_repo_id: 'schule-A/omx_f_stapeln',
+      name: 'Würfel stapeln',
+      description: '',
+      fps: 15,
+      robot_type: 'omx_f',
+      episode_count: 6,
+      total_frames: 2250,
+    });
+  });
+
+  it('without a display name the repo leaf names it', async () => {
+    signedIn();
+    const { hfCb } = await mount();
+    await act(async () => {
+      hfCb(hf({ info_json: JSON.stringify({ fps: 30, total_episodes: 2, total_frames: 600, robot_type: 'omx_f', display_name: null, private: false }) }));
+    });
+    await settle();
+    expect(registerDataset.mock.calls[0][1].name).toBe('omx_f_stapeln');
+  });
+
+  it('the Aufnahme session\'s own repo keeps the form\'s task name', async () => {
+    signedIn();
+    realStore.dispatch(moveToPage(PageType.RECORD));
+    startSessionInRealStore();
+    realStore.dispatch(setTaskInfo({ taskName: 'Würfel', fps: 30 }));
+    const base = {
+      taskType: 'record', taskName: 'Würfel', robotType: 'omx_f', numEpisodes: 5, episodeTime: 20,
+      pushToHub: true, topicReceived: true,
+    };
+    realStore.dispatch(setTaskStatus({
+      ...base, running: true, phase: TaskPhase.SAVING, currentEpisodeNumber: 1, receivedAt: 1, receivedWallMs: Date.now() - 10,
+    }));
+    realStore.dispatch(setTaskStatus({
+      ...base, running: false, phase: TaskPhase.READY, currentEpisodeNumber: 1, receivedAt: 2, receivedWallMs: Date.now() - 5,
+    }));
+    const { hfCb } = await mount();
+    await act(async () => { hfCb(hf({ repo_id: 'schule-A/omx_f_Wuerfel', info_json: INFO })); });
+    await settle();
+    expect(registerDataset.mock.calls[0][1].name).toBe('Würfel');
+  });
+
+  it('the registration-failure toast is suppressed while the finish card shows that repo', async () => {
+    signedIn();
+    realStore.dispatch(moveToPage(PageType.RECORD));
+    startSessionInRealStore();
+    const base = {
+      taskType: 'record', taskName: 'Würfel', robotType: 'omx_f', numEpisodes: 5, episodeTime: 20,
+      pushToHub: true, topicReceived: true,
+    };
+    realStore.dispatch(setTaskStatus({
+      ...base, running: true, phase: TaskPhase.SAVING, currentEpisodeNumber: 1, receivedAt: 1, receivedWallMs: Date.now() - 10,
+    }));
+    realStore.dispatch(setTaskStatus({
+      ...base, running: false, phase: TaskPhase.READY, currentEpisodeNumber: 1, receivedAt: 2, receivedWallMs: Date.now() - 5,
+    }));
+    registerDataset.mockImplementationOnce(() => Promise.reject(Object.assign(new Error('x'), { status: 422 })));
+    const { hfCb } = await mount();
+    await act(async () => { hfCb(hf({ repo_id: 'schule-A/omx_f_Wuerfel' })); });
+    await settle();
+    expect(dispatched('tasks/recordRegisterStatus').map((a) => a.payload.state)).toEqual(['pending', 'failed']);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('a Daten transfer does not toast on the Daten page; its result is left for the page', async () => {
+    realStore.dispatch(moveToPage(PageType.EDIT_DATASET));
+    realStore.dispatch(addTransfer({ repoId: 'schule-A/omx_f_stapeln', kind: 'upload' }));
+    const { hfCb } = await mount();
+    act(() => hfCb(hf({ status: 'Failed', message: 'Nicht hochgeladen.' })));
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(dispatched('editDataset/setTransferResult').map((a) => a.payload)).toEqual([
+      { repoId: 'schule-A/omx_f_stapeln', status: 'Failed', message: 'Nicht hochgeladen.' },
+    ]);
+    expect(dispatched('editDataset/removeTransfer')).toHaveLength(0);
+  });
+
+  it('… and off the Daten page it toasts the robot\'s sentence and forgets the transfer', async () => {
+    realStore.dispatch(addTransfer({ repoId: 'schule-A/omx_f_stapeln', kind: 'upload' }));
+    const { hfCb } = await mount();
+    act(() => hfCb(hf({ status: 'Failed', message: 'Nicht hochgeladen.' })));
+    expect(toast.error).toHaveBeenCalledWith('Nicht hochgeladen.');
+    expect(dispatched('editDataset/removeTransfer').map((a) => a.payload)).toEqual(['schule-A/omx_f_stapeln']);
+  });
+
+  it('a PRIVATE Daten upload is not registered', async () => {
+    signedIn();
+    realStore.dispatch(moveToPage(PageType.EDIT_DATASET));
+    realStore.dispatch(addTransfer({ repoId: 'schule-A/omx_f_stapeln', kind: 'upload' }));
+    const { hfCb } = await mount();
+    await act(async () => { hfCb(hf({ info_json: JSON.stringify({ fps: 30, private: true }) })); });
+    await settle();
+    expect(registerDataset).not.toHaveBeenCalled();
+  });
+
+  it('the HF status never pre-fills a namespace or repo field any more', async () => {
+    const { hfCb } = await mount();
+    act(() => hfCb(hf({ status: 'Uploading' })));
+    const types = mockDispatch.mock.calls.map(([a]) => a && a.type);
+    expect(types.filter((t) => /setHFUserId|setHFRepoId|setDownloadStatus/.test(String(t)))).toEqual([]);
+  });
+});
+

@@ -207,7 +207,12 @@ describe('signOutStudent — no trace of the previous student', () => {
 
   it('resets the dataset-edit form and the Roboter-Studio editor', async () => {
     const { store, signOutStudent, editDataset, workshop } = await freshStore();
-    store.dispatch(editDataset.setHFUserId('schule-A'));
+    // Daten 2.0 (spec §G3, H-A1): the rewritten slice keeps the library
+    // filter, the marks and the Daten transfers of the student signed in.
+    store.dispatch(editDataset.setLibraryFilter('group'));
+    store.dispatch(editDataset.toggleMark({ id: 'schule-A/omx_f_wuerfel', digest: 'd1', index: 2 }));
+    store.dispatch(editDataset.addTransfer({ repoId: 'schule-A/omx_f_wuerfel', kind: 'upload' }));
+    store.dispatch(editDataset.openPlayer('schule-A/omx_f_wuerfel'));
     store.dispatch(workshop.setActiveTutorial({ id: 'lesson-3', step: 4 }));
     // D3: the tutorial ids were cleared but the toolbox restriction it imposes
     // and the unsaved program were not — and WorkshopPage seeds the editor from
@@ -220,7 +225,11 @@ describe('signOutStudent — no trace of the previous student', () => {
     await store.dispatch(signOutStudent({ reload: false }));
 
     const s = store.getState();
-    expect(s.editDataset.hfUserId).toBe('');
+    expect(s.editDataset.libraryFilter).toBe('all');
+    expect(s.editDataset.marks).toEqual({});
+    expect(s.editDataset.transfers).toEqual({});
+    expect(s.editDataset.view).toBe('library');
+    expect(s.editDataset.openId).toBeNull();
     expect(s.workshop.activeTutorialId).toBeNull();
     expect(s.workshop.activeTutorialStep).toBe(0);
     expect(s.workshop.restrictedBlocks).toBeNull();

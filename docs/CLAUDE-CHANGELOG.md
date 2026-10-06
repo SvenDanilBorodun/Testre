@@ -6,6 +6,21 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-06 (evening) — owner decision N7: the Aufnahme form starts public
+
+**Why.** Owner decision N7 (2026-10-05, Daten 2.0): the cloud training reads a dataset with the platform
+token, which cannot read a student's private repo, so a recording made with the defaults must be public
+to be trainable. The owner was told that classroom video is then public on the internet by default and
+accepted it. The implementation session's permission policy had refused the change; the owner then
+gave the conductor explicit permission to make it.
+
+**What.** `taskSlice.defaultTaskInfo.privateMode` `true` → `false` (it had started private since
+2026-08-31). The wire default `TaskInfo.msg` `bool private_mode true` is unchanged and must stay. The
+adopt gate in `useRosTopicSubscription` is unchanged: another student's task never sets this student's
+switch, now in both directions (a new test feeds a foreign PRIVATE task). Tests: the form starts public;
+`signedOut` brings it back to public; `taskSlice.record.test.js` reads the new default. vitest 238 files,
+4264 passed + 2 expected failures. Datasets already on the hub keep their visibility.
+
 ### Unreleased, 2026-10-06 (later) — Daten 2.0 fix round 2: the minors after the targeted verification
 
 **Why.** Both targeted verifiers of fix round 1 passed with minors only (T1-1…T1-4, T2-1…T2-6,

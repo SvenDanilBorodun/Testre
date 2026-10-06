@@ -214,7 +214,7 @@ describe('recordSelectors', () => {
     expect(sel.selectPhaseAnchor(s)).toBe(s.tasks.phaseAnchor);
     expect(sel.selectRecordSession(s)).toBe(s.tasks.recordSession);
     expect(sel.selectRecordNotice(s)).toBe(s.tasks.recordNotice);
-    expect(sel.selectRecordForm(s)).toMatchObject({ fps: 30, episodeTime: 20, privateMode: true });
+    expect(sel.selectRecordForm(s)).toMatchObject({ fps: 30, episodeTime: 20, privateMode: false });
   });
 });
 

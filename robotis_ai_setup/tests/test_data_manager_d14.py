@@ -9,7 +9,9 @@ sha1 of its pointer) and a fake ``_sync_download`` handle:
 * synced: current / changed resume; newer → the sync download of ``revision =
   head`` and ``_sync_base = head``; conflict → SYNC_CONFLICT_DE; a marker repair →
   current with the record repaired;
-* record-less: equal → resume WITHOUT a record (S-1); descendant → resume;
+* record-less: equal → resume WITHOUT a record (the Start never writes one: a
+  record-less dataset is remembered by the library's background step, T2-1, and
+  the session's own upload writes one after its commit); descendant → resume;
   ancestor → the sync download; diverged → SYNC_UNKNOWN_DE;
 * the sync download's failures (disk with the worker's numbers, stalled, a hub
   dataset this robot cannot open, anything else), FINISH while it runs, and no
@@ -324,7 +326,8 @@ class RecordlessVerdicts(D14Case):
         self.local(SESSION1)
         self.hub.put(SESSION1, head='1' * 40)
         self.assert_resumed('1' * 40)
-        self.assertFalse(S.record_path(self.path).exists(), 'S-1: a content decision writes no record')
+        self.assertFalse(S.record_path(self.path).exists(),
+                         'the Start writes no record (T2-1: only the library\'s background step does)')
 
     def test_a_descendant_resumes(self):
         self.local(SESSION1, SESSION2)

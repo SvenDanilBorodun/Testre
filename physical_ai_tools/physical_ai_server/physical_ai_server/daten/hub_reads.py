@@ -453,6 +453,7 @@ class HubReads:
             view = {'state': 'unreachable'}
         state, reason, _ = S.decide(path, rec, view)
         out['sync'] = {'state': state, 'reason': reason}
+        library.remember_if_current(dataset_id, path, rec, view, state)        # T2-1
         return out
 
 

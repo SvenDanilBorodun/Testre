@@ -38,6 +38,9 @@
 * ``stage_lock`` / ``swap_in`` / ``recover``: the per-stage lock file (R-19,
   G-3) and the swap of a verified tmp copy into place together with the record
   that describes it (H-8), finished or undone from the rename state alone.
+* ``remember_identical``: the sync record of a dataset WITHOUT one that is
+  provably identical to its hub copy (T2-1, „remember the state first“) — the
+  library's background step, so a later local edit reads „changed“.
 
 ``huggingface_hub`` is imported inside the functions that use it, never at
 module level (A18: the deps-free loaders stub it with a fixed attribute list,
@@ -57,6 +60,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import time
 
 
 def _sibling(name):
@@ -94,6 +98,11 @@ READBACK_TRIES = 3
 DISK_START_FLOOR_BYTES = 3_000_000_000
 DOWNLOAD_MODES = ('new', 'replace', 'copy', 'sync', 'keep', 'base')
 UNSET = object()
+# T2-1: a stage waits this long for a dataset lock held only briefly — the library's
+# remember step holds it for a check and one record write (milliseconds), far less than
+# any stage — so that step never refuses a stage; another stage is still refused.
+STAGE_LOCK_WAIT_S = 1.0
+_STAGE_LOCK_POLL_S = 0.02
 
 
 class Refused(Exception):
@@ -112,21 +121,41 @@ class Refused(Exception):
 
 # ── the per-stage lock and the swap transaction ─────────────────────────────
 
-def stage_lock(root):
+def stage_lock(root, wait_s=None):
     """``<ns>/.<name>.lock``, ``flock(LOCK_EX | LOCK_NB)``, held by the process of
     ONE stage (G-3: a job never holds it across its child stages — a flock is per
     open file, so its own child stage would fail). Returns the fd; raises
-    ``BlockingIOError`` when another stage/process owns it. The kernel releases
-    it when the process dies."""
+    ``BlockingIOError`` when another stage/process still owns it after
+    ``wait_s`` (default ``STAGE_LOCK_WAIT_S``; 0 = never wait). Each attempt
+    opens the lock file anew and keeps a lock only on the file that is still at
+    the path (a whole-dataset delete unlinks it; a lock on the old file would
+    exclude nobody). The kernel releases it when the process dies."""
     root = Path(root)
     root.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(S.lock_path(root), os.O_RDWR | os.O_CREAT, 0o644)
+    path = S.lock_path(root)
+    deadline = time.monotonic() + max(0.0, STAGE_LOCK_WAIT_S if wait_s is None else float(wait_s))
+    while True:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(_STAGE_LOCK_POLL_S)
+            continue
+        if _is_the_file_at(fd, path):
+            return fd
+        os.close(fd)                                      # unlinked meanwhile: lock the file that is there now
+
+
+def _is_the_file_at(fd, path):
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        os.close(fd)
-        raise
-    return fd
+        st = os.stat(path)
+    except OSError:
+        return False
+    own = os.fstat(fd)
+    return (own.st_dev, own.st_ino) == (st.st_dev, st.st_ino)
 
 
 def release_lock(fd):
@@ -335,6 +364,125 @@ def local_gate(root, rec, sha=None, *, integrity=True):
         V.integrity(root, known_good=frozenset(known))
     except V.SurgeryError as e:
         raise Refused('local_broken', str(e)) from e
+
+
+# ── remember the state first (T2-1) ────────────────────────────────────────────
+
+REMEMBER_WRITTEN = 'written'
+
+
+def sync_snapshot(root):
+    """``{rel: (size, mtime_ns, inode)}`` of every file under data/, meta/,
+    videos/ (no ``.cache``), and the folder's own identity under ``''``."""
+    root = Path(root)
+    st = root.stat()
+    out = {'': (st.st_dev, st.st_ino, None)}
+    for top in S.SYNC_DIRS:
+        base = root / top
+        if not base.is_dir():
+            continue
+        for p in base.rglob('*'):
+            rel = p.relative_to(root)
+            if p.is_file() and '.cache' not in rel.parts:
+                s = p.stat()
+                out[rel.as_posix()] = (s.st_size, s.st_mtime_ns, s.st_ino)
+    return out
+
+
+def _hash_file(path, lfs):
+    """sha256 and — for a file the hub keeps as a plain git blob — its git
+    sha1, in one read (the hub's own identities, P11)."""
+    h256 = hashlib.sha256()
+    h1 = None if lfs else hashlib.sha1(b'blob %d\x00' % os.path.getsize(path))
+    with open(path, 'rb') as f:
+        for b in iter(lambda: f.read(1 << 20), b''):
+            h256.update(b)
+            if h1 is not None:
+                h1.update(b)
+    return h256.hexdigest(), (h1.hexdigest() if h1 is not None else None)
+
+
+def _record_kind(root, repo):
+    """``'free'`` (no record, or one without ``hub_sha`` that names this repo),
+    ``'foreign'`` (it names another repo, G-11), ``'synced'`` (``hub_sha``, or
+    an unconfirmed first upload: ``tag_ok`` false)."""
+    rec = S.read_record(root)
+    if not rec:
+        return 'free'
+    if rec.get('repo_id') != repo:
+        return 'foreign'
+    if rec.get('hub_sha') or rec.get('tag_ok') is False:
+        return 'synced'
+    return 'free'
+
+
+def remember_identical(root, repo, hub, hub_files):
+    """T2-1 (owner: „remember the state first“): the sync record of a dataset
+    WITHOUT one that is identical to its hub copy at ``hub['head']`` — exactly
+    what a download or an upload writes (``hub_sha`` = that head,
+    ``hub_trees``, ``local_digest``, ``files``, ``synced_at``; every other key
+    kept) — so a later local edit reads ``changed`` (one upload) instead of a
+    conflict whose „Beide behalten“ has no base (S-1's „no adopt writer“,
+    narrowly reversed). The library's background step; never part of the
+    decision itself, never in the recorder.
+
+    Written only on proof: the same file set under data/, meta/, videos/ as
+    ``hub_files`` (``dataset_sync.hub_entries`` at the head) and every file
+    hashed and equal — ``lfs.sha256``, else git sha1 == ``blob_id``, videos
+    included; only for the folder's own repo, never over a record that names
+    another repo (G-11/H-7) or that is synced, never with a crash marker. The
+    final check and the write happen under the dataset's stage lock, never
+    waited for (a stage holding it goes first; the next look tries again), on
+    the lock file that is at the path, and only if nothing changed since the
+    hashing began. Returns ``written`` | ``differs`` | ``foreign`` | ``synced``
+    | ``in_session`` | ``no_hub`` | ``busy`` | ``changed``."""
+    root = Path(root)
+    if repo != S.folder_id(root):
+        return 'foreign'
+    if not hub or hub.get('state') != 'present' or not hub.get('head') or not any((hub.get('trees') or {}).values()):
+        return 'no_hub'
+    if S.session_marker_path(root).exists():
+        return 'in_session'
+    kind = _record_kind(root, repo)
+    if kind != 'free':
+        return kind
+    try:
+        before = sync_snapshot(root)
+        digest = S.meta_digest(root)
+        local = set(before) - {''}
+        if local != set(hub_files):
+            return 'differs'
+        sha = {}
+        for rel in sorted(local):
+            entry = hub_files[rel]
+            if before[rel][0] != entry['size']:
+                return 'differs'
+            h256, h1 = _hash_file(root / rel, bool(entry.get('lfs_sha256')))
+            if (h256 != entry['lfs_sha256']) if entry.get('lfs_sha256') else (h1 != entry['blob_id']):
+                return 'differs'
+            sha[rel] = h256
+    except OSError:
+        return 'changed'                                  # a file vanished while it was read
+    try:
+        fd = stage_lock(root, wait_s=0)
+    except (BlockingIOError, OSError):
+        return 'busy'
+    try:
+        if S.session_marker_path(root).exists():
+            return 'in_session'
+        kind = _record_kind(root, repo)
+        if kind != 'free':
+            return kind
+        try:
+            if sync_snapshot(root) != before or S.meta_digest(root) != digest:
+                return 'changed'
+        except OSError:
+            return 'changed'
+        S.update_record(root, repo, hub_sha=hub['head'], hub_trees=dict(hub['trees']), local_digest=digest,
+                        files=S.manifest(sha), synced_at=S.now_iso())
+        return REMEMBER_WRITTEN
+    finally:
+        release_lock(fd)
 
 
 # ── the guarded single-commit upload (§E2) ─────────────────────────────────────

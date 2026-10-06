@@ -470,6 +470,7 @@ def main():
     hub_mod.install_client_factory(C.HUB_CALL_TIMEOUT_S)          # G-6: every hub request bounded
     server = make_server()
     server.sidecar.library.start_hint_worker()
+    server.sidecar.library.start_remember_worker()          # T2-1
     print(f'[daten-sidecar] listening on 0.0.0.0:{C.HTTP_PORT}', flush=True)
     try:
         server.serve_forever(poll_interval=0.5)

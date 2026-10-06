@@ -328,6 +328,19 @@ describe('overlays from /edubotics/daten_state', () => {
     expect(within(card(W)).getByText(COPY.card.view).closest('button')).toBeDisabled();
   });
 
+  // C-2: a Start waiting for this dataset's upload lists it as `record` AND
+  // `upload`; the card shows the upload that runs, in either wire order.
+  it.each([
+    ['record, upload', [{ id: W, kind: 'record' }, { id: W, kind: 'upload' }]],
+    ['upload, record', [{ id: W, kind: 'upload' }, { id: W, kind: 'record' }]],
+  ])('a Start waiting for the upload (%s): the upload overlay, never „Wird gerade aufgenommen"', async (_order, busy) => {
+    await mount();
+    await waitFor(() => expect(card(W)).not.toBeNull());
+    act(() => setDaten({ busy, transfer: { kind: 'upload', repo_id: W, target: null } }));
+    await waitFor(() => expect(cardText(W)).toContain(COPY.sync.uploadLabel));
+    expect(cardText(W)).not.toContain(COPY.sync.recordLabel);
+  });
+
   it('a keep_both job → „Wird zusammengeführt"', async () => {
     await mount();
     await waitFor(() => expect(card(W)).not.toBeNull());

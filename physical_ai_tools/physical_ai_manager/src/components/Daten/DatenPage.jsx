@@ -42,7 +42,7 @@ import {
 } from '../../features/editDataset/editDatasetSlice';
 import useDatenCommand from '../../features/editDataset/hooks/useDatenCommand';
 import useDatenSession from '../../features/editDataset/hooks/useDatenSession';
-import useDatenState, { busyMap } from '../../features/editDataset/hooks/useDatenState';
+import useDatenState, { busyKindsById } from '../../features/editDataset/hooks/useDatenState';
 import useDatenJobs, { stepOfStage } from '../../features/editDataset/hooks/useDatenJobs';
 import useGroupNamespaces from '../../features/editDataset/hooks/useGroupNamespaces';
 import { libraryCards, syncAfterLocalEdit } from '../../features/editDataset/model/libraryState';
@@ -134,7 +134,7 @@ export default function DatenPage() {
   const own = group.own;
   const robotType = session.lib.robotType || statusRobotType || 'omx_f';
   const payload = jobs.payload;
-  const busy = useMemo(() => busyMap(payload), [payload]);
+  const busy = useMemo(() => busyKindsById(payload), [payload]);
   const transferRepo = payload && payload.transfer && payload.transfer.kind === 'upload' ? payload.transfer.repo_id : null;
   const uploadPct = Number(uploadPctRaw) || 0;
 
@@ -164,7 +164,7 @@ export default function DatenPage() {
       out[c.id] = cardModel(c, {
         own,
         ownerNames: group.names,
-        busyKind: busy[c.id] || null,
+        busyKinds: busy[c.id] || EMPTY_LIST,
         job: jobFor(payload, c.id),
         uploadPct: transferRepo === c.id ? uploadPct : null,
         stateSeen: session.lib.stateSeen,

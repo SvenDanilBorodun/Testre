@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  applyLibraryReply, busyChanges, cardPhase, emptyLibrary, libraryCards, stampBusyChange, syncAfterLocalEdit,
+  applyLibraryReply, busyChanges, cardBusyKind, cardPhase, emptyLibrary, libraryCards, stampBusyChange, syncAfterLocalEdit,
 } from '../model/libraryState';
 
 const FP = 'fp-lena';
@@ -143,30 +143,45 @@ describe('an ids reply touches only its datasets', () => {
 describe('the crashed card (H-1, T-1, U-3)', () => {
   const crashed = local('lena/omx_f_k', { state: 'in_session' });
 
-  it('busy changes: a kind change or a disappearance; an appearance is none', () => {
-    expect(busyChanges({ a: 'record' }, { a: 'upload' })).toEqual(['a']);
-    expect(busyChanges({ a: 'upload' }, {})).toEqual(['a']);
-    expect(busyChanges({}, { a: 'record' })).toEqual([]);
-    expect(busyChanges({ a: 'record' }, { a: 'record' })).toEqual([]);
+  it('busy changes: a kind that disappeared; a kind that appeared, or another order, is none (C-2)', () => {
+    expect(busyChanges({ a: ['record'] }, { a: ['upload'] })).toEqual(['a']);
+    expect(busyChanges({ a: ['upload'] }, {})).toEqual(['a']);
+    expect(busyChanges({}, { a: ['record'] })).toEqual([]);
+    expect(busyChanges({ a: ['record'] }, { a: ['record'] })).toEqual([]);
+    // a Start waited for the upload; the upload ended, the recording began
+    expect(busyChanges({ a: ['record', 'upload'] }, { a: ['record'] })).toEqual(['a']);
+    expect(busyChanges({ a: ['record'] }, { a: ['record', 'upload'] })).toEqual([]);
+    expect(busyChanges({ a: ['record', 'upload'] }, { a: ['record', 'upload'] })).toEqual([]);
   });
 
-  it('a live recording is never the crashed card', () => {
-    expect(cardPhase(crashed, { busyKind: 'record', stateSeen: true, stamp: 3, entrySeq: 4 })).toBe('live');
+  it('cardBusyKind: a transfer or an edit beside `record` is what runs (a Start still waits for it)', () => {
+    expect(cardBusyKind(['record', 'upload'])).toBe('upload');
+    expect(cardBusyKind(['upload', 'record'])).toBe('upload');
+    expect(cardBusyKind(['record'])).toBe('record');
+    expect(cardBusyKind(['edit'])).toBe('edit');
+    expect(cardBusyKind(['record', 'download'])).toBe('download');
+    expect(cardBusyKind([])).toBeNull();
+    expect(cardBusyKind(undefined)).toBeNull();
+  });
+
+  it('a live recording is never the crashed card — in either wire order', () => {
+    expect(cardPhase(crashed, { busyKinds: ['record'], stateSeen: true, stamp: 3, entrySeq: 4 })).toBe('live');
+    expect(cardPhase(crashed, { busyKinds: ['upload', 'record'], stateSeen: true, stamp: 3, entrySeq: 4 })).toBe('live');
   });
 
   it('before the first daten_state message an in_session card is neutral', () => {
-    expect(cardPhase(crashed, { busyKind: null, stateSeen: false, stamp: undefined, entrySeq: 4 })).toBe('refreshing');
+    expect(cardPhase(crashed, { busyKinds: [], stateSeen: false, stamp: undefined, entrySeq: 4 })).toBe('refreshing');
   });
 
   it('crashed ONLY from a reply whose request was sent after the newest busy change', () => {
-    expect(cardPhase(crashed, { busyKind: null, stateSeen: true, stamp: 5, entrySeq: 6 })).toBe('crashed');
-    expect(cardPhase(crashed, { busyKind: null, stateSeen: true, stamp: 5, entrySeq: 5 })).toBe('refreshing');
-    expect(cardPhase(crashed, { busyKind: null, stateSeen: true, stamp: 5, entrySeq: 2 })).toBe('refreshing');
+    expect(cardPhase(crashed, { busyKinds: [], stateSeen: true, stamp: 5, entrySeq: 6 })).toBe('crashed');
+    expect(cardPhase(crashed, { busyKinds: [], stateSeen: true, stamp: 5, entrySeq: 5 })).toBe('refreshing');
+    expect(cardPhase(crashed, { busyKinds: [], stateSeen: true, stamp: 5, entrySeq: 2 })).toBe('refreshing');
   });
 
   it('any card waiting for its re-fetch after a busy change is neutral', () => {
-    expect(cardPhase(local('lena/omx_f_a'), { busyKind: 'upload', stateSeen: true, stamp: 5, entrySeq: 5 })).toBe('refreshing');
-    expect(cardPhase(local('lena/omx_f_a'), { busyKind: 'upload', stateSeen: true, stamp: 5, entrySeq: 6 })).toBeNull();
+    expect(cardPhase(local('lena/omx_f_a'), { busyKinds: ['upload'], stateSeen: true, stamp: 5, entrySeq: 5 })).toBe('refreshing');
+    expect(cardPhase(local('lena/omx_f_a'), { busyKinds: ['upload'], stateSeen: true, stamp: 5, entrySeq: 6 })).toBeNull();
   });
 
   it('two replies in reverse order: never crashed from the late old one', () => {
@@ -177,7 +192,7 @@ describe('the crashed card (H-1, T-1, U-3)', () => {
     lib = applyLibraryReply(lib, hub0([crashed], {}), { seq: 4, hub: false, ids: null }, { accountFp: FP });
     const entry = lib.local['lena/omx_f_k'];
     expect(entry.state).toBe('ok');
-    expect(cardPhase(entry, { busyKind: null, stateSeen: true, stamp: lib.stamps['lena/omx_f_k'], entrySeq: lib.entrySeq['lena/omx_f_k'] })).toBeNull();
+    expect(cardPhase(entry, { busyKinds: [], stateSeen: true, stamp: lib.stamps['lena/omx_f_k'], entrySeq: lib.entrySeq['lena/omx_f_k'] })).toBeNull();
   });
 });
 

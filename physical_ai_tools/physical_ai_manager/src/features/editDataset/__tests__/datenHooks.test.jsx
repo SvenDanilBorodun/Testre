@@ -13,7 +13,7 @@ import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import useDatenState, { busyMap, parseDatenState, resetDatenStateForTests } from '../hooks/useDatenState';
+import useDatenState, { busyKindsById, parseDatenState, resetDatenStateForTests } from '../hooks/useDatenState';
 import useDatenStartWait, { isUploading } from '../hooks/useDatenStartWait';
 import useGroupNamespaces, { resetGroupNamespacesCache } from '../hooks/useGroupNamespaces';
 import { getGroupMembers } from '../../../services/meApi';
@@ -77,7 +77,7 @@ describe('parseDatenState', () => {
     expect(p.transfer).toEqual({ kind: 'upload', repo_id: 'a/b', target: null });
     expect(parseDatenState('{"v":2}')).toBeNull();
     expect(parseDatenState('nope')).toBeNull();
-    expect(busyMap(p)).toEqual({ 'a/b': 'record' });
+    expect(busyKindsById(p)).toEqual({ 'a/b': ['record'] });
   });
 });
 
@@ -138,6 +138,26 @@ describe('useDatenStartWait (R-8, F-5)', () => {
 
     rerender({ active: false });
     expect(mockTopics[0].unsubscribed).toBe(true);
+  });
+
+  // C-2: a Start waiting for its dataset's upload lists the id twice
+  // (`record` and `upload`); the answer must not depend on which comes last.
+  it('both wire orders of record + upload: the same answer (C-2)', async () => {
+    const R = 'lena-schmidt/omx_f_wuerfel';
+    const a = msg([{ id: R, kind: 'record' }, { id: R, kind: 'upload' }]);
+    const b = msg([{ id: R, kind: 'upload' }, { id: R, kind: 'record' }]);
+    expect(busyKindsById(a)).toEqual({ [R]: ['record', 'upload'] });
+    expect(busyKindsById(b)).toEqual(busyKindsById(a));
+    expect(isUploading(a, R)).toBe(true);
+    expect(isUploading(b, R)).toBe(true);
+    // through the hook, the order the old map lost
+    const store = makeStore();
+    const { result } = renderHook(() => useDatenStartWait(R, true), { wrapper: wrapper(store) });
+    await waitFor(() => expect(mockTopics.length).toBe(1));
+    act(() => send(b));
+    expect(result.current).toBe(true);
+    act(() => send(msg([{ id: R, kind: 'record' }])));
+    expect(result.current).toBe(false);
   });
 
   it('another repo, or another kind, is no wait', () => {

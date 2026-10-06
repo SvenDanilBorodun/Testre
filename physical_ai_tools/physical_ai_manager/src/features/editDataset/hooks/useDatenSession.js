@@ -25,7 +25,7 @@ import { DatenHttpError, dsUrl, getJson, isTokenError, libUrl } from '../api/dat
 import {
   applyLibraryReply, busyChanges, emptyLibrary, stampBusyChange,
 } from '../model/libraryState';
-import { busyMap } from './useDatenState';
+import { busyKindsById } from './useDatenState';
 
 export const HINT_POLL_MS = 5000;
 export const HINT_POLL_MAX_MS = 120000;
@@ -269,7 +269,7 @@ export default function useDatenSession({
       if (!received) prevBusyRef.current = null;
       return;
     }
-    const nextBusy = busyMap(payload);
+    const nextBusy = busyKindsById(payload);
     const shown = (id) => !!(libRef.current.local[id] || (libRef.current.hub && libRef.current.hub.entries[id]));
     let changed;
     if (prevBusyRef.current === null) {

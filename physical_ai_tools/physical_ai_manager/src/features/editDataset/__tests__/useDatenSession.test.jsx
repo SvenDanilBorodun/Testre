@@ -102,7 +102,7 @@ function mount(initialState = { received: false, payload: null }) {
 const phaseOf = (result, id, busyKind = null) => {
   const lib = result.current.lib;
   return cardPhase(lib.local[id], {
-    busyKind, stateSeen: lib.stateSeen, stamp: lib.stamps[id], entrySeq: lib.entrySeq[id],
+    busyKinds: busyKind ? [busyKind] : [], stateSeen: lib.stateSeen, stamp: lib.stamps[id], entrySeq: lib.entrySeq[id],
   });
 };
 
@@ -170,6 +170,23 @@ describe('useDatenSession', () => {
 
     const n = requests.filter((u) => u.endsWith('ids=lena%2Fomx_f_w')).length;
     rerender(props([]));
+    await waitFor(() => expect(requests.filter((u) => u.endsWith('ids=lena%2Fomx_f_w')).length).toBe(n + 1));
+  });
+
+  it('C-2: the same busy kinds in another order are no change (no re-fetch, no neutral flash)', async () => {
+    world.local = [local('lena/omx_f_w')];
+    const props = (busy) => ({ enabled: true, command, namespaces: ['lena'], inSync: true, accountFp: FP, datenState: state(busy) });
+    const { result, rerender } = mount();
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    rerender(props([{ id: 'lena/omx_f_w', kind: 'record' }, { id: 'lena/omx_f_w', kind: 'upload' }]));
+    await waitFor(() => expect(result.current.lib.stateSeen).toBe(true));
+    const n = requests.filter((u) => u.endsWith('ids=lena%2Fomx_f_w')).length;
+    rerender(props([{ id: 'lena/omx_f_w', kind: 'upload' }, { id: 'lena/omx_f_w', kind: 'record' }]));
+    await act(async () => { await Promise.resolve(); });
+    expect(requests.filter((u) => u.endsWith('ids=lena%2Fomx_f_w')).length).toBe(n);
+    expect(result.current.lib.stamps['lena/omx_f_w']).toBeUndefined();
+    // the upload ends (the waiting Start records now): THAT is a change
+    rerender(props([{ id: 'lena/omx_f_w', kind: 'record' }]));
     await waitFor(() => expect(requests.filter((u) => u.endsWith('ids=lena%2Fomx_f_w')).length).toBe(n + 1));
   });
 

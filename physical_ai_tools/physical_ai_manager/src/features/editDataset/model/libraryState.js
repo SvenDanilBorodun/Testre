@@ -201,15 +201,30 @@ export function stampBusyChange(state, ids, seq) {
 
 /**
  * The ids whose busy entry changed between two daten_state busy maps
- * (`{id: kind}`): an entry that disappeared or changed kind. An entry that
- * appeared is no change (the overlay simply shows).
+ * (`{id: kinds[]}`, useDatenState::busyKindsById): an id that LOST a kind —
+ * it disappeared, changed kind, or the upload a waiting Start was listed
+ * beside ended. A kind that appeared is no change (the overlay simply shows),
+ * and the same kinds in another wire order are none (C-2).
  */
 export function busyChanges(prevBusy, nextBusy) {
   const out = [];
   Object.keys(prevBusy || {}).forEach((id) => {
-    if ((nextBusy || {})[id] !== prevBusy[id]) out.push(id);
+    const next = (nextBusy || {})[id] || [];
+    if ((prevBusy[id] || []).some((k) => !next.includes(k))) out.push(id);
   });
   return out;
+}
+
+// The one kind a card draws when an id is listed with several (C-2): a
+// `record` entry beside another kind is a Start still WAITING for that other
+// job (R-8: the robot waits for the same dataset's upload), so the job that
+// runs wins; at most one of the others can hold a dataset at a time.
+const CARD_BUSY_ORDER = Object.freeze(['upload', 'download', 'edit', 'delete', 'record']);
+
+/** The busy kind a card shows for `kinds` (an id's busyKindsById entry), or null. */
+export function cardBusyKind(kinds) {
+  const list = Array.isArray(kinds) ? kinds : [];
+  return CARD_BUSY_ORDER.find((k) => list.includes(k)) || null;
 }
 
 /**
@@ -218,15 +233,16 @@ export function busyChanges(prevBusy, nextBusy) {
  *                 shows (the re-fetch is on its way) — and, for a card the
  *                 robot reports `in_session`, while no daten_state has come
  *                 yet: never infer „crashed" from a stale reply (T-1 a);
- *   'live'        `in_session` and the robot records into it right now;
+ *   'live'        `in_session` and the robot records into it right now
+ *                 (a `record` entry among its busy kinds, in any order);
  *   'crashed'     `in_session`, no recording, from a reply whose request was
  *                 sent after the newest busy change (H-1, U-3).
  */
-export function cardPhase(entry, { busyKind = null, stateSeen = false, stamp, entrySeq }) {
+export function cardPhase(entry, { busyKinds = [], stateSeen = false, stamp, entrySeq }) {
   const pending = stamp !== undefined && stamp !== null && !((entrySeq ?? -Infinity) > stamp);
   if (pending) return 'refreshing';
   if (!entry || entry.state !== 'in_session') return null;
-  if (busyKind === 'record') return 'live';
+  if (Array.isArray(busyKinds) && busyKinds.includes('record')) return 'live';
   if (!stateSeen) return 'refreshing';
   if (stamp === undefined || stamp === null) return 'refreshing';
   return 'crashed';

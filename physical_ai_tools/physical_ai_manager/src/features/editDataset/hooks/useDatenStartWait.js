@@ -19,11 +19,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 
-import { busyMap, getDatenStateSnapshot, subscribeDatenState } from './useDatenState';
+import { busyKindsById, getDatenStateSnapshot, subscribeDatenState } from './useDatenState';
 
-/** Does a daten_state payload say `repoId` is uploading? */
+/** Does a daten_state payload say `repoId` is uploading? (any `upload` entry, whatever else it is listed with — C-2) */
 export function isUploading(payload, repoId) {
-  return !!repoId && busyMap(payload)[repoId] === 'upload';
+  return !!repoId && (busyKindsById(payload)[repoId] || []).includes('upload');
 }
 
 /**

@@ -25,7 +25,7 @@
 
 import COPY from '../datenCopy';
 import { fill, fmtBytes, fmtFps, fmtTime } from './format';
-import { cardPhase } from './libraryState';
+import { cardBusyKind, cardPhase } from './libraryState';
 import { hubDatasetUrl } from './hubLinks';
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
@@ -80,7 +80,7 @@ function hintOf(entry) {
  * @param {object} ctx
  * @param {string} ctx.own the student's account
  * @param {Object<string,string>} ctx.ownerNames partner namespace → display name
- * @param {string|null} ctx.busyKind daten_state's busy kind for this id
+ * @param {string[]} ctx.busyKinds every daten_state busy kind of this id (useDatenState::busyKindsById)
  * @param {object|null} ctx.job a running job row touching this id
  * @param {number|null} ctx.uploadPct the HF worker's upload percentage when it uploads this id
  * @param {boolean} ctx.stateSeen a daten_state message has arrived
@@ -94,11 +94,12 @@ export function cardModel(card, ctx) {
   const local = card.local;
   const record = local && local.record ? local.record : null;
   const title = (local && local.display_name) || card.name;
-  const busyKind = ctx.busyKind || null;
+  const busyKinds = Array.isArray(ctx.busyKinds) ? ctx.busyKinds : [];
+  const busyKind = cardBusyKind(busyKinds);
   const job = ctx.job || null;
   const lib = ctx.lib || {};
   const phase = local ? cardPhase(local, {
-    busyKind,
+    busyKinds,
     stateSeen: !!ctx.stateSeen,
     stamp: lib.stamps ? lib.stamps[card.id] : undefined,
     entrySeq: lib.entrySeq ? lib.entrySeq[card.id] : undefined,

@@ -460,7 +460,8 @@ def test_the_load_limits_are_the_specs():
     assert C.MAX_CONNECTIONS == 32
     assert C.SOCKET_TIMEOUT_S == 30
     assert C.MEDIA_WORKERS == 2
-    assert C.MEDIA_QUEUE_MAX == 32 == C.MAX_CONNECTIONS
+    assert C.MEDIA_QUEUE_MAX == 32
+    assert C.MEDIA_QUEUE_MAX == C.MAX_CONNECTIONS                       # T2-6: never the binding limit
     assert C.MEDIA_WAIT_S == 20
     assert C.HUB_WORKERS == 2
     assert C.HUB_QUEUE_MAX == 8

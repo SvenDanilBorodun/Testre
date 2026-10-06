@@ -75,7 +75,7 @@ export function nextPlayerShown(shown, kind) {
 }
 
 const BLOCKED_LOOK = Object.freeze({
-  live: { tone: 'dat-sky', icon: 'liveRecording', text: () => COPY.player.live },
+  live: { tone: 'dat-sky', icon: 'info', text: () => COPY.player.live },
   refreshing: { tone: 'dat-sky', icon: 'loading', spin: true, text: () => COPY.card.refreshing },
 });
 

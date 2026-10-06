@@ -84,27 +84,27 @@ describe('parseDatenState', () => {
 describe('useDatenState', () => {
   it('one topic for every reader, closed with the last one', async () => {
     const store = makeStore();
-    const a = renderHook(() => useDatenState(), { wrapper: wrapper(store) });
-    const b = renderHook(() => useDatenState(), { wrapper: wrapper(store) });
+    const { result: first, unmount: unmountFirst } = renderHook(() => useDatenState(), { wrapper: wrapper(store) });
+    const { result: second, unmount: unmountSecond } = renderHook(() => useDatenState(), { wrapper: wrapper(store) });
     await waitFor(() => expect(mockTopics.length).toBe(1));
     expect(mockTopics[0].name).toBe('/edubotics/daten_state');
     expect(mockTopics[0].messageType).toBe('std_msgs/msg/String');
-    expect(a.result.current.received).toBe(false);
+    expect(first.current.received).toBe(false);
     act(() => send(msg([{ id: 'a/b', kind: 'upload' }])));
-    expect(a.result.current.received).toBe(true);
-    expect(b.result.current.payload.busy).toEqual([{ id: 'a/b', kind: 'upload' }]);
-    a.unmount();
+    expect(first.current.received).toBe(true);
+    expect(second.current.payload.busy).toEqual([{ id: 'a/b', kind: 'upload' }]);
+    unmountFirst();
     expect(mockTopics[0].unsubscribed).toBe(false);
-    b.unmount();
+    unmountSecond();
     expect(mockTopics[0].unsubscribed).toBe(true);
   });
 
   it('a re-render does not reopen the topic', async () => {
     const store = makeStore();
-    const r = renderHook(() => useDatenState(), { wrapper: wrapper(store) });
+    const { rerender } = renderHook(() => useDatenState(), { wrapper: wrapper(store) });
     await waitFor(() => expect(mockTopics.length).toBe(1));
-    r.rerender();
-    r.rerender();
+    rerender();
+    rerender();
     expect(mockTopics.length).toBe(1);
     expect(mockTopics[0].unsubscribed).toBe(false);
   });
@@ -113,9 +113,9 @@ describe('useDatenState', () => {
 describe('useDatenStartWait (R-8, F-5)', () => {
   it('subscribes only while active, true while the started repo uploads', async () => {
     const store = makeStore();
-    let renders = 0;
+    let draws = 0;
     const { result, rerender } = renderHook(({ active }) => {
-      renders += 1;
+      draws += 1;
       return useDatenStartWait('lena-schmidt/omx_f_wuerfel', active);
     }, { wrapper: wrapper(store), initialProps: { active: false } });
     expect(mockTopics.length).toBe(0);
@@ -127,11 +127,11 @@ describe('useDatenStartWait (R-8, F-5)', () => {
     expect(result.current).toBe(true);
 
     // 30 messages with an unchanged answer: no render
-    const before = renders;
+    const drawsBefore = draws;
     for (let i = 0; i < 30; i += 1) {
       act(() => send(msg([{ id: 'lena-schmidt/omx_f_wuerfel', kind: 'upload' }])));
     }
-    expect(renders - before).toBe(0);
+    expect(draws - drawsBefore).toBe(0);
 
     act(() => send(msg([])));
     expect(result.current).toBe(false);
@@ -163,12 +163,12 @@ describe('useGroupNamespaces (D2)', () => {
       ],
     });
     const store = makeStore();
-    const a = renderHook(() => useGroupNamespaces(), { wrapper: wrapper(store) });
-    await waitFor(() => expect(a.result.current.status).toBe('ready'));
-    expect(a.result.current.namespaces).toEqual(['lena-schmidt', 'max-weber']);
-    expect(a.result.current.names).toEqual({ 'max-weber': 'Max Weber' });
-    const b = renderHook(() => useGroupNamespaces(), { wrapper: wrapper(store) });
-    await waitFor(() => expect(b.result.current.status).toBe('ready'));
+    const { result: first } = renderHook(() => useGroupNamespaces(), { wrapper: wrapper(store) });
+    await waitFor(() => expect(first.current.status).toBe('ready'));
+    expect(first.current.namespaces).toEqual(['lena-schmidt', 'max-weber']);
+    expect(first.current.names).toEqual({ 'max-weber': 'Max Weber' });
+    const { result: second } = renderHook(() => useGroupNamespaces(), { wrapper: wrapper(store) });
+    await waitFor(() => expect(second.current.status).toBe('ready'));
     expect(getGroupMembers).toHaveBeenCalledTimes(1);
   });
 

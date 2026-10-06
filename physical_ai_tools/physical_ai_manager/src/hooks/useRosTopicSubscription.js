@@ -640,8 +640,8 @@ export function useRosTopicSubscription() {
             pushToHub: msg.task_info.push_to_hub || false,
             // privateMode intentionally NOT set here — see the robotNamesMe
             // gate below. Adopting it unconditionally let a task left behind
-            // by the PREVIOUS student silently un-tick the next student's
-            // private-by-default box.
+            // by the PREVIOUS student silently set the next student's
+            // „Sichtbarkeit“ to that student's choice.
             useOptimizedSave: msg.task_info.use_optimized_save_mode || false,
             recordRosBag2: msg.task_info.record_rosbag2 || false,
           };
@@ -666,14 +666,14 @@ export function useRosTopicSubscription() {
             // The ROS node keeps `task_info` for the life of a task, so it
             // survives a handover exactly like user_id does (see the block
             // above). With this ungated, one tick carrying the previous
-            // student's finished PUBLIC task overwrote the new student's
-            // private-by-default value — in a form field that is read-only
-            // while a task runs, so they could not even see it change before
-            // pressing record.
+            // student's finished task overwrote the new student's choice
+            // (public by default since owner decision N7) — in a form field
+            // that is read-only while a task runs, so they could not even see
+            // it change before pressing record.
             //
-            // `!== false`, not `|| false`: an absent or garbled flag keeps the
-            // private default instead of failing open to public. That matches
-            // TaskInfo.msg's own `bool private_mode true`.
+            // `!== false`, not `|| false`: an absent or garbled flag on the
+            // student's OWN task reads as private instead of failing open to
+            // public. That matches TaskInfo.msg's own `bool private_mode true`.
             infoUpdate.privateMode = msg.task_info.private_mode !== false;
           }
 

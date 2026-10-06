@@ -25,12 +25,14 @@ import { safeTaskName } from '../../../utils/datasetName';
 const CHIP_MAX = 40;
 
 export default function EpisodeToolDialog({
-  kind, name, total, marks = [], hintIndices = [], ownerName = null, onlineCopy = false,
+  kind, name, baseName = null, total, marks = [], hintIndices = [], ownerName = null, onlineCopy = false,
   own, robotType, localIds, onConfirm, onClose,
 }) {
   const isSplit = kind === 'split';
   const [nums, setNums] = useState(() => toRangeText(marks));
-  const [newName, setNewName] = useState(() => fill(COPY.tool.splitDefaultName, { name }));
+  // `baseName`: the dataset's display name or its task part, never its folder
+  // name with the robot prefix the new id would repeat (V2-11).
+  const [newName, setNewName] = useState(() => fill(COPY.tool.splitDefaultName, { name: baseName || name }));
   const inputRef = useRef(null);
   const { indices, errors } = useMemo(() => parseEpisodeNumbers(nums, total), [nums, total]);
 

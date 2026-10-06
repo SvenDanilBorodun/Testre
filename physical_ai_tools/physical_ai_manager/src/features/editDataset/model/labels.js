@@ -15,6 +15,30 @@ import { fill } from './format';
 
 const own = (table, key) => (typeof key === 'string' && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : null);
 
+/** „lehrer-mueller/omx_f_wuerfel-demo" → „Wuerfel demo": the repo name without the robot prefix, separators as spaces, the first letter up. */
+export function nameFromRepo(repo, robotType) {
+  let base = String(repo || '').split('/')[1] || '';
+  if (robotType && base.startsWith(`${robotType}_`)) base = base.slice(robotType.length + 1);
+  base = base.replace(/[-_]+/g, ' ').trim();
+  return base ? base.charAt(0).toUpperCase() + base.slice(1) : '';
+}
+
+/**
+ * What a dataset is called as a name to build on („… gesamt", „… Teil 2"):
+ * its display name, else the task part of its folder name — never the folder
+ * name itself, whose `<robot>_` prefix the new id would repeat
+ * („omx_f_omx_f_deckel-gesamt", V2-11). The entry's own robot type is tried
+ * first, then the page's; a name with no such prefix stays as it is.
+ */
+export function taskNameOf(entry, robotType) {
+  if (!entry) return '';
+  const display = typeof entry.display_name === 'string' ? entry.display_name.trim() : '';
+  if (display) return display;
+  const name = String(entry.name || String(entry.id || '').split('/')[1] || '');
+  const prefix = [entry.robot_type, robotType].find((t) => t && name.startsWith(`${t}_`)) || null;
+  return nameFromRepo(`x/${name}`, prefix) || name;
+}
+
 /** „OpenMANIPULATOR-X" for `omx_f`; the id itself otherwise. */
 export function robotName(robotType) {
   return own(COPY.robots, robotType) || String(robotType || '–');

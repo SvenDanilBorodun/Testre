@@ -265,7 +265,8 @@ describe('the tools (§G6, §J.3, R-9)', () => {
     fireEvent.click(screen.getByRole('button', { name: new RegExp(COPY.tools.split) }));
     const dlg = await screen.findByRole('dialog');
     fireEvent.change(within(dlg).getByPlaceholderText(COPY.tool.placeholder), { target: { value: '2' } });
-    const nameInput = within(dlg).getByDisplayValue('omx_f_w Teil 2');
+    // V2-11: no display name → the task part („W"), never „omx_f_w Teil 2" (omx_f_omx_f_…)
+    const nameInput = within(dlg).getByDisplayValue('W Teil 2');
     expect(dlg.textContent).toContain(COPY.tool.splitKeeps);
     expect(dlg.textContent).toContain('1 Episode: 2');
     fireEvent.change(nameInput, { target: { value: '' } });

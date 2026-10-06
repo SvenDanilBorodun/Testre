@@ -24,7 +24,9 @@ import {
 import { hintBand, hintText, hintTick } from '../model/hintText';
 import { syncBadge } from '../model/syncBadge';
 import { mergeChecks } from '../model/mergeChecks';
-import { cameraLabel, codecName, driverCamera, jointLabel, orderCameras, robotName } from '../model/labels';
+import {
+  cameraLabel, codecName, driverCamera, jointLabel, nameFromRepo, orderCameras, robotName, taskNameOf,
+} from '../model/labels';
 
 describe('the shared contract (§J.2)', () => {
   it('carries the codes and states the page switches on', () => {
@@ -365,6 +367,27 @@ describe('labels (§J.6 tables, §F1 order)', () => {
     expect(codecName('vp9')).toBe('VP9');
     expect(jointLabel('joint5')).toBe('Gelenk 5 · Hand drehen');
     expect(jointLabel('wrist_roll')).toBe('wrist_roll');
+  });
+
+  it('nameFromRepo: the robot prefix and separators gone, the first letter up', () => {
+    expect(nameFromRepo('lehrer-mueller/omx_f_wuerfel-demo', 'omx_f')).toBe('Wuerfel demo');
+    expect(nameFromRepo('lerobot/so100_test', 'omx_f')).toBe('So100 test');
+    expect(nameFromRepo('a/omx_f_', 'omx_f')).toBe('');
+  });
+
+  // V2-11: a name to build on („… gesamt", „… Teil 2") never repeats the
+  // folder's robot prefix — „omx_f_deckel gesamt" became omx_f_omx_f_deckel-gesamt.
+  it('taskNameOf: the display name, else the task part of the folder name', () => {
+    expect(taskNameOf({ id: 'lena/omx_f_deckel', name: 'omx_f_deckel', display_name: 'Deckel auflegen' }, 'omx_f')).toBe('Deckel auflegen');
+    expect(taskNameOf({ id: 'lena/omx_f_deckel', name: 'omx_f_deckel', display_name: null }, 'omx_f')).toBe('Deckel');
+    expect(taskNameOf({ id: 'lena/omx_f_Wuerfel-in-die-Schale', name: 'omx_f_Wuerfel-in-die-Schale', display_name: '  ' }, 'omx_f'))
+      .toBe('Wuerfel in die Schale');
+    // the entry's own robot type first (a dataset recorded on another profile)
+    expect(taskNameOf({ id: 'lena/edu6_studio_becher', name: 'edu6_studio_becher', robot_type: 'edu6_studio' }, 'omx_f')).toBe('Becher');
+    // no prefix to strip: the name as it is
+    expect(taskNameOf({ id: 'lena/meine-daten', name: 'meine-daten' }, 'omx_f')).toBe('Meine daten');
+    expect(taskNameOf({ id: 'lena/omx_f_', name: 'omx_f_' }, 'omx_f')).toBe('omx_f_');
+    expect(taskNameOf(null, 'omx_f')).toBe('');
   });
 
   it('cameras: Greifer, Szene, then others by key; the scene drives', () => {

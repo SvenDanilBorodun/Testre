@@ -47,6 +47,7 @@ import useDatenJobs, { stepOfStage } from '../../features/editDataset/hooks/useD
 import useGroupNamespaces from '../../features/editDataset/hooks/useGroupNamespaces';
 import { libraryCards, syncAfterLocalEdit } from '../../features/editDataset/model/libraryState';
 import { cardModel } from '../../features/editDataset/model/cardModel';
+import { taskNameOf } from '../../features/editDataset/model/labels';
 import { fill, fmtBytes, plural } from '../../features/editDataset/model/format';
 import { selectHfAccount, selectHfInSync } from '../../features/hfToken/hfTokenSelectors';
 import { setDatasetRepoId, setSelectedDataset, setSelectedUser } from '../../features/training/trainingSlice';
@@ -669,6 +670,7 @@ export default function DatenPage() {
           <EpisodeToolDialog
             kind={dialog.kind}
             name={nameOf(c)}
+            baseName={taskNameOf(c.local || { id: c.id, name: c.name }, robotType)}
             total={(s.episodes || []).length}
             marks={dialog.marks || EMPTY_LIST}
             hintIndices={dialog.hintIndices || EMPTY_LIST}

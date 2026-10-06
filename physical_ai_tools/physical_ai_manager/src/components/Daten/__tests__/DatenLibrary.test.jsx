@@ -742,6 +742,22 @@ describe('merge mode (§D5, §G13)', () => {
     }]));
   });
 
+  it('V2-11: a dataset without a display name proposes its task part — never a doubled robot prefix', async () => {
+    const D = `${OWN}/omx_f_deckel`;
+    const E = `${OWN}/omx_f_deckel-2`;
+    world.local = [local(D), local(E)];
+    world.sync = { [D]: { state: 'local' }, [E]: { state: 'local' } };
+    await mount();
+    await waitFor(() => expect(card(D)).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: COPY.page.merge }));
+    fireEvent.click(within(card(D)).getByRole('button', { name: COPY.card.mergePick }));
+    fireEvent.click(within(card(E)).getByRole('button', { name: COPY.card.mergePick }));
+    const panel = screen.getByRole('region', { name: COPY.merge.title });
+    expect(within(panel).getByRole('textbox', { name: COPY.merge.nameLabel }).value).toBe('Deckel gesamt');
+    expect(panel.textContent).toContain('wird gespeichert als lena-schmidt/omx_f_Deckel-gesamt');
+    expect(panel.textContent).not.toContain('omx_f_omx_f_');
+  });
+
   it('a dataset without quantile statistics turns the „Statistiken" row red and the button off', async () => {
     const A = `${OWN}/omx_f_a`;
     const Q = `${OWN}/omx_f_q`;

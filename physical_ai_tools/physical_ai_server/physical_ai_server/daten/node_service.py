@@ -244,7 +244,10 @@ class DownloadProcess:
         while True:
             if self.p.poll() is not None:
                 self._reader.join(2)
-                return self.result or {'ok': False, 'code': 'internal'}
+                result = self.result or {'ok': False, 'code': 'internal'}
+                if result.get('ok') and self.on_progress and self.total:
+                    self.on_progress(self.total, self.total)         # done: the job shows it whole
+                return result
             if cancel_event.is_set():
                 return self.kill('cancelled')
             if self.svc._slot_fp() != self.req.get('token_fp'):

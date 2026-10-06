@@ -76,6 +76,24 @@ describe('daten.css: the button classes win over the page reset (V2-4)', () => {
     expect(cs('field').fontSize).toBe('14px');
   });
 
+  it('V2-13: the card\'s buttons wrap inside their own box; the ⋮ menu never shrinks or wraps', () => {
+    const row = document.createElement('div');
+    row.className = 'dat-card-actions';
+    row.innerHTML = '<div class="dat-card-btns" id="btns"></div><div class="dat-menu-wrap" id="menu"></div><div class="dat-card-actions2" id="a2"></div>';
+    root.appendChild(row);
+    const btns = cs('btns');
+    expect(btns.flexWrap).toBe('wrap');
+    expect(btns.flexGrow).toBe('1');
+    expect(btns.flexShrink).toBe('1');
+    expect(btns.flexBasis).toBe('0px');
+    expect(btns.minWidth).toBe('0px');
+    const menu = cs('menu');
+    expect(menu.flexGrow).toBe('0');
+    expect(menu.flexShrink).toBe('0');
+    expect(menu.alignSelf).toBe('flex-start');
+    expect(cs('a2').flexBasis).toBe('100%');
+  });
+
   it('the reset rule itself carries no class weight (`:where(.dat-page)`)', () => {
     const reset = CSS.split('\n').find((l) => /font:\s*inherit/.test(l));
     expect(reset).toMatch(/^:where\(\.dat-page\) button, :where\(\.dat-page\) input \{/);

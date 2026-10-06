@@ -161,8 +161,12 @@ export default function DatasetCard({
           </>
         ) : (
           <>
-            {m.actions.map((a) => <ActionButton key={a.id} a={a} onAction={onAction} />)}
-            {m.inlineNote ? <span className="dat-small dat-grow">{m.inlineNote}</span> : <span className="dat-grow" />}
+            {/* The buttons wrap inside their own box; the ⋮ menu stays on the
+                first row beside it, never on a row of its own (V2-13). */}
+            <div className="dat-card-btns">
+              {m.actions.map((a) => <ActionButton key={a.id} a={a} onAction={onAction} />)}
+              {m.inlineNote ? <span className="dat-small dat-grow">{m.inlineNote}</span> : null}
+            </div>
             {m.menu ? <CardMenu items={m.menu} onSelect={onMenu} onOpenChange={onMenuOpenChange} /> : null}
             {m.actions2.length ? (
               <div className="dat-card-actions2">

@@ -213,6 +213,27 @@ describe('cards (§C3, §G10, H-1, H-3, §G14)', () => {
     expect(cardText(id('onl'))).toContain(COPY.card.previewAfterLoad);
   });
 
+  // V2-13: the ⋮ menu sits on the first row beside the buttons, never on a row
+  // of its own: the buttons wrap INSIDE their own box, the menu does not
+  // (daten.css; the browser layout is measured in the fix round's Playwright run).
+  it('every card variant: the ⋮ menu beside the buttons\' own box, never in the wrapping row', async () => {
+    await mount();
+    await waitFor(() => expect(card(id('con'))).not.toBeNull());
+    const withMenu = [...document.querySelectorAll('.dat-card')].filter((c) => c.querySelector('.dat-menu-wrap'));
+    expect(withMenu.length).toBeGreaterThanOrEqual(8);
+    withMenu.forEach((c) => {
+      const row = c.querySelector('.dat-card-actions');
+      const btns = row.querySelector(':scope > .dat-card-btns');
+      const menu = row.querySelector(':scope > .dat-menu-wrap');
+      expect(btns).not.toBeNull();
+      expect(menu).not.toBeNull();
+      expect(btns.nextElementSibling).toBe(menu);
+      // every first-row action is inside the box that wraps
+      const first = [...row.querySelectorAll(':scope > button')];
+      expect(first).toEqual([]);
+    });
+  });
+
   it('the „Aktualisieren" link only for not_asked/unreachable, never a partner\'s not_visible', async () => {
     await mount();
     await waitFor(() => expect(card(id('unk'))).not.toBeNull());

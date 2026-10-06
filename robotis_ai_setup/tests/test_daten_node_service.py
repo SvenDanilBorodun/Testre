@@ -48,6 +48,8 @@ import time
 import types
 import unittest
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
 NODE_SERVICE_PATH = PKG / 'daten' / 'node_service.py'
@@ -231,7 +233,7 @@ def wait_for(pred, timeout=10):
     return False
 
 
-class ServiceCase(unittest.TestCase):
+class ServiceCase(BoundedTestCase):
 
     def setUp(self):
         self.root = pathlib.Path(os.path.realpath(tempfile.mkdtemp(prefix='d2_ns_')))

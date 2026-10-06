@@ -45,6 +45,8 @@ import types
 import unittest
 from unittest import mock
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 import test_data_manager_record_fsm as F
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -216,7 +218,7 @@ class Handle:
         self.cancelled = True
 
 
-class D14Case(unittest.TestCase):
+class D14Case(BoundedTestCase):
 
     def setUp(self):
         self.hub = FakeHub()
@@ -557,7 +559,7 @@ class _Worker:
         return True
 
 
-class TheNodeHandsTheBaseToTheUpload(unittest.TestCase):
+class TheNodeHandsTheBaseToTheUpload(BoundedTestCase):
 
     def _node(self, base):
         node = types.SimpleNamespace(hf_api_worker=_Worker(), get_logger=lambda: mock.Mock(),
@@ -640,7 +642,7 @@ class _WorkerDataManager:
         return cls.result
 
 
-class TheHfWorker(unittest.TestCase):
+class TheHfWorker(BoundedTestCase):
 
     @classmethod
     def setUpClass(cls):

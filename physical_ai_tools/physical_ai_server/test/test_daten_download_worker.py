@@ -49,6 +49,8 @@ pytest.importorskip('httpx')
 pytest.importorskip('av')
 pytest.importorskip('pyarrow')
 
+from daten_timeout import per_test_time_limit  # noqa: E402,F401 — V1-3: a hang fails within the limit
+
 from physical_ai_server.daten import node_service as NS  # noqa: E402
 from physical_ai_server.data_processing import dataset_sync as S  # noqa: E402
 from physical_ai_server.data_processing import hf_token_store  # noqa: E402

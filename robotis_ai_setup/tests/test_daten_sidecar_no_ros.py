@@ -23,6 +23,8 @@ import sys
 import textwrap
 import unittest
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG_PARENT = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server'
 PKG = PKG_PARENT / 'physical_ai_server'
@@ -108,7 +110,7 @@ def reachable(start):
     return seen, external
 
 
-class StaticFence(unittest.TestCase):
+class StaticFence(BoundedTestCase):
 
     def test_the_sidecar_reaches_no_ros_and_no_lerobot(self):
         for start in ('http_server.py', 'library.py', 'hub_reads.py'):
@@ -155,7 +157,7 @@ PROBE = textwrap.dedent('''
 
 
 @unittest.skipUnless(HAVE_DEPS, 'numpy, pyarrow and PyAV are installed in CI and the image')
-class RealImport(unittest.TestCase):
+class RealImport(BoundedTestCase):
 
     def test_a_fresh_interpreter_builds_the_sidecar_without_them(self):
         env = dict(os.environ, PYTHONPATH=str(PKG_PARENT))

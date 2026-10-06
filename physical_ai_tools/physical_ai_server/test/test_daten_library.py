@@ -21,6 +21,8 @@ av = pytest.importorskip('av')
 pytest.importorskip('pyarrow')
 np = pytest.importorskip('numpy')
 
+from daten_timeout import per_test_time_limit  # noqa: E402,F401 — V1-3: a hang fails within the limit
+
 from physical_ai_server.daten import contract as C  # noqa: E402
 from physical_ai_server.daten import library as L  # noqa: E402
 from physical_ai_server.data_processing import dataset_sync as S  # noqa: E402

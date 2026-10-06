@@ -17,6 +17,8 @@ import socket
 import threading
 import unittest
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 HTTP_SERVER_PATH = (REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
                     / 'daten' / 'http_server.py')
@@ -81,7 +83,7 @@ def parse_range_cases():
     ]
 
 
-class ParseRange(unittest.TestCase):
+class ParseRange(BoundedTestCase):
 
     def test_every_shape(self):
         for header, expected in parse_range_cases():
@@ -93,7 +95,7 @@ class ParseRange(unittest.TestCase):
         self.assertEqual(HS.parse_range('bytes=-1', 0), ('unsatisfiable', None))
 
 
-class LiveServerBase(unittest.TestCase):
+class LiveServerBase(BoundedTestCase):
 
     def setUp(self):
         sidecar = HS.Sidecar(SECRET, FakeLibrary(), hub=None)

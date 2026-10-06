@@ -21,6 +21,8 @@ import textwrap
 import time
 import unittest
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
 LINK_TOKENS_PATH = PKG / 'daten' / 'link_tokens.py'
@@ -38,7 +40,7 @@ LT = _load(LINK_TOKENS_PATH, '_daten_link_tokens_under_test')
 SECRET = b'k' * 32
 
 
-class MintAndVerify(unittest.TestCase):
+class MintAndVerify(BoundedTestCase):
 
     def test_round_trip_for_both_scopes(self):
         for scope in ('lib', LT.dataset_scope('lena-schmidt/omx_f_wuerfel')):
@@ -115,7 +117,7 @@ _RACER = textwrap.dedent('''
 ''')
 
 
-class TheSecretIsPublishedAtomically(unittest.TestCase):
+class TheSecretIsPublishedAtomically(BoundedTestCase):
     ROUNDS = 50
     PROCS = 8
 

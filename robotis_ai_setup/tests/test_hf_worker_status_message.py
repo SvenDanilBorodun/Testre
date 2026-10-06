@@ -23,6 +23,8 @@ import sys
 import types
 import unittest
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKER_PATH = (
     REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
@@ -108,7 +110,7 @@ def _run_loop(requests):
     return out
 
 
-class TheClientGetsTheWorkersOwnGermanSentence(unittest.TestCase):
+class TheClientGetsTheWorkersOwnGermanSentence(BoundedTestCase):
 
     def test_a_success_is_the_sentence_itself_no_english_prefix_no_glyph(self):
         sentence = 'Hugging Face-Upload abgeschlossen: schueler/daten'
@@ -139,7 +141,7 @@ class TheClientGetsTheWorkersOwnGermanSentence(unittest.TestCase):
         self.assertFalse(_has_glyph(result['message']))
 
 
-class EverySentenceTheWorkerProcessSendsIsGerman(unittest.TestCase):
+class EverySentenceTheWorkerProcessSendsIsGerman(BoundedTestCase):
 
     def test_upload_download_delete_and_both_lists(self):
         out = _run_loop([
@@ -164,7 +166,7 @@ class EverySentenceTheWorkerProcessSendsIsGerman(unittest.TestCase):
             self.assertFalse(_has_glyph(m), m)
 
 
-class NoGlyphInAnyLogLine(unittest.TestCase):
+class NoGlyphInAnyLogLine(BoundedTestCase):
     """The worker's, the data manager's and the progress tracker's log and
     print lines are plain text (they only reach a developer's console)."""
 

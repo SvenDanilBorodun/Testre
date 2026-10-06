@@ -20,6 +20,8 @@ import tempfile
 import types
 import unittest
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SYNC_PATH = (REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
              / 'data_processing' / 'dataset_sync.py')
@@ -121,7 +123,7 @@ OTHER2 = {
 }
 
 
-class _Tmp(unittest.TestCase):
+class _Tmp(BoundedTestCase):
 
     def setUp(self):
         self.base = pathlib.Path(tempfile.mkdtemp(prefix='d2_sync_'))
@@ -297,7 +299,7 @@ class TheContentDecision(_Tmp):
         self.assertFalse(S.file_equal_exact(self.root, p, entry))
 
 
-class OfficialFieldsWithRealHubValues(unittest.TestCase):
+class OfficialFieldsWithRealHubValues(BoundedTestCase):
 
     def test_the_lfs_pointer_rule_against_real_hub_values(self):
         real = [  # IMsubin/omx_f_put_apple_into_the_basket_v3 @ 234f9ddd8b7265c230a00f65e25d1287152d8c59
@@ -376,7 +378,7 @@ class TheRecord(_Tmp):
         self.assertEqual(S.folder_id(self.root), 'lena-schmidt/omx_f_wuerfel')
 
 
-class KeepBothPlan(unittest.TestCase):
+class KeepBothPlan(BoundedTestCase):
     """P18's cases on plain id lists (the ids are episode identities)."""
 
     def _ids(self, plan, local, hub):

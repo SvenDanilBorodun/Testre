@@ -44,6 +44,15 @@ import types
 import unittest
 from unittest import mock
 
+try:
+    from timeout_guard import BoundedTestCase   # V1-3: a hang fails within the limit
+except ImportError:                               # loaded by path from the server's tests
+    _tg = importlib.util.spec_from_file_location(
+        '_edubotics_timeout_guard', str(pathlib.Path(__file__).with_name('timeout_guard.py')))
+    _tg_mod = importlib.util.module_from_spec(_tg)
+    _tg.loader.exec_module(_tg_mod)
+    BoundedTestCase = _tg_mod.BoundedTestCase
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DP = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server' / 'data_processing'
 HUB_SYNC_PATH = DP / 'hub_sync.py'
@@ -163,7 +172,7 @@ def _stub_lerobot():
     return mods
 
 
-class HubCase(unittest.TestCase):
+class HubCase(BoundedTestCase):
     """A fresh fake hub per test; huggingface_hub, the fake and hub_sync live in
     an isolated sys.modules for the class (restored afterwards)."""
 
@@ -821,7 +830,7 @@ class TheOneDownload(HubCase):
         self.assertEqual(e.exception.code, 'not_found')
 
 
-class Fences(unittest.TestCase):
+class Fences(BoundedTestCase):
 
     def test_no_large_folder_or_folder_upload_and_no_module_level_hub_import(self):
         tree = ast.parse(HUB_SYNC_PATH.read_text(encoding='utf-8'))

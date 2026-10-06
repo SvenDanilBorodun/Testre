@@ -26,8 +26,15 @@ import types
 
 import pytest
 
-from physical_ai_server.daten import contract as C
-from physical_ai_server.daten import hub_reads as HR
+# hub_reads imports v3_surgery (PyAV, pyarrow, numpy) at module level; a Python
+# without them skips this module (and the two that share its fakes) instead of
+# aborting the whole collection (C-1).
+pytest.importorskip('av')
+pytest.importorskip('pyarrow')
+pytest.importorskip('numpy')
+
+from physical_ai_server.daten import contract as C  # noqa: E402
+from physical_ai_server.daten import hub_reads as HR  # noqa: E402
 
 TOKEN_A = 'hf_' + 'a' * 34
 TOKEN_B = 'hf_' + 'b' * 34

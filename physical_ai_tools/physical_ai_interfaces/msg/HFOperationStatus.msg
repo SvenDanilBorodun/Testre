@@ -6,3 +6,5 @@ string message                # message of the operation
 uint16 progress_current       # current progress
 uint16 progress_total         # total progress
 float32 progress_percentage   # percentage of the progress
+string repo_type   # dataset | model | '' (unknown)
+string info_json   # '' or {"fps","total_episodes","total_frames","robot_type","display_name","private"}

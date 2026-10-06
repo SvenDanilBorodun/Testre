@@ -93,10 +93,12 @@ def test_the_owner_sentences_verbatim():
                          'noch einmal.')
     assert t.ERROR_STOP_SAVED_DE == ('Die schon gespeicherten Episoden sind gesichert; du '
                                      'kannst sie im Tab Daten hochladen.')
-    assert t.HUB_CHECK_REFUSED_DE == (
-        'Hugging Face ist gerade nicht erreichbar. Ohne diese Prüfung könnte ein Datensatz '
-        'auf Hugging Face überschrieben werden. Schalte unter „Erweitert“ das Hochladen aus '
-        'oder versuche es später.')
+    # Daten 2.0 (D14): an unreachable hub no longer refuses a Start; the session
+    # records and its upload decides at the end (HUB_CHECK_REFUSED_DE removed).
+    assert t.OFFLINE_START_DE == (
+        'Hugging Face war beim Start nicht erreichbar. Die Aufnahme läuft trotzdem; beim '
+        'Hochladen am Ende prüft EduBotics, dass auf Hugging Face nichts überschrieben wird.')
+    assert not hasattr(t, 'HUB_CHECK_REFUSED_DE')
     assert t.UPLOAD_STALL_DE == (
         'Das Hochladen kommt nicht mehr voran. Prüfe die Internetverbindung des Roboters. '
         'Der Datensatz bleibt auf dem Roboter gespeichert; du kannst ihn später im Tab Daten '
@@ -339,9 +341,9 @@ def test_round7_names_for_the_remaining_inline_sentences():
     assert t.NAMESPACE_REFUSED_DE == (
         'Upload abgelehnt: Der Roboter darf nicht in dieses HuggingFace-Konto hochladen. '
         'Bitte die „Benutzer-ID“ prüfen und erneut anmelden.')
-    assert t.HUB_SYNC_FAILED_DE == (
-        'Alte Dateien auf Hugging Face konnten nicht entfernt werden. Ohne Bereinigung würde '
-        'das Training gelöschte Episoden weiterverwenden — bitte den Upload erneut versuchen.')
+    # Daten 2.0 (§E2): the orphan deletes are in the upload's ONE commit; there
+    # is no separate sweep commit any more (HUB_SYNC_FAILED_DE removed).
+    assert not hasattr(t, 'HUB_SYNC_FAILED_DE')
     assert t.HUB_TAG_FAILED_DE == (
         'Der Versions-Tag des Datensatzes konnte nicht aktualisiert werden. Ohne aktuellen Tag '
         'trainiert die Cloud auf einem alten Stand — bitte den Upload erneut versuchen.')
@@ -354,7 +356,6 @@ def test_round7_the_inline_copies_are_byte_identical_while_they_exist():
     src = _DM.read_text(encoding='utf-8')
     constants = {node.value for node in ast.walk(ast.parse(src))
                  if isinstance(node, ast.Constant) and isinstance(node.value, str)}
-    for name in ('UPLOAD_NOT_STARTED_DE', 'NAMESPACE_REFUSED_DE', 'HUB_SYNC_FAILED_DE',
-                 'HUB_TAG_FAILED_DE'):
+    for name in ('UPLOAD_NOT_STARTED_DE', 'NAMESPACE_REFUSED_DE', 'HUB_TAG_FAILED_DE'):
         text = getattr(t, name)
         assert text in constants or f'record_texts_de.{name}' in src, name

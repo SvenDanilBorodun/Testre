@@ -55,7 +55,13 @@ jobs:
           # calibration uses cv2.aruco which is the contrib build; headless
           # avoids GUI libs on the runner). cryptography: the cloud API's
           # AES-GCM token envelope (042); pinned equal to its requirements.txt.
-          python -m pip install pyyaml pytest numpy opencv-contrib-python-headless cryptography==49.0.0
+          # pyarrow + av + huggingface_hub: Daten 2.0 (spec §H8) — the versions the
+          # server image ships (2.26.0), so the deps-free and pytest suites import
+          # dataset_sync, hub_sync (huggingface_hub's own create_commit on the fake
+          # hub), v3_surgery's cutter/layout, daten.library, the sidecar and the
+          # download worker. LeRobot stays image-only (.github/scripts/daten_smoke.py).
+          python -m pip install pyyaml pytest numpy opencv-contrib-python-headless cryptography==49.0.0 \
+            pyarrow==25.0.0 av==15.1.0 huggingface_hub==1.23.0
       - name: Syntax-check Python modules
         # ZERO-FILE FLOOR, the repo's standing rule for scan-based guards (the
         # four ps_* guards and the three lockstep tests all carry one).

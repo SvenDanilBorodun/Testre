@@ -205,11 +205,12 @@ class _Rig(unittest.TestCase):
             if isinstance(result, BaseException):
                 raise result
             return result
+        # The original is captured NOW: reading the class __dict__ at cleanup
+        # time restored the fake itself, so the real function was lost for every
+        # later test of this (cached) module.
+        original = self.DataManager.__dict__['get_huggingface_user_id']
         self.DataManager.get_huggingface_user_id = staticmethod(fake)
-        self.addCleanup(
-            lambda: setattr(
-                self.DataManager, 'get_huggingface_user_id',
-                self.dm_mod.DataManager.__dict__.get('get_huggingface_user_id')))
+        self.addCleanup(setattr, self.DataManager, 'get_huggingface_user_id', original)
 
 
 class TheGuardRefusesAForeignNamespace(_Rig):
@@ -284,13 +285,36 @@ class TheGuardRefusesAForeignNamespace(_Rig):
             msg.count('„'), msg.count('“'),
             'a German quote was opened with „ and not closed with “')
 
-    def test_an_ORG_the_token_belongs_to_is_accepted(self):
-        # whoami returns the account name plus every org; a school org account
-        # is the whole point of the org-namespace plan.
-        self._whoami(['alice', 'schule-musterstadt'])
+    def test_an_ORG_the_token_belongs_to_is_refused(self):
+        """Daten 2.0 (R-10): the namespaces are the token's ACCOUNT only.
+
+        Nothing is recorded into an organisation: the Benutzer-ID list, this
+        guard and the guarded upload all know the account alone, so an old
+        page or a raw rosbridge client cannot put a dataset where the Daten tab
+        never shows it. ``whoami`` is stubbed UNDERNEATH
+        ``get_huggingface_user_id`` (patching the function under test would
+        prove nothing)."""
+        whoami_calls = []
+
+        class _Api:
+            def whoami(self):
+                whoami_calls.append(1)
+                return {'name': 'alice', 'orgs': [{'name': 'schule-musterstadt'}]}
+
+        saved = self.dm_mod.HfApi
+        self.dm_mod.HfApi = _Api
+        self.addCleanup(setattr, self.dm_mod, 'HfApi', saved)
+        self.assertEqual(self.DataManager.get_huggingface_user_id(), ['alice'])
+        self.DataManager.invalidate_hf_namespace_cache()
         dm = self._make(user_id='schule-musterstadt')
         dm._upload_dataset(tags=[], private=True)
-        self.assertEqual(len(self.uploads), 1)
+        self.assertEqual(self.uploads, [], 'an organisation of the token was accepted')
+        self.assertIn('Upload abgelehnt', dm._last_warning_message)
+        self.assertTrue(whoami_calls)
+        ok = self._make(user_id='alice')
+        ok._upload_enqueued = False
+        ok._upload_dataset(tags=[], private=True)
+        self.assertEqual(len(self.uploads), 1, "the account's own namespace was refused")
 
     def test_a_refusal_does_not_fall_through_to_the_direct_push(self):
         """The fallback path (no callback wired) must be gated too.

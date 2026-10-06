@@ -127,9 +127,9 @@ describe.each(CONFIGS)('%s: the server logs in a token-free format', (name) => {
     expect(mapKeyMatches(requestMap, 'GET /static/js/index.js HTTP/1.1')).toBe(false);
     expect(mapKeyMatches(refererMap, 'http://localhost/')).toBe(false);
     // The replacement values name no variable that could carry the path.
-    for (const line of [...directives(requestMap), ...directives(refererMap)]) {
-      if (line.startsWith('"~*')) expect(line).not.toMatch(/\$(request|uri|request_uri|http_referer|args)\b/);
-    }
+    const redacting = [...directives(requestMap), ...directives(refererMap)].filter((l) => l.startsWith('"~*'));
+    expect(redacting).toHaveLength(2);
+    redacting.forEach((line) => expect(line).not.toMatch(/\$(request|uri|request_uri|http_referer|args)\b/));
   });
 
   it('the parser has teeth: the raw format would fail', () => {

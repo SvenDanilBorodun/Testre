@@ -69,7 +69,7 @@ EXPECTED_D = {
     'KEEP_BOTH_DISK_DE': 'Zum Zusammenführen ist zu wenig Speicher frei ({free} frei, etwa {need} nötig). Lösche zuerst alte Datensätze.',
 }
 EXPECTED_R = {
-    'HUB_CHANGED_SINCE_CHECK_DE': 'Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version du behalten willst – „Beide behalten“ verliert nichts.',
+    'HUB_CHANGED_SINCE_CHECK_DE': 'Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version du behalten willst. „Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.',
     'UPLOAD_IN_SESSION_DE': 'Nicht hochgeladen: Die Aufnahme dieses Datensatzes wurde unterbrochen und nicht sauber beendet; hochgeladen würde er die Version auf Hugging Face beschädigen. Lösche ihn im Tab Daten oder lade dort die Online-Version.',
     'UPLOAD_BROKEN_DE': 'Nicht hochgeladen: Der Datensatz auf dem Roboter ist unvollständig oder beschädigt. Die Version auf Hugging Face bleibt, wie sie ist. Lösche ihn im Tab Daten oder lade dort die Online-Version.',
     'UPLOAD_UNCONFIRMED_DE': 'Hochgeladen, aber Hugging Face hat es noch nicht bestätigt. Im Tab Daten siehst du, ob noch etwas zu tun ist.',
@@ -166,6 +166,19 @@ class QuotesAndTabNames(unittest.TestCase):
                 names = ([a.name for a in node.names] if isinstance(node, ast.Import)
                          else [node.module or ''])
                 self.assertTrue(all(n.split('.')[0] == '__future__' for n in names), names)
+
+    def test_no_sentence_promises_that_beide_behalten_keeps_everything(self):
+        """V1-5 / G-2: „Beide behalten" keeps the NEW episodes of both sides;
+        what either side deleted or replaced since the last sync stays gone. No
+        robot sentence may promise more."""
+        for module in (R, D):
+            for name, text in vars(module).items():
+                if name.endswith('_DE') and isinstance(text, str):
+                    for promise in ('verliert nichts', 'alle Episoden', 'nichts verloren', 'geht nichts verloren'):
+                        self.assertNotIn(promise, text, name)
+        self.assertIn('alle neuen Episoden von hier und von Hugging Face', R.HUB_CHANGED_SINCE_CHECK_DE)
+        self.assertIn('Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.',
+                      R.HUB_CHANGED_SINCE_CHECK_DE)
 
     def test_every_R_sentence_that_points_somewhere_names_the_daten_tab(self):
         """§G11 POINTS_TO_DATEN_TAB = /\\b(im|den) Tab Daten\\b/: the finish card then

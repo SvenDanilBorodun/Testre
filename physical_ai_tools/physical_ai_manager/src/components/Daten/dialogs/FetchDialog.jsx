@@ -25,18 +25,10 @@ import { REPO_ID_RE } from '../../../features/editDataset/datenContract';
 import {
   fill, fmtBytes, fmtDay, fmtFps, fmtGB, fmtTime,
 } from '../../../features/editDataset/model/format';
-import { camerasPhrase, robotName } from '../../../features/editDataset/model/labels';
+import { camerasPhrase, nameFromRepo, robotName } from '../../../features/editDataset/model/labels';
 import { safeTaskName } from '../../../utils/datasetName';
 
 const REPO = new RegExp(REPO_ID_RE);
-
-/** „lehrer-mueller/omx_f_wuerfel-demo" → „Wuerfel demo" (the robot prefix and separators gone). */
-export function defaultSaveName(repo, robotType) {
-  let base = String(repo || '').split('/')[1] || '';
-  if (robotType && base.startsWith(`${robotType}_`)) base = base.slice(robotType.length + 1);
-  base = base.replace(/[-_]+/g, ' ').trim();
-  return base ? base.charAt(0).toUpperCase() + base.slice(1) : '';
-}
 
 function Refusal({ result, repo, robotType }) {
   const r = result.refusal;
@@ -94,7 +86,7 @@ export default function FetchDialog({
     }
     if (req !== reqRef.current) return;
     if (result && result.found && !result.refusal) {
-      setSaveName(defaultSaveName(id, robotType));
+      setSaveName(nameFromRepo(id, robotType));
       setState({ kind: 'found', result, repo: id });
     } else {
       setState({ kind: 'refused', result: result || { refusal: 'error' }, repo: id });

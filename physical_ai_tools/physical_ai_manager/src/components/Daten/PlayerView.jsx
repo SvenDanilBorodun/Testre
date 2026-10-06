@@ -58,7 +58,7 @@ export function playerKeyAllowed(e, blocked) {
 }
 
 function PlayerView({
-  card, model, api, connected, hfOff, keysBlocked, newerAcked, actions,
+  card, hubFacts = null, model, api, connected, hfOff, keysBlocked, newerAcked, actions,
 }) {
   countRender('PlayerView');
   const dispatch = useDispatch();
@@ -245,7 +245,9 @@ function PlayerView({
           <h1 className="dat-title">{model.title}</h1>
           <div className="dat-pl-meta">
             <span className="dat-mono">{id}</span>
-            <SyncBadge state={model.badge.state} reason={model.badge.reason} overlay={model.badge.overlay} ownerName={model.badge.ownerName} />
+            {model.badge ? (
+              <SyncBadge state={model.badge.state} reason={model.badge.reason} overlay={model.badge.overlay} ownerName={model.badge.ownerName} />
+            ) : null}
             {ownerName ? <span className="dat-owner"><Icon name="users" size={13} />{fill(COPY.player.groupOwner, { name: ownerName })}</span> : null}
           </div>
         </div>
@@ -262,7 +264,7 @@ function PlayerView({
       />
       <SyncBanners
         syncState={syncState}
-        hub={card.hub}
+        hub={hubFacts}
         newerAcked={newerAcked}
         own={model.own}
         partnerNote={model.own ? null : fill(COPY.card.partnerNote, { name: ownerName })}

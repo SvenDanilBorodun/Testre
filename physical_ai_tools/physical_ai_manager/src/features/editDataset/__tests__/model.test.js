@@ -19,12 +19,36 @@ import {
   MAX_CHART_POINTS, columnDegrees, downsampleMinMax, jointChart, spansZero, toDegrees, yDomain,
 } from '../model/chartData';
 import {
-  fill, fillParts, fmtBytes, fmtDate, fmtDay, fmtFps, fmtGB, fmtNum, fmtTime, joinAnd, plural,
+  fill, fillParts, fmtBytes, fmtBytesProgress, fmtDate, fmtDay, fmtFps, fmtGB, fmtNum, fmtTime, joinAnd, plural,
 } from '../model/format';
 import { hintBand, hintText, hintTick } from '../model/hintText';
 import { syncBadge } from '../model/syncBadge';
 import { mergeChecks } from '../model/mergeChecks';
-import { cameraLabel, codecName, driverCamera, jointLabel, orderCameras, robotName } from '../model/labels';
+import {
+  cameraLabel, codecName, driverCamera, jointLabel, nameFromRepo, orderCameras, robotName, taskNameOf,
+} from '../model/labels';
+
+// V1-5: „Beide behalten" keeps every NEW episode of both sides (G-2); what was
+// deleted or replaced on either side since the last sync stays gone. No copy
+// may promise more — not „alle Episoden", not „verliert nichts".
+describe('„Beide behalten" says what it does (V1-5, G-2)', () => {
+  const all = [];
+  const walk = (v) => {
+    if (typeof v === 'string') all.push(v);
+    else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  walk(COPY);
+
+  it('the tip carries the shared core sentence', () => {
+    expect(COPY.keepBoth.tip.startsWith('„Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. '
+      + 'Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.')).toBe(true);
+  });
+
+  it('no Daten sentence promises that nothing is lost', () => {
+    const promises = all.filter((t) => /verliert nichts|Behält alle Episoden|bleibt gelöscht\./.test(t));
+    expect(promises).toEqual([]);
+  });
+});
 
 describe('the shared contract (§J.2)', () => {
   it('carries the codes and states the page switches on', () => {
@@ -188,6 +212,22 @@ describe('format (§J.6 numbers)', () => {
     expect(fmtBytes(1)).toBe('1 MB');
     expect(fmtBytes(0)).toBe('0 MB');
     expect(fmtGB(23.4e9)).toBe('23,4 GB');
+  });
+
+  it('a progress pair: one unit, done and percent rounded down, never past the total (V2-14)', () => {
+    expect(fmtBytesProgress(5e3, 4e6)).toEqual({ done: '0,0 MB', total: '4,0 MB', pct: 0 });
+    expect(fmtBytesProgress(3.66e6, 4e6)).toEqual({ done: '3,6 MB', total: '4,0 MB', pct: 90 });
+    // the percentage is the SHOWN numbers' (0,09 MB of 4,5 MB is „0,0 MB … 0 %", never „2 %")
+    expect(fmtBytesProgress(0.09e6, 4.5e6)).toEqual({ done: '0,0 MB', total: '4,5 MB', pct: 0 });
+    // not complete: never 100 %, and done never reads as the total
+    expect(fmtBytesProgress(4.46e6, 4.464e6)).toEqual({ done: '4,4 MB', total: '4,5 MB', pct: 97 });
+    // complete: both the same
+    expect(fmtBytesProgress(120e6, 540e6)).toEqual({ done: '120 MB', total: '540 MB', pct: 22 });
+    expect(fmtBytesProgress(0.5e9, 1.08e9)).toEqual({ done: '0,5 GB', total: '1,1 GB', pct: 45 });
+    expect(fmtBytesProgress(4.464e6, 4.464e6)).toEqual({ done: '4,5 MB', total: '4,5 MB', pct: 100 });
+    expect(fmtBytesProgress(12e9, 12e9)).toEqual({ done: '12 GB', total: '12 GB', pct: 100 });
+    expect(fmtBytesProgress(9e9, 4e6)).toEqual({ done: '4,0 MB', total: '4,0 MB', pct: 100 });
+    expect(fmtBytesProgress(1, 0)).toEqual({ done: '–', total: '–', pct: 0 });
   });
 
   it('dates „3. Okt., 14:12" and „30. Sep." in local time', () => {
@@ -365,6 +405,27 @@ describe('labels (§J.6 tables, §F1 order)', () => {
     expect(codecName('vp9')).toBe('VP9');
     expect(jointLabel('joint5')).toBe('Gelenk 5 · Hand drehen');
     expect(jointLabel('wrist_roll')).toBe('wrist_roll');
+  });
+
+  it('nameFromRepo: the robot prefix and separators gone, the first letter up', () => {
+    expect(nameFromRepo('lehrer-mueller/omx_f_wuerfel-demo', 'omx_f')).toBe('Wuerfel demo');
+    expect(nameFromRepo('lerobot/so100_test', 'omx_f')).toBe('So100 test');
+    expect(nameFromRepo('a/omx_f_', 'omx_f')).toBe('');
+  });
+
+  // V2-11: a name to build on („… gesamt", „… Teil 2") never repeats the
+  // folder's robot prefix — „omx_f_deckel gesamt" became omx_f_omx_f_deckel-gesamt.
+  it('taskNameOf: the display name, else the task part of the folder name', () => {
+    expect(taskNameOf({ id: 'lena/omx_f_deckel', name: 'omx_f_deckel', display_name: 'Deckel auflegen' }, 'omx_f')).toBe('Deckel auflegen');
+    expect(taskNameOf({ id: 'lena/omx_f_deckel', name: 'omx_f_deckel', display_name: null }, 'omx_f')).toBe('Deckel');
+    expect(taskNameOf({ id: 'lena/omx_f_Wuerfel-in-die-Schale', name: 'omx_f_Wuerfel-in-die-Schale', display_name: '  ' }, 'omx_f'))
+      .toBe('Wuerfel in die Schale');
+    // the entry's own robot type first (a dataset recorded on another profile)
+    expect(taskNameOf({ id: 'lena/edu6_studio_becher', name: 'edu6_studio_becher', robot_type: 'edu6_studio' }, 'omx_f')).toBe('Becher');
+    // no prefix to strip: the name as it is
+    expect(taskNameOf({ id: 'lena/meine-daten', name: 'meine-daten' }, 'omx_f')).toBe('Meine daten');
+    expect(taskNameOf({ id: 'lena/omx_f_', name: 'omx_f_' }, 'omx_f')).toBe('omx_f_');
+    expect(taskNameOf(null, 'omx_f')).toBe('');
   });
 
   it('cameras: Greifer, Szene, then others by key; the scene drives', () => {

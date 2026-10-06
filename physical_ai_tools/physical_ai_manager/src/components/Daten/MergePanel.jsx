@@ -17,6 +17,7 @@ import { releasePointerFocus } from '../Record/ActionBar';
 import COPY from '../../features/editDataset/datenCopy';
 import { mergeChecks } from '../../features/editDataset/model/mergeChecks';
 import { fill } from '../../features/editDataset/model/format';
+import { taskNameOf } from '../../features/editDataset/model/labels';
 import { safeTaskName } from '../../utils/datasetName';
 
 /** `<own>/<robot>_<safe name>` — the same rule as a recording (§D2). */
@@ -34,7 +35,9 @@ export default function MergePanel({
   // panel under the student's focus.
   const idsKey = sel.map((e) => e.id).join('|');
   useEffect(() => { setName(null); }, [idsKey]);
-  const defaultName = sel[0] ? fill(COPY.merge.defaultName, { name: sel[0].display_name || sel[0].name }) : '';
+  // the first pick's display name, else its task part, never its folder name
+  // with the robot prefix the new id would repeat (V2-11)
+  const defaultName = sel[0] ? fill(COPY.merge.defaultName, { name: taskNameOf(sel[0], robotType) }) : '';
   const value = name ?? defaultName;
   const { checks, ok } = useMemo(() => mergeChecks(sel), [sel]);
   const eps = sel.reduce((a, e) => a + (Number(e.total_episodes) || 0), 0);

@@ -58,11 +58,18 @@ function syncEntry(s) {
 
 const NOT_ASKED = Object.freeze({ state: 'unknown', reason: 'not_asked', head: null });
 
-/** A verdict made against a hub part this page cannot use: only what holds without the hub. */
+/**
+ * A verdict made against a hub part this page cannot use: only what holds
+ * without the hub. The robot's `unreachable` is a fact about asking, true
+ * whoever's token asked, so it stays (V2-9: the badge's tooltip is then the
+ * unreachable sentence, §G10, never „wurde noch nicht geprüft"); every other
+ * verdict about the hub becomes „not asked".
+ */
 function blindSync(s) {
   if (!s) return null;
   if (s.state === 'changed' || s.state === 'conflict') return { state: 'changed', reason: null, head: s.head };
   if (s.state === 'online') return null;
+  if (s.state === 'unknown' && s.reason === 'unreachable') return { state: 'unknown', reason: 'unreachable', head: null };
   return NOT_ASKED;
 }
 
@@ -178,6 +185,39 @@ export function applyLibraryReply(prev, reply, req, { accountFp = null, nowMs = 
   return next;
 }
 
+// What a LOCAL edit (delete, split, „Beide behalten" aside) makes of a sync
+// state when the robot's re-read is not there to say it (V2-5): the copy here
+// changed, so a synced copy reads `changed` — and `conflict` when the hub had
+// moved too (`newer`). `local` and `unknown` stay what they were.
+const AFTER_LOCAL_EDIT = Object.freeze({
+  current: 'changed', changed: 'changed', newer: 'conflict', conflict: 'conflict',
+});
+
+/** The sync state a dataset has after a local edit, from the one it had before (no re-read). */
+export function syncAfterLocalEdit(state) {
+  return AFTER_LOCAL_EDIT[state] || state || 'unknown';
+}
+
+/**
+ * Does a hub entry lack the card's numbers? The robot's re-read of named ids
+ * (`library?ids=…&hub=1`) and every entry of a dataset that is also local
+ * carry only id, head, visibility and date (§J.4.1); only the whole list reads
+ * an online-only dataset's `info.json`.
+ */
+export function hubEntryLacksNumbers(entry) {
+  return !!entry && (entry.total_episodes === undefined || entry.total_episodes === null);
+}
+
+/**
+ * The ids of `ids` that a reply turned into „Nur online" cards without their
+ * numbers (a whole delete with a hub copy, V2-14): the whole list must be read
+ * to fill them.
+ */
+export function onlineCardsWithoutNumbers(lib, ids) {
+  const entries = (lib && lib.hub && lib.hub.entries) || {};
+  return (ids || []).filter((id) => !(lib.local || {})[id] && hubEntryLacksNumbers(entries[id]));
+}
+
 /** Stamp a busy change for `ids` at the page's current request number (T-1 a). */
 export function stampBusyChange(state, ids, seq) {
   if (!ids || !ids.length) return state;
@@ -188,15 +228,30 @@ export function stampBusyChange(state, ids, seq) {
 
 /**
  * The ids whose busy entry changed between two daten_state busy maps
- * (`{id: kind}`): an entry that disappeared or changed kind. An entry that
- * appeared is no change (the overlay simply shows).
+ * (`{id: kinds[]}`, useDatenState::busyKindsById): an id that LOST a kind —
+ * it disappeared, changed kind, or the upload a waiting Start was listed
+ * beside ended. A kind that appeared is no change (the overlay simply shows),
+ * and the same kinds in another wire order are none (C-2).
  */
 export function busyChanges(prevBusy, nextBusy) {
   const out = [];
   Object.keys(prevBusy || {}).forEach((id) => {
-    if ((nextBusy || {})[id] !== prevBusy[id]) out.push(id);
+    const next = (nextBusy || {})[id] || [];
+    if ((prevBusy[id] || []).some((k) => !next.includes(k))) out.push(id);
   });
   return out;
+}
+
+// The one kind a card draws when an id is listed with several (C-2): a
+// `record` entry beside another kind is a Start still WAITING for that other
+// job (R-8: the robot waits for the same dataset's upload), so the job that
+// runs wins; at most one of the others can hold a dataset at a time.
+const CARD_BUSY_ORDER = Object.freeze(['upload', 'download', 'edit', 'delete', 'record']);
+
+/** The busy kind a card shows for `kinds` (an id's busyKindsById entry), or null. */
+export function cardBusyKind(kinds) {
+  const list = Array.isArray(kinds) ? kinds : [];
+  return CARD_BUSY_ORDER.find((k) => list.includes(k)) || null;
 }
 
 /**
@@ -205,15 +260,16 @@ export function busyChanges(prevBusy, nextBusy) {
  *                 shows (the re-fetch is on its way) — and, for a card the
  *                 robot reports `in_session`, while no daten_state has come
  *                 yet: never infer „crashed" from a stale reply (T-1 a);
- *   'live'        `in_session` and the robot records into it right now;
+ *   'live'        `in_session` and the robot records into it right now
+ *                 (a `record` entry among its busy kinds, in any order);
  *   'crashed'     `in_session`, no recording, from a reply whose request was
  *                 sent after the newest busy change (H-1, U-3).
  */
-export function cardPhase(entry, { busyKind = null, stateSeen = false, stamp, entrySeq }) {
+export function cardPhase(entry, { busyKinds = [], stateSeen = false, stamp, entrySeq }) {
   const pending = stamp !== undefined && stamp !== null && !((entrySeq ?? -Infinity) > stamp);
   if (pending) return 'refreshing';
   if (!entry || entry.state !== 'in_session') return null;
-  if (busyKind === 'record') return 'live';
+  if (Array.isArray(busyKinds) && busyKinds.includes('record')) return 'live';
   if (!stateSeen) return 'refreshing';
   if (stamp === undefined || stamp === null) return 'refreshing';
   return 'crashed';

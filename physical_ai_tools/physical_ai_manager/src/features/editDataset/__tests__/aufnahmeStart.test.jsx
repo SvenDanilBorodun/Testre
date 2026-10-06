@@ -18,7 +18,7 @@ import { configureStore } from '@reduxjs/toolkit';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import tasksReducer, {
-  recordIntent, setHeartbeatStatus, setTaskInfo, setTaskStatus,
+  recordIntent, recordUploadStatus, setHeartbeatStatus, setTaskInfo, setTaskStatus,
 } from '../../tasks/taskSlice';
 import uiReducer, { moveToPage } from '../../ui/uiSlice';
 import rosReducer, { setRosbridgeUrl } from '../../ros/rosSlice';
@@ -147,6 +147,40 @@ describe('R-8: through useRecordController and /edubotics/daten_state', () => {
     act(() => send([{ id: REPO, kind: 'upload' }]));
     expect(result.current.model.pill.sub).toBe(RECORD_COPY.pill.waitUpload);
     act(() => send([]));
+    expect(result.current.model.pill.sub).toBe(RECORD_COPY.pill.startingSub);
+  });
+
+  // R-8 from the tab that just recorded (V2-3 removed the page's own refusal)
+  // and C-2 (the robot lists the waiting Start as `record` AND `upload`; the
+  // pill must not depend on their order).
+  it.each([
+    ['record, upload', [{ id: REPO, kind: 'record' }, { id: REPO, kind: 'upload' }]],
+    ['upload, record', [{ id: REPO, kind: 'upload' }, { id: REPO, kind: 'record' }]],
+  ])('the same tab: Start is offered while its upload runs, and the wait shows (%s)', async (_order, busy) => {
+    const store = makeStore();
+    const { result } = mount(store);
+    // the previous session ended here and its upload still runs
+    act(() => { store.dispatch(recordIntent({ kind: 'start', at: Date.now(), snapshot: SNAP })); });
+    const rec = (patch) => setTaskStatus({
+      robotType: 'omx_f', running: true, topicReceived: true, taskType: 'record', taskName: 'Würfel',
+      numEpisodes: 3, episodeTime: 20, warmupTime: 5, resetTime: 5, fps: 30, pushToHub: true,
+      receivedAt: performance.now(), receivedWallMs: Date.now(), ...patch,
+    });
+    act(() => { store.dispatch(rec({ phase: TaskPhase.RECORDING, totalTime: 20 })); });
+    act(() => { store.dispatch(rec({ phase: TaskPhase.SAVING, totalTime: 0, currentEpisodeNumber: 1 })); });
+    act(() => { store.dispatch(rec({ phase: TaskPhase.READY, running: false, currentEpisodeNumber: 1 })); });
+    act(() => { store.dispatch(recordUploadStatus({ repoId: REPO, status: 'Uploading', percentage: 30, message: '', at: Date.now() + 1 })); });
+    act(() => result.current.dismissFinish());
+    expect(result.current.view).toBe(VIEW.READY);
+    expect(result.current.model.buttons[0]).toMatchObject({ id: 'start', disabled: false });
+    // Start (the press dispatches this intent before START_RECORD goes out)
+    act(() => { store.dispatch(recordIntent({ kind: 'start', at: Date.now(), snapshot: SNAP })); });
+    expect(result.current.view).toBe(VIEW.STARTING);
+    await waitFor(() => expect(mockTopics.filter((t) => !t.unsubscribed)).toHaveLength(1));
+    act(() => send(busy));
+    expect(result.current.model.pill.sub).toBe(RECORD_COPY.pill.waitUpload);
+    // the upload ends, the robot records: the ordinary line again
+    act(() => send([{ id: REPO, kind: 'record' }]));
     expect(result.current.model.pill.sub).toBe(RECORD_COPY.pill.startingSub);
   });
 

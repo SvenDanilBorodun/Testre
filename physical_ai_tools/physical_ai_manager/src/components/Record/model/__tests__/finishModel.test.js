@@ -164,7 +164,8 @@ describe('finishSteps', () => {
   // the Daten tab is said once — no second „später im Tab Daten hochladen".
   // The robot's sentences (record_texts_de, spec §J.6 [R]) verbatim.
   it.each([
-    ['HUB_CHANGED_SINCE_CHECK_DE', 'Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version du behalten willst – „Beide behalten“ verliert nichts.'],
+    // V1-5: the truth of G-2, the core sentence the page's „Beide behalten" tip shares
+    ['HUB_CHANGED_SINCE_CHECK_DE', 'Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version du behalten willst. „Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.'],
     ['UPLOAD_HUB_DIFFERS_DE', 'Auf Hugging Face gibt es diesen Datensatz schon in einer anderen Version. Es wurde nichts überschrieben. Öffne den Tab Daten, vergleiche beide Versionen und entscheide dort.'],
     ['UPLOAD_IN_SESSION_DE', 'Nicht hochgeladen: Die Aufnahme dieses Datensatzes wurde unterbrochen und nicht sauber beendet; hochgeladen würde er die Version auf Hugging Face beschädigen. Lösche ihn im Tab Daten oder lade dort die Online-Version.'],
     ['UPLOAD_BROKEN_DE', 'Nicht hochgeladen: Der Datensatz auf dem Roboter ist unvollständig oder beschädigt. Die Version auf Hugging Face bleibt, wie sie ist. Lösche ihn im Tab Daten oder lade dort die Online-Version.'],

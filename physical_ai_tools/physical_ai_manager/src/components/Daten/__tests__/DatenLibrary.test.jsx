@@ -140,6 +140,22 @@ describe('the page states (§G10)', () => {
     await screen.findByText(COPY.old.sidecar);
   });
 
+  it('V2-14: while the first library reply is on its way the header never says „0 Datensätze"', async () => {
+    world.local = [local(`${OWN}/omx_f_a`)];
+    world.sync = { [`${OWN}/omx_f_a`]: { state: 'local', head: null } };
+    let release;
+    world.gate = () => new Promise((r) => { release = r; });
+    await mount();
+    await screen.findByText(COPY.page.title);
+    await waitFor(() => expect(release).toBeDefined());
+    const sub = document.querySelector('.dat-sub');
+    expect(sub.textContent).not.toMatch(/\d+ Datens/);
+    expect(screen.getAllByText(COPY.lib.loading).length).toBeGreaterThan(0);
+    world.gate = null;
+    await act(async () => { release(); });
+    await waitFor(() => expect(document.querySelector('.dat-sub').textContent).toContain('1 Datensatz von dir und deiner Gruppe'));
+  });
+
   it('an empty library', async () => {
     await mount();
     await screen.findByText(COPY.lib.empty);
@@ -166,6 +182,8 @@ describe('the page states (§G10)', () => {
     await screen.findByText(COPY.lib.hubFailed);
     const c = card(`${OWN}/omx_f_a`);
     expect(c.textContent).toContain(COPY.sync.unknownLabel);
+    // V2-9: the badge says WHY (unreachable), never „wurde noch nicht geprüft"
+    expect(c.querySelector('[data-sync="unknown"]').getAttribute('title')).toBe(COPY.sync.unknownTip.unreachable);
     expect(within(c).getByText(COPY.sync.refresh)).toBeInTheDocument();
     expect(within(c).getByText(COPY.card.upload).closest('button')).not.toBeDisabled();
   });
@@ -211,6 +229,27 @@ describe('cards (§C3, §G10, H-1, H-3, §G14)', () => {
     expect(cardText(id('onl'))).toContain(COPY.card.previewAfterLoad);
   });
 
+  // V2-13: the ⋮ menu sits on the first row beside the buttons, never on a row
+  // of its own: the buttons wrap INSIDE their own box, the menu does not
+  // (daten.css; the browser layout is measured in the fix round's Playwright run).
+  it('every card variant: the ⋮ menu beside the buttons\' own box, never in the wrapping row', async () => {
+    await mount();
+    await waitFor(() => expect(card(id('con'))).not.toBeNull());
+    const withMenu = [...document.querySelectorAll('.dat-card')].filter((c) => c.querySelector('.dat-menu-wrap'));
+    expect(withMenu.length).toBeGreaterThanOrEqual(8);
+    withMenu.forEach((c) => {
+      const row = c.querySelector('.dat-card-actions');
+      const btns = row.querySelector(':scope > .dat-card-btns');
+      const menu = row.querySelector(':scope > .dat-menu-wrap');
+      expect(btns).not.toBeNull();
+      expect(menu).not.toBeNull();
+      expect(btns.nextElementSibling).toBe(menu);
+      // every first-row action is inside the box that wraps
+      const first = [...row.querySelectorAll(':scope > button')];
+      expect(first).toEqual([]);
+    });
+  });
+
   it('the „Aktualisieren" link only for not_asked/unreachable, never a partner\'s not_visible', async () => {
     await mount();
     await waitFor(() => expect(card(id('unk'))).not.toBeNull());
@@ -226,6 +265,8 @@ describe('cards (§C3, §G10, H-1, H-3, §G14)', () => {
     expect(cardText(id('hp'))).toContain(COPY.lib.hintsPending);
     expect(cardText(id('cur'))).toContain('2 von 12 Episoden mit Hinweisen');
     expect(cardText(id('bad'))).toContain(COPY.card.unsupported);
+    // a dataset this page cannot open or upload shows no sync badge (V2-12)
+    expect(card(id('bad')).querySelector('[data-sync]')).toBeNull();
     expect(within(card(id('bad'))).queryByText(COPY.card.view)).toBeNull();
     expect(within(card(id('bad'))).getByText(COPY.card.deleteWhole)).toBeInTheDocument();
     expect(cardText(`${PARTNER}/omx_f_p`)).toContain('Max Weber');
@@ -328,6 +369,19 @@ describe('overlays from /edubotics/daten_state', () => {
     expect(within(card(W)).getByText(COPY.card.view).closest('button')).toBeDisabled();
   });
 
+  // C-2: a Start waiting for this dataset's upload lists it as `record` AND
+  // `upload`; the card shows the upload that runs, in either wire order.
+  it.each([
+    ['record, upload', [{ id: W, kind: 'record' }, { id: W, kind: 'upload' }]],
+    ['upload, record', [{ id: W, kind: 'upload' }, { id: W, kind: 'record' }]],
+  ])('a Start waiting for the upload (%s): the upload overlay, never „Wird gerade aufgenommen"', async (_order, busy) => {
+    await mount();
+    await waitFor(() => expect(card(W)).not.toBeNull());
+    act(() => setDaten({ busy, transfer: { kind: 'upload', repo_id: W, target: null } }));
+    await waitFor(() => expect(cardText(W)).toContain(COPY.sync.uploadLabel));
+    expect(cardText(W)).not.toContain(COPY.sync.recordLabel);
+  });
+
   it('a keep_both job → „Wird zusammengeführt"', async () => {
     await mount();
     await waitFor(() => expect(card(W)).not.toBeNull());
@@ -351,6 +405,42 @@ describe('overlays from /edubotics/daten_state', () => {
     expect(c.textContent).toContain('22 %');
     fireEvent.click(within(c).getByText(COPY.card.cancel));
     await waitFor(() => expect(commandCalls('cancel')).toEqual([{ what: 'download' }]));
+  });
+
+  // V2-14: the label and the percentage never disagree („1 MB von 4 MB 0 %").
+  it.each([
+    [5e3, 4e6, 'Wird geladen … 0,0 MB von 4,0 MB', '0 %'],
+    [3.66e6, 4e6, 'Wird geladen … 3,6 MB von 4,0 MB', '90 %'],
+    [0.5e9, 1.08e9, 'Wird geladen … 0,5 GB von 1,1 GB', '45 %'],
+    [540e6, 540e6, 'Wird geladen … 540 MB von 540 MB', '100 %'],
+  ])('a download of %d of %d bytes: one unit, the same rounding as its percentage', async (done, total, label, pct) => {
+    await mount();
+    await waitFor(() => expect(card(W)).not.toBeNull());
+    act(() => setDaten({
+      busy: [{ id: W, kind: 'download' }],
+      jobs: [{ job_id: 'd', op: 'download', state: 'running', datasets: [W], outputs: [W], stage: 'download', done, total, unit: 'bytes' }],
+    }));
+    await waitFor(() => expect(cardText(W)).toContain(label));
+    expect(card(W).querySelector('.dat-prog .dat-mono').textContent).toBe(pct);
+  });
+
+  // V2-14: the robot reports a download's bytes as the bytes in its tmp, which
+  // reads 0 for a moment when the finished tmp is swapped into place — a job's
+  // progress on the card never runs backwards
+  it('a download\'s progress never runs backwards (the finished tmp swapped away reads 0 bytes)', async () => {
+    await mount();
+    await waitFor(() => expect(card(W)).not.toBeNull());
+    const row = (done) => ({ job_id: 'd', op: 'download', state: 'running', datasets: [W], outputs: [W], stage: 'download', done, total: 4.5e6, unit: 'bytes' });
+    act(() => setDaten({ busy: [{ id: W, kind: 'download' }], jobs: [row(2.3e6)] }));
+    await waitFor(() => expect(cardText(W)).toContain('Wird geladen … 2,3 MB von 4,5 MB'));
+    act(() => setDaten({ busy: [{ id: W, kind: 'download' }], jobs: [row(4.5e6)] }));
+    await waitFor(() => expect(card(W).querySelector('.dat-prog .dat-mono').textContent).toBe('100 %'));
+    act(() => setDaten({ busy: [{ id: W, kind: 'download' }], jobs: [row(0)] }));
+    expect(cardText(W)).toContain('Wird geladen … 4,5 MB von 4,5 MB');
+    expect(card(W).querySelector('.dat-prog .dat-mono').textContent).toBe('100 %');
+    // another job starts from its own 0
+    act(() => setDaten({ busy: [{ id: W, kind: 'download' }], jobs: [{ ...row(0.5e6), job_id: 'e' }] }));
+    await waitFor(() => expect(cardText(W)).toContain('Wird geladen … 0,5 MB von 4,5 MB'));
   });
 
   it('an upload → „Wird hochgeladen …" with the HF percentage and a cancel', async () => {
@@ -386,6 +476,23 @@ describe('the crashed card (H-1, T-1, U-3, U-4)', () => {
     const buttons = within(card(K).querySelector('.dat-card-actions')).getAllByRole('button').map((b) => b.textContent);
     expect(buttons).toEqual(expect.arrayContaining([COPY.card.loadOnline, COPY.card.deleteWhole]));
     expect(buttons.some((t) => t === COPY.card.view || t === COPY.card.upload)).toBe(false);
+  });
+
+  // V2-12: the line says upload is impossible, so no sync badge may say
+  // „Hier geändert – nicht hochgeladen" (or „Nur hier") beside it.
+  it.each([
+    ['changed', { state: 'changed', head: `head-${K}` }],
+    ['local', { state: 'local', head: null }],
+    ['unknown', { state: 'unknown', reason: 'not_asked', head: null }],
+  ])('the crashed card carries no sync badge (robot verdict %s)', async (_s, sync) => {
+    world.sync = { [K]: sync };
+    await mount();
+    await waitFor(() => expect(card(K)).not.toBeNull());
+    act(() => setDaten({ busy: [] }));
+    await waitFor(() => expect(cardText(K)).toContain(COPY.card.crashed));
+    expect(card(K).querySelector('[data-sync]')).toBeNull();
+    expect(cardText(K)).not.toContain(COPY.sync.changedLabel);
+    expect(within(card(K)).queryByText(COPY.sync.refresh)).toBeNull();
   });
 
   it('a live recording of the same id shows „Wird gerade aufgenommen", never the crashed line', async () => {
@@ -457,6 +564,41 @@ describe('the crashed card (H-1, T-1, U-3, U-4)', () => {
 });
 
 describe('whole-dataset delete (§D6, U-4): both variants, every card kind sends its digest', () => {
+  // V2-14: the robot's re-read of ONE id carries its hub entry without numbers
+  // (hub_reads.py `_library_hub`); the „Nur online" card it becomes shows a
+  // loading line until the whole list brings them — never „–".
+  it('a hub copy stays: the „Nur online" card loads its values, never „–"', async () => {
+    const D = `${OWN}/omx_f_deckel`;
+    world.local = [local(D)];
+    world.hub = [hubEntry(D)];
+    world.sync = { [D]: { state: 'current', head: `head-${D}` } };
+    world.thinScopedHub = true;
+    await mount();
+    await waitFor(() => expect(card(D)).not.toBeNull());
+    fireEvent.click(within(card(D)).getByRole('button', { name: COPY.card.more }));
+    fireEvent.click(within(card(D)).getByRole('menuitem', { name: new RegExp(COPY.menu.deleteWhole) }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: COPY.confirm.deleteDatasetButton }));
+    await waitFor(() => expect(commandCalls('delete_dataset')).toHaveLength(1));
+    // the robot deleted the copy here; the whole list is held back for a moment
+    world.local = [];
+    world.sync = { [D]: { state: 'online', head: `head-${D}` } };
+    let releaseFull = null;
+    world.gate = (url) => (url.includes('hub=1') && !url.includes('ids=')
+      ? new Promise((r) => { releaseFull = r; }) : null);
+    act(() => setDaten({ jobs: [{ job_id: 'job-1', op: 'delete_dataset', state: 'done', datasets: [D], outputs: [], stage: null, done: 1, total: 1, unit: 'steps' }] }));
+    await waitFor(() => expect(cardText(D)).toContain(COPY.sync.onlineLabel));
+    expect(cardText(D)).toContain(COPY.card.statsLoading);
+    expect(card(D).querySelector('.dat-stats')).toBeNull();
+    await waitFor(() => expect(releaseFull).not.toBeNull());
+    world.gate = null;
+    await act(async () => { releaseFull(); });
+    await waitFor(() => expect(card(D).querySelector('.dat-stats')).not.toBeNull());
+    const stats = card(D).querySelector('.dat-stats').textContent;
+    expect(stats).toContain('12');
+    expect(stats).not.toContain('–');
+    expect(cardText(D)).not.toContain(COPY.card.statsLoading);
+  });
+
   it('a proven hub copy: a plain confirm (+ lost changes for changed)', async () => {
     const C = `${OWN}/omx_f_c`;
     world.local = [local(C)];
@@ -525,9 +667,13 @@ describe('conflict: „Beide behalten" first and default (§E10)', () => {
     expect(dlg.querySelector('[data-step-state="pending"] [data-icon="stepPending"]')).not.toBeNull();
     act(() => setDaten({ jobs: [{ job_id: 'job-1', op: 'keep_both', state: 'running', datasets: [C], outputs: [C], stage: 'upload', done: 2, total: 3, unit: 'steps' }] }));
     await waitFor(() => expect([...document.querySelectorAll('[data-step-state]')].map((li) => li.getAttribute('data-step-state'))).toEqual(['done', 'done', 'now']));
+    // the robot's state after the job: both versions in one, uploaded (the
+    // toast counts THAT, never the copy from before the job)
+    world.local = [local(C, { total_episodes: 15, meta_digest: 'd-merged' })];
+    world.sync = { [C]: { state: 'current', head: 'head-new' } };
     act(() => setDaten({ jobs: [{ job_id: 'job-1', op: 'keep_both', state: 'done', datasets: [C], outputs: [C], stage: null, done: 3, total: 3, unit: 'steps' }] }));
     await waitFor(() => expect(screen.queryByTestId('dat-progress')).toBeNull());
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Beide Versionen sind zusammengeführt und hochgeladen (12 Episoden).', expect.anything()));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Beide Versionen sind zusammengeführt und hochgeladen (15 Episoden).', expect.anything()));
   });
 
   it('the upload compare dialog: „Beide behalten" first and FOCUSED, sending the dialog\'s head', async () => {
@@ -537,7 +683,9 @@ describe('conflict: „Beide behalten" first and default (§E10)', () => {
     const dlg = await screen.findByRole('dialog');
     const keep = await within(dlg).findByRole('button', { name: COPY.keepBoth.button });
     await waitFor(() => expect(document.activeElement).toBe(keep));
-    expect(dlg.textContent).toContain('Was du seit dem letzten Abgleich gelöscht hast, bleibt gelöscht.');
+    // V1-5: the truth of G-2, the same core sentence the robot's texts use
+    expect(dlg.textContent).toContain('„Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. '
+      + 'Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.');
     const order = within(dlg).getAllByRole('button').map((b) => b.textContent);
     expect(order.indexOf(COPY.keepBoth.button)).toBeLessThan(order.indexOf(COPY.conflict.loadOnline));
     expect(order.indexOf(COPY.conflict.loadOnline)).toBeLessThan(order.indexOf(COPY.conflict.uploadHere));
@@ -550,6 +698,10 @@ describe('conflict: „Beide behalten" first and default (§E10)', () => {
     await waitFor(() => expect(card(C)).not.toBeNull());
     fireEvent.click(within(card(C)).getByText(COPY.card.loadOnline));
     const dlg = await screen.findByRole('dialog');
+    // V2-15: nothing says the hub copy of a conflict is NEWER
+    expect(within(dlg).getByRole('heading').textContent).toBe(COPY.pull.titleOnline);
+    expect(dlg.textContent).not.toContain(COPY.pull.title);
+    await within(dlg).findByText(COPY.pull.replacesOnline);
     const keep = await within(dlg).findByRole('button', { name: COPY.keepBoth.button });
     await waitFor(() => expect(document.activeElement).toBe(keep));
     fireEvent.click(within(dlg).getByRole('button', { name: COPY.conflict.uploadHere }));
@@ -570,6 +722,86 @@ describe('upload dialogs (§E2, N7)', () => {
     await within(dlg).findByText(COPY.upload.visibilityPublic);
     fireEvent.click(within(dlg).getByRole('button', { name: COPY.upload.newButton }));
     await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: S, expected_hub_sha: null, private: false }]));
+  });
+
+  // V2-2: what the robot really answers for a never-uploaded dataset is
+  // `hub: null` with the decision `local` — „not on Hugging Face", never „could
+  // not ask". The student must read the visibility before a public repo appears.
+  it.each([
+    [false, COPY.upload.visibilityPublic, 'public'],
+    [true, COPY.upload.visibilityPrivate, 'private'],
+  ])('the real reply for a never-uploaded dataset (hub null, decided local, private=%s): its visibility line, expected_hub_sha null', async (priv, line, vis) => {
+    const S = `${OWN}/omx_f_stapeln`;
+    world.local = [local(S)];
+    world.sync = { [S]: { state: 'local', head: null } };
+    world.hubstate = (hid) => ({
+      v: 1, id: hid, meta_digest: `d-${hid}`, sync: { state: 'local', reason: null }, hub: null,
+      local: { total_episodes: 6, duration_s: 120, modified_at: '2026-10-04T08:00:00Z' }, new_repo_private: priv,
+    });
+    await mount();
+    await waitFor(() => expect(card(S)).not.toBeNull());
+    fireEvent.click(within(card(S)).getByText(COPY.card.upload));
+    const dlg = await screen.findByRole('dialog');
+    await within(dlg).findByText(line);
+    expect(dlg.querySelector('[data-visibility]').getAttribute('data-visibility')).toBe(vis);
+    fireEvent.click(within(dlg).getByRole('button', { name: COPY.upload.newButton }));
+    await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: S, expected_hub_sha: null, private: priv }]));
+  });
+
+  it.each([
+    ['not asked (no token on the robot)', { state: 'unknown', reason: 'not_asked' }],
+    ['unreachable', { state: 'unknown', reason: 'unreachable' }],
+    ['unreachable with local changes (decided changed without the hub)', { state: 'changed', reason: null }],
+  ])('Hugging Face could not be asked — %s: no visibility claim, and the upload decides at upload time (no expected key)', async (_label, sync) => {
+    const S = `${OWN}/omx_f_offen`;
+    world.local = [local(S)];
+    world.sync = { [S]: { state: 'unknown', reason: 'unreachable', head: null } };
+    world.hubstate = (hid) => ({ v: 1, id: hid, sync, hub: null, local: { total_episodes: 6 }, new_repo_private: false });
+    await mount();
+    await waitFor(() => expect(card(S)).not.toBeNull());
+    fireEvent.click(within(card(S)).getByText(COPY.card.upload));
+    const dlg = await screen.findByRole('dialog');
+    const go = await within(dlg).findByRole('button', { name: COPY.upload.newButton });
+    expect(dlg.querySelector('[data-visibility]')).toBeNull();
+    expect(dlg.textContent).not.toContain(COPY.upload.visibilityPublic);
+    fireEvent.click(go);
+    await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: S, private: false }]));
+  });
+
+  it('an EMPTY repo that already exists keeps its own visibility (create_repo never changes it)', async () => {
+    const S = `${OWN}/omx_f_leer`;
+    world.local = [local(S)];
+    world.sync = { [S]: { state: 'local', head: null } };
+    world.hubstate = (hid) => ({
+      v: 1, id: hid, sync: { state: 'local', reason: null }, hub: { exists: false, private: true, head: 'h0' },
+      local: { total_episodes: 6 }, new_repo_private: false,
+    });
+    await mount();
+    await waitFor(() => expect(card(S)).not.toBeNull());
+    fireEvent.click(within(card(S)).getByText(COPY.card.upload));
+    const dlg = await screen.findByRole('dialog');
+    await within(dlg).findByText(COPY.upload.visibilityPrivate);
+    fireEvent.click(within(dlg).getByRole('button', { name: COPY.upload.newButton }));
+    await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: S, expected_hub_sha: null, private: false }]));
+  });
+
+  it('the hubstate read failed: no visibility claim, no expected key', async () => {
+    const S = `${OWN}/omx_f_fehler`;
+    world.local = [local(S)];
+    world.sync = { [S]: { state: 'local', head: null } };
+    world.hubstate = () => { throw new Error('boom'); };
+    const realFetch = global.fetch;
+    global.fetch = vi.fn((url) => (String(url).endsWith('/hubstate')
+      ? Promise.resolve({ ok: false, status: 503, headers: { get: () => null }, json: () => Promise.resolve({ error: 'overloaded' }) })
+      : realFetch(url)));
+    await mount();
+    await waitFor(() => expect(card(S)).not.toBeNull());
+    fireEvent.click(within(card(S)).getByText(COPY.card.upload));
+    const dlg = await screen.findByRole('dialog');
+    const go = await within(dlg).findByRole('button', { name: COPY.upload.newButton });
+    expect(dlg.querySelector('[data-visibility]')).toBeNull();
+    fireEvent.click(go);
+    await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: S, private: false }]));
   });
 
   it('a recorded private choice says private', async () => {
@@ -601,7 +833,8 @@ describe('upload dialogs (§E2, N7)', () => {
     fireEvent.keyDown(within(card(N)).getByRole('menu'), { key: 'Escape' });
     fireEvent.click(within(card(N)).getByText(COPY.card.pullNewer));
     const pull = await screen.findByRole('dialog');
-    expect(pull.textContent).toContain(COPY.pull.title);
+    expect(within(pull).getByRole('heading').textContent).toBe(COPY.pull.title);
+    await within(pull).findByText(COPY.pull.replaces);
     fireEvent.click(await within(pull).findByRole('button', { name: COPY.pull.button }));
     await waitFor(() => expect(commandCalls('download')).toEqual([
       { repo_id: N, revision: 'head-x', target: N, mode: 'replace', display_name: null, meta_digest: `d-${N}` },
@@ -641,6 +874,22 @@ describe('merge mode (§D5, §G13)', () => {
       new_name: 'Würfel gesamt',
       owner_ns: OWN,
     }]));
+  });
+
+  it('V2-11: a dataset without a display name proposes its task part — never a doubled robot prefix', async () => {
+    const D = `${OWN}/omx_f_deckel`;
+    const E = `${OWN}/omx_f_deckel-2`;
+    world.local = [local(D), local(E)];
+    world.sync = { [D]: { state: 'local' }, [E]: { state: 'local' } };
+    await mount();
+    await waitFor(() => expect(card(D)).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: COPY.page.merge }));
+    fireEvent.click(within(card(D)).getByRole('button', { name: COPY.card.mergePick }));
+    fireEvent.click(within(card(E)).getByRole('button', { name: COPY.card.mergePick }));
+    const panel = screen.getByRole('region', { name: COPY.merge.title });
+    expect(within(panel).getByRole('textbox', { name: COPY.merge.nameLabel }).value).toBe('Deckel gesamt');
+    expect(panel.textContent).toContain('wird gespeichert als lena-schmidt/omx_f_Deckel-gesamt');
+    expect(panel.textContent).not.toContain('omx_f_omx_f_');
   });
 
   it('a dataset without quantile statistics turns the „Statistiken" row red and the button off', async () => {

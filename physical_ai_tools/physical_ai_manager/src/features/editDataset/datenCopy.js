@@ -115,6 +115,7 @@ const DATEN_COPY = deepFreeze({
     hintsNone: 'Keine Auffälligkeiten',
     hintsAfterLoad: 'Hinweise nach dem Laden',
     previewAfterLoad: 'Vorschau nach dem Laden',
+    statsLoading: 'Angaben werden von Hugging Face geladen …',
     copyOf: 'Kopie von {repo}',
     view: 'Ansehen',
     viewAfterRecording: 'Erst nach der Aufnahme',
@@ -317,12 +318,16 @@ const DATEN_COPY = deepFreeze({
 
   keepBoth: {
     button: 'Beide behalten',
-    tip: 'Behält alle Episoden von hier und von Hugging Face. Gleiche Episoden kommen nur einmal vor. Was du seit dem letzten Abgleich gelöscht hast, bleibt gelöscht. Danach wird der Datensatz hochgeladen.',
+    // V1-5: the truth of G-2, in the core sentence the robot's texts share
+    // (record_texts_de.HUB_CHANGED_SINCE_CHECK_DE)
+    tip: '„Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg. Gleiche Episoden kommen nur einmal vor. Danach wird der Datensatz hochgeladen.',
     progressTitle: 'Beide Versionen werden zusammengeführt …',
     stepDownload: 'Online-Version laden',
     stepMerge: 'Zusammenführen',
     stepUpload: 'Hochladen',
     done: 'Beide Versionen sind zusammengeführt und hochgeladen ({n} Episoden).',
+    // the re-read after the job did not land: no count rather than „–"
+    doneNoCount: 'Beide Versionen sind zusammengeführt und hochgeladen.',
   },
 
   conflict: {
@@ -423,9 +428,13 @@ const DATEN_COPY = deepFreeze({
 
   pull: {
     title: 'Neuere Version laden?',
+    // „Online-Version laden" of a conflict or a crashed card: the hub copy is
+    // not newer, only different (V2-15)
+    titleOnline: 'Online-Version laden?',
     here: 'Hier',
     onHub: 'Auf Hugging Face',
     replaces: 'Die Version hier wird durch die neuere von Hugging Face ersetzt.',
+    replacesOnline: 'Die Version hier wird durch die Version von Hugging Face ersetzt.',
     button: 'Laden',
   },
 

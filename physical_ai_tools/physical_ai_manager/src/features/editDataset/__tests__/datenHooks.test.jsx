@@ -13,9 +13,10 @@ import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import useDatenState, { busyMap, parseDatenState, resetDatenStateForTests } from '../hooks/useDatenState';
+import useDatenState, { busyKindsById, parseDatenState, resetDatenStateForTests } from '../hooks/useDatenState';
 import useDatenStartWait, { isUploading } from '../hooks/useDatenStartWait';
 import useGroupNamespaces, { resetGroupNamespacesCache } from '../hooks/useGroupNamespaces';
+import { withMonotonicBytes } from '../hooks/useDatenJobs';
 import { getGroupMembers } from '../../../services/meApi';
 
 const mockTopics = [];
@@ -77,7 +78,7 @@ describe('parseDatenState', () => {
     expect(p.transfer).toEqual({ kind: 'upload', repo_id: 'a/b', target: null });
     expect(parseDatenState('{"v":2}')).toBeNull();
     expect(parseDatenState('nope')).toBeNull();
-    expect(busyMap(p)).toEqual({ 'a/b': 'record' });
+    expect(busyKindsById(p)).toEqual({ 'a/b': ['record'] });
   });
 });
 
@@ -140,10 +141,46 @@ describe('useDatenStartWait (R-8, F-5)', () => {
     expect(mockTopics[0].unsubscribed).toBe(true);
   });
 
+  // C-2: a Start waiting for its dataset's upload lists the id twice
+  // (`record` and `upload`); the answer must not depend on which comes last.
+  it('both wire orders of record + upload: the same answer (C-2)', async () => {
+    const R = 'lena-schmidt/omx_f_wuerfel';
+    const a = msg([{ id: R, kind: 'record' }, { id: R, kind: 'upload' }]);
+    const b = msg([{ id: R, kind: 'upload' }, { id: R, kind: 'record' }]);
+    expect(busyKindsById(a)).toEqual({ [R]: ['record', 'upload'] });
+    expect(busyKindsById(b)).toEqual(busyKindsById(a));
+    expect(isUploading(a, R)).toBe(true);
+    expect(isUploading(b, R)).toBe(true);
+    // through the hook, the order the old map lost
+    const store = makeStore();
+    const { result } = renderHook(() => useDatenStartWait(R, true), { wrapper: wrapper(store) });
+    await waitFor(() => expect(mockTopics.length).toBe(1));
+    act(() => send(b));
+    expect(result.current).toBe(true);
+    act(() => send(msg([{ id: R, kind: 'record' }])));
+    expect(result.current).toBe(false);
+  });
+
   it('another repo, or another kind, is no wait', () => {
     expect(isUploading(msg([{ id: 'x/y', kind: 'upload' }]), 'lena-schmidt/omx_f_wuerfel')).toBe(false);
     expect(isUploading(msg([{ id: 'lena-schmidt/omx_f_wuerfel', kind: 'record' }]), 'lena-schmidt/omx_f_wuerfel')).toBe(false);
     expect(isUploading(null, 'a/b')).toBe(false);
+  });
+});
+
+describe('withMonotonicBytes (V2-14)', () => {
+  const job = (id, done, patch = {}) => ({ job_id: id, op: 'download', state: 'running', unit: 'bytes', done, total: 100, ...patch });
+  it('a running byte job never goes backwards; other jobs and finished ones are left alone; gone jobs are forgotten', () => {
+    const peaks = new Map();
+    const p1 = { v: 1, jobs: [job('a', 60), job('k', 1, { unit: 'steps', op: 'keep_both' })] };
+    expect(withMonotonicBytes(p1, peaks)).toBe(p1);
+    const p2 = { v: 1, jobs: [job('a', 0)] };
+    expect(withMonotonicBytes(p2, peaks).jobs[0].done).toBe(60);
+    expect(p2.jobs[0].done).toBe(0); // never mutated
+    expect(withMonotonicBytes(p2, peaks).jobs[0].done).toBe(60); // idempotent
+    expect(withMonotonicBytes({ v: 1, jobs: [job('a', 100, { state: 'done' })] }, peaks).jobs[0].done).toBe(100);
+    expect(peaks.has('a')).toBe(false);
+    expect(withMonotonicBytes(null, peaks)).toBeNull();
   });
 });
 

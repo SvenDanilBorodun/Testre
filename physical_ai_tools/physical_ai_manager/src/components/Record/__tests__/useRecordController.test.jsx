@@ -661,7 +661,9 @@ describe('form, mute and the finish actions', () => {
     expect(store.getState().tasks.recordNotice).toBeNull();
   });
 
-  it('„Neue Aufnahme" with the same name while it still uploads: Start is off AND the banner says why', async () => {
+  // R-8 (owner decision V2-3): the page never refuses Start for the same
+  // dataset's upload — the robot waits for it, and the STARTING pill says so.
+  it('„Neue Aufnahme" with the same name while it still uploads: Start is ON, no banner, and Start goes to the robot (R-8)', async () => {
     const store = makeStore();
     const { result } = mount(store);
     act(() => { pageAct(result, 'start'); });
@@ -675,14 +677,16 @@ describe('form, mute and the finish actions', () => {
     act(() => { store.dispatch(recordUploadStatus({ repoId, status: 'Uploading', percentage: 30, message: '', at: Date.now() + 1 })); });
     act(() => result.current.dismissFinish());
     expect(result.current.view).toBe(VIEW.READY);
-    expect(result.current.model.buttons[0].disabled).toBe(true);
-    expect(result.current.problem).toEqual({ kind: 'bad', textDe: result.current.copy.problem.startUploading });
-    // the link drops while it uploads: the state is unknown, Start is free again
-    act(() => { store.dispatch(setHeartbeatStatus('timeout')); });
-    act(() => { store.dispatch(setHeartbeatStatus('connected')); });
-    expect(store.getState().tasks.recordSession.finish.linkLost).toBe(true);
     expect(result.current.model.startBlock).toBeNull();
-    expect(result.current.model.buttons[0].disabled).toBe(false);
+    expect(result.current.model.buttons[0]).toMatchObject({ id: 'start', disabled: false });
+    expect(result.current.problem).toBeNull();
+    mockSend.mockClear();
+    const ev = press(' ');
+    expect(ev.defaultPrevented).toBe(true);
+    await waitFor(() => expect(mockSend).toHaveBeenCalledWith('start_record'));
+    expect(result.current.view).toBe(VIEW.STARTING);
+    // the previous session's upload is still followed while the robot waits
+    expect(store.getState().tasks.recordSession.finish).toMatchObject({ state: 'uploading', repoId });
   });
 
   it('a recordable=false manifest leaves the page', () => {

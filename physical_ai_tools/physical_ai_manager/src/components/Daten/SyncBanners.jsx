@@ -9,7 +9,9 @@
 // The player's sync banners (spec §C3, §E10, the mockup's banners): a NEWER
 // hub copy („Lade sie, bevor du hier etwas löschst …"), local changes not yet
 // uploaded (the training still uses the old version), and a conflict with
-// „Beide behalten" first.
+// „Beide behalten" first. `hub` is the hub copy's numbers the page read
+// (V2-15, `{total_episodes, last_modified}`); without them the sentences go
+// without numbers, never with „–".
 
 import React from 'react';
 import Icon from '../icons/Icon';
@@ -25,13 +27,14 @@ export default function SyncBanners({
 }) {
   const click = (id) => (e) => { releasePointerFocus(e); onAction(id); };
   const hfTitle = hfOff ? COPY.lib.tokenNotActive : undefined;
-  const hasHub = hub && hub.total_episodes !== undefined && hub.total_episodes !== null;
+  const hasHub = !!hub && Number.isFinite(Number(hub.total_episodes)) && hub.total_episodes !== null;
+  const hasDate = hasHub && !!hub.last_modified && fmtDate(hub.last_modified) !== '–';
   if (syncState === 'newer' && !newerAcked) {
     return (
       <div className="dat-banner dat-sky" data-banner="newer">
         <Icon name="cloudDownload" size={16} />
         <span className="dat-grow">
-          {hasHub ? fill(B.newer, { n: hub.total_episodes, date: fmtDate(hub.last_modified) }) : B.newerShort}
+          {hasDate ? fill(B.newer, { n: hub.total_episodes, date: fmtDate(hub.last_modified) }) : B.newerShort}
         </span>
         <button type="button" className="dat-btn dat-btn-sm" disabled={hfOff} title={hfTitle} onClick={click('pull')}>
           {B.newerButton}

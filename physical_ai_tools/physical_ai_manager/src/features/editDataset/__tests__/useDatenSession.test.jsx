@@ -102,7 +102,7 @@ function mount(initialState = { received: false, payload: null }) {
 const phaseOf = (result, id, busyKind = null) => {
   const lib = result.current.lib;
   return cardPhase(lib.local[id], {
-    busyKind, stateSeen: lib.stateSeen, stamp: lib.stamps[id], entrySeq: lib.entrySeq[id],
+    busyKinds: busyKind ? [busyKind] : [], stateSeen: lib.stateSeen, stamp: lib.stamps[id], entrySeq: lib.entrySeq[id],
   });
 };
 
@@ -171,6 +171,75 @@ describe('useDatenSession', () => {
     const n = requests.filter((u) => u.endsWith('ids=lena%2Fomx_f_w')).length;
     rerender(props([]));
     await waitFor(() => expect(requests.filter((u) => u.endsWith('ids=lena%2Fomx_f_w')).length).toBe(n + 1));
+  });
+
+  it('C-2: the same busy kinds in another order are no change (no re-fetch, no neutral flash)', async () => {
+    world.local = [local('lena/omx_f_w')];
+    const props = (busy) => ({ enabled: true, command, namespaces: ['lena'], inSync: true, accountFp: FP, datenState: state(busy) });
+    const { result, rerender } = mount();
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    rerender(props([{ id: 'lena/omx_f_w', kind: 'record' }, { id: 'lena/omx_f_w', kind: 'upload' }]));
+    await waitFor(() => expect(result.current.lib.stateSeen).toBe(true));
+    const n = requests.filter((u) => u.endsWith('ids=lena%2Fomx_f_w')).length;
+    rerender(props([{ id: 'lena/omx_f_w', kind: 'upload' }, { id: 'lena/omx_f_w', kind: 'record' }]));
+    await act(async () => { await Promise.resolve(); });
+    expect(requests.filter((u) => u.endsWith('ids=lena%2Fomx_f_w')).length).toBe(n);
+    expect(result.current.lib.stamps['lena/omx_f_w']).toBeUndefined();
+    // the upload ends (the waiting Start records now): THAT is a change
+    rerender(props([{ id: 'lena/omx_f_w', kind: 'record' }]));
+    await waitFor(() => expect(requests.filter((u) => u.endsWith('ids=lena%2Fomx_f_w')).length).toBe(n + 1));
+  });
+
+  // V2-14: a re-read of named ids that leaves a „Nur online" card without
+  // numbers reads the whole list; when a whole-list read is already on its way
+  // (it may have been answered before the change), ONE more follows it.
+  const fullReads = () => requests.filter((u) => u.includes('hub=1') && !u.includes('ids=')).length;
+  const thinScoped = () => {
+    const real = global.fetch;
+    global.fetch = vi.fn((url) => {
+      if (String(url).includes('ids=')) {
+        requests.push(url);
+        const reply = libraryReply(url, world);
+        reply.hub.entries = reply.hub.entries.map((e) => ({ id: e.id, head: e.head, private: e.private }));
+        return Promise.resolve(okResponse(reply));
+      }
+      return real(url);
+    });
+  };
+
+  it('V2-14: an ids reply leaving an online card without numbers reads the whole list once', async () => {
+    world.hub = [{ id: 'lena/omx_f_a', head: 'h1', private: false, total_episodes: 10 }];
+    const { result } = mount();
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    const before = fullReads();
+    world.local = [local('lena/omx_f_k', { state: 'in_session' })]; // omx_f_a deleted here, its hub copy stays
+    thinScoped();
+    await act(async () => { await result.current.loadLibrary({ hub: true, ids: ['lena/omx_f_a'] }); });
+    await waitFor(() => expect(fullReads()).toBe(before + 1));
+    await waitFor(() => expect(result.current.lib.hub.entries['lena/omx_f_a'].total_episodes).toBe(10));
+    await act(async () => { await Promise.resolve(); });
+    expect(fullReads()).toBe(before + 1);
+  });
+
+  it('V2-14: with a whole-list read already on its way, one more follows it (never none, never a loop)', async () => {
+    world.hub = [{ id: 'lena/omx_f_a', head: 'h1', private: false, total_episodes: 10 }];
+    const { result } = mount();
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    const before = fullReads();
+    // a whole-list read on its way, answered from BEFORE the delete
+    const release = hold('ns=lena&hub=1');
+    let inFlight;
+    act(() => { inFlight = result.current.loadLibrary({ hub: true }); });
+    await waitFor(() => expect(fullReads()).toBe(before + 1));
+    world.local = [local('lena/omx_f_k', { state: 'in_session' })];
+    thinScoped();
+    await act(async () => { await result.current.loadLibrary({ hub: true, ids: ['lena/omx_f_a'] }); });
+    expect(fullReads()).toBe(before + 1); // not while the other is on its way
+    await act(async () => { release(); await inFlight; });
+    await waitFor(() => expect(fullReads()).toBe(before + 2));
+    await waitFor(() => expect(result.current.lib.hub.entries['lena/omx_f_a'].total_episodes).toBe(10));
+    await act(async () => { await Promise.resolve(); });
+    expect(fullReads()).toBe(before + 2);
   });
 
   it('U-3: a reply to a request sent before the change never shows the crashed card', async () => {

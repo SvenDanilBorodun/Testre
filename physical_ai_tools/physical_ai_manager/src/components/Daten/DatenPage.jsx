@@ -42,11 +42,12 @@ import {
 } from '../../features/editDataset/editDatasetSlice';
 import useDatenCommand from '../../features/editDataset/hooks/useDatenCommand';
 import useDatenSession from '../../features/editDataset/hooks/useDatenSession';
-import useDatenState, { busyMap } from '../../features/editDataset/hooks/useDatenState';
+import useDatenState, { busyKindsById } from '../../features/editDataset/hooks/useDatenState';
 import useDatenJobs, { stepOfStage } from '../../features/editDataset/hooks/useDatenJobs';
 import useGroupNamespaces from '../../features/editDataset/hooks/useGroupNamespaces';
-import { libraryCards } from '../../features/editDataset/model/libraryState';
+import { libraryCards, syncAfterLocalEdit } from '../../features/editDataset/model/libraryState';
 import { cardModel } from '../../features/editDataset/model/cardModel';
+import { taskNameOf } from '../../features/editDataset/model/labels';
 import { fill, fmtBytes, plural } from '../../features/editDataset/model/format';
 import { selectHfAccount, selectHfInSync } from '../../features/hfToken/hfTokenSelectors';
 import { setDatasetRepoId, setSelectedDataset, setSelectedUser } from '../../features/training/trainingSlice';
@@ -127,13 +128,14 @@ export default function DatenPage() {
   const [query, setQuery] = useState('');
   const [newerAck, setNewerAck] = useState({});
   const cancelledRef = useRef(new Set());
-  const libRef = useRef(session.lib);
-  libRef.current = session.lib;
+  // The library as of the last reply — after an awaited `loadLibrary` the
+  // reply it waited for, never the state of the last render (V2-5).
+  const getLib = session.getLib;
 
   const own = group.own;
   const robotType = session.lib.robotType || statusRobotType || 'omx_f';
   const payload = jobs.payload;
-  const busy = useMemo(() => busyMap(payload), [payload]);
+  const busy = useMemo(() => busyKindsById(payload), [payload]);
   const transferRepo = payload && payload.transfer && payload.transfer.kind === 'upload' ? payload.transfer.repo_id : null;
   const uploadPct = Number(uploadPctRaw) || 0;
 
@@ -163,18 +165,19 @@ export default function DatenPage() {
       out[c.id] = cardModel(c, {
         own,
         ownerNames: group.names,
-        busyKind: busy[c.id] || null,
+        busyKinds: busy[c.id] || EMPTY_LIST,
         job: jobFor(payload, c.id),
         uploadPct: transferRepo === c.id ? uploadPct : null,
         stateSeen: session.lib.stateSeen,
         lib: session.lib,
         inSync,
+        hubLoading: session.hubLoading,
         mergeMode: merge.active,
         mergeSelected: merge.ids.includes(c.id),
       });
     });
     return out;
-  }, [cards, own, group.names, busy, payload, transferRepo, uploadPct, session.lib, inSync, merge]);
+  }, [cards, own, group.names, busy, payload, transferRepo, uploadPct, session.lib, session.hubLoading, inSync, merge]);
 
   const counts = useMemo(() => ({
     all: cards.length,
@@ -253,9 +256,11 @@ export default function DatenPage() {
       steps: [COPY.keepBoth.stepDownload, COPY.keepBoth.stepMerge, COPY.keepBoth.stepUpload],
       onDone: () => {
         dispatch(removeTransfer(card.id));
-        session.loadLibrary({ hub: true, ids: [card.id] }).then(() => {
-          const e = libRef.current.local[card.id];
-          toastOk(fill(COPY.keepBoth.done, { n: e ? e.total_episodes : '–' }));
+        session.loadLibrary({ hub: true, ids: [card.id] }).then((landed) => {
+          const e = landed ? getLib().local[card.id] : null;
+          toastOk(e && Number.isFinite(Number(e.total_episodes))
+            ? fill(COPY.keepBoth.done, { n: e.total_episodes })
+            : COPY.keepBoth.doneNoCount);
         });
       },
       onFailed: (row) => {
@@ -264,7 +269,7 @@ export default function DatenPage() {
         refetch([card.id]);
       },
     });
-  }, [run, trackJob, dispatch, session, refetch]);
+  }, [run, trackJob, dispatch, session, getLib, refetch]);
 
   const runUpload = useCallback(async (card, args) => {
     const r = await run('upload', { dataset: card.id, ...args }, { staleIds: [card.id] });
@@ -312,7 +317,8 @@ export default function DatenPage() {
       onDone: (row) => {
         dispatch(clearMarks(card.id));
         const outputs = (row.outputs && row.outputs.length ? row.outputs : r.result.outputs) || [];
-        session.loadLibrary({ hub: true, ids: [...new Set([card.id, ...outputs])] }).then(() => ui.onDone(outputs));
+        session.loadLibrary({ hub: true, ids: [...new Set([card.id, ...outputs])] })
+          .then((landed) => ui.onDone(outputs, landed));
       },
       onFailed: (row) => {
         toastError(row.message || COPY.http.generic);
@@ -328,7 +334,7 @@ export default function DatenPage() {
       dispatch(removeTransfer(repoId));
       if (t.via === 'keep_both') return; // the job says it
       if (cancelledRef.current.has(repoId)) { cancelledRef.current.delete(repoId); return; }
-      const card = libRef.current.local[t.id || repoId];
+      const card = getLib().local[t.id || repoId];
       const name = card ? (card.display_name || card.name) : repoId.split('/')[1];
       if (t.result.status === 'Success') {
         toastOk(PLAIN_UPLOAD_SUCCESS.test(t.result.message) || !t.result.message
@@ -339,13 +345,39 @@ export default function DatenPage() {
       }
       refetch([t.id || repoId]);
     });
-  }, [transfers, dispatch, refetch]);
+  }, [transfers, dispatch, refetch, getLib]);
 
   // ---- the open dataset left the list (deleted elsewhere): back to the library
   const openCard = openId ? cards.find((c) => c.id === openId) || null : null;
   useEffect(() => {
     if (view === 'player' && session.lib.loaded && openId && !(openCard && openCard.local)) dispatch(showLibrary());
   }, [view, openId, openCard, session.lib.loaded, dispatch]);
+
+  // ---- the hub copy's numbers for the open dataset (V2-15) -------------------
+  // The newer/changed banners and the newerWarn dialog name the hub copy's
+  // episodes and date, as the mockup does. The library lists a LOCAL dataset's
+  // hub entry without numbers, so the page asks `hubstate` once per dataset,
+  // hub head and local version; until it answers (or when it cannot) the
+  // sentences go without numbers.
+  const fetchHubState = session.fetchHubState;
+  const openSync = openCard && openCard.sync ? openCard.sync.state : null;
+  const factsKey = view === 'player' && openCard && openCard.local && (openSync === 'newer' || openSync === 'changed')
+    ? `${openCard.id}|${openCard.sync.head || ''}|${openCard.local.meta_digest || ''}` : null;
+  const [hubFacts, setHubFacts] = useState({ key: null, hub: null });
+  useEffect(() => {
+    if (!factsKey || !openId) return undefined;
+    let cancelled = false;
+    fetchHubState(openId).then((data) => {
+      const h = data && data.hub && data.hub.exists ? data.hub : null;
+      if (!cancelled) {
+        setHubFacts({ key: factsKey, hub: h ? { total_episodes: h.total_episodes, last_modified: h.last_modified } : null });
+      }
+    }).catch(() => {
+      if (!cancelled) setHubFacts({ key: factsKey, hub: null });
+    });
+    return () => { cancelled = true; };
+  }, [factsKey, openId, fetchHubState]);
+  const openHubFacts = useStableValue(hubFacts.key && hubFacts.key === factsKey ? hubFacts.hub : null);
 
   // ---- actions -----------------------------------------------------------------
   const guardEdit = useCallback((card, then) => {
@@ -369,7 +401,9 @@ export default function DatenPage() {
         toastWarn(fill(COPY.toast.partnerUpload, { name: (m && m.ownerName) || card.ns }));
         break;
       case 'pull': setDialog({ type: 'pull', card }); break;
-      case 'load_online': setDialog({ type: 'pull', card, crashed: !!(m && m.kind === 'crashed') }); break;
+      case 'load_online': setDialog({
+        type: 'pull', card, crashed: !!(m && m.kind === 'crashed'), online: true,
+      }); break;
       case 'keep_both': runKeepBoth(card, card.sync && card.sync.head ? card.sync.head : (card.hub && card.hub.head)); break;
       case 'load_view':
         runDownload(card, { mode: 'new', revision: (card.sync && card.sync.head) || (card.hub && card.hub.head), open: true });
@@ -470,11 +504,15 @@ export default function DatenPage() {
       title: COPY.progress.deleteTitle,
       sub: COPY.progress.wait,
       steps: COPY.progress.deleteSteps,
-      onDone: () => {
-        const e = libRef.current.local[card.id];
-        const sync = libRef.current.sync[card.id];
+      onDone: (_outputs, landed) => {
+        // The state AFTER the edit (V2-5): the robot's re-read when it landed,
+        // else what a local edit always makes of the state before it.
+        const lib = getLib();
+        const e = lib.local[card.id] || null;
+        const reRead = landed ? lib.sync[card.id] : null;
+        const sync = reRead || { ...(card.sync || {}), state: syncAfterLocalEdit(card.sync && card.sync.state), reason: null };
         const count = plural(indices.length, COPY.count.episodeOne, COPY.count.episodeMany);
-        if (sync && sync.state === 'changed' && card.ns === own) {
+        if (sync.state === 'changed' && card.ns === own) {
           toastOk(fill(COPY.toast.episodesDeletedUpload, { count }), {
             label: COPY.toast.uploadAction,
             onClick: () => setDialog({ type: 'upload', card: { ...card, local: e || card.local, sync } }),
@@ -484,7 +522,7 @@ export default function DatenPage() {
         }
       },
     });
-  }, [runEdit, own]);
+  }, [runEdit, own, getLib]);
 
   const runSplit = useCallback((card, summary, { indices, name, target }) => {
     runEdit(card, {
@@ -493,9 +531,9 @@ export default function DatenPage() {
       title: COPY.progress.splitTitle,
       sub: COPY.progress.wait,
       steps: COPY.progress.splitSteps,
-      onDone: (outputs) => {
+      onDone: (outputs, landed) => {
         const newId = outputs.find((o) => o !== card.id) || target;
-        const orig = libRef.current.local[card.id];
+        const orig = landed ? getLib().local[card.id] : null;
         toastOk(fill(COPY.toast.split, {
           a: nameOf(card),
           na: plural(orig ? orig.total_episodes : (summary.episodes.length - indices.length), COPY.count.episodeOne, COPY.count.episodeMany),
@@ -504,7 +542,7 @@ export default function DatenPage() {
         }), { label: COPY.toast.splitAction, onClick: () => dispatch(openPlayer(newId)) });
       },
     });
-  }, [runEdit, own, dispatch]);
+  }, [runEdit, own, dispatch, getLib]);
 
   // ---- the open player's props, stable by content ---------------------------
   const openModel = useStableValue(openCard ? models[openCard.id] : null);
@@ -535,6 +573,7 @@ export default function DatenPage() {
         <PlayerView
           key={stableCard.id}
           card={stableCard}
+          hubFacts={openHubFacts}
           model={openModel}
           api={api}
           connected={connected}
@@ -606,6 +645,7 @@ export default function DatenPage() {
           <PullNewerDialog
             card={c}
             crashed={!!dialog.crashed}
+            online={!!dialog.online}
             partnerNote={c.ns !== own ? fill(COPY.card.partnerNote, { name: (m && m.ownerName) || c.ns }) : null}
             fetchHubState={session.fetchHubState}
             onClose={close}
@@ -619,6 +659,7 @@ export default function DatenPage() {
         dlg = (
           <NewerWarnDialog
             card={c}
+            hubFacts={c.id === openId ? openHubFacts : null}
             onClose={close}
             onPull={() => setDialog({ type: 'pull', card: c })}
             onAnyway={() => {
@@ -661,6 +702,7 @@ export default function DatenPage() {
           <EpisodeToolDialog
             kind={dialog.kind}
             name={nameOf(c)}
+            baseName={taskNameOf(c.local || { id: c.id, name: c.name }, robotType)}
             total={(s.episodes || []).length}
             marks={dialog.marks || EMPTY_LIST}
             hintIndices={dialog.hintIndices || EMPTY_LIST}

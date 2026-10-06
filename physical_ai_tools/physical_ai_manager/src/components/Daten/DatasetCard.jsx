@@ -93,15 +93,17 @@ export default function DatasetCard({
         {m.thumb === 'online' ? (
           <div className="dat-veil"><span><Icon name="cloud" size={14} />{COPY.card.previewAfterLoad}</span></div>
         ) : null}
-        <div className="dat-badge-wrap">
-          <SyncBadge
-            state={m.badge.state}
-            reason={m.badge.reason}
-            overlay={m.badge.overlay}
-            ownerName={m.badge.ownerName}
-            onRefresh={onRefreshSync}
-          />
-        </div>
+        {m.badge ? (
+          <div className="dat-badge-wrap">
+            <SyncBadge
+              state={m.badge.state}
+              reason={m.badge.reason}
+              overlay={m.badge.overlay}
+              ownerName={m.badge.ownerName}
+              onRefresh={onRefreshSync}
+            />
+          </div>
+        ) : null}
         {m.mergePick ? (
           <button
             type="button"
@@ -128,12 +130,19 @@ export default function DatasetCard({
             <Fill template={COPY.card.copyOf} values={{ repo: <span className="dat-mono">{m.source}</span> }} />
           </div>
         ) : null}
-        <dl className="dat-stats">
-          <div><dt>{COPY.card.episodes}</dt><dd>{m.stats.episodes}</dd></div>
-          <div><dt>{COPY.card.duration}</dt><dd>{m.stats.duration}</dd></div>
-          <div><dt>{COPY.card.size}</dt><dd>{m.stats.size}</dd></div>
-          <div><dt>{COPY.card.fps}</dt><dd>{m.stats.fps}</dd></div>
-        </dl>
+        {m.statsPending ? (
+          <div className="dat-stats-pending" role="status">
+            <Icon name="loading" size={14} className="animate-spin" />
+            <span>{COPY.card.statsLoading}</span>
+          </div>
+        ) : (
+          <dl className="dat-stats">
+            <div><dt>{COPY.card.episodes}</dt><dd>{m.stats.episodes}</dd></div>
+            <div><dt>{COPY.card.duration}</dt><dd>{m.stats.duration}</dd></div>
+            <div><dt>{COPY.card.size}</dt><dd>{m.stats.size}</dd></div>
+            <div><dt>{COPY.card.fps}</dt><dd>{m.stats.fps}</dd></div>
+          </dl>
+        )}
         <div className={`dat-hintline${m.hint.kind === 'warn' ? ' dat-warn' : ''}${m.hint.kind === 'ok' ? ' dat-ok' : ''}${m.hint.kind === 'bad' ? ' dat-bad' : ''}`}>
           <Icon name={m.hint.icon} size={14} className={m.hint.spin ? 'animate-spin' : undefined} />
           <span>{m.hint.text}</span>
@@ -159,8 +168,12 @@ export default function DatasetCard({
           </>
         ) : (
           <>
-            {m.actions.map((a) => <ActionButton key={a.id} a={a} onAction={onAction} />)}
-            {m.inlineNote ? <span className="dat-small dat-grow">{m.inlineNote}</span> : <span className="dat-grow" />}
+            {/* The buttons wrap inside their own box; the ⋮ menu stays on the
+                first row beside it, never on a row of its own (V2-13). */}
+            <div className="dat-card-btns">
+              {m.actions.map((a) => <ActionButton key={a.id} a={a} onAction={onAction} />)}
+              {m.inlineNote ? <span className="dat-small dat-grow">{m.inlineNote}</span> : null}
+            </div>
             {m.menu ? <CardMenu items={m.menu} onSelect={onMenu} onOpenChange={onMenuOpenChange} /> : null}
             {m.actions2.length ? (
               <div className="dat-card-actions2">

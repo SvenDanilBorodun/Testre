@@ -14,7 +14,7 @@
 // instead (the same payload), so a lost subscription can never lock a progress
 // dialog for good.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 export const STATE_POLL_MS = 2000;
 export const TOPIC_SILENT_MS = 3000;
@@ -29,6 +29,31 @@ export function stepOfStage(op, stage) {
   if (stage === 'copy') return 1;
   if (stage === 'verify' || stage === 'swap' || stage === 'upload') return 2;
   return 0;
+}
+
+/**
+ * `payload` with every running BYTE job's `done` held at the most it reached
+ * (`peaks`: job_id → bytes, updated here; jobs no longer listed are forgotten).
+ * The robot counts a download's bytes in its tmp, which reads 0 for a moment
+ * when the finished tmp is swapped into place: a job's progress must never run
+ * backwards on the page (V2-14). Idempotent: the same payload gives the same rows.
+ */
+export function withMonotonicBytes(payload, peaks) {
+  if (!payload || !Array.isArray(payload.jobs)) return payload;
+  const live = new Set();
+  let changed = false;
+  const jobs = payload.jobs.map((j) => {
+    if (j.unit !== 'bytes' || j.state !== 'running') return j;
+    live.add(j.job_id);
+    const done = Number(j.done) || 0;
+    const peak = Math.max(peaks.get(j.job_id) || 0, done);
+    peaks.set(j.job_id, peak);
+    if (peak === done) return j;
+    changed = true;
+    return { ...j, done: peak };
+  });
+  [...peaks.keys()].forEach((id) => { if (!live.has(id)) peaks.delete(id); });
+  return changed ? { ...payload, jobs } : payload;
 }
 
 /**
@@ -58,8 +83,11 @@ export default function useDatenJobs({ datenState, command, now = Date.now }) {
 
   const payload = (datenState && datenState.payload) || null;
 
-  // The freshest payload: the topic's, or the polled one when that is newer.
-  const effective = polled && (!payload || (polled.at > (datenState.receivedAt || 0))) ? polled.payload : payload;
+  // The freshest payload: the topic's, or the polled one when that is newer —
+  // with every byte job's progress held at its peak.
+  const fresh = polled && (!payload || (polled.at > (datenState.receivedAt || 0))) ? polled.payload : payload;
+  const peaksRef = useRef(new Map());
+  const effective = useMemo(() => withMonotonicBytes(fresh, peaksRef.current), [fresh]);
 
   // Finish what the robot reports finished.
   useEffect(() => {

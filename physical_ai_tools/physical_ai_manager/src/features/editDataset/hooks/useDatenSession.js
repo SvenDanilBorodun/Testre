@@ -23,9 +23,9 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import { MAX_LINK_DATASETS, TOKEN_TTL_S } from '../datenContract';
 import { DatenHttpError, dsUrl, getJson, isTokenError, libUrl } from '../api/datenHttp';
 import {
-  applyLibraryReply, busyChanges, emptyLibrary, stampBusyChange,
+  applyLibraryReply, busyChanges, emptyLibrary, onlineCardsWithoutNumbers, stampBusyChange,
 } from '../model/libraryState';
-import { busyMap } from './useDatenState';
+import { busyKindsById } from './useDatenState';
 
 export const HINT_POLL_MS = 5000;
 export const HINT_POLL_MAX_MS = 120000;
@@ -62,7 +62,19 @@ const tokenFresh = (t, nowMs) => !!(t && t.token && t.expiresAt - nowMs > (1 - R
 export default function useDatenSession({
   enabled, command, namespaces, inSync, accountFp, datenState, now = Date.now,
 }) {
-  const [lib, dispatch] = useReducer(reducer, undefined, emptyLibrary);
+  const [lib, rawDispatch] = useReducer(reducer, undefined, emptyLibrary);
+  // The library as of the LAST action, before React renders it: a caller that
+  // awaited `loadLibrary` reads the reply it waited for through `getLib()`
+  // (a `lib` captured by the page is one render behind — V2-5's toast once
+  // read the state from before the edit). The same pure reducer runs here and
+  // in React, in the same order, so both arrive at the same state.
+  const latestRef = useRef(null);
+  if (latestRef.current === null) latestRef.current = lib;
+  const dispatch = useCallback((action) => {
+    latestRef.current = reducer(latestRef.current, action);
+    rawDispatch(action);
+  }, []);
+  const getLib = useCallback(() => latestRef.current, []);
   const [status, setStatus] = useState('idle');
   const [hubLoading, setHubLoading] = useState(false);
   const seqRef = useRef(0);
@@ -150,13 +162,28 @@ export default function useDatenSession({
   /**
    * One `library` request. `hub` asks Hugging Face too; `ids` restricts it to
    * those datasets (and their hub repos). Resolves true when a reply landed.
+   *
+   * A reply to named ids that leaves one of them a „Nur online" card without
+   * its numbers (the robot reads an online-only `info.json` only for the whole
+   * list — a whole delete with a hub copy) reads the whole list right away, in
+   * the same tick, so the card shows „loading" and then its values, never „–"
+   * (V2-14). A whole-list read already on its way may have been answered
+   * before the change, so ONE more follows it then. The whole list never asks
+   * again by itself: no loop.
    */
+  const fullHubLoadsRef = useRef(0);
+  const refullRef = useRef(false);
+  const loadRef = useRef(null);
   const loadLibrary = useCallback(async ({ hub = false, ids = null } = {}) => {
     const seq = ++seqRef.current;
     const ns = nsRef.current;
     if (!ns.length) return false;
     const req = { seq, hub: !!hub, ids: ids && ids.length ? ids : null };
-    if (hub && !req.ids) setHubLoading(true);
+    const full = hub && !req.ids;
+    if (full) {
+      fullHubLoadsRef.current += 1;
+      setHubLoading(true);
+    }
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         // eslint-disable-next-line no-await-in-loop
@@ -172,6 +199,10 @@ export default function useDatenSession({
           setStatus('ready');
           const localIds = Array.isArray(reply.local) ? reply.local.map((e) => e.id).filter(Boolean) : [];
           mintMissing(localIds);
+          if (req.hub && req.ids && onlineCardsWithoutNumbers(latestRef.current, req.ids).length) {
+            if (fullHubLoadsRef.current === 0) loadRef.current({ hub: true });
+            else refullRef.current = true;
+          }
           return true;
         } catch (err) {
           if (err instanceof DatenHttpError && isTokenError(err.code) && attempt === 0) continue;
@@ -183,9 +214,18 @@ export default function useDatenSession({
       }
       return false;
     } finally {
-      if (hub && !req.ids && aliveRef.current) setHubLoading(false);
+      if (full) {
+        fullHubLoadsRef.current -= 1;
+        if (fullHubLoadsRef.current === 0 && refullRef.current && aliveRef.current) {
+          refullRef.current = false;
+          loadRef.current({ hub: true });
+        } else if (aliveRef.current && fullHubLoadsRef.current === 0) {
+          setHubLoading(false);
+        }
+      }
     }
-  }, [libToken, mintMissing, now]);
+  }, [libToken, mintMissing, now, dispatch]);
+  loadRef.current = loadLibrary;
 
   /** „Aktualisieren", opening the tab, after a job: the whole list, the hub too when the token is this student's. */
   const refresh = useCallback(() => loadLibrary({ hub: !!inSyncRef.current }), [loadLibrary]);
@@ -257,7 +297,7 @@ export default function useDatenSession({
       if (!received) prevBusyRef.current = null;
       return;
     }
-    const nextBusy = busyMap(payload);
+    const nextBusy = busyKindsById(payload);
     const shown = (id) => !!(libRef.current.local[id] || (libRef.current.hub && libRef.current.hub.entries[id]));
     let changed;
     if (prevBusyRef.current === null) {
@@ -272,7 +312,7 @@ export default function useDatenSession({
       dispatch({ type: 'stamp', ids: changed, seq: seqRef.current });
       refetchIds(changed);
     }
-  }, [enabled, received, payload, refetchIds]);
+  }, [enabled, received, payload, refetchIds, dispatch]);
 
   // A local dataset the library reports in_session AFTER the first message (a
   // card that appeared later) is stamped too, so it is judged by a fresh reply.
@@ -285,7 +325,7 @@ export default function useDatenSession({
       dispatch({ type: 'stamp', ids: unstamped, seq: seqRef.current });
       refetchIds(unstamped);
     }
-  }, [enabled, lib.stateSeen, lib.local, lib.stamps, refetchIds]);
+  }, [enabled, lib.stateSeen, lib.local, lib.stamps, refetchIds, dispatch]);
 
   // Reset when the page is disabled (signed out, link lost).
   useEffect(() => {
@@ -294,7 +334,7 @@ export default function useDatenSession({
     prevBusyRef.current = null;
     pollStartRef.current = null;
     setStatus((s) => (s === 'old_image' ? s : 'idle'));
-  }, [enabled]);
+  }, [enabled, dispatch]);
 
   // ---- per-dataset reads ---------------------------------------------------
   /** GET `/ds/<T>/<path>` with one re-mint on a token error. */
@@ -338,6 +378,7 @@ export default function useDatenSession({
   return {
     status,
     lib,
+    getLib,
     hubLoading,
     refresh,
     refetchIds,

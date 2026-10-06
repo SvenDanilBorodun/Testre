@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import DatenPage from '../DatenPage';
 import COPY from '../../../features/editDataset/datenCopy';
+import { fill, fmtDate } from '../../../features/editDataset/model/format';
 import { openPlayer } from '../../../features/editDataset/editDatasetSlice';
 import { setRenderProbeForTests } from '../../../features/editDataset/renderProbe';
 import {
@@ -111,6 +112,7 @@ async function openPlayerView(storeOpts = {}) {
   return { store, ...utils };
 }
 const frameText = () => document.querySelector('[data-frame]').textContent;
+const requestsHubstate = () => global.fetch.mock.calls.filter(([u]) => String(u).endsWith('/hubstate')).length;
 const currentRow = () => document.querySelector('.dat-ep-open[aria-current="true"]').closest('[data-episode]').getAttribute('data-episode');
 const key = (code, extra = {}) => fireEvent.keyDown(window, { code, ...extra });
 const commandCalls = (action) => mockCommand.mock.calls.filter(([a]) => a === action).map(([, args]) => args);
@@ -219,6 +221,16 @@ describe('the player (§F)', () => {
     expect(poseSource().version).not.toBe(f.version);
   });
 
+  it('the open dataset turns crashed (a session into it ended unfinished): the player stays, without a sync badge (V2-12)', async () => {
+    await openPlayerView();
+    expect(document.querySelector('.dat-pl-meta [data-sync]')).not.toBeNull();
+    world.local = [local(W, { total_episodes: 3, state: 'in_session' })];
+    act(() => setDaten({ busy: [{ id: W, kind: 'record' }] }));
+    act(() => setDaten({ busy: [] }));
+    await waitFor(() => expect(document.querySelector('.dat-pl-meta [data-sync]')).toBeNull());
+    expect(screen.getByText(COPY.player.eyebrow)).toBeInTheDocument();
+  });
+
   it('the twin is not mounted while the robot link is down', async () => {
     const store = makeStore({ connected: false });
     store.dispatch(openPlayer(W));
@@ -264,7 +276,8 @@ describe('the tools (§G6, §J.3, R-9)', () => {
     fireEvent.click(screen.getByRole('button', { name: new RegExp(COPY.tools.split) }));
     const dlg = await screen.findByRole('dialog');
     fireEvent.change(within(dlg).getByPlaceholderText(COPY.tool.placeholder), { target: { value: '2' } });
-    const nameInput = within(dlg).getByDisplayValue('omx_f_w Teil 2');
+    // V2-11: no display name → the task part („W"), never „omx_f_w Teil 2" (omx_f_omx_f_…)
+    const nameInput = within(dlg).getByDisplayValue('W Teil 2');
     expect(dlg.textContent).toContain(COPY.tool.splitKeeps);
     expect(dlg.textContent).toContain('1 Episode: 2');
     fireEvent.change(nameInput, { target: { value: '' } });
@@ -301,6 +314,79 @@ describe('the tools (§G6, §J.3, R-9)', () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('1 Episode gelöscht.', expect.anything()));
   });
 
+  // V2-5: the toast is decided by the state AFTER the edit — the mockup's
+  // „… Lade den Datensatz hoch, damit das Training die neue Version nutzt." with
+  // „Jetzt hochladen" for a dataset whose hub copy is now behind.
+  async function deleteFirstEpisode() {
+    key('Delete');
+    fireEvent.click(await screen.findByRole('button', { name: COPY.player.deleteMarked }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '1 Episode löschen' }));
+    await waitFor(() => expect(commandCalls('edit')).toHaveLength(1));
+  }
+  const finishJob = () => act(() => setDaten({ jobs: [{ job_id: 'job-1', op: 'delete', state: 'done', datasets: [W], outputs: [W], stage: null, done: 3, total: 3, unit: 'steps' }] }));
+  const actionToast = () => toast.success.mock.calls.find(([body]) => typeof body === 'function');
+  const UPLOAD_TOAST = '1 Episode gelöscht. Lade den Datensatz hoch, damit das Training die neue Version nutzt.';
+
+  it('an uploaded (current) dataset: the robot re-reads it as changed → the upload toast with „Jetzt hochladen" (V2-5)', async () => {
+    await openPlayerView();
+    await deleteFirstEpisode();
+    // what the robot answers once the edit is done
+    world.local = [local(W, { total_episodes: 2, meta_digest: 'd-after' })];
+    world.sync = { [W]: { state: 'changed', head: `head-${W}` } };
+    world.summaries[W] = summary(W, 2, { meta_digest: 'd-after' });
+    finishJob();
+    await waitFor(() => expect(actionToast()).toBeDefined());
+    const [body, opts] = actionToast();
+    const view = render(body({ id: 't1' }));
+    expect(view.container.textContent).toContain(UPLOAD_TOAST);
+    expect(within(view.container).getByRole('button', { name: COPY.toast.uploadAction })).toBeInTheDocument();
+    expect(opts).toEqual({ duration: 8000 });
+    fireEvent.click(within(view.container).getByRole('button', { name: COPY.toast.uploadAction }));
+    const dlg = await screen.findByRole('dialog');
+    await within(dlg).findByText(fill(COPY.upload.newTitle, { name: 'omx_f_w' }));
+  });
+
+  it('the re-read did not land: an uploaded dataset is still judged changed (an edit always changes it here)', async () => {
+    await openPlayerView();
+    await deleteFirstEpisode();
+    const realFetch = global.fetch;
+    global.fetch = vi.fn((url) => (String(url).includes('/library')
+      ? Promise.resolve({ ok: false, status: 502, headers: { get: () => null }, json: () => Promise.reject(new Error('x')) })
+      : realFetch(url)));
+    finishJob();
+    await waitFor(() => expect(actionToast()).toBeDefined());
+    const view = render(actionToast()[0]({ id: 't2' }));
+    expect(view.container.textContent).toContain(UPLOAD_TOAST);
+  });
+
+  async function plainToastAfter(after, head) {
+    world.local = [local(W, { total_episodes: 2, meta_digest: 'd-after' })];
+    world.sync = { [W]: { state: after, head } };
+    world.summaries[W] = summary(W, 2, { meta_digest: 'd-after' });
+    finishJob();
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('1 Episode gelöscht.', expect.anything()));
+    expect(actionToast()).toBeUndefined();
+  }
+
+  it('only here (local): the plain toast', async () => {
+    world.sync = { [W]: { state: 'local', head: null } };
+    await openPlayerView();
+    await deleteFirstEpisode();
+    await plainToastAfter('local', null);
+  });
+
+  it('a newer hub copy edited anyway (now both sides changed): the plain toast — nothing invites a plain upload', async () => {
+    world.sync = { [W]: { state: 'newer', head: 'h' } };
+    const { store } = await openPlayerView();
+    key('Delete');
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: COPY.newer.anyway }));
+    await waitFor(() => expect(store.getState().editDataset.marks[W].indices).toEqual([0]));
+    fireEvent.click(await screen.findByRole('button', { name: COPY.player.deleteMarked }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '1 Episode löschen' }));
+    await waitFor(() => expect(commandCalls('edit')).toHaveLength(1));
+    await plainToastAfter('conflict', 'h');
+  });
+
   it('a failed job: its German message, the dialog closes', async () => {
     await openPlayerView();
     key('Delete');
@@ -327,6 +413,49 @@ describe('the tools (§G6, §J.3, R-9)', () => {
     await waitFor(() => expect(document.querySelectorAll('.dat-ep-row').length).toBe(2));
     await waitFor(() => expect(store.getState().editDataset.marks[W]).toBeUndefined());
     expect(toast).toHaveBeenCalledWith(COPY.marks.cleared, expect.anything());
+  });
+
+  // V2-15: the banners and the newerWarn dialog name the counts and dates the
+  // mockup shows — from the robot's hubstate (the library lists a local
+  // dataset's hub entry without numbers); without it, the sentence without them.
+  const HUB_AT = '2026-10-05T08:15:00Z';
+  const withHubState = (state, n = 11) => {
+    world.hubstate = (hid) => ({
+      v: 1, id: hid, sync: { state, reason: null },
+      hub: { exists: true, private: false, head: 'h', last_modified: HUB_AT, total_episodes: n, duration_s: 220 },
+      local: { total_episodes: 3 }, new_repo_private: false,
+    });
+  };
+
+  it('the newer banner: „(11 Episoden, <date>)"; the newerWarn dialog: the bold count, its date, „Hier sind es 3."', async () => {
+    world.sync = { [W]: { state: 'newer', head: 'h' } };
+    world.local = [local(W, { total_episodes: 3, display_name: 'Würfel' })];
+    withHubState('newer');
+    await openPlayerView();
+    const banner = document.querySelector('[data-banner="newer"]');
+    await waitFor(() => expect(banner.textContent).toContain(fill(COPY.banner.newer, { n: 11, date: fmtDate(HUB_AT) })));
+    key('Delete');
+    const dlg = await screen.findByRole('dialog');
+    expect(dlg.textContent).toContain(`Auf Hugging Face liegt eine neuere Version von „Würfel“: 11 Episoden (${fmtDate(HUB_AT)}). Hier sind es 3.`);
+    expect(within(dlg).getByText('11 Episoden').tagName).toBe('B');
+  });
+
+  it('the changed banner: „Das Training nutzt noch die alte Version (10 Episoden)."', async () => {
+    world.sync = { [W]: { state: 'changed', head: 'h' } };
+    withHubState('changed', 10);
+    await openPlayerView();
+    await waitFor(() => expect(document.querySelector('[data-banner="changed"]').textContent).toContain(fill(COPY.banner.changed, { n: 10 })));
+  });
+
+  it('hubstate unavailable: the banner without numbers, never „–"', async () => {
+    world.sync = { [W]: { state: 'newer', head: 'h' } };
+    world.hubstate = () => ({ v: 1, sync: { state: 'unknown', reason: 'unreachable' }, hub: null, local: {} });
+    await openPlayerView();
+    const banner = document.querySelector('[data-banner="newer"]');
+    await waitFor(() => expect(requestsHubstate()).toBeGreaterThan(0));
+    await act(async () => { await Promise.resolve(); });
+    expect(banner.textContent).toContain(COPY.banner.newerShort);
+    expect(banner.textContent).not.toMatch(/\(–|– Episoden|Episoden, –/);
   });
 
   it('a NEWER hub copy: marking asks first („Trotzdem hier bearbeiten" goes on, once)', async () => {

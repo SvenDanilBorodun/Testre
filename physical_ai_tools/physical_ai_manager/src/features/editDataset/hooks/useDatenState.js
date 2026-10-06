@@ -51,10 +51,22 @@ export function parseDatenState(text) {
   return { v: 1, seq: Number(v.seq) || 0, busy, jobs, transfer };
 }
 
-/** `{id: kind}` of a payload's busy list. */
-export function busyMap(payload) {
+/**
+ * `{id: kinds[]}` of a payload's busy list: EVERY kind an id is listed with,
+ * in BUSY_KINDS order. One id can be listed twice — a Start that waits for
+ * that dataset's upload is `record` AND `upload` (§J.5) — and no reader may
+ * depend on which of the two the robot happened to list last (C-2).
+ */
+export function busyKindsById(payload) {
+  const sets = {};
+  if (payload && Array.isArray(payload.busy)) {
+    payload.busy.forEach((b) => {
+      if (!sets[b.id]) sets[b.id] = new Set();
+      sets[b.id].add(b.kind);
+    });
+  }
   const out = {};
-  if (payload && Array.isArray(payload.busy)) payload.busy.forEach((b) => { out[b.id] = b.kind; });
+  Object.keys(sets).forEach((id) => { out[id] = BUSY_KINDS.filter((k) => sets[id].has(k)); });
   return out;
 }
 

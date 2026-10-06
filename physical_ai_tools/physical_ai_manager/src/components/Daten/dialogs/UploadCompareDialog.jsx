@@ -42,7 +42,7 @@ export default function UploadCompareDialog({
 
   if (status === 'loading') {
     return (
-      <Dialog title={fill(COPY.upload.newTitle, { name })} icon="cloudUpload" iconTone="accent" onClose={onClose}>
+      <Dialog focusKey={status} title={fill(COPY.upload.newTitle, { name })} icon="cloudUpload" iconTone="accent" onClose={onClose}>
         <p className="dat-small"><Icon name="loading" size={14} className="animate-spin" /> {COPY.upload.checking}</p>
         <div className="dat-acts">
           <button type="button" className="dat-btn" data-autofocus onClick={run(onClose)}>{COPY.tool.cancel}</button>
@@ -55,7 +55,7 @@ export default function UploadCompareDialog({
   if (!hub || !hub.exists) {
     const unknown = status !== 'ready' || !hub;
     return (
-      <Dialog title={fill(COPY.upload.newTitle, { name })} icon="cloudUpload" iconTone="accent" onClose={onClose}>
+      <Dialog focusKey={status} title={fill(COPY.upload.newTitle, { name })} icon="cloudUpload" iconTone="accent" onClose={onClose}>
         {unknown ? null : (
           <p data-visibility={privateNew ? 'private' : 'public'}>
             {privateNew ? COPY.upload.visibilityPrivate : COPY.upload.visibilityPublic}
@@ -81,7 +81,7 @@ export default function UploadCompareDialog({
   const head = hub.head || null;
   const conflict = syncState === 'conflict';
   return (
-    <Dialog title={COPY.upload.compareTitle} icon="cloudUpload" iconTone="accent" onClose={onClose} wide={conflict}>
+    <Dialog focusKey={status} title={COPY.upload.compareTitle} icon="cloudUpload" iconTone="accent" onClose={onClose} wide={conflict}>
       <div className="dat-cmp">
         <div>
           <small><Icon name="cloud" size={14} />{COPY.upload.onHub}</small>

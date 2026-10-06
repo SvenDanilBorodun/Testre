@@ -186,7 +186,6 @@ export default function LibraryView({
 
       {merge.active ? (
         <MergePanel
-          key={merge.ids.join('|')}
           entries={mergeEntries}
           own={own}
           ownerNames={ownerNames}

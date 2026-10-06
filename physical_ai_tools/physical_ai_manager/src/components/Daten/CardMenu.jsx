@@ -111,6 +111,10 @@ export default function CardMenu({ items, onSelect, onOpenChange }) {
                 onClick={(e) => {
                   releasePointerFocus(e);
                   close('select');
+                  // A keyboard choice puts the focus back on ⋮ first, so a
+                  // dialog it opens returns the focus there (§G8); a mouse
+                  // choice leaves no button focused (Space must never re-press).
+                  if (!(e.detail > 0) && triggerRef.current) triggerRef.current.focus();
                   onSelect(it.id);
                 }}
               >

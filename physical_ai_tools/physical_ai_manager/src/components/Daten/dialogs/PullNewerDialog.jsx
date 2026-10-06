@@ -38,7 +38,7 @@ export default function PullNewerDialog({
 
   if (status === 'loading') {
     return (
-      <Dialog title={COPY.pull.title} icon="cloudDownload" iconTone="sky" onClose={onClose}>
+      <Dialog focusKey={status} title={COPY.pull.title} icon="cloudDownload" iconTone="sky" onClose={onClose}>
         <p className="dat-small"><Icon name="loading" size={14} className="animate-spin" /> {COPY.upload.checking}</p>
         <div className="dat-acts">
           <button type="button" className="dat-btn" data-autofocus onClick={run(onClose)}>{COPY.tool.cancel}</button>
@@ -48,7 +48,7 @@ export default function PullNewerDialog({
   }
   if (!hub || !hub.exists || !hub.head) {
     return (
-      <Dialog title={COPY.pull.title} icon="cloudDownload" iconTone="sky" onClose={onClose}>
+      <Dialog focusKey={status} title={COPY.pull.title} icon="cloudDownload" iconTone="sky" onClose={onClose}>
         <p>{status === 'ready' ? COPY.fetch.notFound : COPY.fetch.unreachable}</p>
         <div className="dat-acts">
           <button type="button" className="dat-btn" data-autofocus onClick={run(onClose)}>{COPY.tool.cancel}</button>
@@ -58,7 +58,7 @@ export default function PullNewerDialog({
   }
   const head = hub.head;
   return (
-    <Dialog title={COPY.pull.title} icon="cloudDownload" iconTone="sky" onClose={onClose} wide={conflict}>
+    <Dialog focusKey={status} title={COPY.pull.title} icon="cloudDownload" iconTone="sky" onClose={onClose} wide={conflict}>
       <div className="dat-cmp">
         <div>
           <small><Icon name="hardDrive" size={14} />{COPY.pull.here}</small>

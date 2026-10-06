@@ -11,7 +11,7 @@
 // name and where it will be saved (always the student's own namespace, §D2).
 // The button stays disabled while any check fails or the name is unusable.
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import Icon from '../icons/Icon';
 import { releasePointerFocus } from '../Record/ActionBar';
 import COPY from '../../features/editDataset/datenCopy';
@@ -30,6 +30,10 @@ export default function MergePanel({
 }) {
   const sel = useMemo(() => entries || [], [entries]);
   const [name, setName] = useState(null);
+  // A new pick proposes a new name (the mockup's rule), without remounting the
+  // panel under the student's focus.
+  const idsKey = sel.map((e) => e.id).join('|');
+  useEffect(() => { setName(null); }, [idsKey]);
   const defaultName = sel[0] ? fill(COPY.merge.defaultName, { name: sel[0].display_name || sel[0].name }) : '';
   const value = name ?? defaultName;
   const { checks, ok } = useMemo(() => mergeChecks(sel), [sel]);

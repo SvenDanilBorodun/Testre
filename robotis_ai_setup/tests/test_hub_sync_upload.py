@@ -439,6 +439,37 @@ class TheDownloadedFileSet(HubCase):
         self.assertEqual(sorted(self.H._verify_against_listing(tmp, self.listing(files))), sorted(files))
 
 
+class TheRawFileGet(HubCase):
+    """V2-17: the fake hub answers the sidecar's raw GET of one file at a head
+    (daten/hub_reads._json_at: hf_hub_url + get_session().get +
+    hf_raise_for_status, never hf_hub_download) with the hub's rules, so the
+    harness shows online-only cards like the real hub does."""
+
+    def get(self, path, revision, token=LENA_TOKEN, repo=REPO):
+        from huggingface_hub import hf_hub_url
+        from huggingface_hub.utils import build_hf_headers, get_session, hf_raise_for_status
+        r = get_session().get(hf_hub_url(repo, path, repo_type='dataset', revision=revision),
+                              headers=build_hf_headers(token=token))
+        hf_raise_for_status(r)
+        return json.loads(r.content.decode('utf-8'))
+
+    def test_the_file_at_a_head_with_the_hubs_access_rules(self):
+        write_tree(self.root, BASE)
+        head = self.FS.put_tree(REPO, self.root, private=True, title='seed')
+        self.assertEqual(self.get('meta/info.json', head), json.loads(INFO))
+        self.assertEqual(self.get('meta/info.json', 'v3.0'), json.loads(INFO))
+        from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError, RepositoryNotFoundError
+        with self.assertRaises(RepositoryNotFoundError):
+            self.get('meta/info.json', head, token=False)                       # anonymous on a private repo
+        with self.assertRaises(EntryNotFoundError):
+            self.get('meta/nothing.json', head)
+        self.faults({'op': 'resolve', 'kind': '503', 'times': 1})
+        with self.assertRaises(HfHubHTTPError) as e:
+            self.get('meta/info.json', head)
+        self.assertEqual(e.exception.response.status_code, 503)
+        self.assertEqual(self.get('meta/info.json', head), json.loads(INFO))   # the fault was once
+
+
 class FailuresAreClassifiedByTheHub(HubCase):
 
     def test_a_lost_response_after_the_commit_landed_is_success(self):
@@ -1182,13 +1213,14 @@ token=False (argument or HfApi(token=False)) is anonymous.
 """
 import os
 if os.environ.get('FAKEHUB_ROOT'):
-    import fnmatch, json, shutil, sys, time
+    import fnmatch, json, re, shutil, sys, time
     from pathlib import Path
+    from urllib.parse import unquote
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import httpx
     import huggingface_hub
     from huggingface_hub import hf_api
-    from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError, RepositoryNotFoundError
+    from huggingface_hub.errors import HfHubHTTPError, RemoteEntryNotFoundError, RepositoryNotFoundError
     from huggingface_hub.hf_api import (CommitInfo, DatasetInfo, GitCommitInfo, GitRefInfo, GitRefs, RepoFile,
                                         RepoFolder, RepoUrl)
     import fakehub_store as FS
@@ -1467,11 +1499,48 @@ if os.environ.get('FAKEHUB_ROOT'):
         sha = FS.resolve(repo_id, refs, revision)
         e = FS.commit(repo_id, sha)['tree'].get(filename)
         if e is None:
-            raise EntryNotFoundError(f'404 {filename}', response=FS._resp(404))
+            raise RemoteEntryNotFoundError(f'404 {filename}', response=FS._resp(404))
         dst = (Path(local_dir) if local_dir else FS.ROOT / 'cache' / repo_id / sha) / filename
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(FS.blob_path(e['sha256']), dst)
         return str(dst)
+
+    _RESOLVE = re.compile(r'^https?://[^/]+/datasets/([^/]+/[^/]+)/resolve/([^/]+)/(.+)$')
+
+    class _Session:
+        """The raw GET of one file at a revision -- the product's daten/hub_reads._json_at
+        (hf_hub_url + get_session().get + hf_raise_for_status) -- answered from the store with
+        the hub's access rules (op `resolve`, faults apply); every other request goes to the
+        real session."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def get(self, url, *, headers=None, **kw):
+            m = _RESOLVE.match(str(url))
+            if not m:
+                return self._real.get(url, headers=headers, **kw)
+            repo_id, rev, path = m.group(1), unquote(m.group(2)), unquote(m.group(3))
+            auth = {str(k).lower(): v for k, v in (headers or {}).items()}.get('authorization', '')
+            time.sleep(DELAY)
+            refs = FS.check_access(repo_id, auth[7:] if auth.startswith('Bearer ') else None, op='resolve')
+            e = FS.commit(repo_id, FS.resolve(repo_id, refs, rev))['tree'].get(path)
+            if e is None:
+                raise RemoteEntryNotFoundError(f'404 {path}', response=FS._resp(404))
+            return httpx.Response(200, content=FS.blob_path(e['sha256']).read_bytes(),
+                                  request=httpx.Request('GET', str(url)))
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    import huggingface_hub.utils as _hf_utils
+    import huggingface_hub.utils._http as _hf_http
+    _real_get_session = _hf_http.get_session
+
+    def get_session():
+        return _Session(_real_get_session())
+    _hf_utils.get_session = get_session
+    _hf_http.get_session = get_session
 
     for _name, _fn in [('whoami', whoami), ('repo_exists', repo_exists), ('repo_info', repo_info),
                        ('dataset_info', repo_info), ('list_datasets', list_datasets), ('list_models', list_models),

@@ -882,7 +882,17 @@ class TheOldPageUpload(ServiceCase):
         path = self.dataset('lena/omx_f_a')
         self.node.on_recording = True
         self.node.data_manager = types.SimpleNamespace(_save_path=path)
-        self.assertEqual(self.svc.send_control_upload(str(path), self.request(path)), T.BUSY_RECORD_DE)
+        self.assertEqual(self.svc.send_control_upload(str(path), self.request(path)), T.BUSY_RECORD_UPLOAD_DE)
+        self.assertEqual(self.hf.sent, [])
+
+    def test_a_daten_upload_during_a_recording_says_upload_and_an_edit_says_edit(self):
+        """T1-3: the same busy kind, a sentence per action."""
+        path = self.dataset('lena/omx_f_a')
+        self.node.on_recording = True
+        self.node.data_manager = types.SimpleNamespace(_save_path=path)
+        self.refused(self.cmd('upload', dataset='lena/omx_f_a'), 'busy_record', T.BUSY_RECORD_UPLOAD_DE)
+        self.refused(self.cmd('edit', op='delete', dataset='lena/omx_f_a', meta_digest=self.digest(path),
+                              episodes=[0]), 'busy_record', T.BUSY_RECORD_DE)
         self.assertEqual(self.hf.sent, [])
 
     def test_a_free_dataset_is_handed_over_under_the_upload_lease(self):

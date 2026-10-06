@@ -1000,6 +1000,8 @@ class DatenService:
         with self._lock:
             busy = self._busy_locked(key)
             if busy and not (release_after and busy == 'edit' and self._leases.get(key) == 'edit'):
+                if busy == 'record':                     # T1-3: an upload is not an edit
+                    raise Refusal('busy_record', T.BUSY_RECORD_UPLOAD_DE)
                 raise Refusal(*_BUSY[busy])
             if not release_after:
                 self._leases[key] = 'upload'

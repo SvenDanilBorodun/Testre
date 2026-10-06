@@ -399,6 +399,17 @@ def _refuse(request, slots):
         slots.release()
 
 
+def listen_backlog(max_connections=C.MAX_CONNECTIONS):
+    """The listen backlog: twice the connection cap. socketserver's default of 5
+    made a burst of parallel connects (a page loading 30 thumbnails) overflow
+    the accept queue on Linux; the kernel then drops the SYN and the client
+    retries only after a full second. The cap is enforced after ``accept``
+    (``Server.process_request``), so the queue must hold a burst of at least the
+    cap's size, plus the connections being refused meanwhile. Never below
+    twice the contract's cap, whatever cap a caller passes."""
+    return 2 * max(int(max_connections), C.MAX_CONNECTIONS)
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -407,6 +418,7 @@ class Server(ThreadingHTTPServer):
         self.sidecar = sidecar
         self._connections = threading.BoundedSemaphore(int(max_connections))
         self._refusers = threading.BoundedSemaphore(_REFUSERS)
+        self.request_queue_size = listen_backlog(max_connections)     # read by server_activate's listen()
         super().__init__(address, Handler)
 
     def process_request(self, request, client_address):

@@ -351,26 +351,70 @@ def test_parallel_gets_of_one_thumbnail_build_it_once_and_all_succeed(root, tmp_
         srv.close()
 
 
+# A SYN dropped from a full accept queue is retried by the client only after a
+# full second (Linux); a connect that took this long was not accepted at once.
+SYN_RETRY_S = 0.9
+
+
 def test_connection_33_is_refused_and_an_idle_socket_is_closed(root, tmp_path, monkeypatch):
     monkeypatch.setattr(HS.Handler, 'timeout', 3.0)
     srv = Running(root, tmp_path)
     held = []
     try:
+        # Every idle timer starts at its socket's accept, so none can end before
+        # `timeout` after the first connect (measured from here, never from the
+        # end of a connect phase whose length depends on the host).
+        t0 = time.monotonic()
         for _ in range(C.MAX_CONNECTIONS):
             held.append(socket.create_connection(('127.0.0.1', srv.port), timeout=10))
+        assert time.monotonic() - t0 < SYN_RETRY_S, 'a connect waited for a SYN retry'
         assert _wait(lambda: srv.server._connections._value == 0)
         status, headers, body = srv.get(f'{C.API_PREFIX}/health')
         assert (status, json.loads(body), headers['retry-after']) == (503, {'error': 'overloaded'}, '2')
         assert headers['x-content-type-options'] == 'nosniff'
         # the idle ones are closed after the socket timeout, freeing their slots
-        t0 = time.monotonic()
         held[0].settimeout(10)
         assert held[0].recv(1) == b''
-        assert 2.5 <= time.monotonic() - t0 < 6
+        assert 2.9 <= time.monotonic() - t0 < 6
         assert _wait(lambda: srv.server._connections._value == C.MAX_CONNECTIONS, timeout=10)
         assert srv.get(f'{C.API_PREFIX}/health')[0] == 200
     finally:
         for s in held:
+            s.close()
+        srv.close()
+
+
+def test_a_burst_of_parallel_connects_is_accepted_at_once(root, tmp_path):
+    """V2-1: the listen backlog holds a burst of the cap's size. With
+    socketserver's default (5) a page's 30 parallel thumbnails overflowed the
+    accept queue on Linux and part of them waited a SYN retry (1 s or more)."""
+    srv = Running(root, tmp_path)
+    assert srv.server.request_queue_size == HS.listen_backlog() >= 2 * C.MAX_CONNECTIONS
+    assert HS.listen_backlog(4) == HS.listen_backlog()                  # never below twice the contract's cap
+    socks, times, errors = [], [], []
+    lock = threading.Lock()
+    barrier = threading.Barrier(C.MAX_CONNECTIONS)
+
+    def connect():
+        try:
+            barrier.wait(10)
+            t = time.monotonic()
+            s = socket.create_connection(('127.0.0.1', srv.port), timeout=10)
+            with lock:
+                times.append(time.monotonic() - t)
+                socks.append(s)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    try:
+        threads = [threading.Thread(target=connect, daemon=True) for _ in range(C.MAX_CONNECTIONS)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(15)
+        assert errors == [] and len(times) == C.MAX_CONNECTIONS
+        assert max(times) < SYN_RETRY_S, sorted(round(t, 3) for t in times)
+    finally:
+        for s in socks:
             s.close()
         srv.close()
 

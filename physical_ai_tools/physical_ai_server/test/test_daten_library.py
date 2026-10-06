@@ -338,6 +338,9 @@ def test_sync_map_reasons_and_states(tmp_path):
     assert (out[ids[1]]['state'], out[ids[1]]['reason']) == ('local', None)
     out = L.sync_map(lib, local, {}, {f'{NS}/omx_f_c': {'head': 'c1'}})
     assert out[f'{NS}/omx_f_c'] == {'state': 'online', 'reason': None, 'head': 'c1'}
+    # V2-10: a hub-only card whose info.json could not be read just now
+    out = L.sync_map(lib, local, {f'{NS}/omx_f_c': {'state': 'unreachable'}}, {f'{NS}/omx_f_c': {'head': 'c1'}})
+    assert out[f'{NS}/omx_f_c'] == {'state': 'unknown', 'reason': 'unreachable', 'head': 'c1'}
 
     # a record-less dataset decided by content through the real HubReads
     api = FakeApi(account=NS)

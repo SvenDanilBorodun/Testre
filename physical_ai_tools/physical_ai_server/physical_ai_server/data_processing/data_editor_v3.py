@@ -14,54 +14,98 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""v3.0-layout dataset curation — delegates to upstream lerobot dataset_tools.
+"""v3.0-layout dataset curation on the Daten 2.0 engine (spec §D1, §D2).
 
 The legacy ``DataEditor`` (data_editor.py) performs in-place surgery on the
-LeRobot **v2.1** per-episode layout (``data/chunk-000/episode_NNNNNN.parquet``,
-per-episode mp4 files, ``meta/episodes.jsonl``). The v2.5.0 recorder writes the
-**v3.0** concatenated layout (sharded parquet, ``videos/<key>/chunk-NNN/
-file-NNN.mp4``, ``meta/episodes/*.parquet``) — running the v2.1 surgery on a
-v3.0 dataset FileNotFoundErrors at best and corrupts at worst. This module is
-the v3.0 path: ``communicator.dataset_edit_callback`` routes here when
-``meta/info.json::codebase_version`` says v3.0 (see ``is_v3_dataset``).
+LeRobot **v2.1** per-episode layout; running it on the recorder's **v3.0**
+concatenated layout corrupts. This module is the v3.0 path —
+``edit_worker.run_edit`` routes here unless ``meta/info.json`` POSITIVELY says
+v2.x (``is_v21_dataset``).
 
-Design (leLab-comparison PR-1, 2026-06-07):
-- DELEGATE, don't reimplement: lerobot==0.5.1 ships v3.0-aware
-  ``lerobot.datasets.dataset_tools`` (``delete_episodes`` / ``merge_datasets``)
-  that build a NEW dataset tree and never touch the source. We add only
-  validation, the atomic swap, and German error mapping.
-- NEVER edit in place: delete builds ``<dataset>.tmp_edit``, verifies it,
-  renames ``<dataset>`` -> ``<dataset>.bak_edit``, promotes the tmp, re-verifies,
-  and only then removes the backup. Any failure restores the original. The
-  most data-destructive path in the product never has a half-written state.
-- lerobot imports are LAZY (function-local): dataset_tools pulls in torch/
-  pandas/pyarrow at module import, which exist only inside the container.
-  This module stays importable for compileall and the deps-free unit tests
-  (which sys.modules-stub ``lerobot.datasets.dataset_tools``).
-- Student-facing failures raise ``DataEditError`` whose ``str()`` is a German
-  message (Rule §1); the English technical cause goes to the logger.
+Every operation is ONE engine primitive, ``v3_surgery.assemble``, which copies
+data rows and video packets losslessly by STREAM COPY at episode boundaries
+(no re-encode, no private LeRobot name — the old ``dataset_tools`` delegation
+and its ``_copy_and_reindex_videos`` monkeypatch are gone):
+
+* delete  = the complement of the chosen episodes, built into
+  ``<dataset>.tmp_edit``, verified, swapped in (``.bak_edit``), re-checked,
+  the bak dropped; restored on any failure;
+* split   = the chosen episodes into a NEW dataset and the rest back into the
+  original — two builds, both verified, promoted under a JOURNAL
+  (``<ns>/.<name>.journal.json``) that makes the two promotions all or nothing
+  even across a crash (``recover_split``);
+* merge   = every episode of every source, in the given order, into a NEW
+  dataset;
+* union   = „Beide behalten": the three-way plan of the local and the hub copy
+  against the last synced base (``dataset_sync.plan_keep_both`` over
+  ``v3_surgery.episode_identity``), swapped in like a delete; the record of the
+  hub copy is written so the result reads „changed" against that head.
+
+Every promoted output's record gets ``files`` (the sha256 of every file under
+``data/``, ``meta/episodes/``, ``videos/`` — what the next upload checks the
+local copy against). A swap and its record are one transaction
+(``hub_sync.swap_in``, H-8).
+
+``v3_surgery`` (pyarrow/PyAV, LeRobot inside its functions) is imported INSIDE
+the functions that use it, never at module level (A18: deps-free loaders load
+this file by path). Student-facing failures raise ``DataEditError`` whose
+``str()`` is German (Rule §1) and whose ``code`` is the engine's
+(``contract.JOB_FAIL_CODES``); the English cause goes to the logger.
 """
 
 from __future__ import annotations
 
-import contextlib
+import importlib
+import importlib.util
 import json
 import logging
-import os
 from pathlib import Path
 import shutil
-from typing import List, Optional
+import sys
+from typing import Callable, List, Optional
 
 V3_CODEBASE_VERSION = 'v3.0'
 
-# Suffixes for the swap dance. Both live NEXT TO the dataset (same filesystem,
-# so Path.rename is an atomic rename(2), never a copy).
+# Suffixes of the swap: both live NEXT TO the dataset (same filesystem, so
+# Path.rename is an atomic rename(2), never a copy).
 _TMP_SUFFIX = '.tmp_edit'
 _BAK_SUFFIX = '.bak_edit'
 
+ProgressFn = Optional[Callable[[str, int, int], None]]
+
 
 class DataEditError(RuntimeError):
-    """Curation failure whose str() is the student-facing German message."""
+    """Curation failure whose str() is the student-facing German message and
+    whose ``code`` is the machine code (``contract.JOB_FAIL_CODES``)."""
+
+    def __init__(self, message, code='internal'):
+        super().__init__(message)
+        self.code = code
+
+
+def _load_sibling(package, name):
+    """A module of this package: by package name in the image, by file path when
+    a deps-free loader gave the package no ``__path__`` (cached by key)."""
+    try:
+        return importlib.import_module(f'physical_ai_server.{package}.{name}')
+    except ImportError:
+        key = f'_edubotics_{package}_{name}'
+        module = sys.modules.get(key)
+        if module is None:
+            path = Path(__file__).resolve().parent.parent / package / f'{name}.py'
+            spec = importlib.util.spec_from_file_location(key, str(path))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[key] = module
+            try:
+                spec.loader.exec_module(module)
+            except BaseException:
+                sys.modules.pop(key, None)
+                raise
+        return module
+
+
+def _texts():
+    return _load_sibling('daten', 'texts_de')
 
 
 def _default_logger() -> logging.Logger:
@@ -74,14 +118,23 @@ def _default_logger() -> logging.Logger:
     return logger
 
 
+def _progress(progress: ProgressFn, stage: str, done: int, total: int) -> None:
+    if progress is not None:
+        try:
+            progress(stage, done, total)
+        except Exception:  # noqa: BLE001 — a progress line must never break an edit
+            pass
+
+
 def read_dataset_info(dataset_path: Path) -> dict:
     """Parse meta/info.json; {} when missing/unreadable (caller decides)."""
     info_path = Path(dataset_path) / 'meta' / 'info.json'
     try:
         with open(info_path, encoding='utf-8') as f:
-            return json.load(f) or {}
+            info = json.load(f)
     except (OSError, ValueError):
         return {}
+    return info if isinstance(info, dict) else {}
 
 
 def is_v3_dataset(dataset_path: Path) -> bool:
@@ -93,42 +146,22 @@ def is_v3_dataset(dataset_path: Path) -> bool:
 def is_v21_dataset(dataset_path) -> bool:
     """True ONLY when meta/info.json POSITIVELY declares a v2.x codebase version.
 
-    The routing to the DESTRUCTIVE legacy in-place editor keys off THIS, not the
-    negation of ``is_v3_dataset``. A dataset whose ``meta/info.json`` is missing,
-    truncated, or otherwise unreadable (``read_dataset_info`` swallows the parse
-    error and returns ``{}``), or whose ``codebase_version`` is absent / not a
-    string, is NOT positively v2.1 — so it must NOT receive the legacy v2.1
-    surgery. Such a dataset routes to the v3 module instead, which raises a
-    German 'nicht gefunden' / 'beschädigt' ``DataEditError`` and never mutates a
-    v3.0 tree.
-
-    Why the negation matters: a real v3.0 dataset with a corrupt ``info.json``
-    used to fall through to the legacy editor (``is_v3_dataset`` -> False), which
-    FileNotFoundErrors in English on the single-episode path and — worse — on the
-    multi-episode batch path silently deletes nothing, overwrites ``info.json``
-    with ``{}`` and falsely reports success.
-    """
+    The routing to the DESTRUCTIVE legacy in-place editor keys off THIS, never
+    the negation of ``is_v3_dataset``: a v3.0 dataset with a missing or corrupt
+    ``info.json`` (``read_dataset_info`` answers ``{}``) is NOT positively v2.1,
+    so it routes here and fails in German instead of receiving v2.1 surgery
+    (which once clobbered ``info.json`` to ``{}`` and reported success)."""
     version = read_dataset_info(dataset_path).get('codebase_version')
     return isinstance(version, str) and version.startswith('v2')
 
 
 def dataset_dir_missing(dataset_path) -> bool:
-    """True when the path is not an existing directory.
-
-    The edit callback routes MISSING paths through the v3 module so the
-    student gets the German 'nicht gefunden' DataEditError instead of the
-    legacy editor's English FileNotFoundError.
-    """
+    """True when the path is not an existing directory."""
     return not Path(dataset_path).is_dir()
 
 
 def _derive_repo_id(dataset_path: Path) -> str:
-    """Best-effort '<user>/<name>' from the on-disk layout.
-
-    The recorder stores datasets as <lerobot home>/<user_id>/<robot>_<task>;
-    upstream only uses repo_id as an identifier here (nothing is pushed), so
-    a plain directory name is an acceptable fallback.
-    """
+    """``<ns>/<name>`` from the on-disk layout (``<root>/<ns>/<name>``)."""
     dataset_path = Path(dataset_path)
     parent = dataset_path.parent.name
     if parent and not parent.startswith('.'):
@@ -136,301 +169,370 @@ def _derive_repo_id(dataset_path: Path) -> str:
     return dataset_path.name
 
 
-def _verify_v3_tree(root: Path, expected_episodes: int) -> None:
-    """Belt-and-suspenders structural check of a freshly built v3.0 tree.
+def surgery_message_de(error) -> str:
+    """The German sentence of an engine refusal (§D1, §J.6)."""
+    t = _texts()
+    code = getattr(error, 'code', '')
+    if code == 'unsupported':
+        return t.UNSUPPORTED_DE
+    if code == 'layout':
+        return t.LAYOUT_DE
+    if code == 'unaligned':
+        return t.UNALIGNED_DE
+    if code == 'incompatible':
+        return t.incompatible_de([n for n in str(getattr(error, 'detail', '')).split(',') if n])
+    if code == 'exists':
+        return t.EXISTS_DE
+    if code == 'verify_failed':
+        return t.VERIFY_FAILED_DE
+    return t.RUN_EDIT_FAILED_DE
 
-    Upstream delete_episodes/merge_datasets already END by constructing a
-    LeRobotDataset over the new tree (reader.try_load() proves the parquet is
-    readable), so this only re-asserts the shape we are about to promote:
-    correct episode count, v3 version, non-empty data/meta shards, and at
-    least one concatenated mp4 per video key.
-    """
-    root = Path(root)
-    info = read_dataset_info(root)
-    if not info:
+
+def _as_edit_error(error, logger) -> DataEditError:
+    logger.error(f'dataset edit refused by the engine: {error}')
+    return DataEditError(surgery_message_de(error), code=getattr(error, 'code', 'internal'))
+
+
+def _require_dataset(path: Path) -> int:
+    """German pre-validation of an existing v3 dataset: returns total_episodes."""
+    if not path.is_dir():
+        raise DataEditError(f'Datensatz-Ordner nicht gefunden: {path.name}', code='not_found')
+    total = read_dataset_info(path).get('total_episodes')
+    if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
         raise DataEditError(
-            'Der bearbeitete Datensatz ist unvollständig (meta/info.json fehlt '
-            'oder ist unlesbar). Es wurde nichts verändert.'
-        )
-    version = info.get('codebase_version')
-    if not (isinstance(version, str) and version.startswith('v3')):
+            'Der Datensatz enthält keine gültige Episodenzahl '
+            '(meta/info.json) — er ist unvollständig oder beschädigt.', code='layout')
+    return total
+
+
+def _validate_indices(indices, total, *, verb='gelöscht') -> list:
+    chosen = sorted({int(i) for i in indices})
+    if not chosen:
+        raise DataEditError('Keine Episoden zum Löschen ausgewählt.' if verb == 'gelöscht'
+                            else 'Keine Episoden ausgewählt.')
+    out_of_range = [i for i in chosen if i < 0 or i >= total]
+    if out_of_range:
         raise DataEditError(
-            f'Der bearbeitete Datensatz hat eine unerwartete Version '
-            f'({version}). Es wurde nichts verändert.'
-        )
-    total = info.get('total_episodes')
-    if total != expected_episodes:
+            f'Episoden {out_of_range} gibt es nicht — der Datensatz hat die '
+            f'Episoden 0 bis {total - 1}.')
+    if len(chosen) >= total:
         raise DataEditError(
-            f'Episodenzahl nach der Bearbeitung stimmt nicht '
-            f'({total} statt {expected_episodes}). Es wurde nichts verändert.'
-        )
-    if not list((root / 'data').rglob('*.parquet')):
-        raise DataEditError(
-            'Der bearbeitete Datensatz enthält keine Daten-Dateien. '
-            'Es wurde nichts verändert.'
-        )
-    if not list((root / 'meta' / 'episodes').rglob('*.parquet')):
-        raise DataEditError(
-            'Der bearbeitete Datensatz enthält keine Episoden-Metadaten. '
-            'Es wurde nichts verändert.'
-        )
-    videos_dir = root / 'videos'
-    if videos_dir.is_dir():
-        for key_dir in videos_dir.iterdir():
-            if key_dir.is_dir() and not list(key_dir.rglob('*.mp4')):
-                raise DataEditError(
-                    f'Für die Kamera "{key_dir.name}" fehlen die Videodateien '
-                    f'im bearbeiteten Datensatz. Es wurde nichts verändert.'
-                )
+            'Alle Episoden können nicht gelöscht werden — zum vollständigen '
+            'Entfernen bitte den ganzen Datensatz löschen.' if verb == 'gelöscht' else
+            'Es müssen Episoden im ursprünglichen Datensatz bleiben — wähle nicht alle aus.')
+    return chosen
 
 
-@contextlib.contextmanager
-def _force_recorder_vcodec(dataset_tools, logger: logging.Logger):
-    """Pin upstream's mixed-file re-encode to the recorder's codec.
+def _clear_stale(*paths: Path, logger) -> None:
+    for stale in paths:
+        if stale.exists():
+            logger.warning(f'Removing stale edit artifact: {stale}')
+            shutil.rmtree(stale, ignore_errors=True)
 
-    delete_episodes calls the private _copy_and_reindex_videos with its
-    default vcodec='libsvtav1': any video file containing both kept and
-    deleted episodes is fully decoded and re-encoded as AV1 — a lossy
-    generation on a codec the dataset's info.json doesn't declare, and a
-    software SVT-AV1 encode that saturates student CPUs (the 2026-06-07
-    scar). v0.5.1 exposes no vcodec passthrough on the public functions, so
-    for the duration of the edit we default the helper to the same codec
-    the recorder writes (EDUBOTICS_VCODEC, h264). merge_datasets never
-    re-encodes (it stream-copies via aggregate_datasets /
-    concatenate_video_files) — its wrap is defensive only. Version-pinned
-    private access, like lerobot_dataset_wrapper; if upstream ever renames
-    the helper we fall back to upstream defaults with a logged warning
-    instead of failing the edit.
-    """
-    vcodec = os.environ.get('EDUBOTICS_VCODEC', 'h264')
-    original = getattr(dataset_tools, '_copy_and_reindex_videos', None)
-    if original is None:
-        logger.warning(
-            '_copy_and_reindex_videos not found in lerobot dataset_tools — '
-            're-encoded video files will use the upstream default codec.'
-        )
-        yield
-        return
 
-    def _with_recorder_codec(*args, **kwargs):
-        kwargs.setdefault('vcodec', vcodec)
-        return original(*args, **kwargs)
-
-    dataset_tools._copy_and_reindex_videos = _with_recorder_codec
+def _build(out: Path, parts, repo_id, progress: ProgressFn, logger):
+    """assemble + verify into ``out``; any failure removes ``out`` and raises a
+    German DataEditError."""
+    V = _load_sibling('data_processing', 'v3_surgery')
     try:
-        yield
-    finally:
-        dataset_tools._copy_and_reindex_videos = original
+        V.assemble(out, parts, repo_id,
+                   progress=lambda stage, done, total: _progress(progress, 'copy', done, total))
+        _progress(progress, 'verify', 0, 1)
+        V.verify_or_raise(out, parts)
+        _progress(progress, 'verify', 1, 1)
+    except V.SurgeryError as e:
+        shutil.rmtree(out, ignore_errors=True)
+        raise _as_edit_error(e, logger) from e
+    except Exception as e:  # noqa: BLE001 — the boundary to LeRobot/PyAV
+        shutil.rmtree(out, ignore_errors=True)
+        logger.error(f'dataset edit build failed: {e!r}')
+        raise DataEditError(_texts().RUN_EDIT_FAILED_DE, code='internal') from e
 
 
-def _load_source_dataset(dataset_path: Path, logger: logging.Logger):
-    """Construct the source LeRobotDataset (local-only for a complete tree).
-
-    LeRobotDataset.__init__ with an existing root loads from disk
-    (reader.try_load()); it falls back to the Hub ONLY when the local tree
-    is incomplete — on an offline classroom PC that surfaces as a network
-    error, which we map to a German 'beschädigt' message.
-    """
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
+def _open_source(path: Path, logger):
+    V = _load_sibling('data_processing', 'v3_surgery')
     try:
-        return LeRobotDataset(
-            repo_id=_derive_repo_id(dataset_path), root=Path(dataset_path)
-        )
-    except Exception as e:  # noqa: BLE001 — boundary to upstream + network
-        logger.error(f'Failed to load source dataset {dataset_path}: {e}')
+        return V.Source(path)
+    except V.SurgeryError as e:
+        raise _as_edit_error(e, logger) from e
+
+
+def _rename_check(digest_before):
+    """The swap's re-verify: the promoted tree is the verified one (cheap: the
+    meta digest the verified tmp had)."""
+    S = _load_sibling('data_processing', 'dataset_sync')
+
+    def check(target):
+        if S.meta_digest(target) != digest_before:
+            raise DataEditError(_texts().VERIFY_FAILED_DE, code='verify_failed')
+    return check
+
+
+def _record_with_files(root, base_record, files, **extra) -> dict:
+    """``base_record`` (or a fresh one for the folder's own id) with ``files``
+    and ``extra`` set; ``None`` values remove a key."""
+    S = _load_sibling('data_processing', 'dataset_sync')
+    repo_id = S.folder_id(root)
+    rec = dict(base_record) if base_record and base_record.get('repo_id') == repo_id else {
+        'v': S.RECORD_VERSION, 'repo_id': repo_id}
+    rec['files'] = files
+    for k, v in extra.items():
+        if v is None:
+            rec.pop(k, None)
+        else:
+            rec[k] = v
+    return rec
+
+
+def _swap(tmp: Path, target: Path, rec, logger, *, progress: ProgressFn = None):
+    """tmp → target through hub_sync.swap_in (H-8), with the cheap re-check; a
+    failure restores the original and raises German."""
+    H = _load_sibling('data_processing', 'hub_sync')
+    S = _load_sibling('data_processing', 'dataset_sync')
+    digest = S.meta_digest(tmp)
+    _progress(progress, 'swap', 0, 1)
+    try:
+        H.swap_in(tmp, target, rec, _TMP_SUFFIX, _BAK_SUFFIX, check=_rename_check(digest))
+    except DataEditError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.error(f'Swap failed, the original dataset was restored: {e!r}')
         raise DataEditError(
-            'Der Datensatz konnte nicht geladen werden — er ist unvollständig '
-            'oder beschädigt. Bitte den Datensatz neu aufnehmen oder löschen.'
-        ) from e
+            'Beim Ersetzen des Datensatzes ist ein Fehler aufgetreten. '
+            'Der ursprüngliche Datensatz wurde wiederhergestellt.', code='internal') from e
+    _progress(progress, 'swap', 1, 1)
 
 
 def delete_episodes_v3(
     dataset_path: str,
     episode_indices: List[int],
     logger: Optional[logging.Logger] = None,
+    progress: ProgressFn = None,
 ) -> int:
-    """Delete episodes from a v3.0 dataset via upstream dataset_tools.
+    """Delete episodes from a v3.0 dataset; returns the remaining episode count.
 
-    Returns the remaining episode count. Raises DataEditError (German) on any
-    failure; the original dataset is untouched unless the swap fully succeeds.
-    """
+    tmp → verify → ``.bak_edit`` swap → re-check → drop bak; the original is
+    untouched unless the swap fully succeeds. Raises DataEditError (German)."""
     logger = logger or _default_logger()
-    src = Path(dataset_path).resolve()
-    if not src.is_dir():
-        raise DataEditError(f'Datensatz-Ordner nicht gefunden: {src}')
+    src_path = Path(dataset_path).resolve()
+    _progress(progress, 'prepare', 0, 1)
+    total = _require_dataset(src_path)
+    chosen = _validate_indices(episode_indices, total)
+    tmp = src_path.parent / (src_path.name + _TMP_SUFFIX)
+    _clear_stale(tmp, src_path.parent / (src_path.name + _BAK_SUFFIX), logger=logger)
+    src = _open_source(src_path, logger)
+    if len(src.episodes) != total:
+        raise DataEditError(_texts().LAYOUT_DE, code='layout')
+    keep = [e for e in range(total) if e not in set(chosen)]
+    _progress(progress, 'prepare', 1, 1)
+    logger.info(f'delete_episodes_v3: removing {chosen} from {src_path} ({total} -> {len(keep)} episodes)')
+    _build(tmp, [(src, e) for e in keep], _derive_repo_id(src_path), progress, logger)
+    S = _load_sibling('data_processing', 'dataset_sync')
+    rec = _record_with_files(src_path, S.own_record(src_path, S.folder_id(src_path)),
+                             S.files_manifest(tmp))
+    _swap(tmp, src_path, rec, logger, progress=progress)
+    logger.info(f'delete_episodes_v3: success, {len(keep)} episodes remain')
+    return len(keep)
 
-    info = read_dataset_info(src)
-    total = info.get('total_episodes')
-    if not isinstance(total, int) or total <= 0:
-        raise DataEditError(
-            'Der Datensatz enthält keine gültige Episodenzahl '
-            '(meta/info.json) — er ist unvollständig oder beschädigt.'
-        )
 
-    indices = sorted(set(int(i) for i in episode_indices))
-    if not indices:
-        raise DataEditError('Keine Episoden zum Löschen ausgewählt.')
-    out_of_range = [i for i in indices if i < 0 or i >= total]
-    if out_of_range:
-        raise DataEditError(
-            f'Episoden {out_of_range} gibt es nicht — der Datensatz hat die '
-            f'Episoden 0 bis {total - 1}.'
-        )
-    if len(indices) >= total:
-        raise DataEditError(
-            'Alle Episoden können nicht gelöscht werden — zum vollständigen '
-            'Entfernen bitte den ganzen Datensatz löschen.'
-        )
-
-    expected_remaining = total - len(indices)
-    tmp = src.parent / (src.name + _TMP_SUFFIX)
-    bak = src.parent / (src.name + _BAK_SUFFIX)
-    # Stale leftovers from a previous crash never block a new edit.
-    for stale in (tmp, bak):
-        if stale.exists():
-            logger.warning(f'Removing stale edit artifact: {stale}')
-            shutil.rmtree(stale, ignore_errors=True)
-
-    source_dataset = _load_source_dataset(src, logger)
-
-    from lerobot.datasets import dataset_tools
-
-    logger.info(
-        f'delete_episodes_v3: removing {indices} from {src} '
-        f'({total} -> {expected_remaining} episodes)'
-    )
+def split_episodes_v3(
+    dataset_path: str,
+    episode_indices: List[int],
+    new_path: str,
+    logger: Optional[logging.Logger] = None,
+    progress: ProgressFn = None,
+    display_name: Optional[str] = None,
+) -> tuple:
+    """Move the chosen episodes into a NEW dataset at ``new_path``; the rest stays
+    under the original name (D11). Both outputs are built and verified first;
+    then a JOURNAL makes the two promotions one transaction (R-19). Returns
+    ``(kept, moved)``."""
+    logger = logger or _default_logger()
+    S = _load_sibling('data_processing', 'dataset_sync')
+    src_path = Path(dataset_path).resolve()
+    new_path = Path(new_path).resolve()
+    _progress(progress, 'prepare', 0, 1)
+    if new_path.exists():
+        raise DataEditError(_texts().EXISTS_DE, code='exists')
+    total = _require_dataset(src_path)
+    chosen = _validate_indices(episode_indices, total, verb='verschoben')
+    src = _open_source(src_path, logger)
+    if len(src.episodes) != total:
+        raise DataEditError(_texts().LAYOUT_DE, code='layout')
+    rest = [e for e in range(total) if e not in set(chosen)]
+    tmp_rest = src_path.parent / (src_path.name + _TMP_SUFFIX)
+    tmp_new = new_path.parent / (new_path.name + _TMP_SUFFIX)
+    bak = src_path.parent / (src_path.name + _BAK_SUFFIX)
+    _clear_stale(tmp_rest, tmp_new, bak, logger=logger)
+    _progress(progress, 'prepare', 1, 1)
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    _build(tmp_new, [(src, e) for e in chosen], _derive_repo_id(new_path), progress, logger)
     try:
-        # Explicit output_dir + repo_id: the upstream defaults would create a
-        # '<repo>_modified' SIBLING under the lerobot home instead of our
-        # swap-managed tmp tree (dataset_tools.delete_episodes:115-116).
-        with _force_recorder_vcodec(dataset_tools, logger):
-            dataset_tools.delete_episodes(
-                source_dataset,
-                indices,
-                output_dir=tmp,
-                repo_id=_derive_repo_id(src),
-            )
+        _build(tmp_rest, [(src, e) for e in rest], _derive_repo_id(src_path), progress, logger)
     except DataEditError:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(tmp_new, ignore_errors=True)
         raise
-    except ValueError as e:
-        shutil.rmtree(tmp, ignore_errors=True)
-        logger.error(f'dataset_tools.delete_episodes rejected the request: {e}')
-        # Local pre-validation should have caught these; map defensively.
-        raise DataEditError(
-            'Die Episoden konnten nicht gelöscht werden: ungültige Auswahl.'
-        ) from e
-    except Exception as e:  # noqa: BLE001 — boundary to upstream
-        shutil.rmtree(tmp, ignore_errors=True)
-        logger.error(f'dataset_tools.delete_episodes failed: {e}')
-        raise DataEditError(
-            'Beim Löschen der Episoden ist ein Fehler aufgetreten. '
-            'Der Datensatz wurde NICHT verändert.'
-        ) from e
-
-    # Build fully -> verify -> swap -> re-verify -> drop backup. Restore on
-    # any failure past the first rename.
+    old_rec = S.own_record(src_path, S.folder_id(src_path))
+    rec_rest = _record_with_files(src_path, old_rec, S.files_manifest(tmp_rest))
+    rec_new = _record_with_files(new_path, None, S.files_manifest(tmp_new),
+                                 display_name=display_name or None,
+                                 private=old_rec.get('private') if old_rec else None)
+    _progress(progress, 'swap', 0, 1)
+    journal = S.journal_path(src_path)
+    S.write_json_atomic(journal, {'op': 'split', 'path': str(src_path), 'new': str(new_path),
+                                  'records': {'path': rec_rest, 'new': rec_new}})
     try:
-        _verify_v3_tree(tmp, expected_remaining)
-    except DataEditError:
-        shutil.rmtree(tmp, ignore_errors=True)
-        raise
-
-    swapped = False
-    try:
-        src.rename(bak)
-        tmp.rename(src)
-        swapped = True
-        _verify_v3_tree(src, expected_remaining)
-    except Exception as e:
-        # Roll back: put the original tree back exactly where it was.
-        logger.error(f'Swap failed, restoring original dataset: {e}')
-        if swapped and bak.exists():
-            shutil.rmtree(src, ignore_errors=True)
-            bak.rename(src)
-        elif not swapped and bak.exists() and not src.exists():
-            bak.rename(src)
-        shutil.rmtree(tmp, ignore_errors=True)
-        if isinstance(e, DataEditError):
-            raise
+        src_path.rename(bak)
+        tmp_rest.rename(src_path)
+        tmp_new.rename(new_path)
+    except Exception as e:  # noqa: BLE001 — the journal rolls it back right now
+        logger.error(f'split promotion failed, rolling back: {e!r}')
+        recover_split(src_path)
         raise DataEditError(
             'Beim Ersetzen des Datensatzes ist ein Fehler aufgetreten. '
-            'Der ursprüngliche Datensatz wurde wiederhergestellt.'
-        ) from e
+            'Der ursprüngliche Datensatz wurde wiederhergestellt.', code='internal') from e
+    recover_split(src_path)          # the roll forward: records promoted, bak and journal removed
+    _progress(progress, 'swap', 1, 1)
+    logger.info(f'split_episodes_v3: {len(chosen)} episodes -> {new_path.name}, {len(rest)} stay')
+    return len(rest), len(chosen)
 
-    shutil.rmtree(bak, ignore_errors=True)
-    logger.info(
-        f'delete_episodes_v3: success, {expected_remaining} episodes remain'
-    )
-    return expected_remaining
+
+def recover_split(dataset_path) -> Optional[str]:
+    """Finish or undo a split from its journal (R-19, §D3): while the new
+    output's ``.tmp_edit`` still exists the split is rolled BACK (the original
+    restored from ``.bak_edit``, both tmps removed, the prepared records
+    dropped); once it is promoted the split is rolled FORWARD (both records
+    promoted, the bak removed). The journal is removed either way. Returns
+    ``'back'``, ``'forward'`` or None (no journal). Caller holds the lock."""
+    S = _load_sibling('data_processing', 'dataset_sync')
+    src_path = Path(dataset_path)
+    journal = S.journal_path(src_path)
+    try:
+        j = json.loads(journal.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        if journal.exists():
+            journal.unlink(missing_ok=True)
+        return None
+    new_path = Path(j.get('new') or '')
+    bak = src_path.parent / (src_path.name + _BAK_SUFFIX)
+    tmp_rest = src_path.parent / (src_path.name + _TMP_SUFFIX)
+    tmp_new = new_path.parent / (new_path.name + _TMP_SUFFIX)
+    if j.get('new') and tmp_new.exists():                     # roll back
+        if bak.exists():
+            if src_path.exists():
+                shutil.rmtree(src_path, ignore_errors=True)
+            bak.rename(src_path)
+        shutil.rmtree(tmp_rest, ignore_errors=True)
+        shutil.rmtree(tmp_new, ignore_errors=True)
+        outcome = 'back'
+    else:                                                     # roll forward
+        records = j.get('records') or {}
+        if records.get('path') and src_path.exists():
+            S.write_record(src_path, records['path'])
+        if records.get('new') and j.get('new') and new_path.exists():
+            S.write_record(new_path, records['new'])
+        shutil.rmtree(bak, ignore_errors=True)
+        outcome = 'forward'
+    journal.unlink(missing_ok=True)
+    return outcome
 
 
 def merge_datasets_v3(
     dataset_paths: List[str],
     output_path: str,
     logger: Optional[logging.Logger] = None,
-) -> None:
-    """Merge v3.0 datasets into a NEW dataset at output_path (no swap needed)."""
+    progress: ProgressFn = None,
+    display_name: Optional[str] = None,
+) -> int:
+    """Merge v3.0 datasets, every episode in the given order, into a NEW dataset
+    at ``output_path`` (the target must not exist). Returns the episode count."""
     logger = logger or _default_logger()
+    S = _load_sibling('data_processing', 'dataset_sync')
     if not dataset_paths or len(dataset_paths) < 2:
-        raise DataEditError(
-            'Zum Zusammenführen müssen mindestens zwei Datensätze '
-            'ausgewählt sein.'
-        )
+        raise DataEditError('Zum Zusammenführen müssen mindestens zwei Datensätze ausgewählt sein.')
     sources = [Path(p).resolve() for p in dataset_paths]
+    out = Path(output_path).resolve()
+    _progress(progress, 'prepare', 0, 1)
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise DataEditError(_texts().EXISTS_DE, code='exists')
+    if any(out == p or p in out.parents for p in sources):
+        raise DataEditError('Der Ziel-Ordner darf keiner der Quell-Datensätze sein.')
     for p in sources:
         if not p.is_dir():
-            raise DataEditError(f'Datensatz-Ordner nicht gefunden: {p}')
+            raise DataEditError(f'Datensatz-Ordner nicht gefunden: {p.name}', code='not_found')
+        _require_dataset(p)
+    srcs = [_open_source(p, logger) for p in sources]
+    parts = [(s, e) for s in srcs for e in range(len(s.episodes))]
+    if out.exists():
+        out.rmdir()                                            # an empty leftover directory
+    tmp = out.parent / (out.name + _TMP_SUFFIX)
+    _clear_stale(tmp, logger=logger)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _progress(progress, 'prepare', 1, 1)
+    logger.info(f'merge_datasets_v3: merging {len(sources)} datasets ({len(parts)} episodes) into {out}')
+    _build(tmp, parts, _derive_repo_id(out), progress, logger)
+    first = S.own_record(sources[0], S.folder_id(sources[0]))
+    rec = _record_with_files(out, None, S.files_manifest(tmp), display_name=display_name or None,
+                             private=first.get('private') if first else None)
+    _swap(tmp, out, rec, logger, progress=progress)
+    logger.info(f'merge_datasets_v3: success ({len(parts)} episodes)')
+    return len(parts)
 
-    out = Path(output_path).resolve()
-    if out.exists() and any(out.iterdir()):
-        raise DataEditError(
-            f'Der Ziel-Ordner existiert bereits und ist nicht leer: {out}. '
-            f'Bitte einen neuen Ordnernamen wählen.'
-        )
-    if any(out == p or p in out.parents for p in sources):
-        raise DataEditError(
-            'Der Ziel-Ordner darf keiner der Quell-Datensätze sein.'
-        )
 
-    expected_total = 0
-    for p in sources:
-        total = read_dataset_info(p).get('total_episodes')
-        if not isinstance(total, int) or total <= 0:
-            raise DataEditError(
-                f'Der Datensatz "{p.name}" ist unvollständig oder beschädigt '
-                f'(keine gültige Episodenzahl) und kann nicht zusammengeführt '
-                f'werden.'
-            )
-        expected_total += total
-
-    datasets = [_load_source_dataset(p, logger) for p in sources]
-
-    from lerobot.datasets import dataset_tools
-
-    logger.info(
-        f'merge_datasets_v3: merging {len(sources)} datasets '
-        f'({expected_total} episodes) into {out}'
-    )
+def union_episodes_v3(
+    dataset_path: str,
+    hub_copy_path: str,
+    base_copy_path: Optional[str],
+    logger: Optional[logging.Logger] = None,
+    progress: ProgressFn = None,
+    hub_sha: Optional[str] = None,
+    hub_trees: Optional[dict] = None,
+) -> dict:
+    """„Beide behalten" (§E10): the THREE-WAY merge of the local copy and the hub
+    copy against the base (the record's ``hub_sha``; ``base_copy_path`` None =
+    no base → the union by multiplicity), by episode identity (data rows AND
+    video packets). Built into ``<dataset>.tmp_edit``, verified, swapped in like
+    a delete; the record of the HUB copy is written (``hub_sha``/``hub_trees``
+    of that head, its meta digest, ``files`` of the result) so the result reads
+    „changed" until its upload. The hub and base copies are removed."""
+    logger = logger or _default_logger()
+    S = _load_sibling('data_processing', 'dataset_sync')
+    V = _load_sibling('data_processing', 'v3_surgery')
+    src_path = Path(dataset_path).resolve()
+    hub_path = Path(hub_copy_path).resolve()
+    base_path = Path(base_copy_path).resolve() if base_copy_path else None
+    _progress(progress, 'prepare', 0, 1)
     try:
-        with _force_recorder_vcodec(dataset_tools, logger):
-            dataset_tools.merge_datasets(
-                datasets, output_repo_id=_derive_repo_id(out), output_dir=out
-            )
-    except DataEditError:
-        raise
-    except Exception as e:  # noqa: BLE001 — boundary to upstream
-        shutil.rmtree(out, ignore_errors=True)
-        logger.error(f'dataset_tools.merge_datasets failed: {e}')
-        raise DataEditError(
-            'Beim Zusammenführen ist ein Fehler aufgetreten. Die '
-            'Quell-Datensätze wurden nicht verändert.'
-        ) from e
-
-    try:
-        _verify_v3_tree(out, expected_total)
-    except DataEditError:
-        shutil.rmtree(out, ignore_errors=True)
-        raise
-    logger.info(f'merge_datasets_v3: success ({expected_total} episodes)')
+        loc = _open_source(src_path, logger)
+        hub = _open_source(hub_path, logger)
+        base = _open_source(base_path, logger) if base_path else None
+        bad = [c for ok, c in V.check_compatible([loc, hub]) if not ok]
+        if bad:
+            raise DataEditError(_texts().incompatible_de(bad), code='incompatible')
+        try:
+            lid = [V.episode_identity(loc, e) for e in range(len(loc.episodes))]
+            hid = [V.episode_identity(hub, e) for e in range(len(hub.episodes))]
+            bid = [V.episode_identity(base, e) for e in range(len(base.episodes))] if base else None
+        except V.SurgeryError as e:
+            raise _as_edit_error(e, logger) from e
+        plan = S.plan_keep_both(lid, hid, bid)
+        parts = [(loc if side == 'L' else hub, i) for side, i in plan]
+        tmp = src_path.parent / (src_path.name + _TMP_SUFFIX)
+        _clear_stale(tmp, src_path.parent / (src_path.name + _BAK_SUFFIX), logger=logger)
+        _progress(progress, 'prepare', 1, 1)
+        _build(tmp, parts, _derive_repo_id(src_path), progress, logger)
+        old = S.own_record(src_path, S.folder_id(src_path))
+        rec = _record_with_files(
+            src_path, None, S.files_manifest(tmp), hub_sha=hub_sha or None, hub_trees=hub_trees or None,
+            local_digest=S.meta_digest(hub_path), synced_at=S.now_iso(),
+            display_name=old.get('display_name') if old else None,
+            private=old.get('private') if old else None)
+        _swap(tmp, src_path, rec, logger, progress=progress)
+    finally:
+        shutil.rmtree(hub_path, ignore_errors=True)
+        if base_path is not None:
+            shutil.rmtree(base_path, ignore_errors=True)
+    n_local = sum(1 for side, _ in plan if side == 'L')
+    logger.info(f'union_episodes_v3: {len(plan)} episodes ({n_local} here, {len(plan) - n_local} from the hub)')
+    return {'episodes': len(plan), 'local': n_local, 'from_hub': len(plan) - n_local,
+            'three_way': base is not None}

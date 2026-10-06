@@ -13,13 +13,19 @@ test_data_editor_v3_gate.py.
 
 Covered:
   1. run_edit routes delete/merge to the v3 vs legacy editor exactly as the old
-     inline callback did, and maps DataEditError -> German {success: False}.
+     inline callback did, split/union (Daten 2.0) to the v3 editor, and maps
+     DataEditError -> German {success: False, code}; an unexpected error and an
+     unknown mode answer German too (the exception text goes to the log only).
   2. build_command emits the nice-19 `python -m …edit_worker` prefix.
   3. parse_output extracts the LAST RESULT_MARKER line (and tolerates noise /
-     malformed / absent markers).
-  4. main() reads stdin, runs, and emits exactly one machine-readable marker
-     line with the right exit code.
+     malformed / absent markers); parse_progress decodes EDIT_PROGRESS lines.
+  4. main() reads stdin, runs, emits EDIT_PROGRESS lines and exactly one
+     machine-readable result line with the right exit code — and a closed pipe
+     never kills it (R-19: a worker that outlives a node respawn finishes).
+  5. No dataset_tools anywhere on the edit path (the engine is the stream copy).
 """
+
+import ast
 
 import importlib.util
 import io
@@ -121,11 +127,17 @@ class EditWorkerTest(unittest.TestCase):
         # Reset routing hooks to inert defaults each test. The legacy editor is
         # reached ONLY when is_v21_dataset is positively True; everything else
         # (v3 / missing / corrupt) routes to the v3 module.
+        for name in ('is_v3_dataset', 'is_v21_dataset', 'dataset_dir_missing', 'delete_episodes_v3',
+                     'merge_datasets_v3', 'split_episodes_v3', 'union_episodes_v3'):
+            self.addCleanup(setattr, self.v3, name, getattr(self.v3, name))
         self.v3.is_v3_dataset = lambda p: False
         self.v3.is_v21_dataset = lambda p: False
         self.v3.dataset_dir_missing = lambda p: False
-        self.v3.delete_episodes_v3 = mock.Mock(name='delete_episodes_v3')
-        self.v3.merge_datasets_v3 = mock.Mock(name='merge_datasets_v3')
+        self.v3.delete_episodes_v3 = mock.Mock(name='delete_episodes_v3', return_value=2)
+        self.v3.merge_datasets_v3 = mock.Mock(name='merge_datasets_v3', return_value=5)
+        self.v3.split_episodes_v3 = mock.Mock(name='split_episodes_v3', return_value=(3, 2))
+        self.v3.union_episodes_v3 = mock.Mock(name='union_episodes_v3',
+                                              return_value={'episodes': 6, 'three_way': True})
 
     def _run(self, payload):
         """run_edit against this test's confined root."""
@@ -231,18 +243,72 @@ class EditWorkerTest(unittest.TestCase):
         self.assertFalse(res['success'])
         self.assertEqual(res['message'], 'Deutsche Fehlermeldung')
 
-    def test_unexpected_error_is_caught(self):
+    def test_unexpected_error_is_caught_and_answered_in_german(self):
         self.v3.is_v3_dataset = lambda p: True
         self.v3.delete_episodes_v3 = mock.Mock(side_effect=ValueError('boom'))
         res = self._run(
             {'mode': 'delete', 'delete_dataset_path': self.DS, 'delete_episode_num': [0]})
         self.assertFalse(res['success'])
-        self.assertIn('boom', res['message'])
+        self.assertEqual(res['message'], self.worker._texts().RUN_EDIT_FAILED_DE)
+        self.assertNotIn('boom', res['message'])
+        self.assertNotIn('Error', res['message'])
 
-    def test_unknown_mode(self):
+    def test_unknown_mode_is_german(self):
         res = self._run({'mode': 'frobnicate'})
         self.assertFalse(res['success'])
-        self.assertIn('Unknown edit mode', res['message'])
+        self.assertEqual(res['message'], self.worker._texts().UNKNOWN_MODE_DE)
+
+    def test_a_data_edit_error_carries_its_code(self):
+        self.v3.delete_episodes_v3 = mock.Mock(
+            side_effect=self.v3.DataEditError('Nicht geschnitten', code='unaligned'))
+        res = self._run(
+            {'mode': 'delete', 'delete_dataset_path': self.DS, 'delete_episode_num': [0]})
+        self.assertEqual((res['success'], res['message'], res['code']), (False, 'Nicht geschnitten', 'unaligned'))
+
+    def test_split_routes_to_the_v3_editor_confined(self):
+        new = str(self.root / 'u' / 'ds_neu')
+        res = self._run({'mode': 'split', 'dataset_path': self.DS, 'episodes': [1, 3],
+                         'new_path': new, 'display_name': 'Neu'})
+        self.assertTrue(res['success'], res)
+        self.assertEqual((res['kept'], res['moved']), (3, 2))
+        args, kwargs = self.v3.split_episodes_v3.call_args
+        self.assertEqual(args[:3], (self.DS, [1, 3], new))
+        self.assertEqual(kwargs['display_name'], 'Neu')
+        res = self._run({'mode': 'split', 'dataset_path': self.DS, 'episodes': [1], 'new_path': '/etc/x'})
+        self.assertFalse(res['success'])
+        self.assertIn('außerhalb', res['message'])
+
+    def test_union_routes_to_the_v3_editor_confined(self):
+        hub = str(self.root / 'u' / 'ds.tmp_keep')
+        base = str(self.root / 'u' / 'ds.tmp_base')
+        res = self._run({'mode': 'union', 'dataset_path': self.DS, 'hub_copy_path': hub,
+                         'base_copy_path': base, 'hub_sha': 'a' * 40, 'hub_trees': {'data': 't'}})
+        self.assertTrue(res['success'], res)
+        self.assertEqual(res['episodes'], 6)
+        args, kwargs = self.v3.union_episodes_v3.call_args
+        self.assertEqual(args[:3], (self.DS, hub, base))
+        self.assertEqual((kwargs['hub_sha'], kwargs['hub_trees']), ('a' * 40, {'data': 't'}))
+        res = self._run({'mode': 'union', 'dataset_path': self.DS, 'hub_copy_path': '/tmp/x',
+                         'base_copy_path': None})
+        self.assertFalse(res['success'])
+
+    def test_a_lock_held_by_another_process_refuses_busy(self):
+        import subprocess
+        (self.root / 'u').mkdir(parents=True, exist_ok=True)
+        lock = Path(self.DS).parent / '.ds.lock'
+        lock.touch()
+        code = ('import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR); '
+                'fcntl.flock(fd, fcntl.LOCK_EX); sys.stdout.write("held"); sys.stdout.flush(); '
+                'sys.stdin.read()')
+        holder = subprocess.Popen([sys.executable, '-c', code, str(lock)],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait, 10)
+        self.addCleanup(holder.stdin.close)
+        self.assertEqual(holder.stdout.read(4), 'held')
+        res = self._run({'mode': 'delete', 'delete_dataset_path': self.DS, 'delete_episode_num': [0]})
+        self.assertFalse(res['success'])
+        self.assertEqual(res['message'], self.worker._texts().BUSY_EDIT_DE)
+        self.v3.delete_episodes_v3.assert_not_called()
 
     # ---- build_command ----------------------------------------------------------------
 
@@ -315,6 +381,47 @@ class EditWorkerTest(unittest.TestCase):
         result = self.worker.parse_output(out)
         self.assertIsNotNone(result)
         self.assertFalse(result['success'])
+
+    def test_main_emits_progress_lines(self):
+        def fake_run(payload, logger=None, progress=None):
+            progress('prepare', 0, 1)
+            progress('copy', 2, 5)
+            progress('swap', 1, 1)
+            return {'success': True, 'message': 'ok', 'code': ''}
+        with mock.patch.object(self.worker, 'run_edit', side_effect=fake_run):
+            rc, out = self._run_main(json.dumps({'mode': 'delete'}))
+        self.assertEqual(rc, 0)
+        progress = [self.worker.parse_progress(line) for line in out.splitlines()]
+        self.assertEqual([p for p in progress if p], [
+            {'stage': 'prepare', 'done': 0, 'total': 1}, {'stage': 'copy', 'done': 2, 'total': 5},
+            {'stage': 'swap', 'done': 1, 'total': 1}])
+        self.assertIsNone(self.worker.parse_progress('noise'))
+        self.assertIsNone(self.worker.parse_progress(self.worker.PROGRESS_MARKER + '{bad'))
+
+    def test_a_closed_pipe_never_kills_the_worker(self):
+        class Closed(io.StringIO):
+            def write(self, s):
+                raise BrokenPipeError()
+
+        def fake_run(payload, logger=None, progress=None):
+            progress('copy', 1, 2)
+            return {'success': True, 'message': 'ok', 'code': ''}
+        with mock.patch.object(self.worker, 'run_edit', side_effect=fake_run), \
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'mode': 'delete'}))), \
+                mock.patch.object(sys, 'stdout', Closed()):
+            self.assertEqual(self.worker.main(), 0)
+
+    def test_no_dataset_tools_on_the_edit_path(self):
+        for path in (WORKER_PATH, V3_PATH):
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    self.assertNotIn('dataset_tools', node.module or '', path.name)
+                    self.assertNotIn('dataset_tools', [a.name for a in node.names], path.name)
+                if isinstance(node, ast.Import):
+                    self.assertFalse(any('dataset_tools' in a.name for a in node.names), path.name)
+                if isinstance(node, ast.Attribute):
+                    self.assertNotIn(node.attr, ('dataset_tools', '_copy_and_reindex_videos'), path.name)
 
 
 if __name__ == '__main__':

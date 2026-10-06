@@ -538,28 +538,35 @@ class DatenService:
             self._job_finish(job_id, False, 'cancelled', '', result={'ok': False, 'code': 'cancelled'})
 
     def state_payload(self):
+        """§J.5. ``busy`` lists every (id, kind) that holds a dataset; one id may
+        appear with two kinds — a Start that waits for this dataset's upload is
+        ``record`` AND ``upload`` (the Aufnahme page reads the ``upload`` entry of
+        the repo it is starting, §G11), listed in that order."""
         with self._lock:
             self._prune_locked()
-            busy = {}
+            busy = []
             dm = getattr(self.node, 'data_manager', None)
             if getattr(self.node, 'on_recording', False) and dm is not None and getattr(dm, '_save_path', None):
-                busy[self._key(dm._save_path)] = 'record'
-            for key, kind in self._leases.items():
-                busy.setdefault(key, kind)
+                busy.append((self._key(dm._save_path), 'record'))
+            busy += list(self._leases.items())
             task = self._hf_task()
             transfer = None
             if task and task.get('mode') == 'upload':
                 key = self._key(task['local_dir']) if task.get('local_dir') else None
                 if key:
-                    busy.setdefault(key, 'upload')
+                    busy.append((key, 'upload'))
                 transfer = {'kind': 'upload', 'repo_id': task.get('repo_id') or '',
                             'target': self._id_of(key) if key else None}
             elif task and task.get('mode') == 'download' and task.get('repo_type') == 'dataset':
-                busy.setdefault(self._key(self.root / str(task.get('repo_id') or '')), 'download')
+                busy.append((self._key(self.root / str(task.get('repo_id') or '')), 'download'))
             jobs = [dict(s['public']) for s in self._jobs.values()]
             self._seq += 1
             seq = self._seq
-        out_busy = [{'id': self._id_of(k), 'kind': v} for k, v in busy.items() if self._id_of(k)]
+        out_busy = []
+        for key, kind in busy:
+            entry = {'id': self._id_of(key), 'kind': kind}
+            if entry['id'] and entry not in out_busy:
+                out_busy.append(entry)
         return {'v': C.SCHEMA_VERSION, 'seq': seq, 'busy': out_busy, 'jobs': jobs, 'transfer': transfer}
 
     def publish_state(self):

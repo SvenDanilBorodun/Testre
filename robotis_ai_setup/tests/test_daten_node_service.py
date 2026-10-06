@@ -489,6 +489,12 @@ class Leases(ServiceCase):
         self.assertEqual(self.svc.busy_kind(path), 'record')
         self.assertIsNone(self.svc.claim_record_lease(path), 'the recorder never conflicts with itself')
         self.assertEqual(self.svc.state_payload()['busy'], [{'id': 'lena/omx_f_a', 'kind': 'record'}])
+        self.hf.is_processing, self.hf.current_task = True, {'mode': 'upload', 'local_dir': str(path),
+                                                              'repo_id': 'lena/omx_f_a'}
+        self.assertEqual(self.svc.state_payload()['busy'], [{'id': 'lena/omx_f_a', 'kind': 'record'},
+                                                            {'id': 'lena/omx_f_a', 'kind': 'upload'}],
+                         'a Start waiting for this dataset\'s upload: the page reads the upload entry (§G11)')
+        self.hf.is_processing, self.hf.current_task = False, None
         self.node.on_recording = False                                   # the record lease ends with the session
         self.assertIsNone(self.svc.busy_kind(path))
         self.hf.is_processing, self.hf.current_task = True, {'mode': 'upload', 'local_dir': str(path),

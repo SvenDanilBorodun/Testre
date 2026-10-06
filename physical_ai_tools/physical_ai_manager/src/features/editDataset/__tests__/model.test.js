@@ -41,7 +41,7 @@ describe('„Beide behalten" says what it does (V1-5, G-2)', () => {
   };
   walk(COPY);
 
-  it('the tip carries the shared core sentence', () => {
+  it('the tip carries the core sentence', () => {
     expect(COPY.keepBoth.tip.startsWith('„Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. '
       + 'Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.')).toBe(true);
   });

@@ -6,6 +6,34 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-06 (latest) — Daten 2.0 fix round 3: the R2 minors
+
+**Why.** The targeted verification of fix round 2 passed with five minors (R2-1…R2-5,
+`docs/plans/2026-10-05-daten-2/verify3t-findings.md`, gitignored); the owner had all five fixed, one
+fresh fixer per side (`feat/daten-2-fix3-robot`, `feat/daten-2-fix3-page`).
+
+**What changed.** R2-1: `HUB_CHANGED_SINCE_CHECK_DE` promised that „Beide behalten" keeps deletions
+deleted also for a dataset without a sync record, where it is the union and a deleted episode came
+back (hub 7 episodes); the sentence now promises nothing about it and sends the student to the Daten
+tab, whose per-dataset tip says it (robot string, the page's pin in `finishModel.test.js`). R2-2: a
+raw `keep_both` on a dataset whose own record already named the hub head ran the union and committed
+a deleted episode back; `node_service._keep_both` refuses it `stale`, re-checked in the job after
+the download. R2-3: nginx's `error_log` format is fixed and ends in `referrer:`, so the round-2 claim
+„0 tokens in either log" was wrong for a Referer naming a Daten URL sent by hand to another failing
+location (measured: `/video/stream` with web_video_server down logs the token, its access line is
+redacted). `location /daten-api/` now answers `Referrer-Policy: no-referrer` in both manager configs
+(and re-declares the other three security headers, measured on 200, 403 and 502 through nginx
+1.27.5), so a document opened at a token URL sends no Referer; the hand-made case is documented as
+the residual. R2-4: a Daten upload during that dataset's recording answered the crash-marker sentence
+(„… Lösche ihn …"); `node_service._upload` checks the live `record` lease first. R2-5: `CLAUDE.md`
+now says that ANY local change before the Daten tab first sees a dataset identical to its hub copy
+leaves it without a sync record, not only an edit before the remember step ran.
+
+**Numbers on the page branch.** React 238 files / 4266 passed + 2 expected fail, twice (fix round 2:
+4262; the four new tests are the `/daten-api/` header set per config and its teeth, each mutation-
+checked); eslint clean; the production entry chunk has no CodeMirror or three.js runtime token (the
+only `src` change is a comment); `nginx -t` clean on both configs (nginx 1.27.5).
+
 ### Unreleased, 2026-10-06 (later) — Daten 2.0 fix round 2: the minors after the targeted verification
 
 **Why.** Both targeted verifiers of fix round 1 passed with minors only (T1-1…T1-4, T2-1…T2-6,
@@ -36,8 +64,10 @@ in-image LeRobot step 66 passed.
 URL was logged verbatim, and every error of the `/daten-api/` location (a refused method, the sidecar
 down) carried the request line into the error log (T1-1; measured with the real nginx image: 13
 access and 9 error lines with a token over 31 request shapes). The location's errors now go to
-`/dev/null` and the server logs in a token-free format; 0 tokens in either log afterwards, through
-both manager configs and the real sidecar, and each half alone lets its lines back. A dataset that
+`/dev/null` and the server logs in a token-free format; afterwards no token in the access log and
+none in the error log from the page's own requests, through both manager configs and the real
+sidecar, and each half alone lets its lines back. (Corrected in fix round 3, R2-3: a Referer naming a
+Daten URL, sent by hand to ANOTHER location that fails, still reaches the error log.) A dataset that
 crashed while its player was open still offered „Jetzt hochladen" and every tool (T2-2); the player
 now shows its card's state for a live, crashed or broken dataset and opens again only after the
 robot's re-read. A copy fetched from Hugging Face read „–" for all four numbers during the download

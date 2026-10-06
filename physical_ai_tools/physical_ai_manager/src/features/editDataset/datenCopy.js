@@ -320,8 +320,10 @@ const DATEN_COPY = deepFreeze({
 
   keepBoth: {
     button: 'Beide behalten',
-    // V1-5: the truth of G-2, in the core sentence the robot's texts share
-    // (record_texts_de.HUB_CHANGED_SINCE_CHECK_DE)
+    // V1-5: the truth of G-2 for a dataset WITH a sync record. The robot's
+    // record_texts_de.HUB_CHANGED_SINCE_CHECK_DE promises nothing about what
+    // „Beide behalten" keeps; it sends the student here, where this tip (or
+    // tipNoBase) says it for that dataset (R2-1).
     tip: '„Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg. Gleiche Episoden kommen nur einmal vor. Danach wird der Datensatz hochgeladen.',
     // T2-1: a dataset with no sync record (uploaded before Daten 2.0 and never
     // found identical to its hub copy since) has no base; the merge is then

@@ -17,6 +17,11 @@
 // Measured with the real nginx:1.27.5-alpine (fix round 2): with both halves no
 // token in either log over 31 request shapes; drop the error_log line and the
 // error log shows 9 tokens, drop the server access_log line and the access log 13.
+// R2-3 (fix round 3): the location answers `Referrer-Policy: no-referrer`, so a
+// document opened at a token URL sends no Referer. The error log's format is
+// fixed and ends in `referrer: "…"`: a Referer naming a Daten URL, sent BY HAND
+// to another location that fails, still lands there (a residual; the page's own
+// requests never send one).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -47,6 +52,28 @@ function mapBlock(text, variable) {
 function logFormat(text, name) {
   const m = new RegExp(`\\nlog_format ${name} ([\\s\\S]*?);\\n`).exec(text);
   return m ? m[1] : null;
+}
+
+// The add_header directives a block declares at its OWN level, as
+// {name: 'value always'}; a nested block (limit_except) has none.
+function addHeaders(block) {
+  const out = {};
+  for (const line of directives(block)) {
+    const m = /^add_header (\S+) (.+);$/.exec(line);
+    if (m) {
+      expect(out[m[1]]).toBeUndefined();
+      out[m[1]] = m[2];
+    }
+  }
+  return out;
+}
+
+// The server-level security headers (the 4-space-indented add_header lines of
+// the server block), with the Referrer-Policy the Daten block must answer.
+function expectedDatenHeaders(text) {
+  const server = serverBlock(text);
+  const own = server.split('\n').filter((l) => /^ {4}add_header /.test(l)).join('\n');
+  return { ...addHeaders(own), 'Referrer-Policy': '"no-referrer" always' };
 }
 
 // What the two maps do, in JavaScript: their one redacting key is `~*daten-api`.
@@ -80,6 +107,25 @@ describe.each(CONFIGS)('%s: the /daten-api/ block', (name) => {
     const stripped = directives(block.replace(/\n\s*access_log off;/, '').replace(/\n\s*error_log \/dev\/null;/, ''));
     expect(stripped).not.toContain('access_log off;');
     expect(stripped.filter((l) => l.startsWith('error_log'))).toEqual([]);
+  });
+
+  // R2-3: a document opened at a token URL must not send it on as its Referer.
+  // The block then has an add_header of its own, so nothing inherits from the
+  // server level: every server-level security header is re-declared, the
+  // Referrer-Policy as no-referrer and the other three unchanged.
+  it('answers Referrer-Policy: no-referrer and re-declares the server-level security headers', () => {
+    expect(addHeaders(block)).toEqual(expectedDatenHeaders(text));
+    expect(directives(block)).toContain('add_header Referrer-Policy "no-referrer" always;');
+    expect(Object.keys(expectedDatenHeaders(text)).sort()).toEqual(
+      ['Permissions-Policy', 'Referrer-Policy', 'X-Content-Type-Options', 'X-Frame-Options'],
+    );
+  });
+
+  it('the header check has teeth: a missing re-declaration or the inherited policy fails it', () => {
+    const noFrame = block.replace(/\n\s*add_header X-Frame-Options "DENY" always;/, '');
+    expect(addHeaders(noFrame)).not.toEqual(expectedDatenHeaders(text));
+    const inherited = block.replace('"no-referrer"', '"strict-origin-when-cross-origin"');
+    expect(addHeaders(inherited)).not.toEqual(expectedDatenHeaders(text));
   });
 });
 

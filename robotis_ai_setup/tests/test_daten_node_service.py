@@ -724,6 +724,52 @@ class Downloads(ServiceCase):
                 self.assertEqual(self.svc._download_failure(dict(result, ok=False)), (code, message))
 
 
+class TheOldPageUpload(ServiceCase):
+    """V1-6: ``/huggingface/control``'s upload goes through ``send_control_upload``:
+    the busy check and the transient ``upload`` lease of a Daten upload."""
+
+    def request(self, path):
+        return {'mode': 'upload', 'repo_id': 'lena/omx_f_a', 'local_dir': str(path), 'repo_type': 'dataset',
+                'author': ''}
+
+    def test_refused_while_an_edit_a_delete_or_a_download_holds_the_dataset(self):
+        path = self.dataset('lena/omx_f_a')
+        key = self.svc._key(path)
+        for kind, message in (('edit', T.BUSY_EDIT_DE), ('delete', T.BUSY_EDIT_DE),
+                              ('download', T.BUSY_DOWNLOAD_DE)):
+            with self.subTest(kind=kind):
+                self.svc._claim([key], kind)
+                try:
+                    self.assertEqual(self.svc.send_control_upload(str(path), self.request(path)), message)
+                finally:
+                    self.svc._release([key])
+                self.assertEqual(self.hf.sent, [])
+
+    def test_refused_while_a_recording_writes_it(self):
+        path = self.dataset('lena/omx_f_a')
+        self.node.on_recording = True
+        self.node.data_manager = types.SimpleNamespace(_save_path=path)
+        self.assertEqual(self.svc.send_control_upload(str(path), self.request(path)), T.BUSY_RECORD_DE)
+        self.assertEqual(self.hf.sent, [])
+
+    def test_a_free_dataset_is_handed_over_under_the_upload_lease(self):
+        path = self.dataset('lena/omx_f_a')
+        key = self.svc._key(path)
+        seen = []
+        self.hf.on_send = lambda request: seen.append(self.svc._leases.get(key))
+        self.assertIsNone(self.svc.send_control_upload(str(path), self.request(path)))
+        self.assertEqual((self.hf.sent, seen), ([self.request(path)], ['upload']))
+        self.assertEqual(self.svc.busy_kind(path), 'upload', 'from now on the worker task holds it')
+        self.refused(self.cmd('edit', op='delete', dataset='lena/omx_f_a', meta_digest=self.digest(path),
+                              episodes=[0]), 'busy_upload', T.BUSY_UPLOAD_DE)
+
+    def test_a_worker_that_cannot_take_it_is_unavailable(self):
+        path = self.dataset('lena/omx_f_a')
+        self.hf.accept = False
+        self.assertEqual(self.svc.send_control_upload(str(path), self.request(path)), T.UNAVAILABLE_DE)
+        self.assertIsNone(self.svc.busy_kind(path), 'the transient lease is released')
+
+
 class SyncDownloads(ServiceCase):
 
     def test_queued_behind_a_running_download_and_shown_while_recording(self):

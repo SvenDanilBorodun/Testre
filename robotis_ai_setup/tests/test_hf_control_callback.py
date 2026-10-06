@@ -301,6 +301,61 @@ class TheOtherModesStillDispatch(unittest.TestCase):
         self.assertFalse(node.hf_cancel_on_progress)
 
 
+class _Daten:
+    """The node's DatenService, as far as the callback uses it."""
+
+    def __init__(self, refusal=None):
+        self.refusal = refusal
+        self.calls = []
+
+    def send_control_upload(self, local_dir, request):
+        self.calls.append((local_dir, dict(request)))
+        return self.refusal
+
+
+class TheUploadTakesTheDatenLease(unittest.TestCase):
+    """V1-6: an old-page upload goes through the Daten registry when it runs
+    (the transient ``upload`` lease and the busy check of a Daten upload), so it
+    never starts while a Daten edit, delete or download holds the dataset."""
+
+    def setUp(self):
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix='hfctl_')).resolve()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        original = _DP.browsable_roots
+        _DP.browsable_roots = lambda: [self.root]
+        self.addCleanup(setattr, _DP, 'browsable_roots', original)
+        self.inside = str(self.root / 'alice' / 'omx_f_pick')
+
+    def test_a_busy_dataset_is_refused_with_the_registrys_sentence(self):
+        worker = _Worker()
+        node = _Node(worker=worker)
+        node.daten = _Daten(refusal='Es läuft gerade eine andere Bearbeitung. Warte, bis sie fertig ist.')
+        resp = _call(node, _request('upload', repo_id='alice/omx_f_pick', local_dir=self.inside))
+        self.assertFalse(resp.success)
+        self.assertEqual(resp.message, node.daten.refusal)
+        self.assertEqual(worker.requests, [], 'the upload bypassed the registry')
+        self.assertEqual(node.daten.calls[0][0], self.inside, 'the CONFINED folder is the lease key')
+
+    def test_a_free_dataset_is_handed_over_through_the_registry(self):
+        worker = _Worker()
+        node = _Node(worker=worker)
+        node.daten = _Daten()
+        resp = _call(node, _request('upload', repo_id='alice/omx_f_pick', local_dir=self.inside))
+        self.assertTrue(resp.success, resp.message)
+        self.assertEqual(resp.message, 'Hugging Face-Auftrag gestartet (alice/omx_f_pick).')
+        self.assertEqual(node.daten.calls, [(self.inside, {'mode': 'upload', 'repo_id': 'alice/omx_f_pick',
+                                                           'local_dir': self.inside, 'repo_type': 'dataset',
+                                                           'author': ''})])
+        self.assertEqual(worker.requests, [], 'the registry hands the request to the worker, once')
+
+    def test_other_modes_never_ask_the_registry(self):
+        worker = _Worker()
+        node = _Node(worker=worker)
+        node.daten = _Daten(refusal='nein')
+        self.assertTrue(_call(node, _request('download', repo_id='alice/satz')).success)
+        self.assertEqual((node.daten.calls, len(worker.requests)), ([], 1))
+
+
 class TheCancelBranchUnwindsCleanly(unittest.TestCase):
     """`return` no longer sits in the `finally`."""
 

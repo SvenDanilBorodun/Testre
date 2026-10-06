@@ -908,6 +908,18 @@ class DatenService:
         self._enqueue_upload(self._key(path), request)
         return {'repo_id': dataset_id}
 
+    def send_control_upload(self, local_dir, request):
+        """The old page's ``/huggingface/control`` upload (V1-6): handed to the
+        HF worker under the same transient ``upload`` lease and busy check as a
+        Daten upload, so it never starts on a dataset a Daten edit, delete or
+        download (or a recording) holds. Returns None once the worker took it,
+        else the German refusal."""
+        try:
+            self._enqueue_upload(self._key(local_dir), request)
+        except Refusal as e:
+            return e.message
+        return None
+
     def _hf_worker_ready(self):
         """The HF worker, started when absent (outside the registry lock); None
         when it cannot take a task now."""

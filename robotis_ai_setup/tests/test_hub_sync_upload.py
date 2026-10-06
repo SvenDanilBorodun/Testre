@@ -613,6 +613,33 @@ class TheLocalGate(HubCase):
         self.assertEqual(len(self.audit('create_commit')), 1)
 
 
+    def test_a_broken_dataset_with_no_repo_yet_creates_none(self):
+        """V1-6: with no repository on the hub yet, the gate runs BEFORE
+        create_repo: a broken copy leaves no empty repository behind."""
+        write_tree(self.root, BASE, {'BROKEN': b'1'})
+        for name, expected in (('none', None), ('unset', self.H.UNSET)):
+            with self.subTest(path=name):
+                with self.assertRaises(self.H.Refused) as e:
+                    self.H.upload(self.root, REPO, expected=expected, api=self.api)
+                self.assertEqual(e.exception.code, 'local_broken')
+                self.assertFalse(self.api.repo_exists(REPO, repo_type='dataset'))
+        self.assertEqual(self.audit(), [], 'zero writes')
+
+    def test_the_whole_gate_runs_once_per_upload(self):
+        """The early gate (no repo yet) and the late one (on CommitOperationAdd's
+        hashes) never both run the integrity check."""
+        engine = self.H._sibling('v3_surgery')
+        calls = []
+        real = engine.integrity
+        engine.integrity = lambda root, known_good=frozenset(): (calls.append(1), real(root, known_good))[1]
+        self.addCleanup(setattr, engine, 'integrity', real)
+        self.first_upload()                                   # no repo yet: the early gate
+        self.assertEqual((len(calls), len(self.audit('create_repo'))), (1, 1))
+        write_tree(self.root, SESSION2)
+        self.H.upload(self.root, REPO, api=self.api)          # the repo exists: the late gate
+        self.assertEqual(len(calls), 2)
+
+
 class RecordsBelongToTheirOwnDataset(HubCase):
 
     def test_folder_x_uploaded_as_repo_y_writes_no_record_for_x(self):

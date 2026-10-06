@@ -53,6 +53,10 @@ const CRA_ENV_KEYS = [
   'REACT_APP_DEBUG',
   'REACT_APP_BASE_WORKSPACE_PATH',
   'REACT_APP_LEROBOT_OUTPUTS_PATH',
+  // Daten 2.0 (spec §G12): the verification harness builds its SPA with this
+  // set to '1' to count the player's renders (features/editDataset/renderProbe);
+  // no product build sets it, so it inlines as '' and the probe stays inert.
+  'REACT_APP_DATEN_RENDER_PROBE',
 ];
 
 function craEnvDefine(mode) {

@@ -290,7 +290,6 @@ const DATEN_COPY = deepFreeze({
     task: 'Aufgabe',
     taskValue: '„{task}“',
     index: 'In den Daten: episode_index {i}',
-    unplayableNote: 'Nicht abspielbar',
   },
 
   tools: {
@@ -463,6 +462,7 @@ const DATEN_COPY = deepFreeze({
     visPublic: 'öffentlich',
     visPrivate: 'privat – dein Konto hat Zugriff',
     updated: 'aktualisiert {date}',
+    foundLine: '{robot} · {cameras} · {vis} · {updated}',
     camerasPair: '{a}- und {b}-Kamera',
     saveAs: 'Speichern als',
     noName: 'Gib einen Namen ein.',

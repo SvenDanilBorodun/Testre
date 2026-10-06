@@ -8,7 +8,7 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-// The three icons Lucide does not have, drawn in Lucide's own rules so they sit
+// The icons Lucide does not have (or react-icons 5.5 does not ship), drawn in Lucide's own rules so they sit
 // beside it unnoticed: a 24×24 viewBox, no fill, `currentColor` stroke of
 // width 2, round caps and joins, every coordinate within [1, 23]
 // (components/icons/__tests__/icons.test.jsx checks each rule). They are
@@ -62,13 +62,22 @@ export const PYTHON_TREE = Object.freeze(tree([
   path('m21 5.5 1.5 1.5'),
 ]));
 
+// „Aktuell" (Daten 2.0, spec §G7): Lucide's own cloud-check, which react-icons
+// 5.5 does not carry — its two paths verbatim (the cloud, the check mark).
+export const CLOUD_SYNCED_TREE = Object.freeze(tree([
+  path('M5 17.743A7 7 0 1 1 15.71 10h1.79a4.5 4.5 0 0 1 1.5 8.742'),
+  path('m17 15-5.5 5.5L9 18'),
+]));
+
 export const CUSTOM_TREES = Object.freeze({
   robotArm: ROBOT_ARM_TREE,
   leaderArm: LEADER_ARM_TREE,
   python: PYTHON_TREE,
+  cloudSynced: CLOUD_SYNCED_TREE,
 });
 
 // Components with react-icons' own signature (`(props) => element`).
 export const IconRobotArm = (props) => GenIcon(ROBOT_ARM_TREE)(props);
 export const IconLeaderArm = (props) => GenIcon(LEADER_ARM_TREE)(props);
 export const IconPython = (props) => GenIcon(PYTHON_TREE)(props);
+export const IconCloudSynced = (props) => GenIcon(CLOUD_SYNCED_TREE)(props);

@@ -21,6 +21,8 @@ av = pytest.importorskip('av')
 pytest.importorskip('pyarrow')
 np = pytest.importorskip('numpy')
 
+from daten_timeout import per_test_time_limit  # noqa: E402,F401 — V1-3: a hang fails within the limit
+
 from physical_ai_server.daten import contract as C  # noqa: E402
 from physical_ai_server.daten import library as L  # noqa: E402
 from physical_ai_server.data_processing import dataset_sync as S  # noqa: E402
@@ -321,6 +323,12 @@ def _mirror(api, repo, path, head='h1', drop=()):
     return api.add(repo, head=head, files=files)
 
 
+def test_a_trailing_newline_is_never_a_valid_id():
+    assert L.is_valid_id(f'{NS}/omx_f_a')
+    assert not L.is_valid_id(f'{NS}/omx_f_a\n') and not L.is_valid_id(f'{NS}\n/omx_f_a')
+    assert not L.valid_part('omx_f_a\n')
+
+
 def test_sync_map_reasons_and_states(tmp_path):
     ns = tmp_path / NS
     a = build_dataset(ns / 'omx_f_a', lengths=(20, 21))
@@ -338,6 +346,9 @@ def test_sync_map_reasons_and_states(tmp_path):
     assert (out[ids[1]]['state'], out[ids[1]]['reason']) == ('local', None)
     out = L.sync_map(lib, local, {}, {f'{NS}/omx_f_c': {'head': 'c1'}})
     assert out[f'{NS}/omx_f_c'] == {'state': 'online', 'reason': None, 'head': 'c1'}
+    # V2-10: a hub-only card whose info.json could not be read just now
+    out = L.sync_map(lib, local, {f'{NS}/omx_f_c': {'state': 'unreachable'}}, {f'{NS}/omx_f_c': {'head': 'c1'}})
+    assert out[f'{NS}/omx_f_c'] == {'state': 'unknown', 'reason': 'unreachable', 'head': 'c1'}
 
     # a record-less dataset decided by content through the real HubReads
     api = FakeApi(account=NS)

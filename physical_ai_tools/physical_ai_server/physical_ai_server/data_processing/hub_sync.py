@@ -311,13 +311,15 @@ def _gate_cheap(root):
         raise Refused('local_broken', 'no meta/info.json')
 
 
-def local_gate(root, rec, sha=None):
+def local_gate(root, rec, sha=None, *, integrity=True):
     """The local gate of every upload path: no crash marker; every file the
     record vouches for (``files``: data/, meta/episodes/, videos/ as last known
     good) still has its sha256 — an already-synced video included; the dataset
     loads and every episode is whole (``v3_surgery.integrity``, which does not
     re-read the vouched-for videos). ``sha`` = {path: sha256} when the caller
-    hashed the files anyway (the upload); else the vouched-for files are hashed."""
+    hashed the files anyway (the upload); else the vouched-for files are hashed.
+    ``integrity=False``: the caller ran the whole gate earlier in the same
+    upload (a repo that does not exist yet), only the hashes are compared again."""
     V = _sibling('v3_surgery')
     root = Path(root)
     _gate_cheap(root)
@@ -327,6 +329,8 @@ def local_gate(root, rec, sha=None):
     changed = sorted(p for p, h in known.items() if sha.get(p) != h)
     if changed:
         raise Refused('local_broken', f'changed on disk since the last sync: {changed[0]}')
+    if not integrity:
+        return
     try:
         V.integrity(root, known_good=frozenset(known))
     except V.SurgeryError as e:
@@ -400,7 +404,9 @@ def upload(root, repo, *, expected=UNSET, private=True, api=None, progress=None,
     'unconfirmed', 'private', 'files'}``. Raises ``Refused`` (``in_session``,
     ``local_broken``, ``namespace``, ``hub_changed``, ``hub_differs``) or the
     library's own error (the caller classifies it); in every raising case
-    nothing of ours was committed."""
+    nothing of ours was committed, and a dataset the local gate refuses never
+    creates a repo (V1-6: the gate runs before ``create_repo`` when there is
+    none yet)."""
     from huggingface_hub import HfApi
     api = api or HfApi()
     root = Path(root)
@@ -408,6 +414,9 @@ def upload(root, repo, *, expected=UNSET, private=True, api=None, progress=None,
     rec = S.own_record(root, repo)                        # G-11: another repo's record is ignored
     if repo.split('/')[0] != account_of(api):             # R-10: the token's ACCOUNT only
         raise Refused('namespace')
+    gated = not api.repo_exists(repo, repo_type='dataset')
+    if gated:                                             # nothing exists yet: refuse a broken copy BEFORE creating
+        local_gate(root, rec)
     api.create_repo(repo, repo_type='dataset', private=bool(private), exist_ok=True)
     hub = hub_view(api, repo, strict=True)
     head = hub['head']
@@ -429,7 +438,7 @@ def upload(root, repo, *, expected=UNSET, private=True, api=None, progress=None,
     digest = S.meta_digest(root)
     adds, dels = _local_ops(root, hub_files)
     sha = {a.path_in_repo: a.upload_info.sha256.hex() for a in adds}
-    local_gate(root, rec, sha)                            # M3 + m2, on the hashes CommitOperationAdd computed
+    local_gate(root, rec, sha, integrity=not gated)       # M3 + m2, on the hashes CommitOperationAdd computed
     for p in check_exact:                                 # nothing is overwritten on a guess (record-less)
         want = hub_files.get(p, {}).get('lfs_sha256')
         if want and sha.get(p) != want:

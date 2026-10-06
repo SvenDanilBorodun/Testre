@@ -284,10 +284,15 @@ HUB_TAG_FAILED_DE = ('Der Versions-Tag des Datensatzes konnte nicht aktualisiert
 # (components/Record/model/finishModel.js::POINTS_TO_DATEN_TAB).
 
 # §E2 step 3/6: the hub moved between the decision and the commit (Hugging Face
-# refused the commit's stale parent, or our read-back found other data).
+# refused the commit's stale parent, or our read-back found other data). The
+# „Beide behalten" sentence states G-2 (V1-5): the new episodes of BOTH sides
+# are kept; what either side deleted or replaced since the last sync stays gone
+# (the page's „Beide behalten" tip says the same, datenCopy.js).
 HUB_CHANGED_SINCE_CHECK_DE = ('Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde '
                               'nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version '
-                              'du behalten willst – „Beide behalten“ verliert nichts.')
+                              'du behalten willst. „Beide behalten“ behält alle neuen Episoden von hier '
+                              'und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite '
+                              'gelöscht oder ersetzt wurde, bleibt weg.')
 # §E2 step 0 (audit M3): a crash marker — a running session, or one never finalized.
 UPLOAD_IN_SESSION_DE = ('Nicht hochgeladen: Die Aufnahme dieses Datensatzes wurde unterbrochen und '
                         'nicht sauber beendet; hochgeladen würde er die Version auf Hugging Face '

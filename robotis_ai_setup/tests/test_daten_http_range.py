@@ -17,6 +17,8 @@ import socket
 import threading
 import unittest
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 HTTP_SERVER_PATH = (REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
                     / 'daten' / 'http_server.py')
@@ -81,7 +83,7 @@ def parse_range_cases():
     ]
 
 
-class ParseRange(unittest.TestCase):
+class ParseRange(BoundedTestCase):
 
     def test_every_shape(self):
         for header, expected in parse_range_cases():
@@ -93,7 +95,39 @@ class ParseRange(unittest.TestCase):
         self.assertEqual(HS.parse_range('bytes=-1', 0), ('unsatisfiable', None))
 
 
-class LiveServerBase(unittest.TestCase):
+class TheProductionEntryPoint(BoundedTestCase):
+    """V1-2 / G-6: ``main()`` — the sidecar's production entry — installs the
+    bounded client factory (HUB_CALL_TIMEOUT_S) BEFORE the server exists, so
+    no hub call of the production sidecar is ever unbounded."""
+
+    def test_main_installs_the_bounded_client_factory_before_serving(self):
+        events = []
+        hub_mod = type('HubMod', (), {'install_client_factory': staticmethod(
+            lambda bound_s: events.append(('install', bound_s)))})
+
+        class FakeServer:
+            sidecar = type('S', (), {'library': type('L', (), {
+                'start_hint_worker': staticmethod(lambda: events.append(('hints',)))})()})()
+
+            def serve_forever(self, poll_interval=None):
+                events.append(('serve',))
+                raise KeyboardInterrupt
+
+            def server_close(self):
+                events.append(('close',))
+        saved = HS.load_modules, HS.make_server
+        HS.load_modules = lambda: (None, hub_mod)
+        HS.make_server = lambda *a, **k: events.append(('make',)) or FakeServer()
+        try:
+            self.assertEqual(HS.main(), 0)
+        finally:
+            HS.load_modules, HS.make_server = saved
+        self.assertEqual(events, [('install', HS.C.HUB_CALL_TIMEOUT_S), ('make',), ('hints',), ('serve',),
+                                  ('close',)])
+        self.assertEqual(HS.C.HUB_CALL_TIMEOUT_S, 10)
+
+
+class LiveServerBase(BoundedTestCase):
 
     def setUp(self):
         sidecar = HS.Sidecar(SECRET, FakeLibrary(), hub=None)

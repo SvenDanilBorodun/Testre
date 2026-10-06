@@ -337,6 +337,25 @@ def test_P19_every_attack_is_refused_unsupported_before_any_output(tmp_path, hon
     assert tree_digest(victim) == before
 
 
+@pytest.mark.parametrize('key', ['observation/state', '../../x', 'observation state', 'zustand.ä', '', '.\n'])
+def test_an_unsafe_feature_key_is_refused_by_its_own_rule(tmp_path, honest, key):
+    """V1-2 / R-2: every feature key matches FEATURE_KEY_RE — also a NON-video
+    one, which no path template resolves (so the path confinement cannot stand
+    in for the key rule): it names parquet columns and the per-episode
+    statistics' ``stats/<key>/<stat>`` columns."""
+    info = json.loads((honest / 'meta' / 'info.json').read_text())
+    info['features'][key] = info['features'].pop('observation.state')
+    with pytest.raises(V.SurgeryError) as e:
+        V.check_layout(info, [])
+    assert (e.value.code, e.value.detail) == ('unsupported', 'feature key')
+    d = tmp_path / 'ds' / 'lena-schmidt' / 'omx_f_key'
+    shutil.copytree(honest, d)
+    _mutate_info(d, lambda i: i['features'].__setitem__(key, i['features'].pop('observation.state')))
+    with pytest.raises(V.SurgeryError) as e:
+        V.Source(d)
+    assert (e.value.code, e.value.detail) == ('unsupported', 'feature key')
+
+
 def test_the_honest_dataset_is_accepted(honest):
     src = V.Source(honest)
     assert len(src.episodes) == 3

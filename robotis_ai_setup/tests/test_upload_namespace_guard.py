@@ -49,6 +49,8 @@ import tempfile
 import types
 import unittest
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DATA_MANAGER_PATH = (
     REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
@@ -168,7 +170,7 @@ class _TaskInfo:
         self.episode_time_s = 10
 
 
-class _Rig(unittest.TestCase):
+class _Rig(BoundedTestCase):
     """A DataManager wired so _upload_dataset can be driven in isolation."""
 
     def setUp(self):

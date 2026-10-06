@@ -29,6 +29,8 @@ import pytest
 pytest.importorskip('huggingface_hub')
 pytest.importorskip('httpx')
 
+from daten_timeout import per_test_time_limit  # noqa: E402,F401 — V1-3: a hang fails within the limit
+
 PKG_PARENT = Path(__file__).resolve().parents[1]
 DATEN = PKG_PARENT / 'physical_ai_server' / 'daten'
 BOUND_S = 1.5

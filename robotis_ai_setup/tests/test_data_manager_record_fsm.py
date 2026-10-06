@@ -25,6 +25,8 @@ import types
 import unittest
 from pathlib import Path
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_MANAGER_PATH = (
     REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
@@ -163,7 +165,7 @@ def _ensure_loaded():
     return MOD
 
 
-class _FsmTestCase(unittest.TestCase):
+class _FsmTestCase(BoundedTestCase):
     @classmethod
     def setUpClass(cls):
         _ensure_loaded()
@@ -1259,7 +1261,7 @@ class StaleCameraWarningTest(_FsmTestCase):
         self.assertEqual(MOD.camera_name_de('wrist'), 'Kamera „wrist“')
 
 
-class InlineSentencesMovedTest(unittest.TestCase):
+class InlineSentencesMovedTest(BoundedTestCase):
     """Round 7: the last student-facing sentences of the recording path live
     in record_texts_de.py; the data manager keeps no inline copy (the parser
     folds implicit concatenation and f-string parts into Constant nodes). The

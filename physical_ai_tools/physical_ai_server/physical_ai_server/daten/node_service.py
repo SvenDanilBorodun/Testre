@@ -96,7 +96,10 @@ _PART = re.compile(C.DATASET_PART_RE)
 _REPO = re.compile(C.REPO_ID_RE)
 _SHA = re.compile(r'^[0-9a-f]{40}$')
 DOWNLOAD_WORKER_MODULE = 'physical_ai_server.daten.download_worker'
+DL_RESULT = 'DL_RESULT::'             # = download_worker.RESULT_PREFIX / PROGRESS_PREFIX
+DL_PROGRESS = 'DL_PROGRESS::'
 UPLOAD_STATUS_GRACE_S = 3.0          # the HF worker idle with no status for this long: the upload is lost
+ACCOUNT_RETRY_S = 30.0               # a failed account lookup is asked again after this long
 
 # (code, message) of each busy kind
 _BUSY = {'record': ('busy_record', T.BUSY_RECORD_DE), 'upload': ('busy_upload', T.BUSY_UPLOAD_DE),
@@ -121,11 +124,29 @@ def _invalid(message=T.UNKNOWN_MODE_DE):
 def valid_id(dataset_id) -> bool:
     if not isinstance(dataset_id, str) or dataset_id.count('/') != 1:
         return False
-    return all(_PART.match(p) and not p.endswith(C.RESERVED_SUFFIXES) for p in dataset_id.split('/'))
+    return all(_PART.fullmatch(p) and not p.endswith(C.RESERVED_SUFFIXES) for p in dataset_id.split('/'))
 
 
 def _now_iso():
     return S.now_iso()
+
+
+def parse_marked(line, marker):
+    """The JSON object after the LAST ``marker`` in one output line, else None.
+
+    The worker's stderr shares the pipe, and the hub library's progress bar
+    (``\\r`` + text, never a newline while it runs) can stand unfinished on the
+    line the worker's own watch prints its result into: ``Fetching 9 files:
+    22%|██▏ | 2/9 [...]DL_RESULT::{...}`` (V1-1). So the marker counts wherever
+    it stands, and anything after the object is ignored."""
+    i = line.rfind(marker)
+    if i < 0:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(line, i + len(marker))
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
 
 
 def _tree_bytes(path):
@@ -137,6 +158,17 @@ def _tree_bytes(path):
             except OSError:
                 pass
     return n
+
+
+def _default_account_resolver():
+    """The slot token's account (``DataManager.get_huggingface_user_id``: one
+    whoami bounded at 8 s, the token read from the slot); None when it cannot
+    be asked here (the deps-free loaders)."""
+    try:
+        from physical_ai_server.data_processing.data_manager import DataManager
+    except Exception:  # noqa: BLE001
+        return None
+    return DataManager.get_huggingface_user_id()
 
 
 def _kill_group(proc):
@@ -195,22 +227,18 @@ class DownloadProcess:
     def _read(self):
         try:
             for line in self.p.stdout:
-                line = line.rstrip('\n')
-                if line.startswith('DL_RESULT::'):
-                    try:
-                        self.result = json.loads(line[len('DL_RESULT::'):])
-                    except ValueError:
-                        pass
-                elif line.startswith('DL_PROGRESS::'):
-                    try:
-                        p = json.loads(line[len('DL_PROGRESS::'):])
-                    except ValueError:
-                        continue
-                    if 'total' in p:
-                        self.total = int(p.get('total') or 0)
-                    if 'done' in p:
-                        self.verify_done = int(p.get('done') or 0)
-        except (OSError, ValueError):
+                result = parse_marked(line, DL_RESULT)
+                if result is not None:
+                    self.result = result
+                    continue
+                p = parse_marked(line, DL_PROGRESS)
+                if p is None:
+                    continue
+                if 'total' in p:
+                    self.total = int(p.get('total') or 0)
+                if 'done' in p:
+                    self.verify_done = int(p.get('done') or 0)
+        except (OSError, ValueError, TypeError):
             pass
 
     def kill(self, code):
@@ -273,7 +301,8 @@ class DatenService:
 
     def __init__(self, node, *, root=None, ros=True, start_threads=True, popen=None, kill=None,
                  token_reader=None, state_reader=None, name_rule=None, namespace_reader=None,
-                 disk_free=None, secret=None, spawn=None, clock=time.monotonic, sleep=time.sleep):
+                 account_resolver=None, disk_free=None, secret=None, spawn=None, clock=time.monotonic,
+                 sleep=time.sleep):
         self.node = node
         self.root = Path(os.path.realpath(root if root is not None else DP.dataset_root()))
         self._lock = threading.Lock()
@@ -291,6 +320,8 @@ class DatenService:
         self._state_reader = state_reader
         self._name_rule = name_rule
         self._namespace_reader = namespace_reader
+        self._account_resolver = account_resolver or _default_account_resolver
+        self._resolved = {'fp': None, 'account': None, 'at': None, 'running': False}   # V2-16
         self._disk_free = disk_free or SIG.disk_free_bytes
         self._spawn = spawn or (lambda fn, *a: threading.Thread(target=fn, args=a, daemon=True,
                                                                   name='daten-job').start())
@@ -322,8 +353,12 @@ class DatenService:
         self._pub = self.node.create_publisher(String, C.STATE_TOPIC, qos)
         self.node.create_service(DatenCommand, C.COMMAND_SERVICE, self._command_callback,
                                  callback_group=self._service_group)
-        self.node.create_timer(1.0, self.publish_state, callback_group=self._timer_group)
+        self.node.create_timer(1.0, self._tick, callback_group=self._timer_group)
         self.publish_state()
+
+    def _tick(self):
+        self.publish_state()
+        self._refresh_account()
 
     def _command_callback(self, request, response):
         out = self.command(request.action, request.args_json)
@@ -362,11 +397,19 @@ class DatenService:
         return safe_dataset_task_name(name)
 
     def _account(self):
-        """The token's account from the namespace cache, or None when unknown
-        (refuse on proof only; never a network call here)."""
+        """The slot token's account, or None when unknown (refuse on proof only;
+        never a network call here). Daten resolves it itself (V2-16): the account
+        ``_refresh_account`` found for the token NOW in the slot (its fingerprint
+        must match); else the recorder's namespace cache."""
         if self._namespace_reader is not None:
             names = self._namespace_reader()
         else:
+            fp = self._slot_fp()
+            with self._lock:
+                resolved = dict(self._resolved)
+            if fp and resolved['fp'] == fp and resolved['account']:
+                return resolved['account']
+            self._refresh_account()
             try:
                 from physical_ai_server.data_processing.data_manager import DataManager
                 names = DataManager._hf_namespace_cache
@@ -374,6 +417,38 @@ class DatenService:
                 names = None
         names = sorted(names or ())
         return names[0] if len(names) == 1 else None
+
+    def _refresh_account(self):
+        """V2-16: look up the account of the token now in the slot IN THE
+        BACKGROUND (one bounded whoami per new fingerprint, never inside a
+        command), so ``namespace`` refusals are immediate without relying on a
+        cache only the recorder fills. A failed lookup is asked again after
+        ``ACCOUNT_RETRY_S``; called by the 1 Hz state tick and by ``_account``."""
+        fp = self._slot_fp()
+        now = self._clock()
+        with self._lock:
+            r = self._resolved
+            if not fp or r['running']:
+                return
+            if r['fp'] == fp and (r['account'] or (r['at'] is not None and now - r['at'] < ACCOUNT_RETRY_S)):
+                return
+            r.update(fp=fp, account=None, at=now, running=True)
+        threading.Thread(target=self._resolve_account, args=(fp,), daemon=True, name='daten-account').start()
+
+    def _resolve_account(self, fp):
+        account = None
+        try:
+            names = sorted(self._account_resolver() or ())
+            account = names[0] if len(names) == 1 else None
+        except Exception:  # noqa: BLE001 — no token, the hub unreachable: unknown, asked again later
+            account = None
+        current = self._slot_fp()                    # outside the lock (R-18: it reads the slot)
+        with self._lock:
+            r = self._resolved
+            r['running'] = False
+            if r['fp'] == fp and current == fp:      # the token changed meanwhile: the answer is stale
+                r['account'] = account
+                r['at'] = self._clock()
 
     def _robot_type(self):
         return getattr(self.node, 'robot_type', None) or 'omx_f'
@@ -654,7 +729,7 @@ class DatenService:
     def _target(self, args, sources):
         new_name, owner_ns = args.get('new_name'), args.get('owner_ns')
         if not isinstance(new_name, str) or not new_name.strip() or not isinstance(owner_ns, str) \
-                or not _PART.match(owner_ns):
+                or not _PART.fullmatch(owner_ns):
             raise _invalid()
         account = self._account()
         if account is not None and owner_ns != account:
@@ -872,7 +947,7 @@ class DatenService:
             raise _invalid()
         expected = args.get('expected_hub_sha', HS.UNSET)
         if expected is not HS.UNSET and expected is not None and not (isinstance(expected, str)
-                                                                       and _SHA.match(expected)):
+                                                                       and _SHA.fullmatch(expected)):
             raise _invalid()
         path = self._existing(dataset_id)
         state = self._state(path)
@@ -891,6 +966,18 @@ class DatenService:
             request['expected_hub_sha'] = expected
         self._enqueue_upload(self._key(path), request)
         return {'repo_id': dataset_id}
+
+    def send_control_upload(self, local_dir, request):
+        """The old page's ``/huggingface/control`` upload (V1-6): handed to the
+        HF worker under the same transient ``upload`` lease and busy check as a
+        Daten upload, so it never starts on a dataset a Daten edit, delete or
+        download (or a recording) holds. Returns None once the worker took it,
+        else the German refusal."""
+        try:
+            self._enqueue_upload(self._key(local_dir), request)
+        except Refusal as e:
+            return e.message
+        return None
 
     def _hf_worker_ready(self):
         """The HF worker, started when absent (outside the registry lock); None
@@ -932,8 +1019,8 @@ class DatenService:
     def _download(self, args):
         repo_id, revision, target_id = args.get('repo_id'), args.get('revision'), args.get('target')
         mode, display = args.get('mode'), args.get('display_name')
-        if not isinstance(repo_id, str) or not _REPO.match(repo_id) or not isinstance(revision, str) \
-                or not _SHA.match(revision) or not valid_id(target_id) or mode not in C.DOWNLOAD_MODES \
+        if not isinstance(repo_id, str) or not _REPO.fullmatch(repo_id) or not isinstance(revision, str) \
+                or not _SHA.fullmatch(revision) or not valid_id(target_id) or mode not in C.DOWNLOAD_MODES \
                 or (display is not None and not isinstance(display, str)):
             raise _invalid()
         digest = args.get('meta_digest')
@@ -1043,7 +1130,7 @@ class DatenService:
     # keep_both (§E10)
     def _keep_both(self, args):
         dataset_id, head, digest = args.get('dataset'), args.get('expected_hub_sha'), args.get('meta_digest')
-        if not valid_id(dataset_id) or not isinstance(head, str) or not _SHA.match(head):
+        if not valid_id(dataset_id) or not isinstance(head, str) or not _SHA.fullmatch(head):
             raise _invalid()
         path = self._existing(dataset_id)
         self._digest_ok(path, digest)
@@ -1221,7 +1308,7 @@ class DatenService:
             return []
         found = []
         for ns in sorted(self.root.iterdir()):
-            if ns.is_dir() and not ns.is_symlink() and _PART.match(ns.name):
+            if ns.is_dir() and not ns.is_symlink() and _PART.fullmatch(ns.name):
                 found += [ns / name for name in sorted(self._leftover_names(ns))]
         with_journal = [p for p in found if S.journal_path(p).exists()]
         done = []
@@ -1244,7 +1331,7 @@ class DatenService:
                 names.add(entry[1:-len('.journal.json')])
             if entry.startswith('.') and entry.endswith('.sync.next.json'):
                 names.add(entry[1:-len('.sync.next.json')])
-        return {n for n in names if _PART.match(n)}
+        return {n for n in names if _PART.fullmatch(n)}
 
     def _recover_one(self, path):
         partner = None

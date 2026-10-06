@@ -30,6 +30,8 @@ import types
 import unittest
 from unittest import mock
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 import test_hub_sync_upload as T
 
 DATA_MANAGER_PATH = (
@@ -252,7 +254,7 @@ class GuardedUploadThroughTheDataManager(T.HubCase):
         self.assertEqual(self.audit(), [])
 
 
-class TheDatasetBranchReachesOnlyHubSync(unittest.TestCase):
+class TheDatasetBranchReachesOnlyHubSync(BoundedTestCase):
     """AST fences (A18, §E2): the dataset upload is hub_sync's, reached through
     `_sibling('hub_sync')` INSIDE the function; upload_large_folder lives only in
     the model branch, imported there; `_upload_dataset` pushes nothing itself."""

@@ -45,6 +45,8 @@ import types
 import unittest
 from unittest import mock
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 import test_data_manager_record_fsm as F
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -216,7 +218,7 @@ class Handle:
         self.cancelled = True
 
 
-class D14Case(unittest.TestCase):
+class D14Case(BoundedTestCase):
 
     def setUp(self):
         self.hub = FakeHub()
@@ -502,6 +504,50 @@ class TheLease(D14Case):
         self.assertIsNone(self.dm._lease_reason(self.path))
 
 
+class TheOldPageDownloadGuards(BoundedTestCase):
+    """V1-2: the old page's ``/huggingface/control`` dataset download
+    (``DataManager.download_huggingface_repo``) never mixes files into an
+    existing dataset (DOWNLOAD_EXISTS_DE) and never lands outside the dataset
+    root (a ``repo_id`` off the wire, safe_under) — refused before any fetch."""
+
+    def setUp(self):
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix='dm_olddl_')).resolve()
+        self.outside = pathlib.Path(tempfile.mkdtemp(prefix='dm_olddl_out_')).resolve()
+        for p in (self.root, self.outside):
+            self.addCleanup(shutil.rmtree, p, ignore_errors=True)
+        saved = (MOD.dataset_paths.dataset_root, MOD.snapshot_download)
+        self.addCleanup(self._restore, saved)
+        MOD.dataset_paths.dataset_root = lambda: self.root
+        self.fetched = []
+        MOD.snapshot_download = lambda **kw: self.fetched.append(kw) or str(kw['local_dir'])
+
+    @staticmethod
+    def _restore(saved):
+        MOD.dataset_paths.dataset_root, MOD.snapshot_download = saved
+
+    def download(self, repo_id):
+        return MOD.DataManager.download_huggingface_repo(repo_id, 'dataset')
+
+    def test_an_existing_dataset_is_refused_before_any_fetch(self):
+        (self.root / 'lena' / 'omx_f_a' / 'meta').mkdir(parents=True)
+        self.assertFalse(self.download('lena/omx_f_a'))
+        self.assertEqual(MOD.DataManager._last_hf_failure_reason_de, MOD._daten_texts().DOWNLOAD_EXISTS_DE)
+        self.assertEqual(self.fetched, [])
+
+    def test_a_repo_id_that_leaves_the_root_is_refused_before_any_fetch(self):
+        escape = f'../{self.outside.name}/evil'
+        for repo_id in (escape, str(self.outside / 'evil2'), 'lena/../../evil3'):
+            with self.subTest(repo_id=repo_id):
+                self.assertFalse(self.download(repo_id))
+                self.assertTrue(MOD.DataManager._last_hf_failure_reason_de)
+                self.assertEqual(self.fetched, [])
+        self.assertEqual(list(self.outside.iterdir()), [], 'nothing was created outside the root')
+
+    def test_a_new_dataset_is_fetched_into_its_own_folder(self):
+        self.assertEqual(self.download('lena/omx_f_b'), str(self.root / 'lena' / 'omx_f_b'))
+        self.assertEqual([pathlib.Path(kw['local_dir']) for kw in self.fetched], [self.root / 'lena' / 'omx_f_b'])
+
+
 class TheCreateRecord(D14Case):
 
     def test_a_created_dataset_records_its_name_and_visibility_only(self):
@@ -557,7 +603,7 @@ class _Worker:
         return True
 
 
-class TheNodeHandsTheBaseToTheUpload(unittest.TestCase):
+class TheNodeHandsTheBaseToTheUpload(BoundedTestCase):
 
     def _node(self, base):
         node = types.SimpleNamespace(hf_api_worker=_Worker(), get_logger=lambda: mock.Mock(),
@@ -640,7 +686,7 @@ class _WorkerDataManager:
         return cls.result
 
 
-class TheHfWorker(unittest.TestCase):
+class TheHfWorker(BoundedTestCase):
 
     @classmethod
     def setUpClass(cls):

@@ -344,6 +344,28 @@ class EditWorkerTest(unittest.TestCase):
         self.assertEqual(
             self.worker.parse_output(stdout), {'success': True, 'message': 'b'})
 
+    def test_a_marker_behind_an_unfinished_progress_bar_is_read(self):
+        """stderr shares the pipe: a library bar left unfinished (``\\r`` + text,
+        no newline) may precede a protocol line on the same line (V1-1)."""
+        bar = 'Processing observation.images.scene:  40%|████      | 2/5'
+        stdout = bar + self.worker.RESULT_MARKER + json.dumps({'success': True, 'message': 'ok'}) + '\n'
+        self.assertEqual(self.worker.parse_output(stdout), {'success': True, 'message': 'ok'})
+        line = bar + self.worker.PROGRESS_MARKER + json.dumps({'stage': 'copy', 'done': 2, 'total': 5})
+        self.assertEqual(self.worker.parse_progress(line), {'stage': 'copy', 'done': 2, 'total': 5})
+
+    def test_each_protocol_line_starts_a_line_of_its_own_in_one_write(self):
+        writes = []
+
+        class Out:
+            def write(self, text):
+                writes.append(text)
+
+            def flush(self):
+                pass
+        with mock.patch.object(sys, 'stdout', Out()):
+            self.worker._say(self.worker.RESULT_MARKER + '{}')
+        self.assertEqual(writes, ['\n' + self.worker.RESULT_MARKER + '{}\n'])
+
     def test_parse_output_absent_and_malformed_return_none(self):
         self.assertIsNone(self.worker.parse_output('only noise\nmore noise'))
         self.assertIsNone(self.worker.parse_output(self.worker.RESULT_MARKER + 'not-json'))

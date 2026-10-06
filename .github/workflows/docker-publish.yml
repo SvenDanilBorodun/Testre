@@ -928,6 +928,28 @@ jobs:
             -v "$GITHUB_WORKSPACE/.github/scripts/daten_smoke.py:/tmp/daten_smoke.py:ro" \
             "$SERVER_IMAGE" \
             -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && HF_HUB_OFFLINE=1 python3 /tmp/daten_smoke.py'
+      - name: Daten 2.0 LeRobot-only engine tests in the shipped image
+        # python-tests (ci.yml) has no LeRobot, so these files' LeRobot tier
+        # runs nowhere else: verify's teeth and its real loader + decoder, a
+        # truncated output video never raising, another column order, the
+        # data-file roll-over at three settings, the identity through the
+        # engine, integrity with the real loader, the default templates, the
+        # dataset card. The checkout's test directory is mounted read-only;
+        # the tests import the SHIPPED physical_ai_server package (the sourced
+        # install), never the checkout's. pytest ships in the image. A skip
+        # fails the step: in this image nothing may skip for want of LeRobot.
+        # Same shape as the steps above: the image name through env:, after
+        # the revision check, Jetson excluded (it never edits datasets).
+        if: matrix.platform == 'amd64' || matrix.platform == 'opi'
+        timeout-minutes: 10
+        env:
+          SERVER_IMAGE: ghcr.io/svendanilborodun/${{ matrix.server_repo }}:latest
+        run: |
+          set -e
+          docker run --rm --entrypoint bash \
+            -v "$GITHUB_WORKSPACE/physical_ai_tools/physical_ai_server/test:/tmp/server_test:ro" \
+            "$SERVER_IMAGE" \
+            -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && set -o pipefail && cd /tmp/server_test && HF_HUB_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q -rs test_v3_surgery_compat_verify.py test_v3_surgery_layout.py test_dataset_card.py | tee /tmp/pytest.out && if grep -Eq "[0-9]+ skipped" /tmp/pytest.out; then echo "::error::a LeRobot-only engine test skipped inside the server image"; exit 1; fi'
       - name: Assert amd64 server image is CUDA-slimmed (real size ceiling)
         if: matrix.platform == 'amd64'
         # The CUDA slim (build-images.sh flatten of the amd64 image) must keep

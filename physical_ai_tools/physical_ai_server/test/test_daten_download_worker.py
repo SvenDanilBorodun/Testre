@@ -49,6 +49,8 @@ pytest.importorskip('httpx')
 pytest.importorskip('av')
 pytest.importorskip('pyarrow')
 
+from daten_timeout import per_test_time_limit  # noqa: E402,F401 — V1-3: a hang fails within the limit
+
 from physical_ai_server.daten import node_service as NS  # noqa: E402
 from physical_ai_server.data_processing import dataset_sync as S  # noqa: E402
 from physical_ai_server.data_processing import hf_token_store  # noqa: E402
@@ -429,6 +431,16 @@ STUB = textwrap.dedent('''
     elif mode == 'silent':
         time.sleep(0.6)
         print('DL_RESULT::' + json.dumps({'ok': True, 'revision': 'r'}), flush=True)
+    elif mode in ('bar_then_old_result', 'bar_then_worker_result'):
+        # snapshot_download's bar on stderr (merged into the same pipe): '\\r' + text, no newline
+        sys.stderr.write('\\rFetching 9 files:  22%|\u2588\u2588\u258f       | 2/9 [00:01<00:04,  1.60it/s]')
+        sys.stderr.flush()
+        if mode == 'bar_then_old_result':                   # the line as the worker printed it before V1-1
+            print('DL_RESULT::' + json.dumps({'ok': False, 'code': 'token_changed'}), flush=True)
+        else:                                               # the worker's own print
+            from physical_ai_server.daten import download_worker as DW
+            DW._say(DW.RESULT_PREFIX, {'ok': False, 'code': 'token_changed'})
+        sys.exit(3)
     elif mode == 'between_renames':
         tmp = pathlib.Path(f'{target}.tmp_sync'); (tmp / 'meta').mkdir(parents=True)
         (tmp / 'meta' / 'info.json').write_text('new')
@@ -463,6 +475,18 @@ def test_a_check_slower_than_the_stall_survives_on_its_heartbeats(hub, tmp_path,
     assert proc.run(threading.Event()) == {'ok': True, 'revision': 'r'}
     svc, proc = _stub_process(hub, monkeypatch, 'silent', target, stall_s=0.25)
     assert proc.run(threading.Event()) == {'ok': False, 'code': 'stalled'}
+
+
+def test_a_result_printed_into_an_unfinished_progress_bar_is_the_result(hub, tmp_path, monkeypatch):
+    """V1-1: the worker's watch printed its result while the hub library's
+    progress bar stood unfinished on the merged pipe (``<bar>DL_RESULT::{...}``
+    on one line); the supervisor read no result and reported ``internal``. The
+    supervisor finds the marker anywhere in the line, and the worker starts it
+    on a line of its own: each alone keeps the result."""
+    target = hub.root / 'lena-schmidt/omx_f_a'
+    for mode in ('bar_then_old_result', 'bar_then_worker_result'):
+        svc, proc = _stub_process(hub, monkeypatch, mode, target)
+        assert proc.run(threading.Event()) == {'ok': False, 'code': 'token_changed'}, mode
 
 
 def _old_copy(target):

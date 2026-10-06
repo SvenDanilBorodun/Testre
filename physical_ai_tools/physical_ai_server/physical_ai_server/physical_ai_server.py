@@ -3463,6 +3463,21 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 'repo_type': repo_type,
                 'author': author
             }
+            # An upload goes through the Daten registry when it runs (V1-6): the
+            # same transient `upload` lease and busy check as a Daten upload, so
+            # it never starts while a Daten edit, delete or download holds the
+            # dataset (its swap would pull the files from under the upload).
+            if mode == 'upload' and getattr(self, 'daten', None) is not None:
+                refusal = self.daten.send_control_upload(local_dir, request_data)
+                if refusal:
+                    self.get_logger().warning(f'HF upload refused by the Daten registry: {repo_id}')
+                    response.success = False
+                    response.message = refusal
+                    return response
+                self.get_logger().info(f'HF API request sent successfully: {mode} for {repo_id}')
+                response.success = True
+                response.message = f'Hugging Face-Auftrag gestartet ({repo_id}).'
+                return response
             # Send request to HF API Worker
             if self.hf_api_worker.send_request(request_data):
                 self.get_logger().info(f'HF API request sent successfully: {mode} for {repo_id}')

@@ -26,8 +26,17 @@ import types
 
 import pytest
 
-from physical_ai_server.daten import contract as C
-from physical_ai_server.daten import hub_reads as HR
+# hub_reads imports v3_surgery (PyAV, pyarrow, numpy) at module level; a Python
+# without them skips this module (and the two that share its fakes) instead of
+# aborting the whole collection (C-1).
+pytest.importorskip('av')
+pytest.importorskip('pyarrow')
+pytest.importorskip('numpy')
+
+from daten_timeout import per_test_time_limit  # noqa: E402,F401 — V1-3: a hang fails within the limit
+
+from physical_ai_server.daten import contract as C  # noqa: E402
+from physical_ai_server.daten import hub_reads as HR  # noqa: E402
 
 TOKEN_A = 'hf_' + 'a' * 34
 TOKEN_B = 'hf_' + 'b' * 34
@@ -275,6 +284,68 @@ def test_the_states_of_a_failed_ask(api):
     h, views, listed = hub.library_hub(['lena-schmidt'], [entry('lena-schmidt/omx_f_local')])
     assert (h['state'], views, listed) == ('unreachable', {}, {})
     assert h['token_fp'] is not None
+
+
+ONLINE = 'lena-schmidt/omx_f_online'
+
+
+@pytest.mark.parametrize('error', [HttpStatusError(503), HttpStatusError(500), HttpStatusError(429),
+                                   TimeoutError('read timed out'), ConnectionError('no route')],
+                         ids=['503', '500', '429', 'timeout', 'network'])
+def test_a_transient_failure_reading_a_card_keeps_it_unknown_and_retries(api, error):
+    """V2-10: one 5xx / timeout / network failure while reading an online
+    card's info.json proves nothing about the repo: the card stays (numbers
+    unknown, its view `unreachable` → sync `unknown/unreachable`), it is NOT
+    counted as hidden, nothing failed is cached, and the next load reads it."""
+    hub, _ = make_hub(api)
+    api.fail['json'] = error
+    h, views, listed = hub.library_hub(['lena-schmidt'], [entry('lena-schmidt/omx_f_local')])
+    assert h['state'] == 'ok' and h['hidden_count'] == 0
+    card = next(e for e in h['entries'] if e['id'] == ONLINE)
+    assert (card['head'], card['total_episodes'], card['fps'], card['cameras']) == ('o1', None, None, None)
+    assert card['size_bytes'] == 150                          # the listing worked: its size stays
+    assert views[ONLINE] == {'state': 'unreachable'} and ONLINE in listed
+    del api.fail['json']
+    h, views, listed = hub.library_hub(['lena-schmidt'], [entry('lena-schmidt/omx_f_local')])
+    card = next(e for e in h['entries'] if e['id'] == ONLINE)
+    assert (card['total_episodes'], card['fps']) == (4, 30)
+    assert ONLINE not in views
+
+
+@pytest.mark.parametrize('error', [HttpStatusError(404), ValueError('not JSON'), HttpStatusError(403),
+                                   RepositoryNotFoundError('gone')], ids=['404', 'not_json', '403', 'not_found'])
+def test_an_unreadable_card_is_still_hidden(api, error):
+    hub, _ = make_hub(api)
+    api.fail['json'] = error
+    h, views, listed = hub.library_hub(['lena-schmidt'], [entry('lena-schmidt/omx_f_local')])
+    assert h['state'] == 'ok' and h['hidden_count'] == 1
+    assert ONLINE not in [e['id'] for e in h['entries']] and ONLINE not in listed and ONLINE not in views
+
+
+def test_another_robots_dataset_is_hidden_and_a_transient_probe_is_unreachable(api):
+    hub, _ = make_hub(api)
+    api.add('lena-schmidt/so100_x', head='s1', info=dict(INFO_V3, robot_type='so100_follower'))
+    h, _, listed = hub.library_hub(['lena-schmidt'], [])
+    assert h['hidden_count'] == 1 and 'lena-schmidt/so100_x' not in listed
+    hub, _ = make_hub(api)                                    # nothing cached yet
+    api.fail['json'] = HttpStatusError(503)
+    assert hub.probe(ONLINE)['refusal'] == 'unreachable'     # never `unsupported` for a 503
+    del api.fail['json']
+    assert hub.probe(ONLINE)['found'] is True                # the failure was not cached
+
+
+def test_a_repo_id_with_a_trailing_newline_is_invalid(api):
+    hub, _ = make_hub(api)
+    assert hub.probe(ONLINE + '\n')['refusal'] == 'invalid'          # `$` alone would let it through
+    assert api.calls['dataset_info'] == 0
+
+
+def test_transient_is_the_network_a_5xx_or_a_429_only():
+    assert all(HR.transient(e) for e in (HttpStatusError(502), HttpStatusError(429), TimeoutError('t'),
+                                         ConnectionError('c')))
+    nf = RepositoryNotFoundError('x')
+    nf.response = types.SimpleNamespace(status_code=503)
+    assert not any(HR.transient(e) for e in (nf, HttpStatusError(404), HttpStatusError(401), ValueError('json')))
 
 
 def test_a_token_that_changes_during_the_ask_is_token_changed(api):

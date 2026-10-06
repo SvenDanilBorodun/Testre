@@ -76,7 +76,7 @@ class LibraryError(Exception):
 
 
 def valid_part(part) -> bool:
-    return (isinstance(part, str) and bool(_PART.match(part))
+    return (isinstance(part, str) and bool(_PART.fullmatch(part))
             and not part.endswith(C.RESERVED_SUFFIXES))
 
 
@@ -672,7 +672,8 @@ def sync_map(library, local_entries, views, listed, default_view=None):
     the recording Start and the upload use too.
 
     ``views``: {id: hub view} for the ids the hub was asked about; ``listed``:
-    {id: hub entry} of the online repos (an id there and not local → ``online``);
+    {id: hub entry} of the online repos (an id there and not local → ``online``,
+    or ``unknown/unreachable`` when its view says its card could not be read);
     ``default_view``: the view of an id ``views`` lacks — None when the hub was
     not asked (``hub=0``, no token, the token changed: ``unknown/not_asked``),
     ``{'state': 'unreachable'}`` when asking failed. A content decision whose
@@ -698,5 +699,9 @@ def sync_map(library, local_entries, views, listed, default_view=None):
         out[dataset_id] = {'state': state, 'reason': reason, 'head': head}
     for dataset_id, entry in listed.items():
         if dataset_id not in out:
-            out[dataset_id] = {'state': 'online', 'reason': None, 'head': entry.get('head')}
+            view = views.get(dataset_id)
+            if view and view.get('state') == 'unreachable':      # its card could not be read just now (V2-10)
+                out[dataset_id] = {'state': 'unknown', 'reason': 'unreachable', 'head': entry.get('head')}
+            else:
+                out[dataset_id] = {'state': 'online', 'reason': None, 'head': entry.get('head')}
     return out

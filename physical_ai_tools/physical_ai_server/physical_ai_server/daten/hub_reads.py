@@ -109,6 +109,13 @@ def classify(error) -> str:
     return 'auth' if hf_errors.classify_hf_error(error) == 'auth' else 'unreachable'
 
 
+def transient(error) -> bool:
+    """A failure that says nothing about the repo itself (V2-10): the network,
+    a timeout, a 5xx, a 429. Not-found is never transient (R-12), nor is an
+    auth refusal, a missing file or a file that is not JSON."""
+    return not HS.is_not_found(error) and hf_errors.classify_hf_error(error) in ('network', 'server', 'busy')
+
+
 class _HubError(Exception):
     def __init__(self, state):
         super().__init__(state)
@@ -231,10 +238,16 @@ class HubReads:
     def card(self, api, repo, head, token, private=None, last_modified=None, size_bytes=None):
         """An online card's fields from ``meta/info.json`` at ``head``; None when
         the dataset is not one this robot can open (v2.x, another robot, a
-        non-default layout, no LeRobot info at all) — it is then hidden."""
+        non-default layout, no LeRobot info at all) — it is then hidden. A
+        transient failure to read it (``transient``) is RAISED: it proves
+        nothing about the repo, so the caller keeps the card (state unknown)
+        or answers ``unreachable``; nothing failed is cached, the next load
+        reads it again."""
         try:
             info = self.info_json(api, repo, head, token)
-        except Exception:  # noqa: BLE001 — not a LeRobot dataset we can read: hidden
+        except Exception as e:  # noqa: BLE001 — not a LeRobot dataset we can read: hidden
+            if transient(e):
+                raise
             return None, 'unreadable'
         refusal = refusal_of(info, self.robot_type)
         fps, frames = info.get('fps'), info.get('total_frames')
@@ -330,9 +343,19 @@ class HubReads:
                 if ids is not None:
                     entries.append(item)
                     continue
-                card, refusal = self.card(api, repo, item['head'], token, private=item['private'],
-                                          last_modified=item['last_modified'],
-                                          size_bytes=self._size(api, repo, item['head']))
+                size = self._size(api, repo, item['head'])
+                try:
+                    card, refusal = self.card(api, repo, item['head'], token, private=item['private'],
+                                              last_modified=item['last_modified'], size_bytes=size)
+                except Exception as e:  # noqa: BLE001
+                    if not transient(e):
+                        raise
+                    # V2-10: info.json could not be read just now — the card stays with its
+                    # numbers unknown and its state `unknown/unreachable`; the next load retries.
+                    entries.append(dict(item, total_episodes=None, total_frames=None, duration_s=None, fps=None,
+                                        robot_type=None, cameras=None, stat_names=None, size_bytes=size))
+                    views[repo] = {'state': 'unreachable'}
+                    continue
                 if card is None or refusal is not None:
                     hidden += 1
                     del listed[repo]
@@ -361,7 +384,7 @@ class HubReads:
 
     def probe(self, repo):
         base = {'v': C.SCHEMA_VERSION, 'repo_id': repo, 'found': False, 'refusal': None}
-        if not isinstance(repo, str) or not _REPO_ID.match(repo):
+        if not isinstance(repo, str) or not _REPO_ID.fullmatch(repo):
             return dict(base, refusal='invalid')
         token, _ = self.token()
         if not token:

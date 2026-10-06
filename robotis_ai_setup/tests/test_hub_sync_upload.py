@@ -44,6 +44,15 @@ import types
 import unittest
 from unittest import mock
 
+try:
+    from timeout_guard import BoundedTestCase   # V1-3: a hang fails within the limit
+except ImportError:                               # loaded by path from the server's tests
+    _tg = importlib.util.spec_from_file_location(
+        '_edubotics_timeout_guard', str(pathlib.Path(__file__).with_name('timeout_guard.py')))
+    _tg_mod = importlib.util.module_from_spec(_tg)
+    _tg.loader.exec_module(_tg_mod)
+    BoundedTestCase = _tg_mod.BoundedTestCase
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DP = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server' / 'data_processing'
 HUB_SYNC_PATH = DP / 'hub_sync.py'
@@ -163,7 +172,7 @@ def _stub_lerobot():
     return mods
 
 
-class HubCase(unittest.TestCase):
+class HubCase(BoundedTestCase):
     """A fresh fake hub per test; huggingface_hub, the fake and hub_sync live in
     an isolated sys.modules for the class (restored afterwards)."""
 
@@ -384,6 +393,83 @@ class NeverTrustTheNoOpReturn(HubCase):
         self.assertEqual(self.S.read_record(self.root)['hub_sha'], self.main())
 
 
+    def test_a_legacy_dataset_whose_card_commit_lands_is_success(self):
+        """V1-2 / S-a: a legacy hub copy (no marker anywhere), the local copy
+        equal; our upload writes the dataset card, so a README-only commit
+        LANDS. The read-back finds neither our marker nor changed trees: the
+        third acceptance (main's data is ours unchanged) makes it a success."""
+        write_tree(self.root, BASE)
+        self.FS.put_tree(REPO, self.root, private=False, title='Add files using upload-large-folder tool')
+        before = self.main()
+
+        def card(root, repo, private):
+            (pathlib.Path(root) / 'README.md').write_text('---\nlicense: apache-2.0\n---\n# card by EduBotics\n')
+        r = self.H.upload(self.root, REPO, api=self.api, write_card=card)
+        self.assertNotEqual(self.main(), before, 'the card commit landed')
+        self.assertEqual(r['commit'], self.main())
+        self.assertTrue(r['tag_ok'])
+        self.assertEqual(self.S.read_record(self.root)['hub_sha'], self.main())
+        self.assertEqual(self.tag(), self.main())
+
+
+class TheDownloadedFileSet(HubCase):
+    """V1-2 / m5: the downloaded tmp holds exactly the listed files."""
+
+    def listing(self, files):
+        return {rel: {'size': len(data), 'blob_id': self.S.git_sha1_bytes(data), 'lfs_sha256': None}
+                for rel, data in files.items()}
+
+    def test_an_extra_file_is_broken(self):
+        files = {'meta/info.json': b'{}', 'data/chunk-000/file-000.parquet': b'd' * 10}
+        tmp = write_tree(self.base / 'tmp_extra', files, {'data/chunk-000/file-009.parquet': b'x'})
+        with self.assertRaises(self.H.Refused) as e:
+            self.H._verify_against_listing(tmp, self.listing(files))
+        self.assertEqual(e.exception.code, 'broken')
+
+    def test_a_missing_file_is_broken_never_a_raw_error(self):
+        files = {'meta/info.json': b'{}', 'data/chunk-000/file-000.parquet': b'd' * 10}
+        tmp = write_tree(self.base / 'tmp_missing', {'meta/info.json': b'{}'})
+        with self.assertRaises(self.H.Refused) as e:
+            self.H._verify_against_listing(tmp, self.listing(files))
+        self.assertEqual(e.exception.code, 'broken')
+
+    def test_the_listed_set_passes_and_the_cache_is_ignored(self):
+        files = {'meta/info.json': b'{}', 'data/chunk-000/file-000.parquet': b'd' * 10}
+        tmp = write_tree(self.base / 'tmp_ok', files, {'.cache/huggingface/x.lock': b''})
+        self.assertEqual(sorted(self.H._verify_against_listing(tmp, self.listing(files))), sorted(files))
+
+
+class TheRawFileGet(HubCase):
+    """V2-17: the fake hub answers the sidecar's raw GET of one file at a head
+    (daten/hub_reads._json_at: hf_hub_url + get_session().get +
+    hf_raise_for_status, never hf_hub_download) with the hub's rules, so the
+    harness shows online-only cards like the real hub does."""
+
+    def get(self, path, revision, token=LENA_TOKEN, repo=REPO):
+        from huggingface_hub import hf_hub_url
+        from huggingface_hub.utils import build_hf_headers, get_session, hf_raise_for_status
+        r = get_session().get(hf_hub_url(repo, path, repo_type='dataset', revision=revision),
+                              headers=build_hf_headers(token=token))
+        hf_raise_for_status(r)
+        return json.loads(r.content.decode('utf-8'))
+
+    def test_the_file_at_a_head_with_the_hubs_access_rules(self):
+        write_tree(self.root, BASE)
+        head = self.FS.put_tree(REPO, self.root, private=True, title='seed')
+        self.assertEqual(self.get('meta/info.json', head), json.loads(INFO))
+        self.assertEqual(self.get('meta/info.json', 'v3.0'), json.loads(INFO))
+        from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError, RepositoryNotFoundError
+        with self.assertRaises(RepositoryNotFoundError):
+            self.get('meta/info.json', head, token=False)                       # anonymous on a private repo
+        with self.assertRaises(EntryNotFoundError):
+            self.get('meta/nothing.json', head)
+        self.faults({'op': 'resolve', 'kind': '503', 'times': 1})
+        with self.assertRaises(HfHubHTTPError) as e:
+            self.get('meta/info.json', head)
+        self.assertEqual(e.exception.response.status_code, 503)
+        self.assertEqual(self.get('meta/info.json', head), json.loads(INFO))   # the fault was once
+
+
 class FailuresAreClassifiedByTheHub(HubCase):
 
     def test_a_lost_response_after_the_commit_landed_is_success(self):
@@ -479,6 +565,25 @@ class ThePermission(HubCase):
         with self.assertRaises(self.H.Refused) as e:
             self.H.upload(self.root, REPO, api=self.api)
         self.assertEqual(e.exception.code, 'hub_differs')
+        self.assertEqual(self.main(), head)
+        self.assertEqual(self.audit('create_commit'), [])
+
+    def test_the_exact_check_alone_stops_a_same_size_flipped_video(self):
+        """V1-2 / S-1: a record-less copy equal to the hub except ONE byte of a
+        same-size video (meta identical): the content decision says `current`
+        (videos compared by size), so only the exact check stops the upload
+        from overwriting the hub's video."""
+        write_tree(self.root, BASE)
+        self.FS.put_tree(REPO, self.root, private=False, title='legacy')
+        vid = 'videos/observation.images.scene/chunk-000/file-000.mp4'
+        b = bytearray(BASE[vid])
+        b[100] ^= 0xFF
+        write_tree(self.root, {vid: bytes(b)})
+        self.assertEqual(self.S.decide(self.root, None, self.H.hub_view(self.api, REPO))[0], 'current')
+        head = self.main()
+        with self.assertRaises(self.H.Refused) as e:
+            self.H.upload(self.root, REPO, api=self.api)
+        self.assertEqual((e.exception.code, str(e.exception.detail)), ('hub_differs', f'exact check {vid}'))
         self.assertEqual(self.main(), head)
         self.assertEqual(self.audit('create_commit'), [])
 
@@ -611,6 +716,33 @@ class TheLocalGate(HubCase):
                 if name != 'none':
                     self.assertEqual(e.exception.code, 'local_broken')
         self.assertEqual(len(self.audit('create_commit')), 1)
+
+
+    def test_a_broken_dataset_with_no_repo_yet_creates_none(self):
+        """V1-6: with no repository on the hub yet, the gate runs BEFORE
+        create_repo: a broken copy leaves no empty repository behind."""
+        write_tree(self.root, BASE, {'BROKEN': b'1'})
+        for name, expected in (('none', None), ('unset', self.H.UNSET)):
+            with self.subTest(path=name):
+                with self.assertRaises(self.H.Refused) as e:
+                    self.H.upload(self.root, REPO, expected=expected, api=self.api)
+                self.assertEqual(e.exception.code, 'local_broken')
+                self.assertFalse(self.api.repo_exists(REPO, repo_type='dataset'))
+        self.assertEqual(self.audit(), [], 'zero writes')
+
+    def test_the_whole_gate_runs_once_per_upload(self):
+        """The early gate (no repo yet) and the late one (on CommitOperationAdd's
+        hashes) never both run the integrity check."""
+        engine = self.H._sibling('v3_surgery')
+        calls = []
+        real = engine.integrity
+        engine.integrity = lambda root, known_good=frozenset(): (calls.append(1), real(root, known_good))[1]
+        self.addCleanup(setattr, engine, 'integrity', real)
+        self.first_upload()                                   # no repo yet: the early gate
+        self.assertEqual((len(calls), len(self.audit('create_repo'))), (1, 1))
+        write_tree(self.root, SESSION2)
+        self.H.upload(self.root, REPO, api=self.api)          # the repo exists: the late gate
+        self.assertEqual(len(calls), 2)
 
 
 class RecordsBelongToTheirOwnDataset(HubCase):
@@ -794,7 +926,7 @@ class TheOneDownload(HubCase):
         self.assertEqual(e.exception.code, 'not_found')
 
 
-class Fences(unittest.TestCase):
+class Fences(BoundedTestCase):
 
     def test_no_large_folder_or_folder_upload_and_no_module_level_hub_import(self):
         tree = ast.parse(HUB_SYNC_PATH.read_text(encoding='utf-8'))
@@ -1081,13 +1213,14 @@ token=False (argument or HfApi(token=False)) is anonymous.
 """
 import os
 if os.environ.get('FAKEHUB_ROOT'):
-    import fnmatch, json, shutil, sys, time
+    import fnmatch, json, re, shutil, sys, time
     from pathlib import Path
+    from urllib.parse import unquote
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import httpx
     import huggingface_hub
     from huggingface_hub import hf_api
-    from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError, RepositoryNotFoundError
+    from huggingface_hub.errors import HfHubHTTPError, RemoteEntryNotFoundError, RepositoryNotFoundError
     from huggingface_hub.hf_api import (CommitInfo, DatasetInfo, GitCommitInfo, GitRefInfo, GitRefs, RepoFile,
                                         RepoFolder, RepoUrl)
     import fakehub_store as FS
@@ -1366,11 +1499,48 @@ if os.environ.get('FAKEHUB_ROOT'):
         sha = FS.resolve(repo_id, refs, revision)
         e = FS.commit(repo_id, sha)['tree'].get(filename)
         if e is None:
-            raise EntryNotFoundError(f'404 {filename}', response=FS._resp(404))
+            raise RemoteEntryNotFoundError(f'404 {filename}', response=FS._resp(404))
         dst = (Path(local_dir) if local_dir else FS.ROOT / 'cache' / repo_id / sha) / filename
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(FS.blob_path(e['sha256']), dst)
         return str(dst)
+
+    _RESOLVE = re.compile(r'^https?://[^/]+/datasets/([^/]+/[^/]+)/resolve/([^/]+)/(.+)$')
+
+    class _Session:
+        """The raw GET of one file at a revision -- the product's daten/hub_reads._json_at
+        (hf_hub_url + get_session().get + hf_raise_for_status) -- answered from the store with
+        the hub's access rules (op `resolve`, faults apply); every other request goes to the
+        real session."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def get(self, url, *, headers=None, **kw):
+            m = _RESOLVE.match(str(url))
+            if not m:
+                return self._real.get(url, headers=headers, **kw)
+            repo_id, rev, path = m.group(1), unquote(m.group(2)), unquote(m.group(3))
+            auth = {str(k).lower(): v for k, v in (headers or {}).items()}.get('authorization', '')
+            time.sleep(DELAY)
+            refs = FS.check_access(repo_id, auth[7:] if auth.startswith('Bearer ') else None, op='resolve')
+            e = FS.commit(repo_id, FS.resolve(repo_id, refs, rev))['tree'].get(path)
+            if e is None:
+                raise RemoteEntryNotFoundError(f'404 {path}', response=FS._resp(404))
+            return httpx.Response(200, content=FS.blob_path(e['sha256']).read_bytes(),
+                                  request=httpx.Request('GET', str(url)))
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    import huggingface_hub.utils as _hf_utils
+    import huggingface_hub.utils._http as _hf_http
+    _real_get_session = _hf_http.get_session
+
+    def get_session():
+        return _Session(_real_get_session())
+    _hf_utils.get_session = get_session
+    _hf_http.get_session = get_session
 
     for _name, _fn in [('whoami', whoami), ('repo_exists', repo_exists), ('repo_info', repo_info),
                        ('dataset_info', repo_info), ('list_datasets', list_datasets), ('list_models', list_models),

@@ -32,6 +32,8 @@ import types
 import unittest
 from unittest import mock
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PKG_ROOT = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
 V3_PATH = PKG_ROOT / 'data_processing' / 'data_editor_v3.py'
@@ -256,7 +258,7 @@ def _load_worker_module():
     return module
 
 
-class _Base(unittest.TestCase):
+class _Base(BoundedTestCase):
 
     @classmethod
     def setUpClass(cls):

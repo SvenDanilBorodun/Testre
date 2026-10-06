@@ -48,6 +48,8 @@ import time
 import types
 import unittest
 
+from timeout_guard import BoundedTestCase  # V1-3: a hang fails within the limit
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = REPO_ROOT / 'physical_ai_tools' / 'physical_ai_server' / 'physical_ai_server'
 NODE_SERVICE_PATH = PKG / 'daten' / 'node_service.py'
@@ -231,7 +233,7 @@ def wait_for(pred, timeout=10):
     return False
 
 
-class ServiceCase(unittest.TestCase):
+class ServiceCase(BoundedTestCase):
 
     def setUp(self):
         self.root = pathlib.Path(os.path.realpath(tempfile.mkdtemp(prefix='d2_ns_')))
@@ -319,6 +321,26 @@ class TheSurface(ServiceCase):
         self.refused(self.cmd('edit', op='delete', dataset='lena/a.tmp_sync', meta_digest='d', episodes=[0]),
                      'invalid')
         self.refused(self.cmd('cancel', what='everything'), 'invalid')
+
+    def test_a_trailing_newline_never_passes_an_id_rule(self):
+        """Python's ``$`` also matches before a final newline: every anchored id
+        rule is a FULL match (as the page's JavaScript twins already are), so a
+        raw request cannot name a folder, a repo or a commit ``…\\n``."""
+        self.dataset('lena/omx_f_a')
+        digest = self.digest(self.root / 'lena/omx_f_a')
+        self.assertFalse(NS.valid_id('lena/omx_f_a\n'))
+        self.assertFalse(NS.valid_id('lena\n/omx_f_a'))
+        self.refused(self.cmd('download', repo_id='lehrer/omx_f_demo', revision=HEAD, target='lena/omx_f_neu\n',
+                              mode='new'), 'invalid')
+        self.refused(self.cmd('download', repo_id='lehrer/omx_f_demo\n', revision=HEAD, target='lena/omx_f_neu',
+                              mode='new'), 'invalid')
+        self.refused(self.cmd('download', repo_id='lehrer/omx_f_demo', revision=HEAD + '\n', target='lena/omx_f_neu',
+                              mode='new'), 'invalid')
+        self.refused(self.cmd('keep_both', dataset='lena/omx_f_a', expected_hub_sha=HEAD + '\n', meta_digest=digest),
+                     'invalid')
+        self.refused(self.cmd('upload', dataset='lena/omx_f_a', expected_hub_sha=HEAD + '\n'), 'invalid')
+        self.assertEqual((self.procs, self.hf.sent), ([], []))
+        self.assertFalse((self.root / 'lena' / 'omx_f_neu\n').exists())
 
     def test_link_mints_tokens_for_what_exists(self):
         self.dataset('lena/omx_f_a')
@@ -648,6 +670,55 @@ class Downloads(ServiceCase):
         self.assertFalse(tmp.exists())
         self.assertEqual(recovered, [True], 'recover ran while the tmp still told the swap state (U-1)')
 
+    def test_a_result_behind_an_unfinished_progress_bar_is_still_the_result(self):
+        """V1-1: the worker's own watch printed its result while
+        snapshot_download's bar (stderr, merged into the same pipe, no newline)
+        stood unfinished: the line read ``<bar>DL_RESULT::{...}``. It is the
+        result, not a worker that ended without one (``internal``)."""
+        bar = 'Fetching 9 files:  22%|██▏       | 2/9 [00:01<00:04,  1.60it/s]'
+        job_id = self.start()['result']['job_id']
+        self.assertTrue(wait_for(lambda: self.procs and self.procs[0].request))
+        proc = self.procs[0]
+        proc.emit(bar + 'DL_PROGRESS::' + json.dumps({'stage': 'download', 'total': 4000}))
+        self.assertTrue(wait_for(lambda: self.job(job_id)['total'] == 4000))
+        proc.emit(bar + 'DL_RESULT::' + json.dumps({'ok': False, 'code': 'token_changed'}))
+        proc.end(3)
+        job = self.wait_job(job_id)
+        self.assertEqual((job['state'], job['code'], job['message']),
+                         ('failed', 'token_changed', T.DOWNLOAD_TOKEN_CHANGED_DE))
+
+    def test_parse_marked(self):
+        r = 'DL_RESULT::'
+        ok = {'ok': False, 'code': 'token_changed'}
+        cases = [('DL_RESULT::' + json.dumps(ok), ok),
+                 ('Fetching 9 files:  22%|██▏ | 2/9 [...]DL_RESULT::' + json.dumps(ok) + '\n', ok),
+                 ('DL_RESULT::' + json.dumps(ok) + ' 22%|██▏ | 2/9', ok),            # anything after the object
+                 ('DL_RESULT::{"code": "a"}DL_RESULT::{"code": "b"}', {'code': 'b'}),   # the last marker
+                 ('DL_RESULT::{"ok": tru', None), ('DL_RESULT::[1, 2]', None), ('DL_RESULT:: {}', None),
+                 ('DL_PROGRESS::{"total": 1}', None), ('', None), ('Fetching 9 files', None)]
+        for line, want in cases:
+            with self.subTest(line=line):
+                self.assertEqual(NS.parse_marked(line, r), want)
+
+    def test_the_worker_writes_each_protocol_line_on_its_own_line_in_one_write(self):
+        dw = _load('_daten_download_worker_under_test', PKG / 'daten' / 'download_worker.py')
+        self.assertEqual((dw.RESULT_PREFIX, dw.PROGRESS_PREFIX), (NS.DL_RESULT, NS.DL_PROGRESS))
+        writes = []
+
+        class Out:
+            def write(self, text):
+                writes.append(text)
+
+            def flush(self):
+                writes.append(None)
+        saved = sys.stdout
+        sys.stdout = Out()
+        try:
+            dw._say(dw.RESULT_PREFIX, {'ok': False, 'code': 'token_changed'})
+        finally:
+            sys.stdout = saved
+        self.assertEqual(writes, ['\nDL_RESULT::{"ok": false, "code": "token_changed"}\n', None])
+
     def test_a_stall_and_a_cancel(self):
         self.svc.download_stall_s = 0.15
         job = self.wait_job(self.start()['result']['job_id'])
@@ -673,6 +744,126 @@ class Downloads(ServiceCase):
         for result, code, message in cases:
             with self.subTest(code=result['code']):
                 self.assertEqual(self.svc._download_failure(dict(result, ok=False)), (code, message))
+
+
+class DatenResolvesTheAccount(ServiceCase):
+    """V2-16: the ``namespace`` refusals of ``keep_both`` and ``upload`` no
+    longer depend on a cache only the recorder fills: Daten looks the slot
+    token's account up itself, in the background, once per fingerprint."""
+
+    def service(self, resolver, clock=time.monotonic):
+        svc = NS.DatenService(
+            self.node, root=self.root, ros=False, start_threads=False, popen=self.popen,
+            kill=lambda proc: proc.kill(), token_reader=lambda: self.token,
+            state_reader=lambda p: self.states.get(pathlib.Path(p).name, 'ok'),
+            name_rule=lambda n: n.replace(' ', '-'), account_resolver=resolver,
+            disk_free=lambda p: self.free, secret=b's' * 32, clock=clock)
+        svc._lock = self.lock
+        return svc
+
+    def keep_both(self, svc, dataset_id):
+        path = self.root / dataset_id
+        return svc.command('keep_both', json.dumps({'dataset': dataset_id, 'expected_hub_sha': HEAD,
+                                                    'meta_digest': S.meta_digest(path)}))
+
+    def test_a_partners_keep_both_and_upload_are_refused_namespace_at_once(self):
+        calls = []
+        svc = self.service(lambda: calls.append(1) or ['lena'])
+        self.dataset('max/omx_f_x')
+        self.dataset('lena/omx_f_y')
+        svc._refresh_account()                                  # the 1 Hz tick
+        self.assertTrue(wait_for(lambda: svc._account() == 'lena'))
+        self.refused(self.keep_both(svc, 'max/omx_f_x'), 'namespace', R.NAMESPACE_REFUSED_DE)
+        self.refused(svc.command('upload', json.dumps({'dataset': 'max/omx_f_x'})), 'namespace',
+                     R.NAMESPACE_REFUSED_DE)
+        self.assertEqual((self.procs, self.hf.sent, svc.state_payload()['jobs']), ([], [], []))
+        self.assertTrue(self.keep_both(svc, 'lena/omx_f_y')['success'], 'the own dataset still goes')
+        self.assertEqual(len(calls), 1, 'one lookup per token')
+
+    def test_the_lookup_never_runs_inside_a_command(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        svc = self.service(lambda: gate.wait(10) and ['lena'])
+        self.dataset('max/omx_f_x')
+        t0 = time.monotonic()
+        out = self.keep_both(svc, 'max/omx_f_x')                 # unknown yet: refused on proof only
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertTrue(out['success'], out)
+        gate.set()
+        self.assertTrue(wait_for(lambda: svc._account() == 'lena'))
+
+    def test_an_answer_for_a_token_that_changed_meanwhile_is_dropped(self):
+        def resolver():
+            self.token = TOKEN_B                                 # the student changed during the whoami
+            return ['lena']
+        svc = self.service(resolver)
+        svc._refresh_account()
+        self.assertTrue(wait_for(lambda: not svc._resolved['running']))
+        self.assertIsNone(svc._resolved['account'])
+        svc._account_resolver = lambda: ['max']
+        self.assertTrue(wait_for(lambda: svc._account() == 'max'))
+
+    def test_a_failed_lookup_is_asked_again_after_the_retry_time(self):
+        now = [100.0]
+        calls = []
+
+        def resolver():
+            calls.append(1)
+            raise RuntimeError('hub unreachable')
+        svc = self.service(resolver, clock=lambda: now[0])
+        svc._refresh_account()
+        self.assertTrue(wait_for(lambda: len(calls) == 1 and not svc._resolved['running']))
+        self.assertIsNone(svc._account())
+        self.assertEqual(len(calls), 1, 'not again within the retry time')
+        now[0] += NS.ACCOUNT_RETRY_S + 1
+        svc._refresh_account()
+        self.assertTrue(wait_for(lambda: len(calls) == 2))
+
+
+class TheOldPageUpload(ServiceCase):
+    """V1-6: ``/huggingface/control``'s upload goes through ``send_control_upload``:
+    the busy check and the transient ``upload`` lease of a Daten upload."""
+
+    def request(self, path):
+        return {'mode': 'upload', 'repo_id': 'lena/omx_f_a', 'local_dir': str(path), 'repo_type': 'dataset',
+                'author': ''}
+
+    def test_refused_while_an_edit_a_delete_or_a_download_holds_the_dataset(self):
+        path = self.dataset('lena/omx_f_a')
+        key = self.svc._key(path)
+        for kind, message in (('edit', T.BUSY_EDIT_DE), ('delete', T.BUSY_EDIT_DE),
+                              ('download', T.BUSY_DOWNLOAD_DE)):
+            with self.subTest(kind=kind):
+                self.svc._claim([key], kind)
+                try:
+                    self.assertEqual(self.svc.send_control_upload(str(path), self.request(path)), message)
+                finally:
+                    self.svc._release([key])
+                self.assertEqual(self.hf.sent, [])
+
+    def test_refused_while_a_recording_writes_it(self):
+        path = self.dataset('lena/omx_f_a')
+        self.node.on_recording = True
+        self.node.data_manager = types.SimpleNamespace(_save_path=path)
+        self.assertEqual(self.svc.send_control_upload(str(path), self.request(path)), T.BUSY_RECORD_DE)
+        self.assertEqual(self.hf.sent, [])
+
+    def test_a_free_dataset_is_handed_over_under_the_upload_lease(self):
+        path = self.dataset('lena/omx_f_a')
+        key = self.svc._key(path)
+        seen = []
+        self.hf.on_send = lambda request: seen.append(self.svc._leases.get(key))
+        self.assertIsNone(self.svc.send_control_upload(str(path), self.request(path)))
+        self.assertEqual((self.hf.sent, seen), ([self.request(path)], ['upload']))
+        self.assertEqual(self.svc.busy_kind(path), 'upload', 'from now on the worker task holds it')
+        self.refused(self.cmd('edit', op='delete', dataset='lena/omx_f_a', meta_digest=self.digest(path),
+                              episodes=[0]), 'busy_upload', T.BUSY_UPLOAD_DE)
+
+    def test_a_worker_that_cannot_take_it_is_unavailable(self):
+        path = self.dataset('lena/omx_f_a')
+        self.hf.accept = False
+        self.assertEqual(self.svc.send_control_upload(str(path), self.request(path)), T.UNAVAILABLE_DE)
+        self.assertIsNone(self.svc.busy_kind(path), 'the transient lease is released')
 
 
 class SyncDownloads(ServiceCase):

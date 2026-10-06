@@ -44,6 +44,7 @@ EXPECTED_D = {
     'EXISTS_DE': 'Einen Datensatz mit diesem Namen gibt es hier schon. Wähle einen anderen Namen.',
     'STALE_DE': 'Der Datensatz hat sich inzwischen geändert. Lade ihn neu und markiere erneut.',
     'STALE_ACTION_DE': 'Der Datensatz auf dem Roboter hat sich inzwischen geändert. Es wurde nichts verändert. Schau dir den neuen Stand an und entscheide dann noch einmal.',
+    'KEEP_BOTH_NOTHING_TO_MERGE_DE': 'Auf Hugging Face hat sich seit dem letzten Abgleich nichts geändert. Lade den Datensatz einfach hoch.',
     'DISK_EDIT_DE': 'Für diese Bearbeitung ist zu wenig Speicher frei ({free} frei, etwa {need} nötig). Lösche zuerst alte Datensätze.',
     'NAMESPACE_EDIT_DE': 'Der neue Datensatz kann nur in deinem eigenen Hugging-Face-Konto angelegt werden.',
     'INVALID_EPISODES_DE': 'Die Auswahl der Episoden passt nicht zu diesem Datensatz. Lade die Seite neu und wähle noch einmal.',
@@ -70,7 +71,7 @@ EXPECTED_D = {
     'KEEP_BOTH_DISK_DE': 'Zum Zusammenführen ist zu wenig Speicher frei ({free} frei, etwa {need} nötig). Lösche zuerst alte Datensätze.',
 }
 EXPECTED_R = {
-    'HUB_CHANGED_SINCE_CHECK_DE': 'Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version du behalten willst. „Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.',
+    'HUB_CHANGED_SINCE_CHECK_DE': 'Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version du behalten willst. Dort steht auch, was „Beide behalten“ bei diesem Datensatz behält.',
     'UPLOAD_IN_SESSION_DE': 'Nicht hochgeladen: Die Aufnahme dieses Datensatzes wurde unterbrochen und nicht sauber beendet. Auf Hugging Face wurde nichts verändert. Lösche ihn im Tab Daten oder lade dort die Online-Version, falls es eine gibt.',
     'UPLOAD_BROKEN_DE': 'Nicht hochgeladen: Der Datensatz auf dem Roboter ist unvollständig oder beschädigt. Auf Hugging Face wurde nichts verändert. Lösche ihn im Tab Daten oder lade dort die Online-Version, falls es eine gibt.',
     'UPLOAD_UNCONFIRMED_DE': 'Hochgeladen, aber Hugging Face hat es noch nicht bestätigt. Im Tab Daten siehst du, ob noch etwas zu tun ist.',
@@ -177,9 +178,32 @@ class QuotesAndTabNames(unittest.TestCase):
                 if name.endswith('_DE') and isinstance(text, str):
                     for promise in ('verliert nichts', 'alle Episoden', 'nichts verloren', 'geht nichts verloren'):
                         self.assertNotIn(promise, text, name)
-        self.assertIn('alle neuen Episoden von hier und von Hugging Face', R.HUB_CHANGED_SINCE_CHECK_DE)
-        self.assertIn('Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.',
-                      R.HUB_CHANGED_SINCE_CHECK_DE)
+
+    def test_no_robot_sentence_says_what_beide_behalten_keeps(self):
+        """R2-1: what „Beide behalten" keeps depends on the dataset — with a sync
+        record the three-way merge (what was deleted since stays gone), without
+        one the union (deleted episodes come back). A robot sentence cannot
+        know which, so it states neither and points to the Daten tab, whose
+        per-dataset tip states it exactly (datenCopy.js keepBoth.tip /
+        keepBoth.tipNoBase)."""
+        for module in (R, D):
+            for name, text in vars(module).items():
+                if name.endswith('_DE') and isinstance(text, str) and 'Beide behalten' in text:
+                    for claim in ('bleibt weg', 'bleibt gelöscht', 'kommen zurück', 'kommt zurück',
+                                  'neuen Episoden', 'behält alle'):
+                        self.assertNotIn(claim, text, name)
+        self.assertTrue(R.HUB_CHANGED_SINCE_CHECK_DE.endswith(
+            'Öffne den Tab Daten und entscheide, welche Version du behalten willst. '
+            'Dort steht auch, was „Beide behalten“ bei diesem Datensatz behält.'))
+
+    def test_keep_both_with_nothing_to_merge_says_upload(self):
+        """R2-2: refused ``stale`` when the record already names the hub head —
+        the sentence says the hub did not change and a plain upload is right; it
+        makes no merge promise."""
+        text = D.KEEP_BOTH_NOTHING_TO_MERGE_DE
+        self.assertIn('seit dem letzten Abgleich nichts geändert', text)
+        self.assertIn('Lade den Datensatz einfach hoch.', text)
+        self.assertNotIn('Beide behalten', text)
 
     def test_no_upload_refusal_assumes_an_online_version_exists(self):
         """T1-3: the local gate refuses BEFORE anything reaches the hub — also a

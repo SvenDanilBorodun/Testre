@@ -950,6 +950,11 @@ class DatenService:
                                                                        and _SHA.fullmatch(expected)):
             raise _invalid()
         path = self._existing(dataset_id)
+        # R2-4: a live session BEFORE the crash marker — the session the student
+        # is recording has a marker too, and „unterbrochen … Lösche ihn" would be
+        # false for it. Only a marker with no live session behind it is in_session.
+        if self.busy_kind(path) == 'record':
+            raise Refusal('busy_record', T.BUSY_RECORD_UPLOAD_DE)
         state = self._state(path)
         if state == 'in_session':
             raise Refusal('in_session', R.UPLOAD_IN_SESSION_DE)
@@ -1147,6 +1152,8 @@ class DatenService:
                 raise Refusal(*_BUSY[busy])
             if self._edit_slot is not None:
                 raise Refusal(*_BUSY['edit'])
+        if self._nothing_to_merge(path, dataset_id, head):              # R2-2
+            raise Refusal('stale', T.KEEP_BOTH_NOTHING_TO_MERGE_DE)
         short = self._disk_for([path], factor=2)
         if short:
             raise Refusal('disk', T.keep_both_disk_de(*short))
@@ -1167,6 +1174,15 @@ class DatenService:
         self._spawn(self._keep_both_job, job_id, dataset_id, path, head, token_fp)
         return {'job_id': job_id}
 
+    @staticmethod
+    def _nothing_to_merge(path, dataset_id, head):
+        """R2-2: the dataset's own sync record already names ``head``, so the hub
+        has not moved since the last sync and there is nothing to merge: a plain
+        upload is right, and the union (no base) would bring the episodes deleted
+        here back. A record-less dataset never answers True (no base: it keeps
+        the union, which the page's ``keepBoth.tipNoBase`` states)."""
+        return S.own_record(path, dataset_id).get('hub_sha') == head
+
     def _keep_both_job(self, job_id, dataset_id, path, head, token_fp):
         key = self._key(path)
         keep_tmp, base_tmp = HS.tmp_path_of(path, 'keep'), HS.tmp_path_of(path, 'base')
@@ -1183,6 +1199,9 @@ class DatenService:
                 return
             trees = r.get('trees')
             base_sha = S.own_record(path, dataset_id).get('hub_sha')
+            if base_sha == head:                       # R2-2, re-checked where the base is read
+                self._job_finish(job_id, False, 'stale', T.KEEP_BOTH_NOTHING_TO_MERGE_DE)
+                return
             base_dir = None
             if base_sha and base_sha != head:
                 rb = DownloadProcess(self, dict(base_req, revision=base_sha, mode='base')).run(cancel)

@@ -20,7 +20,11 @@ worker's line protocol) loaded by path. What is proven:
 * ``keep_both``: its three stages, each stage's process taking the dataset
   lock itself (the job holds none, G-3), the edit → upload hand-over with no
   gap, ``hub_changed`` keeping the result locally, a stage 3 that cannot be
-  enqueued → ``unavailable``;
+  enqueued → ``unavailable``; a record that already names the head refused
+  ``stale`` in the callback AND re-checked by the job before the union (R2-2),
+  a record-less dataset keeping the base-less union;
+* a Daten upload of a dataset being recorded is ``busy_record`` also WITH the
+  session's crash marker (R2-4: the record lease before the state);
 * boot recovery on a temp root for every rule (the split journal both ways,
   ``.tmp_keep``, ``.tmp_base``, a broken swap both ways, a cut-short delete, a
   held lock skipped), holding an ``edit`` lease while it works and skipping a
@@ -886,7 +890,9 @@ class TheOldPageUpload(ServiceCase):
         self.assertEqual(self.hf.sent, [])
 
     def test_a_daten_upload_during_a_recording_says_upload_and_an_edit_says_edit(self):
-        """T1-3: the same busy kind, a sentence per action."""
+        """T1-3: the same busy kind, a sentence per action (before the session's
+        first record tick, which writes its crash marker; the case WITH the
+        marker is the next test)."""
         path = self.dataset('lena/omx_f_a')
         self.node.on_recording = True
         self.node.data_manager = types.SimpleNamespace(_save_path=path)
@@ -894,6 +900,34 @@ class TheOldPageUpload(ServiceCase):
         self.refused(self.cmd('edit', op='delete', dataset='lena/omx_f_a', meta_digest=self.digest(path),
                               episodes=[0]), 'busy_record', T.BUSY_RECORD_DE)
         self.assertEqual(self.hf.sent, [])
+
+    def test_a_live_session_with_its_crash_marker_is_busy_record_not_in_session(self):
+        """R2-4: a live session HAS a crash marker (the recorder writes it at its
+        first record tick), so the dataset state reads ``in_session``. A Daten
+        upload must still say „wird gerade aufgenommen", never the crash
+        sentence („unterbrochen … Lösche ihn"): the record lease is checked
+        before the state. Once the session is over, the same marker is a crash."""
+        path = self.dataset('lena/omx_f_a')
+        S.session_marker_path(path).write_text('{}')
+        # the state the real reader gives (library.dataset_state: the marker first)
+        self.svc._state_reader = lambda p: 'in_session' if S.session_marker_path(p).exists() else 'ok'
+        self.assertEqual(self.svc._state(path), 'in_session')
+        self.node.on_recording = True
+        self.node.data_manager = types.SimpleNamespace(_save_path=path)
+        self.refused(self.cmd('upload', dataset='lena/omx_f_a'), 'busy_record', T.BUSY_RECORD_UPLOAD_DE)
+        self.refused(self.cmd('upload', dataset='lena/omx_f_a', expected_hub_sha=HEAD), 'busy_record',
+                     T.BUSY_RECORD_UPLOAD_DE)
+        # an episode edit keeps its state-first order: its sentence names the recording too
+        self.refused(self.cmd('edit', op='delete', dataset='lena/omx_f_a', meta_digest=self.digest(path),
+                              episodes=[0]), 'in_session', T.IN_SESSION_DE)
+        self.refused(self.cmd('delete_dataset', dataset='lena/omx_f_a', meta_digest=self.digest(path)),
+                     'busy_record', T.BUSY_RECORD_DE)
+        self.assertEqual(self.hf.sent, [])
+        self.assertTrue(S.session_marker_path(path).exists() and path.is_dir(), 'nothing touched')
+        self.node.on_recording = False                                   # the session is over, the marker stays
+        self.refused(self.cmd('upload', dataset='lena/omx_f_a'), 'in_session', R.UPLOAD_IN_SESSION_DE)
+        self.assertEqual(self.hf.sent, [])
+        self.assertEqual(self.svc._leases, {})
 
     def test_a_free_dataset_is_handed_over_under_the_upload_lease(self):
         path = self.dataset('lena/omx_f_a')
@@ -1032,16 +1066,60 @@ class KeepBoth(ServiceCase):
         self.svc.on_hf_status({'operation': 'upload', 'status': 'Success', 'repo_id': 'lena/omx_f_a'})
         job = self.wait_job(job_id)
         self.assertEqual((job['state'], job['episodes']), ('done', 9))
+        self.assertTrue(wait_for(lambda: self.svc._edit_slot is None), 'the job\'s finally ran')
         self.assertFalse(HS.tmp_path_of(self.path, 'keep').exists())
 
-    def test_no_base_download_when_the_record_is_the_head(self):
+    def test_a_record_that_names_the_head_is_refused_stale_nothing_to_merge(self):
+        """R2-2: the dataset's own record already names the head the page sent —
+        the hub has not moved since the last sync, so there is nothing to merge
+        (a plain upload is right) and the base-less union would bring the
+        episodes deleted here back. Refused ``stale`` before anything starts."""
         S.write_record(self.path, {'v': 1, 'repo_id': 'lena/omx_f_a', 'hub_sha': HEAD})
-        job_id = self.start(meta_digest=self.digest(self.path))['result']['job_id']
-        self.assertTrue(wait_for(lambda: self.hf.sent))
-        self.assertEqual(self.stage_locks, ['keep', 'union'])
-        self.assertIsNone(self.union_req['base_copy_path'])
-        self.svc.on_hf_status({'operation': 'upload', 'status': 'Success', 'repo_id': 'lena/omx_f_a'})
-        self.wait_job(job_id)
+        self.refused(self.start(meta_digest=self.digest(self.path)), 'stale', T.KEEP_BOTH_NOTHING_TO_MERGE_DE)
+        self.assertEqual((self.procs, self.hf.sent, self.svc._leases, self.svc._edit_slot), ([], [], {}, None),
+                         'nothing fetched, merged, uploaded or leased')
+        self.assertEqual(self.svc.state_payload()['jobs'], [], 'no job')
+        self.assertFalse(HS.tmp_path_of(self.path, 'keep').exists())
+
+    def test_the_job_re_checks_the_record_after_the_download_and_never_runs_the_union(self):
+        """R2-2: the record can move between the callback and the job (it names
+        BASE at the callback, HEAD once the hub copy is down): the job reads it
+        where it reads the base and fails ``stale`` — no base fetched, no union,
+        no upload."""
+        script = self.scripts['download']
+
+        def download(proc, payload):
+            S.write_record(self.path, {'v': 1, 'repo_id': 'lena/omx_f_a', 'hub_sha': HEAD})
+            script(proc, payload)
+        self.scripts['download'] = download
+        job = self.wait_job(self.start()['result']['job_id'])
+        self.assertEqual((job['state'], job['code'], job['message']),
+                         ('failed', 'stale', T.KEEP_BOTH_NOTHING_TO_MERGE_DE))
+        self.assertEqual(self.stage_locks, ['keep'], 'no base download, no union')
+        self.assertFalse(hasattr(self, 'union_req'))
+        self.assertEqual(self.hf.sent, [])
+        # the job's finally (tmp cleanup, then the release) runs after its result
+        self.assertTrue(wait_for(lambda: self.svc._leases == {} and self.svc._edit_slot is None))
+        self.assertFalse(HS.tmp_path_of(self.path, 'keep').exists())
+
+    def test_a_record_less_dataset_keeps_the_union_without_a_base(self):
+        """No record, no base (§E10, the page's ``keepBoth.tipNoBase``): the
+        union runs — R2-2 never refuses a dataset it cannot prove synced; nor a
+        record of ANOTHER repo (H-7: never this folder's)."""
+        for record in (None, {'v': 1, 'repo_id': 'lena/omx_f_other', 'hub_sha': HEAD}):
+            with self.subTest(record=record):
+                S.record_path(self.path).unlink(missing_ok=True)
+                if record is not None:
+                    S.write_record(self.path, record)
+                self.stage_locks.clear()
+                self.hf.sent.clear()
+                self.hf.is_processing, self.hf.current_task = False, None
+                job_id = self.start(meta_digest=self.digest(self.path))['result']['job_id']
+                self.assertTrue(wait_for(lambda: self.hf.sent))
+                self.assertEqual(self.stage_locks, ['keep', 'union'])
+                self.assertIsNone(self.union_req['base_copy_path'])
+                self.svc.on_hf_status({'operation': 'upload', 'status': 'Success', 'repo_id': 'lena/omx_f_a'})
+                self.assertEqual(self.wait_job(job_id)['state'], 'done')
 
     def test_hub_changed_keeps_the_result_locally(self):
         job_id = self.start()['result']['job_id']

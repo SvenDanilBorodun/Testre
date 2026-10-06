@@ -44,6 +44,11 @@ EXISTS_DE = 'Einen Datensatz mit diesem Namen gibt es hier schon. Wähle einen a
 STALE_DE = 'Der Datensatz hat sich inzwischen geändert. Lade ihn neu und markiere erneut.'
 STALE_ACTION_DE = ('Der Datensatz auf dem Roboter hat sich inzwischen geändert. Es wurde nichts '
                    'verändert. Schau dir den neuen Stand an und entscheide dann noch einmal.')
+# R2-2: a keep_both whose dataset's own sync record already names the head the
+# page showed (`stale`): nothing to merge, a plain upload is right, and the
+# union would bring back the episodes deleted here.
+KEEP_BOTH_NOTHING_TO_MERGE_DE = ('Auf Hugging Face hat sich seit dem letzten Abgleich nichts '
+                                 'geändert. Lade den Datensatz einfach hoch.')
 NAMESPACE_EDIT_DE = 'Der neue Datensatz kann nur in deinem eigenen Hugging-Face-Konto angelegt werden.'
 INVALID_EPISODES_DE = ('Die Auswahl der Episoden passt nicht zu diesem Datensatz. Lade die Seite neu '
                        'und wähle noch einmal.')

@@ -318,7 +318,9 @@ const DATEN_COPY = deepFreeze({
 
   keepBoth: {
     button: 'Beide behalten',
-    tip: 'Behält alle Episoden von hier und von Hugging Face. Gleiche Episoden kommen nur einmal vor. Was du seit dem letzten Abgleich gelöscht hast, bleibt gelöscht. Danach wird der Datensatz hochgeladen.',
+    // V1-5: the truth of G-2, in the core sentence the robot's texts share
+    // (record_texts_de.HUB_CHANGED_SINCE_CHECK_DE)
+    tip: '„Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg. Gleiche Episoden kommen nur einmal vor. Danach wird der Datensatz hochgeladen.',
     progressTitle: 'Beide Versionen werden zusammengeführt …',
     stepDownload: 'Online-Version laden',
     stepMerge: 'Zusammenführen',

@@ -28,6 +28,28 @@ import {
   cameraLabel, codecName, driverCamera, jointLabel, nameFromRepo, orderCameras, robotName, taskNameOf,
 } from '../model/labels';
 
+// V1-5: „Beide behalten" keeps every NEW episode of both sides (G-2); what was
+// deleted or replaced on either side since the last sync stays gone. No copy
+// may promise more — not „alle Episoden", not „verliert nichts".
+describe('„Beide behalten" says what it does (V1-5, G-2)', () => {
+  const all = [];
+  const walk = (v) => {
+    if (typeof v === 'string') all.push(v);
+    else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  walk(COPY);
+
+  it('the tip carries the shared core sentence', () => {
+    expect(COPY.keepBoth.tip.startsWith('„Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. '
+      + 'Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.')).toBe(true);
+  });
+
+  it('no Daten sentence promises that nothing is lost', () => {
+    const promises = all.filter((t) => /verliert nichts|Behält alle Episoden|bleibt gelöscht\./.test(t));
+    expect(promises).toEqual([]);
+  });
+});
+
 describe('the shared contract (§J.2)', () => {
   it('carries the codes and states the page switches on', () => {
     expect(CONTRACT.HTTP_PORT).toBe(8095);

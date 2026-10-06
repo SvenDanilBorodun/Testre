@@ -664,7 +664,9 @@ describe('conflict: „Beide behalten" first and default (§E10)', () => {
     const dlg = await screen.findByRole('dialog');
     const keep = await within(dlg).findByRole('button', { name: COPY.keepBoth.button });
     await waitFor(() => expect(document.activeElement).toBe(keep));
-    expect(dlg.textContent).toContain('Was du seit dem letzten Abgleich gelöscht hast, bleibt gelöscht.');
+    // V1-5: the truth of G-2, the same core sentence the robot's texts use
+    expect(dlg.textContent).toContain('„Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. '
+      + 'Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.');
     const order = within(dlg).getAllByRole('button').map((b) => b.textContent);
     expect(order.indexOf(COPY.keepBoth.button)).toBeLessThan(order.indexOf(COPY.conflict.loadOnline));
     expect(order.indexOf(COPY.conflict.loadOnline)).toBeLessThan(order.indexOf(COPY.conflict.uploadHere));

@@ -803,6 +803,43 @@ class DatenResolvesTheAccount(ServiceCase):
         svc._account_resolver = lambda: ['max']
         self.assertTrue(wait_for(lambda: svc._account() == 'max'))
 
+    def test_the_1hz_tick_alone_looks_the_account_up(self):
+        """T1-2: no command is needed — the state tick starts the lookup, so the
+        FIRST command after a sign-in already knows the account."""
+        calls = []
+        svc = self.service(lambda: calls.append(1) or ['lena'])
+        self.dataset('max/omx_f_x')
+        svc._tick()
+        self.assertTrue(wait_for(lambda: calls and not svc._resolved['running']))
+        self.assertEqual((svc._resolved['fp'], svc._resolved['account']), (STORE.fingerprint(TOKEN_A), 'lena'))
+        self.refused(self.keep_both(svc, 'max/omx_f_x'), 'namespace', R.NAMESPACE_REFUSED_DE)
+        self.assertEqual(len(calls), 1, 'the command did not have to look it up itself')
+
+    def test_the_previous_tokens_account_is_never_used_for_a_new_token(self):
+        """T1-2: an account is used only for the token it was looked up for. Max
+        signs in after Lena: until max's own lookup answers, nothing is refused
+        on the strength of LENA's account (refuse on proof only)."""
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        answers = {TOKEN_A: ['lena'], TOKEN_B: ['max']}
+
+        def resolver():
+            token = self.token
+            if token == TOKEN_B:
+                gate.wait(10)                                    # max's lookup is still running
+            return answers[token]
+        svc = self.service(resolver)
+        self.dataset('max/omx_f_x')
+        self.dataset('lena/omx_f_y')
+        svc._refresh_account()
+        self.assertTrue(wait_for(lambda: svc._account() == 'lena'))
+        self.token = TOKEN_B                                     # the next student signed in
+        self.assertIsNone(svc._account(), 'lena\'s account must not answer for max\'s token')
+        self.assertTrue(self.keep_both(svc, 'max/omx_f_x')['success'], 'max\'s own dataset is not refused')
+        gate.set()
+        self.assertTrue(wait_for(lambda: svc._account() == 'max'))
+        self.refused(self.keep_both(svc, 'lena/omx_f_y'), 'namespace', R.NAMESPACE_REFUSED_DE)
+
     def test_a_failed_lookup_is_asked_again_after_the_retry_time(self):
         now = [100.0]
         calls = []
@@ -845,7 +882,17 @@ class TheOldPageUpload(ServiceCase):
         path = self.dataset('lena/omx_f_a')
         self.node.on_recording = True
         self.node.data_manager = types.SimpleNamespace(_save_path=path)
-        self.assertEqual(self.svc.send_control_upload(str(path), self.request(path)), T.BUSY_RECORD_DE)
+        self.assertEqual(self.svc.send_control_upload(str(path), self.request(path)), T.BUSY_RECORD_UPLOAD_DE)
+        self.assertEqual(self.hf.sent, [])
+
+    def test_a_daten_upload_during_a_recording_says_upload_and_an_edit_says_edit(self):
+        """T1-3: the same busy kind, a sentence per action."""
+        path = self.dataset('lena/omx_f_a')
+        self.node.on_recording = True
+        self.node.data_manager = types.SimpleNamespace(_save_path=path)
+        self.refused(self.cmd('upload', dataset='lena/omx_f_a'), 'busy_record', T.BUSY_RECORD_UPLOAD_DE)
+        self.refused(self.cmd('edit', op='delete', dataset='lena/omx_f_a', meta_digest=self.digest(path),
+                              episodes=[0]), 'busy_record', T.BUSY_RECORD_DE)
         self.assertEqual(self.hf.sent, [])
 
     def test_a_free_dataset_is_handed_over_under_the_upload_lease(self):

@@ -107,7 +107,8 @@ class TheProductionEntryPoint(BoundedTestCase):
 
         class FakeServer:
             sidecar = type('S', (), {'library': type('L', (), {
-                'start_hint_worker': staticmethod(lambda: events.append(('hints',)))})()})()
+                'start_hint_worker': staticmethod(lambda: events.append(('hints',))),
+                'start_remember_worker': staticmethod(lambda: events.append(('remember',)))})()})()
 
             def serve_forever(self, poll_interval=None):
                 events.append(('serve',))
@@ -122,8 +123,8 @@ class TheProductionEntryPoint(BoundedTestCase):
             self.assertEqual(HS.main(), 0)
         finally:
             HS.load_modules, HS.make_server = saved
-        self.assertEqual(events, [('install', HS.C.HUB_CALL_TIMEOUT_S), ('make',), ('hints',), ('serve',),
-                                  ('close',)])
+        self.assertEqual(events, [('install', HS.C.HUB_CALL_TIMEOUT_S), ('make',), ('hints',), ('remember',),
+                                  ('serve',), ('close',)])          # T2-1: the remember worker runs
         self.assertEqual(HS.C.HUB_CALL_TIMEOUT_S, 10)
 
 

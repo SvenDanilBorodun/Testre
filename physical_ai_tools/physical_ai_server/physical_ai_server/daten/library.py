@@ -18,7 +18,11 @@
 
 Everything here READS: the dataset folders of the requested namespaces, their
 ``meta/``, data rows and video packets. Nothing is written but the sidecar's
-own temp clips (under ``/tmp/edubotics-daten``, deleted at once).
+own temp clips (under ``/tmp/edubotics-daten``, deleted at once) and ONE kind
+of sibling file: the sync record of a dataset WITHOUT one that a decision found
+identical to its hub copy (T2-1, „remember the state first“) — written by a
+background thread after the reply, on proof only and under the dataset's stage
+lock (``hub_sync.remember_identical``), never inside a request.
 
 Confinement (§B6): a dataset id is ``<ns>/<name>``, each part one component
 matching ``DATASET_PART_RE``, the name without a reserved suffix; its folder is
@@ -48,6 +52,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import sys
 import tempfile
 import threading
 from typing import Optional
@@ -59,12 +64,18 @@ from physical_ai_server.daten import contract as C
 from physical_ai_server.data_processing import dataset_hints as hints_mod
 from physical_ai_server.data_processing import dataset_paths
 from physical_ai_server.data_processing import dataset_sync as S
+from physical_ai_server.data_processing import hub_sync as HS
 from physical_ai_server.data_processing import v3_surgery as V
 
 _PART = re.compile(C.DATASET_PART_RE)
 _UNREAD = object()
 THUMB_WIDTH = 320
 CAMERA_PREFIX = 'observation.images.'
+# T2-1: outcomes of the remember step that hold for that state of the dataset; a
+# lock held by a stage, a dataset that changed meanwhile or a session are tried
+# again at the next look.
+REMEMBER_FINAL = ('written', 'differs', 'foreign', 'synced', 'no_hub')
+REMEMBER_MEMO_MAX = 4096
 
 
 class LibraryError(Exception):
@@ -183,6 +194,10 @@ class Library:
         self._hint_thread = None
         self._inflight = {}                      # build key -> {'event', 'result', 'error'}
         self.follow_wait_s = 3 * C.MEDIA_WAIT_S  # a request waiting for another's identical build
+        self._remember_queue = queue.Queue()     # T2-1
+        self._remember_pending = set()           # (id, digest, head, files signature) queued or running
+        self._remembered = collections.OrderedDict()   # that key -> a REMEMBER_FINAL outcome
+        self._remember_thread = None
 
     # ── paths ─────────────────────────────────────────────────────────────
 
@@ -429,6 +444,73 @@ class Library:
         with self._lock:
             self._hints[(dataset_id, digest)] = result
         return result
+
+    # ── remember the state first (T2-1) ────────────────────────────────────
+
+    def remember_if_current(self, dataset_id, path, record, view, state):
+        """T2-1: a dataset WITHOUT a synced record that a decision (``sync_map``,
+        ``hubstate``) found ``current`` against a present hub view is queued for
+        the remember step; the listing is the one that decision just read (the
+        hub cache answers it). Never raises: the reply never depends on it."""
+        if state != 'current' or (record or {}).get('hub_sha') or not view or view.get('state') != 'present':
+            return False
+        try:
+            return self.queue_remember(dataset_id, path, view, view['files']())
+        except Exception:  # noqa: BLE001 — no listing or the folder vanished: nothing to remember
+            return False
+
+    def queue_remember(self, dataset_id, path, view, files):
+        """Queue the remember step for a record-less dataset a decision found
+        ``current`` against ``view`` (a present hub view) and ``files`` (its
+        listing at the head, already read for that decision). Never runs it
+        here: the request answers first. Once per state: the key holds the
+        meta digest, the head and a stat signature of every file (a refused
+        dataset is not hashed again until one of its files changes)."""
+        snap = HS.sync_snapshot(Path(path))
+        signature = hash(tuple(sorted((k, v[0], v[1]) for k, v in snap.items() if k)))
+        key = (dataset_id, self.meta_digest(Path(path)), view.get('head'), signature)
+        with self._lock:
+            if key in self._remembered or key in self._remember_pending:
+                return False
+            self._remember_pending.add(key)
+        hub = {'state': 'present', 'head': view.get('head'), 'trees': dict(view.get('trees') or {})}
+        self._remember_queue.put((key, Path(path), hub, dict(files)))
+        return True
+
+    def remember_pending(self) -> int:
+        with self._lock:
+            return len(self._remember_pending)
+
+    def start_remember_worker(self):
+        """One background thread for the remember step (it hashes every file of
+        a legacy dataset ONCE; like every sidecar thread it runs at the launch's
+        nice 10, R-15)."""
+        if self._remember_thread is None:
+            self._remember_thread = threading.Thread(target=self._remember_loop, name='daten-remember',
+                                                     daemon=True)
+            self._remember_thread.start()
+
+    def _remember_loop(self):
+        while True:
+            self.remember_one(*self._remember_queue.get())
+
+    def remember_one(self, key, path, hub, files):
+        outcome = 'error'
+        try:
+            outcome = HS.remember_identical(path, key[0], hub, files)
+            if outcome == HS.REMEMBER_WRITTEN:
+                print(f'[daten-sidecar] remembered the Hugging Face state of {key[0]} ({key[2][:12]})',
+                      file=sys.stderr, flush=True)
+        except Exception as e:  # noqa: BLE001 — a failed step leaves the dataset as it was
+            print(f'[daten-sidecar] remember step failed: {type(e).__name__}', file=sys.stderr, flush=True)
+        finally:
+            with self._lock:
+                self._remember_pending.discard(key)
+                if outcome in REMEMBER_FINAL:
+                    self._remembered[key] = outcome
+                    while len(self._remembered) > REMEMBER_MEMO_MAX:
+                        self._remembered.popitem(last=False)
+        return outcome
 
     # ── one dataset ──────────────────────────────────────────────────────
 
@@ -695,6 +777,7 @@ def sync_map(library, local_entries, views, listed, default_view=None):
                 state, reason, _ = S.decide(path, record, view)
             except Exception:  # noqa: BLE001 — the folder vanished meanwhile
                 continue
+        library.remember_if_current(dataset_id, path, record, view, state)     # T2-1
         head = view.get('head') if view and view.get('state') == 'present' else None
         out[dataset_id] = {'state': state, 'reason': reason, 'head': head}
     for dataset_id, entry in listed.items():

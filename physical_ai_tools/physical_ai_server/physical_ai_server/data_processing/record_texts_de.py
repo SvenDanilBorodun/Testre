@@ -294,13 +294,15 @@ HUB_CHANGED_SINCE_CHECK_DE = ('Auf Hugging Face hat sich der Datensatz inzwische
                               'und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite '
                               'gelöscht oder ersetzt wurde, bleibt weg.')
 # §E2 step 0 (audit M3): a crash marker — a running session, or one never finalized.
+# T1-3: both local-gate refusals happen before anything reaches the hub, also for
+# a copy that was never uploaded (no online version): neither sentence assumes one.
 UPLOAD_IN_SESSION_DE = ('Nicht hochgeladen: Die Aufnahme dieses Datensatzes wurde unterbrochen und '
-                        'nicht sauber beendet; hochgeladen würde er die Version auf Hugging Face '
-                        'beschädigen. Lösche ihn im Tab Daten oder lade dort die Online-Version.')
+                        'nicht sauber beendet. Auf Hugging Face wurde nichts verändert. Lösche ihn im '
+                        'Tab Daten oder lade dort die Online-Version, falls es eine gibt.')
 # §E2 steps 0/5b (audit M3/m2): the local copy does not load, or a synced file changed.
 UPLOAD_BROKEN_DE = ('Nicht hochgeladen: Der Datensatz auf dem Roboter ist unvollständig oder '
-                    'beschädigt. Die Version auf Hugging Face bleibt, wie sie ist. Lösche ihn im Tab '
-                    'Daten oder lade dort die Online-Version.')
+                    'beschädigt. Auf Hugging Face wurde nichts verändert. Lösche ihn im Tab Daten '
+                    'oder lade dort die Online-Version, falls es eine gibt.')
 # §E2 step 6 (G-13): the commit landed but could not be read back (status Success).
 UPLOAD_UNCONFIRMED_DE = ('Hochgeladen, aber Hugging Face hat es noch nicht bestätigt. Im Tab Daten '
                          'siehst du, ob noch etwas zu tun ist.')

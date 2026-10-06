@@ -6,7 +6,10 @@ validated; the §J.4.1 entry fields; ``hint_episodes`` null until the hint worke
 ran; summary/episode data/clip/thumb incl. the clip LRU and the remembered
 ``unplayable``; the memoised meta digest; and ``sync_map`` per id from hub views
 — each ``unknown`` reason, ``complete``, a content decision, a listing that
-fails mid-decision, and the head fast path making no tree call.
+fails mid-decision, and the head fast path making no tree call. T2-1: a
+record-less dataset decided ``current`` (by ``sync_map`` or ``hubstate``) is
+remembered by the background step — its record written once, after the reply,
+then read on the fast path; nothing else is ever remembered.
 """
 
 from __future__ import annotations
@@ -391,3 +394,113 @@ def test_a_synced_dataset_whose_record_holds_the_head_needs_no_tree_call(tmp_pat
     assert out[f'{NS}/omx_f_a'] == {'state': 'current', 'reason': None, 'head': 'h7'}
     assert api.calls['tree'] == 0 and api.calls['files'] == 0
     assert by_id(local)[f'{NS}/omx_f_a']['record']['hub_sha'] == 'h7'
+
+
+# ── T2-1: remember the state first ───────────────────────────────────────────
+
+def _wait_until(pred, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _hub_view_of(lib, api, hub, local):
+    _, views, listed = hub.library_hub([NS], local, records=lib.records(local))
+    return L.sync_map(lib, local, views, listed)
+
+
+def test_a_record_less_identical_dataset_is_remembered_after_the_reply(tmp_path):
+    a = build_dataset(tmp_path / NS / 'omx_f_a', lengths=(20, 21))
+    S.write_record(a, {'v': 1, 'repo_id': f'{NS}/omx_f_a', 'display_name': 'Würfel legen'})
+    lib = L.Library(root=tmp_path, robot_type='omx_f', clip_tmp_dir=tmp_path / 'c')
+    api = FakeApi(account=NS)
+    repo = _mirror(api, f'{NS}/omx_f_a', a)
+    hub, _ = make_hub(api)
+    local = lib.scan([NS])
+    out = _hub_view_of(lib, api, hub, local)
+    assert out[f'{NS}/omx_f_a']['state'] == 'current'
+    assert S.read_record(a).get('hub_sha') is None, 'never inside the reply: the step runs in the background'
+    assert lib.remember_pending() == 1
+    lib.start_remember_worker()
+    assert _wait_until(lambda: (S.read_record(a) or {}).get('hub_sha') == 'h1')
+    rec = S.read_record(a)
+    assert rec['hub_trees'] == dict(repo['trees'])
+    assert rec['local_digest'] == S.meta_digest(a)
+    assert rec['files'] == S.files_manifest(a)
+    assert rec['display_name'] == 'Würfel legen'
+    assert _wait_until(lambda: lib.remember_pending() == 0)
+    # read back on the head fast path: no tree call, no recursive listing
+    calls = (api.calls['tree'], api.calls['files'])
+    local = lib.scan([NS])
+    assert _hub_view_of(lib, api, hub, local)[f'{NS}/omx_f_a']['state'] == 'current'
+    assert (api.calls['tree'], api.calls['files']) == calls
+    assert lib.remember_pending() == 0, 'a synced dataset is never queued again'
+
+
+def test_only_a_current_record_less_dataset_with_the_hub_asked_is_queued(tmp_path):
+    ns = tmp_path / NS
+    a = build_dataset(ns / 'omx_f_a', lengths=(20, 21))           # here = hub + a session: changed
+    b = build_dataset(ns / 'omx_f_b', lengths=(20,))              # only here: local
+    c = build_dataset(ns / 'omx_f_c', lengths=(20,))              # synced and current
+    lib = L.Library(root=tmp_path, robot_type='omx_f', clip_tmp_dir=tmp_path / 'cl')
+    api = FakeApi(account=NS)
+    video = next(r for r in S.local_files(a) if r.startswith('videos/'))
+    _mirror(api, f'{NS}/omx_f_a', a, drop=(video,))
+    repo_c = _mirror(api, f'{NS}/omx_f_c', c)
+    S.write_record(c, {'v': 1, 'repo_id': f'{NS}/omx_f_c', 'hub_sha': 'h1', 'hub_trees': dict(repo_c['trees']),
+                       'local_digest': S.meta_digest(c)})
+    hub, _ = make_hub(api)
+    local = lib.scan([NS])
+    out = _hub_view_of(lib, api, hub, local)
+    assert {k: v['state'] for k, v in out.items()} == {f'{NS}/omx_f_a': 'changed', f'{NS}/omx_f_b': 'local',
+                                                       f'{NS}/omx_f_c': 'current'}
+    assert L.sync_map(lib, local, {}, {})                          # the hub not asked: unknown
+    assert lib.remember_pending() == 0
+    assert S.read_record(b) is None and S.read_record(a) is None
+
+
+def test_hubstate_remembers_too_and_a_differing_video_is_never_remembered(tmp_path):
+    a = build_dataset(tmp_path / NS / 'omx_f_a', lengths=(20,))
+    lib = L.Library(root=tmp_path, robot_type='omx_f', clip_tmp_dir=tmp_path / 'c')
+    api = FakeApi(account=NS)
+    _mirror(api, f'{NS}/omx_f_a', a)
+    hub, _ = make_hub(api)
+    video = a / next(r for r in S.local_files(a) if r.startswith('videos/'))
+    data = bytearray(video.read_bytes())
+    data[len(data) // 2] ^= 0xFF                                   # same size, one other byte
+    video.write_bytes(bytes(data))
+    assert hub.hubstate(lib, f'{NS}/omx_f_a')['sync']['state'] == 'current'   # videos by size (§C3)
+    assert lib.remember_pending() == 1
+    lib.start_remember_worker()
+    assert _wait_until(lambda: lib.remember_pending() == 0)
+    assert S.read_record(a) is None, 'not provably identical: nothing written'
+    assert hub.hubstate(lib, f'{NS}/omx_f_a')['sync']['state'] == 'current'
+    assert lib.remember_pending() == 0, 'a refusal is remembered for this state: not hashed again'
+    data[len(data) // 2] ^= 0xFF                                   # the byte back: a file changed,
+    video.write_bytes(bytes(data))                                 # so it is looked at again
+    assert hub.hubstate(lib, f'{NS}/omx_f_a')['sync']['state'] == 'current'
+    assert _wait_until(lambda: (S.read_record(a) or {}).get('hub_sha') == 'h1')
+
+
+def test_the_sidecars_main_starts_the_remember_worker():
+    import ast
+    import inspect
+    from physical_ai_server.daten import http_server
+    calls = {n.func.attr for n in ast.walk(ast.parse(inspect.getsource(http_server.main)))
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert {'start_hint_worker', 'start_remember_worker'} <= calls
+
+
+def test_the_reply_never_depends_on_the_remember_step(tmp_path):
+    """A listing that fails, a folder that vanished: the decision stands, nothing queued."""
+    a = build_dataset(tmp_path / NS / 'omx_f_a', lengths=(20,))
+    lib = L.Library(root=tmp_path, robot_type='omx_f', clip_tmp_dir=tmp_path / 'c')
+    view = {'state': 'present', 'head': 'h1', 'trees': {'data': 't'},
+            'files': lambda: (_ for _ in ()).throw(ConnectionError('gone'))}
+    assert lib.remember_if_current(f'{NS}/omx_f_a', a, None, view, 'current') is False
+    view['files'] = lambda: {}
+    assert lib.remember_if_current(f'{NS}/omx_f_a', tmp_path / NS / 'omx_f_gone', None, view, 'current') is False
+    assert lib.remember_pending() == 0

@@ -29,6 +29,9 @@ from __future__ import annotations
 # ── busy: one sentence per kind (§D3) ─────────────────────────────────────────
 
 BUSY_RECORD_DE = 'Dieser Datensatz wird gerade aufgenommen. Bearbeiten geht erst nach der Aufnahme.'
+# T1-3: an upload (the Daten upload, the old page's /huggingface/control upload)
+# refused because the dataset records says „Hochladen“, not „Bearbeiten“.
+BUSY_RECORD_UPLOAD_DE = 'Dieser Datensatz wird gerade aufgenommen. Hochladen geht erst nach der Aufnahme.'
 BUSY_UPLOAD_DE = 'Dieser Datensatz wird gerade hochgeladen. Warte, bis das Hochladen fertig ist.'
 BUSY_DOWNLOAD_DE = ('Dieser Datensatz wird gerade von Hugging Face geladen. Warte, bis das '
                     'fertig ist.')

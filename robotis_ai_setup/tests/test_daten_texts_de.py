@@ -36,6 +36,7 @@ R = _load(TEXTS_R_PATH, '_record_texts_de_under_test')
 # English placeholders; the builders below fill them.
 EXPECTED_D = {
     'BUSY_RECORD_DE': 'Dieser Datensatz wird gerade aufgenommen. Bearbeiten geht erst nach der Aufnahme.',
+    'BUSY_RECORD_UPLOAD_DE': 'Dieser Datensatz wird gerade aufgenommen. Hochladen geht erst nach der Aufnahme.',
     'BUSY_UPLOAD_DE': 'Dieser Datensatz wird gerade hochgeladen. Warte, bis das Hochladen fertig ist.',
     'BUSY_DOWNLOAD_DE': 'Dieser Datensatz wird gerade von Hugging Face geladen. Warte, bis das fertig ist.',
     'BUSY_EDIT_DE': 'Es läuft gerade eine andere Bearbeitung. Warte, bis sie fertig ist.',
@@ -70,8 +71,8 @@ EXPECTED_D = {
 }
 EXPECTED_R = {
     'HUB_CHANGED_SINCE_CHECK_DE': 'Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version du behalten willst. „Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.',
-    'UPLOAD_IN_SESSION_DE': 'Nicht hochgeladen: Die Aufnahme dieses Datensatzes wurde unterbrochen und nicht sauber beendet; hochgeladen würde er die Version auf Hugging Face beschädigen. Lösche ihn im Tab Daten oder lade dort die Online-Version.',
-    'UPLOAD_BROKEN_DE': 'Nicht hochgeladen: Der Datensatz auf dem Roboter ist unvollständig oder beschädigt. Die Version auf Hugging Face bleibt, wie sie ist. Lösche ihn im Tab Daten oder lade dort die Online-Version.',
+    'UPLOAD_IN_SESSION_DE': 'Nicht hochgeladen: Die Aufnahme dieses Datensatzes wurde unterbrochen und nicht sauber beendet. Auf Hugging Face wurde nichts verändert. Lösche ihn im Tab Daten oder lade dort die Online-Version, falls es eine gibt.',
+    'UPLOAD_BROKEN_DE': 'Nicht hochgeladen: Der Datensatz auf dem Roboter ist unvollständig oder beschädigt. Auf Hugging Face wurde nichts verändert. Lösche ihn im Tab Daten oder lade dort die Online-Version, falls es eine gibt.',
     'UPLOAD_UNCONFIRMED_DE': 'Hochgeladen, aber Hugging Face hat es noch nicht bestätigt. Im Tab Daten siehst du, ob noch etwas zu tun ist.',
     'UPLOAD_HUB_DIFFERS_DE': 'Auf Hugging Face gibt es diesen Datensatz schon in einer anderen Version. Es wurde nichts überschrieben. Öffne den Tab Daten, vergleiche beide Versionen und entscheide dort.',
     'SYNC_CONFLICT_DE': 'Dieser Datensatz wurde hier geändert, und auf Hugging Face gibt es inzwischen eine neuere Version. Entscheide im Tab Daten, welche du behalten willst, und starte dann die Aufnahme neu.',
@@ -179,6 +180,25 @@ class QuotesAndTabNames(unittest.TestCase):
         self.assertIn('alle neuen Episoden von hier und von Hugging Face', R.HUB_CHANGED_SINCE_CHECK_DE)
         self.assertIn('Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg.',
                       R.HUB_CHANGED_SINCE_CHECK_DE)
+
+    def test_no_upload_refusal_assumes_an_online_version_exists(self):
+        """T1-3: the local gate refuses BEFORE anything reaches the hub — also a
+        copy that was never uploaded, which has no online version. The two
+        sentences say what is true either way: nothing changed on Hugging Face,
+        and the online version is an option only if there is one."""
+        for name in ('UPLOAD_BROKEN_DE', 'UPLOAD_IN_SESSION_DE'):
+            text = getattr(R, name)
+            self.assertIn('Auf Hugging Face wurde nichts verändert.', text, name)
+            self.assertIn('die Online-Version, falls es eine gibt.', text, name)
+            for claim in ('Die Version auf Hugging Face', 'die Version auf Hugging Face'):
+                self.assertNotIn(claim, text, name)
+
+    def test_a_refused_upload_during_a_recording_says_upload_not_edit(self):
+        """T1-3: an upload refused because the dataset records has its own
+        sentence; the edit sentence („Bearbeiten …") stays the edits'."""
+        self.assertIn('Hochladen geht erst nach der Aufnahme.', D.BUSY_RECORD_UPLOAD_DE)
+        self.assertNotIn('Bearbeiten', D.BUSY_RECORD_UPLOAD_DE)
+        self.assertIn('Bearbeiten geht erst nach der Aufnahme.', D.BUSY_RECORD_DE)
 
     def test_every_R_sentence_that_points_somewhere_names_the_daten_tab(self):
         """§G11 POINTS_TO_DATEN_TAB = /\\b(im|den) Tab Daten\\b/: the finish card then

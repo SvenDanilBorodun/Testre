@@ -166,6 +166,8 @@ describe('the page states (§G10)', () => {
     await screen.findByText(COPY.lib.hubFailed);
     const c = card(`${OWN}/omx_f_a`);
     expect(c.textContent).toContain(COPY.sync.unknownLabel);
+    // V2-9: the badge says WHY (unreachable), never „wurde noch nicht geprüft"
+    expect(c.querySelector('[data-sync="unknown"]').getAttribute('title')).toBe(COPY.sync.unknownTip.unreachable);
     expect(within(c).getByText(COPY.sync.refresh)).toBeInTheDocument();
     expect(within(c).getByText(COPY.card.upload).closest('button')).not.toBeDisabled();
   });

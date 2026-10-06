@@ -119,6 +119,25 @@ describe('applyLibraryReply — rule 3: a hub part read with another token is dr
     expect(lib.hub.state).toBe('unreachable');
     expect(lib.sync['lena/omx_f_a'].state).toBe('unknown');
   });
+
+  it('V2-9: the robot\'s `unreachable` reason survives an unusable hub part (its tooltip is the unreachable sentence)', () => {
+    const failed = applyLibraryReply(emptyLibrary(), hub1([local('lena/omx_f_a')], [], {
+      'lena/omx_f_a': { state: 'unknown', reason: 'unreachable', head: null },
+    }, { state: 'unreachable', token_fp: FP }), { seq: 1, hub: true, ids: null }, { accountFp: FP });
+    expect(failed.sync['lena/omx_f_a']).toEqual({ state: 'unknown', reason: 'unreachable', head: null });
+    // the same for an ids reply
+    const ids = applyLibraryReply(emptyLibrary(), hub1([local('lena/omx_f_a')], [], {
+      'lena/omx_f_a': { state: 'unknown', reason: 'unreachable', head: null },
+    }, { state: 'unreachable', token_fp: FP }), { seq: 2, hub: true, ids: ['lena/omx_f_a'] }, { accountFp: FP });
+    expect(ids.sync['lena/omx_f_a'].reason).toBe('unreachable');
+    // a verdict made with ANOTHER token says nothing about this account: not asked
+    const foreign = applyLibraryReply(emptyLibrary(), hub1([local('lena/omx_f_a'), local('lena/omx_f_b')], [], {
+      'lena/omx_f_a': { state: 'current', reason: null, head: 'h' },
+      'lena/omx_f_b': { state: 'unknown', reason: 'not_visible', head: null },
+    }, { token_fp: 'fp-someone-else' }), { seq: 1, hub: true, ids: null }, { accountFp: FP });
+    expect(foreign.sync['lena/omx_f_a'].reason).toBe('not_asked');
+    expect(foreign.sync['lena/omx_f_b'].reason).toBe('not_asked');
+  });
 });
 
 describe('an ids reply touches only its datasets', () => {

@@ -58,11 +58,18 @@ function syncEntry(s) {
 
 const NOT_ASKED = Object.freeze({ state: 'unknown', reason: 'not_asked', head: null });
 
-/** A verdict made against a hub part this page cannot use: only what holds without the hub. */
+/**
+ * A verdict made against a hub part this page cannot use: only what holds
+ * without the hub. The robot's `unreachable` is a fact about asking, true
+ * whoever's token asked, so it stays (V2-9: the badge's tooltip is then the
+ * unreachable sentence, §G10, never „wurde noch nicht geprüft"); every other
+ * verdict about the hub becomes „not asked".
+ */
 function blindSync(s) {
   if (!s) return null;
   if (s.state === 'changed' || s.state === 'conflict') return { state: 'changed', reason: null, head: s.head };
   if (s.state === 'online') return null;
+  if (s.state === 'unknown' && s.reason === 'unreachable') return { state: 'unknown', reason: 'unreachable', head: null };
   return NOT_ASKED;
 }
 

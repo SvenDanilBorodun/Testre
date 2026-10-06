@@ -572,6 +572,86 @@ describe('upload dialogs (§E2, N7)', () => {
     await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: S, expected_hub_sha: null, private: false }]));
   });
 
+  // V2-2: what the robot really answers for a never-uploaded dataset is
+  // `hub: null` with the decision `local` — „not on Hugging Face", never „could
+  // not ask". The student must read the visibility before a public repo appears.
+  it.each([
+    [false, COPY.upload.visibilityPublic, 'public'],
+    [true, COPY.upload.visibilityPrivate, 'private'],
+  ])('the real reply for a never-uploaded dataset (hub null, decided local, private=%s): its visibility line, expected_hub_sha null', async (priv, line, vis) => {
+    const S = `${OWN}/omx_f_stapeln`;
+    world.local = [local(S)];
+    world.sync = { [S]: { state: 'local', head: null } };
+    world.hubstate = (hid) => ({
+      v: 1, id: hid, meta_digest: `d-${hid}`, sync: { state: 'local', reason: null }, hub: null,
+      local: { total_episodes: 6, duration_s: 120, modified_at: '2026-10-04T08:00:00Z' }, new_repo_private: priv,
+    });
+    await mount();
+    await waitFor(() => expect(card(S)).not.toBeNull());
+    fireEvent.click(within(card(S)).getByText(COPY.card.upload));
+    const dlg = await screen.findByRole('dialog');
+    await within(dlg).findByText(line);
+    expect(dlg.querySelector('[data-visibility]').getAttribute('data-visibility')).toBe(vis);
+    fireEvent.click(within(dlg).getByRole('button', { name: COPY.upload.newButton }));
+    await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: S, expected_hub_sha: null, private: priv }]));
+  });
+
+  it.each([
+    ['not asked (no token on the robot)', { state: 'unknown', reason: 'not_asked' }],
+    ['unreachable', { state: 'unknown', reason: 'unreachable' }],
+    ['unreachable with local changes (decided changed without the hub)', { state: 'changed', reason: null }],
+  ])('Hugging Face could not be asked — %s: no visibility claim, and the upload decides at upload time (no expected key)', async (_label, sync) => {
+    const S = `${OWN}/omx_f_offen`;
+    world.local = [local(S)];
+    world.sync = { [S]: { state: 'unknown', reason: 'unreachable', head: null } };
+    world.hubstate = (hid) => ({ v: 1, id: hid, sync, hub: null, local: { total_episodes: 6 }, new_repo_private: false });
+    await mount();
+    await waitFor(() => expect(card(S)).not.toBeNull());
+    fireEvent.click(within(card(S)).getByText(COPY.card.upload));
+    const dlg = await screen.findByRole('dialog');
+    const go = await within(dlg).findByRole('button', { name: COPY.upload.newButton });
+    expect(dlg.querySelector('[data-visibility]')).toBeNull();
+    expect(dlg.textContent).not.toContain(COPY.upload.visibilityPublic);
+    fireEvent.click(go);
+    await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: S, private: false }]));
+  });
+
+  it('an EMPTY repo that already exists keeps its own visibility (create_repo never changes it)', async () => {
+    const S = `${OWN}/omx_f_leer`;
+    world.local = [local(S)];
+    world.sync = { [S]: { state: 'local', head: null } };
+    world.hubstate = (hid) => ({
+      v: 1, id: hid, sync: { state: 'local', reason: null }, hub: { exists: false, private: true, head: 'h0' },
+      local: { total_episodes: 6 }, new_repo_private: false,
+    });
+    await mount();
+    await waitFor(() => expect(card(S)).not.toBeNull());
+    fireEvent.click(within(card(S)).getByText(COPY.card.upload));
+    const dlg = await screen.findByRole('dialog');
+    await within(dlg).findByText(COPY.upload.visibilityPrivate);
+    fireEvent.click(within(dlg).getByRole('button', { name: COPY.upload.newButton }));
+    await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: S, expected_hub_sha: null, private: false }]));
+  });
+
+  it('the hubstate read failed: no visibility claim, no expected key', async () => {
+    const S = `${OWN}/omx_f_fehler`;
+    world.local = [local(S)];
+    world.sync = { [S]: { state: 'local', head: null } };
+    world.hubstate = () => { throw new Error('boom'); };
+    const realFetch = global.fetch;
+    global.fetch = vi.fn((url) => (String(url).endsWith('/hubstate')
+      ? Promise.resolve({ ok: false, status: 503, headers: { get: () => null }, json: () => Promise.resolve({ error: 'overloaded' }) })
+      : realFetch(url)));
+    await mount();
+    await waitFor(() => expect(card(S)).not.toBeNull());
+    fireEvent.click(within(card(S)).getByText(COPY.card.upload));
+    const dlg = await screen.findByRole('dialog');
+    const go = await within(dlg).findByRole('button', { name: COPY.upload.newButton });
+    expect(dlg.querySelector('[data-visibility]')).toBeNull();
+    fireEvent.click(go);
+    await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: S, private: false }]));
+  });
+
   it('a recorded private choice says private', async () => {
     const S = `${OWN}/omx_f_p`;
     world.local = [local(S)];

@@ -17,6 +17,12 @@
 //     conflict „Beide behalten" comes first and is the default (§E10);
 //   - Hugging Face could not be asked: the upload decides at upload time (no
 //     `expected_hub_sha` key at all).
+//
+// „Not there yet" is a FACT of the reply, never the absence of one (V2-2): the
+// robot answers a never-uploaded dataset with `hub: null` and its decision
+// `local`; `hub: null` with any other decision (not asked, unreachable — and
+// then `changed` when the copy here has changes of its own) means it could not
+// ask. See `hubKnowledge`.
 
 import React from 'react';
 import Dialog from './Dialog';
@@ -29,6 +35,22 @@ import { fill, fmtDate, fmtTime, plural } from '../../../features/editDataset/mo
 
 const eps = (n) => plural(n ?? 0, COPY.count.episodeOne, COPY.count.episodeMany);
 
+/**
+ * What one `hubstate` reply (§J.4.4) proves about Hugging Face:
+ *   'present'  a dataset is there (`hub.exists`);
+ *   'absent'   nothing is there yet — an empty repo (`hub.exists` false), or
+ *              `hub: null` with the robot's decision `local` (the token's own
+ *              namespace listed and the repo not in it);
+ *   'unknown'  the reply did not arrive, or the robot could not ask (`hub: null`
+ *              with `unknown`, or `changed` decided without the hub).
+ */
+export function hubKnowledge(status, data) {
+  if (status !== 'ready' || !data || typeof data !== 'object') return 'unknown';
+  const hub = data.hub;
+  if (hub && typeof hub === 'object') return hub.exists ? 'present' : 'absent';
+  return data.sync && data.sync.state === 'local' ? 'absent' : 'unknown';
+}
+
 export default function UploadCompareDialog({
   card, fetchHubState, onUpload, onKeepBoth, onPull, onClose,
 }) {
@@ -38,6 +60,7 @@ export default function UploadCompareDialog({
   const local = (data && data.local) || {};
   const syncState = (data && data.sync && data.sync.state) || (card.sync && card.sync.state);
   const privateNew = !!(data && data.new_repo_private);
+  const knowledge = hubKnowledge(status, data);
   const run = (fn) => (e) => { releasePointerFocus(e); fn(); };
 
   if (status === 'loading') {
@@ -52,13 +75,16 @@ export default function UploadCompareDialog({
   }
 
   // Not on Hugging Face yet (or it could not be asked): one plain confirm.
-  if (!hub || !hub.exists) {
-    const unknown = status !== 'ready' || !hub;
+  if (knowledge !== 'present') {
+    const unknown = knowledge === 'unknown';
+    // An empty repo that already exists keeps its own visibility (create_repo
+    // never changes it, §E2 step 2); a new one gets the recorded choice (N7).
+    const willBePrivate = hub && typeof hub.private === 'boolean' ? hub.private : privateNew;
     return (
       <Dialog focusKey={status} title={fill(COPY.upload.newTitle, { name })} icon="cloudUpload" iconTone="accent" onClose={onClose}>
         {unknown ? null : (
-          <p data-visibility={privateNew ? 'private' : 'public'}>
-            {privateNew ? COPY.upload.visibilityPrivate : COPY.upload.visibilityPublic}
+          <p data-visibility={willBePrivate ? 'private' : 'public'}>
+            {willBePrivate ? COPY.upload.visibilityPrivate : COPY.upload.visibilityPublic}
           </p>
         )}
         <div className="dat-acts">

@@ -6,6 +6,60 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-06 — Daten 2.0 fix round 1: what the two verifiers found
+
+**Why.** Two fresh verifiers ran the integrated `feat/daten-2` (one against the real Hugging Face, one
+through the page in the spec's harness) and the conductor ran every suite; the owner approved fixing
+every finding (`docs/plans/2026-10-05-daten-2/fix-round-1.md`, gitignored), removing the Aufnahme
+page's own refusal of a Start whose dataset still uploads (V2-3) and running the LeRobot-only engine
+tests inside the built images (C-3). Two fixers worked in parallel: the robot side
+(`feat/daten-2-fix-robot`) and the page side (`feat/daten-2-fix-page`).
+
+**The robot side.** The sidecar listened with socketserver's backlog of 5 against 32 allowed
+connections: on Linux a burst of thumbnails overflowed the accept queue (SYN retransmits, 1–2 s for
+part of them) and the connection-cap test failed (V2-1); it now listens with twice the cap, at least
+64. A token change during a download was sometimes reported as an internal failure, because the
+worker's result line landed behind snapshot_download's unfinished progress bar on the merged pipe
+(V1-1); every protocol line is now one newline-first write and the reader finds the last marker
+anywhere in a line. A Python without PyAV aborted the whole server pytest collection (C-1); the
+dependent modules skip through `pytest.importorskip`. The LeRobot-only tests run in the smoke-test
+of both server images (C-3); fifteen guards no test caught are pinned with mutation proofs, and every
+anchored id rule became a full match (V1-2); waiting tests fail within a per-test limit instead of
+hanging (V1-3). The old page's `/huggingface/control` upload takes the Daten `upload` lease, and a
+broken never-uploaded dataset is refused before any hub repo is created (V1-6). One transient failure
+reading an online dataset's `info.json` no longer hides its card (V2-10). A raw „Beide behalten" or
+upload on a partner's dataset is refused `namespace` at once (V2-16). `HUB_CHANGED_SINCE_CHECK_DE`
+says what „Beide behalten" keeps (V1-5). The harness: the fake hub answers the sidecar's raw file GET
+(V2-17), `realhub_pc2.py` judges `.cache` relative to the dataset (V1-4).
+
+**The page side.** A never-uploaded dataset's upload dialog showed no visibility line, because the
+robot's `hub: null` + decided `local` was read as „could not ask" — a public repo appeared without the
+student being told (V2-2, N7). „Neue Aufnahme" → Start with the same task stayed disabled for the
+whole previous upload (54 s measured), so R-8's wait could not be reached from the tab that had just
+recorded (V2-3); measured after the fix through the page: Start enabled at once, „Wartet, bis das
+Hochladen fertig ist …" from 1 s, „Dauert länger als gewohnt …" from 9 s, recording after the first
+upload, two single commits. `daten.css`'s page reset (0,1,1) beat every button class: dark ink on teal
+(3.8:1) and danger buttons without red (V2-4; now `:where`, measured white 600 on teal, 4.85:1, 13 px and 12.5 px small).
+Toasts after a job read the library ref one render behind the re-read they awaited: deleting from an
+uploaded dataset said only „2 Episoden gelöscht." (V2-5), and the „Beide behalten" toast named the
+count from before the job. The page kept the last busy kind per id (C-2). A failed online list showed
+„… wurde noch nicht geprüft" (V2-9). A dataset without a display name proposed „omx_f_deckel gesamt" →
+`omx_f_omx_f_deckel-gesamt` (V2-11, merge and split). The crashed card carried „Hier geändert – nicht
+hochgeladen" (V2-12). The conflict card's ⋮ wrapped onto its own row (V2-13). After a whole delete
+the „Nur online" card read „–" (the robot's re-read of one id carries no numbers), the download card
+could say „0,0 MB von 4,5 MB 2 %" and fell from 100 % to 0 % when the tmp was swapped in, and the
+header said „0 Datensätze" while loading (V2-14). The banners and the newerWarn dialog had no counts,
+and the conflict's „Online-Version laden" dialog was titled „Neuere Version laden?" (V2-15). The
+„Beide behalten" tip promised every episode (V1-5). The 30-minute link tokens reached nginx's access
+log (V1-6). Each with its test (vitest, mutation-checked) and the touched screens through the harness
+(Playwright: computed styles, the ⋮ position on every card variant, the dialogs, the banners, the
+toasts, the delete and download sequences sampled every 30 ms).
+
+**Numbers on the page branch.** React 238 files / 4222 passed + 2 expected fail, twice (integrated
+branch 236 / 4165); eslint clean; the production entry chunk +3.4 KB raw (+1.2 KB gzip), no
+CodeMirror or three.js runtime token; `nginx -t` clean on both configs; `robotis_ai_setup/tests`
+2218 OK (python3, unchanged). The Aufnahme form still starts private (N7, the owner's own change).
+
 ### Unreleased, 2026-10-05 / 06 — Daten 2.0: the Daten tab rebuilt as a library and a player, on a lossless edit engine and a guarded hub sync
 
 **Why.** The old Daten tab took typed folder paths, re-encoded every edit through a private LeRobot

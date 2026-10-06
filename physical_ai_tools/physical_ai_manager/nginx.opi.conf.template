@@ -435,6 +435,24 @@ server {
         chunked_transfer_encoding off;
     }
 
+    # Daten 2.0: read-only dataset media + data from the physical_ai_server
+    # sidecar (daten/http_server.py, port 8095). Token-gated by the sidecar, not
+    # Origin-gated: a <video>/<img> GET carries no Origin. GET/HEAD only.
+    location /daten-api/ {
+        limit_except GET HEAD { deny all; }
+        set $edubotics_daten physical_ai_server;
+        proxy_pass http://$edubotics_daten:8095;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+    }
+
     # Hashed JS/CSS bundles from CRA are content-addressed and safe to cache.
     location /static/ {
         expires 1y;

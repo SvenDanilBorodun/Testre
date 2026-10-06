@@ -688,6 +688,9 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     ("DELETE", "/me/hf-token", 10, 60.0),
     ("POST", "/me/hf-token/reveal", 20, 60.0),
     ("POST", "/me/hf-token/verify", 6, 60.0),
+    # Daten 2.0 (spec §E6): the SPA asks once per session; per-user keyed
+    # (_PER_USER_RATE_LIMIT_PREFIXES) because a classroom shares one NAT IP.
+    ("GET", "/me/group-members", 30, 60.0),
 ]
 
 # Sort rules longest-prefix-first so a more-specific rule (e.g.
@@ -775,7 +778,11 @@ def _user_key_from_jwt(request: Request) -> str | None:
 #
 # /me/hf-token (042) is per-user for the same NAT reason: every route under it
 # requires Depends(get_current_profile), so a JWT is always present.
-_PER_USER_RATE_LIMIT_PREFIXES = ("/jetson/", "/trainings/", "/workflows", "/me/hf-token")
+#
+# /me/group-members (Daten 2.0) likewise: Depends(get_current_profile).
+_PER_USER_RATE_LIMIT_PREFIXES = (
+    "/jetson/", "/trainings/", "/workflows", "/me/hf-token", "/me/group-members",
+)
 
 
 # Audit A2: hard upper bound on workflow-write request bodies.

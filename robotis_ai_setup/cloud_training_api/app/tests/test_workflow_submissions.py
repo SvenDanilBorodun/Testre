@@ -181,6 +181,7 @@ class TestRateLimitRulesUnchanged(unittest.TestCase):
         ("DELETE", "/me/hf-token", 10, 60.0),
         ("POST", "/me/hf-token/reveal", 20, 60.0),
         ("POST", "/me/hf-token/verify", 6, 60.0),
+        ("GET", "/me/group-members", 30, 60.0),
     ]
 
     def _rules(self) -> list:

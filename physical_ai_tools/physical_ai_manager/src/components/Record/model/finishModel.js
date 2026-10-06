@@ -51,8 +51,13 @@ export function datasetIdOf(session) {
 
 const step = (key, label, state = '', detail = '', pct = '') => ({ key, label, state, detail, pct });
 
-// A failure sentence that already says where to upload later needs no second one.
-const SAYS_UPLOAD_LATER = /im Tab Daten hoch(laden|\.)/;
+// A failure sentence that already sends the student to the Daten tab needs no
+// second „Du kannst den Datensatz später im Tab Daten hochladen." (G-9, Daten
+// 2.0): beside the „… später im Tab Daten hochladen" sentences this covers
+// „Öffne den Tab Daten …" (a hub that moved, a hub copy that differs — where
+// „lade später hoch" would nudge an overwrite) and „Lösche ihn im Tab Daten …"
+// (a crashed or broken dataset).
+export const POINTS_TO_DATEN_TAB = /\b(im|den) Tab Daten\b/;
 
 /**
  * What an error stop's sentence says about the dataset (D5/F3, round 6):
@@ -154,7 +159,7 @@ export function finishSteps(session, { nowWallMs = Date.now(), heartbeat = 'conn
         title: F.titleFailed,
         steps: [step('finalize', F.stepFinalize, 'done'),
           step('upload', upLabel, 'failed',
-            [f.message, SAYS_UPLOAD_LATER.test(f.message || '') ? '' : F.later].filter(Boolean).join(' ')),
+            [f.message, POINTS_TO_DATEN_TAB.test(f.message || '') ? '' : F.later].filter(Boolean).join(' ')),
           // round 7: it will not happen — skipped, never „still to come"
           step('register', F.stepRegister, 'skipped')],
         savedAs: localSaved,

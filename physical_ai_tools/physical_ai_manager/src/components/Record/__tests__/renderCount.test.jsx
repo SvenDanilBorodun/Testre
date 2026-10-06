@@ -19,9 +19,12 @@ import { act, render } from '@testing-library/react';
 import { Provider, useSelector } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 
-import tasksReducer, { setHeartbeatStatus, setTaskInfo, setTaskStatus } from '../../../features/tasks/taskSlice';
+import tasksReducer, {
+  recordIntent, setHeartbeatStatus, setTaskInfo, setTaskStatus,
+} from '../../../features/tasks/taskSlice';
 import uiReducer, { moveToPage } from '../../../features/ui/uiSlice';
-import rosReducer from '../../../features/ros/rosSlice';
+import rosReducer, { setRosbridgeUrl } from '../../../features/ros/rosSlice';
+import { resetDatenStateForTests } from '../../../features/editDataset/hooks/useDatenState';
 import trainingReducer from '../../../features/training/trainingSlice';
 import jetsonReducer from '../../../store/jetsonSlice';
 import PageType from '../../../constants/pageType';
@@ -47,6 +50,25 @@ vi.mock('../../../hooks/useSignalStatus', () => ({ __esModule: true, default: ()
 vi.mock('../../../hooks/useRsBridgeStatus', () => ({ __esModule: true, default: () => ({ available: false, probed: true }) }));
 vi.mock('../../../hooks/useRobotActivation', () => ({ __esModule: true, default: () => ({ status: null }) }));
 vi.mock('../../HeartbeatStatus', () => ({ __esModule: true, default: () => null }));
+// /edubotics/daten_state (Daten 2.0, R-8): the topic the STARTING wait reads.
+const mockTopics = [];
+vi.mock('roslib', () => ({
+  __esModule: true,
+  default: {
+    Topic: function TopicMock(opts) {
+      this.name = opts.name;
+      this.cb = null;
+      this.unsubscribed = false;
+      this.subscribe = (cb) => { this.cb = cb; };
+      this.unsubscribe = () => { this.unsubscribed = true; };
+      mockTopics.push(this);
+    },
+  },
+}));
+vi.mock('../../../utils/rosConnectionManager', () => ({
+  __esModule: true,
+  default: { getConnection: vi.fn(() => Promise.resolve({ isConnected: true })) },
+}));
 vi.mock('react-hot-toast', () => {
   const fn = vi.fn();
   fn.dismiss = vi.fn();
@@ -112,5 +134,47 @@ describe('the Aufnahme page does not re-render per tick (V2-2)', () => {
     expect(app).not.toMatch(/useSelector\(\s*\(state\)\s*=>\s*state\.tasks\.taskInfo\s*\)/);
     const page = fs.readFileSync(path.resolve(__dirname, '../../../pages/RecordPage.js'), 'utf8');
     expect(page).toMatch(/export default React\.memo\(RecordPage\)/);
+  });
+
+  it('Daten 2.0 (R-8, F-5): 30 daten_state messages while STARTING with an unchanged answer — no page render', async () => {
+    resetDatenStateForTests();
+    mockTopics.length = 0;
+    const store = configureStore({
+      reducer: { tasks: tasksReducer, ui: uiReducer, ros: rosReducer, training: trainingReducer, jetson: jetsonReducer },
+    });
+    store.dispatch(moveToPage(PageType.RECORD));
+    store.dispatch(setTaskInfo({ taskName: 'Würfel', taskInstruction: ['Greife.'], userId: 'schule-A' }));
+    store.dispatch(setHeartbeatStatus('connected'));
+    store.dispatch(setRosbridgeUrl('ws://robot/rosbridge'));
+    store.dispatch(setTaskStatus({
+      robotType: 'omx_f', robotProfile: 'omx_full', capabilities: CAPS, topicReceived: true,
+      running: false, taskType: '', phase: TaskPhase.READY, receivedAt: performance.now(), receivedWallMs: Date.now(),
+    }));
+    render(
+      <Provider store={store}>
+        <GreedyShell />
+      </Provider>
+    );
+    act(() => {
+      store.dispatch(recordIntent({
+        kind: 'start',
+        at: Date.now(),
+        snapshot: {
+          taskName: 'Würfel', userId: 'schule-A', robotType: 'omx_f', pushToHub: true, privateMode: true,
+          numEpisodes: 3, episodeTime: 20, warmupTime: 5, resetTime: 5, fps: 30,
+        },
+      }));
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const topic = mockTopics.find((t) => t.name === '/edubotics/daten_state' && !t.unsubscribed);
+    expect(topic).toBeTruthy();
+    const msg = () => ({ data: JSON.stringify({ v: 1, seq: 1, busy: [{ id: 'schule-A/omx_f_Wuerfel', kind: 'upload' }], jobs: [], transfer: null }) });
+    act(() => { topic.cb(msg()); }); // the answer changes once: waiting
+    const drawsBefore = mockHeaderDraws;
+    for (let i = 0; i < 30; i += 1) {
+      act(() => { topic.cb(msg()); });
+    }
+    expect(mockHeaderDraws - drawsBefore).toBe(0);
+    resetDatenStateForTests();
   });
 });

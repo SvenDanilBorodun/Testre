@@ -6,6 +6,70 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-05 / 06 — Daten 2.0: the Daten tab rebuilt as a library and a player (page and cloud half)
+
+**Why.** The old Daten tab took typed folder paths, re-encoded every edit through a private LeRobot
+helper (KNOWN-ISSUES Q1), mixed models into a dataset tool and could not show an episode. The owner
+asked for Cyclo's review and edit options in our design language, approved a clickable mockup first
+(D7) and answered 14 scope questions (D1–D14) plus four review rounds (`docs/plans/2026-10-05-daten-2/decisions.md`,
+gitignored). The ones that shape the page: ONE list of the student's datasets on the robot AND on
+Hugging Face, pulled on demand, with six sync badges (D8, N1); the student's own account plus the
+CURRENT workgroup's members, as UI scoping only (D2); datasets only — models stay in Inferenz (D5); a
+frame-accurate player with all cameras on one clock, joint charts (follower state vs leader action)
+and a 3D replay with a translucent action ghost; hints per episode that never block; delete by
+marking or by typed numbers (D9), split (D11), merge with a compatibility check, „Ganzen Datensatz
+löschen" (D1); „Von Hugging Face holen" by repo id (D12); „Beide behalten" as the default of every
+conflict; and D14, a stale local copy at recording start that silently rolled back a hub dataset
+recorded on another PC, fixed this round („load newer first").
+
+**What was proven before code, by running** (spec §0, P1–P35; the prototypes live in the spec's
+appendix). Stream copy at episode boundaries is lossless through LeRobot 0.5.1's public API (every
+frame of every kept episode decodes at `from_timestamp + i/fps` within 1e-4 s, pixels equal) and 77×
+faster than today's re-encode (0.40 s vs 30.72 s for 20 × 20 s, two cameras; the re-encode was 0/34
+bit-exact, PSNR 45.4 dB). Seeking to `i/fps` landed one frame early 52/300 times in Chrome; to
+`(i + 0.5)/fps` 0/300 on both cameras, also through the real manager nginx (P6, P9). Two cameras
+paired by vsync stay at 0 frames apart at every speed, and rate nudging made it worse, hence hard
+resync only (P7); after `ended` the shown frame can be 1–2 short, so the player seeks to the last
+frame itself (P8). rosbridge answers an unknown service in 27 ms, which is how an older image is
+named (P10). The hints flagged 32 of 489 real OMX episodes (P12). The sync model and the guarded
+single-commit upload passed 28/28 scenarios against a fake hub running huggingface_hub 1.23's own
+`create_commit` (P16), the two-PC overlap race lands exactly one commit in both orders (P17), and
+„Beide behalten" is a three-way merge that brings back no deleted episode (P18). What was NOT run: a
+write to the real Hugging Face (§K.11 RH0 is the verifiers' first step), real WebView2/Firefox/Safari
+playback, real camera bitrates, an Orange Pi's CPU and storage (rig gates D-R1…D-R5).
+
+**The page half (`feat/daten-2-page`).** `pages/EditDatasetPage.js` is a thin shell around
+`components/Daten/` (library, card, merge panel, player, dialogs); the logic is eight hooks under
+`features/editDataset/hooks/`, the decisions pure models under `features/editDataset/model/`, every
+German string one module (`datenCopy.js`, the approved mockup's copy with the owner's N4 corrections),
+and the wire constants a verbatim copy of the spec's shared table (`datenContract.js`). The old
+section's components and `constants/commands.js` are deleted. The player's clock is the video
+(`requestVideoFrameCallback`, a rAF + virtual-clock fallback), published through refs: measured with
+the `REACT_APP_DATEN_RENDER_PROBE` build key, 100 driver frames re-render none of `PlayerView`,
+`Stage`, `Transport`, `JointCharts`, `EpisodeList` (mutation-checked: a per-frame `setState` makes the
+test fail). `UrdfTwin` gained `poseSource` (a recorded pose plus its own ghost clone). The Aufnahme page
+names an upload of the same dataset while a Start waits (one boolean, subscribed only in STARTING:
+30 status messages → 0 renders), replaces a stored organisation Benutzer-ID by the account, and
+stops adding „später hochladen" after a sentence that already points at the Daten tab.
+`useRosTopicSubscription` no longer toasts a Daten-started transfer on the Daten page, never registers a
+model upload or a private Daten upload, and skips the registration-failed toast while the finish
+card shows that repo (closing the round-7 item). Both manager nginx configs gained
+`location /daten-api/` (GET/HEAD, token-gated by the sidecar, `nginx -t` clean on both); the cloud
+gained `GET /me/group-members` (the caller's workgroup only, three keys per member, 30/min per user).
+The tab is `hardwareOnly`.
+
+**Numbers at the page branch's head.** React 236 files / 4165 passed + 2 expected fail (main: 225 /
+3888 + 2; 11 new test files); eslint clean over `.js,.jsx`; the production build's entry chunk holds
+no CodeMirror (`cm-content`, `cm-scroller`) and no three.js (`WebGLRenderer`, `URDFLoader`) runtime
+token; cloud API 498 tests OK (main 487; `test_me_group_members.py` +11). One full-suite run saw
+`StudentProgramsDrawer.test.jsx` time out on a lazy import under load and pass alone and on the
+re-run (a file this round does not touch).
+
+**Not done in this round, deliberately or by refusal.** Owner decision N7 (the Aufnahme form starts
+PUBLIC) is not in the code: the implementation session's permission policy refused a change that
+makes recordings public by default, so it is left to the owner (KNOWN-ISSUES, Daten 2.0 entry). No
+version bump.
+
 ### Unreleased, 2026-10-04 (later) — students write no table directly (046), and the verification's small fixes
 
 **Why.** Verifying the token review, the owner confirmed on the live project that role `authenticated` still held

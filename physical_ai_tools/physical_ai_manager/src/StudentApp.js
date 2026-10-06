@@ -433,7 +433,9 @@ function StudentApp() {
     // inference start is refused downstream (no-GPU gate), not by this nav filter.
     // The capability filter must never gate it.
     { key: PageType.INFERENCE, label: 'Inferenz', icon: 'cpu', onClick: handleInferencePageNavigation },
-    { key: PageType.EDIT_DATASET, label: 'Daten', icon: 'widgets', onClick: handleEditDatasetPageNavigation, sep: true, jetsonIncompatible: true, capabilityKey: 'editable' },
+    // Daten 2.0 (spec §G1): the robot's datasets — nothing to show in cloud
+    // mode (`hardwareOnly`), the mockup's database icon.
+    { key: PageType.EDIT_DATASET, label: 'Daten', icon: 'database', onClick: handleEditDatasetPageNavigation, sep: true, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'editable' },
     { key: PageType.WORKSHOP, label: 'Roboter Studio', icon: 'construction', onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'roboter_studio' },
     // Pi-only: the in-browser setup wizard (arms/cameras/token, Umgebung
     // starten, Update, Reset, Protokoll, Netzwerk-Check). Not hardwareOnly

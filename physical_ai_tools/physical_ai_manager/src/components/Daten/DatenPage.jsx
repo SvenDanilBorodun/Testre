@@ -349,6 +349,9 @@ export default function DatenPage() {
 
   // ---- the open dataset left the list (deleted elsewhere): back to the library
   const openCard = openId ? cards.find((c) => c.id === openId) || null : null;
+  useEffect(() => {
+    if (view === 'player' && session.lib.loaded && openId && !(openCard && openCard.local)) dispatch(showLibrary());
+  }, [view, openId, openCard, session.lib.loaded, dispatch]);
 
   // ---- the hub copy's numbers for the open dataset (V2-15) -------------------
   // The newer/changed banners and the newerWarn dialog name the hub copy's
@@ -375,9 +378,6 @@ export default function DatenPage() {
     return () => { cancelled = true; };
   }, [factsKey, openId, fetchHubState]);
   const openHubFacts = useStableValue(hubFacts.key && hubFacts.key === factsKey ? hubFacts.hub : null);
-  useEffect(() => {
-    if (view === 'player' && session.lib.loaded && openId && !(openCard && openCard.local)) dispatch(showLibrary());
-  }, [view, openId, openCard, session.lib.loaded, dispatch]);
 
   // ---- actions -----------------------------------------------------------------
   const guardEdit = useCallback((card, then) => {

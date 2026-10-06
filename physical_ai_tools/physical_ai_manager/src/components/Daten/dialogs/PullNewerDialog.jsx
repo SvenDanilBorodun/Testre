@@ -23,9 +23,10 @@ import useHubState from './useHubState';
 import Icon from '../../icons/Icon';
 import { releasePointerFocus } from '../../Record/ActionBar';
 import COPY from '../../../features/editDataset/datenCopy';
-import { fmtDate, plural } from '../../../features/editDataset/model/format';
+import { fmtDate, knownNumber, plural } from '../../../features/editDataset/model/format';
 
-const eps = (n) => plural(n ?? 0, COPY.count.episodeOne, COPY.count.episodeMany);
+// An unknown count is „–", never 0 (T2-5).
+const eps = (n) => (knownNumber(n) === null ? '–' : plural(n, COPY.count.episodeOne, COPY.count.episodeMany));
 
 export default function PullNewerDialog({
   card, crashed = false, online = false, partnerNote = null, fetchHubState, onPull, onKeepBoth, onUpload, onClose,

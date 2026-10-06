@@ -31,9 +31,13 @@ import useHubState from './useHubState';
 import Icon from '../../icons/Icon';
 import { releasePointerFocus } from '../../Record/ActionBar';
 import COPY from '../../../features/editDataset/datenCopy';
-import { fill, fmtDate, fmtTime, plural } from '../../../features/editDataset/model/format';
+import {
+  fill, fmtDate, fmtKnown, fmtTime, knownNumber, plural,
+} from '../../../features/editDataset/model/format';
 
-const eps = (n) => plural(n ?? 0, COPY.count.episodeOne, COPY.count.episodeMany);
+// An unknown count or duration is „–", never 0 (T2-5).
+const eps = (n) => (knownNumber(n) === null ? '–' : plural(n, COPY.count.episodeOne, COPY.count.episodeMany));
+const dur = (s) => fmtKnown(s, (v) => fmtTime(v, false));
 
 /**
  * What one `hubstate` reply (§J.4.4) proves about Hugging Face:
@@ -112,12 +116,12 @@ export default function UploadCompareDialog({
         <div>
           <small><Icon name="cloud" size={14} />{COPY.upload.onHub}</small>
           <b>{eps(hub.total_episodes)}</b>
-          <span>{fill(COPY.upload.onHubMeta, { dur: fmtTime(hub.duration_s || 0, false), date: fmtDate(hub.last_modified) })}</span>
+          <span>{fill(COPY.upload.onHubMeta, { dur: dur(hub.duration_s), date: fmtDate(hub.last_modified) })}</span>
         </div>
         <div className="dat-now">
           <small><Icon name="hardDrive" size={14} />{COPY.upload.here}</small>
           <b>{eps(local.total_episodes)}</b>
-          <span>{fill(COPY.upload.hereMeta, { dur: fmtTime(local.duration_s || 0, false), date: fmtDate(local.modified_at) })}</span>
+          <span>{fill(COPY.upload.hereMeta, { dur: dur(local.duration_s), date: fmtDate(local.modified_at) })}</span>
         </div>
       </div>
       {conflict ? (

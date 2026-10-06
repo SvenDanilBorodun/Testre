@@ -19,7 +19,9 @@
 //    from the `hub=0` reply: `changed` for a synced record, else unknown) and
 //    one that is gone locally (its sync falls back to the hub entry's
 //    `online`, or is dropped). So the 5 s hint poll never turns a badge into
-//    „Online-Stand unbekannt" and never drops a „Nur online" card.
+//    „Online-Stand unbekannt", never drops a „Nur online" card and never turns
+//    an online card the hub could not read just now (`unknown/unreachable`)
+//    into „Nur online" (T2-5).
 //
 // 3. A hub part read with ANOTHER token than the one this student stores
 //    (`hub.token_fp` ≠ the account's fingerprint) is not this student's
@@ -178,6 +180,10 @@ export function applyLibraryReply(prev, reply, req, { accountFp = null, nowMs = 
         take(id, replySync[id] || NOT_ASKED);
         return;
       }
+      // Never local: an online-only card keeps the hub=1 verdict — `unknown`
+      // when its numbers could not be read just now (V2-10, T2-5), never a
+      // confident „Nur online" from a reply that did not ask the hub.
+      if (!before && prev.sync[id]) return;
       const hubEntry = next.hub && next.hub.entries ? next.hub.entries[id] : null;
       take(id, hubEntry ? { state: 'online', reason: null, head: hubEntry.head || null } : null);
     });

@@ -23,7 +23,7 @@ import { releasePointerFocus } from '../../Record/ActionBar';
 import COPY from '../../../features/editDataset/datenCopy';
 import { REPO_ID_RE } from '../../../features/editDataset/datenContract';
 import {
-  fill, fmtBytes, fmtDay, fmtFps, fmtGB, fmtTime,
+  fill, fmtBytes, fmtDay, fmtFps, fmtGB, fmtKnown, fmtTime, knownNumber,
 } from '../../../features/editDataset/model/format';
 import { camerasPhrase, nameFromRepo, robotName } from '../../../features/editDataset/model/labels';
 import { safeTaskName } from '../../../utils/datasetName';
@@ -106,7 +106,7 @@ export default function FetchDialog({
     if (!name || !target) preview = <span style={{ color: 'var(--danger-ink)' }}>{COPY.fetch.noName}</span>;
     else if (clash) preview = <span style={{ color: 'var(--danger-ink)' }}>{COPY.fetch.nameExists}</span>;
     else {
-      const size = fmtBytes(found.size_bytes || 0);
+      const size = fmtKnown(found.size_bytes, fmtBytes);
       preview = diskFree !== null && diskFree !== undefined
         ? fill(COPY.fetch.savedAs, { id: target, size, free: fmtGB(diskFree) })
         : fill(COPY.fetch.savedAsNoDisk, { id: target, size });
@@ -149,9 +149,9 @@ export default function FetchDialog({
               <Fill template={COPY.fetch.found} values={{ repo: <span className="dat-mono">{state.repo}</span> }} />
             </h3>
             <dl className="dat-stats">
-              <div><dt>{COPY.card.episodes}</dt><dd>{found.total_episodes ?? '–'}</dd></div>
-              <div><dt>{COPY.card.duration}</dt><dd>{fmtTime(found.duration_s || 0, false)}</dd></div>
-              <div><dt>{COPY.card.size}</dt><dd>{fmtBytes(found.size_bytes || 0)}</dd></div>
+              <div><dt>{COPY.card.episodes}</dt><dd>{fmtKnown(found.total_episodes)}</dd></div>
+              <div><dt>{COPY.card.duration}</dt><dd>{fmtKnown(found.duration_s, (s) => fmtTime(s, false))}</dd></div>
+              <div><dt>{COPY.card.size}</dt><dd>{fmtKnown(found.size_bytes, fmtBytes)}</dd></div>
               <div><dt>{COPY.card.fps}</dt><dd>{fmtFps(found.fps)}</dd></div>
             </dl>
             <div className="dat-small" style={{ marginTop: 6 }}>
@@ -180,7 +180,16 @@ export default function FetchDialog({
           disabled={!canGo}
           onClick={(e) => {
             releasePointerFocus(e);
-            onFetch({ repo: state.repo, revision: found.sha, target, displayName: name });
+            // The numbers found here stand on the new card while it downloads (T2-4).
+            const numbers = {
+              total_episodes: knownNumber(found.total_episodes),
+              duration_s: knownNumber(found.duration_s),
+              size_bytes: knownNumber(found.size_bytes),
+              fps: knownNumber(found.fps),
+            };
+            onFetch({
+              repo: state.repo, revision: found.sha, target, displayName: name, numbers,
+            });
           }}
         >
           <Icon name="cloudDownload" size={16} />

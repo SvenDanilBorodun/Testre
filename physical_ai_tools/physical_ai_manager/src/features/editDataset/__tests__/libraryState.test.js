@@ -77,6 +77,29 @@ describe('applyLibraryReply — H-2: a hub=0 reply never replaces the hub view',
     expect(next.sync['lena/omx_f_a'].state).toBe('changed');
   });
 
+  // T2-5: an online card the hub could not read just now (V2-10) keeps its
+  // `unknown/unreachable` verdict through the 5 s hint poll — never „Nur online".
+  it('… and an online card\'s hub verdict too, unknown/unreachable included (T2-5)', () => {
+    const withUnreadable = applyLibraryReply(first, hub1(
+      [local('lena/omx_f_a'), local('lena/omx_f_b')],
+      [{ id: 'lena/omx_f_a', head: 'h1', private: false }, {
+        id: 'lena/omx_f_becher', head: 'h9', private: true, total_episodes: null, duration_s: null,
+      }],
+      {
+        'lena/omx_f_a': { state: 'current', reason: null, head: 'h1' },
+        'lena/omx_f_b': { state: 'local', reason: null, head: null },
+        'lena/omx_f_becher': { state: 'unknown', reason: 'unreachable', head: 'h9' },
+      },
+    ), { seq: 2, hub: true, ids: null }, { accountFp: FP, nowMs: 2000 });
+    const polled = applyLibraryReply(withUnreadable, hub0(
+      [local('lena/omx_f_a'), local('lena/omx_f_b', { hint_episodes: 1 })],
+      {},
+    ), { seq: 3, hub: false, ids: null }, { accountFp: FP });
+    expect(polled.sync['lena/omx_f_becher']).toEqual({ state: 'unknown', reason: 'unreachable', head: 'h9' });
+    const becher = libraryCards(polled, ['lena']).find((c) => c.id === 'lena/omx_f_becher');
+    expect(becher.sync.state).toBe('unknown');
+  });
+
   it('… and one gone locally falls back to „Nur online" when the hub lists it, else is dropped', () => {
     const next = applyLibraryReply(first, hub0([], {}), { seq: 2, hub: false, ids: null }, { accountFp: FP });
     expect(next.local['lena/omx_f_a']).toBeUndefined();

@@ -29,12 +29,12 @@
 
 import COPY from '../datenCopy';
 import {
-  fill, fmtBytes, fmtBytesProgress, fmtFps, fmtTime,
+  fill, fmtBytes, fmtBytesProgress, fmtFps, fmtTime, knownNumber,
 } from './format';
 import { cardBusyKind, cardPhase, hubEntryLacksNumbers } from './libraryState';
 import { hubDatasetUrl } from './hubLinks';
 
-const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+const num = knownNumber;
 
 /** The training button's reason to be off, or '' (spec §E8). */
 export function trainingBlock(card) {
@@ -57,8 +57,11 @@ export function hubLink(card) {
   };
 }
 
+// The numbers a card shows: the local copy's, else the hub entry's, else —
+// for a copy still being fetched from Hugging Face — the numbers the fetch
+// dialog found (`card.fetchNumbers`, T2-4). Unknown is „–", never 0 (T2-5).
 function statsOf(card) {
-  const src = card.local || card.hub || {};
+  const src = card.local || card.hub || card.fetchNumbers || {};
   const eps = num(src.total_episodes);
   const dur = num(src.duration_s);
   const size = num(src.size_bytes);

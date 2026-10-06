@@ -49,6 +49,27 @@ export function plural(n, one, many) {
   return fill(Number(n) === 1 ? one : many, { n });
 }
 
+/**
+ * `v` as a finite number, or null when it is unknown: null, undefined, an
+ * empty or non-numeric string, a boolean, NaN or ±Infinity. Unknown is never 0
+ * (T2-5: `Number(null)` is 0, which drew „Episoden 0 · Dauer 0:00" for a card
+ * whose numbers Hugging Face had not answered).
+ */
+export function knownNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** `fmt(v)` for a known number (knownNumber), „–" when it is unknown. */
+export function fmtKnown(v, fmt = String) {
+  const n = knownNumber(v);
+  return n === null ? '–' : fmt(n);
+}
+
 /** `x` with `digits` decimals and a decimal comma. */
 export function fmtNum(x, digits = 1) {
   const v = Number(x);

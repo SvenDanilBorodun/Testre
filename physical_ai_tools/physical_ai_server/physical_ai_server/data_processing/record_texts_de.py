@@ -283,6 +283,85 @@ HUB_TAG_FAILED_DE = ('Der Versions-Tag des Datensatzes konnte nicht aktualisiert
                      'aktuellen Tag trainiert die Cloud auf einem alten Stand — bitte den Upload '
                      'erneut versuchen.')
 
+# ── Daten 2.0: the guarded upload, the sync at Start, the auto-upload (§J.6 [R]) ─
+#
+# Every sentence below that sends the student somewhere names the Daten tab, so
+# the Aufnahme finish card adds no second „später hochladen" line
+# (components/Record/model/finishModel.js::POINTS_TO_DATEN_TAB).
+
+# §E2 step 3/6: the hub moved between the decision and the commit (Hugging Face
+# refused the commit's stale parent, or our read-back found other data).
+HUB_CHANGED_SINCE_CHECK_DE = ('Auf Hugging Face hat sich der Datensatz inzwischen geändert. Es wurde '
+                              'nichts hochgeladen. Öffne den Tab Daten und entscheide, welche Version '
+                              'du behalten willst – „Beide behalten“ verliert nichts.')
+# §E2 step 0 (audit M3): a crash marker — a running session, or one never finalized.
+UPLOAD_IN_SESSION_DE = ('Nicht hochgeladen: Die Aufnahme dieses Datensatzes wurde unterbrochen und '
+                        'nicht sauber beendet; hochgeladen würde er die Version auf Hugging Face '
+                        'beschädigen. Lösche ihn im Tab Daten oder lade dort die Online-Version.')
+# §E2 steps 0/5b (audit M3/m2): the local copy does not load, or a synced file changed.
+UPLOAD_BROKEN_DE = ('Nicht hochgeladen: Der Datensatz auf dem Roboter ist unvollständig oder '
+                    'beschädigt. Die Version auf Hugging Face bleibt, wie sie ist. Lösche ihn im Tab '
+                    'Daten oder lade dort die Online-Version.')
+# §E2 step 6 (G-13): the commit landed but could not be read back (status Success).
+UPLOAD_UNCONFIRMED_DE = ('Hochgeladen, aber Hugging Face hat es noch nicht bestätigt. Im Tab Daten '
+                         'siehst du, ob noch etwas zu tun ist.')
+# §E2 steps 3/4: the hub holds another version (decided at upload time, or the exact check).
+UPLOAD_HUB_DIFFERS_DE = ('Auf Hugging Face gibt es diesen Datensatz schon in einer anderen Version. '
+                         'Es wurde nichts überschrieben. Öffne den Tab Daten, vergleiche beide '
+                         'Versionen und entscheide dort.')
+
+# §C4 (D14): the recording Start against the hub.
+SYNC_CONFLICT_DE = ('Dieser Datensatz wurde hier geändert, und auf Hugging Face gibt es inzwischen '
+                    'eine neuere Version. Entscheide im Tab Daten, welche du behalten willst, und '
+                    'starte dann die Aufnahme neu.')
+SYNC_UNKNOWN_DE = ('Der Datensatz hier und der auf Hugging Face sind verschieden, und EduBotics kann '
+                   'nicht erkennen, welcher neuer ist. Entscheide im Tab Daten, welche Version du '
+                   'behalten willst, und starte dann die Aufnahme neu.')
+SYNC_HUB_UNUSABLE_DE = ('Die Version auf Hugging Face kann EduBotics nicht öffnen (älteres Format, '
+                        'anderer Roboter oder unbekanntes Format). Die Aufnahme wurde nicht gestartet. '
+                        'Wähle einen anderen Aufgabennamen.')
+SYNC_DOWNLOAD_FAILED_DE = ('Die neuere Version von Hugging Face konnte nicht geladen werden. Die '
+                           'Aufnahme wurde nicht gestartet, damit nichts überschrieben wird. Versuche '
+                           'es gleich noch einmal oder schalte unter „Erweitert“ das Hochladen aus.')
+SYNC_DISK_DE = ('Die neuere Version von Hugging Face braucht {need}, frei sind {free}, und für '
+                'Aufnahmen müssen 3 GB frei bleiben. Die Aufnahme wurde nicht gestartet. Lösche zuerst '
+                'alte Datensätze im Tab Daten.')
+OFFLINE_START_DE = ('Hugging Face war beim Start nicht erreichbar. Die Aufnahme läuft trotzdem; beim '
+                    'Hochladen am Ende prüft EduBotics, dass auf Hugging Face nichts überschrieben '
+                    'wird.')
+DATASET_BUSY_START_DE = ('Dieser Datensatz wird gerade im Tab Daten bearbeitet oder geladen. Starte '
+                         'die Aufnahme, wenn das fertig ist.')
+
+# The end-of-session auto-upload could not be handed to the HF worker (the node's
+# _enqueue_dataset_upload); the exception text goes to the log only.
+AUTO_UPLOAD_NO_WORKER_DE = ('Automatisches Hochladen fehlgeschlagen: Der Hugging-Face-Dienst des '
+                            'Roboters konnte nicht starten. Lade den Datensatz später im Tab Daten '
+                            'hoch.')
+AUTO_UPLOAD_BUSY_DE = ('Automatisches Hochladen übersprungen: Gerade läuft ein anderer '
+                       'Hugging-Face-Vorgang. Wenn er beendet ist, lade den Datensatz im Tab Daten '
+                       'hoch.')
+AUTO_UPLOAD_REFUSED_DE = ('Automatisches Hochladen fehlgeschlagen: Der Hugging-Face-Dienst des '
+                          'Roboters hat die Anfrage abgelehnt. Lade den Datensatz später im Tab Daten '
+                          'hoch.')
+AUTO_UPLOAD_FAILED_DE = 'Automatisches Hochladen fehlgeschlagen. Lade den Datensatz später im Tab Daten hoch.'
+
+# The old page's read services (communicator.py, R-27).
+DATASET_INFO_FAILED_DE = 'Datensatz-Informationen konnten nicht gelesen werden.'
+BROWSE_FAILED_DE = 'Der Ordner konnte nicht gelesen werden.'
+
+
+def _format_gb_de(n) -> str:
+    """The same rule as signal_status.format_gb_de (this module imports no
+    package; a test pins the two equal)."""
+    return f'{int(n) / 1e9:.1f}'.replace('.', ',') + ' GB'
+
+
+def sync_disk_de(free, need) -> str:
+    """D14's sync download does not fit: ``free``/``need`` in bytes (the
+    download worker's result)."""
+    return SYNC_DISK_DE.format(free=_format_gb_de(free), need=_format_gb_de(need))
+
+
 UPLOAD_STALL_DE = ('Das Hochladen kommt nicht mehr voran. Prüfe die Internetverbindung des '
                    'Roboters. Der Datensatz bleibt auf dem Roboter gespeichert; du kannst ihn '
                    'später im Tab Daten hochladen.')

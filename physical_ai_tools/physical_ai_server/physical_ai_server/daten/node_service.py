@@ -99,6 +99,7 @@ DOWNLOAD_WORKER_MODULE = 'physical_ai_server.daten.download_worker'
 DL_RESULT = 'DL_RESULT::'             # = download_worker.RESULT_PREFIX / PROGRESS_PREFIX
 DL_PROGRESS = 'DL_PROGRESS::'
 UPLOAD_STATUS_GRACE_S = 3.0          # the HF worker idle with no status for this long: the upload is lost
+ACCOUNT_RETRY_S = 30.0               # a failed account lookup is asked again after this long
 
 # (code, message) of each busy kind
 _BUSY = {'record': ('busy_record', T.BUSY_RECORD_DE), 'upload': ('busy_upload', T.BUSY_UPLOAD_DE),
@@ -157,6 +158,17 @@ def _tree_bytes(path):
             except OSError:
                 pass
     return n
+
+
+def _default_account_resolver():
+    """The slot token's account (``DataManager.get_huggingface_user_id``: one
+    whoami bounded at 8 s, the token read from the slot); None when it cannot
+    be asked here (the deps-free loaders)."""
+    try:
+        from physical_ai_server.data_processing.data_manager import DataManager
+    except Exception:  # noqa: BLE001
+        return None
+    return DataManager.get_huggingface_user_id()
 
 
 def _kill_group(proc):
@@ -289,7 +301,8 @@ class DatenService:
 
     def __init__(self, node, *, root=None, ros=True, start_threads=True, popen=None, kill=None,
                  token_reader=None, state_reader=None, name_rule=None, namespace_reader=None,
-                 disk_free=None, secret=None, spawn=None, clock=time.monotonic, sleep=time.sleep):
+                 account_resolver=None, disk_free=None, secret=None, spawn=None, clock=time.monotonic,
+                 sleep=time.sleep):
         self.node = node
         self.root = Path(os.path.realpath(root if root is not None else DP.dataset_root()))
         self._lock = threading.Lock()
@@ -307,6 +320,8 @@ class DatenService:
         self._state_reader = state_reader
         self._name_rule = name_rule
         self._namespace_reader = namespace_reader
+        self._account_resolver = account_resolver or _default_account_resolver
+        self._resolved = {'fp': None, 'account': None, 'at': None, 'running': False}   # V2-16
         self._disk_free = disk_free or SIG.disk_free_bytes
         self._spawn = spawn or (lambda fn, *a: threading.Thread(target=fn, args=a, daemon=True,
                                                                   name='daten-job').start())
@@ -338,8 +353,12 @@ class DatenService:
         self._pub = self.node.create_publisher(String, C.STATE_TOPIC, qos)
         self.node.create_service(DatenCommand, C.COMMAND_SERVICE, self._command_callback,
                                  callback_group=self._service_group)
-        self.node.create_timer(1.0, self.publish_state, callback_group=self._timer_group)
+        self.node.create_timer(1.0, self._tick, callback_group=self._timer_group)
         self.publish_state()
+
+    def _tick(self):
+        self.publish_state()
+        self._refresh_account()
 
     def _command_callback(self, request, response):
         out = self.command(request.action, request.args_json)
@@ -378,11 +397,19 @@ class DatenService:
         return safe_dataset_task_name(name)
 
     def _account(self):
-        """The token's account from the namespace cache, or None when unknown
-        (refuse on proof only; never a network call here)."""
+        """The slot token's account, or None when unknown (refuse on proof only;
+        never a network call here). Daten resolves it itself (V2-16): the account
+        ``_refresh_account`` found for the token NOW in the slot (its fingerprint
+        must match); else the recorder's namespace cache."""
         if self._namespace_reader is not None:
             names = self._namespace_reader()
         else:
+            fp = self._slot_fp()
+            with self._lock:
+                resolved = dict(self._resolved)
+            if fp and resolved['fp'] == fp and resolved['account']:
+                return resolved['account']
+            self._refresh_account()
             try:
                 from physical_ai_server.data_processing.data_manager import DataManager
                 names = DataManager._hf_namespace_cache
@@ -390,6 +417,38 @@ class DatenService:
                 names = None
         names = sorted(names or ())
         return names[0] if len(names) == 1 else None
+
+    def _refresh_account(self):
+        """V2-16: look up the account of the token now in the slot IN THE
+        BACKGROUND (one bounded whoami per new fingerprint, never inside a
+        command), so ``namespace`` refusals are immediate without relying on a
+        cache only the recorder fills. A failed lookup is asked again after
+        ``ACCOUNT_RETRY_S``; called by the 1 Hz state tick and by ``_account``."""
+        fp = self._slot_fp()
+        now = self._clock()
+        with self._lock:
+            r = self._resolved
+            if not fp or r['running']:
+                return
+            if r['fp'] == fp and (r['account'] or (r['at'] is not None and now - r['at'] < ACCOUNT_RETRY_S)):
+                return
+            r.update(fp=fp, account=None, at=now, running=True)
+        threading.Thread(target=self._resolve_account, args=(fp,), daemon=True, name='daten-account').start()
+
+    def _resolve_account(self, fp):
+        account = None
+        try:
+            names = sorted(self._account_resolver() or ())
+            account = names[0] if len(names) == 1 else None
+        except Exception:  # noqa: BLE001 — no token, the hub unreachable: unknown, asked again later
+            account = None
+        current = self._slot_fp()                    # outside the lock (R-18: it reads the slot)
+        with self._lock:
+            r = self._resolved
+            r['running'] = False
+            if r['fp'] == fp and current == fp:      # the token changed meanwhile: the answer is stale
+                r['account'] = account
+                r['at'] = self._clock()
 
     def _robot_type(self):
         return getattr(self.node, 'robot_type', None) or 'omx_f'

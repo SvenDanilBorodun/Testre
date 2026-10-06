@@ -724,6 +724,80 @@ class Downloads(ServiceCase):
                 self.assertEqual(self.svc._download_failure(dict(result, ok=False)), (code, message))
 
 
+class DatenResolvesTheAccount(ServiceCase):
+    """V2-16: the ``namespace`` refusals of ``keep_both`` and ``upload`` no
+    longer depend on a cache only the recorder fills: Daten looks the slot
+    token's account up itself, in the background, once per fingerprint."""
+
+    def service(self, resolver, clock=time.monotonic):
+        svc = NS.DatenService(
+            self.node, root=self.root, ros=False, start_threads=False, popen=self.popen,
+            kill=lambda proc: proc.kill(), token_reader=lambda: self.token,
+            state_reader=lambda p: self.states.get(pathlib.Path(p).name, 'ok'),
+            name_rule=lambda n: n.replace(' ', '-'), account_resolver=resolver,
+            disk_free=lambda p: self.free, secret=b's' * 32, clock=clock)
+        svc._lock = self.lock
+        return svc
+
+    def keep_both(self, svc, dataset_id):
+        path = self.root / dataset_id
+        return svc.command('keep_both', json.dumps({'dataset': dataset_id, 'expected_hub_sha': HEAD,
+                                                    'meta_digest': S.meta_digest(path)}))
+
+    def test_a_partners_keep_both_and_upload_are_refused_namespace_at_once(self):
+        calls = []
+        svc = self.service(lambda: calls.append(1) or ['lena'])
+        self.dataset('max/omx_f_x')
+        self.dataset('lena/omx_f_y')
+        svc._refresh_account()                                  # the 1 Hz tick
+        self.assertTrue(wait_for(lambda: svc._account() == 'lena'))
+        self.refused(self.keep_both(svc, 'max/omx_f_x'), 'namespace', R.NAMESPACE_REFUSED_DE)
+        self.refused(svc.command('upload', json.dumps({'dataset': 'max/omx_f_x'})), 'namespace',
+                     R.NAMESPACE_REFUSED_DE)
+        self.assertEqual((self.procs, self.hf.sent, svc.state_payload()['jobs']), ([], [], []))
+        self.assertTrue(self.keep_both(svc, 'lena/omx_f_y')['success'], 'the own dataset still goes')
+        self.assertEqual(len(calls), 1, 'one lookup per token')
+
+    def test_the_lookup_never_runs_inside_a_command(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        svc = self.service(lambda: gate.wait(10) and ['lena'])
+        self.dataset('max/omx_f_x')
+        t0 = time.monotonic()
+        out = self.keep_both(svc, 'max/omx_f_x')                 # unknown yet: refused on proof only
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertTrue(out['success'], out)
+        gate.set()
+        self.assertTrue(wait_for(lambda: svc._account() == 'lena'))
+
+    def test_an_answer_for_a_token_that_changed_meanwhile_is_dropped(self):
+        def resolver():
+            self.token = TOKEN_B                                 # the student changed during the whoami
+            return ['lena']
+        svc = self.service(resolver)
+        svc._refresh_account()
+        self.assertTrue(wait_for(lambda: not svc._resolved['running']))
+        self.assertIsNone(svc._resolved['account'])
+        svc._account_resolver = lambda: ['max']
+        self.assertTrue(wait_for(lambda: svc._account() == 'max'))
+
+    def test_a_failed_lookup_is_asked_again_after_the_retry_time(self):
+        now = [100.0]
+        calls = []
+
+        def resolver():
+            calls.append(1)
+            raise RuntimeError('hub unreachable')
+        svc = self.service(resolver, clock=lambda: now[0])
+        svc._refresh_account()
+        self.assertTrue(wait_for(lambda: len(calls) == 1 and not svc._resolved['running']))
+        self.assertIsNone(svc._account())
+        self.assertEqual(len(calls), 1, 'not again within the retry time')
+        now[0] += NS.ACCOUNT_RETRY_S + 1
+        svc._refresh_account()
+        self.assertTrue(wait_for(lambda: len(calls) == 2))
+
+
 class TheOldPageUpload(ServiceCase):
     """V1-6: ``/huggingface/control``'s upload goes through ``send_control_upload``:
     the busy check and the transient ``upload`` lease of a Daten upload."""

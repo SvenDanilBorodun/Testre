@@ -122,6 +122,8 @@
 .dat-stats div { display: flex; flex-direction: column; }
 .dat-stats dt { font-size: 11px; color: var(--ink-3); }
 .dat-stats dd { margin: 0; font-family: var(--dat-mono); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* the numbers of an online card still being read (V2-14): as tall as the stats */
+.dat-stats-pending { display: flex; align-items: center; gap: 6px; min-height: 40px; margin: 6px 0 2px; font-size: 12.5px; color: var(--ink-3); }
 .dat-hintline { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-3); min-height: 22px; }
 .dat-hintline.dat-warn { color: var(--amber-ink); }
 .dat-hintline.dat-ok { color: var(--success-ink); }

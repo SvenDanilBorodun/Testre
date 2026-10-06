@@ -70,12 +70,14 @@ export default function LibraryView({
         <div>
           <div className="dat-eyebrow">{COPY.page.eyebrow}</div>
           <h1 className="dat-title">{COPY.page.title}</h1>
+          {/* No counts before the first reply (V2-14: never „0 Datensätze"
+              while loading; the grid says what is happening). */}
           <p className="dat-sub">
-            {fill(COPY.page.sub, {
+            {loaded ? fill(COPY.page.sub, {
               datasets: plural(counts.all, COPY.count.datasetOne, COPY.count.datasetMany),
               changed: counts.changed,
               local: counts.local,
-            })}
+            }) : COPY.lib.loading}
           </p>
         </div>
         <div className="dat-head-actions">

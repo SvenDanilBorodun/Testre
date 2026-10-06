@@ -23,7 +23,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import { MAX_LINK_DATASETS, TOKEN_TTL_S } from '../datenContract';
 import { DatenHttpError, dsUrl, getJson, isTokenError, libUrl } from '../api/datenHttp';
 import {
-  applyLibraryReply, busyChanges, emptyLibrary, stampBusyChange,
+  applyLibraryReply, busyChanges, emptyLibrary, onlineCardsWithoutNumbers, stampBusyChange,
 } from '../model/libraryState';
 import { busyKindsById } from './useDatenState';
 
@@ -162,13 +162,25 @@ export default function useDatenSession({
   /**
    * One `library` request. `hub` asks Hugging Face too; `ids` restricts it to
    * those datasets (and their hub repos). Resolves true when a reply landed.
+   *
+   * A reply to named ids that leaves one of them a „Nur online" card without
+   * its numbers (the robot reads an online-only `info.json` only for the whole
+   * list — a whole delete with a hub copy) reads the whole list right away, in
+   * the same tick, so the card shows „loading" and then its values, never „–"
+   * (V2-14). The whole list never asks again: no loop.
    */
+  const fullHubLoadsRef = useRef(0);
+  const loadRef = useRef(null);
   const loadLibrary = useCallback(async ({ hub = false, ids = null } = {}) => {
     const seq = ++seqRef.current;
     const ns = nsRef.current;
     if (!ns.length) return false;
     const req = { seq, hub: !!hub, ids: ids && ids.length ? ids : null };
-    if (hub && !req.ids) setHubLoading(true);
+    const full = hub && !req.ids;
+    if (full) {
+      fullHubLoadsRef.current += 1;
+      setHubLoading(true);
+    }
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         // eslint-disable-next-line no-await-in-loop
@@ -184,6 +196,10 @@ export default function useDatenSession({
           setStatus('ready');
           const localIds = Array.isArray(reply.local) ? reply.local.map((e) => e.id).filter(Boolean) : [];
           mintMissing(localIds);
+          if (req.hub && req.ids && fullHubLoadsRef.current === 0
+              && onlineCardsWithoutNumbers(latestRef.current, req.ids).length) {
+            loadRef.current({ hub: true });
+          }
           return true;
         } catch (err) {
           if (err instanceof DatenHttpError && isTokenError(err.code) && attempt === 0) continue;
@@ -195,9 +211,13 @@ export default function useDatenSession({
       }
       return false;
     } finally {
-      if (hub && !req.ids && aliveRef.current) setHubLoading(false);
+      if (full) {
+        fullHubLoadsRef.current -= 1;
+        if (aliveRef.current && fullHubLoadsRef.current === 0) setHubLoading(false);
+      }
     }
   }, [libToken, mintMissing, now, dispatch]);
+  loadRef.current = loadLibrary;
 
   /** „Aktualisieren", opening the tab, after a job: the whole list, the hub too when the token is this student's. */
   const refresh = useCallback(() => loadLibrary({ hub: !!inSyncRef.current }), [loadLibrary]);

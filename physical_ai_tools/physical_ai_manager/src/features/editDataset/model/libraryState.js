@@ -198,6 +198,26 @@ export function syncAfterLocalEdit(state) {
   return AFTER_LOCAL_EDIT[state] || state || 'unknown';
 }
 
+/**
+ * Does a hub entry lack the card's numbers? The robot's re-read of named ids
+ * (`library?ids=…&hub=1`) and every entry of a dataset that is also local
+ * carry only id, head, visibility and date (§J.4.1); only the whole list reads
+ * an online-only dataset's `info.json`.
+ */
+export function hubEntryLacksNumbers(entry) {
+  return !!entry && (entry.total_episodes === undefined || entry.total_episodes === null);
+}
+
+/**
+ * The ids of `ids` that a reply turned into „Nur online" cards without their
+ * numbers (a whole delete with a hub copy, V2-14): the whole list must be read
+ * to fill them.
+ */
+export function onlineCardsWithoutNumbers(lib, ids) {
+  const entries = (lib && lib.hub && lib.hub.entries) || {};
+  return (ids || []).filter((id) => !(lib.local || {})[id] && hubEntryLacksNumbers(entries[id]));
+}
+
 /** Stamp a busy change for `ids` at the page's current request number (T-1 a). */
 export function stampBusyChange(state, ids, seq) {
   if (!ids || !ids.length) return state;

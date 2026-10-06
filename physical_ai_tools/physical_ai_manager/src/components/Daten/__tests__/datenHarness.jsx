@@ -76,7 +76,12 @@ export function episodeData(length = 60) {
   };
 }
 
-/** The sidecar the page sees: answers from `world`, records every request. */
+/**
+ * The sidecar the page sees: answers from `world`, records every request.
+ * `world.thinScopedHub`: an `ids=` reply carries hub entries the way the real
+ * sidecar does (id, head, visibility, date — no numbers, hub_reads.py
+ * `_library_hub`); `world.gate(url)` may return a promise that holds a reply.
+ */
 export function installSidecar(world) {
   const requests = [];
   const ok = (body) => ({ ok: true, status: 200, headers: { get: () => null }, json: () => Promise.resolve(body) });
@@ -89,16 +94,19 @@ export function installSidecar(world) {
       const hub = u.searchParams.get('hub') === '1';
       const ids = u.searchParams.get('ids') ? u.searchParams.get('ids').split(',') : null;
       const keep = (id) => !ids || ids.includes(id);
-      const reply = {
+      const thin = (e) => (ids && world.thinScopedHub
+        ? { id: e.id, head: e.head, private: e.private, last_modified: e.last_modified } : e);
+      const gate = world.gate ? world.gate(url) : null;
+      const reply = () => ({
         v: 1,
         robot_type: 'omx_f',
         local: world.local.filter((e) => keep(e.id)),
         hub: hub
-          ? { state: world.hubState || 'ok', token_fp: world.hubFp || FP, account: OWN, fetched_at: 'x', hidden_count: world.hidden || 0, complete_ns: [OWN], entries: world.hub.filter((e) => keep(e.id)) }
+          ? { state: world.hubState || 'ok', token_fp: world.hubFp || FP, account: OWN, fetched_at: 'x', hidden_count: world.hidden || 0, complete_ns: [OWN], entries: world.hub.filter((e) => keep(e.id)).map(thin) }
           : { state: 'skipped', token_fp: null },
         sync: Object.fromEntries(Object.entries(world.sync).filter(([id]) => keep(id))),
-      };
-      return Promise.resolve(ok(reply));
+      });
+      return gate ? gate.then(() => ok(reply())) : Promise.resolve(ok(reply()));
     }
     if (p.endsWith('/hub/probe')) {
       return Promise.resolve(ok(world.probe(u.searchParams.get('repo'))));

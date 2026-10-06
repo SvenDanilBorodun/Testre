@@ -89,6 +89,30 @@ export function fmtBytes(bytes) {
   return `${b > 0 ? Math.max(1, mb) : 0} MB`;
 }
 
+/**
+ * A progress pair „{done} von {total}" and its percentage that never disagree
+ * (V2-14: „1 MB von 4 MB 0 %"): both numbers in the TOTAL's unit (GB from
+ * 1 GB, else MB) with one decimal below ten units, whole units above; `done`
+ * and the percentage are rounded DOWN (neither claims more than arrived),
+ * `done` is never more than `total`.
+ * @returns {{done: string, total: string, pct: number}}
+ */
+export function fmtBytesProgress(done, total) {
+  const t = Number(total);
+  if (!Number.isFinite(t) || t <= 0) return { done: '–', total: '–', pct: 0 };
+  const d = Math.min(Math.max(Number(done) || 0, 0), t);
+  const unit = t >= GB ? GB : MB;
+  const label = unit === GB ? 'GB' : 'MB';
+  const digits = t / unit < 10 ? 1 : 0;
+  const k = 10 ** digits;
+  const show = (x, round) => `${fmtNum(round((x / unit) * k + 1e-9) / k, digits)} ${label}`;
+  return {
+    done: show(d, Math.floor),
+    total: show(t, Math.round),
+    pct: Math.floor((d / t) * 100 + 1e-9),
+  };
+}
+
 /** Bytes as „{x,y} GB" always (the free-disk chip). */
 export function fmtGB(bytes) {
   const b = Number(bytes);

@@ -19,7 +19,7 @@ import {
   MAX_CHART_POINTS, columnDegrees, downsampleMinMax, jointChart, spansZero, toDegrees, yDomain,
 } from '../model/chartData';
 import {
-  fill, fillParts, fmtBytes, fmtDate, fmtDay, fmtFps, fmtGB, fmtNum, fmtTime, joinAnd, plural,
+  fill, fillParts, fmtBytes, fmtBytesProgress, fmtDate, fmtDay, fmtFps, fmtGB, fmtNum, fmtTime, joinAnd, plural,
 } from '../model/format';
 import { hintBand, hintText, hintTick } from '../model/hintText';
 import { syncBadge } from '../model/syncBadge';
@@ -190,6 +190,16 @@ describe('format (§J.6 numbers)', () => {
     expect(fmtBytes(1)).toBe('1 MB');
     expect(fmtBytes(0)).toBe('0 MB');
     expect(fmtGB(23.4e9)).toBe('23,4 GB');
+  });
+
+  it('a progress pair: one unit, done and percent rounded down, never past the total (V2-14)', () => {
+    expect(fmtBytesProgress(5e3, 4e6)).toEqual({ done: '0,0 MB', total: '4,0 MB', pct: 0 });
+    expect(fmtBytesProgress(3.66e6, 4e6)).toEqual({ done: '3,6 MB', total: '4,0 MB', pct: 91 });
+    expect(fmtBytesProgress(120e6, 540e6)).toEqual({ done: '120 MB', total: '540 MB', pct: 22 });
+    expect(fmtBytesProgress(0.5e9, 1.08e9)).toEqual({ done: '0,5 GB', total: '1,1 GB', pct: 46 });
+    expect(fmtBytesProgress(12e9, 12e9)).toEqual({ done: '12 GB', total: '12 GB', pct: 100 });
+    expect(fmtBytesProgress(9e9, 4e6)).toEqual({ done: '4,0 MB', total: '4,0 MB', pct: 100 });
+    expect(fmtBytesProgress(1, 0)).toEqual({ done: '–', total: '–', pct: 0 });
   });
 
   it('dates „3. Okt., 14:12" and „30. Sep." in local time', () => {

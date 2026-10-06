@@ -9,7 +9,8 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  applyLibraryReply, busyChanges, cardBusyKind, cardPhase, emptyLibrary, libraryCards, stampBusyChange, syncAfterLocalEdit,
+  applyLibraryReply, busyChanges, cardBusyKind, cardPhase, emptyLibrary, hubEntryLacksNumbers, libraryCards,
+  onlineCardsWithoutNumbers, stampBusyChange, syncAfterLocalEdit,
 } from '../model/libraryState';
 
 const FP = 'fp-lena';
@@ -224,5 +225,28 @@ describe('syncAfterLocalEdit (V2-5): a local edit without the robot\'s re-read',
     expect(syncAfterLocalEdit('local')).toBe('local');
     expect(syncAfterLocalEdit('unknown')).toBe('unknown');
     expect(syncAfterLocalEdit(undefined)).toBe('unknown');
+  });
+});
+
+describe('online cards without their numbers (V2-14)', () => {
+  it('an ids reply\'s hub entry has none; the whole list\'s has them', () => {
+    expect(hubEntryLacksNumbers({ id: 'a', head: 'h' })).toBe(true);
+    expect(hubEntryLacksNumbers({ id: 'a', head: 'h', total_episodes: null })).toBe(true);
+    expect(hubEntryLacksNumbers({ id: 'a', head: 'h', total_episodes: 0 })).toBe(false);
+    expect(hubEntryLacksNumbers(null)).toBe(false);
+  });
+
+  it('only ids that are online-only now AND lack numbers', () => {
+    const lib = {
+      local: { 'lena/omx_f_l': local('lena/omx_f_l') },
+      hub: { entries: {
+        'lena/omx_f_l': { id: 'lena/omx_f_l', head: 'h' },
+        'lena/omx_f_gone': { id: 'lena/omx_f_gone', head: 'h' },
+        'lena/omx_f_full': { id: 'lena/omx_f_full', head: 'h', total_episodes: 4 },
+      } },
+    };
+    expect(onlineCardsWithoutNumbers(lib, ['lena/omx_f_l', 'lena/omx_f_gone', 'lena/omx_f_full', 'lena/omx_f_x']))
+      .toEqual(['lena/omx_f_gone']);
+    expect(onlineCardsWithoutNumbers(emptyLibrary(), ['a'])).toEqual([]);
   });
 });

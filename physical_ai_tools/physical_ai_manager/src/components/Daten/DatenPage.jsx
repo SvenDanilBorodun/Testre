@@ -171,12 +171,13 @@ export default function DatenPage() {
         stateSeen: session.lib.stateSeen,
         lib: session.lib,
         inSync,
+        hubLoading: session.hubLoading,
         mergeMode: merge.active,
         mergeSelected: merge.ids.includes(c.id),
       });
     });
     return out;
-  }, [cards, own, group.names, busy, payload, transferRepo, uploadPct, session.lib, inSync, merge]);
+  }, [cards, own, group.names, busy, payload, transferRepo, uploadPct, session.lib, session.hubLoading, inSync, merge]);
 
   const counts = useMemo(() => ({
     all: cards.length,

@@ -28,8 +28,10 @@
 // itself on a click, and its conflict card offers only „Online-Version laden".
 
 import COPY from '../datenCopy';
-import { fill, fmtBytes, fmtFps, fmtTime } from './format';
-import { cardBusyKind, cardPhase } from './libraryState';
+import {
+  fill, fmtBytes, fmtBytesProgress, fmtFps, fmtTime,
+} from './format';
+import { cardBusyKind, cardPhase, hubEntryLacksNumbers } from './libraryState';
 import { hubDatasetUrl } from './hubLinks';
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
@@ -90,6 +92,7 @@ function hintOf(entry) {
  * @param {boolean} ctx.stateSeen a daten_state message has arrived
  * @param {object} ctx.lib the library state (stamps, entrySeq)
  * @param {boolean} ctx.inSync the robot holds this student's token
+ * @param {boolean} ctx.hubLoading the whole online list is being read (it fills an online card's numbers)
  * @param {boolean} ctx.mergeMode / ctx.mergeSelected
  */
 export function cardModel(card, ctx) {
@@ -236,11 +239,12 @@ export function cardModel(card, ctx) {
   } else if (isDownloadJob || busyKind === 'download') {
     overlay = 'download';
     if (isDownloadJob && num(job.total) && job.unit === 'bytes') {
-      const pct = Math.max(0, Math.min(100, Math.round((Number(job.done) / Number(job.total)) * 100)));
+      // one unit and one rounding for the label and the percentage (V2-14)
+      const p = fmtBytesProgress(job.done, job.total);
       progress = {
-        label: fill(COPY.card.downloading, { done: fmtBytes(job.done), total: fmtBytes(job.total) }),
-        right: fill(COPY.card.percent, { pct }),
-        pct,
+        label: fill(COPY.card.downloading, { done: p.done, total: p.total }),
+        right: fill(COPY.card.percent, { pct: p.pct }),
+        pct: p.pct,
         cancel: 'download',
       };
     } else {
@@ -264,9 +268,13 @@ export function cardModel(card, ctx) {
 
   // ---- online only
   if (!local) {
+    // Its numbers come with the whole online list; while that is read the
+    // card says so instead of four „–" (V2-14).
+    const pending = !!card.hub && hubEntryLacksNumbers(card.hub) && !!ctx.hubLoading;
     return {
       ...base,
       kind: 'online',
+      statsPending: pending,
       actions: [{ id: 'load_view', label: COPY.card.loadAndView, icon: 'cloudDownload', variant: 'primary', disabled: hfOff, title: hfTitle }],
       inlineNote: base.stats.size,
       menu: menuItems({ online: true }),

@@ -115,6 +115,7 @@ const DATEN_COPY = deepFreeze({
     hintsNone: 'Keine Auffälligkeiten',
     hintsAfterLoad: 'Hinweise nach dem Laden',
     previewAfterLoad: 'Vorschau nach dem Laden',
+    statsLoading: 'Angaben werden von Hugging Face geladen …',
     copyOf: 'Kopie von {repo}',
     view: 'Ansehen',
     viewAfterRecording: 'Erst nach der Aufnahme',

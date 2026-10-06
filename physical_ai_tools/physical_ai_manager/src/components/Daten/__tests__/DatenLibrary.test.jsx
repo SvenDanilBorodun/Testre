@@ -140,6 +140,22 @@ describe('the page states (§G10)', () => {
     await screen.findByText(COPY.old.sidecar);
   });
 
+  it('V2-14: while the first library reply is on its way the header never says „0 Datensätze"', async () => {
+    world.local = [local(`${OWN}/omx_f_a`)];
+    world.sync = { [`${OWN}/omx_f_a`]: { state: 'local', head: null } };
+    let release;
+    world.gate = () => new Promise((r) => { release = r; });
+    await mount();
+    await screen.findByText(COPY.page.title);
+    await waitFor(() => expect(release).toBeDefined());
+    const sub = document.querySelector('.dat-sub');
+    expect(sub.textContent).not.toMatch(/\d+ Datens/);
+    expect(screen.getAllByText(COPY.lib.loading).length).toBeGreaterThan(0);
+    world.gate = null;
+    await act(async () => { release(); });
+    await waitFor(() => expect(document.querySelector('.dat-sub').textContent).toContain('1 Datensatz von dir und deiner Gruppe'));
+  });
+
   it('an empty library', async () => {
     await mount();
     await screen.findByText(COPY.lib.empty);
@@ -391,6 +407,23 @@ describe('overlays from /edubotics/daten_state', () => {
     await waitFor(() => expect(commandCalls('cancel')).toEqual([{ what: 'download' }]));
   });
 
+  // V2-14: the label and the percentage never disagree („1 MB von 4 MB 0 %").
+  it.each([
+    [5e3, 4e6, 'Wird geladen … 0,0 MB von 4,0 MB', '0 %'],
+    [3.66e6, 4e6, 'Wird geladen … 3,6 MB von 4,0 MB', '91 %'],
+    [0.5e9, 1.08e9, 'Wird geladen … 0,5 GB von 1,1 GB', '46 %'],
+    [540e6, 540e6, 'Wird geladen … 540 MB von 540 MB', '100 %'],
+  ])('a download of %d of %d bytes: one unit, the same rounding as its percentage', async (done, total, label, pct) => {
+    await mount();
+    await waitFor(() => expect(card(W)).not.toBeNull());
+    act(() => setDaten({
+      busy: [{ id: W, kind: 'download' }],
+      jobs: [{ job_id: 'd', op: 'download', state: 'running', datasets: [W], outputs: [W], stage: 'download', done, total, unit: 'bytes' }],
+    }));
+    await waitFor(() => expect(cardText(W)).toContain(label));
+    expect(card(W).querySelector('.dat-prog .dat-mono').textContent).toBe(pct);
+  });
+
   it('an upload → „Wird hochgeladen …" with the HF percentage and a cancel', async () => {
     const { store } = await mount();
     await waitFor(() => expect(card(W)).not.toBeNull());
@@ -512,6 +545,41 @@ describe('the crashed card (H-1, T-1, U-3, U-4)', () => {
 });
 
 describe('whole-dataset delete (§D6, U-4): both variants, every card kind sends its digest', () => {
+  // V2-14: the robot's re-read of ONE id carries its hub entry without numbers
+  // (hub_reads.py `_library_hub`); the „Nur online" card it becomes shows a
+  // loading line until the whole list brings them — never „–".
+  it('a hub copy stays: the „Nur online" card loads its values, never „–"', async () => {
+    const D = `${OWN}/omx_f_deckel`;
+    world.local = [local(D)];
+    world.hub = [hubEntry(D)];
+    world.sync = { [D]: { state: 'current', head: `head-${D}` } };
+    world.thinScopedHub = true;
+    await mount();
+    await waitFor(() => expect(card(D)).not.toBeNull());
+    fireEvent.click(within(card(D)).getByRole('button', { name: COPY.card.more }));
+    fireEvent.click(within(card(D)).getByRole('menuitem', { name: new RegExp(COPY.menu.deleteWhole) }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: COPY.confirm.deleteDatasetButton }));
+    await waitFor(() => expect(commandCalls('delete_dataset')).toHaveLength(1));
+    // the robot deleted the copy here; the whole list is held back for a moment
+    world.local = [];
+    world.sync = { [D]: { state: 'online', head: `head-${D}` } };
+    let releaseFull = null;
+    world.gate = (url) => (url.includes('hub=1') && !url.includes('ids=')
+      ? new Promise((r) => { releaseFull = r; }) : null);
+    act(() => setDaten({ jobs: [{ job_id: 'job-1', op: 'delete_dataset', state: 'done', datasets: [D], outputs: [], stage: null, done: 1, total: 1, unit: 'steps' }] }));
+    await waitFor(() => expect(cardText(D)).toContain(COPY.sync.onlineLabel));
+    expect(cardText(D)).toContain(COPY.card.statsLoading);
+    expect(card(D).querySelector('.dat-stats')).toBeNull();
+    await waitFor(() => expect(releaseFull).not.toBeNull());
+    world.gate = null;
+    await act(async () => { releaseFull(); });
+    await waitFor(() => expect(card(D).querySelector('.dat-stats')).not.toBeNull());
+    const stats = card(D).querySelector('.dat-stats').textContent;
+    expect(stats).toContain('12');
+    expect(stats).not.toContain('–');
+    expect(cardText(D)).not.toContain(COPY.card.statsLoading);
+  });
+
   it('a proven hub copy: a plain confirm (+ lost changes for changed)', async () => {
     const C = `${OWN}/omx_f_c`;
     world.local = [local(C)];

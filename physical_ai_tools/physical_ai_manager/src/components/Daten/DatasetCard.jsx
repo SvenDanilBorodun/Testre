@@ -130,12 +130,19 @@ export default function DatasetCard({
             <Fill template={COPY.card.copyOf} values={{ repo: <span className="dat-mono">{m.source}</span> }} />
           </div>
         ) : null}
-        <dl className="dat-stats">
-          <div><dt>{COPY.card.episodes}</dt><dd>{m.stats.episodes}</dd></div>
-          <div><dt>{COPY.card.duration}</dt><dd>{m.stats.duration}</dd></div>
-          <div><dt>{COPY.card.size}</dt><dd>{m.stats.size}</dd></div>
-          <div><dt>{COPY.card.fps}</dt><dd>{m.stats.fps}</dd></div>
-        </dl>
+        {m.statsPending ? (
+          <div className="dat-stats-pending" role="status">
+            <Icon name="loading" size={14} className="animate-spin" />
+            <span>{COPY.card.statsLoading}</span>
+          </div>
+        ) : (
+          <dl className="dat-stats">
+            <div><dt>{COPY.card.episodes}</dt><dd>{m.stats.episodes}</dd></div>
+            <div><dt>{COPY.card.duration}</dt><dd>{m.stats.duration}</dd></div>
+            <div><dt>{COPY.card.size}</dt><dd>{m.stats.size}</dd></div>
+            <div><dt>{COPY.card.fps}</dt><dd>{m.stats.fps}</dd></div>
+          </dl>
+        )}
         <div className={`dat-hintline${m.hint.kind === 'warn' ? ' dat-warn' : ''}${m.hint.kind === 'ok' ? ' dat-ok' : ''}${m.hint.kind === 'bad' ? ' dat-bad' : ''}`}>
           <Icon name={m.hint.icon} size={14} className={m.hint.spin ? 'animate-spin' : undefined} />
           <span>{m.hint.text}</span>

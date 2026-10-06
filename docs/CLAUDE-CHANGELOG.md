@@ -6,7 +6,7 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
-### Unreleased, 2026-10-05 / 06 — Daten 2.0: the Daten tab rebuilt as a library and a player (page and cloud half)
+### Unreleased, 2026-10-05 / 06 — Daten 2.0: the Daten tab rebuilt as a library and a player, on a lossless edit engine and a guarded hub sync
 
 **Why.** The old Daten tab took typed folder paths, re-encoded every edit through a private LeRobot
 helper (KNOWN-ISSUES Q1), mixed models into a dataset tool and could not show an episode. The owner
@@ -37,6 +37,31 @@ single-commit upload passed 28/28 scenarios against a fake hub running huggingfa
 „Beide behalten" is a three-way merge that brings back no deleted episode (P18). What was NOT run: a
 write to the real Hugging Face (§K.11 RH0 is the verifiers' first step), real WebView2/Firefox/Safari
 playback, real camera bitrates, an Orange Pi's CPU and storage (rig gates D-R1…D-R5).
+
+**The robot half (`feat/daten-2-robot`).** Edits are one engine, `data_processing/v3_surgery.py::assemble`:
+stream copy at episode boundaries through LeRobot's public `LeRobotDatasetMetadata` writer, one
+decode-order cutter, only LeRobot's default layout and every path confined (a dataset that names its
+own `video_path` made an unchecked engine REWRITE another dataset's videos: 7/7 such attacks are
+refused, P19), seven merge checks, a verify that sees the physical row order and the per-episode
+statistics, a journal for split and a three-way „Beide behalten". The private
+`_copy_and_reindex_videos` monkeypatch and its Dockerfile assert are gone (Q1 closed). The sync
+model (`dataset_sync.decide`) is one decision for the badge, the Start and the upload, kept in a
+sibling record per dataset. Every dataset upload is one `create_commit(parent_commit=…)` after the
+local gate and per-file `preupload_lfs_files`, read back because huggingface_hub's no-op path returns
+main's head with no parent check; `v3.0` follows main only while main holds our data;
+`upload_large_folder`, the unguarded `push_to_hub` fallback and the orphan sweep after it are gone for
+datasets. D14: the Start asks the hub about a complete local copy, loads a newer version first and
+refuses a conflict; an unreachable hub no longer refuses a Start (`OFFLINE_START_DE`; the upload
+decides). New processes: the read-only sidecar (`daten/http_server.py`, `nice -n 10`, no ROS, no
+LeRobot), the ONE download worker (`daten/download_worker.py`, xet off, its own token watch) and the
+node's `DatenService` (`/daten/command`, `/edubotics/daten_state`, leases, jobs, boot recovery).
+`get_huggingface_user_id` returns the account only, so nothing is recorded into or uploaded to an
+organisation any more. CI: `python-tests` installs `pyarrow==25.0.0 av==15.1.0
+huggingface_hub==1.23.0`; `docker-publish.yml::smoke-test` runs `daten_smoke.py` in the amd64 and opi
+server images against the real LeRobot 0.5.1 writer. At that branch's head: the `test_daten*` files
+90 tests OK, the deps-free suite 2218 OK (83 skipped), the server pytest suite 2946 passed / 18
+skipped; the rebuilt image's package byte-identical to the staging tree. The one write the round
+could not run is a write to the real Hugging Face (D-R5).
 
 **The page half (`feat/daten-2-page`).** `pages/EditDatasetPage.js` is a thin shell around
 `components/Daten/` (library, card, merge panel, player, dialogs); the logic is eight hooks under

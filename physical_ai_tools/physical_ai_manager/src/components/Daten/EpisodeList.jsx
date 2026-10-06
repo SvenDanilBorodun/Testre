@@ -18,7 +18,9 @@ import Fill from './Fill';
 import { releasePointerFocus } from '../Record/ActionBar';
 import { countRender } from '../../features/editDataset/renderProbe';
 import COPY from '../../features/editDataset/datenCopy';
-import { fill, fmtBytes, fmtDate, fmtFps, fmtTime } from '../../features/editDataset/model/format';
+import {
+  fill, fmtBytes, fmtDate, fmtFps, fmtKnown, fmtTime,
+} from '../../features/editDataset/model/format';
 import { hintText } from '../../features/editDataset/model/hintText';
 
 const P = COPY.player;
@@ -49,7 +51,7 @@ function EpisodeList({
           <div><dt>{P.episodes}</dt><dd>{episodes.length}</dd></div>
           <div><dt>{P.duration}</dt><dd>{fill(P.durationMin, { t: fmtTime(totalS, false) })}</dd></div>
           <div><dt>{P.fps}</dt><dd>{fmtFps(summary && summary.fps)}</dd></div>
-          <div><dt>{P.size}</dt><dd>{entry && entry.size_bytes !== undefined ? fmtBytes(entry.size_bytes) : '–'}</dd></div>
+          <div><dt>{P.size}</dt><dd>{fmtKnown(entry && entry.size_bytes, fmtBytes)}</dd></div>
           <div><dt>{P.cameras}</dt><dd>{((summary && summary.cameras) || []).length}</dd></div>
           <div><dt>{P.changedAt}</dt><dd className="dat-plain">{fmtDate(entry && entry.modified_at)}</dd></div>
         </dl>

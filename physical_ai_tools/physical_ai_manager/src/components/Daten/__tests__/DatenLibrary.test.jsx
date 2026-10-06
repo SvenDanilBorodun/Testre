@@ -640,8 +640,10 @@ describe('whole-dataset delete (§D6, U-4): both variants, every card kind sends
 
 describe('conflict: „Beide behalten" first and default (§E10)', () => {
   const C = `${OWN}/omx_f_con`;
+  // A conflict with a recorded sync: the three-way merge (G-2)
+  const SYNCED = { hub_sha: 'head-base', synced_at: '2026-10-02T10:00:00Z', source_repo: null, private: false, tag_ok: true };
   beforeEach(() => {
-    world.local = [local(C)];
+    world.local = [local(C, { record: SYNCED })];
     world.hub = [hubEntry(C)];
     world.sync = { [C]: { state: 'conflict', head: 'head-card' } };
     world.hubstate = (hid) => ({
@@ -706,6 +708,40 @@ describe('conflict: „Beide behalten" first and default (§E10)', () => {
     await waitFor(() => expect(document.activeElement).toBe(keep));
     fireEvent.click(within(dlg).getByRole('button', { name: COPY.conflict.uploadHere }));
     await waitFor(() => expect(commandCalls('upload')).toEqual([{ dataset: C, expected_hub_sha: 'head-dialog', private: false }]));
+  });
+
+  // T2-1: a dataset with no sync record (uploaded before Daten 2.0, never found
+  // identical to its hub copy since) has no base; „Beide behalten" is then the
+  // union, and a deleted episode comes back. Every surface says so — and the
+  // three-way sentence („… bleibt weg") appears nowhere.
+  it.each([
+    ['no record at all', null],
+    ['a record without a hub commit (never uploaded or downloaded)', { hub_sha: null, synced_at: null, source_repo: null, private: null, tag_ok: true }],
+  ])('%s: the card, both dialogs and the tip say deleted episodes come back (T2-1)', async (_k, record) => {
+    world.local = [local(C, { record })];
+    await mount();
+    await waitFor(() => expect(card(C)).not.toBeNull());
+    const keepOnCard = within(card(C)).getByRole('button', { name: COPY.card.keepBoth });
+    expect(keepOnCard.getAttribute('title')).toBe(COPY.keepBoth.tipNoBase);
+    for (const opener of [COPY.card.uploadHere, COPY.card.loadOnline]) {
+      fireEvent.click(within(card(C)).getByText(opener));
+      // eslint-disable-next-line no-await-in-loop
+      const dlg = await screen.findByRole('dialog');
+      // eslint-disable-next-line no-await-in-loop
+      const keep = await within(dlg).findByRole('button', { name: COPY.keepBoth.button });
+      expect(keep.getAttribute('title')).toBe(COPY.keepBoth.tipNoBase);
+      expect(dlg.textContent).toContain(COPY.keepBoth.tipNoBase);
+      expect(dlg.textContent).not.toContain('bleibt weg');
+      fireEvent.click(within(dlg).getByRole('button', { name: COPY.tool.cancel }));
+      // eslint-disable-next-line no-await-in-loop
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    }
+  });
+
+  it('a recorded sync: the three-way sentence on the card too', async () => {
+    await mount();
+    await waitFor(() => expect(card(C)).not.toBeNull());
+    expect(within(card(C)).getByRole('button', { name: COPY.card.keepBoth }).getAttribute('title')).toBe(COPY.keepBoth.tip);
   });
 });
 
@@ -977,6 +1013,111 @@ describe('„Von Hugging Face holen" (D12, §E7)', () => {
       repo_id: 'lehrer-mueller/omx_f_wuerfel-demo', revision: 'sha-1', target: `${OWN}/omx_f_Wuerfel-demo`,
       mode: 'copy', display_name: 'Wuerfel demo', meta_digest: '',
     }]));
+  });
+});
+
+// T2-4: the fetched copy's card shows the numbers the dialog found while it
+// downloads — never „Episoden – Dauer – Größe – Bilder/s –".
+describe('a copy fetched from Hugging Face shows the dialog\'s numbers while it downloads (T2-4)', () => {
+  const REPO = 'lehrer-mueller/omx_f_wuerfel-demo';
+  const TARGET = `${OWN}/omx_f_Wuerfel-demo`;
+  const found = (patch = {}) => ({
+    v: 1, repo_id: REPO, found: true, refusal: null, private: false,
+    last_modified: '2026-09-30T10:00:00Z', sha: 'sha-1', total_episodes: 24, total_frames: 14400, duration_s: 480, fps: 30,
+    robot_type: 'omx_f', cameras: [{ index: 0, name: 'gripper' }, { index: 1, name: 'scene' }], size_bytes: 620e6, ...patch,
+  });
+  const stats = (id) => [...card(id).querySelectorAll('.dat-stats dd')].map((d) => d.textContent);
+  async function fetchIt() {
+    await mount();
+    await screen.findByText(COPY.lib.empty);
+    fireEvent.click(screen.getByRole('button', { name: COPY.page.fetch }));
+    const dlg = await screen.findByRole('dialog');
+    fireEvent.change(within(dlg).getByPlaceholderText(COPY.fetch.placeholder), { target: { value: REPO } });
+    fireEvent.click(within(dlg).getByRole('button', { name: COPY.fetch.search }));
+    await within(dlg).findByText(/Gefunden:/);
+    return dlg;
+  }
+  const running = (done) => setDaten({
+    busy: [{ id: TARGET, kind: 'download' }],
+    jobs: [{ job_id: 'job-1', op: 'download', state: 'running', datasets: [], outputs: [TARGET], stage: 'download', done, total: 620e6, unit: 'bytes' }],
+  });
+
+  it('the found numbers on the card for the whole download, then the copy\'s own', async () => {
+    world.probe = () => found();
+    const dlg = await fetchIt();
+    fireEvent.click(within(dlg).getByRole('button', { name: COPY.fetch.go }));
+    await waitFor(() => expect(commandCalls('download')).toHaveLength(1));
+    act(() => running(0));
+    await waitFor(() => expect(card(TARGET)).not.toBeNull());
+    expect(stats(TARGET)).toEqual(['24', '8:00', '620 MB', '30']);
+    act(() => running(310e6));
+    await waitFor(() => expect(cardText(TARGET)).toContain('Wird geladen … 310 MB von 620 MB'));
+    expect(stats(TARGET)).toEqual(['24', '8:00', '620 MB', '30']);
+    // done: the copy is here, its own numbers
+    world.local = [local(TARGET, { total_episodes: 24, duration_s: 480, size_bytes: 618e6 })];
+    world.sync = { [TARGET]: { state: 'local', head: null } };
+    act(() => setDaten({ jobs: [{ job_id: 'job-1', op: 'download', state: 'done', datasets: [], outputs: [TARGET], stage: null, done: 620e6, total: 620e6, unit: 'bytes' }] }));
+    await waitFor(() => expect(card(TARGET).getAttribute('data-kind')).toBe('ok'));
+    expect(stats(TARGET)).toEqual(['24', '8:00', '618 MB', '30']);
+  });
+
+  it('a number the probe did not know stays „–" in the dialog and on the card, never 0', async () => {
+    world.probe = () => found({ duration_s: null, size_bytes: null });
+    const dlg = await fetchIt();
+    const dd = [...dlg.querySelectorAll('.dat-stats dd')].map((d) => d.textContent);
+    expect(dd).toEqual(['24', '–', '–', '30']);
+    expect(dlg.querySelector('[data-preview]').textContent).not.toContain('0 MB');
+    fireEvent.click(within(dlg).getByRole('button', { name: COPY.fetch.go }));
+    await waitFor(() => expect(commandCalls('download')).toHaveLength(1));
+    act(() => running(0));
+    await waitFor(() => expect(card(TARGET)).not.toBeNull());
+    expect(stats(TARGET)).toEqual(['24', '–', '–', '30']);
+  });
+});
+
+// T2-5: an online card whose numbers Hugging Face did not answer just now
+// (V2-10: the card stays, `unknown/unreachable`, numbers null) shows „–" and
+// the unknown badge — never „Episoden 0 · Dauer 0:00" beside „Nur online".
+describe('unknown numbers are never 0 (T2-5)', () => {
+  const B = `${OWN}/omx_f_becher`;
+  it('an online card after a transient hub failure: „–" and „Online-Stand unbekannt"', async () => {
+    world.hub = [hubEntry(B, {
+      total_episodes: null, total_frames: null, duration_s: null, fps: null, robot_type: null, cameras: null, stat_names: null, size_bytes: 14e6,
+    })];
+    world.sync = { [B]: { state: 'unknown', reason: 'unreachable', head: `head-${B}` } };
+    await mount();
+    await waitFor(() => expect(card(B)).not.toBeNull());
+    await waitFor(() => expect(card(B).querySelector('.dat-stats')).not.toBeNull());
+    expect([...card(B).querySelectorAll('.dat-stats dd')].map((d) => d.textContent)).toEqual(['–', '–', '14 MB', '–']);
+    expect(cardText(B)).not.toMatch(/Episoden0|0:00/);
+    const badge = card(B).querySelector('[data-sync]');
+    expect(badge.getAttribute('data-sync')).toBe('unknown');
+    expect(badge.getAttribute('title')).toBe(COPY.sync.unknownTip.unreachable);
+    expect(cardText(B)).not.toContain(COPY.sync.onlineLabel);
+  });
+
+  it.each([
+    ['the upload compare dialog', 'changed', COPY.card.uploadNow],
+    ['the pull dialog', 'newer', COPY.card.pullNewer],
+  ])('%s: a hub copy whose numbers did not come shows „–", never „0 Episoden"/„0:00"', async (_k, state, opener) => {
+    const N = `${OWN}/omx_f_n`;
+    world.local = [local(N)];
+    world.hub = [hubEntry(N)];
+    world.sync = { [N]: { state, head: 'h' } };
+    world.hubstate = (hid) => ({
+      v: 1, id: hid, sync: { state },
+      hub: { exists: true, head: 'head-x', total_episodes: null, duration_s: null, last_modified: '2026-10-05T08:15:00Z' },
+      local: { total_episodes: 9, duration_s: 180, modified_at: '2026-10-01T15:02:00Z' }, new_repo_private: false,
+    });
+    await mount();
+    await waitFor(() => expect(card(N)).not.toBeNull());
+    fireEvent.click(within(card(N)).getByText(opener));
+    const dlg = await screen.findByRole('dialog');
+    await waitFor(() => expect(dlg.querySelector('.dat-cmp')).not.toBeNull());
+    const counts = [...dlg.querySelectorAll('.dat-cmp b')].map((b) => b.textContent);
+    expect(counts).toContain('–');
+    expect(counts).toContain('9 Episoden');
+    expect(dlg.textContent).not.toMatch(/0 Episoden|0:00 min/);
   });
 });
 

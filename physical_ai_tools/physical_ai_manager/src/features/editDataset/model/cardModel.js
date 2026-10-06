@@ -29,12 +29,12 @@
 
 import COPY from '../datenCopy';
 import {
-  fill, fmtBytes, fmtBytesProgress, fmtFps, fmtTime,
+  fill, fmtBytes, fmtBytesProgress, fmtFps, fmtTime, knownNumber,
 } from './format';
 import { cardBusyKind, cardPhase, hubEntryLacksNumbers } from './libraryState';
 import { hubDatasetUrl } from './hubLinks';
 
-const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+const num = knownNumber;
 
 /** The training button's reason to be off, or '' (spec §E8). */
 export function trainingBlock(card) {
@@ -44,6 +44,17 @@ export function trainingBlock(card) {
   // „Nur hier" only on the sidecar's proof; `unknown` keeps the button (R-4).
   if (s === 'local') return COPY.menu.trainLocal;
   return '';
+}
+
+/**
+ * „Beide behalten"'s tip for this card (G-2, T2-1): the three-way merge needs
+ * the hub commit of the last sync (`record.hub_sha`); a dataset without one —
+ * uploaded before Daten 2.0 and never found identical to its hub copy since —
+ * is merged as the union, so its tip says that deleted episodes come back.
+ */
+export function keepBothTip(card) {
+  const rec = card && card.local && card.local.record;
+  return rec && rec.hub_sha ? COPY.keepBoth.tip : COPY.keepBoth.tipNoBase;
 }
 
 /** „Auf Hugging Face ansehen" for a card whose dataset is proven on the hub (§G14), or null. */
@@ -57,8 +68,11 @@ export function hubLink(card) {
   };
 }
 
+// The numbers a card shows: the local copy's, else the hub entry's, else —
+// for a copy still being fetched from Hugging Face — the numbers the fetch
+// dialog found (`card.fetchNumbers`, T2-4). Unknown is „–", never 0 (T2-5).
 function statsOf(card) {
-  const src = card.local || card.hub || {};
+  const src = card.local || card.hub || card.fetchNumbers || {};
   const eps = num(src.total_episodes);
   const dur = num(src.duration_s);
   const size = num(src.size_bytes);
@@ -308,7 +322,7 @@ export function cardModel(card, ctx) {
       break;
     case 'conflict':
       if (own) {
-        actions.push({ id: 'keep_both', label: COPY.card.keepBoth, icon: 'keepBoth', disabled: hfOff, title: hfTitle || COPY.keepBoth.tip });
+        actions.push({ id: 'keep_both', label: COPY.card.keepBoth, icon: 'keepBoth', disabled: hfOff, title: hfTitle || keepBothTip(card) });
         actions2.push({ id: 'load_online', label: COPY.card.loadOnline, icon: 'cloudDownload', disabled: hfOff, title: hfTitle });
         actions2.push({ id: 'upload_here', label: COPY.card.uploadHere, icon: 'cloudUpload', disabled: hfOff, title: hfTitle });
       } else {

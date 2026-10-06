@@ -19,8 +19,10 @@ import {
   MAX_CHART_POINTS, columnDegrees, downsampleMinMax, jointChart, spansZero, toDegrees, yDomain,
 } from '../model/chartData';
 import {
-  fill, fillParts, fmtBytes, fmtBytesProgress, fmtDate, fmtDay, fmtFps, fmtGB, fmtNum, fmtTime, joinAnd, plural,
+  fill, fillParts, fmtBytes, fmtBytesProgress, fmtDate, fmtDay, fmtFps, fmtGB, fmtKnown, fmtNum, fmtTime, joinAnd,
+  knownNumber, plural,
 } from '../model/format';
+import { cardModel, keepBothTip } from '../model/cardModel';
 import { hintBand, hintText, hintTick } from '../model/hintText';
 import { syncBadge } from '../model/syncBadge';
 import { mergeChecks } from '../model/mergeChecks';
@@ -47,6 +49,57 @@ describe('„Beide behalten" says what it does (V1-5, G-2)', () => {
   it('no Daten sentence promises that nothing is lost', () => {
     const promises = all.filter((t) => /verliert nichts|Behält alle Episoden|bleibt gelöscht\./.test(t));
     expect(promises).toEqual([]);
+  });
+
+  // T2-1: without a recorded sync there is no base, the merge is the union and
+  // a deleted episode comes back; the tip says exactly that, and only there
+  // „alle Episoden" is true.
+  it('a dataset with no recorded sync: the union, and its tip says deleted episodes come back', () => {
+    expect(COPY.keepBoth.tipNoBase).toContain('behält alle Episoden von hier und von Hugging Face');
+    expect(COPY.keepBoth.tipNoBase).toContain('kommen auch Episoden zurück, die auf einer Seite gelöscht wurden');
+    expect(COPY.keepBoth.tipNoBase).not.toContain('bleibt weg');
+    const card = (record) => ({ local: { record } });
+    expect(keepBothTip(card(null))).toBe(COPY.keepBoth.tipNoBase);
+    expect(keepBothTip(card({ hub_sha: null }))).toBe(COPY.keepBoth.tipNoBase);
+    expect(keepBothTip({ local: null })).toBe(COPY.keepBoth.tipNoBase);
+    expect(keepBothTip(card({ hub_sha: 'abc' }))).toBe(COPY.keepBoth.tip);
+    expect(all.filter((t) => t.includes('alle Episoden von hier')).length).toBe(1);
+  });
+});
+
+// T2-5: unknown is never 0 — `Number(null)` is 0.
+describe('unknown numbers (T2-5)', () => {
+  it('knownNumber: a finite number, else null', () => {
+    expect([0, 12, 2.5, '30', ' 4 '].map(knownNumber)).toEqual([0, 12, 2.5, 30, 4]);
+    expect([null, undefined, '', '  ', 'x', true, false, NaN, Infinity, {}, []].map(knownNumber)).toEqual(Array(11).fill(null));
+  });
+
+  it('fmtKnown: „–" for unknown, the format for a known value (0 included)', () => {
+    expect(fmtKnown(null, fmtBytes)).toBe('–');
+    expect(fmtKnown(undefined, (s) => fmtTime(s, false))).toBe('–');
+    expect(fmtKnown(0, (s) => fmtTime(s, false))).toBe('0:00');
+    expect(fmtKnown(620e6, fmtBytes)).toBe('620 MB');
+    expect(fmtKnown(24)).toBe('24');
+  });
+
+  const ctx = { own: 'lena', ownerNames: {}, busyKinds: [], job: null, uploadPct: null, stateSeen: true, lib: {}, inSync: true };
+  it('a card with null numbers shows „–", never „0"/„0:00"', () => {
+    const m = cardModel({
+      id: 'lena/omx_f_b', ns: 'lena', name: 'omx_f_b', local: null,
+      hub: { id: 'lena/omx_f_b', head: 'h', total_episodes: null, duration_s: null, size_bytes: null, fps: null },
+      sync: { state: 'unknown', reason: 'unreachable', head: 'h' },
+    }, ctx);
+    expect(m.stats).toEqual({ episodes: '–', duration: '–', size: '–', fps: '–' });
+    expect(m.badge.state).toBe('unknown');
+  });
+
+  it('a known 0 stays 0; a copy being fetched shows the fetch dialog\'s numbers (T2-4)', () => {
+    const m = cardModel({
+      id: 'lena/omx_f_n', ns: 'lena', name: 'omx_f_n', local: null, hub: null,
+      sync: { state: 'unknown', reason: 'not_asked', head: null },
+      fetchNumbers: { total_episodes: 0, duration_s: 480, size_bytes: 620e6, fps: 30 },
+    }, ctx);
+    expect(m.stats).toEqual({ episodes: '0', duration: '8:00', size: '620 MB', fps: '30' });
   });
 });
 

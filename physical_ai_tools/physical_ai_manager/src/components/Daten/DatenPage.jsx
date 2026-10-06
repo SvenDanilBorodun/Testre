@@ -48,7 +48,9 @@ import useGroupNamespaces from '../../features/editDataset/hooks/useGroupNamespa
 import { libraryCards, syncAfterLocalEdit } from '../../features/editDataset/model/libraryState';
 import { cardModel } from '../../features/editDataset/model/cardModel';
 import { taskNameOf } from '../../features/editDataset/model/labels';
-import { fill, fmtBytes, plural } from '../../features/editDataset/model/format';
+import {
+  fill, fmtBytes, knownNumber, plural,
+} from '../../features/editDataset/model/format';
 import { selectHfAccount, selectHfInSync } from '../../features/hfToken/hfTokenSelectors';
 import { setDatasetRepoId, setSelectedDataset, setSelectedUser } from '../../features/training/trainingSlice';
 import { moveToPage } from '../../features/ui/uiSlice';
@@ -127,6 +129,15 @@ export default function DatenPage() {
   const [merge, setMerge] = useState({ active: false, ids: [] });
   const [query, setQuery] = useState('');
   const [newerAck, setNewerAck] = useState({});
+  // target → the numbers the fetch dialog found, shown on the fetched copy's
+  // card while it downloads (T2-4); dropped when the download ends.
+  const [fetchNumbers, setFetchNumbers] = useState({});
+  const dropFetchNumbers = useCallback((target) => setFetchNumbers((m) => {
+    if (!m[target]) return m;
+    const next = { ...m };
+    delete next[target];
+    return next;
+  }), []);
   const cancelledRef = useRef(new Set());
   // The library as of the last reply — after an awaited `loadLibrary` the
   // reply it waited for, never the state of the last render (V2-5).
@@ -154,10 +165,11 @@ export default function DatenPage() {
       extra.push({
         id: target, ns: target.split('/')[0], name: target.split('/')[1], local: null, hub: null,
         sync: { state: 'unknown', reason: 'not_asked', head: null }, date: Date.now(),
+        fetchNumbers: fetchNumbers[target] || null,
       });
     });
     return extra.length ? [...extra, ...baseCards] : baseCards;
-  }, [baseCards, payload, group.namespaces]);
+  }, [baseCards, payload, group.namespaces, fetchNumbers]);
 
   const models = useMemo(() => {
     const out = {};
@@ -214,7 +226,11 @@ export default function DatenPage() {
   }, [dispatch]);
 
   // ---- jobs --------------------------------------------------------------------
-  const runDownload = useCallback(async (card, { mode, revision, target, displayName = null, repo = null, open = false }) => {
+  const runDownload = useCallback(async (card, {
+    mode, revision, target, displayName = null, repo = null, open = false, numbers = null,
+  }) => {
+    const tgtKey = target || card.id;
+    if (numbers) setFetchNumbers((m) => ({ ...m, [tgtKey]: numbers }));
     const r = await run('download', {
       repo_id: repo || card.id,
       revision,
@@ -223,8 +239,18 @@ export default function DatenPage() {
       display_name: displayName,
       meta_digest: mode === 'replace' && card.local ? card.local.meta_digest : '',
     }, { staleIds: [card.id] });
-    if (!r.ok) return;
+    if (!r.ok) {
+      if (numbers) dropFetchNumbers(tgtKey);
+      return;
+    }
     const tgt = r.result.target || target || card.id;
+    if (numbers && tgt !== tgtKey) {
+      setFetchNumbers((m) => {
+        const next = { ...m, [tgt]: numbers };
+        delete next[tgtKey];
+        return next;
+      });
+    }
     const label = displayName || nameOf(card);
     trackJob(r.result.job_id, {
       op: 'download',
@@ -232,16 +258,18 @@ export default function DatenPage() {
         toastOk(fill(COPY.toast.downloadDone, { name: label }));
         setNewerAck((a) => ({ ...a, [tgt]: false }));
         session.loadLibrary({ hub: true, ids: [tgt] }).then(() => {
+          dropFetchNumbers(tgt);
           if (open) dispatch(openPlayer(tgt));
         });
       },
       onFailed: (row) => {
+        dropFetchNumbers(tgt);
         if (cancelledRef.current.has(`download:${row.job_id}`) || row.code === 'cancelled') return;
         toastError(row.message || COPY.http.generic);
         refetch([tgt]);
       },
     });
-  }, [run, trackJob, session, dispatch, refetch]);
+  }, [run, trackJob, session, dispatch, refetch, dropFetchNumbers]);
 
   const runKeepBoth = useCallback(async (card, head) => {
     const r = await run('keep_both', {
@@ -285,7 +313,7 @@ export default function DatenPage() {
       dataset: card.id, meta_digest: card.local ? card.local.meta_digest : '',
     }, { staleIds: [card.id] });
     if (!r.ok) return;
-    const size = card.local && card.local.size_bytes !== undefined ? fmtBytes(card.local.size_bytes) : null;
+    const size = card.local && knownNumber(card.local.size_bytes) !== null ? fmtBytes(card.local.size_bytes) : null;
     trackJob(r.result.job_id, {
       op: 'delete_dataset',
       dialog: true,
@@ -731,11 +759,13 @@ export default function DatenPage() {
             hubIds={hubIds}
             diskFree={diskFree}
             onClose={close}
-            onFetch={({ repo, revision, target, displayName }) => {
+            onFetch={({
+              repo, revision, target, displayName, numbers,
+            }) => {
               close();
               if (filter === 'group') dispatch(setLibraryFilter('all'));
               runDownload({ id: target, name: target.split('/')[1], ns: own, local: null }, {
-                mode: 'copy', revision, target, displayName, repo,
+                mode: 'copy', revision, target, displayName, repo, numbers,
               });
             }}
           />

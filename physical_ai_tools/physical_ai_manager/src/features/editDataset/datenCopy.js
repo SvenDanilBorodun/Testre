@@ -198,6 +198,8 @@ const DATEN_COPY = deepFreeze({
     eyebrow: 'Episoden ansehen',
     groupOwner: '{name} · Gruppe',
     loading: 'Episoden werden geladen …',
+    // T2-2: the open dataset is being recorded right now (its card: „Erst nach der Aufnahme")
+    live: 'Dieser Datensatz wird gerade aufgenommen. Ansehen und Bearbeiten gehen erst nach der Aufnahme.',
     loadFailed: 'Diese Episode konnte nicht geladen werden.',
     retry: 'Erneut versuchen',
     unplayable: 'Diese Episode kann hier nicht abgespielt werden: Ihr Video ist nicht an der Episodengrenze geschnitten.',
@@ -321,6 +323,10 @@ const DATEN_COPY = deepFreeze({
     // V1-5: the truth of G-2, in the core sentence the robot's texts share
     // (record_texts_de.HUB_CHANGED_SINCE_CHECK_DE)
     tip: '„Beide behalten“ behält alle neuen Episoden von hier und von Hugging Face. Was seit dem letzten Abgleich auf einer Seite gelöscht oder ersetzt wurde, bleibt weg. Gleiche Episoden kommen nur einmal vor. Danach wird der Datensatz hochgeladen.',
+    // T2-1: a dataset with no sync record (uploaded before Daten 2.0 and never
+    // found identical to its hub copy since) has no base; the merge is then
+    // the union (G-2 fallback), so a deleted episode comes back.
+    tipNoBase: '„Beide behalten“ behält alle Episoden von hier und von Hugging Face. Für diesen Datensatz kennt EduBotics keinen letzten Abgleich – deshalb kommen auch Episoden zurück, die auf einer Seite gelöscht wurden. Gleiche Episoden kommen nur einmal vor. Danach wird der Datensatz hochgeladen.',
     progressTitle: 'Beide Versionen werden zusammengeführt …',
     stepDownload: 'Online-Version laden',
     stepMerge: 'Zusammenführen',

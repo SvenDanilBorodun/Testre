@@ -17,6 +17,13 @@
 // play/pause, speed, marks and its own controls — never per video frame; the
 // clock moves the DOM through refs (Transport, Scrubber, JointCharts) and the
 // twin reads its pose from `poseSource`.
+//
+// When the open dataset cannot be viewed or edited right now (T2-2) — it is
+// being recorded (`live`), a session into it ended unfinished (`crashed`) or it
+// turned unreadable (`broken`) — the player shows what its card shows: the
+// card's sentence and the card's actions, and neither the tools, the sync
+// banners („Hier geändert … Jetzt hochladen"), the episodes nor the keys. It
+// asks for no summary meanwhile (the robot answers 409 for such a dataset).
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector, useStore } from 'react-redux';
@@ -41,9 +48,66 @@ import useEpisodePlayer from '../../features/editDataset/hooks/useEpisodePlayer'
 import { driverCamera, orderCameras } from '../../features/editDataset/model/labels';
 import { frameAt, lastFrame, shiftTarget, stepTarget } from '../../features/editDataset/model/playerClock';
 import { fill } from '../../features/editDataset/model/format';
-import { hubLink, trainingBlock } from '../../features/editDataset/model/cardModel';
+import { hubLink, keepBothTip, trainingBlock } from '../../features/editDataset/model/cardModel';
 
 const EMPTY = Object.freeze([]);
+
+/** The card kinds the player cannot show its dataset in (T2-2). */
+export const PLAYER_BLOCKED_KINDS = Object.freeze(['live', 'crashed', 'broken']);
+const isBlocked = (kind) => PLAYER_BLOCKED_KINDS.includes(kind);
+const REFRESHING = Object.freeze({ kind: 'refreshing' });
+
+/**
+ * What the player shows next, from what it showed (`shown`: {kind, reread})
+ * and the card's kind now (T2-2). A blocked player opens again only after the
+ * robot's re-read (the card's „Wird aktualisiert …" phase, T-1 a): the busy
+ * change that ends a recording renders once with the reply from BEFORE it,
+ * whose entry may still read `ok`. Pure; returns `shown` itself when nothing
+ * changes.
+ */
+export function nextPlayerShown(shown, kind) {
+  if (kind === 'refreshing') {
+    return isBlocked(shown.kind) && !shown.reread ? { kind: shown.kind, reread: true } : shown;
+  }
+  if (isBlocked(kind)) return shown.kind === kind && !shown.reread ? shown : { kind, reread: false };
+  if (isBlocked(shown.kind) && !shown.reread) return shown;
+  return shown.kind === kind && !shown.reread ? shown : { kind, reread: false };
+}
+
+const BLOCKED_LOOK = Object.freeze({
+  live: { tone: 'dat-sky', icon: 'info', text: () => COPY.player.live },
+  refreshing: { tone: 'dat-sky', icon: 'loading', spin: true, text: () => COPY.card.refreshing },
+});
+
+/**
+ * The card's state in place of the player: its sentence and its actions (a
+ * live card has none; a blocked player whose card waits for its re-read shows
+ * „Wird aktualisiert …" until the robot's answer says what it is now).
+ */
+function PlayerBlocked({ model, onAction }) {
+  const look = BLOCKED_LOOK[model.kind] || null;
+  const actions = look ? EMPTY : (model.actions || EMPTY);
+  return (
+    <div className={`dat-banner ${look ? look.tone : 'dat-danger'}`} role="status" data-player-state={model.kind}>
+      <Icon name={look ? look.icon : 'failed'} size={16} className={look && look.spin ? 'animate-spin' : undefined} />
+      <span className="dat-grow">{look ? look.text() : model.hint.text}</span>
+      {actions.map((a) => (
+        <button
+          key={a.id}
+          type="button"
+          className={a.variant === 'danger' ? 'dat-btn dat-btn-sm dat-btn-danger' : 'dat-btn dat-btn-sm'}
+          disabled={!!a.disabled}
+          title={a.title || undefined}
+          data-action={a.id}
+          onClick={(e) => { releasePointerFocus(e); onAction(a.id); }}
+        >
+          {a.icon ? <Icon name={a.icon} size={16} /> : null}
+          {a.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /** Should a window keydown reach the player (spec §F4)? */
 export function playerKeyAllowed(e, blocked) {
@@ -66,11 +130,20 @@ function PlayerView({
   const id = card.id;
   const entry = card.local;
   const digest = entry ? entry.meta_digest : '';
+  const [shownState, setShownState] = useState(() => ({ kind: model.kind, reread: false }));
+  const shown = nextPlayerShown(shownState, model.kind);
+  if (shown !== shownState) setShownState(shown);
+  const blocked = isBlocked(shown.kind);
+  // Only a whole dataset has a summary; the robot answers 409 for one that is
+  // recorded or was left unfinished — also while the card still waits for its
+  // re-read („Wird aktualisiert …"), so nothing asks before the state is known.
+  const summarizable = !blocked && !!entry && entry.state === 'ok';
 
   // ---- the summary (reloaded whenever the dataset's version changes) -------
   const [summary, setSummary] = useState({ status: 'loading', data: null, digest: null });
   const [reload, setReload] = useState(0);
   useEffect(() => {
+    if (!summarizable) return undefined;
     let cancelled = false;
     setSummary((s) => (s.digest === digest && s.status === 'ready' ? s : { status: 'loading', data: null, digest }));
     api.fetchSummary(id).then((data) => {
@@ -79,7 +152,7 @@ function PlayerView({
       if (!cancelled) setSummary({ status: 'error', data: null, digest });
     });
     return () => { cancelled = true; };
-  }, [api, id, digest, reload]);
+  }, [api, id, digest, reload, summarizable]);
   const sum = summary.data;
   const sumDigest = sum ? sum.meta_digest : null;
 
@@ -200,7 +273,7 @@ function PlayerView({
   // ---- keys (spec §F4) -------------------------------------------------------
   const keyState = useRef({});
   keyState.current = {
-    keysBlocked, ep, episodes: episodes.length, fps, length, markToggle, selectEp,
+    keysBlocked: keysBlocked || blocked, ep, episodes: episodes.length, fps, length, markToggle, selectEp,
   };
   useEffect(() => {
     const onKey = (e) => {
@@ -253,26 +326,31 @@ function PlayerView({
         </div>
       </div>
 
-      <ToolsBar
-        markCount={marks.length}
-        own={model.own}
-        ownerName={ownerName}
-        syncState={syncState}
-        trainingBlock={trainingBlock(card)}
-        hfOff={hfOff}
-        onAction={onTool}
-      />
-      <SyncBanners
-        syncState={syncState}
-        hub={hubFacts}
-        newerAcked={newerAcked}
-        own={model.own}
-        partnerNote={model.own ? null : fill(COPY.card.partnerNote, { name: ownerName })}
-        hfOff={hfOff}
-        onAction={onBanner}
-      />
+      {blocked ? <PlayerBlocked model={isBlocked(model.kind) ? model : REFRESHING} onAction={onBanner} /> : (
+        <>
+          <ToolsBar
+            markCount={marks.length}
+            own={model.own}
+            ownerName={ownerName}
+            syncState={syncState}
+            trainingBlock={trainingBlock(card)}
+            hfOff={hfOff}
+            onAction={onTool}
+          />
+          <SyncBanners
+            syncState={syncState}
+            hub={hubFacts}
+            newerAcked={newerAcked}
+            own={model.own}
+            partnerNote={model.own ? null : fill(COPY.card.partnerNote, { name: ownerName })}
+            hfOff={hfOff}
+            keepBothTip={keepBothTip(card)}
+            onAction={onBanner}
+          />
+        </>
+      )}
 
-      {summary.status === 'error' ? (
+      {!blocked && summary.status === 'error' ? (
         <div className="dat-state">
           <span>{COPY.http.generic}</span>
           <button type="button" className="dat-btn dat-btn-sm" onClick={(e) => { releasePointerFocus(e); setReload((r) => r + 1); }}>
@@ -281,11 +359,11 @@ function PlayerView({
           </button>
         </div>
       ) : null}
-      {summary.status === 'loading' && !sum ? (
+      {!blocked && summary.status === 'loading' && !sum ? (
         <div className="dat-state"><Icon name="loading" className="animate-spin" />{COPY.player.loading}</div>
       ) : null}
 
-      {sum ? (
+      {!blocked && sum ? (
         <div className="dat-pl-grid">
           <EpisodeList
             summary={sum}

@@ -140,7 +140,15 @@ RUN set -e && \
 #
 # torchcodec uninstall mirrors the Modal worker (modal_app.py): v0.5.1 still
 # falls back to pyav when torchcodec is absent, and torchcodec wheels for
-# our CPU-only student arch are unstable.
+# our CPU-only student arch are unstable. It runs AFTER the lerobot install:
+# lerobot 0.5.1 depends on torchcodec on linux x86_64 (not on aarch64), so an
+# uninstall BEFORE the install was undone by it and the amd64 image shipped a
+# torchcodec that cannot load under the SLIM_CUDA torch==2.7.0+cpu swap
+# (undefined c10 symbol; no FFmpeg 4/5/7/8 libraries) — LeRobot's DEFAULT
+# video decoder, so every frame read without an explicit backend failed
+# there (found by the Daten 2.0 smoke's training-style `ds[i]` read). The
+# seam step below asserts it stays gone and that the default decoder is pyav,
+# the one Modal training reads with.
 #
 # accelerate is now a hard runtime dep in v0.5.1 (was optional in v0.2.0);
 # pin to a safe minor-version range so a future major doesn't break the
@@ -166,6 +174,7 @@ RUN set -e && \
         "lerobot[pi,smolvla,peft]==0.5.1" \
         "accelerate>=1.10.0,<2.0.0" \
         "scipy>=1.14.0,<1.18" && \
+    (python3 -m pip uninstall -y torchcodec 2>/dev/null || true) && \
     rm -rf /root/ros2_ws/src/physical_ai_tools/lerobot && \
     sed -i '\|physical_ai_tools/lerobot/src|d' /root/.bashrc 2>/dev/null || true && \
     sed -i '\|physical_ai_tools/lerobot/src|d' /usr/local/lib/s6-services/ros2_service_run.sh 2>/dev/null || true && \
@@ -579,6 +588,12 @@ assert {'repo_id', 'fps', 'features', 'robot_type', 'root', 'use_videos', 'chunk
 assert all(callable(getattr(LeRobotDatasetMetadata, _m, None)) for _m in ('save_episode', 'save_episode_tasks', 'finalize', 'get_task_index')), \
     'lerobot dropped a LeRobotDatasetMetadata method the Daten edit engine writes through'; \
 assert callable(decode_video_frames), 'lerobot dropped video_utils.decode_video_frames: v3_surgery.verify decodes through it'; \
+import importlib.util; \
+assert importlib.util.find_spec('torchcodec') is None, \
+    'torchcodec is installed: it cannot load in this image and is LeRobot default video decoder (uninstall it AFTER the lerobot install)'; \
+from lerobot.datasets.video_utils import get_safe_default_codec; \
+assert get_safe_default_codec() == 'pyav', \
+    f'LeRobot default video decoder is {get_safe_default_codec()}, expected pyav (the decoder Modal training reads with)'; \
 assert 'streaming_encoding' in inspect.signature(LeRobotDataset.create).parameters, \
     'lerobot dropped LeRobotDataset.create(streaming_encoding=...): lerobot_dataset_wrapper would lose the recording RAM bound'; \
 from lerobot.datasets import video_utils; \
@@ -594,7 +609,7 @@ assert callable(getattr(LeRobotDataset, 'clear_episode_buffer', None)), \
     'lerobot dropped LeRobotDataset.clear_episode_buffer: every discarded take would stay in the writer'; \
 assert 'encoder_queue_maxsize' in inspect.signature(LeRobotDataset.create).parameters, \
     'lerobot dropped LeRobotDataset.create(encoder_queue_maxsize=...): the CI frame-drop smoke can no longer force a drop'; \
-print('all v0.5.1 imports OK; codebase_version=v3.0; public API intact (metadata writer, decode, drop warning, clear_episode_buffer, card, resume check)')"
+print('all v0.5.1 imports OK; codebase_version=v3.0; public API intact (metadata writer, decode, drop warning, clear_episode_buffer, card, resume check); no torchcodec, default decoder pyav')"
 
 # Build-time NODE-import smoke test (v2.5.1 audit). The policy smoke test above
 # imports lerobot.policies.* but NEVER imports physical_ai_server itself, so it

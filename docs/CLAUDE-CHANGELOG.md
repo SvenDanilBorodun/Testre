@@ -6,6 +6,23 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-07 — the amd64 server image ships no torchcodec (release 2.27.0 blocker)
+
+**Why.** After PR #35 merged, `docker-publish.yml::smoke-test (amd64)` failed in the new Daten 2.0 edit-engine
+smoke: its training-style `LeRobotDataset[...]` read uses LeRobot's DEFAULT video decoder, which in the amd64
+image was torchcodec 0.10.0, and that cannot load there (`libtorchcodec_core6.so: undefined symbol
+_ZN3c1013MessageLogger6streamB5cxx11Ev` under the `torch==2.7.0+cpu` swap; no `libavutil` for FFmpeg 4/5/7/8).
+The thin Dockerfile meant to remove it („mirrors the Modal worker") but uninstalled it BEFORE `pip install
+lerobot[pi,smolvla,peft]==0.5.1`, which depends on torchcodec on linux x86_64 and put it back. The opi and
+Jetson images are aarch64, where LeRobot does not pull it, so every arm64 verifier and smoke passed. The
+product's own decode (`v3_surgery.verify`) always passed `backend='pyav'` and was not affected.
+
+**What.** The uninstall now runs after the lerobot install; the seam step asserts torchcodec is absent and
+`get_safe_default_codec() == 'pyav'` (the decoder Modal training reads with). Proven on the published amd64
+image `physical-ai-server:261b4d7` under emulation: as shipped the new gate fails with its message and the smoke
+reports the four torchcodec failures; after `pip uninstall torchcodec` the gate passes, `daten_smoke.py` is
+`ok` with no failure, and the three LeRobot-only test files pass 66, 0 skipped.
+
 ### Unreleased, 2026-10-06 (latest) — owner decision N7: the Aufnahme form starts public
 
 **Why.** Owner decision N7 (2026-10-05, Daten 2.0): the cloud training reads a dataset with the platform

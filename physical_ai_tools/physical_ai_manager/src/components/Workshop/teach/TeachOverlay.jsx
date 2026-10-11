@@ -27,6 +27,15 @@
 // and ending with a line break; pasted back into the program as they are,
 // they land like „Einfügen" (code/vormachenClipboard.js, owner decision R4-O1).
 //
+// The window is content-sized and framed orange like the studio's real-robot
+// mode (owner decision R0-5); its header leaves a slot for the static mode
+// badge (`data-slot="mode-badge"`). Per state it shows only what the student
+// can do next: the Bewegung window's record button is red, a take shows a
+// REC pill with its time to TEACH_RECORD_MAX_S, the review („Bewegung
+// prüfen") hides the action row and makes „Behalten" the filled button, and
+// the summary's filled button is „Als Programm einfügen". What a key or a
+// button does is still decided by teachKeyOffered + teachActionCells alone.
+//
 // Two rules here carry weight of their own:
 //   * No name is ever asked while the arm is limp: a capture/take gets an
 //     automatic name on the key press, and ✎ is enabled only while the arm is
@@ -60,7 +69,7 @@ import { createTeachSounds } from './teachSounds';
 import ReviewStrip from './ReviewStrip';
 import LeaderActivationGate from './LeaderActivationGate';
 import {
-  TEACH_KIND_ICON, TEACH_KIND_LABEL_DE, isTeachKind, teachKeyOffered, teachLeaderStatus,
+  TEACH_KIND_ICON, TEACH_KIND_LABEL_DE, TEACH_RECORD_MAX_S, isTeachKind, teachKeyOffered, teachLeaderStatus,
   teachLeaderStatusNoticeDe,
 } from './teachGates';
 import Icon from '../../icons/Icon';
@@ -746,6 +755,13 @@ function TeachOverlay({
   const kindLabel = TEACH_KIND_LABEL_DE[kind] || '';
   const kindIcon = TEACH_KIND_ICON[kind] || null;
   const fLocks = state === 'frei' || state === 'aufnahme' || state === 'pruefen';
+  // The action row: never in the review (the relock banner carries the F path
+  // there) and never in the summary.
+  const showActions = state !== 'abschluss' && state !== 'pruefen' && state !== 'vorschau';
+  // A pending window has no mode yet: its one (disabled) button is plain.
+  const ownVariant = (filled) => (isPendingMode ? 'secondary' : filled);
+  const recElapsed = Math.min(TEACH_RECORD_MAX_S, Math.max(0, Math.floor(Number(elapsedS) || 0)));
+  const recFraction = Math.min(1, Math.max(0, (Number(elapsedS) || 0) / TEACH_RECORD_MAX_S));
   const showRelockBanner = relock === 'failed' && (state === 'frei' || state === 'pruefen');
   const previewDisabled = state !== 'pruefen' || busy || homeGlideActive || !online || relock === 'failed'
     || leaderStatusUnknown;
@@ -806,6 +822,17 @@ function TeachOverlay({
   // (review round 3, nb4): a second click while it loaded inserted twice;
   // the button is disabled from the first click on.
   const [inserting, setInserting] = useState(false);
+  // What „Als Programm einfügen" wrote last: highlighted once the window has
+  // closed (assetDocument.flashInserted), when the editor is visible again.
+  const lastInsertionRef = useRef(null);
+  useEffect(() => () => {
+    const insertion = lastInsertionRef.current;
+    const target = latest.current.doc;
+    if (!insertion || !target || typeof target.flashInserted !== 'function') return;
+    try {
+      target.flashInserted(insertion);
+    } catch (_) { /* a document already gone: nothing to show */ }
+  }, []);
   const handleInsert = async () => {
     setInserting(true);
     try {
@@ -834,6 +861,7 @@ function TeachOverlay({
         return;
       }
       if (result && result.count > 0) {
+        lastInsertionRef.current = result;
         if (isCode) {
           // Where the lines went: below the cursor's line.
           toast.success(formatCode(CODE_DE.INSERTED_AT, result.file, result.firstLine));
@@ -860,7 +888,12 @@ function TeachOverlay({
       data-testid="teach-overlay"
       className="fixed inset-0 z-[55] flex bg-slate-900/70 p-2 outline-none sm:p-6"
     >
-      <div className="mx-auto flex h-full w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+      {/* Content-sized and framed like the studio in real-robot mode: the
+          orange border says this window drives the real arm. */}
+      <div
+        data-testid="teach-card"
+        className="mx-auto my-auto flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-2xl border-4 border-[#EA580C] bg-white shadow-2xl"
+      >
         <header className="flex flex-wrap items-center gap-3 border-b border-[var(--line)] px-4 py-3">
           <h2 id="teach-title" className="flex items-center gap-2 text-xl font-semibold text-[var(--ink)]">
             {kindIcon && <Icon name={kindIcon} className="text-[var(--accent)]" />}
@@ -872,6 +905,7 @@ function TeachOverlay({
               <span>{isLeaderMode ? DE.TEACH_MODE_LEADER : DE.TEACH_MODE_HAND}</span>
             </span>
           )}
+          <span data-slot="mode-badge" />
           <button
             type="button"
             onClick={() => actions.finish()}
@@ -881,8 +915,8 @@ function TeachOverlay({
             {`${DE.TEACH_DONE} (Esc)`}
           </button>
         </header>
-        <div className="flex min-h-0 flex-1 flex-col overflow-auto md:flex-row">
-          <section className="flex min-w-0 flex-1 flex-col gap-4 p-4 sm:p-6">
+        <div className="flex min-h-0 flex-1 flex-col overflow-auto md:grid md:grid-cols-[minmax(0,1fr)_17rem]">
+          <section className="flex min-w-0 flex-col gap-3 p-4 sm:p-5">
             {heartbeatOk === false && (
               <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-base text-red-800">{DE.TEACH_OFFLINE}</p>
             )}
@@ -919,175 +953,204 @@ function TeachOverlay({
               </div>
             )}
             {maybeGated(<>
-            {isLeaderMode && staleLeaderTake && state === 'bereit' && (
-              <div className="flex flex-wrap items-center gap-3">
-                <SmallKeyButton
-                  label={DE.TEACH_LEADER_DISCARD_OLD}
-                  disabled={busy || !online}
-                  onClick={() => actions.discardStaleLeaderTake()}
-                  onPointerUp={refocus}
-                />
-              </div>
-            )}
-            <div>
-              {/* Only the state is announced; the ticking clock sits OUTSIDE the
-                  live region, or a screen reader would read it every second. */}
-              <p className="text-3xl font-semibold text-[var(--ink)]">
-                <span aria-live="assertive" data-testid="teach-state-line">{stateLine}</span>
-                {state === 'aufnahme' && (
-                  <span className="ml-3 tabular-nums" data-testid="teach-elapsed">{mmss(elapsedS)}</span>
-                )}
-              </p>
-              {hintLine && <p className="mt-1 text-lg text-[var(--ink-3)]">{hintLine}</p>}
-            </div>
-            {zielPrompts.length > 0 && (
-              <ZielTooHighPrompt
-                key={zielPrompts[0].key}
-                heightMm={zielPrompts[0].heightMm}
-                onAnswer={(asPin) => { resolveZielPrompt(asPin); refocus(); }}
-              />
-            )}
-            {state !== 'abschluss' && (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="teach-actions">
-                {offered('space') && (
-                  <ActionButton
-                    icon={state === 'aufnahme' ? 'stop' : 'record'}
-                    label={state === 'aufnahme' ? DE.TEACH_KEY_STOP : DE.TEACH_KEY_REC}
-                    keyHint="Leertaste"
-                    disabled={!cell.space}
-                    onClick={actions.space}
+              {isLeaderMode && staleLeaderTake && state === 'bereit' && (
+                <div className="flex flex-wrap items-center gap-3">
+                  <SmallKeyButton
+                    label={DE.TEACH_LEADER_DISCARD_OLD}
+                    disabled={busy || !online}
+                    onClick={() => actions.discardStaleLeaderTake()}
                     onPointerUp={refocus}
                   />
-                )}
-                {offered('p') && (
-                  <ActionButton
-                    icon="pose"
-                    label={DE.TEACH_KEY_POSE}
-                    keyHint="P"
-                    disabled={!cell.p}
-                    onClick={actions.capturePose}
-                    onPointerUp={refocus}
-                  />
-                )}
-                {offered('z') && (
-                  <ActionButton
-                    icon="ziel"
-                    label={DE.TEACH_KEY_ZIEL}
-                    keyHint="Z"
-                    disabled={!cell.z || zielPrompts.length > 0}
-                    onClick={actions.captureZiel}
-                    onPointerUp={refocus}
-                  />
-                )}
-                {offered('f') && (
-                  <ActionButton
-                    icon={fLocks ? 'lock' : 'lockOpen'}
-                    label={fLocks ? DE.TEACH_KEY_LOCK : DE.TEACH_KEY_FREE}
-                    keyHint="F"
-                    disabled={!cell.f}
-                    onClick={actions.toggleFree}
-                    onPointerUp={refocus}
-                  />
-                )}
-              </div>
-            )}
-            {inReview && (
-              <div className="flex flex-col gap-3 rounded-xl border border-[var(--line)] p-4" data-testid="teach-review">
-                <p className="text-lg text-[var(--ink)]">
-                  {formatDe(DE.TEACH_REVIEW_META, reviewName, formatSecondsDe(Number(rowsDurationS(reviewRows)) || 0),
-                    reviewRows.length)}
-                </p>
-                {analysis && analysis.leadTrimMs > 0 && (
-                  <p className="text-base text-[var(--ink-3)]">{DE.TEACH_TRIM_START}</p>
-                )}
-                {choice && choice.fallTrim && (
-                  <div className="flex flex-wrap items-center gap-3 text-base text-[var(--ink-3)]">
-                    <span>{DE.TEACH_TRIM_END}</span>
-                    <SmallKeyButton
-                      label={DE.TEACH_TRIM_UNDO}
-                      disabled={cleanupLocked}
-                      onClick={() => setCleanupState({ ...choice, endIndex: lastIndex, fallTrim: false })}
-                      onPointerUp={refocus}
-                    />
-                  </div>
-                )}
-                {choice && analysis && (
-                  <ReviewStrip
-                    activity={analysis.activity}
-                    timesMs={analysis.timesMs}
-                    startIndex={choice.startIndex}
-                    endIndex={choice.endIndex}
-                    disabled={cleanupLocked}
-                    onHandleRelease={refocus}
-                    onChange={(next) => setCleanupState({
-                      ...choice, ...next, fallTrim: choice.fallTrim && next.endIndex === choice.endIndex,
-                    })}
-                  />
-                )}
-                {choice && analysis && analysis.pauses.length > 0 && (
-                  <label className="flex items-center gap-2 text-base text-[var(--ink)]">
-                    <input
-                      type="checkbox"
-                      checked={choice.compressPauses}
-                      disabled={cleanupLocked}
-                      onChange={(e) => setCleanupState({ ...choice, compressPauses: e.target.checked })}
-                      onPointerUp={refocus}
-                      className="h-5 w-5"
-                    />
-                    {DE.TEACH_PAUSES}
-                  </label>
-                )}
-                {state === 'vorschau' && (
-                  <div role="status" className="flex flex-wrap items-center gap-3 rounded-lg bg-amber-50 px-3 py-2 text-base text-amber-900">
-                    <div className="flex-1">
-                      <p>{DE.TEACH_ROBOT_PREVIEW_RUNNING}</p>
-                      {previewNoMotionHint && <p>{DE.TEACH_ROBOT_PREVIEW_NO_MOTION}</p>}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => actions.stopPreview()}
-                      onPointerUp={refocus}
-                      className="min-h-[64px] rounded-lg bg-red-600 px-6 text-lg font-semibold text-white hover:bg-red-700"
-                    >
-                      {DE.TEACH_ROBOT_PREVIEW_STOP}
-                    </button>
-                  </div>
-                )}
-                <div className="flex flex-wrap gap-2">
-                  {keepHeld ? (
-                    // Leader mode: a trip within the grace window still discards this take.
-                    <SmallKeyButton label={DE.TEACH_LIST_REVIEWING} keyHint="Enter" disabled onClick={actions.keep} onPointerUp={refocus} />
-                  ) : (
-                    <SmallKeyButton icon="check" label={DE.TEACH_REVIEW_KEEP} keyHint="Enter" disabled={state !== 'pruefen' || !online} onClick={actions.keep} onPointerUp={refocus} />
+                </div>
+              )}
+              <div>
+                {/* Only the state is announced; the ticking clock sits OUTSIDE the
+                    live region, or a screen reader would read it every second. */}
+                <p className="text-2xl font-semibold text-[var(--ink)]">
+                  <span aria-live="assertive" data-testid="teach-state-line">{stateLine}</span>
+                  {state === 'aufnahme' && (
+                    <span className="ml-3 tabular-nums" data-testid="teach-elapsed">{mmss(elapsedS)}</span>
                   )}
-                  <SmallKeyButton icon="again" label={DE.TEACH_REVIEW_AGAIN} keyHint="R" disabled={state !== 'pruefen' || !canStartNew} onClick={actions.again} onPointerUp={refocus} />
-                  <SmallKeyButton label={DE.TEACH_REVIEW_DISCARD} keyHint="Entf" disabled={state !== 'pruefen' || !online} onClick={actions.discard} onPointerUp={refocus} />
-                  {!isLeaderMode && (
-                    <SmallKeyButton label={DE.TEACH_REVIEW_ON_ROBOT} disabled={previewDisabled} onClick={handlePreviewOnRobot} onPointerUp={refocus} />
+                </p>
+                {hintLine && <p className="mt-1 text-lg text-[var(--ink-3)]">{hintLine}</p>}
+              </div>
+              {state === 'aufnahme' && (
+                // A take: the REC pill, its time to the limit and a bar that fills
+                // up to TEACH_RECORD_MAX_S (the server ends the take there).
+                <div className="flex flex-wrap items-center gap-3" data-testid="teach-rec">
+                  <span
+                    role="status"
+                    className="inline-flex items-center gap-1.5 rounded-full bg-red-600 px-2.5 py-0.5 text-sm font-bold text-white"
+                  >
+                    <Icon name="liveRecording" className="motion-safe:animate-pulse" />
+                    <span>{DE.TEACH_REC_BADGE}</span>
+                  </span>
+                  <span className="text-base tabular-nums text-[var(--ink)]" data-testid="teach-rec-progress">
+                    {formatDe(DE.TEACH_REC_PROGRESS, mmss(elapsedS), mmss(TEACH_RECORD_MAX_S))}
+                  </span>
+                  <div
+                    role="progressbar"
+                    aria-label={DE.TEACH_REC_PROGRESS_ARIA}
+                    aria-valuemin={0}
+                    aria-valuemax={TEACH_RECORD_MAX_S}
+                    aria-valuenow={recElapsed}
+                    className="h-2 min-w-[8rem] flex-1 overflow-hidden rounded-full bg-red-100"
+                  >
+                    <div className="h-full rounded-full bg-red-600" style={{ width: `${recFraction * 100}%` }} />
+                  </div>
+                </div>
+              )}
+              {zielPrompts.length > 0 && (
+                <ZielTooHighPrompt
+                  key={zielPrompts[0].key}
+                  heightMm={zielPrompts[0].heightMm}
+                  onAnswer={(asPin) => { resolveZielPrompt(asPin); refocus(); }}
+                />
+              )}
+              {showActions && (
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="teach-actions">
+                  {offered('space') && (
+                    <ActionButton
+                      icon={state === 'aufnahme' ? 'stop' : 'record'}
+                      label={state === 'aufnahme' ? DE.TEACH_KEY_STOP : DE.TEACH_KEY_REC}
+                      keyHint="Leertaste"
+                      variant={ownVariant('record')}
+                      disabled={!cell.space}
+                      onClick={actions.space}
+                      onPointerUp={refocus}
+                    />
+                  )}
+                  {offered('p') && (
+                    <ActionButton
+                      icon="pose"
+                      label={DE.TEACH_KEY_POSE}
+                      keyHint="P"
+                      variant={ownVariant('primary')}
+                      disabled={!cell.p}
+                      onClick={actions.capturePose}
+                      onPointerUp={refocus}
+                    />
+                  )}
+                  {offered('z') && (
+                    <ActionButton
+                      icon="ziel"
+                      label={DE.TEACH_KEY_ZIEL}
+                      keyHint="Z"
+                      variant={ownVariant('primary')}
+                      disabled={!cell.z || zielPrompts.length > 0}
+                      onClick={actions.captureZiel}
+                      onPointerUp={refocus}
+                    />
+                  )}
+                  {offered('f') && (
+                    <ActionButton
+                      icon={fLocks ? 'lock' : 'lockOpen'}
+                      label={fLocks ? DE.TEACH_KEY_LOCK : DE.TEACH_KEY_FREE}
+                      keyHint="F"
+                      variant="secondary"
+                      disabled={!cell.f}
+                      onClick={actions.toggleFree}
+                      onPointerUp={refocus}
+                    />
                   )}
                 </div>
-                {isLeaderMode && (
-                  <p className="text-sm text-[var(--ink-3)]" data-testid="teach-review-on-robot-leader">
-                    {`${DE.TEACH_REVIEW_ON_ROBOT}: ${DE.TEACH_REVIEW_ON_ROBOT_LEADER}`}
+              )}
+              {inReview && (
+                <div className="flex flex-col gap-3 rounded-xl border border-[var(--line)] p-4" data-testid="teach-review">
+                  <p className="text-lg text-[var(--ink)]">
+                    {formatDe(DE.TEACH_REVIEW_META, reviewName, formatSecondsDe(Number(rowsDurationS(reviewRows)) || 0))}
                   </p>
-                )}
-                {slotsLine && <p className="text-sm text-amber-800">{slotsLine}</p>}
-              </div>
-            )}
-            {state === 'abschluss' && (
-              <div className="flex flex-wrap gap-3">
-                <SmallKeyButton label={DE.TEACH_CONTINUE} onClick={actions.continueTeaching} onPointerUp={refocus} />
-                <SmallKeyButton label={DE.TEACH_CLOSE} keyHint="Esc" primary onClick={actions.finish} onPointerUp={refocus} />
-              </div>
-            )}
+                  {analysis && analysis.leadTrimMs > 0 && (
+                    <p className="text-base text-[var(--ink-3)]">{DE.TEACH_TRIM_START}</p>
+                  )}
+                  {choice && choice.fallTrim && (
+                    <div className="flex flex-wrap items-center gap-3 text-base text-[var(--ink-3)]">
+                      <span>{DE.TEACH_TRIM_END}</span>
+                      <SmallKeyButton
+                        label={DE.TEACH_TRIM_UNDO}
+                        disabled={cleanupLocked}
+                        onClick={() => setCleanupState({ ...choice, endIndex: lastIndex, fallTrim: false })}
+                        onPointerUp={refocus}
+                      />
+                    </div>
+                  )}
+                  {choice && analysis && (
+                    <ReviewStrip
+                      activity={analysis.activity}
+                      timesMs={analysis.timesMs}
+                      startIndex={choice.startIndex}
+                      endIndex={choice.endIndex}
+                      disabled={cleanupLocked}
+                      onHandleRelease={refocus}
+                      onChange={(next) => setCleanupState({
+                        ...choice, ...next, fallTrim: choice.fallTrim && next.endIndex === choice.endIndex,
+                      })}
+                    />
+                  )}
+                  {choice && analysis && analysis.pauses.length > 0 && (
+                    <label className="flex items-center gap-2 text-base text-[var(--ink)]">
+                      <input
+                        type="checkbox"
+                        checked={choice.compressPauses}
+                        disabled={cleanupLocked}
+                        onChange={(e) => setCleanupState({ ...choice, compressPauses: e.target.checked })}
+                        onPointerUp={refocus}
+                        className="h-5 w-5"
+                      />
+                      {DE.TEACH_PAUSES}
+                    </label>
+                  )}
+                  {state === 'vorschau' && (
+                    <div role="status" className="flex flex-wrap items-center gap-3 rounded-lg bg-amber-50 px-3 py-2 text-base text-amber-900">
+                      <div className="flex-1">
+                        <p>{DE.TEACH_ROBOT_PREVIEW_RUNNING}</p>
+                        {previewNoMotionHint && <p>{DE.TEACH_ROBOT_PREVIEW_NO_MOTION}</p>}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => actions.stopPreview()}
+                        onPointerUp={refocus}
+                        className="min-h-[64px] rounded-lg bg-red-600 px-6 text-lg font-semibold text-white hover:bg-red-700"
+                      >
+                        {DE.TEACH_ROBOT_PREVIEW_STOP}
+                      </button>
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    {keepHeld ? (
+                      // Leader mode: a trip within the grace window still discards this take.
+                      <SmallKeyButton label={DE.TEACH_LIST_REVIEWING} keyHint="Enter" disabled onClick={actions.keep} onPointerUp={refocus} />
+                    ) : (
+                      <SmallKeyButton icon="check" label={DE.TEACH_REVIEW_KEEP} keyHint="Enter" primary disabled={state !== 'pruefen' || !online} onClick={actions.keep} onPointerUp={refocus} />
+                    )}
+                    <SmallKeyButton icon="again" label={DE.TEACH_REVIEW_AGAIN} keyHint="R" disabled={state !== 'pruefen' || !canStartNew} onClick={actions.again} onPointerUp={refocus} />
+                    <SmallKeyButton label={DE.TEACH_REVIEW_DISCARD} keyHint="Entf" disabled={state !== 'pruefen' || !online} onClick={actions.discard} onPointerUp={refocus} />
+                    {!isLeaderMode && (
+                      <SmallKeyButton label={DE.TEACH_REVIEW_ON_ROBOT} disabled={previewDisabled} onClick={handlePreviewOnRobot} onPointerUp={refocus} />
+                    )}
+                  </div>
+                  {isLeaderMode && (
+                    <p className="text-sm text-[var(--ink-3)]" data-testid="teach-review-on-robot-leader">
+                      {`${DE.TEACH_REVIEW_ON_ROBOT}: ${DE.TEACH_REVIEW_ON_ROBOT_LEADER}`}
+                    </p>
+                  )}
+                  {slotsLine && <p className="text-sm text-amber-800">{slotsLine}</p>}
+                </div>
+              )}
+              {state === 'abschluss' && (
+                <div className="flex flex-wrap gap-3">
+                  <SmallKeyButton label={DE.TEACH_CONTINUE} onClick={actions.continueTeaching} onPointerUp={refocus} />
+                  <SmallKeyButton label={DE.TEACH_CLOSE} keyHint="Esc" onClick={actions.finish} onPointerUp={refocus} />
+                </div>
+              )}
             </>)}
           </section>
-          <aside className="flex w-full shrink-0 flex-col gap-2 border-t border-[var(--line)] p-4 md:w-80 md:border-l md:border-t-0">
+          <aside className="flex min-h-0 flex-col gap-2 border-t border-[var(--line)] p-4 md:border-l md:border-t-0">
             <h3 className="text-base font-semibold text-[var(--ink)]">{DE.TEACH_LIST_TITLE}</h3>
             {items.length === 0 && !inReview && (
               <p className="text-sm text-[var(--ink-3)]">{DE.TEACH_LIST_EMPTY}</p>
             )}
-            <ul className="flex flex-col gap-1.5">
+            <ul className="flex max-h-64 flex-col gap-1.5 overflow-auto md:max-h-none">
               {items.map((item) => (
                 <ListRow
                   key={item.key}
@@ -1112,11 +1175,12 @@ function TeachOverlay({
             <div className="mt-auto pt-2">
               <button
                 type="button"
+                data-variant="primary"
                 onClick={handleInsert}
                 onPointerUp={refocus}
                 disabled={insertCount === 0 || !doc || inserting}
                 aria-busy={inserting || undefined}
-                className="w-full rounded-lg border border-[var(--accent)] px-3 py-2 text-base font-semibold text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40 hover:bg-[var(--bg-sunk)]"
+                className="w-full rounded-lg border border-[var(--accent)] bg-[var(--accent)] px-3 py-2 text-base font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40 hover:opacity-90"
               >
                 {insertLabel}
               </button>
@@ -1128,27 +1192,41 @@ function TeachOverlay({
   );
 }
 
+// The three looks of an action button (owner decision R0-5): the Bewegung
+// window's red record button, the filled accent of „Position merken" / „Ziel
+// hier", and the outline of F (and of a pending window's one button).
+const ACTION_VARIANT_CLASS = Object.freeze({
+  record: 'border-red-600 bg-red-600 text-white hover:bg-red-700',
+  primary: 'border-[var(--accent)] bg-[var(--accent)] text-white hover:opacity-90',
+  secondary: 'border-[var(--line)] bg-white text-[var(--ink)] hover:bg-[var(--bg-sunk)]',
+});
+
 // The label may shrink (and hyphenate, the page is lang="de") so the key hint
 // never leaves the button: at 1366×768 and 150 % scaling (910 CSS px) the
 // Bewegung window's „Aufnahme" + „Leertaste" did not fit.
-function ActionButton({ icon, label, keyHint, disabled, onClick, onPointerUp }) {
+function ActionButton({
+  icon, label, keyHint, variant = 'secondary', disabled, onClick, onPointerUp,
+}) {
+  const look = ACTION_VARIANT_CLASS[variant] ? variant : 'secondary';
   return (
     <button
       type="button"
+      data-variant={look}
       onClick={onClick}
       onPointerUp={onPointerUp}
       disabled={disabled}
       className={
-        'flex min-h-[64px] min-w-0 items-center gap-2 rounded-xl border border-[var(--line)] px-3 text-left text-lg '
-        + 'font-semibold disabled:cursor-not-allowed disabled:opacity-40 hover:bg-[var(--bg-sunk)] lg:gap-3 lg:px-4'
+        'flex min-h-[64px] min-w-0 items-center gap-2 rounded-xl border px-3 text-left text-lg '
+        + 'font-semibold disabled:cursor-not-allowed disabled:opacity-40 lg:gap-3 lg:px-4 '
+        + ACTION_VARIANT_CLASS[look]
       }
     >
       <Icon name={icon} size="1.35em" />
       <span className="min-w-0 flex-1 break-words hyphens-auto" data-testid="teach-action-label">{label}</span>
       <kbd
         className={
-          'shrink-0 rounded border border-[var(--line)] bg-[var(--bg-sunk)] px-1.5 py-0.5 text-xs font-normal '
-          + 'lg:px-2 lg:text-sm'
+          'shrink-0 rounded border px-1.5 py-0.5 text-xs font-normal lg:px-2 lg:text-sm '
+          + (look === 'secondary' ? 'border-[var(--line)] bg-[var(--bg-sunk)]' : 'border-white/50 bg-white/15')
         }
       >
         {keyHint}
@@ -1161,6 +1239,7 @@ function SmallKeyButton({ icon, label, keyHint, disabled, primary, onClick, onPo
   return (
     <button
       type="button"
+      data-variant={primary ? 'primary' : 'secondary'}
       onClick={onClick}
       onPointerUp={onPointerUp}
       disabled={disabled}

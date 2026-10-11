@@ -175,10 +175,15 @@ function insertionOrigin(workspace) {
   };
 }
 
-/** Append the program as a new stack; returns `{ blockId, count }`. */
+/**
+ * Append the program as a new stack; returns `{ blockId, count, blockIds }` —
+ * `blockIds` every block of the new stack (its statements and their inputs),
+ * for the highlight after the Vormachen window closes
+ * (assetDocument.flashInserted).
+ */
 export function insertProgram(workspace, items, opts = {}) {
   const { json, count } = buildProgramBlocks(items, opts);
-  if (!workspace || !json || count === 0) return { blockId: null, count: 0 };
+  if (!workspace || !json || count === 0) return { blockId: null, count: 0, blockIds: [] };
   let block = null;
   Blockly.Events.setGroup(true);
   try {
@@ -193,5 +198,9 @@ export function insertProgram(workspace, items, opts = {}) {
   try {
     Blockly.getFocusManager().focusNode(block);
   } catch (_) { /* focus is a convenience */ }
-  return { blockId: block.id, count };
+  let blockIds = [block.id];
+  try {
+    blockIds = block.getDescendants(false).map((b) => b.id);
+  } catch (_) { /* the stack's head is enough to show */ }
+  return { blockId: block.id, count, blockIds };
 }

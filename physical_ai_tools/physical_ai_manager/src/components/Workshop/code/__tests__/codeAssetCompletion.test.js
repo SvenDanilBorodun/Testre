@@ -153,8 +153,8 @@ describe('assetAtOffset + assetHoverText', () => {
     expect(assetHoverText('place', 'Ablage', KNOWN)).toBe('Ziel „Ablage“ · x 12,3 cm · y 4,0 cm');
     expect(assetHoverText('place', 'Hoch', KNOWN)).toBe('Position „Hoch“ · x 10,0 cm · y −2,0 cm · z 15,0 cm');
     expect(assetHoverText('place', 'Mitte', KNOWN)).toBe(formatCode(CODE_DE.HOVER_CODE_PIN, 'Mitte'));
-    expect(assetHoverText('recording', 'Winken', KNOWN)).toBe('Aufnahme „Winken“ · 4,2 s · 3 Versionen');
-    expect(assetHoverText('recording', 'Tanz', KNOWN)).toBe('Aufnahme „Tanz“ · 1,0 s');
+    expect(assetHoverText('recording', 'Winken', KNOWN)).toBe('Bewegung „Winken“ · 4,2 s · 3 Versionen');
+    expect(assetHoverText('recording', 'Tanz', KNOWN)).toBe('Bewegung „Tanz“ · 1,0 s');
     expect(assetHoverText('recording', 'Weg', KNOWN)).toBe(formatCode(CODE_DE.ASSET_MISSING_RECORDING, 'Weg'));
     expect(assetHoverText('recording', 'Weg', { ...KNOWN, recordingsStatus: 'loading' })).toBeNull();
     expect(assetHoverText('object', 'wuerfel', KNOWN)).toBeNull();

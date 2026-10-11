@@ -29,6 +29,13 @@
 // is where „Einfügen" writes. A paste goes in exactly as copied — except the
 // lines Vormachen itself just put on the clipboard, which land like
 // „Einfügen" (vormachenClipboard.js, owner decision R4-O1).
+//
+// The UX round adds four: a hover over a robot method shows its signature
+// and German doc (methodDocs.js, the Methoden column's data); `commandsRef`
+// hands the page Rückgängig / Wiederholen for THIS view (the toolbar's
+// buttons — CodeMirror is importable only here); Strg+S saves through
+// `onSave` (owner decision K-1); and a reveal request carrying `flash`
+// lights up the lines an insertion just wrote.
 
 import React, { useEffect, useMemo, useRef } from 'react';
 import toast from 'react-hot-toast';
@@ -38,7 +45,7 @@ import { Decoration, EditorView, GutterMarker, gutter, hoverTooltip, keymap, lin
 import {
   Annotation, EditorSelection, EditorState, Compartment, Prec, StateEffect, StateField, countColumn,
 } from '@codemirror/state';
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap, indentWithTab, redo, undo } from '@codemirror/commands';
 import { bracketMatching, ensureSyntaxTree, indentOnInput, indentService, indentUnit, syntaxHighlighting,
   defaultHighlightStyle } from '@codemirror/language';
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
@@ -68,6 +75,7 @@ import {
 } from './codeInsert';
 import { SNIPPET_MIME } from './snippetMime';
 import { vormachenPasteLines } from './vormachenClipboard';
+import { methodAtOffset, methodHoverParts } from './methodDocs';
 import { appendSvgIcon, SVG_NS } from '../../icons/svg';
 
 const LANGUAGE_SUPPORT = { python, java };
@@ -202,6 +210,48 @@ function assetHover(language, knownRef) {
         dom.className = 'cm-edubotics-asset-hover';
         dom.textContent = hit.text;
         return { dom };
+      },
+    };
+  });
+}
+
+/**
+ * What a hover over position `pos` shows for a robot method
+ * (`robot.move_to` / `Robot.moveTo`, in code only): `{pos, end, signature,
+ * doc}`, or null.
+ */
+export function methodHoverAt(state, pos, language) {
+  const hit = methodAtOffset(state.doc.toString(), language, pos);
+  if (!hit) return null;
+  const { signature, doc } = methodHoverParts(hit.method, language);
+  return {
+    pos: hit.from, end: hit.to, signature, doc,
+  };
+}
+
+/** The method hover's DOM: the signature, then the doc — text only, never markup. */
+export function buildMethodHoverDom(parts) {
+  const dom = document.createElement('div');
+  dom.className = 'cm-edubotics-method-hover';
+  const code = document.createElement('code');
+  code.textContent = parts && parts.signature ? parts.signature : '';
+  const p = document.createElement('p');
+  p.textContent = parts && parts.doc ? parts.doc : '';
+  dom.appendChild(code);
+  dom.appendChild(p);
+  return dom;
+}
+
+function methodHover(language) {
+  return hoverTooltip((view, pos) => {
+    const hit = methodHoverAt(view.state, pos, language);
+    if (!hit) return null;
+    return {
+      pos: hit.pos,
+      end: hit.end,
+      above: true,
+      create() {
+        return { dom: buildMethodHoverDom(hit) };
       },
     };
   });
@@ -373,6 +423,54 @@ const runHighlightDecorations = EditorView.decorations.compute(
   },
 );
 
+/*
+ * The insert flash (R0-5): the lines an insertion just wrote light up for
+ * INSERT_FLASH_MS. `{from, to}` (1-based lines) or null; a line the document
+ * does not have is dropped, like the run line's.
+ */
+export const INSERT_FLASH_MS = 2500;
+const setInsertFlash = StateEffect.define();
+
+const insertFlashField = StateField.define({
+  create: () => null,
+  update(value, tr) {
+    let next = value;
+    for (const e of tr.effects) if (e.is(setInsertFlash)) next = e.value;
+    return next;
+  },
+});
+
+const insertFlashDecorations = EditorView.decorations.compute(
+  [insertFlashField],
+  (state) => {
+    const flash = state.field(insertFlashField);
+    if (!flash || !Number.isInteger(flash.from) || !Number.isInteger(flash.to)) return Decoration.none;
+    const marks = [];
+    for (let n = Math.max(1, flash.from); n <= Math.min(flash.to, state.doc.lines); n += 1) {
+      marks.push(Decoration.line({ class: 'cm-edubotics-insert-flash' }).range(state.doc.line(n).from));
+    }
+    return marks.length ? Decoration.set(marks) : Decoration.none;
+  },
+);
+
+/**
+ * Strg+S (Cmd+S on a Mac) inside the editor saves (owner decision K-1). ALWAYS
+ * bound, also without a save callback (a read-only viewer): the browser's
+ * „Seite speichern" must never open from inside the editor. The toolbar's
+ * window-level handler skips a contenteditable target, so a save never runs
+ * twice.
+ */
+function saveKeymap(onSaveRef) {
+  return Prec.high(keymap.of([{
+    key: 'Mod-s',
+    preventDefault: true,
+    run: () => {
+      onSaveRef.current?.();
+      return true;
+    },
+  }]));
+}
+
 /**
  * One marker per line, SET or not: an unset line still needs a press target,
  * because pressing it is how a breakpoint is set. The marker's DOM carries its
@@ -460,6 +558,12 @@ const theme = EditorView.theme({
   '.cm-edubotics-bp-set': { color: '#dc2626' },
   '.cm-edubotics-run-line': { backgroundColor: '#fef3c7' },
   '.cm-edubotics-asset-hover': { padding: '2px 6px', fontSize: '12px' },
+  '.cm-edubotics-method-hover': { padding: '4px 8px', maxWidth: '28rem', fontSize: '12px' },
+  '.cm-edubotics-method-hover code': {
+    display: 'block', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontWeight: '600',
+  },
+  '.cm-edubotics-method-hover p': { margin: '2px 0 0' },
+  '.cm-edubotics-insert-flash': { backgroundColor: '#ccfbf1' },
 });
 
 /**
@@ -592,13 +696,16 @@ export function pythonBackspace(view) {
 }
 
 function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef, withGutter, assetsRef,
-  indentCompartment, initialText) {
+  indentCompartment, initialText, onSaveRef) {
   const parseLint = parseLintExtensions(language);
   return [
+    saveKeymap(onSaveRef),
     lineNumbers(),
     breakpointLinesField,
     runHighlightField,
     runHighlightDecorations,
+    insertFlashField,
+    insertFlashDecorations,
     withGutter ? breakpointGutter(onToggleRef) : [],
     highlightActiveLineGutter(),
     highlightActiveLine(),
@@ -620,6 +727,7 @@ function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef,
     // One lint gutter: the parse markers bring their own when they are on.
     assetLintExtensions(language, assetsRef, parseLint.length === 0),
     assetHover(language, assetsRef),
+    methodHover(language),
     snippetDrop(language),
     vormachenPaste(language),
     readOnlyCompartment.of(EditorState.readOnly.of(false)),
@@ -656,6 +764,12 @@ function editorExtensions(language, callbacks, readOnlyCompartment, onToggleRef,
  * clamped to the document), `onCursorChange(line)` (the student's own cursor
  * moves and edits only — never a programmatic selection or an external value).
  *
+ * The UX round's four: `commandsRef` (a ref object the page owns: this view
+ * puts `{undo(), redo()}` there while it lives — the toolbar's Rückgängig /
+ * Wiederholen in code mode), `onSave()` (Strg+S inside the editor, K-1; read
+ * through a ref, never a rebuild), and `revealRequest.flash` (`{from, to}`:
+ * the lines an insertion wrote light up for INSERT_FLASH_MS).
+ *
  * The view is created once per (language, path); typing flows out through
  * onChange, and an external `value` that differs from the document (a rename,
  * an insertion from the drawer, a version restore) is applied as the SMALLEST
@@ -668,6 +782,7 @@ function CodeEditor({
   breakpointLines = null, onToggleBreakpoint = null,
   highlightLine = null, highlightKind = null,
   assets = null, assetSources = null, revealRequest = null, onCursorChange = null,
+  commandsRef = null, onSave = null,
 }) {
   const knowledge = useMemo(
     () => assets ?? (assetSources ? buildCodeAssetKnowledge(assetSources) : null),
@@ -678,12 +793,16 @@ function CodeEditor({
   const onChangeRef = useRef(onChange);
   const onToggleRef = useRef(onToggleBreakpoint);
   const onCursorRef = useRef(onCursorChange);
+  const onSaveRef = useRef(onSave);
+  const flashTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(flashTimerRef.current), []);
   const assetsRef = useRef(knowledge);
   const readOnlyRef = useRef(new Compartment());
   const indentRef = useRef(new Compartment());
   useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
   useEffect(() => { onToggleRef.current = onToggleBreakpoint; }, [onToggleBreakpoint]);
   useEffect(() => { onCursorRef.current = onCursorChange; }, [onCursorChange]);
+  useEffect(() => { onSaveRef.current = onSave; }, [onSave]);
 
   useEffect(() => {
     if (!hostRef.current) return undefined;
@@ -702,12 +821,29 @@ function CodeEditor({
           assetsRef,
           indentRef.current,
           value || '',
+          onSaveRef,
         ),
       }),
       parent: hostRef.current,
     });
     viewRef.current = view;
+    // The toolbar's Rückgängig / Wiederholen act on THIS view (R0-1); the
+    // focus goes back to the text, as after Strg+Z.
+    const commands = {
+      undo: () => {
+        const done = undo(view);
+        view.focus();
+        return done;
+      },
+      redo: () => {
+        const done = redo(view);
+        view.focus();
+        return done;
+      },
+    };
+    if (commandsRef) commandsRef.current = commands;
     return () => {
+      if (commandsRef && commandsRef.current === commands) commandsRef.current = null;
       view.destroy();
       viewRef.current = null;
     };
@@ -781,6 +917,18 @@ function CodeEditor({
       selection: EditorSelection.cursor(caret),
       effects: EditorView.scrollIntoView(caret, { y: 'center' }),
     });
+    // An insertion's reveal carries the lines it wrote: they light up, and
+    // go dark again after INSERT_FLASH_MS — unless the view was replaced.
+    const flash = revealRequest.flash;
+    if (flash && Number.isInteger(flash.from) && Number.isInteger(flash.to)) {
+      view.dispatch({ effects: setInsertFlash.of({ from: flash.from, to: flash.to }) });
+      // A newer flash restarts the clock (an older timer must not end it).
+      clearTimeout(flashTimerRef.current);
+      flashTimerRef.current = setTimeout(() => {
+        flashTimerRef.current = null;
+        if (viewRef.current === view) view.dispatch({ effects: setInsertFlash.of(null) });
+      }, INSERT_FLASH_MS);
+    }
     // One reveal per NONCE: the request object's identity and line are not
     // the trigger, and neither is the file on screen — a file switch with an
     // unchanged request used to replay the previous file's line (review m5).

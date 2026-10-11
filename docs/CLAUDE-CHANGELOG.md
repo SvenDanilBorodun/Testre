@@ -6,6 +6,110 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-11 — Roboter Studio UX round (mode frame, panes, Sammlung, Methoden, Vormachen)
+
+**Why.** A step-0 live audit of Roboter Studio (a real app shell, a fake rosbridge and cloud, 92 BEFORE
+screenshots at 1440/1366/390 px) showed that students could not tell the simulator from the real robot (the only
+signal was a blue run-bar banner), that every pane had a fixed size (at 1366×768 only 18 px of the simulator's 2D
+table were visible), that the Sammlung sat at the BOTTOM of the toolbox under a bare separator with „Aufnahmen"
+blue like the static „Bewegung" category, and that a Python/Java student had no command reference beyond the
+autocomplete list. The audit also found eleven defects the owner decided on as R0-1…R0-11: a code-mode toolbar
+whose Rückgängig/Wiederholen/Ansicht/Export/Import/Theme acted on a null Blockly workspace (R0-1); a „Letzte
+Speicherung" that showed the LOCAL autosave, „gerade eben" right after opening (R0-2); the simulator's two
+banners eating the 2D table (R0-3); a card's play button switching to the simulator unannounced (R0-4); a
+Vormachen window that was ~60 % empty space with a „Punkte" jargon review (R0-5); a reference block that said
+„Ziel" for a Position (R0-6); „Benutzt in" rows that printed a block's `toString()` (R0-7); „Kalibrierung neu
+starten" offered in the simulator (R0-8); a 3D twin whose first view was a 37.8× close-up at 1440 px (R0-9); a
+flyout scrollbar line left in the workspace after the flyout closed (R0-10); and the Vormachen chooser's menu
+clipped at the right edge at 1366 px (R0-11).
+
+**What.**
+- *A — mode frame and badge.* `WorkshopPage`'s root carries `border-4` orange (real) / blue (simulator) and
+  `data-mode` on the existing element (no wrapper, no transform: TeachOverlay is `fixed`); `ModeBadge` („ECHTER
+  ROBOTER" / „SIMULATOR") with a run dot that pulses only on a live link; a switch toasts once; the Vormachen
+  card carries the orange frame and a static badge. Truth fix: `simEntryBlockReason` gains `realRun` (a real run
+  that runs, pauses or starts blocks entering the simulator; not heartbeat-gated) and `simRun` covers paused and
+  starting.
+- *B — resizable panes.* One primitive, `layout/ResizeHandle.jsx` (a CSS variable on its parent, rAF during a
+  drag, one commit per release/key/double-click, re-clamp of the COMMITTED value on a parent resize), in six
+  places: editor↔dock, the dock split, editor↔simulator, 3D↔table, file list↔code, code↔Methoden.
+  `layout/layoutPrefs.js` holds one literal-const reader/writer per key; six new MACHINE keys (13 in all).
+  SimScene's 2D table is FITTED into its area from md up, the 3D floor drops to 160 px (S-3), the notice gets a
+  close button and the run-bar banner goes.
+- *C — the „Methoden" column.* `robot_api.py` gains JSON-only fields (`ApiParam.doc_de`, `returns_de`,
+  `doc_de_java` on the 7 rows whose doc names Python, `example`/`example_var`, `TYPE_DOCS`) and a sixth artifact,
+  `code/robot_api_docs.json` (`export_docs_json`; `_java_overload_specs` makes the overload enumeration data, the
+  stub text byte-identical). Every example is checked by `code_rpc._validate_call`, `ast.parse`, and javac under
+  exactly the Java starter's imports (the Greifobjekt example is fully qualified because the starter imports only
+  `edubotics.Robot`, M3). The lazy `MethodenPanel` groups the commands like the toolbox (`methodGroups.js` reads
+  `buildToolbox()`), fills examples with the student's own names, and inserts through
+  `snippetLines({kind:'call'})`; `CodeEditor` explains a method under the pointer; the column docks, floats when
+  narrow, or folds to a rail, remembered on the PC.
+- *D — Sammlung.* The toolbox opens with „Vorschläge", the heading „Meine Sammlung" and the four groups, then
+  „Bausteine" (a `ToolboxSeparator` subclass of kind `heading`); one colour source (`sammlungTabs.js`,
+  Bewegungen rose); the object noun becomes „Bewegung(en)" and the static motion category „Arm" (S-1); 32-px card
+  controls with tooltips, titles cut with „…" only when cut, a grey „nicht benutzt", accent teach buttons, ready
+  „bewege zu" blocks, a simulator hint instead of the teach rows; the drawer opens a row as an accordion with a
+  play button per row, empty states with creation buttons and „In 3D zeigen"; „Benutzt in" says „Schritt N in
+  Hauptprogramm" / „main.py, Zeile 8" (R0-7); a reference block labels its kind (R0-6) through a field-instance
+  `doValueUpdate_` wrap, because `blocks.append` loads with events disabled.
+- *E — Vormachen in the header.* The chooser leaves the toolbar for the studio header, with its refusal visible
+  beside it (`aria-describedby`); `MenuButton` flips to the inside of the viewport (R0-11).
+- *R0-1/R0-2/K-1.* In code mode the toolbar's undo/redo act on CodeMirror (`commandsRef`) and the Blockly-only
+  tools are hidden; „Letzte Speicherung" is the cloud save, judged by content against the last save's baseline
+  (`baselineRef`, a scene change counts, M1a/M1b); Strg+S inside the code editor saves (owner decision K-1).
+- *R0-5.* The Vormachen window is redesigned (content-sized, red record button, REC pill + progress to 2:00,
+  review „Bewegung prüfen" without the action row, filled „Behalten" / „Als Programm einfügen", a labelled strip
+  with a time axis, no point count) and what „Als Programm einfügen" wrote flashes for 2.5 s in both notations.
+- *R0-9, root cause.* three's `FileLoader` coalesces a request for a URL already in flight WITHOUT calling
+  `manager.itemStart`; the Startseite's twin was still fetching the same STLs, so the studio twin's
+  `LoadingManager.onLoad` fired after the URDF text alone and framed a mesh-less arm. Evidence: with
+  `edubotics_home_view` unset (hero twin mounted) the close-up reproduced at 1440×900; with the camera view (no
+  hero twin) the framing was right; the canvas size was constant during framing. Fix: the framing pass keys on
+  the twin's own `pendingMeshes`.
+- *R0-10, root cause.* Blockly hides a scrollbar with the SVG attribute `display="none"`; Tailwind Preflight's
+  `svg { display: block }` is a CSS rule and beats a presentation attribute, so the flyout's vertical scrollbar
+  stayed drawn. Evidence: computed `display: block` with the attribute set, Preflight the only matching rule;
+  `.injectionDiv svg[display='none'] { display: none; }` made it `none` (jsdom applies the same cascade, so a
+  unit test pins it).
+- *Plan corrections, re-derived from the code:* C1 the amber camera-mark stroke is CharucoOverlay's
+  calibration dots, so `CameraFeedOverlay.jsx` was not touched; C2 MACHINE keys 7 → 13, not 12 (the dismissed
+  sim hint); C3 RightDock set `--dock-w` on itself and had to stop; C4 `loadingManager.onLoad` was not a
+  reliable framing pass (R0-9); C5 BlocklyWorkspace forwards UI events too, so `onChange` gains the event;
+  C6 a 220-px 3D floor left no visible table, so 160 px / 0.40 and a fitted table; C7 every JSON-only string
+  passes `_is_german`, and 7 rows need `doc_de_java`; C8 `Greifziel` is the nested `Robot.Greifziel`, so
+  examples carry refs; C9 `JSON.parse` drops `.0`, so examples render by parameter kind with a lockstep test;
+  C10 the `simRun` title said „Simulationslauf"; C11 `Field.setValue` fires a change event, so the kind label is
+  set with `fireChangeEvent = false`; C12 an unregistered toolbox kind is skipped with a console warning, so
+  tests that inject `buildToolbox()` register the heading.
+
+**Measured.** Header (real fonts, `probe_header3.mjs`): at 1366 and 1440 px title, hint, badge, Vormachen with
+its reason, „Abgeben" and the simulator toggle fit ONE row (52 px; 47 before) in every state; only the
+LeaderToggle wraps it (85 px; S-2, accepted). At 390 px, before M2/M-1 the running badge ended at x 400–406 and
+the right group was 570 px wide (clipped); after, every header element ends at x ≤ 374. Simulator stage at
+1366×768: 18 px of a 407-px table were visible; with the banners gone and the fit, 3D ≈ 174 px and the whole
+table ≈ 148 × 240 px (1440×900: 3D ≈ 227 px, table ≈ 227 × 368 px). Baselines on a135bdde → after the round:
+vitest 238 files / 4268 passed → 257 files / 4588 passed (+2 expected failures both times); server tests
+2830 → 2849 passed (22 skipped); `robotis_ai_setup` 2256 → 2260 tests (82 skipped with a JDK); the entry chunk
+2 002 227 → 2 033 670 B, with CodeMirror, three, `export_docs_json` and the docs JSON's text absent from it.
+
+**Review 1** (verdict NOT READY; all findings applied). M1a a simulator scene change counts as unsaved; M1b a
+save sets a content baseline, because Blockly's late events made a counter end „Nicht gespeichert" after a
+rename's save; M2 the header's right group shrinks and wraps below lg instead of being clipped at 390 px; M3
+the Greifobjekt Java example is fully qualified and the javac test wraps every example with exactly the
+starter's imports; M4 every breaking test listed with the branch that edits it, cross-owner rows included; M5
+one worktree per implementer, merged I3 → I1 → I2 with two integration commits. m1 „Arm" folded in everywhere;
+m2 `showBelowMd` keeps the dock split's handle on a phone; m3 the fitted table only from md up; m4 `useId`
+above the early return; m5 no doubled quotes in „Benutzt in"; m6 a resize re-clamps the committed value; m7 the
+flyout's simulator hint as three short labels; m8 dead autosave strings and fields removed, the R3-O3 sentence
+replaced; m9 the marker key carries a highlighted Position's z; m10 the run dot pulses only on a live link;
+m11 no phantom „forced forward" in the contract notes; m12 no window-level Strg+Y in code mode. The owner chose
+S-1 („Arm"), S-2 (the leader-rig header wrap) and S-3 (160 px / 40 % / fitted table), and did not select the
+over-building items O1–O3. **Review 2** added M-A (the kind label follows the NAME field instance, not change
+events), M-B (the two resize strings arrive with their handles), m-1…m-9 and the owner's K-1 (Strg+S inside the
+code editor). **Review 3** added M-1 (the header's left group wraps below lg) and m-a…m-g (owner: card titles
+cut with „…", full name on hover and in the drawer).
+
 ### Unreleased, 2026-10-07 — the amd64 server image ships no torchcodec (release 2.27.0 blocker)
 
 **Why.** After PR #35 merged, `docker-publish.yml::smoke-test (amd64)` failed in the new Daten 2.0 edit-engine

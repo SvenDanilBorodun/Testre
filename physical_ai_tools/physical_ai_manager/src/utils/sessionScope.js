@@ -136,6 +136,17 @@ export const MACHINE_SCOPED_KEYS = Object.freeze([
   // and layout like the dock keys above. It replaced `edubotics_urdf_open`, the
   // old floating 3D panel's toggle (Aufnahme 2.0).
   'edubotics_record_view',
+  // Window furniture of the shared PC, the same class as the dock keys above
+  // (components/Workshop/layout/layoutPrefs.js): the simulator's width and its
+  // 3D/table split, a dismissed simulator notice, the code file list's and the
+  // Methoden column's widths, and whether that reference column is open. None
+  // names the student or their program.
+  'edubotics_workshop_sim_width',
+  'edubotics_workshop_sim_split',
+  'edubotics_workshop_sim_hint_dismissed',
+  'edubotics_code_sidebar_width',
+  'edubotics_code_methods_width',
+  'edubotics_code_methods_open',
 ]);
 
 /**

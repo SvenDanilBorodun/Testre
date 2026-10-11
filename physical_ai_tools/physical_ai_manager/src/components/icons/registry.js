@@ -67,6 +67,8 @@ import {
   LuGamepad2,
   LuGitCompareArrows,
   LuGraduationCap,
+  LuGripHorizontal,
+  LuGripVertical,
   LuHand,
   LuHardDrive,
   LuHistory,
@@ -86,6 +88,7 @@ import {
   LuMenu,
   LuMerge,
   LuMinus,
+  LuMonitorPlay,
   LuNotebookPen,
   LuPalette,
   LuPause,
@@ -137,6 +140,14 @@ export const ICONS = Object.freeze({
   lockOpen: LuLockOpen,
   robotArm: IconRobotArm,
   leaderArm: IconLeaderArm,
+
+  // Roboter Studio's mode and panes: the simulator (ModeBadge, the switch
+  // toast) and the grips of the pane dividers (layout/ResizeHandle.jsx: a
+  // vertical bar between left and right panes, a horizontal one between
+  // stacked panes).
+  simulator: LuMonitorPlay,
+  resizeGrip: LuGripVertical,
+  resizeGripRow: LuGripHorizontal,
 
   // Running, stepping, reviewing. The media controls are SOLID (see
   // SOLID_ICON_NAMES below); `record` above is the Bewegung KIND, an outline,

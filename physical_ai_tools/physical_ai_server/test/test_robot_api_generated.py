@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The five checked-in artifacts ARE the renderers' output, byte for byte.
+"""The six checked-in artifacts ARE the renderers' output, byte for byte.
 
 ``robot_api.render_all()`` maps a repo-relative path to the content the table
 renders; this file diffs each against the tree and refuses a drift. To
@@ -65,13 +65,14 @@ def test_generated_file_is_byte_equal_to_the_renderer(rel):
         f'{rel} drifted from robot_api.py — regenerate (see module docstring)')
 
 
-def test_the_five_paths_are_the_five_of_the_spec():
+def test_the_six_paths_are_the_six_of_the_spec():
     assert set(_RENDERED) == {
         'robotis_ai_setup/docker/code_runner/runner/lib/robot.py',
         'robotis_ai_setup/docker/code_runner/runner/java/edubotics/Robot.java',
         'robotis_ai_setup/docker/code_runner/runner/java/edubotics/Greifobjekt.java',
         'robotis_ai_setup/docker/code_runner/runner/java/edubotics/RpcClient.java',
         'physical_ai_tools/physical_ai_manager/src/components/Workshop/code/robot_api.json',
+        'physical_ai_tools/physical_ai_manager/src/components/Workshop/code/robot_api_docs.json',
     }
 
 

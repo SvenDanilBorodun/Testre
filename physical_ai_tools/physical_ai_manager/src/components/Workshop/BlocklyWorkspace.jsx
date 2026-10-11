@@ -551,7 +551,9 @@ function BlocklyWorkspace({
         if (typeof fn !== 'function') return;
         try {
           const json = Blockly.serialization.workspaces.save(workspace);
-          fn(json);
+          // The event rides along: the page counts only a non-UI event as an
+          // edit (a selection or a flyout opening changes no document).
+          fn(json, event);
         } catch (e) {
           console.error('BlocklyWorkspace: failed to serialize', e);
         }

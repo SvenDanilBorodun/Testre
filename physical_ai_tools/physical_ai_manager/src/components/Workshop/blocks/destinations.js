@@ -12,8 +12,10 @@ import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
 import { setEditValidator } from './fieldLoad';
 import { iconMarkup } from '../../icons/svg';
+import { SAMMLUNG_COLOURS } from '../sammlung/sammlungTabs';
 
-const DEST_COLOR = '#f59e0b';
+// The Sammlung „Ziele" colour (sammlung/sammlungTabs.js, the one source).
+export const DEST_COLOR = SAMMLUNG_COLOURS.ziele;
 
 // Sentinel value shown in the X/Y/Z labels of a fresh destination_pin
 // block. Updated to the world coordinates returned by /workshop/mark_destination
@@ -181,15 +183,22 @@ export const DESTINATION_BLOCKS = [
     // STATEMENT (it can't plug into a value socket), so move_to / drop_at had
     // no producible value to fill their DESTINATION input. This block outputs
     // the pinned NAME string; the runtime resolves it against ctx.destinations.
+    //
+    // KIND („Ziel" / „Position", owner decision R0-6) is a plain field_label:
+    // NOT serializable, so the saved JSON and the server keep only NAME. The
+    // label follows the name (edubotics_destination_ref_kind below).
     type: 'edubotics_destination_ref',
     message0: DE.DESTINATION_REF,
-    args0: [{ type: 'field_input', name: 'NAME', text: 'A' }],
+    args0: [
+      { type: 'field_label', name: 'KIND', text: DE.DESTINATION_REF_ZIEL },
+      { type: 'field_input', name: 'NAME', text: 'A' },
+    ],
     output: 'String',
     colour: DEST_COLOR,
     tooltip:
       'Verweist auf ein gepinntes Ziel (gleicher Name wie ein „Pin"-Block). '
       + 'Ziehe diesen Block in „bewege zu" oder „lege ab bei".',
-    extensions: ['edubotics_validate_destination_name'],
+    extensions: ['edubotics_validate_destination_name', 'edubotics_destination_ref_kind'],
   },
 ];
 
@@ -209,6 +218,22 @@ export function applyPinnedCoordinates(block, world_x, world_y, world_z) {
   return true;
 }
 
+// The kind of a destination NAME in the document: `(workspace, name) => 'pose'
+// | 'pin' | null`. Injected, never imported: sammlung/destinationStore.js
+// imports this module, so importing the store here would be a cycle.
+// BlocklyWorkspace::registerAllBlocksOnce sets it to a store lookup; without a
+// resolver (tests that register blocks on their own) every label reads „Ziel".
+let kindResolver = null;
+
+/** Set the destination-kind resolver; a non-function clears it. */
+export function setDestinationKindResolver(fn) {
+  kindResolver = typeof fn === 'function' ? fn : null;
+}
+
+// sammlung/destinationStore.js::DESTINATIONS_CHANGE_EVENT, spelled here for the
+// same reason (no import of the store); a test pins the two equal.
+export const DESTINATIONS_CHANGE_EVENT_TYPE = 'edubotics_destinations_change';
+
 function registerExtensionOnce(name, fn) {
   if (!Blockly.Extensions.isRegistered(name)) {
     Blockly.Extensions.register(name, fn);
@@ -222,6 +247,51 @@ export function registerDestinationBlocks() {
     // fieldLoad.js). „Ablage.1" used to load as „Ablage1", and a name that was
     // only punctuation collapsed to the block DEFAULT, so two pins could merge.
     setEditValidator(this.getField('NAME'), nameValidator);
+  });
+  // R0-6: the reference names its kind — „Position <name>" when the name is a
+  // Position of the document's store, „Ziel <name>" otherwise.
+  registerExtensionOnce('edubotics_destination_ref_kind', function () {
+    const block = this;
+    this.updateKindLabel_ = () => {
+      let kind = null;
+      try {
+        // A flyout block asks the workspace the flyout belongs to.
+        const ws = block.workspace && block.workspace.isFlyout
+          ? block.workspace.targetWorkspace : block.workspace;
+        kind = kindResolver && ws ? kindResolver(ws, String(block.getFieldValue('NAME') || '')) : null;
+      } catch (_) {
+        kind = null;
+      }
+      const label = kind === 'pose' ? DE.DESTINATION_REF_POSE : DE.DESTINATION_REF_ZIEL;
+      const field = block.getField('KIND');
+      // `false`: no change event, so no undo entry and nothing for the page's
+      // „unsaved" status to count.
+      if (field && field.getValue() !== label) field.setValue(label, false);
+    };
+    // The label follows the NAME by a wrap of this field INSTANCE's
+    // doValueUpdate_, not by change events: Blockly's blocks.append (a flyout
+    // block, a drag out of the flyout, paste, duplicate, the undo of a delete,
+    // Vormachen's insert) loads fields with events DISABLED, so at init NAME is
+    // still „A" and the real name arrives with no event. loadState → setValue
+    // → doValueUpdate_ runs on every path.
+    const nameField = this.getField('NAME');
+    if (nameField && typeof nameField.doValueUpdate_ === 'function') {
+      const orig = nameField.doValueUpdate_;
+      nameField.doValueUpdate_ = function updateNameAndKind(value) {
+        orig.call(this, value);
+        block.updateKindLabel_();
+      };
+    }
+    // The one trigger the wrap cannot see: a Ziel/Position added, renamed,
+    // deleted or restored in the store changes no field of this block.
+    // FINISHED_LOADING is a harmless re-check.
+    this.setOnChange((e) => {
+      if (!e) return;
+      if (e.type === DESTINATIONS_CHANGE_EVENT_TYPE || e.type === Blockly.Events.FINISHED_LOADING) {
+        block.updateKindLabel_();
+      }
+    });
+    this.updateKindLabel_();
   });
   // Batch 2b — append the clickable „fahre dorthin" button as a third row on the
   // pin block. FieldImage with an onClick is Blockly's button-in-block idiom;

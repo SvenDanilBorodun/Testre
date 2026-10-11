@@ -16,7 +16,9 @@
 import { describe, it, expect } from 'vitest';
 import { DE } from '../../blocks/messages_de';
 import { isIconName } from '../../../icons/registry';
-import { NEW_ACTION_ROWS, newActionsFor, teachActionFor } from '../newActions';
+import {
+  NEW_ACTION_ROWS, newActionsFor, teachActionFor, teachHintFor, teachHintLinesFor,
+} from '../newActions';
 
 const RIG = { hardware: true, teach: true, simMode: false, pinCamera: true, pinSim: true };
 const SIM = { ...RIG, simMode: true, pinCamera: false };
@@ -82,5 +84,30 @@ describe('newActionsFor', () => {
     expect(teachActionFor(RIG, 'positionen')).toMatchObject({ id: 'teachPose' });
     expect(teachActionFor(RIG, 'variablen')).toBeNull();
     expect(teachActionFor(SIM, 'ziele')).toBeNull();
+  });
+});
+
+describe('the simulator hint (teachHintFor / teachHintLinesFor)', () => {
+  it('in the simulator on a rig that can teach: one sentence, or three short lines, for the three teach tabs', () => {
+    for (const tab of ['aufnahmen', 'ziele', 'positionen']) {
+      expect(teachHintFor(SIM, tab)).toBe(DE.TEACH_SIM_HINT);
+      expect(teachHintLinesFor(SIM, tab)).toEqual([
+        DE.TEACH_SIM_HINT_LINE1, DE.TEACH_SIM_HINT_LINE2, DE.TEACH_SIM_HINT_LINE3,
+      ]);
+    }
+    expect(DE.TEACH_SIM_HINT).toBe('Vormachen geht nur am echten Roboter – beende zuerst den Simulator.');
+    // The three lines ARE the sentence.
+    expect(teachHintLinesFor(SIM, 'ziele').join(' ')).toBe(DE.TEACH_SIM_HINT);
+  });
+
+  it('nothing on the rig, for Variablen, without teach, without hardware, or without capabilities', () => {
+    expect(teachHintFor(RIG, 'aufnahmen')).toBeNull();
+    expect(teachHintLinesFor(RIG, 'aufnahmen')).toBeNull();
+    expect(teachHintFor(SIM, 'variablen')).toBeNull();
+    expect(teachHintLinesFor(SIM, 'variablen')).toBeNull();
+    expect(teachHintFor({ ...SIM, teach: false }, 'aufnahmen')).toBeNull();
+    expect(teachHintFor({ ...SIM, hardware: false }, 'aufnahmen')).toBeNull();
+    expect(teachHintFor(null, 'aufnahmen')).toBeNull();
+    expect(teachHintLinesFor(undefined, 'ziele')).toBeNull();
   });
 });

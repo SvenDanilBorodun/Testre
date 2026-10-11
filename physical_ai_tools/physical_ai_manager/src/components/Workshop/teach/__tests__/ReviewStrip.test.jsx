@@ -94,3 +94,30 @@ describe('ReviewStrip', () => {
     expect(start()).toHaveAttribute('tabindex', '-1');
   });
 });
+
+// R0-5: the strip is labelled — „Anfang" / „Ende" under their handles and a
+// time axis at 0 %, 50 % and 100 % of the take — without touching the sliders.
+describe('ReviewStrip — labels and axis', () => {
+  test('„Anfang" and „Ende" stand under their handles, follow them, and are hidden from assistive tech', () => {
+    render(<Harness initial={{ startIndex: 1, endIndex: 4 }} onChange={vi.fn()} />);
+    const labels = screen.getByTestId('teach-strip-handle-labels');
+    expect(labels).toHaveAttribute('aria-hidden', 'true');
+    const [anfang, ende] = Array.from(labels.childNodes);
+    expect(anfang).toHaveTextContent(DE.TEACH_HANDLE_START);
+    expect(ende).toHaveTextContent(DE.TEACH_HANDLE_END);
+    expect(anfang.style.left).toBe(start().style.left);
+    expect(ende.style.left).toBe(end().style.left);
+    fireEvent.keyDown(start(), { key: 'ArrowRight' });
+    expect(anfang.style.left).toBe(start().style.left);
+    // The sliders keep their own names (the labels add none).
+    expect(screen.getAllByRole('slider').map((s) => s.getAttribute('aria-label')))
+      .toEqual([DE.TEACH_HANDLE_START, DE.TEACH_HANDLE_END]);
+  });
+
+  test('three ticks name the start, the middle and the end of the take in seconds', () => {
+    render(<Harness initial={{ startIndex: 0, endIndex: 5 }} onChange={vi.fn()} />);
+    const axis = screen.getByTestId('teach-strip-axis');
+    expect(axis).toHaveAttribute('aria-hidden', 'true');
+    expect(Array.from(axis.childNodes).map((n) => n.textContent)).toEqual(['0,0 s', '0,7 s', '1,4 s']);
+  });
+});

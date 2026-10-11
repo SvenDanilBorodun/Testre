@@ -28,6 +28,13 @@
  * later touch of another pointer — the whole editor goes dead on a touch
  * screen (a mouse, whose id never changes, hides this).
  *
+ * TEXT THAT FITS (owner decision m-g). The title and the second line are cut to
+ * the room left of the controls (`fitCardText`) and end with „…" only when
+ * they really were cut; the full title is the card's own SVG <title> (its
+ * tooltip) and the drawer shows the whole name. Text is measured with an
+ * OffscreenCanvas in the card's own font where one exists (Chromium/WebView2),
+ * else estimated wide (jsdom).
+ *
  * LIFETIME. Blockly disposes flyout items when it RE-POPULATES the flyout (a
  * re-open, `refreshToolboxSelection`), not on hide. So a card registers nothing
  * outside its own SVG subtree — no document listener, no subscription — and a
@@ -43,13 +50,30 @@ import { getProviderForWorkspace } from './toolboxCategories';
 export const ASSET_CARD_FLYOUT_TYPE = 'edubotics_asset_card';
 
 export const CARD_WIDTH = 240;
-const CARD_BASE_HEIGHT = 38;
+const CARD_BASE_HEIGHT = 46;
 const CARD_CHIP_ROW_HEIGHT = 20;
 const STRIPE_WIDTH = 4;
-const HIT_SIZE = 24;
-const HIT_ICON_SIZE = 14;
+// The play and more controls: 32 × 32 hit areas, from y 7 to 39.
+const HIT_SIZE = 32;
+const HIT_ICON_SIZE = 16;
+const HIT_TOP = 7;
+// x of the play control (when shown) and of the more control.
+const PLAY_X = CARD_WIDTH - 2 * HIT_SIZE - 8;
+const MORE_X = CARD_WIDTH - HIT_SIZE - 4;
+// Title and second line start here and stop 6 px before the first control.
+const TEXT_LEFT = 12;
+const TEXT_GAP = 6;
+const TITLE_FONT = Object.freeze({ weight: 600, size: 13 });
+const META_FONT = Object.freeze({ weight: 400, size: 11 });
+// Where text cannot be measured (jsdom): an estimate per code point that errs
+// WIDE for every glyph but „W" (Chromium, 600 13 px sans-serif: „W" 12.3,
+// „M" 10.8, typical names 6.2–7.7 px per character).
+const ESTIMATE_EM_PER_CHAR = 0.95;
+const ELLIPSIS = '…';
 
 const CHIP_COLOURS = Object.freeze({
+  // „nicht benutzt": a fact, not a problem.
+  muted: { fill: '#f3f4f6', text: '#4b5563' },
   ok: { fill: '#dcfce7', text: '#166534' },
   warn: { fill: '#fef3c7', text: '#92400e' },
   bad: { fill: '#fee2e2', text: '#991b1b' },
@@ -74,6 +98,69 @@ function textNode(parent, attrs, text) {
 }
 
 const str = (v) => (typeof v === 'string' ? v : '');
+
+/**
+ * `text` when `measure(text) <= maxWidth`; else the longest prefix (by code
+ * points, trailing spaces trimmed) that fits WITH „…", plus „…". „…" only
+ * when it really cut. Pure.
+ */
+export function fitCardText(text, maxWidth, measure) {
+  const s = str(text);
+  if (measure(s) <= maxWidth) return s;
+  const points = Array.from(s);
+  for (let n = points.length - 1; n > 0; n -= 1) {
+    const prefix = points.slice(0, n).join('').replace(/\s+$/u, '');
+    if (prefix && measure(prefix + ELLIPSIS) <= maxWidth) return prefix + ELLIPSIS;
+  }
+  return ELLIPSIS;
+}
+
+let measureContext;
+function measureContext2d() {
+  if (measureContext === undefined) {
+    measureContext = null;
+    try {
+      if (typeof OffscreenCanvas !== 'undefined') {
+        measureContext = new OffscreenCanvas(1, 1).getContext('2d') || null;
+      }
+    } catch (_) {
+      measureContext = null;
+    }
+  }
+  return measureContext;
+}
+
+/**
+ * A text-width function for the card's font: an OffscreenCanvas 2-D context in
+ * a browser, else `0.95 × fontSize` per code point (wide on purpose).
+ */
+export function cardTextMeasure(fontWeight, fontSize, family = 'sans-serif') {
+  const ctx = measureContext2d();
+  if (ctx) {
+    const font = `${fontWeight} ${fontSize}px ${family || 'sans-serif'}`;
+    return (text) => {
+      ctx.font = font;
+      return ctx.measureText(text).width;
+    };
+  }
+  return (text) => Array.from(text).length * ESTIMATE_EM_PER_CHAR * fontSize;
+}
+
+function fontFamilyOf(el) {
+  try {
+    const family = window.getComputedStyle(el).fontFamily;
+    return typeof family === 'string' && family ? family : 'sans-serif';
+  } catch (_) {
+    return 'sans-serif';
+  }
+}
+
+function svgTitle(parent, text) {
+  const title = document.createElementNS(Blockly.utils.dom.SVG_NS, 'title');
+  title.appendChild(document.createTextNode(text));
+  parent.appendChild(title);
+  return title;
+}
 
 /**
  * Chip positions, wrapping to a new row instead of dropping a chip: the chips
@@ -161,6 +248,9 @@ export class AssetCard {
     const { Svg } = Blockly.utils;
     const name = str(this.state.assetName);
     const meta = str(this.state.meta);
+    // The whole title: the asset's name (the view model's `title` may already
+    // be shortened).
+    const fullTitle = name || str(this.state.title);
     this.svgGroup = svg(Svg.G, {
       id: this.id,
       class: 'eduAssetCard',
@@ -168,6 +258,14 @@ export class AssetCard {
       role: 'group',
       'aria-label': meta ? `${name} — ${meta}` : name,
     }, this.workspace.getCanvas());
+    // The full title is the card's own tooltip (its FIRST child); the
+    // aria-label above still names the card.
+    svgTitle(this.svgGroup, fullTitle);
+    const canPreview = this.state.canPreview === true;
+    const room = (canPreview ? PLAY_X : MORE_X) - TEXT_GAP - TEXT_LEFT;
+    const family = fontFamilyOf(this.svgGroup);
+    const titleText = fitCardText(fullTitle, room, cardTextMeasure(TITLE_FONT.weight, TITLE_FONT.size, family));
+    const metaText = fitCardText(meta, room, cardTextMeasure(META_FONT.weight, META_FONT.size, family));
     svg(Svg.RECT, {
       width: this.width, height: this.height, rx: 6, ry: 6,
       fill: '#ffffff', stroke: '#e5e7eb',
@@ -176,36 +274,39 @@ export class AssetCard {
       width: STRIPE_WIDTH, height: this.height, fill: str(this.state.colour) || '#64748b',
     }, this.svgGroup);
     textNode(this.svgGroup, {
-      x: 12, y: 17, 'font-size': 13, 'font-weight': 600, fill: '#111827',
-    }, str(this.state.title));
-    textNode(this.svgGroup, { x: 12, y: 32, 'font-size': 11, fill: '#6b7280' }, meta);
+      x: TEXT_LEFT, y: 17, 'font-size': TITLE_FONT.size, 'font-weight': TITLE_FONT.weight, fill: '#111827',
+    }, titleText);
+    textNode(this.svgGroup, {
+      x: TEXT_LEFT, y: 32, 'font-size': META_FONT.size, fill: '#6b7280',
+    }, metaText);
     for (const { chip, x, row, width } of this.chipLayout) {
       const colours = CHIP_COLOURS[chip.level] || CHIP_COLOURS.ok;
-      const y = 40 + row * CARD_CHIP_ROW_HEIGHT;
+      // The same 2-px gap below the base area as ever.
+      const y = CARD_BASE_HEIGHT + 2 + row * CARD_CHIP_ROW_HEIGHT;
       svg(Svg.RECT, {
         x, y, width, height: 16, rx: 8, ry: 8, fill: colours.fill,
       }, this.svgGroup);
       textNode(this.svgGroup, { x: x + 6, y: y + 12, 'font-size': 10, fill: colours.text }, chip.text);
     }
-    if (this.state.canPreview === true) {
+    if (canPreview) {
       // While the leader-status bridge has not answered once, ▶ is drawn
       // DISABLED with the reason as its tooltip/description, and a press
       // dispatches nothing. The flyout re-populates on the provider snapshot
       // change, so the answer brings back an enabled ▶ (a card never updates in
       // place).
       this.previewPending = this.state.previewPending === true;
-      this.previewEl = this.hitArea_(this.width - 2 * HIT_SIZE - 8, 'play', DE.PREVIEW_START,
+      this.previewEl = this.hitArea_(PLAY_X, 'play', DE.PREVIEW_START,
         this.previewPending ? DE.PREVIEW_BLOCK_LEADER_PENDING : null);
     } else {
       this.previewPending = false;
       this.previewEl = null;
     }
-    this.manageEl = this.hitArea_(this.width - HIT_SIZE - 4, 'more', DE.CARD_MANAGE);
+    this.manageEl = this.hitArea_(MORE_X, 'more', DE.CARD_MANAGE);
   }
 
-  // `disabledReason`: a non-empty string draws the control disabled
-  // (`aria-disabled`, greyed) with that reason as an SVG <title> — the tooltip
-  // and, next to the aria-label, the accessible description.
+  // Every control carries an SVG <title> (its tooltip): its label, or — drawn
+  // disabled (`aria-disabled`, greyed) — the `disabledReason`, which is then
+  // also the accessible description next to the aria-label.
   hitArea_(x, iconName, label, disabledReason = null) {
     const { Svg } = Blockly.utils;
     const disabled = typeof disabledReason === 'string' && disabledReason !== '';
@@ -213,15 +314,11 @@ export class AssetCard {
       class: disabled ? 'eduAssetCardButton eduAssetCardButtonDisabled' : 'eduAssetCardButton',
       role: 'button',
       'aria-label': label,
-      transform: `translate(${x},7)`,
+      transform: `translate(${x},${HIT_TOP})`,
     };
     if (disabled) attrs['aria-disabled'] = 'true';
     const g = svg(Svg.G, attrs, this.svgGroup);
-    if (disabled) {
-      const title = document.createElementNS(Blockly.utils.dom.SVG_NS, 'title');
-      title.appendChild(document.createTextNode(disabledReason));
-      g.appendChild(title);
-    }
+    svgTitle(g, disabled ? disabledReason : label);
     svg(Svg.RECT, {
       width: HIT_SIZE, height: HIT_SIZE, rx: 4, ry: 4, fill: disabled ? '#f9fafb' : '#f3f4f6',
     }, g);

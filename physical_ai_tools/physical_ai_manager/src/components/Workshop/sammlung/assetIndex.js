@@ -21,15 +21,17 @@
 import { DE, formatDe } from '../blocks/messages_de';
 import { trajectoryMatchesRig } from '../../../utils/trajectoryIdentity';
 import { formatMmDe, formatSecondsDe, robotShortLabelDe } from './format';
+import { SAMMLUNG_COLOURS } from './sammlungTabs';
 
 export const TITLE_MAX_CHARS = 22;
 export const VARIABLE_VALUE_MAX_CHARS = 20;
 
+// The card colours ARE the group colours (sammlungTabs.js, the one source).
 export const ASSET_COLOURS = Object.freeze({
-  variable: '#a78bfa',
-  recording: '#3b82f6',
-  pin: '#f59e0b',
-  pose: '#14b8a6',
+  variable: SAMMLUNG_COLOURS.variablen,
+  recording: SAMMLUNG_COLOURS.aufnahmen,
+  pin: SAMMLUNG_COLOURS.ziele,
+  pose: SAMMLUNG_COLOURS.positionen,
 });
 
 const ELLIPSIS = '…';
@@ -41,8 +43,9 @@ function ellipsize(text, max) {
 
 const chip = (text, level) => ({ text, level });
 
+// „nicht benutzt" is a fact, not a problem: the grey `muted` level.
 function usageChip(total) {
-  return total > 0 ? chip(formatDe(DE.CHIP_USED, total), 'ok') : chip(DE.CHIP_UNUSED, 'ok');
+  return total > 0 ? chip(formatDe(DE.CHIP_USED, total), 'ok') : chip(DE.CHIP_UNUSED, 'muted');
 }
 
 function mapGet(map, key) {

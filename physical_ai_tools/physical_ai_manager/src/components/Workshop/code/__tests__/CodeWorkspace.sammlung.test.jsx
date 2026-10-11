@@ -116,9 +116,9 @@ beforeEach(() => {
 describe('the Sammlung section', () => {
   test('counts the program’s Variablen, Aufnahmen, Ziele and Positionen and opens the drawer on that tab', async () => {
     const { redux } = await mount();
-    const rows = within(sammlung()).getAllByRole('button', { name: /^(Variablen|Aufnahmen|Ziele|Positionen) \d+$/ });
-    expect(rows.map((b) => b.textContent)).toEqual(['Aufnahmen 1', 'Ziele 1', 'Positionen 1', 'Variablen 1']);
-    fireEvent.click(within(sammlung()).getByRole('button', { name: 'Ziele 1' }));
+    const rows = within(sammlung()).getAllByRole('button', { name: new RegExp(`^(${[DE.CATEGORY_VARIABLEN, DE.CATEGORY_AUFNAHMEN, DE.CATEGORY_ZIELE, DE.CATEGORY_POSITIONEN].join('|')}) \\d+$`) });
+    expect(rows.map((b) => b.textContent)).toEqual([`${DE.CATEGORY_AUFNAHMEN} 1`, `${DE.CATEGORY_ZIELE} 1`, `${DE.CATEGORY_POSITIONEN} 1`, `${DE.CATEGORY_VARIABLEN} 1`]);
+    fireEvent.click(within(sammlung()).getByRole('button', { name: `${DE.CATEGORY_ZIELE} 1` }));
     expect(selectDrawer(redux.getState())).toMatchObject({ open: true, tab: 'ziele', focusId: null });
   });
 

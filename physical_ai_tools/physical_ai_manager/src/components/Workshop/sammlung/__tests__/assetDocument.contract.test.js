@@ -30,7 +30,7 @@ import {
   getDestinationStore,
   registerDestinationSerializer,
 } from '../destinationStore';
-import { createBlocklyAssetDocument } from '../assetDocument';
+import { createBlocklyAssetDocument, INSERT_FLASH_MS } from '../assetDocument';
 import { createCodeAssetDocument, CODE_SIDEBAR_WIDTH_PX } from '../../code/codeAssetDocument';
 import { CODE_DE, formatCode } from '../../code/codeMessagesDe';
 
@@ -422,3 +422,57 @@ describe('the Blockly document alone', () => {
     expect(doc.renameRecordingTarget()).toEqual({ workspace: doc.workspace });
   });
 });
+
+// R0-5: after „Als Programm einfügen" the new blocks are highlighted for
+// INSERT_FLASH_MS once the Vormachen window has closed. The Blockly half; the
+// code half is code/__tests__/codeAssetDocument.flash.test.js.
+describe('the Blockly document: flashInserted', () => {
+  function rendered() {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const ws = Blockly.inject(host, {});
+    const head = Blockly.serialization.blocks.append({ ...moveTo('Ablage'), x: 0, y: 0 }, ws);
+    const ids = head.getDescendants(false).map((b) => b.id);
+    return { ws, host, ids, doc: createBlocklyAssetDocument(ws) };
+  }
+  const highlighted = (ws, id) => ws.getBlockById(id).getSvgRoot().classList.contains('blocklyHighlighted');
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('highlights every inserted block and un-highlights them after INSERT_FLASH_MS', () => {
+    vi.useFakeTimers();
+    const { ws, host, ids, doc } = rendered();
+    expect(INSERT_FLASH_MS).toBe(2500);
+    const spy = vi.spyOn(ws, 'highlightBlock');
+    expect(doc.flashInserted({ blockId: ids[0], count: 1, blockIds: ids })).toBe(true);
+    expect(spy.mock.calls).toEqual(ids.map((id) => [id, true]));
+    ids.forEach((id) => expect(highlighted(ws, id)).toBe(true));
+    vi.advanceTimersByTime(INSERT_FLASH_MS - 1);
+    ids.forEach((id) => expect(highlighted(ws, id)).toBe(true));
+    vi.advanceTimersByTime(1);
+    ids.forEach((id) => expect(highlighted(ws, id)).toBe(false));
+    // A block deleted meanwhile is skipped, not an error.
+    expect(doc.flashInserted({ blockIds: ids })).toBe(true);
+    ws.getBlockById(ids[0]).dispose(false);
+    expect(() => vi.advanceTimersByTime(INSERT_FLASH_MS)).not.toThrow();
+    ws.dispose();
+    host.remove();
+  });
+
+  it('answers false for anything else and for a disposed workspace', () => {
+    vi.useFakeTimers();
+    const { ws, host, ids, doc } = rendered();
+    expect(doc.flashInserted(null)).toBe(false);
+    expect(doc.flashInserted({ count: 0, blockIds: [] })).toBe(false);
+    expect(doc.flashInserted({ file: 'main.py', firstLine: 1, lastLine: 2 })).toBe(false);
+    expect(doc.flashInserted({ blockIds: ['no-such-block'] })).toBe(false);
+    ws.dispose();
+    host.remove();
+    expect(doc.flashInserted({ blockIds: ids })).toBe(false);
+    // A headless workspace cannot highlight: false, never a throw.
+    const { doc: headless } = blocklyDoc();
+    const [first] = headless.workspace.getTopBlocks(false);
+    expect(headless.flashInserted({ blockIds: [first.id] })).toBe(false);
+  });
+});
+

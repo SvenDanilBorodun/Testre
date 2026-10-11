@@ -41,7 +41,7 @@ describe('previewMessageDe', () => {
   test('maps exactly the lead-in sentence', () => {
     expect(previewMessageDe(REPLAY_LEAD_IN_BELOW_TABLE_SERVER)).toBe(DE.PREVIEW_LEAD_IN_BELOW_TABLE);
     expect(DE.PREVIEW_LEAD_IN_BELOW_TABLE).toBe(
-      'Die Aufnahme beginnt unter dem Tisch des Simulators — im Simulator kann sie nicht abgespielt werden.',
+      'Die Bewegung beginnt unter dem Tisch des Simulators — im Simulator kann sie nicht abgespielt werden.',
     );
   });
 

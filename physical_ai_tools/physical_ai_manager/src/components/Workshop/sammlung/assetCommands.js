@@ -89,20 +89,101 @@ export function rewriteRefBlocks(workspace, fromName, toName) {
   return rewriteBlocksOfType(workspace, REF_TYPE, fromName, toName);
 }
 
-function usageLabel(block) {
+// The hats a program starts by (interpreter.py::HAT_BLOCK_TYPES).
+const HAT_TYPES = Object.freeze([
+  'edubotics_when_broadcast',
+  'edubotics_when_object_seen',
+  'edubotics_when_counter_gt',
+]);
+const DEFINITION_TYPES = Object.freeze(['procedures_defnoreturn', 'procedures_defreturn']);
+const HAT_TEXT_MAX_CHARS = 40;
+
+const cut = (text, max) => (text.length > max ? `${text.slice(0, max)}…` : text);
+
+function safeText(block) {
+  try {
+    return String(block.toString());
+  } catch (_) {
+    return '';
+  }
+}
+
+function isHat(block) {
+  return !!block && !block.previousConnection && !!block.nextConnection && HAT_TYPES.includes(block.type);
+}
+
+function isDefinition(block) {
+  return !!block && DEFINITION_TYPES.includes(block.type);
+}
+
+// A block and every block below it on the same stack: [first, …next].
+function chainFrom(first) {
+  const chain = [];
+  let cur = first;
+  while (cur && !chain.includes(cur)) {
+    chain.push(cur);
+    cur = cur.getNextBlock();
+  }
+  return chain;
+}
+
+// The name of the stack `root` heads, and the chain of its steps.
+function stackOf(root, workspace) {
+  if (isDefinition(root)) {
+    let name = '';
+    try {
+      name = String(root.getFieldValue('NAME') || '');
+    } catch (_) {
+      name = '';
+    }
+    const body = root.getInputTargetBlock ? root.getInputTargetBlock('STACK') : null;
+    return { name: formatDe(DE.USAGE_STACK_FUNCTION, name), chain: chainFrom(body) };
+  }
+  if (isHat(root)) {
+    return {
+      name: formatDe(DE.USAGE_STACK_HAT, cut(safeText(root), HAT_TEXT_MAX_CHARS)),
+      chain: chainFrom(root.getNextBlock()),
+    };
+  }
+  // A plain statement stack: the k-th of the program's (creation = run order).
+  let stacks = [];
+  try {
+    stacks = (workspace ? workspace.getTopBlocks(false) : [])
+      .filter((b) => b && !b.outputConnection && !isHat(b) && !isDefinition(b));
+  } catch (_) {
+    stacks = [];
+  }
+  const k = stacks.indexOf(root) + 1;
+  const name = stacks.length === 1 || k === 0 ? DE.USAGE_STACK_MAIN : formatDe(DE.USAGE_STACK_PART, k);
+  return { name, chain: chainFrom(root) };
+}
+
+/**
+ * WHERE a block uses an asset (owner decision R0-7): „Schritt N in
+ * Hauptprogramm" / „… in Programmteil k" / „… in Funktion „tanzen“" / „… in
+ * „<text of the hat>“", „in <stack>" for a use outside the stack's own steps
+ * (e.g. inside a definition's return value), „liegt lose auf der
+ * Arbeitsfläche" for a loose value block. The frame carries no quotes; a name
+ * carries its own.
+ */
+export function usageLabel(block) {
   let root = block;
   try {
     root = block.getRootBlock() || block;
   } catch (_) {
     root = block;
   }
-  let text = '';
+  if (root && root.outputConnection) return DE.USAGE_LOOSE;
+  let label = '';
   try {
-    text = String(root.toString());
+    const { name, chain } = stackOf(root, block.workspace);
+    let step = block;
+    while (step && !chain.includes(step)) step = step.getParent();
+    label = step ? formatDe(DE.USAGE_STEP_IN, chain.indexOf(step) + 1, name) : formatDe(DE.USAGE_IN, name);
   } catch (_) {
-    text = '';
+    label = safeText(root);
   }
-  return text.length > USAGE_LABEL_MAX_CHARS ? `${text.slice(0, USAGE_LABEL_MAX_CHARS)}…` : text;
+  return cut(label, USAGE_LABEL_MAX_CHARS);
 }
 
 /**

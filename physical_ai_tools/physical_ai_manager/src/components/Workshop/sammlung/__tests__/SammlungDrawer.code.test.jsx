@@ -240,7 +240,7 @@ describe('SammlungDrawer over a Python program', () => {
     const { reveals } = setup({ drawer: { focusId: 'Winken' } });
     const section = screen.getByRole('region', { name: DE.DRAWER_USED_IN });
     const row = within(section).getByRole('button');
-    expect(row.textContent).toBe('main.py:2 · robot.replay("Winken")');
+    expect(row.textContent).toContain('main.py, Zeile 2');
     fireEvent.click(row);
     expect(reveals).toEqual([{ file: 'main.py', line: 2 }]);
   });

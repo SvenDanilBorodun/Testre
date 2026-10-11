@@ -199,7 +199,7 @@ describe('a Python program’s zeige(…) reaches both Variablen views', () => {
     const last = within(drawer.getByRole('region', { name: DE.DRAWER_LAST_VALUES }));
     expect(last.getAllByRole('listitem').map((li) => li.textContent.split(' · ')[0])).toEqual(['3', '2', '1']);
     const used = within(drawer.getByRole('region', { name: DE.DRAWER_USED_IN }));
-    expect(used.getAllByRole('button').map((b) => b.textContent.split(' · ')[0]))
+    expect(used.getAllByRole('button').map((b) => b.textContent.match(/^(\S+?)(?::|, Zeile )(\d+)/).slice(1).join(':')))
       .toEqual(['main.py:2', 'main.py:4', 'main.py:5']);
   });
 

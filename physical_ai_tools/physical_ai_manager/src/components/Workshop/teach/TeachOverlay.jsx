@@ -256,7 +256,9 @@ function TeachOverlay({
   const containerRef = useRef(null);
   const trajectoryList = useSelector(selectTrajectoryList);
   const collisionActive = useSelector((s) => !!(s.tasks && s.tasks.collision && s.tasks.collision.active));
-  const { offerHomeGlide, homeGlideActive } = useHomeGlide();
+  const { offerHomeGlide, homeGlideActive, afterHomeGlide } = useHomeGlide();
+  const afterHomeGlideRef = useRef(afterHomeGlide);
+  afterHomeGlideRef.current = afterHomeGlide;
   const { handGuide, recordControl, capturePose, replayMotion } = useRosServiceCaller();
   const services = useMemo(
     () => ({ handGuide, recordControl, capturePose, replayMotion }),
@@ -824,15 +826,23 @@ function TeachOverlay({
   // the button is disabled from the first click on.
   const [inserting, setInserting] = useState(false);
   // What „Als Programm einfügen" wrote last: highlighted once the window has
-  // closed (assetDocument.flashInserted), when the editor is visible again.
+  // closed (assetDocument.flashInserted), when the editor is visible again —
+  // and not under the home-glide warning „Fertig" may have just offered: its
+  // countdown and the glide cover the editor longer than the flash lasts, so
+  // the flash starts once that prompt is gone (afterHomeGlide).
   const lastInsertionRef = useRef(null);
   useEffect(() => () => {
     const insertion = lastInsertionRef.current;
     const target = latest.current.doc;
     if (!insertion || !target || typeof target.flashInserted !== 'function') return;
-    try {
-      target.flashInserted(insertion);
-    } catch (_) { /* a document already gone: nothing to show */ }
+    const flash = () => {
+      try {
+        target.flashInserted(insertion);
+      } catch (_) { /* a document already gone: nothing to show */ }
+    };
+    const after = afterHomeGlideRef.current;
+    if (typeof after === 'function') after(flash);
+    else flash();
   }, []);
   const handleInsert = async () => {
     setInserting(true);

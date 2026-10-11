@@ -54,10 +54,15 @@ vi.mock('../../../../services/workflowApi', () => ({
   deleteTrajectory: vi.fn(),
 }));
 
-const mockGlide = vi.hoisted(() => ({ offer: vi.fn(), active: false }));
+const mockGlide = vi.hoisted(() => ({ offer: vi.fn(), active: false, after: vi.fn((fn) => fn()) }));
 vi.mock('../../HomeGlidePrompt', () => ({
   __esModule: true,
-  useHomeGlide: () => ({ offerHomeGlide: mockGlide.offer, homeGlideDialog: null, homeGlideActive: mockGlide.active }),
+  useHomeGlide: () => ({
+    offerHomeGlide: mockGlide.offer,
+    homeGlideDialog: null,
+    homeGlideActive: mockGlide.active,
+    afterHomeGlide: mockGlide.after,
+  }),
 }));
 
 vi.mock('../teachSounds', () => ({
@@ -181,6 +186,9 @@ beforeEach(() => {
   mockHook.actions = null;
   mockHook.onKeyDown = null;
   mockGlide.offer.mockReset();
+  // Idle by default: work waiting for the prompt runs at once.
+  mockGlide.after.mockReset();
+  mockGlide.after.mockImplementation((fn) => fn());
   mockActivation.status = null;
   mockPi.piMode = false;
   mockGlide.active = false;
@@ -1865,6 +1873,28 @@ describe('TeachOverlay — the insert flash after closing', () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith(formatDe(DE.TEACH_INSERT_DONE, 2)));
     expect(doc.flashInserted).not.toHaveBeenCalled();
     unmount();
+    expect(doc.flashInserted).toHaveBeenCalledTimes(1);
+    expect(doc.flashInserted).toHaveBeenCalledWith(result);
+  });
+
+  // F2 (verification round 1): in hand mode „Fertig" offers the home glide,
+  // whose blurred warning and glide cover the editor for longer than the
+  // flash lasts — so the flash waits until the prompt is gone.
+  test('a home-glide prompt on screen holds the flash until it has gone', async () => {
+    withSnapshot({ state: 'abschluss' });
+    const queued = [];
+    mockGlide.after.mockImplementation((fn) => { queued.push(fn); });
+    const result = { blockId: 'b1', count: 2, blockIds: ['b1', 'r1', 'b2'] };
+    const doc = fakeDoc(result);
+    const { unmount } = render(<TeachOverlay {...baseProps({ assetDoc: doc })} />);
+    await keepTwo();
+    fireEvent.click(screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 2) }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(formatDe(DE.TEACH_INSERT_DONE, 2)));
+    unmount();
+    expect(mockGlide.after).toHaveBeenCalledTimes(1);
+    expect(doc.flashInserted).not.toHaveBeenCalled();
+    // The prompt resolved: now the student sees it.
+    queued.forEach((fn) => fn());
     expect(doc.flashInserted).toHaveBeenCalledTimes(1);
     expect(doc.flashInserted).toHaveBeenCalledWith(result);
   });

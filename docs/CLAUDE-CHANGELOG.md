@@ -119,7 +119,9 @@ property …, object is not extensible" in the plugin's listener, aborting Block
 arrived), but a paste, a duplicate and „Als Programm einfügen" left „Gespeichert", and an editor remounted from
 the store's copy (tab switch, draft or version restore) was broken the same way. Fix: `detachedCopy` on both
 sides of `BlocklyWorkspace`; `BlocklyWorkspace.storeCopy.test.jsx` (real Blockly, plugin and store) fails
-without either copy.
+without either copy. *F2:* in hand mode „Fertig" offers the home glide in the same moment the window closes and asks
+for the insert flash, and the blurred warning (5 s countdown, then the glide) covered the editor for the whole
+2.5 s; `HomeGlidePrompt::afterHomeGlide` now runs the flash once no warning or glide is on screen (both notations).
 
 ### Unreleased, 2026-10-07 — the amd64 server image ships no torchcodec (release 2.27.0 blocker)
 

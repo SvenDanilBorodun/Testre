@@ -2080,8 +2080,8 @@ function WorkshopPage({ isActive }) {
                 // Belt-and-suspenders (the button is already disabled for all
                 // five): never toggle while a sim run is in flight, and never
                 // ENTER sim while a program drives the real arm (running,
-                // paused or starting), during an active tutorial (replacing the dock would
-                // unmount SkillmapPlayer + lift the toolbox restriction
+                // paused or starting), during an active tutorial (replacing
+                // the dock would unmount SkillmapPlayer + lift the toolbox restriction
                 // mid-tutorial), while Vormachen is open (it owns the REAL arm,
                 // which the simulator would hide under the student's hand), or
                 // while the arm is hand-guided (unmounting JogPanel re-torques /
@@ -2165,7 +2165,8 @@ function WorkshopPage({ isActive }) {
             ) : (
               <>
                 {/* One compact toolbar: view switch + „Öffnen" (leading) · editor
-                    tools · Verlauf + Kalibrieren (extra) · autosave. */}
+                    tools · Verlauf + Kalibrieren (extra) · the cloud save status.
+                    The Vormachen chooser sits in the header. */}
                 <ToolbarButtons
                   workspace={workspace}
                   codeMode={isCodeWorkflow}

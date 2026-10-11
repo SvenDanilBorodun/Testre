@@ -9,8 +9,8 @@
  */
 
 /**
- * The four Sammlung toolbox groups „Variablen / Aufnahmen / Ziele /
- * Positionen": dynamic category callbacks that build each flyout from the
+ * The four Sammlung toolbox groups „Bewegungen / Ziele / Positionen /
+ * Variablen": dynamic category callbacks that build each flyout from the
  * workspace (block usage, variables, the destination store) and the page's
  * provider snapshot (recordings, capabilities, tutorial restriction).
  *
@@ -42,7 +42,7 @@ import {
   previewAssetFor,
 } from './AssetCardInflater';
 import { ICON_BUTTON_FLYOUT_TYPE, registerIconButtonInflater } from './IconButtonInflater';
-import { NEW_ACTION_ROWS, newActionsFor } from './newActions';
+import { NEW_ACTION_ROWS, newActionsFor, teachHintLinesFor } from './newActions';
 
 // 'cards' (custom flyout items) or 'plan-b' (labels + buttons). The spike
 // outcome is recorded in docs/KNOWN-ISSUES.md („Sammlung flyout: cards vs Plan B").
@@ -120,9 +120,30 @@ const iconButton = (text, callbackkey, icon, extra = {}) => ({
   kind: ICON_BUTTON_FLYOUT_TYPE, text, callbackkey, icon, ...extra,
 });
 
+// The flyout's Vormachen buttons stand out: white on the accent (index.css).
+const TEACH_BUTTON_CLASS = 'eduFlyoutTeachButton';
+
 // The creation buttons of one Sammlung tab, from the one table.
 function newButtons(c, tab) {
-  return newActionsFor(c, tab).map((a) => iconButton(a.label, NEW_ACTION_BUTTON_KEYS[a.id], a.icon));
+  return newActionsFor(c, tab).map((a) => iconButton(
+    a.label, NEW_ACTION_BUTTON_KEYS[a.id], a.icon,
+    a.action.type === 'teach' ? { 'web-class': TEACH_BUTTON_CLASS } : {},
+  ));
+}
+
+// In the simulator a tab whose Vormachen rows are gone says why — as three
+// short labels with 2-px gaps, because one Blockly label wider than a card
+// widens the whole flyout (Flyout.normalizeSeparators keeps an explicit `sep`
+// and drops the label's default gap before it).
+function teachHintItems(c, tab) {
+  const lines = teachHintLinesFor(c, tab);
+  if (!lines) return [];
+  const items = [];
+  lines.forEach((text, i) => {
+    if (i > 0) items.push({ kind: 'sep', gap: 2 });
+    items.push({ kind: 'label', text, 'web-class': 'eduFlyoutHint' });
+  });
+  return items;
 }
 
 function restrictionOf(snapshot) {
@@ -257,7 +278,11 @@ export function aufnahmenFlyout(workspace) {
   const restricted = restrictionOf(snapshot);
   const replayAllowed = !restricted || restricted.has(REPLAY_BLOCK_TYPE);
   const index = buildWorkspaceAssetIndex(workspace, snapshot);
-  const items = [label(recordingsStatusLabel(snapshot)), ...newButtons(c, 'aufnahmen')];
+  const items = [
+    label(recordingsStatusLabel(snapshot)),
+    ...teachHintItems(c, 'aufnahmen'),
+    ...newButtons(c, 'aufnahmen'),
+  ];
   if (c.drawer) items.push(button(DE.FLY_MANAGE, SAMMLUNG_BUTTON_KEYS.MANAGE_AUFNAHMEN));
   let prefilled = 0;
   for (const vm of index.recordings) {
@@ -281,15 +306,26 @@ const DESTINATION_GENERIC_BLOCKS = Object.freeze([
   'edubotics_destination_current',
 ]);
 const REF_TYPE = 'edubotics_destination_ref';
+const MOVE_TO_TYPE = 'edubotics_move_to';
+
+// A ready „bewege zu <name>" block: the move with this entry's reference
+// already plugged in (offered only when both block types pass the restriction).
+const readyMoveTo = (name) => ({
+  kind: 'block',
+  type: MOVE_TO_TYPE,
+  inputs: { DESTINATION: { block: { type: REF_TYPE, fields: { NAME: name } } } },
+});
 
 export function zieleFlyout(workspace) {
   const snapshot = snapshotOf(workspace);
   const c = caps(snapshot);
   const restricted = restrictionOf(snapshot);
   const allowedType = (type) => !restricted || restricted.has(type);
+  const readyAllowed = allowedType(MOVE_TO_TYPE) && allowedType(REF_TYPE);
   const index = buildWorkspaceAssetIndex(workspace, snapshot);
   const items = [
     ...countLabel(index.counts.ziele, 'FLY_COUNT_ZIELE_ONE', 'FLY_COUNT_ZIELE'),
+    ...teachHintItems(c, 'ziele'),
     ...newButtons(c, 'ziele'),
   ];
   if (c.drawer) items.push(button(DE.FLY_MANAGE, SAMMLUNG_BUTTON_KEYS.MANAGE_ZIELE));
@@ -300,6 +336,7 @@ export function zieleFlyout(workspace) {
   if (index.pins.length === 0) items.push(label(DE.FLY_PLACES_EMPTY));
   for (const vm of index.pins) {
     items.push(...cardItems(vm, c));
+    if (readyAllowed) items.push(readyMoveTo(vm.assetName));
     if (allowedType(REF_TYPE)) items.push({ kind: 'block', type: REF_TYPE, fields: { NAME: vm.assetName } });
   }
   if (index.programPins.length > 0) {
@@ -314,15 +351,18 @@ export function positionenFlyout(workspace) {
   const c = caps(snapshot);
   const restricted = restrictionOf(snapshot);
   const refAllowed = !restricted || restricted.has(REF_TYPE);
+  const readyAllowed = refAllowed && (!restricted || restricted.has(MOVE_TO_TYPE));
   const index = buildWorkspaceAssetIndex(workspace, snapshot);
   const items = [
     ...countLabel(index.counts.positionen, 'FLY_COUNT_POSITIONEN_ONE', 'FLY_COUNT_POSITIONEN'),
+    ...teachHintItems(c, 'positionen'),
     ...newButtons(c, 'positionen'),
   ];
   if (c.drawer) items.push(button(DE.FLY_MANAGE, SAMMLUNG_BUTTON_KEYS.MANAGE_POSITIONEN));
   if (index.poses.length === 0) items.push(label(DE.FLY_POSES_EMPTY));
   for (const vm of index.poses) {
     items.push(...cardItems(vm, c));
+    if (readyAllowed) items.push(readyMoveTo(vm.assetName));
     if (refAllowed) items.push({ kind: 'block', type: REF_TYPE, fields: { NAME: vm.assetName } });
   }
   return items;

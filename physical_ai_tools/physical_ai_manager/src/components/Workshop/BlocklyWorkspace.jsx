@@ -16,7 +16,7 @@ import { buildToolbox } from './blocks/toolbox';
 import { DE } from './blocks/messages_de';
 import { registerMotionBlocks, attachMotionWorkspaceValidators } from './blocks/motion';
 import { registerPerceptionBlocks } from './blocks/perception';
-import { registerDestinationBlocks } from './blocks/destinations';
+import { registerDestinationBlocks, setDestinationKindResolver } from './blocks/destinations';
 import { registerOutputBlocks } from './blocks/output';
 import { registerEventBlocks } from './blocks/events';
 import {
@@ -28,9 +28,10 @@ import { registerCounterBlocks } from './blocks/counters';
 import { registerTrajectoryBlocks } from './blocks/trajectories';
 import { registerProcedureCallArgumentFix } from './blocks/procedures';
 import { attachSavedValueWarnings } from './blocks/savedValueWarnings';
-import { registerDestinationSerializer } from './sammlung/destinationStore';
+import { getDestinationStore, registerDestinationSerializer } from './sammlung/destinationStore';
 import { registerAssetCardInflater } from './sammlung/AssetCardInflater';
 import { registerIconButtonInflater } from './sammlung/IconButtonInflater';
+import { registerToolboxHeading } from './sammlung/ToolboxHeading';
 import { registerSammlungCategories } from './sammlung/toolboxCategories';
 import { attachAssetReferenceValidators } from './sammlung/referenceValidators';
 import { EMPTY_SAMMLUNG_PROVIDER } from './sammlung/provider';
@@ -51,10 +52,16 @@ function registerAllBlocksOnce() {
   // Explicit, never at module import: blocklyPayload.test.js pins the CORE
   // serializer inventory and page tests mock `blockly/core` minimally.
   registerDestinationSerializer();
+  // „Ziel <name>" / „Position <name>" on a reference block: the kind of the
+  // name in the document's store (blocks/destinations.js, R0-6).
+  setDestinationKindResolver((ws, name) => (getDestinationStore(ws).getByName(name.trim()) || {}).kind || null);
   // The Sammlung flyout card item and the icon button (registry CLASSES,
   // instantiated per flyout).
   registerAssetCardInflater();
   registerIconButtonInflater();
+  // The toolbox headings („Meine Sammlung", „Bausteine"); Blockly skips an
+  // unregistered item kind, so this precedes the first inject.
+  registerToolboxHeading();
   blankNonGermanHelpUrls();
   blocksRegistered = true;
 }

@@ -18,7 +18,10 @@
 // not added to buildToolbox().
 
 import * as Blockly from 'blockly/core';
-import { buildToolbox, TOOLBOX, SAMMLUNG_BASE_BLOCKS } from '../blocks/toolbox';
+import {
+  buildToolbox, TOOLBOX, SAMMLUNG_BASE_BLOCKS, SAMMLUNG_TOOLBOX_IDS,
+} from '../blocks/toolbox';
+import { DE } from '../blocks/messages_de';
 import { registerMotionBlocks } from '../blocks/motion';
 import { registerPerceptionBlocks } from '../blocks/perception';
 import { registerDestinationBlocks } from '../blocks/destinations';
@@ -136,5 +139,45 @@ describe('Workshop toolbox consistency', () => {
     const freshEdubotics = [...collectToolboxBlockTypes(buildToolbox())]
       .filter((t) => t.startsWith('edubotics_')).sort();
     expect(exportEdubotics).toEqual(freshEdubotics);
+  });
+
+  test('order: „Vorschläge", „Meine Sammlung", the four groups, „Bausteine", the static categories', () => {
+    const items = buildToolbox().contents;
+    const shape = items.map((it) => (it.kind === 'heading' ? `# ${it.text}` : it.toolboxitemid || it.name));
+    expect(shape).toEqual([
+      DE.CATEGORY_VORSCHLAEGE,
+      `# ${DE.TOOLBOX_HEADING_SAMMLUNG}`,
+      SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN,
+      SAMMLUNG_TOOLBOX_IDS.ZIELE,
+      SAMMLUNG_TOOLBOX_IDS.POSITIONEN,
+      SAMMLUNG_TOOLBOX_IDS.VARIABLEN,
+      `# ${DE.TOOLBOX_HEADING_BAUSTEINE}`,
+      DE.CATEGORY_BEWEGUNG,
+      DE.CATEGORY_WAHRNEHMUNG,
+      DE.CATEGORY_EREIGNISSE,
+      DE.CATEGORY_LOGIK,
+      DE.CATEGORY_LISTE,
+      DE.CATEGORY_FUNKTIONEN,
+      DE.CATEGORY_MATHE,
+      DE.CATEGORY_TEXT,
+      DE.CATEGORY_AUSGABE,
+      DE.CATEGORY_ZAEHLER,
+    ]);
+    // The old separator is gone; the headings are the only non-category items.
+    expect(items.filter((it) => it.kind !== 'category').map((it) => it.kind)).toEqual(['heading', 'heading']);
+    expect(DE.CATEGORY_BEWEGUNG).toBe('Arm');
+  });
+
+  test('a restriction keeps the headings, and drops „Bausteine" when no static category is left', () => {
+    const headings = (restricted) => buildToolbox(restricted).contents
+      .filter((it) => it.kind === 'heading').map((it) => it.text);
+    expect(headings(new Set(['edubotics_home']))).toEqual([
+      DE.TOOLBOX_HEADING_SAMMLUNG, DE.TOOLBOX_HEADING_BAUSTEINE,
+    ]);
+    // Only Sammlung blocks: every static category with contents is dropped.
+    const onlySammlung = buildToolbox(new Set(['edubotics_destination_ref', 'edubotics_replay_trajectory']));
+    expect(headings(new Set(['edubotics_destination_ref', 'edubotics_replay_trajectory'])))
+      .toEqual([DE.TOOLBOX_HEADING_SAMMLUNG]);
+    expect(onlySammlung.contents.some((it) => it.kind === 'category' && Array.isArray(it.contents))).toBe(false);
   });
 });

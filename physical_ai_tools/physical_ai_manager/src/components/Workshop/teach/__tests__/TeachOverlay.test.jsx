@@ -756,12 +756,12 @@ describe('TeachOverlay — list meta and slot lines', () => {
 
   test('slot line: nothing below 14, „noch n" at 14 and 15, full at 16', () => {
     expect(teachSlotsLine(13)).toBeNull();
-    expect(teachSlotsLine(14)).toBe('Noch 2 Plätze für Aufnahmen frei.');
-    expect(teachSlotsLine(15)).toBe('Noch 1 Plätze für Aufnahmen frei.');
+    expect(teachSlotsLine(14)).toBe('Noch 2 Plätze für Bewegungen frei.');
+    expect(teachSlotsLine(15)).toBe('Noch 1 Plätze für Bewegungen frei.');
     expect(teachSlotsLine(16)).toBe(DE.TEACH_SLOTS_FULL);
   });
 
-  test.each([[14, 'Noch 2 Plätze für Aufnahmen frei.'], [16, DE.TEACH_SLOTS_FULL]])(
+  test.each([[14, 'Noch 2 Plätze für Bewegungen frei.'], [16, DE.TEACH_SLOTS_FULL]])(
     'the review shows the slot line with %i rows in the cloud',
     (n, text) => {
       withSnapshot({ state: 'pruefen', relock: 'ok', take: TAKE });
@@ -776,9 +776,9 @@ describe('TeachOverlay — list meta and slot lines', () => {
     withSnapshot({ state: 'pruefen', relock: 'ok', take: TAKE });
     setState({ items: Array.from({ length: 13 }, (_, i) => ({ id: `t${i}`, name: `Alt ${i}` })) });
     render(<TeachOverlay {...baseProps()} />);
-    expect(screen.queryByText(/Plätze für Aufnahmen/)).toBeNull();
+    expect(screen.queryByText(/Plätze für Bewegungen/)).toBeNull();
     await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
-    expect(screen.getByText('Noch 2 Plätze für Aufnahmen frei.')).toBeInTheDocument();
+    expect(screen.getByText('Noch 2 Plätze für Bewegungen frei.')).toBeInTheDocument();
   });
 });
 

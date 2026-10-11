@@ -103,7 +103,7 @@ function registerForBlocks(generator, Order) {
   };
   const kw = (t) => (t ? `, tempo='${t}'` : '');
 
-  // ── Motion (Bewegung) ──────────────────────────────────────────────────
+  // ── Motion (the „Arm“ category) ─────────────────────────────────────────
   F.edubotics_home = () => 'robot.home()\n';
   F.edubotics_open_gripper = () => 'robot.open_gripper()\n';
   F.edubotics_close_gripper = () => 'robot.close_gripper()\n';

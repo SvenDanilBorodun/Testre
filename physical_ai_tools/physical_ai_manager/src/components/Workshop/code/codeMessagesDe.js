@@ -166,6 +166,15 @@ export const CODE_DE = Object.freeze({
   // rides as the row's second line (`detail`).
   USAGE_AT: '{0}, Zeile {1}',
 
+  // The „Methoden" column beside the editor: every robot command with its
+  // German explanation, parameters, return value and an example line that
+  // „Einfügen" (or a drag) writes into the program.
+  METHODS_RANGE: '{0} bis {1}',
+  METHODS_MIN: 'ab {0}',
+  METHODS_MAX_CHARS: 'höchstens {0} Zeichen',
+  METHODS_VARIANTS: '(+{0} Varianten)',
+  METHODS_GROUP_SHOW: 'Anzeigen',
+
   SUBMIT: 'Abgeben',
   SUBMIT_TITLE: 'Diesen Stand des Programms bei der Lehrkraft abgeben',
   SUBMIT_CONFIRM: 'Programm jetzt abgeben? Die Lehrkraft sieht danach genau diesen Stand.',

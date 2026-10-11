@@ -1695,7 +1695,7 @@ describe('TeachOverlay — one focused window per kind', () => {
 describe('TeachOverlay — the redesigned window (R0-5)', () => {
   const variantOf = (label) => screen.getByRole('button', { name: new RegExp(label) }).getAttribute('data-variant');
 
-  test('the card is content-sized and framed orange, with an empty slot for the mode badge', () => {
+  test('the card is content-sized and framed orange, and carries the static real-robot mode badge', () => {
     withSnapshot({ state: 'fest' });
     render(<TeachOverlay {...baseProps()} />);
     const card = screen.getByTestId('teach-card');
@@ -1703,10 +1703,11 @@ describe('TeachOverlay — the redesigned window (R0-5)', () => {
     expect(card.className).toContain('border-[#EA580C]');
     expect(card.className).toContain('my-auto');
     expect(card.className.split(/\s+/)).not.toContain('h-full');
+    const badge = within(card).getByTestId('mode-badge');
+    expect(badge).toHaveTextContent(/^ECHTER ROBOTER$/);
+    // Static: no run state, whatever runs.
     // eslint-disable-next-line testing-library/no-node-access
-    const slot = card.querySelector('[data-slot="mode-badge"]');
-    expect(slot).not.toBeNull();
-    expect(slot).toBeEmptyDOMElement();
+    expect(badge.querySelector('[data-icon="dot"]')).toBeNull();
     // The root keeps its attributes.
     const root = screen.getByTestId('teach-overlay');
     expect(root).toHaveAttribute('role', 'dialog');

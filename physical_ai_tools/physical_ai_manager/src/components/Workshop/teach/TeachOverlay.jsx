@@ -28,8 +28,8 @@
 // they land like „Einfügen" (code/vormachenClipboard.js, owner decision R4-O1).
 //
 // The window is content-sized and framed orange like the studio's real-robot
-// mode (owner decision R0-5); its header leaves a slot for the static mode
-// badge (`data-slot="mode-badge"`). Per state it shows only what the student
+// mode (owner decision R0-5); its header carries the static mode badge
+// („ECHTER ROBOTER", no run state — ModeBadge.jsx). Per state it shows only what the student
 // can do next: the Bewegung window's record button is red, a take shows a
 // REC pill with its time to TEACH_RECORD_MAX_S, the review („Bewegung
 // prüfen") hides the action row and makes „Behalten" the filled button, and
@@ -73,6 +73,7 @@ import {
   teachLeaderStatusNoticeDe,
 } from './teachGates';
 import Icon from '../../icons/Icon';
+import ModeBadge from '../ModeBadge';
 import { formatCmDe, isZielTouchTooHigh, zielTouchHeightAboveTableMm } from './zielTouch';
 import {
   buildProgramBlocks, buildProgramSteps, makeGripperStateOf, placeGripperState,
@@ -905,7 +906,8 @@ function TeachOverlay({
               <span>{isLeaderMode ? DE.TEACH_MODE_LEADER : DE.TEACH_MODE_HAND}</span>
             </span>
           )}
-          <span data-slot="mode-badge" />
+          {/* Vormachen is always the REAL robot: the static badge, no run state. */}
+          <ModeBadge simMode={false} withRunState={false} />
           <button
             type="button"
             onClick={() => actions.finish()}

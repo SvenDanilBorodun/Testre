@@ -205,11 +205,6 @@ export const DE = {
   TOOLBAR_PDF_EXPORT: 'Als PDF exportieren',
   TOOLBAR_THEME: 'Farbschema',
   TOOLBAR_SETTINGS: 'Einstellungen',
-  AUTOSAVE_LABEL: 'Letzte Speicherung',
-  AUTOSAVE_NEVER: 'noch nicht gespeichert',
-  AUTOSAVE_JUST_NOW: 'gerade eben',
-  AUTOSAVE_SECONDS_AGO: 'vor %1 s',
-  AUTOSAVE_MINUTES_AGO: 'vor %1 min',
   AUTOSAVE_QUOTA_FULL:
     'Browser-Speicher voll. Bitte einige gespeicherte Workflows löschen oder Cache leeren.',
   AUTOSAVE_TOO_BIG:

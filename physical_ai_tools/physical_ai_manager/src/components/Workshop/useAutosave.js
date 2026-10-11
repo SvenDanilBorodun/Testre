@@ -111,33 +111,10 @@ export function autosaveSessionScope() {
 }
 
 /**
- * Format a timestamp relative to now in German.
- *   < 5 s        → "gerade eben"
- *   < 60 s       → "vor X s"
- *   < 60 min     → "vor X min"
- *   otherwise    → ISO-ish locale time
- */
-export function formatAutosaveAge(ts) {
-  if (!ts) return DE.AUTOSAVE_NEVER;
-  const ageMs = nowMs() - ts;
-  if (ageMs < 5_000) return DE.AUTOSAVE_JUST_NOW;
-  if (ageMs < 60_000) {
-    return DE.AUTOSAVE_SECONDS_AGO.replace('%1', Math.round(ageMs / 1000));
-  }
-  if (ageMs < 60 * 60_000) {
-    return DE.AUTOSAVE_MINUTES_AGO.replace('%1', Math.round(ageMs / 60_000));
-  }
-  try {
-    return new Date(ts).toLocaleTimeString('de-DE');
-  } catch (e) {
-    return '';
-  }
-}
-
-/**
- * Persist Blockly workspace JSON to IndexedDB. The hook returns a
- * status object the toolbar can render plus a manual-save callback
- * (e.g. when student presses Ctrl+S).
+ * Persist Blockly workspace JSON to IndexedDB — the local CRASH RECOVERY of a
+ * Blockly document. It returns a manual-save callback, a clear, and whether
+ * the restore ran. It reports no save time: the toolbar shows the CLOUD save
+ * (WorkshopPage's save status), never this one.
  *
  * @param {object} options
  * @param {Blockly.WorkspaceSvg | null} options.workspace
@@ -158,7 +135,6 @@ export function useAutosave({
   scopeKey = null,
   onRestore = null,
 } = {}) {
-  const [lastSavedAt, setLastSavedAt] = useState(null);
   const [hasRestored, setHasRestored] = useState(false);
   const restoreCalledRef = useRef(false);
   const loadingFlagRef = useRef(false);
@@ -228,7 +204,6 @@ export function useAutosave({
     }
     try {
       await idbSet(storageKey, { state: payload, ts: nowMs() });
-      setLastSavedAt(nowMs());
     } catch (e) {
       const msg = (e && e.name) || '';
       if (msg === 'QuotaExceededError') {
@@ -279,7 +254,6 @@ export function useAutosave({
           }
           toast(DE.AUTOSAVE_RESTORED, { icon: toastIcon('save') });
         }
-        setLastSavedAt(cached.ts || null);
         setHasRestored(true);
       } catch (e) {
         console.error('useAutosave: idb-get failed', e);
@@ -315,11 +289,10 @@ export function useAutosave({
   const clearAutosave = useCallback(async () => {
     try {
       await idbDel(storageKey);
-      setLastSavedAt(null);
     } catch (e) {
       console.error('useAutosave: idb-del failed', e);
     }
   }, [storageKey]);
 
-  return { lastSavedAt, save, clearAutosave, hasRestored };
+  return { save, clearAutosave, hasRestored };
 }

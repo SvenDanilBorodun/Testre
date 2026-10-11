@@ -350,6 +350,12 @@ function WorkshopPage({ isActive }) {
   // writes nothing and asks them to click first (owner decision R3-O4). A
   // request to show a line (a „Benutzt in" row, an insertion) travels as a prop.
   const codeCursorRef = useRef(null);
+  // Handed to CodeWorkspace: the lazy CodeEditor sets `{ undo, redo }` on
+  // `codeCommandsRef` (the toolbar's „Rückgängig"/„Wiederholen" in a code
+  // document), and CodeWorkspace writes the APPLIED width of its file list
+  // into `codeSidebarWidthRef` (where the Sammlung drawer anchors).
+  const codeCommandsRef = useRef(null);
+  const codeSidebarWidthRef = useRef(null);
   // THE OPEN DOCUMENT'S IDENTITY (review round 5, MD2/MD3/MD5, owner decision
   // R5-O1). `selectedWorkflowId` is the program the student ASKED for and moves
   // the moment they pick one; the editor holds it only once its row arrived.
@@ -377,6 +383,76 @@ function WorkshopPage({ isActive }) {
     setDocToken(docTokenRef.current);
   }, []);
   const getDocumentToken = useCallback(() => docTokenRef.current, []);
+  // The live Blockly canvas, and the document token it was mounted for
+  // (handleWorkspaceReady): a canvas whose token is behind still shows the
+  // PREVIOUS document. The open document's simulator scene, mirrored for the
+  // save and the save status.
+  const workspaceRef = useRef(null);
+  const workspaceDocTokenRef = useRef(null);
+  const simSceneRef = useRef(simScene);
+  useEffect(() => { simSceneRef.current = simScene; }, [simScene]);
+
+  // THE SAVE STATUS (R0-2): what the toolbar says about the CLOUD save of the
+  // open document — `savedAt` (the last successful save in this session, or
+  // the opened row's updated_at) and `dirty`. „Unsaved" means the document OR
+  // its simulator scene differs from what the last successful save SENT
+  // (`baselineRef`, both halves serialized), judged by CONTENT, never by
+  // counting edits: Blockly delivers its events late (requestAnimationFrame +
+  // setTimeout), so a rename's own events arrive after its save — and compare
+  // equal. Before the first save in this session (no baseline) every edit
+  // counts. Every opening resets both (markOpened).
+  const [saveMark, setSaveMarkState] = useState({ savedAt: null, dirty: false });
+  const saveMarkRef = useRef(saveMark);
+  const setSaveMark = useCallback((next) => {
+    saveMarkRef.current = next;
+    setSaveMarkState(next);
+  }, []);
+  const baselineRef = useRef(null);
+  // The doc half of the last noted snapshot: a scene change (one call per
+  // pointermove of an object drag) compares it instead of re-serializing the
+  // canvas. The save's completion recomputes everything once.
+  const lastDocRef = useRef(null);
+  // The open document's content, serialized the way runSave sends it: a
+  // Blockly document's slimmed JSON (the live canvas only while it was mounted
+  // for this document), a code document's files and Ziele.
+  const docSnapshot = useCallback(() => {
+    if (isCodeLanguage(codeLanguageRef.current)) {
+      const entries = codeStoreRef.current ? codeStoreRef.current.getEntries() : [];
+      return JSON.stringify({ files: codeFilesRef.current, ziele: serializeState(entries) });
+    }
+    let json = null;
+    const ws = workspaceDocTokenRef.current === docTokenRef.current ? workspaceRef.current : null;
+    if (ws) {
+      try {
+        json = Blockly.serialization.workspaces.save(ws);
+      } catch (_) {
+        json = null;
+      }
+    }
+    if (!json) json = editorJsonRef.current || unsavedJsonRef.current || initialJsonRef.current;
+    return JSON.stringify(json ? slimSavePayload(json) : null);
+  }, []);
+  const simSnapshot = useCallback(() => JSON.stringify(simSceneRef.current), []);
+  const contentSnapshot = useCallback(() => ({ doc: docSnapshot(), sim: simSnapshot() }), [docSnapshot, simSnapshot]);
+  // An edit was made: dirty unless both halves equal the baseline. The page
+  // re-renders only when `dirty` really changes (not per keystroke).
+  const noteChange = useCallback((snap) => {
+    const baseline = baselineRef.current;
+    const dirty = !baseline || !snap || snap.doc !== baseline.doc || snap.sim !== baseline.sim;
+    if (saveMarkRef.current.dirty !== dirty) setSaveMark({ ...saveMarkRef.current, dirty });
+  }, [setSaveMark]);
+  // A document edit outside the Blockly change events (code typing, a rename
+  // or insertion, a code Ziel).
+  const noteDocEdit = useCallback(() => {
+    lastDocRef.current = docSnapshot();
+    noteChange({ doc: lastDocRef.current, sim: simSnapshot() });
+  }, [docSnapshot, noteChange, simSnapshot]);
+  // Another document is now open: nothing of the last one's baseline counts.
+  const markOpened = useCallback((savedAt, dirty) => {
+    baselineRef.current = null;
+    lastDocRef.current = null;
+    setSaveMark({ savedAt: Number.isFinite(savedAt) ? savedAt : null, dirty: !!dirty });
+  }, [setSaveMark]);
   const revealSeqRef = useRef(0);
   const [codeRevealRequest, setCodeRevealRequest] = useState(null);
   // The ONLY way a code document opens (hydrate, its failure, „Neu", a draft,
@@ -395,7 +471,11 @@ function WorkshopPage({ isActive }) {
       const store = createDetachedDestinationStore(readDestinationEntries(blocklyJson));
       codeZieleSendRef.current = store.getEntries().length > 0;
       // The store lives exactly as long as this document; so does this.
-      codeStoreUnsubscribeRef.current = store.subscribe(() => { codeZieleSendRef.current = true; });
+      codeStoreUnsubscribeRef.current = store.subscribe(() => {
+        codeZieleSendRef.current = true;
+        // A Ziel of the open code document changed: an edit (save status).
+        noteDocEdit();
+      });
       codeLanguageRef.current = language;
       codeStoreRef.current = store;
       setCodeLanguage(language);
@@ -409,7 +489,7 @@ function WorkshopPage({ isActive }) {
     setCodeLanguage('');
     applyCodeFiles(null);
     setCodeDestinationStore(null);
-  }, [applyCodeFiles, bumpDocToken]);
+  }, [applyCodeFiles, bumpDocToken, noteDocEdit]);
   // „Neu ▾" has been used this mount: the student has CHOSEN what the editor
   // holds, so a crash-recovery draft arriving a moment later must not overrule
   // them (the read is async; the click is not).
@@ -526,8 +606,6 @@ function WorkshopPage({ isActive }) {
   });
   const subscriptions = useRosTopicSubscription();
   const { getObjectCatalog, jogArm } = useRosServiceCaller();
-  const workspaceRef = useRef(null);
-  const workspaceDocTokenRef = useRef(null);
   // Blockly 12 ties getSelected() to the FocusManager, and clicking the
   // camera overlay (a non-focusable div) blurs the block in Chromium →
   // selection is null by the time the camera onClick runs. So we remember
@@ -803,6 +881,8 @@ function WorkshopPage({ isActive }) {
             files: w?.code_files,
             blocklyJson: w?.blockly_json,
           });
+          // The row as the cloud holds it: saved at its updated_at.
+          markOpened(Date.parse(w?.updated_at), false);
           setEditorKey((k) => k + 1);
           setHydrating(false);
         })
@@ -816,6 +896,7 @@ function WorkshopPage({ isActive }) {
           setEditorJson(null);
           setInitialJsonForEditor(unsavedBlocklyJson || null);
           openCodeDocument({ language: '' });
+          markOpened(null, !!unsavedBlocklyJson);
           setEditorKey((k) => k + 1);
           setHydrating(false);
         });
@@ -824,6 +905,8 @@ function WorkshopPage({ isActive }) {
     if (!selectedWorkflowId) setOpenDocId(null);
     setEditorJson(null);
     setInitialJsonForEditor(unsavedBlocklyJson || null);
+    // An unsaved document: its edits (if the store kept any) are unsaved.
+    markOpened(null, !!unsavedBlocklyJson);
     setEditorKey((k) => k + 1);
     setHydrating(false);
     return () => { cancelled = true; };
@@ -834,13 +917,36 @@ function WorkshopPage({ isActive }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, selectedWorkflowId, hasAccessToken]);
 
+  // BlocklyWorkspace reports every change with its Blockly event. Only a
+  // content change (not a selection, a scroll or an opened flyout) is an edit
+  // for the save status; a call without an event (an older BlocklyWorkspace, a
+  // test) counts as one.
   const handleEditorChange = useCallback(
-    (json) => {
+    (json, event) => {
       setEditorJson(json);
       setUnsavedJson(json);
+      if (event && event.isUiEvent === true) return;
+      lastDocRef.current = JSON.stringify(json ? slimSavePayload(json) : null);
+      noteChange({ doc: lastDocRef.current, sim: simSnapshot() });
     },
-    [setEditorJson, setUnsavedJson]
+    [setEditorJson, setUnsavedJson, noteChange, simSnapshot]
   );
+  // Every code edit — the editor's typing, a drawer rename, an insertion —
+  // goes through here (CodeWorkspace's onFilesChange and the code asset
+  // document's applyFiles). Identity-stable: the asset document's useMemo
+  // depends on it.
+  const handleCodeFilesChange = useCallback((next) => {
+    applyCodeFiles(next);
+    noteDocEdit();
+  }, [applyCodeFiles, noteDocEdit]);
+  // A change on the simulator table (an object placed, moved, turned, a zone)
+  // is part of what a save sends (sim_scene), so it is an edit too (M1a). It
+  // compares only the scene half — the document half is the last noted one.
+  const handleSimSceneChange = useCallback((scene) => {
+    simSceneRef.current = scene;
+    setSimScene(scene);
+    noteChange({ doc: lastDocRef.current, sim: simSnapshot() });
+  }, [noteChange, simSnapshot]);
 
   const handleWorkspaceReady = useCallback((ws) => {
     workspaceRef.current = ws;
@@ -888,7 +994,8 @@ function WorkshopPage({ isActive }) {
         language: codeLanguage,
         store: codeDestinationStore,
         getFiles: () => codeFilesRef.current,
-        applyFiles: applyCodeFiles,
+        // A rename or an insertion is an edit (the save status).
+        applyFiles: handleCodeFilesChange,
         requestReveal: (at) => {
           revealSeqRef.current += 1;
           setCodeRevealRequest({ ...at, nonce: revealSeqRef.current });
@@ -896,10 +1003,13 @@ function WorkshopPage({ isActive }) {
         getCursor: () => codeCursorRef.current,
         setCursor: (at) => { codeCursorRef.current = at; },
         getDocumentToken,
+        // The file list's APPLIED width (CodeWorkspace measures it); a
+        // missing or non-positive answer falls back to the default inside.
+        getSidebarWidth: () => codeSidebarWidthRef.current,
       });
     }
     return workspace ? createBlocklyAssetDocument(workspace) : null;
-  }, [isCodeWorkflow, codeLanguage, codeDestinationStore, workspace, applyCodeFiles, getDocumentToken]);
+  }, [isCodeWorkflow, codeLanguage, codeDestinationStore, workspace, handleCodeFilesChange, getDocumentToken]);
   const assetDocRef = useRef(assetDoc);
   assetDocRef.current = assetDoc;
   // Vormachen teaches into the document only while its editor is on screen —
@@ -1058,9 +1168,10 @@ function WorkshopPage({ isActive }) {
     openCodeDocument(isCodeLanguage(choice)
       ? { language: choice, files: { ...STARTER_FILES[choice] }, blocklyJson: null }
       : { language: '' });
+    markOpened(null, false);
     setEditorKey((k) => k + 1);
   }, [dispatch, openCodeDocument, refuseSwitch, setOpenDocId, setEditorJson, setInitialJsonForEditor,
-    setUnsavedJson]);
+    setUnsavedJson, markOpened]);
 
   // Camera click → Ziel, without a prompt. CameraFeedOverlay asks for the
   // label BEFORE it calls /workshop/mark_destination, so one point has one name
@@ -1191,17 +1302,19 @@ function WorkshopPage({ isActive }) {
     (state) => {
       if (selectedWorkflowId) return;  // server workflow takes precedence
       if (initialJsonForEditor) return;
-      // The draft replaces the (empty) unsaved document.
+      // The draft replaces the (empty) unsaved document — and it is not saved.
       bumpDocToken();
       setEditorJson(null);
       setInitialJsonForEditor(state);
       setEditorKey((k) => k + 1);
       setUnsavedJson(state);
+      markOpened(null, true);
     },
     [selectedWorkflowId, initialJsonForEditor, bumpDocToken, setEditorJson, setInitialJsonForEditor,
-      setUnsavedJson]
+      setUnsavedJson, markOpened]
   );
-  const { lastSavedAt } = useAutosave({
+  // The local crash recovery only; the toolbar shows the CLOUD save (saveMark).
+  useAutosave({
     workspace,
     enabled: isActive && (calibrated || simMode),
     scopeKey: userId,
@@ -1224,9 +1337,10 @@ function WorkshopPage({ isActive }) {
         files: draft.files,
         blocklyJson: draft.destinations ? { [DESTINATIONS_SERIALIZER_NAME]: draft.destinations } : null,
       });
+      markOpened(null, true);
       setEditorKey((k) => k + 1);
     },
-    [selectedWorkflowId, codeLanguage, openCodeDocument]
+    [selectedWorkflowId, codeLanguage, openCodeDocument, markOpened]
   );
   useCodeAutosave({
     language: codeLanguage,
@@ -1245,8 +1359,6 @@ function WorkshopPage({ isActive }) {
   // with), so nothing captured during an earlier round-trip is lost — and it
   // goes to the row of the document the editor HOLDS (openDocIdRef), never to
   // the one merely selected (review round 5, MD2).
-  const simSceneRef = useRef(simScene);
-  useEffect(() => { simSceneRef.current = simScene; }, [simScene]);
   // codeLanguageRef / codeFilesRef / codeStoreRef are written synchronously by
   // openCodeDocument and applyCodeFiles — their only writers — never by an
   // effect that could run late and put an older value back.
@@ -1298,9 +1410,9 @@ function WorkshopPage({ isActive }) {
     let json = null;
     // The live canvas only while it still shows the open document.
     const ws = workspaceDocTokenRef.current === docTokenRef.current ? workspaceRef.current : null;
+    const codeEntries = savingCode && codeStoreRef.current ? codeStoreRef.current.getEntries() : [];
     if (savingCode) {
-      const entries = codeStoreRef.current ? codeStoreRef.current.getEntries() : [];
-      json = entries.length > 0 ? { [DESTINATIONS_SERIALIZER_NAME]: serializeState(entries) } : {};
+      json = codeEntries.length > 0 ? { [DESTINATIONS_SERIALIZER_NAME]: serializeState(codeEntries) } : {};
     } else if (ws) {
       try {
         json = Blockly.serialization.workspaces.save(ws);
@@ -1330,6 +1442,26 @@ function WorkshopPage({ isActive }) {
     // fence in utils/__tests__/blocklyPayload.test.js reads them line by line,
     // and a one-line object literal reads as an unslimmed writer.
     const documentJson = slimSavePayload(json);
+    // What THIS save sends, serialized like docSnapshot/simSnapshot: once it
+    // succeeds it is the save status's baseline (an edit made during the
+    // round-trip then still reads „Nicht gespeichert").
+    const sentBaseline = {
+      doc: savingCode
+        ? JSON.stringify({ files: saveFiles, ziele: serializeState(codeEntries) })
+        : JSON.stringify(documentJson),
+      sim: JSON.stringify(simSceneRef.current),
+    };
+    // Only while that document is still the open one (the same check as
+    // markWorkflowSaved).
+    const settleSaveMark = () => {
+      baselineRef.current = sentBaseline;
+      const now = contentSnapshot();
+      lastDocRef.current = now.doc;
+      setSaveMark({
+        savedAt: Date.now(),
+        dirty: now.doc !== sentBaseline.doc || now.sim !== sentBaseline.sim,
+      });
+    };
     setSaving(true);
     // The id is taken with the document, at the same instant, and it is the
     // id of the document the editor HOLDS (review round 5, MD2): a workflow
@@ -1364,7 +1496,10 @@ function WorkshopPage({ isActive }) {
             sim_scene: simSceneRef.current,
           });
         }
-        if (docTokenRef.current === targetToken) dispatch(markWorkflowSaved());
+        if (docTokenRef.current === targetToken) {
+          dispatch(markWorkflowSaved());
+          settleSaveMark();
+        }
         if (toastOnSuccess) toast.success('Gespeichert.');
         return { ok: true, workflowId: targetId, created: false };
       }
@@ -1397,6 +1532,7 @@ function WorkshopPage({ isActive }) {
         setOpenDocId(created.id);
         dispatch(setSelectedWorkflowId(created.id));
         dispatch(markWorkflowSaved());
+        settleSaveMark();
       }
       if (toastOnSuccess) toast.success('Gespeichert.');
       return { ok: true, workflowId: created.id, created: true };
@@ -1405,7 +1541,7 @@ function WorkshopPage({ isActive }) {
     } finally {
       setSaving(false);
     }
-  }, [dispatch, setOpenDocId]);
+  }, [dispatch, setOpenDocId, contentSnapshot, setSaveMark]);
 
   // A save never JOINS a save in flight — a join reported `ok` for a document
   // it never sent. A caller arriving mid-save gets ONE coalesced follow-up that
@@ -1473,6 +1609,8 @@ function WorkshopPage({ isActive }) {
         files: updated.code_files,
         blocklyJson: updated.blockly_json,
       });
+      // The restore wrote the cloud row: that version is saved.
+      markOpened(Date.parse(updated.updated_at) || Date.now(), false);
       setEditorKey((k) => k + 1);
       return;
     }
@@ -1482,9 +1620,10 @@ function WorkshopPage({ isActive }) {
       setInitialJsonForEditor(updated.blockly_json);
       setEditorKey((k) => k + 1);
       setUnsavedJson(updated.blockly_json);
+      markOpened(Date.parse(updated.updated_at) || Date.now(), false);
     }
   }, [restoreForId, restoreForToken, openCodeDocument, bumpDocToken, setEditorJson,
-    setInitialJsonForEditor, setUnsavedJson]);
+    setInitialJsonForEditor, setUnsavedJson, markOpened]);
 
   // Why the history takes no restore right now, or null: a program runs or
   // starts, the opened program is still loading (it would restore the ROW
@@ -2029,7 +2168,9 @@ function WorkshopPage({ isActive }) {
                     tools · Verlauf + Kalibrieren (extra) · autosave. */}
                 <ToolbarButtons
                   workspace={workspace}
-                  lastSavedAt={lastSavedAt}
+                  codeMode={isCodeWorkflow}
+                  codeCommandsRef={codeCommandsRef}
+                  saveStatus={saveMark}
                   onSave={handleSave}
                   saving={saving}
                   leading={
@@ -2085,7 +2226,11 @@ function WorkshopPage({ isActive }) {
                           key={editorKey}
                           language={codeLanguage}
                           files={codeFiles}
-                          onFilesChange={applyCodeFiles}
+                          onFilesChange={handleCodeFilesChange}
+                          // Strg+S inside the editor (K-1): the button's save.
+                          onSave={handleSave}
+                          commandsRef={codeCommandsRef}
+                          sidebarWidthRef={codeSidebarWidthRef}
                           assetDoc={assetDoc}
                           provider={sammlungProvider}
                           onCursorChange={handleCodeCursorChange}
@@ -2147,7 +2292,7 @@ function WorkshopPage({ isActive }) {
                     />
                     <SimStage
                       scene={simScene}
-                      onChange={setSimScene}
+                      onChange={handleSimSceneChange}
                       catalog={objectCatalog}
                       catalogDims={catalogDims}
                       workspace={workspace}

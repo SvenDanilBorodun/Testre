@@ -12,6 +12,11 @@
  * Sammlung drawer detail of ONE Ziel (`kind: 'pin'`) or Position
  * (`kind: 'pose'`) of the workflow's destination store. Renaming rewrites the
  * reference blocks in the same undo step; deleting never touches a block.
+ *
+ * Its marker in the 3D twin is highlighted while it has the drawer's focus;
+ * when no 3D view is on screen (`capabilities.view3dOnScreen === false`) it
+ * offers „In 3D zeigen", which opens the dock's 3D panel (`onShow3d`, the
+ * page's `show3d` action).
  */
 
 import React, { useState } from 'react';
@@ -50,7 +55,7 @@ function sourceLabel(entry) {
 }
 
 export default function DrawerPlace({
-  assetDoc: assetDocProp = null, workspace = null, card, capabilities, onPreview,
+  assetDoc: assetDocProp = null, workspace = null, card, capabilities, onPreview, onShow3d,
 }) {
   const dispatch = useDispatch();
   const assetDoc = assetDocumentOf(assetDocProp, workspace);
@@ -64,6 +69,9 @@ export default function DrawerPlace({
   const previewTempo = (drawer && drawer.previewTempo) || 1.0;
   const lastResult = results ? results[previewKeyForDestination(entry.id)] : null;
   const previewPending = !!(capabilities && capabilities.previewPending === true);
+  // Only on an explicit false: an older page that says nothing shows nothing.
+  const offerShow3d = !!capabilities && capabilities.view3dOnScreen === false
+    && typeof onShow3d === 'function';
   // „Greifer merken": a Position's captured gripper, only when its S3 joint
   // snapshot classifies on THIS arm (none from an older server).
   const robotCaps = useSelector((s) => (s.tasks && s.tasks.taskStatus ? s.tasks.taskStatus.capabilities : null));
@@ -128,6 +136,16 @@ export default function DrawerPlace({
           </DetailRow>
         )}
       </dl>
+      {offerShow3d && (
+        <button
+          type="button"
+          onClick={() => onShow3d()}
+          className="mt-2 inline-flex items-center gap-1.5 rounded border border-[var(--line)] px-2 py-1 text-sm hover:bg-gray-50"
+        >
+          <Icon name="box" />
+          <span>{DE.DRAWER_SHOW_3D}</span>
+        </button>
+      )}
       {capabilities && capabilities.preview && typeof onPreview === 'function' && (
         <div className="mt-2">
           <button

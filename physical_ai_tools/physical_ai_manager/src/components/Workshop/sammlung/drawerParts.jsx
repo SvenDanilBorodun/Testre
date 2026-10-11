@@ -88,8 +88,11 @@ export function DetailRow({ label, children }) {
 
 /**
  * „Benutzt in": one button per use (click shows it — a block, or a code line),
- * or the kind's „Nirgends …". Rows are `{id, label, disabled}` from the asset
- * document; a caller that still hands a bare workspace gets `jumpToBlock`.
+ * or the kind's „Nirgends …". Rows are `{id, label, disabled, detail?}` from
+ * the asset document; the optional `detail` (a code row's line text) is a
+ * second line INSIDE the same button, so the whole row stays one jump target
+ * and each line is an element of its own. A caller that still hands a bare
+ * workspace gets `jumpToBlock`.
  */
 export function UsageList({ assetDoc = null, workspace = null, rows, nowhereText }) {
   const jump = (id) => {
@@ -108,9 +111,14 @@ export function UsageList({ assetDoc = null, workspace = null, rows, nowhereText
               <button
                 type="button"
                 onClick={() => jump(row.id ?? row.blockId)}
-                className="w-full truncate rounded px-2 py-1 text-left text-sm hover:bg-gray-100"
+                className="w-full rounded px-2 py-1 text-left text-sm hover:bg-gray-100"
               >
-                {row.disabled ? `${row.label} ${DE.DRAWER_DISABLED_SUFFIX}` : row.label}
+                <span className="block truncate">
+                  {row.disabled ? `${row.label} ${DE.DRAWER_DISABLED_SUFFIX}` : row.label}
+                </span>
+                {row.detail && (
+                  <span className="block truncate text-[11px] text-[var(--ink-3)]">{row.detail}</span>
+                )}
               </button>
             </li>
           ))}
@@ -145,7 +153,8 @@ export function RenameField({ name, maxLength, sanitize, onCommit, disabled }) {
   if (!editing) {
     return (
       <div className="flex items-center gap-2">
-        <h3 className="min-w-0 flex-1 truncate text-base font-semibold text-gray-900" title={name}>{name}</h3>
+        {/* The whole name: a card title may be cut („…"), the drawer never. */}
+        <h3 className="min-w-0 flex-1 break-words text-base font-semibold text-gray-900" title={name}>{name}</h3>
         <button
           type="button"
           onClick={start}

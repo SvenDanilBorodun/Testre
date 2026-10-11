@@ -16,6 +16,8 @@
 // (docs/KNOWN-ISSUES.md, R4).
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 import * as Blockly from 'blockly/core';
 import 'blockly/blocks';
 import * as De from 'blockly/msg/de';
@@ -27,6 +29,7 @@ import { createSammlungProvider } from '../provider';
 import { registerSammlungCategories, SAMMLUNG_BUTTON_KEYS } from '../toolboxCategories';
 import { registerAssetCardInflater } from '../AssetCardInflater';
 import { registerDestinationSerializer } from '../destinationStore';
+import { registerToolboxHeading } from '../ToolboxHeading';
 import {
   __resetDecorateWarningForTests,
   decorateFlyoutButton,
@@ -69,6 +72,9 @@ beforeAll(() => {
   registerDestinationSerializer();
   registerAssetCardInflater();
   registerIconButtonInflater();
+  // buildToolbox() carries the two `heading` items: register them like
+  // BlocklyWorkspace does (an unregistered kind is skipped with a warning).
+  registerToolboxHeading();
 });
 
 beforeEach(() => {
@@ -419,5 +425,37 @@ describe('a FlyoutButton whose DOM changed keeps the category working (review ro
     root.dispatchEvent(pointer('pointerup', 41));
     await flushEvents();
     expect(dispatched).toEqual([{ type: 'teach', kind: 'ziel' }]);
+  });
+});
+
+// The Vormachen creation buttons stand out (owner decision D): the flyout JSON's
+// `web-class` lands on the REAL FlyoutButton's group, index.css paints its
+// background rect (`blocklyFlyoutButtonBackground`) with the accent and its
+// text (`blocklyText`) white — and the icon takes the text's paint.
+describe('teach buttons — white on the accent', () => {
+  const INDEX_CSS = fs.readFileSync(path.join(__dirname, '..', '..', '..', '..', 'index.css'), 'utf8');
+  const teachRules = INDEX_CSS.split('\n').filter((line) => line.startsWith('.eduFlyoutTeachButton')).join('\n');
+  let style;
+  afterEach(() => { if (style) style.remove(); style = null; });
+
+  it('the class sits on the button group whose DOM index.css styles; its icon is painted white', () => {
+    expect(teachRules).toContain('.eduFlyoutTeachButton .blocklyText { fill: #ffffff; }');
+    style = document.createElement('style');
+    style.textContent = teachRules;
+    document.head.appendChild(style);
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.ZIELE);
+    const [teach, camera] = iconButtonsOf(flyout);
+    expect(teach.getButtonText()).toBe(DE.FLY_TEACH_ZIEL);
+    const root = teach.getSvgRoot();
+    expect(root.classList.contains('blocklyFlyoutButton')).toBe(true);
+    expect(root.classList.contains('eduFlyoutTeachButton')).toBe(true);
+    // The two children the rules address, as Blockly 12 builds them.
+    expect(Array.from(root.children).some((el) => el.classList.contains('blocklyFlyoutButtonBackground'))).toBe(true);
+    // eslint-disable-next-line testing-library/no-node-access
+    const text = root.querySelector(':scope > text.blocklyText');
+    expect(window.getComputedStyle(text).fill).toBe('rgb(255, 255, 255)');
+    expect(iconGroupOf(teach).getAttribute('stroke')).toBe('rgb(255, 255, 255)');
+    // A non-teach creation button keeps the plain look.
+    expect(camera.getSvgRoot().classList.contains('eduFlyoutTeachButton')).toBe(false);
   });
 });

@@ -8,7 +8,9 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useEffect, useState, useCallback, useMemo, useRef, Suspense, lazy } from 'react';
+import React, {
+  useEffect, useState, useCallback, useId, useMemo, useRef, Suspense, lazy,
+} from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast, { useToasterStore } from 'react-hot-toast';
 import * as Blockly from 'blockly/core';
@@ -27,6 +29,11 @@ import SkillmapPlayer from '../components/Workshop/SkillmapPlayer';
 import VersionHistoryDropdown from '../components/Workshop/VersionHistoryDropdown';
 import JogPanel from '../components/Workshop/JogPanel';
 import RightDock from '../components/Workshop/RightDock';
+import ResizeHandle from '../components/Workshop/layout/ResizeHandle';
+import {
+  DOCK_WIDTH, SIM_WIDTH, readDockWidth, readSimWidth, writeDockWidth, writeSimWidth,
+} from '../components/Workshop/layout/layoutPrefs';
+import { LAYOUT_DE, fillLayout } from '../components/Workshop/layout/layoutCopy';
 import { buildCatalogDims } from '../components/Workshop/simConstants';
 import { DE, formatDe } from '../components/Workshop/blocks/messages_de';
 import {
@@ -53,6 +60,8 @@ import {
   TEACH_BLOCK_TITLES_DE, TEACH_KINDS, TEACH_KIND_ICON, TEACH_KIND_LABEL_DE, teachEntryBlockReason,
 } from '../components/Workshop/teach/teachGates';
 import MenuButton from '../components/Workshop/MenuButton';
+import ModeBadge from '../components/Workshop/ModeBadge';
+import { MODE_DE } from '../components/Workshop/modeCopy';
 import OpenWorkflowPopover from '../components/Workshop/OpenWorkflowPopover';
 import { toastIcon } from '../components/icons/toast';
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
@@ -164,28 +173,6 @@ function readDockCollapsed() {
     return window.localStorage.getItem(DOCK_COLLAPSED_KEY) === '1';
   } catch (e) {
     return false;
-  }
-}
-
-// Desktop dock width (px), set by the drag divider between the editor and the
-// dock so the student can rebalance how much room the blocks vs. the tools get.
-const DOCK_WIDTH_KEY = 'edubotics_workshop_dock_width';
-const DOCK_WIDTH_DEFAULT = 380;
-const DOCK_WIDTH_MIN = 280;
-const DOCK_WIDTH_MAX = 760;
-
-function clampDockWidth(n) {
-  if (!Number.isFinite(n)) return DOCK_WIDTH_DEFAULT;
-  return Math.min(DOCK_WIDTH_MAX, Math.max(DOCK_WIDTH_MIN, n));
-}
-
-function readDockWidth() {
-  try {
-    const raw = window.localStorage.getItem(DOCK_WIDTH_KEY);
-    if (raw == null) return DOCK_WIDTH_DEFAULT;
-    return clampDockWidth(Number(raw));
-  } catch (e) {
-    return DOCK_WIDTH_DEFAULT;
   }
 }
 
@@ -363,6 +350,12 @@ function WorkshopPage({ isActive }) {
   // writes nothing and asks them to click first (owner decision R3-O4). A
   // request to show a line (a „Benutzt in" row, an insertion) travels as a prop.
   const codeCursorRef = useRef(null);
+  // Handed to CodeWorkspace: the lazy CodeEditor sets `{ undo, redo }` on
+  // `codeCommandsRef` (the toolbar's „Rückgängig"/„Wiederholen" in a code
+  // document), and CodeWorkspace writes the APPLIED width of its file list
+  // into `codeSidebarWidthRef` (where the Sammlung drawer anchors).
+  const codeCommandsRef = useRef(null);
+  const codeSidebarWidthRef = useRef(null);
   // THE OPEN DOCUMENT'S IDENTITY (review round 5, MD2/MD3/MD5, owner decision
   // R5-O1). `selectedWorkflowId` is the program the student ASKED for and moves
   // the moment they pick one; the editor holds it only once its row arrived.
@@ -390,6 +383,76 @@ function WorkshopPage({ isActive }) {
     setDocToken(docTokenRef.current);
   }, []);
   const getDocumentToken = useCallback(() => docTokenRef.current, []);
+  // The live Blockly canvas, and the document token it was mounted for
+  // (handleWorkspaceReady): a canvas whose token is behind still shows the
+  // PREVIOUS document. The open document's simulator scene, mirrored for the
+  // save and the save status.
+  const workspaceRef = useRef(null);
+  const workspaceDocTokenRef = useRef(null);
+  const simSceneRef = useRef(simScene);
+  useEffect(() => { simSceneRef.current = simScene; }, [simScene]);
+
+  // THE SAVE STATUS (R0-2): what the toolbar says about the CLOUD save of the
+  // open document — `savedAt` (the last successful save in this session, or
+  // the opened row's updated_at) and `dirty`. „Unsaved" means the document OR
+  // its simulator scene differs from what the last successful save SENT
+  // (`baselineRef`, both halves serialized), judged by CONTENT, never by
+  // counting edits: Blockly delivers its events late (requestAnimationFrame +
+  // setTimeout), so a rename's own events arrive after its save — and compare
+  // equal. Before the first save in this session (no baseline) every edit
+  // counts. Every opening resets both (markOpened).
+  const [saveMark, setSaveMarkState] = useState({ savedAt: null, dirty: false });
+  const saveMarkRef = useRef(saveMark);
+  const setSaveMark = useCallback((next) => {
+    saveMarkRef.current = next;
+    setSaveMarkState(next);
+  }, []);
+  const baselineRef = useRef(null);
+  // The doc half of the last noted snapshot: a scene change (one call per
+  // pointermove of an object drag) compares it instead of re-serializing the
+  // canvas. The save's completion recomputes everything once.
+  const lastDocRef = useRef(null);
+  // The open document's content, serialized the way runSave sends it: a
+  // Blockly document's slimmed JSON (the live canvas only while it was mounted
+  // for this document), a code document's files and Ziele.
+  const docSnapshot = useCallback(() => {
+    if (isCodeLanguage(codeLanguageRef.current)) {
+      const entries = codeStoreRef.current ? codeStoreRef.current.getEntries() : [];
+      return JSON.stringify({ files: codeFilesRef.current, ziele: serializeState(entries) });
+    }
+    let json = null;
+    const ws = workspaceDocTokenRef.current === docTokenRef.current ? workspaceRef.current : null;
+    if (ws) {
+      try {
+        json = Blockly.serialization.workspaces.save(ws);
+      } catch (_) {
+        json = null;
+      }
+    }
+    if (!json) json = editorJsonRef.current || unsavedJsonRef.current || initialJsonRef.current;
+    return JSON.stringify(json ? slimSavePayload(json) : null);
+  }, []);
+  const simSnapshot = useCallback(() => JSON.stringify(simSceneRef.current), []);
+  const contentSnapshot = useCallback(() => ({ doc: docSnapshot(), sim: simSnapshot() }), [docSnapshot, simSnapshot]);
+  // An edit was made: dirty unless both halves equal the baseline. The page
+  // re-renders only when `dirty` really changes (not per keystroke).
+  const noteChange = useCallback((snap) => {
+    const baseline = baselineRef.current;
+    const dirty = !baseline || !snap || snap.doc !== baseline.doc || snap.sim !== baseline.sim;
+    if (saveMarkRef.current.dirty !== dirty) setSaveMark({ ...saveMarkRef.current, dirty });
+  }, [setSaveMark]);
+  // A document edit outside the Blockly change events (code typing, a rename
+  // or insertion, a code Ziel).
+  const noteDocEdit = useCallback(() => {
+    lastDocRef.current = docSnapshot();
+    noteChange({ doc: lastDocRef.current, sim: simSnapshot() });
+  }, [docSnapshot, noteChange, simSnapshot]);
+  // Another document is now open: nothing of the last one's baseline counts.
+  const markOpened = useCallback((savedAt, dirty) => {
+    baselineRef.current = null;
+    lastDocRef.current = null;
+    setSaveMark({ savedAt: Number.isFinite(savedAt) ? savedAt : null, dirty: !!dirty });
+  }, [setSaveMark]);
   const revealSeqRef = useRef(0);
   const [codeRevealRequest, setCodeRevealRequest] = useState(null);
   // The ONLY way a code document opens (hydrate, its failure, „Neu", a draft,
@@ -408,7 +471,11 @@ function WorkshopPage({ isActive }) {
       const store = createDetachedDestinationStore(readDestinationEntries(blocklyJson));
       codeZieleSendRef.current = store.getEntries().length > 0;
       // The store lives exactly as long as this document; so does this.
-      codeStoreUnsubscribeRef.current = store.subscribe(() => { codeZieleSendRef.current = true; });
+      codeStoreUnsubscribeRef.current = store.subscribe(() => {
+        codeZieleSendRef.current = true;
+        // A Ziel of the open code document changed: an edit (save status).
+        noteDocEdit();
+      });
       codeLanguageRef.current = language;
       codeStoreRef.current = store;
       setCodeLanguage(language);
@@ -422,16 +489,12 @@ function WorkshopPage({ isActive }) {
     setCodeLanguage('');
     applyCodeFiles(null);
     setCodeDestinationStore(null);
-  }, [applyCodeFiles, bumpDocToken]);
+  }, [applyCodeFiles, bumpDocToken, noteDocEdit]);
   // „Neu ▾" has been used this mount: the student has CHOSEN what the editor
   // holds, so a crash-recovery draft arriving a moment later must not overrule
   // them (the read is async; the click is not).
   const documentChosenRef = useRef(false);
-  // #B2: leaving simMode while a sim run is active would unmount RunControls (and
-  // its Stop button) on an uncalibrated rig, stranding the run. Lock the toggle
-  // while a sim run is in flight (mirrors LeaderToggle's run-guard).
   const runState = useSelector((s) => s.workshop.runState);
-  const simRunActive = simMode && runState === 'running';
   // No document switch while a program runs or stands at a breakpoint
   // (owner decision R2-O3): every action that replaces the open document is
   // disabled with this German reason, and the handlers refuse it too (a clone
@@ -459,6 +522,15 @@ function WorkshopPage({ isActive }) {
   // 5, MD5): RunControls reports it; nothing replaces the document meanwhile.
   const [runStarting, setRunStartingState] = useState(false);
   const runStartingRef = useRef(false);
+  // #B2: leaving simMode while a sim run is in flight would unmount RunControls
+  // (and its Stop button) on an uncalibrated rig, stranding the run; ENTERING it
+  // while a program drives the REAL arm would hide that run behind the
+  // simulator. Both count a paused run (a breakpoint still holds it) and a run
+  // that is starting. Not gated on the heartbeat: a dead link with a recorded
+  // real run fails closed. Declared here, below runStarting (a use above its
+  // declaration is a temporal-dead-zone error).
+  const simRunActive = simMode && (workflowRunning || runStarting);
+  const realRunActive = !simMode && (workflowRunning || runStarting);
   const handleRunStarting = useCallback((v) => {
     runStartingRef.current = !!v;
     setRunStartingState(!!v);
@@ -521,6 +593,9 @@ function WorkshopPage({ isActive }) {
   // hand mode, and a leader switched on mid-session) and `followerOnly` (the
   // leader gone in leader mode). Polled only while the page is shown.
   const rsBridge = useRsBridgeStatus({ enabled: isActive });
+  // The id of the Vormachen chooser's visible reason (aria-describedby). A hook,
+  // so it sits above the inactive page's early return.
+  const teachReasonId = useId();
   const teachReason = teachEntryBlockReason({
     heartbeatStatus,
     runState,
@@ -531,8 +606,6 @@ function WorkshopPage({ isActive }) {
   });
   const subscriptions = useRosTopicSubscription();
   const { getObjectCatalog, jogArm } = useRosServiceCaller();
-  const workspaceRef = useRef(null);
-  const workspaceDocTokenRef = useRef(null);
   // Blockly 12 ties getSelected() to the FocusManager, and clicking the
   // camera overlay (a non-focusable div) blurs the block in Chromium →
   // selection is null by the time the camera onClick runs. So we remember
@@ -545,7 +618,11 @@ function WorkshopPage({ isActive }) {
   // `dockCollapsed` folds the dock to its rail. Both persist across reloads.
   const [dockOpen, setDockOpen] = useState(readDockOpen);
   const [dockCollapsed, setDockCollapsed] = useState(readDockCollapsed);
+  // The committed pane sizes (layout/layoutPrefs.js). Each is shown through a
+  // CSS variable its ResizeHandle writes on the editor row (`--dock-w`,
+  // `--sim-w`); a drag changes only the variable, never this state.
   const [dockWidth, setDockWidth] = useState(readDockWidth);
+  const [simWidth, setSimWidth] = useState(readSimWidth);
   // Toast cap — same dismissal loop as the other five student pages. `toasts` is
   // newest-first, so index >= TOAST_LIMIT is the overflow; dismiss (not remove)
   // keeps the exit animation.
@@ -567,36 +644,6 @@ function WorkshopPage({ isActive }) {
       window.localStorage.setItem(DOCK_COLLAPSED_KEY, dockCollapsed ? '1' : '0');
     } catch (_) { /* quota / private mode — keep the in-memory value */ }
   }, [dockCollapsed]);
-
-  // Drag divider between the editor and the dock. The handle captures the pointer
-  // (so a drag that leaves the 8px strip still tracks); the new width is the
-  // distance from the pointer to the row's right edge, clamped so the editor
-  // keeps a usable minimum. Persisted on release (not per-move — avoids a
-  // localStorage write every animation frame).
-  const dockRowRef = useRef(null);
-  const dockDragRef = useRef(false);
-  const onDockResizeDown = useCallback((e) => {
-    dockDragRef.current = true;
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) { /* jsdom */ }
-  }, []);
-  const onDockResizeMove = useCallback((e) => {
-    if (!dockDragRef.current || !dockRowRef.current) return;
-    const rect = dockRowRef.current.getBoundingClientRect();
-    if (!rect.width) return;
-    const raw = rect.right - e.clientX;
-    // Cap so the editor never drops below ~360 px.
-    const maxW = Math.min(DOCK_WIDTH_MAX, rect.width - 360);
-    setDockWidth(Math.max(DOCK_WIDTH_MIN, Math.min(maxW, raw)));
-  }, []);
-  const onDockResizeUp = useCallback((e) => {
-    if (!dockDragRef.current) return;
-    dockDragRef.current = false;
-    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) { /* jsdom */ }
-    setDockWidth((w) => {
-      try { window.localStorage.setItem(DOCK_WIDTH_KEY, String(w)); } catch (_) { /* ignore */ }
-      return w;
-    });
-  }, []);
 
   // No svgResize here: BlocklyWorkspace observes its own host box, which covers
   // the dock width/collapse and the simulator swap as well as every HEIGHT
@@ -705,12 +752,27 @@ function WorkshopPage({ isActive }) {
   // One ladder for the header sim toggle AND a preview's sim entry
   // (utils/simPreview.js::simEntryBlockReason).
   const simEntryReason = simEntryBlockReason({
-    simRunActive, simMode, activeTutorialId, teachOpen, jogHandGuideOn,
+    simRunActive, realRunActive, simMode, activeTutorialId, teachOpen, jogHandGuideOn,
   });
   const simEntryReasonRef = useRef(simEntryReason);
   simEntryReasonRef.current = simEntryReason;
   const simModeRef = useRef(simMode);
   simModeRef.current = simMode;
+  // A switch between the real robot and the simulator is announced once, by
+  // whichever path made it (the header toggle, a card's play button, „Im
+  // Simulator zeigen", a sim-table Ziel) — never on mount. One toast id, so a
+  // quick back-and-forth shows the latest mode, not a stack.
+  const modeToastArmedRef = useRef(false);
+  useEffect(() => {
+    if (!modeToastArmedRef.current) {
+      modeToastArmedRef.current = true;
+      return;
+    }
+    toast(simMode ? MODE_DE.TOAST_SIM : MODE_DE.TOAST_REAL, {
+      id: 'edubotics-mode',
+      icon: toastIcon(simMode ? 'simulator' : 'arm'),
+    });
+  }, [simMode]);
   // Enter the simulator on behalf of a preview (and, later, „Ziel setzen" / a
   // point marker with `showPath: false`, which never turns the trail on).
   // Resolves true once the simulator is (or already was) open.
@@ -819,6 +881,8 @@ function WorkshopPage({ isActive }) {
             files: w?.code_files,
             blocklyJson: w?.blockly_json,
           });
+          // The row as the cloud holds it: saved at its updated_at.
+          markOpened(Date.parse(w?.updated_at), false);
           setEditorKey((k) => k + 1);
           setHydrating(false);
         })
@@ -832,6 +896,7 @@ function WorkshopPage({ isActive }) {
           setEditorJson(null);
           setInitialJsonForEditor(unsavedBlocklyJson || null);
           openCodeDocument({ language: '' });
+          markOpened(null, !!unsavedBlocklyJson);
           setEditorKey((k) => k + 1);
           setHydrating(false);
         });
@@ -840,6 +905,8 @@ function WorkshopPage({ isActive }) {
     if (!selectedWorkflowId) setOpenDocId(null);
     setEditorJson(null);
     setInitialJsonForEditor(unsavedBlocklyJson || null);
+    // An unsaved document: its edits (if the store kept any) are unsaved.
+    markOpened(null, !!unsavedBlocklyJson);
     setEditorKey((k) => k + 1);
     setHydrating(false);
     return () => { cancelled = true; };
@@ -850,13 +917,36 @@ function WorkshopPage({ isActive }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, selectedWorkflowId, hasAccessToken]);
 
+  // BlocklyWorkspace reports every change with its Blockly event. Only a
+  // content change (not a selection, a scroll or an opened flyout) is an edit
+  // for the save status; a call without an event (an older BlocklyWorkspace, a
+  // test) counts as one.
   const handleEditorChange = useCallback(
-    (json) => {
+    (json, event) => {
       setEditorJson(json);
       setUnsavedJson(json);
+      if (event && event.isUiEvent === true) return;
+      lastDocRef.current = JSON.stringify(json ? slimSavePayload(json) : null);
+      noteChange({ doc: lastDocRef.current, sim: simSnapshot() });
     },
-    [setEditorJson, setUnsavedJson]
+    [setEditorJson, setUnsavedJson, noteChange, simSnapshot]
   );
+  // Every code edit — the editor's typing, a drawer rename, an insertion —
+  // goes through here (CodeWorkspace's onFilesChange and the code asset
+  // document's applyFiles). Identity-stable: the asset document's useMemo
+  // depends on it.
+  const handleCodeFilesChange = useCallback((next) => {
+    applyCodeFiles(next);
+    noteDocEdit();
+  }, [applyCodeFiles, noteDocEdit]);
+  // A change on the simulator table (an object placed, moved, turned, a zone)
+  // is part of what a save sends (sim_scene), so it is an edit too (M1a). It
+  // compares only the scene half — the document half is the last noted one.
+  const handleSimSceneChange = useCallback((scene) => {
+    simSceneRef.current = scene;
+    setSimScene(scene);
+    noteChange({ doc: lastDocRef.current, sim: simSnapshot() });
+  }, [noteChange, simSnapshot]);
 
   const handleWorkspaceReady = useCallback((ws) => {
     workspaceRef.current = ws;
@@ -904,7 +994,8 @@ function WorkshopPage({ isActive }) {
         language: codeLanguage,
         store: codeDestinationStore,
         getFiles: () => codeFilesRef.current,
-        applyFiles: applyCodeFiles,
+        // A rename or an insertion is an edit (the save status).
+        applyFiles: handleCodeFilesChange,
         requestReveal: (at) => {
           revealSeqRef.current += 1;
           setCodeRevealRequest({ ...at, nonce: revealSeqRef.current });
@@ -912,10 +1003,13 @@ function WorkshopPage({ isActive }) {
         getCursor: () => codeCursorRef.current,
         setCursor: (at) => { codeCursorRef.current = at; },
         getDocumentToken,
+        // The file list's APPLIED width (CodeWorkspace measures it); a
+        // missing or non-positive answer falls back to the default inside.
+        getSidebarWidth: () => codeSidebarWidthRef.current,
       });
     }
     return workspace ? createBlocklyAssetDocument(workspace) : null;
-  }, [isCodeWorkflow, codeLanguage, codeDestinationStore, workspace, applyCodeFiles, getDocumentToken]);
+  }, [isCodeWorkflow, codeLanguage, codeDestinationStore, workspace, handleCodeFilesChange, getDocumentToken]);
   const assetDocRef = useRef(assetDoc);
   assetDocRef.current = assetDoc;
   // Vormachen teaches into the document only while its editor is on screen —
@@ -1074,9 +1168,10 @@ function WorkshopPage({ isActive }) {
     openCodeDocument(isCodeLanguage(choice)
       ? { language: choice, files: { ...STARTER_FILES[choice] }, blocklyJson: null }
       : { language: '' });
+    markOpened(null, false);
     setEditorKey((k) => k + 1);
   }, [dispatch, openCodeDocument, refuseSwitch, setOpenDocId, setEditorJson, setInitialJsonForEditor,
-    setUnsavedJson]);
+    setUnsavedJson, markOpened]);
 
   // Camera click → Ziel, without a prompt. CameraFeedOverlay asks for the
   // label BEFORE it calls /workshop/mark_destination, so one point has one name
@@ -1207,17 +1302,19 @@ function WorkshopPage({ isActive }) {
     (state) => {
       if (selectedWorkflowId) return;  // server workflow takes precedence
       if (initialJsonForEditor) return;
-      // The draft replaces the (empty) unsaved document.
+      // The draft replaces the (empty) unsaved document — and it is not saved.
       bumpDocToken();
       setEditorJson(null);
       setInitialJsonForEditor(state);
       setEditorKey((k) => k + 1);
       setUnsavedJson(state);
+      markOpened(null, true);
     },
     [selectedWorkflowId, initialJsonForEditor, bumpDocToken, setEditorJson, setInitialJsonForEditor,
-      setUnsavedJson]
+      setUnsavedJson, markOpened]
   );
-  const { lastSavedAt } = useAutosave({
+  // The local crash recovery only; the toolbar shows the CLOUD save (saveMark).
+  useAutosave({
     workspace,
     enabled: isActive && (calibrated || simMode),
     scopeKey: userId,
@@ -1240,9 +1337,10 @@ function WorkshopPage({ isActive }) {
         files: draft.files,
         blocklyJson: draft.destinations ? { [DESTINATIONS_SERIALIZER_NAME]: draft.destinations } : null,
       });
+      markOpened(null, true);
       setEditorKey((k) => k + 1);
     },
-    [selectedWorkflowId, codeLanguage, openCodeDocument]
+    [selectedWorkflowId, codeLanguage, openCodeDocument, markOpened]
   );
   useCodeAutosave({
     language: codeLanguage,
@@ -1261,8 +1359,6 @@ function WorkshopPage({ isActive }) {
   // with), so nothing captured during an earlier round-trip is lost — and it
   // goes to the row of the document the editor HOLDS (openDocIdRef), never to
   // the one merely selected (review round 5, MD2).
-  const simSceneRef = useRef(simScene);
-  useEffect(() => { simSceneRef.current = simScene; }, [simScene]);
   // codeLanguageRef / codeFilesRef / codeStoreRef are written synchronously by
   // openCodeDocument and applyCodeFiles — their only writers — never by an
   // effect that could run late and put an older value back.
@@ -1314,9 +1410,9 @@ function WorkshopPage({ isActive }) {
     let json = null;
     // The live canvas only while it still shows the open document.
     const ws = workspaceDocTokenRef.current === docTokenRef.current ? workspaceRef.current : null;
+    const codeEntries = savingCode && codeStoreRef.current ? codeStoreRef.current.getEntries() : [];
     if (savingCode) {
-      const entries = codeStoreRef.current ? codeStoreRef.current.getEntries() : [];
-      json = entries.length > 0 ? { [DESTINATIONS_SERIALIZER_NAME]: serializeState(entries) } : {};
+      json = codeEntries.length > 0 ? { [DESTINATIONS_SERIALIZER_NAME]: serializeState(codeEntries) } : {};
     } else if (ws) {
       try {
         json = Blockly.serialization.workspaces.save(ws);
@@ -1346,6 +1442,26 @@ function WorkshopPage({ isActive }) {
     // fence in utils/__tests__/blocklyPayload.test.js reads them line by line,
     // and a one-line object literal reads as an unslimmed writer.
     const documentJson = slimSavePayload(json);
+    // What THIS save sends, serialized like docSnapshot/simSnapshot: once it
+    // succeeds it is the save status's baseline (an edit made during the
+    // round-trip then still reads „Nicht gespeichert").
+    const sentBaseline = {
+      doc: savingCode
+        ? JSON.stringify({ files: saveFiles, ziele: serializeState(codeEntries) })
+        : JSON.stringify(documentJson),
+      sim: JSON.stringify(simSceneRef.current),
+    };
+    // Only while that document is still the open one (the same check as
+    // markWorkflowSaved).
+    const settleSaveMark = () => {
+      baselineRef.current = sentBaseline;
+      const now = contentSnapshot();
+      lastDocRef.current = now.doc;
+      setSaveMark({
+        savedAt: Date.now(),
+        dirty: now.doc !== sentBaseline.doc || now.sim !== sentBaseline.sim,
+      });
+    };
     setSaving(true);
     // The id is taken with the document, at the same instant, and it is the
     // id of the document the editor HOLDS (review round 5, MD2): a workflow
@@ -1380,7 +1496,10 @@ function WorkshopPage({ isActive }) {
             sim_scene: simSceneRef.current,
           });
         }
-        if (docTokenRef.current === targetToken) dispatch(markWorkflowSaved());
+        if (docTokenRef.current === targetToken) {
+          dispatch(markWorkflowSaved());
+          settleSaveMark();
+        }
         if (toastOnSuccess) toast.success('Gespeichert.');
         return { ok: true, workflowId: targetId, created: false };
       }
@@ -1413,6 +1532,7 @@ function WorkshopPage({ isActive }) {
         setOpenDocId(created.id);
         dispatch(setSelectedWorkflowId(created.id));
         dispatch(markWorkflowSaved());
+        settleSaveMark();
       }
       if (toastOnSuccess) toast.success('Gespeichert.');
       return { ok: true, workflowId: created.id, created: true };
@@ -1421,7 +1541,7 @@ function WorkshopPage({ isActive }) {
     } finally {
       setSaving(false);
     }
-  }, [dispatch, setOpenDocId]);
+  }, [dispatch, setOpenDocId, contentSnapshot, setSaveMark]);
 
   // A save never JOINS a save in flight — a join reported `ok` for a document
   // it never sent. A caller arriving mid-save gets ONE coalesced follow-up that
@@ -1489,6 +1609,8 @@ function WorkshopPage({ isActive }) {
         files: updated.code_files,
         blocklyJson: updated.blockly_json,
       });
+      // The restore wrote the cloud row: that version is saved.
+      markOpened(Date.parse(updated.updated_at) || Date.now(), false);
       setEditorKey((k) => k + 1);
       return;
     }
@@ -1498,9 +1620,10 @@ function WorkshopPage({ isActive }) {
       setInitialJsonForEditor(updated.blockly_json);
       setEditorKey((k) => k + 1);
       setUnsavedJson(updated.blockly_json);
+      markOpened(Date.parse(updated.updated_at) || Date.now(), false);
     }
   }, [restoreForId, restoreForToken, openCodeDocument, bumpDocToken, setEditorJson,
-    setInitialJsonForEditor, setUnsavedJson]);
+    setInitialJsonForEditor, setUnsavedJson, markOpened]);
 
   // Why the history takes no restore right now, or null: a program runs or
   // starts, the opened program is still loading (it would restore the ROW
@@ -1592,6 +1715,10 @@ function WorkshopPage({ isActive }) {
         previewVariables: true,
         pinCamera: !!calibrated && !simMode,
         pinSim: true,
+        // Whether a 3D view is on screen right now (the simulator's, or the
+        // dock's „3D-Ansicht" panel). While it is not, a Ziel/Position offers
+        // „In 3D zeigen" (the `show3d` action below).
+        view3dOnScreen: simMode || (!dockCollapsed && dockOpen.includes('3d')),
       },
       robotType: robotType || '',
       trajectories: {
@@ -1603,7 +1730,7 @@ function WorkshopPage({ isActive }) {
       restrictedBlocks: Array.isArray(restrictedBlocks) ? restrictedBlocks : null,
     });
   }, [sammlungProvider, simMode, calibrated, previewPending, robotType, trajectoryList,
-    lastPreviewResult, variableValues, restrictedBlocks]);
+    lastPreviewResult, variableValues, restrictedBlocks, dockCollapsed, dockOpen]);
   useEffect(() => {
     sammlungProvider.setActionHandler((action) => {
       if (!action || typeof action !== 'object') return;
@@ -1611,6 +1738,11 @@ function WorkshopPage({ isActive }) {
         setDockCollapsed(false);
         setDockOpen((prev) => (prev.includes('camera') ? prev : addOpenTab(prev, 'camera', isTabBusy)));
         toast(DE.FLY_PIN_CAMERA_HINT, { icon: toastIcon('camera') });
+      } else if (action.type === 'show3d') {
+        // „In 3D zeigen": the dock's 3D panel, by the pinCamera rules (a busy
+        // panel is never evicted). The highlight the drawer set shows there.
+        setDockCollapsed(false);
+        setDockOpen((prev) => (prev.includes('3d') ? prev : addOpenTab(prev, '3d', isTabBusy)));
       } else if (action.type === 'jumpToBlock') {
         jumpToBlock(workspaceRef.current, action.blockId);
       } else if (action.type === 'manage') {
@@ -1672,6 +1804,11 @@ function WorkshopPage({ isActive }) {
   const jogDisabled =
     heartbeatStatus !== 'connected' || runState === 'running' || teachOpen;
   const teachReasonText = teachReason ? TEACH_BLOCK_TITLES_DE[teachReason] : null;
+  const hintText = !showEditor
+    ? 'Bevor wir loslegen können, muss die Kamera eingerichtet werden.'
+    : isCodeWorkflow
+      ? CODE_DE.HEADER_HINT_CODE
+      : 'Bausteine ziehen, Aufgabe zusammenstellen und vom Roboter ausführen lassen.';
   const teachChooserItems = TEACH_KINDS.map((kind) => ({
     id: kind,
     label: TEACH_KIND_LABEL_DE[kind],
@@ -1862,22 +1999,69 @@ function WorkshopPage({ isActive }) {
     // callers (TableTouchStep, JogPanel, Vormachen) can each unmount while a
     // countdown is still running — see HomeGlidePrompt.
     <HomeGlideProvider>
-    <div className="flex flex-col h-full w-full overflow-hidden">
+    {/* The mode FRAME: orange on the real robot, blue in the simulator — a
+        border and `data-mode` on this EXISTING root, never a wrapper (a wrapper
+        would remount the editor and the dock) and never a transform, filter,
+        `contain`, `will-change` or z-index (the Vormachen overlay is `fixed`
+        and not portalled). The frame never animates. */}
+    <div
+      data-mode={simMode ? 'sim' : 'real'}
+      className={
+        'flex flex-col h-full w-full overflow-hidden border-4 '
+        + (simMode ? 'border-[#2563EB]' : 'border-[#EA580C]')
+      }
+    >
       <header className="px-3 sm:px-4 py-2 border-b border-[var(--line)] bg-white shrink-0">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="min-w-0 flex items-baseline gap-2 flex-wrap">
-            <h1 className="text-base sm:text-lg font-semibold text-[var(--ink)]">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          {/* Title, mode badge and hint. Below lg the group wraps (the running
+              badge drops under the title at phone width instead of being
+              clipped); from lg up it is one row and the hint truncates in its
+              own flex item, never hidden. */}
+          <div className="flex min-w-0 flex-1 basis-auto lg:basis-[34rem] flex-wrap lg:flex-nowrap items-center gap-x-2 gap-y-1">
+            <h1 className="shrink-0 text-base sm:text-lg font-semibold text-[var(--ink)]">
               Roboter Studio
             </h1>
-            <p className="text-xs text-[var(--ink-3)] hidden lg:block truncate">
-              {!showEditor
-                ? 'Bevor wir loslegen können, muss die Kamera eingerichtet werden.'
-                : isCodeWorkflow
-                  ? CODE_DE.HEADER_HINT_CODE
-                  : 'Bausteine ziehen, Aufgabe zusammenstellen und vom Roboter ausführen lassen.'}
+            <ModeBadge simMode={simMode} />
+            <p
+              className="hidden lg:block min-w-0 flex-1 truncate text-xs text-[var(--ink-3)]"
+              title={hintText}
+            >
+              {hintText}
             </p>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
+          {/* The actions. Below lg the group may shrink and wrap inside the
+              viewport (`flex-initial max-w-full`); from lg up it keeps its
+              width (`flex-none`) and only the LeaderToggle wraps it. */}
+          <div className="ml-auto flex flex-initial max-w-full lg:flex-none flex-wrap items-center justify-end gap-2">
+            {/* „Vormachen": one focused window per kind (owner decisions D1,
+                D4). A disabled chooser shows WHY as visible text beside it,
+                wired as its aria-describedby; its name stays „Vormachen". */}
+            {showEditor && view === 'editor' && (
+              <div className="flex items-center gap-1.5">
+                {teachReasonText && (
+                  <span
+                    id={teachReasonId}
+                    className="max-w-[15rem] line-clamp-2 text-[11px] leading-tight text-[var(--ink-3)]"
+                  >
+                    {teachReasonText}
+                  </span>
+                )}
+                <MenuButton
+                  label={DE.TOOLBAR_TEACH}
+                  icon="hand"
+                  menuLabel={DE.TEACH_CHOOSER_MENU}
+                  items={teachChooserItems}
+                  disabled={!!teachReason || teachOpen}
+                  title={teachReasonText || DE.TOOLBAR_TEACH_TITLE}
+                  describedBy={teachReasonText ? teachReasonId : undefined}
+                  buttonClassName={
+                    'text-sm px-3 py-1.5 rounded-md border disabled:opacity-50 '
+                    + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
+                    + 'border-[var(--accent)] hover:opacity-90'
+                  }
+                />
+              </div>
+            )}
             {/* „Abgeben": hand the teacher this stand (saves first, then
                 POST /workflows/{id}/submit). Blocks and code alike. */}
             {showEditor && (
@@ -1894,9 +2078,10 @@ function WorkshopPage({ isActive }) {
               type="button"
               onClick={() => {
                 // Belt-and-suspenders (the button is already disabled for all
-                // four): never toggle while a sim run is in flight, and never
-                // ENTER sim during an active tutorial (replacing the dock would
-                // unmount SkillmapPlayer + lift the toolbox restriction
+                // five): never toggle while a sim run is in flight, and never
+                // ENTER sim while a program drives the real arm (running,
+                // paused or starting), during an active tutorial (replacing
+                // the dock would unmount SkillmapPlayer + lift the toolbox restriction
                 // mid-tutorial), while Vormachen is open (it owns the REAL arm,
                 // which the simulator would hide under the student's hand), or
                 // while the arm is hand-guided (unmounting JogPanel re-torques /
@@ -1936,7 +2121,7 @@ function WorkshopPage({ isActive }) {
         </div>
       </header>
       {/* Vormachen: the full-screen teaching overlay, one focused window per
-          kind, opened from the toolbar chooser or a Sammlung creation button
+          kind, opened from the header chooser or a Sammlung creation button
           („Bewegung/Position/Ziel vormachen"). */}
       <TeachHost
         isActive={isActive}
@@ -1980,10 +2165,13 @@ function WorkshopPage({ isActive }) {
             ) : (
               <>
                 {/* One compact toolbar: view switch + „Öffnen" (leading) · editor
-                    tools · Verlauf + Kalibrieren (extra) · autosave. */}
+                    tools · Verlauf + Kalibrieren (extra) · the cloud save status.
+                    The Vormachen chooser sits in the header. */}
                 <ToolbarButtons
                   workspace={workspace}
-                  lastSavedAt={lastSavedAt}
+                  codeMode={isCodeWorkflow}
+                  codeCommandsRef={codeCommandsRef}
+                  saveStatus={saveMark}
                   onSave={handleSave}
                   saving={saving}
                   leading={
@@ -1999,28 +2187,15 @@ function WorkshopPage({ isActive }) {
                   }
                   extra={
                     <>
-                      {/* One focused window per kind (owner decisions D1, D4):
-                          the chooser names the three. */}
-                      <MenuButton
-                        label={DE.TOOLBAR_TEACH}
-                        icon="hand"
-                        menuLabel={DE.TEACH_CHOOSER_MENU}
-                        items={teachChooserItems}
-                        disabled={!!teachReason || teachOpen}
-                        title={teachReasonText || DE.TOOLBAR_TEACH_TITLE}
-                        buttonClassName={
-                          'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
-                          + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
-                          + 'border-[var(--accent)] hover:opacity-90'
-                        }
-                      />
                       <VersionHistoryDropdown
                         workflowId={openDocId}
                         lockedReason={historyLockReason}
                         onRestoringChange={handleRestoringChange}
                         onRestore={handleVersionRestored}
                       />
-                      {recalibrateButton}
+                      {/* There is no camera to recalibrate in the simulator
+                          (R0-8). */}
+                      {!simMode && recalibrateButton}
                     </>
                   }
                 />
@@ -2030,10 +2205,7 @@ function WorkshopPage({ isActive }) {
                     The LEFT editor column is the SAME first child in both branches,
                     so swapping the right sibling NEVER remounts the workspace (it
                     is keyed only by editorKey). On mobile the two stack. */}
-                <div
-                  ref={dockRowRef}
-                  className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden"
-                >
+                <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
                   <div className="flex-1 min-w-0 min-h-0 p-2 md:p-3 md:pr-0">
                     {/* No min-height: Blockly must fill exactly the box that is
                         visible (see BlocklyWorkspace). On narrow screens the dock
@@ -2055,7 +2227,11 @@ function WorkshopPage({ isActive }) {
                           key={editorKey}
                           language={codeLanguage}
                           files={codeFiles}
-                          onFilesChange={applyCodeFiles}
+                          onFilesChange={handleCodeFilesChange}
+                          // Strg+S inside the editor (K-1): the button's save.
+                          onSave={handleSave}
+                          commandsRef={codeCommandsRef}
+                          sidebarWidthRef={codeSidebarWidthRef}
                           assetDoc={assetDoc}
                           provider={sammlungProvider}
                           onCursorChange={handleCodeCursorChange}
@@ -2088,13 +2264,36 @@ function WorkshopPage({ isActive }) {
                     </div>
                   </div>
                   {simMode ? (
-                    // Integrated sim stage: replaces BOTH the drag divider and the
-                    // dock. It owns its OWN width (§6.6) — a collapsed dock must
-                    // never yield a blank right region — and hosts the single
-                    // UrdfTwin via SimScene(layout="split").
+                    // Integrated sim stage: replaces BOTH the dock divider and the
+                    // dock. Its width is its OWN (`--sim-w`, never the dock's) — a
+                    // collapsed dock must never yield a blank right region — and
+                    // it hosts the single UrdfTwin via SimScene(layout="split").
+                    // Its divider sits AFTER the editor column, so the editor
+                    // stays the row's first child and is never remounted.
+                    <>
+                    <ResizeHandle
+                      orientation="vertical"
+                      cssVar="--sim-w"
+                      unit="fraction"
+                      value={simWidth}
+                      defaultValue={SIM_WIDTH.default}
+                      bounds={(r) => ({
+                        min: SIM_WIDTH.min,
+                        max: r && r.width > 0
+                          ? Math.max(SIM_WIDTH.min, Math.min(SIM_WIDTH.max, (r.width - 368) / r.width))
+                          : SIM_WIDTH.max,
+                      })}
+                      fromPointer={(e, r) => (r.right - e.clientX) / r.width}
+                      growKey="ArrowLeft"
+                      step={0.02}
+                      largeStep={0.1}
+                      label={LAYOUT_DE.SIM_WIDTH}
+                      valueText={(v) => fillLayout(LAYOUT_DE.VALUE_PERCENT, Math.round(v * 100))}
+                      onCommit={(v) => { setSimWidth(v); writeSimWidth(v); }}
+                    />
                     <SimStage
                       scene={simScene}
-                      onChange={setSimScene}
+                      onChange={handleSimSceneChange}
                       catalog={objectCatalog}
                       catalogDims={catalogDims}
                       workspace={workspace}
@@ -2110,29 +2309,39 @@ function WorkshopPage({ isActive }) {
                       requestedMode={simZielRequest}
                       onCreateDestination={handleCreateSimDestination}
                     />
+                    </>
                   ) : (
                     <>
-                      {/* Drag divider — students rebalance the blocks area vs. the
-                          dock. Desktop only (mobile stacks); hidden when the dock is
-                          collapsed to its rail. */}
+                      {/* Editor ↔ dock divider — students rebalance the blocks
+                          area vs. the tools; the editor keeps ≥ 360 px. Desktop
+                          only (mobile stacks); gone while the dock is folded to
+                          its rail. */}
                       {!dockCollapsed && (
-                        <div
-                          role="separator"
-                          aria-orientation="vertical"
-                          onPointerDown={onDockResizeDown}
-                          onPointerMove={onDockResizeMove}
-                          onPointerUp={onDockResizeUp}
-                          title="Breite ziehen, um die Größe zu ändern"
-                          className="hidden md:flex shrink-0 w-2 cursor-col-resize items-center justify-center group touch-none"
-                        >
-                          <span className="h-10 w-1 rounded-full bg-[var(--line-2)] group-hover:bg-[var(--accent)]" />
-                        </div>
+                        <ResizeHandle
+                          orientation="vertical"
+                          cssVar="--dock-w"
+                          unit="px"
+                          value={dockWidth}
+                          defaultValue={DOCK_WIDTH.default}
+                          bounds={(r) => ({
+                            min: DOCK_WIDTH.min,
+                            max: r
+                              ? Math.max(DOCK_WIDTH.min, Math.min(DOCK_WIDTH.max, r.width - 360))
+                              : DOCK_WIDTH.max,
+                          })}
+                          fromPointer={(e, r) => r.right - e.clientX}
+                          growKey="ArrowLeft"
+                          step={16}
+                          largeStep={64}
+                          label={LAYOUT_DE.DOCK_WIDTH}
+                          valueText={(v) => fillLayout(LAYOUT_DE.VALUE_PX, Math.round(v))}
+                          onCommit={(v) => { setDockWidth(v); writeDockWidth(v); }}
+                        />
                       )}
                       <RightDock
                         tabs={dockTabs}
                         openIds={dockOpen}
                         collapsed={dockCollapsed}
-                        width={dockWidth}
                         onToggleTab={handleToggleTab}
                         onCloseTab={handleCloseTab}
                         onToggleCollapsed={handleToggleCollapsed}

@@ -51,7 +51,7 @@ vi.mock('react-redux', () => ({
 
 const mockPage = vi.hoisted(() => ({
   blockly: null, code: null, run: null, history: null, template: null, gallery: null,
-  teach: null, autosave: null,
+  teach: null, autosave: null, sim: null, codeDocArgs: null,
 }));
 vi.mock('../../components/Workshop/BlocklyWorkspace', () => ({
   __esModule: true,
@@ -100,7 +100,37 @@ vi.mock('../../components/Workshop/GalleryTab', () => ({
   },
 }));
 vi.mock('../../components/Workshop/RightDock', () => ({ __esModule: true, default: () => <div data-testid="right-dock" /> }));
-vi.mock('../../components/Workshop/SimStage', () => ({ __esModule: true, default: () => <div data-testid="sim-stage" /> }));
+vi.mock('../../components/Workshop/SimStage', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockPage.sim = props;
+    return <div data-testid="sim-stage" />;
+  },
+}));
+// The page's document serializer (m-d: a scene change must not re-serialize
+// the canvas), wrapped, not replaced.
+const mockSlim = vi.hoisted(() => ({ calls: 0 }));
+vi.mock('../../utils/blocklyPayload', async (importOriginal) => {
+  const real = await importOriginal();
+  return {
+    ...real,
+    slimSavePayload: (json) => {
+      mockSlim.calls += 1;
+      return real.slimSavePayload(json);
+    },
+  };
+});
+// The code asset document, built for real; its arguments are recorded.
+vi.mock('../../components/Workshop/code/codeAssetDocument', async (importOriginal) => {
+  const real = await importOriginal();
+  return {
+    ...real,
+    createCodeAssetDocument: (args) => {
+      mockPage.codeDocArgs = args;
+      return real.createCodeAssetDocument(args);
+    },
+  };
+});
 vi.mock('../../components/Workshop/CalibrationWizard', () => ({ __esModule: true, default: () => <div data-testid="calib-wizard" /> }));
 vi.mock('../../components/Workshop/LeaderToggle', () => ({ __esModule: true, default: () => <div data-testid="leader-toggle" /> }));
 vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
@@ -149,10 +179,9 @@ vi.mock('../../components/Workshop/useAutosave', () => ({
   __esModule: true,
   useAutosave: (opts) => {
     mockPage.autosave = opts;
-    return { lastSavedAt: null };
+    return {};
   },
   autosaveSessionScope: () => 'session-1',
-  formatAutosaveAge: () => '',
 }));
 vi.mock('idb-keyval', () => ({
   get: vi.fn(async () => undefined), set: vi.fn(async () => undefined), del: vi.fn(async () => undefined),
@@ -547,4 +576,161 @@ test('a save queued behind another, then another program opens: the caller is to
   const result = await queued;
   expect(result.ok).toBe(false);
   expect(saves().map(([id]) => id)).toEqual(['wf-py']);
+});
+
+// ---------------------------------------------------------------------------
+// R0-2: the toolbar's save status is the CLOUD save of the open document,
+// judged by CONTENT (the real ToolbarButtons renders it). M1a: a simulator
+// scene change is an edit. M1b: after a save, an onChange carrying the saved
+// content (Blockly's late events of a rename) leaves „Gespeichert".
+// ---------------------------------------------------------------------------
+
+const statusText = () => screen.getByTestId('save-status').textContent.trim();
+const SCENE_A = { version: 1, objects: [{ type: 'wuerfel', tag_id: 0, x: 0.2, y: 0, yaw: 0 }], zones: [] };
+// The same content again, as Blockly's late event or a code keystroke that
+// changes nothing would report it.
+function editSame(testId, marker) { edit(testId, marker); }
+
+describe.each(NOTATIONS)('R0-2 — the save status of %s', (_l, a, b, testId) => {
+  test('an opened row with no edit is not „Nicht gespeichert"; an edit is; a save reads „gerade eben"', async () => {
+    await openFirst(a, testId);
+    expect(statusText()).toBe('Noch nicht gespeichert');
+    edit(testId, 'A-1');
+    expect(statusText()).toBe('Nicht gespeichert');
+    await act(async () => { pressCtrlS(); await Promise.resolve(); await Promise.resolve(); });
+    expect(mockApi.updateWorkflow).toHaveBeenCalledTimes(1);
+    expect(statusText()).toBe('Gespeichert: gerade eben');
+  });
+
+  test('an opened row shows its updated_at', async () => {
+    const at = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+    mockApi.getWorkflow.mockImplementation((_t, id) => Promise.resolve({ ...ROWS[id], updated_at: at }));
+    await openFirst(a, testId);
+    expect(statusText()).toBe('Gespeichert: vor 3 Min.');
+  });
+
+  test('an edit DURING the save stays „Nicht gespeichert"', async () => {
+    await openFirst(a, testId);
+    edit(testId, 'A-1');
+    let finish;
+    mockApi.updateWorkflow.mockImplementation(() => new Promise((r) => { finish = r; }));
+    await act(async () => { pressCtrlS(); await Promise.resolve(); });
+    edit(testId, 'A-2');
+    await act(async () => { finish({}); await Promise.resolve(); });
+    expect(statusText()).toBe('Nicht gespeichert');
+  });
+
+  test('M1b: after a save, the saved content reported again (late events) stays „Gespeichert"; undoing back clears an edit', async () => {
+    await openFirst(a, testId);
+    edit(testId, 'A-1');
+    await act(async () => { pressCtrlS(); await Promise.resolve(); await Promise.resolve(); });
+    expect(statusText()).toBe('Gespeichert: gerade eben');
+    editSame(testId, 'A-1');
+    expect(statusText()).toBe('Gespeichert: gerade eben');
+    edit(testId, 'A-2');
+    expect(statusText()).toBe('Nicht gespeichert');
+    edit(testId, 'A-1');
+    expect(statusText()).toBe('Gespeichert: gerade eben');
+  });
+
+  test('M1a: a simulator scene change is unsaved; saving it clears that', async () => {
+    await openFirst(a, testId);
+    await act(async () => { pressCtrlS(); await Promise.resolve(); await Promise.resolve(); });
+    expect(statusText()).toBe('Gespeichert: gerade eben');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    act(() => { mockPage.sim.onChange(SCENE_A); });
+    expect(statusText()).toBe('Nicht gespeichert');
+    await act(async () => { pressCtrlS(); await Promise.resolve(); await Promise.resolve(); });
+    expect(mockApi.updateWorkflow.mock.calls[mockApi.updateWorkflow.mock.calls.length - 1][2].sim_scene)
+      .toEqual(SCENE_A);
+    expect(statusText()).toBe('Gespeichert: gerade eben');
+  });
+
+  test('m-d: ten scene changes in a row serialize the document zero times, and end unsaved', async () => {
+    await openFirst(a, testId);
+    await act(async () => { pressCtrlS(); await Promise.resolve(); await Promise.resolve(); });
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    const before = mockSlim.calls;
+    act(() => {
+      for (let i = 0; i < 10; i += 1) {
+        mockPage.sim.onChange({ ...SCENE_A, objects: [{ ...SCENE_A.objects[0], x: 0.2 + i * 0.001 }] });
+      }
+    });
+    expect(mockSlim.calls).toBe(before);
+    expect(statusText()).toBe('Nicht gespeichert');
+  });
+
+  test('opening another program resets the status', async () => {
+    const { rerender } = await openFirst(a, testId);
+    edit(testId, 'A-1');
+    expect(statusText()).toBe('Nicht gespeichert');
+    mockState = baseState({ selectedWorkflowId: b });
+    rerender(<WorkshopPage isActive />);
+    await waitFor(() => expect(screen.getByTestId(testId).textContent).toContain('B'));
+    expect(statusText()).toBe('Noch nicht gespeichert');
+  });
+});
+
+describe('R0-2 — Blockly: only a content change is an edit', () => {
+  test('a selection or flyout event (isUiEvent) does not dirty', async () => {
+    await openFirst('wf-blk', 'blockly-workspace');
+    act(() => {
+      mockPage.blockly.onChange(ROWS['wf-blk'].blockly_json, { isUiEvent: true, type: 'selected' });
+    });
+    expect(statusText()).toBe('Noch nicht gespeichert');
+    act(() => {
+      mockPage.blockly.onChange({ blocks: { blocks: [{ type: 'edubotics_home', id: 'neu' }] } }, { isUiEvent: false });
+    });
+    expect(statusText()).toBe('Nicht gespeichert');
+  });
+});
+
+describe('R0-2 / K-1 — the code document\'s wiring', () => {
+  test('K-1: CodeWorkspace gets onSave, and calling it (the editor\'s Strg+S) saves like the button', async () => {
+    await openFirst('wf-py', 'code-workspace');
+    edit('code-workspace', 'P-1');
+    expect(typeof mockPage.code.onSave).toBe('function');
+    await act(async () => { mockPage.code.onSave(); await Promise.resolve(); await Promise.resolve(); });
+    expect(saves()).toEqual([['wf-py', JSON.stringify({ 'main.py': 'import robot\nrobot.log("P-1")\n' })]]);
+    expect(statusText()).toBe('Gespeichert: gerade eben');
+  });
+
+  test('onFilesChange is the SAME function across re-renders, and it is the asset document\'s applyFiles', async () => {
+    await openFirst('wf-py', 'code-workspace');
+    const first = mockPage.code.onFilesChange;
+    edit('code-workspace', 'P-1');
+    edit('code-workspace', 'P-2');
+    expect(mockPage.code.onFilesChange).toBe(first);
+    expect(mockPage.codeDocArgs.applyFiles).toBe(first);
+  });
+
+  test('a rename or insertion through the asset document is an edit too', async () => {
+    await openFirst('wf-py', 'code-workspace');
+    act(() => { mockPage.codeDocArgs.applyFiles({ 'main.py': 'import robot\nrobot.log("umbenannt")\n' }); });
+    expect(statusText()).toBe('Nicht gespeichert');
+  });
+
+  test('the toolbar is in code mode and the undo handle and the sidebar width ref are handed down', async () => {
+    await openFirst('wf-py', 'code-workspace');
+    expect(screen.queryByRole('button', { name: DE.TOOLBAR_ZOOM_FIT })).toBeNull();
+    expect(mockPage.code.commandsRef).toEqual({ current: null });
+    const undo = vi.fn();
+    mockPage.code.commandsRef.current = { undo, redo: vi.fn() };
+    await userEvent.click(screen.getByRole('button', { name: DE.TOOLBAR_UNDO }));
+    expect(undo).toHaveBeenCalledTimes(1);
+    // The drawer's anchor: the APPLIED width CodeWorkspace measures (m-3).
+    expect(mockPage.code.sidebarWidthRef).toEqual({ current: null });
+    mockPage.code.sidebarWidthRef.current = 222;
+    expect(mockPage.codeDocArgs.getSidebarWidth()).toBe(222);
+  });
+
+  test('a code Ziel added to the open document is an edit', async () => {
+    await openFirst('wf-py', 'code-workspace');
+    act(() => {
+      mockPage.codeDocArgs.store.add({ name: 'Ablage', kind: 'pin', source: 'sim', x: 0.2, y: 0, z: 0 });
+    });
+    expect(statusText()).toBe('Nicht gespeichert');
+  });
 });

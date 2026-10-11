@@ -940,21 +940,14 @@ function RunControls({
         </div>
       )}
 
-      {preview ? (
+      {/* No simulator banner here (R0-3): the page's frame and its mode badge
+          say „Simulator", and the run bar's room is the 2D table's. */}
+      {preview && (
         <div
           role="status"
           className="bg-teal-50 border border-teal-200 text-teal-800 text-sm rounded-md p-2 mb-2"
         >
           {formatDe(DE.PREVIEW_BANNER, preview.name)}
-        </div>
-      ) : simMode && !isRunning && (
-        <div
-          role="status"
-          className="bg-blue-50 border border-blue-200 text-blue-800 text-sm rounded-md p-2 mb-2"
-        >
-          Simulator-Modus: Das Programm läuft auf einem virtuellen Roboter.
-          Geprüft werden Logik, Reihenfolge und Erreichbarkeit — nicht die echte
-          Physik.
         </div>
       )}
 

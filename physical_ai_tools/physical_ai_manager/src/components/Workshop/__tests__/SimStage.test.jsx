@@ -15,7 +15,7 @@
 // (→ lazy UrdfTwin) and DebugPanel are mocked so these are pure-DOM assertions.
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import SimStage from '../SimStage';
 
@@ -186,5 +186,35 @@ describe('SimStage', () => {
     renderStage();
     expect(screen.queryByText(/Sperrzone|Ausweichroute/)).toBeNull();
     expect(screen.queryByText(/nicht erreichbar/)).toBeNull();
+  });
+});
+
+describe('SimStage — the dismissible notice and its width (WI-1.8)', () => {
+  afterEach(() => {
+    window.localStorage.removeItem('edubotics_workshop_sim_hint_dismissed');
+  });
+
+  test('passes introDismissed (from this PC) and onDismissIntro to SimScene; a dismissal persists', () => {
+    renderStage();
+    let props = mockSimScene.mock.calls[mockSimScene.mock.calls.length - 1][0];
+    expect(props.introDismissed).toBe(false);
+    expect(typeof props.onDismissIntro).toBe('function');
+    act(() => { props.onDismissIntro(); });
+    props = mockSimScene.mock.calls[mockSimScene.mock.calls.length - 1][0];
+    expect(props.introDismissed).toBe(true);
+    expect(window.localStorage.getItem('edubotics_workshop_sim_hint_dismissed')).toBe('1');
+  });
+
+  test('a notice dismissed earlier on this PC starts dismissed', () => {
+    window.localStorage.setItem('edubotics_workshop_sim_hint_dismissed', '1');
+    renderStage();
+    expect(mockSimScene.mock.calls[0][0].introDismissed).toBe(true);
+  });
+
+  test('the stage width is the row\'s --sim-w (never set on the stage itself)', () => {
+    renderStage();
+    const stage = screen.getByRole('complementary', { name: 'Simulator' });
+    expect(stage.className).toContain('md:w-[calc(var(--sim-w,0.55)*100%)]');
+    expect(stage.style.getPropertyValue('--sim-w')).toBe('');
   });
 });

@@ -29,6 +29,11 @@ import SkillmapPlayer from '../components/Workshop/SkillmapPlayer';
 import VersionHistoryDropdown from '../components/Workshop/VersionHistoryDropdown';
 import JogPanel from '../components/Workshop/JogPanel';
 import RightDock from '../components/Workshop/RightDock';
+import ResizeHandle from '../components/Workshop/layout/ResizeHandle';
+import {
+  DOCK_WIDTH, SIM_WIDTH, readDockWidth, readSimWidth, writeDockWidth, writeSimWidth,
+} from '../components/Workshop/layout/layoutPrefs';
+import { LAYOUT_DE, fillLayout } from '../components/Workshop/layout/layoutCopy';
 import { buildCatalogDims } from '../components/Workshop/simConstants';
 import { DE, formatDe } from '../components/Workshop/blocks/messages_de';
 import {
@@ -168,28 +173,6 @@ function readDockCollapsed() {
     return window.localStorage.getItem(DOCK_COLLAPSED_KEY) === '1';
   } catch (e) {
     return false;
-  }
-}
-
-// Desktop dock width (px), set by the drag divider between the editor and the
-// dock so the student can rebalance how much room the blocks vs. the tools get.
-const DOCK_WIDTH_KEY = 'edubotics_workshop_dock_width';
-const DOCK_WIDTH_DEFAULT = 380;
-const DOCK_WIDTH_MIN = 280;
-const DOCK_WIDTH_MAX = 760;
-
-function clampDockWidth(n) {
-  if (!Number.isFinite(n)) return DOCK_WIDTH_DEFAULT;
-  return Math.min(DOCK_WIDTH_MAX, Math.max(DOCK_WIDTH_MIN, n));
-}
-
-function readDockWidth() {
-  try {
-    const raw = window.localStorage.getItem(DOCK_WIDTH_KEY);
-    if (raw == null) return DOCK_WIDTH_DEFAULT;
-    return clampDockWidth(Number(raw));
-  } catch (e) {
-    return DOCK_WIDTH_DEFAULT;
   }
 }
 
@@ -557,7 +540,11 @@ function WorkshopPage({ isActive }) {
   // `dockCollapsed` folds the dock to its rail. Both persist across reloads.
   const [dockOpen, setDockOpen] = useState(readDockOpen);
   const [dockCollapsed, setDockCollapsed] = useState(readDockCollapsed);
+  // The committed pane sizes (layout/layoutPrefs.js). Each is shown through a
+  // CSS variable its ResizeHandle writes on the editor row (`--dock-w`,
+  // `--sim-w`); a drag changes only the variable, never this state.
   const [dockWidth, setDockWidth] = useState(readDockWidth);
+  const [simWidth, setSimWidth] = useState(readSimWidth);
   // Toast cap — same dismissal loop as the other five student pages. `toasts` is
   // newest-first, so index >= TOAST_LIMIT is the overflow; dismiss (not remove)
   // keeps the exit animation.
@@ -579,36 +566,6 @@ function WorkshopPage({ isActive }) {
       window.localStorage.setItem(DOCK_COLLAPSED_KEY, dockCollapsed ? '1' : '0');
     } catch (_) { /* quota / private mode — keep the in-memory value */ }
   }, [dockCollapsed]);
-
-  // Drag divider between the editor and the dock. The handle captures the pointer
-  // (so a drag that leaves the 8px strip still tracks); the new width is the
-  // distance from the pointer to the row's right edge, clamped so the editor
-  // keeps a usable minimum. Persisted on release (not per-move — avoids a
-  // localStorage write every animation frame).
-  const dockRowRef = useRef(null);
-  const dockDragRef = useRef(false);
-  const onDockResizeDown = useCallback((e) => {
-    dockDragRef.current = true;
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) { /* jsdom */ }
-  }, []);
-  const onDockResizeMove = useCallback((e) => {
-    if (!dockDragRef.current || !dockRowRef.current) return;
-    const rect = dockRowRef.current.getBoundingClientRect();
-    if (!rect.width) return;
-    const raw = rect.right - e.clientX;
-    // Cap so the editor never drops below ~360 px.
-    const maxW = Math.min(DOCK_WIDTH_MAX, rect.width - 360);
-    setDockWidth(Math.max(DOCK_WIDTH_MIN, Math.min(maxW, raw)));
-  }, []);
-  const onDockResizeUp = useCallback((e) => {
-    if (!dockDragRef.current) return;
-    dockDragRef.current = false;
-    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) { /* jsdom */ }
-    setDockWidth((w) => {
-      try { window.localStorage.setItem(DOCK_WIDTH_KEY, String(w)); } catch (_) { /* ignore */ }
-      return w;
-    });
-  }, []);
 
   // No svgResize here: BlocklyWorkspace observes its own host box, which covers
   // the dock width/collapse and the simulator swap as well as every HEIGHT
@@ -1619,6 +1576,10 @@ function WorkshopPage({ isActive }) {
         previewVariables: true,
         pinCamera: !!calibrated && !simMode,
         pinSim: true,
+        // Whether a 3D view is on screen right now (the simulator's, or the
+        // dock's „3D-Ansicht" panel). While it is not, a Ziel/Position offers
+        // „In 3D zeigen" (the `show3d` action below).
+        view3dOnScreen: simMode || (!dockCollapsed && dockOpen.includes('3d')),
       },
       robotType: robotType || '',
       trajectories: {
@@ -1630,7 +1591,7 @@ function WorkshopPage({ isActive }) {
       restrictedBlocks: Array.isArray(restrictedBlocks) ? restrictedBlocks : null,
     });
   }, [sammlungProvider, simMode, calibrated, previewPending, robotType, trajectoryList,
-    lastPreviewResult, variableValues, restrictedBlocks]);
+    lastPreviewResult, variableValues, restrictedBlocks, dockCollapsed, dockOpen]);
   useEffect(() => {
     sammlungProvider.setActionHandler((action) => {
       if (!action || typeof action !== 'object') return;
@@ -1638,6 +1599,11 @@ function WorkshopPage({ isActive }) {
         setDockCollapsed(false);
         setDockOpen((prev) => (prev.includes('camera') ? prev : addOpenTab(prev, 'camera', isTabBusy)));
         toast(DE.FLY_PIN_CAMERA_HINT, { icon: toastIcon('camera') });
+      } else if (action.type === 'show3d') {
+        // „In 3D zeigen": the dock's 3D panel, by the pinCamera rules (a busy
+        // panel is never evicted). The highlight the drawer set shows there.
+        setDockCollapsed(false);
+        setDockOpen((prev) => (prev.includes('3d') ? prev : addOpenTab(prev, '3d', isTabBusy)));
       } else if (action.type === 'jumpToBlock') {
         jumpToBlock(workspaceRef.current, action.blockId);
       } else if (action.type === 'manage') {
@@ -2097,10 +2063,7 @@ function WorkshopPage({ isActive }) {
                     The LEFT editor column is the SAME first child in both branches,
                     so swapping the right sibling NEVER remounts the workspace (it
                     is keyed only by editorKey). On mobile the two stack. */}
-                <div
-                  ref={dockRowRef}
-                  className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden"
-                >
+                <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
                   <div className="flex-1 min-w-0 min-h-0 p-2 md:p-3 md:pr-0">
                     {/* No min-height: Blockly must fill exactly the box that is
                         visible (see BlocklyWorkspace). On narrow screens the dock
@@ -2155,10 +2118,33 @@ function WorkshopPage({ isActive }) {
                     </div>
                   </div>
                   {simMode ? (
-                    // Integrated sim stage: replaces BOTH the drag divider and the
-                    // dock. It owns its OWN width (§6.6) — a collapsed dock must
-                    // never yield a blank right region — and hosts the single
-                    // UrdfTwin via SimScene(layout="split").
+                    // Integrated sim stage: replaces BOTH the dock divider and the
+                    // dock. Its width is its OWN (`--sim-w`, never the dock's) — a
+                    // collapsed dock must never yield a blank right region — and
+                    // it hosts the single UrdfTwin via SimScene(layout="split").
+                    // Its divider sits AFTER the editor column, so the editor
+                    // stays the row's first child and is never remounted.
+                    <>
+                    <ResizeHandle
+                      orientation="vertical"
+                      cssVar="--sim-w"
+                      unit="fraction"
+                      value={simWidth}
+                      defaultValue={SIM_WIDTH.default}
+                      bounds={(r) => ({
+                        min: SIM_WIDTH.min,
+                        max: r && r.width > 0
+                          ? Math.max(SIM_WIDTH.min, Math.min(SIM_WIDTH.max, (r.width - 368) / r.width))
+                          : SIM_WIDTH.max,
+                      })}
+                      fromPointer={(e, r) => (r.right - e.clientX) / r.width}
+                      growKey="ArrowLeft"
+                      step={0.02}
+                      largeStep={0.1}
+                      label={LAYOUT_DE.SIM_WIDTH}
+                      valueText={(v) => fillLayout(LAYOUT_DE.VALUE_PERCENT, Math.round(v * 100))}
+                      onCommit={(v) => { setSimWidth(v); writeSimWidth(v); }}
+                    />
                     <SimStage
                       scene={simScene}
                       onChange={setSimScene}
@@ -2177,29 +2163,39 @@ function WorkshopPage({ isActive }) {
                       requestedMode={simZielRequest}
                       onCreateDestination={handleCreateSimDestination}
                     />
+                    </>
                   ) : (
                     <>
-                      {/* Drag divider — students rebalance the blocks area vs. the
-                          dock. Desktop only (mobile stacks); hidden when the dock is
-                          collapsed to its rail. */}
+                      {/* Editor ↔ dock divider — students rebalance the blocks
+                          area vs. the tools; the editor keeps ≥ 360 px. Desktop
+                          only (mobile stacks); gone while the dock is folded to
+                          its rail. */}
                       {!dockCollapsed && (
-                        <div
-                          role="separator"
-                          aria-orientation="vertical"
-                          onPointerDown={onDockResizeDown}
-                          onPointerMove={onDockResizeMove}
-                          onPointerUp={onDockResizeUp}
-                          title="Breite ziehen, um die Größe zu ändern"
-                          className="hidden md:flex shrink-0 w-2 cursor-col-resize items-center justify-center group touch-none"
-                        >
-                          <span className="h-10 w-1 rounded-full bg-[var(--line-2)] group-hover:bg-[var(--accent)]" />
-                        </div>
+                        <ResizeHandle
+                          orientation="vertical"
+                          cssVar="--dock-w"
+                          unit="px"
+                          value={dockWidth}
+                          defaultValue={DOCK_WIDTH.default}
+                          bounds={(r) => ({
+                            min: DOCK_WIDTH.min,
+                            max: r
+                              ? Math.max(DOCK_WIDTH.min, Math.min(DOCK_WIDTH.max, r.width - 360))
+                              : DOCK_WIDTH.max,
+                          })}
+                          fromPointer={(e, r) => r.right - e.clientX}
+                          growKey="ArrowLeft"
+                          step={16}
+                          largeStep={64}
+                          label={LAYOUT_DE.DOCK_WIDTH}
+                          valueText={(v) => fillLayout(LAYOUT_DE.VALUE_PX, Math.round(v))}
+                          onCommit={(v) => { setDockWidth(v); writeDockWidth(v); }}
+                        />
                       )}
                       <RightDock
                         tabs={dockTabs}
                         openIds={dockOpen}
                         collapsed={dockCollapsed}
-                        width={dockWidth}
                         onToggleTab={handleToggleTab}
                         onCloseTab={handleCloseTab}
                         onToggleCollapsed={handleToggleCollapsed}

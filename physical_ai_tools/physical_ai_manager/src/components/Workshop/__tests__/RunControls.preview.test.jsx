@@ -86,11 +86,11 @@ describe('RunControls — a preview in flight', () => {
     expect(screen.queryByText(DE.RUN_RUNNING)).toBeNull();
   });
 
-  test('without a preview the chip and the simulator banner are unchanged', () => {
+  test('without a preview the chip is unchanged, and the run bar carries no simulator banner (R0-3)', () => {
     mockState = state({ runState: 'idle', currentBlockId: null });
     render(<RunControls workflowId="wf-1" simMode simScene={null} workspace={makeWorkspace()} />);
     expect(screen.getByText(DE.RUN_READY)).toBeInTheDocument();
-    expect(screen.getByText(/Simulator-Modus/)).toBeInTheDocument();
+    expect(screen.queryByText(/Simulator-Modus/)).toBeNull();
     expect(screen.queryByText(/Vorschau/)).toBeNull();
   });
 

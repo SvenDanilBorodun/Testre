@@ -68,11 +68,29 @@ import rosConnectionManager from '../../utils/rosConnectionManager';
 import { DE } from './blocks/messages_de';
 import { MARKER_COLORS } from './sammlung/markers';
 import { toastIcon } from '../icons/toast';
+import Icon from '../icons/Icon';
+import ResizeHandle from './layout/ResizeHandle';
+import { SIM_SPLIT, readSimSplit, writeSimSplit } from './layout/layoutPrefs';
+import { LAYOUT_DE, fillLayout } from './layout/layoutCopy';
 
 const UrdfTwin = lazy(() => import('../UrdfTwin'));
 
 // A stable empty marker list, so the twin's marker effect keeps one identity.
 const NO_MARKERS = Object.freeze([]);
+
+// The split stage's 3D ↔ table divider bounds, in px of the stage's height:
+// the 3D view keeps at least 160 px, the table area at least 140 px.
+const SPLIT_3D_MIN_PX = 160;
+const SPLIT_2D_MIN_PX = 140;
+
+// From md up the split stage FITS the 2D table into its area; below md the
+// stage is a 50 %-high scroll box where the full-width table reads better. No
+// `matchMedia` (jsdom) counts as below md.
+function isMdUp() {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(min-width: 768px)').matches;
+}
 
 // Sim-only virtual joint stream (never the bare /joint_states — see plan §C).
 const SIM_JOINT_TOPIC = '/sim/joint_states';
@@ -243,6 +261,10 @@ function SimScene({
   // ({x, y}) → the page adds a `source: 'sim'` pin. The „Ziel setzen" mode is
   // offered only when this is a function.
   onCreateDestination = null,
+  // Split layout only: the „Test im Simulator." notice was closed on this PC
+  // (SimStage owns that state); `onDismissIntro` is its close button.
+  introDismissed = false,
+  onDismissIntro = null,
 }) {
   const objects = useMemo(
     () => (scene && Array.isArray(scene.objects) ? scene.objects : []),
@@ -328,6 +350,38 @@ function SimScene({
   const [resetting, setResetting] = useState(false);
   // Live drag-rectangle while drawing a zone, in base coords {x0,y0,x1,y1}.
   const [zoneDraft, setZoneDraft] = useState(null);
+  // Split layout: the committed 3D share of the stage (its ResizeHandle writes
+  // `--sim-split`), and the 2D table's fitted box from md up ({w, h} | null).
+  const isSplit = layout === 'split';
+  const [simSplit, setSimSplit] = useState(readSimSplit);
+  const tableWrapRef = useRef(null);
+  const [fit, setFit] = useState(null);
+  useEffect(() => {
+    if (!isSplit) return undefined;
+    const el = tableWrapRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    // The table keeps its viewBox ratio inside the area it is given, so
+    // eventToBase (which scales by the drawn box) stays exact.
+    const measure = (entry) => {
+      if (!isMdUp()) {
+        setFit((prev) => (prev === null ? prev : null));
+        return;
+      }
+      const box = entry && entry.contentRect ? entry.contentRect : null;
+      const availW = box ? box.width : el.clientWidth;
+      const availH = box ? box.height : el.clientHeight;
+      if (!(availW > 0) || !(availH > 0)) {
+        setFit((prev) => (prev === null ? prev : null));
+        return;
+      }
+      const w = Math.floor(Math.min(availW, (availH * SVG_W) / SVG_H));
+      const h = Math.min(Math.floor(availH), Math.round((w * SVG_H) / SVG_W));
+      setFit((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+    };
+    const observer = new ResizeObserver((entries) => measure(entries && entries[0]));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [isSplit]);
 
   const svgRef = useRef(null);
   const draggingIdRef = useRef(null);
@@ -782,15 +836,36 @@ function SimScene({
   // The 2D editor body (notice + palette + mode + table + selection + zones),
   // shared by BOTH layouts so they never drift. A fragment adds no DOM node, so
   // the default STACK layout below stays byte-identical to the previous markup.
+  // The split stage's notice can be closed (remembered on this PC by
+  // SimStage); the stack layout keeps it as it always was.
+  const canDismissIntro = isSplit && typeof onDismissIntro === 'function';
   const editorBody = (
     <>
       {/* German notice: the simulator validates logic, not physics. */}
-      <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
-        <strong>Test im Simulator.</strong> Hier prüfst du die Logik und
-        Reihenfolge deines Programms — nicht die echte Physik des Greifens.
-        Platziere Objekte auf dem Tisch und lass das Programm den virtuellen
-        Roboter steuern.
-      </div>
+      {!(isSplit && introDismissed) && (
+        <div
+          className={
+            'rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800'
+            + (canDismissIntro ? ' relative pr-8' : '')
+          }
+        >
+          <strong>Test im Simulator.</strong> Hier prüfst du die Logik und
+          Reihenfolge deines Programms — nicht die echte Physik des Greifens.
+          Platziere Objekte auf dem Tisch und lass das Programm den virtuellen
+          Roboter steuern.
+          {canDismissIntro && (
+            <button
+              type="button"
+              onClick={onDismissIntro}
+              aria-label={LAYOUT_DE.SIM_HINT_CLOSE}
+              title={LAYOUT_DE.SIM_HINT_CLOSE}
+              className="absolute right-1.5 top-1.5 rounded p-0.5 text-blue-700 hover:bg-blue-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            >
+              <Icon name="close" />
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Object palette */}
       <div className="flex flex-wrap items-center gap-1.5">
@@ -867,12 +942,25 @@ function SimScene({
         )}
       </div>
 
-      {/* 2D top-down table editor */}
-      <div className="rounded-lg border border-[var(--line)] bg-white p-2">
+      {/* 2D top-down table editor. In the split stage from md up the table is
+          FITTED into the area left to it (whole table visible); otherwise it
+          is full width and scrolls with the editor. */}
+      <div
+        ref={isSplit ? tableWrapRef : undefined}
+        className={
+          isSplit
+            ? 'rounded-lg border border-[var(--line)] bg-white p-2 md:flex md:min-h-[120px] md:flex-1 md:items-center md:justify-center'
+            : 'rounded-lg border border-[var(--line)] bg-white p-2'
+        }
+      >
         <svg
           ref={svgRef}
           viewBox={`0 0 ${SVG_W} ${SVG_H}`}
-          className="w-full h-auto rounded-md bg-[var(--bg-sunk)] touch-none cursor-crosshair"
+          style={isSplit && fit ? { width: fit.w, height: fit.h } : undefined}
+          className={
+            (isSplit && fit ? 'block' : 'w-full h-auto')
+            + ' rounded-md bg-[var(--bg-sunk)] touch-none cursor-crosshair'
+          }
           onPointerDown={handleSvgPointerDown}
           onPointerMove={handleSvgPointerMove}
           onPointerUp={handleSvgPointerUp}
@@ -1167,8 +1255,12 @@ function SimScene({
   // aspect-video box); the stack className is byte-identical to the previous
   // single-layout markup. ONE UrdfTwin instance in both layouts → one WebGL
   // context + one /sim/joint_states subscription.
+  // Split: below md the 3D pane keeps today's floor (220 px) and shares the
+  // stage with the editor; from md up it takes the `--sim-split` share with a
+  // 160 px floor.
   const previewClass = layout === 'split'
-    ? 'relative w-full flex-1 min-h-[220px] rounded-lg overflow-hidden border border-white/10 bg-[#1a1d23]'
+    ? 'relative w-full flex-1 min-h-[220px] md:min-h-[160px] md:[flex:var(--sim-split,0.4)_1_0px] '
+      + 'rounded-lg overflow-hidden border border-white/10 bg-[#1a1d23]'
     : 'relative w-full aspect-video rounded-lg overflow-hidden border border-white/10 bg-[#1a1d23]';
   const preview = (
     <div className={previewClass}>
@@ -1201,13 +1293,35 @@ function SimScene({
     </div>
   );
 
-  // SPLIT: 3D arm pane on top (fills), the 2D editor below (scrolls if needed).
-  // STACK (default): the previous single-column DOM, byte-identical.
+  // SPLIT: 3D arm pane on top, the 2D editor below (scrolls if needed), and
+  // from md up a divider between them. The column is the divider's parent and
+  // so owns `--sim-split` (the 3D share). STACK (default): the previous
+  // single-column DOM, byte-identical.
   if (layout === 'split') {
     return (
-      <div className="flex h-full flex-col gap-3">
+      // `gap-3` below md keeps today's spacing (the divider is hidden there);
+      // from md up the divider and the editor's top padding space the panes.
+      <div className="flex h-full flex-col gap-3 md:gap-0">
         {preview}
-        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+        <ResizeHandle
+          orientation="horizontal"
+          cssVar="--sim-split"
+          unit="fraction"
+          value={simSplit}
+          defaultValue={SIM_SPLIT.default}
+          bounds={(r) => ({
+            min: r ? Math.max(SIM_SPLIT.min, SPLIT_3D_MIN_PX / r.height) : SIM_SPLIT.min,
+            max: r ? Math.min(SIM_SPLIT.max, 1 - SPLIT_2D_MIN_PX / r.height) : SIM_SPLIT.max,
+          })}
+          fromPointer={(e, r) => (e.clientY - r.top) / r.height}
+          growKey="ArrowDown"
+          step={0.02}
+          largeStep={0.1}
+          label={LAYOUT_DE.SIM_SPLIT}
+          valueText={(v) => fillLayout(LAYOUT_DE.VALUE_PERCENT, Math.round(v * 100))}
+          onCommit={(v) => { setSimSplit(v); writeSimSplit(v); }}
+        />
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto md:min-h-[140px] md:gap-2 md:pt-2 md:[flex:calc(1_-_var(--sim-split,0.4))_1_0px]">
           {editorBody}
         </div>
       </div>

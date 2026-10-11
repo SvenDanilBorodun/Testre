@@ -584,3 +584,120 @@ describe('SimScene — Ziel setzen and Sammlung markers', () => {
     expect(poseRect.getAttribute('width')).toBe('10');
   });
 });
+
+// R0-3 / S-3: the split stage gives the table its room — a 3D ↔ table divider,
+// a notice that can be closed, and from md up the whole table FITTED into its
+// area. The stack layout keeps everything as it was.
+describe('SimScene — the split stage (WI-1.8)', () => {
+  const svgOf = () => screen.getByRole('application');
+  let observers;
+  let originalRO;
+  let originalMatchMedia;
+  beforeEach(() => {
+    observers = [];
+    originalRO = window.ResizeObserver;
+    originalMatchMedia = window.matchMedia;
+    window.ResizeObserver = class {
+      constructor(cb) { this.cb = cb; observers.push(this); }
+
+      observe(el) { this.el = el; }
+
+      disconnect() { this.gone = true; }
+    };
+  });
+  afterEach(() => {
+    window.ResizeObserver = originalRO;
+    window.matchMedia = originalMatchMedia;
+  });
+  // eslint-disable-next-line testing-library/no-node-access
+  const tableObserver = () => observers.find((o) => o.el === svgOf().parentElement);
+  const sizeTable = (width, height) => act(() => {
+    tableObserver().cb([{ contentRect: { width, height } }]);
+  });
+
+  test('the split layout has a 3D ↔ table divider; the stack layout has none', async () => {
+    const { unmount } = render(<SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    const sep = screen.getByRole('separator', { name: 'Aufteilung zwischen 3D-Ansicht und Tisch' });
+    expect(sep).toHaveAttribute('aria-orientation', 'horizontal');
+    // Hidden below md (the stage scrolls there).
+    expect(sep.className).toContain('hidden md:flex');
+    unmount();
+    render(<SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    expect(screen.queryByRole('separator')).toBeNull();
+  });
+
+  test('the split notice has a close button that calls onDismissIntro; dismissed, it is gone', async () => {
+    const onDismissIntro = vi.fn();
+    const { rerender, store } = render(
+      <SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} onDismissIntro={onDismissIntro} />,
+    );
+    await screen.findByTestId('urdf-twin');
+    expect(screen.getByText(/Test im Simulator\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Hinweis ausblenden' }));
+    expect(onDismissIntro).toHaveBeenCalledTimes(1);
+    rerender(
+      <Provider store={store}>
+        <SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} onDismissIntro={onDismissIntro} introDismissed />
+      </Provider>,
+    );
+    expect(screen.queryByText(/Test im Simulator\./)).toBeNull();
+  });
+
+  test('the stack layout keeps its notice, with no close button', async () => {
+    render(<SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} onDismissIntro={() => {}} introDismissed />);
+    await screen.findByTestId('urdf-twin');
+    expect(screen.getByText(/Test im Simulator\./)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Hinweis ausblenden' })).toBeNull();
+  });
+
+  test('from md up the table is fitted by height into its area (viewBox ratio kept)', async () => {
+    window.matchMedia = vi.fn(() => ({ matches: true }));
+    render(<SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    sizeTable(400, 200);
+    expect(window.matchMedia).toHaveBeenCalledWith('(min-width: 768px)');
+    expect(svgOf().style.width).toBe('324px');
+    expect(svgOf().style.height).toBe('200px');
+    expect(svgOf().getAttribute('class')).toContain('block');
+    expect(svgOf().getAttribute('class')).not.toContain('w-full');
+    // A wide-short area fits by width instead.
+    sizeTable(150, 400);
+    expect(svgOf().style.width).toBe('150px');
+    expect(svgOf().style.height).toBe('93px');
+  });
+
+  test('below md the table stays full width (no inline size)', async () => {
+    window.matchMedia = vi.fn(() => ({ matches: false }));
+    render(<SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    sizeTable(400, 200);
+    expect(svgOf().getAttribute('class')).toContain('w-full h-auto');
+    expect(svgOf().style.width).toBe('');
+    expect(svgOf().style.height).toBe('');
+  });
+
+  test('without window.matchMedia (jsdom) nothing is fitted and nothing throws', async () => {
+    delete window.matchMedia;
+    render(<SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    expect(() => sizeTable(400, 200)).not.toThrow();
+    expect(svgOf().getAttribute('class')).toContain('w-full h-auto');
+    expect(svgOf().style.width).toBe('');
+  });
+
+  test('a stored 3D share is read back and a committed one is written', async () => {
+    window.localStorage.setItem('edubotics_workshop_sim_split', '0.5');
+    try {
+      render(<SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+      await screen.findByTestId('urdf-twin');
+      const sep = screen.getByRole('separator');
+      expect(sep).toHaveAttribute('aria-valuenow', '50');
+      fireEvent.keyDown(sep, { key: 'ArrowUp' });
+      expect(window.localStorage.getItem('edubotics_workshop_sim_split')).toBe('0.48');
+    } finally {
+      window.localStorage.removeItem('edubotics_workshop_sim_split');
+    }
+  });
+});

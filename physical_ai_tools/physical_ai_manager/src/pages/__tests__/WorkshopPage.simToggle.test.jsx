@@ -667,3 +667,97 @@ describe('WorkshopPage — the header (WI-1.4)', () => {
     expect(screen.queryByRole('button', { name: 'Kalibrierung neu starten' })).toBeNull();
   });
 });
+
+describe('WorkshopPage — „In 3D zeigen" (WI-1.10)', () => {
+  // The page persists the dock layout; earlier tests leave theirs behind.
+  const clearDock = () => {
+    window.localStorage.removeItem('edubotics_workshop_dock_open');
+    window.localStorage.removeItem('edubotics_workshop_dock_collapsed');
+  };
+  beforeEach(() => {
+    clearDock();
+    toast.mockClear();
+  });
+  afterEach(clearDock);
+  const caps = () => mockBlockly.provider.getSnapshot().capabilities;
+  const openIds = () => JSON.parse(screen.getByTestId('right-dock').getAttribute('data-open-ids'));
+
+  test('view3dOnScreen is false while the dock shows no 3D panel; show3d opens it there', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(openIds()).toEqual(['camera']);
+    expect(caps().view3dOnScreen).toBe(false);
+    await act(async () => { mockBlockly.provider.dispatchAction({ type: 'show3d' }); });
+    expect(openIds()).toEqual(['camera', '3d']);
+    expect(caps().view3dOnScreen).toBe(true);
+    expect(toast).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'edubotics-mode' }));
+  });
+
+  test('a folded dock with the 3D panel open is not on screen; show3d unfolds it', async () => {
+    window.localStorage.setItem('edubotics_workshop_dock_open', JSON.stringify(['3d']));
+    window.localStorage.setItem('edubotics_workshop_dock_collapsed', '1');
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(caps().view3dOnScreen).toBe(false);
+    await act(async () => { mockBlockly.provider.dispatchAction({ type: 'show3d' }); });
+    expect(caps().view3dOnScreen).toBe(true);
+    expect(openIds()).toEqual(['3d']);
+  });
+
+  test('at the two-panel cap show3d evicts the oldest panel that is not busy', async () => {
+    window.localStorage.setItem('edubotics_workshop_dock_open', JSON.stringify(['control', 'camera']));
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    // A live hand-guide pins „Steuern".
+    await userEvent.click(screen.getByTestId('jog-hand-guide-on'));
+    await act(async () => { mockBlockly.provider.dispatchAction({ type: 'show3d' }); });
+    expect(openIds()).toEqual(['control', '3d']);
+  });
+
+  test('in the simulator a 3D view is always on screen', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    expect(caps().view3dOnScreen).toBe(true);
+  });
+});
+
+describe('WorkshopPage — the page dividers (WI-1.7, WI-1.8)', () => {
+  beforeEach(() => {
+    window.localStorage.removeItem('edubotics_workshop_dock_collapsed');
+  });
+
+  test('editor ↔ dock: a divider AFTER the editor column; in the simulator, editor ↔ stage instead', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const dockSep = screen.getByRole('separator', { name: 'Breite der Werkzeuge' });
+    // eslint-disable-next-line testing-library/no-node-access
+    const row = dockSep.parentElement;
+    // The editor column stays the row's FIRST child (never remounted by a swap).
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(row.firstElementChild).toContainElement(screen.getByTestId('blockly-workspace'));
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(dockSep.nextElementSibling).toBe(screen.getByTestId('right-dock'));
+    expect(row.style.getPropertyValue('--dock-w')).toBe('380px');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    expect(screen.queryByRole('separator', { name: 'Breite der Werkzeuge' })).toBeNull();
+    const simSep = screen.getByRole('separator', { name: 'Breite des Simulators' });
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(simSep.parentElement).toBe(row);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(simSep.nextElementSibling).toBe(screen.getByTestId('sim-stage'));
+    expect(row.style.getPropertyValue('--sim-w')).toBe('0.55');
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(row.firstElementChild).toContainElement(screen.getByTestId('blockly-workspace'));
+  });
+
+  test('a folded dock has no width divider', async () => {
+    window.localStorage.setItem('edubotics_workshop_dock_collapsed', '1');
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(screen.queryByRole('separator', { name: 'Breite der Werkzeuge' })).toBeNull();
+  });
+});

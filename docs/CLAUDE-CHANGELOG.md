@@ -110,6 +110,17 @@ events), M-B (the two resize strings arrive with their handles), m-1…m-9 and t
 code editor). **Review 3** added M-1 (the header's left group wraps below lg) and m-a…m-g (owner: card titles
 cut with „…", full name on hover and in the drawer).
 
+**Verification round 1** (two verifiers, FIX FIRST, no blockers; the owner approved F1–F5). *F1, root cause
+(pre-existing on main):* `@blockly/suggested-blocks` serializes by handing out its own `defaultJsonForBlockLookup`
+and `recentlyUsedBlocks` and loads by adopting what it is given; `WorkshopPage::setUnsavedJson` dispatched that
+live state into Redux, Immer deep-froze it, and from the first dispatch on every BLOCK_CREATE threw „Cannot add
+property …, object is not extensible" in the plugin's listener, aborting Blockly's `fireNow` batch before
+`BlocklyWorkspace::handleChange` saw it. A drag from the flyout still read „Nicht gespeichert" (its BLOCK_MOVE
+arrived), but a paste, a duplicate and „Als Programm einfügen" left „Gespeichert", and an editor remounted from
+the store's copy (tab switch, draft or version restore) was broken the same way. Fix: `detachedCopy` on both
+sides of `BlocklyWorkspace`; `BlocklyWorkspace.storeCopy.test.jsx` (real Blockly, plugin and store) fails
+without either copy.
+
 ### Unreleased, 2026-10-07 — the amd64 server image ships no torchcodec (release 2.27.0 blocker)
 
 **Why.** After PR #35 merged, `docker-publish.yml::smoke-test (amd64)` failed in the new Daten 2.0 edit-engine

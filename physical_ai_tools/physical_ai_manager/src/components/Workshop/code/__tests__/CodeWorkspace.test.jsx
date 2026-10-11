@@ -18,7 +18,9 @@
 // the active file's content so the file-tree assertions can read it.
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import {
+  fireEvent, render, screen, waitFor,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
@@ -42,10 +44,12 @@ vi.mock('react-hot-toast', () => ({
   useToasterStore: () => ({ toasts: [] }),
 }));
 
-const editorMock = vi.hoisted(() => ({ throws: false }));
+const editorMock = vi.hoisted(() => ({ throws: false, props: null }));
 vi.mock('../CodeEditor', () => ({
   __esModule: true,
-  default: function MockCodeEditor({ path, value }) {
+  default: function MockCodeEditor(props) {
+    const { path, value } = props;
+    editorMock.props = props;
     // Stands in for the lazy chunk failing to arrive — a stale WebView2 cache
     // after an image update is the field case (the webview URL carries a
     // cache-busting `_v=<IMAGE_TAG>` for exactly this reason).
@@ -339,5 +343,126 @@ describe('the file last open', () => {
     await mount();
 
     expect(activePath()).toBe(ENTRY);
+  });
+});
+
+// ── The UX round: the Methoden column and what the page hands through ──────
+
+describe('the Methoden column', () => {
+  const panel = () => screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+
+  test('is open by default, beside the editor; its close button turns it into the rail and back', async () => {
+    await mount();
+    expect(await panel()).toBeInTheDocument();
+    expect(screen.getByTestId('code-methods')).toHaveAttribute('data-floating', 'false');
+    const editorNode = screen.getByTestId('code-editor');
+
+    await userEvent.click(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }));
+    expect(screen.queryByRole('region', { name: CODE_DE.METHODS_TITLE })).toBeNull();
+    const rail = screen.getByRole('button', { name: CODE_DE.METHODS_OPEN });
+    expect(rail).toHaveTextContent(CODE_DE.METHODS_TITLE);
+    expect(rail).toHaveFocus();
+    // The editor stays the same node — it is never remounted.
+    expect(screen.getByTestId('code-editor')).toBe(editorNode);
+
+    await userEvent.click(rail);
+    expect(await panel()).toBeInTheDocument();
+    expect(screen.getByTestId('code-editor')).toBe(editorNode);
+  });
+
+  test('in a code area too narrow for both it floats, and Esc closes it', async () => {
+    // The widths a narrow window measures: 600 px of code area, a 176-px file
+    // list — below 176 + 320 + 220 + 16.
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function rectOf() {
+      let width = 0;
+      if (this.dataset && this.dataset.testid === 'code-workspace') width = 600;
+      else if (this.tagName === 'ASIDE' && this.dataset.testid !== 'code-methods') width = 176;
+      return {
+        width, height: 400, top: 0, left: 0, right: width, bottom: 400, x: 0, y: 0,
+      };
+    });
+    await mount();
+    await panel();
+    expect(screen.getByTestId('code-methods')).toHaveAttribute('data-floating', 'true');
+    const editorNode = screen.getByTestId('code-editor');
+    fireEvent.keyDown(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }), { key: 'Escape' });
+    expect(screen.queryByRole('region', { name: CODE_DE.METHODS_TITLE })).toBeNull();
+    expect(screen.getByRole('button', { name: CODE_DE.METHODS_OPEN })).toHaveFocus();
+    expect(screen.getByTestId('code-editor')).toBe(editorNode);
+    rect.mockRestore();
+  });
+
+  test('docked, Esc does not close it (it is part of the page, not a layer)', async () => {
+    await mount();
+    await panel();
+    fireEvent.keyDown(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }), { key: 'Escape' });
+    expect(screen.getByRole('region', { name: CODE_DE.METHODS_TITLE })).toBeInTheDocument();
+  });
+
+  test('a column that fails to load says so and leaves the editor and the files', async () => {
+    vi.resetModules();
+    vi.doMock('../MethodenPanel', () => { throw new Error('Loading chunk MethodenPanel failed'); });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { default: Fresh } = await import('../CodeWorkspace');
+    const store = configureStore({ reducer: { workshop: workshopReducer } });
+    render(
+      <Provider store={store}>
+        <Fresh language="python" files={BASE_FILES} onFilesChange={vi.fn()} />
+      </Provider>,
+    );
+    expect(await screen.findByText(CODE_DE.METHODS_FAILED)).toBeInTheDocument();
+    expect(screen.getByTestId('code-editor')).toBeInTheDocument();
+    expect(fileButton('hilfe.py')).toBeInTheDocument();
+    spy.mockRestore();
+    vi.doUnmock('../MethodenPanel');
+    vi.resetModules();
+  });
+});
+
+describe('what the page hands through (K-1, R0-1, m-3)', () => {
+  test('onSave and commandsRef reach the editor; a read-only editor gets no onSave', async () => {
+    const onSave = vi.fn();
+    const commandsRef = { current: null };
+    const { unmount } = await mount(BASE_FILES, { onSave, commandsRef });
+    expect(editorMock.props.onSave).toBe(onSave);
+    expect(editorMock.props.commandsRef).toBe(commandsRef);
+    unmount();
+    await mount(BASE_FILES, { onSave, commandsRef, readOnly: true });
+    expect(editorMock.props.onSave).toBeNull();
+  });
+
+  test('a page reveal carrying flash reaches the editor with it', async () => {
+    const { rerender } = await mount();
+    const store = configureStore({ reducer: { workshop: workshopReducer } });
+    rerender(
+      <Provider store={store}>
+        <CodeWorkspace
+          language="python"
+          files={BASE_FILES}
+          onFilesChange={vi.fn()}
+          revealRequest={{ file: 'hilfe.py', line: 1, nonce: 7, flash: { from: 1, to: 1 } }}
+        />
+      </Provider>,
+    );
+    await waitFor(() => expect(editorMock.props.revealRequest).toMatchObject({ line: 1, flash: { from: 1, to: 1 } }));
+    expect(activePath()).toBe('hilfe.py');
+  });
+
+  test('sidebarWidthRef stays null at a measured width of 0 and takes a positive one', async () => {
+    const zero = { current: null };
+    const first = await mount(BASE_FILES, { sidebarWidthRef: zero });
+    expect(zero.current).toBeNull();
+    first.unmount();
+
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function rectOf() {
+      const width = this.tagName === 'ASIDE' && this.dataset.testid !== 'code-methods' ? 203.6 : 0;
+      return {
+        width, height: 400, top: 0, left: 0, right: width, bottom: 400, x: 0, y: 0,
+      };
+    });
+    const measured = { current: null };
+    await mount(BASE_FILES, { sidebarWidthRef: measured });
+    expect(measured.current).toBe(204);
+    rect.mockRestore();
   });
 });

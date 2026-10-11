@@ -169,10 +169,24 @@ export const CODE_DE = Object.freeze({
   // The „Methoden" column beside the editor: every robot command with its
   // German explanation, parameters, return value and an example line that
   // „Einfügen" (or a drag) writes into the program.
+  METHODS_TITLE: 'Methoden',
+  METHODS_OPEN: 'Methoden anzeigen',
+  METHODS_CLOSE: 'Methoden schließen',
+  METHODS_LOADING: 'Methoden werden geladen …',
+  METHODS_FAILED: 'Die Methoden-Liste konnte nicht geladen werden – bitte die Seite neu laden.',
+  METHODS_HELP: 'Klicke auf einen Befehl für die Erklärung. „Einfügen“ schreibt das Beispiel unter die '
+    + 'Zeile mit dem Cursor – oder zieh es an die Stelle.',
+  METHODS_PARAMS: 'Parameter',
+  METHODS_RETURNS: 'Gibt zurück',
+  METHODS_EXAMPLE: 'Beispiel',
+  METHODS_INSERT_ARIA: 'Einfügen: {0}',
+  METHODS_DEFAULT: 'Standard: {0}',
+  METHODS_OPTIONAL: 'optional',
   METHODS_RANGE: '{0} bis {1}',
   METHODS_MIN: 'ab {0}',
   METHODS_MAX_CHARS: 'höchstens {0} Zeichen',
   METHODS_VARIANTS: '(+{0} Varianten)',
+  METHODS_TYPE: 'Typ',
   METHODS_GROUP_SHOW: 'Anzeigen',
 
   SUBMIT: 'Abgeben',

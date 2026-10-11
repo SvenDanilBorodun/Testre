@@ -128,10 +128,11 @@ describe('ranges, defaults, short forms', () => {
     expect(defaultTextFor(byName('replay').params[0], 'python')).toBeNull();
   });
 
-  it('a row’s short form names the parameters as each language writes them', () => {
+  it('a row’s short form: Python’s signature, Java’s name with „…" for its overloads’ parameters', () => {
     expect(methodShortForm(byName('move_to'), 'python')).toBe('robot.move_to(target)');
     expect(methodShortForm(byName('replay'), 'python')).toBe('robot.replay(name, speed=1.0)');
-    expect(methodShortForm(byName('wait_until_seen'), 'java')).toBe('Robot.waitUntilSeen(obj, timeout)');
+    expect(methodShortForm(byName('wait_until_seen'), 'java')).toBe('Robot.waitUntilSeen(…)');
+    expect(methodShortForm(byName('move_to'), 'java')).toBe('Robot.moveTo(…)');
     expect(methodShortForm(byName('home'), 'java')).toBe('Robot.home()');
   });
 });

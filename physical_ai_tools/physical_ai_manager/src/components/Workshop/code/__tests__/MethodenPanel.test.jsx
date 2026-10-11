@@ -118,7 +118,7 @@ describe('an entry', () => {
 
   test('Java: the Java spelling, every overload, the Java sentence', async () => {
     mount({ language: 'java' });
-    const button = entry(/^Robot\.moveTo\(target\)/);
+    const button = entry(/^Robot\.moveTo\(…\)/);
     expect(button.textContent).toContain(formatCode(CODE_DE.METHODS_VARIANTS, 1));
     expect(button.textContent).toContain(METHOD_DOCS.byName.move_to.doc_de_java);
     await userEvent.click(button);

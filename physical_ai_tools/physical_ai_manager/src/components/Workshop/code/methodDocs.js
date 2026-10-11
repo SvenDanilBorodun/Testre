@@ -181,12 +181,17 @@ export function defaultTextFor(param, language) {
   return literalFor(param.kind, param.default, language);
 }
 
-/** The short form a row of the column shows: `robot.move_to(target)` / `Robot.moveTo(target)`. */
+/**
+ * The short form a row of the column shows: Python the signature
+ * (`robot.move_to(target)`), Java `Robot.moveTo(…)` — its overloads differ in
+ * their parameters, so no one list is THE list (the row adds „(+N Varianten)"
+ * and the opened entry shows every overload); a method without parameters is
+ * `Robot.home()`.
+ */
 export function methodShortForm(method, language) {
   if (!method) return '';
   if (language === 'java') {
-    const params = (method.params || []).map((p) => p.java_name || p.name).join(', ');
-    return `Robot.${method.java_name}(${params})`;
+    return `Robot.${method.java_name}(${(method.params || []).length > 0 ? '…' : ''})`;
   }
   return method.signature_py;
 }

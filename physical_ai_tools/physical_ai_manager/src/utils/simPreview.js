@@ -190,14 +190,21 @@ export const PREVIEW_BLOCK_TITLES_DE = Object.freeze({
 
 /**
  * The header sim toggle and `WorkshopPage::ensureSimMode` share this ladder.
- * Leaving sim is refused only while a sim run is in flight (it would unmount
- * RunControls and its Stop button); ENTERING is refused during a tutorial (the
- * dock swap unmounts SkillmapPlayer), while Vormachen is open (it owns the real
- * arm) and while the arm is hand-guided (unmounting JogPanel ends the session).
+ * Leaving sim is refused only while a sim run is in flight — running, paused
+ * or starting (it would unmount RunControls and its Stop button). ENTERING is
+ * refused while a program runs, pauses or starts on the REAL robot (the
+ * simulator would hide a real run; deliberately not gated on the heartbeat: a
+ * dead link with a recorded real run fails closed), during a tutorial (the
+ * dock swap unmounts SkillmapPlayer), while Vormachen is open (it owns the
+ * real arm) and while the arm is hand-guided (unmounting JogPanel ends the
+ * session).
  */
-export function simEntryBlockReason({ simRunActive, simMode, activeTutorialId, teachOpen, jogHandGuideOn }) {
+export function simEntryBlockReason({
+  simRunActive, realRunActive, simMode, activeTutorialId, teachOpen, jogHandGuideOn,
+}) {
   if (simRunActive) return 'simRun';
   if (simMode) return null;
+  if (realRunActive) return 'realRun';
   if (activeTutorialId) return 'tutorial';
   if (teachOpen) return 'teach';
   if (jogHandGuideOn) return 'handguide';
@@ -205,7 +212,8 @@ export function simEntryBlockReason({ simRunActive, simMode, activeTutorialId, t
 }
 
 export const SIM_ENTRY_BLOCK_TITLES_DE = Object.freeze({
-  simRun: 'Während ein Simulationslauf läuft, kann der Simulator nicht beendet werden — bitte zuerst stoppen.',
+  simRun: 'Während ein Programm im Simulator läuft oder angehalten ist, kann der Simulator nicht beendet werden – bitte zuerst stoppen.',
+  realRun: 'Solange ein Programm am echten Roboter läuft oder angehalten ist, kann der Simulator nicht gestartet werden – bitte zuerst stoppen.',
   tutorial: 'Während ein Lernpfad aktiv ist, kann der Simulator nicht gestartet werden — bitte den Lernpfad zuerst beenden.',
   teach: DE.TEACH_SIM_ENTRY_BLOCKED,
   handguide: 'Solange der Arm freigeschaltet ist, kann der Simulator nicht gestartet werden — bitte den Arm zuerst festsetzen.',

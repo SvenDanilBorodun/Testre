@@ -8,7 +8,9 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useEffect, useState, useCallback, useMemo, useRef, Suspense, lazy } from 'react';
+import React, {
+  useEffect, useState, useCallback, useId, useMemo, useRef, Suspense, lazy,
+} from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast, { useToasterStore } from 'react-hot-toast';
 import * as Blockly from 'blockly/core';
@@ -53,6 +55,8 @@ import {
   TEACH_BLOCK_TITLES_DE, TEACH_KINDS, TEACH_KIND_ICON, TEACH_KIND_LABEL_DE, teachEntryBlockReason,
 } from '../components/Workshop/teach/teachGates';
 import MenuButton from '../components/Workshop/MenuButton';
+import ModeBadge from '../components/Workshop/ModeBadge';
+import { MODE_DE } from '../components/Workshop/modeCopy';
 import OpenWorkflowPopover from '../components/Workshop/OpenWorkflowPopover';
 import { toastIcon } from '../components/icons/toast';
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
@@ -427,11 +431,7 @@ function WorkshopPage({ isActive }) {
   // holds, so a crash-recovery draft arriving a moment later must not overrule
   // them (the read is async; the click is not).
   const documentChosenRef = useRef(false);
-  // #B2: leaving simMode while a sim run is active would unmount RunControls (and
-  // its Stop button) on an uncalibrated rig, stranding the run. Lock the toggle
-  // while a sim run is in flight (mirrors LeaderToggle's run-guard).
   const runState = useSelector((s) => s.workshop.runState);
-  const simRunActive = simMode && runState === 'running';
   // No document switch while a program runs or stands at a breakpoint
   // (owner decision R2-O3): every action that replaces the open document is
   // disabled with this German reason, and the handlers refuse it too (a clone
@@ -459,6 +459,15 @@ function WorkshopPage({ isActive }) {
   // 5, MD5): RunControls reports it; nothing replaces the document meanwhile.
   const [runStarting, setRunStartingState] = useState(false);
   const runStartingRef = useRef(false);
+  // #B2: leaving simMode while a sim run is in flight would unmount RunControls
+  // (and its Stop button) on an uncalibrated rig, stranding the run; ENTERING it
+  // while a program drives the REAL arm would hide that run behind the
+  // simulator. Both count a paused run (a breakpoint still holds it) and a run
+  // that is starting. Not gated on the heartbeat: a dead link with a recorded
+  // real run fails closed. Declared here, below runStarting (a use above its
+  // declaration is a temporal-dead-zone error).
+  const simRunActive = simMode && (workflowRunning || runStarting);
+  const realRunActive = !simMode && (workflowRunning || runStarting);
   const handleRunStarting = useCallback((v) => {
     runStartingRef.current = !!v;
     setRunStartingState(!!v);
@@ -521,6 +530,9 @@ function WorkshopPage({ isActive }) {
   // hand mode, and a leader switched on mid-session) and `followerOnly` (the
   // leader gone in leader mode). Polled only while the page is shown.
   const rsBridge = useRsBridgeStatus({ enabled: isActive });
+  // The id of the Vormachen chooser's visible reason (aria-describedby). A hook,
+  // so it sits above the inactive page's early return.
+  const teachReasonId = useId();
   const teachReason = teachEntryBlockReason({
     heartbeatStatus,
     runState,
@@ -705,12 +717,27 @@ function WorkshopPage({ isActive }) {
   // One ladder for the header sim toggle AND a preview's sim entry
   // (utils/simPreview.js::simEntryBlockReason).
   const simEntryReason = simEntryBlockReason({
-    simRunActive, simMode, activeTutorialId, teachOpen, jogHandGuideOn,
+    simRunActive, realRunActive, simMode, activeTutorialId, teachOpen, jogHandGuideOn,
   });
   const simEntryReasonRef = useRef(simEntryReason);
   simEntryReasonRef.current = simEntryReason;
   const simModeRef = useRef(simMode);
   simModeRef.current = simMode;
+  // A switch between the real robot and the simulator is announced once, by
+  // whichever path made it (the header toggle, a card's play button, „Im
+  // Simulator zeigen", a sim-table Ziel) — never on mount. One toast id, so a
+  // quick back-and-forth shows the latest mode, not a stack.
+  const modeToastArmedRef = useRef(false);
+  useEffect(() => {
+    if (!modeToastArmedRef.current) {
+      modeToastArmedRef.current = true;
+      return;
+    }
+    toast(simMode ? MODE_DE.TOAST_SIM : MODE_DE.TOAST_REAL, {
+      id: 'edubotics-mode',
+      icon: toastIcon(simMode ? 'simulator' : 'arm'),
+    });
+  }, [simMode]);
   // Enter the simulator on behalf of a preview (and, later, „Ziel setzen" / a
   // point marker with `showPath: false`, which never turns the trail on).
   // Resolves true once the simulator is (or already was) open.
@@ -1672,6 +1699,11 @@ function WorkshopPage({ isActive }) {
   const jogDisabled =
     heartbeatStatus !== 'connected' || runState === 'running' || teachOpen;
   const teachReasonText = teachReason ? TEACH_BLOCK_TITLES_DE[teachReason] : null;
+  const hintText = !showEditor
+    ? 'Bevor wir loslegen können, muss die Kamera eingerichtet werden.'
+    : isCodeWorkflow
+      ? CODE_DE.HEADER_HINT_CODE
+      : 'Bausteine ziehen, Aufgabe zusammenstellen und vom Roboter ausführen lassen.';
   const teachChooserItems = TEACH_KINDS.map((kind) => ({
     id: kind,
     label: TEACH_KIND_LABEL_DE[kind],
@@ -1862,22 +1894,69 @@ function WorkshopPage({ isActive }) {
     // callers (TableTouchStep, JogPanel, Vormachen) can each unmount while a
     // countdown is still running — see HomeGlidePrompt.
     <HomeGlideProvider>
-    <div className="flex flex-col h-full w-full overflow-hidden">
+    {/* The mode FRAME: orange on the real robot, blue in the simulator — a
+        border and `data-mode` on this EXISTING root, never a wrapper (a wrapper
+        would remount the editor and the dock) and never a transform, filter,
+        `contain`, `will-change` or z-index (the Vormachen overlay is `fixed`
+        and not portalled). The frame never animates. */}
+    <div
+      data-mode={simMode ? 'sim' : 'real'}
+      className={
+        'flex flex-col h-full w-full overflow-hidden border-4 '
+        + (simMode ? 'border-[#2563EB]' : 'border-[#EA580C]')
+      }
+    >
       <header className="px-3 sm:px-4 py-2 border-b border-[var(--line)] bg-white shrink-0">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="min-w-0 flex items-baseline gap-2 flex-wrap">
-            <h1 className="text-base sm:text-lg font-semibold text-[var(--ink)]">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          {/* Title, mode badge and hint. Below lg the group wraps (the running
+              badge drops under the title at phone width instead of being
+              clipped); from lg up it is one row and the hint truncates in its
+              own flex item, never hidden. */}
+          <div className="flex min-w-0 flex-1 basis-auto lg:basis-[34rem] flex-wrap lg:flex-nowrap items-center gap-x-2 gap-y-1">
+            <h1 className="shrink-0 text-base sm:text-lg font-semibold text-[var(--ink)]">
               Roboter Studio
             </h1>
-            <p className="text-xs text-[var(--ink-3)] hidden lg:block truncate">
-              {!showEditor
-                ? 'Bevor wir loslegen können, muss die Kamera eingerichtet werden.'
-                : isCodeWorkflow
-                  ? CODE_DE.HEADER_HINT_CODE
-                  : 'Bausteine ziehen, Aufgabe zusammenstellen und vom Roboter ausführen lassen.'}
+            <ModeBadge simMode={simMode} />
+            <p
+              className="hidden lg:block min-w-0 flex-1 truncate text-xs text-[var(--ink-3)]"
+              title={hintText}
+            >
+              {hintText}
             </p>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
+          {/* The actions. Below lg the group may shrink and wrap inside the
+              viewport (`flex-initial max-w-full`); from lg up it keeps its
+              width (`flex-none`) and only the LeaderToggle wraps it. */}
+          <div className="ml-auto flex flex-initial max-w-full lg:flex-none flex-wrap items-center justify-end gap-2">
+            {/* „Vormachen": one focused window per kind (owner decisions D1,
+                D4). A disabled chooser shows WHY as visible text beside it,
+                wired as its aria-describedby; its name stays „Vormachen". */}
+            {showEditor && view === 'editor' && (
+              <div className="flex items-center gap-1.5">
+                {teachReasonText && (
+                  <span
+                    id={teachReasonId}
+                    className="max-w-[15rem] line-clamp-2 text-[11px] leading-tight text-[var(--ink-3)]"
+                  >
+                    {teachReasonText}
+                  </span>
+                )}
+                <MenuButton
+                  label={DE.TOOLBAR_TEACH}
+                  icon="hand"
+                  menuLabel={DE.TEACH_CHOOSER_MENU}
+                  items={teachChooserItems}
+                  disabled={!!teachReason || teachOpen}
+                  title={teachReasonText || DE.TOOLBAR_TEACH_TITLE}
+                  describedBy={teachReasonText ? teachReasonId : undefined}
+                  buttonClassName={
+                    'text-sm px-3 py-1.5 rounded-md border disabled:opacity-50 '
+                    + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
+                    + 'border-[var(--accent)] hover:opacity-90'
+                  }
+                />
+              </div>
+            )}
             {/* „Abgeben": hand the teacher this stand (saves first, then
                 POST /workflows/{id}/submit). Blocks and code alike. */}
             {showEditor && (
@@ -1894,8 +1973,9 @@ function WorkshopPage({ isActive }) {
               type="button"
               onClick={() => {
                 // Belt-and-suspenders (the button is already disabled for all
-                // four): never toggle while a sim run is in flight, and never
-                // ENTER sim during an active tutorial (replacing the dock would
+                // five): never toggle while a sim run is in flight, and never
+                // ENTER sim while a program drives the real arm (running,
+                // paused or starting), during an active tutorial (replacing the dock would
                 // unmount SkillmapPlayer + lift the toolbox restriction
                 // mid-tutorial), while Vormachen is open (it owns the REAL arm,
                 // which the simulator would hide under the student's hand), or
@@ -1936,7 +2016,7 @@ function WorkshopPage({ isActive }) {
         </div>
       </header>
       {/* Vormachen: the full-screen teaching overlay, one focused window per
-          kind, opened from the toolbar chooser or a Sammlung creation button
+          kind, opened from the header chooser or a Sammlung creation button
           („Bewegung/Position/Ziel vormachen"). */}
       <TeachHost
         isActive={isActive}
@@ -1999,28 +2079,15 @@ function WorkshopPage({ isActive }) {
                   }
                   extra={
                     <>
-                      {/* One focused window per kind (owner decisions D1, D4):
-                          the chooser names the three. */}
-                      <MenuButton
-                        label={DE.TOOLBAR_TEACH}
-                        icon="hand"
-                        menuLabel={DE.TEACH_CHOOSER_MENU}
-                        items={teachChooserItems}
-                        disabled={!!teachReason || teachOpen}
-                        title={teachReasonText || DE.TOOLBAR_TEACH_TITLE}
-                        buttonClassName={
-                          'text-xs px-2.5 py-1 rounded-md border disabled:opacity-50 '
-                          + 'disabled:cursor-not-allowed bg-[var(--accent)] text-white '
-                          + 'border-[var(--accent)] hover:opacity-90'
-                        }
-                      />
                       <VersionHistoryDropdown
                         workflowId={openDocId}
                         lockedReason={historyLockReason}
                         onRestoringChange={handleRestoringChange}
                         onRestore={handleVersionRestored}
                       />
-                      {recalibrateButton}
+                      {/* There is no camera to recalibrate in the simulator
+                          (R0-8). */}
+                      {!simMode && recalibrateButton}
                     </>
                   }
                 />

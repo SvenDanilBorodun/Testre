@@ -245,6 +245,30 @@ describe.each([
     expect(programText()).toMatch(/Winken/);
     expect(programText()).toMatch(/Ablage/);
   });
+
+  // R0-5: both documents can light up what „Als Programm einfügen" just
+  // wrote, from their OWN insertProgram answer (Blockly: `blockIds`; code:
+  // `file, firstLine, lastLine`), and answer false — never a throw — for
+  // anything else. A headless Blockly workspace cannot highlight, so it
+  // answers false there; the rendered half is „the Blockly document:
+  // flashInserted" below, the code half code/__tests__/codeAssetDocument.flash.test.js.
+  it('carries flashInserted, which takes its own insertProgram answer', async () => {
+    const { doc } = make({ empty: true });
+    expect(typeof doc.flashInserted).toBe('function');
+    expect(doc.flashInserted(null)).toBe(false);
+    expect(doc.flashInserted({ count: 0 })).toBe(false);
+    const result = await doc.insertProgram(
+      [{ kind: 'recording', name: 'Winken', status: 'saved' }],
+      { placeNameOf: (it) => it.name, gripperStateOf: () => null },
+    );
+    expect(result.count).toBe(1);
+    // What each answer carries, and what the document makes of it.
+    const carries = kind === 'code'
+      ? typeof result.file === 'string' && Number.isInteger(result.firstLine) && Number.isInteger(result.lastLine)
+      : Array.isArray(result.blockIds) && result.blockIds.length > 0;
+    expect(carries).toBe(true);
+    expect(doc.flashInserted(result)).toBe(kind === 'code');
+  });
 });
 
 describe('the code document alone', () => {

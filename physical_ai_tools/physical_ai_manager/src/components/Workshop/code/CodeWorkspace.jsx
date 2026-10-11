@@ -39,7 +39,11 @@
 // side when the code area is too narrow for both (measured), or closed to a
 // thin rail. Its children come AFTER the editor, so opening, closing or
 // floating it never moves the editor among its siblings — CodeEditor never
-// remounts. The page hands three more things through: `commandsRef` (the
+// remounts (every child is keyed; the editor is `editor`). Two dividers
+// (layout/ResizeHandle.jsx) size the file list (`--code-sidebar-w`) and the
+// docked column (`--code-methods-w`); both widths and whether the column is
+// open are remembered on THIS PC (layout/layoutPrefs.js, MACHINE keys).
+// The page hands three more things through: `commandsRef` (the
 // editor's Rückgängig / Wiederholen for the toolbar), `onSave` (Strg+S inside
 // the editor, owner decision K-1; not for a read-only editor) and
 // `sidebarWidthRef` (the file sidebar's APPLIED, measured width — where the
@@ -55,7 +59,15 @@ import { addBreakpoint, removeBreakpoint } from '../../../features/workshop/work
 import { openDrawer } from '../../../features/workshop/studioAssetsSlice';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import { DE } from '../blocks/messages_de';
-import { newActionsFor, teachActionFor } from '../sammlung/newActions';
+import { newActionsFor, teachActionFor, teachHintFor } from '../sammlung/newActions';
+import { SAMMLUNG_TABS, SAMMLUNG_TAB_LABEL_DE } from '../sammlung/sammlungTabs';
+import ResizeHandle from '../layout/ResizeHandle';
+import {
+  CODE_SIDEBAR_WIDTH, METHODS_WIDTH,
+  readCodeSidebarWidth, readMethodsOpen, readMethodsWidth,
+  writeCodeSidebarWidth, writeMethodsOpen, writeMethodsWidth,
+} from '../layout/layoutPrefs';
+import { LAYOUT_DE, fillLayout } from '../layout/layoutCopy';
 import MenuButton from '../MenuButton';
 import Icon from '../../icons/Icon';
 import { breakpointLinesForFile, codeBreakpointId, parseCodeBreakpointId } from './codeBreakpoints';
@@ -185,13 +197,11 @@ function methodSammlungOf(sources) {
   return { places, recordings, objects };
 }
 
-// The sidebar's Sammlung rows: [drawer tab, label, index count key].
-const SAMMLUNG_ROWS = Object.freeze([
-  ['aufnahmen', DE.CATEGORY_AUFNAHMEN],
-  ['ziele', DE.CATEGORY_ZIELE],
-  ['positionen', DE.CATEGORY_POSITIONEN],
-  ['variablen', DE.CATEGORY_VARIABLEN],
-]);
+// The sidebar's Sammlung rows: [drawer tab, label] — the one order and the
+// one set of names (sammlung/sammlungTabs.js).
+const SAMMLUNG_ROWS = Object.freeze(SAMMLUNG_TABS.map((tab) => [tab, SAMMLUNG_TAB_LABEL_DE[tab]]));
+
+const pxText = (v) => fillLayout(LAYOUT_DE.VALUE_PX, Math.round(v));
 
 const NO_OBJECT_TYPES = Object.freeze([]);
 
@@ -210,7 +220,7 @@ function snapshotOf(provider) {
  * Rendered only with an asset document.
  */
 function SammlungSection({
-  counts, actions, teachActions, onOpen, onAction, buttonClass,
+  counts, actions, teachActions, teachHint, onOpen, onAction, buttonClass,
 }) {
   return (
     <section
@@ -220,6 +230,7 @@ function SammlungSection({
       <div className="px-1 pb-1 text-[11px] font-semibold text-[var(--ink-3)] uppercase tracking-wide">
         {DE.SAMMLUNG_TITLE}
       </div>
+      {teachHint && <p className="px-2 text-[10px] text-[var(--ink-4)]">{teachHint}</p>}
       {SAMMLUNG_ROWS.map(([tab, label]) => {
         const teach = teachActions[tab] || null;
         return (
@@ -529,6 +540,13 @@ function CodeWorkspace({
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readOnly, assetDoc, provider, sammlungTick]);
+  // In the simulator the rows' „… vormachen" are gone (D9): one sentence says
+  // why, under the heading (the drawer's and the flyout's hint).
+  const teachHint = useMemo(
+    () => (readOnly || !assetDoc ? null : teachHintFor((snapshotOf(provider) || {}).capabilities, 'aufnahmen')),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [readOnly, assetDoc, provider, sammlungTick],
+  );
   const openSammlungTab = useCallback((tab) => {
     dispatch(openDrawer({ tab, focusId: null }));
   }, [dispatch]);
@@ -549,7 +567,9 @@ function CodeWorkspace({
   const rootRef = useRef(null);
   const asideRef = useRef(null);
   const railRef = useRef(null);
-  const [methodsOpen, setMethodsOpen] = useState(true);
+  const [methodsOpen, setMethodsOpen] = useState(readMethodsOpen);
+  const [sidebarW, setSidebarW] = useState(readCodeSidebarWidth);
+  const [methodsW, setMethodsW] = useState(readMethodsWidth);
   const [methodsFloating, setMethodsFloating] = useState(false);
   const focusRailRef = useRef(false);
   useLayoutEffect(() => {
@@ -575,8 +595,12 @@ function CodeWorkspace({
   const closeMethods = useCallback(() => {
     focusRailRef.current = true;
     setMethodsOpen(false);
+    writeMethodsOpen(false);
   }, []);
-  const openMethods = useCallback(() => setMethodsOpen(true), []);
+  const openMethods = useCallback(() => {
+    setMethodsOpen(true);
+    writeMethodsOpen(true);
+  }, []);
   // Closed from inside the panel: the focus lands on the rail that reopens it.
   useEffect(() => {
     if (!methodsOpen && focusRailRef.current) {
@@ -593,6 +617,7 @@ function CodeWorkspace({
       data-language={language}
     >
       <aside
+        key="files"
         ref={asideRef}
         className="w-44 md:w-[var(--code-sidebar-w,11rem)] shrink-0 border-r border-[var(--line)] bg-[var(--bg-sunk)] flex flex-col min-h-0"
       >
@@ -651,13 +676,37 @@ function CodeWorkspace({
             counts={sammlungCounts}
             actions={newActions}
             teachActions={teachActions}
+            teachHint={teachHint}
             onOpen={openSammlungTab}
             onAction={dispatchSammlungAction}
             buttonClass={smallButton}
           />
         )}
       </aside>
-      <div className="flex-1 min-w-0 min-h-0">
+      <ResizeHandle
+        key="files-handle"
+        orientation="vertical"
+        cssVar="--code-sidebar-w"
+        unit="px"
+        value={sidebarW}
+        defaultValue={CODE_SIDEBAR_WIDTH.default}
+        bounds={(r) => ({
+          min: CODE_SIDEBAR_WIDTH.min,
+          max: r ? Math.max(CODE_SIDEBAR_WIDTH.min, Math.min(CODE_SIDEBAR_WIDTH.max, r.width - METHODS_MIN_EDITOR_PX))
+            : CODE_SIDEBAR_WIDTH.max,
+        })}
+        fromPointer={(e, r) => e.clientX - r.left}
+        growKey="ArrowRight"
+        step={8}
+        largeStep={32}
+        label={CODE_DE.CODE_SIDEBAR_RESIZE}
+        valueText={pxText}
+        onCommit={(v) => {
+          setSidebarW(v);
+          writeCodeSidebarWidth(v);
+        }}
+      />
+      <div key="editor" className="flex-1 min-w-0 min-h-0">
         <EditorBoundary>
           <Suspense
             fallback={
@@ -683,8 +732,38 @@ function CodeWorkspace({
           </Suspense>
         </EditorBoundary>
       </div>
+      {methodsOpen && !methodsFloating && (
+        <ResizeHandle
+          key="methods-handle"
+          orientation="vertical"
+          cssVar="--code-methods-w"
+          unit="px"
+          value={methodsW}
+          defaultValue={METHODS_WIDTH.default}
+          bounds={(r) => ({
+            min: METHODS_WIDTH.min,
+            max: r
+              ? Math.max(METHODS_WIDTH.min, Math.min(
+                METHODS_WIDTH.max,
+                r.width - ((sidebarWidthRef && sidebarWidthRef.current) || sidebarW) - METHODS_MIN_EDITOR_PX,
+              ))
+              : METHODS_WIDTH.max,
+          })}
+          fromPointer={(e, r) => r.right - e.clientX}
+          growKey="ArrowLeft"
+          step={8}
+          largeStep={32}
+          label={CODE_DE.METHODS_RESIZE}
+          valueText={pxText}
+          onCommit={(v) => {
+            setMethodsW(v);
+            writeMethodsWidth(v);
+          }}
+        />
+      )}
       {methodsOpen ? (
         <aside
+          key="methods"
           className={
             methodsFloating
               ? 'hidden md:flex md:flex-col absolute inset-y-0 right-0 z-20 w-[min(300px,calc(100%-2rem))] '
@@ -711,6 +790,7 @@ function CodeWorkspace({
         </aside>
       ) : (
         <button
+          key="methods-rail"
           ref={railRef}
           type="button"
           onClick={openMethods}
@@ -722,6 +802,7 @@ function CodeWorkspace({
             + 'bg-[var(--bg-sunk)] py-2 text-[var(--ink-3)] hover:bg-white hover:text-[var(--accent)]'
           }
         >
+          <Icon name="methods" />
           <span className="[writing-mode:vertical-rl] text-[11px] font-semibold uppercase tracking-wide">
             {CODE_DE.METHODS_TITLE}
           </span>

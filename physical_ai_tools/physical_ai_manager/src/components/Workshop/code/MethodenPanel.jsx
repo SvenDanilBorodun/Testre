@@ -241,6 +241,7 @@ export default function MethodenPanel({
       data-testid="methoden-panel"
     >
       <header className="flex items-center gap-1 border-b border-[var(--line)] px-2 py-1">
+        <Icon name="methods" className="text-[var(--ink-3)]" />
         <h2 className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--ink-3)]">
           {CODE_DE.METHODS_TITLE}
         </h2>

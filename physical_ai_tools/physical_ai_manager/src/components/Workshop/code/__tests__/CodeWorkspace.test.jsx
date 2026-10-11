@@ -466,3 +466,94 @@ describe('what the page hands through (K-1, R0-1, m-3)', () => {
     rect.mockRestore();
   });
 });
+
+// ── The code panes' dividers and what this PC remembers (I2-int) ──────────
+
+describe('the code panes are resizable and remembered on this PC', () => {
+  const sidebarHandle = () => screen.getByRole('separator', { name: CODE_DE.CODE_SIDEBAR_RESIZE });
+  const methodsHandle = () => screen.queryByRole('separator', { name: CODE_DE.METHODS_RESIZE });
+
+  test('a divider stands between the file list and the editor, another before the docked column', async () => {
+    await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    const handle = sidebarHandle();
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(handle.previousElementSibling.tagName).toBe('ASIDE');
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(handle.nextElementSibling).toContainElement(screen.getByTestId('code-editor'));
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(methodsHandle().nextElementSibling).toBe(screen.getByTestId('code-methods'));
+    expect(handle).toHaveAttribute('aria-valuenow', '176');
+    expect(methodsHandle()).toHaveAttribute('aria-valuenow', '300');
+  });
+
+  test('a width the student sets is stored, and the next mount takes it', async () => {
+    const first = await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    fireEvent.keyDown(sidebarHandle(), { key: 'ArrowRight' });
+    fireEvent.keyDown(methodsHandle(), { key: 'ArrowLeft', shiftKey: true });
+    expect(window.localStorage.getItem('edubotics_code_sidebar_width')).toBe('184');
+    expect(window.localStorage.getItem('edubotics_code_methods_width')).toBe('332');
+    first.unmount();
+
+    await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    expect(sidebarHandle()).toHaveAttribute('aria-valuenow', '184');
+    expect(methodsHandle()).toHaveAttribute('aria-valuenow', '332');
+  });
+
+  test('a drag of the dividers never remounts the editor', async () => {
+    await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    const editorNode = screen.getByTestId('code-editor');
+    fireEvent.keyDown(sidebarHandle(), { key: 'End' });
+    fireEvent.doubleClick(methodsHandle());
+    expect(screen.getByTestId('code-editor')).toBe(editorNode);
+  });
+
+  test('closing and opening the column is stored; a closed column stays closed next time', async () => {
+    const first = await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    await userEvent.click(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }));
+    expect(window.localStorage.getItem('edubotics_code_methods_open')).toBe('0');
+    expect(methodsHandle()).toBeNull();
+    first.unmount();
+
+    await mount();
+    const rail = screen.getByRole('button', { name: CODE_DE.METHODS_OPEN });
+    expect(screen.queryByRole('region', { name: CODE_DE.METHODS_TITLE })).toBeNull();
+    await userEvent.click(rail);
+    expect(await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE })).toBeInTheDocument();
+    expect(window.localStorage.getItem('edubotics_code_methods_open')).toBe('1');
+  });
+
+  test('a floating column has no width divider', async () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function rectOf() {
+      let width = 0;
+      if (this.dataset && this.dataset.testid === 'code-workspace') width = 600;
+      else if (this.tagName === 'ASIDE' && this.dataset.testid !== 'code-methods') width = 176;
+      return {
+        width, height: 400, top: 0, left: 0, right: width, bottom: 400, x: 0, y: 0,
+      };
+    });
+    await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    expect(screen.getByTestId('code-methods')).toHaveAttribute('data-floating', 'true');
+    expect(methodsHandle()).toBeNull();
+    expect(sidebarHandle()).toBeInTheDocument();
+    rect.mockRestore();
+  });
+});
+
+describe('the methods icon', () => {
+  test('marks the rail and the column’s header', async () => {
+    await mount();
+    const panel = await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(panel.querySelector('header svg[data-icon="methods"]')).not.toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }));
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(screen.getByRole('button', { name: CODE_DE.METHODS_OPEN }).querySelector('svg[data-icon="methods"]'))
+      .not.toBeNull();
+  });
+});

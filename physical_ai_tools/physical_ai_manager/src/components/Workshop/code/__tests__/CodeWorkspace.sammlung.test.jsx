@@ -29,6 +29,7 @@ import { createDetachedDestinationStore } from '../../sammlung/destinationStore'
 import { createSammlungProvider } from '../../sammlung/provider';
 import workshopReducer from '../../../../features/workshop/workshopSlice';
 import studioAssetsReducer, { selectDrawer } from '../../../../features/workshop/studioAssetsSlice';
+import { SAMMLUNG_TABS, SAMMLUNG_TAB_LABEL_DE } from '../../sammlung/sammlungTabs';
 
 vi.mock('../../../../hooks/useRosServiceCaller', () => ({
   __esModule: true,
@@ -350,5 +351,28 @@ describe('a file switch without a remembered line reveals nothing (review m5)', 
     expect(activePath()).toBe('main.py');
     expect(editor.props.revealRequest).toBeNull();
     expect(onCursorChange).toHaveBeenLastCalledWith(null);
+  });
+});
+
+// ── I2-int: the rows' order and names are sammlung/sammlungTabs.js; in the
+// simulator one sentence says why the rows' „… vormachen" are gone ──────────
+
+describe('the Sammlung section follows sammlungTabs and says why Vormachen is gone in the simulator', () => {
+  test('the rows are SAMMLUNG_TABS with their labels, in that order', async () => {
+    await mount();
+    const rows = within(sammlung()).getAllByRole('button', { name: /^.+ \d+$/ });
+    expect(rows.map((b) => b.textContent.replace(/ \d+$/, '')))
+      .toEqual(SAMMLUNG_TABS.map((tab) => SAMMLUNG_TAB_LABEL_DE[tab]));
+  });
+
+  test('in the simulator the hint stands under the heading; on the rig and read-only it does not', async () => {
+    const sim = await mount({ capabilities: { simMode: true } });
+    expect(within(sammlung()).getByText(DE.TEACH_SIM_HINT)).toBeInTheDocument();
+    sim.unmount();
+    const rig = await mount();
+    expect(within(sammlung()).queryByText(DE.TEACH_SIM_HINT)).toBeNull();
+    rig.unmount();
+    await mount({ capabilities: { simMode: true }, readOnly: true });
+    expect(within(sammlung()).queryByText(DE.TEACH_SIM_HINT)).toBeNull();
   });
 });

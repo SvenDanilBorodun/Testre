@@ -188,6 +188,9 @@ export const CODE_DE = Object.freeze({
   METHODS_VARIANTS: '(+{0} Varianten)',
   METHODS_TYPE: 'Typ',
   METHODS_GROUP_SHOW: 'Anzeigen',
+  // The two code dividers (layout/ResizeHandle.jsx labels).
+  METHODS_RESIZE: 'Breite der Methoden',
+  CODE_SIDEBAR_RESIZE: 'Breite der Dateiliste',
 
   SUBMIT: 'Abgeben',
   SUBMIT_TITLE: 'Diesen Stand des Programms bei der Lehrkraft abgeben',

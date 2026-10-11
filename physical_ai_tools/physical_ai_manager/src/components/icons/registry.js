@@ -25,6 +25,7 @@ import {
   LuArrowLeft,
   LuArrowRightLeft,
   LuArrowUp,
+  LuBookOpen,
   LuBookmark,
   LuBox,
   LuBug,
@@ -148,6 +149,8 @@ export const ICONS = Object.freeze({
   simulator: LuMonitorPlay,
   resizeGrip: LuGripVertical,
   resizeGripRow: LuGripHorizontal,
+  // The code editor's „Methoden" column: its rail and its header.
+  methods: LuBookOpen,
 
   // Running, stepping, reviewing. The media controls are SOLID (see
   // SOLID_ICON_NAMES below); `record` above is the Bewegung KIND, an outline,

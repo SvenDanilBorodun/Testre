@@ -25,6 +25,7 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import threading
 import time
 import traceback
@@ -105,6 +106,7 @@ from physical_ai_interfaces.srv import (
     SendTrainingCommand,
     SetHFUser,
     StartCalibration,
+    StartCloudInference,
     StartWorkflow,
     StopWorkflow,
     VerifyCalibration,
@@ -128,6 +130,7 @@ from physical_ai_server.data_processing import dataset_sync
 from physical_ai_server.data_processing import record_texts_de
 from physical_ai_server.data_processing.data_manager import DataManager, SYNC_UNCHECKED
 from physical_ai_server.data_processing.hf_api_worker import HfApiWorker
+from physical_ai_server.inference import cloud_client, cloud_contract, cloud_protocol, cloud_schedule, cloud_texts_de
 from physical_ai_server.inference.inference_manager import InferenceManager
 from physical_ai_server.safety.collision_monitor import CollisionMonitorMixin
 from physical_ai_server.timer.timer_manager import TimerManager
@@ -139,6 +142,7 @@ from physical_ai_server.utils.parameter_utils import (
     parse_topic_list_with_names,
 )
 
+import numpy as np
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
@@ -150,6 +154,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from std_msgs.msg import Empty, String
+from std_srvs.srv import Trigger
 
 
 # Roboter Studio Batch 2b — manual hand-guide recording (/workshop/record).
@@ -500,6 +505,16 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # _hf_token_lock.
         self._hf_token_clear_pending = False
 
+        # Cloud-Inferenz (spec §5.5): the live run (None while idle), the lock that makes its
+        # teardown happen once, and the state topic's bookkeeping (_init_cloud_inference_state
+        # fills the publisher).
+        self._cloud_run = None
+        self._cloud_end_lock = threading.Lock()
+        self._cloud_state_lock = threading.Lock()
+        self._cloud_state_seq = 0
+        self._cloud_last_end_text = None
+        self._cloud_state_pub = None
+
         self._init_core_components()
 
         self._init_ros_publisher()
@@ -519,6 +534,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.daten = DatenService(self)
         except Exception as e:  # noqa: BLE001
             self.get_logger().error(f'Daten service not started: {type(e).__name__}: {e}')
+        # Cloud-Inferenz state topic + stale-marker cleanup. Its own try: a failure here must
+        # never stop the node from booting (the start service then still answers).
+        try:
+            self._init_cloud_inference_state()
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(f'cloud inference state not started: {type(e).__name__}')
 
         # Pure identity hoist (edu6 §4.1): resolve() is NON-RAISING by
         # construction (strip + dict lookup with a default fallback), so the
@@ -1343,6 +1364,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self._preempt_cb_group,
             ),
             ('/calibration/history', CalibrationHistory, self.calibration_history_callback),
+            # Cloud-Inferenz (spec §5.5 item 4): the node-default MutuallyExclusive group, so both
+            # serialize with /task/command's FINISH/STOP and with the cloud tick; neither blocks.
+            (cloud_contract.START_SERVICE, StartCloudInference, self.start_cloud_inference_callback),
+            (cloud_contract.STOP_SERVICE, Trigger, self.cloud_inference_stop_callback),
         ]
 
         for entry in service_definitions:
@@ -1514,7 +1539,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
     def init_robot_control_parameters_from_user_task(
             self,
-            task_info):
+            task_info,
+            timer_callback=None):
+        """``timer_callback`` (Cloud-Inferenz) drives the ``self.operation_mode`` timer with
+        another tick under the SAME timer name, so every existing
+        ``timer_manager.stop(timer_name=self.operation_mode)`` still applies (F-14: no new
+        ``timer_callback_dict`` entry). None = the mode's own callback, as before."""
         self.get_logger().info(
             'Initializing robot control parameters from user task...')
         self.data_manager = DataManager(
@@ -1533,6 +1563,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.data_manager._sync_download = daten.start_sync_download
         self.communicator.clear_latest_data()
 
+        # D19: a second START used to replace the manager and leave the first run's timer
+        # registered on the node, still firing, with nobody able to stop it. Stop it first.
+        # The collision monitor's timer_manager.start(...) resume uses the NEW manager.
+        if self.timer_manager is not None:
+            self.timer_manager.stop_all()
         self.timer_manager = TimerManager(node=self)
         # The record timer runs in its OWN MutuallyExclusiveCallbackGroup
         # (round 5): a slow record step (a save, the official ~1 s discard
@@ -1542,7 +1577,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.timer_manager.set_timer(
             timer_name=self.operation_mode,
             timer_frequency=task_info.fps,
-            callback_function=self.timer_callback_dict[self.operation_mode],
+            callback_function=timer_callback or self.timer_callback_dict[self.operation_mode],
             callback_group=(self._record_cb_group
                             if self.operation_mode == 'collection' else None),
         )
@@ -2395,6 +2430,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.communicator.publish_status(status=current_status)
             return
 
+        # D19: FINISH/STOP cleared on_inference — tear down BEFORE waiting for robot data.
+        # This check used to sit after the camera/follower gates, so a FINISH with silent
+        # cameras returned at 'Waiting for camera data...' on every tick and never ended.
+        if not self.on_inference:
+            self.get_logger().info('Inference mode is not active')
+            current_status = self.data_manager.get_current_record_status()
+            current_status.phase = TaskStatus.READY
+            self.communicator.publish_status(status=current_status)
+            self.inference_manager.clear_policy()
+            self.timer_manager.stop(timer_name=self.operation_mode)
+            return
+
         error_msg = ''
         current_status = TaskStatus()
         camera_msgs, follower_msgs, _ = self.communicator.get_latest_data()
@@ -2430,15 +2477,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 return
 
         try:
-            if not self.on_inference:
-                self.get_logger().info('Inference mode is not active')
-                current_status = self.data_manager.get_current_record_status()
-                current_status.phase = TaskStatus.READY
-                self.communicator.publish_status(status=current_status)
-                self.inference_manager.clear_policy()
-                self.timer_manager.stop(timer_name=self.operation_mode)
-                return
-
             action = self.inference_manager.predict(
                 images=camera_data,
                 state=follower_data,
@@ -2473,6 +2511,520 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.inference_manager.clear_policy()
             self.timer_manager.stop(timer_name=self.operation_mode)
             return
+
+    def _available_camera_names(self):
+        """The configured camera names (``name`` of every ``name:/topic`` entry): the keys the
+        inference pipeline keys its image dict on (communicator.camera_topics)."""
+        return set(parse_topic_list_with_names(self.params['camera_topic_list']).keys()) if self.params else set()
+
+    def _preflight_contract(self, summary, task_info, available_cams):
+        """(sentence_de, log_line) of the first refused check, or None.
+
+        Shared by START_INFERENCE and the Cloud-Inferenz start (spec §5.4); the sentences are
+        HEAD's, byte for byte. ``summary`` is ``InferenceManager.read_policy_summary``'s dict
+        (or the cloud's ready.policy in that shape); None runs only the two summary-free
+        checks (fps <= 0, record_inference_mode) — the cloud start, before ``ready`` exists.
+        """
+        if summary is not None:
+            expected_cams = set(summary['expected_cameras'])
+            # A language-conditioned policy (SmolVLA/Pi0 family) with an
+            # EMPTY Aufgabenanweisung produces unguided behavior — reject
+            # at START with the fix, mirroring the camera pre-flight.
+            if summary['requires_task'] and not any(
+                    s.strip() for s in task_info.task_instruction):
+                return ('Dieses Modell benötigt eine Aufgabenanweisung '
+                        '(z. B. „Greife den roten Würfel"). Bitte das Feld '
+                        '„Aufgabenanweisung" ausfüllen und erneut starten.',
+                        'Pre-flight: language-conditioned policy started '
+                        'without a task instruction')
+            # The camera contract: predict() would tear the run down
+            # mid-flight with a RuntimeError when one is missing. Reject
+            # HERE, before any timer starts, naming both sides.
+            missing_cams = expected_cams - available_cams
+            if missing_cams:
+                return (f'Dieses Modell erwartet die Kamera(s) '
+                        f'{", ".join(sorted(missing_cams))} — verfügbar '
+                        f'{"ist" if len(available_cams) == 1 else "sind"}: '
+                        f'{", ".join(sorted(available_cams)) or "keine"}. '
+                        f'Bitte Kameras prüfen („Hardware neu erkennen") '
+                        f'und erneut starten.',
+                        f'Camera contract pre-flight failed: model expects '
+                        f'{sorted(expected_cams)}, available '
+                        f'{sorted(available_cams)}')
+        # Temporal pre-flight: driving a policy at a different rate than its
+        # training data time-scales every action chunk (too fast/slow) — the
+        # checkpoint itself carries no fps, so the Modal worker stamps the
+        # dataset fps into edubotics_model_meta.json next to config.json.
+        # Models trained before the stamp existed skip the comparison; an fps
+        # of 0 would ZeroDivisionError at timer creation either way, so refuse
+        # it always.
+        task_fps = float(getattr(task_info, 'fps', 0) or 0)
+        if task_fps <= 0:
+            return ('Ungültige fps-Einstellung (0). Bitte im '
+                    'Inferenz-Panel eine gültige Bildrate setzen '
+                    '(z. B. 30) und erneut starten.',
+                    'Pre-flight: fps <= 0')
+        if summary is not None:
+            trained_fps = summary.get('trained_fps')
+            if trained_fps and abs(task_fps - float(trained_fps)) > 0.5:
+                return (f'Dieses Modell wurde mit '
+                        f'{float(trained_fps):.0f} fps trainiert, die '
+                        f'Inferenz ist auf {task_fps:.0f} fps '
+                        f'eingestellt. Bitte die fps im Inferenz-Panel '
+                        f'auf {float(trained_fps):.0f} setzen und erneut '
+                        f'starten.',
+                        f'Pre-flight: fps mismatch (trained '
+                        f'{trained_fps}, requested {task_fps})')
+        if task_info.record_inference_mode:
+            # The record-during-inference toggle is advertised by the UI, but
+            # the inference timer has no record() path — the only
+            # data_manager.record() call site is the data-collection timer,
+            # which never runs in inference mode. Arming on_recording here
+            # produced a session that claimed to record and wrote NOTHING.
+            # Refuse loudly until a real recording path exists.
+            return ('Aufnahme während der Inferenz wird derzeit '
+                    'nicht unterstützt. Bitte den Aufnahme-Modus im '
+                    'Inferenz-Panel deaktivieren und erneut starten.',
+                    'Pre-flight: record_inference_mode requested but '
+                    'the inference timer has no record() path')
+        return None
+
+    # ── Cloud-Inferenz (spec §5) ──────────────────────────────────────────────
+    # The robot runs a trained model on a cloud GPU: it sends one observation per HTTPS request
+    # (cloud_client, its own thread) and executes the returned action chunks through the pure
+    # schedule (cloud_schedule) on the 'inference' timer, publishing every action through the SAME
+    # tensor_array2joint_msgs + publish_action as local inference (Rule §2: same rail, nothing
+    # added). on_inference stays True for the run, so the teleop collision e-stop stays OFF exactly
+    # as for local inference. The owner-decided differences: hold (publish nothing) on an empty
+    # queue, end after 15 s without a plan, end on a non-finite or malformed chunk (never clamped),
+    # the blind cap of 50, ceilings a server value cannot widen — and a live leader refuses the
+    # start and ends the run (D23, the HIGH-6 rule Roboter Studio follows). Neither token is ever
+    # stored outside the client, logged, or copied into TaskInfo/TaskStatus.
+
+    def _init_cloud_inference_state(self):
+        """Publisher + its own 1 Hz timer for /edubotics/cloud_inference_state (latched), and the
+        removal of an ACTIVE marker a crashed node left behind (spec §5.5 item 3)."""
+        state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._cloud_state_pub = self.create_publisher(String, cloud_contract.STATE_TOPIC, state_qos)
+        # Its own group: a blocking default-group callback cannot stall the state tick.
+        self._cloud_state_group = MutuallyExclusiveCallbackGroup()
+        self._cloud_state_timer = self.create_timer(
+            cloud_contract.PUBLISH_PERIOD_S,
+            self._publish_cloud_state,
+            callback_group=self._cloud_state_group,
+        )
+        self._remove_cloud_marker()
+        self._publish_cloud_state()
+
+    def _cloud_leader_active(self) -> bool:
+        """D23 / R-1 — the HIGH-6 backstop, exactly: a live /leader/joint_states (2 s window)
+        means a leader arm is powered. EDUBOTICS_FOLLOWER_ONLY is deliberately not read. A
+        failing check must not block a normal start (HIGH-6's rule): warning + False."""
+        check = getattr(self, 'leader_appears_active', None)
+        if not callable(check):
+            return False
+        try:
+            return bool(check())
+        except Exception as e:  # noqa: BLE001 — a guard must not block a normal start
+            self.get_logger().warning(f'leader_appears_active check failed: {type(e).__name__}')
+            return False
+
+    def _cloud_hello_fields(self, task_info):
+        """The hello's robot facts: the configured cameras with the size of their latest JPEG
+        (read from its SOF marker, never decoded; (0, 0) while unknown), the state width, the fps."""
+        cameras = []
+        msgs = getattr(self.communicator, 'camera_topic_msgs', None) or {}
+        for name, msg in list(msgs.items())[:cloud_protocol.MAX_CAMERAS]:
+            size = None
+            if msg is not None:
+                try:
+                    size = cloud_protocol.jpeg_size(bytes(msg.data))
+                except Exception:  # noqa: BLE001 — a size is only a hint for the server
+                    size = None
+            w, h = size if size and size[0] <= 8192 and size[1] <= 8192 else (0, 0)
+            cameras.append((name, w, h))
+        return {'robot_type': self.robot_type, 'robot_profile': self.robot_profile,
+                'cameras': cameras, 'state_dim': len(self.total_joint_order),
+                'fps': float(task_info.fps)}
+
+    def start_cloud_inference_callback(self, request, response):
+        """/edubotics/cloud_inference/start (StartCloudInference). Claims the arm like
+        START_INFERENCE, refuses a live leader, runs the summary-free pre-flight, then starts the
+        cloud client and drives the 'inference' timer with the cloud tick."""
+        if self.communicator is None:
+            response.success = False
+            response.message = ('Roboter-Initialisierung fehlgeschlagen — bitte die Umgebung neu '
+                                'starten (Details im Protokoll).')
+            return response
+        profile = getattr(self, '_arm_profile', None)
+        if not profile or not profile.capabilities.inferable:
+            response.success = False
+            response.message = cloud_texts_de.NOT_INFERABLE_DE
+            return response
+        token, edge = request.session_token, request.edge_token      # D24: connect + Modal edge token
+        if not (isinstance(token, str) and cloud_protocol.TOKEN_RE.fullmatch(token)
+                and isinstance(edge, str) and cloud_protocol.EDGE_TOKEN_RE.fullmatch(edge)):
+            response.success = False
+            response.message = cloud_texts_de.BAD_SESSION_DE                # neither value echoed
+            return response
+        # F1 — the atomic claim, exactly like START_INFERENCE.
+        with self._mode_lock:
+            ok, msg = self._assert_no_other_active('inference')
+            if not ok:
+                response.success = False
+                response.message = msg
+                return response
+            self.on_inference = True
+        if self._cloud_leader_active():                                     # D23 / R-1
+            self.on_inference = False
+            response.success = False
+            response.message = cloud_texts_de.LEADER_ACTIVE_DE
+            return response
+        try:
+            refusal = self._preflight_contract(None, request.task_info, self._available_camera_names())
+            if refusal is not None:
+                self.on_inference = False
+                self.get_logger().error(refusal[1])
+                response.success = False
+                response.message = refusal[0]
+                return response
+            self.joint_topic_types = self.communicator.get_publisher_msg_types()
+            self.operation_mode = 'inference'
+            self.task_instruction = request.task_info.task_instruction
+            run = _CloudRun(task_info=request.task_info, started=time.monotonic(),
+                            conn_id=secrets.token_hex(16))
+            run.client = cloud_client.CloudClient(
+                token=token, edge_token=edge, conn_id=run.conn_id,
+                hello=self._cloud_hello_fields(request.task_info))
+            with self._cloud_end_lock:
+                self._cloud_run = run
+            self.init_robot_control_parameters_from_user_task(
+                request.task_info, timer_callback=self._cloud_inference_tick)
+            self._write_cloud_marker()
+            status = self.data_manager.get_current_record_status()
+            status.phase = self.PHASE_INFERENCE_LOADING
+            self.communicator.publish_status(status=status)
+            run.last_status_phase, run.last_status_at = self.PHASE_INFERENCE_LOADING, time.monotonic()
+            run.client.start()
+            self._publish_cloud_state()
+        except Exception as e:  # noqa: BLE001
+            # Never the message: an exception text could carry anything the request held.
+            self.get_logger().error(f'cloud inference start failed: {type(e).__name__}')
+            self._end_inference('', end_reason='robot_error', publish=False)
+            self._remove_cloud_marker()
+            self.on_inference = False
+            response.success = False
+            response.message = cloud_texts_de.START_FAILED_DE
+            return response
+        self.get_logger().info('Cloud inference started')
+        response.success = True
+        response.message = cloud_texts_de.STARTED_DE
+        return response
+
+    def _cloud_inference_tick(self):
+        """The 'inference' timer during a cloud run. Never raises into the executor (main()
+        catches only KeyboardInterrupt): any exception ends the run in German."""
+        try:
+            self._cloud_inference_tick_body()
+        except Exception as e:  # noqa: BLE001
+            # type + message, never repr (D30): a transport exception never reaches here, and a
+            # node-side message carries no token (the tick never holds one).
+            self.get_logger().error(f'cloud inference tick failed: {type(e).__name__}: {e}')
+            self._end_inference(cloud_texts_de.INTERNAL_DE, end_reason='robot_error')
+
+    def _cloud_inference_tick_body(self):
+        run = self._cloud_run
+        if run is None:                         # a stray tick after a teardown
+            try:
+                self.timer_manager.stop(timer_name='inference')
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        if not self.on_inference:               # on_inference cleared elsewhere
+            self._end_inference('', end_reason='robot_stop')
+            return
+        now = time.monotonic()
+        snap = run.client.snapshot()
+        if now - run.last_leader_check >= 1.0:  # D23 / R-1: a leader that turns live ends the run
+            run.last_leader_check = now
+            if self._cloud_leader_active():
+                self._end_inference(cloud_texts_de.LEADER_BECAME_ACTIVE_DE, end_reason='robot_error')
+                return
+        if snap.end is not None:                # the server (or the transport) ended it: no bye
+            self._end_inference(cloud_texts_de.end_sentence(snap.end), end_reason=None)
+            return
+        if run.schedule is None:
+            if snap.ready is None:
+                if now - run.started >= cloud_schedule.LOADING_BUDGET_S:
+                    self._end_inference(cloud_texts_de.LOADING_TIMEOUT_DE, end_reason='robot_error')  # R-14
+                    return
+                self._cloud_publish_status(run, self.PHASE_INFERENCE_LOADING, now)
+                return
+            refusal = self._cloud_preflight(run, snap.ready)
+            if refusal:
+                self._end_inference(refusal, end_reason='robot_error')
+                return
+            policy, limits = snap.ready
+            lim = cloud_schedule.clamp_limits(limits)
+            run.policy, run.limits, run.ready_at = policy, lim, now
+            max_end = limits.get('max_end_in_s') if isinstance(limits, dict) else None
+            try:
+                if not isinstance(max_end, bool) and isinstance(max_end, (int, float)) \
+                        and math.isfinite(float(max_end)):
+                    run.max_end_in_s = float(max_end)    # D6: display only
+            except (OverflowError, ValueError):
+                run.max_end_in_s = None
+            run.schedule = cloud_schedule.Schedule(lim, lim.actions_per_chunk, policy['action_dim'],
+                                                   start=run.started)
+        camera_msgs, follower_msgs, _ = self.communicator.get_latest_data()   # C3 unchanged; no decode
+        data_ready = (camera_msgs is not None and follower_msgs is not None
+                      and all(camera_msgs.get(n) is not None for n in run.policy['expected_cameras'])
+                      and all(v is not None for v in follower_msgs.values()))
+        run.data_ever_ready = run.data_ever_ready or data_ready
+        if data_ready:
+            run.last_data_ready_at = now
+        r = run.schedule.step(now, run.client.take_chunks(), data_ready)   # chunks may carry None (M1)
+        if r.end == 'loading_timeout' and not run.data_ever_ready:        # R-13: the robot never had data
+            self._end_inference(
+                cloud_texts_de.no_data_de(self._cloud_missing_source(run, camera_msgs, follower_msgs)),
+                end_reason='robot_error')
+            return
+        if r.end == 'stall' and not data_ready and (                       # F-7: the ROBOT's data
+                run.last_data_ready_at is None                             # stopped, not the link
+                or now - run.last_data_ready_at >= run.limits.resend_after_s):
+            self._end_inference(
+                cloud_texts_de.no_data_de(self._cloud_missing_source(run, camera_msgs, follower_msgs)),
+                end_reason='robot_error')
+            return
+        if r.end:
+            self._end_inference(cloud_texts_de.schedule_end_sentence(r.end, run.limits.stall_end_s),
+                                end_reason='stall' if r.end == 'stall' else 'robot_error')   # R-14
+            return
+        if r.ticket is not None:
+            frame, refusal = self._cloud_build_obs(run, r.ticket, camera_msgs, follower_msgs)
+            if refusal:
+                self._end_inference(refusal, end_reason='robot_error')
+                return
+            run.client.offer(frame, r.ticket.seq, r.ticket.obs_e)
+        if r.action is not None:  # the SAME publish path as local inference (Rule §2)
+            msgs = self.data_manager.data_converter.tensor_array2joint_msgs(
+                r.action, self.joint_topic_types, self.joint_order)
+            self.communicator.publish_action(joint_msg_datas=msgs)
+        self._cloud_publish_status(
+            run, TaskStatus.INFERENCING if run.schedule.last_adopt is not None
+            else self.PHASE_INFERENCE_LOADING, now)
+        if run.schedule.holding != run.last_holding:
+            run.last_holding = run.schedule.holding
+            self._publish_cloud_state()
+
+    def _cloud_missing_source(self, run, camera_msgs, follower_msgs):
+        """F-7 / R-13: which robot source is missing. Reads the Communicator's per-camera cache
+        (every CONFIGURED camera), never ``camera_msgs``: get_latest_data returns (None, None,
+        None) as soon as ANY configured camera — also one the model does not use — has nothing."""
+        cams = getattr(self.communicator, 'camera_topic_msgs', None) or {}
+        expected = list(run.policy['expected_cameras']) if run.policy else []
+        for name in expected + [n for n in cams if n not in expected]:
+            if name in cams and cams[name] is None:
+                return f'Kamera „{name}“'
+        return 'Der Follower-Arm'
+
+    def _cloud_preflight(self, run, ready):
+        """The ready.policy against this robot -> a German sentence, or None. The camera, task
+        and fps checks are START_INFERENCE's own (_preflight_contract), byte for byte."""
+        policy, limits = ready
+        if policy.get('type') != 'act':
+            return cloud_texts_de.MODEL_TYPE_DE
+        refusal = self._preflight_contract(
+            {'policy_type': 'act', 'expected_cameras': policy['expected_cameras'],
+             'requires_task': policy['requires_task'], 'trained_fps': policy['trained_fps']},
+            run.task_info, self._available_camera_names())
+        if refusal is not None:
+            self.get_logger().error(refusal[1])
+            return refusal[0]
+        want_state = len(self.total_joint_order)
+        if policy['state_dim'] != want_state:
+            return cloud_texts_de.state_dim_de(policy['state_dim'], want_state)
+        want_action = sum(len(v) for v in self.joint_order.values())
+        if policy['action_dim'] != want_action:
+            return cloud_texts_de.action_dim_de(policy['action_dim'], want_action)
+        if cloud_schedule.clamp_limits(limits).actions_per_chunk > policy['chunk_size']:
+            return cloud_texts_de.MALFORMED_DE
+        return None
+
+    def _cloud_build_obs(self, run, ticket, camera_msgs, follower_msgs):
+        """One observation frame -> (frame, None), or (None, German sentence). Never decodes an
+        image: the JPEG's size comes from its SOF marker."""
+        policy = run.policy
+        expected = list(policy['expected_cameras'])
+        if not run.extra_cameras_warned:
+            extra = [n for n in camera_msgs if n not in expected]
+            if extra:
+                run.extra_cameras_warned = True      # once per run, InferenceManager's wording
+                print(f'[WARNUNG] Zusätzliche Kameras werden ignoriert: '
+                      f'{extra}, Modell erwartet nur {expected}.', flush=True)
+        now = time.monotonic()
+        thr = float(getattr(self.data_manager, '_stale_halt_threshold_s', 5.0))
+        cams = {}
+        for name in expected:
+            msg = camera_msgs[name]
+            data = bytes(msg.data)
+            size = cloud_protocol.jpeg_size(data)
+            if size is None:
+                return None, cloud_texts_de.not_jpeg_de(name)
+            _, want_h, want_w = policy['image_shapes'][name]
+            if size != (want_w, want_h):
+                return None, cloud_texts_de.image_size_de(name, size[0], size[1], want_w, want_h)
+            if len(data) > cloud_protocol.MAX_JPEG_BYTES:
+                return None, cloud_texts_de.image_too_big_de(name)
+            cams[name] = data
+            # Stale camera: warn only (local inference's rule), from the header stamp alone.
+            stamp = getattr(getattr(msg, 'header', None), 'stamp', None)
+            key = (getattr(stamp, 'sec', None), getattr(stamp, 'nanosec', None))
+            seen = run.camera_stamps.get(name)
+            if seen is None or seen[0] != key:
+                run.camera_stamps[name] = (key, now)
+                if run.stale_camera == name:
+                    run.stale_camera = None
+            elif now - seen[1] > thr:
+                run.stale_camera = name
+                if now - run.last_stale_warn_at >= 5.0:
+                    run.last_stale_warn_at = now
+                    print(f'[WARNUNG] Kamera "{name}" liefert seit über {thr:.0f}s dasselbe Bild. '
+                          f'Aufnahme läuft weiter — bitte prüfen, ob die Szene wirklich statisch ist '
+                          f'oder die Kamera hängt.', flush=True)
+        # Exactly convert_msgs_to_raw_datas's follower half.
+        state = np.concatenate([
+            np.asarray(self.data_manager.joint_msgs2tensor_array(v, self.total_joint_order), np.float32)
+            for v in follower_msgs.values() if v is not None])
+        if state.shape != (policy['state_dim'],) or not np.all(np.isfinite(state)):
+            return None, cloud_texts_de.STATE_DE
+        return cloud_protocol.build_obs(ticket.seq, ticket.obs_e, cams, state), None
+
+    def _cloud_publish_status(self, run, phase, now):
+        """/task/status during a cloud run: ≤ 2 Hz plus every phase change (D18). The task_info
+        echo is the page's own form; no token is ever in it."""
+        if phase == run.last_status_phase and now - run.last_status_at < cloud_contract.STATUS_MIN_PERIOD_S:
+            return
+        status = self.data_manager.get_current_record_status()
+        status.phase = phase
+        self.communicator.publish_status(status=status)
+        run.last_status_phase, run.last_status_at = phase, now
+
+    def _end_inference(self, reason_de='', end_reason='robot_stop', publish=True) -> bool:
+        """The ONE cloud teardown, idempotent; True when it ended a run. ``end_reason`` is the bye
+        reason (robot_stop | robot_error | stall); None = the server ended it (no bye). Every step
+        is guarded on its own: a teardown always finishes. Not used by local inference."""
+        with self._cloud_end_lock:
+            run = self._cloud_run
+            self._cloud_run = None
+        if run is None:
+            return False
+        self.on_inference = False
+        try:
+            self.timer_manager.stop(timer_name='inference')
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warning(f'cloud inference timer stop failed: {type(e).__name__}')
+        try:
+            stats = run.schedule.facts(time.monotonic()) if run.schedule is not None else None
+        except Exception:  # noqa: BLE001
+            stats = None
+        try:
+            if run.client is not None:
+                run.client.close(end_reason, stats)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warning(f'cloud client close failed: {type(e).__name__}')
+        self._remove_cloud_marker()
+        if publish:
+            try:
+                status = self.data_manager.get_current_record_status()
+                status.phase = TaskStatus.READY
+                status.error = reason_de or ''
+                self.communicator.publish_status(status=status)
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warning(f'cloud inference end status failed: {type(e).__name__}')
+        self._cloud_last_end_text = reason_de or None
+        self.get_logger().info(f'Cloud inference ended ({end_reason or "server"})')
+        self._publish_cloud_state()
+        return True
+
+    def cloud_inference_stop_callback(self, request, response):
+        """/edubotics/cloud_inference/stop (std_srvs/Trigger): ends ONLY a cloud run (the page,
+        the GUI's window-close hook, pagehide)."""
+        ended = self._end_inference('', end_reason='robot_stop')
+        response.success = ended
+        response.message = cloud_texts_de.STOPPED_DE if ended else cloud_texts_de.NOT_RUNNING_DE
+        return response
+
+    def _publish_cloud_state(self):
+        """One /edubotics/cloud_inference_state message (spec §5.2): facts only, keys in
+        cloud_contract.STATE_KEYS order. Never raises (its own group, and transitions)."""
+        try:
+            with self._cloud_state_lock:
+                self._cloud_state_seq += 1
+                run = self._cloud_run
+                now = time.monotonic()
+                state = dict.fromkeys(cloud_contract.STATE_KEYS)
+                state['v'] = cloud_contract.STATE_SCHEMA_VERSION
+                state['seq'] = self._cloud_state_seq
+                state['active'] = run is not None
+                if run is None:
+                    state['phase'] = 'ended' if self._cloud_last_end_text else 'idle'
+                    state['end_text_de'] = self._cloud_last_end_text
+                else:
+                    sched = run.schedule
+                    if sched is None or sched.last_adopt is None:
+                        state['phase'] = 'loading'
+                    else:
+                        state['phase'] = 'holding' if sched.holding else 'running'
+                    snap = run.client.snapshot() if run.client is not None else None
+                    facts = sched.facts(now) if sched is not None else {}
+                    state['rtt_ms_p50'] = snap.rtt_ms_p50 if snap is not None else None
+                    state['gpu_ms_p50'] = snap.gpu_ms_p50 if snap is not None else None
+                    state['plan_age_ms'] = facts.get('plan_age_ms')
+                    state['hold_s'] = facts.get('hold_s')
+                    if run.max_end_in_s is not None and run.ready_at is not None:
+                        state['ends_in_s'] = max(0, int(round(run.max_end_in_s - (now - run.ready_at))))
+                    state['stale_camera'] = run.stale_camera
+                pub = self._cloud_state_pub
+                if pub is not None:
+                    pub.publish(String(data=json.dumps(state, ensure_ascii=False)))
+        except Exception as e:  # noqa: BLE001
+            try:
+                self.get_logger().warning(f'cloud inference state publish failed: {type(e).__name__}')
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _write_cloud_marker(self):
+        """D20: an empty file while a cloud run is active; the GUI's window-close hook reads it so
+        the common case starts no ros2 CLI process."""
+        try:
+            with open(cloud_contract.ACTIVE_MARKER_PATH, 'w'):
+                pass
+        except OSError:
+            pass
+
+    def _remove_cloud_marker(self):
+        try:
+            os.unlink(cloud_contract.ACTIVE_MARKER_PATH)
+        except OSError:
+            pass
+
+    def _shutdown_cloud_client(self):
+        """main()'s finally, first: a live cloud run says bye (robot_stop) and its marker goes."""
+        try:
+            run = getattr(self, '_cloud_run', None)
+            if run is None:
+                return
+            if run.client is not None:
+                run.client.close('robot_stop')
+                run.client.join(1.0)
+            self._remove_cloud_marker()
+        except Exception:  # noqa: BLE001 — shutdown must go on
+            pass
 
     def user_training_interaction_callback(self, request, response):
         """Cloud-only stub (EduBotics v2.5.0).
@@ -2642,109 +3194,21 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         self.get_logger().error(response.message)
                         return response
 
-                    # Pre-flight camera contract (leLab-comparison PR-3): the
-                    # checkpoint's config.json names the cameras it was trained
-                    # on; predict() would tear the run down mid-flight with a
-                    # RuntimeError when one is missing. Reject HERE, before any
-                    # timer starts, with a German message naming both sides.
-                    # Camera names come from the same params the pipeline keys
-                    # its image dict on (communicator.camera_topics).
+                    # Pre-flight (leLab-comparison PR-3 and its successors): the
+                    # checkpoint's config.json names the cameras it was trained on,
+                    # a language-conditioned policy needs an Aufgabenanweisung, the
+                    # tick rate must match the training fps, and the record toggle
+                    # has no path. Every check and its German sentence lives in ONE
+                    # place, _preflight_contract, which the Cloud-Inferenz start runs
+                    # too (against ready.policy), so both targets refuse alike.
                     summary = InferenceManager.read_policy_summary(
                         task_info.policy_path)
-                    expected_cams = set(summary['expected_cameras'])
-                    available_cams = set(
-                        parse_topic_list_with_names(
-                            self.params['camera_topic_list']).keys()
-                    ) if self.params else set()
-                    # A language-conditioned policy (SmolVLA/Pi0 family) with an
-                    # EMPTY Aufgabenanweisung produces unguided behavior — reject
-                    # at START with the fix, mirroring the camera pre-flight.
-                    if summary['requires_task'] and not any(
-                            s.strip() for s in task_info.task_instruction):
+                    refusal = self._preflight_contract(summary, task_info, self._available_camera_names())
+                    if refusal is not None:
                         self.on_inference = False  # F1 — release the claim on refusal
                         response.success = False
-                        response.message = (
-                            'Dieses Modell benötigt eine Aufgabenanweisung '
-                            '(z. B. „Greife den roten Würfel"). Bitte das Feld '
-                            '„Aufgabenanweisung" ausfüllen und erneut starten.'
-                        )
-                        self.get_logger().error(
-                            'Pre-flight: language-conditioned policy started '
-                            'without a task instruction')
-                        return response
-
-                    missing_cams = expected_cams - available_cams
-                    if missing_cams:
-                        self.on_inference = False  # F1 — release the claim on refusal
-                        response.success = False
-                        response.message = (
-                            f'Dieses Modell erwartet die Kamera(s) '
-                            f'{", ".join(sorted(missing_cams))} — verfügbar '
-                            f'{"ist" if len(available_cams) == 1 else "sind"}: '
-                            f'{", ".join(sorted(available_cams)) or "keine"}. '
-                            f'Bitte Kameras prüfen („Hardware neu erkennen") '
-                            f'und erneut starten.'
-                        )
-                        self.get_logger().error(
-                            f'Camera contract pre-flight failed: model expects '
-                            f'{sorted(expected_cams)}, available '
-                            f'{sorted(available_cams)}')
-                        return response
-
-                    # Temporal pre-flight: driving a policy at a different
-                    # rate than its training data time-scales every action
-                    # chunk (too fast/slow) — the checkpoint itself carries
-                    # no fps, so the Modal worker stamps the dataset fps
-                    # into edubotics_model_meta.json next to config.json.
-                    # Models trained before the stamp existed skip the
-                    # comparison; an fps of 0 would ZeroDivisionError at
-                    # timer creation either way, so refuse it always.
-                    task_fps = float(getattr(task_info, 'fps', 0) or 0)
-                    if task_fps <= 0:
-                        self.on_inference = False  # F1 — release the claim on refusal
-                        response.success = False
-                        response.message = (
-                            'Ungültige fps-Einstellung (0). Bitte im '
-                            'Inferenz-Panel eine gültige Bildrate setzen '
-                            '(z. B. 30) und erneut starten.'
-                        )
-                        self.get_logger().error('Pre-flight: fps <= 0')
-                        return response
-                    trained_fps = summary.get('trained_fps')
-                    if trained_fps and abs(task_fps - float(trained_fps)) > 0.5:
-                        self.on_inference = False  # F1 — release the claim on refusal
-                        response.success = False
-                        response.message = (
-                            f'Dieses Modell wurde mit '
-                            f'{float(trained_fps):.0f} fps trainiert, die '
-                            f'Inferenz ist auf {task_fps:.0f} fps '
-                            f'eingestellt. Bitte die fps im Inferenz-Panel '
-                            f'auf {float(trained_fps):.0f} setzen und erneut '
-                            f'starten.'
-                        )
-                        self.get_logger().error(
-                            f'Pre-flight: fps mismatch (trained '
-                            f'{trained_fps}, requested {task_fps})')
-                        return response
-
-                    if task_info.record_inference_mode:
-                        # The record-during-inference toggle is advertised by
-                        # the UI, but the inference timer has no record()
-                        # path — the only data_manager.record() call site is
-                        # the data-collection timer, which never runs in
-                        # inference mode. Arming on_recording here produced a
-                        # session that claimed to record and wrote NOTHING.
-                        # Refuse loudly until a real recording path exists.
-                        self.on_inference = False  # F1 — release the claim on refusal
-                        response.success = False
-                        response.message = (
-                            'Aufnahme während der Inferenz wird derzeit '
-                            'nicht unterstützt. Bitte den Aufnahme-Modus im '
-                            'Inferenz-Panel deaktivieren und erneut starten.'
-                        )
-                        self.get_logger().error(
-                            'Pre-flight: record_inference_mode requested but '
-                            'the inference timer has no record() path')
+                        response.message = refusal[0]
+                        self.get_logger().error(refusal[1])
                         return response
 
                     self.init_robot_control_parameters_from_user_task(
@@ -2820,6 +3284,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     return response
                 if request.command in (SendCommand.Request.STOP,
                                        SendCommand.Request.FINISH):
+                    # Cloud-Inferenz (D2): FINISH and STOP end a cloud run at once — STOP
+                    # behaves like FINISH there. The local path below is unchanged.
+                    if getattr(self, '_cloud_run', None) is not None:
+                        self._end_inference('', end_reason='robot_stop')
+                        response.success = True
+                        response.message = (
+                            'Wird beendet.' if rec else 'All operations terminated')
+                        return response
                     # F1 (round 6, owner: the server queues the end): FINISH
                     # and STOP are ACCEPTED at once, even while a record step
                     # (the official discard after „Wiederholen“) holds the
@@ -8095,6 +8567,37 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.get_logger().error(f'Error cleaning up HF API Worker: {str(e)}')
 
 
+class _CloudRun:
+    """One Cloud-Inferenz run's robot-side state (spec §5.5 item 10).
+
+    Defined AFTER PhysicalAIServer on purpose: several AST fences find the node's constructor as
+    the first ``__init__`` in the module (test_sim_reset_contract, test_manual_relock_home_glide).
+
+    Holds NO credential: the connect and edge tokens live only in the client's private fields,
+    and the service request that carried them is not stored."""
+
+    def __init__(self, task_info, started, conn_id):
+        self.task_info = task_info
+        self.started = started
+        self.conn_id = conn_id
+        self.client = None
+        self.policy = None
+        self.limits = None
+        self.schedule = None
+        self.last_status_phase = None
+        self.last_status_at = -math.inf
+        self.ready_at = None
+        self.max_end_in_s = None
+        self.last_holding = True
+        self.stale_camera = None
+        self.camera_stamps = {}            # expected camera -> (header stamp, time it last changed)
+        self.last_stale_warn_at = -math.inf
+        self.extra_cameras_warned = False
+        self.last_leader_check = -math.inf
+        self.data_ever_ready = False
+        self.last_data_ready_at = None
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = PhysicalAIServer()
@@ -8128,6 +8631,8 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        # A live Cloud-Inferenz run first: its bye tells the cloud the robot stopped.
+        node._shutdown_cloud_client()
         # Cleanup HF API Worker before destroying node
         node._cleanup_hf_api_worker()
         # The sensor executor and its node go first: stop flag, executor

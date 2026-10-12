@@ -72,6 +72,7 @@ RUN set -e && \
     test -f "$install_root/srv/_workflow_step.py" && \
     test -f "$install_root/msg/_sensor_snapshot.py" && \
     test -f "$install_root/srv/_daten_command.py" && \
+    test -f "$install_root/srv/_start_cloud_inference.py" && \
     rm -rf /tmp/interfaces_src && \
     echo "physical_ai_interfaces re-built with audit additions"
 
@@ -205,8 +206,9 @@ RUN python3 -m pip uninstall -y opencv-python opencv-python-headless 2>/dev/null
         pupil-apriltags==1.0.4 \
         pip-licenses==5.0.0 \
         urdf-parser-py==0.0.4 \
-        requests==2.32.3 && \
-    python3 -c "import cv2, pupil_apriltags, requests; print('runtime deps OK:', cv2.__version__)"
+        requests==2.32.3 \
+        aiohttp==3.14.1 && \
+    python3 -c "import cv2, pupil_apriltags, requests, aiohttp; print('runtime deps OK:', cv2.__version__)"
 
 # Runtime ROS message deps (NOT an IK install — IK is closed-form pure NumPy,
 # see the urdf-parser-py block below; there is no TRAC-IK / PyKDL / kdl_parser).
@@ -625,6 +627,20 @@ RUN bash -c "set -e && \
     source /opt/ros/jazzy/setup.bash && \
     source /root/ros2_ws/install/setup.bash && \
     python3 -c 'import physical_ai_server.physical_ai_server; print(\"physical_ai_server node module imports OK\")'"
+
+# Build-time CLOUD-INFERENZ gate: the robot client, its pinned transport and the generated srv import.
+# aiohttp is pinned in the runtime-deps install above (both images carried it unpinned and nothing
+# required it); 3.14.1 is the version whose exception repr the client's logging rule was proved
+# against (spec D30) and which does TLS to Modal with the system CA store.
+RUN bash -c "set -e && \
+    source /opt/ros/jazzy/setup.bash && \
+    source /root/ros2_ws/install/setup.bash && \
+    python3 -c '\
+import aiohttp; assert aiohttp.__version__ == \"3.14.1\", aiohttp.__version__; \
+from physical_ai_server.inference import cloud_contract, cloud_protocol, cloud_schedule, cloud_client, cloud_texts_de; \
+from physical_ai_interfaces.srv import StartCloudInference; from std_srvs.srv import Trigger; \
+assert cloud_protocol.CLOUD_BASE_URL.startswith(\"https://\"); \
+print(\"[CLOUD] client + srv import OK\", aiohttp.__version__)'"
 
 # Build-time Daten 2.0 gate: the sidecar, the download worker and the edit/sync modules import, and
 # v3_surgery's layout templates are LeRobot's (R-2: a LeRobot bump that moves the layout fails the

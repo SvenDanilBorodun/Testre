@@ -137,13 +137,38 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// What may stand in front of the call: one name (Python) or one declaration
+// (Java: a type, plain, qualified or an array, and one name) and a single `=`.
+const IDENT = '[\\p{L}_][\\p{L}\\p{N}_]*';
+const PY_ASSIGN = `${IDENT}\\s*=(?!=)\\s*`;
+const JAVA_DECL = `${IDENT}(?:\\s*\\.\\s*${IDENT})*(?:\\s*\\[\\s*\\])*\\s+${IDENT}\\s*=(?!=)\\s*`;
+
+// The index of the bracket that closes the one opened at `open` (literals
+// already blanked), or -1.
+function closingBracket(code, open) {
+  const stack = [];
+  for (let i = open; i < code.length; i += 1) {
+    const ch = code[i];
+    if (ch === '(' || ch === '[' || ch === '{') stack.push(ch);
+    else if (BRACKET_PAIRS[ch]) {
+      if (stack.pop() !== BRACKET_PAIRS[ch]) return -1;
+      if (stack.length === 0) return i;
+    }
+  }
+  return -1;
+}
+
 /**
  * The Methoden column's line for `method`: accepted only when it is ONE line
  * of at most CALL_LINE_MAX characters, with no comment and no unclosed
- * string, balanced brackets, and THIS method's call — the receiver and the
- * name in code (`robot.<name>(` / `Robot.<javaName>(`, never inside a
- * string); Java ends with `;`. Only a public row of robot_api.json. Anything
- * else answers [] — and an empty answer inserts nothing.
+ * string, balanced brackets, and exactly ONE statement — THIS method's call
+ * (`robot.<name>(…)` / `Robot.<javaName>(…)`, the receiver and the name in
+ * code, never inside a string), optionally assigned to one name (Java: one
+ * declaration), the call's closing bracket ending the statement and Java's
+ * one `;` ending the line. The forms the rendered examples use; anything
+ * chained (`robot.home(); import os`) is refused. Only a public row of
+ * robot_api.json. Anything else answers [] — and an empty answer inserts
+ * nothing.
  */
 function callLines(asset, language) {
   const row = METHODS.get(asset.method);
@@ -156,13 +181,18 @@ function callLines(asset, language) {
   if (segs.some((s) => (s.type === 'string' || s.type === 'char') && !literalClosed(line, s))) return [];
   const codeOnly = segs.filter((s) => s.type === 'code').map((s) => line.slice(s.start, s.end)).join('');
   if (!bracketsBalanced(codeOnly)) return [];
-  const callee = java
-    ? new RegExp(`(?<![\\p{L}\\p{N}_.])(?:edubotics\\.)?Robot\\.${escapeRe(row.java_name)}\\(`, 'u')
-    : new RegExp(`(?<![\\p{L}\\p{N}_.])robot\\.${escapeRe(row.name)}\\(`, 'u');
-  if (!callee.test(blankedCode(line, segs))) return [];
-  const trimmed = line.trim();
-  if (java && !trimmed.endsWith(';')) return [];
-  return [trimmed];
+  const code = blankedCode(line, segs);
+  const head = java
+    ? new RegExp(`^\\s*(?:${JAVA_DECL})?(?:edubotics\\s*\\.\\s*)?Robot\\s*\\.\\s*${escapeRe(row.java_name)}\\s*\\(`, 'u')
+    : new RegExp(`^\\s*(?:${PY_ASSIGN})?robot\\s*\\.\\s*${escapeRe(row.name)}\\s*\\(`, 'u');
+  const m = head.exec(code);
+  if (!m) return [];
+  const close = closingBracket(code, m[0].length - 1);
+  if (close < 0) return [];
+  // After the call: nothing (Python), exactly its `;` (Java).
+  const rest = code.slice(close + 1);
+  if (java ? !/^\s*;\s*$/.test(rest) : !/^\s*$/.test(rest)) return [];
+  return [line.trim()];
 }
 
 /**

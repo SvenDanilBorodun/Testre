@@ -37,6 +37,7 @@ import {
   stepsToCode,
 } from '../codeInsert';
 import { STARTER_FILES } from '../codeProject';
+import docs from '../robot_api_docs.json';
 import { CODE_DE, formatCode } from '../codeMessagesDe';
 
 const STEPS = [
@@ -755,5 +756,40 @@ describe('snippetLines — a Methoden example line ({kind: "call"})', () => {
 
   it('refuses Java without its semicolon', () => {
     expect(call('home', 'Robot.home()', 'java')).toEqual([]);
+  });
+
+  // Verification round 1, F5c: exactly ONE statement — the call, or a value
+  // row's assignment to one name (Java: a declaration), Java ending in its
+  // one `;`. A second statement chained on the same line never passes.
+  it('accepts every rendered Methoden example of both languages', () => {
+    docs.methods.forEach((m) => {
+      expect(call(m.name, m.example_py)).toEqual([m.example_py]);
+      expect(call(m.name, m.example_java, 'java')).toEqual([m.example_java]);
+    });
+  });
+
+  it('refuses a second statement chained before or after the call', () => {
+    expect(call('home', 'robot.home(); import os')).toEqual([]);
+    expect(call('home', 'robot.home();')).toEqual([]);
+    expect(call('home', 'import os; robot.home()')).toEqual([]);
+    expect(call('home', 'robot.home() or __import__("os").system("x")')).toEqual([]);
+    expect(call('find', 'ziel = robot.find("wuerfel"); import os')).toEqual([]);
+    expect(call('home', 'Robot.home(); System.exit(0);', 'java')).toEqual([]);
+    expect(call('home', 'Robot.home();;', 'java')).toEqual([]);
+    expect(call('home', 'System.exit(0); Robot.home();', 'java')).toEqual([]);
+    expect(call('home', 'Robot.home(); Robot.home();', 'java')).toEqual([]);
+    expect(call('sees', 'boolean b = Robot.sees("w") || stop();', 'java')).toEqual([]);
+  });
+
+  it('refuses anything but one name (Java: one declaration) in front of the call', () => {
+    expect(call('find', 'a = b = robot.find("w")')).toEqual([]);
+    expect(call('find', 'ziel == robot.find("w")')).toEqual([]);
+    expect(call('find', 'x = 1 + robot.find("w")')).toEqual([]);
+    expect(call('find', 'ziel = robot.find("w") + 1')).toEqual([]);
+    expect(call('find', 'print(robot.find("w"))')).toEqual([]);
+    expect(call('count', 'int a = 1, b = Robot.count("w");', 'java')).toEqual([]);
+    expect(call('count', 'int a = Robot.count("w") + 1;', 'java')).toEqual([]);
+    expect(call('find', 'edubotics.Robot.Greifziel ziel = edubotics.Robot.find("w");', 'java'))
+      .toEqual(['edubotics.Robot.Greifziel ziel = edubotics.Robot.find("w");']);
   });
 });

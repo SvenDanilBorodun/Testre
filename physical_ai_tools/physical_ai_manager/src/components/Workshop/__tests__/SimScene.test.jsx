@@ -729,6 +729,54 @@ describe('SimScene — the split stage (WI-1.8)', () => {
     expect(help.nextElementSibling).toBe(resetRow);
   });
 
+  // Verification round 2, G1: crossing md re-arranges the editor's pieces, and
+  // React reuses DOM nodes by position, so the table's wrap becomes ANOTHER
+  // node (child 3 narrow, child 2 wide). An observer that stayed on the old
+  // node measured the 31-px help row: the table shrank to 51 × 31 px after
+  // 700 → 1366 px. The fitting observer must always watch the node that is the
+  // table's wrap NOW, in both directions and however often md is crossed.
+  test('crossing md keeps the fitting observer on the table\'s wrap, so the fitted size follows', async () => {
+    const media = { matches: false, listeners: new Set() };
+    window.matchMedia = vi.fn(() => ({
+      get matches() { return media.matches; },
+      addEventListener: (type, fn) => { if (type === 'change') media.listeners.add(fn); },
+      removeEventListener: (type, fn) => { if (type === 'change') media.listeners.delete(fn); },
+    }));
+    const crossMd = (matches) => act(() => {
+      media.matches = matches;
+      [...media.listeners].forEach((fn) => fn({ matches }));
+    });
+    render(<SimScene layout="split" scene={{ objects: [OBJ], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    // eslint-disable-next-line testing-library/no-node-access
+    const column = screen.getByRole('separator').parentElement;
+    // The live observers other than the divider's own (it watches the column).
+    const fitObservers = () => observers.filter((o) => !o.gone && o.el !== column);
+    const expectWatchesTheWrap = () => {
+      const live = fitObservers();
+      expect(live).toHaveLength(1);
+      // eslint-disable-next-line testing-library/no-node-access
+      expect(live[0].el).toBe(svgOf().parentElement);
+      return live[0];
+    };
+    expectWatchesTheWrap();
+    // Narrow → wide: the wrap moved to another node, the observer with it.
+    crossMd(true);
+    act(() => expectWatchesTheWrap().cb([{ contentRect: { width: 400, height: 200 } }]));
+    expect(svgOf().style.width).toBe('324px');
+    expect(svgOf().style.height).toBe('200px');
+    // Wide → narrow: full width again, and the observer still on the wrap.
+    crossMd(false);
+    act(() => expectWatchesTheWrap().cb([{ contentRect: { width: 400, height: 200 } }]));
+    expect(svgOf().getAttribute('class')).toContain('w-full h-auto');
+    expect(svgOf().style.width).toBe('');
+    // And back up once more, with a different area.
+    crossMd(true);
+    act(() => expectWatchesTheWrap().cb([{ contentRect: { width: 150, height: 400 } }]));
+    expect(svgOf().style.width).toBe('150px');
+    expect(svgOf().style.height).toBe('93px');
+  });
+
   test('a stored 3D share is read back and a committed one is written', async () => {
     window.localStorage.setItem('edubotics_workshop_sim_split', '0.5');
     try {

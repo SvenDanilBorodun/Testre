@@ -378,11 +378,18 @@ function SimScene({
   // share rows (see editorBody) instead of each taking a row of its own.
   const wideSplit = useMdUp(isSplit);
   const [simSplit, setSimSplit] = useState(readSimSplit);
-  const tableWrapRef = useRef(null);
+  // The table's wrap is held as STATE, set by a callback ref, and the fitting
+  // observer is keyed on that node. Crossing md re-arranges editorBody's
+  // pieces and React reuses DOM nodes by position, so the wrap becomes ANOTHER
+  // node (the 4th child below md, the 3rd from md up); an observer bound once
+  // stayed on the old node and fitted the table to the 31-px help row
+  // (verification round 2, G1). Keyed on the node, the observer follows the
+  // wrap whatever makes React hand it a different node, not only a md crossing.
+  const [tableWrapEl, setTableWrapEl] = useState(null);
   const [fit, setFit] = useState(null);
   useEffect(() => {
     if (!isSplit) return undefined;
-    const el = tableWrapRef.current;
+    const el = tableWrapEl;
     if (!el || typeof ResizeObserver === 'undefined') return undefined;
     // The table keeps its viewBox ratio inside the area it is given, so
     // eventToBase (which scales by the drawn box) stays exact.
@@ -405,7 +412,7 @@ function SimScene({
     const observer = new ResizeObserver((entries) => measure(entries && entries[0]));
     observer.observe(el);
     return () => observer.disconnect();
-  }, [isSplit]);
+  }, [isSplit, tableWrapEl]);
 
   const svgRef = useRef(null);
   const draggingIdRef = useRef(null);
@@ -972,7 +979,7 @@ function SimScene({
   // is full width and scrolls with the editor.
   const tableWrap = (
     <div
-      ref={isSplit ? tableWrapRef : undefined}
+      ref={isSplit ? setTableWrapEl : undefined}
       className={
         isSplit
           ? 'rounded-lg border border-[var(--line)] bg-white p-2 md:flex md:min-h-[120px] md:flex-1 md:items-center md:justify-center'

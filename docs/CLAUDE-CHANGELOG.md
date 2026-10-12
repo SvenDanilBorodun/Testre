@@ -140,6 +140,18 @@ squeezed width); (c) a Methoden line is exactly one statement (`codeInsert::call
 editor keeps 320 px (`CodeWorkspace::paneMax`, `ResizeHandle`'s `bounds(rect, handle)` and `boundsKey`); (e) the
 save status reads „Wird geladen …" while a picked program is fetched instead of the previous program's state.
 
+**Verification round 2** (two fresh verifiers, FIX FIRST, no blockers; the owner approved G1–G2 and had the four
+minors recorded as open risks R19–R22 instead of fixed; one fresh verifier then gave SHIP). *G1, a regression F3
+introduced:* crossing md with the simulator open (a half-snapped window maximised) left the table at 51 × 31 px,
+because `SimScene`'s narrow and wide layouts order the editor pieces differently, React reuses DOM nodes by
+position, and the fit effect (deps `[isSplit]`) kept observing the node that had become the help row. The table's
+wrap is now state set by a callback ref (`tableWrapEl`) and the effect is keyed on it, so 700 → 1366 × 768 reads
+261 × 161 like a direct mount. *G2:* `BlocklyWorkspace.storeCopy.test.jsx` waited a fixed 30 ms for Blockly's
+`requestAnimationFrame` → `setTimeout(fireNow, 0)` delivery and failed in 1 of 3–5 whole-suite runs; it now uses
+the ordered flush F5a introduced (0 of 42 under heavy CPU load, against 7 of 30 for the old flush). Final figures
+on the branch: vitest 258 files / 4611 passed (+2 expected failures), server tests 2850 passed (22 skipped),
+`robotis_ai_setup` 2260 tests (82 skipped with a JDK), the entry chunk 2 035 586 B.
+
 ### Unreleased, 2026-10-07 — the amd64 server image ships no torchcodec (release 2.27.0 blocker)
 
 **Why.** After PR #35 merged, `docker-publish.yml::smoke-test (amd64)` failed in the new Daten 2.0 edit-engine

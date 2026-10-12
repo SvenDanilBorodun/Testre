@@ -189,10 +189,24 @@ def test_the_example_lines_are_spelled_by_param_kind():
     assert by['object_position']['example_py'] == 'position = robot.object_position(ziel)'
     assert by['object_position']['example_java'] == \
         'double[] position = Robot.objectPosition(ziel);'
-    assert by['pin']['example_java'] == 'Robot.pin("Ablage", 0.2, 0.0, 0.05);'
+    assert by['pin']['example_java'] == 'Robot.pin("Ablage", 0.2, 0.0, 0.0);'
+    assert by['pin']['example_py'] == 'robot.pin("Ablage", 0.2, 0.0, 0.0)'
     assert by['zeige']['example_py'] == 'robot.zeige("Anzahl", 3)'
     assert by['is_holding']['example'] == {'args': [], 'var': 'gehalten'}
     assert by['home']['example'] == {'args': [], 'var': None}
+
+
+def test_pin_z_says_the_table_height_wins_where_one_is_known():
+    # handlers/destinations.py::destination_pin stamps `plane_tracked`, and
+    # motion.resolve_destination_z then answers table_z_at(x, y) whenever a
+    # table height is known: on every calibrated rig and always in the
+    # simulator (z_table 0). The text and the example must not promise a
+    # height above the table the robot never uses (verification round 1, F4).
+    by = {m['name']: m for m in _DOCS['methods']}
+    z = [p for p in by['pin']['params'] if p['name'] == 'z'][0]
+    assert z['doc_de'] == ('Höhe in Metern. Auf dem vermessenen Tisch und im Simulator nimmt '
+                           'der Roboter stattdessen die Tischhöhe an dieser Stelle.')
+    assert by['pin']['example']['args'][3] == 0.0
 
 
 # ── the signatures ────────────────────────────────────────────────────────

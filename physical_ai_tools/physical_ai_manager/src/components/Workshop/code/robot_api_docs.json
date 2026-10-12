@@ -446,7 +446,7 @@
           "lo": -1.0,
           "hi": 1.0,
           "java_name": "z",
-          "doc_de": "Wie hoch über dem Tisch, in Metern."
+          "doc_de": "Höhe in Metern. Auf dem vermessenen Tisch und im Simulator nimmt der Roboter stattdessen die Tischhöhe an dieser Stelle."
         }
       ],
       "signature_py": "robot.pin(name, x, y, z)",
@@ -458,12 +458,12 @@
           "Ablage",
           0.2,
           0.0,
-          0.05
+          0.0
         ],
         "var": null
       },
-      "example_py": "robot.pin(\"Ablage\", 0.2, 0.0, 0.05)",
-      "example_java": "Robot.pin(\"Ablage\", 0.2, 0.0, 0.05);"
+      "example_py": "robot.pin(\"Ablage\", 0.2, 0.0, 0.0)",
+      "example_java": "Robot.pin(\"Ablage\", 0.2, 0.0, 0.0);"
     },
     {
       "name": "pin_current",

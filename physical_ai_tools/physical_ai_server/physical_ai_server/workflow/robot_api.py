@@ -418,12 +418,13 @@ ROBOT_API: tuple[ApiCall, ...] = (
            _p('y', 'float', lo=-1.0, hi=1.0,
               doc_de='Wie weit links vom Roboterfuß, in Metern (rechts ist negativ).'),
            _p('z', 'float', lo=-1.0, hi=1.0,
-              doc_de='Wie hoch über dem Tisch, in Metern.')),
+              doc_de='Höhe in Metern. Auf dem vermessenen Tisch und im Simulator nimmt '
+                     'der Roboter stattdessen die Tischhöhe an dieser Stelle.')),
           'Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel '
           'für move_to und drop_at.',
           doc_de_java='Merkt den Punkt (x, y, z) in Metern unter diesem Namen als Ziel für '
                       'moveTo und dropAt.',
-          example=('Ablage', 0.2, 0.0, 0.05)),
+          example=('Ablage', 0.2, 0.0, 0.0)),
     _stmt('pin_current', 'pinCurrent', 'edubotics_destination_current',
           (_DEST_DEF,),
           'Merkt die Stelle, an der der Greifer gerade steht, unter diesem '

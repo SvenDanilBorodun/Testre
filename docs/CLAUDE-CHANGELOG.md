@@ -128,7 +128,10 @@ for the insert flash, and the blurred warning (5 s countdown, then the glide) co
 2.5 s; `HomeGlidePrompt::afterHomeGlide` now runs the flash once no warning or glide is on screen (both notations). *F3:* the split stage's 2D table sat at its 120-px area floor (165 × 102 px at 1366×768) because the
 help sentence, the „Simulator zurücksetzen" row, the Objekt and Modus rows each took a row of the short editor
 column; from md up the reset button now shares the Objekt/Modus row and „Tisch leeren" the help/selection slot,
-and the table takes the rest (numbers under „Measured" above).
+and the table takes the rest (numbers under „Measured" above). *F4:* `pin`'s z said „Wie hoch über dem Tisch" and its
+example pinned 5 cm up, but `destination_pin` stamps `plane_tracked` and `motion.resolve_destination_z` answers
+the table height at (x, y) wherever one is known (every calibrated rig, always the simulator); the z text now says
+so and the example pins at 0.0 (`robot_api_docs.json` regenerated; stubs and `robot_api.json` unchanged).
 
 ### Unreleased, 2026-10-07 — the amd64 server image ships no torchcodec (release 2.27.0 blocker)
 

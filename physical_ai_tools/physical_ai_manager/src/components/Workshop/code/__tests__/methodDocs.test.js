@@ -87,7 +87,7 @@ describe('exampleArgsFor — the student’s own names', () => {
   });
 
   it('keeps the table’s name for something NEW (pin, counter, zeige) and with no Sammlung', () => {
-    expect(exampleArgsFor(byName('pin'), sammlung)).toEqual(['Ablage', 0.2, 0, 0.05]);
+    expect(exampleArgsFor(byName('pin'), sammlung)).toEqual(['Ablage', 0.2, 0, 0]);
     expect(exampleArgsFor(byName('counter_add'), sammlung)).toEqual(['Punkte']);
     expect(exampleArgsFor(byName('zeige'), sammlung)).toEqual(['Anzahl', 3]);
     expect(exampleArgsFor(byName('replay'), null)).toEqual(['Winken']);

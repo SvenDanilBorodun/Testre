@@ -3,7 +3,8 @@
 ``SupabaseSessionBackend`` calls the four anon RPCs of migration 048 with the public anon key;
 the connect token AND the Modal session id that Modal's proxy stamped on the request are the
 credential (a row answers ``invalid`` unless both match). ``StaticSessionBackend`` is the dev
-variant's and the tests' stand-in: one static token, one model, the session id ignored.
+variant's and the tests' stand-in: static tokens, one model, the session id ignored; its ``from_env``
+refuses to start unless the image's baked variant is ``dev`` (V1-5).
 
 Every RPC sends ALL of its arguments, ``p_stats`` as null when there are none (PostgREST answers
 404 / PGRST202 for an omitted one). A transport failure — HTTP >= 400, a timeout, the network,
@@ -11,7 +12,9 @@ a non-JSON or unexpected answer — is ``SessionDenied('unavailable')``; only ``
 ``ended`` and ``replaced`` are verdicts about the session (D42, H-3). Logs carry the RPC name and
 an exception TYPE, never a token, a header or a body.
 """
+import base64
 from dataclasses import dataclass
+import hashlib
 import hmac
 import logging
 import os
@@ -36,7 +39,9 @@ log = logging.getLogger('edubotics.inference.session')
 RPC_TIMEOUT_S = 5.0
 DENIED_CODES = frozenset({'auth', 'ended', 'replaced', 'unavailable'})
 VERDICT_CODES = frozenset({'auth', 'ended', 'replaced'})     # a check answering these ends the session
-STATIC_MAX_SESSION_S = 1800.0
+STATIC_MAX_SESSION_S = 3600.0        # V1-5: the dev soak §10.3(f) runs 35 min on one session
+DEV_DERIVED_SESSIONS = 16            # V1-5: up to 17 robots on the dev app (§10.3(b)/(h) measure 4-15)
+_DEV_TOKEN_LABEL = b'edubotics-inference-dev-session-'
 _REASON_RE = re.compile(r'[a-z_]{1,64}')                   # an end reason fit for an error frame (≤ 64 chars)
 
 
@@ -181,65 +186,112 @@ class SupabaseSessionBackend:
         return None
 
 
+def dev_session_token(master, i):
+    """The ``i``-th extra connect token of the dev app (1..DEV_DERIVED_SESSIONS), derived from the dev
+    secret's ``DEV_SESSION_TOKEN``: unpadded urlsafe base64 of HMAC-SHA256(master, label + i), 43
+    characters like ``secrets.token_urlsafe(32)``. A measurement script that holds the secret computes
+    the same tokens; nobody else can (V1-5)."""
+    if type(i) is not int or not 1 <= i <= DEV_DERIVED_SESSIONS:
+        raise ValueError('dev session index out of range')
+    digest = hmac.new(master.encode('utf-8'), _DEV_TOKEN_LABEL + str(i).encode('ascii'), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode('ascii').rstrip('=')
+
+
+class _StaticRun:
+    """One static token's session: its connection, its clock, its last end."""
+    __slots__ = ('token', 'session_id', 'conn_id', 'started', 'ended')
+
+    def __init__(self, token, session_id):
+        self.token = token.encode('utf-8')
+        self.session_id = session_id
+        self.conn_id = None
+        self.started = None
+        self.ended = None           # (conn_id, reason) of the last ended run
+
+
 class StaticSessionBackend:
-    """Tests and the dev variant only: one static token and model; the Modal session id is IGNORED."""
+    """Tests and the dev variant only: static tokens, one model; the Modal session id is IGNORED.
+
+    Each token is its own session (its own run, clock and end), so several robots can share the
+    dev app's containers (V1-5): ``token`` (session ``session_id``) and ``extra_tokens``
+    (``session_id-1``, ``-2``, ...).
+    """
 
     def __init__(self, token, model_repo, model_revision, *, max_session_s=STATIC_MAX_SESSION_S,
-                 policy_type='act', session_id='static', clock=time.monotonic):
-        self._token = token
+                 policy_type='act', session_id='static', clock=time.monotonic, extra_tokens=()):
         self._repo = model_repo
         self._revision = model_revision
         self._max_session_s = float(max_session_s)
         self._policy_type = policy_type
-        self._session_id = session_id
         self._clock = clock
-        self._conn_id = None
-        self._started = None
-        self._ended = None          # (conn_id, reason) of the last ended run
+        self._runs = [_StaticRun(token, session_id)]
+        self._runs += [_StaticRun(t, f'{session_id}-{i}') for i, t in enumerate(extra_tokens, start=1)]
 
     @classmethod
     def from_env(cls):
-        return cls(os.environ['DEV_SESSION_TOKEN'], os.environ['DEV_MODEL_REPO'], os.environ['DEV_MODEL_REVISION'])
+        """The dev variant's backend; refuses to start in any other image (the prod image bakes
+        ``EDUBOTICS_INFERENCE_VARIANT=prod``). The messages never carry the token."""
+        if os.environ.get('EDUBOTICS_INFERENCE_VARIANT') != 'dev':
+            raise RuntimeError('the static session backend runs only in the dev variant')
+        master = os.environ['DEV_SESSION_TOKEN']
+        if not P.TOKEN_RE.fullmatch(master):
+            raise RuntimeError('DEV_SESSION_TOKEN is not a well-formed connect token')
+        extra = [dev_session_token(master, i) for i in range(1, DEV_DERIVED_SESSIONS + 1)]
+        return cls(master, os.environ['DEV_MODEL_REPO'], os.environ['DEV_MODEL_REVISION'], extra_tokens=extra)
 
-    def _auth(self, token):
-        if type(token) is not str or not hmac.compare_digest(token.encode('utf-8'), self._token.encode('utf-8')):
+    def _run(self, token):
+        if type(token) is not str:
             raise SessionDenied('auth')
+        given = token.encode('utf-8')
+        found = None
+        for run in self._runs:                       # every token compared, constant time each
+            if hmac.compare_digest(given, run.token):
+                found = run
+        if found is None:
+            raise SessionDenied('auth')
+        return found
 
-    def _grant(self, max_end_in_s):
-        return Grant(self._session_id, self._repo, self._revision, self._policy_type, max_end_in_s)
+    def _grant(self, run, max_end_in_s):
+        return Grant(run.session_id, self._repo, self._revision, self._policy_type, max_end_in_s)
 
-    def _remaining(self):
-        return max(0.0, self._max_session_s - (self._clock() - self._started))
+    def _remaining(self, run):
+        return max(0.0, self._max_session_s - (self._clock() - run.started))
+
+    def ended(self, token):
+        """``(conn_id, reason)`` of the token's last ended run, or None (tests and dev measurements)."""
+        try:
+            return self._run(token).ended
+        except SessionDenied:
+            return None
 
     async def peek(self, token, modal_session_id):
-        self._auth(token)
-        return self._grant(None)
+        return self._grant(self._run(token), None)
 
     async def connect(self, token, modal_session_id, conn_id):
-        self._auth(token)
-        if conn_id != self._conn_id or self._ended is not None:    # a new run (or a take-over) starts the clock
-            self._started = self._clock()
-            self._ended = None
-        self._conn_id = conn_id
-        return self._grant(self._remaining())
+        run = self._run(token)
+        if conn_id != run.conn_id or run.ended is not None:    # a new run (or a take-over) starts the clock
+            run.started = self._clock()
+            run.ended = None
+        run.conn_id = conn_id
+        return self._grant(run, self._remaining(run))
 
     async def heartbeat(self, token, modal_session_id, conn_id, stats):
-        self._auth(token)
-        if self._ended is not None and self._ended[0] == conn_id:
-            raise SessionDenied('ended', self._ended[1])
-        if conn_id != self._conn_id:
+        run = self._run(token)
+        if run.ended is not None and run.ended[0] == conn_id:
+            raise SessionDenied('ended', run.ended[1])
+        if conn_id != run.conn_id:
             raise SessionDenied('replaced')
-        remaining = self._remaining()
+        remaining = self._remaining(run)
         if remaining <= 0:
-            self._ended = (conn_id, 'expired')
+            run.ended = (conn_id, 'expired')
             raise SessionDenied('ended', 'expired')
         return remaining
 
     async def end(self, token, modal_session_id, conn_id, reason, stats):
         try:
-            self._auth(token)
+            run = self._run(token)
         except SessionDenied:
             return None
-        if conn_id == self._conn_id and self._ended is None:
-            self._ended = (conn_id, reason)
+        if conn_id == run.conn_id and run.ended is None:
+            run.ended = (conn_id, reason)
         return None

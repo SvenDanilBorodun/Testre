@@ -94,7 +94,7 @@ class Served:
     def __init__(self):
         self.backend = SB.StaticSessionBackend(TOKEN, REPO_ID, REVISION)
         self.engine = FakeEngine()
-        cache = S.EngineCache('cpu', max_models=8, loader=lambda repo, rev, dev: self.engine)
+        cache = S.EngineCache('cpu', max_models=S.LRU_MAX_MODELS, loader=lambda repo, rev, dev: self.engine)
         self.proxy = ProxyLike(S.build_app(self.backend, cache, 'sha-cross'))
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -197,7 +197,7 @@ def test_hello_infer_bye_round_trip(served, make_client, caplog):
     for _, _, h in served.proxy.requests:
         assert h[cp.EDGE_AUTH_HEADER.lower()] == ('Bearer ' + EDGE).encode()
         assert h[cp.CONNECT_AUTH_HEADER.lower()] == ('Bearer ' + TOKEN).encode()
-    assert served.backend._ended is not None and served.backend._ended[1] == 'robot_stop'
+    assert served.backend.ended(TOKEN) is not None and served.backend.ended(TOKEN)[1] == 'robot_stop'
     assert TOKEN not in caplog.text and EDGE not in caplog.text
 
 

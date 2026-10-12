@@ -92,6 +92,26 @@ function isMdUp() {
     && window.matchMedia('(min-width: 768px)').matches;
 }
 
+// isMdUp() as state that follows the viewport, for the split stage's wide
+// arrangement (below). Off for every other layout.
+function useMdUp(enabled) {
+  const [mdUp, setMdUp] = useState(() => enabled && isMdUp());
+  useEffect(() => {
+    if (!enabled) {
+      setMdUp(false);
+      return undefined;
+    }
+    setMdUp(isMdUp());
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+    const query = window.matchMedia('(min-width: 768px)');
+    if (!query || typeof query.addEventListener !== 'function') return undefined;
+    const onChange = () => setMdUp(isMdUp());
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, [enabled]);
+  return mdUp;
+}
+
 // Sim-only virtual joint stream (never the bare /joint_states — see plan §C).
 const SIM_JOINT_TOPIC = '/sim/joint_states';
 // The simulator plays each waypoint at its own time (~30 Hz, SimArm's real-time
@@ -353,6 +373,10 @@ function SimScene({
   // Split layout: the committed 3D share of the stage (its ResizeHandle writes
   // `--sim-split`), and the 2D table's fitted box from md up ({w, h} | null).
   const isSplit = layout === 'split';
+  // From md up the split stage's editor column is short and wide, and the
+  // fitted table gets only the height its siblings leave: there the controls
+  // share rows (see editorBody) instead of each taking a row of its own.
+  const wideSplit = useMdUp(isSplit);
   const [simSplit, setSimSplit] = useState(readSimSplit);
   const tableWrapRef = useRef(null);
   const [fit, setFit] = useState(null);
@@ -833,421 +857,461 @@ function SimScene({
       })()
     : null;
 
-  // The 2D editor body (notice + palette + mode + table + selection + zones),
-  // shared by BOTH layouts so they never drift. A fragment adds no DOM node, so
-  // the default STACK layout below stays byte-identical to the previous markup.
-  // The split stage's notice can be closed (remembered on this PC by
-  // SimStage); the stack layout keeps it as it always was.
+  // The 2D editor's pieces (notice, palette, mode, table, selection, reset,
+  // zones); editorBody below arranges them. The split stage's notice can be
+  // closed (remembered on this PC by SimStage); the stack layout keeps it as
+  // it always was.
   const canDismissIntro = isSplit && typeof onDismissIntro === 'function';
-  const editorBody = (
-    <>
-      {/* German notice: the simulator validates logic, not physics. */}
-      {!(isSplit && introDismissed) && (
-        <div
-          className={
-            'rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800'
-            + (canDismissIntro ? ' relative pr-8' : '')
-          }
-        >
-          <strong>Test im Simulator.</strong> Hier prüfst du die Logik und
-          Reihenfolge deines Programms — nicht die echte Physik des Greifens.
-          Platziere Objekte auf dem Tisch und lass das Programm den virtuellen
-          Roboter steuern.
-          {canDismissIntro && (
-            <button
-              type="button"
-              onClick={onDismissIntro}
-              aria-label={LAYOUT_DE.SIM_HINT_CLOSE}
-              title={LAYOUT_DE.SIM_HINT_CLOSE}
-              className="absolute right-1.5 top-1.5 rounded p-0.5 text-blue-700 hover:bg-blue-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-            >
-              <Icon name="close" />
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Object palette */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-xs text-[var(--ink-3)]">Objekt:</span>
-        {cat.map(([label, value]) => (
-          <button
-            key={value}
-            type="button"
-            onClick={() => setSelectedType(value)}
-            aria-pressed={selectedType === value}
-            className={
-              'px-2.5 py-1 text-xs rounded-md border '
-              + (selectedType === value
-                ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
-            }
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* Editor mode toggle: place objects vs. draw a no-go Sperrzone. */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-xs text-[var(--ink-3)]">Modus:</span>
+  // German notice: the simulator validates logic, not physics.
+  const noticeEl = !(isSplit && introDismissed) ? (
+    <div
+      className={
+        'rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800'
+        + (canDismissIntro ? ' relative pr-8' : '')
+      }
+    >
+      <strong>Test im Simulator.</strong> Hier prüfst du die Logik und
+      Reihenfolge deines Programms — nicht die echte Physik des Greifens.
+      Platziere Objekte auf dem Tisch und lass das Programm den virtuellen
+      Roboter steuern.
+      {canDismissIntro && (
         <button
           type="button"
-          onClick={() => setMode('object')}
-          aria-pressed={mode === 'object'}
+          onClick={onDismissIntro}
+          aria-label={LAYOUT_DE.SIM_HINT_CLOSE}
+          title={LAYOUT_DE.SIM_HINT_CLOSE}
+          className="absolute right-1.5 top-1.5 rounded p-0.5 text-blue-700 hover:bg-blue-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          <Icon name="close" />
+        </button>
+      )}
+    </div>
+  ) : null;
+
+  // Object palette
+  const paletteRow = (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-xs text-[var(--ink-3)]">Objekt:</span>
+      {cat.map(([label, value]) => (
+        <button
+          key={value}
+          type="button"
+          onClick={() => setSelectedType(value)}
+          aria-pressed={selectedType === value}
           className={
             'px-2.5 py-1 text-xs rounded-md border '
-            + (mode === 'object'
+            + (selectedType === value
               ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
               : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
           }
         >
-          Objekte platzieren
+          {label}
         </button>
-        <button
-          type="button"
-          onClick={() => setMode('zone')}
-          aria-pressed={mode === 'zone'}
-          className={
-            'px-2.5 py-1 text-xs rounded-md border '
-            + (mode === 'zone'
-              ? 'bg-red-500 text-white border-red-500'
-              : 'bg-white text-red-700 border-red-200 hover:bg-red-50')
-          }
-        >
-          Sperrzone zeichnen
-        </button>
-        {canCreateZiel && (
-          <button
-            type="button"
-            onClick={() => setMode('ziel')}
-            aria-pressed={mode === 'ziel'}
-            className={
-              'px-2.5 py-1 text-xs rounded-md border '
-              + (mode === 'ziel'
-                ? 'bg-teal-600 text-white border-teal-600'
-                : 'bg-white text-teal-700 border-teal-200 hover:bg-teal-50')
-            }
-          >
-            {DE.SIM_MODE_ZIEL}
-          </button>
-        )}
-        {mode === 'ziel' && (
-          <span className="text-xs text-[var(--ink-4)]">{DE.SIM_ZIEL_HINT}</span>
-        )}
-        {mode === 'zone' && (
-          <span className="text-xs text-[var(--ink-4)]">
-            Ziehe ein Rechteck auf — der Roboter fährt um Sperrzonen herum.
-          </span>
-        )}
-      </div>
+      ))}
+    </div>
+  );
 
-      {/* 2D top-down table editor. In the split stage from md up the table is
-          FITTED into the area left to it (whole table visible); otherwise it
-          is full width and scrolls with the editor. */}
-      <div
-        ref={isSplit ? tableWrapRef : undefined}
+  // Editor mode toggle: place objects vs. draw a no-go Sperrzone.
+  const modeRow = (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-xs text-[var(--ink-3)]">Modus:</span>
+      <button
+        type="button"
+        onClick={() => setMode('object')}
+        aria-pressed={mode === 'object'}
         className={
-          isSplit
-            ? 'rounded-lg border border-[var(--line)] bg-white p-2 md:flex md:min-h-[120px] md:flex-1 md:items-center md:justify-center'
-            : 'rounded-lg border border-[var(--line)] bg-white p-2'
+          'px-2.5 py-1 text-xs rounded-md border '
+          + (mode === 'object'
+            ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+            : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
         }
       >
-        <svg
-          ref={svgRef}
-          viewBox={`0 0 ${SVG_W} ${SVG_H}`}
-          style={isSplit && fit ? { width: fit.w, height: fit.h } : undefined}
-          className={
-            (isSplit && fit ? 'block' : 'w-full h-auto')
-            + ' rounded-md bg-[var(--bg-sunk)] touch-none cursor-crosshair'
-          }
-          onPointerDown={handleSvgPointerDown}
-          onPointerMove={handleSvgPointerMove}
-          onPointerUp={handleSvgPointerUp}
-          onPointerLeave={handleSvgPointerUp}
-          role="application"
-          aria-label="Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren"
-        >
-          {/* Reach annulus (graspable ring) */}
-          <circle
-            cx={ORIGIN_PX}
-            cy={ORIGIN_PY}
-            r={annulus.outer * PX_PER_M}
-            fill="rgba(34,197,94,0.08)"
-            stroke="#22c55e"
-            strokeWidth="1"
-            strokeDasharray="4 3"
-          />
-          <circle
-            cx={ORIGIN_PX}
-            cy={ORIGIN_PY}
-            r={annulus.inner * PX_PER_M}
-            fill="var(--bg-sunk)"
-            stroke="#22c55e"
-            strokeWidth="1"
-            strokeDasharray="4 3"
-          />
-          {/* Robot base marker */}
-          <circle cx={ORIGIN_PX} cy={ORIGIN_PY} r="4" fill="#64748b" />
-          <text
-            x={ORIGIN_PX + 7}
-            y={ORIGIN_PY + 4}
-            fontSize="9"
-            fill="#64748b"
-          >
-            Roboter
-          </text>
-
-          {/* No-go zones (top-down footprint, drawn under the objects) */}
-          {zones.map((z, i) => {
-            if (!Array.isArray(z.min) || !Array.isArray(z.max)) return null;
-            const a = baseToSvg(z.min[0], z.min[1]);
-            const b = baseToSvg(z.max[0], z.max[1]);
-            const x = Math.min(a.px, b.px);
-            const y = Math.min(a.py, b.py);
-            const w = Math.abs(a.px - b.px);
-            const h = Math.abs(a.py - b.py);
-            return (
-              <g key={`zone-${i}`}>
-                <rect
-                  x={x}
-                  y={y}
-                  width={w}
-                  height={h}
-                  fill={ZONE_FILL}
-                  stroke={ZONE_STROKE}
-                  strokeWidth="1.5"
-                  strokeDasharray="5 3"
-                />
-                <text x={x + 3} y={y + 11} fontSize="9" fill="#b91c1c">
-                  Sperrzone {i + 1}
-                </text>
-              </g>
-            );
-          })}
-
-          {/* Live zone-draw preview */}
-          {draftRect && (
-            <rect
-              x={draftRect.x}
-              y={draftRect.y}
-              width={draftRect.w}
-              height={draftRect.h}
-              fill={ZONE_DRAFT_FILL}
-              stroke={ZONE_STROKE}
-              strokeWidth="1.5"
-              strokeDasharray="3 2"
-              pointerEvents="none"
-            />
-          )}
-
-          {/* Sammlung markers (Ziele / Positionen / variable points): after the
-              zones, under the objects, and never a pointer target — a tap on a
-              marker must reach the table like a tap anywhere else. */}
-          {markerList.map((m) => {
-            if (!m || !Number.isFinite(m.x) || !Number.isFinite(m.y)) return null;
-            const { px, py } = baseToSvg(m.x, m.y);
-            const color = MARKER_COLORS[m.kind] || MARKER_COLORS.pin;
-            const grow = m.highlighted ? 2 : 0;
-            const sw = m.highlighted ? 3 : 1.5;
-            let glyph;
-            if (m.kind === 'pose') {
-              const s = 8 + grow;
-              glyph = (
-                <rect
-                  x={px - s / 2} y={py - s / 2} width={s} height={s}
-                  transform={`rotate(45 ${px} ${py})`}
-                  fill={color} stroke="#ffffff" strokeWidth={sw}
-                />
-              );
-            } else if (m.kind === 'variable') {
-              glyph = <circle cx={px} cy={py} r={5 + grow} fill="none" stroke={color} strokeWidth={sw + 1} />;
-            } else {
-              glyph = <circle cx={px} cy={py} r={5 + grow} fill={color} stroke="#ffffff" strokeWidth={sw} />;
-            }
-            return (
-              <g
-                key={`marker-${m.id}`}
-                pointerEvents="none"
-                data-marker-kind={m.kind}
-                data-highlighted={m.highlighted ? 'true' : 'false'}
-              >
-                {glyph}
-                <text x={px + 8 + grow} y={py + 3} fontSize="9" fill={color} fontWeight={m.highlighted ? 700 : 400}>
-                  {m.label}
-                </text>
-              </g>
-            );
-          })}
-
-          {/* Placed objects */}
-          {objects.map((o) => {
-            const { px, py } = baseToSvg(o.x || 0, o.y || 0);
-            const isSel = o.tag_id === selectedId;
-            // Skip a row the 3D twin cannot key (UrdfTwin.simObjectKey returns
-            // null without a tag_id, so it renders no mesh) -- otherwise the two
-            // panes disagree about what exists AND React sees duplicate
-            // `undefined` keys. Only reachable via a hand-edited/foreign
-            // sim_scene: the cloud validator checks size and type, never shape.
-            if (o.tag_id === undefined || o.tag_id === null) return null;
-            const isHeld = o.tag_id === heldObjectId;
-            // yaw direction in SVG: base dir (cosθ,sinθ) → svg (-sinθ,-cosθ).
-            const yaw = o.yaw || 0;
-            const lineLen = 14;
-            const dx = -Math.sin(yaw) * lineLen;
-            const dy = -Math.cos(yaw) * lineLen;
-            // Per-type size + colour from the catalog (fallback amber cube), so the
-            // 2D square matches the 3D box the same object renders as.
-            const dims = catalogDims && catalogDims[o.type];
-            const sizePx = dims && Number.isFinite(dims.width_m) && dims.width_m > 0
-              ? dims.width_m * PX_PER_M
-              : OBJECT_PX;
-            const restFill = dims && typeof dims.color === 'string' && dims.color
-              ? dims.color
-              : SIM_OBJECT_COLOR_HEX;
-            const fill = isHeld ? SIM_OBJECT_HELD_COLOR_HEX : restFill;
-            return (
-              <g
-                key={o.tag_id}
-                onPointerDown={(e) => startDrag(e, o.tag_id)}
-                className="cursor-grab"
-              >
-                <rect
-                  x={px - sizePx / 2}
-                  y={py - sizePx / 2}
-                  width={sizePx}
-                  height={sizePx}
-                  transform={`rotate(${(-yaw * 180) / Math.PI} ${px} ${py})`}
-                  fill={fill}
-                  stroke={isSel ? '#1d4ed8' : '#92400e'}
-                  strokeWidth={isSel ? 2 : 1}
-                  rx="2"
-                />
-                <line
-                  x1={px}
-                  y1={py}
-                  x2={px + dx}
-                  y2={py + dy}
-                  stroke="#1f2937"
-                  strokeWidth="1.5"
-                />
-                <text x={px + 9} y={py - 9} fontSize="9" fill="#475569">
-                  {typeLabel(o.type)} #{o.tag_id}
-                </text>
-              </g>
-            );
-          })}
-        </svg>
-      </div>
-
-      {/* Selected-object controls */}
-      {selected ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-xs">
-          <span className="text-[var(--ink-3)]">
-            Ausgewählt: <strong>{typeLabel(selected.type)} #{selected.tag_id}</strong>
-          </span>
-          <label className="flex items-center gap-1.5">
-            Drehung:
-            <input
-              type="range"
-              min={-180}
-              max={180}
-              step={5}
-              value={selectedYawDeg}
-              onChange={(e) => handleYaw(Number(e.target.value))}
-              aria-label="Drehung des Objekts"
-            />
-            <span className="w-10 text-right font-mono">{selectedYawDeg}°</span>
-          </label>
-          <button
-            type="button"
-            onClick={handleDelete}
-            className="ml-auto px-2 py-1 rounded-md border border-red-200 text-red-700 hover:bg-red-50"
-          >
-            Löschen
-          </button>
-        </div>
-      ) : (
-        <p className="text-xs text-[var(--ink-4)] px-1">
-          Objekt-Typ wählen, dann in die grüne Reichweite tippen, um es zu
-          platzieren. Tippe ein Objekt an, um es zu drehen oder zu verschieben.
-        </p>
-      )}
-
-      <div className="flex flex-wrap items-center gap-1.5">
-        {/* Always available — the state it clears (a latched grasp, a virtual arm
-            parked mid-program) exists precisely when the table is NOT empty of
-            meaning, and after a page reload there may be no objects yet. */}
+        Objekte platzieren
+      </button>
+      <button
+        type="button"
+        onClick={() => setMode('zone')}
+        aria-pressed={mode === 'zone'}
+        className={
+          'px-2.5 py-1 text-xs rounded-md border '
+          + (mode === 'zone'
+            ? 'bg-red-500 text-white border-red-500'
+            : 'bg-white text-red-700 border-red-200 hover:bg-red-50')
+        }
+      >
+        Sperrzone zeichnen
+      </button>
+      {canCreateZiel && (
         <button
           type="button"
-          onClick={handleSimReset}
-          disabled={resetting || workflowRunning}
-          title={workflowRunning
-            ? 'Das Programm läuft noch — zuerst auf „Stopp" drücken.'
-            : 'Stellt die Objekte an ihre Plätze zurück und fährt den virtuellen '
-              + 'Arm in die Grundstellung.'}
-          className="text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed"
+          onClick={() => setMode('ziel')}
+          aria-pressed={mode === 'ziel'}
+          className={
+            'px-2.5 py-1 text-xs rounded-md border '
+            + (mode === 'ziel'
+              ? 'bg-teal-600 text-white border-teal-600'
+              : 'bg-white text-teal-700 border-teal-200 hover:bg-teal-50')
+          }
         >
-          {resetting ? 'Wird zurückgesetzt …' : 'Simulator zurücksetzen'}
+          {DE.SIM_MODE_ZIEL}
         </button>
-        {objects.length > 0 && (
-          <button
-            type="button"
-            onClick={handleClear}
-            className="text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
-          >
-            Tisch leeren
-          </button>
-        )}
-      </div>
-
-      {/* No-go zone list — per-zone height band + delete. */}
-      {zones.length > 0 && (
-        <div className="flex flex-col gap-1.5 rounded-md border border-red-200 bg-white px-3 py-2 text-xs">
-          <span className="font-medium text-red-700">Sperrzonen</span>
-          {zones.map((z, i) => {
-            const z0 = Array.isArray(z.min) && typeof z.min[2] === 'number' ? z.min[2] : 0;
-            const z1 = Array.isArray(z.max) && typeof z.max[2] === 'number' ? z.max[2] : 0;
-            return (
-              <div key={`zone-row-${i}`} className="flex flex-wrap items-center gap-2">
-                <span className="text-[var(--ink-3)]">Zone {i + 1}</span>
-                <label className="flex items-center gap-1">
-                  Höhe von:
-                  <input
-                    type="number"
-                    step={0.01}
-                    value={z0}
-                    onChange={(e) => handleZoneHeight(i, 'z0', Number(e.target.value))}
-                    className="w-16 rounded border border-[var(--line)] px-1 py-0.5 font-mono"
-                    aria-label={`Untere Höhe der Sperrzone ${i + 1}`}
-                  />
-                  m
-                </label>
-                <label className="flex items-center gap-1">
-                  bis:
-                  <input
-                    type="number"
-                    step={0.01}
-                    value={z1}
-                    onChange={(e) => handleZoneHeight(i, 'z1', Number(e.target.value))}
-                    className="w-16 rounded border border-[var(--line)] px-1 py-0.5 font-mono"
-                    aria-label={`Obere Höhe der Sperrzone ${i + 1}`}
-                  />
-                  m
-                </label>
-                <button
-                  type="button"
-                  onClick={() => handleZoneDelete(i)}
-                  className="ml-auto px-2 py-1 rounded-md border border-red-200 text-red-700 hover:bg-red-50"
-                >
-                  Löschen
-                </button>
-              </div>
-            );
-          })}
-        </div>
       )}
+      {mode === 'ziel' && (
+        <span className="text-xs text-[var(--ink-4)]">{DE.SIM_ZIEL_HINT}</span>
+      )}
+      {mode === 'zone' && (
+        <span className="text-xs text-[var(--ink-4)]">
+          Ziehe ein Rechteck auf — der Roboter fährt um Sperrzonen herum.
+        </span>
+      )}
+    </div>
+  );
 
+  // 2D top-down table editor. In the split stage from md up the table is
+  // FITTED into the area left to it (whole table visible); otherwise it
+  // is full width and scrolls with the editor.
+  const tableWrap = (
+    <div
+      ref={isSplit ? tableWrapRef : undefined}
+      className={
+        isSplit
+          ? 'rounded-lg border border-[var(--line)] bg-white p-2 md:flex md:min-h-[120px] md:flex-1 md:items-center md:justify-center'
+          : 'rounded-lg border border-[var(--line)] bg-white p-2'
+      }
+    >
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${SVG_W} ${SVG_H}`}
+        style={isSplit && fit ? { width: fit.w, height: fit.h } : undefined}
+        className={
+          (isSplit && fit ? 'block' : 'w-full h-auto')
+          + ' rounded-md bg-[var(--bg-sunk)] touch-none cursor-crosshair'
+        }
+        onPointerDown={handleSvgPointerDown}
+        onPointerMove={handleSvgPointerMove}
+        onPointerUp={handleSvgPointerUp}
+        onPointerLeave={handleSvgPointerUp}
+        role="application"
+        aria-label="Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren"
+      >
+        {/* Reach annulus (graspable ring) */}
+        <circle
+          cx={ORIGIN_PX}
+          cy={ORIGIN_PY}
+          r={annulus.outer * PX_PER_M}
+          fill="rgba(34,197,94,0.08)"
+          stroke="#22c55e"
+          strokeWidth="1"
+          strokeDasharray="4 3"
+        />
+        <circle
+          cx={ORIGIN_PX}
+          cy={ORIGIN_PY}
+          r={annulus.inner * PX_PER_M}
+          fill="var(--bg-sunk)"
+          stroke="#22c55e"
+          strokeWidth="1"
+          strokeDasharray="4 3"
+        />
+        {/* Robot base marker */}
+        <circle cx={ORIGIN_PX} cy={ORIGIN_PY} r="4" fill="#64748b" />
+        <text
+          x={ORIGIN_PX + 7}
+          y={ORIGIN_PY + 4}
+          fontSize="9"
+          fill="#64748b"
+        >
+          Roboter
+        </text>
+
+        {/* No-go zones (top-down footprint, drawn under the objects) */}
+        {zones.map((z, i) => {
+          if (!Array.isArray(z.min) || !Array.isArray(z.max)) return null;
+          const a = baseToSvg(z.min[0], z.min[1]);
+          const b = baseToSvg(z.max[0], z.max[1]);
+          const x = Math.min(a.px, b.px);
+          const y = Math.min(a.py, b.py);
+          const w = Math.abs(a.px - b.px);
+          const h = Math.abs(a.py - b.py);
+          return (
+            <g key={`zone-${i}`}>
+              <rect
+                x={x}
+                y={y}
+                width={w}
+                height={h}
+                fill={ZONE_FILL}
+                stroke={ZONE_STROKE}
+                strokeWidth="1.5"
+                strokeDasharray="5 3"
+              />
+              <text x={x + 3} y={y + 11} fontSize="9" fill="#b91c1c">
+                Sperrzone {i + 1}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Live zone-draw preview */}
+        {draftRect && (
+          <rect
+            x={draftRect.x}
+            y={draftRect.y}
+            width={draftRect.w}
+            height={draftRect.h}
+            fill={ZONE_DRAFT_FILL}
+            stroke={ZONE_STROKE}
+            strokeWidth="1.5"
+            strokeDasharray="3 2"
+            pointerEvents="none"
+          />
+        )}
+
+        {/* Sammlung markers (Ziele / Positionen / variable points): after the
+            zones, under the objects, and never a pointer target — a tap on a
+            marker must reach the table like a tap anywhere else. */}
+        {markerList.map((m) => {
+          if (!m || !Number.isFinite(m.x) || !Number.isFinite(m.y)) return null;
+          const { px, py } = baseToSvg(m.x, m.y);
+          const color = MARKER_COLORS[m.kind] || MARKER_COLORS.pin;
+          const grow = m.highlighted ? 2 : 0;
+          const sw = m.highlighted ? 3 : 1.5;
+          let glyph;
+          if (m.kind === 'pose') {
+            const s = 8 + grow;
+            glyph = (
+              <rect
+                x={px - s / 2} y={py - s / 2} width={s} height={s}
+                transform={`rotate(45 ${px} ${py})`}
+                fill={color} stroke="#ffffff" strokeWidth={sw}
+              />
+            );
+          } else if (m.kind === 'variable') {
+            glyph = <circle cx={px} cy={py} r={5 + grow} fill="none" stroke={color} strokeWidth={sw + 1} />;
+          } else {
+            glyph = <circle cx={px} cy={py} r={5 + grow} fill={color} stroke="#ffffff" strokeWidth={sw} />;
+          }
+          return (
+            <g
+              key={`marker-${m.id}`}
+              pointerEvents="none"
+              data-marker-kind={m.kind}
+              data-highlighted={m.highlighted ? 'true' : 'false'}
+            >
+              {glyph}
+              <text x={px + 8 + grow} y={py + 3} fontSize="9" fill={color} fontWeight={m.highlighted ? 700 : 400}>
+                {m.label}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Placed objects */}
+        {objects.map((o) => {
+          const { px, py } = baseToSvg(o.x || 0, o.y || 0);
+          const isSel = o.tag_id === selectedId;
+          // Skip a row the 3D twin cannot key (UrdfTwin.simObjectKey returns
+          // null without a tag_id, so it renders no mesh) -- otherwise the two
+          // panes disagree about what exists AND React sees duplicate
+          // `undefined` keys. Only reachable via a hand-edited/foreign
+          // sim_scene: the cloud validator checks size and type, never shape.
+          if (o.tag_id === undefined || o.tag_id === null) return null;
+          const isHeld = o.tag_id === heldObjectId;
+          // yaw direction in SVG: base dir (cosθ,sinθ) → svg (-sinθ,-cosθ).
+          const yaw = o.yaw || 0;
+          const lineLen = 14;
+          const dx = -Math.sin(yaw) * lineLen;
+          const dy = -Math.cos(yaw) * lineLen;
+          // Per-type size + colour from the catalog (fallback amber cube), so the
+          // 2D square matches the 3D box the same object renders as.
+          const dims = catalogDims && catalogDims[o.type];
+          const sizePx = dims && Number.isFinite(dims.width_m) && dims.width_m > 0
+            ? dims.width_m * PX_PER_M
+            : OBJECT_PX;
+          const restFill = dims && typeof dims.color === 'string' && dims.color
+            ? dims.color
+            : SIM_OBJECT_COLOR_HEX;
+          const fill = isHeld ? SIM_OBJECT_HELD_COLOR_HEX : restFill;
+          return (
+            <g
+              key={o.tag_id}
+              onPointerDown={(e) => startDrag(e, o.tag_id)}
+              className="cursor-grab"
+            >
+              <rect
+                x={px - sizePx / 2}
+                y={py - sizePx / 2}
+                width={sizePx}
+                height={sizePx}
+                transform={`rotate(${(-yaw * 180) / Math.PI} ${px} ${py})`}
+                fill={fill}
+                stroke={isSel ? '#1d4ed8' : '#92400e'}
+                strokeWidth={isSel ? 2 : 1}
+                rx="2"
+              />
+              <line
+                x1={px}
+                y1={py}
+                x2={px + dx}
+                y2={py + dy}
+                stroke="#1f2937"
+                strokeWidth="1.5"
+              />
+              <text x={px + 9} y={py - 9} fontSize="9" fill="#475569">
+                {typeLabel(o.type)} #{o.tag_id}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+
+  // Selected-object controls, else how to place one. One slot: they replace
+  // each other, so selecting an object barely moves the table.
+  const slotGrow = wideSplit ? ' min-w-0 flex-1' : '';
+  const selectionOrHelp = selected ? (
+    <div className={`flex flex-wrap items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-xs${slotGrow}`}>
+      <span className="text-[var(--ink-3)]">
+        Ausgewählt: <strong>{typeLabel(selected.type)} #{selected.tag_id}</strong>
+      </span>
+      <label className="flex items-center gap-1.5">
+        Drehung:
+        <input
+          type="range"
+          min={-180}
+          max={180}
+          step={5}
+          value={selectedYawDeg}
+          onChange={(e) => handleYaw(Number(e.target.value))}
+          aria-label="Drehung des Objekts"
+        />
+        <span className="w-10 text-right font-mono">{selectedYawDeg}°</span>
+      </label>
+      <button
+        type="button"
+        onClick={handleDelete}
+        className="ml-auto px-2 py-1 rounded-md border border-red-200 text-red-700 hover:bg-red-50"
+      >
+        Löschen
+      </button>
+    </div>
+  ) : (
+    <p className={`text-xs text-[var(--ink-4)] px-1${slotGrow}`}>
+      Objekt-Typ wählen, dann in die grüne Reichweite tippen, um es zu
+      platzieren. Tippe ein Objekt an, um es zu drehen oder zu verschieben.
+    </p>
+  );
+
+  // Always available — the state it clears (a latched grasp, a virtual arm
+  // parked mid-program) exists precisely when the table is NOT empty of
+  // meaning, and after a page reload there may be no objects yet.
+  const resetButton = (
+    <button
+      type="button"
+      onClick={handleSimReset}
+      disabled={resetting || workflowRunning}
+      title={workflowRunning
+        ? 'Das Programm läuft noch — zuerst auf „Stopp" drücken.'
+        : 'Stellt die Objekte an ihre Plätze zurück und fährt den virtuellen '
+          + 'Arm in die Grundstellung.'}
+      className="text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed"
+    >
+      {resetting ? 'Wird zurückgesetzt …' : 'Simulator zurücksetzen'}
+    </button>
+  );
+
+  const clearButton = objects.length > 0 ? (
+    <button
+      type="button"
+      onClick={handleClear}
+      className="text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
+    >
+      Tisch leeren
+    </button>
+  ) : null;
+
+  // No-go zone list — per-zone height band + delete.
+  const zoneList = zones.length > 0 ? (
+    <div className="flex flex-col gap-1.5 rounded-md border border-red-200 bg-white px-3 py-2 text-xs">
+      <span className="font-medium text-red-700">Sperrzonen</span>
+      {zones.map((z, i) => {
+        const z0 = Array.isArray(z.min) && typeof z.min[2] === 'number' ? z.min[2] : 0;
+        const z1 = Array.isArray(z.max) && typeof z.max[2] === 'number' ? z.max[2] : 0;
+        return (
+          <div key={`zone-row-${i}`} className="flex flex-wrap items-center gap-2">
+            <span className="text-[var(--ink-3)]">Zone {i + 1}</span>
+            <label className="flex items-center gap-1">
+              Höhe von:
+              <input
+                type="number"
+                step={0.01}
+                value={z0}
+                onChange={(e) => handleZoneHeight(i, 'z0', Number(e.target.value))}
+                className="w-16 rounded border border-[var(--line)] px-1 py-0.5 font-mono"
+                aria-label={`Untere Höhe der Sperrzone ${i + 1}`}
+              />
+              m
+            </label>
+            <label className="flex items-center gap-1">
+              bis:
+              <input
+                type="number"
+                step={0.01}
+                value={z1}
+                onChange={(e) => handleZoneHeight(i, 'z1', Number(e.target.value))}
+                className="w-16 rounded border border-[var(--line)] px-1 py-0.5 font-mono"
+                aria-label={`Obere Höhe der Sperrzone ${i + 1}`}
+              />
+              m
+            </label>
+            <button
+              type="button"
+              onClick={() => handleZoneDelete(i)}
+              className="ml-auto px-2 py-1 rounded-md border border-red-200 text-red-700 hover:bg-red-50"
+            >
+              Löschen
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  ) : null;
+
+  // The 2D editor body, shared by BOTH layouts so they never drift. A fragment
+  // adds no DOM node: below md and in the stack layout the pieces keep the
+  // order (and the markup) they always had. From
+  // md up the split stage's column is short and wide and the fitted table
+  // gets only the height its siblings leave (verification round 1, F3: 165 ×
+  // 102 px at 1366 × 768), so there the reset button joins the Objekt/Modus
+  // row and „Tisch leeren" the help/selection slot under the table.
+  const editorBody = wideSplit ? (
+    <>
+      {noticeEl}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+        {paletteRow}
+        {modeRow}
+        <div className="ml-auto flex">{resetButton}</div>
+      </div>
+      {tableWrap}
+      <div className="flex flex-wrap items-center gap-2">
+        {selectionOrHelp}
+        {clearButton}
+      </div>
+      {zoneList}
+    </>
+  ) : (
+    <>
+      {noticeEl}
+      {paletteRow}
+      {modeRow}
+      {tableWrap}
+      {selectionOrHelp}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {resetButton}
+        {clearButton}
+      </div>
+      {zoneList}
     </>
   );
 

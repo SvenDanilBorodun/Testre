@@ -13,7 +13,7 @@
 // (jsdom has no WebGL), so these assertions are pure-DOM on the 2D SVG editor.
 
 import React from 'react';
-import { render as rtlRender, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render as rtlRender, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import SimScene from '../SimScene';
@@ -685,6 +685,48 @@ describe('SimScene — the split stage (WI-1.8)', () => {
     expect(() => sizeTable(400, 200)).not.toThrow();
     expect(svgOf().getAttribute('class')).toContain('w-full h-auto');
     expect(svgOf().style.width).toBe('');
+  });
+
+  // Verification round 1, F3: from md up the editor column is short and wide
+  // and the fitted table gets only the height its siblings leave (165 × 102 px
+  // at 1366 × 768). There the reset button joins the Objekt/Modus row and
+  // „Tisch leeren" the help/selection slot under the table, so no control
+  // takes a row of its own; below md every piece keeps its own row.
+  // eslint-disable-next-line testing-library/no-node-access
+  const rowOf = (el) => el.parentElement.closest('.flex-wrap');
+  const OBJ = { tag_id: 20, type: 'wuerfel', x: 0.2, y: 0, yaw: 0 };
+
+  test('from md up the reset button shares the Objekt/Modus row, and „Tisch leeren" the help row', async () => {
+    window.matchMedia = vi.fn(() => ({ matches: true }));
+    render(<SimScene layout="split" scene={{ objects: [OBJ], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    const reset = screen.getByRole('button', { name: 'Simulator zurücksetzen' });
+    const controls = rowOf(reset);
+    expect(within(controls).getByRole('button', { name: 'Objekte platzieren' })).toBeInTheDocument();
+    expect(within(controls).getByText('Objekt:')).toBeInTheDocument();
+    const help = screen.getByText(/Objekt-Typ wählen, dann in die grüne Reichweite tippen/);
+    // eslint-disable-next-line testing-library/no-node-access
+    const slot = help.parentElement;
+    expect(within(slot).getByRole('button', { name: 'Tisch leeren' })).toBeInTheDocument();
+    expect(within(slot).queryByRole('button', { name: 'Simulator zurücksetzen' })).toBeNull();
+    // The table is the only piece between the two rows.
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(controls.nextElementSibling).toBe(svgOf().parentElement);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(svgOf().parentElement.nextElementSibling).toBe(slot);
+  });
+
+  test('below md (and without matchMedia) each piece keeps its own row', async () => {
+    window.matchMedia = vi.fn(() => ({ matches: false }));
+    render(<SimScene layout="split" scene={{ objects: [OBJ], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    const reset = screen.getByRole('button', { name: 'Simulator zurücksetzen' });
+    const resetRow = rowOf(reset);
+    expect(within(resetRow).getByRole('button', { name: 'Tisch leeren' })).toBeInTheDocument();
+    expect(within(resetRow).queryByRole('button', { name: 'Objekte platzieren' })).toBeNull();
+    const help = screen.getByText(/Objekt-Typ wählen, dann in die grüne Reichweite tippen/);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(help.nextElementSibling).toBe(resetRow);
   });
 
   test('a stored 3D share is read back and a committed one is written', async () => {

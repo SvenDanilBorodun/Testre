@@ -87,8 +87,12 @@ clipped at the right edge at 1366 px (R0-11).
 its reason, „Abgeben" and the simulator toggle fit ONE row (52 px; 47 before) in every state; only the
 LeaderToggle wraps it (85 px; S-2, accepted). At 390 px, before M2/M-1 the running badge ended at x 400–406 and
 the right group was 570 px wide (clipped); after, every header element ends at x ≤ 374. Simulator stage at
-1366×768: 18 px of a 407-px table were visible; with the banners gone and the fit, 3D ≈ 174 px and the whole
-table ≈ 148 × 240 px (1440×900: 3D ≈ 227 px, table ≈ 227 × 368 px). Baselines on a135bdde → after the round:
+1366×768: 18 px of a 407-px table were visible. After the round, measured in the live harness (width × height of
+the fitted table, real fonts, default 40 % 3D share): 1366×768 165 × 102 px with the notice shown or closed,
+1366×697 the same, 1440×900 211 × 130 (notice shown) / 305 × 188 (closed); after verification round 1's F3:
+1366×768 167 × 103 (notice shown) / 261 × 161 (closed; 241 × 149 with an object selected), 1366×697 165 × 102
+(the 120-px area floor binds; with the notice shown the column scrolls), 1440×900 321 × 198 / 415 × 256; the 3D
+view is 672 × 169 px at 1366×768 and 712 × 222 px at 1440×900. Baselines on a135bdde → after the round:
 vitest 238 files / 4268 passed → 257 files / 4588 passed (+2 expected failures both times); server tests
 2830 → 2849 passed (22 skipped); `robotis_ai_setup` 2256 → 2260 tests (82 skipped with a JDK); the entry chunk
 2 002 227 → 2 033 670 B, with CodeMirror, three, `export_docs_json` and the docs JSON's text absent from it.
@@ -121,7 +125,10 @@ the store's copy (tab switch, draft or version restore) was broken the same way.
 sides of `BlocklyWorkspace`; `BlocklyWorkspace.storeCopy.test.jsx` (real Blockly, plugin and store) fails
 without either copy. *F2:* in hand mode „Fertig" offers the home glide in the same moment the window closes and asks
 for the insert flash, and the blurred warning (5 s countdown, then the glide) covered the editor for the whole
-2.5 s; `HomeGlidePrompt::afterHomeGlide` now runs the flash once no warning or glide is on screen (both notations).
+2.5 s; `HomeGlidePrompt::afterHomeGlide` now runs the flash once no warning or glide is on screen (both notations). *F3:* the split stage's 2D table sat at its 120-px area floor (165 × 102 px at 1366×768) because the
+help sentence, the „Simulator zurücksetzen" row, the Objekt and Modus rows each took a row of the short editor
+column; from md up the reset button now shares the Objekt/Modus row and „Tisch leeren" the help/selection slot,
+and the table takes the rest (numbers under „Measured" above).
 
 ### Unreleased, 2026-10-07 — the amd64 server image ships no torchcodec (release 2.27.0 blocker)
 

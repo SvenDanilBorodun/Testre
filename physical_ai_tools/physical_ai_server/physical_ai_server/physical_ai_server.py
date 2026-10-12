@@ -1514,7 +1514,12 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
 
     def init_robot_control_parameters_from_user_task(
             self,
-            task_info):
+            task_info,
+            timer_callback=None):
+        """``timer_callback`` (Cloud-Inferenz) drives the ``self.operation_mode`` timer with
+        another tick under the SAME timer name, so every existing
+        ``timer_manager.stop(timer_name=self.operation_mode)`` still applies (F-14: no new
+        ``timer_callback_dict`` entry). None = the mode's own callback, as before."""
         self.get_logger().info(
             'Initializing robot control parameters from user task...')
         self.data_manager = DataManager(
@@ -1533,6 +1538,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.data_manager._sync_download = daten.start_sync_download
         self.communicator.clear_latest_data()
 
+        # D19: a second START used to replace the manager and leave the first run's timer
+        # registered on the node, still firing, with nobody able to stop it. Stop it first.
+        # The collision monitor's timer_manager.start(...) resume uses the NEW manager.
+        if self.timer_manager is not None:
+            self.timer_manager.stop_all()
         self.timer_manager = TimerManager(node=self)
         # The record timer runs in its OWN MutuallyExclusiveCallbackGroup
         # (round 5): a slow record step (a save, the official ~1 s discard
@@ -1542,7 +1552,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         self.timer_manager.set_timer(
             timer_name=self.operation_mode,
             timer_frequency=task_info.fps,
-            callback_function=self.timer_callback_dict[self.operation_mode],
+            callback_function=timer_callback or self.timer_callback_dict[self.operation_mode],
             callback_group=(self._record_cb_group
                             if self.operation_mode == 'collection' else None),
         )
@@ -2395,6 +2405,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.communicator.publish_status(status=current_status)
             return
 
+        # D19: FINISH/STOP cleared on_inference — tear down BEFORE waiting for robot data.
+        # This check used to sit after the camera/follower gates, so a FINISH with silent
+        # cameras returned at 'Waiting for camera data...' on every tick and never ended.
+        if not self.on_inference:
+            self.get_logger().info('Inference mode is not active')
+            current_status = self.data_manager.get_current_record_status()
+            current_status.phase = TaskStatus.READY
+            self.communicator.publish_status(status=current_status)
+            self.inference_manager.clear_policy()
+            self.timer_manager.stop(timer_name=self.operation_mode)
+            return
+
         error_msg = ''
         current_status = TaskStatus()
         camera_msgs, follower_msgs, _ = self.communicator.get_latest_data()
@@ -2430,15 +2452,6 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 return
 
         try:
-            if not self.on_inference:
-                self.get_logger().info('Inference mode is not active')
-                current_status = self.data_manager.get_current_record_status()
-                current_status.phase = TaskStatus.READY
-                self.communicator.publish_status(status=current_status)
-                self.inference_manager.clear_policy()
-                self.timer_manager.stop(timer_name=self.operation_mode)
-                return
-
             action = self.inference_manager.predict(
                 images=camera_data,
                 state=follower_data,
@@ -2473,6 +2486,83 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             self.inference_manager.clear_policy()
             self.timer_manager.stop(timer_name=self.operation_mode)
             return
+
+    def _available_camera_names(self):
+        """The configured camera names (``name`` of every ``name:/topic`` entry): the keys the
+        inference pipeline keys its image dict on (communicator.camera_topics)."""
+        return set(parse_topic_list_with_names(self.params['camera_topic_list']).keys()) if self.params else set()
+
+    def _preflight_contract(self, summary, task_info, available_cams):
+        """(sentence_de, log_line) of the first refused check, or None.
+
+        Shared by START_INFERENCE and the Cloud-Inferenz start (spec §5.4); the sentences are
+        HEAD's, byte for byte. ``summary`` is ``InferenceManager.read_policy_summary``'s dict
+        (or the cloud's ready.policy in that shape); None runs only the two summary-free
+        checks (fps <= 0, record_inference_mode) — the cloud start, before ``ready`` exists.
+        """
+        if summary is not None:
+            expected_cams = set(summary['expected_cameras'])
+            # A language-conditioned policy (SmolVLA/Pi0 family) with an
+            # EMPTY Aufgabenanweisung produces unguided behavior — reject
+            # at START with the fix, mirroring the camera pre-flight.
+            if summary['requires_task'] and not any(
+                    s.strip() for s in task_info.task_instruction):
+                return ('Dieses Modell benötigt eine Aufgabenanweisung '
+                        '(z. B. „Greife den roten Würfel"). Bitte das Feld '
+                        '„Aufgabenanweisung" ausfüllen und erneut starten.',
+                        'Pre-flight: language-conditioned policy started '
+                        'without a task instruction')
+            # The camera contract: predict() would tear the run down
+            # mid-flight with a RuntimeError when one is missing. Reject
+            # HERE, before any timer starts, naming both sides.
+            missing_cams = expected_cams - available_cams
+            if missing_cams:
+                return (f'Dieses Modell erwartet die Kamera(s) '
+                        f'{", ".join(sorted(missing_cams))} — verfügbar '
+                        f'{"ist" if len(available_cams) == 1 else "sind"}: '
+                        f'{", ".join(sorted(available_cams)) or "keine"}. '
+                        f'Bitte Kameras prüfen („Hardware neu erkennen") '
+                        f'und erneut starten.',
+                        f'Camera contract pre-flight failed: model expects '
+                        f'{sorted(expected_cams)}, available '
+                        f'{sorted(available_cams)}')
+        # Temporal pre-flight: driving a policy at a different rate than its
+        # training data time-scales every action chunk (too fast/slow) — the
+        # checkpoint itself carries no fps, so the Modal worker stamps the
+        # dataset fps into edubotics_model_meta.json next to config.json.
+        # Models trained before the stamp existed skip the comparison; an fps
+        # of 0 would ZeroDivisionError at timer creation either way, so refuse
+        # it always.
+        task_fps = float(getattr(task_info, 'fps', 0) or 0)
+        if task_fps <= 0:
+            return ('Ungültige fps-Einstellung (0). Bitte im '
+                    'Inferenz-Panel eine gültige Bildrate setzen '
+                    '(z. B. 30) und erneut starten.',
+                    'Pre-flight: fps <= 0')
+        if summary is not None:
+            trained_fps = summary.get('trained_fps')
+            if trained_fps and abs(task_fps - float(trained_fps)) > 0.5:
+                return (f'Dieses Modell wurde mit '
+                        f'{float(trained_fps):.0f} fps trainiert, die '
+                        f'Inferenz ist auf {task_fps:.0f} fps '
+                        f'eingestellt. Bitte die fps im Inferenz-Panel '
+                        f'auf {float(trained_fps):.0f} setzen und erneut '
+                        f'starten.',
+                        f'Pre-flight: fps mismatch (trained '
+                        f'{trained_fps}, requested {task_fps})')
+        if task_info.record_inference_mode:
+            # The record-during-inference toggle is advertised by the UI, but
+            # the inference timer has no record() path — the only
+            # data_manager.record() call site is the data-collection timer,
+            # which never runs in inference mode. Arming on_recording here
+            # produced a session that claimed to record and wrote NOTHING.
+            # Refuse loudly until a real recording path exists.
+            return ('Aufnahme während der Inferenz wird derzeit '
+                    'nicht unterstützt. Bitte den Aufnahme-Modus im '
+                    'Inferenz-Panel deaktivieren und erneut starten.',
+                    'Pre-flight: record_inference_mode requested but '
+                    'the inference timer has no record() path')
+        return None
 
     def user_training_interaction_callback(self, request, response):
         """Cloud-only stub (EduBotics v2.5.0).
@@ -2642,109 +2732,21 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                         self.get_logger().error(response.message)
                         return response
 
-                    # Pre-flight camera contract (leLab-comparison PR-3): the
-                    # checkpoint's config.json names the cameras it was trained
-                    # on; predict() would tear the run down mid-flight with a
-                    # RuntimeError when one is missing. Reject HERE, before any
-                    # timer starts, with a German message naming both sides.
-                    # Camera names come from the same params the pipeline keys
-                    # its image dict on (communicator.camera_topics).
+                    # Pre-flight (leLab-comparison PR-3 and its successors): the
+                    # checkpoint's config.json names the cameras it was trained on,
+                    # a language-conditioned policy needs an Aufgabenanweisung, the
+                    # tick rate must match the training fps, and the record toggle
+                    # has no path. Every check and its German sentence lives in ONE
+                    # place, _preflight_contract, which the Cloud-Inferenz start runs
+                    # too (against ready.policy), so both targets refuse alike.
                     summary = InferenceManager.read_policy_summary(
                         task_info.policy_path)
-                    expected_cams = set(summary['expected_cameras'])
-                    available_cams = set(
-                        parse_topic_list_with_names(
-                            self.params['camera_topic_list']).keys()
-                    ) if self.params else set()
-                    # A language-conditioned policy (SmolVLA/Pi0 family) with an
-                    # EMPTY Aufgabenanweisung produces unguided behavior — reject
-                    # at START with the fix, mirroring the camera pre-flight.
-                    if summary['requires_task'] and not any(
-                            s.strip() for s in task_info.task_instruction):
+                    refusal = self._preflight_contract(summary, task_info, self._available_camera_names())
+                    if refusal is not None:
                         self.on_inference = False  # F1 — release the claim on refusal
                         response.success = False
-                        response.message = (
-                            'Dieses Modell benötigt eine Aufgabenanweisung '
-                            '(z. B. „Greife den roten Würfel"). Bitte das Feld '
-                            '„Aufgabenanweisung" ausfüllen und erneut starten.'
-                        )
-                        self.get_logger().error(
-                            'Pre-flight: language-conditioned policy started '
-                            'without a task instruction')
-                        return response
-
-                    missing_cams = expected_cams - available_cams
-                    if missing_cams:
-                        self.on_inference = False  # F1 — release the claim on refusal
-                        response.success = False
-                        response.message = (
-                            f'Dieses Modell erwartet die Kamera(s) '
-                            f'{", ".join(sorted(missing_cams))} — verfügbar '
-                            f'{"ist" if len(available_cams) == 1 else "sind"}: '
-                            f'{", ".join(sorted(available_cams)) or "keine"}. '
-                            f'Bitte Kameras prüfen („Hardware neu erkennen") '
-                            f'und erneut starten.'
-                        )
-                        self.get_logger().error(
-                            f'Camera contract pre-flight failed: model expects '
-                            f'{sorted(expected_cams)}, available '
-                            f'{sorted(available_cams)}')
-                        return response
-
-                    # Temporal pre-flight: driving a policy at a different
-                    # rate than its training data time-scales every action
-                    # chunk (too fast/slow) — the checkpoint itself carries
-                    # no fps, so the Modal worker stamps the dataset fps
-                    # into edubotics_model_meta.json next to config.json.
-                    # Models trained before the stamp existed skip the
-                    # comparison; an fps of 0 would ZeroDivisionError at
-                    # timer creation either way, so refuse it always.
-                    task_fps = float(getattr(task_info, 'fps', 0) or 0)
-                    if task_fps <= 0:
-                        self.on_inference = False  # F1 — release the claim on refusal
-                        response.success = False
-                        response.message = (
-                            'Ungültige fps-Einstellung (0). Bitte im '
-                            'Inferenz-Panel eine gültige Bildrate setzen '
-                            '(z. B. 30) und erneut starten.'
-                        )
-                        self.get_logger().error('Pre-flight: fps <= 0')
-                        return response
-                    trained_fps = summary.get('trained_fps')
-                    if trained_fps and abs(task_fps - float(trained_fps)) > 0.5:
-                        self.on_inference = False  # F1 — release the claim on refusal
-                        response.success = False
-                        response.message = (
-                            f'Dieses Modell wurde mit '
-                            f'{float(trained_fps):.0f} fps trainiert, die '
-                            f'Inferenz ist auf {task_fps:.0f} fps '
-                            f'eingestellt. Bitte die fps im Inferenz-Panel '
-                            f'auf {float(trained_fps):.0f} setzen und erneut '
-                            f'starten.'
-                        )
-                        self.get_logger().error(
-                            f'Pre-flight: fps mismatch (trained '
-                            f'{trained_fps}, requested {task_fps})')
-                        return response
-
-                    if task_info.record_inference_mode:
-                        # The record-during-inference toggle is advertised by
-                        # the UI, but the inference timer has no record()
-                        # path — the only data_manager.record() call site is
-                        # the data-collection timer, which never runs in
-                        # inference mode. Arming on_recording here produced a
-                        # session that claimed to record and wrote NOTHING.
-                        # Refuse loudly until a real recording path exists.
-                        self.on_inference = False  # F1 — release the claim on refusal
-                        response.success = False
-                        response.message = (
-                            'Aufnahme während der Inferenz wird derzeit '
-                            'nicht unterstützt. Bitte den Aufnahme-Modus im '
-                            'Inferenz-Panel deaktivieren und erneut starten.'
-                        )
-                        self.get_logger().error(
-                            'Pre-flight: record_inference_mode requested but '
-                            'the inference timer has no record() path')
+                        response.message = refusal[0]
+                        self.get_logger().error(refusal[1])
                         return response
 
                     self.init_robot_control_parameters_from_user_task(

@@ -4,7 +4,8 @@ supabase==2.15.1
 # Bounded: an unbounded `modal>=0.64` floor once floated to a breaking
 # major (1.4.3) on deploy and broke runtime Modal calls. Keep the upper
 # bound; 1.4.x is verified working — review before bumping to 2.x.
-modal>=1.4,<2
+# 1.6: Server/sessions for Cloud-Inferenz; the training dispatch calls are unchanged.
+modal>=1.6,<2
 httpx==0.28.1
 python-dotenv==1.1.0
 pydantic==2.11.3

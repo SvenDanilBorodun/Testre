@@ -1,0 +1,455 @@
+"""Cloud-Inferenz control plane: /inference/* (migration 048; spec §4.3).
+
+A student runs a trained ACT model on a Modal GPU while the robot stays at
+home. Reserve, then arm (D31):
+
+  POST /inference/sessions                 model chosen -> checks, a DB row
+                                           `reserved`, a Modal session
+                                           (sessions.start), the model prefetched.
+                                           The answer carries NO secret.
+  POST /inference/sessions/{id}/arm        Start pressed -> a FRESH connect token
+                                           (the reservation's dies) + the edge
+                                           token: the ONLY answer with secrets,
+                                           handed by the page to the robot once.
+  POST /inference/sessions/{id}/heartbeat  every 15 s from the page (45 s rule)
+  POST /inference/sessions/{id}/end        Stop / pagehide keepalive (no body)
+  GET  /inference/usage                    today's Cloud-Zeit
+
+Conventions that are easy to undo by accident:
+  * STUDENTS ONLY (owner A-Q4): every route refuses any other role in German.
+    Teachers read their students' cloud runs through routes/teacher.py.
+  * Rule §4: the service role bypasses RLS. Every session RPC is keyed by the
+    JWT's user id (P0002 -> German 404, never 403); a training is visible by
+    exactly routes/training.py::get_training's ladder. No route takes a user id.
+  * Every handler is `async def` and runs blocking work off the loop
+    (asyncio.to_thread, or inference_edge's own pools). Every answer — refusals
+    included — carries `Cache-Control: no-store` (`_no_store`).
+  * The reserve body is read BY HAND from the raw request (V1-8), never through
+    a pydantic model or `Body(...)`: FastAPI's own 422 is English, echoes the
+    request's `input` and carries no `Cache-Control`, and an invalid-JSON body
+    would reach it before any handler. The other POST routes take no body.
+  * No Modal call before the reservation row exists: a refused caller never
+    costs a GPU. Every attach-time end is 503, `superseded` included (G-4), so a
+    409 from reserve always means the model itself was refused.
+  * Neither token, its hash, the envelope nor a credential object is logged or
+    put into an exception text.
+  * Every German `detail=` literal is bound at its raise site on purpose:
+    german_detail_lint.py reads keyword arguments.
+  * ONE answer carries a machine-readable `code` next to its German `detail`:
+    the reserve's 503 when `sessions.start` outlived its bound
+    (`"code": "gpu_not_started"`). The page retries the reserve on that code
+    alone (owner, round 2) and never on German text. Every other start failure
+    answers the same sentence WITHOUT the code (owner, round 3): a permanent one
+    (the SDK's own exception such as an AuthError, credentials of an unexpected
+    shape), which a retry cannot fix, and an end of the reservation itself
+    (attach-time end, or a newer reservation of the student took its start over:
+    another tab superseded it, the page let it go).
+  * A retry never opens a second GPU start (owner, round 3): a reserve of a student
+    whose earlier reservation's `sessions.start` still runs waits on THAT start
+    (`inference_edge.start_session` is keyed by the student), so the page's retries
+    add no START_POOL thread. A start keeps its thread until Modal answers, also after
+    the page gave up, and one older than START_JOIN_MAX_AGE_S is never joined, so the
+    pool is bounded by students with a start in flight, not by the global cap.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import functools
+import json
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+from app.auth import get_current_profile
+from app.services import inference_edge
+from app.services import inference_sessions as svc
+from app.services.supabase_client import get_supabase
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/inference", tags=["inference"])
+
+_NO_STORE = {"Cache-Control": "no-store"}
+# == physical_ai_manager features/cloudInference/controller.js GPU_NOT_STARTED_CODE
+GPU_NOT_STARTED_CODE = "gpu_not_started"
+# The reserve body is `{"training_id": <int>}`; anything past this is not one.
+_RESERVE_BODY_MAX_BYTES = 4096
+_TRAINING_ID_MAX = 2_147_483_647  # trainings.id is a Postgres INT
+
+
+class _CodedHTTPException(HTTPException):
+    """An HTTPException whose JSON body also carries a machine-readable `code`."""
+
+    def __init__(self, status_code: int, detail: str, code: str):
+        super().__init__(status_code=status_code, detail=detail)
+        self.code = code
+
+
+def _ok(content: dict) -> JSONResponse:
+    return JSONResponse(content=content, headers=dict(_NO_STORE))
+
+
+def _no_store(handler):
+    """Answer every HTTPException as a no-store JSON body, and an unexpected
+    exception as a German 500 that names nothing (its TYPE is logged)."""
+
+    @functools.wraps(handler)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await handler(*args, **kwargs)
+        except HTTPException as exc:
+            content = {"detail": exc.detail}
+            if isinstance(exc, _CodedHTTPException):
+                content["code"] = exc.code
+            return JSONResponse(status_code=exc.status_code, content=content, headers=dict(_NO_STORE))
+        except Exception as exc:  # noqa: BLE001 - never str(exc)
+            logger.error("inference route %s failed: %s", handler.__name__, type(exc).__name__)
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Die Cloud-Inferenz ist gerade nicht verfügbar. Bitte versuche es gleich noch einmal."},
+                headers=dict(_NO_STORE),
+            )
+
+    return wrapper
+
+
+def _require_student(profile) -> str:
+    if not isinstance(profile, dict) or profile.get("role") != "student":
+        raise HTTPException(
+            status_code=403,
+            detail="Die Cloud-Inferenz ist nur für Schülerinnen und Schüler verfügbar.",
+        )
+    return str(profile["id"])
+
+
+def _session_id(session_id) -> str:
+    if not isinstance(session_id, str) or not svc.SESSION_ID_RE.fullmatch(session_id):
+        raise HTTPException(status_code=404, detail="Cloud-Sitzung nicht gefunden.")
+    return session_id
+
+
+def _session_not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail="Cloud-Sitzung nicht gefunden.")
+
+
+def _session_unreadable() -> HTTPException:
+    return HTTPException(status_code=500, detail="Die Cloud-Sitzung konnte nicht geladen werden.")
+
+
+def _gpu_not_started() -> HTTPException:
+    """`sessions.start` outlived START_TIMEOUT_S: the page may retry (coded); the retry
+    joins the still-running start (inference_edge.start_session)."""
+    return _CodedHTTPException(
+        status_code=503,
+        detail="Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.",
+        code=GPU_NOT_STARTED_CODE,
+    )
+
+
+def _gpu_start_failed() -> HTTPException:
+    """`sessions.start` failed for good (the SDK's own exception, credentials of an
+    unexpected shape): the same sentence, no retry code — a retry cannot fix it (round 3)."""
+    return HTTPException(
+        status_code=503,
+        detail="Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.",
+    )
+
+
+def _ended_while_starting() -> HTTPException:
+    """The reservation ended while its GPU started (G-4), or a newer reservation of the
+    student took its start over: the same sentence, no retry code."""
+    return HTTPException(
+        status_code=503,
+        detail="Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.",
+    )
+
+
+def _not_created() -> HTTPException:
+    return HTTPException(status_code=500, detail="Die Cloud-Sitzung konnte nicht angelegt werden.")
+
+
+def _model_not_act() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail=(
+            "Dieses Modell kann noch nicht in der Cloud ausgeführt werden – in der Cloud laufen "
+            "bisher nur ACT-Modelle."
+        ),
+    )
+
+
+def _malformed_request() -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail="Die Anfrage ist ungültig. Bitte lade die Seite neu und versuche es noch einmal.",
+    )
+
+
+async def _read_training_id(request) -> int:
+    """The `training_id` of a reserve body `{"training_id": <int 1..INT max>}`
+    (extra keys ignored), else the German 422. Never echoes the body."""
+    try:
+        raw = await request.body()
+    except Exception:  # noqa: BLE001 - a broken upload is a malformed request
+        raise _malformed_request() from None
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > _RESERVE_BODY_MAX_BYTES:
+        raise _malformed_request()
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        raise _malformed_request() from None
+    training_id = body.get("training_id") if isinstance(body, dict) else None
+    if (not isinstance(training_id, int) or isinstance(training_id, bool)
+            or not 1 <= training_id <= _TRAINING_ID_MAX):
+        raise _malformed_request()
+    return training_id
+
+
+def _valid_creds(creds) -> bool:
+    msid = getattr(creds, "session_id", None)
+    token = getattr(creds, "token", None)
+    return (isinstance(msid, str) and svc.MODAL_SESSION_ID_RE.fullmatch(msid) is not None
+            and isinstance(token, str) and svc.EDGE_TOKEN_RE.fullmatch(token) is not None)
+
+
+async def _end_edge_failed(sb, uid: str, session_id: str) -> None:
+    """Best effort: end the row `edge_failed` and wake the terminate loop."""
+    try:
+        await asyncio.to_thread(svc.end_session, sb, uid, session_id, "edge_failed")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("inference edge_failed end not stored: %s %s", session_id, type(exc).__name__)
+    inference_edge.kick()
+
+
+# -------------------------------------------------------------------- reserve
+
+
+@router.post("/sessions")
+@_no_store
+async def reserve_session(request: Request, profile=Depends(get_current_profile)):
+    uid = _require_student(profile)
+    training_id = await _read_training_id(request)
+    row = await asyncio.to_thread(svc.visible_training, profile, training_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Modell nicht gefunden.")
+    if row.get("status") != "succeeded":
+        raise HTTPException(status_code=409, detail="Dieses Training ist noch nicht fertig.")
+    if row.get("model_type") != "act":
+        raise _model_not_act()
+    repo = row.get("model_name")
+    if not isinstance(repo, str) or not svc.MODEL_REPO_RE.fullmatch(repo):
+        raise HTTPException(status_code=409, detail="Dieses Modell liegt nicht im EduBotics-Modellarchiv.")
+    try:
+        summary = await asyncio.to_thread(svc.resolve_model, repo)
+    except svc.ModelResolveError as exc:
+        if exc.code == "unreachable":
+            raise HTTPException(
+                status_code=502,
+                detail="Hugging Face ist gerade nicht erreichbar. Bitte in einer Minute erneut versuchen.",
+            ) from None
+        if exc.code == "not_act":
+            raise _model_not_act() from None
+        if exc.code == "invalid":
+            raise HTTPException(
+                status_code=409, detail="Die Modelldateien sind unvollständig oder beschädigt."
+            ) from None
+        raise HTTPException(status_code=409, detail="Das Modell wurde bei Hugging Face nicht gefunden.") from None
+
+    sb = get_supabase()
+    t0, h0 = svc.new_token()
+    try:
+        reservation = await asyncio.to_thread(svc.create_reservation, sb, profile, row, summary, h0)
+    except svc.DailyCapReached:
+        raise HTTPException(
+            status_code=429, detail="Deine Cloud-Zeit für heute ist aufgebraucht. Morgen geht es weiter."
+        ) from None
+    except svc.CloudBusy:
+        raise HTTPException(
+            status_code=503,
+            detail="Die Cloud ist gerade voll ausgelastet. Bitte in ein paar Minuten erneut versuchen.",
+        ) from None
+    except svc.NotFound:
+        raise HTTPException(status_code=404, detail="Modell nicht gefunden.") from None
+    except svc.SessionStoreError:
+        raise _not_created() from None
+    session_id = reservation["session_id"]
+    # A superseded reservation the robot never used frees its GPU slot now (D33).
+    inference_edge.kick()
+
+    async def on_late(creds) -> None:
+        """A start that outlived its bound succeeded after all: attach it to the
+        (by then ended) row so the terminate loop ends it, or terminate it now."""
+        token = getattr(creds, "token", None)
+        if not _valid_creds(creds):
+            await inference_edge.terminate_now(token)
+            return
+        try:
+            result = await asyncio.to_thread(
+                svc.attach_edge, sb, session_id, creds.session_id, svc.edge_seal(session_id, token))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("inference late attach failed: %s %s", session_id, type(exc).__name__)
+            await inference_edge.terminate_now(token)
+            return
+        if result.get("status") in ("missing", "conflict"):
+            await inference_edge.terminate_now(token)
+            return
+        inference_edge.kick()
+
+    try:
+        creds = await inference_edge.start_session(uid, on_late)
+    except inference_edge.EdgeTimeout as exc:
+        logger.warning("inference start timed out (%s): session=%s user=%s",
+                       exc.args[0] if exc.args else "", session_id, uid)
+        await _end_edge_failed(sb, uid, session_id)
+        raise _gpu_not_started() from None
+    except inference_edge.StartSuperseded:
+        # A newer reservation of this student joined the start and takes it. Creating
+        # it normally already ended this row `superseded`, and the end below is then a
+        # no-op; if two tabs' requests reach the start out of order, this row may be
+        # the newer, still live one, and it ends `edge_failed` here (both tabs see the
+        # plain 503, no session leaks; R3 NIT 2, accepted).
+        logger.info("inference start taken over by a newer reservation: session=%s user=%s", session_id, uid)
+        await _end_edge_failed(sb, uid, session_id)
+        raise _ended_while_starting() from None
+    except Exception as exc:  # noqa: BLE001 - the SDK's own: permanent, never retried
+        logger.warning("inference start failed: %s session=%s user=%s", type(exc).__name__, session_id, uid)
+        await _end_edge_failed(sb, uid, session_id)
+        raise _gpu_start_failed() from None
+    if not _valid_creds(creds):
+        logger.warning("inference start: credentials of an unexpected shape, session=%s", session_id)
+        await inference_edge.terminate_now(getattr(creds, "token", None))
+        await _end_edge_failed(sb, uid, session_id)
+        raise _gpu_start_failed()
+    try:
+        envelope = svc.edge_seal(session_id, creds.token)
+        attached = await asyncio.to_thread(svc.attach_edge, sb, session_id, creds.session_id, envelope)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("inference attach failed: %s session=%s", type(exc).__name__, session_id)
+        await inference_edge.terminate_now(creds.token)
+        await _end_edge_failed(sb, uid, session_id)
+        raise _not_created() from None
+    status = attached.get("status")
+    if status == "reserved":
+        inference_edge.spawn(inference_edge.prefetch(creds.token, t0))
+        return _ok({
+            "session_id": session_id,
+            "summary": summary,
+            "session_s": reservation.get("session_s"),
+            "remaining_today_s": reservation.get("remaining_today_s"),
+            "reserve_s": svc.RESERVE_S,
+        })
+    if status == "ended":
+        # Stored on the ended row: the terminate loop ends the Modal session (D39, G-4).
+        inference_edge.kick()
+        raise _ended_while_starting()
+    await inference_edge.terminate_now(creds.token)
+    raise _not_created()
+
+
+# ------------------------------------------------------------------------ arm
+
+
+@router.post("/sessions/{session_id}/arm")
+@_no_store
+async def arm_session(session_id: str, profile=Depends(get_current_profile)):
+    uid = _require_student(profile)
+    sid = _session_id(session_id)
+    sb = get_supabase()
+    t1, h1 = svc.new_token()
+    try:
+        armed = await asyncio.to_thread(svc.arm, sb, uid, sid, h1)
+    except svc.NotFound:
+        raise _session_not_found() from None
+    except svc.SessionStoreError:
+        raise _session_unreadable() from None
+    status = armed.get("status")
+    if status == "armed":
+        edge_token = svc.edge_open(sid, armed.get("edge_token_enc"))
+        if edge_token is None:
+            logger.warning("inference arm: edge envelope does not open, session=%s", sid)
+            await _end_edge_failed(sb, uid, sid)
+            raise HTTPException(
+                status_code=503, detail="Die Cloud-Sitzung ist nicht mehr nutzbar. Bitte erneut starten."
+            )
+        return _ok({"token": t1, "edge_token": edge_token, "session_s": armed.get("session_s")})
+    if status == "active":
+        raise HTTPException(status_code=409, detail="Dieser Cloud-Lauf läuft bereits.")
+    if status == "not_ready":
+        raise HTTPException(
+            status_code=409, detail="Die Cloud-GPU wird noch vorbereitet. Bitte einen Moment warten."
+        )
+    if status == "ended":
+        raise HTTPException(
+            status_code=410,
+            detail=svc.END_REASON_DE.get(armed.get("end_reason")) or "Die Reservierung ist abgelaufen.",
+        )
+    raise _session_unreadable()
+
+
+# ------------------------------------------------------------------ heartbeat
+
+
+@router.post("/sessions/{session_id}/heartbeat")
+@_no_store
+async def heartbeat_session(session_id: str, profile=Depends(get_current_profile)):
+    uid = _require_student(profile)
+    sid = _session_id(session_id)
+    try:
+        beat = await asyncio.to_thread(svc.client_heartbeat, get_supabase(), uid, sid)
+    except svc.NotFound:
+        raise _session_not_found() from None
+    except svc.SessionStoreError:
+        raise _session_unreadable() from None
+    reason = beat.get("end_reason")
+    return _ok({
+        "status": beat.get("status"),
+        "end_reason": reason,
+        "end_reason_de": svc.END_REASON_DE.get(reason, "") if reason else "",
+        "max_end_in_s": beat.get("max_end_in_s"),
+    })
+
+
+# ------------------------------------------------------------------------ end
+
+
+@router.post("/sessions/{session_id}/end")
+@_no_store
+async def end_session(session_id: str, profile=Depends(get_current_profile)):
+    uid = _require_student(profile)
+    sid = _session_id(session_id)
+    try:
+        ended = await asyncio.to_thread(svc.end_session, get_supabase(), uid, sid, "user_stop")
+    except svc.NotFound:
+        raise _session_not_found() from None
+    except svc.SessionStoreError:
+        raise _session_unreadable() from None
+    # A reservation the robot never used is terminated at once; a connected run
+    # TERMINATE_AFTER_S later, so the robot hears why first (D33).
+    inference_edge.kick()
+    return _ok({
+        "status": ended.get("status"),
+        "end_reason": ended.get("end_reason"),
+        "active_seconds": ended.get("active_seconds"),
+    })
+
+
+# ---------------------------------------------------------------------- usage
+
+
+@router.get("/usage")
+@_no_store
+async def read_usage(profile=Depends(get_current_profile)):
+    uid = _require_student(profile)
+    try:
+        used = await asyncio.to_thread(svc.usage, get_supabase(), uid)
+    except svc.SessionStoreError:
+        raise HTTPException(status_code=500, detail="Die Cloud-Zeit konnte nicht geladen werden.") from None
+    return _ok({
+        "daily_cap_s": svc.DAILY_CAP_S,
+        "session_cap_s": svc.SESSION_MAX_S,
+        "used_today_s": used.get("used_today_s"),
+        "remaining_today_s": used.get("remaining_today_s"),
+        "live_session_id": used.get("live_session_id"),
+    })

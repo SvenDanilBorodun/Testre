@@ -702,6 +702,10 @@ def capabilities_json(profile: ArmProfile) -> str:
         # rather than imported from workflow.code_program (which pulls the whole
         # RPC/handler stack) — code_program.CODE_LANGUAGES is the twin.
         'code_languages': ['python', 'java'],
+        # Cloud-Inferenz (additive, contract C5): this robot can run a trained model on the
+        # cloud GPU. Equal to `inferable` — a cloud run IS an inference run on the same rail;
+        # the six-boolean adopt-guard tolerates the extra key on an old client.
+        'cloud_inference': caps.inferable,
     }
     for key, value in (
         ('reach_inner_m', profile.reach_inner_m),

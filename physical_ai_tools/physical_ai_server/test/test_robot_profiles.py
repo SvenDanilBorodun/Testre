@@ -509,3 +509,23 @@ def test_code_languages_matches_the_code_program_twin():
     from physical_ai_server.workflow.code_program import CODE_LANGUAGES
     obj = json.loads(rp.capabilities_json(rp.resolve('omx_full')))
     assert obj['code_languages'] == list(CODE_LANGUAGES)
+
+
+# --- cloud_inference (Cloud-Inferenz, spec §5.8, contract C5) ---------------
+
+@pytest.mark.parametrize('pid', sorted(rp.ROBOT_PROFILES))
+def test_cloud_inference_equals_inferable(pid):
+    """Every profile's manifest carries the additive ``cloud_inference`` key, equal to
+    ``inferable`` (a cloud run is an inference run; a Roboter-Studio-only arm has neither).
+    It sits right after ``code_languages`` and the six-boolean adopt contract is unchanged."""
+    prof = rp.resolve(pid)
+    obj = json.loads(rp.capabilities_json(prof))
+    assert obj['cloud_inference'] is prof.capabilities.inferable
+    assert type(obj['cloud_inference']) is bool
+    keys = list(obj)
+    assert keys[keys.index('code_languages') + 1] == 'cloud_inference'
+    assert set(_CAP_KEYS) <= set(keys)
+    # main @ a135bdde already sends 15 keys (OMX) / 19 (edu6/edu1, help_de included) since
+    # code_languages; spec §5.8's „15 / 19" counted before it. With cloud_inference: 16 / 20.
+    expected_count = 16 if pid in ('omx_full', 'omx_follower') else 20
+    assert len(keys) == expected_count, keys

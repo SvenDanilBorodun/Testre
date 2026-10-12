@@ -1,0 +1,180 @@
+/* The cloud target's waiting card (CloudWait.jsx). Every class is `ciw-`.
+ * Two tones: light (the white panel, a soft teal wash) and dark (over the
+ * camera stage). The picture moves slowly and never claims progress: the dots
+ * fade in turn from the robot to the cloud, the cloud breathes. Under reduced
+ * motion both stand still (the .ciw-reduced class from matchMedia, and the
+ * media query below for the same). */
+
+.ciw {
+  --ciw-bg: var(--accent-wash);
+  --ciw-line: #BFE0DD;
+  --ciw-ink: var(--ink);
+  --ciw-ink-2: var(--ink-2);
+  --ciw-accent: var(--accent);
+  --ciw-retry: var(--accent-ink);
+  --ciw-node-bg: #FFFFFF;
+  --ciw-node-line: #BFE0DD;
+  --ciw-node-ink: var(--ink-2);
+  --ciw-halo: rgba(10, 127, 122, 0.30);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 16px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--ciw-line);
+  background: var(--ciw-bg);
+  color: var(--ciw-ink);
+  text-align: center;
+}
+
+.ciw.ciw-dark {
+  --ciw-bg: rgba(22, 27, 29, 0.92);
+  --ciw-line: var(--dark-line);
+  --ciw-ink: var(--dark-ink);
+  --ciw-ink-2: var(--dark-ink-2);
+  --ciw-accent: #5CC8C1;
+  --ciw-retry: #8FDAD4;
+  --ciw-node-bg: rgba(255, 255, 255, 0.06);
+  --ciw-node-line: rgba(255, 255, 255, 0.14);
+  --ciw-node-ink: var(--dark-ink-2);
+  --ciw-halo: rgba(92, 200, 193, 0.38);
+  width: min(420px, 100%);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+/* ---------- the picture: robot · · · cloud ---------- */
+.ciw-picture {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.ciw-node {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--ciw-node-line);
+  background: var(--ciw-node-bg);
+  color: var(--ciw-node-ink);
+}
+
+.ciw-node-cloud {
+  width: 52px;
+  height: 52px;
+  color: var(--ciw-accent);
+}
+
+.ciw-halo {
+  position: absolute;
+  inset: -1px;
+  border-radius: 50%;
+  animation: ciw-breathe 2.6s ease-out infinite;
+}
+
+.ciw-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ciw-accent);
+}
+
+.ciw-dot {
+  opacity: 0.25;
+  animation: ciw-flow 1.8s ease-in-out infinite;
+}
+.ciw-dot:nth-child(2) { animation-delay: 0.3s; }
+.ciw-dot:nth-child(3) { animation-delay: 0.6s; }
+
+@keyframes ciw-flow {
+  0%, 100% { opacity: 0.25; }
+  35% { opacity: 1; }
+  70% { opacity: 0.25; }
+}
+
+@keyframes ciw-breathe {
+  0% { box-shadow: 0 0 0 0 var(--ciw-halo); }
+  70% { box-shadow: 0 0 0 12px rgba(0, 0, 0, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+}
+
+/* ---------- the words ---------- */
+.ciw-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  max-width: 34em;
+}
+
+.ciw-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--ciw-ink);
+}
+
+.ciw-sub {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ciw-ink-2);
+}
+
+.ciw-line {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ciw-ink-2);
+}
+.ciw-sub + .ciw-line,
+.ciw-retry + .ciw-line { margin-top: 4px; }
+
+.ciw-long { margin-top: 4px; font-weight: 500; }
+
+.ciw-retry {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--ciw-node-bg);
+  border: 1px solid var(--ciw-node-line);
+  font-size: 12.5px;
+  line-height: 1.4;
+  font-weight: 500;
+  color: var(--ciw-retry);
+  text-align: left;
+}
+.ciw-retry-icon { margin-top: 2px; }
+
+/* ---------- the clock (outside the live region) ---------- */
+.ciw-elapsed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ciw-ink-2);
+}
+
+.ciw-clock {
+  font-family: 'JetBrains Mono', source-code-pro, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--ciw-ink);
+}
+
+/* ---------- reduced motion: the words and the clock stay, the movement goes ---------- */
+.ciw-reduced .ciw-halo,
+.ciw-reduced .ciw-dot { animation: none; }
+.ciw-reduced .ciw-dot { opacity: 0.6; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ciw-halo,
+  .ciw-dot { animation: none; }
+  .ciw-dot { opacity: 0.6; }
+}

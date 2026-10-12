@@ -79,6 +79,7 @@
 import { supabase } from '../lib/supabaseClient';
 import { signedOut } from '../features/session/sessionActions';
 import { resetJetsonOnLogout } from '../features/jetson/sessionReset';
+import { endCloudInferenceOnLogout } from '../features/cloudInference/controller';
 import { CLEAR_BOUND_MS, clearRobotHfToken } from '../features/hfToken/robotChannel';
 import { forgetVormachenCopy } from '../components/Workshop/code/vormachenClipboard';
 import { clearStudentScopedStorage, clearSupabaseSessionKeys } from './sessionScope';
@@ -127,6 +128,10 @@ export const signOutStudent = ({ reload = true } = {}) => async (dispatch, getSt
   const jetsonClaimed = state.jetson?.status === 'connected';
 
   resetJetsonOnLogout(dispatch, accessToken, jetsonId);
+  // Cloud-Inferenz: end a reserved or running cloud session with the same
+  // still-valid JWT (a keepalive POST …/end) and reset the module-level
+  // controller synchronously, so the next student finds no session of ours.
+  endCloudInferenceOnLogout(accessToken);
   // Started now, awaited after the revoke (see „THE ROBOT'S TOKEN SLOT").
   const hfClear = startRobotTokenClear(jetsonClaimed);
   dispatch(signedOut());

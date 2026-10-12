@@ -7,9 +7,10 @@ save (the c56c012 class) — the probe is what makes the Railway deploy abort
 with a named cause instead. Read from the source with ``ast`` (main.py's
 module-level env checks would need the full app deps to import).
 
-Counts are pinned (15 tables / 11 column sets / 21 RPCs; migration 042 added
-one of each) so a later addition to the probe has to move this file
-deliberately, the way CLAUDE.md asks.
+Counts are pinned (16 tables / 13 column sets / 34 RPCs; migration 042 added
+one of each, migration 048 one table, two column sets and thirteen RPCs) so a
+later addition to the probe has to move this file deliberately, the way
+CLAUDE.md asks.
 """
 
 from __future__ import annotations
@@ -66,9 +67,9 @@ class TestSchemaProbeKnows040(unittest.TestCase):
             for e in cls.probe["required_rpcs"].elts
         }
 
-    def test_the_counts_are_15_11_21(self) -> None:
+    def test_the_counts_are_16_13_34(self) -> None:
         self.assertEqual(
-            (len(self.tables), len(self.columns), len(self.rpcs)), (15, 11, 21)
+            (len(self.tables), len(self.columns), len(self.rpcs)), (16, 13, 34)
         )
 
     def test_the_submissions_table_is_probed(self) -> None:

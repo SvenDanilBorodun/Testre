@@ -1,0 +1,10 @@
+# Cloud-Inferenz: start a cloud run on this robot (physical_ai_server). session_token (the connect
+# token) and edge_token (the Modal session's edge token) are the one-time credentials the cloud API
+# issued to the signed-in student for this run; the node hands both to its cloud client and never
+# echoes, stores, logs or copies them into TaskInfo/TaskStatus.
+TaskInfo task_info
+string session_token
+string edge_token
+---
+bool success
+string message

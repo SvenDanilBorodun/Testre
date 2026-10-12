@@ -123,6 +123,25 @@ def configured() -> bool:
     return _keys()["current"] is not None
 
 
+def subkeys(info: bytes) -> list:
+    """HKDF-SHA256 sub-keys of the configured keys, current first: [(parent kid, 32-byte key), ...].
+
+    Cloud-Inferenz (migration 048, D32) seals the Modal edge token under the
+    sub-key for `info=b"edubotics-inference-edge:v1"`: one secret on Railway, two
+    key domains, so an HF-token envelope and an edge envelope can never be
+    swapped. The kid is the PARENT key's, so a rotation (current -> previous)
+    keeps every stored edge envelope openable exactly like an HF-token one.
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    keys = _keys()
+    if keys["current"] is None:
+        raise HfCredentialError("key_missing")
+    return [(pair[0], HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(pair[1]))
+            for pair in (keys["current"], keys["previous"]) if pair is not None]
+
+
 def usable(ciphertext: str) -> bool:
     """True when the envelope's key id is one this process holds (no decryption)."""
     kid = _split(ciphertext)[0] if isinstance(ciphertext, str) else None

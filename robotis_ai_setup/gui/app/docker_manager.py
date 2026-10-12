@@ -1719,6 +1719,114 @@ def clear_robot_hf_token_after_window_close(
     return outcome
 
 
+# ── A Cloud-Inferenz run of the student's window after it closed ─────────────
+#
+# During a Cloud-Inferenz run the robot drives the arm from plans a cloud GPU
+# computes, while the student's page heartbeats the cloud API. A window that just
+# closes never says „Stoppen"; the cloud API would end the run after 45 s of page
+# silence, and the arm would keep moving until then. So before it clears the
+# token (which may sleep for minutes), the window-close hook asks the NODE, ONCE,
+# to end a cloud run: `/edubotics/cloud_inference/stop` (std_srvs/Trigger), which
+# ends only a cloud run and never a local inference, a recording or a program.
+# The node keeps a marker file while a cloud run is active, so the common case
+# (no cloud run) costs one `docker exec … test -e` and no ros2 CLI process.
+
+# Must stay equal to cloud_contract.STOP_SERVICE / ACTIVE_MARKER_PATH of the
+# server package; tests/test_gui_cloud_inference_stop.py compares them.
+CLOUD_STOP_SERVICE = "/edubotics/cloud_inference/stop"        # == cloud_contract.STOP_SERVICE (lockstep)
+CLOUD_STOP_MARKER = "/tmp/edubotics-cloud-inference.active"   # == cloud_contract.ACTIVE_MARKER_PATH (lockstep)
+# The script prints exactly one `EDUBOTICS_CLOUD_STOP=<outcome>` line; the GUI
+# reads nothing else (not stderr, not the exit code).
+CLOUD_STOP_SENTINEL = "EDUBOTICS_CLOUD_STOP="
+CLOUD_STOP_STOPPED, CLOUD_STOP_IDLE, CLOUD_STOP_NO_CONTAINER, CLOUD_STOP_UNREACHABLE = (
+    "stopped", "idle", "no_container", "unreachable")
+CLOUD_STOP_SUPERSEDED = "superseded"      # a newer session began; nothing was done
+_CLOUD_STOP_ANSWERS = (CLOUD_STOP_STOPPED, CLOUD_STOP_IDLE, CLOUD_STOP_NO_CONTAINER,
+                       CLOUD_STOP_UNREACHABLE)
+# One attempt, bounded inside the container (`timeout -k 1 8`) and from the
+# outside by this many seconds for the whole `wsl.exe` round trip.
+CLOUD_STOP_EXEC_TIMEOUT_S = 15
+# Student-visible, logged at most once per closed window and only when the stop
+# could not be asked while the window's session is still the current one. The
+# run ends 45 s after the page's LAST heartbeat plus the container's next session
+# check (up to ~10 s and one RPC), i.e. up to ~55 s after the window closed, so
+# the sentence names no hard bound.
+CLOUD_STOP_UNREACHABLE_DE = (
+    "[WARNUNG] Ein Cloud-Inferenz-Lauf des geschlossenen Fensters konnte nicht gestoppt werden. "
+    "Er endet nach etwa einer Minute von selbst.")
+# Single-flight like the token clear, but its OWN lock: a stop never waits for a
+# token clear that sleeps between its retries.
+_cloud_stop_lock = threading.Lock()
+
+# Fixed text, nothing interpolated, no token in it; carried by `wsl_bridge.run`
+# (stdin to `bash`) like _HF_CLEAR_SCRIPT, every `docker exec` reading /dev/null.
+_CLOUD_STOP_SCRIPT = r"""c=physical_ai_server
+if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" != "true" ]; then echo EDUBOTICS_CLOUD_STOP=no_container; exit 0; fi
+if ! docker exec "$c" test -e /tmp/edubotics-cloud-inference.active </dev/null 2>/dev/null; then echo EDUBOTICS_CLOUD_STOP=idle; exit 0; fi
+out=$(docker exec "$c" bash -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && timeout -k 1 8 nice -n 19 ros2 service call /edubotics/cloud_inference/stop std_srvs/srv/Trigger "{}"' </dev/null 2>&1)
+case "$out" in *success=True*) echo EDUBOTICS_CLOUD_STOP=stopped;; *success=False*) echo EDUBOTICS_CLOUD_STOP=idle;; *) echo EDUBOTICS_CLOUD_STOP=unreachable;; esac
+"""
+
+
+def _cloud_stop_outcome(stdout) -> str:
+    """The outcome named by the script's sentinel line; anything else is unreachable."""
+    if not isinstance(stdout, str):
+        return CLOUD_STOP_UNREACHABLE
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith(CLOUD_STOP_SENTINEL):
+            outcome = line[len(CLOUD_STOP_SENTINEL):].strip()
+            return outcome if outcome in _CLOUD_STOP_ANSWERS else CLOUD_STOP_UNREACHABLE
+    return CLOUD_STOP_UNREACHABLE
+
+
+def stop_cloud_inference(timeout: int = CLOUD_STOP_EXEC_TIMEOUT_S) -> str:
+    """Ask the running server node to end a Cloud-Inferenz run.
+
+    One attempt. Returns "stopped" / "idle" / "no_container" / "unreachable".
+    Reads ONLY the stdout sentinel of ``_CLOUD_STOP_SCRIPT``, maps every failure
+    to "unreachable", never raises and never logs or returns command output.
+    """
+    try:
+        result = wsl_bridge.run(_CLOUD_STOP_SCRIPT, timeout=timeout, check=False)
+        return _cloud_stop_outcome(getattr(result, "stdout", None))
+    except Exception:  # noqa: BLE001 — the contract is "never raises"
+        return CLOUD_STOP_UNREACHABLE
+
+
+def stop_cloud_inference_after_window_close(generation, is_current, log=None, *, attempt=None) -> str:
+    """End a Cloud-Inferenz run of a window that ended on its own. ONE attempt.
+
+    ``is_current(generation)`` (``webview_window.is_current_generation``) is
+    asked first and again once the single-flight lock is held, right before the
+    attempt: a newer session — whose student may have started a cloud run of
+    their own — always wins, and this returns "superseded" without a log line.
+    There is no retry: the cloud API ends a run whose page went silent after
+    45 s, which is the floor. "unreachable" with the window still current logs
+    ONE German line; every other outcome is silent. ``attempt`` defaults to
+    ``stop_cloud_inference``, resolved at call time. Never raises.
+    """
+    do_attempt = attempt if attempt is not None else stop_cloud_inference
+    if not _hf_clear_is_current(is_current, generation):
+        return CLOUD_STOP_SUPERSEDED
+    with _cloud_stop_lock:
+        if not _hf_clear_is_current(is_current, generation):
+            return CLOUD_STOP_SUPERSEDED
+        try:
+            outcome = do_attempt()
+        except Exception:  # noqa: BLE001
+            outcome = CLOUD_STOP_UNREACHABLE
+    if outcome not in _CLOUD_STOP_ANSWERS:
+        outcome = CLOUD_STOP_UNREACHABLE
+    if (outcome == CLOUD_STOP_UNREACHABLE and log is not None
+            and _hf_clear_is_current(is_current, generation)):
+        try:
+            log(CLOUD_STOP_UNREACHABLE_DE)
+        except Exception:  # noqa: BLE001 — a diagnostic must not break the thread
+            pass
+    return outcome
+
+
 def get_container_status() -> dict[str, str]:
     """Get status of all project containers.
 

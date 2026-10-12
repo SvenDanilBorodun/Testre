@@ -195,16 +195,22 @@ export default function StudentTrainingHistoryDrawer({ student, onClose }) {
           {inferenceRuns.length > 0 && (
             <div className="pt-4 mt-2 border-t border-[var(--line)]">
               <h4 className="text-xs font-semibold uppercase tracking-wide text-[var(--ink-3)] mb-2">
-                Inferenz-Läufe (Klassen-Jetson)
+                Inferenz-Läufe
               </h4>
               <div className="space-y-2">
                 {inferenceRuns.map((run) => (
                   <div
                     key={run.id}
+                    data-testid={`inference-run-${run.id}`}
                     className="p-3 border border-[var(--line)] rounded-[var(--radius)] bg-white text-[11px] font-mono"
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-[var(--ink)]">{run.policy_repo}</span>
+                      {/* Cloud-Inferenz (048): where the run ran. An older API
+                          sends no `backend`: every run then was the Jetson's. */}
+                      <Pill tone="neutral" className="shrink-0">
+                        {run.backend === 'cloud' ? 'Cloud' : 'Klassen-Jetson'}
+                      </Pill>
                       <Pill
                         tone={
                           run.exit_reason === 'error'

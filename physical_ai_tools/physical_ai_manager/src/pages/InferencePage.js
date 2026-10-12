@@ -3,7 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import toast, { useToasterStore } from 'react-hot-toast';
@@ -18,6 +18,14 @@ import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
 import { useJetsonConnection } from '../hooks/useJetsonConnection';
 import { useCameraLiveness } from '../hooks/useCameraLiveness';
 import Icon from '../components/icons/Icon';
+import TargetSwitch from '../components/CloudInference/TargetSwitch';
+import CloudInferenceView from '../components/CloudInference/CloudInferenceView';
+import { cloudCopy } from '../components/CloudInference/cloudCopy';
+import useCloudInferenceSession from '../hooks/useCloudInferenceSession';
+import { cloudTargetState, effectiveTarget, jetsonOwnsRosbridge } from '../features/cloudInference/gating';
+import { isLiveRun, release as releaseCloudReservation } from '../features/cloudInference/controller';
+import { isCloudApiConfigured } from '../services/cloudConfig';
+import { isCloudOnlyMode } from '../utils/cloudMode';
 
 const TOAST_LIMIT = 3;
 
@@ -97,6 +105,34 @@ export default function InferencePage({ isActive = true }) {
     dispatch(setIsFirstLoadFalse('inference'));
   }, [taskInfo.tags, taskStatus.robotType, dispatch, isFirstLoad, isConnected]);
 
+  // Cloud-Inferenz (spec §6.2): WHERE the model runs is derived on every
+  // render, never stored (R-6, D3). useJetsonConnection above stays mounted for
+  // BOTH targets, so a discovery that resolves resume/reclaim after mount moves
+  // the page to the Jetson flow at once. `targetChoice` is set only by the
+  // TargetSwitch; without one, „In der Cloud" is the default whenever the robot
+  // advertises it and no Jetson owns rosbridge (owner A-Q5).
+  const cloudSession = useCloudInferenceSession();
+  const [targetChoice, setTargetChoice] = useState(null);
+  const cloud = cloudTargetState({
+    cloudOnly: isCloudOnlyMode(),
+    jetsonStatus,
+    capabilities: taskStatus.capabilities,
+    cloudApiConfigured: isCloudApiConfigured,
+  });
+  const liveCloudRun = isLiveRun(cloudSession);
+  const target = effectiveTarget({
+    jetsonStatus,
+    classroomId,
+    liveCloudSession: liveCloudRun,
+    cloud,
+    choice: targetChoice,
+  });
+  const chooseTarget = useCallback((next) => {
+    // Leaving the cloud lets a reservation go (its GPU slot is freed now).
+    if (next !== 'cloud') releaseCloudReservation();
+    setTargetChoice(next);
+  }, []);
+
   // NO page-level "Abmelden" here any more. StudentApp's own chrome — the
   // desktop rail and the mobile header, both rendered on EVERY page including
   // behind these full-page StateScreens — carries one now. StateScreen keeps
@@ -127,286 +163,314 @@ export default function InferencePage({ isActive = true }) {
     return <CenteredSpinner label="Profil wird geladen…" />;
   }
 
-  // 4) No classroom — message + logout. Per product spec the Inferenz UI
-  //    only exists for classroom-assigned students.
-  if (!classroomId) {
-    return (
-      <StateScreen
-        icon={<Icon name="graduationCap" size={44} className="text-amber-500" />}
-        title="Du bist keiner Klasse zugeordnet"
-        body={
-          <>
-            Inferenz läuft auf einem geteilten Klassen-Jetson. Solange du
-            keiner Klasse zugewiesen bist, kannst du den Inferenz-Bereich
-            nicht nutzen.
-            <br />
-            <span className="text-[var(--ink-3)] mt-3 block">
-              Bitte deinen Lehrer, dich in eine Klasse aufzunehmen — danach
-              erscheint hier dein Klassen-Jetson.
-            </span>
-          </>
-        }
-        identity={{ username, fullName }}
-      />
-    );
-  }
-
-  // 5) Classroom discovery still pending (status === 'unknown' means the
-  //    GET /classrooms/{id}/jetson promise hasn't resolved yet).
-  if (jetsonStatus === 'unknown') {
+  // 4) The classroom Jetson's discovery may still resolve resume/reclaim
+  //    (rosbridge moves to the Jetson): wait for it before showing anything.
+  if (target === 'pending') {
     return <CenteredSpinner label="Klassen-Jetson wird gesucht…" />;
   }
 
-  // 6) No Jetson paired with this classroom.
-  if (jetsonStatus === 'no_jetson') {
-    return (
-      <StateScreen
-        icon={<Icon name="cpu" size={44} className="text-gray-400" />}
-        title="Kein Klassen-Jetson eingerichtet"
-        body={
-          <>
-            Für deine Klasse wurde noch kein Jetson gekoppelt. Inferenz
-            ist erst möglich, wenn dein Lehrer den Klassen-Jetson
-            eingerichtet hat.
-            <br />
-            <span className="text-[var(--ink-3)] mt-3 block">
-              Sobald der Jetson gekoppelt ist, erscheint hier automatisch
-              die Verbindungs-Schaltfläche — du musst die Seite nicht neu
-              laden.
-            </span>
-          </>
-        }
-        identity={{ username, fullName }}
-      />
-    );
-  }
-
-  // 7) Error state.
-  if (jetsonStatus === 'error') {
-    return (
-      <StateScreen
-        icon={<Icon name="unlink" size={44} className="text-red-500" />}
-        title="Verbindung zum Klassen-Jetson fehlgeschlagen"
-        body={
-          <>
-            {jetsonError || 'Unbekannter Fehler.'}
-            <br />
-            <span className="text-[var(--ink-3)] mt-3 block">
-              Bitte versuche es gleich noch einmal. Wenn der Fehler bleibt,
-              wende dich an deinen Lehrer.
-            </span>
-          </>
-        }
-        identity={{ username, fullName }}
-        primaryAction={{ label: 'Erneut versuchen', onClick: () => window.location.reload(), icon: <Icon name="refresh" /> }}
-      />
-    );
-  }
-
-  // 8) Busy — someone else holds the lock.
-  if (jetsonStatus === 'busy') {
-    const who = jetsonOwnerFullName || jetsonOwnerUsername || 'einem anderen Schüler';
-    return (
-      <StateScreen
-        icon={<Icon name="link" size={44} className="text-amber-500" />}
-        title="Klassen-Jetson belegt"
-        body={
-          <>
-            Der Klassen-Jetson wird gerade von <strong>{who}</strong> benutzt.
-            <br />
-            <span className="text-[var(--ink-3)] mt-3 block">
-              Sobald die andere Person die Verbindung trennt, kannst du den
-              Jetson übernehmen. Diese Seite aktualisiert sich automatisch.
-            </span>
-          </>
-        }
-        identity={{ username, fullName }}
-      />
-    );
-  }
-
-  // 9) Available — show the connect CTA.
-  if (jetsonStatus === 'available') {
-    return (
-      <StateScreen
-        icon={<Icon name="cpu" size={44} className="text-emerald-500" />}
-        title={jetsonOnline ? 'Klassen-Jetson bereit' : 'Klassen-Jetson offline'}
-        body={
-          jetsonOnline ? (
+  // The Jetson flow: the page body from „No classroom" on, unchanged (a plain
+  // render function — no hooks inside).
+  function renderJetsonFlow() {
+    // 4) No classroom — message + logout. Per product spec the Inferenz UI
+    //    only exists for classroom-assigned students.
+    if (!classroomId) {
+      return (
+        <StateScreen
+          icon={<Icon name="graduationCap" size={44} className="text-amber-500" />}
+          title="Du bist keiner Klasse zugeordnet"
+          body={
             <>
-              Der Klassen-Jetson ist frei und wartet auf eine Verbindung.
-              Wenn du verbindest, wird der Jetson für dich reserviert, bis
-              du die Verbindung wieder trennst.
+              Inferenz läuft auf einem geteilten Klassen-Jetson. Solange du
+              keiner Klasse zugewiesen bist, kannst du den Inferenz-Bereich
+              nicht nutzen.
               <br />
               <span className="text-[var(--ink-3)] mt-3 block">
-                Das Verbinden kann etwa 30–60 Sekunden dauern — der Jetson
-                startet seinen ROS-Stack neu, damit alles sauber für dich
-                vorbereitet ist.
+                Bitte deinen Lehrer, dich in eine Klasse aufzunehmen — danach
+                erscheint hier dein Klassen-Jetson.
               </span>
             </>
-          ) : (
-            <>
-              Der Klassen-Jetson wurde länger nicht erreicht und gilt als
-              offline. Verbindung ist erst möglich, sobald der Jetson wieder
-              ein Lebenszeichen sendet.
-              <br />
-              <span className="text-[var(--ink-3)] mt-3 block">
-                Bitte deinen Lehrer zu prüfen, ob der Jetson eingeschaltet
-                ist und Netzwerk hat.
-              </span>
-            </>
-          )
-        }
-        identity={{ username, fullName }}
-        primaryAction={
-          jetsonOnline
-            ? {
-                label: 'Verbinde mit Klassen-Jetson',
-                onClick: connect,
-                icon: <Icon name="link" />,
-                tone: 'accent',
-              }
-            : null
-        }
-      />
-    );
-  }
-
-  // 10) Claiming — spinner.
-  if (jetsonStatus === 'claiming') {
-    return (
-      <CenteredSpinner
-        label="Verbinde mit Klassen-Jetson…"
-        sublabel="Der Jetson startet seinen ROS-Stack. Bitte einen Moment Geduld."
-      />
-    );
-  }
-
-  // 11) Disconnecting — spinner.
-  if (jetsonStatus === 'disconnecting') {
-    return (
-      <CenteredSpinner
-        label="Verbindung wird beendet…"
-        sublabel="Der Jetson wird für die nächste Schülerin/den nächsten Schüler vorbereitet."
-      />
-    );
-  }
-
-  // ────────────────────────────────────────────────────────────────────
-  // 12) CONNECTED — the actual Inferenz workspace.
-  // ────────────────────────────────────────────────────────────────────
-
-  const cameraChipLabel = (() => {
-    if (configuredCount === 0) {
-      return 'Keine Kamera-Topics auf dem Jetson';
-    }
-    if (liveCount === 0) {
-      return `0 / ${configuredCount} Kameras liefern Bilder`;
-    }
-    if (!allConfiguredAlive) {
-      return `${liveCount} / ${configuredCount} Kameras aktiv`;
-    }
-    return liveCount === 1 ? '1 Kamera aktiv' : `${liveCount} Kameras aktiv`;
-  })();
-
-  const cameraChipDotColor = (() => {
-    if (configuredCount === 0 || liveCount === 0) return '#ef4444'; // red — no real cameras
-    if (!allConfiguredAlive) return '#f59e0b';                       // amber — partial
-    return 'var(--accent)';                                          // green/teal — all good
-  })();
-
-  return (
-    <div
-      className="relative h-full w-full flex flex-col overflow-hidden"
-      style={{ background: 'var(--dark-bg)', color: 'var(--dark-ink)' }}
-    >
-      <div className="absolute top-3 left-3 right-3 z-30 flex items-center gap-2 flex-wrap">
-        <div className="h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-2 text-[11px] text-white/80">
-          <span className="font-mono uppercase tracking-wider opacity-70">Roboter</span>
-          <span className="font-mono px-1.5 py-0.5 rounded bg-white/10 max-w-[160px] truncate">
-            {taskStatus?.robotType || '—'}
-          </span>
-        </div>
-        <HeartbeatStatus dark />
-        <div
-          className="h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-2 text-[11px] text-white/80 font-mono whitespace-nowrap"
-          title={
-            configuredCount === 0
-              ? 'Kein /image/get_available_list konfiguriert'
-              : `${liveCount}/${configuredCount} Topics liefern aktuell Bilder`
           }
-        >
-          <span
-            className="w-1.5 h-1.5 rounded-full"
-            style={{ background: cameraChipDotColor }}
-          />
-          {cameraChipLabel}
-        </div>
-        <div className="h-8 px-3 rounded-full bg-emerald-500/15 border border-emerald-300/30 backdrop-blur-md flex items-center gap-2 text-[11px] text-emerald-100">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          <span>{heartbeatTransient ? 'Jetson — wird wiederhergestellt' : 'Verbunden mit Klassen-Jetson'}</span>
-          <button
-            type="button"
-            onClick={disconnect}
-            className="ml-1 px-2 py-0.5 rounded bg-red-600/80 hover:bg-red-600 text-white text-[10px]"
-          >
-            Trennen
-          </button>
-        </div>
-        <div className="flex-1" />
-        {isRightPanelCollapsed && (
-          <button
-            onClick={() => setIsRightPanelCollapsed(false)}
-            className="w-10 h-10 bg-white/[0.08] border border-white/15 rounded-full flex items-center justify-center text-white/80 backdrop-blur-md hover:bg-white/15"
-            title="Panel öffnen"
-          >
-            <Icon name="chevronsLeft" size={22} />
-          </button>
-        )}
-      </div>
+          identity={{ username, fullName }}
+        />
+      );
+    }
 
-      <div className="flex-1 flex items-start min-h-0 pt-[56px] pb-2 px-2 sm:px-3 lg:px-4 gap-2 sm:gap-3 lg:gap-4">
-        <div className="flex-1 self-stretch min-w-0 relative rounded-[var(--radius-lg)] overflow-hidden">
-          <ImageGrid isActive={isActive} />
-          {taskStatus.phase === TaskPhase.INFERENCE_LOADING && (
-            <div
-              className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/55 backdrop-blur-sm"
-              role="status"
-              aria-live="polite"
+    // 5) Classroom discovery still pending (status === 'unknown' means the
+    //    GET /classrooms/{id}/jetson promise hasn't resolved yet).
+    if (jetsonStatus === 'unknown') {
+      return <CenteredSpinner label="Klassen-Jetson wird gesucht…" />;
+    }
+
+    // 6) No Jetson paired with this classroom.
+    if (jetsonStatus === 'no_jetson') {
+      return (
+        <StateScreen
+          icon={<Icon name="cpu" size={44} className="text-gray-400" />}
+          title="Kein Klassen-Jetson eingerichtet"
+          body={
+            <>
+              Für deine Klasse wurde noch kein Jetson gekoppelt. Inferenz
+              ist erst möglich, wenn dein Lehrer den Klassen-Jetson
+              eingerichtet hat.
+              <br />
+              <span className="text-[var(--ink-3)] mt-3 block">
+                Sobald der Jetson gekoppelt ist, erscheint hier automatisch
+                die Verbindungs-Schaltfläche — du musst die Seite nicht neu
+                laden.
+              </span>
+            </>
+          }
+          identity={{ username, fullName }}
+        />
+      );
+    }
+
+    // 7) Error state.
+    if (jetsonStatus === 'error') {
+      return (
+        <StateScreen
+          icon={<Icon name="unlink" size={44} className="text-red-500" />}
+          title="Verbindung zum Klassen-Jetson fehlgeschlagen"
+          body={
+            <>
+              {jetsonError || 'Unbekannter Fehler.'}
+              <br />
+              <span className="text-[var(--ink-3)] mt-3 block">
+                Bitte versuche es gleich noch einmal. Wenn der Fehler bleibt,
+                wende dich an deinen Lehrer.
+              </span>
+            </>
+          }
+          identity={{ username, fullName }}
+          primaryAction={{ label: 'Erneut versuchen', onClick: () => window.location.reload(), icon: <Icon name="refresh" /> }}
+        />
+      );
+    }
+
+    // 8) Busy — someone else holds the lock.
+    if (jetsonStatus === 'busy') {
+      const who = jetsonOwnerFullName || jetsonOwnerUsername || 'einem anderen Schüler';
+      return (
+        <StateScreen
+          icon={<Icon name="link" size={44} className="text-amber-500" />}
+          title="Klassen-Jetson belegt"
+          body={
+            <>
+              Der Klassen-Jetson wird gerade von <strong>{who}</strong> benutzt.
+              <br />
+              <span className="text-[var(--ink-3)] mt-3 block">
+                Sobald die andere Person die Verbindung trennt, kannst du den
+                Jetson übernehmen. Diese Seite aktualisiert sich automatisch.
+              </span>
+            </>
+          }
+          identity={{ username, fullName }}
+        />
+      );
+    }
+
+    // 9) Available — show the connect CTA.
+    if (jetsonStatus === 'available') {
+      return (
+        <StateScreen
+          icon={<Icon name="cpu" size={44} className="text-emerald-500" />}
+          title={jetsonOnline ? 'Klassen-Jetson bereit' : 'Klassen-Jetson offline'}
+          body={
+            jetsonOnline ? (
+              <>
+                Der Klassen-Jetson ist frei und wartet auf eine Verbindung.
+                Wenn du verbindest, wird der Jetson für dich reserviert, bis
+                du die Verbindung wieder trennst.
+                <br />
+                <span className="text-[var(--ink-3)] mt-3 block">
+                  Das Verbinden kann etwa 30–60 Sekunden dauern — der Jetson
+                  startet seinen ROS-Stack neu, damit alles sauber für dich
+                  vorbereitet ist.
+                </span>
+              </>
+            ) : (
+              <>
+                Der Klassen-Jetson wurde länger nicht erreicht und gilt als
+                offline. Verbindung ist erst möglich, sobald der Jetson wieder
+                ein Lebenszeichen sendet.
+                <br />
+                <span className="text-[var(--ink-3)] mt-3 block">
+                  Bitte deinen Lehrer zu prüfen, ob der Jetson eingeschaltet
+                  ist und Netzwerk hat.
+                </span>
+              </>
+            )
+          }
+          identity={{ username, fullName }}
+          primaryAction={
+            jetsonOnline
+              ? {
+                  label: 'Verbinde mit Klassen-Jetson',
+                  onClick: connect,
+                  icon: <Icon name="link" />,
+                  tone: 'accent',
+                }
+              : null
+          }
+        />
+      );
+    }
+
+    // 10) Claiming — spinner.
+    if (jetsonStatus === 'claiming') {
+      return (
+        <CenteredSpinner
+          label="Verbinde mit Klassen-Jetson…"
+          sublabel="Der Jetson startet seinen ROS-Stack. Bitte einen Moment Geduld."
+        />
+      );
+    }
+
+    // 11) Disconnecting — spinner.
+    if (jetsonStatus === 'disconnecting') {
+      return (
+        <CenteredSpinner
+          label="Verbindung wird beendet…"
+          sublabel="Der Jetson wird für die nächste Schülerin/den nächsten Schüler vorbereitet."
+        />
+      );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // 12) CONNECTED — the actual Inferenz workspace.
+    // ────────────────────────────────────────────────────────────────────
+
+    const cameraChipLabel = (() => {
+      if (configuredCount === 0) {
+        return 'Keine Kamera-Topics auf dem Jetson';
+      }
+      if (liveCount === 0) {
+        return `0 / ${configuredCount} Kameras liefern Bilder`;
+      }
+      if (!allConfiguredAlive) {
+        return `${liveCount} / ${configuredCount} Kameras aktiv`;
+      }
+      return liveCount === 1 ? '1 Kamera aktiv' : `${liveCount} Kameras aktiv`;
+    })();
+
+    const cameraChipDotColor = (() => {
+      if (configuredCount === 0 || liveCount === 0) return '#ef4444'; // red — no real cameras
+      if (!allConfiguredAlive) return '#f59e0b';                       // amber — partial
+      return 'var(--accent)';                                          // green/teal — all good
+    })();
+
+    return (
+      <div
+        className="relative h-full w-full flex flex-col overflow-hidden"
+        style={{ background: 'var(--dark-bg)', color: 'var(--dark-ink)' }}
+      >
+        <div className="absolute top-3 left-3 right-3 z-30 flex items-center gap-2 flex-wrap">
+          <div className="h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-2 text-[11px] text-white/80">
+            <span className="font-mono uppercase tracking-wider opacity-70">Roboter</span>
+            <span className="font-mono px-1.5 py-0.5 rounded bg-white/10 max-w-[160px] truncate">
+              {taskStatus?.robotType || '—'}
+            </span>
+          </div>
+          <HeartbeatStatus dark />
+          <div
+            className="h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-2 text-[11px] text-white/80 font-mono whitespace-nowrap"
+            title={
+              configuredCount === 0
+                ? 'Kein /image/get_available_list konfiguriert'
+                : `${liveCount}/${configuredCount} Topics liefern aktuell Bilder`
+            }
+          >
+            <span
+              className="w-1.5 h-1.5 rounded-full"
+              style={{ background: cameraChipDotColor }}
+            />
+            {cameraChipLabel}
+          </div>
+          <div className="h-8 px-3 rounded-full bg-emerald-500/15 border border-emerald-300/30 backdrop-blur-md flex items-center gap-2 text-[11px] text-emerald-100">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span>{heartbeatTransient ? 'Jetson — wird wiederhergestellt' : 'Verbunden mit Klassen-Jetson'}</span>
+            <button
+              type="button"
+              onClick={disconnect}
+              className="ml-1 px-2 py-0.5 rounded bg-red-600/80 hover:bg-red-600 text-white text-[10px]"
             >
-              <Icon name="loading" size={40} className="animate-spin text-white" />
-              <span className="text-base font-semibold text-white">
-                Modell wird geladen &amp; Roboter verbindet …
-              </span>
-              <span className="text-xs text-white/70">
-                Das kann beim ersten Start bis zu 30 Sekunden dauern.
-              </span>
-            </div>
+              Trennen
+            </button>
+          </div>
+          <div className="flex-1" />
+          {isRightPanelCollapsed && (
+            <button
+              onClick={() => setIsRightPanelCollapsed(false)}
+              className="w-10 h-10 bg-white/[0.08] border border-white/15 rounded-full flex items-center justify-center text-white/80 backdrop-blur-md hover:bg-white/15"
+              title="Panel öffnen"
+            >
+              <Icon name="chevronsLeft" size={22} />
+            </button>
           )}
         </div>
-        <div
-          className={clsx(
-            'relative transition-all duration-300 ease-in-out',
-            isRightPanelCollapsed
-              ? 'w-0 opacity-0 pointer-events-none overflow-hidden'
-              : 'w-[min(420px,38vw)] min-w-[300px] max-w-[480px] md:min-w-[320px] lg:min-w-[360px] 2xl:max-w-[520px] opacity-100'
-          )}
-          style={{ maxHeight: 'calc(100vh - 220px)' }}
-        >
-          <button
-            onClick={() => setIsRightPanelCollapsed(!isRightPanelCollapsed)}
-            className="absolute -left-4 top-2 w-9 h-9 bg-white/95 border border-[var(--line)] rounded-full flex items-center justify-center shadow-pop text-[var(--ink-2)] hover:text-[var(--ink)] z-30 backdrop-blur"
-            title="Einklappen"
-          >
-            <Icon name="chevronsRight" size={20} />
-          </button>
-          <InferencePanel />
-        </div>
-      </div>
 
-      <div className="shrink-0">
-        <ControlPanel />
+        <div className="flex-1 flex items-start min-h-0 pt-[56px] pb-2 px-2 sm:px-3 lg:px-4 gap-2 sm:gap-3 lg:gap-4">
+          <div className="flex-1 self-stretch min-w-0 relative rounded-[var(--radius-lg)] overflow-hidden">
+            <ImageGrid isActive={isActive} />
+            {taskStatus.phase === TaskPhase.INFERENCE_LOADING && (
+              <div
+                className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/55 backdrop-blur-sm"
+                role="status"
+                aria-live="polite"
+              >
+                <Icon name="loading" size={40} className="animate-spin text-white" />
+                <span className="text-base font-semibold text-white">
+                  Modell wird geladen &amp; Roboter verbindet …
+                </span>
+                <span className="text-xs text-white/70">
+                  Das kann beim ersten Start bis zu 30 Sekunden dauern.
+                </span>
+              </div>
+            )}
+          </div>
+          <div
+            className={clsx(
+              'relative transition-all duration-300 ease-in-out',
+              isRightPanelCollapsed
+                ? 'w-0 opacity-0 pointer-events-none overflow-hidden'
+                : 'w-[min(420px,38vw)] min-w-[300px] max-w-[480px] md:min-w-[320px] lg:min-w-[360px] 2xl:max-w-[520px] opacity-100'
+            )}
+            style={{ maxHeight: 'calc(100vh - 220px)' }}
+          >
+            <button
+              onClick={() => setIsRightPanelCollapsed(!isRightPanelCollapsed)}
+              className="absolute -left-4 top-2 w-9 h-9 bg-white/95 border border-[var(--line)] rounded-full flex items-center justify-center shadow-pop text-[var(--ink-2)] hover:text-[var(--ink)] z-30 backdrop-blur"
+              title="Einklappen"
+            >
+              <Icon name="chevronsRight" size={20} />
+            </button>
+            <InferencePanel />
+          </div>
+        </div>
+
+        <div className="shrink-0">
+          <ControlPanel />
+        </div>
       </div>
+    );
+  }
+
+  const body = target === 'cloud'
+    ? <CloudInferenceView isActive={isActive} cloud={cloud} />
+    : renderJetsonFlow();
+  if (!cloud.offered || jetsonOwnsRosbridge(jetsonStatus)) {
+    return body;
+  }
+  return (
+    <div className="h-full w-full flex flex-col min-h-0">
+      <TargetSwitch
+        cloud={cloud}
+        target={target}
+        onChoose={chooseTarget}
+        lockedReason={liveCloudRun ? cloudCopy.status.running : null}
+      />
+      <div className="flex-1 min-h-0">{body}</div>
     </div>
   );
 }

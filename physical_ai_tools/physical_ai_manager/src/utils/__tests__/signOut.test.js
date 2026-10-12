@@ -40,6 +40,7 @@ import {
 const signOutMock = vi.fn(() => Promise.resolve({ error: null }));
 const resetJetsonMock = vi.fn();
 const clearRobotHfTokenMock = vi.fn(() => Promise.resolve(true));
+const endCloudMock = vi.fn();
 
 vi.mock('../../lib/supabaseClient', () => ({
   __esModule: true,
@@ -56,6 +57,14 @@ vi.mock('../../features/jetson/sessionReset', () => ({
 // the order assertion can observe it and a robot that never answers can be
 // simulated. The real channel's contract (never rejects, bounded) is tested in
 // features/hfToken/__tests__/robotChannel.test.js.
+// Cloud-Inferenz: ending the cloud session is a keepalive fetch, not a reducer —
+// mocked so the order assertion can observe it. The controller's own contract is
+// tested in features/cloudInference/__tests__/controller.test.js.
+vi.mock('../../features/cloudInference/controller', () => ({
+  __esModule: true,
+  endCloudInferenceOnLogout: endCloudMock,
+}));
+
 vi.mock('../../features/hfToken/robotChannel', () => ({
   __esModule: true,
   CLEAR_BOUND_MS: 2000,
@@ -112,6 +121,7 @@ beforeEach(() => {
   signOutMock.mockImplementation(() => Promise.resolve({ error: null }));
   resetJetsonMock.mockClear();
   resetJetsonMock.mockImplementation(() => {});
+  endCloudMock.mockReset();
   clearRobotHfTokenMock.mockReset();
   clearRobotHfTokenMock.mockImplementation(() => Promise.resolve(true));
   localStorage.clear();
@@ -575,6 +585,28 @@ describe('signOutStudent — ordering and failure modes', () => {
       'jetson-1'
     );
     expect(order).toEqual(['jetson', 'signOut']);
+  });
+
+  it('ends the cloud session with the still-valid JWT right after the Jetson reset', async () => {
+    const order = [];
+    resetJetsonMock.mockImplementation(() => order.push('jetson'));
+    endCloudMock.mockImplementation(() => order.push('cloud'));
+    clearRobotHfTokenMock.mockImplementation(() => {
+      order.push('hfClear');
+      return Promise.resolve(true);
+    });
+    signOutMock.mockImplementation(() => {
+      order.push('signOut');
+      return Promise.resolve({ error: null });
+    });
+
+    const { store, signOutStudent, auth } = await freshStore();
+    store.dispatch(auth.setSession({ access_token: 'jwt-abc' }));
+    await store.dispatch(signOutStudent({ reload: false }));
+
+    expect(endCloudMock).toHaveBeenCalledTimes(1);
+    expect(endCloudMock).toHaveBeenCalledWith('jwt-abc');
+    expect(order).toEqual(['jetson', 'cloud', 'hfClear', 'signOut']);
   });
 
   it('reloads by default and not when asked not to', async () => {

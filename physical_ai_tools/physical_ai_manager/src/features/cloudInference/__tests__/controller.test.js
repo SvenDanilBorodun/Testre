@@ -317,6 +317,81 @@ describe('a GPU that did not start: the page asks again by itself (owner, round 
   });
 });
 
+describe('the waiting card reads the GPU start off the snapshot (attempt + start time, read-only)', () => {
+  const T0 = new Date('2026-10-12T10:00:00Z').getTime();
+
+  it('nothing is starting: attempt 0, no start time', () => {
+    expect(controller.getSnapshot()).toMatchObject({ reserveAttempt: 0, reserveStartedAt: null });
+  });
+
+  it('attempt 1 from the reserve on; the retry is announced at once and the start time never moves', async () => {
+    vi.setSystemTime(T0);
+    api.reserveInferenceSession
+      .mockRejectedValueOnce(gpuNotStarted())
+      .mockRejectedValueOnce(gpuNotStarted())
+      .mockResolvedValueOnce({ session_id: SID, summary: SUMMARY, session_s: 1800 });
+    controller.selectModel(token, 7, () => false);
+    expect(controller.getSnapshot()).toMatchObject({ reserveAttempt: 0, reserveStartedAt: null });
+    await vi.advanceTimersByTimeAsync(controller.SELECT_DEBOUNCE_MS);
+    await flush();
+    const started = T0 + controller.SELECT_DEBOUNCE_MS;
+    // the first answer (no GPU) already came: the page says it tries again
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'reserving', reserveAttempt: 2, reserveStartedAt: started });
+    await vi.advanceTimersByTimeAsync(controller.RESERVE_RETRY_DELAY_MS);
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'reserving', reserveAttempt: 3, reserveStartedAt: started });
+    await vi.advanceTimersByTimeAsync(controller.RESERVE_RETRY_DELAY_MS);
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(3);
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'reserved', reserveAttempt: 0, reserveStartedAt: null });
+  });
+
+  it('a first answer still on its way is attempt 1', async () => {
+    vi.setSystemTime(T0);
+    api.reserveInferenceSession.mockReturnValue(new Promise(() => {}));
+    await reserveVia(7);
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'reserving', reserveAttempt: 1, reserveStartedAt: T0 + controller.SELECT_DEBOUNCE_MS,
+    });
+  });
+
+  it('the final failure, a refusal and a release each clear both fields', async () => {
+    api.reserveInferenceSession.mockRejectedValue(gpuNotStarted());
+    await reserveVia(7);
+    await vi.advanceTimersByTimeAsync(10 * controller.RESERVE_RETRY_DELAY_MS);
+    await flush();
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', reserveAttempt: 0, reserveStartedAt: null });
+
+    controller._resetForTests();
+    api.reserveInferenceSession.mockReset();
+    api.reserveInferenceSession.mockRejectedValueOnce(apiError(409, 'Dieses Training ist noch nicht fertig.'));
+    await reserveVia(7);
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', reserveAttempt: 0, reserveStartedAt: null });
+
+    controller._resetForTests();
+    api.reserveInferenceSession.mockReset();
+    api.reserveInferenceSession.mockRejectedValue(gpuNotStarted());
+    await reserveVia(7);
+    expect(controller.getSnapshot().reserveAttempt).toBe(2);
+    controller.release();
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', reserveAttempt: 0, reserveStartedAt: null });
+  });
+
+  it('a new reserve starts its own clock at attempt 1', async () => {
+    vi.setSystemTime(T0);
+    api.reserveInferenceSession.mockRejectedValueOnce(apiError(503, 'Die Cloud ist gerade voll ausgelastet.'));
+    await reserveVia(7);
+    expect(controller.getSnapshot().phase).toBe('idle');
+    vi.setSystemTime(T0 + 60000);
+    api.reserveInferenceSession.mockReturnValue(new Promise(() => {}));
+    await reserveVia(8);
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'reserving', trainingId: 8, reserveAttempt: 1, reserveStartedAt: T0 + 60000 + controller.SELECT_DEBOUNCE_MS,
+    });
+  });
+});
+
 describe('no second reserve while the GPU starts (owner, round 2: the list is locked)', () => {
   it('a click on another row or the same row while reserving sends nothing', async () => {
     let resolve;

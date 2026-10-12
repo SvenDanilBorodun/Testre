@@ -35,6 +35,13 @@
 // reserve or its retry runs, the phase stays 'reserving', the list is locked and
 // no click reserves again; a release, the panel unmounting or a sign-out bumps
 // `seq`, which ends the retries.
+//
+// THE WAITING CARD (components/CloudInference/CloudWait.jsx) reads two fields
+// of the snapshot while the phase is 'reserving': `reserveAttempt` (1 from the
+// reserve on; the next number as soon as the page decides to ask again, so the
+// student sees the retry during its pause) and `reserveStartedAt` (Date.now()
+// at the FIRST attempt; a retry never moves it). Outside a reserve they are 0
+// and null. Read-only for the page: nothing decides on them.
 
 import TaskPhase from '../../constants/taskPhases';
 import {
@@ -70,8 +77,13 @@ const INITIAL = Object.freeze({
   sessionS: null,
   message: '',
   modelRefused: false,
+  reserveAttempt: 0,
+  reserveStartedAt: null,
   seq: 0,
 });
+
+// A reserve is over (reserved, failed, released): the waiting card's two fields go.
+const NOT_STARTING = Object.freeze({ reserveAttempt: 0, reserveStartedAt: null });
 
 let state = INITIAL;
 const listeners = new Set();
@@ -253,6 +265,8 @@ async function requestReservation(my, trainingId) {
       if (my !== state.seq) return null;
       if (err?.code !== GPU_NOT_STARTED_CODE || attempt >= RESERVE_ATTEMPTS) return { ok: false, err };
     }
+    // The page asks again: the waiting card names the coming attempt at once.
+    set({ reserveAttempt: attempt + 1 });
     // eslint-disable-next-line no-await-in-loop
     await retryPause();
     if (my !== state.seq) return null;
@@ -263,7 +277,17 @@ async function requestReservation(my, trainingId) {
 async function reserve(trainingId) {
   const my = state.seq + 1;
   stopHeartbeat();
-  set({ seq: my, phase: 'reserving', trainingId, sessionId: null, summary: null, message: '', modelRefused: false });
+  set({
+    seq: my,
+    phase: 'reserving',
+    trainingId,
+    sessionId: null,
+    summary: null,
+    message: '',
+    modelRefused: false,
+    reserveAttempt: 1,
+    reserveStartedAt: Date.now(),
+  });
   const outcome = await requestReservation(my, trainingId);
   if (outcome === null) return; // a release, sign-out or newer choice ended the retries
   if (!outcome.ok) {
@@ -272,7 +296,7 @@ async function reserve(trainingId) {
     const { routeMissing, message } = apiMessage(err);
     // Only the model itself refused (404/409) disables Start for this row (R-16).
     const refused = !routeMissing && (err?.status === 404 || err?.status === 409);
-    set({ phase: 'idle', sessionId: null, message, modelRefused: refused });
+    set({ phase: 'idle', sessionId: null, message, modelRefused: refused, ...NOT_STARTING });
     return;
   }
   const { res } = outcome;
@@ -288,6 +312,7 @@ async function reserve(trainingId) {
     sessionS: res?.session_s ?? null,
     message: '',
     modelRefused: false,
+    ...NOT_STARTING,
   });
   // A reservation is kept alive exactly like a run: 45 s without a heartbeat ends it.
   startHeartbeat();
@@ -434,7 +459,7 @@ export function release() {
   const id = state.sessionId;
   clearTimers();
   // seq += 1: a reserve answer still in flight is then ignored and ended.
-  set({ seq: state.seq + 1, phase: 'idle', sessionId: null, summary: null, message: '', modelRefused: false });
+  set({ seq: state.seq + 1, phase: 'idle', sessionId: null, summary: null, message: '', modelRefused: false, ...NOT_STARTING });
   if (id) endInferenceSessionKeepalive(accessToken(), id);
 }
 

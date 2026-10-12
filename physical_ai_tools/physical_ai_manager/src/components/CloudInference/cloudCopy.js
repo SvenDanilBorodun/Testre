@@ -32,9 +32,23 @@ export const cloudCopy = {
     stopping: 'Wird gestoppt …',
     runningElsewhere: 'Auf dem Roboter läuft gerade eine Inferenz.',
     chooseModel: 'Wähle zuerst ein Modell.',
-    preparing: 'Cloud-GPU wird vorbereitet …',
+    preparing: 'Cloud-GPU wird gestartet …',
     preparingSub: 'Beim ersten Start kann das einige Minuten dauern.',
     released: 'Die Cloud-GPU wurde wieder freigegeben – beim Start wird sie neu vorbereitet.',
+  },
+  // The waiting card (CloudWait.jsx). Its titles are panel.preparing /
+  // panel.preparingSub (the GPU start) and status.loading / status.loadingSub
+  // (the model load); these are the lines under them. No percentage anywhere:
+  // nobody knows how far a GPU start has come.
+  waiting: {
+    gpuWhat: 'Ein Rechner in einem EU-Rechenzentrum wird für dein Modell eingeschaltet.',
+    gpuNormal: 'Das ist normal. Bleib auf dieser Seite – wenn du sie verlässt, wird der Start abgebrochen.',
+    gpuLong: 'Gerade dauert es länger als sonst. Das liegt an der Cloud, nicht an dir.',
+    retry: 'Noch nicht geklappt – die Seite versucht es von selbst noch einmal (Versuch {n} von {total}).',
+    modelWhat: 'Das dauert meist nur einige Sekunden.',
+    modelNormal: 'Sobald das Modell bereit ist, bewegt sich der Arm von selbst.',
+    modelLong: 'Gerade dauert es länger als sonst. Klappt es nicht, beendet der Roboter den Lauf von selbst und sagt dir, warum.',
+    elapsed: 'Wartezeit',
   },
   leader: {
     hint: 'Der Leader-Arm ist aktiv. Schalte mit dem Leader-Schalter in den Follower-Modus, bevor du in der Cloud startest.',

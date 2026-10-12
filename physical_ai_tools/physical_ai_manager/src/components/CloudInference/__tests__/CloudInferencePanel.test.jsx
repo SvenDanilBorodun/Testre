@@ -292,6 +292,41 @@ describe('CloudInferencePanel while the GPU starts (owner, round 2)', () => {
     expect(api.reserveInferenceSession).toHaveBeenCalledTimes(3);
   });
 
+  it('the waiting card: one clock from the first attempt on, the retry named', async () => {
+    api.reserveInferenceSession
+      .mockRejectedValueOnce(gpuNotStarted())
+      .mockReturnValueOnce(new Promise(() => {}));
+    render(<CloudInferencePanel isActive cloud={CLOUD} cloudState={null} />);
+    fireEvent.click(screen.getByRole('button', { name: /^neu/ }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(controller.SELECT_DEBOUNCE_MS); });
+    await flush();
+    const card = screen.getByTestId('cloud-wait');
+    expect(card).toHaveAttribute('data-kind', 'gpu');
+    expect(screen.getByTestId('cloud-wait-elapsed')).toHaveTextContent('00:00');
+    // the first attempt already answered „no GPU": the page says it asks again
+    expect(screen.getByTestId('cloud-wait-retry')).toHaveTextContent('Versuch 2 von 3');
+    await act(async () => { await vi.advanceTimersByTimeAsync(controller.RESERVE_RETRY_DELAY_MS); });
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(2);
+    // the clock kept counting through the retry (never reset)
+    expect(screen.getByTestId('cloud-wait-elapsed')).toHaveTextContent('00:02');
+    await act(async () => { await vi.advanceTimersByTimeAsync(40 * 1000); });
+    expect(screen.getByTestId('cloud-wait-elapsed')).toHaveTextContent('00:42');
+    expect(screen.getByTestId('cloud-wait')).toBe(card);
+  });
+
+  it('the first attempt shows no retry line, and the card goes once the GPU answers', async () => {
+    let resolve;
+    api.reserveInferenceSession.mockReturnValue(new Promise((r) => { resolve = r; }));
+    render(<CloudInferencePanel isActive cloud={CLOUD} cloudState={null} />);
+    await chooseModel();
+    expect(screen.getByTestId('cloud-wait')).toBeInTheDocument();
+    expect(screen.queryByTestId('cloud-wait-retry')).toBeNull();
+    await act(async () => { resolve({ session_id: SID, summary: SUMMARY, session_s: 1800 }); });
+    await flush();
+    expect(screen.queryByTestId('cloud-wait')).toBeNull();
+  });
+
   it('leaving the panel while a retry waits: no reserve after the unmount', async () => {
     api.reserveInferenceSession.mockRejectedValue(gpuNotStarted());
     const { unmount } = render(<CloudInferencePanel isActive cloud={CLOUD} cloudState={null} />);

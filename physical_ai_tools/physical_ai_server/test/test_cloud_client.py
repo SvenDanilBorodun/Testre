@@ -602,7 +602,7 @@ def test_no_token_in_logs_on_https_503_and_401(fake, clients, caplog):
 def test_no_websocket_import():
     source = Path(inspect.getsourcefile(cc)).read_text(encoding='utf-8')
     for banned in ('ws_connect', 'WSMsgType', '/v1/ws', 'websocket', 'ws_url', 'TRANSPORTS'):
-        assert banned not in source, banned
+        assert banned.lower() not in source.lower(), banned
 
 
 def test_no_repr_of_an_exception_in_the_module():

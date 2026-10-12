@@ -7,7 +7,7 @@
 """Cloud-Inferenz HTTPS transport (robot side, spec §5.6). Own thread + asyncio; never calls rclpy.
 
 O7' (owner): HTTPS ONLY — one ``POST /v1/infer`` per observation to the session's own sticky
-container, over one kept-alive connection. No WebSocket, no ping loop, no keepalive, no
+container, over one kept-alive connection. No second transport, no ping loop, no keepalive, no
 transport switch.
 
 Credentials (D24, D37). Both tokens are private attributes of the client and travel ONLY as

@@ -27,7 +27,8 @@ permissions:
 jobs:
   python-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # main alone needed 14 of 15 minutes; the Cloud-Inferenz suites add about one.
+    timeout-minutes: 25
     env:
       # test_code_insert_cases.py compiles the insertion fixture with javac
       # ($JAVA_HOME_21_X64 on this runner): a lost JDK fails, never skips.

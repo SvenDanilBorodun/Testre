@@ -65,6 +65,17 @@ SUMMARY = {"type": "act", "expected_cameras": ["gripper", "scene"],
            "model_repo": REPO, "model_revision": SHA}
 
 
+def _content(resp):
+    """The JSON body, with the stub or with real Starlette (whose JSONResponse has `.body`)."""
+    if hasattr(resp, "body"):
+        return json.loads(resp.body)
+    return resp.content
+
+
+def _headers(resp):
+    return {k.lower(): v for k, v in dict(resp.headers or {}).items()}
+
+
 class _PgError(Exception):
     def __init__(self, code, msg="x"):
         super().__init__({"code": code, "message": msg})
@@ -245,7 +256,9 @@ class _Case(unittest.TestCase):
         return asyncio.run(wrapper())
 
     def reserve(self, profile=STUDENT, training_id=7):
-        return self.run_async(route.reserve_session(route.ReserveBody(training_id=training_id), profile=profile))
+        # A plain body: real FastAPI validates `ReserveBody` before the handler runs;
+        # the handler re-checks by hand, which is what this drives.
+        return self.run_async(route.reserve_session(SimpleNamespace(training_id=training_id), profile=profile))
 
     def arm(self, sid, profile=STUDENT):
         return self.run_async(route.arm_session(sid, profile=profile))
@@ -260,9 +273,10 @@ class _Case(unittest.TestCase):
         return self.run_async(route.read_usage(profile=profile))
 
     def assertAnswer(self, resp, status):
-        self.assertEqual(resp.status_code, status, getattr(resp, "content", None))
-        self.assertEqual((resp.headers or {}).get("Cache-Control"), "no-store")
-        return resp.content
+        body = _content(resp)
+        self.assertEqual(resp.status_code, status, body)
+        self.assertEqual(_headers(resp).get("cache-control"), "no-store")
+        return body
 
 
 class TestStudentsOnly(_Case):
@@ -402,7 +416,7 @@ class TestReserve(_Case):
         self.server = _Server(start=slow)
 
         async def scenario():
-            resp = await route.reserve_session(route.ReserveBody(training_id=7), profile=STUDENT)
+            resp = await route.reserve_session(SimpleNamespace(training_id=7), profile=STUDENT)
             # the late success arrives after the answer, on the same (long-lived) loop
             await asyncio.sleep(0.5)
             for _ in range(50):

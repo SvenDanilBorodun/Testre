@@ -202,6 +202,37 @@ describe('ResizeHandle — pointer', () => {
     expect(onCommit).toHaveBeenCalledWith(500);
   });
 
+  // Verification round 1, F5b: a click on the divider is no resize. Before,
+  // it committed the value on screen — a size squeezed by a narrow window was
+  // then persisted, and growing the window back no longer restored the
+  // student's size.
+  test('a click (press + release, no move) on a squeezed divider persists nothing', () => {
+    const { row, handle, onCommit } = mountDock({ initial: 600 });
+    const observer = observers.find((o) => o.el === row);
+    rowRect = rect(800); // max 440
+    act(() => observer.cb([]));
+    expect(row.style.getPropertyValue('--dock-w')).toBe('440px');
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 5, clientX: 360 });
+    fireEvent.pointerUp(handle, { pointerId: 5, clientX: 360 });
+    fireEvent.lostPointerCapture(handle, { pointerId: 5 });
+    flushFrames();
+    expect(onCommit).not.toHaveBeenCalled();
+    rowRect = rect(1400);
+    act(() => observer.cb([]));
+    expect(row.style.getPropertyValue('--dock-w')).toBe('600px');
+  });
+
+  test('a press whose moves end where they started commits nothing', () => {
+    const { row, handle, onCommit } = mountDock();
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 6, clientX: 820 });
+    fireEvent.pointerMove(handle, { pointerId: 6, clientX: 800 }); // 400
+    fireEvent.pointerMove(handle, { pointerId: 6, clientX: 820 }); // back to 380
+    flushFrames();
+    fireEvent.pointerUp(handle, { pointerId: 6, clientX: 820 });
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(row.style.getPropertyValue('--dock-w')).toBe('380px');
+  });
+
   test('a move without a press, or a secondary button, does nothing', () => {
     const { row, handle, onCommit } = mountDock();
     fireEvent.pointerMove(handle, { pointerId: 3, clientX: 600 });

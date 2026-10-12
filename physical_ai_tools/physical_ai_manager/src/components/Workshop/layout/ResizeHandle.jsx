@@ -20,8 +20,9 @@
 //     frame, no React state, so the owner (and a live Blockly canvas next to
 //     it) never re-renders while the pointer moves. BlocklyWorkspace's own
 //     ResizeObserver hears the new box.
-//   * The value is COMMITTED exactly once per release, arrow key, Home/End or
-//     double-click (`onCommit`, which persists it through layoutPrefs.js).
+//   * The value is COMMITTED exactly once per release of a drag that changed
+//     it, arrow key, Home/End or double-click (`onCommit`, which persists it
+//     through layoutPrefs.js). A click commits nothing.
 //   * A parent resize re-clamps the COMMITTED value into the new bounds without
 //     committing: a narrower window never persists a smaller pane, and growing
 //     it back restores the student's size.
@@ -78,9 +79,11 @@ export default function ResizeHandle({
   // The value the variable shows right now (after a drag frame, a key, a
   // re-clamp) — the base of the next arrow step.
   const appliedRef = useRef(null);
-  // One drag: { active, value }. `active` is cleared by the FIRST of
-  // pointerup / pointercancel / lostpointercapture, so a drag commits once.
-  const dragRef = useRef({ active: false, value: null });
+  // One drag: { active, start, value }. `active` is cleared by the FIRST of
+  // pointerup / pointercancel / lostpointercapture, so a drag commits once —
+  // and only when it moved the divider: a click commits nothing, or a size a
+  // narrow window squeezed would be persisted as the student's choice.
+  const dragRef = useRef({ active: false, start: null, value: null });
   const rafRef = useRef(null);
 
   // The parent's box, or null when it cannot be measured (no layout, as in
@@ -163,7 +166,7 @@ export default function ResizeHandle({
   const onPointerDown = (e) => {
     if (e.button !== undefined && e.button !== 0) return;
     const start = appliedRef.current !== null ? appliedRef.current : clamp(value, parentRect());
-    dragRef.current = { active: true, value: start };
+    dragRef.current = { active: true, start, value: start };
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) { /* jsdom / no capture */ }
   };
 
@@ -196,7 +199,7 @@ export default function ResizeHandle({
         e.currentTarget.releasePointerCapture(e.pointerId);
       }
     } catch (_) { /* jsdom / capture already gone */ }
-    commit(drag.value);
+    if (drag.value !== drag.start) commit(drag.value);
   };
 
   const onKeyDown = (e) => {

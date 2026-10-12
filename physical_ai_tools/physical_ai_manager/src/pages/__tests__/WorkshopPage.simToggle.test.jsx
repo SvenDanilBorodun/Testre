@@ -16,7 +16,7 @@
 // test exercises only the layout swap.
 
 import React from 'react';
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WorkshopPage from '../WorkshopPage';
 import toast from 'react-hot-toast';
@@ -80,10 +80,20 @@ vi.mock('../../components/Workshop/LeaderToggle', () => ({
   __esModule: true,
   default: ({ lockedReason }) => <div data-testid="leader-toggle" data-locked-reason={lockedReason || ''} />,
 }));
-vi.mock('../../components/Workshop/RunControls', () => ({ __esModule: true, default: () => <div data-testid="run-controls" /> }));
+// RunControls exposes its props, so a test can report the START window
+// (onStartingChange) exactly as the real run bar does.
+const mockRun = vi.hoisted(() => ({ props: null }));
+vi.mock('../../components/Workshop/RunControls', () => ({
+  __esModule: true,
+  default: (props) => {
+    mockRun.props = props;
+    return <div data-testid="run-controls" />;
+  },
+}));
 vi.mock('../../components/Workshop/CameraFeedOverlay', () => ({ __esModule: true, default: () => <div data-testid="camera-feed" /> }));
 vi.mock('../../components/Workshop/TemplatePicker', () => ({ __esModule: true, default: () => <div data-testid="template-picker" /> }));
-// ToolbarButtons renders its `extra` slot, where the Vormachen button lives.
+// ToolbarButtons renders its `extra` slot (Verlauf, Kalibrierung neu starten);
+// the Vormachen chooser lives in the page header.
 vi.mock('../../components/Workshop/ToolbarButtons', () => ({
   __esModule: true,
   default: ({ extra }) => <div data-testid="toolbar-buttons">{extra}</div>,
@@ -342,7 +352,7 @@ describe('WorkshopPage — sim toggle swaps only the right region', () => {
     const leave = screen.getByRole('button', { name: 'Simulator beenden' });
     expect(leave).toBeDisabled();
     expect(leave.getAttribute('title')).toBe(
-      'Während ein Simulationslauf läuft, kann der Simulator nicht beendet werden — bitte zuerst stoppen.');
+      'Während ein Programm im Simulator läuft oder angehalten ist, kann der Simulator nicht beendet werden – bitte zuerst stoppen.');
   });
 });
 
@@ -538,5 +548,216 @@ describe('WorkshopPage — Vormachen wiring', () => {
     await screen.findByTestId('blockly-workspace');
     expect(screen.getByTestId('leader-toggle').getAttribute('data-locked-reason')).toBe('');
     expect(screen.getByTestId('jog-panel').getAttribute('data-disabled')).toBe('false');
+  });
+});
+
+describe('WorkshopPage — a program on the REAL robot blocks the simulator (realRun)', () => {
+  const REAL_RUN_TITLE = 'Solange ein Programm am echten Roboter läuft oder angehalten ist, kann der Simulator '
+    + 'nicht gestartet werden – bitte zuerst stoppen.';
+  const toggle = () => screen.getByRole('button', { name: 'Test im Simulator' });
+
+  test('running: the toggle is disabled with the realRun title', async () => {
+    mockState = baseState({ runState: 'running' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(toggle()).toBeDisabled();
+    expect(toggle().getAttribute('title')).toBe(REAL_RUN_TITLE);
+    await userEvent.click(toggle());
+    expect(screen.queryByTestId('sim-stage')).toBeNull();
+  });
+
+  test('paused at a breakpoint: still blocked', async () => {
+    mockState = baseState({ runState: 'idle', paused: true });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(toggle()).toBeDisabled();
+    expect(toggle().getAttribute('title')).toBe(REAL_RUN_TITLE);
+  });
+
+  test('a dead link does not lift it: a recorded real run fails closed', async () => {
+    mockState = { ...baseState({ runState: 'running' }), tasks: { heartbeatStatus: 'disconnected' } };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(toggle()).toBeDisabled();
+    expect(toggle().getAttribute('title')).toBe(REAL_RUN_TITLE);
+  });
+
+  test('while a run is STARTING (before it is marked running): blocked', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(toggle()).toBeEnabled();
+    await act(async () => { mockRun.props.onStartingChange(true); });
+    expect(toggle()).toBeDisabled();
+    expect(toggle().getAttribute('title')).toBe(REAL_RUN_TITLE);
+    await act(async () => { mockRun.props.onStartingChange(false); });
+    expect(toggle()).toBeEnabled();
+  });
+
+  test('ensureSimMode refuses it too: a sim-table Ziel request toasts the realRun title', async () => {
+    mockState = baseState({ runState: 'running' });
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    toast.error.mockClear();
+    mockBlockly.provider.dispatchAction({ type: 'pinSim' });
+    await act(async () => { await Promise.resolve(); });
+    expect(toast.error).toHaveBeenCalledWith(REAL_RUN_TITLE);
+    expect(screen.queryByTestId('sim-stage')).toBeNull();
+  });
+});
+
+describe('WorkshopPage — the header (WI-1.4)', () => {
+  test('the chooser sits in the header, not in the toolbar', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const header = screen.getByRole('banner');
+    expect(within(header).getByRole('button', { name: DE.TOOLBAR_TEACH })).toBeEnabled();
+    expect(within(screen.getByTestId('toolbar-buttons')).queryByRole('button', { name: DE.TOOLBAR_TEACH })).toBeNull();
+  });
+
+  test('the left group wraps below lg and not from lg up (the badge drops under the title at phone width)', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    // eslint-disable-next-line testing-library/no-node-access
+    const left = screen.getByRole('heading', { name: 'Roboter Studio' }).parentElement;
+    expect(left.className.split(/\s+/)).toEqual(expect.arrayContaining(['flex-wrap', 'lg:flex-nowrap']));
+    expect(within(left).getByTestId('mode-badge')).toBeInTheDocument();
+    // The right group may shrink below lg and keeps its width from lg up.
+    // eslint-disable-next-line testing-library/no-node-access
+    const right = screen.getByRole('button', { name: 'Test im Simulator' }).parentElement;
+    expect(right.className.split(/\s+/)).toEqual(expect.arrayContaining(['flex-initial', 'max-w-full', 'lg:flex-none']));
+  });
+
+  test('enabled: no visible reason, the default title, no aria-describedby', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const btn = screen.getByRole('button', { name: DE.TOOLBAR_TEACH });
+    expect(btn.getAttribute('title')).toBe(DE.TOOLBAR_TEACH_TITLE);
+    expect(btn).not.toHaveAttribute('aria-describedby');
+    expect(screen.queryByText(DE.TEACH_BLOCK_OFFLINE)).toBeNull();
+    expect(screen.queryByText(DE.TEACH_BLOCK_SIM)).toBeNull();
+  });
+
+  test('in the simulator the chooser is disabled with its reason as visible text, wired as aria-describedby', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    const btn = screen.getByRole('button', { name: DE.TOOLBAR_TEACH });
+    expect(btn).toBeDisabled();
+    const reason = screen.getByText('Vormachen braucht den echten Roboter.');
+    expect(reason.id).toBeTruthy();
+    expect(btn.getAttribute('aria-describedby')).toBe(reason.id);
+    expect(btn).toHaveAccessibleName(DE.TOOLBAR_TEACH);
+  });
+
+  test('offline the reason reads „Keine Verbindung zum Roboter-Dienst."', async () => {
+    mockState = { ...baseState(), tasks: { heartbeatStatus: 'disconnected' } };
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const reason = screen.getByText('Keine Verbindung zum Roboter-Dienst.');
+    expect(screen.getByRole('button', { name: DE.TOOLBAR_TEACH }).getAttribute('aria-describedby')).toBe(reason.id);
+  });
+
+  test('„Kalibrierung neu starten" is offered on the real robot, never in the simulator (R0-8)', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(screen.getByRole('button', { name: 'Kalibrierung neu starten' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    expect(screen.queryByRole('button', { name: 'Kalibrierung neu starten' })).toBeNull();
+  });
+});
+
+describe('WorkshopPage — „In 3D zeigen" (WI-1.10)', () => {
+  // The page persists the dock layout; earlier tests leave theirs behind.
+  const clearDock = () => {
+    window.localStorage.removeItem('edubotics_workshop_dock_open');
+    window.localStorage.removeItem('edubotics_workshop_dock_collapsed');
+  };
+  beforeEach(() => {
+    clearDock();
+    toast.mockClear();
+  });
+  afterEach(clearDock);
+  const caps = () => mockBlockly.provider.getSnapshot().capabilities;
+  const openIds = () => JSON.parse(screen.getByTestId('right-dock').getAttribute('data-open-ids'));
+
+  test('view3dOnScreen is false while the dock shows no 3D panel; show3d opens it there', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(openIds()).toEqual(['camera']);
+    expect(caps().view3dOnScreen).toBe(false);
+    await act(async () => { mockBlockly.provider.dispatchAction({ type: 'show3d' }); });
+    expect(openIds()).toEqual(['camera', '3d']);
+    expect(caps().view3dOnScreen).toBe(true);
+    expect(toast).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'edubotics-mode' }));
+  });
+
+  test('a folded dock with the 3D panel open is not on screen; show3d unfolds it', async () => {
+    window.localStorage.setItem('edubotics_workshop_dock_open', JSON.stringify(['3d']));
+    window.localStorage.setItem('edubotics_workshop_dock_collapsed', '1');
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(caps().view3dOnScreen).toBe(false);
+    await act(async () => { mockBlockly.provider.dispatchAction({ type: 'show3d' }); });
+    expect(caps().view3dOnScreen).toBe(true);
+    expect(openIds()).toEqual(['3d']);
+  });
+
+  test('at the two-panel cap show3d evicts the oldest panel that is not busy', async () => {
+    window.localStorage.setItem('edubotics_workshop_dock_open', JSON.stringify(['control', 'camera']));
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    // A live hand-guide pins „Steuern".
+    await userEvent.click(screen.getByTestId('jog-hand-guide-on'));
+    await act(async () => { mockBlockly.provider.dispatchAction({ type: 'show3d' }); });
+    expect(openIds()).toEqual(['control', '3d']);
+  });
+
+  test('in the simulator a 3D view is always on screen', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    expect(caps().view3dOnScreen).toBe(true);
+  });
+});
+
+describe('WorkshopPage — the page dividers (WI-1.7, WI-1.8)', () => {
+  beforeEach(() => {
+    window.localStorage.removeItem('edubotics_workshop_dock_collapsed');
+  });
+
+  test('editor ↔ dock: a divider AFTER the editor column; in the simulator, editor ↔ stage instead', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const dockSep = screen.getByRole('separator', { name: 'Breite der Werkzeuge' });
+    // eslint-disable-next-line testing-library/no-node-access
+    const row = dockSep.parentElement;
+    // The editor column stays the row's FIRST child (never remounted by a swap).
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(row.firstElementChild).toContainElement(screen.getByTestId('blockly-workspace'));
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(dockSep.nextElementSibling).toBe(screen.getByTestId('right-dock'));
+    expect(row.style.getPropertyValue('--dock-w')).toBe('380px');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    expect(screen.queryByRole('separator', { name: 'Breite der Werkzeuge' })).toBeNull();
+    const simSep = screen.getByRole('separator', { name: 'Breite des Simulators' });
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(simSep.parentElement).toBe(row);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(simSep.nextElementSibling).toBe(screen.getByTestId('sim-stage'));
+    expect(row.style.getPropertyValue('--sim-w')).toBe('0.55');
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(row.firstElementChild).toContainElement(screen.getByTestId('blockly-workspace'));
+  });
+
+  test('a folded dock has no width divider', async () => {
+    window.localStorage.setItem('edubotics_workshop_dock_collapsed', '1');
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(screen.queryByRole('separator', { name: 'Breite der Werkzeuge' })).toBeNull();
   });
 });

@@ -54,10 +54,15 @@ vi.mock('../../../../services/workflowApi', () => ({
   deleteTrajectory: vi.fn(),
 }));
 
-const mockGlide = vi.hoisted(() => ({ offer: vi.fn(), active: false }));
+const mockGlide = vi.hoisted(() => ({ offer: vi.fn(), active: false, after: vi.fn((fn) => fn()) }));
 vi.mock('../../HomeGlidePrompt', () => ({
   __esModule: true,
-  useHomeGlide: () => ({ offerHomeGlide: mockGlide.offer, homeGlideDialog: null, homeGlideActive: mockGlide.active }),
+  useHomeGlide: () => ({
+    offerHomeGlide: mockGlide.offer,
+    homeGlideDialog: null,
+    homeGlideActive: mockGlide.active,
+    afterHomeGlide: mockGlide.after,
+  }),
 }));
 
 vi.mock('../teachSounds', () => ({
@@ -181,6 +186,9 @@ beforeEach(() => {
   mockHook.actions = null;
   mockHook.onKeyDown = null;
   mockGlide.offer.mockReset();
+  // Idle by default: work waiting for the prompt runs at once.
+  mockGlide.after.mockReset();
+  mockGlide.after.mockImplementation((fn) => fn());
   mockActivation.status = null;
   mockPi.piMode = false;
   mockGlide.active = false;
@@ -598,7 +606,7 @@ describe('TeachOverlay — banners and the review', () => {
   test('the review names the take and its size, and Enter/R/Entf map to keep/again/discard', () => {
     const actions = withSnapshot({ state: 'pruefen', relock: 'ok', take: TAKE });
     render(<TeachOverlay {...baseProps()} />);
-    expect(screen.getByText(formatDe(DE.TEACH_REVIEW_META, 'Bewegung 1', '1,2', 3))).toBeInTheDocument();
+    expect(screen.getByText(formatDe(DE.TEACH_REVIEW_META, 'Bewegung 1', '1,2'))).toBeInTheDocument();
     expect(within(screen.getByTestId('teach-list-reviewing')).getByText(DE.TEACH_LIST_REVIEWING)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: new RegExp(DE.TEACH_REVIEW_KEEP) }));
     fireEvent.click(screen.getByRole('button', { name: new RegExp(DE.TEACH_REVIEW_AGAIN) }));
@@ -756,12 +764,12 @@ describe('TeachOverlay — list meta and slot lines', () => {
 
   test('slot line: nothing below 14, „noch n" at 14 and 15, full at 16', () => {
     expect(teachSlotsLine(13)).toBeNull();
-    expect(teachSlotsLine(14)).toBe('Noch 2 Plätze für Aufnahmen frei.');
-    expect(teachSlotsLine(15)).toBe('Noch 1 Plätze für Aufnahmen frei.');
+    expect(teachSlotsLine(14)).toBe('Noch 2 Plätze für Bewegungen frei.');
+    expect(teachSlotsLine(15)).toBe('Noch 1 Plätze für Bewegungen frei.');
     expect(teachSlotsLine(16)).toBe(DE.TEACH_SLOTS_FULL);
   });
 
-  test.each([[14, 'Noch 2 Plätze für Aufnahmen frei.'], [16, DE.TEACH_SLOTS_FULL]])(
+  test.each([[14, 'Noch 2 Plätze für Bewegungen frei.'], [16, DE.TEACH_SLOTS_FULL]])(
     'the review shows the slot line with %i rows in the cloud',
     (n, text) => {
       withSnapshot({ state: 'pruefen', relock: 'ok', take: TAKE });
@@ -776,9 +784,9 @@ describe('TeachOverlay — list meta and slot lines', () => {
     withSnapshot({ state: 'pruefen', relock: 'ok', take: TAKE });
     setState({ items: Array.from({ length: 13 }, (_, i) => ({ id: `t${i}`, name: `Alt ${i}` })) });
     render(<TeachOverlay {...baseProps()} />);
-    expect(screen.queryByText(/Plätze für Aufnahmen/)).toBeNull();
+    expect(screen.queryByText(/Plätze für Bewegungen/)).toBeNull();
     await act(async () => { mockHook.props.onKeep(TAKE); await flush(); });
-    expect(screen.getByText('Noch 2 Plätze für Aufnahmen frei.')).toBeInTheDocument();
+    expect(screen.getByText('Noch 2 Plätze für Bewegungen frei.')).toBeInTheDocument();
   });
 });
 
@@ -903,7 +911,7 @@ describe('TeachOverlay — review clean-up (trims with undo, cleaned rows kept a
     expect(within(review).getByText(DE.TEACH_TRIM_START)).toBeInTheDocument();
     expect(within(review).getByText(DE.TEACH_TRIM_END)).toBeInTheDocument();
     expect(within(review).getByRole('slider', { name: DE.TEACH_HANDLE_END })).toHaveAttribute('aria-valuenow', String(onset));
-    expect(within(review).getByText(formatDe(DE.TEACH_REVIEW_META, 'Bewegung 1', '1,3', onset + 1))).toBeInTheDocument();
+    expect(within(review).getByText(formatDe(DE.TEACH_REVIEW_META, 'Bewegung 1', '1,3'))).toBeInTheDocument();
     fireEvent.click(within(review).getByRole('button', { name: DE.TEACH_TRIM_UNDO }));
     expect(within(review).queryByText(DE.TEACH_TRIM_END)).toBeNull();
     expect(within(review).getByText(DE.TEACH_TRIM_START)).toBeInTheDocument();
@@ -1686,5 +1694,231 @@ describe('TeachOverlay — one focused window per kind', () => {
     render(<TeachOverlay {...baseProps({ mode: 'leader', caps: { has_leader: true }, rsBridge: LEADER_BRIDGE })} />);
     const leader = screen.getByText(DE.TEACH_MODE_LEADER).parentElement; // eslint-disable-line testing-library/no-node-access
     expect(leader.querySelector('svg[data-icon="leaderArm"]')).not.toBeNull(); // eslint-disable-line testing-library/no-node-access
+  });
+});
+
+// R0-5: the window redesign. What exists and what is enabled is still decided
+// by teachKeyOffered + teachActionCells (the kind-contract tests above); these
+// pin how it looks per state.
+describe('TeachOverlay — the redesigned window (R0-5)', () => {
+  const variantOf = (label) => screen.getByRole('button', { name: new RegExp(label) }).getAttribute('data-variant');
+
+  test('the card is content-sized and framed orange, and carries the static real-robot mode badge', () => {
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps()} />);
+    const card = screen.getByTestId('teach-card');
+    expect(card.className).toContain('border-4');
+    expect(card.className).toContain('border-[#EA580C]');
+    expect(card.className).toContain('my-auto');
+    expect(card.className.split(/\s+/)).not.toContain('h-full');
+    const badge = within(card).getByTestId('mode-badge');
+    expect(badge).toHaveTextContent(/^ECHTER ROBOTER$/);
+    // Static: no run state, whatever runs.
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(badge.querySelector('[data-icon="dot"]')).toBeNull();
+    // The root keeps its attributes.
+    const root = screen.getByTestId('teach-overlay');
+    expect(root).toHaveAttribute('role', 'dialog');
+    expect(root).toHaveAttribute('aria-labelledby', 'teach-title');
+    expect(root.className).toBe('fixed inset-0 z-[55] flex bg-slate-900/70 p-2 outline-none sm:p-6');
+  });
+
+  test.each(['fest', 'frei', 'aufnahme'])('Bewegung window, %s: the record button is red, F an outline', (state) => {
+    withSnapshot({ state, elapsedS: 3 });
+    render(<TeachOverlay {...baseProps()} />);
+    const space = within(screen.getByTestId('teach-actions')).getAllByRole('button')[0];
+    expect(space).toHaveAttribute('data-variant', 'record');
+    expect(space.className).toContain('bg-red-600');
+    expect(space.className).toContain('text-white');
+    expect(variantOf(state === 'fest' ? DE.TEACH_KEY_FREE : DE.TEACH_KEY_LOCK)).toBe('secondary');
+  });
+
+  test('countdown: the red button stays', () => {
+    withSnapshot({ state: 'countdown', countdownLeft: 2 });
+    render(<TeachOverlay {...baseProps()} />);
+    expect(screen.getByText(formatDe(DE.TEACH_COUNTDOWN, 2))).toBeInTheDocument();
+    expect(variantOf(DE.TEACH_KEY_REC)).toBe('record');
+  });
+
+  test.each([['pose', DE.TEACH_KEY_POSE], ['ziel', DE.TEACH_KEY_ZIEL]])(
+    '%s window: its capture button is the filled accent one, F an outline',
+    (kind, label) => {
+      withSnapshot({ state: 'fest' });
+      render(<TeachOverlay {...baseProps({ kind })} />);
+      expect(variantOf(label)).toBe('primary');
+      expect(screen.getByRole('button', { name: new RegExp(label) }).className).toContain('bg-[var(--accent)]');
+      expect(variantOf(DE.TEACH_KEY_FREE)).toBe('secondary');
+    },
+  );
+
+  test('a pending window\'s one disabled button is plain', () => {
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps({
+      mode: 'pending',
+      caps: { has_leader: true },
+      rsBridge: {
+        available: false, followerOnly: false, hasLeader: undefined, busy: false, leaderOn: false, probed: false,
+      },
+    })}
+    />);
+    const [only] = within(screen.getByTestId('teach-actions')).getAllByRole('button');
+    expect(only).toBeDisabled();
+    expect(only).toHaveAttribute('data-variant', 'secondary');
+  });
+
+  test('leader bereit: the Bewegung window\'s button is red, no F', () => {
+    withSnapshot({ state: 'bereit' });
+    render(<TeachOverlay {...baseProps({
+      mode: 'leader',
+      caps: { has_leader: true },
+      rsBridge: {
+        available: true, followerOnly: false, hasLeader: true, busy: false, leaderOn: true,
+      },
+    })}
+    />);
+    expect(variantOf(DE.TEACH_KEY_REC)).toBe('record');
+    expect(screen.queryByRole('button', { name: new RegExp(DE.TEACH_KEY_FREE) })).toBeNull();
+  });
+
+  test('aufnahme: a REC pill, „mm:ss / 02:00" and a progressbar to the limit', () => {
+    withSnapshot({ state: 'aufnahme', elapsedS: 7.8 });
+    render(<TeachOverlay {...baseProps()} />);
+    const pill = screen.getByRole('status');
+    expect(pill).toHaveTextContent(DE.TEACH_REC_BADGE);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(pill.querySelector('svg[data-icon="liveRecording"]')).not.toBeNull();
+    expect(screen.getByTestId('teach-rec-progress')).toHaveTextContent('00:07 / 02:00');
+    expect(screen.getByTestId('teach-rec-progress')).not.toHaveAttribute('aria-live');
+    const bar = screen.getByRole('progressbar', { name: DE.TEACH_REC_PROGRESS_ARIA });
+    expect(bar).toHaveAttribute('aria-valuemin', '0');
+    expect(bar).toHaveAttribute('aria-valuemax', '120');
+    expect(bar).toHaveAttribute('aria-valuenow', '7');
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(bar.firstChild.style.width).toBe(`${(7.8 / 120) * 100}%`);
+    expect(variantOf(DE.TEACH_KEY_STOP)).toBe('record');
+  });
+
+  test('no REC row outside a take', () => {
+    withSnapshot({ state: 'fest' });
+    render(<TeachOverlay {...baseProps()} />);
+    expect(screen.queryByTestId('teach-rec')).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
+  test.each(['pruefen', 'vorschau'])('%s: „Bewegung prüfen", no action row, „Behalten" filled, no point count', (state) => {
+    withSnapshot({ state, relock: 'ok', take: TAKE });
+    render(<TeachOverlay {...baseProps()} />);
+    expect(screen.getByTestId('teach-state-line')).toHaveTextContent('Bewegung prüfen');
+    expect(screen.queryByTestId('teach-actions')).toBeNull();
+    expect(variantOf(DE.TEACH_REVIEW_KEEP)).toBe('primary');
+    for (const label of [DE.TEACH_REVIEW_AGAIN, DE.TEACH_REVIEW_DISCARD]) {
+      expect(variantOf(label)).toBe('secondary');
+    }
+    expect(screen.getByText(formatDe(DE.TEACH_REVIEW_META, 'Bewegung 1', '1,2'))).toBeInTheDocument();
+    expect(screen.queryByText(/Punkte/)).toBeNull();
+  });
+
+  test('pruefen with a failed re-lock: the banner carries the F path', () => {
+    const actions = withSnapshot({ state: 'pruefen', relock: 'failed', take: TAKE });
+    render(<TeachOverlay {...baseProps()} />);
+    expect(screen.queryByTestId('teach-actions')).toBeNull();
+    const banner = screen.getByRole('alert');
+    fireEvent.click(within(banner).getByRole('button', { name: DE.TEACH_KEY_LOCK }));
+    expect(actions.lock).toHaveBeenCalledTimes(1);
+  });
+
+  test('abschluss: „Schließen" is no longer the filled button; „Als Programm einfügen" is', () => {
+    withSnapshot({ state: 'abschluss' });
+    render(<TeachOverlay {...baseProps()} />);
+    expect(variantOf(DE.TEACH_CLOSE)).toBe('secondary');
+    expect(variantOf(DE.TEACH_CONTINUE)).toBe('secondary');
+    const insert = screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 0) });
+    expect(insert).toHaveAttribute('data-variant', 'primary');
+    expect(insert.className).toContain('bg-[var(--accent)]');
+    expect(insert.className).toContain('text-white');
+    expect(insert).toBeDisabled();
+  });
+});
+
+// R0-5: what „Als Programm einfügen" wrote is highlighted once the window has
+// closed (the editor is hidden behind it before).
+describe('TeachOverlay — the insert flash after closing', () => {
+  function fakeDoc(result) {
+    return {
+      kind: 'blockly',
+      language: '',
+      workspace: null,
+      getStore: () => mockStore,
+      takenPlaceNames: () => [],
+      insertProgram: vi.fn(async () => result),
+      flashInserted: vi.fn(() => true),
+    };
+  }
+  async function keepTwo() {
+    workflowApi.createTrajectory.mockResolvedValue({ id: 't' });
+    await act(async () => {
+      mockHook.props.onKeep(TAKE);
+      mockHook.props.onKeep(TAKE);
+      await flush();
+    });
+  }
+
+  test('a successful insert is flashed on unmount, not before', async () => {
+    withSnapshot({ state: 'abschluss' });
+    const result = { blockId: 'b1', count: 2, blockIds: ['b1', 'r1', 'b2'] };
+    const doc = fakeDoc(result);
+    const { unmount } = render(<TeachOverlay {...baseProps({ assetDoc: doc })} />);
+    await keepTwo();
+    fireEvent.click(screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 2) }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(formatDe(DE.TEACH_INSERT_DONE, 2)));
+    expect(doc.flashInserted).not.toHaveBeenCalled();
+    unmount();
+    expect(doc.flashInserted).toHaveBeenCalledTimes(1);
+    expect(doc.flashInserted).toHaveBeenCalledWith(result);
+  });
+
+  // F2 (verification round 1): in hand mode „Fertig" offers the home glide,
+  // whose blurred warning and glide cover the editor for longer than the
+  // flash lasts — so the flash waits until the prompt is gone.
+  test('a home-glide prompt on screen holds the flash until it has gone', async () => {
+    withSnapshot({ state: 'abschluss' });
+    const queued = [];
+    mockGlide.after.mockImplementation((fn) => { queued.push(fn); });
+    const result = { blockId: 'b1', count: 2, blockIds: ['b1', 'r1', 'b2'] };
+    const doc = fakeDoc(result);
+    const { unmount } = render(<TeachOverlay {...baseProps({ assetDoc: doc })} />);
+    await keepTwo();
+    fireEvent.click(screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 2) }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(formatDe(DE.TEACH_INSERT_DONE, 2)));
+    unmount();
+    expect(mockGlide.after).toHaveBeenCalledTimes(1);
+    expect(doc.flashInserted).not.toHaveBeenCalled();
+    // The prompt resolved: now the student sees it.
+    queued.forEach((fn) => fn());
+    expect(doc.flashInserted).toHaveBeenCalledTimes(1);
+    expect(doc.flashInserted).toHaveBeenCalledWith(result);
+  });
+
+  test('nothing inserted, a refused insert, or a document without flashInserted: nothing is flashed, nothing throws', async () => {
+    withSnapshot({ state: 'abschluss' });
+    const idle = fakeDoc({ count: 2 });
+    const { unmount: unmountIdle } = render(<TeachOverlay {...baseProps({ assetDoc: idle })} />);
+    unmountIdle();
+    expect(idle.flashInserted).not.toHaveBeenCalled();
+
+    const refused = fakeDoc({ count: 0, error: 'Hier nicht.' });
+    const { unmount: unmountRefused } = render(<TeachOverlay {...baseProps({ assetDoc: refused })} />);
+    await keepTwo();
+    fireEvent.click(screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 2) }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Hier nicht.'));
+    unmountRefused();
+    expect(refused.flashInserted).not.toHaveBeenCalled();
+
+    const old = { ...fakeDoc({ blockId: 'b1', count: 2, blockIds: ['b1'] }), flashInserted: undefined };
+    const { unmount: unmountOld } = render(<TeachOverlay {...baseProps({ assetDoc: old })} />);
+    await keepTwo();
+    fireEvent.click(screen.getByRole('button', { name: formatDe(DE.TEACH_INSERT, 2) }));
+    await waitFor(() => expect(old.insertProgram).toHaveBeenCalled());
+    expect(() => unmountOld()).not.toThrow();
   });
 });

@@ -76,6 +76,35 @@ export function newActionsFor(capabilities, tab) {
     .map(({ id, label, icon, action }) => ({ id, label, icon, action }));
 }
 
+// The tabs whose creation rows include Vormachen (the Variablen tab has none).
+const TEACH_TABS = Object.freeze(['aufnahmen', 'ziele', 'positionen']);
+
+// In the simulator the Vormachen rows of a tab are gone (D9); the tab then
+// says why instead of silently offering less.
+function simHidesTeach(c, tab) {
+  return !!c && typeof c === 'object' && !!c.hardware && !!c.simMode && !!c.teach
+    && TEACH_TABS.includes(tab);
+}
+
+/**
+ * „Vormachen geht nur am echten Roboter – beende zuerst den Simulator." for a
+ * Bewegungen/Ziele/Positionen tab in the simulator on a rig that can teach,
+ * else null. The drawer and the code sidebar show it as one sentence.
+ */
+export function teachHintFor(capabilities, tab) {
+  return simHidesTeach(capabilities, tab) ? DE.TEACH_SIM_HINT : null;
+}
+
+/**
+ * The same hint as the three short lines the Blockly flyout draws (one label
+ * wider than a card would widen the whole flyout), else null.
+ */
+export function teachHintLinesFor(capabilities, tab) {
+  return simHidesTeach(capabilities, tab)
+    ? [DE.TEACH_SIM_HINT_LINE1, DE.TEACH_SIM_HINT_LINE2, DE.TEACH_SIM_HINT_LINE3]
+    : null;
+}
+
 /** The one Vormachen button of a tab (a code sidebar row's), or null. */
 export function teachActionFor(capabilities, tab) {
   return newActionsFor(capabilities, tab).find((a) => a.action.type === 'teach') || null;

@@ -44,7 +44,7 @@ import {
   variableOccurrences,
   variableOccurrencesAll,
 } from './codeAssetUsage';
-import { CODE_DE } from './codeMessagesDe';
+import { CODE_DE, formatCode } from './codeMessagesDe';
 
 // codeInsert.js (the insertion's structure analysis, with a Java statement
 // parser) is not in the entry bundle (review round 2, ni4): it is loaded the
@@ -64,7 +64,8 @@ export function loadCodeInsert() {
 }
 
 // CodeWorkspace's file sidebar (`w-44`, 11rem at the 16 px root): the drawer
-// opens right beside it, over the editor.
+// opens right beside it, over the editor — at the sidebar's APPLIED width
+// when the page measured one (`getSidebarWidth`), else at this default.
 export const CODE_SIDEBAR_WIDTH_PX = 176;
 // = assetCommands.USAGE_LABEL_MAX_CHARS, the Blockly rows' cap.
 const USAGE_LABEL_MAX_CHARS = 60;
@@ -74,8 +75,14 @@ function lineText(files, file, line) {
   return (content.split('\n')[line - 1] || '').trim();
 }
 
-function usageLabel(files, file, line) {
-  const text = `${file}:${line} · ${lineText(files, file, line)}`;
+// A „Benutzt in" row says WHERE („main.py, Zeile 8", R0-7); the line's own
+// text is its second line, cut with „…" only when it really was cut.
+function usageLabel(file, line) {
+  return formatCode(CODE_DE.USAGE_AT, file, line);
+}
+
+function usageDetail(files, file, line) {
+  const text = lineText(files, file, line);
   return text.length > USAGE_LABEL_MAX_CHARS ? `${text.slice(0, USAGE_LABEL_MAX_CHARS)}…` : text;
 }
 
@@ -93,7 +100,10 @@ function toUsageRows(files, rows) {
     const id = codeBreakpointId(r.file, r.line);
     if (seen.has(id)) continue;
     seen.add(id);
-    out.push({ id, label: usageLabel(files, r.file, r.line), disabled: !!r.inComment });
+    const row = { id, label: usageLabel(r.file, r.line), disabled: !!r.inComment };
+    const detail = usageDetail(files, r.file, r.line);
+    if (detail) row.detail = detail;
+    out.push(row);
   }
   return out;
 }
@@ -114,9 +124,14 @@ function toUsageRows(files, rows) {
  *   it changes the moment the page starts replacing the document. An
  *   insertion waiting for its module checks it before writing (review round
  *   3, mb9).
+ * @param {() => number|null} [args.getSidebarWidth] - the file sidebar's
+ *   APPLIED (measured) width in px; the drawer opens beside it. Missing,
+ *   non-finite or not positive (jsdom, an aside not laid out yet) →
+ *   CODE_SIDEBAR_WIDTH_PX, never over the file list.
  */
 export function createCodeAssetDocument({
   language, store, getFiles, applyFiles, requestReveal, getCursor, setCursor, getDocumentToken,
+  getSidebarWidth,
 }) {
   // Loaded now, so the first „Einfügen" waits for nothing.
   loadCodeInsert().catch(() => {});
@@ -269,7 +284,22 @@ export function createCodeAssetDocument({
     insertProgram: (items, opts) => insertLines(
       ({ stepsToCode }) => stepsToCode(buildProgramSteps(items, opts), language),
     ),
-    anchorLeft: () => CODE_SIDEBAR_WIDTH_PX,
+    // After „Als Programm einfügen" (R0-5): the inserted lines light up
+    // briefly — the editor gets a reveal of the last line with the range.
+    flashInserted(insertion) {
+      if (!insertion || typeof insertion !== 'object' || typeof requestReveal !== 'function') return false;
+      const { file, firstLine, lastLine } = insertion;
+      if (typeof file !== 'string' || !file) return false;
+      if (!Number.isInteger(firstLine) || !Number.isInteger(lastLine) || firstLine < 1 || lastLine < firstLine) {
+        return false;
+      }
+      requestReveal({ file, line: lastLine, flash: { from: firstLine, to: lastLine } });
+      return true;
+    },
+    anchorLeft: () => {
+      const w = typeof getSidebarWidth === 'function' ? Number(getSidebarWidth()) : NaN;
+      return Number.isFinite(w) && w > 0 ? w : CODE_SIDEBAR_WIDTH_PX;
+    },
     closeFlyout: () => {},
     hideChaff: () => {},
   };

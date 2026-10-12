@@ -46,6 +46,12 @@
  *                                firstLine?, lastLine?}` or a Promise of it
  *                                (a code document loads its insertion module
  *                                on demand); callers `await` either
+ *   flashInserted(insertion)     highlight for INSERT_FLASH_MS what
+ *                                insertProgram just wrote (Blockly: its
+ *                                `blockIds`; code: `file, firstLine,
+ *                                lastLine`), once the Vormachen window has
+ *                                closed; true when it showed something, false
+ *                                for anything else (never throws)
  *   anchorLeft()                 the drawer's left edge in px
  *   closeFlyout(), hideChaff()
  */
@@ -62,6 +68,38 @@ import {
 import { jumpToBlock } from './blockUsage';
 import { getDestinationStore, takenDestinationNames } from './destinationStore';
 import { buildWorkspaceAssetIndex } from './toolboxCategories';
+
+/** How long „Als Programm einfügen" shows what it wrote (both notations). */
+export const INSERT_FLASH_MS = 2500;
+
+// Highlight the blocks of an insertion, and un-highlight the ones still there
+// after INSERT_FLASH_MS. A disposed workspace (or no ids) answers false.
+function flashBlocks(ws, insertion) {
+  const ids = insertion && Array.isArray(insertion.blockIds) ? insertion.blockIds : [];
+  if (!ws || ids.length === 0) return false;
+  const lit = [];
+  try {
+    for (const id of ids) {
+      if (ws.getBlockById(id)) {
+        ws.highlightBlock(id, true);
+        lit.push(id);
+      }
+    }
+  } catch (_) {
+    return false;
+  }
+  if (lit.length === 0) return false;
+  setTimeout(() => {
+    for (const id of lit) {
+      try {
+        if (ws.getBlockById(id)) ws.highlightBlock(id, false);
+      } catch (_) {
+        // The workspace went away meanwhile.
+      }
+    }
+  }, INSERT_FLASH_MS);
+  return true;
+}
 
 function toolboxWidthOf(workspace) {
   try {
@@ -121,6 +159,7 @@ export function createBlocklyAssetDocument(workspace) {
     canInsertSnippets: false,
     insertSnippet: () => ({ count: 0 }),
     insertProgram: (items, opts) => insertProgram(ws, items, opts),
+    flashInserted: (insertion) => flashBlocks(ws, insertion),
     anchorLeft: () => toolboxWidthOf(ws),
     closeFlyout() {
       try {

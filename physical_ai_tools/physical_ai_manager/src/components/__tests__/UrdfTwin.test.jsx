@@ -155,6 +155,8 @@ const mockStandardMaterialCtor = vi.fn(); // captures the opts (incl. color)
 // scene.add / scene.remove, so the ghost-arm tests can prove exactly which
 // material was freed and that the clone left the scene.
 const mockStandardMaterials = [];
+// Every MeshBasicMaterial (markers, halo, ring, table edges …) with its opts.
+const mockBasicMaterials = [];
 const mockSceneOps = [];
 // Ghost arm: each robot.clone(true) result. Its traverse visits two arm meshes
 // (sharing spied geometries), a held sim object and an „Achsen" triad — the
@@ -198,6 +200,9 @@ const attachLog = [];
 // the extended tests assert the draw range advances (append) and resets (clear).
 const mockSetDrawRange = vi.fn();
 let mockPathGeometry = null;
+let mockPrevPathGeometry = null;
+// Drop lines of highlighted Positions: { points, geometry } per setFromPoints.
+const mockDropLines = [];
 // Test-controlled end-effector world position, written into the target vector by
 // the mock robot's getWorldPosition so appendPathPoint sees real numeric coords.
 const mockEEWorld = { x: 0, y: 0, z: 0 };
@@ -206,6 +211,10 @@ const mockEEWorld = { x: 0, y: 0, z: 0 };
 const mockStlLoads = [];
 // Whatever loadMeshCb handed back to urdf-loader's `done` (one entry per mesh).
 const mockMeshDone = [];
+// Mesh paths whose fetch ANOTHER twin already started: three's FileLoader joins
+// such a request without calling the manager's itemStart/itemEnd (R0-9), so the
+// STLLoader mock skips both for them.
+const mockCoalescedPaths = new Set();
 // renderer.render calls — the render-on-demand loop's only observable output.
 const mockRender = vi.fn();
 // camera.position.set calls — frameRobot's observable output.
@@ -364,7 +373,11 @@ vi.mock('three', () => {
       return mat;
     },
     MeshPhongMaterial: function MeshPhongMaterial() { return { dispose: () => {} }; },
-    MeshBasicMaterial: function MeshBasicMaterial() { return { color: { set: () => {} }, dispose: () => {} }; },
+    MeshBasicMaterial: function MeshBasicMaterial(opts) {
+      const mat = { opts, color: { set: () => {} }, dispose: vi.fn() };
+      mockBasicMaterials.push(mat);
+      return mat;
+    },
     Mesh: function Mesh(geometry, material) {
       // Rich enough for the sim-object/table/ring paths: userData bookkeeping, a
       // settable position (positionSimObject/snapMeshToTable write .y), rotation,
@@ -463,7 +476,15 @@ vi.mock('three', () => {
         setDrawRange: mockSetDrawRange,
         attributes: { position: { needsUpdate: false } },
         dispose: () => {},
+        // A highlighted Position's drop line is built from two points; it is
+        // NOT the path line, so it does not replace mockPathGeometry.
+        setFromPoints(points) {
+          if (mockPathGeometry === geo) mockPathGeometry = mockPrevPathGeometry;
+          mockDropLines.push({ points, geometry: geo });
+          return geo;
+        },
       };
+      mockPrevPathGeometry = mockPathGeometry;
       mockPathGeometry = geo;
       return geo;
     },
@@ -528,14 +549,19 @@ vi.mock('three/examples/jsm/loaders/STLLoader', () => ({
     // is what makes LoadingManager.onLoad fire. Nothing resolves on its own, so
     // every test controls exactly when (and whether) geometry exists.
     this.load = (path, onLoad, onProgress, onError) => {
-      if (this.manager) this.manager.itemStart(path);
+      const tracked = !mockCoalescedPaths.has(path);
+      if (this.manager && tracked) this.manager.itemStart(path);
       const entry = {
         path,
         onLoad,
         onError,
         finish: (geometry = { dispose: () => {} }) => {
           if (typeof onLoad === 'function') onLoad(geometry);
-          if (this.manager) this.manager.itemEnd(path);
+          if (this.manager && tracked) this.manager.itemEnd(path);
+        },
+        fail: (err = new Error('404')) => {
+          if (typeof onError === 'function') onError(err);
+          if (this.manager && tracked) this.manager.itemEnd(path);
         },
       };
       mockStlLoads.push(entry);
@@ -557,6 +583,7 @@ beforeEach(() => {
   mockRingGeometryCtor.mockClear();
   mockStandardMaterialCtor.mockClear();
   mockStandardMaterials.length = 0;
+  mockBasicMaterials.length = 0;
   mockSceneOps.length = 0;
   mockGhosts.length = 0;
   mockColorSet.mockClear();
@@ -565,6 +592,8 @@ beforeEach(() => {
   attachLog.length = 0;
   mockSetDrawRange.mockClear();
   mockPathGeometry = null;
+  mockPrevPathGeometry = null;
+  mockDropLines.length = 0;
   mockEEWorld.x = 0;
   mockEEWorld.y = 0;
   mockEEWorld.z = 0;
@@ -573,6 +602,7 @@ beforeEach(() => {
   mockLoadUrls.length = 0;
   mockStlLoads.length = 0;
   mockMeshDone.length = 0;
+  mockCoalescedPaths.clear();
   mockRender.mockClear();
   mockCameraPositionSet.mockClear();
   mockTargetCopy.mockClear();
@@ -1247,6 +1277,47 @@ describe('UrdfTwin — meshes that arrive AFTER the URDF callback', () => {
     mockMeshInstances.forEach((m) => expect(m.castShadow).toBe(false));
   });
 
+  // R0-9: the Startseite twin is still fetching the same STLs when Roboter
+  // Studio mounts its own. three's FileLoader joins those requests without
+  // telling THIS twin's LoadingManager, so its onLoad fires early — and the
+  // framing must still wait for the mesh.
+  test('a mesh whose fetch another twin started is waited for before framing', async () => {
+    mockCoalescedPaths.add('mesh0.stl');
+    render(<UrdfTwin />);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { await Promise.resolve(); });
+    expect(mockCameraPositionSet.mock.calls.length).toBe(1);
+
+    // The tracked mesh lands: the shared manager's onLoad fires now (it never
+    // counted mesh0), but this twin still waits.
+    await act(async () => { mockStlLoads[1].finish(); });
+    expect(mockCameraPositionSet.mock.calls.length).toBe(1);
+
+    await act(async () => { mockStlLoads[0].finish(); });
+    expect(mockCameraPositionSet.mock.calls.length).toBe(2);
+  });
+
+  test('every mesh joined to another twin\'s fetch: framed only once they land', async () => {
+    mockCoalescedPaths.add('mesh0.stl');
+    mockCoalescedPaths.add('mesh1.stl');
+    render(<UrdfTwin />);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { await Promise.resolve(); });
+    expect(mockCameraPositionSet.mock.calls.length).toBe(1);
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    expect(mockCameraPositionSet.mock.calls.length).toBe(2);
+  });
+
+  test('a mesh that fails to load still lets the arm frame (an error is a callback too)', async () => {
+    render(<UrdfTwin />);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads[0].fail(); });
+    expect(mockCameraPositionSet.mock.calls.length).toBe(1);
+    await act(async () => { mockStlLoads[1].finish(); });
+    expect(mockCameraPositionSet.mock.calls.length).toBe(2);
+    expect(mockMeshDone).toHaveLength(2);
+  });
+
   test('a mesh that resolves after unmount neither paints nor throws', async () => {
     const { unmount } = await mountAndWaitForMeshRequests();
     unmount();
@@ -1583,7 +1654,7 @@ describe('UrdfTwin — Sammlung markers', () => {
   test('a variable point is a flat ring; a highlighted marker is scaled up', async () => {
     await mount([{ id: 'var:Punkt', label: 'Punkt', kind: 'variable', x: 0.1, y: 0, z: 0.05, highlighted: true }]);
     expect(prims('TorusGeometry').map((p) => p.args)).toEqual([[0.012, 0.003, 8, 24]]);
-    expect(layer().kids[0].scale.set).toHaveBeenCalledWith(1.4, 1.4, 1.4);
+    expect(layer().kids[0].scale.set).toHaveBeenCalledWith(1.8, 1.8, 1.8);
   });
 
   test('with a 2D canvas the label is a depth-test-free sprite above the glyph', async () => {
@@ -1630,6 +1701,83 @@ describe('UrdfTwin — Sammlung markers', () => {
     rerender(<UrdfTwin markers={[]} />);
     expect(prims('OctahedronGeometry')[0].obj.dispose).toHaveBeenCalled();
     expect(layer().kids).toHaveLength(0);
+  });
+
+  test('a highlighted pin is 1.8x, on top, with a flat halo ring; no drop line', async () => {
+    await mount([{ ...PIN, highlighted: true }]);
+    const root = layer().kids[0];
+    expect(root.scale.set).toHaveBeenCalledWith(1.8, 1.8, 1.8);
+    expect(mockRingGeometryCtor).toHaveBeenCalledWith(0.016, 0.022, 32);
+    const halo = root.kids.find((k) => k.material && k.material.opts && k.material.opts.opacity === 0.55);
+    expect(halo.material.opts).toEqual({
+      color: '#f59e0b', transparent: true, opacity: 0.55, side: 2, depthTest: false,
+    });
+    expect(halo.rotation.x).toBeCloseTo(-Math.PI / 2, 9);
+    expect(halo.renderOrder).toBe(10);
+    // The glyph meshes draw on top of the arm too.
+    const glyphs = root.kids.filter((k) => k !== halo && k.material && k.material.opts);
+    expect(glyphs.length).toBe(2);
+    glyphs.forEach((g) => {
+      expect(g.renderOrder).toBe(10);
+      expect(g.material.opts.depthTest).toBe(false);
+    });
+    expect(mockDropLines).toHaveLength(0);
+  });
+
+  test('a highlighted Position with a height drops a line to the table', async () => {
+    await mount([{ ...POSE, highlighted: true }]);
+    expect(mockDropLines).toHaveLength(1);
+    const [from, to] = mockDropLines[0].points;
+    expect([from.x, from.y, from.z]).toEqual([0, 0, 0]);
+    expect(to.x).toBe(0);
+    // The root is scaled 1.8, so the local length is z / 1.8 = table level.
+    expect(to.y).toBeCloseTo(-0.12 / 1.8, 9);
+    expect(mockLineCtor).toHaveBeenCalledTimes(1);
+  });
+
+  test('a Position on the table (z ≤ 5 mm) has no drop line', async () => {
+    await mount([{ ...POSE, z: 0.004, highlighted: true }]);
+    expect(mockDropLines).toHaveLength(0);
+  });
+
+  test('an unhighlighted marker builds no halo and no drop line, and keeps depth testing', async () => {
+    await mount([PIN, POSE]);
+    expect(mockRingGeometryCtor).not.toHaveBeenCalled();
+    expect(mockDropLines).toHaveLength(0);
+    mockBasicMaterials.forEach((mat) => expect(mat.opts.depthTest).toBeUndefined());
+  });
+
+  test('with a 2D canvas a highlighted label is written in the kind colour', async () => {
+    const styles = [];
+    const ctx = {
+      beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), quadraticCurveTo: vi.fn(), closePath: vi.fn(),
+      fill: vi.fn(),
+      fillText: vi.fn(function record() { styles.push(this.fillStyle); }),
+    };
+    getContextSpy.mockReturnValue(ctx);
+    const { rerender } = await mount([PIN]);
+    expect(styles).toEqual(['#ffffff']);
+    rerender(<UrdfTwin markers={[{ ...PIN, highlighted: true }]} />);
+    expect(styles).toEqual(['#ffffff', '#f59e0b']);
+  });
+
+  test('a highlighted Position whose height changes is REBUILT; an unhighlighted one only moves', async () => {
+    const { rerender } = await mount([{ ...POSE, highlighted: true }]);
+    const first = layer().kids[0];
+    const firstGem = prims('OctahedronGeometry')[0].obj;
+    rerender(<UrdfTwin markers={[{ ...POSE, z: 0.2, highlighted: true }]} />);
+    expect(firstGem.dispose).toHaveBeenCalled();
+    expect(layer().kids[0]).not.toBe(first);
+    expect(mockDropLines).toHaveLength(2);
+    expect(mockDropLines[1].points[1].y).toBeCloseTo(-0.2 / 1.8, 9);
+
+    rerender(<UrdfTwin markers={[{ ...POSE, z: 0.2 }]} />); // highlight off: rebuilt once
+    const plain = layer().kids[0];
+    const gems = prims('OctahedronGeometry').length;
+    rerender(<UrdfTwin markers={[{ ...POSE, z: 0.05 }]} />);
+    expect(layer().kids[0]).toBe(plain);
+    expect(prims('OctahedronGeometry')).toHaveLength(gems);
+    expect(plain.position.set).toHaveBeenLastCalledWith(0.14, 0.05, -0.1);
   });
 
   test('every marker mutation repaints the on-demand loop', async () => {

@@ -475,3 +475,33 @@ describe('BlocklyWorkspace — input and text', () => {
     unmount();
   });
 });
+
+describe('BlocklyWorkspace — registration and change events', () => {
+  it('registers the toolbox heading before the first inject: both headings are drawn, nothing warns', async () => {
+    const { ws, unmount } = await mountEditor();
+    expect(Blockly.registry.hasItem(Blockly.registry.Type.TOOLBOX_ITEM, 'heading')).toBe(true);
+    const texts = ws.getToolbox().getToolboxItems()
+      .filter((item) => item instanceof Blockly.ToolboxSeparator)
+      .map((item) => item.getDiv().textContent);
+    expect(texts).toEqual([DE.TOOLBOX_HEADING_SAMMLUNG, DE.TOOLBOX_HEADING_BAUSTEINE]);
+    expect(warnSpy.mock.calls.map((args) => args.map(String).join(' '))
+      .filter((line) => /heading/.test(line))).toEqual([]);
+    unmount();
+  });
+
+  it('onChange receives the serialized document AND the Blockly event', async () => {
+    const onChange = vi.fn();
+    const { ws, unmount } = await mountEditor({ onChange });
+    act(() => { ws.newBlock('controls_if'); });
+    const created = () => onChange.mock.calls.find(([, e]) => e && e.type === Blockly.Events.BLOCK_CREATE);
+    await waitFor(() => expect(created()).toBeTruthy());
+    const [json, event] = created();
+    expect(json).toEqual(expect.objectContaining({ blocks: expect.any(Object) }));
+    expect(event).toBeInstanceOf(Blockly.Events.Abstract);
+    expect(event.isUiEvent).toBe(false);
+    // UI events (here the viewport) arrive too, marked as such: every call
+    // carries its event.
+    expect(onChange.mock.calls.every(([, e]) => e instanceof Blockly.Events.Abstract)).toBe(true);
+    unmount();
+  });
+});

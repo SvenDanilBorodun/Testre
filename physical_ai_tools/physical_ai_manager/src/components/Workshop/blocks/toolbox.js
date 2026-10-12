@@ -9,6 +9,7 @@
  */
 
 import { DE } from './messages_de';
+import { SAMMLUNG_COLOURS, SAMMLUNG_TABS } from '../sammlung/sammlungTabs';
 
 // Shadow blocks. Beginners can't connect a math_number to a value
 // input, so every numeric value-slot gets a shadow with a sensible
@@ -52,13 +53,25 @@ export const SAMMLUNG_BASE_BLOCKS = Object.freeze([
   { kind: 'block', type: 'edubotics_replay_trajectory' },
 ]);
 
-// Order and colours of the four groups (below the separator).
-const SAMMLUNG_CATEGORIES = Object.freeze([
-  { key: 'VARIABLEN', nameKey: 'CATEGORY_VARIABLEN', colour: '#a78bfa' },
-  { key: 'AUFNAHMEN', nameKey: 'CATEGORY_AUFNAHMEN', colour: '#3b82f6' },
-  { key: 'ZIELE', nameKey: 'CATEGORY_ZIELE', colour: '#f59e0b' },
-  { key: 'POSITIONEN', nameKey: 'CATEGORY_POSITIONEN', colour: '#14b8a6' },
-]);
+// The toolbox item kind of a group heading („Meine Sammlung", „Bausteine"):
+// a ToolboxSeparator subclass registered by sammlung/ToolboxHeading.js
+// (registerToolboxHeading, from BlocklyWorkspace::registerAllBlocksOnce). The
+// string is spelled here too so this module stays Blockly-free.
+const HEADING_KIND = 'heading';
+
+// The four groups, in the one order (sammlung/sammlungTabs.js::SAMMLUNG_TABS)
+// and the one set of colours (SAMMLUNG_COLOURS). Tab id → the keys of
+// SAMMLUNG_CATEGORY_KEYS / SAMMLUNG_TOOLBOX_IDS and the category name.
+const SAMMLUNG_CATEGORY_OF_TAB = Object.freeze({
+  aufnahmen: { key: 'AUFNAHMEN', nameKey: 'CATEGORY_AUFNAHMEN' },
+  ziele: { key: 'ZIELE', nameKey: 'CATEGORY_ZIELE' },
+  positionen: { key: 'POSITIONEN', nameKey: 'CATEGORY_POSITIONEN' },
+  variablen: { key: 'VARIABLEN', nameKey: 'CATEGORY_VARIABLEN' },
+});
+const SAMMLUNG_CATEGORIES = Object.freeze(SAMMLUNG_TABS.map((tab) => ({
+  ...SAMMLUNG_CATEGORY_OF_TAB[tab],
+  colour: SAMMLUNG_COLOURS[tab],
+})));
 
 // Build a category that can be hidden when the parent supplies a
 // `restrictedBlocks` set (used by tutorials in phase 3). When the
@@ -98,7 +111,7 @@ export function buildToolbox(restrictedBlocks = null) {
       type: 'edubotics_wait_seconds',
       inputs: { SECONDS: numberShadow(1) },
     },
-    // The replay block moved to the dynamic „Aufnahmen" group
+    // The replay block moved to the dynamic „Bewegungen" group
     // (SAMMLUNG_BASE_BLOCKS below), where it is offered prefilled per recording.
   ], restricted);
 
@@ -248,6 +261,10 @@ export function buildToolbox(restrictedBlocks = null) {
 
   // Build the toolbox JSON. Empty categories are dropped so a
   // restricted-toolbox tutorial doesn't render empty categories.
+  //
+  // Order: „Vorschläge", the heading „Meine Sammlung", the four Sammlung
+  // groups (the student's own things, at the TOP so they are found), the
+  // heading „Bausteine", then the static categories.
   const categories = [
     {
       kind: 'category',
@@ -256,6 +273,15 @@ export function buildToolbox(restrictedBlocks = null) {
       // Dynamic category populated by @blockly/suggested-blocks.
       custom: 'MOST_USED',
     },
+    { kind: HEADING_KIND, text: DE.TOOLBOX_HEADING_SAMMLUNG },
+    ...SAMMLUNG_CATEGORIES.map((c) => ({
+      kind: 'category',
+      name: DE[c.nameKey],
+      colour: c.colour,
+      custom: SAMMLUNG_CATEGORY_KEYS[c.key],
+      toolboxitemid: SAMMLUNG_TOOLBOX_IDS[c.key],
+    })),
+    { kind: HEADING_KIND, text: DE.TOOLBOX_HEADING_BAUSTEINE },
     {
       kind: 'category',
       name: DE.CATEGORY_BEWEGUNG,
@@ -316,28 +342,25 @@ export function buildToolbox(restrictedBlocks = null) {
       colour: '#0891b2',
       contents: counters,
     },
-    // The student's own things. A categoryToolbox has no label item, so a
-    // separator is the only heading there is.
-    { kind: 'sep' },
-    ...SAMMLUNG_CATEGORIES.map((c) => ({
-      kind: 'category',
-      name: DE[c.nameKey],
-      colour: c.colour,
-      custom: SAMMLUNG_CATEGORY_KEYS[c.key],
-      toolboxitemid: SAMMLUNG_TOOLBOX_IDS[c.key],
-    })),
   ].filter((c) => {
-    // Keep dynamic categories and the separator regardless (the separator is
-    // always followed by the four Sammlung categories, which are custom and
-    // never dropped); drop static categories with no remaining contents
-    // (happens when restrictedBlocks is set).
-    if (c.custom || c.kind === 'sep') return true;
+    // Keep dynamic categories and the headings regardless (the Sammlung
+    // categories are custom and never dropped); drop static categories with
+    // no remaining contents (happens when restrictedBlocks is set).
+    if (c.custom || c.kind === HEADING_KIND) return true;
     return Array.isArray(c.contents) && c.contents.length > 0;
+  });
+
+  // „Bausteine" heads the static categories (the ones with `contents`; the
+  // dynamic „Funktionen" is kept regardless, like every custom category): a
+  // restriction that leaves no static category leaves no heading over them.
+  const contents = categories.filter((c, i) => {
+    if (c.kind !== HEADING_KIND || c.text !== DE.TOOLBOX_HEADING_BAUSTEINE) return true;
+    return categories.slice(i + 1).some((next) => next.kind === 'category' && Array.isArray(next.contents));
   });
 
   return {
     kind: 'categoryToolbox',
-    contents: categories,
+    contents,
   };
 }
 

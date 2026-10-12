@@ -120,20 +120,37 @@ const label = (text) => ({ kind: 'label', text });
 const button = (text, callbackkey) => ({ kind: 'button', text, callbackkey });
 // A creation button from sammlung/newActions.js, drawn with its icon.
 const iconButton = (text, callbackkey, icon) => ({ kind: 'edubotics_icon_button', text, callbackkey, icon });
+// A Vormachen creation button: white on the accent (index.css).
+const teachButton = (text, callbackkey, icon) => ({
+  ...iconButton(text, callbackkey, icon), 'web-class': 'eduFlyoutTeachButton',
+});
+// The ready „bewege zu <name>" block offered after a Ziel/Position card.
+const readyMoveTo = (name) => ({
+  kind: 'block',
+  type: 'edubotics_move_to',
+  inputs: { DESTINATION: { block: { type: 'edubotics_destination_ref', fields: { NAME: name } } } },
+});
 const card = (fields) => ({ kind: 'edubotics_asset_card', gap: 4, ...fields });
 
 describe('Sammlung toolbox groups', () => {
-  it('sit below a separator with stable ids, in order', async () => {
+  it('sit at the top under the „Meine Sammlung" heading with stable ids, in order', async () => {
     const { ws, unmount } = await mountEditor({ sammlungProvider: fixtureProvider() });
     const items = ws.getToolbox().getToolboxItems();
+    // The heading IS a ToolboxSeparator (sammlung/ToolboxHeading.js), right after
+    // „Vorschläge"; then the four groups, the „Bausteine" heading and the ten
+    // static categories.
     const sepIndex = items.findIndex((it) => it instanceof Blockly.ToolboxSeparator);
-    expect(sepIndex).toBeGreaterThan(0);
-    expect(items.slice(sepIndex + 1).map((it) => it.getId())).toEqual([
-      SAMMLUNG_TOOLBOX_IDS.VARIABLEN,
+    expect(sepIndex).toBe(1);
+    expect(items.slice(sepIndex + 1, sepIndex + 5).map((it) => it.getId())).toEqual([
       SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN,
       SAMMLUNG_TOOLBOX_IDS.ZIELE,
       SAMMLUNG_TOOLBOX_IDS.POSITIONEN,
+      SAMMLUNG_TOOLBOX_IDS.VARIABLEN,
     ]);
+    expect(items[sepIndex + 5]).toBeInstanceOf(Blockly.ToolboxSeparator);
+    const rest = items.slice(sepIndex + 6);
+    expect(rest).toHaveLength(10);
+    expect(rest.every((it) => !(it instanceof Blockly.ToolboxSeparator))).toBe(true);
     unmount();
   });
 
@@ -144,26 +161,26 @@ describe('Sammlung toolbox groups', () => {
 
     expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.AUFNAHMEN)).toEqual([
       label('2 von 16'),
-      iconButton(DE.FLY_TEACH_RECORDING, 'EDU_SAMMLUNG_TEACH_RECORDING', 'record'),
+      teachButton(DE.FLY_TEACH_RECORDING, 'EDU_SAMMLUNG_TEACH_RECORDING', 'record'),
       button(DE.FLY_MANAGE, 'EDU_SAMMLUNG_MANAGE_AUFNAHMEN'),
       card({
         assetKind: 'recording', assetId: 'traj-2', assetName: 'Tanz', title: 'Tanz',
         meta: '4,2 s · 105 Punkte',
         chips: [{ text: '1× benutzt', level: 'ok' }, { text: '2 Versionen', level: 'warn' }],
-        canPreview: true, colour: '#3b82f6',
+        canPreview: true, colour: '#e11d48',
       }),
       { kind: 'block', type: 'edubotics_replay_trajectory', fields: { NAME: 'Tanz' } },
       label(DE.FLY_SECTION_MISSING),
       card({
         assetKind: 'missingRecording', assetId: '', assetName: 'Fehlt', title: 'Fehlt', meta: '',
-        chips: [{ text: 'fehlt', level: 'bad' }, { text: '1 Block sucht diese Aufnahme', level: 'bad' }],
-        canPreview: false, colour: '#3b82f6',
+        chips: [{ text: 'fehlt', level: 'bad' }, { text: '1 Block sucht diese Bewegung', level: 'bad' }],
+        canPreview: false, colour: '#e11d48',
       }),
     ]);
 
     expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.ZIELE)).toEqual([
       label('1 Ziel'),
-      iconButton(DE.FLY_TEACH_ZIEL, 'EDU_SAMMLUNG_TEACH_ZIEL', 'ziel'),
+      teachButton(DE.FLY_TEACH_ZIEL, 'EDU_SAMMLUNG_TEACH_ZIEL', 'ziel'),
       iconButton(DE.FLY_PIN_CAMERA, 'EDU_SAMMLUNG_PIN_CAMERA', 'camera'),
       button(DE.FLY_MANAGE, 'EDU_SAMMLUNG_MANAGE_ZIELE'),
       { kind: 'block', type: 'edubotics_destination_pin' },
@@ -172,9 +189,10 @@ describe('Sammlung toolbox groups', () => {
       label(DE.FLY_SECTION_YOURS),
       card({
         assetKind: 'pin', assetId: pin.id, assetName: 'Ablage', title: 'Ablage',
-        meta: 'x 182 · y −64 mm · Kamera', chips: [{ text: 'nicht benutzt', level: 'ok' }],
+        meta: 'x 182 · y −64 mm · Kamera', chips: [{ text: 'nicht benutzt', level: 'muted' }],
         canPreview: true, colour: '#f59e0b',
       }),
+      readyMoveTo('Ablage'),
       { kind: 'block', type: 'edubotics_destination_ref', fields: { NAME: 'Ablage' } },
       label(DE.FLY_SECTION_PROGRAM),
       card({
@@ -185,13 +203,14 @@ describe('Sammlung toolbox groups', () => {
 
     expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.POSITIONEN)).toEqual([
       label('1 Position'),
-      iconButton(DE.FLY_TEACH_POSE, 'EDU_SAMMLUNG_TEACH_POSE', 'pose'),
+      teachButton(DE.FLY_TEACH_POSE, 'EDU_SAMMLUNG_TEACH_POSE', 'pose'),
       button(DE.FLY_MANAGE, 'EDU_SAMMLUNG_MANAGE_POSITIONEN'),
       card({
         assetKind: 'pose', assetId: pose.id, assetName: 'Oben', title: 'Oben',
-        meta: 'z 150 mm · OMX', chips: [{ text: 'nicht benutzt', level: 'ok' }],
+        meta: 'z 150 mm · OMX', chips: [{ text: 'nicht benutzt', level: 'muted' }],
         canPreview: true, colour: '#14b8a6',
       }),
+      readyMoveTo('Oben'),
       { kind: 'block', type: 'edubotics_destination_ref', fields: { NAME: 'Oben' } },
     ]);
 
@@ -206,7 +225,7 @@ describe('Sammlung toolbox groups', () => {
       core[2],
       card({
         assetKind: 'variable', assetId: 'v1', assetName: 'Zahl', title: 'Zahl',
-        meta: 'noch kein Wert', chips: [{ text: 'nicht benutzt', level: 'ok' }],
+        meta: 'noch kein Wert', chips: [{ text: 'nicht benutzt', level: 'muted' }],
         canPreview: false, colour: '#a78bfa',
       }),
       core[3],
@@ -233,7 +252,7 @@ describe('Sammlung toolbox groups', () => {
       },
       { kind: 'block', type: 'edubotics_replay_trajectory', fields: { NAME: 'Tanz' } },
       label(DE.FLY_SECTION_MISSING),
-      { kind: 'label', text: 'Fehlt · fehlt · 1 Block sucht diese Aufnahme', 'web-class': 'eduSammlungCardLabel' },
+      { kind: 'label', text: 'Fehlt · fehlt · 1 Block sucht diese Bewegung', 'web-class': 'eduSammlungCardLabel' },
       {
         kind: 'edubotics_icon_button', text: 'Verwalten', callbackkey: 'EDU_SAMMLUNG_CARD_MANAGE', icon: 'more',
         'web-class': 'eduSammlungCardButton',
@@ -344,7 +363,8 @@ describe('Sammlung groups — restriction, counts, teacher page', () => {
     seed(ws);
     const ziele = flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.ZIELE);
     const blockTypes = ziele.filter((it) => it.kind === 'block').map((it) => it.type);
-    expect(blockTypes).toEqual(['edubotics_destination_ref', 'edubotics_destination_ref']);
+    // The generic ref, then the entry's ready „bewege zu" (both types allowed) and its ref.
+    expect(blockTypes).toEqual(['edubotics_destination_ref', 'edubotics_move_to', 'edubotics_destination_ref']);
     expect(ziele.filter((it) => it.kind === 'edubotics_asset_card')).toHaveLength(2);
     expect(ziele.filter((it) => it.kind === 'label').map((it) => it.text))
       .toEqual(['1 Ziel', DE.FLY_SECTION_YOURS, DE.FLY_SECTION_PROGRAM]);
@@ -433,7 +453,8 @@ describe('refreshIfOpen', () => {
     const refresh = vi.spyOn(ws, 'refreshToolboxSelection');
 
     expect(refreshIfOpen(ws)).toBe(false);
-    toolbox.setSelectedItem(toolbox.getToolboxItems()[1]); // „Bewegung"
+    // A static category (index 1 is now the „Meine Sammlung" heading): „Arm".
+    toolbox.setSelectedItem(toolbox.getToolboxItems().find((it) => it.getName && it.getName() === DE.CATEGORY_BEWEGUNG));
     expect(refreshIfOpen(ws)).toBe(false);
     expect(refresh).not.toHaveBeenCalled();
 
@@ -474,6 +495,68 @@ describe('refreshIfOpen', () => {
     Blockly.Events.fire(new Click(null, ws.id, 'workspace'));
     await flushEvents();
     expect(refresh).toHaveBeenCalledTimes(5);
+    unmount();
+  });
+});
+
+describe('Sammlung groups — ready blocks, the simulator hint, teach buttons (D)', () => {
+  it('a Ziel or Position card is followed by a ready „bewege zu" block only when both types pass the restriction', async () => {
+    const provider = fixtureProvider({ restrictedBlocks: ['edubotics_destination_ref', 'edubotics_home'] });
+    const { ws, unmount } = await mountEditor({ sammlungProvider: provider });
+    seed(ws);
+    const types = (key) => flyoutOf(ws, key).filter((it) => it.kind === 'block').map((it) => it.type);
+    // edubotics_move_to is not allowed: no ready block, the bare refs stay.
+    expect(types(SAMMLUNG_CATEGORY_KEYS.ZIELE)).toEqual(['edubotics_destination_ref', 'edubotics_destination_ref']);
+    expect(types(SAMMLUNG_CATEGORY_KEYS.POSITIONEN)).toEqual(['edubotics_destination_ref']);
+    provider.setSnapshot({ restrictedBlocks: ['edubotics_destination_ref', 'edubotics_move_to'] });
+    expect(types(SAMMLUNG_CATEGORY_KEYS.POSITIONEN)).toEqual(['edubotics_move_to', 'edubotics_destination_ref']);
+    // Only the ref allowed is not enough the other way round either.
+    provider.setSnapshot({ restrictedBlocks: ['edubotics_move_to'] });
+    expect(types(SAMMLUNG_CATEGORY_KEYS.POSITIONEN)).toEqual([]);
+    unmount();
+  });
+
+  it('in the simulator the three hint lines follow the count label, 2 px apart; none on the rig', async () => {
+    const provider = fixtureProvider({ capabilities: { ...FULL_CAPS, simMode: true, pinSim: true } });
+    const { ws, unmount } = await mountEditor({ sammlungProvider: provider });
+    seed(ws);
+    const hint = [
+      { kind: 'label', text: DE.TEACH_SIM_HINT_LINE1, 'web-class': 'eduFlyoutHint' },
+      { kind: 'sep', gap: 2 },
+      { kind: 'label', text: DE.TEACH_SIM_HINT_LINE2, 'web-class': 'eduFlyoutHint' },
+      { kind: 'sep', gap: 2 },
+      { kind: 'label', text: DE.TEACH_SIM_HINT_LINE3, 'web-class': 'eduFlyoutHint' },
+    ];
+    expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.AUFNAHMEN).slice(0, 6)).toEqual([label('2 von 16'), ...hint]);
+    const ziele = flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.ZIELE);
+    expect(ziele.slice(0, 7)).toEqual([
+      label('1 Ziel'), ...hint, iconButton(DE.FLY_PIN_SIM, 'EDU_SAMMLUNG_PIN_SIM', 'box'),
+    ]);
+    expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.POSITIONEN).slice(0, 6)).toEqual([label('1 Position'), ...hint]);
+    // Variablen never had a Vormachen row: no hint.
+    expect(flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.VARIABLEN)
+      .some((it) => it['web-class'] === 'eduFlyoutHint')).toBe(false);
+    // The rig: no hint anywhere.
+    provider.setSnapshot({ capabilities: FULL_CAPS });
+    for (const key of Object.values(SAMMLUNG_CATEGORY_KEYS)) {
+      expect(flyoutOf(ws, key).some((it) => it['web-class'] === 'eduFlyoutHint')).toBe(false);
+    }
+    // The hint opens in the real flyout without widening it past a card.
+    provider.setSnapshot({ capabilities: { ...FULL_CAPS, simMode: true } });
+    const toolbox = ws.getToolbox();
+    expect(() => toolbox.setSelectedItem(toolbox.getToolboxItemById(SAMMLUNG_TOOLBOX_IDS.POSITIONEN)))
+      .not.toThrow();
+    unmount();
+  });
+
+  it('only the Vormachen creation buttons carry the teach web-class', async () => {
+    const provider = fixtureProvider({ capabilities: { ...FULL_CAPS, pinSim: true } });
+    const { ws, unmount } = await mountEditor({ sammlungProvider: provider });
+    const buttons = Object.values(SAMMLUNG_CATEGORY_KEYS).flatMap((k) => flyoutOf(ws, k))
+      .filter((it) => it.kind === 'edubotics_icon_button');
+    expect(buttons.filter((it) => it['web-class'] === 'eduFlyoutTeachButton').map((it) => it.callbackkey))
+      .toEqual(['EDU_SAMMLUNG_TEACH_RECORDING', 'EDU_SAMMLUNG_TEACH_ZIEL', 'EDU_SAMMLUNG_TEACH_POSE']);
+    expect(buttons.find((it) => it.callbackkey === 'EDU_SAMMLUNG_PIN_CAMERA')).not.toHaveProperty('web-class');
     unmount();
   });
 });

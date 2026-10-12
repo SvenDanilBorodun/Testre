@@ -27,9 +27,18 @@
 //     onSelect — so a dialog the choice opens (Vormachen) restores focus to it.
 //   * Every key it handles is stopped here: Blockly's document-level shortcuts
 //     must never see an arrow meant for this menu.
+//   * The menu opens toward the INSIDE of the viewport: measured on every open
+//     (8 px margin), a menu that would leave the right edge is right-aligned
+//     (and a right-aligned one leaving the left edge left-aligned), and one
+//     that would leave the bottom opens upwards when the trigger has room
+//     above it (and the mirror for `placement="up"`). While open the chevron
+//     follows the placement it resolved to. A menu with a zero-size box (not
+//     laid out, as in jsdom) is unmeasurable and is never flipped.
+//   * `describedBy` names an element that says why the trigger is disabled
+//     (its aria-describedby); the accessible name stays the label.
 
 import React, {
-  useCallback, useEffect, useId, useRef, useState,
+  useCallback, useEffect, useId, useLayoutEffect, useRef, useState,
 } from 'react';
 import Icon from '../icons/Icon';
 import usePopoverDismiss from './usePopoverDismiss';
@@ -46,6 +55,27 @@ const SIZE = {
 // The chevron points where the menu opens.
 const CHEVRON_ICON = { down: 'chevronDown', up: 'chevronUp' };
 const ALIGN = { left: 'left-0', right: 'right-0' };
+// The menu keeps this far from the viewport's edges.
+const VIEWPORT_MARGIN_PX = 8;
+
+// Where a menu measured at `menu` (and its trigger at `trigger`) opens so that
+// it stays inside the viewport, starting from the props' align/placement.
+function insidePlacement(menu, trigger, align, placement) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let nextAlign = align;
+  if (align === 'left' && menu.right > vw - VIEWPORT_MARGIN_PX) nextAlign = 'right';
+  else if (align === 'right' && menu.left < VIEWPORT_MARGIN_PX) nextAlign = 'left';
+  let nextPlacement = placement;
+  if (trigger) {
+    if (placement === 'down' && menu.bottom > vh - VIEWPORT_MARGIN_PX && trigger.top >= menu.height) {
+      nextPlacement = 'up';
+    } else if (placement === 'up' && menu.top < VIEWPORT_MARGIN_PX && vh - trigger.bottom >= menu.height) {
+      nextPlacement = 'down';
+    }
+  }
+  return { align: nextAlign, placement: nextPlacement };
+}
 
 export default function MenuButton({
   label,
@@ -59,20 +89,43 @@ export default function MenuButton({
   size = 'md',
   className = '',
   buttonClassName = '',
+  describedBy,
 }) {
   const sized = SIZE[size] || SIZE.md;
   const menuId = useId();
   const wrapRef = useRef(null);
   const triggerRef = useRef(null);
   const itemRefs = useRef([]);
+  const menuRef = useRef(null);
   const [open, setOpen] = useState(false);
   const [focusIndex, setFocusIndex] = useState(0);
+  // Where the open menu really sits: the props, flipped inward on measurement.
+  const [resolved, setResolved] = useState({ align, placement });
 
   const openAt = useCallback((index) => {
     if (disabled || items.length === 0) return;
     setFocusIndex(index);
+    // Every open starts from the props, so the measurement below sees the
+    // menu where the caller asked for it.
+    setResolved({ align, placement });
     setOpen(true);
-  }, [disabled, items.length]);
+  }, [disabled, items.length, align, placement]);
+
+  // Measure the menu as it opens (before paint) and flip it inward.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const menu = menuRef.current;
+    if (!menu || typeof menu.getBoundingClientRect !== 'function' || typeof window === 'undefined') return;
+    const rect = menu.getBoundingClientRect();
+    if (!rect || (rect.width === 0 && rect.height === 0)) return;
+    const trigger = triggerRef.current && typeof triggerRef.current.getBoundingClientRect === 'function'
+      ? triggerRef.current.getBoundingClientRect()
+      : null;
+    const next = insidePlacement(rect, trigger, align, placement);
+    setResolved((prev) => (prev.align === next.align && prev.placement === next.placement ? prev : next));
+    // Measured once per open; the props are the start of that measurement.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const close = useCallback((refocus) => {
     setOpen(false);
@@ -168,6 +221,7 @@ export default function MenuButton({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
+        aria-describedby={describedBy || undefined}
         disabled={disabled}
         title={title}
         onClick={() => (open ? close(false) : openAt(0))}
@@ -177,11 +231,12 @@ export default function MenuButton({
       >
         {icon && <Icon name={icon} />}
         <span>{label}</span>
-        <Icon name={CHEVRON_ICON[placement] || CHEVRON_ICON.down} size="0.85em" />
+        <Icon name={CHEVRON_ICON[open ? resolved.placement : placement] || CHEVRON_ICON.down} size="0.85em" />
       </button>
       {open && (
         // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
         <ul
+          ref={menuRef}
           id={menuId}
           role="menu"
           aria-label={menuLabel || label}
@@ -189,7 +244,7 @@ export default function MenuButton({
           onKeyUp={onMenuKeyUp}
           className={
             `absolute z-30 ${sized.menu} rounded-md border border-[var(--line)] bg-white py-1 shadow-lg ${
-              PLACEMENT[placement] || PLACEMENT.down} ${ALIGN[align] || ALIGN.left}`
+              PLACEMENT[resolved.placement] || PLACEMENT.down} ${ALIGN[resolved.align] || ALIGN.left}`
           }
         >
           {items.map((item, i) => (

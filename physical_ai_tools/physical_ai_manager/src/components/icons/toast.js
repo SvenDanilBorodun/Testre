@@ -33,6 +33,7 @@ export const TOAST_ICONS = Object.freeze({
   record: 'record',
   stop: 'hand',
   arm: 'robotArm',
+  simulator: 'simulator',
   unplugged: 'unplugged',
   timeout: 'alarm',
 });

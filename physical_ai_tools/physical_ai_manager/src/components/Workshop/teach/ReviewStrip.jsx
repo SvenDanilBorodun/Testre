@@ -13,9 +13,14 @@
 // SAMPLE INDICES (ArrowLeft/ArrowRight = one sample) but are drawn at the
 // sample's TIME, because the recorder drops samples of a still arm and the
 // bars are binned by time. The handles never cross and always keep ≥ 2 samples.
+//
+// Below the strip (owner decision R0-5) „Anfang" / „Ende" stand under their
+// handles and a time axis names the start, the middle and the end of the take
+// in seconds. Both rows are aria-hidden: the sliders carry their own names.
 
 import React, { useRef } from 'react';
-import { DE } from '../blocks/messages_de';
+import { DE, formatDe } from '../blocks/messages_de';
+import { formatSecondsDe } from '../sammlung/format';
 
 const CHART_W = 1000;
 const CHART_H = 60;
@@ -104,26 +109,46 @@ function ReviewStrip({
 
   const startPct = fraction(startIndex) * 100;
   const endPct = fraction(endIndex) * 100;
+  const axisLabel = (ms) => formatDe(DE.TEACH_AXIS_SECONDS, formatSecondsDe(ms / 1000));
 
   return (
-    <div
-      role="group"
-      aria-label={DE.TEACH_STRIP_ARIA}
-      ref={trackRef}
-      data-testid="teach-review-strip"
-      className={`relative h-16 w-full select-none rounded-lg bg-[var(--bg-sunk)] ${disabled ? 'opacity-60' : ''}`}
-    >
-      <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} preserveAspectRatio="none" className="absolute inset-0 h-full w-full" aria-hidden="true">
-        {activity.map((v, b) => {
-          const h = peak > 0 ? Math.max(1, (v / peak) * (CHART_H - 4)) : 1;
-          // Bins are positional (bin b = time b × 200 ms), so the index IS the identity.
-          return <rect key={b} x={b * barW + 1} y={CHART_H - h} width={Math.max(1, barW - 2)} height={h} fill="var(--accent)" />;
-        })}
-      </svg>
-      <div className="pointer-events-none absolute inset-y-0 left-0 bg-slate-400/50" style={{ width: `${startPct}%` }} />
-      <div className="pointer-events-none absolute inset-y-0 right-0 bg-slate-400/50" style={{ width: `${100 - endPct}%` }} />
-      <div {...handleProps('start')}><span className="w-1 rounded bg-[var(--ink)]" /></div>
-      <div {...handleProps('end')}><span className="w-1 rounded bg-[var(--ink)]" /></div>
+    <div className="flex w-full flex-col gap-0.5">
+      <div
+        role="group"
+        aria-label={DE.TEACH_STRIP_ARIA}
+        ref={trackRef}
+        data-testid="teach-review-strip"
+        className={`relative h-16 w-full select-none rounded-lg bg-[var(--bg-sunk)] ${disabled ? 'opacity-60' : ''}`}
+      >
+        <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} preserveAspectRatio="none" className="absolute inset-0 h-full w-full" aria-hidden="true">
+          {activity.map((v, b) => {
+            const h = peak > 0 ? Math.max(1, (v / peak) * (CHART_H - 4)) : 1;
+            // Bins are positional (bin b = time b × 200 ms), so the index IS the identity.
+            return <rect key={b} x={b * barW + 1} y={CHART_H - h} width={Math.max(1, barW - 2)} height={h} fill="var(--accent)" />;
+          })}
+        </svg>
+        <div className="pointer-events-none absolute inset-y-0 left-0 bg-slate-400/50" style={{ width: `${startPct}%` }} />
+        <div className="pointer-events-none absolute inset-y-0 right-0 bg-slate-400/50" style={{ width: `${100 - endPct}%` }} />
+        <div {...handleProps('start')}><span className="w-1 rounded bg-[var(--ink)]" /></div>
+        <div {...handleProps('end')}><span className="w-1 rounded bg-[var(--ink)]" /></div>
+      </div>
+      <div className="relative h-4 w-full text-[var(--ink)]" aria-hidden="true" data-testid="teach-strip-handle-labels">
+        <span className="absolute -translate-x-1/2 whitespace-nowrap text-xs font-medium" style={{ left: `${startPct}%` }}>
+          {DE.TEACH_HANDLE_START}
+        </span>
+        <span className="absolute -translate-x-1/2 whitespace-nowrap text-xs font-medium" style={{ left: `${endPct}%` }}>
+          {DE.TEACH_HANDLE_END}
+        </span>
+      </div>
+      <div
+        className="relative h-4 w-full text-xs tabular-nums text-[var(--ink-3)]"
+        aria-hidden="true"
+        data-testid="teach-strip-axis"
+      >
+        <span className="absolute left-0">{axisLabel(0)}</span>
+        <span className="absolute left-1/2 -translate-x-1/2">{axisLabel(durationMs / 2)}</span>
+        <span className="absolute right-0">{axisLabel(durationMs)}</span>
+      </div>
     </div>
   );
 }

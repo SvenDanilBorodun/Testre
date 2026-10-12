@@ -177,3 +177,29 @@ select.eb {
   background-size: 16px 16px;
   padding-right: 32px;
 }
+
+/* ── Roboter Studio: Blockly next to Tailwind ─────────────────────────────── */
+
+/* Tailwind's Preflight sets `svg { display: block }`; a CSS rule beats the SVG
+   presentation attribute Blockly hides a scrollbar with
+   (Scrollbar.updateDisplay_ → outerSvg display="none"). Without this a closed
+   flyout's scrollbar stays drawn on the workspace. */
+.injectionDiv svg[display='none'] { display: none; }
+
+/* Toolbox headings („Meine Sammlung", „Bausteine"; sammlung/ToolboxHeading.js). */
+.eduToolboxHeading { padding: 10px 10px 2px; cursor: default; user-select: none; }
+.eduToolboxHeadingLabel { font-size: 11px; font-weight: 700; letter-spacing: 0.02em; color: var(--ink-3); }
+
+/* Sammlung flyout teach buttons (toolboxCategories `web-class`): white on the
+   accent, 4.85:1. The renderer already paints .blocklyText white; the rule
+   says so here as well, because the button's icon takes the text's paint. */
+.eduFlyoutTeachButton > .blocklyFlyoutButtonBackground { fill: var(--accent); stroke: var(--accent); }
+.eduFlyoutTeachButton:hover > .blocklyFlyoutButtonBackground { fill: var(--accent-ink); }
+.eduFlyoutTeachButton .blocklyText { fill: #ffffff; }
+
+/* The three simulator-hint label lines (toolboxCategories). `.blocklyFlyout`
+   lifts the rule to the specificity of the renderer's own
+   `.<renderer>-renderer.<theme>-theme .blocklyFlyoutLabelText` (fill and the
+   `font` shorthand, which resets font-style); Blockly inserts its styles at
+   the START of <head>, so this later rule wins the tie. */
+.blocklyFlyout .eduFlyoutHint .blocklyFlyoutLabelText { fill: var(--ink-3); font-style: italic; }

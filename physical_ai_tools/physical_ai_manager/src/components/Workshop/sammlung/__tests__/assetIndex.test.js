@@ -73,7 +73,7 @@ describe('buildAssetIndex — recordings', () => {
       capabilities: { preview: true },
       now: NOW,
     });
-    expect(chipsOf(idx.recordings[0])).toEqual([['nicht benutzt', 'ok']]);
+    expect(chipsOf(idx.recordings[0])).toEqual([['nicht benutzt', 'muted']]);
     expect(idx.recordings[0].canPreview).toBe(true);
   });
 
@@ -89,10 +89,10 @@ describe('buildAssetIndex — recordings', () => {
     const idx = buildAssetIndex({ ...base, trajectories: { status: 'ready', items: [] } });
     expect(idx.missingRecordings.map((m) => m.assetName)).toEqual(['Fehlt', 'Einer']);
     expect(chipsOf(idx.missingRecordings[0])).toEqual([
-      ['fehlt', 'bad'], ['2 Blöcke suchen diese Aufnahme', 'bad'],
+      ['fehlt', 'bad'], ['2 Blöcke suchen diese Bewegung', 'bad'],
     ]);
     expect(chipsOf(idx.missingRecordings[1])).toEqual([
-      ['fehlt', 'bad'], ['1 Block sucht diese Aufnahme', 'bad'],
+      ['fehlt', 'bad'], ['1 Block sucht diese Bewegung', 'bad'],
     ]);
     expect(idx.missingRecordings[0].canPreview).toBe(false);
   });
@@ -129,7 +129,7 @@ describe('buildAssetIndex — Ziele, Positionen, program pins', () => {
     expect(idx.pins[0].meta).toBe('x 182 · y −64 mm · Kamera');
     expect(idx.pins[0].canPreview).toBe(true);
     expect(idx.poses[0].meta).toBe('z 150 mm · OMX');
-    expect(chipsOf(idx.poses[0])).toEqual([['nicht benutzt', 'ok']]);
+    expect(chipsOf(idx.poses[0])).toEqual([['nicht benutzt', 'muted']]);
     expect(idx.counts).toMatchObject({ ziele: 1, positionen: 1 });
     // An unpinned program pin shows „—".
     expect(idx.programPins).toEqual([expect.objectContaining({
@@ -145,7 +145,7 @@ describe('buildAssetIndex — Ziele, Positionen, program pins', () => {
       now: NOW,
     });
     expect(idx.poses[0].meta).toBe('z 150 mm · gemessen');
-    expect(chipsOf(idx.poses[0])).toEqual([['nicht benutzt', 'ok'], ['im Programm überschrieben', 'warn']]);
+    expect(chipsOf(idx.poses[0])).toEqual([['nicht benutzt', 'muted'], ['im Programm überschrieben', 'warn']]);
     expect(idx.programPins).toEqual([]);
   });
 });

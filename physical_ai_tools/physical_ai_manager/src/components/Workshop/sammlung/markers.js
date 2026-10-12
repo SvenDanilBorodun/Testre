@@ -22,11 +22,13 @@
 
 import { DE } from '../blocks/messages_de';
 import { pointFromValue } from './assetIndex';
+import { SAMMLUNG_COLOURS } from './sammlungTabs';
 
+// The marker colours ARE the group colours (sammlungTabs.js, the one source).
 export const MARKER_COLORS = Object.freeze({
-  pin: '#f59e0b',
-  pose: '#14b8a6',
-  variable: '#a78bfa',
+  pin: SAMMLUNG_COLOURS.ziele,
+  pose: SAMMLUNG_COLOURS.positionen,
+  variable: SAMMLUNG_COLOURS.variablen,
 });
 
 // 64 store entries (MAX_DESTINATION_ENTRIES) + 16 variable points.

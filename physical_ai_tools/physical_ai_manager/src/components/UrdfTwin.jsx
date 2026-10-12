@@ -444,7 +444,7 @@ export default function UrdfTwin({
   const markersGroupRef = useRef(null);
   const markerMapRef = useRef(new Map());
   // Ghost arm layer. `robotReadyRef` is the robot whose meshes have ALL landed
-  // (loadingManager.onLoad) — cloning earlier would copy a geometry-less URDF
+  // (the mount effect's finishLoad) — cloning earlier would copy a geometry-less URDF
   // skeleton, and the ghost is built once. `robotReadyTick` re-runs the ghost
   // effect at that moment; it changes nothing else.
   const [robotReadyTick, setRobotReadyTick] = useState(0);
@@ -736,7 +736,7 @@ export default function UrdfTwin({
     // because frameRobot's own controls.update() dispatches one. With the arm
     // now painting progressively DURING the load (see loadMeshCb), there is a
     // real window in which a student on a slow link can orbit before the last
-    // STL lands, and the onLoad re-frame would yank their view back. Measured:
+    // STL lands, and the load-end re-frame would yank their view back. Measured:
     // hold the STLs at the network layer, orbit, release — the student's view is
     // replaced. So the re-frame yields to them.
     // (A ref, not a local: the viewPreset effect below must see it too.)
@@ -781,11 +781,15 @@ export default function UrdfTwin({
     //      exists is not a no-op, it is the bug.
     //   3. the showShadows traverse found no meshes, so the robot never cast a
     //      shadow even with the sim stage's literal showShadows.
-    // The manager's onLoad fires once every tracked item (the URDF + every STL)
-    // has ended, which is the first moment all three are meaningful. It can fire
-    // only ONCE: every itemStart (the URDF, each STL via FileLoader, the texture
-    // loader) happens inside the synchronous parse(), strictly before the URDF's
-    // own itemEnd, so the count cannot reach zero early.
+    // All three belong to the moment the URDF is parsed AND every mesh THIS twin
+    // asked for has called back — counted here, by the twin itself
+    // (`pendingMeshes`), never read off the shared LoadingManager. The manager is
+    // NOT that signal (R0-9): three's FileLoader coalesces a request for a URL
+    // that is already in flight into the first request WITHOUT calling the
+    // manager's itemStart. So when another twin (the Startseite hero) is still
+    // fetching the same STLs, this twin's manager never counts them, its onLoad
+    // fires as soon as the URDF text ends, and the framing measured a mesh-less
+    // arm — the OMX's 1 cm end-effector box, the 37.8x close-up again.
     const loadingManager = new THREE.LoadingManager();
     const stlLoader = new STLLoader(loadingManager);
     const material = new THREE.MeshStandardMaterial({
@@ -794,33 +798,17 @@ export default function UrdfTwin({
       roughness: 0.6,
     });
 
-    const loader = new URDFLoader(loadingManager);
-    loader.loadMeshCb = (path, _manager, done) => {
-      stlLoader.load(
-        path,
-        (geometry) => {
-          const mesh = new THREE.Mesh(geometry, material);
-          // Per-mesh, because the onComplete traverse below cannot see a mesh
-          // that does not exist yet. Read through the ref for the same reason
-          // the mount effect does (a [] -deps effect must not list the prop).
-          if (showShadowsRef.current) mesh.castShadow = true;
-          done(mesh);
-          // THE fix for (1): mark the frame dirty as each link lands, so the arm
-          // also paints PROGRESSIVELY instead of all at once. Belt as well as
-          // braces — manager.onLoad below is the same guarantee for the whole
-          // batch, and this line still holds if a mesh loader is ever swapped in
-          // that the manager does not track.
-          needsRender = true;
-        },
-        undefined,
-        (err) => done(null, err),
-      );
-    };
-
-    // Everything tracked by the manager has finished (the URDF text AND every
-    // STL, success or error). Only NOW does the robot have geometry.
-    loadingManager.onLoad = () => {
-      if (disposed) return;
+    // The twin's own load accounting: the URDF parsed (onComplete ran), every
+    // mesh requested through loadMeshCb called back (success or error), and the
+    // one-time finish ran.
+    let urdfParsed = false;
+    let pendingMeshes = 0;
+    let loadFinished = false;
+    // Everything THIS twin asked for has landed. Only NOW does the robot have
+    // geometry. Runs once.
+    const finishLoad = () => {
+      if (disposed || loadFinished || !urdfParsed || pendingMeshes > 0) return;
+      loadFinished = true;
       const robot = robotRef.current;
       if (robot) {
         // The ONLY framing pass. Skipped once the student has grabbed the
@@ -841,6 +829,46 @@ export default function UrdfTwin({
         setRobotReadyTick((t) => t + 1);
       }
       needsRender = true;
+    };
+
+    const loader = new URDFLoader(loadingManager);
+    loader.loadMeshCb = (path, _manager, done) => {
+      pendingMeshes += 1;
+      let settled = false;
+      // Exactly once per mesh, after urdf-loader has the mesh (or the error).
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        pendingMeshes -= 1;
+        finishLoad();
+      };
+      stlLoader.load(
+        path,
+        (geometry) => {
+          const mesh = new THREE.Mesh(geometry, material);
+          // Per-mesh, because the onComplete traverse below cannot see a mesh
+          // that does not exist yet. Read through the ref for the same reason
+          // the mount effect does (a [] -deps effect must not list the prop).
+          if (showShadowsRef.current) mesh.castShadow = true;
+          done(mesh);
+          // THE fix for (1): mark the frame dirty as each link lands, so the arm
+          // also paints PROGRESSIVELY instead of all at once.
+          needsRender = true;
+          settle();
+        },
+        undefined,
+        (err) => {
+          done(null, err);
+          settle();
+        },
+      );
+    };
+
+    // Belt only: a repaint when the manager's batch ends. It can no longer
+    // frame early — finishLoad waits for this twin's own meshes.
+    loadingManager.onLoad = () => {
+      needsRender = true;
+      finishLoad();
     };
 
     loader.load(
@@ -874,8 +902,13 @@ export default function UrdfTwin({
         // NO framing and NO shadow traverse here: at this instant the robot has
         // no mesh geometry, so framing measures whatever PRIMITIVE the URDF
         // happens to declare (the OMX's 1 cm end-effector box → a 37.8x
-        // over-zoom, measured) and the traverse visits nothing.
-        // loadingManager.onLoad owns both, once the STLs have landed.
+        // over-zoom, measured) and the traverse visits nothing. finishLoad owns
+        // both, once every mesh this twin requested has landed — one microtask
+        // later, so meshes the loader requests in the same synchronous parse
+        // are counted whichever order it reports them (the real loader
+        // requests them BEFORE onComplete).
+        urdfParsed = true;
+        Promise.resolve().then(finishLoad);
         // Phase-5: if the „Achsen" toggle was already on before the URDF
         // finished loading, attach the base/TCP triads now (the frames effect
         // bailed earlier because robotRef was still null).
@@ -997,7 +1030,7 @@ export default function UrdfTwin({
   // NEW preset is the student's explicit choice and always applies. The same
   // preset re-runs when the arm has just been framed (robotReadyTick): the
   // framing pass put the camera on the default view, so the chosen preset is
-  // put back — unless the student orbited, in which case onLoad did not frame
+  // put back — unless the student orbited, in which case finishLoad did not frame
   // and their view wins, exactly as it does without a preset.
   useEffect(() => {
     if (!viewPreset) {
@@ -1214,7 +1247,9 @@ export default function UrdfTwin({
 
   // ---- Sammlung markers (Ziele / Positionen / variable points) --------------
   // Diffed by id: a marker is REBUILT only when its kind, label or highlight
-  // changed (the label is a baked canvas texture) and merely MOVED otherwise;
+  // changed (the label is a baked canvas texture) — or, for a highlighted
+  // Position, its height (its drop line to the table is baked from z) — and
+  // merely MOVED otherwise;
   // one no longer listed is removed and disposed. `asset` is a dep because a
   // profile change rebuilds the whole scene and the mount teardown has already
   // dropped this layer. Every mutation dirties the on-demand render loop. For
@@ -1237,7 +1272,8 @@ export default function UrdfTwin({
       if (!m || m.id === undefined || m.id === null || seen.has(m.id)) return;
       if (![m.x, m.y, m.z].every((v) => typeof v === 'number' && Number.isFinite(v))) return;
       seen.add(m.id);
-      const key = `${m.kind}|${m.label}|${m.highlighted ? 1 : 0}`;
+      const key = `${m.kind}|${m.label}|${m.highlighted ? 1 : 0}|${
+        m.highlighted && m.kind === 'pose' ? m.z.toFixed(3) : ''}`;
       let entry = map.get(m.id);
       if (entry && entry.key !== key) {
         group.remove(entry.object);
@@ -1281,7 +1317,7 @@ export default function UrdfTwin({
       return;
     }
     const robot = robotRef.current;
-    // Not yet loaded (or loaded meshes still in flight): the onLoad tick re-runs this.
+    // Not yet loaded (or loaded meshes still in flight): the finishLoad tick re-runs this.
     if (!scene || !robot || robotReadyRef.current !== robot) return;
     let ghost = ghostRef.current;
     if (!ghost) {
@@ -1866,40 +1902,78 @@ function disposeFrameTriads(baseRef, tcpRef) {
   });
 }
 
+// The marker the student highlighted (a drawer focus, a card hover) is drawn
+// 1.8x, ON TOP of the arm (depthTest off, a later render order), with a flat
+// halo ring on the table and its label in the kind colour; a highlighted
+// Position also drops a line to the table, so its height reads at a glance.
+const MARKER_HIGHLIGHT_SCALE = 1.8;
+const MARKER_ON_TOP_ORDER = 10;
+
 // One Sammlung marker: a group at the marker's point (the caller positions it)
 // holding the glyph — pin = a cone standing tip-down on the point with a ball on
 // top, pose = an octahedron, variable = a flat ring — plus a German name label.
+// Everything is a child of the root, so disposeMarker frees all of it.
 function buildMarkerObject(m) {
   const root = new THREE.Group();
-  const material = new THREE.MeshBasicMaterial({ color: MARKER_COLORS[m.kind] || MARKER_COLORS.pin });
+  const highlighted = !!m.highlighted;
+  const color = MARKER_COLORS[m.kind] || MARKER_COLORS.pin;
+  const material = new THREE.MeshBasicMaterial(highlighted ? { color, depthTest: false } : { color });
+  const glyph = (mesh) => {
+    if (highlighted) mesh.renderOrder = MARKER_ON_TOP_ORDER; // eslint-disable-line no-param-reassign
+    root.add(mesh);
+    return mesh;
+  };
   if (m.kind === 'pose') {
-    const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.012), material);
+    const gem = glyph(new THREE.Mesh(new THREE.OctahedronGeometry(0.012), material));
     gem.position.set(0, 0.012, 0);
-    root.add(gem);
   } else if (m.kind === 'variable') {
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.012, 0.003, 8, 24), material);
+    const ring = glyph(new THREE.Mesh(new THREE.TorusGeometry(0.012, 0.003, 8, 24), material));
     ring.rotation.x = Math.PI / 2; // lie flat on the point
     ring.position.set(0, 0.002, 0);
-    root.add(ring);
   } else {
-    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.008, 0.03, 16), material);
+    const cone = glyph(new THREE.Mesh(new THREE.ConeGeometry(0.008, 0.03, 16), material));
     cone.rotation.x = Math.PI; // tip DOWN, touching the point
     cone.position.set(0, 0.015, 0);
-    root.add(cone);
     // The head shares the cone's material; disposeMarker disposes it once per mesh
     // (three's dispose is idempotent).
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.008, 16, 12), material);
+    const head = glyph(new THREE.Mesh(new THREE.SphereGeometry(0.008, 16, 12), material));
     head.position.set(0, 0.034, 0);
-    root.add(head);
   }
-  if (m.highlighted) root.scale.set(1.4, 1.4, 1.4);
-  const label = buildMarkerLabel(typeof m.label === 'string' ? m.label : '');
+  if (highlighted) {
+    root.scale.set(MARKER_HIGHLIGHT_SCALE, MARKER_HIGHLIGHT_SCALE, MARKER_HIGHLIGHT_SCALE);
+    const halo = new THREE.Mesh(
+      new THREE.RingGeometry(0.016, 0.022, 32),
+      new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthTest: false,
+      }),
+    );
+    halo.rotation.x = -Math.PI / 2; // flat on the table
+    halo.position.y = 0.001;
+    halo.renderOrder = MARKER_ON_TOP_ORDER;
+    root.add(halo);
+    if (m.kind === 'pose' && Number.isFinite(m.z) && m.z > 0.005) {
+      // To the table: the root is scaled, so the local length is z / scale.
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(0, 0, 0),
+          new THREE.Vector3(0, -m.z / MARKER_HIGHLIGHT_SCALE, 0),
+        ]),
+        new THREE.LineBasicMaterial({
+          color, transparent: true, opacity: 0.7, depthTest: false,
+        }),
+      );
+      line.renderOrder = MARKER_ON_TOP_ORDER;
+      root.add(line);
+    }
+  }
+  const label = buildMarkerLabel(typeof m.label === 'string' ? m.label : '', highlighted ? color : null);
   if (label) root.add(label);
   return root;
 }
 
 // A camera-facing name sprite. Skipped (glyph only) where there is no 2D canvas.
-function buildMarkerLabel(text) {
+// `textColor` draws the name in the marker's kind colour (a highlighted one).
+function buildMarkerLabel(text, textColor = null) {
   let ctx = null;
   let canvas = null;
   try {
@@ -1926,7 +2000,7 @@ function buildMarkerLabel(text) {
   ctx.quadraticCurveTo(0, 0, r, 0);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = textColor || '#ffffff';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(text, 128, 32, 240);

@@ -111,7 +111,7 @@ describe('SammlungDrawer over a Python program', () => {
   it('counts the code’s assets and sits beside the file sidebar', () => {
     setup();
     expect(screen.getAllByRole('tab').map((t) => t.textContent))
-      .toEqual(['Variablen 0', 'Aufnahmen 1', 'Ziele 1', 'Positionen 1']);
+      .toEqual(['Bewegungen 1', 'Ziele 1', 'Positionen 1', 'Variablen 0']);
     expect(screen.getByRole('dialog', { name: DE.SAMMLUNG_TITLE }).style.left).toBe('176px');
   });
 
@@ -202,8 +202,8 @@ describe('SammlungDrawer over a Python program', () => {
 
   it('a row can be dragged into the editor as a snippet', () => {
     setup();
-    const item = screen.getAllByRole('listitem')
-      .find((li) => within(li).queryByRole('button', { name: /^Winken/ }));
+    // eslint-disable-next-line testing-library/no-node-access
+    const item = screen.getByRole('button', { name: /^Winken/ }).closest('[draggable="true"]');
     expect(item).toHaveAttribute('draggable', 'true');
     const dataTransfer = { setData: vi.fn(), effectAllowed: '' };
     fireEvent.dragStart(item, { dataTransfer });
@@ -222,7 +222,7 @@ describe('SammlungDrawer over a Python program', () => {
     expect(dispatchAction.mock.calls.map((c) => c[0])).toEqual([
       { type: 'teach', kind: 'ziel' }, { type: 'pinCamera' },
     ]);
-    fireEvent.click(screen.getByRole('tab', { name: /Aufnahmen/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /Bewegungen/ }));
     fireEvent.click(within(screen.getByRole('group', { name: CODE_DE.SAMMLUNG_NEW }))
       .getByRole('button', { name: DE.FLY_TEACH_RECORDING }));
     expect(dispatchAction).toHaveBeenLastCalledWith({ type: 'teach', kind: 'recording' });
@@ -240,7 +240,8 @@ describe('SammlungDrawer over a Python program', () => {
     const { reveals } = setup({ drawer: { focusId: 'Winken' } });
     const section = screen.getByRole('region', { name: DE.DRAWER_USED_IN });
     const row = within(section).getByRole('button');
-    expect(row.textContent).toBe('main.py:2 · robot.replay("Winken")');
+    expect(within(row).getByText('main.py, Zeile 2')).toBeInTheDocument();
+    expect(within(row).getByText('robot.replay("Winken")')).toBeInTheDocument();
     fireEvent.click(row);
     expect(reveals).toEqual([{ file: 'main.py', line: 2 }]);
   });
@@ -263,5 +264,20 @@ describe('SammlungDrawer over a Python program', () => {
     await waitFor(() => expect(saveWorkflowNow).toHaveBeenCalledWith({ toastOnSuccess: false, toastOnError: false }));
     expect(workflowApi.renameTrajectory).toHaveBeenCalledWith('tok', 'wf1', 't1', 'Gruss');
     expect(files()['main.py']).toContain('robot.replay("Gruss")');
+  });
+});
+
+describe('SammlungDrawer over a Python program — the row and the detail (D)', () => {
+  it('the drag source is the row div; the detail opens inside the item and is never draggable', () => {
+    setup({ drawer: { tab: 'ziele' } });
+    const row = screen.getByRole('button', { name: /^Ablage/ });
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(row.closest('li')).not.toHaveAttribute('draggable');
+    fireEvent.click(row);
+    const detail = screen.getByRole('region', { name: 'Ablage' });
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(detail.closest('[draggable="true"]')).toBeNull();
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(detail.closest('li')).toBe(row.closest('li'));
   });
 });

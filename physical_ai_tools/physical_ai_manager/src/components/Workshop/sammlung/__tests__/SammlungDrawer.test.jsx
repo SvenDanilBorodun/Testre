@@ -124,11 +124,11 @@ const PIN = { name: 'Ablage', kind: 'pin', source: 'camera', robot_type: 'omx_f'
 const POSE = { name: 'Über Kiste', kind: 'pose', source: 'capture', robot_type: 'omx_f', x: 0.1, y: 0.1, z: 0.118 };
 
 describe('SammlungDrawer', () => {
-  it('renders four tabs with their counts and the Aufnahmen list', () => {
+  it('renders four tabs with their counts and the Bewegungen list', () => {
     setup({ pins: [PIN, POSE], variables: [{ name: 'Anzahl', id: 'v1' }] });
     const tabs = screen.getAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['Variablen 1', 'Aufnahmen 2', 'Ziele 1', 'Positionen 1']);
-    expect(screen.getByRole('tab', { name: /Aufnahmen/ })).toHaveAttribute('aria-selected', 'true');
+    expect(tabs.map((t) => t.textContent)).toEqual(['Bewegungen 2', 'Ziele 1', 'Positionen 1', 'Variablen 1']);
+    expect(screen.getByRole('tab', { name: /Bewegungen/ })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('button', { name: /Winken/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('tab', { name: /Positionen/ }));
     expect(screen.getByRole('button', { name: /Über Kiste/ })).toBeInTheDocument();
@@ -136,7 +136,7 @@ describe('SammlungDrawer', () => {
 
   it('an empty tab says so', () => {
     setup({ drawer: { tab: 'ziele' } });
-    expect(screen.getByText(DE.DRAWER_EMPTY_TAB)).toBeInTheDocument();
+    expect(screen.getByText(DE.DRAWER_EMPTY_ZIELE)).toBeInTheDocument();
   });
 
   it('sits beside the toolbox: style.left is the toolbox width', () => {
@@ -166,7 +166,7 @@ describe('SammlungDrawer', () => {
     setup({ blocks: [replay('Winken', 'b1')], drawer: { focusId: 'Winken' } });
     const section = screen.getByRole('region', { name: DE.DRAWER_USED_IN });
     const row = within(section).getByRole('button');
-    expect(row.textContent).toBe(ws.getBlockById('b1').toString());
+    expect(row.textContent).toBe('Schritt 1 in Hauptprogramm');
     fireEvent.click(row);
     expect(jumpToBlock).toHaveBeenCalledWith(ws, 'b1');
   });
@@ -175,7 +175,7 @@ describe('SammlungDrawer', () => {
     setup({ blocks: [replay('Winken', 'b1')], drawer: { focusId: 'Winken' } });
     act(() => { ws.getBlockById('b1').setDisabledReason(true, 'test'); });
     fireEvent.click(screen.getByRole('tab', { name: /Variablen/ }));
-    fireEvent.click(screen.getByRole('tab', { name: /Aufnahmen/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /Bewegungen/ }));
     const section = screen.getByRole('region', { name: DE.DRAWER_USED_IN });
     expect(within(section).getByRole('button').textContent.endsWith(` ${DE.DRAWER_DISABLED_SUFFIX}`)).toBe(true);
   });
@@ -211,7 +211,7 @@ describe('SammlungDrawer: closing', () => {
     expect(screen.queryByRole('alert')).toBeNull();
     act(() => { redux.dispatch(setRenameSplit({ cloudName: 'Tanz' })); });
     expect(screen.getByRole('alert').textContent).toBe(
-      'Achtung: Die Aufnahme heißt jetzt „Tanz", der Workflow ist aber noch nicht gespeichert. Bitte erneut speichern.',
+      'Achtung: Die Bewegung heißt jetzt „Tanz", der Workflow ist aber noch nicht gespeichert. Bitte erneut speichern.',
     );
   });
 });
@@ -385,10 +385,11 @@ describe('SammlungDrawer over a Blockly workspace: „Neu" yes, the code-only af
       pins: [PIN, POSE],
       capabilities: { teach: true, pinCamera: true, pinSim: true },
     });
-    for (const tab of ['Variablen', 'Aufnahmen', 'Ziele', 'Positionen']) {
+    for (const tab of ['Variablen', 'Bewegungen', 'Ziele', 'Positionen']) {
       fireEvent.click(screen.getByRole('tab', { name: new RegExp(tab) }));
       expect(screen.queryByRole('button', { name: new RegExp(`^${CODE_DE.SAMMLUNG_INSERT}`) })).toBeNull();
-      expect(screen.queryAllByRole('listitem').filter((li) => li.getAttribute('draggable') === 'true')).toEqual([]);
+      // eslint-disable-next-line testing-library/no-node-access
+      expect(screen.getByRole('dialog', { name: DE.SAMMLUNG_TITLE }).querySelectorAll('[draggable="true"]')).toHaveLength(0);
     }
   });
 
@@ -399,7 +400,7 @@ describe('SammlungDrawer over a Blockly workspace: „Neu" yes, the code-only af
     const newRow = () => screen.queryByRole('group', { name: CODE_DE.SAMMLUNG_NEW });
     fireEvent.click(screen.getByRole('tab', { name: /Variablen/ }));
     expect(newRow()).toBeNull();
-    fireEvent.click(screen.getByRole('tab', { name: /Aufnahmen/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /Bewegungen/ }));
     fireEvent.click(within(newRow()).getByRole('button', { name: DE.FLY_TEACH_RECORDING }));
     fireEvent.click(screen.getByRole('tab', { name: /Ziele/ }));
     expect(within(newRow()).getAllByRole('button').map((b) => b.textContent))
@@ -421,9 +422,112 @@ describe('SammlungDrawer over a Blockly workspace: „Neu" yes, the code-only af
 
   it('the teacher page (no hardware) offers no „Neu" at all', () => {
     setup({ capabilities: { hardware: false, teach: true, pinCamera: true } });
-    for (const tab of ['Aufnahmen', 'Ziele', 'Positionen']) {
+    for (const tab of ['Bewegungen', 'Ziele', 'Positionen']) {
       fireEvent.click(screen.getByRole('tab', { name: new RegExp(tab) }));
       expect(screen.queryByRole('group', { name: CODE_DE.SAMMLUNG_NEW })).toBeNull();
     }
+  });
+});
+
+describe('SammlungDrawer: the accordion, empty states, the simulator hint, „In 3D zeigen" (D)', () => {
+  it('the detail opens INSIDE the selected row, which says it is expanded', () => {
+    setup({ pins: [PIN] });
+    const row = screen.getByRole('button', { name: /^Winken/ });
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(row);
+    expect(row).toHaveAttribute('aria-expanded', 'true');
+    const detail = screen.getByRole('region', { name: 'Winken' });
+    expect(row.getAttribute('aria-controls')).toBe(detail.id);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(detail.closest('li')).toBe(row.closest('li'));
+    expect(within(detail).getByText(DE.DRAWER_DURATION)).toBeInTheDocument();
+    // The other row has no detail; a second click closes it again.
+    expect(screen.getByRole('button', { name: /^Tanz/ })).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(row);
+    expect(screen.queryByRole('region', { name: 'Winken' })).toBeNull();
+  });
+
+  it('an empty tab explains itself and offers its „Neu" group ONCE, with large buttons', () => {
+    const { provider } = setup({ drawer: { tab: 'ziele' }, capabilities: { teach: true, pinCamera: true } });
+    const dispatched = [];
+    provider.setActionHandler((a) => dispatched.push(a));
+    expect(screen.getByText(DE.DRAWER_EMPTY_ZIELE)).toBeInTheDocument();
+    const groups = screen.getAllByRole('group', { name: CODE_DE.SAMMLUNG_NEW });
+    expect(groups).toHaveLength(1);
+    const teach = within(groups[0]).getByRole('button', { name: DE.FLY_TEACH_ZIEL });
+    expect(teach.className).toContain('text-sm');
+    expect(teach.className).toContain('py-2');
+    fireEvent.click(teach);
+    expect(dispatched).toEqual([{ type: 'teach', kind: 'ziel' }]);
+    fireEvent.click(screen.getByRole('tab', { name: /Positionen/ }));
+    expect(screen.getByText(DE.DRAWER_EMPTY_POSITIONEN)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: /Variablen/ }));
+    expect(screen.getByText(DE.DRAWER_EMPTY_VARIABLEN)).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: CODE_DE.SAMMLUNG_NEW })).toBeNull();
+  });
+
+  it('a tab with cards keeps the small strip above the list', () => {
+    setup({ capabilities: { teach: true } });
+    const group = screen.getByRole('group', { name: CODE_DE.SAMMLUNG_NEW });
+    expect(within(group).getByRole('button', { name: DE.FLY_TEACH_RECORDING }).className).toContain('text-xs');
+    expect(screen.queryByText(DE.DRAWER_EMPTY_AUFNAHMEN)).toBeNull();
+  });
+
+  it('in the simulator a teach tab says why Vormachen is gone, on an empty tab and on a full one', () => {
+    setup({ drawer: { tab: 'positionen' }, capabilities: { teach: true, simMode: true, pinSim: true } });
+    expect(screen.getByText(DE.DRAWER_EMPTY_POSITIONEN)).toBeInTheDocument();
+    expect(screen.getByText(DE.TEACH_SIM_HINT)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: /Bewegungen/ }));
+    expect(screen.getByText(DE.TEACH_SIM_HINT)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: /Variablen/ }));
+    expect(screen.queryByText(DE.TEACH_SIM_HINT)).toBeNull();
+  });
+
+  it('no simulator hint on the rig', () => {
+    setup({ drawer: { tab: 'positionen' }, capabilities: { teach: true } });
+    expect(screen.queryByText(DE.TEACH_SIM_HINT)).toBeNull();
+  });
+
+  it('a Ziel offers „In 3D zeigen" only while no 3D view is on screen, dispatching show3d', () => {
+    const { provider } = setup({
+      pins: [PIN], drawer: { tab: 'ziele' }, capabilities: { view3dOnScreen: false },
+    });
+    const dispatched = [];
+    provider.setActionHandler((a) => dispatched.push(a));
+    fireEvent.click(screen.getByRole('button', { name: /^Ablage/ }));
+    const show = screen.getByRole('button', { name: DE.DRAWER_SHOW_3D });
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(show.querySelector('svg[data-icon="box"]')).toHaveAttribute('aria-hidden', 'true');
+    fireEvent.click(show);
+    expect(dispatched).toEqual([{ type: 'show3d' }]);
+    act(() => { provider.setSnapshot({ capabilities: { hardware: true, drawer: true, view3dOnScreen: true } }); });
+    expect(screen.queryByRole('button', { name: DE.DRAWER_SHOW_3D })).toBeNull();
+    // An older page that says nothing: nothing.
+    act(() => { provider.setSnapshot({ capabilities: { hardware: true, drawer: true } }); });
+    expect(screen.queryByRole('button', { name: DE.DRAWER_SHOW_3D })).toBeNull();
+  });
+
+  it('the detail heading shows a 40-character name in full', () => {
+    const long = 'Eine sehr lange Bewegung mit 40 Zeichen.'.replace('.', 'x');
+    expect(long).toHaveLength(40);
+    const { provider } = setup({ drawer: { focusId: long } });
+    act(() => {
+      provider.setSnapshot({
+        trajectories: {
+          status: 'ready',
+          items: [{ ...ITEMS[0], id: 'tl', name: long }],
+        },
+      });
+    });
+    const heading = within(screen.getByRole('region', { name: long })).getByRole('heading', { name: long });
+    expect(heading.textContent).toBe(long);
+    expect(heading.className).toContain('break-words');
+    expect(heading.className).not.toContain('truncate');
+  });
+
+  it('a „nicht benutzt" chip is grey (muted)', () => {
+    setup();
+    const chip = screen.getAllByText(DE.CHIP_UNUSED)[0];
+    expect(chip.className).toContain('bg-gray-100');
   });
 });

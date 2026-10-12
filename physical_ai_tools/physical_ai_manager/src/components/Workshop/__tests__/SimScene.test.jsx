@@ -13,7 +13,7 @@
 // (jsdom has no WebGL), so these assertions are pure-DOM on the 2D SVG editor.
 
 import React from 'react';
-import { render as rtlRender, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render as rtlRender, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import SimScene from '../SimScene';
@@ -582,5 +582,212 @@ describe('SimScene — Ziel setzen and Sammlung markers', () => {
     expect(poseRect.getAttribute('fill')).toBe('#14b8a6');
     expect(poseRect.getAttribute('stroke-width')).toBe('3');
     expect(poseRect.getAttribute('width')).toBe('10');
+  });
+});
+
+// R0-3 / S-3: the split stage gives the table its room — a 3D ↔ table divider,
+// a notice that can be closed, and from md up the whole table FITTED into its
+// area. The stack layout keeps everything as it was.
+describe('SimScene — the split stage (WI-1.8)', () => {
+  const svgOf = () => screen.getByRole('application');
+  let observers;
+  let originalRO;
+  let originalMatchMedia;
+  beforeEach(() => {
+    observers = [];
+    originalRO = window.ResizeObserver;
+    originalMatchMedia = window.matchMedia;
+    window.ResizeObserver = class {
+      constructor(cb) { this.cb = cb; observers.push(this); }
+
+      observe(el) { this.el = el; }
+
+      disconnect() { this.gone = true; }
+    };
+  });
+  afterEach(() => {
+    window.ResizeObserver = originalRO;
+    window.matchMedia = originalMatchMedia;
+  });
+  // eslint-disable-next-line testing-library/no-node-access
+  const tableObserver = () => observers.find((o) => o.el === svgOf().parentElement);
+  const sizeTable = (width, height) => act(() => {
+    tableObserver().cb([{ contentRect: { width, height } }]);
+  });
+
+  test('the split layout has a 3D ↔ table divider; the stack layout has none', async () => {
+    const { unmount } = render(<SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    const sep = screen.getByRole('separator', { name: 'Aufteilung zwischen 3D-Ansicht und Tisch' });
+    expect(sep).toHaveAttribute('aria-orientation', 'horizontal');
+    // Hidden below md (the stage scrolls there).
+    expect(sep.className).toContain('hidden md:flex');
+    unmount();
+    render(<SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    expect(screen.queryByRole('separator')).toBeNull();
+  });
+
+  test('the split notice has a close button that calls onDismissIntro; dismissed, it is gone', async () => {
+    const onDismissIntro = vi.fn();
+    const { rerender, store } = render(
+      <SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} onDismissIntro={onDismissIntro} />,
+    );
+    await screen.findByTestId('urdf-twin');
+    expect(screen.getByText(/Test im Simulator\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Hinweis ausblenden' }));
+    expect(onDismissIntro).toHaveBeenCalledTimes(1);
+    rerender(
+      <Provider store={store}>
+        <SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} onDismissIntro={onDismissIntro} introDismissed />
+      </Provider>,
+    );
+    expect(screen.queryByText(/Test im Simulator\./)).toBeNull();
+  });
+
+  test('the stack layout keeps its notice, with no close button', async () => {
+    render(<SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} onDismissIntro={() => {}} introDismissed />);
+    await screen.findByTestId('urdf-twin');
+    expect(screen.getByText(/Test im Simulator\./)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Hinweis ausblenden' })).toBeNull();
+  });
+
+  test('from md up the table is fitted by height into its area (viewBox ratio kept)', async () => {
+    window.matchMedia = vi.fn(() => ({ matches: true }));
+    render(<SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    sizeTable(400, 200);
+    expect(window.matchMedia).toHaveBeenCalledWith('(min-width: 768px)');
+    expect(svgOf().style.width).toBe('324px');
+    expect(svgOf().style.height).toBe('200px');
+    expect(svgOf().getAttribute('class')).toContain('block');
+    expect(svgOf().getAttribute('class')).not.toContain('w-full');
+    // A wide-short area fits by width instead.
+    sizeTable(150, 400);
+    expect(svgOf().style.width).toBe('150px');
+    expect(svgOf().style.height).toBe('93px');
+  });
+
+  test('below md the table stays full width (no inline size)', async () => {
+    window.matchMedia = vi.fn(() => ({ matches: false }));
+    render(<SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    sizeTable(400, 200);
+    expect(svgOf().getAttribute('class')).toContain('w-full h-auto');
+    expect(svgOf().style.width).toBe('');
+    expect(svgOf().style.height).toBe('');
+  });
+
+  test('without window.matchMedia (jsdom) nothing is fitted and nothing throws', async () => {
+    delete window.matchMedia;
+    render(<SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    expect(() => sizeTable(400, 200)).not.toThrow();
+    expect(svgOf().getAttribute('class')).toContain('w-full h-auto');
+    expect(svgOf().style.width).toBe('');
+  });
+
+  // Verification round 1, F3: from md up the editor column is short and wide
+  // and the fitted table gets only the height its siblings leave (165 × 102 px
+  // at 1366 × 768). There the reset button joins the Objekt/Modus row and
+  // „Tisch leeren" the help/selection slot under the table, so no control
+  // takes a row of its own; below md every piece keeps its own row.
+  // eslint-disable-next-line testing-library/no-node-access
+  const rowOf = (el) => el.parentElement.closest('.flex-wrap');
+  const OBJ = { tag_id: 20, type: 'wuerfel', x: 0.2, y: 0, yaw: 0 };
+
+  test('from md up the reset button shares the Objekt/Modus row, and „Tisch leeren" the help row', async () => {
+    window.matchMedia = vi.fn(() => ({ matches: true }));
+    render(<SimScene layout="split" scene={{ objects: [OBJ], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    const reset = screen.getByRole('button', { name: 'Simulator zurücksetzen' });
+    const controls = rowOf(reset);
+    expect(within(controls).getByRole('button', { name: 'Objekte platzieren' })).toBeInTheDocument();
+    expect(within(controls).getByText('Objekt:')).toBeInTheDocument();
+    const help = screen.getByText(/Objekt-Typ wählen, dann in die grüne Reichweite tippen/);
+    // eslint-disable-next-line testing-library/no-node-access
+    const slot = help.parentElement;
+    expect(within(slot).getByRole('button', { name: 'Tisch leeren' })).toBeInTheDocument();
+    expect(within(slot).queryByRole('button', { name: 'Simulator zurücksetzen' })).toBeNull();
+    // The table is the only piece between the two rows.
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(controls.nextElementSibling).toBe(svgOf().parentElement);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(svgOf().parentElement.nextElementSibling).toBe(slot);
+  });
+
+  test('below md (and without matchMedia) each piece keeps its own row', async () => {
+    window.matchMedia = vi.fn(() => ({ matches: false }));
+    render(<SimScene layout="split" scene={{ objects: [OBJ], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    const reset = screen.getByRole('button', { name: 'Simulator zurücksetzen' });
+    const resetRow = rowOf(reset);
+    expect(within(resetRow).getByRole('button', { name: 'Tisch leeren' })).toBeInTheDocument();
+    expect(within(resetRow).queryByRole('button', { name: 'Objekte platzieren' })).toBeNull();
+    const help = screen.getByText(/Objekt-Typ wählen, dann in die grüne Reichweite tippen/);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(help.nextElementSibling).toBe(resetRow);
+  });
+
+  // Verification round 2, G1: crossing md re-arranges the editor's pieces, and
+  // React reuses DOM nodes by position, so the table's wrap becomes ANOTHER
+  // node (child 3 narrow, child 2 wide). An observer that stayed on the old
+  // node measured the 31-px help row: the table shrank to 51 × 31 px after
+  // 700 → 1366 px. The fitting observer must always watch the node that is the
+  // table's wrap NOW, in both directions and however often md is crossed.
+  test('crossing md keeps the fitting observer on the table\'s wrap, so the fitted size follows', async () => {
+    const media = { matches: false, listeners: new Set() };
+    window.matchMedia = vi.fn(() => ({
+      get matches() { return media.matches; },
+      addEventListener: (type, fn) => { if (type === 'change') media.listeners.add(fn); },
+      removeEventListener: (type, fn) => { if (type === 'change') media.listeners.delete(fn); },
+    }));
+    const crossMd = (matches) => act(() => {
+      media.matches = matches;
+      [...media.listeners].forEach((fn) => fn({ matches }));
+    });
+    render(<SimScene layout="split" scene={{ objects: [OBJ], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+    await screen.findByTestId('urdf-twin');
+    // eslint-disable-next-line testing-library/no-node-access
+    const column = screen.getByRole('separator').parentElement;
+    // The live observers other than the divider's own (it watches the column).
+    const fitObservers = () => observers.filter((o) => !o.gone && o.el !== column);
+    const expectWatchesTheWrap = () => {
+      const live = fitObservers();
+      expect(live).toHaveLength(1);
+      // eslint-disable-next-line testing-library/no-node-access
+      expect(live[0].el).toBe(svgOf().parentElement);
+      return live[0];
+    };
+    expectWatchesTheWrap();
+    // Narrow → wide: the wrap moved to another node, the observer with it.
+    crossMd(true);
+    act(() => expectWatchesTheWrap().cb([{ contentRect: { width: 400, height: 200 } }]));
+    expect(svgOf().style.width).toBe('324px');
+    expect(svgOf().style.height).toBe('200px');
+    // Wide → narrow: full width again, and the observer still on the wrap.
+    crossMd(false);
+    act(() => expectWatchesTheWrap().cb([{ contentRect: { width: 400, height: 200 } }]));
+    expect(svgOf().getAttribute('class')).toContain('w-full h-auto');
+    expect(svgOf().style.width).toBe('');
+    // And back up once more, with a different area.
+    crossMd(true);
+    act(() => expectWatchesTheWrap().cb([{ contentRect: { width: 150, height: 400 } }]));
+    expect(svgOf().style.width).toBe('150px');
+    expect(svgOf().style.height).toBe('93px');
+  });
+
+  test('a stored 3D share is read back and a committed one is written', async () => {
+    window.localStorage.setItem('edubotics_workshop_sim_split', '0.5');
+    try {
+      render(<SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} />);
+      await screen.findByTestId('urdf-twin');
+      const sep = screen.getByRole('separator');
+      expect(sep).toHaveAttribute('aria-valuenow', '50');
+      fireEvent.keyDown(sep, { key: 'ArrowUp' });
+      expect(window.localStorage.getItem('edubotics_workshop_sim_split')).toBe('0.48');
+    } finally {
+      window.localStorage.removeItem('edubotics_workshop_sim_split');
+    }
   });
 });

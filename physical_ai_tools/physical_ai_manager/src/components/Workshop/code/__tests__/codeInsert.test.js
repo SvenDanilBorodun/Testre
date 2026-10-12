@@ -37,6 +37,7 @@ import {
   stepsToCode,
 } from '../codeInsert';
 import { STARTER_FILES } from '../codeProject';
+import docs from '../robot_api_docs.json';
 import { CODE_DE, formatCode } from '../codeMessagesDe';
 
 const STEPS = [
@@ -697,5 +698,98 @@ describe('a CRLF file gets CRLF line breaks, and every rule reads CRLF (mb8)', (
       .toBe(CODE_DE.INSERT_DECORATOR_HINT);
     const java = 'class Main {\r\n  static void main(String[] a) {\r\n    Robot.home(); // Start\r\n  }\r\n}\r\n';
     expect(at(java, 3, ['X();'], 'java').content.split('\r\n')[3]).toBe('    X();');
+  });
+});
+
+describe('snippetLines — a Methoden example line ({kind: "call"})', () => {
+  const call = (method, line, language = 'python') => snippetLines({ kind: 'call', method, line }, language);
+
+  it('accepts the method’s own call in both languages, trimmed — a value row too', () => {
+    expect(call('move_to', 'robot.move_to("Ablage")')).toEqual(['robot.move_to("Ablage")']);
+    expect(call('move_to', '  robot.move_to([0.2, 0.0, 0.05])  ')).toEqual(['robot.move_to([0.2, 0.0, 0.05])']);
+    expect(call('find', 'ziel = robot.find("wuerfel")')).toEqual(['ziel = robot.find("wuerfel")']);
+    expect(call('move_to', 'Robot.moveTo("Ablage");', 'java')).toEqual(['Robot.moveTo("Ablage");']);
+    expect(call('find', 'Robot.Greifziel ziel = Robot.find("wuerfel");', 'java'))
+      .toEqual(['Robot.Greifziel ziel = Robot.find("wuerfel");']);
+    expect(call('move_to', 'edubotics.Robot.moveTo(new double[] {0.2, 0.0, 0.05});', 'java'))
+      .toEqual(['edubotics.Robot.moveTo(new double[] {0.2, 0.0, 0.05});']);
+    expect(call('zeige', 'robot.zeige("Anzahl", 3)')).toEqual(['robot.zeige("Anzahl", 3)']);
+    expect(call('log', 'robot.log("Text mit ( und # und ] drin")')).toEqual(['robot.log("Text mit ( und # und ] drin")']);
+  });
+
+  it('refuses an unknown or INTERNAL method', () => {
+    expect(call('fly', 'robot.fly()')).toEqual([]);
+    expect(call('__vars', 'robot.__vars("main.py", 1, {})')).toEqual([]);
+    expect(call('register_object', 'robot.register_object("x")')).toEqual([]);
+  });
+
+  it('refuses a comment, a line break, an empty or a 241-character line', () => {
+    expect(call('home', 'robot.home()  # los')).toEqual([]);
+    expect(call('home', 'Robot.home(); // los', 'java')).toEqual([]);
+    expect(call('home', 'robot.home()\nrobot.home()')).toEqual([]);
+    expect(call('home', 'robot.home()\r')).toEqual([]);
+    expect(call('home', '')).toEqual([]);
+    const long = `robot.log("${'a'.repeat(241 - 'robot.log("")'.length)}")`;
+    expect(long).toHaveLength(241);
+    expect(call('log', long)).toEqual([]);
+    expect(call('log', long.slice(0, 237) + '")')).toEqual([long.slice(0, 237) + '")']);
+    expect(call('home', 42)).toEqual([]);
+  });
+
+  it('refuses unbalanced brackets and an unclosed string', () => {
+    expect(call('move_to', 'robot.move_to("A"')).toEqual([]);
+    expect(call('move_to', 'robot.move_to(("A")')).toEqual([]);
+    expect(call('move_to', 'robot.move_to([0.2, 0.0, 0.05)')).toEqual([]);
+    expect(call('log', 'robot.log("offen)')).toEqual([]);
+    expect(call('log', 'robot.log("offen\\")')).toEqual([]);
+    expect(call('log', 'Robot.log(\'x);', 'java')).toEqual([]);
+  });
+
+  it('refuses a callee only inside a string, another method’s callee, a foreign receiver', () => {
+    expect(call('home', 'print("robot.home()")')).toEqual([]);
+    expect(call('home', 'robot.log("robot.home()")')).toEqual([]);
+    expect(call('home', 'robot.lift()')).toEqual([]);
+    expect(call('home', 'xrobot.home()')).toEqual([]);
+    expect(call('move_to', 'Robot.move_to("A");', 'java')).toEqual([]);
+    expect(call('move_to', 'robot.moveTo("A")', 'java')).toEqual([]);
+  });
+
+  it('refuses Java without its semicolon', () => {
+    expect(call('home', 'Robot.home()', 'java')).toEqual([]);
+  });
+
+  // Verification round 1, F5c: exactly ONE statement — the call, or a value
+  // row's assignment to one name (Java: a declaration), Java ending in its
+  // one `;`. A second statement chained on the same line never passes.
+  it('accepts every rendered Methoden example of both languages', () => {
+    docs.methods.forEach((m) => {
+      expect(call(m.name, m.example_py)).toEqual([m.example_py]);
+      expect(call(m.name, m.example_java, 'java')).toEqual([m.example_java]);
+    });
+  });
+
+  it('refuses a second statement chained before or after the call', () => {
+    expect(call('home', 'robot.home(); import os')).toEqual([]);
+    expect(call('home', 'robot.home();')).toEqual([]);
+    expect(call('home', 'import os; robot.home()')).toEqual([]);
+    expect(call('home', 'robot.home() or __import__("os").system("x")')).toEqual([]);
+    expect(call('find', 'ziel = robot.find("wuerfel"); import os')).toEqual([]);
+    expect(call('home', 'Robot.home(); System.exit(0);', 'java')).toEqual([]);
+    expect(call('home', 'Robot.home();;', 'java')).toEqual([]);
+    expect(call('home', 'System.exit(0); Robot.home();', 'java')).toEqual([]);
+    expect(call('home', 'Robot.home(); Robot.home();', 'java')).toEqual([]);
+    expect(call('sees', 'boolean b = Robot.sees("w") || stop();', 'java')).toEqual([]);
+  });
+
+  it('refuses anything but one name (Java: one declaration) in front of the call', () => {
+    expect(call('find', 'a = b = robot.find("w")')).toEqual([]);
+    expect(call('find', 'ziel == robot.find("w")')).toEqual([]);
+    expect(call('find', 'x = 1 + robot.find("w")')).toEqual([]);
+    expect(call('find', 'ziel = robot.find("w") + 1')).toEqual([]);
+    expect(call('find', 'print(robot.find("w"))')).toEqual([]);
+    expect(call('count', 'int a = 1, b = Robot.count("w");', 'java')).toEqual([]);
+    expect(call('count', 'int a = Robot.count("w") + 1;', 'java')).toEqual([]);
+    expect(call('find', 'edubotics.Robot.Greifziel ziel = edubotics.Robot.find("w");', 'java'))
+      .toEqual(['edubotics.Robot.Greifziel ziel = edubotics.Robot.find("w");']);
   });
 });

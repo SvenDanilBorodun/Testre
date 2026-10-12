@@ -43,6 +43,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SendTrainingCommand.srv"
   "srv/SetHFUser.srv"
   "srv/StartCalibration.srv"
+  "srv/StartCloudInference.srv"
   "srv/StartWorkflow.srv"
   "srv/StopWorkflow.srv"
   "srv/VerifyCalibration.srv"

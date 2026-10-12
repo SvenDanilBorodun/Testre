@@ -27,6 +27,7 @@ import { getInferenceUsage } from '../../services/cloudInferenceApi';
 import * as controller from '../../features/cloudInference/controller';
 import CloudModelList, { cloudModelRows } from './CloudModelList';
 import CloudRunFacts from './CloudRunFacts';
+import CloudWait from './CloudWait';
 import { cloudCopy, fill } from './cloudCopy';
 
 const START_PHASES = new Set(['idle', 'reserved', 'ended']);
@@ -188,13 +189,12 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
       />
 
       {session.phase === 'reserving' && session.trainingId === selectedId && (
-        <div role="status" className="text-sm">
-          <div className="flex items-center gap-2 text-[var(--ink)]">
-            <Icon name="loading" size={14} className="animate-spin" />
-            {cloudCopy.panel.preparing}
-          </div>
-          <div className="text-xs text-[var(--ink-3)] mt-0.5">{cloudCopy.panel.preparingSub}</div>
-        </div>
+        <CloudWait
+          kind="gpu"
+          startedAt={session.reserveStartedAt}
+          attempt={session.reserveAttempt}
+          attempts={controller.RESERVE_ATTEMPTS}
+        />
       )}
 
       {summary && (

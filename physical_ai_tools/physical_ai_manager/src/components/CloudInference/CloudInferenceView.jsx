@@ -21,6 +21,7 @@ import Icon from '../icons/Icon';
 import { useCameraLiveness } from '../../hooks/useCameraLiveness';
 import useCloudInferenceState from '../../hooks/useCloudInferenceState';
 import CloudInferencePanel from './CloudInferencePanel';
+import CloudWait from './CloudWait';
 import { cloudCopy, fill } from './cloudCopy';
 
 const CHIP = 'h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-2 text-[11px] text-white/80';
@@ -68,14 +69,14 @@ export default function CloudInferenceView({ isActive = true, cloud }) {
         <div className="flex-1 self-stretch min-w-0 relative rounded-[var(--radius-lg)] overflow-hidden">
           <ImageGrid isActive={isActive} />
           {phase === TaskPhase.INFERENCE_LOADING && (
+            // The waiting card carries the live region; this overlay is not one,
+            // so its clock is never read out every second. The card mounts with
+            // the loading phase, so its clock counts from the start of the load.
             <div
-              className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/55 backdrop-blur-sm"
-              role="status"
-              aria-live="polite"
+              className="absolute inset-0 z-20 flex items-center justify-center p-4 bg-black/55 backdrop-blur-sm"
+              data-testid="cloud-loading-overlay"
             >
-              <Icon name="loading" size={40} className="animate-spin text-white" />
-              <span className="text-base font-semibold text-white">{cloudCopy.status.loading}</span>
-              <span className="text-xs text-white/70">{cloudCopy.status.loadingSub}</span>
+              <CloudWait kind="model" tone="dark" />
             </div>
           )}
         </div>

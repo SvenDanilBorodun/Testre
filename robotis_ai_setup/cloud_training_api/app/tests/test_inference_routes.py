@@ -11,7 +11,8 @@ Modal call before the reservation row exists); only the token HASH reaches the
 database; the reserve answer carries no secret; every Modal start outcome (a
 timeout ends the row ``edge_failed`` and a late success is still attached, a
 credential of the wrong shape is terminated, an attach-time end is 503 even when
-superseded (G-4), missing/conflict is terminated + 500); the arm rotates the
+superseded (G-4), missing/conflict is terminated + 500; only a timeout carries the
+retry code, and a retry joins the student's own still-running start, round 3); the arm rotates the
 connect token and is the ONLY answer carrying secrets; the caller scoping of
 end/heartbeat; ``Cache-Control: no-store`` on every answer; no token, edge
 token, envelope or hash in any log record; ``main.py``'s rate rules, prefix,
@@ -28,6 +29,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import unittest
 import uuid
@@ -384,12 +386,28 @@ class TestReserve(_Case):
             body = _content(resp)
             into.append((resp.status_code, body))
 
-        # the start failure itself (an SDK error; the timeout is pinned above)
-        self.server = _Server(start=lambda: (_ for _ in ()).throw(RuntimeError("down")))
-        record(self.reserve(), coded)
+        # a real start timeout, the only coded answer (round 3)
+        release = threading.Event()
+
+        def hanging():
+            release.wait(5)
+            return SimpleNamespace(session_id=MSID, token=EDGE_TOK)
+
+        self.server = _Server(start=hanging)
+        try:
+            with patch.object(edge, "START_TIMEOUT_S", 0.05):
+                record(self.reserve(), coded)
+        finally:
+            release.set()
         (row,) = [r for r in self.store.rows.values()]
         self.assertEqual((row["status"], row["end_reason"]), ("ended", "edge_failed"))
         self.assertIsNone(row.get("connected_at"))
+        # a permanent start failure (the SDK's own exception, credentials of the wrong
+        # shape) answers the same sentence WITHOUT the code: retrying it cannot help
+        self.server = _Server(start=lambda: (_ for _ in ()).throw(RuntimeError("down")))
+        record(self.reserve(), plain)                                   # 503
+        self.server = _Server(start=lambda: SimpleNamespace(session_id="not-sd", token=EDGE_TOK))
+        record(self.reserve(), plain)                                   # 503
         # every other answer of every route
         self.server = _Server()
         record(self.reserve(), plain)                                   # 200
@@ -509,8 +527,10 @@ class TestReserve(_Case):
 
         self.server = _Server(start=broken)
         body = self.assertAnswer(self.reserve(), 503)
-        self.assertIn("gestartet", body["detail"])
-        self.assertEqual(body["code"], route.GPU_NOT_STARTED_CODE)
+        # round 3: the SDK's own exception (an AuthError, an app that is not deployed) is
+        # permanent, so the page must not retry it: the same sentence, no retry code
+        self.assertEqual(body, {"detail": "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es "
+                                          "gleich noch einmal."})
         (row,) = self.store.rows.values()
         self.assertEqual(row["end_reason"], "edge_failed")
 
@@ -524,7 +544,7 @@ class TestReserve(_Case):
             with patch.object(route, "get_supabase", return_value=self.store):
                 body = self.assertAnswer(self.reserve(), 503)
             self.assertIn("gestartet", body["detail"])
-            self.assertEqual(body["code"], route.GPU_NOT_STARTED_CODE)
+            self.assertNotIn("code", body)  # round 3: permanent, never retried (each retry cost a GPU start)
             (row,) = self.store.rows.values()
             self.assertEqual(row["end_reason"], "edge_failed")
             self.assertIsNone(row["modal_session_id"])
@@ -588,6 +608,196 @@ class TestReserve(_Case):
         self.assertEqual(body["detail"], "Die Cloud-Inferenz ist nur für Schülerinnen und Schüler verfügbar.")
 
 
+class TestReserveJoinsTheRunningStart(_Case):
+    """Owner, round 3 (R1 MINOR), through the route: a reserve of a student whose
+    earlier reservation's `sessions.start` still runs waits on THAT start. Exactly one
+    Modal session per success, held by exactly one row (the newest reservation's), and
+    a row that ended meanwhile keeps it only for the terminate loop."""
+
+    PLAIN = {"detail": "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal."}
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.gate = threading.Event()
+        self.calls: list[int] = []
+        self.start_error = None
+
+        def start():
+            self.calls.append(1)
+            n = len(self.calls)
+            self.gate.wait(10)  # the GPU shortage
+            if self.start_error is not None:
+                raise self.start_error
+            return SimpleNamespace(session_id=f"{MSID}{n}", token=EDGE_TOK)
+
+        self.server = _Server(start=start)
+
+    def tearDown(self) -> None:
+        self.gate.set()
+        super().tearDown()
+
+    def go(self, scenario, timeout_s):
+        with patch.object(edge, "START_TIMEOUT_S", timeout_s):
+            return asyncio.run(scenario())
+
+    async def until(self, cond, tries=300):
+        for _ in range(tries):
+            if cond():
+                return
+            await asyncio.sleep(0.01)
+
+    async def settle(self):
+        await asyncio.sleep(0.05)
+        await self.until(lambda: not edge._TASKS)
+
+    def attaches(self):
+        return [a["p_session_id"] for n, a in self.store.calls if n == "attach_inference_edge"]
+
+    def coded(self, resp):
+        body = self.assertAnswer(resp, 503)
+        self.assertEqual(body, dict(self.PLAIN, code="gpu_not_started"))
+
+    def plain(self, resp):
+        self.assertEqual(self.assertAnswer(resp, 503), self.PLAIN)
+
+    def test_the_retry_waits_on_the_running_start_and_gets_the_gpu(self) -> None:
+        async def scenario():
+            first = await route.reserve_session(_body_request(7), profile=STUDENT)
+            retry = asyncio.ensure_future(route.reserve_session(_body_request(7), profile=STUDENT))
+            await asyncio.sleep(0.05)
+            self.assertFalse(retry.done())
+            self.gate.set()
+            second = await retry
+            await self.settle()
+            return first, second
+
+        first, second = self.go(scenario, 0.3)
+        self.coded(first)
+        body = self.assertAnswer(second, 200)
+        self.assertEqual(len(self.calls), 1)  # the retry submitted no second sessions.start
+        row1, row2 = self.store.rows.values()
+        self.assertEqual((row1["status"], row1["end_reason"], row1["modal_session_id"]),
+                         ("ended", "edge_failed", None))
+        self.assertEqual(row2["id"], body["session_id"])
+        self.assertEqual((row2["status"], row2["modal_session_id"]), ("reserved", MSID + "1"))
+        self.assertEqual(svc.edge_open(row2["id"], row2["edge_token_enc"]), EDGE_TOK)
+        self.assertEqual(self.attaches(), [row2["id"]])
+        self.assertEqual(len(self.prefetched), 1)
+        self.assertEqual(self.server.terminated, [])
+
+    def test_a_start_that_outlives_every_attempt_lands_once_on_the_newest_row(self) -> None:
+        async def scenario():
+            answers = [await route.reserve_session(_body_request(7), profile=STUDENT) for _ in range(3)]
+            self.gate.set()
+            await self.until(self.attaches)
+            await self.settle()
+            return answers
+
+        answers = self.go(scenario, 0.1)
+        for resp in answers:
+            self.coded(resp)  # each attempt was a real start timeout: the page may retry
+        self.assertEqual(len(self.calls), 1)
+        row1, row2, row3 = self.store.rows.values()
+        for row in (row1, row2, row3):
+            self.assertEqual((row["status"], row["end_reason"]), ("ended", "edge_failed"))
+        # attached once, to the newest (ended) row: the terminate loop ends it from there
+        self.assertEqual(self.attaches(), [row3["id"]])
+        self.assertEqual((row1["modal_session_id"], row2["modal_session_id"], row3["modal_session_id"]),
+                         (None, None, MSID + "1"))
+        self.assertEqual(svc.edge_open(row3["id"], row3["edge_token_enc"]), EDGE_TOK)
+        self.assertEqual(self.server.terminated, [])
+        self.assertEqual(self.prefetched, [])
+
+    def test_another_model_picked_while_the_gpu_starts_takes_the_start_over(self) -> None:
+        async def scenario():
+            first = asyncio.ensure_future(route.reserve_session(_body_request(7), profile=STUDENT))
+            await self.until(lambda: self.calls)
+            self.visible = dict(TRAINING, id=9)
+            second = asyncio.ensure_future(route.reserve_session(_body_request(9), profile=STUDENT))
+            first_resp = await first  # released at once: its reservation is superseded
+            self.assertFalse(second.done())
+            self.gate.set()
+            second_resp = await second
+            await self.settle()
+            return first_resp, second_resp
+
+        first, second = self.go(scenario, 2.0)
+        self.plain(first)  # never the retry code: retrying would supersede the newer reservation
+        body = self.assertAnswer(second, 200)
+        self.assertEqual(len(self.calls), 1)
+        row1, row2 = self.store.rows.values()
+        self.assertEqual((row1["status"], row1["end_reason"], row1["modal_session_id"]),
+                         ("ended", "superseded", None))
+        self.assertEqual((row2["id"], row2["status"], row2["modal_session_id"]),
+                         (body["session_id"], "reserved", MSID + "1"))
+        self.assertEqual(self.attaches(), [row2["id"]])
+        self.assertEqual(len(self.prefetched), 1)
+
+    def test_a_reservation_ended_while_it_waits_holds_the_gpu_only_for_the_terminate_loop(self) -> None:
+        # „Abmelden" (or Stop) during the retry: the page's keepalive end reaches the row first.
+        async def scenario():
+            first = await route.reserve_session(_body_request(7), profile=STUDENT)
+            retry = asyncio.ensure_future(route.reserve_session(_body_request(7), profile=STUDENT))
+            await self.until(lambda: len(self.store.rows) == 2)
+            sid = list(self.store.rows)[-1]
+            ended = await route.end_session(sid, profile=STUDENT)
+            self.gate.set()
+            second = await retry
+            await self.settle()
+            return first, ended, second
+
+        first, ended, second = self.go(scenario, 0.4)
+        self.coded(first)
+        self.assertAnswer(ended, 200)
+        self.plain(second)
+        self.assertEqual(len(self.calls), 1)
+        row1, row2 = self.store.rows.values()
+        self.assertEqual((row1["end_reason"], row1["modal_session_id"]), ("edge_failed", None))
+        self.assertEqual((row2["status"], row2["end_reason"], row2["modal_session_id"]),
+                         ("ended", "user_stop", MSID + "1"))
+        self.assertEqual(self.attaches(), [row2["id"]])
+        self.assertEqual(self.server.terminated, [])  # the loop ends it, from the ended row
+        self.assertEqual(self.prefetched, [])
+
+    def test_two_students_at_once_each_get_a_start_of_their_own(self) -> None:
+        async def scenario():
+            a = asyncio.ensure_future(route.reserve_session(_body_request(7), profile=STUDENT))
+            b = asyncio.ensure_future(route.reserve_session(_body_request(7), profile=OTHER))
+            await self.until(lambda: len(self.calls) == 2)
+            self.gate.set()
+            answers = (await a, await b)
+            await self.settle()
+            return answers
+
+        a, b = self.go(scenario, 2.0)
+        sa, sb = self.assertAnswer(a, 200)["session_id"], self.assertAnswer(b, 200)["session_id"]
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual({self.store.rows[sa]["modal_session_id"], self.store.rows[sb]["modal_session_id"]},
+                         {MSID + "1", MSID + "2"})
+        self.assertEqual(sorted(self.attaches()), sorted([sa, sb]))
+
+    def test_a_permanent_failure_of_the_joined_start_is_not_retried(self) -> None:
+        self.start_error = RuntimeError("AuthError: token rejected")
+
+        async def scenario():
+            first = await route.reserve_session(_body_request(7), profile=STUDENT)
+            retry = asyncio.ensure_future(route.reserve_session(_body_request(7), profile=STUDENT))
+            await asyncio.sleep(0.05)
+            self.gate.set()
+            second = await retry
+            await self.settle()
+            return first, second
+
+        first, second = self.go(scenario, 0.3)
+        self.coded(first)
+        self.plain(second)
+        self.assertEqual(len(self.calls), 1)
+        for row in self.store.rows.values():
+            self.assertEqual((row["status"], row["end_reason"], row["modal_session_id"]),
+                             ("ended", "edge_failed", None))
+        self.assertEqual(self.attaches(), [])
+
+
 _REAL_FASTAPI_SCRIPT = r"""
 import json, sys, types
 
@@ -633,7 +843,13 @@ def visible(profile, training_id):
     return {"id": 8, "status": "succeeded", "model_type": "act", "model_name": "EduBotics-Solutions/m"}
 
 
-async def start_fails(on_late):
+start_calls = []
+
+
+async def start_fails(user_id, on_late):
+    start_calls.append(user_id)
+    if len(start_calls) == 1:
+        raise route.inference_edge.EdgeTimeout("running")
     raise RuntimeError("modal down")
 
 
@@ -668,6 +884,7 @@ cases = [
      {"content": b"training_id=7", "headers": {"content-type": "application/x-www-form-urlencoded"}}),
     ("reserve valid", "/inference/sessions", {"json": {"training_id": 7}}),
     ("gpu not started", "/inference/sessions", {"json": {"training_id": 8}}),
+    ("gpu failed", "/inference/sessions", {"json": {"training_id": 8}}),
 ]
 for tail in ("arm", "heartbeat", "end"):
     for i, kw in enumerate(({"json": {}}, {"json": {"training_id": 0}}, {"content": b"{", "headers": json_ct})):
@@ -714,6 +931,12 @@ class TestRealFastApiBodies(unittest.TestCase):
                         "detail": "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich "
                                   "noch einmal.",
                         "code": "gpu_not_started"})
+                elif name == "gpu failed":
+                    # a permanent failure: the same sentence without the code, so the page never retries it
+                    self.assertEqual(a["status"], 503, a["text"])
+                    self.assertEqual(json.loads(a["text"]), {
+                        "detail": "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich "
+                                  "noch einmal."})
                 elif name == "reserve valid":
                     # the handler parsed it and asked the visibility ladder (patched: not visible)
                     self.assertEqual(a["status"], 404, a["text"])
@@ -721,7 +944,7 @@ class TestRealFastApiBodies(unittest.TestCase):
                 else:
                     self.assertEqual(a["status"], 404, a["text"])
                     self.assertEqual(json.loads(a["text"]), {"detail": "Cloud-Sitzung nicht gefunden."})
-        self.assertEqual(out["seen"], [7, 8])
+        self.assertEqual(out["seen"], [7, 8, 8])
 
 
 class TestArm(_Case):

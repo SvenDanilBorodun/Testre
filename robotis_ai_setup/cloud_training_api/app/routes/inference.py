@@ -36,11 +36,18 @@ Conventions that are easy to undo by accident:
   * Every German `detail=` literal is bound at its raise site on purpose:
     german_detail_lint.py reads keyword arguments.
   * ONE answer carries a machine-readable `code` next to its German `detail`:
-    the reserve's 503 when `sessions.start` itself failed or outlived its bound
+    the reserve's 503 when `sessions.start` outlived its bound
     (`"code": "gpu_not_started"`). The page retries the reserve on that code
-    alone (owner, round 2) and never on German text. An attach-time end answers
-    the same sentence WITHOUT the code: that reservation ended for a reason of
-    its own (another tab superseded it, the page let it go).
+    alone (owner, round 2) and never on German text. Every other start failure
+    answers the same sentence WITHOUT the code (owner, round 3): a permanent one
+    (the SDK's own exception such as an AuthError, credentials of an unexpected
+    shape), which a retry cannot fix, and an end of the reservation itself
+    (attach-time end, or a newer reservation of the student took its start over:
+    another tab superseded it, the page let it go).
+  * A retry never opens a second GPU start (owner, round 3): a reserve of a student
+    whose earlier reservation's `sessions.start` still runs waits on THAT start
+    (`inference_edge.start_session` is keyed by the student), so each student holds
+    at most one START_POOL thread however often the page retries.
 """
 
 from __future__ import annotations
@@ -130,7 +137,8 @@ def _session_unreadable() -> HTTPException:
 
 
 def _gpu_not_started() -> HTTPException:
-    """`sessions.start` failed or outlived START_TIMEOUT_S: the page may retry (coded)."""
+    """`sessions.start` outlived START_TIMEOUT_S: the page may retry (coded); the retry
+    joins the still-running start (inference_edge.start_session)."""
     return _CodedHTTPException(
         status_code=503,
         detail="Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.",
@@ -138,8 +146,18 @@ def _gpu_not_started() -> HTTPException:
     )
 
 
+def _gpu_start_failed() -> HTTPException:
+    """`sessions.start` failed for good (the SDK's own exception, credentials of an
+    unexpected shape): the same sentence, no retry code — a retry cannot fix it (round 3)."""
+    return HTTPException(
+        status_code=503,
+        detail="Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.",
+    )
+
+
 def _ended_while_starting() -> HTTPException:
-    """The reservation ended while its GPU started (G-4): the same sentence, no retry code."""
+    """The reservation ended while its GPU started (G-4), or a newer reservation of the
+    student took its start over: the same sentence, no retry code."""
     return HTTPException(
         status_code=503,
         detail="Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.",
@@ -278,16 +296,27 @@ async def reserve_session(request: Request, profile=Depends(get_current_profile)
         inference_edge.kick()
 
     try:
-        creds = await inference_edge.start_session(on_late)
-    except Exception as exc:  # noqa: BLE001 - EdgeTimeout or the SDK's own
-        logger.warning("inference start failed: %s session=%s user=%s", type(exc).__name__, session_id, uid)
+        creds = await inference_edge.start_session(uid, on_late)
+    except inference_edge.EdgeTimeout as exc:
+        logger.warning("inference start timed out (%s): session=%s user=%s",
+                       exc.args[0] if exc.args else "", session_id, uid)
         await _end_edge_failed(sb, uid, session_id)
         raise _gpu_not_started() from None
+    except inference_edge.StartSuperseded:
+        # A newer reservation of this student joined the start and takes it. Creating
+        # it already ended this row `superseded`; the end below is a no-op then.
+        logger.info("inference start taken over by a newer reservation: session=%s user=%s", session_id, uid)
+        await _end_edge_failed(sb, uid, session_id)
+        raise _ended_while_starting() from None
+    except Exception as exc:  # noqa: BLE001 - the SDK's own: permanent, never retried
+        logger.warning("inference start failed: %s session=%s user=%s", type(exc).__name__, session_id, uid)
+        await _end_edge_failed(sb, uid, session_id)
+        raise _gpu_start_failed() from None
     if not _valid_creds(creds):
         logger.warning("inference start: credentials of an unexpected shape, session=%s", session_id)
         await inference_edge.terminate_now(getattr(creds, "token", None))
         await _end_edge_failed(sb, uid, session_id)
-        raise _gpu_not_started()
+        raise _gpu_start_failed()
     try:
         envelope = svc.edge_seal(session_id, creds.token)
         attached = await asyncio.to_thread(svc.attach_edge, sb, session_id, creds.session_id, envelope)

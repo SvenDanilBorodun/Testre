@@ -17,6 +17,20 @@ Two thread pools, never the default executor that the supabase calls share
   G-7: every waiting `sessions.start` holds one connection of the SDK's shared
   aiohttp connector (default limit 100): keep START_POOL + CONTROL_POOL ≤ 90.
 
+ONE start per student at a time (owner, round 3; R1 MINOR): the page retries a
+`gpu_not_started` reserve up to twice and a timed-out start keeps running, so a
+retry used to hold a second (and third) START_POOL thread and GPU start, and a
+class retrying in a shortage filled the pool. A reservation that arrives while a
+start launched for one of the SAME student's earlier reservations still runs now
+waits on THAT start (`_STARTS`, keyed by user id; process-local like every loop
+here, a single uvicorn worker) and submits none. The start's outcome goes to the
+newest reservation still waiting; an older one waiting is released at once with
+StartSuperseded (its row was superseded when the newer one was created). With
+nobody waiting, a success goes to the NEWEST reservation's `on_late`, exactly
+once. So one success = one Modal session = one attach. A start that finishes
+while nobody waits (the page's pause between two attempts) is attached to the
+ended row and terminated as before; the next attempt then starts its own.
+
 ONE terminate path (D33): `terminate_loop`, a startup task of its own that the
 session sweep never awaits (F-2), every TERMINATE_PERIOD_S and on `kick()`.
 
@@ -29,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import functools
 import logging
 import os
 import threading
@@ -41,6 +56,9 @@ logger = logging.getLogger(__name__)
 APP = os.environ.get("MODAL_INFERENCE_APP_NAME", "edubotics-inference")
 CLS = os.environ.get("MODAL_INFERENCE_CLASS_NAME", "CloudInference")
 START_TIMEOUT_S = 120.0
+# A start older than this is presumed hung (the SDK itself gives up on capacity after
+# ~25 min) and is never joined, so one hung start cannot lock its student out.
+START_JOIN_MAX_AGE_S = 1800.0
 PREFETCH_TIMEOUT_S = 120.0
 URL_TTL_S = 600.0
 # D33 (H-7): > the container's 10 s session-check TTL + two check RPCs + two request
@@ -62,6 +80,37 @@ class EdgeTimeout(Exception):
     """sessions.start did not finish within START_TIMEOUT_S; args[0] is 'queued' or 'running'."""
 
 
+class StartSuperseded(Exception):
+    """A newer reservation of the same student joined this start and takes its outcome."""
+
+
+class _Waiter:
+    """One reserve request waiting on a start: its outcome future and its late path."""
+
+    __slots__ = ("fut", "on_late")
+
+    def __init__(self, fut: asyncio.Future, on_late) -> None:
+        self.fut = fut
+        self.on_late = on_late
+
+
+class _UserStart:
+    """The one `sessions.start` of one student, shared by every reservation of theirs
+    that arrives while it runs. Touched on its event loop only (`start_session` and
+    `_settle` run there), so it needs no lock."""
+
+    __slots__ = ("uid", "loop", "cf", "t0", "waiter", "on_late", "settled")
+
+    def __init__(self, uid: str, loop: asyncio.AbstractEventLoop, cf: concurrent.futures.Future) -> None:
+        self.uid = uid
+        self.loop = loop
+        self.cf = cf
+        self.t0 = time.monotonic()
+        self.waiter: _Waiter | None = None  # the newest reservation's request, while it waits
+        self.on_late = None                 # the newest reservation's late path, even after it gave up
+        self.settled = False
+
+
 _server_lock = threading.Lock()
 _server_obj = None
 _url_cache: tuple[float, str] | None = None
@@ -76,6 +125,8 @@ _in_flight_lock = threading.Lock()
 _IN_FLIGHT: set[str] = set()
 _kick_event: asyncio.Event | None = None
 _kick_loop: asyncio.AbstractEventLoop | None = None
+# user id -> the start a new reservation of that student joins (see the module docstring)
+_STARTS: dict[str, _UserStart] = {}
 
 
 def _reset_for_tests() -> None:
@@ -89,6 +140,7 @@ def _reset_for_tests() -> None:
     with _in_flight_lock:
         _IN_FLIGHT.clear()
     _TASKS.clear()
+    _STARTS.clear()
 
 
 def _server():
@@ -192,35 +244,111 @@ def _start_blocking():
     return _server().sessions.start(idle_timeout=inference_sessions.EDGE_IDLE_S)
 
 
-async def start_session(on_late):
-    """A fresh Modal session's credentials (`.session_id`, `.token`).
+def _spawn_on(loop: asyncio.AbstractEventLoop, coro) -> None:
+    """create_task on `loop` (the caller runs on it), held strongly in _TASKS."""
+    task = loop.create_task(coro)
+    _TASKS.add(task)
+    task.add_done_callback(_TASKS.discard)
 
-    Raises the SDK's exception, or EdgeTimeout after START_TIMEOUT_S: 'queued'
-    (cancelled, it never ran, nothing can arrive late) or 'running' (left alone;
-    a late success is handed to the coroutine function `on_late(creds)` in a task
-    kept in _TASKS).
-    """
-    cf = START_POOL.submit(_start_blocking)
-    af = asyncio.wrap_future(cf)
-    done, _ = await asyncio.wait({af}, timeout=START_TIMEOUT_S)
-    if done:
-        return af.result()
-    if cf.cancel():
-        raise EdgeTimeout("queued")
-    loop = asyncio.get_running_loop()
 
-    def _late(fut) -> None:
-        if fut.cancelled():
-            return
-        exc = fut.exception()
+def _forget(entry: _UserStart) -> None:
+    entry.settled = True
+    if _STARTS.get(entry.uid) is entry:
+        del _STARTS[entry.uid]
+
+
+def _post_settle(entry: _UserStart, _cf) -> None:
+    """The pool future's done callback (any thread): settle on the entry's loop."""
+    try:
+        entry.loop.call_soon_threadsafe(_settle, entry)
+    except RuntimeError:
+        pass  # the loop is closed (process shutdown); nothing can be delivered any more
+
+
+def _settle(entry: _UserStart) -> None:
+    """On the loop, once per start: hand its outcome to the newest reservation still
+    waiting, else a success to the newest reservation's late path."""
+    if entry.settled:
+        return
+    _forget(entry)
+    cf = entry.cf
+    if cf.cancelled():
+        return  # cancelled only while still queued and with nobody waiting
+    waiter, entry.waiter = entry.waiter, None
+    exc = cf.exception()
+    if waiter is not None and not waiter.fut.done():
         if exc is not None:
-            logger.warning("inference late start failed: %s", type(exc).__name__)
-            return
-        task = loop.create_task(on_late(fut.result()))
-        _TASKS.add(task)
-        task.add_done_callback(_TASKS.discard)
+            waiter.fut.set_exception(exc)
+        else:
+            waiter.fut.set_result(cf.result())
+        return
+    if exc is not None:
+        logger.warning("inference late start failed: %s user=%s", type(exc).__name__, entry.uid)
+        return
+    if entry.on_late is not None:
+        _spawn_on(entry.loop, entry.on_late(cf.result()))
 
-    af.add_done_callback(_late)
+
+def _leave(entry: _UserStart, waiter: _Waiter) -> None:
+    """A request stops waiting (its bound, or it was cancelled). An outcome already
+    handed to it is not lost: a success goes to its own late path."""
+    if entry.waiter is waiter:
+        entry.waiter = None
+    fut = waiter.fut
+    if fut.done() and not fut.cancelled():
+        exc = fut.exception()
+        if exc is None:
+            _spawn_on(entry.loop, waiter.on_late(fut.result()))
+        return
+    if entry.waiter is None and not entry.settled and entry.cf.cancel():
+        _forget(entry)  # still queued and nobody waits: it never runs
+
+
+async def start_session(user_id: str, on_late):
+    """A Modal session's credentials (`.session_id`, `.token`) for the reservation
+    calling this, of student `user_id`.
+
+    Joins the start still running for an earlier reservation of the same student
+    (never another student's) instead of submitting another. Raises the SDK's
+    exception (permanent), StartSuperseded (a newer reservation of the student
+    joined and takes the outcome), or EdgeTimeout after START_TIMEOUT_S: 'queued'
+    (cancelled, it never ran, nothing can arrive late) or 'running' (left alone; a
+    late success is handed to the coroutine function `on_late(creds)` of the newest
+    reservation, in a task kept in _TASKS, unless a newer reservation waits for it).
+    """
+    loop = asyncio.get_running_loop()
+    entry = _STARTS.get(user_id)
+    if entry is not None and entry.loop is loop and not entry.settled:
+        # The reservation calling this superseded the one still waiting here (one live
+        # reservation per student): release that request now, the newer one takes over.
+        older, entry.waiter = entry.waiter, None
+        if older is not None and not older.fut.done():
+            older.fut.set_exception(StartSuperseded())
+        if time.monotonic() - entry.t0 <= START_JOIN_MAX_AGE_S:
+            logger.info("inference start joined: user=%s", user_id)
+        else:
+            logger.warning("inference start presumed hung, not joined: user=%s", user_id)
+            entry = None
+    else:
+        entry = None
+    if entry is None:
+        cf = START_POOL.submit(_start_blocking)
+        entry = _UserStart(user_id, loop, cf)
+        _STARTS[user_id] = entry
+        cf.add_done_callback(functools.partial(_post_settle, entry))
+    waiter = _Waiter(loop.create_future(), on_late)
+    entry.waiter = waiter
+    entry.on_late = on_late
+    try:
+        await asyncio.wait({waiter.fut}, timeout=START_TIMEOUT_S)
+    except asyncio.CancelledError:
+        _leave(entry, waiter)
+        raise
+    if waiter.fut.done():
+        return waiter.fut.result()  # the credentials, or StartSuperseded / the SDK's exception
+    _leave(entry, waiter)
+    if entry.settled and entry.cf.cancelled():
+        raise EdgeTimeout("queued")
     raise EdgeTimeout("running")
 
 

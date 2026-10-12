@@ -850,6 +850,21 @@ class TestMainWiring(unittest.TestCase):
         self.assertIn("_inference_sweep_loop()", fns["_start_inference_sweep"])
         self.assertIn("terminate_loop(", fns["_start_inference_terminate_loop"])
 
+    def test_the_url_warm_up_is_a_startup_task_that_never_blocks_boot(self) -> None:
+        """V1-9: scheduled with create_task (never awaited, so neither the lifespan
+        startup nor /health waits for Modal), kept strongly, off in unit tests."""
+        fns = {n.name: n for n in ast.walk(_main_tree()) if isinstance(n, ast.AsyncFunctionDef)}
+        self.assertIn("_start_inference_url_warmup", fns)
+        fn = fns["_start_inference_url_warmup"]
+        self.assertFalse([n for n in ast.walk(fn) if isinstance(n, ast.Await)])
+        with open(MAIN_PY, encoding="utf-8") as fh:
+            src = ast.get_source_segment(fh.read(), fn)
+        self.assertIn('os.environ.get("INFERENCE_SWEEPER_DISABLED") == "1"', src)
+        self.assertIn("_keep_task(_asyncio.create_task(_inference_edge.warm_url()))", src)
+        decorated = [d for d in fn.decorator_list if isinstance(d, ast.Call)
+                     and getattr(d.func, "attr", "") == "on_event"]
+        self.assertEqual([d.args[0].value for d in decorated], ["startup"])
+
     def test_no_new_secret(self) -> None:
         with open(MAIN_PY, encoding="utf-8") as fh:
             src = fh.read()

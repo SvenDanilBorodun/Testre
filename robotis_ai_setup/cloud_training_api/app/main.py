@@ -1078,6 +1078,24 @@ async def _start_inference_terminate_loop() -> None:
     _keep_task(_asyncio.create_task(_inference_edge.terminate_loop()))
 
 
+# V1-9: the inference server's URL (Modal `get_url()`, in inference_edge's
+# CONTROL_POOL) is resolved once at boot, so the first prefetch of this process
+# does not lose the race with a quick Start. A task of its own that nothing
+# awaits: neither the lifespan startup nor /health ever waits for Modal, and a
+# Modal that does not answer leaves today's lazy path. Off with
+# INFERENCE_SWEEPER_DISABLED=1 like the other two inference tasks.
+@app.on_event("startup")
+async def _start_inference_url_warmup() -> None:
+    import asyncio as _asyncio
+
+    if os.environ.get("INFERENCE_SWEEPER_DISABLED") == "1":
+        logger.info("inference url warm-up: disabled via env")
+        return
+    from app.services import inference_edge as _inference_edge
+
+    _keep_task(_asyncio.create_task(_inference_edge.warm_url()))
+
+
 # Schema probe lives in a BACKGROUND task scheduled here, NOT at module
 # import. Without this split, _validate_required_schema() (32+ sequential
 # Supabase round-trips) blocks the FastAPI lifespan startup phase, which

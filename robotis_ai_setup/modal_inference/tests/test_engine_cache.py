@@ -36,7 +36,7 @@ def _key(i):
 
 
 def test_constants():
-    assert S.LRU_MAX_MODELS == 8 and S.MODEL_MAX_BYTES == 1 << 30
+    assert S.LRU_MAX_MODELS == 7 and S.MODEL_MAX_BYTES == 1 << 30     # D27: max_concurrency (5) + 2 (V1-2)
     assert S.ALLOW_PATTERNS == ['config.json', 'model.safetensors', 'policy_preprocessor*.json',
                                 'policy_preprocessor*.safetensors', 'policy_postprocessor*.json',
                                 'policy_postprocessor*.safetensors', 'edubotics_model_meta.json']

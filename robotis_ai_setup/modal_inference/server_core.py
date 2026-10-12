@@ -12,7 +12,9 @@ HTTPS only (O7'): one request per observation, all of a session's requests reach
   awaited by an observation (D42); 30 s of failed checks fail closed, counted from the first
   failure of the current run of failures (J-5).
 * An observation's JPEGs are checked by SOF size and scan count BEFORE any decode (D25, D40); one
-  GPU thread runs every chunk; one ``EngineCache`` (count-based LRU, D27) holds the models.
+  GPU thread runs every chunk; one ``EngineCache`` (count-based LRU, D27) holds the models, each
+  warmed by one zero-input chunk on that GPU thread when it loads (V1-3).
+* A client that disconnects mid-body ends its request quietly (one INFO line, V2-3).
 * Logs carry session ids, conn ids and exception TYPES only: never a token, a header or a frame.
 """
 import asyncio
@@ -30,6 +32,8 @@ import sys
 import threading
 import time
 
+import numpy as np
+
 _HERE = Path(__file__).resolve().parent
 # NEVER `_HERE.parents[1]` unguarded: in the container this file is /root/server_core.py and
 # Path('/root').parents has ONE entry -> IndexError at import [proved] (the main.py `_safe_parent` trap).
@@ -45,6 +49,7 @@ from fastapi import FastAPI, Request          # noqa: E402
 from fastapi.exceptions import RequestValidationError   # noqa: E402
 from fastapi.responses import JSONResponse, Response    # noqa: E402
 from starlette.exceptions import HTTPException as StarletteHTTPException   # noqa: E402
+from starlette.requests import ClientDisconnect         # noqa: E402
 
 log = logging.getLogger('edubotics.inference.server')
 
@@ -53,7 +58,7 @@ LIMITS = {'cadence_steps': 5, 'actions_per_chunk': 50, 'aggregate_new_weight': 0
 HEARTBEAT_FAIL_CLOSED_S = 30.0; HEARTBEAT_RETRY_S = 2.0      # D42 (G-1), J-5
 HTTPS_CACHE_TTL_S = 10.0; HTTPS_ENTRY_EVICT_S = 120.0
 RATE_PER_S = 8.0; RATE_BURST = 8
-LRU_MAX_MODELS = 8               # D27: max_concurrency + 2; an entry in use is never evicted
+LRU_MAX_MODELS = 7               # D27: inference_app's max_concurrency (5, V1-2) + 2; an entry in use is never evicted
 MODEL_MAX_BYTES = 1 << 30
 PREFETCH_TIMEOUT_S = 110.0       # < the cloud API's 120 s wait (§4.3)
 ALLOW_PATTERNS = ['config.json', 'model.safetensors', 'policy_preprocessor*.json', 'policy_preprocessor*.safetensors',
@@ -106,6 +111,23 @@ def default_loader(repo, revision, device):
         raise chunk_engine.ModelRefused('model', f'load: {type(e).__name__}') from None
 
 
+def warm_up_engine(engine, actions_per_chunk):
+    """One chunk on zero inputs of the policy's own shapes (V1-3).
+
+    A fresh container's first chunk costs 1.7-2.2 s of GPU time (CUDA / cuDNN first use) that would
+    otherwise land on a robot's first observation. The inputs are what ``decode_jpeg_rgb`` and the
+    codec hand the engine (uint8 H x W x 3 per expected camera, float32 state) and ``engine.chunk`` is
+    the observation's own path (inference_mode, the AMP rule, the processors).
+    """
+    summary = engine.summary
+    images = {}
+    for name in summary['expected_cameras']:
+        _, h, w = summary['image_shapes'][name]
+        images[name] = np.zeros((h, w, 3), dtype=np.uint8)
+    state = np.zeros(summary['state_dim'], dtype=np.float32)
+    engine.chunk(images, state, min(int(actions_per_chunk), int(summary['chunk_size'])))
+
+
 class _Slot:
     __slots__ = ('engine', 'refs')
 
@@ -141,15 +163,33 @@ class Lease:
 
 class EngineCache:
     """Thread-safe count-based model LRU (D27): loads once per key (a per-key lock), keeps at most
-    ``max_models`` entries, evicts least-recently-used entries with refcount 0 only."""
+    ``max_models`` entries, evicts least-recently-used entries with refcount 0 only.
 
-    def __init__(self, device, max_models=LRU_MAX_MODELS, loader=None):
+    ``warm_up(engine)`` (optional, ``set_warm_up``) runs once per LOAD, under the key's lock and before
+    the engine is cached: nobody holds a lease on an engine that has not been warmed (V1-3). Its
+    failure is logged with the exception type and does not fail the load.
+    """
+
+    def __init__(self, device, max_models=LRU_MAX_MODELS, loader=None, warm_up=None):
         self.device = device
         self.max_models = max_models
         self._loader = loader or default_loader
+        self._warm_up = warm_up
         self._lock = threading.Lock()
         self._slots = OrderedDict()            # (repo, revision) -> _Slot, least recently used first
         self._key_locks = {}
+
+    def set_warm_up(self, warm_up):
+        self._warm_up = warm_up
+
+    def _warm(self, engine):
+        warm_up = self._warm_up
+        if warm_up is None:
+            return
+        try:
+            warm_up(engine)
+        except Exception as e:  # noqa: BLE001 - a broken engine reports on the first real observation
+            log.warning('model warm-up failed: %s', type(e).__name__)
 
     def init_device(self):
         if str(self.device).startswith('cuda'):
@@ -179,6 +219,7 @@ class EngineCache:
                 if key in self._slots:
                     return self._lease_locked(key)
             engine = self._loader(repo, revision, self.device)
+            self._warm(engine)                 # still under the key's lock, before anyone can lease it
             with self._lock:
                 self._slots[key] = _Slot(engine)
                 lease = self._lease_locked(key)
@@ -330,10 +371,16 @@ async def _read_capped(request):
         if n > P.MAX_FRAME_BYTES:
             raise _Answer('bad_frame', status=413)
     buf = bytearray()
-    async for chunk in request.stream():
-        buf += chunk
-        if len(buf) > P.MAX_FRAME_BYTES:
-            raise _Answer('bad_frame', status=413)
+    try:
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > P.MAX_FRAME_BYTES:
+                raise _Answer('bad_frame', status=413)
+    except ClientDisconnect as e:
+        # V2-3: the client left mid-body (a run ending during an upload). Nobody reads the answer; it
+        # must not reach the Exception handler, whose re-raise makes uvicorn log a whole traceback.
+        log.info('request body cut off: %s', type(e).__name__)
+        raise _Answer('bad_frame') from None
     return bytes(buf)
 
 
@@ -349,12 +396,24 @@ def _merge_stats(server_stats, robot_stats):
     return out
 
 
-def build_app(backend, cache, server_sha, *, limits=LIMITS, clock=time.monotonic, cache_ttl_s=HTTPS_CACHE_TTL_S):
-    """The FastAPI app of one container: health, hello, infer, bye, prefetch (§2.2)."""
+def build_app(backend, cache, server_sha, *, limits=LIMITS, clock=time.monotonic, cache_ttl_s=HTTPS_CACHE_TTL_S,
+              warm_up=True):
+    """The FastAPI app of one container: health, hello, infer, bye, prefetch (§2.2).
+
+    ``warm_up`` (V1-3): every model ``cache`` loads is warmed by one ``warm_up_engine`` chunk on THIS
+    app's GPU thread before it is cached (both loading paths, prefetch and hello, go through
+    ``cache.acquire``). It runs per load, never per session: no entry, rate bucket or stats see it.
+    """
     gpu_pool = ThreadPoolExecutor(max_workers=GPU_THREADS, thread_name_prefix='gpu')
     cpu_pool = ThreadPoolExecutor(max_workers=CPU_THREADS, thread_name_prefix='cpu')
     entries = {}                    # sha256(connect token) -> _Entry
     background = set()              # strong references to running background tasks
+    if warm_up:
+        warm_n = int(limits['actions_per_chunk'])
+
+        def _warm_on_gpu(engine):   # called by the loading thread (cpu pool), waits for the GPU thread
+            gpu_pool.submit(warm_up_engine, engine, warm_n).result()
+        cache.set_warm_up(_warm_on_gpu)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):

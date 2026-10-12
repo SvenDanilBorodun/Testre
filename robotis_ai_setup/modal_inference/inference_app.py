@@ -1,6 +1,7 @@
 """Cloud-Inferenz Modal app (ONE file; variant and snapshot baked at deploy). Deploy (Modal CLI >= 1.6):
     modal deploy inference_app.py                                    # prod
-    EDUBOTICS_INFERENCE_VARIANT=dev modal deploy inference_app.py    # dev (static backend, 2 containers)
+    EDUBOTICS_INFERENCE_VARIANT=dev modal deploy inference_app.py    # dev (static backend, 2 containers;
+        # DEV_SESSION_TOKEN + the 16 tokens session_backend.dev_session_token derives from it, one session each)
     EDUBOTICS_INFERENCE_SNAPSHOT=0 modal deploy inference_app.py     # without a memory snapshot (§10.3(c))
 A sessioned server: Modal refuses every request without a live session's edge token before any container
 starts; the cloud API mints them (Server.from_name(app, "CloudInference").sessions.start()).
@@ -19,7 +20,7 @@ VARIANTS = {
     "prod": {"app": "edubotics-inference", "max_containers": 20, "secret": "edubotics-inference-secrets",
              "required": ["SUPABASE_URL", "SUPABASE_ANON_KEY", "HF_TOKEN"]},
     "dev": {"app": "edubotics-inference-dev", "max_containers": 2, "secret": "edubotics-inference-dev-secrets",
-            "required": ["HF_TOKEN", "DEV_SESSION_TOKEN", "DEV_MODEL_REPO", "DEV_MODEL_REVISION"]},
+            "required": ["DEV_SESSION_TOKEN", "DEV_MODEL_REPO", "DEV_MODEL_REVISION"]},   # public model: no HF_TOKEN
 }
 VARIANT = os.environ.get("EDUBOTICS_INFERENCE_VARIANT", "prod")    # baked into the image env below, so the
 if VARIANT not in VARIANTS:                                          # container's re-import agrees
@@ -53,9 +54,14 @@ image = (
     .apt_install("build-essential", "git")                     # lerobot pulls evdev (C extension)
     .pip_install(f"lerobot=={LEROBOT_VERSION}", "scipy>=1.14.0,<1.18", "accelerate>=1.10.0,<2.0.0",
                  "huggingface_hub==1.23.0", "opencv-python-headless==4.10.0.84", "fastapi[standard]==0.115.12",
-                 "httpx==0.28.1")
+                 "httpx==0.28.1", "datasets==4.8.5")
+    # The swap replaces torch 2.10.0's cu128 nvidia-* set and triton 3.6.0 (the first resolve) with torch 2.7.0's
+    # cu126 set, so it keeps --force-reinstall (never --no-deps). It also re-resolves torch's shared deps from the
+    # cu126 index (deploy log: numpy 2.5.2, fsspec 2026.7.0); the next step restores lerobot's numpy range and
+    # datasets 4.8.5's fsspec cap from PyPI (V1-10).
     .pip_install("torch==2.7.0", "torchvision==0.22.0", index_url="https://download.pytorch.org/whl/cu126",
                  extra_options="--force-reinstall")
+    .pip_install("numpy>=2.0.0,<2.3.0", "fsspec==2026.2.0")
     .run_commands("python -m pip uninstall -y torchcodec || true",
                   "python -c \"import torchvision; torchvision.models.resnet18(weights='IMAGENET1K_V1')\"")  # D11
     .env({"PYTHONUNBUFFERED": "1", "HF_HUB_DISABLE_TELEMETRY": "1",
@@ -70,8 +76,10 @@ image = (
 SECRET = modal.Secret.from_name(CFG["secret"], required_keys=CFG["required"])
 
 
+# 5 robots per T4 (V1-2, owner): the real engine costs 26-28 ms per chunk under load, 6 put the GPU thread at
+# ~97 %. server_core.LRU_MAX_MODELS = max_concurrency + 2 (D27, tests/test_inference_app_variants.py).
 @app.server(image=image, gpu="T4", port=SERVER_PORT, routing_region="eu-west", compute_region="eu",
-            max_concurrency=6, target_concurrency=4, min_containers=0, max_containers=CFG["max_containers"],
+            max_concurrency=5, target_concurrency=4, min_containers=0, max_containers=CFG["max_containers"],
             scaledown_window=300, startup_timeout=300, enable_memory_snapshot=SNAPSHOT, cpu=2.0, secrets=[SECRET])
 @modal.sessioned()
 class CloudInference:                # no __init__, no @modal.method, no @modal.concurrent: refused on a server
@@ -82,7 +90,8 @@ class CloudInference:                # no __init__, no @modal.method, no @modal.
         import lerobot.policies.utils                                       # noqa: F401
 
     @modal.enter(snap=False)
-    def serve(self):                 # after a restore: CUDA once, then uvicorn on SERVER_PORT in a thread
+    def serve(self):                 # after a restore: CUDA once, then uvicorn on SERVER_PORT in a thread;
+        # build_app warms every model it loads with one zero chunk on its GPU thread (V1-3), never in a snapshot
         import uvicorn
         import server_core
         import session_backend

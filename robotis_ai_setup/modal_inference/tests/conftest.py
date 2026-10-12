@@ -166,17 +166,23 @@ def obs_frame(P, seq=1, obs_e=0, cams=None, state=None, w=W, h=H):
 
 @pytest.fixture
 def server():
-    """Factory: ``server(backend=None, engine=None, clock=None, ttl=10.0, loader=None, max_models=8)`` ->
-    ``(TestClient, backend, engine, cache)``. Use the client as a context manager so one event loop
-    (and the background session checks it runs) lives across requests."""
+    """Factory: ``server(backend=None, engine=None, clock=None, ttl=10.0, loader=None, max_models=None,
+    warm_up=False)`` -> ``(TestClient, backend, engine, cache)``. Use the client as a context manager so
+    one event loop (and the background session checks it runs) lives across requests.
+
+    ``max_models`` defaults to the shipped ``LRU_MAX_MODELS``. ``warm_up`` is off here because the
+    observation tests count the engine's calls; ``test_server_warm_up.py`` runs it on (V1-3), as
+    ``build_app``'s default and the container do."""
     import session_backend as SB
     import server_core as S
     from fastapi.testclient import TestClient
 
-    def make(backend=None, engine=None, clock=None, ttl=10.0, loader=None, max_models=8):
+    def make(backend=None, engine=None, clock=None, ttl=10.0, loader=None, max_models=None, warm_up=False):
         backend = backend or FakeBackend(SB)
         engine = engine or FakeEngine()
-        cache = S.EngineCache('cpu', max_models=max_models, loader=loader or (lambda repo, rev, dev: engine))
-        app = S.build_app(backend, cache, 'sha-test', clock=clock or FakeClock(), cache_ttl_s=ttl)
+        cache = S.EngineCache('cpu', max_models=S.LRU_MAX_MODELS if max_models is None else max_models,
+                              loader=loader or (lambda repo, rev, dev: engine))
+        app = S.build_app(backend, cache, 'sha-test', clock=clock or FakeClock(), cache_ttl_s=ttl,
+                          warm_up=warm_up)
         return TestClient(app), backend, engine, cache
     return make

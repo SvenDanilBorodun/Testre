@@ -14,6 +14,7 @@ import re
 import pytest
 
 import cloud_protocol as P
+import server_core as S
 
 PKG = Path(__file__).resolve().parents[1]
 APP_SRC = (PKG / 'inference_app.py').read_text(encoding='utf-8')
@@ -55,9 +56,10 @@ def test_variants_table():
     assert variants['prod'] == {'app': 'edubotics-inference', 'max_containers': 20,
                                 'secret': 'edubotics-inference-secrets',
                                 'required': ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'HF_TOKEN']}
+    # V1-5: the dev model is public, so the dev variant needs no HF_TOKEN (and smoke_test reports none missing).
     assert variants['dev'] == {'app': 'edubotics-inference-dev', 'max_containers': 2,
                                'secret': 'edubotics-inference-dev-secrets',
-                               'required': ['HF_TOKEN', 'DEV_SESSION_TOKEN', 'DEV_MODEL_REPO', 'DEV_MODEL_REVISION']}
+                               'required': ['DEV_SESSION_TOKEN', 'DEV_MODEL_REPO', 'DEV_MODEL_REVISION']}
     assert variants['prod']['app'] != variants['dev']['app']           # a dev deploy never overwrites prod
     assert ast.literal_eval(_assign('LEROBOT_VERSION')) == '0.5.1'
     assert ast.literal_eval(_assign('SERVER_PORT')) == 8000
@@ -73,7 +75,7 @@ def test_the_class_is_a_sessioned_server_with_the_measured_settings():
     server = cls.decorator_list[0]
     consts = {k.arg: ast.literal_eval(k.value) for k in server.keywords
               if isinstance(k.value, ast.Constant)}
-    assert consts == {'gpu': 'T4', 'routing_region': 'eu-west', 'compute_region': 'eu', 'max_concurrency': 6,
+    assert consts == {'gpu': 'T4', 'routing_region': 'eu-west', 'compute_region': 'eu', 'max_concurrency': 5,
                       'target_concurrency': 4, 'min_containers': 0, 'scaledown_window': 300,
                       'startup_timeout': 300, 'cpu': 2.0}
     assert ast.unparse(_kw(server, 'port')) == 'SERVER_PORT'
@@ -160,6 +162,8 @@ def test_the_smoke_test_function():
     for needle in ('pretrained_backbone_weights=None', 'ChunkEngine.load', 'missing_secrets', 'chunk_shape',
                    'gpu_ms', 'torch.cuda.is_available()'):
         assert needle in body, needle
+    # V1-5: it reports only the variant's own required secrets (the dev variant has no HF_TOKEN)
+    assert "for k in CFG['required'] if not os.environ.get(k)" in body
 
 
 @pytest.mark.parametrize('name', ['server_core.py', 'session_backend.py'])
@@ -169,3 +173,75 @@ def test_container_import_paths(name):
     namespace = {'__file__': f'/root/{name}', '__name__': f'container_{name[:-3]}'}
     exec(compile(src, f'/root/{name}', 'exec', dont_inherit=True), namespace)   # noqa: S102 - the import is the test
     assert namespace['_ROOT'] is None and namespace['_SHARED'] is None
+
+
+# ---------------------------------------------------------------- fix round (V1-2, V1-3, V1-5, V1-10)
+
+def _image_steps():
+    """The image builder chain in build order: [(method name, Call), ...]."""
+    node, steps = _assign('image'), []
+    while isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        steps.append((node.func.attr, node))
+        node = node.func.value
+    return steps[::-1]
+
+
+def _server_kw(name):
+    return ast.literal_eval(_kw(_class('CloudInference').decorator_list[0], name))
+
+
+def test_five_robots_per_t4_and_the_lru_is_max_concurrency_plus_two():
+    """V1-2 (owner): the real engine costs 26-28 ms per chunk under load, 6 sessions put the GPU thread at
+    ~97 %; 5 per T4. D27: the count-based LRU holds max_concurrency + 2 models."""
+    assert (_server_kw('max_concurrency'), _server_kw('target_concurrency')) == (5, 4)
+    assert S.LRU_MAX_MODELS == _server_kw('max_concurrency') + 2 == 7
+    assert ast.literal_eval(_assign('VARIANTS'))['prod']['max_containers'] == 20
+    assert 'max_models=server_core.LRU_MAX_MODELS' in ast.unparse(
+        next(n for n in _class('CloudInference').body if isinstance(n, ast.FunctionDef) and n.name == 'serve'))
+
+
+def test_the_prod_variant_can_never_serve_a_static_backend():
+    """Every use of StaticSessionBackend sits behind ``VARIANT == "dev"`` (the backend's from_env refuses
+    any other baked variant too, test_session_backend.py)."""
+    uses = [n for n in ast.walk(TREE) if isinstance(n, ast.Attribute) and n.attr == 'StaticSessionBackend']
+    assert len(uses) == 1
+    guarded = False
+    for node in ast.walk(TREE):
+        if isinstance(node, (ast.IfExp, ast.If)) and ast.unparse(node.test).replace("'", '"') == 'VARIANT == "dev"':
+            body = node.body if isinstance(node, ast.IfExp) else ast.Module(body=node.body, type_ignores=[])
+            guarded = guarded or any(n is uses[0] for n in ast.walk(body))
+    assert guarded
+    assert 'DEV_' not in ''.join(ast.literal_eval(_assign('VARIANTS'))['prod']['required'])
+
+
+def test_the_warm_up_runs_after_the_snapshot_restore_never_inside_it():
+    """V1-3: the warm-up chunk needs CUDA, so it may never run in ``@modal.enter(snap=True)``: that hook only
+    imports. It runs per model LOAD inside server_core (build_app's default), reached from serve()."""
+    methods = {n.name: n for n in _class('CloudInference').body if isinstance(n, ast.FunctionDef)}
+    assert all(isinstance(n, (ast.Import, ast.ImportFrom)) for n in methods['load_libraries'].body)
+    build = next(n for n in ast.walk(methods['serve']) if isinstance(n, ast.Call)
+                 and ast.unparse(n.func) == 'server_core.build_app')
+    assert 'warm_up' not in {k.arg for k in build.keywords}             # the default: warm up every load
+    import inspect
+    assert inspect.signature(S.build_app).parameters['warm_up'].default is True
+
+
+def test_the_torch_swap_leaves_no_pin_broken():
+    """V1-10: the --force-reinstall swap re-resolves torch's own dependencies from the cu126 index; the
+    deploy log showed numpy 2.5.2 (lerobot 0.5.1 needs <2.3.0) and fsspec 2026.7.0 (datasets 4.8.5 needs
+    <=2026.2.0). The swap stays (it must replace torch 2.10's cu128 nvidia-* set and triton 3.6.0 with
+    torch 2.7.0's cu126 set, which --no-deps would keep); the very next step puts both back from PyPI."""
+    steps = _image_steps()
+    swap = next(i for i, (name, call) in enumerate(steps) if name == 'pip_install'
+                and any(isinstance(a, ast.Constant) and a.value == 'torch==2.7.0' for a in call.args))
+    first = steps[swap - 1][1]
+    assert steps[swap - 1][0] == 'pip_install'
+    assert 'datasets==4.8.5' in [a.value for a in first.args if isinstance(a, ast.Constant)]   # fsspec's cap holder
+    assert ast.literal_eval(_kw(steps[swap][1], 'extra_options')) == '--force-reinstall'
+    name, repin = steps[swap + 1]
+    assert name == 'pip_install' and not repin.keywords                 # PyPI, no index_url, no force
+    assert [ast.literal_eval(a) for a in repin.args] == ['numpy>=2.0.0,<2.3.0', 'fsspec==2026.2.0']
+    for _, call in steps:
+        for k in call.keywords:
+            if k.arg == 'extra_options':
+                assert '--no-deps' not in ast.literal_eval(k.value)

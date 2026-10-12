@@ -35,7 +35,15 @@ const PIN = {
 };
 
 // Blockly delivers events via requestAnimationFrame(() => setTimeout(fireNow, 0)).
-const flush = () => new Promise((resolve) => { setTimeout(resolve, 40); });
+// The same chain registered after it runs after fireNow, however loaded the
+// machine is (a fixed 40 ms wait flaked under the full suite); twice, so an
+// event fired while the first batch is delivered is delivered too.
+async function flush() {
+  for (let i = 0; i < 2; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => { requestAnimationFrame(() => { setTimeout(resolve, 0); }); });
+  }
+}
 
 const storeResolver = (ws, name) => (getDestinationStore(ws).getByName(name.trim()) || {}).kind || null;
 const kindOf = (block) => block.getFieldValue('KIND');
@@ -151,6 +159,28 @@ describe('the destination reference names its kind (R0-6)', () => {
     ws.undo(false);
     await flush();
     expect(kindOf(ws.getBlockById(id))).toBe(DE.DESTINATION_REF_POSE);
+  });
+
+  // Verification round 1, F5a: the store-change relabel runs inside Blockly's
+  // event delivery, where a change event WOULD be recorded and counted.
+  it('a store change re-labels without a KIND change event and without an undo entry', async () => {
+    setDestinationKindResolver(storeResolver);
+    inject();
+    const z = Blockly.serialization.blocks.append({ type: REF, fields: { NAME: 'Hoch' } }, ws);
+    await flush();
+    const seen = [];
+    ws.addChangeListener((e) => seen.push(e));
+    ws.clearUndo();
+    getDestinationStore(ws).add({
+      name: 'Hoch', kind: 'pose', x: 0, y: 0, z: 0.2, source: 'capture',
+    });
+    await flush();
+    expect(kindOf(z)).toBe(DE.DESTINATION_REF_POSE);
+    const kindChange = (e) => e.type === Blockly.Events.BLOCK_CHANGE && e.name === 'KIND';
+    expect(seen.filter(kindChange)).toEqual([]);
+    expect(ws.getUndoStack().filter(kindChange)).toEqual([]);
+    // The store's own change is the one undo step.
+    expect(ws.getUndoStack().map((e) => e.type)).toEqual([DESTINATIONS_CHANGE_EVENT_TYPE]);
   });
 
   it('the label fires no event and makes no undo entry; the saved JSON keeps only NAME', async () => {

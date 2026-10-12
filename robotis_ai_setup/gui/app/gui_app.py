@@ -1412,7 +1412,17 @@ class EduBoticsApp:
         browser fallback has superseded it (``begin_session``). All of the
         mechanism, the outcomes and the one German line are in
         ``docker_manager.clear_robot_hf_token_after_window_close``. Never raises.
+
+        A Cloud-Inferenz run of that window is stopped FIRST, in its own ``try``
+        (one attempt, ``docker_manager.stop_cloud_inference_after_window_close``):
+        the token clear may sleep for minutes between its retries, and the arm
+        must not keep moving on the cloud's plans meanwhile (spec D17).
         """
+        try:
+            docker_manager.stop_cloud_inference_after_window_close(
+                generation, webview_window.is_current_generation, log=self._log)
+        except Exception:  # noqa: BLE001 — a watcher-thread hook must not raise
+            pass
         try:
             docker_manager.clear_robot_hf_token_after_window_close(
                 generation, webview_window.is_current_generation, log=self._log)

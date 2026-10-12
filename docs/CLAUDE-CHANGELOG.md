@@ -6,6 +6,84 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-11 / 12 — Cloud-Inferenz: a trained ACT model on a Modal T4 while the arm stays at home
+
+**Why.** Until now the Inferenz page worked only against the shared classroom Jetson: the student's own PC and the
+Orange Pi carry CPU torch (`load_policy()` refuses without CUDA), and one ACT chunk on 4 CPU cores of the shipped
+arm64 image costs 337–387 ms, so there was no local path. The owner asked for a second target, „In der Cloud": the
+robot stays at the student's PC or Pi, the policy runs on a Modal GPU, observations go up and action chunks come
+back, reliable on ordinary school internet, safe on an untrusted wire, cheap, German UI
+(`docs/plans/2026-10-11-cloud-inferenz/`, gitignored).
+
+**Step 0, measured before any code (2026-10-11, Essen, home line).** Unpinned Modal containers scattered over four
+continents, so production pins `region` AND `routing_region` together (EU: TCP connect 32–43 ms vs 107–135 ms to
+the default US ingress). Real 640×480 q80 frames (a pair ≈ 43 KB), 10 min at 2 Hz on an EU L4: HTTPS on an
+`App.server` p50/p95/p99 101/162/217 ms, WebSocket 109/171/207 ms, both far under the p95 350 / p99 700 ms gate,
+which is why the owner later took HTTPS only (O7'). A fp32 ACT chunk: T4 22.8 ms p50, L4 16.2, A10 11.6. A memory
+snapshot of the imports brought a typical EU T4 cold start to ≈ 4 s, with 34–58 s outliers. Locally, ACT's
+`select_action` keeps `predict_action_chunk[:, :15]` and postprocesses per step, so one whole-chunk postprocess is
+bit-exact with 15 local `predict` calls (now `test_chunk_engine_parity.py`).
+
+**The owner's decisions that shape it.** ≤ 60 simultaneous sessions, ≤ 20 T4 containers (A-Q1); students only
+(A-Q4); „In der Cloud" first whenever the robot advertises `cloud_inference` (A-Q5); migration 048, since 037 and
+047 are reserved (A-Q7); a hidden window or a reload ends the run (A-Q2, A-Q3); a live leader refuses the start and
+ends the run, with the Leader-Schalter on the cloud panel (Q-A); Rule §2 unchanged, inference runs raw as locally
+(Q-E); keep D8 (Q-D: after a hold only a fresh picture may end it). Q-N1, „the most secure and reliable method",
+replaced a shared Modal proxy key with Modal SESSIONED servers, proven on a throwaway CPU app: no token or a junk
+token → 401 and no container; `sessions.start()` mints a per-session edge token; every request of a session lands
+on one container; Modal's proxy overwrites a forged `x-modal-server-session-id`; `sessions.terminate(token)` kills
+the token at once. O7': HTTPS only, which removed the WebSocket route, the ping loop, the keepalive, the blocked-
+transport probe and the transport switch everywhere. The owner's stop rule ended the spec rounds: after one more
+targeted check, only a BLOCKER, or a MAJOR in a normal student situation, reopened the spec.
+
+**What.** Five places, one contract (`tests/test_cloud_inference_lockstep.py`): the robot's
+`physical_ai_server/inference/cloud_*` + `chunk_engine.py` and `StartCloudInference.srv`; the Modal app
+`robotis_ai_setup/modal_inference/` (one file, prod/dev variant and snapshot flag baked at deploy, a Modal-free
+`server_core.py` under it); the cloud API's `/inference/*` with a reserve-then-arm session lifecycle, a session
+sweep and ONE terminate loop; migration 048 (`inference_sessions`, service-role only, four anon RPCs for the
+container keyed by the connect token's hash AND the Modal-stamped session id, the edge token stored only
+encrypted under an HKDF sub-key of `EDUBOTICS_HF_TOKEN_KEY`); the Inferenz page's cloud target; and the Windows
+GUI's window-close stop, which runs BEFORE the token clear because that may sleep for 8.5 minutes. Two local-
+inference bugs the cloud path relies on were fixed on the way (D19): a second START left the first run's timer
+registered and firing, and a FINISH with silent cameras never tore down. The cloud API's Modal pin moved to
+`modal>=1.6,<2` (`modal.Server` does not exist in 1.4); the training dispatch keeps its calls.
+
+**How it was built and checked.** Three implementers on disjoint files from `a135bdde` (B: the shared core, the
+Modal app and CI; C: the robot; A: the control plane and the page), merged B → C → A, then two fresh verifiers.
+V2 (regression and delivery) rebuilt the Orange-Pi images (the new `[CLOUD]` gate; the image package byte-identical
+to HEAD; the two LeRobot-only cloud tests 10 passed offline) and ran the real node against the real server core
+on CPU in 24 cases: the leader refusal and end, FINISH/STOP, `netem` delay and loss, a dropping firewall, a proxy
+302 and a frameless 401, the GUI's stop script verbatim, a node killed mid-run, and local inference unchanged
+against 2.26.0. V1 (adversarial, security, real GPU) deployed the dev app on EU T4s with Modal 1.6.1 and settled
+the facts the spec had left to a live run: `Authorization: Bearer <connect token>` reaches the container (D37), the
+edge token's `Modal-Authorization` is stripped by Modal's proxy, a session id is `sd-` + a 26-character ULID, an
+edge token a ≈ 740-character RS256 JWT, and the dev URL is exactly the predicted
+`<workspace>--<app>-<class>.eu-west.modal.direct`. Its other numbers: the real engine 26–28 ms per chunk under load
+and ≈ 45 ms for a lone robot (the T4 idles its clocks); 6 sessions on one container kept every gate but ran the
+GPU thread at ≈ 97 %; a memory snapshot works on a GPU server (cold starts typically 3–6 s, 13–22 s without);
+36 minutes on ONE session, 12 908 requests, all 200; 15 robots for 10 minutes on 5 containers, 0 holds; GPU vs
+CPU max |Δ| 2.4·10⁻⁶; an 8192² SOF-patched JPEG and a 17-scan progressive JPEG refused before decode, container
+memory flat; 048's assertions 58 PASS; no token in any API or Modal log. Fuzzing (91 599 codec inputs, 3 000
+mutated frames over HTTP), 1 500 random schedule runs (0 D8 violations) and 36 mutants of the security and safety
+lines (all killed) found nothing. Cost of the real-GPU round ≈ $3.
+
+**The fix round (owner-answers-6, three fixers).** V1-1, the one MAJOR: 2 of 20 cold `sessions.start` outlived
+the API's 120 s bound (135 s, 170 s; Modal was waiting for EU T4 capacity). Raising the bound to 300 s was
+impossible (Railway closes a request after 300 s with no data flowing, and the reservation window counts from the
+row's creation), so the owner chose: the bound stays 120 s, the API marks that 503 with
+`"code": "gpu_not_started"`, and the page retries by itself at most twice, with the model list locked meanwhile
+(„Cloud-GPU wird gestartet … bitte kurz warten.") and „kann einige Minuten dauern" in the waiting line. V1-2: 5
+sessions per T4 (`max_concurrency=5`, `LRU_MAX_MODELS` 7). V1-3: every model load is followed by one zero-input
+chunk on the GPU thread, so CUDA's ~2 s first use no longer lands on a robot's first observation (which was
+dropped stale). V1-4: a deploy does not move new sessions off a warm container of the previous build, so every
+inference deploy is followed by stopping the older containers and checking `server_sha` (CLAUDE.md Rule §6).
+V1-5: the dev variant needs no `HF_TOKEN`, runs one session per derived token and allows 3 600 s. V1-7: the GUI's
+unreachable sentence promises „nach etwa einer Minute", not 45 s. V1-8: a malformed reserve body is answered in
+German. V1-9: the inference server's URL is resolved once at boot. V1-10: numpy and `fsspec` are restored after
+the cu126 torch swap. V2-3: a client that disconnects mid-body ends its request quietly. V2-4: every frozen
+camera is named. The fix round's Modal-side changes are proven by the next deploy, not yet on a GPU
+(`docs/KNOWN-ISSUES.md`).
+
 ### Unreleased, 2026-10-07 — the amd64 server image ships no torchcodec (release 2.27.0 blocker)
 
 **Why.** After PR #35 merged, `docker-publish.yml::smoke-test (amd64)` failed in the new Daten 2.0 edit-engine

@@ -934,7 +934,9 @@ jobs:
         # truncated output video never raising, another column order, the
         # data-file roll-over at three settings, the identity through the
         # engine, integrity with the real loader, the default templates, the
-        # dataset card. The checkout's test directory is mounted read-only;
+        # dataset card. Cloud-Inferenz (spec §8.1) adds the chunk engine's
+        # bit-exact parity with local inference (D26) and the cloud JPEG decode's
+        # parity with cv_bridge's rgb8. The checkout's test directory is mounted read-only;
         # the tests import the SHIPPED physical_ai_server package (the sourced
         # install), never the checkout's. pytest ships in the image. A skip
         # fails the step: in this image nothing may skip for want of LeRobot.
@@ -949,7 +951,7 @@ jobs:
           docker run --rm --entrypoint bash \
             -v "$GITHUB_WORKSPACE/physical_ai_tools/physical_ai_server/test:/tmp/server_test:ro" \
             "$SERVER_IMAGE" \
-            -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && set -o pipefail && cd /tmp/server_test && HF_HUB_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q -rs test_v3_surgery_compat_verify.py test_v3_surgery_layout.py test_dataset_card.py | tee /tmp/pytest.out && if grep -Eq "[0-9]+ skipped" /tmp/pytest.out; then echo "::error::a LeRobot-only engine test skipped inside the server image"; exit 1; fi'
+            -c 'source /opt/ros/jazzy/setup.bash && source /root/ros2_ws/install/setup.bash && set -o pipefail && cd /tmp/server_test && HF_HUB_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q -rs test_v3_surgery_compat_verify.py test_v3_surgery_layout.py test_dataset_card.py test_chunk_engine_parity.py test_cloud_decode_parity.py | tee /tmp/pytest.out && if grep -Eq "[0-9]+ skipped" /tmp/pytest.out; then echo "::error::a LeRobot-only engine test skipped inside the server image"; exit 1; fi'
       - name: Assert amd64 server image is CUDA-slimmed (real size ceiling)
         if: matrix.platform == 'amd64'
         # The CUDA slim (build-images.sh flatten of the amd64 image) must keep

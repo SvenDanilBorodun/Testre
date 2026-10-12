@@ -60,8 +60,12 @@ jobs:
           # dataset_sync, hub_sync (huggingface_hub's own create_commit on the fake
           # hub), v3_surgery's cutter/layout, daten.library, the sidecar and the
           # download worker. LeRobot stays image-only (.github/scripts/daten_smoke.py).
+          # fastapi + httpx + uvicorn + aiohttp: Cloud-Inferenz (spec §8.1) — the Modal app's
+          # server_core under TestClient (httpx) and uvicorn, the robot's HTTPS client (aiohttp).
+          # The cloud API suite stubs fastapi itself and is unchanged by their presence.
           python -m pip install pyyaml pytest numpy opencv-contrib-python-headless cryptography==49.0.0 \
-            pyarrow==25.0.0 av==15.1.0 huggingface_hub==1.23.0
+            pyarrow==25.0.0 av==15.1.0 huggingface_hub==1.23.0 \
+            fastapi==0.115.12 httpx==0.28.1 aiohttp==3.14.1 "uvicorn[standard]==0.34.2"
       - name: Syntax-check Python modules
         # ZERO-FILE FLOOR, the repo's standing rule for scan-based guards (the
         # four ps_* guards and the three lockstep tests all carry one).
@@ -78,6 +82,7 @@ jobs:
             robotis_ai_setup/pi_agent
             robotis_ai_setup/cloud_training_api
             robotis_ai_setup/modal_training
+            robotis_ai_setup/modal_inference
             physical_ai_tools/physical_ai_server/physical_ai_server
             robotis_ai_setup/docker/physical_ai_server/patches
           )
@@ -121,6 +126,16 @@ jobs:
           # real key. The tests set their own keys where they need one.
           export EDUBOTICS_HF_TOKEN_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
           python -m unittest discover -s app/tests -v
+
+      - name: Cloud-Inferenz Modal app unit tests (server core, session backend, app shape)
+        # Modal-free: server_core under FastAPI's TestClient with a fake engine, the
+        # session backend against fake PostgREST, the app file read as an AST. No
+        # modal, torch or LeRobot here (the engine parity runs in the server image,
+        # docker-publish.yml::smoke-test). pytest, not unittest: the tests share
+        # conftest.py fixtures.
+        run: |
+          cd robotis_ai_setup/modal_inference
+          python -m pytest tests -q
 
       - name: Jetson agent unit tests (migration 019 client side)
         # Cross-platform — every subprocess/socket/Cloud-API call is
@@ -949,9 +964,12 @@ jobs:
         # Pin the major version we deploy with. A future SDK that
         # silently renames a kwarg back is exactly what we want this
         # job to catch.
+        # >= 1.6: the Cloud-Inferenz app is a sessioned @app.server; modal.Server and
+        # its sessions do not exist in 1.4 (spec D36). The training app keeps its
+        # signatures under 1.6.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install 'modal>=1.4,<2'
+          python -m pip install 'modal>=1.6,<2'
       - name: Import every Modal app
         # Import each *.py under modal_training/ that defines a
         # modal.App. Failures during Image / function decoration
@@ -970,6 +988,21 @@ jobs:
           for f in modal_app.py; do
             echo "== importing $f =="
             python -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('m', '$f'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('  OK: import succeeded')"
+          done
+      - name: Import the Cloud-Inferenz app in all four variants
+        # ONE file, two baked variants x the snapshot flag (spec §3.2, D21). Each
+        # import runs Modal's decoration-time validation of the sessioned
+        # @app.server (a @modal.method, a custom __init__ or @modal.concurrent on
+        # a server raises InvalidError right here). server_core/session_backend
+        # are mounted lazily (add_local_file), so their deps are not needed.
+        working-directory: robotis_ai_setup/modal_inference
+        run: |
+          set -e
+          for variant in prod dev; do
+            for snapshot in 1 0; do
+              echo "== inference_app.py VARIANT=$variant SNAPSHOT=$snapshot =="
+              EDUBOTICS_INFERENCE_VARIANT=$variant EDUBOTICS_INFERENCE_SNAPSHOT=$snapshot python -c "import importlib.util, modal; spec = importlib.util.spec_from_file_location('m', 'inference_app.py'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); assert isinstance(mod.CloudInference, modal.Server), 'CloudInference is not a modal.Server'; print('  OK:', mod.app.name, 'snapshot', mod.SNAPSHOT)"
+            done
           done
       - name: Smoke-import cloud_training_api routes that touch Modal SDK
         # Audit H28: routes/training.py calls `modal.Function.from_name(...)`

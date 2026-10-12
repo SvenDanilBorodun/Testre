@@ -410,6 +410,21 @@ def test_header_names_and_token_shapes():
     assert P.NAME_RE.fullmatch('gripper') and not P.NAME_RE.fullmatch('a' * 33)
 
 
+def test_caps_are_the_spec_values():
+    """Literal pins of every cap (spec §2.1; test_constant_pins.py demands a literal for each one a test uses)."""
+    assert P.MAX_FRAME_BYTES == 1_572_864
+    assert P.MAX_HEADER_BYTES == 4096
+    assert P.MAX_JPEG_BYTES == 524_288
+    assert P.MAX_CAMERAS == 4
+    assert P.MAX_STATE_DIM == 32
+    assert P.MAX_ACTION_DIM == 32
+    assert P.MAX_CHUNK_N == 100
+    assert P.MAX_SEQ == 9_007_199_254_740_992
+    assert P.MAX_OBS_E == 2_147_483_647
+    assert P.MAX_TASK_CHARS == 512
+    assert P.MAX_JPEG_SCANS == 16
+
+
 def test_cloud_base_url_is_the_server_host():
     assert P.CLOUD_BASE_URL == 'https://svendanilborodun--edubotics-inference-cloudinference.eu-west.modal.direct'
     assert P.PROTOCOL_VERSION == 1 and P.SERVER_ACCEPTS == (1,)

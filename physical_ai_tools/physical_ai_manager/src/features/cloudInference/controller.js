@@ -29,8 +29,11 @@
 // A COLD GPU MAY NOT START IN ONE GO (owner, round 2): the API bounds one start at
 // 120 s and Railway closes a request after 300 s without data, so the page asks
 // again by itself — on the API's `code: 'gpu_not_started'` only, never on German
-// text, at most RESERVE_ATTEMPTS in total, RESERVE_RETRY_DELAY_MS apart. Every
-// other failure is shown at once. A failed attempt leaves no live row and costs no
+// text, at most RESERVE_ATTEMPTS in total, RESERVE_RETRY_DELAY_MS apart. The API
+// sends that code only for a start that ran past its bound, and a retry JOINS the
+// student's start still running on the API (round 3), so retrying opens no second
+// GPU start. Every other failure (a permanent start error included) is shown at
+// once. A failed attempt leaves no live row and costs no
 // Cloud-Zeit (the API ends it `edge_failed`; only connected time counts). While a
 // reserve or its retry runs, the phase stays 'reserving', the list is locked and
 // no click reserves again; a release, the panel unmounting or a sign-out bumps

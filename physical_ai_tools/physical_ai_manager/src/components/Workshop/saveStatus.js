@@ -12,7 +12,9 @@
 // `saveStatus` is the page's `{ savedAt, dirty }`: `savedAt` the time of the
 // last successful save (or the opened row's `updated_at`), `dirty` whether the
 // document or its simulator scene differs from what that save sent. The local
-// crash-recovery autosave is never shown here.
+// crash-recovery autosave is never shown here. `loading` (the page is still
+// fetching the program the student picked) wins over both: until that row has
+// opened, nothing about the previous program or a save time is true.
 
 export const SAVE_STATUS_DE = Object.freeze({
   SAVED: 'Gespeichert: %1',
@@ -22,6 +24,7 @@ export const SAVE_STATUS_DE = Object.freeze({
   DATE: 'am %1',
   DIRTY: 'Nicht gespeichert',
   NEVER: 'Noch nicht gespeichert',
+  LOADING: 'Wird geladen …',
 });
 
 const MINUTE_MS = 60 * 1000;
@@ -35,6 +38,7 @@ function fill(template, value) {
 /** The German status line for `saveStatus` at the time `now` (ms). */
 export function saveStatusLabel(saveStatus, now) {
   const status = saveStatus || {};
+  if (status.loading) return SAVE_STATUS_DE.LOADING;
   if (status.dirty) return SAVE_STATUS_DE.DIRTY;
   const savedAt = Number(status.savedAt);
   if (!status.savedAt || !Number.isFinite(savedAt)) return SAVE_STATUS_DE.NEVER;

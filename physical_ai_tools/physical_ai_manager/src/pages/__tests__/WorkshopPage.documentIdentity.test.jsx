@@ -662,6 +662,27 @@ describe.each(NOTATIONS)('R0-2 — the save status of %s', (_l, a, b, testId) =>
     expect(statusText()).toBe('Nicht gespeichert');
   });
 
+  // Verification round 1, F5e: while the program the student picked is still
+  // being fetched, the toolbar must not keep claiming the previous program's
+  // state (or a save time it does not know yet).
+  test('while a picked program loads, the status claims nothing until it has opened', async () => {
+    pending[a] = true;
+    mockState = baseState({ selectedWorkflowId: a });
+    const { rerender } = render(<WorkshopPage isActive />);
+    expect(statusText()).toBe('Wird geladen …');
+    await act(async () => { pending[a].resolve(ROWS[a]); });
+    await screen.findByTestId(testId);
+    edit(testId, 'A-1');
+    expect(statusText()).toBe('Nicht gespeichert');
+    pending[b] = true;
+    mockState = baseState({ selectedWorkflowId: b });
+    rerender(<WorkshopPage isActive />);
+    await waitFor(() => expect(statusText()).toBe('Wird geladen …'));
+    await act(async () => { pending[b].resolve(ROWS[b]); });
+    await waitFor(() => expect(screen.getByTestId(testId).textContent).toContain('B'));
+    expect(statusText()).toBe('Noch nicht gespeichert');
+  });
+
   test('opening another program resets the status', async () => {
     const { rerender } = await openFirst(a, testId);
     edit(testId, 'A-1');

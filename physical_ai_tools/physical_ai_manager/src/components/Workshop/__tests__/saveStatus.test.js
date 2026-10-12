@@ -14,6 +14,15 @@ const NOW = Date.UTC(2026, 9, 11, 12, 0, 0);
 const MIN = 60 * 1000;
 
 describe('saveStatusLabel (R0-2)', () => {
+  // Verification round 1, F5e: a picked program still loading has no state
+  // the toolbar could truthfully name.
+  test('while the open program loads: a neutral „Wird geladen …", whatever else is set', () => {
+    expect(SAVE_STATUS_DE.LOADING).toBe('Wird geladen …');
+    expect(saveStatusLabel({ savedAt: NOW, dirty: true, loading: true }, NOW)).toBe('Wird geladen …');
+    expect(saveStatusLabel({ savedAt: NOW, dirty: false, loading: true }, NOW)).toBe('Wird geladen …');
+    expect(saveStatusLabel({ savedAt: null, dirty: false, loading: false }, NOW)).toBe('Noch nicht gespeichert');
+  });
+
   test('unsaved changes win over every save time', () => {
     expect(saveStatusLabel({ savedAt: NOW, dirty: true }, NOW)).toBe('Nicht gespeichert');
     expect(saveStatusLabel({ savedAt: null, dirty: true }, NOW)).toBe('Nicht gespeichert');
@@ -55,6 +64,7 @@ describe('saveStatusLabel (R0-2)', () => {
       DATE: 'am %1',
       DIRTY: 'Nicht gespeichert',
       NEVER: 'Noch nicht gespeichert',
+      LOADING: 'Wird geladen …',
     });
   });
 });

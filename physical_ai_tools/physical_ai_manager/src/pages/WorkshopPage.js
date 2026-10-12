@@ -203,6 +203,10 @@ const SIM_DEFAULT_CATALOG = DEFAULT_OBJECT_CATALOG;
 // hydrate/save round-trip the whole sim_scene unchanged, so persisted zones ride
 // along in workflows.sim_scene.zones.
 const EMPTY_SIM_SCENE = { version: 1, objects: [], zones: [] };
+// The toolbar's save status while a picked program is still being fetched
+// (`hydrating`): the previous program's state, or a save time, would be a
+// false claim about the program on its way (saveStatus.js).
+const LOADING_SAVE_STATUS = Object.freeze({ savedAt: null, dirty: false, loading: true });
 
 function WorkshopPage({ isActive }) {
   const dispatch = useDispatch();
@@ -2171,7 +2175,7 @@ function WorkshopPage({ isActive }) {
                   workspace={workspace}
                   codeMode={isCodeWorkflow}
                   codeCommandsRef={codeCommandsRef}
-                  saveStatus={saveMark}
+                  saveStatus={hydrating ? LOADING_SAVE_STATUS : saveMark}
                   onSave={handleSave}
                   saving={saving}
                   leading={

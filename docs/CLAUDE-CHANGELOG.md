@@ -132,6 +132,13 @@ and the table takes the rest (numbers under „Measured" above). *F4:* `pin`'s z
 example pinned 5 cm up, but `destination_pin` stamps `plane_tracked` and `motion.resolve_destination_z` answers
 the table height at (x, y) wherever one is known (every calibrated rig, always the simulator); the z text now says
 so and the example pins at 0.0 (`robot_api_docs.json` regenerated; stubs and `robot_api.json` unchanged).
+*F5 (robustness):* (a) a store-change relabel is pinned to fire no KIND change event and no undo entry, and
+`destinationRefKind.test.js` waits for Blockly's own rAF → setTimeout chain instead of a fixed 40 ms (it flaked
+under the full suite); (b) a click on a pane divider commits nothing (`ResizeHandle::endDrag` used to persist a
+squeezed width); (c) a Methoden line is exactly one statement (`codeInsert::callLines` let
+`robot.home(); import os` through); (d) the code file list and the Methoden column share one budget, so the
+editor keeps 320 px (`CodeWorkspace::paneMax`, `ResizeHandle`'s `bounds(rect, handle)` and `boundsKey`); (e) the
+save status reads „Wird geladen …" while a picked program is fetched instead of the previous program's state.
 
 ### Unreleased, 2026-10-07 — the amd64 server image ships no torchcodec (release 2.27.0 blocker)
 

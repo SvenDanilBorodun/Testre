@@ -620,6 +620,17 @@ def test_offer_and_close_before_start_are_harmless():
     assert c.snapshot().phase == 'connecting'
 
 
+def test_the_protocol_caps_the_robot_relies_on():
+    # Spec §2.1, frozen contract C1, as literals (test_constant_pins: a referenced cap is pinned).
+    assert cp.MAX_FRAME_BYTES == 1_572_864 and cp.MAX_HEADER_BYTES == 4_096
+    assert cp.MAX_JPEG_BYTES == 524_288 and cp.MAX_CAMERAS == 4
+    assert cp.MAX_STATE_DIM == 32 and cp.MAX_ACTION_DIM == 32 and cp.MAX_CHUNK_N == 100
+    assert cp.MAX_SEQ == 9_007_199_254_740_992                  # 2 ** 53
+    assert cp.MAX_OBS_E == 2_147_483_647                       # 2 ** 31 - 1
+    assert cp.MAX_TASK_CHARS == 512
+    assert cp.MAX_JPEG_SCANS == 16 and cp.PROTOCOL_VERSION == 1
+
+
 def test_constants():
     C = cc.CloudClient
     assert (C.CONNECT_TIMEOUT_S, C.HELLO_HTTP_TIMEOUT_S, C.INFER_HTTP_TIMEOUT_S, C.BYE_TIMEOUT_S) == (10.0, 90.0, 8.0, 1.0)

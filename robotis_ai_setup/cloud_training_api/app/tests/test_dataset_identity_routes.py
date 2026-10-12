@@ -99,6 +99,11 @@ def _ensure_stubs() -> None:
         m.Path = lambda *a, **k: None
         m.Body = lambda *a, **k: None
         m.Header = lambda *a, **k: None
+
+        class _Request:  # routes/inference.py reads the reserve body by hand (V1-8)
+            pass
+
+        m.Request = _Request
         sys.modules["fastapi"] = m
 
         r = types.ModuleType("fastapi.responses")

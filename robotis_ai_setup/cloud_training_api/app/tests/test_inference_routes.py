@@ -76,6 +76,25 @@ def _headers(resp):
     return {k.lower(): v for k, v in dict(resp.headers or {}).items()}
 
 
+class _FakeRequest:
+    """Just enough of a Starlette Request for the reserve handler: `await body()`."""
+
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    async def body(self) -> bytes:
+        return self._raw
+
+
+def _body_request(training_id=7, raw=None) -> _FakeRequest:
+    if raw is None:
+        raw = json.dumps({"training_id": training_id}).encode("utf-8")
+    return _FakeRequest(raw)
+
+
+MALFORMED_DE = "Die Anfrage ist ungültig. Bitte lade die Seite neu und versuche es noch einmal."
+
+
 class _PgError(Exception):
     def __init__(self, code, msg="x"):
         super().__init__({"code": code, "message": msg})
@@ -255,10 +274,9 @@ class _Case(unittest.TestCase):
 
         return asyncio.run(wrapper())
 
-    def reserve(self, profile=STUDENT, training_id=7):
-        # A plain body: real FastAPI validates `ReserveBody` before the handler runs;
-        # the handler re-checks by hand, which is what this drives.
-        return self.run_async(route.reserve_session(SimpleNamespace(training_id=training_id), profile=profile))
+    def reserve(self, profile=STUDENT, training_id=7, raw=None):
+        # The handler reads the body by hand (V1-8): FastAPI never validates it.
+        return self.run_async(route.reserve_session(_body_request(training_id, raw), profile=profile))
 
     def arm(self, sid, profile=STUDENT):
         return self.run_async(route.arm_session(sid, profile=profile))
@@ -416,7 +434,7 @@ class TestReserve(_Case):
         self.server = _Server(start=slow)
 
         async def scenario():
-            resp = await route.reserve_session(SimpleNamespace(training_id=7), profile=STUDENT)
+            resp = await route.reserve_session(_body_request(7), profile=STUDENT)
             # the late success arrives after the answer, on the same (long-lived) loop
             await asyncio.sleep(0.5)
             for _ in range(50):
@@ -493,11 +511,139 @@ class TestReserve(_Case):
         (row,) = self.store.rows.values()
         self.assertEqual(row["end_reason"], "edge_failed")
 
-    def test_a_bad_training_id_is_404(self) -> None:
-        for bad in (0, -3, "7", None, True):
-            body = self.assertAnswer(self.reserve(training_id=bad), 404)
-            self.assertEqual(body["detail"], "Modell nicht gefunden.")
+    def test_a_malformed_body_is_a_german_422_that_echoes_nothing(self) -> None:
+        """V1-8: never FastAPI's English 422 with the request's `input`."""
+        bad_ids = (0, -3, "7", None, True, False, 7.0, 7.5, [7], {"x": 7}, 2 ** 31, "x" * 300)
+        raws = [b"", b"{}", b"[]", b'"x"', b"null", b"7", b"{", b'{"training_id": 7', b"\xff\xfe\x00",
+                b"[" * 2000 + b"]" * 2000, b"training_id=7",
+                b'{"trainingId": 7}', b"[" * 5000 + b"]" * 5000, b'{"training_id": 1' + b"0" * 5000 + b"}",
+                b'{"training_id": 7, "pad": "' + b"x" * 5000 + b'"}']
+        cases = [dict(training_id=t) for t in bad_ids] + [dict(raw=r) for r in raws]
+        for case in cases:
+            with self.subTest(case=repr(case)[:80]):
+                body = self.assertAnswer(self.reserve(**case), 422)
+                self.assertEqual(body, {"detail": MALFORMED_DE})
         self.assertEqual(self.store.calls, [])
+        self.assertEqual(self.events, [])
+
+    def test_a_well_formed_body_with_extra_keys_is_accepted(self) -> None:
+        raw = json.dumps({"training_id": 7, "extra": True}).encode()
+        self.assertAnswer(self.reserve(raw=raw), 200)
+        self.assertAnswer(self.reserve(training_id=2 ** 31 - 1), 200)
+
+    def test_non_students_are_refused_before_the_body_is_read(self) -> None:
+        body = self.assertAnswer(self.reserve(TEACHER, raw=b"{"), 403)
+        self.assertEqual(body["detail"], "Die Cloud-Inferenz ist nur für Schülerinnen und Schüler verfügbar.")
+
+
+_REAL_FASTAPI_SCRIPT = r"""
+import json, sys, types
+
+auth = types.ModuleType("app.auth")
+
+
+def get_current_profile():
+    return {}
+
+
+auth.get_current_profile = get_current_profile
+sys.modules["app.auth"] = auth
+
+
+class _PgError(Exception):
+    code = "P0002"
+
+
+class _Store:
+    def rpc(self, name, args):
+        class _R:
+            def execute(self):
+                raise _PgError()
+        return _R()
+
+
+sc = types.ModuleType("app.services.supabase_client")
+sc.get_supabase = lambda: _Store()
+sys.modules["app.services.supabase_client"] = sc
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from app.routes import inference as route
+from app.services import inference_sessions as svc
+
+seen = []
+
+
+def visible(profile, training_id):
+    seen.append(training_id)
+    return None
+
+
+svc.visible_training = visible
+app = FastAPI()
+app.include_router(route.router)
+app.dependency_overrides[route.get_current_profile] = lambda: {
+    "id": "11111111-1111-4111-8111-111111111111", "role": "student"}
+client = TestClient(app)
+sid = "0f5c0a52-5a0c-4d4e-9d61-2b0d2c1f0a11"
+json_ct = {"content-type": "application/json"}
+cases = [
+    ("reserve {}", "/inference/sessions", {"json": {}}),
+    ("reserve 0", "/inference/sessions", {"json": {"training_id": 0}}),
+    ("reserve str", "/inference/sessions", {"json": {"training_id": "7"}}),
+    ("reserve list", "/inference/sessions", {"json": [7]}),
+    ("reserve nobody", "/inference/sessions", {}),
+    ("reserve badjson", "/inference/sessions", {"content": b"{", "headers": json_ct}),
+    ("reserve form", "/inference/sessions",
+     {"content": b"training_id=7", "headers": {"content-type": "application/x-www-form-urlencoded"}}),
+    ("reserve valid", "/inference/sessions", {"json": {"training_id": 7}}),
+]
+for tail in ("arm", "heartbeat", "end"):
+    for i, kw in enumerate(({"json": {}}, {"json": {"training_id": 0}}, {"content": b"{", "headers": json_ct})):
+        cases.append((tail + " " + str(i), "/inference/sessions/" + sid + "/" + tail, kw))
+out = {"seen": seen, "answers": []}
+for name, path, kw in cases:
+    r = client.post(path, **kw)
+    out["answers"].append({"name": name, "status": r.status_code, "text": r.text,
+                           "cc": r.headers.get("cache-control")})
+print(json.dumps(out))
+"""
+
+
+class TestRealFastApiBodies(unittest.TestCase):
+    """V1-8 through the REAL FastAPI stack (ci.yml::python-tests installs fastapi and
+    httpx). This suite stubs `fastapi` process-wide (house pattern), so the real
+    stack runs in a child process: the reserve body is judged by the handler, never
+    by FastAPI's English 422 with the request's `input`, and the bodyless POST
+    routes never answer 422 at all."""
+
+    def test_real_fastapi_answers(self) -> None:
+        import subprocess
+        import sys
+
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.path.dirname(os.path.dirname(HERE))
+        env[hc.KEY_ENV] = KEY
+        proc = subprocess.run([sys.executable, "-c", _REAL_FASTAPI_SCRIPT], capture_output=True, text=True,
+                              env=env, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        out = json.loads(proc.stdout.strip().splitlines()[-1])
+        answers = {a["name"]: a for a in out["answers"]}
+        for name, a in answers.items():
+            with self.subTest(name=name):
+                self.assertEqual(a["cc"], "no-store")
+                self.assertNotIn('"input"', a["text"])
+                if name.startswith("reserve") and name != "reserve valid":
+                    self.assertEqual(a["status"], 422, a["text"])
+                    self.assertEqual(json.loads(a["text"]), {"detail": MALFORMED_DE})
+                elif name == "reserve valid":
+                    # the handler parsed it and asked the visibility ladder (patched: not visible)
+                    self.assertEqual(a["status"], 404, a["text"])
+                    self.assertEqual(json.loads(a["text"]), {"detail": "Modell nicht gefunden."})
+                else:
+                    self.assertEqual(a["status"], 404, a["text"])
+                    self.assertEqual(json.loads(a["text"]), {"detail": "Cloud-Sitzung nicht gefunden."})
+        self.assertEqual(out["seen"], [7])
 
 
 class TestArm(_Case):

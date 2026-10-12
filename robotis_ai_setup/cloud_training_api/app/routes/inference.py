@@ -24,6 +24,10 @@ Conventions that are easy to undo by accident:
   * Every handler is `async def` and runs blocking work off the loop
     (asyncio.to_thread, or inference_edge's own pools). Every answer — refusals
     included — carries `Cache-Control: no-store` (`_no_store`).
+  * The reserve body is read BY HAND from the raw request (V1-8), never through
+    a pydantic model or `Body(...)`: FastAPI's own 422 is English, echoes the
+    request's `input` and carries no `Cache-Control`, and an invalid-JSON body
+    would reach it before any handler. The other POST routes take no body.
   * No Modal call before the reservation row exists: a refused caller never
     costs a GPU. Every attach-time end is 503, `superseded` included (G-4), so a
     409 from reserve always means the model itself was refused.
@@ -37,11 +41,11 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 
 from app.auth import get_current_profile
 from app.services import inference_edge
@@ -53,10 +57,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/inference", tags=["inference"])
 
 _NO_STORE = {"Cache-Control": "no-store"}
-
-
-class ReserveBody(BaseModel):
-    training_id: int = Field(..., ge=1)
+# The reserve body is `{"training_id": <int>}`; anything past this is not one.
+_RESERVE_BODY_MAX_BYTES = 4096
+_TRAINING_ID_MAX = 2_147_483_647  # trainings.id is a Postgres INT
 
 
 def _ok(content: dict) -> JSONResponse:
@@ -129,6 +132,33 @@ def _model_not_act() -> HTTPException:
     )
 
 
+def _malformed_request() -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail="Die Anfrage ist ungültig. Bitte lade die Seite neu und versuche es noch einmal.",
+    )
+
+
+async def _read_training_id(request) -> int:
+    """The `training_id` of a reserve body `{"training_id": <int 1..INT max>}`
+    (extra keys ignored), else the German 422. Never echoes the body."""
+    try:
+        raw = await request.body()
+    except Exception:  # noqa: BLE001 - a broken upload is a malformed request
+        raise _malformed_request() from None
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > _RESERVE_BODY_MAX_BYTES:
+        raise _malformed_request()
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        raise _malformed_request() from None
+    training_id = body.get("training_id") if isinstance(body, dict) else None
+    if (not isinstance(training_id, int) or isinstance(training_id, bool)
+            or not 1 <= training_id <= _TRAINING_ID_MAX):
+        raise _malformed_request()
+    return training_id
+
+
 def _valid_creds(creds) -> bool:
     msid = getattr(creds, "session_id", None)
     token = getattr(creds, "token", None)
@@ -150,11 +180,9 @@ async def _end_edge_failed(sb, uid: str, session_id: str) -> None:
 
 @router.post("/sessions")
 @_no_store
-async def reserve_session(body: ReserveBody, profile=Depends(get_current_profile)):
+async def reserve_session(request: Request, profile=Depends(get_current_profile)):
     uid = _require_student(profile)
-    training_id = getattr(body, "training_id", None)
-    if not isinstance(training_id, int) or isinstance(training_id, bool) or training_id < 1:
-        raise HTTPException(status_code=404, detail="Modell nicht gefunden.")
+    training_id = await _read_training_id(request)
     row = await asyncio.to_thread(svc.visible_training, profile, training_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Modell nicht gefunden.")

@@ -1028,6 +1028,9 @@ jobs:
           # call main.app at FastAPI level — just import the modules so
           # an SDK contract regression surfaces here.
           python -c "from app.routes import training; print('OK')"
+          # Cloud-Inferenz: the only other Modal-SDK importer (sessioned-server
+          # sessions.start/terminate, Server.from_name) and its routes.
+          python -c "from app.services import inference_edge; from app.routes import inference; print('OK')"
 
   teacher-web-build-validate:
     # Builds Dockerfile.web exactly the way Railway's `railway up

@@ -46,8 +46,10 @@ Conventions that are easy to undo by accident:
     another tab superseded it, the page let it go).
   * A retry never opens a second GPU start (owner, round 3): a reserve of a student
     whose earlier reservation's `sessions.start` still runs waits on THAT start
-    (`inference_edge.start_session` is keyed by the student), so each student holds
-    at most one START_POOL thread however often the page retries.
+    (`inference_edge.start_session` is keyed by the student), so the page's retries
+    add no START_POOL thread. A start keeps its thread until Modal answers, also after
+    the page gave up, and one older than START_JOIN_MAX_AGE_S is never joined, so the
+    pool is bounded by students with a start in flight, not by the global cap.
 """
 
 from __future__ import annotations
@@ -304,7 +306,10 @@ async def reserve_session(request: Request, profile=Depends(get_current_profile)
         raise _gpu_not_started() from None
     except inference_edge.StartSuperseded:
         # A newer reservation of this student joined the start and takes it. Creating
-        # it already ended this row `superseded`; the end below is a no-op then.
+        # it normally already ended this row `superseded`, and the end below is then a
+        # no-op; if two tabs' requests reach the start out of order, this row may be
+        # the newer, still live one, and it ends `edge_failed` here (both tabs see the
+        # plain 503, no session leaks; R3 NIT 2, accepted).
         logger.info("inference start taken over by a newer reservation: session=%s user=%s", session_id, uid)
         await _end_edge_failed(sb, uid, session_id)
         raise _ended_while_starting() from None

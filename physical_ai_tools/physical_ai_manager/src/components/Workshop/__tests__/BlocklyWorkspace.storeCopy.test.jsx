@@ -82,9 +82,18 @@ afterEach(() => {
   Object.defineProperty(HTMLElement.prototype, 'offsetHeight', realOffset.height);
 });
 
-// Blockly delivers events asynchronously (setTimeout 0).
+// Blockly delivers events via requestAnimationFrame(() => setTimeout(fireNow, 0)).
+// The same chain registered after it runs after fireNow, however loaded the
+// machine is (a fixed 30 ms wait lost the race to a stalled frame and missed
+// the paste's create under the full suite); twice, so an event fired while the
+// first batch is delivered is delivered too.
 async function flushEvents() {
-  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+  await act(async () => {
+    for (let i = 0; i < 2; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => { requestAnimationFrame(() => { setTimeout(r, 0); }); });
+    }
+  });
 }
 
 // WorkshopPage::handleEditorChange, reduced to the two halves that matter:

@@ -41,7 +41,7 @@ describe('previewMessageDe', () => {
   test('maps exactly the lead-in sentence', () => {
     expect(previewMessageDe(REPLAY_LEAD_IN_BELOW_TABLE_SERVER)).toBe(DE.PREVIEW_LEAD_IN_BELOW_TABLE);
     expect(DE.PREVIEW_LEAD_IN_BELOW_TABLE).toBe(
-      'Die Aufnahme beginnt unter dem Tisch des Simulators — im Simulator kann sie nicht abgespielt werden.',
+      'Die Bewegung beginnt unter dem Tisch des Simulators — im Simulator kann sie nicht abgespielt werden.',
     );
   });
 
@@ -245,7 +245,10 @@ describe('previewBlockReason — each reason when only its condition holds', () 
 });
 
 describe('simEntryBlockReason — the header toggle ladder', () => {
-  const IDLE = { simRunActive: false, simMode: false, activeTutorialId: null, teachOpen: false, jogHandGuideOn: false };
+  const IDLE = {
+    simRunActive: false, realRunActive: false, simMode: false, activeTutorialId: null, teachOpen: false,
+    jogHandGuideOn: false,
+  };
   test('entry', () => {
     expect(simEntryBlockReason(IDLE)).toBeNull();
     expect(simEntryBlockReason({ ...IDLE, activeTutorialId: 't' })).toBe('tutorial');
@@ -259,9 +262,19 @@ describe('simEntryBlockReason — the header toggle ladder', () => {
     expect(simEntryBlockReason(inSim)).toBeNull();
     expect(simEntryBlockReason({ ...inSim, simRunActive: true })).toBe('simRun');
   });
+  test('a program on the REAL robot (running, paused or starting) blocks entry, before every other rung', () => {
+    expect(simEntryBlockReason({ ...IDLE, realRunActive: true })).toBe('realRun');
+    expect(simEntryBlockReason({
+      ...IDLE, realRunActive: true, activeTutorialId: 't', teachOpen: true, jogHandGuideOn: true,
+    })).toBe('realRun');
+    // A sim run comes first; inside the simulator a real run is no reason.
+    expect(simEntryBlockReason({ ...IDLE, simRunActive: true, realRunActive: true })).toBe('simRun');
+    expect(simEntryBlockReason({ ...IDLE, simMode: true, realRunActive: true })).toBeNull();
+  });
   test('the titles moved out of WorkshopPage verbatim', () => {
     expect(SIM_ENTRY_BLOCK_TITLES_DE).toEqual({
-      simRun: 'Während ein Simulationslauf läuft, kann der Simulator nicht beendet werden — bitte zuerst stoppen.',
+      simRun: 'Während ein Programm im Simulator läuft oder angehalten ist, kann der Simulator nicht beendet werden – bitte zuerst stoppen.',
+      realRun: 'Solange ein Programm am echten Roboter läuft oder angehalten ist, kann der Simulator nicht gestartet werden – bitte zuerst stoppen.',
       tutorial: 'Während ein Lernpfad aktiv ist, kann der Simulator nicht gestartet werden — bitte den Lernpfad zuerst beenden.',
       teach: DE.TEACH_SIM_ENTRY_BLOCKED,
       handguide: 'Solange der Arm freigeschaltet ist, kann der Simulator nicht gestartet werden — bitte den Arm zuerst festsetzen.',

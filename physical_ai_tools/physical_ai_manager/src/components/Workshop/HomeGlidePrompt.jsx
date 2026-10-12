@@ -36,6 +36,11 @@ import { toastIcon } from '../icons/toast';
 
 export const HOME_GLIDE_COUNTDOWN_S = 5;
 
+// Deferred work never breaks the prompt that held it.
+function runSafely(fn) {
+  try { fn(); } catch (_) { /* the work's owner is gone: nothing to show */ }
+}
+
 function secondsLabel(n) {
   return n === 1 ? '1 Sekunde' : `${n} Sekunden`;
 }
@@ -122,7 +127,9 @@ export function HomeGlideDialog({
  * Owns the countdown → glide → result flow. Returns
  *   offerHomeGlide()  — open the warning (no-op while one is already open),
  *   homeGlideDialog   — the element to render (null while idle),
- *   homeGlideActive   — true while the warning or the glide is on screen.
+ *   homeGlideActive   — true while the warning or the glide is on screen,
+ *   afterHomeGlide(fn) — run fn now if nothing is on screen, else once the
+ *                       warning or the glide has gone.
  *
  * Unmounting during the COUNTDOWN cancels it (nothing moves). Unmounting during
  * the glide leaves the server-side glide running — it is slow and floor-checked,
@@ -149,6 +156,28 @@ export function useHomeGlidePrompt() {
     phaseRef.current = next;
     if (mountedRef.current) setPhase(next);
   }, []);
+
+  // Work that must not happen under the warning or the glide — the flash of
+  // what Vormachen's „Als Programm einfügen" wrote, asked for the moment the
+  // window closes, which in hand mode is the moment it offers this glide: the
+  // blurred dialog would hide the whole flash. Runs at once while nothing is
+  // offered (or once the owner is gone, its dialog with it), else after the
+  // commit that removed the dialog.
+  const afterIdleRef = useRef([]);
+  const afterHomeGlide = useCallback((fn) => {
+    if (typeof fn !== 'function') return;
+    if (phaseRef.current === 'idle' || !mountedRef.current) {
+      runSafely(fn);
+      return;
+    }
+    afterIdleRef.current.push(fn);
+  }, []);
+  useEffect(() => {
+    if (phase !== 'idle' || afterIdleRef.current.length === 0) return;
+    const waiting = afterIdleRef.current;
+    afterIdleRef.current = [];
+    waiting.forEach(runSafely);
+  }, [phase]);
 
   const startGlide = useCallback(async () => {
     // Exactly ONE glide per offer: the countdown reaching zero and a click on
@@ -226,7 +255,9 @@ export function useHomeGlidePrompt() {
     />
   );
 
-  return { offerHomeGlide, homeGlideDialog, homeGlideActive: phase !== 'idle' };
+  return {
+    offerHomeGlide, homeGlideDialog, homeGlideActive: phase !== 'idle', afterHomeGlide,
+  };
 }
 
 // ONE prompt per Roboter-Studio page. The three callers do not live long
@@ -261,6 +292,7 @@ export function useHomeGlide() {
       offerHomeGlide: shared.offerHomeGlide,
       homeGlideDialog: null,
       homeGlideActive: shared.homeGlideActive,
+      afterHomeGlide: shared.afterHomeGlide,
     };
   }
   return local;

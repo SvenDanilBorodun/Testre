@@ -92,21 +92,21 @@ export const CODE_DE = Object.freeze({
   // the „Neu" menu, insertion, and the Variablen notes. The warnings follow
   // sammlung/referenceValidators.js: only a recording or a Ziel/Position the
   // Sammlung verifiably lacks is marked, never an object type.
-  ASSET_MISSING_RECORDING: 'Eine Aufnahme „{0}“ gibt es in diesem Programm nicht — nimm sie mit '
-    + '„Vormachen“ auf oder wähle eine vorhandene.',
+  ASSET_MISSING_RECORDING: 'Eine Bewegung „{0}“ gibt es in diesem Programm nicht — mach sie mit '
+    + '„Vormachen“ vor oder wähle eine vorhandene.',
   ASSET_MISSING_PLACE: '„{0}“ ist kein Ziel und keine Position deiner Sammlung und wird im Programm '
     + 'auch nicht gesetzt — lege es an oder wähle ein vorhandenes.',
   ASSET_KIND_PIN: 'Ziel',
   ASSET_KIND_POSE: 'Position',
   ASSET_KIND_CODE_PIN: 'Ziel, im Programm gesetzt',
-  ASSET_KIND_RECORDING: 'Aufnahme',
+  ASSET_KIND_RECORDING: 'Bewegung',
   ASSET_KIND_COUNTER: 'Zähler',
   ASSET_KIND_OBJECT: 'Objekt',
   HOVER_PIN: 'Ziel „{0}“ · x {1} cm · y {2} cm',
   HOVER_POSE: 'Position „{0}“ · x {1} cm · y {2} cm · z {3} cm',
   HOVER_CODE_PIN: 'Ziel „{0}“ · wird im Programm mit pin gesetzt',
-  HOVER_RECORDING: 'Aufnahme „{0}“ · {1} s',
-  HOVER_RECORDING_VERSIONS: 'Aufnahme „{0}“ · {1} s · {2} Versionen',
+  HOVER_RECORDING: 'Bewegung „{0}“ · {1} s',
+  HOVER_RECORDING_VERSIONS: 'Bewegung „{0}“ · {1} s · {2} Versionen',
   SAMMLUNG_NEW: 'Neu',
   SAMMLUNG_INSERT: 'Einfügen',
   SAMMLUNG_INSERT_TITLE: 'Unter der Zeile einfügen, in der zuletzt der Cursor stand — '
@@ -162,6 +162,35 @@ export const CODE_DE = Object.freeze({
   VARIABLES_JAVA_NOTE: 'Java zeigt Werte nur mit Robot.zeige("Name", wert); an.',
   VARIABLE_USED_NOWHERE: 'Nirgends — der Name kommt im Programm nicht (mehr) vor.',
   USED_NOWHERE_INSERT: 'Nirgends — „Einfügen“ schreibt den Aufruf ins Programm.',
+  // A „Benutzt in" row of a code program (R0-7): where — the line's own text
+  // rides as the row's second line (`detail`).
+  USAGE_AT: '{0}, Zeile {1}',
+
+  // The „Methoden" column beside the editor: every robot command with its
+  // German explanation, parameters, return value and an example line that
+  // „Einfügen" (or a drag) writes into the program.
+  METHODS_TITLE: 'Methoden',
+  METHODS_OPEN: 'Methoden anzeigen',
+  METHODS_CLOSE: 'Methoden schließen',
+  METHODS_LOADING: 'Methoden werden geladen …',
+  METHODS_FAILED: 'Die Methoden-Liste konnte nicht geladen werden – bitte die Seite neu laden.',
+  METHODS_HELP: 'Klicke auf einen Befehl für die Erklärung. „Einfügen“ schreibt das Beispiel unter die '
+    + 'Zeile mit dem Cursor – oder zieh es an die Stelle.',
+  METHODS_PARAMS: 'Parameter',
+  METHODS_RETURNS: 'Gibt zurück',
+  METHODS_EXAMPLE: 'Beispiel',
+  METHODS_INSERT_ARIA: 'Einfügen: {0}',
+  METHODS_DEFAULT: 'Standard: {0}',
+  METHODS_OPTIONAL: 'optional',
+  METHODS_RANGE: '{0} bis {1}',
+  METHODS_MIN: 'ab {0}',
+  METHODS_MAX_CHARS: 'höchstens {0} Zeichen',
+  METHODS_VARIANTS: '(+{0} Varianten)',
+  METHODS_TYPE: 'Typ',
+  METHODS_GROUP_SHOW: 'Anzeigen',
+  // The two code dividers (layout/ResizeHandle.jsx labels).
+  METHODS_RESIZE: 'Breite der Methoden',
+  CODE_SIDEBAR_RESIZE: 'Breite der Dateiliste',
 
   SUBMIT: 'Abgeben',
   SUBMIT_TITLE: 'Diesen Stand des Programms bei der Lehrkraft abgeben',

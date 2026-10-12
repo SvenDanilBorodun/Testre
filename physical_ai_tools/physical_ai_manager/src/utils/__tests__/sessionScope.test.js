@@ -246,12 +246,18 @@ describe('clearStudentScopedStorage', () => {
   it('lists the exact machine keys by name', () => {
     expect([...MACHINE_SCOPED_KEYS].sort()).toEqual([
       'edubotics_audio_muted',
+      'edubotics_code_methods_open',
+      'edubotics_code_methods_width',
+      'edubotics_code_sidebar_width',
       'edubotics_record_view',
       'edubotics_robotType',
       'edubotics_workshop_dock_collapsed',
       'edubotics_workshop_dock_open',
       'edubotics_workshop_dock_split',
       'edubotics_workshop_dock_width',
+      'edubotics_workshop_sim_hint_dismissed',
+      'edubotics_workshop_sim_split',
+      'edubotics_workshop_sim_width',
     ]);
   });
 

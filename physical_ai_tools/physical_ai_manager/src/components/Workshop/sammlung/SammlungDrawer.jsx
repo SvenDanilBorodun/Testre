@@ -9,9 +9,13 @@
  */
 
 /**
- * The Sammlung drawer: manage the workflow's Variablen, Aufnahmen, Ziele and
- * Positionen — rename, delete (with „Rückgängig"), where each is used, and a
+ * The Sammlung drawer: manage the workflow's Bewegungen, Ziele, Positionen and
+ * Variablen — rename, delete (with „Rückgängig"), where each is used, and a
  * recording's older versions.
+ *
+ * A row's detail opens as an accordion INSIDE its own list item (the row
+ * button carries `aria-expanded`); every previewable row carries its play
+ * button; an empty tab explains itself and offers its creation buttons.
  *
  * It lives in the EDITOR box, never in the dock (the dock disappears in the
  * simulator), absolutely positioned beside the toolbox where a flyout would
@@ -33,7 +37,7 @@
  */
 
 import React, {
-  useEffect, useMemo, useReducer, useState,
+  useEffect, useId, useMemo, useReducer, useState,
 } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
@@ -47,7 +51,9 @@ import {
 import { DE, formatDe } from '../blocks/messages_de';
 import { CODE_DE, formatCode } from '../code/codeMessagesDe';
 import { SNIPPET_MIME } from '../code/snippetMime';
-import { newActionsFor } from './newActions';
+import { newActionsFor, teachHintFor } from './newActions';
+import { previewAssetFor } from './AssetCardInflater';
+import { SAMMLUNG_TABS, SAMMLUNG_TAB_LABEL_DE } from './sammlungTabs';
 import { EMPTY_SAMMLUNG_PROVIDER } from './provider';
 import { assetDocumentOf } from './assetDocument';
 import DrawerRecording from './DrawerRecording';
@@ -55,12 +61,18 @@ import DrawerPlace from './DrawerPlace';
 import DrawerVariable from './DrawerVariable';
 import Icon from '../../icons/Icon';
 
-export const DRAWER_TABS = Object.freeze([
-  { id: 'variablen', label: DE.CATEGORY_VARIABLEN },
-  { id: 'aufnahmen', label: DE.CATEGORY_AUFNAHMEN },
-  { id: 'ziele', label: DE.CATEGORY_ZIELE },
-  { id: 'positionen', label: DE.CATEGORY_POSITIONEN },
-]);
+// The one group order (sammlungTabs.js): toolbox, drawer and code sidebar.
+export const DRAWER_TABS = Object.freeze(SAMMLUNG_TABS.map((id) => Object.freeze({
+  id, label: SAMMLUNG_TAB_LABEL_DE[id],
+})));
+
+// What an empty tab says before its creation buttons.
+const EMPTY_TEXT = Object.freeze({
+  aufnahmen: DE.DRAWER_EMPTY_AUFNAHMEN,
+  ziele: DE.DRAWER_EMPTY_ZIELE,
+  positionen: DE.DRAWER_EMPTY_POSITIONEN,
+  variablen: DE.DRAWER_EMPTY_VARIABLEN,
+});
 
 /** The drag-and-drop type of a Sammlung row dropped into the code editor. */
 export { SNIPPET_MIME };
@@ -69,6 +81,7 @@ export { SNIPPET_MIME };
 const SNIPPET_KINDS = new Set(['recording', 'pin', 'pose']);
 
 const CHIP_CLASSES = {
+  muted: 'bg-gray-100 text-gray-700',
   ok: 'bg-green-100 text-green-800',
   warn: 'bg-amber-100 text-amber-800',
   bad: 'bg-red-100 text-red-800',
@@ -110,6 +123,7 @@ export default function SammlungDrawer({
   const drawer = useSelector(selectDrawer);
   const renameSplit = useSelector(selectRenameSplit);
   const [, rerender] = useReducer((n) => n + 1, 0);
+  const detailIdBase = useId();
   const assetDoc = useMemo(() => assetDocumentOf(assetDocProp, workspace), [assetDocProp, workspace]);
 
   // Re-render on every change the lists depend on: the destination store, the
@@ -148,7 +162,12 @@ export default function SammlungDrawer({
   const anchorLeft = assetDoc ? assetDoc.anchorLeft() : 0;
   const canInsert = !!assetDoc && assetDoc.canInsertSnippets === true;
   const newActions = newActionsFor(capabilities, tab);
+  const teachHint = teachHintFor(capabilities, tab);
   const snippetable = (card) => canInsert && SNIPPET_KINDS.has(card.assetKind);
+  // A sim-run play button (recording, Ziel, Position — never a variable's
+  // marker) waits for the first leader-status answer, like the flyout card's.
+  const previewWaits = (card) => capabilities.previewPending === true && card.assetKind !== 'variable';
+  const canPlay = (card) => card.canPreview === true && typeof onPreview === 'function';
 
   // A code document's insertion may load its module first (async); a
   // Blockly document answers at once — `await` takes both. One at a time
@@ -193,6 +212,15 @@ export default function SammlungDrawer({
     const common = {
       assetDoc, workspace, card: focused, capabilities, onPreview,
     };
+    if (tab === 'ziele' || tab === 'positionen') {
+      return (
+        <DrawerPlace
+          key={key}
+          {...common}
+          onShow3d={() => provider.dispatchAction({ type: 'show3d' })}
+        />
+      );
+    }
     if (tab === 'variablen') return <DrawerVariable key={key} {...common} />;
     if (tab === 'aufnahmen') {
       return (
@@ -208,8 +236,35 @@ export default function SammlungDrawer({
         />
       );
     }
-    return <DrawerPlace key={key} {...common} />;
+    return null;
   };
+
+  // The „Neu" group: today's strip above the list on a tab with cards, the
+  // empty state's large buttons on an empty one — ONE group either way.
+  const renderNewGroup = (large) => (
+    <div
+      role="group"
+      aria-label={CODE_DE.SAMMLUNG_NEW}
+      className={large
+        ? 'mt-3 flex flex-wrap items-center gap-2'
+        : 'flex flex-wrap items-center gap-1 border-b border-[var(--line)] px-2 py-1.5'}
+    >
+      {!large && <span className="text-xs font-semibold text-gray-500">{CODE_DE.SAMMLUNG_NEW}</span>}
+      {newActions.map(({ id, label, icon, action }) => (
+        <button
+          key={id}
+          type="button"
+          onClick={() => provider.dispatchAction(action)}
+          className={large
+            ? 'inline-flex items-center gap-1.5 rounded border border-[var(--line)] px-3 py-2 text-sm text-gray-800 hover:bg-gray-50'
+            : 'inline-flex items-center gap-1 rounded border border-[var(--line)] px-2 py-0.5 text-xs text-gray-800 hover:bg-gray-50'}
+        >
+          <Icon name={icon} />
+          <span>{label}</span>
+        </button>
+      ))}
+    </div>
+  );
 
   return (
     <aside
@@ -256,87 +311,105 @@ export default function SammlungDrawer({
           {formatDe(DE.ERR_RENAME_SPLIT, renameSplit.cloudName)}
         </div>
       )}
-      {newActions.length > 0 && (
-        <div
-          role="group"
-          aria-label={CODE_DE.SAMMLUNG_NEW}
-          className="flex flex-wrap items-center gap-1 border-b border-[var(--line)] px-2 py-1.5"
-        >
-          <span className="text-xs font-semibold text-gray-500">{CODE_DE.SAMMLUNG_NEW}</span>
-          {newActions.map(({ id, label, icon, action }) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => provider.dispatchAction(action)}
-              className="inline-flex items-center gap-1 rounded border border-[var(--line)] px-2 py-0.5 text-xs text-gray-800 hover:bg-gray-50"
-            >
-              <Icon name={icon} />
-              <span>{label}</span>
-            </button>
-          ))}
-        </div>
+      {cards.length > 0 && newActions.length > 0 && renderNewGroup(false)}
+      {cards.length > 0 && teachHint && (
+        <p className="border-b border-[var(--line)] px-3 py-1.5 text-xs text-gray-600">{teachHint}</p>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {cards.length === 0 ? (
-          <p className="p-3 text-sm text-gray-600">{DE.DRAWER_EMPTY_TAB}</p>
+          <div className="p-3">
+            <p className="text-sm text-gray-700">{EMPTY_TEXT[tab] || DE.DRAWER_EMPTY_TAB}</p>
+            {newActions.length > 0 && renderNewGroup(true)}
+            {teachHint && <p className="mt-3 text-sm text-gray-600">{teachHint}</p>}
+          </div>
         ) : (
           <ul className="divide-y divide-[var(--line)]">
-            {cards.map((card) => {
+            {cards.map((card, index) => {
               const id = focusIdOf(card);
               const selected = id === drawer.focusId;
               const insertable = snippetable(card);
+              const detailId = `${detailIdBase}-detail-${index}`;
+              const waits = previewWaits(card);
               return (
-                <li
-                  key={`${card.assetKind}:${id}`}
-                  className={insertable ? 'flex items-stretch' : undefined}
-                  draggable={insertable ? 'true' : undefined}
-                  onDragStart={insertable ? (e) => {
-                    e.dataTransfer.setData(
-                      SNIPPET_MIME, JSON.stringify({ kind: card.assetKind, name: card.assetName }),
-                    );
-                    e.dataTransfer.effectAllowed = 'copy';
-                  } : undefined}
-                >
-                  <button
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => dispatch(setDrawerFocus(selected ? null : id))}
-                    className={(insertable ? 'min-w-0 flex-1 ' : 'w-full ') + 'px-3 py-2 text-left '
-                      + (selected ? 'bg-gray-100' : 'hover:bg-gray-50')}
+                <li key={`${card.assetKind}:${id}`}>
+                  <div
+                    className="flex items-stretch"
+                    draggable={insertable ? 'true' : undefined}
+                    onDragStart={insertable ? (e) => {
+                      e.dataTransfer.setData(
+                        SNIPPET_MIME, JSON.stringify({ kind: card.assetKind, name: card.assetName }),
+                      );
+                      e.dataTransfer.effectAllowed = 'copy';
+                    } : undefined}
                   >
-                    <span className="block truncate text-sm font-semibold text-gray-900" title={card.assetName}>
-                      {card.assetName}
-                    </span>
-                    {card.meta && <span className="block truncate text-xs text-gray-500">{card.meta}</span>}
-                    {card.chips.length > 0 && (
-                      <span className="mt-1 flex flex-wrap gap-1">
-                        {card.chips.map((c) => (
-                          <span key={c.text} className={`rounded px-1.5 text-xs ${CHIP_CLASSES[c.level] || ''}`}>
-                            {c.text}
-                          </span>
-                        ))}
-                      </span>
-                    )}
-                  </button>
-                  {insertable && (
                     <button
                       type="button"
-                      aria-label={`${CODE_DE.SAMMLUNG_INSERT}: ${card.assetName}`}
-                      title={CODE_DE.SAMMLUNG_INSERT_TITLE}
-                      onClick={() => insert(card)}
-                      disabled={inserting}
-                      aria-busy={inserting || undefined}
-                      className="shrink-0 px-2 text-xs font-medium text-[var(--accent)] hover:bg-gray-50 disabled:cursor-wait disabled:opacity-50"
+                      aria-expanded={selected}
+                      aria-controls={selected ? detailId : undefined}
+                      onClick={() => dispatch(setDrawerFocus(selected ? null : id))}
+                      className={'min-w-0 flex-1 px-3 py-2 text-left '
+                        + (selected ? 'bg-gray-100' : 'hover:bg-gray-50')}
                     >
-                      {CODE_DE.SAMMLUNG_INSERT}
+                      <span
+                        id={`${detailId}-name`}
+                        className="block truncate text-sm font-semibold text-gray-900"
+                        title={card.assetName}
+                      >
+                        {card.assetName}
+                      </span>
+                      {card.meta && <span className="block truncate text-xs text-gray-500">{card.meta}</span>}
+                      {card.chips.length > 0 && (
+                        <span className="mt-1 flex flex-wrap gap-1">
+                          {card.chips.map((c) => (
+                            <span key={c.text} className={`rounded px-1.5 text-xs ${CHIP_CLASSES[c.level] || ''}`}>
+                              {c.text}
+                            </span>
+                          ))}
+                        </span>
+                      )}
                     </button>
+                    {canPlay(card) && (
+                      <button
+                        type="button"
+                        aria-label={DE.PREVIEW_START}
+                        title={waits ? DE.PREVIEW_BLOCK_LEADER_PENDING : DE.PREVIEW_START}
+                        disabled={waits}
+                        onClick={() => onPreview(previewAssetFor(card, snapshot))}
+                        className="shrink-0 px-2 text-[var(--accent)] hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Icon name="play" />
+                      </button>
+                    )}
+                    {insertable && (
+                      <button
+                        type="button"
+                        aria-label={`${CODE_DE.SAMMLUNG_INSERT}: ${card.assetName}`}
+                        title={CODE_DE.SAMMLUNG_INSERT_TITLE}
+                        onClick={() => insert(card)}
+                        disabled={inserting}
+                        aria-busy={inserting || undefined}
+                        className="shrink-0 px-2 text-xs font-medium text-[var(--accent)] hover:bg-gray-50 disabled:cursor-wait disabled:opacity-50"
+                      >
+                        {CODE_DE.SAMMLUNG_INSERT}
+                      </button>
+                    )}
+                  </div>
+                  {selected && (
+                    // The accordion panel, named by its row's name.
+                    <div
+                      id={detailId}
+                      role="region"
+                      aria-labelledby={`${detailId}-name`}
+                      className="border-t border-[var(--line)]"
+                    >
+                      {renderDetail()}
+                    </div>
                   )}
                 </li>
               );
             })}
           </ul>
         )}
-        {focused && <div className="border-t border-[var(--line)]">{renderDetail()}</div>}
       </div>
     </aside>
   );

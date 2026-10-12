@@ -11,6 +11,7 @@
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
 import { setEditValidator } from './fieldLoad';
+import { SAMMLUNG_COLOURS } from '../sammlung/sammlungTabs';
 
 // Batch 2b — recorded-motion replay. A student shows a hand-guided motion in
 // „Bewegung vormachen" (teach/TeachOverlay; saved as a named trajectory on the cloud
@@ -26,9 +27,10 @@ import { setEditValidator } from './fieldLoad';
 // the field NAME → args['name'] are read verbatim server-side. Do not rename.
 export const REPLAY_BLOCK_TYPE = 'edubotics_replay_trajectory';
 
-// Reuse the Bewegung (motion) hue so a replayed motion visually groups with the
-// other motion blocks in the palette + workspace.
-const TRAJECTORY_COLOR = '#3b82f6';
+// The replay block takes the Sammlung „Bewegungen" colour (sammlung/
+// sammlungTabs.js, the one source), so a block that plays a recorded motion
+// looks like the group it comes from — never like the static „Arm" category.
+export const TRAJECTORY_COLOR = SAMMLUNG_COLOURS.aufnahmen;
 
 // Keep names short + printable — they are dictionary keys in the runtime
 // ctx.trajectories map and appear in log lines. Mirrors the STRONGER counter
@@ -55,7 +57,7 @@ export const TRAJECTORY_BLOCKS = [
     colour: TRAJECTORY_COLOR,
     tooltip:
       'Spielt eine zuvor aufgenommene Bewegung ab (gleicher Name wie unter '
-      + '„Aufnahmen"). Mach die Bewegung zuerst mit „Bewegung vormachen" vor '
+      + '„Bewegungen"). Mach die Bewegung zuerst mit „Bewegung vormachen" vor '
       + 'und gib ihr genau diesen Namen.',
     extensions: ['edubotics_validate_trajectory_name'],
   },

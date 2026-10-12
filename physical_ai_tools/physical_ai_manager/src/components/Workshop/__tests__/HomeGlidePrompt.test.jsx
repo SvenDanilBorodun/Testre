@@ -220,6 +220,75 @@ describe('HomeGlidePrompt', () => {
     expect(mockRos.homeArm).toHaveBeenCalledTimes(1);
   });
 
+  // F2 (verification round 1): what Vormachen's „Als Programm einfügen" wrote
+  // is flashed for 2.5 s — after the window closes, which in hand mode is the
+  // moment it offers this glide. The warning (5 s) and the glide cover the
+  // editor, so the flash waits until no dialog is left on screen.
+  describe('afterHomeGlide — work that must wait until no warning covers the page', () => {
+    // Vormachen's sequence: offer at „Fertig", then unmount and ask for the flash.
+    function Overlay({ offer, onGone }) {
+      const { offerHomeGlide, afterHomeGlide, homeGlideDialog } = useHomeGlide();
+      const ref = React.useRef({ offerHomeGlide, afterHomeGlide, onGone });
+      ref.current = { offerHomeGlide, afterHomeGlide, onGone };
+      useEffect(() => {
+        if (offer) ref.current.offerHomeGlide();
+        return () => ref.current.afterHomeGlide(() => ref.current.onGone(!!screen.queryByRole('alertdialog')));
+      }, [offer]);
+      return homeGlideDialog;
+    }
+    function Page({ show, offer = true, onGone }) {
+      return (
+        <HomeGlideProvider>
+          {show ? <Overlay offer={offer} onGone={onGone} /> : <span>Editor</span>}
+        </HomeGlideProvider>
+      );
+    }
+
+    test('runs at once while nothing is offered', () => {
+      const onGone = vi.fn();
+      const { rerender } = render(<Page show offer={false} onGone={onGone} />);
+      rerender(<Page show={false} offer={false} onGone={onGone} />);
+      expect(onGone).toHaveBeenCalledTimes(1);
+      expect(onGone).toHaveBeenCalledWith(false);
+    });
+
+    test('waits through the countdown AND the glide, then runs once the dialog is gone', async () => {
+      let resolveGlide;
+      mockRos.homeArm.mockImplementation(() => new Promise((r) => { resolveGlide = r; }));
+      const onGone = vi.fn();
+      const { rerender } = render(<Page show onGone={onGone} />);
+      rerender(<Page show={false} onGone={onGone} />);
+      expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+      expect(onGone).not.toHaveBeenCalled();
+      await advance(HOME_GLIDE_COUNTDOWN_S * 1000);
+      expect(mockRos.homeArm).toHaveBeenCalledTimes(1);
+      // The glide runs: the dialog (with „Stopp") still covers the page.
+      expect(onGone).not.toHaveBeenCalled();
+      await act(async () => { resolveGlide({ success: true }); });
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+      expect(onGone).toHaveBeenCalledTimes(1);
+      expect(onGone).toHaveBeenCalledWith(false);
+    });
+
+    test('„Hier stehen lassen" releases it at once', () => {
+      const onGone = vi.fn();
+      const { rerender } = render(<Page show onGone={onGone} />);
+      rerender(<Page show={false} onGone={onGone} />);
+      expect(onGone).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', { name: 'Hier stehen lassen' }));
+      expect(onGone).toHaveBeenCalledTimes(1);
+      expect(onGone).toHaveBeenCalledWith(false);
+    });
+
+    test('without a provider the caller\'s own dialog leaves with it: runs at once', () => {
+      const onGone = vi.fn();
+      const { unmount } = render(<Overlay offer onGone={onGone} />);
+      expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+      unmount();
+      expect(onGone).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('the dialog is portalled to <body>, so no dock/wizard layout CSS can clip it', () => {
     render(<section aria-label="Aufrufer"><Offerer /></section>);
     // The dialog exists on the page but NOT inside the component that offered

@@ -1,0 +1,1109 @@
+{
+  "generated_by": "physical_ai_server/workflow/robot_api.py::export_docs_json",
+  "methods": [
+    {
+      "name": "home",
+      "java_name": "home",
+      "block_type": "edubotics_home",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist.",
+      "params": [],
+      "signature_py": "robot.home()",
+      "signatures_java": [
+        "void Robot.home()"
+      ],
+      "example": {
+        "args": [],
+        "var": null
+      },
+      "example_py": "robot.home()",
+      "example_java": "Robot.home();"
+    },
+    {
+      "name": "open_gripper",
+      "java_name": "openGripper",
+      "block_type": "edubotics_open_gripper",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Öffnet den Greifer.",
+      "params": [],
+      "signature_py": "robot.open_gripper()",
+      "signatures_java": [
+        "void Robot.openGripper()"
+      ],
+      "example": {
+        "args": [],
+        "var": null
+      },
+      "example_py": "robot.open_gripper()",
+      "example_java": "Robot.openGripper();"
+    },
+    {
+      "name": "close_gripper",
+      "java_name": "closeGripper",
+      "block_type": "edubotics_close_gripper",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Schließt den Greifer.",
+      "params": [],
+      "signature_py": "robot.close_gripper()",
+      "signatures_java": [
+        "void Robot.closeGripper()"
+      ],
+      "example": {
+        "args": [],
+        "var": null
+      },
+      "example_py": "robot.close_gripper()",
+      "example_java": "Robot.closeGripper();"
+    },
+    {
+      "name": "move_to",
+      "java_name": "moveTo",
+      "block_type": "edubotics_move_to",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels.",
+      "doc_de_java": "Fährt über das Ziel: ein Punkt new double[] {x, y, z} in Metern oder der Name eines gemerkten Ziels.",
+      "params": [
+        {
+          "name": "target",
+          "kind": "target",
+          "required": true,
+          "asset": "place",
+          "java_name": "target",
+          "doc_de": "Wohin: der Name eines Ziels oder einer Position aus deiner Sammlung – oder ein Punkt (x, y, z) in Metern."
+        }
+      ],
+      "signature_py": "robot.move_to(target)",
+      "signatures_java": [
+        "void Robot.moveTo(double[] target)",
+        "void Robot.moveTo(String target)"
+      ],
+      "example": {
+        "args": [
+          "Ablage"
+        ],
+        "var": null
+      },
+      "example_py": "robot.move_to(\"Ablage\")",
+      "example_java": "Robot.moveTo(\"Ablage\");"
+    },
+    {
+      "name": "pickup",
+      "java_name": "pickup",
+      "block_type": "edubotics_pickup",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Nimmt an dieser Stelle etwas auf: hinfahren, absenken, Greifer schließen, anheben.",
+      "params": [
+        {
+          "name": "target",
+          "kind": "target",
+          "required": true,
+          "asset": "place",
+          "java_name": "target",
+          "doc_de": "Wo: der Name eines Ziels oder einer Position aus deiner Sammlung – oder ein Punkt (x, y, z) in Metern."
+        }
+      ],
+      "signature_py": "robot.pickup(target)",
+      "signatures_java": [
+        "void Robot.pickup(double[] target)",
+        "void Robot.pickup(String target)"
+      ],
+      "example": {
+        "args": [
+          "Start"
+        ],
+        "var": null
+      },
+      "example_py": "robot.pickup(\"Start\")",
+      "example_java": "Robot.pickup(\"Start\");"
+    },
+    {
+      "name": "drop_at",
+      "java_name": "dropAt",
+      "block_type": "edubotics_drop_at",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Legt das Gehaltene über dem Ziel ab und öffnet den Greifer.",
+      "params": [
+        {
+          "name": "target",
+          "kind": "target",
+          "required": true,
+          "asset": "place",
+          "java_name": "target",
+          "doc_de": "Wo abgelegt wird: der Name eines Ziels oder einer Position aus deiner Sammlung – oder ein Punkt (x, y, z) in Metern."
+        }
+      ],
+      "signature_py": "robot.drop_at(target)",
+      "signatures_java": [
+        "void Robot.dropAt(double[] target)",
+        "void Robot.dropAt(String target)"
+      ],
+      "example": {
+        "args": [
+          "Ablage"
+        ],
+        "var": null
+      },
+      "example_py": "robot.drop_at(\"Ablage\")",
+      "example_java": "Robot.dropAt(\"Ablage\");"
+    },
+    {
+      "name": "wait",
+      "java_name": "waitSeconds",
+      "block_type": "edubotics_wait_seconds",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Wartet so viele Sekunden (höchstens 300).",
+      "params": [
+        {
+          "name": "seconds",
+          "kind": "float",
+          "required": true,
+          "lo": 0.0,
+          "hi": 300.0,
+          "java_name": "seconds",
+          "doc_de": "Wie lange gewartet wird, in Sekunden (höchstens 300)."
+        }
+      ],
+      "signature_py": "robot.wait(seconds)",
+      "signatures_java": [
+        "void Robot.waitSeconds(double seconds)"
+      ],
+      "example": {
+        "args": [
+          1.5
+        ],
+        "var": null
+      },
+      "example_py": "robot.wait(1.5)",
+      "example_java": "Robot.waitSeconds(1.5);"
+    },
+    {
+      "name": "replay",
+      "java_name": "replay",
+      "block_type": "edubotics_replay_trajectory",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Spielt eine aufgenommene Bewegung ab; speed 1.0 ist die Geschwindigkeit der Aufnahme, höchstens 3.0.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
+          "asset": "recording",
+          "java_name": "name",
+          "doc_de": "Der Name einer Bewegung aus deiner Sammlung."
+        },
+        {
+          "name": "speed",
+          "kind": "float",
+          "required": false,
+          "default": 1.0,
+          "lo": 0.25,
+          "hi": 3.0,
+          "java_name": "speed",
+          "doc_de": "Wie schnell: 1.0 ist so schnell wie vorgemacht, 2.0 doppelt so schnell – höchstens 3.0."
+        }
+      ],
+      "signature_py": "robot.replay(name, speed=1.0)",
+      "signatures_java": [
+        "void Robot.replay(String name, double speed)",
+        "void Robot.replay(String name)"
+      ],
+      "example": {
+        "args": [
+          "Winken"
+        ],
+        "var": null
+      },
+      "example_py": "robot.replay(\"Winken\")",
+      "example_java": "Robot.replay(\"Winken\");"
+    },
+    {
+      "name": "move_above",
+      "java_name": "moveAbove",
+      "block_type": "edubotics_move_above",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Fährt in Anfahrhöhe über das gefundene Objekt.",
+      "params": [
+        {
+          "name": "ziel",
+          "kind": "ziel",
+          "required": true,
+          "java_name": "ziel",
+          "doc_de": "Das Greifziel, das „find“ gefunden hat."
+        }
+      ],
+      "signature_py": "robot.move_above(ziel)",
+      "signatures_java": [
+        "void Robot.moveAbove(Robot.Greifziel ziel)"
+      ],
+      "example": {
+        "args": [
+          {
+            "ref": "ziel"
+          }
+        ],
+        "var": null
+      },
+      "example_py": "robot.move_above(ziel)",
+      "example_java": "Robot.moveAbove(ziel);"
+    },
+    {
+      "name": "descend_to",
+      "java_name": "descendTo",
+      "block_type": "edubotics_descend_to",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Senkt den geöffneten Greifer auf das gefundene Objekt ab.",
+      "params": [
+        {
+          "name": "ziel",
+          "kind": "ziel",
+          "required": true,
+          "java_name": "ziel",
+          "doc_de": "Das Greifziel, das „find“ gefunden hat."
+        }
+      ],
+      "signature_py": "robot.descend_to(ziel)",
+      "signatures_java": [
+        "void Robot.descendTo(Robot.Greifziel ziel)"
+      ],
+      "example": {
+        "args": [
+          {
+            "ref": "ziel"
+          }
+        ],
+        "var": null
+      },
+      "example_py": "robot.descend_to(ziel)",
+      "example_java": "Robot.descendTo(ziel);"
+    },
+    {
+      "name": "close_on_object",
+      "java_name": "closeOnObject",
+      "block_type": "edubotics_close_on_object",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Schließt den Greifer um das gefundene Objekt.",
+      "params": [
+        {
+          "name": "ziel",
+          "kind": "ziel",
+          "required": true,
+          "java_name": "ziel",
+          "doc_de": "Das Greifziel, das „find“ gefunden hat."
+        }
+      ],
+      "signature_py": "robot.close_on_object(ziel)",
+      "signatures_java": [
+        "void Robot.closeOnObject(Robot.Greifziel ziel)"
+      ],
+      "example": {
+        "args": [
+          {
+            "ref": "ziel"
+          }
+        ],
+        "var": null
+      },
+      "example_py": "robot.close_on_object(ziel)",
+      "example_java": "Robot.closeOnObject(ziel);"
+    },
+    {
+      "name": "lift",
+      "java_name": "lift",
+      "block_type": "edubotics_lift",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Hebt den Greifer gerade nach oben an, so weit der Arm kann.",
+      "params": [],
+      "signature_py": "robot.lift()",
+      "signatures_java": [
+        "void Robot.lift()"
+      ],
+      "example": {
+        "args": [],
+        "var": null
+      },
+      "example_py": "robot.lift()",
+      "example_java": "Robot.lift();"
+    },
+    {
+      "name": "grasp",
+      "java_name": "grasp",
+      "block_type": "edubotics_grasp_object",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen.",
+      "params": [
+        {
+          "name": "obj",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$",
+          "asset": "object",
+          "java_name": "obj",
+          "doc_de": "Der Objekt-Typ, zum Beispiel \"wuerfel\" für den Würfel – oder ein eigenes Greifobjekt."
+        }
+      ],
+      "signature_py": "robot.grasp(obj)",
+      "signatures_java": [
+        "void Robot.grasp(String obj)",
+        "void Robot.grasp(Greifobjekt obj)"
+      ],
+      "example": {
+        "args": [
+          "wuerfel"
+        ],
+        "var": null
+      },
+      "example_py": "robot.grasp(\"wuerfel\")",
+      "example_java": "Robot.grasp(\"wuerfel\");"
+    },
+    {
+      "name": "mark_done",
+      "java_name": "markDone",
+      "block_type": "edubotics_mark_done",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Merkt dieses Objekt als erledigt, damit es nicht noch einmal gefunden wird.",
+      "params": [
+        {
+          "name": "ziel",
+          "kind": "ziel",
+          "required": true,
+          "java_name": "ziel",
+          "doc_de": "Das Greifziel, das „find“ gefunden hat."
+        }
+      ],
+      "signature_py": "robot.mark_done(ziel)",
+      "signatures_java": [
+        "void Robot.markDone(Robot.Greifziel ziel)"
+      ],
+      "example": {
+        "args": [
+          {
+            "ref": "ziel"
+          }
+        ],
+        "var": null
+      },
+      "example_py": "robot.mark_done(ziel)",
+      "example_java": "Robot.markDone(ziel);"
+    },
+    {
+      "name": "pin",
+      "java_name": "pin",
+      "block_type": "edubotics_destination_pin",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel für move_to und drop_at.",
+      "doc_de_java": "Merkt den Punkt (x, y, z) in Metern unter diesem Namen als Ziel für moveTo und dropAt.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
+          "asset": "place_def",
+          "java_name": "name",
+          "doc_de": "Unter welchem Namen das neue Ziel gemerkt wird (höchstens 40 Zeichen)."
+        },
+        {
+          "name": "x",
+          "kind": "float",
+          "required": true,
+          "lo": -1.0,
+          "hi": 1.0,
+          "java_name": "x",
+          "doc_de": "Wie weit vor dem Roboterfuß, in Metern."
+        },
+        {
+          "name": "y",
+          "kind": "float",
+          "required": true,
+          "lo": -1.0,
+          "hi": 1.0,
+          "java_name": "y",
+          "doc_de": "Wie weit links vom Roboterfuß, in Metern (rechts ist negativ)."
+        },
+        {
+          "name": "z",
+          "kind": "float",
+          "required": true,
+          "lo": -1.0,
+          "hi": 1.0,
+          "java_name": "z",
+          "doc_de": "Höhe in Metern. Auf dem vermessenen Tisch und im Simulator nimmt der Roboter stattdessen die Tischhöhe an dieser Stelle."
+        }
+      ],
+      "signature_py": "robot.pin(name, x, y, z)",
+      "signatures_java": [
+        "void Robot.pin(String name, double x, double y, double z)"
+      ],
+      "example": {
+        "args": [
+          "Ablage",
+          0.2,
+          0.0,
+          0.0
+        ],
+        "var": null
+      },
+      "example_py": "robot.pin(\"Ablage\", 0.2, 0.0, 0.0)",
+      "example_java": "Robot.pin(\"Ablage\", 0.2, 0.0, 0.0);"
+    },
+    {
+      "name": "pin_current",
+      "java_name": "pinCurrent",
+      "block_type": "edubotics_destination_current",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Merkt die Stelle, an der der Greifer gerade steht, unter diesem Namen als Ziel.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
+          "asset": "place_def",
+          "java_name": "name",
+          "doc_de": "Unter welchem Namen das neue Ziel gemerkt wird (höchstens 40 Zeichen)."
+        }
+      ],
+      "signature_py": "robot.pin_current(name)",
+      "signatures_java": [
+        "void Robot.pinCurrent(String name)"
+      ],
+      "example": {
+        "args": [
+          "Hier"
+        ],
+        "var": null
+      },
+      "example_py": "robot.pin_current(\"Hier\")",
+      "example_java": "Robot.pinCurrent(\"Hier\");"
+    },
+    {
+      "name": "log",
+      "java_name": "log",
+      "block_type": "edubotics_log",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens 2000 Zeichen.",
+      "params": [
+        {
+          "name": "message",
+          "kind": "text",
+          "required": true,
+          "max_len": 2000,
+          "java_name": "message",
+          "doc_de": "Was ins Protokoll geschrieben wird: ein Text oder eine Zahl (höchstens 2000 Zeichen)."
+        }
+      ],
+      "signature_py": "robot.log(message)",
+      "signatures_java": [
+        "void Robot.log(Object message)"
+      ],
+      "example": {
+        "args": [
+          "Hallo!"
+        ],
+        "var": null
+      },
+      "example_py": "robot.log(\"Hallo!\")",
+      "example_java": "Robot.log(\"Hallo!\");"
+    },
+    {
+      "name": "beep",
+      "java_name": "beep",
+      "block_type": "edubotics_play_sound",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Spielt einen kurzen Signalton ab — hörbar im Browser.",
+      "params": [],
+      "signature_py": "robot.beep()",
+      "signatures_java": [
+        "void Robot.beep()"
+      ],
+      "example": {
+        "args": [],
+        "var": null
+      },
+      "example_py": "robot.beep()",
+      "example_java": "Robot.beep();"
+    },
+    {
+      "name": "speak",
+      "java_name": "speak",
+      "block_type": "edubotics_speak_de",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Liest den Text mit deutscher Stimme vor (höchstens 240 Zeichen).",
+      "params": [
+        {
+          "name": "text",
+          "kind": "text",
+          "required": true,
+          "max_len": 240,
+          "java_name": "text",
+          "doc_de": "Was vorgelesen wird (höchstens 240 Zeichen)."
+        }
+      ],
+      "signature_py": "robot.speak(text)",
+      "signatures_java": [
+        "void Robot.speak(Object text)"
+      ],
+      "example": {
+        "args": [
+          "Fertig!"
+        ],
+        "var": null
+      },
+      "example_py": "robot.speak(\"Fertig!\")",
+      "example_java": "Robot.speak(\"Fertig!\");"
+    },
+    {
+      "name": "tone",
+      "java_name": "tone",
+      "block_type": "edubotics_play_tone",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Spielt einen Ton mit dieser Frequenz in Hertz für so viele Sekunden (höchstens 5).",
+      "params": [
+        {
+          "name": "freq",
+          "kind": "float",
+          "required": false,
+          "default": 880.0,
+          "lo": 100.0,
+          "hi": 4000.0,
+          "java_name": "freq",
+          "doc_de": "Die Tonhöhe in Hertz (100 bis 4000)."
+        },
+        {
+          "name": "seconds",
+          "kind": "float",
+          "required": false,
+          "default": 0.25,
+          "lo": 0.05,
+          "hi": 5.0,
+          "java_name": "seconds",
+          "doc_de": "Wie lange der Ton klingt, in Sekunden (höchstens 5)."
+        }
+      ],
+      "signature_py": "robot.tone(freq=880.0, seconds=0.25)",
+      "signatures_java": [
+        "void Robot.tone(double freq, double seconds)",
+        "void Robot.tone(double freq)",
+        "void Robot.tone()"
+      ],
+      "example": {
+        "args": [
+          440.0,
+          0.5
+        ],
+        "var": null
+      },
+      "example_py": "robot.tone(440.0, 0.5)",
+      "example_java": "Robot.tone(440.0, 0.5);"
+    },
+    {
+      "name": "toast",
+      "java_name": "toast",
+      "block_type": "edubotics_toast",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Zeigt eine Meldung auf dem Bildschirm; level ist info, success, warning oder error, seconds höchstens 15.",
+      "params": [
+        {
+          "name": "text",
+          "kind": "text",
+          "required": true,
+          "max_len": 240,
+          "java_name": "text",
+          "doc_de": "Die Meldung, die auf dem Bildschirm erscheint (höchstens 240 Zeichen)."
+        },
+        {
+          "name": "level",
+          "kind": "str",
+          "required": false,
+          "default": "info",
+          "max_len": 7,
+          "pattern": "^(info|success|warning|error)$",
+          "java_name": "level",
+          "doc_de": "Die Art der Meldung, zum Beispiel success für grün: info, success, warning oder error."
+        },
+        {
+          "name": "seconds",
+          "kind": "int",
+          "required": false,
+          "default": 3,
+          "lo": 1,
+          "hi": 15,
+          "java_name": "seconds",
+          "doc_de": "Wie lange die Meldung zu sehen ist, in Sekunden (höchstens 15)."
+        }
+      ],
+      "signature_py": "robot.toast(text, level='info', seconds=3)",
+      "signatures_java": [
+        "void Robot.toast(Object text, String level, int seconds)",
+        "void Robot.toast(Object text, String level)",
+        "void Robot.toast(Object text)"
+      ],
+      "example": {
+        "args": [
+          "Fertig!",
+          "success"
+        ],
+        "var": null
+      },
+      "example_py": "robot.toast(\"Fertig!\", \"success\")",
+      "example_java": "Robot.toast(\"Fertig!\", \"success\");"
+    },
+    {
+      "name": "counter_reset",
+      "java_name": "counterReset",
+      "block_type": "edubotics_counter_reset",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Setzt den Zähler mit diesem Namen auf 0.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
+          "asset": "counter",
+          "java_name": "name",
+          "doc_de": "Der Name des Zählers, zum Beispiel \"Punkte\" – höchstens 40 Zeichen."
+        }
+      ],
+      "signature_py": "robot.counter_reset(name)",
+      "signatures_java": [
+        "void Robot.counterReset(String name)"
+      ],
+      "example": {
+        "args": [
+          "Punkte"
+        ],
+        "var": null
+      },
+      "example_py": "robot.counter_reset(\"Punkte\")",
+      "example_java": "Robot.counterReset(\"Punkte\");"
+    },
+    {
+      "name": "counter_add",
+      "java_name": "counterAdd",
+      "block_type": "edubotics_counter_add",
+      "table": "statement",
+      "returns": "none",
+      "doc_de": "Erhöht den Zähler mit diesem Namen um 1.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
+          "asset": "counter",
+          "java_name": "name",
+          "doc_de": "Der Name des Zählers, zum Beispiel \"Punkte\" – höchstens 40 Zeichen."
+        }
+      ],
+      "signature_py": "robot.counter_add(name)",
+      "signatures_java": [
+        "void Robot.counterAdd(String name)"
+      ],
+      "example": {
+        "args": [
+          "Punkte"
+        ],
+        "var": null
+      },
+      "example_py": "robot.counter_add(\"Punkte\")",
+      "example_java": "Robot.counterAdd(\"Punkte\");"
+    },
+    {
+      "name": "ziel",
+      "java_name": "ziel",
+      "block_type": "edubotics_destination_ref",
+      "table": "value",
+      "returns": "name",
+      "doc_de": "Gibt den Namen eines gemerkten Ziels für move_to und drop_at zurück; ein unbekannter Name wird abgelehnt.",
+      "doc_de_java": "Gibt den Namen eines gemerkten Ziels für moveTo und dropAt zurück; ein unbekannter Name wird abgelehnt.",
+      "returns_de": "Den Namen des Ziels als Text – ein Name, den es nicht gibt, wird abgelehnt.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
+          "asset": "place",
+          "java_name": "name",
+          "doc_de": "Der Name eines Ziels oder einer Position aus deiner Sammlung."
+        }
+      ],
+      "signature_py": "robot.ziel(name)",
+      "signatures_java": [
+        "String Robot.ziel(String name)"
+      ],
+      "example": {
+        "args": [
+          "Ablage"
+        ],
+        "var": "name"
+      },
+      "example_py": "name = robot.ziel(\"Ablage\")",
+      "example_java": "String name = Robot.ziel(\"Ablage\");"
+    },
+    {
+      "name": "sees",
+      "java_name": "sees",
+      "block_type": "edubotics_see_object",
+      "table": "value",
+      "returns": "bool",
+      "doc_de": "Prüft, ob gerade ein noch nicht erledigtes Objekt dieses Typs zu sehen ist.",
+      "returns_de": "Wahr, wenn so ein Objekt gerade zu sehen ist – sonst falsch.",
+      "params": [
+        {
+          "name": "obj",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$",
+          "asset": "object",
+          "java_name": "obj",
+          "doc_de": "Der Objekt-Typ, zum Beispiel \"wuerfel\" für den Würfel – oder ein eigenes Greifobjekt."
+        }
+      ],
+      "signature_py": "robot.sees(obj)",
+      "signatures_java": [
+        "boolean Robot.sees(String obj)",
+        "boolean Robot.sees(Greifobjekt obj)"
+      ],
+      "example": {
+        "args": [
+          "wuerfel"
+        ],
+        "var": "gesehen"
+      },
+      "example_py": "gesehen = robot.sees(\"wuerfel\")",
+      "example_java": "boolean gesehen = Robot.sees(\"wuerfel\");"
+    },
+    {
+      "name": "count",
+      "java_name": "count",
+      "block_type": "edubotics_count_object",
+      "table": "value",
+      "returns": "int",
+      "doc_de": "Zählt die sichtbaren, noch nicht erledigten Objekte dieses Typs.",
+      "returns_de": "Die Anzahl der sichtbaren, noch nicht erledigten Objekte – eine ganze Zahl.",
+      "params": [
+        {
+          "name": "obj",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$",
+          "asset": "object",
+          "java_name": "obj",
+          "doc_de": "Der Objekt-Typ, zum Beispiel \"wuerfel\" für den Würfel – oder ein eigenes Greifobjekt."
+        }
+      ],
+      "signature_py": "robot.count(obj)",
+      "signatures_java": [
+        "int Robot.count(String obj)",
+        "int Robot.count(Greifobjekt obj)"
+      ],
+      "example": {
+        "args": [
+          "wuerfel"
+        ],
+        "var": "anzahl"
+      },
+      "example_py": "anzahl = robot.count(\"wuerfel\")",
+      "example_java": "int anzahl = Robot.count(\"wuerfel\");"
+    },
+    {
+      "name": "wait_until_seen",
+      "java_name": "waitUntilSeen",
+      "block_type": "edubotics_wait_until_object_seen",
+      "table": "value",
+      "returns": "bool",
+      "doc_de": "Wartet, bis ein Objekt dieses Typs zu sehen ist; False, wenn es nach timeout Sekunden nicht da ist.",
+      "doc_de_java": "Wartet, bis ein Objekt dieses Typs zu sehen ist; false, wenn es nach timeout Sekunden nicht da ist.",
+      "returns_de": "Wahr, sobald eines zu sehen ist – falsch, wenn die Wartezeit abgelaufen ist.",
+      "params": [
+        {
+          "name": "obj",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$",
+          "asset": "object",
+          "java_name": "obj",
+          "doc_de": "Der Objekt-Typ, zum Beispiel \"wuerfel\" für den Würfel – oder ein eigenes Greifobjekt."
+        },
+        {
+          "name": "timeout",
+          "kind": "float",
+          "required": false,
+          "default": 10.0,
+          "lo": 0.0,
+          "hi": 300.0,
+          "java_name": "timeout",
+          "doc_de": "Wie lange höchstens gewartet wird, in Sekunden."
+        }
+      ],
+      "signature_py": "robot.wait_until_seen(obj, timeout=10.0)",
+      "signatures_java": [
+        "boolean Robot.waitUntilSeen(String obj, double timeout)",
+        "boolean Robot.waitUntilSeen(Greifobjekt obj, double timeout)",
+        "boolean Robot.waitUntilSeen(String obj)",
+        "boolean Robot.waitUntilSeen(Greifobjekt obj)"
+      ],
+      "example": {
+        "args": [
+          "wuerfel",
+          5.0
+        ],
+        "var": "gesehen"
+      },
+      "example_py": "gesehen = robot.wait_until_seen(\"wuerfel\", 5.0)",
+      "example_java": "boolean gesehen = Robot.waitUntilSeen(\"wuerfel\", 5.0);"
+    },
+    {
+      "name": "wait_until_held",
+      "java_name": "waitUntilHeld",
+      "block_type": "edubotics_wait_until_held",
+      "table": "value",
+      "returns": "bool",
+      "doc_de": "Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist.",
+      "doc_de_java": "Wartet, bis der Greifer etwas hält; false, wenn er nach timeout Sekunden noch leer ist.",
+      "returns_de": "Wahr, sobald der Greifer etwas hält – falsch, wenn die Wartezeit abgelaufen ist.",
+      "params": [
+        {
+          "name": "timeout",
+          "kind": "float",
+          "required": false,
+          "default": 10.0,
+          "lo": 0.0,
+          "hi": 300.0,
+          "java_name": "timeout",
+          "doc_de": "Wie lange höchstens gewartet wird, in Sekunden."
+        }
+      ],
+      "signature_py": "robot.wait_until_held(timeout=10.0)",
+      "signatures_java": [
+        "boolean Robot.waitUntilHeld(double timeout)",
+        "boolean Robot.waitUntilHeld()"
+      ],
+      "example": {
+        "args": [
+          3.0
+        ],
+        "var": "gehalten"
+      },
+      "example_py": "gehalten = robot.wait_until_held(3.0)",
+      "example_java": "boolean gehalten = Robot.waitUntilHeld(3.0);"
+    },
+    {
+      "name": "find",
+      "java_name": "find",
+      "block_type": "edubotics_find_object",
+      "table": "value",
+      "returns": "ziel",
+      "doc_de": "Findet das nächste greifbare Objekt dieses Typs und gibt ein Greifziel zurück, sonst None.",
+      "doc_de_java": "Findet das nächste greifbare Objekt dieses Typs und gibt ein Robot.Greifziel zurück, sonst null.",
+      "returns_de": "Ein Greifziel für die Greif-Schritte – oder nichts, wenn kein Objekt greifbar ist.",
+      "params": [
+        {
+          "name": "obj",
+          "kind": "obj",
+          "required": true,
+          "max_len": 24,
+          "pattern": "^[A-Za-z0-9_]{1,24}$",
+          "asset": "object",
+          "java_name": "obj",
+          "doc_de": "Der Objekt-Typ, zum Beispiel \"wuerfel\" für den Würfel – oder ein eigenes Greifobjekt."
+        }
+      ],
+      "signature_py": "robot.find(obj)",
+      "signatures_java": [
+        "Robot.Greifziel Robot.find(String obj)",
+        "Robot.Greifziel Robot.find(Greifobjekt obj)"
+      ],
+      "example": {
+        "args": [
+          "wuerfel"
+        ],
+        "var": "ziel"
+      },
+      "example_py": "ziel = robot.find(\"wuerfel\")",
+      "example_java": "Robot.Greifziel ziel = Robot.find(\"wuerfel\");"
+    },
+    {
+      "name": "object_position",
+      "java_name": "objectPosition",
+      "block_type": "edubotics_object_position",
+      "table": "value",
+      "returns": "point",
+      "doc_de": "Gibt die Position [x, y, z] des Greifziels in Metern zurück.",
+      "doc_de_java": "Gibt die Position {x, y, z} des Greifziels als double[] in Metern zurück.",
+      "returns_de": "Die Position (x, y, z) des Objekts in Metern – drei Zahlen, gemessen über die Kamera.",
+      "params": [
+        {
+          "name": "ziel",
+          "kind": "ziel",
+          "required": true,
+          "java_name": "ziel",
+          "doc_de": "Das Greifziel, das „find“ gefunden hat."
+        }
+      ],
+      "signature_py": "robot.object_position(ziel)",
+      "signatures_java": [
+        "double[] Robot.objectPosition(Robot.Greifziel ziel)"
+      ],
+      "example": {
+        "args": [
+          {
+            "ref": "ziel"
+          }
+        ],
+        "var": "position"
+      },
+      "example_py": "position = robot.object_position(ziel)",
+      "example_java": "double[] position = Robot.objectPosition(ziel);"
+    },
+    {
+      "name": "is_holding",
+      "java_name": "isHolding",
+      "block_type": "edubotics_grasp_held",
+      "table": "value",
+      "returns": "bool",
+      "doc_de": "Prüft, ob der Greifer etwas hält.",
+      "returns_de": "Wahr, wenn der Greifer etwas hält – sonst falsch.",
+      "params": [],
+      "signature_py": "robot.is_holding()",
+      "signatures_java": [
+        "boolean Robot.isHolding()"
+      ],
+      "example": {
+        "args": [],
+        "var": "gehalten"
+      },
+      "example_py": "gehalten = robot.is_holding()",
+      "example_java": "boolean gehalten = Robot.isHolding();"
+    },
+    {
+      "name": "counter_get",
+      "java_name": "counterGet",
+      "block_type": "edubotics_counter_get",
+      "table": "value",
+      "returns": "int",
+      "doc_de": "Gibt den Wert des Zählers zurück; 0, wenn er noch nie gesetzt wurde.",
+      "returns_de": "Den Wert des Zählers – eine ganze Zahl, 0 für einen neuen Zähler.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
+          "asset": "counter",
+          "java_name": "name",
+          "doc_de": "Der Name des Zählers, zum Beispiel \"Punkte\" – höchstens 40 Zeichen."
+        }
+      ],
+      "signature_py": "robot.counter_get(name)",
+      "signatures_java": [
+        "int Robot.counterGet(String name)"
+      ],
+      "example": {
+        "args": [
+          "Punkte"
+        ],
+        "var": "punkte"
+      },
+      "example_py": "punkte = robot.counter_get(\"Punkte\")",
+      "example_java": "int punkte = Robot.counterGet(\"Punkte\");"
+    },
+    {
+      "name": "zeige",
+      "java_name": "zeige",
+      "block_type": null,
+      "table": "code",
+      "returns": "none",
+      "doc_de": "Zeigt einen Wert unter diesem Namen im Variablen-Bereich an — Zahlen, Texte, Listen; höchstens 40 Zeichen Name.",
+      "params": [
+        {
+          "name": "name",
+          "kind": "str",
+          "required": true,
+          "max_len": 40,
+          "pattern": "^(?=.*\\S)[^=\\[\\]\\x00-\\x1f\\x7f]{1,40}$",
+          "asset": "variable",
+          "java_name": "name",
+          "doc_de": "Unter welchem Namen der Wert im Variablen-Bereich erscheint (höchstens 40 Zeichen)."
+        },
+        {
+          "name": "wert",
+          "kind": "value",
+          "required": true,
+          "java_name": "wert",
+          "doc_de": "Der Wert: eine Zahl, ein Text, ein Wahrheitswert oder eine Liste – Größe begrenzt."
+        }
+      ],
+      "signature_py": "robot.zeige(name, wert)",
+      "signatures_java": [
+        "void Robot.zeige(String name, int wert)",
+        "void Robot.zeige(String name, long wert)",
+        "void Robot.zeige(String name, double wert)",
+        "void Robot.zeige(String name, boolean wert)",
+        "void Robot.zeige(String name, char wert)",
+        "void Robot.zeige(String name, Object wert)"
+      ],
+      "example": {
+        "args": [
+          "Anzahl",
+          3
+        ],
+        "var": null
+      },
+      "example_py": "robot.zeige(\"Anzahl\", 3)",
+      "example_java": "Robot.zeige(\"Anzahl\", 3);"
+    }
+  ],
+  "types": [
+    {
+      "name": "Greifziel",
+      "java_name": "Robot.Greifziel",
+      "doc_de": "Ein gefundenes Objekt: find liefert es, die Greif-Schritte (über das Objekt fahren, absenken, schließen, erledigt) nehmen es.",
+      "example_py": "ziel = robot.find(\"wuerfel\")\nif ziel is not None:\n    robot.move_above(ziel)\n    robot.descend_to(ziel)\n    robot.close_on_object(ziel)\n    robot.lift()",
+      "example_java": "Robot.Greifziel ziel = Robot.find(\"wuerfel\");\nif (ziel != null) {\n    Robot.moveAbove(ziel);\n    Robot.descendTo(ziel);\n    Robot.closeOnObject(ziel);\n    Robot.lift();\n}"
+    },
+    {
+      "name": "Greifobjekt",
+      "java_name": "Greifobjekt",
+      "doc_de": "Ein eigener Objekt-Typ für diesen Lauf: Name, AprilTag-Nummern, Höhe und Greiftiefe – danach greift grasp ihn wie einen Würfel.",
+      "example_py": "class Banane(robot.Greifobjekt):\n    tag_ids = [30, 31]\n    hoehe_m = 0.040\n    greiftiefe_m = 0.015\n\nrobot.grasp(Banane)",
+      "example_java": "edubotics.Greifobjekt banane = new edubotics.Greifobjekt(\"Banane\", new int[] {30, 31}, 0.040, 0.015);\nRobot.grasp(banane);"
+    }
+  ]
+}

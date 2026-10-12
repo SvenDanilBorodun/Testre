@@ -306,7 +306,20 @@ describe('insertProgram (real Blockly)', () => {
 
   it('nothing to insert touches nothing', () => {
     const r = insertProgram(ws, [{ kind: 'recording', name: 'X', status: 'failed' }], {});
-    expect(r).toEqual({ blockId: null, count: 0 });
+    expect(r).toEqual({ blockId: null, count: 0, blockIds: [] });
     expect(ws.getTopBlocks(false)).toHaveLength(0);
+  });
+
+  it('answers every block of the new stack in blockIds (for the highlight after closing)', () => {
+    const r = insertProgram(ws, ITEMS, { placeNameOf });
+    const head = ws.getBlockById(r.blockId);
+    const all = head.getDescendants(false).map((b) => b.id);
+    expect(r.blockIds).toEqual(all);
+    expect(r.blockIds[0]).toBe(r.blockId);
+    // The statements AND the reference blocks plugged into them.
+    expect(r.blockIds.map((id) => ws.getBlockById(id).type)).toEqual(expect.arrayContaining([
+      'edubotics_replay_trajectory', 'edubotics_move_to', 'edubotics_destination_ref',
+    ]));
+    expect(new Set(r.blockIds).size).toBe(r.blockIds.length);
   });
 });

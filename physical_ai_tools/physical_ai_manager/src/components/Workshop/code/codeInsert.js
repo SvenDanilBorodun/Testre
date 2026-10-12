@@ -101,13 +101,111 @@ export function stepsToCode(steps, language) {
   return (Array.isArray(steps) ? steps : []).map((s) => stepLine(s, language)).filter(Boolean);
 }
 
-/** A Sammlung row (`{kind, name}`) as the line(s) that use it; [] when none. */
+// The Methoden column's example lines (`{kind: 'call', method, line}`): one
+// line, at most this long.
+const CALL_LINE_MAX = 240;
+const BRACKET_PAIRS = Object.freeze({ ')': '(', ']': '[', '}': '{' });
+
+// The literal segment really ends with its own quote (an escaped one does not
+// count): an unclosed string or char literal is refused.
+function literalClosed(text, seg) {
+  const quoteAt = seg.type === 'string' ? seg.start + seg.prefix.length : seg.start;
+  const quote = text[quoteAt];
+  const q = seg.type === 'string' && seg.triple ? 3 : 1;
+  let j = quoteAt + q;
+  while (j < seg.end) {
+    if (text[j] === '\\') {
+      j += 2;
+      continue;
+    }
+    if (text.startsWith(quote.repeat(q), j)) return j + q === seg.end;
+    j += 1;
+  }
+  return false;
+}
+
+function bracketsBalanced(code) {
+  const stack = [];
+  for (const ch of code) {
+    if (ch === '(' || ch === '[' || ch === '{') stack.push(ch);
+    else if (BRACKET_PAIRS[ch] && stack.pop() !== BRACKET_PAIRS[ch]) return false;
+  }
+  return stack.length === 0;
+}
+
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// What may stand in front of the call: one name (Python) or one declaration
+// (Java: a type, plain, qualified or an array, and one name) and a single `=`.
+const IDENT = '[\\p{L}_][\\p{L}\\p{N}_]*';
+const PY_ASSIGN = `${IDENT}\\s*=(?!=)\\s*`;
+const JAVA_DECL = `${IDENT}(?:\\s*\\.\\s*${IDENT})*(?:\\s*\\[\\s*\\])*\\s+${IDENT}\\s*=(?!=)\\s*`;
+
+// The index of the bracket that closes the one opened at `open` (literals
+// already blanked), or -1.
+function closingBracket(code, open) {
+  const stack = [];
+  for (let i = open; i < code.length; i += 1) {
+    const ch = code[i];
+    if (ch === '(' || ch === '[' || ch === '{') stack.push(ch);
+    else if (BRACKET_PAIRS[ch]) {
+      if (stack.pop() !== BRACKET_PAIRS[ch]) return -1;
+      if (stack.length === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The Methoden column's line for `method`: accepted only when it is ONE line
+ * of at most CALL_LINE_MAX characters, with no comment and no unclosed
+ * string, balanced brackets, and exactly ONE statement — THIS method's call
+ * (`robot.<name>(…)` / `Robot.<javaName>(…)`, the receiver and the name in
+ * code, never inside a string), optionally assigned to one name (Java: one
+ * declaration), the call's closing bracket ending the statement and Java's
+ * one `;` ending the line. The forms the rendered examples use; anything
+ * chained (`robot.home(); import os`) is refused. Only a public row of
+ * robot_api.json. Anything else answers [] — and an empty answer inserts
+ * nothing.
+ */
+function callLines(asset, language) {
+  const row = METHODS.get(asset.method);
+  const { line } = asset;
+  if (!row || typeof line !== 'string' || /[\r\n]/.test(line)) return [];
+  if (line.length < 1 || line.length > CALL_LINE_MAX) return [];
+  const java = language === 'java';
+  const segs = tokenizeCode(line, language);
+  if (segs.some((s) => s.type === 'comment')) return [];
+  if (segs.some((s) => (s.type === 'string' || s.type === 'char') && !literalClosed(line, s))) return [];
+  const codeOnly = segs.filter((s) => s.type === 'code').map((s) => line.slice(s.start, s.end)).join('');
+  if (!bracketsBalanced(codeOnly)) return [];
+  const code = blankedCode(line, segs);
+  const head = java
+    ? new RegExp(`^\\s*(?:${JAVA_DECL})?(?:edubotics\\s*\\.\\s*)?Robot\\s*\\.\\s*${escapeRe(row.java_name)}\\s*\\(`, 'u')
+    : new RegExp(`^\\s*(?:${PY_ASSIGN})?robot\\s*\\.\\s*${escapeRe(row.name)}\\s*\\(`, 'u');
+  const m = head.exec(code);
+  if (!m) return [];
+  const close = closingBracket(code, m[0].length - 1);
+  if (close < 0) return [];
+  // After the call: nothing (Python), exactly its `;` (Java).
+  const rest = code.slice(close + 1);
+  if (java ? !/^\s*;\s*$/.test(rest) : !/^\s*$/.test(rest)) return [];
+  return [line.trim()];
+}
+
+/**
+ * A Sammlung row (`{kind, name}`) as the line(s) that use it; a Methoden
+ * example (`{kind: 'call', method, line}`) as its checked line; [] when none.
+ */
 export function snippetLines(asset, language) {
   if (!asset || typeof asset !== 'object') return [];
   if (asset.kind === 'recording') return stepsToCode([{ type: 'replay', name: asset.name }], language);
   if (asset.kind === 'pin' || asset.kind === 'pose') {
     return stepsToCode([{ type: 'move_to', name: asset.name }], language);
   }
+  if (asset.kind === 'call') return callLines(asset, language);
   return [];
 }
 

@@ -19,6 +19,8 @@ import 'blockly/blocks';
 import * as De from 'blockly/msg/de';
 import { registerTrajectoryBlocks } from '../../blocks/trajectories';
 import { registerDestinationBlocks } from '../../blocks/destinations';
+import { registerEventBlocks } from '../../blocks/events';
+import { registerMotionBlocks } from '../../blocks/motion';
 import { DE, formatDe } from '../../blocks/messages_de';
 import { getDestinationStore, registerDestinationSerializer } from '../destinationStore';
 import {
@@ -57,6 +59,8 @@ beforeAll(() => {
   Blockly.setLocale(De);
   registerTrajectoryBlocks();
   registerDestinationBlocks();
+  registerEventBlocks();
+  registerMotionBlocks();
   registerDestinationSerializer();
 });
 
@@ -144,7 +148,7 @@ describe('rewrite helpers', () => {
     expect(names('edubotics_replay_trajectory')).toEqual(['Winken', 'Winken', 'Winken']);
   });
 
-  it('usageRows lists replay uses with the root block label and the disabled flag', () => {
+  it('usageRows lists replay uses with WHERE they are and the disabled flag', () => {
     load([
       replay('Winken', 'a'),
       { type: 'controls_repeat_ext', id: 'loop', inputs: { DO: { block: replay('Winken', 'inner') } } },
@@ -155,9 +159,91 @@ describe('rewrite helpers', () => {
     expect(rows.map((r) => r.blockId)).toEqual(['a', 'inner']);
     expect(rows[0].disabled).toBe(false);
     expect(rows[1].disabled).toBe(true);   // inherited from the disabled loop
-    expect(rows[1].label).toBe(ws.getBlockById('loop').toString().slice(0, 60)
-      + (ws.getBlockById('loop').toString().length > 60 ? '…' : ''));
+    // Three statement stacks, in creation (= run) order.
+    expect(rows.map((r) => r.label)).toEqual(['Schritt 1 in Programmteil 1', 'Schritt 1 in Programmteil 2']);
     expect(rows.every((r) => r.label.length <= 61)).toBe(true);
+  });
+});
+
+describe('usageRows: „Benutzt in" says WHERE (R0-7)', () => {
+  // Sorted: the row order is the workspace's block order, not part of this rule.
+  const labels = (kind, name) => usageRows(ws, kind, name).map((r) => r.label).sort();
+
+  it('one statement stack is the „Hauptprogramm"; the step counts the stack, nesting included', () => {
+    load([{
+      ...replay('Tanz', 's1'),
+      next: {
+        block: {
+          type: 'controls_repeat_ext',
+          id: 'loop',
+          inputs: {
+            DO: {
+              block: {
+                type: 'edubotics_home', id: 'h', next: { block: replay('Winken', 'deep') },
+              },
+            },
+          },
+          next: { block: replay('Winken', 's3') },
+        },
+      },
+    }]);
+    expect(labels('recording', 'Tanz')).toEqual(['Schritt 1 in Hauptprogramm']);
+    expect(labels('recording', 'Winken')).toEqual(['Schritt 2 in Hauptprogramm', 'Schritt 3 in Hauptprogramm']);
+  });
+
+  it('a function names itself, a hat by its text, a loose value block lies loose', () => {
+    load([
+      {
+        type: 'procedures_defnoreturn',
+        id: 'def',
+        fields: { NAME: 'tanzen' },
+        inputs: { STACK: { block: { ...replay('Tanz', 'f1'), next: { block: replay('Winken', 'f2') } } } },
+      },
+      {
+        type: 'edubotics_when_broadcast',
+        id: 'hat',
+        fields: { EVENT_NAME: 'los' },
+        next: { block: replay('Tanz', 'h1') },
+      },
+      ref('Ablage', 'loose'),
+      replay('Tanz', 'main'),
+    ]);
+    expect(labels('recording', 'Winken')).toEqual(['Schritt 2 in Funktion „tanzen“']);
+    const hatText = ws.getBlockById('hat').toString();
+    expect(labels('recording', 'Tanz')).toEqual([
+      'Schritt 1 in Funktion „tanzen“',
+      // The definition, the hat and the loose value block are not program
+      // parts: one plain stack is the „Hauptprogramm".
+      'Schritt 1 in Hauptprogramm',
+      `Schritt 1 in „${hatText.length > 40 ? `${hatText.slice(0, 40)}…` : hatText}“`,
+    ].sort());
+    expect(labels('ref', 'Ablage')).toEqual([DE.USAGE_LOOSE]);
+    for (const label of [...labels('recording', 'Tanz'), ...labels('recording', 'Winken')]) {
+      expect(label).not.toMatch(/„„|““/);
+    }
+  });
+
+  it('a use outside the stack\'s own steps says „in <stack>"', () => {
+    load([{
+      type: 'procedures_defreturn',
+      id: 'def',
+      fields: { NAME: 'ziel' },
+      inputs: { RETURN: { block: ref('Ablage', 'ret') } },
+    }]);
+    expect(labels('ref', 'Ablage')).toEqual(['in Funktion „ziel“']);
+  });
+
+  it('a long hat text is cut to 40 characters with „…"', () => {
+    load([{
+      type: 'edubotics_when_broadcast',
+      id: 'hat',
+      fields: { EVENT_NAME: 'x'.repeat(40) },
+      next: { block: replay('Tanz', 'h1') },
+    }]);
+    const [label] = labels('recording', 'Tanz');
+    expect(label.startsWith('Schritt 1 in „')).toBe(true);
+    expect(label.endsWith('…“')).toBe(true);
+    expect(label.length).toBeLessThanOrEqual(61);
   });
 });
 

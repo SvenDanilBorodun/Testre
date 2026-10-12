@@ -31,10 +31,27 @@
 // writes nothing and asks the student to click first (owner decision R3-O4,
 // codeInsert.insertionTarget). A reveal request from
 // the page (`{file, line, nonce}`: a „Benutzt in" jump, an insertion) switches
-// to that file and puts the caret on that line.
+// to that file and puts the caret on that line; an insertion's request also
+// carries `flash` (`{from, to}`), the lines the editor lights up briefly.
+//
+// The „Methoden" column (owner decision C) sits to the right of the editor:
+// the lazy MethodenPanel, docked from md up, FLOATING over the code's right
+// side when the code area is too narrow for both (measured), or closed to a
+// thin rail. Its children come AFTER the editor, so opening, closing or
+// floating it never moves the editor among its siblings — CodeEditor never
+// remounts (every child is keyed; the editor is `editor`). Two dividers
+// (layout/ResizeHandle.jsx) size the file list (`--code-sidebar-w`) and the
+// docked column (`--code-methods-w`); both widths and whether the column is
+// open are remembered on THIS PC (layout/layoutPrefs.js, MACHINE keys).
+// The page hands three more things through: `commandsRef` (the
+// editor's Rückgängig / Wiederholen for the toolbar), `onSave` (Strg+S inside
+// the editor, owner decision K-1; not for a read-only editor) and
+// `sidebarWidthRef` (the file sidebar's APPLIED, measured width — where the
+// Sammlung drawer opens).
 
 import React, {
-  Suspense, lazy, useCallback, useDeferredValue, useEffect, useMemo, useReducer, useRef, useState,
+  Suspense, lazy, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useReducer, useRef,
+  useState,
 } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
@@ -42,14 +59,31 @@ import { addBreakpoint, removeBreakpoint } from '../../../features/workshop/work
 import { openDrawer } from '../../../features/workshop/studioAssetsSlice';
 import { useRosServiceCaller } from '../../../hooks/useRosServiceCaller';
 import { DE } from '../blocks/messages_de';
-import { newActionsFor, teachActionFor } from '../sammlung/newActions';
+import { newActionsFor, teachActionFor, teachHintFor } from '../sammlung/newActions';
+import { SAMMLUNG_TABS, SAMMLUNG_TAB_LABEL_DE } from '../sammlung/sammlungTabs';
+import ResizeHandle from '../layout/ResizeHandle';
+import {
+  CODE_SIDEBAR_WIDTH, METHODS_WIDTH,
+  readCodeSidebarWidth, readMethodsOpen, readMethodsWidth,
+  writeCodeSidebarWidth, writeMethodsOpen, writeMethodsWidth,
+} from '../layout/layoutPrefs';
+import { LAYOUT_DE, fillLayout } from '../layout/layoutCopy';
 import MenuButton from '../MenuButton';
 import Icon from '../../icons/Icon';
 import { breakpointLinesForFile, codeBreakpointId, parseCodeBreakpointId } from './codeBreakpoints';
 import { CODE_DE, formatCode } from './codeMessagesDe';
 import { CODE_LIMITS, ENTRY_FILE, validateProjectPath } from './codeProject';
+import { CODE_SIDEBAR_WIDTH_PX } from './codeAssetDocument';
 
 const CodeEditor = lazy(() => import('./CodeEditor'));
+const MethodenPanel = lazy(() => import('./MethodenPanel'));
+
+// The Methoden column floats over the code instead of standing beside it when
+// the code area is narrower than the sidebar + a 320-px editor + a 220-px
+// column (+ 16 px of slack).
+const METHODS_MIN_EDITOR_PX = 320;
+const METHODS_MIN_WIDTH_PX = 220;
+const METHODS_FLOAT_SLACK_PX = 16;
 
 const CODE_LAST_FILE_KEY = 'edubotics_code_last_file';
 
@@ -105,13 +139,69 @@ class EditorBoundary extends React.Component {
   }
 }
 
-// The sidebar's Sammlung rows: [drawer tab, label, index count key].
-const SAMMLUNG_ROWS = Object.freeze([
-  ['aufnahmen', DE.CATEGORY_AUFNAHMEN],
-  ['ziele', DE.CATEGORY_ZIELE],
-  ['positionen', DE.CATEGORY_POSITIONEN],
-  ['variablen', DE.CATEGORY_VARIABLEN],
-]);
+/**
+ * The Methoden column is a lazy chunk of its own: a failed load (a stale
+ * WebView2 cache after an image update) costs the column, never the editor
+ * or the file tree.
+ */
+class MethodenBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <p className="px-3 py-4 text-xs text-[var(--ink-3)]">{CODE_DE.METHODS_FAILED}</p>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function timeOf(item) {
+  const t = Date.parse(item && item.created_at);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * The student's own names for the Methoden examples: the Ziele/Positionen of
+ * the document (pins first), the recordings (one per name, newest first) and
+ * the object types.
+ */
+function methodSammlungOf(sources) {
+  if (!sources) return null;
+  const entries = (Array.isArray(sources.entries) ? sources.entries : [])
+    .filter((e) => e && typeof e.name === 'string' && e.name);
+  const places = [
+    ...entries.filter((e) => e.kind === 'pin'),
+    ...entries.filter((e) => e.kind !== 'pin'),
+  ].map((e) => e.name);
+  const items = sources.trajectories && Array.isArray(sources.trajectories.items)
+    ? sources.trajectories.items.filter((i) => i && typeof i.name === 'string' && i.name) : [];
+  const recordings = [];
+  const seen = new Set();
+  for (const item of items.slice().sort((a, b) => timeOf(b) - timeOf(a))) {
+    if (!seen.has(item.name)) {
+      seen.add(item.name);
+      recordings.push(item.name);
+    }
+  }
+  const objects = (Array.isArray(sources.objectTypes) ? sources.objectTypes : [])
+    .filter((n) => typeof n === 'string' && n);
+  return { places, recordings, objects };
+}
+
+// The sidebar's Sammlung rows: [drawer tab, label] — the one order and the
+// one set of names (sammlung/sammlungTabs.js).
+const SAMMLUNG_ROWS = Object.freeze(SAMMLUNG_TABS.map((tab) => [tab, SAMMLUNG_TAB_LABEL_DE[tab]]));
+
+const pxText = (v) => fillLayout(LAYOUT_DE.VALUE_PX, Math.round(v));
 
 const NO_OBJECT_TYPES = Object.freeze([]);
 
@@ -130,7 +220,7 @@ function snapshotOf(provider) {
  * Rendered only with an asset document.
  */
 function SammlungSection({
-  counts, actions, teachActions, onOpen, onAction, buttonClass,
+  counts, actions, teachActions, teachHint, onOpen, onAction, buttonClass,
 }) {
   return (
     <section
@@ -140,6 +230,7 @@ function SammlungSection({
       <div className="px-1 pb-1 text-[11px] font-semibold text-[var(--ink-3)] uppercase tracking-wide">
         {DE.SAMMLUNG_TITLE}
       </div>
+      {teachHint && <p className="px-2 text-[10px] text-[var(--ink-4)]">{teachHint}</p>}
       {SAMMLUNG_ROWS.map(([tab, label]) => {
         const teach = teachActions[tab] || null;
         return (
@@ -203,6 +294,7 @@ function CodeWorkspace({
   language, files, onFilesChange, readOnly = false,
   assetDoc = null, provider = null, onCursorChange = null, revealRequest = null,
   objectTypes = NO_OBJECT_TYPES,
+  commandsRef = null, onSave = null, sidebarWidthRef = null,
 }) {
   const entry = ENTRY_FILE[language];
   const paths = useMemo(() => sortPaths(Object.keys(files || {})), [files]);
@@ -230,9 +322,9 @@ function CodeWorkspace({
   const onCursorRef = useRef(onCursorChange);
   useEffect(() => { onCursorRef.current = onCursorChange; }, [onCursorChange]);
   const reportCursor = useCallback((at) => { onCursorRef.current?.(at); }, []);
-  const revealInEditor = useCallback((line) => {
+  const revealInEditor = useCallback((line, flash) => {
     revealSeq.current += 1;
-    setEditorReveal({ line, nonce: revealSeq.current });
+    setEditorReveal(flash ? { line, nonce: revealSeq.current, flash } : { line, nonce: revealSeq.current });
   }, []);
 
   const open = useCallback((path) => {
@@ -262,11 +354,11 @@ function CodeWorkspace({
   useEffect(() => {
     if (!revealRequest || typeof revealRequest.file !== 'string' || !Number.isInteger(revealRequest.line)) return;
     if (!files || !Object.prototype.hasOwnProperty.call(files, revealRequest.file)) return;
-    const { file, line } = revealRequest;
+    const { file, line, flash } = revealRequest;
     setActive(file);
     cursorByFile.current.set(file, line);
     reportCursor({ file, line });
-    revealInEditor(line);
+    revealInEditor(line, flash && typeof flash === 'object' ? flash : undefined);
     // Once per nonce — the files change on every keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageRevealNonce]);
@@ -448,6 +540,13 @@ function CodeWorkspace({
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readOnly, assetDoc, provider, sammlungTick]);
+  // In the simulator the rows' „… vormachen" are gone (D9): one sentence says
+  // why, under the heading (the drawer's and the flyout's hint).
+  const teachHint = useMemo(
+    () => (readOnly || !assetDoc ? null : teachHintFor((snapshotOf(provider) || {}).capabilities, 'aufnahmen')),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [readOnly, assetDoc, provider, sammlungTick],
+  );
   const openSammlungTab = useCallback((tab) => {
     dispatch(openDrawer({ tab, focusId: null }));
   }, [dispatch]);
@@ -458,9 +557,94 @@ function CodeWorkspace({
   const smallButton = 'text-xs px-2 py-1 rounded-md border border-[var(--line)] bg-white '
     + 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed';
 
+  /*
+   * The Methoden column: open (docked or floating) or closed to its rail.
+   * The open state is this component's own on this branch; the measured
+   * widths decide whether it floats, and the file sidebar's APPLIED width is
+   * what the page's drawer anchors at (`sidebarWidthRef`, m-3).
+   */
+  const methodSammlung = useMemo(() => methodSammlungOf(assetSources), [assetSources]);
+  const rootRef = useRef(null);
+  const asideRef = useRef(null);
+  const railRef = useRef(null);
+  const [methodsOpen, setMethodsOpen] = useState(readMethodsOpen);
+  const [sidebarW, setSidebarW] = useState(readCodeSidebarWidth);
+  const [methodsW, setMethodsW] = useState(readMethodsWidth);
+  const [methodsFloating, setMethodsFloating] = useState(false);
+  const focusRailRef = useRef(false);
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const aside = asideRef.current;
+    if (!root || !aside) return undefined;
+    const measure = () => {
+      const asideW = aside.getBoundingClientRect().width;
+      if (asideW > 0 && sidebarWidthRef) sidebarWidthRef.current = Math.round(asideW);
+      const rootW = root.getBoundingClientRect().width;
+      const sidebarW = asideW > 0 ? asideW : CODE_SIDEBAR_WIDTH_PX;
+      // An unmeasured root (0: jsdom, not laid out yet) is not „narrow".
+      setMethodsFloating(rootW > 0
+        && rootW < sidebarW + METHODS_MIN_EDITOR_PX + METHODS_MIN_WIDTH_PX + METHODS_FLOAT_SLACK_PX);
+    };
+    measure();
+    if (typeof ResizeObserver !== 'function') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(root);
+    observer.observe(aside);
+    return () => observer.disconnect();
+  }, [sidebarWidthRef]);
+  // The two dividers share one budget: the width a pane may take is what the
+  // code area leaves after the editor's 320 px and EVERY other piece in the
+  // row at its width right now — the other pane (or the rail), and both
+  // handles; a floating column overlays and takes nothing. Each handle also
+  // re-clamps its committed width when the other side changes (`boundsKey`),
+  // so room one side gives back returns to the other (verification round 1,
+  // F5d: each bound used to ignore the other pane or the handles, and the
+  // editor could be squeezed to almost nothing).
+  // The row is read through the handle's own parent (`bounds` gets the
+  // handle): in the first layout effect this component's refs are not
+  // attached yet, the DOM already is.
+  const paneMax = useCallback((r, handle, spec, pane) => {
+    const row = handle ? handle.parentElement : null;
+    if (!r || !row) return spec.max;
+    let besides = 0;
+    Array.from(row.children).forEach((el) => {
+      const ownPane = el.dataset ? el.dataset.pane : undefined;
+      if (ownPane === pane || ownPane === 'editor' || (el.dataset && el.dataset.floating === 'true')) return;
+      besides += el.getBoundingClientRect().width;
+    });
+    return Math.max(spec.min, Math.min(spec.max, r.width - METHODS_MIN_EDITOR_PX - besides));
+  }, []);
+
+  const closeMethods = useCallback(() => {
+    focusRailRef.current = true;
+    setMethodsOpen(false);
+    writeMethodsOpen(false);
+  }, []);
+  const openMethods = useCallback(() => {
+    setMethodsOpen(true);
+    writeMethodsOpen(true);
+  }, []);
+  // Closed from inside the panel: the focus lands on the rail that reopens it.
+  useEffect(() => {
+    if (!methodsOpen && focusRailRef.current) {
+      focusRailRef.current = false;
+      railRef.current?.focus();
+    }
+  }, [methodsOpen]);
+
   return (
-    <div className="flex h-full w-full min-h-0" data-testid="code-workspace" data-language={language}>
-      <aside className="w-44 shrink-0 border-r border-[var(--line)] bg-[var(--bg-sunk)] flex flex-col min-h-0">
+    <div
+      ref={rootRef}
+      className="relative flex h-full w-full min-h-0"
+      data-testid="code-workspace"
+      data-language={language}
+    >
+      <aside
+        key="files"
+        ref={asideRef}
+        data-pane="files"
+        className="w-44 md:w-[var(--code-sidebar-w,11rem)] shrink-0 border-r border-[var(--line)] bg-[var(--bg-sunk)] flex flex-col min-h-0"
+      >
         <div className="px-2 py-1.5 text-[11px] font-semibold text-[var(--ink-3)] uppercase tracking-wide">
           {CODE_DE.FILES_TITLE}
         </div>
@@ -516,13 +700,37 @@ function CodeWorkspace({
             counts={sammlungCounts}
             actions={newActions}
             teachActions={teachActions}
+            teachHint={teachHint}
             onOpen={openSammlungTab}
             onAction={dispatchSammlungAction}
             buttonClass={smallButton}
           />
         )}
       </aside>
-      <div className="flex-1 min-w-0 min-h-0">
+      <ResizeHandle
+        key="files-handle"
+        orientation="vertical"
+        cssVar="--code-sidebar-w"
+        unit="px"
+        value={sidebarW}
+        defaultValue={CODE_SIDEBAR_WIDTH.default}
+        bounds={(r, handle) => ({
+          min: CODE_SIDEBAR_WIDTH.min,
+          max: paneMax(r, handle, CODE_SIDEBAR_WIDTH, 'files'),
+        })}
+        boundsKey={`${methodsOpen}|${methodsFloating}|${methodsW}`}
+        fromPointer={(e, r) => e.clientX - r.left}
+        growKey="ArrowRight"
+        step={8}
+        largeStep={32}
+        label={CODE_DE.CODE_SIDEBAR_RESIZE}
+        valueText={pxText}
+        onCommit={(v) => {
+          setSidebarW(v);
+          writeCodeSidebarWidth(v);
+        }}
+      />
+      <div key="editor" data-pane="editor" className="flex-1 min-w-0 min-h-0">
         <EditorBoundary>
           <Suspense
             fallback={
@@ -542,10 +750,85 @@ function CodeWorkspace({
               assetSources={assetSources}
               revealRequest={editorReveal}
               onCursorChange={handleEditorCursor}
+              commandsRef={commandsRef}
+              onSave={readOnly ? null : onSave}
             />
           </Suspense>
         </EditorBoundary>
       </div>
+      {methodsOpen && !methodsFloating && (
+        <ResizeHandle
+          key="methods-handle"
+          orientation="vertical"
+          cssVar="--code-methods-w"
+          unit="px"
+          value={methodsW}
+          defaultValue={METHODS_WIDTH.default}
+          bounds={(r, handle) => ({
+            min: METHODS_WIDTH.min,
+            max: paneMax(r, handle, METHODS_WIDTH, 'methods'),
+          })}
+          boundsKey={sidebarW}
+          fromPointer={(e, r) => r.right - e.clientX}
+          growKey="ArrowLeft"
+          step={8}
+          largeStep={32}
+          label={CODE_DE.METHODS_RESIZE}
+          valueText={pxText}
+          onCommit={(v) => {
+            setMethodsW(v);
+            writeMethodsWidth(v);
+          }}
+        />
+      )}
+      {methodsOpen ? (
+        <aside
+          key="methods"
+          data-pane="methods"
+          className={
+            methodsFloating
+              ? 'hidden md:flex md:flex-col absolute inset-y-0 right-0 z-20 w-[min(300px,calc(100%-2rem))] '
+                + 'border-l border-[var(--line)] bg-white shadow-xl'
+              : 'hidden md:flex md:flex-col w-[var(--code-methods-w,300px)] shrink-0 border-l border-[var(--line)] bg-white'
+          }
+          data-testid="code-methods"
+          data-floating={methodsFloating ? 'true' : 'false'}
+        >
+          <MethodenBoundary>
+            <Suspense
+              fallback={<p className="px-3 py-4 text-xs text-[var(--ink-3)]">{CODE_DE.METHODS_LOADING}</p>}
+            >
+              <MethodenPanel
+                language={language}
+                assetDoc={assetDoc}
+                readOnly={readOnly}
+                sammlung={methodSammlung}
+                floating={methodsFloating}
+                onClose={closeMethods}
+              />
+            </Suspense>
+          </MethodenBoundary>
+        </aside>
+      ) : (
+        <button
+          key="methods-rail"
+          ref={railRef}
+          type="button"
+          onClick={openMethods}
+          aria-label={CODE_DE.METHODS_OPEN}
+          title={CODE_DE.METHODS_OPEN}
+          data-testid="code-methods-rail"
+          className={
+            'hidden md:flex w-8 shrink-0 flex-col items-center gap-1 border-l border-[var(--line)] '
+            + 'bg-[var(--bg-sunk)] py-2 text-[var(--ink-3)] hover:bg-white hover:text-[var(--accent)]'
+          }
+        >
+          <Icon name="methods" />
+          <span className="[writing-mode:vertical-rl] text-[11px] font-semibold uppercase tracking-wide">
+            {CODE_DE.METHODS_TITLE}
+          </span>
+        </button>
+      )}
     </div>
   );
 }

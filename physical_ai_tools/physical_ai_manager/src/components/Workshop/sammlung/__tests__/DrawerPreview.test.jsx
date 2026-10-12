@@ -123,7 +123,7 @@ describe('DrawerRecording — preview', () => {
   it('an older version has its own ▶', () => {
     const { onPreview } = setup();
     fireEvent.click(screen.getByRole('button', { name: DE.RUN_TEMPO_SLOW }));
-    const older = screen.getAllByRole('button', { name: DE.PREVIEW_START });
+    const older = within(screen.getByRole('region', { name: 'Winken' })).getAllByRole('button', { name: DE.PREVIEW_START });
     expect(older).toHaveLength(1);
     fireEvent.click(older[0]);
     expect(onPreview).toHaveBeenLastCalledWith(
@@ -152,7 +152,7 @@ describe('DrawerRecording — preview', () => {
 describe('DrawerPlace — preview', () => {
   it('▶ Im Simulator ansehen plays the entry at the drawer tempo', () => {
     const { onPreview, pinId } = setup({ tab: 'ziele', focus: 'pin' });
-    const play = screen.getByRole('button', { name: DE.PREVIEW_START });
+    const play = within(screen.getByRole('region', { name: 'Ablage' })).getByRole('button', { name: DE.PREVIEW_START });
     // The play icon, drawn beside the words (never a glyph in them).
     // eslint-disable-next-line testing-library/no-node-access
     expect(play.querySelector('svg[data-icon="play"]')).toHaveAttribute('aria-hidden', 'true');
@@ -183,7 +183,8 @@ describe('Drawer ▶ — waits for the first leader-status answer', () => {
     const { onPreview, provider } = setup({ previewPending: true });
     const section = screen.getByRole('region', { name: DE.PREVIEW_START });
     const play = within(section).getByRole('button', { name: DE.PREVIEW_PLAY });
-    const [older] = screen.getAllByRole('button', { name: DE.PREVIEW_START });
+    const detail = () => screen.getByRole('region', { name: 'Winken' });
+    const [older] = within(detail()).getAllByRole('button', { name: DE.PREVIEW_START });
     for (const btn of [play, older]) {
       expect(btn).toBeDisabled();
       expect(btn).toHaveAttribute('title', 'Roboterstatus wird geprüft …');
@@ -195,7 +196,7 @@ describe('Drawer ▶ — waits for the first leader-status answer', () => {
     act(() => { provider.setSnapshot({ capabilities: { previewPending: false } }); });
     const playNow = within(screen.getByRole('region', { name: DE.PREVIEW_START }))
       .getByRole('button', { name: DE.PREVIEW_PLAY });
-    const [olderNow] = screen.getAllByRole('button', { name: DE.PREVIEW_START });
+    const [olderNow] = within(detail()).getAllByRole('button', { name: DE.PREVIEW_START });
     expect(playNow).toBeEnabled();
     expect(playNow).not.toHaveAttribute('title');
     expect(olderNow).toBeEnabled();
@@ -207,16 +208,54 @@ describe('Drawer ▶ — waits for the first leader-status answer', () => {
 
   it('Ziel: ▶ Im Simulator ansehen is disabled with the hint, then enabled', () => {
     const { onPreview, pinId, provider } = setup({ tab: 'ziele', focus: 'pin', previewPending: true });
-    const btn = screen.getByRole('button', { name: DE.PREVIEW_START });
+    const detail = () => screen.getByRole('region', { name: 'Ablage' });
+    const btn = within(detail()).getByRole('button', { name: DE.PREVIEW_START });
     expect(btn).toBeDisabled();
     expect(btn).toHaveAttribute('title', DE.PREVIEW_BLOCK_LEADER_PENDING);
     fireEvent.click(btn);
     expect(onPreview).not.toHaveBeenCalled();
     act(() => { provider.setSnapshot({ capabilities: { previewPending: false } }); });
-    const now = screen.getByRole('button', { name: DE.PREVIEW_START });
+    const now = within(detail()).getByRole('button', { name: DE.PREVIEW_START });
     expect(now).toBeEnabled();
     expect(now).not.toHaveAttribute('title');
     fireEvent.click(now);
     expect(onPreview).toHaveBeenLastCalledWith({ kind: 'pin', id: pinId, name: 'Ablage' }, { tempo: 1.0 });
+  });
+});
+
+// Every previewable ROW carries its own play button, beside the row (the
+// detail need not be open); it plays like the flyout card's (no tempo).
+describe('Drawer rows — a play button per previewable row', () => {
+  it('a recording row plays its newest version; a Ziel row plays the Ziel', () => {
+    const { onPreview, pinId } = setup({ focus: null });
+    const rowPlay = (name) => {
+      // eslint-disable-next-line testing-library/no-node-access
+      const row = screen.getByRole('button', { name: new RegExp(`^${name}`) }).parentElement;
+      return within(row).getByRole('button', { name: DE.PREVIEW_START });
+    };
+    const play = rowPlay('Winken');
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(play.querySelector('svg[data-icon="play"]')).toHaveAttribute('aria-hidden', 'true');
+    expect(play).toHaveAttribute('title', DE.PREVIEW_START);
+    fireEvent.click(play);
+    expect(onPreview).toHaveBeenLastCalledWith({
+      kind: 'recording', id: 't3', name: 'Winken', robotProfile: 'omx_f',
+    });
+    fireEvent.click(screen.getByRole('tab', { name: /Ziele/ }));
+    fireEvent.click(rowPlay('Ablage'));
+    expect(onPreview).toHaveBeenLastCalledWith({ kind: 'pin', id: pinId, name: 'Ablage' });
+  });
+
+  it('waits for the first leader-status answer, and is absent without the capability', () => {
+    const { onPreview, provider } = setup({ focus: null, previewPending: true });
+    const play = () => screen.getByRole('button', { name: DE.PREVIEW_START });
+    expect(play()).toBeDisabled();
+    expect(play()).toHaveAttribute('title', DE.PREVIEW_BLOCK_LEADER_PENDING);
+    fireEvent.click(play());
+    expect(onPreview).not.toHaveBeenCalled();
+    act(() => { provider.setSnapshot({ capabilities: { previewPending: false } }); });
+    expect(play()).toBeEnabled();
+    act(() => { provider.setSnapshot({ capabilities: { preview: false } }); });
+    expect(screen.queryByRole('button', { name: DE.PREVIEW_START })).toBeNull();
   });
 });

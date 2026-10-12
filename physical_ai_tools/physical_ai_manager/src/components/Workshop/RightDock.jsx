@@ -8,9 +8,12 @@
  *     http://www.apache.org/licenses/LICENSE-2.0
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { DE } from './blocks/messages_de';
 import Icon from '../icons/Icon';
+import ResizeHandle from './layout/ResizeHandle';
+import { DOCK_SPLIT, readDockSplit, writeDockSplit } from './layout/layoutPrefs';
+import { LAYOUT_DE, fillLayout } from './layout/layoutCopy';
 
 // Roboter Studio right dock — the tabbed, collapsible tool panel that replaced
 // the tall stacked right column (camera + jog + record + 3D + Lernpfad, all
@@ -32,23 +35,13 @@ import Icon from '../icons/Icon';
 // JogPanel would fire its unmount teardown (re-torque the arm). Panels unmount
 // ONLY on a deliberate close,
 // evict, or dock collapse.
-
-const SPLIT_STORAGE_KEY = 'edubotics_workshop_dock_split';
-const SPLIT_MIN = 0.18;
-const SPLIT_MAX = 0.82;
-const SPLIT_DEFAULT = 0.5;
-
-function readSplit() {
-  try {
-    const raw = window.localStorage.getItem(SPLIT_STORAGE_KEY);
-    if (raw == null) return SPLIT_DEFAULT;
-    const n = Number(raw);
-    if (!Number.isFinite(n)) return SPLIT_DEFAULT;
-    return Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, n));
-  } catch (e) {
-    return SPLIT_DEFAULT;
-  }
-}
+//
+// SIZES are CSS variables, each written only by its layout/ResizeHandle.jsx:
+// the dock's WIDTH is `--dock-w`, set on the editor row by the page's divider
+// (this aside only reads it — it must never set it in its own `style`, which
+// would shadow the row's value), and the two-panel split is `--dock-split`, set
+// on the body by the divider below. A drag changes only the variable, so the
+// panels never re-render while it runs.
 
 /**
  * @param {Array<{id:string,label:string,icon:string,render:()=>React.ReactNode,
@@ -59,8 +52,6 @@ function readSplit() {
  *   first when collapsed). The parent owns the busy-pin + 2-cap logic.
  * @param {(id:string)=>void} onCloseTab - the per-panel ✕ (close only).
  * @param {()=>void} onToggleCollapsed - fold/unfold the whole dock.
- * @param {number} width - desktop dock width in px (from the drag divider). Wired
- *   through a `--dock-w` CSS var so `w-full` still wins on mobile.
  */
 function RightDock({
   tabs = [],
@@ -69,13 +60,9 @@ function RightDock({
   onToggleTab,
   onCloseTab,
   onToggleCollapsed,
-  width = 380,
 }) {
-  const [split, setSplit] = useState(readSplit);
-  const bodyRef = useRef(null);
-  const draggingRef = useRef(false);
-  const splitRef = useRef(split);
-  useEffect(() => { splitRef.current = split; }, [split]);
+  // The committed two-panel split (the share of the TOP panel).
+  const [split, setSplit] = useState(readDockSplit);
 
   const visibleTabs = tabs.filter((t) => t && !t.hidden);
   // Resolve open ids → tab objects, dropping hidden/unknown ids (e.g. a
@@ -84,30 +71,6 @@ function RightDock({
     .map((id) => visibleTabs.find((t) => t.id === id))
     .filter(Boolean);
   const twoUp = openTabs.length === 2;
-
-  const persistSplit = useCallback((value) => {
-    try {
-      window.localStorage.setItem(SPLIT_STORAGE_KEY, String(value));
-    } catch (e) { /* quota / private mode — keep the in-memory value */ }
-  }, []);
-
-  const onDividerDown = useCallback((e) => {
-    draggingRef.current = true;
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) { /* jsdom */ }
-  }, []);
-  const onDividerMove = useCallback((e) => {
-    if (!draggingRef.current || !bodyRef.current) return;
-    const rect = bodyRef.current.getBoundingClientRect();
-    if (!rect.height) return;
-    const frac = (e.clientY - rect.top) / rect.height;
-    setSplit(Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, frac)));
-  }, []);
-  const onDividerUp = useCallback((e) => {
-    if (!draggingRef.current) return;
-    draggingRef.current = false;
-    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) { /* jsdom */ }
-    persistSplit(splitRef.current);
-  }, [persistSplit]);
 
   const railButton = (tab) => {
     const active = openIds.includes(tab.id);
@@ -141,7 +104,6 @@ function RightDock({
 
   return (
     <aside
-      style={collapsed ? undefined : { '--dock-w': `${width}px` }}
       // Below md the dock stacks UNDER the editor. Expanded it takes exactly
       // half the row (`h-1/2`): the Blockly editor keeps the other half, and the
       // panels get a DEFINITE height to share — content-sized, two open panels
@@ -151,7 +113,7 @@ function RightDock({
         'flex flex-col md:flex-row shrink-0 w-full md:h-full '
         + (collapsed ? '' : 'h-1/2 ')
         + 'border-t md:border-t-0 md:border-l border-[var(--line)] bg-[var(--bg-sunk)] '
-        + (collapsed ? 'md:w-[52px]' : 'md:w-[var(--dock-w)]')
+        + (collapsed ? 'md:w-[52px]' : 'md:w-[var(--dock-w,380px)]')
       }
       aria-label="Werkzeuge"
     >
@@ -159,7 +121,6 @@ function RightDock({
           the rail on the RIGHT on desktop and at the bottom on mobile. */}
       {!collapsed && (
         <div
-          ref={bodyRef}
           className="order-2 md:order-1 flex-1 min-w-0 min-h-0 flex flex-col p-2 gap-2 overflow-hidden"
         >
           {openTabs.length === 0 ? (
@@ -172,18 +133,28 @@ function RightDock({
           ) : (
             openTabs.map((tab, i) => (
               <React.Fragment key={tab.id}>
+                {/* The split divider: inside the SAME Fragment, before the
+                    second section, so the sections keep their keys and stay
+                    direct children of this body. Shown below md too — there
+                    the expanded dock is half the row and two panels share it. */}
                 {twoUp && i === 1 && (
-                  <div
-                    role="separator"
-                    aria-orientation="horizontal"
-                    onPointerDown={onDividerDown}
-                    onPointerMove={onDividerMove}
-                    onPointerUp={onDividerUp}
-                    title="Größe ändern"
-                    className="shrink-0 h-2 -my-0.5 flex items-center justify-center cursor-row-resize group"
-                  >
-                    <span className="w-10 h-1 rounded-full bg-[var(--line-2)] group-hover:bg-[var(--accent)]" />
-                  </div>
+                  <ResizeHandle
+                    orientation="horizontal"
+                    cssVar="--dock-split"
+                    unit="fraction"
+                    value={split}
+                    defaultValue={DOCK_SPLIT.default}
+                    bounds={() => ({ min: DOCK_SPLIT.min, max: DOCK_SPLIT.max })}
+                    fromPointer={(e, r) => (e.clientY - r.top) / r.height}
+                    growKey="ArrowDown"
+                    step={0.02}
+                    largeStep={0.1}
+                    label={LAYOUT_DE.DOCK_SPLIT}
+                    valueText={(v) => fillLayout(LAYOUT_DE.VALUE_PERCENT, Math.round(v * 100))}
+                    onCommit={(v) => { setSplit(v); writeDockSplit(v); }}
+                    showBelowMd
+                    className="-my-0.5"
+                  />
                 )}
                 <section
                   className={
@@ -191,7 +162,9 @@ function RightDock({
                     + 'border-[var(--line)] bg-white '
                     + (twoUp ? '' : 'flex-1')
                   }
-                  style={twoUp ? { flex: `${i === 0 ? split : 1 - split} 1 0px` } : undefined}
+                  style={twoUp
+                    ? { flex: i === 0 ? 'var(--dock-split,0.5) 1 0px' : 'calc(1 - var(--dock-split,0.5)) 1 0px' }
+                    : undefined}
                   aria-label={tab.label}
                 >
                   <div className="flex items-center justify-between gap-2 px-2.5 py-1 border-b border-[var(--line)] bg-[var(--bg-sunk)] shrink-0">

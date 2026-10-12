@@ -132,7 +132,6 @@ const initialState = {
   // Editor state
   selectedWorkflowId: null,
   unsavedBlocklyJson: null,
-  lastSavedAt: null,
   // Phase-3 tutorial / skillmap state
   activeTutorialId: null,
   activeTutorialStep: 0,
@@ -564,7 +563,6 @@ const workshopSlice = createSlice({
       state.unsavedBlocklyJson = action.payload;
     },
     markWorkflowSaved: (state) => {
-      state.lastSavedAt = Date.now();
       state.unsavedBlocklyJson = null;
     },
 
@@ -602,7 +600,6 @@ const workshopSlice = createSlice({
     builder.addCase(signedOut, (state) => {
       state.selectedWorkflowId = null;
       state.unsavedBlocklyJson = null;
-      state.lastSavedAt = null;
       // A half-finished tutorial AND the toolbox restriction it imposes.
       // `setActiveTutorial({id:null})` alone does NOT clear restrictedBlocks,
       // which is how the previous enumeration left the next student's toolbox

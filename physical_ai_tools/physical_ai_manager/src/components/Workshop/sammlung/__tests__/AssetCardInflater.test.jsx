@@ -27,11 +27,14 @@ import {
   ASSET_CARD_FLYOUT_TYPE,
   AssetCard,
   AssetCardInflater,
+  cardTextMeasure,
+  fitCardText,
   highlightAssetFor,
   layoutChips,
   registerAssetCardInflater,
 } from '../AssetCardInflater';
 import { registerDestinationSerializer } from '../destinationStore';
+import { registerToolboxHeading } from '../ToolboxHeading';
 
 // Blockly dispatches events via requestAnimationFrame(() => setTimeout(fireNow, 0)).
 const flushEvents = async () => {
@@ -74,6 +77,9 @@ beforeAll(() => {
   registerDestinationBlocks();
   registerDestinationSerializer();
   registerAssetCardInflater();
+  // buildToolbox() carries the two `heading` items: register them like
+  // BlocklyWorkspace does (an unregistered kind is skipped with a warning).
+  registerToolboxHeading();
 });
 
 beforeEach(() => {
@@ -344,7 +350,7 @@ describe('AssetCardInflater', () => {
     expect(playIcon.getAttribute('stroke')).toBe('#374151');
     // A media control: filled in its stroke colour (review round 1, B2).
     expect(playIcon.getAttribute('fill')).toBe('#374151');
-    expect(playIcon.getAttribute('transform')).toBe(`translate(5,5) scale(${14 / 24})`);
+    expect(playIcon.getAttribute('transform')).toBe(`translate(8,8) scale(${16 / 24})`);
     expect(manage.querySelector('g[data-icon="more"]').querySelectorAll('circle')).toHaveLength(3);
     expect(play.querySelector('text')).toBeNull();
     expect(manage.querySelector('text')).toBeNull();
@@ -361,9 +367,9 @@ describe('AssetCardInflater', () => {
     const card = new AssetCardInflater().load(cardState({ canPreview: false, chips: [] }), flyout).getElement();
     expect(card.getSvgRoot().querySelector(`[aria-label="${DE.PREVIEW_START}"]`)).toBeNull();
     expect(card.getSvgRoot().querySelector(`[aria-label="${DE.CARD_MANAGE}"]`)).not.toBeNull();
-    expect(card.getBoundingRectangle().getHeight()).toBe(38);
+    expect(card.getBoundingRectangle().getHeight()).toBe(46);
     card.moveBy(10, 20);
-    expect(card.getBoundingRectangle()).toMatchObject({ top: 20, left: 10, right: 250, bottom: 58 });
+    expect(card.getBoundingRectangle()).toMatchObject({ top: 20, left: 10, right: 250, bottom: 66 });
     card.dispose();
   });
 
@@ -380,7 +386,7 @@ describe('AssetCardInflater', () => {
     for (const c of chips) expect(texts).toContain(c.text);
     const rows = new Set(layoutChips(chips).map((p) => p.row));
     expect(rows.size).toBeGreaterThan(1);
-    expect(card.getBoundingRectangle().getHeight()).toBe(38 + 20 * rows.size);
+    expect(card.getBoundingRectangle().getHeight()).toBe(46 + 20 * rows.size);
     for (const p of layoutChips(chips)) expect(p.x + p.width).toBeLessThanOrEqual(232);
     card.dispose();
   });
@@ -425,7 +431,8 @@ describe('Sammlung cards — ▶ waits for the first leader-status answer', () =
     [card] = cardsOf(flyout);
     play = playOf(card);
     expect(play.getAttribute('aria-disabled')).toBeNull();
-    expect(titleOf(play)).toBeNull();
+    // Enabled: its tooltip is its label.
+    expect(titleOf(play)).toBe(DE.PREVIEW_START);
     tap(play, 52);
     await flushEvents();
     expect(dispatched).toEqual([{
@@ -445,11 +452,110 @@ describe('Sammlung cards — ▶ waits for the first leader-status answer', () =
     }
     const ready = inflater.load(cardState(), flyout).getElement();
     expect(playOf(ready).getAttribute('aria-disabled')).toBeNull();
-    expect(titleOf(playOf(ready))).toBeNull();
+    expect(titleOf(playOf(ready))).toBe(DE.PREVIEW_START);
     ready.dispose();
     // No ▶ at all stays no ▶ at all.
     const none = inflater.load(cardState({ canPreview: false, previewPending: true }), flyout).getElement();
     expect(playOf(none)).toBeNull();
     none.dispose();
+  });
+});
+
+// Owner decisions D + m-g: 32-px controls with tooltips, the grey „nicht
+// benutzt" chip, and a title that fits left of the controls.
+describe('Sammlung cards — controls, chips, fitted text', () => {
+  const titleOf = (el) => {
+    const t = Array.from(el.childNodes).find((n) => n.nodeName.toLowerCase() === 'title');
+    return t ? t.textContent : null;
+  };
+
+  it('the play and more controls are 32 × 32 at x 168 / 204, each with its tooltip', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN);
+    const card = new AssetCardInflater().load(cardState(), flyout).getElement();
+    const play = card.getSvgRoot().querySelector(`[role="button"][aria-label="${DE.PREVIEW_START}"]`);
+    const manage = card.getSvgRoot().querySelector(`[role="button"][aria-label="${DE.CARD_MANAGE}"]`);
+    expect(play.getAttribute('transform')).toBe('translate(168,7)');
+    expect(manage.getAttribute('transform')).toBe('translate(204,7)');
+    for (const control of [play, manage]) {
+      const rect = control.querySelector('rect');
+      expect(rect.getAttribute('width')).toBe('32');
+      expect(rect.getAttribute('height')).toBe('32');
+    }
+    expect(titleOf(play)).toBe(DE.PREVIEW_START);
+    expect(titleOf(manage)).toBe(DE.CARD_MANAGE);
+    card.dispose();
+  });
+
+  it('„nicht benutzt" is the grey muted chip; the first chip row sits at y 48', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN);
+    const card = new AssetCardInflater()
+      .load(cardState({ chips: [{ text: DE.CHIP_UNUSED, level: 'muted' }] }), flyout).getElement();
+    const chipRect = Array.from(card.getSvgRoot().children)
+      .find((el) => el.tagName.toLowerCase() === 'rect' && el.getAttribute('rx') === '8');
+    expect(chipRect.getAttribute('fill')).toBe('#f3f4f6');
+    expect(chipRect.getAttribute('y')).toBe('48');
+    const chipText = Array.from(card.getSvgRoot().querySelectorAll('text'))
+      .find((t) => t.textContent === DE.CHIP_UNUSED);
+    expect(chipText.getAttribute('fill')).toBe('#4b5563');
+    expect(card.getBoundingRectangle().getHeight()).toBe(66);
+    card.dispose();
+  });
+
+  it('fitCardText: unchanged when it fits (exactly too), else the longest prefix + „…"', () => {
+    const measure = (t) => t.length * 10;
+    const fifteen = 'ABCDEFGHIJKLMNO';
+    expect(fitCardText(fifteen, 150, measure)).toBe(fifteen);
+    const forty = 'A'.repeat(40);
+    const cut = fitCardText(forty, 150, measure);
+    expect(cut).toBe(`${'A'.repeat(14)}…`);
+    expect(measure(cut)).toBeLessThanOrEqual(150);
+    // A trailing space is never left before „…".
+    expect(fitCardText(`${'A'.repeat(13)} BBBBBBBBBB`, 150, measure)).toBe(`${'A'.repeat(13)}…`);
+    expect(fitCardText('', 150, measure)).toBe('');
+    // Code points, not UTF-16 units.
+    expect(fitCardText('ÄÖÜäöüß'.repeat(4), 60, measure)).toBe('ÄÖÜäö…');
+  });
+
+  it('cardTextMeasure: without OffscreenCanvas (jsdom) 0.95 × the font size per character', () => {
+    expect(typeof OffscreenCanvas).toBe('undefined');
+    expect(cardTextMeasure(600, 13)('Ablage')).toBeCloseTo(6 * 0.95 * 13);
+  });
+
+  it('a long title is cut left of the play control and its full text is the card\'s first-child <title>', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN);
+    const long = 'Eine Bewegung mit einem sehr langen Namen';
+    const card = new AssetCardInflater()
+      .load(cardState({ assetName: long, title: long, meta: '' }), flyout).getElement();
+    const root = card.getSvgRoot();
+    expect(root.firstChild.nodeName.toLowerCase()).toBe('title');
+    expect(root.firstChild.textContent).toBe(long);
+    expect(root.getAttribute('aria-label')).toBe(long);
+    const drawn = root.querySelector('text').textContent;
+    expect(drawn.endsWith('…')).toBe(true);
+    expect(long.startsWith(drawn.slice(0, -1))).toBe(true);
+    // The room with a play control: 168 − 6 − 12 = 150 px at the jsdom estimate.
+    const measure = cardTextMeasure(600, 13);
+    expect(measure(drawn)).toBeLessThanOrEqual(150);
+    expect(drawn).toBe(fitCardText(long, 150, measure));
+    card.dispose();
+  });
+
+  it('without a play control the title has 186 px', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN);
+    const long = 'Eine Bewegung mit einem sehr langen Namen';
+    const card = new AssetCardInflater()
+      .load(cardState({ assetName: long, title: long, canPreview: false }), flyout).getElement();
+    const measure = cardTextMeasure(600, 13);
+    const drawn = card.getSvgRoot().querySelector('text').textContent;
+    expect(drawn).toBe(fitCardText(long, 186, measure));
+    expect(drawn.length).toBeGreaterThan(fitCardText(long, 150, measure).length);
+    card.dispose();
+  });
+
+  it('a short title is drawn as it is, without „…"', () => {
+    const flyout = openCategory(SAMMLUNG_TOOLBOX_IDS.AUFNAHMEN);
+    const card = new AssetCardInflater().load(cardState(), flyout).getElement();
+    expect(card.getSvgRoot().querySelector('text').textContent).toBe('Ablage');
+    card.dispose();
   });
 });

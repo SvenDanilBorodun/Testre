@@ -127,6 +127,12 @@ const boxStyle = {
 };
 const modalStyle = { ...boxStyle, textAlign: 'left' };
 
+// The two header buttons („Leader abschalten" / „Leader verbinden"): compact,
+// to fit the studio header's action row beside the simulator toggle.
+const TOGGLE_BUTTON_CLASS = 'text-xs px-3 py-1.5 rounded-md border border-[var(--line)] bg-white '
+  + 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed '
+  + 'whitespace-nowrap';
+
 // `lockedReason` (string | null): while set — Vormachen is open and owns the
 // arm — the three toggle buttons are disabled and carry it as their title; the
 // readiness overlay's „Trotzdem fortfahren" is unaffected.
@@ -356,10 +362,12 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
   }
 
   return (
-    <div className="leader-toggle" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+    // Compact, to sit in the studio header beside the simulator toggle.
+    <div className="leader-toggle flex items-center gap-2">
       {!followerOnly ? (
         <button
           type="button"
+          className={TOGGLE_BUTTON_CLASS}
           disabled={busy || taskBusy || !!lockedReason}
           onClick={() => doToggle(true)}
           title={lockedReason || (taskBusy
@@ -370,12 +378,13 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
         </button>
       ) : (
         <>
-          <span style={{ color: '#1a7f37', fontWeight: 600 }}>
-            <Icon name="dot" size="0.6em" fill="currentColor" style={{ marginRight: 6, verticalAlign: 'middle' }} />
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1a7f37] whitespace-nowrap">
+            <Icon name="dot" size="0.6em" fill="currentColor" />
             Leader abgeschaltet — Roboter Studio aktiv
           </span>
           <button
             type="button"
+            className={TOGGLE_BUTTON_CLASS}
             disabled={busy || taskBusy || !!lockedReason}
             onClick={() => setShowReconnect(true)}
             title={lockedReason || (taskBusy ? 'Während Aufnahme/Inferenz nicht verfügbar.' : undefined)}
@@ -386,7 +395,7 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
       )}
 
       {taskBusy && (
-        <span style={{ color: '#9a6700', fontSize: 13 }}>
+        <span className="text-xs" style={{ color: '#9a6700' }}>
           Während Aufnahme/Inferenz nicht verfügbar
         </span>
       )}

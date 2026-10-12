@@ -41,7 +41,7 @@ const settle = async () => {
   await new Promise((resolve) => { setTimeout(resolve, 0); });
 };
 
-const MISSING_RECORDING = 'Eine Aufnahme „Tanz" gibt es in diesem Workflow nicht. Nimm sie auf oder wähle eine vorhandene.';
+const MISSING_RECORDING = 'Eine Bewegung „Tanz" gibt es in diesem Workflow nicht. Mach sie vor oder wähle eine vorhandene.';
 const MISSING_DESTINATION = '„Ablage" ist nicht in deiner Sammlung — lege das Ziel neu an oder wähle ein vorhandenes.';
 
 let host;

@@ -16,7 +16,7 @@ import { buildToolbox } from './blocks/toolbox';
 import { DE } from './blocks/messages_de';
 import { registerMotionBlocks, attachMotionWorkspaceValidators } from './blocks/motion';
 import { registerPerceptionBlocks } from './blocks/perception';
-import { registerDestinationBlocks } from './blocks/destinations';
+import { registerDestinationBlocks, setDestinationKindResolver } from './blocks/destinations';
 import { registerOutputBlocks } from './blocks/output';
 import { registerEventBlocks } from './blocks/events';
 import {
@@ -28,9 +28,10 @@ import { registerCounterBlocks } from './blocks/counters';
 import { registerTrajectoryBlocks } from './blocks/trajectories';
 import { registerProcedureCallArgumentFix } from './blocks/procedures';
 import { attachSavedValueWarnings } from './blocks/savedValueWarnings';
-import { registerDestinationSerializer } from './sammlung/destinationStore';
+import { getDestinationStore, registerDestinationSerializer } from './sammlung/destinationStore';
 import { registerAssetCardInflater } from './sammlung/AssetCardInflater';
 import { registerIconButtonInflater } from './sammlung/IconButtonInflater';
+import { registerToolboxHeading } from './sammlung/ToolboxHeading';
 import { registerSammlungCategories } from './sammlung/toolboxCategories';
 import { attachAssetReferenceValidators } from './sammlung/referenceValidators';
 import { EMPTY_SAMMLUNG_PROVIDER } from './sammlung/provider';
@@ -51,10 +52,16 @@ function registerAllBlocksOnce() {
   // Explicit, never at module import: blocklyPayload.test.js pins the CORE
   // serializer inventory and page tests mock `blockly/core` minimally.
   registerDestinationSerializer();
+  // „Ziel <name>" / „Position <name>" on a reference block: the kind of the
+  // name in the document's store (blocks/destinations.js, R0-6).
+  setDestinationKindResolver((ws, name) => (getDestinationStore(ws).getByName(name.trim()) || {}).kind || null);
   // The Sammlung flyout card item and the icon button (registry CLASSES,
   // instantiated per flyout).
   registerAssetCardInflater();
   registerIconButtonInflater();
+  // The toolbox headings („Meine Sammlung", „Bausteine"); Blockly skips an
+  // unregistered item kind, so this precedes the first inject.
+  registerToolboxHeading();
   blankNonGermanHelpUrls();
   blocksRegistered = true;
 }
@@ -312,6 +319,21 @@ function hideCornerControlsThatDoNotFit(workspace, droppedTargets) {
   if (targetsChanged) workspace.recordDragTargets();
 }
 
+// A workspace serialization detached from the editor, in both directions.
+// `@blockly/suggested-blocks` serializes by handing out its OWN lookup object
+// and recently-used array and loads by ADOPTING the objects it is given. The
+// page dispatches what `handleChange` reports into Redux, whose Immer
+// deep-freezes it, and remounts the editor from that store copy; frozen plugin
+// state made every BLOCK_CREATE throw inside the plugin's listener, which
+// aborted Blockly's event batch before `handleChange` heard it (a paste, a
+// duplicate or „Als Programm einfügen" never marked the document unsaved).
+function detachedCopy(json) {
+  if (json === null || typeof json !== 'object') return json;
+  return typeof structuredClone === 'function'
+    ? structuredClone(json)
+    : JSON.parse(JSON.stringify(json));
+}
+
 // Runs synchronously right after inject and BEFORE the initial JSON loads, so
 // the backpack + suggested-blocks serializers restore their (autosaved) state.
 function initPlugins(workspace, { search, backpack, zoomToFit, suggested }, { readOnly, hasInitialJson }) {
@@ -525,7 +547,7 @@ function BlocklyWorkspace({
       let loadingInitial = !!initialJson;
       if (initialJson) {
         try {
-          Blockly.serialization.workspaces.load(initialJson, workspace);
+          Blockly.serialization.workspaces.load(detachedCopy(initialJson), workspace);
         } catch (e) {
           console.error('BlocklyWorkspace: failed to load initial JSON', e);
           // A load that threw fires no FINISHED_LOADING; forward again at once
@@ -543,8 +565,10 @@ function BlocklyWorkspace({
         const fn = onChangeRef.current;
         if (typeof fn !== 'function') return;
         try {
-          const json = Blockly.serialization.workspaces.save(workspace);
-          fn(json);
+          const json = detachedCopy(Blockly.serialization.workspaces.save(workspace));
+          // The event rides along: the page counts only a non-UI event as an
+          // edit (a selection or a flyout opening changes no document).
+          fn(json, event);
         } catch (e) {
           console.error('BlocklyWorkspace: failed to serialize', e);
         }

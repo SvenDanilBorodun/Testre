@@ -56,8 +56,8 @@ describe('replay-trajectory block', () => {
     }
   });
 
-  // The replay block left the static „Bewegung" category: the „Aufnahmen"
-  // group offers it (prefilled per recording, generic otherwise). That the
+  // The replay block left the static motion category („Arm"): the
+  // „Bewegungen" group offers it (prefilled per recording, generic otherwise). That the
   // flyout really emits it is pinned in sammlung/__tests__/toolboxCategories.test.jsx.
   test('the replay block is offered by the Aufnahmen group', () => {
     expect(SAMMLUNG_BASE_BLOCKS).toContainEqual({ kind: 'block', type: REPLAY_BLOCK_TYPE });

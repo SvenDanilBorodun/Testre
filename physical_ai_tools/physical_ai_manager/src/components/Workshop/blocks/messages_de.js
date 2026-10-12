@@ -20,8 +20,10 @@ export const WORKSPACE_BOUNDS_M = {
 };
 
 export const DE = {
-  // Toolbox categories
-  CATEGORY_BEWEGUNG: 'Bewegung',
+  // Toolbox categories. CATEGORY_BEWEGUNG is the static motion category, named
+  // „Arm" (owner decision S-1), so „Bewegungen" means only the recorded
+  // motions of the Sammlung; the key keeps its name.
+  CATEGORY_BEWEGUNG: 'Arm',
   CATEGORY_WAHRNEHMUNG: 'Wahrnehmung',
   CATEGORY_EREIGNISSE: 'Ereignisse',
   CATEGORY_ZIELE: 'Ziele',
@@ -34,6 +36,10 @@ export const DE = {
   CATEGORY_AUSGABE: 'Ausgabe',
   CATEGORY_ZAEHLER: 'Zähler',
   CATEGORY_VORSCHLAEGE: 'Vorschläge',
+  // The two toolbox headings (sammlung/ToolboxHeading.js): over the four
+  // Sammlung groups and over the static categories.
+  TOOLBOX_HEADING_SAMMLUNG: 'Meine Sammlung',
+  TOOLBOX_HEADING_BAUSTEINE: 'Bausteine',
   // Shown in „Vorschläge" before the student has used any block. Replaces the
   // English placeholder @blockly/suggested-blocks hardcodes (BlocklyWorkspace).
   SUGGESTED_EMPTY: 'Noch keine Blöcke benutzt — hier erscheinen die, die du oft verwendest.',
@@ -158,7 +164,11 @@ export const DE = {
   // Destinations
   DESTINATION_PIN: 'setze %1 = Pin (Klick auf Szenenkamera)',
   DESTINATION_CURRENT: 'setze %1 = aktuelle Position',
-  DESTINATION_REF: 'Ziel %1',
+  // The value reference names its kind: %1 = „Ziel" or „Position" (a
+  // non-serializable label, blocks/destinations.js), %2 = the name.
+  DESTINATION_REF: '%1 %2',
+  DESTINATION_REF_ZIEL: 'Ziel',
+  DESTINATION_REF_POSE: 'Position',
 
   // Output
   LOG: 'melde %1',
@@ -195,11 +205,6 @@ export const DE = {
   TOOLBAR_PDF_EXPORT: 'Als PDF exportieren',
   TOOLBAR_THEME: 'Farbschema',
   TOOLBAR_SETTINGS: 'Einstellungen',
-  AUTOSAVE_LABEL: 'Letzte Speicherung',
-  AUTOSAVE_NEVER: 'noch nicht gespeichert',
-  AUTOSAVE_JUST_NOW: 'gerade eben',
-  AUTOSAVE_SECONDS_AGO: 'vor %1 s',
-  AUTOSAVE_MINUTES_AGO: 'vor %1 min',
   AUTOSAVE_QUOTA_FULL:
     'Browser-Speicher voll. Bitte einige gespeicherte Workflows löschen oder Cache leeren.',
   AUTOSAVE_TOO_BIG:
@@ -331,7 +336,7 @@ export const DE = {
   // Simulator previews (utils/simPreview.js::previewMessageDe). The server's
   // lead-in refusal advises lifting the arm — impossible in a simulator.
   PREVIEW_LEAD_IN_BELOW_TABLE:
-    'Die Aufnahme beginnt unter dem Tisch des Simulators — im Simulator kann sie nicht abgespielt werden.',
+    'Die Bewegung beginnt unter dem Tisch des Simulators — im Simulator kann sie nicht abgespielt werden.',
   // Card ▶ aria-label (sammlung/AssetCardInflater.js) and the drawer's preview
   // section heading / Ziel button (sammlung/DrawerRecording.jsx, DrawerPlace.jsx).
   PREVIEW_START: 'Im Simulator ansehen',
@@ -392,7 +397,7 @@ export const DE = {
   MARKER_PIN_REAL_SUFFIX: '(z ≈)',
 
   // Sammlung toolbox groups (blocks/toolbox.js + sammlung/toolboxCategories.js).
-  CATEGORY_AUFNAHMEN: 'Aufnahmen',
+  CATEGORY_AUFNAHMEN: 'Bewegungen',
   CATEGORY_POSITIONEN: 'Positionen',
   // Also the window titles of the three focused Vormachen windows
   // (teach/teachGates.js::TEACH_KIND_LABEL_DE); the kind icon is drawn beside
@@ -408,10 +413,10 @@ export const DE = {
   FLY_SECTION_PROGRAM: 'Im Programm gesetzt',
   FLY_SECTION_YOURS: 'Deine Ziele',
   FLY_RECORDINGS_COUNT: '%1 von 16',
-  FLY_RECORDINGS_LOADING: 'Aufnahmen werden geladen …',
-  FLY_RECORDINGS_ERROR: 'Aufnahmen konnten nicht geladen werden.',
-  FLY_RECORDINGS_EMPTY: 'Noch keine Aufnahmen.',
-  FLY_RECORDINGS_TEACHER: 'Aufnahmen gehören zu einem Schüler-Workflow.',
+  FLY_RECORDINGS_LOADING: 'Bewegungen werden geladen …',
+  FLY_RECORDINGS_ERROR: 'Bewegungen konnten nicht geladen werden.',
+  FLY_RECORDINGS_EMPTY: 'Noch keine Bewegungen.',
+  FLY_RECORDINGS_TEACHER: 'Bewegungen gehören zu einem Schüler-Workflow.',
   FLY_PLACES_EMPTY: 'Noch keine Ziele in deiner Sammlung.',
   FLY_POSES_EMPTY: 'Noch keine Positionen.',
   FLY_COUNT_VARIABLEN_ONE: '1 Variable',
@@ -444,8 +449,8 @@ export const DE = {
   CHIP_UNUSED: 'nicht benutzt',
   CHIP_VERSIONS: '%1 Versionen',
   CHIP_MISSING: 'fehlt',
-  CHIP_SEARCHED_ONE_RECORDING: '1 Block sucht diese Aufnahme',
-  CHIP_SEARCHED_MANY_RECORDING: '%1 Blöcke suchen diese Aufnahme',
+  CHIP_SEARCHED_ONE_RECORDING: '1 Block sucht diese Bewegung',
+  CHIP_SEARCHED_MANY_RECORDING: '%1 Blöcke suchen diese Bewegung',
   CHIP_OTHER_ROBOT: 'anderer Roboter',
   CHIP_OVERRIDDEN: 'im Programm überschrieben',
   CHIP_SIM_REFUSED: 'im Simulator abgelehnt',
@@ -454,7 +459,7 @@ export const DE = {
   // Keyed canvas warnings for names the program uses but the workflow does not
   // have (sammlung/referenceValidators.js).
   WARN_MISSING_RECORDING:
-    'Eine Aufnahme „%1" gibt es in diesem Workflow nicht. Nimm sie auf oder wähle eine vorhandene.',
+    'Eine Bewegung „%1" gibt es in diesem Workflow nicht. Mach sie vor oder wähle eine vorhandene.',
   WARN_MISSING_DESTINATION:
     '„%1" ist nicht in deiner Sammlung — lege das Ziel neu an oder wähle ein vorhandenes.',
 
@@ -468,7 +473,7 @@ export const DE = {
   DRAWER_DURATION: 'Dauer',
   DRAWER_DURATION_VALUE: '%1 s · %2 Punkte · %3 Hz',
   DRAWER_ROBOT: 'Roboter',
-  DRAWER_ROBOT_LEGACY: 'OMX (alte Aufnahme)',
+  DRAWER_ROBOT_LEGACY: 'OMX (alte Bewegung)',
   DRAWER_RECORDED_AT: 'Aufgenommen',
   DRAWER_COORDS: 'Koordinaten',
   DRAWER_COORDS_VALUE: 'x %1 · y %2 · z %3 mm',
@@ -476,7 +481,7 @@ export const DE = {
   // A Position's captured gripper (S3 joints); the value is TEACH_GRIPPER_OPEN/_CLOSED.
   DRAWER_STATE: 'Zustand',
   DRAWER_USED_IN: 'Benutzt in',
-  DRAWER_USED_NOWHERE_RECORDING: 'Nirgends — ziehe den Block aus der Gruppe „Aufnahmen" ins Programm.',
+  DRAWER_USED_NOWHERE_RECORDING: 'Nirgends — ziehe den Block aus der Gruppe „Bewegungen" ins Programm.',
   DRAWER_USED_NOWHERE_PLACE: 'Nirgends — ziehe den Block aus der Gruppe „Ziele" ins Programm.',
   DRAWER_USED_NOWHERE_POSE: 'Nirgends — ziehe den Block aus der Gruppe „Positionen" ins Programm.',
   DRAWER_USED_NOWHERE_VARIABLE: 'Nirgends — ziehe den Block aus der Gruppe „Variablen" ins Programm.',
@@ -484,11 +489,19 @@ export const DE = {
   DRAWER_OLDER_VERSIONS: 'Ältere Versionen',
   DRAWER_VERSION_NOT_PLAYED: 'wird nicht abgespielt',
   DRAWER_DELETE_VERSION: 'Löschen',
-  DRAWER_DELETE_RECORDING: 'Aufnahme löschen',
+  DRAWER_DELETE_RECORDING: 'Bewegung löschen',
   DRAWER_DELETE_PLACE: 'Ziel löschen',
   DRAWER_DELETE_POSE: 'Position löschen',
   DRAWER_DELETE_VARIABLE: 'Variable löschen',
   DRAWER_EMPTY_TAB: 'Hier ist noch nichts.',
+  // An empty tab explains itself (SammlungDrawer.jsx); its „Neu" buttons follow.
+  DRAWER_EMPTY_AUFNAHMEN:
+    'Noch keine Bewegungen. Mach dem Roboter eine Bewegung vor – sie erscheint dann hier und als Block „spiele Bewegung“.',
+  DRAWER_EMPTY_ZIELE: 'Noch keine Ziele. Ein Ziel ist ein Punkt auf dem Tisch, zu dem der Roboter fährt.',
+  DRAWER_EMPTY_POSITIONEN: 'Noch keine Positionen. Eine Position merkt sich die ganze Armstellung – auch in der Luft.',
+  DRAWER_EMPTY_VARIABLEN: 'Noch keine Variablen. Sie erscheinen hier, sobald dein Programm eine anlegt.',
+  // A Ziel/Position's detail while the 3D view is not on screen (DrawerPlace.jsx).
+  DRAWER_SHOW_3D: 'In 3D zeigen',
   DRAWER_LAST_VALUE: 'Letzter Wert',
   DRAWER_LAST_VALUES: 'Zuletzt',
   DRAWER_NO_VALUE: 'Noch kein Wert — starte das Programm.',
@@ -506,16 +519,16 @@ export const DE = {
   TOAST_RENAMED: '„%1" heißt jetzt „%2".',
   ERR_RENAME_FAILED: 'Umbenennen fehlgeschlagen: %1',
   ERR_RENAME_SPLIT:
-    'Achtung: Die Aufnahme heißt jetzt „%1", der Workflow ist aber noch nicht gespeichert. Bitte erneut speichern.',
+    'Achtung: Die Bewegung heißt jetzt „%1", der Workflow ist aber noch nicht gespeichert. Bitte erneut speichern.',
   TOAST_DISMISS: 'Schließen',
   ERR_DELETE_FAILED: 'Löschen fehlgeschlagen: %1',
   ERR_REPLACED_LOST:
-    'Die ersetzte Aufnahme „%1" wurde dabei gelöscht und konnte nicht wiederhergestellt werden.',
+    'Die ersetzte Bewegung „%1" wurde dabei gelöscht und konnte nicht wiederhergestellt werden.',
   ERR_UNDO_FAILED: 'Rückgängig fehlgeschlagen: %1',
   ERR_UNDO_PARTIAL:
     'Rückgängig nur teilweise: %1 von %2 Versionen wiederhergestellt, nicht wiederhergestellt: %3 (%4).',
   UNDO_RATE_LIMIT_WAIT: 'Viele Versionen – die Wiederherstellung dauert etwa eine Minute …',
-  ERR_UNDO_NEWER_VERSION: 'Rückgängig nicht möglich: Von „%1" gibt es inzwischen eine neuere Aufnahme.',
+  ERR_UNDO_NEWER_VERSION: 'Rückgängig nicht möglich: Von „%1" gibt es inzwischen eine neuere Bewegung.',
   ERR_RECORDING_NAME:
     'Der Name darf nur Buchstaben, Ziffern, Leerzeichen, _ und - enthalten (höchstens 40 Zeichen).',
 
@@ -578,7 +591,7 @@ export const DE = {
   TEACH_STATE_LOCKED: 'Arm ist fest',
   TEACH_STATE_FREE: 'Arm ist frei — halte ihn fest',
   TEACH_STATE_REC: 'Aufnahme läuft',
-  TEACH_STATE_REVIEW: 'Aufnahme prüfen',
+  TEACH_STATE_REVIEW: 'Bewegung prüfen',
   TEACH_COUNTDOWN: 'Halte den Arm fest — %1',
   TEACH_HINT_LOCKED: 'F gibt den Arm frei. Die Leertaste zählt herunter und startet die Aufnahme.',
   TEACH_HINT_FREE: 'Bring den Arm an den Start. Leertaste startet die Aufnahme.',
@@ -600,10 +613,10 @@ export const DE = {
   TEACH_REVIEW_DISCARD: 'Verwerfen',
   TEACH_REVIEW_ON_ROBOT: 'Auf dem Roboter ansehen',
   TEACH_REVIEW_ON_ROBOT_LEADER: 'Mit eingeschaltetem Leader-Arm nicht möglich.',
-  TEACH_REVIEW_META: '%1 · %2 s · %3 Punkte',
+  TEACH_REVIEW_META: '%1 · %2 s',
   TEACH_ROBOT_PREVIEW_STOP: 'Stopp',
-  TEACH_SLOTS_LOW: 'Noch %1 Plätze für Aufnahmen frei.',
-  TEACH_SLOTS_FULL: 'Es gibt schon 16 Aufnahmen — beim Behalten wird die älteste gelöscht.',
+  TEACH_SLOTS_LOW: 'Noch %1 Plätze für Bewegungen frei.',
+  TEACH_SLOTS_FULL: 'Es gibt schon 16 Bewegungen — beim Behalten wird die älteste gelöscht.',
   TEACH_DONE: 'Fertig',
   TEACH_CONTINUE: 'Weiter vormachen',
   TEACH_CLOSE: 'Schließen',
@@ -646,6 +659,30 @@ export const DE = {
   TEACH_INSERT_ONE: 'Als Programm einfügen (1 Block)',
   TEACH_INSERT_DONE: '%1 Blöcke eingefügt.',
   TEACH_INSERT_DONE_ONE: '1 Block eingefügt.',
+  // During a take (TeachOverlay): the REC pill, „mm:ss / mm:ss" to the limit
+  // (teach/teachGates.js::TEACH_RECORD_MAX_S) and the progressbar's name.
+  TEACH_REC_BADGE: 'REC',
+  TEACH_REC_PROGRESS: '%1 / %2',
+  TEACH_REC_PROGRESS_ARIA: 'Aufnahmezeit, höchstens zwei Minuten',
+  // The review strip's time axis (teach/ReviewStrip.jsx).
+  TEACH_AXIS_SECONDS: '%1 s',
+  // In the simulator a Sammlung tab offers no Vormachen and says why
+  // (sammlung/newActions.js::teachHintFor). The flyout draws it as three short
+  // labels (teachHintLinesFor): one Blockly label wider than a card widens the
+  // whole flyout.
+  TEACH_SIM_HINT: 'Vormachen geht nur am echten Roboter – beende zuerst den Simulator.',
+  TEACH_SIM_HINT_LINE1: 'Vormachen geht nur am',
+  TEACH_SIM_HINT_LINE2: 'echten Roboter –',
+  TEACH_SIM_HINT_LINE3: 'beende zuerst den Simulator.',
+  // „Benutzt in" (sammlung/assetCommands.js::usageLabel): WHERE a block uses an
+  // asset. The frame carries no quotes; a name carries its own.
+  USAGE_STEP_IN: 'Schritt %1 in %2',
+  USAGE_IN: 'in %1',
+  USAGE_STACK_MAIN: 'Hauptprogramm',
+  USAGE_STACK_PART: 'Programmteil %1',
+  USAGE_STACK_FUNCTION: 'Funktion „%1“',
+  USAGE_STACK_HAT: '„%1“',
+  USAGE_LOOSE: 'liegt lose auf der Arbeitsfläche',
 };
 
 /**

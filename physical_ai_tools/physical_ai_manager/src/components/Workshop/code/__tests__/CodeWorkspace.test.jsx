@@ -18,7 +18,9 @@
 // the active file's content so the file-tree assertions can read it.
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import {
+  fireEvent, render, screen, waitFor,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
@@ -42,10 +44,12 @@ vi.mock('react-hot-toast', () => ({
   useToasterStore: () => ({ toasts: [] }),
 }));
 
-const editorMock = vi.hoisted(() => ({ throws: false }));
+const editorMock = vi.hoisted(() => ({ throws: false, props: null }));
 vi.mock('../CodeEditor', () => ({
   __esModule: true,
-  default: function MockCodeEditor({ path, value }) {
+  default: function MockCodeEditor(props) {
+    const { path, value } = props;
+    editorMock.props = props;
     // Stands in for the lazy chunk failing to arrive — a stale WebView2 cache
     // after an image update is the field case (the webview URL carries a
     // cache-busting `_v=<IMAGE_TAG>` for exactly this reason).
@@ -339,5 +343,307 @@ describe('the file last open', () => {
     await mount();
 
     expect(activePath()).toBe(ENTRY);
+  });
+});
+
+// ── The UX round: the Methoden column and what the page hands through ──────
+
+describe('the Methoden column', () => {
+  const panel = () => screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+
+  test('is open by default, beside the editor; its close button turns it into the rail and back', async () => {
+    await mount();
+    expect(await panel()).toBeInTheDocument();
+    expect(screen.getByTestId('code-methods')).toHaveAttribute('data-floating', 'false');
+    const editorNode = screen.getByTestId('code-editor');
+
+    await userEvent.click(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }));
+    expect(screen.queryByRole('region', { name: CODE_DE.METHODS_TITLE })).toBeNull();
+    const rail = screen.getByRole('button', { name: CODE_DE.METHODS_OPEN });
+    expect(rail).toHaveTextContent(CODE_DE.METHODS_TITLE);
+    expect(rail).toHaveFocus();
+    // The editor stays the same node — it is never remounted.
+    expect(screen.getByTestId('code-editor')).toBe(editorNode);
+
+    await userEvent.click(rail);
+    expect(await panel()).toBeInTheDocument();
+    expect(screen.getByTestId('code-editor')).toBe(editorNode);
+  });
+
+  test('in a code area too narrow for both it floats, and Esc closes it', async () => {
+    // The widths a narrow window measures: 600 px of code area, a 176-px file
+    // list — below 176 + 320 + 220 + 16.
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function rectOf() {
+      let width = 0;
+      if (this.dataset && this.dataset.testid === 'code-workspace') width = 600;
+      else if (this.tagName === 'ASIDE' && this.dataset.testid !== 'code-methods') width = 176;
+      return {
+        width, height: 400, top: 0, left: 0, right: width, bottom: 400, x: 0, y: 0,
+      };
+    });
+    await mount();
+    await panel();
+    expect(screen.getByTestId('code-methods')).toHaveAttribute('data-floating', 'true');
+    const editorNode = screen.getByTestId('code-editor');
+    fireEvent.keyDown(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }), { key: 'Escape' });
+    expect(screen.queryByRole('region', { name: CODE_DE.METHODS_TITLE })).toBeNull();
+    expect(screen.getByRole('button', { name: CODE_DE.METHODS_OPEN })).toHaveFocus();
+    expect(screen.getByTestId('code-editor')).toBe(editorNode);
+    rect.mockRestore();
+  });
+
+  test('docked, Esc does not close it (it is part of the page, not a layer)', async () => {
+    await mount();
+    await panel();
+    fireEvent.keyDown(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }), { key: 'Escape' });
+    expect(screen.getByRole('region', { name: CODE_DE.METHODS_TITLE })).toBeInTheDocument();
+  });
+
+  test('a column that fails to load says so and leaves the editor and the files', async () => {
+    vi.resetModules();
+    vi.doMock('../MethodenPanel', () => { throw new Error('Loading chunk MethodenPanel failed'); });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { default: Fresh } = await import('../CodeWorkspace');
+    const store = configureStore({ reducer: { workshop: workshopReducer } });
+    render(
+      <Provider store={store}>
+        <Fresh language="python" files={BASE_FILES} onFilesChange={vi.fn()} />
+      </Provider>,
+    );
+    expect(await screen.findByText(CODE_DE.METHODS_FAILED)).toBeInTheDocument();
+    expect(screen.getByTestId('code-editor')).toBeInTheDocument();
+    expect(fileButton('hilfe.py')).toBeInTheDocument();
+    spy.mockRestore();
+    vi.doUnmock('../MethodenPanel');
+    vi.resetModules();
+  });
+});
+
+describe('what the page hands through (K-1, R0-1, m-3)', () => {
+  test('onSave and commandsRef reach the editor; a read-only editor gets no onSave', async () => {
+    const onSave = vi.fn();
+    const commandsRef = { current: null };
+    const { unmount } = await mount(BASE_FILES, { onSave, commandsRef });
+    expect(editorMock.props.onSave).toBe(onSave);
+    expect(editorMock.props.commandsRef).toBe(commandsRef);
+    unmount();
+    await mount(BASE_FILES, { onSave, commandsRef, readOnly: true });
+    expect(editorMock.props.onSave).toBeNull();
+  });
+
+  test('a page reveal carrying flash reaches the editor with it', async () => {
+    const { rerender } = await mount();
+    const store = configureStore({ reducer: { workshop: workshopReducer } });
+    rerender(
+      <Provider store={store}>
+        <CodeWorkspace
+          language="python"
+          files={BASE_FILES}
+          onFilesChange={vi.fn()}
+          revealRequest={{ file: 'hilfe.py', line: 1, nonce: 7, flash: { from: 1, to: 1 } }}
+        />
+      </Provider>,
+    );
+    await waitFor(() => expect(editorMock.props.revealRequest).toMatchObject({ line: 1, flash: { from: 1, to: 1 } }));
+    expect(activePath()).toBe('hilfe.py');
+  });
+
+  test('sidebarWidthRef stays null at a measured width of 0 and takes a positive one', async () => {
+    const zero = { current: null };
+    const first = await mount(BASE_FILES, { sidebarWidthRef: zero });
+    expect(zero.current).toBeNull();
+    first.unmount();
+
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function rectOf() {
+      const width = this.tagName === 'ASIDE' && this.dataset.testid !== 'code-methods' ? 203.6 : 0;
+      return {
+        width, height: 400, top: 0, left: 0, right: width, bottom: 400, x: 0, y: 0,
+      };
+    });
+    const measured = { current: null };
+    await mount(BASE_FILES, { sidebarWidthRef: measured });
+    expect(measured.current).toBe(204);
+    rect.mockRestore();
+  });
+});
+
+// ── The code panes' dividers and what this PC remembers (I2-int) ──────────
+
+describe('the code panes are resizable and remembered on this PC', () => {
+  const sidebarHandle = () => screen.getByRole('separator', { name: CODE_DE.CODE_SIDEBAR_RESIZE });
+  const methodsHandle = () => screen.queryByRole('separator', { name: CODE_DE.METHODS_RESIZE });
+
+  test('a divider stands between the file list and the editor, another before the docked column', async () => {
+    await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    const handle = sidebarHandle();
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(handle.previousElementSibling.tagName).toBe('ASIDE');
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(handle.nextElementSibling).toContainElement(screen.getByTestId('code-editor'));
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(methodsHandle().nextElementSibling).toBe(screen.getByTestId('code-methods'));
+    expect(handle).toHaveAttribute('aria-valuenow', '176');
+    expect(methodsHandle()).toHaveAttribute('aria-valuenow', '300');
+  });
+
+  test('a width the student sets is stored, and the next mount takes it', async () => {
+    const first = await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    fireEvent.keyDown(sidebarHandle(), { key: 'ArrowRight' });
+    fireEvent.keyDown(methodsHandle(), { key: 'ArrowLeft', shiftKey: true });
+    expect(window.localStorage.getItem('edubotics_code_sidebar_width')).toBe('184');
+    expect(window.localStorage.getItem('edubotics_code_methods_width')).toBe('332');
+    first.unmount();
+
+    await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    expect(sidebarHandle()).toHaveAttribute('aria-valuenow', '184');
+    expect(methodsHandle()).toHaveAttribute('aria-valuenow', '332');
+  });
+
+  test('a drag of the dividers never remounts the editor', async () => {
+    await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    const editorNode = screen.getByTestId('code-editor');
+    fireEvent.keyDown(sidebarHandle(), { key: 'End' });
+    fireEvent.doubleClick(methodsHandle());
+    expect(screen.getByTestId('code-editor')).toBe(editorNode);
+  });
+
+  test('closing and opening the column is stored; a closed column stays closed next time', async () => {
+    const first = await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    await userEvent.click(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }));
+    expect(window.localStorage.getItem('edubotics_code_methods_open')).toBe('0');
+    expect(methodsHandle()).toBeNull();
+    first.unmount();
+
+    await mount();
+    const rail = screen.getByRole('button', { name: CODE_DE.METHODS_OPEN });
+    expect(screen.queryByRole('region', { name: CODE_DE.METHODS_TITLE })).toBeNull();
+    await userEvent.click(rail);
+    expect(await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE })).toBeInTheDocument();
+    expect(window.localStorage.getItem('edubotics_code_methods_open')).toBe('1');
+  });
+
+  // Verification round 1, F5d: the two dividers share one budget, so the
+  // editor never gets less than 320 px — each bound counts the other pane (or
+  // the rail) and both handles at their width right now, and a change on one
+  // side re-clamps the other's committed width.
+  describe('the editor keeps 320 px between the two dividers', () => {
+    // A laid-out row: the panes take the widths their CSS variables say (the
+    // handles 8 px, the rail 40), the editor the rest.
+    function layOut(rootW) {
+      // eslint-disable-next-line testing-library/no-node-access
+      const root = () => document.querySelector('[data-testid="code-workspace"]');
+      const varPx = (name, fallback) => {
+        const v = root() ? root().style.getPropertyValue(name) : '';
+        return v ? parseFloat(v) : fallback;
+      };
+      return vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function rectOf() {
+        const id = this.dataset ? this.dataset.testid : undefined;
+        let width = 0;
+        if (id === 'code-workspace') width = rootW;
+        else if (this.tagName === 'ASIDE' && id !== 'code-methods') width = varPx('--code-sidebar-w', 176);
+        else if (id === 'code-methods') width = this.dataset.floating === 'true' ? 300 : varPx('--code-methods-w', 300);
+        else if (id === 'code-methods-rail') width = 40;
+        else if (this.getAttribute && this.getAttribute('role') === 'separator') width = 8;
+        return {
+          width, height: 400, top: 0, left: 0, right: width, bottom: 400, x: 0, y: 0,
+        };
+      });
+    }
+    const now = (handle) => Number(handle.getAttribute('aria-valuenow'));
+    const editorWidth = (rootW) => {
+      const methods = methodsHandle() ? 8 + now(methodsHandle()) : 40;
+      return rootW - now(sidebarHandle()) - 8 - methods;
+    };
+
+    test('widening the file list stops where the docked column leaves the editor 320 px', async () => {
+      const rect = layOut(900);
+      await mount();
+      await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+      expect(screen.getByTestId('code-methods')).toHaveAttribute('data-floating', 'false');
+      fireEvent.keyDown(sidebarHandle(), { key: 'End' });
+      expect(now(sidebarHandle())).toBe(900 - 320 - 8 - 8 - 300);
+      expect(editorWidth(900)).toBe(320);
+      rect.mockRestore();
+    });
+
+    test('widening the column stops where the file list and both handles leave the editor 320 px', async () => {
+      window.localStorage.setItem('edubotics_code_sidebar_width', '360');
+      const rect = layOut(1100);
+      await mount();
+      await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+      fireEvent.keyDown(methodsHandle(), { key: 'End' });
+      expect(now(methodsHandle())).toBe(1100 - 320 - 360 - 8 - 8);
+      expect(editorWidth(1100)).toBe(320);
+      rect.mockRestore();
+    });
+
+    test('room one side gives back returns to the other side’s committed width', async () => {
+      window.localStorage.setItem('edubotics_code_sidebar_width', '360');
+      window.localStorage.setItem('edubotics_code_methods_width', '520');
+      const rect = layOut(1100);
+      await mount();
+      await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+      // Squeezed at first: 1100 − 320 − 360 − 16.
+      expect(now(methodsHandle())).toBe(404);
+      expect(editorWidth(1100)).toBe(320);
+      // The file list narrows: the column grows back towards its 520 px.
+      fireEvent.keyDown(sidebarHandle(), { key: 'Home' });
+      expect(now(sidebarHandle())).toBe(140);
+      expect(now(methodsHandle())).toBe(520);
+      expect(editorWidth(1100)).toBeGreaterThanOrEqual(320);
+      // Nothing was stored for the column by the re-clamp.
+      expect(window.localStorage.getItem('edubotics_code_methods_width')).toBe('520');
+      rect.mockRestore();
+    });
+
+    test('closing the column gives a squeezed file list its committed width back', async () => {
+      window.localStorage.setItem('edubotics_code_sidebar_width', '360');
+      const rect = layOut(950);
+      await mount();
+      await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+      // 950 − 320 − 8 − 8 − 300.
+      expect(now(sidebarHandle())).toBe(314);
+      expect(editorWidth(950)).toBe(320);
+      await userEvent.click(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }));
+      expect(now(sidebarHandle())).toBe(360);
+      expect(editorWidth(950)).toBeGreaterThanOrEqual(320);
+      expect(window.localStorage.getItem('edubotics_code_sidebar_width')).toBe('360');
+      rect.mockRestore();
+    });
+  });
+
+  test('a floating column has no width divider', async () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function rectOf() {
+      let width = 0;
+      if (this.dataset && this.dataset.testid === 'code-workspace') width = 600;
+      else if (this.tagName === 'ASIDE' && this.dataset.testid !== 'code-methods') width = 176;
+      return {
+        width, height: 400, top: 0, left: 0, right: width, bottom: 400, x: 0, y: 0,
+      };
+    });
+    await mount();
+    await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    expect(screen.getByTestId('code-methods')).toHaveAttribute('data-floating', 'true');
+    expect(methodsHandle()).toBeNull();
+    expect(sidebarHandle()).toBeInTheDocument();
+    rect.mockRestore();
+  });
+});
+
+describe('the methods icon', () => {
+  test('marks the rail and the column’s header', async () => {
+    await mount();
+    const panel = await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(panel.querySelector('header svg[data-icon="methods"]')).not.toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }));
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(screen.getByRole('button', { name: CODE_DE.METHODS_OPEN }).querySelector('svg[data-icon="methods"]'))
+      .not.toBeNull();
   });
 });

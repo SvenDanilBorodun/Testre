@@ -29,6 +29,7 @@ import { createDetachedDestinationStore } from '../../sammlung/destinationStore'
 import { createSammlungProvider } from '../../sammlung/provider';
 import workshopReducer from '../../../../features/workshop/workshopSlice';
 import studioAssetsReducer, { selectDrawer } from '../../../../features/workshop/studioAssetsSlice';
+import { SAMMLUNG_TABS, SAMMLUNG_TAB_LABEL_DE } from '../../sammlung/sammlungTabs';
 
 vi.mock('../../../../hooks/useRosServiceCaller', () => ({
   __esModule: true,
@@ -116,9 +117,9 @@ beforeEach(() => {
 describe('the Sammlung section', () => {
   test('counts the program’s Variablen, Aufnahmen, Ziele and Positionen and opens the drawer on that tab', async () => {
     const { redux } = await mount();
-    const rows = within(sammlung()).getAllByRole('button', { name: /^(Variablen|Aufnahmen|Ziele|Positionen) \d+$/ });
-    expect(rows.map((b) => b.textContent)).toEqual(['Aufnahmen 1', 'Ziele 1', 'Positionen 1', 'Variablen 1']);
-    fireEvent.click(within(sammlung()).getByRole('button', { name: 'Ziele 1' }));
+    const rows = within(sammlung()).getAllByRole('button', { name: new RegExp(`^(${[DE.CATEGORY_VARIABLEN, DE.CATEGORY_AUFNAHMEN, DE.CATEGORY_ZIELE, DE.CATEGORY_POSITIONEN].join('|')}) \\d+$`) });
+    expect(rows.map((b) => b.textContent)).toEqual([`${DE.CATEGORY_AUFNAHMEN} 1`, `${DE.CATEGORY_ZIELE} 1`, `${DE.CATEGORY_POSITIONEN} 1`, `${DE.CATEGORY_VARIABLEN} 1`]);
+    fireEvent.click(within(sammlung()).getByRole('button', { name: `${DE.CATEGORY_ZIELE} 1` }));
     expect(selectDrawer(redux.getState())).toMatchObject({ open: true, tab: 'ziele', focusId: null });
   });
 
@@ -350,5 +351,28 @@ describe('a file switch without a remembered line reveals nothing (review m5)', 
     expect(activePath()).toBe('main.py');
     expect(editor.props.revealRequest).toBeNull();
     expect(onCursorChange).toHaveBeenLastCalledWith(null);
+  });
+});
+
+// ── I2-int: the rows' order and names are sammlung/sammlungTabs.js; in the
+// simulator one sentence says why the rows' „… vormachen" are gone ──────────
+
+describe('the Sammlung section follows sammlungTabs and says why Vormachen is gone in the simulator', () => {
+  test('the rows are SAMMLUNG_TABS with their labels, in that order', async () => {
+    await mount();
+    const rows = within(sammlung()).getAllByRole('button', { name: /^.+ \d+$/ });
+    expect(rows.map((b) => b.textContent.replace(/ \d+$/, '')))
+      .toEqual(SAMMLUNG_TABS.map((tab) => SAMMLUNG_TAB_LABEL_DE[tab]));
+  });
+
+  test('in the simulator the hint stands under the heading; on the rig and read-only it does not', async () => {
+    const sim = await mount({ capabilities: { simMode: true } });
+    expect(within(sammlung()).getByText(DE.TEACH_SIM_HINT)).toBeInTheDocument();
+    sim.unmount();
+    const rig = await mount();
+    expect(within(sammlung()).queryByText(DE.TEACH_SIM_HINT)).toBeNull();
+    rig.unmount();
+    await mount({ capabilities: { simMode: true }, readOnly: true });
+    expect(within(sammlung()).queryByText(DE.TEACH_SIM_HINT)).toBeNull();
   });
 });

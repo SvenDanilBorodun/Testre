@@ -36,12 +36,13 @@
 // Shipping them on is the plan's decision; the one-line rollback is flipping the
 // literals to `false` here.
 
-import React from 'react';
+import React, { useCallback, useState } from 'react';
 import { useSelector } from 'react-redux';
 import SimScene from './SimScene';
 import DebugPanel from './DebugPanel';
 import { DE } from './blocks/messages_de';
 import Icon from '../icons/Icon';
+import { readSimHintDismissed, writeSimHintDismissed } from './layout/layoutPrefs';
 
 // Most-recent runtime log line that signals a no-go reroute. motion.py logs
 // „[WARNUNG] Sperrzone auf dem Weg — Ausweichroute wird gefahren." via ctx.log →
@@ -85,14 +86,23 @@ function SimStage({
   const rerouteMessage = latestRerouteMessage(log);
   const warningCount = Array.isArray(debuggerWarnings) ? debuggerWarnings.length : 0;
   const hasFeedback = !!rerouteMessage || warningCount > 0;
+  // The „Test im Simulator." notice, once closed, stays closed on this PC
+  // (R0-3: the space is the 2D table's).
+  const [introDismissed, setIntroDismissed] = useState(readSimHintDismissed);
+  const dismissIntro = useCallback(() => {
+    setIntroDismissed(true);
+    writeSimHintDismissed();
+  }, []);
 
   return (
     <aside
       // Below md the stage stacks UNDER the editor: capped at half the row (and
       // scrollable) so the Blockly editor keeps at least the other half, like
-      // RightDock. Uncapped from md up, where it sits beside the editor.
+      // RightDock. Uncapped from md up, where it sits beside the editor; its
+      // width there is the row's `--sim-w` (a fraction, written only by the
+      // page's divider — never set here, which would shadow it).
       className={
-        'flex flex-col w-full md:h-full shrink-0 md:w-[55%] min-h-0 '
+        'flex flex-col w-full md:h-full shrink-0 md:w-[calc(var(--sim-w,0.55)*100%)] min-h-0 '
         + 'max-h-[50%] overflow-y-auto md:max-h-none md:overflow-visible '
         + 'border-t md:border-t-0 md:border-l border-[var(--line)] bg-[var(--bg-sunk)]'
       }
@@ -163,6 +173,8 @@ function SimStage({
           ghostJoints={ghostJoints}
           requestedMode={requestedMode}
           onCreateDestination={onCreateDestination}
+          introDismissed={introDismissed}
+          onDismissIntro={dismissIntro}
         />
       </div>
 

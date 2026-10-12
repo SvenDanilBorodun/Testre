@@ -260,3 +260,132 @@ describe('MenuButton', () => {
     }
   });
 });
+
+// R0-11: the menu opens toward the inside of the viewport, wherever it is
+// placed. jsdom lays nothing out, so the boxes are mocked; a zero-size box (the
+// jsdom default) is unmeasurable and must change nothing.
+describe('MenuButton — the menu stays inside the viewport', () => {
+  const box = ({ left = 0, top = 0, width = 0, height = 0 }) => ({
+    left, top, width, height, right: left + width, bottom: top + height, x: left, y: top,
+  });
+  let menuBox;
+  let triggerBox;
+  let spies = [];
+  let innerWidth;
+  let innerHeight;
+  beforeEach(() => {
+    menuBox = box({});
+    triggerBox = box({});
+    innerWidth = window.innerWidth;
+    innerHeight = window.innerHeight;
+    spies = [
+      vi.spyOn(HTMLUListElement.prototype, 'getBoundingClientRect').mockImplementation(() => menuBox),
+      vi.spyOn(HTMLButtonElement.prototype, 'getBoundingClientRect').mockImplementation(() => triggerBox),
+    ];
+  });
+  afterEach(() => {
+    spies.forEach((s) => s.mockRestore());
+    window.innerWidth = innerWidth;
+    window.innerHeight = innerHeight;
+  });
+  const chevron = (trigger, name) => trigger.querySelector(`svg[data-icon="${name}"]`); // eslint-disable-line testing-library/no-node-access
+
+  test('describedBy lands on the trigger; without it there is no aria-describedby', () => {
+    const { unmount } = setup({ describedBy: 'grund-1', disabled: true });
+    expect(screen.getByRole('button', { name: /Vormachen$/ })).toHaveAttribute('aria-describedby', 'grund-1');
+    unmount();
+    const { trigger } = setup();
+    expect(trigger).not.toHaveAttribute('aria-describedby');
+  });
+
+  test('a menu that would leave the right edge is right-aligned', () => {
+    window.innerWidth = 1366;
+    window.innerHeight = 768;
+    menuBox = box({ left: 1234, top: 60, width: 192, height: 110 }); // right 1426
+    triggerBox = box({ left: 1234, top: 20, width: 110, height: 32 });
+    const { trigger } = setup();
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu').className).toMatch(/\bright-0\b/);
+    expect(screen.getByRole('menu').className).not.toMatch(/\bleft-0\b/);
+  });
+
+  test('a menu that fits keeps its alignment and placement', () => {
+    window.innerWidth = 1366;
+    window.innerHeight = 768;
+    menuBox = box({ left: 933, top: 60, width: 192, height: 110 });
+    triggerBox = box({ left: 933, top: 20, width: 110, height: 32 });
+    const { trigger } = setup();
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu').className).toMatch(/\bleft-0\b/);
+    expect(screen.getByRole('menu').className).toMatch(/top-full/);
+  });
+
+  test('a right-aligned menu that would leave the left edge is left-aligned', () => {
+    window.innerWidth = 1366;
+    window.innerHeight = 768;
+    menuBox = box({ left: -40, top: 60, width: 192, height: 110 });
+    triggerBox = box({ left: 4, top: 20, width: 110, height: 32 });
+    const { trigger } = setup({ align: 'right' });
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu').className).toMatch(/\bleft-0\b/);
+  });
+
+  test('a down menu leaving the bottom opens upwards when there is room above, and its chevron follows', () => {
+    window.innerWidth = 1366;
+    window.innerHeight = 768;
+    triggerBox = box({ left: 100, top: 700, width: 110, height: 32 });
+    menuBox = box({ left: 100, top: 736, width: 192, height: 110 }); // bottom 846
+    const { trigger } = setup();
+    expect(chevron(trigger, 'chevronDown')).not.toBeNull();
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu').className).toMatch(/bottom-full/);
+    expect(chevron(trigger, 'chevronUp')).not.toBeNull();
+    expect(chevron(trigger, 'chevronDown')).toBeNull();
+    fireEvent.click(trigger);
+    expect(menu()).toBeNull();
+    expect(chevron(trigger, 'chevronDown')).not.toBeNull();
+  });
+
+  test('a down menu leaving the bottom stays down when there is no room above', () => {
+    window.innerWidth = 1366;
+    window.innerHeight = 140;
+    triggerBox = box({ left: 100, top: 40, width: 110, height: 32 });
+    menuBox = box({ left: 100, top: 76, width: 192, height: 110 });
+    const { trigger } = setup();
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu').className).toMatch(/top-full/);
+  });
+
+  test('an up menu leaving the top opens downwards when there is room below', () => {
+    window.innerWidth = 1366;
+    window.innerHeight = 768;
+    triggerBox = box({ left: 100, top: 30, width: 110, height: 32 });
+    menuBox = box({ left: 100, top: -84, width: 192, height: 110 });
+    const { trigger } = setup({ placement: 'up' });
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu').className).toMatch(/top-full/);
+    expect(chevron(trigger, 'chevronDown')).not.toBeNull();
+  });
+
+  test('every open starts from the props again', () => {
+    window.innerWidth = 1366;
+    window.innerHeight = 768;
+    menuBox = box({ left: 1234, top: 60, width: 192, height: 110 });
+    triggerBox = box({ left: 1234, top: 20, width: 110, height: 32 });
+    const { trigger } = setup();
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu').className).toMatch(/\bright-0\b/);
+    fireEvent.click(trigger);
+    menuBox = box({ left: 400, top: 60, width: 192, height: 110 });
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu').className).toMatch(/\bleft-0\b/);
+  });
+
+  test('a zero-size box (not laid out) never flips: the code sidebar\'s up/right „+ Neu" keeps bottom-full and right-0', () => {
+    const { trigger } = setup({ placement: 'up', align: 'right' });
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu').className).toMatch(/bottom-full/);
+    expect(screen.getByRole('menu').className).toMatch(/\bright-0\b/);
+    expect(chevron(trigger, 'chevronUp')).not.toBeNull();
+  });
+});

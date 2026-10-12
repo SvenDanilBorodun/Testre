@@ -12,9 +12,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as Blockly from 'blockly/core';
 import toast from 'react-hot-toast';
 import { DE } from './blocks/messages_de';
-import { formatAutosaveAge } from './useAutosave';
 import { THEME_KEYS, applyTheme } from './themes';
 import Icon from '../icons/Icon';
+import { saveStatusLabel } from './saveStatus';
 
 const BUTTON_BASE =
   'inline-flex items-center justify-center gap-1.5 min-h-[28px] min-w-[28px] '
@@ -49,14 +49,24 @@ function persistTheme(name) {
 }
 
 /**
- * Toolbar above the Blockly workspace. Provides undo/redo, save,
- * export, import, theme switcher, and an autosave status chip. Acts on
- * the workspace via the ref; keeps no internal state about the
- * workflow.
+ * Toolbar above the editor. Provides undo/redo, save, export, import, the
+ * theme switcher and the save status (`saveStatus`, the page's
+ * `{ savedAt, dirty }` of the CLOUD save — saveStatus.js). Acts on the Blockly
+ * workspace; keeps no internal state about the workflow.
+ *
+ * In a CODE document (`codeMode`) „Rückgängig"/„Wiederholen" act on the
+ * CodeMirror history through `codeCommandsRef` (the lazy CodeEditor sets
+ * `{ undo, redo }` on it), and the Blockly-only tools — „Ansicht anpassen",
+ * „Exportieren", „Importieren" and the theme select — are not rendered. The
+ * window-level Strg+Y / Strg+Umschalt+Z do nothing there: inside the editor
+ * CodeMirror's own history keys handle them, and outside it a redo without its
+ * undo would surprise. Strg+S saves in both.
  */
 function ToolbarButtons({
   workspace,
-  lastSavedAt,
+  codeMode = false,
+  codeCommandsRef = null,
+  saveStatus = { savedAt: null, dirty: false },
   onSave,
   saving = false,
   onExportPdf = null,
@@ -72,7 +82,7 @@ function ToolbarButtons({
     if (workspace) applyTheme(workspace, theme);
   }, [workspace, theme]);
 
-  // Re-render every 5 s so the autosave-age label stays current.
+  // Re-render every 5 s so the save-age label stays current.
   // Audit §toolbar-r1: gate on visibility — when the tab is hidden, we
   // don't need to keep ticking React renders against a label nobody
   // is reading. Saves 12 wasted re-renders per minute on backgrounded
@@ -87,12 +97,22 @@ function ToolbarButtons({
   }, []);
 
   const handleUndo = useCallback(() => {
+    if (codeMode) {
+      const commands = codeCommandsRef && codeCommandsRef.current;
+      if (commands && typeof commands.undo === 'function') commands.undo();
+      return;
+    }
     if (workspace) workspace.undo(false);
-  }, [workspace]);
+  }, [workspace, codeMode, codeCommandsRef]);
 
   const handleRedo = useCallback(() => {
+    if (codeMode) {
+      const commands = codeCommandsRef && codeCommandsRef.current;
+      if (commands && typeof commands.redo === 'function') commands.redo();
+      return;
+    }
     if (workspace) workspace.undo(true);
-  }, [workspace]);
+  }, [workspace, codeMode, codeCommandsRef]);
 
   // Keyboard shortcuts: Ctrl+S → save, Ctrl+Y / Ctrl+Shift+Z → redo.
   // Audit round-3 §U / §V — the toolbar's redo tooltip used to claim
@@ -114,6 +134,9 @@ function ToolbarButtons({
         if (typeof onSave === 'function') onSave();
         return;
       }
+      // A code document: the redo shortcuts are CodeMirror's own (inside the
+      // editor); outside it they do nothing.
+      if (codeMode) return;
       // Ctrl+Y → redo (Windows/Linux convention)
       if (e.key === 'y' || e.key === 'Y') {
         e.preventDefault();
@@ -129,7 +152,7 @@ function ToolbarButtons({
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [onSave, handleRedo]);
+  }, [onSave, handleRedo, codeMode]);
 
   const handleZoomFit = useCallback(() => {
     if (!workspace) return;
@@ -198,7 +221,7 @@ function ToolbarButtons({
     persistTheme(name);
   }, []);
 
-  const ageLabel = formatAutosaveAge(lastSavedAt);
+  const statusLabel = saveStatusLabel(saveStatus, Date.now());
 
   return (
     <div
@@ -230,16 +253,18 @@ function ToolbarButtons({
         <Icon name="redo" />
         {DE.TOOLBAR_REDO}
       </button>
-      <button
-        type="button"
-        className={BUTTON_BASE}
-        onClick={handleZoomFit}
-        title={DE.TOOLBAR_ZOOM_FIT}
-        aria-label={DE.TOOLBAR_ZOOM_FIT}
-      >
-        <Icon name="fit" />
-        {DE.TOOLBAR_ZOOM_FIT}
-      </button>
+      {!codeMode && (
+        <button
+          type="button"
+          className={BUTTON_BASE}
+          onClick={handleZoomFit}
+          title={DE.TOOLBAR_ZOOM_FIT}
+          aria-label={DE.TOOLBAR_ZOOM_FIT}
+        >
+          <Icon name="fit" />
+          {DE.TOOLBAR_ZOOM_FIT}
+        </button>
+      )}
 
       <span className="mx-1 h-6 w-px bg-[var(--line)]" aria-hidden="true" />
 
@@ -254,26 +279,30 @@ function ToolbarButtons({
         <Icon name="save" />
         {saving ? '…' : DE.TOOLBAR_SAVE}
       </button>
-      <button
-        type="button"
-        className={BUTTON_BASE}
-        onClick={handleExport}
-        title={DE.TOOLBAR_EXPORT}
-        aria-label={DE.TOOLBAR_EXPORT}
-      >
-        <Icon name="fileExport" />
-        {DE.TOOLBAR_EXPORT}
-      </button>
-      <button
-        type="button"
-        className={BUTTON_BASE}
-        onClick={handleImport}
-        title={DE.TOOLBAR_IMPORT}
-        aria-label={DE.TOOLBAR_IMPORT}
-      >
-        <Icon name="fileImport" />
-        {DE.TOOLBAR_IMPORT}
-      </button>
+      {!codeMode && (
+        <>
+          <button
+            type="button"
+            className={BUTTON_BASE}
+            onClick={handleExport}
+            title={DE.TOOLBAR_EXPORT}
+            aria-label={DE.TOOLBAR_EXPORT}
+          >
+            <Icon name="fileExport" />
+            {DE.TOOLBAR_EXPORT}
+          </button>
+          <button
+            type="button"
+            className={BUTTON_BASE}
+            onClick={handleImport}
+            title={DE.TOOLBAR_IMPORT}
+            aria-label={DE.TOOLBAR_IMPORT}
+          >
+            <Icon name="fileImport" />
+            {DE.TOOLBAR_IMPORT}
+          </button>
+        </>
+      )}
       {onExportPdf && (
         <button
           type="button"
@@ -287,36 +316,40 @@ function ToolbarButtons({
         </button>
       )}
       {extra}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="application/json,.json"
-        className="hidden"
-        onChange={handleFile}
-      />
+      {!codeMode && (
+        <>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={handleFile}
+          />
 
-      <span className="mx-1 h-6 w-px bg-[var(--line)]" aria-hidden="true" />
+          <span className="mx-1 h-6 w-px bg-[var(--line)]" aria-hidden="true" />
 
-      <label className="text-sm text-[var(--ink-3)] flex items-center gap-1.5">
-        <span className="sr-only">{DE.TOOLBAR_THEME}</span>
-        <Icon name="palette" />
-        <select
-          value={theme}
-          onChange={handleThemeChange}
-          className="text-sm border border-[var(--line)] rounded-md px-1 py-0.5 bg-white"
-          aria-label={DE.TOOLBAR_THEME}
-        >
-          <option value={THEME_KEYS.STANDARD}>{DE.THEME_STANDARD}</option>
-          <option value={THEME_KEYS.TRITANOPIA}>{DE.THEME_TRITANOPIA}</option>
-          <option value={THEME_KEYS.DEUTERANOPIA}>{DE.THEME_DEUTERANOPIA}</option>
-          <option value={THEME_KEYS.HIGHCONTRAST}>{DE.THEME_HIGHCONTRAST}</option>
-        </select>
-      </label>
+          <label className="text-sm text-[var(--ink-3)] flex items-center gap-1.5">
+            <span className="sr-only">{DE.TOOLBAR_THEME}</span>
+            <Icon name="palette" />
+            <select
+              value={theme}
+              onChange={handleThemeChange}
+              className="text-sm border border-[var(--line)] rounded-md px-1 py-0.5 bg-white"
+              aria-label={DE.TOOLBAR_THEME}
+            >
+              <option value={THEME_KEYS.STANDARD}>{DE.THEME_STANDARD}</option>
+              <option value={THEME_KEYS.TRITANOPIA}>{DE.THEME_TRITANOPIA}</option>
+              <option value={THEME_KEYS.DEUTERANOPIA}>{DE.THEME_DEUTERANOPIA}</option>
+              <option value={THEME_KEYS.HIGHCONTRAST}>{DE.THEME_HIGHCONTRAST}</option>
+            </select>
+          </label>
+        </>
+      )}
 
-      <span className="ml-auto text-xs text-[var(--ink-4)]" aria-live="polite">
+      <span className="ml-auto text-xs text-[var(--ink-4)]" aria-live="polite" data-testid="save-status">
         <Icon name="dot" size="0.6em" fill="currentColor" className="align-middle" />
         {' '}
-        {DE.AUTOSAVE_LABEL}: {ageLabel}
+        {statusLabel}
       </span>
     </div>
   );

@@ -527,6 +527,96 @@ describe('the code panes are resizable and remembered on this PC', () => {
     expect(window.localStorage.getItem('edubotics_code_methods_open')).toBe('1');
   });
 
+  // Verification round 1, F5d: the two dividers share one budget, so the
+  // editor never gets less than 320 px — each bound counts the other pane (or
+  // the rail) and both handles at their width right now, and a change on one
+  // side re-clamps the other's committed width.
+  describe('the editor keeps 320 px between the two dividers', () => {
+    // A laid-out row: the panes take the widths their CSS variables say (the
+    // handles 8 px, the rail 40), the editor the rest.
+    function layOut(rootW) {
+      // eslint-disable-next-line testing-library/no-node-access
+      const root = () => document.querySelector('[data-testid="code-workspace"]');
+      const varPx = (name, fallback) => {
+        const v = root() ? root().style.getPropertyValue(name) : '';
+        return v ? parseFloat(v) : fallback;
+      };
+      return vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function rectOf() {
+        const id = this.dataset ? this.dataset.testid : undefined;
+        let width = 0;
+        if (id === 'code-workspace') width = rootW;
+        else if (this.tagName === 'ASIDE' && id !== 'code-methods') width = varPx('--code-sidebar-w', 176);
+        else if (id === 'code-methods') width = this.dataset.floating === 'true' ? 300 : varPx('--code-methods-w', 300);
+        else if (id === 'code-methods-rail') width = 40;
+        else if (this.getAttribute && this.getAttribute('role') === 'separator') width = 8;
+        return {
+          width, height: 400, top: 0, left: 0, right: width, bottom: 400, x: 0, y: 0,
+        };
+      });
+    }
+    const now = (handle) => Number(handle.getAttribute('aria-valuenow'));
+    const editorWidth = (rootW) => {
+      const methods = methodsHandle() ? 8 + now(methodsHandle()) : 40;
+      return rootW - now(sidebarHandle()) - 8 - methods;
+    };
+
+    test('widening the file list stops where the docked column leaves the editor 320 px', async () => {
+      const rect = layOut(900);
+      await mount();
+      await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+      expect(screen.getByTestId('code-methods')).toHaveAttribute('data-floating', 'false');
+      fireEvent.keyDown(sidebarHandle(), { key: 'End' });
+      expect(now(sidebarHandle())).toBe(900 - 320 - 8 - 8 - 300);
+      expect(editorWidth(900)).toBe(320);
+      rect.mockRestore();
+    });
+
+    test('widening the column stops where the file list and both handles leave the editor 320 px', async () => {
+      window.localStorage.setItem('edubotics_code_sidebar_width', '360');
+      const rect = layOut(1100);
+      await mount();
+      await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+      fireEvent.keyDown(methodsHandle(), { key: 'End' });
+      expect(now(methodsHandle())).toBe(1100 - 320 - 360 - 8 - 8);
+      expect(editorWidth(1100)).toBe(320);
+      rect.mockRestore();
+    });
+
+    test('room one side gives back returns to the other side’s committed width', async () => {
+      window.localStorage.setItem('edubotics_code_sidebar_width', '360');
+      window.localStorage.setItem('edubotics_code_methods_width', '520');
+      const rect = layOut(1100);
+      await mount();
+      await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+      // Squeezed at first: 1100 − 320 − 360 − 16.
+      expect(now(methodsHandle())).toBe(404);
+      expect(editorWidth(1100)).toBe(320);
+      // The file list narrows: the column grows back towards its 520 px.
+      fireEvent.keyDown(sidebarHandle(), { key: 'Home' });
+      expect(now(sidebarHandle())).toBe(140);
+      expect(now(methodsHandle())).toBe(520);
+      expect(editorWidth(1100)).toBeGreaterThanOrEqual(320);
+      // Nothing was stored for the column by the re-clamp.
+      expect(window.localStorage.getItem('edubotics_code_methods_width')).toBe('520');
+      rect.mockRestore();
+    });
+
+    test('closing the column gives a squeezed file list its committed width back', async () => {
+      window.localStorage.setItem('edubotics_code_sidebar_width', '360');
+      const rect = layOut(950);
+      await mount();
+      await screen.findByRole('region', { name: CODE_DE.METHODS_TITLE });
+      // 950 − 320 − 8 − 8 − 300.
+      expect(now(sidebarHandle())).toBe(314);
+      expect(editorWidth(950)).toBe(320);
+      await userEvent.click(screen.getByRole('button', { name: CODE_DE.METHODS_CLOSE }));
+      expect(now(sidebarHandle())).toBe(360);
+      expect(editorWidth(950)).toBeGreaterThanOrEqual(320);
+      expect(window.localStorage.getItem('edubotics_code_sidebar_width')).toBe('360');
+      rect.mockRestore();
+    });
+  });
+
   test('a floating column has no width divider', async () => {
     const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function rectOf() {
       let width = 0;

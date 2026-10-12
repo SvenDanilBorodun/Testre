@@ -592,6 +592,29 @@ function CodeWorkspace({
     observer.observe(aside);
     return () => observer.disconnect();
   }, [sidebarWidthRef]);
+  // The two dividers share one budget: the width a pane may take is what the
+  // code area leaves after the editor's 320 px and EVERY other piece in the
+  // row at its width right now — the other pane (or the rail), and both
+  // handles; a floating column overlays and takes nothing. Each handle also
+  // re-clamps its committed width when the other side changes (`boundsKey`),
+  // so room one side gives back returns to the other (verification round 1,
+  // F5d: each bound used to ignore the other pane or the handles, and the
+  // editor could be squeezed to almost nothing).
+  // The row is read through the handle's own parent (`bounds` gets the
+  // handle): in the first layout effect this component's refs are not
+  // attached yet, the DOM already is.
+  const paneMax = useCallback((r, handle, spec, pane) => {
+    const row = handle ? handle.parentElement : null;
+    if (!r || !row) return spec.max;
+    let besides = 0;
+    Array.from(row.children).forEach((el) => {
+      const ownPane = el.dataset ? el.dataset.pane : undefined;
+      if (ownPane === pane || ownPane === 'editor' || (el.dataset && el.dataset.floating === 'true')) return;
+      besides += el.getBoundingClientRect().width;
+    });
+    return Math.max(spec.min, Math.min(spec.max, r.width - METHODS_MIN_EDITOR_PX - besides));
+  }, []);
+
   const closeMethods = useCallback(() => {
     focusRailRef.current = true;
     setMethodsOpen(false);
@@ -619,6 +642,7 @@ function CodeWorkspace({
       <aside
         key="files"
         ref={asideRef}
+        data-pane="files"
         className="w-44 md:w-[var(--code-sidebar-w,11rem)] shrink-0 border-r border-[var(--line)] bg-[var(--bg-sunk)] flex flex-col min-h-0"
       >
         <div className="px-2 py-1.5 text-[11px] font-semibold text-[var(--ink-3)] uppercase tracking-wide">
@@ -690,11 +714,11 @@ function CodeWorkspace({
         unit="px"
         value={sidebarW}
         defaultValue={CODE_SIDEBAR_WIDTH.default}
-        bounds={(r) => ({
+        bounds={(r, handle) => ({
           min: CODE_SIDEBAR_WIDTH.min,
-          max: r ? Math.max(CODE_SIDEBAR_WIDTH.min, Math.min(CODE_SIDEBAR_WIDTH.max, r.width - METHODS_MIN_EDITOR_PX))
-            : CODE_SIDEBAR_WIDTH.max,
+          max: paneMax(r, handle, CODE_SIDEBAR_WIDTH, 'files'),
         })}
+        boundsKey={`${methodsOpen}|${methodsFloating}|${methodsW}`}
         fromPointer={(e, r) => e.clientX - r.left}
         growKey="ArrowRight"
         step={8}
@@ -706,7 +730,7 @@ function CodeWorkspace({
           writeCodeSidebarWidth(v);
         }}
       />
-      <div key="editor" className="flex-1 min-w-0 min-h-0">
+      <div key="editor" data-pane="editor" className="flex-1 min-w-0 min-h-0">
         <EditorBoundary>
           <Suspense
             fallback={
@@ -740,15 +764,11 @@ function CodeWorkspace({
           unit="px"
           value={methodsW}
           defaultValue={METHODS_WIDTH.default}
-          bounds={(r) => ({
+          bounds={(r, handle) => ({
             min: METHODS_WIDTH.min,
-            max: r
-              ? Math.max(METHODS_WIDTH.min, Math.min(
-                METHODS_WIDTH.max,
-                r.width - ((sidebarWidthRef && sidebarWidthRef.current) || sidebarW) - METHODS_MIN_EDITOR_PX,
-              ))
-              : METHODS_WIDTH.max,
+            max: paneMax(r, handle, METHODS_WIDTH, 'methods'),
           })}
+          boundsKey={sidebarW}
           fromPointer={(e, r) => r.right - e.clientX}
           growKey="ArrowLeft"
           step={8}
@@ -764,6 +784,7 @@ function CodeWorkspace({
       {methodsOpen ? (
         <aside
           key="methods"
+          data-pane="methods"
           className={
             methodsFloating
               ? 'hidden md:flex md:flex-col absolute inset-y-0 right-0 z-20 w-[min(300px,calc(100%-2rem))] '

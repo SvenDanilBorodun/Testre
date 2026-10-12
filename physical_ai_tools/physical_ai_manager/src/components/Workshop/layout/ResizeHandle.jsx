@@ -29,6 +29,13 @@
 //   * Keyboard: the arrow `growKey` grows, the opposite arrow shrinks (Shift: a
 //     large step), Home/End jump to the bounds. Handled keys are stopped here so
 //     Blockly's document-level shortcuts never see them.
+//   * `bounds(rect, handle)` gets the parent's rect (null when unmeasured) and
+//     the handle's own element, so an owner can measure the handle's siblings
+//     even in the first layout effect, before the owner's own refs are
+//     attached. `boundsKey` (optional): when the bounds depend on something
+//     besides the parent's size — a neighbouring pane's width — the owner
+//     passes a value that changes with it, and the COMMITTED value is
+//     re-clamped (committing nothing), exactly like a parent resize.
 //   * The display classes come from `showBelowMd`, never from `className`:
 //     Tailwind orders `hidden` after `flex`, so a caller's `flex` could not
 //     undo a `hidden`.
@@ -67,6 +74,7 @@ export default function ResizeHandle({
   label,
   valueText,
   onCommit,
+  boundsKey,
   showBelowMd = false,
   className = '',
 }) {
@@ -100,7 +108,7 @@ export default function ResizeHandle({
 
   const boundsFor = useCallback((rect) => {
     const p = propsRef.current;
-    const b = (typeof p.bounds === 'function' ? p.bounds(rect) : null) || {};
+    const b = (typeof p.bounds === 'function' ? p.bounds(rect, ref.current) : null) || {};
     const min = Number.isFinite(b.min) ? b.min : -Infinity;
     const max = Number.isFinite(b.max) ? Math.max(b.max, min) : Infinity;
     return { min, max };
@@ -134,11 +142,12 @@ export default function ResizeHandle({
     if (typeof p.onCommit === 'function') p.onCommit(v);
   }, []);
 
-  // The committed value, clamped into what the parent allows now.
+  // The committed value, clamped into what the parent allows now — again
+  // whenever the owner's `boundsKey` says the bounds moved.
   useLayoutEffect(() => {
     const rect = parentRect();
     apply(clamp(value, rect), rect);
-  }, [value, cssVar, parentRect, apply, clamp]);
+  }, [value, cssVar, boundsKey, parentRect, apply, clamp]);
 
   // A parent resize re-clamps the COMMITTED value — never the last clamped one,
   // so growing the window back restores the student's size — and commits

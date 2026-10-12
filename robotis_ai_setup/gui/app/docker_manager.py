@@ -1747,10 +1747,13 @@ _CLOUD_STOP_ANSWERS = (CLOUD_STOP_STOPPED, CLOUD_STOP_IDLE, CLOUD_STOP_NO_CONTAI
 # outside by this many seconds for the whole `wsl.exe` round trip.
 CLOUD_STOP_EXEC_TIMEOUT_S = 15
 # Student-visible, logged at most once per closed window and only when the stop
-# could not be asked while the window's session is still the current one.
+# could not be asked while the window's session is still the current one. The
+# run ends 45 s after the page's LAST heartbeat plus the container's next session
+# check (up to ~10 s and one RPC), i.e. up to ~55 s after the window closed, so
+# the sentence names no hard bound.
 CLOUD_STOP_UNREACHABLE_DE = (
     "[WARNUNG] Ein Cloud-Inferenz-Lauf des geschlossenen Fensters konnte nicht gestoppt werden. "
-    "Er endet spätestens nach 45 Sekunden von selbst.")
+    "Er endet nach etwa einer Minute von selbst.")
 # Single-flight like the token clear, but its OWN lock: a stop never waits for a
 # token clear that sleeps between its retries.
 _cloud_stop_lock = threading.Lock()

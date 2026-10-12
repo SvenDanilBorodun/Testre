@@ -449,8 +449,15 @@ class TheStudentVisibleLineFollowsTheGuiRules(unittest.TestCase):
         line = docker_manager.CLOUD_STOP_UNREACHABLE_DE
         self.assertTrue(line.startswith("[WARNUNG] "))
         self.assertNotIn("–", line)
-        self.assertRegex(line, r"[äöüß]")
-        self.assertIn("45 Sekunden", line)
+        # German with literal umlauts (Rule §1): the sentence needs none, so the
+        # fence is the absence of a transliteration rather than an umlaut's presence.
+        self.assertNotRegex(line, r"(?i)ae|oe|ue")
+        # The run ends 45 s after the page's LAST heartbeat plus the container's
+        # next session check (up to ~10 s and one RPC), i.e. up to ~55 s after the
+        # window closed: never promise a bound the run cannot keep (V1-7).
+        self.assertTrue(line.endswith("Er endet nach etwa einer Minute von selbst."))
+        self.assertNotIn("45 Sekunden", line)
+        self.assertNotIn("spätestens", line)
         self.assertNotIn("EDUBOTICS_CLOUD_STOP", line)
         self.assertNotIn("{", line)
 

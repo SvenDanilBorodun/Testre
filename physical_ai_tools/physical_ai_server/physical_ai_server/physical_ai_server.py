@@ -2869,6 +2869,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         now = time.monotonic()
         thr = float(getattr(self.data_manager, '_stale_halt_threshold_s', 5.0))
         cams = {}
+        stale = []                       # every expected camera frozen in THIS frame, in policy order
         for name in expected:
             msg = camera_msgs[name]
             data = bytes(msg.data)
@@ -2882,20 +2883,24 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 return None, cloud_texts_de.image_too_big_de(name)
             cams[name] = data
             # Stale camera: warn only (local inference's rule), from the header stamp alone.
+            # Every frozen camera is named in the log, each at most every 5 s on its own
+            # throttle, so a second frozen camera is never swallowed by the first one's.
             stamp = getattr(getattr(msg, 'header', None), 'stamp', None)
             key = (getattr(stamp, 'sec', None), getattr(stamp, 'nanosec', None))
             seen = run.camera_stamps.get(name)
             if seen is None or seen[0] != key:
                 run.camera_stamps[name] = (key, now)
-                if run.stale_camera == name:
-                    run.stale_camera = None
             elif now - seen[1] > thr:
-                run.stale_camera = name
-                if now - run.last_stale_warn_at >= 5.0:
-                    run.last_stale_warn_at = now
+                stale.append(name)
+                if now - run.stale_warned_at.get(name, -math.inf) >= 5.0:
+                    run.stale_warned_at[name] = now
                     print(f'[WARNUNG] Kamera "{name}" liefert seit über {thr:.0f}s dasselbe Bild. '
                           f'Aufnahme läuft weiter — bitte prüfen, ob die Szene wirklich statisch ist '
                           f'oder die Kamera hängt.', flush=True)
+        # The state topic carries ONE camera name or null (cloud_contract): the FIRST frozen
+        # camera in policy order, which the log above names too. One assignment, so the state
+        # timer never reads a half-updated value.
+        run.stale_camera = stale[0] if stale else None
         # Exactly convert_msgs_to_raw_datas's follower half.
         state = np.concatenate([
             np.asarray(self.data_manager.joint_msgs2tensor_array(v, self.total_joint_order), np.float32)
@@ -8589,9 +8594,9 @@ class _CloudRun:
         self.ready_at = None
         self.max_end_in_s = None
         self.last_holding = True
-        self.stale_camera = None
+        self.stale_camera = None           # the FIRST frozen expected camera, or None
         self.camera_stamps = {}            # expected camera -> (header stamp, time it last changed)
-        self.last_stale_warn_at = -math.inf
+        self.stale_warned_at = {}          # expected camera -> time its stale line was last logged
         self.extra_cameras_warned = False
         self.last_leader_check = -math.inf
         self.data_ever_ready = False

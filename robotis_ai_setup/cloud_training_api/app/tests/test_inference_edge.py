@@ -161,7 +161,7 @@ class TestStartSession(_Keyed):
     def test_a_quick_start_returns_the_credentials(self) -> None:
         fake = _FakeServer()
         with patch.object(edge, "_server", return_value=fake):
-            creds = asyncio.run(edge.start_session(self._never))
+            creds = asyncio.run(edge.start_session("u1", self._never))
         self.assertEqual(creds.session_id, "sd-abc")
         self.assertEqual(fake.started, [svc.EDGE_IDLE_S])
 
@@ -186,11 +186,12 @@ class TestStartSession(_Keyed):
             late.append(creds.session_id)
 
         async def scenario():
-            first = asyncio.ensure_future(edge.start_session(on_late))
+            first = asyncio.ensure_future(edge.start_session("u-first", on_late))
             await asyncio.sleep(0.05)  # the first occupies the only worker
             with self.assertRaises(edge.EdgeTimeout) as ctx:
-                await edge.start_session(on_late)
+                await edge.start_session("u-second", on_late)  # another student: a start of its own
             self.assertEqual(ctx.exception.args[0], "queued")
+            self.assertNotIn("u-second", edge._STARTS)  # a cancelled start is never joined
             with self.assertRaises(edge.EdgeTimeout) as ctx:
                 await first  # the first is still RUNNING at its own bound
             self.assertEqual(ctx.exception.args[0], "running")
@@ -226,7 +227,7 @@ class TestStartSession(_Keyed):
         async def scenario():
             t0 = time.monotonic()
             with self.assertRaises(edge.EdgeTimeout) as ctx:
-                await edge.start_session(on_late)
+                await edge.start_session("u1", on_late)
             self.assertEqual(ctx.exception.args[0], "running")
             self.assertLess(time.monotonic() - t0, 0.35)
             for _ in range(100):
@@ -254,7 +255,7 @@ class TestStartSession(_Keyed):
 
         async def scenario():
             with self.assertRaises(edge.EdgeTimeout):
-                await edge.start_session(on_late)
+                await edge.start_session("u1", on_late)
             for _ in range(100):
                 if seen_in_set:
                     break
@@ -284,7 +285,7 @@ class TestStartSession(_Keyed):
 
         async def scenario():
             with self.assertRaises(edge.EdgeTimeout):
-                await edge.start_session(on_late)
+                await edge.start_session("u1", on_late)
             await asyncio.sleep(0.5)
 
         with patch.object(edge, "_server", return_value=_FakeServer(start=failing)), \
@@ -298,7 +299,7 @@ class TestStartSession(_Keyed):
 
         with patch.object(edge, "_server", return_value=_FakeServer(start=broken)):
             with self.assertRaises(RuntimeError):
-                asyncio.run(edge.start_session(self._noop))
+                asyncio.run(edge.start_session("u1", self._noop))
 
     def test_start_and_control_pools_are_separate(self) -> None:
         # 64 starts blocked in the start pool never starve terminate or get_url.
@@ -330,6 +331,302 @@ class TestStartSession(_Keyed):
         self.assertTrue(url.startswith("https://"))
         self.assertLess(took, 1.0)
         self.assertEqual(fake.terminated, [EDGE_TOK])
+
+
+# ------------------------------------------------------------ joined starts
+
+
+class _Gated:
+    """A sessions.start that blocks until `gate` is set (a GPU shortage) and answers
+    credentials of its own per call (sd-1, sd-2, ...), or raises `error`."""
+
+    def __init__(self, error=None):
+        self.gate = threading.Event()
+        self.error = error
+        self.n = 0
+        self._lock = threading.Lock()
+
+    def __call__(self):
+        with self._lock:
+            self.n += 1
+            n = self.n
+        self.gate.wait(10)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(session_id=f"sd-{n}", token=EDGE_TOK)
+
+
+class TestJoinedStarts(_Keyed):
+    """Owner, round 3 (R1 MINOR): the page retries a `gpu_not_started` reserve up to
+    twice, and a timed-out start keeps running (it cannot be cancelled), so a student
+    once held up to three START_POOL threads and three GPU starts. A reservation that
+    arrives while a start launched for one of the SAME student's earlier reservations
+    still runs now waits on that start instead of submitting another; its success goes
+    to the newest reservation still waiting, else (nobody waits) to the newest
+    reservation's late path, exactly once."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.late: list[tuple[str, str]] = []
+        self.start = _Gated()
+        self._patches = [patch.object(edge, "_server", return_value=_FakeServer(start=self.start))]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self) -> None:
+        self.start.gate.set()
+        for p in reversed(self._patches):
+            p.stop()
+        super().tearDown()
+
+    def on_late(self, tag):
+        async def record(creds):
+            self.late.append((tag, creds.session_id))
+
+        return record
+
+    async def until(self, cond, tries=300):
+        for _ in range(tries):
+            if cond():
+                return
+            await asyncio.sleep(0.01)
+
+    def run_with(self, scenario, timeout_s):
+        with patch.object(edge, "START_TIMEOUT_S", timeout_s):
+            return asyncio.run(scenario())
+
+    def test_a_retry_joins_the_running_start_and_takes_its_success(self) -> None:
+        async def scenario():
+            with self.assertRaises(edge.EdgeTimeout) as ctx:
+                await edge.start_session("u1", self.on_late("r1"))
+            self.assertEqual(ctx.exception.args[0], "running")
+            retry = asyncio.ensure_future(edge.start_session("u1", self.on_late("r2")))
+            await asyncio.sleep(0.05)
+            self.assertFalse(retry.done())
+            self.start.gate.set()
+            creds = await retry
+            await asyncio.sleep(0.05)
+            return creds
+
+        creds = self.run_with(scenario, 0.25)
+        self.assertEqual(creds.session_id, "sd-1")
+        self.assertEqual(self.start.n, 1)   # the retry submitted no second sessions.start
+        self.assertEqual(self.late, [])     # handed to the waiting retry, never ALSO to a late path
+        self.assertEqual(edge._STARTS, {})  # the next reservation starts afresh
+
+    def test_a_success_after_every_attempt_timed_out_goes_to_the_newest_reservation_once(self) -> None:
+        async def scenario():
+            for tag in ("r1", "r2", "r3"):
+                with self.assertRaises(edge.EdgeTimeout) as ctx:
+                    await edge.start_session("u1", self.on_late(tag))
+                self.assertEqual(ctx.exception.args[0], "running")
+            self.start.gate.set()
+            await self.until(lambda: self.late)
+            await asyncio.sleep(0.1)
+
+        self.run_with(scenario, 0.1)
+        self.assertEqual(self.start.n, 1)
+        self.assertEqual(self.late, [("r3", "sd-1")])
+
+    def test_a_newer_reservation_takes_over_and_the_older_request_is_released_at_once(self) -> None:
+        # e.g. the student picked another model while the first one's GPU started:
+        # a Modal session is not bound to a model, the newer reservation takes it.
+        async def scenario():
+            first = asyncio.ensure_future(edge.start_session("u1", self.on_late("r1")))
+            await asyncio.sleep(0.05)
+            second = asyncio.ensure_future(edge.start_session("u1", self.on_late("r2")))
+            await self.until(first.done)
+            with self.assertRaises(edge.StartSuperseded):
+                first.result()
+            self.assertFalse(second.done())
+            self.start.gate.set()
+            creds = await second
+            await asyncio.sleep(0.05)
+            return creds
+
+        creds = self.run_with(scenario, 2.0)
+        self.assertEqual(creds.session_id, "sd-1")
+        self.assertEqual(self.start.n, 1)
+        self.assertEqual(self.late, [])
+
+    def test_two_students_never_share_a_start(self) -> None:
+        async def scenario():
+            a = asyncio.ensure_future(edge.start_session("ua", self.on_late("a")))
+            b = asyncio.ensure_future(edge.start_session("ub", self.on_late("b")))
+            await self.until(lambda: self.start.n == 2)
+            self.assertFalse(a.done() or b.done())
+            self.start.gate.set()
+            return await a, await b
+
+        ca, cb = self.run_with(scenario, 2.0)
+        self.assertEqual(self.start.n, 2)
+        self.assertEqual({ca.session_id, cb.session_id}, {"sd-1", "sd-2"})
+        self.assertEqual(self.late, [])
+
+    def test_a_failure_of_a_joined_start_reaches_the_waiting_retry_and_nothing_arrives_late(self) -> None:
+        class AuthError(Exception):
+            pass
+
+        self.start.error = AuthError("token rejected")
+
+        async def scenario():
+            with self.assertRaises(edge.EdgeTimeout):
+                await edge.start_session("u1", self.on_late("r1"))
+            retry = asyncio.ensure_future(edge.start_session("u1", self.on_late("r2")))
+            await asyncio.sleep(0.05)
+            self.start.gate.set()
+            with self.assertRaises(AuthError):  # the SDK's own exception: permanent, not a timeout
+                await retry
+            await asyncio.sleep(0.1)
+
+        self.run_with(scenario, 0.25)
+        self.assertEqual(self.start.n, 1)
+        self.assertEqual(self.late, [])
+        self.assertEqual(edge._STARTS, {})
+
+    def test_a_request_that_goes_away_leaves_its_success_to_its_late_path(self) -> None:
+        async def scenario():
+            waiting = asyncio.ensure_future(edge.start_session("u1", self.on_late("r1")))
+            await asyncio.sleep(0.05)
+            waiting.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiting
+            self.start.gate.set()
+            await self.until(lambda: self.late)
+            await asyncio.sleep(0.05)
+
+        self.run_with(scenario, 2.0)
+        self.assertEqual(self.late, [("r1", "sd-1")])
+
+    def test_a_success_already_handed_to_a_request_that_goes_away_is_not_lost(self) -> None:
+        # The success is delivered, then the request is cancelled before it could read it.
+        real_settle = edge._settle
+        holder = {}
+
+        def settle_then_cancel(entry):
+            real_settle(entry)
+            holder["task"].cancel()
+
+        async def scenario():
+            holder["task"] = asyncio.ensure_future(edge.start_session("u1", self.on_late("r1")))
+            await asyncio.sleep(0.05)
+            self.start.gate.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await holder["task"]
+            await self.until(lambda: self.late)
+            await asyncio.sleep(0.05)
+
+        with patch.object(edge, "_settle", settle_then_cancel):
+            self.run_with(scenario, 2.0)
+        self.assertEqual(self.late, [("r1", "sd-1")])
+
+    def test_a_queued_start_nobody_waits_for_is_cancelled_and_the_retry_starts_its_own(self) -> None:
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        other = threading.Event()
+        blocker = pool.submit(other.wait, 5)  # the only worker is busy with someone else's start
+        self.start.gate.set()                 # no shortage once a worker is free
+
+        async def scenario():
+            with self.assertRaises(edge.EdgeTimeout) as ctx:
+                await edge.start_session("u1", self.on_late("r1"))
+            self.assertEqual(ctx.exception.args[0], "queued")
+            self.assertNotIn("u1", edge._STARTS)
+            other.set()
+            return await edge.start_session("u1", self.on_late("r2"))
+
+        try:
+            with patch.object(edge, "START_POOL", pool):
+                creds = self.run_with(scenario, 0.2)
+        finally:
+            other.set()
+            blocker.result(timeout=5)
+            pool.shutdown(wait=True)
+        self.assertEqual(creds.session_id, "sd-1")  # the cancelled one never ran
+        self.assertEqual(self.start.n, 1)
+        self.assertEqual(self.late, [])
+
+    def test_a_start_presumed_hung_is_not_joined(self) -> None:
+        # Beyond the SDK's own ~25 min bound a start is presumed hung: a new reservation
+        # starts its own, so one hung start cannot lock its student out for good.
+        self.assertEqual(edge.START_JOIN_MAX_AGE_S, 1800.0)
+        self.assertGreater(edge.START_JOIN_MAX_AGE_S, 25 * 60)
+
+        async def scenario():
+            with self.assertRaises(edge.EdgeTimeout):
+                await edge.start_session("u1", self.on_late("r1"))
+            with patch.object(edge, "START_JOIN_MAX_AGE_S", 0.0):
+                fresh = asyncio.ensure_future(edge.start_session("u1", self.on_late("r2")))
+                await self.until(lambda: self.start.n == 2)
+            self.start.gate.set()
+            creds = await fresh
+            await self.until(lambda: self.late)
+            await asyncio.sleep(0.05)
+            return creds
+
+        creds = self.run_with(scenario, 0.25)
+        self.assertEqual(self.start.n, 2)
+        self.assertEqual(creds.session_id, "sd-2")
+        self.assertEqual(self.late, [("r1", "sd-1")])  # the hung one, if it ever ends, is terminated
+
+    def test_a_class_retrying_in_a_gpu_shortage_never_fills_the_start_pool(self) -> None:
+        """R1's simulation, scaled to the real pool: 30 students each make the page's
+        3 attempts (RESERVE_ATTEMPTS) while every start hangs. Before, each attempt
+        held a thread of its own (90 > 64) and a student of another class, whose start
+        would have been instant, was queued and answered `gpu_not_started`. Now the
+        class holds 30 threads and that student gets a GPU."""
+        class_size, attempts = 30, 3
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=edge.START_POOL._max_workers)
+        outsider_turn = threading.Event()
+        calls = []
+        lock = threading.Lock()
+
+        def start():
+            with lock:
+                calls.append(outsider_turn.is_set())
+                n = len(calls)
+            if not outsider_turn.is_set():
+                self.start.gate.wait(10)  # the shortage
+            return SimpleNamespace(session_id=f"sd-{n}", token=EDGE_TOK)
+
+        timeouts = []
+
+        async def student(i):
+            for attempt in range(1, attempts + 1):
+                try:
+                    await edge.start_session(f"student-{i}", self.on_late(f"student-{i}/{attempt}"))
+                except edge.EdgeTimeout as exc:
+                    timeouts.append(exc.args[0])
+
+        async def scenario():
+            await asyncio.gather(*(student(i) for i in range(class_size)))
+            class_calls, joined = len(calls), len(edge._STARTS)
+            outsider_turn.set()
+            try:
+                outsider = await edge.start_session("outsider", self.on_late("outsider"))
+            except edge.EdgeTimeout as exc:  # before: 'queued', the pool was full
+                outsider = exc
+            self.start.gate.set()  # the shortage ends: every class start succeeds late
+            await self.until(lambda: len(self.late) >= class_size)
+            await asyncio.sleep(0.1)
+            return outsider, class_calls, joined
+
+        try:
+            with patch.object(edge, "_server", return_value=_FakeServer(start=start)), \
+                    patch.object(edge, "START_POOL", pool):
+                outsider, class_calls, joined = self.run_with(scenario, 0.15)
+        finally:
+            self.start.gate.set()
+            pool.shutdown(wait=True)
+        self.assertNotIsInstance(outsider, edge.EdgeTimeout)  # the other class's student got a GPU
+        self.assertEqual(outsider.token, EDGE_TOK)
+        self.assertEqual(class_calls, class_size)  # one sessions.start per student, not one per attempt
+        self.assertEqual(joined, class_size)
+        self.assertEqual(timeouts, ["running"] * (class_size * attempts))
+        self.assertEqual(calls, [False] * class_size + [True])
+        # each student's success went once, to their newest reservation
+        self.assertEqual(sorted(tag for tag, _ in self.late),
+                         sorted(f"student-{i}/{attempts}" for i in range(class_size)))
+        self.assertEqual(len({sid for _, sid in self.late}), class_size)
 
 
 # -------------------------------------------------------------- terminate

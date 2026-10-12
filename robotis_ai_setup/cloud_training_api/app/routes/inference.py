@@ -24,6 +24,10 @@ Conventions that are easy to undo by accident:
   * Every handler is `async def` and runs blocking work off the loop
     (asyncio.to_thread, or inference_edge's own pools). Every answer — refusals
     included — carries `Cache-Control: no-store` (`_no_store`).
+  * The reserve body is read BY HAND from the raw request (V1-8), never through
+    a pydantic model or `Body(...)`: FastAPI's own 422 is English, echoes the
+    request's `input` and carries no `Cache-Control`, and an invalid-JSON body
+    would reach it before any handler. The other POST routes take no body.
   * No Modal call before the reservation row exists: a refused caller never
     costs a GPU. Every attach-time end is 503, `superseded` included (G-4), so a
     409 from reserve always means the model itself was refused.
@@ -31,17 +35,23 @@ Conventions that are easy to undo by accident:
     put into an exception text.
   * Every German `detail=` literal is bound at its raise site on purpose:
     german_detail_lint.py reads keyword arguments.
+  * ONE answer carries a machine-readable `code` next to its German `detail`:
+    the reserve's 503 when `sessions.start` itself failed or outlived its bound
+    (`"code": "gpu_not_started"`). The page retries the reserve on that code
+    alone (owner, round 2) and never on German text. An attach-time end answers
+    the same sentence WITHOUT the code: that reservation ended for a reason of
+    its own (another tab superseded it, the page let it go).
 """
 
 from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 
 from app.auth import get_current_profile
 from app.services import inference_edge
@@ -53,10 +63,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/inference", tags=["inference"])
 
 _NO_STORE = {"Cache-Control": "no-store"}
+# == physical_ai_manager features/cloudInference/controller.js GPU_NOT_STARTED_CODE
+GPU_NOT_STARTED_CODE = "gpu_not_started"
+# The reserve body is `{"training_id": <int>}`; anything past this is not one.
+_RESERVE_BODY_MAX_BYTES = 4096
+_TRAINING_ID_MAX = 2_147_483_647  # trainings.id is a Postgres INT
 
 
-class ReserveBody(BaseModel):
-    training_id: int = Field(..., ge=1)
+class _CodedHTTPException(HTTPException):
+    """An HTTPException whose JSON body also carries a machine-readable `code`."""
+
+    def __init__(self, status_code: int, detail: str, code: str):
+        super().__init__(status_code=status_code, detail=detail)
+        self.code = code
 
 
 def _ok(content: dict) -> JSONResponse:
@@ -72,8 +91,10 @@ def _no_store(handler):
         try:
             return await handler(*args, **kwargs)
         except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
-                                headers=dict(_NO_STORE))
+            content = {"detail": exc.detail}
+            if isinstance(exc, _CodedHTTPException):
+                content["code"] = exc.code
+            return JSONResponse(status_code=exc.status_code, content=content, headers=dict(_NO_STORE))
         except Exception as exc:  # noqa: BLE001 - never str(exc)
             logger.error("inference route %s failed: %s", handler.__name__, type(exc).__name__)
             return JSONResponse(
@@ -109,6 +130,16 @@ def _session_unreadable() -> HTTPException:
 
 
 def _gpu_not_started() -> HTTPException:
+    """`sessions.start` failed or outlived START_TIMEOUT_S: the page may retry (coded)."""
+    return _CodedHTTPException(
+        status_code=503,
+        detail="Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.",
+        code=GPU_NOT_STARTED_CODE,
+    )
+
+
+def _ended_while_starting() -> HTTPException:
+    """The reservation ended while its GPU started (G-4): the same sentence, no retry code."""
     return HTTPException(
         status_code=503,
         detail="Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.",
@@ -127,6 +158,33 @@ def _model_not_act() -> HTTPException:
             "bisher nur ACT-Modelle."
         ),
     )
+
+
+def _malformed_request() -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail="Die Anfrage ist ungültig. Bitte lade die Seite neu und versuche es noch einmal.",
+    )
+
+
+async def _read_training_id(request) -> int:
+    """The `training_id` of a reserve body `{"training_id": <int 1..INT max>}`
+    (extra keys ignored), else the German 422. Never echoes the body."""
+    try:
+        raw = await request.body()
+    except Exception:  # noqa: BLE001 - a broken upload is a malformed request
+        raise _malformed_request() from None
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > _RESERVE_BODY_MAX_BYTES:
+        raise _malformed_request()
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        raise _malformed_request() from None
+    training_id = body.get("training_id") if isinstance(body, dict) else None
+    if (not isinstance(training_id, int) or isinstance(training_id, bool)
+            or not 1 <= training_id <= _TRAINING_ID_MAX):
+        raise _malformed_request()
+    return training_id
 
 
 def _valid_creds(creds) -> bool:
@@ -150,11 +208,9 @@ async def _end_edge_failed(sb, uid: str, session_id: str) -> None:
 
 @router.post("/sessions")
 @_no_store
-async def reserve_session(body: ReserveBody, profile=Depends(get_current_profile)):
+async def reserve_session(request: Request, profile=Depends(get_current_profile)):
     uid = _require_student(profile)
-    training_id = getattr(body, "training_id", None)
-    if not isinstance(training_id, int) or isinstance(training_id, bool) or training_id < 1:
-        raise HTTPException(status_code=404, detail="Modell nicht gefunden.")
+    training_id = await _read_training_id(request)
     row = await asyncio.to_thread(svc.visible_training, profile, training_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Modell nicht gefunden.")
@@ -253,7 +309,7 @@ async def reserve_session(body: ReserveBody, profile=Depends(get_current_profile
     if status == "ended":
         # Stored on the ended row: the terminate loop ends the Modal session (D39, G-4).
         inference_edge.kick()
-        raise _gpu_not_started()
+        raise _ended_while_starting()
     await inference_edge.terminate_now(creds.token)
     raise _not_created()
 

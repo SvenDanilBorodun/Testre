@@ -76,6 +76,25 @@ def _headers(resp):
     return {k.lower(): v for k, v in dict(resp.headers or {}).items()}
 
 
+class _FakeRequest:
+    """Just enough of a Starlette Request for the reserve handler: `await body()`."""
+
+    def __init__(self, raw: bytes):
+        self._raw = raw
+
+    async def body(self) -> bytes:
+        return self._raw
+
+
+def _body_request(training_id=7, raw=None) -> _FakeRequest:
+    if raw is None:
+        raw = json.dumps({"training_id": training_id}).encode("utf-8")
+    return _FakeRequest(raw)
+
+
+MALFORMED_DE = "Die Anfrage ist ungültig. Bitte lade die Seite neu und versuche es noch einmal."
+
+
 class _PgError(Exception):
     def __init__(self, code, msg="x"):
         super().__init__({"code": code, "message": msg})
@@ -255,10 +274,9 @@ class _Case(unittest.TestCase):
 
         return asyncio.run(wrapper())
 
-    def reserve(self, profile=STUDENT, training_id=7):
-        # A plain body: real FastAPI validates `ReserveBody` before the handler runs;
-        # the handler re-checks by hand, which is what this drives.
-        return self.run_async(route.reserve_session(SimpleNamespace(training_id=training_id), profile=profile))
+    def reserve(self, profile=STUDENT, training_id=7, raw=None):
+        # The handler reads the body by hand (V1-8): FastAPI never validates it.
+        return self.run_async(route.reserve_session(_body_request(training_id, raw), profile=profile))
 
     def arm(self, sid, profile=STUDENT):
         return self.run_async(route.arm_session(sid, profile=profile))
@@ -356,6 +374,54 @@ class TestReserve(_Case):
             self.assertNotIn("modal", self.events)  # a refused caller never costs a GPU
             self.assertEqual(self.server.started, [])
 
+    def test_the_retry_marker_is_on_the_start_failure_503_and_no_other_answer(self) -> None:
+        """Round 2 (owner): the page retries a reserve only on this marker, never on
+        German text. A failed start leaves no live row and costs no Cloud-Zeit."""
+        self.assertEqual(route.GPU_NOT_STARTED_CODE, "gpu_not_started")
+        coded, plain = [], []
+
+        def record(resp, into):
+            body = _content(resp)
+            into.append((resp.status_code, body))
+
+        # the start failure itself (an SDK error; the timeout is pinned above)
+        self.server = _Server(start=lambda: (_ for _ in ()).throw(RuntimeError("down")))
+        record(self.reserve(), coded)
+        (row,) = [r for r in self.store.rows.values()]
+        self.assertEqual((row["status"], row["end_reason"]), ("ended", "edge_failed"))
+        self.assertIsNone(row.get("connected_at"))
+        # every other answer of every route
+        self.server = _Server()
+        record(self.reserve(), plain)                                   # 200
+        sid = next(r["id"] for r in self.store.rows.values() if r["status"] == "reserved")
+        for code in ("P0048", "P0049", "P0002", "XX000"):
+            self.store.raise_on["create_inference_session_safe"] = _PgError(code)
+            record(self.reserve(), plain)                               # 429, 503 busy, 404, 500
+        self.store.raise_on.clear()
+        self.visible = None
+        record(self.reserve(), plain)                                   # 404
+        self.visible = TRAINING
+        for err in ("not_found", "invalid", "not_act", "unreachable"):
+            self.resolve_error = svc.ModelResolveError(err)
+            record(self.reserve(), plain)                               # 409, 502
+        self.resolve_error = None
+        record(self.reserve(raw=b"{}"), plain)                          # 422
+        record(self.reserve(TEACHER), plain)                            # 403
+        self.store.attach_override = {"status": "ended", "end_reason": "superseded"}
+        record(self.reserve(), plain)                                   # 503, attach-time end
+        self.store.attach_override = {"status": "conflict"}
+        record(self.reserve(), plain)                                   # 500
+        self.store.attach_override = None
+        record(self.arm(sid), plain)
+        record(self.heartbeat(sid), plain)
+        record(self.end(sid), plain)
+        record(self.usage(), plain)
+        self.assertEqual([(st, b.get("code")) for st, b in coded], [(503, "gpu_not_started")])
+        statuses = {st for st, _ in plain}
+        self.assertTrue({200, 403, 404, 409, 422, 429, 500, 502, 503} <= statuses, statuses)
+        for status, body in plain:
+            self.assertNotIn("code", body, (status, body))
+
     def test_reserve_sends_only_the_hash_to_the_rpc(self) -> None:
         tokens = []
         real_new = svc.new_token
@@ -416,7 +482,7 @@ class TestReserve(_Case):
         self.server = _Server(start=slow)
 
         async def scenario():
-            resp = await route.reserve_session(SimpleNamespace(training_id=7), profile=STUDENT)
+            resp = await route.reserve_session(_body_request(7), profile=STUDENT)
             # the late success arrives after the answer, on the same (long-lived) loop
             await asyncio.sleep(0.5)
             for _ in range(50):
@@ -427,8 +493,8 @@ class TestReserve(_Case):
 
         with patch.object(edge, "START_TIMEOUT_S", 0.1):
             body = self.assertAnswer(asyncio.run(scenario()), 503)
-        self.assertEqual(body["detail"], "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich "
-                                         "noch einmal.")
+        self.assertEqual(body, {"detail": "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es "
+                                          "gleich noch einmal.", "code": "gpu_not_started"})
         (row,) = self.store.rows.values()
         self.assertEqual((row["status"], row["end_reason"]), ("ended", "edge_failed"))
         # attached to the ENDED row (so the terminate loop ends it), never handed out
@@ -444,6 +510,7 @@ class TestReserve(_Case):
         self.server = _Server(start=broken)
         body = self.assertAnswer(self.reserve(), 503)
         self.assertIn("gestartet", body["detail"])
+        self.assertEqual(body["code"], route.GPU_NOT_STARTED_CODE)
         (row,) = self.store.rows.values()
         self.assertEqual(row["end_reason"], "edge_failed")
 
@@ -457,6 +524,7 @@ class TestReserve(_Case):
             with patch.object(route, "get_supabase", return_value=self.store):
                 body = self.assertAnswer(self.reserve(), 503)
             self.assertIn("gestartet", body["detail"])
+            self.assertEqual(body["code"], route.GPU_NOT_STARTED_CODE)
             (row,) = self.store.rows.values()
             self.assertEqual(row["end_reason"], "edge_failed")
             self.assertIsNone(row["modal_session_id"])
@@ -470,8 +538,10 @@ class TestReserve(_Case):
             self.store.attach_override = {"status": "ended", "end_reason": reason}
             kicks = self.kicks[0]
             body = self.assertAnswer(self.reserve(), 503)
-            self.assertEqual(body["detail"], "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es "
-                                             "gleich noch einmal.")
+            # the same sentence, but NO retry marker: this reservation ended for a reason of
+            # its own (another tab superseded it, the page let it go) — the GPU did start
+            self.assertEqual(body, {"detail": "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche "
+                                              "es gleich noch einmal."})
             self.assertGreater(self.kicks[0], kicks)
             self.assertEqual(self.server.terminated, [])  # the terminate LOOP ends it, from the stored edge
             self.assertEqual(self.prefetched, [])
@@ -493,11 +563,165 @@ class TestReserve(_Case):
         (row,) = self.store.rows.values()
         self.assertEqual(row["end_reason"], "edge_failed")
 
-    def test_a_bad_training_id_is_404(self) -> None:
-        for bad in (0, -3, "7", None, True):
-            body = self.assertAnswer(self.reserve(training_id=bad), 404)
-            self.assertEqual(body["detail"], "Modell nicht gefunden.")
+    def test_a_malformed_body_is_a_german_422_that_echoes_nothing(self) -> None:
+        """V1-8: never FastAPI's English 422 with the request's `input`."""
+        bad_ids = (0, -3, "7", None, True, False, 7.0, 7.5, [7], {"x": 7}, 2 ** 31, "x" * 300)
+        raws = [b"", b"{}", b"[]", b'"x"', b"null", b"7", b"{", b'{"training_id": 7', b"\xff\xfe\x00",
+                b"[" * 2000 + b"]" * 2000, b"training_id=7",
+                b'{"trainingId": 7}', b"[" * 5000 + b"]" * 5000, b'{"training_id": 1' + b"0" * 5000 + b"}",
+                b'{"training_id": 7, "pad": "' + b"x" * 5000 + b'"}']
+        cases = [dict(training_id=t) for t in bad_ids] + [dict(raw=r) for r in raws]
+        for case in cases:
+            with self.subTest(case=repr(case)[:80]):
+                body = self.assertAnswer(self.reserve(**case), 422)
+                self.assertEqual(body, {"detail": MALFORMED_DE})
         self.assertEqual(self.store.calls, [])
+        self.assertEqual(self.events, [])
+
+    def test_a_well_formed_body_with_extra_keys_is_accepted(self) -> None:
+        raw = json.dumps({"training_id": 7, "extra": True}).encode()
+        self.assertAnswer(self.reserve(raw=raw), 200)
+        self.assertAnswer(self.reserve(training_id=2 ** 31 - 1), 200)
+
+    def test_non_students_are_refused_before_the_body_is_read(self) -> None:
+        body = self.assertAnswer(self.reserve(TEACHER, raw=b"{"), 403)
+        self.assertEqual(body["detail"], "Die Cloud-Inferenz ist nur für Schülerinnen und Schüler verfügbar.")
+
+
+_REAL_FASTAPI_SCRIPT = r"""
+import json, sys, types
+
+auth = types.ModuleType("app.auth")
+
+
+def get_current_profile():
+    return {}
+
+
+auth.get_current_profile = get_current_profile
+sys.modules["app.auth"] = auth
+
+
+class _PgError(Exception):
+    code = "P0002"
+
+
+class _Store:
+    def rpc(self, name, args):
+        class _R:
+            def execute(self):
+                raise _PgError()
+        return _R()
+
+
+sc = types.ModuleType("app.services.supabase_client")
+sc.get_supabase = lambda: _Store()
+sys.modules["app.services.supabase_client"] = sc
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from app.routes import inference as route
+from app.services import inference_sessions as svc
+
+seen = []
+
+
+def visible(profile, training_id):
+    seen.append(training_id)
+    if training_id != 8:
+        return None
+    return {"id": 8, "status": "succeeded", "model_type": "act", "model_name": "EduBotics-Solutions/m"}
+
+
+async def start_fails(on_late):
+    raise RuntimeError("modal down")
+
+
+svc.visible_training = visible
+svc.resolve_model = lambda repo: {"model_repo": repo, "model_revision": "a" * 40}
+svc.create_reservation = lambda *a: {"session_id": "0f5c0a52-5a0c-4d4e-9d61-2b0d2c1f0a12", "session_s": 1800,
+                                     "remaining_today_s": 7000}
+
+
+async def ended_edge_failed(*a):
+    return None
+
+
+route._end_edge_failed = ended_edge_failed
+route.inference_edge.start_session = start_fails
+route.inference_edge.kick = lambda: None
+app = FastAPI()
+app.include_router(route.router)
+app.dependency_overrides[route.get_current_profile] = lambda: {
+    "id": "11111111-1111-4111-8111-111111111111", "role": "student"}
+client = TestClient(app)
+sid = "0f5c0a52-5a0c-4d4e-9d61-2b0d2c1f0a11"
+json_ct = {"content-type": "application/json"}
+cases = [
+    ("reserve {}", "/inference/sessions", {"json": {}}),
+    ("reserve 0", "/inference/sessions", {"json": {"training_id": 0}}),
+    ("reserve str", "/inference/sessions", {"json": {"training_id": "7"}}),
+    ("reserve list", "/inference/sessions", {"json": [7]}),
+    ("reserve nobody", "/inference/sessions", {}),
+    ("reserve badjson", "/inference/sessions", {"content": b"{", "headers": json_ct}),
+    ("reserve form", "/inference/sessions",
+     {"content": b"training_id=7", "headers": {"content-type": "application/x-www-form-urlencoded"}}),
+    ("reserve valid", "/inference/sessions", {"json": {"training_id": 7}}),
+    ("gpu not started", "/inference/sessions", {"json": {"training_id": 8}}),
+]
+for tail in ("arm", "heartbeat", "end"):
+    for i, kw in enumerate(({"json": {}}, {"json": {"training_id": 0}}, {"content": b"{", "headers": json_ct})):
+        cases.append((tail + " " + str(i), "/inference/sessions/" + sid + "/" + tail, kw))
+out = {"seen": seen, "answers": []}
+for name, path, kw in cases:
+    r = client.post(path, **kw)
+    out["answers"].append({"name": name, "status": r.status_code, "text": r.text,
+                           "cc": r.headers.get("cache-control")})
+print(json.dumps(out))
+"""
+
+
+class TestRealFastApiBodies(unittest.TestCase):
+    """V1-8 through the REAL FastAPI stack (ci.yml::python-tests installs fastapi and
+    httpx). This suite stubs `fastapi` process-wide (house pattern), so the real
+    stack runs in a child process: the reserve body is judged by the handler, never
+    by FastAPI's English 422 with the request's `input`, and the bodyless POST
+    routes never answer 422 at all."""
+
+    def test_real_fastapi_answers(self) -> None:
+        import subprocess
+        import sys
+
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.path.dirname(os.path.dirname(HERE))
+        env[hc.KEY_ENV] = KEY
+        proc = subprocess.run([sys.executable, "-c", _REAL_FASTAPI_SCRIPT], capture_output=True, text=True,
+                              env=env, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        out = json.loads(proc.stdout.strip().splitlines()[-1])
+        answers = {a["name"]: a for a in out["answers"]}
+        for name, a in answers.items():
+            with self.subTest(name=name):
+                self.assertEqual(a["cc"], "no-store")
+                self.assertNotIn('"input"', a["text"])
+                if name.startswith("reserve") and name != "reserve valid":
+                    self.assertEqual(a["status"], 422, a["text"])
+                    self.assertEqual(json.loads(a["text"]), {"detail": MALFORMED_DE})
+                elif name == "gpu not started":
+                    # the retry marker survives the real JSONResponse (a body field, readable cross-origin)
+                    self.assertEqual(a["status"], 503, a["text"])
+                    self.assertEqual(json.loads(a["text"]), {
+                        "detail": "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich "
+                                  "noch einmal.",
+                        "code": "gpu_not_started"})
+                elif name == "reserve valid":
+                    # the handler parsed it and asked the visibility ladder (patched: not visible)
+                    self.assertEqual(a["status"], 404, a["text"])
+                    self.assertEqual(json.loads(a["text"]), {"detail": "Modell nicht gefunden."})
+                else:
+                    self.assertEqual(a["status"], 404, a["text"])
+                    self.assertEqual(json.loads(a["text"]), {"detail": "Cloud-Sitzung nicht gefunden."})
+        self.assertEqual(out["seen"], [7, 8])
 
 
 class TestArm(_Case):
@@ -703,6 +927,59 @@ class TestMainWiring(unittest.TestCase):
             self.assertIn('os.environ.get("INFERENCE_SWEEPER_DISABLED") == "1"', fns[name])
         self.assertIn("_inference_sweep_loop()", fns["_start_inference_sweep"])
         self.assertIn("terminate_loop(", fns["_start_inference_terminate_loop"])
+
+    def test_the_url_warm_up_is_a_startup_task_that_never_blocks_boot(self) -> None:
+        """V1-9: scheduled with create_task (never awaited, so neither the lifespan
+        startup nor /health waits for Modal), kept strongly, off in unit tests."""
+        fns = {n.name: n for n in ast.walk(_main_tree()) if isinstance(n, ast.AsyncFunctionDef)}
+        self.assertIn("_start_inference_url_warmup", fns)
+        fn = fns["_start_inference_url_warmup"]
+        self.assertFalse([n for n in ast.walk(fn) if isinstance(n, ast.Await)])
+        with open(MAIN_PY, encoding="utf-8") as fh:
+            src = ast.get_source_segment(fh.read(), fn)
+        self.assertIn('os.environ.get("INFERENCE_SWEEPER_DISABLED") == "1"', src)
+        self.assertIn("_keep_task(_asyncio.create_task(_inference_edge.warm_url()))", src)
+        decorated = [d for d in fn.decorator_list if isinstance(d, ast.Call)
+                     and getattr(d.func, "attr", "") == "on_event"]
+        self.assertEqual([d.args[0].value for d in decorated], ["startup"])
+
+    def test_the_retry_code_is_the_pages_code(self) -> None:
+        """Lockstep: the page retries on exactly the code this API sends."""
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
+        path = os.path.join(repo, "physical_ai_tools", "physical_ai_manager", "src", "features", "cloudInference",
+                            "controller.js")
+        with open(path, encoding="utf-8") as fh:
+            js = fh.read()
+        m = re.search(r"export const GPU_NOT_STARTED_CODE = '([a-z_]+)';", js)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), route.GPU_NOT_STARTED_CODE)
+
+    def test_three_reserve_attempts_fit_the_per_user_budget(self) -> None:
+        """Round 2: the page's 3 automatic reserve attempts (worst case an immediate SDK
+        error, RESERVE_RETRY_DELAY_MS apart) fit the shared POST budget of ONE
+        student, together with the ends of the failed attempts' sessions."""
+        from app.services.rate_limiter import RateLimiter
+
+        rule = _match(_main_literal("_RATE_LIMIT_RULES"), "POST", "/inference/sessions")
+        self.assertEqual(rule, ("POST", "/inference/sessions", 30, 60.0))
+        prefixes = _main_literal("_PER_USER_RATE_LIMIT_PREFIXES")
+        self.assertIn("/inference/", prefixes)  # keyed per student, not per classroom NAT
+        limiter = RateLimiter()
+        method, prefix, limit, window = rule
+        allowed = [limiter.check(f"{method}:{prefix}", "jwt:student", limit, window) for _ in range(3 + 3)]
+        self.assertEqual(allowed, [True] * 6)
+        # a classmate behind the same NAT has a budget of their own
+        self.assertTrue(limiter.check(f"{method}:{prefix}", "jwt:classmate", limit, window))
+
+    def test_a_failed_start_costs_no_cloud_time(self) -> None:
+        """Round 2: an attempt that never connected adds 0 s to today's Cloud-Zeit (048)."""
+        mig = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "supabase", "migrations")
+        (name,) = [n for n in os.listdir(mig) if n.endswith("_048_inference_sessions.sql")]
+        with open(os.path.join(mig, name), encoding="utf-8") as fh:
+            sql = fh.read()
+        used = sql[sql.index("FUNCTION public._inference_used_today_s"):]
+        used = used[:used.index("$$;")]
+        self.assertIn("CASE WHEN connected_at IS NULL THEN 0", used)
 
     def test_no_new_secret(self) -> None:
         with open(MAIN_PY, encoding="utf-8") as fh:

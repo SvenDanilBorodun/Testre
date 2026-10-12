@@ -125,6 +125,9 @@ describe('reserve on an explicit model click', () => {
     const answers = [];
     api.reserveInferenceSession.mockImplementation(() => new Promise((r) => answers.push(r)));
     await reserveVia(5);
+    // the list is locked while the GPU starts (round 2): only a release (the panel
+    // unmounting, the target switch) lets the student choose again before it answers
+    controller.release();
     controller.selectModel(token, 6, () => false);
     await vi.advanceTimersByTimeAsync(800);
     answers[1]({ session_id: SID2, summary: SUMMARY, session_s: 1800 });
@@ -178,6 +181,185 @@ describe('reserve on an explicit model click', () => {
     api.reserveInferenceSession.mockRejectedValueOnce(apiError(404, 'Not Found'));
     await reserveVia(7);
     expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', modelRefused: false, message: cloudCopy.errors.apiUnavailable });
+  });
+});
+
+const GPU_DE = 'Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.';
+
+function gpuNotStarted() {
+  const err = apiError(503, GPU_DE);
+  err.code = controller.GPU_NOT_STARTED_CODE;
+  return err;
+}
+
+describe('a GPU that did not start: the page asks again by itself (owner, round 2)', () => {
+  it('the constants: 3 attempts in total, the API\'s code', () => {
+    expect(controller.RESERVE_ATTEMPTS).toBe(3);
+    expect(controller.GPU_NOT_STARTED_CODE).toBe('gpu_not_started');
+    expect(controller.RESERVE_RETRY_DELAY_MS).toBeGreaterThan(0);
+  });
+
+  it('retries on the code only, after a pause, and a later success is an ordinary reservation', async () => {
+    api.reserveInferenceSession
+      .mockRejectedValueOnce(gpuNotStarted())
+      .mockResolvedValueOnce({ session_id: SID, summary: SUMMARY, session_s: 1800 });
+    await reserveVia(7);
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    // still preparing, no message, nothing refused while it waits
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'reserving', trainingId: 7, message: '', modelRefused: false });
+    await vi.advanceTimersByTimeAsync(controller.RESERVE_RETRY_DELAY_MS - 1);
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(2);
+    expect(api.reserveInferenceSession).toHaveBeenLastCalledWith('jwt-student', 7);
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'reserved', sessionId: SID, trainingId: 7, summary: SUMMARY });
+  });
+
+  it('at most 2 more times (3 in total), then today\'s error, Start enabled', async () => {
+    api.reserveInferenceSession.mockRejectedValue(gpuNotStarted());
+    await reserveVia(7);
+    await vi.advanceTimersByTimeAsync(10 * controller.RESERVE_RETRY_DELAY_MS);
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(3);
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', sessionId: null, message: GPU_DE, modelRefused: false });
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(3);
+  });
+
+  it('every other failure is shown at once, never retried — German text alone is no marker', async () => {
+    for (const err of [
+      apiError(503, 'Die Cloud ist gerade voll ausgelastet. Bitte in ein paar Minuten erneut versuchen.'),
+      apiError(503, GPU_DE), // the attach-time end: same sentence, no code
+      apiError(429, 'Deine Cloud-Zeit für heute ist aufgebraucht. Morgen geht es weiter.'),
+      apiError(404, 'Modell nicht gefunden.'),
+      apiError(409, 'Dieses Training ist noch nicht fertig.'),
+      apiError(502, 'Hugging Face ist gerade nicht erreichbar. Bitte in einer Minute erneut versuchen.'),
+      apiError(500, 'Die Cloud-Sitzung konnte nicht angelegt werden.'),
+      Object.assign(apiError(503, GPU_DE), { code: 'something_else' }),
+      new TypeError('Failed to fetch'),
+    ]) {
+      controller._resetForTests();
+      api.reserveInferenceSession.mockReset();
+      api.reserveInferenceSession.mockRejectedValueOnce(err);
+      // eslint-disable-next-line no-await-in-loop
+      await reserveVia(7);
+      // eslint-disable-next-line no-await-in-loop
+      await vi.advanceTimersByTimeAsync(10 * controller.RESERVE_RETRY_DELAY_MS);
+      expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+      expect(controller.getSnapshot().phase).toBe('idle');
+    }
+  });
+
+  it('a retry that meets another failure shows that one at once', async () => {
+    api.reserveInferenceSession
+      .mockRejectedValueOnce(gpuNotStarted())
+      .mockRejectedValueOnce(apiError(503, 'Die Cloud ist gerade voll ausgelastet. Bitte in ein paar Minuten erneut versuchen.'));
+    await reserveVia(7);
+    await vi.advanceTimersByTimeAsync(10 * controller.RESERVE_RETRY_DELAY_MS);
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: 'idle', message: 'Die Cloud ist gerade voll ausgelastet. Bitte in ein paar Minuten erneut versuchen.',
+    });
+  });
+
+  it('release() (the panel unmounts, the target switches) while a retry waits: no reserve after it', async () => {
+    api.reserveInferenceSession.mockRejectedValue(gpuNotStarted());
+    await reserveVia(7);
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    controller.release();
+    expect(controller.getSnapshot().phase).toBe('idle');
+    await vi.advanceTimersByTimeAsync(10 * controller.RESERVE_RETRY_DELAY_MS);
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', message: '' });
+  });
+
+  it('release() while a retry is in flight: its late answer is ended, and no further attempt', async () => {
+    let resolve;
+    api.reserveInferenceSession
+      .mockRejectedValueOnce(gpuNotStarted())
+      .mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    await reserveVia(7);
+    await vi.advanceTimersByTimeAsync(controller.RESERVE_RETRY_DELAY_MS);
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(2);
+    controller.release();
+    resolve({ session_id: SID, summary: SUMMARY, session_s: 1800 });
+    await flush();
+    await vi.advanceTimersByTimeAsync(10 * controller.RESERVE_RETRY_DELAY_MS);
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot().phase).toBe('idle');
+    expect(api.endInferenceSessionKeepalive).toHaveBeenCalledWith('jwt-student', SID);
+  });
+
+  it('sign-out while a retry waits: no reserve after it', async () => {
+    api.reserveInferenceSession.mockRejectedValue(gpuNotStarted());
+    await reserveVia(7);
+    controller.endCloudInferenceOnLogout('jwt-student');
+    await vi.advanceTimersByTimeAsync(10 * controller.RESERVE_RETRY_DELAY_MS);
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot().phase).toBe('idle');
+  });
+
+  it('a Start that reserves first retries the same way', async () => {
+    api.reserveInferenceSession
+      .mockRejectedValueOnce(gpuNotStarted())
+      .mockResolvedValueOnce({ session_id: SID, summary: SUMMARY, session_s: 1800 });
+    const started = controller.start({ getAccessToken: token, getTaskInfo: () => FORM, trainingId: 7 });
+    await flush();
+    await vi.advanceTimersByTimeAsync(controller.RESERVE_RETRY_DELAY_MS);
+    await started;
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot().phase).toBe('running');
+  });
+});
+
+describe('no second reserve while the GPU starts (owner, round 2: the list is locked)', () => {
+  it('a click on another row or the same row while reserving sends nothing', async () => {
+    let resolve;
+    api.reserveInferenceSession.mockReturnValue(new Promise((r) => { resolve = r; }));
+    await reserveVia(7);
+    expect(controller.isStartingGpu()).toBe(true);
+    controller.selectModel(token, 8, () => false);
+    controller.selectModel(token, 7, () => false);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    resolve({ session_id: SID, summary: SUMMARY, session_s: 1800 });
+    await flush();
+    expect(controller.getSnapshot()).toMatchObject({ phase: 'reserved', trainingId: 7 });
+    expect(controller.isStartingGpu()).toBe(false);
+  });
+
+  it('the same while a retry waits', async () => {
+    api.reserveInferenceSession.mockRejectedValueOnce(gpuNotStarted()).mockReturnValue(new Promise(() => {}));
+    await reserveVia(7);
+    expect(controller.isStartingGpu()).toBe(true);
+    controller.selectModel(token, 8, () => false);
+    await vi.advanceTimersByTimeAsync(controller.RESERVE_RETRY_DELAY_MS + 1000);
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(2);
+    expect(api.reserveInferenceSession.mock.calls.map((c) => c[1])).toEqual([7, 7]);
+  });
+
+  it('a Start while reserving sends no second reserve', async () => {
+    let resolve;
+    api.reserveInferenceSession.mockReturnValue(new Promise((r) => { resolve = r; }));
+    await reserveVia(7);
+    await controller.start({ getAccessToken: token, getTaskInfo: () => FORM, trainingId: 7 });
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    expect(api.armInferenceSession).not.toHaveBeenCalled();
+    resolve({ session_id: SID, summary: SUMMARY, session_s: 1800 });
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('reserved');
+  });
+
+  it('isStartingGpu: only while reserving', () => {
+    for (const phase of ['idle', 'reserved', 'arming', 'starting', 'running', 'stopping', 'ended']) {
+      expect(controller.isStartingGpu({ phase })).toBe(false);
+    }
+    expect(controller.isStartingGpu({ phase: 'reserving' })).toBe(true);
   });
 });
 

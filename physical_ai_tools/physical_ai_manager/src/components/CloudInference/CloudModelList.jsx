@@ -9,9 +9,12 @@
 // The student's finished models for a cloud run (spec §6.4). Presentational:
 // the rows come from useSupabaseTrainings (own + group, the ladder the API
 // checks). Only an explicit click reserves (the panel debounces it); the list
-// never pre-selects anything (F-9).
+// never pre-selects anything (F-9). While the cloud GPU starts (a reserve and
+// its automatic retries, owner round 2) the list is LOCKED: every other row is
+// disabled with the reason, and the chosen row keeps its look but a click on it
+// sends nothing.
 
-import React from 'react';
+import React, { useId } from 'react';
 import clsx from 'clsx';
 
 import Icon from '../icons/Icon';
@@ -45,13 +48,21 @@ function formatDate(iso) {
  * @param {boolean} p.loading
  * @param {?number} p.selectedId
  * @param {boolean} p.disabled   a Start or a run is in progress, or a task runs (G-3)
+ * @param {?string} [p.lockedReason]  set while the cloud GPU starts: the list is locked
  * @param {(job: object) => void} p.onSelect
  */
-export default function CloudModelList({ jobs, loading, selectedId, disabled, onSelect }) {
+export default function CloudModelList({ jobs, loading, selectedId, disabled, lockedReason = null, onSelect }) {
   const rows = cloudModelRows(jobs);
+  const locked = Boolean(lockedReason);
+  const lockHintId = useId();
   return (
     <section aria-label={cloudCopy.models.title} className="flex flex-col gap-2">
       <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--ink-3)]">{cloudCopy.models.title}</h3>
+      {locked && rows.length > 0 && (
+        <div id={lockHintId} role="status" className="text-xs text-[var(--ink-3)]" data-testid="cloud-models-locked">
+          {lockedReason}
+        </div>
+      )}
       {rows.length === 0 && loading && (
         <div className="text-sm text-[var(--ink-3)] flex items-center gap-2">
           <Icon name="loading" size={14} className="animate-spin" />
@@ -65,19 +76,26 @@ export default function CloudModelList({ jobs, loading, selectedId, disabled, on
         {rows.map((job) => {
           const isAct = job.model_type === 'act';
           const selected = job.id === selectedId;
+          const lockedOut = locked && !selected; // disabled, with the reason
+          const inert = locked && selected; // looks chosen; a click sends nothing
+          const off = disabled || !isAct || lockedOut;
           return (
             <li key={job.id}>
               <button
                 type="button"
                 aria-pressed={selected}
-                disabled={disabled || !isAct}
-                onClick={() => onSelect(job)}
+                aria-disabled={inert ? 'true' : undefined}
+                aria-describedby={locked && rows.length > 0 ? lockHintId : undefined}
+                disabled={off}
+                title={lockedOut && isAct ? lockedReason : undefined}
+                onClick={() => { if (!locked) onSelect(job); }}
                 className={clsx(
                   'w-full text-left px-3 py-2 rounded-[var(--radius-sm)] border transition',
                   selected
                     ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft,rgba(16,185,129,0.08))]'
                     : 'border-[var(--line)] bg-white hover:bg-[var(--bg-sunk)]',
-                  (disabled || !isAct) && 'opacity-60 cursor-not-allowed hover:bg-white',
+                  off && 'opacity-60 cursor-not-allowed hover:bg-white',
+                  inert && 'cursor-progress',
                 )}
               >
                 <div className="flex items-center justify-between gap-2">

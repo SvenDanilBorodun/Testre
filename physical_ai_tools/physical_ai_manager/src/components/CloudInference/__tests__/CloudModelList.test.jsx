@@ -50,6 +50,39 @@ describe('CloudModelList', () => {
     expect(screen.getByRole('button', { name: /^neu/ })).toHaveAttribute('aria-pressed', 'true');
   });
 
+  it('while the GPU starts, every other row is disabled with the visible reason (owner, round 2)', () => {
+    const onSelect = vi.fn();
+    const reason = cloudCopy.models.gpuStarting;
+    expect(reason).toBe('Cloud-GPU wird gestartet … bitte kurz warten.');
+    render(<CloudModelList jobs={JOBS} loading={false} selectedId={2} disabled={false} lockedReason={reason} onSelect={onSelect} />);
+    const chosen = screen.getByRole('button', { name: /^neu/ });
+    const other = screen.getByRole('button', { name: /^alt/ });
+    expect(other).toBeDisabled();
+    expect(other).toHaveAttribute('title', reason);
+    expect(screen.getByTestId('cloud-models-locked')).toHaveTextContent(reason);
+    // the chosen row keeps its look, but a click on it sends nothing
+    expect(chosen).not.toBeDisabled();
+    expect(chosen).toHaveAttribute('aria-pressed', 'true');
+    expect(chosen).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(chosen);
+    fireEvent.click(other);
+    expect(onSelect).not.toHaveBeenCalled();
+    // a model of another type keeps its own reason
+    expect(screen.getByRole('button', { name: /^diff/ })).toHaveTextContent(cloudCopy.models.notAct);
+  });
+
+  it('without a lock: no reason, no title, every ACT row clickable', () => {
+    const onSelect = vi.fn();
+    render(<CloudModelList jobs={JOBS} loading={false} selectedId={2} disabled={false} lockedReason={null} onSelect={onSelect} />);
+    expect(screen.queryByTestId('cloud-models-locked')).toBeNull();
+    const other = screen.getByRole('button', { name: /^alt/ });
+    expect(other).toBeEnabled();
+    expect(other).not.toHaveAttribute('title');
+    expect(screen.getByRole('button', { name: /^neu/ })).not.toHaveAttribute('aria-disabled');
+    fireEvent.click(other);
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }));
+  });
+
   it('says loading, then empty — never pre-selects anything', () => {
     const { rerender } = render(<CloudModelList jobs={[]} loading selectedId={null} disabled={false} onSelect={() => {}} />);
     expect(screen.getByText(cloudCopy.models.loading)).toBeInTheDocument();

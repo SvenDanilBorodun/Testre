@@ -65,6 +65,10 @@ class EdgeTimeout(Exception):
 _server_lock = threading.Lock()
 _server_obj = None
 _url_cache: tuple[float, str] | None = None
+# The get_url call in flight, shared by every caller that arrives while it runs
+# (the startup warm-up and the first prefetches, or a class's prefetches after
+# the TTL), so they never queue several get_url calls in CONTROL_POOL.
+_url_future: concurrent.futures.Future | None = None
 # Tasks the event loop would otherwise hold only weakly (G-7): the late attach
 # of a start that outlived its bound, and every prefetch.
 _TASKS: set = set()
@@ -75,10 +79,11 @@ _kick_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _reset_for_tests() -> None:
-    global _server_obj, _url_cache, _kick_event, _kick_loop
+    global _server_obj, _url_cache, _url_future, _kick_event, _kick_loop
     with _server_lock:
         _server_obj = None
     _url_cache = None
+    _url_future = None
     _kick_event = None
     _kick_loop = None
     with _in_flight_lock:
@@ -122,17 +127,32 @@ async def _await_without_cancel(cf: concurrent.futures.Future, timeout: float) -
 # ------------------------------------------------------------------- url
 
 
+def _get_url_blocking():
+    return _server().get_url()
+
+
 async def server_url() -> str | None:
-    """The server's https URL from `get_url()` (in CONTROL_POOL), cached URL_TTL_S."""
-    global _url_cache
+    """The server's https URL from `get_url()` (in CONTROL_POOL), cached URL_TTL_S.
+
+    Callers that arrive while a get_url runs wait for that same call. One that
+    outlives PREFETCH_TIMEOUT_S is left behind (never cancelled once running) and
+    the next caller starts a fresh one, exactly as without the sharing."""
+    global _url_cache, _url_future
     now = time.monotonic()
     cached = _url_cache
     if cached is not None and now - cached[0] < URL_TTL_S:
         return cached[1]
-    cf = CONTROL_POOL.submit(lambda: _server().get_url())
+    cf = _url_future
+    if cf is None or cf.done():
+        cf = CONTROL_POOL.submit(_get_url_blocking)
+        _url_future = cf
     if not await _await_without_cancel(cf, PREFETCH_TIMEOUT_S):
         cf.cancel()
+        if _url_future is cf:
+            _url_future = None
         logger.warning("inference get_url timed out")
+        return None
+    if cf.cancelled():  # another caller's timeout cancelled it while still queued
         return None
     exc = cf.exception()
     if exc is not None:
@@ -145,6 +165,24 @@ async def server_url() -> str | None:
     url = url.rstrip("/")
     _url_cache = (now, url)
     return url
+
+
+async def warm_url() -> None:
+    """V1-9: resolve the server URL once at API startup (main.py schedules this as a
+    task of its own and never awaits it), so the first prefetch of the process finds
+    it cached instead of losing the race with a quick Start. get_url runs in
+    CONTROL_POOL as always; the cache keeps its URL_TTL_S. A Modal that does not
+    answer leaves the cache empty (server_url logged the exception TYPE) and the
+    prefetch resolves lazily as before. Never raises."""
+    try:
+        url = await server_url()
+    except Exception as exc:  # noqa: BLE001 - a startup task must never die loudly
+        logger.warning("inference url warm-up failed: %s", type(exc).__name__)
+        return
+    if url:
+        logger.info("inference url warm-up: resolved")
+    else:
+        logger.info("inference url warm-up: not resolved, the first prefetch resolves it")
 
 
 # ----------------------------------------------------------------- start

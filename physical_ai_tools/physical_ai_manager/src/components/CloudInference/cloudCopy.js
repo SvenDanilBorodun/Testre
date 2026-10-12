@@ -33,7 +33,7 @@ export const cloudCopy = {
     runningElsewhere: 'Auf dem Roboter läuft gerade eine Inferenz.',
     chooseModel: 'Wähle zuerst ein Modell.',
     preparing: 'Cloud-GPU wird vorbereitet …',
-    preparingSub: 'Beim ersten Start kann das bis zu 2 Minuten dauern.',
+    preparingSub: 'Beim ersten Start kann das einige Minuten dauern.',
     released: 'Die Cloud-GPU wurde wieder freigegeben – beim Start wird sie neu vorbereitet.',
   },
   leader: {
@@ -44,6 +44,7 @@ export const cloudCopy = {
     loading: 'Modelle werden geladen …',
     empty: 'Noch kein fertig trainiertes Modell. Trainiere zuerst im Tab „Training“.',
     notAct: 'Noch nicht in der Cloud verfügbar (nur ACT-Modelle).',
+    gpuStarting: 'Cloud-GPU wird gestartet … bitte kurz warten.',
     group: 'Gruppe',
   },
   summary: {

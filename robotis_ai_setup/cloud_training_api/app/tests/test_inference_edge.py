@@ -661,6 +661,124 @@ class TestUrlAndPrefetch(_Keyed):
         asyncio.run(scenario())
 
 
+class TestUrlWarmUp(_Keyed):
+    """V1-9: the server URL is resolved once at API startup (its own startup task),
+    so the first prefetch of a process never pays `get_url()`; a Modal that does
+    not answer leaves the lazy path exactly as before. No network anywhere."""
+
+    def _prefetch(self, fake, seen):
+        with patch.object(edge, "_server", return_value=fake), \
+                patch.dict(sys.modules, {"httpx": _fake_httpx(seen)}):
+            asyncio.run(edge.prefetch(EDGE_TOK, CONNECT_TOK))
+
+    def test_the_warm_up_fills_the_cache_for_the_first_prefetch(self) -> None:
+        fake = _FakeServer()
+        clock = [100.0]
+        seen = {}
+        with patch.object(edge.time, "monotonic", lambda: clock[0]):
+            with patch.object(edge, "_server", return_value=fake):
+                self.assertIsNone(asyncio.run(edge.warm_url()))
+            self.assertEqual(fake.url_calls, 1)
+            clock[0] += 30.0  # the first reserve comes later; the prefetch finds the URL cached
+            self._prefetch(fake, seen)
+        self.assertEqual(fake.url_calls, 1)
+        self.assertEqual(seen["url"], fake._url + "/v1/prefetch")
+
+    def test_the_warm_up_respects_the_url_ttl(self) -> None:
+        fake = _FakeServer()
+        clock = [100.0]
+        with patch.object(edge.time, "monotonic", lambda: clock[0]):
+            with patch.object(edge, "_server", return_value=fake):
+                asyncio.run(edge.warm_url())
+            clock[0] += edge.URL_TTL_S + 1
+            self._prefetch(fake, {})
+        self.assertEqual(fake.url_calls, 2)
+
+    def test_an_unreachable_modal_never_raises_and_the_prefetch_resolves_lazily(self) -> None:
+        class _Down(_FakeServer):
+            def get_url(self):
+                self.url_calls += 1
+                raise ConnectionError("modal unreachable")
+
+        down = _Down()
+        with patch.object(edge, "_server", return_value=down):
+            with self.assertLogs(edge.logger, level="WARNING") as logs:
+                self.assertIsNone(asyncio.run(edge.warm_url()))
+        self.assertIn("ConnectionError", "\n".join(logs.output))
+        self.assertNotIn("modal unreachable", "\n".join(logs.output))
+        self.assertIsNone(edge._url_cache)
+        # the very first `_server()` raising is just as harmless
+        with patch.object(edge, "_server", side_effect=RuntimeError("no modal")):
+            self.assertIsNone(asyncio.run(edge.warm_url()))
+        fake = _FakeServer()
+        seen = {}
+        self._prefetch(fake, seen)
+        self.assertEqual(fake.url_calls, 1)
+        self.assertEqual(seen["url"], fake._url + "/v1/prefetch")
+
+    def test_a_hanging_get_url_is_left_behind_and_the_next_caller_starts_fresh(self) -> None:
+        gate = threading.Event()
+
+        class _Hang(_FakeServer):
+            def get_url(self):
+                self.url_calls += 1
+                gate.wait(10)
+                return self._url
+
+        hang = _Hang()
+        try:
+            with patch.object(edge, "_server", return_value=hang), patch.object(edge, "PREFETCH_TIMEOUT_S", 0.1):
+                t0 = time.monotonic()
+                self.assertIsNone(asyncio.run(edge.warm_url()))
+                self.assertLess(time.monotonic() - t0, 2.0)
+                self.assertIsNone(edge._url_cache)
+                # a later caller does not join the call that is still hanging
+                asyncio.run(edge.server_url())
+                self.assertEqual(hang.url_calls, 2)
+        finally:
+            gate.set()
+
+    def test_concurrent_callers_share_one_get_url(self) -> None:
+        gate = threading.Event()
+
+        class _Slow(_FakeServer):
+            def get_url(self):
+                self.url_calls += 1
+                gate.wait(10)
+                return self._url
+
+        slow = _Slow()
+
+        async def scenario():
+            warm = asyncio.get_running_loop().create_task(edge.warm_url())
+            await asyncio.sleep(0.05)
+            first = asyncio.get_running_loop().create_task(edge.server_url())
+            await asyncio.sleep(0.05)
+            gate.set()
+            await warm
+            return await first
+
+        try:
+            with patch.object(edge, "_server", return_value=slow):
+                self.assertEqual(asyncio.run(scenario()), slow._url)
+        finally:
+            gate.set()
+        self.assertEqual(slow.url_calls, 1)
+
+    def test_get_url_runs_in_the_control_pool(self) -> None:
+        names = []
+
+        class _Where(_FakeServer):
+            def get_url(self):
+                names.append(threading.current_thread().name)
+                return self._url
+
+        with patch.object(edge, "_server", return_value=_Where()):
+            asyncio.run(edge.warm_url())
+        self.assertEqual(len(names), 1)
+        self.assertTrue(names[0].startswith("modal-control"), names)
+
+
 class TestNoSecretInLogs(_Keyed):
     def test_no_token_edge_token_envelope_or_hash_in_any_log_record(self) -> None:
         records = []

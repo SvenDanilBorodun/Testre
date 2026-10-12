@@ -535,5 +535,55 @@ class TestHasCredential(unittest.TestCase):
             self.assertFalse(hc.has_credential(sb, UID))
 
 
+def _rfc5869_hkdf_sha256(key: bytes, info: bytes, length: int = 32) -> bytes:
+    """HKDF-SHA256 with no salt, written from RFC 5869 with the stdlib only, so
+    the test does not check `cryptography` against itself."""
+    import hashlib
+    import hmac
+
+    prk = hmac.new(b"\x00" * 32, key, hashlib.sha256).digest()
+    out, block, counter = b"", b"", 1
+    while len(out) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        out += block
+        counter += 1
+    return out[:length]
+
+
+class TestSubkeys(unittest.TestCase):
+    """Cloud-Inferenz (D32): the edge envelope's key is an HKDF-SHA256 sub-key of
+    EDUBOTICS_HF_TOKEN_KEY, never the parent key itself."""
+
+    INFO = b"edubotics-inference-edge:v1"
+
+    def test_the_documented_vectors(self) -> None:
+        with _Env(current=SEQ_A):
+            ((kid, key),) = hc.subkeys(self.INFO)
+        self.assertEqual(kid, KID_A)
+        self.assertEqual(key.hex(), "80346c61094e0ba0a7e878682642893e167e95a008530033a51f26641a7bd214")
+        self.assertEqual(key, _rfc5869_hkdf_sha256(SEQ_A, self.INFO))
+
+    def test_current_first_then_previous_each_with_the_parent_kid(self) -> None:
+        with _Env(current=SEQ_B, previous=SEQ_A):
+            pairs = hc.subkeys(self.INFO)
+        self.assertEqual([kid for kid, _ in pairs], [KID_B, KID_A])
+        self.assertEqual(pairs[0][1].hex(), "195f14e332e01a8264b08554b08e07da6eaa4bc66f4a3a5439b2eca7e4af3073")
+        self.assertEqual(pairs[1][1], _rfc5869_hkdf_sha256(SEQ_A, self.INFO))
+
+    def test_the_sub_key_is_not_the_parent_and_depends_on_the_info(self) -> None:
+        with _Env(current=SEQ_A):
+            (_, edge), = hc.subkeys(self.INFO)
+            (_, other), = hc.subkeys(b"something-else:v1")
+        self.assertEqual(len(edge), 32)
+        self.assertNotEqual(edge, SEQ_A)
+        self.assertNotEqual(edge, other)
+
+    def test_no_key_is_key_missing(self) -> None:
+        with _Env():
+            with self.assertRaises(hc.HfCredentialError) as ctx:
+                hc.subkeys(self.INFO)
+        self.assertEqual(ctx.exception.code, "key_missing")
+
+
 if __name__ == "__main__":
     unittest.main()

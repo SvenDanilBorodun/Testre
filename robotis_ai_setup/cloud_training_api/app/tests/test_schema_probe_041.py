@@ -14,8 +14,9 @@ main.py's module-level env checks need the full app deps to import):
   * the probe's argument names,
   * migration 041's parameter names,
   * the argument names the route passes in ``update_workflow``.
-The 15 / 11 / 21 counts are pinned in ``test_schema_probe_040.py`` (042 added
-one of each; 041 adds no table, column set or RPC).
+The 16 / 13 / 34 counts are pinned in ``test_schema_probe_040.py`` (042 added
+one of each, 048 one table, two column sets and thirteen RPCs; 041 adds no
+table, column set or RPC).
 """
 
 from __future__ import annotations

@@ -14,6 +14,7 @@ from app.routes.admin import router as admin_router
 from app.routes.datasets import router as datasets_router
 from app.routes.health import router as health_router
 from app.routes.hf_token import router as hf_token_router
+from app.routes.inference import router as inference_router
 from app.routes.jetson import router as jetson_router
 from app.routes.jetson import teacher_router as jetson_teacher_router
 from app.routes.me import router as me_router
@@ -24,6 +25,7 @@ from app.routes.version import router as version_router
 from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
 from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
+from app.services.inference_sweep import sweep_loop as _inference_sweep_loop
 from app.services.jetson_sweep import sweep_loop as _jetson_sweep_loop
 from app.services.rate_limiter import RateLimiter
 from app.services.training_sweep import sweep_loop as _training_cancel_sweep_loop
@@ -289,6 +291,7 @@ def _validate_required_schema() -> None:
         "jetsons",  # 019 — classroom Jetson Orin Nano support
         "workflow_submissions",  # 040 — Roboter Studio „Abgeben" snapshots
         "user_hf_credentials",  # 042 — a student's own HF token, AES-GCM encrypted
+        "inference_sessions",  # 048 — Cloud-Inferenz sessions (service-role only)
     )
     missing_tables: list[str] = []
     for table in required_tables:
@@ -351,6 +354,15 @@ def _validate_required_schema() -> None:
         # migration would 500 every /me/hf-token call — fail the deploy fast.
         ("user_hf_credentials",
          "user_id, token_ciphertext, token_fp, token_hint, hf_username, token_role, validated_at"),
+        # Migration 048 — Cloud-Inferenz. routes/inference.py and the session
+        # sweep read and write these columns; the teacher's run list selects
+        # inference_runs.backend. A deploy landing the code before the
+        # migration would 500 every /inference call — fail the deploy fast.
+        ("inference_sessions",
+         "id, user_id, training_id, model_repo, model_revision, status, token_hash, "
+         "modal_session_id, edge_token_enc, edge_terminated_at, session_s, reserve_until, "
+         "connected_at, max_end_at, ended_at, end_reason, active_seconds, run_logged_at"),
+        ("inference_runs", "backend"),
     )
     for table, cols in required_columns:
         try:
@@ -520,6 +532,47 @@ def _validate_required_schema() -> None:
             "p_hf_username": "_probe",
             "p_role": "_probe",
             "p_expected_fp": None,
+        }),
+        # Migration 048 — Cloud-Inferenz. Every call names exactly the §4.2
+        # argument set (PostgREST resolves on name + argument names) and writes
+        # nothing: the dummy ids answer P0002 / `missing` / `invalid` / false
+        # before any write, and the sweep runs as it would anyway. The four anon
+        # RPCs are what the Modal app calls; probing them here catches a
+        # database without 048 before a robot does.
+        ("create_inference_session_safe", {
+            "p_user_id": dummy,
+            "p_training_id": None,
+            "p_model_repo": "_probe",
+            "p_model_revision": "_probe",
+            "p_policy_type": "act",
+            "p_token_hash": "_probe",
+            "p_max_session_s": 60,
+            "p_daily_cap_s": 60,
+            "p_global_cap": 1,
+            "p_reserve_s": 60,
+        }),
+        ("attach_inference_edge", {
+            "p_session_id": dummy,
+            "p_modal_session_id": "sd-probe",
+            "p_edge_token_enc": "e1.00000000." + "A" * 24,
+        }),
+        ("arm_inference_session", {"p_session_id": dummy, "p_user_id": dummy, "p_token_hash": "0" * 64}),
+        ("end_inference_session", {"p_session_id": dummy, "p_user_id": dummy, "p_reason": "user_stop"}),
+        ("heartbeat_inference_session_client", {"p_session_id": dummy, "p_user_id": dummy}),
+        ("inference_usage", {"p_user_id": dummy, "p_daily_cap_s": 60}),
+        ("sweep_inference_sessions", {}),
+        ("inference_edges_due", {"p_min_age_s": 3600, "p_limit": 1}),
+        ("mark_inference_edge_terminated", {"p_session_id": dummy}),
+        ("inference_session_peek", {"p_token": "_probe", "p_modal_session_id": "_probe"}),
+        ("inference_session_connect", {
+            "p_token": "_probe", "p_modal_session_id": "_probe", "p_conn_id": "_probe",
+        }),
+        ("inference_session_heartbeat", {
+            "p_token": "_probe", "p_modal_session_id": "_probe", "p_conn_id": "_probe", "p_stats": None,
+        }),
+        ("inference_session_end", {
+            "p_token": "_probe", "p_modal_session_id": "_probe", "p_conn_id": "_probe",
+            "p_reason": "robot_stop", "p_stats": None,
         }),
     )
     missing_rpcs: list[str] = []
@@ -691,6 +744,12 @@ _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     # Daten 2.0 (spec §E6): the SPA asks once per session; per-user keyed
     # (_PER_USER_RATE_LIMIT_PREFIXES) because a classroom shares one NAT IP.
     ("GET", "/me/group-members", 30, 60.0),
+    # Cloud-Inferenz (048). Reserve, arm, the 15 s heartbeat and end share the
+    # POST budget: ≤ 6/min in normal use, and a student clicking through ten
+    # models in a minute stays under 30 (R-16). Per-user keyed
+    # (_PER_USER_RATE_LIMIT_PREFIXES): a classroom shares one NAT IP.
+    ("POST", "/inference/sessions", 30, 60.0),
+    ("GET", "/inference/usage", 30, 60.0),
 ]
 
 # Sort rules longest-prefix-first so a more-specific rule (e.g.
@@ -780,8 +839,11 @@ def _user_key_from_jwt(request: Request) -> str | None:
 # requires Depends(get_current_profile), so a JWT is always present.
 #
 # /me/group-members (Daten 2.0) likewise: Depends(get_current_profile).
+#
+# /inference/ (Cloud-Inferenz, 048) likewise: every route requires
+# Depends(get_current_profile), so a JWT is always present.
 _PER_USER_RATE_LIMIT_PREFIXES = (
-    "/jetson/", "/trainings/", "/workflows", "/me/hf-token", "/me/group-members",
+    "/jetson/", "/trainings/", "/workflows", "/me/hf-token", "/me/group-members", "/inference/",
 )
 
 
@@ -926,6 +988,7 @@ app.include_router(admin_router)
 app.include_router(workflows_router)
 app.include_router(jetson_router)
 app.include_router(jetson_teacher_router)
+app.include_router(inference_router)
 
 
 # ─── Background tasks ───────────────────────────────────────────────────
@@ -977,6 +1040,42 @@ async def _start_training_cancel_sweep() -> None:
         logger.info("training_cancel_sweep: disabled via env")
         return
     _asyncio.create_task(_training_cancel_sweep_loop())
+
+
+# Cloud-Inferenz (048): two SEPARATE startup tasks (F-2). The session sweep
+# (15 s: the sweep RPC + the teacher's run rows) never waits for Modal; the
+# terminate loop (inference_edge.py) ends the ended sessions' Modal sessions on
+# its own clock and on every kick. Both are disabled with
+# INFERENCE_SWEEPER_DISABLED=1 (unit tests). Held in a module set: the event
+# loop keeps only weak references to tasks.
+_BACKGROUND_TASKS: set = set()
+
+
+def _keep_task(task) -> None:
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+@app.on_event("startup")
+async def _start_inference_sweep() -> None:
+    import asyncio as _asyncio
+
+    if os.environ.get("INFERENCE_SWEEPER_DISABLED") == "1":
+        logger.info("inference_sweep: disabled via env")
+        return
+    _keep_task(_asyncio.create_task(_inference_sweep_loop()))
+
+
+@app.on_event("startup")
+async def _start_inference_terminate_loop() -> None:
+    import asyncio as _asyncio
+
+    if os.environ.get("INFERENCE_SWEEPER_DISABLED") == "1":
+        logger.info("inference terminate loop: disabled via env")
+        return
+    from app.services import inference_edge as _inference_edge
+
+    _keep_task(_asyncio.create_task(_inference_edge.terminate_loop()))
 
 
 # Schema probe lives in a BACKGROUND task scheduled here, NOT at module

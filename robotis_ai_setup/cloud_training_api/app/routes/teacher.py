@@ -1140,6 +1140,10 @@ class InferenceRunSummary(BaseModel):
     exit_reason: str
     error_message_de: str
     created_at: str
+    # Migration 048: 'jetson' (the classroom Jetson) or 'cloud' (Cloud-Inferenz,
+    # written by the session sweep). Teachers READ their students' cloud runs;
+    # they cannot start one (students only, owner A-Q4).
+    backend: str = "jetson"
 
 
 @router.get(
@@ -1150,14 +1154,14 @@ async def list_student_inference_runs(
     student_id: str,
     teacher=Depends(get_current_teacher),
 ):
-    """Compact Jetson inference run records for failure forensics."""
+    """Compact inference run records (classroom Jetson and Cloud-Inferenz) for failure forensics."""
     _assert_student_owned(teacher["id"], student_id)
     supabase = get_supabase()
     result = (
         supabase.table("inference_runs")
         .select(
             "id, policy_repo, started_at, duration_s, exit_reason, "
-            "error_message_de, created_at"
+            "error_message_de, created_at, backend"
         )
         .eq("student_user_id", student_id)
         .order("created_at", desc=True)

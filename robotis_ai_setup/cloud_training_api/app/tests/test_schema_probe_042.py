@@ -11,7 +11,7 @@ function missing. Since migration 045 that definition has seven parameters
 (``p_expected_fp`` last, defaulted), and 045 drops the six-parameter one. Read from the source with ``ast``/regex (main.py's module-level env
 checks would need the full app deps to import).
 
-The 15 / 11 / 21 counts are pinned in ``test_schema_probe_040.py``.
+The 16 / 13 / 34 counts are pinned in ``test_schema_probe_040.py``.
 """
 
 from __future__ import annotations

@@ -15,11 +15,40 @@
 // else.
 
 import { apiRequest } from './apiClient';
-import { CLOUD_API_URL } from './cloudConfig';
+import { CLOUD_API_URL, assertCloudApiConfigured } from './cloudConfig';
 
-/** POST /inference/sessions — reserve a cloud GPU for a model (no secret in the answer). */
-export function reserveInferenceSession(accessToken, trainingId) {
-  return apiRequest('/inference/sessions', 'POST', accessToken, { training_id: trainingId });
+/**
+ * POST /inference/sessions — reserve a cloud GPU for a model (no secret in the answer).
+ *
+ * apiRequest's contract (a refusal throws an Error carrying `status` and the
+ * German `detail`) PLUS the API's machine-readable `code` when it sends one: the
+ * controller retries on `code === 'gpu_not_started'` alone, never on German text
+ * (owner, round 2). apiRequest drops every body field but `detail`, hence the
+ * reserve reads its own error body.
+ */
+export async function reserveInferenceSession(accessToken, trainingId) {
+  assertCloudApiConfigured();
+  const response = await fetch(`${CLOUD_API_URL}/inference/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ training_id: trainingId }),
+  });
+  if (!response.ok) {
+    let body = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    const detail = body && typeof body === 'object' && body.detail !== undefined ? body.detail : response.statusText;
+    const err = new Error(detail || `HTTP ${response.status}`);
+    err.status = response.status;
+    err.detail = detail;
+    if (body && typeof body === 'object' && typeof body.code === 'string') err.code = body.code;
+    throw err;
+  }
+  if (response.status === 204) return null;
+  return response.json();
 }
 
 /** POST /inference/sessions/{id}/arm — {token, edge_token, session_s}: the ONLY answer with secrets. */

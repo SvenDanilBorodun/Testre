@@ -109,9 +109,12 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
   const selectedJob = rows.find((j) => j.id === selectedId) || null;
   const busy = BUSY_PHASES.has(session.phase);
   const rowsDisabled = busy || Boolean(taskRunning);
+  // Owner, round 2: from the reserve until the start ends (success or the final
+  // error after the automatic retries) the list is locked; no click reserves again.
+  const gpuStarting = controller.isStartingGpu(session);
 
   const onSelect = useCallback((job) => {
-    if (rowsDisabled) return;
+    if (rowsDisabled || gpuStarting) return;
     if (job.id === selectedId) {
       setSelectedId(null);
       controller.release();
@@ -119,7 +122,7 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
     }
     setSelectedId(job.id);
     controller.selectModel(getAccessToken, job.id, isTaskRunning);
-  }, [rowsDisabled, selectedId, getAccessToken, isTaskRunning]);
+  }, [rowsDisabled, gpuStarting, selectedId, getAccessToken, isTaskRunning]);
 
   const summary = session.trainingId === selectedId ? session.summary : null;
   const missing = missingCameras(summary, imageTopicList);
@@ -180,6 +183,7 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
         loading={loading}
         selectedId={selectedId}
         disabled={rowsDisabled}
+        lockedReason={gpuStarting ? cloudCopy.models.gpuStarting : null}
         onSelect={onSelect}
       />
 

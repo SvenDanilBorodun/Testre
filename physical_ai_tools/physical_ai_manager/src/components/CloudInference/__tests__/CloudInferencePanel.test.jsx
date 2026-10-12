@@ -226,6 +226,99 @@ describe('CloudInferencePanel', () => {
   });
 });
 
+const GPU_DE = 'Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.';
+const TWO_JOBS = [
+  ...JOBS,
+  { id: 8, status: 'succeeded', model_type: 'act', model_name: 'EduBotics-Solutions/alt', dataset_name: 'u/a', terminated_at: '2026-10-01T10:00:00Z' },
+];
+
+function gpuNotStarted() {
+  const err = new Error(GPU_DE);
+  err.status = 503;
+  err.detail = GPU_DE;
+  err.code = 'gpu_not_started';
+  return err;
+}
+
+describe('CloudInferencePanel while the GPU starts (owner, round 2)', () => {
+  it('says that a first start can take some minutes', () => {
+    expect(cloudCopy.panel.preparingSub).toBe('Beim ersten Start kann das einige Minuten dauern.');
+  });
+
+  it('locks every other model while reserving, and a click on the chosen one sends nothing', async () => {
+    mockJobs.current = TWO_JOBS;
+    let resolve;
+    api.reserveInferenceSession.mockReturnValue(new Promise((r) => { resolve = r; }));
+    render(<CloudInferencePanel isActive cloud={CLOUD} cloudState={null} />);
+    await chooseModel();
+    const other = screen.getByRole('button', { name: /^alt/ });
+    expect(other).toBeDisabled();
+    expect(other).toHaveAttribute('title', cloudCopy.models.gpuStarting);
+    expect(screen.getByTestId('cloud-models-locked')).toHaveTextContent(cloudCopy.models.gpuStarting);
+    fireEvent.click(screen.getByRole('button', { name: /^neu/ }));
+    fireEvent.click(other);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot().phase).toBe('reserving');
+    expect(screen.getByText(cloudCopy.panel.preparing)).toBeInTheDocument();
+    await act(async () => { resolve({ session_id: SID, summary: SUMMARY, session_s: 1800 }); });
+    await flush();
+    expect(screen.getByRole('button', { name: /^alt/ })).toBeEnabled();
+    expect(screen.queryByTestId('cloud-models-locked')).toBeNull();
+    expect(startButton()).toBeEnabled();
+  });
+
+  it('asks again by itself on the API\'s code, keeps the list locked meanwhile, then shows today\'s error and unlocks', async () => {
+    mockJobs.current = TWO_JOBS;
+    api.reserveInferenceSession.mockRejectedValue(gpuNotStarted());
+    render(<CloudInferencePanel isActive cloud={CLOUD} cloudState={null} />);
+    await chooseModel();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(cloudCopy.panel.preparingSub)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^alt/ })).toBeDisabled();
+    expect(screen.queryByTestId('cloud-message')).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(controller.RESERVE_RETRY_DELAY_MS); });
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('button', { name: /^alt/ })).toBeDisabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(controller.RESERVE_RETRY_DELAY_MS); });
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId('cloud-message')).toHaveTextContent(GPU_DE);
+    expect(screen.queryByText(cloudCopy.panel.preparing)).toBeNull();
+    expect(screen.getByRole('button', { name: /^alt/ })).toBeEnabled();
+    expect(startButton()).toBeEnabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(3);
+  });
+
+  it('leaving the panel while a retry waits: no reserve after the unmount', async () => {
+    api.reserveInferenceSession.mockRejectedValue(gpuNotStarted());
+    const { unmount } = render(<CloudInferencePanel isActive cloud={CLOUD} cloudState={null} />);
+    await chooseModel();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10 * controller.RESERVE_RETRY_DELAY_MS); });
+    await flush();
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot().phase).toBe('idle');
+  });
+
+  it('a refusal without the code is shown at once and unlocks (no retry)', async () => {
+    mockJobs.current = TWO_JOBS;
+    const err = new Error('x');
+    err.status = 503;
+    err.detail = 'Die Cloud ist gerade voll ausgelastet. Bitte in ein paar Minuten erneut versuchen.';
+    api.reserveInferenceSession.mockRejectedValue(err);
+    render(<CloudInferencePanel isActive cloud={CLOUD} cloudState={null} />);
+    await chooseModel();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10 * controller.RESERVE_RETRY_DELAY_MS); });
+    expect(api.reserveInferenceSession).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('cloud-message')).toHaveTextContent(err.detail);
+    expect(screen.getByRole('button', { name: /^alt/ })).toBeEnabled();
+  });
+});
+
 describe('the cloud view has no transport chip (O7\')', () => {
   it('names no WebSocket / transport anywhere in the cloud components', async () => {
     const fs = await vi.importActual('fs');

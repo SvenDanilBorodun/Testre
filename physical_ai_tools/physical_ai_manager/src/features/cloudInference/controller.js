@@ -25,6 +25,16 @@
 // pagehide keepalive (owner A-Q3); a hidden or minimized window is throttled by
 // the browser and its 15 s heartbeat stops, which ends the run after ~5-6 min
 // (owner A-Q2).
+//
+// A COLD GPU MAY NOT START IN ONE GO (owner, round 2): the API bounds one start at
+// 120 s and Railway closes a request after 300 s without data, so the page asks
+// again by itself — on the API's `code: 'gpu_not_started'` only, never on German
+// text, at most RESERVE_ATTEMPTS in total, RESERVE_RETRY_DELAY_MS apart. Every
+// other failure is shown at once. A failed attempt leaves no live row and costs no
+// Cloud-Zeit (the API ends it `edge_failed`; only connected time counts). While a
+// reserve or its retry runs, the phase stays 'reserving', the list is locked and
+// no click reserves again; a release, the panel unmounting or a sign-out bumps
+// `seq`, which ends the retries.
 
 import TaskPhase from '../../constants/taskPhases';
 import {
@@ -40,6 +50,11 @@ import { taskInfoWire } from './taskInfoWire';
 
 export const SELECT_DEBOUNCE_MS = 800;
 export const HEARTBEAT_MS = 15000;
+// Owner, round 2: the first reserve and at most 2 automatic retries.
+export const RESERVE_ATTEMPTS = 3;
+export const RESERVE_RETRY_DELAY_MS = 2000;
+// == cloud_training_api routes/inference.py GPU_NOT_STARTED_CODE
+export const GPU_NOT_STARTED_CODE = 'gpu_not_started';
 
 // A Start or a run is in progress: model rows are disabled and a click is a
 // no-op (a reserve would supersede the running session, G-3).
@@ -65,6 +80,8 @@ let tokenGetter = () => null;
 let taskRunningGetter = () => false;
 let selectionTimer = null;
 let heartbeatTimer = null;
+let retryTimer = null;
+let retryWake = null;
 let pagehideAttached = false;
 let sawRobotInside = false;
 
@@ -107,6 +124,11 @@ export function isLiveRun(snapshot = state) {
   return BUSY_PHASES.has(snapshot.phase);
 }
 
+/** A reserve (or its automatic retry) runs: the model list is locked (owner, round 2). */
+export function isStartingGpu(snapshot = state) {
+  return snapshot.phase === 'reserving';
+}
+
 function clearSelectionTimer() {
   if (selectionTimer !== null) {
     clearTimeout(selectionTimer);
@@ -141,9 +163,33 @@ function stopHeartbeat() {
   }
 }
 
+/** Cancel a retry pause; its waiter wakes up and finds `seq` moved. */
+function clearRetryTimer() {
+  if (retryTimer !== null) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+  const wake = retryWake;
+  retryWake = null;
+  if (wake) wake();
+}
+
+function retryPause() {
+  clearRetryTimer();
+  return new Promise((resolve) => {
+    retryWake = resolve;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      retryWake = null;
+      resolve();
+    }, RESERVE_RETRY_DELAY_MS);
+  });
+}
+
 function clearTimers() {
   stopHeartbeat();
   clearSelectionTimer();
+  clearRetryTimer();
   if (pagehideAttached && typeof window !== 'undefined') {
     window.removeEventListener('pagehide', onPagehide);
   }
@@ -192,21 +238,44 @@ function apiMessage(err) {
   return { routeMissing, message: detail || cloudCopy.errors.apiUnavailable };
 }
 
+/**
+ * POST /inference/sessions, asked again by itself while the API answers that the
+ * GPU did not start (its code, never its text), RESERVE_ATTEMPTS in total.
+ * Resolves `{ok: true, res}` or `{ok: false, err}`, or null once `seq` moved away from `my`.
+ */
+async function requestReservation(my, trainingId) {
+  for (let attempt = 1; attempt <= RESERVE_ATTEMPTS; attempt += 1) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await reserveInferenceSession(accessToken(), trainingId);
+      return { ok: true, res };
+    } catch (err) {
+      if (my !== state.seq) return null;
+      if (err?.code !== GPU_NOT_STARTED_CODE || attempt >= RESERVE_ATTEMPTS) return { ok: false, err };
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await retryPause();
+    if (my !== state.seq) return null;
+  }
+  return null; // not reached: the last attempt always returns
+}
+
 async function reserve(trainingId) {
   const my = state.seq + 1;
   stopHeartbeat();
   set({ seq: my, phase: 'reserving', trainingId, sessionId: null, summary: null, message: '', modelRefused: false });
-  let res;
-  try {
-    res = await reserveInferenceSession(accessToken(), trainingId);
-  } catch (err) {
+  const outcome = await requestReservation(my, trainingId);
+  if (outcome === null) return; // a release, sign-out or newer choice ended the retries
+  if (!outcome.ok) {
     if (my !== state.seq) return;
+    const { err } = outcome;
     const { routeMissing, message } = apiMessage(err);
     // Only the model itself refused (404/409) disables Start for this row (R-16).
     const refused = !routeMissing && (err?.status === 404 || err?.status === 409);
     set({ phase: 'idle', sessionId: null, message, modelRefused: refused });
     return;
   }
+  const { res } = outcome;
   if (my !== state.seq) {
     // A newer choice or a release() came meanwhile: nothing else would end this one (F-9).
     if (res && res.session_id) endInferenceSessionKeepalive(accessToken(), res.session_id);
@@ -236,11 +305,12 @@ async function reserve(trainingId) {
 export function selectModel(getAccessToken, trainingId, isTaskRunning) {
   if (typeof getAccessToken === 'function') tokenGetter = getAccessToken;
   if (typeof isTaskRunning === 'function') taskRunningGetter = isTaskRunning;
-  if (BUSY_PHASES.has(state.phase) || taskRunning()) return;
+  // Round 2: while the GPU starts (a reserve or its retry), a click sends nothing.
+  if (BUSY_PHASES.has(state.phase) || isStartingGpu() || taskRunning()) return;
   clearSelectionTimer();
   selectionTimer = setTimeout(() => {
     selectionTimer = null;
-    if (BUSY_PHASES.has(state.phase) || taskRunning()) return;
+    if (BUSY_PHASES.has(state.phase) || isStartingGpu() || taskRunning()) return;
     reserve(trainingId);
   }, SELECT_DEBOUNCE_MS);
 }
@@ -274,7 +344,8 @@ export async function start({ getAccessToken, getTaskInfo, trainingId }) {
   if (typeof getAccessToken === 'function') tokenGetter = getAccessToken;
   // H-4: a Start within 800 ms of a row click must not trigger a second reserve.
   clearSelectionTimer();
-  if (BUSY_PHASES.has(state.phase)) return;
+  // A reserve (or its retry) already runs: never a second one (round 2).
+  if (BUSY_PHASES.has(state.phase) || isStartingGpu()) return;
   if (state.phase !== 'reserved' || state.trainingId !== trainingId) {
     await reserve(trainingId);
     if (state.phase !== 'reserved' || state.trainingId !== trainingId) return;

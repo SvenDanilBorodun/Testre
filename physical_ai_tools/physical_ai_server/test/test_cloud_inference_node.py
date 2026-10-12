@@ -792,18 +792,73 @@ def test_a_bad_state_ends_with_the_state_sentence():
     assert end_status(node) == cloud_texts_de.STATE_DE
 
 
-def test_stale_camera_warns_and_the_run_continues(capsys):
-    node, c = running_node()                        # the fake cameras never change their stamp
-    for _ in range(30 * 7):
+STALE_LINE = 'liefert seit über 5s dasselbe Bild'
+
+
+def _stale_lines(capsys):
+    out = capsys.readouterr()
+    return [ln for ln in (out.out + out.err).splitlines() if STALE_LINE in ln]
+
+
+def _named(lines, cam):
+    return sum(f'Kamera "{cam}"' in ln for ln in lines)
+
+
+def _state(node):
+    node._publish_cloud_state()
+    return json.loads(node._cloud_state_pub.sent[-1].data)
+
+
+def _run_for(node, c, seconds, live=()):
+    """Tick for ``seconds``; every camera in ``live`` gets a new header stamp on every tick."""
+    for _ in range(int(round(30 * seconds))):
+        for cam in live:
+            msg = node.communicator.camera_topic_msgs[cam]
+            node.communicator.camera_topic_msgs[cam] = CamMsg(JPEG_640, sec=msg.header.stamp.sec + 1)
         answer_all(c)
         tick(node)
+
+
+def test_stale_camera_warns_and_the_run_continues(capsys):
+    node, c = running_node()                        # the fake cameras never change their stamp
+    _run_for(node, c, 7)
     assert node._cloud_run is not None
-    assert node._cloud_run.stale_camera in ('gripper', 'scene')
-    out = capsys.readouterr()
-    assert (out.out + out.err).count('liefert seit über 5s dasselbe Bild') == 1   # ≤ every 5 s
-    node._publish_cloud_state()
-    state = json.loads(node._cloud_state_pub.sent[-1].data)
-    assert state['stale_camera'] in ('gripper', 'scene')
+    lines = _stale_lines(capsys)
+    # V2-4: BOTH frozen cameras are named, each at most once per 5 s (7 s of frozen
+    # images: one line each), and nothing else is.
+    assert len(lines) == 2
+    assert _named(lines, 'gripper') == 1 and _named(lines, 'scene') == 1
+    # The state names ONE camera (the contract: a camera name or null), the FIRST
+    # stale one in the policy's camera order, which the log names too.
+    assert node._cloud_run.stale_camera == 'gripper'
+    assert _state(node)['stale_camera'] == 'gripper'
+
+
+def test_only_the_frozen_camera_is_named_in_log_and_state(capsys):
+    node, c = running_node()
+    _run_for(node, c, 7, live=('gripper',))
+    lines = _stale_lines(capsys)
+    assert len(lines) == 1 and _named(lines, 'scene') == 1
+    assert _state(node)['stale_camera'] == 'scene'
+
+
+def test_a_second_camera_freezing_is_named_at_once_and_state_follows_both(capsys):
+    node, c = running_node()
+    _run_for(node, c, 6, live=('gripper',))         # scene frozen and logged
+    lines = _stale_lines(capsys)
+    assert len(lines) == 1 and _named(lines, 'scene') == 1
+    assert _state(node)['stale_camera'] == 'scene'
+    _run_for(node, c, 5.5)                          # now the gripper freezes too
+    lines = _stale_lines(capsys)
+    # The gripper is named the moment it counts as stale, never swallowed by the
+    # scene's throttle (the old run-wide throttle never named a second camera).
+    assert _named(lines, 'gripper') == 1
+    assert _state(node)['stale_camera'] == 'gripper'
+    _run_for(node, c, 0.5, live=('gripper',))       # the gripper recovers, the scene does not
+    assert _state(node)['stale_camera'] == 'scene'
+    _run_for(node, c, 0.5, live=('gripper', 'scene'))
+    assert _state(node)['stale_camera'] is None
+    assert node._cloud_run is not None              # warning only: the run never ended
 
 
 # ── actions, hold, status rate ──────────────────────────────────────────────

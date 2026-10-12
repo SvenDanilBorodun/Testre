@@ -374,6 +374,54 @@ class TestReserve(_Case):
             self.assertNotIn("modal", self.events)  # a refused caller never costs a GPU
             self.assertEqual(self.server.started, [])
 
+    def test_the_retry_marker_is_on_the_start_failure_503_and_no_other_answer(self) -> None:
+        """Round 2 (owner): the page retries a reserve only on this marker, never on
+        German text. A failed start leaves no live row and costs no Cloud-Zeit."""
+        self.assertEqual(route.GPU_NOT_STARTED_CODE, "gpu_not_started")
+        coded, plain = [], []
+
+        def record(resp, into):
+            body = _content(resp)
+            into.append((resp.status_code, body))
+
+        # the start failure itself (an SDK error; the timeout is pinned above)
+        self.server = _Server(start=lambda: (_ for _ in ()).throw(RuntimeError("down")))
+        record(self.reserve(), coded)
+        (row,) = [r for r in self.store.rows.values()]
+        self.assertEqual((row["status"], row["end_reason"]), ("ended", "edge_failed"))
+        self.assertIsNone(row.get("connected_at"))
+        # every other answer of every route
+        self.server = _Server()
+        record(self.reserve(), plain)                                   # 200
+        sid = next(r["id"] for r in self.store.rows.values() if r["status"] == "reserved")
+        for code in ("P0048", "P0049", "P0002", "XX000"):
+            self.store.raise_on["create_inference_session_safe"] = _PgError(code)
+            record(self.reserve(), plain)                               # 429, 503 busy, 404, 500
+        self.store.raise_on.clear()
+        self.visible = None
+        record(self.reserve(), plain)                                   # 404
+        self.visible = TRAINING
+        for err in ("not_found", "invalid", "not_act", "unreachable"):
+            self.resolve_error = svc.ModelResolveError(err)
+            record(self.reserve(), plain)                               # 409, 502
+        self.resolve_error = None
+        record(self.reserve(raw=b"{}"), plain)                          # 422
+        record(self.reserve(TEACHER), plain)                            # 403
+        self.store.attach_override = {"status": "ended", "end_reason": "superseded"}
+        record(self.reserve(), plain)                                   # 503, attach-time end
+        self.store.attach_override = {"status": "conflict"}
+        record(self.reserve(), plain)                                   # 500
+        self.store.attach_override = None
+        record(self.arm(sid), plain)
+        record(self.heartbeat(sid), plain)
+        record(self.end(sid), plain)
+        record(self.usage(), plain)
+        self.assertEqual([(st, b.get("code")) for st, b in coded], [(503, "gpu_not_started")])
+        statuses = {st for st, _ in plain}
+        self.assertTrue({200, 403, 404, 409, 422, 429, 500, 502, 503} <= statuses, statuses)
+        for status, body in plain:
+            self.assertNotIn("code", body, (status, body))
+
     def test_reserve_sends_only_the_hash_to_the_rpc(self) -> None:
         tokens = []
         real_new = svc.new_token
@@ -445,8 +493,8 @@ class TestReserve(_Case):
 
         with patch.object(edge, "START_TIMEOUT_S", 0.1):
             body = self.assertAnswer(asyncio.run(scenario()), 503)
-        self.assertEqual(body["detail"], "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich "
-                                         "noch einmal.")
+        self.assertEqual(body, {"detail": "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es "
+                                          "gleich noch einmal.", "code": "gpu_not_started"})
         (row,) = self.store.rows.values()
         self.assertEqual((row["status"], row["end_reason"]), ("ended", "edge_failed"))
         # attached to the ENDED row (so the terminate loop ends it), never handed out
@@ -462,6 +510,7 @@ class TestReserve(_Case):
         self.server = _Server(start=broken)
         body = self.assertAnswer(self.reserve(), 503)
         self.assertIn("gestartet", body["detail"])
+        self.assertEqual(body["code"], route.GPU_NOT_STARTED_CODE)
         (row,) = self.store.rows.values()
         self.assertEqual(row["end_reason"], "edge_failed")
 
@@ -475,6 +524,7 @@ class TestReserve(_Case):
             with patch.object(route, "get_supabase", return_value=self.store):
                 body = self.assertAnswer(self.reserve(), 503)
             self.assertIn("gestartet", body["detail"])
+            self.assertEqual(body["code"], route.GPU_NOT_STARTED_CODE)
             (row,) = self.store.rows.values()
             self.assertEqual(row["end_reason"], "edge_failed")
             self.assertIsNone(row["modal_session_id"])
@@ -488,8 +538,10 @@ class TestReserve(_Case):
             self.store.attach_override = {"status": "ended", "end_reason": reason}
             kicks = self.kicks[0]
             body = self.assertAnswer(self.reserve(), 503)
-            self.assertEqual(body["detail"], "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es "
-                                             "gleich noch einmal.")
+            # the same sentence, but NO retry marker: this reservation ended for a reason of
+            # its own (another tab superseded it, the page let it go) — the GPU did start
+            self.assertEqual(body, {"detail": "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche "
+                                              "es gleich noch einmal."})
             self.assertGreater(self.kicks[0], kicks)
             self.assertEqual(self.server.terminated, [])  # the terminate LOOP ends it, from the stored edge
             self.assertEqual(self.prefetched, [])
@@ -576,10 +628,28 @@ seen = []
 
 def visible(profile, training_id):
     seen.append(training_id)
-    return None
+    if training_id != 8:
+        return None
+    return {"id": 8, "status": "succeeded", "model_type": "act", "model_name": "EduBotics-Solutions/m"}
+
+
+async def start_fails(on_late):
+    raise RuntimeError("modal down")
 
 
 svc.visible_training = visible
+svc.resolve_model = lambda repo: {"model_repo": repo, "model_revision": "a" * 40}
+svc.create_reservation = lambda *a: {"session_id": "0f5c0a52-5a0c-4d4e-9d61-2b0d2c1f0a12", "session_s": 1800,
+                                     "remaining_today_s": 7000}
+
+
+async def ended_edge_failed(*a):
+    return None
+
+
+route._end_edge_failed = ended_edge_failed
+route.inference_edge.start_session = start_fails
+route.inference_edge.kick = lambda: None
 app = FastAPI()
 app.include_router(route.router)
 app.dependency_overrides[route.get_current_profile] = lambda: {
@@ -597,6 +667,7 @@ cases = [
     ("reserve form", "/inference/sessions",
      {"content": b"training_id=7", "headers": {"content-type": "application/x-www-form-urlencoded"}}),
     ("reserve valid", "/inference/sessions", {"json": {"training_id": 7}}),
+    ("gpu not started", "/inference/sessions", {"json": {"training_id": 8}}),
 ]
 for tail in ("arm", "heartbeat", "end"):
     for i, kw in enumerate(({"json": {}}, {"json": {"training_id": 0}}, {"content": b"{", "headers": json_ct})):
@@ -636,6 +707,13 @@ class TestRealFastApiBodies(unittest.TestCase):
                 if name.startswith("reserve") and name != "reserve valid":
                     self.assertEqual(a["status"], 422, a["text"])
                     self.assertEqual(json.loads(a["text"]), {"detail": MALFORMED_DE})
+                elif name == "gpu not started":
+                    # the retry marker survives the real JSONResponse (a body field, readable cross-origin)
+                    self.assertEqual(a["status"], 503, a["text"])
+                    self.assertEqual(json.loads(a["text"]), {
+                        "detail": "Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich "
+                                  "noch einmal.",
+                        "code": "gpu_not_started"})
                 elif name == "reserve valid":
                     # the handler parsed it and asked the visibility ladder (patched: not visible)
                     self.assertEqual(a["status"], 404, a["text"])
@@ -643,7 +721,7 @@ class TestRealFastApiBodies(unittest.TestCase):
                 else:
                     self.assertEqual(a["status"], 404, a["text"])
                     self.assertEqual(json.loads(a["text"]), {"detail": "Cloud-Sitzung nicht gefunden."})
-        self.assertEqual(out["seen"], [7])
+        self.assertEqual(out["seen"], [7, 8])
 
 
 class TestArm(_Case):
@@ -864,6 +942,44 @@ class TestMainWiring(unittest.TestCase):
         decorated = [d for d in fn.decorator_list if isinstance(d, ast.Call)
                      and getattr(d.func, "attr", "") == "on_event"]
         self.assertEqual([d.args[0].value for d in decorated], ["startup"])
+
+    def test_the_retry_code_is_the_pages_code(self) -> None:
+        """Lockstep: the page retries on exactly the code this API sends."""
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
+        path = os.path.join(repo, "physical_ai_tools", "physical_ai_manager", "src", "features", "cloudInference",
+                            "controller.js")
+        with open(path, encoding="utf-8") as fh:
+            js = fh.read()
+        m = re.search(r"export const GPU_NOT_STARTED_CODE = '([a-z_]+)';", js)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), route.GPU_NOT_STARTED_CODE)
+
+    def test_three_reserve_attempts_fit_the_per_user_budget(self) -> None:
+        """Round 2: the page's 3 automatic reserve attempts (worst case an immediate SDK
+        error, RESERVE_RETRY_DELAY_MS apart) fit the shared POST budget of ONE
+        student, together with the ends of the failed attempts' sessions."""
+        from app.services.rate_limiter import RateLimiter
+
+        rule = _match(_main_literal("_RATE_LIMIT_RULES"), "POST", "/inference/sessions")
+        self.assertEqual(rule, ("POST", "/inference/sessions", 30, 60.0))
+        prefixes = _main_literal("_PER_USER_RATE_LIMIT_PREFIXES")
+        self.assertIn("/inference/", prefixes)  # keyed per student, not per classroom NAT
+        limiter = RateLimiter()
+        method, prefix, limit, window = rule
+        allowed = [limiter.check(f"{method}:{prefix}", "jwt:student", limit, window) for _ in range(3 + 3)]
+        self.assertEqual(allowed, [True] * 6)
+        # a classmate behind the same NAT has a budget of their own
+        self.assertTrue(limiter.check(f"{method}:{prefix}", "jwt:classmate", limit, window))
+
+    def test_a_failed_start_costs_no_cloud_time(self) -> None:
+        """Round 2: an attempt that never connected adds 0 s to today's Cloud-Zeit (048)."""
+        mig = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "supabase", "migrations")
+        (name,) = [n for n in os.listdir(mig) if n.endswith("_048_inference_sessions.sql")]
+        with open(os.path.join(mig, name), encoding="utf-8") as fh:
+            sql = fh.read()
+        used = sql[sql.index("FUNCTION public._inference_used_today_s"):]
+        used = used[:used.index("$$;")]
+        self.assertIn("CASE WHEN connected_at IS NULL THEN 0", used)
 
     def test_no_new_secret(self) -> None:
         with open(MAIN_PY, encoding="utf-8") as fh:

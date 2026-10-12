@@ -35,6 +35,12 @@ Conventions that are easy to undo by accident:
     put into an exception text.
   * Every German `detail=` literal is bound at its raise site on purpose:
     german_detail_lint.py reads keyword arguments.
+  * ONE answer carries a machine-readable `code` next to its German `detail`:
+    the reserve's 503 when `sessions.start` itself failed or outlived its bound
+    (`"code": "gpu_not_started"`). The page retries the reserve on that code
+    alone (owner, round 2) and never on German text. An attach-time end answers
+    the same sentence WITHOUT the code: that reservation ended for a reason of
+    its own (another tab superseded it, the page let it go).
 """
 
 from __future__ import annotations
@@ -57,9 +63,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/inference", tags=["inference"])
 
 _NO_STORE = {"Cache-Control": "no-store"}
+# == physical_ai_manager features/cloudInference/controller.js GPU_NOT_STARTED_CODE
+GPU_NOT_STARTED_CODE = "gpu_not_started"
 # The reserve body is `{"training_id": <int>}`; anything past this is not one.
 _RESERVE_BODY_MAX_BYTES = 4096
 _TRAINING_ID_MAX = 2_147_483_647  # trainings.id is a Postgres INT
+
+
+class _CodedHTTPException(HTTPException):
+    """An HTTPException whose JSON body also carries a machine-readable `code`."""
+
+    def __init__(self, status_code: int, detail: str, code: str):
+        super().__init__(status_code=status_code, detail=detail)
+        self.code = code
 
 
 def _ok(content: dict) -> JSONResponse:
@@ -75,8 +91,10 @@ def _no_store(handler):
         try:
             return await handler(*args, **kwargs)
         except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
-                                headers=dict(_NO_STORE))
+            content = {"detail": exc.detail}
+            if isinstance(exc, _CodedHTTPException):
+                content["code"] = exc.code
+            return JSONResponse(status_code=exc.status_code, content=content, headers=dict(_NO_STORE))
         except Exception as exc:  # noqa: BLE001 - never str(exc)
             logger.error("inference route %s failed: %s", handler.__name__, type(exc).__name__)
             return JSONResponse(
@@ -112,6 +130,16 @@ def _session_unreadable() -> HTTPException:
 
 
 def _gpu_not_started() -> HTTPException:
+    """`sessions.start` failed or outlived START_TIMEOUT_S: the page may retry (coded)."""
+    return _CodedHTTPException(
+        status_code=503,
+        detail="Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.",
+        code=GPU_NOT_STARTED_CODE,
+    )
+
+
+def _ended_while_starting() -> HTTPException:
+    """The reservation ended while its GPU started (G-4): the same sentence, no retry code."""
     return HTTPException(
         status_code=503,
         detail="Die Cloud-GPU konnte gerade nicht gestartet werden. Bitte versuche es gleich noch einmal.",
@@ -281,7 +309,7 @@ async def reserve_session(request: Request, profile=Depends(get_current_profile)
     if status == "ended":
         # Stored on the ended row: the terminate loop ends the Modal session (D39, G-4).
         inference_edge.kick()
-        raise _gpu_not_started()
+        raise _ended_while_starting()
     await inference_edge.terminate_now(creds.token)
     raise _not_created()
 

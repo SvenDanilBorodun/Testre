@@ -358,6 +358,24 @@ describe('stop, release, heartbeat, robot phase, pagehide, sign-out', () => {
     expect(controller.getSnapshot()).toMatchObject({ phase: 'ended', message: 'Das Zeitlimit für diesen Lauf war erreicht.' });
   });
 
+  it('an `ended` beat landing while a Start is arming is left to start() (it re-reserves once)', async () => {
+    await reserveVia(7);
+    let armAnswer;
+    api.armInferenceSession.mockImplementationOnce(() => new Promise((r) => { armAnswer = r; }));
+    const pending = controller.start({ getAccessToken: token, getTaskInfo: () => FORM, trainingId: 7 });
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('arming');
+    api.heartbeatInferenceSession.mockResolvedValue({ status: 'ended', end_reason: 'client_gone', end_reason_de: 'x', max_end_in_s: null });
+    await vi.advanceTimersByTimeAsync(controller.HEARTBEAT_MS);
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('arming');
+    expect(robot.stopCloudInference).not.toHaveBeenCalled();
+    api.heartbeatInferenceSession.mockResolvedValue({ status: 'reserved', end_reason: null, end_reason_de: '', max_end_in_s: null });
+    armAnswer({ token: CONNECT, edge_token: EDGE, session_s: 1800 });
+    await pending;
+    expect(controller.getSnapshot().phase).toBe('running');
+  });
+
   it('a network failure of the heartbeat changes nothing (retried next tick)', async () => {
     await running();
     api.heartbeatInferenceSession.mockRejectedValue(new TypeError('Failed to fetch'));

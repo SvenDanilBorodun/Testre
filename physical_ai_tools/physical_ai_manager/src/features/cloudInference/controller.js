@@ -175,7 +175,9 @@ async function beat() {
   if (state.phase === 'reserved') {
     clearTimers();
     set({ phase: 'idle', sessionId: null, summary: state.summary, message: cloudCopy.panel.released });
-  } else if (state.phase === 'running' || state.phase === 'starting' || state.phase === 'arming') {
+  } else if (state.phase === 'running') {
+    // (While arming or starting, start() itself meets the end: the arm answers
+    // 410 and re-reserves once, a robot call answers and the next beat ends it.)
     stopCloudInference().catch(() => {});
     clearTimers();
     set({ phase: 'ended', sessionId: null, message: res.end_reason_de || '' });

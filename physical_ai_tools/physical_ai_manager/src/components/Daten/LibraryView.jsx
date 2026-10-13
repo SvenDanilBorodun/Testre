@@ -68,7 +68,7 @@ export default function LibraryView({
     <div className="dat-main" data-view="library">
       <header className="dat-head">
         <div>
-          <div className="dat-eyebrow">{COPY.page.eyebrow}</div>
+          <div className="dat-eyebrow"><span aria-hidden="true">05 · </span>{COPY.page.eyebrow}</div>
           <h1 className="dat-title">{COPY.page.title}</h1>
           {/* No counts before the first reply (V2-14: never „0 Datensätze"
               while loading; the grid says what is happening). */}

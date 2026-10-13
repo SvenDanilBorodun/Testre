@@ -44,16 +44,16 @@ afterEach(() => {
 const cs = (id) => getComputedStyle(document.getElementById(id));
 
 describe('daten.css: the button classes win over the page reset (V2-4)', () => {
-  it('a primary button: white 13 px / 600 on teal', () => {
+  it('a primary button: dark ink 13 px / 600 on the signal orange', () => {
     const s = cs('primary');
-    expect(s.color).toBe('rgb(255, 255, 255)');
+    expect(s.color).toBe('rgb(35, 35, 34)');
     expect(s.fontWeight).toBe('600');
     expect(s.fontSize).toBe('13px');
   });
 
-  it('a small primary button keeps white ink at 12.5 px / 600', () => {
+  it('a small primary button keeps its dark ink at 12.5 px / 600', () => {
     const s = cs('primary-sm');
-    expect(s.color).toBe('rgb(255, 255, 255)');
+    expect(s.color).toBe('rgb(35, 35, 34)');
     expect(s.fontWeight).toBe('600');
     expect(s.fontSize).toBe('12.5px');
   });

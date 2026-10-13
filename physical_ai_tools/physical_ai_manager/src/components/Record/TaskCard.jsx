@@ -18,44 +18,18 @@
 // after a mouse click, so Space still starts a recording instead of pressing
 // „+" once more (keyboard focus stays where the student put it). Validation runs when Start is pressed, not here;
 // a refused field is only marked.
+//
+// Sucher (§8): a plate with the title in the serif, well fields, and the
+// four steppers as the shared Stepper primitive (the same DOM as the local
+// stepper it replaced; ↑/↓ and the wheel over the number step it while the
+// form is unlocked).
 
 import React, { useState } from 'react';
 import clsx from 'clsx';
 import Icon from '../icons/Icon';
 import TagInput from '../TagInput';
+import { Plate, Stepper } from '../sucher';
 import { releasePointerFocus } from './ActionBar';
-
-function Stepper({ s, value, disabled, onChange, labels }) {
-  const v = Number.isFinite(Number(value)) ? Number(value) : s.min;
-  const set = (next) => onChange(s.field, Math.max(s.min, Math.min(s.max, next)));
-  return (
-    <div className="rec-stp" style={{ '--c': s.color }} data-field={s.field}>
-      <span className="sl"><i />{s.label}</span>
-      <div className="ctl">
-        <button
-          type="button"
-          disabled={disabled || v <= s.min}
-          aria-label={labels.dec(s.label)}
-          onClick={(e) => { releasePointerFocus(e); set(v - 1); }}
-        >
-          <Icon name="minus" size={16} />
-        </button>
-        <output aria-label={s.label}>
-          {v}
-          {s.unit ? <small>{s.unit}</small> : null}
-        </output>
-        <button
-          type="button"
-          disabled={disabled || v >= s.max}
-          aria-label={labels.inc(s.label)}
-          onClick={(e) => { releasePointerFocus(e); set(v + 1); }}
-        >
-          <Icon name="plus" size={16} />
-        </button>
-      </div>
-    </div>
-  );
-}
 
 export default function TaskCard({
   labels,
@@ -78,16 +52,20 @@ export default function TaskCard({
   const markInvalid = (field) => (invalid && invalid.field === field ? invalid.messageDe : '');
 
   return (
-    <section className="rec-card" aria-labelledby="rec-task-title" data-testid="rec-task-card">
+    <Plate as="section" className="rec-card rec-taskcard" aria-labelledby="rec-task-title" data-testid="rec-task-card">
       <div className="rec-card-h">
-        <h3 id="rec-task-title"><Icon name="task" size={17} />{labels.title}</h3>
-        <span className={clsx('rec-chip', !locked && 'ok')}>{locked ? labels.chipLocked : labels.chipEditable}</span>
+        <h3 id="rec-task-title" className="su-serif"><Icon name="task" size={17} />{labels.title}</h3>
+        <span className="rec-chipwrap">
+          {locked ? <Icon name="lock" size={13} /> : null}
+          <span className={clsx('rec-chip', !locked && 'ok')}>{locked ? labels.chipLocked : labels.chipEditable}</span>
+        </span>
       </div>
       <div className="rec-card-b">
         <div className="rec-field">
           <label htmlFor="rec-task-name">{labels.name}</label>
           <input
             id="rec-task-name"
+            className="su-field"
             value={form.taskName || ''}
             maxLength={taskNameMax}
             placeholder={labels.namePlaceholder}
@@ -101,6 +79,7 @@ export default function TaskCard({
           <label htmlFor="rec-task-instruction">{labels.instruction}</label>
           <textarea
             id="rec-task-instruction"
+            className="su-field"
             value={form.taskInstruction || ''}
             placeholder={labels.instructionPlaceholder}
             disabled={locked}
@@ -115,11 +94,18 @@ export default function TaskCard({
             {steppers.map((s) => (
               <Stepper
                 key={s.field}
-                s={s}
+                className="rec-stp"
+                field={s.field}
+                label={s.label}
                 value={form[s.field]}
+                min={s.min}
+                max={s.max}
+                unit={s.unit}
+                color={s.color}
                 disabled={locked}
                 onChange={change}
-                labels={labels}
+                decLabel={labels.dec(s.label)}
+                incLabel={labels.inc(s.label)}
               />
             ))}
           </div>
@@ -201,7 +187,7 @@ export default function TaskCard({
                 {userOptions.length ? (
                   <select
                     id="rec-adv-user"
-                    className="rec-mini"
+                    className="rec-mini su-field"
                     style={{ width: 130 }}
                     value={form.userId || ''}
                     disabled={locked}
@@ -228,7 +214,7 @@ export default function TaskCard({
               <label htmlFor="rec-adv-fps">{labels.fps}</label>
               <input
                 id="rec-adv-fps"
-                className="rec-mini"
+                className="rec-mini su-field"
                 type="number"
                 min={1}
                 max={60}
@@ -246,6 +232,6 @@ export default function TaskCard({
           </div>
         ) : null}
       </div>
-    </section>
+    </Plate>
   );
 }

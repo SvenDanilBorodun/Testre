@@ -209,7 +209,7 @@ export default function ActionBar({
               <Icon
                 name={pill.icon}
                 size={22}
-                className={pill.icon === 'loading' ? 'animate-spin' : ''}
+                className={pill.icon === 'loading' ? 'animate-spin' : pill.icon === 'liveRecording' ? 'rec-blink' : ''}
               />
             ) : null}
           </span>

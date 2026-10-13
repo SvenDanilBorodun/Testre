@@ -50,7 +50,7 @@ function SubmitButton({ accessToken, saveWorkflowNow, running = false }) {
       disabled={busy || running || !accessToken}
       title={CODE_DE.SUBMIT_TITLE}
       className={
-        'inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 disabled:cursor-not-allowed '
+        'st-key inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 disabled:cursor-not-allowed '
         + 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]'
       }
     >

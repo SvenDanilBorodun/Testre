@@ -64,25 +64,22 @@ const TagInput = ({ tags, onChange, disabled, className }) => {
   return (
     <div
       className={clsx(
+        // Sucher (§8): a well field (su-field) with key-look chips.
+        'su-field',
         'flex',
         'flex-wrap',
         'gap-1',
         'p-2',
-        'border',
-        'border-gray-300',
-        'rounded-md',
         'min-h-10',
         'max-w-full',
         'w-full',
         'text-sm',
         'focus-within:ring-2',
-        'focus-within:ring-teal-500',
-        'focus-within:border-transparent',
+        'focus-within:ring-[#FF5B1F]',
         'max-h-24',
         'overflow-y-auto',
         {
-          'bg-gray-100 cursor-not-allowed': disabled,
-          'bg-white': !disabled,
+          'cursor-not-allowed': disabled,
         },
         className
       )}
@@ -101,8 +98,9 @@ const TagInput = ({ tags, onChange, disabled, className }) => {
             'items-center',
             'px-2',
             'py-1',
-            'bg-teal-100',
-            'text-teal-800',
+            'bg-[#FFFFFF]',
+            'text-gray-800',
+            'shadow-[0_0_0_1px_#CFCAC0,0_2px_0_#C9C4BA]',
             'text-xs',
             'font-medium',
             'rounded-full',
@@ -119,7 +117,7 @@ const TagInput = ({ tags, onChange, disabled, className }) => {
             <button
               type="button"
               onClick={() => removeTag(index)}
-              className={clsx('ml-1', 'text-teal-600', 'hover:text-teal-800', 'focus:outline-none')}
+              className={clsx('ml-1', 'text-gray-500', 'hover:text-gray-800')}
               aria-label={`${tag} entfernen`}
               title={`${tag} entfernen`}
             >

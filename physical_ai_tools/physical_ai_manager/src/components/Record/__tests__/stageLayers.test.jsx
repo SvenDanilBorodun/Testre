@@ -85,12 +85,12 @@ describe('ProblemBanner', () => {
     expect(screen.queryByTestId('rec-banner')).toBeNull();
   });
 
-  it.each([['warn', 'warning'], ['bad', 'warning'], ['info', 'info']])('%s banner with its icon, polite', (kind, icon) => {
+  it.each([['warn', 'warn'], ['bad', 'rec'], ['info', 'info']])('%s banner with its light, polite', (kind, tone) => {
     render(<ProblemBanner problem={{ kind, textDe: 'Die Szenen-Kamera liefert nur 11 statt 30 Bilder pro Sekunde. Steck die Kamera direkt am PC ein.' }} />);
     const b = screen.getByRole('status');
     expect(b).toHaveAttribute('aria-live', 'polite');
     expect(b).toHaveAttribute('data-kind', kind);
-    expect(b.querySelector(`svg[data-icon="${icon}"]`)).not.toBeNull(); // eslint-disable-line testing-library/no-node-access
+    expect(b.querySelector(`.su-led.su-led--${tone}`)).not.toBeNull(); // eslint-disable-line testing-library/no-node-access
     expect(b.querySelector('b')).toHaveTextContent('Die Szenen-Kamera liefert nur 11 statt 30 Bilder pro Sekunde.'); // eslint-disable-line testing-library/no-node-access
   });
 

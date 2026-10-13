@@ -21,6 +21,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { Card, Btn, Pill, SectionHeader } from '../components/EbUI';
+import { Led, RobotIcon, Screen } from '../components/sucher';
+import Icon from '../components/icons/Icon';
+import '../components/sucher-pages/system.css';
 import { usePiMode } from '../utils/piMode';
 import { useAgentUpdate } from '../hooks/useAgentUpdate';
 import { toastIcon } from '../components/icons/toast';
@@ -66,15 +69,33 @@ const CAMERA_ROLE_OPTIONS = [
 ];
 
 // A labelled step card so the wizard reads top-to-bottom like the .exe.
+// Sucher: a serif title; a lettered step gets its letter in a dark disc
+// (decorative — the title keeps the whole „Schritt A — …" text).
 function Step({ n, title, children, right }) {
   return (
     <Card
-      title={n ? `Schritt ${n} — ${title}` : title}
+      title={n ? (
+        <span className="su-sys-step">
+          <span className="su-sys-step__disc" aria-hidden="true">{n}</span>
+          <span>{`Schritt ${n} — ${title}`}</span>
+        </span>
+      ) : title}
+      titleStyle="serif"
       right={right}
-      className="mb-4"
+      className="su-sys-card"
     >
       {children}
     </Card>
+  );
+}
+
+// A status chip with a light: green wash when true, the well and an off light otherwise.
+function StatusChip({ tone, led, children }) {
+  return (
+    <Pill tone={tone}>
+      <Led tone={led} size={7} />
+      {children}
+    </Pill>
   );
 }
 
@@ -472,7 +493,8 @@ export default function SystemPage() {
     <div className="h-full w-full overflow-y-auto">
       <div className="eb-shell">
         <SectionHeader
-          eyebrow="Orange Pi"
+          size="md"
+          eyebrow={<span className="su-sys-eyebrow">Orange Pi</span>}
           title="System"
           description="Richte deinen Roboter ein: Arme und Kameras scannen, Umgebung starten, aktualisieren."
           className="mb-6 md:mb-8"
@@ -533,41 +555,44 @@ export default function SystemPage() {
           </div>
         )}
 
+        <div className="su-sys-grid">
+        <div className="su-sys-col">
         {/* Pi-IP-Anzeige + Verbindungszustand */}
-        <Card className="mb-4">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="min-w-0">
-              <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
-                Adresse dieses Roboters
-              </div>
-              <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <span className="font-mono text-[24px] font-semibold text-[var(--ink)] leading-none">
+        <Card className="su-sys-card su-sys-addr" padded={false}>
+          <div className="su-sys-addr__main">
+            <div className="su-lab">
+              Adresse dieses Roboters
+            </div>
+            <Screen className="su-sys-addr__screen">
+              <span className="su-sys-addr__disc" aria-hidden="true"><Led tone="sig" size={10} /></span>
+              <span className="min-w-0">
+                <span className="su-sys-addr__ip su-dot">
                   {lanIp || '—'}
                 </span>
                 {hostname && (
-                  <span className="font-mono text-sm text-[var(--ink-3)]">
+                  <span className="su-sys-addr__host">
                     {hostname}.local
                   </span>
                 )}
-              </div>
-              <p className="mt-2 text-xs text-[var(--ink-3)] max-w-md">
-                Diese Adresse steht auf dem Etikett am Gerät. Ruf sie im Browser auf,
-                um von einem anderen PC auf den Roboter zuzugreifen.
-              </p>
-            </div>
-            <div className="flex flex-col items-end gap-2">
-              {agentReachable ? (
-                <Pill tone="success" dot>Agent bereit</Pill>
-              ) : (
-                <Pill tone="amber" dot>Agent wird gestartet …</Pill>
-              )}
-              <Pill tone={managerUp ? 'success' : 'neutral'}>
-                Weboberfläche {managerUp ? 'läuft' : '—'}
-              </Pill>
-              <Pill tone={robotTierUp ? 'success' : 'neutral'}>
-                Roboter {robotTierUp ? 'läuft' : 'gestoppt'}
-              </Pill>
-            </div>
+              </span>
+            </Screen>
+            <p className="su-sys-addr__desc">
+              Diese Adresse steht auf dem Etikett am Gerät. Ruf sie im Browser auf,
+              um von einem anderen PC auf den Roboter zuzugreifen.
+            </p>
+          </div>
+          <div className="su-sys-addr__chips">
+            {agentReachable ? (
+              <StatusChip tone="success" led="ok">Agent bereit</StatusChip>
+            ) : (
+              <StatusChip tone="amber" led="warn">Agent wird gestartet …</StatusChip>
+            )}
+            <StatusChip tone={managerUp ? 'success' : 'neutral'} led={managerUp ? 'ok' : 'off'}>
+              Weboberfläche {managerUp ? 'läuft' : '—'}
+            </StatusChip>
+            <StatusChip tone={robotTierUp ? 'success' : 'neutral'} led={robotTierUp ? 'ok' : 'off'}>
+              Roboter {robotTierUp ? 'läuft' : 'gestoppt'}
+            </StatusChip>
           </div>
         </Card>
 
@@ -589,10 +614,11 @@ export default function SystemPage() {
             <div className="mb-4">
               <label
                 htmlFor="eb-robot-type"
-                className="block text-sm font-medium text-[var(--ink)]"
+                className="su-lab block"
               >
                 Robotertyp
               </label>
+              <div className="su-sys-type">
               <select
                 id="eb-robot-type"
                 value={selectedRobotType}
@@ -609,7 +635,7 @@ export default function SystemPage() {
                     ? 'Im Cloud-Modus wird kein Roboter verwendet — der Robotertyp spielt keine Rolle.'
                     : undefined
                 }
-                className="mt-1 h-10 w-full max-w-md rounded-[var(--radius-sm)] border border-[var(--line)] bg-white px-2 text-sm disabled:opacity-60"
+                className="su-field mt-1 h-11 w-full max-w-md px-3"
               >
                 {/* Only while the agent's id is not (yet) in the list — a
                     hand-edited .env, or a status that has not landed. Without
@@ -628,7 +654,16 @@ export default function SystemPage() {
                   </option>
                 ))}
               </select>
-              <p className="mt-2 text-xs text-[var(--ink-3)]">
+              {/* The selected type's sprite (D8: the dropdown stays; it plays on hover). */}
+              <span className="su-sys-type__robot">
+                <RobotIcon
+                  profile={selectedRobotType}
+                  size={72}
+                  title={selectedProfile ? selectedProfile.display_de : undefined}
+                />
+              </span>
+              </div>
+              <p className="mt-2 text-[13px] text-[var(--ink-2)]">
                 Wähle, welcher Roboter an diesem Pi angeschlossen ist.{' '}
                 {scanRequiresLeader
                   ? 'Dieser Typ braucht beide Arme — Leader und Follower.'
@@ -638,12 +673,12 @@ export default function SystemPage() {
               </p>
             </div>
           )}
-          <label className="flex items-start gap-3 cursor-pointer">
+          <label className="su-sys-cloud flex items-start gap-4 cursor-pointer">
             <input
               type="checkbox"
               checked={cloudOnly}
               onChange={(e) => setCloudOnly(e.target.checked)}
-              className="mt-1 h-4 w-4"
+              className="su-switch"
             />
             <span className="text-sm text-[var(--ink-2)]">
               <span className="font-medium text-[var(--ink)]">Cloud-Modus (ohne Roboter)</span>
@@ -669,6 +704,7 @@ export default function SystemPage() {
               title={scanRequiresLeader ? 'Arme scannen' : 'Arm scannen'}
               right={
                 <Pill tone={hardwareReady ? 'success' : 'neutral'}>
+                  <Led tone={hardwareReady ? 'ok' : 'off'} size={7} />
                   {hardwareReady
                     ? (scanRequiresLeader ? 'Beide Arme erkannt' : 'Arm erkannt')
                     : 'Nicht erkannt'}
@@ -680,17 +716,25 @@ export default function SystemPage() {
                   a Roboter-Studio kit look half-broken. The remaining tile is
                   then named „Roboterarm" (the agent's own German for it), since
                   „Follower" only means anything opposite a leader. */}
-              <div className={`grid grid-cols-1 ${scanRequiresLeader ? 'sm:grid-cols-2' : ''} gap-3 mb-3`}>
+              <div className="su-sys-scan">
+              {/* The radar (decorative): it sweeps while scanning; a found arm is a blip. */}
+              <Screen className={`su-sys-radar${scanning ? ' su-sys-radar--on' : ''}`} aria-hidden="true">
+                <span className="su-sys-radar__sweep" />
+                {scanRequiresLeader && arms.leader ? <span className="su-sys-radar__blip su-sys-radar__blip--l" /> : null}
+                {arms.follower ? <span className="su-sys-radar__blip su-sys-radar__blip--f" /> : null}
+              </Screen>
+              <div className="su-sys-scan__side">
+              <div className={`grid grid-cols-1 ${scanRequiresLeader ? 'lg:grid-cols-1' : ''} gap-3 mb-3`}>
                 {scanRequiresLeader && (
-                  <div className="rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] p-3">
-                    <div className="text-[11px] uppercase tracking-wide text-[var(--ink-3)]">Leader</div>
+                  <div className="su-sys-well">
+                    <div className="su-sys-well__lab">Leader</div>
                     <div className="font-mono text-sm text-[var(--ink)] break-all">
                       {arms.leader || '—'}
                     </div>
                   </div>
                 )}
-                <div className="rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] p-3">
-                  <div className="text-[11px] uppercase tracking-wide text-[var(--ink-3)]">
+                <div className="su-sys-well">
+                  <div className="su-sys-well__lab">
                     {scanRequiresLeader ? 'Follower' : 'Roboterarm'}
                   </div>
                   <div className="font-mono text-sm text-[var(--ink)] break-all">
@@ -708,13 +752,15 @@ export default function SystemPage() {
                   Vollständig neu scannen
                 </Btn>
               </div>
+              </div>
+              </div>
               {scanMsg && (
                 <p className={`mt-3 text-sm ${scanFailed ? 'text-[color:var(--danger)]' : 'text-[var(--ink-2)]'}`}>
                   {scanMsg}
                 </p>
               )}
               {scanFailed && (
-                <div className="mt-3 rounded-[var(--radius-sm)] border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                <div className="mt-3 rounded-[14px] bg-[var(--amber-wash)] p-3 text-sm text-[color:var(--amber)]">
                   <div className="font-medium mb-1">Hilfe bei Problemen</div>
                   <ul className="list-disc pl-5 space-y-1">
                     <li>
@@ -744,7 +790,7 @@ export default function SystemPage() {
               }
             >
               {scanCameras.length === 0 ? (
-                <p className="text-sm text-[var(--ink-3)]">
+                <p className="text-sm text-[var(--ink-2)]">
                   Noch keine Kameras gesucht. „Kameras suchen" klicken.
                 </p>
               ) : (
@@ -752,13 +798,13 @@ export default function SystemPage() {
                   {scanCameras.map((cam) => (
                     <div
                       key={cam.path}
-                      className="flex flex-wrap items-center gap-3 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] p-3"
+                      className="su-sys-well flex flex-wrap items-center gap-3"
                     >
                       <div className="min-w-0 flex-1">
                         <div className="text-sm font-medium text-[var(--ink)] truncate">
                           {cam.name || cam.path}
                         </div>
-                        <div className="font-mono text-[11px] text-[var(--ink-3)] break-all">
+                        <div className="font-mono text-[11.5px] text-[var(--ink-2)] break-all">
                           {cam.path}
                         </div>
                       </div>
@@ -778,7 +824,7 @@ export default function SystemPage() {
                         onChange={(e) =>
                           setRoles((prev) => ({ ...prev, [cam.path]: e.target.value }))
                         }
-                        className="h-9 rounded-[var(--radius-sm)] border border-[var(--line)] bg-white px-2 text-sm"
+                        className="su-field su-sys-rolesel h-10 px-3"
                       >
                         <option value="">— Rolle —</option>
                         {CAMERA_ROLE_OPTIONS.filter((o) =>
@@ -810,7 +856,7 @@ export default function SystemPage() {
 
               {previewSrc && (
                 <div className="mt-4">
-                  <div className="text-[11px] uppercase tracking-wide text-[var(--ink-3)] mb-1">
+                  <div className="su-lab mb-1">
                     Vorschau
                   </div>
                   <img
@@ -825,9 +871,11 @@ export default function SystemPage() {
           </>
         )}
 
+        </div>
+        <div className="su-sys-col">
         {/* Umgebung starten / stoppen */}
-        <Card title="Roboter-Umgebung" className="mb-4">
-          <p className="text-sm text-[var(--ink-3)] mb-3">
+        <Card title="Roboter-Umgebung" titleStyle="serif" className="su-sys-card">
+          <p className="text-sm text-[var(--ink-2)] mb-3">
             {cloudOnly
               ? 'Im Cloud-Modus läuft die Weboberfläche bereits — Roboter-Start nicht nötig.'
               : robotTierUp
@@ -836,6 +884,19 @@ export default function SystemPage() {
               ? 'Startet Arme und Kameras. Voraussetzung: beide Arme erkannt.'
               : 'Startet den Roboterarm und die Kameras. Voraussetzung: Arm erkannt.'}
           </p>
+          {/* The state as a screen bar: a light, the state word, activity dots
+              while it starts or stops. Words from the page's own chips. */}
+          <Screen className="su-sys-env" aria-hidden="true">
+            <Led
+              tone={startingEnv || stoppingEnv ? 'sig' : robotTierUp ? 'ok' : 'off'}
+              pulse={startingEnv || stoppingEnv || robotTierUp ? 'breathe' : 'none'}
+              size={12}
+            />
+            <span className="su-sys-env__word su-dot">{robotTierUp ? 'läuft' : 'gestoppt'}</span>
+            <span className={`su-sys-env__dots${startingEnv || stoppingEnv ? ' su-sys-env__dots--on' : ''}`}>
+              {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => <i key={i} style={{ '--i': i }} />)}
+            </span>
+          </Screen>
           <div className="flex flex-wrap items-center gap-2">
             <Btn
               variant="primary"
@@ -860,7 +921,7 @@ export default function SystemPage() {
             </Btn>
           </div>
           {!cloudOnly && !canStart && (
-            <p className="mt-2 text-xs text-[var(--ink-3)]">
+            <p className="mt-2 text-[13px] text-[var(--ink-2)]">
               {scanRequiresLeader
                 ? 'Bitte zuerst beide Arme scannen (Schritt A) oder oben „Cloud-Modus" wählen.'
                 : 'Bitte zuerst den Roboterarm scannen (Schritt A) oder oben „Cloud-Modus" wählen.'}
@@ -871,12 +932,13 @@ export default function SystemPage() {
         {/* Update */}
         <Card
           title="Aktualisierung"
+          titleStyle="serif"
           right={
-            <span className="text-xs text-[var(--ink-3)]">{fmtAge(agentStatus?.images)}</span>
+            <span className="text-[13px] text-[var(--ink-2)]">{fmtAge(agentStatus?.images)}</span>
           }
-          className="mb-4"
+          className="su-sys-card"
         >
-          <p className="text-sm text-[var(--ink-3)] mb-3">
+          <p className="text-sm text-[var(--ink-2)] mb-3">
             Lädt die neuesten Container-Images. Die Weboberfläche wird zuletzt neu
             gestartet — die Seite lädt sich danach kurz selbst neu.
           </p>
@@ -884,12 +946,12 @@ export default function SystemPage() {
             {updating ? 'Aktualisierung läuft …' : 'Jetzt aktualisieren'}
           </Btn>
           {updateJob && (
-            <div className="mt-3 rounded-[var(--radius-sm)] bg-[var(--bg-sunk)] p-3 text-sm">
-              <div className="text-[var(--ink-2)]">{updateJob.message}</div>
+            <div className="su-sys-well mt-3 text-sm">
+              <div className="text-[var(--ink)]">{updateJob.message}</div>
               {typeof updateJob.progress === 'number' && updateJob.status === 'running' && (
                 <div className="mt-2 h-1.5 w-full bg-[var(--line)] rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-[var(--accent)] transition-[width] duration-500"
+                    className="h-full bg-[var(--su-sig)] transition-[width] duration-500"
                     style={{ width: `${Math.max(0, Math.min(100, updateJob.progress))}%` }}
                   />
                 </div>
@@ -901,26 +963,23 @@ export default function SystemPage() {
         {/* Netzwerk-Check */}
         <Card
           title="Netzwerk-Check"
+          titleStyle="serif"
           right={
             <Btn size="sm" variant="secondary" onClick={handleNetCheck} disabled={netChecking}>
               {netChecking ? 'Prüfe …' : 'Netzwerk prüfen'}
             </Btn>
           }
-          className="mb-4"
+          className="su-sys-card"
         >
-          <p className="text-sm text-[var(--ink-3)] mb-3">
+          <p className="text-sm text-[var(--ink-2)] mb-3">
             Prüft, ob Cloud, Registry und Hugging Face erreichbar sind und ob die
             Uhrzeit stimmt — die häufigsten Ursachen für Fehler im Schulnetz.
           </p>
           {netCheck && Array.isArray(netCheck.checks) ? (
             <ul className="space-y-2">
               {netCheck.checks.map((c) => (
-                <li key={c.key} className="flex items-start gap-2">
-                  <span
-                    className={`mt-0.5 inline-block h-2.5 w-2.5 rounded-full ${
-                      c.ok ? 'bg-[color:var(--success)]' : 'bg-[color:var(--danger)]'
-                    }`}
-                  />
+                <li key={c.key} className="flex items-start gap-2.5">
+                  <Led tone={c.ok ? 'ok' : 'rec'} className="mt-1.5" />
                   <div className="min-w-0">
                     <div
                       className={`text-sm font-medium ${
@@ -930,60 +989,68 @@ export default function SystemPage() {
                       {c.label}
                     </div>
                     {!c.ok && c.hint && (
-                      <div className="text-xs text-[var(--ink-3)]">{c.hint}</div>
+                      <div className="text-[13px] text-[var(--ink-2)]">{c.hint}</div>
                     )}
                   </div>
                 </li>
               ))}
             </ul>
           ) : (
-            <p className="text-sm text-[var(--ink-3)]">Noch nicht geprüft.</p>
+            <p className="text-sm text-[var(--ink-2)]">Noch nicht geprüft.</p>
           )}
         </Card>
 
         {/* Protokoll */}
         <Card
           title="Protokoll"
+          titleStyle="serif"
           right={
             <Btn size="sm" variant="secondary" onClick={() => setProtokollOpen((v) => !v)}>
               {protokollOpen ? 'Ausblenden' : 'Anzeigen'}
             </Btn>
           }
-          className="mb-4"
+          className="su-sys-card"
         >
           {protokollOpen ? (
-            <div className="max-h-64 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--ink)] p-3 font-mono text-[11px] text-white/85">
+            <Screen className="su-sys-log">
               {logLines.length === 0 ? (
-                <p className="text-white/40">Warte auf Meldungen …</p>
+                <p className="su-sys-log__line su-sys-log__line--last">Warte auf Meldungen …<span className="su-sys-log__caret" aria-hidden="true" /></p>
               ) : (
                 logLines.map((line, i) => (
-                  <div key={i} className="whitespace-pre-wrap break-words">
+                  <div
+                    key={i}
+                    className={`su-sys-log__line whitespace-pre-wrap break-words${i === logLines.length - 1 ? ' su-sys-log__line--last' : ''}`}
+                  >
                     {line}
+                    {i === logLines.length - 1 && <span className="su-sys-log__caret" aria-hidden="true" />}
                   </div>
                 ))
               )}
-            </div>
+            </Screen>
           ) : (
-            <p className="text-sm text-[var(--ink-3)]">
+            <p className="text-sm text-[var(--ink-2)]">
               Live-Meldungen des Roboters (mit ausgeblendeten Passwörtern).
             </p>
           )}
         </Card>
 
         {/* Daten zurücksetzen */}
-        <Card title="Daten zurücksetzen" className="mb-8">
-          <p className="text-sm text-[var(--ink-3)] mb-3">
+        <Card title="Daten zurücksetzen" titleStyle="serif" className="su-sys-card">
+          <p className="text-sm text-[var(--ink-2)] mb-3">
             Löscht Datensätze, den Hugging-Face-Zwischenspeicher und die
             Roboter-Studio-Kalibrierung. Das kann nicht rückgängig gemacht werden.
           </p>
           {resetStep === 0 && (
-            <Btn variant="danger" onClick={() => setResetStep(1)}>
-              Daten zurücksetzen
-            </Btn>
+            <div className="su-sys-hazard">
+              <Btn variant="ghost" className="su-sys-hazard__btn" onClick={() => setResetStep(1)}>
+                <Icon name="trash" size={16} />
+                Daten zurücksetzen
+              </Btn>
+            </div>
           )}
           {resetStep === 1 && (
-            <div className="rounded-[var(--radius-sm)] border border-red-200 bg-red-50 p-3">
-              <p className="text-sm text-red-800 mb-2">
+            <div className="rounded-[14px] bg-[var(--danger-wash)] p-3">
+              <p className="text-sm text-[color:var(--danger)] mb-2">
                 Wirklich alle Daten löschen? Datensätze und Kalibrierung gehen verloren.
               </p>
               <div className="flex items-center gap-2">
@@ -993,8 +1060,8 @@ export default function SystemPage() {
             </div>
           )}
           {resetStep === 2 && (
-            <div className="rounded-[var(--radius-sm)] border border-red-300 bg-red-50 p-3">
-              <p className="text-sm font-medium text-red-800 mb-2">
+            <div className="rounded-[14px] bg-[var(--danger-wash)] p-3 shadow-[inset_0_0_0_1px_#F1C4C4]">
+              <p className="text-sm font-medium text-[color:var(--danger)] mb-2">
                 Letzte Bestätigung: Dies löscht endgültig alle lokalen Daten.
               </p>
               <div className="flex items-center gap-2">
@@ -1008,6 +1075,8 @@ export default function SystemPage() {
             </div>
           )}
         </Card>
+        </div>
+        </div>
       </div>
     </div>
   );

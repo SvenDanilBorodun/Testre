@@ -1,0 +1,503 @@
+/*
+ * Copyright 2026 EduBotics
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Roboter Studio in the „Sucher" look (Sucher spec §12, boards Studio.dc.html
+ * and Studio-Simulator.dc.html). Imported by pages/WorkshopPage.js.
+ *
+ * EVERY rule here is scoped under `:root[data-ui='sucher'] .su-studio`: the
+ * teacher web build mounts BlocklyWorkspace (the template editor) and must
+ * render exactly as today; it never has data-ui='sucher' and never renders
+ * the page root that carries `.su-studio`.
+ *
+ * Paint only, plus the few geometry values the boards name (radii, the dock
+ * keys' width). Never a transform, filter, `contain` or z-index on the page
+ * root (the mode frame and the fixed Vormachen overlay); Blockly keeps its
+ * own isolation and z-index ceiling; the ResizeHandle variables are never
+ * written here. Hooks are `st-*` classes in the Workshop components, or
+ * attributes the components already carry (data-testid, data-pane, roles).
+ * `content:` is only ever `""` (noIconGlyphs.test.js).
+ */
+
+/* ── page body ─────────────────────────────────────────────────────────── */
+
+:root[data-ui='sucher'] .su-studio { background: var(--su-body); }
+
+/* ── header: serif title, the badge, the actions ───────────────────────── */
+
+:root[data-ui='sucher'] .su-studio .st-header {
+  background: transparent;
+  border-bottom-color: transparent;
+  padding-top: 10px;
+  padding-bottom: 8px;
+}
+:root[data-ui='sucher'] .su-studio .st-title {
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-weight: 400;
+  font-size: 40px;
+  line-height: 1;
+  letter-spacing: 0;
+  color: var(--su-ink);
+}
+:root[data-ui='sucher'] .su-studio .st-title em { font-style: italic; }
+:root[data-ui='sucher'] .su-studio .st-hint { font-size: 14px; color: var(--su-ink-2); }
+:root[data-ui='sucher'] .su-studio .st-reason { font-size: 12px; color: var(--su-ink-2); }
+/* ModeBadge (colours stay its own inline ones; the type is the device's) */
+:root[data-ui='sucher'] .su-studio [data-testid='mode-badge'] {
+  font-family: 'Host Grotesk', system-ui, sans-serif;
+  font-weight: 800;
+  font-size: 11.5px;
+  letter-spacing: .04em;
+  padding: 4px 11px;
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, .18);
+}
+
+/* ── keys: the Sucher key paint on the page's own buttons ──────────────────
+ * Default = white key; signal = orange (ink text); dark = dark key. The lists
+ * sit in :where() and the tiers are made explicit (default (0,3,0) < signal /
+ * dark (0,4,0) < disabled (0,5,0)), so a long selector in one list can never
+ * lift a whole tier (the :is() max-specificity trap). Every tier beats the
+ * Tailwind utilities on the same buttons ((0,1,0) / (0,2,0) with a variant). */
+
+:root[data-ui='sucher'] .su-studio :where(.st-tbtn, .st-key, .st-teach > button, .st-toolbar .relative > button[aria-expanded]) {
+  border-color: transparent;
+  border-radius: 12px;
+  background: linear-gradient(#FFFFFF, #EEEBE5);
+  color: var(--su-ink);
+  font-family: 'Host Grotesk', system-ui, sans-serif;
+  font-weight: 650;
+  box-shadow: 0 0 0 1px #CFCAC0, 0 3px 0 #C9C4BA, 0 8px 14px -10px rgba(0, 0, 0, .4);
+  opacity: 1;
+  transition: transform 160ms var(--su-ease-spring), box-shadow 160ms var(--su-ease-spring);
+}
+:root[data-ui='sucher'] .su-studio :where(.st-tbtn, .st-key, .st-teach > button, .st-toolbar .relative > button[aria-expanded]):hover:not(:disabled) {
+  transform: translateY(-1px);
+  background: linear-gradient(#FFFFFF, #EEEBE5);
+  box-shadow: 0 0 0 1px #FF9A6B, 0 4px 0 #C9C4BA, 0 8px 14px -10px rgba(0, 0, 0, .4);
+  transition-duration: 120ms;
+  transition-timing-function: var(--su-ease-out);
+}
+:root[data-ui='sucher'] .su-studio :where(.st-tbtn, .st-key, .st-teach > button, .st-toolbar .relative > button[aria-expanded]):active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 1px 0 #C9C4BA;
+  transition: transform 90ms ease-out, box-shadow 90ms ease-out;
+}
+/* a saved „Speichern" is a default key even though its button carries the accent fill */
+:root[data-ui='sucher'] .su-studio.su-studio :where(.st-tbtn--save:not([data-unsaved='true'])) {
+  background: linear-gradient(#FFFFFF, #EEEBE5);
+  color: var(--su-ink);
+  border-color: transparent;
+}
+/* signal: the Vormachen chooser, an unsaved „Speichern", Start / Weiter */
+:root[data-ui='sucher'] .su-studio.su-studio :where(.st-teach > button, .st-tbtn--save[data-unsaved='true'], .st-key--signal) {
+  background: linear-gradient(#FF7440, #FF5B1F);
+  color: #232322;
+  border-color: transparent;
+  box-shadow: 0 0 0 1px #D9480F, 0 3px 0 #C2410C, 0 10px 18px -10px rgba(255, 91, 31, .9);
+}
+:root[data-ui='sucher'] .su-studio.su-studio :where(.st-teach > button, .st-tbtn--save[data-unsaved='true'], .st-key--signal):hover:not(:disabled) {
+  background: linear-gradient(#FF7440, #FF5B1F);
+  box-shadow: 0 0 0 1px #FF9A6B, 0 4px 0 #C2410C, 0 10px 18px -10px rgba(255, 91, 31, .9);
+}
+:root[data-ui='sucher'] .su-studio.su-studio :where(.st-teach > button, .st-tbtn--save[data-unsaved='true'], .st-key--signal):active:not(:disabled) {
+  box-shadow: 0 0 0 1px #D9480F, 0 1px 0 #C2410C;
+}
+/* dark: „Stopp", a pressed toggle key (the simulator switch while on, Bahn verbergen, …) */
+:root[data-ui='sucher'] .su-studio.su-studio :where(.st-key--dark, .st-key[aria-pressed='true']) {
+  background: linear-gradient(#3A3A38, #262624);
+  color: #F3EDE2;
+  border-color: transparent;
+  box-shadow: 0 0 0 1px #11110F, 0 3px 0 #0E0E0D;
+}
+:root[data-ui='sucher'] .su-studio.su-studio :where(.st-key--dark, .st-key[aria-pressed='true']):hover:not(:disabled) {
+  background: linear-gradient(#3A3A38, #262624);
+  box-shadow: 0 0 0 1px #FF9A6B, 0 4px 0 #0E0E0D;
+}
+/* „Stopp": the red square in front of its label */
+:root[data-ui='sucher'] .su-studio .st-key--stop > svg { color: var(--su-rec); width: 12px; height: 12px; }
+/* disabled: the well key, never the half-transparent Tailwind one */
+:root[data-ui='sucher'] .su-studio.su-studio :where(.st-tbtn, .st-key, .st-teach > button, .st-toolbar .relative > button[aria-expanded]):disabled {
+  background: #DEDAD2;
+  color: #8A867E;
+  border-color: transparent;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2);
+  opacity: 1;
+  transform: none;
+}
+:root[data-ui='sucher'] .su-studio .st-key--stop:disabled > svg { color: #8A867E; }
+:root[data-ui='sucher'] .su-studio .st-key--lg { min-height: 46px; padding-left: 18px; padding-right: 18px; border-radius: 14px; font-size: 14.5px; }
+:root[data-ui='sucher'] .su-studio .st-key--lg.st-key--signal { min-height: 50px; padding-left: 22px; padding-right: 22px; font-weight: 700; font-size: 15px; }
+:root[data-ui='sucher'] .su-studio .st-teach > button { min-height: 40px; padding: 0 16px; border-radius: 13px; font-size: 14px; font-weight: 700; }
+
+/* the generic fill of an accent button elsewhere on the page: the signal key
+ * paint (ink on orange). The segmented / list / dock selections below win. */
+:root[data-ui='sucher'] .su-studio button:where([class*='bg-[var(--accent)]']):where(:not([role='option'])) {
+  background: linear-gradient(#FF7440, #FF5B1F);
+  color: #232322;
+  border-color: #D9480F;
+}
+:root[data-ui='sucher'] .su-studio button:where([class*='bg-[var(--accent)]']):where(:not([role='option'])):disabled {
+  background: #DEDAD2;
+  color: #8A867E;
+  border-color: #CFCAC0;
+}
+
+/* ── segmented: Editor | Galerie, Tempo, the simulator's Objekt / Modus ── */
+
+:root[data-ui='sucher'] .su-studio :is(.st-seg, .st-segs) {
+  display: inline-flex;
+  gap: 0;
+  padding: 3px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--su-well);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .25);
+}
+:root[data-ui='sucher'] .su-studio :is(.st-seg, .st-segs) > button {
+  min-height: 30px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--su-ink-2);
+  font-family: 'Host Grotesk', system-ui, sans-serif;
+  font-weight: 700;
+  font-size: 12.5px;
+  box-shadow: none;
+}
+:root[data-ui='sucher'] .su-studio :is(.st-seg, .st-segs) > button:hover:not(:disabled):not([aria-pressed='true']) { background: transparent; color: var(--su-ink); }
+:root[data-ui='sucher'] .su-studio :is(.st-seg, .st-segs) > button[aria-pressed='true'] {
+  background: linear-gradient(#FFFFFF, #ECE9E3);
+  color: var(--su-ink);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 2px 4px rgba(0, 0, 0, .18);
+}
+:root[data-ui='sucher'] .su-studio :is(.st-seg, .st-segs) > button:disabled { opacity: .5; }
+/* the simulator's „Sperrzone zeichnen" keeps its red, „Ziel setzen" its orange */
+:root[data-ui='sucher'] .su-studio .st-segs > button[data-tone='zone'] { color: #8F1B12; }
+:root[data-ui='sucher'] .su-studio .st-segs > button[data-tone='zone'][aria-pressed='true'] { background: linear-gradient(#E0453B, #B42318); color: #FFFFFF; box-shadow: 0 0 0 1px #8F1B12; }
+:root[data-ui='sucher'] .su-studio .st-segs > button[data-tone='ziel'] { color: var(--su-sig-text); }
+:root[data-ui='sucher'] .su-studio .st-segs > button[data-tone='ziel'][aria-pressed='true'] { background: linear-gradient(#FF7440, #FF5B1F); color: #232322; box-shadow: 0 0 0 1px #D9480F; }
+/* a label in front of a segmented row */
+:root[data-ui='sucher'] .su-studio :is(.st-tempo-label, .st-lab) {
+  font-family: 'Host Grotesk', system-ui, sans-serif;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--su-ink-3);
+}
+
+/* ── toolbar: a plate bar ──────────────────────────────────────────────── */
+
+:root[data-ui='sucher'] .su-studio .st-toolbar {
+  margin: 0 12px 4px;
+  padding: 8px 10px;
+  gap: 8px;
+  border: 0;
+  border-radius: 18px;
+  background: var(--su-plate);
+  box-shadow: var(--su-plate-shadow);
+}
+:root[data-ui='sucher'] .su-studio .st-toolbar > span[aria-hidden='true'] { background: var(--su-hair); }
+:root[data-ui='sucher'] .su-studio .st-toolbar :is(.st-tbtn, .relative > button[aria-expanded]) {
+  min-height: 36px;
+  padding-left: 12px;
+  padding-right: 12px;
+  border-radius: 11px;
+  font-size: 13.5px;
+}
+:root[data-ui='sucher'] .su-studio .st-toolbar .st-select {
+  min-height: 34px;
+  padding: 0 32px 0 10px;
+  border: 0;
+  font-size: 13.5px;
+}
+/* the save status: a light in its tone + the words */
+:root[data-ui='sucher'] .su-studio .st-savestatus { font-size: 12.5px; color: var(--su-ink-2); }
+:root[data-ui='sucher'] .su-studio .st-savestatus > svg { color: var(--su-led-off); }
+:root[data-ui='sucher'] .su-studio .st-savestatus[data-tone='ok'] > svg { color: var(--su-ok); filter: drop-shadow(0 0 4px rgba(61, 190, 90, .8)); }
+:root[data-ui='sucher'] .su-studio .st-savestatus[data-tone='warn'] > svg { color: var(--su-warn); filter: drop-shadow(0 0 4px rgba(245, 165, 36, .8)); }
+
+/* popovers (Öffnen, Neu, Verlauf, the Vormachen menu, „+ Neu"): plates */
+:root[data-ui='sucher'] .su-studio :is(.st-toolbar [role='dialog'], [role='menu']) {
+  border: 0;
+  border-radius: 16px;
+  background: var(--su-plate);
+  box-shadow: inset 0 1px 0 #FFFFFF, 0 0 0 1px var(--su-hair), 0 18px 36px -14px rgba(35, 35, 34, .45);
+}
+:root[data-ui='sucher'] .su-studio [role='menu'] { padding: 6px; }
+:root[data-ui='sucher'] .su-studio [role='menu'] [role='menuitem'] { border-radius: 10px; font-weight: 600; }
+:root[data-ui='sucher'] .su-studio [role='menu'] [role='menuitem']:is(:hover, :focus) { background: var(--su-well); }
+
+/* ── the editor: a plate; Blockly's chrome in the device's colours ───────── */
+
+:root[data-ui='sucher'] .su-studio .st-editorbox {
+  border: 0;
+  border-radius: 18px;
+  background: var(--su-plate);
+  box-shadow: var(--su-plate-shadow);
+}
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklySvg { background-color: var(--su-plate); }
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklySvg pattern line { stroke: #CFCAC0; }
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyToolbox {
+  background: var(--su-plate);
+  box-shadow: inset -1px 0 0 var(--su-hair);
+  padding: 6px 6px 6px 8px;
+}
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyToolboxCategoryContainer { margin: 1px 4px 1px 0; }
+/* a category: Host Grotesk 500 15 px; its colour a 4 × 18 px rounded stripe
+ * (the stripe takes the colour Blockly sets inline as the row's border) */
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyToolboxCategory {
+  position: relative;
+  border-left-width: 0 !important;
+  padding-left: 14px !important;
+  border-radius: 9px;
+  background-color: transparent !important;
+}
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyToolboxCategory::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  height: 18px;
+  margin-top: -9px;
+  border-left-style: solid;
+  border-left-width: 4px;
+  border-left-color: inherit;
+  border-radius: 2px;
+}
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyToolboxCategory:hover { background-color: #ECE9E3 !important; }
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyToolboxCategory.blocklyToolboxSelected {
+  background-color: #FFFFFF !important;
+  box-shadow: 0 0 0 1px #CFCAC0;
+}
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyToolboxCategoryLabel {
+  font-family: 'Host Grotesk', system-ui, sans-serif;
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--su-ink);
+}
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyToolboxSelected .blocklyToolboxCategoryLabel { color: var(--su-ink); }
+:root[data-ui='sucher'] .su-studio .st-editorbox .eduToolboxHeading { padding: 12px 10px 4px; }
+:root[data-ui='sucher'] .su-studio .st-editorbox .eduToolboxHeadingLabel {
+  font-family: 'Host Grotesk', system-ui, sans-serif;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--su-ink-3);
+}
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyFlyoutBackground { fill: #EFECE6; fill-opacity: 1; }
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyScrollbarHandle { fill: rgba(35, 35, 34, .22); }
+/* M14 „Programm läuft": the running block glows orange (static) */
+:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyHighlighted > .blocklyPath {
+  stroke: #FF5B1F;
+  stroke-width: 2.5px;
+  filter: drop-shadow(0 0 6px rgba(255, 91, 31, .7));
+}
+
+/* the Python preview strip under the editor */
+:root[data-ui='sucher'] .su-studio .st-codestrip > div {
+  border: 0;
+  border-radius: 14px;
+  background: var(--su-plate);
+  box-shadow: inset 0 1px 0 #FFFFFF, 0 0 0 1px var(--su-hair);
+}
+:root[data-ui='sucher'] .su-studio .st-codestrip > div > div:first-child { border-bottom-color: var(--su-hair); }
+:root[data-ui='sucher'] .su-studio .st-codestrip .st-tbtn { min-height: 30px; padding: 0 12px; border-radius: 10px; font-size: 12.5px; }
+:root[data-ui='sucher'] .su-studio .st-codestrip .st-tbtn[aria-pressed='true'] {
+  background: linear-gradient(#3A3A38, #262624);
+  color: #F3EDE2;
+  box-shadow: 0 0 0 1px #11110F, 0 3px 0 #0E0E0D;
+}
+
+/* ── code mode: the file list and the Methoden column ──────────────────── */
+
+:root[data-ui='sucher'] .su-studio [data-testid='code-workspace'] [data-pane='files'] {
+  background: #EFECE6;
+  border-right-color: var(--su-hair);
+}
+:root[data-ui='sucher'] .su-studio [data-testid='code-workspace'] [data-pane='files'] [role='option'] { border-radius: 8px; font-weight: 600; }
+:root[data-ui='sucher'] .su-studio [data-testid='code-workspace'] [data-pane='files'] [role='option'][aria-selected='true'] {
+  background: #FFFFFF;
+  color: var(--su-ink);
+  box-shadow: 0 0 0 1px #CFCAC0, inset 3px 0 0 var(--su-sig);
+}
+:root[data-ui='sucher'] .su-studio [data-testid='code-workspace'] [data-pane='methods'] {
+  background: var(--su-plate);
+  border-left-color: var(--su-hair);
+}
+:root[data-ui='sucher'] .su-studio [data-testid='code-methods-rail'] {
+  width: 38px;
+  background: linear-gradient(#FFFFFF, #EEEBE5);
+  border-left-color: var(--su-hair);
+  color: var(--su-ink-2);
+  box-shadow: inset 1px 0 0 #CFCAC0;
+}
+:root[data-ui='sucher'] .su-studio [data-testid='code-methods-rail']:hover { background: #FFFFFF; color: var(--su-sig-text); }
+:root[data-ui='sucher'] .su-studio [data-testid='code-methods-rail'] span { letter-spacing: .14em; }
+
+/* ── the dock: plates and a column of 64 px key tiles ──────────────────── */
+
+:root[data-ui='sucher'] .su-studio .st-dock { background: transparent; border-color: transparent; }
+:root[data-ui='sucher'] .su-studio .st-dock-rail {
+  gap: 6px;
+  padding: 8px 6px;
+  margin: 12px 12px 12px 0;
+  border: 0;
+  border-radius: 18px;
+  background: var(--su-plate);
+  box-shadow: var(--su-plate-shadow);
+}
+@media (min-width: 768px) {
+  :root[data-ui='sucher'] .su-studio .st-dock-rail { width: 76px; }
+  :root[data-ui='sucher'] .su-studio .st-dock--collapsed { width: 88px; }
+}
+:root[data-ui='sucher'] .su-studio .st-dockkey {
+  min-width: 64px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  gap: 4px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--su-ink-3);
+  font-family: 'Host Grotesk', system-ui, sans-serif;
+  font-weight: 700;
+  font-size: 9.5px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+:root[data-ui='sucher'] .su-studio .st-dockkey:hover { background: #ECE9E3; color: var(--su-ink); }
+:root[data-ui='sucher'] .su-studio .st-dockkey[aria-pressed='true'] {
+  background: #FFFFFF;
+  color: var(--su-ink);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 2px 0 #C9C4BA, inset 0 -2px 0 var(--su-sig);
+}
+:root[data-ui='sucher'] .su-studio .st-dockkey--fold { color: var(--su-ink-2); }
+:root[data-ui='sucher'] .su-studio .st-dockkey--fold[aria-pressed='true'] { box-shadow: 0 0 0 1px #CFCAC0; background: #FFFFFF; }
+:root[data-ui='sucher'] .su-studio .st-dockkey > svg { font-size: 18px; }
+:root[data-ui='sucher'] .su-studio .st-panel {
+  border: 0;
+  border-radius: 18px;
+  background: var(--su-plate);
+  box-shadow: var(--su-plate-shadow);
+}
+:root[data-ui='sucher'] .su-studio .st-panel-h {
+  padding: 8px 12px;
+  background: transparent;
+  border-bottom-color: var(--su-hair);
+}
+:root[data-ui='sucher'] .su-studio .st-panel-h > span { font-size: 13px; font-weight: 700; color: var(--su-ink); }
+/* the camera and the 3D view are watched: a screen with the full bezel */
+:root[data-ui='sucher'] .su-studio .st-panel:is([data-tab='camera'], [data-tab='3d']) {
+  margin: 8px;
+  border-radius: 18px;
+  background: var(--su-scr);
+  color: var(--su-scr-ink);
+  box-shadow: var(--su-bezel), inset 0 2px 12px rgba(0, 0, 0, .65);
+}
+:root[data-ui='sucher'] .su-studio .st-panel:is([data-tab='camera'], [data-tab='3d']) .st-panel-h { border-bottom-color: var(--su-scr-line); }
+:root[data-ui='sucher'] .su-studio .st-panel:is([data-tab='camera'], [data-tab='3d']) .st-panel-h > span { color: var(--su-scr-ink); }
+:root[data-ui='sucher'] .su-studio .st-panel:is([data-tab='camera'], [data-tab='3d']) .st-panel-h > button { color: var(--su-scr-ink-3); }
+:root[data-ui='sucher'] .su-studio .st-panel:is([data-tab='camera'], [data-tab='3d']) .st-panel-h > button:hover { background: var(--su-scr-3); color: var(--su-scr-ink); }
+
+/* ── the run bar: a plate ──────────────────────────────────────────────── */
+
+:root[data-ui='sucher'] .su-studio .st-runbar {
+  margin: 4px 12px 12px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 18px;
+  background: var(--su-plate);
+  box-shadow: var(--su-plate-shadow);
+}
+:root[data-ui='sucher'] .su-studio .st-runbar > div:first-child { margin-bottom: 0; gap: 10px; }
+:root[data-ui='sucher'] .su-studio .st-runbar > :not(:first-child) { margin-top: 10px; }
+/* the run status: a light in its tone + the words */
+:root[data-ui='sucher'] .su-studio .st-runstatus {
+  background: transparent;
+  padding-left: 4px;
+  padding-right: 4px;
+  font-family: 'Host Grotesk', system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--su-ink);
+}
+:root[data-ui='sucher'] .su-studio .st-runstatus > span[aria-hidden='true'] { width: 9px; height: 9px; background: var(--su-led-off); }
+:root[data-ui='sucher'] .su-studio .st-runstatus[data-tone='ok'] > span[aria-hidden='true'] { background: var(--su-ok); box-shadow: 0 0 0 3px rgba(61, 190, 90, .18), 0 0 10px rgba(61, 190, 90, .8); }
+:root[data-ui='sucher'] .su-studio .st-runstatus[data-tone='sig'] > span[aria-hidden='true'] { background: var(--su-sig); box-shadow: 0 0 0 3px rgba(255, 91, 31, .2), 0 0 10px rgba(255, 91, 31, .85); }
+:root[data-ui='sucher'] .su-studio .st-runstatus[data-tone='warn'] > span[aria-hidden='true'] { background: var(--su-warn); box-shadow: 0 0 0 3px rgba(245, 165, 36, .2), 0 0 10px rgba(245, 165, 36, .8); }
+:root[data-ui='sucher'] .su-studio .st-runstatus[data-tone='rec'] > span[aria-hidden='true'] { background: var(--su-rec); box-shadow: 0 0 0 3px rgba(255, 59, 48, .2), 0 0 12px rgba(255, 59, 48, .9); }
+:root[data-ui='sucher'] .su-studio .st-runstatus[data-tone='rec'] { color: var(--danger); }
+:root[data-ui='sucher'] .su-studio .st-tempo { gap: 8px; }
+
+/* ── the simulator stage ───────────────────────────────────────────────── */
+
+:root[data-ui='sucher'] .su-studio .st-sim {
+  border-color: var(--su-hair);
+  background: var(--su-plate);
+}
+:root[data-ui='sucher'] .su-studio .st-sim-h { background: transparent; border-bottom-color: transparent; padding-top: 10px; }
+:root[data-ui='sucher'] .su-studio .st-sim-title {
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-weight: 400;
+  font-size: 30px;
+  line-height: 1;
+  color: var(--su-ink);
+}
+:root[data-ui='sucher'] .su-studio .st-sim-h .st-key { min-height: 34px; padding: 0 12px; border-radius: 11px; font-size: 12.5px; }
+:root[data-ui='sucher'] .su-studio .st-sim-debug { border-top-color: var(--su-hair); background: var(--su-plate); }
+/* the 3D view: a screen; its chip a glass readout */
+:root[data-ui='sucher'] .su-studio .st-sim3d {
+  border: 0;
+  border-radius: 16px;
+  background: var(--su-scr);
+  box-shadow: var(--su-bezel-thin), inset 0 2px 12px rgba(0, 0, 0, .65);
+}
+/* the 2D table: a well plate */
+:root[data-ui='sucher'] .su-studio .st-table {
+  border: 0;
+  border-radius: 14px;
+  background: var(--su-well);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .22);
+}
+:root[data-ui='sucher'] .su-studio .st-table > svg { background-color: #E4E0D8; border-radius: 10px; }
+
+/* header keys: one height (the board's 40 px) */
+:root[data-ui='sucher'] .su-studio .st-header .st-key { min-height: 40px; padding: 0 14px; border-radius: 12px; font-size: 13.5px; }
+
+/* ── Vormachen: the card keeps its orange frame; its buttons are keys ──── */
+
+:root[data-ui='sucher'] .su-studio [data-testid='teach-card'] { border-radius: 22px; background: var(--su-plate); }
+:root[data-ui='sucher'] .su-studio [data-testid='teach-card'] > header { border-bottom-color: var(--su-hair); }
+:root[data-ui='sucher'] .su-studio [data-testid='teach-card'] h2 { font-weight: 700; }
+:root[data-ui='sucher'] .su-studio [data-testid='teach-card'] button:where([class*='border-[var(--line)]']) {
+  border-color: transparent;
+  background: linear-gradient(#FFFFFF, #EEEBE5);
+  color: var(--su-ink);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 3px 0 #C9C4BA, 0 8px 14px -10px rgba(0, 0, 0, .4);
+}
+:root[data-ui='sucher'] .su-studio [data-testid='teach-card'] button:where([class*='border-[var(--line)]']):hover:not(:disabled) {
+  box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #C9C4BA, 0 8px 14px -10px rgba(0, 0, 0, .4);
+}
+:root[data-ui='sucher'] .su-studio [data-testid='teach-card'] button:where([class*='bg-red-600']) {
+  box-shadow: 0 0 0 1px #8F1B12, 0 3px 0 #8F1B12;
+}
+:root[data-ui='sucher'] .su-studio [data-testid='teach-card'] button:where([class*='bg-[var(--accent)]']) {
+  box-shadow: 0 0 0 1px #D9480F, 0 3px 0 #C2410C, 0 10px 18px -10px rgba(255, 91, 31, .9);
+}
+:root[data-ui='sucher'] .su-studio [data-testid='teach-card'] button:disabled { box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2); }
+:root[data-ui='sucher'] .su-studio [data-testid='teach-card'] kbd { font-family: 'Host Grotesk', system-ui, sans-serif; font-weight: 700; border-radius: 6px; }
+
+/* ── focus: the key paint replaces Tailwind's box-shadow ring, so every keyed
+ * control draws the Sucher ring as an outline (beats `focus:outline-none`) ── */
+:root[data-ui='sucher'] .su-studio :where(.st-tbtn, .st-key, .st-teach > button, .st-toolbar .relative > button, .st-seg > button, .st-segs > button, .st-dockkey, [data-testid='teach-card'] button, [data-testid='code-methods-rail']):focus-visible {
+  outline: 2px solid var(--su-sig);
+  outline-offset: 3px;
+}

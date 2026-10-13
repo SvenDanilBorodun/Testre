@@ -16,8 +16,9 @@ import { THEME_KEYS, applyTheme } from './themes';
 import Icon from '../icons/Icon';
 import { saveStatusLabel } from './saveStatus';
 
+// `st-tbtn`: the Sucher key look (studio.css, scoped to the student build).
 const BUTTON_BASE =
-  'inline-flex items-center justify-center gap-1.5 min-h-[28px] min-w-[28px] '
+  'st-tbtn inline-flex items-center justify-center gap-1.5 min-h-[28px] min-w-[28px] '
   + 'px-3 py-1.5 rounded-md text-sm font-medium border border-[var(--line)] '
   + 'bg-white text-[var(--ink)] hover:bg-[var(--bg-sunk)] '
   + 'disabled:opacity-50 disabled:cursor-not-allowed '
@@ -25,7 +26,7 @@ const BUTTON_BASE =
   + 'focus-visible:ring-offset-1';
 
 const PRIMARY_BUTTON =
-  'inline-flex items-center justify-center gap-1.5 min-h-[28px] '
+  'st-tbtn st-tbtn--save inline-flex items-center justify-center gap-1.5 min-h-[28px] '
   + 'px-3 py-1.5 rounded-md text-sm font-medium '
   + 'bg-[var(--accent)] text-white hover:opacity-90 '
   + 'disabled:opacity-50 disabled:cursor-not-allowed '
@@ -222,12 +223,16 @@ function ToolbarButtons({
   }, []);
 
   const statusLabel = saveStatusLabel(saveStatus, Date.now());
+  // The light beside the save status (Sucher): saved ok, unsaved warn, loading
+  // or never saved off. Presentation only — the words are saveStatusLabel's.
+  const st = saveStatus || {};
+  const saveTone = st.loading ? 'off' : st.dirty ? 'warn' : st.savedAt ? 'ok' : 'off';
 
   return (
     <div
       role="toolbar"
       aria-label="Workshop Werkzeugleiste"
-      className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 bg-white border-b border-[var(--line)]"
+      className="st-toolbar flex flex-wrap items-center gap-1.5 px-3 py-1.5 bg-white border-b border-[var(--line)]"
     >
       {leading}
       {leading && (
@@ -271,6 +276,7 @@ function ToolbarButtons({
       <button
         type="button"
         className={PRIMARY_BUTTON}
+        data-unsaved={saveTone === 'warn' ? 'true' : undefined}
         onClick={onSave}
         disabled={saving || !onSave}
         title={`${DE.TOOLBAR_SAVE} (Strg+S)`}
@@ -334,7 +340,7 @@ function ToolbarButtons({
             <select
               value={theme}
               onChange={handleThemeChange}
-              className="text-sm border border-[var(--line)] rounded-md px-1 py-0.5 bg-white"
+              className="su-field st-select text-sm border border-[var(--line)] rounded-md px-1 py-0.5 bg-white"
               aria-label={DE.TOOLBAR_THEME}
             >
               <option value={THEME_KEYS.STANDARD}>{DE.THEME_STANDARD}</option>
@@ -346,7 +352,7 @@ function ToolbarButtons({
         </>
       )}
 
-      <span className="ml-auto text-xs text-[var(--ink-4)]" aria-live="polite" data-testid="save-status">
+      <span className="st-savestatus ml-auto text-xs text-[var(--ink-4)]" aria-live="polite" data-testid="save-status" data-tone={saveTone}>
         <Icon name="dot" size="0.6em" fill="currentColor" className="align-middle" />
         {' '}
         {statusLabel}

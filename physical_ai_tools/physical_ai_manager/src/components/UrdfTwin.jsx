@@ -115,6 +115,8 @@ import {
 } from './Workshop/simConstants';
 import { armGeometry } from '../utils/armProfile';
 import { MARKER_COLORS } from './Workshop/sammlung/markers';
+import { resolveChronoTrail, createChronoTrail, chronoTick } from './sucher/chronoTrail';
+import useReducedMotion from './sucher/useReducedMotion';
 
 // The joints applied to the model are profile-driven (armGeometry from the
 // capability manifest: the OMX's joint1..joint5 + gripper_joint_1 when there is
@@ -221,6 +223,9 @@ const LINK_COLOR = 0xbfc4cc;
 // Ghost arm: the Positionen teal (sammlung/markers.js MARKER_COLORS.pose).
 const GHOST_COLOR = 0x14b8a6;
 
+// Chronophotography trail (M6, „Sucher" §6.6): warm screen ink (#C9C1B5).
+const CHRONO_COLOR = 0xc9c1b5;
+
 // `{names, positions}` with equal-length arrays of non-empty strings and finite
 // numbers, else null — an invalid ghost draws nothing rather than a half pose.
 function validGhostJoints(g) {
@@ -238,13 +243,15 @@ function validGhostJoints(g) {
 // which rebuilds the clone's joints/links/mimic maps, so setJointValue drives the
 // clone alone. The clone SHARES every geometry with the live robot: whoever
 // removes it disposes ONLY the one material returned here, never a geometry.
-// Used by both ghost layers — the `ghostJoints` prop and the `poseSource` ghost
-// (Daten 2.0, spec §G5) — so the two can never build it differently.
-function buildGhostClone(robot, color) {
+// Used by every ghost layer — the `ghostJoints` prop, the `poseSource` ghost
+// (Daten 2.0, spec §G5) and the chronophotography trail (each of its clones
+// with a material of its own, starting at `opacity` 0) — so they can never
+// build it differently.
+function buildGhostClone(robot, color, opacity = 0.35) {
   if (!robot || typeof robot.clone !== 'function') return null;
   const ghost = robot.clone(true);
   const material = new THREE.MeshStandardMaterial({
-    color, transparent: true, opacity: 0.35, depthWrite: false,
+    color, transparent: true, opacity, depthWrite: false,
   });
   const strays = [];
   if (typeof ghost.traverse === 'function') {
@@ -273,6 +280,22 @@ function buildGhostClone(robot, color) {
 // positions finite numbers), else null — the poseSource's pose and ghost.
 function validPose(p) {
   return validGhostJoints(p);
+}
+
+// The robot's current joint values by name (urdf-loader URDFJoint.angle), only
+// the profile's joints, or null when it has none yet — whatever drove the model
+// (the live stream or a poseSource), which is what the chronophotography trail
+// follows.
+function readModelPose(robot, jointSet) {
+  const joints = robot && robot.joints;
+  if (!joints || !jointSet) return null;
+  const pose = new Map();
+  jointSet.forEach((name) => {
+    const j = joints[name];
+    const value = j ? j.angle : undefined;
+    if (typeof value === 'number' && Number.isFinite(value)) pose.set(name, value);
+  });
+  return pose.size ? pose : null;
 }
 
 // ── Sim-object render constants ──────────────────────────────────────────────
@@ -385,6 +408,13 @@ export default function UrdfTwin({
   // applies `pose` (and the translucent `ghost`, in `color`, default the teal
   // GHOST_COLOR) whenever `version` changed. null (the default) changes nothing.
   poseSource = null,
+  // „Sucher" (M6, D15): the chronophotography trail — up to `count` fading
+  // clones of the arm left behind while it moves (one per `stepMs`, each fading
+  // over `fadeMs`). `true` = { count: 8, stepMs: 120, fadeMs: 1200 }; an object
+  // overrides. Built once the robot is fully loaded, driven by the existing
+  // render loop (no React state), off under reduced motion. false (the default)
+  // constructs nothing.
+  chronoTrail = false,
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
   // Read by the release handler, which must land a mesh on the SERVER's released
@@ -463,6 +493,13 @@ export default function UrdfTwin({
   const sourceGhostMaterialRef = useRef(null);
   const sourceGhostColorRef = useRef(null);
   const sourceSeenRef = useRef(false);
+  // The chronophotography trail: `{ robot, trail, ghosts: [{ghost, material}] }`
+  // or null. Its clones share the live robot's geometries like every ghost.
+  const chronoRef = useRef(null);
+  const chronoKey = JSON.stringify(resolveChronoTrail(chronoTrail));
+  const reducedMotion = useReducedMotion();
+  const reducedMotionRef = useRef(reducedMotion);
+  reducedMotionRef.current = reducedMotion;
   // Latest onEndEffector callback, read by the (stable) subscription closure.
   const onEndEffectorRef = useRef(onEndEffector);
   useEffect(() => {
@@ -583,6 +620,43 @@ export default function UrdfTwin({
     sourceGhostRef.current = null;
     sourceGhostMaterialRef.current = null;
     sourceGhostColorRef.current = null;
+  }, []);
+
+  // Remove the chronophotography trail (each clone detached first, then only
+  // its own material freed — the geometries are the live robot's).
+  const dropChrono = useCallback((scene) => {
+    const chrono = chronoRef.current;
+    if (!chrono) return;
+    chrono.ghosts.forEach(({ ghost, material }) => {
+      if (scene) scene.remove(ghost);
+      material.dispose();
+    });
+    chronoRef.current = null;
+  }, []);
+
+  // Advance the trail to `nowMs` (render loop, every frame while it exists):
+  // a new snapshot poses the oldest clone, every clone takes its fading
+  // opacity. Returns whether the frame must be painted. Reads refs only.
+  const stepChrono = useCallback((nowMs) => {
+    const chrono = chronoRef.current;
+    const robot = robotRef.current;
+    if (!chrono || !robot || chrono.robot !== robot) return false;
+    const { snap, opacities, needsRender } = chronoTick(
+      chrono.trail,
+      nowMs,
+      () => readModelPose(robot, jointSetRef.current),
+      { reduced: reducedMotionRef.current },
+    );
+    if (snap >= 0 && chrono.ghosts[snap]) {
+      const { ghost } = chrono.ghosts[snap];
+      chrono.trail.slots[snap].pose.forEach((value, name) => ghost.setJointValue(name, value));
+    }
+    chrono.ghosts.forEach(({ ghost, material }, i) => {
+      const op = opacities[i] || 0;
+      material.opacity = op;
+      ghost.visible = op > 0;
+    });
+    return needsRender;
   }, []);
 
   // The source went away: its ghost goes with it, and a later source starts
@@ -951,8 +1025,10 @@ export default function UrdfTwin({
       // Move the arm to THIS frame's interpolated pose. While the stream carries
       // motion this dirties every frame (60 fps motion from ~30 Hz data); at rest
       // it returns false and the loop idles as before.
-      if (stepPose(performance.now())) needsRender = true;
+      const nowMs = performance.now();
+      if (stepPose(nowMs)) needsRender = true;
       if (poseSourceRef.current && stepSource()) needsRender = true;
+      if (chronoRef.current && stepChrono(nowMs)) needsRender = true;
       if (needsRender || controlsUpdated) {
         renderer.render(scene, camera);
         needsRender = false;
@@ -985,6 +1061,7 @@ export default function UrdfTwin({
       ghostRef.current = null;
       ghostMaterialRef.current = null;
       dropSourceGhost(scene);
+      dropChrono(scene);
       sourceAppliedRef.current = { robot: null, version: undefined };
       robotReadyRef.current = null;
       // Dispose every geometry/material reachable from the scene (three leaks
@@ -1021,9 +1098,9 @@ export default function UrdfTwin({
     // asset: a profile change (the capability manifest naming a different
     // urdf_asset_id) rebuilds the whole viewer with the right URDF — rare
     // (caps normally settle before the twin first opens) and the cleanup
-    // above already disposes everything. stepPose, stepSource and
-    // dropSourceGhost are stable (refs only).
-  }, [asset, stepPose, stepSource, dropSourceGhost]);
+    // above already disposes everything. stepPose, stepSource, stepChrono,
+    // dropSourceGhost and dropChrono are stable (refs only).
+  }, [asset, stepPose, stepSource, dropSourceGhost, stepChrono, dropChrono]);
 
   // ---- viewPreset (Aufnahme 2.0) --------------------------------------------
   // Declared AFTER the mount effect so the camera exists on the first run. A
@@ -1336,6 +1413,37 @@ export default function UrdfTwin({
     });
     requestRenderRef.current();
   }, [ghostJoints, robotReadyTick]);
+
+  // ---- Chronophotography trail („Sucher" M6) ---------------------------------
+  // `count` clones of the LOADED robot (built at the finish-load tick, never at
+  // URDF parse), each with its own material at opacity 0 and drawn before the
+  // live arm. The render loop poses and fades them (stepChrono). A changed
+  // config or a new robot rebuilds them; the default chronoTrail=false builds
+  // nothing.
+  useEffect(() => {
+    const cfg = chronoKey === 'null' ? null : JSON.parse(chronoKey);
+    if (chronoRef.current) {
+      dropChrono(sceneRef.current);
+      requestRenderRef.current();
+    }
+    const scene = sceneRef.current;
+    const robot = robotRef.current;
+    if (!cfg || !scene || !robot || robotReadyRef.current !== robot) return undefined;
+    const ghosts = [];
+    for (let i = 0; i < cfg.count; i += 1) {
+      const built = buildGhostClone(robot, CHRONO_COLOR, 0);
+      if (!built) break;
+      if (typeof built.ghost.traverse === 'function') {
+        built.ghost.traverse((obj) => { if (obj && obj.isMesh) obj.renderOrder = -1; });
+      }
+      built.ghost.visible = false;
+      scene.add(built.ghost);
+      ghosts.push(built);
+    }
+    if (ghosts.length === 0) return undefined;
+    chronoRef.current = { robot, trail: createChronoTrail({ ...cfg, count: ghosts.length }), ghosts };
+    return () => dropChrono(sceneRef.current);
+  }, [chronoKey, robotReadyTick, dropChrono]);
 
   // ---- Phase-5: end-effector path trail ("Bahn anzeigen") -------------------
   // Lazily builds a cyan THREE.Line over a PREALLOCATED Float32Array the first

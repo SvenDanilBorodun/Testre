@@ -2100,3 +2100,95 @@ describe('UrdfTwin — poseSource (Daten 2.0)', () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// chronoTrail („Sucher" M6, spec §6.6): `count` fading clones of the LOADED
+// robot, each with a material of its own over the shared geometry, built at the
+// finish-load tick, posed and faded by the existing render loop, and freed
+// (material only) on unmount. The default chronoTrail=false builds nothing — the
+// ghost-arm describe above already pins that `clone` is never called then.
+// The pure snapshot/fade rules are in sucher/__tests__/chronoTrail.test.js.
+// ---------------------------------------------------------------------------
+describe('UrdfTwin — chronoTrail', () => {
+  const trailMaterials = () => mockStandardMaterials.filter((m) => m.opts && m.opts.color === 0xc9c1b5);
+
+  async function mountLoaded(ui) {
+    const utils = render(ui);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    return utils;
+  }
+
+  test('true builds 8 hidden clones after the meshes land, each with its own invisible material', async () => {
+    render(<UrdfTwin chronoTrail />);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    expect(mockRobot.clone).not.toHaveBeenCalled();
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    await waitFor(() => expect(mockRobot.clone).toHaveBeenCalledTimes(8));
+    const mats = trailMaterials();
+    expect(mats).toHaveLength(8);
+    expect(new Set(mats).size).toBe(8);
+    mats.forEach((m) => expect(m.opts).toEqual({ color: 0xc9c1b5, transparent: true, opacity: 0, depthWrite: false }));
+    mockGhosts.forEach((g, i) => {
+      expect(mockSceneOps).toContainEqual(['add', g]);
+      expect(g.visible).toBe(false);
+      g.meshes.forEach((m) => {
+        expect(m.material).toBe(mats[i]);
+        expect(m.renderOrder).toBe(-1);
+      });
+    });
+  });
+
+  test('an object overrides the count; a re-render with an equal object rebuilds nothing', async () => {
+    const { rerender } = await mountLoaded(<UrdfTwin chronoTrail={{ count: 3 }} />);
+    expect(mockRobot.clone).toHaveBeenCalledTimes(3);
+    rerender(<UrdfTwin chronoTrail={{ count: 3 }} />);
+    expect(mockRobot.clone).toHaveBeenCalledTimes(3);
+  });
+
+  test('a moving arm poses the oldest clone and makes it visible; the loop then fades it', async () => {
+    await mountLoaded(<UrdfTwin chronoTrail={{ count: 2, stepMs: 1, fadeMs: 100000 }} />);
+    const angles = { joint1: 0, joint2: 0 };
+    mockRobot.joints = {
+      joint1: { get angle() { return angles.joint1; } },
+      joint2: { get angle() { return angles.joint2; } },
+    };
+    await settleFrames(); // the first look only records the pose
+    expect(mockGhosts[0].setJointValue).not.toHaveBeenCalled();
+    angles.joint1 = 0.5;
+    await settleFrames(3);
+    expect(mockGhosts[0].setJointValue).toHaveBeenCalledWith('joint1', 0.5);
+    expect(mockGhosts[0].setJointValue).toHaveBeenCalledWith('joint2', 0);
+    expect(mockGhosts[0].visible).toBe(true);
+    const [mat0] = trailMaterials();
+    expect(mat0.opacity).toBeGreaterThan(0);
+    expect(mat0.opacity).toBeLessThanOrEqual(0.35);
+    expect(mockRobot.applied).toEqual([]); // the live arm is never written by the trail
+  });
+
+  test('false → the clones leave the scene, only their materials are freed', async () => {
+    const { rerender } = await mountLoaded(<UrdfTwin chronoTrail={{ count: 2 }} />);
+    const ghosts = [...mockGhosts];
+    const mats = trailMaterials();
+    rerender(<UrdfTwin chronoTrail={false} />);
+    ghosts.forEach((g) => expect(mockSceneOps).toContainEqual(['remove', g]));
+    mats.forEach((m) => expect(m.dispose).toHaveBeenCalledTimes(1));
+    ghosts.forEach((g) => g.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled()));
+  });
+
+  test('unmount detaches every clone BEFORE the dispose traverse and frees only their materials', async () => {
+    const { unmount } = await mountLoaded(<UrdfTwin chronoTrail={{ count: 2 }} />);
+    const ghosts = [...mockGhosts];
+    const mats = trailMaterials();
+    unmount();
+    const traversedAt = mockSceneOps.map((op) => op[0]).lastIndexOf('traverse');
+    expect(traversedAt).toBeGreaterThan(-1);
+    ghosts.forEach((g) => {
+      const removedAt = mockSceneOps.findIndex((op) => op[0] === 'remove' && op[1] === g);
+      expect(removedAt).toBeGreaterThan(-1);
+      expect(removedAt).toBeLessThan(traversedAt);
+      g.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled());
+    });
+    mats.forEach((m) => expect(m.dispose).toHaveBeenCalledTimes(1));
+  });
+});

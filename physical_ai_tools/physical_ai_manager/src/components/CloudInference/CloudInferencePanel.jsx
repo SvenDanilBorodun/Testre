@@ -15,11 +15,11 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
-import clsx from 'clsx';
 
 import TaskPhase from '../../constants/taskPhases';
 import LeaderToggle from '../Workshop/LeaderToggle';
 import Icon from '../icons/Icon';
+import { Key } from '../sucher';
 import useRsBridgeStatus from '../../hooks/useRsBridgeStatus';
 import useSupabaseTrainings from '../../hooks/useSupabaseTrainings';
 import useCloudInferenceSession from '../../hooks/useCloudInferenceSession';
@@ -30,6 +30,8 @@ import CloudRunFacts from './CloudRunFacts';
 import CloudWait from './CloudWait';
 import { cloudCopy, fill } from './cloudCopy';
 
+// The Cloud-Zeit light bar's segments (Sucher).
+const METER_SEGMENTS = 8;
 const START_PHASES = new Set(['idle', 'reserved', 'ended']);
 const BUSY_PHASES = new Set(['arming', 'starting', 'running', 'stopping']);
 const INFERENCE_PHASES = new Set([TaskPhase.INFERENCE_LOADING, TaskPhase.INFERENCING]);
@@ -67,6 +69,8 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
   const accessToken = useSelector((s) => s.auth.session?.access_token);
   const taskRunning = useSelector((s) => s.tasks.taskStatus.running);
   const robotPhase = useSelector((s) => s.tasks.taskStatus.phase);
+  // The robot sprite on the waiting card (presentation only).
+  const robotProfile = useSelector((s) => s.tasks.taskStatus.robotProfile || s.tasks.taskStatus.robotType);
   const taskInfo = useSelector((s) => s.tasks.taskInfo);
   const imageTopicList = useSelector((s) => s.ros.imageTopicList);
   const { jobs, loading } = useSupabaseTrainings();
@@ -156,28 +160,39 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
 
   const remainingMin = minutes(usage?.remaining_today_s);
   const sessionMin = minutes(usage?.session_cap_s);
+  // The Cloud-Zeit light bar (Sucher): drawn only from numbers the panel
+  // already has (today's remaining seconds and the daily cap), else nothing.
+  const usedSegments = (typeof usage?.remaining_today_s === 'number'
+    && typeof usage?.daily_cap_s === 'number' && usage.daily_cap_s > 0)
+    ? Math.max(0, Math.min(METER_SEGMENTS, Math.round(
+      ((usage.daily_cap_s - usage.remaining_today_s) / usage.daily_cap_s) * METER_SEGMENTS)))
+    : null;
+  // „Modell in der Cloud ausführen" with „Cloud" in italics, split at render.
+  const titleParts = cloudCopy.panel.title.split('Cloud');
 
   return (
-    <div className="h-full overflow-y-auto rounded-[var(--radius-lg)] bg-white text-[var(--ink)] p-4 flex flex-col gap-4">
+    <div className="su-cip h-full overflow-y-auto text-[var(--ink)] p-5 flex flex-col gap-4">
       <div>
-        <h2 className="text-base font-semibold flex items-center gap-2">
-          <Icon name="cloud" size={18} className="text-[color:var(--accent)]" />
-          {cloudCopy.panel.title}
+        <h2 className="su-cip__title">
+          <Icon name="cloud" size={22} className="su-cip__titleicon" />
+          <span className="su-serif">{titleParts.length === 2
+            ? <>{titleParts[0]}<em>Cloud</em>{titleParts[1]}</>
+            : cloudCopy.panel.title}</span>
         </h2>
-        <p className="mt-1 text-sm text-[var(--ink-2)]">{cloudCopy.panel.intro}</p>
+        <p className="mt-2 text-[14.5px] text-[var(--ink-2)]">{cloudCopy.panel.intro}</p>
       </div>
 
       <div className="flex flex-col gap-2">
-        <LeaderToggle isActive={isActive} />
+        <div className="su-cip__leader su-plate su-plate--well"><LeaderToggle isActive={isActive} /></div>
         {leaderOn && (
-          <div role="status" className="flex items-start gap-2 text-sm text-amber-700">
+          <div role="status" className="flex items-start gap-2 text-sm text-[color:var(--amber)]">
             <Icon name="warning" size={16} className="mt-0.5" />
             <span>{cloudCopy.leader.hint}</span>
           </div>
         )}
       </div>
 
-      <p className="text-xs text-[var(--ink-3)]">{cloudCopy.panel.privacy}</p>
+      <p className="text-[13px] leading-snug text-[var(--ink-2)]">{cloudCopy.panel.privacy}</p>
 
       <CloudModelList
         jobs={jobs}
@@ -194,6 +209,7 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
           startedAt={session.reserveStartedAt}
           attempt={session.reserveAttempt}
           attempts={controller.RESERVE_ATTEMPTS}
+          robotProfile={robotProfile}
         />
       )}
 
@@ -217,49 +233,45 @@ export default function CloudInferencePanel({ isActive = true, cloud, cloudState
         <div role="status" className="text-sm text-[var(--ink-2)]" data-testid="cloud-message">{session.message}</div>
       )}
 
-      <div className="text-xs text-[var(--ink-3)]" data-testid="cloud-usage">
+      <div className="text-[13.5px] text-[var(--ink)]" data-testid="cloud-usage">
         {remainingMin !== null && sessionMin !== null
           ? fill(cloudCopy.usage.line, { min: remainingMin, session: sessionMin })
           : cloudCopy.usage.unknown}
       </div>
+      {usedSegments !== null && (
+        <div className="su-cip__meter" aria-hidden="true">
+          {Array.from({ length: METER_SEGMENTS }, (_, i) => (
+            <span key={i} className={i < usedSegments ? 'su-cip__seg su-cip__seg--used' : 'su-cip__seg'} />
+          ))}
+        </div>
+      )}
 
       <div className="flex flex-col gap-1.5">
         {session.phase === 'running' || session.phase === 'stopping' ? (
-          <button
-            type="button"
+          <Key
+            variant="danger"
+            size="lg"
             onClick={onStop}
             disabled={session.phase === 'stopping'}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-[var(--radius-sm)] font-semibold text-sm bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
+            className="w-full"
           >
             <Icon name={session.phase === 'stopping' ? 'loading' : 'stop'} size={16}
               className={session.phase === 'stopping' ? 'animate-spin' : ''} />
             {session.phase === 'stopping' ? cloudCopy.panel.stopping : cloudCopy.panel.stop}
-          </button>
+          </Key>
         ) : orphanRun ? (
-          <button
-            type="button"
-            onClick={onStopOrphan}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-[var(--radius-sm)] font-semibold text-sm bg-red-600 text-white hover:bg-red-700"
-          >
+          <Key variant="danger" size="lg" onClick={onStopOrphan} className="w-full">
             <Icon name="stop" size={16} />
             {cloudCopy.panel.stop}
-          </button>
+          </Key>
         ) : (
-          <button
-            type="button"
-            onClick={onStart}
-            disabled={startDisabled}
-            className={clsx(
-              'inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-[var(--radius-sm)] font-semibold text-sm transition',
-              'bg-[color:var(--accent)] text-white hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed',
-            )}
-          >
+          <Key variant="signal" size="lg" onClick={onStart} disabled={startDisabled} className="w-full">
             <Icon name={session.phase === 'arming' || session.phase === 'starting' ? 'loading' : 'play'} size={16}
               className={session.phase === 'arming' || session.phase === 'starting' ? 'animate-spin' : ''} />
             {session.phase === 'arming' || session.phase === 'starting' ? cloudCopy.panel.starting : cloudCopy.panel.start}
-          </button>
+          </Key>
         )}
-        {hint && <div className="text-xs text-[var(--ink-3)]" data-testid="cloud-start-hint">{hint}</div>}
+        {hint && <div className="text-[13px] text-[var(--ink-2)]" data-testid="cloud-start-hint">{hint}</div>}
       </div>
 
       <CloudRunFacts state={cloudState} robotPhase={robotPhase} />

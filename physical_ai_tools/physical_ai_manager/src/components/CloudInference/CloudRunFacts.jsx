@@ -14,6 +14,7 @@ import React from 'react';
 
 import TaskPhase from '../../constants/taskPhases';
 import Icon from '../icons/Icon';
+import { Led } from '../sucher';
 import { cloudCopy, fill } from './cloudCopy';
 
 export function formatMmSs(seconds) {
@@ -55,24 +56,25 @@ export default function CloudRunFacts({ state, robotPhase }) {
   return (
     <section aria-label={cloudCopy.status.running} className="flex flex-col gap-1.5 text-sm" data-testid="cloud-run-facts">
       {running && (
-        <div className="flex items-center gap-2 font-medium text-[var(--ink)]">
+        <div className="flex items-center gap-2 font-semibold text-[var(--ink)]">
+          <Led tone="sig" pulse="breathe" />
           <Icon name="cloud" size={16} className="text-[color:var(--accent)]" />
           {cloudCopy.status.running}
         </div>
       )}
       {facts.length > 0 && (
-        <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs font-mono text-[var(--ink-2)]">
+        <ul className="flex flex-wrap gap-x-3 gap-y-1 text-[13px] text-[var(--ink-2)]">
           {facts.map(([key, text]) => <li key={key}>{text}</li>)}
         </ul>
       )}
       {holding && (
-        <div role="status" className="flex items-center gap-2 text-amber-700">
+        <div role="status" className="flex items-center gap-2 text-[color:var(--amber)]">
           <Icon name="warning" size={14} />
           {fill(cloudCopy.status.holding, { s: holdS ?? '–' })}
         </div>
       )}
       {staleCamera && (
-        <div className="flex items-center gap-2 text-amber-700">
+        <div className="flex items-center gap-2 text-[color:var(--amber)]">
           <Icon name="warning" size={14} />
           {fill(cloudCopy.status.staleCamera, { name: staleCamera })}
         </div>

@@ -83,21 +83,9 @@ const InferencePanel = () => {
     [handleChange]
   );
 
-  const classLabel = clsx('text-xs', 'text-gray-600', 'w-[120px]', 'flex-shrink-0', 'font-medium', 'leading-snug', 'break-words');
+  const classLabel = clsx('text-[13px]', 'text-[var(--ink-2)]', 'w-[120px]', 'flex-shrink-0', 'font-medium', 'leading-snug', 'break-words');
 
-  const classInfoPanel = clsx(
-    'bg-white',
-    'border',
-    'border-[var(--line)]',
-    'rounded-[var(--radius-lg)]',
-    'shadow-soft',
-    'p-4',
-    'w-full',
-    'relative',
-    'overflow-y-auto',
-    'scrollbar-thin',
-    'max-h-[calc(100vh-220px)]'
-  );
+  const classInfoPanel = clsx('p-5', 'w-full', 'relative', 'overflow-y-auto', 'scrollbar-thin', 'h-full');
 
   const classTaskInstructionTextarea = clsx(
     'text-sm',
@@ -106,17 +94,8 @@ const InferencePanel = () => {
     'max-h-20',
     'w-full',
     'p-2',
-    'border',
-    'border-gray-300',
-    'rounded-md',
-    'focus:outline-none',
-    'focus:ring-2',
-    'focus:ring-teal-500',
-    'focus:border-transparent',
-    {
-      'bg-gray-100 cursor-not-allowed': !isEditable,
-      'bg-white': isEditable,
-    }
+    'su-field',
+    { 'cursor-not-allowed': !isEditable }
   );
 
   const classPolicyPathTextarea = clsx(
@@ -126,17 +105,8 @@ const InferencePanel = () => {
     'max-h-24',
     'w-full',
     'p-2',
-    'border',
-    'border-gray-300',
-    'rounded-md',
-    'focus:outline-none',
-    'focus:ring-2',
-    'focus:ring-teal-500',
-    'focus:border-transparent',
-    {
-      'bg-gray-100 cursor-not-allowed': !isEditable,
-      'bg-white': isEditable,
-    }
+    'su-field',
+    { 'cursor-not-allowed': !isEditable }
   );
 
   const classTextInput = clsx(
@@ -144,22 +114,13 @@ const InferencePanel = () => {
     'w-full',
     'h-8',
     'p-2',
-    'border',
-    'border-gray-300',
-    'rounded-md',
-    'focus:outline-none',
-    'focus:ring-2',
-    'focus:ring-teal-500',
-    'focus:border-transparent',
-    {
-      'bg-gray-100 cursor-not-allowed': !isEditable,
-      'bg-white': isEditable,
-    }
+    'su-field',
+    { 'cursor-not-allowed': !isEditable }
   );
 
   return (
     <div className={classInfoPanel}>
-      <div className={clsx('text-lg', 'font-semibold', 'mb-3', 'text-gray-800')}>
+      <div className="su-serif text-[30px] leading-none mb-4 text-[var(--ink)]">
         Aufgabeninformationen
       </div>
 
@@ -333,7 +294,7 @@ const InferencePanel = () => {
         </div>
       </div>
 
-      <div className="w-full h-1 my-2 border-t border-gray-300"></div>
+      <div className="w-full h-1 my-2 border-t border-[var(--su-hair)]"></div>
 
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
         <span className={classLabel}>FPS</span>

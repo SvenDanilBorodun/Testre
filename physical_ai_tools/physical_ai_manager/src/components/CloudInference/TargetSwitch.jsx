@@ -13,9 +13,9 @@
 // is locked while a cloud run is live.
 
 import React from 'react';
-import clsx from 'clsx';
 
 import Icon from '../icons/Icon';
+import { releasePointerFocus } from '../sucher/pointerFocus';
 import { cloudCopy } from './cloudCopy';
 
 function Option({ active, disabled, icon, label, onClick, title }) {
@@ -25,16 +25,12 @@ function Option({ active, disabled, icon, label, onClick, title }) {
       aria-pressed={active}
       disabled={disabled}
       title={title}
-      onClick={onClick}
-      className={clsx(
-        'inline-flex items-center gap-2 px-3 py-1.5 rounded-[var(--radius-sm)] text-sm font-medium transition',
-        active
-          ? 'bg-[color:var(--accent)] text-white shadow-pop'
-          : 'bg-white text-[var(--ink-2)] border border-[var(--line)] hover:bg-[var(--bg-sunk)]',
-        disabled && 'opacity-50 cursor-not-allowed hover:bg-white',
-      )}
+      onClick={(e) => {
+        releasePointerFocus(e);
+        onClick();
+      }}
     >
-      <Icon name={icon} size={16} />
+      <Icon name={icon} size={15} />
       <span>{label}</span>
     </button>
   );
@@ -52,12 +48,13 @@ export default function TargetSwitch({ cloud, target, onChoose, lockedReason = n
   const reason = cloud.enabled ? null : cloudCopy.disabled[cloud.reason] || null;
   const locked = Boolean(lockedReason);
   return (
-    <div
-      className="shrink-0 flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2 border-b border-[var(--line)]"
-      style={{ background: 'var(--bg)' }}
-    >
-      <span id="inference-target-label" className="text-sm text-[var(--ink-2)]">{cloudCopy.target.label}</span>
-      <div role="group" aria-labelledby="inference-target-label" className="flex items-center gap-2">
+    <div className="su-target shrink-0 flex flex-wrap items-center gap-x-4 gap-y-2">
+      <span id="inference-target-label" className="su-serif su-target__q">{cloudCopy.target.label}</span>
+      <div
+        role="group"
+        aria-labelledby="inference-target-label"
+        className="su-seg su-seg--light su-seg--accent su-seg--md su-target__seg"
+      >
         <Option
           active={target === 'cloud'}
           disabled={locked || !cloud.enabled}
@@ -76,8 +73,9 @@ export default function TargetSwitch({ cloud, target, onChoose, lockedReason = n
         />
       </div>
       {reason && (
-        <span className="text-xs text-[var(--ink-3)]" data-testid="cloud-disabled-reason">{reason}</span>
+        <span className="text-[13px] text-[var(--ink-2)]" data-testid="cloud-disabled-reason">{reason}</span>
       )}
+      <span className="su-lab ml-auto"><span aria-hidden="true">04 · </span>Inferenz</span>
     </div>
   );
 }

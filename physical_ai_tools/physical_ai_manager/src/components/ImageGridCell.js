@@ -37,6 +37,9 @@ const JETSON_VIEW_THROTTLE_MS = 100;
 
 const classImageGridCell = (topic) =>
   clsx(
+    // Sucher: a black tile, radius 6, a dashed add tile (inference.css)
+    'su-cell',
+    { 'su-cell--empty': !topic },
     'relative',
     'bg-gray-100',
     'rounded-3xl',
@@ -73,7 +76,7 @@ const classImageGridCellButton = clsx(
 // and fallback text, so a BARE cell is only a dark box the image fills.
 const CLASS_BARE_CELL = 'relative w-full h-full overflow-hidden bg-[#111618]';
 const CLASS_BARE_IMG = 'absolute inset-0 w-full h-full object-cover';
-const CLASS_IMG = 'w-full h-full object-cover rounded-3xl bg-gray-100';
+const CLASS_IMG = 'su-cell__img w-full h-full object-cover rounded-3xl bg-gray-100';
 
 export default function ImageGridCell({
   topic,
@@ -250,7 +253,7 @@ export default function ImageGridCell({
       style={{ cursor: !topic ? 'pointer' : 'default', aspectRatio: aspect, ...style }}
     >
       {topic && topic.trim() !== '' && (
-        <button className={classImageGridCellButton} onClick={handleClose} aria-label="Kamera entfernen" title="Kamera entfernen">
+        <button type="button" className={classImageGridCellButton} onClick={handleClose} aria-label="Kamera entfernen" title="Kamera entfernen">
           <Icon name="close" size={20} />
         </button>
       )}

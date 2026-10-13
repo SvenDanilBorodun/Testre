@@ -1,180 +1,189 @@
-/* The cloud target's waiting card (CloudWait.jsx). Every class is `ciw-`.
- * Two tones: light (the white panel, a soft teal wash) and dark (over the
- * camera stage). The picture moves slowly and never claims progress: the dots
- * fade in turn from the robot to the cloud, the cloud breathes. Under reduced
- * motion both stand still (the .ciw-reduced class from matchMedia, and the
- * media query below for the same). */
-
+/* The cloud target's waiting card (CloudWait.jsx), „Sucher" look (spec §10,
+ * M12). Every class is `ciw-`. Two tones: light (a well plate in the panel)
+ * and dark (over the camera screen). The picture moves slowly and never
+ * claims progress: three pulses run from the robot to the cloud, the cloud's
+ * halo breathes, the robot sprite plays. Under reduced motion all of it stands
+ * still (the .ciw-reduced class from matchMedia, and the media query below for
+ * the same; the sprite reads useReducedMotion itself). */
 .ciw {
-  --ciw-bg: var(--accent-wash);
-  --ciw-line: #BFE0DD;
+  --ciw-bg: var(--su-well, #DEDAD2);
+  --ciw-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.22);
   --ciw-ink: var(--ink);
   --ciw-ink-2: var(--ink-2);
-  --ciw-accent: var(--accent);
-  --ciw-retry: var(--accent-ink);
+  --ciw-accent: #FF5B1F;
   --ciw-node-bg: #FFFFFF;
-  --ciw-node-line: #BFE0DD;
+  --ciw-node-shadow: 0 0 0 1px #CFCAC0, 0 3px 0 #C9C4BA;
   --ciw-node-ink: var(--ink-2);
-  --ciw-halo: rgba(10, 127, 122, 0.30);
+  --ciw-lane: #C9C4BA;
+  --ciw-halo: rgba(255, 91, 31, 0.55);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 18px 16px 14px;
-  border-radius: var(--radius);
-  border: 1px solid var(--ciw-line);
+  gap: 14px;
+  padding: 22px 18px 18px;
+  border-radius: 18px;
   background: var(--ciw-bg);
+  box-shadow: var(--ciw-shadow);
   color: var(--ciw-ink);
   text-align: center;
 }
-
 .ciw.ciw-dark {
-  --ciw-bg: rgba(22, 27, 29, 0.92);
-  --ciw-line: var(--dark-line);
+  --ciw-bg: rgba(20, 18, 16, 0.94);
+  --ciw-shadow: inset 0 0 0 1px #34302B, 0 12px 40px rgba(0, 0, 0, 0.45);
   --ciw-ink: var(--dark-ink);
   --ciw-ink-2: var(--dark-ink-2);
-  --ciw-accent: #5CC8C1;
-  --ciw-retry: #8FDAD4;
-  --ciw-node-bg: rgba(255, 255, 255, 0.06);
-  --ciw-node-line: rgba(255, 255, 255, 0.14);
-  --ciw-node-ink: var(--dark-ink-2);
-  --ciw-halo: rgba(92, 200, 193, 0.38);
-  width: min(420px, 100%);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  --ciw-accent: #FF7A3D;
+  --ciw-node-bg: #F2EDE4;
+  --ciw-node-shadow: 0 0 0 1px #48433C;
+  --ciw-node-ink: #232322;
+  --ciw-lane: #48433C;
+  --ciw-halo: rgba(255, 122, 61, 0.55);
+  width: min(440px, 100%);
 }
-
 /* ---------- the picture: robot · · · cloud ---------- */
 .ciw-picture {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   padding-top: 2px;
 }
-
 .ciw-node {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 38px;
-  height: 38px;
+  width: 56px;
+  height: 56px;
   border-radius: 50%;
-  border: 1px solid var(--ciw-node-line);
   background: var(--ciw-node-bg);
+  box-shadow: var(--ciw-node-shadow);
   color: var(--ciw-node-ink);
 }
-
-.ciw-node-cloud {
-  width: 52px;
-  height: 52px;
-  color: var(--ciw-accent);
-}
-
+.ciw-node-cloud { color: var(--ciw-accent); }
 .ciw-halo {
   position: absolute;
-  inset: -1px;
+  inset: -2px;
   border-radius: 50%;
-  animation: ciw-breathe 2.6s ease-out infinite;
+  border: 2px solid var(--ciw-halo);
+  opacity: 0;
+  animation: ciw-halo 2.6s ease-out infinite;
 }
-
 .ciw-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  position: relative;
+  display: block;
+  width: 96px;
+  height: 10px;
   color: var(--ciw-accent);
 }
-
+.ciw-dots::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 1px;
+  background: var(--ciw-lane);
+}
 .ciw-dot {
-  opacity: 0.25;
+  position: absolute;
+  left: 0;
+  top: 1px;
+  opacity: 0;
+  filter: drop-shadow(0 0 4px var(--ciw-accent));
   animation: ciw-flow 1.8s ease-in-out infinite;
 }
-.ciw-dot:nth-child(2) { animation-delay: 0.3s; }
-.ciw-dot:nth-child(3) { animation-delay: 0.6s; }
-
+.ciw-dot:nth-child(2) { animation-delay: 0.6s; }
+.ciw-dot:nth-child(3) { animation-delay: 1.2s; }
 @keyframes ciw-flow {
-  0%, 100% { opacity: 0.25; }
-  35% { opacity: 1; }
-  70% { opacity: 0.25; }
+  0% { transform: translateX(0); opacity: 0; }
+  15% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { transform: translateX(88px); opacity: 0; }
 }
-
-@keyframes ciw-breathe {
-  0% { box-shadow: 0 0 0 0 var(--ciw-halo); }
-  70% { box-shadow: 0 0 0 12px rgba(0, 0, 0, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+@keyframes ciw-halo {
+  0% { transform: scale(0.9); opacity: 0.75; }
+  100% { transform: scale(1.35); opacity: 0; }
 }
-
 /* ---------- the words ---------- */
 .ciw-text {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   max-width: 34em;
 }
-
 .ciw-title {
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.3;
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-size: 30px;
+  font-weight: 400;
+  line-height: 1.05;
   color: var(--ciw-ink);
 }
-
 .ciw-sub {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.4;
   color: var(--ciw-ink-2);
 }
-
 .ciw-line {
-  font-size: 12.5px;
+  font-size: 13.5px;
   line-height: 1.45;
   color: var(--ciw-ink-2);
 }
 .ciw-sub + .ciw-line,
 .ciw-retry + .ciw-line { margin-top: 4px; }
-
-.ciw-long { margin-top: 4px; font-weight: 500; }
-
+.ciw-long { margin-top: 4px; font-weight: 600; color: var(--ciw-ink); }
 .ciw-retry {
   display: inline-flex;
   align-items: flex-start;
   gap: 6px;
   margin-top: 6px;
-  padding: 5px 10px;
-  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  border-radius: 10px;
   background: var(--ciw-node-bg);
-  border: 1px solid var(--ciw-node-line);
-  font-size: 12.5px;
+  box-shadow: var(--ciw-node-shadow);
+  font-size: 13px;
   line-height: 1.4;
-  font-weight: 500;
-  color: var(--ciw-retry);
+  font-weight: 600;
+  color: #232322;
   text-align: left;
 }
 .ciw-retry-icon { margin-top: 2px; }
-
-/* ---------- the clock (outside the live region) ---------- */
+/* ---------- the clock (outside the live region): a readout ---------- */
 .ciw-elapsed {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--ciw-ink-2);
-}
-
-.ciw-clock {
-  font-family: 'JetBrains Mono', source-code-pro, Menlo, Monaco, Consolas, monospace;
-  font-variant-numeric: tabular-nums;
+  gap: 10px;
+  height: 46px;
+  padding: 0 16px;
+  border-radius: 12px;
+  background: #262624;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.6), 0 0 0 1px #11110F;
+  font-size: 12.5px;
   font-weight: 600;
-  color: var(--ciw-ink);
+  color: #C9C1B5;
 }
-
+.ciw-clock {
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  font-size: 22px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: #F3EDE2;
+}
 /* ---------- reduced motion: the words and the clock stay, the movement goes ---------- */
 .ciw-reduced .ciw-halo,
 .ciw-reduced .ciw-dot { animation: none; }
-.ciw-reduced .ciw-dot { opacity: 0.6; }
-
+.ciw-reduced .ciw-halo { display: none; }
+.ciw-reduced .ciw-dot { opacity: 0.8; }
+.ciw-reduced .ciw-dot:nth-child(2) { transform: translateX(40px); }
+.ciw-reduced .ciw-dot:nth-child(3) { transform: translateX(80px); }
 @media (prefers-reduced-motion: reduce) {
   .ciw-halo,
   .ciw-dot { animation: none; }
-  .ciw-dot { opacity: 0.6; }
+  .ciw-halo { display: none; }
+  .ciw-dot { opacity: 0.8; }
+  .ciw-dot:nth-child(2) { transform: translateX(40px); }
+  .ciw-dot:nth-child(3) { transform: translateX(80px); }
 }

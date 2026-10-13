@@ -158,6 +158,11 @@ const mockStandardMaterials = [];
 // Every MeshBasicMaterial (markers, halo, ring, table edges …) with its opts.
 const mockBasicMaterials = [];
 const mockSceneOps = [];
+// The scenes built, the Color constructor values and the GridHelper arguments,
+// for the screen-palette tests (web vs „Sucher").
+const mockScenes = [];
+const mockColorCtor = vi.fn();
+const mockGridCtor = vi.fn();
 // Ghost arm: each robot.clone(true) result. Its traverse visits two arm meshes
 // (sharing spied geometries), a held sim object and an „Achsen" triad — the
 // last two hang under a link and must be detached from the clone.
@@ -307,7 +312,7 @@ vi.mock('three', () => {
     // transform — i.e. it deliberately does NOT move the mesh — so a test that
     // wants the mesh in the right place has to prove the component put it there.
     Scene: function Scene() {
-      return noopObj({
+      const scene = noopObj({
         background: null,
         add: (child) => { mockSceneOps.push(['add', child]); },
         remove: (child) => { mockSceneOps.push(['remove', child]); },
@@ -319,8 +324,10 @@ vi.mock('three', () => {
           if (child) child.__parent = 'scene';
         },
       });
+      mockScenes.push(scene);
+      return scene;
     },
-    Color: function Color() {},
+    Color: function Color(value) { mockColorCtor(value); this.value = value; },
     PerspectiveCamera: function PerspectiveCamera() {
       // position.set is spied so the async-mesh tests can assert that frameRobot
       // runs AGAIN once real geometry exists (in production the onComplete call
@@ -362,7 +369,7 @@ vi.mock('three', () => {
         },
       });
     },
-    GridHelper: function GridHelper() { return noopObj(); },
+    GridHelper: function GridHelper(...args) { mockGridCtor(...args); return noopObj(); },
     MeshStandardMaterial: function MeshStandardMaterial(opts) {
       // Capture the opts (incl. the per-type `color`) so the sim-stage tests can
       // assert an object used its catalog colour; color.set is the shared
@@ -585,6 +592,9 @@ beforeEach(() => {
   mockStandardMaterials.length = 0;
   mockBasicMaterials.length = 0;
   mockSceneOps.length = 0;
+  mockScenes.length = 0;
+  mockColorCtor.mockClear();
+  mockGridCtor.mockClear();
   mockGhosts.length = 0;
   mockColorSet.mockClear();
   mockMeshInstances.length = 0;
@@ -2192,3 +2202,79 @@ describe('UrdfTwin — chronoTrail', () => {
     mats.forEach((m) => expect(m.dispose).toHaveBeenCalledTimes(1));
   });
 });
+
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: the web build's exact class strings and the Sucher chip's DOM. */
+describe('UrdfTwin — screen palette and chips (web unchanged, „Sucher" warm)', () => {
+  const WEB_ROOT = 'relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden bg-[#1a1d23]';
+  const WEB_CHIP = 'absolute top-2 left-2 z-10 h-7 px-2.5 rounded-full bg-white/[0.08] border border-white/15 '
+    + 'backdrop-blur-md flex items-center gap-1.5 text-[11px] text-white/80 font-mono';
+  const WEB_HINT = 'px-3 py-1.5 rounded-full bg-black/55 border border-white/15 backdrop-blur-md text-[12px] text-white/85';
+  afterEach(() => { document.documentElement.removeAttribute('data-ui'); });
+
+  test('without data-ui (the web build): the original colours and the original chip markup', async () => {
+    const { container } = render(<UrdfTwin />);
+    expect(mockScenes).toHaveLength(1);
+    expect(mockScenes[0].background.value).toBe(0x1a1d23);
+    expect(mockGridCtor).toHaveBeenCalledTimes(1);
+    expect(mockGridCtor).toHaveBeenCalledWith(1, 20, 0x3a3f47, 0x2a2e34);
+    expect(container.firstChild.className).toBe(WEB_ROOT);
+    const chip = screen.getByText('Follower-Modell');
+    expect(chip.className).toBe(WEB_CHIP);
+    expect(chip.firstChild.className).toBe('w-1.5 h-1.5 rounded-full');
+    expect(chip.firstChild.style.background).toBe('rgb(154, 160, 166)');
+    expect(screen.getByText('Wartet auf Gelenkdaten …').className).toBe(WEB_HINT);
+    expect(container.querySelector('.su-read, .su-led, .su-twin')).toBeNull();
+
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    act(() => mockSubscribe.mock.calls[0][0]({ name: ['joint1'], position: [0.1] }));
+    await waitFor(() => expect(chip.firstChild.style.background).toBe('var(--accent)'));
+  });
+
+  test('under data-ui="sucher": the Screen colour, a warm grid and glass Readout-sm chips', async () => {
+    document.documentElement.setAttribute('data-ui', 'sucher');
+    const { container } = render(<UrdfTwin />);
+    expect(mockScenes[0].background.value).toBe(0x141210);
+    expect(mockGridCtor).toHaveBeenCalledWith(1, 20, 0x2c2926, 0x221f1c);
+    expect(container.firstChild).toHaveClass('su-twin');
+    expect(container.firstChild).not.toHaveClass('bg-[#1a1d23]');
+    const chip = screen.getByText('Follower-Modell').closest('.su-read');
+    expect(chip).toHaveClass('su-read--sm', 'su-read--glass', 'su-twin__chip');
+    expect(chip.querySelector('.su-led')).toHaveClass('su-led--off');
+    const hint = screen.getByText('Wartet auf Gelenkdaten …').closest('.su-read');
+    expect(hint).toHaveClass('su-read--sm', 'su-read--glass');
+    expect(hint.parentElement).toHaveClass('su-twin__hint');
+
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    act(() => mockSubscribe.mock.calls[0][0]({ name: ['joint1'], position: [0.1] }));
+    await waitFor(() => expect(chip.querySelector('.su-led')).toHaveClass('su-led--ok'));
+    expect(screen.queryByText('Wartet auf Gelenkdaten …')).not.toBeInTheDocument();
+  });
+
+  test('„Sucher": the simulator twin lights its chip blue (info)', async () => {
+    document.documentElement.setAttribute('data-ui', 'sucher');
+    render(<UrdfTwin jointTopic="/sim/joint_states" />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    act(() => mockSubscribe.mock.calls[0][0]({ name: ['joint1'], position: [0.1] }));
+    const chip = screen.getByText('Follower-Modell').closest('.su-read');
+    await waitFor(() => expect(chip.querySelector('.su-led')).toHaveClass('su-led--info'));
+  });
+
+  test('decided once at mount: a later data-ui change does not restyle a mounted twin', () => {
+    const { container, rerender } = render(<UrdfTwin />);
+    document.documentElement.setAttribute('data-ui', 'sucher');
+    rerender(<UrdfTwin showPath />);
+    expect(container.firstChild.className).toBe(WEB_ROOT);
+    expect(mockScenes).toHaveLength(1);
+    expect(mockColorCtor).toHaveBeenCalledWith(0x1a1d23);
+    expect(mockColorCtor).not.toHaveBeenCalledWith(0x141210);
+  });
+
+  test('showChrome=false draws no chip in either build', () => {
+    document.documentElement.setAttribute('data-ui', 'sucher');
+    render(<UrdfTwin showChrome={false} />);
+    expect(screen.queryByText('Follower-Modell')).toBeNull();
+    expect(screen.queryByText('Wartet auf Gelenkdaten …')).toBeNull();
+  });
+});
+/* eslint-enable testing-library/no-container, testing-library/no-node-access */

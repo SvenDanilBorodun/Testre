@@ -117,6 +117,8 @@ import { armGeometry } from '../utils/armProfile';
 import { MARKER_COLORS } from './Workshop/sammlung/markers';
 import { resolveChronoTrail, createChronoTrail, chronoTick } from './sucher/chronoTrail';
 import useReducedMotion from './sucher/useReducedMotion';
+import Readout from './sucher/Readout';
+import { readTwinPalette } from './sucher/twinPalette';
 
 // The joints applied to the model are profile-driven (armGeometry from the
 // capability manifest: the OMX's joint1..joint5 + gripper_joint_1 when there is
@@ -500,6 +502,13 @@ export default function UrdfTwin({
   const reducedMotion = useReducedMotion();
   const reducedMotionRef = useRef(reducedMotion);
   reducedMotionRef.current = reducedMotion;
+  // „Sucher" screen colours + glass chips (student build only), decided ONCE
+  // at mount from <html data-ui> (sucher/twinPalette.js). Without
+  // data-ui="sucher" (the web build) the colours and the chip markup are the
+  // ones this twin always had.
+  const paletteRef = useRef(null);
+  if (paletteRef.current === null) paletteRef.current = readTwinPalette();
+  const sucherChrome = paletteRef.current.sucher;
   // Latest onEndEffector callback, read by the (stable) subscription closure.
   const onEndEffectorRef = useRef(onEndEffector);
   useEffect(() => {
@@ -744,8 +753,9 @@ export default function UrdfTwin({
     const width = mount.clientWidth || 480;
     const height = mount.clientHeight || 360;
 
+    const palette = paletteRef.current;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a1d23);
+    scene.background = new THREE.Color(palette.background);
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 100);
@@ -794,7 +804,7 @@ export default function UrdfTwin({
     }
 
     // Ground grid for spatial reference (1 m, 20 divisions).
-    const grid = new THREE.GridHelper(1, 20, 0x3a3f47, 0x2a2e34);
+    const grid = new THREE.GridHelper(1, 20, palette.gridCenter, palette.gridLines);
     scene.add(grid);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -1628,12 +1638,25 @@ export default function UrdfTwin({
     };
   }, [rosbridgeUrl, jointTopic, jointThrottleMs, stepPose, poseDriven]);
 
+  // Student build („Sucher"): the same chrome, same texts and conditions, as
+  // glass Readout-sm chips on the Screen colour (sucher.css `.su-twin`). The
+  // web build keeps its markup exactly (sucherChrome is false there).
+  const liveTone = typeof jointTopic === 'string' && jointTopic.startsWith('/sim/') ? 'info' : 'ok';
   return (
-    <div className="relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden bg-[#1a1d23]">
+    <div
+      className={sucherChrome
+        ? 'su-twin relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden'
+        : 'relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden bg-[#1a1d23]'}
+    >
       <div ref={mountRef} className="absolute inset-0" />
 
       {/* Header chip */}
-      {showChrome && (
+      {showChrome && sucherChrome && (
+        <Readout size="sm" led={hasJointData ? liveTone : 'off'} className="su-read--glass su-twin__chip">
+          Follower-Modell
+        </Readout>
+      )}
+      {showChrome && !sucherChrome && (
       <div className="absolute top-2 left-2 z-10 h-7 px-2.5 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-1.5 text-[11px] text-white/80 font-mono">
         <span
           className="w-1.5 h-1.5 rounded-full"
@@ -1644,13 +1667,17 @@ export default function UrdfTwin({
       )}
 
       {/* German "waiting for joint data" hint until the first message. */}
-      {showChrome && !hasJointData && !loadError && (
+      {showChrome && !hasJointData && !loadError && (sucherChrome ? (
+        <div className="su-twin__hint">
+          <Readout size="sm" className="su-read--glass">Wartet auf Gelenkdaten …</Readout>
+        </div>
+      ) : (
         <div className="absolute bottom-2 left-2 right-2 z-10 flex justify-center">
           <div className="px-3 py-1.5 rounded-full bg-black/55 border border-white/15 backdrop-blur-md text-[12px] text-white/85">
             Wartet auf Gelenkdaten …
           </div>
         </div>
-      )}
+      ))}
 
       {/* Asset load failure (bundled asset missing/corrupt — should not happen). */}
       {loadError && (

@@ -25,6 +25,7 @@ import useGroupDatasets from '../hooks/useGroupDatasets';
 import { syncDatasets } from '../services/datasetsApi';
 import { Pill } from './EbUI';
 import Icon from './icons/Icon';
+import { Led } from './sucher';
 
 export default function DatasetSelector() {
   const dispatch = useDispatch();
@@ -249,54 +250,13 @@ export default function DatasetSelector() {
     }
   }, [fetchUsers, manualMode]);
 
-  const classCard = clsx(
-    'bg-white',
-    'border',
-    'border-[var(--line)]',
-    'rounded-[var(--radius-lg)]',
-    'shadow-soft',
-    'p-5',
-    'w-full'
-  );
+  const classCard = clsx('su-plate', 'su-plate--plate', 'su-trn-card', 'w-full');
 
-  const classRefreshButton = clsx(
-    'w-full',
-    'px-4',
-    'py-2',
-    'bg-gray-500',
-    'text-white',
-    'rounded-md',
-    'font-medium',
-    'transition-colors',
-    'hover:bg-gray-600',
-    'disabled:bg-gray-400',
-    'disabled:cursor-not-allowed',
-    'flex',
-    'items-center',
-    'justify-center',
-    'gap-2',
-    'mb-4'
-  );
+  const classRefreshButton = clsx('su-key', 'su-key--md', 'w-full', 'mb-4');
 
-  const classCurrentSelection = clsx(
-    'text-sm',
-    'text-gray-600',
-    'bg-gray-100',
-    'px-3',
-    'py-2',
-    'rounded-md',
-    'text-center',
-    'mb-4'
-  );
+  const classCurrentSelection = clsx('su-trn-selected', 'mb-4');
 
-  const classTreeContainer = clsx(
-    'border',
-    'border-gray-300',
-    'rounded-md',
-    'max-h-96',
-    'overflow-y-auto',
-    'bg-gray-50'
-  );
+  const classTreeContainer = clsx('su-plate', 'su-plate--well', 'su-trn-list', 'max-h-96', 'overflow-y-auto');
 
   const classUserFolder = clsx(
     'flex',
@@ -348,32 +308,31 @@ export default function DatasetSelector() {
 
   return (
     <div className={classCard}>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-xl font-bold text-gray-800">Datensatzauswahl</h1>
-        <button
-          onClick={() => setManualMode(!manualMode)}
-          className={clsx(
-            'flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-full transition-colors',
-            manualMode
-              ? 'bg-teal-100 text-teal-700 hover:bg-teal-200'
-              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-          )}
-          disabled={isTraining}
-        >
-          <Icon name="pencil" size={14} />
-          {manualMode ? 'Durchsuchen' : 'Manuell'}
-        </button>
+      <div className="flex items-center justify-between gap-2 mb-4 flex-wrap">
+        <h1 className="su-trn-card__title">Datensatzauswahl</h1>
+        <span className="su-trn-mode">
+          <button
+            type="button"
+            onClick={() => setManualMode(!manualMode)}
+            className="su-trn-mode__btn"
+            disabled={isTraining}
+          >
+            <Icon name="pencil" size={13} />
+            {manualMode ? 'Durchsuchen' : 'Manuell'}
+          </button>
+        </span>
       </div>
 
       {/* Current Selection Display */}
       {selectedUser && selectedDataset && (
         <div className={classCurrentSelection}>
+          <Led tone="sig" />
           <div className="truncate">
             <strong>Ausgewählt: </strong>
-            <span className="text-teal-500" title={`${selectedUser}/${selectedDataset}`}>
+            <span className="font-semibold text-[var(--ink)]" title={`${selectedUser}/${selectedDataset}`}>
               {selectedUser.length > 15 ? `${selectedUser.substring(0, 12)}...` : selectedUser}/
             </span>
-            <span className="text-teal-500" title={`${selectedUser}/${selectedDataset}`}>
+            <span className="font-semibold text-[var(--ink)]" title={`${selectedUser}/${selectedDataset}`}>
               {selectedDataset.length > 30
                 ? `${selectedDataset.substring(0, 25)}...${selectedDataset.substring(
                     selectedDataset.length - 10
@@ -387,13 +346,13 @@ export default function DatasetSelector() {
       {/* Group-shared datasets (cloud registry) — always rendered so the
           sync button + empty-state hint are reachable even with zero rows. */}
       <div className="mb-4">
-        <div className="flex items-center justify-between mb-2 gap-2">
-          <h3 className="text-sm font-semibold text-gray-700">
+        <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+          <h3 className="su-lab">
             Eigene &amp; geteilte Datensätze
           </h3>
           <div className="flex items-center gap-2">
             {cloudDatasets && cloudDatasets.length > 0 && (
-              <span className="text-[11px] text-gray-500 font-mono">
+              <span className="su-lab">
                 {cloudDatasets.length}
               </span>
             )}
@@ -402,11 +361,7 @@ export default function DatasetSelector() {
               onClick={handleSyncDatasets}
               disabled={syncing || isTraining}
               title="Eigene HuggingFace-Datensätze mit der Cloud abgleichen"
-              className={clsx(
-                'flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full transition-colors',
-                'bg-teal-50 text-teal-700 hover:bg-teal-100',
-                'disabled:opacity-50 disabled:cursor-not-allowed'
-              )}
+              className="su-key su-key--sm su-trn-sync"
             >
               <Icon name="refresh" className={syncing ? 'animate-spin' : ''} size={14} />
               {syncing ? 'Synchronisiere…' : 'Datensätze synchronisieren'}
@@ -438,7 +393,7 @@ export default function DatasetSelector() {
         )}
 
         {cloudDatasets && cloudDatasets.length > 0 ? (
-          <div className="border border-gray-300 rounded-md max-h-60 overflow-y-auto bg-gray-50 divide-y divide-gray-200">
+          <div className="su-plate su-plate--well su-trn-list max-h-60 overflow-y-auto">
             {cloudDatasets.map((d) => {
               const [user, ...rest] = (d.hf_repo_id || '/').split('/');
               const dataset = rest.join('/');
@@ -449,18 +404,13 @@ export default function DatasetSelector() {
                   key={d.id}
                   type="button"
                   onClick={() => !isTraining && handleDatasetSelection(user, dataset)}
-                  className={clsx(
-                    'w-full flex items-center gap-3 px-3 py-2 text-left transition-colors text-sm',
-                    isSelected
-                      ? 'bg-teal-100 text-teal-800'
-                      : 'hover:bg-teal-50'
-                  )}
+                  className={clsx('su-trn-row', isSelected && 'su-trn-row--on')}
                   disabled={isTraining}
                 >
-                  <Icon name="database" className="text-green-600 shrink-0" />
+                  <Led tone={isSelected ? 'sig' : 'off'} />
                   <div className="min-w-0 flex-1">
                     <div className="font-medium truncate">{d.name || dataset}</div>
-                    <div className="text-[11px] text-gray-500 font-mono truncate">
+                    <div className="text-[11.5px] text-[var(--ink-2)] font-mono truncate">
                       {d.hf_repo_id}
                     </div>
                   </div>
@@ -476,7 +426,7 @@ export default function DatasetSelector() {
           </div>
         ) : (
           !cloudError && (
-            <p className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-md p-3 leading-snug">
+            <p className="su-plate su-plate--well text-[13px] text-[var(--ink)] p-3 leading-snug">
               Noch keine Datensätze – nimm im Aufnahme-Tab etwas auf oder klicke
               „Datensätze synchronisieren", um deine HuggingFace-Datensätze zu
               laden.
@@ -488,16 +438,12 @@ export default function DatasetSelector() {
       {/* Manual HuggingFace Repo ID Input */}
       {manualMode ? (
         <div className="space-y-3">
-          <p className="text-sm text-gray-500">
-            HuggingFace Datensatz-ID direkt eingeben (z.B. <span className="font-mono text-teal-600">benutzername/datensatzname</span>)
+          <p className="text-[13px] text-[var(--ink-2)]">
+            HuggingFace Datensatz-ID direkt eingeben (z.B. <span className="font-mono text-[var(--ink)]">benutzername/datensatzname</span>)
           </p>
           <input
             type="text"
-            className={clsx(
-              'w-full px-3 py-2 border rounded-md text-sm',
-              'focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent',
-              'border-gray-300'
-            )}
+            className="su-field w-full h-11 px-3 text-sm"
             placeholder="benutzername/datensatzname"
             value={manualRepoId}
             onChange={(e) => setManualRepoId(e.target.value)}
@@ -505,12 +451,8 @@ export default function DatasetSelector() {
             disabled={isTraining}
           />
           <button
-            className={clsx(
-              'w-full px-4 py-2 rounded-md font-medium transition-colors text-sm',
-              manualRepoId.trim()
-                ? 'bg-teal-600 text-white hover:bg-teal-700'
-                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-            )}
+            type="button"
+            className="su-key su-key--signal su-key--md w-full"
             onClick={handleManualSubmit}
             disabled={!manualRepoId.trim() || isTraining}
           >
@@ -538,7 +480,7 @@ export default function DatasetSelector() {
       {/* Folder Tree View */}
       <div className={classTreeContainer}>
         {userList.length === 0 ? (
-          <div className="text-center py-8 text-gray-500">
+          <div className="text-center py-8 text-[var(--ink)]">
             {loadingUsers ? 'Benutzer werden geladen...' : 'Keine Benutzer gefunden'}
           </div>
         ) : (

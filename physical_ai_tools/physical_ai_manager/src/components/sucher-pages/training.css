@@ -1,0 +1,293 @@
+/* „Sucher" — the Training tab (spec §9, board Training.dc.html). Imported by
+ * TrainingPage; App.js pulls it into the teacher build's CSS too, so every rule
+ * is scoped under [data-ui='sucher']. `:root[data-ui]` (not :where) where a
+ * rule must beat a Tailwind utility on the same element. */
+
+/* ── Header: the credits readout ────────────────────────────────────────────── */
+:where([data-ui='sucher']) .su-trn-credits { height: 50px; padding: 0 16px; gap: 6px; }
+:where([data-ui='sucher']) .su-trn-credits > :first-child { font-size: 28px; }
+:where([data-ui='sucher']) .su-trn-credits__of { font-size: 18px; color: var(--su-scr-ink-3); }
+:where([data-ui='sucher']) .su-trn-credits__text {
+  margin-left: 8px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--su-scr-ink-2);
+}
+
+/* ── Info box ───────────────────────────────────────────────────────────────── */
+:where([data-ui='sucher']) .su-trn-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 20px;
+  color: var(--su-ink-2);
+}
+:where([data-ui='sucher']) .su-trn-info strong { color: var(--su-ink); }
+:where([data-ui='sucher']) .su-trn-info__led { margin-top: 5px; }
+:where([data-ui='sucher']) .su-trn-info--warn {
+  border-radius: 22px;
+  background: var(--amber-wash);
+  color: var(--amber);
+  box-shadow: inset 0 0 0 1px rgba(138, 83, 0, .18);
+}
+
+/* ── Setup: four plates, a numbered disc on each top edge ───────────────────── */
+:where([data-ui='sucher']) .su-trn-step { position: relative; display: flex; flex-direction: column; }
+:where([data-ui='sucher']) .su-trn-step > :last-child { flex: 1; }
+:where([data-ui='sucher']) .su-trn-steplabel { position: absolute; left: 18px; top: -15px; z-index: 1; }
+:where([data-ui='sucher']) .su-trn-steplabel__disc {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--su-scr);
+  color: var(--su-scr-ink);
+  box-shadow: 0 0 0 3px var(--su-body);
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  font-size: 15px;
+}
+:where([data-ui='sucher']) .su-trn-card {
+  display: flex;
+  flex-direction: column;
+  padding: 26px 18px 18px;
+  min-height: 100%;
+}
+:where([data-ui='sucher']) .su-trn-card__title { margin-bottom: 18px; font-size: 18px; font-weight: 700; line-height: 1.2; color: var(--su-ink); }
+:where([data-ui='sucher']) .su-trn-card__title--ro { color: var(--su-ink-2); }
+/* The DatasetSelector header row sets its own margin. */
+:where([data-ui='sucher']) .su-trn-card .flex > .su-trn-card__title { margin-bottom: 0; }
+:where([data-ui='sucher']) .su-trn-mode {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--su-well);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .25);
+}
+:where([data-ui='sucher']) .su-trn-mode__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--su-ink);
+  background: linear-gradient(#FFFFFF, #ECE9E3);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 2px 4px rgba(0, 0, 0, .18);
+  cursor: pointer;
+}
+:where([data-ui='sucher']) .su-trn-mode__btn:disabled { opacity: .45; cursor: not-allowed; }
+:where([data-ui='sucher']) .su-trn-selected {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13.5px;
+  color: var(--su-ink-2);
+}
+:where([data-ui='sucher']) .su-trn-list { padding: 4px; }
+:where([data-ui='sucher']) .su-trn-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  text-align: left;
+  font-size: 14px;
+  color: var(--su-ink);
+  transition: background-color 120ms ease-out;
+}
+:where([data-ui='sucher']) .su-trn-row:hover:not(:disabled) { background: rgba(255, 255, 255, .5); }
+:where([data-ui='sucher']) .su-trn-row--on { background: #FFFFFF; box-shadow: 0 0 0 1px #CFCAC0; }
+:where([data-ui='sucher']) .su-trn-row--on:hover:not(:disabled) { background: #FFFFFF; }
+:root[data-ui='sucher'] .su-trn-sync { height: 34px; padding: 0 12px; font-size: 13px; }
+:where([data-ui='sucher']) .su-trn-avail { margin-top: 12px; font-size: 13.5px; }
+:where([data-ui='sucher']) .su-trn-avail p { display: flex; align-items: center; gap: 8px; }
+:where([data-ui='sucher']) .su-trn-avail .su-led { flex: none; }
+:where([data-ui='sucher']) .su-trn-opt__label { font-size: 14px; font-weight: 500; color: var(--su-ink); }
+:root[data-ui='sucher'] .su-trn-opt__input {
+  width: 108px;
+  flex: none;
+  text-align: right;
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+:root[data-ui='sucher'] .su-trn-opt__input::placeholder { font-family: var(--font-ui); font-weight: 500; font-size: 12px; }
+
+/* ── Trainingsverlauf: a powered dark screen ────────────────────────────────── */
+:where([data-ui='sucher']) .su-trn-monitor { margin: 8px; padding: 26px 26px 24px; border-radius: 26px; }
+:where([data-ui='sucher']) .su-trn-monitor__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+:where([data-ui='sucher']) .su-trn-monitor__title { font-size: 40px; line-height: 1; color: var(--su-scr-ink); }
+:where([data-ui='sucher']) .su-trn-monitor__title em { font-style: italic; }
+:where([data-ui='sucher']) .su-trn-monitor__status { display: inline-flex; align-items: center; gap: 8px; }
+:where([data-ui='sucher']) .su-trn-monitor__status .su-lab,
+:where([data-ui='sucher']) .su-trn-monitor .su-lab { color: var(--su-scr-ink-3); }
+:where([data-ui='sucher']) .su-trn-monitor__nocredit,
+:where([data-ui='sucher']) .su-trn-nocredit {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: rgba(255, 59, 48, .14);
+  box-shadow: inset 0 0 0 1px rgba(255, 59, 48, .4);
+  color: #FF8A80;
+  font-size: 13px;
+  font-weight: 600;
+}
+:where([data-ui='sucher']) .su-trn-monitor__nocredit { margin-top: 18px; }
+:where([data-ui='sucher']) .su-trn-live-chart { display: flex; flex-direction: column; gap: 22px; }
+:where([data-ui='sucher']) .su-trn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(36, 32, 29, .85);
+  box-shadow: inset 0 0 0 1px #34302B;
+  color: var(--su-scr-ink);
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+:where([data-ui='sucher']) .su-trn-chip__icon--sig { color: var(--su-sig-on-dark); }
+:where([data-ui='sucher']) .su-trn-chip__icon--ok { color: var(--su-ok); }
+:where([data-ui='sucher']) .su-trn-chip__icon--warn { color: var(--su-warn); }
+:where([data-ui='sucher']) .su-trn-chip__icon--rec { color: var(--su-rec); }
+:where([data-ui='sucher']) .su-trn-chip__icon--off { color: var(--su-scr-ink-3); }
+:where([data-ui='sucher']) .su-trn-repo { font-size: 14px; font-weight: 700; color: var(--su-scr-ink); }
+:where([data-ui='sucher']) .su-trn-repo--link:hover { text-decoration: underline; }
+:where([data-ui='sucher']) .su-trn-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  font-size: 14px;
+  text-transform: uppercase;
+  color: var(--su-scr-ink);
+  white-space: nowrap;
+}
+:where([data-ui='sucher']) .su-trn-live__age { color: var(--su-scr-ink-2); }
+:where([data-ui='sucher']) .su-trn-live--stale { color: var(--su-warn); font-family: var(--font-ui); font-size: 12.5px; font-weight: 600; text-transform: none; }
+:where([data-ui='sucher']) .su-trn-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; }
+@media (min-width: 1024px) {
+  :where([data-ui='sucher']) .su-trn-body { grid-template-columns: minmax(0, 5fr) minmax(0, 8fr); }
+}
+:where([data-ui='sucher']) .su-trn-pct {
+  margin-top: 6px;
+  font-size: 96px;
+  line-height: .9;
+  color: var(--su-sig-on-dark);
+}
+:where([data-ui='sucher']) .su-trn-pct span { font-size: .6em; }
+:where([data-ui='sucher']) .su-trn-stepnum { margin-top: 6px; font-size: 22px; color: var(--su-scr-ink); }
+:where([data-ui='sucher']) .su-trn-stepnum span { color: var(--su-scr-ink-3); }
+:where([data-ui='sucher']) .su-trn-band { margin-top: 14px; }
+/* the band's caption is its accessible name only; the hero says „Fortschritt" */
+:where([data-ui='sucher']) .su-trn-band .su-band__label { display: none; }
+:where([data-ui='sucher']) .su-trn-band--starting {
+  height: 8px;
+  width: 33%;
+  border-radius: 999px;
+  background: #FF5B1F;
+  animation: su-breathe 2400ms ease-in-out infinite;
+}
+:where([data-ui='sucher']) .su-trn-stat { margin-top: 6px; font-size: 22px; line-height: 1; color: var(--su-scr-ink); }
+:where([data-ui='sucher']) .su-trn-stat--ok { color: var(--su-ok); }
+:where([data-ui='sucher']) .su-trn-stat--rec { color: var(--su-rec); }
+:where([data-ui='sucher']) .su-trn-chart {
+  height: 230px;
+  border-radius: 12px;
+  background: #1A1715;
+  box-shadow: inset 0 0 0 1px #2B2825;
+  overflow: hidden;
+}
+:where([data-ui='sucher']) .su-trn-chart--empty { height: 150px; display: flex; align-items: center; justify-content: center; }
+:where([data-ui='sucher']) .su-trn-tip {
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #24201D;
+  box-shadow: inset 0 0 0 1px #34302B, 0 10px 20px -10px rgba(0, 0, 0, .7);
+  color: var(--su-scr-ink);
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  font-size: 13px;
+}
+:where([data-ui='sucher']) .su-trn-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px;
+  border-radius: 14px;
+  background: #1C1917;
+  box-shadow: inset 0 0 0 1px #34302B;
+}
+@media (min-width: 768px) { :where([data-ui='sucher']) .su-trn-empty { flex-direction: row; align-items: flex-start; } }
+:where([data-ui='sucher']) .su-trn-error {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 59, 48, .12);
+  box-shadow: inset 0 0 0 1px rgba(255, 59, 48, .35);
+  color: #FF8A80;
+}
+
+/* ── Meine Modelle ──────────────────────────────────────────────────────────── */
+:where([data-ui='sucher']) .su-trn-models { padding: 22px; }
+:where([data-ui='sucher']) .su-models__title { font-size: 40px; line-height: 1; color: var(--su-ink); }
+:where([data-ui='sucher']) .su-models__title em { font-style: italic; }
+:where([data-ui='sucher']) .su-models__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  max-height: 560px;
+  overflow-y: auto;
+  padding: 4px;
+}
+@media (min-width: 900px) { :where([data-ui='sucher']) .su-models__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1280px) { :where([data-ui='sucher']) .su-models__grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+:where([data-ui='sucher']) .su-model {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: #EFECE6;
+  box-shadow: inset 0 0 0 1px #DEDAD2;
+  cursor: pointer;
+  min-width: 0;
+}
+:where([data-ui='sucher']) .su-model:hover { box-shadow: inset 0 0 0 1px #CFCAC0; }
+:where([data-ui='sucher']) .su-model--selected,
+:where([data-ui='sucher']) .su-model--selected:hover { box-shadow: inset 0 0 0 2px var(--su-sig); }
+:where([data-ui='sucher']) .su-model__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+:where([data-ui='sucher']) .su-model__status { display: inline-flex; align-items: center; gap: 8px; }
+:where([data-ui='sucher']) .su-model__status .su-lab { color: var(--su-ink-2); }
+:where([data-ui='sucher']) .su-model__live { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--su-sig-text); }
+:where([data-ui='sucher']) .su-model__name { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; margin: 5px; }
+:where([data-ui='sucher']) .su-model__title { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 14px; font-weight: 700; color: var(--su-scr-ink); }
+:where([data-ui='sucher']) .su-model__title--link:hover { text-decoration: underline; }
+:where([data-ui='sucher']) .su-model__meta { font-size: 13px; color: var(--su-ink-2); }
+:where([data-ui='sucher']) .su-model__progress { display: flex; flex-direction: column; gap: 6px; }
+:where([data-ui='sucher']) .su-model__track { height: 8px; border-radius: 999px; background: var(--su-well); box-shadow: inset 0 1px 2px rgba(0, 0, 0, .2); overflow: hidden; }
+:where([data-ui='sucher']) .su-model__fill { height: 100%; border-radius: 999px; background: var(--su-sig); transition: width 500ms var(--su-ease-out); }
+:where([data-ui='sucher']) .su-model__error { padding: 8px 10px; border-radius: 10px; background: var(--danger-wash); color: var(--danger); font-size: 12.5px; }
+:where([data-ui='sucher']) .su-model__actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: auto; padding-top: 4px; }
+:root[data-ui='sucher'] .su-model__cancel { color: var(--danger); }

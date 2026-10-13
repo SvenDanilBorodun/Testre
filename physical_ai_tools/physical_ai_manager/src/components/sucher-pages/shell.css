@@ -1,0 +1,136 @@
+/* „Sucher" — the student shell (spec §6.1, §6.5): the rail, the login plate
+ * and the shared gates/modals. Imported by StudentApp only, but App.js imports
+ * StudentApp statically, so this file also lands in the teacher build's CSS:
+ * every rule is scoped under [data-ui='sucher'] (wrapped in :where() so the
+ * scope adds no specificity), which the web build never sets. */
+
+/* ── Rail ───────────────────────────────────────────────────────────────────── */
+:where([data-ui='sucher']) .su-rail {
+  width: 72px;
+  gap: 10px;
+  padding: 24px 0 18px;
+  background: var(--su-well);
+  box-shadow: inset -1px 0 0 var(--su-edge);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+:where([data-ui='sucher']) .su-rail::-webkit-scrollbar { display: none; }
+@media (min-width: 768px) { :where([data-ui='sucher']) .su-rail { width: 100px; } }
+@media (min-width: 1280px) { :where([data-ui='sucher']) .su-rail { width: 116px; } }
+:where([data-ui='sucher']) .su-rail__brand { flex: none; margin-bottom: 10px; display: grid; place-items: center; }
+/* BrandMark is 64 px; the sm rail (72 px) shows it at 44. */
+:where([data-ui='sucher']) .su-rail__brand .su-brand { --s: 44px !important; width: 44px !important; height: 44px !important; }
+@media (min-width: 768px) {
+  :where([data-ui='sucher']) .su-rail__brand .su-brand { --s: 64px !important; width: 64px !important; height: 64px !important; }
+}
+:where([data-ui='sucher']) .su-rail__sep { flex: none; width: 32px; height: 1px; margin: 2px 0; background: var(--su-edge); }
+:where([data-ui='sucher']) .su-rail__nav {
+  appearance: none;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  width: 64px;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--su-ink-2);
+}
+@media (min-width: 768px) { :where([data-ui='sucher']) .su-rail__nav { width: 92px; } }
+:where([data-ui='sucher']) .su-rail__disc {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 35%, #FFFFFF, #ECE9E3 70%);
+  color: var(--su-ink-2);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 3px 0 #C9C4BA, 0 8px 14px -8px rgba(0, 0, 0, .35);
+  transition: transform 160ms var(--su-ease-spring), box-shadow 160ms var(--su-ease-spring);
+}
+:where([data-ui='sucher']) .su-rail__nav--on .su-rail__disc {
+  background: radial-gradient(circle at 50% 35%, #FF7B47, #FF5B1F 70%);
+  color: #232322;
+  box-shadow: 0 0 0 1px #D9480F, 0 3px 0 #C2410C, 0 8px 16px -8px rgba(255, 91, 31, .8);
+}
+:where([data-ui='sucher']) .su-rail__nav:hover:not(:disabled) .su-rail__disc {
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #C9C4BA, 0 8px 14px -8px rgba(0, 0, 0, .35);
+  transition-duration: 120ms;
+  transition-timing-function: var(--su-ease-out);
+}
+:where([data-ui='sucher']) .su-rail__nav--on:hover .su-rail__disc { box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #C2410C, 0 8px 16px -8px rgba(255, 91, 31, .8); }
+:where([data-ui='sucher']) .su-rail__nav:active:not(:disabled) .su-rail__disc {
+  transform: translateY(2px);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 1px 0 #C9C4BA;
+  transition: transform 90ms ease-out, box-shadow 90ms ease-out;
+}
+:where([data-ui='sucher']) .su-rail__nav--on:active .su-rail__disc { box-shadow: 0 0 0 1px #D9480F, 0 1px 0 #C2410C; }
+/* The focus ring goes round the disc, not round the column. */
+:where([data-ui='sucher']) .su-rail__nav:focus-visible { outline: none; }
+:where([data-ui='sucher']) .su-rail__nav:focus-visible .su-rail__disc { outline: 2px solid var(--su-sig); outline-offset: 3px; }
+:where([data-ui='sucher']) .su-rail__label {
+  max-width: 100%;
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--su-ink-2);
+}
+:where([data-ui='sucher']) .su-rail__nav--on .su-rail__label { color: var(--su-ink); }
+:where([data-ui='sucher']) .su-rail__who { flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%; padding: 0 6px; }
+:where([data-ui='sucher']) .su-rail__mail { max-width: 100%; font-size: 10px; line-height: 1.3; color: var(--su-ink-2); text-align: center; }
+:where([data-ui='sucher']) .su-rail__logout .su-rail__disc { width: 40px; height: 40px; }
+:where([data-ui='sucher']) .su-rail__logout:disabled { cursor: not-allowed; }
+:where([data-ui='sucher']) .su-rail__logout:disabled .su-rail__disc {
+  background: #DEDAD2;
+  color: #8A867E;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2);
+}
+:where([data-ui='sucher']) .su-rail__ver { flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--su-ink-3); }
+/* Short windows: the rail tightens instead of scrolling (7 tabs in Pi mode). */
+@media (max-height: 860px) {
+  :where([data-ui='sucher']) .su-rail { gap: 6px; padding-top: 16px; }
+  :where([data-ui='sucher']) .su-rail__disc { width: 42px; height: 42px; }
+  :where([data-ui='sucher']) .su-rail__nav { gap: 5px; padding: 2px 0; }
+  :where([data-ui='sucher']) .su-rail__brand { margin-bottom: 4px; }
+}
+@media (max-height: 860px) and (min-width: 768px) {
+  :where([data-ui='sucher']) .su-rail__brand .su-brand { --s: 54px !important; width: 54px !important; height: 54px !important; }
+}
+
+/* ── Login (web-shared: hook classes, styled only under the scope) ──────────── */
+:root[data-ui='sucher'] .su-login { background: var(--su-body); background-image: none; }
+:root[data-ui='sucher'] .su-login__plate {
+  background: var(--su-plate);
+  border-color: transparent;
+  border-radius: 22px;
+  box-shadow: var(--su-plate-shadow);
+}
+:root[data-ui='sucher'] .su-login__title {
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-weight: 400;
+  font-size: 40px;
+  line-height: 1;
+  letter-spacing: -.01em;
+}
+:root[data-ui='sucher'] .su-login__input {
+  background: var(--su-well);
+  border-color: transparent;
+  border-radius: 10px;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2);
+  font-size: 14.5px;
+  font-weight: 500;
+}
+:root[data-ui='sucher'] .su-login__input::placeholder { color: #5F5B55; }
+:root[data-ui='sucher'] .su-login__input:focus { border-color: transparent; box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2), 0 0 0 2px var(--su-sig); }
+
+/* ── CollisionModal: a plate with a coloured ring (stays topmost, z 60) ─────── */
+:where([data-ui='sucher']) .su-collision--stop { box-shadow: var(--su-plate-shadow), 0 0 0 3px var(--su-rec), 0 24px 60px -20px rgba(0, 0, 0, .6); }
+:where([data-ui='sucher']) .su-collision--homed { box-shadow: var(--su-plate-shadow), 0 0 0 3px var(--su-warn), 0 24px 60px -20px rgba(0, 0, 0, .6); }

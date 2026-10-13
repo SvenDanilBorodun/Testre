@@ -6,6 +6,9 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: hook classes, custom properties and the DOM shape. */
+
 // The Lichtband (M7, F15): ONE render builds the lights; progress only writes
 // the row's custom properties + aria-valuenow, and only when the head index or
 // `full` changes — never React state per frame.
@@ -44,11 +47,9 @@ describe('Lichtband', () => {
     expect(bar.style.getPropertyValue('--full')).toBe('0');
     expect(bar.style.getPropertyValue('--fade')).toBe('1');
     expect(bar.style.getPropertyValue('--band-c')).toBe('#FF5B1F');
-    // eslint-disable-next-line testing-library/no-node-access
     const leds = container.querySelectorAll('.su-band__led');
     expect(leds).toHaveLength(30);
     expect(leds[7].style.getPropertyValue('--i')).toBe('7');
-    // eslint-disable-next-line testing-library/no-node-access
     expect(container.querySelectorAll('.su-band__head')).toHaveLength(1);
     expect(screen.getByText('noch 9 s')).toHaveClass('su-band__remain');
   });
@@ -100,9 +101,7 @@ describe('Lichtband', () => {
 
   it('no label and no remaining: neither is drawn', () => {
     const { container } = render(<Lichtband frac={0.2} />);
-    // eslint-disable-next-line testing-library/no-node-access
     expect(container.querySelector('.su-band__label')).toBeNull();
-    // eslint-disable-next-line testing-library/no-node-access
     expect(container.querySelector('.su-band__remain')).toBeNull();
   });
 });

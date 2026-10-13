@@ -6,6 +6,9 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: hook classes, custom properties and the DOM shape. */
+
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 import RobotIcon, { robotSpriteName, robotSpriteUrl } from '../RobotIcon';
@@ -31,7 +34,6 @@ describe('RobotIcon', () => {
     expect(box).not.toHaveClass('su-robot--animate');
     expect(box.style.width).toBe('72px');
     expect(box.style.height).toBe('72px');
-    // eslint-disable-next-line testing-library/no-node-access
     const img = box.querySelector('img');
     expect(img).toHaveAttribute('src', '/robots/edu1.webp');
     expect(img).toHaveAttribute('loading', 'lazy');

@@ -6,6 +6,9 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: hook classes, custom properties and the DOM shape. */
+
 import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import Segmented from '../Segmented';
@@ -26,7 +29,6 @@ describe('Segmented', () => {
     const both = screen.getByRole('button', { name: 'Beides' });
     expect(both).toBeDisabled();
     expect(both).toHaveAttribute('title', 'Nur mit zwei Kameras');
-    // eslint-disable-next-line testing-library/no-node-access
     expect(screen.getByRole('button', { name: '3D' }).querySelector('svg[data-icon="rotate3d"]')).not.toBeNull();
   });
 

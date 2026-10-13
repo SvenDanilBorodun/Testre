@@ -6,6 +6,9 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: hook classes, custom properties and the DOM shape. */
+
 // Readout + the rolling digits (M5, F16): only a plain integer on BOTH the old
 // and the new value rolls, and only after mount; the digit columns are
 // aria-hidden and one visually hidden node carries the real value; at rest it
@@ -16,7 +19,7 @@ import { act, render, screen } from '@testing-library/react';
 import Readout from '../Readout';
 import RollingDigits, { isPlainInteger } from '../RollingDigits';
 
-const cols = (container) => container.querySelectorAll('.su-roll__col'); // eslint-disable-line testing-library/no-node-access
+const cols = (container) => container.querySelectorAll('.su-roll__col');
 
 describe('isPlainInteger', () => {
   it.each([[0, true], [12, true], ['12', true], ['007', true], [1.5, false], [-1, false], ['12,4 GB', false],
@@ -39,12 +42,9 @@ describe('Readout', () => {
     const root = container.firstChild;
     expect(root.tagName).toBe('DIV');
     expect(root).toHaveClass('su-readout');
-    // eslint-disable-next-line testing-library/no-node-access
     const box = root.querySelector('.su-read');
     expect(box).toHaveClass('su-read--xl');
-    // eslint-disable-next-line testing-library/no-node-access
     expect(box.firstChild).toHaveClass('su-led', 'su-led--ok', 'su-led--breathe');
-    // eslint-disable-next-line testing-library/no-node-access
     expect(root.querySelector('.su-readout__label')).toHaveTextContent('Aufnahmen');
   });
 
@@ -70,9 +70,7 @@ describe('Readout', () => {
       rerender(<Readout roll>{10}</Readout>);
       const c = cols(container);
       expect(c).toHaveLength(2);
-      // eslint-disable-next-line testing-library/no-node-access
       expect(container.querySelector('.su-roll__cols')).toHaveAttribute('aria-hidden', 'true');
-      // eslint-disable-next-line testing-library/no-node-access
       expect(container.querySelector('.su-sr')).toHaveTextContent(/^10$/);
       // getByText finds the real value only (a strip is one text node „0123456789").
       expect(screen.getByText('10')).toHaveClass('su-sr');
@@ -122,9 +120,7 @@ describe('RollingDigits', () => {
 
   it('at rest it is a bare text node (no wrapper element)', () => {
     const { container } = render(<span><RollingDigits value={42} /></span>);
-    // eslint-disable-next-line testing-library/no-node-access
     expect(container.firstChild.childNodes).toHaveLength(1);
-    // eslint-disable-next-line testing-library/no-node-access
     expect(container.firstChild.firstChild.nodeType).toBe(3);
   });
 

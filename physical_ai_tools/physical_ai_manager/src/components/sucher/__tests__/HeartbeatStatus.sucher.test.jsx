@@ -6,6 +6,9 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: hook classes, custom properties and the DOM shape. */
+
 // HeartbeatStatus as a „Sucher" readout (spec §6.2): a light by state (ok
 // breathing / warn / rec), the status word as its own node, the latency; every
 // state and string unchanged.
@@ -38,7 +41,6 @@ describe('HeartbeatStatus (readout)', () => {
     expect(screen.getByText(word)).toBeInTheDocument();
     const root = container.firstChild;
     expect(root).toHaveClass('su-read', 'su-read--md', 'su-hb');
-    // eslint-disable-next-line testing-library/no-node-access
     const led = root.querySelector('.su-led');
     expect(led).toHaveClass(tone, pulse);
     expect(led).toHaveAttribute('aria-hidden', 'true');
@@ -46,13 +48,11 @@ describe('HeartbeatStatus (readout)', () => {
 
   it('the latency while connected, „—" otherwise', () => {
     renderWith('connected', Date.now() - 5);
-    // eslint-disable-next-line testing-library/no-node-access
     expect(document.querySelector('.su-hb__latency').textContent).toMatch(/^\d+ms$/);
   });
 
   it('„—" when not connected', () => {
     renderWith('disconnected', null);
-    // eslint-disable-next-line testing-library/no-node-access
     expect(document.querySelector('.su-hb__latency')).toHaveTextContent('—');
   });
 

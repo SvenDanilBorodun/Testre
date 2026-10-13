@@ -6,6 +6,9 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: hook classes, custom properties and the DOM shape. */
+
 import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import Key from '../Key';
@@ -27,9 +30,7 @@ describe('Key', () => {
   it('draws a leading icon and a key label; the label is part of the name (as on the Aufnahme bar)', () => {
     render(<Key icon="play" kbd="Leertaste" variant="signal">Aufnahme starten</Key>);
     const b = screen.getByRole('button', { name: /^Aufnahme starten\s*Leertaste$/ });
-    // eslint-disable-next-line testing-library/no-node-access
     expect(b.querySelector('svg[data-icon="play"]')).not.toBeNull();
-    // eslint-disable-next-line testing-library/no-node-access
     expect(b.querySelector('kbd.su-kbd')).toHaveTextContent('Leertaste');
   });
 
@@ -74,7 +75,6 @@ describe('RoundKey', () => {
     render(<RoundKey icon="home" label="Start" />);
     const b = screen.getByRole('button', { name: 'Start' });
     expect(b).toHaveClass('su-rkey', 'su-rkey--labelled');
-    // eslint-disable-next-line testing-library/no-node-access
     expect(b.querySelector('.su-rkey__label')).toHaveTextContent('Start');
     expect(err).not.toHaveBeenCalled();
   });
@@ -93,11 +93,9 @@ describe('RoundKey', () => {
     render(<RoundKey icon="play" aria-label="Abspielen" size={60} on />);
     const b = screen.getByRole('button', { name: 'Abspielen' });
     expect(b).toHaveClass('su-rkey--on');
-    // eslint-disable-next-line testing-library/no-node-access
     const disc = b.querySelector('.su-rkey__disc');
     expect(disc.style.width).toBe('60px');
     expect(disc.style.height).toBe('60px');
-    // eslint-disable-next-line testing-library/no-node-access
     const svg = disc.querySelector('svg[data-icon="play"]');
     expect(svg.getAttribute('width')).toBe(String(Math.round(60 * 0.38)));
   });

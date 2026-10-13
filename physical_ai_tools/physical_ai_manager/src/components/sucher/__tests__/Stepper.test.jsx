@@ -6,6 +6,9 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: hook classes, custom properties and the DOM shape. */
+
 // The Stepper primitive (spec §4.7, D16): the Aufnahme page's TaskCard
 // stepper DOM, plus ↑/↓ inside the control and the wheel over the NUMBER only.
 
@@ -36,7 +39,7 @@ function renderStepper(props = {}) {
 
 describe('Stepper', () => {
   it('the DOM is TaskCard\'s stepper DOM (only the su-stp class is added)', () => {
-    const tc = render(
+    const view = render(
       <TaskCard
         labels={{
           title: 'Aufgabe', chipLocked: 'gesperrt', chipEditable: 'bearbeitbar', name: 'Aufgabenname',
@@ -49,11 +52,9 @@ describe('Stepper', () => {
         onChange={() => {}}
       />,
     );
-    // eslint-disable-next-line testing-library/no-node-access
-    const theirs = tc.container.querySelector('.rec-stp').outerHTML;
-    tc.unmount();
+    const theirs = view.container.querySelector('.rec-stp').outerHTML;
+    view.unmount();
     const { container } = renderStepper({ className: 'rec-stp' });
-    // eslint-disable-next-line testing-library/no-node-access
     const ours = container.querySelector('.su-stp');
     expect(ours).toHaveClass('rec-stp');
     expect(ours.outerHTML.replace('class="su-stp rec-stp"', 'class="rec-stp"')).toBe(theirs);
@@ -145,7 +146,6 @@ describe('Stepper', () => {
   it('the number rolls when it changes (aria-hidden columns, the output keeps its name)', () => {
     const { container, rerender } = renderStepper();
     rerender(<Stepper {...S} value={21} decLabel="d" incLabel="i" onChange={() => {}} />);
-    // eslint-disable-next-line testing-library/no-node-access
     expect(container.querySelector('.su-roll__cols')).toHaveAttribute('aria-hidden', 'true');
     expect(screen.getByRole('status', { name: 'Episode' })).toBeInTheDocument();
   });

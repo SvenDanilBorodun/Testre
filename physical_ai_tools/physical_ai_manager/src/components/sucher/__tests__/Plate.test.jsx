@@ -6,6 +6,9 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: hook classes, custom properties and the DOM shape. */
+
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 import Plate from '../Plate';
@@ -54,9 +57,9 @@ describe('Screen', () => {
     expect(container.firstChild).toHaveClass('su-screen--power');
     rerender(<Screen power={false}>x</Screen>);
     expect(container.firstChild).toHaveClass('su-screen--power');
-    const off = render(<Screen>y</Screen>);
-    off.rerender(<Screen power>y</Screen>);
-    expect(off.container.firstChild).not.toHaveClass('su-screen--power');
+    const view = render(<Screen>y</Screen>);
+    view.rerender(<Screen power>y</Screen>);
+    expect(view.container.firstChild).not.toHaveClass('su-screen--power');
   });
 });
 
@@ -94,7 +97,6 @@ describe('BrandMark', () => {
     const mark = screen.getByRole('img', { name: 'EduBotics' });
     expect(mark.style.width).toBe('44px');
     expect(mark.style.getPropertyValue('--s')).toBe('44px');
-    // eslint-disable-next-line testing-library/no-node-access
     const bars = mark.querySelectorAll('.su-brand__bar');
     expect(bars).toHaveLength(4);
     expect([...bars].map((b) => b.style.height)).toEqual(['30%', '45%', '62%', '80%']);

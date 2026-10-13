@@ -6,6 +6,9 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: hook classes, custom properties and the DOM shape. */
+
 // EbUI is shared with the teacher web build (spec §3.4): every component keeps
 // its Tailwind classes and gains stable hook classes the student „Sucher" look
 // restyles under :root[data-ui='sucher']. Btn releases the focus after a
@@ -53,13 +56,10 @@ describe('EbUI hook classes', () => {
     const h = screen.getByRole('heading', { name: 'Gesundheit' });
     expect(h).toHaveClass('eb-card__title', 'text-sm', 'font-semibold');
     expect(h).not.toHaveClass('eb-card__title--serif');
-    // eslint-disable-next-line testing-library/no-node-access
     const card = h.closest('section');
     expect(card).toHaveClass('eb-card', 'bg-white', 'shadow-soft');
-    // eslint-disable-next-line testing-library/no-node-access
     expect(card.querySelector('header')).toHaveClass('eb-card__head', 'border-b');
     expect(screen.getByText('Zustand')).toHaveClass('eb-card__sub');
-    // eslint-disable-next-line testing-library/no-node-access
     expect(card.querySelector('.eb-card__body')).toHaveClass('p-5');
     rerender(<Card title={<>Deine <em>Arbeit</em></>} titleStyle="serif" padded={false}>x</Card>);
     expect(screen.getByRole('heading', { name: 'Deine Arbeit' })).toHaveClass('eb-card__title--serif');
@@ -68,7 +68,6 @@ describe('EbUI hook classes', () => {
   it('Pill: tone hooks and the dot hook', () => {
     const { container, rerender } = render(<Pill tone="success" dot>Bereit</Pill>);
     expect(container.firstChild).toHaveClass('eb-pill', 'eb-pill--success', 'rounded-full');
-    // eslint-disable-next-line testing-library/no-node-access
     expect(container.querySelector('.eb-pill__dot')).not.toBeNull();
     rerender(<Pill tone="nope">x</Pill>);
     expect(container.firstChild).toHaveClass('eb-pill--neutral');
@@ -100,9 +99,7 @@ describe('EbUI hook classes', () => {
     expect(screen.getByText('+1')).toHaveClass('eb-stat__trend');
     expect(screen.getByText('12')).toHaveClass('eb-stat__value');
     expect(screen.getByText('heute')).toHaveClass('eb-stat__trend');
-    // eslint-disable-next-line testing-library/no-node-access
     expect(document.querySelector('.eb-progress > .eb-progress__fill').style.width).toBe('40%');
-    // eslint-disable-next-line testing-library/no-node-access
     expect(document.querySelector('.eb-divider')).toHaveClass('w-px');
   });
 

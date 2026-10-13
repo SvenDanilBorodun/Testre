@@ -52,12 +52,15 @@ describe('Stepper', () => {
         onChange={() => {}}
       />,
     );
-    const theirs = view.container.querySelector('.rec-stp').outerHTML;
+    // TaskCard renders this primitive itself, so both sides carry su-stp: normalise both, and the
+    // comparison still proves the primitive's DOM is TaskCard's stepper DOM plus that one class.
+    const strip = (html) => html.replace('class="su-stp rec-stp"', 'class="rec-stp"');
+    const theirs = strip(view.container.querySelector('.rec-stp').outerHTML);
     view.unmount();
     const { container } = renderStepper({ className: 'rec-stp' });
     const ours = container.querySelector('.su-stp');
     expect(ours).toHaveClass('rec-stp');
-    expect(ours.outerHTML.replace('class="su-stp rec-stp"', 'class="rec-stp"')).toBe(theirs);
+    expect(strip(ours.outerHTML)).toBe(theirs);
   });
 
   it('clicks step by one and stop at the limits', () => {

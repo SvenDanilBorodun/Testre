@@ -83,11 +83,11 @@ function StartupGateRouter({ children }) {
 // seamless on a non-Pi rig (splash -> StartupGateImpl).
 function BootSplash() {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-white">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--su-body)]">
       <div className="flex flex-col items-center gap-6">
         <div className="flex flex-col items-center gap-2">
-          <h1 className="text-3xl font-bold text-gray-800">EduBotics</h1>
-          <p className="text-sm text-gray-500">System wird gestartet...</p>
+          <h1 className="su-serif text-[56px] leading-none text-[var(--su-ink)]">EduBotics</h1>
+          <p className="text-sm text-[var(--ink-2)]">System wird gestartet...</p>
         </div>
         <Spinner />
       </div>
@@ -172,14 +172,14 @@ function PiStartupGate({ children }) {
     <>
       {children}
       {overlayVisible && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-white">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--su-body)]">
           <div className="flex flex-col items-center gap-8">
             <div className="flex flex-col items-center gap-2">
-              <h1 className="text-3xl font-bold text-gray-800">EduBotics</h1>
-              <p className="text-sm text-gray-500">Roboter wird verbunden...</p>
+              <h1 className="su-serif text-[56px] leading-none text-[var(--su-ink)]">EduBotics</h1>
+              <p className="text-sm text-[var(--ink-2)]">Roboter wird verbunden...</p>
             </div>
 
-            <div className="flex flex-col gap-4 bg-gray-50 rounded-2xl px-8 py-6 shadow-lg border border-gray-100 min-w-80">
+            <div className="su-plate su-plate--plate flex flex-col gap-4 px-8 py-6 min-w-80">
               <ProgressStep label="Verbindung zum Roboter..." done={connected} />
               <ProgressStep label="Dienste werden initialisiert..." done={settled} />
             </div>
@@ -190,17 +190,17 @@ function PiStartupGate({ children }) {
                     (same-origin /rosbridge proxy) is unreachable from the browser
                     — the server container still initialising, or a middlebox
                     breaking WebSocket upgrades. Never the Windows „Docker prüfen". */}
-                <p className="text-sm text-orange-600">{PI_PORT_BLOCKED_HINT}</p>
+                <p className="text-sm text-[color:var(--amber)]">{PI_PORT_BLOCKED_HINT}</p>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={goToSystem}
-                    className="px-4 py-2 bg-teal-500 text-white rounded-md text-sm font-medium hover:bg-teal-600 transition-colors"
+                    className="su-key su-key--signal su-key--sm"
                   >
                     Zum System-Fenster
                   </button>
                   <button
                     onClick={handleRetry}
-                    className="px-4 py-2 bg-white text-teal-600 border border-teal-500 rounded-md text-sm font-medium hover:bg-teal-50 transition-colors"
+                    className="su-key su-key--sm"
                   >
                     Erneut versuchen
                   </button>
@@ -301,12 +301,12 @@ function StartupGateImpl({ children }) {
         <div className="flex flex-col items-center gap-8">
           {/* Header */}
           <div className="flex flex-col items-center gap-2">
-            <h1 className="text-3xl font-bold text-gray-800">EduBotics</h1>
-            <p className="text-sm text-gray-500">System wird gestartet...</p>
+            <h1 className="su-serif text-[56px] leading-none text-[var(--su-ink)]">EduBotics</h1>
+            <p className="text-sm text-[var(--ink-2)]">System wird gestartet...</p>
           </div>
 
           {/* Progress steps */}
-          <div className="flex flex-col gap-4 bg-gray-50 rounded-2xl px-8 py-6 shadow-lg border border-gray-100 min-w-80">
+          <div className="su-plate su-plate--plate flex flex-col gap-4 px-8 py-6 min-w-80">
             <ProgressStep label="Verbindung zum ROS-System..." done={rosbridgeConnected} />
             <ProgressStep label="Dienste werden initialisiert..." done={settled} />
           </div>
@@ -314,13 +314,13 @@ function StartupGateImpl({ children }) {
           {/* Timeout hint */}
           {timedOut && !settled && (
             <div className="flex flex-col items-center gap-3 max-w-sm text-center">
-              <p className="text-sm text-orange-600">
+              <p className="text-sm text-[color:var(--amber)]">
                 Das System braucht ungewöhnlich lange. Bitte prüfe ob Docker Desktop läuft und
                 alle Container gestartet sind.
               </p>
               <button
                 onClick={handleRetry}
-                className="px-4 py-2 bg-teal-500 text-white rounded-md text-sm font-medium hover:bg-teal-600 transition-colors"
+                className="su-key su-key--signal su-key--sm"
               >
                 Erneut versuchen
               </button>

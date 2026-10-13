@@ -43,6 +43,8 @@ import { useSelector } from 'react-redux';
 
 import HeartbeatStatus from '../components/HeartbeatStatus';
 import { Pill, SectionHeader } from '../components/EbUI';
+import { Readout } from '../components/sucher';
+import '../components/Home/home.css';
 import ActivationCard from '../components/Home/ActivationCard';
 import HfTokenCard from '../components/Home/HfTokenCard';
 import RobotHero from '../components/Home/RobotHero';
@@ -66,6 +68,9 @@ export default function HomePage() {
   const workgroupName = useSelector((state) => state.auth.workgroupName);
   const robotProfile = useSelector((state) => state.tasks.taskStatus.robotProfile);
   const robotType = useSelector((state) => state.tasks.taskStatus.robotType);
+  // Layout only: a claimed Jetson hides the activation card (it renders null),
+  // and the Health-Check then takes both rows beside the hero.
+  const jetsonConnected = useSelector((state) => state.jetson?.status === 'connected');
 
   const cloudOnly = isCloudOnlyMode();
   // Held here rather than in either consumer: the hero's dot and the
@@ -84,12 +89,13 @@ export default function HomePage() {
 
   return (
     <div className="h-full w-full overflow-y-auto">
-      <div className="eb-shell">
+      <div className="eb-shell su-home">
         <SectionHeader
-          eyebrow="Startseite"
-          title={`${getGreeting()}, ${firstName}.`}
-          right={!cloudOnly ? <HeartbeatStatus /> : <Pill tone="neutral">Cloud-Modus</Pill>}
-          className="mb-5 md:mb-6"
+          size="xl"
+          eyebrow={<><span aria-hidden="true">01 · </span>Startseite</>}
+          title={<>{getGreeting()}<em>, {firstName}.</em></>}
+          right={!cloudOnly ? <HeartbeatStatus /> : <Readout size="md">Cloud-Modus</Readout>}
+          className="mb-5 md:mb-6 items-end"
         />
 
         {/* Identity chips. Rendered only when the profile actually supplied
@@ -100,7 +106,20 @@ export default function HomePage() {
           </div>
         )}
 
-        <div className="grid grid-cols-12 gap-4 md:gap-6">
+        {/* DOM order Hero, Activation, Token, Health, Work (the text order the
+            tests read: activation before token before health); from lg the grid
+            PLACES them like the board — hero left over two rows, activation and
+            health beside it, token and work below. */}
+        <div className="su-home__grid grid grid-cols-12 gap-4 md:gap-6">
+          {/* In cloud mode there is no robot to show, so the hero would be a
+              picture of nothing. The health card carries the mode instead and
+              „Deine Arbeit" — which is cloud data — sits beside it. */}
+          {!cloudOnly && (
+            <div className="su-home__hero col-span-12 lg:col-start-1 lg:col-end-8 lg:row-start-1 lg:row-end-3">
+              <RobotHero jointsLive={jointsLive} />
+            </div>
+          )}
+
           {/* The TWO controls on this page, and the reason the page is allowed
               them. „Roboter aktivieren": bringing the environment up no longer
               moves the arm, so something has to. „Hugging-Face-Token": the
@@ -112,30 +131,41 @@ export default function HomePage() {
               page documents is untouched. In cloud mode there is no robot to
               activate and none to give a token to. */}
           {!cloudOnly && (
-            <div className="col-span-12">
+            <div
+              className={
+                jetsonConnected
+                  ? 'hidden'
+                  : 'col-span-12 lg:col-start-8 lg:col-end-13 lg:row-start-1'
+              }
+            >
               <ActivationCard />
             </div>
           )}
           {!cloudOnly && (
-            <div className="col-span-12">
+            <div className="col-span-12 lg:col-start-1 lg:col-end-6 lg:row-start-3">
               <HfTokenCard />
             </div>
           )}
 
-          {/* In cloud mode there is no robot to show, so the hero would be a
-              picture of nothing. The health card carries the mode instead and
-              „Deine Arbeit" — which is cloud data — takes the full width. */}
-          {!cloudOnly && (
-            <div className="col-span-12 lg:col-span-8">
-              <RobotHero jointsLive={jointsLive} />
-            </div>
-          )}
-
-          <div className="col-span-12 lg:col-span-4">
+          <div
+            className={
+              cloudOnly
+                ? 'col-span-12 lg:col-span-5'
+                : jetsonConnected
+                  ? 'col-span-12 lg:col-start-8 lg:col-end-13 lg:row-start-1 lg:row-end-3'
+                  : 'col-span-12 lg:col-start-8 lg:col-end-13 lg:row-start-2'
+            }
+          >
             <HealthCard jointsLive={jointsLive} cloudOnly={cloudOnly} />
           </div>
 
-          <div className="col-span-12">
+          <div
+            className={
+              cloudOnly
+                ? 'col-span-12 lg:col-span-7'
+                : 'col-span-12 lg:col-start-6 lg:col-end-13 lg:row-start-3'
+            }
+          >
             <WorkCard work={work} loading={loading} />
           </div>
         </div>
@@ -145,7 +175,7 @@ export default function HomePage() {
             does not know (an unpinned `?_v=latest`, Pi mode, the teacher web
             app) — in which case it says nothing rather than the SPA's own
             package version, which is what it used to print. */}
-        <div className="mt-6 md:mt-8 flex flex-wrap gap-x-5 gap-y-1 text-[11px] font-mono text-[var(--ink-4)]">
+        <div className="su-lab mt-6 md:mt-8 flex flex-wrap gap-x-6 gap-y-1">
           {version && <span>EduBotics {version}</span>}
           {(robotProfile || robotType) && <span>{robotProfile || robotType}</span>}
           {build && build !== 'dev' && <span>Build {build}</span>}

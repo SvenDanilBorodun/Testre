@@ -6,6 +6,11 @@ import { cancelCloudTraining } from '../services/cloudTrainingApi';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { setSelectedTrainingId } from '../features/training/trainingSlice';
 import Icon from './icons/Icon';
+import { Led } from './sucher';
+import { releasePointerFocus } from './sucher/pointerFocus';
+
+// The status light of a model card (Sucher: a light + a caption).
+const STATUS_LED = { queued: 'warn', running: 'sig', succeeded: 'ok', failed: 'rec', canceled: 'off' };
 
 const STATUS_CONFIG = {
   queued: { icon: 'hourglass', color: 'text-gray-500', bg: 'bg-gray-100', label: 'In Warteschlange' },
@@ -27,77 +32,69 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
       + ', ' + d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
   };
 
+  const pct = isActive && job.total_steps > 0
+    ? Math.min(100, ((job.current_step || 0) / job.total_steps) * 100)
+    : 0;
+
   return (
     <div
-      className={clsx(
-        'border rounded-xl p-4 transition-all cursor-pointer',
-        selected
-          ? 'border-[color:var(--accent)] ring-2 ring-[color:var(--accent)] ring-offset-1 shadow-md bg-white'
-          : isActive
-            ? 'border-teal-300 bg-teal-50/30 shadow-md hover:shadow-lg'
-            : 'border-gray-200 bg-white shadow-sm hover:shadow-md',
-      )}
+      className={clsx('su-model', selected && 'su-model--selected', isActive && 'su-model--active')}
       onClick={() => onSelect(job.id)}
       title="Als Live-Ansicht oben auswählen"
     >
-      {/* Header: Status + Model Type */}
-      <div className="flex items-center justify-between mb-3">
-        <span className={clsx('inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold', config.bg, config.color)}>
-          <Icon name={config.icon} size={14} className={config.spin ? 'animate-spin' : ''} />
-          {config.label}
+      {/* Header: Status + Live view */}
+      <div className="su-model__head">
+        <span className="su-model__status">
+          <Led tone={STATUS_LED[job.status] || 'off'} pulse={job.status === 'running' ? 'breathe' : 'none'} />
+          <span className="su-lab">{config.label}</span>
         </span>
-        <div className="flex items-center gap-2">
-          {selected && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[var(--accent-wash)] text-[var(--accent-ink)]">
-              <Icon name="zap" size={10} /> Live-Ansicht
-            </span>
-          )}
-          <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full font-mono">
-            {job.model_type}
+        {selected && (
+          <span className="su-model__live">
+            <Icon name="zap" size={11} /> Live-Ansicht
           </span>
-        </div>
+        )}
       </div>
 
-      {/* Model Name */}
-      <div className="mb-2">
+      {/* Model name in a thin-bezel screen strip, the policy under it */}
+      <div className="su-model__name su-screen su-screen--thin">
         {isSucceeded ? (
           <a
             href={`https://huggingface.co/${job.model_name}`}
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="text-sm font-semibold text-teal-700 hover:text-teal-900 hover:underline flex items-center gap-1"
+            className="su-model__title su-model__title--link"
+            title={job.model_name}
           >
-            {job.model_name}
-            <Icon name="externalLink" size={14} className="flex-shrink-0" />
+            <span className="truncate">{job.model_name}</span>
+            <Icon name="externalLink" size={13} className="flex-shrink-0" />
           </a>
         ) : (
-          <span className="text-sm font-semibold text-gray-700">{job.model_name}</span>
+          <span className="su-model__title" title={job.model_name}>
+            <span className="truncate">{job.model_name}</span>
+          </span>
         )}
+        <span className="su-lab">{job.model_type}</span>
       </div>
 
       {/* Dataset */}
-      <div className="text-xs text-gray-500 mb-3">
-        <span className="text-gray-400">Datensatz: </span>
-        <span className="font-medium text-gray-600">{job.dataset_name}</span>
+      <div className="su-model__meta">
+        Datensatz: <span className="text-[var(--ink)]">{job.dataset_name}</span>
       </div>
 
       {/* Training Progress (for active jobs) */}
       {isActive && job.total_steps > 0 && (
-        <div className="mb-3">
-          <div className="flex justify-between text-xs text-gray-500 mb-1">
-            <span>Schritt {job.current_step?.toLocaleString('de-DE') || 0} / {job.total_steps?.toLocaleString('de-DE')}</span>
+        <div className="su-model__progress">
+          <div className="flex justify-between gap-2 su-model__meta">
+            <span>Schritt <span className="su-dot">{job.current_step?.toLocaleString('de-DE') || 0} / {job.total_steps?.toLocaleString('de-DE')}</span></span>
             {job.current_loss != null && (
-              <span>Loss: {job.current_loss.toFixed(4)}</span>
+              <span>Loss: <span className="su-dot">{job.current_loss.toFixed(4)}</span></span>
             )}
           </div>
-          <div className="w-full bg-gray-200 rounded-full h-2">
-            <div
-              className="bg-teal-500 h-2 rounded-full transition-all duration-500"
-              style={{ width: `${Math.min(100, ((job.current_step || 0) / job.total_steps) * 100)}%` }}
-            />
+          <div className="su-model__track">
+            <div className="su-model__fill" style={{ width: `${pct}%` }} />
           </div>
-          <div className="text-xs text-gray-400 mt-1 text-right">
+          <div className="su-model__meta text-right">
             {Math.round(((job.current_step || 0) / job.total_steps) * 100)}%
           </div>
         </div>
@@ -105,13 +102,13 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
 
       {/* Waiting indicator (queued, no progress yet) */}
       {isActive && (!job.total_steps || job.total_steps === 0) && (
-        <div className="text-xs text-gray-400 mb-3 italic">
+        <div className="su-model__meta italic">
           Warte auf GPU-Worker...
         </div>
       )}
 
       {/* Date */}
-      <div className="text-xs text-gray-400 mb-3">
+      <div className="su-model__meta">
         {formatDate(job.requested_at)}
         {job.terminated_at && job.status !== 'queued' && job.status !== 'running' && (
           <span> — {formatDate(job.terminated_at)}</span>
@@ -120,26 +117,22 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
 
       {/* Error message */}
       {job.status === 'failed' && job.error_message && (
-        <div className="text-xs text-red-500 bg-red-50 border border-red-200 rounded-lg p-2 mb-3">
+        <div className="su-model__error">
           <span className="font-medium">Fehler: </span>
           <span className="break-all">{job.error_message.length > 150 ? job.error_message.substring(0, 150) + '...' : job.error_message}</span>
-          <div className="mt-1 text-red-400 italic">Trainingsguthaben wurde erstattet.</div>
+          <div className="mt-1 italic">Trainingsguthaben wurde erstattet.</div>
         </div>
       )}
 
       {/* Actions */}
-      <div className="flex items-center gap-2 pt-2 border-t border-gray-100" onClick={(e) => e.stopPropagation()}>
+      <div className="su-model__actions" onClick={(e) => e.stopPropagation()}>
         {isSucceeded && (
           <>
             <button
-              onClick={() => onDownload(job.model_name)}
+              type="button"
+              onClick={(e) => { releasePointerFocus(e); onDownload(job.model_name); }}
               disabled={downloadingModel === job.model_name || !rosConnected}
-              className={clsx(
-                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
-                rosConnected
-                  ? 'bg-teal-600 text-white hover:bg-teal-700 disabled:bg-teal-300'
-                  : 'bg-gray-200 text-gray-500 cursor-not-allowed'
-              )}
+              className="su-key su-key--signal su-key--sm"
               title={rosConnected ? 'Modell auf Roboter herunterladen' : 'Roboter-Umgebung muss gestartet sein'}
             >
               <Icon name="download" size={16} className={downloadingModel === job.model_name ? 'animate-pulse' : ''} />
@@ -149,27 +142,33 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
               href={`https://huggingface.co/${job.model_name}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
+              className="su-key su-key--sm"
             >
               <Icon name="externalLink" size={14} />
               HuggingFace
             </a>
             <button
-              onClick={() => {
+              type="button"
+              onClick={(e) => {
+                releasePointerFocus(e);
                 navigator.clipboard.writeText(job.model_name);
                 toast.success('Modell-ID kopiert');
               }}
-              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+              className="su-rkey"
               title="Modell-ID kopieren"
+              aria-label="Modell-ID kopieren"
             >
-              <Icon name="copy" size={14} />
+              <span className="su-rkey__disc" style={{ width: 36, height: 36 }}>
+                <Icon name="copy" size={14} />
+              </span>
             </button>
           </>
         )}
         {isActive && (
           <button
-            onClick={() => onCancel(job.id)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-100 text-red-600 hover:bg-red-200 transition-colors"
+            type="button"
+            onClick={(e) => { releasePointerFocus(e); onCancel(job.id); }}
+            className="su-key su-key--flat su-key--sm su-model__cancel"
           >
             <Icon name="cancel" size={14} />
             Abbrechen
@@ -232,94 +231,96 @@ export default function MyModels({ jobs = [], loading = false, refetch, isRealti
   const activeCount = jobs.filter((j) => j.status === 'queued' || j.status === 'running').length;
   const failedCount = jobs.filter((j) => j.status === 'failed' || j.status === 'canceled').length;
 
-  const classCard = clsx(
-    'bg-white', 'border', 'border-gray-200', 'rounded-2xl', 'shadow-lg', 'p-6', 'w-full'
-  );
-
-  const filterButton = (key, activeColor) =>
-    clsx(
-      'px-3 py-1 rounded-full text-xs font-medium transition-colors',
-      filter === key
-        ? `${activeColor} shadow-sm`
-        : 'text-gray-500 hover:bg-gray-100'
-    );
+  // The filter is a light segmented control (Sucher); same buttons, same
+  // handlers. A mouse click gives the focus back (D11).
+  const filterProps = (key) => ({
+    type: 'button',
+    'aria-pressed': filter === key,
+    onClick: (e) => {
+      releasePointerFocus(e);
+      setFilter(key);
+    },
+  });
 
   return (
-    <div className={classCard}>
+    <div className="su-models">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <h2 className="text-xl font-bold text-gray-800">Meine Modelle</h2>
+      <div className="flex items-start justify-between gap-4 mb-4">
+        <div className="flex items-baseline gap-4 flex-wrap min-w-0">
+          <h2 className="su-serif su-models__title">Meine <em>Modelle</em></h2>
+          <span className="su-lab">Lokal + in der Cloud</span>
+        </div>
+        <div className="flex items-center gap-4 shrink-0">
           {isRealtime && (
-            <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--accent-ink)] bg-[var(--accent-wash)] px-2 py-0.5 rounded-full">
-              <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-pulse" />
-              Live
+            <span className="inline-flex items-center gap-2">
+              <Led tone="ok" pulse="breathe" />
+              <span className="su-lab">Live</span>
             </span>
           )}
+          <button
+            type="button"
+            onClick={(e) => { releasePointerFocus(e); refetch?.(); }}
+            className="su-rkey"
+            disabled={loading}
+            title="Aktualisieren"
+            aria-label="Aktualisieren"
+          >
+            <span className="su-rkey__disc" style={{ width: 40, height: 40 }}>
+              <Icon name="refresh" size={16} className={loading ? 'animate-spin' : ''} />
+            </span>
+          </button>
         </div>
-        <button
-          onClick={() => refetch?.()}
-          className="text-gray-500 hover:text-gray-700 p-1 rounded-lg hover:bg-gray-100 transition-colors"
-          disabled={loading}
-          title="Aktualisieren"
-        >
-          <Icon name="refresh" size={20} className={loading ? 'animate-spin' : ''} />
-        </button>
       </div>
 
-      {/* Stats bar */}
-      <div className="flex items-center gap-3 mb-4 text-xs">
-        <span className="text-gray-400">{jobs.length} gesamt</span>
-        {succeededCount > 0 && (
-          <span className="text-green-600 font-medium">{succeededCount} erfolgreich</span>
-        )}
-        {activeCount > 0 && (
-          <span className="text-teal-600 font-medium">{activeCount} aktiv</span>
-        )}
-        {failedCount > 0 && (
-          <span className="text-red-400">{failedCount} fehlgeschlagen</span>
+      {/* Stats bar + filter */}
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <div className="flex items-center gap-1.5 text-[13.5px] text-[var(--ink-2)] flex-wrap">
+          <span>{jobs.length} gesamt</span>
+          {succeededCount > 0 && <span>· {succeededCount} erfolgreich</span>}
+          {activeCount > 0 && <span>· {activeCount} aktiv</span>}
+          {failedCount > 0 && <span>· {failedCount} fehlgeschlagen</span>}
+        </div>
+
+        {/* Filter tabs */}
+        {jobs.length > 0 && (
+          <div className="su-seg su-seg--light su-seg--sm" role="group" aria-label="Modelle filtern">
+            <button {...filterProps('all')}>
+              Alle ({jobs.length})
+            </button>
+            <button {...filterProps('succeeded')}>
+              Erfolgreich ({succeededCount})
+            </button>
+            {activeCount > 0 && (
+              <button {...filterProps('active')}>
+                Aktiv ({activeCount})
+              </button>
+            )}
+            {failedCount > 0 && (
+              <button {...filterProps('failed')}>
+                Fehlgeschlagen ({failedCount})
+              </button>
+            )}
+          </div>
         )}
       </div>
-
-      {/* Filter tabs */}
-      {jobs.length > 0 && (
-        <div className="flex items-center gap-2 mb-4 pb-3 border-b border-gray-100">
-          <button className={filterButton('all', 'bg-gray-200 text-gray-800')} onClick={() => setFilter('all')}>
-            Alle ({jobs.length})
-          </button>
-          <button className={filterButton('succeeded', 'bg-green-100 text-green-700')} onClick={() => setFilter('succeeded')}>
-            Erfolgreich ({succeededCount})
-          </button>
-          {activeCount > 0 && (
-            <button className={filterButton('active', 'bg-teal-100 text-teal-700')} onClick={() => setFilter('active')}>
-              Aktiv ({activeCount})
-            </button>
-          )}
-          {failedCount > 0 && (
-            <button className={filterButton('failed', 'bg-red-100 text-red-600')} onClick={() => setFilter('failed')}>
-              Fehlgeschlagen ({failedCount})
-            </button>
-          )}
-        </div>
-      )}
 
       {/* Info banner */}
       {!rosConnected && succeededCount > 0 && (
-        <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+        <div className="text-[13px] text-[color:var(--amber)] bg-[var(--amber-wash)] rounded-[14px] p-3 mb-4">
           Starte die Roboter-Umgebung, um Modelle herunterzuladen und auf der Inferenz-Seite zu verwenden.
         </div>
       )}
 
       {/* Model cards grid */}
       {filteredJobs.length === 0 ? (
-        <div className="text-center py-8 text-gray-400">
+        <div className="text-center py-8 text-[var(--ink-2)]">
           {jobs.length === 0
             ? 'Noch keine Trainingsaufträge. Starte dein erstes Training oben!'
             : `Keine Modelle mit Filter "${filter === 'succeeded' ? 'Erfolgreich' : filter === 'active' ? 'Aktiv' : 'Fehlgeschlagen'}"`
           }
         </div>
       ) : (
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 max-h-[500px] overflow-y-auto pr-1">
+        <div className="su-models__grid">
           {filteredJobs.map((job) => (
             <ModelCard
               key={job.id}

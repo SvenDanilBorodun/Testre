@@ -32,6 +32,7 @@ import React, { useEffect, useState } from 'react';
 import clsx from 'clsx';
 
 import Icon from '../icons/Icon';
+import { robotSpriteUrl } from '../sucher/RobotIcon';
 import { cloudCopy, fill } from './cloudCopy';
 import './cloudWait.css';
 
@@ -134,16 +135,20 @@ export function useElapsedSeconds(startedAt) {
   return seconds;
 }
 
-function Picture() {
+function Picture({ robotProfile, reduced }) {
+  // The robot's sprite (the RobotIcon markup, driven by this card's own
+  // reduced-motion state so the card keeps one matchMedia listener).
   return (
     <div className="ciw-picture" aria-hidden="true" data-testid="cloud-wait-picture">
-      <span className="ciw-node">
-        <Icon name="robotArm" size={20} />
+      <span className="ciw-node ciw-node-robot">
+        <span className={clsx('su-robot', !reduced && 'su-robot--animate')} style={{ width: 40, height: 40 }}>
+          <img src={robotSpriteUrl(robotProfile)} loading="lazy" decoding="async" alt="" draggable="false" />
+        </span>
       </span>
       <span className="ciw-dots">
-        <Icon name="dot" size={7} className="ciw-dot" />
-        <Icon name="dot" size={7} className="ciw-dot" />
-        <Icon name="dot" size={7} className="ciw-dot" />
+        <Icon name="dot" size={8} className="ciw-dot" />
+        <Icon name="dot" size={8} className="ciw-dot" />
+        <Icon name="dot" size={8} className="ciw-dot" />
       </span>
       <span className="ciw-node ciw-node-cloud">
         <span className="ciw-halo" />
@@ -160,8 +165,11 @@ function Picture() {
  * @param {?number} [p.startedAt]     ms (Date.now()); the mount when absent
  * @param {number}  [p.attempt]       the page's current attempt (1 = the first)
  * @param {number}  [p.attempts]      attempts in total; without it no retry line
+ * @param {?string} [p.robotProfile]  the robot's profile id, for the sprite (Sucher)
  */
-export default function CloudWait({ kind = 'gpu', tone = 'light', startedAt = null, attempt = 1, attempts = null }) {
+export default function CloudWait({
+  kind = 'gpu', tone = 'light', startedAt = null, attempt = 1, attempts = null, robotProfile = null,
+}) {
   const texts = waitTexts(kind);
   const seconds = useElapsedSeconds(startedAt);
   const reduced = usePrefersReducedMotion();
@@ -177,7 +185,7 @@ export default function CloudWait({ kind = 'gpu', tone = 'light', startedAt = nu
       data-kind={kind === 'model' ? 'model' : 'gpu'}
       data-reduced-motion={reduced ? 'true' : 'false'}
     >
-      <Picture />
+      <Picture robotProfile={robotProfile} reduced={reduced} />
       <div className="ciw-text" role="status" aria-live="polite" aria-atomic="false">
         <div className="ciw-title">{texts.title}</div>
         <div className="ciw-sub">{texts.sub}</div>

@@ -18,6 +18,7 @@ import React, { useId } from 'react';
 import clsx from 'clsx';
 
 import Icon from '../icons/Icon';
+import { Led } from '../sucher';
 import { cloudCopy } from './cloudCopy';
 
 const ARCHIVE_PREFIX = 'EduBotics-Solutions/';
@@ -57,22 +58,22 @@ export default function CloudModelList({ jobs, loading, selectedId, disabled, lo
   const lockHintId = useId();
   return (
     <section aria-label={cloudCopy.models.title} className="flex flex-col gap-2">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--ink-3)]">{cloudCopy.models.title}</h3>
+      <h3 className="su-lab">{cloudCopy.models.title}</h3>
       {locked && rows.length > 0 && (
-        <div id={lockHintId} role="status" className="text-xs text-[var(--ink-3)]" data-testid="cloud-models-locked">
+        <div id={lockHintId} role="status" className="text-[13px] text-[var(--ink-2)]" data-testid="cloud-models-locked">
           {lockedReason}
         </div>
       )}
       {rows.length === 0 && loading && (
-        <div className="text-sm text-[var(--ink-3)] flex items-center gap-2">
+        <div className="text-sm text-[var(--ink-2)] flex items-center gap-2">
           <Icon name="loading" size={14} className="animate-spin" />
           {cloudCopy.models.loading}
         </div>
       )}
       {rows.length === 0 && !loading && (
-        <div className="text-sm text-[var(--ink-3)]">{cloudCopy.models.empty}</div>
+        <div className="text-sm text-[var(--ink-2)]">{cloudCopy.models.empty}</div>
       )}
-      <ul className="flex flex-col gap-1.5">
+      <ul className="flex flex-col gap-2">
         {rows.map((job) => {
           const isAct = job.model_type === 'act';
           const selected = job.id === selectedId;
@@ -90,26 +91,27 @@ export default function CloudModelList({ jobs, loading, selectedId, disabled, lo
                 title={lockedOut && isAct ? lockedReason : undefined}
                 onClick={() => { if (!locked) onSelect(job); }}
                 className={clsx(
-                  'w-full text-left px-3 py-2 rounded-[var(--radius-sm)] border transition',
-                  selected
-                    ? 'border-[color:var(--accent)] bg-[color:var(--accent-soft,rgba(16,185,129,0.08))]'
-                    : 'border-[var(--line)] bg-white hover:bg-[var(--bg-sunk)]',
-                  off && 'opacity-60 cursor-not-allowed hover:bg-white',
+                  'su-cmodel',
+                  selected && 'su-cmodel--on',
+                  off && 'su-cmodel--off',
                   inert && 'cursor-progress',
                 )}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="truncate font-medium text-[var(--ink)]">{shortName(job.model_name)}</span>
+                  <span className="flex items-center gap-2.5 min-w-0">
+                    <Led tone={selected ? 'sig' : 'off'} />
+                    <span className="truncate font-bold text-[var(--ink)]">{shortName(job.model_name)}</span>
+                  </span>
                   {job.workgroup_id && (
-                    <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-sunk)] text-[var(--ink-2)]">
+                    <span className="shrink-0 text-[11px] px-2 py-0.5 rounded-full bg-[var(--su-well)] text-[var(--ink-2)]">
                       {cloudCopy.models.group}
                     </span>
                   )}
                 </div>
-                <div className="mt-0.5 text-xs text-[var(--ink-3)] truncate">
+                <div className="su-cmodel__meta truncate">
                   {[job.dataset_name, formatDate(job.terminated_at)].filter(Boolean).join(' · ')}
                 </div>
-                {!isAct && <div className="mt-0.5 text-xs text-[var(--ink-3)]">{cloudCopy.models.notAct}</div>}
+                {!isAct && <div className="su-cmodel__meta">{cloudCopy.models.notAct}</div>}
               </button>
             </li>
           );

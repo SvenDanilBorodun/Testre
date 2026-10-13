@@ -16,6 +16,7 @@
 
 import React, { Suspense, useEffect, useRef, useState } from 'react';
 import Icon from '../icons/Icon';
+import Screen from '../sucher/Screen';
 import { releasePointerFocus } from '../Record/ActionBar';
 import { countRender } from '../../features/editDataset/renderProbe';
 import COPY from '../../features/editDataset/datenCopy';
@@ -121,7 +122,7 @@ function Stage({
   const showCams = view !== '3d';
   const click = (fn) => (e) => { releasePointerFocus(e); fn(); };
   return (
-    <div className="dat-stage">
+    <Screen power className="dat-stage">
       <div className="dat-stage-bar">
         <div className="dat-seg dat-dark" role="group" aria-label={COPY.player.viewLabel}>
           {[['cams', COPY.player.viewCams], ['3d', COPY.player.view3d], ['both', COPY.player.viewBoth]].map(([k, l]) => (
@@ -169,7 +170,7 @@ function Stage({
         ) : null}
       </div>
       {children}
-    </div>
+    </Screen>
   );
 }
 

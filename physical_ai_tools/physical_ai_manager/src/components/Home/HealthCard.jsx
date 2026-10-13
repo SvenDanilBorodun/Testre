@@ -38,7 +38,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { useSelector } from 'react-redux';
 
-import { Card, Pill } from '../EbUI';
+import { Card } from '../EbUI';
+import { Led, Readout } from '../sucher';
 import { useRosServiceCaller } from '../../hooks/useRosServiceCaller';
 import { usePiMode, PI_PORT_BLOCKED_HINT } from '../../utils/piMode';
 import { expectedCameraRoles } from '../../utils/robotIdentity';
@@ -46,13 +47,10 @@ import {
   deriveHealth, VERDICT_LABEL_DE, OK, WARN, BAD, READY, LIMITED, NOT_READY,
 } from '../../utils/homeHealth';
 
-const DOT_CLASS = {
-  [OK]: 'bg-[color:var(--success)]',
-  [WARN]: 'bg-[color:var(--amber)]',
-  [BAD]: 'bg-[color:var(--danger)]',
-};
+// Row light per state; unknown is the off light (never a colour, never a guess).
+const ROW_LED = { [OK]: 'ok', [WARN]: 'warn', [BAD]: 'rec' };
 
-const VERDICT_TONE = { [READY]: 'success', [LIMITED]: 'amber', [NOT_READY]: 'danger' };
+const VERDICT_LED = { [READY]: 'ok', [LIMITED]: 'warn', [NOT_READY]: 'rec' };
 
 /**
  * The German next step for a dead bridge, per platform.
@@ -161,22 +159,19 @@ export default function HealthCard({ jointsLive = null, cloudOnly = false }) {
   return (
     <Card
       title="Roboter-Zustand"
-      right={<Pill tone={VERDICT_TONE[health.verdict]} dot>{VERDICT_LABEL_DE[health.verdict]}</Pill>}
-      className="h-full"
+      right={(
+        <Readout size="sm" led={VERDICT_LED[health.verdict] || 'off'}>
+          {VERDICT_LABEL_DE[health.verdict]}
+        </Readout>
+      )}
+      className="su-health h-full"
     >
-      <ul className="-my-2">
+      <ul className="su-health__rows">
         {health.rows.map((row) => (
-          <li
-            key={row.key}
-            className="flex items-center gap-2.5 py-2 border-b border-dashed border-[var(--line)] last:border-b-0"
-          >
-            <span
-              className={clsx('w-[7px] h-[7px] rounded-full shrink-0',
-                DOT_CLASS[row.state] || 'bg-[var(--ink-4)]')}
-              aria-hidden="true"
-            />
-            <span className="text-sm text-[var(--ink-2)] flex-1 min-w-0">{row.label}</span>
-            <span className="font-mono text-xs text-[var(--ink-3)] text-right">{row.value}</span>
+          <li key={row.key} className="su-health__row">
+            <Led tone={ROW_LED[row.state] || 'off'} />
+            <span className="su-health__label">{row.label}</span>
+            <span className="su-health__value">{row.value}</span>
           </li>
         ))}
       </ul>
@@ -184,14 +179,14 @@ export default function HealthCard({ jointsLive = null, cloudOnly = false }) {
       {hint && (
         <div
           className={clsx(
-            'mt-4 rounded-[var(--radius)] p-3',
+            'su-health__hint',
             hint.tone === BAD
               ? 'bg-[var(--danger-wash)] text-[color:var(--danger)]'
               : 'bg-[var(--amber-wash)] text-[color:var(--amber)]',
           )}
         >
-          <div className="text-[13px] font-semibold leading-snug">{hint.title}</div>
-          {hint.body && <p className="text-[12.5px] leading-snug mt-1 opacity-90">{hint.body}</p>}
+          <div className="text-[13.5px] font-semibold leading-snug">{hint.title}</div>
+          {hint.body && <p className="text-[13px] leading-snug mt-1">{hint.body}</p>}
         </div>
       )}
     </Card>

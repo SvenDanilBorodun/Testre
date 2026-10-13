@@ -30,6 +30,8 @@ import CollisionModal from './components/CollisionModal';
 import PiUpdateGate from './components/PiUpdateGate';
 import StartupGate from './components/StartupGate';
 import { Avatar, LogoMark } from './components/EbUI';
+import { BrandMark } from './components/sucher';
+import './components/sucher-pages/shell.css';
 import packageJson from '../package.json';
 import { useRosTopicSubscription } from './hooks/useRosTopicSubscription';
 import { useHfUserList } from './hooks/useHfUserList';
@@ -436,7 +438,7 @@ function StudentApp() {
     // Daten 2.0 (spec §G1): the robot's datasets — nothing to show in cloud
     // mode (`hardwareOnly`), the mockup's database icon.
     { key: PageType.EDIT_DATASET, label: 'Daten', icon: 'database', onClick: handleEditDatasetPageNavigation, sep: true, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'editable' },
-    { key: PageType.WORKSHOP, label: 'Roboter Studio', icon: 'construction', onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'roboter_studio' },
+    { key: PageType.WORKSHOP, label: 'Roboter Studio', icon: 'blocks', onClick: handleWorkshopPageNavigation, hardwareOnly: true, jetsonIncompatible: true, capabilityKey: 'roboter_studio' },
     // Pi-only: the in-browser setup wizard (arms/cameras/token, Umgebung
     // starten, Update, Reset, Protokoll, Netzwerk-Check). Not hardwareOnly
     // (its own „Cloud-Modus" checkbox handles that) and not jetsonIncompatible
@@ -449,10 +451,6 @@ function StudentApp() {
     .filter((n) => !jetsonConnected || !n.jetsonIncompatible)
     .filter((n) => isCapabilityVisible(n, { jetsonConnected, caps }))
     .filter((n) => piMode || !n.piOnly);
-
-  // Aufnahme 2.0 is a light page in the Startseite language around its own
-  // dark stage; only Inferenz keeps the dark shell.
-  const isDarkPage = page === PageType.INFERENCE;
 
   // Who is signed in. On a shared Windows account this is the only answer to
   // "am I signed in as me?", so it is rendered as TEXT beside the control and
@@ -492,62 +490,27 @@ function StudentApp() {
 
   return (
     <StartupGate>
-      <div
-        className={clsx(
-          'flex h-screen w-screen overflow-hidden',
-          'flex-col sm:flex-row',
-          isDarkPage && 'dark-surface'
-        )}
-        style={isDarkPage ? { background: 'var(--dark-bg)' } : {}}
-      >
-        {/* Desktop / tablet rail */}
-        <aside
-          className={clsx(
-            'hidden sm:flex shrink-0 flex-col items-center py-4 md:py-5 gap-1',
-            'w-[64px] md:w-[88px]',
-            isDarkPage
-              ? 'border-r border-[color:var(--dark-line)]'
-              : 'bg-white border-r border-[var(--line)]'
-          )}
-        >
-          <div className="mb-3 md:mb-4">
-            <LogoMark size={22} />
+      <div className="su-shell flex h-screen w-screen overflow-hidden flex-col sm:flex-row">
+        {/* Desktop / tablet rail („Sucher": a well strip with round keys) */}
+        <aside className="su-rail hidden sm:flex shrink-0 flex-col items-center">
+          <div className="su-rail__brand">
+            <BrandMark size={64} />
           </div>
           {navItems.map((n) => {
             const active = page === n.key;
             return (
               <React.Fragment key={n.key}>
-                {n.sep && (
-                  <div
-                    className={clsx(
-                      'w-8 h-px my-2',
-                      isDarkPage ? 'bg-[color:var(--dark-line)]' : 'bg-[var(--line)]'
-                    )}
-                  />
-                )}
+                {n.sep && <div className="su-rail__sep" aria-hidden="true" />}
                 <button
                   onClick={navClick(n)}
                   title={n.label}
-                  className={clsx(
-                    'group w-12 md:w-[68px] py-2.5 md:py-3 rounded-[var(--radius)] flex flex-col items-center gap-1 md:gap-1.5 transition',
-                    active
-                      ? isDarkPage
-                        ? 'bg-white/[0.08] text-white'
-                        : 'bg-[var(--accent-wash)] text-[var(--accent-ink)]'
-                      : isDarkPage
-                      ? 'text-white/60 hover:bg-white/[0.05]'
-                      : 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]'
-                  )}
+                  aria-current={active ? 'page' : undefined}
+                  className={clsx('su-rail__nav', active && 'su-rail__nav--on')}
                 >
-                  <span
-                    className={clsx(
-                      'w-9 h-9 md:w-10 md:h-10 flex items-center justify-center rounded-[10px]',
-                      active && (isDarkPage ? 'bg-white/10' : 'bg-white/60')
-                    )}
-                  >
-                    <Icon name={n.icon} size={20} />
+                  <span className="su-rail__disc">
+                    <Icon name={n.icon} size={19} />
                   </span>
-                  <span className="hidden md:block text-[11px] font-medium">{n.label}</span>
+                  <span className="su-rail__label hidden md:block">{n.label}</span>
                 </button>
               </React.Fragment>
             );
@@ -566,17 +529,14 @@ function StudentApp() {
               `md:` like the nav LABELS are: the mobile header below is
               `sm:hidden`, so a `hidden md:block` here left the 640–767 px band
               — rail visible, header gone — with the e-mail as a tooltip only,
-              which is exactly what this is asserted not to be. Width tracks the
-              rail (`w-[64px] md:w-[88px]`) so the truncation stays inside it. */}
+              which is exactly what this is asserted not to be. The width tracks
+              the rail so the truncation stays inside it. */}
           {showLogout && identity && (
-            <div
-              title={identity}
-              className={clsx(
-                'w-[60px] md:w-[68px] px-1 mb-0.5 text-[9px] leading-tight text-center truncate',
-                isDarkPage ? 'text-white/50' : 'text-[var(--ink-4)]'
-              )}
-            >
-              {identity}
+            <div className="su-rail__who">
+              <Avatar name={identity} size={40} />
+              <div title={identity} className="su-rail__mail truncate">
+                {identity}
+              </div>
             </div>
           )}
           {showLogout && (
@@ -585,56 +545,32 @@ function StudentApp() {
               disabled={logoutBlocked}
               title={logoutTitle}
               aria-label="Abmelden"
-              className={clsx(
-                'w-12 md:w-[68px] py-2 mb-1 rounded-[var(--radius)] flex flex-col items-center gap-1 transition',
-                logoutBlocked && 'opacity-40 cursor-not-allowed',
-                isDarkPage
-                  ? 'text-white/60 hover:bg-white/[0.05]'
-                  : 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]'
-              )}
+              className="su-rail__nav su-rail__logout"
             >
-              <Avatar name={identity} size={26} />
-              <span className="hidden md:flex items-center gap-1 text-[11px] font-medium">
-                <Icon name="logout" size={13} /> Abmelden
+              <span className="su-rail__disc">
+                <Icon name="logout" size={16} />
               </span>
+              <span className="su-rail__label hidden md:block">Abmelden</span>
             </button>
           )}
-          <div
-            className={clsx(
-              'text-[10px] font-mono',
-              isDarkPage ? 'text-white/40' : 'text-[var(--ink-4)]'
-            )}
-          >
-            v{packageJson.version}
-          </div>
+          <div className="su-rail__ver">v{packageJson.version}</div>
         </aside>
 
         {/* Mobile top bar */}
         <header
-          className={clsx(
-            'sm:hidden shrink-0 h-12 px-3 flex items-center justify-between border-b',
-            isDarkPage
-              ? 'border-[color:var(--dark-line)] bg-black/30 backdrop-blur'
-              : 'bg-white border-[var(--line)]'
-          )}
+          className="sm:hidden shrink-0 h-12 px-3 flex items-center justify-between border-b bg-[var(--su-well)] border-[var(--su-edge)]"
         >
           <div className="flex items-center gap-2">
             <LogoMark size={20} />
             <span
-              className={clsx(
-                'text-sm font-semibold tracking-tight',
-                isDarkPage ? 'text-white' : 'text-[var(--ink)]'
-              )}
+              className="text-sm font-semibold tracking-tight text-[var(--ink)]"
             >
               EduBotics
             </span>
           </div>
           <div className="flex items-center gap-2 min-w-0">
             <div
-              className={clsx(
-                'text-[10px] font-mono shrink-0',
-                isDarkPage ? 'text-white/40' : 'text-[var(--ink-4)]'
-              )}
+              className="text-[10px] font-mono shrink-0 text-[var(--ink-3)]"
             >
               v{packageJson.version}
             </div>
@@ -642,10 +578,7 @@ function StudentApp() {
             {showLogout && identity && (
               <span
                 title={identity}
-                className={clsx(
-                  'text-[10px] truncate min-w-0',
-                  isDarkPage ? 'text-white/50' : 'text-[var(--ink-4)]'
-                )}
+                className="text-[10px] truncate min-w-0 text-[var(--ink-2)]"
               >
                 {identity}
               </span>
@@ -657,11 +590,8 @@ function StudentApp() {
                 title={logoutTitle}
                 aria-label="Abmelden"
                 className={clsx(
-                  'flex items-center gap-1 h-8 px-2 rounded-[var(--radius-sm)] text-sm transition',
-                  logoutBlocked && 'opacity-40 cursor-not-allowed',
-                  isDarkPage
-                    ? 'text-white/70 hover:bg-white/[0.08]'
-                    : 'text-[var(--ink-2)] hover:bg-[var(--bg-sunk)]'
+                  'flex items-center gap-1 h-8 px-2 rounded-[var(--radius-sm)] text-sm transition text-[var(--ink-2)] hover:bg-[var(--bg-sunk)]',
+                  logoutBlocked && 'opacity-40 cursor-not-allowed'
                 )}
               >
                 <Icon name="logout" size={16} />
@@ -724,12 +654,7 @@ function StudentApp() {
 
         {/* Mobile bottom nav */}
         <nav
-          className={clsx(
-            'sm:hidden shrink-0 h-14 border-t flex items-stretch',
-            isDarkPage
-              ? 'bg-black/60 backdrop-blur border-[color:var(--dark-line)]'
-              : 'bg-white border-[var(--line)]'
-          )}
+          className="sm:hidden shrink-0 h-14 border-t flex items-stretch bg-[var(--su-well)] border-[var(--su-edge)]"
         >
           {navItems.map((n) => {
             const active = page === n.key;
@@ -737,15 +662,10 @@ function StudentApp() {
               <button
                 key={n.key}
                 onClick={navClick(n)}
+                aria-current={active ? 'page' : undefined}
                 className={clsx(
                   'flex-1 min-w-0 flex flex-col items-center justify-center gap-0.5 transition',
-                  active
-                    ? isDarkPage
-                      ? 'text-white'
-                      : 'text-[var(--accent-ink)]'
-                    : isDarkPage
-                    ? 'text-white/60'
-                    : 'text-[var(--ink-3)]'
+                  active ? 'text-[var(--accent-ink)]' : 'text-[var(--ink-2)]'
                 )}
               >
                 <Icon name={n.icon} size={20} />

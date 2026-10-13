@@ -51,19 +51,19 @@ function RemedyDiagram() {
       aria-label="Hindernis aus dem Bewegungsbereich des Arms entfernen"
     >
       {/* table */}
-      <line x1="10" y1="95" x2="270" y2="95" stroke="#9ca3af" strokeWidth="3" />
+      <line x1="10" y1="95" x2="270" y2="95" stroke="#A9A398" strokeWidth="3" />
       {/* robot base + arm */}
-      <rect x="30" y="75" width="34" height="20" rx="3" fill="#6b7280" />
-      <line x1="47" y1="75" x2="70" y2="40" stroke="#374151" strokeWidth="7" strokeLinecap="round" />
-      <line x1="70" y1="40" x2="105" y2="58" stroke="#374151" strokeWidth="6" strokeLinecap="round" />
-      <circle cx="70" cy="40" r="5" fill="#111827" />
+      <rect x="30" y="75" width="34" height="20" rx="3" fill="#5F5B55" />
+      <line x1="47" y1="75" x2="70" y2="40" stroke="#232322" strokeWidth="7" strokeLinecap="round" />
+      <line x1="70" y1="40" x2="105" y2="58" stroke="#232322" strokeWidth="6" strokeLinecap="round" />
+      <circle cx="70" cy="40" r="5" fill="#141210" />
       {/* obstacle pressed against the gripper */}
-      <rect x="108" y="52" width="26" height="43" rx="4" fill="#f59e0b" />
+      <rect x="108" y="52" width="26" height="43" rx="4" fill="#F5A524" />
       {/* arrow moving the obstacle away */}
-      <line x1="150" y1="72" x2="215" y2="72" stroke="#dc2626" strokeWidth="5" strokeLinecap="round" />
-      <polygon points="215,62 235,72 215,82" fill="#dc2626" />
+      <line x1="150" y1="72" x2="215" y2="72" stroke="#FF5B1F" strokeWidth="5" strokeLinecap="round" />
+      <polygon points="215,62 235,72 215,82" fill="#FF5B1F" />
       {/* obstacle at its new, safe spot (ghost) */}
-      <rect x="240" y="52" width="26" height="43" rx="4" fill="#fcd34d" opacity="0.55" />
+      <rect x="240" y="52" width="26" height="43" rx="4" fill="#E8B04A" opacity="0.55" />
     </svg>
   );
 }
@@ -147,23 +147,23 @@ export default function CollisionModal() {
       aria-label="Kollision erkannt"
     >
       <div
-        className={`mx-4 max-w-lg rounded-2xl border-2 bg-white p-8 shadow-2xl ${
-          isHomed ? 'border-amber-500' : 'border-red-500'
+        className={`su-plate su-plate--plate su-collision mx-4 max-w-lg p-8 ${
+          isHomed ? 'su-collision--homed' : 'su-collision--stop'
         }`}
       >
         <div className="flex flex-col items-center gap-4 text-center">
           <Icon
             name={isHomed ? 'robotArm' : 'warning'}
             size="3rem"
-            className={isHomed ? 'text-amber-600' : 'text-red-600'}
+            className={isHomed ? 'text-[color:var(--amber)]' : 'text-[color:var(--danger)]'}
           />
-          <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+          <span className="su-lab">
             {isHomed ? 'Schritt 2 von 2' : 'Schritt 1 von 2'}
           </span>
-          <h2 className={`text-2xl font-bold ${isHomed ? 'text-amber-600' : 'text-red-600'}`}>
+          <h2 className={`su-serif text-[34px] leading-none ${isHomed ? 'text-[color:var(--amber)]' : 'text-[color:var(--danger)]'}`}>
             {isHomed ? 'Follower in Grundstellung' : 'STOPP — Kollision erkannt'}
           </h2>
-          <p className="text-gray-700">
+          <p className="text-[15px] text-[var(--ink-2)]">
             {collision.message ||
               (isHomed
                 ? 'Bringe den Leader-Arm in die gleiche Stellung und klicke dann auf ' +
@@ -171,11 +171,11 @@ export default function CollisionModal() {
                 : 'Der Roboterarm wurde gegen ein Hindernis gedrückt und angehalten. Entferne ' +
                   'zuerst das Hindernis und klicke dann auf „Follower in Grundstellung fahren".')}
           </p>
-          {hint && <p className="text-sm font-medium text-amber-700">{hint}</p>}
+          {hint && <p className="text-sm font-medium text-[color:var(--amber)]">{hint}</p>}
           {showRemedyDiagram && (
-            <div className="flex w-full flex-col items-center gap-1 rounded-xl border border-amber-200 bg-amber-50 p-3">
+            <div className="flex w-full flex-col items-center gap-1 rounded-[14px] bg-[var(--amber-wash)] p-3">
               <RemedyDiagram />
-              <p className="text-sm font-medium text-amber-800">
+              <p className="text-sm font-medium text-[color:var(--amber)]">
                 Hindernis ganz aus dem Bewegungsbereich nehmen — auch unter
                 dem Greifer nachsehen. Danach erneut auf „Follower in
                 Grundstellung fahren" klicken.
@@ -196,8 +196,8 @@ export default function CollisionModal() {
                     key={i}
                     className={`flex min-w-14 flex-col items-center rounded-lg border px-2 py-1 text-xs font-medium ${
                       done
-                        ? 'border-green-300 bg-green-50 text-green-700'
-                        : 'border-amber-300 bg-amber-50 text-amber-700'
+                        ? 'border-transparent bg-[var(--success-wash)] text-[color:var(--success)]'
+                        : 'border-transparent bg-[var(--amber-wash)] text-[color:var(--amber)]'
                     }`}
                     title={`Gelenk ${i + 1}: noch ${deg}° bis zur Grundstellung`}
                   >
@@ -213,7 +213,7 @@ export default function CollisionModal() {
               type="button"
               onClick={handleResume}
               disabled={busy}
-              className="mt-2 rounded-xl bg-amber-600 px-6 py-3 text-base font-semibold text-white shadow hover:bg-amber-700 disabled:opacity-50"
+              className="su-key su-key--signal su-key--lg mt-2"
             >
               {busy ? 'Wird fortgesetzt …' : 'Teleoperation fortsetzen'}
             </button>
@@ -223,7 +223,7 @@ export default function CollisionModal() {
                 type="button"
                 onClick={handleHome}
                 disabled={busy || isHoming}
-                className="rounded-xl bg-red-600 px-6 py-3 text-base font-semibold text-white shadow hover:bg-red-700 disabled:opacity-50"
+                className="su-key su-key--danger su-key--lg"
               >
                 {isHoming ? 'Fährt in Grundstellung …' : 'Follower in Grundstellung fahren'}
               </button>
@@ -232,7 +232,7 @@ export default function CollisionModal() {
                   type="button"
                   onClick={handleForceResume}
                   disabled={busy || isHoming}
-                  className="text-sm font-medium text-gray-500 underline underline-offset-2 hover:text-gray-700 disabled:opacity-50"
+                  className="text-sm font-medium text-[var(--ink-2)] underline underline-offset-2 hover:text-[var(--ink)] disabled:opacity-50"
                   title="Bringe den Leader-Arm nah an die aktuelle Stellung des Followers, dann hier klicken."
                 >
                   Klappt nicht? Trotzdem fortsetzen (Notentriegelung)

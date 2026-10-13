@@ -112,53 +112,14 @@ export default function PolicySelector({ readonly = false }) {
     }
   }, [policyList, selectedPolicy, dispatch]);
 
-  const classCard = clsx(
-    'bg-white',
-    'border',
-    'border-[var(--line)]',
-    'rounded-[var(--radius-lg)]',
-    'shadow-soft',
-    'p-5',
-    'w-full',
-    'min-w-[200px]'
-  );
+  const classCard = clsx('su-plate', 'su-plate--plate', 'su-trn-card', 'w-full', 'min-w-[200px]');
 
-  const classSelect = clsx(
-    'w-full',
-    'px-3',
-    'py-2',
-    'border',
-    'border-gray-300',
-    'rounded-md',
-    'focus:outline-none',
-    'focus:ring-2',
-    'focus:ring-teal-500',
-    'focus:border-transparent',
-    'disabled:bg-gray-100',
-    'disabled:cursor-not-allowed',
-    'disabled:text-gray-500',
-    'disabled:border-gray-300'
-  );
+  const classSelect = clsx('su-field', 'w-full', 'h-11', 'px-3', 'disabled:cursor-not-allowed');
 
-  const classRefreshButton = clsx(
-    'w-full',
-    'px-4',
-    'py-2',
-    'bg-gray-500',
-    'text-white',
-    'rounded-md',
-    'font-medium',
-    'transition-colors',
-    'hover:bg-gray-600',
-    'disabled:bg-gray-400',
-    'disabled:cursor-not-allowed'
-  );
+  const classRefreshButton = clsx('su-key', 'su-key--md', 'w-full');
 
-  const classTitle = clsx('text-xl', 'font-bold', 'mb-6', 'text-left', {
-    'text-gray-500': readonly,
-    'text-gray-800': !readonly,
-  });
-  const classLabel = clsx('text-sm', 'font-medium', 'text-gray-700', 'mb-2', 'block');
+  const classTitle = clsx('su-trn-card__title', { 'su-trn-card__title--ro': readonly });
+  const classLabel = clsx('su-lab', 'mb-2', 'block');
 
   useEffect(() => {
     fetchItemList();
@@ -187,13 +148,13 @@ export default function PolicySelector({ readonly = false }) {
 
       <div className="mb-2" />
 
-      <p className="text-xs text-gray-400">
+      <p className="text-[13px] text-[var(--ink-2)]">
         Training läuft auf Cloud-GPU (CUDA)
       </p>
 
       {!readonly && (
         <>
-          <div className="mb-4" />
+          <div className="mb-4 mt-auto" />
           <button
             className={classRefreshButton}
             onClick={fetchItemList}

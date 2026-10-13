@@ -196,18 +196,8 @@ export default function ImageGrid({ isActive = true }) {
       'flex-[3_1_0]': idx !== 1,
     });
 
-  const classTopicLabel = clsx(
-    'absolute',
-    'bottom-2',
-    'left-2',
-    'text-xs',
-    'text-white',
-    'bg-black',
-    'bg-opacity-50',
-    'px-2',
-    'py-1',
-    'rounded'
-  );
+  // Sucher: a glass label chip on the tile (inference.css).
+  const classTopicLabel = clsx('su-cell__label', 'absolute', 'bottom-2', 'left-2');
 
   return (
     <div className="w-full h-full overflow-hidden">
@@ -222,7 +212,9 @@ export default function ImageGrid({ isActive = true }) {
               onPlusClick={handlePlusClick}
               isActive={isActive}
             />
-            <div className={classTopicLabel}>{asignedImageTopicList[idx] || ''}</div>
+            {asignedImageTopicList[idx] ? (
+              <div className={classTopicLabel}>{asignedImageTopicList[idx]}</div>
+            ) : null}
           </div>
         ))}
         {modalOpen && (

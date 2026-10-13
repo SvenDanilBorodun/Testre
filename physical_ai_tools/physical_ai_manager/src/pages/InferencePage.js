@@ -19,6 +19,8 @@ import { useJetsonConnection } from '../hooks/useJetsonConnection';
 import { useCameraLiveness } from '../hooks/useCameraLiveness';
 import Icon from '../components/icons/Icon';
 import TargetSwitch from '../components/CloudInference/TargetSwitch';
+import { Key, Led, Plate, Screen } from '../components/sucher';
+import '../components/sucher-pages/inference.css';
 import CloudInferenceView from '../components/CloudInference/CloudInferenceView';
 import { cloudCopy } from '../components/CloudInference/cloudCopy';
 import useCloudInferenceSession from '../hooks/useCloudInferenceSession';
@@ -354,103 +356,105 @@ export default function InferencePage({ isActive = true }) {
       return liveCount === 1 ? '1 Kamera aktiv' : `${liveCount} Kameras aktiv`;
     })();
 
-    const cameraChipDotColor = (() => {
-      if (configuredCount === 0 || liveCount === 0) return '#ef4444'; // red — no real cameras
-      if (!allConfiguredAlive) return '#f59e0b';                       // amber — partial
-      return 'var(--accent)';                                          // green/teal — all good
+
+    const cameraChipLed = (() => {
+      if (configuredCount === 0 || liveCount === 0) return 'rec'; // no real cameras
+      if (!allConfiguredAlive) return 'warn';                       // partial
+      return 'ok';                                                  // all good
     })();
 
     return (
-      <div
-        className="relative h-full w-full flex flex-col overflow-hidden"
-        style={{ background: 'var(--dark-bg)', color: 'var(--dark-ink)' }}
-      >
-        <div className="absolute top-3 left-3 right-3 z-30 flex items-center gap-2 flex-wrap">
-          <div className="h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-2 text-[11px] text-white/80">
-            <span className="font-mono uppercase tracking-wider opacity-70">Roboter</span>
-            <span className="font-mono px-1.5 py-0.5 rounded bg-white/10 max-w-[160px] truncate">
-              {taskStatus?.robotType || '—'}
-            </span>
-          </div>
-          <HeartbeatStatus dark />
-          <div
-            className="h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-2 text-[11px] text-white/80 font-mono whitespace-nowrap"
-            title={
-              configuredCount === 0
-                ? 'Kein /image/get_available_list konfiguriert'
-                : `${liveCount}/${configuredCount} Topics liefern aktuell Bilder`
-            }
-          >
-            <span
-              className="w-1.5 h-1.5 rounded-full"
-              style={{ background: cameraChipDotColor }}
-            />
-            {cameraChipLabel}
-          </div>
-          <div className="h-8 px-3 rounded-full bg-emerald-500/15 border border-emerald-300/30 backdrop-blur-md flex items-center gap-2 text-[11px] text-emerald-100">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            <span>{heartbeatTransient ? 'Jetson — wird wiederhergestellt' : 'Verbunden mit Klassen-Jetson'}</span>
-            <button
-              type="button"
-              onClick={disconnect}
-              className="ml-1 px-2 py-0.5 rounded bg-red-600/80 hover:bg-red-600 text-white text-[10px]"
-            >
-              Trennen
-            </button>
-          </div>
-          <div className="flex-1" />
-          {isRightPanelCollapsed && (
-            <button
-              onClick={() => setIsRightPanelCollapsed(false)}
-              className="w-10 h-10 bg-white/[0.08] border border-white/15 rounded-full flex items-center justify-center text-white/80 backdrop-blur-md hover:bg-white/15"
-              title="Panel öffnen"
-            >
-              <Icon name="chevronsLeft" size={22} />
-            </button>
-          )}
-        </div>
-
-        <div className="flex-1 flex items-start min-h-0 pt-[56px] pb-2 px-2 sm:px-3 lg:px-4 gap-2 sm:gap-3 lg:gap-4">
-          <div className="flex-1 self-stretch min-w-0 relative rounded-[var(--radius-lg)] overflow-hidden">
-            <ImageGrid isActive={isActive} />
-            {taskStatus.phase === TaskPhase.INFERENCE_LOADING && (
-              <div
-                className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/55 backdrop-blur-sm"
-                role="status"
-                aria-live="polite"
-              >
-                <Icon name="loading" size={40} className="animate-spin text-white" />
-                <span className="text-base font-semibold text-white">
-                  Modell wird geladen &amp; Roboter verbindet …
-                </span>
-                <span className="text-xs text-white/70">
-                  Das kann beim ersten Start bis zu 30 Sekunden dauern.
-                </span>
+      <div className="su-inf relative h-full w-full flex flex-col overflow-hidden">
+        <div className="su-inf__body">
+          <div className="su-inf__left">
+            <Screen power className="su-inf__screen">
+              <div className="su-inf__chips">
+                <div className="su-inf-chip">
+                  <span className="su-inf-chip__key">Roboter</span>
+                  <span className="max-w-[160px] truncate">
+                    {taskStatus?.robotType || '—'}
+                  </span>
+                </div>
+                <HeartbeatStatus dark size="sm" />
+                <div
+                  className="su-inf-chip whitespace-nowrap"
+                  title={
+                    configuredCount === 0
+                      ? 'Kein /image/get_available_list konfiguriert'
+                      : `${liveCount}/${configuredCount} Topics liefern aktuell Bilder`
+                  }
+                >
+                  <Led tone={cameraChipLed} size={7} />
+                  {cameraChipLabel}
+                </div>
+                <div className="su-inf-chip su-inf-chip--text">
+                  <Led tone="ok" pulse="breathe" size={7} />
+                  <span>{heartbeatTransient ? 'Jetson — wird wiederhergestellt' : 'Verbunden mit Klassen-Jetson'}</span>
+                  <button
+                    type="button"
+                    onClick={disconnect}
+                    className="su-inf-chip__btn"
+                  >
+                    Trennen
+                  </button>
+                </div>
+                <div className="flex-1" />
+                {isRightPanelCollapsed && (
+                  <button
+                    type="button"
+                    onClick={() => setIsRightPanelCollapsed(false)}
+                    className="su-inf-chip su-inf-chip--round"
+                    title="Panel öffnen"
+                    aria-label="Panel öffnen"
+                  >
+                    <Icon name="chevronsLeft" size={20} />
+                  </button>
+                )}
               </div>
-            )}
+              <div className="su-inf__grid">
+                <ImageGrid isActive={isActive} />
+                {taskStatus.phase === TaskPhase.INFERENCE_LOADING && (
+                  <div
+                    className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/55 backdrop-blur-sm"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <Icon name="loading" size={40} className="animate-spin text-white" />
+                    <span className="su-serif text-[30px] leading-none text-white">
+                      Modell wird geladen &amp; Roboter verbindet …
+                    </span>
+                    <span className="text-[13px] text-[var(--su-scr-ink-2)]">
+                      Das kann beim ersten Start bis zu 30 Sekunden dauern.
+                    </span>
+                  </div>
+                )}
+              </div>
+            </Screen>
+            <div className="shrink-0">
+              <ControlPanel />
+            </div>
           </div>
           <div
             className={clsx(
-              'relative transition-all duration-300 ease-in-out',
+              'su-inf__side relative transition-all duration-300 ease-in-out',
               isRightPanelCollapsed
                 ? 'w-0 opacity-0 pointer-events-none overflow-hidden'
                 : 'w-[min(420px,38vw)] min-w-[300px] max-w-[480px] md:min-w-[320px] lg:min-w-[360px] 2xl:max-w-[520px] opacity-100'
             )}
-            style={{ maxHeight: 'calc(100vh - 220px)' }}
           >
             <button
+              type="button"
               onClick={() => setIsRightPanelCollapsed(!isRightPanelCollapsed)}
-              className="absolute -left-4 top-2 w-9 h-9 bg-white/95 border border-[var(--line)] rounded-full flex items-center justify-center shadow-pop text-[var(--ink-2)] hover:text-[var(--ink)] z-30 backdrop-blur"
+              className="su-inf__collapse"
               title="Einklappen"
+              aria-label="Einklappen"
             >
-              <Icon name="chevronsRight" size={20} />
+              <Icon name="chevronsRight" size={18} />
             </button>
-            <InferencePanel />
+            <Plate as="aside" className="su-inf__panel su-inf__panel--jetson">
+              <InferencePanel />
+            </Plate>
           </div>
-        </div>
-
-        <div className="shrink-0">
-          <ControlPanel />
         </div>
       </div>
     );
@@ -481,8 +485,8 @@ function CenteredSpinner({ label, sublabel }) {
   return (
     <div className="flex flex-col items-center justify-center h-full w-full gap-4 px-6 text-center" style={{ background: 'var(--bg)' }}>
       <Icon name="loading" size={32} className="animate-spin text-[color:var(--accent)]" />
-      <div className="text-[var(--ink)] text-base font-medium">{label}</div>
-      {sublabel && <div className="text-[var(--ink-3)] text-sm max-w-md">{sublabel}</div>}
+      <div className="su-serif text-[30px] leading-none text-[var(--ink)]">{label}</div>
+      {sublabel && <div className="text-[var(--ink-2)] text-sm max-w-md">{sublabel}</div>}
     </div>
   );
 }
@@ -491,28 +495,24 @@ function StateScreen({ icon, title, body, identity, primaryAction }) {
   return (
     <div className="h-full w-full overflow-y-auto" style={{ background: 'var(--bg)' }}>
       <div className="min-h-full w-full flex items-center justify-center px-4 py-8">
-        <div className="w-full max-w-[560px] flex flex-col items-center gap-5 text-center">
-          {icon && <div>{icon}</div>}
-          <h1 className="text-2xl font-bold text-[var(--ink)] tracking-tight">{title}</h1>
+        <Plate className="su-state w-full max-w-[560px] flex flex-col items-center gap-5 text-center">
+          {icon && <div className="su-state__disc">{icon}</div>}
+          <h1 className="su-serif text-[34px] leading-none text-[var(--ink)]">{title}</h1>
           <div className="text-[var(--ink-2)] text-[15px] leading-relaxed">{body}</div>
           {primaryAction && (
-            <button
-              type="button"
+            <Key
+              variant={primaryAction.tone === 'accent' ? 'signal' : 'default'}
+              size="lg"
               onClick={primaryAction.onClick}
-              className={clsx(
-                'mt-2 inline-flex items-center gap-2 px-5 py-3 rounded-[var(--radius-sm)] font-semibold text-sm transition shadow-pop',
-                primaryAction.tone === 'accent'
-                  ? 'bg-[color:var(--accent)] text-white hover:brightness-110'
-                  : 'bg-white border border-[var(--line)] text-[var(--ink)] hover:bg-[var(--bg-sunk)]'
-              )}
+              className="mt-2"
             >
               {primaryAction.icon}
               <span>{primaryAction.label}</span>
-            </button>
+            </Key>
           )}
           {identity && (
-            <div className="mt-6 pt-5 border-t border-[var(--line)] w-full text-center text-sm">
-              <div className="text-[var(--ink-3)]">
+            <div className="mt-6 pt-5 border-t border-[var(--su-hair)] w-full text-center text-sm">
+              <div className="text-[var(--ink-2)]">
                 Angemeldet als{' '}
                 <span className="text-[var(--ink)] font-medium">
                   {identity.fullName || identity.username || '—'}
@@ -520,7 +520,7 @@ function StateScreen({ icon, title, body, identity, primaryAction }) {
               </div>
             </div>
           )}
-        </div>
+        </Plate>
       </div>
     </div>
   );

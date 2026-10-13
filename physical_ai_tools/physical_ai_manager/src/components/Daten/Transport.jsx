@@ -67,12 +67,14 @@ function Transport({
         <button type="button" className="dat-tbtn" aria-label={COPY.player.nextEpisode} title={COPY.player.nextEpisodeTitle} onClick={click(onNextEpisode)}>
           <Icon name="chevronDown" size={16} />
         </button>
-        <span className="dat-tp-time dat-mono">
-          <span ref={curRef} data-time="cur" />
-          {' '}
-          <span ref={totalRef} className="dat-dim" data-time="total" />
+        <span className="dat-tp-clock">
+          <span className="dat-tp-time dat-mono">
+            <span ref={curRef} data-time="cur" />
+            {' '}
+            <span ref={totalRef} className="dat-dim" data-time="total" />
+          </span>
+          <span ref={frameRef} className="dat-tp-frame dat-mono" data-frame="" />
         </span>
-        <span ref={frameRef} className="dat-tp-frame dat-mono" data-frame="" />
         <span className="dat-grow" />
         <div className="dat-seg dat-dark" role="group" aria-label={COPY.player.speedLabel}>
           {SPEEDS.map((v, i) => (

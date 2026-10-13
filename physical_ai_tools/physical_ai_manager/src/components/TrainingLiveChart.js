@@ -11,7 +11,7 @@ import {
   YAxis,
 } from 'recharts';
 import clsx from 'clsx';
-import { Pill } from './EbUI';
+import { Led, Lichtband, useReducedMotion } from './sucher';
 import { setSelectedTrainingId } from '../features/training/trainingSlice';
 import {
   ACTIVE_STATUSES,
@@ -57,27 +57,26 @@ const STATUS_UI = {
   canceled: { tone: 'neutral', label: 'Abgebrochen', icon: 'cancel' },
 };
 
+// The job state as a glass chip on the dark screen (Sucher).
+const STATUS_LED = { amber: 'warn', accent: 'sig', success: 'ok', danger: 'rec', neutral: 'off' };
+
 function StatusPill({ status }) {
   const ui = STATUS_UI[status] || STATUS_UI.queued;
   return (
-    <Pill tone={ui.tone} dot>
-      <span className="inline-flex items-center gap-1.5">
-        <Icon name={ui.icon} size={12} className={ui.spin ? 'animate-spin' : ''} />
-        {ui.label}
-      </span>
-    </Pill>
+    <span className="su-trn-chip">
+      <Icon name={ui.icon} size={13} className={clsx(ui.spin && 'animate-spin', `su-trn-chip__icon--${STATUS_LED[ui.tone] || 'off'}`)} />
+      {ui.label}
+    </span>
   );
 }
 
-// "Live · vor 3s" while healthy, an amber "wirkt langsam" hint when the worker
-// has gone quiet for a while. Only rendered for active jobs.
 function LiveChip({ isRealtime, ageSeconds }) {
   const stale = ageSeconds != null && ageSeconds > STALE_AFTER_SECONDS;
   const ageStr = formatAge(ageSeconds);
   if (stale) {
     return (
       <span
-        className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-[var(--amber-wash)] text-[color:var(--amber)]"
+        className="su-trn-live su-trn-live--stale"
         title="Seit einer Weile kein neuer Fortschritt — Training läuft evtl. in einer ruhigen Phase oder die Verbindung ist langsam."
       >
         <Icon name="hourglass" size={12} />
@@ -86,44 +85,40 @@ function LiveChip({ isRealtime, ageSeconds }) {
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-[var(--accent-wash)] text-[var(--accent-ink)]">
-      <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-pulse" />
+    <span className="su-trn-live">
+      <Led tone="ok" pulse="breathe" size={7} />
       {isRealtime ? 'Live' : 'Aktiv'}
-      {ageStr ? <span className="opacity-70">· {ageStr}</span> : null}
+      {ageStr ? <span className="su-trn-live__age">· {ageStr}</span> : null}
     </span>
   );
 }
 
-// Big metric in the hero strip.
 function HeroStat({ label, value, sub, tone }) {
   return (
     <div className="min-w-0">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
-        {label}
-      </div>
+      <div className="su-lab">{label}</div>
       <div
         className={clsx(
-          'font-mono font-semibold leading-none mt-1.5 text-[22px] md:text-[26px] truncate',
-          tone === 'success' && 'text-[color:var(--success)]',
-          tone === 'danger' && 'text-[color:var(--danger)]',
-          !tone && 'text-[var(--ink)]',
+          'su-dot su-trn-stat truncate',
+          tone === 'success' && 'su-trn-stat--ok',
+          tone === 'danger' && 'su-trn-stat--rec',
         )}
       >
         {value}
       </div>
-      {sub ? <div className="text-[11px] text-[var(--ink-3)] mt-1 truncate">{sub}</div> : null}
+      {sub ? <div className="text-[11px] text-[var(--su-scr-ink-3)] mt-1 truncate">{sub}</div> : null}
     </div>
   );
 }
 
 function EmptyState() {
   return (
-    <div className="flex flex-col md:flex-row gap-4 items-start p-4 md:p-6 rounded-[var(--radius)] bg-[var(--accent-wash)] border border-[color:var(--accent)]/20">
-      <div className="flex items-center gap-2 text-[var(--accent-ink)] font-semibold text-base shrink-0">
+    <div className="su-trn-empty">
+      <div className="flex items-center gap-2 text-[var(--su-sig-on-dark)] font-semibold text-base shrink-0">
         <Icon name="cloud" size={22} />
         Cloud-Training
       </div>
-      <div className="text-sm text-[var(--accent-ink)] leading-relaxed space-y-2">
+      <div className="text-sm text-[var(--su-scr-ink-2)] leading-relaxed space-y-2">
         <p>
           Das Training läuft auf einer Cloud-GPU. Wenn du auf „Training starten"
           klickst, wird der Auftrag an die Cloud gesendet. Der Fortschritt
@@ -143,9 +138,9 @@ function ChartTooltip({ active, payload }) {
   if (!active || !payload?.length) return null;
   const p = payload[0].payload;
   return (
-    <div className="rounded-[var(--radius-sm)] bg-white border border-[var(--line)] shadow-soft px-3 py-2 text-xs">
-      <div className="font-mono text-[var(--ink)]">Schritt {formatStep(p.s)}</div>
-      <div className="font-mono text-[var(--accent-ink)]">Loss {formatLoss(p.l)}</div>
+    <div className="su-trn-tip">
+      <div>Schritt {formatStep(p.s)}</div>
+      <div className="text-[var(--su-sig-on-dark)]">Loss {formatLoss(p.l)}</div>
     </div>
   );
 }
@@ -153,25 +148,32 @@ function ChartTooltip({ active, payload }) {
 function PulseDot(props) {
   const { cx, cy } = props;
   if (cx == null || cy == null) return null;
+  // M13: the newest point glows (static).
   return (
-    <g>
-      <circle cx={cx} cy={cy} r={7} fill="var(--accent)" opacity={0.25} className="animate-ping" />
-      <circle cx={cx} cy={cy} r={4} fill="var(--accent)" />
-    </g>
+    <circle
+      cx={cx}
+      cy={cy}
+      r={6}
+      fill="#FF5B1F"
+      stroke="#FFFFFF"
+      strokeWidth={2}
+      style={{ filter: 'drop-shadow(0 0 8px rgba(255,91,31,.9))' }}
+    />
   );
 }
 
 // Secondary loss chart. Shows a friendly placeholder until there are >= 2 points
 // so the hero (numbers + progress) is never blocked by a missing curve.
 function LossChart({ history, totalSteps, currentStep, currentLoss, isRunning, isActive }) {
+  const reduced = useReducedMotion();
   const hasChart = history.length >= 2;
   const lastPoint = history.length > 0 ? history[history.length - 1] : null;
 
   if (!hasChart) {
     return (
-      <div className="h-[150px] rounded-[var(--radius)] chart-grid flex items-center justify-center">
-        <div className="flex items-center gap-2.5 text-[var(--ink-3)] text-sm">
-          <span className="w-2.5 h-2.5 rounded-full bg-[var(--accent)] animate-pulse" />
+      <div className="su-trn-chart su-trn-chart--empty">
+        <div className="flex items-center gap-2.5 text-[var(--su-scr-ink-2)] text-sm">
+          <Led tone="sig" pulse="breathe" />
           {isActive
             ? 'Die Loss-Kurve erscheint nach den ersten Trainingsschritten…'
             : 'Keine Verlaufsdaten aufgezeichnet.'}
@@ -182,7 +184,7 @@ function LossChart({ history, totalSteps, currentStep, currentLoss, isRunning, i
 
   return (
     <div
-      className="h-[200px] rounded-[var(--radius)] chart-grid overflow-hidden"
+      className="su-trn-chart"
       role="img"
       aria-label={`Loss-Kurve: Schritt ${formatStep(currentStep)} von ${formatStep(
         totalSteps,
@@ -192,25 +194,25 @@ function LossChart({ history, totalSteps, currentStep, currentLoss, isRunning, i
         <AreaChart data={history} margin={{ top: 16, right: 16, bottom: 8, left: 8 }}>
           <defs>
             <linearGradient id="lossFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.32} />
-              <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.02} />
+              <stop offset="0%" stopColor="#FF5B1F" stopOpacity={0.35} />
+              <stop offset="100%" stopColor="#FF5B1F" stopOpacity={0} />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="2 6" stroke="rgba(14,20,21,0.08)" vertical={false} />
+          <CartesianGrid stroke="#34302B" />
           <XAxis
             dataKey="s"
             type="number"
             domain={['dataMin', totalSteps > 0 ? totalSteps : 'dataMax']}
             tickFormatter={compactAxis}
-            stroke="var(--ink-3)"
-            tick={{ fontSize: 11, fill: 'var(--ink-3)' }}
+            stroke="#9C9488"
+            tick={{ fontSize: 11, fill: '#9C9488' }}
             tickLine={false}
             axisLine={false}
           />
           <YAxis
             dataKey="l"
-            stroke="var(--ink-3)"
-            tick={{ fontSize: 11, fill: 'var(--ink-3)' }}
+            stroke="#9C9488"
+            tick={{ fontSize: 11, fill: '#9C9488' }}
             tickLine={false}
             axisLine={false}
             width={48}
@@ -218,18 +220,19 @@ function LossChart({ history, totalSteps, currentStep, currentLoss, isRunning, i
           />
           <Tooltip
             content={<ChartTooltip />}
-            cursor={{ stroke: 'var(--accent)', strokeWidth: 1, strokeDasharray: '2 4' }}
+            cursor={{ stroke: '#FF5B1F', strokeWidth: 1, strokeDasharray: '2 4' }}
           />
           <Area
             type="monotone"
             dataKey="l"
-            stroke="var(--accent)"
-            strokeWidth={2}
+            stroke="#FF5B1F"
+            strokeWidth={2.5}
             fill="url(#lossFill)"
-            isAnimationActive={!isActive}
+            isAnimationActive={!isActive && !reduced}
             animationDuration={400}
+            animationEasing="ease-out"
             dot={false}
-            activeDot={{ r: 4, fill: 'var(--accent)', stroke: 'white', strokeWidth: 2 }}
+            activeDot={{ r: 4, fill: '#FF5B1F', stroke: 'white', strokeWidth: 2 }}
           />
           {isRunning && lastPoint && (
             <ReferenceDot x={lastPoint.s} y={lastPoint.l} shape={<PulseDot />} ifOverflow="extendDomain" />
@@ -273,14 +276,6 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
   // the old bare "Warte auf GPU-Worker" spinner.
   const starting = isActive && totalSteps <= 0;
 
-  const barTone = isFailed
-    ? 'var(--danger)'
-    : isCanceled
-      ? 'var(--ink-4)'
-      : isSucceeded
-        ? 'var(--success)'
-        : 'var(--accent)';
-
   const heroPct = isSucceeded ? 100 : pct;
 
   // Middle hero stat: remaining time while running, else final progress %.
@@ -289,32 +284,32 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
     : { label: 'Fortschritt', value: `${Math.round(heroPct)}%` };
 
   return (
-    <div className="space-y-4">
+    <div className="su-trn-live-chart">
       {/* Header: status + model/dataset + live age + deselect */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
           <StatusPill status={job.status} />
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm min-w-0">
+          <div className="min-w-0 flex items-baseline gap-x-3 gap-y-0.5 flex-wrap">
+            <div className="flex items-center gap-2 min-w-0">
               {isSucceeded ? (
                 <a
                   href={`https://huggingface.co/${job.model_name}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="font-semibold text-[var(--accent-ink)] hover:underline truncate inline-flex items-center gap-1"
+                  className="su-trn-repo su-trn-repo--link truncate inline-flex items-center gap-1"
                   title={job.model_name}
                 >
                   {job.model_name}
                   <Icon name="externalLink" size={14} className="shrink-0" />
                 </a>
               ) : (
-                <span className="font-semibold text-[var(--ink)] truncate" title={job.model_name}>
+                <span className="su-trn-repo truncate" title={job.model_name}>
                   {job.model_name}
                 </span>
               )}
-              <span className="text-[var(--ink-3)] text-[11px] font-mono shrink-0">{job.model_type}</span>
+              <span className="su-lab shrink-0">{job.model_type}</span>
             </div>
-            <div className="text-[11px] text-[var(--ink-3)] truncate" title={job.dataset_name}>
+            <div className="text-[13px] text-[var(--su-scr-ink-2)] truncate" title={job.dataset_name}>
               Datensatz · {job.dataset_name}
             </div>
           </div>
@@ -323,8 +318,9 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
           {isActive && <LiveChip isRealtime={isRealtime} ageSeconds={ageSeconds} />}
           {selectedId === job.id && (
             <button
+              type="button"
               onClick={() => dispatch(setSelectedTrainingId(null))}
-              className="text-[11px] text-[var(--ink-3)] hover:text-[var(--ink)] underline"
+              className="text-[12px] text-[var(--su-scr-ink-2)] hover:text-[var(--su-scr-ink)] underline"
               title="Auswahl aufheben — automatisch das neueste Training zeigen"
             >
               Auswahl aufheben
@@ -333,81 +329,75 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
         </div>
       </div>
 
-      {/* HERO: progress is the headline */}
-      <div className="rounded-[var(--radius)] border border-[var(--line)] bg-white p-4 md:p-5">
-        <div className="flex items-end justify-between gap-4 mb-3">
-          <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
-              {starting ? 'Status' : 'Fortschritt'}
-            </div>
-            {starting ? (
-              <div className="flex items-center gap-2 mt-1.5 text-[var(--ink)] font-semibold text-lg">
-                <Icon name="loading" size={18} className="animate-spin text-[var(--accent)]" />
-                GPU-Worker startet…
-              </div>
-            ) : (
-              <div className="font-mono font-semibold leading-none mt-1 text-[40px] md:text-[48px] text-[var(--ink)]">
-                {Math.round(heroPct)}
-                <span className="text-[var(--ink-3)] text-[24px] md:text-[28px]">%</span>
-              </div>
-            )}
+      <div className="su-trn-body">
+        {/* HERO: progress is the headline */}
+        <div className="su-trn-hero">
+          <div className="su-lab">
+            {starting ? 'Status' : 'Fortschritt'}
           </div>
-          <div className="text-right shrink-0">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
-              Schritt
-            </div>
-            <div className="font-mono text-[var(--ink)] mt-1 text-sm md:text-base">
-              <span className="font-semibold">{formatStep(currentStep)}</span>
-              {totalSteps > 0 && (
-                <span className="text-[var(--ink-3)]"> / {formatStep(totalSteps)}</span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Progress bar — determinate when steps are known, indeterminate while starting */}
-        <div className="w-full h-3 bg-[var(--bg-sunk)] rounded-full overflow-hidden">
           {starting ? (
-            <div className="h-full w-1/3 rounded-full bg-[var(--accent)] animate-pulse" />
+            <div className="flex items-center gap-2 mt-2 text-[var(--su-scr-ink)] font-semibold text-lg">
+              <Icon name="loading" size={18} className="animate-spin text-[var(--su-sig-on-dark)]" />
+              GPU-Worker startet…
+            </div>
           ) : (
-            <div
-              className="h-full rounded-full transition-[width] duration-500"
-              style={{ width: `${heroPct}%`, background: barTone }}
+            <div className="su-dot su-trn-pct">
+              {Math.round(heroPct)}
+              <span>%</span>
+            </div>
+          )}
+
+          <div className="su-lab mt-4">Schritt</div>
+          <div className="su-dot su-trn-stepnum">
+            {formatStep(currentStep)}
+            {totalSteps > 0 && <span> / {formatStep(totalSteps)}</span>}
+          </div>
+
+          {/* Progress — the light band (static); indeterminate while starting */}
+          {starting ? (
+            <div className="su-trn-band su-trn-band--starting" />
+          ) : (
+            <Lichtband
+              className={clsx('su-trn-band', `su-trn-band--${isFailed ? 'failed' : isCanceled ? 'canceled' : isSucceeded ? 'done' : 'run'}`)}
+              count={30}
+              frac={heroPct / 100}
+              color={isFailed ? '#FF3B30' : isCanceled ? '#8A867E' : isSucceeded ? '#3DBE5A' : '#FF5B1F'}
+              label="Fortschritt"
             />
           )}
+
+          {/* Hero stats */}
+          <div className="grid grid-cols-3 gap-3 md:gap-5 mt-5">
+            <HeroStat
+              label="Loss"
+              value={formatLoss(currentLoss)}
+              tone={isSucceeded ? 'success' : undefined}
+            />
+            <HeroStat label={middle.label} value={middle.value} />
+            <HeroStat label="Vergangen" value={formatDuration(elapsed)} />
+          </div>
         </div>
 
-        {/* Hero stats */}
-        <div className="grid grid-cols-3 gap-3 md:gap-5 mt-4">
-          <HeroStat
-            label="Loss"
-            value={formatLoss(currentLoss)}
-            tone={isSucceeded ? 'success' : undefined}
+        {/* Secondary: loss curve */}
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 mb-2 su-lab">
+            <Icon name="zap" size={12} className="text-[var(--su-sig-on-dark)]" />
+            Loss-Verlauf
+          </div>
+          <LossChart
+            history={history}
+            totalSteps={totalSteps}
+            currentStep={currentStep}
+            currentLoss={currentLoss}
+            isRunning={isRunning}
+            isActive={isActive}
           />
-          <HeroStat label={middle.label} value={middle.value} />
-          <HeroStat label="Vergangen" value={formatDuration(elapsed)} />
         </div>
-      </div>
-
-      {/* Secondary: loss curve */}
-      <div>
-        <div className="flex items-center gap-2 mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-3)]">
-          <Icon name="zap" size={12} className="text-[var(--accent)]" />
-          Loss-Verlauf
-        </div>
-        <LossChart
-          history={history}
-          totalSteps={totalSteps}
-          currentStep={currentStep}
-          currentLoss={currentLoss}
-          isRunning={isRunning}
-          isActive={isActive}
-        />
       </div>
 
       {/* Error tail */}
       {isFailed && job.error_message && (
-        <details className="text-xs text-[color:var(--danger)] bg-[var(--danger-wash)] border border-[color:var(--danger)]/30 rounded-[var(--radius-sm)] p-3">
+        <details className="su-trn-error text-xs">
           <summary className="cursor-pointer font-medium">Fehlermeldung anzeigen</summary>
           <pre className="mt-2 whitespace-pre-wrap break-all text-[11px] font-mono leading-snug">
             {job.error_message}

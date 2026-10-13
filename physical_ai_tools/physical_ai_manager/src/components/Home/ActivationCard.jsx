@@ -31,7 +31,8 @@
 import React, { useCallback } from 'react';
 import { useSelector } from 'react-redux';
 
-import { Btn, Card, Pill } from '../EbUI';
+import { Btn } from '../EbUI';
+import { Led, Plate } from '../sucher';
 import useRobotActivation, { ACTIVATING, ACTIVE, FAILED } from '../../hooks/useRobotActivation';
 import { selectWorkflowRunning } from '../../features/workshop/workshopSlice';
 import { stripSeverityPrefix, isHardError } from '../../utils/homeHealth';
@@ -163,45 +164,68 @@ export default function ActivationCard() {
   // the one thing this page's doctrine forbids.
   const warned = !!rawDetail && rawDetail.trim().startsWith('[WARNUNG]');
 
+  // The state disc (spec §7): the old header pill's words and its condition,
+  // drawn as the board's big lit button. Purely a picture of the state — the
+  // action stays the Btn below.
+  const label = pillLabel(state, busy, warned);
+  const tone = pillTone(state, busy, warned);
+  const discKind = state === FAILED
+    ? 'failed'
+    : warned
+      ? 'warned'
+      : isActive
+        ? 'active'
+        : (busy || state === ACTIVATING)
+          ? 'activating'
+          : 'idle';
+  const lit = discKind === 'active' || discKind === 'activating';
+
   return (
-    <Card
-      title={TITLE}
-      right={(
-        <Pill tone={pillTone(state, busy, warned)} dot={isActive && !warned}>
-          {pillLabel(state, busy, warned)}
-        </Pill>
-      )}
-    >
-      <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-        <div className="min-w-0 flex-1">
-          <p className="text-[13px] leading-snug text-[var(--ink-2)]">
-            {isActive
-              ? (hasLeader
-                ? 'Der Roboter ist aktiv. Der Follower-Arm folgt dem Leader-Arm.'
-                // NOT „…und steht in der Grundstellung": arrival is verified
-                // softly, and an incomplete home still ends in STATE_ACTIVE.
-                // The Hinweis under this line says what actually happened.
-                : 'Der Roboter ist aktiv.')
-              : idleBody(hasLeader)}
-          </p>
-          {detail && (
-            <p
-              className={`text-[12.5px] leading-snug mt-2 ${
-                state === FAILED || detailIsBad
-                  ? 'text-[color:var(--danger)]'
-                  : 'text-[color:var(--amber)]'
-              }`}
-            >
-              {detail}
-            </p>
-          )}
-          {reason && !busy && (
-            <p className="text-[12.5px] leading-snug mt-2 text-[var(--ink-3)]">{reason}</p>
-          )}
+    <Plate className="su-act">
+      <div
+        role="img"
+        aria-label={label}
+        data-tone={tone}
+        className={`su-act__disc su-act__disc--${discKind}`}
+      >
+        {lit && <span className="su-act__halo" aria-hidden="true" />}
+        {lit && <span className="su-act__halo su-act__halo--late" aria-hidden="true" />}
+        <span className={`su-act__core${label.length > 10 ? ' su-act__core--long' : ''}`}>
+          {label}
+        </span>
+      </div>
+      <div className="su-act__body">
+        <div className="su-act__head">
+          <h3 className="su-act__title">{TITLE}</h3>
+          <Led tone={lit ? 'sig' : 'off'} pulse={discKind === 'activating' ? 'breathe' : 'none'} />
         </div>
-        <div className="shrink-0">
+        <p className={`su-act__state su-serif${isActive ? '' : ' su-act__state--long'}`}>
+          {isActive
+            ? (hasLeader
+              ? 'Der Roboter ist aktiv. Der Follower-Arm folgt dem Leader-Arm.'
+              // NOT „…und steht in der Grundstellung": arrival is verified
+              // softly, and an incomplete home still ends in STATE_ACTIVE.
+              // The Hinweis under this line says what actually happened.
+              : 'Der Roboter ist aktiv.')
+            : idleBody(hasLeader)}
+        </p>
+        {detail && (
+          <p
+            className={`su-act__note ${
+              state === FAILED || detailIsBad
+                ? 'text-[color:var(--danger)]'
+                : 'text-[color:var(--amber)]'
+            }`}
+          >
+            {detail}
+          </p>
+        )}
+        {reason && !busy && (
+          <p className="su-act__note text-[var(--ink-2)]">{reason}</p>
+        )}
+        <div className="su-act__action">
           {teleopOwnsTheArm ? (
-            <p className="text-[12.5px] leading-snug text-[var(--ink-3)] max-w-[26ch]">
+            <p className="su-act__note text-[var(--ink-2)]">
               Zum Zurücksetzen führst du den Leader-Arm von Hand in die
               Grundstellung.
             </p>
@@ -220,6 +244,6 @@ export default function ActivationCard() {
           )}
         </div>
       </div>
-    </Card>
+    </Plate>
   );
 }

@@ -45,7 +45,7 @@ const ImageTopicSelectModal = ({
 
   return (
     <div className={classImageTopicSelectModal}>
-      <div className="bg-white rounded-xl p-8 min-w-[420px] max-h-[80vh] overflow-hidden flex flex-col">
+      <div className="su-plate su-plate--plate p-8 min-w-[420px] max-h-[80vh] overflow-hidden flex flex-col">
         <div className="flex justify-between gap-4 items-center mb-6">
           <h3 className="text-4xl">Bildthema auswählen</h3>
           <button

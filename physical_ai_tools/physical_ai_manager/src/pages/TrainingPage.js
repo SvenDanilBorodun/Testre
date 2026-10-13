@@ -27,7 +27,9 @@ import TrainingLiveChart, { pickSelectedJob } from '../components/TrainingLiveCh
 import MyModels from '../components/MyModels';
 import LoginForm from '../components/LoginForm';
 import HeartbeatStatus from '../components/HeartbeatStatus';
-import { Card, Pill, Btn, SectionHeader } from '../components/EbUI';
+import { Card, Btn, SectionHeader } from '../components/EbUI';
+import { Led, Plate, Screen } from '../components/sucher';
+import '../components/sucher-pages/training.css';
 import {
   setQuota,
   requestProfileRefetch,
@@ -185,30 +187,37 @@ export default function TrainingPage() {
 
   const remaining = trainingCredits - trainingsUsed;
   const creditTone = remaining <= 0 ? 'danger' : remaining <= 2 ? 'amber' : 'success';
+  // The credits readout's light colour for the old pill tone.
+  const creditRead = creditTone === 'danger' ? 'rec' : creditTone === 'amber' ? 'warn' : 'ok';
 
   const status = selectedJob?.status;
   const subtitle = statusSubtitle(status);
   const pill = statusPill(status);
+  // The status light for the old pill tone; a running job breathes.
+  const pillLed = status === 'running'
+    ? 'sig'
+    : pill.tone === 'success' ? 'ok' : pill.tone === 'danger' ? 'rec' : pill.tone === 'amber' ? 'warn' : 'off';
 
   return (
     <div className="h-full w-full overflow-y-auto" style={{ background: 'var(--bg)' }}>
-      <div className="eb-shell flex flex-col gap-5 md:gap-6">
+      <div className="eb-shell su-trn flex flex-col gap-5 md:gap-6">
         {/* Header rail */}
         <SectionHeader
-          eyebrow="Training"
-          title="Modell trainieren"
+          size="xl"
+          eyebrow={<><span aria-hidden="true">03 · </span>Training</>}
+          title={<>Modell <em>trainieren</em></>}
           description="Wähle Datensatz und Policy, dann starte das Training in der Cloud."
+          className="items-end"
           right={
             <div className="flex items-center gap-3 flex-wrap justify-end">
               <HeartbeatStatus />
-              <div className="text-right">
-                <Pill tone={creditTone} dot>
-                  <span className="font-mono">
-                    {remaining} / {trainingCredits}
-                  </span>{' '}
+              <span className="su-read su-read--md su-trn-credits">
+                <span className={`su-read--${creditRead}`}>{remaining}</span>
+                <span className="su-trn-credits__of">/{trainingCredits}</span>
+                <span className="su-trn-credits__text">
                   Trainingsguthaben{trainingsUsed > 0 ? ` · ${trainingsUsed} verbraucht` : ''}
-                </Pill>
-              </div>
+                </span>
+              </span>
             </div>
           }
         />
@@ -221,57 +230,58 @@ export default function TrainingPage() {
             Benutzer-ID so a mis-link is visible. */}
         <div
           className={clsx(
-            'rounded-[var(--radius)] border px-4 py-3 text-sm leading-snug',
-            hfUsername
-              ? 'bg-[var(--accent-wash)] border-[color:var(--accent)]/20 text-[var(--ink-2)]'
-              : 'bg-amber-50 border-amber-200 text-amber-800'
+            'su-trn-info text-sm leading-snug',
+            hfUsername ? 'su-plate su-plate--plate' : 'su-trn-info--warn'
           )}
         >
-          <p>
-            Cloud-Training läuft über deine <strong>Cloud-Anmeldung</strong>{' '}
-            (angemeldet als {session?.user?.email || 'dein Konto'}) — das
-            ist getrennt vom Hugging-Face-Token, das du auf der Startseite
-            hinterlegt hast.
-          </p>
-          {hfUsername ? (
-            <p className="mt-1.5">
-              Verknüpfte HuggingFace-ID:{' '}
-              <span className="font-mono font-semibold">{hfUsername}</span> —
-              deine Datensätze werden hierüber gefunden.
+          {hfUsername && <Led tone="ok" className="su-trn-info__led" />}
+          <div className="min-w-0">
+            <p>
+              Cloud-Training läuft über deine <strong>Cloud-Anmeldung</strong>{' '}
+              (angemeldet als {session?.user?.email || 'dein Konto'}) — das
+              ist getrennt vom Hugging-Face-Token, das du auf der Startseite
+              hinterlegt hast.
             </p>
-          ) : (
-            <p className="mt-1.5">
-              Es ist noch kein Hugging-Face-Konto mit deinem Konto verknüpft.
-              Hinterlege dein Token auf der Startseite, dann wird es
-              automatisch verknüpft und deine Datensätze erscheinen hier.
-            </p>
-          )}
+            {hfUsername ? (
+              <p className="mt-1.5">
+                Verknüpfte HuggingFace-ID:{' '}
+                <span className="font-semibold">{hfUsername}</span> —
+                deine Datensätze werden hierüber gefunden.
+              </p>
+            ) : (
+              <p className="mt-1.5">
+                Es ist noch kein Hugging-Face-Konto mit deinem Konto verknüpft.
+                Hinterlege dein Token auf der Startseite, dann wird es
+                automatisch verknüpft und deine Datensätze erscheinen hier.
+              </p>
+            )}
+          </div>
         </div>
 
         {/* Setup rail */}
         <div>
-          <div className="flex items-center gap-3 mb-3">
-            <h2 className="text-[15px] font-semibold tracking-tight text-[var(--ink)]">
+          <div className="flex items-baseline gap-4 mb-5 flex-wrap">
+            <h2 className="su-serif text-[34px] leading-none text-[var(--ink)]">
               Setup
             </h2>
-            <span className="text-xs text-[var(--ink-3)]">
+            <span className="su-lab">
               Datensatz · Policy · Ausgabe · Optionen
             </span>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 items-start">
-            <div className="min-w-0">
+          <div className="su-trn-setup grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-x-4 gap-y-8 items-stretch">
+            <div className="su-trn-step min-w-0">
               <StepLabel n={1} title="Datensatz" />
               <DatasetSelector />
             </div>
-            <div className="min-w-0">
+            <div className="su-trn-step min-w-0">
               <StepLabel n={2} title="Policy" />
               <PolicySelector />
             </div>
-            <div className="min-w-0">
+            <div className="su-trn-step min-w-0">
               <StepLabel n={3} title="Ausgabeordner" />
               <TrainingOutputFolderInput />
             </div>
-            <div className="min-w-0">
+            <div className="su-trn-step min-w-0">
               <StepLabel n={4} title="Optionen" />
               <TrainingOptionInput />
             </div>
@@ -284,42 +294,40 @@ export default function TrainingPage() {
             that is not proof. */}
         <DatenWarning />
 
-        {/* Monitor rail (full width) */}
-        <Card
-          title="Trainingsverlauf"
-          subtitle={subtitle}
-          right={
-            <div className="flex gap-2 items-center flex-wrap justify-end">
-              <Pill tone={pill.tone} dot>
-                {pill.label}
-              </Pill>
+        {/* Monitor rail (full width): a powered dark screen */}
+        <Screen as="section" power className="su-trn-monitor" aria-label="Trainingsverlauf">
+          <div className="su-trn-monitor__head">
+            <div className="min-w-0">
+              <h2 className="su-serif su-trn-monitor__title">
+                Trainings<em>verlauf</em>
+              </h2>
+              <p className="su-lab mt-1">{subtitle}</p>
+            </div>
+            <div className="flex gap-4 items-center flex-wrap justify-end">
+              <span className="su-trn-monitor__status">
+                <Led tone={pillLed} pulse={status === 'running' ? 'breathe' : 'none'} />
+                <span className="su-lab">{pill.label}</span>
+              </span>
               <TrainingControlPanel />
             </div>
-          }
-        >
+          </div>
           <TrainingLiveChart jobs={jobs} isRealtime={isRealtime} />
           {remaining <= 0 && (
-            <div className="mt-4 text-xs text-[color:var(--danger)] bg-[var(--danger-wash)] px-3 py-2 rounded-[var(--radius-sm)] leading-snug">
+            <div className="su-trn-monitor__nocredit">
               Kein Guthaben mehr. Kontaktiere deinen Lehrer für mehr Credits.
             </div>
           )}
-        </Card>
+        </Screen>
 
         {/* My Models */}
-        <Card
-          title="Meine Modelle"
-          subtitle="Lokal + in der Cloud"
-          padded={false}
-        >
-          <div className="p-2">
-            <MyModels
-              jobs={jobs}
-              loading={loading}
-              refetch={refetch}
-              isRealtime={isRealtime}
-            />
-          </div>
-        </Card>
+        <Plate className="su-trn-models">
+          <MyModels
+            jobs={jobs}
+            loading={loading}
+            refetch={refetch}
+            isRealtime={isRealtime}
+          />
+        </Plate>
       </div>
     </div>
   );
@@ -332,7 +340,7 @@ function DatenWarning() {
   if (!warning) return null;
   return (
     <div
-      className="flex items-center gap-3 flex-wrap rounded-[var(--radius)] border px-4 py-3 text-sm leading-snug bg-amber-50 border-amber-200 text-amber-800"
+      className="flex items-center gap-3 flex-wrap rounded-[18px] px-4 py-3 text-sm leading-snug bg-[var(--amber-wash)] text-[color:var(--amber)]"
       role="status"
       data-daten-warning={warning}
     >
@@ -349,20 +357,13 @@ function DatenWarning() {
   );
 }
 
+// A dark disc with the step's number on the plate's top edge; the step title
+// stays for screen readers.
 function StepLabel({ n, title }) {
   return (
-    <div className="flex items-center gap-2 mb-3">
-      <span
-        className={clsx(
-          'w-6 h-6 rounded-full flex items-center justify-center font-mono text-xs font-semibold',
-          'bg-[var(--accent-wash)] text-[var(--accent-ink)]'
-        )}
-      >
-        {n}
-      </span>
-      <span className="text-xs font-semibold uppercase tracking-wide text-[var(--ink-3)]">
-        {title}
-      </span>
+    <div className="su-trn-steplabel">
+      <span className="su-trn-steplabel__disc" aria-hidden="true">{n}</span>
+      <span className="su-sr">{title}</span>
     </div>
   );
 }

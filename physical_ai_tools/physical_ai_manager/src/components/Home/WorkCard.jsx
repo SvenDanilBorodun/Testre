@@ -29,8 +29,20 @@
 import React from 'react';
 import { useSelector } from 'react-redux';
 
-import { Card, Pill, Stat } from '../EbUI';
+import { Card } from '../EbUI';
+import { Led, Readout } from '../sucher';
 import { relativeDe } from '../../hooks/useStudentWork';
+
+/** One counter tile: a big dark readout, its caption and the line under it. */
+function WorkStat({ label, value, tone = 'ink', trend }) {
+  return (
+    <div className="su-work__stat">
+      <Readout size="xl" tone={tone} roll className="su-work__val">{value}</Readout>
+      <span className="su-lab su-work__label">{label}</span>
+      <span className="su-work__trend">{trend}</span>
+    </div>
+  );
+}
 
 /** „—" for unknown, the number otherwise. `0` is a real answer and prints. */
 function fmt(n) {
@@ -49,50 +61,58 @@ export default function WorkCard({ work, loading }) {
   const creditsTone = creditsRemaining === 0 ? 'danger'
     : (typeof creditsRemaining === 'number' && creditsRemaining > 0 ? 'success' : undefined);
 
+  // The credits readout takes the old Stat tone: success → ok, danger → rec.
+  const creditsReadTone = creditsTone === 'danger' ? 'rec' : creditsTone === 'success' ? 'ok' : 'ink';
+
   return (
     <Card
-      title="Deine Arbeit"
+      title={<>Deine <em>Arbeit</em></>}
+      titleStyle="serif"
+      className="su-work h-full"
       subtitle={inGroup
         ? `Training und Credits teilst du mit der Gruppe ${workgroupName || ''}`.trim()
         : undefined}
       right={runningTrainings > 0
         ? (
-          <Pill tone="accent" dot>
-            {runningTrainings === 1 ? '1 Training läuft' : `${runningTrainings} Trainings laufen`}
-          </Pill>
+          <span className="su-work__running">
+            <Led tone="sig" pulse="breathe" />
+            <span className="su-lab">
+              {runningTrainings === 1 ? '1 Training läuft' : `${runningTrainings} Trainings laufen`}
+            </span>
+          </span>
         )
         : null}
     >
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-5">
-        <Stat label="Aufnahmen" value={loading ? '…' : fmt(datasetCount)} trend="Datensätze" />
-        <Stat label="Episoden" value={loading ? '…' : fmt(episodeCount)} trend="aufgezeichnet" />
-        <Stat
+      <div className="su-work__stats grid grid-cols-2 md:grid-cols-5 gap-3">
+        <WorkStat label="Aufnahmen" value={loading ? '…' : fmt(datasetCount)} tone="sig" trend="Datensätze" />
+        <WorkStat label="Episoden" value={loading ? '…' : fmt(episodeCount)} trend="aufgezeichnet" />
+        <WorkStat
           label="Modelle"
           value={loading ? '…' : fmt(modelCount)}
           trend={inGroup ? 'in der Gruppe' : 'fertig trainiert'}
         />
-        <Stat label="Programme" value={loading ? '…' : fmt(workflowCount)} trend="Roboter Studio" />
-        <Stat
+        <WorkStat label="Programme" value={loading ? '…' : fmt(workflowCount)} trend="Roboter Studio" />
+        <WorkStat
           label={inGroup ? 'Credits der Gruppe' : 'Credits'}
           value={loading ? '…' : fmt(creditsRemaining)}
-          tone={creditsTone}
+          tone={creditsReadTone}
           trend={typeof creditsTotal === 'number' ? `von ${creditsTotal} übrig` : 'übrig'}
         />
       </div>
 
       {(lastDataset || lastWorkflow) && (
-        <div className="mt-5 pt-4 border-t border-dashed border-[var(--line)] flex flex-wrap gap-x-8 gap-y-1.5 text-xs text-[var(--ink-3)]">
+        <div className="su-work__last mt-5 pt-4 border-t border-[var(--su-hair)] flex flex-wrap gap-x-8 gap-y-1.5 text-[13px] text-[var(--ink-2)]">
           {lastDataset && (
             <span>
               Zuletzt aufgenommen:{' '}
-              <span className="text-[var(--ink-2)]">{lastDataset.name}</span>
+              <span className="font-semibold text-[var(--ink)]">{lastDataset.name}</span>
               {relativeDe(lastDataset.created_at) && ` · ${relativeDe(lastDataset.created_at)}`}
             </span>
           )}
           {lastWorkflow && (
             <span>
               Zuletzt programmiert:{' '}
-              <span className="text-[var(--ink-2)]">{lastWorkflow.name}</span>
+              <span className="font-semibold text-[var(--ink)]">{lastWorkflow.name}</span>
               {relativeDe(lastWorkflow.updated_at) && ` · ${relativeDe(lastWorkflow.updated_at)}`}
             </span>
           )}
@@ -103,7 +123,7 @@ export default function WorkCard({ work, loading }) {
           once we KNOW it is empty. All-null means the fetches failed, and that
           is not the moment to tell a student they have done nothing. */}
       {!loading && datasetCount === 0 && workflowCount === 0 && modelCount === 0 && (
-        <p className="mt-5 pt-4 border-t border-dashed border-[var(--line)] text-xs text-[var(--ink-3)]">
+        <p className="mt-5 pt-4 border-t border-[var(--su-hair)] text-[13px] text-[var(--ink-2)]">
           Noch nichts aufgenommen oder programmiert — hier siehst du später deine Datensätze,
           Modelle und Programme.
         </p>

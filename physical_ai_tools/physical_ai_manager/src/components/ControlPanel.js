@@ -507,57 +507,35 @@ export default function ControlPanel() {
     handleKeyboardRelease,
   ]);
 
+  // Sucher: a light plate bar under the camera screen; `su-ctl` re-tones the
+  // dark-dock children (inference.css).
   const classControlPanelBody = clsx(
-    'min-h-[168px]',
-    'rounded-[20px]',
-    'mx-3',
-    'mt-1',
-    'mb-3',
-    'p-3',
-    'flex',
-    'flex-row',
-    'flex-wrap',
-    'items-stretch',
-    'gap-3',
-    'border',
-    'border-white/10',
-    'backdrop-blur'
+    'su-plate', 'su-plate--plate', 'su-ctl',
+    'min-h-[168px]', 'mt-4', 'p-3', 'flex', 'flex-row', 'flex-wrap', 'items-stretch', 'gap-3'
   );
 
-  const controlPanelBodyStyle = {
-    background:
-      'linear-gradient(180deg, rgba(22,27,29,0.96) 0%, rgba(10,14,15,0.96) 100%)',
-  };
 
   const classControlPanelButtons = (label, isDisabled) =>
     clsx(
+      'su-ctl__btn',
       'text-4xl',
       'font-semibold',
       'w-full',
       'h-full',
       'min-w-0',
-      'rounded-[var(--radius-lg)]',
-      'cursor-pointer',
       'px-2',
       'flex',
       'items-center',
       'justify-center',
       'flex-col',
-      'border',
-      'transition-all',
-      'duration-200',
       'overflow-hidden',
-      'text-white',
       {
-        'bg-white/[0.04] border-white/10 hover:bg-white/[0.08]':
-          !isDisabled && pressed !== label && hovered !== label,
-        'bg-white/[0.08] border-white/15': hovered === label && pressed !== label && !isDisabled,
-        'bg-white/[0.14] border-white/20': pressed === label && !isDisabled,
-        'opacity-30': isDisabled,
+        'su-ctl__btn--hover': hovered === label && pressed !== label && !isDisabled,
+        'su-ctl__btn--pressed': pressed === label && !isDisabled,
         'cursor-not-allowed': isDisabled,
-        'bg-white/[0.02] border-white/5': isDisabled,
       }
     );
+
 
   const classControlPanelButtonIcon = clsx(
     'bg-transparent',
@@ -606,7 +584,7 @@ export default function ControlPanel() {
   };
 
   return (
-    <div className={classControlPanelBody} style={controlPanelBodyStyle}>
+    <div className={classControlPanelBody}>
       <div className="flex flex-[2_2_320px] min-w-[280px] w-full h-[104px] gap-2 md:gap-3">
         {buttons.map(({ label, displayLabel, icon, color, description, shortcut }) => {
           const isDisabled = !isButtonEnabled(label);
@@ -654,7 +632,7 @@ export default function ControlPanel() {
                   <Icon
                     name={icon}
                     style={{ fontSize: 'clamp(1rem, 3vw, 2.8rem)', opacity: isDisabled ? 0.35 : undefined }}
-                    color={isDisabled ? '#ffffff' : color}
+                    color={isDisabled ? '#8A867E' : color}
                   />
                 </span>
                 <span className="text-center whitespace-pre-line leading-tight text-ellipsis overflow-hidden block w-full h-full flex items-center justify-center">
@@ -665,7 +643,7 @@ export default function ControlPanel() {
           );
         })}
       </div>
-      <div className="rounded-[var(--radius-lg)] flex flex-[1_1_260px] min-w-[220px] flex-col justify-center items-center gap-2 text-white px-2">
+      <div className="su-ctl__status rounded-[var(--radius-lg)] flex flex-[1_1_260px] min-w-[220px] flex-col justify-center items-center gap-2 text-white px-2">
         <div className="flex items-center justify-center gap-3">
           <div
             className="flex min-w-0 text-center items-center gap-2 font-semibold"

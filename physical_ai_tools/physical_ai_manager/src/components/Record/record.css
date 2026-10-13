@@ -58,7 +58,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 18px 22px 16px;
+  padding: 18px 18px 16px;
   gap: 14px;
   overflow: hidden;
 }
@@ -720,17 +720,17 @@
 
 /* ---------- action bar: a light plate ----------
  * Height budget (D6): every child ≤ 54 px, so the bar stays one row of its
- * min-height (80 px; ActionBar's ONE_ROW_MAX_PX is 82). A key's shortcut sits
- * UNDER its label (a key legend), which keeps the three recording keys narrow
- * enough for one row at 1440 px. */
+ * min-height (80 px; ActionBar's ONE_ROW_MAX_PX is 82). Widths are kept tight
+ * (keys, frames, gaps) so the recording row — pill, three frames, three keys
+ * with their shortcuts, the sound key — fits one row at 1440 px. */
 .rec-actionbar {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   background: var(--su-plate);
   border-radius: 18px;
-  padding: 12px 14px;
+  padding: 12px;
   min-height: 80px;
   box-shadow: inset 0 1px 0 #FFFFFF, 0 0 0 1px var(--su-hair);
 }
@@ -747,7 +747,7 @@
   color: var(--c);
   flex: none;
 }
-.rec-pp-t { display: flex; flex-direction: column; min-width: 96px; }
+.rec-pp-t { display: flex; flex-direction: column; min-width: 86px; }
 .rec-pp-t b {
   font-family: var(--rec-serif);
   font-size: 24px;
@@ -799,7 +799,7 @@
 .rec-film > .lbl { color: #C9C1B5; padding: 0 4px; }
 .rec-epd {
   position: relative;
-  width: 36px;
+  width: 30px;
   height: 28px;
   border-radius: 2px;
   background: #141210;
@@ -833,18 +833,15 @@
 
 /* Right-aligned by margin, not by a spacer element: a spacer costs one more
  * flex gap, which is exactly what the recording row lacks at 1440 px. */
-.rec-btns { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; justify-content: flex-end; flex: none; margin-left: auto; }
+.rec-btns { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; justify-content: flex-end; flex: none; margin-left: auto; }
 
-/* a command key: icon, label, and the shortcut under the label */
+/* a command key: icon, label and shortcut on one line, centred (Main.dc.html .rk + .kb) */
 .rec-btn {
   font: inherit;
-  display: inline-grid;
-  grid-template-columns: auto;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  justify-items: start;
-  column-gap: 8px;
-  row-gap: 3px;
+  gap: 6px;
   border-radius: 15px;
   border: 0;
   cursor: pointer;
@@ -857,11 +854,9 @@
   /* back from a press with the spring (M2) */
   transition: transform 160ms var(--su-ease-spring), box-shadow 160ms var(--su-ease-spring), background-color 120ms ease-out;
 }
-.rec-btn:has(> svg) { grid-template-columns: auto auto; }
-.rec-btn:has(> .rec-kbd) > svg { grid-row: span 2; }
-.rec-btn > .rec-kbd { grid-column: -2; }
-.rec-btn.xl { height: 54px; padding: 0 22px; font-size: 15px; font-weight: 700; }
-.rec-btn.md { height: 54px; padding: 0 16px; font-size: 14px; }
+.rec-btn > svg { flex: none; }
+.rec-btn.xl { height: 54px; padding: 0 20px; gap: 9px; font-size: 15px; font-weight: 700; }
+.rec-btn.md { height: 54px; padding: 0 12px; font-size: 14px; }
 .rec-btn:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 0 0 1px #FF9A6B, 0 4px 0 #C9C4BA, 0 10px 16px -10px rgba(0, 0, 0, .4);
@@ -905,10 +900,10 @@
 .rec-btn[data-action="end"]:disabled > svg { color: #8A867E; }
 .rec-kbd {
   font-family: inherit;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   line-height: 1;
-  padding: 2px 6px;
+  padding: 3px 5px;
   border-radius: 6px;
   background: rgba(0, 0, 0, .08);
   color: inherit;
@@ -947,11 +942,11 @@
  * only on a bar with three command buttons. */
 .rec-actionbar.rec-shed-endkey .rec-btn[data-action="end"] .rec-kbd { display: none; }
 .rec-actionbar.rec-shed-keys .rec-btns .rec-kbd { display: none; }
-.rec-actionbar.rec-shed-keys .rec-btns .rec-btn.md { padding: 0 13px; }
+.rec-actionbar.rec-shed-keys .rec-btns .rec-btn.md { padding: 0 12px; }
 .rec-actionbar.rec-shed-label .rec-eps .lbl:first-child { display: none; }
 .rec-actionbar.rec-shed-label .rec-phasepill { min-width: 0; }
 .rec-actionbar.rec-shed-dots .rec-film { gap: 3px; }
-.rec-actionbar.rec-shed-dots .rec-epd { width: 26px; height: 24px; font-size: 11px; }
+.rec-actionbar.rec-shed-dots .rec-epd { width: 24px; height: 24px; font-size: 11px; }
 
 
 /* ---------- cards (right column): plates ---------- */

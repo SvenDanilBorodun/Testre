@@ -294,12 +294,6 @@
 }
 :root[data-ui='sucher'] .su-studio .st-editorbox .blocklyFlyoutBackground { fill: #EFECE6; fill-opacity: 1; }
 :root[data-ui='sucher'] .su-studio .st-editorbox .blocklyScrollbarHandle { fill: rgba(35, 35, 34, .22); }
-/* M14 „Programm läuft": the running block glows orange (static) */
-:root[data-ui='sucher'] .su-studio .st-editorbox .blocklyHighlighted > .blocklyPath {
-  stroke: #FF5B1F;
-  stroke-width: 2.5px;
-  filter: drop-shadow(0 0 6px rgba(255, 91, 31, .7));
-}
 
 /* the Python preview strip under the editor */
 :root[data-ui='sucher'] .su-studio .st-codestrip > div {

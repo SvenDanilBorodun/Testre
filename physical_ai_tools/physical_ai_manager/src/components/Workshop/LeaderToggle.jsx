@@ -129,7 +129,9 @@ const modalStyle = { ...boxStyle, textAlign: 'left' };
 
 // The two header buttons („Leader abschalten" / „Leader verbinden"): compact,
 // to fit the studio header's action row beside the simulator toggle.
-const TOGGLE_BUTTON_CLASS = 'text-xs px-3 py-1.5 rounded-md border border-[var(--line)] bg-white '
+// `st-key`: the Sucher key paint (studio.css; also wherever this toggle is
+// shown outside the studio, e.g. the Inferenz page's cloud panel).
+const TOGGLE_BUTTON_CLASS = 'st-key text-xs px-3 py-1.5 rounded-md border border-[var(--line)] bg-white '
   + 'text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed '
   + 'whitespace-nowrap';
 
@@ -378,7 +380,7 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
         </button>
       ) : (
         <>
-          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1a7f37] whitespace-nowrap">
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--success)] whitespace-nowrap">
             <Icon name="dot" size="0.6em" fill="currentColor" />
             Leader abgeschaltet — Roboter Studio aktiv
           </span>
@@ -395,7 +397,7 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
       )}
 
       {taskBusy && (
-        <span className="text-xs" style={{ color: '#9a6700' }}>
+        <span className="text-xs" style={{ color: 'var(--amber)' }}>
           Während Aufnahme/Inferenz nicht verfügbar
         </span>
       )}

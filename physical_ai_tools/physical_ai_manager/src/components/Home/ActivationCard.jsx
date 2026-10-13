@@ -199,7 +199,7 @@ export default function ActivationCard() {
           <h3 className="su-act__title">{TITLE}</h3>
           <Led tone={lit ? 'sig' : 'off'} pulse={discKind === 'activating' ? 'breathe' : 'none'} />
         </div>
-        <p className="su-act__state su-serif">
+        <p className={`su-act__state su-serif${isActive ? '' : ' su-act__state--long'}`}>
           {isActive
             ? (hasLeader
               ? 'Der Roboter ist aktiv. Der Follower-Arm folgt dem Leader-Arm.'

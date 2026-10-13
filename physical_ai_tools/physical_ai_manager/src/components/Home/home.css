@@ -127,6 +127,14 @@
 :where([data-ui='sucher']) .su-act__head { display: flex; align-items: center; gap: 10px; }
 :where([data-ui='sucher']) .su-act__title { margin: 0; font-size: 19px; font-weight: 700; color: var(--su-ink); }
 :where([data-ui='sucher']) .su-act__state { margin: 0; font-size: 26px; line-height: 1.15; color: var(--su-ink); }
+/* the idle sentence is three times as long: a smaller serif keeps the card short */
+:where([data-ui='sucher']) .su-act__state--long { font-size: 19px; line-height: 1.25; }
+@media (max-width: 1279px) {
+  :where([data-ui='sucher']) .su-act__disc { width: 112px; height: 112px; }
+  :where([data-ui='sucher']) .su-act__core { width: 84px; height: 84px; }
+  :where([data-ui='sucher']) .su-act__state { font-size: 22px; }
+  :where([data-ui='sucher']) .su-act__state--long { font-size: 17px; }
+}
 :where([data-ui='sucher']) .su-act__note { margin: 0; font-size: 13px; line-height: 1.4; }
 :where([data-ui='sucher']) .su-act__action { margin-top: 4px; }
 :where([data-ui='sucher']) .su-act__action:empty { display: none; }

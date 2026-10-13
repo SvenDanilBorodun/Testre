@@ -25,6 +25,10 @@
 // On a narrow window (≤ 1150 px of page, e.g. 1093 px at 125 % scaling)
 // record.css turns this into one scrolling column with a sticky footer (banner
 // + action bar together, so the banner can never slide under the bar).
+//
+// Sucher (§8): on a wide page .rec-left is the dark „device" round the stage
+// and the footer (CSS only, both stay its only children); the 3D tile draws
+// the arm's chronophotography trail (UrdfTwin chronoTrail, D15).
 
 import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { shallowEqual, useSelector } from 'react-redux';
@@ -191,7 +195,7 @@ function RecordPage({ isActive = true }) {
           {twinShown ? (
             <div className="rec-tile-fill">
               <Suspense fallback={<div className="rec-tile-fallback">{copy.tiles.twinLoading}</div>}>
-                <UrdfTwin viewPreset={preset} showChrome={false} />
+                <UrdfTwin viewPreset={preset} showChrome={false} chronoTrail />
               </Suspense>
             </div>
           ) : null}

@@ -11,7 +11,8 @@
 // name, one line of what to do, what comes next, and a small moving picture —
 // the hand on the Leader-Arm while warming up, the arm and the cube going back
 // to the start mark while resetting. The last three seconds pop with each new
-// number; the first frame of a recording shows a green „Los!".
+// number; the first frame of a recording shows „Los!" (Sucher M16: serif
+// italic with an orange underline sweeping in, 950 ms).
 //
 // The ring and the pictograms are drawn inline, as illustrations
 // (noIconGlyphs.test.js::INLINE_SVG_ALLOWED names this file). The ring moves
@@ -27,7 +28,7 @@ import clsx from 'clsx';
 import { PHASE_COLOR } from './PhaseTrack';
 
 export const RING_CIRCUMFERENCE = 552.92; // 2π · 88
-export const LOS_MS = 700;
+export const LOS_MS = 950;
 
 /**
  * The F6d wording rule, pure: which episode numbers the overlay names.
@@ -62,14 +63,14 @@ export function overlayText(phase, { saved = 0, total = 0, episodeTime = 0 } = {
 function WarmupPicture({ label }) {
   return (
     <svg className="rec-picto" viewBox="0 0 190 96" aria-hidden="true" data-picto="warmup">
-      <rect x="10" y="80" width="170" height="4" rx="2" fill="#3A4448" />
-      <g stroke="#E8EBEC" strokeWidth="6" strokeLinecap="round" fill="none"><path d="M40 78 V40 L80 30" /></g>
+      <rect x="10" y="80" width="170" height="4" rx="2" fill="#34302B" />
+      <g stroke="#F2EDE4" strokeWidth="6" strokeLinecap="round" fill="none"><path d="M40 78 V40 L80 30" /></g>
       <circle cx="40" cy="40" r="5" fill="var(--c)" />
       <circle cx="80" cy="30" r="5" fill="var(--c)" />
       <g className="rec-p-hand">
         <path d="M86 44 q10 -22 26 -10 l8 6 q6 5 0 10 l-16 8 q-12 4 -18 -14z" fill="var(--c)" opacity=".95" />
       </g>
-      <text x="120" y="76" fill="#B4B9BC" fontSize="12" fontFamily="Inter Tight, sans-serif">{label}</text>
+      <text x="120" y="76" fill="#9C9488" fontSize="12" fontFamily="Host Grotesk, sans-serif">{label}</text>
     </svg>
   );
 }
@@ -77,15 +78,15 @@ function WarmupPicture({ label }) {
 function ResetPicture({ label }) {
   return (
     <svg className="rec-picto" viewBox="0 0 190 96" aria-hidden="true" data-picto="reset">
-      <rect x="10" y="80" width="170" height="4" rx="2" fill="#3A4448" />
-      <rect x="52" y="64" width="16" height="16" rx="2" fill="none" stroke="#B4B9BC" strokeWidth="1.5" strokeDasharray="3 3" />
-      <g className="rec-p-cube"><rect x="53" y="65" width="14" height="14" rx="2" fill="#E0574A" /></g>
+      <rect x="10" y="80" width="170" height="4" rx="2" fill="#34302B" />
+      <rect x="52" y="64" width="16" height="16" rx="2" fill="none" stroke="#9C9488" strokeWidth="1.5" strokeDasharray="3 3" />
+      <g className="rec-p-cube"><rect x="53" y="65" width="14" height="14" rx="2" fill="#FF7A3D" /></g>
       <g className="rec-p-arm">
-        <path d="M40 78 V38" stroke="#E8EBEC" strokeWidth="6" strokeLinecap="round" />
-        <path d="M40 38 L70 28" stroke="#E8EBEC" strokeWidth="6" strokeLinecap="round" />
+        <path d="M40 78 V38" stroke="#F2EDE4" strokeWidth="6" strokeLinecap="round" />
+        <path d="M40 38 L70 28" stroke="#F2EDE4" strokeWidth="6" strokeLinecap="round" />
         <circle cx="40" cy="38" r="5" fill="var(--c)" />
       </g>
-      <text x="96" y="30" fill="#B4B9BC" fontSize="12" fontFamily="Inter Tight, sans-serif">{label}</text>
+      <text x="96" y="30" fill="#9C9488" fontSize="12" fontFamily="Host Grotesk, sans-serif">{label}</text>
     </svg>
   );
 }

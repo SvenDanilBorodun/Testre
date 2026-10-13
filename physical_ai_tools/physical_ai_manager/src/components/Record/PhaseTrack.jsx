@@ -12,13 +12,21 @@
 // white playhead, and the seconds left sit on the right. Outside a session it
 // is one neutral segment with the idle text.
 //
+// Sucher (§8): a second row under the segments — the „Lichtband" in the
+// running segment's colour, its label (the running segment's name, which is
+// why that segment itself shows no text: it is named once, in row 2) and the
+// seconds left (`.rec-remain`).
+//
 // The fill moves every animation frame, but the page must not re-render at
 // 60 Hz: `subscribeFrame(fn)` hands `fn({frac})` each frame and this component
-// writes the width straight into the DOM through refs (no React state).
+// writes the width straight into the DOM through refs (no React state). The
+// Lichtband gets the same frames through ONE subscription of this component
+// (a local fan-out), so the clock still has one subscriber per Phasenleiste.
 
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import clsx from 'clsx';
 import Icon from '../icons/Icon';
+import { Lichtband } from '../sucher';
 
 // The four phase colours as CSS values (record.css defines the variables on
 // .rec-page, spec §3.5), keyed by the kind a segment, dot or overlay shows.
@@ -33,7 +41,7 @@ export const PHASE_COLOR = Object.freeze({
 
 /** The colour for a segment kind; an unknown kind is neutral grey. */
 export function phaseColor(kind) {
-  return PHASE_COLOR[kind] || '#3A4448';
+  return PHASE_COLOR[kind] || '#4A4944';
 }
 
 function setFrac(fill, head, frac) {
@@ -52,6 +60,14 @@ export default function PhaseTrack({
 }) {
   const fillRef = useRef(null);
   const headRef = useRef(null);
+  // The Lichtband's frames: one local set, fed by this component's one clock
+  // subscription (never a second subscription to the clock).
+  const bandSubsRef = useRef(new Set());
+  const bandSubscribe = useCallback((fn) => {
+    const subs = bandSubsRef.current;
+    subs.add(fn);
+    return () => { subs.delete(fn); };
+  }, []);
   const nowIndex = segments ? segments.findIndex((s) => s.state === 'now') : -1;
   const now = nowIndex >= 0 ? segments[nowIndex] : null;
   const nowKey = now ? now.key : null;
@@ -59,18 +75,22 @@ export default function PhaseTrack({
 
   useEffect(() => {
     if (!nowKey) return undefined;
+    const paint = (frac) => {
+      setFrac(fillRef.current, headRef.current, frac);
+      bandSubsRef.current.forEach((fn) => fn({ frac }));
+    };
     // The Speichern dot has no time of its own: it shows half full while saving.
     if (nowIsDot) {
-      setFrac(fillRef.current, headRef.current, 0.5);
+      paint(0.5);
       return undefined;
     }
     if (staticFrac !== null && staticFrac !== undefined) {
-      setFrac(fillRef.current, headRef.current, staticFrac);
+      paint(staticFrac);
       return undefined;
     }
-    setFrac(fillRef.current, headRef.current, 0);
+    paint(0);
     if (typeof subscribeFrame !== 'function') return undefined;
-    return subscribeFrame((f) => setFrac(fillRef.current, headRef.current, f && f.frac));
+    return subscribeFrame((f) => paint(f && f.frac));
   }, [nowKey, nowIsDot, subscribeFrame, staticFrac]);
 
   if (!segments || segments.length === 0) {
@@ -85,7 +105,7 @@ export default function PhaseTrack({
   }
 
   return (
-    <div className="rec-track" role="group" aria-label={ariaLabel} data-testid="rec-track">
+    <div className="rec-track has-band" role="group" aria-label={ariaLabel} data-testid="rec-track">
       <div className="rec-segs">
         {segments.map((s) => {
           const isNow = s.state === 'now';
@@ -100,12 +120,25 @@ export default function PhaseTrack({
             >
               {isNow ? <i className="rec-sg-fill" ref={fillRef} /> : null}
               {isNow && !s.dot ? <i className="rec-sg-head" ref={headRef} /> : null}
-              <span>{s.dot ? <Icon name="save" size={14} /> : s.label}</span>
+              {s.dot ? <span><Icon name="save" size={14} /></span> : null}
+              {!s.dot && !isNow ? <span>{s.label}</span> : null}
             </div>
           );
         })}
       </div>
-      <div className="rec-remain">{remaining}</div>
+      <div className="rec-bandrow">
+        {now ? (
+          <Lichtband
+            key={now.key}
+            className="rec-band"
+            count={32}
+            color={phaseColor(now.kind)}
+            label={now.label}
+            subscribeFrame={bandSubscribe}
+          />
+        ) : <div className="rec-band rec-band-idle" />}
+        <div className="rec-remain">{remaining}</div>
+      </div>
     </div>
   );
 }

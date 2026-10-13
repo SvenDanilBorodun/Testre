@@ -7,10 +7,17 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 //
 // What the stage shows while an episode is being recorded (spec §3.5): the red
-// „REC mm:ss" badge top left, the seconds left until it is saved top right (red
-// in the last three seconds) and a red line along the bottom that shrinks to
-// nothing. The red frame itself is RecordStage's. The line moves every frame
-// through `subscribeFrame` and a ref; the texts change once per second.
+// „REC mm:ss" badge, the seconds left until it is saved (red in the last three
+// seconds) and a line along the bottom that shrinks to nothing. The frame
+// itself is drawn round the device (record.css, from RecordStage's classes).
+// The line moves every frame through `subscribeFrame` and a ref; the texts
+// change once per second.
+//
+// Sucher (§8, M11): the badge is a red chip in Doto with a blinking white
+// light, centred over the tiles; the seconds left are a big serif italic
+// number bottom right — the number and its unit split at render from the one
+// handed-in string (the copy is unchanged); in the last three seconds the
+// number pops once per second (keyed on its value, CSS only).
 
 import React, { useEffect, useRef } from 'react';
 import clsx from 'clsx';
@@ -42,6 +49,8 @@ export default function RecordingFrame({
   }, [active, subscribeFrame, staticFrac]);
 
   if (!active || !text) return null;
+  // „13 s" → „13" + „ s" (presentation only; anything else is drawn as is).
+  const m = /^(\d+)(\s*\S.*)$/.exec(String(text.remaining || ''));
   return (
     <>
       <div className="rec-recinfo" data-testid="rec-recording-frame">
@@ -50,7 +59,14 @@ export default function RecordingFrame({
           {text.badge}
         </span>
         <div className={clsx('rec-recleft', hot && 'hot')} data-testid="rec-remaining">
-          <div className="big">{text.remaining}</div>
+          <div className="big">
+            {m ? (
+              <>
+                <span className="num" key={hot ? m[1] : 'steady'}>{m[1]}</span>
+                <small>{m[2]}</small>
+              </>
+            ) : text.remaining}
+          </div>
           <div className="sm">{text.until}</div>
         </div>
       </div>

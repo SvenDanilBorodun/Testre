@@ -9,6 +9,8 @@
 // The Aufnahme page header (spec §3.12): eyebrow, the task name as the page
 // title, the connection pill and the robot's German name. Presentational: the
 // connection pill is handed in (HeartbeatStatus reads Redux itself).
+// Sucher (§8): the eyebrow carries the tab number „02 · " (decorative,
+// aria-hidden), the title is set in the serif as ONE text node.
 
 import React from 'react';
 import Icon from '../icons/Icon';
@@ -17,7 +19,7 @@ export default function RecordHeader({ eyebrow, title, connection = null, robotN
   return (
     <header className="rec-top">
       <div>
-        <div className="rec-eyebrow">{eyebrow}</div>
+        <div className="rec-eyebrow"><span aria-hidden="true">02 · </span>{eyebrow}</div>
         <h1 className="rec-title" title={title}>{title}</h1>
       </div>
       <div className="rec-pills">

@@ -9,7 +9,9 @@
 // A robot icon (Sucher §4.10, D17): a 24-frame sprite rendered from the real
 // URDF (public/robots/*.webp, 3456 × 144). Frame 0 is the still icon;
 // `animate` sways it (steps(24), 2.4 s), never under reduced motion. Loaded
-// lazily — the images are 88–107 KB each.
+// lazily — the images are 88–107 KB each. `reducedMotion` (boolean) lets a
+// caller that already follows the media query hand its answer in: the icon
+// then opens no matchMedia subscription of its own.
 
 import React from 'react';
 import clsx from 'clsx';
@@ -35,9 +37,11 @@ export function robotSpriteUrl(profile, light = false) {
 }
 
 export default function RobotIcon({
-  profile, size = 48, animate = false, light = false, dim = false, title, className,
+  profile, size = 48, animate = false, light = false, dim = false, title, className, reducedMotion,
 }) {
-  const reduced = useReducedMotion();
+  const given = typeof reducedMotion === 'boolean';
+  const systemReduced = useReducedMotion(!given);
+  const reduced = given ? reducedMotion : systemReduced;
   const a11y = title ? { role: 'img', 'aria-label': title } : { role: 'presentation' };
   return (
     <span

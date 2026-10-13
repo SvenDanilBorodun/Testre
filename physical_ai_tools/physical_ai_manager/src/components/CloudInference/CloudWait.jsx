@@ -32,7 +32,7 @@ import React, { useEffect, useState } from 'react';
 import clsx from 'clsx';
 
 import Icon from '../icons/Icon';
-import { robotSpriteUrl } from '../sucher/RobotIcon';
+import RobotIcon from '../sucher/RobotIcon';
 import { cloudCopy, fill } from './cloudCopy';
 import './cloudWait.css';
 
@@ -136,14 +136,12 @@ export function useElapsedSeconds(startedAt) {
 }
 
 function Picture({ robotProfile, reduced }) {
-  // The robot's sprite (the RobotIcon markup, driven by this card's own
-  // reduced-motion state so the card keeps one matchMedia listener).
+  // The robot's sprite, driven by this card's own reduced-motion state
+  // (handed in, so the card keeps one matchMedia listener).
   return (
     <div className="ciw-picture" aria-hidden="true" data-testid="cloud-wait-picture">
       <span className="ciw-node ciw-node-robot">
-        <span className={clsx('su-robot', !reduced && 'su-robot--animate')} style={{ width: 40, height: 40 }}>
-          <img src={robotSpriteUrl(robotProfile)} loading="lazy" decoding="async" alt="" draggable="false" />
-        </span>
+        <RobotIcon profile={robotProfile} size={40} animate reducedMotion={reduced} />
       </span>
       <span className="ciw-dots">
         <Icon name="dot" size={8} className="ciw-dot" />

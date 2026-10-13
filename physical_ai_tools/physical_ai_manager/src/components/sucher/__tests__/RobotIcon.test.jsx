@@ -60,4 +60,40 @@ describe('RobotIcon', () => {
       window.matchMedia = orig;
     }
   });
+
+  it('reducedMotion given: it decides, and the icon neither reads nor subscribes to matchMedia', () => {
+    const orig = window.matchMedia;
+    const listeners = new Set();
+    window.matchMedia = vi.fn((q) => ({
+      matches: true, media: q, addEventListener: (_t, fn) => listeners.add(fn), removeEventListener: (_t, fn) => listeners.delete(fn),
+    }));
+    try {
+      const { container, rerender } = render(<RobotIcon profile="omx_full" animate reducedMotion={false} />);
+      expect(container.firstChild).toHaveClass('su-robot--animate');
+      rerender(<RobotIcon profile="omx_full" animate reducedMotion />);
+      expect(container.firstChild).not.toHaveClass('su-robot--animate');
+      expect(window.matchMedia).not.toHaveBeenCalled();
+      expect(listeners.size).toBe(0);
+    } finally {
+      window.matchMedia = orig;
+    }
+  });
+
+  it('reducedMotion omitted: it follows the media query (one subscription)', () => {
+    const orig = window.matchMedia;
+    const listeners = new Set();
+    window.matchMedia = vi.fn((q) => ({
+      matches: false, media: q, addEventListener: (_t, fn) => listeners.add(fn), removeEventListener: (_t, fn) => listeners.delete(fn),
+    }));
+    try {
+      const { container, unmount } = render(<RobotIcon profile="omx_full" animate />);
+      expect(container.firstChild).toHaveClass('su-robot--animate');
+      expect(window.matchMedia).toHaveBeenCalledWith('(prefers-reduced-motion: reduce)');
+      expect(listeners.size).toBe(1);
+      unmount();
+      expect(listeners.size).toBe(0);
+    } finally {
+      window.matchMedia = orig;
+    }
+  });
 });

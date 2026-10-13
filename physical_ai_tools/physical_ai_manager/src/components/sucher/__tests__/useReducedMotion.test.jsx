@@ -53,4 +53,14 @@ describe('useReducedMotion', () => {
     unmount();
     expect(listeners.size).toBe(0);
   });
+
+  it('subscribe = false: no read, no listener, answer false', () => {
+    window.matchMedia = vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+    function Off() {
+      return <span data-testid="off">{String(useReducedMotion(false))}</span>;
+    }
+    render(<Off />);
+    expect(screen.getByTestId('off')).toHaveTextContent('false');
+    expect(window.matchMedia).not.toHaveBeenCalled();
+  });
 });

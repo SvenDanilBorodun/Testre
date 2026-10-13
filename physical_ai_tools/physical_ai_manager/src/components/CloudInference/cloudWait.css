@@ -4,7 +4,8 @@
  * claims progress: three pulses run from the robot to the cloud, the cloud's
  * halo breathes, the robot sprite plays. Under reduced motion all of it stands
  * still (the .ciw-reduced class from matchMedia, and the media query below for
- * the same; the sprite reads useReducedMotion itself). */
+ * the same; the sprite gets the card's answer through RobotIcon's
+ * reducedMotion prop). */
 .ciw {
   --ciw-bg: var(--su-well, #DEDAD2);
   --ciw-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.22);

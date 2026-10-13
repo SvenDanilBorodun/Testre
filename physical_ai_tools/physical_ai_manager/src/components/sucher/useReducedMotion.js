@@ -30,9 +30,15 @@ export function readReducedMotion() {
   return !!(mq && mq.matches);
 }
 
-export default function useReducedMotion() {
-  const [reduced, setReduced] = useState(readReducedMotion);
+/**
+ * `subscribe = false` skips the media query entirely (no read, no listener)
+ * and answers `false`: for a caller that already holds the answer (RobotIcon's
+ * `reducedMotion` prop). The hook is still called unconditionally.
+ */
+export default function useReducedMotion(subscribe = true) {
+  const [reduced, setReduced] = useState(() => (subscribe ? readReducedMotion() : false));
   useEffect(() => {
+    if (!subscribe) return undefined;
     const mq = mediaQuery();
     if (!mq) return undefined;
     const onChange = () => setReduced(!!mq.matches);
@@ -46,6 +52,6 @@ export default function useReducedMotion() {
       return () => mq.removeListener(onChange);
     }
     return undefined;
-  }, []);
-  return reduced;
+  }, [subscribe]);
+  return subscribe ? reduced : false;
 }

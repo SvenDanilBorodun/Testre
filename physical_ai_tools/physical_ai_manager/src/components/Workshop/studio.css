@@ -180,7 +180,8 @@
 /* the simulator's „Sperrzone zeichnen" keeps its red, „Ziel setzen" its orange */
 :root[data-ui='sucher'] .su-studio .st-segs > button[data-tone='zone'] { color: #8F1B12; }
 :root[data-ui='sucher'] .su-studio .st-segs > button[data-tone='zone'][aria-pressed='true'] { background: linear-gradient(#E0453B, #B42318); color: #FFFFFF; box-shadow: 0 0 0 1px #8F1B12; }
-:root[data-ui='sucher'] .su-studio .st-segs > button[data-tone='ziel'] { color: var(--su-sig-text); }
+/* the accent's ink tone on the well (5.24:1; the signal text tone #B83E0C reads 4.04 there) */
+:root[data-ui='sucher'] .su-studio .st-segs > button[data-tone='ziel'] { color: var(--accent-ink); }
 :root[data-ui='sucher'] .su-studio .st-segs > button[data-tone='ziel'][aria-pressed='true'] { background: linear-gradient(#FF7440, #FF5B1F); color: #232322; box-shadow: 0 0 0 1px #D9480F; }
 /* a label in front of a segmented row */
 :root[data-ui='sucher'] .su-studio :is(.st-tempo-label, .st-lab) {
@@ -447,7 +448,7 @@
   border-color: var(--su-hair);
   background: var(--su-plate);
 }
-:root[data-ui='sucher'] .su-studio .st-sim-h { background: transparent; border-bottom-color: transparent; padding-top: 10px; }
+:root[data-ui='sucher'] .su-studio .st-sim-h { background: transparent; border-bottom-color: transparent; padding-top: 8px; padding-bottom: 4px; }
 :root[data-ui='sucher'] .su-studio .st-sim-title {
   font-family: 'Instrument Serif', Georgia, serif;
   font-weight: 400;
@@ -464,12 +465,28 @@
   background: var(--su-scr);
   box-shadow: var(--su-bezel-thin), inset 0 2px 12px rgba(0, 0, 0, .65);
 }
-/* the 2D table: a well plate */
+/* the 2D table: a well plate (a thin rim: the fitted table gets the height) */
 :root[data-ui='sucher'] .su-studio .st-table {
   border: 0;
   border-radius: 14px;
+  padding: 4px;
   background: var(--su-well);
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, .22);
+}
+/* the 2D editor's controls are compact: from md up Objekt, Modus and
+ * „Simulator zurücksetzen" share ONE row and „Tisch leeren" shares the help
+ * line (CLAUDE.md „Integrated sim stage"), so no control takes a row of its
+ * own out of the fitted table's height. */
+:root[data-ui='sucher'] .su-studio .st-sim .st-simrow { column-gap: 10px; }
+:root[data-ui='sucher'] .su-studio .st-sim .st-segs { padding: 2px; }
+:root[data-ui='sucher'] .su-studio .st-sim .st-segs > button { min-height: 26px; padding: 0 9px; font-size: 12px; }
+:root[data-ui='sucher'] .su-studio .st-sim .st-lab { letter-spacing: .1em; }
+:root[data-ui='sucher'] .su-studio .st-sim .st-simkey { min-height: 28px; padding: 0 10px; border-radius: 10px; font-size: 12px; }
+/* from md up the stage's body sits right under its title row, and the 2D
+ * editor's rows are spaced 6 px (the table gets what that saves) */
+@media (min-width: 768px) {
+  :root[data-ui='sucher'] .su-studio .st-sim .st-simbody { padding-top: 4px; }
+  :root[data-ui='sucher'] .su-studio .st-sim .st-simedit { gap: 6px; padding-top: 6px; }
 }
 :root[data-ui='sucher'] .su-studio .st-table > svg { background-color: #E4E0D8; border-radius: 10px; }
 

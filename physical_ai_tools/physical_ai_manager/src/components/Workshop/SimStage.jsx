@@ -158,7 +158,7 @@ function SimStage({
       {/* The integrated sim stage: SimScene owns the single UrdfTwin (3D pane on
           top, 2D placement/zone editor below). showShadows/showReach are LITERAL
           true — mount-time constants inside UrdfTwin (see the file-top note). */}
-      <div className="flex-1 min-h-0 p-2 md:p-3 overflow-hidden">
+      <div className="st-simbody flex-1 min-h-0 p-2 md:p-3 overflow-hidden">
         <SimScene
           layout="split"
           scene={scene}

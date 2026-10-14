@@ -1211,7 +1211,7 @@ function SimScene({
       </button>
     </div>
   ) : (
-    <p className={`text-xs text-[var(--ink-4)] px-1${slotGrow}`}>
+    <p className={`st-simhelp text-xs text-[var(--ink-4)] px-1${slotGrow}`}>
       Objekt-Typ wählen, dann in die grüne Reichweite tippen, um es zu
       platzieren. Tippe ein Objekt an, um es zu drehen oder zu verschieben.
     </p>
@@ -1229,7 +1229,7 @@ function SimScene({
         ? 'Das Programm läuft noch — zuerst auf „Stopp" drücken.'
         : 'Stellt die Objekte an ihre Plätze zurück und fährt den virtuellen '
           + 'Arm in die Grundstellung.'}
-      className="st-key text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed"
+      className="st-key st-simkey text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed"
     >
       {resetting ? 'Wird zurückgesetzt …' : 'Simulator zurücksetzen'}
     </button>
@@ -1239,7 +1239,7 @@ function SimScene({
     <button
       type="button"
       onClick={handleClear}
-      className="st-key text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
+      className="st-key st-simkey text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
     >
       Tisch leeren
     </button>
@@ -1302,7 +1302,7 @@ function SimScene({
   const editorBody = wideSplit ? (
     <>
       {noticeEl}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+      <div className="st-simrow flex flex-wrap items-center gap-x-4 gap-y-1.5">
         {paletteRow}
         {modeRow}
         <div className="ml-auto flex">{resetButton}</div>
@@ -1399,7 +1399,7 @@ function SimScene({
           valueText={(v) => fillLayout(LAYOUT_DE.VALUE_PERCENT, Math.round(v * 100))}
           onCommit={(v) => { setSimSplit(v); writeSimSplit(v); }}
         />
-        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto md:min-h-[140px] md:gap-2 md:pt-2 md:[flex:calc(1_-_var(--sim-split,0.4))_1_0px]">
+        <div className="st-simedit flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto md:min-h-[140px] md:gap-2 md:pt-2 md:[flex:calc(1_-_var(--sim-split,0.4))_1_0px]">
           {editorBody}
         </div>
       </div>

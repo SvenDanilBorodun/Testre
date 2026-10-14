@@ -109,3 +109,35 @@ export function chronoTick(state, now, livePose, { reduced = false } = {}) {
   state.wasActive = active;
   return { snap, opacities: state.opacities, needsRender };
 }
+
+// ── D30: no trail on a software WebGL renderer ──────────────────────────────
+// On a software rasteriser (SwiftShader, llvmpipe, Windows' „Microsoft Basic
+// Render Driver") every ghost is a full extra draw of the arm on the CPU: the
+// verifier measured a frame p95 of 308 ms with the trail against 65 ms
+// without. UrdfTwin asks this ONCE, when it creates its renderer, and then
+// builds no ghosts; a real GPU keeps the trail.
+
+const SOFTWARE_RENDERER_RE = /swiftshader|llvmpipe|softpipe|basic render driver|software/i;
+
+/** The WebGL renderer's name (the unmasked one where the browser gives it), or null. */
+export function webglRendererName(gl) {
+  if (!gl || typeof gl.getParameter !== 'function') return null;
+  try {
+    const ext = typeof gl.getExtension === 'function' ? gl.getExtension('WEBGL_debug_renderer_info') : null;
+    const unmasked = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null;
+    if (typeof unmasked === 'string' && unmasked) return unmasked;
+  } catch {
+    // fall back to the masked name
+  }
+  try {
+    const name = gl.getParameter(gl.RENDERER);
+    return typeof name === 'string' && name ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a renderer name is a software rasteriser. An unknown name is not. */
+export function isSoftwareRenderer(name) {
+  return typeof name === 'string' && SOFTWARE_RENDERER_RE.test(name);
+}

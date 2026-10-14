@@ -21,6 +21,7 @@
 import React from 'react';
 import { render, screen, waitFor, act, cleanup } from '@testing-library/react';
 import UrdfTwin from '../UrdfTwin';
+import { SUCHER_HEMI_GROUND, SUCHER_LINK_COLOR, SUCHER_LINK_METALNESS } from '../sucher/twinPalette';
 
 // --- react-redux: selector-aware stub over a mutable module-level state. ---
 let mockState;
@@ -216,6 +217,22 @@ const mockEEWorld = { x: 0, y: 0, z: 0 };
 const mockStlLoads = [];
 // Whatever loadMeshCb handed back to urdf-loader's `done` (one entry per mesh).
 const mockMeshDone = [];
+// The URDF's own <material>: the real urdf-loader assigns it to a mesh inside
+// `done` (URDFLoader.js, loadMeshCb callback), so the mock does too.
+const MOCK_URDF_MATERIAL = { urdfMaterial: true, dispose: () => {} };
+// The HemisphereLight constructor args, for the palette tests (web vs Sucher).
+const mockHemiCtor = vi.fn();
+// What the mock renderer's getContext() returns (D30): null = no context; else
+// a fake GL whose unmasked renderer is `mockGlRendererName`.
+let mockGlRendererName = null;
+function mockGlContext() {
+  if (mockGlRendererName === null) return null;
+  return {
+    RENDERER: 0x1f01,
+    getExtension: (name) => (name === 'WEBGL_debug_renderer_info' ? { UNMASKED_RENDERER_WEBGL: 0x9246 } : null),
+    getParameter: (p) => (p === 0x9246 ? mockGlRendererName : 'WebKit WebGL'),
+  };
+}
 // Mesh paths whose fetch ANOTHER twin already started: three's FileLoader joins
 // such a request without calling the manager's itemStart/itemEnd (R0-9), so the
 // STLLoader mock skips both for them.
@@ -254,6 +271,7 @@ vi.mock('urdf-loader', () => ({
       for (let i = 0; i < MOCK_URDF_MESH_COUNT; i += 1) {
         if (typeof this.loadMeshCb === 'function') {
           this.loadMeshCb(`mesh${i}.stl`, this.manager, (obj) => {
+            if (obj && obj.geometry !== undefined) obj.material = MOCK_URDF_MATERIAL;
             mockMeshDone.push(obj);
           });
         }
@@ -352,10 +370,11 @@ vi.mock('three', () => {
         dispose: () => {},
         shadowMap: { enabled: false, type: null },
         domElement: document.createElement('canvas'),
+        getContext: () => mockGlContext(),
       };
       return mockRenderer;
     },
-    HemisphereLight: function HemisphereLight() { return noopObj(); },
+    HemisphereLight: function HemisphereLight(...args) { mockHemiCtor(...args); return noopObj(); },
     // The key light: a settable castShadow + a shadow object (mapSize.set + a
     // shadow camera) so the sim-stage shadow config path runs. Only touched when
     // showShadows is enabled.
@@ -612,6 +631,8 @@ beforeEach(() => {
   mockLoadUrls.length = 0;
   mockStlLoads.length = 0;
   mockMeshDone.length = 0;
+  mockHemiCtor.mockClear();
+  mockGlRendererName = null;
   mockCoalescedPaths.clear();
   mockRender.mockClear();
   mockCameraPositionSet.mockClear();
@@ -2200,6 +2221,63 @@ describe('UrdfTwin — chronoTrail', () => {
       g.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled());
     });
     mats.forEach((m) => expect(m.dispose).toHaveBeenCalledTimes(1));
+  });
+
+  // D30: decided once when the renderer is created, from the unmasked WebGL
+  // renderer name; a software rasteriser builds no ghost at all.
+  test.each([
+    'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)',
+    'llvmpipe (LLVM 15.0.7, 256 bits)',
+    'ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  ])('a software renderer (%s) builds no clones', async (name) => {
+    mockGlRendererName = name;
+    await mountLoaded(<UrdfTwin chronoTrail />);
+    await settleFrames(2);
+    expect(mockRobot.clone).not.toHaveBeenCalled();
+    expect(trailMaterials()).toHaveLength(0);
+  });
+
+  test('a GPU renderer keeps the trail', async () => {
+    mockGlRendererName = 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+    await mountLoaded(<UrdfTwin chronoTrail />);
+    await waitFor(() => expect(mockRobot.clone).toHaveBeenCalledTimes(8));
+  });
+});
+
+// The arm, the hemisphere's ground light and the simulator's table slab come
+// from the palette read once at mount (D26/D27): the web build keeps exactly
+// what it drew (urdf-loader's own <material> stays on the meshes, the 0x33373d
+// ground, the 0x2a2e34 slab); the student build puts its cream link material
+// back on every mesh after urdf-loader's done(), warms the ground light and
+// draws the slab in --su-scr-3.
+describe('UrdfTwin — arm, ground light and table slab (web unchanged, „Sucher" cream)', () => {
+  const linkMaterial = () => mockStandardMaterials.find((m) => m.opts && m.opts.roughness === 0.6 && m.opts.side === undefined && !m.opts.transparent);
+  const tableMaterial = () => mockStandardMaterials.find((m) => m.opts && m.opts.roughness === 0.95);
+  async function mountLoaded(ui) {
+    render(ui);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    await waitFor(() => expect(mockMeshDone).toHaveLength(MOCK_URDF_MESH_COUNT));
+  }
+  afterEach(() => { document.documentElement.removeAttribute('data-ui'); });
+
+  test('without data-ui (the web build): the original link material, the URDF material on the meshes, ground 0x33373d, slab 0x2a2e34', async () => {
+    await mountLoaded(<UrdfTwin showTable />);
+    expect(linkMaterial().opts).toEqual({ color: 0xbfc4cc, metalness: 0.25, roughness: 0.6 });
+    mockMeshDone.forEach((m) => expect(m.material).toBe(MOCK_URDF_MATERIAL));
+    expect(mockHemiCtor).toHaveBeenCalledTimes(1);
+    expect(mockHemiCtor).toHaveBeenCalledWith(0xffffff, 0x33373d, 1.1);
+    expect(tableMaterial().opts.color).toBe(0x2a2e34);
+  });
+
+  test('under data-ui="sucher": the cream link material on every mesh, a warm ground, the --su-scr-3 slab', async () => {
+    document.documentElement.setAttribute('data-ui', 'sucher');
+    await mountLoaded(<UrdfTwin showTable />);
+    const link = linkMaterial();
+    expect(link.opts).toEqual({ color: SUCHER_LINK_COLOR, metalness: SUCHER_LINK_METALNESS, roughness: 0.6 });
+    mockMeshDone.forEach((m) => expect(m.material).toBe(link));
+    expect(mockHemiCtor).toHaveBeenCalledWith(0xffffff, SUCHER_HEMI_GROUND, 1.1);
+    expect(tableMaterial().opts.color).toBe(0x24201d);
   });
 });
 

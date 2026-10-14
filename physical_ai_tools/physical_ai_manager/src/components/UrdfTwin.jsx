@@ -115,7 +115,9 @@ import {
 } from './Workshop/simConstants';
 import { armGeometry } from '../utils/armProfile';
 import { MARKER_COLORS } from './Workshop/sammlung/markers';
-import { resolveChronoTrail, createChronoTrail, chronoTick } from './sucher/chronoTrail';
+import {
+  resolveChronoTrail, createChronoTrail, chronoTick, isSoftwareRenderer, webglRendererName,
+} from './sucher/chronoTrail';
 import useReducedMotion from './sucher/useReducedMotion';
 import Readout from './sucher/Readout';
 import { readTwinPalette } from './sucher/twinPalette';
@@ -218,9 +220,12 @@ const JOINT_STALE_CHECK_MS = 1000;
 // asset drop). Fetched relative to PUBLIC_URL so it works offline with NO CDN
 // (classroom requirement) — see URDF_ASSETS above for the per-profile rows.
 
-// Arm link colour (the URDF materials are a flat dark grey; we override for a
-// cleaner, better-lit look in the viewer).
-const LINK_COLOR = 0xbfc4cc;
+// The arm's link material (colour + metalness), the hemisphere's ground colour
+// and the sim table slab come from `palette` (sucher/twinPalette.js), read once
+// at mount: the web build's former constants (0xbfc4cc / 0.25, 0x33373d,
+// 0x2a2e34), the student build's cream arm under a warm ground light and the
+// --su-scr-3 slab (D26/D27). urdf-loader hands a mesh the URDF's own grey
+// <material> inside done(); only the student build replaces it (loadMeshCb).
 
 // Ghost arm: the Positionen teal (sammlung/markers.js MARKER_COLORS.pose).
 const GHOST_COLOR = 0x14b8a6;
@@ -308,7 +313,8 @@ function readModelPose(robot, jointSet) {
 // panes never disagree. Held meshes turn green while carried, restore their own
 // per-type rest colour on release.
 const SIM_TABLE_SIZE_M = 0.7;
-const SIM_TABLE_COLOR = 0x2a2e34;
+// The table slab's colour is `palette.simTable` (web 0x2a2e34; Sucher
+// `--su-scr-3`, D27), read once at mount like the rest of the palette.
 // Phase-4 no-go ("Sperrzone") box rendering: a translucent red volume + a
 // brighter red wireframe, distinct from the amber sim objects.
 const ZONE_COLOR = 0xef4444;
@@ -499,6 +505,9 @@ export default function UrdfTwin({
   // or null. Its clones share the live robot's geometries like every ghost.
   const chronoRef = useRef(null);
   const chronoKey = JSON.stringify(resolveChronoTrail(chronoTrail));
+  // D30: decided once when the renderer is created — a software WebGL
+  // renderer (SwiftShader, llvmpipe, Basic Render Driver) gets no trail.
+  const softwareGlRef = useRef(false);
   const reducedMotion = useReducedMotion();
   const reducedMotionRef = useRef(reducedMotion);
   reducedMotionRef.current = reducedMotion;
@@ -762,12 +771,19 @@ export default function UrdfTwin({
     camera.position.set(0.45, 0.35, 0.45);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    try {
+      softwareGlRef.current = isSoftwareRenderer(
+        webglRendererName(typeof renderer.getContext === 'function' ? renderer.getContext() : null),
+      );
+    } catch {
+      softwareGlRef.current = false;
+    }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height);
     mount.appendChild(renderer.domElement);
 
     // Soft lighting: a hemisphere fill + one key directional light.
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x33373d, 1.1);
+    const hemi = new THREE.HemisphereLight(0xffffff, palette.hemiGround, 1.1);
     scene.add(hemi);
     const key = new THREE.DirectionalLight(0xffffff, 1.4);
     key.position.set(1, 2, 1.5);
@@ -877,8 +893,8 @@ export default function UrdfTwin({
     const loadingManager = new THREE.LoadingManager();
     const stlLoader = new STLLoader(loadingManager);
     const material = new THREE.MeshStandardMaterial({
-      color: LINK_COLOR,
-      metalness: 0.25,
+      color: palette.link,
+      metalness: palette.linkMetalness,
       roughness: 0.6,
     });
 
@@ -935,6 +951,11 @@ export default function UrdfTwin({
           // the mount effect does (a [] -deps effect must not list the prop).
           if (showShadowsRef.current) mesh.castShadow = true;
           done(mesh);
+          // urdf-loader gives the mesh the URDF's own <material> inside done()
+          // (the OMX/edu links: a flat grey), so the link material above only
+          // ever showed on a visual without one. The student build (D26) puts
+          // its cream back after that; the web build keeps what it always drew.
+          if (palette.sucher) mesh.material = material;
           // THE fix for (1): mark the frame dirty as each link lands, so the arm
           // also paints PROGRESSIVELY instead of all at once.
           needsRender = true;
@@ -1164,7 +1185,7 @@ export default function UrdfTwin({
     if (showTable && !tableMeshRef.current) {
       const tableGeo = new THREE.PlaneGeometry(SIM_TABLE_SIZE_M, SIM_TABLE_SIZE_M);
       const tableMat = new THREE.MeshStandardMaterial({
-        color: SIM_TABLE_COLOR,
+        color: paletteRef.current.simTable,
         metalness: 0.05,
         roughness: 0.95,
         side: THREE.DoubleSide,
@@ -1429,7 +1450,7 @@ export default function UrdfTwin({
   // URDF parse), each with its own material at opacity 0 and drawn before the
   // live arm. The render loop poses and fades them (stepChrono). A changed
   // config or a new robot rebuilds them; the default chronoTrail=false builds
-  // nothing.
+  // nothing, and neither does a software WebGL renderer (D30).
   useEffect(() => {
     const cfg = chronoKey === 'null' ? null : JSON.parse(chronoKey);
     if (chronoRef.current) {
@@ -1439,6 +1460,7 @@ export default function UrdfTwin({
     const scene = sceneRef.current;
     const robot = robotRef.current;
     if (!cfg || !scene || !robot || robotReadyRef.current !== robot) return undefined;
+    if (softwareGlRef.current) return undefined; // D30: no ghosts on a software renderer
     const ghosts = [];
     for (let i = 0; i < cfg.count; i += 1) {
       const built = buildGhostClone(robot, CHRONO_COLOR, 0);

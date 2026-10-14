@@ -12,6 +12,9 @@ import {
   GRID_CENTER_INK,
   GRID_LINES_INK,
   SCREEN_TOKEN_FALLBACK,
+  SUCHER_HEMI_GROUND,
+  SUCHER_LINK_COLOR,
+  SUCHER_LINK_METALNESS,
   WEB_TWIN_PALETTE,
   mixColor,
   parseHexColor,
@@ -30,7 +33,15 @@ describe('twinPalette', () => {
 
   it('the web build keeps the colours the twin always had', () => {
     expect(WEB_TWIN_PALETTE).toEqual({
-      sucher: false, background: 0x1a1d23, gridCenter: 0x3a3f47, gridLines: 0x2a2e34,
+      sucher: false,
+      background: 0x1a1d23,
+      gridCenter: 0x3a3f47,
+      gridLines: 0x2a2e34,
+      // UrdfTwin's former LINK_COLOR, metalness, hemisphere ground and SIM_TABLE_COLOR
+      link: 0xbfc4cc,
+      linkMetalness: 0.25,
+      hemiGround: 0x33373d,
+      simTable: 0x2a2e34,
     });
     expect(readTwinPalette(fakeRoot(null))).toBe(WEB_TWIN_PALETTE);
     expect(readTwinPalette(fakeRoot('other'))).toBe(WEB_TWIN_PALETTE);
@@ -52,21 +63,39 @@ describe('twinPalette', () => {
     expect(r(p.gridCenter)).toBeLessThan(r(0x90a0b0));
   });
 
+  it('under data-ui="sucher" the arm is cream under a warm ground light and the table slab IS --su-scr-3 (D26/D27)', () => {
+    const p = readTwinPalette(fakeRoot('sucher'), styleOf({ '--su-scr-3': '#302010' }));
+    expect(p.link).toBe(SUCHER_LINK_COLOR);
+    expect(p.linkMetalness).toBe(SUCHER_LINK_METALNESS);
+    expect(p.hemiGround).toBe(SUCHER_HEMI_GROUND);
+    expect(p.simTable).toBe(0x302010);
+    // cream: light, warm (R > G > B), unlike the web build's cool grey (B > R)
+    const ch = (c, s) => (c >> s) & 0xff;
+    expect(ch(SUCHER_LINK_COLOR, 16)).toBeGreaterThan(ch(SUCHER_LINK_COLOR, 8));
+    expect(ch(SUCHER_LINK_COLOR, 8)).toBeGreaterThan(ch(SUCHER_LINK_COLOR, 0));
+    expect(ch(SUCHER_LINK_COLOR, 0)).toBeGreaterThan(0xa0);
+    expect(ch(SUCHER_HEMI_GROUND, 16)).toBeGreaterThan(ch(SUCHER_HEMI_GROUND, 0));
+    // the trail's ghosts (#C9C1B5 at ≤ .35 over the screen) stay far below the lit arm
+    expect(ch(SUCHER_LINK_COLOR, 16)).toBeGreaterThan(0xc9);
+  });
+
   it('an unreadable token falls back to index.css\'s value (the shipped tokens give the shipped colours)', () => {
     const p = readTwinPalette(fakeRoot('sucher'), styleOf({}));
     expect(p.background).toBe(0x141210);
     expect(p.gridCenter).toBe(0x2c2926);
     expect(p.gridLines).toBe(0x221f1c);
+    expect(p.simTable).toBe(0x24201d);
     expect(readTwinPalette(fakeRoot('sucher'), () => { throw new Error('no'); }).background).toBe(0x141210);
     document.documentElement.setAttribute('data-ui', 'sucher');
     expect(readTwinPalette().background).toBe(0x141210);
   });
 
-  it('the fallback mirrors index.css\'s --su-scr / --su-scr-ink-3 exactly', () => {
+  it('the fallback mirrors index.css\'s --su-scr / --su-scr-ink-3 / --su-scr-3 exactly', () => {
     const css = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'index.css'), 'utf8');
     const token = (name) => parseHexColor(new RegExp(`${name}:\\s*(#[0-9A-Fa-f]{3,6})\\s*;`).exec(css)[1]);
     expect(SCREEN_TOKEN_FALLBACK.scr).toBe(token('--su-scr'));
     expect(SCREEN_TOKEN_FALLBACK.ink3).toBe(token('--su-scr-ink-3'));
+    expect(SCREEN_TOKEN_FALLBACK.scr3).toBe(token('--su-scr-3'));
   });
 
   it('parseHexColor and mixColor', () => {

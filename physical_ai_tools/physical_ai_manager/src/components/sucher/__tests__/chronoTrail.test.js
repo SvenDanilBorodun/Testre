@@ -11,7 +11,8 @@
 // (components/__tests__/UrdfTwin.test.jsx, „chronoTrail").
 
 import {
-  CHRONO_DEFAULTS, CHRONO_MAX_OPACITY, chronoTick, createChronoTrail, resolveChronoTrail,
+  CHRONO_DEFAULTS, CHRONO_MAX_OPACITY, chronoTick, createChronoTrail, isSoftwareRenderer,
+  resolveChronoTrail, webglRendererName,
 } from '../chronoTrail';
 
 const pose = (j1, j2 = 0) => new Map([['joint1', j1], ['joint2', j2]]);
@@ -102,5 +103,45 @@ describe('chronoTick', () => {
   it('no pose yet (robot without joints): nothing', () => {
     const t = createChronoTrail(cfg);
     expect(chronoTick(t, 0, () => null)).toEqual({ snap: -1, opacities: [0, 0, 0], needsRender: false });
+  });
+});
+
+// D30: the trail is off on a software WebGL renderer, decided from its name.
+describe('software WebGL renderer (D30)', () => {
+  const gl = (unmasked, masked = 'WebKit WebGL', { ext = true, throws = false } = {}) => ({
+    RENDERER: 0x1f01,
+    getExtension: (n) => {
+      if (throws) throw new Error('lost');
+      return ext && n === 'WEBGL_debug_renderer_info' ? { UNMASKED_RENDERER_WEBGL: 0x9246 } : null;
+    },
+    getParameter: (p) => (p === 0x9246 ? unmasked : masked),
+  });
+
+  it('reads the unmasked name, else the masked one, else null', () => {
+    expect(webglRendererName(gl('ANGLE (Apple, ANGLE Metal Renderer: Apple M5 Pro)'))).toBe('ANGLE (Apple, ANGLE Metal Renderer: Apple M5 Pro)');
+    expect(webglRendererName(gl(null, 'Mesa llvmpipe', { ext: false }))).toBe('Mesa llvmpipe');
+    expect(webglRendererName(gl(null, 'llvmpipe', { throws: true }))).toBe('llvmpipe');
+    expect(webglRendererName(null)).toBeNull();
+    expect(webglRendererName({})).toBeNull();
+    expect(webglRendererName({ getParameter: () => { throw new Error('x'); } })).toBeNull();
+  });
+
+  it('SwiftShader, llvmpipe and the Basic Render Driver are software; GPUs and unknowns are not', () => {
+    [
+      'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)',
+      'Google SwiftShader',
+      'llvmpipe (LLVM 15.0.7, 256 bits)',
+      'ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      'Software Rasterizer',
+    ].forEach((n) => expect(isSoftwareRenderer(n)).toBe(true));
+    [
+      'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      'Mali-G610 MC4',
+      'WebKit WebGL',
+      '',
+      null,
+      undefined,
+    ].forEach((n) => expect(isSoftwareRenderer(n)).toBe(false));
   });
 });

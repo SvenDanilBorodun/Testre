@@ -40,9 +40,11 @@
   font-size: 56px;
   line-height: 1;
   color: var(--su-scr-ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* D28: a long robot name („OMX – Roboter Studio (nur Follower)") wraps to a
+   * second line at the board's size; never an ellipsis. */
+  white-space: normal;
+  overflow-wrap: break-word;
+  text-wrap: balance;
 }
 :where([data-ui='sucher']) .su-hero__help {
   margin-top: 6px;

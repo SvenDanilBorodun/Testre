@@ -495,6 +495,8 @@
 :root[data-ui='sucher'] .su-studio .st-sim .st-segs > button { min-height: 26px; padding: 0 9px; font-size: 12px; }
 :root[data-ui='sucher'] .su-studio .st-sim .st-lab { letter-spacing: .1em; }
 :root[data-ui='sucher'] .su-studio .st-sim .st-simkey { min-height: 28px; padding: 0 10px; border-radius: 10px; font-size: 12px; }
+/* the help line under the table: ink-3 on the plate (5.40:1; --ink-4 read 3.27) */
+:root[data-ui='sucher'] .su-studio .st-sim .st-simhelp { color: var(--su-ink-3); }
 /* from md up the stage's body sits right under its title row, and the 2D
  * editor's rows are spaced 6 px (the table gets what that saves) */
 @media (min-width: 768px) {

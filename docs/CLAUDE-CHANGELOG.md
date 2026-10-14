@@ -6,6 +6,73 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-13 / 14 — „Sucher": the student app's visual redesign
+
+**Why.** The owner chose a new look for the student app from a series of shown directions: „Sucher", a light
+device body (plates, keys, small lights, Doto readouts, one signal orange) with dark „Dunkelkammer" screens
+wherever something is watched, Instrument Serif headings, Host Grotesk UI and a chronophotography trail of the
+arm. Presentational only: hooks, slices, selectors, models, wire contracts, ROS calls, storage keys and every
+German string stayed as they were, and the teacher/admin web build had to render exactly as before.
+
+**How it was built.** A written spec with the owner's decisions, then a foundation agent alone (fonts, tokens,
+the Tailwind branch, the `data-ui` scope switch, the primitives in `components/sucher/`, the EbUI hooks, the
+paper toast, `UrdfTwin`'s `chronoTrail`), then two page implementers in parallel on their own worktrees (I1: rail
+and shell, Start, Training, Inferenz, Daten, System; I2: Aufnahme and Roboter Studio), a foundation fix round
+(the twin's warm screen and glass chips, `RobotIcon`'s reduced-motion prop, the dropped block glow), a fresh
+verifier (FIX FIRST: the simulator's 2D table shrank from 321×198 to 191×117 px at 1440×900 and its reset key
+wrapped out of the Objekt/Modus row, a long robot name cut by an ellipsis on the Start hero, the System IP
+readout cut, the Pi rail with seven tabs overflowing at 861–920 px height, two texts under 4.5:1 on a well —
+`--ink-3` 4.29 and the accent 4.04 —, icons instead of a light on the Daten card's hint line, the studio
+subtitle cut), a fix round (D26–D33), a second fresh verifier (SHIP, four doubts), and a last polish and docs
+round (D34–D35: the reset key's focus ring, the Training `?cloud=1` notice from 3.07 to 4.84:1, these docs).
+
+**Owner decisions D1–D35.** D1 the web dashboard stays as it is. D2 `tailwind.config.js` branches on
+`REACT_APP_MODE`. D3 two-tone accent: `#B83E0C` fills and text, `#FF5B1F` primitives. D4 Start keeps its DOM order
+(Activation → Token → Health) and places by grid. D5 italics only where tests allow. D6 the Aufnahme bar: children
+≤ 54 px inside the unchanged 82 px budget, no shedding at 1440 px with three dots. D7 pinned tests: markup-only
+updates with their intent kept. D8 System keeps the robot-type dropdown, restyled, with the selected type's
+sprite. D9 paper toasts with react-hot-toast's own animation. D10 reduced motion stops every loop (one global
+rule). D11 pointer-focus release on Key, RoundKey, Segmented, Stepper, the rail and every EbUI `Btn`, web
+included. D12 contrast: gray-500 `#5F5B55`, rail labels in ink-2, no accent text on wells. D13 foundation first,
+then two page implementers. D14 Daten goes to I1. D15 the chrono trail on the Start hero and the Aufnahme 3D
+view. D16 the stepper's wheel only over the number. D17 robot icons as lazy WebP sprites. D18 fonts latin +
+latin-ext, no preload. D19 film-strip frames with a check mark, no picture. D20 the brand mark on the rail only.
+D21 the hero tick ruler dropped. D22 eyebrow numbers kept. D23 the minor fixes F12–F20 applied. D24 Blockly
+blocks stay exactly main's (shapes, renderer, colours, fonts, fields, sizes); only the canvas, grid, toolbox
+column and flyout around them are restyled. D25 the running block keeps Blockly's own highlight (the planned
+orange glow dropped). D26 a cream arm in every student 3D view, the web build unchanged, trail ghosts still
+distinguishable. D27 the simulator's table slab warm dark (`--su-scr-3`). D28 a long robot name on the Start
+hero wraps to two lines, never an ellipsis. D29 the System address plate takes the full row below 1500 px, the
+address is never cut. D30 no chrono trail on a software WebGL renderer, decided once at mount. D31 the
+Code-Vorschau strip inside the editor plate and the Daten player's back control a Key; the focus ring stays
+instant and the narrow Inferenz camera tile's label stays as it is. D32 the twin's lights stay; the cream arm's
+mid-tones a little darker than the boards' render, accepted. D33 the studio subtitle at 1366×768 in the
+simulator: two lines ending in „…", the full sentence in its tooltip. D34 the studio header may take two rows
+at 1093–1280 px. D35 one last polish and docs round, then a short fresh re-check.
+
+**Measured (the second verifier, the polish round).** Entry chunk +5.7 KB against main in the same build
+environment, with 0 × `WebGLRenderer`, `URDFLoader` and CodeMirror's runtime tokens in it; eight self-hosted
+woff2, no request to Google from the student build. The web build: the teacher dashboard and class view 0 px
+different, the template editor 0 px at 1093 px and 14 px of ≤ 2/255 antialiasing at 1440 px; its CSS differs
+only by rules scoped under `data-ui` or unused. Blockly blocks pixel-identical (11 blocks: paths, fills, fonts,
+fields equal, crops ≤ 4/255). Aufnahme renders equal to main (2/s ready, 13/s in the timed phases under the
+harness's 10 Hz feeder; `renderCount.test.jsx` green); the Daten player 0 renders per video frame. Chrono trail:
+frame p95 10.1–10.3 ms against 10.3 without it on a real GPU, drawing until 1.28–1.37 s after the last motion; on
+SwiftShader 241.7 ms with the trail against 58.3 without, hence D30. The simulator's 2D table at 1440×900 is
+332×205 px (main 321×198), at 1366×768 202×124 (main 167×103). Every measured text ≥ 4.5:1 (the lowest
+`--su-sig-text` on the body, 4.52). vitest 290 files (16 new), 4 965 tests, 2 expected failures; five existing
+test files changed (asserted markup values and mocks only, each test's intent kept).
+
+**Not this round (each with what would bring it back).** The teacher/admin web restyle (the owner asks; teacher
+boards first); Blockly blocks in Host Grotesk or new block themes (the owner asks; a theme pass and the card
+flyouts re-measured); a CodeMirror theme; a whole-session Episodenleiste and episode pictures in the film strip
+(a `phaseModel` change, client-side frame capture); a „LÄUFT" label beside the running block; a training
+progress bar on the Start page (training progress in `useStudentWork`); the hero tick ruler; robot-type cards on
+System (a ~38-query test rewrite); a „6 Achsen" line on System (the agent's `/status` would need the axis
+count); the Aufnahme mute key on the stage bar; a printed-toast animation; phone widths below 640 px beyond the
+tokens; removing the unused 2 MB `PretendardVariable.woff2`; favicon, manifest and `theme-color`; screw-head plate
+ornaments; Host Grotesk italic and font preload; committing the frontend harness.
+
 ### Unreleased, 2026-10-11 / 12 — Cloud-Inferenz: a trained ACT model on a Modal T4 while the arm stays at home
 
 **Why.** Until now the Inferenz page worked only against the shared classroom Jetson: the student's own PC and the

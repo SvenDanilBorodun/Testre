@@ -18,13 +18,16 @@ import TaskPhase from '../../constants/taskPhases';
 import HeartbeatStatus from '../HeartbeatStatus';
 import ImageGrid from '../ImageGrid';
 import Icon from '../icons/Icon';
+import { Led, Plate, Screen } from '../sucher';
+import '../sucher-pages/inference.css';
 import { useCameraLiveness } from '../../hooks/useCameraLiveness';
 import useCloudInferenceState from '../../hooks/useCloudInferenceState';
 import CloudInferencePanel from './CloudInferencePanel';
 import CloudWait from './CloudWait';
 import { cloudCopy, fill } from './cloudCopy';
 
-const CHIP = 'h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-2 text-[11px] text-white/80';
+// A glass chip on the camera screen (Sucher: a small readout).
+const CHIP = 'su-inf-chip';
 
 /**
  * @param {object} p
@@ -33,6 +36,7 @@ const CHIP = 'h-8 px-3 rounded-full bg-white/[0.08] border border-white/15 backd
  */
 export default function CloudInferenceView({ isActive = true, cloud }) {
   const robotType = useSelector((s) => s.tasks.taskStatus.robotType);
+  const robotProfile = useSelector((s) => s.tasks.taskStatus.robotProfile);
   const phase = useSelector((s) => s.tasks.taskStatus.phase);
   const imageTopicList = useSelector((s) => s.ros.imageTopicList);
   const rosbridgeUrl = useSelector((s) => s.ros.rosbridgeUrl);
@@ -44,45 +48,41 @@ export default function CloudInferenceView({ isActive = true, cloud }) {
     : null;
 
   return (
-    <div
-      className="relative h-full w-full flex flex-col overflow-hidden"
-      style={{ background: 'var(--dark-bg)', color: 'var(--dark-ink)' }}
-    >
-      <div className="absolute top-3 left-3 right-3 z-30 flex items-center gap-2 flex-wrap">
-        <div className={CHIP}>
-          <span className="font-mono uppercase tracking-wider opacity-70">Roboter</span>
-          <span className="font-mono px-1.5 py-0.5 rounded bg-white/10 max-w-[160px] truncate">{robotType || '—'}</span>
-        </div>
-        <HeartbeatStatus dark />
-        <div className={`${CHIP} font-mono whitespace-nowrap`} data-testid="cloud-camera-chip">
-          <Icon name="camera" size={12} />
-          {configured === 0 ? '—' : `${liveCount} / ${configured}`}
-        </div>
-        <div className={`${CHIP} whitespace-nowrap`} data-testid="cloud-chip">
-          <Icon name="cloud" size={12} />
-          <span>{cloudCopy.target.cloud}</span>
-          {rtt !== null && <span className="font-mono">{fill(cloudCopy.status.rtt, { ms: rtt })}</span>}
-        </div>
-      </div>
-
-      <div className="flex-1 flex items-start min-h-0 pt-[56px] pb-2 px-2 sm:px-3 lg:px-4 gap-2 sm:gap-3 lg:gap-4">
-        <div className="flex-1 self-stretch min-w-0 relative rounded-[var(--radius-lg)] overflow-hidden">
-          <ImageGrid isActive={isActive} />
-          {phase === TaskPhase.INFERENCE_LOADING && (
-            // The waiting card carries the live region; this overlay is not one,
-            // so its clock is never read out every second. The card mounts with
-            // the loading phase, so its clock counts from the start of the load.
-            <div
-              className="absolute inset-0 z-20 flex items-center justify-center p-4 bg-black/55 backdrop-blur-sm"
-              data-testid="cloud-loading-overlay"
-            >
-              <CloudWait kind="model" tone="dark" />
+    <div className="su-inf relative h-full w-full flex flex-col overflow-hidden">
+      <div className="su-inf__body">
+        <Screen power className="su-inf__screen">
+          <div className="su-inf__chips">
+            <div className={CHIP}>
+              <span className="su-inf-chip__key">Roboter</span>
+              <span className="max-w-[160px] truncate">{robotType || '—'}</span>
             </div>
-          )}
-        </div>
-        <div className="self-stretch w-[min(420px,38vw)] min-w-[300px] max-w-[480px]">
+            <HeartbeatStatus dark size="sm" />
+            <div className={`${CHIP} whitespace-nowrap`} data-testid="cloud-camera-chip">
+              <Icon name="camera" size={13} />
+              {configured === 0 ? '—' : `${liveCount} / ${configured}`}
+            </div>
+            <div className={`${CHIP} su-inf-chip--text whitespace-nowrap`} data-testid="cloud-chip">
+              <Led tone={cloudState && cloudState.active ? 'sig' : 'off'} pulse={cloudState && cloudState.active ? 'breathe' : 'none'} size={7} />
+              <Icon name="cloud" size={13} />
+              <span>{cloudCopy.target.cloud}</span>
+              {rtt !== null && <span className="su-inf-chip__num">{fill(cloudCopy.status.rtt, { ms: rtt })}</span>}
+            </div>
+          </div>
+          <div className="su-inf__grid">
+            <ImageGrid isActive={isActive} />
+            {phase === TaskPhase.INFERENCE_LOADING && (
+              <div
+                className="absolute inset-0 z-20 flex items-center justify-center p-4 bg-black/55 backdrop-blur-sm"
+                data-testid="cloud-loading-overlay"
+              >
+                <CloudWait kind="model" tone="dark" robotProfile={robotProfile || robotType} />
+              </div>
+            )}
+          </div>
+        </Screen>
+        <Plate as="aside" className="su-inf__panel">
           <CloudInferencePanel isActive={isActive} cloud={cloud} cloudState={cloudState} />
-        </div>
+        </Plate>
       </div>
     </div>
   );

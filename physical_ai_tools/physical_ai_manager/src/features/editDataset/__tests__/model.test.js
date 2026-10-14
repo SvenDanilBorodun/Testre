@@ -350,17 +350,21 @@ describe('hintText (§F6, every type)', () => {
 });
 
 describe('syncBadge (all seven states, every unknown reason)', () => {
+  // A state's badge is a light in its tone (SyncBadge.jsx), so the model
+  // names no icon for it: an icon nothing draws would keep a registry entry
+  // alive (components/icons/__tests__/registryUsage.test.js).
   it.each([
-    ['local', 'Nur hier', 'hardDrive', 'neutral'],
-    ['online', 'Nur online', 'cloud', 'sky'],
-    ['current', 'Aktuell', 'cloudSynced', 'ok'],
-    ['changed', 'Hier geändert – nicht hochgeladen', 'cloudUpload', 'warn'],
-    ['newer', 'Online neuer', 'cloudDownload', 'sky'],
-    ['conflict', 'Hier und online verschieden', 'syncConflict', 'danger'],
-    ['unknown', 'Online-Stand unbekannt', 'syncUnknown', 'muted'],
-  ])('%s', (state, label, icon, tone) => {
+    ['local', 'Nur hier', 'neutral'],
+    ['online', 'Nur online', 'sky'],
+    ['current', 'Aktuell', 'ok'],
+    ['changed', 'Hier geändert – nicht hochgeladen', 'warn'],
+    ['newer', 'Online neuer', 'sky'],
+    ['conflict', 'Hier und online verschieden', 'danger'],
+    ['unknown', 'Online-Stand unbekannt', 'muted'],
+  ])('%s', (state, label, tone) => {
     const b = syncBadge({ state, reason: 'not_asked' });
-    expect(b).toMatchObject({ key: state, label, icon, tone });
+    expect(b).toMatchObject({ key: state, label, tone, spin: false });
+    expect(b.icon).toBeUndefined();
   });
 
   it('unknown: the link only for not_asked and unreachable; each its own tip', () => {
@@ -377,8 +381,11 @@ describe('syncBadge (all seven states, every unknown reason)', () => {
   });
 
   it('an overlay wins over the state', () => {
-    expect(syncBadge({ state: 'current', overlay: 'record' })).toMatchObject({ label: 'Wird gerade aufgenommen', icon: 'liveRecording', tone: 'rec' });
-    expect(syncBadge({ state: 'current', overlay: 'upload' })).toMatchObject({ label: 'Wird hochgeladen', spin: true });
+    const record = syncBadge({ state: 'current', overlay: 'record' });
+    expect(record).toMatchObject({ label: 'Wird gerade aufgenommen', tone: 'rec', spin: false });
+    expect(record.icon).toBeUndefined();
+    // Only a spinning overlay names an icon: the loader the badge draws.
+    expect(syncBadge({ state: 'current', overlay: 'upload' })).toMatchObject({ label: 'Wird hochgeladen', icon: 'loading', spin: true });
     expect(syncBadge({ state: 'current', overlay: 'keep_both' }).label).toBe('Wird zusammengeführt');
     expect(syncBadge({ state: 'current', overlay: 'refreshing' }).label).toBe('Wird aktualisiert …');
   });

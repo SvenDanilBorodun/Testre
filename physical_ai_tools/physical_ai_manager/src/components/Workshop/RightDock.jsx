@@ -82,7 +82,7 @@ function RightDock({
         aria-pressed={active}
         title={tab.label}
         className={
-          'relative flex md:flex-col items-center justify-center gap-0.5 '
+          'st-dockkey relative flex md:flex-col items-center justify-center gap-0.5 '
           + 'md:w-full px-2 md:px-1 py-1.5 rounded-md border text-[9px] font-medium '
           + 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 '
           + (active
@@ -110,7 +110,8 @@ function RightDock({
       // (each `flex: n 1 0px`) collapsed to zero. Collapsed it is just the rail.
       // From md up it sits beside the editor at full height.
       className={
-        'flex flex-col md:flex-row shrink-0 w-full md:h-full '
+        'st-dock ' + (collapsed ? 'st-dock--collapsed ' : '')
+        + 'flex flex-col md:flex-row shrink-0 w-full md:h-full '
         + (collapsed ? '' : 'h-1/2 ')
         + 'border-t md:border-t-0 md:border-l border-[var(--line)] bg-[var(--bg-sunk)] '
         + (collapsed ? 'md:w-[52px]' : 'md:w-[var(--dock-w,380px)]')
@@ -157,8 +158,9 @@ function RightDock({
                   />
                 )}
                 <section
+                  data-tab={tab.id}
                   className={
-                    'flex flex-col min-h-0 overflow-hidden rounded-lg border '
+                    'st-panel flex flex-col min-h-0 overflow-hidden rounded-lg border '
                     + 'border-[var(--line)] bg-white '
                     + (twoUp ? '' : 'flex-1')
                   }
@@ -167,7 +169,7 @@ function RightDock({
                     : undefined}
                   aria-label={tab.label}
                 >
-                  <div className="flex items-center justify-between gap-2 px-2.5 py-1 border-b border-[var(--line)] bg-[var(--bg-sunk)] shrink-0">
+                  <div className="st-panel-h flex items-center justify-between gap-2 px-2.5 py-1 border-b border-[var(--line)] bg-[var(--bg-sunk)] shrink-0">
                     <span className="text-xs font-semibold text-[var(--ink)] truncate flex items-center gap-1.5">
                       <Icon name={tab.icon} />
                       {tab.label}
@@ -183,7 +185,7 @@ function RightDock({
                       <Icon name="close" />
                     </button>
                   </div>
-                  <div className="flex-1 min-h-0 overflow-auto p-2">
+                  <div className="st-panel-b flex-1 min-h-0 overflow-auto p-2">
                     {tab.render()}
                   </div>
                 </section>
@@ -196,7 +198,7 @@ function RightDock({
       {/* Rail — collapse button + one button per (non-hidden) tab. */}
       <div
         className={
-          'order-1 md:order-2 shrink-0 flex md:flex-col items-stretch gap-1 '
+          'st-dock-rail order-1 md:order-2 shrink-0 flex md:flex-col items-stretch gap-1 '
           + 'p-1.5 overflow-x-auto md:overflow-y-auto md:w-[52px] '
           + 'border-b md:border-b-0 md:border-l border-[var(--line)] bg-white'
         }
@@ -207,7 +209,7 @@ function RightDock({
           aria-pressed={collapsed}
           title={collapsed ? DE.DOCK_EXPAND : DE.DOCK_COLLAPSE}
           aria-label={collapsed ? DE.DOCK_EXPAND : DE.DOCK_COLLAPSE}
-          className="flex items-center justify-center md:w-full px-2 md:px-1 py-1.5 rounded-md border border-[var(--line)] bg-white text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="st-dockkey st-dockkey--fold flex items-center justify-center md:w-full px-2 md:px-1 py-1.5 rounded-md border border-[var(--line)] bg-white text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <Icon name={collapsed ? 'chevronLeft' : 'chevronRight'} size={16} />
         </button>

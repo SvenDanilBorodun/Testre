@@ -102,7 +102,7 @@ function SimStage({
       // width there is the row's `--sim-w` (a fraction, written only by the
       // page's divider — never set here, which would shadow it).
       className={
-        'flex flex-col w-full md:h-full shrink-0 md:w-[calc(var(--sim-w,0.55)*100%)] min-h-0 '
+        'st-sim flex flex-col w-full md:h-full shrink-0 md:w-[calc(var(--sim-w,0.55)*100%)] min-h-0 '
         + 'max-h-[50%] overflow-y-auto md:max-h-none md:overflow-visible '
         + 'border-t md:border-t-0 md:border-l border-[var(--line)] bg-[var(--bg-sunk)]'
       }
@@ -110,8 +110,8 @@ function SimStage({
     >
       {/* Slim top bar: title + the „Bahn" trail controls (mirrors the real-mode
           „3D-Ansicht" tab — the Debug button lives in RunControls, not here). */}
-      <div className="shrink-0 flex items-center gap-1.5 flex-wrap px-3 py-2 border-b border-[var(--line)] bg-white">
-        <span className="text-sm font-semibold text-[var(--ink)]">Simulator</span>
+      <div className="st-sim-h shrink-0 flex items-center gap-1.5 flex-wrap px-3 py-2 border-b border-[var(--line)] bg-white">
+        <span className="st-sim-title text-sm font-semibold text-[var(--ink)]">Simulator</span>
         <div className="ml-auto flex items-center gap-1.5 flex-wrap">
           <button
             type="button"
@@ -119,7 +119,7 @@ function SimStage({
             aria-pressed={!!showPath}
             title="Bewegungsbahn des Greifers anzeigen"
             className={
-              'text-xs px-2.5 py-1 rounded-md border '
+              'st-key text-xs px-2.5 py-1 rounded-md border '
               + (showPath
                 ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
                 : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
@@ -131,7 +131,7 @@ function SimStage({
             type="button"
             onClick={onClearPath}
             title="Bewegungsbahn löschen"
-            className="text-xs px-2.5 py-1 rounded-md border bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]"
+            className="st-key text-xs px-2.5 py-1 rounded-md border bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]"
           >
             Bahn löschen
           </button>
@@ -158,7 +158,7 @@ function SimStage({
       {/* The integrated sim stage: SimScene owns the single UrdfTwin (3D pane on
           top, 2D placement/zone editor below). showShadows/showReach are LITERAL
           true — mount-time constants inside UrdfTwin (see the file-top note). */}
-      <div className="flex-1 min-h-0 p-2 md:p-3 overflow-hidden">
+      <div className="st-simbody flex-1 min-h-0 p-2 md:p-3 overflow-hidden">
         <SimScene
           layout="split"
           scene={scene}
@@ -181,7 +181,7 @@ function SimStage({
       {/* Collapsible debug strip — RunControls' Debug button toggles it in sim. */}
       {debugOpen && (
         <section
-          className="shrink-0 h-64 flex flex-col border-t border-[var(--line)] bg-white overflow-hidden"
+          className="st-sim-debug shrink-0 h-64 flex flex-col border-t border-[var(--line)] bg-white overflow-hidden"
           aria-label={DE.DOCK_TAB_DEBUG}
         >
           <div className="flex items-center justify-between gap-2 px-2.5 py-1 border-b border-[var(--line)] bg-[var(--bg-sunk)] shrink-0">

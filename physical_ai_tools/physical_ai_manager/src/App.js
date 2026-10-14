@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// „Sucher" (student look): mark <html data-ui="sucher"> first, then its CSS,
+// which follows index.css (and so Tailwind's utilities) in the cascade.
+import './components/sucher/ui';
+import './components/sucher/sucher.css';
 import React from 'react';
 import { Toaster } from 'react-hot-toast';
 import StudentApp from './StudentApp';

@@ -1,0 +1,192 @@
+/* „Sucher" — the Inferenz tab (spec §10, board Inferenz.dc.html): a light page,
+ * the cameras on a powered dark screen, the panel on a plate. Imported by
+ * InferencePage and CloudInferenceView; App.js pulls it into the teacher
+ * build's CSS too, so every rule is scoped under [data-ui='sucher'].
+ * `:root[data-ui]` (not :where) where a rule must beat a Tailwind utility. */
+
+/* ── The target row ─────────────────────────────────────────────────────────── */
+:where([data-ui='sucher']) .su-target { padding: 18px 28px 6px; background: var(--su-body); }
+:where([data-ui='sucher']) .su-target__q { font-size: 30px; line-height: 1.05; color: var(--su-ink); }
+:root[data-ui='sucher'] .su-target__seg > button { text-transform: none; letter-spacing: 0; font-size: 14px; font-weight: 650; padding: 0 16px; }
+
+/* ── Page body: screen left, plate right ────────────────────────────────────── */
+:where([data-ui='sucher']) .su-inf { background: var(--su-body); color: var(--su-ink); }
+:where([data-ui='sucher']) .su-inf__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 24px;
+  padding: 16px 28px 24px;
+}
+:where([data-ui='sucher']) .su-inf__left { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+:where([data-ui='sucher']) .su-inf__screen {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  margin: 8px;
+  border-radius: 26px;
+  display: flex;
+  flex-direction: column;
+}
+:where([data-ui='sucher']) .su-inf__chips {
+  position: relative;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 16px 18px 0;
+}
+:where([data-ui='sucher']) .su-inf__grid { position: relative; flex: 1; min-height: 0; padding: 14px 18px 18px; }
+:where([data-ui='sucher']) .su-inf__side { display: flex; flex-direction: column; min-height: 0; }
+:where([data-ui='sucher']) .su-inf__panel { flex: 1; min-height: 0; width: 420px; max-width: 100%; display: flex; flex-direction: column; overflow: hidden; }
+:where([data-ui='sucher']) .su-inf__side .su-inf__panel { width: 100%; }
+:where([data-ui='sucher']) .su-inf__body > .su-inf__panel { flex: 0 0 auto; }
+:where([data-ui='sucher']) .su-inf__panel > * { min-height: 0; }
+:where([data-ui='sucher']) .su-inf__collapse {
+  position: absolute;
+  left: -16px;
+  top: 10px;
+  z-index: 30;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(circle at 50% 35%, #FFFFFF, #ECE9E3 70%);
+  color: var(--su-ink-2);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 2px 0 #C9C4BA;
+}
+:where([data-ui='sucher']) .su-inf__collapse:hover { color: var(--su-ink); box-shadow: 0 0 0 1px #FF9A6B, 0 2px 0 #C9C4BA; }
+@media (max-width: 1150px) {
+  :where([data-ui='sucher']) .su-inf__body { padding: 12px 16px 16px; gap: 16px; }
+  :where([data-ui='sucher']) .su-inf__panel { width: 340px; }
+}
+
+/* ── Glass readout chips on the screen ──────────────────────────────────────── */
+:where([data-ui='sucher']) .su-inf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(20, 18, 16, .75);
+  box-shadow: inset 0 0 0 1px #34302B;
+  color: var(--su-scr-ink);
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+:where([data-ui='sucher']) .su-inf-chip--text {
+  font-family: var(--font-ui);
+  font-weight: 650;
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+:where([data-ui='sucher']) .su-inf-chip__key {
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  color: var(--su-scr-ink-3);
+}
+:where([data-ui='sucher']) .su-inf-chip__num { font-family: 'Doto', ui-monospace, monospace; font-weight: 800; color: var(--su-sig-on-dark); }
+:where([data-ui='sucher']) .su-inf-chip__btn {
+  margin-left: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: linear-gradient(#C62A1F, #B42318);
+  color: #FFFFFF;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+:where([data-ui='sucher']) .su-inf-chip--round { width: 36px; padding: 0; justify-content: center; }
+
+/* ── Camera tiles (ImageGrid / ImageGridCell, the non-bare cells) ───────────── */
+:root[data-ui='sucher'] .su-cell { background: #000000; border-radius: 6px; overflow: hidden; }
+:root[data-ui='sucher'] .su-cell--empty { background: transparent; border: 1.5px dashed #34302B; }
+:root[data-ui='sucher'] .su-cell--empty:hover { border-color: #48433C; }
+:root[data-ui='sucher'] .su-cell--empty svg { color: #6B645A; }
+:root[data-ui='sucher'] .su-cell__img { border-radius: 6px; background: #000000; }
+:where([data-ui='sucher']) .su-cell__label {
+  max-width: calc(100% - 16px);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(20, 18, 16, .78);
+  box-shadow: inset 0 0 0 1px #34302B;
+  color: var(--su-scr-ink);
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Cloud panel ────────────────────────────────────────────────────────────── */
+:where([data-ui='sucher']) .su-cip__title { display: flex; align-items: center; gap: 10px; font-size: 30px; line-height: 1.05; font-weight: 400; color: var(--su-ink); }
+:where([data-ui='sucher']) .su-cip__title em { font-style: italic; }
+:where([data-ui='sucher']) .su-cip__titleicon { flex: none; color: var(--su-sig-text); }
+:where([data-ui='sucher']) .su-cip__leader { padding: 10px 12px; }
+:where([data-ui='sucher']) .su-cip__leader:empty { display: none; }
+:where([data-ui='sucher']) .su-cip__meter { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 3px; margin-top: -8px; }
+:where([data-ui='sucher']) .su-cip__seg { height: 8px; border-radius: 2px; background: var(--su-ok); box-shadow: 0 0 6px rgba(61, 190, 90, .45); }
+:where([data-ui='sucher']) .su-cip__seg--used { background: #8A867E; box-shadow: none; }
+:where([data-ui='sucher']) .su-cmodel {
+  width: 100%;
+  text-align: left;
+  padding: 11px 14px;
+  border-radius: 14px;
+  background: linear-gradient(#FFFFFF, #F7F5F1);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 2px 0 #D2CEC5;
+  transition: box-shadow 120ms var(--su-ease-out), transform 120ms var(--su-ease-out);
+}
+:where([data-ui='sucher']) .su-cmodel:hover:not(:disabled) { box-shadow: 0 0 0 1px #FF9A6B, 0 2px 0 #D2CEC5; }
+:where([data-ui='sucher']) .su-cmodel--on,
+:where([data-ui='sucher']) .su-cmodel--on:hover:not(:disabled) { background: #FFF4EE; box-shadow: 0 0 0 2px var(--su-sig), 0 2px 0 #D2CEC5; }
+:where([data-ui='sucher']) .su-cmodel--off { opacity: .6; cursor: not-allowed; }
+:where([data-ui='sucher']) .su-cmodel__meta { margin-top: 2px; padding-left: 19px; font-size: 13px; color: var(--su-ink-2); }
+
+/* ── The Jetson state screens ───────────────────────────────────────────────── */
+:where([data-ui='sucher']) .su-state { padding: 36px 32px; }
+:where([data-ui='sucher']) .su-state__disc {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--su-well);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, .22);
+}
+:where([data-ui='sucher']) .su-state__disc svg { width: 30px; height: 30px; }
+
+/* ── ControlPanel: the dark dock re-toned as a light plate bar ──────────────── */
+:root[data-ui='sucher'] .su-ctl .text-white,
+:root[data-ui='sucher'] .su-ctl .text-white\/85,
+:root[data-ui='sucher'] .su-ctl .text-white\/80 { color: var(--su-ink); }
+:root[data-ui='sucher'] .su-ctl .text-white\/60,
+:root[data-ui='sucher'] .su-ctl .text-white\/50 { color: var(--su-ink-2); }
+:root[data-ui='sucher'] .su-ctl .text-white\/40 { color: #8A867E; }
+:root[data-ui='sucher'] .su-ctl .text-white\/15 { color: #CFCAC0; }
+:root[data-ui='sucher'] .su-ctl .bg-white\/10,
+:root[data-ui='sucher'] .su-ctl .bg-white\/\[0\.06\] { background-color: var(--su-well); }
+:root[data-ui='sucher'] .su-ctl .border-white\/15 { border-color: var(--su-hair); }
+:root[data-ui='sucher'] .su-ctl .hover\:bg-white\/10:hover,
+:root[data-ui='sucher'] .su-ctl .hover\:bg-white\/\[0\.10\]:hover { background-color: #E4E0D8; }
+:root[data-ui='sucher'] .su-ctl .hover\:text-white:hover { color: var(--su-ink); }
+:where([data-ui='sucher']) .su-ctl__btn {
+  border-radius: 18px;
+  color: var(--su-ink);
+  background: linear-gradient(#FFFFFF, #EEEBE5);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 3px 0 #C9C4BA, 0 8px 14px -10px rgba(0, 0, 0, .4);
+  transition: transform 160ms var(--su-ease-spring), box-shadow 160ms var(--su-ease-spring);
+  cursor: pointer;
+}
+:where([data-ui='sucher']) .su-ctl__btn--hover { transform: translateY(-1px); box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #C9C4BA, 0 8px 14px -10px rgba(0, 0, 0, .4); }
+:where([data-ui='sucher']) .su-ctl__btn--pressed { transform: translateY(2px); box-shadow: 0 0 0 1px #CFCAC0, 0 1px 0 #C9C4BA; transition: transform 90ms ease-out, box-shadow 90ms ease-out; }
+:where([data-ui='sucher']) .su-ctl__btn:disabled { background: #DEDAD2; color: #8A867E; box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2); }

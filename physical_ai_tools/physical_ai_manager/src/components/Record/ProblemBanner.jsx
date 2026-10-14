@@ -8,16 +8,18 @@
 //
 // The one banner above the action bar (spec §3.9 / §3.12). It exists only while
 // there IS a problem (the page decides which one; this draws it): amber for a
-// warning, red for something that stops the recording or Start, teal for a
+// warning, red for something that stops the recording or Start, blue for a
 // short note. The first sentence is the problem and is set bold; the rest is
 // what to do. A problem that sends the student to the Startseite (the
 // un-activated robot, Q5) gets the word as a real link.
+// Sucher (§8): a wash plate with a light in the problem's tone (amber, red,
+// blue) in place of the icon.
 
 import React from 'react';
 import clsx from 'clsx';
-import Icon from '../icons/Icon';
+import { Led } from '../sucher';
 
-const ICON = { warn: 'warning', bad: 'warning', info: 'info' };
+const TONE = { warn: 'warn', bad: 'rec', info: 'info' };
 
 // „Satz eins. Satz zwei." → ['Satz eins.', 'Satz zwei.']; one sentence → [it, ''].
 export function splitFirstSentence(text) {
@@ -39,12 +41,12 @@ function withHomeLink(text, homeLabel, onGoHome) {
 
 export default function ProblemBanner({ problem, homeLabel = '', onGoHome }) {
   if (!problem || !problem.textDe) return null;
-  const kind = ICON[problem.kind] ? problem.kind : 'warn';
+  const kind = TONE[problem.kind] ? problem.kind : 'warn';
   const [lead, rest] = splitFirstSentence(problem.textDe);
   const linked = problem.linkToHome && typeof onGoHome === 'function';
   return (
     <div className={clsx('rec-banner', kind)} role="status" aria-live="polite" data-testid="rec-banner" data-kind={kind}>
-      <Icon name={ICON[kind]} size={18} />
+      <Led tone={TONE[kind]} size={10} className="rec-banner-led" />
       <div>
         <b>{linked && !rest ? withHomeLink(lead, homeLabel, onGoHome) : lead}</b>
         {rest ? ' ' : null}

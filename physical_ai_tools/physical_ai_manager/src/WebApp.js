@@ -16,6 +16,22 @@ import TeacherDashboard from './pages/teacher/TeacherDashboard';
 import AdminDashboard from './pages/admin/AdminDashboard';
 import { signOutStudent } from './utils/signOut';
 
+// The teacher web build keeps its webfonts (Inter Tight + JetBrains Mono) from
+// Google, added at runtime once; index.css no longer @imports them, so the
+// student app never contacts Google (spec §3.5).
+const WEB_FONTS_LINK_ID = 'eb-web-fonts';
+const WEB_FONTS_HREF =
+  'https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap';
+
+export function addWebFontsOnce() {
+  if (typeof document === 'undefined' || document.getElementById(WEB_FONTS_LINK_ID)) return;
+  const link = document.createElement('link');
+  link.id = WEB_FONTS_LINK_ID;
+  link.rel = 'stylesheet';
+  link.href = WEB_FONTS_HREF;
+  document.head.appendChild(link);
+}
+
 function WebApp() {
   const dispatch = useDispatch();
   const isLoading = useSelector((s) => s.auth.isLoading);
@@ -23,6 +39,10 @@ function WebApp() {
   const role = useSelector((s) => s.auth.role);
   const profileLoaded = useSelector((s) => s.auth.profileLoaded);
   const profileError = useSelector((s) => s.auth.profileError);
+
+  useEffect(() => {
+    addWebFontsOnce();
+  }, []);
 
   useEffect(() => {
     supabase.auth

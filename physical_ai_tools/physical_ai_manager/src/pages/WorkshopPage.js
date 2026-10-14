@@ -119,6 +119,9 @@ import {
   createWorkflow,
   updateWorkflow,
 } from '../services/workflowApi';
+// The Sucher look of the page (spec §12): every rule under
+// :root[data-ui='sucher'] .su-studio, so the teacher web build is untouched.
+import '../components/Workshop/studio.css';
 
 // Phase-5: live 3D follower twin in the real-mode editor (stacked below the scene
 // camera). LAZY-loaded so three.js (~600 KB) + urdf-loader stay out of the entry
@@ -1823,7 +1826,7 @@ function WorkshopPage({ isActive }) {
   // Editor/Galerie switch — shared by both views (in the editor toolbar, and as a
   // standalone strip in the gallery view where the toolbar is absent).
   const viewTabs = (
-    <div className="flex items-center gap-1 rounded-md border border-[var(--line)] bg-white p-0.5">
+    <div className="st-seg flex items-center gap-1 rounded-md border border-[var(--line)] bg-white p-0.5">
       <button
         type="button"
         onClick={() => setView('editor')}
@@ -1865,7 +1868,7 @@ function WorkshopPage({ isActive }) {
           dispatch(requestRecalibration());
         }
       }}
-      className="text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
+      className="st-tbtn text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
       title="Kalibrierung erneut durchlaufen — Schritt-Marker werden zurückgesetzt"
     >
       Kalibrierung neu starten
@@ -1954,7 +1957,7 @@ function WorkshopPage({ isActive }) {
               {showFrames ? 'Achsen verbergen' : 'Achsen anzeigen'}
             </button>
           </div>
-          <div className="relative flex-1 min-h-0 w-full bg-[#1a1d23] rounded-md overflow-hidden">
+          <div className="relative flex-1 min-h-0 w-full bg-[#141210] rounded-md overflow-hidden">
             <Suspense
               fallback={
                 <div className="w-full h-full flex items-center justify-center text-[12px] text-white/70">
@@ -2007,27 +2010,28 @@ function WorkshopPage({ isActive }) {
         border and `data-mode` on this EXISTING root, never a wrapper (a wrapper
         would remount the editor and the dock) and never a transform, filter,
         `contain`, `will-change` or z-index (the Vormachen overlay is `fixed`
-        and not portalled). The frame never animates. */}
+        and not portalled). The frame never animates. `su-studio` scopes the
+        page's Sucher look (studio.css, every rule under data-ui='sucher'). */}
     <div
       data-mode={simMode ? 'sim' : 'real'}
       className={
-        'flex flex-col h-full w-full overflow-hidden border-4 '
+        'su-studio flex flex-col h-full w-full overflow-hidden border-4 '
         + (simMode ? 'border-[#2563EB]' : 'border-[#EA580C]')
       }
     >
-      <header className="px-3 sm:px-4 py-2 border-b border-[var(--line)] bg-white shrink-0">
+      <header className="st-header px-3 sm:px-4 py-2 border-b border-[var(--line)] bg-white shrink-0">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
           {/* Title, mode badge and hint. Below lg the group wraps (the running
               badge drops under the title at phone width instead of being
               clipped); from lg up it is one row and the hint truncates in its
               own flex item, never hidden. */}
           <div className="flex min-w-0 flex-1 basis-auto lg:basis-[34rem] flex-wrap lg:flex-nowrap items-center gap-x-2 gap-y-1">
-            <h1 className="shrink-0 text-base sm:text-lg font-semibold text-[var(--ink)]">
-              Roboter Studio
+            <h1 className="st-title shrink-0 text-base sm:text-lg font-semibold text-[var(--ink)]">
+              Roboter <em>Studio</em>
             </h1>
             <ModeBadge simMode={simMode} />
             <p
-              className="hidden lg:block min-w-0 flex-1 truncate text-xs text-[var(--ink-3)]"
+              className="st-hint hidden lg:block min-w-0 flex-1 truncate text-xs text-[var(--ink-3)]"
               title={hintText}
             >
               {hintText}
@@ -2045,12 +2049,13 @@ function WorkshopPage({ isActive }) {
                 {teachReasonText && (
                   <span
                     id={teachReasonId}
-                    className="max-w-[15rem] line-clamp-2 text-[11px] leading-tight text-[var(--ink-3)]"
+                    className="st-reason max-w-[15rem] line-clamp-2 text-[11px] leading-tight text-[var(--ink-3)]"
                   >
                     {teachReasonText}
                   </span>
                 )}
                 <MenuButton
+                  className="st-teach"
                   label={DE.TOOLBAR_TEACH}
                   icon="hand"
                   menuLabel={DE.TEACH_CHOOSER_MENU}
@@ -2106,7 +2111,7 @@ function WorkshopPage({ isActive }) {
                 ? SIM_ENTRY_BLOCK_TITLES_DE[simEntryReason]
                 : SIM_TOGGLE_DEFAULT_TITLE_DE}
               className={
-                'text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 '
+                'st-key text-xs px-3 py-1.5 rounded-md border disabled:opacity-50 '
                 + 'disabled:cursor-not-allowed '
                 + (simMode
                   ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
@@ -2152,7 +2157,7 @@ function WorkshopPage({ isActive }) {
               <>
                 {/* Gallery view has no editor toolbar — a slim strip carries the
                     view switch + „Öffnen". */}
-                <div className="px-3 sm:px-4 py-1.5 flex items-center gap-2 flex-wrap border-b border-[var(--line)] bg-white shrink-0">
+                <div className="st-toolbar px-3 sm:px-4 py-1.5 flex items-center gap-2 flex-wrap border-b border-[var(--line)] bg-white shrink-0">
                   {viewTabs}
                   <OpenWorkflowPopover onPicked={handlePickWorkflow} lockedReason={switchLockReason} />
                 </div>
@@ -2210,13 +2215,15 @@ function WorkshopPage({ isActive }) {
                     so swapping the right sibling NEVER remounts the workspace (it
                     is keyed only by editorKey). On mobile the two stack. */}
                 <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
-                  <div className="flex-1 min-w-0 min-h-0 p-2 md:p-3 md:pr-0">
+                  <div className="st-editorcol flex-1 min-w-0 min-h-0 p-2 md:p-3 md:pr-0 flex flex-col">
                     {/* No min-height: Blockly must fill exactly the box that is
                         visible (see BlocklyWorkspace). On narrow screens the dock
                         is height-capped instead, so the editor keeps ≥ half. */}
                     {/* `relative`: the Sammlung drawer is positioned inside this
-                        box beside the toolbox and never changes its size. */}
-                    <div className="relative h-full bg-white rounded-lg border border-[var(--line)] overflow-hidden">
+                        box beside the toolbox and never changes its size. It
+                        takes the column's height minus the Code-Vorschau strip
+                        below it (flex-1 + min-h-0 = no min-height). */}
+                    <div className="st-editorbox relative flex-1 min-h-0 bg-white rounded-lg border border-[var(--line)] overflow-hidden">
                       {/* One workflow is one language: a code document mounts the
                           file tree + CodeMirror host and NEVER the Blockly canvas
                           (the Sammlung drawer belongs to that canvas). While the
@@ -2266,6 +2273,52 @@ function WorkshopPage({ isActive }) {
                         />
                       )}
                     </div>
+                    {/* Read-only Python „Code"-Vorschau — compact, collapsible,
+                        the bottom of the editor plate (Sucher D31): a sibling
+                        AFTER the editor box, so BlocklyWorkspace keeps its
+                        parent and key and is never remounted; opening it
+                        shrinks the box, which the canvas hears (its host's
+                        ResizeObserver). A Blockly affordance: a code program
+                        IS its code. */}
+                    {!isCodeWorkflow && (
+                    <div className="st-codestrip shrink-0">
+                      <div className="rounded-lg border border-[var(--line)] bg-white overflow-hidden">
+                        <div className="flex items-center gap-2 px-3 py-1 border-b border-[var(--line)]">
+                          <button
+                            type="button"
+                            onClick={toggleCode}
+                            aria-pressed={isCodeOpen}
+                            title={isCodeOpen ? 'Code-Vorschau schließen' : 'Code-Vorschau öffnen'}
+                            className={
+                              'st-tbtn text-xs px-2.5 py-1 rounded-md border '
+                              + (isCodeOpen
+                                ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                                : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+                            }
+                          >
+                            {DE.DOCK_CODE_LABEL} anzeigen
+                          </button>
+                          <span className="text-[11px] text-[var(--ink-3)]">
+                            Python-Vorschau deines Programms
+                          </span>
+                        </div>
+                        {isCodeOpen && (
+                          <Suspense
+                            fallback={
+                              <p className="px-3 py-4 text-xs text-[var(--ink-3)]">
+                                Code-Vorschau wird geladen …
+                              </p>
+                            }
+                          >
+                            <CodeView
+                              workspace={workspace}
+                              changeToken={editorJson || unsavedBlocklyJson || initialJsonForEditor}
+                            />
+                          </Suspense>
+                        )}
+                      </div>
+                    </div>
+                    )}
                   </div>
                   {simMode ? (
                     // Integrated sim stage: replaces BOTH the dock divider and the
@@ -2353,48 +2406,6 @@ function WorkshopPage({ isActive }) {
                     </>
                   )}
                 </div>
-                {/* Read-only Python „Code"-Vorschau — compact, collapsible,
-                    full-width strip between the editor row and the run controls.
-                    A Blockly affordance: a code program IS its code. */}
-                {!isCodeWorkflow && (
-                <div className="px-2 sm:px-3 pb-1 shrink-0">
-                  <div className="rounded-lg border border-[var(--line)] bg-white overflow-hidden">
-                    <div className="flex items-center gap-2 px-3 py-1 border-b border-[var(--line)]">
-                      <button
-                        type="button"
-                        onClick={toggleCode}
-                        aria-pressed={isCodeOpen}
-                        title={isCodeOpen ? 'Code-Vorschau schließen' : 'Code-Vorschau öffnen'}
-                        className={
-                          'text-xs px-2.5 py-1 rounded-md border '
-                          + (isCodeOpen
-                            ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                            : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
-                        }
-                      >
-                        {DE.DOCK_CODE_LABEL} anzeigen
-                      </button>
-                      <span className="text-[11px] text-[var(--ink-3)]">
-                        Python-Vorschau deines Programms
-                      </span>
-                    </div>
-                    {isCodeOpen && (
-                      <Suspense
-                        fallback={
-                          <p className="px-3 py-4 text-xs text-[var(--ink-3)]">
-                            Code-Vorschau wird geladen …
-                          </p>
-                        }
-                      >
-                        <CodeView
-                          workspace={workspace}
-                          changeToken={editorJson || unsavedBlocklyJson || initialJsonForEditor}
-                        />
-                      </Suspense>
-                    )}
-                  </div>
-                </div>
-                )}
                 <RunControls
                   workflowId={openDocId}
                   blocklyJson={editorJson || unsavedBlocklyJson || initialJsonForEditor}

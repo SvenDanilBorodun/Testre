@@ -205,9 +205,10 @@ function callSimReset(rosbridgeUrl) {
 const ZONE_Z0_DEFAULT = 0;
 const ZONE_Z1_DEFAULT = 0.12;
 const MIN_ZONE_M = 0.01;
-const ZONE_FILL = 'rgba(239,68,68,0.15)';
-const ZONE_DRAFT_FILL = 'rgba(239,68,68,0.12)';
-const ZONE_STROKE = '#ef4444';
+// Sucher (§12): the device's red, translucent and dashed.
+const ZONE_FILL = 'rgba(255,59,48,0.15)';
+const ZONE_DRAFT_FILL = 'rgba(255,59,48,0.12)';
+const ZONE_STROKE = '#FF3B30';
 
 // Fallback palette when the catalog service momentarily returns nothing — keeps
 // the simulator usable. The key MUST be a real type in the server's FIXED object
@@ -898,71 +899,77 @@ function SimScene({
   // Object palette
   const paletteRow = (
     <div className="flex flex-wrap items-center gap-1.5">
-      <span className="text-xs text-[var(--ink-3)]">Objekt:</span>
-      {cat.map(([label, value]) => (
-        <button
-          key={value}
-          type="button"
-          onClick={() => setSelectedType(value)}
-          aria-pressed={selectedType === value}
-          className={
-            'px-2.5 py-1 text-xs rounded-md border '
-            + (selectedType === value
-              ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-              : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
-          }
-        >
-          {label}
-        </button>
-      ))}
+      <span className="st-lab text-xs text-[var(--ink-3)]">Objekt:</span>
+      <span className="st-segs">
+        {cat.map(([label, value]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setSelectedType(value)}
+            aria-pressed={selectedType === value}
+            className={
+              'px-2.5 py-1 text-xs rounded-md border '
+              + (selectedType === value
+                ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+            }
+          >
+            {label}
+          </button>
+        ))}
+      </span>
     </div>
   );
 
   // Editor mode toggle: place objects vs. draw a no-go Sperrzone.
   const modeRow = (
     <div className="flex flex-wrap items-center gap-1.5">
-      <span className="text-xs text-[var(--ink-3)]">Modus:</span>
-      <button
-        type="button"
-        onClick={() => setMode('object')}
-        aria-pressed={mode === 'object'}
-        className={
-          'px-2.5 py-1 text-xs rounded-md border '
-          + (mode === 'object'
-            ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-            : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
-        }
-      >
-        Objekte platzieren
-      </button>
-      <button
-        type="button"
-        onClick={() => setMode('zone')}
-        aria-pressed={mode === 'zone'}
-        className={
-          'px-2.5 py-1 text-xs rounded-md border '
-          + (mode === 'zone'
-            ? 'bg-red-500 text-white border-red-500'
-            : 'bg-white text-red-700 border-red-200 hover:bg-red-50')
-        }
-      >
-        Sperrzone zeichnen
-      </button>
-      {canCreateZiel && (
+      <span className="st-lab text-xs text-[var(--ink-3)]">Modus:</span>
+      <span className="st-segs">
         <button
           type="button"
-          onClick={() => setMode('ziel')}
-          aria-pressed={mode === 'ziel'}
+          onClick={() => setMode('object')}
+          aria-pressed={mode === 'object'}
           className={
             'px-2.5 py-1 text-xs rounded-md border '
-            + (mode === 'ziel'
-              ? 'bg-teal-600 text-white border-teal-600'
-              : 'bg-white text-teal-700 border-teal-200 hover:bg-teal-50')
+            + (mode === 'object'
+              ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+              : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
           }
         >
-          {DE.SIM_MODE_ZIEL}
+          Objekte platzieren
         </button>
-      )}
+        <button
+          type="button"
+          onClick={() => setMode('zone')}
+          aria-pressed={mode === 'zone'}
+          data-tone="zone"
+          className={
+            'px-2.5 py-1 text-xs rounded-md border '
+            + (mode === 'zone'
+              ? 'bg-red-500 text-white border-red-500'
+              : 'bg-white text-red-700 border-red-200 hover:bg-red-50')
+          }
+        >
+          Sperrzone zeichnen
+        </button>
+        {canCreateZiel && (
+          <button
+            type="button"
+            onClick={() => setMode('ziel')}
+            aria-pressed={mode === 'ziel'}
+            data-tone="ziel"
+            className={
+              'px-2.5 py-1 text-xs rounded-md border '
+              + (mode === 'ziel'
+                ? 'bg-teal-600 text-white border-teal-600'
+                : 'bg-white text-teal-700 border-teal-200 hover:bg-teal-50')
+            }
+          >
+            {DE.SIM_MODE_ZIEL}
+          </button>
+        )}
+      </span>
       {mode === 'ziel' && (
         <span className="text-xs text-[var(--ink-4)]">{DE.SIM_ZIEL_HINT}</span>
       )}
@@ -982,8 +989,8 @@ function SimScene({
       ref={isSplit ? setTableWrapEl : undefined}
       className={
         isSplit
-          ? 'rounded-lg border border-[var(--line)] bg-white p-2 md:flex md:min-h-[120px] md:flex-1 md:items-center md:justify-center'
-          : 'rounded-lg border border-[var(--line)] bg-white p-2'
+          ? 'st-table rounded-lg border border-[var(--line)] bg-white p-2 md:flex md:min-h-[120px] md:flex-1 md:items-center md:justify-center'
+          : 'st-table rounded-lg border border-[var(--line)] bg-white p-2'
       }
     >
       <svg
@@ -1006,8 +1013,8 @@ function SimScene({
           cx={ORIGIN_PX}
           cy={ORIGIN_PY}
           r={annulus.outer * PX_PER_M}
-          fill="rgba(34,197,94,0.08)"
-          stroke="#22c55e"
+          fill="rgba(61,190,90,0.12)"
+          stroke="#3DBE5A"
           strokeWidth="1"
           strokeDasharray="4 3"
         />
@@ -1016,17 +1023,17 @@ function SimScene({
           cy={ORIGIN_PY}
           r={annulus.inner * PX_PER_M}
           fill="var(--bg-sunk)"
-          stroke="#22c55e"
+          stroke="#3DBE5A"
           strokeWidth="1"
           strokeDasharray="4 3"
         />
         {/* Robot base marker */}
-        <circle cx={ORIGIN_PX} cy={ORIGIN_PY} r="4" fill="#64748b" />
+        <circle cx={ORIGIN_PX} cy={ORIGIN_PY} r="4" fill="#4D4B47" />
         <text
           x={ORIGIN_PX + 7}
           y={ORIGIN_PY + 4}
           fontSize="9"
-          fill="#64748b"
+          fill="#4D4B47"
         >
           Roboter
         </text>
@@ -1204,7 +1211,7 @@ function SimScene({
       </button>
     </div>
   ) : (
-    <p className={`text-xs text-[var(--ink-4)] px-1${slotGrow}`}>
+    <p className={`st-simhelp text-xs text-[var(--ink-4)] px-1${slotGrow}`}>
       Objekt-Typ wählen, dann in die grüne Reichweite tippen, um es zu
       platzieren. Tippe ein Objekt an, um es zu drehen oder zu verschieben.
     </p>
@@ -1222,7 +1229,7 @@ function SimScene({
         ? 'Das Programm läuft noch — zuerst auf „Stopp" drücken.'
         : 'Stellt die Objekte an ihre Plätze zurück und fährt den virtuellen '
           + 'Arm in die Grundstellung.'}
-      className="text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed"
+      className="st-key st-simkey text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)] disabled:opacity-50 disabled:cursor-not-allowed"
     >
       {resetting ? 'Wird zurückgesetzt …' : 'Simulator zurücksetzen'}
     </button>
@@ -1232,7 +1239,7 @@ function SimScene({
     <button
       type="button"
       onClick={handleClear}
-      className="text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
+      className="st-key st-simkey text-xs px-2 py-1 rounded-md border border-[var(--line)] text-[var(--ink-3)] hover:bg-[var(--bg-sunk)]"
     >
       Tisch leeren
     </button>
@@ -1295,7 +1302,7 @@ function SimScene({
   const editorBody = wideSplit ? (
     <>
       {noticeEl}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+      <div className="st-simrow flex flex-wrap items-center gap-x-4 gap-y-1.5">
         {paletteRow}
         {modeRow}
         <div className="ml-auto flex">{resetButton}</div>
@@ -1330,9 +1337,9 @@ function SimScene({
   // stage with the editor; from md up it takes the `--sim-split` share with a
   // 160 px floor.
   const previewClass = layout === 'split'
-    ? 'relative w-full flex-1 min-h-[220px] md:min-h-[160px] md:[flex:var(--sim-split,0.4)_1_0px] '
-      + 'rounded-lg overflow-hidden border border-white/10 bg-[#1a1d23]'
-    : 'relative w-full aspect-video rounded-lg overflow-hidden border border-white/10 bg-[#1a1d23]';
+    ? 'st-sim3d relative w-full flex-1 min-h-[220px] md:min-h-[160px] md:[flex:var(--sim-split,0.4)_1_0px] '
+      + 'rounded-lg overflow-hidden border border-white/10 bg-[#141210]'
+    : 'st-sim3d relative w-full aspect-video rounded-lg overflow-hidden border border-white/10 bg-[#141210]';
   const preview = (
     <div className={previewClass}>
       <Suspense
@@ -1392,7 +1399,7 @@ function SimScene({
           valueText={(v) => fillLayout(LAYOUT_DE.VALUE_PERCENT, Math.round(v * 100))}
           onCommit={(v) => { setSimSplit(v); writeSimSplit(v); }}
         />
-        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto md:min-h-[140px] md:gap-2 md:pt-2 md:[flex:calc(1_-_var(--sim-split,0.4))_1_0px]">
+        <div className="st-simedit flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto md:min-h-[140px] md:gap-2 md:pt-2 md:[flex:calc(1_-_var(--sim-split,0.4))_1_0px]">
           {editorBody}
         </div>
       </div>

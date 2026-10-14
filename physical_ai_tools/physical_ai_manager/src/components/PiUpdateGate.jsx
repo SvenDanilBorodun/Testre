@@ -123,25 +123,25 @@ export default function PiUpdateGate() {
       aria-modal="true"
       aria-label="Ein Update ist verfügbar"
     >
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-        <h2 className="text-lg font-bold text-gray-900">Ein Update ist verfügbar!</h2>
-        <p className="mt-2 text-sm text-gray-700">
+      <div className="su-plate su-plate--plate w-full max-w-md p-6">
+        <h2 className="su-serif text-[34px] leading-none text-[var(--su-ink)]">Ein Update ist verfügbar!</h2>
+        <p className="mt-3 text-sm text-[var(--ink-2)]">
           Neue Version: <span className="font-mono">{latestVersion || '—'}</span>
           {currentVersion ? (
-            <span className="text-gray-500">{'  '}(aktuell: {currentVersion})</span>
+            <span className="text-[var(--ink-2)]">{'  '}(aktuell: {currentVersion})</span>
           ) : null}
         </p>
-        <p className="mt-1 text-sm text-gray-500">
+        <p className="mt-1 text-sm text-[var(--ink-2)]">
           Bitte aktualisiere EduBotics, bevor du fortfährst.
         </p>
 
         {updateJob && (
-          <div className="mt-4 rounded-lg bg-gray-50 p-3 text-sm">
-            <div className="text-gray-700">{updateJob.message}</div>
+          <div className="su-plate su-plate--well mt-4 p-3 text-sm">
+            <div className="text-[var(--ink)]">{updateJob.message}</div>
             {typeof updateJob.progress === 'number' && running && (
-              <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
+              <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[#CFCAC0]">
                 <div
-                  className="h-full bg-teal-500 transition-[width] duration-500"
+                  className="h-full bg-[var(--su-sig)] transition-[width] duration-500"
                   style={{ width: `${Math.max(0, Math.min(100, updateJob.progress))}%` }}
                 />
               </div>
@@ -154,7 +154,7 @@ export default function PiUpdateGate() {
             type="button"
             onClick={startUpdate}
             disabled={updating}
-            className="rounded-md bg-teal-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-teal-600 disabled:cursor-not-allowed disabled:opacity-60"
+            className="su-key su-key--signal"
           >
             {primaryLabel}
           </button>
@@ -164,7 +164,7 @@ export default function PiUpdateGate() {
             <button
               type="button"
               onClick={handleSkip}
-              className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+              className="su-key"
             >
               Ohne Update fortfahren
             </button>
@@ -176,7 +176,7 @@ export default function PiUpdateGate() {
             reveal the skip) but is NOT a failure, so its in-progress note in the
             box above must not be contradicted by „fehlgeschlagen". */}
         {failed && !running && (
-          <p className="mt-3 text-xs text-orange-600">
+          <p className="mt-3 text-xs text-[color:var(--amber)]">
             Aktualisierung fehlgeschlagen. Bitte Internetverbindung prüfen und erneut versuchen.
           </p>
         )}

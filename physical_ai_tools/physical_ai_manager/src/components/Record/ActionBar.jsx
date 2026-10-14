@@ -36,18 +36,10 @@
 import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import Icon from '../icons/Icon';
+import { releasePointerFocus } from '../sucher/pointerFocus';
 
-/**
- * onClick helper for the page's buttons: after a POINTER click, give the focus
- * back to the page, so Space is „Aufnahme starten" again and not „press this
- * button once more". A keyboard click (Enter/Space, `detail === 0`) keeps the
- * focus where the student put it.
- */
-export function releasePointerFocus(event) {
-  if (!event || !(event.detail > 0)) return;
-  const el = event.currentTarget;
-  if (el && typeof el.blur === 'function') el.blur();
-}
+// releasePointerFocus moved to components/sucher/pointerFocus.js; re-exported for every existing importer.
+export { releasePointerFocus };
 
 // The shedding steps, cumulative, for a bar with three command buttons
 // (recording / saving). A bar with fewer buttons never sheds.
@@ -217,7 +209,7 @@ export default function ActionBar({
               <Icon
                 name={pill.icon}
                 size={22}
-                className={pill.icon === 'loading' ? 'animate-spin' : ''}
+                className={pill.icon === 'loading' ? 'animate-spin' : pill.icon === 'liveRecording' ? 'rec-blink' : ''}
               />
             ) : null}
           </span>

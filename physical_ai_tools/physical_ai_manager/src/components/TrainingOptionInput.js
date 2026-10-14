@@ -39,61 +39,22 @@ const TrainingOptionInput = () => {
 
   const isTraining = useSelector((state) => state.training.isTraining);
 
-  const classLabel = clsx('text-sm', 'text-gray-600', 'w-28', 'flex-shrink-0', 'font-medium');
+  const classLabel = clsx('su-trn-opt__label', 'flex-1', 'min-w-0');
 
-  const classPanel = clsx(
-    'bg-white',
-    'border',
-    'border-[var(--line)]',
-    'rounded-[var(--radius-lg)]',
-    'shadow-soft',
-    'p-5',
-    'w-full',
-    'min-w-[250px]',
-    'relative',
-    'overflow-y-auto',
-    'scrollbar-thin'
-  );
+  const classPanel = clsx('su-plate', 'su-plate--plate', 'su-trn-card', 'w-full', 'min-w-[250px]', 'relative');
 
-  const classTextInput = clsx(
-    'text-sm',
-    'w-full',
-    'h-8',
-    'p-2',
-    'border',
-    'border-gray-300',
-    'rounded-md',
-    'focus:outline-none',
-    'focus:ring-2',
-    'focus:ring-teal-500',
-    'focus:border-transparent',
-    {
-      'bg-gray-100 cursor-not-allowed': isTraining,
-      'bg-white': !isTraining,
-    }
-  );
+  const classTextInput = clsx('su-field', 'su-trn-opt__input', 'h-10', 'px-3', { 'cursor-not-allowed': isTraining });
 
-  const classResetButton = clsx(
-    'w-full',
-    'px-4',
-    'py-2',
-    'bg-gray-500',
-    'text-white',
-    'rounded-md',
-    'font-medium',
-    'transition-colors',
-    'hover:bg-gray-600',
-    'disabled:bg-gray-400',
-    'disabled:cursor-not-allowed'
-  );
+
+  const classResetButton = clsx('su-key', 'su-key--md', 'w-full');
 
   return (
     <div className={classPanel}>
-      <div className={clsx('text-lg', 'font-semibold', 'mb-3', 'text-gray-800')}>
-        Additional Options
+      <div className="su-trn-card__title">
+        Weitere Optionen
       </div>
 
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
+      <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
         <span className={classLabel}>Seed</span>
         <input
           className={classTextInput}
@@ -104,12 +65,12 @@ const TrainingOptionInput = () => {
           value={seed || ''}
           onChange={(e) => dispatch(setSeed(Number(e.target.value) || 0))}
           disabled={isTraining}
-          placeholder="Enter Seed"
+          placeholder="Seed eingeben"
         />
       </div>
 
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <span className={classLabel}>Num Workers</span>
+      <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
+        <span className={classLabel}>Worker</span>
         <input
           className={classTextInput}
           type="number"
@@ -119,12 +80,12 @@ const TrainingOptionInput = () => {
           value={numWorkers || ''}
           onChange={(e) => dispatch(setNumWorkers(Number(e.target.value) || 0))}
           disabled={isTraining}
-          placeholder="Enter Num Workers"
+          placeholder="Worker eingeben"
         />
       </div>
 
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <span className={classLabel}>Batch Size</span>
+      <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
+        <span className={classLabel}>Batch-Größe</span>
         <input
           className={classTextInput}
           type="number"
@@ -134,12 +95,12 @@ const TrainingOptionInput = () => {
           value={batchSize || ''}
           onChange={(e) => dispatch(setBatchSize(Number(e.target.value) || 0))}
           disabled={isTraining}
-          placeholder="Enter Batch Size"
+          placeholder="Batch-Größe eingeben"
         />
       </div>
 
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <span className={classLabel}>Steps</span>
+      <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
+        <span className={classLabel}>Schritte</span>
         <input
           className={classTextInput}
           type="number"
@@ -149,12 +110,12 @@ const TrainingOptionInput = () => {
           value={steps || ''}
           onChange={(e) => dispatch(setSteps(Number(e.target.value) || 0))}
           disabled={isTraining}
-          placeholder="Enter Steps"
+          placeholder="Schritte eingeben"
         />
       </div>
 
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <span className={classLabel}>Log Frequency</span>
+      <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
+        <span className={classLabel}>Log-Intervall</span>
         <input
           className={classTextInput}
           type="number"
@@ -164,12 +125,12 @@ const TrainingOptionInput = () => {
           value={logFreq || ''}
           onChange={(e) => dispatch(setLogFreq(Number(e.target.value) || 0))}
           disabled={isTraining}
-          placeholder="Enter Log Frequency"
+          placeholder="Log-Intervall eingeben"
         />
       </div>
 
-      <div className={clsx('flex', 'items-center', 'mb-2.5')}>
-        <span className={classLabel}>Save Frequency</span>
+      <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
+        <span className={classLabel}>Speicher-Intervall</span>
         <input
           className={classTextInput}
           type="number"
@@ -179,12 +140,13 @@ const TrainingOptionInput = () => {
           value={saveFreq || ''}
           onChange={(e) => dispatch(setSaveFreq(Number(e.target.value) || 0))}
           disabled={isTraining}
-          placeholder="Enter Save Frequency"
+          placeholder="Speicher-Intervall eingeben"
         />
       </div>
 
-      <button className={classResetButton} onClick={() => dispatch(setDefaultTrainingInfo())}>
-        Reset to Default
+      <div className="mb-2 mt-auto" />
+      <button type="button" className={classResetButton} onClick={() => dispatch(setDefaultTrainingInfo())}>
+        Standardwerte
       </button>
     </div>
   );

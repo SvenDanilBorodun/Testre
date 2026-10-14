@@ -21,6 +21,7 @@
 import React from 'react';
 import { render, screen, waitFor, act, cleanup } from '@testing-library/react';
 import UrdfTwin from '../UrdfTwin';
+import { SUCHER_HEMI_GROUND, SUCHER_LINK_COLOR, SUCHER_LINK_METALNESS } from '../sucher/twinPalette';
 
 // --- react-redux: selector-aware stub over a mutable module-level state. ---
 let mockState;
@@ -158,6 +159,11 @@ const mockStandardMaterials = [];
 // Every MeshBasicMaterial (markers, halo, ring, table edges …) with its opts.
 const mockBasicMaterials = [];
 const mockSceneOps = [];
+// The scenes built, the Color constructor values and the GridHelper arguments,
+// for the screen-palette tests (web vs „Sucher").
+const mockScenes = [];
+const mockColorCtor = vi.fn();
+const mockGridCtor = vi.fn();
 // Ghost arm: each robot.clone(true) result. Its traverse visits two arm meshes
 // (sharing spied geometries), a held sim object and an „Achsen" triad — the
 // last two hang under a link and must be detached from the clone.
@@ -211,6 +217,22 @@ const mockEEWorld = { x: 0, y: 0, z: 0 };
 const mockStlLoads = [];
 // Whatever loadMeshCb handed back to urdf-loader's `done` (one entry per mesh).
 const mockMeshDone = [];
+// The URDF's own <material>: the real urdf-loader assigns it to a mesh inside
+// `done` (URDFLoader.js, loadMeshCb callback), so the mock does too.
+const MOCK_URDF_MATERIAL = { urdfMaterial: true, dispose: () => {} };
+// The HemisphereLight constructor args, for the palette tests (web vs Sucher).
+const mockHemiCtor = vi.fn();
+// What the mock renderer's getContext() returns (D30): null = no context; else
+// a fake GL whose unmasked renderer is `mockGlRendererName`.
+let mockGlRendererName = null;
+function mockGlContext() {
+  if (mockGlRendererName === null) return null;
+  return {
+    RENDERER: 0x1f01,
+    getExtension: (name) => (name === 'WEBGL_debug_renderer_info' ? { UNMASKED_RENDERER_WEBGL: 0x9246 } : null),
+    getParameter: (p) => (p === 0x9246 ? mockGlRendererName : 'WebKit WebGL'),
+  };
+}
 // Mesh paths whose fetch ANOTHER twin already started: three's FileLoader joins
 // such a request without calling the manager's itemStart/itemEnd (R0-9), so the
 // STLLoader mock skips both for them.
@@ -249,6 +271,7 @@ vi.mock('urdf-loader', () => ({
       for (let i = 0; i < MOCK_URDF_MESH_COUNT; i += 1) {
         if (typeof this.loadMeshCb === 'function') {
           this.loadMeshCb(`mesh${i}.stl`, this.manager, (obj) => {
+            if (obj && obj.geometry !== undefined) obj.material = MOCK_URDF_MATERIAL;
             mockMeshDone.push(obj);
           });
         }
@@ -307,7 +330,7 @@ vi.mock('three', () => {
     // transform — i.e. it deliberately does NOT move the mesh — so a test that
     // wants the mesh in the right place has to prove the component put it there.
     Scene: function Scene() {
-      return noopObj({
+      const scene = noopObj({
         background: null,
         add: (child) => { mockSceneOps.push(['add', child]); },
         remove: (child) => { mockSceneOps.push(['remove', child]); },
@@ -319,8 +342,10 @@ vi.mock('three', () => {
           if (child) child.__parent = 'scene';
         },
       });
+      mockScenes.push(scene);
+      return scene;
     },
-    Color: function Color() {},
+    Color: function Color(value) { mockColorCtor(value); this.value = value; },
     PerspectiveCamera: function PerspectiveCamera() {
       // position.set is spied so the async-mesh tests can assert that frameRobot
       // runs AGAIN once real geometry exists (in production the onComplete call
@@ -345,10 +370,11 @@ vi.mock('three', () => {
         dispose: () => {},
         shadowMap: { enabled: false, type: null },
         domElement: document.createElement('canvas'),
+        getContext: () => mockGlContext(),
       };
       return mockRenderer;
     },
-    HemisphereLight: function HemisphereLight() { return noopObj(); },
+    HemisphereLight: function HemisphereLight(...args) { mockHemiCtor(...args); return noopObj(); },
     // The key light: a settable castShadow + a shadow object (mapSize.set + a
     // shadow camera) so the sim-stage shadow config path runs. Only touched when
     // showShadows is enabled.
@@ -362,7 +388,7 @@ vi.mock('three', () => {
         },
       });
     },
-    GridHelper: function GridHelper() { return noopObj(); },
+    GridHelper: function GridHelper(...args) { mockGridCtor(...args); return noopObj(); },
     MeshStandardMaterial: function MeshStandardMaterial(opts) {
       // Capture the opts (incl. the per-type `color`) so the sim-stage tests can
       // assert an object used its catalog colour; color.set is the shared
@@ -585,6 +611,9 @@ beforeEach(() => {
   mockStandardMaterials.length = 0;
   mockBasicMaterials.length = 0;
   mockSceneOps.length = 0;
+  mockScenes.length = 0;
+  mockColorCtor.mockClear();
+  mockGridCtor.mockClear();
   mockGhosts.length = 0;
   mockColorSet.mockClear();
   mockMeshInstances.length = 0;
@@ -602,6 +631,8 @@ beforeEach(() => {
   mockLoadUrls.length = 0;
   mockStlLoads.length = 0;
   mockMeshDone.length = 0;
+  mockHemiCtor.mockClear();
+  mockGlRendererName = null;
   mockCoalescedPaths.clear();
   mockRender.mockClear();
   mockCameraPositionSet.mockClear();
@@ -2100,3 +2131,228 @@ describe('UrdfTwin — poseSource (Daten 2.0)', () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// chronoTrail („Sucher" M6, spec §6.6): `count` fading clones of the LOADED
+// robot, each with a material of its own over the shared geometry, built at the
+// finish-load tick, posed and faded by the existing render loop, and freed
+// (material only) on unmount. The default chronoTrail=false builds nothing — the
+// ghost-arm describe above already pins that `clone` is never called then.
+// The pure snapshot/fade rules are in sucher/__tests__/chronoTrail.test.js.
+// ---------------------------------------------------------------------------
+describe('UrdfTwin — chronoTrail', () => {
+  const trailMaterials = () => mockStandardMaterials.filter((m) => m.opts && m.opts.color === 0xc9c1b5);
+
+  async function mountLoaded(ui) {
+    const utils = render(ui);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    return utils;
+  }
+
+  test('true builds 8 hidden clones after the meshes land, each with its own invisible material', async () => {
+    render(<UrdfTwin chronoTrail />);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    expect(mockRobot.clone).not.toHaveBeenCalled();
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    await waitFor(() => expect(mockRobot.clone).toHaveBeenCalledTimes(8));
+    const mats = trailMaterials();
+    expect(mats).toHaveLength(8);
+    expect(new Set(mats).size).toBe(8);
+    mats.forEach((m) => expect(m.opts).toEqual({ color: 0xc9c1b5, transparent: true, opacity: 0, depthWrite: false }));
+    mockGhosts.forEach((g, i) => {
+      expect(mockSceneOps).toContainEqual(['add', g]);
+      expect(g.visible).toBe(false);
+      g.meshes.forEach((m) => {
+        expect(m.material).toBe(mats[i]);
+        expect(m.renderOrder).toBe(-1);
+      });
+    });
+  });
+
+  test('an object overrides the count; a re-render with an equal object rebuilds nothing', async () => {
+    const { rerender } = await mountLoaded(<UrdfTwin chronoTrail={{ count: 3 }} />);
+    expect(mockRobot.clone).toHaveBeenCalledTimes(3);
+    rerender(<UrdfTwin chronoTrail={{ count: 3 }} />);
+    expect(mockRobot.clone).toHaveBeenCalledTimes(3);
+  });
+
+  test('a moving arm poses the oldest clone and makes it visible; the loop then fades it', async () => {
+    await mountLoaded(<UrdfTwin chronoTrail={{ count: 2, stepMs: 1, fadeMs: 100000 }} />);
+    const angles = { joint1: 0, joint2: 0 };
+    mockRobot.joints = {
+      joint1: { get angle() { return angles.joint1; } },
+      joint2: { get angle() { return angles.joint2; } },
+    };
+    await settleFrames(); // the first look only records the pose
+    expect(mockGhosts[0].setJointValue).not.toHaveBeenCalled();
+    angles.joint1 = 0.5;
+    await settleFrames(3);
+    expect(mockGhosts[0].setJointValue).toHaveBeenCalledWith('joint1', 0.5);
+    expect(mockGhosts[0].setJointValue).toHaveBeenCalledWith('joint2', 0);
+    expect(mockGhosts[0].visible).toBe(true);
+    const [mat0] = trailMaterials();
+    expect(mat0.opacity).toBeGreaterThan(0);
+    expect(mat0.opacity).toBeLessThanOrEqual(0.35);
+    expect(mockRobot.applied).toEqual([]); // the live arm is never written by the trail
+  });
+
+  test('false → the clones leave the scene, only their materials are freed', async () => {
+    const { rerender } = await mountLoaded(<UrdfTwin chronoTrail={{ count: 2 }} />);
+    const ghosts = [...mockGhosts];
+    const mats = trailMaterials();
+    rerender(<UrdfTwin chronoTrail={false} />);
+    ghosts.forEach((g) => expect(mockSceneOps).toContainEqual(['remove', g]));
+    mats.forEach((m) => expect(m.dispose).toHaveBeenCalledTimes(1));
+    ghosts.forEach((g) => g.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled()));
+  });
+
+  test('unmount detaches every clone BEFORE the dispose traverse and frees only their materials', async () => {
+    const { unmount } = await mountLoaded(<UrdfTwin chronoTrail={{ count: 2 }} />);
+    const ghosts = [...mockGhosts];
+    const mats = trailMaterials();
+    unmount();
+    const traversedAt = mockSceneOps.map((op) => op[0]).lastIndexOf('traverse');
+    expect(traversedAt).toBeGreaterThan(-1);
+    ghosts.forEach((g) => {
+      const removedAt = mockSceneOps.findIndex((op) => op[0] === 'remove' && op[1] === g);
+      expect(removedAt).toBeGreaterThan(-1);
+      expect(removedAt).toBeLessThan(traversedAt);
+      g.meshes.forEach((m) => expect(m.geometry.dispose).not.toHaveBeenCalled());
+    });
+    mats.forEach((m) => expect(m.dispose).toHaveBeenCalledTimes(1));
+  });
+
+  // D30: decided once when the renderer is created, from the unmasked WebGL
+  // renderer name; a software rasteriser builds no ghost at all.
+  test.each([
+    'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)',
+    'llvmpipe (LLVM 15.0.7, 256 bits)',
+    'ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  ])('a software renderer (%s) builds no clones', async (name) => {
+    mockGlRendererName = name;
+    await mountLoaded(<UrdfTwin chronoTrail />);
+    await settleFrames(2);
+    expect(mockRobot.clone).not.toHaveBeenCalled();
+    expect(trailMaterials()).toHaveLength(0);
+  });
+
+  test('a GPU renderer keeps the trail', async () => {
+    mockGlRendererName = 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+    await mountLoaded(<UrdfTwin chronoTrail />);
+    await waitFor(() => expect(mockRobot.clone).toHaveBeenCalledTimes(8));
+  });
+});
+
+// The arm, the hemisphere's ground light and the simulator's table slab come
+// from the palette read once at mount (D26/D27): the web build keeps exactly
+// what it drew (urdf-loader's own <material> stays on the meshes, the 0x33373d
+// ground, the 0x2a2e34 slab); the student build puts its cream link material
+// back on every mesh after urdf-loader's done(), warms the ground light and
+// draws the slab in --su-scr-3.
+describe('UrdfTwin — arm, ground light and table slab (web unchanged, „Sucher" cream)', () => {
+  const linkMaterial = () => mockStandardMaterials.find((m) => m.opts && m.opts.roughness === 0.6 && m.opts.side === undefined && !m.opts.transparent);
+  const tableMaterial = () => mockStandardMaterials.find((m) => m.opts && m.opts.roughness === 0.95);
+  async function mountLoaded(ui) {
+    render(ui);
+    await waitFor(() => expect(mockStlLoads.length).toBe(MOCK_URDF_MESH_COUNT));
+    await act(async () => { mockStlLoads.forEach((l) => l.finish()); });
+    await waitFor(() => expect(mockMeshDone).toHaveLength(MOCK_URDF_MESH_COUNT));
+  }
+  afterEach(() => { document.documentElement.removeAttribute('data-ui'); });
+
+  test('without data-ui (the web build): the original link material, the URDF material on the meshes, ground 0x33373d, slab 0x2a2e34', async () => {
+    await mountLoaded(<UrdfTwin showTable />);
+    expect(linkMaterial().opts).toEqual({ color: 0xbfc4cc, metalness: 0.25, roughness: 0.6 });
+    mockMeshDone.forEach((m) => expect(m.material).toBe(MOCK_URDF_MATERIAL));
+    expect(mockHemiCtor).toHaveBeenCalledTimes(1);
+    expect(mockHemiCtor).toHaveBeenCalledWith(0xffffff, 0x33373d, 1.1);
+    expect(tableMaterial().opts.color).toBe(0x2a2e34);
+  });
+
+  test('under data-ui="sucher": the cream link material on every mesh, a warm ground, the --su-scr-3 slab', async () => {
+    document.documentElement.setAttribute('data-ui', 'sucher');
+    await mountLoaded(<UrdfTwin showTable />);
+    const link = linkMaterial();
+    expect(link.opts).toEqual({ color: SUCHER_LINK_COLOR, metalness: SUCHER_LINK_METALNESS, roughness: 0.6 });
+    mockMeshDone.forEach((m) => expect(m.material).toBe(link));
+    expect(mockHemiCtor).toHaveBeenCalledWith(0xffffff, SUCHER_HEMI_GROUND, 1.1);
+    expect(tableMaterial().opts.color).toBe(0x24201d);
+  });
+});
+
+/* eslint-disable testing-library/no-container, testing-library/no-node-access --
+   these tests pin markup: the web build's exact class strings and the Sucher chip's DOM. */
+describe('UrdfTwin — screen palette and chips (web unchanged, „Sucher" warm)', () => {
+  const WEB_ROOT = 'relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden bg-[#1a1d23]';
+  const WEB_CHIP = 'absolute top-2 left-2 z-10 h-7 px-2.5 rounded-full bg-white/[0.08] border border-white/15 '
+    + 'backdrop-blur-md flex items-center gap-1.5 text-[11px] text-white/80 font-mono';
+  const WEB_HINT = 'px-3 py-1.5 rounded-full bg-black/55 border border-white/15 backdrop-blur-md text-[12px] text-white/85';
+  afterEach(() => { document.documentElement.removeAttribute('data-ui'); });
+
+  test('without data-ui (the web build): the original colours and the original chip markup', async () => {
+    const { container } = render(<UrdfTwin />);
+    expect(mockScenes).toHaveLength(1);
+    expect(mockScenes[0].background.value).toBe(0x1a1d23);
+    expect(mockGridCtor).toHaveBeenCalledTimes(1);
+    expect(mockGridCtor).toHaveBeenCalledWith(1, 20, 0x3a3f47, 0x2a2e34);
+    expect(container.firstChild.className).toBe(WEB_ROOT);
+    const chip = screen.getByText('Follower-Modell');
+    expect(chip.className).toBe(WEB_CHIP);
+    expect(chip.firstChild.className).toBe('w-1.5 h-1.5 rounded-full');
+    expect(chip.firstChild.style.background).toBe('rgb(154, 160, 166)');
+    expect(screen.getByText('Wartet auf Gelenkdaten …').className).toBe(WEB_HINT);
+    expect(container.querySelector('.su-read, .su-led, .su-twin')).toBeNull();
+
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    act(() => mockSubscribe.mock.calls[0][0]({ name: ['joint1'], position: [0.1] }));
+    await waitFor(() => expect(chip.firstChild.style.background).toBe('var(--accent)'));
+  });
+
+  test('under data-ui="sucher": the Screen colour, a warm grid and glass Readout-sm chips', async () => {
+    document.documentElement.setAttribute('data-ui', 'sucher');
+    const { container } = render(<UrdfTwin />);
+    expect(mockScenes[0].background.value).toBe(0x141210);
+    expect(mockGridCtor).toHaveBeenCalledWith(1, 20, 0x2c2926, 0x221f1c);
+    expect(container.firstChild).toHaveClass('su-twin');
+    expect(container.firstChild).not.toHaveClass('bg-[#1a1d23]');
+    const chip = screen.getByText('Follower-Modell').closest('.su-read');
+    expect(chip).toHaveClass('su-read--sm', 'su-read--glass', 'su-twin__chip');
+    expect(chip.querySelector('.su-led')).toHaveClass('su-led--off');
+    const hint = screen.getByText('Wartet auf Gelenkdaten …').closest('.su-read');
+    expect(hint).toHaveClass('su-read--sm', 'su-read--glass');
+    expect(hint.parentElement).toHaveClass('su-twin__hint');
+
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    act(() => mockSubscribe.mock.calls[0][0]({ name: ['joint1'], position: [0.1] }));
+    await waitFor(() => expect(chip.querySelector('.su-led')).toHaveClass('su-led--ok'));
+    expect(screen.queryByText('Wartet auf Gelenkdaten …')).not.toBeInTheDocument();
+  });
+
+  test('„Sucher": the simulator twin lights its chip blue (info)', async () => {
+    document.documentElement.setAttribute('data-ui', 'sucher');
+    render(<UrdfTwin jointTopic="/sim/joint_states" />);
+    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
+    act(() => mockSubscribe.mock.calls[0][0]({ name: ['joint1'], position: [0.1] }));
+    const chip = screen.getByText('Follower-Modell').closest('.su-read');
+    await waitFor(() => expect(chip.querySelector('.su-led')).toHaveClass('su-led--info'));
+  });
+
+  test('decided once at mount: a later data-ui change does not restyle a mounted twin', () => {
+    const { container, rerender } = render(<UrdfTwin />);
+    document.documentElement.setAttribute('data-ui', 'sucher');
+    rerender(<UrdfTwin showPath />);
+    expect(container.firstChild.className).toBe(WEB_ROOT);
+    expect(mockScenes).toHaveLength(1);
+    expect(mockColorCtor).toHaveBeenCalledWith(0x1a1d23);
+    expect(mockColorCtor).not.toHaveBeenCalledWith(0x141210);
+  });
+
+  test('showChrome=false draws no chip in either build', () => {
+    document.documentElement.setAttribute('data-ui', 'sucher');
+    render(<UrdfTwin showChrome={false} />);
+    expect(screen.queryByText('Follower-Modell')).toBeNull();
+    expect(screen.queryByText('Wartet auf Gelenkdaten …')).toBeNull();
+  });
+});
+/* eslint-enable testing-library/no-container, testing-library/no-node-access */

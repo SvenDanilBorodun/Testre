@@ -38,10 +38,10 @@
 //     says so, instead of leaving a green dot over a frozen pose.
 
 import React, { Suspense, useCallback, useMemo, useState } from 'react';
-import clsx from 'clsx';
 import { useSelector } from 'react-redux';
 
-import { Pill } from '../EbUI';
+import { Led, RobotIcon, Screen } from '../sucher';
+import { releasePointerFocus } from '../sucher/pointerFocus';
 import { STREAM_QUALITY } from '../../constants/streamConfig';
 import { usePiMode, videoStreamBase } from '../../utils/piMode';
 import { robotDisplayName, robotHelpText } from '../../utils/robotIdentity';
@@ -88,25 +88,6 @@ export function streamUrlFor(topic, base) {
     + `&default_transport=compressed&topic=${encodeURIComponent(bare)}`;
 }
 
-/** Flat, unmistakably inert stand-in while there is no robot to render. */
-function OfflineArt() {
-  return (
-    <svg
-      viewBox="0 0 520 250"
-      className="absolute inset-0 w-full h-full opacity-30"
-      preserveAspectRatio="xMidYMid meet"
-      aria-hidden="true"
-    >
-      <g stroke="#9aa0a6" strokeWidth="12" strokeLinecap="round" fill="none">
-        <path d="M260 200v-46" />
-        <path d="M260 154l58-56" />
-        <path d="M318 98l60 32" />
-      </g>
-      <rect x="224" y="196" width="72" height="14" rx="4" fill="#9aa0a6" />
-    </svg>
-  );
-}
-
 /**
  * @param {boolean|null} [jointsLive] — from hooks/useJointLiveness, owned by
  *   HomePage and shared with the Health-Check card. One subscription, two
@@ -148,11 +129,21 @@ export default function RobotHero({ jointsLive = null }) {
   // WITHOUT rewriting their choice, so the camera comes back when it does.
   const effectiveView = view === VIEW_CAMERA && !cameraAvailable ? VIEW_TWIN : view;
 
+  // A real view switch (the two buttons below) releases the pointer focus on a
+  // mouse click, like every Sucher key (D11).
+  const pick = (next) => (event) => {
+    releasePointerFocus(event);
+    chooseView(next);
+  };
+
   return (
-    <div className="relative h-[280px] sm:h-[340px] md:h-[380px] xl:h-[430px] rounded-[var(--radius-lg)] overflow-hidden bg-[#1a1d23]">
+    <Screen
+      power
+      className="su-hero h-[280px] sm:h-[340px] md:h-[380px] lg:h-full lg:min-h-[540px]"
+    >
       {connected && effectiveView === VIEW_TWIN && (
         <Suspense fallback={<div className="absolute inset-0 eb-sweep" />}>
-          <UrdfTwin showChrome={false} />
+          <UrdfTwin showChrome={false} chronoTrail />
         </Suspense>
       )}
 
@@ -164,63 +155,65 @@ export default function RobotHero({ jointsLive = null }) {
         />
       )}
 
-      {!connected && <OfflineArt />}
+      {/* Flat, unmistakably inert stand-in while there is no robot to render:
+          the robot's own sprite, dimmed and still. */}
+      {!connected && (
+        <div className="su-hero__offline" aria-hidden="true">
+          <RobotIcon profile={robotProfile || robotType} light dim size={200} />
+        </div>
+      )}
 
       {/* Liveness — the real one. Grey whenever we are not receiving. */}
-      <div className="absolute top-3 left-3 z-10 flex items-center gap-2 flex-wrap">
+      <div className="absolute top-4 left-4 z-10 flex items-center gap-2 flex-wrap">
         {connected ? (
           effectiveView === VIEW_TWIN ? (
-            <Pill tone="glass" dot={jointsLive === true}>
-              {jointsLive === true ? 'Gelenke live' : 'Wartet auf Gelenkdaten …'}
-            </Pill>
+            <span className="su-hero__chip">
+              <Led tone={jointsLive === true ? 'ok' : 'off'} pulse={jointsLive === true ? 'breathe' : 'none'} size={8} />
+              <span>{jointsLive === true ? 'Gelenke live' : 'Wartet auf Gelenkdaten …'}</span>
+            </span>
           ) : (
-            <Pill tone="glass" dot>Kamerabild</Pill>
+            <span className="su-hero__chip">
+              <Led tone="ok" pulse="breathe" size={8} />
+              <span>Kamerabild</span>
+            </span>
           )
         ) : (
-          <Pill tone="glass">Nicht verbunden</Pill>
+          <span className="su-hero__chip">
+            <Led tone="off" size={8} />
+            <span>Nicht verbunden</span>
+          </span>
         )}
       </div>
 
       {/* View switch. Disabled rather than hidden when there is no camera, so
           the student can see the option exists and why it is unavailable. */}
-      <div className="absolute top-3 right-3 z-10 flex p-0.5 rounded-[var(--radius-sm)] bg-black/40 border border-white/15 backdrop-blur-md">
+      <div className="su-seg su-seg--glass su-seg--md absolute top-4 right-4 z-10">
         <button
           type="button"
-          onClick={() => chooseView(VIEW_TWIN)}
-          className={clsx(
-            'h-7 px-3 rounded-[6px] text-xs font-medium transition',
-            effectiveView === VIEW_TWIN ? 'bg-white/20 text-white' : 'text-white/70 hover:text-white',
-          )}
+          onClick={pick(VIEW_TWIN)}
+          aria-pressed={effectiveView === VIEW_TWIN}
         >
           3D-Modell
         </button>
         <button
           type="button"
-          onClick={() => chooseView(VIEW_CAMERA)}
+          onClick={pick(VIEW_CAMERA)}
           disabled={!cameraAvailable}
+          aria-pressed={effectiveView === VIEW_CAMERA}
           title={cameraAvailable ? 'Livebild der Kamera zeigen' : 'Keine Kamera erkannt'}
-          className={clsx(
-            'h-7 px-3 rounded-[6px] text-xs font-medium transition',
-            effectiveView === VIEW_CAMERA ? 'bg-white/20 text-white' : 'text-white/70 hover:text-white',
-            !cameraAvailable && 'opacity-40 cursor-not-allowed hover:text-white/70',
-          )}
         >
           Kamera
         </button>
       </div>
 
       {/* Identity. The German name from the wire, never the profile id. */}
-      <div className="absolute bottom-0 left-0 right-0 z-10 p-4 bg-gradient-to-t from-black/75 to-transparent">
-        <div className="text-white/55 font-mono text-[10px] uppercase tracking-wider">
-          Dein Roboter
-        </div>
-        <div className="text-white font-semibold text-lg sm:text-xl tracking-tight leading-tight truncate">
+      <div className="su-hero__id absolute bottom-0 left-0 right-0 z-10">
+        <div className="su-lab">Dein Roboter</div>
+        <div className="su-hero__name su-serif">
           {name || 'Roboter wird erkannt …'}
         </div>
-        {help && (
-          <p className="text-white/70 text-[12.5px] leading-snug mt-1 max-w-[62ch]">{help}</p>
-        )}
+        {help && <p className="su-hero__help">{help}</p>}
       </div>
-    </div>
+    </Screen>
   );
 }

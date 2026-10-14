@@ -287,7 +287,6 @@ export const INLINE_SVG_ALLOWED = Object.freeze({
   'src/components/EbUI.js': 'the EduBotics brand mark (LogoMark), not an icon',
   'src/components/CollisionModal.js': 'the remedy illustration (RemedyDiagram)',
   'src/components/CompactSystemStatus.js': 'the circular usage gauge, a chart',
-  'src/components/Home/RobotHero.jsx': 'the Startseite illustration',
   'src/components/Record/PhaseOverlay.jsx':
     'the Aufnahme countdown ring and the warm-up/reset pictograms (illustrations)',
   'src/components/Workshop/SimScene.jsx': 'the 2D simulator scene',

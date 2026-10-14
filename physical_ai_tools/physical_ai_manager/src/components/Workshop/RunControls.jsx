@@ -767,7 +767,7 @@ function RunControls({
     : DE.RUN_READY;
 
   return (
-    <div className="border-t border-[var(--line)] bg-white p-3 sm:p-4">
+    <div className="st-runbar border-t border-[var(--line)] bg-white p-3 sm:p-4">
       <div className="flex flex-wrap items-center gap-2 mb-3">
         {!isRunning ? (
           <button
@@ -779,7 +779,7 @@ function RunControls({
               : undefined)}
             className={
               BUTTON_BASE
-              + ' bg-[var(--accent)] text-white hover:opacity-90 '
+              + ' st-key st-key--signal st-key--lg bg-[var(--accent)] text-white hover:opacity-90 '
               + 'focus-visible:ring-blue-500'
             }
             aria-label={DE.RUN_START}
@@ -793,7 +793,7 @@ function RunControls({
             disabled={busy}
             className={
               BUTTON_BASE
-              + ' bg-amber-500 text-white hover:bg-amber-600 '
+              + ' st-key st-key--lg bg-amber-500 text-white hover:bg-amber-600 '
               + 'focus-visible:ring-amber-500'
             }
             aria-label={DE.RUN_PAUSE}
@@ -808,7 +808,7 @@ function RunControls({
               disabled={busy}
               className={
                 BUTTON_BASE
-                + ' bg-blue-500 text-white hover:bg-blue-600 '
+                + ' st-key st-key--lg bg-blue-500 text-white hover:bg-blue-600 '
                 + 'focus-visible:ring-blue-500'
               }
               aria-label={DE.RUN_STEP}
@@ -821,7 +821,7 @@ function RunControls({
               disabled={busy}
               className={
                 BUTTON_BASE
-                + ' bg-[var(--accent)] text-white hover:opacity-90 '
+                + ' st-key st-key--signal st-key--lg bg-[var(--accent)] text-white hover:opacity-90 '
                 + 'focus-visible:ring-blue-500'
               }
               aria-label={DE.RUN_CONTINUE}
@@ -836,7 +836,7 @@ function RunControls({
           disabled={busy || !isRunning}
           className={
             BUTTON_BASE
-            + ' bg-red-500 text-white hover:bg-red-600 '
+            + ' st-key st-key--dark st-key--lg st-key--stop bg-red-500 text-white hover:bg-red-600 '
             + 'focus-visible:ring-red-500'
           }
           aria-label={DE.RUN_STOP}
@@ -844,8 +844,9 @@ function RunControls({
           <Icon name="stop" /> {DE.RUN_STOP}
         </button>
         <span
+          data-tone={paused ? 'warn' : isRunning ? 'sig' : phase === 'error' ? 'rec' : 'ok'}
           className={
-            'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium '
+            'st-runstatus inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium '
             + (paused
               ? 'bg-amber-100 text-amber-700'
               : isRunning
@@ -869,30 +870,32 @@ function RunControls({
         {/* Phase-2 global Tempo control. Applies to the WHOLE program at the
             next Start (the server reads ctx.tempo once at workflow start). */}
         <div
-          className="inline-flex items-center gap-1"
+          className="st-tempo inline-flex items-center gap-1"
           role="group"
           aria-label={DE.RUN_TEMPO_LABEL}
         >
-          <span className="text-xs text-[var(--ink-3)]">{DE.RUN_TEMPO_LABEL}:</span>
-          {TEMPO_PRESETS.map((p) => (
-            <button
-              key={p.value}
-              type="button"
-              onClick={() => handleTempo(p.value)}
-              disabled={busy}
-              aria-pressed={tempo === p.value}
-              title={`Tempo ${p.label} (×${p.value})`}
-              className={
-                'min-h-[28px] px-2 py-1 text-xs rounded-md border '
-                + 'disabled:opacity-50 disabled:cursor-not-allowed '
-                + (tempo === p.value
-                  ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                  : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
-              }
-            >
-              {p.label}
-            </button>
-          ))}
+          <span className="st-tempo-label text-xs text-[var(--ink-3)]">{DE.RUN_TEMPO_LABEL}:</span>
+          <span className="st-segs">
+            {TEMPO_PRESETS.map((p) => (
+              <button
+                key={p.value}
+                type="button"
+                onClick={() => handleTempo(p.value)}
+                disabled={busy}
+                aria-pressed={tempo === p.value}
+                title={`Tempo ${p.label} (×${p.value})`}
+                className={
+                  'min-h-[28px] px-2 py-1 text-xs rounded-md border '
+                  + 'disabled:opacity-50 disabled:cursor-not-allowed '
+                  + (tempo === p.value
+                    ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                    : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+                }
+              >
+                {p.label}
+              </button>
+            ))}
+          </span>
         </div>
 
         <div className="ml-auto flex items-center gap-2">
@@ -903,7 +906,7 @@ function RunControls({
             title={logOpen ? 'Protokoll ausblenden' : 'Protokoll anzeigen'}
             className={
               BUTTON_BASE
-              + ' border border-[var(--line)] bg-white text-[var(--ink)] '
+              + ' st-key border border-[var(--line)] bg-white text-[var(--ink)] '
               + 'hover:bg-[var(--bg-sunk)] focus-visible:ring-blue-500'
             }
           >
@@ -920,7 +923,7 @@ function RunControls({
             aria-pressed={debugIsOpen}
             className={
               BUTTON_BASE
-              + ' border border-[var(--line)] bg-white text-[var(--ink)] '
+              + ' st-key border border-[var(--line)] bg-white text-[var(--ink)] '
               + 'hover:bg-[var(--bg-sunk)] focus-visible:ring-blue-500'
             }
           >

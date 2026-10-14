@@ -28,6 +28,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector, useStore } from 'react-redux';
 import Icon from '../icons/Icon';
+import { Key } from '../sucher';
 import SyncBadge from './SyncBadge';
 import ToolsBar from './ToolsBar';
 import SyncBanners from './SyncBanners';
@@ -309,10 +310,10 @@ function PlayerView({
   return (
     <div className="dat-main" data-view="player">
       <div className="dat-pl-head">
-        <button type="button" className="dat-btn dat-btn-ghost" onClick={(e) => { releasePointerFocus(e); actions.back(); }}>
-          <Icon name="back" size={16} />
+        {/* A white key (§11, D31); Key gives a mouse click's focus back. */}
+        <Key icon="back" className="dat-pl-back" onClick={() => actions.back()}>
           {COPY.player.back}
-        </button>
+        </Key>
         <div className="dat-pl-title">
           <div className="dat-eyebrow">{COPY.player.eyebrow}</div>
           <h1 className="dat-title">{model.title}</h1>

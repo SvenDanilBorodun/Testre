@@ -70,7 +70,7 @@ describe('record.css', () => {
     const page = rule(CSS, '.rec-page');
     expect(page).toMatch(/container-type:\s*inline-size/);
     expect(page).toMatch(/container-name:\s*rec/);
-    ['--rec-warm: #D08A1E', '--rec-run: #E23B3B', '--rec-save: #2F9E63', '--rec-reset: #0A7F7A']
+    ['--rec-warm: #E8B04A', '--rec-run: #FF5B1F', '--rec-save: #8FBF8A', '--rec-reset: #8EB4D6']
       .forEach((token) => expect(page).toContain(token));
   });
 

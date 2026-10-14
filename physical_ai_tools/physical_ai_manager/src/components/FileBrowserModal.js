@@ -90,9 +90,8 @@ export default function FileBrowserModal({
 
   const classModal = clsx(
     'relative',
-    'bg-white',
-    'rounded-lg',
-    'shadow-xl',
+    'su-plate',
+    'su-plate--plate',
     'max-w-4xl',
     'w-full',
     'max-h-[90vh]',

@@ -29,7 +29,8 @@
 import React, { useCallback, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 
-import { Btn, Card, Pill } from '../EbUI';
+import { Btn, Card } from '../EbUI';
+import { Led } from '../sucher';
 import Icon from '../icons/Icon';
 import { hfCopy } from '../../features/hfToken/hfTokenCopy';
 import { kicked } from '../../features/hfToken/hfTokenSlice';
@@ -50,8 +51,11 @@ import {
 } from '../../features/hfToken/hfTokenThunks';
 import { isCloudOnlyMode } from '../../utils/cloudMode';
 
-const NOTE = 'text-[12.5px] leading-snug text-[var(--ink-3)]';
+const NOTE = 'text-[13px] leading-snug text-[var(--ink-2)]';
 const NOTE_BAD = 'text-[12.5px] leading-snug text-[color:var(--danger)]';
+
+// The header light for the old pill tone (Sucher: a light, not a pill).
+const PILL_LED = { success: 'ok', danger: 'rec', amber: 'warn', accent: 'sig', neutral: 'off' };
 
 /** „03.10.26, 14:05" for an ISO time, or '' when it is missing or unparseable. */
 export function formatChecked(iso) {
@@ -158,7 +162,7 @@ function TokenInput({ value, onChange, onSubmit, disabled }) {
       name="edubotics-hf-access"
       {...PASSWORD_MANAGER_IGNORE}
       disabled={disabled}
-      className="h-10 flex-1 min-w-[200px] rounded-[var(--radius-sm)] border border-[var(--line)] bg-white px-3 font-mono text-sm"
+      className="su-field h-10 flex-1 min-w-[200px] px-3 font-mono text-sm"
     />
   );
 }
@@ -245,10 +249,12 @@ export default function HfTokenCard() {
   })();
   const pillTone = status === 'none' ? 'neutral' : (view?.tone ?? 'neutral');
 
+  // The status as a light and a caption (Sucher): the old pill's text and tone.
   const header = (
-    <Pill tone={pillTone} dot={status === 'stored' && inSync}>
-      {pillText}
-    </Pill>
+    <span className="su-tok__status">
+      <Led tone={PILL_LED[pillTone] || 'off'} />
+      <span className="su-lab">{pillText}</span>
+    </span>
   );
 
   const inputRow = (
@@ -312,7 +318,7 @@ export default function HfTokenCard() {
         </p>
         {inputRow}
         <div className="mt-3">
-          <Btn variant="ghost" size="sm" onClick={remove} disabled={busy}>
+          <Btn variant="ghost" size="sm" className="su-tok__remove" onClick={remove} disabled={busy}>
             <Icon name="trash" /> {hfCopy('card.remove')}
           </Btn>
         </div>
@@ -324,16 +330,21 @@ export default function HfTokenCard() {
     const checked = formatChecked(account.validatedAt);
     body = (
       <div>
-        <div className="flex flex-col gap-0.5 mb-3">
-          <p className="text-[13px] leading-snug text-[var(--ink-2)]">
-            {hfCopy('card.stored.as')}{' '}
-            <strong className="font-semibold text-[var(--ink)]">{account.hfUsername}</strong>
-          </p>
-          <p className={NOTE}>
-            {hfCopy('card.stored.hint')}{' '}
-            <span className="font-mono">{account.hint}</span>
-            {checked ? ` · ${hfCopy('card.stored.checked')} ${checked}` : ''}
-          </p>
+        <div className="su-tok__who">
+          <span className="su-tok__tile" aria-hidden="true">
+            <Icon name="key" size={22} />
+          </span>
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <p className="text-[14px] leading-snug text-[var(--ink-2)]">
+              {hfCopy('card.stored.as')}{' '}
+              <strong className="su-tok__name su-serif">{account.hfUsername}</strong>
+            </p>
+            <p className={NOTE}>
+              {hfCopy('card.stored.hint')}{' '}
+              <span className="font-mono">{account.hint}</span>
+              {checked ? ` · ${hfCopy('card.stored.checked')} ${checked}` : ''}
+            </p>
+          </div>
         </div>
 
         {account.accountChanged && (
@@ -386,7 +397,7 @@ export default function HfTokenCard() {
                 </Btn>
               </>
             ) : (
-              <Btn variant="ghost" onClick={() => setConfirmingRemove(true)} disabled={busy}>
+              <Btn variant="ghost" className="su-tok__remove" onClick={() => setConfirmingRemove(true)} disabled={busy}>
                 <Icon name="trash" /> {hfCopy('card.remove')}
               </Btn>
             )}
@@ -399,7 +410,7 @@ export default function HfTokenCard() {
 
   return (
     <div data-testid="hf-token-card">
-      <Card title={hfCopy('card.title')} right={pillText ? header : null}>
+      <Card className="su-tok" title={hfCopy('card.title')} right={pillText ? header : null}>
         {body}
       </Card>
     </div>

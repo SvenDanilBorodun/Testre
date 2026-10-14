@@ -115,6 +115,12 @@ import {
 } from './Workshop/simConstants';
 import { armGeometry } from '../utils/armProfile';
 import { MARKER_COLORS } from './Workshop/sammlung/markers';
+import {
+  resolveChronoTrail, createChronoTrail, chronoTick, isSoftwareRenderer, webglRendererName,
+} from './sucher/chronoTrail';
+import useReducedMotion from './sucher/useReducedMotion';
+import Readout from './sucher/Readout';
+import { readTwinPalette } from './sucher/twinPalette';
 
 // The joints applied to the model are profile-driven (armGeometry from the
 // capability manifest: the OMX's joint1..joint5 + gripper_joint_1 when there is
@@ -214,12 +220,18 @@ const JOINT_STALE_CHECK_MS = 1000;
 // asset drop). Fetched relative to PUBLIC_URL so it works offline with NO CDN
 // (classroom requirement) — see URDF_ASSETS above for the per-profile rows.
 
-// Arm link colour (the URDF materials are a flat dark grey; we override for a
-// cleaner, better-lit look in the viewer).
-const LINK_COLOR = 0xbfc4cc;
+// The arm's link material (colour + metalness), the hemisphere's ground colour
+// and the sim table slab come from `palette` (sucher/twinPalette.js), read once
+// at mount: the web build's former constants (0xbfc4cc / 0.25, 0x33373d,
+// 0x2a2e34), the student build's cream arm under a warm ground light and the
+// --su-scr-3 slab (D26/D27). urdf-loader hands a mesh the URDF's own grey
+// <material> inside done(); only the student build replaces it (loadMeshCb).
 
 // Ghost arm: the Positionen teal (sammlung/markers.js MARKER_COLORS.pose).
 const GHOST_COLOR = 0x14b8a6;
+
+// Chronophotography trail (M6, „Sucher" §6.6): warm screen ink (#C9C1B5).
+const CHRONO_COLOR = 0xc9c1b5;
 
 // `{names, positions}` with equal-length arrays of non-empty strings and finite
 // numbers, else null — an invalid ghost draws nothing rather than a half pose.
@@ -238,13 +250,15 @@ function validGhostJoints(g) {
 // which rebuilds the clone's joints/links/mimic maps, so setJointValue drives the
 // clone alone. The clone SHARES every geometry with the live robot: whoever
 // removes it disposes ONLY the one material returned here, never a geometry.
-// Used by both ghost layers — the `ghostJoints` prop and the `poseSource` ghost
-// (Daten 2.0, spec §G5) — so the two can never build it differently.
-function buildGhostClone(robot, color) {
+// Used by every ghost layer — the `ghostJoints` prop, the `poseSource` ghost
+// (Daten 2.0, spec §G5) and the chronophotography trail (each of its clones
+// with a material of its own, starting at `opacity` 0) — so they can never
+// build it differently.
+function buildGhostClone(robot, color, opacity = 0.35) {
   if (!robot || typeof robot.clone !== 'function') return null;
   const ghost = robot.clone(true);
   const material = new THREE.MeshStandardMaterial({
-    color, transparent: true, opacity: 0.35, depthWrite: false,
+    color, transparent: true, opacity, depthWrite: false,
   });
   const strays = [];
   if (typeof ghost.traverse === 'function') {
@@ -275,6 +289,22 @@ function validPose(p) {
   return validGhostJoints(p);
 }
 
+// The robot's current joint values by name (urdf-loader URDFJoint.angle), only
+// the profile's joints, or null when it has none yet — whatever drove the model
+// (the live stream or a poseSource), which is what the chronophotography trail
+// follows.
+function readModelPose(robot, jointSet) {
+  const joints = robot && robot.joints;
+  if (!joints || !jointSet) return null;
+  const pose = new Map();
+  jointSet.forEach((name) => {
+    const j = joints[name];
+    const value = j ? j.angle : undefined;
+    if (typeof value === 'number' && Number.isFinite(value)) pose.set(name, value);
+  });
+  return pose.size ? pose : null;
+}
+
 // ── Sim-object render constants ──────────────────────────────────────────────
 // Objects are sized/coloured PER TYPE from the `catalogDims` prop (the sim-stage
 // catalog seam); a type absent from the map falls back to a fixed amber cube. The
@@ -283,7 +313,8 @@ function validPose(p) {
 // panes never disagree. Held meshes turn green while carried, restore their own
 // per-type rest colour on release.
 const SIM_TABLE_SIZE_M = 0.7;
-const SIM_TABLE_COLOR = 0x2a2e34;
+// The table slab's colour is `palette.simTable` (web 0x2a2e34; Sucher
+// `--su-scr-3`, D27), read once at mount like the rest of the palette.
 // Phase-4 no-go ("Sperrzone") box rendering: a translucent red volume + a
 // brighter red wireframe, distinct from the amber sim objects.
 const ZONE_COLOR = 0xef4444;
@@ -385,6 +416,13 @@ export default function UrdfTwin({
   // applies `pose` (and the translucent `ghost`, in `color`, default the teal
   // GHOST_COLOR) whenever `version` changed. null (the default) changes nothing.
   poseSource = null,
+  // „Sucher" (M6, D15): the chronophotography trail — up to `count` fading
+  // clones of the arm left behind while it moves (one per `stepMs`, each fading
+  // over `fadeMs`). `true` = { count: 8, stepMs: 120, fadeMs: 1200 }; an object
+  // overrides. Built once the robot is fully loaded, driven by the existing
+  // render loop (no React state), off under reduced motion. false (the default)
+  // constructs nothing.
+  chronoTrail = false,
 }) {
   const rosbridgeUrl = useSelector((state) => state.ros.rosbridgeUrl);
   // Read by the release handler, which must land a mesh on the SERVER's released
@@ -463,6 +501,23 @@ export default function UrdfTwin({
   const sourceGhostMaterialRef = useRef(null);
   const sourceGhostColorRef = useRef(null);
   const sourceSeenRef = useRef(false);
+  // The chronophotography trail: `{ robot, trail, ghosts: [{ghost, material}] }`
+  // or null. Its clones share the live robot's geometries like every ghost.
+  const chronoRef = useRef(null);
+  const chronoKey = JSON.stringify(resolveChronoTrail(chronoTrail));
+  // D30: decided once when the renderer is created — a software WebGL
+  // renderer (SwiftShader, llvmpipe, Basic Render Driver) gets no trail.
+  const softwareGlRef = useRef(false);
+  const reducedMotion = useReducedMotion();
+  const reducedMotionRef = useRef(reducedMotion);
+  reducedMotionRef.current = reducedMotion;
+  // „Sucher" screen colours + glass chips (student build only), decided ONCE
+  // at mount from <html data-ui> (sucher/twinPalette.js). Without
+  // data-ui="sucher" (the web build) the colours and the chip markup are the
+  // ones this twin always had.
+  const paletteRef = useRef(null);
+  if (paletteRef.current === null) paletteRef.current = readTwinPalette();
+  const sucherChrome = paletteRef.current.sucher;
   // Latest onEndEffector callback, read by the (stable) subscription closure.
   const onEndEffectorRef = useRef(onEndEffector);
   useEffect(() => {
@@ -585,6 +640,43 @@ export default function UrdfTwin({
     sourceGhostColorRef.current = null;
   }, []);
 
+  // Remove the chronophotography trail (each clone detached first, then only
+  // its own material freed — the geometries are the live robot's).
+  const dropChrono = useCallback((scene) => {
+    const chrono = chronoRef.current;
+    if (!chrono) return;
+    chrono.ghosts.forEach(({ ghost, material }) => {
+      if (scene) scene.remove(ghost);
+      material.dispose();
+    });
+    chronoRef.current = null;
+  }, []);
+
+  // Advance the trail to `nowMs` (render loop, every frame while it exists):
+  // a new snapshot poses the oldest clone, every clone takes its fading
+  // opacity. Returns whether the frame must be painted. Reads refs only.
+  const stepChrono = useCallback((nowMs) => {
+    const chrono = chronoRef.current;
+    const robot = robotRef.current;
+    if (!chrono || !robot || chrono.robot !== robot) return false;
+    const { snap, opacities, needsRender } = chronoTick(
+      chrono.trail,
+      nowMs,
+      () => readModelPose(robot, jointSetRef.current),
+      { reduced: reducedMotionRef.current },
+    );
+    if (snap >= 0 && chrono.ghosts[snap]) {
+      const { ghost } = chrono.ghosts[snap];
+      chrono.trail.slots[snap].pose.forEach((value, name) => ghost.setJointValue(name, value));
+    }
+    chrono.ghosts.forEach(({ ghost, material }, i) => {
+      const op = opacities[i] || 0;
+      material.opacity = op;
+      ghost.visible = op > 0;
+    });
+    return needsRender;
+  }, []);
+
   // The source went away: its ghost goes with it, and a later source starts
   // from scratch.
   useEffect(() => {
@@ -670,20 +762,28 @@ export default function UrdfTwin({
     const width = mount.clientWidth || 480;
     const height = mount.clientHeight || 360;
 
+    const palette = paletteRef.current;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a1d23);
+    scene.background = new THREE.Color(palette.background);
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 100);
     camera.position.set(0.45, 0.35, 0.45);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    try {
+      softwareGlRef.current = isSoftwareRenderer(
+        webglRendererName(typeof renderer.getContext === 'function' ? renderer.getContext() : null),
+      );
+    } catch {
+      softwareGlRef.current = false;
+    }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height);
     mount.appendChild(renderer.domElement);
 
     // Soft lighting: a hemisphere fill + one key directional light.
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x33373d, 1.1);
+    const hemi = new THREE.HemisphereLight(0xffffff, palette.hemiGround, 1.1);
     scene.add(hemi);
     const key = new THREE.DirectionalLight(0xffffff, 1.4);
     key.position.set(1, 2, 1.5);
@@ -720,7 +820,7 @@ export default function UrdfTwin({
     }
 
     // Ground grid for spatial reference (1 m, 20 divisions).
-    const grid = new THREE.GridHelper(1, 20, 0x3a3f47, 0x2a2e34);
+    const grid = new THREE.GridHelper(1, 20, palette.gridCenter, palette.gridLines);
     scene.add(grid);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -793,8 +893,8 @@ export default function UrdfTwin({
     const loadingManager = new THREE.LoadingManager();
     const stlLoader = new STLLoader(loadingManager);
     const material = new THREE.MeshStandardMaterial({
-      color: LINK_COLOR,
-      metalness: 0.25,
+      color: palette.link,
+      metalness: palette.linkMetalness,
       roughness: 0.6,
     });
 
@@ -851,6 +951,11 @@ export default function UrdfTwin({
           // the mount effect does (a [] -deps effect must not list the prop).
           if (showShadowsRef.current) mesh.castShadow = true;
           done(mesh);
+          // urdf-loader gives the mesh the URDF's own <material> inside done()
+          // (the OMX/edu links: a flat grey), so the link material above only
+          // ever showed on a visual without one. The student build (D26) puts
+          // its cream back after that; the web build keeps what it always drew.
+          if (palette.sucher) mesh.material = material;
           // THE fix for (1): mark the frame dirty as each link lands, so the arm
           // also paints PROGRESSIVELY instead of all at once.
           needsRender = true;
@@ -951,8 +1056,10 @@ export default function UrdfTwin({
       // Move the arm to THIS frame's interpolated pose. While the stream carries
       // motion this dirties every frame (60 fps motion from ~30 Hz data); at rest
       // it returns false and the loop idles as before.
-      if (stepPose(performance.now())) needsRender = true;
+      const nowMs = performance.now();
+      if (stepPose(nowMs)) needsRender = true;
       if (poseSourceRef.current && stepSource()) needsRender = true;
+      if (chronoRef.current && stepChrono(nowMs)) needsRender = true;
       if (needsRender || controlsUpdated) {
         renderer.render(scene, camera);
         needsRender = false;
@@ -985,6 +1092,7 @@ export default function UrdfTwin({
       ghostRef.current = null;
       ghostMaterialRef.current = null;
       dropSourceGhost(scene);
+      dropChrono(scene);
       sourceAppliedRef.current = { robot: null, version: undefined };
       robotReadyRef.current = null;
       // Dispose every geometry/material reachable from the scene (three leaks
@@ -1021,9 +1129,9 @@ export default function UrdfTwin({
     // asset: a profile change (the capability manifest naming a different
     // urdf_asset_id) rebuilds the whole viewer with the right URDF — rare
     // (caps normally settle before the twin first opens) and the cleanup
-    // above already disposes everything. stepPose, stepSource and
-    // dropSourceGhost are stable (refs only).
-  }, [asset, stepPose, stepSource, dropSourceGhost]);
+    // above already disposes everything. stepPose, stepSource, stepChrono,
+    // dropSourceGhost and dropChrono are stable (refs only).
+  }, [asset, stepPose, stepSource, dropSourceGhost, stepChrono, dropChrono]);
 
   // ---- viewPreset (Aufnahme 2.0) --------------------------------------------
   // Declared AFTER the mount effect so the camera exists on the first run. A
@@ -1077,7 +1185,7 @@ export default function UrdfTwin({
     if (showTable && !tableMeshRef.current) {
       const tableGeo = new THREE.PlaneGeometry(SIM_TABLE_SIZE_M, SIM_TABLE_SIZE_M);
       const tableMat = new THREE.MeshStandardMaterial({
-        color: SIM_TABLE_COLOR,
+        color: paletteRef.current.simTable,
         metalness: 0.05,
         roughness: 0.95,
         side: THREE.DoubleSide,
@@ -1337,6 +1445,38 @@ export default function UrdfTwin({
     requestRenderRef.current();
   }, [ghostJoints, robotReadyTick]);
 
+  // ---- Chronophotography trail („Sucher" M6) ---------------------------------
+  // `count` clones of the LOADED robot (built at the finish-load tick, never at
+  // URDF parse), each with its own material at opacity 0 and drawn before the
+  // live arm. The render loop poses and fades them (stepChrono). A changed
+  // config or a new robot rebuilds them; the default chronoTrail=false builds
+  // nothing, and neither does a software WebGL renderer (D30).
+  useEffect(() => {
+    const cfg = chronoKey === 'null' ? null : JSON.parse(chronoKey);
+    if (chronoRef.current) {
+      dropChrono(sceneRef.current);
+      requestRenderRef.current();
+    }
+    const scene = sceneRef.current;
+    const robot = robotRef.current;
+    if (!cfg || !scene || !robot || robotReadyRef.current !== robot) return undefined;
+    if (softwareGlRef.current) return undefined; // D30: no ghosts on a software renderer
+    const ghosts = [];
+    for (let i = 0; i < cfg.count; i += 1) {
+      const built = buildGhostClone(robot, CHRONO_COLOR, 0);
+      if (!built) break;
+      if (typeof built.ghost.traverse === 'function') {
+        built.ghost.traverse((obj) => { if (obj && obj.isMesh) obj.renderOrder = -1; });
+      }
+      built.ghost.visible = false;
+      scene.add(built.ghost);
+      ghosts.push(built);
+    }
+    if (ghosts.length === 0) return undefined;
+    chronoRef.current = { robot, trail: createChronoTrail({ ...cfg, count: ghosts.length }), ghosts };
+    return () => dropChrono(sceneRef.current);
+  }, [chronoKey, robotReadyTick, dropChrono]);
+
   // ---- Phase-5: end-effector path trail ("Bahn anzeigen") -------------------
   // Lazily builds a cyan THREE.Line over a PREALLOCATED Float32Array the first
   // time the trail is enabled, then just toggles its visibility. Points are
@@ -1520,12 +1660,25 @@ export default function UrdfTwin({
     };
   }, [rosbridgeUrl, jointTopic, jointThrottleMs, stepPose, poseDriven]);
 
+  // Student build („Sucher"): the same chrome, same texts and conditions, as
+  // glass Readout-sm chips on the Screen colour (sucher.css `.su-twin`). The
+  // web build keeps its markup exactly (sucherChrome is false there).
+  const liveTone = typeof jointTopic === 'string' && jointTopic.startsWith('/sim/') ? 'info' : 'ok';
   return (
-    <div className="relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden bg-[#1a1d23]">
+    <div
+      className={sucherChrome
+        ? 'su-twin relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden'
+        : 'relative w-full h-full rounded-[var(--radius-lg)] overflow-hidden bg-[#1a1d23]'}
+    >
       <div ref={mountRef} className="absolute inset-0" />
 
       {/* Header chip */}
-      {showChrome && (
+      {showChrome && sucherChrome && (
+        <Readout size="sm" led={hasJointData ? liveTone : 'off'} className="su-read--glass su-twin__chip">
+          Follower-Modell
+        </Readout>
+      )}
+      {showChrome && !sucherChrome && (
       <div className="absolute top-2 left-2 z-10 h-7 px-2.5 rounded-full bg-white/[0.08] border border-white/15 backdrop-blur-md flex items-center gap-1.5 text-[11px] text-white/80 font-mono">
         <span
           className="w-1.5 h-1.5 rounded-full"
@@ -1536,13 +1689,17 @@ export default function UrdfTwin({
       )}
 
       {/* German "waiting for joint data" hint until the first message. */}
-      {showChrome && !hasJointData && !loadError && (
+      {showChrome && !hasJointData && !loadError && (sucherChrome ? (
+        <div className="su-twin__hint">
+          <Readout size="sm" className="su-read--glass">Wartet auf Gelenkdaten …</Readout>
+        </div>
+      ) : (
         <div className="absolute bottom-2 left-2 right-2 z-10 flex justify-center">
           <div className="px-3 py-1.5 rounded-full bg-black/55 border border-white/15 backdrop-blur-md text-[12px] text-white/85">
             Wartet auf Gelenkdaten …
           </div>
         </div>
-      )}
+      ))}
 
       {/* Asset load failure (bundled asset missing/corrupt — should not happen). */}
       {loadError && (

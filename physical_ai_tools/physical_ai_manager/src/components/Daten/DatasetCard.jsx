@@ -14,12 +14,17 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import Icon from '../icons/Icon';
+import { Led } from '../sucher';
 import SyncBadge from './SyncBadge';
 import CardMenu from './CardMenu';
 import Fill from './Fill';
 import { releasePointerFocus } from '../Record/ActionBar';
 import COPY from '../../features/editDataset/datenCopy';
 import { THUMB_RETRY_DELAYS_MS, classifyMedia, isTokenError, thumbUrl } from '../../features/editDataset/api/datenHttp';
+
+// The hint line's light (Sucher §11: a Led + the coloured text). A hint that
+// is still being worked out (`spin`) breathes.
+const HINT_LED = { ok: 'ok', warn: 'warn', bad: 'rec', online: 'off', pending: 'sig', state: 'sig' };
 
 const VARIANT = {
   primary: 'dat-btn dat-btn-sm dat-btn-primary',
@@ -144,7 +149,12 @@ export default function DatasetCard({
           </dl>
         )}
         <div className={`dat-hintline${m.hint.kind === 'warn' ? ' dat-warn' : ''}${m.hint.kind === 'ok' ? ' dat-ok' : ''}${m.hint.kind === 'bad' ? ' dat-bad' : ''}`}>
-          <Icon name={m.hint.icon} size={14} className={m.hint.spin ? 'animate-spin' : undefined} />
+          <Led
+            tone={HINT_LED[m.hint.kind] || 'off'}
+            pulse={m.hint.spin ? 'breathe' : 'none'}
+            size={8}
+            className="dat-hint-led"
+          />
           <span>{m.hint.text}</span>
         </div>
       </div>

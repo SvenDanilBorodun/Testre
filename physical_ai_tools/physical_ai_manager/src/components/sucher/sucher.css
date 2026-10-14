@@ -1,0 +1,797 @@
+/* „Sucher" — the student app's device look (spec §3–§4). Imported by App.js
+ * right after components/sucher/ui.js, so it follows Tailwind's utilities.
+ *
+ * Two kinds of rule live here:
+ *   - `.su-*` classes: the primitives (components/sucher/*). Only student code
+ *     renders them, so they need no scope.
+ *   - everything that could match DOM the teacher web build renders (generic
+ *     elements, the EbUI hook classes, the toast) is scoped under
+ *     `:root[data-ui='sucher']`, which the web build never sets.
+ *
+ * Every looping or entrance animation has a reduced-motion form (the global
+ * rule below, D10). `content:` is only ever "" (no glyphs). */
+
+/* ── Global ─────────────────────────────────────────────────────────────────── */
+
+/* Focus ring. Low specificity on purpose (0,1,0): an author's own
+ * `focus-visible:outline-none` + ring still wins. Blockly's inline editor and
+ * CodeMirror draw their own (F18). */
+:where(:root[data-ui='sucher']) :where(button, a[href], [role=button], [role=tab], [role=radio], [role=switch], [role=checkbox], summary, input, select, textarea):not(:where(.blocklyWidgetDiv *, .blocklyHtmlInput, .cm-editor *)):focus-visible {
+  outline: 2px solid var(--su-sig);
+  outline-offset: 2px;
+}
+
+/* Reduced motion stops ALL loops (D10): entrance animations with fill `both`
+ * end visible at once, loaders stand still. JS-driven motion reads
+ * useReducedMotion() as well. */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-ui='sucher'] *,
+  :root[data-ui='sucher'] *::before,
+  :root[data-ui='sucher'] *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+:root[data-ui='sucher'] ::selection { background: rgba(255, 91, 31, .22); }
+:root[data-ui='sucher'] ::-webkit-scrollbar-thumb { background: rgba(35, 35, 34, .18); }
+:root[data-ui='sucher'] ::-webkit-scrollbar-thumb:hover { background: rgba(35, 35, 34, .3); }
+:root[data-ui='sucher'] .su-screen ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .14); }
+
+/* ── Text styles ────────────────────────────────────────────────────────────── */
+
+.su-serif { font-family: 'Instrument Serif', Georgia, serif; font-weight: 400; }
+.su-serif em, .su-serif i { font-style: italic; }
+.su-dot {
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+}
+.su-lab {
+  font-family: 'Host Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--su-ink-3);
+}
+.su-screen .su-lab { color: var(--su-scr-ink-3); }
+.su-mono { font-family: var(--font-mono); }
+.su-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A well input / select / textarea (F13, Main.dc.html .field). Geometry
+ * (width, padding, height) stays with the caller. */
+.su-field {
+  background-color: var(--su-well);
+  border: 0;
+  border-radius: 10px;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2);
+  font-family: 'Host Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 14.5px;
+  font-weight: 500;
+  color: var(--su-ink);
+}
+.su-field::placeholder { color: #5F5B55; opacity: 1; }
+.su-field:disabled { color: var(--su-ink-3); cursor: not-allowed; }
+select.su-field {
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%2366635E'><path d='M5.5 7.5l4.5 4.5 4.5-4.5'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 16px 16px;
+  padding-right: 32px;
+}
+
+/* ── 4.1 Plate ──────────────────────────────────────────────────────────────── */
+
+.su-plate--plate { background: var(--su-plate); border-radius: 22px; box-shadow: var(--su-plate-shadow); }
+.su-plate--paper { background: #FFFFFF; border-radius: 4px; box-shadow: 0 0 0 1px var(--su-hair); }
+.su-plate--well { background: var(--su-well); border-radius: 12px; box-shadow: inset 0 1px 3px rgba(0, 0, 0, .22); }
+
+/* ── 4.2 Screen ─────────────────────────────────────────────────────────────── */
+
+.su-screen {
+  position: relative;
+  overflow: hidden;
+  background: var(--su-scr);
+  color: var(--su-scr-ink);
+  border-radius: 18px;
+}
+.su-screen--full { box-shadow: var(--su-bezel), inset 0 2px 12px rgba(0, 0, 0, .65); }
+.su-screen--thin { box-shadow: var(--su-bezel-thin), inset 0 2px 12px rgba(0, 0, 0, .65); }
+.su-screen--none { box-shadow: inset 0 2px 12px rgba(0, 0, 0, .65); }
+/* M1 „Sucher geht an": once, on mount. The clip reaches 12 px past the box on
+ * every side so the bezel (a box-shadow outside it) is never clipped. */
+.su-screen--power { animation: su-power 1100ms var(--su-ease-out) 150ms both; }
+@keyframes su-power {
+  0% { clip-path: inset(50% -12px 50% -12px); filter: brightness(2.6); }
+  38% { clip-path: inset(-12px -12px -12px -12px); filter: brightness(1.7); }
+  100% { clip-path: inset(-12px -12px -12px -12px); filter: none; }
+}
+
+/* ── 4.3 Key ────────────────────────────────────────────────────────────────── */
+
+.su-key {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 0;
+  white-space: nowrap;
+  cursor: pointer;
+  font-family: 'Host Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-weight: 650;
+  font-size: 14.5px;
+  line-height: 1;
+  background: linear-gradient(#FFFFFF, #EEEBE5);
+  color: var(--su-ink);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 3px 0 #C9C4BA, 0 8px 14px -10px rgba(0, 0, 0, .4);
+  /* back from a press with the spring (M2) */
+  transition: transform 160ms var(--su-ease-spring), box-shadow 160ms var(--su-ease-spring), background-color 120ms ease-out, color 120ms ease-out;
+}
+.su-key--md { height: 46px; padding: 0 18px; border-radius: 14px; }
+.su-key--sm { height: 36px; padding: 0 14px; border-radius: 11px; }
+.su-key--lg { height: 54px; padding: 0 20px; border-radius: 15px; font-weight: 700; font-size: 15px; }
+.su-key:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #C9C4BA, 0 8px 14px -10px rgba(0, 0, 0, .4);
+  transition-duration: 120ms;
+  transition-timing-function: var(--su-ease-out);
+}
+.su-key:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 1px 0 #C9C4BA;
+  transition: transform 90ms ease-out, box-shadow 90ms ease-out;
+}
+.su-key--signal {
+  background: linear-gradient(#FF7440, #FF5B1F);
+  color: #232322;
+  box-shadow: 0 0 0 1px #D9480F, 0 3px 0 #C2410C, 0 10px 18px -10px rgba(255, 91, 31, .9);
+}
+.su-key--signal:hover:not(:disabled) { box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #C2410C, 0 10px 18px -10px rgba(255, 91, 31, .9); }
+.su-key--signal:active:not(:disabled) { box-shadow: 0 0 0 1px #D9480F, 0 1px 0 #C2410C; }
+.su-key--dark {
+  background: linear-gradient(#3A3A38, #262624);
+  color: #F3EDE2;
+  box-shadow: 0 0 0 1px #11110F, 0 3px 0 #0E0E0D;
+}
+.su-key--dark:hover:not(:disabled) { box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #0E0E0D; }
+.su-key--dark:active:not(:disabled) { box-shadow: 0 0 0 1px #11110F, 0 1px 0 #0E0E0D; }
+.su-key--danger {
+  background: linear-gradient(#C62A1F, #B42318);
+  color: #FFFFFF;
+  box-shadow: 0 0 0 1px #8F1B12, 0 3px 0 #8F1B12;
+}
+.su-key--danger:hover:not(:disabled) { box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #8F1B12; }
+.su-key--danger:active:not(:disabled) { box-shadow: 0 0 0 1px #8F1B12, 0 1px 0 #8F1B12; }
+.su-key--flat {
+  background: transparent;
+  color: var(--su-sig-text);
+  box-shadow: none;
+}
+.su-key--flat:hover:not(:disabled) { transform: none; background: rgba(35, 35, 34, .06); box-shadow: none; }
+.su-key--flat:active:not(:disabled) { transform: translateY(1px); box-shadow: none; }
+.su-key:disabled {
+  background: #DEDAD2;
+  color: #8A867E;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2);
+  cursor: not-allowed;
+  transform: none;
+}
+.su-key:focus-visible { outline: 2px solid var(--su-sig); outline-offset: 3px; }
+
+.su-kbd {
+  font-family: 'Host Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, .08);
+  color: inherit;
+}
+.su-key--dark .su-kbd { background: rgba(255, 255, 255, .12); }
+
+/* ── 4.4 RoundKey ───────────────────────────────────────────────────────────── */
+
+.su-rkey {
+  appearance: none;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--su-ink-2);
+  cursor: pointer;
+}
+.su-rkey__disc {
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 35%, #FFFFFF, #ECE9E3 70%);
+  color: var(--su-ink-2);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 3px 0 #C9C4BA, 0 8px 14px -8px rgba(0, 0, 0, .35);
+  transition: transform 160ms var(--su-ease-spring), box-shadow 160ms var(--su-ease-spring);
+}
+.su-rkey--on .su-rkey__disc {
+  background: radial-gradient(circle at 50% 35%, #FF7B47, #FF5B1F 70%);
+  color: #232322;
+  box-shadow: 0 0 0 1px #D9480F, 0 3px 0 #C2410C, 0 8px 16px -8px rgba(255, 91, 31, .8);
+}
+.su-rkey:hover:not(:disabled) .su-rkey__disc {
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #C9C4BA, 0 8px 14px -8px rgba(0, 0, 0, .35);
+  transition-duration: 120ms;
+  transition-timing-function: var(--su-ease-out);
+}
+.su-rkey--on:hover:not(:disabled) .su-rkey__disc { box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #C2410C, 0 8px 16px -8px rgba(255, 91, 31, .8); }
+.su-rkey:active:not(:disabled) .su-rkey__disc {
+  transform: translateY(2px);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 1px 0 #C9C4BA;
+  transition: transform 90ms ease-out, box-shadow 90ms ease-out;
+}
+.su-rkey--on:active:not(:disabled) .su-rkey__disc { box-shadow: 0 0 0 1px #D9480F, 0 1px 0 #C2410C; }
+.su-rkey:disabled { cursor: not-allowed; }
+.su-rkey:disabled .su-rkey__disc {
+  background: #DEDAD2;
+  color: #8A867E;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2);
+}
+/* The ring goes round the disc, not round the whole column. */
+.su-rkey:focus-visible { outline: none; }
+.su-rkey:focus-visible .su-rkey__disc { outline: 2px solid var(--su-sig); outline-offset: 3px; }
+.su-rkey__label {
+  font-family: 'Host Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  color: var(--su-ink-2);
+}
+.su-rkey--on .su-rkey__label { color: var(--su-ink); }
+
+/* ── 4.5 Led ────────────────────────────────────────────────────────────────── */
+
+.su-led {
+  display: inline-block;
+  flex: none;
+  border-radius: 50%;
+  background: var(--su-led-off);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, .25);
+}
+.su-led--ok { background: var(--su-ok); box-shadow: 0 0 0 3px rgba(61, 190, 90, .18), 0 0 10px rgba(61, 190, 90, .8); }
+.su-led--sig { background: var(--su-sig); box-shadow: 0 0 0 3px rgba(255, 91, 31, .2), 0 0 10px rgba(255, 91, 31, .85); }
+.su-led--warn { background: var(--su-warn); box-shadow: 0 0 0 3px rgba(245, 165, 36, .2), 0 0 10px rgba(245, 165, 36, .8); }
+.su-led--rec { background: var(--su-rec); box-shadow: 0 0 0 3px rgba(255, 59, 48, .2), 0 0 12px rgba(255, 59, 48, .9); }
+.su-led--info { background: var(--su-info); box-shadow: 0 0 0 3px rgba(142, 180, 214, .2), 0 0 10px rgba(142, 180, 214, .8); }
+/* M4 „Lämpchen atmet" */
+.su-led--breathe { animation: su-breathe 2400ms ease-in-out infinite; }
+.su-led--blink { animation: su-blink 1000ms steps(1, end) infinite; }
+@keyframes su-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+@keyframes su-blink { 50% { opacity: .2; } }
+
+/* ── 4.6 Readout (+ rolling digits) ─────────────────────────────────────────── */
+
+.su-read {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--su-read);
+  color: var(--su-read-ink);
+  border-radius: 12px;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, .6), 0 0 0 1px #11110F;
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+}
+.su-read--sm { height: 28px; padding: 0 10px; font-size: 14px; gap: 8px; border-radius: 9px; }
+.su-read--md { height: 40px; padding: 0 14px; font-size: 20px; }
+.su-read--lg { height: 56px; padding: 0 18px; font-size: 28px; border-radius: 14px; }
+.su-read--xl { height: 84px; padding: 0 22px; font-size: 48px; border-radius: 16px; }
+.su-read--sig { color: var(--su-sig-on-dark); }
+.su-read--ok { color: var(--su-ok); }
+.su-read--warn { color: var(--su-warn); }
+.su-read--rec { color: var(--su-rec); }
+.su-read__text { display: inline-flex; align-items: baseline; gap: .35em; }
+.su-readout { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 7px; }
+
+/* The 3D twin's chrome (UrdfTwin, §12: the „Follower-Modell" chip as a glass
+ * Readout-sm). UrdfTwin renders these classes only under data-ui="sucher"
+ * (twinPalette.js, decided at mount); the web build keeps its own markup. */
+:root[data-ui='sucher'] .su-twin { background: var(--su-scr); }
+:root[data-ui='sucher'] .su-read--glass {
+  background: rgba(20, 18, 16, .78);
+  color: var(--su-scr-ink);
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--su-scr-line);
+  backdrop-filter: blur(6px);
+}
+:root[data-ui='sucher'] .su-twin__chip {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 10;
+  max-width: calc(100% - 24px);
+}
+:root[data-ui='sucher'] .su-twin__hint {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 10;
+  display: flex;
+  justify-content: center;
+}
+/* a narrow pane wraps the sentence instead of clipping it */
+:root[data-ui='sucher'] .su-twin__hint .su-read {
+  max-width: 100%;
+  height: auto;
+  min-height: 28px;
+  padding-block: 6px;
+  white-space: normal;
+  text-align: center;
+  line-height: 1.15;
+}
+
+/* M5 „Zählwerk" / M10: a column per digit, a strip of 0–9 in ONE text node,
+ * one character per line (1ch wide, break-all), rolled by --from → --to. */
+.su-roll--on { position: relative; display: inline-block; }
+.su-roll__cols { display: inline-flex; vertical-align: top; height: 1em; overflow: hidden; line-height: 1; }
+/* 1ch + the readouts' .02em letter-spacing, so a rolling digit sits exactly where the bare one does */
+.su-roll__col { display: block; width: calc(1ch + .02em); height: 1em; overflow: hidden; }
+.su-roll__strip {
+  display: block;
+  width: 1ch;
+  line-height: 1em;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  transform: translateY(calc(var(--to) * -1em));
+  animation: su-roll var(--dur, 520ms) var(--su-ease-out) var(--delay, 0ms) both;
+}
+.su-roll__col--new .su-roll__strip { animation-name: su-roll, su-roll-in; }
+@keyframes su-roll {
+  from { transform: translateY(calc(var(--from) * -1em)); }
+  to { transform: translateY(calc(var(--to) * -1em)); }
+}
+@keyframes su-roll-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* ── 4.7 Stepper (Main.dc.html .stpc / .stpb) ───────────────────────────────── */
+
+.su-stp {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: #EFECE6;
+  box-shadow: inset 0 0 0 1px #DEDAD2;
+  min-width: 0;
+}
+.su-stp .sl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'Host Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 12px;
+  font-weight: 650;
+  color: #4D4B47;
+}
+.su-stp .sl i { width: 8px; height: 8px; border-radius: 2px; flex: none; background: var(--c, var(--su-ink-3)); }
+.su-stp .ctl { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.su-stp .ctl button {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  background: linear-gradient(#FFFFFF, #EEEBE5);
+  color: #4D4B47;
+  box-shadow: 0 0 0 1px #CFCAC0, 0 2px 0 #C9C4BA;
+  cursor: pointer;
+  transition: transform 160ms var(--su-ease-spring), box-shadow 160ms var(--su-ease-spring);
+}
+.su-stp .ctl button:hover:not(:disabled) {
+  color: #232322;
+  box-shadow: 0 0 0 1px #FF9A6B, 0 2px 0 #C9C4BA;
+  transition-duration: 120ms;
+  transition-timing-function: var(--su-ease-out);
+}
+.su-stp .ctl button:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 0 0 #C9C4BA;
+  transition: transform 90ms ease-out, box-shadow 90ms ease-out;
+}
+.su-stp .ctl button:focus-visible { outline: 2px solid var(--su-sig); outline-offset: 2px; }
+.su-stp .ctl button:disabled {
+  background: #E4E0D8;
+  color: #A9A398;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .15);
+  cursor: not-allowed;
+}
+.su-stp output {
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  font-size: 19px;
+  line-height: 1;
+  color: #232322;
+  letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: ns-resize;
+}
+.su-stp output small {
+  font-family: 'Host Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  color: #66635E;
+  margin-left: 3px;
+}
+
+/* ── 4.8 Segmented ──────────────────────────────────────────────────────────── */
+
+.su-seg { display: inline-flex; padding: 3px; border-radius: 999px; flex: none; }
+.su-seg > button {
+  appearance: none;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: 'Host Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  transition: background-color 160ms var(--su-ease-out), color 160ms var(--su-ease-out), box-shadow 160ms var(--su-ease-out);
+}
+.su-seg--sm > button { height: 30px; }
+.su-seg--md > button { height: 34px; }
+.su-seg > button:disabled { opacity: .45; cursor: not-allowed; }
+.su-seg > button:focus-visible { outline: 2px solid var(--su-sig); outline-offset: 3px; }
+
+/* light (Main.dc.html .seg) */
+.su-seg--light { background: var(--su-well); box-shadow: inset 0 1px 3px rgba(0, 0, 0, .25); }
+.su-seg--light > button {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--su-ink-2);
+}
+.su-seg--light > button:hover:not(:disabled):not([aria-pressed='true']) { color: var(--su-ink); }
+.su-seg--light > button[aria-pressed='true'] {
+  background: linear-gradient(#FFFFFF, #ECE9E3);
+  color: var(--su-ink);
+  box-shadow: 0 0 0 1px #CFCAC0, 0 2px 4px rgba(0, 0, 0, .18);
+}
+.su-seg--accent > button[aria-pressed='true'] {
+  background: linear-gradient(#FF7440, #FF5B1F);
+  color: #232322;
+  box-shadow: 0 0 0 1px #D9480F, 0 2px 4px rgba(194, 65, 12, .35);
+}
+/* dark (Aufnahme.dc.html .seg) and glass (Startseite.dc.html .seg) */
+.su-seg--dark { background: #24201D; box-shadow: inset 0 0 0 1px #34302B; }
+.su-seg--glass {
+  background: rgba(36, 32, 29, .85);
+  box-shadow: inset 0 0 0 1px #34302B;
+  backdrop-filter: blur(6px);
+}
+.su-seg--dark > button,
+.su-seg--glass > button { font-size: 12.5px; font-weight: 600; color: #C9C1B5; }
+.su-seg--glass.su-seg--md > button { font-size: 13px; }
+.su-seg--dark > button:hover:not(:disabled):not([aria-pressed='true']),
+.su-seg--glass > button:hover:not(:disabled):not([aria-pressed='true']) { color: #F2EDE4; }
+.su-seg--dark > button[aria-pressed='true'],
+.su-seg--glass > button[aria-pressed='true'] { background: #F2EDE4; color: #141210; }
+
+/* ── 4.9 Lichtband (M7) ─────────────────────────────────────────────────────── */
+
+.su-band {
+  --h: 0;
+  --full: 0;
+  --fade: 1;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.su-band__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  font-family: 'Host Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.su-band__dot { width: 9px; height: 9px; background: var(--band-c); box-shadow: 0 0 10px var(--band-c); }
+.su-band__track { position: relative; flex: 1; min-width: 0; display: flex; height: 16px; align-items: center; }
+.su-band__led { position: relative; flex: 1; display: grid; place-items: center; height: 100%; }
+.su-band__led::before,
+.su-band__led::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  grid-area: 1 / 1;
+}
+.su-band__led::before { background: #2B2825; box-shadow: inset 0 1px 1px rgba(0, 0, 0, .6); }
+/* lit when i ≤ h; the older ones glow out by .07 a light, never below .38 */
+.su-band__led::after {
+  background: var(--band-c);
+  box-shadow: 0 0 6px var(--band-c);
+  opacity: calc(clamp(0, (var(--h) - var(--i) + 1) * 1000, 1) * max(.38, 1 - (var(--h) - var(--i)) * .07 * var(--fade) * (1 - var(--full))));
+  transition: opacity 250ms var(--su-ease-out);
+}
+.su-band__head {
+  position: absolute;
+  top: 50%;
+  left: calc((var(--h) + .5) / var(--count) * 100%);
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: #FFF4EC;
+  box-shadow: 0 0 0 2px var(--band-c), 0 0 12px var(--band-c);
+  transform: scale(1.3);
+  opacity: calc(1 - var(--full));
+  transition: left 180ms var(--su-ease-spring);
+  pointer-events: none;
+}
+.su-band--reduced .su-band__head { display: none; }
+.su-band__remain {
+  flex: none;
+  min-width: 96px;
+  text-align: right;
+  white-space: nowrap;
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  font-size: 17px;
+  letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+}
+
+/* ── 4.10 RobotIcon ─────────────────────────────────────────────────────────── */
+
+.su-robot { display: inline-block; position: relative; flex: none; overflow: hidden; }
+/* max-width beats Preflight's `img { max-width: 100% }`, which would squeeze
+ * the 24-frame strip into one frame's box. */
+.su-robot img { display: block; height: 100%; width: auto; max-width: none; user-select: none; }
+.su-robot--animate img { animation: su-sprite 2400ms steps(24) infinite; }
+.su-robot--dim { opacity: .35; }
+@keyframes su-sprite { to { transform: translateX(-100%); } }
+
+/* ── 4.11 BrandMark ─────────────────────────────────────────────────────────── */
+
+.su-brand {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  border-radius: 50%;
+  background: var(--su-scr);
+  box-shadow: 0 0 0 3px #2B2825, 0 0 0 4px #48433C;
+}
+.su-brand__bars {
+  position: absolute;
+  left: 50%;
+  top: 30%;
+  height: 40%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: flex-end;
+  gap: calc(var(--s) * .06);
+}
+.su-brand__bar { display: block; width: calc(var(--s) * .09); border-radius: 1px; }
+.su-brand__bar--0 { background: #5A554D; }
+.su-brand__bar--1 { background: #7A746B; }
+.su-brand__bar--2 { background: #9C9488; }
+.su-brand__bar--3 { background: var(--su-sig); }
+
+/* ── HeartbeatStatus (§6.2) ─────────────────────────────────────────────────── */
+
+.su-hb__latency { color: var(--su-sig-on-dark); }
+
+/* ── Toasts (§6.3, D9): a paper slip out of a dark slot ─────────────────────── */
+
+:root[data-ui='sucher'] .su-toast { position: relative; }
+:root[data-ui='sucher'] .su-toast::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  right: -6px;
+  top: -8px;
+  height: 8px;
+  border-radius: 4px;
+  background: #232322;
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, .6);
+}
+
+/* ── EbUI hooks (§3.4): paint only, never geometry ──────────────────────────── */
+
+/* Btn — key paint (§4.3) */
+:root[data-ui='sucher'] .eb-btn {
+  border-radius: 12px;
+  font-family: var(--font-ui);
+  font-weight: 650;
+  filter: none;
+  transition: transform 160ms var(--su-ease-spring), box-shadow 160ms var(--su-ease-spring), background-color 120ms ease-out, color 120ms ease-out;
+}
+:root[data-ui='sucher'] .eb-btn--sm { border-radius: 10px; }
+:root[data-ui='sucher'] .eb-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  transition-duration: 120ms;
+  transition-timing-function: var(--su-ease-out);
+}
+:root[data-ui='sucher'] .eb-btn:active:not(:disabled) {
+  transform: translateY(2px);
+  transition: transform 90ms ease-out, box-shadow 90ms ease-out;
+}
+:root[data-ui='sucher'] .eb-btn--primary {
+  background: linear-gradient(#FF7440, #FF5B1F);
+  color: #232322;
+  border-color: transparent;
+  box-shadow: 0 0 0 1px #D9480F, 0 3px 0 #C2410C, 0 10px 18px -10px rgba(255, 91, 31, .9);
+}
+:root[data-ui='sucher'] .eb-btn--primary:hover:not(:disabled) { box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #C2410C, 0 10px 18px -10px rgba(255, 91, 31, .9); }
+:root[data-ui='sucher'] .eb-btn--primary:active:not(:disabled) { box-shadow: 0 0 0 1px #D9480F, 0 1px 0 #C2410C; }
+:root[data-ui='sucher'] .eb-btn--secondary {
+  background: linear-gradient(#FFFFFF, #EEEBE5);
+  color: var(--su-ink);
+  border-color: transparent;
+  box-shadow: 0 0 0 1px #CFCAC0, 0 3px 0 #C9C4BA, 0 8px 14px -10px rgba(0, 0, 0, .4);
+}
+:root[data-ui='sucher'] .eb-btn--secondary:hover:not(:disabled) { box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #C9C4BA, 0 8px 14px -10px rgba(0, 0, 0, .4); }
+:root[data-ui='sucher'] .eb-btn--secondary:active:not(:disabled) { box-shadow: 0 0 0 1px #CFCAC0, 0 1px 0 #C9C4BA; }
+:root[data-ui='sucher'] .eb-btn--ghost {
+  background: transparent;
+  color: var(--su-ink-2);
+  border-color: transparent;
+  box-shadow: none;
+}
+:root[data-ui='sucher'] .eb-btn--ghost:hover:not(:disabled) { transform: none; background: var(--su-well); color: var(--su-ink); }
+:root[data-ui='sucher'] .eb-btn--ghost:active:not(:disabled) { transform: translateY(1px); }
+:root[data-ui='sucher'] .eb-btn--danger {
+  background: linear-gradient(#C62A1F, #B42318);
+  color: #FFFFFF;
+  border-color: transparent;
+  box-shadow: 0 0 0 1px #8F1B12, 0 3px 0 #8F1B12;
+}
+:root[data-ui='sucher'] .eb-btn--danger:hover:not(:disabled) { box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #8F1B12; }
+:root[data-ui='sucher'] .eb-btn--danger:active:not(:disabled) { box-shadow: 0 0 0 1px #8F1B12, 0 1px 0 #8F1B12; }
+:root[data-ui='sucher'] .eb-btn--dark {
+  background: linear-gradient(#3A3A38, #262624);
+  color: #F3EDE2;
+  border-color: transparent;
+  box-shadow: 0 0 0 1px #11110F, 0 3px 0 #0E0E0D;
+}
+:root[data-ui='sucher'] .eb-btn--dark:hover:not(:disabled) { box-shadow: 0 0 0 1px #FF9A6B, 0 3px 0 #0E0E0D; }
+:root[data-ui='sucher'] .eb-btn--dark:active:not(:disabled) { box-shadow: 0 0 0 1px #11110F, 0 1px 0 #0E0E0D; }
+/* Beats Tailwind's disabled:opacity-50 (F17): the disabled key paint instead. */
+:root[data-ui='sucher'] .eb-btn:disabled {
+  opacity: 1;
+  background: #DEDAD2;
+  color: #8A867E;
+  border-color: transparent;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2);
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Card — a plate */
+:root[data-ui='sucher'] .eb-card {
+  background: var(--su-plate);
+  border-color: transparent;
+  border-radius: 22px;
+  box-shadow: var(--su-plate-shadow);
+}
+:root[data-ui='sucher'] .eb-card__head { border-bottom-color: transparent; }
+:root[data-ui='sucher'] .eb-card__title {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: -.01em;
+  color: var(--su-ink);
+}
+:root[data-ui='sucher'] .eb-card__title--serif {
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-weight: 400;
+  font-size: 30px;
+  line-height: 1;
+  letter-spacing: 0;
+}
+:root[data-ui='sucher'] .eb-card__title--serif em { font-style: italic; }
+:root[data-ui='sucher'] .eb-card__sub,
+:root[data-ui='sucher'] .eb-section__eyebrow,
+:root[data-ui='sucher'] .eb-stat__label {
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--su-ink-3);
+}
+
+/* Pill — a chip */
+:root[data-ui='sucher'] .eb-pill {
+  border-radius: 999px;
+  background: var(--su-well);
+  border-color: transparent;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .18);
+  font-family: var(--font-ui);
+  font-weight: 650;
+  font-size: 12px;
+}
+:root[data-ui='sucher'] .eb-pill--neutral { color: var(--su-ink-2); }
+:root[data-ui='sucher'] .eb-pill--glass {
+  background: rgba(12, 11, 10, .8);
+  color: var(--su-scr-ink);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08);
+}
+:root[data-ui='sucher'] .eb-pill__dot { box-shadow: 0 0 6px currentColor; }
+
+/* SectionHeader — serif title in four sizes */
+:root[data-ui='sucher'] .eb-section__title {
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-weight: 400;
+  line-height: .95;
+  letter-spacing: -.01em;
+  color: var(--su-ink);
+}
+:root[data-ui='sucher'] .eb-section__title em { font-style: italic; }
+:root[data-ui='sucher'] .eb-section--xl .eb-section__title { font-size: clamp(36px, 5vw, 72px); }
+:root[data-ui='sucher'] .eb-section--lg .eb-section__title { font-size: clamp(36px, 5vw, 64px); }
+:root[data-ui='sucher'] .eb-section--md .eb-section__title { font-size: clamp(36px, 5vw, 60px); }
+:root[data-ui='sucher'] .eb-section--sm .eb-section__title { font-size: clamp(36px, 5vw, 52px); }
+:root[data-ui='sucher'] .eb-section__desc { font-size: 15px; color: var(--su-ink-2); }
+
+/* Stat / StatBig — Doto values */
+:root[data-ui='sucher'] .eb-stat__value {
+  font-family: 'Doto', ui-monospace, monospace;
+  font-weight: 800;
+  letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Progress — a well track; the fill keeps its tone */
+:root[data-ui='sucher'] .eb-progress { background: var(--su-well); box-shadow: inset 0 1px 2px rgba(0, 0, 0, .2); }
+
+:root[data-ui='sucher'] .eb-divider { background: var(--su-hair); }
+
+/* Avatar — a dark disc with a serif initial */
+:root[data-ui='sucher'] .eb-avatar {
+  --eb-avatar-bg: #232322;
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-style: italic;
+  font-weight: 400;
+  color: var(--su-plate);
+}

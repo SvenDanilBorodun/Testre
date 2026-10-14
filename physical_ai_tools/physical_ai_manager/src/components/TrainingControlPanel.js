@@ -16,7 +16,7 @@
 
 import React from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import clsx from 'clsx';
+import { Key } from './sucher';
 import toast from 'react-hot-toast';
 import { setIsTraining, triggerCloudJobsRefresh } from '../features/training/trainingSlice';
 import { setQuota } from '../features/auth/authSlice';
@@ -34,34 +34,6 @@ export default function TrainingControlPanel() {
   const trainingsUsed = useSelector((state) => state.auth.trainingsUsed);
 
   const remaining = trainingCredits - trainingsUsed;
-
-  const classContainer = clsx('flex', 'items-center', 'justify-center', 'p-2', 'gap-6', 'm-2');
-
-  const classButton = clsx(
-    'h-full',
-    'px-8',
-    'py-3',
-    'rounded-2xl',
-    'font-semibold',
-    'text-lg',
-    'transition-all',
-    'duration-200',
-    'transform',
-    'active:scale-95',
-    'shadow-lg'
-  );
-
-  const classStartButton = clsx(
-    classButton,
-    'bg-teal-600',
-    'text-white',
-    'hover:bg-teal-700',
-    'hover:shadow-xl',
-    'disabled:bg-gray-400',
-    'disabled:cursor-not-allowed',
-    'disabled:hover:bg-gray-400',
-    'disabled:hover:shadow-lg'
-  );
 
   const handleStartTraining = async () => {
     if (!datasetRepoId) {
@@ -119,17 +91,19 @@ export default function TrainingControlPanel() {
   };
 
   return (
-    <div className={classContainer}>
-      <button
+    <div className="flex items-center justify-end gap-4 flex-wrap">
+      <Key
+        variant="signal"
+        size="lg"
+        icon="play"
         onClick={handleStartTraining}
-        className={classStartButton}
         disabled={isTraining || remaining <= 0}
       >
         {isTraining ? 'Wird gesendet...' : 'Training starten'}
-      </button>
+      </Key>
 
       {remaining <= 0 && (
-        <span className="text-sm text-red-500 font-medium">
+        <span className="su-trn-nocredit">
           Kein Guthaben mehr
         </span>
       )}

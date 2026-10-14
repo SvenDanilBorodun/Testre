@@ -19,20 +19,24 @@ import { useSelector, useDispatch } from 'react-redux';
 import clsx from 'clsx';
 import { setHeartbeatStatus } from '../features/tasks/taskSlice';
 import { usePiMode, PI_PORT_BLOCKED_HINT } from '../utils/piMode';
+import Led from './sucher/Led';
 
 /**
  * HeartbeatStatus Component
  *
- * Displays ROS connection status as a compact pill with a live blinking dot.
- * Matches the EduBotics design: small rounded chip, mono latency badge.
+ * Displays the ROS connection status as a „Sucher" readout: a light (green and
+ * breathing while connected, amber on a timeout, red when disconnected), the
+ * status word and the latency („VERBUNDEN 2MS"; upper case comes from CSS).
+ * `size`: 'sm' | 'md' (default; the older 'small' / 'medium' / 'large' map onto
+ * them). `dark` is kept for its callers and has no visual effect.
  */
 export default function HeartbeatStatus({
   timeoutMs = 3000,
   disconnectTimeoutMs = 10000,
   className = '',
   showLabel = true,
-  dark = false,
-  size = 'medium',
+  dark = false, // kept for its callers; no visual effect in the readout look
+  size = 'md',
 }) {
   const dispatch = useDispatch();
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
@@ -57,20 +61,23 @@ export default function HeartbeatStatus({
     switch (heartbeatStatus) {
       case 'connected':
         return {
-          color: 'var(--success)',
+          led: 'ok',
+          pulse: 'breathe',
           label: 'Verbunden',
           tone: 'success',
         };
       case 'timeout':
         return {
-          color: 'var(--amber)',
+          led: 'warn',
+          pulse: 'none',
           label: 'Zeitüberschreitung',
           tone: 'amber',
         };
       case 'disconnected':
       default:
         return {
-          color: 'var(--danger)',
+          led: 'rec',
+          pulse: 'none',
           label: 'Getrennt',
           tone: 'danger',
         };
@@ -126,49 +133,20 @@ export default function HeartbeatStatus({
       ? `${Math.min(999, latencyMs)}ms`
       : '—';
 
-  const sizeClass =
-    size === 'small' ? 'h-7 px-2.5 text-[10px]' : size === 'large' ? 'h-9 px-3.5 text-xs' : 'h-8 px-3 text-[11px]';
-
-  const containerClasses = clsx(
-    'inline-flex items-center gap-2 rounded-full font-mono',
-    sizeClass,
-    dark
-      ? 'bg-white/[0.08] border border-white/15 text-white/80'
-      : 'bg-white border border-[var(--line)] text-[var(--ink-2)]',
-    className
-  );
-
-  const dotWrap = (
-    <span className="relative inline-flex">
-      <span
-        className="w-2 h-2 rounded-full block"
-        style={{ background: statusInfo.color }}
-      />
-      {heartbeatStatus === 'connected' && (
-        <span
-          className="absolute inset-0 w-2 h-2 rounded-full eb-blink"
-          style={{ background: statusInfo.color }}
-        />
-      )}
-    </span>
-  );
+  const small = size === 'sm' || size === 'small';
 
   const pill = (
-    <div className={containerClasses} title={portBlocked ? PI_PORT_BLOCKED_HINT : undefined}>
-      {dotWrap}
+    <div
+      className={clsx('su-read', small ? 'su-read--sm' : 'su-read--md', 'su-hb', className)}
+      title={portBlocked ? PI_PORT_BLOCKED_HINT : undefined}
+    >
+      <Led tone={statusInfo.led} pulse={statusInfo.pulse} size={small ? 8 : 9} />
       {showLabel && <span className="whitespace-nowrap">{statusInfo.label}</span>}
-      <span
-        className={clsx(
-          'px-1.5 py-0.5 rounded text-[10px]',
-          dark ? 'bg-white/10' : 'bg-[var(--bg-sunk)]'
-        )}
-      >
-        {shownLatency}
-      </span>
+      <span className="su-hb__latency">{shownLatency}</span>
     </div>
   );
 
-  // Non-Pi (and the healthy Pi paths) keep the bare pill — byte-identical.
+  // Non-Pi (and the healthy Pi paths) keep the bare readout.
   if (!portBlocked) return pill;
 
   // Pi port-blocked: pair the „Getrennt" pill with the network hint.

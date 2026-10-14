@@ -46,6 +46,19 @@
 }
 :root[data-ui='sucher'] .su-studio .st-title em { font-style: italic; }
 :root[data-ui='sucher'] .su-studio .st-hint { font-size: 14px; color: var(--su-ink-2); }
+/* from lg up the subtitle shares the title row with the badge and the
+ * actions: 13 px, and up to two lines (beside the 40 px serif title) instead
+ * of an ellipsis; still its own shrinking flex item, never hidden. */
+@media (min-width: 1024px) {
+  :root[data-ui='sucher'] .su-studio .st-hint {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    font-size: 13px;
+    line-height: 1.3;
+  }
+}
 :root[data-ui='sucher'] .su-studio .st-reason { font-size: 12px; color: var(--su-ink-2); }
 /* ModeBadge (colours stay its own inline ones; the type is the device's) */
 :root[data-ui='sucher'] .su-studio [data-testid='mode-badge'] {

@@ -5,8 +5,19 @@
 
 :where([data-ui='sucher']) .su-sys-eyebrow { color: var(--su-sig-text); }
 :where([data-ui='sucher']) .su-sys-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: start; }
+/* D29: the address plate is a grid item of its own. Below 1500 px it takes the
+ * full row above the two columns (so the address stays large); from 1500 px
+ * it heads the first column and the second column spans both rows (the 1fr
+ * row takes the second column's extra height, never a gap under the plate). */
 @media (min-width: 1200px) {
   :where([data-ui='sucher']) .su-sys-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+  :where([data-ui='sucher']) .su-sys-grid > .su-sys-addr { grid-column: 1 / -1; }
+}
+@media (min-width: 1500px) {
+  :where([data-ui='sucher']) .su-sys-grid { grid-template-rows: auto 1fr; }
+  :where([data-ui='sucher']) .su-sys-grid > .su-sys-addr { grid-column: 1; grid-row: 1; }
+  :where([data-ui='sucher']) .su-sys-grid > .su-sys-col--a { grid-column: 1; grid-row: 2; }
+  :where([data-ui='sucher']) .su-sys-grid > .su-sys-col--b { grid-column: 2; grid-row: 1 / span 2; }
 }
 :where([data-ui='sucher']) .su-sys-col { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
 :where([data-ui='sucher']) .su-sys-card { min-width: 0; }
@@ -41,7 +52,21 @@
   box-shadow: inset 0 0 0 1px #34302B;
 }
 :where([data-ui='sucher']) .su-sys-addr__disc .su-led { width: 20px !important; height: 20px !important; }
-:where([data-ui='sucher']) .su-sys-addr__ip { display: block; font-size: clamp(26px, 2.4vw, 40px); line-height: 1; color: var(--su-scr-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The address is never cut (D29): its text box is a size container and the
+ * Doto size is also capped by what its own length needs (Doto advances about
+ * .62 em per character; --su-ip-len is set from the address's length). */
+:where([data-ui='sucher']) .su-sys-addr__screen > span:last-child { flex: 1 1 0; min-width: 0; container-type: inline-size; }
+:where([data-ui='sucher']) .su-sys-addr__ip {
+  display: block;
+  --su-ip-size: clamp(26px, 2.4vw, 40px);
+  font-size: min(var(--su-ip-size), calc(100cqi / (var(--su-ip-len, 15) * .64)));
+  line-height: 1;
+  color: var(--su-scr-ink);
+  white-space: nowrap;
+}
+@media (min-width: 768px) and (max-width: 1499px) {
+  :where([data-ui='sucher']) .su-sys-addr__ip { --su-ip-size: 40px; }
+}
 :where([data-ui='sucher']) .su-sys-addr__host { display: block; margin-top: 6px; font-family: var(--font-mono); font-size: 13px; color: var(--su-scr-ink-3); }
 :where([data-ui='sucher']) .su-sys-addr__desc { margin: 0; font-size: 13px; line-height: 1.45; color: var(--su-ink-2); }
 :where([data-ui='sucher']) .su-sys-addr__chips {

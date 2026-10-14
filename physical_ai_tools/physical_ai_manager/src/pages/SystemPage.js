@@ -556,8 +556,9 @@ export default function SystemPage() {
         )}
 
         <div className="su-sys-grid">
-        <div className="su-sys-col">
-        {/* Pi-IP-Anzeige + Verbindungszustand */}
+        {/* Pi-IP-Anzeige + Verbindungszustand. A grid item of its own (D29):
+            below 1500 px it takes the full row above both columns, so the
+            address stays large; from 1500 px it heads the first column. */}
         <Card className="su-sys-card su-sys-addr" padded={false}>
           <div className="su-sys-addr__main">
             <div className="su-lab">
@@ -566,7 +567,10 @@ export default function SystemPage() {
             <Screen className="su-sys-addr__screen">
               <span className="su-sys-addr__disc" aria-hidden="true"><Led tone="sig" size={10} /></span>
               <span className="min-w-0">
-                <span className="su-sys-addr__ip su-dot">
+                <span
+                  className="su-sys-addr__ip su-dot"
+                  style={{ '--su-ip-len': (lanIp || '—').length }}
+                >
                   {lanIp || '—'}
                 </span>
                 {hostname && (
@@ -595,6 +599,8 @@ export default function SystemPage() {
             </StatusChip>
           </div>
         </Card>
+
+        <div className="su-sys-col su-sys-col--a">
 
         {/* Modus — Robotertyp + Cloud-Modus.
             ONE card, deliberately: the Windows twin puts both in a single
@@ -872,7 +878,7 @@ export default function SystemPage() {
         )}
 
         </div>
-        <div className="su-sys-col">
+        <div className="su-sys-col su-sys-col--b">
         {/* Umgebung starten / stoppen */}
         <Card title="Roboter-Umgebung" titleStyle="serif" className="su-sys-card">
           <p className="text-sm text-[var(--ink-2)] mb-3">

@@ -459,7 +459,7 @@ export default function DatasetSelector() {
             Datensatz auswählen
           </button>
           {!rosConnected && (
-            <p className="text-xs text-amber-600 bg-amber-50 rounded-md p-2">
+            <p className="text-xs text-amber-700 bg-amber-50 rounded-md p-2">
               Roboter-Umgebung nicht verbunden. Verwende die manuelle Eingabe oder starte die Umgebung, um lokale Datensätze zu durchsuchen.
             </p>
           )}

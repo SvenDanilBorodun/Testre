@@ -491,6 +491,12 @@
  * line (CLAUDE.md „Integrated sim stage"), so no control takes a row of its
  * own out of the fitted table's height. */
 :root[data-ui='sucher'] .su-studio .st-sim .st-simrow { column-gap: 10px; }
+/* the reset key sits flush with the right edge of the scrolling editor, which
+ * clips: the editor reaches 6 px into the stage body's padding and gives them
+ * back as its own padding, so its content keeps its width (the row does not
+ * wrap, the fitted table keeps its size) and the key's ring (offset 3 + 2)
+ * has room. */
+:root[data-ui='sucher'] .su-studio .st-sim .st-simedit { margin-right: -6px; padding-right: 6px; }
 :root[data-ui='sucher'] .su-studio .st-sim .st-segs { padding: 2px; }
 :root[data-ui='sucher'] .su-studio .st-sim .st-segs > button { min-height: 26px; padding: 0 9px; font-size: 12px; }
 :root[data-ui='sucher'] .su-studio .st-sim .st-lab { letter-spacing: .1em; }

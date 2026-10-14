@@ -144,6 +144,8 @@
 .dat-hintline.dat-warn { color: var(--amber-ink); }
 .dat-hintline.dat-ok { color: var(--success-ink); }
 .dat-hintline.dat-bad { color: var(--danger-ink); align-items: flex-start; }
+.dat-hintline .dat-hint-led { flex: none; }
+.dat-hintline.dat-bad .dat-hint-led { margin-top: 5px; }
 .dat-card-actions { display: flex; align-items: center; gap: 10px; padding: 14px 16px 16px; border-top: 1.5px dashed var(--su-hair); margin: 10px 16px 0; padding-left: 0; padding-right: 0; flex-wrap: wrap; }
 .dat-card-actions .dat-grow { flex: 1; }
 /* The first row: the buttons wrap inside .dat-card-btns, which takes the room

@@ -6,10 +6,11 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-// A dataset's sync badge (spec §C3, §J.6): the label, icon and tone come from
-// model/syncBadge.js; the „Aktualisieren" link beside an `unknown` badge asks
-// Hugging Face again (never for a partner's `not_visible`). Nothing is disabled
-// because of `unknown` (R-4).
+// A dataset's sync badge (spec §C3, §J.6): the label, the tone and, for a
+// running job, its loader icon come from model/syncBadge.js; the
+// „Aktualisieren" link beside an `unknown` badge asks Hugging Face again
+// (never for a partner's `not_visible`). Nothing is disabled because of
+// `unknown` (R-4).
 
 import React from 'react';
 import Icon from '../icons/Icon';

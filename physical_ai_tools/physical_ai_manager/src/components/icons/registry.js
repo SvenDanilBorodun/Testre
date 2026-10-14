@@ -42,7 +42,6 @@ import {
   LuCircleAlert,
   LuCircleCheck,
   LuCircleDot,
-  LuCircleHelp,
   LuCircleX,
   LuClipboardList,
   LuCloud,
@@ -129,7 +128,7 @@ import {
   LuX,
   LuZap,
 } from 'react-icons/lu';
-import { IconCloudSynced, IconLeaderArm, IconPython, IconRobotArm } from './custom';
+import { IconLeaderArm, IconPython, IconRobotArm } from './custom';
 
 export const ICONS = Object.freeze({
   // Vormachen: the three kinds (owner decision D10) and the arm controls.
@@ -248,12 +247,11 @@ export const ICONS = Object.freeze({
   volumeOn: LuVolume2,
   volumeOff: LuVolumeX,
 
-  // Daten 2.0 (spec §G7): the dataset library, its sync badges and the player.
+  // Daten 2.0 (spec §G7): the dataset library, its sync banners and dialogs,
+  // and the player.
   hardDrive: LuHardDrive,
   cloudDownload: LuCloudDownload,
-  cloudSynced: IconCloudSynced,
   syncConflict: LuGitCompareArrows,
-  syncUnknown: LuCircleHelp,
   keepBoth: LuCombine,
   split: LuSplit,
   rotate3d: LuRotate3D,

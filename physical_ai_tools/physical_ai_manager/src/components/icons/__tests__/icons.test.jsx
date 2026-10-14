@@ -277,9 +277,10 @@ describe('the custom icons follow Lucide\'s rules', () => {
     expect(height(leaderOwn.filter((c) => /z\s*$/i.test(c.attr.d || '')))).toBeGreaterThanOrEqual(8);
   });
 
-  it('gripper is gone from the registry (it was never used)', () => {
+  it('gripper and cloudSynced are gone from the registry (neither is drawn)', () => {
     expect(isIconName('gripper')).toBe(false);
-    expect(Object.keys(CUSTOM_TREES).sort()).toEqual(['cloudSynced', 'leaderArm', 'python', 'robotArm']);
+    expect(isIconName('cloudSynced')).toBe(false);
+    expect(Object.keys(CUSTOM_TREES).sort()).toEqual(['leaderArm', 'python', 'robotArm']);
   });
 });
 

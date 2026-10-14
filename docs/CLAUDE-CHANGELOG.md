@@ -14,17 +14,20 @@ wherever something is watched, Instrument Serif headings, Host Grotesk UI and a 
 arm. Presentational only: hooks, slices, selectors, models, wire contracts, ROS calls, storage keys and every
 German string stayed as they were, and the teacher/admin web build had to render exactly as before.
 
-**How it was built.** A written spec with the owner's decisions, then a foundation agent alone (fonts, tokens,
-the Tailwind branch, the `data-ui` scope switch, the primitives in `components/sucher/`, the EbUI hooks, the
-paper toast, `UrdfTwin`'s `chronoTrail`), then two page implementers in parallel on their own worktrees (I1: rail
-and shell, Start, Training, Inferenz, Daten, System; I2: Aufnahme and Roboter Studio), a foundation fix round
-(the twin's warm screen and glass chips, `RobotIcon`'s reduced-motion prop, the dropped block glow), a fresh
-verifier (FIX FIRST: the simulator's 2D table shrank from 321×198 to 191×117 px at 1440×900 and its reset key
-wrapped out of the Objekt/Modus row, a long robot name cut by an ellipsis on the Start hero, the System IP
-readout cut, the Pi rail with seven tabs overflowing at 861–920 px height, two texts under 4.5:1 on a well —
-`--ink-3` 4.29 and the accent 4.04 —, icons instead of a light on the Daten card's hint line, the studio
-subtitle cut), a fix round (D26–D33), a second fresh verifier (SHIP, four doubts), and a last polish and docs
-round (D34–D35: the reset key's focus ring, the Training `?cloud=1` notice from 3.07 to 4.84:1, these docs).
+**How it was built.** A written spec with the owner's decisions, then a foundation agent alone (fonts, tokens, the
+Tailwind branch, the `data-ui` scope switch, the primitives in `components/sucher/`, the EbUI hooks, the paper
+toast, `UrdfTwin`'s `chronoTrail`), then two page implementers in parallel on their own worktrees (I1: rail and
+shell, Start, Training, Inferenz, Daten, System; I2: Aufnahme and Roboter Studio), a foundation fix round (the
+twin's warm screen and glass chips, `RobotIcon`'s reduced-motion prop, the dropped block glow), a fresh verifier
+(FIX FIRST: the simulator's 2D table shrank from 321×198 to 191×117 px at 1440×900 and its reset key wrapped out
+of the Objekt/Modus row, a long robot name cut by an ellipsis on the Start hero, the System IP readout cut, the Pi
+rail with seven tabs overflowing at 861–920 px height, two texts under 4.5:1 on a well — `--ink-3` 4.29 and the
+accent 4.04 —, icons instead of a light on the Daten card's hint line, the studio subtitle cut), a fix round
+(D26–D33), a second fresh verifier (SHIP, four doubts), a last polish and docs round (D34–D35: the reset key's
+focus ring, the Training `?cloud=1` notice from 3.07 to 4.84:1, these docs), and an icon cleanup: the sync badge
+draws a light since Sucher, so `model/syncBadge.js` dropped the icons of its states and of the `record` overlay,
+and the two registry entries only they named went with them (`cloudSynced`, the custom cloud-check tree, and
+`syncUnknown`; 107 Lucide icons, three custom trees).
 
 **Owner decisions D1–D35.** D1 the web dashboard stays as it is. D2 `tailwind.config.js` branches on
 `REACT_APP_MODE`. D3 two-tone accent: `#B83E0C` fills and text, `#FF5B1F` primitives. D4 Start keeps its DOM order
@@ -51,17 +54,20 @@ simulator: two lines ending in „…", the full sentence in its tooltip. D34 th
 at 1093–1280 px. D35 one last polish and docs round, then a short fresh re-check.
 
 **Measured (the second verifier, the polish round).** Entry chunk +5.7 KB against main in the same build
-environment, with 0 × `WebGLRenderer`, `URDFLoader` and CodeMirror's runtime tokens in it; eight self-hosted
-woff2, no request to Google from the student build. The web build: the teacher dashboard and class view 0 px
-different, the template editor 0 px at 1093 px and 14 px of ≤ 2/255 antialiasing at 1440 px; its CSS differs
-only by rules scoped under `data-ui` or unused. Blockly blocks pixel-identical (11 blocks: paths, fills, fonts,
-fields equal, crops ≤ 4/255). Aufnahme renders equal to main (2/s ready, 13/s in the timed phases under the
-harness's 10 Hz feeder; `renderCount.test.jsx` green); the Daten player 0 renders per video frame. Chrono trail:
-frame p95 10.1–10.3 ms against 10.3 without it on a real GPU, drawing until 1.28–1.37 s after the last motion; on
-SwiftShader 241.7 ms with the trail against 58.3 without, hence D30. The simulator's 2D table at 1440×900 is
-332×205 px (main 321×198), at 1366×768 202×124 (main 167×103). Every measured text ≥ 4.5:1 (the lowest
-`--su-sig-text` on the body, 4.52). vitest 290 files (16 new), 4 965 tests, 2 expected failures; five existing
-test files changed (asserted markup values and mocks only, each test's intent kept).
+environment (+5.0 KB after the icon cleanup), with 0 × `WebGLRenderer`, `URDFLoader` and CodeMirror's runtime
+tokens in it; eight self-hosted woff2, no request to Google from the student build. The web build: the teacher
+dashboard and class view 0 px different, the template editor 0 px at 1093 px and 14 px of ≤ 2/255 antialiasing at
+1440 px; its CSS differs only by rules scoped under `data-ui` or unused. Blockly blocks pixel-identical (11
+blocks: paths, fills, fonts, fields equal, crops ≤ 4/255). Aufnahme renders equal to main (2/s ready, 13/s in the
+timed phases under the harness's 10 Hz feeder; `renderCount.test.jsx` green); the Daten player 0 renders per video
+frame. Chrono trail: frame p95 10.1–10.3 ms against 10.3 without it on a real GPU; on SwiftShader 241.7 ms with
+the trail against 58.3 without, hence D30. The spec's „0 frames 1.3 s after motion stops" (G12) counts from the
+moment the twin VISIBLY stops, after its interpolation delay, and measured that way the trail stops ≈ 1.16 s after
+the visible stop (1.35–1.37 s after the last joint message on the Start hero, 1.28–1.31 s on Aufnahme 3D, the twin
+trailing the data by 0.15–0.22 s by design). The simulator's 2D table at 1440×900 is 332×205 px (main 321×198), at
+1366×768 202×124 (main 167×103). Every measured text ≥ 4.5:1 (the lowest `--su-sig-text` on the body, 4.52).
+vitest 290 files (16 new), 4 965 tests, 2 expected failures; seven existing test files changed (asserted markup
+values, mocks and the two removed icon names only, each test's intent kept).
 
 **Not this round (each with what would bring it back).** The teacher/admin web restyle (the owner asks; teacher
 boards first); Blockly blocks in Host Grotesk or new block themes (the owner asks; a theme pass and the card

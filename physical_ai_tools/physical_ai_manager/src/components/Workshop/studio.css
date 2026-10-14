@@ -295,14 +295,24 @@
 :root[data-ui='sucher'] .su-studio .st-editorbox .blocklyFlyoutBackground { fill: #EFECE6; fill-opacity: 1; }
 :root[data-ui='sucher'] .su-studio .st-editorbox .blocklyScrollbarHandle { fill: rgba(35, 35, 34, .22); }
 
-/* the Python preview strip under the editor */
+/* the Python preview strip: the bottom of the editor plate (D31). It is the
+ * editor box's next sibling in the editor column; the box loses its bottom
+ * corners, the strip takes them, and the strip (positioned, painted after the
+ * box) covers the box's bottom ring and drop shadow, so the two read as ONE
+ * plate with a hairline between the canvas and the strip. */
+:root[data-ui='sucher'] .su-studio .st-editorcol > .st-editorbox:not(:last-child) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+:root[data-ui='sucher'] .su-studio .st-codestrip { position: relative; }
 :root[data-ui='sucher'] .su-studio .st-codestrip > div {
   border: 0;
-  border-radius: 14px;
+  border-radius: 0 0 18px 18px;
   background: var(--su-plate);
-  box-shadow: inset 0 1px 0 #FFFFFF, 0 0 0 1px var(--su-hair);
+  box-shadow: 0 0 0 1px var(--su-hair), 0 12px 26px -20px rgba(35, 35, 34, .5);
 }
-:root[data-ui='sucher'] .su-studio .st-codestrip > div > div:first-child { border-bottom-color: var(--su-hair); }
+:root[data-ui='sucher'] .su-studio .st-codestrip > div > div:first-child { padding: 6px 10px 8px; border-bottom-color: var(--su-hair); }
+:root[data-ui='sucher'] .su-studio .st-codestrip > div > div:first-child:last-child { border-bottom-color: transparent; }
 :root[data-ui='sucher'] .su-studio .st-codestrip .st-tbtn { min-height: 30px; padding: 0 12px; border-radius: 10px; font-size: 12.5px; }
 :root[data-ui='sucher'] .su-studio .st-codestrip .st-tbtn[aria-pressed='true'] {
   background: linear-gradient(#3A3A38, #262624);

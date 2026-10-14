@@ -2215,13 +2215,15 @@ function WorkshopPage({ isActive }) {
                     so swapping the right sibling NEVER remounts the workspace (it
                     is keyed only by editorKey). On mobile the two stack. */}
                 <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
-                  <div className="flex-1 min-w-0 min-h-0 p-2 md:p-3 md:pr-0">
+                  <div className="st-editorcol flex-1 min-w-0 min-h-0 p-2 md:p-3 md:pr-0 flex flex-col">
                     {/* No min-height: Blockly must fill exactly the box that is
                         visible (see BlocklyWorkspace). On narrow screens the dock
                         is height-capped instead, so the editor keeps ≥ half. */}
                     {/* `relative`: the Sammlung drawer is positioned inside this
-                        box beside the toolbox and never changes its size. */}
-                    <div className="st-editorbox relative h-full bg-white rounded-lg border border-[var(--line)] overflow-hidden">
+                        box beside the toolbox and never changes its size. It
+                        takes the column's height minus the Code-Vorschau strip
+                        below it (flex-1 + min-h-0 = no min-height). */}
+                    <div className="st-editorbox relative flex-1 min-h-0 bg-white rounded-lg border border-[var(--line)] overflow-hidden">
                       {/* One workflow is one language: a code document mounts the
                           file tree + CodeMirror host and NEVER the Blockly canvas
                           (the Sammlung drawer belongs to that canvas). While the
@@ -2271,6 +2273,52 @@ function WorkshopPage({ isActive }) {
                         />
                       )}
                     </div>
+                    {/* Read-only Python „Code"-Vorschau — compact, collapsible,
+                        the bottom of the editor plate (Sucher D31): a sibling
+                        AFTER the editor box, so BlocklyWorkspace keeps its
+                        parent and key and is never remounted; opening it
+                        shrinks the box, which the canvas hears (its host's
+                        ResizeObserver). A Blockly affordance: a code program
+                        IS its code. */}
+                    {!isCodeWorkflow && (
+                    <div className="st-codestrip shrink-0">
+                      <div className="rounded-lg border border-[var(--line)] bg-white overflow-hidden">
+                        <div className="flex items-center gap-2 px-3 py-1 border-b border-[var(--line)]">
+                          <button
+                            type="button"
+                            onClick={toggleCode}
+                            aria-pressed={isCodeOpen}
+                            title={isCodeOpen ? 'Code-Vorschau schließen' : 'Code-Vorschau öffnen'}
+                            className={
+                              'st-tbtn text-xs px-2.5 py-1 rounded-md border '
+                              + (isCodeOpen
+                                ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                                : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
+                            }
+                          >
+                            {DE.DOCK_CODE_LABEL} anzeigen
+                          </button>
+                          <span className="text-[11px] text-[var(--ink-3)]">
+                            Python-Vorschau deines Programms
+                          </span>
+                        </div>
+                        {isCodeOpen && (
+                          <Suspense
+                            fallback={
+                              <p className="px-3 py-4 text-xs text-[var(--ink-3)]">
+                                Code-Vorschau wird geladen …
+                              </p>
+                            }
+                          >
+                            <CodeView
+                              workspace={workspace}
+                              changeToken={editorJson || unsavedBlocklyJson || initialJsonForEditor}
+                            />
+                          </Suspense>
+                        )}
+                      </div>
+                    </div>
+                    )}
                   </div>
                   {simMode ? (
                     // Integrated sim stage: replaces BOTH the dock divider and the
@@ -2358,48 +2406,6 @@ function WorkshopPage({ isActive }) {
                     </>
                   )}
                 </div>
-                {/* Read-only Python „Code"-Vorschau — compact, collapsible,
-                    full-width strip between the editor row and the run controls.
-                    A Blockly affordance: a code program IS its code. */}
-                {!isCodeWorkflow && (
-                <div className="st-codestrip px-2 sm:px-3 pb-1 shrink-0">
-                  <div className="rounded-lg border border-[var(--line)] bg-white overflow-hidden">
-                    <div className="flex items-center gap-2 px-3 py-1 border-b border-[var(--line)]">
-                      <button
-                        type="button"
-                        onClick={toggleCode}
-                        aria-pressed={isCodeOpen}
-                        title={isCodeOpen ? 'Code-Vorschau schließen' : 'Code-Vorschau öffnen'}
-                        className={
-                          'st-tbtn text-xs px-2.5 py-1 rounded-md border '
-                          + (isCodeOpen
-                            ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
-                            : 'bg-white text-[var(--ink-3)] border-[var(--line)] hover:bg-[var(--bg-sunk)]')
-                        }
-                      >
-                        {DE.DOCK_CODE_LABEL} anzeigen
-                      </button>
-                      <span className="text-[11px] text-[var(--ink-3)]">
-                        Python-Vorschau deines Programms
-                      </span>
-                    </div>
-                    {isCodeOpen && (
-                      <Suspense
-                        fallback={
-                          <p className="px-3 py-4 text-xs text-[var(--ink-3)]">
-                            Code-Vorschau wird geladen …
-                          </p>
-                        }
-                      >
-                        <CodeView
-                          workspace={workspace}
-                          changeToken={editorJson || unsavedBlocklyJson || initialJsonForEditor}
-                        />
-                      </Suspense>
-                    )}
-                  </div>
-                </div>
-                )}
                 <RunControls
                   workflowId={openDocId}
                   blocklyJson={editorJson || unsavedBlocklyJson || initialJsonForEditor}

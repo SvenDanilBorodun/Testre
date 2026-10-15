@@ -9,6 +9,8 @@
 /* eslint-disable testing-library/no-container, testing-library/no-node-access --
    these tests pin markup: hook classes, custom properties and the DOM shape. */
 
+import fs from 'fs';
+import path from 'path';
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 import RobotIcon, { robotSpriteName, robotSpriteUrl } from '../RobotIcon';
@@ -16,12 +18,34 @@ import RobotIcon, { robotSpriteName, robotSpriteUrl } from '../RobotIcon';
 describe('robotSpriteName', () => {
   it.each([
     ['omx_full', 'omx_full'], ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
-    ['omx_f', 'omx_f'], ['', 'omx_f'], [undefined, 'omx_f'], ['toString', 'omx_f'],
+    ['omx_f', 'omx_f'],
   ])('%j → %s', (profile, name) => { expect(robotSpriteName(profile)).toBe(name); });
 
-  it('light is the OMX for dark screens', () => {
-    expect(robotSpriteName('edu6_studio', true)).toBe('omx_f_light');
+  // An unknown profile draws NO robot: never the OMX as a stand-in (an Edu:1
+  // student must not see an OMX before the first status tick).
+  it.each(['', undefined, null, 'toString', '__proto__', 'edu6', 'nonsense', 42])('%j → no sprite', (profile) => {
+    expect(robotSpriteName(profile)).toBeNull();
+    expect(robotSpriteName(profile, true)).toBeNull();
+    expect(robotSpriteUrl(profile)).toBeNull();
+  });
+
+  it('light is the cream variant of the SAME robot, for dark screens', () => {
+    expect(robotSpriteName('omx_full', true)).toBe('omx_full_light');
+    expect(robotSpriteName('omx_follower', true)).toBe('omx_f_light');
+    expect(robotSpriteName('omx_f', true)).toBe('omx_f_light');
+    expect(robotSpriteName('edu6_studio', true)).toBe('edu6_light');
+    expect(robotSpriteName('edu1_studio', true)).toBe('edu1_light');
     expect(robotSpriteUrl('omx_full')).toBe('/robots/omx_full.webp');
+    expect(robotSpriteUrl('edu1_studio', true)).toBe('/robots/edu1_light.webp');
+  });
+
+  it('every sprite it names is a shipped file', () => {
+    const dir = path.resolve(__dirname, '../../../../public/robots');
+    for (const profile of ['omx_full', 'omx_follower', 'omx_f', 'edu6_studio', 'edu1_studio']) {
+      for (const light of [false, true]) {
+        expect(fs.existsSync(path.join(dir, `${robotSpriteName(profile, light)}.webp`))).toBe(true);
+      }
+    }
   });
 });
 
@@ -40,6 +64,15 @@ describe('RobotIcon', () => {
     expect(img).toHaveAttribute('decoding', 'async');
     expect(img).toHaveAttribute('alt', '');
     expect(img).toHaveAttribute('draggable', 'false');
+  });
+
+  it('an unknown profile draws an empty box of the same size, never another robot', () => {
+    const { container } = render(<RobotIcon profile="" size={72} title="Roboter" animate />);
+    const box = container.firstChild;
+    expect(box).toHaveClass('su-robot');
+    expect(box.style.width).toBe('72px');
+    expect(box.querySelector('img')).toBeNull();
+    expect(box).toHaveAttribute('role', 'presentation'); // no picture, so no image to name
   });
 
   it('a title makes it an image with that name; animate and dim set their classes', () => {

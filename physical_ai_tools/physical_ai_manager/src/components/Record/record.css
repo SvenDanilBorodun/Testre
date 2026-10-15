@@ -422,13 +422,43 @@
 .rec-ov-line { font-size: 17px; color: #E4DED3; line-height: 1.4; }
 .rec-ov-next { margin-top: 4px; font-size: 14px; color: #C9C1B5; }
 .rec-ov-next b { color: #F2EDE4; }
-.rec-picto { width: 190px; height: 96px; margin-top: 6px; }
-.rec-p-arm { transform-origin: 40px 78px; animation: rec-armback 2.4s ease-in-out infinite; }
-@keyframes rec-armback { 0%, 15% { transform: rotate(38deg); } 60%, 100% { transform: rotate(0deg); } }
-.rec-p-cube { animation: rec-cubeback 2.4s ease-in-out infinite; }
-@keyframes rec-cubeback { 0%, 15% { transform: translateX(88px); } 60%, 100% { transform: translateX(0); } }
-.rec-p-hand { animation: rec-handgrab 1.6s ease-in-out infinite; transform-origin: 95px 60px; }
-@keyframes rec-handgrab { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+/* The small picture of the overlay (PhasePicture.jsx): a sprite strip of the REAL robot, 24 frames side by side
+ * in one image, stepped by CSS. The box takes its height from the frame's aspect ratio (set inline); the strip
+ * is as wide as its frames (`--rec-frames`, set inline) and slides left by one box per step. Warm-up loops steadily; reset holds on its first
+ * frame (cube away from the dashed mark), moves for 64 % of the loop and holds on its last (cube on the mark).
+ * Reduced motion (below, and the page's .rec-reduced) leaves the strip on its first frame. */
+.rec-picto { margin-top: 6px; }
+/* 320 px wide at most, and never taller than the overlay can hold: on a short window (1366 × 768) the picture
+ * gives up height first, so the kicker and the „Als Nächstes" line stay inside the stage. */
+.rec-pic {
+  --rec-pic-h: clamp(110px, calc(100vh - 590px), 230px);
+  position: relative;
+  width: min(320px, 100%, calc(var(--rec-pic-h) * var(--rec-pic-ar, 1.5)));
+}
+.rec-pic-clip { position: absolute; inset: 0; overflow: hidden; }
+/* The strip's width is DECLARED (frames × the box), never taken from the decoded image: a percentage translate on
+ * an image that has not loaded yet resolves against 0 and the first loops would slide off the frame. */
+.rec-pic-strip { display: block; height: 100%; width: calc(var(--rec-frames, 24) * 100%); max-width: none; user-select: none; pointer-events: none; }
+.rec-pic-warmup .rec-pic-strip { animation: rec-pic-loop 2.4s steps(24) infinite; }
+.rec-pic-reset .rec-pic-strip { animation: rec-pic-reset 3.6s infinite; }
+@keyframes rec-pic-loop { to { transform: translateX(-100%); } }
+@keyframes rec-pic-reset {
+  0% { transform: translateX(0); }
+  14% { transform: translateX(0); animation-timing-function: steps(23, end); }
+  78%, 100% { transform: translateX(-95.8333%); }
+}
+.rec-pic-chip {
+  position: absolute;
+  transform: translate(-50%, 7px);
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: rgba(12, 11, 10, .72);
+  color: #C9C1B5;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  pointer-events: none;
+}
 
 /* „Los!" (M16): serif italic, an orange underline sweeps in under it */
 .rec-los { position: absolute; inset: var(--rec-tiles-top) 14px 14px; display: grid; place-items: center; z-index: 6; pointer-events: none; }
@@ -1220,9 +1250,7 @@ select.rec-mini { padding-right: 28px; }
  * own `.rec-reduced` switch, which follows the controller's media query.) */
 .rec-page.rec-reduced .rec-halo,
 .rec-page.rec-reduced .rec-orbit,
-.rec-page.rec-reduced .rec-p-arm,
-.rec-page.rec-reduced .rec-p-cube,
-.rec-page.rec-reduced .rec-p-hand,
+.rec-page.rec-reduced .rec-pic-strip,
 .rec-page.rec-reduced .rec-epd.cur,
 .rec-page.rec-reduced .rec-epd.fresh,
 .rec-page.rec-reduced .rec-blink,
@@ -1249,9 +1277,7 @@ select.rec-mini { padding-right: 28px; }
 @media (prefers-reduced-motion: reduce) {
   .rec-halo,
   .rec-orbit,
-  .rec-p-arm,
-  .rec-p-cube,
-  .rec-p-hand,
+  .rec-pic-strip,
   .rec-epd.cur,
   .rec-epd.fresh,
   .rec-blink,

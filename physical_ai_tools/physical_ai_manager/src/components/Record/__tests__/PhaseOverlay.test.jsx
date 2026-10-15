@@ -12,6 +12,7 @@
 import React from 'react';
 import { render, screen, act } from '@testing-library/react';
 import PhaseOverlay, { overlayText, RING_CIRCUMFERENCE, LOS_MS } from '../PhaseOverlay';
+import { PHASE_PICTURES } from '../../icons/robotAssets';
 
 const COPY = {
   warmKicker: 'Vor Episode 1',
@@ -22,6 +23,7 @@ const COPY = {
   resetLine: 'Stell alles wieder so hin wie am Anfang: Gegenstände an den Start, Leader-Arm in die Ausgangslage.',
   next: (n, N, E) => ({ pre: 'Als Nächstes: ', bold: `Episode ${n} von ${N}`, post: ` · ${E} s Aufnahme` }),
   pictoLeader: 'Leader-Arm',
+  pictoFollower: 'Follower-Arm',
   pictoBack: 'zurück zum Start',
 };
 
@@ -44,6 +46,7 @@ describe('overlayText — the F6d wording rule', () => {
     expect(t.title).toBe('Aufwärmen');
     expect(t.next).toEqual({ pre: 'Als Nächstes: ', bold: 'Episode 1 von 5', post: ' · 20 s Aufnahme' });
     expect(t.picto).toBe('Leader-Arm');
+    expect(t.pictoFollower).toBe('Follower-Arm');
   });
 
   it('reset names the episode just saved and the NEXT one', () => {
@@ -51,6 +54,7 @@ describe('overlayText — the F6d wording rule', () => {
     expect(t.kicker).toBe('Nach Episode 2');
     expect(t.next.bold).toBe('Episode 3 von 5');
     expect(t.picto).toBe('zurück zum Start');
+    expect(t.pictoFollower).toBeUndefined();
   });
 
   it('a reset with nothing saved yet (a redo in episode 1) says „Vor Episode 1"', () => {
@@ -69,27 +73,74 @@ describe('PhaseOverlay', () => {
   const warm = overlayText('warmup', { saved: 0, total: 5, episodeTime: 20 }, COPY);
   const reset = overlayText('reset', { saved: 1, total: 5, episodeTime: 20 }, COPY);
 
-  it('warm-up: ring, halos, the hand picture, the kicker and the next line', () => {
+  it('warm-up: ring, halos, the real-robot picture, the kicker and the next line', () => {
     const clock = frameClock();
-    render(<PhaseOverlay phase="warmup" text={warm} totalS={5} secondsLeft={5} subscribeFrame={clock.subscribe} />);
+    render(<PhaseOverlay phase="warmup" text={warm} totalS={5} secondsLeft={5} subscribeFrame={clock.subscribe} profile="omx_full" />);
     expect(overlay()).toHaveClass('show');
     expect(overlay()).toHaveAttribute('data-phase', 'warmup');
     expect(screen.getByText('Vor Episode 1')).toBeInTheDocument();
     expect(screen.getByText('Aufwärmen')).toBeInTheDocument();
     expect(screen.getByText('Episode 1 von 5')).toBeInTheDocument();
     expect(screen.getByText('Leader-Arm')).toBeInTheDocument();
+    expect(screen.getByText('Follower-Arm')).toBeInTheDocument();
     expect(screen.getByTestId('rec-halo')).toBeInTheDocument();
     expect(screen.queryByTestId('rec-orbit')).toBeNull();
     expect(screen.getByTestId('rec-num')).toHaveTextContent('5s');
   });
 
   it('reset: orbit instead of halos, the way-back picture, „Nach Episode n"', () => {
-    render(<PhaseOverlay phase="reset" text={reset} totalS={6} secondsLeft={6} />);
+    render(<PhaseOverlay phase="reset" text={reset} totalS={6} secondsLeft={6} profile="omx_full" />);
     expect(screen.getByText('Nach Episode 1')).toBeInTheDocument();
     expect(screen.getByText('Episode 2 von 5')).toBeInTheDocument();
     expect(screen.getByText('zurück zum Start')).toBeInTheDocument();
     expect(screen.getByTestId('rec-orbit')).toBeInTheDocument();
     expect(screen.queryByTestId('rec-halo')).toBeNull();
+  });
+
+  describe('the picture is the REAL robot the student started with', () => {
+    const imgOf = () => document.querySelector('[data-picto] img'); // eslint-disable-line testing-library/no-node-access
+
+    it('warm-up shows the shipped strip of the omx_full profile, pinned to its arms', () => {
+      render(<PhaseOverlay phase="warmup" text={warm} totalS={5} secondsLeft={5} profile="omx_full" />);
+      const box = document.querySelector('[data-picto="warmup"]'); // eslint-disable-line testing-library/no-node-access
+      expect(box).toHaveAttribute('data-robot-picture', PHASE_PICTURES.omx_full.warmup.file);
+      expect(imgOf().getAttribute('src')).toBe(`/robots/${PHASE_PICTURES.omx_full.warmup.file}`);
+      const leader = screen.getByText('Leader-Arm');
+      expect(leader.style.left).toBe(`${PHASE_PICTURES.omx_full.warmup.anchors.leader[0] * 100}%`);
+    });
+
+    it('reset shows its own strip, with the way-back chip at the start mark', () => {
+      render(<PhaseOverlay phase="reset" text={reset} totalS={6} secondsLeft={6} profile="omx_full" />);
+      expect(imgOf().getAttribute('src')).toBe(`/robots/${PHASE_PICTURES.omx_full.reset.file}`);
+      expect(screen.getByText('zurück zum Start').style.top).toBe(`${PHASE_PICTURES.omx_full.reset.anchors.mark[1] * 100}%`);
+    });
+
+    it.each([null, undefined, '', 'omx_f', 'edu6_studio', 'edu1_studio', 'omx_follower'])(
+      'a profile with no picture (%j) draws NO robot — no OMX stand-in, no chips',
+      (profile) => {
+        render(<PhaseOverlay phase="warmup" text={warm} totalS={5} secondsLeft={5} profile={profile} />);
+        expect(document.querySelector('[data-picto]')).toBeNull(); // eslint-disable-line testing-library/no-node-access
+        expect(screen.queryByText('Leader-Arm')).toBeNull();
+        // The overlay's own words stay.
+        expect(screen.getByText('Aufwärmen')).toBeInTheDocument();
+      }
+    );
+
+    it('the strip is not requested before the overlay is first shown, then stays while it fades', () => {
+      const { rerender } = render(<PhaseOverlay phase={null} text={null} totalS={0} secondsLeft={0} profile="omx_full" />);
+      expect(imgOf()).toBeNull();
+      rerender(<PhaseOverlay phase="reset" text={reset} totalS={6} secondsLeft={3} profile="omx_full" />);
+      expect(imgOf()).not.toBeNull();
+      rerender(<PhaseOverlay phase={null} text={null} totalS={0} secondsLeft={0} profile="omx_full" />);
+      expect(imgOf()).not.toBeNull();
+    });
+
+    it('is decorative: hidden from assistive technology, never draggable', () => {
+      render(<PhaseOverlay phase="warmup" text={warm} totalS={5} secondsLeft={5} profile="omx_full" />);
+      expect(document.querySelector('[data-picto]')).toHaveAttribute('aria-hidden', 'true'); // eslint-disable-line testing-library/no-node-access
+      expect(imgOf()).toHaveAttribute('alt', '');
+      expect(imgOf()).toHaveAttribute('draggable', 'false');
+    });
   });
 
   it('the ring follows the frame clock, without React re-rendering', () => {

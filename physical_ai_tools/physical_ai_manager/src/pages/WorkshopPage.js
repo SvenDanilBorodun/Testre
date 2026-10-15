@@ -242,6 +242,11 @@ function WorkshopPage({ isActive }) {
   // the live editor already IS that document, so its hydrate is skipped once.
   const skipHydrateForIdRef = useRef(null);
   const robotType = useSelector((s) => (s.tasks && s.tasks.taskStatus ? s.tasks.taskStatus.robotType : ''));
+  // The robot profile id (omx_full / omx_follower / edu6_studio / edu1_studio): which robot's real
+  // glyph the mode badge and the mode toast draw. '' while unknown: then they draw none.
+  const robotProfile = useSelector((s) => (s.tasks && s.tasks.taskStatus && s.tasks.taskStatus.robotProfile) || '');
+  const robotProfileRef = useRef(robotProfile);
+  robotProfileRef.current = robotProfile;
   // Audit fix: prior path `s.auth?.user?.id` was always null (no
   // top-level `user` field on the auth slice). The Supabase user lives
   // under `session.user.id`. Without this fix the autosave scopeKey
@@ -777,7 +782,7 @@ function WorkshopPage({ isActive }) {
     }
     toast(simMode ? MODE_DE.TOAST_SIM : MODE_DE.TOAST_REAL, {
       id: 'edubotics-mode',
-      icon: toastIcon(simMode ? 'simulator' : 'arm'),
+      icon: simMode ? toastIcon('simulator') : toastIcon('arm', { profile: robotProfileRef.current }),
     });
   }, [simMode]);
   // Enter the simulator on behalf of a preview (and, later, „Ziel setzen" / a
@@ -2005,7 +2010,7 @@ function WorkshopPage({ isActive }) {
     // ONE warned glide-to-Grundstellung prompt for the whole page: its three
     // callers (TableTouchStep, JogPanel, Vormachen) can each unmount while a
     // countdown is still running — see HomeGlidePrompt.
-    <HomeGlideProvider>
+    <HomeGlideProvider robotProfile={robotProfile}>
     {/* The mode FRAME: orange on the real robot, blue in the simulator — a
         border and `data-mode` on this EXISTING root, never a wrapper (a wrapper
         would remount the editor and the dock) and never a transform, filter,
@@ -2029,7 +2034,7 @@ function WorkshopPage({ isActive }) {
             <h1 className="st-title shrink-0 text-base sm:text-lg font-semibold text-[var(--ink)]">
               Roboter <em>Studio</em>
             </h1>
-            <ModeBadge simMode={simMode} />
+            <ModeBadge simMode={simMode} profile={robotProfile} />
             <p
               className="st-hint hidden lg:block min-w-0 flex-1 truncate text-xs text-[var(--ink-3)]"
               title={hintText}

@@ -21,6 +21,7 @@ import userEvent from '@testing-library/user-event';
 import toast from 'react-hot-toast';
 import WorkshopPage from '../WorkshopPage';
 import { MODE_DE } from '../../components/Workshop/modeCopy';
+import { toastIcon } from '../../components/icons/toast';
 
 let mockState;
 const mockDispatch = vi.fn();
@@ -108,7 +109,7 @@ vi.mock('react-hot-toast', () => ({
   useToasterStore: () => ({ toasts: [] }),
 }));
 
-function baseState(over = {}) {
+function baseState(over = {}, robotProfile = 'omx_full') {
   return {
     workshop: {
       hasIntrinsicScene: true,
@@ -126,7 +127,7 @@ function baseState(over = {}) {
       ...over,
     },
     auth: { session: { access_token: 'jwt', user: { id: 'u1' } } },
-    tasks: { heartbeatStatus: 'connected' },
+    tasks: { heartbeatStatus: 'connected', taskStatus: { robotProfile } },
   };
 }
 
@@ -170,9 +171,31 @@ describe('WorkshopPage — the mode frame', () => {
     render(<WorkshopPage isActive />);
     await screen.findByTestId('blockly-workspace');
     expect(screen.getByTestId('mode-badge')).toHaveTextContent(MODE_DE.BADGE_REAL);
+    // The real-robot badge draws the arm of the robot the student started with.
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(screen.getByTestId('mode-badge').querySelector('[data-robot-glyph="omx_f"]')).not.toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
     await screen.findByTestId('sim-stage');
     expect(screen.getByTestId('mode-badge')).toHaveTextContent(MODE_DE.BADGE_SIM);
+  });
+
+  test.each([
+    ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
+  ])('the badge follows the robot: %s draws the %s arm', async (profile, glyph) => {
+    mockState = baseState({}, profile);
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(screen.getByTestId('mode-badge').querySelector(`[data-robot-glyph="${glyph}"]`)).not.toBeNull();
+  });
+
+  test('before the first status tick (profile unknown) the badge draws NO robot, only its words', async () => {
+    mockState = baseState({}, '');
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const badge = screen.getByTestId('mode-badge');
+    expect(badge).toHaveTextContent(MODE_DE.BADGE_REAL);
+    expect(badge.querySelector('[data-robot-glyph]')).toBeNull(); // eslint-disable-line testing-library/no-node-access
   });
 });
 
@@ -190,6 +213,33 @@ describe('WorkshopPage — the switch toast', () => {
     expect(modeToasts()).toHaveLength(2);
     expect(modeToasts()[1][0]).toBe(MODE_DE.TOAST_REAL);
     modeToasts().forEach(([, opts]) => expect(opts.icon).toBeTruthy());
+    // The real-mode toast draws the arm of the robot the student started with.
+    expect(modeToasts()[1][1].icon).toBe(toastIcon('arm', { profile: 'omx_full' }));
+  });
+
+  test('the real-mode toast of an Edu:1 draws the Edu:1 arm, never an OMX', async () => {
+    mockState = baseState({}, 'edu1_studio');
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    await userEvent.click(screen.getByRole('button', { name: 'Simulator beenden' }));
+    await screen.findByTestId('right-dock');
+    const icon = modeToasts()[1][1].icon;
+    expect(icon).toBe(toastIcon('arm', { profile: 'edu1_studio' }));
+    expect(icon).not.toBe(toastIcon('arm', { profile: 'omx_full' }));
+  });
+
+  test('with the profile unknown the real-mode toast has no robot picture (the simulator toast keeps its icon)', async () => {
+    mockState = baseState({}, '');
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    await userEvent.click(screen.getByRole('button', { name: 'Simulator beenden' }));
+    await screen.findByTestId('right-dock');
+    expect(modeToasts()[0][1].icon).toBeTruthy();
+    expect(modeToasts()[1][1].icon).toBeUndefined();
   });
 
   test('R0-4: a play button that enters the simulator for the student is announced too', async () => {

@@ -135,8 +135,11 @@ export function HomeGlideDialog({
  * the glide leaves the server-side glide running — it is slow and floor-checked,
  * and aborting it from a teardown would be a surprise of its own.
  */
-export function useHomeGlidePrompt() {
+export function useHomeGlidePrompt(robotProfile = null) {
   const { homeArm, handGuide } = useRosServiceCaller();
+  // The arm of the robot the student started with draws the „stays here" toast.
+  const profileRef = useRef(robotProfile);
+  profileRef.current = robotProfile;
   const [phase, setPhase] = useState('idle'); // 'idle' | 'countdown' | 'moving'
   const [secondsLeft, setSecondsLeft] = useState(HOME_GLIDE_COUNTDOWN_S);
   const [stopping, setStopping] = useState(false);
@@ -229,7 +232,7 @@ export function useHomeGlidePrompt() {
   const stay = useCallback(() => {
     if (phaseRef.current !== 'countdown') return;
     setPhaseBoth('idle');
-    toast('Der Arm bleibt an seiner Position.', { icon: toastIcon('arm') });
+    toast('Der Arm bleibt an seiner Position.', { icon: toastIcon('arm', { profile: profileRef.current }) });
   }, [setPhaseBoth]);
 
   const stop = useCallback(async () => {
@@ -268,8 +271,8 @@ export function useHomeGlidePrompt() {
 // outlives all three, so it hosts the provider.
 const HomeGlideContext = createContext(null);
 
-export function HomeGlideProvider({ children }) {
-  const glide = useHomeGlidePrompt();
+export function HomeGlideProvider({ children, robotProfile = null }) {
+  const glide = useHomeGlidePrompt(robotProfile);
   return (
     <HomeGlideContext.Provider value={glide}>
       {children}

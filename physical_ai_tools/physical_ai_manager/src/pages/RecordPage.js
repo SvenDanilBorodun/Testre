@@ -243,6 +243,7 @@ function RecordPage({ isActive = true }) {
           title={title}
           connection={<HeartbeatStatus />}
           robotName={robotDisplayName(caps, status.robotProfile, status.robotType)}
+          robotProfile={status.robotProfile}
         />
         <div className="rec-grid">
           <section className="rec-left" aria-label={copy.header.eyebrow}>
@@ -264,6 +265,7 @@ function RecordPage({ isActive = true }) {
                 recording={recording}
                 losText={copy.overlay.los}
                 reducedMotion={c.reducedMotion}
+                profile={status.robotProfile}
               />
               <RecordingFrame
                 active={recording}

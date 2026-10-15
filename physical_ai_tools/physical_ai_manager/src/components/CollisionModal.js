@@ -37,39 +37,48 @@ import { useSelector } from 'react-redux';
 
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import Icon from './icons/Icon';
+import RobotGlyph from './icons/RobotGlyph';
+import { phasePicture, robotGlyphName } from './icons/robotAssets';
 
 // Show-the-remedy escalation (leLab-comparison PR-3): after repeated failed
 // homing attempts a 13-year-old needs a PICTURE of the fix, not another
-// paragraph. Inline SVG — bundled with the app, no hot-link (classrooms are
-// offline), no binary asset.
-function RemedyDiagram() {
+// paragraph. The picture is a render of the real follower (its URDF, by
+// profile id) with an obstacle pressed against the gripper and the obstacle's
+// ghost where it belongs; the arrow between them is a registry icon laid over
+// the image at anchors measured in the render. Bundled with the app, no
+// hot-link (classrooms are offline). A profile with no such picture (or none
+// known yet) shows none — never another robot.
+function RemedyPicture({ profile }) {
+  const pic = phasePicture(profile, 'collision');
+  if (!pic) return null;
+  const { obstacle, ghost } = pic.anchors;
+  const angle = Math.atan2((ghost[1] - obstacle[1]) * pic.height, (ghost[0] - obstacle[0]) * pic.width);
   return (
-    <svg
-      viewBox="0 0 280 110"
-      className="w-full max-w-xs"
+    <div
+      className="relative w-full max-w-xs"
+      style={{ aspectRatio: `${pic.width} / ${pic.height}` }}
       role="img"
       aria-label="Hindernis aus dem Bewegungsbereich des Arms entfernen"
+      data-robot-picture={pic.file}
     >
-      {/* table */}
-      <line x1="10" y1="95" x2="270" y2="95" stroke="#A9A398" strokeWidth="3" />
-      {/* robot base + arm */}
-      <rect x="30" y="75" width="34" height="20" rx="3" fill="#5F5B55" />
-      <line x1="47" y1="75" x2="70" y2="40" stroke="#232322" strokeWidth="7" strokeLinecap="round" />
-      <line x1="70" y1="40" x2="105" y2="58" stroke="#232322" strokeWidth="6" strokeLinecap="round" />
-      <circle cx="70" cy="40" r="5" fill="#141210" />
-      {/* obstacle pressed against the gripper */}
-      <rect x="108" y="52" width="26" height="43" rx="4" fill="#F5A524" />
-      {/* arrow moving the obstacle away */}
-      <line x1="150" y1="72" x2="215" y2="72" stroke="#FF5B1F" strokeWidth="5" strokeLinecap="round" />
-      <polygon points="215,62 235,72 215,82" fill="#FF5B1F" />
-      {/* obstacle at its new, safe spot (ghost) */}
-      <rect x="240" y="52" width="26" height="43" rx="4" fill="#E8B04A" opacity="0.55" />
-    </svg>
+      <img src={pic.url} alt="" draggable="false" decoding="async" className="block h-full w-full" />
+      <span
+        className="absolute text-[#FF5B1F] drop-shadow-[0_1px_2px_rgba(0,0,0,.55)]"
+        style={{
+          left: `${((obstacle[0] + ghost[0]) / 2) * 100}%`,
+          top: `${((obstacle[1] + ghost[1]) / 2) * 100}%`,
+          transform: `translate(-50%, -50%) rotate(${angle}rad)`,
+        }}
+      >
+        <Icon name="arrowRight" size="1.9rem" />
+      </span>
+    </div>
   );
 }
 
 export default function CollisionModal() {
   const collision = useSelector((state) => state.tasks.collision);
+  const profile = useSelector((state) => (state.tasks && state.tasks.taskStatus && state.tasks.taskStatus.robotProfile) || '');
   const { homeFollower, resumeTeleop, forceResumeTeleop } = useRosServiceCaller();
   const [busy, setBusy] = useState(false);
   const [hint, setHint] = useState('');
@@ -127,7 +136,7 @@ export default function CollisionModal() {
   // Escalate to the picture after the second attempt that did NOT get the
   // arm home (the server falls back to stage 'stopped' with a retry hint
   // when the glide exhausts its re-sends).
-  const showRemedyDiagram = stage === 'stopped' && homeAttempts >= 2;
+  const showRemedyPicture = stage === 'stopped' && homeAttempts >= 2;
   const handleResume = () => callStep(resumeTeleop, '„Teleoperation fortsetzen" fehlgeschlagen.');
   // Escape hatch (issue #19 finding #4): when the verified safe-home glide keeps failing
   // (e.g. a degraded bus), homing can never reach step 2 and the freeze would otherwise wedge
@@ -135,7 +144,7 @@ export default function CollisionModal() {
   // remedy picture, offer „Trotzdem fortsetzen" — the server forces a proximity-gated resync
   // from the follower's CURRENT pose to the leader and clears the freeze. Surfaced only on
   // the step-1 (stopped) screen so the normal two-step flow stays clean.
-  const showForceResume = showRemedyDiagram;
+  const showForceResume = showRemedyPicture;
   const handleForceResume = () =>
     callStep(forceResumeTeleop, '„Trotzdem fortsetzen" fehlgeschlagen.');
 
@@ -152,11 +161,15 @@ export default function CollisionModal() {
         }`}
       >
         <div className="flex flex-col items-center gap-4 text-center">
-          <Icon
-            name={isHomed ? 'robotArm' : 'warning'}
-            size="3rem"
-            className={isHomed ? 'text-[color:var(--amber)]' : 'text-[color:var(--danger)]'}
-          />
+          {isHomed && robotGlyphName(profile, 'arm') ? (
+            <RobotGlyph profile={profile} part="arm" size="3rem" className="text-[color:var(--amber)]" />
+          ) : (
+            <Icon
+              name="warning"
+              size="3rem"
+              className={isHomed ? 'text-[color:var(--amber)]' : 'text-[color:var(--danger)]'}
+            />
+          )}
           <span className="su-lab">
             {isHomed ? 'Schritt 2 von 2' : 'Schritt 1 von 2'}
           </span>
@@ -172,9 +185,9 @@ export default function CollisionModal() {
                   'zuerst das Hindernis und klicke dann auf „Follower in Grundstellung fahren".')}
           </p>
           {hint && <p className="text-sm font-medium text-[color:var(--amber)]">{hint}</p>}
-          {showRemedyDiagram && (
+          {showRemedyPicture && (
             <div className="flex w-full flex-col items-center gap-1 rounded-[14px] bg-[var(--amber-wash)] p-3">
-              <RemedyDiagram />
+              <RemedyPicture profile={profile} />
               <p className="text-sm font-medium text-[color:var(--amber)]">
                 Hindernis ganz aus dem Bewegungsbereich nehmen — auch unter
                 dem Greifer nachsehen. Danach erneut auf „Follower in

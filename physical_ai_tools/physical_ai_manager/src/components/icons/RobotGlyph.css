@@ -1,0 +1,10 @@
+/* RobotGlyph: a robot glyph painted in the text colour through its alpha mask
+ * (the mask image, size and position are set inline, per glyph). */
+.robot-glyph {
+  display: inline-block;
+  flex: none;
+  vertical-align: -0.15em;
+  background-color: currentColor;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}

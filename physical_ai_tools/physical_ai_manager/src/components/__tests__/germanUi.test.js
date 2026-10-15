@@ -38,6 +38,7 @@ export const GERMAN_FILES = Object.freeze([
   'components/Record/EpisodeDots.jsx',
   'components/Record/FinishCard.jsx',
   'components/Record/PhaseOverlay.jsx',
+  'components/Record/PhasePicture.jsx',
   'components/Record/PhaseTrack.jsx',
   'components/Record/ProblemBanner.jsx',
   'components/Record/RecordHeader.jsx',
@@ -50,6 +51,8 @@ export const GERMAN_FILES = Object.freeze([
   'components/Record/TaskCard.jsx',
   'components/Record/model/recordCopy.js',
   'components/SystemStatus.js',
+  // The robot pictures (robot-picture round): their labels are German, their words come from recordCopy.
+  'components/icons/RobotGlyph.jsx',
   'components/TagInput.js',
   'constants/HFStatus.js',
   'features/hfToken/hfTokenCopy.js',

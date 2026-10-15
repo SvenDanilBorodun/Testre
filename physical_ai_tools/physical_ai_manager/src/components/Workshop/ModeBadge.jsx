@@ -16,11 +16,15 @@
 // a steady dot at a breakpoint. The badge itself never animates.
 //
 // `withRunState={false}` (the Vormachen window) renders no run state and reads
-// no store, so the badge needs no Redux slice there.
+// no store, so the badge needs no Redux slice there. The real-robot badge shows
+// the arm of the robot the student started with — `profile`, the robot profile
+// id, handed in by the page — as its glyph (RobotGlyph: the real URDF); with no
+// known profile it shows the words alone, never another robot.
 
 import React from 'react';
 import { useSelector } from 'react-redux';
 import Icon from '../icons/Icon';
+import RobotGlyph from '../icons/RobotGlyph';
 import { selectWorkflowRunning } from '../../features/workshop/workshopSlice';
 import { MODE_DE } from './modeCopy';
 
@@ -45,7 +49,7 @@ function RunDot() {
   );
 }
 
-export default function ModeBadge({ simMode, withRunState = true }) {
+export default function ModeBadge({ simMode, withRunState = true, profile = null }) {
   return (
     <span
       className="inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-bold text-white whitespace-nowrap"
@@ -53,7 +57,7 @@ export default function ModeBadge({ simMode, withRunState = true }) {
       title={simMode ? MODE_DE.BADGE_SIM_TITLE : MODE_DE.BADGE_REAL_TITLE}
       data-testid="mode-badge"
     >
-      <Icon name={simMode ? 'simulator' : 'robotArm'} />
+      {simMode ? <Icon name="simulator" /> : <RobotGlyph profile={profile} part="arm" size="1.25em" />}
       <span>{simMode ? MODE_DE.BADGE_SIM : MODE_DE.BADGE_REAL}</span>
       {!simMode && withRunState && <RunDot />}
     </span>

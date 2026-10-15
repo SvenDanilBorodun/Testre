@@ -73,6 +73,7 @@ import {
   teachLeaderStatusNoticeDe,
 } from './teachGates';
 import Icon from '../../icons/Icon';
+import RobotGlyph from '../../icons/RobotGlyph';
 import ModeBadge from '../ModeBadge';
 import { formatCmDe, isZielTouchTooHigh, zielTouchHeightAboveTableMm } from './zielTouch';
 import {
@@ -256,6 +257,8 @@ function TeachOverlay({
   const containerRef = useRef(null);
   const trajectoryList = useSelector(selectTrajectoryList);
   const collisionActive = useSelector((s) => !!(s.tasks && s.tasks.collision && s.tasks.collision.active));
+  // The robot profile id: which robot the mode chip and the badge draw (none while unknown).
+  const robotProfile = useSelector((s) => (s.tasks && s.tasks.taskStatus && s.tasks.taskStatus.robotProfile) || '');
   const { offerHomeGlide, homeGlideActive, afterHomeGlide } = useHomeGlide();
   const afterHomeGlideRef = useRef(afterHomeGlide);
   afterHomeGlideRef.current = afterHomeGlide;
@@ -912,12 +915,12 @@ function TeachOverlay({
           </h2>
           {!isPendingMode && (
             <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--bg-sunk)] px-2.5 py-0.5 text-sm text-[var(--ink-3)]">
-              <Icon name={isLeaderMode ? 'leaderArm' : 'hand'} />
+              {isLeaderMode ? <RobotGlyph profile={robotProfile} part="leader" size="1.25em" /> : <Icon name="hand" />}
               <span>{isLeaderMode ? DE.TEACH_MODE_LEADER : DE.TEACH_MODE_HAND}</span>
             </span>
           )}
           {/* Vormachen is always the REAL robot: the static badge, no run state. */}
-          <ModeBadge simMode={false} withRunState={false} />
+          <ModeBadge simMode={false} withRunState={false} profile={robotProfile} />
           <button
             type="button"
             onClick={() => actions.finish()}

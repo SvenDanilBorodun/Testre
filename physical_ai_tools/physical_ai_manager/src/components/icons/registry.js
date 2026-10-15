@@ -23,6 +23,7 @@ import {
   LuActivity,
   LuAlarmClock,
   LuArrowLeft,
+  LuArrowRight,
   LuArrowRightLeft,
   LuArrowUp,
   LuBookOpen,
@@ -128,18 +129,18 @@ import {
   LuX,
   LuZap,
 } from 'react-icons/lu';
-import { IconLeaderArm, IconPython, IconRobotArm } from './custom';
+import { IconPython } from './custom';
 
 export const ICONS = Object.freeze({
-  // Vormachen: the three kinds (owner decision D10) and the arm controls.
+  // Vormachen: the three kinds (owner decision D10) and the arm controls. The
+  // robots themselves are not here: they are renders of the real URDFs
+  // (RobotGlyph.jsx, robotAssets.js).
   record: LuCircleDot,
   pose: LuMapPin,
   ziel: LuTarget,
   hand: LuHand,
   lock: LuLock,
   lockOpen: LuLockOpen,
-  robotArm: IconRobotArm,
-  leaderArm: IconLeaderArm,
 
   // Roboter Studio's mode and panes: the simulator (ModeBadge, the switch
   // toast) and the grips of the pane dividers (layout/ResizeHandle.jsx: a
@@ -196,6 +197,8 @@ export const ICONS = Object.freeze({
   chevronsLeft: LuChevronsLeft,
   chevronsRight: LuChevronsRight,
   arrowUp: LuArrowUp,
+  // The collision modal's picture: where the obstacle should go (CollisionModal.js).
+  arrowRight: LuArrowRight,
   enterKey: LuCornerDownLeft,
   externalLink: LuExternalLink,
   refresh: LuRefreshCw,

@@ -21,7 +21,7 @@ import {
 } from '../registry';
 import { CUSTOM_TREES } from '../custom';
 import { appendSvgIcon, iconNodes, SVG_NS } from '../svg';
-import { toastIcon, TOAST_ICON_KINDS } from '../toast';
+import { toastIcon, ROBOT_TOAST_KIND, TOAST_ICON_KINDS } from '../toast';
 
 const ICON_DIR = path.resolve(__dirname, '..');
 
@@ -210,7 +210,7 @@ function treePoints(node) {
   return out;
 }
 
-describe('the custom icons follow Lucide\'s rules', () => {
+describe('the custom icon follows Lucide\'s rules', () => {
   it.each(Object.entries(CUSTOM_TREES))('%s', (name, tree) => {
     expect(tree.attr).toEqual({
       viewBox: '0 0 24 24',
@@ -261,26 +261,16 @@ describe('the custom icons follow Lucide\'s rules', () => {
     expect(Math.max(...ys)).toBeCloseTo(10, 6);
   });
 
-  it('the leader arm ends in a CLOSED grip where the follower\'s claw is open', () => {
-    const own = (tree, other) => tree.child.filter(
-      (c) => !other.child.some((o) => JSON.stringify(o) === JSON.stringify(c)),
-    );
-    const leaderOwn = own(CUSTOM_TREES.leaderArm, CUSTOM_TREES.robotArm);
-    const followerOwn = own(CUSTOM_TREES.robotArm, CUSTOM_TREES.leaderArm);
-    expect(leaderOwn.some((c) => c.tag === 'path' && /z\s*$/i.test(c.attr.d))).toBe(true);
-    expect(followerOwn.some((c) => c.tag === 'path' && /z\s*$/i.test(c.attr.d))).toBe(false);
-    // The grip is a tall shape (≥ 8 units), the claw a short open arch.
-    const height = (nodes) => {
-      const ys = nodes.flatMap(treePoints).map(([, y]) => y);
-      return Math.max(...ys) - Math.min(...ys);
-    };
-    expect(height(leaderOwn.filter((c) => /z\s*$/i.test(c.attr.d || '')))).toBeGreaterThanOrEqual(8);
-  });
-
   it('gripper and cloudSynced are gone from the registry (neither is drawn)', () => {
     expect(isIconName('gripper')).toBe(false);
     expect(isIconName('cloudSynced')).toBe(false);
-    expect(Object.keys(CUSTOM_TREES).sort()).toEqual(['leaderArm', 'python', 'robotArm']);
+    expect(Object.keys(CUSTOM_TREES).sort()).toEqual(['python']);
+  });
+
+  it('the hand-drawn robot arms are gone: a robot is a render of its real URDF (RobotGlyph)', () => {
+    expect(isIconName('robotArm')).toBe(false);
+    expect(isIconName('leaderArm')).toBe(false);
+    expect(TOAST_ICON_KINDS).not.toContain('arm');
   });
 });
 
@@ -356,6 +346,28 @@ describe('toastIcon', () => {
 
   it('throws on an unknown kind', () => {
     expect(() => toastIcon('no-such-kind')).toThrow(/Unknown toast icon kind/);
+  });
+
+  // The robot toast draws the arm of the robot the student started with: the
+  // real URDF's glyph, by profile id, and none while the profile is unknown.
+  it.each([
+    ['omx_full', 'omx_f'], ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
+  ])('the `arm` kind draws the %s robot\'s arm (%s), one cached element per glyph', (profile, glyph) => {
+    const el = toastIcon(ROBOT_TOAST_KIND, { profile });
+    expect(React.isValidElement(el)).toBe(true);
+    expect(toastIcon(ROBOT_TOAST_KIND, { profile })).toBe(el);
+    const { container } = render(el);
+    const mark = container.querySelector('[data-robot-glyph]');
+    expect(mark.getAttribute('data-robot-glyph')).toBe(glyph);
+    expect(container.querySelector('svg')).toBeNull(); // no hand-drawn glyph anywhere
+  });
+
+  it.each([undefined, null, '', 'omx_f', 'nonsense'])('the `arm` kind with the profile %j draws NO robot', (profile) => {
+    expect(toastIcon(ROBOT_TOAST_KIND, { profile })).toBeUndefined();
+  });
+
+  it('the `arm` kind without a profile draws no robot either', () => {
+    expect(toastIcon(ROBOT_TOAST_KIND)).toBeUndefined();
   });
 });
 

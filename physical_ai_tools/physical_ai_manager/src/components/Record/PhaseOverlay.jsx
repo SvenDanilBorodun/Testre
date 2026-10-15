@@ -9,12 +9,14 @@
 // The Aufwärmen / Zurücksetzen overlay over the cameras (spec §3.5, the owner's
 // timed-only phase design): a countdown ring with the seconds left, the phase
 // name, one line of what to do, what comes next, and a small moving picture —
-// the hand on the Leader-Arm while warming up, the arm and the cube going back
-// to the start mark while resetting. The last three seconds pop with each new
+// the real Leader-Arm and Follower-Arm while warming up, the real arm and the
+// cube going back to the start mark while resetting (PhasePicture.jsx: a sprite
+// strip rendered from the robot's URDF, nothing drawn by hand; no picture while
+// the robot's profile is unknown). The last three seconds pop with each new
 // number; the first frame of a recording shows „Los!" (Sucher M16: serif
 // italic with an orange underline sweeping in, 950 ms).
 //
-// The ring and the pictograms are drawn inline, as illustrations
+// The ring and the orbit arrow are drawn inline, as illustrations
 // (noIconGlyphs.test.js::INLINE_SVG_ALLOWED names this file). The ring moves
 // every animation frame through `subscribeFrame` and refs, never React state.
 // Under reduced motion the ring steps once per second from `secondsLeft`, the
@@ -25,6 +27,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
+import PhasePicture from './PhasePicture';
 import { PHASE_COLOR } from './PhaseTrack';
 
 export const RING_CIRCUMFERENCE = 552.92; // 2π · 88
@@ -37,7 +40,8 @@ export const LOS_MS = 950;
  * yet) and the next line names the NEXT one („Episode n+1 von N").
  * `copy` supplies the German sentences: {warmKicker, warmTitle, warmLine,
  * resetKicker(n), resetTitle, resetLine, next(n, N, E) → {pre, bold, post},
- * pictoLeader, pictoBack}.
+ * pictoLeader, pictoFollower, pictoBack}; the picture's chips are `picto`
+ * (the Leader-Arm / the start mark) and, warming up only, `pictoFollower`.
  */
 export function overlayText(phase, { saved = 0, total = 0, episodeTime = 0 } = {}, copy) {
   if (phase !== 'warmup' && phase !== 'reset') return null;
@@ -49,6 +53,7 @@ export function overlayText(phase, { saved = 0, total = 0, episodeTime = 0 } = {
       line: copy.warmLine,
       next,
       picto: copy.pictoLeader,
+      pictoFollower: copy.pictoFollower,
     };
   }
   return {
@@ -58,37 +63,6 @@ export function overlayText(phase, { saved = 0, total = 0, episodeTime = 0 } = {
     next,
     picto: copy.pictoBack,
   };
-}
-
-function WarmupPicture({ label }) {
-  return (
-    <svg className="rec-picto" viewBox="0 0 190 96" aria-hidden="true" data-picto="warmup">
-      <rect x="10" y="80" width="170" height="4" rx="2" fill="#34302B" />
-      <g stroke="#F2EDE4" strokeWidth="6" strokeLinecap="round" fill="none"><path d="M40 78 V40 L80 30" /></g>
-      <circle cx="40" cy="40" r="5" fill="var(--c)" />
-      <circle cx="80" cy="30" r="5" fill="var(--c)" />
-      <g className="rec-p-hand">
-        <path d="M86 44 q10 -22 26 -10 l8 6 q6 5 0 10 l-16 8 q-12 4 -18 -14z" fill="var(--c)" opacity=".95" />
-      </g>
-      <text x="120" y="76" fill="#9C9488" fontSize="12" fontFamily="Host Grotesk, sans-serif">{label}</text>
-    </svg>
-  );
-}
-
-function ResetPicture({ label }) {
-  return (
-    <svg className="rec-picto" viewBox="0 0 190 96" aria-hidden="true" data-picto="reset">
-      <rect x="10" y="80" width="170" height="4" rx="2" fill="#34302B" />
-      <rect x="52" y="64" width="16" height="16" rx="2" fill="none" stroke="#9C9488" strokeWidth="1.5" strokeDasharray="3 3" />
-      <g className="rec-p-cube"><rect x="53" y="65" width="14" height="14" rx="2" fill="#FF7A3D" /></g>
-      <g className="rec-p-arm">
-        <path d="M40 78 V38" stroke="#F2EDE4" strokeWidth="6" strokeLinecap="round" />
-        <path d="M40 38 L70 28" stroke="#F2EDE4" strokeWidth="6" strokeLinecap="round" />
-        <circle cx="40" cy="38" r="5" fill="var(--c)" />
-      </g>
-      <text x="96" y="30" fill="#9C9488" fontSize="12" fontFamily="Host Grotesk, sans-serif">{label}</text>
-    </svg>
-  );
 }
 
 function NextLine({ next }) {
@@ -112,6 +86,7 @@ export default function PhaseOverlay({
   recording = false,
   losText = '',
   reducedMotion = false,
+  profile = null,
 }) {
   const shown = (phase === 'warmup' || phase === 'reset') && totalS > 0 && !!text;
   // Keep what was shown while the overlay fades out (.3 s).
@@ -202,7 +177,11 @@ export default function PhaseOverlay({
               <span className="rec-ov-kicker">{t.kicker}</span>
               <div className="rec-ov-title">{t.title}</div>
               <div className="rec-ov-line">{t.line}</div>
-              {view.phase === 'warmup' ? <WarmupPicture label={t.picto} /> : <ResetPicture label={t.picto} />}
+              {view.phase === 'warmup' ? (
+                <PhasePicture profile={profile} kind="warmup" labels={{ leader: t.picto, follower: t.pictoFollower }} />
+              ) : (
+                <PhasePicture profile={profile} kind="reset" labels={{ mark: t.picto }} />
+              )}
               <NextLine next={t.next} />
             </div>
           </div>

@@ -161,9 +161,9 @@ function baseProps(over = {}) {
   };
 }
 
-function setState({ collision = false, items = [] } = {}) {
+function setState({ collision = false, items = [], robotProfile = '' } = {}) {
   mockState = {
-    tasks: { collision: { active: collision } },
+    tasks: { collision: { active: collision }, taskStatus: { robotProfile } },
     studioAssets: { trajectories: { workflowId: 'wf-1', status: 'ready', items, error: null, fetchedAt: 1 } },
   };
 }
@@ -1684,7 +1684,8 @@ describe('TeachOverlay — one focused window per kind', () => {
     }
   });
 
-  test('the mode badge carries the hand or the leader-arm icon', () => {
+  test('the mode chip carries the hand, or the REAL leader arm of the robot the student started with', () => {
+    setState({ robotProfile: 'omx_full' });
     withSnapshot({ state: 'fest' });
     const { unmount: unmountHand } = render(<TeachOverlay {...baseProps()} />);
     const badge = screen.getByText(DE.TEACH_MODE_HAND).parentElement; // eslint-disable-line testing-library/no-node-access
@@ -1693,7 +1694,18 @@ describe('TeachOverlay — one focused window per kind', () => {
     withSnapshot({ state: 'bereit' });
     render(<TeachOverlay {...baseProps({ mode: 'leader', caps: { has_leader: true }, rsBridge: LEADER_BRIDGE })} />);
     const leader = screen.getByText(DE.TEACH_MODE_LEADER).parentElement; // eslint-disable-line testing-library/no-node-access
-    expect(leader.querySelector('svg[data-icon="leaderArm"]')).not.toBeNull(); // eslint-disable-line testing-library/no-node-access
+    expect(leader.querySelector('[data-robot-glyph="omx_l"]')).not.toBeNull(); // eslint-disable-line testing-library/no-node-access
+    // The „ECHTER ROBOTER" badge beside it draws the follower arm of the same robot.
+    expect(screen.getByTestId('mode-badge').querySelector('[data-robot-glyph="omx_f"]')).not.toBeNull(); // eslint-disable-line testing-library/no-node-access
+  });
+
+  test('an unknown profile draws no robot at all: the chip and the badge keep their words', () => {
+    setState({ robotProfile: '' });
+    withSnapshot({ state: 'bereit' });
+    render(<TeachOverlay {...baseProps({ mode: 'leader', caps: { has_leader: true }, rsBridge: LEADER_BRIDGE })} />);
+    expect(document.querySelector('[data-robot-glyph]')).toBeNull(); // eslint-disable-line testing-library/no-node-access
+    expect(screen.getByText(DE.TEACH_MODE_LEADER)).toBeInTheDocument();
+    expect(screen.getByTestId('mode-badge')).toBeInTheDocument();
   });
 });
 

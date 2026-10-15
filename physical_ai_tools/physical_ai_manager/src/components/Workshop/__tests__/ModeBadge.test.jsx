@@ -37,14 +37,14 @@ beforeEach(() => {
 const dotOf = (badge) => badge.querySelector('[data-icon="dot"]');
 
 describe('ModeBadge', () => {
-  test('real mode: orange, „ECHTER ROBOTER", the arm icon and its title', () => {
-    render(<ModeBadge simMode={false} />);
+  test('real mode: orange, „ECHTER ROBOTER", the real arm of the robot and its title', () => {
+    render(<ModeBadge simMode={false} profile="omx_full" />);
     const badge = screen.getByTestId('mode-badge');
     expect(badge).toHaveTextContent(MODE_DE.BADGE_REAL);
     expect(badge.style.background).toBe('rgb(194, 65, 12)');
     expect(badge).toHaveAttribute('title', MODE_DE.BADGE_REAL_TITLE);
     // eslint-disable-next-line testing-library/no-node-access
-    expect(badge.querySelector('[data-icon="robotArm"]')).not.toBeNull();
+    expect(badge.querySelector('[data-robot-glyph="omx_f"]')).not.toBeNull();
     // Literal uppercase, never CSS `uppercase`.
     expect(badge.className).not.toContain('uppercase');
     expect(MODE_DE.BADGE_REAL).toBe('ECHTER ROBOTER');
@@ -104,6 +104,22 @@ describe('ModeBadge', () => {
     expect(badge).toHaveTextContent(/^ECHTER ROBOTER$/);
     expect(dotOf(badge)).toBeNull();
     expect(mockSelectorCalls).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['omx_full', 'omx_f'], ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
+  ])('the real-mode badge of %s draws the real %s arm', (profile, glyph) => {
+    render(<ModeBadge simMode={false} withRunState={false} profile={profile} />);
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(screen.getByTestId('mode-badge').querySelector(`[data-robot-glyph="${glyph}"]`)).not.toBeNull();
+  });
+
+  test.each([null, undefined, '', 'omx_f', 'toString'])('an unknown profile (%j) draws NO robot — words only', (profile) => {
+    render(<ModeBadge simMode={false} withRunState={false} profile={profile} />);
+    const badge = screen.getByTestId('mode-badge');
+    // eslint-disable-next-line testing-library/no-node-access
+    expect(badge.querySelector('[data-robot-glyph]')).toBeNull();
+    expect(badge).toHaveTextContent(/^ECHTER ROBOTER$/);
   });
 
   test('getByText("Simulator") (exact) never matches the badge', () => {

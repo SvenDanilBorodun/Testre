@@ -22,6 +22,7 @@ import {
   HomeGlideProvider,
   useHomeGlide,
 } from '../HomeGlidePrompt';
+import { toastIcon } from '../../icons/toast';
 
 const mockRos = vi.hoisted(() => ({
   homeArm: vi.fn(),
@@ -106,6 +107,28 @@ describe('HomeGlidePrompt', () => {
     await advance(HOME_GLIDE_COUNTDOWN_S * 3000);
     expect(mockRos.homeArm).not.toHaveBeenCalled();
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  // The „stays here" toast draws the arm of the robot the student started with
+  // (its real URDF, by profile id) — and no robot at all while that is unknown.
+  test.each([
+    ['omx_full', 'omx_f'], ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
+  ])('„Hier stehen lassen" toasts with the %s arm', (profile, glyph) => {
+    render(<HomeGlideProvider robotProfile={profile}><Offerer /></HomeGlideProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Hier stehen lassen' }));
+    expect(mockToast).toHaveBeenCalledTimes(1);
+    const [text, opts] = mockToast.mock.calls[0];
+    expect(text).toBe('Der Arm bleibt an seiner Position.');
+    expect(opts.icon).toBe(toastIcon('arm', { profile }));
+    const { container } = render(opts.icon);
+    // eslint-disable-next-line testing-library/no-container, testing-library/no-node-access
+    expect(container.querySelector('[data-robot-glyph]').getAttribute('data-robot-glyph')).toBe(glyph);
+  });
+
+  test('„Hier stehen lassen" with no known robot toasts WITHOUT a robot picture', () => {
+    render(<HomeGlideProvider><Offerer /></HomeGlideProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Hier stehen lassen' }));
+    expect(mockToast).toHaveBeenCalledWith('Der Arm bleibt an seiner Position.', { icon: undefined });
   });
 
   test('„Jetzt fahren" starts at once, and the countdown cannot start a second glide', async () => {

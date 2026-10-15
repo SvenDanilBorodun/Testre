@@ -6,27 +6,48 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 //
-// The small moving picture of the Aufwärmen / Zurücksetzen overlay: a sprite
-// strip rendered from the REAL robot (the shipped URDFs, poses from the
-// server's own IK — tools/frontend-harness/render-robot-pictures.sh), of the
-// robot the student started with. Warm-up: the student moves the Leader-Arm
-// and the Follower-Arm mirrors it. Reset: the arm and the 30 mm cube go back
-// to the dashed start mark. No live WebGL context (the Windows PCs have no
-// GPU) and no three.js: 24 frames in one lazy image, stepped by CSS
-// (record.css, `.rec-pic`). Under reduced motion the strip stands still on its
-// first frame. A profile with no picture, or none known yet, draws nothing.
+// The small picture of the Aufwärmen / Zurücksetzen overlay, rendered from the
+// REAL robot (the shipped URDFs, poses from the server's own IK —
+// tools/frontend-harness/render-robot-pictures.sh), of the robot the student
+// started with.
+//   * Warm-up: ONE still of the Leader-Arm and the Follower-Arm in the
+//     Grundstellung. Nothing moves: the student only takes the Leader in the
+//     hand and waits for „Los!" (moving it is for the episode). A hand (the
+//     registry's `hand`, then `grab`) opens, comes to the Leader's handle,
+//     closes and holds while a ring pulses around it (record.css, `.rec-pic-handle`).
+//   * Reset: 24 frames, stepped by CSS: both arms glide back to the Grundstellung
+//     (no object), and the „Ausgangslage" chip shows once they are there.
+// No live WebGL context (the Windows PCs have no GPU) and no three.js: one lazy
+// image. Under reduced motion the finished picture stands still (the hand holds
+// the Leader; the arms are home, the chip is there). A profile with no picture,
+// or none known yet, draws nothing.
 //
-// The labels are real text pinned to anchors measured in the render (fractions
-// of one frame), so they stay on the arm they name.
+// The labels and the hand are real elements pinned to anchors measured in the
+// render (fractions of one frame), so they stay on the arm they name.
 
 import React from 'react';
+import Icon from '../icons/Icon';
 import { phasePicture } from '../icons/robotAssets';
 
-function Chip({ anchor, text }) {
+const at = (anchor) => ({ left: `${anchor[0] * 100}%`, top: `${anchor[1] * 100}%` });
+
+function Chip({ anchor, text, arrive = false }) {
   if (!anchor || !text) return null;
   return (
-    <span className="rec-pic-chip" style={{ left: `${anchor[0] * 100}%`, top: `${anchor[1] * 100}%` }}>
+    <span className={arrive ? 'rec-pic-chip rec-pic-chip--arrive' : 'rec-pic-chip'} style={at(anchor)}>
       {text}
+    </span>
+  );
+}
+
+// The student's hand taking the Leader: an open hand, a closed one, a pulsing ring.
+function Handle({ anchor }) {
+  if (!anchor) return null;
+  return (
+    <span className="rec-pic-handle" style={at(anchor)} data-testid="rec-pic-handle">
+      <span className="rec-pic-ring" />
+      <Icon name="hand" className="rec-pic-hand" size="100%" />
+      <Icon name="grab" className="rec-pic-fist" size="100%" />
     </span>
   );
 }
@@ -34,7 +55,7 @@ function Chip({ anchor, text }) {
 /**
  * @param {?string} profile  the robot profile id (taskStatus.robotProfile)
  * @param {'warmup'|'reset'} kind
- * @param {{leader?: string, follower?: string, mark?: string}} labels  German chips
+ * @param {{leader?: string, follower?: string, home?: string}} labels  German chips
  */
 export default function PhasePicture({ profile, kind, labels = {} }) {
   const pic = phasePicture(profile, kind);
@@ -55,9 +76,10 @@ export default function PhasePicture({ profile, kind, labels = {} }) {
         <>
           <Chip anchor={a.leader} text={labels.leader} />
           <Chip anchor={a.follower} text={labels.follower} />
+          <Handle anchor={a.handle} />
         </>
       ) : (
-        <Chip anchor={a.mark} text={labels.mark} />
+        <Chip anchor={a.home} text={labels.home} arrive />
       )}
     </div>
   );

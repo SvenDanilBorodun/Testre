@@ -422,11 +422,16 @@
 .rec-ov-line { font-size: 17px; color: #E4DED3; line-height: 1.4; }
 .rec-ov-next { margin-top: 4px; font-size: 14px; color: #C9C1B5; }
 .rec-ov-next b { color: #F2EDE4; }
-/* The small picture of the overlay (PhasePicture.jsx): a sprite strip of the REAL robot, 24 frames side by side
- * in one image, stepped by CSS. The box takes its height from the frame's aspect ratio (set inline); the strip
- * is as wide as its frames (`--rec-frames`, set inline) and slides left by one box per step. Warm-up loops steadily; reset holds on its first
- * frame (cube away from the dashed mark), moves for 64 % of the loop and holds on its last (cube on the mark).
- * Reduced motion (below, and the page's .rec-reduced) leaves the strip on its first frame. */
+/* The small picture of the overlay (PhasePicture.jsx), rendered from the REAL robot's URDF.
+ * Warm-up is ONE still of the Leader and the Follower in the Grundstellung — nothing moves, the student is only to
+ * take the Leader in the hand — plus a hand (two icons) that opens, comes to the Leader's handle, closes and holds
+ * while a ring pulses around it. Reset is a 24-frame strip, stepped by CSS: both arms glide back to the
+ * Grundstellung (holds on its first frame, moves for 64 % of the loop, holds on its last) and the „Ausgangslage"
+ * chip appears when they arrive. The box takes its height from the frame's aspect ratio (set inline); the strip is
+ * as wide as its frames (`--rec-frames`, set inline) and slides left by one box per step.
+ * Every rule below that animates keeps its FINISHED state as the plain style, so reduced motion (below, and the
+ * page's .rec-reduced: `animation: none`) shows the arrived picture: the hand holding the Leader, the arms at
+ * home, the chip. */
 .rec-picto { margin-top: 6px; }
 /* 320 px wide at most, and never taller than the overlay can hold: on a short window (1366 × 768) the picture
  * gives up height first, so the kicker and the „Als Nächstes" line stay inside the stage. */
@@ -439,13 +444,47 @@
 /* The strip's width is DECLARED (frames × the box), never taken from the decoded image: a percentage translate on
  * an image that has not loaded yet resolves against 0 and the first loops would slide off the frame. */
 .rec-pic-strip { display: block; height: 100%; width: calc(var(--rec-frames, 24) * 100%); max-width: none; user-select: none; pointer-events: none; }
-.rec-pic-warmup .rec-pic-strip { animation: rec-pic-loop 2.4s steps(24) infinite; }
-.rec-pic-reset .rec-pic-strip { animation: rec-pic-reset 3.6s infinite; }
-@keyframes rec-pic-loop { to { transform: translateX(-100%); } }
+.rec-pic-reset .rec-pic-strip { transform: translateX(-95.8333%); animation: rec-pic-reset 3.6s infinite; }
 @keyframes rec-pic-reset {
   0% { transform: translateX(0); }
   14% { transform: translateX(0); animation-timing-function: steps(23, end); }
   78%, 100% { transform: translateX(-95.8333%); }
+}
+/* Warm-up: the hand that takes the Leader. Pinned to the Leader's last link (`.rec-pic-handle`, a zero-size
+ * anchor; every child is centred on it by its own negative margin so the animations are free to use transform).
+ * 3.2 s loop: an open hand fades in below-right of the handle, comes up to it, closes (the closed hand takes
+ * over), holds still while a ring pulses twice, then everything fades and starts again. */
+.rec-pic-handle { position: absolute; width: 0; height: 0; font-size: 24px; color: var(--c); pointer-events: none; }
+.rec-pic-handle > * { position: absolute; left: 0; top: 0; }
+.rec-pic-hand, .rec-pic-fist { width: 1.5em; height: 1.5em; margin: -.75em 0 0 -.75em; stroke-width: 2.2; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .7)); }
+.rec-pic-hand { opacity: 0; animation: rec-pic-hand 3.2s infinite; }
+.rec-pic-fist { opacity: 1; animation: rec-pic-fist 3.2s infinite; }
+.rec-pic-ring { width: 2em; height: 2em; margin: -1em 0 0 -1em; border: 2px solid var(--c); border-radius: 50%; opacity: .5; animation: rec-pic-ring 3.2s infinite; }
+@keyframes rec-pic-hand {
+  0% { opacity: 0; transform: translate(34px, 24px); }
+  10% { opacity: 1; transform: translate(34px, 24px); animation-timing-function: ease-out; }
+  32% { opacity: 1; transform: translate(0, 0); }
+  34%, 100% { opacity: 0; transform: translate(0, 0); }
+}
+@keyframes rec-pic-fist {
+  0%, 33% { opacity: 0; transform: scale(1.12); }
+  38% { opacity: 1; transform: scale(.92); }
+  44% { opacity: 1; transform: scale(1); }
+  88% { opacity: 1; transform: scale(1); }
+  96%, 100% { opacity: 0; transform: scale(1); }
+}
+@keyframes rec-pic-ring {
+  0%, 36% { opacity: 0; transform: scale(.7); }
+  40% { opacity: .9; transform: scale(.9); }
+  62% { opacity: 0; transform: scale(1.9); }
+  64% { opacity: .9; transform: scale(.9); }
+  88%, 100% { opacity: 0; transform: scale(1.9); }
+}
+/* Reset: the chip names the pose the arms come to, and shows once they are there. */
+.rec-pic-chip--arrive { animation: rec-pic-arrive 3.6s infinite; }
+@keyframes rec-pic-arrive {
+  0%, 74% { opacity: 0; }
+  84%, 100% { opacity: 1; }
 }
 .rec-pic-chip {
   position: absolute;
@@ -1251,6 +1290,10 @@ select.rec-mini { padding-right: 28px; }
 .rec-page.rec-reduced .rec-halo,
 .rec-page.rec-reduced .rec-orbit,
 .rec-page.rec-reduced .rec-pic-strip,
+.rec-page.rec-reduced .rec-pic-hand,
+.rec-page.rec-reduced .rec-pic-fist,
+.rec-page.rec-reduced .rec-pic-ring,
+.rec-page.rec-reduced .rec-pic-chip--arrive,
 .rec-page.rec-reduced .rec-epd.cur,
 .rec-page.rec-reduced .rec-epd.fresh,
 .rec-page.rec-reduced .rec-blink,
@@ -1278,6 +1321,10 @@ select.rec-mini { padding-right: 28px; }
   .rec-halo,
   .rec-orbit,
   .rec-pic-strip,
+  .rec-pic-hand,
+  .rec-pic-fist,
+  .rec-pic-ring,
+  .rec-pic-chip--arrive,
   .rec-epd.cur,
   .rec-epd.fresh,
   .rec-blink,

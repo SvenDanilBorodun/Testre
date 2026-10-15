@@ -67,6 +67,7 @@ import {
   LuFolderOpen,
   LuGamepad2,
   LuGitCompareArrows,
+  LuGrab,
   LuGraduationCap,
   LuGripHorizontal,
   LuGripVertical,
@@ -139,6 +140,7 @@ export const ICONS = Object.freeze({
   pose: LuMapPin,
   ziel: LuTarget,
   hand: LuHand,
+  grab: LuGrab,
   lock: LuLock,
   lockOpen: LuLockOpen,
 

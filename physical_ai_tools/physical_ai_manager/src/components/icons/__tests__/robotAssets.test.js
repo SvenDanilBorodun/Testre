@@ -134,17 +134,24 @@ describe('the shipped files are the ones robotAssets.js describes', () => {
       expect(h).toBe(pic.height);
       expect(w).toBeLessThanOrEqual(16383); // WebP's hard limit
       expect(bytes).toBeLessThanOrEqual(300 * 1024);
-      // record.css steps(24) / 23 / 95.8333 % for the strips; the collision picture is one still
-      expect(pic.frames).toBe(kind === 'collision' ? 1 : 24);
+      // record.css steps through the 24 frames of the reset strip; warm-up and collision are one still each
+      expect(pic.frames).toBe(kind === 'reset' ? 24 : 1);
     }
   );
 
-  it('record.css steps through exactly the strips\' 24 frames, and holds the reset on its last one', () => {
+  it('record.css steps through the reset strip\'s 24 frames and holds it on its last one; warm-up is a still', () => {
     const css = fs.readFileSync(path.resolve(__dirname, '../../Record/record.css'), 'utf8');
-    expect(css).toMatch(/\.rec-pic-warmup \.rec-pic-strip \{ animation: rec-pic-loop [\d.]+s steps\(24\) infinite; \}/);
     // ONE keyframe rule carries both the value and the steps(): split in two, Chrome drops the easing
     expect(css).toMatch(/14% \{ transform: translateX\(0\); animation-timing-function: steps\(23, end\); \}/);
     expect(css).toContain('translateX(-95.8333%)'); // 23 / 24 of the strip: frame index 23
+    // the warm-up picture is a single frame: its strip never moves, only the hand does
+    expect(css).not.toMatch(/\.rec-pic-warmup \.rec-pic-strip \{ animation/);
+    expect(css).not.toContain('rec-pic-loop');
+    for (const kf of ['rec-pic-hand', 'rec-pic-fist', 'rec-pic-ring', 'rec-pic-arrive']) expect(css).toContain(`@keyframes ${kf}`);
+    // every animated piece is switched off under reduced motion (page switch and media query) and then shows its finished state
+    for (const sel of ['.rec-pic-hand', '.rec-pic-fist', '.rec-pic-ring', '.rec-pic-chip--arrive']) {
+      expect(css).toContain(`.rec-page.rec-reduced ${sel},`);
+    }
     for (const gone of ['rec-p-arm', 'rec-p-cube', 'rec-p-hand']) expect(css).not.toContain(gone);
   });
 

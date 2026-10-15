@@ -20,9 +20,10 @@
 //   * the glyph sheet `glyphs.png`: five 64 px tonal alpha cells (RobotGlyph
 //     paints one with CSS mask-image in `currentColor`, like a Lucide icon);
 //   * the phase pictures, sprite strips and a still: Aufnahme's warm-up and
-//     reset, and the collision modal's. They exist only for a profile that
-//     reaches that screen (recording and the collision e-stop are `omx_full`
-//     only), so `phasePicture` answers null for every other profile.
+//     reset, and the collision modal's (warm-up is one still, reset 24
+//     frames). They exist only for a profile that reaches that screen
+//     (recording and the collision e-stop are `omx_full` only), so
+//     `phasePicture` answers null for every other profile.
 //
 // All of it is rendered by tools/frontend-harness/render-robot-pictures.sh
 // (dev only, deterministic). The numbers below are that script's output; the
@@ -67,16 +68,19 @@ const strip = (file, frames, width, height, anchors) => Object.freeze({
 
 export const PHASE_PICTURES = Object.freeze({
   omx_full: Object.freeze({
-    warmup: strip('rec-warmup-omx_full.webp', 24, 400, 204, {
-      follower: [0.4923, 0.7157],
-      leader: [0.214, 0.486],
+    // One still (nothing moves while warming up); `handle` is where the hand takes the Leader.
+    warmup: strip('rec-warmup-omx_full.webp', 1, 400, 182, {
+      follower: [0.4923, 0.6814],
+      handle: [0.3117, 0.0868],
+      leader: [0.214, 0.4239],
     }),
+    // Both arms glide back to the Grundstellung; `home` is under the Follower's base.
     reset: strip('rec-reset-omx_full.webp', 24, 400, 203, {
-      mark: [0.6617, 0.7751],
+      home: [0.4923, 0.7142],
     }),
     collision: strip('collision-omx_full.webp', 1, 440, 277, {
-      ghost: [0.7186, 0.7158],
-      obstacle: [0.6126, 0.5771],
+      ghost: [0.7133, 0.7234],
+      obstacle: [0.6073, 0.5846],
     }),
   }),
 });

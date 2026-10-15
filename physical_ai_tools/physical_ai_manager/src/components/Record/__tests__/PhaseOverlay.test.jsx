@@ -24,7 +24,7 @@ const COPY = {
   next: (n, N, E) => ({ pre: 'Als Nächstes: ', bold: `Episode ${n} von ${N}`, post: ` · ${E} s Aufnahme` }),
   pictoLeader: 'Leader-Arm',
   pictoFollower: 'Follower-Arm',
-  pictoBack: 'zurück zum Start',
+  pictoBack: 'Ausgangslage',
 };
 
 function frameClock() {
@@ -53,7 +53,7 @@ describe('overlayText — the F6d wording rule', () => {
     const t = overlayText('reset', { saved: 2, total: 5, episodeTime: 12 }, COPY);
     expect(t.kicker).toBe('Nach Episode 2');
     expect(t.next.bold).toBe('Episode 3 von 5');
-    expect(t.picto).toBe('zurück zum Start');
+    expect(t.picto).toBe('Ausgangslage');
     expect(t.pictoFollower).toBeUndefined();
   });
 
@@ -88,11 +88,11 @@ describe('PhaseOverlay', () => {
     expect(screen.getByTestId('rec-num')).toHaveTextContent('5s');
   });
 
-  it('reset: orbit instead of halos, the way-back picture, „Nach Episode n"', () => {
+  it('reset: orbit instead of halos, the way-home picture, „Nach Episode n"', () => {
     render(<PhaseOverlay phase="reset" text={reset} totalS={6} secondsLeft={6} profile="omx_full" />);
     expect(screen.getByText('Nach Episode 1')).toBeInTheDocument();
     expect(screen.getByText('Episode 2 von 5')).toBeInTheDocument();
-    expect(screen.getByText('zurück zum Start')).toBeInTheDocument();
+    expect(screen.getByText('Ausgangslage')).toBeInTheDocument();
     expect(screen.getByTestId('rec-orbit')).toBeInTheDocument();
     expect(screen.queryByTestId('rec-halo')).toBeNull();
   });
@@ -109,10 +109,27 @@ describe('PhaseOverlay', () => {
       expect(leader.style.left).toBe(`${PHASE_PICTURES.omx_full.warmup.anchors.leader[0] * 100}%`);
     });
 
-    it('reset shows its own strip, with the way-back chip at the start mark', () => {
+    it('warm-up is one still (nothing moves) with a hand that takes the Leader\'s handle', () => {
+      render(<PhaseOverlay phase="warmup" text={warm} totalS={5} secondsLeft={5} profile="omx_full" />);
+      expect(PHASE_PICTURES.omx_full.warmup.frames).toBe(1);
+      const handle = screen.getByTestId('rec-pic-handle');
+      const { handle: anchor } = PHASE_PICTURES.omx_full.warmup.anchors;
+      expect(handle.style.left).toBe(`${anchor[0] * 100}%`);
+      expect(handle.style.top).toBe(`${anchor[1] * 100}%`);
+      // the open hand, the closed hand and the ring
+      expect(handle.querySelectorAll('svg')).toHaveLength(2); // eslint-disable-line testing-library/no-node-access
+      expect(handle.querySelector('.rec-pic-ring')).not.toBeNull(); // eslint-disable-line testing-library/no-node-access
+    });
+
+    it('reset shows its own strip, with the „Ausgangslage" chip where the arms end and no object, no hand', () => {
       render(<PhaseOverlay phase="reset" text={reset} totalS={6} secondsLeft={6} profile="omx_full" />);
       expect(imgOf().getAttribute('src')).toBe(`/robots/${PHASE_PICTURES.omx_full.reset.file}`);
-      expect(screen.getByText('zurück zum Start').style.top).toBe(`${PHASE_PICTURES.omx_full.reset.anchors.mark[1] * 100}%`);
+      const chip = screen.getByText('Ausgangslage');
+      expect(chip.style.top).toBe(`${PHASE_PICTURES.omx_full.reset.anchors.home[1] * 100}%`);
+      expect(chip).toHaveClass('rec-pic-chip--arrive'); // it appears when the arms have arrived
+      expect(screen.queryByText('zurück zum Start')).toBeNull();
+      expect(screen.queryByTestId('rec-pic-handle')).toBeNull();
+      expect(PHASE_PICTURES.omx_full.reset.anchors.mark).toBeUndefined(); // the cube and its mark are gone
     });
 
     it.each([null, undefined, '', 'omx_f', 'edu6_studio', 'edu1_studio', 'omx_follower'])(

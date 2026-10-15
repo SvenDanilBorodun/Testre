@@ -111,7 +111,7 @@ export const RECORD_COPY = Object.freeze({
     next: (n, N, E) => ({ pre: 'Als Nächstes: ', bold: `Episode ${n} von ${N}`, post: ` · ${E} s Aufnahme` }),
     pictoLeader: 'Leader-Arm',
     pictoFollower: 'Follower-Arm',
-    pictoBack: 'zurück zum Start',
+    pictoBack: 'Ausgangslage',
     los: 'Los!',
   }),
 

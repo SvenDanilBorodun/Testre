@@ -9,10 +9,11 @@
 // The Aufwärmen / Zurücksetzen overlay over the cameras (spec §3.5, the owner's
 // timed-only phase design): a countdown ring with the seconds left, the phase
 // name, one line of what to do, what comes next, and a small moving picture —
-// the real Leader-Arm and Follower-Arm while warming up, the real arm and the
-// cube going back to the start mark while resetting (PhasePicture.jsx: a sprite
-// strip rendered from the robot's URDF, nothing drawn by hand; no picture while
-// the robot's profile is unknown). The last three seconds pop with each new
+// the real Leader-Arm and Follower-Arm standing still while warming up (the
+// student takes the Leader in the hand and waits for „Los!"), both arms going
+// back to the Grundstellung while resetting (PhasePicture.jsx: rendered from the
+// robot's URDF, nothing drawn by hand; no picture while the robot's profile is
+// unknown). The last three seconds pop with each new
 // number; the first frame of a recording shows „Los!" (Sucher M16: serif
 // italic with an orange underline sweeping in, 950 ms).
 //
@@ -41,7 +42,7 @@ export const LOS_MS = 950;
  * `copy` supplies the German sentences: {warmKicker, warmTitle, warmLine,
  * resetKicker(n), resetTitle, resetLine, next(n, N, E) → {pre, bold, post},
  * pictoLeader, pictoFollower, pictoBack}; the picture's chips are `picto`
- * (the Leader-Arm / the start mark) and, warming up only, `pictoFollower`.
+ * (the Leader-Arm / the Ausgangslage) and, warming up only, `pictoFollower`.
  */
 export function overlayText(phase, { saved = 0, total = 0, episodeTime = 0 } = {}, copy) {
   if (phase !== 'warmup' && phase !== 'reset') return null;
@@ -180,7 +181,7 @@ export default function PhaseOverlay({
               {view.phase === 'warmup' ? (
                 <PhasePicture profile={profile} kind="warmup" labels={{ leader: t.picto, follower: t.pictoFollower }} />
               ) : (
-                <PhasePicture profile={profile} kind="reset" labels={{ mark: t.picto }} />
+                <PhasePicture profile={profile} kind="reset" labels={{ home: t.picto }} />
               )}
               <NextLine next={t.next} />
             </div>

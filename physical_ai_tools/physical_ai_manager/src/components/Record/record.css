@@ -405,7 +405,13 @@
 }
 .rec-num.pop > span { display: inline-block; animation: rec-numpop .25s ease-out; }
 @keyframes rec-numpop { from { transform: scale(1.35); opacity: .4; } to { transform: scale(1); opacity: 1; } }
-.rec-num small { font-family: var(--rec-serif); font-style: italic; font-size: 30px; font-weight: 400; margin-left: 2px; opacity: .8; }
+/* The unit takes NO width: only the digits are centred in the ring and the „s" hangs off their right side, on the
+ * same baseline (a zero-width inline-block keeps the baseline of its text and lets it overflow; text-indent, not a
+ * margin, spaces it, so it stays zero wide). The digits' INK sits left of their box (the trailing letter-spacing and the
+ * Doto glyphs' own side bearings, measured at 88 px), so the span is nudged right by that much: the ink, not the box,
+ * is what has to be on the ring's centre. */
+.rec-num > span { position: relative; left: .0625em; }
+.rec-num small { display: inline-block; width: 0; white-space: nowrap; text-indent: 2px; font-family: var(--rec-serif); font-style: italic; font-size: 30px; font-weight: 400; opacity: .8; }
 .rec-ov-text { max-width: 380px; display: flex; flex-direction: column; gap: 8px; }
 .rec-ov-kicker {
   display: inline-flex;

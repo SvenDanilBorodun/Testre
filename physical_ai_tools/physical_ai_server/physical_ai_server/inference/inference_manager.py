@@ -25,6 +25,9 @@ from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.utils.control_utils import predict_action
 import numpy as np
 from physical_ai_server.data_processing import dataset_paths
+from physical_ai_server.inference.chunk_engine import PROCESSOR_STEPS_REFUSED_DE
+from physical_ai_server.inference.chunk_engine import ProcessorStepsRefused
+from physical_ai_server.inference.chunk_engine import validate_processor_steps
 from physical_ai_server.utils.file_utils import read_json_file
 import torch
 
@@ -47,6 +50,9 @@ class InferenceManager:
         self.preprocessor = None
         self.postprocessor = None
         self._expected_image_keys = []
+        # The German reason of the last failed load_policy() when it has one of its own (S17,
+        # the processor allowlist); None otherwise. _eager_load_policy shows it to the student.
+        self.last_load_error = None
 
     # Policies that consume a natural-language task instruction (the React
     # Aufgabenanweisung). Mirrors the upstream language-conditioned set; used
@@ -153,6 +159,7 @@ class InferenceManager:
         return True, f'Policy {policy_type} is valid.'
 
     def load_policy(self):
+        self.last_load_error = None
         # CUDA check moved here from __init__: failing the constructor
         # would also break recording-mode init (see __init__ comment).
         # Returning False keeps the ROS node alive so the operator can
@@ -167,6 +174,7 @@ class InferenceManager:
             )
             return False
         try:
+            validate_processor_steps(self.policy_path)
             policy_cls = self._get_policy_class(self.policy_type)
             self.policy = policy_cls.from_pretrained(self.policy_path)
             self.policy.to(self.device)
@@ -189,6 +197,13 @@ class InferenceManager:
             self.reset_policy()
             self._expected_image_keys = self._read_expected_image_keys()
             return True
+        except ProcessorStepsRefused as e:
+            # The model was trained on a GPU host we do not trust (RunPod spec §4.10): its
+            # processor JSONs or config.json name code, a repo or a file outside the robot's
+            # allowlist, so LeRobot never sees it. English detail to the log, S17 to the student.
+            print(f'Refused policy from {self.policy_path}: {e}', flush=True)
+            self.last_load_error = PROCESSOR_STEPS_REFUSED_DE
+            return False
         except Exception as e:
             print(f'Failed to load policy from {self.policy_path}: {e}')
             return False

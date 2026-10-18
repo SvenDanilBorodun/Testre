@@ -43,20 +43,22 @@ import DATEN_COPY from '../features/editDataset/datenCopy';
 import { moveToPage } from '../features/ui/uiSlice';
 import PageType from '../constants/pageType';
 
-function statusSubtitle(status) {
+// Names no provider (RunPod spec §4.11): a training runs on a RunPod GPU or on
+// Modal, whichever the API placed it on, so the monitor says „Cloud".
+export function statusSubtitle(status) {
   switch (status) {
     case 'queued':
-      return 'Wird eingereiht · Modal';
+      return 'Wird eingereiht · Cloud';
     case 'running':
-      return 'Live · aktualisiert laufend · Modal';
+      return 'Live · aktualisiert laufend · Cloud';
     case 'succeeded':
-      return 'Erfolgreich · Modal';
+      return 'Erfolgreich · Cloud';
     case 'failed':
-      return 'Fehlgeschlagen · Modal';
+      return 'Fehlgeschlagen · Cloud';
     case 'canceled':
-      return 'Abgebrochen · Modal';
+      return 'Abgebrochen · Cloud';
     default:
-      return 'Bereit · Modal';
+      return 'Bereit · Cloud';
   }
 }
 

@@ -79,6 +79,9 @@ class TheLock(unittest.TestCase):
         self.assertEqual(lock["draccus"], "0.10.0")
         self.assertTrue((1, 14) <= _version_tuple(lock["scipy"])[:2] < (1, 18), lock["scipy"])
         self.assertTrue((1, 10) <= _version_tuple(lock["accelerate"])[:2] < (2, 0), lock["accelerate"])
+        # E21: LeRobot 0.5.1's numpy range and datasets' fsspec cap, restored after the cu126 swap.
+        self.assertTrue((2, 0) <= _version_tuple(lock["numpy"])[:2] < (2, 3), lock["numpy"])
+        self.assertEqual(lock["fsspec"], "2026.2.0")
         for name in ("peft", "scipy", "av", "numpy", "datasets", "pyarrow", "huggingface-hub", "supabase",
                      "safetensors", "opencv-python-headless"):
             self.assertIn(name, lock)
@@ -104,6 +107,7 @@ class TheRecipe(unittest.TestCase):
         self.assertEqual(mtl.PYPI_SPECS, ("lerobot[pi,smolvla,peft]==0.5.1", "scipy>=1.14.0,<1.18",
                                           "accelerate>=1.10.0,<2.0.0", "huggingface_hub", "supabase"))
         self.assertEqual(mtl.TORCH_SPECS, ("torch==2.7.0", "torchvision==0.22.0"))
+        self.assertEqual(mtl.REPIN_SPECS, ("numpy>=2.0.0,<2.3.0", "fsspec==2026.2.0"))      # E21
         self.assertEqual(mtl.index_url, "https://download.pytorch.org/whl/cu126")
         self.assertEqual(mtl.APT_PACKAGES, ("gcc", "g++", "build-essential"))
         self.assertEqual(mtl.PLATFORM, "linux/amd64")
@@ -113,8 +117,21 @@ class TheRecipe(unittest.TestCase):
         script = mtl.build_script()
         order = [script.index(s) for s in ("apt-get install", "'lerobot[pi,smolvla,peft]==0.5.1'",
                                            "--index-url https://download.pytorch.org/whl/cu126 --force-reinstall",
-                                           "pip uninstall -y torchcodec", "pip freeze --all")]
+                                           "'numpy>=2.0.0,<2.3.0' 'fsspec==2026.2.0'",
+                                           "pip uninstall -y torchcodec", "pip check", "pip freeze --all")]
         self.assertEqual(order, sorted(order))
+        repin = next(ln for ln in script.splitlines() if "'fsspec==2026.2.0'" in ln)
+        self.assertNotIn("--index-url", repin, "the re-pin comes from PyPI, not the cu126 index")
+
+    def test_pip_check_must_be_clean_apart_from_the_deliberate_torchcodec_removal(self):
+        out = lambda *lines: ("x\n" + mtl._CHECK_MARK + "\n" + "\n".join(lines) + "\n"   # noqa: E731
+                              + mtl._FREEZE_MARK + "\nnumpy==2.2.6\n")
+        self.assertEqual(mtl.pip_check_problems(out("No broken requirements found.")), [])
+        self.assertEqual(mtl.pip_check_problems(out(*mtl.PIP_CHECK_ALLOWED)), [])
+        bad = "lerobot 0.5.1 has requirement numpy<2.3.0,>=2.0.0, but you have numpy 2.5.2."
+        self.assertEqual(mtl.pip_check_problems(out(mtl.PIP_CHECK_ALLOWED[0], bad)), [bad])
+        with self.assertRaises(ValueError):
+            mtl.pip_check_problems(mtl._FREEZE_MARK + "\nnumpy==2.2.6\n")
 
     def test_parse_freeze_drops_pip_and_normalises(self):
         out = "noise\n" + mtl._FREEZE_MARK + "\npip==25.0.1\nTyping_Extensions==4.16.0\nzz==1\naa.b==2\n"

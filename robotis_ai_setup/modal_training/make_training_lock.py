@@ -7,7 +7,9 @@ The recipe below is today's Modal sequence, written as quoted literals so
 tests/test_lerobot_pin_lockstep.py can read it as the training site of Rule §5:
 an apt build toolchain (LeRobot pulls in evdev, a C extension), the five PyPI
 specs, then torch + torchvision from the CUDA 12.6 wheel index with
---force-reinstall, then torchcodec removed (LeRobot decodes with PyAV).
+--force-reinstall, then LeRobot's numpy range and datasets' fsspec cap restored
+from PyPI (E21), then torchcodec removed (LeRobot decodes with PyAV). `pip check`
+must then be clean apart from that deliberate torchcodec removal.
 
 It runs inside the pinned amd64 python base (the trainer image's base), freezes
 everything that ended up installed (minus pip itself) and writes two files:
@@ -48,6 +50,17 @@ PYPI_SPECS = (
 TORCH_SPECS = ("torch==2.7.0", "torchvision==0.22.0")
 index_url = "https://download.pytorch.org/whl/cu126"
 
+# E21: the force-reinstall above re-resolves torch's shared deps from the cu126 index (numpy 2.5.2,
+# fsspec 2026.7.0 when this was written), outside LeRobot 0.5.1's numpy range and datasets 4.8.5's
+# fsspec cap. One PyPI step restores both, exactly as modal_inference/inference_app.py does (V1-10).
+REPIN_SPECS = ("numpy>=2.0.0,<2.3.0", "fsspec==2026.2.0")
+
+# `pip check` of the resolved environment must be clean except for this one deliberate line:
+# torchcodec is removed on purpose (LeRobot decodes with PyAV; CLAUDE.md Rule §5).
+PIP_CHECK_ALLOWED = (
+    "lerobot 0.5.1 requires torchcodec, which is not installed.",
+)
+
 # The one install command both images run (tests/test_training_lock.py holds both Dockerfiles to it).
 INSTALL_COMMAND = (
     "python -m pip install --no-cache-dir --no-deps -r {lock} "
@@ -59,6 +72,7 @@ LOCK_PATH = HERE / "training-lock.txt"
 HASH_PATH = HERE.parent / "cloud_training_api" / "app" / "services" / "training_lock_hash.py"
 
 _FREEZE_MARK = "=====EDUBOTICS-FREEZE====="
+_CHECK_MARK = "=====EDUBOTICS-PIP-CHECK====="
 
 
 def _q(s: str) -> str:
@@ -75,11 +89,23 @@ def build_script() -> str:
         "python -m pip install --no-cache-dir " + " ".join(_q(s) for s in PYPI_SPECS),
         "python -m pip install --no-cache-dir " + " ".join(_q(s) for s in TORCH_SPECS)
         + " --index-url " + index_url + " --force-reinstall",
+        "python -m pip install --no-cache-dir " + " ".join(_q(s) for s in REPIN_SPECS),
         "python -m pip uninstall -y torchcodec || true",
+        "echo " + _CHECK_MARK,
+        "python -m pip check || true",
         "echo " + _FREEZE_MARK,
         "python -m pip freeze --all",
     ]
     return "\n".join(lines) + "\n"
+
+
+def pip_check_problems(text: str) -> list[str]:
+    """The `pip check` lines between the two markers that are not PIP_CHECK_ALLOWED."""
+    if _CHECK_MARK not in text:
+        raise ValueError("the build script printed no pip check section")
+    section = text.split(_CHECK_MARK, 1)[1].split(_FREEZE_MARK, 1)[0]
+    lines = [ln.strip() for ln in section.splitlines() if ln.strip()]
+    return [ln for ln in lines if ln not in PIP_CHECK_ALLOWED and ln != "No broken requirements found."]
 
 
 def pep503(name: str) -> str:
@@ -144,6 +170,11 @@ def generate() -> int:
         sys.stderr.write(proc.stdout[-4000:] + "\n" + proc.stderr[-4000:] + "\n")
         print(f"docker run failed with exit {proc.returncode}", file=sys.stderr)
         return proc.returncode or 1
+    problems = pip_check_problems(proc.stdout)
+    if problems:
+        print("pip check found broken requirements:\n  " + "\n  ".join(problems), file=sys.stderr)
+        return 1
+    print("pip check: clean apart from " + "; ".join(PIP_CHECK_ALLOWED))
     entries = parse_freeze(proc.stdout)
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     lock_text = render_lock(entries, today)

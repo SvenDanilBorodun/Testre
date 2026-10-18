@@ -4,4 +4,4 @@ sha256 of modal_training/training-lock.txt. The worker sends the hash of the loc
 in POST .../start; any other value is refused as wrong_image.
 """
 
-TRAINING_LOCK_SHA256 = "a4aa235cb25107b0942a0dfead8537667e88f7c9e0bf1d37a09656c21e0c9ade"
+TRAINING_LOCK_SHA256 = "5ebfa82c4bea2cf0b5de14947f1074669b7ab7796b9cc49ded515707426730c2"

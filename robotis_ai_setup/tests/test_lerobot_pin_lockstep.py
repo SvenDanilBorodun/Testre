@@ -14,9 +14,13 @@ Before this test the repo had:
   - docker-publish's smoke-test, which asserts the image has ROS and is under a
     size ceiling but never asserts a package version.
 
-The gap that matters most is modal_app.py, because it is the one site whose
-drift is invisible until a student pays for it: the trainer and the recorder
-must agree on the dataset codebase version, so a modal-only bump surfaces at
+The gap that matters most is the training site, because it is the one whose
+drift is invisible until a student pays for it. Since the RunPod build (spec
+§3.10) that site is make_training_lock.py: it holds the recipe both training
+images install (as the generated training-lock.txt, fenced by
+test_training_lock.py), and modal_app.py no longer pins anything itself. The
+trainer and the recorder must agree on the dataset codebase version, so a
+training-only bump surfaces at
 TRAINING time as the German preflight error from training_handler.py — after
 the student recorded a dataset, queued a job and spent GPU credit.
 
@@ -44,10 +48,10 @@ _REPO_ROOT = _TESTS_DIR.parents[1]
 _PAS_DIR = _REPO_ROOT / "physical_ai_tools" / "physical_ai_server"
 
 # The six Rule §5 sites, keyed by the repo-relative label used in failures.
-MODAL_SITE = "robotis_ai_setup/modal_training/modal_app.py"
+MODAL_SITE = "robotis_ai_setup/modal_training/make_training_lock.py"
 INFERENCE_SITE = "robotis_ai_setup/modal_inference/inference_app.py"
 SITES = {
-    MODAL_SITE: _REPO_ROOT / "robotis_ai_setup" / "modal_training" / "modal_app.py",
+    MODAL_SITE: _REPO_ROOT / "robotis_ai_setup" / "modal_training" / "make_training_lock.py",
     INFERENCE_SITE: _REPO_ROOT / "robotis_ai_setup" / "modal_inference" / "inference_app.py",
     "physical_ai_tools/physical_ai_server/Dockerfile.amd64": _PAS_DIR / "Dockerfile.amd64",
     "physical_ai_tools/physical_ai_server/Dockerfile.arm64": _PAS_DIR / "Dockerfile.arm64",
@@ -132,7 +136,7 @@ class LeRobotPinLockstepTest(unittest.TestCase):
             )
             extras, version = "", plain.group(1)
         if version.startswith("{") and version.endswith("}"):
-            # modal_app.py builds the spec as f"lerobot[...]=={LEROBOT_VERSION}".
+            # make_training_lock.py builds the spec as f"lerobot[...]=={LEROBOT_VERSION}".
             const = _MODAL_VERSION_CONST_RE.search(self.code[name])
             self.assertIsNotNone(
                 const,

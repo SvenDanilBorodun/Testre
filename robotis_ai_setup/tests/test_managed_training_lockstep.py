@@ -37,7 +37,6 @@ that way by design; they pass once WP-B and WP-A are merged (merge order B -> A 
 
 import ast
 import copy
-import importlib.util
 import json
 import os
 import pathlib
@@ -46,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -373,9 +373,12 @@ def _text(path):
 
 
 def _load_by_path(name, path):
-    spec = importlib.util.spec_from_file_location(name, _require(path))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    """Execute a file's SOURCE as a fresh module: no sys.modules entry, and no __pycache__ read or
+    written (a cached .pyc keyed on mtime and size can outlive a same-size edit made within one
+    second, and this test must judge the file as it is now)."""
+    module = types.ModuleType(name)
+    module.__file__ = str(_require(path))
+    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
     return module
 
 

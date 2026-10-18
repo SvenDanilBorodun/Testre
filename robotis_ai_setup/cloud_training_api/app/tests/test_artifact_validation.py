@@ -370,6 +370,47 @@ class EveryRuleRefusesItsMutation(unittest.TestCase):
         self.assertEqual(AV.parse_json_bytes(b'{"step": 10}', "x"), {"step": 10})
 
 
+class OnlyItsOwnExceptions(unittest.TestCase):
+    """The three shared functions refuse with ArtifactRefused only — never a
+    TypeError or KeyError — whatever shape the input has (WP-C's lockstep
+    table runs them beside chunk_engine.validate_model_dir)."""
+
+    ODD = [None, 0, 1.5, True, "act", [], [1], {}, {"x": 1}, {1: 2}, {"shape": None}, {"shape": "3"},
+           {"type": "VISUAL", "shape": [3, "x", 4]}, {"dtype": "video", "shape": [1, 2, 3], "names": "abc"},
+           {"dtype": "video", "shape": [1, 2, 3], "names": [None, None]}, {"dtype": 5, "shape": []}]
+
+    def test_act_config_summary(self):
+        base = _load("omx_000010", "pretrained_model", "config.json")
+        cases = list(self.ODD)
+        for key in ("type", "n_obs_steps", "use_peft", "temporal_ensemble_coeff", "input_features",
+                    "output_features", "chunk_size", "n_action_steps"):
+            for odd in self.ODD:
+                cases.append(dict(base, **{key: copy.deepcopy(odd)}))
+        for odd in self.ODD:
+            cases.append(dict(base, input_features={"observation.state": odd, "observation.images.a": odd}))
+            cases.append(dict(base, output_features={"action": odd}))
+        for case in cases:
+            try:
+                AV.act_config_summary(case)
+            except AV.ArtifactRefused:
+                pass
+
+    def test_dataset_policy_features_and_act_feature_rules(self):
+        for odd in self.ODD:
+            for features in (odd, {"observation.state": odd}, {"observation.images.x": odd}, {"action": odd},
+                             {5: odd}):
+                try:
+                    inputs, outputs = AV.dataset_policy_features(copy.deepcopy(features))
+                    AV.act_feature_rules(inputs, outputs)
+                except AV.ArtifactRefused:
+                    pass
+            for a, b in ((odd, {}), ({}, odd), ({"observation.state": odd}, {"action": odd})):
+                try:
+                    AV.act_feature_rules(copy.deepcopy(a), copy.deepcopy(b))
+                except AV.ArtifactRefused:
+                    pass
+
+
 class DatasetFeatures(unittest.TestCase):
     """FR-5: the dataset's features through LeRobot's own map equal the
     config.json LeRobot wrote, and the robot's rules judge them before a credit."""

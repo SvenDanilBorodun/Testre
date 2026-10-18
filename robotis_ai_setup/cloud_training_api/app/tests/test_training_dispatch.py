@@ -904,6 +904,12 @@ class Reaper(Base):
         await D.reaper_tick()
         self.assertEqual(self.rp.patches(), [("M", {"locked": False})])
         self.assertNotIn("M", self.rp.pods)
+        self.rp.calls.clear()
+        self.rp.add_pod(id="N", name=f"{self.s.pod_prefix}-1-a3")
+        self.rp.delete_answers["N"] = [400]
+        await D.reaper_tick()
+        self.assertEqual(self.rp.patches(), [("N", {"locked": False})])
+        self.assertNotIn("N", self.rp.pods)
 
     async def test_no_unlock_after_401_403_429_and_survivors_are_errors(self):
         for status in (401, 403, 429):

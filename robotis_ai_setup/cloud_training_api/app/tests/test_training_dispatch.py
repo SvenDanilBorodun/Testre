@@ -1015,12 +1015,27 @@ class Supervisor(Base):
             await asyncio.wait_for(D.managed_supervisor(), 2)
         self.assertEqual(started, [1])
 
+    async def test_starting_the_loops_with_missing_variables_logs_an_error(self):
+        s = settings(TRAINING_DISPATCH="legacy", R2_BUCKET=None)
+        created = []
+        with patch.object(D, "SETTINGS", s), patch.object(asyncio, "create_task", lambda c: created.append(c.close()) or _Done()):
+            with self.assertLogs("app.services.training_dispatch", level="ERROR") as logs:
+                self.assertTrue(D.start_loops())
+        self.assertTrue(any("R2_BUCKET" in m for m in logs.output))
+        self.assertEqual(len(created), 5)
+        self.assertFalse(D.start_loops(), "once per process")
+
     async def test_legacy_without_managed_rows_waits(self):
         s = settings(TRAINING_DISPATCH="legacy")
         self.db.add_training(status="running", managed=False)
         with patch.object(D, "SETTINGS", s), patch.object(D, "start_loops", lambda: self.fail("started")):
             with self.assertRaises(asyncio.TimeoutError):
                 await asyncio.wait_for(D.managed_supervisor(), 0.2)
+
+
+class _Done:
+    def add_done_callback(self, cb):
+        pass
 
 
 class Helpers(unittest.TestCase):

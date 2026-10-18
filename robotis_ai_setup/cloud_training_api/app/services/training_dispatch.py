@@ -1774,6 +1774,11 @@ def start_loops() -> bool:
     if STATE.loops_started:
         return False
     STATE.loops_started = True
+    if SETTINGS.missing:
+        # §3.8: the loops run (a legacy deploy still drives the managed rows it left
+        # behind), but whatever needs these variables cannot work.
+        logger.error("managed training loops start with required variables missing: %s",
+                     ", ".join(SETTINGS.missing))
     _LOOP = asyncio.get_running_loop()
     _KICK = asyncio.Event()
     _keep(asyncio.create_task(_recheck_until_good("HF write check", hf_check_tick, lambda r: r is True)))

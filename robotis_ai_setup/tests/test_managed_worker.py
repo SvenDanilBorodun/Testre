@@ -288,6 +288,9 @@ class World:
     def bodies(self, action):
         return [b for a, b in self.calls if a == action]
 
+    def ckpt_asks(self):
+        return [b["step"] for a, b in self.calls if a == "upload-url" and b.get("kind") == "ckpt"]
+
     def finish(self):
         f = self.bodies("finish")
         return f[-1] if f else None
@@ -509,7 +512,8 @@ class ReactionTable(ManagedTestBase):
     def test_429_waits_and_repeats_the_same_call(self):
         waits = []
         self.world.on("start", (429, {}, {"Retry-After": "7"}))
-        with mock.patch.object(th, "_sleep", side_effect=lambda s: (waits.append(s), time.sleep(0.001))):
+        with mock.patch.object(th, "START_RETRY_GIVEUP_S", 600), \
+                mock.patch.object(th, "_sleep", side_effect=lambda s: (waits.append(s), time.sleep(0.001))):
             self.assertEqual(self.run_managed()["outcome"], "succeeded")
         self.assertEqual(waits[0], 7.0)
         self.assertEqual(self.world.actions()[:2], ["start", "start"])
@@ -530,56 +534,68 @@ class ReactionTable(ManagedTestBase):
         self.assertEqual(self.world.puts[0]["headers"].get("x-test-echo"), "yes")
 
     def test_upload_url_409_already_ready_marks_uploaded(self):
+        self.world.mirror_every = 2
         self.world.on("upload-url", (409, {"code": "already_ready"}))
         self.assertEqual(self.run_managed()["outcome"], "succeeded")
-        first_step = self.world.bodies("upload-url")[0]["step"]
+        first_step = self.world.ckpt_asks()[0]
         self.assertNotIn(first_step, {b["step"] for b in self.world.bodies("ckpt-done")})
-        self.assertEqual(self.world.bodies("upload-url").count(self.world.bodies("upload-url")[0]), 1)
+        self.assertEqual(self.world.ckpt_asks().count(first_step), 1)
 
     def test_upload_url_409_already_refused_skips_the_step(self):
+        self.world.mirror_every = 2
         self.world.on("upload-url", (409, {"code": "already_refused"}))
         self.assertEqual(self.run_managed()["outcome"], "succeeded")
-        first_step = self.world.bodies("upload-url")[0]["step"]
+        first_step = self.world.ckpt_asks()[0]
         self.assertNotIn(first_step, {b["step"] for b in self.world.bodies("ckpt-done")})
+        self.assertEqual(self.world.ckpt_asks().count(first_step), 1)
 
     def test_upload_url_422_skips_the_step(self):
+        self.world.mirror_every = 2          # every checkpoint is a must-upload
         self.world.on("upload-url", (422, {"code": "bad_manifest"}))
         self.assertEqual(self.run_managed()["outcome"], "succeeded")
-        first_step = self.world.bodies("upload-url")[0]["step"]
-        self.assertEqual([b["step"] for b in self.world.bodies("upload-url")].count(first_step), 1)
+        first_step = self.world.ckpt_asks()[0]
+        self.assertEqual(self.world.ckpt_asks().count(first_step), 1, "a 422 step is never asked again")
+        self.assertNotIn(first_step, self.world.ready)
 
     def test_upload_url_5xx_and_network_retry_on_the_next_tick(self):
+        self.world.mirror_every = 2          # every checkpoint is a must-upload
         self.world.on("upload-url", (502, {}), "network")
         self.assertEqual(self.run_managed()["outcome"], "succeeded")
-        first_step = self.world.bodies("upload-url")[0]["step"]
-        self.assertGreaterEqual([b["step"] for b in self.world.bodies("upload-url")].count(first_step), 3)
+        first_step = self.world.ckpt_asks()[0]
+        self.assertGreaterEqual(self.world.ckpt_asks().count(first_step), 3)
         self.assertIn(first_step, self.world.ready)
 
     # --- PUT ---
     def test_put_403_asks_upload_url_again(self):
+        self.world.mirror_every = 2
         self.world.put_script = [403]
         self.assertEqual(self.run_managed()["outcome"], "succeeded")
-        first = self.world.bodies("upload-url")[0]["step"]
-        self.assertEqual([b["step"] for b in self.world.bodies("upload-url")[:2]], [first, first])
+        first = self.world.ckpt_asks()[0]
+        self.assertEqual(self.world.ckpt_asks()[:2], [first, first])
         self.assertIn(first, self.world.ready)
 
     def test_put_403_at_most_three_reasks_per_tick(self):
+        self.world.mirror_every = 2
         self.world.put_script = [403] * 4
         self.assertEqual(self.run_managed()["outcome"], "succeeded")
-        first = self.world.bodies("upload-url")[0]["step"]
-        asks = [b["step"] for b in self.world.bodies("upload-url")][:5]
-        self.assertEqual(asks[:4], [first] * 4, "1 ask + 3 re-asks in the first tick")
+        first = self.world.ckpt_asks()[0]
+        self.assertEqual(self.world.ckpt_asks()[:4], [first] * 4, "1 ask + 3 re-asks in the first tick")
+        # The 4th 403 ends the tick: the 5th PUT (the next tick's) succeeds and the step is ready.
+        self.assertIn(first, self.world.ready)
 
     def test_put_5xx_and_network_three_tries_per_file(self):
+        self.world.mirror_every = 2
         self.world.put_script = [500, "network"]
         self.assertEqual(self.run_managed()["outcome"], "succeeded")
         first_path = self.world.puts[0]["path"]
         self.assertEqual([p["path"] for p in self.world.puts[:3]], [first_path] * 3)
 
     def test_put_failing_three_times_waits_for_the_next_tick(self):
+        self.world.mirror_every = 2
         self.world.put_script = [500, 500, 500]
         self.assertEqual(self.run_managed()["outcome"], "succeeded")
-        first = self.world.bodies("upload-url")[0]["step"]
+        first = self.world.ckpt_asks()[0]
+        self.assertGreaterEqual(self.world.ckpt_asks().count(first), 2, "asked again on the next tick")
         self.assertIn(first, self.world.ready)
 
     # --- ckpt-done ---
@@ -588,6 +604,7 @@ class ReactionTable(ManagedTestBase):
         self.assertEqual(sorted(self.world.ready), sorted({b["step"] for b in self.world.bodies("ckpt-done")}))
 
     def test_ckpt_done_409_not_uploading_skips(self):
+        self.world.mirror_every = 2
         self.world.on("ckpt-done", (409, {"code": "not_uploading"}))
         self.assertEqual(self.run_managed()["outcome"], "succeeded")
         first = self.world.bodies("ckpt-done")[0]["step"]
@@ -612,11 +629,20 @@ class ReactionTable(ManagedTestBase):
         self.assertNotIn("finish", self.world.actions())
 
     def test_ckpt_done_5xx_calls_ckpt_done_again_without_reputting(self):
-        self.world.on("ckpt-done", (503, {}), "network")
+        self.world.mirror_every = 2
+        failed = []
+
+        def fail_first_step_twice(body):
+            if len(failed) < 2 and (not failed or body["step"] == failed[0]):
+                failed.append(body["step"])
+                return 503, {}
+            return 200, None
+        self.world.on("ckpt-done", *([fail_first_step_twice] * 100))
         self.assertEqual(self.run_managed()["outcome"], "succeeded")
-        first = self.world.bodies("ckpt-done")[0]["step"]
-        self.assertEqual([b["step"] for b in self.world.bodies("ckpt-done")][:3], [first] * 3)
-        self.assertEqual([b["step"] for b in self.world.bodies("upload-url")].count(first), 1)
+        first = failed[0]
+        self.assertEqual([b["step"] for b in self.world.bodies("ckpt-done")].count(first), 3)
+        self.assertEqual(self.world.ckpt_asks().count(first), 1, "ckpt-done is repeated, the PUTs are not")
+        self.assertIn(first, self.world.ready)
 
     # --- finish ---
     def test_finish_200_returns(self):
@@ -1102,7 +1128,9 @@ class LegacyHostCheck(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(writes[0][4:6], ("failed", th.LEGACY_HOST_UNFIT_DE))
         running.assert_not_called()
-        self.assertIn("ü", th.LEGACY_HOST_UNFIT_DE)
+        self.assertEqual(th.LEGACY_HOST_UNFIT_DE,
+                         "Der Cloud-GPU-Server ist nicht nutzbar (GPU oder Speicherplatz fehlt). "
+                         "Das Training wurde nicht gestartet – das Trainingsguthaben wurde erstattet.")
 
 
 class EntrySelfStop(unittest.TestCase):

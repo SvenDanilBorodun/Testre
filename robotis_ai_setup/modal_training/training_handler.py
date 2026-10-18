@@ -2493,6 +2493,11 @@ class _ManagedRun:
         _managed_proc = None
         for t in self.threads:
             t.join(timeout=2)
+        if self.proc is not None and self.proc.stdout is not None:
+            try:
+                self.proc.stdout.close()
+            except Exception:  # noqa: BLE001
+                pass
         try:
             self.client.close()
         except Exception:  # noqa: BLE001

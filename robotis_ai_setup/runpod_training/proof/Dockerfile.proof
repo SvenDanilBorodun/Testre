@@ -1,0 +1,56 @@
+# CPU proof image for the managed-training worker (spec §6 WP-B; impl-notes WP-B 1). NOT shipped.
+#
+#   docker build -f robotis_ai_setup/runpod_training/proof/Dockerfile.proof -t edubotics-trainer-proof:local .
+#
+# Host-native (arm64 on an Apple-silicon Mac, amd64 on a CI runner). The same base and
+# the same lock as the trainer image, with torch/torchvision switched to their CPU
+# builds and the CUDA-only packages (nvidia-*, triton) dropped:
+#   torch==2.7.0+cpu on both architectures;
+#   torchvision==0.22.0+cpu on x86_64, plain torchvision==0.22.0 on aarch64 (no +cpu
+#   torchvision wheel exists for Linux aarch64; the plain one IS the CPU build).
+# The ORIGINAL training-lock.txt stays at /app/training-lock.txt, the path the worker
+# hashes for `start`, so a fake pod is not refused as wrong_image. The derived lock is
+# /app/training-lock.cpu.txt, and that is what is installed and checked.
+#
+# Used by run_resume_proof.sh, revision_proof.sh (R3, E17) and as the pod image of
+# e2e/fake_runpod.py (entrypoint harness_entry.py: CPU device, no GPU host check).
+
+FROM python:3.12.14-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc g++ build-essential procps \
+ && rm -rf /var/lib/apt/lists/*
+RUN python -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH PIP_DISABLE_PIP_VERSION_CHECK=1
+COPY robotis_ai_setup/modal_training/training-lock.txt /app/training-lock.txt
+COPY robotis_ai_setup/modal_training/check_training_lock.py /app/check_training_lock.py
+RUN python - <<'PY'
+import platform, re
+arch = platform.machine()
+vision = {"x86_64": "torchvision==0.22.0+cpu", "aarch64": "torchvision==0.22.0"}[arch]
+out = [f"# derived from training-lock.txt for {arch} (CPU proof image); not hashed\n"]
+for raw in open("/app/training-lock.txt", encoding="utf-8"):
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        continue
+    name = line.split("==", 1)[0]
+    if name.startswith("nvidia-") or name == "triton":
+        continue
+    if name == "torch":
+        line = "torch==2.7.0+cpu"
+    elif name == "torchvision":
+        line = vision
+    out.append(line + "\n")
+open("/app/training-lock.cpu.txt", "w", encoding="utf-8").write("".join(out))
+print("".join(out[:1]), len(out) - 1, "packages")
+PY
+RUN python -m pip install --no-cache-dir --no-deps -r /app/training-lock.cpu.txt --index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu
+RUN python /app/check_training_lock.py /app/training-lock.cpu.txt --strict
+ENV TORCH_HOME=/opt/torch PYTHONUNBUFFERED=1 HF_HUB_DISABLE_TELEMETRY=1 PYTHONPATH=/app EDUBOTICS_BUILD=proof
+RUN python -c "import torchvision; torchvision.models.ResNet18_Weights.IMAGENET1K_V1.get_state_dict(progress=False)"
+COPY robotis_ai_setup/modal_training/training_handler.py /app/training_handler.py
+COPY robotis_ai_setup/runpod_training/entry.py /app/entry.py
+COPY robotis_ai_setup/runpod_training/e2e/harness_entry.py /app/harness_entry.py
+COPY robotis_ai_setup/runpod_training/proof/make_dataset.py /app/proof/make_dataset.py
+COPY robotis_ai_setup/runpod_training/proof/compare.py /app/proof/compare.py
+COPY robotis_ai_setup/runpod_training/proof/resume_proof.py /app/proof/resume_proof.py
+ENTRYPOINT ["python", "-u", "/app/harness_entry.py"]

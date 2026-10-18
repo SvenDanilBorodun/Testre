@@ -93,8 +93,16 @@ class TestMigration048Shape(unittest.TestCase):
 
     def test_migration_048_shape(self) -> None:
         names = sorted(os.listdir(os.path.join(SUPABASE, "migrations")))
-        self.assertEqual(names[-1], "20261011120000_048_inference_sessions.sql")
-        self.assertGreater(names[-1], "20261004150000_046_close_direct_student_writes.sql")
+        mine = "20261011120000_048_inference_sessions.sql"
+        self.assertIn(mine, names)
+        self.assertGreater(mine, "20261004150000_046_close_direct_student_writes.sql")
+        # 048 was the newest migration when it shipped; the only files sorted
+        # after it are the RunPod training build's 047 (written later, the
+        # number it had been earmarked) and 049, in that order.
+        self.assertEqual(names[names.index(mine) + 1:], [
+            "20261020120000_047_hide_worker_token.sql",
+            "20261020130000_049_managed_training.sql",
+        ])
         self.assertTrue(os.path.isfile(ROLLBACK))
         self.assertTrue(os.path.isfile(ASSERTIONS))
         self.assertIn("037 stays reserved", self.raw)

@@ -29,7 +29,8 @@ sends steps=50000 / batch=8, but the VLAs converge far below 50k (docs: pi0/pi05
 ~3k, smolvla ~20k) and batch 8 is either too small (smolvla/pi0/pi05, docs use
 32/64) or the memory ceiling (pi0_fast = a full ~2.9B fine-tune). So VLA steps
 are CAPPED (never raised) and batch is CLAMPED into a safe+effective range; this
-saves A100 hours and improves convergence. ACT-class is left UI-controlled.
+saves A100 hours and improves convergence. ACT's batch is fixed at 8 (D4, E2:
+the RunPod training build); diffusion / vqbet / tdmpc are left UI-controlled.
 
 TWO OPERATIONAL REALITIES (operator decision 2026-06-15 = "leave open, document
 only"; not enforced in code):
@@ -107,7 +108,9 @@ LANGUAGE_CONDITIONED_POLICIES = frozenset({"pi0", "pi05", "pi0_fast", "smolvla"}
 # the safe+effective batch range on an A100-80GB. pi0_fast has NO steps_cap (its
 # full ~2.9B FT is timeout-bound) and the tightest batch (memory ceiling).
 POLICY_PROFILE: dict[str, dict] = {
-    "act":       {"gpu_tier": GPU_L4,   "policy_flags": []},
+    # ACT is pinned to batch 8 (D4, E2): the managed path's resume, its measured
+    # steps/s and the 4 h cap assume it; a student's other value is ignored.
+    "act":       {"gpu_tier": GPU_L4,   "policy_flags": [], "batch_min": 8, "batch_max": 8},
     "diffusion": {"gpu_tier": GPU_L4,   "policy_flags": []},
     "vqbet":     {"gpu_tier": GPU_L4,   "policy_flags": []},
     "tdmpc":     {"gpu_tier": GPU_L4,   "policy_flags": []},

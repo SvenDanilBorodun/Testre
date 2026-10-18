@@ -664,6 +664,15 @@ async def terminate_attempt(attempt) -> bool:
     return True
 
 
+async def stop_for_cancel(backend, attempt_state, cloud_ref) -> bool:
+    """Cancel's „stop the attempt" (§4.4, SR-19): a `starting`/`running` attempt
+    with a cloud_ref is stopped (DELETE the pod / cancel the Modal call); a
+    `placing` or `lost` attempt, or none, has nothing running. True = stopped."""
+    if attempt_state in ("starting", "running") and cloud_ref:
+        return await terminate_attempt({"backend": backend, "cloud_ref": cloud_ref})
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Losses, requeues, the end of an attempt
 # ---------------------------------------------------------------------------

@@ -64,9 +64,13 @@ jobs:
           # fastapi + httpx + uvicorn + aiohttp: Cloud-Inferenz (spec §8.1) — the Modal app's
           # server_core under TestClient (httpx) and uvicorn, the robot's HTTPS client (aiohttp).
           # The cloud API suite stubs fastapi itself and is unchanged by their presence.
+          # boto3 + botocore: managed training (spec §4.12, FR-11) — the cloud API's
+          # test_r2_client.py proves the presigned PUT's signed headers with real botocore;
+          # pinned equal to cloud_training_api/requirements.txt.
           python -m pip install pyyaml pytest numpy opencv-contrib-python-headless cryptography==49.0.0 \
             pyarrow==25.0.0 av==15.1.0 huggingface_hub==1.23.0 \
-            fastapi==0.115.12 httpx==0.28.1 aiohttp==3.14.1 "uvicorn[standard]==0.34.2"
+            fastapi==0.115.12 httpx==0.28.1 aiohttp==3.14.1 "uvicorn[standard]==0.34.2" \
+            boto3==1.43.107 botocore==1.43.107
       - name: Syntax-check Python modules
         # ZERO-FILE FLOOR, the repo's standing rule for scan-based guards (the
         # four ps_* guards and the three lockstep tests all carry one).
@@ -84,6 +88,7 @@ jobs:
             robotis_ai_setup/cloud_training_api
             robotis_ai_setup/modal_training
             robotis_ai_setup/modal_inference
+            robotis_ai_setup/runpod_training
             physical_ai_tools/physical_ai_server/physical_ai_server
             robotis_ai_setup/docker/physical_ai_server/patches
           )
@@ -971,24 +976,27 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install 'modal>=1.6,<2'
-      - name: Import every Modal app
-        # Import each *.py under modal_training/ that defines a
-        # modal.App. Failures during Image / function decoration
-        # surface as ImportError/TypeError here and fail the build —
-        # exactly the c56c012 vision_app.py near-miss with the bad
+      - name: Import the training app in both variants
+        # modal_app.py under the real SDK, once per baked variant (spec §3.8):
+        # prod = edubotics-training with train, train_vla, train_managed, smoke_test;
+        # dev = edubotics-training-dev with train_managed + smoke_test only. Failures
+        # during Image / function decoration surface as ImportError/TypeError here and
+        # fail the build — exactly the c56c012 vision_app.py near-miss with the bad
         # force_reinstall= kwarg.
         #
-        # training_handler.py is intentionally NOT in this sweep —
-        # it imports server-side runtime deps (supabase,
-        # huggingface_hub.utils.HfHubHTTPError) that only exist inside
-        # the Modal container's image. It's already syntax-checked by
-        # python-tests via compileall.
+        # training_handler.py is intentionally NOT imported: it needs supabase and
+        # huggingface_hub, which only the training images carry (python-tests
+        # compiles it and runs it under stubs).
         working-directory: robotis_ai_setup/modal_training
         run: |
           set -e
-          for f in modal_app.py; do
-            echo "== importing $f =="
-            python -c "import importlib.util, sys; spec = importlib.util.spec_from_file_location('m', '$f'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('  OK: import succeeded')"
+          for variant in prod dev; do
+            case "$variant" in
+              prod) want="smoke_test,train,train_managed,train_vla"; app="edubotics-training" ;;
+              dev)  want="smoke_test,train_managed"; app="edubotics-training-dev" ;;
+            esac
+            echo "== modal_app.py EDUBOTICS_TRAINING_VARIANT=$variant =="
+            EDUBOTICS_TRAINING_VARIANT=$variant WANT="$want" APP="$app" python -c "import importlib.util, os, modal; spec = importlib.util.spec_from_file_location('m', 'modal_app.py'); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); got = ','.join(sorted(k for k, v in vars(mod).items() if isinstance(v, modal.Function))); assert mod.app.name == os.environ['APP'], mod.app.name; assert got == os.environ['WANT'], got; print('  OK:', mod.app.name, got)"
           done
       - name: Import the Cloud-Inferenz app in all four variants
         # ONE file, two baked variants x the snapshot flag (spec §3.2, D21). Each
@@ -1014,7 +1022,8 @@ jobs:
         run: |
           python -m pip install --quiet \
             'fastapi==0.115.12' 'pydantic==2.11.3' 'supabase==2.15.1' \
-            'httpx==0.28.1' 'python-dotenv==1.1.0' 'huggingface_hub>=0.25.0'
+            'httpx==0.28.1' 'python-dotenv==1.1.0' 'huggingface_hub>=0.25.0' \
+            'boto3==1.43.107' 'botocore==1.43.107'
           export SUPABASE_URL=http://ci.test
           export SUPABASE_SERVICE_ROLE_KEY=ci-fake
           export MODAL_TOKEN_ID=ci-fake
@@ -1032,6 +1041,9 @@ jobs:
           # Cloud-Inferenz: the only other Modal-SDK importer (sessioned-server
           # sessions.start/terminate, Server.from_name) and its routes.
           python -c "from app.services import inference_edge; from app.routes import inference; print('OK')"
+          # Managed training (spec §4.12): the dispatcher (Modal train_managed spawn) and the
+          # RunPod client import with their SDKs (boto3 is imported inside r2_client's functions).
+          python -c "from app.services import training_dispatch, runpod_client; print('OK')"
 
   teacher-web-build-validate:
     # Builds Dockerfile.web exactly the way Railway's `railway up

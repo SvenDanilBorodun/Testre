@@ -1,0 +1,193 @@
+name: trainer-image
+
+# Builds, smoke-tests and pushes the RunPod managed-training image
+# ghcr.io/svendanilborodun/edubotics-trainer (spec §4.8, §4.12).
+#
+#   workflow_dispatch  → tag test-<sha> (an E2E test image; the anonymous-pull probe only warns)
+#   workflow_call      → tag <inputs.version> (release.yml, with the VERSION file; the probe fails)
+#
+# Outputs the pushed DIGEST: the cloud API pins the image by digest
+# (RUNPOD_TRAINER_IMAGE=ghcr.io/svendanilborodun/edubotics-trainer:<VERSION>@sha256:…), set by
+# release.yml::trainer-image-var. The image carries no secret.
+#
+# The mode is decided by inputs.version, never by github.event_name: inside a reusable
+# workflow event_name reports the CALLER's event (CLAUDE.md, docker-publish lanes).
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version (the VERSION file), used as the image tag"
+        required: true
+        type: string
+    outputs:
+      digest:
+        description: "sha256:<64 hex> of the pushed image"
+        value: ${{ jobs.build.outputs.digest }}
+      image:
+        description: "ghcr.io/svendanilborodun/edubotics-trainer:<tag>"
+        value: ${{ jobs.build.outputs.image }}
+
+concurrency:
+  group: trainer-image-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build, smoke-test and push the trainer image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write   # push to ghcr.io with GITHUB_TOKEN
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      image: ${{ steps.tag.outputs.image }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Choose the tag
+        id: tag
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            if ! printf '%s' "$INPUT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::version '${INPUT_VERSION}' is not X.Y.Z"
+              exit 1
+            fi
+            TAG="$INPUT_VERSION"; MODE=release
+          else
+            TAG="test-${GITHUB_SHA}"; MODE=test
+          fi
+          IMG="ghcr.io/svendanilborodun/edubotics-trainer:${TAG}"
+          echo "image=${IMG}" >> "$GITHUB_OUTPUT"
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+          echo "Building ${IMG} (${MODE})"
+
+      - name: Refuse a dirty tree
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --porcelain
+            echo "::error::the checkout is dirty; the image would not equal a commit"
+            exit 1
+          fi
+
+      - name: Free disk space (the CUDA wheel set is several GB)
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Build
+        env:
+          IMG: ${{ steps.tag.outputs.image }}
+        run: |
+          set -euo pipefail
+          df -h /
+          docker build --pull --no-cache --build-arg BUILD_COMMIT="$GITHUB_SHA" \
+            -f robotis_ai_setup/runpod_training/Dockerfile -t "$IMG" .
+
+      - name: Smoke test (lock, host refusal, imports, lerobot_train --help)
+        env:
+          IMG: ${{ steps.tag.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python "$IMG" /app/check_training_lock.py --strict
+          # The GPU-less runner must be REFUSED by the worker's host check (exit 0 iff HostUnfit).
+          docker run --rm --entrypoint python \
+            -v "$PWD/robotis_ai_setup/runpod_training/ci_host_refusal.py:/ci/ci_host_refusal.py:ro" \
+            "$IMG" /ci/ci_host_refusal.py
+          docker run --rm --entrypoint python "$IMG" \
+            -c "import lerobot.scripts.lerobot_train, lerobot.policies.act.modeling_act, av, cv2; print('imports OK')"
+          docker run --rm --entrypoint python "$IMG" -m lerobot.scripts.lerobot_train --help > /dev/null
+          echo "lerobot_train --help OK"
+
+      - name: Size gate (uncompressed layer bytes ≤ 12 GB)
+        env:
+          IMG: ${{ steps.tag.outputs.image }}
+        run: |
+          set -euo pipefail
+          # `docker image history` sums UNCOMPRESSED layer bytes on every image store;
+          # `docker image inspect .Size` reads compressed under the containerd snapshotter
+          # (the reason docker-publish.yml measures it this way too).
+          SIZE=$(docker image history --human=false --format '{{.Size}}' "$IMG" | awk '{s+=$1} END {print s+0}')
+          [ "${SIZE:-0}" -gt 0 ] || { echo "::error::could not measure the image size"; exit 1; }
+          CEIL=$((12 * 1000 * 1000 * 1000))
+          echo "uncompressed layer bytes: ${SIZE} (ceiling ${CEIL})"
+          if [ "$SIZE" -gt "$CEIL" ]; then
+            echo "::error::the trainer image is ${SIZE} bytes uncompressed, over the 12 GB ceiling"
+            exit 1
+          fi
+
+      - name: GHCR login
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push and read the digest
+        id: push
+        env:
+          IMG: ${{ steps.tag.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker push "$IMG"
+          REF=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMG" \
+                | grep '^ghcr.io/svendanilborodun/edubotics-trainer@' | head -n 1)
+          DIGEST="${REF#*@}"
+          if ! printf '%s' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::could not read the pushed digest (got '${DIGEST}')"
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          # Compressed push size: the sum of the pushed manifest's layer sizes.
+          docker buildx imagetools inspect --raw "ghcr.io/svendanilborodun/edubotics-trainer@${DIGEST}" > manifest.json
+          COMPRESSED=$(python3 -c "import json; m=json.load(open('manifest.json')); print(sum(l['size'] for l in m.get('layers', [])))")
+          echo "pushed ${IMG}@${DIGEST} (compressed layers: ${COMPRESSED} bytes)"
+          {
+            echo "### Trainer image"
+            echo ""
+            echo "- image: \`${IMG}\`"
+            echo "- digest: \`${DIGEST}\`"
+            echo "- compressed layers: ${COMPRESSED} bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Anonymous-pull probe (fails on a release, warns on a test image)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          MODE: ${{ steps.tag.outputs.mode }}
+        run: |
+          set -euo pipefail
+          # A pod pulls the image anonymously: the package must be public (spec §8 item 3).
+          ACCEPT='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+          TOKEN=$(curl -fsS --retry 3 --max-time 15 \
+            "https://ghcr.io/token?scope=repository:svendanilborodun/edubotics-trainer:pull" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('token',''))" || true)
+          CODE=000
+          if [ -n "$TOKEN" ]; then
+            CODE=$(curl -sS --retry 3 --max-time 15 -o /dev/null -w '%{http_code}' -I \
+              -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT}" \
+              "https://ghcr.io/v2/svendanilborodun/edubotics-trainer/manifests/${DIGEST}" || true)
+          fi
+          if [ "$CODE" = "200" ]; then
+            echo "anonymously pullable: ${DIGEST}"
+          elif [ "$MODE" = "release" ]; then
+            echo "::error::ghcr.io/svendanilborodun/edubotics-trainer@${DIGEST} is not anonymously pullable (HTTP ${CODE}). Make the GHCR package public before the release (spec §8 item 3)."
+            exit 1
+          else
+            echo "::warning::ghcr.io/svendanilborodun/edubotics-trainer@${DIGEST} is not anonymously pullable (HTTP ${CODE}). Make the GHCR package public before RunPod pods can pull it."
+          fi

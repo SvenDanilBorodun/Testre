@@ -468,13 +468,13 @@ class RunpodErrorTable(Base):
         self.assertEqual(self.rp.creates()[-1][3]["gpu"]["id"], "NVIDIA GeForce RTX 3080", "the 400 combo is skipped")
 
     async def test_every_candidate_400_logs_error_with_the_detail(self):
-        self.rp.create_answers = [(400, {"detail": "image not found"}, None)] * 2
+        self.rp.create_answers = [(400, {"detail": "imageRef ghcr.io/x@sha256:00 unresolvable"}, None)] * 2
         self.s = settings(RUNPOD_LADDER='[{"rung":"runpod_community","gpus":[{"id":"NVIDIA RTX A5000","min_vcpu":8},'
                                         '{"id":"NVIDIA GeForce RTX 3080","min_vcpu":8}]},{"rung":"modal"}]')
         self.queued()
         with self.assertLogs("app.services.training_dispatch", level="ERROR") as logs:
             await D.dispatch_tick(self.s)
-        self.assertTrue(any("400" in m and "image not found" in m for m in logs.output))
+        self.assertTrue(any("400" in m and "imageRef ghcr.io/x@sha256:00 unresolvable" in m for m in logs.output))
 
     async def test_every_candidate_403_logs_error_once_per_process(self):
         self.rp.create_answers = [(403, None, None)] * 4

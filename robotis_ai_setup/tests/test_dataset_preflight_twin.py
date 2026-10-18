@@ -10,14 +10,17 @@ twin's German sentence, transliterated back (ä→ae, ö→oe, ü→ue, ß→ss,
 Ö→Oe, Ü→Ue), is the worker's sentence character for character.
 
 Both modules are loaded the way they run: the worker with ``huggingface_hub``
-and ``supabase`` stubbed when they are not installed (its module top imports
-them), the twin BY PATH (stdlib at its top; an ``app`` package of the GUI
+and ``supabase`` stubbed only when they are not installed (its module top
+imports them; every stub is removed from sys.modules again right after the
+import), the twin BY PATH (stdlib at its top; an ``app`` package of the GUI
 could shadow the cloud API's). The fake hub is installed into both: the
 worker's module globals, the twin's ``_hub()``.
 """
 
 from __future__ import annotations
 
+import importlib
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -35,38 +38,74 @@ _MODAL = os.path.join(_ROOT, "modal_training")
 TRANSLIT = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue"})
 
 
-def _stub_worker_deps() -> None:
-    if "huggingface_hub" not in sys.modules:
-        m = types.ModuleType("huggingface_hub")
-        m.HfApi = lambda *a, **k: None
-        m.hf_hub_download = lambda *a, **k: None
-        m.login = lambda *a, **k: None
-        u = types.ModuleType("huggingface_hub.utils")
-
-        class HfHubHTTPError(Exception):
-            pass
-
-        class RepositoryNotFoundError(HfHubHTTPError):
-            pass
-
-        class RevisionNotFoundError(HfHubHTTPError):
-            pass
-
-        u.HfHubHTTPError = HfHubHTTPError
-        u.RepositoryNotFoundError = RepositoryNotFoundError
-        u.RevisionNotFoundError = RevisionNotFoundError
-        sys.modules["huggingface_hub"] = m
-        sys.modules["huggingface_hub.utils"] = u
-    if "supabase" not in sys.modules:
-        m = types.ModuleType("supabase")
-        m.create_client = lambda *a, **k: None
-        sys.modules["supabase"] = m
+def _stub_module(name: str) -> types.ModuleType:
+    """A stub with a real ModuleSpec, so importlib.util.find_spec never trips on it."""
+    m = types.ModuleType(name)
+    m.__spec__ = importlib.machinery.ModuleSpec(name, None)
+    return m
 
 
-_stub_worker_deps()
-if _MODAL not in sys.path:
-    sys.path.insert(0, _MODAL)
-import training_handler as worker  # noqa: E402
+def _import_worker():
+    """The worker module, imported with the REAL huggingface_hub / supabase when
+    they are installed and with stubs only when they are not. Whatever this
+    function puts into sys.modules is taken out again afterwards (the stubs and
+    the training_handler bound to them): a later test module must see the
+    interpreter as it was (a stub without a spec once broke
+    test_hf_token_compose's find_spec in a full discover run)."""
+    added = []
+    for name in ("huggingface_hub", "supabase"):
+        if name in sys.modules:
+            continue
+        # A namespace package is not the library: robotis_ai_setup/supabase/ (the
+        # migrations) is one on sys.path during discover.
+        spec = importlib.util.find_spec(name)
+        if spec is not None and spec.origin not in (None, "namespace"):
+            importlib.import_module(name)
+            continue
+        if name == "huggingface_hub":
+            m = _stub_module("huggingface_hub")
+            m.HfApi = lambda *a, **k: None
+            m.hf_hub_download = lambda *a, **k: None
+            m.login = lambda *a, **k: None
+            u = _stub_module("huggingface_hub.utils")
+
+            class HfHubHTTPError(Exception):
+                pass
+
+            class RepositoryNotFoundError(HfHubHTTPError):
+                pass
+
+            class RevisionNotFoundError(HfHubHTTPError):
+                pass
+
+            u.HfHubHTTPError = HfHubHTTPError
+            u.RepositoryNotFoundError = RepositoryNotFoundError
+            u.RevisionNotFoundError = RevisionNotFoundError
+            sys.modules["huggingface_hub"] = m
+            sys.modules["huggingface_hub.utils"] = u
+            added += ["huggingface_hub", "huggingface_hub.utils"]
+        else:
+            m = _stub_module("supabase")
+            m.create_client = lambda *a, **k: None
+            sys.modules["supabase"] = m
+            added.append("supabase")
+    had_worker = "training_handler" in sys.modules
+    path_added = _MODAL not in sys.path
+    if path_added:
+        sys.path.insert(0, _MODAL)
+    try:
+        import training_handler as module
+    finally:
+        if added and not had_worker:
+            sys.modules.pop("training_handler", None)
+        for name in added:
+            sys.modules.pop(name, None)
+        if path_added:
+            sys.path.remove(_MODAL)
+    return module
+
+
+worker = _import_worker()
 
 _spec = importlib.util.spec_from_file_location("_edubotics_api_dataset_preflight", _TWIN)
 twin = importlib.util.module_from_spec(_spec)

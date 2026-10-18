@@ -11,6 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth import get_current_user, get_user_profile
+from app.services import artifact_validation, dataset_preflight, training_dispatch
+from app.services import training_texts_de as texts
 from app.services.modal_client import (
     cancel_training_job,
     get_job_status,
@@ -18,10 +20,8 @@ from app.services.modal_client import (
 )
 from app.services.policy_profile import apply_training_tuning, get_policy_profile
 from app.services.supabase_client import get_supabase
-from app.services.training_sweep import MAX_CANCEL_ATTEMPTS
+from app.services.training_sweep import MAX_CANCEL_ATTEMPTS, LEGACY_CANCEL_GIVEUP_DE
 from app.services.workgroups import resolve_visible_workgroup_ids
-from huggingface_hub import HfApi
-from huggingface_hub.utils import RepositoryNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,10 @@ class TrainingJob(BaseModel):
     # 028: full worker stdout (training_log.txt in the private HF model
     # repo); teacher/admin forensics, set on the terminal transition.
     log_url: str | None = None
+    # 049: a managed (RunPod/Modal ladder) training's progress line, e.g. „GPU-Server
+    # ausgefallen – das Training wird ab Schritt 2.500 … fortgesetzt." (S1–S3).
+    status_note: str | None = None
+    managed: bool = False
 
 
 class StartTrainingResponse(BaseModel):
@@ -280,6 +284,11 @@ async def _sync_modal_status(training: dict) -> dict:
     event loop. Safe to call from sync context only via asyncio.run().
     """
     if training["status"] not in ("queued", "running"):
+        return training
+    # 049: a managed row is driven by training_dispatch's dispatcher and sweep
+    # alone (its cloud_job_id is unset and its stall clock is step_advanced_at);
+    # this legacy reconciler would fail it as „dispatch lost" (§1 item 7).
+    if training.get("managed"):
         return training
 
     job_id = training.get("cloud_job_id")
@@ -436,6 +445,9 @@ def _find_recent_duplicate(
             return None
         if not isinstance(params, dict):
             return None
+        # A managed row stores the dataset commit (E17) AFTER this compare runs
+        # on the request (§4.1 step 4), so a repeated request still matches.
+        params = {k: v for k, v in params.items() if k != "dataset_revision"}
         return json.dumps(params, sort_keys=True, default=str)
 
     want = _canonical(training_params)
@@ -474,7 +486,8 @@ async def _sweep_user_running_jobs(user_id: str, workgroup_id: str | None = None
         except Exception as e:
             logger.warning("Sweep sync failed for training %s: %s", row.get("id"), e)
 
-    rows = result.data or []
+    # Managed rows are the managed sweep's (training_dispatch), never this one's.
+    rows = [r for r in (result.data or []) if not r.get("managed")]
     if rows:
         await asyncio.gather(*[_sync_one(row) for row in rows])
 
@@ -546,6 +559,16 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     # training_params_dict["steps"].
     apply_training_tuning(profile, training_params_dict)
 
+    # 049 (§4.1 step 3): managed = the RunPod/Modal ladder, ACT only (E2). The
+    # cadences are written into the row so a later environment change cannot
+    # strand a running training (FR-12); the worker picks num_workers itself.
+    settings = training_dispatch.SETTINGS
+    managed = settings.managed and req.model_type.lower() == "act"
+    if managed:
+        training_params_dict["save_freq"] = settings.save_freq
+        training_params_dict["mirror_every"] = settings.mirror_every
+        training_params_dict.pop("num_workers", None)
+
     # 0c. Idempotency: a duplicate /start within DEDUPE_WINDOW returns the
     #     existing training instead of creating a new one. Catches network
     #     retries and accidental double-clicks. Zero schema/client cost.
@@ -568,37 +591,37 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
             status=duplicate["status"],
         )
 
-    # 1. Validate dataset exists on HuggingFace Hub. Distinguish real 404 from
-    #    transient errors — the student sees different messages so they know
-    #    whether to fix the name or retry.
+    # 1. Dataset check (§4.1 step 5): the worker's own preflight, run here before
+    #    any credit or GPU (dataset_preflight is its twin). A managed training
+    #    reads the dataset anonymously, as its pod will, pinned to the commit the
+    #    v3.0 tag points to now (E17), and its features must be ones the robot
+    #    can send (FR-5, S20).
     try:
-        hf_api = HfApi(token=os.environ.get("HF_TOKEN", ""))
-        hf_api.dataset_info(req.dataset_name)
-    except RepositoryNotFoundError:
-        logger.warning("Dataset not found on HF: %s", req.dataset_name)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Dataset '{req.dataset_name}' wurde nicht auf dem HuggingFace Hub gefunden.",
+        info, revision = await asyncio.wait_for(
+            asyncio.to_thread(_dataset_check, req.dataset_name, req.model_type, managed), 60
         )
+    except ValueError as e:
+        logger.info("Dataset check refused %s: %s", req.dataset_name, e)
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        # Rate limit, DNS blip, 5xx — tell the student to retry, don't send
-        # them chasing a typo that isn't there.
-        logger.warning("HF dataset check transient error for %s: %s", req.dataset_name, e)
-        raise HTTPException(
-            status_code=502,
-            detail="HuggingFace Hub ist vorübergehend nicht erreichbar. Bitte gleich erneut versuchen.",
-        )
+        # Timeout, rate limit, DNS blip, 5xx — tell the student to retry, don't
+        # send them chasing a typo that isn't there.
+        logger.warning("HF dataset check transient error for %s: %s", req.dataset_name, type(e).__name__)
+        raise HTTPException(status_code=502, detail=texts.HF_UNREACHABLE_DE)
+    if managed and revision:
+        training_params_dict["dataset_revision"] = revision
 
     # 2. Atomic credit-check + training row insert via start_training_safe RPC.
     #    The function locks the user row, counts active trainings, and inserts
     #    in one transaction — concurrent /start calls cannot both pass the check.
-    #    worker_token is the only DB credential the Modal worker receives.
+    #    worker_token is the only DB credential the Modal worker receives; a
+    #    managed row gets one per attempt from claim_training_attempt instead.
     model_name = _generate_model_name(
         req.model_type,
         req.dataset_name,
         output_folder_name=req.training_params.output_folder_name,
     )
-    worker_token = str(uuid.uuid4())
+    worker_token = None if managed else str(uuid.uuid4())
 
     try:
         rpc_result = supabase.rpc(
@@ -611,6 +634,7 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
                 "p_training_params": training_params_dict,
                 "p_total_steps": training_params_dict["steps"],
                 "p_worker_token": worker_token,
+                "p_managed": managed,
             },
         ).execute()
     except Exception as e:
@@ -629,7 +653,20 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         logger.error("start_training_safe returned no rows for user=%s", user_id)
         raise HTTPException(status_code=500, detail="Interner Fehler beim Starten des Trainings.")
     training_id = rpc_result.data[0]["training_id"]
-    logger.info("Created training %s for user=%s model=%s", training_id, user_id, model_name)
+    logger.info("Created training %s for user=%s model=%s managed=%s", training_id, user_id, model_name, managed)
+
+    if managed:
+        # §4.1 step 7: the dispatcher places it (claim → RunPod/Modal → attach).
+        fps = (info or {}).get("fps")
+        if isinstance(fps, (int, float)) and not isinstance(fps, bool) and fps > 0:
+            try:
+                supabase.table("trainings").update({"dataset_fps": fps}).eq("id", training_id).eq(
+                    "managed", True
+                ).execute()
+            except Exception as e:  # metadata only: the publish re-reads meta/info.json
+                logger.warning("dataset_fps write failed for training %s: %s", training_id, type(e).__name__)
+        training_dispatch.kick()
+        return StartTrainingResponse(training_id=training_id, model_name=model_name, status="queued")
 
     # 3. Dispatch to Modal. The worker receives the training_id + worker_token
     #    and reads SUPABASE_URL / SUPABASE_ANON_KEY / HF_TOKEN from its own
@@ -675,145 +712,123 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     )
 
 
+def _dataset_check(dataset_name: str, model_type: str, managed: bool):
+    """(info, revision) — BLOCKING; the route runs it in a thread under a 60 s bound.
+
+    Raises ValueError with the German sentence a student reads (400)."""
+    token = False if managed else (os.environ.get("HF_TOKEN") or None)
+    revision = None
+    if managed:
+        revision = dataset_preflight.resolve_v3_commit(dataset_name)
+    info = dataset_preflight.preflight_dataset(
+        dataset_name, token, model_type, revision=revision or dataset_preflight.EXPECTED_CODEBASE_VERSION
+    )
+    if managed:
+        try:
+            inputs, outputs = artifact_validation.dataset_policy_features(info.get("features"))
+            artifact_validation.act_feature_rules(inputs, outputs)
+        except artifact_validation.ArtifactRefused as exc:
+            logger.info("dataset %s refused for managed ACT: %s", dataset_name, exc.reason)
+            raise ValueError(texts.S20) from None
+    return info, revision
+
+
 @router.post("/cancel")
 async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_user)):
-    """Cancel a running training (migration 023 cost-bomb fix).
+    """Cancel a training (migration 023 cost-bomb fix; 049's compare-and-set).
 
-    Two-phase commit semantics:
-      1. Flip status to `cancel_requested` and record the attempt.
-         The credit STAYS consumed at this stage — get_remaining_credits
-         counts cancel_requested as "used" (not in failed/canceled).
-      2. Attempt Modal cancel.
-         * Success → flip to `canceled` (credit auto-frees), null
-           worker_token so the worker can't overwrite the terminal
-           status via update_training_progress (migration 010 guard).
-         * Failure → leave status='cancel_requested'. The background
-           training_cancel_sweep retries every 30 s, up to 5 attempts.
-           After 5 failed attempts the sweep marks the row failed —
-           credit still frees, the operator notices stuck rows in logs.
-
-    Why this matters: the pre-023 path always flipped to canceled +
-    refunded the credit even when Modal cancel raised. A student
-    looping start→cancel against flaky Modal could leave up to 10 GPU
-    containers running to their full timeout_hours cap — a real
-    cost-bomb. The new flow ensures the credit is only refunded once
-    the GPU is actually released.
+    Two-phase commit semantics, for legacy and managed rows alike:
+      1. ``cancel_request_training`` (one transaction, owner-scoped: P0002 →
+         404) flips the row to `cancel_requested` and counts the attempt. The
+         credit STAYS consumed — get_remaining_credits counts cancel_requested
+         as "used". P0050 → the row is not active (400); P0051 → the finished
+         model is being published (409, S9).
+      2. Stop the GPU: a legacy row's Modal call; a managed row's current attempt
+         (DELETE the RunPod pod / cancel the Modal call; a `placing` or `lost`
+         attempt has nothing running — the dispatcher's late attach fails and
+         the reaper ends an old pod).
+         * Success → ``complete_cancel_training(canceled)`` (credit frees).
+         * Failure → stays `cancel_requested`; training_cancel_sweep retries
+           every 30 s; at MAX_CANCEL_ATTEMPTS it is failed (credit frees) with
+           S21 for a managed row, today's text for a legacy one.
     """
     supabase = get_supabase()
     user_id = str(user.id)
     logger.info("POST /trainings/cancel user=%s training_id=%s", user_id, req.training_id)
 
-    # Verify ownership — only the trainer can cancel, even when in a group.
-    # Group siblings can SEE the training but cannot stop someone else's run.
-    result = (
-        supabase.table("trainings")
-        .select("*")
-        .eq("id", req.training_id)
-        .eq("user_id", user_id)
-        .execute()
-    )
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Training nicht gefunden.")
+    try:
+        data = supabase.rpc(
+            "cancel_request_training", {"p_training_id": req.training_id, "p_user_id": user_id}
+        ).execute().data
+    except Exception as e:
+        code = training_dispatch.pg_code(e)
+        if code == "P0002":
+            raise HTTPException(status_code=404, detail=texts.TRAINING_NOT_FOUND_DE)
+        if code == "P0050":
+            raise HTTPException(status_code=400, detail=texts.TRAINING_NOT_ACTIVE_DE)
+        if code == "P0051":
+            raise HTTPException(status_code=409, detail=texts.S9)
+        raise
+    info = (data or [{}])[0] if isinstance(data, list) else (data or {})
+    attempts = int(info.get("o_cancel_attempts") or 0)
+    managed = bool(info.get("o_managed"))
 
-    training = result.data[0]
-    # 'cancel_requested' is a valid mid-flight state: the user clicked
-    # cancel, we tried Modal once and failed, the sweep hasn't retried
-    # yet, and the student impatiently clicks cancel again. Treat this
-    # as a re-attempt rather than a 400 — bump cancel_attempts and try
-    # Modal again synchronously.
-    if training["status"] not in ("queued", "running", "cancel_requested"):
-        raise HTTPException(status_code=400, detail="Training ist nicht aktiv.")
-
-    # Phase 1: record the cancel intent. We do this BEFORE talking to
-    # Modal so even if the Cloud API crashes mid-cancel, the sweep can
-    # pick up the row and finish the job.
-    now_iso = datetime.now(timezone.utc).isoformat()
-    current_attempts = int(training.get("cancel_attempts") or 0)
-    supabase.table("trainings").update(
-        {
-            "status": "cancel_requested",
-            "cancel_attempted_at": now_iso,
-            "cancel_attempts": current_attempts + 1,
-        }
-    ).eq("id", req.training_id).execute()
-
-    # Phase 2: attempt the Modal cancel. We deliberately do NOT touch
-    # the credit / status here — that only happens on Modal success.
-    modal_ok = False
-    if training.get("cloud_job_id"):
+    if managed:
+        stopped = await training_dispatch.stop_for_cancel(
+            info.get("o_backend"), info.get("o_attempt_state"), info.get("o_cloud_ref")
+        )
+    elif info.get("o_cloud_job_id"):
         try:
-            await cancel_training_job(training["cloud_job_id"])
-            modal_ok = True
+            await cancel_training_job(info["o_cloud_job_id"])
+            stopped = True
         except Exception as e:
-            # Leave the row in cancel_requested; the sweep will retry.
-            # The user-visible HTTP response is still 200 because the
-            # cancel REQUEST was accepted — the eventual state is
-            # canceled or failed, both terminal and credit-free.
+            # Leave the row in cancel_requested; the sweep will retry. The
+            # cancel REQUEST was accepted, the eventual state is canceled or
+            # failed, both terminal and credit-free.
             logger.warning(
-                "Modal cancel failed for training %s call %s "
-                "(attempt %d, sweep will retry): %s",
-                req.training_id, training["cloud_job_id"], current_attempts + 1, e,
+                "Modal cancel failed for training %s call %s (attempt %d, sweep will retry): %s",
+                req.training_id, info["o_cloud_job_id"], attempts, e,
             )
+            stopped = False
     else:
-        # No cloud_job_id means start_training_job failed at /start
-        # without recording an id, so there's nothing to cancel on
-        # Modal. We can short-circuit straight to canceled — the GPU
-        # never spun up.
-        modal_ok = True
+        # No cloud_job_id: the GPU never spun up, nothing to cancel on Modal.
+        stopped = True
 
-    if modal_ok:
-        # Flip to canceled. This auto-frees the credit because
-        # get_remaining_credits filters `status NOT IN ('failed',
-        # 'canceled')`. Null worker_token as defense-in-depth so a
-        # racing worker can't overwrite the terminal status via
-        # update_training_progress (migration 010 guard is the
-        # authoritative protection; this is belt-and-suspenders).
-        supabase.table("trainings").update(
-            {
-                "status": "canceled",
-                "terminated_at": datetime.now(timezone.utc).isoformat(),
-                "worker_token": None,
-            }
-        ).eq("id", req.training_id).execute()
-        logger.info("Canceled training %s for user=%s", req.training_id, user_id)
-        return {"status": "canceled", "training_id": req.training_id}
+    if stopped:
+        return await _complete_cancel(supabase, req.training_id, "canceled", None)
 
-    # Modal cancel failed. If this synchronous attempt has now reached the
-    # retry cap — e.g. a student spam-clicking Abbrechen against a flaky
-    # Modal drove cancel_attempts to MAX_CANCEL_ATTEMPTS — flip straight to
-    # 'failed' here so the credit frees immediately and further clicks stop
-    # issuing redundant Modal cancels, rather than depending on the
-    # background sweep to notice. Mirrors the sweep's give-up message
-    # (training_sweep._retry_one) so the student sees one consistent text.
-    if current_attempts + 1 >= MAX_CANCEL_ATTEMPTS:
-        supabase.table("trainings").update(
-            {
-                "status": "failed",
-                "terminated_at": datetime.now(timezone.utc).isoformat(),
-                "worker_token": None,
-                "error_message": (
-                    "Abbruch konnte nicht an Cloud-Worker zugestellt werden "
-                    f"(Modal-Cancel nach {MAX_CANCEL_ATTEMPTS} Versuchen "
-                    "weiterhin fehlgeschlagen). Credit wurde freigegeben — "
-                    "bitte Training neu starten."
-                ),
-            }
-        ).eq("id", req.training_id).execute()
+    # Stopping failed. At the retry cap (a student spam-clicking Abbrechen
+    # against a flaky backend) fail the row now so the credit frees and further
+    # clicks stop issuing redundant cancels; the sweep's give-up uses the same
+    # sentence.
+    if attempts >= MAX_CANCEL_ATTEMPTS:
+        message = texts.S21 if managed else LEGACY_CANCEL_GIVEUP_DE
         logger.error(
-            "Cancel for training %s exhausted %d synchronous attempts, "
-            "marked failed (credit freed)",
+            "Cancel for training %s exhausted %d synchronous attempts, marked failed (credit freed)",
             req.training_id, MAX_CANCEL_ATTEMPTS,
         )
-        return {"status": "failed", "training_id": req.training_id}
+        return await _complete_cancel(supabase, req.training_id, "failed", message)
 
-    # Below the cap: leave the row in cancel_requested. The background
-    # training_cancel_sweep retries every 30 s. Return cancel_requested so
-    # the React UI can surface a "Abbruch in Bearbeitung…" toast and poll.
-    logger.info(
-        "Cancel queued for training %s (sweep will retry Modal cancel)",
-        req.training_id,
-    )
+    logger.info("Cancel queued for training %s (sweep will retry)", req.training_id)
     return {"status": "cancel_requested", "training_id": req.training_id}
+
+
+async def _complete_cancel(supabase, training_id: int, final: str, message):
+    """complete_cancel_training; P0049 → answer the row's current status."""
+    try:
+        supabase.rpc(
+            "complete_cancel_training",
+            {"p_training_id": training_id, "p_final": final, "p_message": message},
+        ).execute()
+    except Exception as e:
+        if training_dispatch.pg_code(e) != "P0049":
+            raise
+        rows = supabase.table("trainings").select("status").eq("id", training_id).execute().data or []
+        status = rows[0]["status"] if rows else final
+        logger.info("Cancel of training %s lost a race; row is %s", training_id, status)
+        return {"status": status, "training_id": training_id}
+    logger.info("Cancel of training %s: %s", training_id, final)
+    return {"status": final, "training_id": training_id}
 
 
 @router.get("/list", response_model=list[TrainingJob])

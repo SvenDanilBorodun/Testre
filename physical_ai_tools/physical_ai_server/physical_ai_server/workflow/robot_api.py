@@ -283,6 +283,12 @@ class ApiCall:
     doc_de_java: str = ''            # only where doc_de names Python (None, [x, y, z], move_to …)
     example: tuple = ()              # positional example args (ExampleRef = a variable)
     example_var: str = ''            # the variable a value row's example assigns
+    # The BLOCK's tooltip text (robot_api.json only; no stub renders it): the
+    # same promise as doc_de in the words a Blockly student reads — German, no
+    # Python spelling (no snake_case name, None/True/False, [x, y, z] or a
+    # parameter name such as timeout/speed/level). Every handler row has one;
+    # the code-only and internal rows have no block and none.
+    doc_de_block: str = ''
 
 
 @dataclass(frozen=True)
@@ -349,38 +355,55 @@ _EX_ZIEL = ExampleRef('ziel')
 ROBOT_API: tuple[ApiCall, ...] = (
     # ── Motion ────────────────────────────────────────────────────────────
     _stmt('home', 'home', 'edubotics_home', (),
-          'Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist.'),
+          'Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist.',
+          doc_de_block='Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist.'),
     _stmt('open_gripper', 'openGripper', 'edubotics_open_gripper', (),
-          'Öffnet den Greifer.'),
+          'Öffnet den Greifer.',
+          doc_de_block='Öffnet den Greifer.'),
     _stmt('close_gripper', 'closeGripper', 'edubotics_close_gripper', (),
-          'Schließt den Greifer.'),
+          'Schließt den Greifer.',
+          doc_de_block='Schließt den Greifer.'),
     _stmt('move_to', 'moveTo', 'edubotics_move_to',
           (_p('target', 'target', 'destination', asset='place',
               doc_de='Wohin: der Name eines Ziels oder einer Position aus deiner Sammlung – '
                      'oder ein Punkt (x, y, z) in Metern.'),),
-          'Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name '
-          'eines gemerkten Ziels.',
-          doc_de_java='Fährt über das Ziel: ein Punkt new double[] {x, y, z} in Metern oder '
-                      'der Name eines gemerkten Ziels.',
-          example=('Ablage',)),
+          # Q3: a table (plane-tracked) Ziel is approached from above and the
+          # arm stops at the release height over it (motion.table_ziel_hover).
+          'Fährt zum Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten '
+          'Ziels; bei einem Ziel auf dem Tisch hält der Greifer darüber an (Ablagehöhe).',
+          doc_de_java='Fährt zum Ziel: ein Punkt new double[] {x, y, z} in Metern oder der '
+                      'Name eines gemerkten Ziels; bei einem Ziel auf dem Tisch hält der '
+                      'Greifer darüber an (Ablagehöhe).',
+          example=('Ablage',),
+          doc_de_block='Fährt den Greifer zum Ziel; bei einem Ziel auf dem Tisch hält er '
+                       'darüber an (Ablagehöhe).'),
     _stmt('pickup', 'pickup', 'edubotics_pickup',
+          # Q9: a Position („Position vormachen") is refused here.
           (_p('target', 'target', 'target', asset='place',
-              doc_de='Wo: der Name eines Ziels oder einer Position aus deiner Sammlung – '
+              doc_de='Wo: der Name eines Ziels aus deiner Sammlung (keine Position) – '
                      'oder ein Punkt (x, y, z) in Metern.'),),
           'Nimmt an dieser Stelle etwas auf: hinfahren, absenken, Greifer '
           'schließen, anheben.',
-          example=('Start',)),
+          example=('Start',),
+          doc_de_block='Nimmt an diesem Ziel etwas auf: Greifer öffnen, darüber fahren, '
+                       'absenken, Greifer schließen, anheben. Eine Position lehnt der Block '
+                       'ab.'),
     _stmt('drop_at', 'dropAt', 'edubotics_drop_at',
           (_p('target', 'target', 'destination', asset='place',
-              doc_de='Wo abgelegt wird: der Name eines Ziels oder einer Position aus deiner '
-                     'Sammlung – oder ein Punkt (x, y, z) in Metern.'),),
+              doc_de='Wo abgelegt wird: der Name eines Ziels aus deiner Sammlung (keine '
+                     'Position) – oder ein Punkt (x, y, z) in Metern.'),),
           'Legt das Gehaltene über dem Ziel ab und öffnet den Greifer.',
-          example=('Ablage',)),
+          example=('Ablage',),
+          doc_de_block='Legt das Gehaltene an diesem Ziel ab: darüber fahren, bis auf '
+                       'Ablagehöhe absenken, Greifer öffnen, wieder hochfahren. Eine Position '
+                       'lehnt der Block ab.'),
     _stmt('wait', 'waitSeconds', 'edubotics_wait_seconds',
           (_p('seconds', 'float', lo=0.0, hi=300.0,
               doc_de='Wie lange gewartet wird, in Sekunden (höchstens 300).'),),
           'Wartet so viele Sekunden (höchstens 300).',
-          example=(1.5,)),
+          example=(1.5,),
+          doc_de_block='Wartet so viele Sekunden, bevor der nächste Block läuft (höchstens '
+                       '300).'),
     _stmt('replay', 'replay', 'edubotics_replay_trajectory',
           (_p('name', 'str', max_len=40, pattern=TRAJECTORY_NAME_RE, asset='recording',
               doc_de='Der Name einer Bewegung aus deiner Sammlung.'),
@@ -389,27 +412,47 @@ ROBOT_API: tuple[ApiCall, ...] = (
                      'höchstens 3.0.')),
           'Spielt eine aufgenommene Bewegung ab; speed 1.0 ist die Geschwindigkeit '
           'der Aufnahme, höchstens 3.0.',
-          example=('Winken',)),
+          example=('Winken',),
+          doc_de_block='Spielt eine Bewegung aus deiner Sammlung ab (gleicher Name wie unter '
+                       '„Bewegungen“). Mach sie zuerst mit „Bewegung vormachen“ vor.'),
     _stmt('move_above', 'moveAbove', 'edubotics_move_above', (_ZIEL,),
           'Fährt in Anfahrhöhe über das gefundene Objekt.',
-          example=(_EX_ZIEL,)),
+          example=(_EX_ZIEL,),
+          doc_de_block='Fährt den Greifer in Anfahrhöhe über das Greifziel, ohne abzusenken.'),
     _stmt('descend_to', 'descendTo', 'edubotics_descend_to', (_ZIEL,),
-          'Senkt den geöffneten Greifer auf das gefundene Objekt ab.',
-          example=(_EX_ZIEL,)),
+          # F21: not straight above yet → the move_above hover first.
+          'Senkt den geöffneten Greifer auf das gefundene Objekt ab; steht er nicht '
+          'schon darüber, fährt er zuerst darüber.',
+          example=(_EX_ZIEL,),
+          doc_de_block='Senkt den Greifer auf die Greifhöhe des Greifziels ab; steht er nicht '
+                       'schon darüber, fährt er zuerst darüber.'),
     _stmt('close_on_object', 'closeOnObject', 'edubotics_close_on_object', (_ZIEL,),
           'Schließt den Greifer um das gefundene Objekt.',
-          example=(_EX_ZIEL,)),
+          example=(_EX_ZIEL,),
+          doc_de_block='Schließt den Greifer um das Greifziel.'),
     _stmt('lift', 'lift', 'edubotics_lift', (),
-          'Hebt den Greifer gerade nach oben an, so weit der Arm kann.'),
+          'Hebt den Greifer gerade nach oben an, so weit der Arm kann.',
+          doc_de_block='Hebt den Greifer gerade nach oben an, so weit der Arm kann.'),
     # ── Named-object grasp ────────────────────────────────────────────────
     _stmt('grasp', 'grasp', 'edubotics_grasp_object', (_OBJ,),
+          # Q8: on the rig an empty scene is WAITED for, with no time limit;
+          # the sim (and the Blockly „Solange … sichtbar" body) never waits.
           'Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, '
-          'schließen, prüfen.',
-          example=('wuerfel',)),
+          'schließen, prüfen. Ist keines zu sehen, wird gewartet, bis eines zu sehen '
+          'ist — so lange geht das Programm hier nicht weiter; Stopp beendet das '
+          'Warten (im Simulator wird nicht gewartet).',
+          example=('wuerfel',),
+          doc_de_block='Sucht ein Objekt dieses Typs, fährt darüber, greift es von oben und '
+                       'prüft, ob es wirklich hält; klappt es nicht, wird es noch einmal '
+                       'versucht. Ist keines zu sehen, wartet der Block, bis eines zu sehen '
+                       'ist — so lange geht das Programm hier nicht weiter; Stopp beendet das '
+                       'Warten. Im Simulator und in „Solange … sichtbar“ wird nicht gewartet.'),
     _stmt('mark_done', 'markDone', 'edubotics_mark_done', (_ZIEL,),
           'Merkt dieses Objekt als erledigt, damit es nicht noch einmal '
           'gefunden wird.',
-          example=(_EX_ZIEL,)),
+          example=(_EX_ZIEL,),
+          doc_de_block='Merkt dieses Greifziel als erledigt, damit es nicht noch einmal '
+                       'gefunden wird.'),
     # ── Destinations ──────────────────────────────────────────────────────
     _stmt('pin', 'pin', 'edubotics_destination_pin',
           (_DEST_DEF,
@@ -420,16 +463,28 @@ ROBOT_API: tuple[ApiCall, ...] = (
            _p('z', 'float', lo=-1.0, hi=1.0,
               doc_de='Höhe in Metern. Auf dem vermessenen Tisch und im Simulator nimmt '
                      'der Roboter stattdessen die Tischhöhe an dieser Stelle.')),
-          'Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel '
-          'für move_to und drop_at.',
-          doc_de_java='Merkt den Punkt (x, y, z) in Metern unter diesem Namen als Ziel für '
-                      'moveTo und dropAt.',
-          example=('Ablage', 0.2, 0.0, 0.0)),
+          # F16: a pinned destination is plane-tracked, so wherever a table
+          # height is known (a calibrated rig, always the simulator) its z is
+          # never used (motion.resolve_destination_z).
+          'Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für '
+          'move_to und drop_at; z gilt nur, wenn der Tisch nicht vermessen ist (im '
+          'Simulator nie).',
+          doc_de_java='Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für '
+                      'moveTo und dropAt; z gilt nur, wenn der Tisch nicht vermessen ist (im '
+                      'Simulator nie).',
+          example=('Ablage', 0.2, 0.0, 0.0),
+          doc_de_block='Merkt einen Tischpunkt unter diesem Namen als Ziel: den Block '
+                       'auswählen und in die Szenen-Kamera klicken. „fahre dorthin“ fährt den '
+                       'Greifer über diesen Punkt (Ablagehöhe). Die Höhe gilt nur, wenn der '
+                       'Tisch nicht vermessen ist (im Simulator nie).'),
     _stmt('pin_current', 'pinCurrent', 'edubotics_destination_current',
           (_DEST_DEF,),
-          'Merkt die Stelle, an der der Greifer gerade steht, unter diesem '
-          'Namen als Ziel.',
-          example=('Hier',)),
+          # Q12: xyz only — a Ziel, never a Position.
+          'Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den Punkt, '
+          'nicht die Armstellung).',
+          example=('Hier',),
+          doc_de_block='Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den '
+                       'Punkt, nicht die Armstellung).'),
     # ── Output ────────────────────────────────────────────────────────────
     _stmt('log', 'log', 'edubotics_log',
           (_p('message', 'text', max_len=2000,
@@ -437,14 +492,17 @@ ROBOT_API: tuple[ApiCall, ...] = (
                      '(höchstens 2000 Zeichen).'),),
           'Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens '
           '2000 Zeichen.',
-          example=('Hallo!',)),
+          example=('Hallo!',),
+          doc_de_block='Schreibt eine Zeile ins Protokoll (höchstens 2000 Zeichen).'),
     _stmt('beep', 'beep', 'edubotics_play_sound', (),
-          'Spielt einen kurzen Signalton ab — hörbar im Browser.'),
+          'Spielt einen kurzen Signalton ab — hörbar im Browser.',
+          doc_de_block='Spielt einen kurzen Signalton ab — hörbar im Browser.'),
     _stmt('speak', 'speak', 'edubotics_speak_de',
           (_p('text', 'text', max_len=240,
               doc_de='Was vorgelesen wird (höchstens 240 Zeichen).'),),
           'Liest den Text mit deutscher Stimme vor (höchstens 240 Zeichen).',
-          example=('Fertig!',)),
+          example=('Fertig!',),
+          doc_de_block='Liest den Text mit deutscher Stimme vor (höchstens 240 Zeichen).'),
     _stmt('tone', 'tone', 'edubotics_play_tone',
           (_p('freq', 'float', lo=100.0, hi=4000.0, default=880.0,
               doc_de='Die Tonhöhe in Hertz (100 bis 4000).'),
@@ -452,7 +510,9 @@ ROBOT_API: tuple[ApiCall, ...] = (
               doc_de='Wie lange der Ton klingt, in Sekunden (höchstens 5).')),
           'Spielt einen Ton mit dieser Frequenz in Hertz für so viele Sekunden '
           '(höchstens 5).',
-          example=(440.0, 0.5)),
+          example=(440.0, 0.5),
+          doc_de_block='Spielt einen Ton: die erste Zahl ist die Höhe in Hertz (100 bis 4000), '
+                       'die zweite die Dauer in Sekunden (0,05 bis 5).'),
     _stmt('toast', 'toast', 'edubotics_toast',
           (_p('text', 'text', max_len=240,
               doc_de='Die Meldung, die auf dem Bildschirm erscheint (höchstens 240 Zeichen).'),
@@ -463,14 +523,18 @@ ROBOT_API: tuple[ApiCall, ...] = (
               doc_de='Wie lange die Meldung zu sehen ist, in Sekunden (höchstens 15).')),
           'Zeigt eine Meldung auf dem Bildschirm; level ist info, success, '
           'warning oder error, seconds höchstens 15.',
-          example=('Fertig!', 'success')),
+          example=('Fertig!', 'success'),
+          doc_de_block='Zeigt eine Meldung auf dem Bildschirm: als Info, Erfolg, Warnung oder '
+                       'Fehler, höchstens 15 Sekunden lang.'),
     # ── Counters ──────────────────────────────────────────────────────────
     _stmt('counter_reset', 'counterReset', 'edubotics_counter_reset', (_COUNTER,),
           'Setzt den Zähler mit diesem Namen auf 0.',
-          example=('Punkte',)),
+          example=('Punkte',),
+          doc_de_block='Setzt den Zähler mit diesem Namen auf 0.'),
     _stmt('counter_add', 'counterAdd', 'edubotics_counter_add', (_COUNTER,),
           'Erhöht den Zähler mit diesem Namen um 1.',
-          example=('Punkte',)),
+          example=('Punkte',),
+          doc_de_block='Erhöht den Zähler mit diesem Namen um 1.'),
     # ── Values ────────────────────────────────────────────────────────────
     _value('ziel', 'ziel', 'edubotics_destination_ref', (_DEST_REF,), 'name',
            'Gibt den Namen eines gemerkten Ziels für move_to und drop_at zurück; '
@@ -479,18 +543,24 @@ ROBOT_API: tuple[ApiCall, ...] = (
                       'abgelehnt.',
            doc_de_java='Gibt den Namen eines gemerkten Ziels für moveTo und dropAt zurück; ein '
                        'unbekannter Name wird abgelehnt.',
-           example=('Ablage',), example_var='name'),
+           example=('Ablage',), example_var='name',
+           doc_de_block='Verweist auf ein Ziel oder eine Position deiner Sammlung mit diesem '
+                        'Namen – für „bewege zu“, ein Ziel auch für „aufnehmen“ und „ablegen '
+                        'bei“. Einen unbekannten Namen lehnt der Roboter ab.'),
     _value('sees', 'sees', 'edubotics_see_object', (_OBJ,), 'bool',
            'Prüft, ob gerade ein noch nicht erledigtes Objekt dieses Typs zu '
            'sehen ist.', budget='perception',
            returns_de='Wahr, wenn so ein Objekt gerade zu sehen ist – sonst falsch.',
-           example=('wuerfel',), example_var='gesehen'),
+           example=('wuerfel',), example_var='gesehen',
+           doc_de_block='Wahr, wenn gerade ein noch nicht erledigtes Objekt dieses Typs zu '
+                        'sehen ist.'),
     _value('count', 'count', 'edubotics_count_object', (_OBJ,), 'int',
            'Zählt die sichtbaren, noch nicht erledigten Objekte dieses Typs.',
            budget='perception',
            returns_de='Die Anzahl der sichtbaren, noch nicht erledigten Objekte – eine ganze '
                       'Zahl.',
-           example=('wuerfel',), example_var='anzahl'),
+           example=('wuerfel',), example_var='anzahl',
+           doc_de_block='Zählt die sichtbaren, noch nicht erledigten Objekte dieses Typs.'),
     _value('wait_until_seen', 'waitUntilSeen', 'edubotics_wait_until_object_seen',
            (_OBJ, _TIMEOUT), 'bool',
            'Wartet, bis ein Objekt dieses Typs zu sehen ist; False, wenn es nach '
@@ -499,16 +569,24 @@ ROBOT_API: tuple[ApiCall, ...] = (
                       'abgelaufen ist.',
            doc_de_java='Wartet, bis ein Objekt dieses Typs zu sehen ist; false, wenn es nach '
                        'timeout Sekunden nicht da ist.',
-           example=('wuerfel', 5.0), example_var='gesehen'),
+           example=('wuerfel', 5.0), example_var='gesehen',
+           # F9a: a timeout answers falsch with a [WARNUNG]; it never aborts.
+           doc_de_block='Wartet, bis ein Objekt dieses Typs zu sehen ist: wahr, sobald eines '
+                        'auftaucht – falsch mit einer Warnung im Protokoll, wenn die '
+                        'eingestellte Zeit abläuft. Das Programm läuft danach weiter.'),
     _value('wait_until_held', 'waitUntilHeld', 'edubotics_wait_until_held',
            (_TIMEOUT,), 'bool',
+           # Q10: the measured gripper OPEN never holds.
            'Wartet, bis der Greifer etwas hält; False, wenn er nach timeout '
-           'Sekunden noch leer ist.',
+           'Sekunden noch leer ist. Ein offener Greifer hält nie etwas.',
            returns_de='Wahr, sobald der Greifer etwas hält – falsch, wenn die Wartezeit '
                       'abgelaufen ist.',
            doc_de_java='Wartet, bis der Greifer etwas hält; false, wenn er nach timeout '
-                       'Sekunden noch leer ist.',
-           example=(3.0,), example_var='gehalten'),
+                       'Sekunden noch leer ist. Ein offener Greifer hält nie etwas.',
+           example=(3.0,), example_var='gehalten',
+           doc_de_block='Wartet, bis der Greifer etwas hält: wahr, sobald er etwas hält – '
+                        'falsch mit einer Warnung im Protokoll, wenn die eingestellte Zeit '
+                        'abläuft. Ein offener Greifer hält nie etwas.'),
     _value('find', 'find', 'edubotics_find_object', (_OBJ,), 'ziel',
            'Findet das nächste greifbare Objekt dieses Typs und gibt ein '
            'Greifziel zurück, sonst None.', budget='perception',
@@ -516,7 +594,10 @@ ROBOT_API: tuple[ApiCall, ...] = (
                       'greifbar ist.',
            doc_de_java='Findet das nächste greifbare Objekt dieses Typs und gibt ein '
                        'Robot.Greifziel zurück, sonst null.',
-           example=('wuerfel',), example_var='ziel'),
+           example=('wuerfel',), example_var='ziel',
+           doc_de_block='Sucht das nächste greifbare Objekt dieses Typs und gibt es als '
+                        'Greifziel zurück – oder „nichts“, wenn keines greifbar ist. Merke '
+                        'dir das Ergebnis in einer Variablen.'),
     _value('object_position', 'objectPosition', 'edubotics_object_position',
            (_ZIEL,), 'point',
            'Gibt die Position [x, y, z] des Greifziels in Metern zurück.',
@@ -525,15 +606,20 @@ ROBOT_API: tuple[ApiCall, ...] = (
                       'über die Kamera.',
            doc_de_java='Gibt die Position {x, y, z} des Greifziels als double[] in Metern '
                        'zurück.',
-           example=(_EX_ZIEL,), example_var='position'),
+           example=(_EX_ZIEL,), example_var='position',
+           doc_de_block='Gibt die Position (x, y, z) des Greifziels in Metern zurück.'),
     _value('is_holding', 'isHolding', 'edubotics_grasp_held', (), 'bool',
-           'Prüft, ob der Greifer etwas hält.',
+           'Prüft, ob der Greifer etwas hält. Ein offener Greifer hält nie etwas.',
            returns_de='Wahr, wenn der Greifer etwas hält – sonst falsch.',
-           example_var='gehalten'),
+           example_var='gehalten',
+           doc_de_block='Wahr, wenn der Greifer gerade etwas hält. Ein offener Greifer hält '
+                        'nie etwas.'),
     _value('counter_get', 'counterGet', 'edubotics_counter_get', (_COUNTER,), 'int',
            'Gibt den Wert des Zählers zurück; 0, wenn er noch nie gesetzt wurde.',
            returns_de='Den Wert des Zählers – eine ganze Zahl, 0 für einen neuen Zähler.',
-           example=('Punkte',), example_var='punkte'),
+           example=('Punkte',), example_var='punkte',
+           doc_de_block='Gibt den Wert des Zählers zurück; 0, wenn er noch nie gesetzt '
+                        'wurde.'),
 )
 
 _FILE = _p('file', 'str', max_len=80, pattern=CODE_PATH_RE)
@@ -1833,7 +1919,8 @@ def render_java_files() -> dict[str, str]:
 # ── JSON ──────────────────────────────────────────────────────────────────
 
 def _param_json(p: ApiParam) -> dict[str, Any]:
-    out: dict[str, Any] = {'name': p.name, 'kind': p.kind, 'required': p.required}
+    out: dict[str, Any] = {'name': p.name, 'kind': p.kind, 'arg_key': p.arg_key,
+                           'required': p.required}
     if not p.required:
         out['default'] = p.default
     for key in ('lo', 'hi', 'max_len', 'pattern'):
@@ -1850,7 +1937,7 @@ def _param_json(p: ApiParam) -> dict[str, Any]:
 
 
 def _call_json(c: ApiCall) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         'name': c.name,
         'java_name': c.java_name,
         'block_type': c.block_type,
@@ -1858,8 +1945,12 @@ def _call_json(c: ApiCall) -> dict[str, Any]:
         'budget': c.budget,
         'returns': c.returns,
         'doc_de': c.doc_de,
-        'params': [_param_json(p) for p in c.params],
     }
+    # The block's tooltip (blocks/*.js reads it): only rows that HAVE a block.
+    if c.doc_de_block:
+        out['doc_de_block'] = c.doc_de_block
+    out['params'] = [_param_json(p) for p in c.params]
+    return out
 
 
 def export_json() -> str:

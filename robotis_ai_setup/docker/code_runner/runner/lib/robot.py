@@ -336,7 +336,7 @@ def close_gripper():
     _rpc.call('close_gripper', [], 'call')
 
 def move_to(target):
-    """Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels."""
+    """Fährt zum Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels; bei einem Ziel auf dem Tisch hält der Greifer darüber an (Ablagehöhe)."""
     _rpc.call('move_to', [target], 'call')
 
 def pickup(target):
@@ -360,7 +360,7 @@ def move_above(ziel):
     _rpc.call('move_above', [_handle(ziel)], 'call')
 
 def descend_to(ziel):
-    """Senkt den geöffneten Greifer auf das gefundene Objekt ab."""
+    """Senkt den geöffneten Greifer auf das gefundene Objekt ab; steht er nicht schon darüber, fährt er zuerst darüber."""
     _rpc.call('descend_to', [_handle(ziel)], 'call')
 
 def close_on_object(ziel):
@@ -372,7 +372,7 @@ def lift():
     _rpc.call('lift', [], 'call')
 
 def grasp(obj):
-    """Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen."""
+    """Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen. Ist keines zu sehen, wird gewartet, bis eines zu sehen ist — so lange geht das Programm hier nicht weiter; Stopp beendet das Warten (im Simulator wird nicht gewartet)."""
     _rpc.call('grasp', [_type_name(obj)], 'call')
 
 def mark_done(ziel):
@@ -380,11 +380,11 @@ def mark_done(ziel):
     _rpc.call('mark_done', [_handle(ziel)], 'call')
 
 def pin(name, x, y, z):
-    """Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel für move_to und drop_at."""
+    """Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für move_to und drop_at; z gilt nur, wenn der Tisch nicht vermessen ist (im Simulator nie)."""
     _rpc.call('pin', [name, x, y, z], 'call')
 
 def pin_current(name):
-    """Merkt die Stelle, an der der Greifer gerade steht, unter diesem Namen als Ziel."""
+    """Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den Punkt, nicht die Armstellung)."""
     _rpc.call('pin_current', [name], 'call')
 
 def log(message):
@@ -432,7 +432,7 @@ def wait_until_seen(obj, timeout=10.0):
     return _rpc.call('wait_until_seen', [_type_name(obj), timeout], 'perception')
 
 def wait_until_held(timeout=10.0):
-    """Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist."""
+    """Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist. Ein offener Greifer hält nie etwas."""
     return _rpc.call('wait_until_held', [timeout], 'call')
 
 def find(obj):
@@ -446,7 +446,7 @@ def object_position(ziel):
     return _point(r)
 
 def is_holding():
-    """Prüft, ob der Greifer etwas hält."""
+    """Prüft, ob der Greifer etwas hält. Ein offener Greifer hält nie etwas."""
     return _rpc.call('is_holding', [], 'call')
 
 def counter_get(name):

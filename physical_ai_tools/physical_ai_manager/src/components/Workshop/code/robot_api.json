@@ -9,6 +9,7 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist.",
+      "doc_de_block": "Fährt den Arm in die Grundstellung; der Greifer bleibt, wie er ist.",
       "params": []
     },
     {
@@ -19,6 +20,7 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Öffnet den Greifer.",
+      "doc_de_block": "Öffnet den Greifer.",
       "params": []
     },
     {
@@ -29,6 +31,7 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Schließt den Greifer.",
+      "doc_de_block": "Schließt den Greifer.",
       "params": []
     },
     {
@@ -38,11 +41,13 @@
       "table": "statement",
       "budget": "call",
       "returns": "none",
-      "doc_de": "Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels.",
+      "doc_de": "Fährt zum Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels; bei einem Ziel auf dem Tisch hält der Greifer darüber an (Ablagehöhe).",
+      "doc_de_block": "Fährt den Greifer zum Ziel; bei einem Ziel auf dem Tisch hält er darüber an (Ablagehöhe).",
       "params": [
         {
           "name": "target",
           "kind": "target",
+          "arg_key": "destination",
           "required": true,
           "asset": "place"
         }
@@ -56,10 +61,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Nimmt an dieser Stelle etwas auf: hinfahren, absenken, Greifer schließen, anheben.",
+      "doc_de_block": "Nimmt an diesem Ziel etwas auf: Greifer öffnen, darüber fahren, absenken, Greifer schließen, anheben. Eine Position lehnt der Block ab.",
       "params": [
         {
           "name": "target",
           "kind": "target",
+          "arg_key": "target",
           "required": true,
           "asset": "place"
         }
@@ -73,10 +80,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Legt das Gehaltene über dem Ziel ab und öffnet den Greifer.",
+      "doc_de_block": "Legt das Gehaltene an diesem Ziel ab: darüber fahren, bis auf Ablagehöhe absenken, Greifer öffnen, wieder hochfahren. Eine Position lehnt der Block ab.",
       "params": [
         {
           "name": "target",
           "kind": "target",
+          "arg_key": "destination",
           "required": true,
           "asset": "place"
         }
@@ -90,10 +99,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Wartet so viele Sekunden (höchstens 300).",
+      "doc_de_block": "Wartet so viele Sekunden, bevor der nächste Block läuft (höchstens 300).",
       "params": [
         {
           "name": "seconds",
           "kind": "float",
+          "arg_key": "seconds",
           "required": true,
           "lo": 0.0,
           "hi": 300.0
@@ -108,10 +119,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Spielt eine aufgenommene Bewegung ab; speed 1.0 ist die Geschwindigkeit der Aufnahme, höchstens 3.0.",
+      "doc_de_block": "Spielt eine Bewegung aus deiner Sammlung ab (gleicher Name wie unter „Bewegungen“). Mach sie zuerst mit „Bewegung vormachen“ vor.",
       "params": [
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
@@ -120,6 +133,7 @@
         {
           "name": "speed",
           "kind": "float",
+          "arg_key": "speed",
           "required": false,
           "default": 1.0,
           "lo": 0.25,
@@ -135,10 +149,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Fährt in Anfahrhöhe über das gefundene Objekt.",
+      "doc_de_block": "Fährt den Greifer in Anfahrhöhe über das Greifziel, ohne abzusenken.",
       "params": [
         {
           "name": "ziel",
           "kind": "ziel",
+          "arg_key": "ziel",
           "required": true
         }
       ]
@@ -150,11 +166,13 @@
       "table": "statement",
       "budget": "call",
       "returns": "none",
-      "doc_de": "Senkt den geöffneten Greifer auf das gefundene Objekt ab.",
+      "doc_de": "Senkt den geöffneten Greifer auf das gefundene Objekt ab; steht er nicht schon darüber, fährt er zuerst darüber.",
+      "doc_de_block": "Senkt den Greifer auf die Greifhöhe des Greifziels ab; steht er nicht schon darüber, fährt er zuerst darüber.",
       "params": [
         {
           "name": "ziel",
           "kind": "ziel",
+          "arg_key": "ziel",
           "required": true
         }
       ]
@@ -167,10 +185,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Schließt den Greifer um das gefundene Objekt.",
+      "doc_de_block": "Schließt den Greifer um das Greifziel.",
       "params": [
         {
           "name": "ziel",
           "kind": "ziel",
+          "arg_key": "ziel",
           "required": true
         }
       ]
@@ -183,6 +203,7 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Hebt den Greifer gerade nach oben an, so weit der Arm kann.",
+      "doc_de_block": "Hebt den Greifer gerade nach oben an, so weit der Arm kann.",
       "params": []
     },
     {
@@ -192,11 +213,13 @@
       "table": "statement",
       "budget": "call",
       "returns": "none",
-      "doc_de": "Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen.",
+      "doc_de": "Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen. Ist keines zu sehen, wird gewartet, bis eines zu sehen ist — so lange geht das Programm hier nicht weiter; Stopp beendet das Warten (im Simulator wird nicht gewartet).",
+      "doc_de_block": "Sucht ein Objekt dieses Typs, fährt darüber, greift es von oben und prüft, ob es wirklich hält; klappt es nicht, wird es noch einmal versucht. Ist keines zu sehen, wartet der Block, bis eines zu sehen ist — so lange geht das Programm hier nicht weiter; Stopp beendet das Warten. Im Simulator und in „Solange … sichtbar“ wird nicht gewartet.",
       "params": [
         {
           "name": "obj",
           "kind": "obj",
+          "arg_key": "object_type",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$",
@@ -212,10 +235,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Merkt dieses Objekt als erledigt, damit es nicht noch einmal gefunden wird.",
+      "doc_de_block": "Merkt dieses Greifziel als erledigt, damit es nicht noch einmal gefunden wird.",
       "params": [
         {
           "name": "ziel",
           "kind": "ziel",
+          "arg_key": "ziel",
           "required": true
         }
       ]
@@ -227,11 +252,13 @@
       "table": "statement",
       "budget": "call",
       "returns": "none",
-      "doc_de": "Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel für move_to und drop_at.",
+      "doc_de": "Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für move_to und drop_at; z gilt nur, wenn der Tisch nicht vermessen ist (im Simulator nie).",
+      "doc_de_block": "Merkt einen Tischpunkt unter diesem Namen als Ziel: den Block auswählen und in die Szenen-Kamera klicken. „fahre dorthin“ fährt den Greifer über diesen Punkt (Ablagehöhe). Die Höhe gilt nur, wenn der Tisch nicht vermessen ist (im Simulator nie).",
       "params": [
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
@@ -240,6 +267,7 @@
         {
           "name": "x",
           "kind": "float",
+          "arg_key": "x",
           "required": true,
           "lo": -1.0,
           "hi": 1.0
@@ -247,6 +275,7 @@
         {
           "name": "y",
           "kind": "float",
+          "arg_key": "y",
           "required": true,
           "lo": -1.0,
           "hi": 1.0
@@ -254,6 +283,7 @@
         {
           "name": "z",
           "kind": "float",
+          "arg_key": "z",
           "required": true,
           "lo": -1.0,
           "hi": 1.0
@@ -267,11 +297,13 @@
       "table": "statement",
       "budget": "call",
       "returns": "none",
-      "doc_de": "Merkt die Stelle, an der der Greifer gerade steht, unter diesem Namen als Ziel.",
+      "doc_de": "Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den Punkt, nicht die Armstellung).",
+      "doc_de_block": "Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den Punkt, nicht die Armstellung).",
       "params": [
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
@@ -287,10 +319,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens 2000 Zeichen.",
+      "doc_de_block": "Schreibt eine Zeile ins Protokoll (höchstens 2000 Zeichen).",
       "params": [
         {
           "name": "message",
           "kind": "text",
+          "arg_key": "message",
           "required": true,
           "max_len": 2000
         }
@@ -304,6 +338,7 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Spielt einen kurzen Signalton ab — hörbar im Browser.",
+      "doc_de_block": "Spielt einen kurzen Signalton ab — hörbar im Browser.",
       "params": []
     },
     {
@@ -314,10 +349,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Liest den Text mit deutscher Stimme vor (höchstens 240 Zeichen).",
+      "doc_de_block": "Liest den Text mit deutscher Stimme vor (höchstens 240 Zeichen).",
       "params": [
         {
           "name": "text",
           "kind": "text",
+          "arg_key": "text",
           "required": true,
           "max_len": 240
         }
@@ -331,10 +368,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Spielt einen Ton mit dieser Frequenz in Hertz für so viele Sekunden (höchstens 5).",
+      "doc_de_block": "Spielt einen Ton: die erste Zahl ist die Höhe in Hertz (100 bis 4000), die zweite die Dauer in Sekunden (0,05 bis 5).",
       "params": [
         {
           "name": "freq",
           "kind": "float",
+          "arg_key": "freq",
           "required": false,
           "default": 880.0,
           "lo": 100.0,
@@ -343,6 +382,7 @@
         {
           "name": "seconds",
           "kind": "float",
+          "arg_key": "seconds",
           "required": false,
           "default": 0.25,
           "lo": 0.05,
@@ -358,16 +398,19 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Zeigt eine Meldung auf dem Bildschirm; level ist info, success, warning oder error, seconds höchstens 15.",
+      "doc_de_block": "Zeigt eine Meldung auf dem Bildschirm: als Info, Erfolg, Warnung oder Fehler, höchstens 15 Sekunden lang.",
       "params": [
         {
           "name": "text",
           "kind": "text",
+          "arg_key": "text",
           "required": true,
           "max_len": 240
         },
         {
           "name": "level",
           "kind": "str",
+          "arg_key": "level",
           "required": false,
           "default": "info",
           "max_len": 7,
@@ -376,6 +419,7 @@
         {
           "name": "seconds",
           "kind": "int",
+          "arg_key": "seconds",
           "required": false,
           "default": 3,
           "lo": 1,
@@ -391,10 +435,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Setzt den Zähler mit diesem Namen auf 0.",
+      "doc_de_block": "Setzt den Zähler mit diesem Namen auf 0.",
       "params": [
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
@@ -410,10 +456,12 @@
       "budget": "call",
       "returns": "none",
       "doc_de": "Erhöht den Zähler mit diesem Namen um 1.",
+      "doc_de_block": "Erhöht den Zähler mit diesem Namen um 1.",
       "params": [
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
@@ -429,10 +477,12 @@
       "budget": "call",
       "returns": "name",
       "doc_de": "Gibt den Namen eines gemerkten Ziels für move_to und drop_at zurück; ein unbekannter Name wird abgelehnt.",
+      "doc_de_block": "Verweist auf ein Ziel oder eine Position deiner Sammlung mit diesem Namen – für „bewege zu“, ein Ziel auch für „aufnehmen“ und „ablegen bei“. Einen unbekannten Namen lehnt der Roboter ab.",
       "params": [
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
@@ -448,10 +498,12 @@
       "budget": "perception",
       "returns": "bool",
       "doc_de": "Prüft, ob gerade ein noch nicht erledigtes Objekt dieses Typs zu sehen ist.",
+      "doc_de_block": "Wahr, wenn gerade ein noch nicht erledigtes Objekt dieses Typs zu sehen ist.",
       "params": [
         {
           "name": "obj",
           "kind": "obj",
+          "arg_key": "object_type",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$",
@@ -467,10 +519,12 @@
       "budget": "perception",
       "returns": "int",
       "doc_de": "Zählt die sichtbaren, noch nicht erledigten Objekte dieses Typs.",
+      "doc_de_block": "Zählt die sichtbaren, noch nicht erledigten Objekte dieses Typs.",
       "params": [
         {
           "name": "obj",
           "kind": "obj",
+          "arg_key": "object_type",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$",
@@ -486,10 +540,12 @@
       "budget": "perception",
       "returns": "bool",
       "doc_de": "Wartet, bis ein Objekt dieses Typs zu sehen ist; False, wenn es nach timeout Sekunden nicht da ist.",
+      "doc_de_block": "Wartet, bis ein Objekt dieses Typs zu sehen ist: wahr, sobald eines auftaucht – falsch mit einer Warnung im Protokoll, wenn die eingestellte Zeit abläuft. Das Programm läuft danach weiter.",
       "params": [
         {
           "name": "obj",
           "kind": "obj",
+          "arg_key": "object_type",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$",
@@ -498,6 +554,7 @@
         {
           "name": "timeout",
           "kind": "float",
+          "arg_key": "timeout",
           "required": false,
           "default": 10.0,
           "lo": 0.0,
@@ -512,11 +569,13 @@
       "table": "value",
       "budget": "call",
       "returns": "bool",
-      "doc_de": "Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist.",
+      "doc_de": "Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist. Ein offener Greifer hält nie etwas.",
+      "doc_de_block": "Wartet, bis der Greifer etwas hält: wahr, sobald er etwas hält – falsch mit einer Warnung im Protokoll, wenn die eingestellte Zeit abläuft. Ein offener Greifer hält nie etwas.",
       "params": [
         {
           "name": "timeout",
           "kind": "float",
+          "arg_key": "timeout",
           "required": false,
           "default": 10.0,
           "lo": 0.0,
@@ -532,10 +591,12 @@
       "budget": "perception",
       "returns": "ziel",
       "doc_de": "Findet das nächste greifbare Objekt dieses Typs und gibt ein Greifziel zurück, sonst None.",
+      "doc_de_block": "Sucht das nächste greifbare Objekt dieses Typs und gibt es als Greifziel zurück – oder „nichts“, wenn keines greifbar ist. Merke dir das Ergebnis in einer Variablen.",
       "params": [
         {
           "name": "obj",
           "kind": "obj",
+          "arg_key": "object_type",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$",
@@ -551,10 +612,12 @@
       "budget": "perception",
       "returns": "point",
       "doc_de": "Gibt die Position [x, y, z] des Greifziels in Metern zurück.",
+      "doc_de_block": "Gibt die Position (x, y, z) des Greifziels in Metern zurück.",
       "params": [
         {
           "name": "ziel",
           "kind": "ziel",
+          "arg_key": "ziel",
           "required": true
         }
       ]
@@ -566,7 +629,8 @@
       "table": "value",
       "budget": "call",
       "returns": "bool",
-      "doc_de": "Prüft, ob der Greifer etwas hält.",
+      "doc_de": "Prüft, ob der Greifer etwas hält. Ein offener Greifer hält nie etwas.",
+      "doc_de_block": "Wahr, wenn der Greifer gerade etwas hält. Ein offener Greifer hält nie etwas.",
       "params": []
     },
     {
@@ -577,10 +641,12 @@
       "budget": "call",
       "returns": "int",
       "doc_de": "Gibt den Wert des Zählers zurück; 0, wenn er noch nie gesetzt wurde.",
+      "doc_de_block": "Gibt den Wert des Zählers zurück; 0, wenn er noch nie gesetzt wurde.",
       "params": [
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
@@ -600,6 +666,7 @@
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^(?=.*\\S)[^=\\[\\]\\x00-\\x1f\\x7f]{1,40}$",
@@ -608,6 +675,7 @@
         {
           "name": "wert",
           "kind": "value",
+          "arg_key": "wert",
           "required": true
         }
       ]
@@ -626,6 +694,7 @@
         {
           "name": "token",
           "kind": "str",
+          "arg_key": "token",
           "required": true,
           "max_len": 32,
           "pattern": "^[0-9a-f]{32}$"
@@ -644,6 +713,7 @@
         {
           "name": "file",
           "kind": "str",
+          "arg_key": "file",
           "required": true,
           "max_len": 80,
           "pattern": "^(?:[A-Za-z][A-Za-z0-9_]{0,39}/){0,3}[A-Za-z][A-Za-z0-9_]{0,39}\\.(py|java)$"
@@ -651,6 +721,7 @@
         {
           "name": "line",
           "kind": "int",
+          "arg_key": "line",
           "required": true,
           "lo": 0,
           "hi": 1000000
@@ -658,6 +729,7 @@
         {
           "name": "locals",
           "kind": "dict",
+          "arg_key": "locals",
           "required": true,
           "max_len": 30
         }
@@ -675,6 +747,7 @@
         {
           "name": "file",
           "kind": "str",
+          "arg_key": "file",
           "required": true,
           "max_len": 80,
           "pattern": "^(?:[A-Za-z][A-Za-z0-9_]{0,39}/){0,3}[A-Za-z][A-Za-z0-9_]{0,39}\\.(py|java)$"
@@ -682,6 +755,7 @@
         {
           "name": "line",
           "kind": "int",
+          "arg_key": "line",
           "required": true,
           "lo": 0,
           "hi": 1000000
@@ -700,6 +774,7 @@
         {
           "name": "file",
           "kind": "str",
+          "arg_key": "file",
           "required": true,
           "max_len": 80,
           "pattern": "^(?:[A-Za-z][A-Za-z0-9_]{0,39}/){0,3}[A-Za-z][A-Za-z0-9_]{0,39}\\.(py|java)$"
@@ -707,6 +782,7 @@
         {
           "name": "line",
           "kind": "int",
+          "arg_key": "line",
           "required": true,
           "lo": 0,
           "hi": 1000000
@@ -714,6 +790,7 @@
         {
           "name": "locals",
           "kind": "dict",
+          "arg_key": "locals",
           "required": true,
           "max_len": 30
         }
@@ -731,6 +808,7 @@
         {
           "name": "info",
           "kind": "dict",
+          "arg_key": "info",
           "required": true,
           "max_len": 8
         }
@@ -748,6 +826,7 @@
         {
           "name": "name",
           "kind": "obj",
+          "arg_key": "name",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$"
@@ -755,17 +834,20 @@
         {
           "name": "label",
           "kind": "str",
+          "arg_key": "label",
           "required": true,
           "max_len": 40
         },
         {
           "name": "tag_ids",
           "kind": "tagids",
+          "arg_key": "tag_ids",
           "required": true
         },
         {
           "name": "hoehe_m",
           "kind": "float",
+          "arg_key": "hoehe_m",
           "required": true,
           "lo": 0.0,
           "hi": 0.3,
@@ -774,6 +856,7 @@
         {
           "name": "greiftiefe_m",
           "kind": "float",
+          "arg_key": "greiftiefe_m",
           "required": true,
           "lo": 0.0,
           "hi": 0.3
@@ -781,6 +864,7 @@
         {
           "name": "greifer_schliessen_rad",
           "kind": "float",
+          "arg_key": "greifer_schliessen_rad",
           "required": true,
           "lo": -1.75,
           "hi": 1.75,
@@ -789,6 +873,7 @@
         {
           "name": "anfahrhoehe_m",
           "kind": "float",
+          "arg_key": "anfahrhoehe_m",
           "required": true,
           "lo": 0.0,
           "hi": 0.3,

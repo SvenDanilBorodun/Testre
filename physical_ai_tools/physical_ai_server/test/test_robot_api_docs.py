@@ -55,6 +55,10 @@ _JAVA_DOC_ROWS = frozenset({
     'object_position',
 })
 
+# What a Blockly student cannot read in a block tooltip beyond the Python-isms:
+# the parameter names of the text API, which are English words.
+_PARAM_WORD = re.compile(r'\b(?:timeout|speed|level|seconds|freq|message|target|obj)\b')
+
 
 def _load_gdl():
     path = _REPO / '.github' / 'scripts' / 'german_detail_lint.py'
@@ -273,8 +277,11 @@ def test_the_older_five_artifacts_do_not_read_the_column_data(monkeypatch):
 def test_robot_api_json_carries_no_column_key():
     doc = json.loads(robot_api.export_json())
     for m in doc['methods'] + doc['internal']:
+        # The block tooltip (doc_de_block) rides robot_api.json, because the
+        # blocks read it from there — exactly on the rows that HAVE a block.
+        block = {'doc_de_block'} if m['block_type'] is not None else set()
         assert set(m) == {'name', 'java_name', 'block_type', 'table', 'budget', 'returns',
-                          'doc_de', 'params'}, m['name']
+                          'doc_de', 'params'} | block, m['name']
         for p in m['params']:
             assert 'doc_de' not in p and 'java_name' not in p, (m['name'], p['name'])
     assert 'types' not in doc
@@ -286,3 +293,100 @@ def test_the_docs_json_names_its_generator():
     # it must sit in exactly one lazy chunk, never in the entry.
     assert _DOCS['generated_by'] == \
         'physical_ai_server/workflow/robot_api.py::export_docs_json'
+
+
+# ── the block side of the contract (area B) ───────────────────────────────
+
+def test_every_param_exports_its_arg_key():
+    # pythonCodeGen.js reads the block input/field named arg_key.upper() (F8);
+    # the key is the one the handler reads (test_robot_api), never the
+    # student-facing parameter name: move_to/drop_at take `destination`.
+    doc = json.loads(robot_api.export_json())
+    for m in doc['methods'] + doc['internal']:
+        row = {c.name: c for c in _PUBLIC + robot_api.INTERNAL_METHODS}[m['name']]
+        assert [p['arg_key'] for p in m['params']] == [p.arg_key for p in row.params], m['name']
+    by = {m['name']: m for m in doc['methods']}
+    assert by['move_to']['params'][0]['arg_key'] == 'destination'
+    assert by['drop_at']['params'][0]['arg_key'] == 'destination'
+    assert by['pickup']['params'][0]['arg_key'] == 'target'
+    assert by['grasp']['params'][0]['arg_key'] == 'object_type'
+
+
+def test_every_block_row_has_a_german_block_doc_without_python_spelling():
+    for call in robot_api.ROBOT_API:
+        text = call.doc_de_block
+        assert text.strip(), call.name
+        assert _is_german(text), (call.name, text)
+        assert not _has_python_ism(text), (call.name, text)
+        assert not _PARAM_WORD.search(text), (call.name, text)
+    # The code-only and internal rows have no block, hence no block text.
+    for call in robot_api.CODE_ONLY_METHODS + robot_api.INTERNAL_METHODS:
+        assert call.doc_de_block == '', call.name
+    doc = json.loads(robot_api.export_json())
+    by = {m['name']: m for m in doc['methods']}
+    for call in robot_api.ROBOT_API:
+        assert by[call.name]['doc_de_block'] == call.doc_de_block, call.name
+    assert 'doc_de_block' not in by['zeige']
+
+
+def test_the_block_doc_fence_bites():
+    assert _PARAM_WORD.search('falsch, wenn timeout abläuft')
+    assert _PARAM_WORD.search('level ist info')
+    assert not _PARAM_WORD.search('Wartet so viele Sekunden (höchstens 300).')
+
+
+def test_the_block_doc_is_json_only_for_the_stubs(monkeypatch):
+    # The stubs never render the block text (no runner image change for a
+    # tooltip edit); only robot_api.json carries it.
+    before = robot_api.render_all()
+    monkeypatch.setattr(robot_api, 'ROBOT_API', tuple(
+        dataclasses.replace(c, doc_de_block='') for c in robot_api.ROBOT_API))
+    after = robot_api.render_all()
+    changed = {rel for rel in before if after[rel] != before[rel]}
+    assert changed == {robot_api.GENERATED_PATHS['json']}
+
+
+def test_pin_doc_names_a_table_point():
+    # F16: a pinned destination is plane-tracked (handlers/destinations.py::
+    # destination_pin), so its z is used only where no table height is known.
+    pin = robot_api.ROBOT_API_BY_NAME['pin']
+    for text in (pin.doc_de, pin.doc_de_java):
+        assert text.startswith('Merkt den Tischpunkt (x, y) in Metern'), text
+        assert 'z gilt nur, wenn der Tisch nicht vermessen ist (im Simulator nie).' in text
+    assert 'Tischpunkt' in pin.doc_de_block
+    assert 'Die Höhe gilt nur, wenn der Tisch nicht vermessen ist' in pin.doc_de_block
+
+
+def test_the_area_b_row_texts():
+    by = robot_api.ROBOT_API_BY_NAME
+    # Q3: a table Ziel is approached from above, release height.
+    for text in (by['move_to'].doc_de, by['move_to'].doc_de_java):
+        assert text.startswith('Fährt zum Ziel: ein Punkt '), text
+        assert text.endswith('; bei einem Ziel auf dem Tisch hält der Greifer darüber an '
+                             '(Ablagehöhe).'), text
+    assert 'hält er darüber an (Ablagehöhe)' in by['move_to'].doc_de_block
+    # Q8: the grasp waits and says what that means for the program.
+    for text in (by['grasp'].doc_de, by['grasp'].doc_de_block):
+        assert 'bis eines zu sehen ist — so lange geht das Programm hier nicht weiter; ' \
+               'Stopp beendet das Warten' in text, text
+        assert 'Simulator' in text, text
+    # Q10: an open gripper never holds.
+    for name in ('is_holding', 'wait_until_held'):
+        for text in (by[name].doc_de, by[name].doc_de_block):
+            assert text.endswith('Ein offener Greifer hält nie etwas.'), (name, text)
+    assert by['wait_until_held'].doc_de_java.endswith('Ein offener Greifer hält nie etwas.')
+    # Q9: the place/pick targets name a Ziel, never a Position.
+    assert by['pickup'].params[0].doc_de.startswith(
+        'Wo: der Name eines Ziels aus deiner Sammlung (keine Position) – ')
+    assert by['drop_at'].params[0].doc_de.startswith(
+        'Wo abgelegt wird: der Name eines Ziels aus deiner Sammlung (keine Position) – ')
+    for name in ('pickup', 'drop_at'):
+        assert 'Eine Position lehnt der Block ab.' in by[name].doc_de_block
+    # Q12: „aktuelle Position" stores a point, a Ziel.
+    assert by['pin_current'].doc_de == (
+        'Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den Punkt, '
+        'nicht die Armstellung).')
+    # F9a: the wait block answers falsch with a warning; it never aborts.
+    seen = by['wait_until_seen'].doc_de_block
+    assert 'falsch mit einer Warnung im Protokoll' in seen and 'läuft danach weiter' in seen
+    assert 'bricht' not in seen

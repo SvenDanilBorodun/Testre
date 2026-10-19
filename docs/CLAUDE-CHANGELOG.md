@@ -70,7 +70,8 @@ commanded band, 3953 clear, 0 refused, ~2 s; 200,000 draws in a scratch run, 132
 „Lernpfad" key in the studio header cost the simulator header a row (Sucher: 2 rows / 105 px at 1366–1680 px, main
 1 / 59) and a shrinking note did not cure it, so (owner decision) the sentence moved into the simulator's dismissible
 „Test im Simulator." notice (`SimScene`'s `noticeEl`, inline; closed, it goes too) and the header is main's again:
-64 measured cells (900–1920 px, real/simulator, with/without the leader bridge) equal main's rows and height.
+32 setups (8 window widths from 900 to 1920 px × real/simulator × leader bridge on/off), each measured on main and
+on the branch, give main's rows and height.
 
 ### Unreleased, 2026-10-13 / 14 — „Sucher": the student app's visual redesign
 

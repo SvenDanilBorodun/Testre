@@ -1096,7 +1096,10 @@ def test_the_blockly_replay_refuses_a_seam_crossing_before_moving(monkeypatch):
 def _edu1_true_claw_rise(g):
     """The claw's LOWEST point above the closed-tip TCP, recomputed from the
     SHIPPED finger meshes through RL_joint / LF_joint (URDF origins, flipped axes,
-    mimic) — the ground truth tool_tip_rise_m must never exceed."""
+    mimic) and the claw housing (link5 + end_effector, rigid in the end_effector
+    frame, which ``end_joint`` puts at link5's origin) — the ground truth
+    tool_tip_rise_m must never exceed. Past ≈1.385 rad the housing, not a blade,
+    is the lowest part."""
     import struct
     meshes = (Path(__file__).resolve().parents[2] / 'physical_ai_manager' / 'public'
               / 'edu1-urdf' / 'meshes')
@@ -1120,31 +1123,56 @@ def _edu1_true_claw_rise(g):
     if cache is None:
         cache = {
             'right': _stl('right_finger.STL'), 'left': _stl('left_finger.STL'),
-            'R0': _rpy(-1.5708, 0, -1.5708)}
+            'R0': _rpy(-1.5708, 0, -1.5708),
+            'housing': max(float(_stl(name)[:, 2].max())
+                           for name in ('link5.STL', 'end_effector.STL'))}
         _edu1_true_claw_rise._cache = cache
     lowest = max(
         ((cache['R0'] @ _rotz(g * sign) @ cache[key].T).T + np.array(origin))[:, 2].max()
         for key, origin, sign in (('right', (0.0202, -0.00925, 0.02125), +1),
                                   ('left', (0.0195, 0.00925, 0.02125), -1)))
-    return 0.08625 - lowest
+    return 0.08625 - max(lowest, cache['housing'])
 
 
 def test_edu1_claw_tip_rise_never_over_credits_the_mesh_derived_truth():
-    from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
-    ik = Edu1IKSolver()
+    """Over the claw's WHOLE window (0–1.5708 rad, where a claw opened by hand
+    while the arm is limp can stand) and past it, the table never credits more
+    than the meshes allow; inside the window it is pessimistic only by its own
+    rounding and the rise within one 0.05 rad band, and every row is exactly
+    its band's minimum, rounded DOWN to 0.01 mm."""
+    from physical_ai_server.workflow import edu1_ik as E
+    ik = E.Edu1IKSolver()
     worst_over = -1.0
+    worst_under_band = 0.0
     worst_under = 0.0
     for g in np.linspace(0.0, 1.5708, 400):
         truth = _edu1_true_claw_rise(float(g))
         model = ik.tool_tip_rise_m(float(g))
         worst_over = max(worst_over, model - truth)
+        worst_under = max(worst_under, truth - model)
         if g <= 0.9:
-            worst_under = max(worst_under, truth - model)
+            worst_under_band = max(worst_under_band, truth - model)
+    for g in np.linspace(1.5708, math.pi, 60):          # past the window: the plateau
+        worst_over = max(worst_over, ik.tool_tip_rise_m(float(g)) - _edu1_true_claw_rise(float(g)))
     assert worst_over <= 1e-6, f'over-credits by {worst_over * 1000:.3f} mm'
-    assert worst_under < 0.0025, f'needlessly pessimistic by {worst_under * 1000:.2f} mm'
+    assert worst_under_band < 0.0025, f'needlessly pessimistic by {worst_under_band * 1000:.2f} mm'
+    # 0.05 rad bands on a curve rising ~6 mm per 0.1 rad: ≤ 3.05 mm (measured 3.04).
+    assert worst_under < 0.0031, f'needlessly pessimistic by {worst_under * 1000:.2f} mm'
+    # Each row IS its band's minimum, floored to 1e-5 (sampled every 0.5 mrad).
+    starts = [row[0] for row in E._TIP_RISE_TABLE]
+    assert starts == pytest.approx([round(0.05 * k, 2) for k in range(29)])
+    for i, (start, rise) in enumerate(E._TIP_RISE_TABLE):
+        end = starts[i + 1] if i + 1 < len(starts) else 1.5708
+        band_min = min(_edu1_true_claw_rise(float(g))
+                       for g in np.arange(start, end + 1e-12, 0.0005) if g < end or end == 1.5708)
+        assert band_min - 1.2e-5 <= rise <= band_min + 1e-9, (start, rise, band_min)
     # The dip is real and reported as a NEGATIVE rise (stricter, never looser).
     assert ik.tool_tip_rise_m(0.14) < 0.0
     assert ik.tool_tip_rise_m(0.9) == pytest.approx(0.01742)
+    # A claw opened by hand past the commanded band: the blades, then the housing.
+    assert ik.tool_tip_rise_m(1.2) == pytest.approx(0.03291)
+    assert ik.tool_tip_rise_m(1.5708) == pytest.approx(0.04374)
+    assert ik.tool_tip_rise_m(3.0) == pytest.approx(0.04374)
     assert ik.tool_tip_rise_m(float('nan')) == 0.0
     from physical_ai_server.workflow.handlers import motion as m
     from physical_ai_server.workflow.ik_solver import IKSolver

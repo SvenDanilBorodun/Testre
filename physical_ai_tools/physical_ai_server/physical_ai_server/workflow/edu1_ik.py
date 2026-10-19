@@ -179,14 +179,22 @@ BASE_AXIS_X_WORLD = 0.0
 _L_TOOL = 0.02125 + 0.065
 # Claw LOWEST-point rise above the closed-tip TCP: (band start rad, min true rise
 # in [start, next start) in m, rounded DOWN to 1e-5). Generated from the shipped
-# finger STLs through RL_joint/LF_joint (see tool_tip_rise_m); the last band covers
-# [0.9, 1.5708]. Negative near 0.14 rad: the tips dip before they rise.
+# finger STLs through RL_joint/LF_joint and the claw housing (link5.STL +
+# end_effector.STL, rigid in the end_effector frame) — see tool_tip_rise_m. It
+# spans the claw's WHOLE window [0, 1.5708], not only the commanded band (0–0.9):
+# a claw opened by hand while the arm is limp stays that wide after the re-lock.
+# Negative near 0.14 rad: the tips dip before they rise. From ≈1.385 rad the tips
+# ride above the housing's own lowest point (43.75 mm), so the last band, which
+# covers [1.40, 1.5708] and everything past it, is the housing's plateau.
 _TIP_RISE_TABLE = (
     (0.00, -0.00038), (0.05, -0.00059), (0.10, -0.00065), (0.15, -0.00064),
     (0.20, -0.00053), (0.25, -0.00025), (0.30, 0.00019), (0.35, 0.00080),
     (0.40, 0.00156), (0.45, 0.00249), (0.50, 0.00357), (0.55, 0.00480),
     (0.60, 0.00618), (0.65, 0.00771), (0.70, 0.00939), (0.75, 0.01120),
-    (0.80, 0.01315), (0.85, 0.01522), (0.90, 0.01742),
+    (0.80, 0.01315), (0.85, 0.01522), (0.90, 0.01742), (0.95, 0.01974),
+    (1.00, 0.02218), (1.05, 0.02472), (1.10, 0.02736), (1.15, 0.03009),
+    (1.20, 0.03291), (1.25, 0.03582), (1.30, 0.03879), (1.35, 0.04183),
+    (1.40, 0.04374),
 )
 
 # FK∘IK acceptance for a returned solve().
@@ -684,8 +692,13 @@ class Edu1IKSolver:
 
         Read from :data:`_TIP_RISE_TABLE`, which is DERIVED from the shipped finger
         meshes (``right_finger.STL`` / ``left_finger.STL`` through ``RL_joint`` /
-        ``LF_joint``, the flipped axes and the ``<mimic>``): each 0.05 rad band holds
-        the MINIMUM true rise anywhere inside it, rounded DOWN to 0.01 mm. A
+        ``LF_joint``, the flipped axes and the ``<mimic>``) and the claw housing
+        (``link5.STL`` + ``end_effector.STL``), over the claw's whole window
+        0–1.5708 rad: each 0.05 rad band holds the MINIMUM true rise of the
+        claw's lowest part anywhere inside it, rounded DOWN to 0.01 mm. Up to
+        ≈1.385 rad that part is a blade tip; past it the housing (43.75 mm above
+        the closed tip), so the last band is a plateau and a value past the
+        window is never credited more than the housing allows. A
         quadratic through the two CAD figures (86.25 mm closed, 68.8 mm at 0.9 rad)
         was used first and was WRONG: the blade pivots sit 9.25 mm either side of
         the tool axis, so opening the claw first moves the tips DOWN (−0.64 mm at

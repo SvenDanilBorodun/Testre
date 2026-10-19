@@ -258,13 +258,8 @@ def test_the_position_floor_check_never_refuses_a_pose_the_meshes_clear():
     whose real meshes are clear of the table AT THAT OPENING passes. The box
     model refused up to 86 % of the tilted ones that touch, per tilt band.
     Measured 2026-10-19 (seed 1019, 6000 draws, ~2 s): 3953 clear, 150 of them
-    within 20 mm of the table, claw tilt 1–179°.
-
-    Beyond the commanded band (a claw pushed wider by hand) the fingertip is
-    credited only ``tool_tip_rise_m``'s last band (17.4 mm from 0.9 rad on),
-    so a pose whose wide-open tips touch can be refused there; measured
-    2026-10-19: 30 of 14,689 clear near-table poses at 1.0–1.5708 rad, none
-    up to 1.0 rad (``docs/KNOWN-ISSUES.md``)."""
+    within 20 mm of the table, claw tilt 1–179°. A claw opened wider by hand
+    is the next test."""
     from physical_ai_server import robot_profiles as rp
     from physical_ai_server.workflow.handlers import motion as M
 
@@ -309,3 +304,50 @@ def test_the_position_floor_check_never_refuses_a_pose_the_meshes_clear():
     assert len(near_tilts) > 100, len(near_tilts)
     # The near-table poses span the tilts the box model refused (10–90°).
     assert min(near_tilts) < 10.0 and max(near_tilts) > 90.0, (min(near_tilts), max(near_tilts))
+
+
+def test_the_position_floor_check_never_refuses_a_hand_opened_claw_the_meshes_clear():
+    """A claw opened by HAND while the arm is limp can stand anywhere up to its
+    window's 1.5708 rad and keeps that opening after the re-lock, so a Position
+    is judged at claw values past the commanded band too. ``tool_tip_rise_m``
+    covers the whole window (fix round 3; before, every opening past 0.9 rad
+    was credited only 17.4 mm and a pose whose wide tips touch was refused).
+    Over seeded in-limit poses at claw openings 0.9–1.5708 rad, judged by the
+    mesh oracle: no pose clear of the flat z = 0 table is refused, and no pose
+    is refused against a flat table moved up or down to its OWN lowest mesh
+    point (every draw touching). Measured 2026-10-19 (seed 1020, 3000 draws,
+    ~2 s): 2015 clear at z = 0, 0 refused; 3000 touching, 0 refused. The table
+    cut back to 0.9 rad refused 2 of the clear and 118 of the touching ones."""
+    from physical_ai_server.workflow.handlers import motion as M
+
+    class _Ctx:
+        def __init__(self, z_table=None):
+            self.ik = _IK
+            self.z_table = z_table
+            self.table_plane = None
+
+    _IK = Edu1IKSolver()
+    urdf = _Urdf()
+    verts = {link: np.unique(urdf.vertices(link), axis=0)
+             for link in _BOX_LINKS[1:] + _GRIPPER_CHILDREN}
+    rng = np.random.default_rng(1020)
+    clear = 0
+    for _ in range(3000):
+        q = [float(rng.uniform(lo, hi)) for (lo, hi) in _IK.joint_limits]
+        claw = float(rng.uniform(0.9, 1.5708))
+        qmap = {f'joint{i + 1}': q[i] for i in range(5)}
+        qmap.update({'RL_joint': claw, 'LF_joint': claw})
+        frames = urdf.frames(qmap)
+        truth = min(float((v @ frames[link][2, :3]).min() + frames[link][2, 3])
+                    for link, v in verts.items())
+        cases = [(_Ctx(truth), 'touching its own table')]
+        if truth >= 0.0:
+            cases.append((_Ctx(), 'clear of z = 0'))
+        for ctx, what in cases:
+            try:
+                M._refuse_position_below_table(ctx, q + [claw], 'P')
+            except M.WorkflowError:
+                raise AssertionError(f'refused a pose {what} (mesh {truth * 1000:.1f} mm '
+                                     f'above z = 0): q={q}, claw={claw}') from None
+        clear += truth >= 0.0
+    assert clear > 1500, clear

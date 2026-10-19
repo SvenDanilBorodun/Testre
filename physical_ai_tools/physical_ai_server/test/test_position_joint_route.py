@@ -601,6 +601,37 @@ def test_an_open_edu1_claw_is_judged_by_its_open_tips(monkeypatch):
     assert _arm(rig) == pytest.approx(q, abs=1e-6)
 
 
+@pytest.mark.parametrize('g', [1.2, 1.5])
+def test_a_hand_opened_edu1_claw_is_judged_by_its_wide_open_tips(monkeypatch, g):
+    """A claw opened by HAND while the arm is limp can stand anywhere in its
+    window (to 1.5708 rad) and keeps that opening after the re-lock, so the
+    Position is judged at it. ``tool_tip_rise_m`` covers the whole window
+    (33 mm at 1.2 rad, the housing's 43.7 mm from 1.4 rad): a Position taught
+    with those wide-open tips on the table runs, the claw stays where the hand
+    put it. Judged with the table cut back to its commanded band (17.4 mm from
+    0.9 rad, as before fix round 3) the same Position was refused."""
+    from physical_ai_server.workflow import edu1_ik as E
+    pid = 'edu1_studio'
+    rise = M.tool_tip_rise_m(rp.ROBOT_PROFILES[pid].build_ik(), [0.0] * 5 + [g], 5)
+    assert rise > _carried_rise(pid) + M.WORKSPACE_FLOOR_MARGIN_M
+    q = _touching_pose(pid, -rise)
+    ctx = _plain_ctx(pid)
+    assert hp.pose_floor_clearance(ctx, q + [g]) == pytest.approx(0.0, abs=1e-6)
+    M._refuse_position_below_table(ctx, q + [g], 'P')
+    rig = Rig(monkeypatch, pid, simulated=True)
+    rig.arm._last_q[rig.profile.num_arm_joints] = g      # the hand-opened claw
+    phase = rig.run(program(_move('P'), destinations=[_entry(pid, 'P', q, 0.0)]))
+    assert phase == 'finished', rig.errors()
+    assert _arm(rig) == pytest.approx(q, abs=1e-6)
+    assert rig.arm.get_joints()[rig.profile.num_arm_joints] == pytest.approx(g)
+
+    monkeypatch.setattr(E, '_TIP_RISE_TABLE',
+                        tuple(row for row in E._TIP_RISE_TABLE if row[0] <= 0.9))
+    with pytest.raises(M.WorkflowError) as exc:
+        M._refuse_position_below_table(ctx, q + [g], 'P')
+    assert str(exc.value) == _BELOW_TABLE
+
+
 def test_the_threshold_is_a_ziels_margin_below_the_surface(monkeypatch):
     """1 mm inside ``WORKSPACE_FLOOR_MARGIN_M`` passes, 1 mm beyond refuses,
     whatever ``FLOOR_TOL_M`` is set to (it is only the rollback switch here).

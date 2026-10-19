@@ -52,7 +52,7 @@ TRAIN_DEVICE = "cuda"
 # Byte-equal to cloud_training_api/app/services/training_texts_de.py::S16.
 # Managed mode writes no German sentence to the database (E11).
 LEGACY_HOST_UNFIT_DE = (
-    "Der Cloud-GPU-Server ist nicht nutzbar (GPU oder Speicherplatz fehlt). "
+    "Der Cloud-GPU-Server ist nicht nutzbar (keine passende GPU). "
     "Das Training wurde nicht gestartet – das Trainingsguthaben wurde erstattet."
 )
 

@@ -52,6 +52,13 @@ BOOT_ID = uuid.uuid4().hex
 # ---------------------------------------------------------------------------
 SAVE_FREQ = 2500
 MIRROR_EVERY = 10000
+# An ACT start under TRAINING_DISPATCH=legacy ignores the client's num_workers and
+# save_freq too (owner E3: the form no longer shows them for ACT, yet still sends
+# whatever the browser stored): today's fresh-form defaults
+# (physical_ai_manager trainingSlice.js::defaultTrainingInfo, numWorkers / saveFreq;
+# app/tests/test_managed_start.py reads that file and holds the two equal).
+LEGACY_ACT_NUM_WORKERS = 2
+LEGACY_ACT_SAVE_FREQ = 10000
 ACT_BATCH = 8
 MAX_ATTEMPTS = 4
 COMMUNITY_LOSS_LIMIT = 2

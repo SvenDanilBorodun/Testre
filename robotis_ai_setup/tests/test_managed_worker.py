@@ -1215,7 +1215,7 @@ class LegacyHostCheck(unittest.TestCase):
         self.assertEqual(writes[0][4:6], ("failed", th.LEGACY_HOST_UNFIT_DE))
         running.assert_not_called()
         self.assertEqual(th.LEGACY_HOST_UNFIT_DE,
-                         "Der Cloud-GPU-Server ist nicht nutzbar (GPU oder Speicherplatz fehlt). "
+                         "Der Cloud-GPU-Server ist nicht nutzbar (keine passende GPU). "
                          "Das Training wurde nicht gestartet – das Trainingsguthaben wurde erstattet.")
 
     def test_legacy_mode_has_no_tmp_floor(self):

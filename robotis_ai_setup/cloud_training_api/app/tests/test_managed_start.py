@@ -176,7 +176,7 @@ class ManagedStart(StartBase):
         self.assertEqual(self.db.calls("start_training_safe"), [])
 
     async def test_preflight_refusals_and_outages(self):
-        self.preflight_result = ValueError("Dataset 'u/ds' enthält keine Episoden.")
+        self.preflight_result = dataset_preflight.DatasetRefused("Dataset 'u/ds' enthält keine Episoden.")
         with self.assertRaises(HTTPException) as ctx:
             await self.start()
         self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (400, "Dataset 'u/ds' enthält keine Episoden."))
@@ -185,7 +185,7 @@ class ManagedStart(StartBase):
             await self.start()
         self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (502, T.HF_UNREACHABLE_DE))
         self.preflight_result = info()
-        self.resolved = ValueError(dataset_preflight.not_found_sentence("u/ds"))
+        self.resolved = dataset_preflight.DatasetRefused(dataset_preflight.not_found_sentence("u/ds"))
         with self.assertRaises(HTTPException) as ctx:
             await self.start()
         self.assertEqual(ctx.exception.status_code, 400)
@@ -236,10 +236,37 @@ class LegacyDispatchStart(StartBase):
         (call,) = self.db.calls("start_training_safe")
         self.assertIs(call["p_managed"], False)
         self.assertIsNotNone(call["p_worker_token"])
-        self.assertEqual(call["p_training_params"]["num_workers"], 4, "legacy keeps the student's value")
+        self.assertEqual(call["p_training_params"]["num_workers"], 2, "E3: the client's value is ignored for ACT")
         self.assertNotIn("mirror_every", call["p_training_params"])
         self.assertEqual(resp.status, "running")
         self.assertEqual(self.preflight_calls, [("u/ds", "hf_platform", "act", "v3.0")])
+
+    async def test_a_legacy_act_start_ignores_the_hidden_form_fields(self):
+        # Owner E3: the form hides „Worker" and „Speicher-Intervall" for ACT, but the
+        # browser still sends what it stored (an old edubotics_trainingInfo).
+        await self.start(request(num_workers=9, save_freq=123))
+        (call,) = self.legacy
+        self.assertEqual((call["training_params"]["num_workers"], call["training_params"]["save_freq"]), (2, 10000))
+        (row,) = self.db.calls("start_training_safe")
+        self.assertEqual((row["p_training_params"]["num_workers"], row["p_training_params"]["save_freq"]),
+                         (2, 10000), "the stored dict (the dedupe key) too")
+
+    async def test_another_policy_keeps_the_clients_values(self):
+        await self.start(request(model_type="diffusion", num_workers=9, save_freq=123))
+        (call,) = self.legacy
+        self.assertEqual((call["training_params"]["num_workers"], call["training_params"]["save_freq"]), (9, 123))
+
+    def test_the_defaults_are_the_fresh_forms(self):
+        import os
+        import re
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        slice_js = os.path.join(here, "..", "..", "..", "..", "physical_ai_tools", "physical_ai_manager", "src",
+                                "features", "training", "trainingSlice.js")
+        with open(slice_js, encoding="utf-8") as fh:
+            block = re.search(r"const defaultTrainingInfo = \{(.*?)\n\};", fh.read(), re.S).group(1)
+        self.assertEqual(int(re.search(r"\bnumWorkers: (\d+),", block).group(1)), D.LEGACY_ACT_NUM_WORKERS)
+        self.assertEqual(int(re.search(r"\bsaveFreq: (\d+),", block).group(1)), D.LEGACY_ACT_SAVE_FREQ)
 
 
 class ResolveV3Commit(unittest.TestCase):

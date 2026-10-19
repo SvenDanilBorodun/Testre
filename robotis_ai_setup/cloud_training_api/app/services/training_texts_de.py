@@ -55,7 +55,7 @@ S15 = "Für diesen Checkpoint wurde kein Upload angefordert."
 
 # --- legacy worker host check (written by the worker through the RPC) --------
 S16 = (
-    "Der Cloud-GPU-Server ist nicht nutzbar (GPU oder Speicherplatz fehlt). Das Training wurde "
+    "Der Cloud-GPU-Server ist nicht nutzbar (keine passende GPU). Das Training wurde "
     "nicht gestartet – das Trainingsguthaben wurde erstattet."
 )
 

@@ -12,6 +12,20 @@ import { releasePointerFocus } from './sucher/pointerFocus';
 // The status light of a model card (Sucher: a light + a caption).
 const STATUS_LED = { queued: 'warn', running: 'sig', succeeded: 'ok', failed: 'rec', canceled: 'off' };
 
+// A failed row's error_message is cut on the card only when it is longer than
+// this: a legacy worker writes up to 2 KB of LeRobot output there, while every
+// German sentence of the managed training's S-table (training_texts_de.py, the
+// longest S4 at 178 characters) is shown whole. Fenced by
+// robotis_ai_setup/tests/test_managed_training_lockstep.py (every S sentence fits).
+export const ERROR_MESSAGE_MAX_CHARS = 300;
+
+export function cardErrorText(message) {
+  if (typeof message !== 'string') return '';
+  return message.length > ERROR_MESSAGE_MAX_CHARS
+    ? message.substring(0, ERROR_MESSAGE_MAX_CHARS) + '...'
+    : message;
+}
+
 const STATUS_CONFIG = {
   queued: { icon: 'hourglass', color: 'text-gray-500', bg: 'bg-gray-100', label: 'In Warteschlange' },
   running: { icon: 'loading', color: 'text-teal-600', bg: 'bg-teal-50', label: 'Training läuft', spin: true },
@@ -119,7 +133,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
       {job.status === 'failed' && job.error_message && (
         <div className="su-model__error">
           <span className="font-medium">Fehler: </span>
-          <span className="break-all">{job.error_message.length > 150 ? job.error_message.substring(0, 150) + '...' : job.error_message}</span>
+          <span className="break-all">{cardErrorText(job.error_message)}</span>
           <div className="mt-1 italic">Trainingsguthaben wurde erstattet.</div>
         </div>
       )}

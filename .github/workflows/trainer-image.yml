@@ -14,6 +14,15 @@ name: trainer-image
 # workflow event_name reports the CALLER's event (CLAUDE.md, docker-publish lanes).
 
 on:
+  # TEMPORARY (owner decision E22, 2026-10-19): a branch push builds the E2E test image
+  # test-<sha>, because workflow_dispatch only reaches a workflow that already exists on main.
+  # REMOVE this `push:` block before the branch is merged into main.
+  push:
+    branches: [feat/runpod-training]
+    paths:
+      - "robotis_ai_setup/runpod_training/**"
+      - "robotis_ai_setup/modal_training/**"
+      - ".github/workflows/trainer-image.yml"
   workflow_dispatch:
   workflow_call:
     inputs:

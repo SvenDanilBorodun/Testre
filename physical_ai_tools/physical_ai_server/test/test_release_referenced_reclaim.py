@@ -243,15 +243,21 @@ def test_the_all_done_notice_fires_once_per_type_per_run():
     knows the difference — and after the reclaim, saying so is actionable.
 
     Deduped, because every looking block reaches here now, including „warte bis"
-    at ~5 Hz."""
+    at ~5 Hz.
+
+    Intent kept: once per type per run, not a [WARNUNG]. The sentence now comes
+    from ``_done_sentence_de``: these tags were claimed with no release point (a
+    „merke … als erledigt"), which the reclaim never undoes, so it says „neu
+    starten" rather than promising that moving them helps (m4)."""
     ctx = _Ctx(_StubPerception([_det(20, _PICK), _det(21, (0.16, -0.05))]))
     ctx.claimed_tags |= {20, 21, 22}
     for _ in range(5):
         assert _look(ctx) == 0
         assert pb.see_object(ctx, {'object_type': 'banane'}) is False
-    notices = [m for m in ctx.logs if 'schon erledigt' in m]
+    notices = [m for m in ctx.logs if 'erledigt' in m]
     assert len(notices) == 1, notices
-    assert 'Alle „Banane" sind schon erledigt' in notices[0]
+    assert notices[0] == ('„Banane" ist schon als erledigt markiert — zum erneuten '
+                          'Greifen das Programm neu starten.')
     assert '[WARNUNG]' not in notices[0], 'a finished table is not a fault'
     assert ctx.all_done_notified == {'banane'}
 

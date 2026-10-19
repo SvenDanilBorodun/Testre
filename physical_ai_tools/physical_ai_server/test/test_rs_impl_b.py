@@ -1280,26 +1280,51 @@ def test_warte_bis_greifer_haelt_returns_false_on_timeout(monkeypatch):
     assert any('WARNUNG' in m for m in ctx.logs)
 
 
+def _tag(tag_id):
+    from physical_ai_server.workflow.perception import Detection
+    return Detection(centroid_px=(4, 4), bbox_px=(0, 0, 8, 8), confidence=1.0,
+                     label=f'tag{tag_id}', aruco_id=tag_id)
+
+
 def test_all_instances_done_is_not_reported_as_nothing_visible():
     """Measured 2026-09-07 with two cubes in plain view, both grasped earlier:
     „Kein „Würfel" sichtbar — bitte das Objekt in den markierten Greifbereich
     legen." with the camera detect call count at ZERO. The objects ARE in the
-    Greifbereich, and putting them back would not help."""
-    ctx = _perception_ctx()
+    Greifbereich, and putting them back would not help.
+
+    Intent kept: claimed cubes in plain view are never „nicht sichtbar". Since
+    Q8 the sentence comes from ONE helper (_done_sentence_de) and names the
+    mode's remedy: the simulator's „Greife" refuses at once with it; on the rig
+    a cube claimed without a release point says „neu starten" (m4)."""
+    ctx = _perception_ctx(dets=[_tag(20), _tag(21)])
+    ctx.simulated = True
     ctx.claimed_tags.update({20, 21})
     recipe = ctx.object_catalog.recipe_for_type('wuerfel')
     with pytest.raises(GraspSkip) as exc:
         pb.grasp_object(ctx, {'object_type': 'wuerfel'})
-    assert 'schon erledigt' in str(exc.value)
-    assert 'in den markierten Greifbereich legen' not in str(exc.value)
+    assert str(exc.value) == ('Alle „Würfel" sind erledigt — im Simulator „Simulator '
+                              'zurücksetzen" oder das Programm neu starten.')
     assert pb._all_instances_done(ctx, recipe) is True
+    rig = _perception_ctx(dets=[_tag(20), _tag(21)])
+    rig.claimed_tags.update({20, 21})
+    said = pb._nothing_to_grasp_message(rig, recipe)
+    assert said == ('„Würfel" ist schon als erledigt markiert — zum erneuten Greifen '
+                    'das Programm neu starten.')
+    assert 'in den markierten Greifbereich legen' not in said
 
 
 def test_a_genuinely_empty_scene_still_says_nothing_visible():
+    """Intent kept: an empty scene says „nicht sichtbar" — at once in the
+    simulator (worded for the Sim-Tisch), as the rig's sentence elsewhere."""
     ctx = _perception_ctx()
+    ctx.simulated = True
     with pytest.raises(GraspSkip) as exc:
         pb.grasp_object(ctx, {'object_type': 'wuerfel'})
     assert 'sichtbar' in str(exc.value)
+    rig = _perception_ctx()
+    recipe = rig.object_catalog.recipe_for_type('wuerfel')
+    assert pb._nothing_to_grasp_message(rig, recipe) == (
+        'Kein „Würfel" sichtbar — bitte das Objekt in den markierten Greifbereich legen.')
 
 
 def test_see_and_count_do_not_un_claim_an_object_nobody_moved():

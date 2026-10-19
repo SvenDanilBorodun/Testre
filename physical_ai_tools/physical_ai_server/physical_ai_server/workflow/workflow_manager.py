@@ -50,6 +50,7 @@ from physical_ai_server.workflow.handlers.motion import (
     position_joint_route,
     resolve_destination_z,
 )
+from physical_ai_server.workflow import claims as claims_mod
 from physical_ai_server.workflow.code_program import (
     CODE_LANGUAGES,
     CodeProgram,
@@ -645,8 +646,9 @@ class WorkflowManager:
         ``acquire(timeout=10.0)`` sites alone can park one for 10 s
         (interpreter.py, handlers/trajectory.py, handlers/perception_blocks.py
         x2, handlers/motion.py), and ``perception.detect`` under the AprilTag
-        lock is the CPU-only-Pi case. ``ctx.should_stop is
-        self._stop_event.is_set``, so the next start's ``clear()`` UN-STOPS it.
+        lock is the CPU-only-Pi case. ``ctx.should_stop`` is (for a Blockly run)
+        or wraps (for a code run, see below) ``self._stop_event.is_set``, so the
+        next start's ``clear()`` UN-STOPS it.
 
         The MAIN thread is not optional here. Guarding only ``_hat_threads``
         left a stopped run publishing 104 further waypoints after a new run had
@@ -891,9 +893,11 @@ class WorkflowManager:
             # THE REFUSAL GUARDS RUN BEFORE ``_stop_event.clear()``, AND THAT
             # ORDERING IS LOAD-BEARING.
             #
-            # ``ctx.should_stop is self._stop_event.is_set``, so clearing the
-            # event un-stops EVERY thread that is still holding a reference to
-            # it — including a hat thread that survived the previous run. When
+            # ``ctx.should_stop is self._stop_event.is_set`` for a Blockly run;
+            # during a CODE run ``code_rpc.RunSession`` wraps it (``… or the
+            # program has ended``) until its ``close()``, and the wrapper still
+            # reads the same event. So clearing the event un-stops EVERY thread
+            # that is still holding a reference to it — including a hat thread that survived the previous run. When
             # the clear ran first and a guard below then refused the start, the
             # refusal returned without restoring the flag: measured 2/2, a
             # surviving hat published 90 further waypoints with NO workflow
@@ -1972,6 +1976,12 @@ class WorkflowManager:
                 try:
                     if ctx.should_stop():
                         return
+                    # N14: the claim/skip EVENT counts as of right before the
+                    # body — read inside the motion lock (another hat's claim
+                    # landing between the gate and the lock must not count as
+                    # this body's).
+                    events_before = (claims_mod.claim_events_snapshot(ctx)
+                                     if btype == 'edubotics_when_object_seen' else None)
                     try:
                         interpreter.execute_chain(
                             hat,
@@ -2001,6 +2011,32 @@ class WorkflowManager:
                                 f'„{label}": Interner Fehler im Ereignis-Block.'
                             ),
                         })
+                    finally:
+                        # N14 — RE-ARM THE OBJECT HAT when a claim or skip EVENT
+                        # of ITS type happened during the body, by any thread.
+                        # The set edge alone missed it: a cube the body grasped
+                        # and the student put back is un-claimed again by the
+                        # next look of that type (a later „falls sehe ich" in
+                        # the body, the main stack, any thread's grasp wait), so
+                        # the trigger set after the body equals the one it fired
+                        # on and the edge never re-armed — the cube was left
+                        # lying. Counting EVENTS (claims.claim_tag / skip_tag;
+                        # the reclaim never counts) sees the claim even when it
+                        # was undone. Scoped to this hat's own type and to the
+                        # object hat: „wenn Zähler P > 3" keeps its plain
+                        # armed/disarmed edge, and another type's claim never
+                        # re-fires a non-claiming body (r6-M1).
+                        if events_before is not None:
+                            mine = self._claimed_during_body(
+                                hat, ctx, events_before)
+                            if mine:
+                                last_fired_ids = None
+                                edge_armed = True
+                                # Drop exactly these ids from the absence
+                                # debounce, so the claimed tag's ghost cannot
+                                # re-fire the body.
+                                for tag in mine:
+                                    _seen_at.pop(tag, None)
                 finally:
                     _release_motion_lock(ctx, acquired)
                 if consecutive_errors >= MAX_HAT_CONSECUTIVE_ERRORS:
@@ -2024,6 +2060,22 @@ class WorkflowManager:
                     self._sleep_until_stop(ctx, HAT_MIN_CYCLE_S - elapsed)
         except Exception:
             return
+
+    @staticmethod
+    def _claimed_during_body(hat: dict[str, Any], ctx, before: dict) -> frozenset:
+        """The tag ids of the object hat's OWN type with a claim or skip event
+        since ``before`` (a :func:`claims.claim_events_snapshot`). Never
+        raises — an unknown type re-arms nothing."""
+        try:
+            type_name = (hat.get('fields') or {}).get('OBJECT_TYPE')
+            catalog = getattr(ctx, 'object_catalog', None)
+            if catalog is None or not type_name:
+                return frozenset()
+            ids = {int(i) for i in catalog.recipe_for_type(type_name).tag_ids}
+            after = claims_mod.claim_events_snapshot(ctx)
+            return frozenset(t for t in ids if after.get(t, 0) > before.get(t, 0))
+        except Exception:  # noqa: BLE001 — the re-arm is best-effort
+            return frozenset()
 
     @staticmethod
     def _sleep_until_stop(ctx, seconds: float) -> None:

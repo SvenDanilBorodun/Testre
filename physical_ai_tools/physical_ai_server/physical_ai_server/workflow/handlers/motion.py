@@ -924,8 +924,10 @@ def _hold_motion_lock(ctx, *, notice_s: float | None = None,
         return False
     if notice_s is None:
         notice_s = MOTION_LOCK_NOTICE_S
-    # Snapshotted once, deliberately: in production ``ctx.should_stop`` is the
-    # stable bound ``_stop_event.is_set``.
+    # Snapshotted once per call, deliberately: in production ``ctx.should_stop``
+    # is the bound ``_stop_event.is_set`` for a Blockly run, and for a code run
+    # the wrapper ``code_rpc.RunSession`` installs before the first call and
+    # removes only after its worker has joined — stable for any call's life.
     should_stop = getattr(ctx, 'should_stop', None)
     is_paused = getattr(ctx, 'is_paused', None)
     deadline = time.monotonic() + max(0.0, float(notice_s))

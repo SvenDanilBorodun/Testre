@@ -39,7 +39,7 @@ from physical_ai_server.workflow.object_catalog import fixed_catalog
 from physical_ai_server.workflow.sim_arm import SimArm
 from physical_ai_server.workflow.sim_perception import SimPerception
 from physical_ai_server.workflow.sim_world import SimWorld
-from physical_ai_server.workflow.workflow_manager import WorkflowManager
+from physical_ai_server.workflow.workflow_manager import WorkflowContext, WorkflowManager
 
 
 def true_table_xy(ctx, d, recipe):
@@ -126,6 +126,30 @@ class Rig:
             arm_profile=p,
             code_rpc=code_rpc,
         )
+
+    def make_ctx(self, simulated: bool = False, should_stop=None):
+        """A run context wired like ``WorkflowManager.start`` builds one, for a
+        test that calls handlers directly (e.g. from two threads)."""
+        p = self.profile
+        ctx = WorkflowContext(
+            publisher=self.arm.publish, ik=p.build_ik(),
+            perception=SimPerception([dict(o) for o in self.objects], self.catalog,
+                                     self.world, table_z=self.z_table),
+            z_table=self.z_table, simulated=simulated,
+            should_stop=should_stop or (lambda: False),
+            log=lambda msg: self.statuses.append({'log_message': msg}),
+            get_scene_frame=lambda: self._frame,
+            get_scene_frame_age=lambda: 0.0,
+            get_follower_joints=self.arm.get_joints,
+            motion_lock=threading.RLock(), var_lock=threading.RLock(),
+            claim_lock=threading.RLock(), object_catalog=self.catalog,
+            num_arm_joints=p.num_arm_joints, roll_joint_index=p.roll_joint_index,
+            home_joints_rad=p.home_joints_rad, gripper_open_rad=p.gripper_open_rad,
+            gripper_closed_rad=p.gripper_closed_rad,
+            velocity_limit_rad_s=p.velocity_limit_rad_s,
+            grasp_held_margin_rad=p.grasp_held_margin_rad)
+        ctx.last_full_joints = [float(v) for v in p.home_joints_rad] + [float(p.gripper_open_rad)]
+        return ctx
 
     # ── running ──────────────────────────────────────────────────────────
     def _finished(self, phase):

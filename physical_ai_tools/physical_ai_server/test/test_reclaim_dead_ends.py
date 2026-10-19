@@ -231,10 +231,17 @@ def test_A_the_two_falsy_shapes_are_still_not_interchangeable(_no_poll_sleep):
 
 # ── B: a skipped tag with no pick record ─────────────────────────────────────
 def _skipped_with_no_pick_record():
-    """The reachable state: tag 20 occluded at the gate (so the reclaim records
-    no pick position for it) and skipped by ``grasp_object``'s own non-reclaim
-    detect a moment later. Tag 21 is the in-run CONTROL — seen at the gate, so
-    recorded."""
+    """A SKIPPED tag with no pick record: tag 20, occluded at the gate (so the
+    reclaim records no pick position for it). Tag 21 is the in-run CONTROL —
+    seen at the gate, so recorded.
+
+    The state is now built DIRECTLY (r5-m5): it used to arise when
+    ``grasp_object``'s own NON-reclaim detect skipped a tag the gate never saw,
+    but since Q8 the grasp looks through the reclaiming view
+    (``_look_for_grasp``), which records the pick position itself, and a
+    „merke … als erledigt" claim is never in ``skipped_tags`` — so no block
+    reaches this state any more. The adopt rule these tests pin is defence in
+    depth; the asserts are unchanged."""
     state = {'occlude20': True, 'p20': (0.60, 0.00), 'p21': (0.62, 0.03)}
 
     def scene(_c):
@@ -244,8 +251,8 @@ def _skipped_with_no_pick_record():
     ctx = _Ctx(_StubPerception(scene))
     pb.count_unclaimed_visible(ctx, 'banane')      # the „Solange sichtbar" gate
     state['occlude20'] = False
-    with pytest.raises(pb.GraspSkip):              # both are out of reach
-        pb.grasp_object(ctx, {'object_type': 'banane'})
+    pb._skip_tag(ctx, 20)                          # both out of reach: skipped
+    pb._skip_tag(ctx, 21)
     assert ctx.skipped_tags == {20, 21}
     assert 20 not in ctx.claim_pick_xy and 21 in ctx.claim_pick_xy
     return ctx, state

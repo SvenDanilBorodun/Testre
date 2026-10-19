@@ -562,12 +562,20 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
     # 049 (§4.1 step 3): managed = the RunPod/Modal ladder, ACT only (E2). The
     # cadences are written into the row so a later environment change cannot
     # strand a running training (FR-12); the worker picks num_workers itself.
+    # A LEGACY ACT start ignores the client's two values as well (owner E3: the
+    # form hides them for ACT but still sends what the browser stored) and uses
+    # today's fresh-form defaults. Both happen before the dedupe, so its key is
+    # the stored dict.
     settings = training_dispatch.SETTINGS
-    managed = settings.managed and req.model_type.lower() == "act"
+    is_act = req.model_type.lower() == "act"
+    managed = settings.managed and is_act
     if managed:
         training_params_dict["save_freq"] = settings.save_freq
         training_params_dict["mirror_every"] = settings.mirror_every
         training_params_dict.pop("num_workers", None)
+    elif is_act:
+        training_params_dict["num_workers"] = training_dispatch.LEGACY_ACT_NUM_WORKERS
+        training_params_dict["save_freq"] = training_dispatch.LEGACY_ACT_SAVE_FREQ
 
     # 0c. Idempotency: a duplicate /start within DEDUPE_WINDOW returns the
     #     existing training instead of creating a new one. Catches network
@@ -600,12 +608,15 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
         info, revision = await asyncio.wait_for(
             asyncio.to_thread(_dataset_check, req.dataset_name, req.model_type, managed), 60
         )
-    except ValueError as e:
+    except dataset_preflight.DatasetRefused as e:
+        # Only this module's own German sentences reach the student: never a
+        # library exception's text (a ValueError of huggingface_hub included).
         logger.info("Dataset check refused %s: %s", req.dataset_name, e)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        # Timeout, rate limit, DNS blip, 5xx — tell the student to retry, don't
-        # send them chasing a typo that isn't there.
+        # HubUnavailable (timeout, rate limit, DNS blip, 5xx), the 60 s bound,
+        # anything else — tell the student to retry, don't send them chasing a
+        # typo that isn't there. The type goes to the log, never its text.
         logger.warning("HF dataset check transient error for %s: %s", req.dataset_name, type(e).__name__)
         raise HTTPException(status_code=502, detail=texts.HF_UNREACHABLE_DE)
     if managed and revision:
@@ -715,7 +726,8 @@ async def start_training(req: StartTrainingRequest, user=Depends(get_current_use
 def _dataset_check(dataset_name: str, model_type: str, managed: bool):
     """(info, revision) — BLOCKING; the route runs it in a thread under a 60 s bound.
 
-    Raises ValueError with the German sentence a student reads (400)."""
+    Raises dataset_preflight.DatasetRefused with the German sentence a student
+    reads (400); anything else is the route's 502."""
     token = False if managed else (os.environ.get("HF_TOKEN") or None)
     revision = None
     if managed:
@@ -729,7 +741,7 @@ def _dataset_check(dataset_name: str, model_type: str, managed: bool):
             artifact_validation.act_feature_rules(inputs, outputs)
         except artifact_validation.ArtifactRefused as exc:
             logger.info("dataset %s refused for managed ACT: %s", dataset_name, exc.reason)
-            raise ValueError(texts.S20) from None
+            raise dataset_preflight.DatasetRefused(texts.S20) from None
     return info, revision
 
 

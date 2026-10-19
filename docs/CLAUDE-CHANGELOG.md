@@ -30,6 +30,21 @@ maximal `robot.log` frame costs about 1.8 ms (a maximal `zeige` ~2 ms, the Rule 
 rows: 3 grasps for one cube put back twice (1 before). Positions on the floor ladder: grasp-like 0 % refused,
 arbitrary near-table OMX poses 26–38 %.
 
+**Fix round, 2026-10-19 (owner decisions on three verifier findings).** (1) A Position taught BELOW the table
+was driven to: the reversed rung of `_pose_route` let the target set its own floor allowance (OMX EE z −0.031 with
+a link at −0.067 and Edu:1 EE z −0.032 both „finished", saying only „über einen Zwischenpunkt"; the same point as a
+Ziel refuses). `motion._refuse_position_below_table` now judges the taught pose's own clearance first, with the
+ladder's own models, against this rig's table (the touch-off plane minus `tool_tip_below_ee_m`, else z = 0):
+both cases refuse with „Die Position „P" liegt unter der Tischebene — bitte die Position an diesem Roboter neu
+vormachen." and nothing moves; the probe's 0/−1/−3 mm fingertip cases still run. Cost, measured with the Edu:1 mesh
+oracle of `test_arm_geometry_edu1.py`: of 400 random physically clear poses whose lowest mesh point is 0–50 mm
+above the table, 11 (2.8 %) read below −20 mm in the box model and are now refused (worst −57.6 mm); 0 of 1354
+strict-vertical touching Edu:1 poses and 0 of 1931 OMX ones are. (2) One reversed leg was labelled `'via'`; both
+rungs now label by leg count. (3) Q14: the wait judged the frame's age, then its look read the age again and raised
+the camera sentence when it had crossed 1.0 s in between (5 of 24 seeds with a 30 ms frame fetch on this host;
+the verifier measured 1 in 24); the wait's look now uses the frame `_wait_frame_usable` judged and returns —
+24 of 24 wait until Stopp — while the look right before the motion stays strict.
+
 ### Unreleased, 2026-10-13 / 14 — „Sucher": the student app's visual redesign
 
 **Why.** The owner chose a new look for the student app from a series of shown directions: „Sucher", a light

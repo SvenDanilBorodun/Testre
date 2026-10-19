@@ -11,7 +11,9 @@ stubbed); httpx is the CI python-tests job's pinned 0.28.1.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
+import io
 import inspect
 import json
 import os
@@ -61,6 +63,9 @@ for _p in (_SETUP / "modal_training", _SETUP / "runpod_training"):
 import httpx  # noqa: E402
 
 import training_handler as th  # noqa: E402
+
+# The real host check: ManagedTestBase patches it out, the host-check tests put it back.
+_REAL_ASSERT_HOST = th._assert_training_host
 
 MODEL = "EduBotics-Solutions/m"
 DATASET = "EduBotics-Solutions/ds"
@@ -937,6 +942,21 @@ class HostCheck(ManagedTestBase):
                                                        "detail": "measured"})
                 self.assertEqual(result["reason"], reason)
 
+    def test_managed_mode_keeps_the_disk_floor_and_prints_the_free_bytes(self):
+        # V2-2: the floor gates train_managed and the trainer image only; the P2 check reads
+        # the free /tmp bytes off this "Host check:" line.
+        free = 29 * 1024 ** 3
+        buf = io.StringIO()
+        with mock.patch.object(th, "_assert_training_host", _REAL_ASSERT_HOST), \
+                mock.patch.dict(sys.modules, {"torch": _FakeCuda().module()}), \
+                mock.patch.object(th.shutil, "disk_usage", return_value=types.SimpleNamespace(free=free)), \
+                contextlib.redirect_stdout(buf):
+            result = self.run_managed()
+        self.assertEqual(self.world.actions(), ["finish"])
+        self.assertEqual(self.world.finish()["reason"], "disk")
+        self.assertEqual(result["reason"], "disk")
+        self.assertIn(f"'tmp_free_b': {free}", buf.getvalue())
+
 
 class _FakeCuda:
     def __init__(self, available=True, cap=(8, 6), memory=24 * 10 ** 9, finite=True, raise_matmul=False):
@@ -967,10 +987,10 @@ class _FakeCuda:
 
 
 class AssertTrainingHost(unittest.TestCase):
-    def check(self, fake, free=100 * 1024 ** 3):
+    def check(self, fake, free=100 * 1024 ** 3, **kw):
         with mock.patch.dict(sys.modules, {"torch": fake.module()}), \
                 mock.patch.object(th.shutil, "disk_usage", return_value=types.SimpleNamespace(free=free)):
-            th._assert_training_host()
+            th._assert_training_host(**kw)
 
     def reason(self, fake, **kw):
         with self.assertRaises(th.HostUnfit) as cm:
@@ -998,6 +1018,27 @@ class AssertTrainingHost(unittest.TestCase):
 
     def test_disk_below_30_gib(self):
         self.assertEqual(self.reason(_FakeCuda(), free=29 * 1024 ** 3), "disk")
+        self.assertEqual(self.reason(_FakeCuda(), free=29 * 1024 ** 3, disk_floor=True), "disk")
+
+    def test_without_the_disk_floor_a_small_tmp_passes_and_is_still_printed(self):
+        # V2-2: the legacy Modal functions call disk_floor=False; every other check stays.
+        free = 1 * 1024 ** 3
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.check(_FakeCuda(), free=free, disk_floor=False)
+        self.assertIn(f"'tmp_free_b': {free}", buf.getvalue())
+        self.assertEqual(self.reason(_FakeCuda(available=False), disk_floor=False), "no_cuda")
+        self.assertEqual(self.reason(_FakeCuda(cap=(7, 5)), disk_floor=False), "gpu_capability")
+        self.assertEqual(self.reason(_FakeCuda(memory=8 * 1024 ** 3), disk_floor=False), "gpu_memory")
+        self.assertEqual(self.reason(_FakeCuda(finite=False), disk_floor=False), "matmul")
+
+    def test_the_host_check_line_names_the_free_tmp_bytes(self):
+        free = 123 * 1024 ** 3
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.check(_FakeCuda(), free=free)
+        line = next(ln for ln in buf.getvalue().splitlines() if ln.startswith("Host check: "))
+        self.assertIn(f"'tmp_free_b': {free}", line)
 
 
 class BudgetAndExit(ManagedTestBase):
@@ -1139,6 +1180,30 @@ class LegacyHostCheck(unittest.TestCase):
         self.assertEqual(th.LEGACY_HOST_UNFIT_DE,
                          "Der Cloud-GPU-Server ist nicht nutzbar (GPU oder Speicherplatz fehlt). "
                          "Das Training wurde nicht gestartet – das Trainingsguthaben wurde erstattet.")
+
+    def test_legacy_mode_has_no_tmp_floor(self):
+        # V2-2: the 30 GiB floor would gate train / train_vla, whose /tmp nobody measured. The
+        # REAL host check runs on a good GPU with 1 GiB free: the row goes on to `running`
+        # (stopped right there by the fake), never S16; the free bytes are still printed.
+        env = {"SUPABASE_URL": "http://sb.test", "SUPABASE_ANON_KEY": "anon"}
+        free = 1 * 1024 ** 3
+        writes = []
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.dict(sys.modules, {"torch": _FakeCuda().module()}), \
+                mock.patch.object(th.shutil, "disk_usage", return_value=types.SimpleNamespace(free=free)), \
+                mock.patch.object(th, "_preflight_dataset", return_value={"fps": 30}), \
+                mock.patch.object(th, "_cleanup_output"), \
+                mock.patch.object(th, "_update_status_with_retry",
+                                  side_effect=lambda *a, **k: writes.append(a) or True), \
+                mock.patch.object(th, "_update_supabase_status",
+                                  side_effect=RuntimeError("past the host check")) as running, \
+                contextlib.redirect_stdout(buf):
+            th.run_training("u/d", "u/m", "pi0", {}, 5, TOKEN)
+        running.assert_called_once()
+        self.assertEqual(writes[0][4:6], ("failed", "past the host check"))
+        self.assertNotIn(th.LEGACY_HOST_UNFIT_DE, [w[5] for w in writes if len(w) > 5])
+        self.assertIn(f"'tmp_free_b': {free}", buf.getvalue())
 
 
 class EntrySelfStop(unittest.TestCase):

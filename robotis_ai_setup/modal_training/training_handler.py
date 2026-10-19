@@ -1010,10 +1010,11 @@ def run_training(
             )
             return {"status": "failed", "error": str(e)}
 
-        # ----- 1b. Host check (spec §4.7 legacy mode): a GPU-less, too-old or
-        # disk-starved host fails the row with S16 BEFORE it is marked running. -----
+        # ----- 1b. Host check (spec §4.7 legacy mode): a GPU-less or too-old host fails
+        # the row with S16 BEFORE it is marked running. No /tmp floor here (V2-2): the
+        # free bytes are only printed, since nobody measured the legacy L4 / A100's /tmp. -----
         try:
-            _assert_training_host()
+            _assert_training_host(disk_floor=False)
         except HostUnfit as e:
             print(f"Host check failed ({e.reason}): {e.detail}", flush=True)
             _update_status_with_retry(
@@ -1437,8 +1438,15 @@ class HostUnfit(Exception):
         self.detail = detail
 
 
-def _assert_training_host() -> None:
-    """CUDA, capability (8,0)-(9,0), >= 9.5 GB, a finite synchronised matmul, >= 30 GiB at /tmp."""
+def _assert_training_host(*, disk_floor: bool = True) -> None:
+    """CUDA, capability (8,0)-(9,0), >= 9.5 GB, a finite synchronised matmul, >= 30 GiB at /tmp.
+
+    The free /tmp bytes are measured and printed on the "Host check:" line of every host
+    that gets that far (the P2 record, SR-24 i). Only managed mode (`disk_floor`, the
+    default) refuses below MIN_FREE_DISK_B; the legacy Modal functions pass
+    disk_floor=False (V2-2: nobody measured the /tmp of Modal's L4 / A100-80GB, and the
+    floor must not turn a path that works today into S16).
+    """
     measured = {}
     try:
         import torch
@@ -1481,7 +1489,7 @@ def _assert_training_host() -> None:
     free = shutil.disk_usage("/tmp").free
     measured["tmp_free_b"] = int(free)
     print(f"Host check: {measured}", flush=True)
-    if free < MIN_FREE_DISK_B:
+    if disk_floor and free < MIN_FREE_DISK_B:
         raise HostUnfit("disk", f"/tmp free {free} B < {MIN_FREE_DISK_B} B")
 
 

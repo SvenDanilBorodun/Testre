@@ -64,12 +64,14 @@ MIGRATION_047 = MIGRATIONS / "20261020120000_047_hide_worker_token.sql"
 MIGRATION_049 = MIGRATIONS / "20261020130000_049_managed_training.sql"
 LIVE_JS = (REPO_ROOT / "physical_ai_tools" / "physical_ai_manager" / "src" / "hooks"
            / "useSupabaseTrainings.js")
+MY_MODELS_JS = (REPO_ROOT / "physical_ai_tools" / "physical_ai_manager" / "src" / "components"
+                / "MyModels.js")
 GERMAN_LINT_PY = REPO_ROOT / ".github" / "scripts" / "german_detail_lint.py"
 
 OWNERS = {
     ARTIFACT_VALIDATION_PY: "WP-A", TEXTS_PY: "WP-A", MIGRATION_047: "WP-A", MIGRATION_049: "WP-A",
     HANDLER_PY: "WP-B", CHUNK_ENGINE_PY: "WP-C", CLOUD_PROTOCOL_PY: "Cloud-Inferenz",
-    LIVE_JS: "WP-C", GERMAN_LINT_PY: "CI",
+    LIVE_JS: "WP-C", MY_MODELS_JS: "WP-C", GERMAN_LINT_PY: "CI",
 }
 
 # ------------------------------------------------------------------ the frozen contract (spec §3)
@@ -994,6 +996,17 @@ class TheSentencesAreTheContract(unittest.TestCase):
                         gdl.GERMAN_CHARS.search(text) or gdl.GERMAN_WORDS.search(text)),
                         f"{name}: reads as English: {text!r}")
         self.assertEqual(markerless, set(MARKERLESS_SENTENCES))
+
+    def test_the_models_card_shows_every_sentence_whole(self):
+        """„Meine Modelle" cuts an error_message only past ERROR_MESSAGE_MAX_CHARS (a legacy
+        worker's LeRobot blob): every S sentence, its placeholders at their widest, fits."""
+        found = re.findall(r"export const ERROR_MESSAGE_MAX_CHARS = (\d+);", _text(MY_MODELS_JS))
+        self.assertEqual(len(found), 1, "MyModels.js defines ERROR_MESSAGE_MAX_CHARS once, as a literal")
+        limit = int(found[0])
+        for name, text in SENTENCES.items():
+            widest = text.replace("{step}", "500.000").replace("{hours}", "999,5")
+            self.assertNotIn("{", widest, name)
+            self.assertLessEqual(len(widest), limit, f"{name} would be cut on the models card")
 
     def test_the_rule_holds_for_the_contract_texts_themselves(self):
         gdl = _german_lint()

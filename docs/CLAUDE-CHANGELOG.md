@@ -45,6 +45,10 @@ the camera sentence when it had crossed 1.0 s in between (5 of 24 seeds with a 3
 the verifier measured 1 in 24); the wait's look now uses the frame `_wait_frame_usable` judged and returns —
 24 of 24 wait until Stopp — while the look right before the motion stays strict.
 
+**Fix round (header rows).** The simulator's „Lernpfad" note pushed the Sucher header onto a third row at
+1093 px (153 px tall, base 105 px); it now shrinks like the subtitle hint (two lines, then „…", the whole sentence
+in its `title`), so the header is two rows and 105 px again at 1024–1093 px and unchanged at 1280/1366 px.
+
 ### Unreleased, 2026-10-13 / 14 — „Sucher": the student app's visual redesign
 
 **Why.** The owner chose a new look for the student app from a series of shown directions: „Sucher", a light

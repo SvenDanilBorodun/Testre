@@ -374,6 +374,38 @@ describe('WorkshopPage — Lernpfade are real-rig only (N1, owner decision Q5)',
     expect(screen.queryByText(DE.TUTORIAL_REAL_ONLY)).toBeNull();
   });
 
+  // Fix round (header rows): at 1093 px under Sucher the note+key group used to
+  // wrap the header onto a THIRD row. The note now shrinks like the studio's
+  // subtitle hint (`.st-hint`): its own shrinking flex item, two lines and then
+  // „…", the whole sentence in its `title` and in the DOM (CSS truncation only).
+  // The group starts from a zero basis (it never forces a wrap), grows only to
+  // its own max-content (wide windows keep the whole sentence, the row stays
+  // right-aligned) and never below its min-content (the key stays whole).
+  test('the note truncates like the hint and keeps its whole sentence', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    const note = screen.getByText(DE.TUTORIAL_REAL_ONLY);
+    expect(note.tagName).toBe('SPAN');
+    expect(note.getAttribute('title')).toBe(DE.TUTORIAL_REAL_ONLY);
+    expect(note.textContent).toBe(DE.TUTORIAL_REAL_ONLY);
+    for (const cls of ['line-clamp-2', 'min-w-0', 'max-w-[15rem]', 'st-reason']) {
+      expect(note.classList.contains(cls)).toBe(true);
+    }
+    const group = screen.getByTestId('tutorial-real-only');
+    expect(group).toContainElement(note);
+    for (const cls of ['grow', 'basis-0', 'min-w-min', 'max-w-max', 'justify-end']) {
+      expect(group.classList.contains(cls)).toBe(true);
+    }
+    const entry = screen.getByRole('button', { name: DE.DOCK_TAB_TUTORIAL });
+    expect(group).toContainElement(entry);
+    expect(entry.classList.contains('shrink-0')).toBe(true);
+    // The disabled key still names the reason for a screen reader.
+    expect(entry.getAttribute('aria-describedby')).toBe(note.id);
+    expect(entry.getAttribute('title')).toBe(DE.TUTORIAL_REAL_ONLY);
+  });
+
   test('the note is German and names the real robot', () => {
     expect(DE.TUTORIAL_REAL_ONLY).toBe('Lernpfade gibt es nur am echten Roboter.');
   });

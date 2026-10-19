@@ -2133,12 +2133,24 @@ function WorkshopPage({ isActive }) {
             {/* N1 (owner decision Q5): a Lernpfad needs the calibrated real
                 rig. In the simulator the dock — and its „Lernpfad" tab — is
                 replaced by SimStage, so the entry stays here, disabled, with
-                the reason as visible text beside it. */}
+                the reason as visible text beside it. The note shrinks like
+                the studio's subtitle hint (`.st-hint`, Sucher D33): its own
+                shrinking flex item, up to two lines and then „…", the whole
+                sentence in its `title` and in the DOM (the key's
+                aria-describedby). The group's basis is 0, so it alone never
+                wraps the header onto a third row; it may only grow to its own
+                max-content (`max-w-max`), so wide windows keep the whole
+                sentence and the row stays right-aligned, and never shrinks
+                below its min-content (`min-w-min`: the key plus one word). */}
             {simMode && showEditor && (
-              <div className="flex items-center gap-1.5">
+              <div
+                data-testid="tutorial-real-only"
+                className="flex grow basis-0 min-w-min max-w-max items-center justify-end gap-1.5"
+              >
                 <span
                   id={tutorialNoteId}
-                  className="st-reason max-w-[15rem] line-clamp-2 text-[11px] leading-tight text-[var(--ink-3)]"
+                  title={DE.TUTORIAL_REAL_ONLY}
+                  className="st-reason min-w-0 max-w-[15rem] line-clamp-2 text-[11px] leading-tight text-[var(--ink-3)]"
                 >
                   {DE.TUTORIAL_REAL_ONLY}
                 </span>
@@ -2148,7 +2160,7 @@ function WorkshopPage({ isActive }) {
                   aria-describedby={tutorialNoteId}
                   title={DE.TUTORIAL_REAL_ONLY}
                   className={
-                    'st-key inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-md border '
+                    'st-key shrink-0 inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-md border '
                     + 'opacity-50 cursor-not-allowed bg-white text-[var(--ink-3)] border-[var(--line)]'
                   }
                 >

@@ -531,20 +531,25 @@
       "block_type": "edubotics_log",
       "table": "statement",
       "returns": "none",
-      "doc_de": "Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens 2000 Zeichen.",
+      "doc_de": "Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen.",
       "params": [
         {
           "name": "message",
-          "kind": "text",
+          "kind": "value",
           "arg_key": "message",
           "required": true,
           "max_len": 2000,
           "java_name": "message",
-          "doc_de": "Was ins Protokoll geschrieben wird: ein Text oder eine Zahl (höchstens 2000 Zeichen)."
+          "doc_de": "Was ins Protokoll geschrieben wird: ein Text, eine Zahl, ein Wahrheitswert oder eine Liste (höchstens 2000 Zeichen)."
         }
       ],
       "signature_py": "robot.log(message)",
       "signatures_java": [
+        "void Robot.log(int message)",
+        "void Robot.log(long message)",
+        "void Robot.log(double message)",
+        "void Robot.log(boolean message)",
+        "void Robot.log(char message)",
         "void Robot.log(Object message)"
       ],
       "example": {

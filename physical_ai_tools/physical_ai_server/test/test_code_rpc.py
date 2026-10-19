@@ -1089,3 +1089,112 @@ def test_the_socket_file_is_world_connectable_and_unlinked_on_close(sock_dir):
     assert os.stat(path).st_mode & 0o777 == 0o666
     srv.close()
     assert not os.path.exists(path)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# area C: refusals read right in the run's language (m7, F11, F18)
+# ══════════════════════════════════════════════════════════════════════════
+
+_PYTHON_SPELLING = ('robot.', 'True', 'False', '[x')
+
+
+def test_kind_sentences_name_no_python_spelling():
+    """m7: the kind refusals reach a Java student as often as a Python one, so
+    none names a Python spelling (robot.find, True/False, [x, y, z]); and the
+    Greifziel sentence both stubs raise locally is ONE robot_api constant."""
+    sentences = {name: value for name, value in vars(code_rpc).items()
+                 if name.startswith('_KIND_') and name.endswith('_DE')}
+    assert len(sentences) >= 12, sorted(sentences)
+    sentences['robot_api.NOT_A_GREIFZIEL_DE'] = robot_api.NOT_A_GREIFZIEL_DE
+    for name, text in sentences.items():
+        for spelling in _PYTHON_SPELLING:
+            assert spelling not in text, (name, spelling, text)
+    assert code_rpc._KIND_BOOL_DE == '„{p}“ muss wahr oder falsch sein (true/false).'
+    assert 'das Ergebnis von find' in code_rpc._KIND_ZIEL_DE
+    assert 'drei Zahlen x, y, z' in code_rpc._KIND_POINT_DE
+    assert 'drei Zahlen x, y, z' in code_rpc._KIND_TARGET_DE
+    stub = (_REPO / robot_api.GENERATED_PATHS['python_stub']).read_text(encoding='utf-8')
+    client = (_REPO / robot_api.GENERATED_PATHS['java_rpc_client']).read_text(encoding='utf-8')
+    literal = json.dumps(robot_api.NOT_A_GREIFZIEL_DE, ensure_ascii=False)
+    assert repr(robot_api.NOT_A_GREIFZIEL_DE) in stub
+    assert literal in client
+
+
+def test_a_java_run_names_the_java_method_and_parameter(server):
+    """The refusal prefix follows ctx.code_language: a Java student never
+    reads „robot.wait:" for the Robot.waitSeconds they wrote."""
+    for language, arity, value in (
+            (None, 'robot.move_to erwartet 1 Angabe(n), erhält aber 0.', 'robot.wait: '),
+            ('python', 'robot.move_to erwartet 1 Angabe(n), erhält aber 0.', 'robot.wait: '),
+            ('java', 'Robot.moveTo erwartet 1 Angabe(n), erhält aber 0.', 'Robot.waitSeconds: ')):
+        ctx = _ctx()
+        ctx.code_language = language
+        session = server.open_run(ctx)
+        c = _Client(server.socket_path, session.token)
+        r = c.call('move_to', [])
+        assert (r['k'], r['e']) == ('arity', arity), language
+        r = c.call('wait', [-1])
+        assert r['k'] == 'value' and r['e'].startswith(value), (language, r)
+        assert '„seconds“' in r['e']
+        # Greifobjekt is what the student wrote, not register_object; Java
+        # spells the attribute as its constructor parameter.
+        r = c.call('register_object', ['banane', 'Banane', [30, 31], 0.0, 0.015, None, None])
+        param = 'hoeheM' if language == 'java' else 'hoehe_m'
+        assert r['k'] == 'value' and r['e'].startswith(f'Greifobjekt: „{param}“ '), (language, r)
+        c.close()
+        server.close_run(session)
+
+
+def test_log_takes_a_list_none_and_a_greifziel(server):
+    """F11: `robot.log` takes what `zeige` takes (the bounded `value` kind),
+    rendered by the same German stringifier as „melde": a list, None
+    („nichts") and a Greifziel (the stub sends its rendering) are written,
+    a long text is capped at 2000 characters, a hostile nesting refused."""
+    from physical_ai_server.workflow.handlers import output as out
+    row = robot_api.ROBOT_API_BY_NAME['log']
+    assert row.params[0].kind == 'value' and row.params[0].max_len == out.MAX_LOG_CHARS
+    ctx = _ctx()
+    ctx.code_language = 'python'
+    session = server.open_run(ctx)
+    c = _Client(server.socket_path, session.token)
+    for arg in ([1, 'b', [2.5, True]], None, 'Greifziel(0)', 'x' * 5000):
+        assert c.call('log', [arg])['ok'] is True, arg
+    deep = [[[[[[[[[[1]]]]]]]]]]
+    r = c.call('log', [deep])
+    assert r['ok'] is False and r['k'] == 'value'
+    logs = [m for m in ctx._test_logs if not m.startswith('[')]
+    assert logs[:3] == ['(1, b, (2.5, wahr))', 'nichts', 'Greifziel(0)']
+    assert len(logs[3]) == out.MAX_LOG_CHARS
+    c.close()
+    server.close_run(session)
+
+
+def test_a_blockly_melde_of_nothing_is_still_empty():
+    # „nichts" is for a text program's explicit None; a Blockly socket that
+    # yields nothing keeps adding nothing (test_rs_impl_b pins '').
+    from physical_ai_server.workflow.handlers import output as out
+    ctx = _ctx()
+    out.log(ctx, {'message': None})
+    assert ctx._test_logs == ['']
+
+
+def test_obj_refusal_suggests_the_type_for_a_label(server):
+    """F18: `robot.sees("Würfel")` names the object by its LABEL; the refusal
+    says what a type name is made of and which one was meant."""
+    from physical_ai_server.workflow.object_catalog import fixed_catalog
+    for language, prefix in (('python', 'robot.sees: '), ('java', 'Robot.sees: ')):
+        ctx = _ctx(object_catalog=fixed_catalog('omx_full'))
+        ctx.code_language = language
+        session = server.open_run(ctx)
+        c = _Client(server.socket_path, session.token)
+        r = c.call('sees', ['Würfel'])
+        assert r['ok'] is False and r['k'] == 'value', r
+        assert r['e'] == (f'{prefix}„obj“ muss ein Objekt-Name aus Buchstaben ohne Umlaute '
+                          '(a–z), Ziffern und _ sein (höchstens 24 Zeichen). '
+                          'Meintest du "wuerfel"?')
+        r = c.call('grasp', [' würfel '])
+        assert r['e'].endswith('Meintest du "wuerfel"?'), r
+        r = c.call('sees', ['Rote Banane'])
+        assert 'Meintest du' not in r['e'], r
+        c.close()
+        server.close_run(session)

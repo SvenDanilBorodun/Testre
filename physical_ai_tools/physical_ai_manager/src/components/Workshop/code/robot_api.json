@@ -318,12 +318,12 @@
       "table": "statement",
       "budget": "call",
       "returns": "none",
-      "doc_de": "Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens 2000 Zeichen.",
+      "doc_de": "Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen.",
       "doc_de_block": "Schreibt eine Zeile ins Protokoll (höchstens 2000 Zeichen).",
       "params": [
         {
           "name": "message",
-          "kind": "text",
+          "kind": "value",
           "arg_key": "message",
           "required": true,
           "max_len": 2000

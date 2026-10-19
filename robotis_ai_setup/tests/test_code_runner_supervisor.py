@@ -480,7 +480,44 @@ class OutputPump(_Base):
         self.assertEqual(sent, [{'ev': 'stdout', 'lines': [self.S._STDOUT_DROP_NOTICE_DE]}])
 
 
+class StderrPump(_Base):
+    def test_stderr_overflow_never_emits_the_stdout_notice(self):
+        """N7: a long stack trace on stderr overran the per-second line budget
+        and the run then told the student „… Das Programm läuft normal
+        weiter." about a program that had just crashed. Only the stdout pump
+        may say that; the stderr pump drops silently."""
+        fn = _function(self.tree, '_execute', cls='Run')
+        pumps = {}
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == '_LinePump':
+                pumps[ast.unparse(node.args[0])] = ast.unparse(node.args[2])
+        self.assertEqual(set(pumps), {'proc.stdout', 'proc.stderr'})
+        self.assertEqual(pumps['proc.stdout'], 'self._on_drop')
+        self.assertNotIn('_on_drop', pumps['proc.stderr'])
+
+
 class JavacErrors(_Base):
+    def test_compile_error_keeps_the_symbol_line(self):
+        """N9: javac names the missing symbol on a line of its own; the
+        report (the [TECHNIK] line) keeps it, for the first error only."""
+        text = ('Main.java:5: error: cannot find symbol\n'
+                '        Robot.moveAboev(z);\n'
+                '             ^\n'
+                '  symbol:   method moveAboev(Greifziel)\n'
+                '  location: class Robot\n'
+                'Main.java:9: error: cannot find symbol\n'
+                '  symbol:   variable y\n'
+                '2 errors\n')
+        report = self.S.parse_javac_output(text)
+        self.assertEqual(report, {
+            'file': 'Main.java', 'line': 5,
+            'text': 'cannot find symbol — symbol: method moveAboev(Greifziel)'})
+        plain = self.S.parse_javac_output('Main.java:3: error: \';\' expected\n'
+                                          '        int x = ;\n1 error\n')
+        self.assertEqual(plain, {'file': 'Main.java', 'line': 3, 'text': "';' expected"})
+        self.assertEqual(self.S.parse_javac_output('\nerror: invalid flag: -x\n'),
+                         {'file': '', 'line': 0, 'text': 'error: invalid flag: -x'})
+
     def test_the_first_javac_error_line_is_parsed_into_file_line_text(self):
         text = ('Main.java:3: error: \';\' expected\n'
                 '        int x = ;\n'

@@ -22,7 +22,10 @@ The exit report is the ``{kind, file, line, exc_type, name, detail_line}``
 dict ``code_rpc._EXIT_INFO_KEYS`` accepts; ``kind`` is one of
 ``code_errors_de.ERROR_KINDS`` or ``'ok'``. Never a message: the German
 sentence is the server's, the raw last traceback line rides ``detail_line``
-for the ``[TECHNIK]`` log line (decision A14).
+for the ``[TECHNIK]`` log line (decision A14). Its Java twin is
+``java/edubotics/Launcher.java`` (area C); the one sentence both launchers
+own, the keyboard refusal :data:`INPUT_REFUSED_DE`, is byte-equal in the two
+(tests/test_code_runner_launcher_lockstep.py).
 """
 
 from __future__ import annotations
@@ -40,6 +43,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _LIB = os.path.join(_HERE, 'lib')
 ENTRY_FILE = 'main.py'
 EXIT_DETAIL_MAX_CHARS = 2000
+# input() on the robot: there is no keyboard (N12). Raised as a RobotError, so
+# the exit report carries it as kind `robot` with the line of the call.
+INPUT_REFUSED_DE = ('Eingaben über die Tastatur gibt es hier nicht — das Programm '
+                    'läuft auf dem Roboter.')
 
 
 def _load_limits():
@@ -61,6 +68,11 @@ def classify_exception(exc: BaseException, project_root: str, robot_module) -> d
         kind, name = 'name', str(getattr(exc, 'name', '') or '')
     elif isinstance(exc, AttributeError) and getattr(exc, 'obj', None) is robot_module:
         kind, name = 'robot_method', str(getattr(exc, 'name', '') or '')
+    elif (isinstance(exc, AttributeError) and getattr(exc, 'name', None)
+          and getattr(exc, 'obj', 0) is None):
+        # `ziel.x` with ziel None: the server words it „Hier ist kein Wert da
+        # (None bzw. null)" (code_errors_de, chosen from exc_type + this name).
+        name = 'None'
     elif isinstance(exc, ImportError):
         kind, name = 'import', str(getattr(exc, 'name', '') or '')
     elif isinstance(exc, TypeError):
@@ -169,6 +181,12 @@ def main(argv: list[str]) -> int:
     sys.path.insert(1, run_dir)
     import edubotics_debug  # noqa: E402 — needs the path above
     import robot  # noqa: E402
+
+    def _no_keyboard(*_args, **_kwargs):
+        raise robot.RobotError(INPUT_REFUSED_DE)
+
+    import builtins
+    builtins.input = _no_keyboard
 
     hook = edubotics_debug.Hook(robot._rpc, run_dir, max_locals=limits.PAUSED_MAX_LOCALS)
     hook.install()

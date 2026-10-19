@@ -259,10 +259,22 @@ def emit_student_text(ctx, text: str, kind: str) -> None:
     ctx.log(text)
 
 
+# What a text program's `robot.log(None)` writes (F11). A Blockly „melde" whose
+# socket yields nothing keeps writing an empty line, as „verbinde" adds
+# nothing for it.
+LOG_NONE_DE = 'nichts'
+
+
 def log(ctx, args: dict[str, Any]) -> None:
     # German-aware, not str(): see _student_text. The stringification stays HERE
-    # (a block VALUE), then the shared helper does the rate/truncate/strip.
-    emit_student_text(ctx, _student_text(args.get('message')), 'melde')
+    # (a block VALUE, or a text program's `value`: a list, None, a Greifziel's
+    # rendering — F11), then the shared helper does the rate/truncate/strip.
+    message = args.get('message')
+    if message is None and getattr(ctx, 'code_language', None):
+        text = LOG_NONE_DE
+    else:
+        text = _student_text(message)
+    emit_student_text(ctx, text, 'melde')
 
 
 def play_sound(ctx, args: dict[str, Any]) -> None:

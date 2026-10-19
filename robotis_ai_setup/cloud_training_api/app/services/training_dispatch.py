@@ -80,6 +80,8 @@ MAX_CREATES_PER_TICK = 6
 CREATE_400_CACHE_S = 300
 DC_TABLE_CACHE_S = 600
 REAPER_SURVIVOR_ROUNDS = 3
+REAPER_PAGE_ROWS = 1000            # PostgREST's default max_rows (V1-7)
+REAPER_MAX_PAGES = 100             # a reply that never ends skips the round
 MIRROR_LEASE_S = 900
 HF_CHECK_TIMEOUT_S = 10
 FINAL_UPLOAD_WAIT_S = 1080
@@ -1508,11 +1510,27 @@ async def reaper_tick(settings: Settings | None = None) -> dict:
         logger.warning("reaper: pod list failed: %s", type(exc).__name__)
         return out
 
+    max_age = s.cap_s + s.start_deadline_s + REAPER_GRACE_S
+
     def _db():
-        refs = (
-            _sb().table("training_attempts").select("training_id, attempt_no, backend, cloud_ref, state")
-            .in_("backend", list(RUNPOD_RUNGS)).not_.is_("cloud_ref", "null").execute()
-        ).data or []
+        # (b) by DB id (V1-7): only attempts young enough to still own a live pod
+        # (a pod is created while its attempt is placing, and one older than
+        # max_age is deleted anyway), read page by page, so PostgREST's max_rows
+        # can never hide a row.
+        since = _iso(now - (max_age + PLACING_STALE_S + REAPER_GRACE_S))
+        refs = []
+        for _ in range(REAPER_MAX_PAGES):
+            page = (
+                _sb().table("training_attempts").select("training_id, attempt_no, backend, cloud_ref, state")
+                .in_("backend", list(RUNPOD_RUNGS)).not_.is_("cloud_ref", "null").gte("created_at", since)
+                .order("training_id").order("attempt_no")
+                .range(len(refs), len(refs) + REAPER_PAGE_ROWS - 1).execute()
+            ).data or []
+            if not page:
+                break
+            refs.extend(page)
+        else:
+            raise RuntimeError("reaper: attempt list did not end")
         active = (
             _sb().table("trainings").select("id, status, current_attempt")
             .eq("managed", True).in_("status", ["queued", "running"]).execute()
@@ -1532,7 +1550,6 @@ async def reaper_tick(settings: Settings | None = None) -> dict:
     active_by_id = {r["id"]: r for r in active}
     attempt_by_key = {(a["training_id"], a["attempt_no"]): a for a in attempts}
     name_re = re.compile(rf"{re.escape(s.pod_prefix)}-(\d+)-a(\d+)")
-    max_age = s.cap_s + s.start_deadline_s + REAPER_GRACE_S
     listed = set()
     for pod in pods:
         pod_id = pod.get("id")

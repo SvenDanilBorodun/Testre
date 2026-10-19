@@ -19,6 +19,7 @@ import base64
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import threading
@@ -89,8 +90,9 @@ class _Query:
         self.cols = None
         self.op = "select"
         self.payload = None
-        self._order = None
+        self._order = []
         self._limit = None
+        self._range = None
         self._negate = False
 
     # chain ------------------------------------------------------------
@@ -127,11 +129,15 @@ class _Query:
         return self._f("lt", c, v)
 
     def order(self, c, desc=False):
-        self._order = (c, desc)
+        self._order.append((c, desc))  # supabase-py: each call adds a key
         return self
 
     def limit(self, n):
         self._limit = n
+        return self
+
+    def range(self, start, end):
+        self._range = (start, end)
         return self
 
     def update(self, payload):
@@ -204,11 +210,14 @@ class _Query:
                 for r in hit:
                     rows.remove(r)
                 return SimpleNamespace(data=[copy.deepcopy(r) for r in hit], count=len(hit))
-            if self._order:
-                col, desc = self._order
-                hit = sorted(hit, key=lambda r: (r.get(col) is None, r.get(col)), reverse=desc)
+            for col, desc in reversed(self._order):  # stable: the first key decides last
+                hit = sorted(hit, key=lambda r, col=col: (r.get(col) is None, r.get(col)), reverse=desc)
+            if self._range is not None:
+                hit = hit[self._range[0]: self._range[1] + 1]
             if self._limit is not None:
                 hit = hit[: self._limit]
+            if db.max_rows is not None:  # PostgREST's max_rows: a reply never carries more
+                hit = hit[: db.max_rows]
             return SimpleNamespace(data=[self._project(r) for r in hit], count=len(hit))
 
 
@@ -232,6 +241,7 @@ class FakeDB:
         self.ops: list = []
         self.rpcs: list = []
         self.failures: dict = {}
+        self.max_rows = None
         self.lock = threading.RLock()
         self._next_id = 100
         self.credits: dict = {}
@@ -357,8 +367,10 @@ class FakeDB:
             raise PgError("P0049")
         a.update(state="lost", ended_at=self.now(), end_reason=p_reason)
         resume = p_resume_step or 0
+        hist = [e for e in t["loss_history"] or [] if int(e["s"]) <= resume]
+        last = hist[-1].get("l") if hist else None
         t.update(status="queued", worker_token=None, status_note=p_note, current_step=resume, step_advanced_at=None,
-                 loss_history=[e for e in t["loss_history"] or [] if int(e["s"]) <= resume])
+                 loss_history=hist, current_loss=last if isinstance(last, (int, float)) else None)
         t["train_seconds_used"] += max(p_train_seconds or 0, 0)
         return None
 
@@ -379,6 +391,9 @@ class FakeDB:
         t = self.row(p_training_id)
         if not (t and t["managed"] and t["current_attempt"] == p_attempt and t["status"] in ("queued", "running")):
             raise PgError("P0049")
+        a = self.attempt(p_training_id, p_attempt)
+        first = _ts(a["first_heartbeat_at"]) if a and a["state"] not in ("lost", "ended") else None
+        t["train_seconds_used"] += max(int(self.clock.t - first), 0) if first is not None else 0
         t.update(status=p_status, terminated_at=self.now(), worker_token=None, status_note=None)
         if p_status == "failed":
             t["error_message"] = p_message
@@ -458,6 +473,13 @@ class FakeDB:
         if not (t and t["worker_token"] == p_token
                 and t["status"] not in ("succeeded", "failed", "canceled", "cancel_requested")):
             raise PgError("P0001")
+        if managed:  # V1-3: the API's range on a managed row's chart
+            if p_current_step is not None:
+                p_current_step = max(p_current_step, 0)
+                if t["total_steps"] is not None:
+                    p_current_step = min(p_current_step, t["total_steps"])
+            if p_current_loss is not None and not (math.isfinite(p_current_loss) and abs(p_current_loss) <= 1e30):
+                p_current_loss = None
         hist = list(t["loss_history"] or [])
         if p_current_step is not None and p_current_loss is not None:
             hist.append({"s": p_current_step, "l": p_current_loss, "t": int(self.clock.t * 1000)})

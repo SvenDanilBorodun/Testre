@@ -82,6 +82,27 @@ _RUN_ID_MAX = 80
 _RUN_DIR_SAFE_RE = re.compile(r'[^A-Za-z0-9_-]')
 _JAVAC_ERROR_RE = re.compile(r'^(?P<file>[^\s:]+\.java):(?P<line>\d+): error: (?P<text>.*)$',
                              re.MULTILINE)
+# javac names a missing symbol on a line of its own below the error (N9).
+_JAVAC_SYMBOL_RE = re.compile(r'^\s+symbol:\s+(?P<symbol>.+)$', re.MULTILINE)
+
+
+def parse_javac_output(text: str) -> dict:
+    """The first javac error as ``{file, line, text}`` — with the following
+    ``symbol:`` line of THAT error appended (N9: „cannot find symbol" alone
+    does not say which), or the first non-empty line when no error line
+    matches."""
+    match = _JAVAC_ERROR_RE.search(text)
+    if not match:
+        first = next((line for line in text.splitlines() if line.strip()), '')
+        return {'file': '', 'line': 0, 'text': first[:L.STDOUT_MAX_LINE_BYTES]}
+    reported = match.group('text')
+    following = _JAVAC_ERROR_RE.search(text, match.end())
+    end = following.start() if following else len(text)
+    symbol = _JAVAC_SYMBOL_RE.search(text, match.end(), end)
+    if symbol:
+        reported += ' — symbol: ' + ' '.join(symbol.group('symbol').split())
+    return {'file': match.group('file')[:80], 'line': int(match.group('line')),
+            'text': reported[:L.STDOUT_MAX_LINE_BYTES]}
 
 # Rule §1: the one line a student may see from this file — sent as a stdout
 # event once per run when the per-second line budget drops output.
@@ -390,6 +411,10 @@ class _LinePump(threading.Thread):
         self._emit(kept)
 
 
+def _drop_quietly() -> None:
+    """The stderr pump's drop handler: stderr is never shown live (N7)."""
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # One run
 # ══════════════════════════════════════════════════════════════════════════
@@ -519,9 +544,12 @@ class Run:
             # The kill landed between the check above and the spawn.
             with self._kill_lock:
                 kill_sequence(proc)
+        # Only the stdout pump says „… läuft normal weiter" when it drops
+        # lines: a crash's long stack trace on stderr is no reason to tell a
+        # student the program runs on (N7).
         pumps = [
             _LinePump(proc.stdout, self._emit_lines('stdout'), self._on_drop),
-            _LinePump(proc.stderr, self._emit_lines('stderr'), self._on_drop),
+            _LinePump(proc.stderr, self._emit_lines('stderr'), _drop_quietly),
         ]
         for pump in pumps:
             pump.start()
@@ -578,9 +606,11 @@ class Run:
         return sorted(path for path in self.files if path.endswith('.java'))
 
     def _compile_java(self) -> bool:
+        # -g: the JVM's own null message then names the variable („"s" is
+        # null"), which the [TECHNIK] line shows.
         argv = [L.PYTHON_BIN, '-I', _SANDBOX_EXEC, 'java', L.JAVAC_BIN,
                 *(f'-J{flag}' for flag in L.JAVA_FLAGS),
-                '-encoding', 'UTF-8', '-d', os.path.join(self.run_dir, 'out'),
+                '-g', '-encoding', 'UTF-8', '-d', os.path.join(self.run_dir, 'out'),
                 '-cp', L.JAVA_CLASSES_DIR, *self._java_sources()]
         proc = spawn_as_student(argv, env={}, cwd=self.run_dir,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -603,20 +633,17 @@ class Run:
         if proc.returncode == 0:
             return True
         text = out[:_COMPILE_OUTPUT_MAX_BYTES].decode('utf-8', 'replace')
-        match = _JAVAC_ERROR_RE.search(text)
-        if match:
-            report = {'file': match.group('file')[:80], 'line': int(match.group('line')),
-                      'text': match.group('text')[:L.STDOUT_MAX_LINE_BYTES]}
-        else:
-            first = next((line for line in text.splitlines() if line.strip()), '')
-            report = {'file': '', 'line': 0, 'text': first[:L.STDOUT_MAX_LINE_BYTES]}
-        self.send({'ev': 'compile_error', **report})
+        self.send({'ev': 'compile_error', **parse_javac_output(text)})
         return False
 
     def _spawn_java(self) -> subprocess.Popen:
+        # The launcher runs Main.main and reports any fault with its file and
+        # line (area C, F2); it needs the project's file names to tell a
+        # student frame from a library one.
         classpath = os.path.join(self.run_dir, 'out') + ':' + L.JAVA_CLASSES_DIR
         argv = [L.PYTHON_BIN, '-I', _SANDBOX_EXEC, 'java', L.JAVA_BIN,
-                *L.JAVA_FLAGS, '-cp', classpath, 'Main']
+                *L.JAVA_FLAGS, '-cp', classpath, 'edubotics.Launcher', 'Main',
+                *self._java_sources()]
         return spawn_as_student(argv, env=self._student_env(), cwd=self.run_dir,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 

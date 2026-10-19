@@ -20,7 +20,8 @@ a non-zero exit. The rungs:
   (d) the compiled Java tree's ``SmokeMain`` prints ``JAVA SMOKE OK``.
   (e) end to end — the real supervisor over ``runner.sock`` against a fake
       ``physical_ai_server`` on ``rpc.sock``: a clean Python run, a faulting
-      one, a misspelled robot method, a Java run, a Java compile error, a
+      one, a misspelled robot method, a Java run, a faulting Java run (the
+      launcher's classified ``__exit``), a Java compile error, a
       breakpoint applied mid-run over the control socket, ``busy``, an
       out-of-band ``kill``, and no student process left behind.
 
@@ -444,6 +445,27 @@ def rung_end_to_end() -> None:
                and events[-1].get('code') == 0, f'java: {events}')
         _check('hallo ü' in _lines(events, 'stdout'), f'java stdout: {events}')
 
+        # 4b. a faulting Java run — the launcher's classified __exit (area C):
+        #     the wire kind, the student's file and line, then code 1.
+        conn = _start(control, 'run-4b', 'java', {'Main.java': (
+            'public class Main {\n'
+            '    public static void main(String[] args) {\n'
+            '        int[] a = new int[2];\n'
+            '        a[3] = 1;\n'
+            '    }\n'
+            '}\n')})
+        events = _events(conn, {'exited', 'compile_error'}, 120)
+        conn.close()
+        _check(events[-1].get('ev') == 'exited' and events[-1].get('code') == 1,
+               f'java fault: {events}')
+        _check(server.wait_for(lambda: server.exit_infos
+                               and server.exit_infos[-1].get('kind') == 'index', 5),
+               f'java fault __exit: {server.exit_infos}')
+        info = server.exit_infos[-1]
+        _check(info.get('file') == 'Main.java' and info.get('line') == 4
+               and info.get('exc_type') == 'ArrayIndexOutOfBoundsException',
+               f'java fault position: {info}')
+
         # 5. a Java compile error
         conn = _start(control, 'run-5', 'java', {'Main.java': (
             'public class Main { public static void main(String[] a) { int x = ; } }\n')})
@@ -498,7 +520,7 @@ def rung_end_to_end() -> None:
         except subprocess.TimeoutExpired:
             sup.kill()
         server.close()
-    _ok('e', f'end to end: python ok/fault/robot_method, java ok/compile_error, '
+    _ok('e', f'end to end: python ok/fault/robot_method, java ok/fault/compile_error, '
              f'mid-run breakpoint paused {server.paused - paused_before}x, busy answered, '
              f'kill acked and exited in {kill_s:.2f} s, dropped connection killed the run')
 

@@ -369,6 +369,13 @@ class CodeProgram:
             outcome, exited, compile_err = self._event_loop(
                 control, ctx, on_block_change)
         finally:
+            # The program has ended (or never started): from here every wait of
+            # a robot call still in flight stops — BEFORE the out-of-band kill
+            # below waits for its ack and close_run joins the worker (area C).
+            try:
+                session.mark_over()
+            except Exception:  # noqa: BLE001 — teardown never raises
+                pass
             try:
                 control.close()
             except OSError:

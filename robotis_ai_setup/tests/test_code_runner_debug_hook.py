@@ -1254,3 +1254,51 @@ class HookSource(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@unittest.skipUnless(hasattr(sys, 'monitoring'), 'needs sys.monitoring (3.12+)')
+class TheLauncherReportsWhatThePythonProgramDid(unittest.TestCase):
+    """N12 and the null sentence's input (area C), run as the runner runs the
+    launcher: a program that asks the keyboard is told in German, with its
+    line; an attribute read on None is named None, which the server words as
+    „Hier ist kein Wert da (None bzw. null)"."""
+
+    _runner_copy = TheLauncherEndsARunWithTheLastValues._runner_copy
+
+    def _run(self, source):
+        runner = self._runner_copy()
+        run_dir = tempfile.mkdtemp(prefix='edu-run-')
+        with open(os.path.join(run_dir, 'main.py'), 'w', encoding='utf-8') as handle:
+            handle.write(source)
+        sock_dir = tempfile.mkdtemp(prefix='edu-sock-')
+        robot_srv = _FakeRobot(os.path.join(sock_dir, 'rpc.sock'))
+        self.addCleanup(robot_srv.close)
+        env = dict(os.environ, CODE_RPC_SOCKET=robot_srv.path, CODE_RUN_TOKEN='a' * 32)
+        import subprocess
+        proc = subprocess.run([sys.executable, '-I', '-u', str(runner / 'student_main.py'), run_dir],
+                              env=env, capture_output=True, text=True, timeout=60)
+        exits = robot_srv.of('__exit')
+        self.assertEqual(len(exits), 1, (proc.returncode, proc.stderr))
+        return proc, exits[0][1][0]
+
+    def test_input_is_refused_in_german(self):
+        sm = _load_student_main()
+        proc, info = self._run('import robot\nzahl = input("Wie viele? ")\nrobot.home()\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['file'], info['line']), ('robot', 'main.py', 2))
+        self.assertEqual(info['detail_line'], sm.INPUT_REFUSED_DE)
+        self.assertIn('Tastatur', sm.INPUT_REFUSED_DE)
+
+    def test_an_attribute_of_none_is_named_none(self):
+        proc, info = self._run('import robot\nziel = None\nprint(ziel.x)\n')
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual((info['kind'], info['exc_type'], info['name'], info['line']),
+                         ('other', 'AttributeError', 'None', 3))
+
+    def test_any_other_attribute_error_keeps_no_name(self):
+        sm = _load_student_main()
+        try:
+            (1).nichtda  # noqa: B018 — the fault under test
+        except AttributeError as exc:
+            info = sm.classify_exception(exc, tempfile.gettempdir(), None)
+        self.assertEqual((info['kind'], info['name']), ('other', ''))

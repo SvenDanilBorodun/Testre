@@ -66,9 +66,11 @@ table's last band (30 of 14,689 clear near-table poses refused). The property is
 (`test_arm_geometry_edu1.py::test_the_position_floor_check_never_refuses_a_pose_the_meshes_clear`: 6000 draws in the
 commanded band, 3953 clear, 0 refused, ~2 s; 200,000 draws in a scratch run, 132,248 clear, 0 refused).
 
-**Fix round (header rows).** The simulator's „Lernpfad" note pushed the Sucher header onto a third row at
-1093 px (153 px tall, base 105 px); it now shrinks like the subtitle hint (two lines, then „…", the whole sentence
-in its `title`), so the header is two rows and 105 px again at 1024–1093 px and unchanged at 1280/1366 px.
+**Fix round (header rows), 2026-10-19.** The Q5 sentence „Lernpfade gibt es nur am echten Roboter." plus a disabled
+„Lernpfad" key in the studio header cost the simulator header a row (Sucher: 2 rows / 105 px at 1366–1680 px, main
+1 / 59) and a shrinking note did not cure it, so (owner decision) the sentence moved into the simulator's dismissible
+„Test im Simulator." notice (`SimScene`'s `noticeEl`, inline; closed, it goes too) and the header is main's again:
+64 measured cells (900–1920 px, real/simulator, with/without the leader bridge) equal main's rows and height.
 
 ### Unreleased, 2026-10-13 / 14 — „Sucher": the student app's visual redesign
 

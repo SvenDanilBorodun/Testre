@@ -248,8 +248,8 @@ export const DE = {
   DOCK_TAB_CONTROL: 'Steuern',
   DOCK_TAB_3D: '3D-Ansicht',
   DOCK_TAB_TUTORIAL: 'Lernpfad',
-  // N1 (owner decision Q5): a Lernpfad needs the calibrated real rig. In the
-  // simulator its entry stays visible, disabled, with this note beside it.
+  // N1 (owner decision Q5): a Lernpfad needs the calibrated real rig. The
+  // simulator's „Test im Simulator." notice says so (SimScene's noticeEl).
   TUTORIAL_REAL_ONLY: 'Lernpfade gibt es nur am echten Roboter.',
   DOCK_TAB_DEBUG: 'Debug',
   DOCK_COLLAPSE: 'Werkzeuge einklappen',

@@ -64,7 +64,6 @@ import ModeBadge from '../components/Workshop/ModeBadge';
 import { MODE_DE } from '../components/Workshop/modeCopy';
 import OpenWorkflowPopover from '../components/Workshop/OpenWorkflowPopover';
 import { toastIcon } from '../components/icons/toast';
-import Icon from '../components/icons/Icon';
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
 import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
@@ -609,7 +608,6 @@ function WorkshopPage({ isActive }) {
   // The id of the Vormachen chooser's visible reason (aria-describedby). A hook,
   // so it sits above the inactive page's early return.
   const teachReasonId = useId();
-  const tutorialNoteId = useId();
   const teachReason = teachEntryBlockReason({
     heartbeatStatus,
     runState,
@@ -2130,45 +2128,6 @@ function WorkshopPage({ isActive }) {
             >
               {simMode ? 'Simulator beenden' : 'Test im Simulator'}
             </button>
-            {/* N1 (owner decision Q5): a Lernpfad needs the calibrated real
-                rig. In the simulator the dock — and its „Lernpfad" tab — is
-                replaced by SimStage, so the entry stays here, disabled, with
-                the reason as visible text beside it. The note shrinks like
-                the studio's subtitle hint (`.st-hint`, Sucher D33): its own
-                shrinking flex item, up to two lines and then „…", the whole
-                sentence in its `title` and in the DOM (the key's
-                aria-describedby). The group's basis is 0, so it alone never
-                wraps the header onto a third row; it may only grow to its own
-                max-content (`max-w-max`), so wide windows keep the whole
-                sentence and the row stays right-aligned, and never shrinks
-                below its min-content (`min-w-min`: the key plus one word). */}
-            {simMode && showEditor && (
-              <div
-                data-testid="tutorial-real-only"
-                className="flex grow basis-0 min-w-min max-w-max items-center justify-end gap-1.5"
-              >
-                <span
-                  id={tutorialNoteId}
-                  title={DE.TUTORIAL_REAL_ONLY}
-                  className="st-reason min-w-0 max-w-[15rem] line-clamp-2 text-[11px] leading-tight text-[var(--ink-3)]"
-                >
-                  {DE.TUTORIAL_REAL_ONLY}
-                </span>
-                <button
-                  type="button"
-                  disabled
-                  aria-describedby={tutorialNoteId}
-                  title={DE.TUTORIAL_REAL_ONLY}
-                  className={
-                    'st-key shrink-0 inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-md border '
-                    + 'opacity-50 cursor-not-allowed bg-white text-[var(--ink-3)] border-[var(--line)]'
-                  }
-                >
-                  <Icon name="graduationCap" size={14} />
-                  {DE.DOCK_TAB_TUTORIAL}
-                </button>
-              </div>
-            )}
             {/* Follower-only leader toggle (Windows student rig only; self-hides
                 on Jetson/cloud where the GUI control bridge is absent). */}
             <LeaderToggle

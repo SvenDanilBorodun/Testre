@@ -894,7 +894,8 @@ function SimScene({
   // closed (remembered on this PC by SimStage); the stack layout keeps it as
   // it always was.
   const canDismissIntro = isSplit && typeof onDismissIntro === 'function';
-  // German notice: the simulator validates logic, not physics.
+  // German notice: the simulator validates logic, not physics, and a Lernpfad
+  // needs the real robot (owner decision Q5).
   const noticeEl = !(isSplit && introDismissed) ? (
     <div
       className={
@@ -905,7 +906,12 @@ function SimScene({
       <strong>Test im Simulator.</strong> Hier prüfst du die Logik und
       Reihenfolge deines Programms — nicht die echte Physik des Greifens.
       Platziere Objekte auf dem Tisch und lass das Programm den virtuellen
-      Roboter steuern.
+      Roboter steuern.{' '}
+      {/* Owner decision Q5: a Lernpfad needs the calibrated real rig, and the
+          simulator says so here, in its own notice: part of the same text
+          (inline, so it costs the fitted table at most one line), read with
+          it by a screen reader, and closed with it. */}
+      <span data-testid="sim-notice-tutorial">{DE.TUTORIAL_REAL_ONLY}</span>
       {canDismissIntro && (
         <button
           type="button"

@@ -17,6 +17,7 @@ import { render as rtlRender, screen, fireEvent, waitFor, act, within } from '@t
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import SimScene from '../SimScene';
+import { DE } from '../blocks/messages_de';
 
 // The /sim/objects subscription, under test control. The hook itself has its own
 // wire contract; what matters here is WHEN SimScene is allowed to believe it.
@@ -722,6 +723,38 @@ describe('SimScene — the split stage (WI-1.8)', () => {
       </Provider>,
     );
     expect(screen.queryByText(/Test im Simulator\./)).toBeNull();
+  });
+
+  // Owner decision Q5 (fix round 2): a Lernpfad needs the calibrated real rig,
+  // and the simulator says so in its own „Test im Simulator." notice — part of
+  // the same text (one notice for a screen reader), closed with it. The studio
+  // header carries no note and no disabled „Lernpfad" key any more.
+  test('the notice says Lernpfade need the real robot, and the sentence closes with it', async () => {
+    const onDismissIntro = vi.fn();
+    const { rerender, store } = render(
+      <SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} onDismissIntro={onDismissIntro} />,
+    );
+    await screen.findByTestId('urdf-twin');
+    const sentence = screen.getByText(DE.TUTORIAL_REAL_ONLY);
+    expect(DE.TUTORIAL_REAL_ONLY).toBe('Lernpfade gibt es nur am echten Roboter.');
+    // The same notice as „Test im Simulator.", read as one piece.
+    // eslint-disable-next-line testing-library/no-node-access
+    const notice = screen.getByText('Test im Simulator.').parentElement;
+    expect(notice).toContainElement(sentence);
+    expect(notice).toContainElement(screen.getByRole('button', { name: 'Hinweis ausblenden' }));
+    expect(notice.textContent).toContain(
+      'lass das Programm den virtuellen Roboter steuern. Lernpfade gibt es nur am echten Roboter.',
+    );
+    // Visible text, not a title or an aria-only label.
+    expect(sentence).toBeVisible();
+    expect(sentence.getAttribute('aria-hidden')).toBeNull();
+    rerender(
+      <Provider store={store}>
+        <SimScene layout="split" scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={() => {}} onDismissIntro={onDismissIntro} introDismissed />
+      </Provider>,
+    );
+    expect(screen.queryByText('Test im Simulator.')).toBeNull();
+    expect(screen.queryByText(DE.TUTORIAL_REAL_ONLY)).toBeNull();
   });
 
   test('the stack layout keeps its notice, with no close button', async () => {

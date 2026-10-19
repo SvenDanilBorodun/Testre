@@ -14,11 +14,12 @@
 --   psql <local db url> -f supabase/tests/049_managed_training_assertions.sql
 -- Built from the spec's behaviour probes 1–4 (§B.3), plus probe 5 (a managed
 -- row's chart range, the requeue's current_loss, the seconds finish(failed)
--- counts: V1-3, V2-6, V2-7) and probe 6 (the CAS guards of release, end,
+-- counts: V1-3, V2-6, V2-7), probe 6 (the CAS guards of release, end,
 -- finish and complete_cancel that no other probe isolates: V1-4's S09, S10,
--- S11, S14). Every DENIAL is asserted
--- with has_function_privilege / has_table_privilege / has_column_privilege,
--- never by calling: in the stand-alone supabase/postgres:17.6.1.106 image a
+-- S11, S14) and probe 7 (the loss an in-place-restart trim leaves, and the
+-- seconds complete_cancel_training counts: fix round 2026-10-19). Every
+-- DENIAL is asserted with has_function_privilege / has_table_privilege /
+-- has_column_privilege, never by calling: in the stand-alone supabase/postgres:17.6.1.106 image a
 -- call of a function the role may not execute crashes the backend with signal
 -- 11 (SR-25, measured). The worker is simulated as `anon`, which IS granted
 -- update_training_progress (the Modal/RunPod anon-key path). A statement sees
@@ -26,10 +27,10 @@
 -- PostgREST's view of the same denials is checked by hand (see the RunPod
 -- training build's proof notes): a student's call of any of the ten functions
 -- or of start_training_safe, and a read of training_checkpoints, answer 403.
--- Expected: 57 PASS, 0 FAIL (T1..T33; T5, T8, T9, T18, T24, T27..T30, T32 and T33 in
+-- Expected: 66 PASS, 0 FAIL (T1..T35; T5, T8, T9, T18, T24, T27..T30 and T32..T35 in
 -- lettered parts). The rollback is exercised separately
 -- (rollback/20261020130000_049_managed_training_rollback.sql refuses while this
--- file's T26 row is active; every row probes 5 and 6 create ends terminal).
+-- file's T26 row is active; every row probes 5 to 7 create ends terminal).
 \set ON_ERROR_STOP off
 \pset pager off
 
@@ -402,3 +403,80 @@ SELECT public.finish_training(:g14, 1, 'failed', 'x', NULL);
 SELECT pg_temp.expect(format('SELECT public.complete_cancel_training(%s, %L, NULL)', :d, 'canceled'), 'P0049', 'PASS T33c');
 SELECT CASE WHEN status = 'succeeded' AND error_message IS NULL THEN 'PASS T33d' ELSE 'FAIL T33d' END
   FROM public.trainings WHERE id = :d;
+
+-- ===================== probe 7: the restart trim's loss, a cancel's seconds (fix round 2026-10-19) =====================
+SELECT training_id AS ir FROM public.start_training_safe(:u,'u/ds','EduBotics-Solutions/p7a','act','{"steps":5000,"save_freq":2500}'::jsonb,5000,NULL,true) \gset
+SELECT o_worker_token AS tokir FROM public.claim_training_attempt(:ir, 0) \gset
+SELECT public.attach_training_attempt(:ir, 1, 'runpod_community', 'pod-ir');
+SET ROLE anon;
+SELECT public.update_training_progress(:ir, :'tokir', 'running', 0, 5000, NULL, NULL, NULL);
+SELECT public.update_training_progress(:ir, :'tokir', NULL, 1000, 5000, 0.4, NULL, NULL);
+SELECT public.update_training_progress(:ir, :'tokir', NULL, 2000, 5000, 0.3, NULL, NULL);
+SELECT public.update_training_progress(:ir, :'tokir', NULL, 3000, 5000, 0.2, NULL, NULL);
+SELECT public.update_training_progress(:ir, :'tokir', 'running', 2500, 5000, NULL, NULL, NULL);
+RESET ROLE;
+\echo '=== T34a an in-place restart (running, lower step, no loss) leaves the loss of the last point it keeps (2000: 0.3) ==='
+SELECT CASE WHEN current_loss = 0.3::real AND current_step = 2500 AND jsonb_array_length(loss_history) = 2
+             AND (loss_history->-1->>'s') = '2000'
+            THEN 'PASS T34a' ELSE 'FAIL T34a' END FROM public.trainings WHERE id = :ir;
+SET ROLE anon; SELECT public.update_training_progress(:ir, :'tokir', 'running', 500, 5000, NULL, NULL, NULL); RESET ROLE;
+\echo '=== T34b … and NULL when the trim keeps no point ==='
+SELECT CASE WHEN current_loss IS NULL AND current_step = 500 AND jsonb_array_length(loss_history) = 0
+            THEN 'PASS T34b' ELSE 'FAIL T34b' END FROM public.trainings WHERE id = :ir;
+SET ROLE anon;
+SELECT public.update_training_progress(:ir, :'tokir', NULL, 1500, 5000, 0.6, NULL, NULL);
+SELECT public.update_training_progress(:ir, :'tokir', 'running', 1000, 5000, 0.9, NULL, NULL);
+RESET ROLE;
+\echo '=== T34c a restart write that carries its own loss keeps it (it is the kept curve''s last point) ==='
+SELECT CASE WHEN current_loss = 0.9::real AND current_step = 1000 AND jsonb_array_length(loss_history) = 1
+             AND (loss_history->-1->>'s') = '1000'
+            THEN 'PASS T34c' ELSE 'FAIL T34c' END FROM public.trainings WHERE id = :ir;
+SET ROLE anon;
+SELECT public.update_training_progress(:ir, :'tokir', NULL, NULL, 5000, 0.7, NULL, NULL);
+SELECT public.update_training_progress(:ir, :'tokir', 'running', 1200, 5000, NULL, NULL, NULL);
+RESET ROLE;
+\echo '=== T34d a running write that trims nothing keeps current_loss as it is (0.7, no chart point of its own) ==='
+SELECT CASE WHEN current_loss = 0.7::real AND current_step = 1200 AND jsonb_array_length(loss_history) = 1
+            THEN 'PASS T34d' ELSE 'FAIL T34d' END FROM public.trainings WHERE id = :ir;
+SELECT training_id AS lr FROM public.start_training_safe(:u,'u/ds','EduBotics-Solutions/p7b','pi0','{}'::jsonb,500,'33333333-4444-5555-6666-777777777777') \gset
+SET ROLE anon;
+SELECT public.update_training_progress(:lr, '33333333-4444-5555-6666-777777777777', 'running', 0, 500, NULL, NULL, NULL);
+SELECT public.update_training_progress(:lr, '33333333-4444-5555-6666-777777777777', NULL, 100, 500, 0.5, NULL, NULL);
+SELECT public.update_training_progress(:lr, '33333333-4444-5555-6666-777777777777', NULL, 200, 500, 0.4, NULL, NULL);
+SELECT public.update_training_progress(:lr, '33333333-4444-5555-6666-777777777777', 'running', 150, 500, NULL, NULL, NULL);
+RESET ROLE;
+\echo '=== T34e the trim is every row''s, so the loss follows it on a legacy row too (100: 0.5) ==='
+SELECT CASE WHEN NOT managed AND current_loss = 0.5::real AND current_step = 150 AND jsonb_array_length(loss_history) = 1
+            THEN 'PASS T34e' ELSE 'FAIL T34e' END FROM public.trainings WHERE id = :lr;
+SET ROLE anon; SELECT public.update_training_progress(:lr, '33333333-4444-5555-6666-777777777777', 'running', 120, 500, 'Infinity', NULL, NULL); RESET ROLE;
+\echo '=== T34f … and a legacy restart write that carries its own loss keeps it as today, even a non-finite one ==='
+SELECT CASE WHEN current_loss = 'Infinity'::real AND current_step = 120 AND jsonb_array_length(loss_history) = 2
+            THEN 'PASS T34f' ELSE 'FAIL T34f' END FROM public.trainings WHERE id = :lr;
+SET ROLE anon; SELECT public.update_training_progress(:lr, '33333333-4444-5555-6666-777777777777', 'failed', 120, 500, NULL, NULL, NULL); RESET ROLE;
+UPDATE public.training_attempts SET first_heartbeat_at = now() - interval '600 seconds' WHERE training_id = :ir AND attempt_no = 1;
+SELECT train_seconds_used AS secs_ir FROM public.trainings WHERE id = :ir \gset
+SELECT o_attempt_state FROM public.cancel_request_training(:ir, :u);
+SELECT public.complete_cancel_training(:ir, 'canceled', NULL);
+\echo '=== T35a complete_cancel_training counts the seconds of the attempt it ends (now − first_heartbeat_at) ==='
+SELECT CASE WHEN t.status = 'canceled' AND t.train_seconds_used - :secs_ir BETWEEN 600 AND 660
+             AND a.state = 'ended' AND a.end_reason = 'canceled'
+            THEN 'PASS T35a' ELSE 'FAIL T35a' END
+  FROM public.trainings t JOIN public.training_attempts a ON a.training_id = t.id AND a.attempt_no = 1 WHERE t.id = :ir;
+SELECT training_id AS cr FROM public.start_training_safe(:u,'u/ds','EduBotics-Solutions/p7c','act','{"steps":5000,"save_freq":2500}'::jsonb,5000,NULL,true) \gset
+SELECT o_worker_token AS tokcr FROM public.claim_training_attempt(:cr, 0) \gset
+SELECT public.attach_training_attempt(:cr, 1, 'runpod_secure', 'pod-cr');
+SET ROLE anon; SELECT public.update_training_progress(:cr, :'tokcr', 'running', 0, 5000, NULL, NULL, NULL); RESET ROLE;
+UPDATE public.training_attempts SET first_heartbeat_at = now() - interval '300 seconds' WHERE training_id = :cr;
+SELECT public.requeue_training(:cr, 1, 'pod_gone', 'n', 0, 300);
+SELECT o_attempt_state FROM public.cancel_request_training(:cr, :u);
+SELECT public.complete_cancel_training(:cr, 'failed', 'S21');
+\echo '=== T35b … but never counts an attempt again that the requeue already counted (lost), on a given-up cancel too ==='
+SELECT CASE WHEN t.status = 'failed' AND t.train_seconds_used = 300 AND a.state = 'lost'
+            THEN 'PASS T35b' ELSE 'FAIL T35b' END
+  FROM public.trainings t JOIN public.training_attempts a ON a.training_id = t.id AND a.attempt_no = 1 WHERE t.id = :cr;
+SELECT training_id AS cl FROM public.start_training_safe(:u,'u/ds','EduBotics-Solutions/p7d','pi0','{}'::jsonb,100,'44444444-5555-6666-7777-888888888888') \gset
+SELECT o_managed FROM public.cancel_request_training(:cl, :u);
+SELECT public.complete_cancel_training(:cl, 'canceled', NULL);
+\echo '=== T35c a legacy row (no attempts) is canceled with nothing counted ==='
+SELECT CASE WHEN NOT managed AND status = 'canceled' AND train_seconds_used = 0
+            THEN 'PASS T35c' ELSE 'FAIL T35c' END FROM public.trainings WHERE id = :cl;

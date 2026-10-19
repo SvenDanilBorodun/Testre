@@ -30,11 +30,13 @@
 --     also clamps p_current_step to [0, total_steps] and ignores a
 --     p_current_loss that is NaN, ±Infinity or beyond ±1e30, so a host cannot
 --     draw out-of-range numbers on the student's chart (V1-3).
---   * requeue_training sets current_loss to the last point of the trimmed
---     curve (NULL when none is left), and finish_training counts the seconds
---     of an attempt it ends (now − first_heartbeat_at) into
---     train_seconds_used, as requeue_training and end_training_attempt do
---     (V2-6, V2-7).
+--   * requeue_training, and update_training_progress's in-place-restart trim
+--     when the write carries no loss of its own, set current_loss to the last
+--     point of the trimmed curve (NULL when none is left); finish_training and
+--     complete_cancel_training count the seconds of an attempt they end
+--     (now − first_heartbeat_at) into train_seconds_used, as requeue_training
+--     and end_training_attempt do, and never an attempt already lost or ended
+--     (V2-6, V2-7, fix round 2026-10-19).
 --
 -- Proven on a local `supabase start` stack (Postgres 17,
 -- public.ecr.aws/supabase/postgres:17.6.1.106; the guarded baseline + every
@@ -418,14 +420,26 @@ $$;
 
 CREATE OR REPLACE FUNCTION public.complete_cancel_training(p_training_id INT, p_final TEXT, p_message TEXT)
 RETURNS VOID LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
-DECLARE v_rows INT;
+DECLARE
+  v_rows INT;
+  v_seconds INT;
 BEGIN
   IF p_final NOT IN ('canceled','failed') THEN
     RAISE EXCEPTION 'invalid final %', p_final USING ERRCODE = '22023';
   END IF;
+  PERFORM 1 FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;
+  -- The trained seconds of the attempt this call ends, exactly as finish_training
+  -- counts them (now − first_heartbeat_at): an attempt a requeue or an end
+  -- already took to lost/ended was counted by that call. A legacy row has none.
+  SELECT GREATEST(floor(EXTRACT(EPOCH FROM (now() - a.first_heartbeat_at)))::int, 0) INTO v_seconds
+    FROM public.trainings t
+    JOIN public.training_attempts a ON a.training_id = t.id AND a.attempt_no = t.current_attempt
+   WHERE t.id = p_training_id
+     AND a.state NOT IN ('lost','ended') AND a.first_heartbeat_at IS NOT NULL;
   UPDATE public.trainings
      SET status = p_final, terminated_at = now(), worker_token = NULL, status_note = NULL,
-         error_message = CASE WHEN p_final = 'failed' THEN p_message ELSE error_message END
+         error_message = CASE WHEN p_final = 'failed' THEN p_message ELSE error_message END,
+         train_seconds_used = train_seconds_used + COALESCE(v_seconds, 0)
    WHERE id = p_training_id AND status = 'cancel_requested';
   GET DIAGNOSTICS v_rows = ROW_COUNT;
   IF v_rows = 0 THEN
@@ -558,7 +572,18 @@ BEGIN
     -- A managed row's step count and error text are the API's alone (E11, FR-1):
     -- a host holding its token can call this RPC directly.
     total_steps   = CASE WHEN managed THEN total_steps   ELSE COALESCE(p_total_steps,   total_steps)   END,
-    current_loss  = COALESCE(v_loss,          current_loss),
+    -- An in-place restart (the trim below) leaves the loss of the trimmed curve's
+    -- last point (NULL when none is left), never one of a step it dropped, as
+    -- requeue_training does; a write that carries its own loss keeps it.
+    current_loss  = CASE
+      WHEN p_status = 'running' AND v_step IS NOT NULL AND v_step < COALESCE(current_step, 0)
+        THEN COALESCE(v_loss,
+               (SELECT CASE WHEN jsonb_typeof(e->'l') = 'number' THEN (e->>'l')::real END
+                  FROM jsonb_array_elements(COALESCE(v_new_history, loss_history)) WITH ORDINALITY AS x(e, ord)
+                 WHERE (e->>'s')::int <= v_step
+                 ORDER BY ord DESC LIMIT 1))
+      ELSE COALESCE(v_loss, current_loss)
+    END,
     error_message = CASE WHEN managed THEN error_message ELSE COALESCE(p_error_message, error_message) END,
     loss_history  = CASE
       WHEN p_status = 'running' AND v_step IS NOT NULL AND v_step < COALESCE(current_step, 0)

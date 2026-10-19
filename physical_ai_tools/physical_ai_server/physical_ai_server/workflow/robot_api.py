@@ -24,7 +24,10 @@ fenced by ``test/test_robot_api_generated.py``):
   (``robotis_ai_setup/docker/code_runner/runner/lib/robot.py``),
 - the Java client (``Robot.java`` + ``Greifobjekt.java`` + ``RpcClient.java``
   under ``runner/java/edubotics/``),
-- the editor's ``robot_api.json`` (autocomplete, hover docs, the caps),
+- the editor's ``robot_api.json`` (autocomplete, hover docs, the caps, and
+  for the blocks: every parameter's ``arg_key`` — the block input the
+  row-driven preview reads — and every handler row's ``doc_de_block``, the
+  block tooltip in Blockly words, which no stub renders),
 - the Methoden column's ``robot_api_docs.json`` (``export_docs_json``):
   parameter docs, signatures, return docs, example lines and the two types.
   Its fields (``ApiParam.doc_de``, ``ApiCall.returns_de`` / ``doc_de_java`` /
@@ -61,6 +64,12 @@ of each handler body, helpers included). The three point-takers share the
 student-facing name ``target`` but ``move_to``/``drop_at`` read
 ``args['destination']`` while ``pickup`` reads ``args['target']`` — the rows
 say so, the test proves it.
+
+Two rules both stubs carry are spelled here once: :data:`NOT_A_GREIFZIEL_DE`
+(the sentence a grasp step raises locally for anything that is not a
+Greifziel, a Java ``null`` included) and :func:`type_name_for` (the type name
+of a Greifobjekt that names none, rendered into the Python stub from its own
+source and spelled in Java, SmokeMain holding the two equal).
 
 The rate budget both ends enforce lives here as :data:`RPC_LIMITS` (the
 generated stubs embed the numbers; ``code_rpc.py`` imports them). The project

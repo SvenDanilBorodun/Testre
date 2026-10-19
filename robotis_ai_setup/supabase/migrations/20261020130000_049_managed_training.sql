@@ -26,7 +26,15 @@
 --     otherwise), ignores p_total_steps and p_error_message (a host holding the
 --     token can call this RPC directly, FR-1), every 'running' write resets
 --     step_advanced_at, and a 'running' write with a lower step trims
---     loss_history to that step (an in-place restart).
+--     loss_history to that step (an in-place restart). For a managed row it
+--     also clamps p_current_step to [0, total_steps] and ignores a
+--     p_current_loss that is NaN, ±Infinity or beyond ±1e30, so a host cannot
+--     draw out-of-range numbers on the student's chart (V1-3).
+--   * requeue_training sets current_loss to the last point of the trimmed
+--     curve (NULL when none is left), and finish_training counts the seconds
+--     of an attempt it ends (now − first_heartbeat_at) into
+--     train_seconds_used, as requeue_training and end_training_attempt do
+--     (V2-6, V2-7).
 --
 -- Proven on a local `supabase start` stack (Postgres 17,
 -- public.ecr.aws/supabase/postgres:17.6.1.106; the guarded baseline + every
@@ -283,7 +291,9 @@ $$;
 CREATE OR REPLACE FUNCTION public.requeue_training(
   p_training_id INT, p_attempt INT, p_reason TEXT, p_note TEXT, p_resume_step INT, p_train_seconds INT)
 RETURNS VOID LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
-DECLARE v_rows INT;
+DECLARE
+  v_rows INT;
+  v_hist JSONB;
 BEGIN
   PERFORM 1 FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;
   UPDATE public.training_attempts a
@@ -297,13 +307,18 @@ BEGIN
   IF v_rows = 0 THEN
     RAISE EXCEPTION 'requeue conflict for training %', p_training_id USING ERRCODE = 'P0049';
   END IF;
+  SELECT COALESCE(jsonb_agg(e ORDER BY ord), '[]'::jsonb) INTO v_hist
+    FROM public.trainings t,
+         jsonb_array_elements(COALESCE(t.loss_history, '[]'::jsonb)) WITH ORDINALITY AS x(e, ord)
+   WHERE t.id = p_training_id AND (e->>'s')::int <= COALESCE(p_resume_step, 0);
   UPDATE public.trainings
      SET status = 'queued', worker_token = NULL, status_note = p_note,
          current_step = COALESCE(p_resume_step, 0),
          step_advanced_at = NULL,
-         loss_history = (SELECT COALESCE(jsonb_agg(e ORDER BY ord), '[]'::jsonb)
-                           FROM jsonb_array_elements(loss_history) WITH ORDINALITY AS x(e, ord)
-                          WHERE (e->>'s')::int <= COALESCE(p_resume_step, 0)),
+         loss_history = v_hist,
+         -- The loss of the last point kept, not of a step the requeue rolled back (V2-6).
+         current_loss = CASE WHEN jsonb_typeof(v_hist -> -1 -> 'l') = 'number'
+                             THEN (v_hist -> -1 ->> 'l')::real END,
          train_seconds_used = train_seconds_used + GREATEST(COALESCE(p_train_seconds, 0), 0)
    WHERE id = p_training_id;
 END;
@@ -337,16 +352,27 @@ $$;
 CREATE OR REPLACE FUNCTION public.finish_training(
   p_training_id INT, p_attempt INT, p_status TEXT, p_message TEXT, p_log_url TEXT)
 RETURNS VOID LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
-DECLARE v_rows INT;
+DECLARE
+  v_rows INT;
+  v_seconds INT;
 BEGIN
   IF p_status NOT IN ('succeeded','failed') THEN
     RAISE EXCEPTION 'invalid status %', p_status USING ERRCODE = '22023';
   END IF;
+  PERFORM 1 FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;
+  -- The trained seconds of an attempt this call ends (V2-7): the same
+  -- now − first_heartbeat_at the API passes to requeue_training and
+  -- end_training_attempt. An attempt they already ended (lost/ended) was counted.
+  SELECT GREATEST(floor(EXTRACT(EPOCH FROM (now() - a.first_heartbeat_at)))::int, 0) INTO v_seconds
+    FROM public.training_attempts a
+   WHERE a.training_id = p_training_id AND a.attempt_no = p_attempt
+     AND a.state NOT IN ('lost','ended') AND a.first_heartbeat_at IS NOT NULL;
   UPDATE public.trainings
      SET status = p_status, terminated_at = now(), worker_token = NULL, status_note = NULL,
          error_message = CASE WHEN p_status = 'failed' THEN p_message ELSE error_message END,
          log_url = COALESCE(p_log_url, log_url),
-         current_step = CASE WHEN p_status = 'succeeded' THEN total_steps ELSE current_step END
+         current_step = CASE WHEN p_status = 'succeeded' THEN total_steps ELSE current_step END,
+         train_seconds_used = train_seconds_used + COALESCE(v_seconds, 0)
    WHERE id = p_training_id AND managed AND current_attempt = p_attempt
      AND status IN ('queued','running');
   GET DIAGNOSTICS v_rows = ROW_COUNT;
@@ -471,22 +497,35 @@ DECLARE
   v_managed     BOOLEAN;
   v_prev_status TEXT;
   v_attempt     INT;
+  v_total       INT;
+  v_step        INT  := p_current_step;
+  v_loss        REAL := p_current_loss;
 BEGIN
   IF p_status IS NOT NULL AND p_status NOT IN ('queued','running','succeeded','failed','canceled') THEN
     RAISE EXCEPTION 'Invalid status: %', p_status USING ERRCODE = '22023';
   END IF;
 
-  SELECT managed, status, current_attempt INTO v_managed, v_prev_status, v_attempt
+  SELECT managed, status, current_attempt, total_steps INTO v_managed, v_prev_status, v_attempt, v_total
     FROM public.trainings WHERE id = p_training_id;
   IF v_managed AND p_status IS NOT NULL AND p_status <> 'running' THEN
     RAISE EXCEPTION 'Managed training: status % is set by the API', p_status USING ERRCODE = '22023';
   END IF;
+  -- A managed row's chart is the API's range (V1-3): the step in [0, total_steps],
+  -- a loss only when finite and within ±1e30 (NaN compares above every number).
+  IF v_managed THEN
+    IF v_step IS NOT NULL THEN
+      v_step := LEAST(GREATEST(v_step, 0), v_total);
+    END IF;
+    IF v_loss IS NOT NULL AND NOT (v_loss <> 'NaN'::real AND v_loss BETWEEN -1e30 AND 1e30) THEN
+      v_loss := NULL;
+    END IF;
+  END IF;
 
-  IF p_current_step IS NOT NULL AND p_current_loss IS NOT NULL THEN
+  IF v_step IS NOT NULL AND v_loss IS NOT NULL THEN
     SELECT COALESCE(loss_history, '[]'::jsonb) || jsonb_build_array(
              jsonb_build_object(
-               's', p_current_step,
-               'l', p_current_loss,
+               's', v_step,
+               'l', v_loss,
                't', (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT
              )
            )
@@ -515,17 +554,17 @@ BEGIN
   UPDATE public.trainings
   SET
     status        = COALESCE(p_status,        status),
-    current_step  = COALESCE(p_current_step,  current_step),
+    current_step  = COALESCE(v_step,          current_step),
     -- A managed row's step count and error text are the API's alone (E11, FR-1):
     -- a host holding its token can call this RPC directly.
     total_steps   = CASE WHEN managed THEN total_steps   ELSE COALESCE(p_total_steps,   total_steps)   END,
-    current_loss  = COALESCE(p_current_loss,  current_loss),
+    current_loss  = COALESCE(v_loss,          current_loss),
     error_message = CASE WHEN managed THEN error_message ELSE COALESCE(p_error_message, error_message) END,
     loss_history  = CASE
-      WHEN p_status = 'running' AND p_current_step IS NOT NULL AND p_current_step < COALESCE(current_step, 0)
+      WHEN p_status = 'running' AND v_step IS NOT NULL AND v_step < COALESCE(current_step, 0)
         THEN (SELECT COALESCE(jsonb_agg(e ORDER BY ord), '[]'::jsonb)
                 FROM jsonb_array_elements(COALESCE(v_new_history, loss_history)) WITH ORDINALITY AS x(e, ord)
-               WHERE (e->>'s')::int <= p_current_step)
+               WHERE (e->>'s')::int <= v_step)
       ELSE COALESCE(v_new_history, loss_history)
     END,
     log_url       = CASE
@@ -536,7 +575,7 @@ BEGIN
     last_progress_at = NOW(),
     step_advanced_at = CASE
       WHEN step_advanced_at IS NULL OR p_status = 'running' THEN NOW()
-      WHEN p_current_step IS NOT NULL AND p_current_step > COALESCE(current_step, 0) THEN NOW()
+      WHEN v_step IS NOT NULL AND v_step > COALESCE(current_step, 0) THEN NOW()
       ELSE step_advanced_at
     END,
     status_note   = CASE

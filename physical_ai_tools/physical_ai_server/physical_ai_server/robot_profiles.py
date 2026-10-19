@@ -206,6 +206,9 @@ class ArmProfile:
     camera_roles: tuple = ('gripper', 'scene')   # GUI camera auto-assign order
     reach_inner_m: Optional[float] = None    # React annulus (None → simConstants)
     reach_outer_m: Optional[float] = None
+    # Bearing sector (degrees, base frame) the arm can reach, or None for a full
+    # ring. Exported as the manifest key ``reach_sector_deg`` (a list).
+    reach_sector_deg: Optional[tuple] = None
     gripper_mm_per_rad: Optional[float] = None   # jaw-opening display factor
     # True when the TCP's HEIGHT below the tool frame depends on the gripper
     # command — a ROTATING claw, where the fingertip swings back as the jaws
@@ -306,6 +309,15 @@ _OMX_FULL = ArmProfile(
     gripper_closed_rad=_OMX_GRIPPER_CLOSED_RAD,
     num_arm_joints=5,
     joint_names=_OMX_JOINT_NAMES,
+    # The reach shape the editor draws (manifest keys, N6/N11): the inner
+    # radius is the editor's historic 0.10 (never widened from IK alone,
+    # principle 6); the outer 0.25 m is the MINIMUM over bearings at the rig's
+    # grasp height (EE z 0.055 with z_table 0.04: 0.2595 m at 0°, 0.2705 m at
+    # 90°), rounded down — the drawn 0.28 promised a forward reach the arm does
+    # not have. The simulator's table equals the rig's since Q13, so the same
+    # number holds there.
+    reach_inner_m=0.10,
+    reach_outer_m=0.25,
     urdf_asset_id='omx_f',
 )
 
@@ -332,6 +344,15 @@ _OMX_FOLLOWER = ArmProfile(
     gripper_closed_rad=_OMX_GRIPPER_CLOSED_RAD,
     num_arm_joints=5,
     joint_names=_OMX_JOINT_NAMES,
+    # The reach shape the editor draws (manifest keys, N6/N11): the inner
+    # radius is the editor's historic 0.10 (never widened from IK alone,
+    # principle 6); the outer 0.25 m is the MINIMUM over bearings at the rig's
+    # grasp height (EE z 0.055 with z_table 0.04: 0.2595 m at 0°, 0.2705 m at
+    # 90°), rounded down — the drawn 0.28 promised a forward reach the arm does
+    # not have. The simulator's table equals the rig's since Q13, so the same
+    # number holds there.
+    reach_inner_m=0.10,
+    reach_outer_m=0.25,
     urdf_asset_id='omx_f',
     # A follower-only Roboter-Studio kit's LONE camera is the SCENE camera, not
     # the gripper cam (perception + the config topics hang off the role name —
@@ -530,6 +551,9 @@ _EDU1_STUDIO = ArmProfile(
     # both planes with ~110 mm of hover headroom.
     reach_inner_m=0.07,
     reach_outer_m=0.35,
+    # Joint 1 turns ±90° only: the arm cannot reach behind itself, so the editor
+    # draws a sector, not a ring (N6), and snaps a tap behind into it.
+    reach_sector_deg=(-90, 90),
     # gripper_mm_per_rad is deliberately OMITTED (→ the jog row keeps its degree
     # display). This is a ROTATING claw: the jaw gap is affine in the servo
     # angle, ≈21 mm already at 0 rad plus ≈85 mm/rad, so a pure mm/rad factor
@@ -710,6 +734,8 @@ def capabilities_json(profile: ArmProfile) -> str:
     for key, value in (
         ('reach_inner_m', profile.reach_inner_m),
         ('reach_outer_m', profile.reach_outer_m),
+        ('reach_sector_deg', (list(profile.reach_sector_deg)
+                              if profile.reach_sector_deg is not None else None)),
         ('gripper_mm_per_rad', profile.gripper_mm_per_rad),
         ('sim_close_threshold_rad', profile.sim_close_threshold_rad),
     ):

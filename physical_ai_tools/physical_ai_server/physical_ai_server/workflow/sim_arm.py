@@ -477,13 +477,36 @@ class SimArm:
                     world.carry_to(xyz[0], xyz[1])
                     return True
                 before = world.held_key()
-                world.capture_nearest(xyz[0], xyz[1], _GRASP_CAPTURE_RADIUS_M)
+                world.capture_nearest(xyz[0], xyz[1], _GRASP_CAPTURE_RADIUS_M,
+                                      accept=self._fingertips_reach(xyz[2]))
                 return world.held_key() != before
             if was_closed:
                 return world.release() is not None
         except Exception:  # noqa: BLE001 — the sim world must never kill a run
             pass
         return False
+
+    def _fingertips_reach(self, ee_z: float) -> Callable[[dict[str, Any]], bool]:
+        """N3 / Q13: a close only grabs an object the FINGERTIPS are at or below
+        the top of. The fingertips sit the solver's ``tool_tip_below_ee_m``
+        under the EE frame (0.04 m on the OMX, 0 on the Feetech arms); the
+        object's top is at base z = its own ``height_m`` (the drawn table is
+        z = 0), which ``SimPerception`` binds onto the world entry. No extra
+        margin: the simulator holds or misses exactly where the rig would. An
+        entry without a height (an older binder) is judged as before."""
+        tip = getattr(self._ik, 'tool_tip_below_ee_m', 0.0) if self._ik is not None else 0.0
+        try:
+            tip = float(tip or 0.0)
+        except (TypeError, ValueError):
+            tip = 0.0
+
+        def _accept(obj: dict[str, Any]) -> bool:
+            height = obj.get('height_m')
+            if height is None:
+                return True
+            return float(ee_z) - tip <= float(height)
+
+        return _accept
 
     # ------------------------------------------------------------------
     # Joint readback (ctx.get_follower_joints contract)

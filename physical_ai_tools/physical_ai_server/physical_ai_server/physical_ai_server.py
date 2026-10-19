@@ -7402,6 +7402,18 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # 1x1 non-None dummy frame: perception_blocks._scene_frame only checks
         # for None (SimPerception ignores the pixels entirely).
         sim_dummy_frame = np.zeros((1, 1, 3), dtype=np.uint8)
+        # Q13 — the sim TABLE sits where a real touch-off puts it: z_table is the
+        # EE height with the FINGERTIPS on the drawn table, i.e. the solver's
+        # tool_tip_below_ee_m (0.04 m on the OMX, 0 on the Feetech arms). Base
+        # z = 0 stays the drawn surface. Together with SimArm's fingertip
+        # capture rule this makes a recording or a program hold or miss in the
+        # simulator exactly as on the rig. Visible cost (accepted): the simulated
+        # OMX grasps, hovers and releases 4 cm higher than before — its fingers
+        # used to sink into the drawn table.
+        try:
+            sim_table_z = float(getattr(sim_arm._ik, 'tool_tip_below_ee_m', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            sim_table_z = 0.0
         self.sim_workflow_manager = WorkflowManager(
             publisher=sim_arm.publish,
             ik_factory=self._build_ik_solver,
@@ -7409,6 +7421,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 list(getattr(self, '_sim_objects', []) or []),
                 self._load_object_catalog_tolerant(),
                 self._sim_world,
+                table_z=sim_table_z,
             ),
             load_destinations=lambda: {},
             # The critical bypass is INTACT: _attach_named_world early-returns on
@@ -7427,10 +7440,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # rule guards the REAL calibration path, where an absent z_table means
             # the table was never MEASURED and mark_destination/grasp must refuse
             # rather than guess. Here the table is not measured but DEFINED: the
-            # virtual table is the z=0 plane by construction, which is the same
-            # assumption sim_perception already bakes into every grasp height
-            # ("Virtual table at z = 0 → grasp z is object_height − grasp_depth").
-            load_calibration=lambda: {'z_table': 0.0},
+            # virtual table is DEFINED by construction — the drawn z = 0 surface,
+            # with the touch-off's z_table at the fingertip height above it
+            # (Q13, see sim_table_z) — which is the same table SimPerception
+            # bakes into every grasp height.
+            load_calibration=lambda: {'z_table': sim_table_z},
             emit_status=self._emit_workflow_status,
             on_finished=self._on_sim_workflow_finished,
             get_scene_frame=lambda: sim_dummy_frame,
@@ -7442,6 +7456,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             # A code run in the simulator drives the virtual arm the same way
             # (student types simply can't be placed in the sim — §3.10).
             code_rpc=getattr(self, '_code_rpc', None),
+            # THE simulator flag (ctx.simulated): „Greife" never waits here (no
+            # person can put an object back) and every sentence names the
+            # Sim-Tisch instead of the camera. ONLY this builder passes it.
+            simulated=True,
         )
         return self.sim_workflow_manager
 

@@ -588,6 +588,82 @@ describe('SimScene — Ziel setzen and Sammlung markers', () => {
 // R0-3 / S-3: the split stage gives the table its room — a 3D ↔ table divider,
 // a notice that can be closed, and from md up the whole table FITTED into its
 // area. The stack layout keeps everything as it was.
+// N6/N11 (owner decision Q6): the Edu:1 reaches ±90° only. Its back half is
+// out of reach on the rig, so the simulator draws the sector, snaps a tap
+// behind the arm onto the nearest sector edge, and marks — never moves — a
+// saved object that lies outside the shape.
+describe('SimScene — the reach shape of the arm (N6/N11)', () => {
+  const EDU1_REACH = { reach_inner_m: 0.07, reach_outer_m: 0.35, reach_sector_deg: [-90, 90] };
+  const giveBox = () => {
+    const svg = screen.getByRole('application', {
+      name: 'Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren',
+    });
+    svg.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: SVG_W, height: SVG_H, right: SVG_W, bottom: SVG_H, x: 0, y: 0,
+    });
+    return svg;
+  };
+
+  test('a_tap_behind_the_edu1_is_snapped_into_the_sector', async () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={onChange} />,
+      { capabilities: EDU1_REACH },
+    );
+    await screen.findByTestId('urdf-twin');
+    expect(container.querySelector('[data-testid="reach-sector"]')).not.toBeNull();
+    const svg = giveBox();
+    // px 75 → y = 0.30 − 75/500 = 0.15; py 175 → x = 0.32 − 175/500 = −0.03:
+    // behind the arm, bearing ≈ 101°, nearest the +90° edge.
+    fireEvent.pointerDown(svg, { clientX: 75, clientY: 175 });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const [placed] = onChange.mock.calls[0][0].objects;
+    expect(placed.x).toBe(0);
+    expect(placed.y).toBe(0.153);
+    expect(mockToast).toHaveBeenCalledWith('Objekt in den Greifbereich verschoben.', expect.anything());
+  });
+
+  test('the OMX keeps its full ring (no sector drawn, a tap behind stays behind)', async () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={onChange} />,
+      { capabilities: { reach_inner_m: 0.10, reach_outer_m: 0.25 } },
+    );
+    await screen.findByTestId('urdf-twin');
+    expect(container.querySelector('[data-testid="reach-sector"]')).toBeNull();
+    const svg = giveBox();
+    // x = −0.03, y = 0.15 (r ≈ 0.153): inside the ring, behind the base.
+    fireEvent.pointerDown(svg, { clientX: 75, clientY: 175 });
+    const [placed] = onChange.mock.calls[0][0].objects;
+    expect([placed.x, placed.y]).toEqual([-0.03, 0.15]);
+  });
+
+  test('a_saved_object_outside_the_shape_is_kept_and_marked', async () => {
+    const onChange = vi.fn();
+    const scene = {
+      objects: [
+        { type: 'wuerfel', tag_id: 0, x: 0.15, y: 0, yaw: 0 },
+        { type: 'wuerfel', tag_id: 1, x: -0.03, y: 0.15, yaw: 0 },
+      ],
+      zones: [],
+    };
+    const { container } = render(
+      <SimScene scene={scene} catalog={CATALOG} onChange={onChange} />,
+      { capabilities: EDU1_REACH },
+    );
+    await screen.findByTestId('urdf-twin');
+    // Kept where it was saved: loading never moves an object.
+    expect(onChange).not.toHaveBeenCalled();
+    const groups = [...container.querySelectorAll('[data-object-tag]')];
+    const byTag = Object.fromEntries(groups.map((g) => [g.getAttribute('data-object-tag'), g]));
+    expect(byTag['0'].getAttribute('data-unreachable')).toBe('false');
+    expect(byTag['1'].getAttribute('data-unreachable')).toBe('true');
+    expect(byTag['1'].textContent).toContain('nicht erreichbar');
+    expect(byTag['0'].textContent).not.toContain('nicht erreichbar');
+    expect(byTag['1'].querySelector('[data-testid="unreachable-ring"]')).not.toBeNull();
+  });
+});
+
 describe('SimScene — the split stage (WI-1.8)', () => {
   const svgOf = () => screen.getByRole('application');
   let observers;

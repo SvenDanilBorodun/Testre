@@ -53,9 +53,9 @@ import toast from 'react-hot-toast';
 import { useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import {
+  clampIntoReach,
   reachAnnulus,
-  REACH_INNER_M,
-  REACH_OUTER_M,
+  reachContains,
   SIM_OBJECT_FALLBACK_SIZE_M,
   SIM_OBJECT_COLOR_HEX,
   SIM_OBJECT_HELD_COLOR_HEX,
@@ -120,9 +120,11 @@ const SIM_JOINT_TOPIC = '/sim/joint_states';
 // arm's twins keep UrdfTwin's default (~30 Hz out of 100 Hz).
 const SIM_JOINT_THROTTLE_MS = 20;
 
-// Strict-vertical reach annulus SHOWN TO THE STUDENT (the graspable table-top
-// ring). PROFILE-DRIVEN (edu6 §4.5) via reachAnnulus(caps): OMX fallback
-// 0.10–0.28 m, edu6 0.09–0.21 m. Objects must sit inside it to be graspable.
+// Strict-vertical reach shape SHOWN TO THE STUDENT (the graspable table-top
+// ring, or the sector of an arm that reaches only part of the circle).
+// PROFILE-DRIVEN (edu6 §4.5; N6/N11) via reachAnnulus(caps): OMX 0.10–0.25 m
+// (fallback without a manifest 0.10–0.28 m), edu6 0.09–0.21 m, Edu:1
+// 0.07–0.35 m within ±90°. Objects must sit inside it to be graspable.
 // The radii come from ./simConstants so the 2D SVG ring and the 3D twin's ring
 // never desync — and so this is NOT the solver's wrist-centre span (module note).
 
@@ -210,6 +212,10 @@ const ZONE_FILL = 'rgba(255,59,48,0.15)';
 const ZONE_DRAFT_FILL = 'rgba(255,59,48,0.12)';
 const ZONE_STROKE = '#FF3B30';
 
+// The mark on a saved object that lies outside the reach shape (N6/N11).
+const UNREACHABLE_LABEL_DE = '(nicht erreichbar)';
+const UNREACHABLE_TITLE_DE = 'Hier kann der Arm nicht greifen — verschiebe das Objekt in den grünen Greifbereich.';
+
 // Fallback palette when the catalog service momentarily returns nothing — keeps
 // the simulator usable. The key MUST be a real type in the server's FIXED object
 // set (`wuerfel`, object_catalog.py::_FIXED_CATALOG), else the server's
@@ -231,20 +237,38 @@ function svgToBase(px, py) {
     y: VIEW_MAX_Y - px / PX_PER_M,
   };
 }
-// Clamp a base point into the reach annulus so every placement is reachable.
-// The annulus is PROFILE-DRIVEN (edu6 §4.5): callers pass reachAnnulus(caps);
-// the default keeps the OMX constants for annulus-less call sites.
+// Clamp a base point into the reach shape so every placement is reachable:
+// the radius SNAPS onto the ring and — for an arm that reaches only a sector,
+// the Edu:1's ±90° (N6/N11 of the 2026-10-18 semantics round) — the bearing
+// onto the nearest sector edge. The shape is PROFILE-DRIVEN (edu6 §4.5):
+// callers pass reachAnnulus(caps); without one the OMX constants apply.
 function clampToAnnulus(x, y, annulus) {
-  const inner = annulus && annulus.inner ? annulus.inner : REACH_INNER_M;
-  const outer = annulus && annulus.outer ? annulus.outer : REACH_OUTER_M;
-  const r = Math.hypot(x, y);
-  if (r === 0) return { x: inner, y: 0 };
-  let rr = r;
-  if (r < inner) rr = inner;
-  else if (r > outer) rr = outer;
-  if (rr === r) return { x, y };
-  const k = rr / r;
-  return { x: x * k, y: y * k };
+  return clampIntoReach(x, y, annulus);
+}
+
+// The annular sector of the reach shape as one SVG path: the outer arc from the
+// min to the max bearing, then back along the inner arc. Bearing θ (base frame,
+// x forward, y left) is drawn at baseToSvg(r cos θ, r sin θ).
+function sectorPath(annulus) {
+  const lo = (annulus.sector.minDeg * Math.PI) / 180;
+  const hi = (annulus.sector.maxDeg * Math.PI) / 180;
+  const at = (r, t) => baseToSvg(r * Math.cos(t), r * Math.sin(t));
+  const large = hi - lo > Math.PI ? 1 : 0;
+  const o0 = at(annulus.outer, lo);
+  const o1 = at(annulus.outer, hi);
+  const i1 = at(annulus.inner, hi);
+  const i0 = at(annulus.inner, lo);
+  const ro = annulus.outer * PX_PER_M;
+  const ri = annulus.inner * PX_PER_M;
+  // Increasing bearing turns counter-clockwise in the base frame, which is
+  // clockwise on screen (+x up, +y left): sweep 0 out, sweep 1 back.
+  return [
+    `M ${o0.px} ${o0.py}`,
+    `A ${ro} ${ro} 0 ${large} 0 ${o1.px} ${o1.py}`,
+    `L ${i1.px} ${i1.py}`,
+    `A ${ri} ${ri} 0 ${large} 1 ${i0.px} ${i0.py}`,
+    'Z',
+  ].join(' ');
 }
 // Clamp a scalar into [lo, hi]. Zone corners are clamped into the VIEW window
 // (not the reach annulus) so a drawn rectangle stays on the visible table.
@@ -1008,25 +1032,39 @@ function SimScene({
         role="application"
         aria-label="Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren"
       >
-        {/* Reach annulus (graspable ring) */}
-        <circle
-          cx={ORIGIN_PX}
-          cy={ORIGIN_PY}
-          r={annulus.outer * PX_PER_M}
-          fill="rgba(61,190,90,0.12)"
-          stroke="#3DBE5A"
-          strokeWidth="1"
-          strokeDasharray="4 3"
-        />
-        <circle
-          cx={ORIGIN_PX}
-          cy={ORIGIN_PY}
-          r={annulus.inner * PX_PER_M}
-          fill="var(--bg-sunk)"
-          stroke="#3DBE5A"
-          strokeWidth="1"
-          strokeDasharray="4 3"
-        />
+        {/* Reach shape (graspable ring, or the sector of an arm that
+            reaches only part of the circle — the Edu:1's ±90°) */}
+        {annulus.sector ? (
+          <path
+            data-testid="reach-sector"
+            d={sectorPath(annulus)}
+            fill="rgba(61,190,90,0.12)"
+            stroke="#3DBE5A"
+            strokeWidth="1"
+            strokeDasharray="4 3"
+          />
+        ) : (
+          <>
+            <circle
+              cx={ORIGIN_PX}
+              cy={ORIGIN_PY}
+              r={annulus.outer * PX_PER_M}
+              fill="rgba(61,190,90,0.12)"
+              stroke="#3DBE5A"
+              strokeWidth="1"
+              strokeDasharray="4 3"
+            />
+            <circle
+              cx={ORIGIN_PX}
+              cy={ORIGIN_PY}
+              r={annulus.inner * PX_PER_M}
+              fill="var(--bg-sunk)"
+              stroke="#3DBE5A"
+              strokeWidth="1"
+              strokeDasharray="4 3"
+            />
+          </>
+        )}
         {/* Robot base marker */}
         <circle cx={ORIGIN_PX} cy={ORIGIN_PY} r="4" fill="#4D4B47" />
         <text
@@ -1146,12 +1184,32 @@ function SimScene({
             ? dims.color
             : SIM_OBJECT_COLOR_HEX;
           const fill = isHeld ? SIM_OBJECT_HELD_COLOR_HEX : restFill;
+          // A saved object outside the reach shape is KEPT where it is (a load
+          // never moves it) and marked: the arm cannot grasp it there (N6/N11).
+          // A held object travels with the gripper and is never judged.
+          const unreachable = !isHeld && !reachContains(annulus, o.x || 0, o.y || 0);
           return (
             <g
               key={o.tag_id}
+              data-object-tag={o.tag_id}
+              data-unreachable={unreachable ? 'true' : 'false'}
               onPointerDown={(e) => startDrag(e, o.tag_id)}
               className="cursor-grab"
             >
+              {unreachable && (
+                <circle
+                  data-testid="unreachable-ring"
+                  cx={px}
+                  cy={py}
+                  r={sizePx / 2 + 5}
+                  fill="none"
+                  stroke={ZONE_STROKE}
+                  strokeWidth="1.5"
+                  strokeDasharray="3 2"
+                >
+                  <title>{UNREACHABLE_TITLE_DE}</title>
+                </circle>
+              )}
               <rect
                 x={px - sizePx / 2}
                 y={py - sizePx / 2}
@@ -1171,8 +1229,9 @@ function SimScene({
                 stroke="#1f2937"
                 strokeWidth="1.5"
               />
-              <text x={px + 9} y={py - 9} fontSize="9" fill="#475569">
+              <text x={px + 9} y={py - 9} fontSize="9" fill={unreachable ? '#b91c1c' : '#475569'}>
                 {typeLabel(o.type)} #{o.tag_id}
+                {unreachable ? ` ${UNREACHABLE_LABEL_DE}` : ''}
               </text>
             </g>
           );

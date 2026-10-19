@@ -90,10 +90,15 @@ export function buildCatalogDims(res) {
   return out;
 }
 
-// reachAnnulus — profile-driven annulus radii (edu6 §4.5). The server manifest
-// carries reach_inner_m/reach_outer_m for a profile whose ring differs from the
-// OMX (edu6: 0.09/0.21); absent keys (OMX, old server, cloud mode) keep the
-// exported OMX constants so both panes render exactly the pre-edu6 ring.
+// reachAnnulus — the profile-driven reach shape (edu6 §4.5; N6/N11 of the
+// 2026-10-18 semantics round). The server manifest carries reach_inner_m /
+// reach_outer_m (OMX 0.10/0.25 — the rig's reach at its grasp height —, edu6
+// 0.09/0.21, Edu:1 0.07/0.35); absent keys (old server, cloud mode) keep the
+// exported OMX constants. A profile that reaches only part of the circle also
+// carries `reach_sector_deg: [min, max]` (Edu:1: [-90, 90], the bearing
+// atan2(y, x) in the base frame, x forward, y left), and only then does the
+// result carry `sector: {minDeg, maxDeg}` — the key is ABSENT otherwise, so a
+// full ring compares equal to `{inner, outer}`.
 export function reachAnnulus(caps) {
   const inner = caps && typeof caps.reach_inner_m === 'number'
     && Number.isFinite(caps.reach_inner_m) && caps.reach_inner_m > 0
@@ -101,7 +106,73 @@ export function reachAnnulus(caps) {
   const outer = caps && typeof caps.reach_outer_m === 'number'
     && Number.isFinite(caps.reach_outer_m) && caps.reach_outer_m > inner
     ? caps.reach_outer_m : REACH_OUTER_M;
-  return { inner, outer };
+  const out = { inner, outer };
+  const sector = caps && caps.reach_sector_deg;
+  if (Array.isArray(sector) && sector.length === 2
+      && sector.every((v) => typeof v === 'number' && Number.isFinite(v) && v >= -180 && v <= 180)
+      && sector[0] < sector[1]) {
+    out.sector = { minDeg: sector[0], maxDeg: sector[1] };
+  }
+  return out;
+}
+
+const DEG = Math.PI / 180;
+
+// The smallest angle between two bearings (radians), in [0, π].
+function angleBetween(a, b) {
+  const d = Math.abs(((a - b) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI);
+  return d;
+}
+
+// The bearing `theta` (radians) moved onto the sector of `annulus` — unchanged
+// when it is inside, else onto the nearer of the two edges.
+function bearingIntoSector(theta, annulus) {
+  const sector = annulus && annulus.sector;
+  if (!sector) return theta;
+  const lo = sector.minDeg * DEG;
+  const hi = sector.maxDeg * DEG;
+  if (theta >= lo - 1e-12 && theta <= hi + 1e-12) return theta;
+  return angleBetween(theta, lo) <= angleBetween(theta, hi) ? lo : hi;
+}
+
+/**
+ * Is the base-frame point (x, y) inside the reach shape: its radius between
+ * the inner and the outer radius, and its bearing inside the sector (when the
+ * shape has one)?
+ */
+export function reachContains(annulus, x, y) {
+  const inner = annulus && annulus.inner ? annulus.inner : REACH_INNER_M;
+  const outer = annulus && annulus.outer ? annulus.outer : REACH_OUTER_M;
+  const r = Math.hypot(x, y);
+  if (!(r >= inner - 1e-12 && r <= outer + 1e-12)) return false;
+  const theta = Math.atan2(y, x);
+  return bearingIntoSector(theta, annulus) === theta;
+}
+
+/**
+ * The base-frame point (x, y) SNAPPED into the reach shape: its radius onto
+ * the ring, its bearing onto the nearest sector edge. A point already inside
+ * is returned unchanged; the base itself lands on the inner radius in the
+ * middle of the sector (bearing 0 for a full ring).
+ */
+export function clampIntoReach(x, y, annulus) {
+  const inner = annulus && annulus.inner ? annulus.inner : REACH_INNER_M;
+  const outer = annulus && annulus.outer ? annulus.outer : REACH_OUTER_M;
+  const r = Math.hypot(x, y);
+  if (r === 0) {
+    const sector = annulus && annulus.sector;
+    const mid = sector ? ((sector.minDeg + sector.maxDeg) / 2) * DEG : 0;
+    return mid === 0 ? { x: inner, y: 0 } : { x: inner * Math.cos(mid), y: inner * Math.sin(mid) };
+  }
+  const rr = Math.min(outer, Math.max(inner, r));
+  const theta = Math.atan2(y, x);
+  const tt = bearingIntoSector(theta, annulus);
+  if (rr === r && tt === theta) return { x, y };
+  if (tt === theta) {
+    const k = rr / r;
+    return { x: x * k, y: y * k };
+  }
+  return { x: rr * Math.cos(tt), y: rr * Math.sin(tt) };
 }
 
 // Fallback per-type placement cap when the GetObjectCatalog map is unavailable.

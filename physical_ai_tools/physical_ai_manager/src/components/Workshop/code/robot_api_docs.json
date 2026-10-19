@@ -256,13 +256,16 @@
       "example": {
         "args": [
           {
-            "ref": "ziel"
+            "call": "find",
+            "args": [
+              "wuerfel"
+            ]
           }
         ],
         "var": null
       },
-      "example_py": "robot.move_above(ziel)",
-      "example_java": "Robot.moveAbove(ziel);"
+      "example_py": "robot.move_above(robot.find(\"wuerfel\"))",
+      "example_java": "Robot.moveAbove(Robot.find(\"wuerfel\"));"
     },
     {
       "name": "descend_to",
@@ -288,13 +291,16 @@
       "example": {
         "args": [
           {
-            "ref": "ziel"
+            "call": "find",
+            "args": [
+              "wuerfel"
+            ]
           }
         ],
         "var": null
       },
-      "example_py": "robot.descend_to(ziel)",
-      "example_java": "Robot.descendTo(ziel);"
+      "example_py": "robot.descend_to(robot.find(\"wuerfel\"))",
+      "example_java": "Robot.descendTo(Robot.find(\"wuerfel\"));"
     },
     {
       "name": "close_on_object",
@@ -320,13 +326,16 @@
       "example": {
         "args": [
           {
-            "ref": "ziel"
+            "call": "find",
+            "args": [
+              "wuerfel"
+            ]
           }
         ],
         "var": null
       },
-      "example_py": "robot.close_on_object(ziel)",
-      "example_java": "Robot.closeOnObject(ziel);"
+      "example_py": "robot.close_on_object(robot.find(\"wuerfel\"))",
+      "example_java": "Robot.closeOnObject(Robot.find(\"wuerfel\"));"
     },
     {
       "name": "lift",
@@ -405,13 +414,16 @@
       "example": {
         "args": [
           {
-            "ref": "ziel"
+            "call": "find",
+            "args": [
+              "wuerfel"
+            ]
           }
         ],
         "var": null
       },
-      "example_py": "robot.mark_done(ziel)",
-      "example_java": "Robot.markDone(ziel);"
+      "example_py": "robot.mark_done(robot.find(\"wuerfel\"))",
+      "example_java": "Robot.markDone(Robot.find(\"wuerfel\"));"
     },
     {
       "name": "pin",
@@ -1016,13 +1028,16 @@
       "example": {
         "args": [
           {
-            "ref": "ziel"
+            "call": "find",
+            "args": [
+              "wuerfel"
+            ]
           }
         ],
         "var": "position"
       },
-      "example_py": "position = robot.object_position(ziel)",
-      "example_java": "double[] position = Robot.objectPosition(ziel);"
+      "example_py": "position = robot.object_position(robot.find(\"wuerfel\"))",
+      "example_java": "double[] position = Robot.objectPosition(Robot.find(\"wuerfel\"));"
     },
     {
       "name": "is_holding",
@@ -1131,8 +1146,8 @@
       "name": "Greifziel",
       "java_name": "Robot.Greifziel",
       "doc_de": "Ein gefundenes Objekt: find liefert es, die Greif-Schritte (über das Objekt fahren, absenken, schließen, erledigt) nehmen es.",
-      "example_py": "ziel = robot.find(\"wuerfel\")\nif ziel is not None:\n    robot.move_above(ziel)\n    robot.descend_to(ziel)\n    robot.close_on_object(ziel)\n    robot.lift()",
-      "example_java": "Robot.Greifziel ziel = Robot.find(\"wuerfel\");\nif (ziel != null) {\n    Robot.moveAbove(ziel);\n    Robot.descendTo(ziel);\n    Robot.closeOnObject(ziel);\n    Robot.lift();\n}"
+      "example_py": "ziel = robot.find(\"wuerfel\")\nif ziel is not None:\n    robot.move_above(ziel)\n    robot.descend_to(ziel)\n    robot.close_on_object(ziel)\n    robot.lift()\n    robot.mark_done(ziel)",
+      "example_java": "Robot.Greifziel ziel = Robot.find(\"wuerfel\");\nif (ziel != null) {\n    Robot.moveAbove(ziel);\n    Robot.descendTo(ziel);\n    Robot.closeOnObject(ziel);\n    Robot.lift();\n    Robot.markDone(ziel);\n}"
     },
     {
       "name": "Greifobjekt",

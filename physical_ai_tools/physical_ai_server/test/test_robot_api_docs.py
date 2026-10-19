@@ -84,9 +84,9 @@ def _has_python_ism(s: str) -> bool:
 
 
 def _example_args(call: robot_api.ApiCall) -> list:
-    """The example as the wire would carry it: a variable as handle 0, the
-    defaults the stub appends after the given positionals."""
-    args = [0 if isinstance(a, robot_api.ExampleRef) else a for a in call.example]
+    """The example as the wire would carry it: a nested call as the handle it
+    returns (0), the defaults the stub appends after the given positionals."""
+    args = [0 if isinstance(a, robot_api.ExampleCall) else a for a in call.example]
     args += [p.default for p in call.params[len(call.example):]]
     return args
 
@@ -189,10 +189,13 @@ def test_the_example_lines_are_spelled_by_param_kind():
     assert by['tone']['example']['args'] == [440.0, 0.5]
     assert by['wait']['example_java'] == 'Robot.waitSeconds(1.5);'
     assert by['find']['example_java'] == 'Robot.Greifziel ziel = Robot.find("wuerfel");'
-    assert by['object_position']['example']['args'] == [{'ref': 'ziel'}]
-    assert by['object_position']['example_py'] == 'position = robot.object_position(ziel)'
+    assert by['object_position']['example']['args'] == [{'call': 'find', 'args': ['wuerfel']}]
+    assert by['object_position']['example_py'] == \
+        'position = robot.object_position(robot.find("wuerfel"))'
     assert by['object_position']['example_java'] == \
-        'double[] position = Robot.objectPosition(ziel);'
+        'double[] position = Robot.objectPosition(Robot.find("wuerfel"));'
+    assert by['move_above']['example_py'] == 'robot.move_above(robot.find("wuerfel"))'
+    assert by['move_above']['example_java'] == 'Robot.moveAbove(Robot.find("wuerfel"));'
     assert by['pin']['example_java'] == 'Robot.pin("Ablage", 0.2, 0.0, 0.0);'
     assert by['pin']['example_py'] == 'robot.pin("Ablage", 0.2, 0.0, 0.0)'
     assert by['zeige']['example_py'] == 'robot.zeige("Anzahl", 3)'
@@ -390,3 +393,52 @@ def test_the_area_b_row_texts():
     seen = by['wait_until_seen'].doc_de_block
     assert 'falsch mit einer Warnung im Protokoll' in seen and 'läuft danach weiter' in seen
     assert 'bricht' not in seen
+
+
+# ── N9 / F20: an example the student inserts runs as it stands ───────────
+
+def test_insertable_examples_need_no_variable():
+    # „Einfügen" writes the example line into the student's program: a name it
+    # reads that the program does not define is a NameError / a javac error
+    # (the audit's N9: five grasp-step examples used an undefined `ziel`). The
+    # only name an example may READ is the robot module; a value row's example
+    # assigns its own variable. Java is compiled with no variable in scope by
+    # robotis_ai_setup/tests/test_robot_api_examples_java.py.
+    for m in _DOCS['methods']:
+        tree = ast.parse(m['example_py'])
+        read = {n.id for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        assert read <= {'robot'}, (m['name'], m['example_py'], read)
+        assert not any(isinstance(a, dict) and 'ref' in a for a in m['example']['args']), \
+            m['name']
+    assert not hasattr(robot_api, 'ExampleRef')
+
+
+def test_a_nested_example_call_returns_what_its_parameter_takes():
+    nested = 0
+    for call in _PUBLIC:
+        for p, a in zip(call.params, call.example):
+            if isinstance(a, robot_api.ExampleCall):
+                nested += 1
+                row = robot_api.ROBOT_API_BY_NAME[a.name]
+                assert row.returns == p.kind, (call.name, a.name)
+                # The nested call's own arguments pass the robot's validator.
+                full = list(a.args) + [q.default for q in row.params[len(a.args):]]
+                assert code_rpc._validate_call(row, full) is None, (call.name, full)
+    assert nested == 5      # move_above, descend_to, close_on_object, mark_done, object_position
+
+
+def test_type_docs_greifziel_example_calls_mark_done():
+    # F20: the example is one pass of the grasp steps; without mark_done a
+    # student who wraps it in `while robot.sees("wuerfel"):` grasps the same
+    # cube until the cap. The Q7 smoke runs that loop in the simulator.
+    greifziel = next(t for t in robot_api.TYPE_DOCS if t.name == 'Greifziel')
+    tree = ast.parse(greifziel.example_py)
+    assert not any(isinstance(n, (ast.While, ast.For)) for n in ast.walk(tree))
+    find, branch = tree.body
+    assert isinstance(find, ast.Assign) and find.targets[0].id == 'ziel'
+    assert isinstance(branch, ast.If)
+    calls = [st.value.func.attr for st in branch.body]
+    assert calls == ['move_above', 'descend_to', 'close_on_object', 'lift', 'mark_done']
+    assert ast.unparse(branch.body[-1]) == 'robot.mark_done(ziel)'
+    assert greifziel.example_java.splitlines()[-2].strip() == 'Robot.markDone(ziel);'

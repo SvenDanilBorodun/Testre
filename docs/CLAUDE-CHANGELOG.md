@@ -30,6 +30,10 @@ maximal `robot.log` frame costs about 1.8 ms (a maximal `zeige` ~2 ms, the Rule 
 rows: 3 grasps for one cube put back twice (1 before). Positions on the floor ladder: grasp-like 0 % refused,
 arbitrary near-table OMX poses 26–38 %.
 
+**Fix round (header rows).** The simulator's „Lernpfad" note pushed the Sucher header onto a third row at
+1093 px (153 px tall, base 105 px); it now shrinks like the subtitle hint (two lines, then „…", the whole sentence
+in its `title`), so the header is two rows and 105 px again at 1024–1093 px and unchanged at 1280/1366 px.
+
 ### Unreleased, 2026-10-13 / 14 — „Sucher": the student app's visual redesign
 
 **Why.** The owner chose a new look for the student app from a series of shown directions: „Sucher", a light

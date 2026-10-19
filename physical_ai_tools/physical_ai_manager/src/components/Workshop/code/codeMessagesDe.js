@@ -96,6 +96,10 @@ export const CODE_DE = Object.freeze({
     + '„Vormachen“ vor oder wähle eine vorhandene.',
   ASSET_MISSING_PLACE: '„{0}“ ist kein Ziel und keine Position deiner Sammlung und wird im Programm '
     + 'auch nicht gesetzt — lege es an oder wähle ein vorhandenes.',
+  // F10 (semantics round 2026-10-18): a run sends only the recordings whose
+  // names stand in the program as whole literals.
+  REPLAY_NAME_NOT_LITERAL: 'Der Name einer Bewegung muss direkt in Anführungszeichen stehen, '
+    + 'sonst wird sie nicht mitgeschickt.',
   ASSET_KIND_PIN: 'Ziel',
   ASSET_KIND_POSE: 'Position',
   ASSET_KIND_CODE_PIN: 'Ziel, im Programm gesetzt',

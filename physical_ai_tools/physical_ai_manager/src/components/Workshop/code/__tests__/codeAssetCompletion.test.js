@@ -237,3 +237,68 @@ describe('review round 2: completion knows the keyword form and a Unicode receiv
     expect(assetArgContext('edubotics.Robot.replay("', 'java')).toMatchObject({ asset: 'recording' });
   });
 });
+
+// F10 (semantics round 2026-10-18): a run sends only the recordings whose
+// names stand in the program as whole literals (codeProject's scan), so a
+// `replay` whose name is a variable, an f-string or a concatenation plays a
+// recording that never reaches the robot. The editor says so where it is
+// written.
+describe('F10: a replay whose name is not written directly in quotes', () => {
+  const lineOf = (src, offset) => src.slice(0, offset).split('\n').length;
+
+  it('non_literal_replay_is_flagged', () => {
+    const src = [
+      'import robot',
+      'name = "Winken"',
+      'robot.replay(name)',
+      'robot.replay(f"Win{1}")',
+      'robot.replay("Win" + "ken")',
+      'robot.replay("Winken")',
+      'robot.replay(speed=2, name="Winken")',
+      'robot.replay(speed=2, name=name)',
+      'robot.replay("Winken", 2)',
+      '# robot.replay(name)',
+      'print("robot.replay(name)")',
+      'robot.replay(name)',
+      '',
+    ].join('\n');
+    const flagged = assetDiagnostics(src, 'python', KNOWN, { cursorLine: 12 })
+      .filter((d) => d.message === CODE_DE.REPLAY_NAME_NOT_LITERAL);
+    expect(flagged.map((d) => [lineOf(src, d.from), src.slice(d.from, d.to)])).toEqual([
+      [3, 'name'],
+      [4, 'f"Win{1}"'],
+      [5, '"Win" + "ken"'],
+      [8, 'name=name'],
+    ]);
+    for (const d of flagged) expect(d.severity).toBe('warning');
+  });
+
+  it('reads Java, and only the robot’s replay', () => {
+    const j = [
+      'import edubotics.Robot;',
+      'public class Main {',
+      '  static void replay(String n) {}',
+      '  public static void main(String[] args) {',
+      '    String n = "Winken";',
+      '    Robot.replay(n);',
+      '    Robot.replay("Winken");',
+      '    Robot.replay("Win" + "ken", 2.0);',
+      '    replay(n);',
+      '  }',
+      '}',
+      '',
+    ].join('\n');
+    const flagged = assetDiagnostics(j, 'java', KNOWN, { cursorLine: 0 })
+      .filter((d) => d.message === CODE_DE.REPLAY_NAME_NOT_LITERAL);
+    expect(flagged.map((d) => [lineOf(j, d.from), j.slice(d.from, d.to)])).toEqual([
+      [6, 'n'],
+      [8, '"Win" + "ken"'],
+    ]);
+  });
+
+  it('the sentence is German and says why', () => {
+    expect(CODE_DE.REPLAY_NAME_NOT_LITERAL).toBe(
+      'Der Name einer Bewegung muss direkt in Anführungszeichen stehen, sonst wird sie nicht mitgeschickt.',
+    );
+  });
+});

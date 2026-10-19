@@ -1010,10 +1010,11 @@ def run_training(
             )
             return {"status": "failed", "error": str(e)}
 
-        # ----- 1b. Host check (spec §4.7 legacy mode): a GPU-less, too-old or
-        # disk-starved host fails the row with S16 BEFORE it is marked running. -----
+        # ----- 1b. Host check (spec §4.7 legacy mode): a GPU-less or too-old host fails
+        # the row with S16 BEFORE it is marked running. No /tmp floor here (V2-2): the
+        # free bytes are only printed, since nobody measured the legacy L4 / A100's /tmp. -----
         try:
-            _assert_training_host()
+            _assert_training_host(disk_floor=False)
         except HostUnfit as e:
             print(f"Host check failed ({e.reason}): {e.detail}", flush=True)
             _update_status_with_retry(
@@ -1419,6 +1420,10 @@ LOG_HEAD_BYTES = 1024 * 1024
 JSON_READ_CAP_B = 1024 * 1024
 DETAIL_MAX_CHARS = 500
 LOCK_CANDIDATES = (Path("/app/training-lock.txt"), Path("/root/training-lock.txt"))
+# This very file, the handler code the process runs (V2-1): the trainer image COPYs it to
+# /app/training_handler.py, Modal's add_local_python_source mounts it at /root; both are the
+# repo file's bytes, which make_handler_hash.py hashes into the API's TRAINING_HANDLER_SHA256.
+HANDLER_PATH = Path(__file__)
 
 # Test seams: an httpx transport (tests pass httpx.MockTransport) and the clock.
 _HTTP_TRANSPORT = None
@@ -1437,8 +1442,15 @@ class HostUnfit(Exception):
         self.detail = detail
 
 
-def _assert_training_host() -> None:
-    """CUDA, capability (8,0)-(9,0), >= 9.5 GB, a finite synchronised matmul, >= 30 GiB at /tmp."""
+def _assert_training_host(*, disk_floor: bool = True) -> None:
+    """CUDA, capability (8,0)-(9,0), >= 9.5 GB, a finite synchronised matmul, >= 30 GiB at /tmp.
+
+    The free /tmp bytes are measured and printed on the "Host check:" line of every host
+    that gets that far (the P2 record, SR-24 i). Only managed mode (`disk_floor`, the
+    default) refuses below MIN_FREE_DISK_B; the legacy Modal functions pass
+    disk_floor=False (V2-2: nobody measured the /tmp of Modal's L4 / A100-80GB, and the
+    floor must not turn a path that works today into S16).
+    """
     measured = {}
     try:
         import torch
@@ -1481,7 +1493,7 @@ def _assert_training_host() -> None:
     free = shutil.disk_usage("/tmp").free
     measured["tmp_free_b"] = int(free)
     print(f"Host check: {measured}", flush=True)
-    if free < MIN_FREE_DISK_B:
+    if disk_floor and free < MIN_FREE_DISK_B:
         raise HostUnfit("disk", f"/tmp free {free} B < {MIN_FREE_DISK_B} B")
 
 
@@ -1538,6 +1550,20 @@ def _lock_sha256() -> str:
         print("[edubotics-worker] no training-lock.txt found; start will be refused", flush=True)
         return "0" * 64
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _handler_sha256() -> str:
+    """sha256 of the handler file this process runs (§3.10, V2-1); 64 zeros when unreadable.
+
+    Sent in `start` beside the lock hash, so a stale handler (a forgotten Modal deploy, an
+    older trainer image) is refused as wrong_image even when the lock did not change.
+    """
+    import hashlib
+    try:
+        return hashlib.sha256(HANDLER_PATH.read_bytes()).hexdigest()
+    except OSError:
+        print("[edubotics-worker] training_handler.py is unreadable; start will be refused", flush=True)
+        return "0" * 64
 
 
 def _build_id() -> str:
@@ -1982,7 +2008,7 @@ class _ManagedRun:
 
     def call_start(self):
         """POST start; returns the 200 body, or _STOP."""
-        body = {"lock_sha256": _lock_sha256(), "build": _build_id()}
+        body = {"lock_sha256": _lock_sha256(), "handler_sha256": _handler_sha256(), "build": _build_id()}
 
         def once(deadline):
             a = self.api("start", body, deadline=deadline)

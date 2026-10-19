@@ -24,6 +24,11 @@ docker-compose*.yml   text eol=lf
 # because every current reader .Trim()s. Pin LF so no future reader needs to.
 robotis_ai_setup/wsl_rootfs/ROOTFS_VERSION  text eol=lf
 *.env.template        text eol=lf
+# Hashed at run time and compared with a generated constant in POST .../start (the training
+# lock, and the handler since V2-1): a CRLF checkout would make a Modal deploy from it answer
+# wrong_image on every attempt.
+robotis_ai_setup/modal_training/training_handler.py  text eol=lf
+robotis_ai_setup/modal_training/training-lock.txt    text eol=lf
 
 # PowerShell scripts on Windows should stay CRLF or UTF-8+BOM (the scripts
 # are explicitly saved with BOM to survive Windows PowerShell 5.1 parsing).

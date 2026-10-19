@@ -226,11 +226,16 @@ def test_every_motion_lock_acquire_goes_through_the_one_helper():
 def test_the_helper_is_used_at_all_eight_sites():
     """The fence above proves nobody acquires it the OLD way; this proves the
     sites still take the lock at all — a site that simply dropped the acquire
-    would pass the fence while re-opening the race the lock exists to close."""
+    would pass the fence while re-opening the race the lock exists to close.
+
+    Counted ON PURPOSE (Rule §2, spec D3): the semantics round added two motion
+    sites — a Position's route is planned and driven under one hold (M2), and
+    „senke auf" judges „straight down?" and runs its hover under one hold (F21)."""
     expected = {
         # _publish_motion, _execute_pickup, drop_at, + _reacquire_after_release's
-        # `stop_raises=False` wrapper
-        'handlers/motion.py': 4,
+        # `stop_raises=False` wrapper, + _move_to_position (D1, M2) and
+        # descend_to (F21) — both new, counted on purpose
+        'handlers/motion.py': 6,
         'handlers/perception_blocks.py': 2,  # grasp_object, _check_grasp_held_locked
         'handlers/trajectory.py': 1,         # replay_trajectory
         'workflow_manager.py': 1,            # _run_hat_handler  ← THE one that was missing

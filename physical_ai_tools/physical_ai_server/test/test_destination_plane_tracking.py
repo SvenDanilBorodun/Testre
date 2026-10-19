@@ -101,6 +101,18 @@ def _run(mgr, program, status):
     return done()[-1]['_finished']
 
 
+# Q3 (owner decision): „bewege zu <Tisch-Ziel>" stops ABOVE the table point at
+# the release height „ablegen bei" uses. Every reached height below is the
+# hover; the TABLE POINT the plane decided is that minus the hover, and that is
+# what these tests are about (which plane is in force) — unchanged in intent.
+_HOVER_MM = M.DROP_HEIGHT_M * 1000.0
+
+
+def _table_point_mm(arm) -> float:
+    """The table height under the arm's hover (reached z − the full hover)."""
+    return arm.fk_xyz()[2] * 1000.0 - _HOVER_MM
+
+
 def _pin_then_move(z_field: float):
     """Exactly the bytes a pre-change editor saved: a pin block carrying X/Y/Z,
     then „bewege zu P"."""
@@ -135,11 +147,13 @@ def test_the_same_saved_pin_descends_to_whichever_plane_is_in_force(
         degrees, expected_mm):
     """The Z field says 0.000 — the value a click on a LEVEL table produced.
     Next lesson the touch-off finds the table tilted, and the run must follow it.
+    Intent kept: the plane in force decides the table point; the arm hovers the
+    release height above it (Q3).
     """
     mgr, arm, status = _manager(
         {'z_table': 0.0, 'table_plane': _plane(degrees)})
     assert _run(mgr, _pin_then_move(0.0), status) == 'finished'
-    reached_mm = arm.fk_xyz()[2] * 1000.0
+    reached_mm = _table_point_mm(arm)
     assert reached_mm == pytest.approx(expected_mm, abs=0.05), (
         f'{degrees}deg: the arm went to {reached_mm:.2f} mm, the local table '
         f'surface is at {_surface_mm(degrees, _PIN_X):.2f} mm')
@@ -149,12 +163,13 @@ def test_the_same_saved_pin_descends_to_whichever_plane_is_in_force(
 
 def test_the_baked_field_no_longer_decides_anything_on_a_calibrated_rig():
     """Two workflows whose ONLY difference is the baked Z reach the same height.
-    Before, the field was the answer; now it is only the fallback."""
+    Before, the field was the answer; now it is only the fallback. Intent kept;
+    the height reached is the hover over the plane's point (Q3)."""
     reached = []
     for baked in (0.0, 0.045, -0.030):
         mgr, arm, status = _manager({'z_table': 0.0, 'table_plane': _plane(8)})
         assert _run(mgr, _pin_then_move(baked), status) == 'finished'
-        reached.append(round(arm.fk_xyz()[2] * 1000.0, 2))
+        reached.append(round(_table_point_mm(arm), 2))
     assert reached[0] == pytest.approx(16.86, abs=0.05)
     assert len(set(reached)) == 1, reached
 
@@ -163,12 +178,13 @@ def test_the_baked_field_no_longer_decides_anything_on_a_calibrated_rig():
 
 def test_a_service_pinned_destination_follows_a_later_touch_off():
     """`_persisted_destinations` is written only by `set_destination` and never
-    cleared, so a mid-session „Tisch vermessen" used to leave it stale."""
+    cleared, so a mid-session „Tisch vermessen" used to leave it stale. Intent
+    kept; the arm hovers the release height above the plane's point (Q3)."""
     mgr, arm, status = _manager({'z_table': 0.0, 'table_plane': _plane(11)})
     # The click happened while the table was still believed level.
     mgr.set_destination('P', _PIN_X, 0.0, 0.0, plane_tracked=True)
     assert _run(mgr, _move_ref_only(), status) == 'finished'
-    assert arm.fk_xyz()[2] * 1000.0 == pytest.approx(23.33, abs=0.05)
+    assert _table_point_mm(arm) == pytest.approx(23.33, abs=0.05)
 
 
 def test_a_measured_capture_is_NOT_rerouted_through_the_plane():
@@ -184,10 +200,11 @@ def test_a_measured_capture_is_NOT_rerouted_through_the_plane():
 
 def test_an_uncalibrated_rig_keeps_the_stored_height():
     """No z_table and no plane → the pin keeps the only height anybody gave it.
-    NOT a z_table = 0.0 fallback: nothing is invented."""
+    NOT a z_table = 0.0 fallback: nothing is invented. Intent kept; the arm
+    hovers the release height above that stored point (Q3)."""
     mgr, arm, status = _manager({})
     assert _run(mgr, _pin_then_move(0.045), status) == 'finished'
-    assert arm.fk_xyz()[2] * 1000.0 == pytest.approx(45.0, abs=0.05)
+    assert _table_point_mm(arm) == pytest.approx(45.0, abs=0.05)
 
 
 @pytest.mark.parametrize('from_plane,expected_mm', [
@@ -206,11 +223,13 @@ def test_the_one_variable_rollback_moves_both_call_sites_and_nothing_else(
     A 2 deg tilt is used deliberately: with the knob OFF the commanded scalar and
     the still-plane-aware floor guard disagree, and above ~4.76 deg over this
     lever that guard refuses the pin outright — the pre-existing knob-off
-    behaviour §9.2(b) describes, not something this change introduced."""
+    behaviour §9.2(b) describes, not something this change introduced.
+
+    Intent kept; the arm hovers the release height above the chosen point (Q3)."""
     monkeypatch.setattr(M, 'GRASP_Z_FROM_PLANE', from_plane)
     mgr, arm, status = _manager({'z_table': 0.0, 'table_plane': _plane(2)})
     assert _run(mgr, _pin_then_move(0.045), status) == 'finished'
-    assert arm.fk_xyz()[2] * 1000.0 == pytest.approx(expected_mm, abs=0.05)
+    assert _table_point_mm(arm) == pytest.approx(expected_mm, abs=0.05)
 
 
 # ── the pure helper, with literal expectations ─────────────────────────────

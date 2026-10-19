@@ -5090,7 +5090,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             n = 0
         return n if n > 0 else 5
 
-    def _jog_solve_floor(self, ik, target, roll, require_floor=False):
+    def _jog_solve_floor(self, ik, target, roll, require_floor=False, hover=False):
         """Solve a Cartesian jog target with the workspace-floor refusal + reach
         annulus, reusing ``motion._solve_or_raise`` (its German errors) via a
         light ctx-shim. Raises ``motion.WorkflowError`` on a floor violation /
@@ -5101,7 +5101,14 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         can only enforce the floor when a height is known, so a downward move / a
         drive-to on an uncalibrated rig has no floor and could drive the tool into
         the table. Downward cartesian-Z and ``drive_to`` pass True; joint jog and
-        X/Y/roll leave it False (they can't descend past a known floor unaided)."""
+        X/Y/roll leave it False (they can't descend past a known floor unaided).
+
+        ``hover`` (the pin block's „fahre dorthin", owner decision Q11): the
+        target's own z is IGNORED — it is the height the pin was clicked at, on
+        a table that may have been re-measured since. The point is re-asked on
+        the plane IN FORCE (``motion.table_z_at``, exactly what a program
+        resolves a plane-tracked pin to) and approached at the program's hover
+        (``motion.table_ziel_hover``), so the jog stops where the program would."""
         from types import SimpleNamespace
         from physical_ai_server.workflow.handlers import motion as _motion
         calib = {}
@@ -5125,7 +5132,22 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             num_arm_joints=getattr(_profile, 'num_arm_joints', None),
             home_joints_rad=getattr(_profile, 'home_joints_rad', None),
             roll_joint_index=getattr(_profile, 'roll_joint_index', None),
+            # Resolved LAZILY, at call time: the ast-loaded node stubs of the
+            # jog tests carry no _publish_manual_notice (r3-m7). A notice is a
+            # toast, so the log prefix is not part of it.
+            log=lambda msg: (getattr(self, '_publish_manual_notice', None)
+                             or (lambda _m: None))(
+                str(msg).replace('[WARNUNG] ', '', 1)),
         )
+        if hover:
+            x, y = float(target[0]), float(target[1])
+            table_z = _motion.table_z_at(shim, x, y)
+            if table_z is None:
+                raise _motion.WorkflowError(
+                    'Tisch noch nicht vermessen — bitte zuerst „Tisch vermessen" in '
+                    'der Kalibrierung abschließen, bevor der Arm nach unten oder zu '
+                    'einem Ziel gefahren wird.')
+            target = _motion.table_ziel_hover(shim, (x, y, table_z), roll)
         return _motion._solve_or_raise(shim, target, roll=roll)
 
     def _compute_jog_target(self, mode, request, joints):
@@ -5231,8 +5253,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
             target = (float(request.target_x), float(request.target_y),
                       float(request.target_z))
             # A drive_to descends toward the table — refuse it without a measured floor.
+            # Q11: stop at the program's hover over the table in force.
             arm_q = self._jog_solve_floor(
-                ik, target, roll=_motion.GRASP_ROLL_RAD, require_floor=True)
+                ik, target, roll=_motion.GRASP_ROLL_RAD, require_floor=True,
+                hover=True)
             q_end = list(arm_q) + [grip]
         else:
             raise _motion.WorkflowError('Unbekannter Handbetrieb-Modus.')

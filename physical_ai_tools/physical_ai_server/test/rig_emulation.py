@@ -170,6 +170,26 @@ class Rig:
         """„„Würfel" gegriffen." lines, counted from the direct emit trace."""
         return sum(1 for m in self.logs() if m.endswith('" gegriffen.'))
 
+    def trace_waypoints(self) -> list:
+        """Record EVERY commanded waypoint as ``(ee_xyz, held_key)``, in order,
+        exactly as the sim world judged it (``SimArm._update_world`` runs once
+        per waypoint). Returns the list the trace fills."""
+        trace: list = []
+        original = self.arm._update_world
+        n = self.profile.num_arm_joints
+
+        def _traced(prev, cur):
+            changed = original(prev, cur)
+            try:
+                _R, t = self.ik.fk(list(cur)[:n])
+                trace.append(((float(t[0]), float(t[1]), float(t[2])), self.world.held_key()))
+            except Exception:  # noqa: BLE001 — a trace never breaks the run
+                pass
+            return changed
+
+        self.arm._update_world = _traced
+        return trace
+
     def ee_z(self, q=None) -> float:
         q = list(self.arm.get_joints()) if q is None else list(q)
         _R, t = self.ik.fk(q[:self.profile.num_arm_joints])

@@ -2223,6 +2223,52 @@ def _refuse_position(ctx, value: Any, row: str) -> None:
     raise WorkflowError(_POSITION_NOT_HERE_DE.format(name=value))
 
 
+# ── a table Ziel is approached from above (owner decisions Q3, Q11) ─────────
+# „bewege zu <Tisch-Ziel>" used to drive the end effector ONTO the table point:
+# with a cube in the jaws that pressed its bottom ~15 mm into the table, while
+# the API text said „über". Every plane-tracked destination (a camera or
+# Sim-Tisch pin, whose height IS the table) is now approached at the release
+# height „ablegen bei" uses, so „bewege zu Ablage; öffne Greifer" releases where
+# „ablegen bei Ablage" does. Accepted cost (Q3): saved programs that drive to a
+# table Ziel stop about 5 cm higher. The pin block's „fahre dorthin" (the jog's
+# drive_to) uses the same helper, over the table in force (Q11).
+_HOVER_REDUCED_DE = ('[WARNUNG] Anfahrhöhe über „{name}" auf {mm:.0f} mm reduziert — '
+                     'höher ist hier nicht erreichbar.')
+_HOVER_REDUCED_NAMELESS_DE = ('[WARNUNG] Anfahrhöhe über dem Ziel auf {mm:.0f} mm '
+                              'reduziert — höher ist hier nicht erreichbar.')
+
+
+def table_ziel_hover(ctx, target_xyz, roll, name: str | None = None):
+    """``(x, y, z + clearance)`` over a TABLE Ziel at ``target_xyz``.
+
+    ``clearance`` is the largest rise up to ``DROP_HEIGHT_M`` that solves
+    straight above the point FOR THE ROLL ACTUALLY USED (``_max_reachable_rise``,
+    the bisect every „as high as this arm can" caller shares). Warns only when
+    it fell below ``_APPROACH_WARN_FRAC`` of the request — the rule
+    ``_reachable_release_clearance`` applies — with the Ziel's name, or
+    nameless for the jog's drive_to (``WorkshopJog.srv`` carries no name).
+    ``drop_at`` is NOT a user: it keeps ``_reachable_release_clearance`` and its
+    own sentence."""
+    x, y, z = (float(v) for v in target_xyz)
+    clearance, _q = _max_reachable_rise(ctx, (x, y, z), DROP_HEIGHT_M, roll=roll)
+    if clearance < _APPROACH_WARN_FRAC * DROP_HEIGHT_M:
+        mm = clearance * 1000.0
+        try:
+            ctx.log(_HOVER_REDUCED_DE.format(name=name, mm=mm) if name is not None
+                    else _HOVER_REDUCED_NAMELESS_DE.format(mm=mm))
+        except Exception:  # noqa: BLE001 — a diagnostic never breaks the move
+            pass
+    return (x, y, z + clearance)
+
+
+def _is_table_ziel(ctx, value: Any) -> bool:
+    """True when ``value`` names a plane-tracked (table) destination in force."""
+    if not isinstance(value, str):
+        return False
+    entry = (getattr(ctx, 'destinations', None) or {}).get(value)
+    return isinstance(entry, dict) and bool(entry.get('plane_tracked'))
+
+
 def move_to(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     _refuse_greifziel(args.get('destination'), 'bewege zu')
@@ -2230,8 +2276,16 @@ def move_to(ctx, args: dict[str, Any]) -> None:
     if pose is not None:
         _move_to_position(ctx, args.get('destination'), pose, _move_tempo(args))
         return
-    target = _resolve_target(args.get('destination'), ctx)
+    dest = args.get('destination')
+    target = _resolve_target(dest, ctx)
     roll = _carry_roll(ctx)
+    if _is_table_ziel(ctx, dest):
+        # The roll is decided FIRST (the drop_at rule: the carry roll when it
+        # solves at the point, else the fixed jaw roll), so the hover is
+        # bisected for the roll this move really uses.
+        if roll != GRASP_ROLL_RAD and _try_solve(ctx, target, roll=roll) is None:
+            roll = GRASP_ROLL_RAD
+        target = table_ziel_hover(ctx, target, roll, dest)
     arm_q = _solve_with_carry_roll(ctx, target, roll)
     if arm_q is None:
         roll = GRASP_ROLL_RAD
@@ -2997,17 +3051,33 @@ def descend_to(ctx, args: dict[str, Any]) -> None:
     transit half through ``safe_move`` fixes both: the arm never enters the box,
     so it is never trapped in it."""
     _require_seeded_start_pose(ctx)
-    x, y, z, roll = _greifziel_xyz_roll(ctx, args.get('ziel'), 'senke auf')
+    ziel = args.get('ziel')
+    x, y, z, roll = _greifziel_xyz_roll(ctx, ziel, 'senke auf')
     arm_q = _solve_or_raise(ctx, (x, y, z), roll=roll)
-    q_end = arm_q + [ctx.last_full_joints[_n(ctx)]]
-    if _is_straight_down(ctx, x, y):
-        # Grasp corridor — EXEMPT (raw), same rule as _execute_pickup's descend.
-        _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_GRASP_DURATION_S)
-    else:
-        safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_GRASP_DURATION_S,
-                  roll=roll)
-    ctx.last_arm_joints = arm_q
-    ctx.last_full_joints = q_end
+    # F21 (owner decision Q3): from anywhere but straight above, the block
+    # first runs „fahre über" for the same Greifziel and only then descends — a
+    # descend that started elsewhere used to swing in LOW, sideways at grasp
+    # height. ONE hold of the motion lock FIRST, and only inside it is the
+    # current pose judged (M2: a hat moving the arm in between would otherwise
+    # make the „straight down" verdict describe a pose the arm has left). The
+    # lock is re-entrant, so the hover's own publishes nest inside it.
+    acquired = _hold_motion_lock(ctx)
+    try:
+        if not _is_straight_down(ctx, x, y):
+            move_above(ctx, {'ziel': ziel})
+        q_end = arm_q + [ctx.last_full_joints[_n(ctx)]]
+        if _is_straight_down(ctx, x, y):
+            # Grasp corridor — EXEMPT (raw), same rule as _execute_pickup's descend.
+            _publish_motion(ctx, ctx.last_full_joints, q_end, DEFAULT_GRASP_DURATION_S)
+        else:
+            # The hover could not be reached straight above (a clamped edge):
+            # still a transit, still zone-checked.
+            safe_move(ctx, ctx.last_full_joints, q_end, DEFAULT_GRASP_DURATION_S,
+                      roll=roll)
+        ctx.last_arm_joints = arm_q
+        ctx.last_full_joints = q_end
+    finally:
+        _release_motion_lock(ctx, acquired)
 
 
 def _is_straight_down(ctx, x: float, y: float) -> bool:

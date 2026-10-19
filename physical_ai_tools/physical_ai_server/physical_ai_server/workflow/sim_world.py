@@ -110,28 +110,44 @@ class SimWorld:
                     'key': i,               # index in the list the editor sent
                     'type': obj.get('type'),
                     'tag_id': None,         # filled in by SimPerception.bind_tag
+                    'height_m': None,       # ditto: the resolved object's height
                     'x': x, 'y': y, 'yaw': yaw,
                     'placed_x': x, 'placed_y': y,
                 })
             self._held_key = None
             self._epoch += 1
 
-    def bind_tag(self, key: int, tag_id: int) -> None:
+    def bind_tag(self, key: int, tag_id: int, height_m: Optional[float] = None) -> None:
         """Record the catalog tag id ``SimPerception`` assigned to a placement slot.
 
         The front end's own ``tag_id`` is ignored by the runtime, so this is the only
         place the two id spaces are ever joined — and it is what lets the
         ``/sim/objects`` snapshot name an object the way the student's program does.
+
+        ``height_m`` is the resolved object's own height (the recipe's
+        ``object_height_m``). The sim arm judges a close against it (N3: the
+        fingertips must be at or below the object's top), so the height rides the
+        binding and no catalog lookup is needed per run. :meth:`reset` clears it
+        with the rest of the placement.
         """
         try:
             key = int(key)
             tag_id = int(tag_id)
         except (TypeError, ValueError):
             return
+        h = None
+        if height_m is not None:
+            try:
+                h = float(height_m)
+            except (TypeError, ValueError):
+                h = None
+            if h is not None and not math.isfinite(h):
+                h = None
         with self._lock:
             for o in self._objects:
                 if o['key'] == key:
                     o['tag_id'] = tag_id
+                    o['height_m'] = h
                     return
 
     def objects(self) -> list[dict[str, Any]]:

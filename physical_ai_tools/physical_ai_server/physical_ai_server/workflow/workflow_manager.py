@@ -47,6 +47,7 @@ from physical_ai_server.workflow.handlers.motion import (
     _release_motion_lock,
     _TEMPO_MAX,
     _TEMPO_MIN,
+    position_joint_route,
     resolve_destination_z,
 )
 from physical_ai_server.workflow.code_program import (
@@ -85,6 +86,35 @@ MAX_PAYLOAD_DESTINATIONS = 64
 MAX_DESTINATION_SKIP_REASONS = 8
 _DESTINATION_SKIP_OVERFLOW_DE = 'Weitere ungültige Ziele werden nicht einzeln aufgeführt.'
 _DESTINATION_KIND_PLANE_TRACKED = {'pin': True, 'pose': False}   # provenance -> flag, IN CODE
+
+
+# A Position's taught arm pose: 1–8 finite joint values (the widest arm has 7
+# servos), plus the joint names and the robot it was taught on. Kept only when
+# well-formed; a malformed set is dropped and the entry takes the point path.
+_POSE_JOINTS_MAX = 8
+
+
+def _pose_keys(item: dict) -> dict:
+    """``joints`` / ``joint_names`` / ``robot_type`` of a payload Position,
+    each kept only when it has the right shape. Never raises."""
+    out: dict = {}
+    joints = item.get('joints')
+    if (isinstance(joints, list) and 1 <= len(joints) <= _POSE_JOINTS_MAX
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in joints)):
+        try:
+            values = [float(v) for v in joints]
+        except (OverflowError, ValueError, TypeError):
+            values = None
+        if values is not None and all(math.isfinite(v) for v in values):
+            out['joints'] = values
+    names = item.get('joint_names')
+    if (isinstance(names, list) and len(names) <= _POSE_JOINTS_MAX
+            and all(isinstance(v, str) for v in names)):
+        out['joint_names'] = list(names)
+    robot = item.get('robot_type')
+    if isinstance(robot, str):
+        out['robot_type'] = robot
+    return out
 
 
 def _payload_coordinate_error_de(name: str) -> str:
@@ -357,6 +387,9 @@ class WorkflowContext:
     # re-arms the edge even when a later look un-claimed it again (N14): a set
     # read after the body cannot see a claim that was undone in between.
     claim_events: dict[int, int] = field(default_factory=dict)
+    # Position names already warned THIS RUN that they were taught on another
+    # robot (motion._stored_pose_joints): the [WARNUNG] is said once per name.
+    position_warned: set = field(default_factory=set)
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5
@@ -483,8 +516,14 @@ class WorkflowManager:
         load_object_catalog: Callable[[], Any] | None = None,
         arm_profile: Any | None = None,
         code_rpc: Any | None = None,
+        simulated: bool = False,
     ) -> None:
         self._publisher = publisher
+        # True ONLY for the simulator's manager (the node's
+        # _get_or_create_sim_workflow_manager passes it). Stamped onto every
+        # run's ctx.simulated: the one source of the mode-aware behaviour (no
+        # grasp wait in the sim) and wording (no camera, the Sim-Tisch).
+        self._simulated = bool(simulated)
         self._ik_factory = ik_factory
         self._perception_factory = perception_factory
         self._load_destinations = load_destinations or (lambda: {})
@@ -1057,6 +1096,10 @@ class WorkflowManager:
 
                 ctx = WorkflowContext(
                     publisher=self._publisher,
+                    # Mode and language, the two sources every mode- or
+                    # language-aware sentence reads (spec principle 7).
+                    simulated=self._simulated,
+                    code_language=code_language if is_code else None,
                     ik=ik_instance,
                     perception=perception_instance,
                     destinations=destinations,
@@ -1612,8 +1655,15 @@ class WorkflowManager:
             if name in out:
                 skip(f'„{name}" gibt es doppelt.')
                 continue
-            out[name] = {'x': fx, 'y': fy, 'z': fz, 'label': name,
-                         'plane_tracked': _DESTINATION_KIND_PLANE_TRACKED[kind]}
+            entry = {'x': fx, 'y': fy, 'z': fz, 'label': name,
+                     'plane_tracked': _DESTINATION_KIND_PLANE_TRACKED[kind],
+                     # The kind is KEPT (spec D1): motion.is_position reads it.
+                     # Only payload entries ever carry it — pin/current
+                     # statements and the robot-local store never do.
+                     'kind': kind}
+            if kind == 'pose':
+                entry.update(_pose_keys(item))
+            out[name] = entry
         if overflowed:
             skipped.append(_DESTINATION_SKIP_OVERFLOW_DE)
         return out, skipped, True
@@ -1710,6 +1760,14 @@ class WorkflowManager:
         destinations: dict[str, dict[str, Any]] | None = None,
         calib: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        # A Position that takes the JOINT route is not a point the arm has to
+        # reach by a Cartesian solve (its HOME-like poses are often outside the
+        # strict-vertical image), so it is left out of the point pre-check; the
+        # route's own floor ladder judges it at run time (spec D1).
+        if destinations:
+            destinations = {
+                name: entry for name, entry in destinations.items()
+                if position_joint_route(entry, self._arm_profile) != 'joints'}
         extra = self._precheck_destination_points(destinations, calib)
         if ik is None or not hasattr(ik, 'solve'):
             # Even without an IK solver we can still flag concrete pins that sit

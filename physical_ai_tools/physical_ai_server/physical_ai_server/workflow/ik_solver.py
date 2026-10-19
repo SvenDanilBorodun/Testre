@@ -158,6 +158,12 @@ class IKSolver:
     calibration touch-off / pose readout.
     """
 
+    # How far the fingertips reach BELOW the end-effector frame when the tool
+    # points straight down: the touch-off measures z_table as the EE height
+    # with the fingertips on the table, so the table surface sits this much
+    # lower. The simulator's table (Q13) and its grasp capture (N3) read it.
+    tool_tip_below_ee_m = _TOOL_TIP_EXT_M
+
     def __init__(
         self,
         urdf_string: Optional[str] = None,

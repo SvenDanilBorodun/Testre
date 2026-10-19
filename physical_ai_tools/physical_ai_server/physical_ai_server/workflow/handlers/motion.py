@@ -1997,9 +1997,239 @@ def close_gripper(ctx, args: dict[str, Any]) -> None:
     ctx.last_commanded_close_rad = _gripper_closed(ctx)
 
 
+# ── Positions: the taught ARM pose (owner decisions Q2, Q9, Q12) ────────────
+# A Position is what „Position vormachen" teaches: the arm's own joint angles,
+# not only a point. „bewege zu <Position>" drives there in JOINT space — the
+# old path re-solved the stored point with the fixed jaw roll, which refused
+# all 30 of 30 taught Positions on the Edu:1 (its HOME and many taught poses
+# are outside the strict-vertical image) and picked another wrist on the OMX.
+#
+# THE ONE PREDICATE is ``is_position`` (spec principle 8): a payload entry
+# whose ``kind`` is 'pose', on the entry IN FORCE for that name this run. Only
+# the payload parser keeps ``kind``; a program's own pin/current statement
+# replaces the entry with one that has none, so its result is a Ziel — and so
+# is everything the robot writes by itself (``destination_current``, the
+# capture service, ``_persisted_destinations``). Q12: „setze X = aktuelle
+# Position" stays a Ziel.
+#
+# The joint route is GATED twice. By profile: Positions on edu6 are a non-goal
+# this round (m12), it keeps the point path without a word. By robot: the
+# joints are used only for a pose taught on THIS arm (``robot_type`` equals the
+# profile's ``data_robot_type`` AND ``joint_names`` equals its joint names,
+# gripper included — the strict form of ``armProfile.ghostJointsFromEntry``).
+# Anything else takes the point path with one German [WARNUNG] per name and
+# run. A Position without joints (taught before they were captured) takes the
+# point path silently.
+#
+# Rule §2 (owner-signed, Q2): the joint-space line is judged by the SAME floor
+# ladder as the Grundstellung (``home_planner``), planned and published under
+# ONE hold of the motion lock (M2), each leg through ``safe_move`` for the
+# Sperrzonen. The gripper is CARRIED like on every „bewege zu" (C1).
+_POSITION_JOINT_PROFILES = ('omx_full', 'omx_follower', 'edu1_studio')
+# A taught joint value may sit this far outside the arm's limit (servo readback
+# noise at a hard stop) and is then clamped; beyond it the Position is refused.
+_POSITION_LIMIT_TOL_RAD = 0.005
+_POSITION_OTHER_ROBOT_DE = (
+    '[WARNUNG] Die Position „{name}" wurde an einem anderen Roboter vorgemacht — '
+    'der Arm fährt nur zu ihrem Punkt, nicht in ihre Armstellung.'
+)
+_POSITION_OUT_OF_LIMITS_DE = (
+    'Die Position „{name}" liegt außerhalb der Gelenkgrenzen dieses Arms.'
+)
+_POSITION_FLOOR_DE = (
+    'Der Weg zur Position „{name}" würde durch die Tischebene führen — '
+    'bitte die Position etwas höher neu vormachen.'
+)
+_POSITION_VIA_DE = 'Fahre zur Position „{name}" über einen Zwischenpunkt.'
+_POSITION_VIA_HOME_DE = 'Fahre zur Position „{name}" über die Grundstellung.'
+
+
+def is_position(entry: Any) -> bool:
+    """True when ``entry`` (a stored destination) is a taught Position."""
+    return isinstance(entry, dict) and entry.get('kind') == 'pose'
+
+
+def position_joint_route(entry: Any, profile: Any) -> str | None:
+    """Which route a stored destination takes on ``profile``, purely.
+
+    ``'joints'`` — a Position with joints taught on this arm, on a profile in
+    ``_POSITION_JOINT_PROFILES``: the joint route. ``'other_robot'`` — a
+    Position with joints taught on ANOTHER arm: the point path, with the
+    warning. ``None`` — everything else (a Ziel, a Position without joints, an
+    edu6 or unknown profile): the point path, silently. Shared with the
+    start-time pre-check, which skips exactly the ``'joints'`` entries."""
+    if not is_position(entry) or entry.get('joints') is None:
+        return None
+    if profile is None or getattr(profile, 'profile_id', None) not in _POSITION_JOINT_PROFILES:
+        return None
+    joints = entry.get('joints')
+    names = entry.get('joint_names')
+    try:
+        same_robot = (
+            entry.get('robot_type') == profile.data_robot_type
+            and isinstance(names, (list, tuple))
+            and tuple(names) == tuple(profile.joint_names)
+            and isinstance(joints, (list, tuple)) and len(joints) == len(names)
+        )
+    except Exception:  # noqa: BLE001 — an odd entry is simply not this robot's
+        same_robot = False
+    return 'joints' if same_robot else 'other_robot'
+
+
+def _stored_pose_joints(ctx, name: Any) -> list[float] | None:
+    """The taught ARM joints of the Position ``name`` for the joint route, or
+    ``None`` for the point path (see :func:`position_joint_route`)."""
+    if not isinstance(name, str):
+        return None
+    entry = (getattr(ctx, 'destinations', None) or {}).get(name)
+    route = position_joint_route(entry, _profile_for_ctx(ctx))
+    if route is None:
+        return None
+    if route == 'other_robot':
+        warned = getattr(ctx, 'position_warned', None)
+        if warned is None:
+            warned = set()
+            try:
+                ctx.position_warned = warned
+            except Exception:  # noqa: BLE001
+                pass
+        if name not in warned:
+            warned.add(name)
+            ctx.log(_POSITION_OTHER_ROBOT_DE.format(name=name))
+        return None
+    n = _n(ctx)
+    try:
+        arm = [float(v) for v in entry['joints'][:n]]
+    except (TypeError, ValueError):
+        return None
+    if len(arm) != n or not all(math.isfinite(v) for v in arm):
+        return None
+    limits = getattr(getattr(ctx, 'ik', None), 'joint_limits', None)
+    if limits:
+        clamped = []
+        for q, (lo, hi) in zip(arm, limits):
+            if q < lo - _POSITION_LIMIT_TOL_RAD or q > hi + _POSITION_LIMIT_TOL_RAD:
+                raise WorkflowError(_POSITION_OUT_OF_LIMITS_DE.format(name=name))
+            clamped.append(min(max(q, float(lo)), float(hi)))
+        arm = clamped + arm[len(clamped):]
+    return arm
+
+
+def _pose_route(ctx, q_start, q_end, name) -> tuple[list, str]:
+    """Plan the joint route to a Position: ``(legs, rung)``, rung ``'direct'``
+    / ``'via'`` / ``'home'``. A PURE planner: the caller holds the motion lock.
+
+    1. forward: ``plan_floor_checked_home_route(start → target)``;
+    2. reversed: plan target → start and reverse the legs (a target near the
+       table judges its lift from ITS end);
+    3. via the Grundstellung: start → HOME forward, HOME → target as the
+       reversed target → HOME plan;
+    4. else the German refusal naming the Position.
+
+    A rung falls through ONLY on :class:`home_planner.FloorRefusal`; a
+    Sperrzone refusal or any other ``WorkflowError`` reaches the student
+    verbatim (r4-M2). The rungs are planned QUIETLY: their notes describe the
+    Grundstellung (and the reversed rung the reversed direction), so they go to
+    a sink that is thrown away; ``move_to`` says its own one line."""
+    from physical_ai_server.workflow import home_planner
+    quiet: list[str] = []
+    sink = quiet.append
+    try:
+        legs = home_planner.plan_floor_checked_home_route(
+            ctx, q_start, q_end, DEFAULT_MOVE_DURATION_S, log=sink)
+        return list(legs), ('direct' if len(legs) == 1 else 'via')
+    except home_planner.FloorRefusal:
+        pass
+    try:
+        legs = home_planner.plan_floor_checked_home_route(
+            ctx, q_end, q_start, DEFAULT_MOVE_DURATION_S, log=sink)
+        return [(list(b), list(a), d) for (a, b, d) in reversed(legs)], 'via'
+    except home_planner.FloorRefusal:
+        pass
+    home = _home_joints(ctx) + [q_end[_n(ctx)]]
+    try:
+        up = home_planner.plan_floor_checked_home_route(
+            ctx, q_start, home, DEFAULT_HOME_DURATION_S, log=sink)
+        down = home_planner.plan_floor_checked_home_route(
+            ctx, q_end, home, DEFAULT_MOVE_DURATION_S, log=sink)
+    except home_planner.FloorRefusal:
+        raise WorkflowError(_POSITION_FLOOR_DE.format(name=name)) from None
+    return (list(up) + [(list(b), list(a), d) for (a, b, d) in reversed(down)],
+            'home')
+
+
+def _move_to_position(ctx, name: str, pose: list[float], tempo) -> None:
+    """Drive to a Position's taught arm pose (see the block comment above).
+
+    ONE hold of the motion lock FIRST; only inside it is ``q_start`` read and
+    the route planned (M2: a hat moving the arm between this call and the lock
+    would otherwise leave a first leg the floor ladder never judged)."""
+    acquired = _hold_motion_lock(ctx)
+    try:
+        q_start = list(ctx.last_full_joints)
+        n = _n(ctx)
+        q_end = list(pose) + [q_start[n]]
+        legs, rung = _pose_route(ctx, q_start, q_end, name)
+        if rung == 'via':
+            ctx.log(_POSITION_VIA_DE.format(name=name))
+        elif rung == 'home':
+            ctx.log(_POSITION_VIA_HOME_DE.format(name=name))
+        for leg_start, leg_end, leg_dur in legs:
+            safe_move(ctx, leg_start, leg_end, leg_dur, tempo=tempo)
+            ctx.last_full_joints = list(leg_end)
+            ctx.last_arm_joints = list(leg_end[:n])
+    finally:
+        _release_motion_lock(ctx, acquired)
+
+
+_POSITION_NOT_HERE_DE = (
+    '„{name}" ist eine Position — dieser Block braucht ein Ziel auf dem Tisch. '
+    'Für eine Position bitte „bewege zu" und dann „öffne Greifer" bzw. '
+    '„schließe Greifer" benutzen.'
+)
+_POSITION_NOT_HERE_CODE_DE = (
+    '„{name}" ist eine Position — {method} braucht ein Ziel auf dem Tisch. '
+    'Für eine Position bitte {move} und dann {open_} bzw. {close} benutzen.'
+)
+
+
+def _method_name(ctx, row: str) -> str:
+    """The text-API spelling of ``row`` in the run's language (Python name, or
+    the Java spelling for a Java run), from the ONE table, ``robot_api``."""
+    from physical_ai_server.workflow import robot_api as _api
+    call = _api.ROBOT_API_BY_NAME.get(row)
+    if call is None:
+        return row
+    return call.java_name if getattr(ctx, 'code_language', None) == 'java' else call.name
+
+
+def _refuse_position(ctx, value: Any, row: str) -> None:
+    """Q9: a Position in „ablegen bei" / „aufnehmen" (``drop_at`` / ``pickup``)
+    is refused — they place and pick at a table point, and joint-space
+    place/pick is a non-goal. Keyed on :func:`is_position` with or without
+    joints, on EVERY profile. A „setze X = aktuelle Position" entry is a Ziel and
+    never refused (Q12)."""
+    if not isinstance(value, str):
+        return
+    entry = (getattr(ctx, 'destinations', None) or {}).get(value)
+    if not is_position(entry):
+        return
+    if getattr(ctx, 'code_language', None) in ('python', 'java'):
+        raise WorkflowError(_POSITION_NOT_HERE_CODE_DE.format(
+            name=value, method=_method_name(ctx, row),
+            move=_method_name(ctx, 'move_to'),
+            open_=_method_name(ctx, 'open_gripper'),
+            close=_method_name(ctx, 'close_gripper')))
+    raise WorkflowError(_POSITION_NOT_HERE_DE.format(name=value))
+
+
 def move_to(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     _refuse_greifziel(args.get('destination'), 'bewege zu')
+    pose = _stored_pose_joints(ctx, args.get('destination'))
+    if pose is not None:
+        _move_to_position(ctx, args.get('destination'), pose, _move_tempo(args))
+        return
     target = _resolve_target(args.get('destination'), ctx)
     roll = _carry_roll(ctx)
     arm_q = _solve_with_carry_roll(ctx, target, roll)
@@ -2443,6 +2673,7 @@ def note_object_released(ctx, xy) -> None:
 def pickup(ctx, args: dict[str, Any]) -> None:
     _require_seeded_start_pose(ctx)
     _refuse_greifziel(args.get('target'), 'aufnehmen')
+    _refuse_position(ctx, args.get('target'), 'pickup')
     target = _resolve_target(args.get('target'), ctx)
     # Conservative descend: grasp at the measured table plane + clearance so the
     # fingertips straddle the lower part of a low object, not the table itself.
@@ -2463,6 +2694,7 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     way in. The bounded-quintic approach is consistent with pickup."""
     _require_seeded_start_pose(ctx)
     _refuse_greifziel(args.get('destination'), 'ablegen bei')
+    _refuse_position(ctx, args.get('destination'), 'drop_at')
     target = _resolve_target(args.get('destination'), ctx)
     # Optional per-move „mit Tempo" override; None → workflow-global tempo. Scales
     # every sub-motion of the place uniformly.

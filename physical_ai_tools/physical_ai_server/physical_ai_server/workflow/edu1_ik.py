@@ -365,6 +365,10 @@ class Edu1IKSolver:
     ``ArmProfile.build_ik`` swaps it in transparently.
     """
 
+    # The EE frame IS the closed fingertip (``_L_TOOL`` ends at the tip), so a
+    # touch-off's z_table is the table surface itself (see IKSolver's twin).
+    tool_tip_below_ee_m = 0.0
+
     def __init__(self, urdf_string: Optional[str] = None) -> None:
         # ``urdf_string`` accepted for factory-signature compatibility; the
         # baked constants are verified by the independent URDF-parsing oracle

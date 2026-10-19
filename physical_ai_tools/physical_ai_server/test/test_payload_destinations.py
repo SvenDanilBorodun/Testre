@@ -135,10 +135,31 @@ def test_the_kind_decides_plane_tracked_in_code():
 
 
 def test_stored_entry_shape_is_exactly_the_runtime_shape():
+    """Intent kept: a stored entry carries exactly the keys the runtime reads —
+    now including the kept ``kind`` (motion.is_position), and for a Position
+    its taught pose (``joints`` / ``joint_names`` / ``robot_type``, spec D1)."""
     out, _, _ = _parse({'destinations': [_entry('A', x=1, y=0, z=0)]})
-    assert set(out['A']) == {'x', 'y', 'z', 'label', 'plane_tracked'}
+    assert set(out['A']) == {'x', 'y', 'z', 'label', 'plane_tracked', 'kind'}
     assert all(type(out['A'][k]) is float for k in ('x', 'y', 'z'))
     assert out['A']['label'] == 'A'
+    assert out['A']['kind'] == 'pin'
+    pose = dict(_entry('P', x=1, y=0, z=0), kind='pose', joints=[0, 1, 2, 3, 4, 0.8],
+                joint_names=['j1', 'j2', 'j3', 'j4', 'j5', 'g'], robot_type='omx_f',
+                surplus='dropped')
+    out, _, _ = _parse({'destinations': [pose]})
+    assert set(out['P']) == {'x', 'y', 'z', 'label', 'plane_tracked', 'kind',
+                             'joints', 'joint_names', 'robot_type'}
+    assert out['P']['joints'] == [0.0, 1.0, 2.0, 3.0, 4.0, 0.8]
+    assert all(type(v) is float for v in out['P']['joints'])
+    # A malformed pose set is dropped key by key: the entry takes the point path.
+    bad = dict(_entry('Q', x=1, y=0, z=0), kind='pose', joints=[float('nan')] * 6,
+               joint_names='j1', robot_type=7)
+    out, _, _ = _parse({'destinations': [bad]})
+    assert set(out['Q']) == {'x', 'y', 'z', 'label', 'plane_tracked', 'kind'}
+    # Only a Position keeps the pose keys.
+    pin = dict(_entry('R', x=1, y=0, z=0), joints=[0, 1, 2, 3, 4, 0.8])
+    out, _, _ = _parse({'destinations': [pin]})
+    assert 'joints' not in out['R']
 
 
 @pytest.mark.parametrize('kind', [None, 'cam', 'PIN', 1, True])

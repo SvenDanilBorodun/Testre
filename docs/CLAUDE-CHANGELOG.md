@@ -9,8 +9,8 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 ### Unreleased, 2026-10-18 / 19 — Roboter Studio semantics: every block and method does what it says
 
 **Why.** An audit ran every Blockly block and every Python/Java robot method against what its preview, tooltip,
-docstring and refusal sentences promise, on both `omx_full` and `edu1_studio`, and found 36 gaps (F1–F23,
-N1–N14): count-down loops that ran zero times, every Java fault reading „Zeile 0 in : … (Code 1)", Positions that
+docstring and refusal sentences promise, on both `omx_full` and `edu1_studio`, and found the gaps F1–F23 and
+N1–N14: count-down loops that ran zero times, every Java fault reading „Zeile 0 in : … (Code 1)", Positions that
 lost their pose (Edu:1: 30 of 30 refused), „bewege zu" pressing a held cube about 15 mm into the table, a
 simulator that grasped from any height and reached further than the rig, an open gripper reading „hält", and a
 hat that never fired again for a cube put back during its body. The owner decided Q1–Q14 (spec

@@ -18,7 +18,9 @@ motion handlers' ``_resolve_target`` knows how to read
 
 from __future__ import annotations
 
+import contextlib
 import math
+import threading
 import time
 from typing import Any, Optional
 
@@ -696,7 +698,7 @@ def _note_all_instances_done(ctx, recipe) -> None:
     _safe_log(ctx, _nothing_to_grasp_message(ctx, recipe))
 
 
-def _detect_named_unclaimed(ctx, type_name) -> list:
+def _detect_named_unclaimed(ctx, type_name, note: bool = True) -> list:
     """``_detect_named`` minus the per-run claimed/skipped ids, WITH the
     recycled-object reclaim (#1) run first on the full set of visible type ids —
     so an object a person moved is un-claimed and grabbed again.
@@ -714,14 +716,51 @@ def _detect_named_unclaimed(ctx, type_name) -> list:
 
     That split was also the whole reason a loop nested inside „falls sehe ich
     Würfel" deadlocked: once every tag was claimed, „sehe ich" answered False
-    forever and the only reclaiming block was unreachable."""
-    return _detect_named(ctx, type_name, reclaim=True)
+    forever and the only reclaiming block was unreachable.
+
+    ``note=False`` skips the all-done notice for this look (see
+    :func:`count_unclaimed_visible`)."""
+    return _detect_named(ctx, type_name, reclaim=True, note=note)
 
 
-def count_unclaimed_visible(ctx, type_name) -> int:
+def count_unclaimed_visible(ctx, type_name, note: bool = True) -> int:
     """Number of currently-visible UNCLAIMED instances of ``type_name``. The
-    gate the interpreter's ``edubotics_while_visible`` loop polls each pass."""
-    return len(_detect_named_unclaimed(ctx, type_name))
+    gate the interpreter's ``edubotics_while_visible`` loop polls each pass.
+
+    ``note=False`` suppresses the once-per-type all-done notice for THIS look.
+    The „Solange sichtbar" loop asks with it: its own empty pass is its normal
+    end, and its own completion line already says how it ended, so the notice
+    („… wegnehmen und neu hinlegen …") would only follow a successful loop with
+    advice nobody needs (F19). Every other caller keeps the default."""
+    return len(_detect_named_unclaimed(ctx, type_name, note=note))
+
+
+# „Greife" waits for a graspable object (Q8) — except inside a „Solange
+# sichtbar" loop, which has its own empty window and its own end, so a grasp in
+# its body must stay the immediate GraspSkip the loop is built around. The
+# exemption is THREAD-LOCAL on purpose: a „wenn …" hat running beside a main
+# stack that sits inside such a loop still waits, because it is not inside the
+# loop. A counter, not a flag, so nested loops (or a procedure re-entering one)
+# restore the outer state correctly.
+_NO_GRASP_WAIT = threading.local()
+
+
+@contextlib.contextmanager
+def no_grasp_wait():
+    """Run the ``with`` body with the grasp wait switched off on THIS thread.
+
+    Re-entrant (a per-thread counter), and the counter is restored in
+    ``finally``, so a raising body leaves the thread exactly as it found it."""
+    _NO_GRASP_WAIT.depth = getattr(_NO_GRASP_WAIT, 'depth', 0) + 1
+    try:
+        yield
+    finally:
+        _NO_GRASP_WAIT.depth = max(0, getattr(_NO_GRASP_WAIT, 'depth', 1) - 1)
+
+
+def in_no_grasp_wait() -> bool:
+    """True while this thread runs inside :func:`no_grasp_wait`."""
+    return getattr(_NO_GRASP_WAIT, 'depth', 0) > 0
 
 
 def _apply_xy_correction(ctx, x: float, y: float) -> tuple[float, float]:
@@ -1014,7 +1053,8 @@ def reclaim_only(ctx, type_name) -> None:
         return
 
 
-def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False) -> list:
+def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False,
+                  note: bool = True) -> list:
     """All catalog tags of ``type_name`` currently visible (minus
     ``exclude_ids``), with world_xyz_m + tag_yaw + close_rad attached. Reusable
     by grasp_object / see_object / count_object and the P2 while-visible loop.
@@ -1036,7 +1076,7 @@ def _detect_named(ctx, type_name, exclude_ids=None, reclaim=False) -> list:
         # ids even when every instance is currently claimed/skipped.
         detections = _look_and_reclaim(ctx, recipe)
         wanted = type_ids - {int(i) for i in _excluded_ids(ctx)}
-        if not wanted:
+        if not wanted and note:
             _note_all_instances_done(ctx, recipe)
         kept = [d for d in detections if d.aruco_id in wanted]
         return _attach_named_world(ctx, kept, recipe)

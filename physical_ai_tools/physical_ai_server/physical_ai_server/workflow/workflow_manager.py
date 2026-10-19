@@ -337,6 +337,26 @@ class WorkflowContext:
     # teaching speed knob on the workflow runtime, NOT an inference safety
     # envelope (it never reshapes a recorded/replayed action).
     tempo: float = 1.0
+    # True only for the simulator's manager (physical_ai_server's
+    # _get_or_create_sim_workflow_manager builds it with
+    # ``WorkflowManager(simulated=True)``). The ONE source of mode-aware
+    # behaviour and wording: the grasp wait (it never waits in the sim, where no
+    # person can put an object back), the „Sim-Tisch" find wording and the
+    # unknown-Ziel advice („auf den Tisch tippen" instead of the camera). Set
+    # once per run in start(), never mutated.
+    simulated: bool = False
+    # The language of a text program for THIS run: 'python' / 'java', None for
+    # Blockly. Set by WorkflowManager.start when the payload builds a
+    # CodeProgram; the one source every German sentence that names a method
+    # (Q9's refusal, the unsent-recording sentence) reads its spelling from.
+    code_language: str | None = None
+    # Tag id → the number of claim or skip EVENTS this run (bumped by
+    # workflow.claims.claim_tag / skip_tag under claim_lock, never by the
+    # reclaim). The „Wenn <Typ> gesehen" hat compares a snapshot taken before
+    # its body with the counts after it, so a cube claimed during the body
+    # re-arms the edge even when a later look un-claimed it again (N14): a set
+    # read after the body cannot see a claim that was undone in between.
+    claim_events: dict[int, int] = field(default_factory=dict)
 
 
 MAX_WORKFLOW_JSON_BYTES = 256 * 1024  # 256 KiB; see plan §2.5

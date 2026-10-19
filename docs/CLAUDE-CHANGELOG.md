@@ -6,6 +6,30 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### Unreleased, 2026-10-18 / 19 — Roboter Studio semantics: every block and method does what it says
+
+**Why.** An audit ran every Blockly block and every Python/Java robot method against what its preview, tooltip,
+docstring and refusal sentences promise, on both `omx_full` and `edu1_studio`, and found 36 gaps (F1–F23,
+N1–N14): count-down loops that ran zero times, every Java fault reading „Zeile 0 in : … (Code 1)", Positions that
+lost their pose (Edu:1: 30 of 30 refused), „bewege zu" pressing a held cube about 15 mm into the table, a
+simulator that grasped from any height and reached further than the rig, an open gripper reading „hält", and a
+hat that never fired again for a cube put back during its body. The owner decided Q1–Q14 (spec
+`docs/plans/2026-10-18-studio-semantics/10-spec.md`, revision 9, after seven fresh reviews).
+
+**How it was built.** Three agents on their own worktrees, files not overlapping: Agent 1 the Blockly side and
+the editor (the interpreter following Blockly's own generator, measured over 213 programs: 53 disagreements
+before, 12 after, every one INTENTIONAL; the row-driven preview, tooltips and ranges from `robot_api.json`, the
+sim reach sector), Agent 2 the text API, the runner and these docs (the `doc_de_block`/`arg_key` contract first,
+then the Java `Launcher` twin of `student_main.py`, the language-aware refusals, `RunSession.over`, the Q7
+two-container smoke), Agent 3 motion and simulator truth (Positions in joint space through a three-rung floor
+ladder, the table-Ziel hover, the Q8 grasp wait, the N14 claim-event counter, the fingertip table).
+
+**Measured.** The fault matrix (35 cases) and every Methoden example (70 runs) in a rebuilt runner image against
+the branch's server: all per spec; the same smoke against the pre-branch runner fails 26 matrix cases. A
+maximal `robot.log` frame costs about 1.8 ms (a maximal `zeige` ~2 ms, the Rule §2 ceiling). The Q8 put-back
+rows: 3 grasps for one cube put back twice (1 before). Positions on the floor ladder: grasp-like 0 % refused,
+arbitrary near-table OMX poses 26–38 %.
+
 ### Unreleased, 2026-10-13 / 14 — „Sucher": the student app's visual redesign
 
 **Why.** The owner chose a new look for the student app from a series of shown directions: „Sucher", a light

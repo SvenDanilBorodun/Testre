@@ -135,11 +135,12 @@ describe('Workshop toolbox consistency', () => {
       }
       return null;
     };
-    for (const type of ['lists_getIndex', 'lists_setIndex']) {
+    const at = ['lists_getIndex', 'lists_setIndex'].map((type) => {
       const entry = find(buildToolbox(), type);
-      expect(entry, type).toBeTruthy();
-      expect(entry.inputs && entry.inputs.AT, type).toEqual({ shadow: { type: 'math_number', fields: { NUM: 1 } } });
-    }
+      return [type, entry && entry.inputs ? entry.inputs.AT : null];
+    });
+    const shadow = { shadow: { type: 'math_number', fields: { NUM: 1 } } };
+    expect(at).toEqual([['lists_getIndex', shadow], ['lists_setIndex', shadow]]);
   });
 
   test('the edubotics_toast block is present in the toolbox (regression anchor)', () => {

@@ -10,16 +10,16 @@
 
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
+import { apiRange, apiTooltip } from './apiDocs';
 
 const OUTPUT_COLOR = '#a855f7';
 
-// Tone bounds. The runtime in useRosTopicSubscription generates the
-// audio with an OscillatorNode; we cap frequency at 4000 Hz to avoid
-// piercing a classroom's speakers.
-const TONE_FREQ_MIN = 100;
-const TONE_FREQ_MAX = 4000;
-const TONE_SECONDS_MIN = 0.05;
-const TONE_SECONDS_MAX = 5;
+// Tone bounds — exactly what the robot takes (robot_api.py's `tone` row:
+// 100–4000 Hz so a classroom's speakers are spared, 0.05–5 s). The runtime in
+// useRosTopicSubscription generates the audio with an OscillatorNode.
+const { min: TONE_FREQ_MIN, max: TONE_FREQ_MAX } = apiRange('edubotics_play_tone', 'freq');
+const { min: TONE_SECONDS_MIN, max: TONE_SECONDS_MAX } = apiRange('edubotics_play_tone', 'seconds');
+const TOAST_SECONDS = apiRange('edubotics_toast', 'seconds');
 
 export const OUTPUT_BLOCKS = [
   {
@@ -29,7 +29,7 @@ export const OUTPUT_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: OUTPUT_COLOR,
-    tooltip: 'Schreibt eine Nachricht in das Log.',
+    tooltip: apiTooltip('edubotics_log'),
   },
   {
     type: 'edubotics_play_sound',
@@ -37,7 +37,7 @@ export const OUTPUT_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: OUTPUT_COLOR,
-    tooltip: 'Spielt einen kurzen Bestätigungston ab.',
+    tooltip: apiTooltip('edubotics_play_sound'),
   },
   // Phase-2 speech output — frontend-only block. Backend emits a
   // [SPEAK:text] sentinel that useRosTopicSubscription intercepts and
@@ -49,7 +49,7 @@ export const OUTPUT_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: OUTPUT_COLOR,
-    tooltip: 'Liest den Text auf Deutsch vor.',
+    tooltip: apiTooltip('edubotics_speak_de'),
   },
   // Phase-2 parameterized tone block. Frontend-only — backend treats
   // it as [TONE:freq:seconds].
@@ -78,11 +78,8 @@ export const OUTPUT_BLOCKS = [
     nextStatement: null,
     colour: OUTPUT_COLOR,
     // handlers/output.py::play_tone emits [TONE:freq:seconds]; the React layer
-    // turns it into an OscillatorNode beep. Bounds mirror TONE_FREQ_MIN/MAX +
-    // TONE_SECONDS_MIN/MAX on both sides, so name them for the student.
-    tooltip:
-      'Spielt einen Ton ab. Die erste Zahl ist die Höhe in Hertz '
-      + '(100 bis 4000), die zweite die Dauer in Sekunden (0,05 bis 5).',
+    // turns it into an OscillatorNode beep. The row's doc names the bounds.
+    tooltip: apiTooltip('edubotics_play_tone'),
     extensions: ['edubotics_validate_tone'],
   },
   // On-screen message (toast). Frontend-only — the backend emits a
@@ -110,15 +107,15 @@ export const OUTPUT_BLOCKS = [
         type: 'field_number',
         name: 'SECONDS',
         value: 3,
-        min: 1,
-        max: 15,
+        min: TOAST_SECONDS.min,
+        max: TOAST_SECONDS.max,
         precision: 1,
       },
     ],
     previousStatement: null,
     nextStatement: null,
     colour: OUTPUT_COLOR,
-    tooltip: 'Zeigt eine kurze Meldung am Bildschirm an.',
+    tooltip: apiTooltip('edubotics_toast'),
   },
 ];
 

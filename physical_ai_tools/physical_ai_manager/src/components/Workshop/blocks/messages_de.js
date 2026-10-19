@@ -117,6 +117,9 @@ export const DE = {
   TEMPO_LANGSAM: 'langsam',
   TEMPO_NORMAL: 'normal',
   TEMPO_SCHNELL: 'schnell',
+  // The one sentence the five „Tempo" blocks add to their robot_api tooltip
+  // (blocks/apiDocs.js::apiTooltip).
+  TEMPO_TOOLTIP: 'Tempo „Standard“ übernimmt die Geschwindigkeit aus der Leiste oben.',
 
   // Named-object grasping (AprilTag). Custom-init blocks use a prefix label +
   // a runtime-populated dropdown (no %1), so these are prefixes, not templates.

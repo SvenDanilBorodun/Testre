@@ -10,6 +10,7 @@
 
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
+import { apiTooltip } from './apiDocs';
 import { setEditValidator } from './fieldLoad';
 import { iconMarkup } from '../../icons/svg';
 import { SAMMLUNG_COLOURS } from '../sammlung/sammlungTabs';
@@ -155,10 +156,7 @@ export const DESTINATION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: DEST_COLOR,
-    tooltip:
-      'Wähle diesen Block aus und klicke dann in die Szenen-Kamera, um '
-      + 'das Ziel zu setzen. Mit „fahre dorthin" fährt der Roboter direkt '
-      + 'zu diesem Punkt.',
+    tooltip: apiTooltip('edubotics_destination_pin'),
     extensions: [
       'edubotics_validate_destination_name',
       'edubotics_destination_drive_button',
@@ -173,9 +171,7 @@ export const DESTINATION_BLOCKS = [
     colour: DEST_COLOR,
     // handlers/destinations.py::destination_current — saves the gripper's
     // CURRENT position under this name while the program runs.
-    tooltip:
-      'Speichert die Stelle, an der der Greifer gerade steht, unter diesem '
-      + 'Namen. Praktisch, wenn du den Arm von Hand dorthin führst.',
+    tooltip: apiTooltip('edubotics_destination_current'),
     extensions: ['edubotics_validate_destination_name'],
   },
   {
@@ -195,9 +191,7 @@ export const DESTINATION_BLOCKS = [
     ],
     output: 'String',
     colour: DEST_COLOR,
-    tooltip:
-      'Verweist auf ein gepinntes Ziel (gleicher Name wie ein „Pin"-Block). '
-      + 'Ziehe diesen Block in „bewege zu" oder „lege ab bei".',
+    tooltip: apiTooltip('edubotics_destination_ref'),
     extensions: ['edubotics_validate_destination_name', 'edubotics_destination_ref_kind'],
   },
 ];

@@ -209,6 +209,18 @@ class Migration049(unittest.TestCase):
         self.assertIn("GRANT EXECUTE ON FUNCTION public.update_training_progress(INT, UUID, TEXT, INT, INT, REAL, TEXT, TEXT) "
                       "TO anon, authenticated;", self.code)
 
+    def test_end_training_attempt_counts_a_lost_attempt_once(self):
+        # requeue_training already counted a lost attempt's seconds; the state is read
+        # under the trainings row lock BEFORE the attempt is ended.
+        (body,) = _bodies(self.code, "end_training_attempt")
+        lock = body.index("FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;")
+        read = body.index("SELECT a.state INTO v_prev FROM public.training_attempts a")
+        update = body.index("UPDATE public.training_attempts a")
+        self.assertLess(lock, read)
+        self.assertLess(read, update)
+        self.assertIn("+ CASE WHEN v_prev IN ('lost','ended') THEN 0 ELSE GREATEST(COALESCE(p_train_seconds, 0), 0) END",
+                      body)
+
     def test_the_cas_error_codes(self):
         for name in ("claim_training_attempt", "attach_training_attempt", "release_training_attempt",
                      "requeue_training", "end_training_attempt", "finish_training", "complete_cancel_training"):

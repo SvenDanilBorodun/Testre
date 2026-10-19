@@ -231,6 +231,26 @@ class Publish(PublishBase):
         self.assertEqual(self.db.row(self.tid)["status"], "running")
         self.assertEqual(self.db.attempt(self.tid, 1)["publish_tries"], 0, "no database write after the loss")
 
+    def test_a_lease_lost_between_download_and_commit_makes_no_hf_call(self):
+        # TR-8 n9 (V1-4 H04): the renewal answers false after every R2 read is
+        # done (here: while the API reaches for the Hub client); not one HF call.
+        leases = []
+
+        class Recording(P._Lease):
+            def __init__(self, claim):
+                super().__init__(claim)
+                leases.append(self)
+
+        def _hf_after_the_loss():
+            leases[-1]._lost.set()
+            return self.hub.make()
+
+        with patch.object(P, "_Lease", Recording), patch.object(P, "_hf", _hf_after_the_loss):
+            self.assertEqual(P.publish_sync(self.tid, 1), "lost")
+        self.assertEqual((self.hub.repos, self.hub.commits), ([], []))
+        self.assertEqual(self.db.row(self.tid)["status"], "running")
+        self.assertEqual(self.db.attempt(self.tid, 1)["publish_tries"], 0, "no database write after the loss")
+
     def test_a_row_that_is_no_longer_publishing_is_left_alone(self):
         self.db.row(self.tid)["status"] = "canceled"
         self.assertEqual(P.publish_sync(self.tid, 1), "not_claimed")
@@ -283,6 +303,21 @@ class Mirror(PublishBase):
         self.assertIsNotNone(c["mirrored_at"])
         self.assertEqual(c["mirror_owner"], D.BOOT_ID)
         self.assertEqual(P.mirror_sync(self.tid, 1, 10000), "not_claimed", "a mirrored checkpoint is done")
+
+    def test_a_checkpoint_poisoned_after_ready_is_never_mirrored(self):
+        # §4.5 (V1-4 H05): the mirror re-validates the whole model it downloads;
+        # JSON changed in R2 after ckpt-done (manifest made to match) is refused.
+        rel = "pretrained_model/policy_preprocessor.json"
+        doc = json.loads(self.mfiles[rel])
+        doc["steps"][0]["class"] = "os.system"
+        data = json.dumps(doc).encode()
+        self.r2.objects[r2_client.ckpt_key(self.tid, 1, 10000, rel)] = data
+        self.mck["manifest"][rel] = manifest_of({"x": data})["x"]
+        self.assertEqual(P.mirror_sync(self.tid, 1, 10000), "retry")
+        self.assertEqual((self.hub.repos, self.hub.commits), ([], []))
+        c = self.db.checkpoint(self.tid, 1, 10000)
+        self.assertIsNone(c["mirrored_at"])
+        self.assertEqual(c["mirror_tries"], 1)
 
     def test_a_failure_counts_a_try_and_the_claim_lapses(self):
         self.hub.fail_commit = 1

@@ -705,6 +705,29 @@ class SweepLosses(Base):
         self.assertEqual(self.db.attempt(row["id"], 1)["state"], "running")
         self.assertEqual(self.db.row(row["id"])["status"], "running")
 
+    async def test_the_heartbeat_rule_counts_from_the_last_failed_db_round(self):
+        # SR-4 (V1-4 Q17): the worker's heartbeats failed with the database, so
+        # last_progress_at is old; t0 = max(last_progress_at, last_failed_round_at)
+        # keeps two good rounds right after the outage from calling it lost.
+        row, _ = self._running()
+        self.db.row(row["id"])["last_progress_at"] = self.clock.iso(self.clock.t - D.HEARTBEAT_LOST_S - 100)
+        D.STATE.last_failed_round_at = self.clock.t - 10
+        await D.sweep_tick()
+        self.clock.advance(30)
+        self.db.row(row["id"])["step_advanced_at"] = self.clock.iso()
+        await D.sweep_tick()
+        self.assertEqual(self.db.attempt(row["id"], 1)["state"], "running")
+        self.assertEqual(self.db.row(row["id"])["status"], "running")
+        self.assertNotIn((row["id"], 1), D.STATE.heartbeat_miss)
+        # … and the rule still fires once the outage is HEARTBEAT_LOST_S behind.
+        self.clock.advance(D.HEARTBEAT_LOST_S)
+        self.db.row(row["id"])["step_advanced_at"] = self.clock.iso()
+        await D.sweep_tick()
+        self.clock.advance(30)
+        self.db.row(row["id"])["step_advanced_at"] = self.clock.iso()
+        await D.sweep_tick()
+        self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "heartbeat_lost")
+
     async def test_heartbeat_lost_needs_two_consecutive_rounds(self):
         row, _ = self._running()
         self.clock.advance(D.HEARTBEAT_LOST_S + 1)
@@ -888,6 +911,34 @@ class Reaper(Base):
         self.assertIn("foreign", self.rp.pods)
         self.assertIn("otherenv", self.rp.pods)
         self.assertIn("otherprefix", self.rp.pods)
+
+    async def test_the_db_id_rule_sees_every_row_past_postgrests_max_rows(self):
+        # V1-7: PostgREST answers at most max_rows rows; the reaper pages, so a
+        # renamed pod (rule (b) alone) is found however many attempts precede it.
+        self.db.max_rows = 2
+        for i in range(5):
+            row = self.db.add_training(status="failed", current_attempt=1)
+            self.db.add_attempt(row["id"], 1, state="ended", backend="runpod_community", cloud_ref=f"old{i}")
+            self.rp.add_pod(id=f"old{i}", name=f"renamed-{i}", createdAt=self.clock.iso())
+        await D.reaper_tick()
+        self.assertEqual(sorted(self.rp.deletes()), [f"old{i}" for i in range(5)])
+
+    async def test_the_db_id_rule_reads_only_attempts_young_enough_to_own_a_pod(self):
+        old = self.db.add_training(status="failed", current_attempt=1)
+        window = self.s.cap_s + self.s.start_deadline_s + D.REAPER_GRACE_S + D.PLACING_STALE_S + D.REAPER_GRACE_S
+        self.db.add_attempt(old["id"], 1, state="ended", backend="runpod_secure", cloud_ref="ancient",
+                            created_at=self.clock.iso(self.clock.t - window - 1))
+        young = self.db.add_training(status="failed", current_attempt=1)
+        self.db.add_attempt(young["id"], 1, state="ended", backend="runpod_secure", cloud_ref="recent",
+                            created_at=self.clock.iso(self.clock.t - window + 60))
+        self.rp.add_pod(id="ancient", name="renamed-a")
+        self.rp.add_pod(id="recent", name="renamed-r")
+        await D.reaper_tick()
+        self.assertEqual(self.rp.deletes(), ["recent"])
+        reads = [f for op, table, f, _ in self.db.ops if op == "select" and table == "training_attempts"
+                 and any(k == "is" and c == "cloud_ref" for k, c, _v, _n in f)]
+        self.assertTrue(reads)
+        self.assertTrue(all(("gte", "created_at", self.clock.iso(self.clock.t - window), False) in f for f in reads))
 
     async def test_a_young_placing_pod_is_kept_by_its_name(self):
         row = self.db.add_training(status="queued", current_attempt=1)

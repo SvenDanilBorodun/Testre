@@ -90,8 +90,9 @@ class _Query:
         self.cols = None
         self.op = "select"
         self.payload = None
-        self._order = None
+        self._order = []
         self._limit = None
+        self._range = None
         self._negate = False
 
     # chain ------------------------------------------------------------
@@ -128,11 +129,15 @@ class _Query:
         return self._f("lt", c, v)
 
     def order(self, c, desc=False):
-        self._order = (c, desc)
+        self._order.append((c, desc))  # supabase-py: each call adds a key
         return self
 
     def limit(self, n):
         self._limit = n
+        return self
+
+    def range(self, start, end):
+        self._range = (start, end)
         return self
 
     def update(self, payload):
@@ -205,11 +210,14 @@ class _Query:
                 for r in hit:
                     rows.remove(r)
                 return SimpleNamespace(data=[copy.deepcopy(r) for r in hit], count=len(hit))
-            if self._order:
-                col, desc = self._order
-                hit = sorted(hit, key=lambda r: (r.get(col) is None, r.get(col)), reverse=desc)
+            for col, desc in reversed(self._order):  # stable: the first key decides last
+                hit = sorted(hit, key=lambda r, col=col: (r.get(col) is None, r.get(col)), reverse=desc)
+            if self._range is not None:
+                hit = hit[self._range[0]: self._range[1] + 1]
             if self._limit is not None:
                 hit = hit[: self._limit]
+            if db.max_rows is not None:  # PostgREST's max_rows: a reply never carries more
+                hit = hit[: db.max_rows]
             return SimpleNamespace(data=[self._project(r) for r in hit], count=len(hit))
 
 
@@ -233,6 +241,7 @@ class FakeDB:
         self.ops: list = []
         self.rpcs: list = []
         self.failures: dict = {}
+        self.max_rows = None
         self.lock = threading.RLock()
         self._next_id = 100
         self.credits: dict = {}

@@ -120,17 +120,17 @@ public final class Robot {
 
     /** Fährt in Anfahrhöhe über das gefundene Objekt. */
     public static void moveAbove(Greifziel ziel) {
-        RpcClient.call("move_above", new Object[] {ziel.handle()}, "call");
+        RpcClient.call("move_above", new Object[] {RpcClient.handleOf(ziel)}, "call");
     }
 
     /** Senkt den geöffneten Greifer auf das gefundene Objekt ab; steht er nicht schon darüber, fährt er zuerst darüber. */
     public static void descendTo(Greifziel ziel) {
-        RpcClient.call("descend_to", new Object[] {ziel.handle()}, "call");
+        RpcClient.call("descend_to", new Object[] {RpcClient.handleOf(ziel)}, "call");
     }
 
     /** Schließt den Greifer um das gefundene Objekt. */
     public static void closeOnObject(Greifziel ziel) {
-        RpcClient.call("close_on_object", new Object[] {ziel.handle()}, "call");
+        RpcClient.call("close_on_object", new Object[] {RpcClient.handleOf(ziel)}, "call");
     }
 
     /** Hebt den Greifer gerade nach oben an, so weit der Arm kann. */
@@ -150,7 +150,7 @@ public final class Robot {
 
     /** Merkt dieses Objekt als erledigt, damit es nicht noch einmal gefunden wird. */
     public static void markDone(Greifziel ziel) {
-        RpcClient.call("mark_done", new Object[] {ziel.handle()}, "call");
+        RpcClient.call("mark_done", new Object[] {RpcClient.handleOf(ziel)}, "call");
     }
 
     /** Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für move_to und drop_at; z gilt nur, wenn der Tisch nicht vermessen ist (im Simulator nie). */
@@ -163,9 +163,34 @@ public final class Robot {
         RpcClient.call("pin_current", new Object[] {name}, "call");
     }
 
-    /** Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens 2000 Zeichen. */
-    public static void log(Object message) {
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(int message) {
         RpcClient.call("log", new Object[] {message}, "call");
+    }
+
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(long message) {
+        RpcClient.call("log", new Object[] {RpcClient.shownLong(message)}, "call");
+    }
+
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(double message) {
+        RpcClient.call("log", new Object[] {RpcClient.shownDouble(message)}, "call");
+    }
+
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(boolean message) {
+        RpcClient.call("log", new Object[] {message}, "call");
+    }
+
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(char message) {
+        RpcClient.call("log", new Object[] {String.valueOf(message)}, "call");
+    }
+
+    /** Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen. */
+    public static void log(Object message) {
+        RpcClient.call("log", new Object[] {RpcClient.shownObject(message, 2000)}, "call");
     }
 
     /** Spielt einen kurzen Signalton ab — hörbar im Browser. */
@@ -298,7 +323,7 @@ public final class Robot {
 
     /** Gibt die Position [x, y, z] des Greifziels in Metern zurück. */
     public static double[] objectPosition(Greifziel ziel) {
-        Object r = RpcClient.call("object_position", new Object[] {ziel.handle()}, "perception");
+        Object r = RpcClient.call("object_position", new Object[] {RpcClient.handleOf(ziel)}, "perception");
         return RpcClient.asPoint(r);
     }
 

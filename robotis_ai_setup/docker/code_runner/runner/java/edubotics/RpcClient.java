@@ -34,6 +34,7 @@ public final class RpcClient {
     static final String CONNECTION_LOST_DE = "Die Verbindung zum Roboter ist abgebrochen.";
     static final String FRAME_TOO_BIG_DE = "Der Aufruf ist zu groß für den Roboter.";
     static final String BAD_REPLY_DE = "Der Roboter hat unverständlich geantwortet.";
+    static final String NOT_A_GREIFZIEL_DE = "Hier wird ein Greifziel erwartet — das Ergebnis von find, wenn es etwas gefunden hat.";
 
     /** Der Roboter hat einen Aufruf abgelehnt; getMessage() ist die deutsche Meldung. */
     public static final class RobotError extends RuntimeException {
@@ -230,6 +231,14 @@ public final class RpcClient {
         return (int) asLong(r);
     }
 
+    /** The wire handle of a Greifziel; a null one (find found nothing) is refused here, in German. */
+    static long handleOf(Robot.Greifziel ziel) {
+        if (ziel == null) {
+            throw new RobotError(NOT_A_GREIFZIEL_DE);
+        }
+        return ziel.handle();
+    }
+
     static String asString(Object r) {
         if (r instanceof String) {
             return (String) r;
@@ -276,6 +285,16 @@ public final class RpcClient {
 
     static Object shownObject(Object o) {
         return shownValue(o, 0, new int[] {SHOWN_BUDGET_CHARS});
+    }
+
+    // Robot.log: a String passes whole up to textMax characters (the robot
+    // writes at most that many); any other value is rendered like zeige's.
+    static Object shownObject(Object o, int textMax) {
+        if (o instanceof String) {
+            String s = (String) o;
+            return s.length() > textMax ? s.substring(0, textMax) : s;
+        }
+        return shownObject(o);
     }
 
     // One node of a shown value, charged to the shared budget like the

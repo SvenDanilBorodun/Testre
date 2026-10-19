@@ -255,21 +255,28 @@ REGISTER_OBJECT_TOO_MANY_DE = ('Zu viele eigene Objekte in einem Programm '
                                '(höchstens {n}).')
 _UNKNOWN_METHOD_DE = 'robot.{name} gibt es nicht.'
 _UNKNOWN_METHOD_SUGGEST_DE = 'robot.{name} gibt es nicht. Meintest du robot.{suggestion}?'
-_ARITY_DE = 'robot.{name} erwartet {expected} Angabe(n), erhält aber {got}.'
-_VALUE_FRAME = 'robot.{name}: {reason}'
+# {method} is the call as the student WROTE it, in the run's language
+# (_method_display): robot.wait / Robot.waitSeconds / Greifobjekt.
+_ARITY_DE = '{method} erwartet {expected} Angabe(n), erhält aber {got}.'
+_VALUE_FRAME = '{method}: {reason}'
+# The kind sentences reach a Python AND a Java student, so none names a
+# Python spelling (robot.find, True/False, [x, y, z]) — m7.
 _KIND_NUMBER_DE = '„{p}“ muss eine Zahl sein.'
 _KIND_INTEGER_DE = '„{p}“ muss eine ganze Zahl sein.'
 _KIND_TEXT_DE = '„{p}“ muss ein Text sein.'
 _KIND_TEXT_OR_NUMBER_DE = '„{p}“ muss ein Text oder eine Zahl sein.'
-_KIND_BOOL_DE = '„{p}“ muss True oder False sein.'
-_KIND_POINT_DE = ('„{p}“ muss ein Punkt [x, y, z] in Metern sein, jeder Wert '
-                  'höchstens 1 m vom Roboter entfernt.')
-_KIND_TARGET_DE = ('„{p}“ muss ein Punkt [x, y, z] in Metern oder der Name eines '
-                   'gemerkten Ziels sein.')
-_KIND_ZIEL_DE = '„{p}“ muss ein Greifziel von robot.find sein.'
+_KIND_BOOL_DE = '„{p}“ muss wahr oder falsch sein (true/false).'
+_KIND_POINT_DE = ('„{p}“ muss ein Punkt aus drei Zahlen x, y, z in Metern sein, jeder '
+                  'Wert höchstens 1 m vom Roboter entfernt.')
+_KIND_TARGET_DE = ('„{p}“ muss ein Punkt aus drei Zahlen x, y, z in Metern oder der '
+                   'Name eines gemerkten Ziels sein.')
+_KIND_ZIEL_DE = '„{p}“ muss ein Greifziel sein — das Ergebnis von find.'
 _KIND_TAGIDS_DE = '„{p}“ muss eine Liste mit 1 bis 16 Marker-IDs (0 bis 586) sein.'
-_KIND_OBJ_DE = ('„{p}“ muss ein Objekt-Name aus Buchstaben, Ziffern und Unterstrichen '
-                'sein (höchstens 24 Zeichen).')
+_KIND_OBJ_DE = ('„{p}“ muss ein Objekt-Name aus Buchstaben ohne Umlaute (a–z), Ziffern '
+                'und _ sein (höchstens 24 Zeichen).')
+# F18: an object named by its LABEL („Würfel") — the type it means (a German
+# clause appended to _KIND_OBJ_DE, so no _DE name of its own).
+_OBJ_SUGGEST_SUFFIX = ' Meintest du "{type_name}"?'
 _KIND_DICT_DE = '„{p}“ muss eine Zuordnung mit höchstens {n} Einträgen sein.'
 _KIND_VALUE_DE = '„{p}“ ist zu tief verschachtelt oder zu groß zum Anzeigen.'
 _RANGE_DE = '„{p}“ muss zwischen {lo} und {hi} liegen.'
@@ -401,38 +408,38 @@ def _is_number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-def _range_error(p: ApiParam, v: float) -> str | None:
+def _range_error(p: ApiParam, v: float, label: str) -> str | None:
     lo, hi = p.lo, p.hi
     if lo is not None and (v < lo or (p.lo_open and v <= lo)):
-        return (_RANGE_OPEN_DE if p.lo_open else _RANGE_DE).format(p=p.name, lo=lo, hi=hi)
+        return (_RANGE_OPEN_DE if p.lo_open else _RANGE_DE).format(p=label, lo=lo, hi=hi)
     if hi is not None and v > hi:
-        return (_RANGE_OPEN_DE if p.lo_open else _RANGE_DE).format(p=p.name, lo=lo, hi=hi)
+        return (_RANGE_OPEN_DE if p.lo_open else _RANGE_DE).format(p=label, lo=lo, hi=hi)
     return None
 
 
-def _text_error(p: ApiParam, v: str, *, pattern: str | None, max_len: int | None,
+def _text_error(label: str, v: str, *, pattern: str | None, max_len: int | None,
                 allow_empty: bool = False) -> str | None:
     if not v and not allow_empty:
-        return _EMPTY_DE.format(p=p.name)
+        return _EMPTY_DE.format(p=label)
     if max_len is not None and len(v) > max_len:
-        return _TOO_LONG_DE.format(p=p.name, n=max_len)
+        return _TOO_LONG_DE.format(p=label, n=max_len)
     if any(ord(c) < 0x20 or c == '\x7f' for c in v):
-        return _BAD_CHARS_DE.format(p=p.name)
+        return _BAD_CHARS_DE.format(p=label)
     if pattern is not None:
         rx = _pattern_cache.get(pattern)
         if rx is None:
             rx = _pattern_cache[pattern] = re.compile(pattern)
         if not rx.fullmatch(v):
-            return _BAD_CHARS_DE.format(p=p.name)
+            return _BAD_CHARS_DE.format(p=label)
     return None
 
 
-def _point_error(p: ApiParam, v: Any, sentence: str) -> str | None:
+def _point_error(label: str, v: Any, sentence: str) -> str | None:
     if not isinstance(v, (list, tuple)) or len(v) != 3:
-        return sentence.format(p=p.name)
+        return sentence.format(p=label)
     for c in v:
         if not _is_number(c) or abs(c) > _POINT_ABS_MAX_M:
-            return sentence.format(p=p.name)
+            return sentence.format(p=label)
     return None
 
 
@@ -550,75 +557,105 @@ class _RateGate:
         return False
 
 
-def validate_value(p: ApiParam, v: Any) -> str | None:
-    """The German reason ``v`` is not a valid ``p``, or ``None`` when it is."""
+def validate_value(p: ApiParam, v: Any, *, label: str | None = None) -> str | None:
+    """The German reason ``v`` is not a valid ``p``, or ``None`` when it is.
+    ``label`` is how the sentence names the parameter (the run's language:
+    ``_param_display``); the row's own name by default."""
     if v is None and p.nullable:
         return None
+    name = p.name if label is None else label
     kind = p.kind
     if kind == 'float':
         if not _is_number(v):
-            return _KIND_NUMBER_DE.format(p=p.name)
-        return _range_error(p, float(v))
+            return _KIND_NUMBER_DE.format(p=name)
+        return _range_error(p, float(v), name)
     if kind == 'int':
         if isinstance(v, bool) or not _is_number(v) or float(v) != int(v):
-            return _KIND_INTEGER_DE.format(p=p.name)
-        return _range_error(p, int(v))
+            return _KIND_INTEGER_DE.format(p=name)
+        return _range_error(p, int(v), name)
     if kind == 'str':
         if not isinstance(v, str):
-            return _KIND_TEXT_DE.format(p=p.name)
-        return _text_error(p, v, pattern=p.pattern, max_len=p.max_len)
+            return _KIND_TEXT_DE.format(p=name)
+        return _text_error(name, v, pattern=p.pattern, max_len=p.max_len)
     if kind == 'text':
         if isinstance(v, str):
-            return _text_error(p, v, pattern=None, max_len=p.max_len, allow_empty=True)
+            return _text_error(name, v, pattern=None, max_len=p.max_len, allow_empty=True)
         if isinstance(v, bool) or _is_number(v):
             return None
-        return _KIND_TEXT_OR_NUMBER_DE.format(p=p.name)
+        return _KIND_TEXT_OR_NUMBER_DE.format(p=name)
     if kind == 'bool':
-        return None if isinstance(v, bool) else _KIND_BOOL_DE.format(p=p.name)
+        return None if isinstance(v, bool) else _KIND_BOOL_DE.format(p=name)
     if kind == 'point':
-        return _point_error(p, v, _KIND_POINT_DE)
+        return _point_error(name, v, _KIND_POINT_DE)
     if kind == 'target':
         if isinstance(v, str):
-            err = _text_error(p, v, pattern=robot_api.DESTINATION_NAME_RE,
+            err = _text_error(name, v, pattern=robot_api.DESTINATION_NAME_RE,
                               max_len=_TARGET_NAME_MAX)
-            return _KIND_TARGET_DE.format(p=p.name) if err else None
-        return _point_error(p, v, _KIND_TARGET_DE)
+            return _KIND_TARGET_DE.format(p=name) if err else None
+        return _point_error(name, v, _KIND_TARGET_DE)
     if kind == 'ziel':
         if isinstance(v, bool) or not isinstance(v, int) or v < 0:
-            return _KIND_ZIEL_DE.format(p=p.name)
+            return _KIND_ZIEL_DE.format(p=name)
         return None
     if kind == 'tagids':
         if (not isinstance(v, list) or not 1 <= len(v) <= _TAG_IDS_MAX
                 or any(isinstance(t, bool) or not isinstance(t, int)
                        or not 0 <= t <= _TAG_ID_MAX for t in v)):
-            return _KIND_TAGIDS_DE.format(p=p.name)
+            return _KIND_TAGIDS_DE.format(p=name)
         return None
     if kind == 'obj':
         if not isinstance(v, str):
-            return _KIND_OBJ_DE.format(p=p.name)
-        err = _text_error(p, v, pattern=p.pattern or robot_api.TYPE_NAME_RE,
+            return _KIND_OBJ_DE.format(p=name)
+        err = _text_error(name, v, pattern=p.pattern or robot_api.TYPE_NAME_RE,
                           max_len=p.max_len or 24)
-        return _KIND_OBJ_DE.format(p=p.name) if err else None
+        return _KIND_OBJ_DE.format(p=name) if err else None
     if kind == 'dict':
         cap = p.max_len if p.max_len is not None else 0
         if (not isinstance(v, dict) or len(v) > cap
                 or any(not isinstance(k, str) for k in v)):
-            return _KIND_DICT_DE.format(p=p.name, n=cap)
+            return _KIND_DICT_DE.format(p=name, n=cap)
         return None
     if kind == 'value':
-        return _KIND_VALUE_DE.format(p=p.name) if shown_value_is_bad(v) else None
+        return _KIND_VALUE_DE.format(p=name) if shown_value_is_bad(v) else None
     return INTERNAL_ERROR_DE
 
 
-def _validate_call(call: ApiCall, args: list) -> tuple[str, str] | None:
-    """``(kind, sentence)`` of the first refusal, or ``None``."""
+def _method_display(call: ApiCall, language: str | None) -> str:
+    """The call as the student wrote it: ``robot.wait`` (Python, and a run
+    of no declared language), ``Robot.waitSeconds`` (Java); a ``Greifobjekt``
+    for the registration the class makes on the student's behalf."""
+    if call.name == 'register_object':
+        return 'Greifobjekt'
+    if language == 'java':
+        return f'Robot.{call.java_name}'
+    return f'robot.{call.name}'
+
+
+def _param_display(p: ApiParam, language: str | None) -> str:
+    """A parameter as the student wrote it: the Python name, or the Java
+    parameter name of the generated stub (``hoeheM`` for ``hoehe_m``)."""
+    return robot_api.java_camel(p.name) if language == 'java' else p.name
+
+
+def _validate_call(call: ApiCall, args: list, language: str | None = None, *,
+                   obj_hint: Callable[[str], str | None] | None = None
+                   ) -> tuple[str, str] | None:
+    """``(kind, sentence)`` of the first refusal, or ``None``. The sentence
+    names the call and the parameter in ``language`` (``ctx.code_language``);
+    ``obj_hint`` maps a refused object name to the catalog type it means
+    (F18), whose name the sentence then suggests."""
+    method = _method_display(call, language)
     if len(args) != len(call.params):
-        return 'arity', _ARITY_DE.format(name=call.name, expected=len(call.params),
+        return 'arity', _ARITY_DE.format(method=method, expected=len(call.params),
                                          got=len(args))
     for p, v in zip(call.params, args):
-        reason = validate_value(p, v)
+        reason = validate_value(p, v, label=_param_display(p, language))
         if reason is not None:
-            return 'value', _VALUE_FRAME.format(name=call.name, reason=reason)
+            if p.kind == 'obj' and isinstance(v, str) and obj_hint is not None:
+                type_name = obj_hint(v)
+                if type_name:
+                    reason += _OBJ_SUGGEST_SUFFIX.format(type_name=type_name)
+            return 'value', _VALUE_FRAME.format(method=method, reason=reason)
     return None
 
 
@@ -722,6 +759,19 @@ class RunSession:
         self.token = secrets.token_hex(16)
         self.on_block_change = on_block_change or (lambda _id, _phase, _progress: None)
         self.closed = threading.Event()
+        # Set the moment the program has ENDED (mark_over: CodeProgram's
+        # control loop returned; close()). While the session lives,
+        # ctx.should_stop answers True once it is set, so every wait of a robot
+        # call still in flight — a grasp waiting for an object, _poll_until, a
+        # replay's chunked_publish, the motion-lock slices — ends at once,
+        # instead of after the out-of-band kill and the worker join, when the
+        # manager's own stop event is set (area C, r3-m3). close() restores the
+        # manager's flag AFTER the join, because _run judges finished / stopped
+        # / error from it.
+        self.over = threading.Event()
+        self._base_should_stop = getattr(ctx, 'should_stop', None)
+        self._wrapped_should_stop = None
+        self._wrap_should_stop()
         self.frames_decoded = 0
         self.exit_info: dict | None = None
         self._lock = threading.Lock()
@@ -773,8 +823,69 @@ class RunSession:
     def worker_alive(self) -> bool:
         return self._worker.is_alive()
 
+    @property
+    def language(self) -> str | None:
+        """The run's language, read from ``ctx.code_language`` — the ONE
+        source every sentence that names a call reads (r3-m4; set by
+        ``WorkflowManager.start``). ``None`` reads as Python."""
+        language = getattr(self.ctx, 'code_language', None)
+        return language if language in ('python', 'java') else None
+
+    def _type_for_label(self, value: str) -> str | None:
+        """The catalog type whose German LABEL ``value`` is (F18: „Würfel"
+        for "wuerfel"), compared without case or surrounding blanks; ``None``
+        when there is none or no catalog."""
+        catalog = getattr(self.ctx, 'object_catalog', None)
+        try:
+            pairs = catalog.labels() if catalog is not None else ()
+        except Exception:  # noqa: BLE001 — a hint never breaks a refusal
+            return None
+        wanted = value.strip().casefold()
+        for type_name, label in pairs:
+            if isinstance(label, str) and label.strip().casefold() == wanted:
+                return type_name
+        return None
+
+    def _wrap_should_stop(self) -> None:
+        base = self._base_should_stop
+        over = self.over
+        if callable(base):
+            def should_stop() -> bool:
+                return bool(base()) or over.is_set()
+        else:
+            should_stop = over.is_set
+        try:
+            self.ctx.should_stop = should_stop
+        except Exception:  # noqa: BLE001 — a stub ctx that takes no attribute
+            return
+        self._wrapped_should_stop = should_stop
+
+    def _restore_should_stop(self) -> None:
+        """Hand ctx.should_stop back — only if it is still the session's own
+        wrapper (nothing else replaced it meanwhile)."""
+        wrapped = self._wrapped_should_stop
+        if wrapped is None:
+            return
+        try:
+            if getattr(self.ctx, 'should_stop', None) is wrapped:
+                if self._base_should_stop is None:
+                    del self.ctx.should_stop
+                else:
+                    self.ctx.should_stop = self._base_should_stop
+        except Exception:  # noqa: BLE001 — teardown never raises
+            pass
+        self._wrapped_should_stop = None
+
+    def mark_over(self) -> None:
+        """The program has ended: every wait of a call still in flight stops
+        (through the wrapped ctx.should_stop). Idempotent, any thread."""
+        self.over.set()
+
     def close(self) -> None:
-        """Retire the token, drop every connection, drain and join the worker."""
+        """Retire the token, drop every connection, drain and join the worker,
+        then give ctx.should_stop back (after the join: a worker still ending
+        its wait keeps reading True)."""
+        self.over.set()
         self.closed.set()
         self._server._forget(self)
         with self._lock:
@@ -793,6 +904,7 @@ class RunSession:
         # Whatever zeige still holds is the last value of those names: it
         # arrives before the run's final status, never dropped.
         self._flush_shown(force=True)
+        self._restore_should_stop()
 
     # ── the reader's half: validate, budget, hand to the worker ──────────
     def charge_call(self) -> bool:
@@ -812,7 +924,7 @@ class RunSession:
         call = _lookup(method)
         if call is None:
             return _err(rid, 'method', _unknown_method_de(method))
-        refusal = _validate_call(call, args)
+        refusal = _validate_call(call, args, self.language, obj_hint=self._type_for_label)
         if refusal is not None:
             return _err(rid, *refusal)
         file, line = _position_of(frame)
@@ -1077,11 +1189,23 @@ class RunSession:
             try:
                 catalog = _oc.parse_catalog(merged, gripper_close_range=band)
             except _oc.ObjectCatalogError as exc:
-                return _err(rid, 'robot', str(exc))
+                return _err(rid, 'robot', self._student_fields(str(exc)))
             # Success: rebind atomically and record (only now).
             self.ctx.object_catalog = catalog
             student[name] = entry
         return _ok(rid, None)
+
+    _STUDENT_FIELD_RE = re.compile(
+        r'\b(' + '|'.join(map(re.escape, robot_api.REGISTER_OBJECT_STUDENT_FIELDS)) + r')\b')
+
+    def _student_fields(self, text: str) -> str:
+        """A catalog refusal in the student's words (F17): its own field
+        names (grasp_depth_m …) become the Greifobjekt attributes the student
+        wrote — the Python name, or the Java constructor parameter."""
+        def name(match: re.Match) -> str:
+            student = robot_api.REGISTER_OBJECT_STUDENT_FIELDS[match.group(1)]
+            return robot_api.java_camel(student) if self.language == 'java' else student
+        return self._STUDENT_FIELD_RE.sub(name, text)
 
     def _profile_catalog(self):
         """The ctx profile's built-in catalog dict + gripper band, from

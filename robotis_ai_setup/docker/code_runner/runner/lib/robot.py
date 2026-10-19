@@ -20,11 +20,13 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import socket
 import struct
 import sys
 import threading
 import time
+import unicodedata
 
 # The call budget the robot enforces. This floor is a courtesy — the server
 # sleeps on the same numbers, and that is the boundary, never this.
@@ -54,7 +56,7 @@ _NO_CONNECTION_DE = ('Keine Verbindung zum Roboter — das Programm muss über '
 _CONNECTION_LOST_DE = 'Die Verbindung zum Roboter ist abgebrochen.'
 _FRAME_TOO_BIG_DE = 'Der Aufruf ist zu groß für den Roboter.'
 _BAD_REPLY_DE = 'Der Roboter hat unverständlich geantwortet.'
-_NOT_A_GREIFZIEL_DE = 'Hier wird ein Greifziel von robot.find erwartet.'
+_NOT_A_GREIFZIEL_DE = 'Hier wird ein Greifziel erwartet — das Ergebnis von find, wenn es etwas gefunden hat.'
 _NOT_AN_OBJECT_DE = ('Hier wird ein Objekt-Name (z. B. "wuerfel") oder eine '
                      'Greifobjekt-Klasse erwartet.')
 
@@ -250,7 +252,7 @@ def _type_name(value):
     if isinstance(value, str):
         return value
     if isinstance(value, type) and issubclass(value, Greifobjekt):
-        return value.name or value.__name__.lower()
+        return value.name or _type_name_for(value.__name__)
     raise RobotError(_NOT_AN_OBJECT_DE)
 
 
@@ -277,7 +279,11 @@ _SHOWN_BIG_INT = 2 ** 53
 _SHOWN_TOO_BIG_DE = 'sehr große Zahl'
 
 
-def _shown(value):
+def _shown(value, text_max=None):
+    # robot.log passes its text whole, up to text_max characters (the robot
+    # writes at most that many); every other value is rendered like zeige's.
+    if text_max is not None and isinstance(value, str):
+        return value[:text_max]
     return _shown_part(value, 0, [_SHOWN_BUDGET_CHARS])
 
 
@@ -321,6 +327,28 @@ def _shown_part(value, depth, budget):
         return '<?>'
     budget[0] -= len(text)
     return text
+
+
+# A Greifobjekt registered without a name is named from its class name
+# (robot_api.type_name_for, rendered from its source).
+_TYPE_NAME_MAX_CHARS = 24
+_TYPE_NAME_FALLBACK = 'objekt'
+_GERMAN_PAIRS = (('ä', 'ae'), ('ö', 'oe'), ('ü', 'ue'), ('Ä', 'Ae'),
+                 ('Ö', 'Oe'), ('Ü', 'Ue'), ('ß', 'ss'), ('ẞ', 'SS'))
+
+
+def _type_name_for(label):
+    """The type name a Greifobjekt is registered under when it names none
+    (F17): NFC, the German letter pairs, lowercase, every run of anything but
+    a–z/0–9 one ``_``, no ``_`` at either end, at most _TYPE_NAME_MAX_CHARS.
+    "Rote Banane" → "rote_banane", "Würfel" → "wuerfel". Rendered into the
+    Python stub verbatim and spelled once more in Java
+    (Greifobjekt.typeNameFor, asserted equal by SmokeMain)."""
+    text = unicodedata.normalize('NFC', str(label))
+    for umlaut, pair in _GERMAN_PAIRS:
+        text = text.replace(umlaut, pair)
+    text = re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
+    return text[:_TYPE_NAME_MAX_CHARS].rstrip('_') or _TYPE_NAME_FALLBACK
 
 
 def home():
@@ -388,8 +416,8 @@ def pin_current(name):
     _rpc.call('pin_current', [name], 'call')
 
 def log(message):
-    """Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens 2000 Zeichen."""
-    _rpc.call('log', [message], 'call')
+    """Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens 2000 Zeichen."""
+    _rpc.call('log', [_shown(message, 2000)], 'call')
 
 def beep():
     """Spielt einen kurzen Signalton ab — hörbar im Browser."""
@@ -465,10 +493,11 @@ class Greifobjekt:
             hoehe_m = 0.040
             greiftiefe_m = 0.015
 
-    Optional: name (sonst der Klassenname in Kleinbuchstaben), label (sonst
-    der Klassenname), greifer_schliessen_rad, anfahrhoehe_m. Die Klasse wird
-    beim Anlegen für diesen Lauf beim Roboter angemeldet; robot.grasp(Banane)
-    und robot.sees(Banane) nehmen die Klasse oder ihren Namen.
+    Optional: name (sonst aus dem Klassennamen: Kleinbuchstaben, ä wird ae, ß
+    wird ss, alles andere _), label (sonst der Klassenname),
+    greifer_schliessen_rad, anfahrhoehe_m. Die Klasse wird beim Anlegen für
+    diesen Lauf beim Roboter angemeldet; robot.grasp(Banane) und
+    robot.sees(Banane) nehmen die Klasse oder ihren Namen.
     """
 
     name = None
@@ -481,6 +510,6 @@ class Greifobjekt:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        name = cls.name or cls.__name__.lower()
+        name = cls.name or _type_name_for(cls.__name__)
         label = cls.label or cls.__name__
         _rpc.call('register_object', [name, label, list(cls.tag_ids), cls.hoehe_m, cls.greiftiefe_m, cls.greifer_schliessen_rad, cls.anfahrhoehe_m], 'perception')

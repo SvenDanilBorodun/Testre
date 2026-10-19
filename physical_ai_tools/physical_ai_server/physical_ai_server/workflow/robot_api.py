@@ -76,6 +76,8 @@ from __future__ import annotations
 import dataclasses
 import difflib
 import json
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -492,11 +494,14 @@ ROBOT_API: tuple[ApiCall, ...] = (
           doc_de_block='Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den '
                        'Punkt, nicht die Armstellung).'),
     # ── Output ────────────────────────────────────────────────────────────
+    # F11: the `value` kind zeige takes (bounded: Rule §2's cost ceiling of a
+    # maximal value frame covers it); max_len is where both stubs cut a TEXT
+    # (handlers/output.py caps the rendered line at the same 2000).
     _stmt('log', 'log', 'edubotics_log',
-          (_p('message', 'text', max_len=2000,
-              doc_de='Was ins Protokoll geschrieben wird: ein Text oder eine Zahl '
-                     '(höchstens 2000 Zeichen).'),),
-          'Schreibt eine Zeile ins Protokoll — Zahlen und Texte, höchstens '
+          (_p('message', 'value', max_len=2000,
+              doc_de='Was ins Protokoll geschrieben wird: ein Text, eine Zahl, ein '
+                     'Wahrheitswert oder eine Liste (höchstens 2000 Zeichen).'),),
+          'Schreibt eine Zeile ins Protokoll — Zahlen, Texte und Listen, höchstens '
           '2000 Zeichen.',
           example=('Hallo!',),
           doc_de_block='Schreibt eine Zeile ins Protokoll (höchstens 2000 Zeichen).'),
@@ -732,6 +737,47 @@ def suggest(name: str) -> str | None:
     return hits[0] if hits else None
 
 
+# The sentence both stubs raise LOCALLY when a grasp step gets something that
+# is not a Greifziel (Python's `_handle`, Java's `RpcClient.handleOf` — a
+# `null` from a `find` that found nothing included). One constant, rendered
+# into both, in words that read right in both languages (m7).
+NOT_A_GREIFZIEL_DE = ('Hier wird ein Greifziel erwartet — das Ergebnis von find, wenn es '
+                      'etwas gefunden hat.')
+
+# The catalog's own field names (object_catalog.parse_catalog's refusals name
+# them) → the Greifobjekt attribute the student wrote (F17). Java spells each
+# as its constructor parameter (java_camel).
+REGISTER_OBJECT_STUDENT_FIELDS = {
+    'object_height_m': 'hoehe_m',
+    'grasp_depth_m': 'greiftiefe_m',
+    'gripper_close_rad': 'greifer_schliessen_rad',
+    'approach_clear_m': 'anfahrhoehe_m',
+    'label_de': 'label',
+    'tag_ids': 'tag_ids',
+}
+
+# A Greifobjekt type name is at most this long (TYPE_NAME_RE).
+TYPE_NAME_MAX_CHARS = 24
+# What a label with no usable letter becomes.
+TYPE_NAME_FALLBACK = 'objekt'
+_GERMAN_PAIRS = (('ä', 'ae'), ('ö', 'oe'), ('ü', 'ue'), ('Ä', 'Ae'), ('Ö', 'Oe'),
+                 ('Ü', 'Ue'), ('ß', 'ss'), ('ẞ', 'SS'))
+
+
+def type_name_for(label):
+    """The type name a Greifobjekt is registered under when it names none
+    (F17): NFC, the German letter pairs, lowercase, every run of anything but
+    a–z/0–9 one ``_``, no ``_`` at either end, at most TYPE_NAME_MAX_CHARS.
+    "Rote Banane" → "rote_banane", "Würfel" → "wuerfel". Rendered into the
+    Python stub verbatim and spelled once more in Java
+    (Greifobjekt.typeNameFor, asserted equal by SmokeMain)."""
+    text = unicodedata.normalize('NFC', str(label))
+    for umlaut, pair in _GERMAN_PAIRS:
+        text = text.replace(umlaut, pair)
+    text = re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
+    return text[:TYPE_NAME_MAX_CHARS].rstrip('_') or TYPE_NAME_FALLBACK
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Rendering — the checked-in artifacts
 # ══════════════════════════════════════════════════════════════════════════
@@ -821,9 +867,17 @@ def _py_signature(call: ApiCall) -> str:
     return ', '.join(parts)
 
 
+def _py_marshal(p: ApiParam) -> str:
+    """How the Python stub hands one argument to the client. A `value`
+    parameter with a max_len (log, F11) passes a TEXT whole up to that many
+    characters; anything else is rendered like zeige's."""
+    if p.kind == 'value' and p.max_len is not None:
+        return f'_shown({p.name}, {p.max_len})'
+    return _PY_ARG_MARSHAL.get(p.kind, '{v}').format(v=p.name)
+
+
 def _py_method(call: ApiCall) -> str:
-    args = ', '.join(
-        _PY_ARG_MARSHAL.get(p.kind, '{v}').format(v=p.name) for p in call.params)
+    args = ', '.join(_py_marshal(p) for p in call.params)
     kind = _py_literal(call.budget)
     lines = [f'def {call.name}({_py_signature(call)}):']
     lines.append(f'    """{_comment_safe(call.doc_de)}"""')
@@ -858,11 +912,13 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import socket
 import struct
 import sys
 import threading
 import time
+import unicodedata
 
 # The call budget the robot enforces. This floor is a courtesy — the server
 # sleeps on the same numbers, and that is the boundary, never this.
@@ -887,7 +943,7 @@ _NO_CONNECTION_DE = ('Keine Verbindung zum Roboter — das Programm muss über '
 _CONNECTION_LOST_DE = 'Die Verbindung zum Roboter ist abgebrochen.'
 _FRAME_TOO_BIG_DE = 'Der Aufruf ist zu groß für den Roboter.'
 _BAD_REPLY_DE = 'Der Roboter hat unverständlich geantwortet.'
-_NOT_A_GREIFZIEL_DE = 'Hier wird ein Greifziel von robot.find erwartet.'
+_NOT_A_GREIFZIEL_DE = {NOT_A_GREIFZIEL_DE!r}
 _NOT_AN_OBJECT_DE = ('Hier wird ein Objekt-Name (z. B. "wuerfel") oder eine '
                      'Greifobjekt-Klasse erwartet.')
 
@@ -1083,7 +1139,7 @@ def _type_name(value):
     if isinstance(value, str):
         return value
     if isinstance(value, type) and issubclass(value, Greifobjekt):
-        return value.name or value.__name__.lower()
+        return value.name or _type_name_for(value.__name__)
     raise RobotError(_NOT_AN_OBJECT_DE)
 
 
@@ -1110,7 +1166,11 @@ _SHOWN_BIG_INT = 2 ** 53
 _SHOWN_TOO_BIG_DE = {SHOWN_TOO_BIG_DE!r}
 
 
-def _shown(value):
+def _shown(value, text_max=None):
+    # robot.log passes its text whole, up to text_max characters (the robot
+    # writes at most that many); every other value is rendered like zeige's.
+    if text_max is not None and isinstance(value, str):
+        return value[:text_max]
     return _shown_part(value, 0, [_SHOWN_BUDGET_CHARS])
 
 
@@ -1167,10 +1227,11 @@ class Greifobjekt:
             hoehe_m = 0.040
             greiftiefe_m = 0.015
 
-    Optional: name (sonst der Klassenname in Kleinbuchstaben), label (sonst
-    der Klassenname), greifer_schliessen_rad, anfahrhoehe_m. Die Klasse wird
-    beim Anlegen für diesen Lauf beim Roboter angemeldet; robot.grasp(Banane)
-    und robot.sees(Banane) nehmen die Klasse oder ihren Namen.
+    Optional: name (sonst aus dem Klassennamen: Kleinbuchstaben, ä wird ae, ß
+    wird ss, alles andere _), label (sonst der Klassenname),
+    greifer_schliessen_rad, anfahrhoehe_m. Die Klasse wird beim Anlegen für
+    diesen Lauf beim Roboter angemeldet; robot.grasp(Banane) und
+    robot.sees(Banane) nehmen die Klasse oder ihren Namen.
     """
 
     name = None
@@ -1183,7 +1244,7 @@ class Greifobjekt:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        name = cls.name or cls.__name__.lower()
+        name = cls.name or _type_name_for(cls.__name__)
         label = cls.label or cls.__name__
         _rpc.call({method!r}, [{args}], {kind!r})
 '''
@@ -1202,6 +1263,23 @@ def _py_name_block(names) -> str:
     return '\n'.join(lines)
 
 
+def _py_type_name_block() -> str:
+    """type_name_for and its constants, as private names of the stub — the
+    SOURCE of the server's own function, so the two can never differ."""
+    import inspect
+    source = inspect.getsource(type_name_for)
+    for public in ('TYPE_NAME_MAX_CHARS', 'TYPE_NAME_FALLBACK', 'type_name_for'):
+        source = re.sub(rf'\b{public}\b', f'_{public}', source)
+    return (
+        '# A Greifobjekt registered without a name is named from its class name\n'
+        '# (robot_api.type_name_for, rendered from its source).\n'
+        f'_TYPE_NAME_MAX_CHARS = {TYPE_NAME_MAX_CHARS!r}\n'
+        f'_TYPE_NAME_FALLBACK = {TYPE_NAME_FALLBACK!r}\n'
+        f'_GERMAN_PAIRS = ({", ".join(map(repr, _GERMAN_PAIRS[:4]))},\n'
+        f'                 {", ".join(map(repr, _GERMAN_PAIRS[4:]))})\n'
+        '\n\n' + source + '\n\n')
+
+
 def render_python_stub() -> str:
     limits = dataclasses.asdict(RPC_LIMITS)
     head = _PY_STUB_HEAD.format(
@@ -1217,7 +1295,9 @@ def render_python_stub() -> str:
         SHOWN_MAX_ITEMS=_SHOWN_MAX_ITEMS,
         SHOWN_TOO_BIG_DE=_SHOWN_TOO_BIG_DE,
         PUBLIC_METHODS=_py_name_block(c.name for c in ROBOT_API + CODE_ONLY_METHODS),
+        NOT_A_GREIFZIEL_DE=NOT_A_GREIFZIEL_DE,
     )
+    head += _py_type_name_block()
     methods = '\n'.join(_py_method(c) for c in ROBOT_API + CODE_ONLY_METHODS)
     row = INTERNAL_METHODS_BY_NAME['register_object']
     # The seven positionals, in the row's order: the first two come from the
@@ -1242,7 +1322,9 @@ _JAVA_ALTS = {
     'bool': (('boolean', '{v}'),),
     'point': (('double[]', '{v}'),),
     'target': (('double[]', '{v}'), ('String', '{v}')),
-    'ziel': (('Greifziel', '{v}.handle()'),),
+    # handleOf, not .handle(): a `null` Greifziel (find found nothing) is the
+    # German NOT_A_GREIFZIEL_DE, the sentence Python's _handle raises.
+    'ziel': (('Greifziel', 'RpcClient.handleOf({v})'),),
     'tagids': (('int[]', '{v}'),),
     'obj': (('String', '{v}'), ('Greifobjekt', '{v}.name()')),
     # zeige(): the primitives plus exactly ONE reference overload, Object,
@@ -1272,6 +1354,23 @@ def _java_camel(name: str) -> str:
     return head + ''.join(w[:1].upper() + w[1:] for w in rest)
 
 
+def java_camel(name: str) -> str:
+    """A Python parameter / attribute name as the Java stub spells it
+    (``hoehe_m`` → ``hoeheM``): how code_rpc names it to a Java student."""
+    return _java_camel(name)
+
+
+def _java_alts(p: ApiParam) -> tuple[tuple[str, str], ...]:
+    """The Java alternatives of one parameter (``_JAVA_ALTS`` by kind); a
+    `value` parameter with a max_len (log, F11) passes a String whole up to
+    that many characters, like the Python stub."""
+    alts = _JAVA_ALTS[p.kind]
+    if p.kind == 'value' and p.max_len is not None:
+        alts = tuple((jtype, f'RpcClient.shownObject({{v}}, {p.max_len})')
+                     if jtype == 'Object' else (jtype, expr) for jtype, expr in alts)
+    return alts
+
+
 @dataclass(frozen=True)
 class JavaOverload:
     """One Java overload of a row, as data: the stub renders its text from it
@@ -1299,7 +1398,7 @@ def _java_overload_specs(call: ApiCall) -> list[JavaOverload]:
     ret_type, unwrap = _JAVA_RETURN[call.returns]
     out: list[JavaOverload] = []
     for prefix in range(n, first_default - 1, -1):
-        alts = [_JAVA_ALTS[p.kind] for p in call.params[:prefix]]
+        alts = [_java_alts(p) for p in call.params[:prefix]]
         for combo in itertools.product(*alts):
             params = tuple(
                 (jtype, _java_camel(p.name))
@@ -1402,6 +1501,7 @@ def render_java_robot() -> str:
 
 _JAVA_GREIFOBJEKT = '''package edubotics;
 
+import java.text.Normalizer;
 import java.util.Locale;
 
 /**
@@ -1412,7 +1512,8 @@ import java.util.Locale;
  * Robot.grasp(banane);
  * </pre>
  *
- * Der Name ist das Label in Kleinbuchstaben; zwei optionale Zahlen am Ende
+ * Der Name kommt aus dem Label: Kleinbuchstaben, ä wird ae, ß wird ss, alles
+ * andere _ ("Rote Banane" wird rote_banane). Zwei optionale Zahlen am Ende
  * sind greiferSchliessenRad und anfahrhoeheM. Das Objekt wird beim Anlegen
  * für diesen Lauf beim Roboter angemeldet.
  *
@@ -1439,8 +1540,40 @@ public final class Greifobjekt {{
 
     private Greifobjekt(String label, int[] tagIds, double hoeheM, double greiftiefeM,
                         Double greiferSchliessenRad, Double anfahrhoeheM) {{
-        this.name = label.toLowerCase(Locale.ROOT);
+        this.name = typeNameFor(label);
         RpcClient.call({method}, new Object[] {{{args}}}, {kind});
+    }}
+
+    // robot_api.type_name_for, spelled in Java (SmokeMain asserts the two
+    // agree on the same table): NFC, the German letter pairs, lowercase, every
+    // run of anything but a-z/0-9 one "_", none at either end, at most
+    // TYPE_NAME_MAX_CHARS characters.
+    static final int TYPE_NAME_MAX_CHARS = {max_chars};
+    static final String TYPE_NAME_FALLBACK = "{fallback}";
+    private static final String[][] GERMAN_PAIRS = {{{pairs}}};
+
+    static String typeNameFor(String label) {{
+        String text = Normalizer.normalize(String.valueOf(label), Normalizer.Form.NFC);
+        for (String[] pair : GERMAN_PAIRS) {{
+            text = text.replace(pair[0], pair[1]);
+        }}
+        text = stripUnderscores(text.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "_"));
+        if (text.length() > TYPE_NAME_MAX_CHARS) {{
+            text = stripUnderscores(text.substring(0, TYPE_NAME_MAX_CHARS));
+        }}
+        return text.isEmpty() ? TYPE_NAME_FALLBACK : text;
+    }}
+
+    private static String stripUnderscores(String text) {{
+        int start = 0;
+        int end = text.length();
+        while (start < end && text.charAt(start) == '_') {{
+            start++;
+        }}
+        while (end > start && text.charAt(end - 1) == '_') {{
+            end--;
+        }}
+        return text.substring(start, end);
     }}
 
     /** Der Name, unter dem der Roboter diesen Typ kennt. */
@@ -1455,9 +1588,11 @@ def render_java_greifobjekt() -> str:
     row = INTERNAL_METHODS_BY_NAME['register_object']
     java_of = {'name': 'this.name', 'label': 'label'}
     args = ', '.join(java_of.get(p.name, _java_camel(p.name)) for p in row.params)
+    pairs = ', '.join(f'{{{_java_literal(a)}, {_java_literal(b)}}}' for a, b in _GERMAN_PAIRS)
     return _JAVA_GREIFOBJEKT.format(
         notice=_GENERATED_NOTICE.replace('\n', '\n * '),
-        method=_java_literal(row.name), args=args, kind=_java_literal(row.budget))
+        method=_java_literal(row.name), args=args, kind=_java_literal(row.budget),
+        max_chars=TYPE_NAME_MAX_CHARS, fallback=TYPE_NAME_FALLBACK, pairs=pairs)
 
 
 _JAVA_RPC_CLIENT = '''package edubotics;
@@ -1494,6 +1629,7 @@ public final class RpcClient {{
     static final String CONNECTION_LOST_DE = "Die Verbindung zum Roboter ist abgebrochen.";
     static final String FRAME_TOO_BIG_DE = "Der Aufruf ist zu groß für den Roboter.";
     static final String BAD_REPLY_DE = "Der Roboter hat unverständlich geantwortet.";
+    static final String NOT_A_GREIFZIEL_DE = {NOT_A_GREIFZIEL_DE};
 
     /** Der Roboter hat einen Aufruf abgelehnt; getMessage() ist die deutsche Meldung. */
     public static final class RobotError extends RuntimeException {{
@@ -1690,6 +1826,14 @@ public final class RpcClient {{
         return (int) asLong(r);
     }}
 
+    /** The wire handle of a Greifziel; a null one (find found nothing) is refused here, in German. */
+    static long handleOf(Robot.Greifziel ziel) {{
+        if (ziel == null) {{
+            throw new RobotError(NOT_A_GREIFZIEL_DE);
+        }}
+        return ziel.handle();
+    }}
+
     static String asString(Object r) {{
         if (r instanceof String) {{
             return (String) r;
@@ -1736,6 +1880,16 @@ public final class RpcClient {{
 
     static Object shownObject(Object o) {{
         return shownValue(o, 0, new int[] {{SHOWN_BUDGET_CHARS}});
+    }}
+
+    // Robot.log: a String passes whole up to textMax characters (the robot
+    // writes at most that many); any other value is rendered like zeige's.
+    static Object shownObject(Object o, int textMax) {{
+        if (o instanceof String) {{
+            String s = (String) o;
+            return s.length() > textMax ? s.substring(0, textMax) : s;
+        }}
+        return shownObject(o);
     }}
 
     // One node of a shown value, charged to the shared budget like the
@@ -1913,6 +2067,7 @@ def render_java_rpc_client() -> str:
         SHOWN_MAX_ITEMS=_java_literal(_SHOWN_MAX_ITEMS),
         SHOWN_BIG_BITS=_java_literal(_SHOWN_BIG_BITS),
         SHOWN_TOO_BIG_DE=_SHOWN_TOO_BIG_DE,
+        NOT_A_GREIFZIEL_DE=_java_literal(NOT_A_GREIFZIEL_DE),
     )
 
 

@@ -83,11 +83,37 @@ SENTENCES: dict[str, str] = {
                        'abgestürzt — bitte die Umgebung neu starten.'),
     'other': ('Zeile {line} in {file}: Das Programm ist mit einem Fehler '
               'abgebrochen ({exc_type}).'),
+    # Chosen by :func:`sentence` from the exception, never a wire kind (no
+    # runner ever reports it, so an old runner and a new server agree): Java's
+    # NullPointerException and Python's AttributeError on None
+    # (student_main.classify_exception names that one 'None').
+    'null': ('Zeile {line} in {file}: Hier ist kein Wert da (None bzw. null) — '
+             'wurde die Variable vorher belegt, und hat find etwas gefunden?'),
+    # The Java launcher's NoSuchMethodException with no position: Main has no
+    # `static void main(String[])` (m14). Chosen like 'null'.
+    'no_main': ('In Main.java fehlt die Methode „public static void main(String[] '
+                'args)“ — ohne sie kann das Programm nicht starten.'),
 }
 
 # The prefix the position-carrying kinds share; ``robot`` prepends it to the
 # relayed (already-German) WorkflowError text.
 _POSITION_PREFIX = 'Zeile {line} in {file}: '
+
+
+def _special_kind(kind: str, file: str, line: int, name: str, exc_type: str) -> str:
+    """The sentence a fault deserves beyond its wire kind, read from the
+    exception the runner named (area C): the null sentence for Java's
+    NullPointerException and Python's AttributeError on None, the missing
+    entry point for the Java launcher's position-less NoSuchMethodException.
+    Everything else keeps its kind."""
+    if kind != 'other':
+        return kind
+    if exc_type == 'NullPointerException' or (exc_type == 'AttributeError'
+                                              and name == 'None'):
+        return 'null'
+    if exc_type == 'NoSuchMethodException' and not (file and line):
+        return 'no_main'
+    return kind
 
 
 def sentence(kind: str, *, file: str = '', line: int = 0, name: str = '',
@@ -99,20 +125,23 @@ def sentence(kind: str, *, file: str = '', line: int = 0, name: str = '',
     suggestion, and says the two halves' versions differ when the suggestion
     IS the name (the server knows the call, the runner's stub does not);
     ``robot`` prefixes the relayed (German-by-contract) text with the
-    position; ``other`` names the exception CLASS only. An unknown kind falls
-    back to ``other``.
+    position; ``other`` names the exception CLASS only, unless the exception
+    is a missing value or a missing ``main`` (:func:`_special_kind`). A
+    report with no file or no line drops the position prefix (F2: never
+    „Zeile 0 in :"). An unknown kind falls back to ``other``.
     """
+    kind = _special_kind(kind, file, line, name, exc_type)
     if kind == 'robot_method' and suggestion and suggestion == name:
-        return SENTENCES['robot_method_version'].format(line=line, file=file, name=name)
-    if kind == 'robot_method':
-        base = (_POSITION_PREFIX + 'robot.{name} gibt es nicht.').format(
-            line=line, file=file, name=name)
+        template = SENTENCES['robot_method_version']
+    elif kind == 'robot_method':
+        template = _POSITION_PREFIX + 'robot.{name} gibt es nicht.'
         if suggestion:
-            base += f' Meintest du robot.{suggestion}?'
-        return base
-    if kind == 'robot':
-        return (_POSITION_PREFIX + '{relayed}').format(
-            line=line, file=file, relayed=relayed)
-    template = SENTENCES.get(kind) or SENTENCES['other']
-    return template.format(line=line, file=file, name=name,
+            template += ' Meintest du robot.{suggestion}?'
+    elif kind == 'robot':
+        template = _POSITION_PREFIX + '{relayed}'
+    else:
+        template = SENTENCES.get(kind) or SENTENCES['other']
+    if not (file and line) and template.startswith(_POSITION_PREFIX):
+        template = template[len(_POSITION_PREFIX):]
+    return template.format(line=line, file=file, name=name, relayed=relayed,
                            suggestion=suggestion or '', exc_type=exc_type)

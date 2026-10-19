@@ -63,9 +63,21 @@ describe('renderExample — the lockstep with the generator', () => {
     expect(renderExample(byName('wait_until_held'), 'java')).toBe('boolean gehalten = Robot.waitUntilHeld(3.0);');
   });
 
-  it('a variable argument is its name, and a value row declares its variable', () => {
-    expect(renderExample(byName('object_position'), 'python')).toBe('position = robot.object_position(ziel)');
-    expect(renderExample(byName('object_position'), 'java')).toBe('double[] position = Robot.objectPosition(ziel);');
+  it('a Greifziel argument is the nested find call (never an undefined variable, N9), and a value row declares its variable', () => {
+    // The example used to name a variable `ziel` the student's program does
+    // not have; it now carries the call that produces the Greifziel.
+    expect(renderExample(byName('object_position'), 'python'))
+      .toBe('position = robot.object_position(robot.find("wuerfel"))');
+    expect(renderExample(byName('object_position'), 'java'))
+      .toBe('double[] position = Robot.objectPosition(Robot.find("wuerfel"));');
+    expect(renderExample(byName('move_above'), 'python')).toBe('robot.move_above(robot.find("wuerfel"))');
+    expect(renderExample(byName('move_above'), 'java')).toBe('Robot.moveAbove(Robot.find("wuerfel"));');
+    // No public row's example names a variable any more.
+    for (const m of METHOD_DOCS.methods) {
+      for (const a of (m.example && m.example.args) || []) {
+        expect(!!a && typeof a === 'object' && !Array.isArray(a) && 'ref' in a).toBe(false);
+      }
+    }
     expect(renderExample(byName('find'), 'java')).toBe('Robot.Greifziel ziel = Robot.find("wuerfel");');
   });
 

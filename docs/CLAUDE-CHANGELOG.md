@@ -73,6 +73,12 @@ commanded band, 3953 clear, 0 refused, ~2 s; 200,000 draws in a scratch run, 132
 32 setups (8 window widths from 900 to 1920 px × real/simulator × leader bridge on/off), each measured on main and
 on the branch, give main's rows and height.
 
+**Fix round 3, 2026-10-19 (owner decision: the tip-rise table over the claw's full range).** A claw opened by hand
+stays open after the re-lock, but `edu1_ik._TIP_RISE_TABLE` stopped at 0.9 rad, so wide-open touching Positions
+were refused (up to 9.1 % per 0.1 rad bucket); it now runs to 1.5708 rad (the housing's 43.74 mm plateau from
+1.40 rad): 0 refused in every bucket. The replay floor checks now credit the rise along the tool axis
+(`motion.tool_tip_rise_world_z_m`), because straight up the larger rows let a tilted open claw replay into the table.
+
 ### Unreleased, 2026-10-13 / 14 — „Sucher": the student app's visual redesign
 
 **Why.** The owner chose a new look for the student app from a series of shown directions: „Sucher", a light

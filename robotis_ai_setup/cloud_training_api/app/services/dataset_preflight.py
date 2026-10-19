@@ -402,6 +402,13 @@ def preflight_dataset(dataset_name: str, token, model_type: str = "",
         raise _public_failure(dataset_name, failure.stage, failure.exc) from None
     except DatasetRefused:
         raise
+    except (TypeError, AttributeError) as exc:
+        # A meta file of the wrong SHAPE (an info.json that is a list, "fps": "30"):
+        # the twin's content checks fail on it. A permanent fault, so 400, never the
+        # retry sentence; the type goes to the log only.
+        logger.warning("dataset preflight %r: %s in the content checks -> refused",
+                       dataset_name, _type_chain(exc))
+        raise DatasetRefused(read_failed_sentence(dataset_name)) from None
     except Exception as exc:  # a library exception none of the twin's handlers catches
         raise _public_failure(dataset_name, "other", exc) from None
 
@@ -415,6 +422,11 @@ _NO_REPO_NAMES = frozenset({"RepositoryNotFoundError", "GatedRepoError", "Disabl
 _NO_FILE_NAMES = frozenset({"RemoteEntryNotFoundError", "EntryNotFoundError"})
 _TRANSPORT_NAMES = frozenset({"TransportError", "TimeoutException", "Timeout", "gaierror"})
 _CHAIN_MAX = 8
+# 4xx answers that say „ask again later", not „this dataset is wrong".
+_RETRY_STATUSES = frozenset({408, 425, 429})
+# The stages that read a meta FILE: there a body that does not parse is the
+# dataset's fault. Anywhere else (the file list) it is a proxy or captive page.
+_FILE_STAGES = frozenset({"info", "info_json", "stats"})
 
 
 def _chain(exc):
@@ -431,7 +443,7 @@ def classify_hub_error(exc) -> tuple[str, int | None]:
     ``kind``: ``"no_repo"`` (missing, private or gated: RepositoryNotFound, a 401
     or 403), ``"no_revision"`` (no such tag or commit), ``"no_file"`` (a 404 on a
     file), ``"malformed"`` (the downloaded JSON does not parse), ``"refused"``
-    (another 4xx), else ``"transient"``: an HTTP 429 or 5xx, a network or
+    (another 4xx), else ``"transient"``: an HTTP 408, 425, 429 or 5xx, a network or
     transport error, a timeout, and every failure nobody classified (we could not
     ask, which is no proof against the dataset)."""
     for link in _chain(exc):
@@ -446,7 +458,7 @@ def classify_hub_error(exc) -> tuple[str, int | None]:
         if names & _NO_FILE_NAMES:
             return "no_file", status
         if status is not None:
-            if status == 429 or status >= 500:
+            if status in _RETRY_STATUSES or status >= 500:
                 return "transient", status
             if status in (401, 403):
                 return "no_repo", status
@@ -469,6 +481,8 @@ def _type_chain(exc) -> str:
 def _public_failure(dataset_name: str, stage: str, exc) -> Exception:
     """The exception the route may show for a failed read at ``stage``."""
     kind, status = classify_hub_error(exc)
+    if kind == "malformed" and stage not in _FILE_STAGES:
+        kind = "transient"
     logger.warning(
         "dataset preflight %r: %s at stage %s (HTTP %s) -> %s",
         dataset_name, _type_chain(exc), stage, status, kind,

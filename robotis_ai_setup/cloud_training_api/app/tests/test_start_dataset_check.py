@@ -213,6 +213,10 @@ def transient_cases():
         "file list read timeout": {"files": read_timeout()},
         "file list TimeoutError": {"files": TimeoutError(MARKER)},
         "file list connection reset": {"files": ConnectionResetError(MARKER)},
+        "info 408 (LocalEntryNotFound from it)": {"info": local_from(http(E.HfHubHTTPError, 408))},
+        "file list 408": {"files": http(E.HfHubHTTPError, 408)},
+        "file list 425": {"files": http(E.HfHubHTTPError, 425)},
+        "file list answers a page that is not JSON": {"files": json.JSONDecodeError(MARKER, "<html>", 0)},
     }
 
 
@@ -233,6 +237,8 @@ def permanent_cases():
         "stats.json not JSON": ({"stats": b"[" + MARKER.encode()}, lambda: P.stats_unloadable_sentence(n)),
         "file list refused 400": ({"files": http(E.HfHubHTTPError, 400)}, lambda: P.hub_refused_sentence(n, 400)),
         "file list repo gone": ({"files": http(E.RepositoryNotFoundError, 404)}, lambda: P.not_found_sentence(n)),
+        "info.json is a list": ({"info": [MARKER]}, lambda: P.read_failed_sentence(n)),
+        "fps is a string": ({"info": {**good_info(), "fps": "30"}}, lambda: P.read_failed_sentence(n)),
     }
 
 

@@ -356,6 +356,29 @@ describe('WorkshopPage — sim toggle swaps only the right region', () => {
   });
 });
 
+describe('WorkshopPage — Lernpfade are real-rig only (N1, owner decision Q5)', () => {
+  test('lernpfad_says_real_robot_only_in_sim', async () => {
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    expect(screen.queryByText(DE.TUTORIAL_REAL_ONLY)).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
+    await screen.findByTestId('sim-stage');
+    // Where the dock's „Lernpfad" tab was, the simulator says why there is none.
+    const entry = screen.getByRole('button', { name: DE.DOCK_TAB_TUTORIAL });
+    expect(entry).toBeDisabled();
+    const note = screen.getByText(DE.TUTORIAL_REAL_ONLY);
+    expect(note).toBeVisible();
+    expect(entry.getAttribute('aria-describedby')).toBe(note.id);
+    await userEvent.click(screen.getByRole('button', { name: 'Simulator beenden' }));
+    await screen.findByTestId('right-dock');
+    expect(screen.queryByText(DE.TUTORIAL_REAL_ONLY)).toBeNull();
+  });
+
+  test('the note is German and names the real robot', () => {
+    expect(DE.TUTORIAL_REAL_ONLY).toBe('Lernpfade gibt es nur am echten Roboter.');
+  });
+});
+
 describe('WorkshopPage — an uncalibrated rig cannot START outside the simulator (§3.49)', () => {
   // A simulator „Ziel setzen" pin is stored at z = 0 (the virtual table). On a
   // real rig with no touch-off the server keeps that stored 0 and has no floor
@@ -541,6 +564,24 @@ describe('WorkshopPage — Vormachen wiring', () => {
     await handler({ name: 'A', x: 0.2, y: 0, z: 0.05 });
     expect(toast.error).toHaveBeenCalledWith(DE.TEACH_DRIVE_BLOCKED);
     expect(mockRos.jogArm).not.toHaveBeenCalled();
+  });
+
+  // M4 / Q11 (semantics round 2026-10-18): „fahre dorthin" stops ABOVE the
+  // Ziel at the program's hover height, over the table measured this lesson —
+  // the pin's stored z is not where the arm goes, so the question names none.
+  test('the „fahre dorthin" question names x and y only', async () => {
+    setDriveToHandler.mockClear();
+    render(<WorkshopPage isActive />);
+    await screen.findByTestId('blockly-workspace');
+    const handler = setDriveToHandler.mock.calls.map((c) => c[0]).filter(Boolean).pop();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      await handler({ name: 'Ablage', x: 0.2, y: -0.05, z: 0.012 });
+      expect(confirm).toHaveBeenCalledWith('Arm über das Ziel „Ablage" fahren (x=0.200, y=-0.050)?');
+      expect(mockRos.jogArm).not.toHaveBeenCalled();
+    } finally {
+      confirm.mockRestore();
+    }
   });
 
   test('with Vormachen closed the LeaderToggle carries no lock reason', async () => {

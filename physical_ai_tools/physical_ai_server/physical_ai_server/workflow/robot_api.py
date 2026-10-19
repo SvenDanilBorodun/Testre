@@ -237,12 +237,18 @@ SHOWN_VAR_NAMES_MAX = 256
 
 
 @dataclass(frozen=True)
-class ExampleRef:
-    """An example argument that is a VARIABLE of the student's program (the
-    Greifziel `ziel`), not a literal. Rendered as its name; validated as
-    handle 0 (test_robot_api_docs.py)."""
+class ExampleCall:
+    """An example argument that is a nested robot CALL, not a literal: the
+    Greifziel a grasp step takes is ``robot.find("wuerfel")`` itself (N9), so
+    an inserted example never names a variable the student's program does
+    not have. ``name`` is the nested row's Python name; its ``args`` are
+    spelled by THAT row's parameter kinds. The docs json carries it as
+    ``{"call": name, "args": [...]}`` (code/methodDocs.js::literalFor renders
+    both languages from it); the validator sees the handle the call returns,
+    0 (test_robot_api_docs.py)."""
 
     name: str
+    args: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -281,7 +287,7 @@ class ApiCall:
     # artifacts read none of these, so they stay byte-identical):
     returns_de: str = ''             # value rows: what comes back, in German
     doc_de_java: str = ''            # only where doc_de names Python (None, [x, y, z], move_to …)
-    example: tuple = ()              # positional example args (ExampleRef = a variable)
+    example: tuple = ()              # positional example args (ExampleCall = a nested call)
     example_var: str = ''            # the variable a value row's example assigns
     # The BLOCK's tooltip text (robot_api.json only; no stub renders it): the
     # same promise as doc_de in the words a Blockly student reads — German, no
@@ -344,8 +350,8 @@ _DEST_DEF = _p('name', 'str', max_len=40, pattern=DESTINATION_NAME_RE, asset='pl
 _DEST_REF = _p('name', 'str', max_len=40, pattern=DESTINATION_NAME_RE, asset='place',
                doc_de='Der Name eines Ziels oder einer Position aus deiner Sammlung.')
 
-# The Greifziel variable a grasp-step example hands over (`ziel = robot.find(…)`).
-_EX_ZIEL = ExampleRef('ziel')
+# The Greifziel a grasp-step example hands over: the find call itself (N9).
+_EX_ZIEL = ExampleCall('find', ('wuerfel',))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -684,13 +690,15 @@ TYPE_DOCS: tuple[TypeDoc, ...] = (
         '    robot.move_above(ziel)\n'
         '    robot.descend_to(ziel)\n'
         '    robot.close_on_object(ziel)\n'
-        '    robot.lift()',
+        '    robot.lift()\n'
+        '    robot.mark_done(ziel)',
         'Robot.Greifziel ziel = Robot.find("wuerfel");\n'
         'if (ziel != null) {\n'
         '    Robot.moveAbove(ziel);\n'
         '    Robot.descendTo(ziel);\n'
         '    Robot.closeOnObject(ziel);\n'
         '    Robot.lift();\n'
+        '    Robot.markDone(ziel);\n'
         '}'),
     TypeDoc(
         'Greifobjekt', 'Greifobjekt',
@@ -1989,8 +1997,13 @@ def _example_literal(kind: str, value: Any, language: str) -> str:
     ``JSON.parse`` turns ``440.0`` into ``440``, so code/methodDocs.js renders
     by kind too, and test/test_robot_api_docs + methodDocs.test.js hold the two
     renderings equal)."""
-    if isinstance(value, ExampleRef):
-        return value.name
+    if isinstance(value, ExampleCall):
+        row = ROBOT_API_BY_NAME[value.name]
+        inner = ', '.join(
+            _example_literal(p.kind, v, language) for p, v in zip(row.params, value.args))
+        if language == 'python':
+            return f'robot.{row.name}({inner})'
+        return f'Robot.{row.java_name}({inner})'
     if kind == 'float':
         return repr(float(value))
     if kind == 'int':
@@ -2060,7 +2073,8 @@ def _method_doc_json(c: ApiCall) -> dict[str, Any]:
     out['signature_py'] = f'robot.{c.name}({_py_signature(c)})'
     out['signatures_java'] = [_java_signature(c, s) for s in _java_overload_specs(c)]
     out['example'] = {
-        'args': [{'ref': a.name} if isinstance(a, ExampleRef) else a for a in c.example],
+        'args': [{'call': a.name, 'args': list(a.args)} if isinstance(a, ExampleCall) else a
+                 for a in c.example],
         'var': c.example_var or None,
     }
     out['example_py'] = _example_line(c, 'python')

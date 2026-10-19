@@ -10,8 +10,10 @@ that does not compile would be the first thing a Java student meets.
 So this file builds ONE `Main.java` whose import block is EXACTLY the Java
 starter's (`codeProject.js::STARTER_FILES.java`, read from the source and
 pinned, so a starter change re-pins this test), puts every method example in
-a method of its own (a `Robot.Greifziel` parameter for every variable the
-example names) and every type example likewise, and compiles it against the
+a method of its own with NO variable in scope (an inserted example must run as
+it stands: a Greifziel argument is the nested call `Robot.find("wuerfel")`,
+never an undefined `ziel`, N9) and every type example likewise, and compiles it
+against the
 REAL runner sources (`Robot.java`, `RpcClient.java`, `Greifobjekt.java`,
 `EduJson.java`). A negative control proves the import block is what is being
 tested: the short `new Greifobjekt(…)` — without the starter importing it —
@@ -87,12 +89,7 @@ def _indent(body, prefix):
 def _main_java(imports, methods, types, extra_body=None):
     lines = list(imports) + ['', 'public class Main {']
     for i, m in enumerate(methods):
-        refs = []
-        for arg in m['example']['args']:
-            if isinstance(arg, dict) and 'ref' in arg and arg['ref'] not in refs:
-                refs.append(arg['ref'])
-        params = ', '.join(f'Robot.Greifziel {r}' for r in refs)
-        lines += [f'    // {m["name"]}', f'    static void ex{i}({params}) {{',
+        lines += [f'    // {m["name"]}', f'    static void ex{i}() {{',
                   _indent(m['example_java'], '        '), '    }', '']
     for i, t in enumerate(types):
         lines += [f'    // {t["name"]}', f'    static void t{i}() {{',
@@ -133,6 +130,9 @@ class StarterImports(unittest.TestCase):
         self.assertEqual([t['name'] for t in doc['types']], ['Greifziel', 'Greifobjekt'])
         for m in doc['methods']:
             self.assertTrue(m['example_java'].endswith(';'), m['name'])
+            # N9: no example names a variable of the student's program.
+            for arg in m['example']['args']:
+                self.assertFalse(isinstance(arg, dict) and 'ref' in arg, m['name'])
 
 
 @unittest.skipUnless(_JAVAC or os.environ.get('EDUBOTICS_REQUIRE_JAVAC') == '1',

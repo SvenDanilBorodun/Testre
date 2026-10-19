@@ -357,53 +357,31 @@ describe('WorkshopPage — sim toggle swaps only the right region', () => {
 });
 
 describe('WorkshopPage — Lernpfade are real-rig only (N1, owner decision Q5)', () => {
-  test('lernpfad_says_real_robot_only_in_sim', async () => {
+  // Fix round 2 (owner decision): the sentence lives in the simulator's own
+  // „Test im Simulator." notice (SimScene, pinned in SimScene.test.jsx), and
+  // the studio header looks exactly as it did before this round — no note and
+  // no disabled „Lernpfad" key there, in either mode (the header measured
+  // against main at 900–1920 px, with and without the leader bridge).
+  test('the header carries no Lernpfad note and no Lernpfad key, in either mode', async () => {
     render(<WorkshopPage isActive />);
     await screen.findByTestId('blockly-workspace');
-    expect(screen.queryByText(DE.TUTORIAL_REAL_ONLY)).toBeNull();
+    const header = screen.getByRole('banner');
+    const assertClean = () => {
+      expect(within(header).queryByText(DE.TUTORIAL_REAL_ONLY)).toBeNull();
+      expect(within(header).queryByRole('button', { name: DE.DOCK_TAB_TUTORIAL })).toBeNull();
+      expect(within(header).queryByTitle(DE.TUTORIAL_REAL_ONLY)).toBeNull();
+    };
+    assertClean();
     await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
     await screen.findByTestId('sim-stage');
-    // Where the dock's „Lernpfad" tab was, the simulator says why there is none.
-    const entry = screen.getByRole('button', { name: DE.DOCK_TAB_TUTORIAL });
-    expect(entry).toBeDisabled();
-    const note = screen.getByText(DE.TUTORIAL_REAL_ONLY);
-    expect(note).toBeVisible();
-    expect(entry.getAttribute('aria-describedby')).toBe(note.id);
+    assertClean();
+    // Nowhere else on the page either: SimStage (stubbed here) carries it.
+    expect(screen.queryByText(DE.TUTORIAL_REAL_ONLY)).toBeNull();
+    expect(screen.queryByRole('button', { name: DE.DOCK_TAB_TUTORIAL })).toBeNull();
+    expect(screen.queryByTestId('tutorial-real-only')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Simulator beenden' }));
     await screen.findByTestId('right-dock');
-    expect(screen.queryByText(DE.TUTORIAL_REAL_ONLY)).toBeNull();
-  });
-
-  // Fix round (header rows): at 1093 px under Sucher the note+key group used to
-  // wrap the header onto a THIRD row. The note now shrinks like the studio's
-  // subtitle hint (`.st-hint`): its own shrinking flex item, two lines and then
-  // „…", the whole sentence in its `title` and in the DOM (CSS truncation only).
-  // The group starts from a zero basis (it never forces a wrap), grows only to
-  // its own max-content (wide windows keep the whole sentence, the row stays
-  // right-aligned) and never below its min-content (the key stays whole).
-  test('the note truncates like the hint and keeps its whole sentence', async () => {
-    render(<WorkshopPage isActive />);
-    await screen.findByTestId('blockly-workspace');
-    await userEvent.click(screen.getByRole('button', { name: 'Test im Simulator' }));
-    await screen.findByTestId('sim-stage');
-    const note = screen.getByText(DE.TUTORIAL_REAL_ONLY);
-    expect(note.tagName).toBe('SPAN');
-    expect(note.getAttribute('title')).toBe(DE.TUTORIAL_REAL_ONLY);
-    expect(note.textContent).toBe(DE.TUTORIAL_REAL_ONLY);
-    for (const cls of ['line-clamp-2', 'min-w-0', 'max-w-[15rem]', 'st-reason']) {
-      expect(note.classList.contains(cls)).toBe(true);
-    }
-    const group = screen.getByTestId('tutorial-real-only');
-    expect(group).toContainElement(note);
-    for (const cls of ['grow', 'basis-0', 'min-w-min', 'max-w-max', 'justify-end']) {
-      expect(group.classList.contains(cls)).toBe(true);
-    }
-    const entry = screen.getByRole('button', { name: DE.DOCK_TAB_TUTORIAL });
-    expect(group).toContainElement(entry);
-    expect(entry.classList.contains('shrink-0')).toBe(true);
-    // The disabled key still names the reason for a screen reader.
-    expect(entry.getAttribute('aria-describedby')).toBe(note.id);
-    expect(entry.getAttribute('title')).toBe(DE.TUTORIAL_REAL_ONLY);
+    assertClean();
   });
 
   test('the note is German and names the real robot', () => {

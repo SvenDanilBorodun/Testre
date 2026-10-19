@@ -45,9 +45,11 @@ the camera sentence when it had crossed 1.0 s in between (5 of 24 seeds with a 3
 the verifier measured 1 in 24); the wait's look now uses the frame `_wait_frame_usable` judged and returns —
 24 of 24 wait until Stopp — while the look right before the motion stays strict.
 
-**Fix round (header rows).** The simulator's „Lernpfad" note pushed the Sucher header onto a third row at
-1093 px (153 px tall, base 105 px); it now shrinks like the subtitle hint (two lines, then „…", the whole sentence
-in its `title`), so the header is two rows and 105 px again at 1024–1093 px and unchanged at 1280/1366 px.
+**Fix round (header rows), 2026-10-19.** The Q5 sentence „Lernpfade gibt es nur am echten Roboter." plus a disabled
+„Lernpfad" key in the studio header cost the simulator header a row (Sucher: 2 rows / 105 px at 1366–1680 px, main
+1 / 59) and a shrinking note did not cure it, so (owner decision) the sentence moved into the simulator's dismissible
+„Test im Simulator." notice (`SimScene`'s `noticeEl`, inline; closed, it goes too) and the header is main's again:
+64 measured cells (900–1920 px, real/simulator, with/without the leader bridge) equal main's rows and height.
 
 ### Unreleased, 2026-10-13 / 14 — „Sucher": the student app's visual redesign
 

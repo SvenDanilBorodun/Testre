@@ -10,6 +10,7 @@
 
 import * as Blockly from 'blockly/core';
 import { DE, WORKSPACE_BOUNDS_M } from './messages_de';
+import { apiTooltip } from './apiDocs';
 
 const MOTION_COLOR = '#3b82f6';
 
@@ -44,7 +45,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Bewegt den Roboterarm zur Heimposition.',
+    tooltip: apiTooltip('edubotics_home'),
   },
   {
     type: 'edubotics_open_gripper',
@@ -52,7 +53,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Öffnet den Greifer.',
+    tooltip: apiTooltip('edubotics_open_gripper'),
   },
   {
     type: 'edubotics_close_gripper',
@@ -60,7 +61,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Schließt den Greifer.',
+    tooltip: apiTooltip('edubotics_close_gripper'),
   },
   // DESTINATION/TARGET accept a Ziel-WERT — the pinned-name string that
   // `edubotics_destination_ref` and `edubotics_object_position` both output.
@@ -100,8 +101,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Bewegt den Greifer zu einem Ziel-Block. Tempo „Standard" '
-      + 'übernimmt die globale Geschwindigkeit der Leiste.',
+    tooltip: apiTooltip('edubotics_move_to', { tempo: true }),
   },
   {
     type: 'edubotics_pickup',
@@ -111,9 +111,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip:
-      'Fährt über das Ziel, schließt den Greifer und hebt das '
-      + 'Objekt an. Tempo „Standard" übernimmt die globale Geschwindigkeit.',
+    tooltip: apiTooltip('edubotics_pickup', { tempo: true }),
   },
   {
     type: 'edubotics_drop_at',
@@ -123,9 +121,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip:
-      'Fährt zum Ziel, öffnet den Greifer und hebt den Arm wieder '
-      + 'an. Tempo „Standard" übernimmt die globale Geschwindigkeit.',
+    tooltip: apiTooltip('edubotics_drop_at', { tempo: true }),
   },
   {
     type: 'edubotics_wait_seconds',
@@ -134,7 +130,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Wartet die angegebene Zeit, bevor der nächste Block läuft.',
+    tooltip: apiTooltip('edubotics_wait_seconds'),
   },
   // Grasp split (Phase 1): the explicit pick sequence the student assembles
   // by hand (fahre über → senke auf → schließe um → hebe an). Each consumes a
@@ -148,8 +144,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Fährt den Greifer über das Greifziel, ohne abzusenken. Tempo '
-      + '„Standard" übernimmt die globale Geschwindigkeit.',
+    tooltip: apiTooltip('edubotics_move_above', { tempo: true }),
   },
   {
     type: 'edubotics_descend_to',
@@ -158,7 +153,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Senkt den Greifer auf Greifhöhe des Greifziels ab.',
+    tooltip: apiTooltip('edubotics_descend_to'),
   },
   {
     type: 'edubotics_close_on_object',
@@ -167,7 +162,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Schließt den Greifer um das Greifziel.',
+    tooltip: apiTooltip('edubotics_close_on_object'),
   },
   {
     type: 'edubotics_lift',
@@ -176,8 +171,7 @@ export const MOTION_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: MOTION_COLOR,
-    tooltip: 'Hebt das gegriffene Objekt an. Tempo „Standard" übernimmt die '
-      + 'globale Geschwindigkeit.',
+    tooltip: apiTooltip('edubotics_lift', { tempo: true }),
   },
 ];
 

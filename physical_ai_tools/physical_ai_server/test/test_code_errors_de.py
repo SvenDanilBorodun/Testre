@@ -108,3 +108,54 @@ def test_a_call_the_robot_knows_but_the_runner_lacks_names_the_version_gap():
     assert 'Meintest du robot.zeige?' in ce.sentence(
         'robot_method', file='main.py', line=3, name='zeigen',
         suggestion=robot_api.suggest('zeigen'))
+
+
+# ── area C: the Java launcher's reports, read the same way as Python's ─────
+
+def test_a_report_without_a_position_drops_the_position_prefix():
+    """F2: `System.exit(3)` (and any fault with no project frame) used to read
+    „Zeile 0 in : … (Code 3)". With no file or no line, the sentence starts
+    with what the program did."""
+    s = ce.sentence('other', exc_type='Code 3')
+    assert s == 'Das Programm ist mit einem Fehler abgebrochen (Code 3).'
+    assert ce.sentence('other', file='Main.java', line=0, exc_type='Code 1') \
+        == 'Das Programm ist mit einem Fehler abgebrochen (Code 1).'
+    assert ce.sentence('robot', relayed='Arm kaputt.') == 'Arm kaputt.'
+    assert ce.sentence('zero_division', file='', line=4) \
+        == 'Division durch 0 ist nicht erlaubt.'
+    # With a position nothing changes.
+    assert ce.sentence('zero_division', file='Main.java', line=4) \
+        == 'Zeile 4 in Main.java: Division durch 0 ist nicht erlaubt.'
+    gdl = _gdl()
+    for kind in ce.SENTENCES:
+        s = ce.sentence(kind, exc_type='X', name='n')
+        assert 'Zeile 0' not in s and ' in :' not in s, (kind, s)
+        assert _is_german(gdl, s), (kind, s)
+
+
+_NULL_DE = ('Hier ist kein Wert da (None bzw. null) — wurde die Variable vorher '
+            'belegt, und hat find etwas gefunden?')
+
+
+def test_the_null_sentence_is_chosen_from_the_exception_in_both_languages():
+    java = ce.sentence('other', file='Main.java', line=7, exc_type='NullPointerException')
+    py = ce.sentence('other', file='main.py', line=2, exc_type='AttributeError', name='None')
+    assert java == f'Zeile 7 in Main.java: {_NULL_DE}'
+    assert py == f'Zeile 2 in main.py: {_NULL_DE}'
+    # Any other AttributeError (a name that is not None) stays the class name.
+    other = ce.sentence('other', file='main.py', line=2, exc_type='AttributeError', name='x')
+    assert other == 'Zeile 2 in main.py: Das Programm ist mit einem Fehler abgebrochen (AttributeError).'
+    assert _is_german(_gdl(), java)
+
+
+def test_missing_static_main_is_german():
+    """m14: the launcher reports a missing or non-static `main` as kind
+    `other` with exc_type NoSuchMethodException and no position."""
+    s = ce.sentence('other', exc_type='NoSuchMethodException')
+    assert s == ('In Main.java fehlt die Methode „public static void main(String[] args)“ — '
+                 'ohne sie kann das Programm nicht starten.')
+    assert _is_german(_gdl(), s)
+    # The student's own reflective NoSuchMethodException has a position: it
+    # is an ordinary fault, not the missing entry point.
+    assert ce.sentence('other', file='Main.java', line=9, exc_type='NoSuchMethodException') \
+        == 'Zeile 9 in Main.java: Das Programm ist mit einem Fehler abgebrochen (NoSuchMethodException).'

@@ -255,3 +255,128 @@ def test_valid_divide_and_modulo_still_work():
     c2 = _StubCtx()
     Interpreter.from_json(_modulo_ws(7, 3)).execute(c2, lambda *a: None)
     assert c2.variables['r'] == 1
+
+
+# ── semantics round 2026-10-18, area A (the preview is the meaning) ─────────
+# The whole corpus runs in test_blockly_conformance.py; these pin the named
+# rules one by one, so a failure says which rule broke.
+
+def _num_block(v):
+    return {'block': {'type': 'math_number', 'fields': {'NUM': v}}}
+
+
+def _set_r(value_block: dict) -> str:
+    return _ws([{
+        'type': 'variables_set', 'fields': {'VAR': {'name': 'r'}},
+        'inputs': {'VALUE': {'block': value_block}},
+    }])
+
+
+def _list_of(*values) -> dict:
+    return {'type': 'lists_create_with', 'extraState': {'itemCount': len(values)},
+            'inputs': {f'ADD{k}': _num_block(v) for k, v in enumerate(values)}}
+
+
+def test_list_index_error_says_one_element():
+    """N13: „nur 1 Element", not „nur 1 Elemente"."""
+    interp = Interpreter.from_json(_set_r({
+        'type': 'lists_getIndex', 'fields': {'MODE': 'GET', 'WHERE': 'FROM_START'},
+        'inputs': {'VALUE': {'block': _list_of(7)}, 'AT': _num_block(3)},
+    }))
+    with pytest.raises(InterpreterError) as exc:
+        interp.execute(_StubCtx(), lambda *a: None)
+    assert 'die Liste hat nur 1 Element.' in str(exc.value), str(exc.value)
+
+
+def _for_ws(start, end, by) -> str:
+    return _ws([{
+        'type': 'variables_set', 'fields': {'VAR': {'name': 'trace'}},
+        'inputs': {'VALUE': {'block': {'type': 'lists_create_with', 'extraState': {'itemCount': 0}}}},
+        'next': {'block': {
+            'type': 'controls_for', 'fields': {'VAR': {'name': 'i'}},
+            'inputs': {
+                'FROM': _num_block(start), 'TO': _num_block(end), 'BY': _num_block(by),
+                'DO': {'block': {
+                    'type': 'lists_setIndex', 'fields': {'MODE': 'INSERT', 'WHERE': 'LAST'},
+                    'inputs': {
+                        'LIST': {'block': {'type': 'variables_get', 'fields': {'VAR': {'name': 'trace'}}}},
+                        'TO': {'block': {'type': 'variables_get', 'fields': {'VAR': {'name': 'i'}}}},
+                    },
+                }},
+            },
+        }},
+    }])
+
+
+@pytest.mark.parametrize('start,end,by,want', [
+    (3, 1, 1, [3, 2, 1]),
+    (1, 3, -1, [1, 2, 3]),
+    (3, 1, -1, [3, 2, 1]),
+    (1, 3, 1, [1, 2, 3]),
+    (10, 1, 3, [10, 7, 4, 1]),
+])
+def test_for_counts_in_the_direction_from_to_with_the_size_of_by(start, end, by, want):
+    """F1: direction from FROM vs TO, step |BY| — what the preview runs."""
+    ctx = _StubCtx()
+    Interpreter.from_json(_for_ws(start, end, by)).execute(ctx, lambda *a: None)
+    assert ctx.variables['trace'] == want
+
+
+def test_and_or_never_evaluate_b_when_a_decides():
+    """F6: „falsch und (1/0 = 1)" is falsch, „wahr oder (1/0 = 1)" is wahr."""
+    div0 = {'type': 'logic_compare', 'fields': {'OP': 'EQ'}, 'inputs': {
+        'A': {'block': {'type': 'math_arithmetic', 'fields': {'OP': 'DIVIDE'},
+                        'inputs': {'A': _num_block(1), 'B': _num_block(0)}}},
+        'B': _num_block(1)}}
+    for op, a, want in (('AND', 'FALSE', False), ('OR', 'TRUE', True)):
+        ctx = _StubCtx()
+        Interpreter.from_json(_set_r({
+            'type': 'logic_operation', 'fields': {'OP': op},
+            'inputs': {'A': {'block': {'type': 'logic_boolean', 'fields': {'BOOL': a}}},
+                       'B': {'block': div0}},
+        })).execute(ctx, lambda *a: None)
+        assert ctx.variables['r'] is want
+
+
+def test_a_text_in_a_math_socket_is_refused_in_german():
+    """F7: „2" + 1 is refused (the preview raises), never coerced to 3."""
+    interp = Interpreter.from_json(_set_r({
+        'type': 'math_arithmetic', 'fields': {'OP': 'ADD'},
+        'inputs': {'A': {'block': {'type': 'text', 'fields': {'TEXT': '2'}}},
+                   'B': _num_block(1)},
+    }))
+    with pytest.raises(InterpreterError) as exc:
+        interp.execute(_StubCtx(), lambda *a: None)
+    assert str(exc.value) == 'Hier wird eine Zahl gebraucht — „2" ist keine Zahl.'
+
+
+def test_length_of_a_number_is_refused_and_an_empty_socket_is_zero():
+    """N13: „Länge von 5" refuses (the preview's len() raises); an empty
+    socket is the generator's len([]) = 0."""
+    with pytest.raises(InterpreterError) as exc:
+        Interpreter.from_json(_set_r({
+            'type': 'lists_length', 'inputs': {'VALUE': _num_block(5)},
+        })).execute(_StubCtx(), lambda *a: None)
+    assert '„Länge von" braucht eine Liste oder einen Text.' == str(exc.value)
+    ctx = _StubCtx()
+    Interpreter.from_json(_set_r({'type': 'lists_length'})).execute(ctx, lambda *a: None)
+    assert ctx.variables['r'] == 0
+
+
+def test_index_of_works_on_text_and_an_empty_at_is_element_one():
+    """N13: the position of „b" in „abcb" (first 2, last 4); „hole Element"
+    with no number takes element 1, as the generator does."""
+    for end, want in (('FIRST', 2), ('LAST', 4)):
+        ctx = _StubCtx()
+        Interpreter.from_json(_set_r({
+            'type': 'lists_indexOf', 'fields': {'END': end},
+            'inputs': {'VALUE': {'block': {'type': 'text', 'fields': {'TEXT': 'abcb'}}},
+                       'FIND': {'block': {'type': 'text', 'fields': {'TEXT': 'b'}}}},
+        })).execute(ctx, lambda *a: None)
+        assert ctx.variables['r'] == want
+    ctx = _StubCtx()
+    Interpreter.from_json(_set_r({
+        'type': 'lists_getIndex', 'fields': {'MODE': 'GET', 'WHERE': 'FROM_START'},
+        'inputs': {'VALUE': {'block': _list_of(10, 20, 30)}},
+    })).execute(ctx, lambda *a: None)
+    assert ctx.variables['r'] == 10

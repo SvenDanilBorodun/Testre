@@ -55,6 +55,10 @@ _JAVA_DOC_ROWS = frozenset({
     'object_position',
 })
 
+# What a Blockly student cannot read in a block tooltip beyond the Python-isms:
+# the parameter names of the text API, which are English words.
+_PARAM_WORD = re.compile(r'\b(?:timeout|speed|level|seconds|freq|message|target|obj)\b')
+
 
 def _load_gdl():
     path = _REPO / '.github' / 'scripts' / 'german_detail_lint.py'
@@ -80,9 +84,9 @@ def _has_python_ism(s: str) -> bool:
 
 
 def _example_args(call: robot_api.ApiCall) -> list:
-    """The example as the wire would carry it: a variable as handle 0, the
-    defaults the stub appends after the given positionals."""
-    args = [0 if isinstance(a, robot_api.ExampleRef) else a for a in call.example]
+    """The example as the wire would carry it: a nested call as the handle it
+    returns (0), the defaults the stub appends after the given positionals."""
+    args = [0 if isinstance(a, robot_api.ExampleCall) else a for a in call.example]
     args += [p.default for p in call.params[len(call.example):]]
     return args
 
@@ -185,10 +189,13 @@ def test_the_example_lines_are_spelled_by_param_kind():
     assert by['tone']['example']['args'] == [440.0, 0.5]
     assert by['wait']['example_java'] == 'Robot.waitSeconds(1.5);'
     assert by['find']['example_java'] == 'Robot.Greifziel ziel = Robot.find("wuerfel");'
-    assert by['object_position']['example']['args'] == [{'ref': 'ziel'}]
-    assert by['object_position']['example_py'] == 'position = robot.object_position(ziel)'
+    assert by['object_position']['example']['args'] == [{'call': 'find', 'args': ['wuerfel']}]
+    assert by['object_position']['example_py'] == \
+        'position = robot.object_position(robot.find("wuerfel"))'
     assert by['object_position']['example_java'] == \
-        'double[] position = Robot.objectPosition(ziel);'
+        'double[] position = Robot.objectPosition(Robot.find("wuerfel"));'
+    assert by['move_above']['example_py'] == 'robot.move_above(robot.find("wuerfel"))'
+    assert by['move_above']['example_java'] == 'Robot.moveAbove(Robot.find("wuerfel"));'
     assert by['pin']['example_java'] == 'Robot.pin("Ablage", 0.2, 0.0, 0.0);'
     assert by['pin']['example_py'] == 'robot.pin("Ablage", 0.2, 0.0, 0.0)'
     assert by['zeige']['example_py'] == 'robot.zeige("Anzahl", 3)'
@@ -273,8 +280,11 @@ def test_the_older_five_artifacts_do_not_read_the_column_data(monkeypatch):
 def test_robot_api_json_carries_no_column_key():
     doc = json.loads(robot_api.export_json())
     for m in doc['methods'] + doc['internal']:
+        # The block tooltip (doc_de_block) rides robot_api.json, because the
+        # blocks read it from there — exactly on the rows that HAVE a block.
+        block = {'doc_de_block'} if m['block_type'] is not None else set()
         assert set(m) == {'name', 'java_name', 'block_type', 'table', 'budget', 'returns',
-                          'doc_de', 'params'}, m['name']
+                          'doc_de', 'params'} | block, m['name']
         for p in m['params']:
             assert 'doc_de' not in p and 'java_name' not in p, (m['name'], p['name'])
     assert 'types' not in doc
@@ -286,3 +296,149 @@ def test_the_docs_json_names_its_generator():
     # it must sit in exactly one lazy chunk, never in the entry.
     assert _DOCS['generated_by'] == \
         'physical_ai_server/workflow/robot_api.py::export_docs_json'
+
+
+# ── the block side of the contract (area B) ───────────────────────────────
+
+def test_every_param_exports_its_arg_key():
+    # pythonCodeGen.js reads the block input/field named arg_key.upper() (F8);
+    # the key is the one the handler reads (test_robot_api), never the
+    # student-facing parameter name: move_to/drop_at take `destination`.
+    doc = json.loads(robot_api.export_json())
+    for m in doc['methods'] + doc['internal']:
+        row = {c.name: c for c in _PUBLIC + robot_api.INTERNAL_METHODS}[m['name']]
+        assert [p['arg_key'] for p in m['params']] == [p.arg_key for p in row.params], m['name']
+    by = {m['name']: m for m in doc['methods']}
+    assert by['move_to']['params'][0]['arg_key'] == 'destination'
+    assert by['drop_at']['params'][0]['arg_key'] == 'destination'
+    assert by['pickup']['params'][0]['arg_key'] == 'target'
+    assert by['grasp']['params'][0]['arg_key'] == 'object_type'
+
+
+def test_every_block_row_has_a_german_block_doc_without_python_spelling():
+    for call in robot_api.ROBOT_API:
+        text = call.doc_de_block
+        assert text.strip(), call.name
+        assert _is_german(text), (call.name, text)
+        assert not _has_python_ism(text), (call.name, text)
+        assert not _PARAM_WORD.search(text), (call.name, text)
+    # The code-only and internal rows have no block, hence no block text.
+    for call in robot_api.CODE_ONLY_METHODS + robot_api.INTERNAL_METHODS:
+        assert call.doc_de_block == '', call.name
+    doc = json.loads(robot_api.export_json())
+    by = {m['name']: m for m in doc['methods']}
+    for call in robot_api.ROBOT_API:
+        assert by[call.name]['doc_de_block'] == call.doc_de_block, call.name
+    assert 'doc_de_block' not in by['zeige']
+
+
+def test_the_block_doc_fence_bites():
+    assert _PARAM_WORD.search('falsch, wenn timeout abläuft')
+    assert _PARAM_WORD.search('level ist info')
+    assert not _PARAM_WORD.search('Wartet so viele Sekunden (höchstens 300).')
+
+
+def test_the_block_doc_is_json_only_for_the_stubs(monkeypatch):
+    # The stubs never render the block text (no runner image change for a
+    # tooltip edit); only robot_api.json carries it.
+    before = robot_api.render_all()
+    monkeypatch.setattr(robot_api, 'ROBOT_API', tuple(
+        dataclasses.replace(c, doc_de_block='') for c in robot_api.ROBOT_API))
+    after = robot_api.render_all()
+    changed = {rel for rel in before if after[rel] != before[rel]}
+    assert changed == {robot_api.GENERATED_PATHS['json']}
+
+
+def test_pin_doc_names_a_table_point():
+    # F16: a pinned destination is plane-tracked (handlers/destinations.py::
+    # destination_pin), so its z is used only where no table height is known.
+    pin = robot_api.ROBOT_API_BY_NAME['pin']
+    for text in (pin.doc_de, pin.doc_de_java):
+        assert text.startswith('Merkt den Tischpunkt (x, y) in Metern'), text
+        assert 'z gilt nur, wenn der Tisch nicht vermessen ist (im Simulator nie).' in text
+    assert 'Tischpunkt' in pin.doc_de_block
+    assert 'Die Höhe gilt nur, wenn der Tisch nicht vermessen ist' in pin.doc_de_block
+
+
+def test_the_area_b_row_texts():
+    by = robot_api.ROBOT_API_BY_NAME
+    # Q3: a table Ziel is approached from above, release height.
+    for text in (by['move_to'].doc_de, by['move_to'].doc_de_java):
+        assert text.startswith('Fährt zum Ziel: ein Punkt '), text
+        assert text.endswith('; bei einem Ziel auf dem Tisch hält der Greifer darüber an '
+                             '(Ablagehöhe).'), text
+    assert 'hält er darüber an (Ablagehöhe)' in by['move_to'].doc_de_block
+    # Q8: the grasp waits and says what that means for the program.
+    for text in (by['grasp'].doc_de, by['grasp'].doc_de_block):
+        assert 'bis eines zu sehen ist — so lange geht das Programm hier nicht weiter; ' \
+               'Stopp beendet das Warten' in text, text
+        assert 'Simulator' in text, text
+    # Q10: an open gripper never holds.
+    for name in ('is_holding', 'wait_until_held'):
+        for text in (by[name].doc_de, by[name].doc_de_block):
+            assert text.endswith('Ein offener Greifer hält nie etwas.'), (name, text)
+    assert by['wait_until_held'].doc_de_java.endswith('Ein offener Greifer hält nie etwas.')
+    # Q9: the place/pick targets name a Ziel, never a Position.
+    assert by['pickup'].params[0].doc_de.startswith(
+        'Wo: der Name eines Ziels aus deiner Sammlung (keine Position) – ')
+    assert by['drop_at'].params[0].doc_de.startswith(
+        'Wo abgelegt wird: der Name eines Ziels aus deiner Sammlung (keine Position) – ')
+    for name in ('pickup', 'drop_at'):
+        assert 'Eine Position lehnt der Block ab.' in by[name].doc_de_block
+    # Q12: „aktuelle Position" stores a point, a Ziel.
+    assert by['pin_current'].doc_de == (
+        'Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den Punkt, '
+        'nicht die Armstellung).')
+    # F9a: the wait block answers falsch with a warning; it never aborts.
+    seen = by['wait_until_seen'].doc_de_block
+    assert 'falsch mit einer Warnung im Protokoll' in seen and 'läuft danach weiter' in seen
+    assert 'bricht' not in seen
+
+
+# ── N9 / F20: an example the student inserts runs as it stands ───────────
+
+def test_insertable_examples_need_no_variable():
+    # „Einfügen" writes the example line into the student's program: a name it
+    # reads that the program does not define is a NameError / a javac error
+    # (the audit's N9: five grasp-step examples used an undefined `ziel`). The
+    # only name an example may READ is the robot module; a value row's example
+    # assigns its own variable. Java is compiled with no variable in scope by
+    # robotis_ai_setup/tests/test_robot_api_examples_java.py.
+    for m in _DOCS['methods']:
+        tree = ast.parse(m['example_py'])
+        read = {n.id for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        assert read <= {'robot'}, (m['name'], m['example_py'], read)
+        assert not any(isinstance(a, dict) and 'ref' in a for a in m['example']['args']), \
+            m['name']
+    assert not hasattr(robot_api, 'ExampleRef')
+
+
+def test_a_nested_example_call_returns_what_its_parameter_takes():
+    nested = 0
+    for call in _PUBLIC:
+        for p, a in zip(call.params, call.example):
+            if isinstance(a, robot_api.ExampleCall):
+                nested += 1
+                row = robot_api.ROBOT_API_BY_NAME[a.name]
+                assert row.returns == p.kind, (call.name, a.name)
+                # The nested call's own arguments pass the robot's validator.
+                full = list(a.args) + [q.default for q in row.params[len(a.args):]]
+                assert code_rpc._validate_call(row, full) is None, (call.name, full)
+    assert nested == 5      # move_above, descend_to, close_on_object, mark_done, object_position
+
+
+def test_type_docs_greifziel_example_calls_mark_done():
+    # F20: the example is one pass of the grasp steps; without mark_done a
+    # student who wraps it in `while robot.sees("wuerfel"):` grasps the same
+    # cube until the cap. The Q7 smoke runs that loop in the simulator.
+    greifziel = next(t for t in robot_api.TYPE_DOCS if t.name == 'Greifziel')
+    tree = ast.parse(greifziel.example_py)
+    assert not any(isinstance(n, (ast.While, ast.For)) for n in ast.walk(tree))
+    find, branch = tree.body
+    assert isinstance(find, ast.Assign) and find.targets[0].id == 'ziel'
+    assert isinstance(branch, ast.If)
+    calls = [st.value.func.attr for st in branch.body]
+    assert calls == ['move_above', 'descend_to', 'close_on_object', 'lift', 'mark_done']
+    assert ast.unparse(branch.body[-1]) == 'robot.mark_done(ziel)'
+    assert greifziel.example_java.splitlines()[-2].strip() == 'Robot.markDone(ziel);'

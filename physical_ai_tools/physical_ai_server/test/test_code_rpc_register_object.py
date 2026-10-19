@@ -318,3 +318,72 @@ def test_shipped_stub_call_shape_matches_the_validator():
                   java)
     assert m, 'register_object call not found in Greifobjekt.java'
     assert len([x for x in m.group(1).split(',') if x.strip()]) == len(row)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# F17: the sentences name what the student wrote
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_sentences_name_student_attributes(server):
+    """A catalog refusal names the catalog's own fields (grasp_depth_m,
+    object_height_m, gripper_close_rad); the student wrote greiftiefe_m,
+    hoehe_m, greifer_schliessen_rad (Java: greiftiefeM …). One map in
+    robot_api translates, per language."""
+    for language, depth, height, close in (
+            ('python', 'greiftiefe_m', 'hoehe_m', 'greifer_schliessen_rad'),
+            ('java', 'greiftiefeM', 'hoeheM', 'greiferSchliessenRad')):
+        ctx = _ctx('edu6_studio')
+        ctx.code_language = language
+        session = server.open_run(ctx)
+        r = _register(session, 'banane', 'Banane', [30, 31], 0.02, 0.03)
+        assert r['ok'] is False and r['k'] == 'robot', r
+        assert depth in r['e'] and height in r['e'], r['e']
+        r = _register(session, 'banane', 'Banane', [30, 31], 0.04, 0.015, close=-0.4)
+        assert r['ok'] is False and close in r['e'], r['e']
+        for wire in ('grasp_depth_m', 'object_height_m', 'gripper_close_rad', 'label_de'):
+            assert wire not in r['e'], (wire, r['e'])
+        server.close_run(session)
+    assert set(robot_api.REGISTER_OBJECT_STUDENT_FIELDS.values()) <= {
+        p.name for p in robot_api.INTERNAL_METHODS_BY_NAME['register_object'].params}
+
+
+def _stub_module():
+    import importlib.util
+    path = _REPO / robot_api.GENERATED_PATHS['python_stub']
+    spec = importlib.util.spec_from_file_location('robot_stub_for_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_TYPE_NAMES = (
+    ('Rote Banane', 'rote_banane'), ('Würfel', 'wuerfel'), ('Banane', 'banane'),
+    ('Große Straße', 'grosse_strasse'), ('ÄÖÜ äöü ẞ', 'aeoeue_aeoeue_ss'),
+    ('  A--B  ', 'a_b'), ('rote_banane', 'rote_banane'), ('Teil 2', 'teil_2'),
+    ('x' * 30, 'x' * 24), ('ein sehr langer objektname', 'ein_sehr_langer_objektna'),
+    ('Ganz_langer_Name_mit_ende_', 'ganz_langer_name_mit_end'), ('!!!', 'objekt'),
+    ('Cafe\u0301', 'caf'),  # NFC first; an accent is not a German pair: no fold
+)
+
+
+def test_type_name_for_rote_banane_and_wuerfel():
+    """F17: a Greifobjekt's default type name comes from its label (Java) or
+    class name (Python) through ONE rule, robot_api.type_name_for, rendered
+    into both stubs. Before, Java sent "rote banane" (refused for its space)
+    and Python `Würfel` sent "würfel" (refused for its umlaut)."""
+    for label, want in _TYPE_NAMES:
+        got = robot_api.type_name_for(label)
+        assert got == want, (label, got)
+        assert re.fullmatch(robot_api.TYPE_NAME_RE, got), got
+    stub = _stub_module()
+    for label, want in _TYPE_NAMES:
+        assert stub._type_name_for(label) == want, label
+    sent = []
+    stub._rpc.call = lambda method, args, kind: sent.append((method, args))
+    Wuerfelchen = type('Würfelchen', (stub.Greifobjekt,),
+                       {'tag_ids': [30], 'hoehe_m': 0.03, 'greiftiefe_m': 0.01})
+    assert sent[-1][0] == 'register_object'
+    assert sent[-1][1][:2] == ['wuerfelchen', 'Würfelchen']
+    assert stub._type_name(Wuerfelchen) == 'wuerfelchen'
+    java = (_REPO / robot_api.GENERATED_PATHS['java_greifobjekt']).read_text(encoding='utf-8')
+    assert 'this.name = typeNameFor(label);' in java

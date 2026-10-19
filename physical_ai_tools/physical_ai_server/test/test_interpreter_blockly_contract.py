@@ -549,6 +549,19 @@ def test_a_zero_step_for_loop_is_refused():
 
 
 def test_a_non_finite_step_is_refused_rather_than_running_zero_times():
+    """Intent unchanged: a non-finite step is refused, never a silent loop of
+    zero passes. The NaN used to arrive as the TEXT 'nan'; since F7 (semantics
+    round 2026-10-18) a text in a math socket is refused earlier with the
+    number sentence, so it now comes from a number block, and the text case
+    asserts that sentence."""
+    with pytest.raises(InterpreterError) as exc:
+        _run([{'type': 'controls_for', 'fields': {'VAR': 'i'},
+               'inputs': {'FROM': {'block': _num(1)},
+                          'TO': {'block': _num(3)},
+                          'BY': {'block': {'type': 'math_number',
+                                           'fields': {'NUM': 'nan'}}},
+                          'DO': {'block': _set_text('body', 'ran')}}}])
+    assert 'Schrittweite' in str(exc.value)
     with pytest.raises(InterpreterError) as exc:
         _run([{'type': 'controls_for', 'fields': {'VAR': 'i'},
                'inputs': {'FROM': {'block': _num(1)},
@@ -556,7 +569,7 @@ def test_a_non_finite_step_is_refused_rather_than_running_zero_times():
                           'BY': {'block': {'type': 'text',
                                            'fields': {'TEXT': 'nan'}}},
                           'DO': {'block': _set_text('body', 'ran')}}}])
-    assert 'Schrittweite' in str(exc.value)
+    assert 'keine Zahl' in str(exc.value)
 
 
 def test_a_missing_step_still_defaults_to_one():

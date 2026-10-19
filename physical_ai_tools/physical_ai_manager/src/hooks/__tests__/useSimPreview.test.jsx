@@ -43,7 +43,10 @@ const mockApi = vi.hoisted(() => ({ getTrajectory: vi.fn() }));
 vi.mock('../../services/workflowApi', () => ({ __esModule: true, ...mockApi }));
 
 const mockStore = vi.hoisted(() => ({ getById: vi.fn() }));
-vi.mock('../../components/Workshop/sammlung/destinationStore', () => ({
+// Only the store is faked: the payload helper (entriesForRunPayload, which
+// buildDestinationPreviewProgram shares with the run since D1) stays real.
+vi.mock('../../components/Workshop/sammlung/destinationStore', async (importOriginal) => ({
+  ...(await importOriginal()),
   __esModule: true,
   getDestinationStore: () => mockStore,
 }));

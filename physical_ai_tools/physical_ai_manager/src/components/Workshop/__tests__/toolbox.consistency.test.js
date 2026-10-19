@@ -80,8 +80,9 @@ describe('Workshop toolbox consistency', () => {
       Object.keys(Blockly.Blocks).filter((t) => t.startsWith('edubotics_'))
     );
     // The destination and replay blocks live in the dynamic Sammlung flyouts
-    // (sammlung/toolboxCategories.js), which always emit SAMMLUNG_BASE_BLOCKS —
-    // pinned by sammlung/__tests__/toolboxCategories.test.jsx, which injects a
+    // (sammlung/toolboxCategories.js), which emit SAMMLUNG_BASE_BLOCKS (on the
+    // rig every one; the simulator leaves the camera pin out, N5) — pinned by
+    // sammlung/__tests__/toolboxCategories.test.jsx, which injects a
     // workspace (this file must not). Coverage counts them as in the palette.
     toolboxTypes = collectToolboxBlockTypes([buildToolbox(), SAMMLUNG_BASE_BLOCKS]);
   });
@@ -112,6 +113,35 @@ describe('Workshop toolbox consistency', () => {
     );
     // Helpful diff: lists any defined-but-unreachable block by name.
     expect(missing).toEqual([]);
+  });
+
+  test('„hole Element" and „setze Element" come with the number 1 in their AT socket (F13)', () => {
+    // An empty AT is element 1 at run time too (interpreter N13), but the
+    // student should SEE the number they can change, as on every other
+    // number socket of the palette.
+    const find = (node, type) => {
+      if (Array.isArray(node)) {
+        for (const n of node) {
+          const hit = find(n, type);
+          if (hit) return hit;
+        }
+      } else if (node && typeof node === 'object') {
+        if (node.kind === 'block' && node.type === type) return node;
+        for (const v of Object.values(node)) {
+          if (v && typeof v === 'object') {
+            const hit = find(v, type);
+            if (hit) return hit;
+          }
+        }
+      }
+      return null;
+    };
+    const at = ['lists_getIndex', 'lists_setIndex'].map((type) => {
+      const entry = find(buildToolbox(), type);
+      return [type, entry && entry.inputs ? entry.inputs.AT : null];
+    });
+    const shadow = { shadow: { type: 'math_number', fields: { NUM: 1 } } };
+    expect(at).toEqual([['lists_getIndex', shadow], ['lists_setIndex', shadow]]);
   });
 
   test('the edubotics_toast block is present in the toolbox (regression anchor)', () => {

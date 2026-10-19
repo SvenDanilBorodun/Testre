@@ -86,7 +86,10 @@ describe('pythonCodeGen — motion', () => {
     expect(code).toContain('robot.wait(2)');
   });
 
-  test('move_to consumes a destination_ref value as a string', async () => {
+  // Intent kept (F8, semantics round 2026-10-18): move_to consumes the
+  // destination_ref value. The reference block is a robot_api row of its own
+  // (`ziel`), so it renders as that row's call, which a text program writes too.
+  test('move_to consumes a destination_ref value (robot.ziel)', async () => {
     const code = await gen([
       {
         type: 'edubotics_move_to',
@@ -95,10 +98,13 @@ describe('pythonCodeGen — motion', () => {
         },
       },
     ]);
-    expect(code).toContain("robot.move_to('A')");
+    expect(code).toContain("robot.move_to(robot.ziel('A'))");
   });
 
-  test('per-move „Tempo" (GESCHWINDIGKEIT) renders as a tempo kwarg', async () => {
+  // Intent kept (F8): a non-default per-move Tempo is visible in the preview.
+  // The text API takes no tempo parameter, so it is a German end-of-line
+  // comment, never a keyword the robot would refuse.
+  test('per-move „Tempo" (GESCHWINDIGKEIT) renders as a German comment', async () => {
     const code = await gen([
       {
         type: 'edubotics_move_to',
@@ -109,8 +115,9 @@ describe('pythonCodeGen — motion', () => {
       },
       { type: 'edubotics_lift', fields: { GESCHWINDIGKEIT: 'langsam' } },
     ]);
-    expect(code).toContain("robot.move_to('A', tempo='schnell')");
-    expect(code).toContain("robot.lift(tempo='langsam')");
+    expect(code).toContain("robot.move_to(robot.ziel('A'))  # mit Tempo „schnell“");
+    expect(code).toContain('robot.lift()  # mit Tempo „langsam“');
+    expect(code).not.toContain('tempo=');
   });
 
   test('default „Tempo" (global) renders no tempo kwarg', async () => {
@@ -123,8 +130,8 @@ describe('pythonCodeGen — motion', () => {
         },
       },
     ]);
-    expect(code).toContain("robot.move_to('B')");
-    expect(code).not.toContain('tempo=');
+    expect(code).toContain("robot.move_to(robot.ziel('B'))\n");
+    expect(code).not.toContain('Tempo');
   });
 
   test('replay_trajectory maps to robot.replay(<name>)', async () => {
@@ -230,7 +237,8 @@ describe('pythonCodeGen — output + counters', () => {
     expect(code).toContain("robot.log('Hallo')");
     expect(code).toContain('robot.beep()');
     expect(code).toContain('robot.tone(880, 0.25)');
-    expect(code).toContain("robot.toast('Fertig', level='success', seconds=3)");
+    // Positional, in the row's order — like the Methoden examples (F8).
+    expect(code).toContain("robot.toast('Fertig', 'success', 3)");
   });
 
   test('counter blocks map to counter_reset/add/get', async () => {
@@ -249,7 +257,11 @@ describe('pythonCodeGen — output + counters', () => {
 });
 
 describe('pythonCodeGen — events + control', () => {
-  test('broadcast statement + when_broadcast hat wrapper', async () => {
+  // Intent kept (F8): a broadcast reaches its hat. The text API has no
+  // broadcast (a text program uses functions), so the preview CALLS the hat's
+  // function; the hat keeps today's `def when_…():` name and says in German
+  // that it runs by itself.
+  test('broadcast calls the when_broadcast hat function', async () => {
     const code = await gen([
       { type: 'edubotics_broadcast', fields: { EVENT_NAME: 'start' } },
       {
@@ -258,8 +270,9 @@ describe('pythonCodeGen — events + control', () => {
         next: { block: { type: 'edubotics_home' } },
       },
     ]);
-    expect(code).toContain("robot.broadcast('start')");
-    expect(code).toMatch(/def when_start\(\):\n {2}robot\.home\(\)/);
+    expect(code).not.toContain('robot.broadcast');
+    expect(code).toMatch(/# Läuft von selbst, sobald die Nachricht „start“ gesendet wird\.\ndef when_start\(\):\n {2}robot\.home\(\)/);
+    expect(code).toContain('when_start()  # Nachricht „start“');
   });
 
   test('when_counter_gt hat with empty body emits pass', async () => {
@@ -295,8 +308,10 @@ describe('pythonCodeGen — built-in blocks + edge cases', () => {
     expect(code).toContain('robot.home()');
   });
 
-  test('an empty workspace produces empty code', async () => {
-    expect((await gen([])).trim()).toBe('');
+  // Intent kept (F8): nothing in the workspace, nothing in the program — but
+  // the preview always starts with the text program's `import robot`.
+  test('an empty workspace produces only the import', async () => {
+    expect(await gen([])).toBe('import robot\n');
   });
 
   test('a null workspace resolves to an empty string', async () => {

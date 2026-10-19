@@ -92,8 +92,9 @@
 //                    table as receiver. Default false → NO renderer flags are set
 //                    and nothing casts (RecordPage + jsdom mock untouched).
 //   * showReach    — Sim-stage translucent reach-annulus ring on the 3D table
-//                    (the profile-driven annulus — reachAnnulus(caps), OMX
-//                    fallback 0.10/0.28, edu6 0.09/0.21 — shared with the 2D
+//                    (the profile-driven annulus or sector — reachAnnulus(caps),
+//                    OMX 0.10/0.25, fallback 0.10/0.28, edu6 0.09/0.21, Edu:1
+//                    ±90° — shared with the 2D
 //                    editor via ./Workshop/simConstants, not the solver's
 //                    wrist-centre span). Default false → the ring builds ZERO
 //                    primitives.
@@ -350,8 +351,9 @@ const FRAME_AXIS_SIZE_M = 0.07;
 
 // ── Sim-stage reach-annulus ring ("showReach") ───────────────────────────────
 // A translucent green ring on the table marking the graspable annulus. Its radii
-// are the profile-driven annulus (reachAnnulus(caps); OMX fallback 0.10/0.28,
-// edu6 0.09/0.21) shared with the 2D editor via simConstants, so the two panes
+// (and, for the Edu:1, its ±90° sector) are the profile-driven shape
+// (reachAnnulus(caps); OMX 0.10/0.25, fallback 0.10/0.28, edu6 0.09/0.21)
+// shared with the 2D editor via simConstants, so the two panes
 // never desync. Green matches the 2D SVG annulus stroke (#22c55e). Sits just
 // above the table (y=0.001) to avoid z-fighting; rendered only while showReach.
 const REACH_RING_COLOR = 0x22c55e;
@@ -1547,8 +1549,8 @@ export default function UrdfTwin({
   }, [showFrames]);
 
   // ---- Sim-stage: reach-annulus ring ("showReach") --------------------------
-  // Lazily builds a translucent green ring on the table (the 0.10/0.28 graspable
-  // annulus, shared with the 2D editor) the first time it is enabled, then just
+  // Lazily builds a translucent green ring on the table (the profile's graspable
+  // annulus or sector, shared with the 2D editor) the first time it is enabled, then just
   // toggles its visibility. For the default showReach=false call this returns
   // BEFORE constructing any THREE primitive — RecordPage's `<UrdfTwin/>` and the
   // jsdom three mock (no RingGeometry/MeshBasicMaterial) are never exercised.
@@ -1558,9 +1560,16 @@ export default function UrdfTwin({
     if (!showReach && !reachRingRef.current) return;
 
     let ring = reachRingRef.current;
-    // Profile change (annulus radii) → rebuild the ring geometry.
-    if (ring && ring.userData && ring.userData.annulusKey
-        !== `${annulus.inner}:${annulus.outer}`) {
+    // An arm that reaches only part of the circle (the Edu:1's ±90°, N6/N11 of
+    // the 2026-10-18 semantics round) draws only that sector. RingGeometry's
+    // angles run in its own XY plane from +x towards +y; laid flat by the
+    // -π/2 X-rotation below, local (x, y) IS the base frame's (x, y), so the
+    // bearing atan2(y, x) of the manifest is the geometry's theta unchanged.
+    const sector = annulus.sector || null;
+    const annulusKey = `${annulus.inner}:${annulus.outer}`
+      + (sector ? `:${sector.minDeg}:${sector.maxDeg}` : '');
+    // Profile change (annulus radii or sector) → rebuild the ring geometry.
+    if (ring && ring.userData && ring.userData.annulusKey !== annulusKey) {
       sceneRef.current.remove(ring);
       if (ring.geometry) ring.geometry.dispose();
       if (ring.material) ring.material.dispose();
@@ -1568,7 +1577,12 @@ export default function UrdfTwin({
       ring = null;
     }
     if (!ring) {
-      const geo = new THREE.RingGeometry(annulus.inner, annulus.outer, 64);
+      const geo = sector
+        ? new THREE.RingGeometry(
+          annulus.inner, annulus.outer, 64, 1,
+          (sector.minDeg * Math.PI) / 180, ((sector.maxDeg - sector.minDeg) * Math.PI) / 180,
+        )
+        : new THREE.RingGeometry(annulus.inner, annulus.outer, 64);
       const mat = new THREE.MeshBasicMaterial({
         color: REACH_RING_COLOR,
         transparent: true,
@@ -1577,7 +1591,7 @@ export default function UrdfTwin({
         depthWrite: false,
       });
       ring = new THREE.Mesh(geo, mat);
-      ring.userData.annulusKey = `${annulus.inner}:${annulus.outer}`;
+      ring.userData.annulusKey = annulusKey;
       ring.rotation.x = -Math.PI / 2; // flat on the table (viewer y=0 plane)
       ring.position.set(0, REACH_RING_Y, 0);
       scene.add(ring);

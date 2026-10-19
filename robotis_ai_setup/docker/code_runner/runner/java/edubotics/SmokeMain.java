@@ -283,6 +283,94 @@ public final class SmokeMain {
         check(RpcClient.asPoint(null) == null, "null point");
         check(RpcClient.asPoint(List.of(1.0, 2L, 3.5))[1] == 2.0, "point decode");
 
+        // 3. The launcher's exit report (area C, F2): every Java fault on its
+        //    existing wire kind, the deepest PROJECT frame as its position.
+        String[] sources = {"Main.java", "tiere/Hund.java", "Katze.java"};
+        Object[][] kinds = {
+            {new RpcClient.RobotError("Arm kaputt."), "robot"},
+            {new ArithmeticException("/ by zero"), "zero_division"},
+            {new ArrayIndexOutOfBoundsException(3), "index"},
+            {new java.util.NoSuchElementException(), "index"},
+            {new StackOverflowError(), "recursion"},
+            {new OutOfMemoryError(), "memory"},
+            {new ClassCastException(), "type"},
+            {new NumberFormatException("x"), "type"},
+            {new NullPointerException(), "other"},
+        };
+        for (Object[] row : kinds) {
+            Map<String, Object> info = Launcher.classify((Throwable) row[0], sources);
+            check(row[1].equals(info.get("kind")), "launcher kind of " + row[0]);
+            check(java.util.Set.of("kind", "file", "line", "exc_type", "name", "detail_line")
+                      .equals(info.keySet()), "launcher exit keys");
+        }
+        Map<String, Object> npe = Launcher.classify(new NullPointerException("s is null"), sources);
+        check("NullPointerException".equals(npe.get("exc_type")), "launcher exc_type");
+        check("Arm kaputt.".equals(Launcher.classify(new RpcClient.RobotError("Arm kaputt."), sources)
+                                       .get("detail_line")), "launcher relays the robot's sentence");
+        Throwable deep = new IllegalStateException("x");
+        deep.setStackTrace(new StackTraceElement[] {
+            new StackTraceElement("java.lang.Integer", "parseInt", "Integer.java", 600),
+            new StackTraceElement("edubotics.Robot", "home", "Robot.java", 20),
+            new StackTraceElement("tiere.Hund", "bellen", "Hund.java", 5),
+            new StackTraceElement("Main", "main", "Main.java", 4),
+        });
+        Map<String, Object> at = Launcher.classify(deep, sources);
+        check("tiere/Hund.java".equals(at.get("file")) && Integer.valueOf(5).equals(at.get("line")),
+              "launcher: the deepest project frame, by package path");
+        check("Katze.java".equals(Launcher.projectFile(
+                  new StackTraceElement("tiere.Katze", "m", "Katze.java", 7), sources)),
+              "launcher: a package that does not match its directory, by unique basename");
+        check(Launcher.projectFile(new StackTraceElement("Hund", "m", "Hund.java", 1),
+                                   new String[] {"a/Hund.java", "b/Hund.java"}) == null,
+              "launcher: an ambiguous basename is nobody's");
+        Map<String, Object> none = Launcher.classify(new NoSuchMethodException("Main.main"), sources);
+        check("".equals(none.get("file")) && Integer.valueOf(0).equals(none.get("line"))
+              && "NoSuchMethodException".equals(none.get("exc_type")),
+              "launcher: a missing main has no position");
+        Throwable wrapped = new java.lang.reflect.InvocationTargetException(
+            new ExceptionInInitializerError(new ArithmeticException("/ by zero")));
+        check(Launcher.unwrap(wrapped) instanceof ArithmeticException, "launcher unwraps both wrappers");
+        boolean noKeyboard = false;
+        try {
+            new java.util.Scanner(new java.io.InputStream() {
+                @Override
+                public int read() {
+                    throw new RpcClient.RobotError(Launcher.INPUT_DE);
+                }
+            }).nextLine();
+        } catch (RpcClient.RobotError e) {
+            noKeyboard = Launcher.INPUT_DE.equals(e.getMessage());
+        }
+        check(noKeyboard, "a Scanner on the refusing stdin raises the German sentence");
+
+        // 4. A null Greifziel is refused locally with the ONE sentence both
+        //    stubs share (robot_api.NOT_A_GREIFZIEL_DE).
+        boolean nullZiel = false;
+        try {
+            RpcClient.handleOf(null);
+        } catch (RpcClient.RobotError e) {
+            nullZiel = RpcClient.NOT_A_GREIFZIEL_DE.equals(e.getMessage());
+        }
+        check(nullZiel, "handleOf(null) refused in German");
+        // Robot.log passes a text whole up to 2000 characters (F11).
+        check(((String) RpcClient.shownObject("a".repeat(5000), 2000)).length() == 2000, "log text cut");
+        check(EduJson.encode(RpcClient.shownObject(List.of(1, "b"), 2000)).equals("[1,\"b\"]"), "log list");
+
+        // 5. Greifobjekt's default type name: robot_api.type_name_for, spelled
+        //    in Java (tests/test_code_runner_launcher_lockstep.py reads this
+        //    table and runs the Python rule over it).
+        String[][] typeNames = {
+            {"Rote Banane", "rote_banane"}, {"Würfel", "wuerfel"}, {"Banane", "banane"},
+            {"Große Straße", "grosse_strasse"}, {"ÄÖÜ äöü ẞ", "aeoeue_aeoeue_ss"},
+            {"  A--B  ", "a_b"}, {"rote_banane", "rote_banane"}, {"Teil 2", "teil_2"},
+            {"ein sehr langer objektname", "ein_sehr_langer_objektna"},
+            {"Ganz_langer_Name_mit_ende_", "ganz_langer_name_mit_end"}, {"!!!", "objekt"},
+            {"Cafe\u0301", "caf"},
+        };
+        for (String[] row : typeNames) {
+            check(row[1].equals(Greifobjekt.typeNameFor(row[0])), "type name of " + row[0]);
+        }
+
         System.out.println("JAVA SMOKE OK");
     }
 }

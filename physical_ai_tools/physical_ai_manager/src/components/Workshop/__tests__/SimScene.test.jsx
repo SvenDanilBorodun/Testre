@@ -606,12 +606,12 @@ describe('SimScene — the reach shape of the arm (N6/N11)', () => {
 
   test('a_tap_behind_the_edu1_is_snapped_into_the_sector', async () => {
     const onChange = vi.fn();
-    const { container } = render(
+    render(
       <SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={onChange} />,
       { capabilities: EDU1_REACH },
     );
     await screen.findByTestId('urdf-twin');
-    expect(container.querySelector('[data-testid="reach-sector"]')).not.toBeNull();
+    expect(screen.getByTestId('reach-sector')).toBeInTheDocument();
     const svg = giveBox();
     // px 75 → y = 0.30 − 75/500 = 0.15; py 175 → x = 0.32 − 175/500 = −0.03:
     // behind the arm, bearing ≈ 101°, nearest the +90° edge.
@@ -625,12 +625,12 @@ describe('SimScene — the reach shape of the arm (N6/N11)', () => {
 
   test('the OMX keeps its full ring (no sector drawn, a tap behind stays behind)', async () => {
     const onChange = vi.fn();
-    const { container } = render(
+    render(
       <SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={onChange} />,
       { capabilities: { reach_inner_m: 0.10, reach_outer_m: 0.25 } },
     );
     await screen.findByTestId('urdf-twin');
-    expect(container.querySelector('[data-testid="reach-sector"]')).toBeNull();
+    expect(screen.queryByTestId('reach-sector')).toBeNull();
     const svg = giveBox();
     // x = −0.03, y = 0.15 (r ≈ 0.153): inside the ring, behind the base.
     fireEvent.pointerDown(svg, { clientX: 75, clientY: 175 });
@@ -654,13 +654,16 @@ describe('SimScene — the reach shape of the arm (N6/N11)', () => {
     await screen.findByTestId('urdf-twin');
     // Kept where it was saved: loading never moves an object.
     expect(onChange).not.toHaveBeenCalled();
+    // SVG groups have no ARIA role, so a DOM query is the only way to assert on them.
+    // eslint-disable-next-line testing-library/no-container, testing-library/no-node-access
     const groups = [...container.querySelectorAll('[data-object-tag]')];
     const byTag = Object.fromEntries(groups.map((g) => [g.getAttribute('data-object-tag'), g]));
     expect(byTag['0'].getAttribute('data-unreachable')).toBe('false');
     expect(byTag['1'].getAttribute('data-unreachable')).toBe('true');
     expect(byTag['1'].textContent).toContain('nicht erreichbar');
     expect(byTag['0'].textContent).not.toContain('nicht erreichbar');
-    expect(byTag['1'].querySelector('[data-testid="unreachable-ring"]')).not.toBeNull();
+    expect(within(byTag['1']).getByTestId('unreachable-ring')).toBeInTheDocument();
+    expect(within(byTag['0']).queryByTestId('unreachable-ring')).toBeNull();
   });
 });
 

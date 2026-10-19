@@ -365,7 +365,7 @@ def test_the_replay_floor_credit_never_refuses_a_pose_touching_its_table():
     0.9–1.5708 rad): the table cut back to 0.9 rad refused 1657 of those
     touching their table; credited straight up rather than along the axis, the
     full table passed 3581 with the claw more than 10 mm under z = 0, worst
-    139 mm (along the axis 2471, worst 85 mm; cut back and straight up, 2788)."""
+    139 mm (along the axis 2471, worst 86 mm; cut back and straight up, 2788)."""
     from physical_ai_server.workflow.handlers import motion as M
 
     ik = Edu1IKSolver()

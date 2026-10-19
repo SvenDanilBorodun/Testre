@@ -183,7 +183,7 @@ _L_TOOL = 0.02125 + 0.065
 # end_effector.STL, rigid in the end_effector frame) — see tool_tip_rise_m. It
 # spans the claw's WHOLE window [0, 1.5708], not only the commanded band (0–0.9):
 # a claw opened by hand while the arm is limp stays that wide after the re-lock.
-# Negative near 0.14 rad: the tips dip before they rise. From ≈1.385 rad the tips
+# Negative near 0.14 rad: the tips dip before they rise. From ≈1.38 rad the tips
 # ride above the housing's own lowest point (43.75 mm), so the last band, which
 # covers [1.40, 1.5708] and everything past it, is the housing's plateau.
 _TIP_RISE_TABLE = (
@@ -696,7 +696,7 @@ class Edu1IKSolver:
         (``link5.STL`` + ``end_effector.STL``), over the claw's whole window
         0–1.5708 rad: each 0.05 rad band holds the MINIMUM true rise of the
         claw's lowest part anywhere inside it, rounded DOWN to 0.01 mm. Up to
-        ≈1.385 rad that part is a blade tip; past it the housing (43.75 mm above
+        ≈1.38 rad that part is a blade tip; past it the housing (43.75 mm above
         the closed tip), so the last band is a plateau and a value past the
         window is never credited more than the housing allows. A
         quadratic through the two CAD figures (86.25 mm closed, 68.8 mm at 0.9 rad)
@@ -705,7 +705,10 @@ class Edu1IKSolver:
         0.14 rad) and they only climb past the closed height at ≈0.28 rad; the
         quadratic over-credited by up to 1.88 mm (at 0.42 rad) — i.e. it approved
         points the floor check should have refused. A negative value therefore
-        makes the check STRICTER, never looser. ``test_edu1_claw_tip_rise_…``
+        makes a check that adds the rise straight up STRICTER, never looser;
+        set back along a tilted or upturned tool axis
+        (``motion.tool_tip_rise_world_z_m``) it is penalised less, by at most
+        twice the 0.65 mm dip, which is the true geometry of that point. ``test_edu1_claw_tip_rise_…``
         recomputes the true curve from the meshes and fails if any band
         over-credits. Rig gate E8 owns the physical curve."""
         try:

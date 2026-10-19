@@ -61,8 +61,8 @@ refuses from 11 mm under the table. The price, stated: what the points do not se
 random openings, a passing pose can put a mesh up to 83.3 mm below the table (box model: 19.3 mm), worst 16 mm at
 0–10° tilt rising to 80 mm at 60–90°, and in the commanded claw band the deepest parts are the claw housing (77 mm),
 the blades (64 mm) and link4 (44 mm), not only the blade edges; on the OMX a scratch oracle from the twin URDF puts
-the gripper housing up to 75 mm under (86 mm before). A claw opened by hand past 1.0 rad is credited only the rise
-table's last band (30 of 14,689 clear near-table poses refused). The property is a test now
+the gripper housing up to 75 mm under (86 mm before). A claw opened by hand past 1.0 rad was, until fix round 3, credited only the
+rise table's last band (30 of 14,689 clear near-table poses refused). The property is a test now
 (`test_arm_geometry_edu1.py::test_the_position_floor_check_never_refuses_a_pose_the_meshes_clear`: 6000 draws in the
 commanded band, 3953 clear, 0 refused, ~2 s; 200,000 draws in a scratch run, 132,248 clear, 0 refused).
 
@@ -78,6 +78,11 @@ stays open after the re-lock, but `edu1_ik._TIP_RISE_TABLE` stopped at 0.9 rad, 
 were refused (up to 9.1 % per 0.1 rad bucket); it now runs to 1.5708 rad (the housing's 43.74 mm plateau from
 1.40 rad): 0 refused in every bucket. The replay floor checks now credit the rise along the tool axis
 (`motion.tool_tip_rise_world_z_m`), because straight up the larger rows let a tilted open claw replay into the table.
+In the commanded band a tilted claw's take is judged more strictly too (13 of 300 random near-table takes newly
+refused, each with claw mesh below the table). Accepted residual (owner decision): each check still judges one
+point on the tool axis, so a tilted wide-open claw's blades can lie under the table; over 200,000 poses at
+0.9–1.5708 rad 11,592 deep takes pass (12,992 before the round, worst 91 mm against 122) and no touching take is
+refused (8,535 before), but under 60° of tilt slightly more pass than before (0–30°: 386 against 134 per 100,000).
 
 ### Unreleased, 2026-10-13 / 14 — „Sucher": the student app's visual redesign
 

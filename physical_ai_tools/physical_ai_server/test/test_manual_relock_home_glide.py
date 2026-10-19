@@ -1098,7 +1098,7 @@ def _edu1_true_claw_rise(g):
     SHIPPED finger meshes through RL_joint / LF_joint (URDF origins, flipped axes,
     mimic) and the claw housing (link5 + end_effector, rigid in the end_effector
     frame, which ``end_joint`` puts at link5's origin) — the ground truth
-    tool_tip_rise_m must never exceed. Past ≈1.385 rad the housing, not a blade,
+    tool_tip_rise_m must never exceed. Past ≈1.38 rad the housing, not a blade,
     is the lowest part."""
     import struct
     meshes = (Path(__file__).resolve().parents[2] / 'physical_ai_manager' / 'public'

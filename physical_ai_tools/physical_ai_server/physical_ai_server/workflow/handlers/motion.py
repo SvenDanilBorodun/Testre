@@ -705,7 +705,10 @@ def tool_tip_rise_world_z_m(ik, q_full, num_arm_joints: int, rot) -> float:
     ALONG the tool's world approach axis (``rot @ ik.approach_axis_local``),
     the very point ``home_planner.pose_floor_clearance`` judges, so a claw
     tilted by θ is credited ``rise · cos θ`` and never the whole rise straight
-    up (a tool pointing up is credited a negative share: stricter).
+    up (a tool pointing up is credited a negative share of a positive rise:
+    stricter; in the dip band near 0.14 rad, where the rise is negative, a
+    tilted or upturned tool is penalised less than one pointing straight down,
+    by at most about 1.3 mm, the true geometry of the judged point).
 
     For the replay floor checks, which judge the TCP's z: crediting the full
     rise vertically let a tilted, hand-opened claw pass with its blades and

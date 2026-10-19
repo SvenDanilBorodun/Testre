@@ -699,6 +699,33 @@ def tool_tip_rise_m(ik, q_full, num_arm_joints: int) -> float:
     return max(-0.005, min(0.06, rise))
 
 
+def tool_tip_rise_world_z_m(ik, q_full, num_arm_joints: int, rot) -> float:
+    """The WORLD-z share of :func:`tool_tip_rise_m` at the tool orientation
+    ``rot`` (the ``fk`` rotation of the same arm joints): the tip is set back
+    ALONG the tool's world approach axis (``rot @ ik.approach_axis_local``),
+    the very point ``home_planner.pose_floor_clearance`` judges, so a claw
+    tilted by θ is credited ``rise · cos θ`` and never the whole rise straight
+    up (a tool pointing up is credited a negative share: stricter).
+
+    For the replay floor checks, which judge the TCP's z: crediting the full
+    rise vertically let a tilted, hand-opened claw pass with its blades and
+    housing tens of millimetres under the table. 0.0 on every arm that models
+    no rise (OMX, edu6) without reading ``rot``; any failure answers 0.0, the
+    uncredited check. Never raises."""
+    rise = tool_tip_rise_m(ik, q_full, num_arm_joints)
+    if rise == 0.0:
+        return 0.0
+    try:
+        local = [float(v) for v in ik.approach_axis_local]
+        norm = math.sqrt(sum(v * v for v in local))
+        down = -sum(float(r) * v for r, v in zip(rot[2], local)) / norm
+    except Exception:  # noqa: BLE001
+        return 0.0
+    if not math.isfinite(down):
+        return 0.0
+    return rise * max(-1.0, min(1.0, down))
+
+
 class WorkflowError(Exception):
     """Raised by handlers with a German message ready for the editor's
     log strip and toast."""

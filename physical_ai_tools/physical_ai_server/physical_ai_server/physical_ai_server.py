@@ -6676,11 +6676,11 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 return False
             if pose is None:
                 return False
-            _R, t = pose
+            rot, t = pose
             fz = _motion._floor_z_at(shim, float(t[0]), float(t[1]))
             if fz is None:
                 return False
-            return (float(t[2]) + _motion.tool_tip_rise_m(ik, q6, _n_fk)
+            return (float(t[2]) + _motion.tool_tip_rise_world_z_m(ik, q6, _n_fk, rot)
                     < fz - _motion.WORKSPACE_FLOOR_MARGIN_M)
 
         return _lead_floor

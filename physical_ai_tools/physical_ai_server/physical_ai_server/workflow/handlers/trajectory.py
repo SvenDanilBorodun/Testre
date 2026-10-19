@@ -586,7 +586,7 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     from physical_ai_server.workflow.handlers.motion import (
         WORKSPACE_FLOOR_MARGIN_M as _FLOOR_MARGIN,
         _floor_z_at,
-        tool_tip_rise_m,
+        tool_tip_rise_world_z_m,
     )
 
     def _lead_floor(q6):
@@ -601,11 +601,11 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
             return False
         if pose is None:
             return False
-        _R, t = pose
+        rot, t = pose
         fz = _floor_z_at(ctx, float(t[0]), float(t[1]))
         if fz is None:
             return False
-        return float(t[2]) + tool_tip_rise_m(ik, q6, n) < fz - _FLOOR_MARGIN
+        return float(t[2]) + tool_tip_rise_world_z_m(ik, q6, n, rot) < fz - _FLOOR_MARGIN
 
     segmented = resegment_trajectory(
         points, speed, lead_in_from=lead_in, lead_in_floor_check=_lead_floor,

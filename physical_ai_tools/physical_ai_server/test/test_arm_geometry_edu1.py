@@ -351,3 +351,41 @@ def test_the_position_floor_check_never_refuses_a_hand_opened_claw_the_meshes_cl
                                      f'above z = 0): q={q}, claw={claw}') from None
         clear += truth >= 0.0
     assert clear > 1500, clear
+
+
+def test_the_replay_floor_credit_never_refuses_a_pose_touching_its_table():
+    """The two replay floor checks judge the TCP's z plus
+    ``motion.tool_tip_rise_world_z_m``: the claw's rise set back ALONG the tool
+    axis, the very tip the Position check judges. Over seeded in-limit poses at
+    claw openings across the whole window (0–1.5708 rad), judged against a flat
+    table at each pose's OWN lowest mesh point, none is refused; and the tilted,
+    hand-opened pose ``test_manual_relock_home_glide`` pins really has its
+    claw under the table. Measured 2026-10-19 (seed 1022, 3000 draws, ~2 s):
+    0 refused. A scratch run (seed 22, 100,000 draws, 42,581 of them at
+    0.9–1.5708 rad): the table cut back to 0.9 rad refused 1657 of those
+    touching their table; credited straight up rather than along the axis, the
+    full table passed 3581 with the claw more than 10 mm under z = 0, worst
+    139 mm (along the axis 2471, worst 85 mm; cut back and straight up, 2788)."""
+    from physical_ai_server.workflow.handlers import motion as M
+
+    ik = Edu1IKSolver()
+    urdf = _Urdf()
+    verts = {link: np.unique(urdf.vertices(link), axis=0)
+             for link in _BOX_LINKS[1:] + _GRIPPER_CHILDREN}
+
+    def lowest(q, claw, links=None):
+        qmap = {f'joint{i + 1}': q[i] for i in range(5)}
+        qmap.update({'RL_joint': claw, 'LF_joint': claw})
+        frames = urdf.frames(qmap)
+        return min(float((v @ frames[link][2, :3]).min() + frames[link][2, 3])
+                   for link, v in verts.items() if links is None or link in links)
+
+    rng = np.random.default_rng(1022)
+    for _ in range(3000):
+        q = [float(rng.uniform(lo, hi)) for (lo, hi) in ik.joint_limits]
+        claw = float(rng.uniform(0.0, 1.5708))
+        rot, t = ik.fk(q)
+        judged = float(t[2]) + M.tool_tip_rise_world_z_m(ik, q + [claw], 5, rot)
+        assert judged >= lowest(q, claw) - M.WORKSPACE_FLOOR_MARGIN_M, (q, claw)
+    q, claw = [-0.027, 2.237, 1.491, 0.096, -0.103], 1.5
+    assert lowest(q, claw, ('link5', 'end_effector', 'right_finger', 'left_finger')) < -0.03

@@ -1195,8 +1195,8 @@ def test_an_edu1_take_whose_OPEN_claw_touches_the_table_is_replayable():
     ctx = types.SimpleNamespace(z_table=0.0, table_plane=None)
 
     def floor(q_full):
-        _R, t = ik.fk(q_full[:5])
-        return (float(t[2]) + m.tool_tip_rise_m(ik, q_full, 5)
+        rot, t = ik.fk(q_full[:5])
+        return (float(t[2]) + m.tool_tip_rise_world_z_m(ik, q_full, 5, rot)
                 < m._floor_z_at(ctx, t[0], t[1]) - m.WORKSPACE_FLOOR_MARGIN_M)
     open_rows = [list(q) + [0.9, 0.0], list(q) + [0.9, 0.04]]
     tr.resegment_trajectory(open_rows, point_floor_check=floor, num_arm_joints=5)
@@ -1205,12 +1205,84 @@ def test_an_edu1_take_whose_OPEN_claw_touches_the_table_is_replayable():
         tr.resegment_trajectory(closed_rows, point_floor_check=floor, num_arm_joints=5)
 
 
-def test_both_replay_floor_checks_credit_the_claw_rise():
+def test_both_replay_floor_checks_credit_the_claw_rise_along_the_tool_axis():
+    """Both replay floor checks credit the rise through the ONE along-axis
+    helper, never the bare rise added to the TCP's z."""
     handler = Path(__import__('physical_ai_server.workflow.handlers.trajectory',
                               fromlist=['x']).__file__).read_text(encoding='utf-8')
-    assert 'tool_tip_rise_m(ik, q6, n)' in handler
-    assert '_motion.tool_tip_rise_m(ik, q6, _n_fk)' in _server_fn_source(
-        '_build_replay_lead_floor_check')
+    server = _server_fn_source('_build_replay_lead_floor_check')
+    assert 'tool_tip_rise_world_z_m(ik, q6, n, rot)' in handler
+    assert '_motion.tool_tip_rise_world_z_m(ik, q6, _n_fk, rot)' in server
+    assert 'tool_tip_rise_m(ik, q6' not in handler
+    assert 'tool_tip_rise_m(ik, q6' not in server
+
+
+def test_the_world_z_credit_is_the_tip_set_back_along_the_tool_axis():
+    """``tool_tip_rise_world_z_m`` is the z of exactly the point
+    ``home_planner.pose_floor_clearance`` judges (the closed tip minus the rise
+    along the world approach axis): ``rise · cos(tilt)``, negative for a tool
+    pointing up. 0.0 on the OMX (no rise) and when the axis cannot be read."""
+    from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
+    from physical_ai_server.workflow.handlers import motion as m
+    from physical_ai_server.workflow.ik_solver import IKSolver
+    ik = Edu1IKSolver()
+    rng = np.random.default_rng(1021)
+    signs = set()
+    for _ in range(300):
+        q = [float(rng.uniform(lo, hi)) for lo, hi in ik.joint_limits]
+        g = float(rng.uniform(0.0, 1.5708))
+        rot, t = ik.fk(q)
+        axis = np.asarray(rot) @ np.asarray(ik.approach_axis_local, dtype=float)
+        tip = np.asarray(t) - m.tool_tip_rise_m(ik, q + [g], 5) * axis
+        credit = m.tool_tip_rise_world_z_m(ik, q + [g], 5, rot)
+        assert float(t[2]) + credit == pytest.approx(float(tip[2]), abs=1e-12)
+        assert abs(credit) <= abs(m.tool_tip_rise_m(ik, q + [g], 5)) + 1e-12
+        signs.add(credit > 0)
+    assert signs == {True, False}
+    omx = IKSolver()
+    assert m.tool_tip_rise_world_z_m(omx, [0.0, -1.0, 1.0, 0.0, 0.0, 0.8], 5, None) == 0.0
+    blind = types.SimpleNamespace(tool_tip_rise_m=lambda g: 0.03, approach_axis_local=None)
+    assert m.tool_tip_rise_world_z_m(blind, [0.0] * 5 + [1.2], 5, np.eye(3)) == 0.0
+
+
+# A tilted (53°), hand-opened (1.5 rad) Edu:1 pose whose claw meshes lie 35 mm
+# under z = 0 (test_arm_geometry_edu1 proves it on the meshes): the TCP 47.7 mm
+# under the table, the rise 43.7 mm. Credited straight up the check judged
+# -3.9 mm and passed; along the tool axis it judges -21.2 mm.
+_TILTED_OPEN_CLAW_BELOW = ([-0.027, 2.237, 1.491, 0.096, -0.103], 1.5)
+
+
+def test_a_tilted_open_claw_under_the_table_is_refused_by_both_replay_checks(monkeypatch):
+    from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
+    from physical_ai_server.workflow.handlers import motion as m
+    from physical_ai_server.workflow.handlers import trajectory as tr
+    ik = Edu1IKSolver()
+    q, g = _TILTED_OPEN_CLAW_BELOW
+    check = _load(['_build_replay_lead_floor_check'], {})['_build_replay_lead_floor_check'](
+        types.SimpleNamespace(_build_ik_solver=lambda: ik,
+                              _load_workflow_calibration=lambda: {'z_table': 0.0},
+                              _profile_n=lambda: 5))
+    assert check(q + [g]) is True
+    assert check(q + [0.0]) is True
+
+    def replay():
+        chunks = []
+        ctx = types.SimpleNamespace(
+            trajectories={'B': {'fps': 25, 'points': [q + [g, 0.0], q + [g, 0.04]]}},
+            last_full_joints=q + [g], last_arm_joints=list(q), num_arm_joints=5, ik=ik,
+            z_table=0.0, table_plane=None, zones=None, motion_lock=threading.RLock(),
+            should_stop=lambda: False, tempo=1.0,
+            publisher=lambda c: chunks.append(c), log=lambda *a, **k: None)
+        tr.replay_trajectory(ctx, {'name': 'B'})
+        return chunks
+    with pytest.raises(m.WorkflowError):
+        replay()
+    # Credited straight up, as both checks did before, the same take was
+    # replayed into the table.
+    monkeypatch.setattr(m, 'tool_tip_rise_world_z_m',
+                        lambda ik_, q_full, n, rot: m.tool_tip_rise_m(ik_, q_full, n))
+    assert check(q + [g]) is False
+    assert replay()
 
 
 def test_sub_millisecond_recorded_steps_stay_strictly_increasing_on_the_wire():

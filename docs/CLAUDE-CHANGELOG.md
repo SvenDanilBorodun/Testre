@@ -30,20 +30,41 @@ maximal `robot.log` frame costs about 1.8 ms (a maximal `zeige` ~2 ms, the Rule 
 rows: 3 grasps for one cube put back twice (1 before). Positions on the floor ladder: grasp-like 0 % refused,
 arbitrary near-table OMX poses 26–38 %.
 
-**Fix round, 2026-10-19 (owner decisions on three verifier findings).** (1) A Position taught BELOW the table
-was driven to: the reversed rung of `_pose_route` let the target set its own floor allowance (OMX EE z −0.031 with
-a link at −0.067 and Edu:1 EE z −0.032 both „finished", saying only „über einen Zwischenpunkt"; the same point as a
-Ziel refuses). `motion._refuse_position_below_table` now judges the taught pose's own clearance first, with the
-ladder's own models, against this rig's table (the touch-off plane minus `tool_tip_below_ee_m`, else z = 0):
-both cases refuse with „Die Position „P" liegt unter der Tischebene — bitte die Position an diesem Roboter neu
-vormachen." and nothing moves; the probe's 0/−1/−3 mm fingertip cases still run. Cost, measured with the Edu:1 mesh
-oracle of `test_arm_geometry_edu1.py`: of 400 random physically clear poses whose lowest mesh point is 0–50 mm
-above the table, 11 (2.8 %) read below −20 mm in the box model and are now refused (worst −57.6 mm); 0 of 1354
-strict-vertical touching Edu:1 poses and 0 of 1931 OMX ones are. (2) One reversed leg was labelled `'via'`; both
-rungs now label by leg count. (3) Q14: the wait judged the frame's age, then its look read the age again and raised
-the camera sentence when it had crossed 1.0 s in between (5 of 24 seeds with a 30 ms frame fetch on this host;
-the verifier measured 1 in 24); the wait's look now uses the frame `_wait_frame_usable` judged and returns —
-24 of 24 wait until Stopp — while the look right before the motion stays strict.
+**Fix round, 2026-10-19 (owner decisions on three verifier findings).** (1) A Position taught BELOW the table was
+driven to: the reversed rung of `_pose_route` let the target set its own floor allowance (OMX EE z −0.031 with a
+link at −0.067 and Edu:1 EE z −0.032 both „finished", saying only „über einen Zwischenpunkt"; the same point as a
+Ziel refuses). `motion._refuse_position_below_table` now judges the taught pose's own clearance first, against this
+rig's table (the touch-off plane minus `tool_tip_below_ee_m`, else z = 0): both cases refuse with „Die Position „P"
+liegt unter der Tischebene — bitte die Position an diesem Roboter neu vormachen." and nothing moves; the probe's
+0/−1/−3 mm fingertip cases still run. This first version used the ladder's own models (the box model on the Edu:1,
+the point model on the OMX, 20 mm allowance), and its cost was quoted wrongly: „11 of 400 random clear poses
+(2.8 %)" counted a population dominated by poses whose lowest point is the fixed link1 at 43.7 mm. The next verifier
+measured the poses that matter, tilted Positions that touch the table, and the box model refused 11–86 % of them per
+tilt band from 10° to 90° (see fix round 2). (2) One reversed leg was labelled `'via'`; both rungs now label by leg
+count. (3) Q14: the wait judged the frame's age, then its look read the age again and raised the camera sentence
+when it had crossed 1.0 s in between (5 of 24 seeds with a 30 ms frame fetch on this host; the verifier measured 1
+in 24); the wait's look now uses the frame `_wait_frame_usable` judged and returns — 24 of 24 wait until Stopp —
+while the look right before the motion stays strict.
+
+**Fix round 2, 2026-10-19 (owner decisions on the next verifier's finding).** The box model reads a tilted Edu:1
+claw far below its meshes: of the poses the mesh oracle of `test_arm_geometry_edu1.py` proves clear of the table for
+every claw opening with their lowest point 0–5 mm up, it refused 0/229 at 0–10° claw tilt, 30/265 at 10–20°, 155/238
+at 20–30°, 220/273 at 30–45°, 120/139 at 45–60° and 111/170 at 60–90°, and all twelve sampled tilted touching
+Positions (0.6–19.9 mm up) in the simulator; the OMX's 20 mm allowance drove to a fingertip 19 mm under the table.
+`home_planner.pose_floor_clearance` is now the point model on both arms: the joint points (`ik.link_points` at one
+sample per link) and the fingertip at the CARRIED claw opening, the solver's closed fingertip set back along the
+world approach axis by `motion.tool_tip_rise_m` (an open Edu:1 claw's tips ride up 17 mm at 0.9 rad); the margin is
+a Ziel's 1 cm (`motion.WORKSPACE_FLOOR_MARGIN_M`), `FLOOR_TOL_M <= 0` stays the rollback. Measured with the same
+oracle and seeds: 0 refusals in every one of those bands, at the closed claw and at each of nine openings, and 0 in
+every cell of the verifier's height × tilt table (before: up to 945/1261); the twelve Positions are reached; the OMX
+refuses from 11 mm under the table. The price, stated: what the points do not see. Over 10⁶ uniform Edu:1 poses at
+random openings, a passing pose can put a mesh up to 83.3 mm below the table (box model: 19.3 mm), worst 16 mm at
+0–10° tilt rising to 80 mm at 60–90°, and in the commanded claw band the deepest parts are the claw housing (77 mm),
+the blades (64 mm) and link4 (44 mm), not only the blade edges; on the OMX a scratch oracle from the twin URDF puts
+the gripper housing up to 75 mm under (86 mm before). A claw opened by hand past 1.0 rad is credited only the rise
+table's last band (30 of 14,689 clear near-table poses refused). The property is a test now
+(`test_arm_geometry_edu1.py::test_the_position_floor_check_never_refuses_a_pose_the_meshes_clear`: 6000 draws in the
+commanded band, 3953 clear, 0 refused, ~2 s; 200,000 draws in a scratch run, 132,248 clear, 0 refused).
 
 **Fix round (header rows).** The simulator's „Lernpfad" note pushed the Sucher header onto a third row at
 1093 px (153 px tall, base 105 px); it now shrinks like the subtitle hint (two lines, then „…", the whole sentence

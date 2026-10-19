@@ -47,14 +47,16 @@ export function apiTooltip(blockType, { tempo = false } = {}) {
 
 /**
  * `{min, max}` of a parameter (by its `arg_key`), as robot_api.py bounds it.
- * Throws when the row or the bound is missing: a block definition that names
- * a parameter the table does not have must fail at registration, not drift.
+ * `fallback` only keeps the editor alive if the generated table ever lacked
+ * the bound (these modules are evaluated at import, so a throw here would
+ * take the whole page down); blocks/__tests__/fieldRangesFromApi.test.js
+ * fails on exactly that drift.
  */
-export function apiRange(blockType, argKey) {
+export function apiRange(blockType, argKey, fallback) {
   const row = ROWS.get(blockType);
   const param = row && (row.params || []).find((p) => p.arg_key === argKey);
   if (!param || typeof param.lo !== 'number' || typeof param.hi !== 'number') {
-    throw new Error(`robot_api.json has no range for ${blockType}.${argKey}`);
+    return { min: fallback.min, max: fallback.max };
   }
   return { min: param.lo, max: param.hi };
 }

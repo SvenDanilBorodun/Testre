@@ -18,8 +18,8 @@ const PERCEPTION_COLOR = '#22c55e';
 // (robot_api.py's `timeout` parameter, 0 to 300 s; F15 — the editor allowed
 // 1–120). Widening never changes a saved value: a field validator guards an
 // edit, not a load.
-const SEEN_TIMEOUT = apiRange('edubotics_wait_until_object_seen', 'timeout');
-const HELD_TIMEOUT = apiRange('edubotics_wait_until_held', 'timeout');
+const SEEN_TIMEOUT = apiRange('edubotics_wait_until_object_seen', 'timeout', { min: 0, max: 300 });
+const HELD_TIMEOUT = apiRange('edubotics_wait_until_held', 'timeout', { min: 0, max: 300 });
 
 // ── Named-object dynamic dropdown (Roboter Studio AprilTag grasping) ─────────
 // The object-type list comes from the RUNTIME catalog (GetObjectCatalog over

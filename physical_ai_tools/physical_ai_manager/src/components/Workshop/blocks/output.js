@@ -17,9 +17,11 @@ const OUTPUT_COLOR = '#a855f7';
 // Tone bounds — exactly what the robot takes (robot_api.py's `tone` row:
 // 100–4000 Hz so a classroom's speakers are spared, 0.05–5 s). The runtime in
 // useRosTopicSubscription generates the audio with an OscillatorNode.
-const { min: TONE_FREQ_MIN, max: TONE_FREQ_MAX } = apiRange('edubotics_play_tone', 'freq');
-const { min: TONE_SECONDS_MIN, max: TONE_SECONDS_MAX } = apiRange('edubotics_play_tone', 'seconds');
-const TOAST_SECONDS = apiRange('edubotics_toast', 'seconds');
+const { min: TONE_FREQ_MIN, max: TONE_FREQ_MAX } = apiRange('edubotics_play_tone', 'freq', { min: 100, max: 4000 });
+const { min: TONE_SECONDS_MIN, max: TONE_SECONDS_MAX } = apiRange(
+  'edubotics_play_tone', 'seconds', { min: 0.05, max: 5 },
+);
+const TOAST_SECONDS = apiRange('edubotics_toast', 'seconds', { min: 1, max: 15 });
 
 export const OUTPUT_BLOCKS = [
   {

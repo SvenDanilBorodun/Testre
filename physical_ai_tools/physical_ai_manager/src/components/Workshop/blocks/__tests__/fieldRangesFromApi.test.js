@@ -17,6 +17,7 @@
 import * as Blockly from 'blockly/core';
 import { describe, expect, it } from 'vitest';
 import { ROW_BLOCKS, registerEverything, fieldsOf } from './_apiBlocks';
+import { apiRange } from '../apiDocs';
 
 // Registered at module scope: `it.each` below is collected before any hook.
 registerEverything();
@@ -53,6 +54,11 @@ describe('number field ranges come from robot_api.json', () => {
       const f = ws.newBlock(type).getField('TIMEOUT');
       expect([f.getMin(), f.getMax()]).toEqual([0, 300]);
     }
+  });
+
+  it('a bound the table lacks keeps the caller’s fallback instead of breaking the page', () => {
+    expect(apiRange('edubotics_nope', 'timeout', { min: 1, max: 2 })).toEqual({ min: 1, max: 2 });
+    expect(apiRange('edubotics_wait_until_held', 'timeout', { min: 1, max: 2 })).toEqual({ min: 0, max: 300 });
   });
 
   it('a saved TIMEOUT outside the old range loads unchanged', () => {

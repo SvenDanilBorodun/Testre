@@ -10,6 +10,7 @@
 
 import * as Blockly from 'blockly/core';
 import { DE } from './messages_de';
+import { apiTooltip } from './apiDocs';
 import { setEditValidator } from './fieldLoad';
 import { SAMMLUNG_COLOURS } from '../sammlung/sammlungTabs';
 
@@ -55,10 +56,7 @@ export const TRAJECTORY_BLOCKS = [
     previousStatement: null,
     nextStatement: null,
     colour: TRAJECTORY_COLOR,
-    tooltip:
-      'Spielt eine zuvor aufgenommene Bewegung ab (gleicher Name wie unter '
-      + '„Bewegungen"). Mach die Bewegung zuerst mit „Bewegung vormachen" vor '
-      + 'und gib ihr genau diesen Namen.',
+    tooltip: apiTooltip(REPLAY_BLOCK_TYPE),
     extensions: ['edubotics_validate_trajectory_name'],
   },
 ];

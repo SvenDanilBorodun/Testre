@@ -19,6 +19,7 @@
 
 import { DE } from '../components/Workshop/blocks/messages_de';
 import { trajectoryMatchesRig } from './trajectoryIdentity';
+import { entriesForRunPayload } from '../components/Workshop/sammlung/destinationStore';
 
 // How long the virtual arm rests on the previewed pose before the run ends.
 export const PREVIEW_HOLD_S = 1.5;
@@ -102,7 +103,8 @@ export function buildDestinationPreviewProgram({ entry, simScene, tempo }) {
       }],
     },
     ...sceneSiblings(simScene, tempo),
-    destinations: [{ name: entry.name, kind: entry.kind, x: entry.x, y: entry.y, z: entry.z }],
+    // The same entry a run sends (D1), a Position's taught pose included.
+    destinations: entriesForRunPayload([entry]),
   };
 }
 

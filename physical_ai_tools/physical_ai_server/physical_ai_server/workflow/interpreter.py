@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import math
 import os
 import random
@@ -48,6 +49,8 @@ from physical_ai_server.workflow.handlers.motion import (
     _reacquire_after_release,
 )
 
+
+_logger = logging.getLogger(__name__)
 
 # Hat block types — collected by Interpreter.split_roots() and run as
 # separate handler stacks by WorkflowManager.
@@ -209,6 +212,59 @@ _BUILTIN_VALUE_TYPES: frozenset[str] = frozenset({
     'procedures_callreturn',
 })
 
+# The German name a student reads on a block, for the one sentence that
+# reports an UNEXPECTED failure inside it (F7 of the 2026-10-18 semantics
+# round). That sentence used to append Python's own exception text („could not
+# convert string to float: 'abc'") to a German surface; the Python text now
+# goes to the server log only. Unlisted types fall back to their type id.
+_BLOCK_LABEL_DE: dict[str, str] = {
+    'math_number': 'Zahl',
+    'math_arithmetic': 'Rechnen',
+    'math_round': 'runde',
+    'math_modulo': 'Rest von',
+    'math_constrain': 'begrenze',
+    'math_random_int': 'Zufallszahl',
+    'math_change': 'erhöhe',
+    'text': 'Text',
+    'text_join': 'erstelle Text aus',
+    'logic_boolean': 'wahr/falsch',
+    'logic_negate': 'nicht',
+    'logic_compare': 'Vergleich',
+    'logic_operation': 'und/oder',
+    'variables_get': 'Variable',
+    'variables_set': 'setze',
+    'lists_create_with': 'erzeuge Liste mit',
+    'lists_repeat': 'erzeuge Liste mit … Mal',
+    'lists_length': 'Länge von',
+    'lists_isEmpty': 'ist leer',
+    'lists_indexOf': 'suche in der Liste',
+    'lists_getIndex': 'hole Element',
+    'lists_setIndex': 'setze Element',
+    'lists_getSublist': 'nimm Teilliste',
+    'controls_if': 'falls',
+    'controls_repeat_ext': 'wiederhole',
+    'controls_whileUntil': 'wiederhole solange',
+    'controls_for': 'zähle',
+    'controls_forEach': 'für jeden Wert',
+    'procedures_callreturn': 'Funktionsaufruf',
+    'procedures_callnoreturn': 'Funktionsaufruf',
+}
+
+
+def _block_label_de(btype: Any) -> str:
+    return _BLOCK_LABEL_DE.get(btype, str(btype or '?'))
+
+
+def _unexpected_block_error(btype: Any, exc: BaseException, *, value: bool) -> 'InterpreterError':
+    """The German refusal for an exception no block raised on purpose.
+
+    Python's own text (English, and naming internals) is logged for the
+    maintainer and never reaches the student."""
+    _logger.warning('block %s failed: %s: %s', btype, type(exc).__name__, exc)
+    verb = 'ausgewertet' if value else 'ausgeführt'
+    return InterpreterError(
+        f'Der Block „{_block_label_de(btype)}" konnte nicht {verb} werden.')
+
 
 def _is_disabled(block: Any) -> bool:
     """True when Blockly has marked ``block`` disabled.
@@ -359,7 +415,10 @@ class Interpreter:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            raise InterpreterError(f'Workflow-JSON konnte nicht gelesen werden: {e}')
+            _logger.warning('workflow JSON unreadable: %s', e)
+            raise InterpreterError(
+                'Das Programm konnte nicht gelesen werden — die gespeicherten '
+                'Daten sind beschädigt.')
 
         top = data.get('blocks')
         if isinstance(top, dict):
@@ -796,9 +855,7 @@ class Interpreter:
             except (WorkflowError, InterpreterError, _ProcedureReturn):
                 raise
             except Exception as e:
-                raise InterpreterError(
-                    f'Fehler beim Ausführen von "{btype}": {e}'
-                )
+                raise _unexpected_block_error(btype, e, value=False)
 
             handler = STATEMENT_HANDLERS.get(btype)
             if handler is None:
@@ -820,7 +877,7 @@ class Interpreter:
             except InterpreterError:
                 raise
             except Exception as e:
-                raise InterpreterError(f'Fehler beim Ausführen von "{btype}": {e}')
+                raise _unexpected_block_error(btype, e, value=False)
         finally:
             try:
                 on_block_change(block_id, 'done', 0.0)
@@ -1050,7 +1107,12 @@ class Interpreter:
             # Settle after the retreat so the first detect frame isn't a still-
             # settling/blurred arm (#3).
             self._interruptible_wait(ctx, WHILE_SETTLE_S)
-            n_visible = _pb.count_unclaimed_visible(ctx, type_name)
+            # note=False (F19): the loop's OWN look never prints the all-done
+            # notice („… zum Wiederholen bitte ein Objekt kurz wegnehmen …").
+            # An empty look is how this loop ENDS, and its completion line below
+            # already says how it ended; with two cubes the notice used to print
+            # mid-loop, long before the clean end.
+            n_visible = _pb.count_unclaimed_visible(ctx, type_name, note=False)
             if n_visible > 0:
                 empty_streak = 0
                 empty_since = None
@@ -1089,7 +1151,13 @@ class Interpreter:
                 before = _claim_progress_count(ctx)
                 if do_block is not None:
                     try:
-                        self._exec_chain(do_block, ctx, on_block_change)
+                        # „Greife" waits for a graspable object (Q8) — but not
+                        # in here: this loop has its own empty window and its
+                        # own end, so a grasp in its body stays the immediate
+                        # GraspSkip it is built around. Thread-local: a hat
+                        # running beside this loop still waits.
+                        with _pb.no_grasp_wait():
+                            self._exec_chain(do_block, ctx, on_block_change)
                     except GraspSkip as e:
                         # One instance couldn't be grasped (out of reach /
                         # orientation unreadable / vanished / not held after
@@ -1188,8 +1256,29 @@ class Interpreter:
                         ctx.log(f'„{label}": nichts mehr sichtbar — fertig.')
                 except Exception:
                     pass
+                # F19: the type is DONE for this run, said by the line above —
+                # so the once-per-type all-done notice of a later look („sehe
+                # ich …" after the loop) must not follow it with advice to put
+                # an object back. The notice reads the same store.
+                self._mark_all_done_notified(ctx, type_name)
                 break
             self._interruptible_wait(ctx, WHILE_EMPTY_SECONDS)
+
+    @staticmethod
+    def _mark_all_done_notified(ctx, type_name) -> None:
+        """Record that the all-done notice for ``type_name`` has been given
+        this run (``ctx.all_done_notified``, keyed by the recipe's type name as
+        ``perception_blocks._note_all_instances_done`` keys it). Best-effort:
+        a diagnostic never breaks a loop."""
+        from physical_ai_server.workflow.handlers import perception_blocks as _pb
+        try:
+            try:
+                key = str(_pb._recipe_for(_pb._require_catalog(ctx), type_name).type_name)
+            except Exception:  # noqa: BLE001 — no catalog: the raw type name
+                key = str(type_name)
+            _pb._claim_store(ctx, 'all_done_notified', set).add(key)
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _skipped_count_for_type(ctx, type_name) -> int:
@@ -1467,9 +1556,13 @@ class Interpreter:
         # Schritten von 0" ran 3 iterations and reported success, silently
         # substituting a step the student did not ask for. Only a genuinely
         # missing (None) input falls back to the default.
-        start = self._number_or(self._eval_value(self._get_input_block(block, 'FROM'), ctx), 0.0)
-        end = self._number_or(self._eval_value(self._get_input_block(block, 'TO'), ctx), 0.0)
-        step = self._number_or(self._eval_value(self._get_input_block(block, 'BY'), ctx), 1.0)
+        #
+        # A bound that is not a number (a text in a variable) is refused in
+        # German (F7): Blockly's own Python raises there, and the old silent
+        # fallback to 0 / 1 ran a loop the student never asked for.
+        start = self._as_number(self._eval_value(self._get_input_block(block, 'FROM'), ctx), 0.0)
+        end = self._as_number(self._eval_value(self._get_input_block(block, 'TO'), ctx), 0.0)
+        step = self._as_number(self._eval_value(self._get_input_block(block, 'BY'), ctx), 1.0)
         if step == 0:
             # Name the FIX, not only the fault. „ungleich 0", not „größer als
             # 0": a negative step is legal and counts down.
@@ -1481,6 +1574,13 @@ class Interpreter:
         # the `or` trap above produced. Fail loud instead.
         if not math.isfinite(step):
             raise InterpreterError('Schrittweite ist keine gültige Zahl.')
+        # F1 — Blockly's own semantics, in BOTH of its generators (the Code
+        # panel's Python upRange/downRange and range(), and JavaScript): the
+        # DIRECTION comes from FROM vs TO, and the step is |BY|. „zähle i von 3
+        # bis 1 in Schritten von 1" counts 3, 2, 1, and „von 1 bis 3 in
+        # Schritten von -1" counts 1, 2, 3 — both used to run ZERO times while
+        # the preview showed the loop.
+        step = abs(step) if start <= end else -abs(step)
         do_block = self._get_input_block(block, 'DO')
         i = start
         iter_count = 0
@@ -1654,8 +1754,10 @@ class Interpreter:
         fields = block.get('fields') or {}
         mode = fields.get('MODE', 'SET')  # SET or INSERT
         where = fields.get('WHERE', 'FROM_START')
+        # An empty AT is element 1, as the generator's default; a text is
+        # refused (F7, N13).
         at_block = self._get_input_block(block, 'AT')
-        at = int(self._eval_value(at_block, ctx) or 0) if at_block else 0
+        at = int(self._as_number(self._eval_value(at_block, ctx), 1.0))
         value_block = self._get_input_block(block, 'TO')
         value = self._eval_value(value_block, ctx) if value_block else None
         inserting = (mode == 'INSERT')
@@ -1723,8 +1825,10 @@ class Interpreter:
         fields = block.get('fields') or {}
         mode = fields.get('MODE', 'GET')
         where = fields.get('WHERE', 'FROM_START')
+        # An empty AT is element 1, as the generator's default; a text is
+        # refused (F7, N13).
         at_block = self._get_input_block(block, 'AT')
-        at = int(self._eval_value(at_block, ctx) or 0) if at_block else 0
+        at = int(self._as_number(self._eval_value(at_block, ctx), 1.0))
         if not target:
             raise InterpreterError(
                 f'Die Liste ist leer — „{block_de}" findet nichts.')
@@ -1760,7 +1864,9 @@ class Interpreter:
         # See _exec_variables_set: truthiness, not `is None`.
         if not var_name or not var_name.strip():
             raise InterpreterError('Variable hat keinen Namen.')
-        delta = self._number_or(
+        # The DELTA must be a number (F7): the generator's `x + delta` raises
+        # for a text delta; the old silent fallback added 0.
+        delta = self._as_number(
             self._eval_value(self._get_input_block(block, 'DELTA'), ctx), 0.0)
         current = self._read_variable(ctx, var_name)
         if isinstance(current, bool) or not isinstance(current, (int, float)):
@@ -1770,8 +1876,28 @@ class Interpreter:
         self._set_variable(ctx, var_name, base + delta)
 
     @staticmethod
+    def _as_number(value: Any, default: float = 0.0) -> float:
+        """The number a math socket holds, or a German refusal (F7).
+
+        An empty socket (None) gives ``default``, the value Blockly's generator
+        puts in an empty socket. ``int``, ``float`` and ``bool`` pass. Anything
+        else — a text (even „2"), a list, a Greifziel — is refused: Blockly's
+        own Python raises a TypeError there, and the old reads (``float(x or
+        0)``) silently turned „2" into 2 and a list into 0."""
+        if value is None:
+            return float(default)
+        if isinstance(value, (bool, int, float)):
+            return float(value)
+        raise InterpreterError(
+            'Hier wird eine Zahl gebraucht — '
+            f'„{student_text(value)[:40]}" ist keine Zahl.')
+
+    @staticmethod
     def _number_or(value: Any, default: float) -> float:
         """float(value), with ``default`` ONLY for a genuinely missing input.
+
+        INTERNAL defaults only: a value a student put into a math socket goes
+        through :meth:`_as_number`, which refuses text instead of guessing.
 
         Deliberately not ``float(value or default)``: that turns an explicit
         zero into the default (see _exec_for's step-0 guard, which the `or`
@@ -2004,10 +2130,7 @@ class Interpreter:
         except _ProcedureReturn:
             raise
         except Exception as e:
-            btype = block.get('type', '?')
-            raise InterpreterError(
-                f'Fehler beim Auswerten von "{btype}": {e}'
-            )
+            raise _unexpected_block_error(block.get('type', '?'), e, value=True)
 
     def _eval_value_impl(self, block: dict[str, Any], ctx) -> Any:
         btype = block.get('type')
@@ -2085,27 +2208,34 @@ class Interpreter:
                 )
 
         if btype == 'logic_operation':
+            # Short-circuits like the preview's `a and b` / `a or b` (F6): B is
+            # not evaluated when A already decides — „Liste nicht leer UND
+            # Element 1 = 5" must not fail on the empty list. The answer stays
+            # a Boolean (INTENTIONAL #1 of test_blockly_conformance).
             op = block.get('fields', {}).get('OP', 'AND')
             a = self._truthy(self._eval_value(self._get_input_block(block, 'A'), ctx))
-            b = self._truthy(self._eval_value(self._get_input_block(block, 'B'), ctx))
-            return (a and b) if op == 'AND' else (a or b)
+            if op == 'AND' and not a:
+                return False
+            if op != 'AND' and a:
+                return True
+            return self._truthy(self._eval_value(self._get_input_block(block, 'B'), ctx))
 
         if btype == 'math_arithmetic':
             op = block.get('fields', {}).get('OP', 'ADD')
-            a = float(self._eval_value(self._get_input_block(block, 'A'), ctx) or 0)
-            b = float(self._eval_value(self._get_input_block(block, 'B'), ctx) or 0)
+            a = self._as_number(self._eval_value(self._get_input_block(block, 'A'), ctx))
+            b = self._as_number(self._eval_value(self._get_input_block(block, 'B'), ctx))
             return self._apply_arithmetic(op, a, b)
 
         if btype == 'math_random_int':
-            lo = int(self._eval_value(self._get_input_block(block, 'FROM'), ctx) or 0)
-            hi = int(self._eval_value(self._get_input_block(block, 'TO'), ctx) or 0)
+            lo = int(self._as_number(self._eval_value(self._get_input_block(block, 'FROM'), ctx)))
+            hi = int(self._as_number(self._eval_value(self._get_input_block(block, 'TO'), ctx)))
             if lo > hi:
                 lo, hi = hi, lo
             return random.randint(lo, hi)
         if btype == 'math_constrain':
-            v = float(self._eval_value(self._get_input_block(block, 'VALUE'), ctx) or 0)
-            lo = float(self._eval_value(self._get_input_block(block, 'LOW'), ctx) or 0)
-            hi = float(self._eval_value(self._get_input_block(block, 'HIGH'), ctx) or 0)
+            v = self._as_number(self._eval_value(self._get_input_block(block, 'VALUE'), ctx))
+            lo = self._as_number(self._eval_value(self._get_input_block(block, 'LOW'), ctx))
+            hi = self._as_number(self._eval_value(self._get_input_block(block, 'HIGH'), ctx))
             if lo > hi:
                 lo, hi = hi, lo
             return min(max(v, lo), hi)
@@ -2115,8 +2245,8 @@ class Interpreter:
             # bug). Only a genuinely missing (None) input falls back to 1.
             raw_a = self._eval_value(self._get_input_block(block, 'DIVIDEND'), ctx)
             raw_b = self._eval_value(self._get_input_block(block, 'DIVISOR'), ctx)
-            a = float(raw_a if raw_a is not None else 0)
-            b = float(raw_b if raw_b is not None else 1)
+            a = self._as_number(raw_a, 0.0)
+            b = self._as_number(raw_b, 1.0)
             # Fail loud instead of the old silent `0.0`: a modulo-by-zero is a
             # student mistake, and returning 0 would feed a wrong value silently
             # into the rest of the program (violates "no silent fallbacks").
@@ -2128,7 +2258,7 @@ class Interpreter:
             return a % b
         if btype == 'math_round':
             op = (block.get('fields') or {}).get('OP', 'ROUND')
-            n = float(self._eval_value(self._get_input_block(block, 'NUM'), ctx) or 0)
+            n = self._as_number(self._eval_value(self._get_input_block(block, 'NUM'), ctx))
             # NOTE: `math` is imported at module scope. A function-local
             # `import math` here would rebind `math` as a LOCAL for the WHOLE of
             # _eval_value_impl, so every earlier `math.` use in this function
@@ -2179,7 +2309,7 @@ class Interpreter:
             return []
         if btype == 'lists_repeat':
             v = self._eval_value(self._get_input_block(block, 'ITEM'), ctx)
-            raw_n = self._number_or(
+            raw_n = self._as_number(
                 self._eval_value(self._get_input_block(block, 'NUM'), ctx), 0.0)
             if not math.isfinite(raw_n):
                 raise InterpreterError('Anzahl ist keine gültige Zahl.')
@@ -2196,19 +2326,39 @@ class Interpreter:
                 )
             return [v] * n
         if btype == 'lists_length':
-            target = self._eval_value(self._get_input_block(block, 'VALUE'), ctx)
+            # N13: the length of a number (or of nothing at all, a variable
+            # never set) is refused, as the preview's len() raises; it used to
+            # answer 0 silently. An EMPTY socket is the generator's `len([])`.
+            inner = self._get_input_block(block, 'VALUE')
+            if inner is None or _is_disabled(inner):
+                return 0
+            target = self._eval_value(inner, ctx)
             if isinstance(target, (list, str, tuple)):
                 return len(target)
-            return 0
+            raise InterpreterError(
+                '„Länge von" braucht eine Liste oder einen Text.')
         if btype == 'lists_isEmpty':
+            # N13: a number is refused like the preview's len(); an empty
+            # value (None) stays „leer" — INTENTIONAL #6 of
+            # test_blockly_conformance.
             target = self._eval_value(self._get_input_block(block, 'VALUE'), ctx)
             if isinstance(target, (list, str, tuple)):
                 return len(target) == 0
-            return target is None
+            if target is None:
+                return True
+            raise InterpreterError(
+                '„ist leer" braucht eine Liste oder einen Text.')
         if btype == 'lists_indexOf':
             target = self._eval_value(self._get_input_block(block, 'VALUE'), ctx)
             find = self._eval_value(self._get_input_block(block, 'FIND'), ctx)
             end = (block.get('fields') or {}).get('END', 'FIRST')
+            # N13: in a text, the position of a text, as the preview's
+            # first_index/last_index helpers answer it (1-based, 0 = absent).
+            if isinstance(target, str):
+                if not isinstance(find, str):
+                    return 0
+                k = target.rfind(find) if end == 'LAST' else target.find(find)
+                return k + 1
             if not isinstance(target, list):
                 return 0
             try:
@@ -2230,8 +2380,8 @@ class Interpreter:
             where2 = (block.get('fields') or {}).get('WHERE2', 'FROM_END')
             at1_block = self._get_input_block(block, 'AT1')
             at2_block = self._get_input_block(block, 'AT2')
-            at1 = int(self._eval_value(at1_block, ctx) or 0) if at1_block else 1
-            at2 = int(self._eval_value(at2_block, ctx) or 0) if at2_block else 1
+            at1 = int(self._as_number(self._eval_value(at1_block, ctx), 1.0))
+            at2 = int(self._as_number(self._eval_value(at2_block, ctx), 1.0))
             i1 = max(0, self._resolve_index(target, where1, at1))
             i2 = self._resolve_index(target, where2, at2) + 1
             i2 = max(i1, min(len(target), i2))
@@ -2481,8 +2631,9 @@ def _list_index_error_de(at: Any, length: int) -> str:
         which = int(at)
     except (TypeError, ValueError):
         which = at
+    elements = 'Element' if length == 1 else 'Elemente'
     return (f'Element {which} gibt es nicht — die Liste hat nur {length} '
-            'Elemente. Das erste Element ist Nummer 1.')
+            f'{elements}. Das erste Element ist Nummer 1.')
 
 
 def _jsonable(value: Any, budget: int = _MAX_VAR_PAYLOAD_ITEMS) -> Any:

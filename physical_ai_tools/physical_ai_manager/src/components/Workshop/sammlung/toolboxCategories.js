@@ -42,7 +42,9 @@ import {
   previewAssetFor,
 } from './AssetCardInflater';
 import { ICON_BUTTON_FLYOUT_TYPE, registerIconButtonInflater } from './IconButtonInflater';
-import { NEW_ACTION_ROWS, newActionsFor, teachHintLinesFor } from './newActions';
+import {
+  NEW_ACTION_ROWS, cameraPinOffered, newActionsFor, teachHintLinesFor,
+} from './newActions';
 
 // 'cards' (custom flyout items) or 'plan-b' (labels + buttons). The spike
 // outcome is recorded in docs/KNOWN-ISSUES.md („Sammlung flyout: cards vs Plan B").
@@ -306,6 +308,7 @@ const DESTINATION_GENERIC_BLOCKS = Object.freeze([
   'edubotics_destination_current',
 ]);
 const REF_TYPE = 'edubotics_destination_ref';
+const PIN_TYPE = 'edubotics_destination_pin';
 const MOVE_TO_TYPE = 'edubotics_move_to';
 
 // A ready „bewege zu <name>" block: the move with this entry's reference
@@ -330,6 +333,9 @@ export function zieleFlyout(workspace) {
   ];
   if (c.drawer) items.push(button(DE.FLY_MANAGE, SAMMLUNG_BUTTON_KEYS.MANAGE_ZIELE));
   for (const type of DESTINATION_GENERIC_BLOCKS) {
+    // No camera in the simulator, so no camera pin there (N5, newActions'
+    // cameraPinOffered — the same rule as its „+ Neu" row).
+    if (type === PIN_TYPE && !cameraPinOffered(c)) continue;
     if (allowedType(type)) items.push({ kind: 'block', type });
   }
   items.push(label(DE.FLY_SECTION_YOURS));

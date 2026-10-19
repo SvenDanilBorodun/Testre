@@ -64,6 +64,7 @@ import ModeBadge from '../components/Workshop/ModeBadge';
 import { MODE_DE } from '../components/Workshop/modeCopy';
 import OpenWorkflowPopover from '../components/Workshop/OpenWorkflowPopover';
 import { toastIcon } from '../components/icons/toast';
+import Icon from '../components/icons/Icon';
 import { jumpToBlock } from '../components/Workshop/sammlung/blockUsage';
 import { refreshAssetReferenceWarnings } from '../components/Workshop/sammlung/referenceValidators';
 import { useAutosave } from '../components/Workshop/useAutosave';
@@ -608,6 +609,7 @@ function WorkshopPage({ isActive }) {
   // The id of the Vormachen chooser's visible reason (aria-describedby). A hook,
   // so it sits above the inactive page's early return.
   const teachReasonId = useId();
+  const tutorialNoteId = useId();
   const teachReason = teachEntryBlockReason({
     heartbeatStatus,
     runState,
@@ -1081,10 +1083,13 @@ function WorkshopPage({ isActive }) {
         return;
       }
       const label = name || 'Ziel';
+      // M4 / Q11: the arm stops ABOVE the Ziel at the program's hover height,
+      // over the table measured in this lesson — the pin's stored z is not
+      // where it goes, so the question names none.
       if (typeof window !== 'undefined'
           && !window.confirm(
-            `Roboter zu „${label}" fahren `
-            + `(x=${x.toFixed(3)}, y=${y.toFixed(3)}, z=${z.toFixed(3)})?`)) {
+            `Arm über das Ziel „${label}" fahren `
+            + `(x=${x.toFixed(3)}, y=${y.toFixed(3)})?`)) {
         return;
       }
       try {
@@ -2125,6 +2130,33 @@ function WorkshopPage({ isActive }) {
             >
               {simMode ? 'Simulator beenden' : 'Test im Simulator'}
             </button>
+            {/* N1 (owner decision Q5): a Lernpfad needs the calibrated real
+                rig. In the simulator the dock — and its „Lernpfad" tab — is
+                replaced by SimStage, so the entry stays here, disabled, with
+                the reason as visible text beside it. */}
+            {simMode && showEditor && (
+              <div className="flex items-center gap-1.5">
+                <span
+                  id={tutorialNoteId}
+                  className="st-reason max-w-[15rem] line-clamp-2 text-[11px] leading-tight text-[var(--ink-3)]"
+                >
+                  {DE.TUTORIAL_REAL_ONLY}
+                </span>
+                <button
+                  type="button"
+                  disabled
+                  aria-describedby={tutorialNoteId}
+                  title={DE.TUTORIAL_REAL_ONLY}
+                  className={
+                    'st-key inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-md border '
+                    + 'opacity-50 cursor-not-allowed bg-white text-[var(--ink-3)] border-[var(--line)]'
+                  }
+                >
+                  <Icon name="graduationCap" size={14} />
+                  {DE.DOCK_TAB_TUTORIAL}
+                </button>
+              </div>
+            )}
             {/* Follower-only leader toggle (Windows student rig only; self-hides
                 on Jetson/cloud where the GUI control bridge is absent). */}
             <LeaderToggle

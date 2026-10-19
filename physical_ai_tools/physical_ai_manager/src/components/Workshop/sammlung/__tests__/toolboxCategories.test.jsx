@@ -306,6 +306,21 @@ describe('Sammlung groups — the creation buttons', () => {
     unmount();
   });
 
+  // N5 (semantics round 2026-10-18): the „Ziel setzen" block is set by a
+  // click into the SCENE CAMERA, which the simulator has not; there a Ziel is
+  // set by tapping the Sim-Tisch. Its generic block leaves the Ziele flyout in
+  // the simulator by the same rule as the camera's creation button.
+  it('sim_flyout_offers_no_camera_pin', async () => {
+    const provider = fixtureProvider({ capabilities: { ...FULL_CAPS, pinSim: true } });
+    const { ws, unmount } = await mountEditor({ sammlungProvider: provider });
+    const blocks = () => flyoutOf(ws, SAMMLUNG_CATEGORY_KEYS.ZIELE)
+      .filter((it) => it.kind === 'block' && !(it.fields && it.fields.NAME)).map((it) => it.type);
+    expect(blocks()).toEqual(['edubotics_destination_pin', 'edubotics_destination_ref', 'edubotics_destination_current']);
+    provider.setSnapshot({ capabilities: { ...FULL_CAPS, pinSim: true, simMode: true } });
+    expect(blocks()).toEqual(['edubotics_destination_ref', 'edubotics_destination_current']);
+    unmount();
+  });
+
   it('the flyout offers exactly what the drawer offers, per tab', async () => {
     const { newActionsFor } = await import('../newActions');
     const provider = fixtureProvider({ capabilities: { ...FULL_CAPS, pinSim: true } });

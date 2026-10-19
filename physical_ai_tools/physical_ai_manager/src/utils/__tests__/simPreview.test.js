@@ -135,6 +135,25 @@ describe('preview program builders (spec §4.4)', () => {
     });
   });
 
+  // D1 (M2 of the first review): the preview of a Position sends the same
+  // entry a run would (destinationStore.entriesForRunPayload), its taught pose
+  // included, so the simulator drives the arm the way the program will.
+  test('preview_payload_carries_pose_joints', () => {
+    const entry = {
+      id: 'd_4f1c9a2f', name: 'Über der Kiste', kind: 'pose', source: 'capture', robot_type: 'omx_f',
+      x: 0.141, y: 0.102, z: 0.118, created_at: '2026-09-13T10:20:51.000Z',
+      joints: [0, -0.9123, 1.1047, 0.3, 0, 0.8],
+      joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'],
+    };
+    const program = buildDestinationPreviewProgram({ entry, simScene: SCENE, tempo: 1.0 });
+    expect(program.destinations).toEqual([{
+      name: 'Über der Kiste', kind: 'pose', x: 0.141, y: 0.102, z: 0.118,
+      joints: [0, -0.9123, 1.1047, 0.3, 0, 0.8],
+      joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'],
+      robot_type: 'omx_f',
+    }]);
+  });
+
   test('an absent scene sends empty objects and zones (never undefined)', () => {
     const program = buildRecordingPreviewProgram({ name: 'A', fps: 25, points: [], simScene: null, tempo: 1.0 });
     expect(program.sim).toEqual({ enabled: true, objects: [] });

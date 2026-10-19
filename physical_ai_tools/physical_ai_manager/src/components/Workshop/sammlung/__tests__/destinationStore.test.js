@@ -331,14 +331,37 @@ describe('helpers', () => {
     expect(taken).not.toContain('Nur Verweis');
   });
 
-  it('entriesForRunPayload sends exactly {name, kind, x, y, z}', () => {
-    const [entry] = readDestinationEntries({
-      [DESTINATIONS_SERIALIZER_NAME]: { version: 1, entries: [POSE] },
+  // Changed on purpose (D1, owner decision Q2 of the 2026-10-18 semantics
+  // round): a Position IS the taught arm pose, so a pose entry also sends its
+  // joints, their names and the robot that taught it — the server drives
+  // there in joint space only for that robot. A Ziel (pin) still sends exactly
+  // {name, kind, x, y, z}; id, source and timestamps stay in the editor.
+  it('entriesForRunPayload sends {name, kind, x, y, z}, plus the taught pose for a Position', () => {
+    const [pose, pin] = readDestinationEntries({
+      [DESTINATIONS_SERIALIZER_NAME]: {
+        version: 1,
+        entries: [POSE, { id: 'd_00000001', ...PIN_INPUT, robot_type: 'omx_f' }],
+      },
     });
-    expect(entriesForRunPayload([entry])).toEqual([
-      { name: 'Über der Kiste', kind: 'pose', x: 0.141, y: 0.102, z: 0.118 },
+    const sent = entriesForRunPayload([pose, pin]);
+    expect(sent).toEqual([
+      {
+        name: 'Über der Kiste', kind: 'pose', x: 0.141, y: 0.102, z: 0.118,
+        joints: [0, -0.9123, 1.1047, 0.3, 0, 0.8],
+        joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1'],
+        robot_type: 'omx_f',
+      },
+      { name: 'A', kind: 'pin', x: 0.1, y: 0.2, z: 0.01 },
     ]);
-    expect(Object.keys(entriesForRunPayload([entry])[0])).toEqual(['name', 'kind', 'x', 'y', 'z']);
+    expect(Object.keys(sent[0])).toEqual(['name', 'kind', 'x', 'y', 'z', 'joints', 'joint_names', 'robot_type']);
+    expect(Object.keys(sent[1])).toEqual(['name', 'kind', 'x', 'y', 'z']);
+    // Plain arrays, not the store's frozen ones.
+    expect(Object.isFrozen(sent[0].joints)).toBe(false);
+  });
+
+  it('a Position taught before joints were captured sends only what it has', () => {
+    const sent = entriesForRunPayload([{ name: 'Alt', kind: 'pose', x: 0.1, y: 0, z: 0.1, source: 'capture' }]);
+    expect(sent).toEqual([{ name: 'Alt', kind: 'pose', x: 0.1, y: 0, z: 0.1 }]);
   });
 
   it('sanitizeDestinationNameInput strips and caps without trimming', () => {

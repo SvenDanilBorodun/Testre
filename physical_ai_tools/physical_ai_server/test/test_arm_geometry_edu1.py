@@ -247,3 +247,65 @@ def test_floor_clearance_is_a_sound_lower_bound_on_the_real_meshes():
     # same shape as the edu6 table's (median 0.0, mean 10.1, p95 45.9). The
     # bound below is the max with headroom, not a target.
     assert worst_slack < 0.09, worst_slack
+
+
+def test_the_position_floor_check_never_refuses_a_pose_the_meshes_clear():
+    """``motion._refuse_position_below_table`` judges a taught Position by the
+    POINT model (``home_planner.pose_floor_clearance``: the joint points and
+    the fingertip at the carried claw opening, never these boxes). Over a
+    seeded sample of in-limit poses at random claw openings in the band the
+    arm commands (``gripper_closed_rad`` … ``gripper_open_rad``), every pose
+    whose real meshes are clear of the table AT THAT OPENING passes. The box
+    model refused up to 86 % of the tilted ones that touch, per tilt band.
+    Measured 2026-10-19 (seed 1019, 6000 draws, ~2 s): 3953 clear, 150 of them
+    within 20 mm of the table, claw tilt 1–179°.
+
+    Beyond the commanded band (a claw pushed wider by hand) the fingertip is
+    credited only ``tool_tip_rise_m``'s last band (17.4 mm from 0.9 rad on),
+    so a pose whose wide-open tips touch can be refused there; measured
+    2026-10-19: 30 of 14,689 clear near-table poses at 1.0–1.5708 rad, none
+    up to 1.0 rad (``docs/KNOWN-ISSUES.md``)."""
+    from physical_ai_server import robot_profiles as rp
+    from physical_ai_server.workflow.handlers import motion as M
+
+    class _Ctx:
+        ik = Edu1IKSolver()
+        z_table = None
+        table_plane = None
+
+    prof = rp.ROBOT_PROFILES['edu1_studio']
+    claw_band = (float(prof.gripper_closed_rad), float(prof.gripper_open_rad))
+    urdf = _Urdf()
+    ik = _Ctx.ik
+    # Duplicates only (an STL repeats each vertex per triangle); the world z of
+    # a vertex is row 2 of its frame, since the solver's world is URDF rotZ(π).
+    verts = {link: np.unique(urdf.vertices(link), axis=0)
+             for link in _BOX_LINKS[1:] + _GRIPPER_CHILDREN}
+    rng = np.random.default_rng(1019)
+    clear = 0
+    near_tilts = []
+    for _ in range(6000):
+        q = [float(rng.uniform(lo, hi)) for (lo, hi) in ik.joint_limits]
+        claw = float(rng.uniform(*claw_band))
+        qmap = {f'joint{i + 1}': q[i] for i in range(5)}
+        qmap.update({'RL_joint': claw, 'LF_joint': claw})
+        frames = urdf.frames(qmap)
+        truth = min(float((v @ frames[link][2, :3]).min() + frames[link][2, 3])
+                    for link, v in verts.items())
+        if truth < 0.0:
+            continue
+        clear += 1
+        try:
+            M._refuse_position_below_table(_Ctx(), q + [claw], 'P')
+        except M.WorkflowError:
+            raise AssertionError(
+                f'refused a pose the meshes clear by {truth * 1000:.1f} mm: '
+                f'q={q}, claw={claw}') from None
+        if truth <= 0.02:
+            rot, _t = ik.fk(q)
+            axis = np.asarray(rot) @ np.asarray(ik.approach_axis_local)
+            near_tilts.append(float(np.degrees(np.arccos(np.clip(-axis[2], -1.0, 1.0)))))
+    assert clear > 3000, clear
+    assert len(near_tilts) > 100, len(near_tilts)
+    # The near-table poses span the tilts the box model refused (10–90°).
+    assert min(near_tilts) < 10.0 and max(near_tilts) > 90.0, (min(near_tilts), max(near_tilts))

@@ -68,7 +68,7 @@ class Rig:
                  simulated: bool = False, real_time: bool = False,
                  rig_projection: bool = True, catalog=None,
                  z_table: float | None = None, scene_frame=True,
-                 scene_frame_age=None, code_rpc=None):
+                 scene_frame_age=None, code_rpc=None, table_plane=None):
         self.pid = pid
         self.profile = rp.ROBOT_PROFILES[pid]
         self.objects = [dict(o) for o in (objects or [])]
@@ -99,6 +99,10 @@ class Rig:
             # emulated rig keeps the same table, as a touch-off would measure.
             z_table = tip
         self.z_table = float(z_table)
+        # A touch-off's tilted plane ``(a, b, c)``, z = a·x + b·y + c, handed to
+        # the run's calibration only when a test sets one.
+        self.table_plane = (None if table_plane is None
+                            else tuple(float(v) for v in table_plane))
         self.statuses: list[dict] = []
         self.done = threading.Event()
         self.final = None
@@ -113,7 +117,7 @@ class Rig:
                 [dict(o) for o in self.objects], cat, self.world,
                 table_z=self.z_table),
             load_destinations=lambda: {},
-            load_calibration=lambda: {'z_table': self.z_table},
+            load_calibration=self._calibration,
             emit_status=self.statuses.append,
             on_finished=self._finished,
             simulated=simulated,
@@ -150,6 +154,12 @@ class Rig:
             grasp_held_margin_rad=p.grasp_held_margin_rad)
         ctx.last_full_joints = [float(v) for v in p.home_joints_rad] + [float(p.gripper_open_rad)]
         return ctx
+
+    def _calibration(self) -> dict:
+        calib = {'z_table': self.z_table}
+        if self.table_plane is not None:
+            calib['table_plane'] = self.table_plane
+        return calib
 
     # ── running ──────────────────────────────────────────────────────────
     def _finished(self, phase):

@@ -2213,21 +2213,21 @@ def _pose_route(ctx, q_start, q_end, name) -> tuple[list, str]:
 def _refuse_position_below_table(ctx, q_end, name) -> None:
     """Refuse a Position whose taught pose lies below THIS rig's table.
 
-    Judged on the pose's OWN floor clearance (``home_planner.
-    pose_floor_clearance``: the ladder's box model on the Feetech arms, its
-    point model on the OMX, against the touch-off plane minus the solver's
-    ``tool_tip_below_ee_m``, else the base plane z = 0): any moving part more
-    than ``home_planner.FLOOR_TOL_M`` below the surface is refused, so a pose
-    taught with the fingertips on the table passes. Geometry the model cannot
-    judge is refused too — never an approval. ``FLOOR_TOL_M <= 0`` (the rollback
-    ``EDUBOTICS_HOME_FLOOR_TOL_M=0``) switches the check off, like the ladder.
-    Read at call time, so a test or the rollback sees the live value."""
+    Judged by ``home_planner.pose_floor_clearance``: the point model on every
+    joint-route arm — the arm's joint points and its fingertip at the CARRIED
+    claw opening ``q_end[n]`` — against the touch-off plane minus the solver's
+    ``tool_tip_below_ee_m``, else the base plane z = 0. A judged point more
+    than ``WORKSPACE_FLOOR_MARGIN_M`` (1 cm, exactly a Ziel's margin) below the
+    surface refuses, so a pose taught with the fingertips on the table passes.
+    Geometry the model cannot judge is refused too — never an approval.
+    ``home_planner.FLOOR_TOL_M <= 0`` (the rollback
+    ``EDUBOTICS_HOME_FLOOR_TOL_M=0``) switches the check off, like the ladder;
+    read at call time, so a test or the rollback sees the live value."""
     from physical_ai_server.workflow import home_planner
-    tol = float(home_planner.FLOOR_TOL_M)
-    if tol <= 0.0:
+    if float(home_planner.FLOOR_TOL_M) <= 0.0:
         return
     clearance = home_planner.pose_floor_clearance(ctx, q_end)
-    if clearance is None or clearance < -tol:
+    if clearance is None or clearance < -WORKSPACE_FLOOR_MARGIN_M:
         raise WorkflowError(_POSITION_BELOW_TABLE_DE.format(name=name))
 
 

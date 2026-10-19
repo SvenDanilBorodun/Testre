@@ -375,13 +375,17 @@ def test_precheck_skips_a_joint_route_position(monkeypatch):
     assert [w['message'] for w in warnings] == ['Diese Position ist außerhalb des Arbeitsbereichs.']
 
 
-# ── fix round: a Position taught below THIS rig's table is refused ─────────
+# ── fix rounds: a Position taught below THIS rig's table is refused ────────
 # The reversed rung of ``_pose_route`` lets the TARGET set its own floor
 # allowance, so a pose taught below the table used to be driven to (OMX EE
 # z −0.031 with a link at −0.067, Edu:1 EE z −0.032, both „finished"). The
-# taught pose's own clearance is now judged first (``home_planner.
-# pose_floor_clearance``) against the touch-off plane minus the solver's
-# ``tool_tip_below_ee_m``, else z = 0; more than ``FLOOR_TOL_M`` below refuses.
+# taught pose's own clearance is judged first (``home_planner.
+# pose_floor_clearance``): the POINT model on every arm, i.e. the arm's joint
+# points and its fingertip at the CARRIED claw opening, against the touch-off
+# plane minus the solver's ``tool_tip_below_ee_m``, else z = 0. A point more
+# than ``motion.WORKSPACE_FLOOR_MARGIN_M`` (1 cm, a Ziel's margin) below the
+# surface refuses. Fix round 2: the first version judged the Edu:1 by the box
+# model, which refused tilted Positions that touch the table (the twelve below).
 
 _BELOW_TABLE = ('Die Position „P" liegt unter der Tischebene — '
                 'bitte die Position an diesem Roboter neu vormachen.')
@@ -407,12 +411,12 @@ def _below_table_pose(pid):
     raise AssertionError('no below-table pose found')
 
 
-def _touching_pose(pid, fingertip_z):
-    """A strict-vertical pose whose closed FINGERTIP sits at ``fingertip_z``."""
+def _touching_pose(pid, fingertip_z, xy=(0.18, 0.02)):
+    """A strict-vertical pose whose CLOSED fingertip sits at ``fingertip_z``."""
     prof = rp.ROBOT_PROFILES[pid]
     ik = prof.build_ik()
     tip = float(getattr(ik, 'tool_tip_below_ee_m', 0.0))
-    q = ik.solve(target_xyz=(0.18, 0.02, tip + fingertip_z),
+    q = ik.solve(target_xyz=(xy[0], xy[1], tip + fingertip_z),
                  seed=list(prof.home_joints_rad), roll=M.GRASP_ROLL_RAD)
     assert q is not None
     return [float(v) for v in q]
@@ -434,6 +438,19 @@ def _plain_ctx(pid, *, z_table=None, table_plane=None, ik=None):
     return ctx
 
 
+def _carried(pid):
+    """The gripper value the rig's arm starts with (and so arrives with)."""
+    return float(rp.ROBOT_PROFILES[pid].gripper_open_rad)
+
+
+def _carried_rise(pid):
+    """How far the tips at that carried opening sit above the solver's TCP
+    (``motion.tool_tip_rise_m``: 0 on the OMX, 17 mm on the open Edu:1)."""
+    prof = rp.ROBOT_PROFILES[pid]
+    n = prof.num_arm_joints
+    return M.tool_tip_rise_m(prof.build_ik(), [0.0] * n + [_carried(pid)], n)
+
+
 @pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
 def test_a_position_below_the_table_is_refused_and_nothing_moves(monkeypatch, pid):
     """The verifier's case on both joint-route arms: the same point a Ziel
@@ -441,8 +458,8 @@ def test_a_position_below_the_table_is_refused_and_nothing_moves(monkeypatch, pi
     too, with its own sentence, before any leg is published."""
     q = _below_table_pose(pid)
     tip = float(getattr(rp.ROBOT_PROFILES[pid].build_ik(), 'tool_tip_below_ee_m', 0.0))
-    clearance = hp.pose_floor_clearance(_plain_ctx(pid, z_table=tip), q)
-    assert clearance is not None and clearance < -hp.FLOOR_TOL_M
+    clearance = hp.pose_floor_clearance(_plain_ctx(pid, z_table=tip), q + [_carried(pid)])
+    assert clearance is not None and clearance < -M.WORKSPACE_FLOOR_MARGIN_M
     rig = Rig(monkeypatch, pid, simulated=True)
     before = _arm(rig)
     moves = _count_moves(monkeypatch)
@@ -458,12 +475,33 @@ def test_a_position_below_the_table_is_refused_and_nothing_moves(monkeypatch, pi
 @pytest.mark.parametrize('fingertip_z', [0.0, -0.003])
 def test_a_position_taught_touching_the_table_still_runs(monkeypatch, pid, fingertip_z):
     """Fingertips on the table (and a few mm of readback below it) is the
-    ordinary taught Position near the table: ``FLOOR_TOL_M`` covers it."""
+    ordinary taught Position near the table: the 1 cm margin covers it."""
     q = _touching_pose(pid, fingertip_z)
     rig = Rig(monkeypatch, pid, simulated=True)
     phase = rig.run(program(_move('P'), destinations=[_entry(pid, 'P', q, 0.0)]))
     assert phase == 'finished', rig.errors()
     assert _arm(rig) == pytest.approx(q, abs=1e-6)
+
+
+@pytest.mark.parametrize('depth_mm, runs', [(0, True), (3, True), (9, True),
+                                            (11, False), (15, False), (19, False)])
+def test_the_omx_margin_is_one_centimetre_below_the_table(monkeypatch, depth_mm, runs):
+    """On the OMX the lowest judged point of a vertical pose is its fingertip,
+    and the margin is a Ziel's 1 cm, not the ladder's 20 mm allowance (a
+    fingertip 19 mm under the table used to be driven to)."""
+    q = _touching_pose('omx_full', -depth_mm / 1000.0)
+    assert hp.pose_floor_clearance(_plain_ctx('omx_full', z_table=0.04), q + [0.8]) == \
+        pytest.approx(-depth_mm / 1000.0, abs=1e-6)
+    rig = Rig(monkeypatch, 'omx_full', simulated=True)
+    moves = _count_moves(monkeypatch)
+    phase = rig.run(program(_move('P'), destinations=[_entry('omx_full', 'P', q, 0.8)]))
+    if runs:
+        assert phase == 'finished', rig.errors()
+        assert _arm(rig) == pytest.approx(q, abs=1e-6)
+    else:
+        assert phase == 'error'
+        assert rig.errors()[-1] == _BELOW_TABLE
+        assert moves == []
 
 
 @pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
@@ -484,17 +522,98 @@ def test_a_riser_kit_is_judged_by_its_own_measured_table(monkeypatch, pid):
     assert flat.errors()[-1] == _BELOW_TABLE
 
 
-def test_the_threshold_is_floor_tol_below_the_surface():
-    """On the OMX the lowest moving point of a vertical pose is its fingertip
-    sample; 1 mm inside ``FLOOR_TOL_M`` passes, 1 mm beyond refuses. The OMX
-    touch-off's ``z_table`` is the EE height (fingertip + 0.04), so the surface
-    is ``z_table − tool_tip_below_ee_m``; a tilted plane is honoured per point."""
-    tol = hp.FLOOR_TOL_M
-    assert tol == pytest.approx(0.020)
+@pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
+def test_a_tilted_touch_off_plane_is_judged_at_each_point(monkeypatch, pid):
+    """A 10° tilted touch-off plane, z_surface = tan(10°)·(x − 0.18): Positions
+    touching it at its low side (12 mm under the plane's height at the taught
+    centre, i.e. beyond the margin of a flat table there) and at its high side
+    run; a pose 15 mm under the high side's surface — still above z = 0 — is
+    refused (its tips at the CARRIED claw opening are what is judged)."""
+    tip = float(getattr(rp.ROBOT_PROFILES[pid].build_ik(), 'tool_tip_below_ee_m', 0.0))
+    a = math.tan(math.radians(10.0))
+    plane = (a, 0.0, tip - a * 0.18)        # the touch-off's frame: surface + tip
+
+    def surface(x):
+        return a * (x - 0.18)
+
+    for x in (0.11, 0.25):
+        q = _touching_pose(pid, surface(x), xy=(x, 0.02))
+        rig = Rig(monkeypatch, pid, simulated=True, table_plane=plane)
+        phase = rig.run(program(_move('P'), destinations=[_entry(pid, 'P', q, 0.0)]))
+        assert phase == 'finished', (x, rig.errors())
+        assert _arm(rig) == pytest.approx(q, abs=1e-6)
+    assert surface(0.11) < -M.WORKSPACE_FLOOR_MARGIN_M
+    sunk = _touching_pose(pid, surface(0.25) - 0.015 - _carried_rise(pid), xy=(0.25, 0.02))
+    rig = Rig(monkeypatch, pid, simulated=True, table_plane=plane)
+    phase = rig.run(program(_move('P'), destinations=[_entry(pid, 'P', sunk, 0.0)]))
+    assert phase == 'error'
+    assert rig.errors()[-1] == _BELOW_TABLE
+
+
+# Twelve tilted Edu:1 Positions TOUCHING the table (the verifier's sample from
+# fix round 1, edu1_bands): the mesh oracle of test_arm_geometry_edu1.py puts
+# their lowest point 0.6–19.9 mm above it with the claw closed, at 22–40° claw
+# tilt. The box model read them 21–52 mm below and refused all twelve.
+_TILTED_TOUCHING_EDU1 = [
+    [0.95862, 0.59744, 0.29186, -1.935, -0.65039],
+    [-1.20784, 1.99685, 1.61676, -1.74143, -1.22208],
+    [0.23157, 1.02345, 0.54384, -0.40306, 1.41389],
+    [-1.21465, 1.27111, 0.73096, -0.46552, -1.1303],
+    [0.34423, 0.6525, 0.29329, -1.81913, -0.54272],
+    [-1.17181, 0.42996, 0.21106, -1.81013, -0.88651],
+    [-1.32438, 2.80293, 2.86819, -0.98535, -0.70291],
+    [-0.47336, 2.30942, 2.13182, -1.77883, 1.36489],
+    [-0.77969, 0.72363, 0.32913, -0.58125, -0.65897],
+    [0.27279, 1.00223, 0.52465, -1.52886, -1.31464],
+    [-0.91238, 1.69127, 1.27916, -1.63619, 0.358],
+    [0.8986, 1.3323, 0.69709, -1.63369, -1.36529],
+]
+
+
+@pytest.mark.parametrize('q', _TILTED_TOUCHING_EDU1)
+def test_tilted_edu1_positions_touching_the_table_run(monkeypatch, q):
+    """Every one of them is driven to, with the claw carried open; the check
+    passes them at the closed claw too."""
+    M._refuse_position_below_table(_plain_ctx('edu1_studio'), list(q) + [0.0], 'P')
+    rig = Rig(monkeypatch, 'edu1_studio', simulated=True)
+    phase = rig.run(program(_move('P'), destinations=[_entry('edu1_studio', 'P', q, 0.0)]))
+    assert phase == 'finished', rig.errors()
+    assert _arm(rig) == pytest.approx(q, abs=1e-6)
+
+
+def test_an_open_edu1_claw_is_judged_by_its_open_tips(monkeypatch):
+    """The Edu:1 TCP is the CLOSED fingertip; an open claw's tips ride up by
+    ``tool_tip_rise_m`` (17 mm at the rig's carried 0.9 rad). A Position taught
+    with the OPEN tips on the table — the closed-tip TCP 17 mm under it — runs;
+    the same pose judged with the claw closed is below the table."""
+    pid = 'edu1_studio'
+    g = _carried(pid)
+    rise = _carried_rise(pid)
+    assert rise > M.WORKSPACE_FLOOR_MARGIN_M
+    q = _touching_pose(pid, -rise)
+    ctx = _plain_ctx(pid)
+    assert hp.pose_floor_clearance(ctx, q + [g]) == pytest.approx(0.0, abs=1e-6)
+    with pytest.raises(M.WorkflowError):
+        M._refuse_position_below_table(ctx, q + [0.0], 'P')
+    rig = Rig(monkeypatch, pid, simulated=True)
+    phase = rig.run(program(_move('P'), destinations=[_entry(pid, 'P', q, 0.0)]))
+    assert phase == 'finished', rig.errors()
+    assert _arm(rig) == pytest.approx(q, abs=1e-6)
+
+
+def test_the_threshold_is_a_ziels_margin_below_the_surface(monkeypatch):
+    """1 mm inside ``WORKSPACE_FLOOR_MARGIN_M`` passes, 1 mm beyond refuses,
+    whatever ``FLOOR_TOL_M`` is set to (it is only the rollback switch here).
+    The OMX touch-off's ``z_table`` is the EE height (fingertip + 0.04), so the
+    surface is ``z_table − tool_tip_below_ee_m``; a tilted plane is honoured
+    per point."""
+    tol = M.WORKSPACE_FLOOR_MARGIN_M
+    assert tol == pytest.approx(0.010)
+    monkeypatch.setattr(hp, 'FLOOR_TOL_M', 0.05)
     inside = _touching_pose('omx_full', -tol + 0.001)
     beyond = _touching_pose('omx_full', -tol - 0.001)
     ctx = _plain_ctx('omx_full', z_table=0.04)
-    assert hp.pose_floor_clearance(ctx, inside) == pytest.approx(-tol + 0.001, abs=2e-4)
+    assert hp.pose_floor_clearance(ctx, inside) == pytest.approx(-tol + 0.001, abs=1e-6)
     M._refuse_position_below_table(ctx, inside + [0.8], 'P')
     with pytest.raises(M.WorkflowError) as exc:
         M._refuse_position_below_table(ctx, beyond + [0.8], 'P')
@@ -508,9 +627,26 @@ def test_the_threshold_is_floor_tol_below_the_surface():
                                    beyond + [0.8], 'P')
 
 
+@pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
+def test_the_solvers_last_link_point_is_the_closed_fingertip(pid):
+    """``pose_floor_clearance`` replaces the solver's LAST ``link_points``
+    entry with the fingertip at the claw opening; that entry is the closed
+    fingertip (``fk`` + ``tool_tip_below_ee_m`` along the approach axis) on
+    both solvers, at one sample per link as at the default five."""
+    import numpy as np
+    ik = rp.ROBOT_PROFILES[pid].build_ik()
+    rng = random.Random(7)
+    for _ in range(20):
+        q = [rng.uniform(lo, hi) for lo, hi in ik.joint_limits]
+        rot, t = ik.fk(q)
+        tip = np.asarray(t) + ik.tool_tip_below_ee_m * (np.asarray(rot) @ np.asarray(ik.approach_axis_local))
+        for k in (1, 5):
+            assert np.asarray(ik.link_points(q, samples_per_link=k)[-1]) == pytest.approx(tip, abs=1e-9)
+
+
 def test_geometry_that_cannot_be_judged_is_refused():
-    """An unknown is never an approval: a solver whose link sampling fails, or a
-    non-finite table, refuses the Position."""
+    """An unknown is never an approval: a solver whose link sampling fails, a
+    non-finite table, a non-finite joint or claw value refuses the Position."""
     ik = rp.ROBOT_PROFILES['omx_full'].build_ik()
     q = _touching_pose('omx_full', 0.01)
 
@@ -518,18 +654,25 @@ def test_geometry_that_cannot_be_judged_is_refused():
         backend = ik.backend
         joint_limits = ik.joint_limits
         tool_tip_below_ee_m = ik.tool_tip_below_ee_m
+        approach_axis_local = ik.approach_axis_local
 
         def num_joints(self):
             return ik.num_joints()
 
-        def link_points(self, _q):
+        def fk(self, joints):
+            return ik.fk(joints)
+
+        def link_points(self, _q, samples_per_link=5):
             raise ValueError('no geometry')
 
-    for ctx in (_plain_ctx('omx_full', ik=_Broken()),
-                _plain_ctx('omx_full', z_table=float('nan'))):
-        assert hp.pose_floor_clearance(ctx, q) is None
+    cases = [(_plain_ctx('omx_full', ik=_Broken()), q + [0.8]),
+             (_plain_ctx('omx_full', z_table=float('nan')), q + [0.8]),
+             (_plain_ctx('omx_full'), [float('nan')] + q[1:] + [0.8]),
+             (_plain_ctx('edu1_studio'), _touching_pose('edu1_studio', 0.01) + [float('nan')])]
+    for ctx, qq in cases:
+        assert hp.pose_floor_clearance(ctx, qq) is None
         with pytest.raises(M.WorkflowError) as exc:
-            M._refuse_position_below_table(ctx, q + [0.8], 'P')
+            M._refuse_position_below_table(ctx, qq, 'P')
         assert str(exc.value) == _BELOW_TABLE
 
 

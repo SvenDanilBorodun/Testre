@@ -489,17 +489,20 @@ def _base_plane_floor(_x: float, _y: float) -> float:
     return 0.0
 
 
-def _moving_point_start(ik) -> Optional[int]:
+def _moving_point_start(ik, samples_per_link: int = 5) -> Optional[int]:
     """Index of the first link sample whose HEIGHT depends on the joints.
 
     The leading samples are the base column up to the shoulder, whose z no joint
     changes (joint1 only yaws them); judging them against the table would refuse
     every route, since the base is bolted to it. Derived from the solver itself
-    so a different chain cannot silently shift the cut."""
+    so a different chain cannot silently shift the cut. ``samples_per_link`` is
+    the sampling of the list the index is for (the solvers' default, 5, for the
+    ladder; 1 for :func:`pose_floor_clearance`)."""
     try:
         n = int(ik.num_joints())
-        a = ik.link_points([0.0] * n)
-        b = ik.link_points([0.0] + [0.7 * (-1) ** i for i in range(n - 1)])
+        a = ik.link_points([0.0] * n, samples_per_link=samples_per_link)
+        b = ik.link_points([0.0] + [0.7 * (-1) ** i for i in range(n - 1)],
+                           samples_per_link=samples_per_link)
     except Exception:  # noqa: BLE001 — unjudgeable geometry is handled by the caller
         return None
     if not a or not b:
@@ -556,41 +559,54 @@ def _table_surface_fn(ctx):
     return _at
 
 
-def pose_floor_clearance(ctx, q_arm) -> Optional[float]:
-    """How far the LOWEST moving part of the arm at the ONE pose ``q_arm`` sits
-    above this rig's table surface (:func:`_table_surface_fn`); negative =
-    below it. ``None`` when the model cannot judge the pose — never an approval.
+def pose_floor_clearance(ctx, q_full) -> Optional[float]:
+    """How far the LOWEST judged point of the arm at the ONE pose ``q_full``
+    (arm joints, then optionally the gripper value) sits above this rig's table
+    surface (:func:`_table_surface_fn`); negative = below it. ``None`` when the
+    pose cannot be judged — never an approval.
 
-    The ladder's own two models, no second one: the box model where the arm has
-    one (``arm_geometry.resolve_geometry``: the Feetech arms; base_link
-    excluded), else the point model over ``ik.link_points`` from
-    :func:`_moving_point_start` (the OMX; its fingertip samples included). Used
-    by ``motion._move_to_position`` to refuse a Position taught below the
-    table before any route is planned (spec D1 fix round)."""
-    from physical_ai_server.workflow import arm_geometry as _ag
+    The POINT model, on every arm (owner decision, fix round 2): the arm's
+    joint points — ``ik.link_points`` at ONE sample per link, from
+    :func:`_moving_point_start`; against the (planar) table a straight link's
+    lowest point is one of its two ends, so samples between them add nothing —
+    and its FINGERTIP. The solver's own last point is the CLOSED fingertip
+    (``fk`` plus ``tool_tip_below_ee_m`` along the tool's world approach axis,
+    checked here, else ``None``); it is replaced by the tip at the claw opening
+    in ``q_full[n]``, set back along that axis by ``motion.tool_tip_rise_m``
+    (0 on the OMX; on the Edu:1 an open claw's tips ride up, slightly down near
+    0.14 rad). Never the box model: it reads a tilted Edu:1 claw tens of
+    millimetres below where its meshes are. Not judged: the link and housing
+    surfaces around the centreline (the OMX gripper housing included) and the
+    claw's outer blade edges. Used by ``motion._move_to_position`` to refuse a
+    Position taught below the table before any route is planned."""
+    from physical_ai_server.workflow.handlers import motion as _m
 
     ik = getattr(ctx, 'ik', None)
     if ik is None:
         return None
     try:
         n = int(ik.num_joints())
-        arm = [float(v) for v in list(q_arm)[:n]]
-        if len(arm) != n or not all(np.isfinite(v) for v in arm):
+        q = [float(v) for v in q_full]
+        arm = q[:n]
+        if len(arm) != n or not all(np.isfinite(v) for v in q):
             return None
+        start = _moving_point_start(ik, samples_per_link=1)
+        pts = [np.asarray(p, dtype=float) for p in ik.link_points(arm, samples_per_link=1)]
+        rot, tcp = ik.fk(arm)
+        axis = np.asarray(rot, dtype=float) @ np.asarray(ik.approach_axis_local, dtype=float)
+        axis = axis / np.linalg.norm(axis)
+        closed_tip = (np.asarray(tcp, dtype=float)
+                      + float(getattr(ik, 'tool_tip_below_ee_m', 0.0) or 0.0) * axis)
+        if (start is None or len(pts) <= start + 1
+                or not np.linalg.norm(pts[-1] - closed_tip) < 1e-6):
+            return None
+        tip = closed_tip - _m.tool_tip_rise_m(ik, q, n) * axis
         surface = _table_surface_fn(ctx)
-        geom = _ag.resolve_geometry(ctx)
-        if geom is not None:
-            value = geom.floor_clearance(arm, surface)
-        elif callable(getattr(ik, 'link_points', None)):
-            start_idx = _moving_point_start(ik)
-            if start_idx is None:
-                return None
-            value = _point_clearance(ik, arm, surface, start_idx)
-        else:
-            return None
+        value = min(float(p[2]) - surface(float(p[0]), float(p[1]))
+                    for p in pts[start:-1] + [tip])
     except Exception:  # noqa: BLE001 — an unjudgeable pose is refused by the caller
         return None
-    if value is None or not np.isfinite(value):
+    if not np.isfinite(value):
         return None
     return float(value)
 

@@ -2082,6 +2082,13 @@ _POSITION_FLOOR_DE = (
     'Der Weg zur Position „{name}" würde durch die Tischebene führen — '
     'bitte die Position etwas höher neu vormachen.'
 )
+# Fix round (owner): a Position whose taught pose ITSELF lies below this rig's
+# table is refused before any route is planned — the reversed rung would
+# otherwise let the target set its own floor allowance and drive there.
+_POSITION_BELOW_TABLE_DE = (
+    'Die Position „{name}" liegt unter der Tischebene — '
+    'bitte die Position an diesem Roboter neu vormachen.'
+)
 _POSITION_VIA_DE = 'Fahre zur Position „{name}" über einen Zwischenpunkt.'
 _POSITION_VIA_HOME_DE = 'Fahre zur Position „{name}" über die Grundstellung.'
 
@@ -2185,7 +2192,10 @@ def _pose_route(ctx, q_start, q_end, name) -> tuple[list, str]:
     try:
         legs = home_planner.plan_floor_checked_home_route(
             ctx, q_end, q_start, DEFAULT_MOVE_DURATION_S, log=sink)
-        return [(list(b), list(a), d) for (a, b, d) in reversed(legs)], 'via'
+        # Labelled by leg count like the forward rung: ONE reversed leg is a
+        # straight move and never says „über einen Zwischenpunkt".
+        return ([(list(b), list(a), d) for (a, b, d) in reversed(legs)],
+                ('direct' if len(legs) == 1 else 'via'))
     except home_planner.FloorRefusal:
         pass
     home = _home_joints(ctx) + [q_end[_n(ctx)]]
@@ -2200,17 +2210,41 @@ def _pose_route(ctx, q_start, q_end, name) -> tuple[list, str]:
             'home')
 
 
+def _refuse_position_below_table(ctx, q_end, name) -> None:
+    """Refuse a Position whose taught pose lies below THIS rig's table.
+
+    Judged on the pose's OWN floor clearance (``home_planner.
+    pose_floor_clearance``: the ladder's box model on the Feetech arms, its
+    point model on the OMX, against the touch-off plane minus the solver's
+    ``tool_tip_below_ee_m``, else the base plane z = 0): any moving part more
+    than ``home_planner.FLOOR_TOL_M`` below the surface is refused, so a pose
+    taught with the fingertips on the table passes. Geometry the model cannot
+    judge is refused too — never an approval. ``FLOOR_TOL_M <= 0`` (the rollback
+    ``EDUBOTICS_HOME_FLOOR_TOL_M=0``) switches the check off, like the ladder.
+    Read at call time, so a test or the rollback sees the live value."""
+    from physical_ai_server.workflow import home_planner
+    tol = float(home_planner.FLOOR_TOL_M)
+    if tol <= 0.0:
+        return
+    clearance = home_planner.pose_floor_clearance(ctx, q_end)
+    if clearance is None or clearance < -tol:
+        raise WorkflowError(_POSITION_BELOW_TABLE_DE.format(name=name))
+
+
 def _move_to_position(ctx, name: str, pose: list[float], tempo) -> None:
     """Drive to a Position's taught arm pose (see the block comment above).
 
     ONE hold of the motion lock FIRST; only inside it is ``q_start`` read and
     the route planned (M2: a hat moving the arm between this call and the lock
-    would otherwise leave a first leg the floor ladder never judged)."""
+    would otherwise leave a first leg the floor ladder never judged). Before the
+    route, the taught pose itself must lie above the table
+    (:func:`_refuse_position_below_table`); nothing moves on a refusal."""
     acquired = _hold_motion_lock(ctx)
     try:
         q_start = list(ctx.last_full_joints)
         n = _n(ctx)
         q_end = list(pose) + [q_start[n]]
+        _refuse_position_below_table(ctx, q_end, name)
         legs, rung = _pose_route(ctx, q_start, q_end, name)
         if rung == 'via':
             ctx.log(_POSITION_VIA_DE.format(name=name))

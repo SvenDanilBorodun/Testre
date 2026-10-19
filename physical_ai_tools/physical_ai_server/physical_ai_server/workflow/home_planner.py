@@ -533,6 +533,68 @@ def _point_line_ok(ik, a_arm, b_arm, floor_fn, start_idx, allowance) -> bool:
     return True
 
 
+def _table_surface_fn(ctx):
+    """``(x, y) -> the table SURFACE height under that point``, for judging
+    where the arm's OWN parts are (``pose_floor_clearance``).
+
+    The touch-off plane where one exists (``motion._floor_z_at``, the
+    plane-aware refusal helper — never the ``GRASP_Z_FROM_PLANE`` knob) minus
+    the solver's ``tool_tip_below_ee_m``: on the OMX the touch-off's
+    ``z_table`` is the END-EFFECTOR frame's height with the fingertips on the
+    table (0.04 m above the surface), on the Feetech arms the EE frame IS the
+    fingertip (0). With no table measurement, the base plane z = 0. So a kit
+    whose arm stands on a riser is judged by its own measurement, and on a
+    Feetech arm this is exactly :func:`_floor_fn`."""
+    from physical_ai_server.workflow.handlers import motion as _m
+
+    tip = float(getattr(getattr(ctx, 'ik', None), 'tool_tip_below_ee_m', 0.0) or 0.0)
+
+    def _at(x: float, y: float) -> float:
+        value = _m._floor_z_at(ctx, x, y)
+        return 0.0 if value is None else float(value) - tip
+
+    return _at
+
+
+def pose_floor_clearance(ctx, q_arm) -> Optional[float]:
+    """How far the LOWEST moving part of the arm at the ONE pose ``q_arm`` sits
+    above this rig's table surface (:func:`_table_surface_fn`); negative =
+    below it. ``None`` when the model cannot judge the pose — never an approval.
+
+    The ladder's own two models, no second one: the box model where the arm has
+    one (``arm_geometry.resolve_geometry``: the Feetech arms; base_link
+    excluded), else the point model over ``ik.link_points`` from
+    :func:`_moving_point_start` (the OMX; its fingertip samples included). Used
+    by ``motion._move_to_position`` to refuse a Position taught below the
+    table before any route is planned (spec D1 fix round)."""
+    from physical_ai_server.workflow import arm_geometry as _ag
+
+    ik = getattr(ctx, 'ik', None)
+    if ik is None:
+        return None
+    try:
+        n = int(ik.num_joints())
+        arm = [float(v) for v in list(q_arm)[:n]]
+        if len(arm) != n or not all(np.isfinite(v) for v in arm):
+            return None
+        surface = _table_surface_fn(ctx)
+        geom = _ag.resolve_geometry(ctx)
+        if geom is not None:
+            value = geom.floor_clearance(arm, surface)
+        elif callable(getattr(ik, 'link_points', None)):
+            start_idx = _moving_point_start(ik)
+            if start_idx is None:
+                return None
+            value = _point_clearance(ik, arm, surface, start_idx)
+        else:
+            return None
+    except Exception:  # noqa: BLE001 — an unjudgeable pose is refused by the caller
+        return None
+    if value is None or not np.isfinite(value):
+        return None
+    return float(value)
+
+
 def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float,
                                   log=None) -> list:
     """Legs to HOME for the manual glide and the `home` block, or raise

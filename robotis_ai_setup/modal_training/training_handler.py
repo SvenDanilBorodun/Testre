@@ -1420,6 +1420,10 @@ LOG_HEAD_BYTES = 1024 * 1024
 JSON_READ_CAP_B = 1024 * 1024
 DETAIL_MAX_CHARS = 500
 LOCK_CANDIDATES = (Path("/app/training-lock.txt"), Path("/root/training-lock.txt"))
+# This very file, the handler code the process runs (V2-1): the trainer image COPYs it to
+# /app/training_handler.py, Modal's add_local_python_source mounts it at /root; both are the
+# repo file's bytes, which make_handler_hash.py hashes into the API's TRAINING_HANDLER_SHA256.
+HANDLER_PATH = Path(__file__)
 
 # Test seams: an httpx transport (tests pass httpx.MockTransport) and the clock.
 _HTTP_TRANSPORT = None
@@ -1546,6 +1550,20 @@ def _lock_sha256() -> str:
         print("[edubotics-worker] no training-lock.txt found; start will be refused", flush=True)
         return "0" * 64
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _handler_sha256() -> str:
+    """sha256 of the handler file this process runs (§3.10, V2-1); 64 zeros when unreadable.
+
+    Sent in `start` beside the lock hash, so a stale handler (a forgotten Modal deploy, an
+    older trainer image) is refused as wrong_image even when the lock did not change.
+    """
+    import hashlib
+    try:
+        return hashlib.sha256(HANDLER_PATH.read_bytes()).hexdigest()
+    except OSError:
+        print("[edubotics-worker] training_handler.py is unreadable; start will be refused", flush=True)
+        return "0" * 64
 
 
 def _build_id() -> str:
@@ -1990,7 +2008,7 @@ class _ManagedRun:
 
     def call_start(self):
         """POST start; returns the 200 body, or _STOP."""
-        body = {"lock_sha256": _lock_sha256(), "build": _build_id()}
+        body = {"lock_sha256": _lock_sha256(), "handler_sha256": _handler_sha256(), "build": _build_id()}
 
         def once(deadline):
             a = self.api("start", body, deadline=deadline)

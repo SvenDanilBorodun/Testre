@@ -202,22 +202,40 @@ def _resume_files(tid: int, ckpt) -> dict:
     return out
 
 
+def _expected_handler_sha256() -> str:
+    """The generated hash of training_handler.py (make_handler_hash.py, V2-1), imported
+    lazily like the lock hash."""
+    from app.services import training_handler_hash
+
+    return training_handler_hash.TRAINING_HANDLER_SHA256
+
+
 async def _start(row, att, body):
     lock = body.get("lock_sha256")
     build = body.get("build")
+    # V2-1: the sha256 of the training_handler.py the worker runs. Absent = an image from
+    # before the handler hash, i.e. a stale handler: refused as wrong_image, never 422.
+    handler = body.get("handler_sha256")
     if type(lock) is not str or not _HEX64.fullmatch(lock) or type(build) is not str or len(build) > 64:
+        return _bad_request()
+    if handler is not None and (type(handler) is not str or not _HEX64.fullmatch(handler)):
         return _bad_request()
     tid, n = int(row["id"]), int(att["attempt_no"])
     now = D._now()
     logger.info("worker start: training %s attempt %s build %s", tid, n, D.sanitize_log_text(build, 64))
     try:
         expected = _expected_lock_sha256()
-    except Exception as exc:  # noqa: BLE001 - never admit a lock we cannot compare
-        logger.error("training lock hash unavailable: %s", type(exc).__name__)
+        expected_handler = _expected_handler_sha256()
+    except Exception as exc:  # noqa: BLE001 - never admit a lock or handler we cannot compare
+        logger.error("training lock or handler hash unavailable: %s", type(exc).__name__)
         return _unavailable()
+    stale = []
     if not hmac.compare_digest(lock, expected):
-        logger.error("training %s attempt %s: wrong image (lock %s…, expected %s…); requeued",
-                     tid, n, lock[:12], expected[:12])
+        stale.append(f"lock {lock[:12]}…, expected {expected[:12]}…")
+    if handler is None or not hmac.compare_digest(handler, expected_handler):
+        stale.append(f"handler {(handler or 'none')[:12]}…, expected {expected_handler[:12]}…")
+    if stale:
+        logger.error("training %s attempt %s: wrong image (%s); requeued", tid, n, "; ".join(stale))
         await D.requeue_attempt(row, att, "host_unfit:wrong_image", now)
         await D.terminate_attempt(att)
         return _err(409, T.S10, "wrong_image")

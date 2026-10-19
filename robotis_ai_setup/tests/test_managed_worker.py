@@ -417,7 +417,21 @@ class HappyPath(ManagedTestBase):
     def test_lock_hash_and_build_in_start(self):
         self.run_managed()
         start = self.world.bodies("start")[0]
-        self.assertEqual(start, {"lock_sha256": self.lock_sha, "build": "test-build"})
+        handler = hashlib.sha256((_SETUP / "modal_training" / "training_handler.py").read_bytes()).hexdigest()
+        self.assertEqual(start, {"lock_sha256": self.lock_sha, "handler_sha256": handler, "build": "test-build"})
+
+    def test_start_sends_the_hash_of_the_handler_file_it_runs(self):
+        # V2-1: the hash is taken at run time from the file the process runs, never a constant.
+        other = self.tmp / "training_handler.py"
+        other.write_bytes(b"# another handler version\n")
+        with mock.patch.object(th, "HANDLER_PATH", other):
+            self.run_managed()
+        self.assertEqual(self.world.bodies("start")[0]["handler_sha256"],
+                         hashlib.sha256(b"# another handler version\n").hexdigest())
+        self.world.calls.clear()
+        with mock.patch.object(th, "HANDLER_PATH", self.tmp / "absent.py"):
+            self.run_managed()
+        self.assertEqual(self.world.bodies("start")[0]["handler_sha256"], "0" * 64)
 
     def test_every_api_call_carries_the_bearer_token_and_no_put_does(self):
         self.run_managed()

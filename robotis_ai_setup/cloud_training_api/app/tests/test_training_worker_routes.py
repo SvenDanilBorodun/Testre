@@ -7,7 +7,8 @@ FakeDB (049's functions), the in-memory R2 and the fake RunPod. Pinned: every
 wrong_image / budget_exhausted, 422 bad_manifest / ckpt_refused); a content
 refusal fails the row with S7 at once while a size/sha refusal does not (FR-5);
 ckpt-bad's ignored/refused/kept; resume-crash counting; finish never stores host
-text (E11); the lock hash (SR-18); budget_s minus the attempt's own time (FR-18).
+text (E11); the lock hash (SR-18) and the handler hash (V2-1); budget_s minus the
+attempt's own time (FR-18).
 """
 
 from __future__ import annotations
@@ -36,6 +37,10 @@ from app.tests._managed_fakes import (  # noqa: E402
 from app.tests.test_training_dispatch import settings  # noqa: E402
 
 LOCK = "c" * 64
+HANDLER = "e" * 64
+# The real accessors (WorkerBase patches both).
+_REAL_LOCK_ACCESSOR = route._expected_lock_sha256
+_REAL_HANDLER_ACCESSOR = route._expected_handler_sha256
 TOKEN = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
 
 
@@ -69,6 +74,7 @@ class WorkerBase(unittest.IsolatedAsyncioTestCase):
             patch.object(D, "_now", self.clock), patch.object(D, "_sb", lambda: self.db),
             patch.object(D, "SETTINGS", self.s),
             patch.object(route, "_expected_lock_sha256", lambda: LOCK),
+            patch.object(route, "_expected_handler_sha256", lambda: HANDLER),
             patch.object(hf_publish, "schedule_publish", lambda t, n: self.published.append((t, n)) or True),
             patch.object(hf_publish, "schedule_mirror", lambda t, n, st: self.mirrors.append((t, n, st)) or True),
             patch.object(hf_publish, "schedule_failed_log", lambda row: self.logs.append(row["id"]) or True),
@@ -92,6 +98,10 @@ class WorkerBase(unittest.IsolatedAsyncioTestCase):
             cm.__exit__(None, None, None)
 
     async def call(self, action, body=None, *, tid=None, attempt="1", **req):
+        # Every `start` body carries the handler hash an honest worker sends (V2-1), unless the
+        # test names it; a test of its ABSENCE sends raw bytes.
+        if action == "start" and isinstance(body, dict) and "handler_sha256" not in body:
+            body = {**body, "handler_sha256": HANDLER}
         resp = await route.worker_action(str(self.tid if tid is None else tid), attempt, action,
                                          FakeRequest(body=body, **req))
         return resp.status_code, content(resp)
@@ -217,6 +227,80 @@ class Start(WorkerBase):
 
         with patch.object(route, "_expected_lock_sha256", _missing):
             self.assertEqual((await self.call("start", {"lock_sha256": LOCK, "build": "b"}))[0], 503)
+
+    def _assert_wrong_image(self, status, body):
+        self.assertEqual((status, body["code"], body["detail"]), (409, "wrong_image", T.S10))
+        self.assertEqual((self.att["state"], self.att["end_reason"]), ("lost", "host_unfit:wrong_image"))
+        self.assertIn("pod1", self.rp.deletes())
+        self.assertEqual(self.db.row(self.tid)["status"], "queued")
+        self.assertEqual((self.att["resume_from_step"], self.att.get("resume_from_attempt")), (0, None),
+                         "a refused start hands out nothing")
+
+    async def test_a_stale_handler_requeues_logs_and_stops_the_pod_like_a_wrong_lock(self):
+        # V2-1: the lock matches, the handler is another version (a forgotten Modal deploy).
+        with self.assertLogs("app.routes.training_worker", level="ERROR") as logs:
+            status, body = await self.call("start", {"lock_sha256": LOCK, "handler_sha256": "d" * 64,
+                                                     "build": "b"})
+        self._assert_wrong_image(status, body)
+        self.assertEqual(logs.output, [
+            "ERROR:app.routes.training_worker:training %s attempt 1: wrong image "
+            "(handler dddddddddddd…, expected eeeeeeeeeeee…); requeued" % self.tid])
+
+    async def test_a_start_without_a_handler_hash_is_a_stale_image(self):
+        # An image from before V2-1 sends no handler hash: wrong_image, never a 422 the
+        # worker would retry for ten minutes.
+        raw = json.dumps({"lock_sha256": LOCK, "build": "b"}).encode()
+        with self.assertLogs("app.routes.training_worker", level="ERROR") as logs:
+            status, body = await self.call("start", raw=raw)
+        self._assert_wrong_image(status, body)
+        self.assertIn("(handler none…, expected eeeeeeeeeeee…)", logs.output[0])
+
+    async def test_the_wrong_lock_log_line_is_unchanged(self):
+        with self.assertLogs("app.routes.training_worker", level="ERROR") as logs:
+            await self.call("start", {"lock_sha256": "d" * 64, "build": "b"})
+        self.assertEqual(logs.output, [
+            "ERROR:app.routes.training_worker:training %s attempt 1: wrong image "
+            "(lock dddddddddddd…, expected cccccccccccc…); requeued" % self.tid])
+
+    async def test_a_stale_lock_and_handler_requeue_once_and_name_both(self):
+        requeues = []
+        orig = D.requeue_attempt
+
+        async def spy(*a, **k):
+            requeues.append(a[2])
+            return await orig(*a, **k)
+
+        with patch.object(D, "requeue_attempt", spy), \
+                self.assertLogs("app.routes.training_worker", level="ERROR") as logs:
+            status, body = await self.call("start", {"lock_sha256": "d" * 64, "handler_sha256": "f" * 64,
+                                                     "build": "b"})
+        self._assert_wrong_image(status, body)
+        self.assertEqual(requeues, ["host_unfit:wrong_image"])
+        self.assertIn("(lock dddddddddddd…, expected cccccccccccc…; handler ffffffffffff…, expected "
+                      "eeeeeeeeeeee…)", logs.output[0])
+
+    async def test_a_malformed_handler_hash_is_422(self):
+        for bad in ("E" * 64, "e" * 63, "e" * 65, "", 7, True, ["e" * 64], {"sha256": "e" * 64}):
+            with self.subTest(handler=bad):
+                status, body = await self.call("start", {"lock_sha256": LOCK, "handler_sha256": bad,
+                                                         "build": "b"})
+                self.assertEqual((status, body["code"]), (422, "bad_request"))
+        self.assertEqual(self.att["state"], "running", "a malformed body requeues nothing")
+
+    async def test_no_handler_module_is_503(self):
+        def _missing():
+            raise ImportError("training_handler_hash")
+
+        with patch.object(route, "_expected_handler_sha256", _missing):
+            self.assertEqual((await self.call("start", {"lock_sha256": LOCK, "build": "b"}))[0], 503)
+        self.assertEqual(self.att["state"], "running")
+
+    async def test_the_accessors_answer_the_generated_modules(self):
+        from app.services import training_handler_hash, training_lock_hash
+
+        self.assertRegex(training_handler_hash.TRAINING_HANDLER_SHA256, r"^[0-9a-f]{64}$")
+        self.assertEqual(_REAL_HANDLER_ACCESSOR(), training_handler_hash.TRAINING_HANDLER_SHA256)
+        self.assertEqual(_REAL_LOCK_ACCESSOR(), training_lock_hash.TRAINING_LOCK_SHA256)
 
     async def test_an_exhausted_budget_fails_the_row(self):
         self.db.row(self.tid)["train_seconds_used"] = 14400 - 1800 - 200

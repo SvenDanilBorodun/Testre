@@ -22,6 +22,16 @@ import { DE } from '../blocks/messages_de';
 
 const onRig = (c) => !!c.hardware && !c.simMode;
 
+/**
+ * The camera pin — its creation row below and the generic „Ziel setzen" block
+ * of the Ziele flyout (sammlung/toolboxCategories.js) — is set by a click into
+ * the SCENE CAMERA, which the simulator has not; there a Ziel is set on the
+ * Sim-Tisch (N5 of the 2026-10-18 semantics round). One rule for both.
+ */
+export function cameraPinOffered(c) {
+  return !(c && typeof c === 'object' && c.simMode);
+}
+
 export const NEW_ACTION_ROWS = Object.freeze([
   Object.freeze({
     id: 'teachRecording',
@@ -45,7 +55,7 @@ export const NEW_ACTION_ROWS = Object.freeze([
     label: DE.FLY_PIN_CAMERA,
     icon: 'camera',
     action: Object.freeze({ type: 'pinCamera' }),
-    allowed: (c) => onRig(c) && !!c.pinCamera,
+    allowed: (c) => onRig(c) && !!c.pinCamera && cameraPinOffered(c),
   }),
   Object.freeze({
     id: 'pinSim',

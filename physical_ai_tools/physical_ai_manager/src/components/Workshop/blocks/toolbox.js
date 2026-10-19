@@ -44,8 +44,10 @@ export const SAMMLUNG_TOOLBOX_IDS = Object.freeze({
   POSITIONEN: 'sammlung-positionen',
 });
 
-// The blocks that left the static toolbox. The dynamic flyouts always emit
-// each of them (generic or prefilled), so coverage tests union this list.
+// The blocks that left the static toolbox. The dynamic flyouts emit each of
+// them (generic or prefilled) — on the rig every one; in the simulator the
+// camera pin `edubotics_destination_pin` is left out (N5, newActions'
+// cameraPinOffered) — so coverage tests union this list.
 export const SAMMLUNG_BASE_BLOCKS = Object.freeze([
   { kind: 'block', type: 'edubotics_destination_pin' },
   { kind: 'block', type: 'edubotics_destination_ref' },

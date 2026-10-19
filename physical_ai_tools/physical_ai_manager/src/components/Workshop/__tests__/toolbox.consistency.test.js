@@ -80,8 +80,9 @@ describe('Workshop toolbox consistency', () => {
       Object.keys(Blockly.Blocks).filter((t) => t.startsWith('edubotics_'))
     );
     // The destination and replay blocks live in the dynamic Sammlung flyouts
-    // (sammlung/toolboxCategories.js), which always emit SAMMLUNG_BASE_BLOCKS —
-    // pinned by sammlung/__tests__/toolboxCategories.test.jsx, which injects a
+    // (sammlung/toolboxCategories.js), which emit SAMMLUNG_BASE_BLOCKS (on the
+    // rig every one; the simulator leaves the camera pin out, N5) — pinned by
+    // sammlung/__tests__/toolboxCategories.test.jsx, which injects a
     // workspace (this file must not). Coverage counts them as in the palette.
     toolboxTypes = collectToolboxBlockTypes([buildToolbox(), SAMMLUNG_BASE_BLOCKS]);
   });

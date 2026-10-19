@@ -704,12 +704,15 @@ async def requeue_attempt(row, attempt, reason: str, now: float, checkpoints=Non
 
 
 async def end_attempt_succeeded(row, attempt, now: float) -> bool:
-    """end_training_attempt(succeeded, S3) and schedule the publish (§4.6)."""
+    """end_training_attempt(succeeded, S3) and schedule the publish (§4.6). A `lost`
+    attempt's seconds were counted by the requeue that lost it: 0 here (§4.2 step 1;
+    049 adds nothing for it either, fix round 2026-10-19)."""
     tid = int(row["id"])
+    counted = attempt.get("state") in ("lost", "ended")
     try:
         await arpc("end_training_attempt", {
             "p_training_id": tid, "p_attempt": int(attempt["attempt_no"]), "p_reason": "succeeded",
-            "p_note": T.S3, "p_train_seconds": attempt_seconds(attempt, now),
+            "p_note": T.S3, "p_train_seconds": 0 if counted else attempt_seconds(attempt, now),
         })
     except RpcConflict:
         logger.info("end of training %s attempt %s lost a race", tid, attempt["attempt_no"])

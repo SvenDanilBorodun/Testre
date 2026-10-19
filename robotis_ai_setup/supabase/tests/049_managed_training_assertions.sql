@@ -16,8 +16,10 @@
 -- row's chart range, the requeue's current_loss, the seconds finish(failed)
 -- counts: V1-3, V2-6, V2-7), probe 6 (the CAS guards of release, end,
 -- finish and complete_cancel that no other probe isolates: V1-4's S09, S10,
--- S11, S14) and probe 7 (the loss an in-place-restart trim leaves, and the
--- seconds complete_cancel_training counts: fix round 2026-10-19). Every
+-- S11, S14), probe 7 (the loss an in-place-restart trim leaves, and the
+-- seconds complete_cancel_training counts: fix round 2026-10-19) and probe 8
+-- (an end_training_attempt after a requeue counts the attempt once: fix round
+-- 2026-10-19). Every
 -- DENIAL is asserted with has_function_privilege / has_table_privilege /
 -- has_column_privilege, never by calling: in the stand-alone supabase/postgres:17.6.1.106 image a
 -- call of a function the role may not execute crashes the backend with signal
@@ -27,10 +29,10 @@
 -- PostgREST's view of the same denials is checked by hand (see the RunPod
 -- training build's proof notes): a student's call of any of the ten functions
 -- or of start_training_safe, and a read of training_checkpoints, answer 403.
--- Expected: 66 PASS, 0 FAIL (T1..T35; T5, T8, T9, T18, T24, T27..T30 and T32..T35 in
+-- Expected: 69 PASS, 0 FAIL (T1..T36; T5, T8, T9, T18, T24, T27..T30 and T32..T36 in
 -- lettered parts). The rollback is exercised separately
 -- (rollback/20261020130000_049_managed_training_rollback.sql refuses while this
--- file's T26 row is active; every row probes 5 to 7 create ends terminal).
+-- file's T26 row is active; every row probes 5 to 8 create ends terminal).
 \set ON_ERROR_STOP off
 \pset pager off
 
@@ -480,3 +482,29 @@ SELECT public.complete_cancel_training(:cl, 'canceled', NULL);
 \echo '=== T35c a legacy row (no attempts) is canceled with nothing counted ==='
 SELECT CASE WHEN NOT managed AND status = 'canceled' AND train_seconds_used = 0
             THEN 'PASS T35c' ELSE 'FAIL T35c' END FROM public.trainings WHERE id = :cl;
+
+-- ===================== probe 8: an end after a requeue counts nothing again (fix round 2026-10-19) =====================
+SELECT training_id AS er FROM public.start_training_safe(:u,'u/ds','EduBotics-Solutions/p8a','act','{"steps":5000,"save_freq":2500}'::jsonb,5000,NULL,true) \gset
+SELECT o_worker_token AS toker FROM public.claim_training_attempt(:er, 0) \gset
+SELECT public.attach_training_attempt(:er, 1, 'runpod_community', 'pod-er');
+SET ROLE anon; SELECT public.update_training_progress(:er, :'toker', 'running', 0, 5000, NULL, NULL, NULL); RESET ROLE;
+UPDATE public.training_attempts SET first_heartbeat_at = now() - interval '300 seconds' WHERE training_id = :er;
+SELECT public.requeue_training(:er, 1, 'pod_gone', 'n', 0, 300);
+SELECT public.end_training_attempt(:er, 1, 'succeeded', 'S3', 300);
+\echo '=== T36a end_training_attempt of an attempt the requeue already counted (lost) adds nothing: 300, not 600 ==='
+SELECT CASE WHEN t.status = 'running' AND t.status_note = 'S3' AND t.worker_token IS NULL AND t.train_seconds_used = 300
+             AND a.state = 'ended' AND a.end_reason = 'succeeded'
+            THEN 'PASS T36a' ELSE 'FAIL T36a' END
+  FROM public.trainings t JOIN public.training_attempts a ON a.training_id = t.id AND a.attempt_no = 1 WHERE t.id = :er;
+SELECT public.finish_training(:er, 1, 'succeeded', NULL, NULL);
+\echo '=== T36b … and the finish after it counts nothing either (the attempt is ended) ==='
+SELECT CASE WHEN status = 'succeeded' AND train_seconds_used = 300 THEN 'PASS T36b' ELSE 'FAIL T36b' END
+  FROM public.trainings WHERE id = :er;
+SELECT training_id AS es FROM public.start_training_safe(:u,'u/ds','EduBotics-Solutions/p8b','act','{"steps":5000,"save_freq":2500}'::jsonb,5000,NULL,true) \gset
+SELECT o_worker_token AS tokes FROM public.claim_training_attempt(:es, 0) \gset
+SELECT public.attach_training_attempt(:es, 1, 'runpod_secure', 'pod-es');
+SET ROLE anon; SELECT public.update_training_progress(:es, :'tokes', 'running', 0, 5000, NULL, NULL, NULL); RESET ROLE;
+SELECT public.end_training_attempt(:es, 1, 'succeeded', 'S3', 300);
+\echo '=== T36c an end of a running attempt still counts the seconds the API passes ==='
+SELECT CASE WHEN train_seconds_used = 300 THEN 'PASS T36c' ELSE 'FAIL T36c' END FROM public.trainings WHERE id = :es;
+SELECT public.finish_training(:es, 1, 'succeeded', NULL, NULL);

@@ -381,6 +381,33 @@ class DispatcherPlacement(Base):
         self.assertEqual((r["status"], r["status_note"]), ("running", T.S3))
         self.assertEqual(self.published, [(row["id"], 1)])
 
+    async def test_a_finished_lost_attempt_is_not_counted_twice(self):
+        # Fix round 2026-10-19: the requeue that lost attempt 1 counted its 900 s already;
+        # ending it now (a ready final) adds nothing, on the API's side and in 049.
+        row = self.queued(current_attempt=1, train_seconds_used=900)
+        self.db.add_attempt(row["id"], 1, state="lost", backend="runpod_community",
+                            first_heartbeat_at=self.clock.iso(self.clock.t - 900))
+        self.db.add_checkpoint(row["id"], 1, 50000, state="ready", manifest={})
+        out = await D.dispatch_tick()
+        self.assertEqual(out["finished"], 1)
+        (call,) = self.db.calls("end_training_attempt")
+        self.assertEqual(call["p_train_seconds"], 0)
+        self.assertEqual(self.db.row(row["id"])["train_seconds_used"], 900)
+        a = self.db.attempt(row["id"], 1)
+        self.assertEqual((a["state"], a["end_reason"]), ("ended", "succeeded"))
+
+    async def test_the_fake_end_follows_049_and_skips_only_a_counted_attempt(self):
+        # The FakeDB's end_training_attempt as 049's: a lost attempt adds nothing, a running one its seconds.
+        lost = self.queued(current_attempt=1, train_seconds_used=300)
+        self.db.add_attempt(lost["id"], 1, state="lost")
+        running = self.db.add_training(status="running", current_attempt=1, train_seconds_used=300)
+        self.db.add_attempt(running["id"], 1, state="running")
+        for r in (lost, running):
+            self.db.rpc("end_training_attempt", {"p_training_id": r["id"], "p_attempt": 1, "p_reason": "succeeded",
+                                                 "p_note": T.S3, "p_train_seconds": 300}).execute()
+        self.assertEqual((self.db.row(lost["id"])["train_seconds_used"],
+                          self.db.row(running["id"])["train_seconds_used"]), (300, 600))
+
 
 class DispatcherBudgets(Base):
     async def test_the_attempt_cap(self):

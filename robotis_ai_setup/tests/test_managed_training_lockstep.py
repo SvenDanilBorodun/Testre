@@ -130,7 +130,7 @@ SENTENCES = {
     "S13": "Der letzte Checkpoint fehlt – das Training kann noch nicht abgeschlossen werden.",
     "S14": "Dieser Checkpoint wurde bereits übernommen.",
     "S15": "Für diesen Checkpoint wurde kein Upload angefordert.",
-    "S16": "Der Cloud-GPU-Server ist nicht nutzbar (GPU oder Speicherplatz fehlt). Das Training wurde nicht "
+    "S16": "Der Cloud-GPU-Server ist nicht nutzbar (keine passende GPU). Das Training wurde nicht "
            "gestartet – das Trainingsguthaben wurde erstattet.",
     "S17": "Das Modell enthält nicht erlaubte Verarbeitungsschritte und wird aus Sicherheitsgründen nicht "
            "geladen.",

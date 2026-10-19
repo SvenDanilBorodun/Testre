@@ -4,4 +4,4 @@ sha256 of modal_training/training_handler.py. The worker sends the hash of the h
 file it runs in POST .../start; any other value is refused as wrong_image.
 """
 
-TRAINING_HANDLER_SHA256 = "633a0c1b413622eaef3a426d119cc9a550dcb2af5f2fe6ceacb91ed3e9c96ead"
+TRAINING_HANDLER_SHA256 = "a4f50974bfbf2a4f8bb7ab8f9ac862656c40a89d5fcab05ebd5cb4eb28650c27"

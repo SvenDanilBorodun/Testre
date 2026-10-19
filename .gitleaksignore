@@ -40,3 +40,9 @@ dc16314b45a64df1947222f0c023fa3307d17fb9:robotis_ai_setup/docker/code_runner/run
 #    test module's fake harness token constant (a made-up hf_harness… string
 #    the fake hub maps to the fictional account "lena"). Not a credential.
 0f66ef1bdeb2bbeb8a5dff1d5b93a375f273b3bf:robotis_ai_setup/tests/test_hub_sync_upload.py:generic-api-key:785
+#
+# 4. A made-up UUID used as a fake worker token in a unit test of the managed
+#    training worker API (RunPod build, 2026-10-19): `TOKEN = "…-4f89-41d3-…"`
+#    is never a credential (the tests' FakeDB issues and checks it).
+#    generic-api-key false positive.
+4d4da58269f1b2fb2d49368d011132cb41ebc7c5:robotis_ai_setup/cloud_training_api/app/tests/test_training_worker_routes.py:generic-api-key:39

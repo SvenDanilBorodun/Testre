@@ -364,6 +364,20 @@ class Cancel(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.db.row(row["id"])["status"], "canceled")
                 self.assertEqual(bool(self.rp.deletes()), stops)
 
+    async def test_the_cancel_counts_the_trained_seconds_of_the_attempt_it_ends(self):
+        # Fix round 2026-10-19: complete_cancel_training adds now − first_heartbeat_at, as finish_training does.
+        row = self.managed("running", ref="pod-s", train_seconds_used=100)
+        self.db.attempt(row["id"], 1)["first_heartbeat_at"] = self.clock.iso(self.clock.t - 900)
+        self.assertEqual((await self.cancel(row["id"]))["status"], "canceled")
+        self.assertEqual(self.db.row(row["id"])["train_seconds_used"], 1000)
+        self.assertEqual(self.db.attempt(row["id"], 1)["state"], "ended")
+
+    async def test_the_cancel_never_counts_an_attempt_a_requeue_already_counted(self):
+        row = self.managed("lost", ref=None, train_seconds_used=300)
+        self.db.attempt(row["id"], 1)["first_heartbeat_at"] = self.clock.iso(self.clock.t - 900)
+        self.assertEqual((await self.cancel(row["id"]))["status"], "canceled")
+        self.assertEqual(self.db.row(row["id"])["train_seconds_used"], 300)
+
     async def test_a_modal_attempt_is_cancelled_on_modal(self):
         row = self.managed("running", backend="modal", ref="fc-7")
         await self.cancel(row["id"])

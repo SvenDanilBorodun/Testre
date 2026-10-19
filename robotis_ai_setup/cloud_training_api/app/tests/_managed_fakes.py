@@ -429,10 +429,12 @@ class FakeDB:
         t = self.row(p_training_id)
         if not (t and t["status"] == "cancel_requested"):
             raise PgError("P0049")
+        a = self.attempt(p_training_id, t["current_attempt"])
+        first = _ts(a["first_heartbeat_at"]) if a and a["state"] not in ("lost", "ended") else None
+        t["train_seconds_used"] += max(int(self.clock.t - first), 0) if first is not None else 0
         t.update(status=p_final, terminated_at=self.now(), worker_token=None, status_note=None)
         if p_final == "failed":
             t["error_message"] = p_message
-        a = self.attempt(p_training_id, t["current_attempt"])
         if a and a["state"] not in ("lost", "ended"):
             a.update(state="ended", ended_at=self.now(), end_reason="canceled")
         return None
@@ -485,7 +487,8 @@ class FakeDB:
             hist.append({"s": p_current_step, "l": p_current_loss, "t": int(self.clock.t * 1000)})
         prev_step = t["current_step"] or 0
         prev_status = t["status"]
-        if p_status == "running" and p_current_step is not None and p_current_step < prev_step:
+        trimmed = p_status == "running" and p_current_step is not None and p_current_step < prev_step
+        if trimmed:
             hist = [e for e in hist if int(e["s"]) <= p_current_step]
         if t["step_advanced_at"] is None or p_status == "running" or (
                 p_current_step is not None and p_current_step > prev_step):
@@ -495,7 +498,11 @@ class FakeDB:
         if not managed:
             t["total_steps"] = p_total_steps if p_total_steps is not None else t["total_steps"]
             t["error_message"] = p_error_message if p_error_message is not None else t["error_message"]
-        t["current_loss"] = p_current_loss if p_current_loss is not None else t["current_loss"]
+        if p_current_loss is not None:
+            t["current_loss"] = p_current_loss
+        elif trimmed:  # the trimmed curve's last point, as requeue_training (fix round 2026-10-19)
+            last = hist[-1].get("l") if hist else None
+            t["current_loss"] = last if isinstance(last, (int, float)) else None
         t["loss_history"] = hist
         t["last_progress_at"] = self.now()
         if managed and p_status == "running" and prev_status == "queued":

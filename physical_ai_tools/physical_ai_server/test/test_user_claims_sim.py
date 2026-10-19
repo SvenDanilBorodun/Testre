@@ -139,3 +139,130 @@ def test_a_replayed_grasp_still_holds_and_an_empty_one_does_not(monkeypatch, pid
                  objects=[cube(*PICK[1])]) is False
     assert _held(monkeypatch, pid, [grasp()]) is True
     assert _held(monkeypatch, pid, [grasp(), B('edubotics_open_gripper')]) is False
+
+
+# ── D4: wording and small refusals (F5, F14, N8) ───────────────────────────
+
+def _pose_entry(pid, name):
+    """A Position taught at a grasp-like pose on ``pid``."""
+    from physical_ai_server import robot_profiles as rp
+    prof = rp.ROBOT_PROFILES[pid]
+    ik = prof.build_ik()
+    tip = float(getattr(ik, 'tool_tip_below_ee_m', 0.0))
+    q = list(ik.solve(target_xyz=(0.17, 0.05, tip + 0.05), seed=list(prof.home_joints_rad),
+                      roll=M.GRASP_ROLL_RAD))
+    _R, t = ik.fk(q)
+    return {'name': name, 'kind': 'pose', 'x': float(t[0]), 'y': float(t[1]), 'z': float(t[2]),
+            'joints': q + [float(prof.gripper_open_rad)], 'joint_names': list(prof.joint_names),
+            'robot_type': prof.data_robot_type}
+
+
+def _split_pick():
+    return [vset('Z', _find()),
+            B('controls_if', inputs={'IF0': vget('Z'), 'DO0': chain(
+                B('edubotics_move_above', inputs={'ZIEL': vget('Z')}),
+                B('edubotics_descend_to', inputs={'ZIEL': vget('Z')}),
+                B('edubotics_close_on_object', inputs={'ZIEL': vget('Z')}),
+                B('edubotics_lift'))})]
+
+
+# Every sentence that RECOMMENDS another block, with a program that does what
+# it recommends. Each program must finish (spec principle 3, F5). The sentence
+# is looked up by its key, so a sentence that is reworded stays covered and one
+# that is added without a program here is caught by the coverage assert below.
+_RECOMMENDATIONS = {
+    ('greifziel', 'bewege zu'): lambda: [vset('Z', _find()),
+                                        B('edubotics_move_above', inputs={'ZIEL': vget('Z')})],
+    ('greifziel', 'aufnehmen'): lambda: [grasp()],
+    ('greifziel', 'aufnehmen', 'split'): _split_pick,
+    ('greifziel', 'ablegen bei'): lambda: [vset('Z', _find()), B('edubotics_drop_at', inputs={
+        'DESTINATION': B('edubotics_object_position', inputs={'ZIEL': vget('Z')})})],
+    ('not_a_greifziel',): _split_pick,
+    ('no_greifziel',): _split_pick,
+    ('position_not_here',): lambda: [B('edubotics_move_to', inputs={'DESTINATION': ref('P')}),
+                                     B('edubotics_open_gripper'), B('edubotics_close_gripper')],
+    ('lift_behind_grasp',): lambda: [grasp(), B('edubotics_lift')],
+}
+
+
+def _sentence(key):
+    if key[0] == 'greifziel':
+        return M._GREIFZIEL_IN_DESTINATION_DE[key[1]]
+    if key[0] == 'not_a_greifziel':
+        return M._NOT_A_GREIFZIEL_DE['fahre über']
+    if key[0] == 'no_greifziel':
+        return M._NO_GREIFZIEL_MSG
+    if key[0] == 'position_not_here':
+        return M._POSITION_NOT_HERE_DE
+    if key[0] == 'lift_behind_grasp':
+        return M._LIFT_NOT_SOLVABLE_HOME_DE
+    raise KeyError(key)
+
+
+def test_bewege_zu_recommends_only_fahre_ueber():
+    """F5: „Position von <Ziel>" slips past the Greifziel refusal (a blind,
+    fixed-wrist grasp 12 mm too high), so the refusal no longer recommends it."""
+    text_ = M._GREIFZIEL_IN_DESTINATION_DE['bewege zu']
+    assert '„fahre über"' in text_
+    assert 'Position von' not in text_
+
+
+@pytest.mark.parametrize('key', list(_RECOMMENDATIONS))
+def test_recommended_alternative_runs(monkeypatch, key):
+    """Each recommending sentence names its block, and that block, used as the
+    sentence says, finishes."""
+    sentence = _sentence(key)
+    assert sentence
+    rig = Rig(monkeypatch, 'omx_full', objects=[cube(*PICK[0])], simulated=True)
+    payload = program(chain(*_RECOMMENDATIONS[key]()), variables=[var('Z')],
+                      destinations=[ABLAGE, _pose_entry('omx_full', 'P')])
+    assert rig.run(payload) == 'finished', (key, rig.errors())
+
+
+@pytest.mark.parametrize('seconds', [text('2'), text('abc'), None])
+def test_wait_refuses_text(monkeypatch, seconds):
+    """F14: „warte" with a text or an empty socket used to wait a silent 1 s."""
+    rig = Rig(monkeypatch, 'omx_full', simulated=True)
+    block = (B('edubotics_wait_seconds', inputs={'SECONDS': seconds}) if seconds is not None
+             else B('edubotics_wait_seconds'))
+    assert rig.run(program(block)) == 'error'
+    assert rig.errors()[-1] == '„warte" braucht eine Zahl (Sekunden).'
+
+
+def test_wait_still_clamps_a_long_wait(monkeypatch):
+    """The 300 s clamp and its warning stay (F14 only refuses non-numbers)."""
+    lines = []
+    ctx = type('C', (), {'should_stop': staticmethod(lambda: True),
+                         'log': staticmethod(lines.append), 'motion_lock': None})()
+    with pytest.raises(M.WorkflowError):
+        M.wait_seconds(ctx, {'seconds': 1e9})
+    assert lines and lines[0].startswith('[WARNUNG] Warte-Dauer auf 300 s begrenzt')
+
+
+@pytest.mark.parametrize('pid', ['edu1_studio', 'edu6_studio'])
+def test_lift_warning_names_grundstellung_only_at_home(monkeypatch, pid):
+    """N8: „hebe an" that cannot rise says „aus der Grundstellung heraus …" only
+    when the arm IS in the Grundstellung; anywhere else just the first clause."""
+    from physical_ai_server import robot_profiles as rp
+    prof = rp.ROBOT_PROFILES[pid]
+    at_home = Rig(monkeypatch, pid, simulated=True)
+    assert at_home.run(program(B('edubotics_lift'))) == 'finished'
+    home_lines = [m for m in at_home.logs() if '„hebe an"' in m]
+    assert home_lines == [M._LIFT_NOT_SOLVABLE_HOME_DE]
+    assert 'Grundstellung' in home_lines[0]
+    # The arm moved away from HOME into another unsolvable pose (a recorded
+    # motion ending there), then „hebe an".
+    away = list(prof.home_joints_rad)
+    away[1] += 0.2
+    n = prof.num_arm_joints
+    rec = {'Weg': {'fps': 25, 'points': [list(prof.home_joints_rad) + [float(prof.gripper_open_rad), 0.0],
+                                         away + [float(prof.gripper_open_rad), 1.0]]}}
+    rig = Rig(monkeypatch, pid, simulated=True)
+    assert rig.ik.solve(target_xyz=tuple(rig.ik.fk(away)[1]), seed=away) is None
+    payload = program(chain(B('edubotics_replay_trajectory', fields={'NAME': 'Weg'}),
+                            B('edubotics_lift')), trajectories=rec)
+    assert rig.run(payload) == 'finished', rig.errors()
+    lines = [m for m in rig.logs() if '„hebe an"' in m]
+    assert lines == ['[WARNUNG] „hebe an" hat den Arm nicht bewegt — aus dieser Stellung '
+                     'kann der Arm nicht senkrecht nach oben fahren.']
+    assert len(rig.arm.get_joints()) == n + 1

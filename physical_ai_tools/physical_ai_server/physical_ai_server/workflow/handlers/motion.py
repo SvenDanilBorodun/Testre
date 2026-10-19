@@ -1699,10 +1699,14 @@ _GREIFZIEL_IN_DESTINATION_DE = {
         'gefundenes Objekt bitte „Greife <Typ>" benutzen oder „fahre über" → '
         '„senke auf" → „schließe um" → „hebe an".'
     ),
+    # F5: „Position von <Ziel>" is NOT recommended here any more — it slips
+    # past this very refusal (a plain {x, y, z}) and drives sideways to the
+    # cube's mid-height with the fixed jaw roll, the blind move this refusal
+    # exists to prevent.
     'bewege zu': (
         'Ein Greifziel gehört nicht in „bewege zu" — dieser Block fährt zu '
         'einem gepinnten Ziel. Für ein gefundenes Objekt bitte „fahre über" '
-        'benutzen, oder „Position von <Ziel>" hier einsetzen.'
+        'benutzen.'
     ),
     'ablegen bei': (
         'Ein Greifziel gehört nicht in „ablegen bei" — dieser Block legt an '
@@ -1753,6 +1757,40 @@ def _refuse_greifziel(value: Any, block_de: str) -> None:
         raise WorkflowError(_GREIFZIEL_IN_DESTINATION_DE[block_de])
 
 
+# F22 / N5: ONE sentence for a Ziel name this run does not know, whichever path
+# met it — the Blockly reference block (``destinations.destination_ref``) and a
+# text program's ``robot.move_to("X")`` (this module's ``_resolve_target``) used
+# to say two different things, neither of them where a Ziel is made. The
+# simulator has no scene camera, so there the remedy is the Sim-Tisch.
+_UNKNOWN_DESTINATION_DE = ('Das Ziel „{name}" gibt es in diesem Programm nicht — '
+                           'lege es in der Sammlung unter „Ziele" an ({how}).')
+_UNKNOWN_DESTINATION_HOW_RIG_DE = 'Vormachen oder Klick in die Szenen-Kamera'
+_UNKNOWN_DESTINATION_HOW_SIM_DE = 'im Simulator: auf den Tisch tippen'
+
+
+def unknown_destination_de(ctx, name: Any) -> str:
+    """The German refusal for an unknown Ziel ``name``, worded for the mode."""
+    how = (_UNKNOWN_DESTINATION_HOW_SIM_DE if getattr(ctx, 'simulated', False)
+           else _UNKNOWN_DESTINATION_HOW_RIG_DE)
+    return _UNKNOWN_DESTINATION_DE.format(name=name, how=how)
+
+
+# N10: in the simulator the find-failure wording of a move that got no
+# Greifziel says WHERE the Greifbereich is — on the Sim-Tisch; there is no
+# „markierten" area drawn on a real mat there.
+_MARKED_GREIFBEREICH_DE = 'in den markierten Greifbereich'
+_SIM_GREIFBEREICH_DE = 'in den Greifbereich auf dem Sim-Tisch'
+
+
+def sim_greifbereich_de(ctx, text: Any) -> Any:
+    """``text`` with the rig's „markierten Greifbereich" worded for the
+    simulator when the run is simulated; unchanged otherwise (and for a
+    non-string)."""
+    if not isinstance(text, str) or not getattr(ctx, 'simulated', False):
+        return text
+    return text.replace(_MARKED_GREIFBEREICH_DE, _SIM_GREIFBEREICH_DE)
+
+
 def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
     """Turn an evaluated input value into a base-frame (x, y, z) point.
 
@@ -1763,7 +1801,7 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
         raise WorkflowError('Block hat kein Ziel erhalten.')
     if isinstance(value, str):
         if value not in ctx.destinations:
-            raise WorkflowError(f'Unbekanntes Ziel: {value}')
+            raise WorkflowError(unknown_destination_de(ctx, value))
         d = ctx.destinations[value]
         # The pin's height is re-asked here rather than trusted from storage —
         # see resolve_destination_z. This is the ONE run-time read of a named
@@ -2921,6 +2959,7 @@ def _no_greifziel_error(ctx) -> WorkflowError:
     reason = getattr(ctx, 'last_find_failure', None)
     if not isinstance(reason, str) or not reason.strip():
         return WorkflowError(_NO_GREIFZIEL_MSG)
+    reason = sim_greifbereich_de(ctx, reason)
     return GraspSkip(
         f'{reason.strip()} (Der Block hat deshalb kein Greifziel bekommen — '
         'mit „falls Ziel" prüfen, bevor der Arm bewegt wird.)'
@@ -3194,6 +3233,34 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
     note_object_picked_up(ctx, getattr(ziel, 'aruco_id', None))
 
 
+_LIFT_NOT_SOLVABLE_DE = (
+    '[WARNUNG] „hebe an" hat den Arm nicht bewegt — aus dieser Stellung '
+    'kann der Arm nicht senkrecht nach oben fahren.'
+)
+_LIFT_NOT_SOLVABLE_HOME_DE = (
+    _LIFT_NOT_SOLVABLE_DE + ' „hebe an" gehört hinter „Greife" oder „schließe '
+    'um"; aus der Grundstellung heraus gibt es nichts anzuheben.'
+)
+# „In the Grundstellung" for N8's wording: every arm joint within this of HOME
+# (the same 0.01 rad the manual home glide calls „steht bereits in der
+# Grundstellung").
+_HOME_POSE_TOL_RAD = 0.01
+
+
+def _is_home_pose(ctx) -> bool:
+    """True when every arm joint of ``ctx.last_full_joints`` is within
+    ``_HOME_POSE_TOL_RAD`` of the profile's HOME. Never raises."""
+    try:
+        n = _n(ctx)
+        pose = [float(v) for v in list(getattr(ctx, 'last_full_joints', None) or [])[:n]]
+        home = _home_joints(ctx)
+        if len(pose) != n or len(home) != n:
+            return False
+        return all(abs(a - b) <= _HOME_POSE_TOL_RAD for a, b in zip(pose, home))
+    except Exception:  # noqa: BLE001 — wording only
+        return False
+
+
 def lift(ctx, args: dict[str, Any]) -> None:
     """„hebe an" — raise the end-effector straight up by the default approach
     height from its CURRENT position, preserving the wrist roll (j5) so a held
@@ -3250,12 +3317,10 @@ def lift(ctx, args: dict[str, Any]) -> None:
         raise WorkflowError('Zielpunkt liegt unter der Tischebene.')
     cur_arm_q = _try_solve(ctx, (x, y, z))
     if cur_arm_q is None:
-        ctx.log(
-            '[WARNUNG] „hebe an" hat den Arm nicht bewegt — aus dieser Stellung '
-            'kann der Arm nicht senkrecht nach oben fahren. „hebe an" gehört '
-            'hinter „Greife" oder „schließe um"; aus der Grundstellung heraus '
-            'gibt es nichts anzuheben.'
-        )
+        # N8: the Grundstellung half of the sentence is said only when the arm
+        # IS there — anywhere else it would describe a pose the arm is not in.
+        ctx.log(_LIFT_NOT_SOLVABLE_HOME_DE if _is_home_pose(ctx)
+                else _LIFT_NOT_SOLVABLE_DE)
         ctx.last_arm_joints = list(cur[:_n(ctx)])
         return
     # Clamp the lift to the reachable envelope so an outer-ring grasp is never
@@ -3301,26 +3366,33 @@ def lift(ctx, args: dict[str, Any]) -> None:
 WAIT_SECONDS_MAX = 300.0  # 5 minutes — anything longer is almost certainly a mistake
 
 
+_WAIT_NEEDS_A_NUMBER_DE = '„warte" braucht eine Zahl (Sekunden).'
+
+
 def wait_seconds(ctx, args: dict[str, Any]) -> None:
+    # F14: a text value or an EMPTY socket used to wait a silent 1 s (and a
+    # digit text like "2" was coerced). Reachable without a crafted payload:
+    # `variables_get` has no Blockly output type, so any variable connects to
+    # the check:'Number' SECONDS socket. Refused in German now, like every
+    # other number socket of the interpreter (area A's _as_number); a bool is
+    # not a number of seconds either.
+    raw = args.get('seconds')
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise WorkflowError(_WAIT_NEEDS_A_NUMBER_DE)
     try:
-        duration = float(args.get('seconds', 1.0))
-    except (TypeError, ValueError):
-        duration = 1.0
+        duration = float(raw)
+    except (OverflowError, ValueError):
+        raise WorkflowError(_WAIT_NEEDS_A_NUMBER_DE) from None
     # NaN falls through EVERY comparison below (`nan < 0`, `nan > MAX` and
     # `monotonic() < nan` are all False), so „warte N Sekunden" silently waited
-    # 0.000 s and logged nothing — measured 2026-09-07 with seconds='nan'.
-    # Reachable without a crafted payload: `variables_get` has no Blockly output
-    # type, so any variable connects to the check:'Number' SECONDS socket.
-    # Treated exactly like the non-numeric 'abc' case (which already falls back
-    # to 1.0 silently), so the two malformed inputs behave the same way.
+    # 0.000 s and logged nothing — measured 2026-09-07. It is refused like any
+    # other value that is not a number of seconds.
     #
     # NaN ONLY — `inf` is deliberately left to the WAIT_SECONDS_MAX branch
-    # below, which already handles it correctly: measured 2026-09-07,
-    # seconds='inf' waited to the cap and logged the German [WARNUNG], while
-    # seconds='nan' waited 0.000 s and logged nothing. Using isfinite() here
-    # would have swallowed the inf warning too.
+    # below, which handles it correctly: it waits to the cap and logs the
+    # German [WARNUNG]. Using isfinite() here would swallow that warning.
     if math.isnan(duration):
-        duration = 1.0
+        raise WorkflowError(_WAIT_NEEDS_A_NUMBER_DE)
     if duration < 0:
         duration = 0.0
     if duration > WAIT_SECONDS_MAX:

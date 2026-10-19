@@ -624,12 +624,18 @@ def test_a_genuinely_missing_touch_off_still_says_tisch_vermessen():
 def test_wait_seconds_treats_nan_like_any_other_malformed_input():
     """Measured 2026-09-07: seconds='nan' → waited 0.000 s, logs=[]. Both guards
     are </> comparisons (False for NaN) and `monotonic() < nan` is False on the
-    first test. Reachable because variables_get carries no Blockly output type."""
-    ctx = Ctx('omx_full')
-    t0 = time.monotonic()
-    motion.wait_seconds(ctx, {'seconds': 'nan'})
-    waited = time.monotonic() - t0
-    assert 0.9 <= waited <= 1.5, f'NaN must fall back to the 1.0 s default, waited {waited}'
+    first test. Reachable because variables_get carries no Blockly output type.
+
+    Intent kept: NaN — the text 'nan' and the number alike — is handled like any
+    other malformed input, and since F14 a malformed input is REFUSED in German
+    (it used to wait a silent 1.0 s)."""
+    for bad in ('nan', float('nan'), 'abc', None):
+        ctx = Ctx('omx_full')
+        t0 = time.monotonic()
+        with pytest.raises(motion.WorkflowError) as e:
+            motion.wait_seconds(ctx, {'seconds': bad})
+        assert str(e.value) == '„warte" braucht eine Zahl (Sekunden).'
+        assert time.monotonic() - t0 < 0.5, 'a refusal must not wait first'
 
 
 def test_wait_seconds_releases_the_motion_lock_while_it_waits():

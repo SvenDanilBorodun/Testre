@@ -258,15 +258,16 @@ def test_a_payload_entry_beats_a_persisted_one_of_the_same_name():
 
 def test_with_the_sibling_present_a_robot_local_name_is_NOT_consulted():
     """Another student's „Position 1" on the same rig must not answer for a Ziel
-    this student's document does not have."""
+    this student's document does not have. Intent kept; the refusal is the one
+    unknown-Ziel sentence (F22, ``motion.unknown_destination_de``)."""
     status = []
     mgr, _arm, _w = _sim_manager([], status, {'z_table': 0.0})
     mgr.set_destination('Position 1', 0.18, -0.12, 0.08)
     program = _move_to_ref('Position 1')
     program['destinations'] = []
     assert _run(mgr, program, status) == 'error'
-    assert any(e.startswith('Unbekanntes Ziel: „Position 1"') for e in _errors(status)), (
-        _errors(status))
+    assert any(e.startswith('Das Ziel „Position 1" gibt es in diesem Programm nicht')
+               for e in _errors(status)), _errors(status)
 
 
 def test_without_the_sibling_the_legacy_robot_local_merge_is_unchanged():

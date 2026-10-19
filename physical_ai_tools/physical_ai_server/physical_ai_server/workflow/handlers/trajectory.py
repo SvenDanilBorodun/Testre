@@ -511,6 +511,26 @@ def _refuse_if_replay_crosses_a_zone(ctx, segmented, num_arm_joints: int) -> Non
         prev = q
 
 
+# F10: a text program's recordings are SCANNED out of its files
+# (codeProject.collectCodeReplayNames), so a name that is not a literal inside
+# replay(…) — a variable, a concatenation — is never sent with the run, and
+# neither is a literal name the cloud answered 404 for. The sentence says both,
+# in the run's language. A Blockly run keeps the short form, with the
+# Roboter-Studio noun „Bewegung".
+_UNKNOWN_RECORDING_DE = 'Unbekannte Bewegung: {name}'
+_UNSENT_RECORDING_DE = ('Die Bewegung „{name}" gibt es nicht oder steht nicht direkt '
+                        'in {call} — schreibe ihren Namen direkt in Anführungszeichen.')
+
+
+def _unknown_recording_de(ctx, name: str) -> str:
+    language = getattr(ctx, 'code_language', None)
+    if language == 'java':
+        return _UNSENT_RECORDING_DE.format(name=name, call='Robot.replay("…")')
+    if language == 'python':
+        return _UNSENT_RECORDING_DE.format(name=name, call='robot.replay("…")')
+    return _UNKNOWN_RECORDING_DE.format(name=name)
+
+
 def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     """„Aufnahme abspielen" — replay a recorded hand-guided trajectory named
     ``args['name']`` from ``ctx.trajectories`` at ``args['speed']`` (default 1.0).
@@ -530,7 +550,7 @@ def replay_trajectory(ctx, args: dict[str, Any]) -> None:
     trajectories = getattr(ctx, 'trajectories', None) or {}
     traj = trajectories.get(name)
     if traj is None:
-        raise WorkflowError(f'Unbekannte Aufnahme: {name}')
+        raise WorkflowError(_unknown_recording_de(ctx, name))
     n = _num_joints(ctx)
     points = extract_points(traj, num_arm_joints=n)
     refuse_wrapped_joint_jumps(

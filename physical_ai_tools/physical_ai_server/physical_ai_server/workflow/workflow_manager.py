@@ -139,7 +139,7 @@ class WorkflowContext:
     # top-level ``trajectories`` sibling of the workflow_json (CONTRACT C) merged
     # with any server-persisted recordings, exactly like ``destinations``. Read by
     # handlers/trajectory.replay_trajectory. Empty {} → the „Aufnahme abspielen"
-    # block fails loud with a German "Unbekannte Aufnahme" (backward-safe: a
+    # block fails loud with a German "Unbekannte Bewegung" (backward-safe: a
     # workflow with no replay block never touches it).
     trajectories: dict[str, Any] = field(default_factory=dict)
     # DUAL Z-KEY (don't conflate):

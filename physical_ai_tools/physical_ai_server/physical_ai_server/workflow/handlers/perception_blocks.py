@@ -1163,9 +1163,10 @@ def _note_find_failure(ctx, reason) -> None:
     """Record (or clear, with ``None``) WHY the last „finde" produced no
     Greifziel, so the split motion blocks can say it instead of the generic
     „you never ran finde" message (see ``motion._no_greifziel_error``). Plain
-    attribute on the per-run ctx — never raises."""
+    attribute on the per-run ctx — never raises. In the simulator the reason is
+    worded for the Sim-Tisch (N10, ``motion.sim_greifbereich_de``)."""
     try:
-        ctx.last_find_failure = reason
+        ctx.last_find_failure = _motion.sim_greifbereich_de(ctx, reason)
     except Exception:  # noqa: BLE001 — a diagnostic must never break the run
         pass
 
@@ -1608,10 +1609,10 @@ def find_object(ctx, args: dict[str, Any]):
         # Direction-correct reason (the old text said „näher legen" even for an
         # object that was too NEAR), recorded on the ctx so „fahre über" / „senke
         # auf" / „schließe um" report it instead of „Kein Greifziel".
-        reason = _out_of_reach_reason(
+        reason = _motion.sim_greifbereich_de(ctx, _out_of_reach_reason(
             ctx, recipe.label_de,
             next((d.world_xyz_m for d in detections if d.world_xyz_m is not None),
-                 (0.0, 0.0, 0.0)))
+                 (0.0, 0.0, 0.0))))
         _note_find_failure(ctx, reason)
         try:
             ctx.log(f'[WARNUNG] {reason}')

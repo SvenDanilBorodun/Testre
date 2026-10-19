@@ -101,8 +101,11 @@ def _logs(status):
             if isinstance(e, dict) and 'log_message' in e]
 
 
-def _hat_program(seconds='14'):
+def _hat_program(seconds=14):
     """Main stack: pin a destination and idle. Hat: grasp + place, once per cube.
+
+    ``seconds`` is a NUMBER: since F14 „warte" refuses a text (these fixtures
+    used to send the strings '14' / '6', which the block never produces).
 
     The hat body rides the `next` chain — edubotics_when_object_seen is declared with
     setNextStatement, not a DO input.
@@ -133,7 +136,8 @@ def _hat_program(seconds='14'):
 
 
 def test_when_object_seen_grasps_every_placed_cube_in_sim():
-    """The direct regression guard. Before the fix this grasped 1 of 2."""
+    """The direct regression guard. Before the fix this grasped 1 of 2.
+    (Intent kept; the idle wait is sent as a number since F14.)"""
     status = []
     mgr, world = _sim([dict(c) for c in CUBES], status)
     assert _run(mgr, _hat_program(), status) == 'finished'
@@ -143,7 +147,8 @@ def test_when_object_seen_grasps_every_placed_cube_in_sim():
 
 
 def test_the_hat_does_not_refire_on_an_already_claimed_tag():
-    """Re-arming must not become a spin: each tag is grasped exactly once."""
+    """Re-arming must not become a spin: each tag is grasped exactly once.
+    (Intent kept; the idle wait is sent as a number since F14.)"""
     status = []
     mgr, _world = _sim([dict(c) for c in CUBES], status)
     _run(mgr, _hat_program(), status)
@@ -159,7 +164,7 @@ def test_a_hat_body_error_reaches_the_protokoll_in_german():
     # One cube, but a long enough idle that the hat is polled again after the
     # grasp -- the second firing finds nothing unclaimed and raises GraspSkip.
     mgr, _world = _sim([dict(CUBES[0])], status)
-    _run(mgr, _hat_program(seconds='14'), status)
+    _run(mgr, _hat_program(seconds=14), status)
     logs = _logs(status)
     assert any('gegriffen' in m for m in logs), logs
     hat_errors = [m for m in logs if m.startswith('Ereignis-Block')]
@@ -188,7 +193,7 @@ def test_a_static_object_with_a_non_consuming_body_still_fires_exactly_ONCE():
                 'type': 'text', 'fields': {'TEXT': 'GESEHEN'}}}},
         }},
     }
-    main = {'type': 'edubotics_wait_seconds', 'fields': {'SECONDS': '6'}}
+    main = {'type': 'edubotics_wait_seconds', 'fields': {'SECONDS': 6}}   # a number (F14)
     _run(mgr, {'blocks': {'languageVersion': 0, 'blocks': [main, hat]}}, status)
     hits = [m for m in _logs(status) if 'GESEHEN' in m]
     assert len(hits) == 1, f'expected exactly one firing, got {len(hits)}'

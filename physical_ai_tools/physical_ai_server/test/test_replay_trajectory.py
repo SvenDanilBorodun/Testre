@@ -248,10 +248,29 @@ class _Ctx:
 
 
 def test_replay_handler_unknown_name_fails_loud():
+    """Intent kept: an unknown name fails loud in German. Worded „Bewegung" now,
+    the Roboter-Studio noun for a recording (F10)."""
     ctx = _Ctx({})
     with pytest.raises(WorkflowError) as e:
         replay_trajectory(ctx, {'name': 'X'})
-    assert 'Unbekannte Aufnahme' in str(e.value)
+    assert str(e.value) == 'Unbekannte Bewegung: X'
+
+
+@pytest.mark.parametrize('language,call', [
+    ('python', 'robot.replay("…")'),
+    ('java', 'Robot.replay("…")'),
+])
+def test_a_code_run_names_an_unsent_recording(language, call):
+    """F10: a text program's recordings are SCANNED out of the files, so a name
+    that is not a literal in ``replay(…)`` (or one the cloud answered 404 for)
+    is never sent. The sentence says so, in the run's language."""
+    ctx = _Ctx({})
+    ctx.code_language = language
+    with pytest.raises(WorkflowError) as e:
+        replay_trajectory(ctx, {'name': 'Winken'})
+    assert str(e.value) == (
+        f'Die Bewegung „Winken" gibt es nicht oder steht nicht direkt in {call} — '
+        'schreibe ihren Namen direkt in Anführungszeichen.')
 
 
 def test_replay_handler_empty_name_fails_loud():

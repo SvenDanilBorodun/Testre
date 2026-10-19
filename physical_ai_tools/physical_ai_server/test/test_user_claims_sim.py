@@ -458,6 +458,60 @@ def test_wait_survives_a_2s_camera_freeze_and_stops_after_5s(monkeypatch):
     assert 3.3 <= took <= 6.5, took
 
 
+def _scripted_frame_age(values):
+    """An age getter answering ``values`` in order, one per READ, then 0.0
+    (fresh); the second callable is True once every scripted read was made —
+    a deterministic clock that does not depend on how long a read takes."""
+    left = [float(v) for v in values]
+
+    def age():
+        return left.pop(0) if left else 0.0
+
+    return age, (lambda: not left)
+
+
+@pytest.mark.parametrize('ages', [
+    # the FIRST look: judged 0.99 s, the old second read said 1.01 s
+    [0.99, 1.01, 1.5, 0.2],
+    # a later look inside ``_graspable``: the same crossing on the third poll
+    [0.2, 0.5, 0.99, 1.01, 2.0, 0.3],
+])
+def test_a_frame_crossing_one_second_between_two_reads_keeps_waiting(monkeypatch, ages):
+    """Q14 race: the wait judged the frame's age, then the look read it AGAIN
+    and raised „Die Szenen-Kamera liefert kein aktuelles Bild …" once it had
+    crossed 1.0 s in between — a freeze far inside the 5 s grace ended the wait
+    (measured 1 in 24 with a 30 ms frame fetch). The wait's look now uses the
+    judged frame: the scripted ages are read once each and it waits until
+    Stopp."""
+    rig = Rig(monkeypatch, 'omx_full', objects=[])
+    age, exhausted = _scripted_frame_age(ages)
+    ctx = rig.make_ctx(should_stop=exhausted)
+    ctx.get_scene_frame_age = age
+    with pytest.raises(M.WorkflowError) as exc:
+        pb.grasp_object(ctx, {'object_type': 'wuerfel'})
+    assert str(exc.value) == 'Workflow wurde gestoppt.'
+    assert rig.logs() == [WAIT_LINE]
+
+
+def test_the_look_right_before_the_motion_stays_strict(monkeypatch):
+    """The other half of the race fix: the look inside ``_grasp_object_locked``
+    judges its OWN frame, so a picture that went stale after the wait saw the
+    cube still refuses at once, before any motion."""
+    rig = Rig(monkeypatch, 'omx_full', objects=[cube(*PICK[0])])
+    age, _exhausted = _scripted_frame_age([0.99, 1.01])
+    ctx = rig.make_ctx()
+    ctx.get_scene_frame_age = age
+    published = []
+    real = ctx.publisher
+    ctx.publisher = lambda pts: (published.append(pts), real(pts))
+    with pytest.raises(M.WorkflowError) as exc:
+        pb.grasp_object(ctx, {'object_type': 'wuerfel'})
+    assert str(exc.value) == ('Die Szenen-Kamera liefert kein aktuelles Bild — bitte '
+                              'die Kamera prüfen.')
+    assert published == []
+    assert rig.grasps() == 0
+
+
 def test_a_missing_frame_counts_from_its_first_poll(monkeypatch):
     """Q14 / r5-m8: a ``None`` frame is waited out for 5 s too, then the
     „Kein aktuelles Szenenbild" sentence."""

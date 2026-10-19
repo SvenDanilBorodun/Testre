@@ -1042,14 +1042,19 @@ def reclaim_from_detections(ctx, recipe, detections) -> None:
     _reclaim_recycled(ctx, recipe, visible_xy)
 
 
-def _look_and_reclaim(ctx, recipe) -> list:
+def _look_and_reclaim(ctx, recipe, frame=None) -> list:
     """Grab ONE scene frame, reclaim over it, and hand the RAW detections back.
 
     The frame-grabbing wrapper around :func:`reclaim_from_detections`, shared by
     the unclaimed view (``_detect_named``'s reclaim branch) and by
     :func:`reclaim_only`. It attaches nothing and emits nothing; that is the
-    caller's job."""
-    bgr = _scene_frame(ctx)
+    caller's job.
+
+    ``frame`` — a scene frame the caller ALREADY judged usable (the „Greife"
+    wait, :func:`_wait_frame_usable`); it is looked at as it is, never
+    re-judged on a second age read. ``None`` (every other caller) fetches and
+    judges one through the strict :func:`_scene_frame`."""
+    bgr = _scene_frame(ctx) if frame is None else frame
     detections = ctx.perception.detect(
         bgr, camera='scene', mode='apriltag', aruco_id=None)
     reclaim_from_detections(ctx, recipe, detections)
@@ -1502,13 +1507,17 @@ class GraspLook(NamedTuple):
     skipped_seen: frozenset
 
 
-def _look_for_grasp(ctx, recipe, type_name) -> GraspLook:
+def _look_for_grasp(ctx, recipe, type_name, frame=None) -> GraspLook:
     """The reclaiming detect of the unclaimed view (a cube a person moved is
     un-claimed first) plus, from the SAME frame, which done / skipped ids of the
-    type are in view. Never emits the all-done note: the wait line says it."""
+    type are in view. Never emits the all-done note: the wait line says it.
+
+    ``frame`` — the wait's already-judged frame (see :func:`_look_and_reclaim`);
+    ``None`` — the strict look (``_grasp_object_locked``, right before the
+    motion: a stale frame there still refuses at once)."""
     _ensure_perception(ctx)
     _require_marker_detector(ctx)
-    detections = _look_and_reclaim(ctx, recipe)
+    detections = _look_and_reclaim(ctx, recipe, frame=frame)
     type_ids = {int(i) for i in recipe.tag_ids}
 
     def _read():
@@ -1553,9 +1562,16 @@ def _stop_check(ctx) -> None:
         raise WorkflowError('Workflow wurde gestoppt.')
 
 
-def _wait_frame_usable(ctx, state: dict) -> bool:
-    """During the wait: True = look now; False = „noch nichts zu sehen"; raises
-    the camera sentence once the picture has been unusable too long (Q14).
+def _wait_frame_usable(ctx, state: dict):
+    """During the wait: the scene frame to look at now, or ``None`` = „noch
+    nichts zu sehen"; raises the camera sentence once the picture has been
+    unusable too long (Q14).
+
+    The returned frame IS the judgement: the wait's look uses it as it is
+    (``_look_for_grasp(..., frame=…)``) and never reads the age a second time —
+    a frame that crossed ``_SCENE_FRAME_MAX_AGE_S`` between two reads once
+    ended the wait at once with the camera sentence, though the freeze was far
+    inside ``GRASP_WAIT_STALE_GRACE_S``.
 
     Judged on the frame's OWN age (``ctx.get_scene_frame_age``): ≤
     ``_SCENE_FRAME_MAX_AGE_S`` → look; up to ``GRASP_WAIT_STALE_GRACE_S`` →
@@ -1570,7 +1586,7 @@ def _wait_frame_usable(ctx, state: dict) -> bool:
         since = state.setdefault('none_since', now)
         if now - since > GRASP_WAIT_STALE_GRACE_S:
             _scene_frame(ctx)            # raises the missing-picture sentence
-        return False
+        return None
     state.pop('none_since', None)
     age_getter = getattr(ctx, 'get_scene_frame_age', None)
     age = None
@@ -1580,10 +1596,10 @@ def _wait_frame_usable(ctx, state: dict) -> bool:
         except Exception:  # noqa: BLE001 — age is advisory, like _scene_frame
             age = None
     if age is None or age <= _SCENE_FRAME_MAX_AGE_S:
-        return True
+        return frame
     if age > GRASP_WAIT_STALE_GRACE_S:
         _scene_frame(ctx)                # raises the stale-camera sentence
-    return False
+    return None
 
 
 def _wait_for_graspable(ctx, recipe, type_name) -> None:
@@ -1597,8 +1613,9 @@ def _wait_for_graspable(ctx, recipe, type_name) -> None:
     _stop_check(ctx)
     state: dict = {}
     look = GraspLook([], frozenset(), frozenset())
-    if _wait_frame_usable(ctx, state):
-        look = _look_for_grasp(ctx, recipe, type_name)
+    frame = _wait_frame_usable(ctx, state)
+    if frame is not None:
+        look = _look_for_grasp(ctx, recipe, type_name, frame=frame)
         if look.unclaimed:
             return
     label = recipe.label_de
@@ -1613,9 +1630,10 @@ def _wait_for_graspable(ctx, recipe, type_name) -> None:
         wait_if_paused = getattr(ctx, 'wait_if_paused', None)
         if callable(wait_if_paused):
             wait_if_paused()
-        if not _wait_frame_usable(ctx, state):
+        usable = _wait_frame_usable(ctx, state)
+        if usable is None:
             return False
-        return bool(_look_for_grasp(ctx, recipe, type_name).unclaimed)
+        return bool(_look_for_grasp(ctx, recipe, type_name, frame=usable).unclaimed)
 
     # _poll_until releases a lock this thread holds (a hat body) for the wait,
     # polls Stop every 0.2 s and never times out here; the line is not repeated.

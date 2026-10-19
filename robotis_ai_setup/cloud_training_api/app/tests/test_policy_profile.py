@@ -109,11 +109,27 @@ class TestApplyTrainingTuning(unittest.TestCase):
         apply_training_tuning(get_policy_profile(model_type), p)
         return p
 
-    def test_act_is_noop(self):
-        # ACT-class has no tuning fields → steps/batch untouched.
+    def test_act_keeps_steps_and_batch_8(self):
+        # ACT has no steps cap; its batch is pinned to 8 (D4, E2), which a
+        # request at 8 already is.
         out = self._tuned("act", {"steps": 50000, "batch_size": 8})
         self.assertEqual(out["steps"], 50000)
         self.assertEqual(out["batch_size"], 8)
+
+    def test_act_batch_is_forced_to_8(self):
+        # E2: the RunPod build trains ACT at exactly batch 8, whatever was typed.
+        for typed in (1, 4, 16, 32, 256):
+            self.assertEqual(self._tuned("act", {"steps": 50000, "batch_size": typed})["batch_size"], 8)
+        self.assertEqual(self._tuned("act", {"steps": 50000})["batch_size"], 8)
+        self.assertEqual(get_policy_profile("act")["batch_min"], 8)
+        self.assertEqual(get_policy_profile("act")["batch_max"], 8)
+
+    def test_other_act_class_policies_are_noop(self):
+        # E2: diffusion / vqbet / tdmpc keep today's batch handling.
+        for policy in ("diffusion", "vqbet", "tdmpc"):
+            out = self._tuned(policy, {"steps": 50000, "batch_size": 32})
+            self.assertEqual(out, {"steps": 50000, "batch_size": 32}, policy)
+            self.assertNotIn("batch_min", get_policy_profile(policy))
 
     def test_pi05_caps_steps_and_raises_batch(self):
         out = self._tuned("pi05", {"steps": 50000, "batch_size": 8})

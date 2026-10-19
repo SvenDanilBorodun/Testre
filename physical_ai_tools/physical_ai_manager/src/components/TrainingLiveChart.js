@@ -271,10 +271,19 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
   const eta = estimateEtaSeconds(job, history, elapsed);
   const pct = progressPct(job);
 
-  // While running with no step info yet (Modal cold-start + dataset download),
-  // there is nothing to fill — show an indeterminate "starting" bar instead of
-  // the old bare "Warte auf GPU-Worker" spinner.
-  const starting = isActive && totalSteps <= 0;
+  // While no GPU server is training yet there is nothing to fill — show an
+  // indeterminate "starting" bar instead of the old bare "Warte auf GPU-Worker"
+  // spinner. A managed (RunPod) row knows its total_steps from the start, so
+  // `queued` counts as starting too: no attempt has written `running` yet, or
+  // the training was requeued after a lost GPU (RunPod spec §4.11).
+  const starting = isActive && (job.status === 'queued' || totalSteps <= 0);
+
+  // The API's German line for a training between GPU servers or being
+  // published (`trainings.status_note`, migration 049). Active jobs only: a
+  // finished job's last note would describe a state that is over.
+  const statusNote = isActive && typeof job.status_note === 'string' && job.status_note.trim()
+    ? job.status_note
+    : null;
 
   const heroPct = isSucceeded ? 100 : pct;
 
@@ -376,6 +385,12 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
             <HeroStat label={middle.label} value={middle.value} />
             <HeroStat label="Vergangen" value={formatDuration(elapsed)} />
           </div>
+
+          {statusNote && (
+            <p className="su-trn-note" role="status">
+              {statusNote}
+            </p>
+          )}
         </div>
 
         {/* Secondary: loss curve */}

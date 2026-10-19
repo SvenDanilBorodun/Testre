@@ -2408,7 +2408,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 self.get_logger().error('Eager policy load failed')
                 current_status = self.data_manager.get_current_record_status()
                 current_status.phase = TaskStatus.READY
-                current_status.error = (
+                # A refusal with its own German reason (S17: the processor allowlist) is shown
+                # as is; every other failure keeps the generic sentence.
+                current_status.error = self.inference_manager.last_load_error or (
                     'Das Modell konnte nicht geladen werden. Bitte Modellpfad '
                     'prüfen und erneut versuchen.'
                 )

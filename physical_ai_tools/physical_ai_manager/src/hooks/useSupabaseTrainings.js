@@ -14,10 +14,15 @@ const ACTIVE_POLL_MS = 6000;
 // Explicit, secret-free column set for the direct live read. Pulling only what
 // the UI needs avoids ever putting worker_token on the wire (the realtime path
 // delivers the whole row and strips it client-side; this is strictly tighter).
-const LIVE_COLUMNS =
+// Never `*`: since migration 047 the request roles may SELECT only the columns
+// granted to them, so `select=*` answers 42501, and a later column (049's
+// `status_note`, the German „GPU-Server ausgefallen …" line) is readable only
+// because its migration grants it. test_managed_training_lockstep.py checks
+// every name here against those GRANT lists.
+export const LIVE_COLUMNS =
   'id,status,model_name,model_type,dataset_name,current_step,total_steps,' +
   'current_loss,loss_history,error_message,requested_at,terminated_at,' +
-  'last_progress_at,workgroup_id';
+  'last_progress_at,workgroup_id,status_note';
 
 function isActiveJob(j) {
   return j && (j.status === 'queued' || j.status === 'running');

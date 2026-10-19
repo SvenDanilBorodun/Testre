@@ -72,6 +72,53 @@ async def start_training_job(
     return call.object_id
 
 
+def _get_managed_function():
+    """The managed ACT function (spec §4.9): `train_managed` in the same app.
+
+    It takes no Modal secret at all: the worker gets the per-attempt worker
+    token, the API's worker URL and the anon key as arguments, and nothing
+    else (§1 item 11)."""
+    app_name = os.environ.get("MODAL_TRAINING_APP_NAME", "edubotics-training")
+    fn_name = os.environ.get("MODAL_TRAINING_MANAGED_FUNCTION_NAME", "train_managed")
+    return modal.Function.from_name(app_name, fn_name)
+
+
+# The frozen call contract with modal_app.train_managed (impl-notes TR-11 n14):
+# exactly these keyword arguments.
+MANAGED_SPAWN_KWARGS = (
+    "training_id", "attempt", "worker_token", "api_url", "supabase_url", "supabase_anon_key",
+)
+
+
+def _spawn_managed_blocking(kwargs: dict) -> str:
+    fn = _get_managed_function()
+    call = fn.spawn(**kwargs)
+    return call.object_id
+
+
+async def start_managed_training_job(
+    *,
+    training_id: int,
+    attempt: int,
+    worker_token: str,
+    api_url: str,
+    supabase_url: str,
+    supabase_anon_key: str,
+) -> str:
+    """Spawn one managed attempt on Modal (the ladder's last rung); returns the
+    FunctionCall id. The BLOCKING SDK in a worker thread, like cancel/status
+    (spec §4.13)."""
+    kwargs = {
+        "training_id": int(training_id),
+        "attempt": int(attempt),
+        "worker_token": str(worker_token),
+        "api_url": api_url,
+        "supabase_url": supabase_url,
+        "supabase_anon_key": supabase_anon_key,
+    }
+    return await asyncio.to_thread(_spawn_managed_blocking, kwargs)
+
+
 def _cancel_blocking(job_id: str) -> None:
     """Synchronous Modal cancel — run inside a worker thread (see below)."""
     call = modal.FunctionCall.from_id(job_id)

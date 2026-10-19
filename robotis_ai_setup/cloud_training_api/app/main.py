@@ -21,6 +21,7 @@ from app.routes.me import router as me_router
 from app.routes.policies import router as policies_router
 from app.routes.teacher import router as teacher_router
 from app.routes.training import router as training_router
+from app.routes.training_worker import router as training_worker_router
 from app.routes.version import router as version_router
 from app.routes.workflows import router as workflows_router
 from app.routes.workgroups import router as workgroups_router
@@ -28,6 +29,8 @@ from app.services.dataset_sweep import sweep_loop as _dataset_sweep_loop
 from app.services.inference_sweep import sweep_loop as _inference_sweep_loop
 from app.services.jetson_sweep import sweep_loop as _jetson_sweep_loop
 from app.services.rate_limiter import RateLimiter
+from app.services import training_dispatch as _training_dispatch
+from app.services.training_sweep import active_sweep_loop as _training_active_sweep_loop
 from app.services.training_sweep import sweep_loop as _training_cancel_sweep_loop
 
 load_dotenv()
@@ -95,6 +98,23 @@ def _validate_hf_token_key() -> None:
 
 
 _validate_hf_token_key()
+
+
+def _validate_managed_training() -> None:
+    """Managed ACT training (049, spec §3.8): a malformed setting (the ladder,
+    TRAINING_SAVE_FREQ / TRAINING_MIRROR_EVERY without TRAINING_E2E=1, a cap
+    above the Modal ceiling, an undigested trainer image, …) always stops the
+    boot; a required variable missing stops it only under
+    TRAINING_DISPATCH=managed. Messages name variables, never values."""
+    _training_dispatch.validate_boot()
+
+
+_validate_managed_training()
+
+# One id per process start, the publish/mirror lease owner (FR-4): uvicorn is
+# PID 1 in every Railway container, so a process id would make two instances
+# one owner. Defined in training_dispatch (its user), named here.
+BOOT_ID = _training_dispatch.BOOT_ID
 
 
 def _warn_optional_secrets() -> None:
@@ -292,6 +312,8 @@ def _validate_required_schema() -> None:
         "workflow_submissions",  # 040 — Roboter Studio „Abgeben" snapshots
         "user_hf_credentials",  # 042 — a student's own HF token, AES-GCM encrypted
         "inference_sessions",  # 048 — Cloud-Inferenz sessions (service-role only)
+        "training_attempts",  # 049 — managed training: one row per placement (service-role only)
+        "training_checkpoints",  # 049 — managed training: one row per uploaded checkpoint
     )
     missing_tables: list[str] = []
     for table in required_tables:
@@ -363,6 +385,19 @@ def _validate_required_schema() -> None:
          "modal_session_id, edge_token_enc, edge_terminated_at, session_s, reserve_until, "
          "connected_at, max_end_at, ended_at, end_reason, active_seconds, run_logged_at"),
         ("inference_runs", "backend"),
+        # Migration 049 — managed ACT training. routes/training.py,
+        # routes/training_worker.py and training_dispatch read and write these
+        # columns; a deploy landing the code before the migration would 500
+        # every managed start and every worker call — fail the deploy fast.
+        ("trainings", "managed, current_attempt, train_seconds_used, status_note, step_advanced_at, "
+         "dataset_fps, unplaced_since"),
+        ("training_attempts",
+         "training_id, attempt_no, backend, cloud_ref, gpu_type, data_center, cuda_version, cost_per_hr, "
+         "state, created_at, started_at, first_heartbeat_at, ended_at, end_reason, resume_from_step, "
+         "resume_from_attempt, allowed_dcs, publish_claimed_at, publish_owner, publish_first_at, publish_tries"),
+        ("training_checkpoints",
+         "training_id, attempt_no, step, state, manifest, created_at, ready_at, mirrored_at, mirror_tries, "
+         "refused_reason, refused_by, crash_attempts, mirror_claimed_at, mirror_owner"),
     )
     for table, cols in required_columns:
         try:
@@ -416,6 +451,8 @@ def _validate_required_schema() -> None:
             "p_training_params": {},
             "p_total_steps": 0,
             "p_worker_token": dummy,
+            # 049: the eighth argument; a database without 049 answers PGRST202.
+            "p_managed": False,
         }),
         # Migration 018 — the SECURITY DEFINER wrappers that set
         # app.user_id GUC inside the transaction so the
@@ -574,6 +611,19 @@ def _validate_required_schema() -> None:
             "p_token": "_probe", "p_modal_session_id": "_probe", "p_conn_id": "_probe",
             "p_reason": "robot_stop", "p_stats": None,
         }),
+        # Migration 049 — managed training's ten compare-and-set functions.
+        # Training id 0 never exists: each answers P0002, P0049 or false and
+        # writes nothing (proven through PostgREST, spec §3.1).
+        ("claim_training_attempt", {"p_training_id": 0, "p_expected_attempt": 0}),
+        ("attach_training_attempt", {"p_training_id": 0, "p_attempt": 1, "p_backend": "modal", "p_cloud_ref": "_probe"}),
+        ("release_training_attempt", {"p_training_id": 0, "p_attempt": 1, "p_note": None}),
+        ("requeue_training", {"p_training_id": 0, "p_attempt": 1, "p_reason": "_probe", "p_note": None, "p_resume_step": None, "p_train_seconds": 0}),
+        ("end_training_attempt", {"p_training_id": 0, "p_attempt": 1, "p_reason": "_probe", "p_note": None, "p_train_seconds": 0}),
+        ("finish_training", {"p_training_id": 0, "p_attempt": 1, "p_status": "failed", "p_message": None, "p_log_url": None}),
+        ("cancel_request_training", {"p_training_id": 0, "p_user_id": dummy}),
+        ("complete_cancel_training", {"p_training_id": 0, "p_final": "canceled", "p_message": None}),
+        ("claim_training_publish", {"p_training_id": 0, "p_attempt": 1, "p_lease_s": 900, "p_owner": "_probe"}),
+        ("claim_checkpoint_mirror", {"p_training_id": 0, "p_attempt": 1, "p_step": 1, "p_lease_s": 900, "p_owner": "_probe"}),
     )
     missing_rpcs: list[str] = []
     for name, args in required_rpcs:
@@ -672,6 +722,11 @@ _rate_limiter = RateLimiter()
 _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     ("*", "/trainings/start", 10, 60.0),
     ("*", "/trainings/cancel", 20, 60.0),
+    # 049 — the managed-training worker API (/trainings/worker/{id}/{attempt}/
+    # {action}). Per worker TOKEN (the /trainings/ prefix is per-user keyed and
+    # the worker authenticates with Bearer <worker_token>): start + an upload
+    # pair per checkpoint every 15 s + finish fit easily.
+    ("POST", "/trainings/worker", 120, 60.0),
     ("POST", "/workflows", 10, 60.0),
     # Recording renames + explicit workflow saves; per-user keyed via the
     # `/workflows` prefix. Autosave is local IndexedDB and never PATCHes.
@@ -861,6 +916,7 @@ _BODY_SIZE_LIMITED_PREFIXES: tuple[tuple[str, str], ...] = (
     ("PATCH", "/workflows"),
     ("POST", "/teacher/classrooms"),  # covers workflow-templates path too
     ("PUT", "/me/hf-token"),  # 042 — a token is 256 chars at most; this stops a huge body being read
+    ("POST", "/trainings/worker"),  # 049 — every worker frame is hostile; the route reads ≤ 384 KB
 )
 
 
@@ -978,6 +1034,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(version_router)
 app.include_router(training_router)
+app.include_router(training_worker_router)
 app.include_router(me_router)
 app.include_router(hf_token_router)
 app.include_router(teacher_router)
@@ -1040,6 +1097,33 @@ async def _start_training_cancel_sweep() -> None:
         logger.info("training_cancel_sweep: disabled via env")
         return
     _asyncio.create_task(_training_cancel_sweep_loop())
+
+
+@app.on_event("startup")
+async def _start_managed_training() -> None:
+    """049 (spec §3.8, FR-3): the managed loops (dispatcher, sweep, reaper, HF
+    write check, RunPod boot probe) start whenever TRAINING_DISPATCH=managed or
+    a managed row is non-terminal (re-checked every 10 min, so a rollback to
+    legacy keeps driving the rows it left behind). The supervisor itself never
+    blocks boot. Disable via TRAINING_DISPATCH_DISABLED=1 for unit tests."""
+    import asyncio as _asyncio
+
+    if os.environ.get("TRAINING_DISPATCH_DISABLED") == "1":
+        logger.info("managed training: disabled via env")
+        return
+    _keep_task(_asyncio.create_task(_training_dispatch.managed_supervisor()))
+
+
+@app.on_event("startup")
+async def _start_training_active_sweep() -> None:
+    """§4.4: the legacy reconciler on every legacy row, every 60 s. Disable via
+    TRAINING_ACTIVE_SWEEP_DISABLED=1 for unit tests."""
+    import asyncio as _asyncio
+
+    if os.environ.get("TRAINING_ACTIVE_SWEEP_DISABLED") == "1":
+        logger.info("training_active_sweep: disabled via env")
+        return
+    _keep_task(_asyncio.create_task(_training_active_sweep_loop()))
 
 
 # Cloud-Inferenz (048): two SEPARATE startup tasks (F-2). The session sweep

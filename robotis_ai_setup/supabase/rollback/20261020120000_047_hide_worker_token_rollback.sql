@@ -1,0 +1,13 @@
+-- Rollback for 047_hide_worker_token. Gives anon and authenticated the
+-- TABLE-level SELECT on public.trainings back, which makes worker_token
+-- readable to a student again (their own rows, through the „… read
+-- consolidated" policy).
+--
+-- WARNING: this RE-OPENS the hole 047 closed: a student who reads their own
+-- running training's worker_token can call update_training_progress (EXECUTE
+-- for both request roles) and mark it `failed`, which refunds the credit while
+-- the GPU job runs on. Roll migration 049 back FIRST (its rollback self-check
+-- asserts that worker_token is still unreadable, i.e. that 047 is still in
+-- place). The column-level grants 047 made are left as they are; the table
+-- grant covers them. No data is touched; re-runnable.
+BEGIN; GRANT SELECT ON public.trainings TO anon, authenticated; COMMIT;

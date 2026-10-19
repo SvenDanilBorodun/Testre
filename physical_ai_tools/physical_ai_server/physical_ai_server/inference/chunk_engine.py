@@ -30,6 +30,12 @@ run in the deps-free CI suite.
 * ``ChunkEngine.chunk`` mirrors ``lerobot.utils.control_utils.predict_action`` but asks the policy
   for the whole chunk and postprocesses it in ONE call (D26: bit-exact with per-row and with
   ``InferenceManager.predict`` called once per row).
+* ``validate_processor_steps`` is the ROBOT's allowlist (RunPod training spec §4.10), run by
+  ``InferenceManager.load_policy`` before LeRobot sees a model: the robot runs every policy the
+  student may train (ACT and the VLAs), so its step lists are the union over LeRobot's eight
+  processor factories, and the two tokenizer steps that load a hub repo with
+  ``trust_remote_code=True`` are pinned to the names LeRobot's own factories write. It is
+  additive: ``validate_model_dir`` (the cloud's ACT-only check) is unchanged.
 """
 import json
 import os
@@ -41,6 +47,29 @@ PRE_STEPS_ALLOWED = ('rename_observations_processor', 'to_batch_processor', 'dev
                      'normalizer_processor')
 POST_STEPS_ALLOWED = ('unnormalizer_processor', 'device_processor')
 MODEL_REFUSED_KINDS = ('model', 'model_type')
+
+# The robot's allowlist (RunPod training spec §4.10): the union of the steps LeRobot 0.5.1's eight
+# policy processor factories write (act, diffusion, vqbet, tdmpc, pi0, pi0_fast, pi05, smolvla).
+ROBOT_PRE_STEPS_ALLOWED = ('rename_observations_processor', 'to_batch_processor', 'device_processor',
+                           'normalizer_processor', 'smolvla_new_line_processor', 'pi0_new_line_processor',
+                           'tokenizer_processor', 'delta_actions_processor',
+                           'pi05_prepare_state_tokenizer_processor_step',
+                           'pi0_fast_prepare_state_tokenizer_processor_step', 'action_tokenizer_processor')
+ROBOT_POST_STEPS_ALLOWED = ('unnormalizer_processor', 'device_processor', 'absolute_actions_processor')
+# The only repos the two hub-loading steps may name: tokenizer_processor (pi0, pi05, pi0_fast use
+# paligemma, smolvla its VLM) and action_tokenizer_processor (pi0_fast's FAST tokenizer, loaded with
+# trust_remote_code=True by default, plus its paligemma tokenizer).
+ROBOT_TOKENIZER_NAMES = ('google/paligemma-3b-pt-224', 'HuggingFaceTB/SmolVLM2-500M-Video-Instruct')
+ROBOT_ACTION_TOKENIZER_NAMES = ('lerobot/fast-action-tokenizer',)
+# S17 of the training spec §3.7, duplicated from cloud_training_api's training_texts_de (lockstep-tested).
+PROCESSOR_STEPS_REFUSED_DE = ('Das Modell enthält nicht erlaubte Verarbeitungsschritte und wird aus '
+                              'Sicherheitsgründen nicht geladen.')
+_PALIGEMMA_TOKENIZER = 'google/paligemma-3b-pt-224'
+_FAST_ACTION_TOKENIZER = 'lerobot/fast-action-tokenizer'
+_PROCESSOR_JSON_MAX_BYTES = 1024 * 1024
+_STATE_FILE_RE = r'[A-Za-z0-9_.-]+\.safetensors'
+_PROCESSOR_FILES = (('policy_preprocessor.json', ROBOT_PRE_STEPS_ALLOWED),
+                    ('policy_postprocessor.json', ROBOT_POST_STEPS_ALLOWED))
 
 _IMAGE_PREFIX = 'observation.images.'
 _STATE_KEY = 'observation.state'
@@ -63,6 +92,11 @@ class ModelRefused(Exception):
         super().__init__(f'{kind}: {detail}' if detail else kind)
         self.kind = kind
         self.detail = detail
+
+
+class ProcessorStepsRefused(Exception):
+    """A model the robot refuses to load. ``str(e)`` is an English detail for logs (it never names
+    the model's path); the student sees ``PROCESSOR_STEPS_REFUSED_DE``."""
 
 
 def _protocol():
@@ -201,6 +235,111 @@ def validate_model_dir(model_dir):
         'action_dim': action_shape[0],
         'requires_task': False,
     }
+
+
+def _repo_root(model_dir):
+    """The directory every state file must resolve inside (SR-17).
+
+    The nearest LEXICAL ancestor of ``model_dir`` named ``models--*`` when there is one: a Hugging
+    Face cache snapshot (``models--<org>--<name>/snapshots/<sha>/pretrained_model``), whose files are
+    symlinks into that repo's ``blobs/``. Else ``model_dir`` itself.
+    """
+    from pathlib import Path
+
+    here = Path(os.path.abspath(model_dir))
+    for candidate in (here, *here.parents):
+        if candidate.name.startswith('models--'):
+            return candidate
+    return here
+
+
+def _read_processor_json(path, label):
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        raise ProcessorStepsRefused(f'{label}: missing') from None
+    if size > _PROCESSOR_JSON_MAX_BYTES:
+        raise ProcessorStepsRefused(f'{label}: larger than 1 MiB')
+    data = _read_json(path)
+    if data is _MISSING:
+        raise ProcessorStepsRefused(f'{label}: unreadable')
+    return data
+
+
+def _check_state_file(model_dir, root, value, label):
+    import re
+    from pathlib import Path
+
+    if type(value) is not str or not re.fullmatch(_STATE_FILE_RE, value):
+        raise ProcessorStepsRefused(f'{label}: state_file is not a .safetensors basename')
+    try:
+        target = (Path(model_dir) / value).resolve(strict=True)
+    except (OSError, RuntimeError):         # missing, dangling, a symlink loop
+        raise ProcessorStepsRefused(f'{label}: state_file not on disk') from None
+    # A file not on disk would make LeRobot fall back to a hub download; one outside the repo root
+    # is another model's (or anybody's) bytes.
+    if not target.is_file() or not target.is_relative_to(root):
+        raise ProcessorStepsRefused(f'{label}: state_file is not a regular file inside the repo root')
+
+
+def validate_processor_steps(model_dir):
+    """``None``, or ``ProcessorStepsRefused`` for a model LeRobot would turn into foreign code.
+
+    Run by ``InferenceManager.load_policy`` before ``from_pretrained`` and
+    ``make_pre_post_processors``. Reads config.json and the two processor JSONs (each <= 1 MiB)
+    and stats the state files; imports nothing from LeRobot. Refused:
+
+    * a processor JSON that is missing, larger than 1 MiB or not ``{"steps": [<object>, ...]}``;
+    * a step with a ``"class"`` key (LeRobot imports it and calls it with the step's config), a
+      ``registry_name`` not in its pipeline's ``ROBOT_*_STEPS_ALLOWED``, or a non-object config;
+    * ``tokenizer_processor`` naming a tokenizer outside ``ROBOT_TOKENIZER_NAMES``;
+      ``action_tokenizer_processor`` naming one outside ``ROBOT_ACTION_TOKENIZER_NAMES`` or a
+      paligemma tokenizer other than LeRobot's default (both load with ``trust_remote_code``);
+    * a ``pi0_fast`` config.json whose ``action_tokenizer_name`` / ``text_tokenizer_name`` are not
+      LeRobot's (``modeling_pi0_fast`` loads both with ``trust_remote_code=True``);
+    * a ``state_file`` that is not a ``*.safetensors`` basename resolving to a regular file inside
+      the repo root (``_repo_root``).
+
+    Scope (stated, SR-28): this closes the processor-JSON and the pi0_fast tokenizer paths;
+    draccus resolves a config's ``type`` through its registry only.
+    """
+    config = _read_json(os.path.join(model_dir, 'config.json'))
+    if not isinstance(config, dict):
+        raise ProcessorStepsRefused('config.json missing or not an object')
+    if 'pi0_fast' in (config.get('type'), config.get('model_type')):
+        if (config.get('action_tokenizer_name') != _FAST_ACTION_TOKENIZER
+                or config.get('text_tokenizer_name') != _PALIGEMMA_TOKENIZER):
+            raise ProcessorStepsRefused('pi0_fast config.json: a tokenizer name is not pinned')
+
+    root = _repo_root(model_dir).resolve()
+    for filename, allowed in _PROCESSOR_FILES:
+        label = filename[:-len('.json')]
+        pipeline = _read_processor_json(os.path.join(model_dir, filename), label)
+        if not isinstance(pipeline, dict) or type(pipeline.get('steps')) is not list:
+            raise ProcessorStepsRefused(f'{label}: no steps list')
+        for step in pipeline['steps']:
+            if not isinstance(step, dict):
+                raise ProcessorStepsRefused(f'{label}: a step is not an object')
+            if 'class' in step:
+                raise ProcessorStepsRefused(f'{label}: a step names a class')
+            name = step.get('registry_name')
+            if type(name) is not str or name not in allowed:
+                raise ProcessorStepsRefused(f'{label}: a step is not on the allowlist')
+            step_config = step.get('config', {})
+            if not isinstance(step_config, dict):
+                raise ProcessorStepsRefused(f'{label}: a step config is not an object')
+            if name == 'tokenizer_processor':
+                tokenizer = step_config.get('tokenizer_name')
+                if type(tokenizer) is not str or tokenizer not in ROBOT_TOKENIZER_NAMES:
+                    raise ProcessorStepsRefused(f'{label}: tokenizer_name not pinned')
+            elif name == 'action_tokenizer_processor':
+                tokenizer = step_config.get('action_tokenizer_name')
+                if type(tokenizer) is not str or tokenizer not in ROBOT_ACTION_TOKENIZER_NAMES:
+                    raise ProcessorStepsRefused(f'{label}: action_tokenizer_name not pinned')
+                if step_config.get('paligemma_tokenizer_name', _PALIGEMMA_TOKENIZER) != _PALIGEMMA_TOKENIZER:
+                    raise ProcessorStepsRefused(f'{label}: paligemma_tokenizer_name not pinned')
+            if 'state_file' in step:
+                _check_state_file(model_dir, root, step['state_file'], label)
 
 
 def decode_jpeg_rgb(data, want_w, want_h):

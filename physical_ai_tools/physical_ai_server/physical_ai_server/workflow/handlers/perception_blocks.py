@@ -1525,20 +1525,14 @@ def wait_until_held(ctx, args: dict[str, Any]) -> bool:
     tick) instead of silently looping to the timeout on every rig without
     follower-joint feedback.
 
-    LIMITATION (position-only sensing, document-only fix 2026-06-30):
-    ``check_grasp_held`` reads the achieved gripper angle, which is ABOVE the
-    held-threshold whenever the gripper is OPEN (the rest state) — so this
-    block returns True immediately if the gripper is open. It is only
-    meaningful directly AFTER a close (e.g. „Greifer schließen" or a grasp).
-    The block tooltip states this. (The threshold itself is per-object since
-    2026-07-10 — the last COMMANDED close, ``ctx.last_commanded_close_rad``,
-    + ``GRASP_HELD_MARGIN_RAD``. With no close commanded yet this run the
-    fallback is ``motion._grasp_held_max``, which is PROFILE-AWARE since
-    2026-09-08 and is no longer the legacy global constant: that constant
-    (−0.35) sits below the whole Feetech gripper band, so on edu6/edu1 it
-    reported HELD for every readable angle rather than just the open one. The
-    open-gripper behaviour documented above is preserved on all three arms —
-    that is the part the change deliberately kept.)
+    POSITION-ONLY SENSING: ``check_grasp_held`` reads the achieved gripper
+    angle. An OPEN gripper never „hält" (owner decision Q10): the angle has to
+    have left the open position by ``motion.GRASP_HELD_MIN_TRAVEL_FRAC`` of the
+    travel to the reference close (the last COMMANDED close, else the arm's own
+    closed angle), so this block no longer returns True on an open gripper —
+    it used to, on every arm. The blocked-jaw threshold is unchanged: the last
+    commanded close + ``GRASP_HELD_MARGIN_RAD``, else the profile-aware
+    ``motion._grasp_held_max``.
 
     The check runs under ``motion_lock`` (``_check_grasp_held_locked``) so a
     hat-side poll can't read the threshold + joint state mid-close; note

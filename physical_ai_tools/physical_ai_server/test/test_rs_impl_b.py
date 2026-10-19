@@ -174,14 +174,17 @@ def test_an_empty_full_close_reads_MISS_on_every_profile(profile_id, monkeypatch
 
     i.e. an EMPTY FULL CLOSE read as a successful grasp on the only two profiles
     whose sole capability is Roboter Studio.
+
+    Intent kept (an empty close is a MISS on every arm, the threshold inside the
+    band); the OPEN row changed on purpose with Q10: an open gripper never holds.
     """
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
     ctx = Ctx(profile_id)
     ctx.last_commanded_close_rad = None            # fresh run
 
-    # OPEN jaws, nothing commanded → the documented open-gripper behaviour.
+    # OPEN jaws, nothing commanded → „hält nicht" (Q10: an open gripper never holds).
     ctx.gripper_readback = ctx.gripper_open_rad
-    assert motion.check_grasp_held(ctx) is True
+    assert motion.check_grasp_held(ctx) is False
 
     # An EMPTY close reaches the arm's own closed angle → MISS, on every arm.
     ctx.gripper_readback = ctx.gripper_closed_rad

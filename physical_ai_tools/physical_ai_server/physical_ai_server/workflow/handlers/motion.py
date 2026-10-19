@@ -140,7 +140,9 @@ def _grasp_held_env_override_set() -> bool:
 # the angle where the jaws meet the body.
 GRASP_HELD_MARGIN_RAD = 0.15
 # Second half of the HELD test: how far the jaws must have MOVED away from the
-# open command, as a fraction of the commanded open→close travel.
+# open command, as a fraction of the open→close travel. The close is the one
+# commanded this run, else (owner decision Q10) the arm's own closed angle — so
+# an OPEN gripper never reads „hält", whether or not a close was commanded.
 #
 # ``check_grasp_held`` was position-only and one-sided — ``gripper > threshold``
 # — and an OPEN gripper is above that threshold by construction. So a close that
@@ -2493,9 +2495,9 @@ def _held_threshold_rad(ctx) -> float:
     ``EDUBOTICS_GRASP_HELD_MAX_RAD`` to a non-empty value (rig override /
     rollback wins everywhere), and otherwise to the PROFILE-AWARE
     :func:`_grasp_held_max` when no gripper close has been commanded this run
-    (``last_commanded_close_rad`` is None / malformed / outside the band) —
-    which also keeps the documented open-gripper behaviour of
-    ``grasp_held``/``wait_until_held`` on a fresh run. That fallback used to be
+    (``last_commanded_close_rad`` is None / malformed / outside the band). An
+    OPEN gripper is judged by :func:`_jaws_left_the_open_position`, not here: it
+    never „hält" (Q10). That fallback used to be
     the bare OMX constant, which sits BELOW the whole Feetech gripper band and
     therefore reported HELD for every reading on edu6/edu1 (see
     :func:`_grasp_held_max` for the measurement)."""
@@ -2584,15 +2586,22 @@ def check_grasp_held(ctx) -> bool | None:
 def _jaws_left_the_open_position(ctx, gripper: float) -> bool:
     """Second half of the HELD test — see ``GRASP_HELD_MIN_TRAVEL_FRAC``.
 
-    ``True`` unless a close WAS commanded this run and the achieved angle is
-    still essentially at the OPEN command, which means the close never executed.
-    With no close commanded this run the documented open-gripper behaviour of
-    ``grasp_held`` / ``wait_until_held`` is preserved exactly (``True``)."""
+    ``True`` unless the achieved angle is still essentially at the OPEN command
+    — within ``GRASP_HELD_MIN_TRAVEL_FRAC`` of the travel from open to the
+    reference close. „Ein offener Greifer hält nie etwas" (owner decision Q10,
+    Rule §2 sign-off): with no close commanded this run the reference is the
+    arm's own closed angle (``_gripper_closed``), so an OPEN gripper reads
+    „hält nicht" — it used to read „hält" through ``grasp_held`` and
+    ``wait_until_held`` on every arm, the simulator included. There is NO
+    close-command requirement: a replayed grasp (whose close the run never
+    commanded) still reads „hält" because its jaws really left the open
+    position. ``EDUBOTICS_GRASP_HELD_MIN_TRAVEL_FRAC=0`` stays the one-variable
+    rollback."""
     if GRASP_HELD_MIN_TRAVEL_FRAC <= 0.0:
         return True
     commanded = getattr(ctx, 'last_commanded_close_rad', None)
     if commanded is None:
-        return True
+        commanded = _gripper_closed(ctx)
     try:
         commanded = float(commanded)
     except (TypeError, ValueError):

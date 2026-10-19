@@ -27,6 +27,8 @@ import hmac
 import json
 import logging
 import re
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -416,6 +418,51 @@ async def _ckpt_done(row, att, body):
 # ---------------------------------------------------------------------------
 
 
+# ckpt-bad sha256 streams the whole handed checkpoint (~620 MB for ACT) through
+# the API (V1-6), so a hostile host could make it pull hundreds of GB a minute.
+# Therefore: one verdict per checkpoint (training, attempt, step), remembered
+# for the process's life, so a repeat answers without hashing; one hash at a
+# time per checkpoint (concurrent askers wait for the same one); and the
+# hashing runs in its own 1-thread pool, never in the default executor that
+# every asyncio.to_thread Supabase call shares.
+_HASH_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ckpt-hash")
+HASH_VERDICTS_MAX = 1024
+_HASH_VERDICTS: OrderedDict = OrderedDict()   # (training, attempt, step) -> intact (bool)
+_HASH_INFLIGHT: dict = {}                     # (training, attempt, step) -> asyncio.Future
+
+
+def reset_hash_state_for_tests() -> None:
+    _HASH_VERDICTS.clear()
+    _HASH_INFLIGHT.clear()
+
+
+async def _checkpoint_intact(tid: int, ckpt) -> bool:
+    """The remembered or single-flight verdict of _hash_checkpoint (V1-6). A
+    transport fault is never remembered: it propagates (503) and the next ask
+    hashes again."""
+    key = (int(tid), int(ckpt["attempt_no"]), int(ckpt["step"]))
+    if key in _HASH_VERDICTS:
+        _HASH_VERDICTS.move_to_end(key)
+        return _HASH_VERDICTS[key]
+    fut = _HASH_INFLIGHT.get(key)
+    if fut is None:
+        fut = asyncio.get_running_loop().run_in_executor(_HASH_POOL, _hash_checkpoint, tid, ckpt)
+        _HASH_INFLIGHT[key] = fut
+
+        def _settled(f, key=key):
+            if _HASH_INFLIGHT.get(key) is f:
+                del _HASH_INFLIGHT[key]
+            if f.cancelled() or f.exception() is not None:
+                return
+            _HASH_VERDICTS[key] = bool(f.result())
+            while len(_HASH_VERDICTS) > HASH_VERDICTS_MAX:
+                _HASH_VERDICTS.popitem(last=False)
+
+        fut.add_done_callback(_settled)
+    # shield: an asker that hangs up never cancels the hash the others wait for.
+    return bool(await asyncio.shield(fut))
+
+
 def _hash_checkpoint(tid: int, ckpt) -> bool:
     """True when every object of the checkpoint matches its manifest (size + sha256)."""
     from app.services import r2_client
@@ -443,7 +490,7 @@ async def _ckpt_bad(row, att, body):
     if ckpt is None:
         return _resp(200, {"state": "ignored"})
     if reason == "sha256":
-        intact = await asyncio.to_thread(_hash_checkpoint, tid, ckpt)
+        intact = await _checkpoint_intact(tid, ckpt)
         if intact:
             logger.info("training %s attempt %s: ckpt-bad sha256 not confirmed for step %s", tid, n, step)
             return _resp(200, {"state": "kept"})

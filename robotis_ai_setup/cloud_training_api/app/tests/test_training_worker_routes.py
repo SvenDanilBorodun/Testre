@@ -17,6 +17,7 @@ import copy
 import hashlib
 import json
 import os
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -58,6 +59,7 @@ class WorkerBase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         D.reset_state_for_tests()
         hf_publish.reset_for_tests()
+        route.reset_hash_state_for_tests()
         self.clock = Clock()
         self.db = FakeDB(self.clock)
         self.r2 = FakeR2()
@@ -398,6 +400,18 @@ class CkptBad(WorkerBase):
         self.assertEqual(await self.bad(5000, "train_config"), (200, {"state": "ignored"}))
         self.assertEqual(self.db.checkpoint(self.tid, 1, 2500)["state"], "ready")
 
+    async def test_an_existing_checkpoint_that_was_not_handed_is_ignored_and_untouched(self):
+        # SR-2 / F18 (V1-4 M07): attempt 2 was handed step 2500 of attempt 1; a
+        # ckpt-bad naming attempt 1's EXISTING step 5000 never acts on it.
+        files = self.upload(5000)
+        self.db.add_checkpoint(self.tid, 1, 5000, state="ready", manifest=manifest_of(files))
+        before = copy.deepcopy(self.db.checkpoint(self.tid, 1, 5000))
+        for reason in route.CKPT_BAD_REASONS:
+            with self.subTest(reason=reason):
+                self.assertEqual(await self.bad(5000, reason), (200, {"state": "ignored"}))
+                self.assertEqual(self.db.checkpoint(self.tid, 1, 5000), before)
+        self.assertEqual(self.db.checkpoint(self.tid, 1, 2500)["state"], "ready")
+
     async def test_deterministic_reasons_refuse(self):
         for reason in route.DETERMINISTIC_BAD:
             self.db.checkpoint(self.tid, 1, 2500)["state"] = "ready"
@@ -405,11 +419,80 @@ class CkptBad(WorkerBase):
             c = self.db.checkpoint(self.tid, 1, 2500)
             self.assertEqual((c["state"], c["refused_by"], c["refused_reason"]), ("refused", 2, reason))
 
+    def _count_hashes(self):
+        calls = []
+        real = self.r2.stream_sha256
+
+        def counted(key):
+            calls.append(key)
+            return real(key)
+
+        return calls, patch.object(r2_client, "stream_sha256", counted)
+
     async def test_sha256_confirmed_refuses_and_not_confirmed_keeps(self):
         self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "kept"}))
         self.assertEqual(self.db.checkpoint(self.tid, 1, 2500)["state"], "ready")
+        route.reset_hash_state_for_tests()  # a fresh process: nothing remembered
         self.r2.objects[r2_client.ckpt_key(self.tid, 1, 2500, "training_state/optimizer_state.safetensors")] = b"x"
         self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "refused"}))
+        c = self.db.checkpoint(self.tid, 1, 2500)
+        self.assertEqual((c["state"], c["refused_by"], c["refused_reason"]), ("refused", 2, "sha256"))
+
+    async def test_a_repeat_answers_the_remembered_verdict_without_hashing_again(self):
+        # V1-6: every sha256 ask re-streamed the whole checkpoint through the API.
+        calls, cm = self._count_hashes()
+        with cm:
+            self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "kept"}))
+            first = len(calls)
+            self.assertEqual(first, len(self.files))
+            for _ in range(5):
+                self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "kept"}))
+            self.assertEqual(len(calls), first, "a remembered verdict hashes nothing")
+        route.reset_hash_state_for_tests()
+        self.r2.objects[r2_client.ckpt_key(self.tid, 1, 2500, "pretrained_model/config.json")] = b"{}"
+        calls, cm = self._count_hashes()
+        with cm:
+            self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "refused"}))
+            first = len(calls)
+            self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "refused"}))
+            self.assertEqual(len(calls), first, "a refusal is remembered too")
+
+    async def test_concurrent_asks_share_one_hash_on_the_dedicated_pool(self):
+        gate = threading.Event()
+        threads, calls = [], []
+        real = self.r2.stream_sha256
+
+        def slow(key):
+            threads.append(threading.current_thread().name)
+            calls.append(key)
+            gate.wait(5)
+            return real(key)
+
+        with patch.object(r2_client, "stream_sha256", slow):
+            tasks = [asyncio.ensure_future(self.bad(2500, "sha256")) for _ in range(4)]
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(calls), 1, "one hash in flight for one checkpoint")
+            gate.set()
+            answers = await asyncio.gather(*tasks)
+        self.assertEqual(answers, [(200, {"state": "kept"})] * 4)
+        self.assertEqual(len(calls), len(self.files), "the four asks hashed the checkpoint once")
+        self.assertTrue(threads and all(t.startswith("ckpt-hash") for t in threads), threads)
+        self.assertEqual(route._HASH_POOL._max_workers, 1)
+        self.assertEqual(route._HASH_INFLIGHT, {})
+
+    async def test_a_transport_fault_is_503_and_never_remembered(self):
+        self.r2.fail["get"] = 1
+        self.assertEqual(await self.bad(2500, "sha256"), (503, {"detail": T.WORKER_UNAVAILABLE_DE,
+                                                                 "code": "unavailable"}))
+        self.assertEqual(self.db.checkpoint(self.tid, 1, 2500)["state"], "ready")
+        self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "kept"}), "the next ask hashes again")
+
+    async def test_the_remembered_verdicts_are_bounded_oldest_first(self):
+        with patch.object(route, "HASH_VERDICTS_MAX", 3):
+            for step in (1, 2, 3):
+                route._HASH_VERDICTS[(self.tid, 1, step)] = True
+            self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "kept"}))
+            self.assertEqual(list(route._HASH_VERDICTS), [(self.tid, 1, 2), (self.tid, 1, 3), (self.tid, 1, 2500)])
 
     async def test_a_bad_reason_is_422_never_404(self):
         self.assertEqual((await self.bad(2500, "boom"))[0], 422)
@@ -436,6 +519,13 @@ class Finish(WorkerBase):
         self.assertNotIn("evil", json.dumps(self.db.tables))
         self.assertEqual(self.logs, [self.tid])
         self.assertIn("pod1", self.rp.deletes())
+
+    async def test_failed_counts_the_attempts_trained_seconds(self):
+        # V2-7: finish_training counts the attempt it ends, like requeue and end do.
+        self.assertEqual(await self.call("finish", {"outcome": "failed", "reason": "lerobot_error"}),
+                         (200, {"status": "failed"}))
+        self.assertEqual(self.db.row(self.tid)["train_seconds_used"], 1800)
+        self.assertEqual(self.db.attempt(self.tid, 1)["state"], "ended")
 
     async def test_time_cap_says_which_cap_bound(self):
         await self.call("start", {"lock_sha256": LOCK, "build": "b"})  # records the bound: the cap term

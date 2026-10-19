@@ -665,6 +665,19 @@ class SweepLosses(Base):
         self.assertIn("2.500", r["status_note"])
         self.assertEqual(r["train_seconds_used"], 630)  # now − first_heartbeat_at
 
+    async def test_a_requeue_keeps_the_loss_of_the_last_point_it_keeps(self):
+        # V2-6: the requeue rolls the step back to 2500; the loss shown is 2000's, not 3000's.
+        row, _ = self._running(loss_history=[{"s": 2000, "l": 0.4, "t": 1}, {"s": 3000, "l": 0.2, "t": 2}],
+                               current_step=3000, current_loss=0.2)
+        self.db.add_checkpoint(row["id"], 1, 2500, state="ready", manifest={})
+        self.rp.pods.clear()
+        await D.sweep_tick()
+        self.clock.advance(30)
+        await D.sweep_tick()
+        r = self.db.row(row["id"])
+        self.assertEqual((r["status"], r["current_step"], r["current_loss"]), ("queued", 2500, 0.4))
+        self.assertEqual([e["s"] for e in r["loss_history"]], [2000])
+
     async def test_an_exited_pod_is_gone_and_without_a_checkpoint_the_note_is_s2(self):
         row, _ = self._running()
         self.rp.pods["pod1"]["status"] = "EXITED"

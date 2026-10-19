@@ -789,8 +789,10 @@ def _run_scripted(monkeypatch, verdict, **kw):
 @pytest.mark.parametrize('verdict', ['deadline', 'eof'])
 def test_a_waiting_grasp_ends_when_the_program_has_ended(monkeypatch, verdict):
     out = _run_scripted(monkeypatch, verdict)
-    assert any(line and line.startswith('Warte auf „Würfel“') for line in out['logs']), \
-        out['logs']
+    # The Q8 wait line, exactly as perception_blocks words every label
+    # sentence (an ASCII closing quote).
+    assert ('Warte auf „Würfel" — bitte ein Objekt in den Greifbereich legen.'
+            in out['logs']), out['logs']
     assert isinstance(out.get('reply'), dict), out
     assert out['reply']['ok'] is False and out['reply']['e'] == code_rpc_stop, out['reply']
     # The non-vacuous part: the grasp ended BEFORE the out-of-band kill was

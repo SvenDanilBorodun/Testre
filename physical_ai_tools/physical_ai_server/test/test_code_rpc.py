@@ -673,11 +673,25 @@ def test_real_counter_handlers_round_trip_through_the_wire(server):
 
 
 def test_a_workflow_error_from_a_handler_is_relayed_verbatim(server):
-    session = server.open_run(_ctx(trajectories={}))
-    c = _Client(server.socket_path, session.token)
-    r = c.call('replay', ['gibt_es_nicht', 1.0])
-    assert r == {'id': 2, 'ok': False, 'k': 'robot', 'e': 'Unbekannte Aufnahme: gibt_es_nicht'}
-    server.close_run(session)
+    # The handler's German WorkflowError reaches the student unchanged — in the
+    # wording the handler chose for the run's language (F10: a code run names
+    # the recording it was not sent; a ctx of no language reads the Blockly
+    # sentence).
+    from physical_ai_server.workflow.handlers import trajectory
+    for language in (None, 'python'):
+        ctx = _ctx(trajectories={})
+        ctx.code_language = language
+        session = server.open_run(ctx)
+        c = _Client(server.socket_path, session.token)
+        r = c.call('replay', ['gibt_es_nicht', 1.0])
+        want = trajectory._unknown_recording_de(ctx, 'gibt_es_nicht')
+        assert r == {'id': 2, 'ok': False, 'k': 'robot', 'e': want}, (language, r)
+        if language is None:
+            assert want == 'Unbekannte Bewegung: gibt_es_nicht'
+        else:
+            assert 'robot.replay(' in want and want != 'Unbekannte Bewegung: gibt_es_nicht'
+        c.close()
+        server.close_run(session)
 
 
 def test_an_unexpected_exception_is_an_internal_error_without_the_traceback(server):

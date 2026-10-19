@@ -64,12 +64,13 @@
       "block_type": "edubotics_move_to",
       "table": "statement",
       "returns": "none",
-      "doc_de": "Fährt über das Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels.",
-      "doc_de_java": "Fährt über das Ziel: ein Punkt new double[] {x, y, z} in Metern oder der Name eines gemerkten Ziels.",
+      "doc_de": "Fährt zum Ziel: ein Punkt [x, y, z] in Metern oder der Name eines gemerkten Ziels; bei einem Ziel auf dem Tisch hält der Greifer darüber an (Ablagehöhe).",
+      "doc_de_java": "Fährt zum Ziel: ein Punkt new double[] {x, y, z} in Metern oder der Name eines gemerkten Ziels; bei einem Ziel auf dem Tisch hält der Greifer darüber an (Ablagehöhe).",
       "params": [
         {
           "name": "target",
           "kind": "target",
+          "arg_key": "destination",
           "required": true,
           "asset": "place",
           "java_name": "target",
@@ -101,10 +102,11 @@
         {
           "name": "target",
           "kind": "target",
+          "arg_key": "target",
           "required": true,
           "asset": "place",
           "java_name": "target",
-          "doc_de": "Wo: der Name eines Ziels oder einer Position aus deiner Sammlung – oder ein Punkt (x, y, z) in Metern."
+          "doc_de": "Wo: der Name eines Ziels aus deiner Sammlung (keine Position) – oder ein Punkt (x, y, z) in Metern."
         }
       ],
       "signature_py": "robot.pickup(target)",
@@ -132,10 +134,11 @@
         {
           "name": "target",
           "kind": "target",
+          "arg_key": "destination",
           "required": true,
           "asset": "place",
           "java_name": "target",
-          "doc_de": "Wo abgelegt wird: der Name eines Ziels oder einer Position aus deiner Sammlung – oder ein Punkt (x, y, z) in Metern."
+          "doc_de": "Wo abgelegt wird: der Name eines Ziels aus deiner Sammlung (keine Position) – oder ein Punkt (x, y, z) in Metern."
         }
       ],
       "signature_py": "robot.drop_at(target)",
@@ -163,6 +166,7 @@
         {
           "name": "seconds",
           "kind": "float",
+          "arg_key": "seconds",
           "required": true,
           "lo": 0.0,
           "hi": 300.0,
@@ -194,6 +198,7 @@
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
@@ -204,6 +209,7 @@
         {
           "name": "speed",
           "kind": "float",
+          "arg_key": "speed",
           "required": false,
           "default": 1.0,
           "lo": 0.25,
@@ -237,6 +243,7 @@
         {
           "name": "ziel",
           "kind": "ziel",
+          "arg_key": "ziel",
           "required": true,
           "java_name": "ziel",
           "doc_de": "Das Greifziel, das „find“ gefunden hat."
@@ -263,11 +270,12 @@
       "block_type": "edubotics_descend_to",
       "table": "statement",
       "returns": "none",
-      "doc_de": "Senkt den geöffneten Greifer auf das gefundene Objekt ab.",
+      "doc_de": "Senkt den geöffneten Greifer auf das gefundene Objekt ab; steht er nicht schon darüber, fährt er zuerst darüber.",
       "params": [
         {
           "name": "ziel",
           "kind": "ziel",
+          "arg_key": "ziel",
           "required": true,
           "java_name": "ziel",
           "doc_de": "Das Greifziel, das „find“ gefunden hat."
@@ -299,6 +307,7 @@
         {
           "name": "ziel",
           "kind": "ziel",
+          "arg_key": "ziel",
           "required": true,
           "java_name": "ziel",
           "doc_de": "Das Greifziel, das „find“ gefunden hat."
@@ -344,11 +353,12 @@
       "block_type": "edubotics_grasp_object",
       "table": "statement",
       "returns": "none",
-      "doc_de": "Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen.",
+      "doc_de": "Greift das nächste sichtbare Objekt dieses Typs: finden, anfahren, schließen, prüfen. Ist keines zu sehen, wird gewartet, bis eines zu sehen ist — so lange geht das Programm hier nicht weiter; Stopp beendet das Warten (im Simulator wird nicht gewartet).",
       "params": [
         {
           "name": "obj",
           "kind": "obj",
+          "arg_key": "object_type",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$",
@@ -382,6 +392,7 @@
         {
           "name": "ziel",
           "kind": "ziel",
+          "arg_key": "ziel",
           "required": true,
           "java_name": "ziel",
           "doc_de": "Das Greifziel, das „find“ gefunden hat."
@@ -408,12 +419,13 @@
       "block_type": "edubotics_destination_pin",
       "table": "statement",
       "returns": "none",
-      "doc_de": "Merkt den Punkt [x, y, z] in Metern unter diesem Namen als Ziel für move_to und drop_at.",
-      "doc_de_java": "Merkt den Punkt (x, y, z) in Metern unter diesem Namen als Ziel für moveTo und dropAt.",
+      "doc_de": "Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für move_to und drop_at; z gilt nur, wenn der Tisch nicht vermessen ist (im Simulator nie).",
+      "doc_de_java": "Merkt den Tischpunkt (x, y) in Metern unter diesem Namen als Ziel für moveTo und dropAt; z gilt nur, wenn der Tisch nicht vermessen ist (im Simulator nie).",
       "params": [
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
@@ -424,6 +436,7 @@
         {
           "name": "x",
           "kind": "float",
+          "arg_key": "x",
           "required": true,
           "lo": -1.0,
           "hi": 1.0,
@@ -433,6 +446,7 @@
         {
           "name": "y",
           "kind": "float",
+          "arg_key": "y",
           "required": true,
           "lo": -1.0,
           "hi": 1.0,
@@ -442,6 +456,7 @@
         {
           "name": "z",
           "kind": "float",
+          "arg_key": "z",
           "required": true,
           "lo": -1.0,
           "hi": 1.0,
@@ -471,11 +486,12 @@
       "block_type": "edubotics_destination_current",
       "table": "statement",
       "returns": "none",
-      "doc_de": "Merkt die Stelle, an der der Greifer gerade steht, unter diesem Namen als Ziel.",
+      "doc_de": "Merkt die Stelle, an der der Greifer gerade steht, als Ziel (nur den Punkt, nicht die Armstellung).",
       "params": [
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
@@ -508,6 +524,7 @@
         {
           "name": "message",
           "kind": "text",
+          "arg_key": "message",
           "required": true,
           "max_len": 2000,
           "java_name": "message",
@@ -557,6 +574,7 @@
         {
           "name": "text",
           "kind": "text",
+          "arg_key": "text",
           "required": true,
           "max_len": 240,
           "java_name": "text",
@@ -587,6 +605,7 @@
         {
           "name": "freq",
           "kind": "float",
+          "arg_key": "freq",
           "required": false,
           "default": 880.0,
           "lo": 100.0,
@@ -597,6 +616,7 @@
         {
           "name": "seconds",
           "kind": "float",
+          "arg_key": "seconds",
           "required": false,
           "default": 0.25,
           "lo": 0.05,
@@ -632,6 +652,7 @@
         {
           "name": "text",
           "kind": "text",
+          "arg_key": "text",
           "required": true,
           "max_len": 240,
           "java_name": "text",
@@ -640,6 +661,7 @@
         {
           "name": "level",
           "kind": "str",
+          "arg_key": "level",
           "required": false,
           "default": "info",
           "max_len": 7,
@@ -650,6 +672,7 @@
         {
           "name": "seconds",
           "kind": "int",
+          "arg_key": "seconds",
           "required": false,
           "default": 3,
           "lo": 1,
@@ -685,6 +708,7 @@
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
@@ -717,6 +741,7 @@
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
@@ -751,6 +776,7 @@
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[A-Za-zÄÖÜäöüß0-9 _\\-]{1,40}$",
@@ -784,6 +810,7 @@
         {
           "name": "obj",
           "kind": "obj",
+          "arg_key": "object_type",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$",
@@ -818,6 +845,7 @@
         {
           "name": "obj",
           "kind": "obj",
+          "arg_key": "object_type",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$",
@@ -853,6 +881,7 @@
         {
           "name": "obj",
           "kind": "obj",
+          "arg_key": "object_type",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$",
@@ -863,6 +892,7 @@
         {
           "name": "timeout",
           "kind": "float",
+          "arg_key": "timeout",
           "required": false,
           "default": 10.0,
           "lo": 0.0,
@@ -894,13 +924,14 @@
       "block_type": "edubotics_wait_until_held",
       "table": "value",
       "returns": "bool",
-      "doc_de": "Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist.",
-      "doc_de_java": "Wartet, bis der Greifer etwas hält; false, wenn er nach timeout Sekunden noch leer ist.",
+      "doc_de": "Wartet, bis der Greifer etwas hält; False, wenn er nach timeout Sekunden noch leer ist. Ein offener Greifer hält nie etwas.",
+      "doc_de_java": "Wartet, bis der Greifer etwas hält; false, wenn er nach timeout Sekunden noch leer ist. Ein offener Greifer hält nie etwas.",
       "returns_de": "Wahr, sobald der Greifer etwas hält – falsch, wenn die Wartezeit abgelaufen ist.",
       "params": [
         {
           "name": "timeout",
           "kind": "float",
+          "arg_key": "timeout",
           "required": false,
           "default": 10.0,
           "lo": 0.0,
@@ -936,6 +967,7 @@
         {
           "name": "obj",
           "kind": "obj",
+          "arg_key": "object_type",
           "required": true,
           "max_len": 24,
           "pattern": "^[A-Za-z0-9_]{1,24}$",
@@ -971,6 +1003,7 @@
         {
           "name": "ziel",
           "kind": "ziel",
+          "arg_key": "ziel",
           "required": true,
           "java_name": "ziel",
           "doc_de": "Das Greifziel, das „find“ gefunden hat."
@@ -997,7 +1030,7 @@
       "block_type": "edubotics_grasp_held",
       "table": "value",
       "returns": "bool",
-      "doc_de": "Prüft, ob der Greifer etwas hält.",
+      "doc_de": "Prüft, ob der Greifer etwas hält. Ein offener Greifer hält nie etwas.",
       "returns_de": "Wahr, wenn der Greifer etwas hält – sonst falsch.",
       "params": [],
       "signature_py": "robot.is_holding()",
@@ -1023,6 +1056,7 @@
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^[^=\\[\\]\\x00-\\x1f]{1,40}$",
@@ -1055,6 +1089,7 @@
         {
           "name": "name",
           "kind": "str",
+          "arg_key": "name",
           "required": true,
           "max_len": 40,
           "pattern": "^(?=.*\\S)[^=\\[\\]\\x00-\\x1f\\x7f]{1,40}$",
@@ -1065,6 +1100,7 @@
         {
           "name": "wert",
           "kind": "value",
+          "arg_key": "wert",
           "required": true,
           "java_name": "wert",
           "doc_de": "Der Wert: eine Zahl, ein Text, ein Wahrheitswert oder eine Liste – Größe begrenzt."

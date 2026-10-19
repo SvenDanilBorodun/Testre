@@ -191,8 +191,10 @@ export function buildToolbox(restrictedBlocks = null) {
     { kind: 'block', type: 'lists_length' },
     { kind: 'block', type: 'lists_isEmpty' },
     { kind: 'block', type: 'lists_indexOf' },
-    { kind: 'block', type: 'lists_getIndex' },
-    { kind: 'block', type: 'lists_setIndex' },
+    // F13: the element number is visible and editable, like every other
+    // number socket here (an empty AT is element 1 at run time anyway).
+    { kind: 'block', type: 'lists_getIndex', inputs: { AT: numberShadow(1) } },
+    { kind: 'block', type: 'lists_setIndex', inputs: { AT: numberShadow(1) } },
     { kind: 'block', type: 'lists_getSublist' },
   ], restricted);
 

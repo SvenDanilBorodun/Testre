@@ -114,6 +114,34 @@ describe('Workshop toolbox consistency', () => {
     expect(missing).toEqual([]);
   });
 
+  test('„hole Element" and „setze Element" come with the number 1 in their AT socket (F13)', () => {
+    // An empty AT is element 1 at run time too (interpreter N13), but the
+    // student should SEE the number they can change, as on every other
+    // number socket of the palette.
+    const find = (node, type) => {
+      if (Array.isArray(node)) {
+        for (const n of node) {
+          const hit = find(n, type);
+          if (hit) return hit;
+        }
+      } else if (node && typeof node === 'object') {
+        if (node.kind === 'block' && node.type === type) return node;
+        for (const v of Object.values(node)) {
+          if (v && typeof v === 'object') {
+            const hit = find(v, type);
+            if (hit) return hit;
+          }
+        }
+      }
+      return null;
+    };
+    for (const type of ['lists_getIndex', 'lists_setIndex']) {
+      const entry = find(buildToolbox(), type);
+      expect(entry, type).toBeTruthy();
+      expect(entry.inputs && entry.inputs.AT, type).toEqual({ shadow: { type: 'math_number', fields: { NUM: 1 } } });
+    }
+  });
+
   test('the edubotics_toast block is present in the toolbox (regression anchor)', () => {
     // The exact bug this suite guards against: a defined + backend-registered
     // toast block that never made it into the palette.

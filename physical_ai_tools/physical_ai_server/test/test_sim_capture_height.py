@@ -125,7 +125,9 @@ def test_the_height_comes_from_the_resolved_sim_object():
 
 def test_tool_tip_offsets_per_solver():
     """ONE value per solver, beside its source."""
-    assert IKSolver.tool_tip_below_ee_m == _TOOL_TIP_EXT_M == 0.04
+    assert _TOOL_TIP_EXT_M == 0.04
+    assert IKSolver.tool_tip_below_ee_m == 0.04
+    assert IKSolver.tool_tip_below_ee_m is _TOOL_TIP_EXT_M or IKSolver.tool_tip_below_ee_m == _TOOL_TIP_EXT_M
     assert Edu1IKSolver.tool_tip_below_ee_m == 0.0
     assert Edu6IKSolver.tool_tip_below_ee_m == 0.0
 

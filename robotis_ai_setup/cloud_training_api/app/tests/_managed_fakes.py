@@ -380,9 +380,10 @@ class FakeDB:
         if not (t and a and a["state"] in ("placing", "starting", "running", "lost") and t["managed"]
                 and t["current_attempt"] == p_attempt and t["status"] in ("queued", "running")):
             raise PgError("P0049")
+        counted = a["state"] in ("lost", "ended")  # the requeue that lost it counted it (fix round 2026-10-19)
         a.update(state="ended", ended_at=self.now(), end_reason=p_reason)
         t.update(status="running", worker_token=None, status_note=p_note)
-        t["train_seconds_used"] += max(p_train_seconds or 0, 0)
+        t["train_seconds_used"] += 0 if counted else max(p_train_seconds or 0, 0)
         return None
 
     def _rpc_finish_training(self, p_training_id, p_attempt, p_status, p_message, p_log_url):

@@ -329,9 +329,15 @@ $$;
 -- 8. end attempt (succeeded, before publish) --------------------------------
 CREATE OR REPLACE FUNCTION public.end_training_attempt(p_training_id INT, p_attempt INT, p_reason TEXT, p_note TEXT, p_train_seconds INT)
 RETURNS VOID LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
-DECLARE v_rows INT;
+DECLARE
+  v_rows INT;
+  v_prev TEXT;
 BEGIN
   PERFORM 1 FROM public.trainings t WHERE t.id = p_training_id FOR UPDATE;
+  -- The attempt's state before this call (fix round 2026-10-19): a lost attempt
+  -- was counted by the requeue that lost it, so its seconds are not added again.
+  SELECT a.state INTO v_prev FROM public.training_attempts a
+   WHERE a.training_id = p_training_id AND a.attempt_no = p_attempt;
   UPDATE public.training_attempts a
      SET state = 'ended', ended_at = now(), end_reason = p_reason
     FROM public.trainings t
@@ -345,7 +351,8 @@ BEGIN
   END IF;
   UPDATE public.trainings
      SET status = 'running', worker_token = NULL, status_note = p_note,
-         train_seconds_used = train_seconds_used + GREATEST(COALESCE(p_train_seconds, 0), 0)
+         train_seconds_used = train_seconds_used
+           + CASE WHEN v_prev IN ('lost','ended') THEN 0 ELSE GREATEST(COALESCE(p_train_seconds, 0), 0) END
    WHERE id = p_training_id;
 END;
 $$;

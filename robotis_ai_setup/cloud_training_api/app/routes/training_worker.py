@@ -438,15 +438,24 @@ async def _ckpt_done(row, att, body):
 
 # ckpt-bad sha256 streams the whole handed checkpoint (~620 MB for ACT) through
 # the API (V1-6), so a hostile host could make it pull hundreds of GB a minute.
-# Therefore: one verdict per checkpoint (training, attempt, step), remembered
-# for the process's life, so a repeat answers without hashing; one hash at a
-# time per checkpoint (concurrent askers wait for the same one); and the
-# hashing runs in its own 1-thread pool, never in the default executor that
-# every asyncio.to_thread Supabase call shares.
+# Therefore: one verdict per asking attempt and checkpoint (training, asking
+# attempt, checkpoint attempt, step), remembered for the process's life, so a
+# repeat answers without hashing; one hash at a time per key (concurrent
+# askers wait for the same one); and the hashing runs in its own 1-thread
+# pool, never in the default executor that every asyncio.to_thread Supabase
+# call shares.
+# The asking attempt is in the key (fix round 2026-10-19): a checkpoint's PUT
+# links stay usable for r2_client.PUT_TTL_S after they were minted (an upload
+# begun before then may end later), and a same-length body with the same MD5
+# (both are signed) replaces an object with its size and ETag unchanged, so no
+# verdict may be reused for another attempt: each hashes the checkpoint as it
+# then is. Reusing it for the attempt that asked equals that attempt not asking
+# again (`kept` changes nothing; its worker then gives the GPU up). The cost
+# stays one hash per asking attempt, at most MAX_ATTEMPTS per checkpoint.
 _HASH_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ckpt-hash")
 HASH_VERDICTS_MAX = 1024
-_HASH_VERDICTS: OrderedDict = OrderedDict()   # (training, attempt, step) -> intact (bool)
-_HASH_INFLIGHT: dict = {}                     # (training, attempt, step) -> asyncio.Future
+_HASH_VERDICTS: OrderedDict = OrderedDict()   # (training, asker, attempt, step) -> intact (bool)
+_HASH_INFLIGHT: dict = {}                     # (training, asker, attempt, step) -> asyncio.Future
 
 
 def reset_hash_state_for_tests() -> None:
@@ -454,11 +463,11 @@ def reset_hash_state_for_tests() -> None:
     _HASH_INFLIGHT.clear()
 
 
-async def _checkpoint_intact(tid: int, ckpt) -> bool:
-    """The remembered or single-flight verdict of _hash_checkpoint (V1-6). A
-    transport fault is never remembered: it propagates (503) and the next ask
-    hashes again."""
-    key = (int(tid), int(ckpt["attempt_no"]), int(ckpt["step"]))
+async def _checkpoint_intact(tid: int, asker: int, ckpt) -> bool:
+    """The remembered or single-flight verdict of _hash_checkpoint (V1-6) for
+    the asking attempt `asker`. A transport fault is never remembered: it
+    propagates (503) and the next ask hashes again."""
+    key = (int(tid), int(asker), int(ckpt["attempt_no"]), int(ckpt["step"]))
     if key in _HASH_VERDICTS:
         _HASH_VERDICTS.move_to_end(key)
         return _HASH_VERDICTS[key]
@@ -508,7 +517,7 @@ async def _ckpt_bad(row, att, body):
     if ckpt is None:
         return _resp(200, {"state": "ignored"})
     if reason == "sha256":
-        intact = await _checkpoint_intact(tid, ckpt)
+        intact = await _checkpoint_intact(tid, n, ckpt)
         if intact:
             logger.info("training %s attempt %s: ckpt-bad sha256 not confirmed for step %s", tid, n, step)
             return _resp(200, {"state": "kept"})

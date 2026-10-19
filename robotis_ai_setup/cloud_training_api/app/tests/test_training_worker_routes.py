@@ -574,9 +574,33 @@ class CkptBad(WorkerBase):
     async def test_the_remembered_verdicts_are_bounded_oldest_first(self):
         with patch.object(route, "HASH_VERDICTS_MAX", 3):
             for step in (1, 2, 3):
-                route._HASH_VERDICTS[(self.tid, 1, step)] = True
+                route._HASH_VERDICTS[(self.tid, 2, 1, step)] = True
             self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "kept"}))
-            self.assertEqual(list(route._HASH_VERDICTS), [(self.tid, 1, 2), (self.tid, 1, 3), (self.tid, 1, 2500)])
+            self.assertEqual(list(route._HASH_VERDICTS),
+                             [(self.tid, 2, 1, 2), (self.tid, 2, 1, 3), (self.tid, 2, 1, 2500)])
+
+    async def test_another_attempt_never_reuses_a_kept_verdict(self):
+        # Fix round 2026-10-19: attempt 1's PUT links stay usable for PUT_TTL_S after they were
+        # minted, so the checkpoint can change after attempt 2 heard `kept` (a same-length body:
+        # size and the signed MD5 are all R2 checks). Attempt 3, handed the same checkpoint,
+        # hashes it as it then is and refuses it.
+        calls, cm = self._count_hashes()
+        with cm:
+            self.assertEqual(await self.bad(2500, "sha256"), (200, {"state": "kept"}))
+            key = r2_client.ckpt_key(self.tid, 1, 2500, "training_state/optimizer_state.safetensors")
+            old = self.r2.objects[key]
+            self.r2.objects[key] = bytes(b ^ 0xFF for b in old)
+            self.assertEqual(len(self.r2.objects[key]), len(old))
+            self.db.attempt(self.tid, 2)["state"] = "lost"
+            self.db.add_attempt(self.tid, 3, state="running", backend="modal", cloud_ref="fc-3",
+                                resume_from_step=2500, resume_from_attempt=1)
+            self.db.row(self.tid)["current_attempt"] = 3
+            before = len(calls)
+            self.assertEqual(await self.call("ckpt-bad", {"step": 2500, "reason": "sha256"}, attempt="3"),
+                             (200, {"state": "refused"}))
+            self.assertGreater(len(calls), before, "attempt 3 hashed the checkpoint itself")
+        c = self.db.checkpoint(self.tid, 1, 2500)
+        self.assertEqual((c["state"], c["refused_by"], c["refused_reason"]), ("refused", 3, "sha256"))
 
     async def test_a_bad_reason_is_422_never_404(self):
         self.assertEqual((await self.bad(2500, "boom"))[0], 422)

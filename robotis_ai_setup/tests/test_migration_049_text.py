@@ -1,7 +1,7 @@
 """Migrations 047 and 049 and their rollbacks, read as text (spec §3.1, §6 WP-A, SR-26).
 
 The behaviour is proven on a local stack by the hand-run assertion files
-(``supabase/tests/047_*`` 10 PASS, ``049_*`` 66 PASS); what is pinned here,
+(``supabase/tests/047_*`` 10 PASS, ``049_*`` 69 PASS); what is pinned here,
 deps-free and in CI, is the shape a careless edit would break: the ten
 functions' signatures and SECURITY INVOKER, their grants and the self-check
 naming each, the FR-1 CASE in update_training_progress with 032's terminal

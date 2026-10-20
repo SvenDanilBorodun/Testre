@@ -132,6 +132,31 @@ class _Query:
     def lt(self, c, v):
         return self._f("lt", c, v)
 
+    def lte(self, c, v):
+        return self._f("lte", c, v)
+
+    def or_(self, expr):
+        """PostgREST's `or=(a.eq.x,b.in.(y,z),c.is.null)`: a top-level comma list of
+        `column.op.value` with op eq / neq / in / is / gte / lt / lte."""
+        terms, depth, cur = [], 0, ""
+        for ch in expr:
+            if ch == "," and depth == 0:
+                terms.append(cur)
+                cur = ""
+                continue
+            depth += ch == "("
+            depth -= ch == ")"
+            cur += ch
+        terms.append(cur)
+        parsed = []
+        for term in terms:
+            col, op, val = term.split(".", 2)
+            if op == "in":
+                assert val.startswith("(") and val.endswith(")"), term
+                val = [v for v in val[1:-1].split(",") if v]
+            parsed.append((op, col, val))
+        return self._f("or", None, parsed)
+
     def order(self, c, desc=False):
         self._order.append((c, desc))  # supabase-py: each call adds a key
         return self
@@ -160,7 +185,11 @@ class _Query:
     def _match(self, row):
         for kind, col, val, neg in self.filters:
             cur = row.get(col)
-            if kind == "eq":
+            if kind == "or":
+                ok = any(_Query._one(op, row.get(c), v) for op, c, v in val)
+            elif kind == "lte":
+                ok = cur is not None and (_ts(cur) or cur) <= (_ts(val) or val)
+            elif kind == "eq":
                 ok = cur == val
             elif kind == "neq":
                 ok = cur != val
@@ -179,6 +208,23 @@ class _Query:
             if not ok:
                 return False
         return True
+
+    @staticmethod
+    def _one(op, cur, val):  # one or_() term; values arrive as PostgREST text
+        if op == "eq":
+            return cur is not None and str(cur) == val
+        if op == "neq":
+            return cur is None or str(cur) != val
+        if op == "in":
+            return cur is not None and str(cur) in val
+        if op == "is":
+            return cur is None if val == "null" else str(cur).lower() == val
+        if op in ("gte", "lt", "lte"):
+            if cur is None:
+                return False
+            a, b = (_ts(cur) or cur), (_ts(val) or val)
+            return a >= b if op == "gte" else (a < b if op == "lt" else a <= b)
+        raise AssertionError(op)
 
     def _project(self, row):
         if self.cols in (None, "*"):

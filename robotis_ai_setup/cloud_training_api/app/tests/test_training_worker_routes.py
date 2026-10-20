@@ -752,7 +752,10 @@ class Continuation(WorkerBase):
                 self.assertEqual((self.db.row(self.cid)["status"], self.db.row(self.cid)["error_message"]),
                                  ("failed", T.S27))
                 self.assertIn("podc", self.rp.deletes())
-                await self.asyncSetUp()  # reset for the next subTest
+                # reset for the next subTest: exit this run's patches first, or they leak
+                # into every later module (verifier m3)
+                await self.asyncTearDown()
+                await self.asyncSetUp()
 
     async def test_a_past_expiry_still_resumes_by_presence(self):
         self.db.row(self.pid)["continuable_until"] = self.clock.iso(self.clock.t - 1)

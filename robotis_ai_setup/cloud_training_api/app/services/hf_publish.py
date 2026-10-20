@@ -320,6 +320,8 @@ def _keep_checkpoint(tid: int, ckpt: dict, lease, tmp: str) -> str:
                     return expires_at  # already kept and intact: skip the stream (fallback mode)
             except r2_client.R2Missing:
                 pass  # re-copy below
+            except Exception as exc:  # noqa: BLE001 - transport: counted and backed off (verifier m1)
+                raise Transient(f"kept head {type(exc).__name__}") from None
         else:
             raise Transient("kept row conflict")
     use_fallback = False
@@ -352,8 +354,14 @@ def _keep_checkpoint(tid: int, ckpt: dict, lease, tmp: str) -> str:
             r2_client.put_file_presigned(dst, local)
         except Exception as exc:  # noqa: BLE001 - RuntimeError / transport → retry
             raise Transient(f"keep put {type(exc).__name__}") from None
-    for rel in AV.CHECKPOINT_RELPATHS:
-        if int(r2_client.head_size(r2_client.keep_key(tid, step, rel))) != int(manifest[rel]["size"]):
+    for rel in AV.CHECKPOINT_RELPATHS:  # (4b): every fault here is Transient (rev3 §6.4 B4, verifier m1)
+        try:
+            size = int(r2_client.head_size(r2_client.keep_key(tid, step, rel)))
+        except r2_client.R2Missing:
+            raise Transient(f"kept copy missing {rel}") from None
+        except Exception as exc:  # noqa: BLE001 - transport
+            raise Transient(f"kept head {type(exc).__name__}") from None
+        if size != int(manifest[rel]["size"]):
             raise Transient(f"kept size mismatch {rel}")
     if existing is None:
         expires_at = D._iso(D._now() + D.KEEP_S)

@@ -434,6 +434,33 @@ class CappedPublish(PublishBase):
         self.assertEqual(self.db.attempt(self.tid, 1)["publish_tries"], 1)
         self.assertIsNone(self.db.kept(self.tid))
 
+    def test_a_head_fault_after_the_copy_retries_counted(self):
+        # (4b)'s size check: a transport fault is Transient, counted and backed off (verifier m1).
+        self.r2.fail["head"] = 1
+        self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        self.assertEqual(self.hub.commits, [])
+        self.assertEqual(self.db.attempt(self.tid, 1)["publish_tries"], 1)
+        self.assertIsNone(self.db.kept(self.tid))
+        self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")
+
+    def test_a_copy_that_wrote_nothing_retries_counted(self):
+        # The copy answered but wrote nothing: (4b) sees R2Missing → Transient, no kept row (m1).
+        with patch.object(r2_client, "copy_object", lambda src, dst: None):
+            self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        self.assertEqual(self.hub.commits, [])
+        self.assertEqual(self.db.attempt(self.tid, 1)["publish_tries"], 1)
+        self.assertIsNone(self.db.kept(self.tid))
+
+    def test_a_head_fault_in_the_retry_precheck_retries_counted(self):
+        # A retried publish re-checks the kept copy; a fault there is Transient too (m1).
+        self.hub.fail_commit = 1
+        self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        self.assertIsNotNone(self.db.kept(self.tid))
+        self.r2.fail["head"] = 1
+        self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        self.assertEqual(self.db.attempt(self.tid, 1)["publish_tries"], 2)
+        self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")
+
     def test_a_retried_publish_never_moves_the_window(self):
         # The HF commit fails after the kept copy is made → retry; the kept row is
         # already inserted, so a retry with the clock advanced must not move expires_at.

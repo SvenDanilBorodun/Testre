@@ -1157,6 +1157,32 @@ class SweepLosses(Base):
         (create,) = self.rp.creates()
         self.assertEqual((create[3]["cloud"], create[3]["dataCenterIds"]), ("SECURE", ["EUR-RO-1"]))
 
+    async def test_the_skip_keys_the_ladder_card_when_the_metadata_write_failed(self):
+        # D1 without the recorded gpu_type (verifier n4): the attach's metadata write fails,
+        # the pod later reports its data centre and a refused CUDA, and the skip still names
+        # the card the ladder placed, never (cloud, None, dc).
+        card = "NVIDIA RTX A4500"
+        row = self.queued()
+        self.stock("SECURE", gpus=(card,), dcs=("EU-RO-1",))
+        real_write = D.write_attempt_meta
+
+        def failing_write(tid, attempt_no, payload, *a, **kw):
+            if "gpu_type" in payload:  # the attach's metadata write only
+                raise RuntimeError("metadata write failed")
+            return real_write(tid, attempt_no, payload, *a, **kw)
+
+        with patch.object(D, "write_attempt_meta", failing_write):
+            await D.dispatch_tick()
+        (create,) = self.rp.creates()
+        a = self.db.attempt(row["id"], 1)
+        self.assertIsNone(a.get("gpu_type"), "precondition: the metadata write failed")
+        pod_id = a["cloud_ref"]
+        self.rp.pods[pod_id].update(status="RUNNING", dataCenterId="EU-RO-1", cudaVersion="12.2")
+        await D.sweep_tick()
+        self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "placement_guard")
+        self.assertTrue(D._dc_skipped("SECURE", card, "EU-RO-1", self.clock.t))
+        self.assertNotIn(("SECURE", None, "EU-RO-1"), D.STATE.dc_skip)
+
     async def test_a_host_unfit_finish_skips_the_secure_dc(self):
         # D1: routes/training_worker.py::_finish makes exactly this call for every host_unfit reason.
         import inspect
@@ -1706,6 +1732,16 @@ class KeptExpiry(Base):
         self.db.add_training(status="queued", continued_from=parent["id"])
         await D.janitor_tick(self.clock.t)
         self.assertEqual(self.db.kept(parent["id"])["state"], "kept")
+
+    async def test_an_expired_copy_behind_100_fresh_ones_is_deleted_in_one_round(self):
+        # The expiry is decided in the query, before the limit (verifier m4).
+        for _ in range(100):
+            self._kept()  # fresh: KEEP_S ahead
+        parent, _ = self._kept(expires_in=-1)
+        self.clock.advance(D.KEEP_DELETE_GRACE_S + 1)
+        self.assertEqual(D.kept_expiry_tick(self.clock.t), 1)
+        self.assertEqual(self.db.kept(parent["id"])["state"], "deleted")
+        self.assertEqual(sum(1 for r in self.db.tables["training_kept_checkpoints"] if r["state"] == "kept"), 100)
 
     async def test_a_delete_failure_leaves_the_state(self):
         parent, _ = self._kept(state="refused")

@@ -540,6 +540,18 @@ class Continue(StartBase):
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertEqual(len(self.db.tables["trainings"]), 1, "no row created")
 
+    async def test_404_for_another_users_non_continuable_row_without_a_preflight(self):
+        # The route's own owner check (verifier m5): another user's row answers 404 whatever its
+        # state, never 409 S26/S24 (an existence/state oracle), and costs no dataset preflight.
+        for kw in ({"status": "failed"}, {"capped_step": None}, {"managed": False},
+                   {"continuable_until": self.clock.iso(self.clock.t - 1)}):
+            with self.subTest(kw=kw):
+                p = self._parent(user_id="someone-else", **kw)
+                with self.assertRaises(HTTPException) as ctx:
+                    await self.cont(p["id"])
+                self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (404, T.TRAINING_NOT_FOUND_DE))
+        self.assertEqual(self.preflight_calls, [])
+
     async def test_409_s26_for_a_non_continuable_parent(self):
         for kw in ({"capped_step": None}, {"status": "failed"}, {"managed": False}):
             with self.subTest(kw=kw):
@@ -619,11 +631,16 @@ class Continue(StartBase):
             self.assertTrue(all(t["is_mine"] for t in mine if t["id"] == parent["id"]))
             got = await route.get_training(parent["id"], user=SimpleNamespace(id="u-1"))
             self.assertTrue(got["is_mine"])
-        # a groupmate reads the same row (visible via the group) with is_mine False.
+        # a groupmate reads the same row (visible via the group) with is_mine False,
+        # through /trainings/list too: the page's jobs come from there (verifier M3).
         self.db.tables["trainings"][-1]["workgroup_id"] = "g1"
         with patch.object(route, "resolve_visible_workgroup_ids", lambda uid: ["g1"]):
             got = await route.get_training(parent["id"], user=SimpleNamespace(id="other"))
+            listed = await route.list_trainings(user=SimpleNamespace(id="other"))
         self.assertFalse(got["is_mine"])
+        rows = [t for t in listed if t["id"] == parent["id"]]
+        self.assertEqual(len(rows), 1, "the groupmate sees the group's row in the list")
+        self.assertIs(rows[0]["is_mine"], False)
 
     async def test_a_fresh_start_is_not_deduped_onto_a_child(self):
         parent = self._parent()

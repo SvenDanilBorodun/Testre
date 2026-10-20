@@ -543,6 +543,7 @@ class _State:
     runpod_probe: object = None      # None (unknown) | True | False (401/403)
     runpod_402_until: float = 0.0
     dc_skip: dict = field(default_factory=dict)
+    attempt_gpu: dict = field(default_factory=dict)        # (tid, attempt) -> the ladder card (D1, verifier n4)
     create_400: dict = field(default_factory=dict)
     catalog: dict = field(default_factory=dict)
     gdpr: tuple | None = None
@@ -801,8 +802,12 @@ async def requeue_attempt(row, attempt, reason: str, now: float, checkpoints=Non
     logger.info("training %s attempt %s requeued (%s, resume step %s)", tid, attempt["attempt_no"], reason, resume)
     # D1: a broken host (start_timeout, host_unfit:*, the CUDA guard) is skipped on
     # both RunPod clouds; the keyword keeps its historic name.
+    key = (tid, int(attempt["attempt_no"]))
+    placed_gpu = STATE.attempt_gpu.pop(key, None)
     if skip_community_dc and attempt.get("backend") in RUNPOD_RUNGS:
-        skip_dc(RUNG_CLOUD[attempt["backend"]], attempt.get("gpu_type"), attempt.get("data_center"), now)
+        # the recorded card, else the one the ladder placed (a failed metadata write, n4)
+        skip_dc(RUNG_CLOUD[attempt["backend"]], attempt.get("gpu_type") or placed_gpu,
+                attempt.get("data_center"), now)
     kick()
     return True
 
@@ -1172,6 +1177,9 @@ async def _attach_runpod(row, attempt_no: int, rung: str, gpu: dict, pod: dict, 
     STATE.pod_count += 1
     meta = {"gpu_type": (pod.get("gpu") or {}).get("id") if isinstance(pod.get("gpu"), dict) else None}
     meta["gpu_type"] = meta["gpu_type"] or gpu["id"]
+    STATE.attempt_gpu[(tid, int(attempt_no))] = meta["gpu_type"]  # D1's key survives a failed write (n4)
+    while len(STATE.attempt_gpu) > 1000:  # bounded: an attempt that ends otherwise never pops its entry
+        STATE.attempt_gpu.pop(next(iter(STATE.attempt_gpu)))
     if pod.get("dataCenterId"):
         meta["data_center"] = pod.get("dataCenterId")
     if pod.get("cudaVersion"):
@@ -1551,18 +1559,24 @@ def apply_retention(training_id: int, now: float | None = None) -> int:
 
 def kept_expiry_tick(now: float) -> int:
     """Owner E36 (§6.4 G): delete a `refused` kept copy at once, and a `kept` one
-    KEEP_DELETE_GRACE_S after expiry when no child is active. At most 100 rows per
-    round; a delete_keys failure leaves the state. Returns how many were deleted."""
+    KEEP_DELETE_GRACE_S after expiry when no child is active. At most 100 rows of
+    each kind per round, the expiry decided IN the query and the oldest first, so a
+    fresh copy never hides an expired one (verifier m4); a delete_keys failure
+    leaves the state. Returns how many were deleted."""
     from app.services import r2_client
 
-    rows = (
+    refused = (
         _sb().table("training_kept_checkpoints").select(KEPT_COLUMNS)
-        .in_("state", ["kept", "refused"]).limit(100).execute()
+        .eq("state", "refused").limit(100).execute()
     ).data or []
+    expired = (
+        _sb().table("training_kept_checkpoints").select(KEPT_COLUMNS)
+        .eq("state", "kept").lte("expires_at", _iso(now - KEEP_DELETE_GRACE_S))
+        .order("expires_at").limit(100).execute()
+    ).data or []
+    rows = refused + expired
     if not rows:
         return 0
-    expired = [r for r in rows if r.get("state") == "kept"
-               and (ts(r.get("expires_at")) or 0) <= now - KEEP_DELETE_GRACE_S]
     active_parents: set = set()
     parent_ids = [int(r["training_id"]) for r in expired]
     if parent_ids:

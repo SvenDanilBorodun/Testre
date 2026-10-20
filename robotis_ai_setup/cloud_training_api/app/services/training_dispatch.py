@@ -1,8 +1,11 @@
 """Managed ACT training: settings, dispatcher, sweep, reaper (spec §3.6, §3.8, §4.2, §4.3).
 
-A managed row (``trainings.managed``) is placed attempt by attempt: RunPod
-Community (EEA requested) → RunPod Secure (EEA, GDPR, verified) → Modal L4,
-attempt ``MAX_ATTEMPTS`` always on Modal. Every state change of such a row is
+A managed row (``trainings.managed``) is placed attempt by attempt, cheapest
+first (owner E42): RunPod Community in any region, then RunPod Secure in the EU
+GDPR data centres, then RunPod Secure in any region, and only while
+``MANAGED_MODAL_RUNG=1`` a last rung on Modal L4 (then attempt ``MAX_ATTEMPTS``
+is Modal-only). Without a usable rung a row waits and ends with S18 after
+``PLACEMENT_GIVEUP_S`` (owner E29–E31). Every state change of such a row is
 one of migration 049's compare-and-set functions (P0049 = another instance or
 the sweep was first; never an error). What lives in memory here (caches,
 skip lists, the "two rounds" counters, the delete retry set) only ever costs a
@@ -85,7 +88,6 @@ RESUME_CRASH_LIMIT = 2
 START_LOOP_MAX = 5
 MAX_CREATES_PER_TICK = 6
 CREATE_400_CACHE_S = 300
-DC_TABLE_CACHE_S = 600
 REAPER_SURVIVOR_ROUNDS = 3
 REAPER_PAGE_ROWS = 1000            # PostgREST's default max_rows (V1-7)
 REAPER_MAX_PAGES = 100             # a reply that never ends skips the round
@@ -122,6 +124,10 @@ RUNPOD_RUNGS = (RUNG_COMMUNITY, RUNG_SECURE)
 RUNG_CLOUD = {RUNG_COMMUNITY: "COMMUNITY", RUNG_SECURE: "SECURE"}
 # The emergency rung (owner E29): appended last only while MANAGED_MODAL_RUNG=1.
 MODAL_RUNG_ENTRY = {"rung": RUNG_MODAL}
+# Owner E42: the scopes each RunPod rung is asked in, in order. Community is asked
+# worldwide only (its EEA-scoped catalog is always empty).
+SCOPE_EEA, SCOPE_WORLD = "eea", "world"
+RUNG_SCOPES = {RUNG_COMMUNITY: (SCOPE_WORLD,), RUNG_SECURE: (SCOPE_EEA, SCOPE_WORLD)}
 
 DEFAULT_LADDER = [
     {"rung": RUNG_COMMUNITY, "gpus": [
@@ -508,7 +514,6 @@ class _State:
     create_400: dict = field(default_factory=dict)
     catalog: dict = field(default_factory=dict)
     gdpr: tuple | None = None
-    dc_table: tuple | None = None
     all_403_logged: bool = False
     pod_count: int = 0
     last_failed_round_at: float = field(default_factory=time.time)
@@ -548,13 +553,14 @@ def runpod_configured(settings: Settings | None = None) -> bool:
     return bool(s.runpod_api_key and s.trainer_image)
 
 
-def skip_dc(dc, now: float | None = None) -> None:
+def skip_dc(cloud, gpu_id, dc, now: float | None = None) -> None:
+    """Skip one host for DC_SKIP_S, keyed (cloud, card, data centre) like the 400 cache (D1)."""
     if dc:
-        STATE.dc_skip[dc] = (now or _now()) + DC_SKIP_S
+        STATE.dc_skip[(cloud, gpu_id, dc)] = (now or _now()) + DC_SKIP_S
 
 
-def _dc_skipped(dc, now: float) -> bool:
-    until = STATE.dc_skip.get(dc)
+def _dc_skipped(cloud, gpu_id, dc, now: float) -> bool:
+    until = STATE.dc_skip.get((cloud, gpu_id, dc))
     return until is not None and until > now
 
 
@@ -745,8 +751,10 @@ async def requeue_attempt(row, attempt, reason: str, now: float, checkpoints=Non
         logger.info("requeue of training %s attempt %s lost a race", tid, attempt["attempt_no"])
         return False
     logger.info("training %s attempt %s requeued (%s, resume step %s)", tid, attempt["attempt_no"], reason, resume)
-    if skip_community_dc and attempt.get("backend") == RUNG_COMMUNITY:
-        skip_dc(attempt.get("data_center"), now)
+    # D1: a broken host (start_timeout, host_unfit:*, the CUDA guard) is skipped on
+    # both RunPod clouds; the keyword keeps its historic name.
+    if skip_community_dc and attempt.get("backend") in RUNPOD_RUNGS:
+        skip_dc(RUNG_CLOUD[attempt["backend"]], attempt.get("gpu_type"), attempt.get("data_center"), now)
     kick()
     return True
 
@@ -799,19 +807,20 @@ async def on_loss(row, attempt, reason: str, now: float, checkpoints, *, skip_co
 # ---------------------------------------------------------------------------
 
 
-async def _catalog(cloud: str, now: float):
-    hit = STATE.catalog.get(cloud)
+async def _catalog(cloud: str, now: float, *, worldwide: bool = False):
+    key = (cloud, bool(worldwide))
+    hit = STATE.catalog.get(key)
     if hit and now - hit[0] < CATALOG_CACHE_S:
         return hit[1]
     try:
-        resp = await runpod_client.catalog_gpus(cloud)
+        resp = await runpod_client.catalog_gpus(cloud, worldwide=worldwide)
     except runpod_client.RunpodNetworkError:
         return None
     if resp.status != 200 or not isinstance(resp.body, dict) or not isinstance(resp.body.get("gpus"), list):
         logger.warning("RunPod catalog (%s) answered %s", cloud, resp.status)
         return None
     table = {g.get("id"): g for g in resp.body["gpus"] if isinstance(g, dict)}
-    STATE.catalog[cloud] = (now, table)
+    STATE.catalog[key] = (now, table)
     return table
 
 
@@ -829,29 +838,8 @@ async def _gdpr_dcs(now: float):
     return ids
 
 
-async def dc_regions(now: float):
-    """{data centre id: region} from the unfiltered catalog (the known-outside
-    table, E18, FR-8), cached DC_TABLE_CACHE_S; None when it cannot be read."""
-    if STATE.dc_table and now - STATE.dc_table[0] < DC_TABLE_CACHE_S:
-        return STATE.dc_table[1]
-    try:
-        resp = await runpod_client.datacenters_all()
-    except runpod_client.RunpodNetworkError:
-        return None
-    if resp.status != 200 or not isinstance(resp.body, dict) or not isinstance(resp.body.get("dataCenters"), list):
-        return None
-    table = {d["id"]: d.get("region") for d in resp.body["dataCenters"] if isinstance(d, dict) and d.get("id")}
-    STATE.dc_table = (now, table)
-    return table
-
-
-def known_outside(dc: str, table) -> bool:
-    region = (table or {}).get(dc)
-    return region is not None and region not in ("EUROPE", "UNKNOWN")
-
-
 # ---------------------------------------------------------------------------
-# Placement guard (§4.2, E18, FR-8, TR-8 n8)
+# Placement guard (§4.2, E42, FR-8, TR-8 n8)
 # ---------------------------------------------------------------------------
 
 
@@ -860,37 +848,15 @@ def _parse_cuda(value):
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
-def judge_guard(attempt, pod, table) -> tuple[str, bool]:
-    """``(verdict, final)``: verdict 'refuse' or 'ok'; ``final`` once both the data
-    centre and the CUDA version were judged for good (else the sweep re-judges)."""
+def judge_guard(attempt, pod) -> tuple[str, bool]:
+    """``(verdict, final)``: verdict 'refuse' only for a CUDA version below 12.6; the
+    data centre is recorded, never judged (owner E42); ``final`` once the CUDA version
+    was judged and a data centre is on record."""
     key = (attempt["training_id"], attempt["attempt_no"])
-    backend = attempt.get("backend")
-    allowed = list(attempt.get("allowed_dcs") or [])
     dc = pod.get("dataCenterId")
-    dc_final = False
-    if backend == RUNG_SECURE:
-        if dc is None:
-            if pod.get("status") == "RUNNING":
-                return "refuse", True
-        elif dc not in allowed:
-            return "refuse", True
-        else:
-            dc_final = True
-    else:
-        if dc is None:
-            if (key, "dc-null") not in STATE.guard_warned:
-                STATE.guard_warned.add((key, "dc-null"))
-                logger.warning("training %s attempt %s: Community pod reports no data centre", *key)
-        elif table is None:
-            logger.info("training %s attempt %s: data-centre table unreadable, no verdict on %s", key[0], key[1], dc)
-        elif known_outside(dc, table):
-            return "refuse", True
-        else:
-            if dc not in allowed and (key, "dc-unrequested") not in STATE.guard_warned:
-                STATE.guard_warned.add((key, "dc-unrequested"))
-                logger.warning("training %s attempt %s: Community pod in data centre %s (not requested)",
-                               key[0], key[1], dc)
-            dc_final = True
+    if dc is None and attempt.get("backend") != RUNG_SECURE and (key, "dc-null") not in STATE.guard_warned:
+        STATE.guard_warned.add((key, "dc-null"))
+        logger.info("training %s attempt %s: Community pod reports no data centre", *key)
     cuda = pod.get("cudaVersion")
     cuda_final = False
     if cuda is not None:
@@ -903,7 +869,7 @@ def judge_guard(attempt, pod, table) -> tuple[str, bool]:
             return "refuse", True
         else:
             cuda_final = True
-    return "ok", dc_final and cuda_final
+    return "ok", cuda_final and dc is not None
 
 
 async def apply_guard(row, attempt, pod, now: float, checkpoints) -> bool:
@@ -911,9 +877,6 @@ async def apply_guard(row, attempt, pod, now: float, checkpoints) -> bool:
     key = (int(attempt["training_id"]), int(attempt["attempt_no"]))
     if key in STATE.guard_final:
         return False
-    table = None
-    if attempt.get("backend") == RUNG_COMMUNITY and pod.get("dataCenterId") is not None:
-        table = await dc_regions(now)
     meta = {}
     if pod.get("dataCenterId") and pod.get("dataCenterId") != attempt.get("data_center"):
         meta["data_center"] = pod.get("dataCenterId")
@@ -924,7 +887,7 @@ async def apply_guard(row, attempt, pod, now: float, checkpoints) -> bool:
             await asyncio.to_thread(write_attempt_meta, key[0], key[1], meta)
         except Exception as exc:  # noqa: BLE001 - metadata only
             logger.warning("attempt metadata write failed: %s", type(exc).__name__)
-    verdict, final = judge_guard(attempt, pod, table)
+    verdict, final = judge_guard(attempt, pod)
     if verdict == "refuse":
         logger.warning("training %s attempt %s refused by the placement guard (dc=%s cuda=%s)",
                        key[0], key[1], pod.get("dataCenterId"), pod.get("cudaVersion"))
@@ -984,6 +947,13 @@ def rungs_for(row, attempts_of_row, now: float, tick: _Tick, settings: Settings 
     return rungs
 
 
+def placement_steps(rungs) -> list:
+    """Owner E42: the (rung, scope) steps of one claim, in ladder order. The default
+    ladder gives Community worldwide, then Secure in the EU GDPR data centres, then
+    Secure worldwide; a custom RUNPOD_LADDER keeps its own rung order."""
+    return [(r, sc) for r in rungs if r in RUNPOD_RUNGS for sc in RUNG_SCOPES[r]]
+
+
 def pod_body(row, attempt_no: int, token: str, cloud: str, gpu: dict, dcs: list, settings: Settings) -> dict:
     """POST /v2/pods, exactly §3.6 call 3."""
     return {
@@ -1040,16 +1010,18 @@ async def _create_one(body: dict, tick: _Tick):
         return "answer", resp
 
 
-async def _try_runpod(row, attempt_no: int, token: str, rung: str, now: float, tick: _Tick, s: Settings):
-    """'placed' | 'stop' (do not try another rung) | 'none' (nothing placed here)."""
+async def _try_runpod(row, attempt_no: int, token: str, rung: str, now: float, tick: _Tick, s: Settings,
+                      *, scope: str):
+    """One (rung, scope) step of a claim (owner E42): 'placed' | 'stop' (do not try
+    another step) | 'none' (nothing placed here)."""
     cloud = RUNG_CLOUD[rung]
-    catalog = await _catalog(cloud, now)
+    catalog = await _catalog(cloud, now, worldwide=scope == SCOPE_WORLD)
     if catalog is None:
         return "none"
     gdpr = None
-    if rung == RUNG_SECURE:
+    if scope == SCOPE_EEA:
         gdpr = await _gdpr_dcs(now)
-        if gdpr is None:
+        if gdpr is None:  # skips this step only; Secure worldwide still runs
             return "none"
     tid = int(row["id"])
     for gpu in s.rung_gpus(rung):
@@ -1058,15 +1030,24 @@ async def _try_runpod(row, attempt_no: int, token: str, rung: str, now: float, t
         entry = catalog.get(gpu["id"])
         if not isinstance(entry, dict) or entry.get("availability") in (None, "NONE"):
             continue
-        dcs = [d.get("id") for d in entry.get("dataCenters") or []
-               if isinstance(d, dict) and d.get("id") and d.get("availability") not in (None, "NONE")]
-        if rung == RUNG_COMMUNITY:
-            dcs = [d for d in dcs if not _dc_skipped(d, now)]
-        dcs = [d for d in dcs if STATE.create_400.get((cloud, gpu["id"], d), 0) <= now]
-        if gdpr is not None:
-            dcs = [d for d in dcs if d in gdpr]
-        if not dcs:
-            continue
+        listed = [d.get("id") for d in entry.get("dataCenters") or []
+                  if isinstance(d, dict) and d.get("id") and d.get("availability") not in (None, "NONE")]
+        if listed:
+            dcs = [d for d in listed if not _dc_skipped(cloud, gpu["id"], d, now)]
+            dcs = [d for d in dcs if STATE.create_400.get((cloud, gpu["id"], d), 0) <= now]
+            if gdpr is not None:
+                dcs = [d for d in dcs if d in gdpr]
+            if not dcs:
+                continue
+        else:
+            # Community availability names no data centre (measured 2026-10-20): such a
+            # card is created with dataCenterIds [] and the scheduler chooses. Secure
+            # always reports its data centres, so an empty list is „unavailable".
+            if (rung, scope) != (RUNG_COMMUNITY, SCOPE_WORLD):
+                continue
+            if STATE.create_400.get((cloud, gpu["id"], ""), 0) > now:
+                continue
+            dcs = []
         try:
             await asyncio.to_thread(write_attempt_meta, tid, attempt_no, {"allowed_dcs": dcs}, ("placing",))
         except Exception as exc:  # noqa: BLE001 - FR-8: no create without the persisted set
@@ -1082,9 +1063,9 @@ async def _try_runpod(row, attempt_no: int, token: str, rung: str, now: float, t
         status = resp.status
         tick.statuses.append(status)
         if status in (200, 201) and isinstance(resp.body, dict) and resp.body.get("id"):
-            return await _attach_runpod(row, attempt_no, rung, gpu, resp.body, now)
+            return await _attach_runpod(row, attempt_no, rung, gpu, resp.body, now, scope=scope)
         if status == 400:
-            for d in dcs:
+            for d in dcs or [""]:
                 STATE.create_400[(cloud, gpu["id"], d)] = now + CREATE_400_CACHE_S
             tick.last_400_detail = resp.detail
             continue
@@ -1102,7 +1083,7 @@ async def _try_runpod(row, attempt_no: int, token: str, rung: str, now: float, t
     return "none"
 
 
-async def _attach_runpod(row, attempt_no: int, rung: str, gpu: dict, pod: dict, now: float) -> str:
+async def _attach_runpod(row, attempt_no: int, rung: str, gpu: dict, pod: dict, now: float, *, scope: str) -> str:
     tid = int(row["id"])
     pod_id = str(pod["id"])
     try:
@@ -1127,8 +1108,9 @@ async def _attach_runpod(row, attempt_no: int, rung: str, gpu: dict, pod: dict, 
         await asyncio.to_thread(write_attempt_meta, tid, attempt_no, meta)
     except Exception as exc:  # noqa: BLE001 - metadata only
         logger.warning("attempt metadata write failed: %s", type(exc).__name__)
-    logger.info("training %s attempt %s placed on %s (%s, pod %s)", tid, attempt_no, rung, meta["gpu_type"], pod_id)
-    if pod.get("dataCenterId"):
+    logger.info("training %s attempt %s placed on %s/%s (%s, pod %s)", tid, attempt_no, rung, scope,
+                meta["gpu_type"], pod_id)
+    if pod.get("dataCenterId") or pod.get("cudaVersion"):
         attempt = await asyncio.to_thread(read_attempt, tid, attempt_no)
         if attempt:
             await apply_guard(row, attempt, pod, now, None)
@@ -1248,15 +1230,14 @@ async def dispatch_tick(settings: Settings | None = None) -> dict:
         attempt_no = int(claim.get("o_attempt_no") or n + 1)
         token = claim.get("o_worker_token")
         result = "none"
-        for rung in rungs:
-            if rung in RUNPOD_RUNGS:
-                if tick.runpod_off:
-                    continue
-                result = await _try_runpod(row, attempt_no, token, rung, now, tick, s)
-            else:
-                result = await _try_modal(row, attempt_no, token, s)
+        for rung, scope in placement_steps(rungs):
+            if tick.runpod_off:
+                break
+            result = await _try_runpod(row, attempt_no, token, rung, now, tick, s, scope=scope)
             if result in ("placed", "stop"):
                 break
+        if result not in ("placed", "stop") and RUNG_MODAL in rungs:
+            result = await _try_modal(row, attempt_no, token, s)
         if result == "placed":
             out["placed"] += 1
             continue
@@ -1271,8 +1252,8 @@ async def dispatch_tick(settings: Settings | None = None) -> dict:
         except Exception as exc:  # noqa: BLE001 - the sweep's placing_stale rule releases it later
             logger.warning("dispatcher: release failed for training %s: %s", tid, type(exc).__name__)
     if tick.statuses and all(st == 400 for st in tick.statuses):
-        logger.error("RunPod answered 400 to every create this tick (the request is wrong): %s",
-                     tick.last_400_detail)
+        logger.warning("RunPod placed no candidate this tick: every create answered 400 (no capacity for the request, "
+                       "or a wrong request): %s", tick.last_400_detail)
     if tick.statuses and all(st == 403 for st in tick.statuses) and not STATE.all_403_logged:
         STATE.all_403_logged = True
         logger.error("RunPod answered 403 to every create this tick: the key probably lacks pods:write")

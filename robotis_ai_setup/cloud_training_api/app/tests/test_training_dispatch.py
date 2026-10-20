@@ -199,6 +199,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(D.FINAL_UPLOAD_WAIT_S, D.WATCHDOG_GRACE_S - 120)
 
 
+_DEFAULT = object()
+
+
 class Base(unittest.IsolatedAsyncioTestCase):
     """Fakes installed; STATE fresh; the HF check passed; publish scheduling recorded."""
 
@@ -233,8 +236,20 @@ class Base(unittest.IsolatedAsyncioTestCase):
     async def _fake_sleep(self, s):
         self.logs_sleep.append(s)
 
-    def stock(self, cloud="COMMUNITY", gpus=("NVIDIA RTX A5000",), dcs=("EU-RO-1",)):
-        self.rp.catalog[cloud] = [catalog_entry(g, dcs) for g in gpus]
+    def stock(self, cloud="COMMUNITY", gpus=("NVIDIA RTX A5000",), dcs=_DEFAULT, scope=None):
+        """Stock one catalog (owner E42): Community worldwide without data centres (the
+        measured shape) and Secure in the EEA catalog in EU-RO-1 unless told otherwise."""
+        if scope is None:
+            scope = "world" if cloud == "COMMUNITY" else "eea"
+        if dcs is _DEFAULT:
+            dcs = None if cloud == "COMMUNITY" else ("EU-RO-1",)
+        target = self.rp.catalog_world if scope == "world" else self.rp.catalog
+        target[cloud] = [catalog_entry(g, dcs) for g in gpus]
+
+    def gpu_calls(self):
+        """The recorded /v2/catalog/gpus calls as (cloud, scope)."""
+        return [(c[2]["cloud"], "eea" if "countryCodes" in c[2] else "world") for c in self.rp.calls
+                if c[1] == "/v2/catalog/gpus"]
 
     def queued(self, **kw):
         return self.db.add_training(status="queued", **kw)
@@ -268,7 +283,7 @@ class DispatcherPlacement(Base):
         self.assertEqual(catalog_call[2]["include"], "AVAILABILITY")
         self.assertEqual(catalog_call[2]["product"], "POD")
         self.assertEqual(catalog_call[2]["minCudaVersion"], "12.6")
-        self.assertEqual(len(catalog_call[2]["countryCodes"].split(",")), 30)
+        self.assertNotIn("countryCodes", catalog_call[2])  # owner E42: Community is asked worldwide
 
     async def test_the_allowed_dcs_write_precedes_the_create(self):
         self.stock()
@@ -427,6 +442,126 @@ class DispatcherPlacement(Base):
             await D.dispatch_tick(self.s)
         (create,) = self.rp.creates()
         self.assertEqual(create[3]["dataCenterIds"], ["EU-RO-1"])
+
+    async def test_stock_arriving_late_places_the_row(self):
+        row = self.queued()
+        for _ in range(120):  # 20 min without stock
+            await D.dispatch_tick()
+            self.clock.advance(D.DISPATCH_INTERVAL_S)
+        self.assertEqual(self.db.row(row["id"])["status"], "queued")
+        self.assertIsNotNone(self.db.row(row["id"])["unplaced_since"])
+        self.stock()
+        out = await D.dispatch_tick()
+        self.assertEqual(out["placed"], 1)
+        (create,) = self.rp.creates()
+        self.assertEqual((create[3]["cloud"], create[3]["dataCenterIds"]), ("COMMUNITY", []))
+        self.assertIsNone(self.db.row(row["id"])["unplaced_since"])
+
+    async def test_one_claim_asks_community_world_then_secure_eea_then_secure_world(self):
+        row = self.queued()  # no stock anywhere
+        out = await D.dispatch_tick()
+        self.assertEqual(self.gpu_calls(), [("COMMUNITY", "world"), ("SECURE", "eea"), ("SECURE", "world")])
+        eea = [c for c in self.rp.calls if c[1] == "/v2/catalog/gpus" and "countryCodes" in c[2]]
+        self.assertEqual([len(c[2]["countryCodes"].split(",")) for c in eea], [30])
+        paths = [(c[1], c[2].get("cloud"), "countryCodes" in c[2]) for c in self.rp.calls
+                 if c[1] in ("/v2/catalog/gpus", "/v2/catalog/datacenters")]
+        gdpr_at = [i for i, p in enumerate(paths) if p[0] == "/v2/catalog/datacenters"]
+        self.assertEqual(len(gdpr_at), 1)
+        self.assertEqual(paths.index(("/v2/catalog/gpus", "SECURE", True)) + 1, gdpr_at[0])
+        self.assertLess(gdpr_at[0], paths.index(("/v2/catalog/gpus", "SECURE", False)))
+        self.assertEqual(out["released"], 1)
+        self.assertEqual(self.db.row(row["id"])["current_attempt"], 0)
+
+    async def test_a_community_card_without_data_centres_is_created_without_any(self):
+        card = "NVIDIA RTX 4000 Ada Generation"
+        self.rp.catalog_world["COMMUNITY"] = [catalog_entry(card, None, "LOW")]
+        order = []
+        real = self.rp.handler
+
+        def handler(request):
+            if request.method == "POST":
+                order.append([o[3]["allowed_dcs"] for o in self.db.ops if o[0] == "update"
+                              and o[1] == "training_attempts" and "allowed_dcs" in (o[3] or {})])
+            return real(request)
+
+        import httpx
+
+        from app.services import runpod_client
+        runpod_client.set_transport_for_tests(httpx.MockTransport(handler))
+        row = self.queued()
+        await D.dispatch_tick()
+        (create,) = self.rp.creates()
+        self.assertEqual((create[3]["cloud"], create[3]["gpu"]["id"], create[3]["dataCenterIds"]),
+                         ("COMMUNITY", card, []))
+        self.assertEqual(order, [[[]]], "allowed_dcs [] is written before the create (FR-8)")
+        a = self.db.attempt(row["id"], 1)
+        self.assertEqual((a["state"], a["allowed_dcs"]), ("starting", []))
+        # A 400 caches (cloud, card, "") and the card is tried again after CREATE_400_CACHE_S.
+        self.rp.create_answers = [(400, {"detail": "There are no longer any instances available with the "
+                                                   "requested specifications."}, None)]
+        row2 = self.queued()
+        await D.dispatch_tick()
+        self.assertEqual(len(self.rp.creates()), 2)
+        self.assertIn(("COMMUNITY", card, ""), D.STATE.create_400)
+        self.clock.advance(D.DISPATCH_INTERVAL_S)
+        await D.dispatch_tick()
+        self.assertEqual(len(self.rp.creates()), 2, "the cached card is not tried again yet")
+        self.clock.advance(D.CREATE_400_CACHE_S)
+        await D.dispatch_tick()
+        self.assertEqual(len(self.rp.creates()), 3)
+        self.assertEqual(self.db.attempt(row2["id"], 1)["state"], "starting")
+
+    async def test_world_community_beats_eu_secure(self):
+        self.stock("COMMUNITY")
+        self.stock("SECURE", dcs=("EU-RO-1",))
+        self.queued()
+        await D.dispatch_tick()
+        (create,) = self.rp.creates()
+        self.assertEqual((create[3]["cloud"], create[3]["dataCenterIds"]), ("COMMUNITY", []))
+        self.assertEqual([c for c in self.gpu_calls() if c[0] == "SECURE"], [])
+
+    async def test_secure_eu_before_secure_world(self):
+        self.stock("SECURE", dcs=("EU-RO-1",), scope="eea")
+        self.stock("SECURE", dcs=("US-KS-2",), scope="world")
+        self.queued()
+        await D.dispatch_tick()
+        (create,) = self.rp.creates()
+        self.assertEqual((create[3]["cloud"], create[3]["dataCenterIds"]), ("SECURE", ["EU-RO-1"]))
+        self.assertNotIn(("SECURE", "world"), self.gpu_calls())
+
+    async def test_secure_world_last(self):
+        self.stock("SECURE", dcs=("US-KS-2",), scope="world")
+        row = self.queued()
+        await D.dispatch_tick()
+        (create,) = self.rp.creates()
+        self.assertEqual((create[3]["cloud"], create[3]["dataCenterIds"]), ("SECURE", ["US-KS-2"]))
+        self.assertEqual(self.db.attempt(row["id"], 1)["allowed_dcs"], ["US-KS-2"])  # no GDPR cut worldwide
+
+    async def test_a_community_card_with_listed_data_centres_uses_them_and_its_skips(self):
+        self.stock("COMMUNITY", dcs=("EU-RO-1", "US-KS-2"))
+        D.skip_dc("COMMUNITY", "NVIDIA RTX A5000", "US-KS-2", self.clock.t)
+        self.queued()
+        await D.dispatch_tick()
+        (create,) = self.rp.creates()
+        self.assertEqual(create[3]["dataCenterIds"], ["EU-RO-1"])
+        D.skip_dc("COMMUNITY", "NVIDIA RTX A5000", "EU-RO-1", self.clock.t)
+        self.stock("SECURE", dcs=("US-KS-2",), scope="world")
+        self.queued()
+        await D.dispatch_tick()
+        creates = self.rp.creates()
+        self.assertEqual(len(creates), 2)
+        self.assertEqual((creates[1][3]["cloud"], creates[1][3]["dataCenterIds"]), ("SECURE", ["US-KS-2"]),
+                         "no [] fallback for a listed card whose data centres are all skipped")
+
+    async def test_a_gdpr_list_failure_skips_only_the_secure_eu_step(self):
+        self.rp.dc_status = 500
+        self.stock("SECURE", dcs=("EU-RO-1",), scope="eea")
+        self.stock("SECURE", dcs=("US-KS-2",), scope="world")
+        row = self.queued()
+        await D.dispatch_tick()
+        (create,) = self.rp.creates()
+        self.assertEqual((create[3]["cloud"], create[3]["dataCenterIds"]), ("SECURE", ["US-KS-2"]))
+        self.assertEqual(self.db.attempt(row["id"], 1)["backend"], "runpod_secure")
 
     def test_the_real_modal_client_spawns_exactly_those_keywords(self):
         import ast
@@ -693,14 +828,17 @@ class RunpodErrorTable(Base):
         await D.dispatch_tick()
         self.assertEqual(self.rp.creates()[-1][3]["gpu"]["id"], "NVIDIA GeForce RTX 3080", "the 400 combo is skipped")
 
-    async def test_every_candidate_400_logs_error_with_the_detail(self):
+    async def test_an_all_400_tick_is_a_warning_not_an_error(self):
+        # Review m7: RunPod's capacity answer is a 400 („no longer any instances available").
         self.rp.create_answers = [(400, {"detail": "imageRef ghcr.io/x@sha256:00 unresolvable"}, None)] * 2
         self.s = settings(RUNPOD_LADDER='[{"rung":"runpod_community","gpus":[{"id":"NVIDIA RTX A5000","min_vcpu":8},'
                                         '{"id":"NVIDIA GeForce RTX 3080","min_vcpu":8}]}]')
         self.queued()
-        with self.assertLogs("app.services.training_dispatch", level="ERROR") as logs:
+        with self.assertLogs("app.services.training_dispatch", level="WARNING") as logs:
             await D.dispatch_tick(self.s)
-        self.assertTrue(any("400" in m and "imageRef ghcr.io/x@sha256:00 unresolvable" in m for m in logs.output))
+        self.assertTrue(any(m.startswith("WARNING") and "every create answered 400" in m
+                            and "imageRef ghcr.io/x@sha256:00 unresolvable" in m for m in logs.output))
+        self.assertFalse([r for r in logs.records if r.levelno >= logging.ERROR])
 
     async def test_every_candidate_403_logs_error_once_per_process(self):
         self.rp.create_answers = [(403, None, None)] * 4
@@ -781,52 +919,46 @@ class RunpodErrorTable(Base):
 
 
 class PlacementGuard(Base):
-    def _attempt(self, backend, allowed=("EU-RO-1",)):
+    def _attempt(self, backend, allowed=("EU-RO-1",), **kw):
         row = self.db.add_training(status="running", current_attempt=1)
         a = self.db.add_attempt(row["id"], 1, state="running", backend=backend, cloud_ref="pod1",
-                                allowed_dcs=list(allowed))
+                                allowed_dcs=list(allowed), **kw)
         return row, a
 
-    def test_secure_is_strict(self):
+    def test_a_data_centre_is_recorded_never_refused(self):
+        # Owner E42: only CUDA is judged; a Secure pod outside allowed_dcs keeps training.
         _, a = self._attempt("runpod_secure")
-        self.assertEqual(D.judge_guard(a, {"dataCenterId": "EU-CZ-1", "status": "RUNNING"}, None)[0], "refuse")
-        self.assertEqual(D.judge_guard(a, {"dataCenterId": None, "status": "RUNNING"}, None)[0], "refuse")
-        self.assertEqual(D.judge_guard(a, {"dataCenterId": None, "status": "STARTING"}, None), ("ok", False))
-        self.assertEqual(D.judge_guard(a, {"dataCenterId": "EU-RO-1", "status": "RUNNING", "cudaVersion": "12.8"},
-                                       None), ("ok", True))
-
-    def test_community_refuses_only_a_known_outside_dc(self):
-        _, a = self._attempt("runpod_community")
-        table = self.rp.regions
-        self.assertEqual(D.judge_guard(a, {"dataCenterId": "US-KS-2", "cudaVersion": "12.8"}, table)[0], "refuse")
-        with self.assertLogs("app.services.training_dispatch", level="WARNING") as logs:
-            self.assertEqual(D.judge_guard(a, {"dataCenterId": None, "cudaVersion": "12.8"}, table), ("ok", False))
-            self.assertEqual(D.judge_guard(a, {"dataCenterId": "EU-CZ-1", "cudaVersion": "12.8"}, table), ("ok", True))
-            self.assertEqual(D.judge_guard(a, {"dataCenterId": "ZZ-NEW-1", "cudaVersion": "12.8"}, table), ("ok", True))
-            self.assertEqual(D.judge_guard(a, {"dataCenterId": "XX-1", "cudaVersion": "12.8"}, table), ("ok", True))
-        self.assertTrue(any("no data centre" in m for m in logs.output))
-        self.assertTrue(any("EU-CZ-1" in m for m in logs.output))
-        # the table could not be read: no verdict
-        self.assertEqual(D.judge_guard(a, {"dataCenterId": "US-KS-2", "cudaVersion": "12.8"}, None), ("ok", False))
+        self.assertEqual(D.judge_guard(a, {"dataCenterId": "EU-CZ-1", "status": "RUNNING", "cudaVersion": "12.8"}),
+                         ("ok", True))
+        self.assertEqual(D.judge_guard(a, {"dataCenterId": None, "status": "RUNNING", "cudaVersion": "12.8"}),
+                         ("ok", False))
+        self.assertEqual(D.judge_guard(a, {"dataCenterId": None, "status": "STARTING"}), ("ok", False))
+        self.assertEqual(D.judge_guard(a, {"dataCenterId": "EU-RO-1", "status": "RUNNING", "cudaVersion": "12.8"}),
+                         ("ok", True))
+        _, c = self._attempt("runpod_community")
+        self.assertEqual(D.judge_guard(c, {"dataCenterId": "CA-MTL-1", "cudaVersion": "12.8"}), ("ok", True))
+        with self.assertLogs("app.services.training_dispatch", level="INFO") as logs:
+            self.assertEqual(D.judge_guard(c, {"dataCenterId": None, "cudaVersion": "12.8"}), ("ok", False))
+        self.assertTrue(any(m.startswith("INFO") and "no data centre" in m for m in logs.output))
 
     def test_cuda(self):
         _, a = self._attempt("runpod_secure")
         pod = {"dataCenterId": "EU-RO-1", "status": "RUNNING"}
-        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion="12.4"), None)[0], "refuse")
-        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion="11.8"), None)[0], "refuse")
-        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion="12.10"), None), ("ok", True))
-        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion=None), None), ("ok", False))
-        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion="13.0"), None), ("ok", True))
-        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion="cuda"), None), ("ok", False))
+        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion="12.4"))[0], "refuse")
+        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion="11.8"))[0], "refuse")
+        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion="12.10")), ("ok", True))
+        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion=None)), ("ok", False))
+        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion="13.0")), ("ok", True))
+        self.assertEqual(D.judge_guard(a, dict(pod, cudaVersion="cuda")), ("ok", False))
 
     async def test_a_refusal_deletes_requeues_and_skips_the_community_dc(self):
-        row, a = self._attempt("runpod_community")
+        row, a = self._attempt("runpod_community", gpu_type="NVIDIA RTX A5000")
         self.db.row(row["id"])["worker_token"] = "t"
-        self.rp.add_pod(id="pod1", dataCenterId="US-KS-2", cudaVersion="12.8")
+        self.rp.add_pod(id="pod1", dataCenterId="US-KS-2", cudaVersion="12.4")
         await D.sweep_tick()
         self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "placement_guard")
         self.assertIn("pod1", self.rp.deletes())
-        self.assertIn("US-KS-2", D.STATE.dc_skip)
+        self.assertTrue(D._dc_skipped("COMMUNITY", "NVIDIA RTX A5000", "US-KS-2", self.clock.t))
 
     async def test_the_guard_is_rejudged_until_a_verdict_and_after_a_restart(self):
         row, a = self._attempt("runpod_community")
@@ -843,25 +975,15 @@ class PlacementGuard(Base):
         self.assertEqual(self.db.attempt(row["id"], 1)["state"], "running")
         self.assertEqual(self.db.attempt(row["id"], 1)["data_center"], "EU-RO-1")
 
-    async def test_a_known_outside_id_reported_later_is_refused_that_round(self):
-        row, a = self._attempt("runpod_community")
-        pod = self.rp.add_pod(id="pod1", dataCenterId=None, cudaVersion="12.8", status="RUNNING")
-        self.db.row(row["id"]).update(last_progress_at=self.clock.iso(), step_advanced_at=self.clock.iso())
-        await D.sweep_tick()
-        pod["dataCenterId"] = "CA-MTL-1"
-        await D.sweep_tick()
-        self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "placement_guard")
-
-    async def test_an_unreadable_table_is_no_verdict(self):
-        row, a = self._attempt("runpod_community")
+    async def test_a_pod_outside_europe_keeps_training(self):
+        row, a = self._attempt("runpod_community", allowed=())
         self.rp.add_pod(id="pod1", dataCenterId="US-KS-2", cudaVersion="12.8", status="RUNNING")
         self.db.row(row["id"]).update(last_progress_at=self.clock.iso(), step_advanced_at=self.clock.iso())
-        self.rp.dc_status = 500
         await D.sweep_tick()
-        self.assertEqual(self.db.attempt(row["id"], 1)["state"], "running")
-        self.rp.dc_status = 200
-        await D.sweep_tick()
-        self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "placement_guard")
+        a = self.db.attempt(row["id"], 1)
+        self.assertEqual((a["state"], a["data_center"], a["allowed_dcs"]), ("running", "US-KS-2", []))
+        self.assertEqual(self.rp.deletes(), [])
+        self.assertIn((row["id"], 1), D.STATE.guard_final)
 
 
 class SweepLosses(Base):
@@ -989,7 +1111,8 @@ class SweepLosses(Base):
     async def test_start_timeout_with_the_outage_clock(self):
         row = self.db.add_training(status="queued", current_attempt=1, worker_token="tok")
         self.db.add_attempt(row["id"], 1, state="starting", backend="runpod_community", cloud_ref="pod1",
-                            started_at=self.clock.iso(self.clock.t - 1201), data_center="EU-SE-1")
+                            started_at=self.clock.iso(self.clock.t - 1201), data_center="EU-SE-1",
+                            gpu_type="NVIDIA RTX A5000")
         self.rp.add_pod(id="pod1", status="STARTING")
         D.STATE.last_failed_round_at = self.clock.t - 100  # FR-16: max(started_at, last_failed_round_at)
         await D.sweep_tick()
@@ -997,8 +1120,70 @@ class SweepLosses(Base):
         D.STATE.last_failed_round_at = self.clock.t - 10_000
         await D.sweep_tick()
         self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "start_timeout")
-        self.assertIn("EU-SE-1", D.STATE.dc_skip)
+        self.assertIn(("COMMUNITY", "NVIDIA RTX A5000", "EU-SE-1"), D.STATE.dc_skip)  # D1: cloud + card + DC
         self.assertIn("pod1", self.rp.deletes())
+
+    async def test_a_secure_start_timeout_skips_its_card_and_data_centre(self):
+        # D1 (production e2e T10b): a Secure host whose container was never created.
+        card = "NVIDIA RTX 4000 Ada Generation"
+        row = self.db.add_training(status="queued", current_attempt=1, worker_token="tok")
+        self.db.add_attempt(row["id"], 1, state="starting", backend="runpod_secure", cloud_ref="pod1",
+                            started_at=self.clock.iso(self.clock.t - self.s.start_deadline_s - 1),
+                            data_center="EUR-IS-1", gpu_type=card)
+        self.rp.add_pod(id="pod1", status="STARTING", dataCenterId="EUR-IS-1")
+        await D.sweep_tick()
+        a = self.db.attempt(row["id"], 1)
+        self.assertEqual((a["state"], a["end_reason"]), ("lost", "start_timeout"))
+        self.assertTrue(D._dc_skipped("SECURE", card, "EUR-IS-1", self.clock.t))
+        self.assertFalse(D._dc_skipped("SECURE", "NVIDIA RTX A4500", "EUR-IS-1", self.clock.t),
+                         "a different card in the same data centre is still open")
+        self.stock("SECURE", gpus=(card,), dcs=("EUR-IS-1",), scope="world")
+        await D.dispatch_tick()
+        self.assertEqual(self.rp.creates(), [])
+        self.stock("SECURE", gpus=(card,), dcs=("EUR-IS-1", "EUR-RO-1"), scope="world")
+        self.clock.advance(D.CATALOG_CACHE_S)
+        await D.dispatch_tick()
+        (create,) = self.rp.creates()
+        self.assertEqual((create[3]["cloud"], create[3]["dataCenterIds"]), ("SECURE", ["EUR-RO-1"]))
+
+    async def test_a_host_unfit_finish_skips_the_secure_dc(self):
+        # D1: routes/training_worker.py::_finish makes exactly this call for every host_unfit reason.
+        import inspect
+
+        from app.routes import training_worker
+
+        self.assertIn('await D.requeue_attempt(row, att, f"host_unfit:{reason}", now, skip_community_dc=True)',
+                      inspect.getsource(training_worker._finish))
+        card = "NVIDIA RTX A4500"
+        row, a = self._running("runpod_secure")
+        a.update(gpu_type=card, data_center="EU-SE-1")
+        await D.requeue_attempt(row, a, "host_unfit:download", self.clock.t, [], skip_community_dc=True)
+        self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "host_unfit:download")
+        self.assertTrue(D._dc_skipped("SECURE", card, "EU-SE-1", self.clock.t))
+        # pod_gone and heartbeat_lost are not a bad host: no skip (a fence).
+        for reason in ("pod_gone", "heartbeat_lost"):
+            with self.subTest(reason=reason):
+                D.reset_state_for_tests()
+                D.STATE.last_failed_round_at = self.clock.t - 10_000
+                self.db.tables["trainings"].clear()
+                self.db.tables["training_attempts"].clear()
+                self.rp.pods.clear()
+                r2, a2 = self._running("runpod_secure")
+                a2.update(gpu_type=card, data_center="EU-SE-1")
+                if reason == "pod_gone":
+                    self.rp.pods.clear()
+                    await D.sweep_tick()
+                    self.clock.advance(D.POD_GONE_CONFIRM_S)
+                    await D.sweep_tick()
+                else:
+                    self.clock.advance(D.HEARTBEAT_LOST_S + 1)
+                    self.db.row(r2["id"])["step_advanced_at"] = self.clock.iso()
+                    await D.sweep_tick()
+                    self.db.row(r2["id"])["step_advanced_at"] = self.clock.iso()
+                    await D.sweep_tick()
+                self.assertEqual(self.db.attempt(r2["id"], 1)["end_reason"], reason)
+                self.assertFalse(D._dc_skipped("SECURE", card, "EU-SE-1", self.clock.t))
+
 
     async def test_a_stale_placing_attempt_is_released(self):
         row = self.db.add_training(status="queued", current_attempt=1, worker_token="tok")
@@ -1366,6 +1551,28 @@ class Helpers(unittest.TestCase):
         self.assertEqual(D.budget_for(row, {"first_heartbeat_at": None}, now, s), (14400 - 3600, "cap"))
         old = {"train_seconds_used": 0, "requested_at": Clock(now - 40000).iso()}
         self.assertEqual(D.budget_for(old, {}, now, s), (43200 - 40000, "wall"))
+
+    def test_the_catalog_cache_is_per_scope(self):
+        rp = FakeRunpod()
+        now = 1_800_000_000.0
+
+        async def go():
+            await D._catalog("SECURE", now, worldwide=False)
+            await D._catalog("SECURE", now, worldwide=True)
+            n = len(rp.calls)
+            await D._catalog("SECURE", now + D.CATALOG_CACHE_S - 1, worldwide=False)
+            await D._catalog("SECURE", now + D.CATALOG_CACHE_S - 1, worldwide=True)
+            return n, len(rp.calls)
+
+        D.reset_state_for_tests()
+        try:
+            with rp.installed():
+                first, after = asyncio.run(go())
+        finally:
+            D.reset_state_for_tests()
+        self.assertEqual(first, 2, "the EEA and the worldwide scope are two cache entries")
+        self.assertEqual(after, 2, "a repeat within 60 s hits nothing")
+        self.assertEqual([("countryCodes" in c[2]) for c in rp.calls], [True, False])
 
     def test_rungs_for_table(self):
         now = 1_800_000_000.0

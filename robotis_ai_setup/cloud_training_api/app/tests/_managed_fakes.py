@@ -625,16 +625,21 @@ class FakeR2:
 
 
 def catalog_entry(gpu_id, dcs, availability="HIGH"):
-    return {"id": gpu_id, "name": gpu_id, "memory": 24, "price": {"secure": 0.3, "community": 0.2},
-            "availability": availability, "dataCenters": [{"id": d, "name": d, "availability": availability}
-                                                          for d in dcs], "cudaVersions": ["12.8"]}
+    """A /v2/catalog/gpus entry; ``dcs is None`` = no ``dataCenters`` key at all (the
+    measured Community shape, 2026-10-20)."""
+    entry = {"id": gpu_id, "name": gpu_id, "memory": 24, "price": {"secure": 0.3, "community": 0.2},
+             "availability": availability, "cudaVersions": ["12.8"]}
+    if dcs is not None:
+        entry["dataCenters"] = [{"id": d, "name": d, "availability": availability} for d in dcs]
+    return entry
 
 
 class FakeRunpod:
     def __init__(self):
         self.calls: list = []
         self.pods: dict = {}
-        self.catalog = {"COMMUNITY": [], "SECURE": []}
+        self.catalog = {"COMMUNITY": [], "SECURE": []}        # served with countryCodes (the EEA scope)
+        self.catalog_world = {"COMMUNITY": [], "SECURE": []}  # served without (worldwide, owner E42)
         self.gdpr = ["EU-RO-1", "EU-SE-1", "EUR-IS-1"]
         self.regions = {"EU-RO-1": "EUROPE", "EU-SE-1": "EUROPE", "EUR-IS-1": "EUROPE", "EU-CZ-1": "EUROPE",
                         "US-KS-2": "NORTH_AMERICA", "CA-MTL-1": "NORTH_AMERICA", "XX-1": "UNKNOWN"}
@@ -667,7 +672,8 @@ class FakeRunpod:
         if method == "GET" and path == "/v2/catalog/gpus":
             if self.catalog_status != 200:
                 return httpx.Response(self.catalog_status, json={"detail": "x"})
-            return httpx.Response(200, json={"gpus": self.catalog[request.url.params["cloud"]]})
+            table = self.catalog if "countryCodes" in request.url.params else self.catalog_world
+            return httpx.Response(200, json={"gpus": table[request.url.params["cloud"]]})
         if method == "GET" and path == "/v2/catalog/datacenters":
             if self.dc_status != 200:
                 return httpx.Response(self.dc_status, json={"detail": "x"})

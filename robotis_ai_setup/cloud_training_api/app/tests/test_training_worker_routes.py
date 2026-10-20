@@ -652,7 +652,8 @@ class Finish(WorkerBase):
         self.assertEqual((self.att["state"], self.att["end_reason"]), ("lost", "host_unfit:gpu_memory"))
         r = self.db.row(self.tid)
         self.assertEqual((r["status"], r["status_note"], r["current_step"]), ("queued", T.s1(2500), 2500))
-        self.assertIn("EU-RO-1", D.STATE.dc_skip)
+        # D1: the skip is keyed (cloud, card, data centre).
+        self.assertTrue(D._dc_skipped("COMMUNITY", self.att.get("gpu_type"), "EU-RO-1", self.clock.t))
         self.assertIn("pod1", self.rp.deletes())
 
     async def test_resume_crashes_refuse_the_checkpoint_after_two_attempts(self):

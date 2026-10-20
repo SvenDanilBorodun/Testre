@@ -105,7 +105,8 @@ START_TIMEOUT_GRACE_S = 300        # the dispatcher's own cap margin (§4.2 step
 JANITOR_WINDOW_S = 7 * 86400       # terminal rows the janitor revisits (R2 lifecycle is the backstop)
 # train_managed's Modal timeout is fixed at 7 h in code (§4.9, TR-8 n11).
 MODAL_TIMEOUT_S = 7 * 3600
-MANAGED_CAP_CEILING_S = MODAL_TIMEOUT_S - FINAL_UPLOAD_WAIT_S - 600  # 23 520 s
+MANAGED_CAP_CEILING_S = MODAL_TIMEOUT_S - FINAL_UPLOAD_WAIT_S - 600  # 23 520 s: with the Modal rung
+MANAGED_CAP_CEILING_RUNPOD_S = WALL_CAP_S  # without the Modal rung a cap past the wall clock could never bind
 
 HF_ORG = "EduBotics-Solutions"
 TRAINER_IMAGE_PREFIX = "ghcr.io/svendanilborodun/edubotics-trainer"
@@ -119,6 +120,8 @@ RUNG_MODAL = "modal"
 RUNGS = (RUNG_COMMUNITY, RUNG_SECURE, RUNG_MODAL)
 RUNPOD_RUNGS = (RUNG_COMMUNITY, RUNG_SECURE)
 RUNG_CLOUD = {RUNG_COMMUNITY: "COMMUNITY", RUNG_SECURE: "SECURE"}
+# The emergency rung (owner E29): appended last only while MANAGED_MODAL_RUNG=1.
+MODAL_RUNG_ENTRY = {"rung": RUNG_MODAL}
 
 DEFAULT_LADDER = [
     {"rung": RUNG_COMMUNITY, "gpus": [
@@ -134,7 +137,6 @@ DEFAULT_LADDER = [
         {"id": "NVIDIA RTX A4000", "min_vcpu": 6}, {"id": "NVIDIA RTX 4000 Ada Generation", "min_vcpu": 6},
         {"id": "NVIDIA GeForce RTX 3090", "min_vcpu": 8}, {"id": "NVIDIA RTX A6000", "min_vcpu": 8},
         {"id": "NVIDIA GeForce RTX 4090", "min_vcpu": 8}]},
-    {"rung": RUNG_MODAL},
 ]
 
 ACTIVE_STATES = ("placing", "starting", "running")
@@ -175,6 +177,8 @@ class Settings:
     runpod_api_key: str = ""
     trainer_image: str = ""
     ladder: tuple = ()
+    modal_rung: bool = False     # MANAGED_MODAL_RUNG=1 was asked for (owner E29)
+    cap_clamped_from: int | None = None  # the configured cap when E43 clamped it
     pod_prefix: str = "edubotics-train"
     max_runpod_pods: int = 30
     start_deadline_s: int = 1200
@@ -193,6 +197,10 @@ class Settings:
     def has_runpod_rung(self) -> bool:
         return any(r["rung"] in RUNPOD_RUNGS for r in self.ladder)
 
+    @property
+    def has_modal_rung(self) -> bool:
+        return any(r["rung"] == RUNG_MODAL for r in self.ladder)
+
     def rung_gpus(self, rung: str) -> list:
         for r in self.ladder:
             if r["rung"] == rung:
@@ -200,9 +208,10 @@ class Settings:
         return []
 
 
-def parse_ladder(raw) -> tuple:
-    """RUNPOD_LADDER (JSON) or the default, validated (§3.6): a list; each rung
-    once; modal present and last; gpus non-empty lists of {id, min_vcpu 1–32}."""
+def parse_ladder(raw, *, modal_rung: bool = False) -> tuple:
+    """RUNPOD_LADDER (JSON) or the default, validated: a non-empty list; each rung
+    once; modal only with MANAGED_MODAL_RUNG=1 and then last (appended when
+    absent); gpus non-empty lists of {id, min_vcpu 1–32}."""
     if raw is None or raw == "":
         data = json.loads(json.dumps(DEFAULT_LADDER))
     else:
@@ -238,9 +247,19 @@ def parse_ladder(raw) -> tuple:
                 raise SettingsError("RUNPOD_LADDER: a gpu entry is not {id, min_vcpu 1-32}")
             clean.append({"id": g["id"], "min_vcpu": g["min_vcpu"]})
         out.append({"rung": rung, "gpus": clean})
-    if RUNG_MODAL not in seen or seen[-1] != RUNG_MODAL:
-        raise SettingsError("RUNPOD_LADDER: modal must be present and last")
+    if RUNG_MODAL in seen:
+        if seen[-1] != RUNG_MODAL:
+            raise SettingsError("RUNPOD_LADDER: modal must be last")
+        if not modal_rung:
+            raise SettingsError("RUNPOD_LADDER names modal, which needs MANAGED_MODAL_RUNG=1")
+    elif modal_rung:
+        out.append(dict(MODAL_RUNG_ENTRY))
     return tuple(out)
+
+
+def cap_ceiling(ladder) -> int:
+    """The largest MANAGED_ACT_CAP_S this ladder can honour."""
+    return MANAGED_CAP_CEILING_S if any(r["rung"] == RUNG_MODAL for r in ladder) else MANAGED_CAP_CEILING_RUNPOD_S
 
 
 def _int_env(env, name, default, lo=1, hi=None):
@@ -256,6 +275,15 @@ def _int_env(env, name, default, lo=1, hi=None):
     return value
 
 
+def _flag_env(env, name) -> bool:
+    raw = (env.get(name) or "").strip()
+    if raw in ("", "0"):
+        return False
+    if raw == "1":
+        return True
+    raise SettingsError(f"{name} must be 0 or 1")
+
+
 def load_settings(env=None) -> Settings:
     """Parse and validate every managed-training variable. Raises SettingsError
     for a MALFORMED value whatever TRAINING_DISPATCH says; required-but-missing
@@ -264,7 +292,8 @@ def load_settings(env=None) -> Settings:
     dispatch = (env.get("TRAINING_DISPATCH") or "legacy").strip()
     if dispatch not in ("legacy", "managed"):
         raise SettingsError("TRAINING_DISPATCH must be legacy or managed")
-    ladder = parse_ladder(env.get("RUNPOD_LADDER"))
+    modal_rung = _flag_env(env, "MANAGED_MODAL_RUNG")
+    ladder = parse_ladder(env.get("RUNPOD_LADDER"), modal_rung=modal_rung)
     e2e = env.get("TRAINING_E2E") == "1"
     save_freq = _int_env(env, "TRAINING_SAVE_FREQ", SAVE_FREQ)
     mirror_every = _int_env(env, "TRAINING_MIRROR_EVERY", MIRROR_EVERY)
@@ -276,8 +305,12 @@ def load_settings(env=None) -> Settings:
     elif mirror_every % save_freq != 0:
         raise SettingsError("TRAINING_MIRROR_EVERY must be a positive multiple of TRAINING_SAVE_FREQ")
     cap_s = _int_env(env, "MANAGED_ACT_CAP_S", MANAGED_ACT_CAP_S)
-    if any(r["rung"] == RUNG_MODAL for r in ladder) and cap_s > MANAGED_CAP_CEILING_S:
-        raise SettingsError("MANAGED_ACT_CAP_S exceeds the Modal ceiling (7 h minus the final-upload wait and 600 s)")
+    cap_clamped_from = None
+    if any(r["rung"] == RUNG_MODAL for r in ladder):
+        if cap_s > MANAGED_CAP_CEILING_S:          # E43: an emergency switch never blocks the boot
+            cap_clamped_from, cap_s = cap_s, MANAGED_CAP_CEILING_S
+    elif cap_s > MANAGED_CAP_CEILING_RUNPOD_S:     # not the emergency path: a malformed value
+        raise SettingsError("MANAGED_ACT_CAP_S exceeds the 12 h wall cap")
     prefix = (env.get("RUNPOD_POD_PREFIX") or "edubotics-train").strip()
     if not POD_PREFIX_RE.fullmatch(prefix):
         raise SettingsError("RUNPOD_POD_PREFIX must match ^[a-z0-9-]{3,40}$")
@@ -296,6 +329,8 @@ def load_settings(env=None) -> Settings:
         runpod_api_key=(env.get("RUNPOD_API_KEY") or "").strip(),
         trainer_image=image,
         ladder=ladder,
+        modal_rung=modal_rung,
+        cap_clamped_from=cap_clamped_from,
         pod_prefix=prefix,
         max_runpod_pods=_int_env(env, "MAX_RUNPOD_PODS", 30),
         start_deadline_s=_int_env(env, "TRAINING_START_DEADLINE_S", 1200),
@@ -330,6 +365,12 @@ def validate_boot(env=None) -> Settings:
             "TRAINING_E2E=1: managed checkpoints every %d steps, mirrors every %d (an end-to-end stack only, "
             "never production)", settings.save_freq, settings.mirror_every,
         )
+    if settings.modal_rung:
+        logger.warning("MANAGED_MODAL_RUNG=1: the managed ladder ends in Modal train_managed (an emergency setting; "
+                       "unset it when RunPod is usable again)")
+    if settings.cap_clamped_from is not None:
+        logger.warning("MANAGED_ACT_CAP_S is above the Modal ceiling while MANAGED_MODAL_RUNG=1: clamped to "
+                       "MANAGED_CAP_CEILING_S (23520 s, owner E43)")
     if settings.missing:
         if settings.managed:
             raise RuntimeError(
@@ -923,10 +964,11 @@ def _runpod_usable(now: float, settings: Settings) -> bool:
 
 
 def rungs_for(row, attempts_of_row, now: float, tick: _Tick, settings: Settings | None = None) -> list:
-    """§4.2 step 3: the rungs attempt N+1 may use, in ladder order."""
+    """The rungs attempt N+1 may use, in ladder order. Attempt MAX_ATTEMPTS is
+    Modal-only only while the ladder has the Modal rung (owner E31)."""
     s = settings or SETTINGS
     n_next = int(row.get("current_attempt") or 0) + 1
-    if n_next == MAX_ATTEMPTS:
+    if n_next == MAX_ATTEMPTS and s.has_modal_rung:
         return [RUNG_MODAL]
     rungs = [r["rung"] for r in s.ladder]
     lost_community = sum(1 for a in attempts_of_row

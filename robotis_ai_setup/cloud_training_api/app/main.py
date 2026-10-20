@@ -102,8 +102,10 @@ _validate_hf_token_key()
 
 def _validate_managed_training() -> None:
     """Managed ACT training (049, spec §3.8): a malformed setting (the ladder,
-    TRAINING_SAVE_FREQ / TRAINING_MIRROR_EVERY without TRAINING_E2E=1, a cap
-    above the Modal ceiling, an undigested trainer image, …) always stops the
+    TRAINING_SAVE_FREQ / TRAINING_MIRROR_EVERY without TRAINING_E2E=1, a
+    `MANAGED_ACT_CAP_S` above the 12 h wall without the Modal rung (with it the
+    cap is clamped, owner E43), a `MANAGED_MODAL_RUNG` that is not 0 or 1, an
+    undigested trainer image, …) always stops the
     boot; a required variable missing stops it only under
     TRAINING_DISPATCH=managed. Messages name variables, never values."""
     _training_dispatch.validate_boot()

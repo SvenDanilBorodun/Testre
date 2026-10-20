@@ -47,27 +47,61 @@ def settings(**env):
 class SettingsTests(unittest.TestCase):
     def test_the_default_ladder(self):
         s = settings()
-        self.assertEqual([r["rung"] for r in s.ladder], ["runpod_community", "runpod_secure", "modal"])
+        self.assertEqual([r["rung"] for r in s.ladder], ["runpod_community", "runpod_secure"])
         self.assertEqual(len(s.rung_gpus("runpod_community")), 13)
         self.assertEqual(len(s.rung_gpus("runpod_secure")), 7)
         self.assertNotIn("NVIDIA GeForce RTX 3070", [g["id"] for g in s.rung_gpus("runpod_community")])
+        self.assertTrue(s.has_runpod_rung)
+        self.assertFalse(s.has_modal_rung)
+        self.assertFalse(s.modal_rung)
         self.assertEqual(s.missing, ())
+        on = settings(MANAGED_MODAL_RUNG="1")  # the emergency switch: today's ladder exactly
+        self.assertEqual([r["rung"] for r in on.ladder], ["runpod_community", "runpod_secure", "modal"])
+        self.assertEqual(on.rung_gpus("runpod_community"), s.rung_gpus("runpod_community"))
+        self.assertEqual(on.rung_gpus("runpod_secure"), s.rung_gpus("runpod_secure"))
+        self.assertTrue(on.has_modal_rung)
+        self.assertTrue(on.modal_rung)
 
     def test_ladder_validation(self):
         bad = ['{"rung":"modal"}', "[]", '[{"rung":"aws"},{"rung":"modal"}]', '[{"rung":"runpod_secure","gpus":[]},{"rung":"modal"}]',
                '[{"rung":"modal"},{"rung":"runpod_secure","gpus":[{"id":"x","min_vcpu":8}]}]',
-               '[{"rung":"runpod_secure","gpus":[{"id":"x","min_vcpu":8}]}]',
                '[{"rung":"runpod_secure","gpus":[{"id":"x","min_vcpu":0}]},{"rung":"modal"}]',
                '[{"rung":"runpod_secure","gpus":[{"id":"x","min_vcpu":33}]},{"rung":"modal"}]',
                '[{"rung":"runpod_secure","gpus":[{"id":"","min_vcpu":8}]},{"rung":"modal"}]',
                '[{"rung":"runpod_secure","gpus":[{"id":"x","min_vcpu":8,"cloud":"x"}]},{"rung":"modal"}]',
                '[{"rung":"modal"},{"rung":"modal"}]', '[{"rung":"modal","gpus":[]}]', "not json"]
         for raw in bad:
-            with self.subTest(raw=raw), self.assertRaises(D.SettingsError):
-                settings(RUNPOD_LADDER=raw)
-        s = settings(RUNPOD_LADDER='[{"rung":"modal"}]')
+            for switch in ("0", "1"):
+                with self.subTest(raw=raw, switch=switch), self.assertRaises(D.SettingsError):
+                    settings(RUNPOD_LADDER=raw, MANAGED_MODAL_RUNG=switch)
+        # A RunPod-only ladder is good; a ladder naming modal needs the switch.
+        ok = settings(RUNPOD_LADDER='[{"rung":"runpod_secure","gpus":[{"id":"x","min_vcpu":8}]}]')
+        self.assertEqual([r["rung"] for r in ok.ladder], ["runpod_secure"])
+        with self.assertRaises(D.SettingsError) as ctx:
+            settings(RUNPOD_LADDER='[{"rung":"runpod_secure","gpus":[{"id":"x","min_vcpu":8}]},{"rung":"modal"}]')
+        self.assertIn("MANAGED_MODAL_RUNG", str(ctx.exception))
+        with self.assertRaises(D.SettingsError):
+            settings(RUNPOD_LADDER='[{"rung":"modal"}]')
+        with self.assertRaises(D.SettingsError):  # modal first, switch on
+            settings(RUNPOD_LADDER='[{"rung":"modal"},{"rung":"runpod_secure","gpus":[{"id":"x","min_vcpu":8}]}]',
+                     MANAGED_MODAL_RUNG="1")
+        for lenient in ("true", "yes", "2", "on"):
+            with self.subTest(switch=lenient), self.assertRaises(D.SettingsError) as ctx:
+                settings(MANAGED_MODAL_RUNG=lenient)
+            self.assertNotIn(lenient, str(ctx.exception))
+        self.assertTrue(settings(MANAGED_MODAL_RUNG=" 1 ").modal_rung)
+        self.assertFalse(settings(MANAGED_MODAL_RUNG="0").modal_rung)
+        self.assertFalse(settings(MANAGED_MODAL_RUNG="").has_modal_rung)
+        # The switch appends modal last and never twice.
+        on = settings(RUNPOD_LADDER='[{"rung":"runpod_secure","gpus":[{"id":"x","min_vcpu":8}]}]', MANAGED_MODAL_RUNG="1")
+        self.assertEqual([r["rung"] for r in on.ladder], ["runpod_secure", "modal"])
+        twice = settings(RUNPOD_LADDER='[{"rung":"runpod_secure","gpus":[{"id":"x","min_vcpu":8}]},{"rung":"modal"}]',
+                         MANAGED_MODAL_RUNG="1")
+        self.assertEqual([r["rung"] for r in twice.ladder], ["runpod_secure", "modal"])
+        s = settings(RUNPOD_LADDER='[{"rung":"modal"}]', MANAGED_MODAL_RUNG="1")
         self.assertFalse(s.has_runpod_rung)
-        self.assertNotIn("RUNPOD_API_KEY", settings(RUNPOD_LADDER='[{"rung":"modal"}]', RUNPOD_API_KEY=None).missing)
+        self.assertNotIn("RUNPOD_API_KEY", settings(RUNPOD_LADDER='[{"rung":"modal"}]', MANAGED_MODAL_RUNG="1",
+                                                    RUNPOD_API_KEY=None).missing)
 
     def test_the_cadence_lock(self):
         with self.assertRaises(D.SettingsError):
@@ -87,11 +121,41 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(any("TRAINING_E2E=1" in m for m in logs.output))
         D.validate_boot(dict(BASE_ENV, TRAINING_DISPATCH="legacy"))
 
-    def test_the_cap_ceiling_while_the_ladder_ends_in_modal(self):
+    def test_the_cap_ceiling_follows_the_ladder(self):
+        # Owner E43: with the switch a cap above the Modal ceiling is CLAMPED (never a boot stop);
+        # without it a cap above the 12 h wall is malformed.
         self.assertEqual(D.MANAGED_CAP_CEILING_S, 23520)
-        self.assertEqual(settings(MANAGED_ACT_CAP_S="21600").cap_s, 21600)
-        with self.assertRaises(D.SettingsError):
-            settings(MANAGED_ACT_CAP_S="23521")
+        self.assertEqual(D.MANAGED_CAP_CEILING_RUNPOD_S, D.WALL_CAP_S)
+        self.assertEqual(D.MANAGED_CAP_CEILING_RUNPOD_S, 43200)
+        self.assertEqual(D.cap_ceiling(settings().ladder), 43200)
+        self.assertEqual(D.cap_ceiling(settings(MANAGED_MODAL_RUNG="1").ladder), 23520)
+        on = settings(MANAGED_MODAL_RUNG="1", MANAGED_ACT_CAP_S="23520")
+        self.assertEqual((on.cap_s, on.cap_clamped_from), (23520, None))
+        on = settings(MANAGED_MODAL_RUNG="1", MANAGED_ACT_CAP_S="23521")
+        self.assertEqual((on.cap_s, on.cap_clamped_from), (23520, 23521))
+        on = settings(MANAGED_MODAL_RUNG="1", MANAGED_ACT_CAP_S="50000")
+        self.assertEqual((on.cap_s, on.cap_clamped_from), (23520, 50000))
+        self.assertEqual(settings(MANAGED_MODAL_RUNG="1", MANAGED_ACT_CAP_S="21600").cap_s, 21600)
+        off = settings(MANAGED_ACT_CAP_S="23521")
+        self.assertEqual((off.cap_s, off.cap_clamped_from), (23521, None))
+        self.assertEqual(settings(MANAGED_ACT_CAP_S="43200").cap_s, 43200)
+        with self.assertRaises(D.SettingsError) as ctx:
+            settings(MANAGED_ACT_CAP_S="43201")
+        self.assertIn("MANAGED_ACT_CAP_S", str(ctx.exception))
+        self.assertNotIn("43201", str(ctx.exception))
+
+    def test_the_switch_and_the_clamp_log_a_warning_on_every_boot(self):
+        with self.assertLogs("app.services.training_dispatch", level="WARNING") as logs:
+            D.validate_boot(dict(BASE_ENV, MANAGED_MODAL_RUNG="1"))
+        self.assertTrue(any("MANAGED_MODAL_RUNG=1" in m for m in logs.output))
+        self.assertFalse(any("clamped" in m for m in logs.output))
+        with self.assertLogs("app.services.training_dispatch", level="WARNING") as logs:
+            D.validate_boot(dict(BASE_ENV, MANAGED_MODAL_RUNG="1", MANAGED_ACT_CAP_S="30000"))
+        self.assertTrue(any("MANAGED_MODAL_RUNG=1" in m for m in logs.output))
+        self.assertTrue(any("clamped" in m for m in logs.output))
+        self.assertFalse(any("30000" in m for m in logs.output))
+        with self.assertNoLogs("app.services.training_dispatch", level="WARNING"):
+            D.validate_boot(BASE_ENV)
 
     def test_the_image_must_be_digest_pinned(self):
         for bad in ("ghcr.io/svendanilborodun/edubotics-trainer:latest", "docker.io/x/y@sha256:" + "a" * 64,
@@ -122,7 +186,8 @@ class SettingsTests(unittest.TestCase):
     def test_runpod_variables_are_required_only_with_a_runpod_rung(self):
         env = {k: v for k, v in BASE_ENV.items() if k not in ("RUNPOD_API_KEY", "RUNPOD_TRAINER_IMAGE")}
         self.assertEqual(set(D.load_settings(env).missing), {"RUNPOD_API_KEY", "RUNPOD_TRAINER_IMAGE"})
-        self.assertEqual(D.load_settings(dict(env, RUNPOD_LADDER='[{"rung":"modal"}]')).missing, ())
+        self.assertEqual(D.load_settings(dict(env, RUNPOD_LADDER='[{"rung":"modal"}]', MANAGED_MODAL_RUNG="1")).missing,
+                         ())
 
     def test_the_spec_constants(self):
         for name, value in (("SAVE_FREQ", 2500), ("MIRROR_EVERY", 10000), ("MAX_ATTEMPTS", 4), ("WALL_CAP_S", 43200),
@@ -224,16 +289,6 @@ class DispatcherPlacement(Base):
         await D.dispatch_tick()
         self.assertEqual(order, [("create", True)])
 
-    async def test_attempt_four_goes_to_modal_only(self):
-        self.stock()
-        row = self.queued(current_attempt=3)
-        for n in (1, 2, 3):
-            self.db.add_attempt(row["id"], n, state="lost", backend="runpod_secure")
-        await D.dispatch_tick()
-        self.assertEqual(self.rp.creates(), [])
-        self.assertEqual(len(self.modal.spawned), 1)
-        self.assertEqual(self.db.attempt(row["id"], 4)["backend"], "modal")
-
     async def test_community_is_skipped_after_two_community_losses(self):
         self.stock("COMMUNITY")
         self.stock("SECURE")
@@ -244,9 +299,127 @@ class DispatcherPlacement(Base):
         (create,) = self.rp.creates()
         self.assertEqual(create[3]["cloud"], "SECURE")
 
+    async def test_attempt_four_uses_the_ladder(self):
+        # Owner E31: without the switch the 4th attempt is placed like any other.
+        self.stock()
+        row = self.queued(current_attempt=3)
+        for n in (1, 2, 3):
+            self.db.add_attempt(row["id"], n, state="lost", backend="runpod_secure")
+        await D.dispatch_tick()
+        (create,) = self.rp.creates()
+        self.assertEqual(create[3]["cloud"], "COMMUNITY")
+        self.assertEqual(self.db.attempt(row["id"], 4)["backend"], "runpod_community")
+        self.assertEqual(self.modal.spawned, [])
+
+    async def test_attempt_four_skips_community_after_two_community_losses(self):
+        self.stock("COMMUNITY")
+        self.stock("SECURE")
+        row = self.queued(current_attempt=3)
+        self.db.add_attempt(row["id"], 1, state="lost", backend="runpod_community")
+        self.db.add_attempt(row["id"], 2, state="lost", backend="runpod_community")
+        self.db.add_attempt(row["id"], 3, state="lost", backend="runpod_secure")
+        await D.dispatch_tick()
+        (create,) = self.rp.creates()
+        self.assertEqual(create[3]["cloud"], "SECURE")
+        self.assertEqual(self.db.attempt(row["id"], 4)["backend"], "runpod_secure")
+
+    async def test_no_stock_anywhere_retries_every_tick_until_s18_and_never_modal(self):
+        # Owner E30: no GPU anywhere → the row retries every tick and ends with S18 after 30 min.
+        row = self.queued()
+        out = await D.dispatch_tick()
+        self.assertEqual(out["released"], 1)
+        first = self.db.row(row["id"])["unplaced_since"]
+        self.assertIsNotNone(first)
+        claims = len(self.db.calls("claim_training_attempt"))
+        start = self.clock.t
+        catalog_calls_at_120 = None
+        while self.db.row(row["id"])["status"] == "queued":
+            self.clock.advance(D.DISPATCH_INTERVAL_S)
+            await D.dispatch_tick()
+            r = self.db.row(row["id"])
+            if r["status"] == "queued":
+                self.assertEqual(r["unplaced_since"], first, "the clock never moves forward")
+            if catalog_calls_at_120 is None and self.clock.t - start >= 120:
+                catalog_calls_at_120 = len([c for c in self.rp.calls if c[1] == "/v2/catalog/gpus"])
+            self.assertLess(self.clock.t - start, D.PLACEMENT_GIVEUP_S + D.DISPATCH_INTERVAL_S)
+        self.assertGreaterEqual(catalog_calls_at_120, 4, "the catalogs are re-asked at least every 60 s")
+        self.assertGreater(len(self.db.calls("claim_training_attempt")), claims)
+        r = self.db.row(row["id"])
+        self.assertEqual((r["status"], r["error_message"]), ("failed", T.S18))
+        self.assertGreaterEqual(self.clock.t - start, D.PLACEMENT_GIVEUP_S)
+        self.assertEqual(self.modal.spawned, [])
+        self.assertEqual(self.rp.creates(), [])
+
+    async def _reset_world(self):
+        D.reset_state_for_tests()
+        D.STATE.hf_check = True
+        D.STATE.last_failed_round_at = self.clock.t - 10_000
+        self.rp.calls.clear()
+        self.rp.create_answers = []
+        self.rp.probe_status = 200
+        for t in ("trainings", "training_attempts", "training_checkpoints"):
+            self.db.tables[t].clear()
+        self.db.rpcs.clear()
+
+    async def test_runpod_unusable_marks_without_a_claim_and_ends_with_s18(self):
+        cases = ("probe_403", "max_pods", "no_key_legacy", "persisting_402")
+        for case in cases:
+            with self.subTest(case=case):
+                await self._reset_world()
+                s = self.s
+                self.stock()
+                if case == "probe_403":
+                    self.rp.probe_status = 403
+                    self.assertIs(await D.runpod_probe_tick(s), False)
+                elif case == "max_pods":
+                    D.STATE.pod_count = s.max_runpod_pods
+                elif case == "no_key_legacy":
+                    s = settings(TRAINING_DISPATCH="legacy", RUNPOD_API_KEY=None)
+                else:
+                    self.rp.create_answers = [(402, None, None)] * 40
+                row = self.queued()
+                start = self.clock.t
+                with self.assertLogs("app.services.training_dispatch", level="INFO") as logs:
+                    await D.dispatch_tick(s)
+                    if case == "persisting_402":
+                        self.assertEqual(len(self.db.calls("claim_training_attempt")), 1)
+                        self.assertEqual(len(self.rp.creates()), 1)
+                        self.assertEqual(len(self.db.calls("release_training_attempt")), 1)
+                        for _ in range(5):  # the 60 s back-off: no claim at all
+                            self.clock.advance(D.DISPATCH_INTERVAL_S)
+                            await D.dispatch_tick(s)
+                        self.assertEqual(len(self.db.calls("claim_training_attempt")), 1)
+                    while self.db.row(row["id"])["status"] == "queued":
+                        self.clock.advance(D.DISPATCH_INTERVAL_S)
+                        await D.dispatch_tick(s)
+                        self.assertLess(self.clock.t - start, D.PLACEMENT_GIVEUP_S + D.DISPATCH_INTERVAL_S)
+                r = self.db.row(row["id"])
+                self.assertEqual((r["status"], r["error_message"]), ("failed", T.S18))
+                self.assertGreaterEqual(self.clock.t - start, D.PLACEMENT_GIVEUP_S)
+                self.assertEqual(self.modal.spawned, [])
+                if case == "persisting_402":
+                    creates = len(self.rp.creates())
+                    self.assertLessEqual(creates, 1 + D.PLACEMENT_GIVEUP_S // 60 + 1)
+                    warnings = [m for m in logs.output if m.startswith("WARNING") and "402" in m]
+                    self.assertEqual(len(warnings), 40 - len(self.rp.create_answers))
+                    self.assertEqual(len(warnings), creates)
+                else:
+                    self.assertEqual(self.db.calls("claim_training_attempt"), [])
+                    self.assertEqual(self.rp.creates(), [])
+                    self.assertIsNotNone(r["unplaced_since"])
+
+    async def test_an_unusable_runpod_logs_nothing_per_tick(self):
+        self.stock()
+        self.rp.probe_status = 403
+        await D.runpod_probe_tick()
+        self.queued()
+        with self.assertNoLogs("app.services.training_dispatch", level="WARNING"):
+            for _ in range(30):
+                await D.dispatch_tick()
+                self.clock.advance(D.DISPATCH_INTERVAL_S)
+
     async def test_secure_dcs_are_cut_to_the_gdpr_list(self):
-        self.s = settings(RUNPOD_LADDER='[{"rung":"runpod_secure","gpus":[{"id":"NVIDIA RTX A5000","min_vcpu":8}]},'
-                                        '{"rung":"modal"}]')
+        self.s = settings(RUNPOD_LADDER='[{"rung":"runpod_secure","gpus":[{"id":"NVIDIA RTX A5000","min_vcpu":8}]}]')
         D.SETTINGS = self.s
         self.stock("SECURE", dcs=("EU-RO-1", "EU-CZ-1", "US-KS-2"))
         self.queued()
@@ -254,51 +427,6 @@ class DispatcherPlacement(Base):
             await D.dispatch_tick(self.s)
         (create,) = self.rp.creates()
         self.assertEqual(create[3]["dataCenterIds"], ["EU-RO-1"])
-
-    async def test_nothing_placed_releases_and_costs_no_attempt(self):
-        row = self.queued()  # no stock anywhere
-        out = await D.dispatch_tick()
-        self.assertEqual(out["released"], 1)
-        r = self.db.row(row["id"])
-        self.assertEqual((r["current_attempt"], r["worker_token"]), (0, None))
-        self.assertIsNotNone(r["unplaced_since"])
-        self.assertEqual(self.db.tables["training_attempts"], [])
-        self.assertEqual(self.modal.spawned, [], "RunPod is usable: Modal waits RUNPOD_GIVEUP_S")
-
-    async def test_modal_after_two_minutes_of_runpod_retries(self):
-        row = self.queued()
-        await D.dispatch_tick()
-        self.clock.advance(60)
-        await D.dispatch_tick()
-        self.assertEqual(self.modal.spawned, [])
-        self.clock.advance(61)
-        await D.dispatch_tick()
-        self.assertEqual(len(self.modal.spawned), 1)
-        self.assertEqual(self.db.attempt(row["id"], 1)["backend"], "modal")
-        self.assertIsNone(self.db.row(row["id"])["unplaced_since"])  # attach cleared it
-
-    async def test_s18_after_thirty_minutes_unplaced(self):
-        row = self.queued()
-        self.modal.spawn_raises = RuntimeError("no modal either")
-        await D.dispatch_tick()
-        self.clock.advance(D.PLACEMENT_GIVEUP_S)
-        await D.dispatch_tick()
-        r = self.db.row(row["id"])
-        self.assertEqual((r["status"], r["error_message"]), ("failed", T.S18))
-
-    async def test_the_modal_call_is_the_frozen_contract(self):
-        from app.services import modal_client
-
-        self.s = settings(RUNPOD_LADDER='[{"rung":"modal"}]')
-        row = self.queued()
-        await D.dispatch_tick(self.s)
-        (kw,) = self.modal.spawned
-        self.assertEqual(tuple(kw), ("training_id", "attempt", "worker_token", "api_url", "supabase_url",
-                                     "supabase_anon_key"))
-        self.assertEqual(kw["api_url"], "https://api.test")
-        self.assertEqual(kw["supabase_url"], "https://sb.test")
-        self.assertEqual(kw["supabase_anon_key"], "anon-key")
-        self.assertEqual(kw["worker_token"], self.db.row(row["id"])["worker_token"])
 
     def test_the_real_modal_client_spawns_exactly_those_keywords(self):
         import ast
@@ -313,14 +441,6 @@ class DispatcherPlacement(Base):
                       and getattr(n.targets[0], "id", "") == "MANAGED_SPAWN_KWARGS")
         self.assertEqual(ast.literal_eval(assign.value), ("training_id", "attempt", "worker_token", "api_url",
                                                           "supabase_url", "supabase_anon_key"))
-
-    async def test_a_modal_spawn_failure_releases(self):
-        self.s = settings(RUNPOD_LADDER='[{"rung":"modal"}]')
-        self.modal.spawn_raises = RuntimeError("app not deployed")
-        row = self.queued()
-        out = await D.dispatch_tick(self.s)
-        self.assertEqual(out["released"], 1)
-        self.assertEqual(self.db.row(row["id"])["current_attempt"], 0)
 
     async def test_attach_conflict_deletes_the_pod(self):
         self.stock()
@@ -339,13 +459,6 @@ class DispatcherPlacement(Base):
         self.db.failures["rpc:attach_training_attempt"] = 1
         await D.dispatch_tick()
         self.assertEqual(len(self.rp.deletes()), 1)
-
-    async def test_modal_attach_conflict_cancels_the_call(self):
-        self.s = settings(RUNPOD_LADDER='[{"rung":"modal"}]')
-        self.queued()
-        self.db._rpc_attach_training_attempt = lambda **kw: (_ for _ in ()).throw(PgError("P0049"))
-        await D.dispatch_tick(self.s)
-        self.assertEqual(self.modal.canceled, ["fc-1"])
 
     async def test_two_instances_claim_one_row_once(self):
         self.stock()
@@ -409,12 +522,98 @@ class DispatcherPlacement(Base):
                           self.db.row(running["id"])["train_seconds_used"]), (300, 600))
 
 
+
+class DispatcherPlacementModalRung(Base):
+    """MANAGED_MODAL_RUNG=1 (owner E29): today's ladder and attempt-4 rule, byte for byte."""
+
+    env = {"MANAGED_MODAL_RUNG": "1"}
+
+    async def test_attempt_four_goes_to_modal_only(self):
+        self.stock()
+        row = self.queued(current_attempt=3)
+        for n in (1, 2, 3):
+            self.db.add_attempt(row["id"], n, state="lost", backend="runpod_secure")
+        await D.dispatch_tick()
+        self.assertEqual(self.rp.creates(), [])
+        self.assertEqual(len(self.modal.spawned), 1)
+        self.assertEqual(self.db.attempt(row["id"], 4)["backend"], "modal")
+
+    async def test_nothing_placed_releases_and_costs_no_attempt(self):
+        row = self.queued()  # no stock anywhere
+        out = await D.dispatch_tick()
+        self.assertEqual(out["released"], 1)
+        r = self.db.row(row["id"])
+        self.assertEqual((r["current_attempt"], r["worker_token"]), (0, None))
+        self.assertIsNotNone(r["unplaced_since"])
+        self.assertEqual(self.db.tables["training_attempts"], [])
+        self.assertEqual(self.modal.spawned, [], "RunPod is usable: Modal waits RUNPOD_GIVEUP_S")
+
+    async def test_modal_after_two_minutes_of_runpod_retries(self):
+        row = self.queued()
+        await D.dispatch_tick()
+        self.clock.advance(60)
+        await D.dispatch_tick()
+        self.assertEqual(self.modal.spawned, [])
+        self.clock.advance(61)
+        await D.dispatch_tick()
+        self.assertEqual(len(self.modal.spawned), 1)
+        self.assertEqual(self.db.attempt(row["id"], 1)["backend"], "modal")
+        self.assertIsNone(self.db.row(row["id"])["unplaced_since"])  # attach cleared it
+
+    async def test_s18_after_thirty_minutes_unplaced(self):
+        row = self.queued()
+        self.modal.spawn_raises = RuntimeError("no modal either")
+        await D.dispatch_tick()
+        self.clock.advance(D.PLACEMENT_GIVEUP_S)
+        await D.dispatch_tick()
+        r = self.db.row(row["id"])
+        self.assertEqual((r["status"], r["error_message"]), ("failed", T.S18))
+
+    async def test_the_modal_call_is_the_frozen_contract(self):
+        from app.services import modal_client
+
+        self.s = settings(RUNPOD_LADDER='[{"rung":"modal"}]', MANAGED_MODAL_RUNG="1")
+        row = self.queued()
+        await D.dispatch_tick(self.s)
+        (kw,) = self.modal.spawned
+        self.assertEqual(tuple(kw), ("training_id", "attempt", "worker_token", "api_url", "supabase_url",
+                                     "supabase_anon_key"))
+        self.assertEqual(kw["api_url"], "https://api.test")
+        self.assertEqual(kw["supabase_url"], "https://sb.test")
+        self.assertEqual(kw["supabase_anon_key"], "anon-key")
+        self.assertEqual(kw["worker_token"], self.db.row(row["id"])["worker_token"])
+
+    async def test_a_modal_spawn_failure_releases(self):
+        self.s = settings(RUNPOD_LADDER='[{"rung":"modal"}]', MANAGED_MODAL_RUNG="1")
+        self.modal.spawn_raises = RuntimeError("app not deployed")
+        row = self.queued()
+        out = await D.dispatch_tick(self.s)
+        self.assertEqual(out["released"], 1)
+        self.assertEqual(self.db.row(row["id"])["current_attempt"], 0)
+
+    async def test_modal_attach_conflict_cancels_the_call(self):
+        self.s = settings(RUNPOD_LADDER='[{"rung":"modal"}]', MANAGED_MODAL_RUNG="1")
+        self.queued()
+        self.db._rpc_attach_training_attempt = lambda **kw: (_ for _ in ()).throw(PgError("P0049"))
+        await D.dispatch_tick(self.s)
+        self.assertEqual(self.modal.canceled, ["fc-1"])
+
+
 class DispatcherBudgets(Base):
     async def test_the_attempt_cap(self):
         row = self.queued(current_attempt=4)
         self.db.add_attempt(row["id"], 4, state="lost", backend="modal")
         await D.dispatch_tick()
         self.assertEqual(self.db.row(row["id"])["error_message"], T.S4)
+
+    async def test_a_lost_fourth_runpod_attempt_ends_with_s4(self):
+        self.stock()
+        row = self.queued(current_attempt=4)
+        self.db.add_attempt(row["id"], 4, state="lost", backend="runpod_secure")
+        await D.dispatch_tick()
+        r = self.db.row(row["id"])
+        self.assertEqual((r["status"], r["error_message"]), ("failed", T.S4))
+        self.assertEqual(self.rp.creates(), [])
 
     async def test_the_training_time_cap_uses_the_setting(self):
         self.s = settings(MANAGED_ACT_CAP_S="21600")
@@ -497,7 +696,7 @@ class RunpodErrorTable(Base):
     async def test_every_candidate_400_logs_error_with_the_detail(self):
         self.rp.create_answers = [(400, {"detail": "imageRef ghcr.io/x@sha256:00 unresolvable"}, None)] * 2
         self.s = settings(RUNPOD_LADDER='[{"rung":"runpod_community","gpus":[{"id":"NVIDIA RTX A5000","min_vcpu":8},'
-                                        '{"id":"NVIDIA GeForce RTX 3080","min_vcpu":8}]},{"rung":"modal"}]')
+                                        '{"id":"NVIDIA GeForce RTX 3080","min_vcpu":8}]}]')
         self.queued()
         with self.assertLogs("app.services.training_dispatch", level="ERROR") as logs:
             await D.dispatch_tick(self.s)
@@ -506,7 +705,7 @@ class RunpodErrorTable(Base):
     async def test_every_candidate_403_logs_error_once_per_process(self):
         self.rp.create_answers = [(403, None, None)] * 4
         self.s = settings(RUNPOD_LADDER='[{"rung":"runpod_community","gpus":[{"id":"NVIDIA RTX A5000","min_vcpu":8},'
-                                        '{"id":"NVIDIA GeForce RTX 3080","min_vcpu":8}]},{"rung":"modal"}]')
+                                        '{"id":"NVIDIA GeForce RTX 3080","min_vcpu":8}]}]')
         self.queued()
         with self.assertLogs("app.services.training_dispatch", level="ERROR") as logs:
             await D.dispatch_tick(self.s)
@@ -517,6 +716,10 @@ class RunpodErrorTable(Base):
         self.assertFalse(any("pods:write" in m for m in logs2.output))
 
     async def test_402_stops_runpod_for_sixty_seconds(self):
+        # Under MANAGED_MODAL_RUNG=1 (the Modal fall-through inside the back-off); the
+        # RunPod-only 402 case is test_runpod_unusable_marks_without_a_claim_and_ends_with_s18.
+        self.s = settings(MANAGED_MODAL_RUNG="1")
+        D.SETTINGS = self.s
         self.rp.create_answers = [(402, None, None)]
         row = self.queued()
         await D.dispatch_tick()
@@ -815,6 +1018,24 @@ class SweepLosses(Base):
         await D.sweep_tick()
         self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "modal_ended")
         self.assertIn("fc-1", self.modal.canceled)
+
+    async def test_an_in_flight_modal_attempt_still_ends_and_requeues_onto_runpod(self):
+        # Switch off: a Modal attempt placed before the flip is still judged, cancelled and requeued.
+        row, _ = self._running("modal")
+        self.modal.status["fc-1"] = "FAILED"
+        await D.sweep_tick()
+        a = self.db.attempt(row["id"], 1)
+        self.assertEqual((a["state"], a["end_reason"]), ("lost", "modal_ended"))
+        self.assertEqual(self.db.row(row["id"])["status_note"], T.S2)
+        self.assertEqual(self.modal.canceled, ["fc-1"])
+        for _ in range(18):  # 3 min without stock: never Modal
+            await D.dispatch_tick()
+            self.clock.advance(D.DISPATCH_INTERVAL_S)
+        self.assertEqual(self.modal.spawned, [])
+        self.stock()
+        await D.dispatch_tick()
+        self.assertEqual(self.db.attempt(row["id"], 2)["backend"], "runpod_community")
+        self.assertEqual(self.modal.spawned, [])
 
     async def test_a_runpod_list_failure_judges_no_pod(self):
         row, _ = self._running()
@@ -1145,6 +1366,31 @@ class Helpers(unittest.TestCase):
         self.assertEqual(D.budget_for(row, {"first_heartbeat_at": None}, now, s), (14400 - 3600, "cap"))
         old = {"train_seconds_used": 0, "requested_at": Clock(now - 40000).iso()}
         self.assertEqual(D.budget_for(old, {}, now, s), (43200 - 40000, "wall"))
+
+    def test_rungs_for_table(self):
+        now = 1_800_000_000.0
+        table = (  # (modal_rung, n_next, lost_community, runpod_usable, unplaced_age_s) → rungs
+            ((False, 4, 0, True, None), ["runpod_community", "runpod_secure"]),
+            ((False, 4, 2, True, None), ["runpod_secure"]),
+            ((False, 2, 0, False, 500), []),
+            ((True, 4, 0, True, None), ["modal"]),
+            ((True, 1, 0, True, None), ["runpod_community", "runpod_secure"]),
+            ((True, 1, 0, True, 200), ["runpod_community", "runpod_secure", "modal"]),
+            ((True, 1, 0, False, None), ["modal"]),
+        )
+        try:
+            for (modal_rung, n_next, lost, usable, age), want in table:
+                with self.subTest(modal_rung=modal_rung, n_next=n_next, lost=lost, usable=usable, age=age):
+                    D.reset_state_for_tests()
+                    if not usable:
+                        D.STATE.runpod_probe = False
+                    s = settings(MANAGED_MODAL_RUNG="1" if modal_rung else "0")
+                    row = {"current_attempt": n_next - 1,
+                           "unplaced_since": Clock(now - age).iso() if age is not None else None}
+                    attempts = [{"backend": "runpod_community", "state": "lost"} for _ in range(lost)]
+                    self.assertEqual(D.rungs_for(row, attempts, now, D._Tick(), s), want)
+        finally:
+            D.reset_state_for_tests()
 
     def test_s1_formats_the_step(self):
         self.assertEqual(T.s1(12500), T.S1.format(step="12.500"))

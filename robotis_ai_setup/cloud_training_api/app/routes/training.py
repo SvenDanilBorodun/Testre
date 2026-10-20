@@ -186,6 +186,17 @@ class TrainingJob(BaseModel):
     # ausgefallen – das Training wird ab Schritt 2.500 … fortgesetzt." (S1–S3).
     status_note: str | None = None
     managed: bool = False
+    # 050: a capped/wall-capped training that the student may continue (owner E32–E37).
+    capped_step: int | None = None
+    continuable_until: str | None = None
+    continued_from: int | None = None
+    # Server-computed: whether the caller started this training (owner E46; only the
+    # starter sees „Fortsetzen"). user_id itself is never exposed.
+    is_mine: bool | None = None
+
+
+class ContinueTrainingRequest(BaseModel):
+    training_id: int
 
 
 class StartTrainingResponse(BaseModel):
@@ -420,6 +431,9 @@ def _find_recent_duplicate(
         .eq("model_type", model_type)
         .gte("requested_at", window_start)
         .not_.in_("status", ["failed", "canceled"])
+        # 050/n1: a continuation child shares its parent's dataset/model/params, so it
+        # must never be returned as the duplicate of a fresh /trainings/start.
+        .is_("continued_from", "null")
         .order("requested_at", desc=True)
         .limit(10)
     )
@@ -825,6 +839,70 @@ async def cancel_training(req: CancelTrainingRequest, user=Depends(get_current_u
     return {"status": "cancel_requested", "training_id": req.training_id}
 
 
+def _continuation_dataset_check(dataset_name: str, revision: str):
+    """BLOCKING preflight at the parent's pinned revision (E17: never re-resolve the tag).
+    Raises dataset_preflight.DatasetRefused (→ 400) or anything else (→ 502)."""
+    return dataset_preflight.preflight_dataset(dataset_name, False, "act", revision=revision)
+
+
+@router.post("/continue", response_model=StartTrainingResponse)
+async def continue_training(req: ContinueTrainingRequest, user=Depends(get_current_user)):
+    """Continue a capped/wall-capped training toward its original step target (owner
+    E32–E37). Owner-only (E46): a second credit, a managed child resuming from the
+    7-day kept copy, publishing into the same HF repo."""
+    supabase = get_supabase()
+    user_id = str(user.id)
+    logger.info("POST /trainings/continue user=%s training_id=%s", user_id, req.training_id)
+    if not training_dispatch.SETTINGS.managed:
+        raise HTTPException(status_code=409, detail=texts.S26)
+    rows = supabase.table("trainings").select("*").eq("id", req.training_id).execute().data or []
+    parent = rows[0] if rows else None
+    if parent is None or parent.get("user_id") != user_id:  # never 403 (Rule §4)
+        raise HTTPException(status_code=404, detail=texts.TRAINING_NOT_FOUND_DE)
+    total = training_dispatch.total_steps_of(parent)
+    capped = parent.get("capped_step")
+    if (not parent.get("managed") or parent.get("status") != "succeeded"
+            or not isinstance(capped, int) or capped >= total or not parent.get("continuable_until")):
+        raise HTTPException(status_code=409, detail=texts.S26)
+    until = training_dispatch.ts(parent.get("continuable_until"))
+    if until is not None and until <= training_dispatch._now():
+        raise HTTPException(status_code=409, detail=texts.S24)
+    params = training_dispatch._params(parent)
+    revision = params.get("dataset_revision") or dataset_preflight.EXPECTED_CODEBASE_VERSION
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_continuation_dataset_check, parent["dataset_name"], revision), 60
+        )
+    except dataset_preflight.DatasetRefused as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("continuation dataset check transient error for %s: %s",
+                       parent["dataset_name"], type(e).__name__)
+        raise HTTPException(status_code=502, detail=texts.HF_UNREACHABLE_DE)
+    try:
+        data = supabase.rpc("start_continuation_safe", {
+            "p_user_id": user_id, "p_parent_id": req.training_id, "p_note": texts.s28(int(capped)),
+        }).execute().data
+    except Exception as e:
+        code = training_dispatch.pg_code(e)
+        if code == "P0002":
+            raise HTTPException(status_code=404, detail=texts.TRAINING_NOT_FOUND_DE)
+        if code == "P0052":
+            raise HTTPException(status_code=409, detail=texts.S26)
+        if code == "P0053":
+            raise HTTPException(status_code=409, detail=texts.S24)
+        if code == "P0054":
+            raise HTTPException(status_code=409, detail=texts.S25)
+        if code == "P0003":
+            raise HTTPException(status_code=403, detail="Keine Trainings-Credits mehr übrig.")
+        raise
+    info = (data or [{}])[0] if isinstance(data, list) else (data or {})
+    training_dispatch.kick()
+    return StartTrainingResponse(
+        training_id=int(info["o_training_id"]), model_name=parent["model_name"], status="queued",
+    )
+
+
 async def _complete_cancel(supabase, training_id: int, final: str, message):
     """complete_cancel_training; P0049 → answer the row's current status."""
     try:
@@ -873,6 +951,8 @@ async def list_trainings(user=Depends(get_current_user)):
     # serialize into N× Modal roundtrip latency.
     rows = result.data or []
     trainings = list(await asyncio.gather(*[_sync_modal_status(t) for t in rows])) if rows else []
+    for t in trainings:  # owner E46: only the starter sees „Fortsetzen"; user_id stays unexposed.
+        t["is_mine"] = t.get("user_id") == user_id
     return trainings
 
 
@@ -896,4 +976,5 @@ async def get_training(training_id: int, user=Depends(get_current_user)):
             raise HTTPException(status_code=404, detail="Training nicht gefunden.")
 
     training = await _sync_modal_status(row)
+    training["is_mine"] = training.get("user_id") == user_id
     return training

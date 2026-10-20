@@ -25,7 +25,10 @@ logger = logging.getLogger(__name__)
 PUT_TTL_S = 900
 GET_TTL_S = 3600
 DEFAULT_KEY_PREFIX = "train/"
+DEFAULT_KEEP_PREFIX = "keep/"
 STREAM_CHUNK = 1024 * 1024
+FALLBACK_PUT_TRIES = 3
+FALLBACK_PUT_DELAYS_S = (2, 4)
 
 _LOCK = threading.Lock()
 _CLIENT = None
@@ -39,8 +42,21 @@ class R2Missing(Exception):
     """The object does not exist (HEAD/GET answered 404 / NoSuchKey)."""
 
 
+class R2CopyUnsupported(Exception):
+    """CopyObject is not implemented by this endpoint (the caller streams instead)."""
+
+
 def key_prefix() -> str:
     return os.environ.get("R2_KEY_PREFIX") or DEFAULT_KEY_PREFIX
+
+
+def keep_prefix() -> str:
+    return os.environ.get("R2_KEEP_PREFIX") or DEFAULT_KEEP_PREFIX
+
+
+def keep_key(training_id: int, step: int, relpath: str) -> str:
+    """The kept continuable copy of one checkpoint file (owner E36)."""
+    return f"{keep_prefix()}t{int(training_id)}/s{int(step):07d}/{relpath}"
 
 
 def training_prefix(training_id: int) -> str:
@@ -126,6 +142,67 @@ def presign_get(key: str) -> str:
     return _client().generate_presigned_url(
         "get_object", Params={"Bucket": bucket(), "Key": key}, ExpiresIn=GET_TTL_S,
     )
+
+
+def copy_object(src_key: str, dst_key: str) -> None:
+    """Server-side S3 CopyObject src → dst within the bucket (the kept copy, owner E36).
+
+    A ``NotImplemented`` / HTTP 400 / 501 answer raises ``R2CopyUnsupported`` (the
+    caller falls back to a presigned PUT, §3 item 21); a missing source raises
+    ``R2Missing``; anything else propagates."""
+    try:
+        _client().copy_object(Bucket=bucket(), Key=dst_key,
+                              CopySource={"Bucket": bucket(), "Key": src_key})
+    except Exception as exc:  # botocore ClientError
+        if _is_missing(exc):
+            raise R2Missing(src_key) from None
+        resp = getattr(exc, "response", None)
+        if isinstance(resp, dict):
+            code = str((resp.get("Error") or {}).get("Code") or "")
+            status = (resp.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+            if code == "NotImplemented" or status in (400, 501):
+                raise R2CopyUnsupported(f"{src_key} -> {dst_key}") from None
+        raise
+
+
+def put_file_presigned(key: str, path: str) -> None:
+    """Upload a local file through a presigned PUT — exactly the protocol the workers
+    use (Content-MD5, no aws-chunked trailer; §3 item 21). Raises RuntimeError on a
+    403 or after FALLBACK_PUT_TRIES failures (the publish maps it to Transient)."""
+    import base64
+
+    size = os.path.getsize(path)
+    md5 = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(STREAM_CHUNK), b""):
+            md5.update(chunk)
+    md5_b64 = base64.b64encode(md5.digest()).decode("ascii")
+    url, headers = presign_put(key, size, md5_b64)
+
+    import httpx
+
+    def _chunks():
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(STREAM_CHUNK), b""):
+                yield chunk
+
+    timeout = httpx.Timeout(connect=10, read=600, write=600, pool=10)
+    with httpx.Client(follow_redirects=False) as client:
+        for attempt in range(FALLBACK_PUT_TRIES):
+            try:
+                resp = client.put(url, content=_chunks(), headers=dict(headers), timeout=timeout)
+                status = resp.status_code
+            except (httpx.HTTPError, OSError) as exc:
+                status = None
+                logger.warning("fallback PUT %s: %s", key, type(exc).__name__)
+            if status is not None and 200 <= status < 300:
+                return
+            if status == 403:
+                raise RuntimeError(f"fallback PUT {key} refused (403)")
+            if attempt < FALLBACK_PUT_TRIES - 1:
+                import time
+                time.sleep(FALLBACK_PUT_DELAYS_S[attempt])
+    raise RuntimeError(f"fallback PUT {key} failed after {FALLBACK_PUT_TRIES} tries")
 
 
 def _is_missing(exc) -> bool:

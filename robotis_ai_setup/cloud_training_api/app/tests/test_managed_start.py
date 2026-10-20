@@ -494,5 +494,144 @@ class LegacyReconcilers(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((n, seen), (1, [legacy["id"]]))
 
 
+class Continue(StartBase):
+    """POST /trainings/continue (owner E32–E37, E46): a second credit, a managed child."""
+
+    def _parent(self, **kw):
+        defaults = dict(user_id="u-1", status="succeeded", managed=True, capped_step=42500, total_steps=50000,
+                        model_name="EduBotics-Solutions/m-act-ds-abc", dataset_name="u/ds", dataset_fps=30.0,
+                        training_params={"steps": 50000, "save_freq": 2500, "dataset_revision": SHA},
+                        continuable_until=self.clock.iso(self.clock.t + D.KEEP_S))
+        defaults.update(kw)
+        p = self.db.add_training(**defaults)
+        if p["status"] == "succeeded" and p.get("capped_step") is not None:
+            self.db.add_kept(p["id"], 42500, manifest={"a": {"size": 1}},
+                             expires_at=self.clock.iso(self.clock.t + D.KEEP_S))
+        return p
+
+    async def cont(self, pid, user_id="u-1"):
+        return await route.continue_training(SimpleNamespace(training_id=pid), user=SimpleNamespace(id=user_id))
+
+    async def test_happy_path(self):
+        parent = self._parent()
+        resp = await self.cont(parent["id"])
+        child = self.db.row(resp.training_id)
+        self.assertEqual((child["managed"], child["status"], child["continued_from"]),
+                         (True, "queued", parent["id"]))
+        self.assertEqual((child["current_step"], child["capped_step"], child["current_attempt"]), (42500, None, 0))
+        self.assertEqual(child["status_note"], T.s28(42500))
+        self.assertEqual(child["training_params"], parent["training_params"])
+        self.assertEqual((child["model_name"], child["dataset_fps"]), (parent["model_name"], 30.0))
+        self.assertEqual(child["user_id"], "u-1")
+        self.assertEqual((resp.model_name, resp.status), (parent["model_name"], "queued"))
+        self.assertEqual(self.kicks, [1])
+        self.assertEqual(self.preflight_calls, [("u/ds", False, "act", SHA)])
+        self.assertEqual(self.resolve_calls, [], "the pinned revision is reused, never re-resolved (E17)")
+        self.assertEqual(self.db.row(parent["id"])["status"], "succeeded", "the parent is unchanged")
+
+    async def test_404_for_another_user_and_a_missing_id(self):
+        parent = self._parent(user_id="someone-else")
+        self.db.tables["trainings"][-1]["user_id"] = "someone-else"
+        with self.assertRaises(HTTPException) as ctx:
+            await self.cont(parent["id"])
+        self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (404, T.TRAINING_NOT_FOUND_DE))
+        with self.assertRaises(HTTPException) as ctx:
+            await self.cont(999999)
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(len(self.db.tables["trainings"]), 1, "no row created")
+
+    async def test_409_s26_for_a_non_continuable_parent(self):
+        for kw in ({"capped_step": None}, {"status": "failed"}, {"managed": False}):
+            with self.subTest(kw=kw):
+                p = self._parent(**kw)
+                with self.assertRaises(HTTPException) as ctx:
+                    await self.cont(p["id"])
+                self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (409, T.S26))
+
+    async def test_409_s26_under_legacy_dispatch(self):
+        p = self._parent()
+        with patch.object(D, "SETTINGS", settings(TRAINING_DISPATCH="legacy")):
+            with self.assertRaises(HTTPException) as ctx:
+                await self.cont(p["id"])
+        self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (409, T.S26))
+
+    async def test_409_s24_when_expired(self):
+        p = self._parent(continuable_until=self.clock.iso(self.clock.t - 1))
+        with self.assertRaises(HTTPException) as ctx:
+            await self.cont(p["id"])
+        self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (409, T.S24))
+
+    async def test_409_s24_from_the_database_p0053(self):
+        p = self._parent()
+        self.db._rpc_start_continuation_safe = lambda **kw: (_ for _ in ()).throw(PgError("P0053"))
+        with self.assertRaises(HTTPException) as ctx:
+            await self.cont(p["id"])
+        self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (409, T.S24))
+
+    async def test_409_s25_while_a_child_is_queued_then_ok_after_it_failed(self):
+        p = self._parent()
+        await self.cont(p["id"])
+        with self.assertRaises(HTTPException) as ctx:
+            await self.cont(p["id"])
+        self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (409, T.S25))
+        for c in self.db.tables["trainings"]:
+            if c.get("continued_from") == p["id"]:
+                c["status"] = "failed"
+        resp = await self.cont(p["id"])
+        self.assertTrue(resp.training_id)
+
+    async def test_403_at_zero_credits(self):
+        p = self._parent()
+        self.db.credits["u-1"] = 1  # the parent already counts as 1 → none left
+        with self.assertRaises(HTTPException) as ctx:
+            await self.cont(p["id"])
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    async def test_a_workgroup_member_spends_the_pool(self):
+        self.db.workgroup_of["u-1"] = "g1"
+        self.db.pools["g1"] = 2
+        p = self._parent(workgroup_id="g1")
+        resp = await self.cont(p["id"])
+        self.assertEqual(self.db.row(resp.training_id)["workgroup_id"], "g1")
+
+    async def test_a_teacher_may_continue_their_own(self):
+        # no role rule (review n5): ownership is the gate, not the role.
+        p = self._parent()
+        resp = await self.cont(p["id"])
+        self.assertTrue(resp.training_id)
+
+    async def test_400_and_502_on_the_dataset_check(self):
+        p = self._parent()
+        self.preflight_result = dataset_preflight.DatasetRefused(T.S20)
+        with self.assertRaises(HTTPException) as ctx:
+            await self.cont(p["id"])
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.preflight_result = RuntimeError("hub down")
+        with self.assertRaises(HTTPException) as ctx:
+            await self.cont(p["id"])
+        self.assertEqual((ctx.exception.status_code, ctx.exception.detail), (502, T.HF_UNREACHABLE_DE))
+        self.assertFalse(any(c.get("continued_from") == p["id"] for c in self.db.tables["trainings"]))
+
+    async def test_list_and_get_carry_is_mine(self):
+        parent = self._parent()
+        with patch.object(route, "resolve_visible_workgroup_ids", lambda uid: []):
+            mine = await route.list_trainings(user=SimpleNamespace(id="u-1"))
+            self.assertTrue(all(t["is_mine"] for t in mine if t["id"] == parent["id"]))
+            got = await route.get_training(parent["id"], user=SimpleNamespace(id="u-1"))
+            self.assertTrue(got["is_mine"])
+        # a groupmate reads the same row (visible via the group) with is_mine False.
+        self.db.tables["trainings"][-1]["workgroup_id"] = "g1"
+        with patch.object(route, "resolve_visible_workgroup_ids", lambda uid: ["g1"]):
+            got = await route.get_training(parent["id"], user=SimpleNamespace(id="other"))
+        self.assertFalse(got["is_mine"])
+
+    async def test_a_fresh_start_is_not_deduped_onto_a_child(self):
+        parent = self._parent()
+        await self.cont(parent["id"])  # a child with the same dataset/model/params exists
+        resp = await self.start(request(steps=50000, save_freq=2500, dataset_revision=SHA))
+        new = self.db.row(resp.training_id)
+        self.assertIsNone(new["continued_from"], "the fresh start is its own row, not the child")
+
+
 if __name__ == "__main__":
     unittest.main()

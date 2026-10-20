@@ -17,7 +17,8 @@ or a managed row is non-terminal, §3.8 / FR-3; off with
 
 * dispatcher (``DISPATCH_INTERVAL_S`` and on ``kick()``): §4.2;
 * sweep (``SWEEP_INTERVAL_S``): losses, caps, the placement guard, publish
-  recovery, mirrors, the janitor, failed-log uploads (§4.3, TR-2/TR-3);
+  recovery, mirrors, the janitor (with the kept-checkpoint expiry), failed-log
+  uploads (§4.3, TR-2/TR-3);
 * reaper (``REAPER_INTERVAL_S``): every pod we created that is not the attached
   current attempt of an active row is deleted (§4.3, SR-8);
 * the HF write check and the RunPod boot probe (every 10 min until good).
@@ -55,6 +56,15 @@ BOOT_ID = uuid.uuid4().hex
 # ---------------------------------------------------------------------------
 SAVE_FREQ = 2500
 MIRROR_EVERY = 10000
+# Owner E36: a kept continuable checkpoint lives 7 days; the janitor deletes it
+# this long after expiry (any child created before expiry has capped or failed by
+# then), and the bucket's keep/ rule (9 days) is the floor.
+KEEP_S = 7 * 86400
+# The two cap end_reasons live ONLY here; every other site reads the names (review m2).
+END_CAPPED = "capped"
+END_WALL_CAPPED = "wall_capped"
+CAP_END_REASONS = (END_CAPPED, END_WALL_CAPPED)
+PUBLISH_END_REASONS = ("succeeded",) + CAP_END_REASONS
 # An ACT start under TRAINING_DISPATCH=legacy ignores the client's num_workers and
 # save_freq too (owner E3: the form no longer shows them for ACT, yet still sends
 # whatever the browser stored): today's fresh-form defaults
@@ -65,7 +75,7 @@ LEGACY_ACT_SAVE_FREQ = 10000
 ACT_BATCH = 8
 MAX_ATTEMPTS = 4
 COMMUNITY_LOSS_LIMIT = 2
-MANAGED_ACT_CAP_S = 14400
+MANAGED_ACT_CAP_S = 12600  # 3.5 h of training time per credit (owner E32; still a setting)
 WALL_CAP_S = 43200
 HEARTBEAT_INTERVAL_S = 15
 HEARTBEAT_LOST_S = 300
@@ -95,6 +105,9 @@ MIRROR_LEASE_S = 900
 HF_CHECK_TIMEOUT_S = 10
 FINAL_UPLOAD_WAIT_S = 1080
 WATCHDOG_GRACE_S = 1200
+# The janitor deletes a kept copy only this long after its expiry (§6.4 G): a child
+# created before expiry has hit its own 12 h wall + grace by then.
+KEEP_DELETE_GRACE_S = WALL_CAP_S + WATCHDOG_GRACE_S
 PUT_TTL_S = 900
 GET_TTL_S = 3600
 MIN_FREE_DISK_B = 30 * 1024**3
@@ -151,8 +164,10 @@ TERMINAL_STATUSES = ("succeeded", "failed", "canceled")
 TRAINING_COLUMNS = (
     "id, user_id, status, managed, current_attempt, train_seconds_used, status_note, step_advanced_at, "
     "dataset_fps, unplaced_since, requested_at, last_progress_at, total_steps, training_params, "
-    "model_name, dataset_name, terminated_at, log_url, cancel_attempts, current_step"
+    "model_name, dataset_name, terminated_at, log_url, cancel_attempts, current_step, "
+    "capped_step, continuable_until, continued_from"
 )
+KEPT_COLUMNS = "training_id, step, manifest, state, kept_at, expires_at, refused_reason, bad_attempts"
 ATTEMPT_COLUMNS = (
     "training_id, attempt_no, backend, cloud_ref, gpu_type, data_center, cuda_version, cost_per_hr, state, "
     "created_at, started_at, first_heartbeat_at, ended_at, end_reason, resume_from_step, resume_from_attempt, "
@@ -326,6 +341,13 @@ def load_settings(env=None) -> Settings:
     worker_url = (env.get("TRAINING_WORKER_API_URL") or "").strip().rstrip("/")
     if worker_url and not worker_url.startswith("https://"):
         raise SettingsError("TRAINING_WORKER_API_URL must be an https URL")
+    # The kept continuable copies (keep/) must never be covered by the train/ 3-day
+    # rule: both prefixes end in / and neither is a prefix of the other (§6.2).
+    key_prefix = (env.get("R2_KEY_PREFIX") or "train/").strip()
+    keep_prefix = (env.get("R2_KEEP_PREFIX") or "keep/").strip()
+    if (not key_prefix.endswith("/") or not keep_prefix.endswith("/")
+            or key_prefix.startswith(keep_prefix) or keep_prefix.startswith(key_prefix)):
+        raise SettingsError("R2_KEEP_PREFIX must end with / and must not overlap R2_KEY_PREFIX")
     settings = Settings(
         dispatch=dispatch,
         worker_api_url=worker_url,
@@ -494,6 +516,16 @@ def final_ready(checkpoints, total_steps: int):
     return None
 
 
+def newest_ready_checkpoint(checkpoints, total_steps: int):
+    """The ready checkpoint with the highest (step, attempt_no) below the total, or None
+    (routes/training_worker.py::_resume_point is this function)."""
+    candidates = [c for c in checkpoints
+                  if c.get("state") == "ready" and int(c.get("step") or 0) < total_steps]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: (int(c.get("step") or 0), int(c.get("attempt_no") or 0)))
+
+
 def sanitize_log_text(text, limit: int = 500) -> str:
     if not isinstance(text, str):
         return ""
@@ -580,13 +612,14 @@ def budget_for(row, attempt, now: float, settings: Settings | None = None) -> tu
     return int(cap_left), "cap"
 
 
-def time_cap_sentence(row, attempt, now: float, settings: Settings | None = None) -> str:
-    """`finish {failed, time_cap}` → S6 when the wall term bound at `start`, else S5 (TR-2 n3)."""
+def time_cap_bound(row, attempt, now: float, settings: Settings | None = None) -> str:
+    """`finish {failed, time_cap}` → the bound that limited this attempt: 'wall' when the
+    wall term bound at `start`, else 'cap' (owner E44; TR-2 n3)."""
     s = settings or SETTINGS
     bound = STATE.budget_bound.get((int(row["id"]), int(attempt["attempt_no"])))
     if bound is None:
         _, bound = budget_for(row, attempt, now, s)
-    return T.S6 if bound == "wall" else T.s5(s.cap_s)
+    return bound
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +659,15 @@ def read_attempt(training_id: int, attempt_no: int):
     rows = (
         _sb().table("training_attempts").select(ATTEMPT_COLUMNS)
         .eq("training_id", int(training_id)).eq("attempt_no", int(attempt_no)).execute()
+    ).data or []
+    return rows[0] if rows else None
+
+
+def read_kept(training_id: int):
+    """The kept continuable checkpoint of a parent (training_kept_checkpoints), or None."""
+    rows = (
+        _sb().table("training_kept_checkpoints").select(KEPT_COLUMNS)
+        .eq("training_id", int(training_id)).execute()
     ).data or []
     return rows[0] if rows else None
 
@@ -741,6 +783,12 @@ async def requeue_attempt(row, attempt, reason: str, now: float, checkpoints=Non
     if checkpoints is None:
         checkpoints = await asyncio.to_thread(read_checkpoints, [tid], ["ready"])
     resume = resume_step_from(checkpoints, total)
+    # E: a loss inside a continuation resumes at least from the kept step, so S1
+    # never names a lower step and current_step never falls below it.
+    if row.get("continued_from"):
+        kept = await asyncio.to_thread(read_kept, int(row["continued_from"]))
+        if kept and kept.get("state") == "kept":
+            resume = max(resume, int(kept.get("step") or 0))
     try:
         await arpc("requeue_training", {
             "p_training_id": tid, "p_attempt": int(attempt["attempt_no"]), "p_reason": reason,
@@ -800,6 +848,32 @@ async def on_loss(row, attempt, reason: str, now: float, checkpoints, *, skip_co
     else:
         await requeue_attempt(row, attempt, reason, now, checkpoints, skip_community_dc=skip_community_dc)
     await terminate_attempt(attempt)
+
+
+async def cap_attempt(row, attempt, now: float, checkpoints, *, bound: str) -> str:
+    """A cap (bound 'cap': training time; bound 'wall': the 12 h wall, owner E44) with a
+    ready checkpoint publishes; without one it fails the row (S5 / S6). Returns
+    'published' | 'failed' | 'conflict'. ``checkpoints`` = the row's ready checkpoints."""
+    total = total_steps_of(row)
+    if final_ready(checkpoints, total) is not None:          # the ready-final rule, as today
+        return "published" if await end_attempt_succeeded(row, attempt, now) else "conflict"
+    ck = newest_ready_checkpoint(checkpoints, total)
+    n = int(attempt["attempt_no"])
+    if ck is None:                                           # no checkpoint, no publish
+        msg = T.s5(SETTINGS.cap_s) if bound == "cap" else T.S6
+        return "failed" if await fail_training(row, n, msg) else "conflict"
+    try:
+        await arpc("cap_training_attempt", {
+            "p_training_id": int(row["id"]), "p_attempt": n, "p_step": int(ck["step"]),
+            "p_reason": END_CAPPED if bound == "cap" else END_WALL_CAPPED, "p_note": T.S22,
+            "p_train_seconds": 0 if attempt.get("state") in ("lost", "ended") else attempt_seconds(attempt, now)})
+    except RpcConflict:
+        logger.info("cap of training %s attempt %s lost a race", row["id"], n)
+        return "conflict"
+    from app.services import hf_publish
+
+    hf_publish.schedule_publish(int(row["id"]), n)
+    return "published"
 
 
 # ---------------------------------------------------------------------------
@@ -1142,24 +1216,31 @@ async def _try_modal(row, attempt_no: int, token: str, s: Settings) -> str:
     return "placed"
 
 
-async def _budget_finish(row, now: float, s: Settings) -> bool:
-    """§4.2 step 2. True when the row was finished (or someone else changed it)."""
+async def _budget_finish(row, attempt, now: float, s: Settings, checkpoints) -> bool:
+    """§4.2 step 2. True when the row was finished, capped or lost a race. S4 first and
+    S18 last stay fail + refund even with a ready checkpoint (owner E47); the training-time
+    cap and the 12 h wall between them publish the newest ready checkpoint (owner E33/E44)."""
     n = int(row.get("current_attempt") or 0)
-    msg = None
     if n >= MAX_ATTEMPTS:
-        msg = T.S4
-    elif int(row.get("train_seconds_used") or 0) >= s.cap_s - START_TIMEOUT_GRACE_S:
-        msg = T.s5(s.cap_s)
-    elif now - (ts(row.get("requested_at")) or now) >= WALL_CAP_S - START_TIMEOUT_GRACE_S:
-        msg = T.S6
-    else:
-        unplaced = ts(row.get("unplaced_since"))
-        if unplaced is not None and now - unplaced >= PLACEMENT_GIVEUP_S:
-            msg = T.S18
-    if msg is None:
-        return False
-    await fail_training(row, n, msg)
-    return True
+        await fail_training(row, n, T.S4)
+        return True
+    if int(row.get("train_seconds_used") or 0) >= s.cap_s - START_TIMEOUT_GRACE_S:
+        if n > 0 and attempt is not None:
+            await cap_attempt(row, attempt, now, checkpoints, bound="cap")
+        else:
+            await fail_training(row, n, T.s5(s.cap_s))
+        return True
+    if now - (ts(row.get("requested_at")) or now) >= WALL_CAP_S - START_TIMEOUT_GRACE_S:
+        if n > 0 and attempt is not None:
+            await cap_attempt(row, attempt, now, checkpoints, bound="wall")
+        else:
+            await fail_training(row, n, T.S6)
+        return True
+    unplaced = ts(row.get("unplaced_since"))
+    if unplaced is not None and now - unplaced >= PLACEMENT_GIVEUP_S:
+        await fail_training(row, n, T.S18)
+        return True
+    return False
 
 
 async def dispatch_tick(settings: Settings | None = None) -> dict:
@@ -1202,7 +1283,7 @@ async def dispatch_tick(settings: Settings | None = None) -> dict:
                 out["finished"] += 1
             continue
         # 2. Budgets (every tick, also while placement is blocked: FR-3, TR-4).
-        if await _budget_finish(row, now, s):
+        if await _budget_finish(row, current.get((tid, n)), now, s, ready.get(tid, [])):
             out["finished"] += 1
             continue
         if blocked:
@@ -1291,17 +1372,18 @@ async def _check_attempt(row, attempt, now: float, pods_by_id, pods_ok: bool, ch
         if await end_attempt_succeeded(row, attempt, now):
             await terminate_attempt(attempt)
         return
-    # Caps (with WATCHDOG_GRACE_S, TR-2).
+    # Caps (with WATCHDOG_GRACE_S, TR-2): training time (cap) or the 12 h wall (owner
+    # E44); either one publishes the newest ready checkpoint (else S5 / S6).
     if state in ("starting", "running"):
         used = int(row.get("train_seconds_used") or 0) + attempt_seconds(attempt, now)
-        msg = None
+        bound = None
         if used > s.cap_s + WATCHDOG_GRACE_S:
-            msg = T.s5(s.cap_s)
+            bound = "cap"
         elif now - (ts(row.get("requested_at")) or now) > WALL_CAP_S + WATCHDOG_GRACE_S:
-            msg = T.S6
-        if msg is not None:
+            bound = "wall"
+        if bound is not None:
             await terminate_attempt(attempt)
-            await fail_training(row, key[1], msg)
+            await cap_attempt(row, attempt, now, checkpoints, bound=bound)
             return
     if state == "placing":
         created = ts(attempt.get("created_at")) or now
@@ -1384,7 +1466,7 @@ async def sweep_tick(settings: Settings | None = None) -> dict:
             continue
         try:
             if row.get("status") == "running" and attempt.get("state") == "ended" \
-                    and attempt.get("end_reason") == "succeeded":
+                    and attempt.get("end_reason") in PUBLISH_END_REASONS:
                 await hf_publish.recover_publish(row, attempt, now)
                 continue
             if attempt.get("state") in ACTIVE_STATES:
@@ -1417,6 +1499,10 @@ def _checkpoint_keys(c) -> list:
 
 
 def mirror_claim_live(c, now: float) -> bool:
+    # A finished mirror holds no live claim (production N1): once mirrored_at is set,
+    # no writer owns the checkpoint, so retention and the janitor may delete it now.
+    if c.get("mirrored_at"):
+        return False
     claimed = ts(c.get("mirror_claimed_at"))
     return claimed is not None and now - claimed < MIRROR_LEASE_S
 
@@ -1463,11 +1549,65 @@ def apply_retention(training_id: int, now: float | None = None) -> int:
     return deleted
 
 
+def kept_expiry_tick(now: float) -> int:
+    """Owner E36 (§6.4 G): delete a `refused` kept copy at once, and a `kept` one
+    KEEP_DELETE_GRACE_S after expiry when no child is active. At most 100 rows per
+    round; a delete_keys failure leaves the state. Returns how many were deleted."""
+    from app.services import r2_client
+
+    rows = (
+        _sb().table("training_kept_checkpoints").select(KEPT_COLUMNS)
+        .in_("state", ["kept", "refused"]).limit(100).execute()
+    ).data or []
+    if not rows:
+        return 0
+    expired = [r for r in rows if r.get("state") == "kept"
+               and (ts(r.get("expires_at")) or 0) <= now - KEEP_DELETE_GRACE_S]
+    active_parents: set = set()
+    parent_ids = [int(r["training_id"]) for r in expired]
+    if parent_ids:
+        children = (
+            _sb().table("trainings").select("continued_from")
+            .in_("continued_from", parent_ids)
+            .in_("status", ["queued", "running", "cancel_requested"]).execute()
+        ).data or []
+        active_parents = {int(c["continued_from"]) for c in children if c.get("continued_from") is not None}
+    deleted = 0
+    for r in rows:
+        tid = int(r["training_id"])
+        prev = r.get("state")
+        if prev == "refused":
+            pass
+        elif r in expired and tid not in active_parents:
+            pass
+        else:
+            continue
+        manifest = r.get("manifest") if isinstance(r.get("manifest"), dict) else {}
+        keys = [r2_client.keep_key(tid, int(r["step"]), rel) for rel in manifest]
+        try:
+            if keys:
+                r2_client.delete_keys(keys)
+            (
+                _sb().table("training_kept_checkpoints").update({"state": "deleted"})
+                .eq("training_id", tid).eq("state", prev).execute()
+            )
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001 - leave the state; the next round retries
+            logger.warning("kept-copy delete failed for training %s: %s", tid, type(exc).__name__)
+    return deleted
+
+
 async def janitor_tick(now: float) -> None:
     """Terminal managed rows: delete every checkpoint not `deleted` (refused ones
     included) and the log keys; a live mirror claim waits; a failed row's log
-    is kept while it is still being uploaded (TR-3)."""
+    is kept while it is still being uploaded (TR-3). The kept-checkpoint expiry runs
+    FIRST (owner E36), in its own guard, before the no-terminal-row early return."""
     from app.services import hf_publish, r2_client
+
+    try:
+        await asyncio.to_thread(kept_expiry_tick, now)
+    except Exception as exc:  # noqa: BLE001 - never stop the janitor
+        logger.warning("kept-copy expiry failed: %s", type(exc).__name__)
 
     since = _iso(now - JANITOR_WINDOW_S)
 

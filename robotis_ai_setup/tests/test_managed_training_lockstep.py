@@ -141,6 +141,17 @@ SENTENCES = {
            "nicht zu dem, was der Roboter senden kann.",
     "S21": "Der Abbruch konnte nicht an den GPU-Server übermittelt werden. Das Trainingsguthaben wurde "
            "erstattet – bitte starte das Training neu.",
+    "S22": "Zeitlimit erreicht – der letzte Zwischenstand wird geprüft und veröffentlicht …",
+    "S23": "Nach {hours} Stunden bei Schritt {step} von {total} gestoppt – du kannst das Training fortsetzen.",
+    "S24": "Der gespeicherte Zwischenstand ist abgelaufen oder nicht mehr nutzbar – das Training kann nicht "
+           "mehr fortgesetzt werden. Bitte starte ein neues Training.",
+    "S25": "Dieses Training wird bereits fortgesetzt.",
+    "S26": "Dieses Training kann zurzeit nicht fortgesetzt werden.",
+    "S27": "Der gespeicherte Zwischenstand ist nicht mehr nutzbar. Das Trainingsguthaben wurde erstattet – "
+           "bitte starte das Training neu.",
+    "S28": "Fortsetzung ab Schritt {step} – ein GPU-Server wird dafür gesucht …",
+    "S29": "Das Zeitlimit von 12 Stunden seit dem Start wurde bei Schritt {step} von {total} erreicht – "
+           "du kannst das Training fortsetzen.",
 }
 # The two sentences with neither an umlaut nor a word of german_detail_lint's GERMAN_WORDS. The lint
 # itself classifies such a string as neither language and accepts it (ENGLISH is judged only on
@@ -973,7 +984,7 @@ class TheSentencesAreTheContract(unittest.TestCase):
     def test_every_sentence_is_the_spec_text(self):
         texts = _texts(self)
         numbered = {n for n in texts if re.fullmatch(r"S\d+", n)}
-        self.assertEqual(numbered, set(SENTENCES), "training_texts_de defines exactly S1 … S21")
+        self.assertEqual(numbered, set(SENTENCES), "training_texts_de defines exactly S1 … S29")
         for name, want in SENTENCES.items():
             self.assertEqual(texts[name], want, name)
 
@@ -1004,7 +1015,8 @@ class TheSentencesAreTheContract(unittest.TestCase):
         self.assertEqual(len(found), 1, "MyModels.js defines ERROR_MESSAGE_MAX_CHARS once, as a literal")
         limit = int(found[0])
         for name, text in SENTENCES.items():
-            widest = text.replace("{step}", "500.000").replace("{hours}", "999,5")
+            widest = (text.replace("{step}", "500.000").replace("{hours}", "999,5")
+                      .replace("{total}", "500.000"))
             self.assertNotIn("{", widest, name)
             self.assertLessEqual(len(widest), limit, f"{name} would be cut on the models card")
 

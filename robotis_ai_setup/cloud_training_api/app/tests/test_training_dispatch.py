@@ -103,6 +103,16 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("RUNPOD_API_KEY", settings(RUNPOD_LADDER='[{"rung":"modal"}]', MANAGED_MODAL_RUNG="1",
                                                     RUNPOD_API_KEY=None).missing)
 
+    def test_the_keep_prefix_must_not_overlap_the_key_prefix(self):
+        with self.assertRaises(D.SettingsError):
+            settings(R2_KEEP_PREFIX="train/x/")
+        with self.assertRaises(D.SettingsError):
+            settings(R2_KEEP_PREFIX="keep")  # must end with /
+        with self.assertRaises(D.SettingsError):
+            settings(R2_KEY_PREFIX="keep/")  # the default keep prefix would be a sub-prefix
+        self.assertEqual(settings(R2_KEEP_PREFIX="keep/").cap_s, D.MANAGED_ACT_CAP_S)
+        self.assertEqual(settings(R2_KEY_PREFIX="train/", R2_KEEP_PREFIX="kept/").cap_s, D.MANAGED_ACT_CAP_S)
+
     def test_the_cadence_lock(self):
         with self.assertRaises(D.SettingsError):
             settings(TRAINING_SAVE_FREQ="20")
@@ -757,7 +767,7 @@ class DispatcherBudgets(Base):
         msg = self.db.row(row["id"])["error_message"]
         self.assertEqual(msg, T.s5(21600))
         self.assertIn("6 Stunden", msg)
-        self.assertEqual(T.s5(14400), T.S5.format(hours="4"))
+        self.assertEqual(T.s5(D.MANAGED_ACT_CAP_S), T.S5.format(hours=T.hours_text(D.MANAGED_ACT_CAP_S)))
         self.assertEqual(T.hours_text(5400), "1,5")
 
     async def test_the_wall_cap(self):
@@ -779,7 +789,7 @@ class DispatcherBudgets(Base):
 
     async def test_budgets_run_while_placement_is_blocked(self):
         D.STATE.hf_check = False
-        row = self.queued(train_seconds_used=14400)
+        row = self.queued(train_seconds_used=D.MANAGED_ACT_CAP_S)
         await D.dispatch_tick()
         self.assertEqual(self.db.row(row["id"])["status"], "failed")
 
@@ -1015,7 +1025,8 @@ class SweepLosses(Base):
                          ("pod_gone", "queued", 2500))
         self.assertEqual(r["status_note"], T.s1(2500))
         self.assertIn("2.500", r["status_note"])
-        self.assertEqual(r["train_seconds_used"], 630)  # now − first_heartbeat_at
+        # E50: charged up to the checkpoint's created_at (30 s before the loss), not now.
+        self.assertEqual(r["train_seconds_used"], 600)
 
     async def test_a_requeue_keeps_the_loss_of_the_last_point_it_keeps(self):
         # V2-6: the requeue rolls the step back to 2500; the loss shown is 2000's, not 3000's.
@@ -1231,7 +1242,7 @@ class SweepLosses(Base):
         self.assertEqual(self.db.attempt(row["id"], 1)["state"], "running")
 
     async def test_the_training_time_cap_has_the_watchdog_grace(self):
-        row, a = self._running(train_seconds_used=14400 - 600)
+        row, a = self._running(train_seconds_used=D.MANAGED_ACT_CAP_S - 600)
         self.clock.advance(D.WATCHDOG_GRACE_S - 1)
         self.db.row(row["id"]).update(last_progress_at=self.clock.iso(), step_advanced_at=self.clock.iso())
         await D.sweep_tick()
@@ -1240,11 +1251,11 @@ class SweepLosses(Base):
         self.db.row(row["id"]).update(last_progress_at=self.clock.iso(), step_advanced_at=self.clock.iso())
         await D.sweep_tick()
         self.assertEqual((self.db.row(row["id"])["status"], self.db.row(row["id"])["error_message"]),
-                         ("failed", T.s5(14400)))
+                         ("failed", T.s5(D.MANAGED_ACT_CAP_S)))
         self.assertIn("pod1", self.rp.deletes())
 
     async def test_a_final_ready_after_the_cap_publishes_instead_of_s5(self):
-        row, a = self._running(train_seconds_used=14400)
+        row, a = self._running(train_seconds_used=D.MANAGED_ACT_CAP_S)
         self.clock.advance(600 + D.WATCHDOG_GRACE_S)
         self.db.add_checkpoint(row["id"], 1, 50000, state="ready", manifest={})
         await D.sweep_tick()
@@ -1386,7 +1397,8 @@ class Reaper(Base):
     async def test_an_attached_pod_past_its_age_is_deleted(self):
         row = self.db.add_training(status="running", current_attempt=1)
         self.db.add_attempt(row["id"], 1, state="running", backend="runpod_community", cloud_ref="p")
-        self.rp.add_pod(id="p", name="x", createdAt=self.clock.iso(self.clock.t - (14400 + 1200 + 1800) - 1))
+        self.rp.add_pod(id="p", name="x",
+                        createdAt=self.clock.iso(self.clock.t - (D.MANAGED_ACT_CAP_S + 1200 + 1800) - 1))
         await D.reaper_tick()
         self.assertEqual(self.rp.deletes(), ["p"])
 
@@ -1541,14 +1553,202 @@ class _Done:
         pass
 
 
+class CapPublish(Base):
+    """The training-time cap and the 12 h wall publish the newest ready checkpoint (owner E33/E44)."""
+
+    def _running(self, **kw):
+        row = self.db.add_training(status="running", current_attempt=1, worker_token="tok",
+                                   last_progress_at=self.clock.iso(), step_advanced_at=self.clock.iso(), **kw)
+        self.db.add_attempt(row["id"], 1, state="running", backend="runpod_secure", cloud_ref="pod1",
+                            first_heartbeat_at=self.clock.iso(self.clock.t - 600), allowed_dcs=["EU-RO-1"],
+                            data_center="EU-RO-1")
+        self.rp.add_pod(id="pod1", dataCenterId="EU-RO-1", cudaVersion="12.8", status="RUNNING")
+        return row
+
+    async def test_sweep_cap_with_a_ready_checkpoint_publishes(self):
+        row = self._running(train_seconds_used=D.MANAGED_ACT_CAP_S)
+        self.clock.advance(600 + D.WATCHDOG_GRACE_S)
+        self.db.add_checkpoint(row["id"], 1, 42500, state="ready", manifest={})
+        await D.sweep_tick()
+        r = self.db.row(row["id"])
+        self.assertEqual((r["status"], r["status_note"], r["capped_step"]), ("running", T.S22, 42500))
+        self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "capped")
+        self.assertEqual(self.published, [(row["id"], 1)])
+        self.assertIn("pod1", self.rp.deletes())
+
+    async def test_sweep_cap_without_a_ready_checkpoint_is_s5(self):
+        row = self._running(train_seconds_used=D.MANAGED_ACT_CAP_S)
+        self.clock.advance(600 + D.WATCHDOG_GRACE_S)
+        await D.sweep_tick()
+        self.assertEqual(self.db.row(row["id"])["error_message"], T.s5(D.MANAGED_ACT_CAP_S))
+        self.assertEqual(self.published, [])
+
+    async def test_sweep_wall_with_a_ready_checkpoint_publishes(self):
+        row = self._running(requested_at=self.clock.iso(self.clock.t - D.WALL_CAP_S - D.WATCHDOG_GRACE_S - 1))
+        self.db.add_checkpoint(row["id"], 1, 42500, state="ready", manifest={})
+        await D.sweep_tick()
+        self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "wall_capped")
+        self.assertEqual(self.published, [(row["id"], 1)])
+
+    async def test_sweep_wall_without_a_ready_checkpoint_is_s6(self):
+        row = self._running(requested_at=self.clock.iso(self.clock.t - D.WALL_CAP_S - D.WATCHDOG_GRACE_S - 1))
+        await D.sweep_tick()
+        self.assertEqual(self.db.row(row["id"])["error_message"], T.S6)
+
+    async def test_budget_finish_cap_with_a_lost_attempt_charges_zero(self):
+        row = self.queued(current_attempt=1, train_seconds_used=D.MANAGED_ACT_CAP_S)
+        self.db.add_attempt(row["id"], 1, state="lost", backend="runpod_secure",
+                            first_heartbeat_at=self.clock.iso(self.clock.t - 600))
+        self.db.add_checkpoint(row["id"], 1, 42500, state="ready", manifest={})
+        await D.dispatch_tick()
+        (call,) = self.db.calls("cap_training_attempt")
+        self.assertEqual(call["p_train_seconds"], 0)
+        self.assertEqual(self.published, [(row["id"], 1)])
+
+    async def test_budget_finish_wall_with_a_ready_checkpoint_publishes(self):
+        row = self.queued(current_attempt=1, requested_at=self.clock.iso(self.clock.t - D.WALL_CAP_S))
+        self.db.add_attempt(row["id"], 1, state="lost", backend="runpod_secure")
+        self.db.add_checkpoint(row["id"], 1, 42500, state="ready", manifest={})
+        await D.dispatch_tick()
+        self.assertEqual(self.db.attempt(row["id"], 1)["end_reason"], "wall_capped")
+        self.assertEqual(self.published, [(row["id"], 1)])
+
+    async def test_s4_never_publishes_even_with_a_ready_checkpoint(self):
+        row = self.queued(current_attempt=4)
+        self.db.add_attempt(row["id"], 4, state="lost", backend="runpod_secure")
+        self.db.add_checkpoint(row["id"], 4, 42500, state="ready", manifest={})
+        await D.dispatch_tick()
+        self.assertEqual(self.db.row(row["id"])["error_message"], T.S4)
+        self.assertEqual(self.published, [])
+
+    async def test_s18_never_publishes_even_with_a_ready_checkpoint(self):
+        row = self.queued(current_attempt=1, unplaced_since=self.clock.iso(self.clock.t - D.PLACEMENT_GIVEUP_S - 1))
+        self.db.add_attempt(row["id"], 1, state="lost", backend="runpod_secure")
+        self.db.add_checkpoint(row["id"], 1, 42500, state="ready", manifest={})
+        await D.dispatch_tick()
+        self.assertEqual(self.db.row(row["id"])["error_message"], T.S18)
+        self.assertEqual(self.published, [])
+
+    async def test_a_cap_conflict_schedules_nothing(self):
+        row = self._running(train_seconds_used=D.MANAGED_ACT_CAP_S)
+        self.clock.advance(600 + D.WATCHDOG_GRACE_S)
+        self.db.add_checkpoint(row["id"], 1, 42500, state="ready", manifest={})
+        self.db._rpc_cap_training_attempt = lambda **kw: (_ for _ in ()).throw(PgError("P0049"))
+        await D.sweep_tick()
+        self.assertEqual(self.published, [])
+        self.assertNotEqual(self.db.row(row["id"])["error_message"], T.s5(D.MANAGED_ACT_CAP_S))
+
+    async def test_a_continuation_requeue_floors_at_the_kept_step(self):
+        parent = self.db.add_training(status="succeeded", current_attempt=1, capped_step=42500,
+                                      continuable_until=self.clock.iso(self.clock.t + D.KEEP_S))
+        self.db.add_kept(parent["id"], 42500, manifest={})
+        child = self.db.add_training(status="running", current_attempt=1, worker_token="t",
+                                     continued_from=parent["id"], last_progress_at=self.clock.iso(),
+                                     step_advanced_at=self.clock.iso())
+        self.db.add_attempt(child["id"], 1, state="running", backend="runpod_secure", cloud_ref="podc",
+                            first_heartbeat_at=self.clock.iso(self.clock.t - 600), allowed_dcs=["EU-RO-1"])
+        self.rp.add_pod(id="podc", status="RUNNING")
+        self.rp.pods.clear()
+        await D.sweep_tick()
+        self.clock.advance(D.POD_GONE_CONFIRM_S)
+        await D.sweep_tick()
+        (call,) = self.db.calls("requeue_training")
+        self.assertEqual(call["p_resume_step"], 42500)
+        self.assertEqual(self.db.row(child["id"])["status_note"], T.s1(42500))
+
+    def test_the_constants(self):
+        self.assertEqual(D.MANAGED_ACT_CAP_S, 12600)
+        self.assertEqual(D.KEEP_S, 604800)
+        self.assertEqual(D.KEEP_DELETE_GRACE_S, 44400)
+        self.assertIn("3,5 Stunden", T.s5(12600))
+
+
+class RequeueCharging(SweepLosses):
+    async def test_a_loss_without_an_own_ready_checkpoint_charges_nothing(self):
+        row, _ = self._running()
+        self.rp.pods.clear()
+        await D.sweep_tick()
+        self.clock.advance(D.POD_GONE_CONFIRM_S)
+        await D.sweep_tick()
+        (call,) = self.db.calls("requeue_training")
+        self.assertEqual(call["p_train_seconds"], 630)
+        self.assertEqual(self.db.row(row["id"])["train_seconds_used"], 0)
+
+
+class KeptExpiry(Base):
+    def _kept(self, state="kept", expires_in=D.KEEP_S):
+        parent = self.db.add_training(status="succeeded", current_attempt=1, capped_step=42500)
+        from app.services import r2_client
+        manifest = {"pretrained_model/config.json": {"size": 1}}
+        kept = self.db.add_kept(parent["id"], 42500, state=state, manifest=manifest,
+                                expires_at=self.clock.iso(self.clock.t + expires_in))
+        self.r2.objects[r2_client.keep_key(parent["id"], 42500, "pretrained_model/config.json")] = b"x"
+        return parent, kept
+
+    async def test_a_refused_copy_is_deleted_at_once(self):
+        from app.services import r2_client
+        parent, _ = self._kept(state="refused")
+        await D.janitor_tick(self.clock.t)
+        self.assertEqual(self.db.kept(parent["id"])["state"], "deleted")
+        self.assertNotIn(r2_client.keep_key(parent["id"], 42500, "pretrained_model/config.json"), self.r2.objects)
+
+    async def test_a_kept_copy_waits_for_expiry_plus_grace(self):
+        parent, _ = self._kept(expires_in=-1)  # already expired
+        await D.janitor_tick(self.clock.t)
+        self.assertEqual(self.db.kept(parent["id"])["state"], "kept", "within the grace: untouched")
+        self.clock.advance(D.KEEP_DELETE_GRACE_S + 1)
+        await D.janitor_tick(self.clock.t)
+        self.assertEqual(self.db.kept(parent["id"])["state"], "deleted")
+
+    async def test_an_active_child_keeps_the_copy(self):
+        parent, _ = self._kept(expires_in=-1)
+        self.clock.advance(D.KEEP_DELETE_GRACE_S + 1)
+        self.db.add_training(status="queued", continued_from=parent["id"])
+        await D.janitor_tick(self.clock.t)
+        self.assertEqual(self.db.kept(parent["id"])["state"], "kept")
+
+    async def test_a_delete_failure_leaves_the_state(self):
+        parent, _ = self._kept(state="refused")
+        self.r2.fail["delete"] = 1
+        await D.janitor_tick(self.clock.t)
+        self.assertEqual(self.db.kept(parent["id"])["state"], "refused")
+
+    async def test_the_expiry_runs_even_without_a_terminal_row(self):
+        parent, _ = self._kept(state="refused")
+        self.assertEqual(self.db.tables["trainings"][0]["status"], "succeeded")
+        self.db.tables["trainings"][0]["terminated_at"] = None  # not in the janitor's terminal window
+        await D.janitor_tick(self.clock.t)
+        self.assertEqual(self.db.kept(parent["id"])["state"], "deleted")
+
+
+class MirrorClaim(Base):
+    def test_a_finished_mirror_claim_is_not_live(self):
+        now = self.clock.t
+        self.assertFalse(D.mirror_claim_live({"mirror_claimed_at": self.clock.iso(now), "mirrored_at": self.clock.iso(now)}, now))
+        self.assertTrue(D.mirror_claim_live({"mirror_claimed_at": self.clock.iso(now), "mirrored_at": None}, now))
+
+    async def test_retention_deletes_a_mirrored_checkpoint_at_once(self):
+        from app.services import r2_client
+        row = self.db.add_training(status="running", current_attempt=1, training_params={"steps": 50000,
+                                   "mirror_every": 10000})
+        for step in (10000, 12500, 15000, 17500):
+            self.db.add_checkpoint(row["id"], 1, step, state="ready", manifest={"a": {}})
+        # 10000 is a mirror step, below the kept top 2 (15000, 17500); its mirror finished.
+        self.db.checkpoint(row["id"], 1, 10000).update(mirrored_at=self.clock.iso(),
+                                                       mirror_claimed_at=self.clock.iso())
+        self.r2.objects[r2_client.ckpt_key(row["id"], 1, 10000, "a")] = b"x"
+        await asyncio.to_thread(D.apply_retention, row["id"], self.clock.t)
+        self.assertEqual(self.db.checkpoint(row["id"], 1, 10000)["state"], "deleted")
+
+
 class Helpers(unittest.TestCase):
     def test_budget_for_subtracts_the_current_attempts_own_time(self):
         now = 1_800_000_000.0
         row = {"train_seconds_used": 3600, "requested_at": Clock(now - 7200).iso()}
         att = {"first_heartbeat_at": Clock(now - 1800).iso()}
         s = settings()
-        self.assertEqual(D.budget_for(row, att, now, s), (14400 - 3600 - 1800, "cap"))
-        self.assertEqual(D.budget_for(row, {"first_heartbeat_at": None}, now, s), (14400 - 3600, "cap"))
+        self.assertEqual(D.budget_for(row, att, now, s), (D.MANAGED_ACT_CAP_S - 3600 - 1800, "cap"))
+        self.assertEqual(D.budget_for(row, {"first_heartbeat_at": None}, now, s), (D.MANAGED_ACT_CAP_S - 3600, "cap"))
         old = {"train_seconds_used": 0, "requested_at": Clock(now - 40000).iso()}
         self.assertEqual(D.budget_for(old, {}, now, s), (43200 - 40000, "wall"))
 

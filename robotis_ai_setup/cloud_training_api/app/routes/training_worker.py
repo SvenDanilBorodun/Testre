@@ -183,10 +183,7 @@ def _spec(row) -> dict:
 
 
 def _resume_point(ckpts, total: int):
-    ready = [c for c in ckpts if c.get("state") == "ready" and c.get("step", 0) < total]
-    if not ready:
-        return None
-    return max(ready, key=lambda c: (c["step"], c["attempt_no"]))
+    return D.newest_ready_checkpoint(ckpts, total)
 
 
 def _resume_files(tid: int, ckpt) -> dict:
@@ -202,6 +199,43 @@ def _resume_files(tid: int, ckpt) -> dict:
             "sha256": meta.get("sha256"),
         }
     return out
+
+
+def _kept_files(parent_id: int, kept) -> dict:
+    """_resume_files' shape, but presigned GETs of the kept copy's keep/ keys (owner E36)."""
+    from app.services import r2_client
+
+    manifest = kept.get("manifest") or {}
+    step = int(kept["step"])
+    out = {}
+    for rel in AV.CHECKPOINT_RELPATHS:
+        meta = manifest.get(rel) or {}
+        out[rel] = {
+            "url": r2_client.presign_get(r2_client.keep_key(int(parent_id), step, rel)),
+            "size": meta.get("size"),
+            "sha256": meta.get("sha256"),
+        }
+    return out
+
+
+def _kept_usable(parent_id: int, kept) -> bool:
+    """A kept copy is usable iff it exists, is `kept`, and all 11 keep/ objects are present
+    and sized as its manifest says. An R2 transport fault propagates (→ 503, the worker
+    retries `start`). The clock is NOT judged here (presence decides, review m1)."""
+    from app.services import r2_client
+
+    if not kept or kept.get("state") != "kept":
+        return False
+    manifest = kept.get("manifest") if isinstance(kept.get("manifest"), dict) else {}
+    step = int(kept["step"])
+    for rel in AV.CHECKPOINT_RELPATHS:
+        meta = manifest.get(rel) or {}
+        try:
+            if int(r2_client.head_size(r2_client.keep_key(int(parent_id), step, rel))) != int(meta.get("size")):
+                return False
+        except r2_client.R2Missing:
+            return False
+    return True
 
 
 def _expected_handler_sha256() -> str:
@@ -241,17 +275,33 @@ async def _start(row, att, body):
         await D.requeue_attempt(row, att, "host_unfit:wrong_image", now)
         await D.terminate_attempt(att)
         return _err(409, T.S10, "wrong_image")
+    total = D.total_steps_of(row)
+    ckpts = await asyncio.to_thread(D.read_checkpoints, [tid], ["ready"])  # A3: before the budget check
+    finished = D.final_ready(ckpts, total) is not None
     budget_s, bound = D.budget_for(row, att, now)
     if budget_s < MIN_BUDGET_S:
-        msg = T.S6 if bound == "wall" else T.s5(D.SETTINGS.cap_s)
-        await D.fail_training(row, n, msg)
+        result = await D.cap_attempt(row, att, now, ckpts, bound=bound)
         await D.terminate_attempt(att)
-        return _err(409, msg, "budget_exhausted")
+        detail = T.S22 if result == "published" else (T.S6 if bound == "wall" else T.s5(D.SETTINGS.cap_s))
+        return _err(409, detail, "budget_exhausted")
     D.record_budget_bound(tid, n, bound)
-    total = D.total_steps_of(row)
-    ckpts = await asyncio.to_thread(D.read_checkpoints, [tid], ["ready"])
-    finished = D.final_ready(ckpts, total) is not None
     resume = None if finished else _resume_point(ckpts, total)
+    # D: a continuation whose own attempts have no ready checkpoint yet resumes from
+    # the parent's kept copy (presence decides, not the clock — review m1).
+    if resume is None and not finished and row.get("continued_from"):
+        parent_id = int(row["continued_from"])
+        kept = await asyncio.to_thread(D.read_kept, parent_id)
+        if not await asyncio.to_thread(_kept_usable, parent_id, kept):
+            await D.fail_training(row, n, T.S27)
+            await D.terminate_attempt(att)
+            return _err(409, T.S27, "kept_unusable")
+        await asyncio.to_thread(D.write_attempt_meta, tid, n,
+                                {"resume_from_step": int(kept["step"]), "resume_from_attempt": None},
+                                D.ACTIVE_STATES)
+        files = await asyncio.to_thread(_kept_files, parent_id, kept)
+        out_resume = {"step": int(kept["step"]), "step_id": AV.step_id(int(kept["step"]), total),
+                      "attempt_no": 0, "files": files}
+        return _resp(200, {"spec": _spec(row), "budget_s": int(budget_s), "finished": False, "resume": out_resume})
     meta = {"resume_from_step": int(resume["step"]) if resume else 0,
             "resume_from_attempt": int(resume["attempt_no"]) if resume else None}
     await asyncio.to_thread(D.write_attempt_meta, tid, n, meta, D.ACTIVE_STATES)
@@ -463,17 +513,18 @@ def reset_hash_state_for_tests() -> None:
     _HASH_INFLIGHT.clear()
 
 
-async def _checkpoint_intact(tid: int, asker: int, ckpt) -> bool:
+async def _checkpoint_intact(tid: int, asker: int, ckpt, key_of=None) -> bool:
     """The remembered or single-flight verdict of _hash_checkpoint (V1-6) for
     the asking attempt `asker`. A transport fault is never remembered: it
-    propagates (503) and the next ask hashes again."""
+    propagates (503) and the next ask hashes again. ``key_of`` hashes a kept copy
+    (keep/ keys) instead of the attempt's own ckpt_key (owner E36)."""
     key = (int(tid), int(asker), int(ckpt["attempt_no"]), int(ckpt["step"]))
     if key in _HASH_VERDICTS:
         _HASH_VERDICTS.move_to_end(key)
         return _HASH_VERDICTS[key]
     fut = _HASH_INFLIGHT.get(key)
     if fut is None:
-        fut = asyncio.get_running_loop().run_in_executor(_HASH_POOL, _hash_checkpoint, tid, ckpt)
+        fut = asyncio.get_running_loop().run_in_executor(_HASH_POOL, _hash_checkpoint, tid, ckpt, key_of)
         _HASH_INFLIGHT[key] = fut
 
         def _settled(f, key=key):
@@ -490,18 +541,64 @@ async def _checkpoint_intact(tid: int, asker: int, ckpt) -> bool:
     return bool(await asyncio.shield(fut))
 
 
-def _hash_checkpoint(tid: int, ckpt) -> bool:
-    """True when every object of the checkpoint matches its manifest (size + sha256)."""
+def _hash_checkpoint(tid: int, ckpt, key_of=None) -> bool:
+    """True when every object of the checkpoint matches its manifest (size + sha256).
+    ``key_of(rel)`` picks the R2 key (default the attempt's ckpt_key; a kept copy
+    passes keep_key)."""
     from app.services import r2_client
 
+    if key_of is None:
+        def key_of(rel):
+            return r2_client.ckpt_key(tid, ckpt["attempt_no"], ckpt["step"], rel)
     for rel, meta in (ckpt.get("manifest") or {}).items():
         try:
-            size, sha = r2_client.stream_sha256(r2_client.ckpt_key(tid, ckpt["attempt_no"], ckpt["step"], rel))
+            size, sha = r2_client.stream_sha256(key_of(rel))
         except r2_client.R2Missing:
             return False
         if size != meta.get("size") or sha != meta.get("sha256"):
             return False
     return True
+
+
+def _set_kept_state(parent_id: int, payload: dict, expect: str):
+    return (
+        D._sb().table("training_kept_checkpoints").update(payload)
+        .eq("training_id", int(parent_id)).eq("state", expect).execute()
+    ).data
+
+
+def _count_kept_crash(tid: int, n: int, parent_id: int, step: int) -> bool:
+    """Owner E43/review M3: add this child attempt to the kept row's bad_attempts
+    (read-modify-write, filtered on state='kept'); True once RESUME_CRASH_LIMIT distinct
+    attempts across all children have complained with a crash / train_config."""
+    kept = D.read_kept(parent_id)
+    if not kept or kept.get("state") != "kept" or int(kept.get("step") or 0) != int(step):
+        return False
+    bad = set(str(x) for x in (kept.get("bad_attempts") or [])) | {f"{int(tid)}:{int(n)}"}
+    _set_kept_state(parent_id, {"bad_attempts": sorted(bad)}, "kept")
+    return len(bad) >= D.RESUME_CRASH_LIMIT
+
+
+async def _refuse_kept(row, att, parent_id: int, reason: str) -> None:
+    """A proven-unusable kept copy (owner E43, review M3): mark it refused, expire the
+    parent, fail the child with a refund, stop the pod. Order load-bearing (§6.4 F)."""
+    tid, n = int(row["id"]), int(att["attempt_no"])
+
+    def _mark():
+        _set_kept_state(parent_id, {"state": "refused", "refused_reason": reason}, "kept")
+        (
+            D._sb().table("trainings").update({"continuable_until": D._iso(D._now())})
+            .eq("id", int(parent_id)).eq("status", "succeeded").execute()
+        )
+
+    await asyncio.to_thread(_mark)
+    await D.fail_training(row, n, T.S27)
+    await D.terminate_attempt(att)
+
+
+def _is_kept_resume(row, att) -> bool:
+    return bool(att.get("resume_from_attempt") is None and int(att.get("resume_from_step") or 0) >= 1
+                and row.get("continued_from"))
 
 
 async def _ckpt_bad(row, att, body):
@@ -510,6 +607,27 @@ async def _ckpt_bad(row, att, body):
     if type(step) is not int or reason not in CKPT_BAD_REASONS:
         return _bad_request()
     tid, n = int(row["id"]), int(att["attempt_no"])
+    # A kept-copy resume (owner E36/E43): a complaint about the handed copy is re-hashed
+    # for content reasons, counted for train_config, never trusted on one host's word.
+    if _is_kept_resume(row, att) and att.get("resume_from_step") == step:
+        from app.services import r2_client
+
+        parent = int(row["continued_from"])
+        kept = await asyncio.to_thread(D.read_kept, parent)
+        if not kept or kept.get("state") != "kept" or int(kept.get("step") or 0) != step:
+            return _resp(200, {"state": "ignored"})
+        if reason in ("sha256", "file_list", "steps", "training_step"):
+            probe = {"attempt_no": 0, "step": step, "manifest": kept.get("manifest") or {}}
+            intact = await _checkpoint_intact(tid, n, probe,
+                                              key_of=lambda rel: r2_client.keep_key(parent, step, rel))
+            if intact:
+                logger.info("training %s attempt %s: kept copy %s intact despite ckpt-bad %s", tid, n, step, reason)
+                return _resp(200, {"state": "kept"})
+        elif not await asyncio.to_thread(_count_kept_crash, tid, n, parent, step):
+            return _resp(200, {"state": "kept"})
+        await _refuse_kept(row, att, parent, reason)
+        logger.warning("training %s attempt %s: kept copy %s refused (%s)", tid, n, step, reason)
+        return _resp(200, {"state": "refused"})
     src_attempt = att.get("resume_from_attempt")
     if att.get("resume_from_step") != step or src_attempt is None or step < 1:
         return _resp(200, {"state": "ignored"})
@@ -576,15 +694,34 @@ async def _finish(row, att, body):
             await D.terminate_attempt(att)
         return _resp(200, {"status": "publishing"})
     if outcome == "failed":
-        msg = T.S19 if reason == "lerobot_error" else D.time_cap_sentence(row, att, now)
-        await D.fail_training(row, n, msg)
+        if reason == "lerobot_error":
+            await D.fail_training(row, n, T.S19)
+            if runpod:
+                await D.terminate_attempt(att)
+            hf_publish.schedule_failed_log(dict(row, current_attempt=n))
+            return _resp(200, {"status": "failed"})
+        # time_cap: publish the newest ready checkpoint (training time or the 12 h wall,
+        # owner E33/E44), else S5 / S6 + the failed log.
+        ckpts = await asyncio.to_thread(D.read_checkpoints, [tid], ["ready"])
+        bound = D.time_cap_bound(row, att, now)
+        result = await D.cap_attempt(row, att, now, ckpts, bound=bound)
         if runpod:
             await D.terminate_attempt(att)
-        hf_publish.schedule_failed_log(dict(row, current_attempt=n))
-        return _resp(200, {"status": "failed"})
+        if result == "failed":
+            hf_publish.schedule_failed_log(dict(row, current_attempt=n))
+            return _resp(200, {"status": "failed"})
+        return _resp(200, {"status": "publishing"}) if result == "published" else _resp(200, {"status": "failed"})
     # host_unfit
     if reason == "resume_crash":
-        await asyncio.to_thread(_count_resume_crash, tid, att)
+        if _is_kept_resume(row, att):
+            step = int(att.get("resume_from_step") or 0)
+            parent = int(row["continued_from"])
+            if await asyncio.to_thread(_count_kept_crash, tid, n, parent, step):
+                await _refuse_kept(row, att, parent, "resume_crash")
+                return _resp(200, {"status": "failed"})
+            # below the limit: requeue as today (fall through)
+        else:
+            await asyncio.to_thread(_count_resume_crash, tid, att)
     await D.requeue_attempt(row, att, f"host_unfit:{reason}", now, skip_community_dc=True)
     if runpod:
         await D.terminate_attempt(att)

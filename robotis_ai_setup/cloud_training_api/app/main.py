@@ -316,6 +316,7 @@ def _validate_required_schema() -> None:
         "inference_sessions",  # 048 — Cloud-Inferenz sessions (service-role only)
         "training_attempts",  # 049 — managed training: one row per placement (service-role only)
         "training_checkpoints",  # 049 — managed training: one row per uploaded checkpoint
+        "training_kept_checkpoints",  # 050 — the 7-day continuable kept checkpoint (service-role only)
     )
     missing_tables: list[str] = []
     for table in required_tables:
@@ -400,6 +401,11 @@ def _validate_required_schema() -> None:
         ("training_checkpoints",
          "training_id, attempt_no, step, state, manifest, created_at, ready_at, mirrored_at, mirror_tries, "
          "refused_reason, refused_by, crash_attempts, mirror_claimed_at, mirror_owner"),
+        # Migration 050 — the capped publish + „Fortsetzen": routes/training.py,
+        # routes/training_worker.py and training_dispatch read/write these.
+        ("trainings", "capped_step, continuable_until, continued_from"),
+        ("training_kept_checkpoints",
+         "training_id, step, manifest, state, kept_at, expires_at, refused_reason, bad_attempts"),
     )
     for table, cols in required_columns:
         try:
@@ -621,11 +627,20 @@ def _validate_required_schema() -> None:
         ("release_training_attempt", {"p_training_id": 0, "p_attempt": 1, "p_note": None}),
         ("requeue_training", {"p_training_id": 0, "p_attempt": 1, "p_reason": "_probe", "p_note": None, "p_resume_step": None, "p_train_seconds": 0}),
         ("end_training_attempt", {"p_training_id": 0, "p_attempt": 1, "p_reason": "_probe", "p_note": None, "p_train_seconds": 0}),
-        ("finish_training", {"p_training_id": 0, "p_attempt": 1, "p_status": "failed", "p_message": None, "p_log_url": None}),
+        # 050 widened finish_training to 8 arguments (p_note/p_final_step/
+        # p_continuable_until, all DEFAULT NULL); probe all eight so a database
+        # without 050 fails its own /health (the 5-named-arg call still resolves).
+        ("finish_training", {"p_training_id": 0, "p_attempt": 1, "p_status": "failed", "p_message": None,
+                             "p_log_url": None, "p_note": None, "p_final_step": None, "p_continuable_until": None}),
         ("cancel_request_training", {"p_training_id": 0, "p_user_id": dummy}),
         ("complete_cancel_training", {"p_training_id": 0, "p_final": "canceled", "p_message": None}),
         ("claim_training_publish", {"p_training_id": 0, "p_attempt": 1, "p_lease_s": 900, "p_owner": "_probe"}),
         ("claim_checkpoint_mirror", {"p_training_id": 0, "p_attempt": 1, "p_step": 1, "p_lease_s": 900, "p_owner": "_probe"}),
+        # Migration 050 — the capped publish + continuation. Training id 0 never
+        # exists: cap answers P0049, start_continuation_safe P0002; both write nothing.
+        ("cap_training_attempt", {"p_training_id": 0, "p_attempt": 1, "p_step": 1, "p_reason": "capped",
+                                  "p_note": None, "p_train_seconds": 0}),
+        ("start_continuation_safe", {"p_user_id": dummy, "p_parent_id": 0, "p_note": None}),
     )
     missing_rpcs: list[str] = []
     for name, args in required_rpcs:
@@ -724,6 +739,7 @@ _rate_limiter = RateLimiter()
 _RATE_LIMIT_RULES: list[tuple[str, str, int, float]] = [
     ("*", "/trainings/start", 10, 60.0),
     ("*", "/trainings/cancel", 20, 60.0),
+    ("*", "/trainings/continue", 10, 60.0),
     # 049 — the managed-training worker API (/trainings/worker/{id}/{attempt}/
     # {action}). Per worker TOKEN (the /trainings/ prefix is per-user keyed and
     # the worker authenticates with Bearer <worker_token>): start + an upload

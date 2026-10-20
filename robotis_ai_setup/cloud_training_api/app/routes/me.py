@@ -24,7 +24,8 @@ _EXPORT_TRAINING_COLUMNS = (
     "id, user_id, status, dataset_name, model_name, model_type, training_params, cloud_job_id, "
     "current_step, total_steps, current_loss, requested_at, terminated_at, error_message, "
     "last_progress_at, loss_history, workgroup_id, cancel_attempted_at, cancel_attempts, log_url, "
-    "managed, current_attempt, train_seconds_used, status_note, step_advanced_at, dataset_fps, unplaced_since"
+    "managed, current_attempt, train_seconds_used, status_note, step_advanced_at, dataset_fps, unplaced_since, "
+    "capped_step, continuable_until, continued_from"
 )
 _PROVIDER_OF_BACKEND = {
     "runpod_community": ("runpod", "community"),
@@ -41,7 +42,7 @@ def _export_attempts(supabase, training_ids: list) -> dict:
         return {}
     rows = (
         supabase.table("training_attempts")
-        .select("training_id, attempt_no, backend, data_center, gpu_type, started_at, ended_at")
+        .select("training_id, attempt_no, backend, data_center, allowed_dcs, gpu_type, started_at, ended_at")
         .in_("training_id", training_ids)
         .order("attempt_no", desc=False)
         .execute()
@@ -55,6 +56,8 @@ def _export_attempts(supabase, training_ids: list) -> dict:
             "provider": provider[0],
             "cloud": provider[1],
             "data_center": r.get("data_center"),
+            # the data centres the create asked for ([] = any region; owner E42/m8)
+            "requested_data_centers": r.get("allowed_dcs") or [],
             "gpu_type": r.get("gpu_type"),
             "started_at": r.get("started_at"),
             "ended_at": r.get("ended_at"),

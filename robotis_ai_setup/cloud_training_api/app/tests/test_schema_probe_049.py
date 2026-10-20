@@ -8,7 +8,7 @@ argument-name set), so every probe names EXACTLY the migration's parameters
 id 0, which never exists, so each call answers P0002, P0049 or false and
 writes nothing (proven through PostgREST on a local stack, spec §3.1).
 
-The 18 / 16 / 44 totals are pinned in ``test_schema_probe_040.py``.
+The 19 / 18 / 46 totals are pinned in ``test_schema_probe_040.py``.
 """
 
 from __future__ import annotations
@@ -23,6 +23,11 @@ from app.tests.test_schema_probe_040 import _probe_tuples
 HERE = os.path.dirname(os.path.abspath(__file__))
 MIGRATION = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "supabase", "migrations",
                          "20261020130000_049_managed_training.sql")
+MIGRATION_050 = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "supabase", "migrations",
+                             "20261021120000_050_training_continuation.sql")
+# 050 widened finish_training to 8 arguments and dropped the 5-arg overload; the probe
+# names all eight, so its parameter source is the 050 text.
+LATEST_DEFINITION = {"finish_training": MIGRATION_050}
 NEW_RPCS = ("claim_training_attempt", "attach_training_attempt", "release_training_attempt", "requeue_training",
             "end_training_attempt", "finish_training", "cancel_request_training", "complete_cancel_training",
             "claim_training_publish", "claim_checkpoint_mirror")
@@ -88,7 +93,12 @@ class TestSchemaProbeKnows049(unittest.TestCase):
         for name in NEW_RPCS:
             with self.subTest(rpc=name):
                 self.assertIn(name, self.rpcs)
-                self.assertEqual(sorted(self.rpcs[name]), sorted(_params(self.sql, name)))
+                if name in LATEST_DEFINITION:
+                    with open(LATEST_DEFINITION[name], encoding="utf-8") as fh:
+                        sql = fh.read()
+                else:
+                    sql = self.sql
+                self.assertEqual(sorted(self.rpcs[name]), sorted(_params(sql, name)))
 
     def test_start_training_safe_probes_the_eight_argument_shape(self):
         self.assertEqual(sorted(self.rpcs["start_training_safe"]), sorted(_params(self.sql, "start_training_safe")))

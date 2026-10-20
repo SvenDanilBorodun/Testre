@@ -53,9 +53,11 @@ class Export(unittest.TestCase):
 
         m047 = re.search(r"GRANT SELECT \((.*?)\) ON public\.trainings", code("20261020120000_047_hide_worker_token.sql"), re.S)
         m049 = re.search(r"GRANT SELECT \((.*?)\)\s+ON public\.trainings", code("20261020130000_049_managed_training.sql"), re.S)
-        granted = [c.strip() for c in m047.group(1).split(",")] + [c.strip() for c in m049.group(1).split(",")]
+        m050 = re.search(r"GRANT SELECT \((.*?)\) ON public\.trainings", code("20261021120000_050_training_continuation.sql"), re.S)
+        granted = ([c.strip() for c in m047.group(1).split(",")] + [c.strip() for c in m049.group(1).split(",")]
+                   + [c.strip() for c in m050.group(1).split(",")])
         self.assertEqual(sorted(cols), sorted(granted))
-        self.assertEqual(len(cols), 27)
+        self.assertEqual(len(cols), 30)
 
     def test_the_export_carries_attempts_without_ids(self):
         db = _db()
@@ -79,9 +81,10 @@ class Export(unittest.TestCase):
         by_id = {t["id"]: t for t in bundle["trainings"]}
         self.assertEqual(set(by_id), {managed["id"], legacy["id"]})
         self.assertEqual(by_id[managed["id"]]["attempts"], [
-            {"provider": "runpod", "cloud": "community", "data_center": "EU-RO-1", "gpu_type": "NVIDIA RTX A5000",
+            {"provider": "runpod", "cloud": "community", "data_center": "EU-RO-1",
+             "requested_data_centers": [], "gpu_type": "NVIDIA RTX A5000",
              "started_at": "2026-10-18T10:00:00+00:00", "ended_at": "2026-10-18T11:00:00+00:00"},
-            {"provider": "modal", "cloud": None, "data_center": None, "gpu_type": None,
+            {"provider": "modal", "cloud": None, "data_center": None, "requested_data_centers": [], "gpu_type": None,
              "started_at": "2026-10-18T11:05:00+00:00", "ended_at": "2026-10-18T12:00:00+00:00"},
         ])
         self.assertEqual(by_id[legacy["id"]]["attempts"], [])

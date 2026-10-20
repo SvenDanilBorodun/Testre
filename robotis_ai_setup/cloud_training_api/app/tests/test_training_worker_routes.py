@@ -181,7 +181,7 @@ class Start(WorkerBase):
         self.assertIsNone(body["resume"])
         self.assertIs(body["finished"], False)
         # FR-18: minus the current attempt's own 1800 s
-        self.assertEqual(body["budget_s"], 14400 - 0 - 1800)
+        self.assertEqual(body["budget_s"], D.MANAGED_ACT_CAP_S - 0 - 1800)
         self.assertEqual((self.att["resume_from_step"], self.att["resume_from_attempt"]), (0, None))
 
     async def test_spec_total_steps_is_the_params_not_a_column_a_host_wrote(self):
@@ -305,10 +305,10 @@ class Start(WorkerBase):
         self.assertEqual(_REAL_LOCK_ACCESSOR(), training_lock_hash.TRAINING_LOCK_SHA256)
 
     async def test_an_exhausted_budget_fails_the_row(self):
-        self.db.row(self.tid)["train_seconds_used"] = 14400 - 1800 - 200
+        self.db.row(self.tid)["train_seconds_used"] = D.MANAGED_ACT_CAP_S - 1800 - 200
         status, body = await self.call("start", {"lock_sha256": LOCK, "build": "b"})
         self.assertEqual((status, body["code"]), (409, "budget_exhausted"))
-        self.assertEqual(self.db.row(self.tid)["error_message"], T.s5(14400))
+        self.assertEqual(self.db.row(self.tid)["error_message"], T.s5(D.MANAGED_ACT_CAP_S))
         self.assertIn("pod1", self.rp.deletes())
 
     async def test_the_wall_term_gives_s6(self):
@@ -638,7 +638,7 @@ class Finish(WorkerBase):
     async def test_time_cap_says_which_cap_bound(self):
         await self.call("start", {"lock_sha256": LOCK, "build": "b"})  # records the bound: the cap term
         await self.call("finish", {"outcome": "failed", "reason": "time_cap"})
-        self.assertEqual(self.db.row(self.tid)["error_message"], T.s5(14400))
+        self.assertEqual(self.db.row(self.tid)["error_message"], T.s5(D.MANAGED_ACT_CAP_S))
 
     async def test_time_cap_after_a_restart_recomputes_the_bound(self):
         self.db.row(self.tid)["requested_at"] = self.clock.iso(self.clock.t - 40000)
@@ -687,6 +687,175 @@ class Finish(WorkerBase):
             with self.subTest(body=body):
                 self.assertEqual((await self.call("finish", body))[0], 422)
         self.assertEqual(self.db.row(self.tid)["status"], "running")
+
+
+CHILD_TOKEN = "11111111-2222-3333-4444-555555555555"
+
+
+class Continuation(WorkerBase):
+    """A continuation's first attempt resumes from the parent's kept copy (owner E36),
+    and a complaint about that copy is proven, never trusted (owner E43, review M3)."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.parent = self.db.add_training(status="succeeded", current_attempt=1, capped_step=42500,
+                                           model_name="EduBotics-Solutions/m-act-ds-abc", dataset_name="u/ds",
+                                           continuable_until=self.clock.iso(self.clock.t + D.KEEP_S),
+                                           training_params=self.row["training_params"], dataset_fps=30.0)
+        self.pid = self.parent["id"]
+        self.kfiles = checkpoint_files(self.parent, 42500, final=False)
+        self.kmanifest = manifest_of(self.kfiles)
+        for rel, data in self.kfiles.items():
+            self.r2.objects[r2_client.keep_key(self.pid, 42500, rel)] = data
+        self.kept = self.db.add_kept(self.pid, 42500, manifest=self.kmanifest,
+                                     expires_at=self.clock.iso(self.clock.t + D.KEEP_S))
+        self.child = self.db.add_training(status="running", current_attempt=1, worker_token=CHILD_TOKEN,
+                                          continued_from=self.pid, model_name=self.parent["model_name"],
+                                          dataset_name="u/ds", dataset_fps=30.0,
+                                          training_params=self.row["training_params"],
+                                          requested_at=self.clock.iso(self.clock.t - 60))
+        self.cid = self.child["id"]
+        self.catt = self.db.add_attempt(self.cid, 1, state="starting", backend="runpod_secure", cloud_ref="podc")
+        self.rp.add_pod(id="podc", status="RUNNING")
+
+    async def ccall(self, action, body=None, attempt="1"):
+        if action == "start" and isinstance(body, dict) and "handler_sha256" not in body:
+            body = {**body, "handler_sha256": HANDLER}
+        resp = await route.worker_action(str(self.cid), attempt, action,
+                                         FakeRequest(token=CHILD_TOKEN, body=body))
+        return resp.status_code, content(resp)
+
+    async def test_start_hands_the_kept_copy_as_resume(self):
+        status, body = await self.ccall("start", {"lock_sha256": LOCK, "build": "b"})
+        self.assertEqual(status, 200)
+        r = body["resume"]
+        self.assertEqual((r["step"], r["step_id"], r["attempt_no"]), (42500, "042500", 0))
+        for rel in AV.CHECKPOINT_RELPATHS:
+            self.assertIn(r2_client.keep_key(self.pid, 42500, rel), r["files"][rel]["url"])
+            self.assertEqual(r["files"][rel]["size"], self.kmanifest[rel]["size"])
+            self.assertEqual(r["files"][rel]["sha256"], self.kmanifest[rel]["sha256"])
+        a = self.db.attempt(self.cid, 1)
+        self.assertEqual((a["resume_from_step"], a["resume_from_attempt"]), (42500, None))
+        self.assertEqual(body["budget_s"], D.MANAGED_ACT_CAP_S - 0 - 0)
+
+    async def test_an_unusable_kept_copy_fails_the_child(self):
+        for setup in ("refused", "missing_row", "missing_object"):
+            with self.subTest(setup=setup):
+                if setup == "refused":
+                    self.kept["state"] = "refused"
+                elif setup == "missing_row":
+                    self.db.tables["training_kept_checkpoints"].clear()
+                else:
+                    self.r2.objects.pop(r2_client.keep_key(self.pid, 42500, "pretrained_model/config.json"), None)
+                status, body = await self.ccall("start", {"lock_sha256": LOCK, "build": "b"})
+                self.assertEqual((status, body["code"]), (409, "kept_unusable"))
+                self.assertEqual((self.db.row(self.cid)["status"], self.db.row(self.cid)["error_message"]),
+                                 ("failed", T.S27))
+                self.assertIn("podc", self.rp.deletes())
+                await self.asyncSetUp()  # reset for the next subTest
+
+    async def test_a_past_expiry_still_resumes_by_presence(self):
+        self.db.row(self.pid)["continuable_until"] = self.clock.iso(self.clock.t - 1)
+        self.kept["expires_at"] = self.clock.iso(self.clock.t - 1)
+        status, body = await self.ccall("start", {"lock_sha256": LOCK, "build": "b"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["resume"]["step"], 42500)
+
+    async def test_the_childs_own_checkpoint_wins_over_the_kept_copy(self):
+        self.db.add_checkpoint(self.cid, 1, 45000, state="ready", manifest=manifest_of(
+            checkpoint_files(self.child, 45000)))
+        status, body = await self.ccall("start", {"lock_sha256": LOCK, "build": "b"})
+        self.assertEqual((body["resume"]["step"], body["resume"]["attempt_no"]), (45000, 1))
+
+    async def test_upload_url_floor_is_the_kept_step(self):
+        self.catt.update(state="running", resume_from_step=42500, resume_from_attempt=None)
+        self.assertEqual((await self.ccall("upload-url", self._upload_body(42500)))[0], 422)
+        self.assertEqual((await self.ccall("upload-url", self._upload_body(45000)))[0], 200)
+
+    def _upload_body(self, step):
+        return {"kind": "ckpt", "step": step, "files": manifest_of(checkpoint_files(self.child, step))}
+
+    async def _resumed(self, attempt_no=1, state="running"):
+        # A resumed attempt is running with a fresh worker token (claim_training_attempt
+        # minted it; a requeue cleared the previous one).
+        self.db.row(self.cid).update(status="running", worker_token=CHILD_TOKEN, current_attempt=attempt_no)
+        if attempt_no == 1:
+            self.catt.update(state=state, resume_from_step=42500, resume_from_attempt=None)
+        else:
+            self.db.attempt(self.cid, attempt_no - 1)["state"] = "lost"
+            self.catt = self.db.add_attempt(self.cid, attempt_no, state=state, backend="runpod_secure",
+                                            cloud_ref="podc", resume_from_step=42500, resume_from_attempt=None)
+
+    async def test_ckpt_bad_sha256_on_an_intact_copy_is_kept_a_flip_refuses(self):
+        await self._resumed()
+        status, body = await self.ccall("ckpt-bad", {"step": 42500, "reason": "sha256"})
+        self.assertEqual((status, body["state"]), (200, "kept"))
+        # a flipped byte in a keep object → refuse
+        route.reset_hash_state_for_tests()
+        key = r2_client.keep_key(self.pid, 42500, "pretrained_model/model.safetensors")
+        self.r2.objects[key] = self.r2.objects[key][:-1] + b"\x00"
+        status, body = await self.ccall("ckpt-bad", {"step": 42500, "reason": "sha256"})
+        self.assertEqual((status, body["state"]), (200, "refused"))
+        self.assertEqual(self.db.kept(self.pid)["state"], "refused")
+        self.assertLessEqual(D.ts(self.db.row(self.pid)["continuable_until"]), self.clock.t)
+        self.assertEqual((self.db.row(self.cid)["status"], self.db.row(self.cid)["error_message"]),
+                         ("failed", T.S27))
+        self.assertIn("podc", self.rp.deletes())
+
+    async def test_ckpt_bad_file_list_on_an_intact_copy_is_kept(self):
+        await self._resumed()
+        status, body = await self.ccall("ckpt-bad", {"step": 42500, "reason": "file_list"})
+        self.assertEqual((status, body["state"]), (200, "kept"))
+        self.assertEqual(self.db.kept(self.pid)["state"], "kept")
+
+    async def test_ckpt_bad_train_config_counts_two_attempts(self):
+        await self._resumed()
+        status, body = await self.ccall("ckpt-bad", {"step": 42500, "reason": "train_config"})
+        self.assertEqual((status, body["state"]), (200, "kept"))
+        self.assertEqual(self.db.kept(self.pid)["bad_attempts"], [f"{self.cid}:1"])
+        await self._resumed(attempt_no=2)
+        status, body = await self.ccall("ckpt-bad", {"step": 42500, "reason": "train_config"}, attempt="2")
+        self.assertEqual((status, body["state"]), (200, "refused"))
+        self.assertEqual(self.db.row(self.cid)["error_message"], T.S27)
+
+    async def test_finish_resume_crash_refuses_after_two_attempts(self):
+        await self._resumed()
+        self.assertEqual((await self.ccall("finish", {"outcome": "host_unfit", "reason": "resume_crash"}))[1],
+                         {"status": "requeued"})
+        self.assertEqual(self.db.kept(self.pid)["bad_attempts"], [f"{self.cid}:1"])
+        await self._resumed(attempt_no=2)
+        status, body = await self.ccall("finish", {"outcome": "host_unfit", "reason": "resume_crash"}, attempt="2")
+        self.assertEqual((status, body), (200, {"status": "failed"}))
+        self.assertEqual((self.db.row(self.cid)["status"], self.db.row(self.cid)["error_message"]),
+                         ("failed", T.S27))
+        self.assertEqual(self.db.kept(self.pid)["state"], "refused")
+
+
+class TimeCapPublish(WorkerBase):
+    async def test_finish_time_cap_publishes_or_fails(self):
+        # cap bound + a ready checkpoint → published, NO failed log
+        self.db.add_checkpoint(self.tid, 1, 42500, state="ready", manifest={})
+        await self.call("start", {"lock_sha256": LOCK, "build": "b"})  # records the cap bound
+        status, body = await self.call("finish", {"outcome": "failed", "reason": "time_cap"})
+        self.assertEqual((status, body), (200, {"status": "publishing"}))
+        self.assertEqual(self.db.attempt(self.tid, 1)["end_reason"], "capped")
+        self.assertEqual(self.published, [(self.tid, 1)])
+        self.assertEqual(self.logs, [], "no failed log when published")
+        self.assertIn("pod1", self.rp.deletes())
+
+    async def test_finish_wall_cap_publishes(self):
+        self.db.row(self.tid)["requested_at"] = self.clock.iso(self.clock.t - 40000)  # the wall term bounds
+        self.db.add_checkpoint(self.tid, 1, 42500, state="ready", manifest={})
+        status, body = await self.call("finish", {"outcome": "failed", "reason": "time_cap"})
+        self.assertEqual((status, body), (200, {"status": "publishing"}))
+        self.assertEqual(self.db.attempt(self.tid, 1)["end_reason"], "wall_capped")
+
+    async def test_finish_wall_cap_without_a_checkpoint_is_s6_and_a_failed_log(self):
+        self.db.row(self.tid)["requested_at"] = self.clock.iso(self.clock.t - 40000)
+        status, body = await self.call("finish", {"outcome": "failed", "reason": "time_cap"})
+        self.assertEqual((status, body), (200, {"status": "failed"}))
+        self.assertEqual(self.db.row(self.tid)["error_message"], T.S6)
+        self.assertEqual(self.logs, [self.tid])
 
 
 class MainWiring(unittest.TestCase):

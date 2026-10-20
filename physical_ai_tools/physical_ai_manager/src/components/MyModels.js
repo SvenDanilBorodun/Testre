@@ -5,6 +5,8 @@ import toast from 'react-hot-toast';
 import { cancelCloudTraining } from '../services/cloudTrainingApi';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { setSelectedTrainingId } from '../features/training/trainingSlice';
+import ContinueTrainingButton from './ContinueTrainingButton';
+import { CONTINUE_DE } from '../features/training/continuation';
 import Icon from './icons/Icon';
 import { Led } from './sucher';
 import { releasePointerFocus } from './sucher/pointerFocus';
@@ -34,7 +36,7 @@ const STATUS_CONFIG = {
   canceled: { icon: 'cancel', color: 'text-gray-400', bg: 'bg-gray-50', label: 'Abgebrochen' },
 };
 
-function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, selected, onSelect }) {
+function ModelCard({ job, jobs, remaining, onContinued, rosConnected, onDownload, downloadingModel, onCancel, selected, onSelect }) {
   const config = STATUS_CONFIG[job.status] || STATUS_CONFIG.queued;
   const isActive = job.status === 'queued' || job.status === 'running';
   const isSucceeded = job.status === 'succeeded';
@@ -89,6 +91,16 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
           </span>
         )}
         <span className="su-lab">{job.model_type}</span>
+        {job.continued_from != null && (
+          <span className="su-lab">
+            {(() => {
+              const parent = (jobs || []).find((j) => j.id === job.continued_from);
+              return parent && Number.isInteger(parent.capped_step)
+                ? CONTINUE_DE.continuedFrom(parent.capped_step)
+                : CONTINUE_DE.continuationChip;
+            })()}
+          </span>
+        )}
       </div>
 
       {/* Dataset */}
@@ -142,6 +154,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
       <div className="su-model__actions" onClick={(e) => e.stopPropagation()}>
         {isSucceeded && (
           <>
+            <ContinueTrainingButton job={job} jobs={jobs} remaining={remaining} onContinued={onContinued} />
             <button
               type="button"
               onClick={(e) => { releasePointerFocus(e); onDownload(job.model_name); }}
@@ -193,7 +206,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
   );
 }
 
-export default function MyModels({ jobs = [], loading = false, refetch, isRealtime = false }) {
+export default function MyModels({ jobs = [], loading = false, refetch, isRealtime = false, remaining, onContinued }) {
   const dispatch = useDispatch();
   const session = useSelector((state) => state.auth.session);
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
@@ -339,6 +352,9 @@ export default function MyModels({ jobs = [], loading = false, refetch, isRealti
             <ModelCard
               key={job.id}
               job={job}
+              jobs={jobs}
+              remaining={remaining}
+              onContinued={onContinued}
               rosConnected={rosConnected}
               onDownload={handleDownload}
               downloadingModel={downloadingModel}

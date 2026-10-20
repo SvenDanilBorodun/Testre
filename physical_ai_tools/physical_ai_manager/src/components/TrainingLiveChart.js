@@ -28,6 +28,7 @@ import {
   estimateEtaSeconds,
 } from './trainingLiveChartUtils';
 import Icon from './icons/Icon';
+import ContinueTrainingButton from './ContinueTrainingButton';
 
 // Re-exported so existing importers (TrainingPage + the gate test) keep working
 // after the pure helpers moved into trainingLiveChartUtils.
@@ -245,7 +246,7 @@ function LossChart({ history, totalSteps, currentStep, currentLoss, isRunning, i
 
 // ---------- main component ----------
 
-export default function TrainingLiveChart({ jobs, isRealtime }) {
+export default function TrainingLiveChart({ jobs, isRealtime, remaining, onContinued }) {
   const dispatch = useDispatch();
   const selectedId = useSelector((s) => s.training.selectedTrainingId);
   const job = useMemo(() => pickSelectedJob(jobs, selectedId), [jobs, selectedId]);
@@ -280,12 +281,14 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
 
   // The API's German line for a training between GPU servers or being
   // published (`trainings.status_note`, migration 049). Active jobs only: a
-  // finished job's last note would describe a state that is over.
+  // finished job's last note would describe a state that is over — a finished,
+  // capped row's note (S23/S29) is rendered by ContinueTrainingButton instead.
   const statusNote = isActive && typeof job.status_note === 'string' && job.status_note.trim()
     ? job.status_note
     : null;
 
-  const heroPct = isSucceeded ? 100 : pct;
+  // A capped parent shows its real percentage, never „100 %" (owner E32, review m2).
+  const heroPct = isSucceeded && !Number.isInteger(job.capped_step) ? 100 : pct;
 
   // Middle hero stat: remaining time while running, else final progress %.
   const middle = isRunning
@@ -385,6 +388,10 @@ export default function TrainingLiveChart({ jobs, isRealtime }) {
             <HeroStat label={middle.label} value={middle.value} />
             <HeroStat label="Vergangen" value={formatDuration(elapsed)} />
           </div>
+
+          {isSucceeded && (
+            <ContinueTrainingButton job={job} jobs={jobs} remaining={remaining} onContinued={onContinued} />
+          )}
 
           {statusNote && (
             <p className="su-trn-note" role="status">

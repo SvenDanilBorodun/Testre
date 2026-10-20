@@ -50,6 +50,8 @@ const EXPECTED = [
   'id', 'status', 'model_name', 'model_type', 'dataset_name', 'current_step', 'total_steps',
   'current_loss', 'loss_history', 'error_message', 'requested_at', 'terminated_at',
   'last_progress_at', 'workgroup_id', 'status_note',
+  // 050: the three continuation columns (owner E32–E37), granted by name.
+  'capped_step', 'continuable_until', 'continued_from',
 ];
 
 describe('useSupabaseTrainings LIVE_COLUMNS', () => {

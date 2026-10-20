@@ -62,6 +62,7 @@ HANDLER_PY = MODAL_TRAINING / "training_handler.py"
 MIGRATIONS = SETUP / "supabase" / "migrations"
 MIGRATION_047 = MIGRATIONS / "20261020120000_047_hide_worker_token.sql"
 MIGRATION_049 = MIGRATIONS / "20261020130000_049_managed_training.sql"
+MIGRATION_050 = MIGRATIONS / "20261021120000_050_training_continuation.sql"
 LIVE_JS = (REPO_ROOT / "physical_ai_tools" / "physical_ai_manager" / "src" / "hooks"
            / "useSupabaseTrainings.js")
 MY_MODELS_JS = (REPO_ROOT / "physical_ai_tools" / "physical_ai_manager" / "src" / "components"
@@ -70,6 +71,7 @@ GERMAN_LINT_PY = REPO_ROOT / ".github" / "scripts" / "german_detail_lint.py"
 
 OWNERS = {
     ARTIFACT_VALIDATION_PY: "WP-A", TEXTS_PY: "WP-A", MIGRATION_047: "WP-A", MIGRATION_049: "WP-A",
+    MIGRATION_050: "v2.33.0 WP-B",
     HANDLER_PY: "WP-B", CHUNK_ENGINE_PY: "WP-C", CLOUD_PROTOCOL_PY: "Cloud-Inferenz",
     LIVE_JS: "WP-C", MY_MODELS_JS: "WP-C", GERMAN_LINT_PY: "CI",
 }
@@ -1091,12 +1093,18 @@ class TheLiveColumnsAreGranted(unittest.TestCase):
     def test_every_live_column_is_granted_and_the_token_never(self):
         live = self._live_columns()
         self.assertNotIn("*", "".join(live))
-        g047, g049 = self._granted(MIGRATION_047), self._granted(MIGRATION_049)
+        g047, g049, g050 = (self._granted(MIGRATION_047), self._granted(MIGRATION_049),
+                            self._granted(MIGRATION_050))
+        granted = g047 | g049 | g050
         self.assertTrue(g047, "047 grants no column list on trainings")
         self.assertIn("status_note", g049, "049 grants status_note")
-        self.assertNotIn("worker_token", g047 | g049)
-        self.assertEqual([c for c in live if c not in g047 | g049], [],
-                         "a column the live read selects is granted by neither 047 nor 049 (42501 for students)")
+        # 050's three continuation columns (owner E32–E37) are granted by name.
+        for col in ("capped_step", "continuable_until", "continued_from"):
+            self.assertIn(col, g050, f"050 grants {col}")
+            self.assertIn(col, live, f"LIVE_COLUMNS selects {col}")
+        self.assertNotIn("worker_token", granted)
+        self.assertEqual([c for c in live if c not in granted], [],
+                         "a column the live read selects is granted by none of 047/049/050 (42501 for students)")
 
 
 class TheMatchersHaveTeeth(unittest.TestCase):

@@ -66,6 +66,14 @@ class AssertionHeaders(unittest.TestCase):
         # fixed, this fails and the headers' patch paragraph goes.
         self.assertEqual(baseline.count(_UNGUARDED), 1)
 
+    def test_the_050_header_names_the_049_assertions_050_breaks(self):
+        header = _header((_TESTS / '050_training_continuation_assertions.sql').read_text(encoding='utf-8'))
+        # the 049 labels E50's charging change breaks, and the counts at 049 and after 050.
+        for label in ('T1', 'T5a', 'T5d', 'T29b', 'T35b', 'T36a', 'T36b'):
+            self.assertIn(label, header)
+        self.assertIn('69 PASS', header)
+        self.assertIn('62 PASS', header)
+
     def test_the_041_header_names_the_040_assertions_041_breaks(self):
         header = _header((_TESTS / '041_code_destinations_assertions.sql').read_text(encoding='utf-8'))
         for label in ('T4b', 'T8'):

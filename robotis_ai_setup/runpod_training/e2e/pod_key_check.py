@@ -120,11 +120,17 @@ def ok2(status):
 
 
 def env_has_canary(pod):
+    # REST answers env as an object; GraphQL's `env` is [String] of "KEY=value"
+    # (docs.runpod.io/sdks/graphql/manage-pods); a {key, value} list is accepted too.
     env = pod.get("env") if isinstance(pod, dict) else None
     if isinstance(env, dict):
         return CANARY_NAME in env
     if isinstance(env, list):
-        return any(isinstance(i, dict) and i.get("key") == CANARY_NAME for i in env)
+        for i in env:
+            if isinstance(i, str) and i.split("=", 1)[0].strip() == CANARY_NAME:
+                return True
+            if isinstance(i, dict) and i.get("key") == CANARY_NAME:
+                return True
     return False
 
 
@@ -187,6 +193,12 @@ def gql_env_has_canary(parsed):
     return False
 
 
+def gql_pod_env_has_canary(parsed):
+    data = (parsed or {}).get("data") if isinstance(parsed, dict) else None
+    node = (data or {}).get("pod") if isinstance(data, dict) else None
+    return isinstance(node, dict) and node.get("id") == TARGET and env_has_canary(node)
+
+
 # ----- per-surface runs ----------------------------------------------------
 def run_rest(tag, base, create_body):
     results = {}
@@ -232,16 +244,18 @@ def run_rest(tag, base, create_body):
 
 def run_gql(create_body):
     results = {}
-    s, got = gql_call('query{pod(input:{podId:"%s"}){id env{key value}}}' % OWN)
+    # `env` is a plain [String] field: a sub-selection is a validation error (M1).
+    s, got = gql_call('query{pod(input:{podId:"%s"}){id name}}' % OWN)
     results["own_get"] = classify_gql(s, got, "pod")
     out("check", surface="graphql", name="own_get", verdict=results["own_get"])
-    s, listed = gql_call("query{myself{pods{id name env{key value}}}}")
+    s, listed = gql_call("query{myself{pods{id name env}}}")
     results["list"] = classify_gql(s, listed, "myself")
     out("check", surface="graphql", name="list", verdict=results["list"],
         target_env_visible=gql_env_has_canary(listed))
-    s, got = gql_call('query{pod(input:{podId:"%s"}){id env{key value}}}' % TARGET)
+    s, got = gql_call('query{pod(input:{podId:"%s"}){id name env}}' % TARGET)
     results["target_get"] = classify_gql(s, got, "pod")
-    out("check", surface="graphql", name="target_get", verdict=results["target_get"])
+    out("check", surface="graphql", name="target_get", verdict=results["target_get"],
+        target_env_visible=gql_pod_env_has_canary(got))
     s, _ = gql_call('mutation{podStop(input:{podId:"%s"}){id}}' % TARGET)
     results["target_stop"] = classify_gql(s, _, "podStop")
     out("check", surface="graphql", name="target_stop", verdict=results["target_stop"])
@@ -337,17 +351,26 @@ def build_bodies(*, a_gpu_id: str, cpu_flavor: str, vcpu: int, canary: str, a_cl
     c = {"name": "edubotics-e49-c", "image": BASE_IMAGE, "cloud": "SECURE",
          "cpu": {"id": cpu_flavor, "vcpuCount": int(vcpu)}, "entrypoint": ["sleep", "infinity"],
          "ports": [], "startSsh": False, "startJupyter": False, "disk": 10}
-    gql_create = json.dumps({"cloudType": "SECURE", "gpuCount": 1, "name": "edubotics-e49-c", "imageName": BASE_IMAGE})
-    # GraphQL's input object is unquoted keys; the probe splices it verbatim.
-    gql_input = "{cloudType:SECURE,gpuCount:1,name:\"edubotics-e49-c\",imageName:\"%s\"}" % BASE_IMAGE
+    # REST v1 has its own create body (docs.runpod.io/api-reference/pods/POST/pods): a CPU pod
+    # is computeType CPU + cpuFlavorIds; the v2 keys (image, cloud, cpu, entrypoint) are not v1's.
+    c_v1 = {"name": "edubotics-e49-c", "imageName": BASE_IMAGE, "cloudType": "SECURE",
+            "computeType": "CPU", "cpuFlavorIds": [cpu_flavor], "vcpuCount": int(vcpu),
+            "dockerEntrypoint": ["sleep", "infinity"], "containerDiskInGb": 10, "volumeInGb": 0, "ports": []}
+    # GraphQL has no documented CPU-pod mutation: podFindAndDeployOnDemand creates a GPU pod and
+    # names its gpuTypeId (docs.runpod.io/sdks/graphql/manage-pods). Pod A's own card and cloud,
+    # where stock was just found; a key that CAN create gets one more pod, deleted by the launcher.
+    # The input object has unquoted keys and enum values; the probe splices it verbatim.
+    gql_input = ("{cloudType:%s,gpuCount:1,volumeInGb:0,containerDiskInGb:10,gpuTypeId:%s,"
+                 "name:\"edubotics-e49-c\",imageName:%s,dockerArgs:\"sleep infinity\"}"
+                 % (a_cloud, json.dumps(a_gpu_id), json.dumps(BASE_IMAGE)))
     a = {"name": "edubotics-e49-a", "image": BASE_IMAGE, "cloud": a_cloud,
          "gpu": {"id": a_gpu_id, "count": 1, "minCudaVersion": "12.6"}, "dataCenterIds": [],
          "entrypoint": list(BOOTSTRAP), "ports": [], "startSsh": False, "startJupyter": False, "disk": 10,
          "env": {"E49_TARGET_POD_ID": "", "E49_SURFACES": "",
                  "E49_PROBE_B64": base64.b64encode(PROBE_SOURCE.encode()).decode(),
-                 "E49_CREATE_BODY_V2": json.dumps(c), "E49_CREATE_BODY_V1": json.dumps(c),
+                 "E49_CREATE_BODY_V2": json.dumps(c), "E49_CREATE_BODY_V1": json.dumps(c_v1),
                  "E49_CREATE_BODY_GQL": gql_input}}
-    return {"a_template": a, "b": b, "c": c, "gql_create": gql_create}
+    return {"a_template": a, "b": b, "c": c, "c_v1": c_v1, "gql_create": gql_input}
 
 
 def canary_key() -> str:
@@ -474,9 +497,16 @@ def _read_log_lines(key, pod_id, timeout_s):
         conn = (http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection)(
             parsed.netloc, timeout=5)
         try:
-            conn.request("GET", parsed.path + ("?" + parsed.query if parsed.query else ""), headers=headers)
-            resp = conn.getresponse()
-            fp = resp.fp
+            try:
+                conn.request("GET", parsed.path + ("?" + parsed.query if parsed.query else ""), headers=headers)
+                resp = conn.getresponse()
+            except Exception:
+                # a refused or dropped connection: retry until the deadline (verifier m2b)
+                time.sleep(1)
+                continue
+            # HTTPResponse.readline is chunk-aware; resp.fp (the raw socket) is not, and
+            # loses an event split across two chunks (verifier m2a).
+            fp = resp
             event_id = None
             while time.time() < deadline:
                 try:
@@ -594,7 +624,13 @@ def main(argv=None) -> int:
         if not (args.key_file and args.a_gpu and args.cpu_flavor):
             parser.error("--run needs --key-file, --a-gpu and --cpu-flavor")
         surfaces = tuple(x.strip() for x in args.surfaces.split(",") if x.strip())
-        return run(args.key_file, args.a_gpu, args.cpu_flavor, args.vcpu, a_cloud=args.a_cloud, surfaces=surfaces)
+        try:
+            return run(args.key_file, args.a_gpu, args.cpu_flavor, args.vcpu, a_cloud=args.a_cloud,
+                       surfaces=surfaces)
+        except Exception as e:
+            # 1 means „the key is not confined"; a failure of the tool proves nothing (verifier m2b).
+            print("E49 launcher: failed (%s); exit 2, repeat the check" % type(e).__name__, file=sys.stderr)
+            return 2
     parser.error("pass --dry-run or --run")
     return 2
 

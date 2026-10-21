@@ -109,7 +109,7 @@ LANGUAGE_CONDITIONED_POLICIES = frozenset({"pi0", "pi05", "pi0_fast", "smolvla"}
 # full ~2.9B FT is timeout-bound) and the tightest batch (memory ceiling).
 POLICY_PROFILE: dict[str, dict] = {
     # ACT is pinned to batch 8 (D4, E2): the managed path's resume, its measured
-    # steps/s and the 4 h cap assume it; a student's other value is ignored.
+    # steps/s and the 3.5 h cap (owner E32) assume it; a student's other value is ignored.
     "act":       {"gpu_tier": GPU_L4,   "policy_flags": [], "batch_min": 8, "batch_max": 8},
     "diffusion": {"gpu_tier": GPU_L4,   "policy_flags": []},
     "vqbet":     {"gpu_tier": GPU_L4,   "policy_flags": []},

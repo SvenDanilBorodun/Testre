@@ -7,7 +7,8 @@ HTTP API with them. They are passed around as NAMES (``detail=S10``), so
 ``.github/scripts/german_detail_lint.py`` cannot see them; the umlaut rule is
 fenced by ``robotis_ai_setup/tests/test_managed_training_lockstep.py`` (every
 ``S*`` constant: no ae/oe/ue/ss transliteration, at least one German marker).
-S17 is duplicated in the robot's ``chunk_engine.py`` (same test). The worker
+S17 is duplicated in the robot's ``chunk_engine.py`` (same test). S22–S29 are
+the cap, wall and continuation sentences (owner E33–E37, E43–E44). The worker
 defines no German sentence for the database (E11): a host's own text never
 reaches ``error_message``.
 
@@ -79,6 +80,25 @@ S21 = (
     "erstattet – bitte starte das Training neu."
 )
 
+# --- the cap, the wall and the continuation (owner E33–E37, E43–E44) --------
+S22 = "Zeitlimit erreicht – der letzte Zwischenstand wird geprüft und veröffentlicht …"
+S23 = "Nach {hours} Stunden bei Schritt {step} von {total} gestoppt – du kannst das Training fortsetzen."
+S24 = (
+    "Der gespeicherte Zwischenstand ist abgelaufen oder nicht mehr nutzbar – das Training kann nicht mehr "
+    "fortgesetzt werden. Bitte starte ein neues Training."
+)
+S25 = "Dieses Training wird bereits fortgesetzt."
+S26 = "Dieses Training kann zurzeit nicht fortgesetzt werden."
+S27 = (
+    "Der gespeicherte Zwischenstand ist nicht mehr nutzbar. Das Trainingsguthaben wurde erstattet – "
+    "bitte starte das Training neu."
+)
+S28 = "Fortsetzung ab Schritt {step} – ein GPU-Server wird dafür gesucht …"
+S29 = (
+    "Das Zeitlimit von 12 Stunden seit dem Start wurde bei Schritt {step} von {total} erreicht – "
+    "du kannst das Training fortsetzen."
+)
+
 # --- other API answers of the managed path (not numbered in the spec) -------
 TRAINING_NOT_FOUND_DE = "Training nicht gefunden."
 TRAINING_NOT_ACTIVE_DE = "Training ist nicht aktiv."
@@ -108,6 +128,18 @@ def s1(step: int) -> str:
 
 def s5(cap_s: int) -> str:
     return S5.format(hours=hours_text(cap_s))
+
+
+def s23(cap_s: int, step: int, total: int) -> str:
+    return S23.format(hours=hours_text(cap_s), step=format_step(step), total=format_step(total))
+
+
+def s28(step: int) -> str:
+    return S28.format(step=format_step(step))
+
+
+def s29(step: int, total: int) -> str:
+    return S29.format(step=format_step(step), total=format_step(total))
 
 
 def loss_note(resume_step: int) -> str:

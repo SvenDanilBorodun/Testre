@@ -1,8 +1,11 @@
 """Managed ACT training: settings, dispatcher, sweep, reaper (spec §3.6, §3.8, §4.2, §4.3).
 
-A managed row (``trainings.managed``) is placed attempt by attempt: RunPod
-Community (EEA requested) → RunPod Secure (EEA, GDPR, verified) → Modal L4,
-attempt ``MAX_ATTEMPTS`` always on Modal. Every state change of such a row is
+A managed row (``trainings.managed``) is placed attempt by attempt, cheapest
+first (owner E42): RunPod Community in any region, then RunPod Secure in the EU
+GDPR data centres, then RunPod Secure in any region, and only while
+``MANAGED_MODAL_RUNG=1`` a last rung on Modal L4 (then attempt ``MAX_ATTEMPTS``
+is Modal-only). Without a usable rung a row waits and ends with S18 after
+``PLACEMENT_GIVEUP_S`` (owner E29–E31). Every state change of such a row is
 one of migration 049's compare-and-set functions (P0049 = another instance or
 the sweep was first; never an error). What lives in memory here (caches,
 skip lists, the "two rounds" counters, the delete retry set) only ever costs a
@@ -14,7 +17,8 @@ or a managed row is non-terminal, §3.8 / FR-3; off with
 
 * dispatcher (``DISPATCH_INTERVAL_S`` and on ``kick()``): §4.2;
 * sweep (``SWEEP_INTERVAL_S``): losses, caps, the placement guard, publish
-  recovery, mirrors, the janitor, failed-log uploads (§4.3, TR-2/TR-3);
+  recovery, mirrors, the janitor (with the kept-checkpoint expiry), failed-log
+  uploads (§4.3, TR-2/TR-3);
 * reaper (``REAPER_INTERVAL_S``): every pod we created that is not the attached
   current attempt of an active row is deleted (§4.3, SR-8);
 * the HF write check and the RunPod boot probe (every 10 min until good).
@@ -52,6 +56,15 @@ BOOT_ID = uuid.uuid4().hex
 # ---------------------------------------------------------------------------
 SAVE_FREQ = 2500
 MIRROR_EVERY = 10000
+# Owner E36: a kept continuable checkpoint lives 7 days; the janitor deletes it
+# this long after expiry (any child created before expiry has capped or failed by
+# then), and the bucket's keep/ rule (9 days) is the floor.
+KEEP_S = 7 * 86400
+# The two cap end_reasons live ONLY here; every other site reads the names (review m2).
+END_CAPPED = "capped"
+END_WALL_CAPPED = "wall_capped"
+CAP_END_REASONS = (END_CAPPED, END_WALL_CAPPED)
+PUBLISH_END_REASONS = ("succeeded",) + CAP_END_REASONS
 # An ACT start under TRAINING_DISPATCH=legacy ignores the client's num_workers and
 # save_freq too (owner E3: the form no longer shows them for ACT, yet still sends
 # whatever the browser stored): today's fresh-form defaults
@@ -62,7 +75,7 @@ LEGACY_ACT_SAVE_FREQ = 10000
 ACT_BATCH = 8
 MAX_ATTEMPTS = 4
 COMMUNITY_LOSS_LIMIT = 2
-MANAGED_ACT_CAP_S = 14400
+MANAGED_ACT_CAP_S = 12600  # 3.5 h of training time per credit (owner E32; still a setting)
 WALL_CAP_S = 43200
 HEARTBEAT_INTERVAL_S = 15
 HEARTBEAT_LOST_S = 300
@@ -85,7 +98,6 @@ RESUME_CRASH_LIMIT = 2
 START_LOOP_MAX = 5
 MAX_CREATES_PER_TICK = 6
 CREATE_400_CACHE_S = 300
-DC_TABLE_CACHE_S = 600
 REAPER_SURVIVOR_ROUNDS = 3
 REAPER_PAGE_ROWS = 1000            # PostgREST's default max_rows (V1-7)
 REAPER_MAX_PAGES = 100             # a reply that never ends skips the round
@@ -93,6 +105,9 @@ MIRROR_LEASE_S = 900
 HF_CHECK_TIMEOUT_S = 10
 FINAL_UPLOAD_WAIT_S = 1080
 WATCHDOG_GRACE_S = 1200
+# The janitor deletes a kept copy only this long after its expiry (§6.4 G): a child
+# created before expiry has hit its own 12 h wall + grace by then.
+KEEP_DELETE_GRACE_S = WALL_CAP_S + WATCHDOG_GRACE_S
 PUT_TTL_S = 900
 GET_TTL_S = 3600
 MIN_FREE_DISK_B = 30 * 1024**3
@@ -105,7 +120,8 @@ START_TIMEOUT_GRACE_S = 300        # the dispatcher's own cap margin (§4.2 step
 JANITOR_WINDOW_S = 7 * 86400       # terminal rows the janitor revisits (R2 lifecycle is the backstop)
 # train_managed's Modal timeout is fixed at 7 h in code (§4.9, TR-8 n11).
 MODAL_TIMEOUT_S = 7 * 3600
-MANAGED_CAP_CEILING_S = MODAL_TIMEOUT_S - FINAL_UPLOAD_WAIT_S - 600  # 23 520 s
+MANAGED_CAP_CEILING_S = MODAL_TIMEOUT_S - FINAL_UPLOAD_WAIT_S - 600  # 23 520 s: with the Modal rung
+MANAGED_CAP_CEILING_RUNPOD_S = WALL_CAP_S  # without the Modal rung a cap past the wall clock could never bind
 
 HF_ORG = "EduBotics-Solutions"
 TRAINER_IMAGE_PREFIX = "ghcr.io/svendanilborodun/edubotics-trainer"
@@ -119,6 +135,12 @@ RUNG_MODAL = "modal"
 RUNGS = (RUNG_COMMUNITY, RUNG_SECURE, RUNG_MODAL)
 RUNPOD_RUNGS = (RUNG_COMMUNITY, RUNG_SECURE)
 RUNG_CLOUD = {RUNG_COMMUNITY: "COMMUNITY", RUNG_SECURE: "SECURE"}
+# The emergency rung (owner E29): appended last only while MANAGED_MODAL_RUNG=1.
+MODAL_RUNG_ENTRY = {"rung": RUNG_MODAL}
+# Owner E42: the scopes each RunPod rung is asked in, in order. Community is asked
+# worldwide only (its EEA-scoped catalog is always empty).
+SCOPE_EEA, SCOPE_WORLD = "eea", "world"
+RUNG_SCOPES = {RUNG_COMMUNITY: (SCOPE_WORLD,), RUNG_SECURE: (SCOPE_EEA, SCOPE_WORLD)}
 
 DEFAULT_LADDER = [
     {"rung": RUNG_COMMUNITY, "gpus": [
@@ -134,7 +156,6 @@ DEFAULT_LADDER = [
         {"id": "NVIDIA RTX A4000", "min_vcpu": 6}, {"id": "NVIDIA RTX 4000 Ada Generation", "min_vcpu": 6},
         {"id": "NVIDIA GeForce RTX 3090", "min_vcpu": 8}, {"id": "NVIDIA RTX A6000", "min_vcpu": 8},
         {"id": "NVIDIA GeForce RTX 4090", "min_vcpu": 8}]},
-    {"rung": RUNG_MODAL},
 ]
 
 ACTIVE_STATES = ("placing", "starting", "running")
@@ -143,8 +164,10 @@ TERMINAL_STATUSES = ("succeeded", "failed", "canceled")
 TRAINING_COLUMNS = (
     "id, user_id, status, managed, current_attempt, train_seconds_used, status_note, step_advanced_at, "
     "dataset_fps, unplaced_since, requested_at, last_progress_at, total_steps, training_params, "
-    "model_name, dataset_name, terminated_at, log_url, cancel_attempts, current_step"
+    "model_name, dataset_name, terminated_at, log_url, cancel_attempts, current_step, "
+    "capped_step, continuable_until, continued_from"
 )
+KEPT_COLUMNS = "training_id, step, manifest, state, kept_at, expires_at, refused_reason, bad_attempts"
 ATTEMPT_COLUMNS = (
     "training_id, attempt_no, backend, cloud_ref, gpu_type, data_center, cuda_version, cost_per_hr, state, "
     "created_at, started_at, first_heartbeat_at, ended_at, end_reason, resume_from_step, resume_from_attempt, "
@@ -175,6 +198,8 @@ class Settings:
     runpod_api_key: str = ""
     trainer_image: str = ""
     ladder: tuple = ()
+    modal_rung: bool = False     # MANAGED_MODAL_RUNG=1 was asked for (owner E29)
+    cap_clamped_from: int | None = None  # the configured cap when E43 clamped it
     pod_prefix: str = "edubotics-train"
     max_runpod_pods: int = 30
     start_deadline_s: int = 1200
@@ -193,6 +218,10 @@ class Settings:
     def has_runpod_rung(self) -> bool:
         return any(r["rung"] in RUNPOD_RUNGS for r in self.ladder)
 
+    @property
+    def has_modal_rung(self) -> bool:
+        return any(r["rung"] == RUNG_MODAL for r in self.ladder)
+
     def rung_gpus(self, rung: str) -> list:
         for r in self.ladder:
             if r["rung"] == rung:
@@ -200,9 +229,10 @@ class Settings:
         return []
 
 
-def parse_ladder(raw) -> tuple:
-    """RUNPOD_LADDER (JSON) or the default, validated (§3.6): a list; each rung
-    once; modal present and last; gpus non-empty lists of {id, min_vcpu 1–32}."""
+def parse_ladder(raw, *, modal_rung: bool = False) -> tuple:
+    """RUNPOD_LADDER (JSON) or the default, validated: a non-empty list; each rung
+    once; modal only with MANAGED_MODAL_RUNG=1 and then last (appended when
+    absent); gpus non-empty lists of {id, min_vcpu 1–32}."""
     if raw is None or raw == "":
         data = json.loads(json.dumps(DEFAULT_LADDER))
     else:
@@ -238,9 +268,19 @@ def parse_ladder(raw) -> tuple:
                 raise SettingsError("RUNPOD_LADDER: a gpu entry is not {id, min_vcpu 1-32}")
             clean.append({"id": g["id"], "min_vcpu": g["min_vcpu"]})
         out.append({"rung": rung, "gpus": clean})
-    if RUNG_MODAL not in seen or seen[-1] != RUNG_MODAL:
-        raise SettingsError("RUNPOD_LADDER: modal must be present and last")
+    if RUNG_MODAL in seen:
+        if seen[-1] != RUNG_MODAL:
+            raise SettingsError("RUNPOD_LADDER: modal must be last")
+        if not modal_rung:
+            raise SettingsError("RUNPOD_LADDER names modal, which needs MANAGED_MODAL_RUNG=1")
+    elif modal_rung:
+        out.append(dict(MODAL_RUNG_ENTRY))
     return tuple(out)
+
+
+def cap_ceiling(ladder) -> int:
+    """The largest MANAGED_ACT_CAP_S this ladder can honour."""
+    return MANAGED_CAP_CEILING_S if any(r["rung"] == RUNG_MODAL for r in ladder) else MANAGED_CAP_CEILING_RUNPOD_S
 
 
 def _int_env(env, name, default, lo=1, hi=None):
@@ -256,6 +296,15 @@ def _int_env(env, name, default, lo=1, hi=None):
     return value
 
 
+def _flag_env(env, name) -> bool:
+    raw = (env.get(name) or "").strip()
+    if raw in ("", "0"):
+        return False
+    if raw == "1":
+        return True
+    raise SettingsError(f"{name} must be 0 or 1")
+
+
 def load_settings(env=None) -> Settings:
     """Parse and validate every managed-training variable. Raises SettingsError
     for a MALFORMED value whatever TRAINING_DISPATCH says; required-but-missing
@@ -264,7 +313,8 @@ def load_settings(env=None) -> Settings:
     dispatch = (env.get("TRAINING_DISPATCH") or "legacy").strip()
     if dispatch not in ("legacy", "managed"):
         raise SettingsError("TRAINING_DISPATCH must be legacy or managed")
-    ladder = parse_ladder(env.get("RUNPOD_LADDER"))
+    modal_rung = _flag_env(env, "MANAGED_MODAL_RUNG")
+    ladder = parse_ladder(env.get("RUNPOD_LADDER"), modal_rung=modal_rung)
     e2e = env.get("TRAINING_E2E") == "1"
     save_freq = _int_env(env, "TRAINING_SAVE_FREQ", SAVE_FREQ)
     mirror_every = _int_env(env, "TRAINING_MIRROR_EVERY", MIRROR_EVERY)
@@ -276,8 +326,12 @@ def load_settings(env=None) -> Settings:
     elif mirror_every % save_freq != 0:
         raise SettingsError("TRAINING_MIRROR_EVERY must be a positive multiple of TRAINING_SAVE_FREQ")
     cap_s = _int_env(env, "MANAGED_ACT_CAP_S", MANAGED_ACT_CAP_S)
-    if any(r["rung"] == RUNG_MODAL for r in ladder) and cap_s > MANAGED_CAP_CEILING_S:
-        raise SettingsError("MANAGED_ACT_CAP_S exceeds the Modal ceiling (7 h minus the final-upload wait and 600 s)")
+    cap_clamped_from = None
+    if any(r["rung"] == RUNG_MODAL for r in ladder):
+        if cap_s > MANAGED_CAP_CEILING_S:          # E43: an emergency switch never blocks the boot
+            cap_clamped_from, cap_s = cap_s, MANAGED_CAP_CEILING_S
+    elif cap_s > MANAGED_CAP_CEILING_RUNPOD_S:     # not the emergency path: a malformed value
+        raise SettingsError("MANAGED_ACT_CAP_S exceeds the 12 h wall cap")
     prefix = (env.get("RUNPOD_POD_PREFIX") or "edubotics-train").strip()
     if not POD_PREFIX_RE.fullmatch(prefix):
         raise SettingsError("RUNPOD_POD_PREFIX must match ^[a-z0-9-]{3,40}$")
@@ -287,6 +341,13 @@ def load_settings(env=None) -> Settings:
     worker_url = (env.get("TRAINING_WORKER_API_URL") or "").strip().rstrip("/")
     if worker_url and not worker_url.startswith("https://"):
         raise SettingsError("TRAINING_WORKER_API_URL must be an https URL")
+    # The kept continuable copies (keep/) must never be covered by the train/ 3-day
+    # rule: both prefixes end in / and neither is a prefix of the other (§6.2).
+    key_prefix = (env.get("R2_KEY_PREFIX") or "train/").strip()
+    keep_prefix = (env.get("R2_KEEP_PREFIX") or "keep/").strip()
+    if (not key_prefix.endswith("/") or not keep_prefix.endswith("/")
+            or key_prefix.startswith(keep_prefix) or keep_prefix.startswith(key_prefix)):
+        raise SettingsError("R2_KEEP_PREFIX must end with / and must not overlap R2_KEY_PREFIX")
     settings = Settings(
         dispatch=dispatch,
         worker_api_url=worker_url,
@@ -296,6 +357,8 @@ def load_settings(env=None) -> Settings:
         runpod_api_key=(env.get("RUNPOD_API_KEY") or "").strip(),
         trainer_image=image,
         ladder=ladder,
+        modal_rung=modal_rung,
+        cap_clamped_from=cap_clamped_from,
         pod_prefix=prefix,
         max_runpod_pods=_int_env(env, "MAX_RUNPOD_PODS", 30),
         start_deadline_s=_int_env(env, "TRAINING_START_DEADLINE_S", 1200),
@@ -330,6 +393,12 @@ def validate_boot(env=None) -> Settings:
             "TRAINING_E2E=1: managed checkpoints every %d steps, mirrors every %d (an end-to-end stack only, "
             "never production)", settings.save_freq, settings.mirror_every,
         )
+    if settings.modal_rung:
+        logger.warning("MANAGED_MODAL_RUNG=1: the managed ladder ends in Modal train_managed (an emergency setting; "
+                       "unset it when RunPod is usable again)")
+    if settings.cap_clamped_from is not None:
+        logger.warning("MANAGED_ACT_CAP_S is above the Modal ceiling while MANAGED_MODAL_RUNG=1: clamped to "
+                       "MANAGED_CAP_CEILING_S (23520 s, owner E43)")
     if settings.missing:
         if settings.managed:
             raise RuntimeError(
@@ -447,6 +516,16 @@ def final_ready(checkpoints, total_steps: int):
     return None
 
 
+def newest_ready_checkpoint(checkpoints, total_steps: int):
+    """The ready checkpoint with the highest (step, attempt_no) below the total, or None
+    (routes/training_worker.py::_resume_point is this function)."""
+    candidates = [c for c in checkpoints
+                  if c.get("state") == "ready" and int(c.get("step") or 0) < total_steps]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: (int(c.get("step") or 0), int(c.get("attempt_no") or 0)))
+
+
 def sanitize_log_text(text, limit: int = 500) -> str:
     if not isinstance(text, str):
         return ""
@@ -464,10 +543,10 @@ class _State:
     runpod_probe: object = None      # None (unknown) | True | False (401/403)
     runpod_402_until: float = 0.0
     dc_skip: dict = field(default_factory=dict)
+    attempt_gpu: dict = field(default_factory=dict)        # (tid, attempt) -> the ladder card (D1, verifier n4)
     create_400: dict = field(default_factory=dict)
     catalog: dict = field(default_factory=dict)
     gdpr: tuple | None = None
-    dc_table: tuple | None = None
     all_403_logged: bool = False
     pod_count: int = 0
     last_failed_round_at: float = field(default_factory=time.time)
@@ -507,13 +586,14 @@ def runpod_configured(settings: Settings | None = None) -> bool:
     return bool(s.runpod_api_key and s.trainer_image)
 
 
-def skip_dc(dc, now: float | None = None) -> None:
+def skip_dc(cloud, gpu_id, dc, now: float | None = None) -> None:
+    """Skip one host for DC_SKIP_S, keyed (cloud, card, data centre) like the 400 cache (D1)."""
     if dc:
-        STATE.dc_skip[dc] = (now or _now()) + DC_SKIP_S
+        STATE.dc_skip[(cloud, gpu_id, dc)] = (now or _now()) + DC_SKIP_S
 
 
-def _dc_skipped(dc, now: float) -> bool:
-    until = STATE.dc_skip.get(dc)
+def _dc_skipped(cloud, gpu_id, dc, now: float) -> bool:
+    until = STATE.dc_skip.get((cloud, gpu_id, dc))
     return until is not None and until > now
 
 
@@ -533,13 +613,14 @@ def budget_for(row, attempt, now: float, settings: Settings | None = None) -> tu
     return int(cap_left), "cap"
 
 
-def time_cap_sentence(row, attempt, now: float, settings: Settings | None = None) -> str:
-    """`finish {failed, time_cap}` → S6 when the wall term bound at `start`, else S5 (TR-2 n3)."""
+def time_cap_bound(row, attempt, now: float, settings: Settings | None = None) -> str:
+    """`finish {failed, time_cap}` → the bound that limited this attempt: 'wall' when the
+    wall term bound at `start`, else 'cap' (owner E44; TR-2 n3)."""
     s = settings or SETTINGS
     bound = STATE.budget_bound.get((int(row["id"]), int(attempt["attempt_no"])))
     if bound is None:
         _, bound = budget_for(row, attempt, now, s)
-    return T.S6 if bound == "wall" else T.s5(s.cap_s)
+    return bound
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +660,15 @@ def read_attempt(training_id: int, attempt_no: int):
     rows = (
         _sb().table("training_attempts").select(ATTEMPT_COLUMNS)
         .eq("training_id", int(training_id)).eq("attempt_no", int(attempt_no)).execute()
+    ).data or []
+    return rows[0] if rows else None
+
+
+def read_kept(training_id: int):
+    """The kept continuable checkpoint of a parent (training_kept_checkpoints), or None."""
+    rows = (
+        _sb().table("training_kept_checkpoints").select(KEPT_COLUMNS)
+        .eq("training_id", int(training_id)).execute()
     ).data or []
     return rows[0] if rows else None
 
@@ -694,6 +784,12 @@ async def requeue_attempt(row, attempt, reason: str, now: float, checkpoints=Non
     if checkpoints is None:
         checkpoints = await asyncio.to_thread(read_checkpoints, [tid], ["ready"])
     resume = resume_step_from(checkpoints, total)
+    # E: a loss inside a continuation resumes at least from the kept step, so S1
+    # never names a lower step and current_step never falls below it.
+    if row.get("continued_from"):
+        kept = await asyncio.to_thread(read_kept, int(row["continued_from"]))
+        if kept and kept.get("state") == "kept":
+            resume = max(resume, int(kept.get("step") or 0))
     try:
         await arpc("requeue_training", {
             "p_training_id": tid, "p_attempt": int(attempt["attempt_no"]), "p_reason": reason,
@@ -704,8 +800,14 @@ async def requeue_attempt(row, attempt, reason: str, now: float, checkpoints=Non
         logger.info("requeue of training %s attempt %s lost a race", tid, attempt["attempt_no"])
         return False
     logger.info("training %s attempt %s requeued (%s, resume step %s)", tid, attempt["attempt_no"], reason, resume)
-    if skip_community_dc and attempt.get("backend") == RUNG_COMMUNITY:
-        skip_dc(attempt.get("data_center"), now)
+    # D1: a broken host (start_timeout, host_unfit:*, the CUDA guard) is skipped on
+    # both RunPod clouds; the keyword keeps its historic name.
+    key = (tid, int(attempt["attempt_no"]))
+    placed_gpu = STATE.attempt_gpu.pop(key, None)
+    if skip_community_dc and attempt.get("backend") in RUNPOD_RUNGS:
+        # the recorded card, else the one the ladder placed (a failed metadata write, n4)
+        skip_dc(RUNG_CLOUD[attempt["backend"]], attempt.get("gpu_type") or placed_gpu,
+                attempt.get("data_center"), now)
     kick()
     return True
 
@@ -753,24 +855,51 @@ async def on_loss(row, attempt, reason: str, now: float, checkpoints, *, skip_co
     await terminate_attempt(attempt)
 
 
+async def cap_attempt(row, attempt, now: float, checkpoints, *, bound: str) -> str:
+    """A cap (bound 'cap': training time; bound 'wall': the 12 h wall, owner E44) with a
+    ready checkpoint publishes; without one it fails the row (S5 / S6). Returns
+    'published' | 'failed' | 'conflict'. ``checkpoints`` = the row's ready checkpoints."""
+    total = total_steps_of(row)
+    if final_ready(checkpoints, total) is not None:          # the ready-final rule, as today
+        return "published" if await end_attempt_succeeded(row, attempt, now) else "conflict"
+    ck = newest_ready_checkpoint(checkpoints, total)
+    n = int(attempt["attempt_no"])
+    if ck is None:                                           # no checkpoint, no publish
+        msg = T.s5(SETTINGS.cap_s) if bound == "cap" else T.S6
+        return "failed" if await fail_training(row, n, msg) else "conflict"
+    try:
+        await arpc("cap_training_attempt", {
+            "p_training_id": int(row["id"]), "p_attempt": n, "p_step": int(ck["step"]),
+            "p_reason": END_CAPPED if bound == "cap" else END_WALL_CAPPED, "p_note": T.S22,
+            "p_train_seconds": 0 if attempt.get("state") in ("lost", "ended") else attempt_seconds(attempt, now)})
+    except RpcConflict:
+        logger.info("cap of training %s attempt %s lost a race", row["id"], n)
+        return "conflict"
+    from app.services import hf_publish
+
+    hf_publish.schedule_publish(int(row["id"]), n)
+    return "published"
+
+
 # ---------------------------------------------------------------------------
 # RunPod catalog caches
 # ---------------------------------------------------------------------------
 
 
-async def _catalog(cloud: str, now: float):
-    hit = STATE.catalog.get(cloud)
+async def _catalog(cloud: str, now: float, *, worldwide: bool = False):
+    key = (cloud, bool(worldwide))
+    hit = STATE.catalog.get(key)
     if hit and now - hit[0] < CATALOG_CACHE_S:
         return hit[1]
     try:
-        resp = await runpod_client.catalog_gpus(cloud)
+        resp = await runpod_client.catalog_gpus(cloud, worldwide=worldwide)
     except runpod_client.RunpodNetworkError:
         return None
     if resp.status != 200 or not isinstance(resp.body, dict) or not isinstance(resp.body.get("gpus"), list):
         logger.warning("RunPod catalog (%s) answered %s", cloud, resp.status)
         return None
     table = {g.get("id"): g for g in resp.body["gpus"] if isinstance(g, dict)}
-    STATE.catalog[cloud] = (now, table)
+    STATE.catalog[key] = (now, table)
     return table
 
 
@@ -788,29 +917,8 @@ async def _gdpr_dcs(now: float):
     return ids
 
 
-async def dc_regions(now: float):
-    """{data centre id: region} from the unfiltered catalog (the known-outside
-    table, E18, FR-8), cached DC_TABLE_CACHE_S; None when it cannot be read."""
-    if STATE.dc_table and now - STATE.dc_table[0] < DC_TABLE_CACHE_S:
-        return STATE.dc_table[1]
-    try:
-        resp = await runpod_client.datacenters_all()
-    except runpod_client.RunpodNetworkError:
-        return None
-    if resp.status != 200 or not isinstance(resp.body, dict) or not isinstance(resp.body.get("dataCenters"), list):
-        return None
-    table = {d["id"]: d.get("region") for d in resp.body["dataCenters"] if isinstance(d, dict) and d.get("id")}
-    STATE.dc_table = (now, table)
-    return table
-
-
-def known_outside(dc: str, table) -> bool:
-    region = (table or {}).get(dc)
-    return region is not None and region not in ("EUROPE", "UNKNOWN")
-
-
 # ---------------------------------------------------------------------------
-# Placement guard (§4.2, E18, FR-8, TR-8 n8)
+# Placement guard (§4.2, E42, FR-8, TR-8 n8)
 # ---------------------------------------------------------------------------
 
 
@@ -819,37 +927,15 @@ def _parse_cuda(value):
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
-def judge_guard(attempt, pod, table) -> tuple[str, bool]:
-    """``(verdict, final)``: verdict 'refuse' or 'ok'; ``final`` once both the data
-    centre and the CUDA version were judged for good (else the sweep re-judges)."""
+def judge_guard(attempt, pod) -> tuple[str, bool]:
+    """``(verdict, final)``: verdict 'refuse' only for a CUDA version below 12.6; the
+    data centre is recorded, never judged (owner E42); ``final`` once the CUDA version
+    was judged and a data centre is on record."""
     key = (attempt["training_id"], attempt["attempt_no"])
-    backend = attempt.get("backend")
-    allowed = list(attempt.get("allowed_dcs") or [])
     dc = pod.get("dataCenterId")
-    dc_final = False
-    if backend == RUNG_SECURE:
-        if dc is None:
-            if pod.get("status") == "RUNNING":
-                return "refuse", True
-        elif dc not in allowed:
-            return "refuse", True
-        else:
-            dc_final = True
-    else:
-        if dc is None:
-            if (key, "dc-null") not in STATE.guard_warned:
-                STATE.guard_warned.add((key, "dc-null"))
-                logger.warning("training %s attempt %s: Community pod reports no data centre", *key)
-        elif table is None:
-            logger.info("training %s attempt %s: data-centre table unreadable, no verdict on %s", key[0], key[1], dc)
-        elif known_outside(dc, table):
-            return "refuse", True
-        else:
-            if dc not in allowed and (key, "dc-unrequested") not in STATE.guard_warned:
-                STATE.guard_warned.add((key, "dc-unrequested"))
-                logger.warning("training %s attempt %s: Community pod in data centre %s (not requested)",
-                               key[0], key[1], dc)
-            dc_final = True
+    if dc is None and attempt.get("backend") != RUNG_SECURE and (key, "dc-null") not in STATE.guard_warned:
+        STATE.guard_warned.add((key, "dc-null"))
+        logger.info("training %s attempt %s: Community pod reports no data centre", *key)
     cuda = pod.get("cudaVersion")
     cuda_final = False
     if cuda is not None:
@@ -862,7 +948,7 @@ def judge_guard(attempt, pod, table) -> tuple[str, bool]:
             return "refuse", True
         else:
             cuda_final = True
-    return "ok", dc_final and cuda_final
+    return "ok", cuda_final and dc is not None
 
 
 async def apply_guard(row, attempt, pod, now: float, checkpoints) -> bool:
@@ -870,9 +956,6 @@ async def apply_guard(row, attempt, pod, now: float, checkpoints) -> bool:
     key = (int(attempt["training_id"]), int(attempt["attempt_no"]))
     if key in STATE.guard_final:
         return False
-    table = None
-    if attempt.get("backend") == RUNG_COMMUNITY and pod.get("dataCenterId") is not None:
-        table = await dc_regions(now)
     meta = {}
     if pod.get("dataCenterId") and pod.get("dataCenterId") != attempt.get("data_center"):
         meta["data_center"] = pod.get("dataCenterId")
@@ -883,7 +966,7 @@ async def apply_guard(row, attempt, pod, now: float, checkpoints) -> bool:
             await asyncio.to_thread(write_attempt_meta, key[0], key[1], meta)
         except Exception as exc:  # noqa: BLE001 - metadata only
             logger.warning("attempt metadata write failed: %s", type(exc).__name__)
-    verdict, final = judge_guard(attempt, pod, table)
+    verdict, final = judge_guard(attempt, pod)
     if verdict == "refuse":
         logger.warning("training %s attempt %s refused by the placement guard (dc=%s cuda=%s)",
                        key[0], key[1], pod.get("dataCenterId"), pod.get("cudaVersion"))
@@ -923,10 +1006,11 @@ def _runpod_usable(now: float, settings: Settings) -> bool:
 
 
 def rungs_for(row, attempts_of_row, now: float, tick: _Tick, settings: Settings | None = None) -> list:
-    """§4.2 step 3: the rungs attempt N+1 may use, in ladder order."""
+    """The rungs attempt N+1 may use, in ladder order. Attempt MAX_ATTEMPTS is
+    Modal-only only while the ladder has the Modal rung (owner E31)."""
     s = settings or SETTINGS
     n_next = int(row.get("current_attempt") or 0) + 1
-    if n_next == MAX_ATTEMPTS:
+    if n_next == MAX_ATTEMPTS and s.has_modal_rung:
         return [RUNG_MODAL]
     rungs = [r["rung"] for r in s.ladder]
     lost_community = sum(1 for a in attempts_of_row
@@ -940,6 +1024,13 @@ def rungs_for(row, attempts_of_row, now: float, tick: _Tick, settings: Settings 
         if unplaced is None or now - unplaced < RUNPOD_GIVEUP_S:
             rungs = [r for r in rungs if r != RUNG_MODAL]
     return rungs
+
+
+def placement_steps(rungs) -> list:
+    """Owner E42: the (rung, scope) steps of one claim, in ladder order. The default
+    ladder gives Community worldwide, then Secure in the EU GDPR data centres, then
+    Secure worldwide; a custom RUNPOD_LADDER keeps its own rung order."""
+    return [(r, sc) for r in rungs if r in RUNPOD_RUNGS for sc in RUNG_SCOPES[r]]
 
 
 def pod_body(row, attempt_no: int, token: str, cloud: str, gpu: dict, dcs: list, settings: Settings) -> dict:
@@ -998,16 +1089,18 @@ async def _create_one(body: dict, tick: _Tick):
         return "answer", resp
 
 
-async def _try_runpod(row, attempt_no: int, token: str, rung: str, now: float, tick: _Tick, s: Settings):
-    """'placed' | 'stop' (do not try another rung) | 'none' (nothing placed here)."""
+async def _try_runpod(row, attempt_no: int, token: str, rung: str, now: float, tick: _Tick, s: Settings,
+                      *, scope: str):
+    """One (rung, scope) step of a claim (owner E42): 'placed' | 'stop' (do not try
+    another step) | 'none' (nothing placed here)."""
     cloud = RUNG_CLOUD[rung]
-    catalog = await _catalog(cloud, now)
+    catalog = await _catalog(cloud, now, worldwide=scope == SCOPE_WORLD)
     if catalog is None:
         return "none"
     gdpr = None
-    if rung == RUNG_SECURE:
+    if scope == SCOPE_EEA:
         gdpr = await _gdpr_dcs(now)
-        if gdpr is None:
+        if gdpr is None:  # skips this step only; Secure worldwide still runs
             return "none"
     tid = int(row["id"])
     for gpu in s.rung_gpus(rung):
@@ -1016,15 +1109,24 @@ async def _try_runpod(row, attempt_no: int, token: str, rung: str, now: float, t
         entry = catalog.get(gpu["id"])
         if not isinstance(entry, dict) or entry.get("availability") in (None, "NONE"):
             continue
-        dcs = [d.get("id") for d in entry.get("dataCenters") or []
-               if isinstance(d, dict) and d.get("id") and d.get("availability") not in (None, "NONE")]
-        if rung == RUNG_COMMUNITY:
-            dcs = [d for d in dcs if not _dc_skipped(d, now)]
-        dcs = [d for d in dcs if STATE.create_400.get((cloud, gpu["id"], d), 0) <= now]
-        if gdpr is not None:
-            dcs = [d for d in dcs if d in gdpr]
-        if not dcs:
-            continue
+        listed = [d.get("id") for d in entry.get("dataCenters") or []
+                  if isinstance(d, dict) and d.get("id") and d.get("availability") not in (None, "NONE")]
+        if listed:
+            dcs = [d for d in listed if not _dc_skipped(cloud, gpu["id"], d, now)]
+            dcs = [d for d in dcs if STATE.create_400.get((cloud, gpu["id"], d), 0) <= now]
+            if gdpr is not None:
+                dcs = [d for d in dcs if d in gdpr]
+            if not dcs:
+                continue
+        else:
+            # Community availability names no data centre (measured 2026-10-20): such a
+            # card is created with dataCenterIds [] and the scheduler chooses. Secure
+            # always reports its data centres, so an empty list is „unavailable".
+            if (rung, scope) != (RUNG_COMMUNITY, SCOPE_WORLD):
+                continue
+            if STATE.create_400.get((cloud, gpu["id"], ""), 0) > now:
+                continue
+            dcs = []
         try:
             await asyncio.to_thread(write_attempt_meta, tid, attempt_no, {"allowed_dcs": dcs}, ("placing",))
         except Exception as exc:  # noqa: BLE001 - FR-8: no create without the persisted set
@@ -1040,9 +1142,9 @@ async def _try_runpod(row, attempt_no: int, token: str, rung: str, now: float, t
         status = resp.status
         tick.statuses.append(status)
         if status in (200, 201) and isinstance(resp.body, dict) and resp.body.get("id"):
-            return await _attach_runpod(row, attempt_no, rung, gpu, resp.body, now)
+            return await _attach_runpod(row, attempt_no, rung, gpu, resp.body, now, scope=scope)
         if status == 400:
-            for d in dcs:
+            for d in dcs or [""]:
                 STATE.create_400[(cloud, gpu["id"], d)] = now + CREATE_400_CACHE_S
             tick.last_400_detail = resp.detail
             continue
@@ -1060,7 +1162,7 @@ async def _try_runpod(row, attempt_no: int, token: str, rung: str, now: float, t
     return "none"
 
 
-async def _attach_runpod(row, attempt_no: int, rung: str, gpu: dict, pod: dict, now: float) -> str:
+async def _attach_runpod(row, attempt_no: int, rung: str, gpu: dict, pod: dict, now: float, *, scope: str) -> str:
     tid = int(row["id"])
     pod_id = str(pod["id"])
     try:
@@ -1075,6 +1177,9 @@ async def _attach_runpod(row, attempt_no: int, rung: str, gpu: dict, pod: dict, 
     STATE.pod_count += 1
     meta = {"gpu_type": (pod.get("gpu") or {}).get("id") if isinstance(pod.get("gpu"), dict) else None}
     meta["gpu_type"] = meta["gpu_type"] or gpu["id"]
+    STATE.attempt_gpu[(tid, int(attempt_no))] = meta["gpu_type"]  # D1's key survives a failed write (n4)
+    while len(STATE.attempt_gpu) > 1000:  # bounded: an attempt that ends otherwise never pops its entry
+        STATE.attempt_gpu.pop(next(iter(STATE.attempt_gpu)))
     if pod.get("dataCenterId"):
         meta["data_center"] = pod.get("dataCenterId")
     if pod.get("cudaVersion"):
@@ -1085,8 +1190,9 @@ async def _attach_runpod(row, attempt_no: int, rung: str, gpu: dict, pod: dict, 
         await asyncio.to_thread(write_attempt_meta, tid, attempt_no, meta)
     except Exception as exc:  # noqa: BLE001 - metadata only
         logger.warning("attempt metadata write failed: %s", type(exc).__name__)
-    logger.info("training %s attempt %s placed on %s (%s, pod %s)", tid, attempt_no, rung, meta["gpu_type"], pod_id)
-    if pod.get("dataCenterId"):
+    logger.info("training %s attempt %s placed on %s/%s (%s, pod %s)", tid, attempt_no, rung, scope,
+                meta["gpu_type"], pod_id)
+    if pod.get("dataCenterId") or pod.get("cudaVersion"):
         attempt = await asyncio.to_thread(read_attempt, tid, attempt_no)
         if attempt:
             await apply_guard(row, attempt, pod, now, None)
@@ -1118,24 +1224,31 @@ async def _try_modal(row, attempt_no: int, token: str, s: Settings) -> str:
     return "placed"
 
 
-async def _budget_finish(row, now: float, s: Settings) -> bool:
-    """§4.2 step 2. True when the row was finished (or someone else changed it)."""
+async def _budget_finish(row, attempt, now: float, s: Settings, checkpoints) -> bool:
+    """§4.2 step 2. True when the row was finished, capped or lost a race. S4 first and
+    S18 last stay fail + refund even with a ready checkpoint (owner E47); the training-time
+    cap and the 12 h wall between them publish the newest ready checkpoint (owner E33/E44)."""
     n = int(row.get("current_attempt") or 0)
-    msg = None
     if n >= MAX_ATTEMPTS:
-        msg = T.S4
-    elif int(row.get("train_seconds_used") or 0) >= s.cap_s - START_TIMEOUT_GRACE_S:
-        msg = T.s5(s.cap_s)
-    elif now - (ts(row.get("requested_at")) or now) >= WALL_CAP_S - START_TIMEOUT_GRACE_S:
-        msg = T.S6
-    else:
-        unplaced = ts(row.get("unplaced_since"))
-        if unplaced is not None and now - unplaced >= PLACEMENT_GIVEUP_S:
-            msg = T.S18
-    if msg is None:
-        return False
-    await fail_training(row, n, msg)
-    return True
+        await fail_training(row, n, T.S4)
+        return True
+    if int(row.get("train_seconds_used") or 0) >= s.cap_s - START_TIMEOUT_GRACE_S:
+        if n > 0 and attempt is not None:
+            await cap_attempt(row, attempt, now, checkpoints, bound="cap")
+        else:
+            await fail_training(row, n, T.s5(s.cap_s))
+        return True
+    if now - (ts(row.get("requested_at")) or now) >= WALL_CAP_S - START_TIMEOUT_GRACE_S:
+        if n > 0 and attempt is not None:
+            await cap_attempt(row, attempt, now, checkpoints, bound="wall")
+        else:
+            await fail_training(row, n, T.S6)
+        return True
+    unplaced = ts(row.get("unplaced_since"))
+    if unplaced is not None and now - unplaced >= PLACEMENT_GIVEUP_S:
+        await fail_training(row, n, T.S18)
+        return True
+    return False
 
 
 async def dispatch_tick(settings: Settings | None = None) -> dict:
@@ -1178,7 +1291,7 @@ async def dispatch_tick(settings: Settings | None = None) -> dict:
                 out["finished"] += 1
             continue
         # 2. Budgets (every tick, also while placement is blocked: FR-3, TR-4).
-        if await _budget_finish(row, now, s):
+        if await _budget_finish(row, current.get((tid, n)), now, s, ready.get(tid, [])):
             out["finished"] += 1
             continue
         if blocked:
@@ -1206,15 +1319,14 @@ async def dispatch_tick(settings: Settings | None = None) -> dict:
         attempt_no = int(claim.get("o_attempt_no") or n + 1)
         token = claim.get("o_worker_token")
         result = "none"
-        for rung in rungs:
-            if rung in RUNPOD_RUNGS:
-                if tick.runpod_off:
-                    continue
-                result = await _try_runpod(row, attempt_no, token, rung, now, tick, s)
-            else:
-                result = await _try_modal(row, attempt_no, token, s)
+        for rung, scope in placement_steps(rungs):
+            if tick.runpod_off:
+                break
+            result = await _try_runpod(row, attempt_no, token, rung, now, tick, s, scope=scope)
             if result in ("placed", "stop"):
                 break
+        if result not in ("placed", "stop") and RUNG_MODAL in rungs:
+            result = await _try_modal(row, attempt_no, token, s)
         if result == "placed":
             out["placed"] += 1
             continue
@@ -1229,8 +1341,8 @@ async def dispatch_tick(settings: Settings | None = None) -> dict:
         except Exception as exc:  # noqa: BLE001 - the sweep's placing_stale rule releases it later
             logger.warning("dispatcher: release failed for training %s: %s", tid, type(exc).__name__)
     if tick.statuses and all(st == 400 for st in tick.statuses):
-        logger.error("RunPod answered 400 to every create this tick (the request is wrong): %s",
-                     tick.last_400_detail)
+        logger.warning("RunPod placed no candidate this tick: every create answered 400 (no capacity for the request, "
+                       "or a wrong request): %s", tick.last_400_detail)
     if tick.statuses and all(st == 403 for st in tick.statuses) and not STATE.all_403_logged:
         STATE.all_403_logged = True
         logger.error("RunPod answered 403 to every create this tick: the key probably lacks pods:write")
@@ -1268,17 +1380,18 @@ async def _check_attempt(row, attempt, now: float, pods_by_id, pods_ok: bool, ch
         if await end_attempt_succeeded(row, attempt, now):
             await terminate_attempt(attempt)
         return
-    # Caps (with WATCHDOG_GRACE_S, TR-2).
+    # Caps (with WATCHDOG_GRACE_S, TR-2): training time (cap) or the 12 h wall (owner
+    # E44); either one publishes the newest ready checkpoint (else S5 / S6).
     if state in ("starting", "running"):
         used = int(row.get("train_seconds_used") or 0) + attempt_seconds(attempt, now)
-        msg = None
+        bound = None
         if used > s.cap_s + WATCHDOG_GRACE_S:
-            msg = T.s5(s.cap_s)
+            bound = "cap"
         elif now - (ts(row.get("requested_at")) or now) > WALL_CAP_S + WATCHDOG_GRACE_S:
-            msg = T.S6
-        if msg is not None:
+            bound = "wall"
+        if bound is not None:
             await terminate_attempt(attempt)
-            await fail_training(row, key[1], msg)
+            await cap_attempt(row, attempt, now, checkpoints, bound=bound)
             return
     if state == "placing":
         created = ts(attempt.get("created_at")) or now
@@ -1361,7 +1474,7 @@ async def sweep_tick(settings: Settings | None = None) -> dict:
             continue
         try:
             if row.get("status") == "running" and attempt.get("state") == "ended" \
-                    and attempt.get("end_reason") == "succeeded":
+                    and attempt.get("end_reason") in PUBLISH_END_REASONS:
                 await hf_publish.recover_publish(row, attempt, now)
                 continue
             if attempt.get("state") in ACTIVE_STATES:
@@ -1394,6 +1507,10 @@ def _checkpoint_keys(c) -> list:
 
 
 def mirror_claim_live(c, now: float) -> bool:
+    # A finished mirror holds no live claim (production N1): once mirrored_at is set,
+    # no writer owns the checkpoint, so retention and the janitor may delete it now.
+    if c.get("mirrored_at"):
+        return False
     claimed = ts(c.get("mirror_claimed_at"))
     return claimed is not None and now - claimed < MIRROR_LEASE_S
 
@@ -1440,11 +1557,71 @@ def apply_retention(training_id: int, now: float | None = None) -> int:
     return deleted
 
 
+def kept_expiry_tick(now: float) -> int:
+    """Owner E36 (§6.4 G): delete a `refused` kept copy at once, and a `kept` one
+    KEEP_DELETE_GRACE_S after expiry when no child is active. At most 100 rows of
+    each kind per round, the expiry decided IN the query and the oldest first, so a
+    fresh copy never hides an expired one (verifier m4); a delete_keys failure
+    leaves the state. Returns how many were deleted."""
+    from app.services import r2_client
+
+    refused = (
+        _sb().table("training_kept_checkpoints").select(KEPT_COLUMNS)
+        .eq("state", "refused").limit(100).execute()
+    ).data or []
+    expired = (
+        _sb().table("training_kept_checkpoints").select(KEPT_COLUMNS)
+        .eq("state", "kept").lte("expires_at", _iso(now - KEEP_DELETE_GRACE_S))
+        .order("expires_at").limit(100).execute()
+    ).data or []
+    rows = refused + expired
+    if not rows:
+        return 0
+    active_parents: set = set()
+    parent_ids = [int(r["training_id"]) for r in expired]
+    if parent_ids:
+        children = (
+            _sb().table("trainings").select("continued_from")
+            .in_("continued_from", parent_ids)
+            .in_("status", ["queued", "running", "cancel_requested"]).execute()
+        ).data or []
+        active_parents = {int(c["continued_from"]) for c in children if c.get("continued_from") is not None}
+    deleted = 0
+    for r in rows:
+        tid = int(r["training_id"])
+        prev = r.get("state")
+        if prev == "refused":
+            pass
+        elif r in expired and tid not in active_parents:
+            pass
+        else:
+            continue
+        manifest = r.get("manifest") if isinstance(r.get("manifest"), dict) else {}
+        keys = [r2_client.keep_key(tid, int(r["step"]), rel) for rel in manifest]
+        try:
+            if keys:
+                r2_client.delete_keys(keys)
+            (
+                _sb().table("training_kept_checkpoints").update({"state": "deleted"})
+                .eq("training_id", tid).eq("state", prev).execute()
+            )
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001 - leave the state; the next round retries
+            logger.warning("kept-copy delete failed for training %s: %s", tid, type(exc).__name__)
+    return deleted
+
+
 async def janitor_tick(now: float) -> None:
     """Terminal managed rows: delete every checkpoint not `deleted` (refused ones
     included) and the log keys; a live mirror claim waits; a failed row's log
-    is kept while it is still being uploaded (TR-3)."""
+    is kept while it is still being uploaded (TR-3). The kept-checkpoint expiry runs
+    FIRST (owner E36), in its own guard, before the no-terminal-row early return."""
     from app.services import hf_publish, r2_client
+
+    try:
+        await asyncio.to_thread(kept_expiry_tick, now)
+    except Exception as exc:  # noqa: BLE001 - never stop the janitor
+        logger.warning("kept-copy expiry failed: %s", type(exc).__name__)
 
     since = _iso(now - JANITOR_WINDOW_S)
 

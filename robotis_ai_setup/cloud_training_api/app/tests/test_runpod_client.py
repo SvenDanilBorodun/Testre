@@ -1,8 +1,8 @@
 """runpod_client: exactly §3.6's calls, through httpx.MockTransport (no network).
 
 Pinned: the base URL and Bearer key, the catalog query (AVAILABILITY / POD /
-cloud / the 30 EEA codes / CUDA 12.6), Secure's GDPR list and the unfiltered
-data-centre table, list pagination by nextCursor, a transport failure as
+cloud / the 30 EEA codes / CUDA 12.6, and the worldwide form without the
+codes, owner E42), Secure's GDPR list, list pagination by nextCursor, a transport failure as
 RunpodNetworkError, problem+json details cut to 300 characters, Retry-After,
 and the 20 s timeout with no redirect following.
 """
@@ -51,13 +51,18 @@ class RunpodClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rc.EEA_COUNTRY_CODES), 30)
         self.assertNotIn("GB", rc.EEA_COUNTRY_CODES)
         self.assertNotIn("CH", rc.EEA_COUNTRY_CODES)
+        self.assertEqual(list(q), ["include", "product", "cloud", "countryCodes", "minCudaVersion"])
+        # Owner E42: the worldwide form drops only the countryCodes key.
+        with patch.dict(os.environ, {"RUNPOD_API_KEY": "rp-test", "RUNPOD_API_BASE": "https://runpod.test/"}):
+            await rc.catalog_gpus("COMMUNITY", worldwide=True)
+        world = dict(rec.requests[1].url.params)
+        self.assertNotIn("countryCodes", world)
+        self.assertEqual(world, {k: v for k, v in q.items() if k != "countryCodes"})
 
     async def test_the_data_centre_calls(self):
         rec = self.use(lambda r: httpx.Response(200, json={"dataCenters": []}))
         await rc.datacenters_gdpr()
-        await rc.datacenters_all()
         self.assertEqual(dict(rec.requests[0].url.params), {"regions": "EUROPE", "compliance": "GDPR"})
-        self.assertEqual(dict(rec.requests[1].url.params), {})
 
     async def test_list_pods_follows_the_cursor(self):
         pages = {None: ([{"id": "a"}, {"id": "b"}], "c1", True), "c1": ([{"id": "c"}], None, False)}

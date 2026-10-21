@@ -162,6 +162,19 @@ def catalog_gpus(request: Request, cloud: str = "SECURE", countryCodes: str = ""
             cudas = [v for v in s.get("cudaVersions", ["12.8"]) if floor is None or _cuda_tuple(v) >= floor]
             if floor is not None and not cudas:
                 continue
+            if s.get("cloud") == "COMMUNITY" and s.get("dataCenters") == []:
+                # RunPod's measured Community shape (owner E42): availability without a
+                # dataCenters key; a countryCodes query drops such an entry.
+                if countries:
+                    continue
+                gpus.append({
+                    "id": s["id"], "name": s["id"], "memory": s.get("memory", 24),
+                    "secure": False, "community": True,
+                    "price": {"secure": s.get("price", 0.2), "community": s.get("price", 0.2)},
+                    "availability": s.get("availability", "HIGH"),
+                    "cudaVersions": [{"version": v, "available": True} for v in cudas],
+                })
+                continue
             dcs = []
             for dc_id in s.get("dataCenters", []):
                 dc = _dc(dc_id)
@@ -221,7 +234,11 @@ async def create_pod(request: Request):
         stock = next((s for s in _stock_for(cloud) if s["id"] == gpu_id
                       and s.get("availability", "HIGH") != "NONE"), None)
         dc_id = next((d for d in wanted if stock and d in stock.get("dataCenters", [])), None)
-    if stock is None or dc_id is None:
+        dc_less = (stock is not None and cloud == "COMMUNITY" and stock.get("cloud") == "COMMUNITY"
+                   and stock.get("dataCenters") == [] and wanted == [])
+        if dc_less:  # the scheduler chooses; the pod reports what the stock entry says (default none)
+            dc_id = stock.get("reportDataCenter")
+    if stock is None or (dc_id is None and not dc_less):
         return problem(400, "There are no longer any instances available with the requested specifications.")
     pod_id = "fk" + secrets.token_hex(6)
     pod_key = "podkey-" + secrets.token_hex(16)

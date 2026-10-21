@@ -67,9 +67,11 @@ class TestSchemaProbeKnows040(unittest.TestCase):
             for e in cls.probe["required_rpcs"].elts
         }
 
-    def test_the_counts_are_18_16_44(self) -> None:
+    def test_the_counts_are_19_18_46(self) -> None:
+        # 050 added training_kept_checkpoints, two column sets and two RPCs
+        # (cap_training_attempt, start_continuation_safe).
         self.assertEqual(
-            (len(self.tables), len(self.columns), len(self.rpcs)), (18, 16, 44)
+            (len(self.tables), len(self.columns), len(self.rpcs)), (19, 18, 46)
         )
 
     def test_the_submissions_table_is_probed(self) -> None:

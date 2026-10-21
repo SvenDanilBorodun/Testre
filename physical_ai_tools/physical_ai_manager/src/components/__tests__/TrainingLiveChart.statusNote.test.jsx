@@ -27,6 +27,7 @@ import { Provider } from 'react-redux';
 import trainingReducer from '../../features/training/trainingSlice';
 import TrainingLiveChart from '../TrainingLiveChart';
 import { statusSubtitle } from '../../pages/TrainingPage';
+import { CONTINUE_DE } from '../../features/training/continuation';
 
 // The page module is imported for its subtitle helper only; keep its cloud
 // client from touching the environment (same stub as TrainingPage.gate.test).
@@ -57,11 +58,11 @@ function job(over = {}) {
   };
 }
 
-function renderChart(j) {
+function renderChart(j, extra = {}) {
   const store = configureStore({ reducer: { training: trainingReducer } });
   return render(
     <Provider store={store}>
-      <TrainingLiveChart jobs={[j]} isRealtime />
+      <TrainingLiveChart jobs={[j]} isRealtime {...extra} />
     </Provider>,
   );
 }
@@ -113,6 +114,38 @@ describe('TrainingLiveChart starting state', () => {
   test('a running job that has not reported its steps yet is starting', () => {
     renderChart(job({ status: 'running', current_step: 0, total_steps: 0 }));
     expect(screen.getByText('GPU-Worker startet…')).toBeInTheDocument();
+  });
+});
+
+describe('TrainingLiveChart capped hero and „Fortsetzen" (owner E32–E37, review m2)', () => {
+  const S23 = 'Nach 3,5 Stunden bei Schritt 42.500 von 50.000 gestoppt – du kannst das Training fortsetzen.';
+  const capped = (over = {}) => job({
+    status: 'succeeded',
+    current_step: 42500,
+    total_steps: 50000,
+    capped_step: 42500,
+    continuable_until: new Date(Date.now() + 7 * 86400 * 1000).toISOString(),
+    is_mine: true,
+    status_note: S23,
+    terminated_at: '2026-10-18T11:00:00Z',
+    ...over,
+  });
+
+  test('a capped succeeded job shows its real percent, S23, and the key', () => {
+    renderChart(capped(), { remaining: 5 });
+    expect(document.querySelector('.su-trn-pct')).toHaveTextContent('85');
+    expect(document.querySelector('.su-trn-pct')).not.toHaveTextContent('100');
+    const note = screen.getByRole('status');
+    expect(note).toHaveTextContent(S23);
+    expect(screen.getByRole('button', { name: new RegExp(CONTINUE_DE.button) })).toBeEnabled();
+  });
+
+  test('a succeeded job without capped_step shows 100 % and no continue note', () => {
+    renderChart(job({ status: 'succeeded', current_step: 50000, total_steps: 50000,
+      terminated_at: '2026-10-18T11:00:00Z' }), { remaining: 5 });
+    expect(document.querySelector('.su-trn-pct')).toHaveTextContent('100');
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.queryByRole('button', { name: new RegExp(CONTINUE_DE.button) })).toBeNull();
   });
 });
 

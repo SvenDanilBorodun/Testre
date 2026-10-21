@@ -22,7 +22,7 @@ const ACTIVE_POLL_MS = 6000;
 export const LIVE_COLUMNS =
   'id,status,model_name,model_type,dataset_name,current_step,total_steps,' +
   'current_loss,loss_history,error_message,requested_at,terminated_at,' +
-  'last_progress_at,workgroup_id,status_note';
+  'last_progress_at,workgroup_id,status_note,capped_step,continuable_until,continued_from';
 
 function isActiveJob(j) {
   return j && (j.status === 'queued' || j.status === 'running');
@@ -35,8 +35,11 @@ function stripSecrets(row) {
   return safe;
 }
 
-function mergeJob(prev, incoming) {
+export function mergeJob(prev, incoming) {
   const map = new Map(prev.map((j) => [j.id, j]));
+  // {...existing, ...incoming} keeps an API row's is_mine when a direct-poll or
+  // Realtime row without the key arrives; a Realtime-first row has is_mine
+  // undefined until the next API list, which hides the button (fail-safe).
   map.set(incoming.id, { ...(map.get(incoming.id) || {}), ...incoming });
   return Array.from(map.values()).sort(
     (a, b) => new Date(b.requested_at) - new Date(a.requested_at),

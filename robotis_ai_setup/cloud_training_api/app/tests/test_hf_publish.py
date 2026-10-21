@@ -392,6 +392,137 @@ class FailedLog(PublishBase):
         self.assertEqual(P._LOG_TRIES[self.tid], 3)
 
 
+class CappedPublish(PublishBase):
+    """A capped / wall-capped publish (owner E32–E37): the newest ready checkpoint is
+    published, its 11 files are kept under keep/, the row ends succeeded + continuable."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.attempt(self.tid, 1).update(end_reason="capped")
+        self.db.row(self.tid).update(capped_step=42500, status_note=T.S22)
+        self.cfiles = checkpoint_files(self.row, 42500, final=False)
+        self.r2.put_checkpoint(self.tid, 1, 42500, self.cfiles)
+        self.cck = self.db.add_checkpoint(self.tid, 1, 42500, state="ready", manifest=manifest_of(self.cfiles))
+
+    def _keep_keys(self):
+        return [r2_client.keep_key(self.tid, 42500, rel) for rel in AV.CHECKPOINT_RELPATHS]
+
+    def test_capped_publish_keeps_the_copy_and_finishes_continuable(self):
+        self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")
+        (commit,) = self.hub.commits
+        self.assertIn("time cap", commit[2])
+        self.assertIn("step 42500 of 50000", commit[2])
+        for key in self._keep_keys():
+            self.assertIn(key, self.r2.objects)
+        for rel in AV.CHECKPOINT_RELPATHS:
+            self.assertEqual(self.r2.objects[r2_client.keep_key(self.tid, 42500, rel)], self.cfiles[rel])
+        kept = self.db.kept(self.tid)
+        self.assertEqual((kept["state"], kept["step"]), ("kept", 42500))
+        r = self.db.row(self.tid)
+        self.assertEqual((r["status"], r["current_step"]), ("succeeded", 42500))
+        self.assertEqual(r["status_note"], T.s23(12600, 42500, 50000))
+        self.assertEqual(r["continuable_until"], kept["expires_at"])
+        # train/ gone, keep/ kept
+        for key in self._keep_keys():
+            self.assertIn(key, self.r2.objects)
+        self.assertNotIn(r2_client.ckpt_key(self.tid, 1, 42500, "pretrained_model/config.json"), self.r2.objects)
+
+    def test_a_copy_failure_retries_without_an_hf_call(self):
+        self.r2.fail["copy"] = 1
+        self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        self.assertEqual(self.hub.commits, [])
+        self.assertEqual(self.db.attempt(self.tid, 1)["publish_tries"], 1)
+        self.assertIsNone(self.db.kept(self.tid))
+
+    def test_a_head_fault_after_the_copy_retries_counted(self):
+        # (4b)'s size check: a transport fault is Transient, counted and backed off (verifier m1).
+        self.r2.fail["head"] = 1
+        self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        self.assertEqual(self.hub.commits, [])
+        self.assertEqual(self.db.attempt(self.tid, 1)["publish_tries"], 1)
+        self.assertIsNone(self.db.kept(self.tid))
+        self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")
+
+    def test_a_copy_that_wrote_nothing_retries_counted(self):
+        # The copy answered but wrote nothing: (4b) sees R2Missing → Transient, no kept row (m1).
+        with patch.object(r2_client, "copy_object", lambda src, dst: None):
+            self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        self.assertEqual(self.hub.commits, [])
+        self.assertEqual(self.db.attempt(self.tid, 1)["publish_tries"], 1)
+        self.assertIsNone(self.db.kept(self.tid))
+
+    def test_a_head_fault_in_the_retry_precheck_retries_counted(self):
+        # A retried publish re-checks the kept copy; a fault there is Transient too (m1).
+        self.hub.fail_commit = 1
+        self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        self.assertIsNotNone(self.db.kept(self.tid))
+        self.r2.fail["head"] = 1
+        self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        self.assertEqual(self.db.attempt(self.tid, 1)["publish_tries"], 2)
+        self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")
+
+    def test_a_retried_publish_never_moves_the_window(self):
+        # The HF commit fails after the kept copy is made → retry; the kept row is
+        # already inserted, so a retry with the clock advanced must not move expires_at.
+        self.hub.fail_commit = 1
+        self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        first = self.db.kept(self.tid)["expires_at"]
+        self.assertIsNotNone(first)
+        self.clock.advance(3600)
+        self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")
+        self.assertEqual(self.db.kept(self.tid)["expires_at"], first)
+        self.assertEqual(len(self.db.tables["training_kept_checkpoints"]), 1)
+
+    def test_a_missing_capped_checkpoint_retries(self):
+        self.cck["state"] = "deleted"
+        self.assertEqual(P.publish_sync(self.tid, 1), "retry")
+        self.assertEqual(self.hub.commits, [])
+
+    def test_sweep_recovers_a_capped_row(self):
+        self.db.attempt(self.tid, 1).update(publish_claimed_at=None)
+        out = asyncio.run(P.recover_publish(self.db.row(self.tid), self.db.attempt(self.tid, 1), self.clock.t))
+        self.assertEqual(out, "scheduled")
+        self.assertEqual(self.db.row(self.tid)["status"], "succeeded")
+
+    def test_wall_capped_note_and_message(self):
+        self.db.attempt(self.tid, 1).update(end_reason="wall_capped")
+        self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")
+        self.assertIn("12 h limit", self.hub.commits[0][2])
+        self.assertEqual(self.db.row(self.tid)["status_note"], T.s29(42500, 50000))
+
+    def test_copy_unsupported_streams_through_a_presigned_put(self):
+        self.r2.copy_unsupported = True
+        with self.assertLogs("app.services.hf_publish", level="WARNING") as logs:
+            self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")
+        self.assertTrue(any("CopyObject unsupported" in m for m in logs.output))
+        for rel in AV.CHECKPOINT_RELPATHS:
+            self.assertEqual(self.r2.objects[r2_client.keep_key(self.tid, 42500, rel)], self.cfiles[rel])
+        self.assertEqual(self.db.row(self.tid)["status"], "succeeded")
+
+    def test_a_continuation_publishes_into_the_same_repo(self):
+        self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")  # the parent, a capped commit
+        # the child: a normal final publish into the SAME repo (one more commit)
+        child = self.db.add_training(status="running", current_attempt=1, continued_from=self.tid,
+                                     model_name=self.row["model_name"], dataset_name="u/ds", dataset_fps=30.0,
+                                     training_params=self.row["training_params"])
+        self.db.add_attempt(child["id"], 1, state="ended", end_reason="succeeded", backend="runpod_secure")
+        files = checkpoint_files(child, 50000, final=True)
+        self.r2.put_checkpoint(child["id"], 1, 50000, files)
+        self.db.add_checkpoint(child["id"], 1, 50000, state="ready", manifest=manifest_of(files))
+        self.assertEqual(P.publish_sync(child["id"], 1), "succeeded")
+        self.assertEqual(len(self.hub.commits), 2)
+        self.assertEqual({c[0] for c in self.hub.commits}, {self.row["model_name"]})
+
+    def test_the_uncapped_path_is_unchanged(self):
+        # a fence: a non-capped (final) publish never touches keep/ or the kept table.
+        self.db.attempt(self.tid, 1).update(end_reason="succeeded")
+        self.db.row(self.tid).update(capped_step=None)
+        self.assertEqual(P.publish_sync(self.tid, 1), "succeeded")
+        self.assertIsNone(self.db.kept(self.tid))
+        self.assertEqual(self.r2.copies, [])
+        self.assertIn("trained model", self.hub.commits[0][2])
+
+
 class Hashes(unittest.TestCase):
     def test_git_blob_sha1(self):
         self.assertEqual(P.git_blob_sha1(b"hello\n"), "ce013625030ba8dba906f756967f9e9ca394464a")

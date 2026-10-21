@@ -12,7 +12,7 @@ process's ``BOOT_ID``, renewed every ``PUBLISH_RENEW_S``):
   sha256 against the manifest (R4) → 3. validate (§3.5 JSON rules,
   ``act_config_summary``, config.json == train_config.policy, processor steps,
   state files; a refusal fails the row with S7 at once) → 4. our one own file,
-  ``edubotics_model_meta.json`` (the legacy worker's byte format) → 5.
+  ``edubotics_model_meta.json`` (the legacy worker's byte format), and, for a CAPPED/WALL_CAPPED publish, copy the checkpoint's 11 files to ``keep/`` and record the kept row (owner E36, ``_keep_checkpoint``) before any HF call → 5.
   ``create_repo(exist_ok)`` + ONE ``create_commit`` (8 root files, the 7 files
   under ``checkpoints/<step_id>/pretrained_model/``, the training log) → 6.
   read back every path (LFS sha256 + size; non-LFS git blob sha1) → 7.
@@ -299,6 +299,87 @@ def log_url_for(model_name: str) -> str:
     return f"https://huggingface.co/{model_name}/blob/main/training_log.txt"
 
 
+def _keep_checkpoint(tid: int, ckpt: dict, lease, tmp: str) -> str:
+    """Copy the capped checkpoint's 11 files to keep/ and record the kept row (owner E36),
+    returning its ``expires_at`` string. Runs AFTER _download_model/_validate_model and
+    NEVER raises Refused (only Transient): the copy checks sizes only, like the fallback,
+    and a kept copy's content is re-judged later by the continuation (review m1)."""
+    from app.services import r2_client
+
+    step = int(ckpt["step"])
+    attempt_no = int(ckpt["attempt_no"])
+    manifest = ckpt.get("manifest") if isinstance(ckpt.get("manifest"), dict) else {}
+    existing = D.read_kept(tid)
+    expires_at = None
+    if existing is not None:
+        if existing.get("state") == "kept" and int(existing.get("step") or 0) == step:
+            expires_at = existing["expires_at"]  # a retried publish NEVER moves the window
+            try:
+                if all(int(r2_client.head_size(r2_client.keep_key(tid, step, rel)))
+                       == int(manifest[rel]["size"]) for rel in AV.CHECKPOINT_RELPATHS):
+                    return expires_at  # already kept and intact: skip the stream (fallback mode)
+            except r2_client.R2Missing:
+                pass  # re-copy below
+            except Exception as exc:  # noqa: BLE001 - transport: counted and backed off (verifier m1)
+                raise Transient(f"kept head {type(exc).__name__}") from None
+        else:
+            raise Transient("kept row conflict")
+    use_fallback = False
+    for rel in AV.CHECKPOINT_RELPATHS:
+        lease.check()
+        src = r2_client.ckpt_key(tid, attempt_no, step, rel)
+        dst = r2_client.keep_key(tid, step, rel)
+        if not use_fallback:
+            try:
+                r2_client.copy_object(src, dst)
+                continue
+            except r2_client.R2CopyUnsupported:
+                use_fallback = True
+                logger.warning("R2 CopyObject unsupported: kept copy streamed through the API")
+            except r2_client.R2Missing:
+                raise Transient(f"kept source missing {rel}") from None
+            except LeaseLost:
+                raise
+            except Exception as exc:  # noqa: BLE001 - transport
+                raise Transient(f"keep copy {type(exc).__name__}") from None
+        local = os.path.join(tmp, "keep", rel)
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        try:
+            r2_client.stream_to_file(src, local)
+        except r2_client.R2Missing:
+            raise Transient(f"kept source missing {rel}") from None
+        except Exception as exc:  # noqa: BLE001
+            raise Transient(f"keep stream {type(exc).__name__}") from None
+        try:
+            r2_client.put_file_presigned(dst, local)
+        except Exception as exc:  # noqa: BLE001 - RuntimeError / transport → retry
+            raise Transient(f"keep put {type(exc).__name__}") from None
+    for rel in AV.CHECKPOINT_RELPATHS:  # (4b): every fault here is Transient (rev3 §6.4 B4, verifier m1)
+        try:
+            size = int(r2_client.head_size(r2_client.keep_key(tid, step, rel)))
+        except r2_client.R2Missing:
+            raise Transient(f"kept copy missing {rel}") from None
+        except Exception as exc:  # noqa: BLE001 - transport
+            raise Transient(f"kept head {type(exc).__name__}") from None
+        if size != int(manifest[rel]["size"]):
+            raise Transient(f"kept size mismatch {rel}")
+    if existing is None:
+        expires_at = D._iso(D._now() + D.KEEP_S)
+        try:
+            (
+                D._sb().table("training_kept_checkpoints")
+                .insert({"training_id": int(tid), "step": step, "manifest": manifest,
+                         "state": "kept", "expires_at": expires_at}).execute()
+            )
+        except Exception as exc:  # noqa: BLE001 - a concurrent insert → re-read and reuse
+            if D.pg_code(exc) == "23505":
+                row = D.read_kept(tid)
+                if row and row.get("state") == "kept" and int(row.get("step") or 0) == step:
+                    return row["expires_at"]
+            raise Transient(f"kept insert {type(exc).__name__}") from None
+    return expires_at
+
+
 def publish_sync(tid: int, attempt_no: int) -> str:
     """One publish attempt (§4.6). Returns 'succeeded' | 'refused' | 'retry' | 'not_claimed' | 'lost' | 'gone'."""
     from app.services import r2_client
@@ -312,24 +393,37 @@ def publish_sync(tid: int, attempt_no: int) -> str:
         row = D.read_row(tid)
         attempt = D.read_attempt(tid, attempt_no)
         if (not row or row.get("status") != "running" or int(row.get("current_attempt") or 0) != int(attempt_no)
-                or not attempt or attempt.get("state") != "ended" or attempt.get("end_reason") != "succeeded"):
+                or not attempt or attempt.get("state") != "ended"
+                or attempt.get("end_reason") not in D.PUBLISH_END_REASONS):
             return "gone"
+        capped = attempt.get("end_reason") in D.CAP_END_REASONS
         total = D.total_steps_of(row)
-        final = D.final_ready(D.read_checkpoints([tid], ["ready"]), total)
-        if final is None:
-            raise Transient("no ready final checkpoint")
+        ready = D.read_checkpoints([tid], ["ready"])
+        if capped:
+            cap_step = int(row.get("capped_step") or 0)
+            targets = [c for c in ready if int(c.get("step") or 0) == cap_step]
+            ckpt = max(targets, key=lambda c: int(c.get("attempt_no") or 0)) if targets else None
+            if ckpt is None:
+                raise Transient("capped checkpoint missing")
+        else:
+            ckpt = D.final_ready(ready, total)
+            if ckpt is None:
+                raise Transient("no ready final checkpoint")
         try:
-            paths = _download_model(tid, final, tmp, lease)
+            paths = _download_model(tid, ckpt, tmp, lease)
             _validate_model(paths, row)
         except Refused as exc:
             lease.check()
-            logger.error("training %s: final model refused (%s)", tid, exc)
+            logger.error("training %s: model refused (%s)", tid, exc)
             try:
                 D.rpc("finish_training", {"p_training_id": int(tid), "p_attempt": int(attempt_no),
                                           "p_status": "failed", "p_message": T.S7, "p_log_url": None})
             except D.RpcConflict:
                 return "gone"
             return "refused"
+        expires_at = None
+        if capped:
+            expires_at = _keep_checkpoint(tid, ckpt, lease, tmp)
         meta = model_meta_bytes(row)
         meta_path = os.path.join(tmp, MODEL_META_NAME)
         with open(meta_path, "wb") as fh:
@@ -346,7 +440,8 @@ def publish_sync(tid: int, attempt_no: int) -> str:
             log_path = None
         except Exception as exc:  # noqa: BLE001
             raise Transient(f"log {type(exc).__name__}") from None
-        sid = AV.step_id(int(final["step"]), total)
+        step = int(ckpt["step"])
+        sid = AV.step_id(step, total)
         files = []  # (path_in_repo, local path)
         for rel, local in paths.items():
             name = rel.split("/", 1)[1]
@@ -362,6 +457,12 @@ def publish_sync(tid: int, attempt_no: int) -> str:
             expected[repo_path] = (hashlib.sha256(data).hexdigest(), len(data), git_blob_sha1(data))
         api, CommitOperationAdd = _hf()
         repo = row["model_name"]
+        if not capped:
+            commit_message = f"EduBotics: trained model (training {int(tid)})"
+        elif attempt.get("end_reason") == D.END_WALL_CAPPED:
+            commit_message = f"EduBotics: model at step {step} of {total} (training {int(tid)}, 12 h limit)"
+        else:
+            commit_message = f"EduBotics: model at step {step} of {total} (training {int(tid)}, time cap)"
         lease.check()
         try:
             api.create_repo(repo_id=repo, repo_type="model", exist_ok=True)
@@ -369,7 +470,7 @@ def publish_sync(tid: int, attempt_no: int) -> str:
             api.create_commit(
                 repo_id=repo, repo_type="model",
                 operations=[CommitOperationAdd(path_in_repo=p, path_or_fileobj=l) for p, l in files],
-                commit_message=f"EduBotics: trained model (training {int(tid)})",
+                commit_message=commit_message,
             )
         except LeaseLost:
             raise
@@ -378,10 +479,14 @@ def publish_sync(tid: int, attempt_no: int) -> str:
         lease.check()
         _read_back(api, repo, expected)
         lease.check()
+        finish_args = {"p_training_id": int(tid), "p_attempt": int(attempt_no), "p_status": "succeeded",
+                       "p_message": None, "p_log_url": log_url_for(repo) if log_path is not None else None}
+        if capped:
+            note = (T.s29(step, total) if attempt.get("end_reason") == D.END_WALL_CAPPED
+                    else T.s23(D.SETTINGS.cap_s, step, total))
+            finish_args.update({"p_note": note, "p_final_step": step, "p_continuable_until": expires_at})
         try:
-            D.rpc("finish_training", {"p_training_id": int(tid), "p_attempt": int(attempt_no),
-                                      "p_status": "succeeded", "p_message": None,
-                                      "p_log_url": log_url_for(repo) if log_path is not None else None})
+            D.rpc("finish_training", finish_args)
         except D.RpcConflict:
             logger.info("training %s: finish(succeeded) lost a race", tid)
             return "gone"

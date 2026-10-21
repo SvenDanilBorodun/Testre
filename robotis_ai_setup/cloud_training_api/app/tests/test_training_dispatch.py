@@ -507,7 +507,7 @@ class DispatcherPlacement(Base):
         a = self.db.attempt(row["id"], 1)
         self.assertEqual((a["state"], a["allowed_dcs"]), ("starting", []))
         # A 400 caches (cloud, card, "") and the card is tried again after CREATE_400_CACHE_S.
-        self.rp.create_answers = [(400, {"detail": "There are no longer any instances available with the "
+        self.rp.create_answers = [(400, {"detail": "There are no longer any instances available with the "  # english-ok: RunPod's own 400 answer, quoted verbatim
                                                    "requested specifications."}, None)]
         row2 = self.queued()
         await D.dispatch_tick()

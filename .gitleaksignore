@@ -49,8 +49,12 @@ dc16314b45a64df1947222f0c023fa3307d17fb9:robotis_ai_setup/docker/code_runner/run
 #
 # 5. Two v2.33.0 test fixtures (managed training on RunPod, 2026-10-21), both
 #    generic-api-key false positives: a tuple of test-case LABELS
-#    (`cases = ("probe_403", "max_pods", "no_key_legacy", "persisting_402")`)
-#    and the E49 pod-key test's made-up key `SECRET = "rpa_POD_A_SECRET_e49…"`,
+#    (the cap-probe test's tuple of four case names in test_training_dispatch.py)
+#    and the E49 pod-key test's made-up SECRET constant (an rpa_-prefixed fake),
 #    which the fake RunPod server issues and checks. Neither is a credential.
 40b0ae947820ab88e508c80f5c5d7918384c0939:robotis_ai_setup/cloud_training_api/app/tests/test_training_dispatch.py:generic-api-key:365
 fa39bebd7759dac794dd5685516502aec97f7814:robotis_ai_setup/tests/test_pod_key_check.py:generic-api-key:30
+#
+# 6. Entry 5's first wording quoted the case-name tuple itself and was flagged
+#    in this file (commit fccbeb92); reworded since. Not a credential.
+fccbeb9287d684040604fbebded142f5dd3dd5ce:.gitleaksignore:generic-api-key:52

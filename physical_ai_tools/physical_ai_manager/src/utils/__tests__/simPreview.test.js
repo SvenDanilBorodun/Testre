@@ -206,7 +206,7 @@ describe('previewBlockReason — each reason when only its condition holds', () 
     ['leader', { rsLeaderOn: true }],
     ['leaderPending', { rsLeaderPending: true }],
     ['leaderUnknown', { rsLeaderUnknown: true }],
-    ['otherRobot', { asset: { kind: 'recording', id: 't1', name: 'A', robotProfile: 'edu6_studio' } }],
+    ['otherRobot', { asset: { kind: 'recording', id: 't1', name: 'A', robotProfile: 'v1_studio' } }],
     ['unsaved', { workflowId: null }],
     ['inFlight', { inFlight: true }],
   ])('%s', (reason, over) => {
@@ -223,7 +223,7 @@ describe('previewBlockReason — each reason when only its condition holds', () 
       jogHandGuideOn: true,
       activeTutorialId: 't', rsLeaderOn: true, rsLeaderPending: true, rsLeaderUnknown: true, workflowId: null,
       inFlight: true,
-      asset: { kind: 'recording', id: 't1', name: 'A', robotProfile: 'edu6_studio' },
+      asset: { kind: 'recording', id: 't1', name: 'A', robotProfile: 'v1_studio' },
     };
     const order = [
       'offline', 'running', 'loading', 'restoring', 'teach', 'handguide', 'tutorial', 'leader', 'leaderPending', 'leaderUnknown',
@@ -329,7 +329,7 @@ describe('previewLeaderGate — the preview fails CLOSED on an unanswered bridge
     ['answered leader on', { ...BRIDGE_LEADER, probed: true }, { has_leader: true }, gate(true, false, false)],
     ['answered leader off', { ...BRIDGE_FOLLOWER, probed: true }, { has_leader: true }, gate(false, false, false)],
     // A proven leader-less rig never waits for the bridge.
-    ['not answered yet, omx_follower/edu6/edu1 caps', BRIDGE_PENDING, { has_leader: false }, gate(false, false, false)],
+    ['not answered yet, omx_follower/v1_studio caps', BRIDGE_PENDING, { has_leader: false }, gate(false, false, false)],
   ])('%s', (_label, bridge, caps, expected) => {
     expect(previewLeaderGate(bridge, caps)).toEqual(expected);
   });

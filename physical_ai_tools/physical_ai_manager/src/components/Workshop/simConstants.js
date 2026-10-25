@@ -90,12 +90,12 @@ export function buildCatalogDims(res) {
   return out;
 }
 
-// reachAnnulus — the profile-driven reach shape (edu6 §4.5; N6/N11 of the
-// 2026-10-18 semantics round). The server manifest carries reach_inner_m /
-// reach_outer_m (OMX 0.10/0.25 — the rig's reach at its grasp height —, edu6
-// 0.09/0.21, Edu:1 0.07/0.35); absent keys (old server, cloud mode) keep the
-// exported OMX constants. A profile that reaches only part of the circle also
-// carries `reach_sector_deg: [min, max]` (Edu:1: [-90, 90], the bearing
+// reachAnnulus — the profile-driven reach shape (N6/N11 of the 2026-10-18
+// semantics round). The server manifest carries reach_inner_m / reach_outer_m
+// (OMX 0.10/0.25 — the rig's reach at its grasp height —, V1 0.10/0.34);
+// absent keys (old server, cloud mode) keep the exported OMX constants. A
+// profile that reaches only part of the circle also carries
+// `reach_sector_deg: [min, max]` (V1: [-90, 90], the bearing
 // atan2(y, x) in the base frame, x forward, y left), and only then does the
 // result carry `sector: {minDeg, maxDeg}` — the key is ABSENT otherwise, so a
 // full ring compares equal to `{inner, outer}`.

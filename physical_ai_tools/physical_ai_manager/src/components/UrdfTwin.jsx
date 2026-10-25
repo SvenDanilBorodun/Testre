@@ -93,7 +93,7 @@
 //                    and nothing casts (RecordPage + jsdom mock untouched).
 //   * showReach    — Sim-stage translucent reach-annulus ring on the 3D table
 //                    (the profile-driven annulus or sector — reachAnnulus(caps),
-//                    OMX 0.10/0.25, fallback 0.10/0.28, edu6 0.09/0.21, Edu:1
+//                    OMX 0.10/0.25, fallback 0.10/0.28, V1 0.10/0.34 over
 //                    ±90° — shared with the 2D
 //                    editor via ./Workshop/simConstants, not the solver's
 //                    wrist-centre span). Default false → the ring builds ZERO
@@ -125,25 +125,27 @@ import { readTwinPalette } from './sucher/twinPalette';
 
 // The joints applied to the model are profile-driven (armGeometry from the
 // capability manifest: the OMX's joint1..joint5 + gripper_joint_1 when there is
-// none, edu6's joint1..joint6 + end_gear_joint, edu1's joint1..joint5 +
-// RL_joint). They are matched by NAME in each JointState, so unknown names — a
-// URDF <mimic> joint like gripper_joint_2, which urdf-loader drives itself — are
-// ignored, and a name missing from a message keeps its last value.
+// none, the V1's joint1..joint5 + RL_joint). They are matched by NAME in each
+// JointState, so unknown names — a URDF <mimic> joint like gripper_joint_2 or
+// LF_joint, which urdf-loader drives itself — are ignored, and a name missing
+// from a message keeps its last value.
 
-// Per-URDF-asset render config (edu6 §4.5). The capability manifest's
+// Per-URDF-asset render config. The capability manifest's
 // urdf_asset_id picks the row; joint names come from the manifest itself
 // (armGeometry) so /joint_states, the sim publisher and this twin agree.
 // gripperJoint is special-cased in emitEndEffector (the grasp-attach gripper
-// channel); eeLink is the frame a held mesh re-parents to. The edu6 gripper
-// FINGERS are <mimic> joints urdf-loader animates from end_gear_joint itself.
+// channel); eeLink is the frame a held mesh re-parents to. The V1's second claw
+// blade (LF_joint) is a <mimic> joint urdf-loader animates from RL_joint itself
+// (multiplier -18/19: the two claw gears have 18 and 19 teeth).
 //
 // `yaw` (radians, default 0) is a per-asset rotation about the URDF +Z axis
 // applied to the robot model BEFORE the -π/2 up-axis fix (with THREE Euler
-// order 'XYZ', rotation.z composes as Rx(-π/2)·Rz(yaw)). edu6's SOFTWARE WORLD
-// frame is the URDF base_link rotated 180° about Z (plan §2.1 / edu6_ik.py:
-// front = +x like the OMX), while /joint_states + the object layer speak WORLD
-// coords — so the URDF-native model must be yawed π to render in the world
-// frame, or the arm appears rotated 180° from the sim objects it grasps. OMX's
+// order 'XYZ', rotation.z composes as Rx(-π/2)·Rz(yaw)). The V1's SOFTWARE WORLD
+// frame is the URDF base_link rotated 180° about Z (v1_ik.py: front = +x like
+// the OMX; the export's reachable half-disc is on -x), while /joint_states + the
+// object layer speak WORLD coords — so the URDF-native model must be yawed π to
+// render in the world frame, or the arm appears rotated 180° from the sim
+// objects it grasps. OMX's
 // world frame IS its URDF frame (no yaw key → rotation.z stays 0 → byte-identical).
 const URDF_ASSETS = {
   omx_f: {
@@ -151,35 +153,21 @@ const URDF_ASSETS = {
     eeLink: 'end_effector_link',
     baseLink: 'link0',
   },
-  edu6: {
-    url: `${process.env.PUBLIC_URL || ''}/edu6-urdf/edu6.urdf`,
-    // NOTE this link is NOT the solver's TCP. `End_effector` sits 45.45 mm from
-    // link6 (edu6.urdf end_gear_joint) while edu6_ik's TCP is 104.95 mm from it
-    // (_LINK6_TO_TCP) -- a 59.5 mm axial gap. Harmless today: the shipped grasp
-    // family is strictly vertical (q4 == 0), so the offset is along the tool axis
-    // and the XY this frame reports equals the TCP's. It stops being harmless the
-    // moment any non-vertical pose exists, and a held mesh only looks right
-    // because attach() preserves the world transform rather than snapping to the
-    // link. Re-derive before adding a tilted grasp.
-    eeLink: 'End_effector',
-    baseLink: 'base_link',
-    yaw: Math.PI,
-  },
-  edu1: {
-    url: `${process.env.PUBLIC_URL || ''}/edu1-urdf/edu1.urdf`,
-    // Same caveat as edu6's row, with different numbers: `end_effector` is
-    // FIXED to link5 at zero offset, while edu1_ik's TCP is the CLOSED FINGERTIP
-    // 86.25 mm along that frame's +z (`_L_TOOL`). Harmless today for the same
-    // reason -- the shipped grasp family is strictly vertical, so the offset is
-    // along the tool axis and the XY this frame reports equals the TCP's -- and
-    // a held mesh only looks right because attach() preserves the world
-    // transform rather than snapping to the link. Re-derive before adding a
-    // tilted grasp. NOTE this arm's claw ROTATES, so the fingertip's HEIGHT
-    // below this frame also varies with the jaw opening (86.25 mm closed,
-    // 68.8 mm at 0.9 rad open); the constant is the CLOSED value.
+  v1: {
+    url: `${process.env.PUBLIC_URL || ''}/v1-urdf/v1.urdf`,
+    // NOTE this link is NOT the solver's TCP: `end_effector` is FIXED to link5
+    // at zero offset, while v1_ik's TCP is the CLOSED FINGERTIP 108.6 mm along
+    // that frame's +z (`_L_TOOL`). Harmless today: the shipped grasp family is
+    // strictly vertical, so the offset is along the tool axis and the XY this
+    // frame reports equals the TCP's -- and a held mesh only looks right because
+    // attach() preserves the world transform rather than snapping to the link.
+    // Re-derive before adding a tilted grasp. NOTE this arm's claw ROTATES, so
+    // the fingertip's HEIGHT below this frame also varies with the jaw opening
+    // (108.6 mm closed, 82.6 mm at the 0.90 rad open command); the constant is
+    // the CLOSED value.
     eeLink: 'end_effector',
     baseLink: 'base_link',
-    // URDF·rotZ(pi), same as edu6: this export's reachable half-disc is on -x.
+    // URDF·rotZ(pi): this export's reachable half-disc is on -x.
     yaw: Math.PI,
   },
 };
@@ -217,8 +205,8 @@ const JOINT_STALE_MS = 3000;
 const JOINT_STALE_CHECK_MS = 1000;
 
 // The URDFs + their STL meshes are bundled under public/<asset>-urdf/ (the OMX
-// copied there by tools/export_omx_urdf_for_web.py; edu6 by the plan's PR-3
-// asset drop). Fetched relative to PUBLIC_URL so it works offline with NO CDN
+// copied there by tools/export_omx_urdf_for_web.py; the V1 generated by
+// tools/build_v1_urdf_assets.py). Fetched relative to PUBLIC_URL so it works offline with NO CDN
 // (classroom requirement) — see URDF_ASSETS above for the per-profile rows.
 
 // The arm's link material (colour + metalness), the hemisphere's ground colour
@@ -351,8 +339,8 @@ const FRAME_AXIS_SIZE_M = 0.07;
 
 // ── Sim-stage reach-annulus ring ("showReach") ───────────────────────────────
 // A translucent green ring on the table marking the graspable annulus. Its radii
-// (and, for the Edu:1, its ±90° sector) are the profile-driven shape
-// (reachAnnulus(caps); OMX 0.10/0.25, fallback 0.10/0.28, edu6 0.09/0.21)
+// (and, for the V1, its ±90° sector) are the profile-driven shape
+// (reachAnnulus(caps); OMX 0.10/0.25, fallback 0.10/0.28, V1 0.10/0.34)
 // shared with the 2D editor via simConstants, so the two panes
 // never desync. Green matches the 2D SVG annulus stroke (#22c55e). Sits just
 // above the table (y=0.001) to avoid z-fighting; rendered only while showReach.
@@ -431,9 +419,9 @@ export default function UrdfTwin({
   // coordinates rather than wherever the carry happened to leave it.
   const simPositionsRef = useRef(simPositions);
   useEffect(() => { simPositionsRef.current = simPositions; }, [simPositions]);
-  // Profile geometry (edu6 §4.5): which URDF asset to load, which joint names
-  // to apply, which link is the grasp frame, and the reach-ring radii. A null/
-  // OMX manifest resolves to the pre-edu6 values exactly.
+  // Profile geometry: which URDF asset to load, which joint names to apply,
+  // which link is the grasp frame, and the reach-ring radii. A null/OMX
+  // manifest resolves to the OMX values exactly.
   const caps = useSelector((state) => (state.tasks && state.tasks.taskStatus ? state.tasks.taskStatus.capabilities : null));
   const armGeo = useMemo(() => armGeometry(caps), [caps]);
   const asset = URDF_ASSETS[armGeo.urdfAssetId] || URDF_ASSETS.omx_f;
@@ -857,9 +845,8 @@ export default function UrdfTwin({
     // returns — i.e. right after the XML is read, while every <mesh> is still an
     // in-flight STL fetch. (Mesh COUNT is not tag count: urdf-loader ships
     // `parseCollision = false` and we never set it, so only <visual> meshes are
-    // fetched — 8 for the OMX, 10 for edu6 (whose 20 <mesh> tags are 10 visual +
-    // 10 collision over 10 files) and 9 for edu1 (18 tags over 9 files).
-    // 5.4 MB, 6.2 MB and 3.3 MB respectively.)
+    // fetched — 8 for the OMX and 9 for the V1 (whose 18 <mesh> tags are
+    // 9 visual + 9 collision over 9 files); 5.4 MB and 3.6 MB respectively.)
     // So the robot handed to onComplete below has NO mesh geometry, and three
     // things that used to run there ran against a robot that was not there yet.
     // All three were MEASURED against a real Chromium + real WebGL, and the
@@ -872,7 +859,7 @@ export default function UrdfTwin({
     //      whose effect calls requestRenderRef. On the SIM twin that is
     //      terminal: /sim/joint_states does not exist until the first simulation
     //      run, so there is no other render pump at all.
-    //   2. frameRobot() did NOT simply early-return. It does on edu6 (all
+    //   2. frameRobot() did NOT simply early-return. It does on the V1 (all
     //      geometry is meshes, so the Box3 really is empty) — but omx_f.urdf
     //      declares a 1 cm red <box> on end_effector_link, a PRIMITIVE that
     //      exists from parse time. So on the OMX the Box3 was non-empty and
@@ -996,8 +983,8 @@ export default function UrdfTwin({
         robot.userData.baseLinkName = asset.baseLink;
         // URDF +Z is "up"; rotate so the arm stands upright in the viewer. A
         // per-asset `yaw` (about the URDF +Z axis) renders a model whose URDF
-        // frame differs from the software WORLD frame in the world frame — edu6
-        // is URDF·rotZ(π), so its yaw is π; OMX has no yaw key (rotation.z stays
+        // frame differs from the software WORLD frame in the world frame — the
+        // V1 is URDF·rotZ(π), so its yaw is π; OMX has no yaw key (rotation.z stays
         // 0 → byte-identical). Order 'XYZ' composes these as Rx(-π/2)·Rz(yaw),
         // i.e. the yaw is applied in the URDF frame BEFORE the up-axis fix, so
         // getWorldPosition (and every mesh parented under the robot) now reports
@@ -1560,7 +1547,7 @@ export default function UrdfTwin({
     if (!showReach && !reachRingRef.current) return;
 
     let ring = reachRingRef.current;
-    // An arm that reaches only part of the circle (the Edu:1's ±90°, N6/N11 of
+    // An arm that reaches only part of the circle (the V1's ±90°, N6/N11 of
     // the 2026-10-18 semantics round) draws only that sector. RingGeometry's
     // angles run in its own XY plane from +x towards +y; laid flat by the
     // -π/2 X-rotation below, local (x, y) IS the base frame's (x, y), so the
@@ -1918,7 +1905,7 @@ function setMeshColor(mesh, color) {
 // Read the end-effector link's world position and convert it back out of the
 // viewer frame by undoing the robot's -π/2 X-rotation: viewer (X,Y,Z) →
 // (X, -Z, Y). getWorldPosition already folds in the FULL robot transform, so on
-// a YAWED asset (edu6, rotation.z = π) this undo yields Rz(π)·(URDF TCP) = the
+// a YAWED asset (the V1, rotation.z = π) this undo yields Rz(π)·(URDF TCP) = the
 // software WORLD frame — exactly what the world-space object layer + IK expect,
 // by construction (a URDF TCP at (x, y) surfaces as (-x, -y)). On an un-yawed
 // asset (OMX, rotation.z = 0) it yields the URDF/base frame unchanged. No

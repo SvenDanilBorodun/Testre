@@ -156,9 +156,9 @@ describe('buildProgramBlocks — „Greifer merken"', () => {
   });
 
   it('a mismatched gripper joint name is unknown', () => {
-    const edu6Names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'end_gear_joint'];
-    expect(placeGripperState(poseEntry(-0.3, edu6Names), null)).toBeNull();
-    const opts = places({ a: poseEntry(0.8), b: poseEntry(-0.3, edu6Names) });
+    const v1Names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'];
+    expect(placeGripperState(poseEntry(-0.3, v1Names), null)).toBeNull();
+    const opts = places({ a: poseEntry(0.8), b: poseEntry(-0.3, v1Names) });
     const { json } = buildProgramBlocks([
       { kind: 'pose', name: 'P1', entryId: 'a' },
       { kind: 'pose', name: 'P2', entryId: 'b' },
@@ -186,16 +186,27 @@ describe('buildProgramBlocks — „Greifer merken"', () => {
   it('recordingGripperStates reads the profile gripper column of exact-width rows only', () => {
     expect(recordingGripperStates([omxRow(0.8, 0), omxRow(-0.4, 1)], null))
       .toEqual({ start: 'open', end: 'closed' });
-    const edu6Caps = {
+    // A SYNTHETIC 6-joint manifest: an 8-wide take. A 7-wide row under it is
+    // not one of its takes → unknown.
+    const sixJointCaps = {
       arm_joints: 6,
-      joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'end_gear_joint'],
+      joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'gripper'],
       sim_close_threshold_rad: 1.5,
       gripper_open_rad: 1.75,
     };
-    // A 7-wide OMX row under edu6 caps is not an edu6 take → unknown.
-    expect(recordingGripperStates([omxRow(0.8, 0)], edu6Caps)).toEqual({ start: null, end: null });
-    expect(recordingGripperStates([[0, 0, 0, 0, 0, 0, 1.0, 0], [0, 0, 0, 0, 0, 0, 1.75, 1]], edu6Caps))
+    expect(recordingGripperStates([omxRow(0.8, 0)], sixJointCaps)).toEqual({ start: null, end: null });
+    expect(recordingGripperStates([[0, 0, 0, 0, 0, 0, 1.0, 0], [0, 0, 0, 0, 0, 0, 1.75, 1]], sixJointCaps))
       .toEqual({ start: 'closed', end: 'open' });
+    // The V1: 7-wide like the OMX, judged against its own claw band (0.5 / 0.70).
+    const v1Caps = {
+      arm_joints: 5,
+      joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'],
+      sim_close_threshold_rad: 0.5,
+      gripper_open_rad: 0.9,
+    };
+    expect(recordingGripperStates([[0, 0.64, 1.48, 0.9, 0, 0.9, 0], [0, 0.64, 1.48, 0.9, 0, 0.05, 1]], v1Caps))
+      .toEqual({ start: 'open', end: 'closed' });
+    expect(recordingGripperStates([[0, 0, 0, 0, 0, 0.6, 0]], v1Caps)).toEqual({ start: null, end: null });
     expect(recordingGripperStates([], null)).toEqual({ start: null, end: null });
     expect(recordingGripperStates(undefined, null)).toEqual({ start: null, end: null });
   });

@@ -186,7 +186,7 @@ export default function SystemPage() {
     ? selectedProfile.scan_requires_leader !== false
     : true;
 
-  // Which camera roles this rig may use. `edu6_studio` allows „Szene" ONLY —
+  // Which camera roles this rig may use. `v1_studio` allows „Szene" ONLY —
   // its server config declares a single `scene:` topic, so a camera named
   // `gripper` publishes a topic nothing subscribes to while the opi compose
   // healthcheck (which greps the STUDENT-NAMED topic) still goes green. The
@@ -453,8 +453,8 @@ export default function SystemPage() {
   // PROFILE-AWARE readiness, computed by the agent against the selected
   // ArmProfile (`agent.py::_hardware_ready`). `arms_identified.both` answers a
   // DIFFERENT question — are two arms present — and a follower-only rig is
-  // fully ready with it false, which is why omx_follower and edu6_studio were
-  // both unstartable on a Pi. Falls back to the old both-arms gate when the
+  // fully ready with it false, which is why the follower-only profiles were
+  // once unstartable on a Pi. Falls back to the old both-arms gate when the
   // agent predates the key, so an un-updated Pi is byte-unchanged.
   const hardwareReady =
     typeof agentStatus?.hardware_ready === 'boolean' ? agentStatus.hardware_ready : armsBoth;

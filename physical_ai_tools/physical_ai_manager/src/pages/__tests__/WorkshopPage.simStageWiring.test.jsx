@@ -415,7 +415,7 @@ describe('WorkshopPage — Ziel/Position markers and „Ziel setzen"', () => {
     await screen.findByTestId('sim-scene');
     expect(lastSimSceneProps().ghostJoints).toEqual({ names, positions: GHOSTED.joints });
     // Another arm's snapshot (or an older server's joint-less Position) draws nothing.
-    act(() => { mockStore.listeners.forEach((fn) => fn([PIN, { ...GHOSTED, robot_type: 'edu6_studio' }])); });
+    act(() => { mockStore.listeners.forEach((fn) => fn([PIN, { ...GHOSTED, robot_type: 'v1_studio' }])); });
     await waitFor(() => expect(lastSimSceneProps().ghostJoints).toBeNull());
     act(() => { mockStore.listeners.forEach((fn) => fn([PIN, POSE])); });
     await waitFor(() => expect(lastSimSceneProps().ghostJoints).toBeNull());

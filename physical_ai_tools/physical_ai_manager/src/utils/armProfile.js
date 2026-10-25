@@ -13,8 +13,8 @@
 // driven React surfaces consume (UrdfTwin, JogPanel, SimScene/simConstants).
 //
 // Every field falls back to the OMX value when the manifest is absent (cloud
-// mode, pre-first-tick) or predates the edu6 keys — so an old server, a null
-// caps, or a partial manifest render EXACTLY the pre-edu6 UI. Deliberately
+// mode, pre-first-tick) or predates the geometry keys — so an old server, a
+// null caps, or a partial manifest render EXACTLY the OMX UI. Deliberately
 // dependency-free (no three, no react) — it rides the entry chunk.
 
 const OMX_JOINT_NAMES = [
@@ -50,7 +50,7 @@ export function armGeometry(caps) {
     // open — so the TCP's height below the tool frame depends on the gripper
     // command. `=== true` and no fallback: the server omits the key entirely on
     // every parallel-jaw arm, and an OLD server omits it for all of them, which
-    // is exactly the pre-Edu:1 behaviour.
+    // is exactly the parallel-jaw behaviour.
     toolTipTracksGripper: c.tool_tip_tracks_gripper === true,
   };
 }
@@ -73,7 +73,7 @@ export function gripperBand(caps) {
     return { close: OMX_GRIPPER_CLOSED_RAD, open: OMX_GRIPPER_OPEN_RAD };
   }
   // Profile-supplied close threshold; re-open hysteresis sits halfway
-  // between it and the profile's full-open command (edu6: 1.5 / 1.625).
+  // between it and the profile's full-open command (V1: 0.5 / 0.70).
   return {
     close: geo.simCloseThresholdRad,
     open: (geo.simCloseThresholdRad + geo.gripperOpenRad) / 2,

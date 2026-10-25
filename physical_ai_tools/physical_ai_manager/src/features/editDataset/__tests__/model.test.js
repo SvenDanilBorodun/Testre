@@ -432,7 +432,7 @@ describe('mergeChecks (§D5, each check failing alone)', () => {
 
   it.each([
     ['version', { codebase_version: 'v2.1' }, 'Unterschiedliches Datensatz-Format – lässt sich nicht zusammenführen'],
-    ['robot', { robot_type: 'edu6_studio' }, 'Unterschiedliche Roboter – lässt sich nicht zusammenführen'],
+    ['robot', { robot_type: 'v1_studio' }, 'Unterschiedliche Roboter – lässt sich nicht zusammenführen'],
     ['fps', { fps: 15 }, 'Unterschiedliche Bildrate (15 und 30 Bilder/s) – lässt sich nicht zusammenführen'],
     ['cameras', {
       cameras: [{ index: 0, key: 'observation.images.scene', name: 'scene', codec: 'h264', pix_fmt: 'yuv420p', width: 640, height: 480, fps: 30 }],
@@ -458,7 +458,7 @@ describe('mergeChecks (§D5, each check failing alone)', () => {
 describe('labels (§J.6 tables, §F1 order)', () => {
   it('robots, codecs and joints with their fallbacks', () => {
     expect(robotName('omx_f')).toBe('OpenMANIPULATOR-X');
-    expect(robotName('edu6_studio')).toBe('Edu:6');
+    expect(robotName('v1_studio')).toBe('V1');
     expect(robotName('so100')).toBe('so100');
     expect(codecName('libx264')).toBe('H.264');
     expect(codecName('libsvtav1')).toBe('AV1');
@@ -481,7 +481,7 @@ describe('labels (§J.6 tables, §F1 order)', () => {
     expect(taskNameOf({ id: 'lena/omx_f_Wuerfel-in-die-Schale', name: 'omx_f_Wuerfel-in-die-Schale', display_name: '  ' }, 'omx_f'))
       .toBe('Wuerfel in die Schale');
     // the entry's own robot type first (a dataset recorded on another profile)
-    expect(taskNameOf({ id: 'lena/edu6_studio_becher', name: 'edu6_studio_becher', robot_type: 'edu6_studio' }, 'omx_f')).toBe('Becher');
+    expect(taskNameOf({ id: 'lena/v1_studio_becher', name: 'v1_studio_becher', robot_type: 'v1_studio' }, 'omx_f')).toBe('Becher');
     // no prefix to strip: the name as it is
     expect(taskNameOf({ id: 'lena/meine-daten', name: 'meine-daten' }, 'omx_f')).toBe('Meine daten');
     expect(taskNameOf({ id: 'lena/omx_f_', name: 'omx_f_' }, 'omx_f')).toBe('omx_f_');

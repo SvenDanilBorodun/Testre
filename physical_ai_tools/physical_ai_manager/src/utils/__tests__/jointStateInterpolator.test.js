@@ -129,7 +129,7 @@ describe('createJointStateInterpolator', () => {
 
   test('the speed limit scales with the gap: a fast but real move still blends', () => {
     const it = createJointStateInterpolator();
-    // 1.5 rad over 200 ms = 7.5 rad/s — the Edu:1's fastest joints do 7.87.
+    // 1.5 rad over 200 ms = 7.5 rad/s — the V1's fastest joints do 7.87.
     it.push(msg(0, { joint2: 0.0 }), 1000);
     it.push(msg(200, { joint2: 1.5 }), 1200);
     expect(it.frame(1200).pose.get('joint2')).toBeCloseTo(0.75, 9); // rt = 100

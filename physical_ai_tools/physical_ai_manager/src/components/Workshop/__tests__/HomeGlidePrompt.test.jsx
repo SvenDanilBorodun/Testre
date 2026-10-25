@@ -112,7 +112,7 @@ describe('HomeGlidePrompt', () => {
   // The „stays here" toast draws the arm of the robot the student started with
   // (its real URDF, by profile id) — and no robot at all while that is unknown.
   test.each([
-    ['omx_full', 'omx_f'], ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
+    ['omx_full', 'omx_f'], ['omx_follower', 'omx_f'], ['v1_studio', 'v1'],
   ])('„Hier stehen lassen" toasts with the %s arm', (profile, glyph) => {
     render(<HomeGlideProvider robotProfile={profile}><Offerer /></HomeGlideProvider>);
     fireEvent.click(screen.getByRole('button', { name: 'Hier stehen lassen' }));

@@ -62,18 +62,25 @@ function lookup(map, id) {
   return typeof id === 'string' && Object.prototype.hasOwnProperty.call(map, id) ? map[id] : null;
 }
 
+// The legacy tags of the two retired arms. Rows stored with them keep their id
+// (the cloud and the destination store accept it), and they all share ONE
+// German label — never the raw id, never the old product name.
+export const LEGACY_ROBOT_TYPES = Object.freeze(['edu6_studio', 'edu1_studio']);
+
+const isLegacy = (id) => typeof id === 'string' && LEGACY_ROBOT_TYPES.includes(id);
+
 export function robotLongLabelDe(id) {
+  if (isLegacy(id)) return DE.ROBOT_LABEL_RETIRED;
   return lookup({
     omx_f: DE.ROBOT_LABEL_OMX,
-    edu6_studio: DE.ROBOT_LABEL_EDU6,
-    edu1_studio: DE.ROBOT_LABEL_EDU1,
+    v1_studio: DE.ROBOT_LABEL_V1,
   }, id);
 }
 
 export function robotShortLabelDe(id) {
+  if (isLegacy(id)) return DE.ROBOT_SHORT_RETIRED;
   return lookup({
     omx_f: DE.ROBOT_SHORT_OMX,
-    edu6_studio: DE.ROBOT_SHORT_EDU6,
-    edu1_studio: DE.ROBOT_SHORT_EDU1,
+    v1_studio: DE.ROBOT_SHORT_V1,
   }, id);
 }

@@ -242,7 +242,7 @@ function WorkshopPage({ isActive }) {
   // the live editor already IS that document, so its hydrate is skipped once.
   const skipHydrateForIdRef = useRef(null);
   const robotType = useSelector((s) => (s.tasks && s.tasks.taskStatus ? s.tasks.taskStatus.robotType : ''));
-  // The robot profile id (omx_full / omx_follower / edu6_studio / edu1_studio): which robot's real
+  // The robot profile id (omx_full / omx_follower / v1_studio): which robot's real
   // glyph the mode badge and the mode toast draw. '' while unknown: then they draw none.
   const robotProfile = useSelector((s) => (s.tasks && s.tasks.taskStatus && s.tasks.taskStatus.robotProfile) || '');
   const robotProfileRef = useRef(robotProfile);

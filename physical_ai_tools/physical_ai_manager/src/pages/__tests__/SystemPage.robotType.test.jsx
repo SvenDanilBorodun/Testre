@@ -9,7 +9,7 @@
 // The two are ONE change: the selector chooses the profile, and every gate on
 // the page (start button, pill, Leader tile, hints) reads the SAME profile back
 // off the agent's /status. Before this, the Pi hard-required BOTH arms, so
-// `edu6_studio` AND the long-shipping `omx_follower` were unreachable there.
+// every follower-only profile (`omx_follower`, `v1_studio`) was unreachable there.
 //
 // Two properties carry the most weight and are asserted repeatedly:
 //   1. an `omx_full` Pi renders and gates EXACTLY as it did (every existing
@@ -61,22 +61,16 @@ const PROFILES = [
     camera_roles: ['scene', 'gripper'],
   },
   {
-    id: 'edu6_studio',
-    display_de: 'EduBotics 6-Achs – Roboter Studio',
-    scan_requires_leader: false,
-    camera_roles: ['scene'],
-  },
-  {
-    id: 'edu1_studio',
-    display_de: 'Edu:1 – Roboter Studio',
+    id: 'v1_studio',
+    display_de: 'V1 – Roboter Studio',
     scan_requires_leader: false,
     camera_roles: ['scene'],
   },
 ];
 
 // Every profile the agent can send. Derived from PROFILES rather than restated:
-// the follower-only sweeps below were hardcoded triples and stopped covering
-// `edu1_studio` the day it was added, without saying so.
+// the follower-only sweeps below were once hardcoded lists and stopped covering
+// a profile the day it was added, without saying so.
 const ALL_PROFILE_IDS = PROFILES.map((p) => p.id);
 const FOLLOWER_ONLY_IDS = PROFILES.filter((p) => p.scan_requires_leader === false)
   .map((p) => p.id);
@@ -131,7 +125,7 @@ beforeEach(() => {
   mockToast.success.mockClear();
   mockToast.error.mockClear();
   robotTypeResponse = () =>
-    jsonRes({ ok: true, robot_type: 'edu6_studio', message: 'Robotertyp gesetzt: X.' });
+    jsonRes({ ok: true, robot_type: 'v1_studio', message: 'Robotertyp gesetzt: X.' });
   mockPi = {
     piMode: true,
     piModeResolved: true,
@@ -157,13 +151,13 @@ describe('SystemPage — Robotertyp selector', () => {
     const labels = within(select)
       .getAllByRole('option')
       .map((o) => o.textContent);
-    // Derived from PROFILES, never restated: this list was a hardcoded triple
-    // and silently stopped covering `edu1_studio` the day it was added. The
+    // Derived from PROFILES, never restated: this list was once a hardcoded
+    // list and silently stopped covering a new profile the day it was added. The
     // selector is the Pi's whole entry point — a profile the agent knows but
     // the dropdown never lists is unreachable on the one repair surface a
     // student can get to.
     expect(labels).toEqual(PROFILES.map((p) => p.display_de));
-    expect(labels).toContain('Edu:1 – Roboter Studio');
+    expect(labels).toContain('V1 – Roboter Studio');
     expect(select).toHaveValue('omx_full');
   });
 
@@ -175,7 +169,7 @@ describe('SystemPage — Robotertyp selector', () => {
   it('POSTs the chosen id to /api/system/robot-type and refreshes status', async () => {
     renderWith(statusFixture());
     const before = refreshAgentStatus.mock.calls.length;
-    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'edu6_studio');
+    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'v1_studio');
 
     await waitFor(() =>
       expect(mockToast.success).toHaveBeenCalledWith('Robotertyp gesetzt: X.')
@@ -184,7 +178,7 @@ describe('SystemPage — Robotertyp selector', () => {
     expect(call).toBeTruthy();
     expect(String(call[0])).toBe('/api/system/robot-type');
     expect(call[1].method).toBe('POST');
-    expect(JSON.parse(call[1].body)).toEqual({ robot_type: 'edu6_studio' });
+    expect(JSON.parse(call[1].body)).toEqual({ robot_type: 'v1_studio' });
     expect(refreshAgentStatus.mock.calls.length).toBeGreaterThan(before);
   });
 
@@ -234,7 +228,7 @@ describe('SystemPage — Robotertyp selector', () => {
         release = () => r({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
       });
     renderWith(statusFixture());
-    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'edu6_studio');
+    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'v1_studio');
     await waitFor(() => expect(screen.getByLabelText('Robotertyp')).toBeDisabled());
     release();
     await waitFor(() => expect(screen.getByLabelText('Robotertyp')).toBeEnabled());
@@ -247,9 +241,9 @@ describe('SystemPage — Robotertyp selector', () => {
         release = () => r({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
       });
     renderWith(statusFixture());
-    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'edu6_studio');
+    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'v1_studio');
     // The agent's /status still says omx_full; the optimistic value holds.
-    expect(screen.getByLabelText('Robotertyp')).toHaveValue('edu6_studio');
+    expect(screen.getByLabelText('Robotertyp')).toHaveValue('v1_studio');
     release();
     await waitFor(() => expect(screen.getByLabelText('Robotertyp')).toBeEnabled());
   });
@@ -264,7 +258,7 @@ describe('SystemPage — Robotertyp selector', () => {
         409
       );
     renderWith(statusFixture());
-    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'edu6_studio');
+    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'v1_studio');
     await waitFor(() =>
       expect(mockToast.error).toHaveBeenCalledWith(
         'Der Robotertyp kann nur geändert werden, wenn die Roboter-Umgebung gestoppt ist.'
@@ -276,7 +270,7 @@ describe('SystemPage — Robotertyp selector', () => {
   it('reverts when the agent is unreachable mid-change', async () => {
     robotTypeResponse = () => Promise.reject(new Error('offline'));
     renderWith(statusFixture());
-    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'edu6_studio');
+    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'v1_studio');
     await waitFor(() =>
       expect(mockToast.error).toHaveBeenCalledWith('Der Agent ist nicht erreichbar.')
     );
@@ -294,15 +288,15 @@ describe('SystemPage — Robotertyp selector', () => {
     refreshAgentStatus
       .mockImplementationOnce(() => Promise.resolve(null))          // mount
       .mockImplementationOnce(() => refreshHeld.then(() => {        // the finally
-        mockPi.agentStatus = statusFixture({ robot_type: 'edu6_studio' });
+        mockPi.agentStatus = statusFixture({ robot_type: 'v1_studio' });
         return mockPi.agentStatus;
       }));
     renderWith(statusFixture());
-    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'edu6_studio');
+    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'v1_studio');
     await waitFor(() => expect(refreshAgentStatus.mock.calls.length).toBeGreaterThan(1));
     // The refresh has NOT returned yet — the agent still says omx_full, so only
     // the optimistic value can be holding the display here.
-    expect(screen.getByLabelText('Robotertyp')).toHaveValue('edu6_studio');
+    expect(screen.getByLabelText('Robotertyp')).toHaveValue('v1_studio');
     releaseRefresh();
     await waitFor(() => expect(screen.getByLabelText('Robotertyp')).toBeEnabled());
   });
@@ -315,7 +309,7 @@ describe('SystemPage — Robotertyp selector', () => {
       .mockImplementationOnce(() => Promise.resolve(null))
       .mockImplementationOnce(() => Promise.reject(new Error('boom')));
     renderWith(statusFixture());
-    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'edu6_studio');
+    await userEvent.selectOptions(screen.getByLabelText('Robotertyp'), 'v1_studio');
     await waitFor(() => expect(refreshAgentStatus.mock.calls.length).toBeGreaterThan(1));
     await waitFor(() => expect(screen.getByLabelText('Robotertyp')).toHaveValue('omx_full'));
     expect(screen.getByLabelText('Robotertyp')).toBeEnabled();
@@ -342,7 +336,7 @@ describe('SystemPage — Robotertyp selector', () => {
       screen.getByText(/Dieser Typ braucht beide Arme — Leader und Follower\./)
     ).toBeInTheDocument();
     cleanup();
-    renderWith(statusFixture({ robot_type: 'edu6_studio' }));
+    renderWith(statusFixture({ robot_type: 'v1_studio' }));
     expect(
       screen.getByText(/Dieser Typ braucht nur einen Arm/)
     ).toBeInTheDocument();
@@ -440,7 +434,7 @@ describe('SystemPage — an agent without the profile keys', () => {
     const labels = within(screen.getByLabelText('Robotertyp'))
       .getAllByRole('option')
       .map((o) => o.textContent);
-    expect(labels).toEqual(['OMX – Voll', 'EduBotics 6-Achs – Roboter Studio']);
+    expect(labels).toEqual(['OMX – Voll', 'V1 – Roboter Studio']);
   });
 });
 
@@ -456,7 +450,7 @@ describe('SystemPage — follower-only start gating', () => {
   );
 
   it('still refuses a follower-only rig with no arm at all', () => {
-    renderWith(statusFixture({ robot_type: 'edu6_studio', hardware_ready: false }));
+    renderWith(statusFixture({ robot_type: 'v1_studio', hardware_ready: false }));
     expect(screen.getByRole('button', { name: 'Umgebung starten' })).toBeDisabled();
   });
 
@@ -490,16 +484,16 @@ describe('SystemPage — follower-only start gating', () => {
     // `arms_identified.both` is false on such a rig by construction, so a pill
     // still toned off `both` would read „Arm erkannt" in grey — the neutral
     // tone the page uses for „Nicht erkannt". Tone and text must agree.
-    renderWith(readyFixture('edu6_studio'));
+    renderWith(readyFixture('v1_studio'));
     const pill = screen.getByText('Arm erkannt');
     expect(pill.className).toContain('--success-wash');
     cleanup();
-    renderWith(statusFixture({ robot_type: 'edu6_studio', hardware_ready: false }));
+    renderWith(statusFixture({ robot_type: 'v1_studio', hardware_ready: false }));
     expect(screen.getByText('Nicht erkannt').className).toContain('--bg-sunk');
   });
 
   it('matches the hint and the button title to the profile', () => {
-    renderWith(statusFixture({ robot_type: 'edu6_studio', hardware_ready: false }));
+    renderWith(statusFixture({ robot_type: 'v1_studio', hardware_ready: false }));
     expect(
       screen.getByText('Bitte zuerst den Roboterarm scannen (Schritt A) oder oben „Cloud-Modus" wählen.')
     ).toBeInTheDocument();
@@ -542,7 +536,7 @@ describe('SystemPage — follower-only start gating', () => {
       }
       return jsonRes({});
     });
-    renderWith(statusFixture({ robot_type: 'edu6_studio', hardware_ready: false }));
+    renderWith(statusFixture({ robot_type: 'v1_studio', hardware_ready: false }));
     await userEvent.click(screen.getByRole('button', { name: 'Arm scannen' }));
     expect(
       await screen.findByText('Den Roboterarm über USB anschließen und einschalten (12-V-Netzteil).')
@@ -570,7 +564,7 @@ describe('SystemPage — follower-only start gating', () => {
   });
 
   it('Cloud-Modus starts regardless of profile or hardware', async () => {
-    renderWith(statusFixture({ robot_type: 'edu6_studio', hardware_ready: false }));
+    renderWith(statusFixture({ robot_type: 'v1_studio', hardware_ready: false }));
     expect(screen.getByRole('button', { name: 'Umgebung starten' })).toBeDisabled();
     await userEvent.click(screen.getByRole('checkbox'));
     expect(screen.getByRole('button', { name: 'Umgebung starten' })).toBeEnabled();
@@ -619,7 +613,7 @@ describe('Schritt A wording matches how many arms the profile has', () => {
   // „Roboterarm" tile, an „Arm erkannt" pill), so the plural read as a bug
   // beside them on a one-arm rig. `omx_full` must stay plural.
 
-  const FOLLOWER_ONLY = ['omx_follower', 'edu6_studio'];
+  const FOLLOWER_ONLY = ['omx_follower', 'v1_studio'];
 
   it('is plural on omx_full — heading and button', () => {
     renderWith(statusFixture({ robot_type: 'omx_full' }));
@@ -662,7 +656,7 @@ describe('Schritt A wording matches how many arms the profile has', () => {
           })
         : jsonRes({})
     );
-    renderWith(statusFixture({ robot_type: 'edu6_studio' }));
+    renderWith(statusFixture({ robot_type: 'v1_studio' }));
     await userEvent.click(screen.getByRole('button', { name: 'Arm scannen' }));
     expect(await screen.findByRole('button', { name: 'Wird gescannt …' })).toBeInTheDocument();
     release();
@@ -746,7 +740,7 @@ describe('camera roles are only ever sent with an explicit role', () => {
     // independent review caught it.) Seeded this way it fences the filter.
     renderWith(
       statusFixture({
-        robot_type: 'edu6_studio',
+        robot_type: 'v1_studio',
         cameras: [{ path: '/dev/v4l/by-id/usb-CAM-A', role: '' }],
       })
     );
@@ -757,14 +751,14 @@ describe('camera roles are only ever sent with an explicit role', () => {
   it('sends a lone „scene" camera — the only camera a follower-only kit has', async () => {
     // The filter is an ALLOWLIST, and until this test it was fenced in one
     // direction only: every case above supplies `gripper`, so narrowing it to
-    // `r === 'gripper'` left the whole 46-file suite green. On an edu6 /
+    // `r === 'gripper'` left the whole 46-file suite green. On a V1 /
     // omx_follower kit `scene` is the ONLY role there is (a follower-only rig
     // has no gripper camera), so that narrowing would POST `{"cameras": []}`,
     // the agent would answer 200, the toast would say „Kameras zugeordnet."
     // — and the rig would then start with no camera at all.
     renderWith(
       statusFixture({
-        robot_type: 'edu6_studio',
+        robot_type: 'v1_studio',
         cameras: [{ path: '/dev/v4l/by-id/usb-CAM-A', role: 'scene' }],
       })
     );

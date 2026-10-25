@@ -51,8 +51,8 @@ vi.mock('../../../utils/rosConnectionManager', () => ({
 }));
 
 // SimScene reads the capability manifest (profile-driven reach annulus + grasp
-// band, edu6 §4.5) via useSelector — wrap every render in a minimal store.
-// null caps = the OMX constants, keeping every pre-edu6 assertion identical.
+// band) via useSelector — wrap every render in a minimal store.
+// null caps = the OMX constants, keeping every OMX assertion identical.
 // `workshop` answers the AUTHORITY question (is a program actually driving the
 // virtual arm?) and is mutable through a test action so a single mounted tree can
 // cross the running→idle edge, which is the edge the staleness bug lived on.
@@ -589,12 +589,12 @@ describe('SimScene — Ziel setzen and Sammlung markers', () => {
 // R0-3 / S-3: the split stage gives the table its room — a 3D ↔ table divider,
 // a notice that can be closed, and from md up the whole table FITTED into its
 // area. The stack layout keeps everything as it was.
-// N6/N11 (owner decision Q6): the Edu:1 reaches ±90° only. Its back half is
+// N6/N11 (owner decision Q6): the V1 reaches ±90° only. Its back half is
 // out of reach on the rig, so the simulator draws the sector, snaps a tap
 // behind the arm onto the nearest sector edge, and marks — never moves — a
 // saved object that lies outside the shape.
 describe('SimScene — the reach shape of the arm (N6/N11)', () => {
-  const EDU1_REACH = { reach_inner_m: 0.07, reach_outer_m: 0.35, reach_sector_deg: [-90, 90] };
+  const V1_REACH = { reach_inner_m: 0.10, reach_outer_m: 0.34, reach_sector_deg: [-90, 90] };
   const giveBox = () => {
     const svg = screen.getByRole('application', {
       name: 'Simulator-Tisch — Objekte, Sperrzonen und Ziele platzieren',
@@ -605,11 +605,11 @@ describe('SimScene — the reach shape of the arm (N6/N11)', () => {
     return svg;
   };
 
-  test('a_tap_behind_the_edu1_is_snapped_into_the_sector', async () => {
+  test('a_tap_behind_the_v1_is_snapped_into_the_sector', async () => {
     const onChange = vi.fn();
     render(
       <SimScene scene={{ objects: [], zones: [] }} catalog={CATALOG} onChange={onChange} />,
-      { capabilities: EDU1_REACH },
+      { capabilities: V1_REACH },
     );
     await screen.findByTestId('urdf-twin');
     expect(screen.getByTestId('reach-sector')).toBeInTheDocument();
@@ -650,7 +650,7 @@ describe('SimScene — the reach shape of the arm (N6/N11)', () => {
     };
     const { container } = render(
       <SimScene scene={scene} catalog={CATALOG} onChange={onChange} />,
-      { capabilities: EDU1_REACH },
+      { capabilities: V1_REACH },
     );
     await screen.findByTestId('urdf-twin');
     // Kept where it was saved: loading never moves an object.

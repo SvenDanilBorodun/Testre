@@ -78,8 +78,8 @@ export const INTERP_DELAY_MS = 100;
 export const INTERP_MAX_GAP_MS = 250;
 // A per-joint change between two consecutive samples that would need a joint
 // speed above this is a discontinuity (a wrap, a teleport), not motion. 2.5× the
-// fastest joint limit in the three URDF assets (edu1 joint2/joint3, 7.87 rad/s;
-// the OMX is 4.8, edu6 5.45). A 2π encoder wrap needs ≥ 25 rad/s even across the
+// fastest joint limit in the two URDF assets (V1 joint2/joint3, 7.87 rad/s;
+// the OMX is 4.8). A 2π encoder wrap needs ≥ 25 rad/s even across the
 // widest gap that is still blended (INTERP_MAX_GAP_MS), so it always steps.
 export const INTERP_MAX_JOINT_SPEED_RAD_S = 20;
 

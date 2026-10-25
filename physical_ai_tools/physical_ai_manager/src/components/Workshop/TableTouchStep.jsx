@@ -48,7 +48,8 @@ function TableTouchStep() {
   // A ROTATING claw's fingertip swings BACK as the jaws open, so the point the
   // FK model calls the TCP is only under the student's finger when the claw is
   // CLOSED. Touching off with it open measures the table too low by the whole
-  // difference (~17 mm on the Edu:1) and every later grasp inherits the error.
+  // difference (~26 mm on the V1 at its 0.90 rad open command) and every later
+  // grasp inherits the error.
   // No guard can catch this — the readback is a legal pose — so it has to be an
   // instruction, and it is shown ONLY on an arm it is true for.
   const caps = useSelector((s) => (s.tasks && s.tasks.taskStatus

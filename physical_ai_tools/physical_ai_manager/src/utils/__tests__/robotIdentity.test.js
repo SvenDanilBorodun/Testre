@@ -30,7 +30,7 @@ describe('robotDisplayName', () => {
 
   it('falls back to the profile id on an older server image', () => {
     // Not ideal, but it is what the page showed before and it is TRUE.
-    expect(robotDisplayName(capsWith({}), 'edu1_studio', 'omx_f')).toBe('edu1_studio');
+    expect(robotDisplayName(capsWith({}), 'v1_studio', 'omx_f')).toBe('v1_studio');
   });
 
   it('falls back again to the data robot_type, then to empty', () => {

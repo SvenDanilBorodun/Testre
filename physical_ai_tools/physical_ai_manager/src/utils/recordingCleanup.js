@@ -42,8 +42,7 @@ export const MIN_POINTS = 2;
  */
 export function fallJointIndices(caps) {
   const geo = armGeometry(caps);
-  if (geo.urdfAssetId === 'edu6') return [1, 2, 4];
-  if (geo.urdfAssetId === 'omx_f' || geo.urdfAssetId === 'edu1') return [1, 2, 3];
+  if (geo.urdfAssetId === 'omx_f' || geo.urdfAssetId === 'v1') return [1, 2, 3];
   return geo.armJoints >= 4 ? [1, 2, 3] : [1, 2];
 }
 

@@ -17,7 +17,7 @@ import {
 } from '../recordingCleanup';
 
 const OMX = { urdf_asset_id: 'omx_f', arm_joints: 5 };
-const EDU6 = { urdf_asset_id: 'edu6', arm_joints: 6 };
+const V1 = { urdf_asset_id: 'v1', arm_joints: 5 };
 
 // A still OMX row (7 wide) at time t seconds.
 const row7 = (t, q = [0, 0.5, -0.5, 0, 0, 0.8]) => [...q, t];
@@ -160,20 +160,21 @@ describe('recordingCleanup — the end handle and the fall onset', () => {
     expect(analyzeTake(rows, OMX).suggestedEndIndex).toBeNull();
   });
 
-  it('only the profile\'s fall joints count (edu6 watches joint5, not joint4)', () => {
+  it('only the profile\'s fall joints count (V1: joint4 sags, the roll joint5 does not)', () => {
     const fall = (idx) => {
-      const rows = [row7(0, [0, 0, 0, 0, 0, 0, 1]), row7(0.5, [0, 0, 0, 0, 0, 0, 1]),
-        row7(1.0, [0, 0, 0, 0, 0, 0, 1])];
+      const rows = [row7(0, [0, 0, 0, 0, 0, 0.9]), row7(0.5, [0, 0, 0, 0, 0, 0.9]),
+        row7(1.0, [0, 0, 0, 0, 0, 0.9])];
       for (let i = 1; i <= 5; i += 1) {
-        const q = [0, 0, 0, 0, 0, 0, 1];
+        const q = [0, 0, 0, 0, 0, 0.9];
         q[idx] = -0.2 * i;
         rows.push([...q, 1.0 + 0.04 * i]);
       }
       return rows;
     };
-    expect(analyzeTake(fall(4), EDU6).suggestedEndIndex).toBe(2);
-    expect(analyzeTake(fall(3), EDU6).suggestedEndIndex).toBeNull();
+    expect(analyzeTake(fall(3), V1).suggestedEndIndex).toBe(2);
+    expect(analyzeTake(fall(4), V1).suggestedEndIndex).toBeNull();
     expect(analyzeTake(fall(3), OMX).suggestedEndIndex).toBe(2);
+    expect(analyzeTake(fall(4), OMX).suggestedEndIndex).toBeNull();
   });
 
   it('a short take, or a single fast move, is never trimmed down to its start', () => {
@@ -225,8 +226,8 @@ describe('recordingCleanup — analysis details', () => {
   it('fallJointIndices per asset id', () => {
     expect(fallJointIndices(OMX)).toEqual([1, 2, 3]);
     expect(fallJointIndices(null)).toEqual([1, 2, 3]);
-    expect(fallJointIndices(EDU6)).toEqual([1, 2, 4]);
-    expect(fallJointIndices({ urdf_asset_id: 'edu1', arm_joints: 5 })).toEqual([1, 2, 3]);
+    expect(fallJointIndices(V1)).toEqual([1, 2, 3]);
+    expect(fallJointIndices({ urdf_asset_id: 'future', arm_joints: 6 })).toEqual([1, 2, 3]);
     expect(fallJointIndices({ urdf_asset_id: 'future', arm_joints: 4 })).toEqual([1, 2, 3]);
     expect(fallJointIndices({ urdf_asset_id: 'future', arm_joints: 3 })).toEqual([1, 2]);
   });

@@ -7,6 +7,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { normalizeTrajectory, trajectoryMatchesRig } from '../trajectoryIdentity';
+import { LEGACY_ROBOT_TYPES } from '../../components/Workshop/sammlung/format';
 
 const PTS = [[0, 0, 0, 0, 0, 0.8, 0], [0.1, 0, 0, 0, 0, 0.8, 0.04]];
 
@@ -23,8 +24,8 @@ describe('normalizeTrajectory', () => {
 
   it('reads the getTrajectory row shape with a samples object', () => {
     expect(normalizeTrajectory({
-      id: 't1', name: 'Winken', robot_profile: 'edu1_studio', samples: { fps: 25, points: PTS },
-    })).toEqual({ fps: 25, points: PTS, robotProfile: 'edu1_studio' });
+      id: 't1', name: 'Winken', robot_profile: 'v1_studio', samples: { fps: 25, points: PTS },
+    })).toEqual({ fps: 25, points: PTS, robotProfile: 'v1_studio' });
     // samples.fps missing → the row fps.
     expect(normalizeTrajectory({ fps: 20, samples: { points: PTS } }).fps).toBe(20);
   });
@@ -40,14 +41,21 @@ describe('normalizeTrajectory', () => {
 describe('trajectoryMatchesRig', () => {
   it('compares arm-family IDS, never widths', () => {
     // Both 7-wide — only the tag separates them.
-    expect(trajectoryMatchesRig('edu1_studio', 'omx_f')).toBe(false);
-    expect(trajectoryMatchesRig('omx_f', 'edu1_studio')).toBe(false);
-    expect(trajectoryMatchesRig('edu6_studio', 'edu6_studio')).toBe(true);
+    expect(trajectoryMatchesRig('v1_studio', 'omx_f')).toBe(false);
+    expect(trajectoryMatchesRig('omx_f', 'v1_studio')).toBe(false);
+    expect(trajectoryMatchesRig('v1_studio', 'v1_studio')).toBe(true);
+  });
+
+  it('a recording of a retired arm (its tag kept in the cloud) never matches a V1 or an OMX rig', () => {
+    for (const tag of LEGACY_ROBOT_TYPES) {
+      expect(trajectoryMatchesRig(tag, 'v1_studio')).toBe(false);
+      expect(trajectoryMatchesRig(tag, 'omx_f')).toBe(false);
+    }
   });
 
   it('maps an untagged recording and an unknown rig to omx_f', () => {
     expect(trajectoryMatchesRig(null, 'omx_f')).toBe(true);
     expect(trajectoryMatchesRig('', '')).toBe(true);
-    expect(trajectoryMatchesRig(undefined, 'edu1_studio')).toBe(false);
+    expect(trajectoryMatchesRig(undefined, 'v1_studio')).toBe(false);
   });
 });

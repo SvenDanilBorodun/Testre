@@ -6,7 +6,7 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
-### Unreleased, 2026-10-18 / 19 — Roboter Studio semantics: every block and method does what it says
+### v2.34.0, 2026-10-25 — Roboter Studio semantics: every block and method does what it says
 
 **Why.** An audit ran every Blockly block and every Python/Java robot method against what its preview, tooltip,
 docstring and refusal sentences promise, on both `omx_full` and `edu1_studio`, and found the gaps F1–F23 and

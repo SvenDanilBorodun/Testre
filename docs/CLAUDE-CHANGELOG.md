@@ -6,6 +6,52 @@ For future sessions: do not stack new dated release narratives into `CLAUDE.md` 
 
 ## Dated stories (post-rewrite, newest-first)
 
+### 2026-10-25 — the V1 replaces `edu6_studio` and `edu1_studio`
+
+**Why.** The owner replaced both EduBotics Feetech arms with one new 5-DOF arm, the V1 (Roboter Studio only,
+follower-only). The V1 has the Edu:1 topology (joint1 yaw, three parallel pitch joints, a roll, a rotating two-blade
+claw, six servos with STS3250 on joints 2/3), so the route chosen was „edu1 → V1": the Edu:1 pipeline rewritten
+with V1 constants rather than a new arm family. Deltas against the Edu:1 export, measured on the CAD: joint1
+z 0.0442 (0.0492), joint2 z 0.04175 (0.04075), joint5 0.07195 (0.06095), the fingertip 108.6 mm past
+`end_effector` (86.25), joint4 ±1.92 (±2.0071), a new base (`Base_part.2.step`); L2, L3, ALPHA0 and the
+G-offset identical. `edu1_ik.py` with eight literal edits reproduced an independent URDF parser to 0.0 over
+3000 poses (FK∘IK residual ≤ 2.39e-6 m). Build spec `docs/plans/2026-10-25-v1-arm/10-spec.md` (rev3).
+
+**Owner decisions.** D1 both edu profiles removed; D2 profile `v1_studio`, asset `v1`, „V1 – Roboter Studio";
+D3 joint4 ±110° (`1.9198`, inward; link4 passes link3 at 4.2 mm at +110°); D4 migration 051 keeps the edu ids for
+stored rows, the API refuses them on new writes, `edu6_arm_records` kept; D5 a stored edu id falls back to
+`omx_full`; Q1 the adapter PCB left out of the 3D view; Q2 the j2/j3 encoder windows as on the Edu:1; Q3 the board
+origin stays 0.18 / 0.075 with an own printed V1 mat; Q4 no-go coverage as on the Edu:1 (gap G1); Q5 claw open
+0.90; R1 the inner ring drawn at 0.10 with no server guard (gap G5); b1 the goal-edge ceiling 130 for the V1
+(246 was an edu6 number and latently wrong for the Edu:1 too). Architect decisions: A1 the base frame re-origined
+to the table (joint1 z → 0.0502, base mesh +6 mm), because z = 0 is the table in every consumer and the CAD's
+base bottom sat at −0.006; A4 the claw gear ratio in the URDF (`LF_joint` mimic −18/19, the 18T/19T spur gears)
+and a tip-rise table that is the minimum over both ratios.
+
+**How it was built.** WP-1 (server, cloud, assets, mat) first: `v1_ik.py`, the profile, `V1_LINK_BOXES`, the
+catalog (close 0.05), `_POSITION_JOINT_PROFILES`, migration 051 + rollback, the generated and checksummed
+`public/v1-urdf/` (`tools/build_v1_urdf_assets.py`), `tools/generate_v1_mat.py`. Then WP-2 (arm container, GUI,
+Pi, CI, provisioning: `feetech_arm_node.py`, `feetech_geometry.py`, `EDUBOTICS_FEETECH_*`, `/v1/*` services,
+`tools/feetech_provision.py --arm v1`, the generic stale-image token rule) and WP-3 (React, pictures, docs) in
+parallel. WP-3: `UrdfTwin`'s `v1` row (yaw π), the re-rendered sprite, light sprite and a four-cell glyph sheet
+(the OMX pictures re-render byte-identical), the legacy-label rule in the Sammlung („Früherer EduBotics-Arm",
+`LEGACY_ROBOT_TYPES`), the destination store keeping both legacy tags (V1 and Edu:1 share joint names, so a dropped
+tag would ghost an Edu:1 Position on a V1), and every comment and doc that named an edu arm.
+
+**Tests restructured, not weakened (React).** Every profile table lost its two edu rows and gained a `v1_studio`
+row; the edu6 6-joint fixtures that covered generic code paths (the millimetre jog row, 8-wide recordings, the
+reach-annulus resolver) became SYNTHETIC 6-joint fixtures; UrdfTwin's edu6 and edu1 blocks merged into one V1
+block (yaw π, world-frame end effector, RL_joint as the claw channel); the cross-profile replay tests now use
+v1↔omx (same width) plus every legacy tag on a V1 rig. Deleted outright: none; folded: the edu1 „asset + yaw" test
+into the V1 one and „untagged recording on an edu6 rig" into „untagged on a V1 rig". New: the legacy label in the
+drawer, legacy tags kept + no ghost on a V1, a lockstep of `ZIEL_TOUCH_TCP_Z_M.v1` with
+`V1IKSolver.tool_tip_below_ee_m`, the V1 gripper band 0.5 / 0.70.
+
+**Open.** Nothing is hardware-validated: rig gates VR1–VR16 replace R1–R10 and E1–E9 (`docs/KNOWN-ISSUES.md`,
+bench checklist `docs/v1-hardware-bringup.md`). Documented, not fixed: joint jogging has no table check; a real
+program starts without a touch-off in this boot (only the app's hidden Start gates it); `home_planner`'s via search
+varies index 4, which is the V1's roll; `tool_tip_rise_m` caps its credit at 60 mm against a 66.1 mm table.
+
 ### v2.34.0, 2026-10-25 — Roboter Studio semantics: every block and method does what it says
 
 **Why.** An audit ran every Blockly block and every Python/Java robot method against what its preview, tooltip,

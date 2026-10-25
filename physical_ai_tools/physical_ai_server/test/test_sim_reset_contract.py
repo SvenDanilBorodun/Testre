@@ -203,8 +203,8 @@ def _sim_stack(profile, objects):
 
 # ── the rest pose that gives the twin something to draw before run #1 ────────
 
-# From the REGISTRY, never a restated list: a hardcoded triple stopped
-# covering `edu1_studio` the day it was added, silently.
+# From the REGISTRY, never a restated list: a hardcoded list stops covering a
+# newly added profile the day it is added, silently.
 @pytest.mark.parametrize('profile_id',
                          sorted(robot_profiles.ROBOT_PROFILES))
 def test_rest_pose_vector_matches_the_published_joint_names(profile_id):
@@ -463,10 +463,11 @@ def test_the_boot_seed_runs_after_everything_it_reads():
 
 def test_a_name_position_mismatch_is_refused_not_published():
     """The boot seed runs BEFORE `_init_robot_profile`, whose exception path
-    downgrades `_arm_profile` to the omx_full default. An edu6 rig booting
-    degraded therefore seeds a 7-vector and then resolves 6 OMX names — and
-    `_sim_idle_republish` would re-emit that malformed JointState at 2 Hz for the
-    life of the container. Refuse it instead, and say why once."""
+    downgrades `_arm_profile` to the omx_full default. A rig whose profile has
+    another joint count, booting degraded, therefore seeds a vector of that width
+    and then resolves 6 OMX names — and `_sim_idle_republish` would re-emit that
+    malformed JointState at 2 Hz for the life of the container. Refuse it
+    instead, and say why once."""
     node = _PublishStubNode(profile=_profile('omx_full'))  # 6 names
     node._publish_sim_joint_state([0.0] * 7)              # 7 positions
 
@@ -475,8 +476,8 @@ def test_a_name_position_mismatch_is_refused_not_published():
     assert node._logger.warnings and 'joint names' in node._logger.warnings[-1]
 
 
-# From the REGISTRY, never a restated list: a hardcoded triple stopped
-# covering `edu1_studio` the day it was added, silently.
+# From the REGISTRY, never a restated list: a hardcoded list stops covering a
+# newly added profile the day it is added, silently.
 @pytest.mark.parametrize('profile_id',
                          sorted(robot_profiles.ROBOT_PROFILES))
 def test_the_matching_case_still_publishes_every_profile(profile_id):

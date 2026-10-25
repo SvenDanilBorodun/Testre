@@ -351,7 +351,7 @@ describe('toastIcon', () => {
   // The robot toast draws the arm of the robot the student started with: the
   // real URDF's glyph, by profile id, and none while the profile is unknown.
   it.each([
-    ['omx_full', 'omx_f'], ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
+    ['omx_full', 'omx_f'], ['omx_follower', 'omx_f'], ['v1_studio', 'v1'],
   ])('the `arm` kind draws the %s robot\'s arm (%s), one cached element per glyph', (profile, glyph) => {
     const el = toastIcon(ROBOT_TOAST_KIND, { profile });
     expect(React.isValidElement(el)).toBe(true);

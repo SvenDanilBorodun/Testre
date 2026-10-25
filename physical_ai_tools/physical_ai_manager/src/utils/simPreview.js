@@ -119,7 +119,7 @@ export function buildDestinationPreviewProgram({ entry, simScene, tempo }) {
  * checks for a leader on a preview. So the preview gate fails CLOSED: unless
  * the rig is PROVEN leader-less (an explicit `has_leader === false` from the
  * server or the bridge) or the bridge ANSWERED „follower only", an unanswered
- * probe is `rsLeaderUnknown`. omx_follower/edu6/edu1 carry `has_leader: false`,
+ * probe is `rsLeaderUnknown`. omx_follower/v1_studio carry `has_leader: false`,
  * which is what keeps a bridge-less rig previewable.
  *
  * `rsLeaderPending` (owner decision 2026-09-15, B1) splits that unknown in two:

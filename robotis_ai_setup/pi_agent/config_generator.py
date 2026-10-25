@@ -422,9 +422,9 @@ def upsert_env_var(key: str, value: str, path: str = ENV_FILE,
     able to persist before any hardware is scanned (the scan reads the family
     back off this key). Representation matters there and nowhere else: the arm
     container branches on a literal string compare
-    (``[ "$EDUBOTICS_ROBOT_TYPE" = "edu6_studio" ]`` in entrypoint_omx.sh), so a
-    stray pair of quotes surviving into the container would silently take the
-    OMX path on an edu6 rig — the exact split brain WP-1 closed. Callers passing
+    (the ``case`` on ``EDUBOTICS_ROBOT_TYPE`` in entrypoint_omx.sh), so a stray
+    pair of quotes surviving into the container would silently take the OMX
+    path on a Feetech rig — the exact split brain WP-1 closed. Callers passing
     quote=False MUST pass a value from a fixed, validated set (constants.
     resolve_robot_type); it is not an escape hatch for free text.
     """
@@ -551,8 +551,8 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
             ``EDUBOTICS_ROBOT_TYPE`` line. The opi compose forwards it to BOTH
             robot-tier services — the server resolves the ArmProfile from it and
             ``entrypoint_omx.sh`` branches on it INSIDE the arm container. It
-            reached the server alone until 2026-07-28, which is why an
-            ``edu6_studio`` value used to leave the two containers disagreeing.
+            reached the server alone until 2026-07-28, which is why a Feetech
+            profile value used to leave the two containers disagreeing.
             Agent callers must pass the CURRENT on-disk value through
             (``read_env_var(..) or "omx_full"``) unless explicitly setting it —
             the key is MANAGED, so an omitted value would silently rewrite it.
@@ -565,7 +565,7 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
     # editing this line (single source of truth: constants.ROBOT_PROFILES).
     #
     # ORDER IS LOAD-BEARING: this MUST run before the leader-null guard below.
-    # A follower-only rig (omx_follower, edu6_studio) has no leader at all, so
+    # A follower-only rig (omx_follower, v1_studio) has no leader at all, so
     # with the derive after the guard it would hit `not follower_only and
     # config.leader is None` and raise „Der Leader-Arm muss konfiguriert sein"
     # on every single start — the exact reason the Pi could not run either

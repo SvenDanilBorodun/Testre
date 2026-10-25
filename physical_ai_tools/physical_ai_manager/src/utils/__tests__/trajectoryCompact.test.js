@@ -31,7 +31,7 @@ describe('compactTrajectoryPoints', () => {
       .toBe('[[0.1235,-1.2346,2.3457,0,0.5,0.8,42.123]]');
   });
 
-  test('the width follows each row (8-wide edu6 rows keep their layout)', () => {
+  test('the width follows each row (an 8-wide row keeps its layout)', () => {
     const out = compactTrajectoryPoints([[1, 2, 3, 4, 5, 6, 1.23456, 9.87654]]);
     expect(out[0]).toHaveLength(8);
     expect(out[0][6]).toBe(1.2346);

@@ -114,6 +114,7 @@ from fastapi import HTTPException  # noqa: E402
 from app.routes import workflows as wf  # noqa: E402
 from app.validators.workflow import (  # noqa: E402
     INT4_MAX,
+    LEGACY_TRAJECTORY_ROBOT_PROFILES,
     MAX_TRAJECTORY_JSON_BYTES,
     MAX_TRAJECTORY_POINTS,
     TRAJECTORY_FPS_MAX,
@@ -1150,18 +1151,28 @@ class TestWorkflowsRateLimitedPerUser(unittest.TestCase):
 
 
 # ==================================================================
-# edu6 dual width + robot_profile tag (migration 035, plan §14)
+# robot_profile tag (migrations 035, 039, 051)
 # ==================================================================
-class TestTrajectoryRobotProfile(unittest.TestCase):
-    """The arm-family tag (migration 035, widened by 039).
+def _sql_file(kind: str, label: str) -> str:
+    """The one migration/rollback file with the NNN ``label``. Globbed on the
+    label, not the timestamp prefix: applying a migration through the Supabase
+    MCP re-stamps that prefix, and CLAUDE.md's remedy is to rename the file to
+    match."""
+    import glob as _glob
+    here = os.path.dirname(os.path.abspath(__file__))
+    hits = _glob.glob(os.path.join(here, "..", "..", "..", "supabase", kind,
+                                   f"*_{label}_*.sql"))
+    assert len(hits) == 1, hits
+    return open(hits[0], encoding="utf-8").read()
 
-    Until 039 width and arm were in BIJECTION (omx_f 7, edu6_studio 8), so
-    every test below could have passed with `trajectoryMatchesRig`/the tag
-    deleted — the width check alone would have caught the cross-arm case. The
-    Edu:1 ends that: 5 arm joints → 5 + 2 = 7, the SAME width omx_f uses, so
-    this column is now the ONLY thing separating an OMX recording from an Edu:1
-    one. `test_the_width_gate_cannot_separate_edu1_from_omx` states that
-    directly so nobody is reassured by the width check again."""
+
+class TestTrajectoryRobotProfile(unittest.TestCase):
+    """The arm-family tag (migration 035, widened by 039 and 051).
+
+    The V1 has 5 arm joints → 5 + 2 = 7, the SAME width omx_f uses, so this
+    column is the ONLY thing separating an OMX recording from a V1 one.
+    `test_the_width_gate_cannot_separate_v1_from_omx` states that directly so
+    nobody is reassured by the width check."""
 
     def _pt8(self, t=0.0):
         return [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, t]
@@ -1182,17 +1193,6 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
         with self.assertRaises(HTTPException):
             validate_trajectory([self._pt8()], fps=25.0, robot_profile="omx_f")
 
-    def test_edu6_tag_is_8_wide_exactly(self):
-        validate_trajectory([self._pt8(0.0), self._pt8(0.1)], fps=25.0,
-                            robot_profile="edu6_studio")
-        # 7-wide on an edu6 tag refuses — no silent truncation/padding, and the
-        # German message names the expected width (8).
-        with self.assertRaises(HTTPException) as ctx:
-            validate_trajectory([self._pt7()], fps=25.0,
-                                robot_profile="edu6_studio")
-        self.assertEqual(ctx.exception.status_code, 400)
-        self.assertIn("8", ctx.exception.detail)
-
     def test_unknown_profile_refused_in_german(self):
         with self.assertRaises(HTTPException) as ctx:
             validate_trajectory([self._pt7()], fps=25.0,
@@ -1200,23 +1200,38 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("Roboterprofil", ctx.exception.detail)
 
-    def test_empty_tag_counts_as_untagged(self):
-        validate_trajectory([self._pt7()], fps=25.0, robot_profile="  ")
+    def test_a_retired_arm_id_is_refused_on_a_new_upload(self):
+        """The database still admits the retired ids (stored rows stay
+        readable), the API refuses them on every new upload with the ordinary
+        German 400 — at any width, so neither the old 7- nor the old 8-wide
+        payload can sneak a row in through an upload (a workflow clone copies
+        stored rows verbatim, owner decision)."""
+        self.assertEqual(LEGACY_TRAJECTORY_ROBOT_PROFILES,
+                         frozenset({"edu6_studio", "edu1_studio"}))
+        for pid in sorted(LEGACY_TRAJECTORY_ROBOT_PROFILES):
+            for pt in (self._pt7, self._pt8):
+                with self.subTest(pid=pid, width=len(pt())):
+                    with self.assertRaises(HTTPException) as ctx:
+                        validate_trajectory([pt(0.0), pt(0.1)], fps=25.0,
+                                            robot_profile=pid)
+                    self.assertEqual(ctx.exception.status_code, 400)
+                    self.assertEqual(ctx.exception.detail,
+                                     "Unbekanntes Roboterprofil für diese Bewegung.")
 
-    def test_create_stores_and_by_name_returns_the_tag(self):
+    def test_a_retired_arm_id_never_reaches_the_database(self):
         db = _FakeDB()
         with _Ctx(db):
             created = wf.create_workflow(_create_wf_payload(), user=_OWNER)
-            payload = _traj_payload(
-                points=[self._pt8(0.0), self._pt8(0.1)],
-                robot_profile="edu6_studio",
-            )
-            res = wf.create_trajectory(created.id, payload, user=_OWNER)
-            self.assertEqual(db.trajectories[res.id]["robot_profile"],
-                             "edu6_studio")
-            got = wf.get_trajectory_by_name(created.id, "Bewegung1", user=_OWNER)
-            self.assertEqual(got.robot_profile, "edu6_studio")
-            self.assertEqual(len(got.points[0]), 8)
+            for pid in sorted(LEGACY_TRAJECTORY_ROBOT_PROFILES):
+                payload = _traj_payload(
+                    points=[self._pt7(0.0), self._pt7(0.1)], robot_profile=pid)
+                with self.assertRaises(HTTPException) as ctx:
+                    wf.create_trajectory(created.id, payload, user=_OWNER)
+                self.assertEqual(ctx.exception.status_code, 400)
+            self.assertEqual(db.trajectories, {})
+
+    def test_empty_tag_counts_as_untagged(self):
+        validate_trajectory([self._pt7()], fps=25.0, robot_profile="  ")
 
     def test_untagged_create_stores_null(self):
         db = _FakeDB()
@@ -1225,32 +1240,31 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
             res = wf.create_trajectory(created.id, _traj_payload(), user=_OWNER)
             self.assertIsNone(db.trajectories[res.id]["robot_profile"])
 
-    # ── migration 039: the Edu:1, which SHARES a width with the OMX ─────────
     def test_the_map_is_the_registry_id_space(self):
-        # `TRAJECTORY_ROBOT_PROFILES` was referenced by NO test at all, so a
-        # dropped or mistyped row was invisible on this side.
         self.assertEqual(TRAJECTORY_ROBOT_PROFILES,
-                         {"omx_f": 7, "edu6_studio": 8, "edu1_studio": 7})
+                         {"omx_f": 7, "v1_studio": 7})
         self.assertEqual(TRAJECTORY_POINT_LEN,
                          TRAJECTORY_ROBOT_PROFILES["omx_f"])
+        self.assertFalse(set(TRAJECTORY_ROBOT_PROFILES)
+                         & LEGACY_TRAJECTORY_ROBOT_PROFILES)
 
-    def test_edu1_tag_is_7_wide_exactly(self):
+    def test_v1_tag_is_7_wide_exactly(self):
         validate_trajectory([self._pt7(0.0), self._pt7(0.1)], fps=25.0,
-                            robot_profile="edu1_studio")
+                            robot_profile="v1_studio")
         with self.assertRaises(HTTPException) as ctx:
             validate_trajectory([self._pt8()], fps=25.0,
-                                robot_profile="edu1_studio")
+                                robot_profile="v1_studio")
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("7", ctx.exception.detail)
 
-    def test_the_width_gate_cannot_separate_edu1_from_omx(self):
+    def test_the_width_gate_cannot_separate_v1_from_omx(self):
         """Stated as a PROPERTY: the SAME payload validates under both tags, so
-        the width check provably cannot tell these two arms apart. This is
-        migration 039's whole reason for existing."""
+        the width check provably cannot tell these two arms apart. This is the
+        tag's whole reason for existing."""
         payload = [self._pt7(0.0), self._pt7(0.04)]
         validate_trajectory(payload, fps=25.0, robot_profile="omx_f")
-        validate_trajectory(payload, fps=25.0, robot_profile="edu1_studio")
-        self.assertEqual(TRAJECTORY_ROBOT_PROFILES["edu1_studio"],
+        validate_trajectory(payload, fps=25.0, robot_profile="v1_studio")
+        self.assertEqual(TRAJECTORY_ROBOT_PROFILES["v1_studio"],
                          TRAJECTORY_ROBOT_PROFILES["omx_f"])
 
     def test_every_known_id_returns_its_own_width(self):
@@ -1262,10 +1276,10 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
                                  width)
 
     def test_near_miss_ids_are_refused_not_coerced(self):
-        # The GUI/registry id space ('edu1_studio') is NOT the family name
-        # ('edu1') nor the GUI profile id ('omx_full'); each must 400 rather
-        # than fall back to the OMX width.
-        for bad in ("edu1", "EDU1_STUDIO", "omx_full", "edu2_studio"):
+        # The registry id space ('v1_studio') is NOT the family name ('v1') nor
+        # the GUI profile id ('omx_full'); each must 400 rather than fall back
+        # to the OMX width.
+        for bad in ("v1", "V1_STUDIO", "omx_full", "v2_studio"):
             with self.subTest(bad):
                 with self.assertRaises(HTTPException) as ctx:
                     validate_trajectory([self._pt7()], fps=25.0,
@@ -1280,64 +1294,101 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
                     validate_trajectory_robot_profile(bad)
                 self.assertEqual(ctx.exception.status_code, 400)
 
-    def test_edu1_create_round_trips_the_tag(self):
+    def test_v1_create_round_trips_the_tag(self):
         # The end-to-end shape the React replay gate reads back: a 7-wide
-        # payload stored under the Edu:1 tag must come back tagged, or the
-        # client sees a legacy (= OMX) recording and happily replays it.
+        # payload stored under the V1 tag must come back tagged, or the client
+        # sees a legacy (= OMX) recording and happily replays it.
         db = _FakeDB()
         with _Ctx(db):
             created = wf.create_workflow(_create_wf_payload(), user=_OWNER)
             payload = _traj_payload(
                 points=[self._pt7(0.0), self._pt7(0.1)],
-                robot_profile="edu1_studio",
+                robot_profile="v1_studio",
             )
             res = wf.create_trajectory(created.id, payload, user=_OWNER)
             self.assertEqual(db.trajectories[res.id]["robot_profile"],
-                             "edu1_studio")
+                             "v1_studio")
             got = wf.get_trajectory_by_name(created.id, "Bewegung1", user=_OWNER)
-            self.assertEqual(got.robot_profile, "edu1_studio")
+            self.assertEqual(got.robot_profile, "v1_studio")
             self.assertEqual(len(got.points[0]), 7)
 
-    def test_the_migration_allows_exactly_the_validator_s_id_set(self):
-        # 039 widens the CHECK; a validator that knows an id the constraint
-        # refuses is a 500 on save, and the reverse is dead capacity.
-        import glob as _glob
-        import os as _os
+    def test_the_051_check_admits_exactly_the_validator_and_the_retired_ids(self):
+        # 051 widens the CHECK; a validator that knows an id the constraint
+        # refuses is a 500 on save. The retired ids stay in the CHECK (stored
+        # rows) and out of the validator (new uploads).
         import re as _re
-        here = _os.path.dirname(_os.path.abspath(__file__))
-        # Globbed on the NNN label, not the timestamp prefix: applying a
-        # migration through the Supabase MCP re-stamps that prefix, and
-        # CLAUDE.md's remedy is to rename the file to match.
-        hits = _glob.glob(_os.path.join(
-            here, "..", "..", "..", "supabase", "migrations",
-            "*_039_*.sql"))
-        self.assertEqual(len(hits), 1, hits)
-        sql = open(hits[0], encoding="utf-8").read()
+        sql = _sql_file("migrations", "051")
         body = sql.split("ADD CONSTRAINT", 1)[1]
         ids = set(_re.findall(r"'([a-z0-9_]+)'", body.split("NOT VALID", 1)[0]))
-        self.assertEqual(ids, set(TRAJECTORY_ROBOT_PROFILES))
+        self.assertEqual(ids, set(TRAJECTORY_ROBOT_PROFILES)
+                         | set(LEGACY_TRAJECTORY_ROBOT_PROFILES))
+        self.assertIn("VALIDATE CONSTRAINT workflow_trajectories_robot_profile_known", sql)
+        self.assertIn("COMMENT ON COLUMN public.workflow_trajectories.robot_profile", sql)
 
-    def test_the_039_rollback_cannot_half_apply_under_a_bare_psql(self):
+    def test_the_051_rollback_restores_039s_check_and_comment(self):
+        """The rollback refuses while a 'v1_studio' row exists and otherwise
+        puts back exactly 039's id set and 039's column comment."""
+        import re as _re
+        rollback = _sql_file("rollback", "051")
+        mig039 = _sql_file("migrations", "039")
+        self.assertIn("WHERE robot_profile = 'v1_studio'", rollback)
+        check = rollback.split("ADD CONSTRAINT", 1)[1].split("COMMENT ON", 1)[0]
+        ids = set(_re.findall(r"''([a-z0-9_]+)''", check))
+        ids039 = set(_re.findall(
+            r"'([a-z0-9_]+)'",
+            mig039.split("ADD CONSTRAINT", 1)[1].split("NOT VALID", 1)[0]))
+        self.assertEqual(ids, ids039)
+        self.assertNotIn("v1_studio", check)
+        # The comment, reassembled from the rollback's adjacent SQL literals, is
+        # 039's comment verbatim.
+        head = "COMMENT ON COLUMN public.workflow_trajectories.robot_profile IS"
+        comment039 = mig039.split(head, 1)[1].strip().rstrip(";").strip()
+        stmt = rollback.split("EXECUTE 'COMMENT ON", 1)[1].split(";\nEND", 1)[0]
+        pieces = _re.findall(r"'((?:[^']|'')*)'", "'COMMENT ON" + stmt)
+        rebuilt = "".join(pieces).replace("''", "'")
+        self.assertTrue(rebuilt.startswith(head + " "), rebuilt)
+        self.assertEqual(rebuilt[len(head) + 1:], comment039)
+
+    def test_the_051_rollback_refuses_on_a_single_v1_row(self):
+        """The refusal CONDITION, not just its presence: the 'v1_studio' row
+        count goes into ``offending``, and ``IF offending > 0 THEN RAISE
+        EXCEPTION … END IF`` sits inside the DO block BEFORE the first
+        EXECUTE, so one V1 recording stops the rollback before it changes
+        anything. A loosened threshold (``> 1``, ``> 1000000``) or a
+        ``RAISE NOTICE`` would let it narrow the CHECK over live V1 rows."""
+        import re as _re
+        sql = _sql_file("rollback", "051")
+        code = "\n".join(ln for ln in sql.splitlines()
+                          if not ln.lstrip().startswith("--"))
+        block = _re.search(r"DO \$\$(.*?)\$\$\s*;", code, flags=_re.S)
+        self.assertIsNotNone(block)
+        block = block.group(1)
+        count = _re.search(
+            r"SELECT\s+count\(\*\)\s+INTO\s+offending\s+FROM\s+"
+            r"public\.workflow_trajectories\s+WHERE\s+robot_profile\s*=\s*"
+            r"'v1_studio'\s*;", block)
+        self.assertIsNotNone(count, "the gate must count exactly the v1_studio rows")
+        gate = _re.search(
+            r"IF\s+offending\s*>\s*0\s+THEN\s+RAISE\s+EXCEPTION\b.*?;\s*END\s+IF\s*;",
+            block, flags=_re.S)
+        self.assertIsNotNone(gate, "the gate must be IF offending > 0 THEN RAISE EXCEPTION")
+        self.assertLess(count.end(), gate.start())
+        self.assertLess(gate.end(), block.index("EXECUTE"))
+
+    def _assert_rollback_cannot_half_apply(self, label):
         """CLAUDE.md sanctions `psql -f rollback/NNN_*.sql` as an emergency
         path, and a bare psql has NO `ON_ERROR_STOP`: it PRINTS a `RAISE` and
-        carries on to the next statement. 039 is the first rollback whose
-        refusal GATE depends on abort semantics, so as four statements it
-        dropped the constraint, re-added the narrowed one NOT VALID, failed the
-        VALIDATE, and left an unvalidated narrowed constraint that rejects every
-        new edu1 write — the exact half-applied state the refusal exists to
-        prevent. VERIFIED on postgres:15 both ways.
+        carries on to the next statement. As separate statements a gated
+        rollback drops the constraint, re-adds the narrowed one NOT VALID, fails
+        the VALIDATE, and leaves an unvalidated narrowed constraint that rejects
+        every new write under the newer id — the exact half-applied state the
+        refusal exists to prevent (VERIFIED on postgres:15 both ways, for 039).
 
         The fix is structural: everything the rollback DOES lives inside the
         same single `DO` block as the gate, so the RAISE rolls it all back. This
-        test therefore asserts the SHAPE, not the wording."""
-        import glob as _glob
-        import os as _os
+        asserts the SHAPE, not the wording."""
         import re as _re
-        here = _os.path.dirname(_os.path.abspath(__file__))
-        root = _os.path.join(here, "..", "..", "..", "supabase", "rollback")
-        hits = _glob.glob(_os.path.join(root, "*_039_*.sql"))
-        self.assertEqual(len(hits), 1, hits)
-        sql = open(hits[0], encoding="utf-8").read()
+        sql = _sql_file("rollback", label)
         # Strip line comments so the prose above the code cannot satisfy or
         # trip any assertion below.
         code = "\n".join(ln for ln in sql.splitlines()
@@ -1352,6 +1403,12 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
                              "a bare psql would run it after the RAISE")
         # …and the gate is not defeated by a second DO block either.
         self.assertEqual(code.count("DO $$"), 1)
+
+    def test_the_039_rollback_cannot_half_apply_under_a_bare_psql(self):
+        self._assert_rollback_cannot_half_apply("039")
+
+    def test_the_051_rollback_cannot_half_apply_under_a_bare_psql(self):
+        self._assert_rollback_cannot_half_apply("051")
 
 
 if __name__ == "__main__":

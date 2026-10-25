@@ -20,7 +20,7 @@ import { GLYPH_ORDER } from '../robotAssets';
 describe('RobotGlyph', () => {
   it.each([
     ['omx_full', 'robot', 'omx_full'], ['omx_full', 'arm', 'omx_f'], ['omx_full', 'leader', 'omx_l'],
-    ['omx_follower', 'robot', 'omx_f'], ['edu6_studio', 'robot', 'edu6'], ['edu1_studio', 'arm', 'edu1'],
+    ['omx_follower', 'robot', 'omx_f'], ['v1_studio', 'robot', 'v1'], ['v1_studio', 'arm', 'v1'],
   ])('%s / %s draws the %s cell of the sheet, in the text colour', (profile, part, cell) => {
     const { container } = render(<RobotGlyph profile={profile} part={part} size={20} />);
     const el = container.firstChild;
@@ -29,7 +29,7 @@ describe('RobotGlyph', () => {
     expect(el).toHaveAttribute('aria-hidden', 'true');
     expect(el.style.width).toBe('20px');
     expect(el.style.height).toBe('20px');
-    // One sheet of GLYPH_ORDER.length cells: five times as wide as the box, the cell's own position.
+    // One sheet of GLYPH_ORDER.length cells: four times as wide as the box, the cell's own position.
     const i = GLYPH_ORDER.indexOf(cell);
     expect(el.style.maskImage || el.style.webkitMaskImage).toContain('/robots/glyphs.png');
     expect(el.style.maskSize || el.style.webkitMaskSize).toBe(`${GLYPH_ORDER.length * 100}% 100%`);
@@ -41,15 +41,15 @@ describe('RobotGlyph', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('a part the profile does not have renders nothing: no leader on an Edu:1', () => {
-    const { container } = render(<RobotGlyph profile="edu1_studio" part="leader" />);
+  it('a part the profile does not have renders nothing: no leader on a V1', () => {
+    const { container } = render(<RobotGlyph profile="v1_studio" part="leader" />);
     expect(container.firstChild).toBeNull();
   });
 
   it('a title makes it a named image', () => {
-    render(<RobotGlyph profile="edu6_studio" title="EduBotics 6-Achs" />);
-    const img = screen.getByRole('img', { name: 'EduBotics 6-Achs' });
-    expect(img).toHaveAttribute('data-robot-glyph', 'edu6');
+    render(<RobotGlyph profile="v1_studio" title="V1 – Roboter Studio" />);
+    const img = screen.getByRole('img', { name: 'V1 – Roboter Studio' });
+    expect(img).toHaveAttribute('data-robot-glyph', 'v1');
     expect(img).not.toHaveAttribute('aria-hidden');
   });
 

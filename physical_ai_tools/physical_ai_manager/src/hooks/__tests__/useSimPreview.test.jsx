@@ -118,7 +118,7 @@ describe('useSimPreview — refusals (German, nothing sent)', () => {
     ['handguide', { gates: { ...GATES, jogHandGuideOn: true } }, DE.PREVIEW_BLOCK_HANDGUIDE],
     ['tutorial', { gates: { ...GATES, simMode: false, activeTutorialId: 'tut' } }, DE.PREVIEW_BLOCK_TUTORIAL],
     ['leader', { gates: { ...GATES, rsLeaderOn: true } }, DE.PREVIEW_BLOCK_LEADER],
-    ['otherRobot', { robotType: 'edu6_studio' }, DE.PREVIEW_BLOCK_OTHER_ROBOT],
+    ['otherRobot', { robotType: 'v1_studio' }, DE.PREVIEW_BLOCK_OTHER_ROBOT],
     ['unsaved', { workflowId: null }, DE.PREVIEW_BLOCK_UNSAVED],
   ])('%s', async (_name, over, text) => {
     const { result } = setup(over);
@@ -163,7 +163,7 @@ describe('useSimPreview — refusals (German, nothing sent)', () => {
   });
 
   test('cross-profile is refused AFTER the fetch (the row tag decides)', async () => {
-    mockApi.getTrajectory.mockResolvedValue({ ...ROW, robot_profile: 'edu1_studio' });
+    mockApi.getTrajectory.mockResolvedValue({ ...ROW, robot_profile: 'v1_studio' });
     const { result } = setup();
     await act(async () => { await result.current.startPreview(REC); });
     expect(mockApi.getTrajectory).toHaveBeenCalledWith('jwt', 'wf-1', TRAJ_ID);

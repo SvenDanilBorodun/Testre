@@ -291,8 +291,8 @@ class CollisionMonitorMixin:
         self._collision_detector = build_detector_from_env(
             os.environ.get, ARM_JOINT_NAMES, update_rate_hz=100.0)
 
-        # ArmProfile gate (edu6 §8): a profile with collision_enabled=False
-        # (edu6_studio — no gpio controller, no leader, nothing publishes
+        # ArmProfile gate: a profile with collision_enabled=False
+        # (v1_studio — no gpio controller, no leader, nothing publishes
         # /collision_flag) skips the ENTIRE ROS wiring below: no flag
         # publisher/latch-clear, no watchdog, no second publisher on the
         # command rail. The STATE attributes above stay initialized (idle tick
@@ -1349,7 +1349,7 @@ class CollisionMonitorMixin:
                 reboot_client = self.create_client(
                     RebootDxl, REBOOT_DXL_SERVICE, callback_group=group)
                 clients['reboot'] = reboot_client
-            # ArmProfile seam (edu6 §3.4): the torque service name comes from the
+            # ArmProfile seam: the torque service name comes from the
             # resolved profile (OMX default = the Dynamixel HW interface), with the
             # legacy literal as fallback — mirrors physical_ai_server._set_follower_
             # torque. This recovery path only runs on a collision-enabled profile

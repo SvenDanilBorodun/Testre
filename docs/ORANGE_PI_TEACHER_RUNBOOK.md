@@ -45,8 +45,8 @@ der Ticket-Warteschlange.
 | Offizielles Netzteil (5 V / 5 A USB-C) | Ein schwaches Netzteil führt zu Unterspannungs-Resets mitten in der Aufnahme. |
 | Aktive Kühlung (Kühlkörper + Lüfter) | Für dauerhaften 2-Kamera-Encode nötig (Throttling sonst). |
 | eMMC-Modul **oder** NVMe-SSD | Schneller + zuverlässiger als microSD. |
-| Roboterarm(e) — **je nach Robotertyp** | „OMX – Voll": 1× OpenMANIPULATOR-X **Leader** + 1× **Follower** (beide OpenRB-150-Boards). „OMX – Roboter Studio": **nur der Follower**. „EduBotics 6-Achs": **ein** Arm, und zwar ein **Feetech**-Arm am Waveshare-Adapter — **kein** OpenRB-150. |
-| USB-Kameras — **je nach Robotertyp** | „OMX – Voll": 2× (Greifer + Szene). „OMX – Roboter Studio": 1× (Szene) genügt, 2× möglich. „EduBotics 6-Achs": **1× (Szene)** — dieser Typ kennt nur die Szenen-Kamera. |
+| Roboterarm(e) — **je nach Robotertyp** | „OMX – Voll": 1× OpenMANIPULATOR-X **Leader** + 1× **Follower** (beide OpenRB-150-Boards). „OMX – Roboter Studio": **nur der Follower**. „V1": **ein** Arm, und zwar ein **Feetech**-Arm am Waveshare-Adapter — **kein** OpenRB-150. |
+| USB-Kameras — **je nach Robotertyp** | „OMX – Voll": 2× (Greifer + Szene). „OMX – Roboter Studio": 1× (Szene) genügt, 2× möglich. „V1": **1× (Szene)** — dieser Typ kennt nur die Szenen-Kamera. |
 | Kabelgebundenes Ethernet | Empfohlen — stabiler als WLAN, und `.local` funktioniert zuverlässiger. |
 
 **USB-Aufteilung** (Bandbreite): eine Kamera an den **USB3**-Port, eine an den
@@ -148,9 +148,9 @@ Derselbe Ablauf wie in der Windows-App, jetzt im Browser:
 
 | Schritt | Aktion |
 |---|---|
-| **Modus — Robotertyp** | Auswählen, **welcher Roboter** an diesem Pi hängt: „OMX – Voll" (beide Arme), „OMX – Roboter Studio (nur Follower)" oder „EduBotics 6-Achs – Roboter Studio". Diese Wahl bestimmt alles Weitere — nach welcher Arm-Familie der Scan sucht, ob es überhaupt einen Leader-Arm gibt, welche Kamera-Rollen angeboten werden und was „Umgebung starten" verlangt. **Zuerst** den Robotertyp wählen, **dann** scannen: ein Wechsel über die Arm-Familien-Grenze (OMX ↔ EduBotics 6-Achs) macht einen vorhandenen Scan ungültig (siehe Fehlerbehebung). Das Auswahlfeld ist gesperrt, solange die **Roboter-Umgebung läuft**, im **Cloud-Modus** (dort spielt der Robotertyp keine Rolle), während die Auswahl gerade **gespeichert** wird und während ein **Update läuft**. |
+| **Modus — Robotertyp** | Auswählen, **welcher Roboter** an diesem Pi hängt: „OMX – Voll" (beide Arme), „OMX – Roboter Studio (nur Follower)" oder „V1 – Roboter Studio". Diese Wahl bestimmt alles Weitere — nach welcher Arm-Familie der Scan sucht, ob es überhaupt einen Leader-Arm gibt, welche Kamera-Rollen angeboten werden und was „Umgebung starten" verlangt. **Zuerst** den Robotertyp wählen, **dann** scannen: ein Wechsel über die Arm-Familien-Grenze (OMX ↔ V1) macht einen vorhandenen Scan ungültig (siehe Fehlerbehebung). Das Auswahlfeld ist gesperrt, solange die **Roboter-Umgebung läuft**, im **Cloud-Modus** (dort spielt der Robotertyp keine Rolle), während die Auswahl gerade **gespeichert** wird und während ein **Update läuft**. |
 | **A/B — Arm(e) scannen** | „OMX – Voll": **beide** Arme scannen, Leader/Follower werden per Servo-ID erkannt. Bei den beiden Follower-only-Typen heißt der Schritt „**Arm scannen**" und es gibt **keine Leader-Kachel** — ein Arm genügt. Die Ports werden in jedem Fall stabil gespeichert. |
-| **C — Kameras** | Kameras scannen, Rollen zuweisen, Vorschau prüfen. **Welche Rollen zur Auswahl stehen, hängt am Robotertyp**: bei den OMX-Typen **Greifer** und **Szene**, bei „EduBotics 6-Achs" **nur Szene** — dieser Typ kennt serverseitig keine Greifer-Kamera, und eine so benannte Kamera würde ein Thema veröffentlichen, das niemand liest (der Start meldete trotzdem Erfolg). Auf einem Roboter-Studio-Kit mit **nur einer** Kamera ist **Szene** die richtige Rolle (die Perzeption hängt am Rollen-Namen). Der Pi rät hier nichts: eine Kamera **ohne** zugewiesene Rolle wird nicht gespeichert. |
+| **C — Kameras** | Kameras scannen, Rollen zuweisen, Vorschau prüfen. **Welche Rollen zur Auswahl stehen, hängt am Robotertyp**: bei den OMX-Typen **Greifer** und **Szene**, bei „V1" **nur Szene** — dieser Typ kennt serverseitig keine Greifer-Kamera, und eine so benannte Kamera würde ein Thema veröffentlichen, das niemand liest (der Start meldete trotzdem Erfolg). Auf einem Roboter-Studio-Kit mit **nur einer** Kamera ist **Szene** die richtige Rolle (die Perzeption hängt am Rollen-Namen). Der Pi rät hier nichts: eine Kamera **ohne** zugewiesene Rolle wird nicht gespeichert. |
 | **D — HF-Token** | Entfällt auf dem Pi: Jede Schülerin und jeder Schüler trägt das Hugging-Face-Token einmal auf der Startseite der Web-App ein. Es wird mit dem Konto gespeichert und beim Abmelden vom Roboter entfernt. |
 | **Umgebung starten** | Bringt die Roboter-Container hoch (der Manager/die Web-Oberfläche läuft **immer**). |
 
@@ -164,7 +164,7 @@ Derselbe Ablauf wie in der Windows-App, jetzt im Browser:
 > Dieser Schritt gilt für **„OMX – Voll"**. Auf den Follower-only-Typen blendet
 > die Web-Oberfläche **Aufnahme, Daten und Training** aus (es gibt keinen
 > Leader-Arm zum Teleoperieren) — dort bleiben **Roboter Studio** und, bei
-> „OMX – Roboter Studio", **Inferenz**. Der **EduBotics 6-Achs**-Typ kann
+> „OMX – Roboter Studio", **Inferenz**. Der **V1**-Typ kann
 > ausschließlich Roboter Studio: der Inferenz-Tab ist sichtbar, ein Start wird
 > aber auf Deutsch abgelehnt.
 >
@@ -213,7 +213,7 @@ cat /var/lib/edubotics/.last_image_pull.json  # letzter Image-Update
 | Web-App lädt, aber der Roboter bleibt „Getrennt" | Die Oberfläche zeigt dazu „Verbindung zum Roboter blockiert? Netzwerk-Anleitung prüfen". **Am Pi läuft alles über Port 80** — Web-Oberfläche, rosbridge und Videostrom gehen durch denselben Proxy; 9090 und 8080 muss die IT **nicht** freigeben. Zuerst prüfen: Läuft die Roboter-Umgebung überhaupt („Umgebung starten")? Startet sie noch? Erst danach ans Netz denken — bleibt es dabei, bricht eine Middlebox die WebSocket-Verbindung (Netzwerk-Anleitung). |
 | „Updates schlagen mit Zertifikatfehler fehl" | TLS-Inspektion → Ausnahme nötig; der „Netzwerk-Check" bestätigt es. |
 | Kamerabild schwarz, UI sonst da | Kamera in Schritt C **ohne Rolle** gespeichert, oder die Roboter-Umgebung läuft nicht. **Nicht** die Ports: der Videostrom läuft am Pi über Port 80, nicht über 8080. |
-| Nach einem Wechsel des **Robotertyps**: „Die gescannten Arme gehören zu einem anderen Robotertyp." | **Kein Kabelproblem.** Ein Wechsel über die Arm-Familien-Grenze (OMX ↔ EduBotics 6-Achs) macht den vorhandenen Scan ungültig — dieselbe Meldung steht auch im Protokoll. Einfach mit dem neuen Typ **neu scannen**. |
+| Nach einem Wechsel des **Robotertyps**: „Die gescannten Arme gehören zu einem anderen Robotertyp." | **Kein Kabelproblem.** Ein Wechsel über die Arm-Familien-Grenze (OMX ↔ V1) macht den vorhandenen Scan ungültig — dieselbe Meldung steht auch im Protokoll. Einfach mit dem neuen Typ **neu scannen**. |
 | Arme werden nicht erkannt | **Zuerst:** Passt der oben gewählte **Robotertyp** zum angesteckten Arm? Der Scan sucht ausschließlich nach der Arm-Familie dieses Typs, findet den falschen also gar nicht — dann nennt die Meldung den Robotertyp, nicht das Kabel. Sonst: Arm(e) eingesteckt? Läuft bereits eine Umgebung (belegt den seriellen Bus)? Erst „Stoppen", dann neu scannen. |
 | Unterspannungs-Resets in der Aufnahme | Offizielles 5 V/5 A-Netzteil verwenden; Kernel-Log auf `undervoltage`/`reset` prüfen. |
 | Agent-Dienst startet nicht | `journalctl -u edubotics-pi -n 50`. |

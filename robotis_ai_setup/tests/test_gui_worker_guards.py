@@ -213,7 +213,7 @@ class ARaisingScanDoesNotStrandTheButton(unittest.TestCase):
                 config=lambda **kw: rec.button_arm.append(kw.get("state"))),
             btn_stop=types.SimpleNamespace(config=lambda **kw: None),
             btn_open_browser=types.SimpleNamespace(config=lambda **kw: None),
-            _selected_robot_profile=lambda: "edu6_studio",
+            _selected_robot_profile=lambda: "v1_studio",
             root=types.SimpleNamespace(
                 after=lambda _d, fn=None, *a: fn(*a) if fn is not None else None),
             progress=types.SimpleNamespace(

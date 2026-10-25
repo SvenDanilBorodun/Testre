@@ -2,12 +2,12 @@
 """Minimal Feetech STS3215 half-duplex serial bus (Dynamixel-1.0-style framing).
 
 CLEAN-ROOM implementation written for EduBotics from the documented STS3215
-register map + wire format (edu6 plan §2.5) — deliberately NOT vendored from
+register map + wire format — deliberately NOT vendored from
 ``feetech-servo-sdk`` (a 2022 third-party PyPI republish whose packet-timeout
 maths LeRobot has to monkeypatch, under a republisher-granted license) and NOT
 from LeRobot (whose baud table is wrong at indices 5–7). Every framing rule
 below is pinned by deps-free unit tests (``tests/test_feetech_bus.py``) and the
-undocumented servo behaviours are bench-verified at rig gate R2.
+undocumented servo behaviours are bench-verified on the rig.
 
 Wire format (Dynamixel Protocol-1.0 style, 8N1):
 
@@ -96,7 +96,7 @@ REG_PRESENT_CURRENT = 69      # R, 2 bytes, ×6.5 mA
 #  * The vendor documents this register as working TOGETHER with Phase bit 4
 #    („多圈控制时需修改地址0x12参数BIT4置1"), which probe_bus already refuses. So a
 #    lone resolution ≠ 1 may well be INERT on this firmware. That is exactly why
-#    the boot check WARNS rather than refuses — see Edu6ArmNode.probe_bus.
+#    the boot check WARNS rather than refuses — see FeetechArmNode.probe_bus.
 # LeRobot carries the same address (`"Angular_Resolution": (30, 1)`) and never
 # reads or writes it, relying on a hardcoded 4096 instead — i.e. upstream has the
 # identical un-checked assumption.
@@ -104,9 +104,9 @@ ANGULAR_RESOLUTION_SINGLE_TURN = 1
 
 STS3215_MODEL_NUMBER = 777
 STS3250_MODEL_NUMBER = 2825
-# The edu6 arm mixes STS servo models BY DESIGN: joints 1/4/5/6/7 are STS3215
-# (Model 777) and the high-load shoulder + elbow (joints 2/3) are STS3250
-# (Model 2825, bench-confirmed 2026-07-24). Both are STS-series: identical
+# The V1 arm mixes STS servo models BY DESIGN: joints 1/4/5 and the claw (ids
+# 1/4/5/6) are STS3215 (Model 777) and the high-load shoulder + elbow (joints
+# 2/3) are STS3250 (Model 2825). Both are STS-series: identical
 # Protocol-1.0 framing, little-endian words, sign-magnitude bits, and 4096-tick
 # single-turn resolution — so every register/tick math in this module is
 # model-independent. Identity checks (provision, boot probe, scan) accept the
@@ -332,7 +332,7 @@ class FeetechBusError(Exception):
 
 class FeetechBus:
     """One serial port, many STS3215 servos. NOT thread-safe — the caller
-    (edu6_arm_node) serializes access with its own lock."""
+    (feetech_arm_node) serializes access with its own lock."""
 
     def __init__(self, port: str, baudrate: int = 1_000_000,
                  timeout_s: float = 0.02, serial_factory=None) -> None:
@@ -447,7 +447,7 @@ class FeetechBus:
             raise ValueError('sync_write values must share one length')
         # Per-servo, before anything is framed: a broadcast SYNC_WRITE takes no
         # reply, so a bad Torque_Enable byte here would be both undetectable and
-        # applied to all 7 servos at once.
+        # applied to every servo on the bus at once.
         for _sid, _data in per_servo.items():
             assert_safe_torque_enable(addr, _data)
         dlen = lengths.pop()

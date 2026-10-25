@@ -40,7 +40,7 @@ describe('buildAssetIndex — recordings', () => {
         status: 'ready',
         items: [
           rec('b', 'Tanz', '2026-09-13T10:00:00Z'),
-          rec('c', 'Tanz', '2026-09-13T12:00:00Z', { robot_profile: 'edu6_studio' }),
+          rec('c', 'Tanz', '2026-09-13T12:00:00Z', { robot_profile: 'v1_studio' }),
           rec('a', 'Tanz', '2026-09-12T10:00:00Z'),
         ],
       },
@@ -101,7 +101,7 @@ describe('buildAssetIndex — recordings', () => {
 describe('buildAssetIndex — Ziele, Positionen, program pins', () => {
   const pin = {
     id: 'd_1', name: 'Ablage', kind: 'pin', x: 0.182, y: -0.064, z: 0.012,
-    source: 'camera', robot_type: 'edu6_studio',
+    source: 'camera', robot_type: 'v1_studio',
   };
   const pose = {
     id: 'd_2', name: 'Oben', kind: 'pose', x: 0.1, y: 0, z: 0.15, source: 'capture', robot_type: 'omx_f',

@@ -927,8 +927,8 @@ if __name__ == '__main__':
 # `_set_follower_torque` did `ok = bool(getattr(res, 'success', False))` and threw
 # `res.message` away, so the driver's own German reason reached the container
 # Protokoll (the driver logs it) but never the Roboter-Studio toast — where the
-# student got a generic „bitte die Umgebung neu starten" instead. The edu6 driver
-# returns real reasons there (`edu6_arm_node._torque_cb` → `_torque_refusal`),
+# student got a generic „bitte die Umgebung neu starten" instead. The Feetech driver
+# returns real reasons there (`feetech_arm_node._torque_cb` → `_torque_refusal`),
 # e.g. a joint parked on the position-map edge, which points at a hand-guide
 # habit rather than at a cable.
 
@@ -1010,7 +1010,7 @@ def test_set_follower_torque_clears_the_stash_on_every_call():
 
 
 def test_only_a_failed_switch_stores_a_reason():
-    """The edu6 driver answers a literal ``'ok'`` in ``message`` on SUCCESS —
+    """The Feetech driver answers a literal ``'ok'`` in ``message`` on SUCCESS —
     that must never end up in a toast, so the stash is written only on failure."""
     source = _SERVER_PY.read_text(encoding='utf-8')
     idx = source.index('self._follower_torque_last_message = detail.strip()')

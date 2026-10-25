@@ -36,8 +36,8 @@ Two design points that are easy to get wrong:
   survives only as ``workflow_manager::_HAT_ABSENT_GRACE_S``, the object-seen hat's
   debounce.)
 * **Capture is NEAREST-wins**, never any-match. The legacy proximity test in ``SimArm``
-  returned True for ANY object inside the radius, which on edu6 (whose whole pick band
-  is 120 mm wide against a 60 mm capture radius) cannot tell two adjacent cubes apart.
+  returned True for ANY object inside the radius, which cannot tell two adjacent cubes
+  apart (two cubes side by side are well inside one 60 mm capture radius).
 
 Objects are keyed by their INDEX in the list the editor sent, not by ``tag_id``: the
 front end's ``tag_id`` is a local placement counter that the server deliberately ignores

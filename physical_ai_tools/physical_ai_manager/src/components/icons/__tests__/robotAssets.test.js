@@ -24,8 +24,8 @@ import { robotSpriteName } from '../../sucher/RobotIcon';
 
 const APP = path.resolve(__dirname, '../../../..');
 const ROBOTS = path.join(APP, 'public', 'robots');
-const PROFILES = ['omx_full', 'omx_follower', 'edu6_studio', 'edu1_studio'];
-const NOT_A_PROFILE = [null, undefined, '', 'omx_f', 'omx_l', 'edu6', 'OMX_FULL', 'toString', '__proto__', 'constructor', 42, {}, []];
+const PROFILES = ['omx_full', 'omx_follower', 'v1_studio'];
+const NOT_A_PROFILE = [null, undefined, '', 'omx_f', 'omx_l', 'v1', 'OMX_FULL', 'toString', '__proto__', 'constructor', 42, {}, []];
 
 /** Pixel size of a PNG (IHDR) or a WebP (VP8X canvas, VP8 or VP8L), without a decoder. */
 function imageSize(file) {
@@ -43,8 +43,7 @@ describe('robotGlyphName: a profile maps to its OWN robot, an unknown one to non
   it.each([
     ['omx_full', 'omx_full', 'omx_f', 'omx_l'],
     ['omx_follower', 'omx_f', 'omx_f', null],
-    ['edu6_studio', 'edu6', 'edu6', null],
-    ['edu1_studio', 'edu1', 'edu1', null],
+    ['v1_studio', 'v1', 'v1', null],
   ])('%s → robot %s, arm %s, leader %s', (profile, robot, arm, leader) => {
     expect(robotGlyphName(profile)).toBe(robot);
     expect(robotGlyphName(profile, 'robot')).toBe(robot);
@@ -93,7 +92,7 @@ describe('phasePicture: only a profile that reaches the screen has one', () => {
     }
   });
 
-  it.each(['omx_follower', 'edu6_studio', 'edu1_studio', ...NOT_A_PROFILE])(
+  it.each(['omx_follower', 'v1_studio', ...NOT_A_PROFILE])(
     '%j has no phase picture (recording and the collision e-stop are omx_full only)',
     (profile) => {
       for (const kind of PHASE_KINDS) expect(phasePicture(profile, kind)).toBeNull();
@@ -119,7 +118,7 @@ describe('phasePicture: only a profile that reaches the screen has one', () => {
 describe('the shipped files are the ones robotAssets.js describes', () => {
   it('glyphs.png is one row of GLYPH_ORDER.length square cells', () => {
     const { w, h, bytes } = imageSize(path.join(ROBOTS, GLYPH_FILE));
-    expect(GLYPH_ORDER).toEqual(['omx_full', 'omx_f', 'edu6', 'edu1', 'omx_l']);
+    expect(GLYPH_ORDER).toEqual(['omx_full', 'omx_f', 'v1', 'omx_l']);
     expect(h).toBe(GLYPH_CELL_PX);
     expect(w).toBe(GLYPH_CELL_PX * GLYPH_ORDER.length);
     expect(bytes).toBeLessThan(20 * 1024); // a handful of KB: it is an icon
@@ -160,8 +159,8 @@ describe('the shipped files are the ones robotAssets.js describes', () => {
       GLYPH_FILE,
       ...Object.values(PHASE_PICTURES).flatMap((set) => Object.values(set).map((p) => p.file)),
       // the Sucher sprites and their light variants (RobotIcon.jsx, rendered by render-icons.sh / render-robot-pictures.sh)
-      'omx_full.webp', 'omx_f.webp', 'edu6.webp', 'edu1.webp',
-      'omx_full_light.webp', 'omx_f_light.webp', 'edu6_light.webp', 'edu1_light.webp',
+      'omx_full.webp', 'omx_f.webp', 'v1.webp',
+      'omx_full_light.webp', 'omx_f_light.webp', 'v1_light.webp',
     ]);
     expect(fs.readdirSync(ROBOTS).sort()).toEqual([...known].sort());
   });

@@ -168,9 +168,9 @@ from std_srvs.srv import Trigger
 RECORD_MAX_S = 120.0
 _MANUAL_RECORD_FPS = 25
 _MANUAL_RECORD_MAX_SAMPLES = int(RECORD_MAX_S * _MANUAL_RECORD_FPS) + 100
-# Plan §4.5's per-channel-epsilon concern is SUPERSEDED: the edu6 gripper channel
-# is RADIANS (0…1.75 rad), not metres — 0.003 rad = 0.17 % of the 1.75 rad stroke —
-# so this uniform epsilon dedups correctly on BOTH profiles (no per-channel split).
+# One uniform epsilon for every channel: the Feetech claw channel is RADIANS
+# (0…0.90 rad commanded), not metres — 0.003 rad = 0.33 % of that stroke — so
+# this epsilon dedups correctly on every profile (no per-channel split).
 _MANUAL_RECORD_MIN_DELTA_RAD = 0.003
 # Recorded samples are ROUNDED at the sampler: joint values to 1e-4 rad, the time
 # column to 1 ms. A full-precision float serialises to ~19 characters, which put
@@ -541,7 +541,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         except Exception as e:  # noqa: BLE001
             self.get_logger().error(f'cloud inference state not started: {type(e).__name__}')
 
-        # Pure identity hoist (edu6 §4.1): resolve() is NON-RAISING by
+        # Pure identity hoist: resolve() is NON-RAISING by
         # construction (strip + dict lookup with a default fallback), so the
         # profile is readable by _init_collision_monitor (collision_enabled)
         # and every later __init__ consumer. _init_robot_profile stays the
@@ -4127,8 +4127,8 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         :meth:`_get_current_gripper_pose` reports, taken from the SOLVER.
 
         The touch-off verticality gate needs it, and it is a per-arm frame
-        convention — the OMX's FK points the tool along local +x, the edu6's
-        along −z and the edu1's along +z. ``None`` (no solver yet) leaves the
+        convention — the OMX's FK points the tool along local +x, the V1's
+        along +z. ``None`` (no solver yet) leaves the
         manager on its OMX default, which is what it did before this existed."""
         ik = self._build_ik_solver()
         if ik is None:
@@ -4199,15 +4199,15 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         thrown away (``ok = bool(getattr(res, 'success', False))``), so a specific
         refusal reached the container Protokoll (the driver logs it) but never the
         Roboter-Studio toast, where the student was handed a generic „bitte die
-        Umgebung neu starten" instead. The edu6 driver returns real reasons there
-        (``edu6_arm_node._torque_cb`` → ``self._torque_refusal``), e.g. a joint
+        Umgebung neu starten" instead. The Feetech driver returns real reasons there
+        (``feetech_arm_node._torque_cb`` → ``self._torque_refusal``), e.g. a joint
         parked on the position-map edge — which points at a hand-guide habit, not
         at a cable.
 
         OMX identity: this returns '' unless ``message`` is a non-empty string, so
         a Dynamixel response with an empty/absent ``message`` appends NOTHING and
         every German string on the shared paths is byte-identical. The success
-        message is never stored (the edu6 driver answers a literal 'ok' there, and
+        message is never stored (the Feetech driver answers a literal 'ok' there, and
         nothing wants that in a toast)."""
         reason = getattr(self, '_follower_torque_last_message', '')
         if not isinstance(reason, str) or not reason.strip():
@@ -4234,9 +4234,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 client = getattr(self, '_dxl_torque_client', None)
                 if client is None:
                     from rclpy.callback_groups import ReentrantCallbackGroup
-                    # ArmProfile seam (edu6 §3.4): the torque service name comes
+                    # ArmProfile seam: the torque service name comes
                     # from the resolved profile (OMX default = the Dynamixel HW
-                    # interface; edu6 = its own driver node, which ALSO aliases
+                    # interface; V1 = its own driver node, which ALSO aliases
                     # the legacy name so a stale client can never silently fail
                     # to disable torque).
                     service_name = getattr(
@@ -4332,7 +4332,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
     def _follower_rail_is_ros2_control(self) -> bool:
         """True when the follower is driven through ros2_control's
         JointTrajectoryController (both OMX profiles), False for an arm with its
-        own driver node (edu6_studio / edu1_studio).
+        own driver node (v1_studio).
 
         Keyed on the profile's torque service: the Dynamixel hardware interface's
         ``set_dxl_torque`` IS the ros2_control rail, and every Feetech profile
@@ -5216,9 +5216,9 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 #
                 # roll= is the SOLVER's roll argument, NEVER the raw joint value:
                 # the two are the same number on the OMX (theta5 = roll) but not
-                # on edu6 (q6 = fold(wrap(π − roll))), where passing the joint
-                # mirrored the wrist on EVERY Cartesian step — up to 178°, and it
-                # rotated a held object (found 2026-07-25).
+                # on the V1 (q5 = fold(wrap(−roll))), where passing the joint
+                # would mirror the wrist on EVERY Cartesian step and rotate a
+                # held object.
                 jog_roll = arm[roll_idx]
                 _convert = getattr(ik, 'roll_from_joints', None)
                 if _convert is not None:
@@ -5229,10 +5229,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                     ik, (target[0], target[1], target[2]), roll=jog_roll,
                     require_floor=(idx == 2 and delta < 0.0))
                 # Pin the wrist EXACTLY. Inside the jaw-fold window the solve
-                # already returns it; outside (the student jogged joint6 past
-                # 90°) it returns the jaw-identical twin, which is the same
-                # grasp but a 180° joint swing. Free: the fingertip TCP lies on
-                # the roll axis (edu6 exactly, OMX within ~1.6 mm — the same
+                # already returns it; outside (the student jogged the roll joint
+                # past the fold window) it returns the jaw-identical twin, which
+                # is the same grasp but a 180° joint swing. Free: the fingertip
+                # TCP lies on the roll axis (V1 exactly, OMX within ~1.6 mm — the same
                 # licence motion.py's lift already takes), so this cannot move
                 # the tool off the solved Cartesian target.
                 arm_q = list(arm_q)
@@ -5439,7 +5439,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 duration = max(0.2, min(4.0, duration))
                 # Thread the profile velocity limit into build_segment's floor,
                 # like the workflow-move and replay paths (OMX None → 4.8 default,
-                # bit-identical; edu6 URDF 5.45).
+                # bit-identical; V1 4.72).
                 _vl = getattr(getattr(self, '_arm_profile', None),
                               'velocity_limit_rad_s', None)
                 points = build_segment(
@@ -7097,9 +7097,10 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         # Refuse a name/position mismatch instead of publishing a malformed
         # JointState. Reachable since the boot seed: the seed runs BEFORE
         # `_init_robot_profile`, whose exception path DOWNGRADES `_arm_profile`
-        # to the omx_full default — so an edu6 rig that boots degraded seeds a
-        # 7-vector and then resolves 6 OMX names, and `_sim_idle_republish` would
-        # re-emit that mismatch at 2 Hz forever. Dropping the pose is the honest
+        # to the omx_full default — so a rig whose profile has another joint
+        # count that boots degraded seeds a vector of that width and then
+        # resolves 6 OMX names, and `_sim_idle_republish` would re-emit that
+        # mismatch at 2 Hz forever. Dropping the pose is the honest
         # outcome on a degraded node; the twin simply keeps saying it is waiting.
         if len(names) != len(positions):
             self.get_logger().warning(
@@ -7392,7 +7393,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
                 [float(v) for v in _home] + [float(_g_open)]
                 if _home is not None and _g_open is not None else None),
             # Per-profile grasp-classifier values (None → OMX module defaults);
-            # a radian-band gripper (edu6 0..1.75, closes DOWNWARD from open)
+            # a radian-band gripper (V1 0..0.90, closes DOWNWARD from open)
             # needs its own close threshold / blocked offsets.
             close_threshold_rad=getattr(_profile, 'sim_close_threshold_rad', None),
             held_block_offset_rad=getattr(
@@ -7406,7 +7407,7 @@ class PhysicalAIServer(CollisionMonitorMixin, Node):
         sim_dummy_frame = np.zeros((1, 1, 3), dtype=np.uint8)
         # Q13 — the sim TABLE sits where a real touch-off puts it: z_table is the
         # EE height with the FINGERTIPS on the drawn table, i.e. the solver's
-        # tool_tip_below_ee_m (0.04 m on the OMX, 0 on the Feetech arms). Base
+        # tool_tip_below_ee_m (0.04 m on the OMX, 0 on the Feetech arm). Base
         # z = 0 stays the drawn surface. Together with SimArm's fingertip
         # capture rule this makes a recording or a program hold or miss in the
         # simulator exactly as on the rig. Visible cost (accepted): the simulated

@@ -56,46 +56,34 @@ _logger = logging.getLogger(__name__)
 # girth). Tuned conservatively; keep zones a little off the table/target.
 #
 # DO NOT SHRINK THIS — not even "per profile for the smaller arm". It looks like
-# an over-conservative OMX-sized value that a 0.21 m-reach arm should scale down,
-# and it is the opposite. Measured 2026-07-26 against the edu6 collision meshes
-# (``physical_ai_manager/public/edu6-urdf/edu6.urdf`` + its STLs), over 326
-# configurations (HOME, 175 strict-vertical grasp poses across the pick band, 150
-# random in-limit poses): the largest distance from ANY moving-link mesh vertex to
-# the NEAREST ``link_points`` sample — which is exactly the inflation the
-# Minkowski "fatten the obstacle, test link centres" argument requires — is
+# an over-conservative OMX-sized value that a shorter arm should scale down, and
+# it is the opposite. Measured against the V1 meshes (link_points samples only
+# the tool axis, so the inflation is what has to cover everything off it): with
+# the claw open at 0.90 rad the RL blade reaches 72.9 mm off the tool axis
+# (the LF blade 69.9 mm at the URDF's 18/19 gear ratio) and the claw housing
+# (link5 + end_effector) 69.2 mm, against a shipped TOTAL inflation of
+# LINK_RADIUS_M + ZONE_MARGIN_M = 50 mm. The guard is therefore already 22.9 mm
+# (blade) / 19.2 mm (housing) UNDER-covered on this arm — 46.8 mm for a claw
+# opened by hand to its 1.5708 rad stop — so shrinking it would widen a real gap
+# on the very part that carries the student's object into the obstacle.
 #
-#     link6  83.6 mm   ← the wrist/gripper housing (80 x 117 x 67 mm), whose body
-#                        spreads far off the tool-axis centreline link_points samples
-#     link2  64.7 mm     link3 48.7 mm    link4 43.3 mm
-#     link5  38.7 mm     link1 37.9 mm    End_effector 17.0 mm
-#     fingers 44.1 mm at the 1.75 rad command cap (46.6 mm at the URDF limit)
-#              ← re-measured; an earlier revision said 39.7 mm. After the two
-#                breaches above this is the figure CLOSEST to the 50 mm total,
-#                i.e. the third thing that would break first if it were shrunk.
-#
-# against a shipped TOTAL inflation of LINK_RADIUS_M + ZONE_MARGIN_M = 50 mm. The
-# guard is therefore already 33.6 mm UNDER-covered on this arm, so shrinking it
-# would widen a real gap on the very link that carries the student's object into
-# the obstacle.
-#
-# It is not RAISED to 83.6 mm either, and that is a deliberate, disclosed trade:
-# a 10 mm drawn box would then inflate to 177 mm across, against a measured pick
-# band of only 176 mm (r ∈ [0.0325, 0.2082]) — every in-band zone would refuse
-# the entire band, i.e. the feature would be gone, and a Sperrzone nobody can
-# draw guards nothing. Widening it is also a Rule §2-class change to a collision
-# margin, so it is the user's call, not this module's. CONSEQUENCE, recorded so
-# it is not rediscovered as a surprise: on edu6 a no-go zone protects the arm's
-# LINKS conservatively but can let the gripper HOUSING clip an obstacle by up to
-# ~34 mm. The physical backstops are the servo current limits (gripper
-# Max_Torque 150, arm 800); rig gate R7 is where this gets a verdict. The real
-# fix is for ``edu6_ik.link_points`` to sample link6's girth instead of only its
-# axis — a solver change, out of scope here.
+# It is not RAISED to cover the open claw either, and that is a deliberate,
+# disclosed trade: every drawn box would then grow by the whole claw on every
+# face, and a small zone would block most of the pick band — a Sperrzone nobody
+# can draw guards nothing. Widening it is also a Rule §2-class change to a
+# collision margin, so it is the user's call, not this module's. CONSEQUENCE,
+# recorded so it is not rediscovered as a surprise: on the V1 a no-go zone
+# protects the arm's LINKS conservatively but can let the open claw clip an
+# obstacle by up to the figures above. The physical backstops are the servo
+# current limits; rig gate VR13 is where this gets a verdict. Sampling the claw
+# housing in ``v1_ik.link_points`` would close it — a solver change the owner
+# has deliberately left out of scope.
 #
 # ``test_path_guard_inflation_is_not_secretly_shrunk`` pins the CONSTANTS, the
 # absence of any per-profile override field, and one source string. It does NOT
-# pin the eight distances above — they are prose, and only a re-measurement
-# against the meshes can falsify them (two were wrong for a day with that test
-# green). Re-measure before quoting them; do not treat the test as their guard.
+# pin the distances above — they are prose, and only a re-measurement against
+# the meshes can falsify them. Re-measure before quoting them; do not treat the
+# test as their guard.
 LINK_RADIUS_M = 0.03
 # Extra user safety margin added to the inflation on top of the link radius.
 ZONE_MARGIN_M = 0.02
@@ -149,12 +137,10 @@ def _refusal_message(zones, margin: float, link_radius: float) -> str:
     editor: a zone is inflated by ``link_radius + margin`` = 5 cm on EVERY face
     before anything is tested (the Minkowski "fatten the obstacle, test link
     centres" argument — see LINK_RADIUS_M), so a 3 cm box drawn on the mat is a
-    13 cm obstacle to the planner. Against edu6's measured 176 mm pick band
-    (r ∈ [0.0325, 0.2082]) that leaves no side to pass on, which is exactly what
-    the sweep found: over 20 blocked, non-static edu6 cases, 2880 base-swing via
-    candidates were tried, 1280 SOLVED, 426 had the FIRST leg clear and 417 the
-    SECOND — and ZERO had both. Saying the inflated width out loud is the one
-    piece of information that turns "it refused" into "draw it smaller"."""
+    13 cm obstacle to the planner. In a narrow pick band that can leave no side
+    to pass on: a single via cannot be on the clear side of both endpoints.
+    Saying the inflated width out loud is the one piece of information that
+    turns "it refused" into "draw it smaller"."""
     boxes = build_zones(zones, link_radius + margin)
     if not boxes:
         return _REFUSE_MSG
@@ -203,9 +189,9 @@ def _static_overlap_refusal(ik, q_start, q_end, zones, margin, link_radius):
 
     This is how a small box near the base bricks all motion: ``link_points``
     samples the arm's fixed base column, whose points do not move with the
-    configuration at all — indices 0-5 on edu6 (base → joint-1 origin, within
-    26 mm of the origin) and, WORSE, indices 0-10 on the OMX (base → shoulder,
-    out to 98 mm, because they sit on the joint-1 rotation axis). A zone drawn
+    configuration at all — indices 0-5 on the V1 (base → joint-1 origin, on the
+    joint-1 axis) and, WORSE, indices 0-10 on the OMX (base → shoulder, out to
+    98 mm, because they sit on the joint-1 rotation axis). A zone drawn
     within the inflation of those points contains an arm point in every
     conceivable pose. The refusal itself is KEPT (the zone genuinely does overlap
     the robot, and no motion can undo that); only the diagnosis changes, so which
@@ -237,34 +223,19 @@ def _static_overlap_refusal(ik, q_start, q_end, zones, margin, link_radius):
 # unreachable via candidate makes its whole rung silently unable to return a
 # route, so every blocked transit falls through to the German refusal.
 #
-# Measured 2026-07-26 through the real solvers: edu6's top-down TCP ceiling is
-# ~0.065 m (joint5's +110° relief binds, not the 2R annulus), so all three OMX
-# swing heights AND the 0.18 m cruise are unreachable — 0/144 base-swing
-# candidates solved vs 144/144 on the OMX. The ArmProfile now carries per-arm
-# values; ``None``/absent resolves to the module constant, so the OMX (and every
-# profile-less construction, i.e. all non-Roboter-Studio paths and the existing
-# tests) is bit-identical.
+# The ArmProfile therefore carries per-arm values (re-measured through the V1
+# solver: its strict-vertical TCP ceiling is ~0.146 m, and its grid solves
+# 72/144 base-swing candidates, the joint1 ±90° ceiling); ``None``/absent
+# resolves to the module constant, so the OMX (and every profile-less
+# construction, i.e. all non-Roboter-Studio paths and the existing tests) is
+# bit-identical.
 #
-# RE-MEASURED 2026-09-07, and the per-arm grid does NOT revive base-swing on
-# edu6 — only its CANDIDATE count. Over 40 blocked, non-static transits between
-# two grasp points in the pick band (a 3 cm box drawn between them):
-#
-#   grid (heights, radii, cruise)                     lift  swing  refuse
-#   SHIPPED (0.03,0.05,0.02) (0.14,0.18,0.10) 0.060     5     0      35
-#   every one of 60 alternative grids swept            5     0      35
-#
-# i.e. the outcome is grid-INDEPENDENT. The reason is not reachability: over 20
-# of those cases, 2880 candidates were tried, 1280 SOLVED, 426 had leg 1 clear
-# and 417 had leg 2 clear — and ZERO had BOTH. A single via cannot be on the
-# clear side of both endpoints when the inflated obstacle (13 cm for a 3 cm box)
-# is wider than the room either side of it in a 176 mm band. Routing that case
-# needs a TWO-via rung, which is a new rung and a Rule §2-class change to a
+# A per-arm grid cannot fix every case: a single via cannot be on the clear side
+# of both endpoints when the inflated obstacle (13 cm for a 3 cm box) is wider
+# than the room either side of it in a narrow band. Routing that case needs a
+# TWO-via rung, which is a new rung and a Rule §2-class change to a
 # collision-avoidance ladder, i.e. the user's call — NOT a re-tune of these four
-# numbers. edu1 is unaffected in practice: its lift rung answers 25/30 of the
-# same cases (OMX 22/30), because its ceiling clears a 5 mm-tall inflated zone
-# where edu6's 0.065 m does not. (That ceiling was 0.100 m when this was
-# measured and is 0.195 m since joint4 widened to ±115° on 2026-09-10, so the
-# conclusion holds a fortiori — but the 25/30 itself has NOT been re-measured.)
+# numbers.
 #
 # What DID change is the refusal: see ``_refusal_message``, which now names the
 # inflated width so the student can act on it instead of being told to move a
@@ -462,7 +433,7 @@ def _zone_clear_top(zones, margin, link_radius,
 
     ``tool_clear`` is per-arm (``_tool_clear``): it is how far the lowest TOOL
     sample sits below the EE frame, which is 0.04 m of appended tool-tip samples
-    on the OMX but exactly 0 on edu6, whose EE frame IS the fingertip TCP."""
+    on the OMX but exactly 0 on the V1, whose EE frame IS the fingertip TCP."""
     boxes = build_zones(zones, link_radius + margin)
     if not boxes:
         return None
@@ -592,9 +563,8 @@ def plan_safe_route(ctx, q_start, q_end, zones, duration_s, roll=None,
     if roll is None:
         # NEVER the raw joint value: ``roll`` is the SOLVER's aim-the-gripper
         # argument, which equals the roll joint on the OMX (theta5 = roll) but not
-        # on edu6 (q6 = fold(wrap(π − roll))). Passing the joint through mirrored
-        # the via wrist by up to 178° — measured 80° for a q_end wrist of 40° —
-        # the same defect class as the Cartesian-jog mirror fixed on 2026-07-25,
+        # on the V1 (q5 = fold(wrap(−roll))). Passing the joint through mirrors
+        # the via wrist — the same defect class as the Cartesian-jog mirror fixed on 2026-07-25,
         # in the one site that fix did not reach. ``_roll_arg`` asks the solver.
         #
         # Reachable via ``safe_move``'s two roll-less callers, ``motion.home`` and

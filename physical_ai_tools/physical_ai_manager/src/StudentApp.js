@@ -430,7 +430,7 @@ function StudentApp() {
     { key: PageType.TRAINING, label: 'Training', icon: 'chart', onClick: handleTrainingPageNavigation, capabilityKey: 'trainable' },
     // Inferenz carries NO capabilityKey — it is ALWAYS visible (documented
     // invariant): hiding it would also hide the classroom-Jetson claim UI that a
-    // cloud/follower-only student needs. edu6_studio is inferable=false, yet the
+    // cloud/follower-only student needs. v1_studio is inferable=false, yet the
     // tab MUST stay so that student can still claim a classroom Jetson; its local
     // inference start is refused downstream (no-GPU gate), not by this nav filter.
     // The capability filter must never gate it.

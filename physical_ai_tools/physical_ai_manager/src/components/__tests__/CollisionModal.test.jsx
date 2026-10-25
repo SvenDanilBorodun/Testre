@@ -77,7 +77,7 @@ describe('CollisionModal — the remedy picture', () => {
     expect(arrow.style.transform).toContain('rotate(');
   });
 
-  it.each(['', 'omx_follower', 'edu6_studio', 'edu1_studio'])(
+  it.each(['', 'omx_follower', 'v1_studio'])(
     'a profile with no collision picture (%j) shows none — the advice text stays',
     async (profile) => {
       mockState = state('stopped', profile);

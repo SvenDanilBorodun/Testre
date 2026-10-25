@@ -12,18 +12,18 @@ behaviour, byte-identical):
   by the SERVOS answering, not the CH343 bridge chip — every arm family
   enumerates as /dev/ttyACM*).
 
-  ``--servos=N`` says how many the SELECTED robot type has (7 = edu6_studio,
-  6 = edu1_studio; default 7 so a pre-edu1 caller is byte-identical). THE COUNT
-  IS THE ONLY DISCRIMINATOR between the two Feetech arms: same Waveshare CH343P
-  bridge, same VID:PID, same by-id strings, and the same servo models on ids
-  1..6. So the probe asserts the count EXACTLY — every id up to N must answer
-  AND id N+1 must not — and reports a bus of a DIFFERENT supported length as
-  that family's cross-probe token rather than as a success.
+  ``--servos=N`` says how many the SELECTED robot type has (6 = v1_studio, the
+  default). The probe asserts the count EXACTLY — every id up to N must answer
+  AND id N+1 must not — because the Waveshare CH343P bridge, its VID:PID and
+  its by-id string say nothing about WHICH Feetech arm is on the bus. A bus of
+  a different supported length is reported as that family's cross-probe token
+  rather than as a success; a bus longer than any supported arm is
+  ``bus_too_long:K``.
 
 Cross-probe: when the EXPECTED protocol finds nothing, the OTHER one is probed
-and a distinct token returned ("omx_arm_found" / "edu6_arm_found" /
-"edu1_arm_found") so the GUI can say „Es wurde ein OMX-Arm gefunden, aber ein
-EduBotics-Arm ist ausgewählt." instead of a bare failure.
+and a distinct token returned ("omx_arm_found" / "v1_arm_found") so the GUI can
+say „Es wurde ein OMX-Arm gefunden, aber ein EduBotics-Arm ist ausgewählt."
+instead of a bare failure.
 
 Baudrate: 1,000,000 for all arms.
 """
@@ -79,12 +79,12 @@ def _timeout_handler(signum, frame):
     sys.exit(1)
 
 
-# Servo count per Feetech arm family, and its inverse. These are the ONLY facts
-# that separate the two: the bridge chip, the VID:PID, the by-id string and the
-# models on ids 1..6 are all identical.
-FEETECH_SERVO_COUNT = {"edu6": 7, "edu1": 6}
+# Servo count per Feetech arm family, and its inverse. The count is what the
+# probe can prove: the bridge chip, the VID:PID and the by-id string say nothing
+# about which Feetech arm is on the bus.
+FEETECH_SERVO_COUNT = {"v1": 6}
 FEETECH_FAMILY_BY_COUNT = {n: fam for fam, n in FEETECH_SERVO_COUNT.items()}
-DEFAULT_FEETECH_SERVOS = FEETECH_SERVO_COUNT["edu6"]
+DEFAULT_FEETECH_SERVOS = FEETECH_SERVO_COUNT["v1"]
 FEETECH_MAX_SERVOS = max(FEETECH_SERVO_COUNT.values())
 # Probe one id PAST the longest supported arm, so "exactly N" is provable.
 FEETECH_MAX_ID = FEETECH_MAX_SERVOS + 1
@@ -108,20 +108,18 @@ def feetech_bus_length(bus) -> int:
 
 def identify_feetech(port_path: str, expected: int = DEFAULT_FEETECH_SERVOS) -> str:
     """Feetech probe: EXACTLY ``expected`` servos answer from id 1 up, and each
-    reads an accepted STS model (777 STS3215 / 2825 STS3250 — both arms mix the
+    reads an accepted STS model (777 STS3215 / 2825 STS3250 — the arm mixes the
     two by design).
 
-    Returns the family name ("edu6" / "edu1") on success, or one of:
+    Returns the family name ("v1") on success, or one of:
 
     * ``feetech_silent``  — the port opened but NO servo answered. The single
       most likely student error is the 12-V supply being off (USB alone
       enumerates the port but never powers the servos), so it gets its own
       token rather than a bare "unknown".
-    * ``edu6_arm_found`` / ``edu1_arm_found`` — the bus is exactly the length of
-      a DIFFERENT supported arm. Usually the wrong robot type is selected;
-      note the one ambiguity, which the caller's German wording must own: an
-      edu6 whose LAST servo has dropped off the chain is indistinguishable from
-      a healthy edu1, because they are the same six servos.
+    * ``<family>_arm_found`` — the bus is exactly the length of a DIFFERENT
+      supported Feetech arm (unreachable while ``FEETECH_SERVO_COUNT`` holds one
+      family; kept so a second family needs no new token).
     * ``bus_too_long:K``  — K contiguous ids answered, MORE than the longest
       supported arm has. Its own token rather than ``partial:K`` because it is
       the OPPOSITE fault and needs the opposite remedy: ``partial`` means
@@ -165,7 +163,7 @@ def identify_feetech(port_path: str, expected: int = DEFAULT_FEETECH_SERVOS) -> 
         # ``expected`` is validated against this table by the CLI before we
         # ever get here, so the fallback is unreachable in production and
         # exists only for a direct in-process call.
-        return FEETECH_FAMILY_BY_COUNT.get(expected, "edu6")
+        return FEETECH_FAMILY_BY_COUNT.get(expected, "v1")
     except Exception as e:
         return f"error:{e}"
     finally:
@@ -181,9 +179,8 @@ if __name__ == "__main__":
             protocol = a.split("=", 1)[1] if "=" in a else "feetech"
         elif a.startswith("--servos="):
             # A malformed or unsupported count must not silently probe the WRONG
-            # length — that would report an edu1 as an edu6 (or the reverse)
-            # with full confidence, and the success token would name a family
-            # nothing can act on. Fail loudly instead; the host always passes a
+            # length — that would report the wrong arm with full confidence, and
+            # the success token would name a family nothing can act on. Fail loudly instead; the host always passes a
             # value derived from its own family table.
             try:
                 servos = int(a.split("=", 1)[1])
@@ -220,8 +217,7 @@ if __name__ == "__main__":
     result = identify(args[0])
     if result == "unknown":
         # cross-probe: is a Feetech arm plugged in instead? Probe by LENGTH so
-        # either family is named — an OMX rig with an Edu:1 attached must not be
-        # told to select the 6-axis arm.
+        # the family is named by what actually answered.
         feet = identify_feetech(args[0], servos)
         if feet in FEETECH_SERVO_COUNT:
             result = f"{feet}_arm_found"

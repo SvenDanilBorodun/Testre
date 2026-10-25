@@ -5,8 +5,8 @@ only self-consistent if the student taps with the tool pointing STRAIGHT DOWN �
 so each tap is gated on the angle between the tool axis and base −z.
 
 WHICH axis that is, is a per-solver frame convention. The gate hardcoded the OMX
-answer (FK rotation column 0) and therefore read 90° on both Feetech arms, whose
-FK frames point the tool along −z and +z. At a 12° limit that rejected EVERY
+answer (FK rotation column 0) and therefore read 90° on a Feetech arm, whose
+FK frame points the tool along +z on the V1. At a 12° limit that rejected EVERY
 correct vertical tap with „Greifer steht schräg (90°)" — the touch-off simply
 could not be completed, and with no touch-off there is no ``z_table``, so every
 grasp refuses in German. This file pins the fix from both ends: each solver
@@ -24,9 +24,8 @@ from physical_ai_server.workflow.calibration_manager import (
     CalibrationManager,
     TABLE_TOUCH_MAX_TILT_DEG,
 )
-from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
-from physical_ai_server.workflow.edu6_ik import Edu6IKSolver
 from physical_ai_server.workflow.ik_solver import IKSolver
+from physical_ai_server.workflow.v1_ik import V1IKSolver
 import physical_ai_server.workflow.calibration_manager as cm
 
 
@@ -39,8 +38,7 @@ def _calib_dir(monkeypatch, tmp_path):
 # (solver, a reachable strict-vertical target, expected local axis)
 _ARMS = [
     (IKSolver, (0.18, 0.0, 0.02), (1.0, 0.0, 0.0)),
-    (Edu6IKSolver, (0.14, 0.0, 0.02), (0.0, 0.0, -1.0)),
-    (Edu1IKSolver, (0.18, 0.0, 0.02), (0.0, 0.0, 1.0)),
+    (V1IKSolver, (0.18, 0.0, 0.02), (0.0, 0.0, 1.0)),
 ]
 
 
@@ -52,7 +50,7 @@ def test_each_solver_declares_its_own_tool_axis(cls, target, axis):
 @pytest.mark.parametrize('cls,target,axis', _ARMS)
 def test_a_vertical_grasp_pose_reads_zero_tilt_on_every_arm(cls, target, axis):
     """THE regression. Every solve() result is strict-vertical by construction,
-    so the gate must read ~0° for all three — not 0° for one and 90° for two."""
+    so the gate must read ~0° on every arm — not 0° on one and 90° on another."""
     ik = cls()
     q = ik.solve(target)
     assert q is not None, f'{cls.__name__} cannot reach its own test target'
@@ -65,7 +63,7 @@ def test_a_vertical_grasp_pose_reads_zero_tilt_on_every_arm(cls, target, axis):
 
 
 @pytest.mark.parametrize('cls,target,axis', _ARMS)
-def test_the_old_hardcoded_column_zero_would_still_fail_two_of_them(cls, target, axis):
+def test_the_old_hardcoded_column_zero_would_still_fail_the_feetech_arm(cls, target, axis):
     """Keeps the bug legible: column 0 is the OMX's answer and nobody else's.
     If a future refactor 'simplifies' back to it, this is what says why not."""
     ik = cls()
@@ -79,7 +77,7 @@ def test_the_old_hardcoded_column_zero_would_still_fail_two_of_them(cls, target,
 
 def test_a_genuinely_tilted_tap_is_still_rejected():
     """The gate must not have been widened into uselessness by the fix."""
-    ik = Edu1IKSolver()
+    ik = V1IKSolver()
     rot, _t = ik.fk(ik.solve((0.18, 0.0, 0.02)))
     twenty = np.array([[math.cos(0.35), 0.0, math.sin(0.35)],
                        [0.0, 1.0, 0.0],

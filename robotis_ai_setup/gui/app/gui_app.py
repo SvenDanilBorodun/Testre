@@ -1026,7 +1026,7 @@ class EduBoticsApp:
         )
         # ONE paragraph, driven by the SELECTED profile's `help_de`. The two
         # static paragraphs this replaced named „OMX – Voll" and „OMX – Roboter
-        # Studio (nur Follower)" on every profile — including edu6_studio, a
+        # Studio (nur Follower)" on every profile — including the Feetech arm, a
         # different robot with neither name — and the second one described a
         # leader toggle that `_start_rs_control_server` never even constructs on
         # a follower-only profile.
@@ -1247,8 +1247,8 @@ class EduBoticsApp:
 
         PRESENCE IS NOT ENOUGH — the arms must also be of this profile's ARM
         FAMILY. Measured headless before this check existed: with an OMX pair
-        scanned, `_hardware_ready('edu6_studio')` returned True, and with a
-        single edu6 arm scanned `_hardware_ready('omx_follower')` returned True
+        scanned, `_hardware_ready(<Feetech profile>)` returned True, and with a
+        single Feetech arm scanned `_hardware_ready('omx_follower')` returned True
         — so the Modus dropdown alone could arm „Umgebung starten" for a
         Feetech bringup over a Dynamixel bus, or the reverse. Same hole the Pi
         had (see ``pi_agent/agent.py::_hardware_ready`` for the measured
@@ -1291,7 +1291,7 @@ class EduBoticsApp:
         the scan button in it. The frame used to stay on screen titled
         „Schritt A: Leader-Arm (für diesen Typ nicht nötig)" — wrapped around
         the only button the student must press — and it rendered identically on
-        `edu6_studio`, a 6-axis Feetech arm with no leader CONCEPT, while naming
+        the Feetech arm, which has no leader CONCEPT, while naming
         `omx_follower`'s display label. A permanently empty „Leader —" makes a
         Roboter-Studio kit look half-broken; the Pi's card went singular for
         exactly that reason and Windows now agrees with it.
@@ -1343,7 +1343,7 @@ class EduBoticsApp:
         self._apply_robot_type_labels()
         # The profile decides the camera ROLES, so a type change must re-derive
         # them. Measured: pick a camera under omx_full (role „gripper", green
-        # „Greifer-Kamera: Cam0"), switch the dropdown to edu6_studio — the role
+        # „Greifer-Kamera: Cam0"), switch the dropdown to a Feetech profile — the role
         # stayed „gripper" and the label stayed „Greifer-Kamera", and „Umgebung
         # starten" then wrote CAMERA_NAME_1="gripper" on a rig whose server
         # subscribes only to /scene/…. That is the likeliest real-world route
@@ -3163,11 +3163,11 @@ class EduBoticsApp:
                     # SINGULAR, matching the single-step scan card this profile
                     # renders („Schritt A: Roboterarm" / „Arm scannen"). The
                     # leader/follower distinction does not exist on a
-                    # follower-only kit and is meaningless on edu6_studio.
+                    # follower-only kit and is meaningless on v1_studio.
                     self._set_status("Roboterarm gefunden! Kamera auswählen und auf Start klicken.")
                 return
 
-            # Cross-probe notice (edu6 §5.4): the most likely setup mistake —
+            # Cross-probe notice: the most likely setup mistake —
             # the OTHER arm family is plugged in — becomes one clear sentence
             # instead of a wall of diagnosis.
             notice = getattr(device_manager, "LAST_SCAN_NOTICE", "")
@@ -3244,7 +3244,7 @@ class EduBoticsApp:
             # Turn the diagnosis into a one-click guided repair button that
             # matches the actual failure, instead of leaving the student to
             # parse a wall of log text. Carry the arm family so the "freigeben"
-            # list scopes to the right VID (an edu6 CH343 never showed up under
+            # list scopes to the right VID (a Feetech CH343 never showed up under
             # the OMX-only 2F5D probe).
             self.root.after(
                 0, lambda d=diag, f=arm_family: self._show_arm_repair(d, f))
@@ -3704,7 +3704,7 @@ class EduBoticsApp:
     def _on_cameras_changed(self):
         """Ausgewählte Kameras in HardwareConfig speichern und Rollenzuweisung anzeigen."""
         # The PROFILE decides which roles exist and therefore how many cameras
-        # this rig can use: edu6_studio declares camera_roles=('scene',) and its
+        # this rig can use: v1_studio declares camera_roles=('scene',) and its
         # server config subscribes to exactly one topic, so a second camera
         # would publish a topic nothing reads. The cap used to be a flat 2.
         roles = ROBOT_PROFILES.get(
@@ -3739,9 +3739,9 @@ class EduBoticsApp:
             ).pack(anchor=tk.W, pady=(0, 4))
 
         if len(selected) == 1:
-            # Single camera — auto-assign the PROFILE's first role (edu6 §4.4):
+            # Single camera — auto-assign the PROFILE's first role:
             # a Roboter-Studio kit's lone camera is the SCENE camera, not the
-            # gripper cam (perception + the omx_f/edu6 config topics hang off
+            # gripper cam (perception + the omx_f/v1 config topics hang off
             # the role name, so "gripper" here broke every follower-only kit).
             role = roles[0]
             selected[0].role = role

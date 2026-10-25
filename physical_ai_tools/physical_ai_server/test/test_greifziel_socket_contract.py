@@ -52,7 +52,7 @@ from physical_ai_server.workflow.perception import Detection
 from physical_ai_server.workflow.tag_pose import tag_corner_object_points
 
 
-PROFILE_IDS = ('omx_full', 'edu6_studio', 'edu1_studio')
+PROFILE_IDS = ('omx_full', 'v1_studio')
 
 
 @pytest.fixture(autouse=True)
@@ -406,7 +406,7 @@ def test_a_real_greifziel_still_works_on_every_profile(profile_id):
     ctx.swing_heights_m = p.swing_heights_m
     ctx.swing_radii_m = p.swing_radii_m
     ctx.last_full_joints = list(p.home_joints_rad) + [p.gripper_open_rad]
-    r = {'omx_full': 0.20, 'edu6_studio': 0.14, 'edu1_studio': 0.20}[profile_id]
+    r = {'omx_full': 0.20, 'v1_studio': 0.20}[profile_id]
     ziel = types.SimpleNamespace(
         world_xyz_m=(ctx.ik.base_axis_x + r, 0.0, 0.015),
         aruco_id=20, corners_px=None,

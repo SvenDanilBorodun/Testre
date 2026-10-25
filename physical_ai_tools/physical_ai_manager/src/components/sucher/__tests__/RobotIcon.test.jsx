@@ -17,13 +17,14 @@ import RobotIcon, { robotSpriteName, robotSpriteUrl } from '../RobotIcon';
 
 describe('robotSpriteName', () => {
   it.each([
-    ['omx_full', 'omx_full'], ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
+    ['omx_full', 'omx_full'], ['omx_follower', 'omx_f'], ['v1_studio', 'v1'],
     ['omx_f', 'omx_f'],
   ])('%j → %s', (profile, name) => { expect(robotSpriteName(profile)).toBe(name); });
 
-  // An unknown profile draws NO robot: never the OMX as a stand-in (an Edu:1
-  // student must not see an OMX before the first status tick).
-  it.each(['', undefined, null, 'toString', '__proto__', 'edu6', 'nonsense', 42])('%j → no sprite', (profile) => {
+  // An unknown profile draws NO robot: never the OMX as a stand-in (a V1
+  // student must not see an OMX before the first status tick). A sprite NAME
+  // ('v1') is not a profile id either.
+  it.each(['', undefined, null, 'toString', '__proto__', 'v1', 'nonsense', 42])('%j → no sprite', (profile) => {
     expect(robotSpriteName(profile)).toBeNull();
     expect(robotSpriteName(profile, true)).toBeNull();
     expect(robotSpriteUrl(profile)).toBeNull();
@@ -33,15 +34,14 @@ describe('robotSpriteName', () => {
     expect(robotSpriteName('omx_full', true)).toBe('omx_full_light');
     expect(robotSpriteName('omx_follower', true)).toBe('omx_f_light');
     expect(robotSpriteName('omx_f', true)).toBe('omx_f_light');
-    expect(robotSpriteName('edu6_studio', true)).toBe('edu6_light');
-    expect(robotSpriteName('edu1_studio', true)).toBe('edu1_light');
+    expect(robotSpriteName('v1_studio', true)).toBe('v1_light');
     expect(robotSpriteUrl('omx_full')).toBe('/robots/omx_full.webp');
-    expect(robotSpriteUrl('edu1_studio', true)).toBe('/robots/edu1_light.webp');
+    expect(robotSpriteUrl('v1_studio', true)).toBe('/robots/v1_light.webp');
   });
 
   it('every sprite it names is a shipped file', () => {
     const dir = path.resolve(__dirname, '../../../../public/robots');
-    for (const profile of ['omx_full', 'omx_follower', 'omx_f', 'edu6_studio', 'edu1_studio']) {
+    for (const profile of ['omx_full', 'omx_follower', 'omx_f', 'v1_studio']) {
       for (const light of [false, true]) {
         expect(fs.existsSync(path.join(dir, `${robotSpriteName(profile, light)}.webp`))).toBe(true);
       }
@@ -51,7 +51,7 @@ describe('robotSpriteName', () => {
 
 describe('RobotIcon', () => {
   it('a lazy, undraggable, alt-less sprite in a square box; presentation without a title', () => {
-    const { container } = render(<RobotIcon profile="edu1_studio" size={72} />);
+    const { container } = render(<RobotIcon profile="v1_studio" size={72} />);
     const box = container.firstChild;
     expect(box).toHaveAttribute('role', 'presentation');
     expect(box).toHaveClass('su-robot');
@@ -59,7 +59,7 @@ describe('RobotIcon', () => {
     expect(box.style.width).toBe('72px');
     expect(box.style.height).toBe('72px');
     const img = box.querySelector('img');
-    expect(img).toHaveAttribute('src', '/robots/edu1.webp');
+    expect(img).toHaveAttribute('src', '/robots/v1.webp');
     expect(img).toHaveAttribute('loading', 'lazy');
     expect(img).toHaveAttribute('decoding', 'async');
     expect(img).toHaveAttribute('alt', '');

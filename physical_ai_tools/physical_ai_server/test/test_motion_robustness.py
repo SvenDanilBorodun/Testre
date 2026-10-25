@@ -422,9 +422,9 @@ def test_solve_grasp_and_approach_clamps_at_outer_ring():
     """The clamp itself is unchanged; the WARNING became conditional (F6).
 
     This assertion used to be „a reduction was logged", which is the contract the
-    2026-07-26 audit retired: on edu6 the requested 60 mm hover is unreachable at
-    EVERY radius, so warn-on-any-reduction fired on 100 % of grasps (936 warnings
-    over 780 swept runs) and taught students to ignore the log strip. The clamp is
+    2026-07-26 audit retired: on an arm whose requested 60 mm hover is unreachable
+    at EVERY radius, warn-on-any-reduction fires on every grasp and teaches
+    students to ignore the log strip. The clamp is
     now reported only when the achieved clearance drops below
     ``_APPROACH_WARN_FRAC`` (0.25) of the request — for the shipped catalogs that
     is 15 mm, i.e. exactly ``object_height_m − grasp_depth_m``, the clearance at
@@ -462,8 +462,8 @@ def test_solve_grasp_and_approach_clamps_at_outer_ring():
     warned = [m for m in deep.logs if 'Anfahrhöhe' in m]
     assert warned, 'a consequential clamp MUST be reported'
     # The reason must be the TRUE one (the arm's height over that point), never
-    # the old „Ziel liegt am Rand des Greifbereichs" — which was flatly wrong at
-    # mid-band radii on edu6.
+    # the old „Ziel liegt am Rand des Greifbereichs" — which is flatly wrong at
+    # mid-band radii on a low-ceiling arm.
     assert 'höher kommt der Arm' in warned[0]
     assert 'Rand des Greifbereichs' not in warned[0]
 
@@ -509,10 +509,10 @@ def test_drop_at_outer_ring_reduces_the_release_height_instead_of_refusing(
     Measured at ``OUTER_RING_XYZ`` (r = 0.2732 m from the joint-1 axis): the
     target itself IS reachable, target + 50 mm is not, and the bisect lands on
     **48.4 mm**. So the old behaviour refused an entire place to avoid losing
-    **1.6 mm** of rim clearance. On edu6 the same defect was far worse — it cut
-    „lege ab bei (Position von X)" down to ~13 % of the pick band, because
-    `object_position` returns the GRASP height and the release stacked 50 mm on
-    top, landing 0.5 mm under that arm's absolute ceiling.
+    **1.6 mm** of rim clearance. On an arm with a low top-down ceiling the same
+    defect is far worse — it cuts „lege ab bei (Position von X)" down to a sliver
+    of the pick band, because `object_position` returns the GRASP height and the
+    release stacks 50 mm on top.
 
     Now: it places, and says so in German."""
     ctx = _RecordingCtx(z_table=0.0)
@@ -524,8 +524,8 @@ def test_drop_at_outer_ring_reduces_the_release_height_instead_of_refusing(
     # …and it does NOT nag about it. The bisect lands on 48.4 of the requested
     # 50 mm here — 96.8 % — and a rim clearance that came back at 48 instead of
     # 50 mm still clears every container. The warning used to fire on ANY
-    # reduction: measured 2026-09-07, 38 of 120 successful edu6 places (31.7 %)
-    # carried it. It is now gated at the same _APPROACH_WARN_FRAC the approach
+    # reduction — on a low-ceiling arm a third of all successful places. It is
+    # now gated at the same _APPROACH_WARN_FRAC the approach
     # hover uses, so it fires when the clearance is genuinely gone, not when it
     # is 1.6 mm short. (Deliberately reversed from the original assertion; see
     # the class of defect _APPROACH_WARN_FRAC itself was derived to fix.)

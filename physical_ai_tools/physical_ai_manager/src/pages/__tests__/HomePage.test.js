@@ -272,8 +272,8 @@ describe('HomePage — the Hugging-Face-Token card', () => {
 
 describe('HomePage — the robot names itself in German', () => {
   it('shows display_de from the capability manifest', () => {
-    renderHome({ caps: fullCaps({ display_de: 'Edu:1 – Roboter Studio' }) });
-    expect(screen.getByText('Edu:1 – Roboter Studio')).toBeInTheDocument();
+    renderHome({ caps: fullCaps({ display_de: 'V1 – Roboter Studio' }) });
+    expect(screen.getByText('V1 – Roboter Studio')).toBeInTheDocument();
   });
 
   it('renders help_de under the name when the server sent one', () => {
@@ -290,11 +290,11 @@ describe('HomePage — the robot names itself in German', () => {
   it('falls back to the profile id on an older server image', () => {
     // Not pretty, but true — and it is what the page showed before the key
     // existed, so an un-updated rig is no worse off.
-    renderHome({ caps: fullCaps(), status: { robotProfile: 'edu6_studio' } });
+    renderHome({ caps: fullCaps(), status: { robotProfile: 'v1_studio' } });
     // Twice on purpose in this fallback case: once as the hero's name, once in
     // the footer, where the profile id is a permanent diagnostic a support call
     // can quote. With `display_de` present the two differ, which is the point.
-    expect(screen.getAllByText('edu6_studio').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('v1_studio').length).toBeGreaterThan(0);
   });
 
   it('says the robot is being detected rather than showing an empty heading', () => {

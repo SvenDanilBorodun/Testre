@@ -6,7 +6,7 @@ and are then used anyway.
 sub-bullet. Both knobs reach a physical decision and both were guarded by
 ``math.isfinite`` alone:
 
-* ``EDUBOTICS_PICKUP_CLOSE_RAD=5.0`` on an edu6 (band 0.00..1.75) reaches the
+* ``EDUBOTICS_PICKUP_CLOSE_RAD=5.0`` on a V1 (band 0.00..0.90) reaches the
   published trajectory's gripper column; ``=-9.0`` likewise.
 * ``_held_threshold_rad``'s first branch returns the RAW module constant −0.35
   when the env is non-empty, and on a Feetech rig that sits BELOW the whole
@@ -42,16 +42,15 @@ def _ctx(closed: float, opened: float, warned: set | None = None):
     return ctx
 
 
-# Both Feetech bands, and the OMX, as LITERALS (robot_profiles owns the values;
+# The Feetech band and the OMX's, as LITERALS (robot_profiles owns the values;
 # these are the numbers a rig actually runs).
-_EDU6 = (0.00, 1.75)
-_EDU1 = (0.00, 0.90)
+_V1 = (0.00, 0.90)
 _OMX = (-0.50, 0.80)
 
 
 # ── EDUBOTICS_PICKUP_CLOSE_RAD ─────────────────────────────────────────────
 
-@pytest.mark.parametrize('band', [_EDU6, _EDU1, _OMX])
+@pytest.mark.parametrize('band', [_V1, _OMX])
 @pytest.mark.parametrize('value', [5.0, -9.0])
 def test_an_out_of_band_pickup_close_is_used_and_reported(
         monkeypatch, band, value):
@@ -69,11 +68,11 @@ def test_an_out_of_band_pickup_close_is_used_and_reported(
     assert 'läuft normal weiter' in line
 
 
-@pytest.mark.parametrize('value', [0.0, 1.0, 1.75])
+@pytest.mark.parametrize('value', [0.0, 0.05, 0.90])
 def test_an_in_band_pickup_close_says_nothing(monkeypatch, value):
     monkeypatch.setenv('EDUBOTICS_PICKUP_CLOSE_RAD', str(value))
     monkeypatch.setattr(M, 'PICKUP_CLOSE_RAD', value)
-    ctx = _ctx(*_EDU6)
+    ctx = _ctx(*_V1)
     assert M._pickup_close(ctx) == value
     assert ctx.lines == []
 
@@ -82,14 +81,14 @@ def test_the_unset_knob_is_silent_and_still_falls_through(monkeypatch):
     """The knob ships UNSET on every profile; compose forwards it as `${…:-}`."""
     monkeypatch.setenv('EDUBOTICS_PICKUP_CLOSE_RAD', '')
     monkeypatch.setattr(M, 'PICKUP_CLOSE_RAD', float('nan'))
-    ctx = _ctx(*_EDU6)
+    ctx = _ctx(*_V1)
     assert M._pickup_close(ctx) == 0.0     # the profile's gripper_closed_rad
     assert ctx.lines == []
 
 
 # ── EDUBOTICS_GRASP_HELD_MAX_RAD ───────────────────────────────────────────
 
-@pytest.mark.parametrize('band', [_EDU6, _EDU1])
+@pytest.mark.parametrize('band', [_V1])
 def test_the_shipped_held_default_is_out_of_band_on_a_feetech_rig(
         monkeypatch, band):
     """−0.35 is an OMX-band number. Setting the rollback on a Feetech arm makes
@@ -119,10 +118,10 @@ def test_the_same_rollback_on_an_omx_rig_is_in_band_and_silent(monkeypatch):
 def test_an_unset_held_knob_never_warns_and_keeps_the_per_object_path(
         monkeypatch):
     monkeypatch.setenv('EDUBOTICS_GRASP_HELD_MAX_RAD', '')
-    ctx = _ctx(*_EDU6)
-    ctx.last_commanded_close_rad = 1.0
-    ctx.grasp_held_margin_rad = 0.12
-    assert M._held_threshold_rad(ctx) == pytest.approx(1.12)
+    ctx = _ctx(*_V1)
+    ctx.last_commanded_close_rad = 0.05
+    ctx.grasp_held_margin_rad = 0.10
+    assert M._held_threshold_rad(ctx) == pytest.approx(0.15)
     assert ctx.lines == []
 
 
@@ -133,7 +132,7 @@ def test_a_knob_is_reported_ONCE_PER_RUN_not_once_per_grasp(monkeypatch):
     as forty faults."""
     monkeypatch.setenv('EDUBOTICS_PICKUP_CLOSE_RAD', '5.0')
     monkeypatch.setattr(M, 'PICKUP_CLOSE_RAD', 5.0)
-    ctx = _ctx(*_EDU6)
+    ctx = _ctx(*_V1)
     for _ in range(40):
         M._pickup_close(ctx)
     assert len(ctx.lines) == 1
@@ -144,7 +143,7 @@ def test_the_two_knobs_are_reported_independently(monkeypatch):
     monkeypatch.setattr(M, 'PICKUP_CLOSE_RAD', 5.0)
     monkeypatch.setenv('EDUBOTICS_GRASP_HELD_MAX_RAD', '-0.35')
     monkeypatch.setattr(M, 'GRASP_HELD_MAX_RAD', -0.35)
-    ctx = _ctx(*_EDU6)
+    ctx = _ctx(*_V1)
     M._pickup_close(ctx)
     M._held_threshold_rad(ctx)
     assert len(ctx.lines) == 2
@@ -172,7 +171,7 @@ def test_a_non_finite_value_is_not_reported_as_out_of_band():
     """NaN/inf is a different fault with a different (existing) handler; a band
     sentence about it would name a comparison that was never made."""
     lines: list[str] = []
-    ctx = _ctx(*_EDU6)
+    ctx = _ctx(*_V1)
     ctx.log = lines.append
     for bad in (float('nan'), float('inf'), float('-inf')):
         M._warn_gripper_knob_out_of_band(ctx, 'X', bad, 'Test')
@@ -184,11 +183,11 @@ def test_the_band_is_orientation_agnostic():
     `closed <= v <= open`.
 
     No SHIPPED profile closes at a numerically higher angle than it opens
-    (OMX −0.50/0.80, edu6 0.00/1.75, edu1 0.00/0.90), so a `closed <= v <= open`
-    form is indistinguishable on today's fleet — which is exactly why the
-    reversed band is asserted explicitly here rather than left to a future arm
-    to discover. A one-line helper that silently inverts on the fourth profile
-    is the shape this suite keeps finding."""
+    (OMX −0.50/0.80, V1 0.00/0.90), so a `closed <= v <= open` form is
+    indistinguishable on today's fleet — which is exactly why the reversed band
+    is asserted explicitly here rather than left to a future arm to discover. A
+    one-line helper that silently inverts on the next profile is the shape this
+    suite keeps finding."""
     ctx = _ctx(-0.50, 0.80)
     M._warn_gripper_knob_out_of_band(ctx, 'X', -0.40, 'Test')
     assert ctx.lines == []
@@ -227,23 +226,21 @@ def test_the_once_per_run_state_is_a_REAL_WorkflowContext_field(monkeypatch):
 
 
 # ── the deleted ArmProfile.grasp_held_max_rad ──────────────────────────────
-# `docs/KNOWN-ISSUES.md`, second sub-bullet of the same round. The field (0.12
-# edu6, 0.10 edu1) had ZERO production readers: `_grasp_held_max` resolved it
-# from `ctx.grasp_held_max_rad` and `WorkflowContext` has no such field, so
-# every run already fell through to the derivation — which yields the IDENTICAL
-# number on all four profiles. It is gone; the derivation stays, pinned here
-# with literals so a silent drift is a failure and not a rename.
+# `docs/KNOWN-ISSUES.md`, second sub-bullet of the same round. The field had
+# ZERO production readers: `_grasp_held_max` resolved it from
+# `ctx.grasp_held_max_rad` and `WorkflowContext` has no such field, so every run
+# already fell through to the derivation. It is gone; the derivation stays,
+# pinned here with literals so a silent drift is a failure and not a rename.
 
 def test_the_derived_fallback_is_the_number_each_arm_actually_used():
-    """Measured before AND after the deletion: identical on all four."""
+    """The derived fallback, per profile, as literals."""
     import types as _t
     from physical_ai_server import robot_profiles as rp
 
     expected = {
         'omx_full': -0.35,
         'omx_follower': -0.35,
-        'edu6_studio': 0.12,
-        'edu1_studio': 0.10,
+        'v1_studio': 0.10,
     }
     assert set(rp.ROBOT_PROFILES) == set(expected), (
         'a profile was added or removed — give it a row here')

@@ -1156,7 +1156,7 @@ class RunSession:
         base_dict, band = self._profile_catalog()
         if close is None:
             # A missing close defaults to the profile's built-in wuerfel close
-            # (OMX −0.5, edu6 1.0, edu1 0.10) — never OMX unconditionally (§3.10).
+            # (OMX −0.5, V1 0.05) — never OMX unconditionally (§3.10).
             try:
                 close = base_dict['types']['wuerfel']['gripper_close_rad']
             except Exception:  # noqa: BLE001 — a profile without wuerfel

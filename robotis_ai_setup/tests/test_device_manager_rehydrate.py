@@ -178,14 +178,14 @@ class FollowerOnlyRehydrateTest(unittest.TestCase):
         identify.assert_not_called()
 
 
-class Edu6FamilyRehydrateTest(unittest.TestCase):
-    """arm_family threads through the light rehydrate (edu6 §4.4): the CH343
+class FeetechFamilyRehydrateTest(unittest.TestCase):
+    """arm_family threads through the light rehydrate: the CH343
     adapter must be attached + matched by FAMILY, not the OMX 2F5D defaults —
-    otherwise an edu6 rig never self-heals on launch (attach/by-id both no-op)."""
+    otherwise a V1 rig never self-heals on launch (attach/by-id both no-op)."""
 
-    _EDU6_FOLLOWER = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5AE-if00"
+    _V1_FOLLOWER = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5AE-if00"
 
-    def test_edu6_family_threaded_to_attach_and_serial_discovery(self):
+    def test_v1_family_threaded_to_attach_and_serial_discovery(self):
         attach_calls, find_calls = [], []
 
         def _attach(arm_family="omx"):
@@ -194,7 +194,7 @@ class Edu6FamilyRehydrateTest(unittest.TestCase):
 
         def _find(arm_family="omx"):
             find_calls.append(arm_family)
-            return [self._EDU6_FOLLOWER]
+            return [self._V1_FOLLOWER]
 
         with patch.object(device_manager, "self_heal_wsl_serial"), \
                 patch.object(device_manager, "attach_all_robotis_devices", _attach), \
@@ -205,13 +205,13 @@ class Edu6FamilyRehydrateTest(unittest.TestCase):
                              MagicMock()) as identify, \
                 patch("time.sleep"):
             leader, follower = device_manager.fast_rehydrate_arms(
-                "", self._EDU6_FOLLOWER, require_leader=False, arm_family="edu6")
+                "", self._V1_FOLLOWER, require_leader=False, arm_family="v1")
         self.assertIsNone(leader)
         self.assertIsNotNone(follower)
-        self.assertEqual(follower.serial_path, self._EDU6_FOLLOWER)
-        # THE contract: the edu6 family reached BOTH family-aware helpers.
-        self.assertEqual(attach_calls, ["edu6"])
-        self.assertEqual(find_calls, ["edu6"])
+        self.assertEqual(follower.serial_path, self._V1_FOLLOWER)
+        # THE contract: the v1 family reached BOTH family-aware helpers.
+        self.assertEqual(attach_calls, ["v1"])
+        self.assertEqual(find_calls, ["v1"])
         # still the light path — no scanner container, no serial pings.
         scanner.assert_not_called()
         identify.assert_not_called()

@@ -161,7 +161,7 @@ try {
 }
 
 # Full hardware-id allowlist: every discovered/known ROBOTIS PID plus the
-# edu6 Feetech arm's WCH CH343P bridge (1a86:55d3, edu6 plan §4.4). The PID is
+# V1 Feetech arm's WCH CH343P bridge (1a86:55d3). The PID is
 # pinned for 1a86 — that VID covers every CH34x dongle on earth.
 $armHardwareIds = @()
 foreach ($productId in $knownPIDs) { $armHardwareIds += "${ROBOTIS_VID}:${productId}" }

@@ -132,7 +132,7 @@ describe('PhaseOverlay', () => {
       expect(PHASE_PICTURES.omx_full.reset.anchors.mark).toBeUndefined(); // the cube and its mark are gone
     });
 
-    it.each([null, undefined, '', 'omx_f', 'edu6_studio', 'edu1_studio', 'omx_follower'])(
+    it.each([null, undefined, '', 'omx_f', 'v1_studio', 'omx_follower'])(
       'a profile with no picture (%j) draws NO robot — no OMX stand-in, no chips',
       (profile) => {
         render(<PhaseOverlay phase="warmup" text={warm} totalS={5} secondsLeft={5} profile={profile} />);

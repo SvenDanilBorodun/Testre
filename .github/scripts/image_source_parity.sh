@@ -86,12 +86,12 @@ case "$KIND" in
     [ "$fail" = 0 ] || exit 1
     echo "OK: all open-manipulator overlays present in image"
 
-    # edu6 plain COPYs (SECOND extraction root — they land in /usr/local/bin,
+    # Plain COPYs (SECOND extraction root — they land in /usr/local/bin,
     # not the ros2_ws src tree; previously plain COPYs were verified by
     # NOTHING, the identify_arm.py precedent).
     rm -rf /tmp/parity_bin
     extract /usr/local/bin /tmp/parity_bin
-    for f in edu6_arm_node.py feetech_bus.py edu6_geometry.py identify_arm.py camera_ingest_node.py calibrate_collision_currents.py activation_agent.py; do
+    for f in feetech_arm_node.py feetech_bus.py feetech_geometry.py identify_arm.py camera_ingest_node.py calibrate_collision_currents.py activation_agent.py; do
         repo="robotis_ai_setup/docker/open_manipulator/$f"
         img="/tmp/parity_bin/$f"
         if [ ! -f "$img" ]; then

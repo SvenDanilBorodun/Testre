@@ -548,8 +548,7 @@ const DATEN_COPY = deepFreeze({
 
   robots: {
     omx_f: 'OpenMANIPULATOR-X',
-    edu6_studio: 'Edu:6',
-    edu1_studio: 'Edu:1',
+    v1_studio: 'V1',
   },
 
   codecs: {

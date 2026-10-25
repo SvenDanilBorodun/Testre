@@ -353,7 +353,7 @@ export default function LeaderToggle({ isActive, lockedReason = null }) {
   }, [preparing, refreshStatus]);
 
   // Hidden when: still probing, no control bridge at all (Jetson / cloud), the
-  // ROS capabilities say this profile has no leader (omx_follower, edu6_studio),
+  // ROS capabilities say this profile has no leader (omx_follower, v1_studio),
   // OR the control bridge itself says so. The last clause is what covers the Pi
   // between mount and the first `/task/status` tick, where `caps` is undefined
   // and the always-on agent answers every probe. Both are `=== false` tests, so

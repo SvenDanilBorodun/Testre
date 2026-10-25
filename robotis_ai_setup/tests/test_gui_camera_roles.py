@@ -8,7 +8,7 @@ Three separate defects, all measured against the shipped GUI:
     rows below it under the live thumbnail, a grey „Rolle: Greifer".
   * the role picker offered Greifer/Szene unconditionally and
     `config_generator.generate_env_file` accepted either on ANY robot type. On
-    `edu6_studio` (camera_roles=('scene',)) that writes CAMERA_NAME_1="gripper",
+    `v1_studio` (camera_roles=('scene',)) that writes CAMERA_NAME_1="gripper",
     and the failure is SILENT AND GREEN: the compose healthcheck greps
     /${CAMERA_NAME_1}/image_raw/compressed — the very topic the student's own
     role name causes the bridge to publish — so „Umgebung starten" reports
@@ -16,7 +16,7 @@ Three separate defects, all measured against the shipped GUI:
     divergence with the Pi as "known, accepted, unguarded"; both halves of the
     Pi's fence (filter the options AND refuse server-side) now exist here.
   * the role went STALE across a Robotertyp switch: pick a camera under
-    omx_full (role „gripper"), switch the dropdown to edu6_studio, and the role
+    omx_full (role „gripper"), switch the dropdown to v1_studio, and the role
     and its green label both stayed „Greifer". `_on_robot_type_changed` called
     `_apply_robot_type_labels` and `_update_start_button` but never
     `_on_cameras_changed`. That is the likeliest real-world route into the
@@ -120,7 +120,7 @@ class RolesComeFromTheProfile(unittest.TestCase):
                         f"server config has no topic for")
 
     def test_a_lone_camera_on_a_follower_only_kit_is_the_SCENE_camera(self):
-        for profile in ("omx_follower", "edu6_studio"):
+        for profile in ("omx_follower", "v1_studio"):
             with self.subTest(profile):
                 owner, labels, _p = self._run(profile, 1)
                 self.assertEqual(owner.hardware.cameras[0].role, "scene")
@@ -135,10 +135,10 @@ class RolesComeFromTheProfile(unittest.TestCase):
             any("Greifer-Kamera" in (lb.get("text") or "") for lb in labels))
 
     def test_a_single_role_profile_uses_only_ONE_camera_and_says_so(self):
-        """`edu6_studio_config.yaml` subscribes to exactly one topic, so a
+        """`v1_studio_config.yaml` subscribes to exactly one topic, so a
         second camera would publish one nothing reads. Silently dropping a
         ticked box would be its own defect, so the cap is stated in German."""
-        owner, labels, _p = self._run("edu6_studio", 2)
+        owner, labels, _p = self._run("v1_studio", 2)
         self.assertEqual(len(owner.hardware.cameras), 1)
         self.assertTrue(
             any("nur eine Kamera" in (lb.get("text") or "") for lb in labels),
@@ -202,15 +202,15 @@ class TheGeneratorRefusesARoleTheProfileDoesNotDeclare(unittest.TestCase):
                                          delete=False) as f:
             return f.name
 
-    def test_edu6_refuses_a_gripper_camera(self):
+    def test_v1_refuses_a_gripper_camera_and_names_its_own_label(self):
         p = self._tmp()
         try:
             with self.assertRaises(ValueError) as ctx:
                 generate_env_file(self._config("gripper"), output_path=p,
-                                  robot_type="edu6_studio")
+                                  robot_type="v1_studio")
             msg = str(ctx.exception)
             self.assertIn("Greifer", msg)
-            self.assertIn(ROBOT_PROFILES["edu6_studio"]["display_de"], msg)
+            self.assertIn(ROBOT_PROFILES["v1_studio"]["display_de"], msg)
             # Rule §1 — literal umlauts, and this message reaches a student.
             self.assertIn("Für", msg)
             for bad in ("Fuer", "fuer"):
@@ -218,37 +218,11 @@ class TheGeneratorRefusesARoleTheProfileDoesNotDeclare(unittest.TestCase):
         finally:
             os.unlink(p)
 
-    def test_edu6_accepts_its_own_scene_camera(self):
+    def test_v1_accepts_its_own_scene_camera(self):
         p = self._tmp()
         try:
             content = generate_env_file(self._config("scene"), output_path=p,
-                                        robot_type="edu6_studio")
-            self.assertIn('CAMERA_NAME_1="scene"', content)
-        finally:
-            os.unlink(p)
-
-    def test_edu1_refuses_a_gripper_camera_and_names_ITS_OWN_label(self):
-        """The second scene-only arm. The check is a per-profile ALLOWLIST, so
-        the refusal must name the profile the student actually picked — a
-        message hardcoded to the first such arm would send them to the wrong
-        dropdown entry."""
-        p = self._tmp()
-        try:
-            with self.assertRaises(ValueError) as ctx:
-                generate_env_file(self._config("gripper"), output_path=p,
-                                  robot_type="edu1_studio")
-            msg = str(ctx.exception)
-            self.assertIn("Greifer", msg)
-            self.assertIn(ROBOT_PROFILES["edu1_studio"]["display_de"], msg)
-            self.assertNotIn(ROBOT_PROFILES["edu6_studio"]["display_de"], msg)
-        finally:
-            os.unlink(p)
-
-    def test_edu1_accepts_its_own_scene_camera(self):
-        p = self._tmp()
-        try:
-            content = generate_env_file(self._config("scene"), output_path=p,
-                                        robot_type="edu1_studio")
+                                        robot_type="v1_studio")
             self.assertIn('CAMERA_NAME_1="scene"', content)
         finally:
             os.unlink(p)
@@ -275,7 +249,7 @@ class TheGeneratorRefusesARoleTheProfileDoesNotDeclare(unittest.TestCase):
         try:
             with self.assertRaises(ValueError) as ctx:
                 generate_env_file(self._config("BOGUS"), output_path=p,
-                                  robot_type="edu6_studio")
+                                  robot_type="v1_studio")
             self.assertIn("ohne gültige Rolle", str(ctx.exception))
         finally:
             os.unlink(p)
@@ -310,7 +284,7 @@ class ARobotTypeSwitchReDerivesTheCameraRole(unittest.TestCase):
             code.index("self._on_cameras_changed()"),
             "the roles are re-derived before the labels that describe them")
 
-    def test_switching_from_omx_full_to_edu6_moves_the_role_to_scene(self):
+    def test_switching_from_omx_full_to_v1_moves_the_role_to_scene(self):
         """End to end through the two real methods: the stale role used to
         survive the switch and reach `generate_env_file` unchanged."""
         profile = {"id": "omx_full"}
@@ -342,12 +316,12 @@ class ARobotTypeSwitchReDerivesTheCameraRole(unittest.TestCase):
 
         # The student changes their mind about the robot type.
         labels.clear()
-        profile["id"] = "edu6_studio"
+        profile["id"] = "v1_studio"
         on_cameras_changed(owner)
         self.assertEqual(
             cams[0].role, "scene",
             "the camera kept role='gripper' after the switch — .env then ships "
-            "a topic the edu6 server never subscribes to")
+            "a topic the v1 server never subscribes to")
         self.assertTrue(
             any("Szenen-Kamera" in (lb.get("text") or "") for lb in labels),
             labels)

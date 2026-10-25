@@ -148,13 +148,13 @@ GRASP_HELD_MARGIN_RAD = 0.15
 # — and an OPEN gripper is above that threshold by construction. So a close that
 # never executed at all (a dropped trajectory, a halted arm, a servo fault) read
 # as HELD. Measured 2026-09-07 with the follower gripper PINNED at its open
-# angle, on all three profiles: „Greife" returned OK, printed „„Würfel"
-# gegriffen." and CLAIMED the tag, so a „Solange sichtbar" loop marked the object
+# angle: „Greife" returned OK, printed „„Würfel" gegriffen." and CLAIMED the
+# tag, so a „Solange sichtbar" loop marked the object
 # done and moved on having touched nothing. The genuine-miss path is correct by
 # contrast (retry → skip, never claimed), which is what made this invisible.
 #
-# Requiring 5 % of the travel is deliberately tiny. Re-derived 2026-09-08 from
-# the tree's own constants — ``gripper_open_rad``, the shipped catalog's
+# Requiring 5 % of the travel is deliberately tiny. Derived from the tree's own
+# constants — ``gripper_open_rad``, the shipped catalog's
 # ``gripper_close_rad``, and each profile's ``sim_held_block_offset_rad`` /
 # ``sim_held_floor_rad``, which are DEFINED as where the jaws stop on a held
 # 30 mm cube (``sim_arm._blocked_gripper``: max(floor, commanded + offset), and
@@ -162,13 +162,11 @@ GRASP_HELD_MARGIN_RAD = 0.15
 #
 #   profile     open   close  blocked   ‖open−blocked‖   5 % bar   ratio
 #   omx_full    0.80   −0.50   −0.10        0.90          0.0650   13.8×
-#   edu6_studio 1.75    1.00    1.19        0.56          0.0375   14.9×
-#   edu1_studio 0.90    0.10    0.25        0.65          0.0400   16.2×
+#   v1_studio   0.90    0.05    0.20        0.70          0.0425   16.5×
 #
-# i.e. 14–16× the bar on every arm. An earlier revision of this comment gave
-# 1.15 / 0.75 / 0.80: the two Feetech figures were the open→close TRAVEL (the
-# bar's own basis, a different quantity), and the OMX figure ignored the held
-# FLOOR that clamps it. Nothing about the conclusion moves.
+# i.e. 14–17× the bar on every arm. (The bar's basis is the open→close TRAVEL,
+# a different quantity from ‖open−blocked‖, and the OMX figure includes the held
+# FLOOR that clamps it.)
 #
 # It only ever converts True → False, and only for a reading that is
 # still essentially AT the open command. DISCLOSED TRADE-OFF: an object nearly as
@@ -239,19 +237,16 @@ GRASP_SETTLE_S = _clamped_settle_s(
 # angle. On the OMX that is the right number by coincidence: its closed value
 # (−0.5) IS what the shipped catalog commands for the 30 mm cube, and the cube
 # blocks the jaws at ≈−0.35, i.e. 0.15 rad of bounded position error against the
-# Dynamixel current limit. On the two Feetech arms the same constant means
-# something completely different — measured 2026-09-07 through the real
-# profiles + the real catalogs:
+# Dynamixel current limit. On the Feetech arm the same constant means something
+# different — through the real profiles + the real catalogs:
 #
 #   profile       band [closed, open]   catalog close   pickup commanded
 #   omx_full        [−0.50,  0.80]         −0.50            −0.50   (no-op)
-#   edu6_studio     [ 0.00,  1.75]          1.00             0.00   (1.00 deeper)
-#   edu1_studio     [ 0.00,  0.90]          0.10             0.00   (0.10 deeper)
+#   v1_studio       [ 0.00,  0.90]          0.05             0.00   (0.05 deeper)
 #
-# On edu6 that is ~25 mm of extra jaw travel (gripper_mm_per_rad 25.2) into a
-# 30 mm cube that is already blocking at ≈1.19 rad — a hard stall at
-# ``Max_Torque 150`` sustained through the close, the lift, the whole carry AND
-# the descend, because ``_execute_pickup`` also records the commanded close as
+# On the V1 that is a claw closing into a 30 mm cube that is already blocking it
+# at ≈0.20 rad — a stall at ``Max_Torque`` sustained through the close, the
+# lift, the whole carry AND the descend, because ``_execute_pickup`` also records the commanded close as
 # ``ctx.last_commanded_close_rad``, which ``drop_at`` then reuses as the CARRY
 # close. It is EXACTLY the stall ``drop_at``'s own ``_carry_close`` comment says
 # it fixed for the named-object path; the generic path was left on it.
@@ -263,8 +258,7 @@ GRASP_SETTLE_S = _clamped_settle_s(
 # ctx are byte-identical.
 #
 # DISCLOSED TRADE-OFF: a generic close that is not the hardware limit cannot
-# grip an object THINNER than the jaw gap at that angle (edu6 ≈25 mm at 1.0 rad,
-# edu1 ≈2 mm at 0.10 rad). For a catalogued object use „Greife <Typ>" or the
+# grip an object THINNER than the jaw gap at that angle. For a catalogued object use „Greife <Typ>" or the
 # split blocks, which command the recipe's own close. The physical backstop
 # either way is the servo current limit.
 #
@@ -281,8 +275,8 @@ GRASP_SETTLE_S = _clamped_settle_s(
 #
 # ONE-VARIABLE ROLLBACK: ``EDUBOTICS_PICKUP_CLOSE_RAD`` pins that generic close
 # for the whole rig. A rig runs exactly one profile, so setting it to that
-# profile's ``gripper_closed_rad`` (0 on both Feetech arms — the only arms whose
-# behaviour changes at all) restores the previous full close exactly. Empty /
+# profile's ``gripper_closed_rad`` (0 on the V1 — the only arm whose behaviour
+# changes at all) restores the previous full close exactly. Empty /
 # whitespace counts as UNSET, because compose forwards it as `${…:-}` (the
 # EDUBOTICS_GRASP_HELD_MAX_RAD scar). env-forwarding-guard: forwarded in
 # robotis_ai_setup/docker/docker-compose.yml + docker-compose.opi.yml.
@@ -457,8 +451,8 @@ def _n(ctx) -> int:
 
 
 def _roll_idx(ctx) -> int:
-    """Index of the tool-roll joint (OMX joint5 → 4; edu6 joint6 → 5). Defaults
-    to the LAST arm joint — true for both shipped geometries."""
+    """Index of the tool-roll joint (OMX and V1 joint5 → 4). Defaults to the
+    LAST arm joint — true for every shipped geometry."""
     idx = getattr(ctx, 'roll_joint_index', None)
     if idx is None:
         return _n(ctx) - 1
@@ -473,9 +467,8 @@ def _roll_arg(ctx, joints) -> float:
 
     NEVER pass ``joints[_roll_idx(ctx)]`` into ``roll=`` directly. The roll
     argument and the roll JOINT are the same number on the OMX
-    (``theta5 = roll``) but NOT on edu6 (``q6 = fold(wrap(π − roll))``), so the
-    shortcut mirrored the edu6 wrist by up to 178° on every Cartesian move
-    (found 2026-07-25). The solver owns the conversion; this is just the
+    (``theta5 = roll``) but NOT on the V1 (``q5 = fold(wrap(−roll))``), so the
+    shortcut would mirror the V1 wrist on every Cartesian move. The solver owns the conversion; this is just the
     profile-tolerant lookup, falling back to the old behaviour only for a
     solver/test-double that predates the method (OMX-identical there)."""
     idx = _roll_idx(ctx)
@@ -540,7 +533,7 @@ def _gripper_closed(ctx) -> float:
 
 def _grasp_held_margin(ctx) -> float:
     """Per-profile grasp-held margin (rad above the commanded close that a
-    blocked jaw must read to count as HELD). OMX 0.15; edu6 0.12."""
+    blocked jaw must read to count as HELD). OMX 0.15; V1 0.10."""
     val = getattr(ctx, 'grasp_held_margin_rad', None)
     if val is None:
         return GRASP_HELD_MARGIN_RAD
@@ -559,17 +552,15 @@ def _grasp_held_max(ctx) -> float:
     ``GRASP_HELD_MAX_RAD`` (−0.35) is an OMX-BAND number: it is exactly
     ``gripper_closed_rad + GRASP_HELD_MARGIN_RAD`` = −0.5 + 0.15 for that arm.
     Reused verbatim on a gripper whose band does not contain it, it decides
-    nothing — measured 2026-09-07 through the real profiles:
+    nothing:
 
         omx_full     band [−0.50, 0.80]  OPEN → True   CLOSED-EMPTY → False  ✓
-        edu6_studio  band [ 0.00, 1.75]  OPEN → True   CLOSED-EMPTY → TRUE   ✗
-        edu1_studio  band [ 0.00, 0.90]  OPEN → True   CLOSED-EMPTY → TRUE   ✗
+        v1_studio    band [ 0.00, 0.90]  OPEN → True   CLOSED-EMPTY → TRUE   ✗
 
-    i.e. on BOTH Feetech arms every readable gripper angle sits above −0.35, so
-    „Greifer hält etwas?" and „warte bis Greifer hält" were CONSTANT TRUE — an
-    empty full close read as a successful grasp. Those are the two profiles whose
-    ONLY capability is Roboter Studio, so the block was wrong on exactly the arms
-    it is used on.
+    i.e. on the Feetech arm every readable gripper angle sits above −0.35, so
+    „Greifer hält etwas?" and „warte bis Greifer hält" would be CONSTANT TRUE —
+    an empty full close read as a successful grasp, on a profile whose ONLY
+    capability is Roboter Studio.
 
     Resolution order — TWO rungs, not three:
 
@@ -578,18 +569,14 @@ def _grasp_held_max(ctx) -> float:
     2. DERIVED from fields the ctx already carries:
        ``gripper_closed_rad + grasp_held_margin_rad`` — the same rule the
        per-object threshold uses for a full close. On the OMX that is
-       −0.5 + 0.15 = −0.35 EXACTLY, so its behaviour is byte-identical; on edu6
-       it is 0.12 and on edu1 0.10, both inside their band, which is what makes
-       an empty close read as a MISS again.
+       −0.5 + 0.15 = −0.35 EXACTLY, so its behaviour is byte-identical; on the
+       V1 it is 0.00 + 0.10 = 0.10, inside its band, which is what makes an
+       empty close read as a MISS.
 
-    There WAS a rung between them — ``ctx.grasp_held_max_rad``, fed by an
-    ``ArmProfile.grasp_held_max_rad`` field. It was DELETED 2026-09-09 because
-    it never executed: ``WorkflowContext`` has no such field and
-    ``workflow_manager.start()`` never stamped one, so every production run
-    already reached the derivation, which yields the IDENTICAL number on all
-    four profiles (0.00 + 0.12 on edu6, 0.00 + 0.10 on edu1). Re-adding the
-    lookup without ALSO declaring the ctx field would recreate a branch that
-    reads as coverage of a path that does not run.
+    There is deliberately no rung between them reading a
+    ``ctx.grasp_held_max_rad``: ``WorkflowContext`` has no such field and
+    ``workflow_manager.start()`` never stamps one, so such a lookup would read
+    as coverage of a path that does not run.
 
     A ctx with no profile fields at all (every non-Roboter-Studio path, every
     plain test double) still lands on the OMX constants and therefore on −0.35.
@@ -606,7 +593,7 @@ def _grasp_held_max(ctx) -> float:
 # `EDUBOTICS_PICKUP_CLOSE_RAD` and `EDUBOTICS_GRASP_HELD_MAX_RAD` are both
 # operator knobs that reach the published trajectory's gripper column / the
 # HELD decision, and both were guarded by `math.isfinite` alone. Measured:
-# `EDUBOTICS_PICKUP_CLOSE_RAD=5.0` on an edu6 (band 0.00..1.75) commands 5.0,
+# `EDUBOTICS_PICKUP_CLOSE_RAD=5.0` on a V1 (band 0.00..0.90) commands 5.0,
 # and `=-9.0` commands −9.0; the shipped `GRASP_HELD_MAX_RAD` default of −0.35
 # sits BELOW the whole Feetech band, so with the env set „Greifer hält etwas?"
 # answers TRUE for every readable angle.
@@ -656,7 +643,7 @@ def _warn_gripper_knob_out_of_band(ctx, env: str, value: float, was: str,
 
 def _velocity_limit(ctx) -> float:
     """Per-profile joint velocity limit for ``build_segment``'s floor (OMX 4.8,
-    edu6 URDF 5.45)."""
+    V1 4.72)."""
     from physical_ai_server.workflow.trajectory_builder import (
         JOINT_VELOCITY_LIMIT_RAD_S,
     )
@@ -673,12 +660,12 @@ def _velocity_limit(ctx) -> float:
 def tool_tip_rise_m(ik, q_full, num_arm_joints: int) -> float:
     """How far the tool's LOWEST point sits ABOVE the modelled TCP for the gripper
     angle carried in ``q_full[num_arm_joints]`` — 0.0 on every arm whose solver
-    does not model it (OMX, edu6: parallel jaws, constant tip height). May be
-    slightly NEGATIVE (the edu1's tips dip before they rise), which only makes a
+    does not model it (OMX: parallel jaws, constant tip height). May be
+    slightly NEGATIVE (the V1's tips dip before they rise), which only makes a
     floor check stricter.
 
     For a floor check on a RECORDED or hand-guided pose only: on a rotating claw
-    (edu1) the TCP is the CLOSED fingertip, and an open claw's tips ride up, so a
+    (V1) the TCP is the CLOSED fingertip, and an open claw's tips ride up, so a
     take in which the OPEN claw touched the table read as below it and was
     refused („Die Aufnahme führt unter die Tischebene"). Never raises; any
     failure answers 0.0, i.e. the old, stricter check."""
@@ -706,14 +693,14 @@ def tool_tip_rise_world_z_m(ik, q_full, num_arm_joints: int, rot) -> float:
     the very point ``home_planner.pose_floor_clearance`` judges, so a claw
     tilted by θ is credited ``rise · cos θ`` and never the whole rise straight
     up (a tool pointing up is credited a negative share of a positive rise:
-    stricter; in the dip band near 0.14 rad, where the rise is negative, a
+    stricter; in the dip band near 0.1 rad, where the rise is negative, a
     tilted or upturned tool is penalised less than one pointing straight down,
-    by at most about 1.3 mm, the true geometry of the judged point).
+    by at most about 0.9 mm, the true geometry of the judged point).
 
     For the replay floor checks, which judge the TCP's z: crediting the full
     rise vertically let a tilted, hand-opened claw pass with its blades and
     housing tens of millimetres under the table. 0.0 on every arm that models
-    no rise (OMX, edu6) without reading ``rot``; any failure answers 0.0, the
+    no rise (OMX) without reading ``rot``; any failure answers 0.0, the
     uncredited check. Never raises."""
     rise = tool_tip_rise_m(ik, q_full, num_arm_joints)
     if rise == 0.0:
@@ -1368,25 +1355,15 @@ _APPROACH_BISECT_TOL_M = 0.002
 #
 # The comment above used to be a WISH, not a guarantee: the bisect below can and
 # does converge to exactly 0, and the code then returned ``approach == grasp``
-# and called it a success. Measured 2026-07-26 through the real solvers, grasping
-# the shipped 30 mm cube (requested clearance 0.06):
-#
-#   edu6   19 / 704 radii in [0.030, 0.215] bisect to <= 2 mm  (2.7 %),
-#          in two bands: r ∈ [0.0325, 0.0347] and r ∈ [0.2062, 0.2082]
-#   OMX     2 / 958 radii in [0.020, 0.300]                    (0.2 %),
-#          one band at the very lip of its annulus: r ∈ [0.2800, 0.2802]
-#
-# Three traps in those intervals, all found by re-measuring rather than re-reading:
-#   * the NARROWER edu6 pair r ∈ [0.0325, 0.0335] ∪ [0.2075, 0.2082] (9 radii) is
-#     a DIFFERENT measurement and must not be quoted for the floor. The COUNTS
-#     (19 / 704, 2.7 %) were always exact; the interval labels were not.
-#   * the OMX band holds at grasp z = 0.012 (GRASP_CLEARANCE_M). At z = 0.015 it
-#     shifts to r ∈ [0.2795, 0.2797]. Quote the grasp HEIGHT with any of these
-#     intervals or none of them means anything.
-#   * at grasp z = 0.015 every refused edu6 radius rises exactly 1.875 mm — one
-#     bisect step — NOT zero. "Zero clearance" is the failure MODE, not
-#     universally the measured value; see
-#     test_a_real_but_sub_floor_rise_is_refused_not_just_an_exactly_zero_one.
+# and called it a success. Measured 2026-07-26 through the real OMX solver,
+# grasping the shipped 30 mm cube (requested clearance 0.06): 2 / 958 radii in
+# [0.020, 0.300] (0.2 %), one band at the very lip of its annulus,
+# r ∈ [0.2800, 0.2802] at grasp z = 0.012 (GRASP_CLEARANCE_M); at z = 0.015 it
+# shifts to r ∈ [0.2795, 0.2797]. Quote the grasp HEIGHT with any such interval
+# or it means nothing. A refused radius need not rise exactly zero — it can rise
+# one bisect step: "zero clearance" is the failure MODE, not universally the
+# measured value; see
+# test_a_real_but_sub_floor_rise_is_refused_not_just_an_exactly_zero_one.
 #
 # In that state ``above_q == grasp_q`` AND ``lift_q == closed_q``: there is no
 # descend and no lift-out, the TCP stays pinned at grasp height for the whole
@@ -1407,10 +1384,10 @@ _APPROACH_BISECT_TOL_M = 0.002
 #
 # The physically ideal threshold is larger — the fingertips only clear the
 # object's top once the clearance reaches ``object_height_m − grasp_depth_m``
-# (15 mm for the shipped cube), which would refuse 12.1 % of the edu6 band
-# (85 of 704 swept radii — a COUNT of radii below that threshold, not a fire
-# rate; see _APPROACH_WARN_FRAC, where the two were once conflated). That is a
-# PRODUCT decision (it removes reach the student can see on the mat), not a
+# (15 mm for the shipped cube), which would refuse part of an arm's band (a
+# COUNT of radii below that threshold is not a fire rate; see
+# _APPROACH_WARN_FRAC, where the two were once conflated). That is a PRODUCT
+# decision (it removes reach the student can see on the mat), not a
 # correctness fix, so it is left to the rig gate; below that clearance the run
 # now WARNS instead.
 _MIN_APPROACH_CLEARANCE_M = _APPROACH_BISECT_TOL_M
@@ -1418,11 +1395,10 @@ _MIN_APPROACH_CLEARANCE_M = _APPROACH_BISECT_TOL_M
 # The clamped-approach warning fires only when the achieved clearance falls below
 # this FRACTION of the requested one.
 #
-# It used to fire on ANY reduction, which on edu6 means every single grasp: the
-# requested 60 mm hover is unreachable at every radius there (max achieved
-# 50.6 mm, at r = 0.120), so the 2026-07-26 sweep logged 936 warnings over 780
-# runs — 100 % of grasps. A warning that always fires is not a warning, it is
-# noise that teaches students to ignore the log strip.
+# It used to fire on ANY reduction, which on an arm whose 60 mm hover is
+# unreachable at every radius means every single grasp. A warning that always
+# fires is not a warning, it is noise that teaches students to ignore the log
+# strip.
 #
 # 0.25 is not a taste value: the requested clearance is the recipe's
 # ``approach_clear_m`` (0.060 on BOTH shipped catalogs) and the clearance at
@@ -1432,15 +1408,8 @@ _MIN_APPROACH_CLEARANCE_M = _APPROACH_BISECT_TOL_M
 # about to grasp", expressed relative to the request so it tracks a re-tuned
 # recipe instead of hard-coding metres.
 #
-# Measured NEW fire rates (re-measured independently — do NOT reuse the 12.1 %
-# above, which counts radii BELOW the 15 mm threshold, 85 / 704: 19 of those are
-# refused outright before any warning can fire, so the two numbers count
-# different things and an earlier revision of this comment conflated them):
-#
-#   edu6   9.4 % of attempts  (was 100 %)
-#   OMX    0.8 % — 8 / 965 radii, the outer ~2 mm lip  (was 6.2 %)
-#
-# So the OMX is far quieter, NOT silent — it still warns at the very lip of its
+# Measured fire rate on the OMX: 0.8 % — 8 / 965 radii, the outer ~2 mm lip
+# (was 6.2 %). So the OMX is far quieter, NOT silent — it still warns at the very lip of its
 # annulus, which is correct: that is where its hover really is clamped.
 _APPROACH_WARN_FRAC = 0.25
 
@@ -1546,18 +1515,9 @@ def _solve_grasp_and_approach(
     threshold is derived from grasp geometry too (``object_height_m −
     grasp_depth_m`` = 0.25 × ``approach_clear_m``) and has no meaning for a place,
     whose 0.06 approach is stacked on an ALREADY-bisected release clearance.
-    Measured 2026-09-07 over 120 radii per arm across the pick band, target z = 0,
-    counting successful places that printed the grasp wording:
-
-        edu6_studio  92 / 120 = 76.7 %      edu1_studio  1 / 120 = 0.8 %
-        omx_full      8 / 109 =  7.3 %
-
-    NOT RE-MEASURED after joint4 widened to ±115° (2026-09-10), which widened
-    edu1's pick band at every height — so treat that arm's 0.8 % as a ±90°
-    figure. It does not change the CONCLUSION, which is about edu6.
-
-    i.e. on the arm where „lege ab" is used most it fired on three of every four
-    successful placements. The meaningful place-side signal already exists and is
+    Measured 2026-09-07 over the pick band, target z = 0, counting successful
+    places that printed the grasp wording: omx_full 8 / 109 = 7.3 %, and on an
+    arm with a low top-down ceiling most of every placement. The meaningful place-side signal already exists and is
     correctly worded: ``_reachable_release_clearance``'s „Ablegehöhe … reduziert".
     This is the same defect class ``lift`` was split out of this helper to fix
     (F2); ``drop_at`` was left on it.
@@ -1570,8 +1530,8 @@ def _solve_grasp_and_approach(
     object AT the target — and refusing a place over a missing rim clearance is
     precisely the regression the 2026-07-26 release-clearance bisect removed
     (measured: it costs the whole place to save 1.6 mm of clearance at the OMX
-    outer ring, and ~87 % of the pick band on edu6). Re-introducing it here would
-    undo that fix.
+    outer ring, and most of the pick band on an arm with a low top-down
+    ceiling). Re-introducing it here would undo that fix.
     """
     gx, gy, gz = (float(v) for v in grasp_xyz)
     grasp_arm_q = _solve_or_raise(ctx, (gx, gy, gz), roll=roll)
@@ -1629,12 +1589,11 @@ def _reachable_release_clearance(
 
     On the OMX that never showed: its ceiling is ~0.25 m, so target+0.05 is
     reachable everywhere and this returns ``requested_m`` on the fast path,
-    byte-identical to before. On edu6 the top-down ceiling is ~0.0655 m, and
+    byte-identical to before. On an arm with a low top-down ceiling
     „lege ab bei (Position von X)" stacks TWO clearances — `object_position`
     already returns the GRASP height (0.015 for a 30 mm cube) and the release
-    adds 0.05 on top, landing 0.5 mm under the absolute ceiling. Measured
-    2026-07-26: that worked for r ∈ [0.1075, 0.1335] only — about 15 % of the
-    pick band — and refused everywhere else, on what is the most natural thing a
+    adds 0.05 on top — which can leave only a narrow band of the pick area
+    reachable, refusing everywhere else on what is the most natural thing a
     student writes.
 
     Bisecting keeps the FULL rim clearance wherever it is reachable (so nothing
@@ -1659,8 +1618,8 @@ def _reachable_release_clearance(
     # Warn only when the reduction is CONSEQUENTIAL, the same rule (and the same
     # fraction) ``_APPROACH_WARN_FRAC`` applies to the approach hover. This used
     # to fire on ANY reduction, i.e. on every place whose rim clearance was
-    # clamped even by a millimetre: measured 2026-09-07 over 120 radii per arm,
-    # 38 / 120 successful edu6 places (31.7 %) carried it. A rim clearance that
+    # clamped even by a millimetre — on a low-ceiling arm, a third of all
+    # successful places. A rim clearance that
     # came back at, say, 45 of the requested 50 mm still clears a container rim;
     # one that came back at 5 mm does not, and THAT is what the sentence is for.
     if clearance >= _APPROACH_WARN_FRAC * requested:
@@ -1755,32 +1714,20 @@ def _refuse_greifziel(value: Any, block_de: str) -> None:
     carry NO Blockly ``check`` on their value input, so a Greifziel — which
     ``find_object`` outputs as type 'Greifziel' — connects to them with a single
     drag. ``_resolve_target`` then happily reads its ``world_xyz_m``, and the
-    block does the WRONG thing silently. Re-measured 2026-09-08 with the real
-    solvers, tag yaw 1.1 rad, the object ON each arm's +x axis (base_yaw = 0) at
+    block does the WRONG thing silently. Measured 2026-09-08 with the real OMX
+    solver, tag yaw 1.1 rad, the object ON the arm's +x axis (base_yaw = 0) at
     its own band radius, against the split blocks' correct answer for the SAME
-    detection — the ROLL JOINT, so the three cells are one quantity:
+    detection — the ROLL JOINT:
 
         arm            correct (split)                pickup(Greifziel)
         omx_full       z 0.0150  q_roll +0.4708       z 0.0270  q_roll +1.5708
-        edu6_studio    z 0.0150  q_roll −0.4708       z 0.0270  q_roll +1.5708
-        edu1_studio    z 0.0150  q_roll −0.4708       z 0.0270  q_roll −1.5708
 
     i.e. +12.0 mm of descend height (``GRASP_CLEARANCE_M`` added on top of a z
     that IS already the grasp band) and — because pickup(Greifziel) never sees
-    the tag yaw — a wrist error of exactly THAT YAW, 1.1 rad = 63.03°, on all
-    three arms. (Raw joint differences read 63.03° / 116.97° / 63.03°; edu6's is
-    the same grasp through its jaw fold, ``q6`` and ``q6∓π`` being mirror twins.)
-    So: a blind grasp on the wrong axis, at the wrong height, reported as
-    success, on a 30 mm cube that grips 3 mm below its top.
-    ``move_to(Greifziel)`` likewise ends at EE z = 0.0150, i.e. it drives
-    LATERALLY at cube height.
-
-    An earlier revision of this table gave the edu6 cell as „roll −2.6708" and
-    the error as „56–57°". −2.6708 is real but is a THIRD quantity —
-    ``ik.roll_from_joints`` of that same −0.4708 joint, i.e. the unfolded roll —
-    printed where the neighbouring cells hold something else; and 56–57° needs
-    an off-axis object whose position was never recorded, and does not hold for
-    edu6 at any of them.
+    the tag yaw — a wrist error of exactly THAT YAW, 1.1 rad = 63.03°. So: a
+    blind grasp on the wrong axis, at the wrong height, reported as success, on
+    a 30 mm cube that grips 3 mm below its top. ``move_to(Greifziel)`` likewise
+    ends at EE z = 0.0150, i.e. it drives LATERALLY at cube height.
 
     Refused rather than silently re-interpreted: „Position von <Ziel>" already
     exists for the legitimate "go where that object is" intent and returns a
@@ -1912,8 +1859,8 @@ def _resolve_target(value: Any, ctx) -> tuple[float, float, float]:
 
 
 # Arrival tolerance for the workflow-side Grundstellung check. Deliberately the
-# SAME 0.30 rad the edu6 driver's boot-home verifier uses
-# (edu6_arm_node.BOOT_HOME_VERIFY_TOL_RAD) and the same value the OMX
+# SAME 0.30 rad the Feetech driver's boot-home verifier uses
+# (feetech_arm_node.BOOT_HOME_VERIFY_TOL_RAD) and the same value the OMX
 # entrypoint's Phase-3 verifier uses — one number for "did the arm actually get
 # where it was told", not three.
 HOME_ARRIVAL_TOL_RAD = 0.30
@@ -2072,9 +2019,9 @@ def close_gripper(ctx, args: dict[str, Any]) -> None:
 # ── Positions: the taught ARM pose (owner decisions Q2, Q9, Q12) ────────────
 # A Position is what „Position vormachen" teaches: the arm's own joint angles,
 # not only a point. „bewege zu <Position>" drives there in JOINT space — the
-# old path re-solved the stored point with the fixed jaw roll, which refused
-# all 30 of 30 taught Positions on the Edu:1 (its HOME and many taught poses
-# are outside the strict-vertical image) and picked another wrist on the OMX.
+# old path re-solved the stored point with the fixed jaw roll, which refuses
+# most taught Positions on the V1 (its HOME and many taught poses are outside
+# the strict-vertical image) and picked another wrist on the OMX.
 #
 # THE ONE PREDICATE is ``is_position`` (spec principle 8): a payload entry
 # whose ``kind`` is 'pose', on the entry IN FORCE for that name this run. Only
@@ -2084,8 +2031,9 @@ def close_gripper(ctx, args: dict[str, Any]) -> None:
 # capture service, ``_persisted_destinations``). Q12: „setze X = aktuelle
 # Position" stays a Ziel.
 #
-# The joint route is GATED twice. By profile: Positions on edu6 are a non-goal
-# this round (m12), it keeps the point path without a word. By robot: the
+# The joint route is GATED twice. By profile: only a profile in
+# ``_POSITION_JOINT_PROFILES`` takes it; any other keeps the point path without
+# a word. By robot: the
 # joints are used only for a pose taught on THIS arm (``robot_type`` equals the
 # profile's ``data_robot_type`` AND ``joint_names`` equals its joint names,
 # gripper included — the strict form of ``armProfile.ghostJointsFromEntry``).
@@ -2097,7 +2045,7 @@ def close_gripper(ctx, args: dict[str, Any]) -> None:
 # ladder as the Grundstellung (``home_planner``), planned and published under
 # ONE hold of the motion lock (M2), each leg through ``safe_move`` for the
 # Sperrzonen. The gripper is CARRIED like on every „bewege zu" (C1).
-_POSITION_JOINT_PROFILES = ('omx_full', 'omx_follower', 'edu1_studio')
+_POSITION_JOINT_PROFILES = ('omx_full', 'omx_follower', 'v1_studio')
 # A taught joint value may sit this far outside the arm's limit (servo readback
 # noise at a hard stop) and is then clamped; beyond it the Position is refused.
 _POSITION_LIMIT_TOL_RAD = 0.005
@@ -2135,7 +2083,7 @@ def position_joint_route(entry: Any, profile: Any) -> str | None:
     ``_POSITION_JOINT_PROFILES``: the joint route. ``'other_robot'`` — a
     Position with joints taught on ANOTHER arm: the point path, with the
     warning. ``None`` — everything else (a Ziel, a Position without joints, an
-    edu6 or unknown profile): the point path, silently. Shared with the
+    unknown profile): the point path, silently. Shared with the
     start-time pre-check, which skips exactly the ``'joints'`` entries."""
     if not is_position(entry) or entry.get('joints') is None:
         return None
@@ -2411,14 +2359,13 @@ def move_to(ctx, args: dict[str, Any]) -> None:
 # back to the fleet-wide 90° jaw axis. Measured 2026-09-07 after a split grasp at
 # tag yaw 0.7 rad:
 #
-#   block            omx_full wrist travel      edu6_studio wrist travel
-#   „bewege zu"          +40.1°                     joint −49.9° → +90.0°
-#   „ablegen bei"        +40.1°                     (same solve, same twist)
+#   block            omx_full wrist travel
+#   „bewege zu"          +40.1°
+#   „ablegen bei"        +40.1°   (same solve, same twist)
 #   „hebe an"             +0.0°   ← already correct: it pins the current roll
 #   „Heimposition"       +49.9°   ← a deliberate whole-arm move to a fixed pose
 #
-# At tag yaw 45° on edu6 the roll JOINT travels −0.7854 → +1.5708 = 135°. The
-# object is in the jaws for that whole rotation, the no-go-zone model covers arm
+# The object is in the jaws for that whole rotation, the no-go-zone model covers arm
 # LINKS only (never a held object), and the place then happens on an axis the
 # grasp never chose. „hebe an" already documents the fix ("preserving the wrist
 # roll (j5) so a held object isn't twisted"); these two were left on the fixed
@@ -2603,8 +2550,8 @@ def _held_threshold_rad(ctx) -> float:
     OPEN gripper is judged by :func:`_jaws_left_the_open_position`, not here: it
     never „hält" (Q10). That fallback used to be
     the bare OMX constant, which sits BELOW the whole Feetech gripper band and
-    therefore reported HELD for every reading on edu6/edu1 (see
-    :func:`_grasp_held_max` for the measurement)."""
+    therefore reported HELD for every reading on the V1 (see
+    :func:`_grasp_held_max`)."""
     if _grasp_held_env_override_set():
         _warn_gripper_knob_out_of_band(
             ctx, 'EDUBOTICS_GRASP_HELD_MAX_RAD', GRASP_HELD_MAX_RAD,
@@ -2628,7 +2575,7 @@ def _held_threshold_rad(ctx) -> float:
         # "commanded close" is garbage — fall back to the fixed threshold.
         return _grasp_held_max(ctx)
     if not (min(closed, opened) <= commanded < max(closed, opened)):
-        # Band sanity for a non-negative-close profile (edu6 closes 0..1.75):
+        # Band sanity for a non-negative-close profile (V1 closes 0..0.90):
         # a command outside the physical band is equally garbage.
         return _grasp_held_max(ctx)
     return commanded + _grasp_held_margin(ctx)
@@ -2658,7 +2605,7 @@ def _settle_for_readback(ctx) -> None:
 
 def check_grasp_held(ctx) -> bool | None:
     """Decide HELD vs EMPTY after a gripper close, from the achieved gripper
-    angle (follower joint index ``_n(ctx)`` — 5 on the OMX, 6 on edu6).
+    angle (follower joint index ``_n(ctx)`` — 5 on the OMX and the V1).
 
     Returns ``True`` (object held), ``False`` (empty close — the grasp missed),
     or ``None`` when the follower-joint readback is unavailable (the caller then
@@ -2747,9 +2694,9 @@ def _current_tool_xy(ctx):
     assumed: ``_is_straight_down`` above already compares this very quantity
     against a grasp target's (x, y), and those targets come from
     ``perception_blocks._tag_table_xy`` — the same base-frame table positions the
-    reclaim judges. Measured 2026-09-14, solve(target) → fk(joints) round-trips
-    to 1.6 mm on the OMX solver, 4e-15 m on edu6 and 2e-6 m on edu1; all three
-    are far inside the 50 mm ``_RELEASE_MOVE_M`` threshold, and the OMX residual
+    reclaim judges. solve(target) → fk(joints) round-trips to 1.6 mm on the OMX
+    solver (measured 2026-09-14) and 2.4e-6 m on the V1; both are far inside the
+    50 mm ``_RELEASE_MOVE_M`` threshold, and the OMX residual
     is the solver's own strict-vertical approximation, not an error in this read.
 
     EVERY failure answers ``None`` — no solver, a raising ``fk``, an ``fk`` that
@@ -2896,12 +2843,11 @@ def drop_at(ctx, args: dict[str, Any]) -> None:
     # Carry at the close the GRASP actually commanded, not at the profile's
     # full-closed value. The two are the same number on the OMX
     # (gripper_closed_rad −0.5 == the catalog close −0.5), so this is a no-op
-    # there — but on edu6 the catalog closes at +1.0 inside a 0…1.75 band while
-    # gripper_closed_rad is 0.0, so carrying at "closed" demanded 1.0 rad MORE
-    # closure than the grasp: 25.2 mm of extra jaw travel into a 30 mm cube that
-    # is already blocking the jaws at ≈1.19 rad. That is a hard stall at
-    # Max_Torque 150 for the whole carry + descend, on EVERY place (found by the
-    # 2026-07-26 sim sweep; invisible on the OMX by construction).
+    # there — but on the V1 the catalog closes at +0.05 inside a 0…0.90 band
+    # while gripper_closed_rad is 0.0, so carrying at "closed" would demand more
+    # closure than the grasp, into a 30 mm cube that is already blocking the
+    # claw at ≈0.20 rad. That is a stall at Max_Torque for the whole carry +
+    # descend, on EVERY place (invisible on the OMX by construction).
     #
     # None (a `lege ab` with nothing ever grasped this run) falls back to the old
     # value, so that path is unchanged too.
@@ -3270,9 +3216,8 @@ def close_on_object(ctx, args: dict[str, Any]) -> None:
                       <= max(_gripper_closed(ctx), _gripper_open(ctx))):
                 # A catalog value OUTSIDE the physical band is corrupt, and the
                 # old code CLAMPED it — which on a non-negative-close gripper
-                # clamps toward the OPEN end: measured 2026-09-07 on edu6,
-                # gripper_close_rad=100 → commanded 1.75, i.e. the jaws opened
-                # FULLY on a „schließe um", and that value was then stored as
+                # clamps toward the OPEN end: gripper_close_rad=100 → the open
+                # command, i.e. the jaws opened FULLY on a „schließe um", and that value was then stored as
                 # ctx.last_commanded_close_rad, pushing _held_threshold_rad onto
                 # its out-of-band fallback so check_grasp_held answered True
                 # unconditionally. Fall back to the documented generic close
@@ -3334,12 +3279,10 @@ def lift(ctx, args: dict[str, Any]) -> None:
 
     A lift that cannot rise at all is reported as exactly that and does NOT
     move the arm. It used to borrow :func:`_solve_grasp_and_approach` wholesale,
-    which meant two wrong things on edu6 (measured 2026-07-26): ``_execute_pickup``
-    already ends AT the hover, which is already clamped at that arm's top-down
-    ceiling (~0.0655 m), so a following „hebe an" bisected to 0 mm at EVERY
-    radius tested (0.06 / 0.10 / 0.13 / 0.16 / 0.19 — the OMX solves the same
-    second +60 mm lift cleanly out to r = 0.20) — and it then blamed „Ziel liegt
-    am Rand des Greifbereichs" at r = 0.13, the sweet spot of the pick band, not
+    which meant two wrong things on an arm with a low top-down ceiling:
+    ``_execute_pickup`` already ends AT the hover, which is already clamped at
+    that ceiling, so a following „hebe an" bisected to 0 mm — and it then blamed
+    „Ziel liegt am Rand des Greifbereichs" in the middle of the pick band, not at
     an edge. It also cannot raise :func:`_solve_grasp_and_approach`'s new
     no-clearance refusal: a maxed-out lift is a legitimate no-op, not a failed
     grasp, and aborting the run there would break „Greife" → „hebe an"."""
@@ -3363,19 +3306,17 @@ def lift(ctx, args: dict[str, Any]) -> None:
     #     no lift may be computed from it.
     #   * NOT SOLVABLE is now a German warn-and-do-nothing. „hebe an" raises a
     #     straight-up lift, which only EXISTS for a pose inside the solver's
-    #     strict-vertical image — and both Feetech HOMEs are deliberately
-    #     OUTSIDE it. Measured 2026-09-07:
+    #     strict-vertical image — and the Feetech HOME is deliberately
+    #     OUTSIDE it:
     #
     #       omx_full     fk(HOME) = [0.1582, −0.0016, 0.1390]  solve → ok    lift OK
-    #       edu6_studio  fk(HOME) = [0.0499,  0.0000, 0.4545]  solve → None  lift ERROR
-    #       edu1_studio  fk(HOME) = [0.0181,  0.0000, 0.5193]  solve → None  lift ERROR
+    #       v1_studio    fk(HOME) = [0.0125,  0.0000, 0.5541]  solve → None  lift ERROR
     #
     #     and the error was „Position außerhalb des Arbeitsbereichs — bitte das
     #     Objekt in den markierten Greifbereich legen", i.e. it blamed an OBJECT
     #     for the arm's own pose and HARD-ABORTED the run. Reached by
     #     home→lift, replay→lift, open_gripper→lift, wait→lift and every
-    #     permutation where „hebe an" precedes „fahre über"/„senke auf" — 44 of
-    #     120 orderings per arm. A lift the arm cannot compute is a no-op, the
+    #     permutation where „hebe an" precedes „fahre über"/„senke auf". A lift the arm cannot compute is a no-op, the
     #     same verdict the „already as high as it goes" branch below reaches, so
     #     it says so and moves on instead of killing the program.
     floor_z = _floor_z_at(ctx, x, y)
@@ -3422,7 +3363,7 @@ def lift(ctx, args: dict[str, Any]) -> None:
     # „mit Tempo" override; None → workflow-global tempo.
     # roll= must be the SOLVER's roll argument, not the joint value (see
     # _roll_arg): a no-go-zone reroute re-solves its via-points with it, and on
-    # edu6 the raw joint value would mirror the wrist at every one of them.
+    # the V1 the raw joint value would mirror the wrist at every one of them.
     safe_move(ctx, cur, q_end, DEFAULT_APPROACH_DURATION_S,
               roll=_roll_arg(ctx, cur), tempo=_move_tempo(args))
     ctx.last_arm_joints = arm_q

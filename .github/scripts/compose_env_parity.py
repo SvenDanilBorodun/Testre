@@ -13,8 +13,8 @@ of the right file satisfies it too. Both failure modes shipped together:
 `EDUBOTICS_ROBOT_TYPE` was on the opi compose but only under
 `physical_ai_server`, so an Orange Pi's `open_manipulator` container never saw
 the variable its entrypoint branches on and ran the OMX Dynamixel bringup
-against a Feetech bus; and none of the five `EDUBOTICS_EDU6_*` rollback knobs
-reached a Pi at all. Two verifiers MEASURED that the union guard stays green
+against a Feetech bus; and none of the five Feetech-driver rollback knobs
+(today `EDUBOTICS_FEETECH_*`) reached a Pi at all. Two verifiers MEASURED that the union guard stays green
 with all six keys deleted from the opi compose.
 
 This job closes exactly that gap. It compares the two files SERVICE BY SERVICE,

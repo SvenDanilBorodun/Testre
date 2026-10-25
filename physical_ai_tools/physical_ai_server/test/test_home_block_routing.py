@@ -10,18 +10,19 @@ import math
 import pytest
 
 from physical_ai_server import robot_profiles as RP
-from physical_ai_server.workflow.edu6_ik import Edu6IKSolver
+from physical_ai_server.workflow.v1_ik import V1IKSolver
 from physical_ai_server.workflow.handlers import motion as M
 from physical_ai_server.workflow.ik_solver import IKSolver
 
-_EDU6 = RP.ROBOT_PROFILES['edu6_studio']
+_V1 = RP.ROBOT_PROFILES['v1_studio']
 _OMX = RP.ROBOT_PROFILES['omx_full']
-_EDU6_HOME = list(_EDU6.home_joints_rad)
+_V1_HOME = list(_V1.home_joints_rad)
 
-# The rescued witness from the mesh sweep: direct presses, a via exists.
-_RESCUED = [0.075, 1.336, -0.882, -2.109, -1.355, -2.621]
-# The deepest press in the sweep; no via rescues it.
-_UNRESCUABLE = [-0.131, 2.997, -0.020, 1.964, -0.391, 1.898]
+# The rescued witness from the box-model sweep (test_home_planner): the direct
+# glide stays below the floor allowance, a via exists.
+_RESCUED = [-0.599, 0.269, 0.313, -1.161, 0.957]
+# A 234 mm press on the direct line; no via rescues it.
+_UNRESCUABLE = [0.009, 2.885, 0.047, -1.289, -1.384]
 
 
 class _Ctx:
@@ -51,9 +52,9 @@ class _Ctx:
             self.get_follower_joints = lambda: list(follower)
 
 
-def _edu6_ctx(start, follower=None):
-    return _Ctx(_EDU6, Edu6IKSolver(),
-                list(start) + [_EDU6.gripper_open_rad], follower)
+def _v1_ctx(start, follower=None):
+    return _Ctx(_V1, V1IKSolver(),
+                list(start) + [_V1.gripper_open_rad], follower)
 
 
 def _omx_ctx(start, follower=None):
@@ -71,22 +72,22 @@ def _legs(monkeypatch):
     return seen
 
 
-# ── the edu6 fix is actually reached from the block ──────────────────────────
+# ── the box-model fix is actually reached from the block ─────────────────────
 
 def test_home_publishes_more_than_one_leg_for_a_pressing_start(monkeypatch):
     """The whole point of the wiring. If ``home`` went straight to ``safe_move``
     again this would be one leg — and that one leg presses the table."""
     seen = _legs(monkeypatch)
-    M.home(_edu6_ctx(_RESCUED), {})
+    M.home(_v1_ctx(_RESCUED), {})
     assert len(seen) >= 2
 
 
 def test_home_is_still_exactly_one_leg_when_the_route_is_clean(monkeypatch):
     seen = _legs(monkeypatch)
-    ik = Edu6IKSolver()
+    ik = V1IKSolver()
     clean = list(ik.solve((ik.base_axis_x + 0.14, 0.0, 0.0),
                           roll=M.GRASP_ROLL_RAD))
-    M.home(_edu6_ctx(clean), {})
+    M.home(_v1_ctx(clean), {})
     assert len(seen) == 1
     assert seen[0][2] == M.DEFAULT_HOME_DURATION_S
 
@@ -95,29 +96,29 @@ def test_home_still_carries_the_gripper_across_a_multi_leg_route(monkeypatch):
     """The deliberate 2026-06 behaviour (pickup -> home must not drop the
     object) must survive the reroute. Every leg ends with the START gripper."""
     seen = _legs(monkeypatch)
-    ctx = _edu6_ctx(_RESCUED)
+    ctx = _v1_ctx(_RESCUED)
     closed = 0.25
     ctx.last_full_joints = list(_RESCUED) + [closed]
     M.home(ctx, {})
     assert len(seen) >= 2
     for _a, b, _d in seen:
-        assert b[6] == pytest.approx(closed)
-    assert ctx.last_full_joints[6] == pytest.approx(closed)
+        assert b[5] == pytest.approx(closed)
+    assert ctx.last_full_joints[5] == pytest.approx(closed)
 
 
 def test_home_records_the_home_pose_as_the_new_state(monkeypatch):
     _legs(monkeypatch)
-    ctx = _edu6_ctx(_RESCUED)
+    ctx = _v1_ctx(_RESCUED)
     M.home(ctx, {})
-    assert ctx.last_arm_joints == pytest.approx(_EDU6_HOME)
-    assert ctx.last_full_joints[:6] == pytest.approx(_EDU6_HOME)
+    assert ctx.last_arm_joints == pytest.approx(_V1_HOME)
+    assert ctx.last_full_joints[:5] == pytest.approx(_V1_HOME)
 
 
 def test_home_refuses_in_german_when_no_route_exists(monkeypatch):
     """A refusal must reach the student, not be swallowed into a direct publish."""
     _legs(monkeypatch)
     with pytest.raises(M.WorkflowError) as excinfo:
-        M.home(_edu6_ctx(_UNRESCUABLE), {})
+        M.home(_v1_ctx(_UNRESCUABLE), {})
     assert 'Tischebene' in str(excinfo.value)
 
 
@@ -128,7 +129,7 @@ def test_every_leg_goes_through_safe_move_so_zones_still_apply(monkeypatch):
     raw: list = []
     monkeypatch.setattr(M, '_publish_motion_t',
                         lambda *a, **k: raw.append(a))
-    M.home(_edu6_ctx(_RESCUED), {})
+    M.home(_v1_ctx(_RESCUED), {})
     assert len(seen) >= 2
     assert raw == []
 
@@ -140,7 +141,7 @@ def test_the_observation_retreat_is_planned_too(monkeypatch):
     „Solange … sichtbar" loop, so leaving it unjudged would keep the defect on
     the hottest path."""
     seen = _legs(monkeypatch)
-    M.go_to_observation_pose(_edu6_ctx(_RESCUED))
+    M.go_to_observation_pose(_v1_ctx(_RESCUED))
     assert len(seen) >= 2
 
 
@@ -173,11 +174,11 @@ def test_a_missed_arrival_warns_once_and_does_not_raise(monkeypatch):
     writers on the same rail. And a workflow may be stopping legitimately, so a
     raise would turn a clean stop into an error."""
     _legs(monkeypatch)
-    off = [v + 0.9 for v in _EDU6_HOME] + [_EDU6.gripper_open_rad]
-    ik = Edu6IKSolver()
+    off = [v + 0.9 for v in _V1_HOME] + [_V1.gripper_open_rad]
+    ik = V1IKSolver()
     clean = list(ik.solve((ik.base_axis_x + 0.14, 0.0, 0.0),
                           roll=M.GRASP_ROLL_RAD))
-    ctx = _edu6_ctx(clean, follower=off)
+    ctx = _v1_ctx(clean, follower=off)
     M.home(ctx, {})
     hits = [m for m in ctx.logs if 'Grundstellung nicht ganz erreicht' in m]
     assert len(hits) == 1
@@ -185,19 +186,19 @@ def test_a_missed_arrival_warns_once_and_does_not_raise(monkeypatch):
 
 def test_a_matching_arrival_is_silent(monkeypatch):
     _legs(monkeypatch)
-    ik = Edu6IKSolver()
+    ik = V1IKSolver()
     clean = list(ik.solve((ik.base_axis_x + 0.14, 0.0, 0.0),
                           roll=M.GRASP_ROLL_RAD))
-    ctx = _edu6_ctx(clean,
-                    follower=list(_EDU6_HOME) + [_EDU6.gripper_open_rad])
+    ctx = _v1_ctx(clean,
+                    follower=list(_V1_HOME) + [_V1.gripper_open_rad])
     M.home(ctx, {})
     assert not any('nicht ganz erreicht' in m for m in ctx.logs)
 
 
 def test_the_arrival_tolerance_matches_the_drivers(monkeypatch):
-    """One number for "did the arm get there", not three. The edu6 driver uses
-    BOOT_HOME_VERIFY_TOL_RAD = 0.30 and the OMX entrypoint's Phase-3 verifier
-    uses the same."""
+    """One number for "did the arm get there", not three. The Feetech driver
+    uses BOOT_HOME_VERIFY_TOL_RAD = 0.30 and the OMX entrypoint's Phase-3
+    verifier uses the same."""
     assert M.HOME_ARRIVAL_TOL_RAD == 0.30
 
 
@@ -205,10 +206,10 @@ def test_the_arrival_tolerance_matches_the_drivers(monkeypatch):
 def test_an_unusable_joint_readback_is_silently_tolerated(monkeypatch, follower):
     """A diagnostic must never break a home move."""
     _legs(monkeypatch)
-    ik = Edu6IKSolver()
+    ik = V1IKSolver()
     clean = list(ik.solve((ik.base_axis_x + 0.14, 0.0, 0.0),
                           roll=M.GRASP_ROLL_RAD))
-    ctx = _edu6_ctx(clean)
+    ctx = _v1_ctx(clean)
     if follower is not None:
         ctx.get_follower_joints = lambda: follower
     M.home(ctx, {})
@@ -217,10 +218,10 @@ def test_an_unusable_joint_readback_is_silently_tolerated(monkeypatch, follower)
 
 def test_a_raising_joint_getter_is_tolerated(monkeypatch):
     _legs(monkeypatch)
-    ik = Edu6IKSolver()
+    ik = V1IKSolver()
     clean = list(ik.solve((ik.base_axis_x + 0.14, 0.0, 0.0),
                           roll=M.GRASP_ROLL_RAD))
-    ctx = _edu6_ctx(clean)
+    ctx = _v1_ctx(clean)
 
     def _boom():
         raise RuntimeError('bus down')

@@ -43,7 +43,7 @@ describe('Sammlung provider', () => {
     expect(fn).toHaveBeenCalledTimes(1);
     expect(fn.mock.calls[0][0].robotType).toBe('omx_f');
     off();
-    p.setSnapshot({ robotType: 'edu6_studio' });
+    p.setSnapshot({ robotType: 'v1_studio' });
     expect(fn).toHaveBeenCalledTimes(1);
   });
 

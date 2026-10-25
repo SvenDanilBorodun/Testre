@@ -5,7 +5,7 @@ Two halves, and only together do they match the rig:
 
 * the sim TABLE sits where a real touch-off puts it — ``z_table`` is the EE
   height with the fingertips on the drawn table, the solver's
-  ``tool_tip_below_ee_m`` (0.04 m on the OMX, 0 on the Feetech arms, whose EE
+  ``tool_tip_below_ee_m`` (0.04 m on the OMX, 0 on the V1, whose EE
   frame IS the closed fingertip);
 * a close CAPTURES only when the fingertips are at or below the top of the
   nearest object (base z = its own ``height_m``), with no extra margin.
@@ -19,14 +19,13 @@ from __future__ import annotations
 import pytest
 
 from physical_ai_server import robot_profiles as rp
-from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
-from physical_ai_server.workflow.edu6_ik import Edu6IKSolver
 from physical_ai_server.workflow.handlers import motion as M
 from physical_ai_server.workflow.ik_solver import IKSolver, _TOOL_TIP_EXT_M
 from physical_ai_server.workflow.object_catalog import fixed_catalog
 from physical_ai_server.workflow.sim_arm import SimArm
 from physical_ai_server.workflow.sim_perception import SimPerception
 from physical_ai_server.workflow.sim_world import SimWorld
+from physical_ai_server.workflow.v1_ik import V1IKSolver
 
 from rig_emulation import ABLAGE, PICK, B, Rig, chain, cube, grasp, program, ref, var, vget, vset
 
@@ -60,14 +59,14 @@ def _close_at(pid, ee_z, objects=None):
     return world.held_key()
 
 
-@pytest.mark.parametrize('pid,ee_z', [('omx_full', 0.055), ('edu1_studio', 0.015)])
+@pytest.mark.parametrize('pid,ee_z', [('omx_full', 0.055), ('v1_studio', 0.015)])
 def test_a_rig_recorded_pick_holds(pid, ee_z):
     """A pick recorded on the rig (the jaws close with the fingertips 15 mm up
     the 30 mm cube) holds the cube in the simulator too."""
     assert _close_at(pid, ee_z) == 0
 
 
-@pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
+@pytest.mark.parametrize('pid', ['omx_full', 'v1_studio'])
 def test_the_composite_grasp_holds(monkeypatch, pid):
     rig = Rig(monkeypatch, pid, objects=[cube(*PICK[0])], simulated=True)
     assert rig.run(program(grasp())) == 'finished', rig.errors()
@@ -75,7 +74,7 @@ def test_the_composite_grasp_holds(monkeypatch, pid):
     assert rig.grasps() == 1
 
 
-@pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
+@pytest.mark.parametrize('pid', ['omx_full', 'v1_studio'])
 def test_fahre_ueber_then_schliesse_holds_nothing(monkeypatch, pid):
     """„fahre über" hovers the approach height ABOVE the cube; closing there
     grabs air on the rig, and now in the simulator too."""
@@ -128,13 +127,12 @@ def test_tool_tip_offsets_per_solver():
     assert _TOOL_TIP_EXT_M == 0.04
     assert IKSolver.tool_tip_below_ee_m == 0.04
     assert IKSolver.tool_tip_below_ee_m is _TOOL_TIP_EXT_M or IKSolver.tool_tip_below_ee_m == _TOOL_TIP_EXT_M
-    assert Edu1IKSolver.tool_tip_below_ee_m == 0.0
-    assert Edu6IKSolver.tool_tip_below_ee_m == 0.0
+    assert V1IKSolver.tool_tip_below_ee_m == 0.0
 
 
 def test_sim_table_is_the_tool_tip_height():
     """The node's sim manager reports ``z_table`` = the fingertip height (OMX
-    0.04, Edu:1 0) — read from the builder's source, which cannot be imported
+    0.04, V1 0) — read from the builder's source, which cannot be imported
     without rclpy — and its SimPerception grasps at that table."""
     import ast
     from pathlib import Path

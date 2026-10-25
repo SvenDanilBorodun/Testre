@@ -20,9 +20,9 @@ import { configureStore } from '@reduxjs/toolkit';
 import JogPanel from '../JogPanel';
 import { DE } from '../blocks/messages_de';
 
-// JogPanel reads the capability manifest (profile-driven jog rows, edu6 §4.5)
-// via useSelector — wrap every render in a minimal store. null caps = the OMX
-// default rows, keeping every pre-edu6 assertion byte-identical.
+// JogPanel reads the capability manifest (profile-driven jog rows) via
+// useSelector — wrap every render in a minimal store. null caps = the OMX
+// default rows, keeping every OMX assertion byte-identical.
 function makeStore(capabilities = null) {
   return configureStore({
     reducer: {
@@ -228,22 +228,45 @@ describe('JogPanel', () => {
   });
 });
 
-// ── edu6 profile rows (§4.5/§9) ──────────────────────────────────────────────
-const EDU6_CAPS = {
+// ── profile-driven rows ──────────────────────────────────────────────────────
+// The V1's manifest (robot_profiles._V1_STUDIO): 5 arm joints and a rotating
+// claw with NO gripper_mm_per_rad, so it keeps the degree row.
+const V1_CAPS = {
+  recordable: false, editable: false, trainable: false, inferable: false,
+  roboter_studio: true, has_leader: false,
+  arm_joints: 5,
+  joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'RL_joint'],
+  urdf_asset_id: 'v1',
+  gripper_open_rad: 0.9,
+  gripper_closed_rad: 0.0,
+};
+// A SYNTHETIC 6-joint manifest that sends gripper_mm_per_rad: no shipped
+// profile does today, but the millimetre row is a live code path of the panel.
+const SIX_JOINT_MM_CAPS = {
   recordable: false, editable: false, trainable: false, inferable: false,
   roboter_studio: true, has_leader: false,
   arm_joints: 6,
   joint_names: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6',
-    'end_gear_joint'],
-  urdf_asset_id: 'edu6',
+    'gripper'],
+  urdf_asset_id: 'synthetic',
   gripper_open_rad: 1.75,
   gripper_closed_rad: 0.0,
   gripper_mm_per_rad: 25.2,
 };
 
-describe('JogPanel — edu6 profile rows', () => {
-  it('renders Gelenk 1..6 + the millimetre gripper row', () => {
-    render(<JogPanel disabled={false} />, { capabilities: EDU6_CAPS });
+describe('JogPanel — profile-driven rows', () => {
+  it('V1: Gelenk 1..5 + the degree gripper row (no mm mapping)', () => {
+    render(<JogPanel disabled={false} />, { capabilities: V1_CAPS });
+    for (let i = 1; i <= 5; i += 1) {
+      expect(screen.getByText(`Gelenk ${i}`)).toBeInTheDocument();
+    }
+    expect(screen.queryByText('Gelenk 6')).not.toBeInTheDocument();
+    expect(screen.getByText('Greifer-Drehung')).toBeInTheDocument();
+    expect(screen.queryByText('Greifer öffnen/schließen')).not.toBeInTheDocument();
+  });
+
+  it('a gripper_mm_per_rad manifest renders Gelenk 1..6 + the millimetre gripper row', () => {
+    render(<JogPanel disabled={false} />, { capabilities: SIX_JOINT_MM_CAPS });
     for (let i = 1; i <= 6; i += 1) {
       expect(screen.getByText(`Gelenk ${i}`)).toBeInTheDocument();
     }
@@ -252,7 +275,7 @@ describe('JogPanel — edu6 profile rows', () => {
   });
 
   it('the gripper row jogs index 6 with an mm-derived radian delta', async () => {
-    render(<JogPanel disabled={false} />, { capabilities: EDU6_CAPS });
+    render(<JogPanel disabled={false} />, { capabilities: SIX_JOINT_MM_CAPS });
     fireEvent.click(
       screen.getByRole('button', { name: 'Greifer öffnen/schließen erhöhen' }),
     );
@@ -264,7 +287,7 @@ describe('JogPanel — edu6 profile rows', () => {
     expect(call.delta).toBeCloseTo((0.01 * 1000) / 25.2, 9);
   });
 
-  it('OMX (null caps) keeps the exact pre-edu6 rows', () => {
+  it('OMX (null caps) keeps the exact OMX rows', () => {
     render(<JogPanel disabled={false} />);
     for (let i = 1; i <= 5; i += 1) {
       expect(screen.getByText(`Gelenk ${i}`)).toBeInTheDocument();

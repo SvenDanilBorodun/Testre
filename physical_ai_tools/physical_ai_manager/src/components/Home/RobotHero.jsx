@@ -9,13 +9,13 @@
 // The Start-page hero: the student's ACTUAL robot.
 //
 // What this replaces: a hand-drawn SVG of a two-finger gantry (matching none
-// of the four shipped arms) on a `camera-noise` background, under a hardcoded
+// of the shipped arms) on a `camera-noise` background, under a hardcoded
 // „LIVE" pill that rendered identically while the bridge was down. Every part
 // of that claimed something the page could not back up.
 //
 // Two views, both real:
 //   * 3D-Modell — the existing `UrdfTwin`, mirroring /joint_states onto the
-//     URDF of the detected arm family (omx_f / edu6 / edu1).
+//     URDF of the detected arm family (omx_f / v1).
 //   * Kamera    — the scene camera's MJPEG stream, the same web_video_server
 //     URL shape `CameraFeedOverlay` uses.
 //

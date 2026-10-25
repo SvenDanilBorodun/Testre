@@ -17,8 +17,8 @@ import { armGeometry } from '../../../utils/armProfile';
 
 // The expected FK TCP height when the fingertips touch the table (z = 0 is the table surface
 // on every shipped arm: CLAUDE.md „z = 0 IS the table"). OMX: the FK TCP is end_effector_link and the
-// fingers reach ik_solver._TOOL_TIP_EXT_M = 0.04 m further. Edu:6 / Edu:1: the TCP IS the fingertip.
-export const ZIEL_TOUCH_TCP_Z_M = Object.freeze({ omx_f: 0.04, edu6: 0.0, edu1: 0.0 });
+// fingers reach ik_solver._TOOL_TIP_EXT_M = 0.04 m further. V1: the TCP IS the (closed) fingertip.
+export const ZIEL_TOUCH_TCP_Z_M = Object.freeze({ omx_f: 0.04, v1: 0.0 });
 export const ZIEL_TOUCH_TOLERANCE_MM = 30;
 
 const EXPECTED = new Map(Object.entries(ZIEL_TOUCH_TCP_Z_M));

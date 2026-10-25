@@ -1130,7 +1130,7 @@ jobs:
           exit "$rc"
       - name: Pull + assert open-manipulator has Dynamixel SDK + pyserial
         # `serial` is asserted EXPLICITLY, not left to ride on dynamixel_sdk.
-        # It is the edu6 driver's only third-party dependency: `feetech_bus.py`
+        # It is the Feetech driver's only third-party dependency: `feetech_bus.py`
         # imports it LAZILY inside FeetechBus.__init__, so nothing at image
         # build or node import time proves it is installed — an absence would
         # surface as a German bus error on a real arm, not in CI. Nothing pip-

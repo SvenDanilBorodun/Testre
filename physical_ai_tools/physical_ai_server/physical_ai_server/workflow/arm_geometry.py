@@ -7,41 +7,30 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-"""Whole-link geometry for the Feetech Roboter-Studio arms (edu6_studio,
-edu1_studio) — the table floor and self-collision, on a model small enough to
-live in the server image.
+"""Whole-link geometry for the Feetech Roboter-Studio arm (v1_studio) — the
+table floor and self-collision, on a model small enough to live in the server
+image.
 
 WHY THIS EXISTS. ``handlers/motion.py``'s ``WORKSPACE_FLOOR_MARGIN_M`` refusal
 lives inside ``_solve_or_raise`` / ``_try_solve``, i.e. it only ever judges a
-**Cartesian target**. The Grundstellung is not one: ``Edu6IKSolver.solve()``
-only emits strict-vertical poses (``edu6_ik.py`` pins ``q4 = 0``,
-``q5 = π − β``), and HOME needs ``q5 = π/2 − q2 − q3 = 3.2708 rad``, far outside
-joint5's ``(−1.5708, 1.9199)``. ``ik.solve(HOME_TCP)`` returns ``None``. So the
-whole Cartesian toolchain — reach check, workspace floor, reroute vias — is
-structurally inapplicable to a home move, and the straight joint-space glide
-``motion.home`` publishes was judged by nothing at all.
-
-Measured consequence on the real collision meshes (2026-07-27): from start poses
-the arm can physically be in, that glide drives a link **up to 167.9 mm below the
-table** in roughly 1 in 100 cases (0.3 %–1.9 % across seven samples of 300-2500
-starts). ``base_link.STL`` spans z ∈ [0.0000, 0.0625] m, so z = 0 IS the table
-surface — that is a press, not a margin.
+**Cartesian target**. The Grundstellung is not one: ``V1IKSolver.solve()``
+only emits strict-vertical poses, and HOME points the tool 9.7° off straight UP,
+so ``ik.solve(HOME_TCP)`` returns ``None``. The whole Cartesian toolchain —
+reach check, workspace floor, reroute vias — is therefore structurally
+inapplicable to a home move, and without this module the straight joint-space
+glide ``motion.home`` publishes would be judged by nothing at all — from a limp
+collapse, that glide can drive a link through the table. ``base_link`` spans
+z ∈ [0.0000, 0.0521] m (its frame is re-origined to the base bottom), so z = 0
+IS the table surface — a link below it is a press, not a margin.
 
 THE MODEL: one axis-aligned box per link, expressed in that link's OWN frame.
 A link-frame AABB *contains* its mesh, so every predicate below is a SOUND
 bound — it can be pessimistic, never optimistic. Unlike a single per-link
-radius it is ORIENTATION-AWARE, which is exactly what a floor test needs: the
-radius form is direction-blind and (measured) refuses 1500/1500 random configs
-and 900/900 legitimate table-level grasps, i.e. it is unusable.
+radius it is ORIENTATION-AWARE, which is exactly what a floor test needs: a
+direction-blind radius over the open claw would refuse essentially every
+table-level grasp, i.e. it would be unusable.
 
-Measured fidelity of the box form over 1500 random in-limit configs, against the
-decimated STLs: sound in 1500/1500; conservatism (truth − model) median 0.0 mm,
-mean 10.1 mm, p95 45.9 mm; **exact at HOME** (model +10.10 mm == truth); and it
-refuses 0 of 900 strict-vertical grasps across the pick band. Re-verified with a
-different seed, denser meshes and a RANDOM jaw opening per config: 0/1200
-violations, tightest slack +0.000 mm.
-
-Cost: 7 boxes × 6 floats = 42 numbers. No meshes ship.
+Cost: 6 boxes × 6 floats = 36 numbers. No meshes ship.
 
 OMX IS UNTOUCHED BY CONSTRUCTION. :func:`resolve_geometry` returns ``None`` for
 any profile that has no box table — both OMX profiles, and every profile-less
@@ -66,58 +55,42 @@ from physical_ai_server.workflow.path_guard import (
 
 # ── the box table ────────────────────────────────────────────────────────────
 # (min_xyz, max_xyz) in each link's OWN frame, metres. Index i is the frame
-# ``Edu6IKSolver.link_frames()`` returns at position i: 0 = base_link (the fixed
-# root), 1..6 = link1..link6.
-#
-# Derived from the in-repo URDF + its ten binary STLs
-# (``physical_ai_manager/public/edu6-urdf/``) and rounded OUTWARD to 0.1 mm, so
-# a constant here can never be SMALLER than the mesh it stands for.
-#
-# Index 6 (link6) is the UNION over the whole gripper command band [0, 1.79] of
-# link6 + End_effector + both Claw fingers, so the box is valid at every jaw
-# opening — the fingers ride the ×0.01 prismatic mimics off ``end_gear_joint``
-# and are not on the arm's own FK chain. Its 80 × 117 × 114 mm extent is the
-# gripper housing that also gives link6 the 83.6 mm ``link_points`` radius
-# documented in ``path_guard``; the box captures it DIRECTIONALLY instead of
-# isotropically, which is the whole reason this module exists.
-#
-# ``test_arm_geometry.py::test_boxes_contain_every_mesh_vertex`` re-derives them
-# from the URDF + STLs with an INDEPENDENT parser (the same discipline as
-# ``test_edu6_ik.py``'s FK oracle), so a transcription slip here cannot verify
-# itself. Regenerate with the scratch harness if the CAD export ever changes.
-EDU6_LINK_BOXES: tuple = (
-    ((-0.0351, -0.0501, -0.0001), (+0.1328, +0.0500, +0.0626)),   # 0 base_link
-    ((-0.0258, -0.0210, -0.0044), (+0.0210, +0.0210, +0.0885)),   # 1 link1
-    ((-0.1097, -0.0153, -0.0492), (+0.0097, +0.0475, +0.0138)),   # 2 link2
-    ((-0.0097, -0.0213, -0.0492), (+0.0893, +0.0353, +0.0138)),   # 3 link3
-    ((-0.0210, -0.0153, -0.0031), (+0.0391, +0.0215, +0.0543)),   # 4 link4
-    ((-0.0728, -0.0153, -0.0139), (+0.0097, +0.0353, +0.0492)),   # 5 link5
-    ((-0.0400, -0.0353, -0.1050), (+0.0400, +0.0820, +0.0095)),   # 6 link6
-)
-
-# edu1_studio box table — same derivation, same rounding-OUTWARD-to-0.1 mm rule,
-# from ``physical_ai_manager/public/edu1-urdf/`` (the in-repo copy of the
-# ``5dof_assembly_urdf2`` export) and its nine binary STLs. Index i is the frame
-# ``Edu1IKSolver.link_frames()`` returns at position i: 0 = base_link (the fixed
+# ``V1IKSolver.link_frames()`` returns at position i: 0 = base_link (the fixed
 # root), 1..5 = link1..link5.
 #
-# Index 5 (link5) is the UNION over the whole claw band [0, 1.57] of link5 +
-# end_effector + both fingers, so the box is valid at every jaw opening — the
-# fingers ride ``RL_joint`` and its ``LF_joint`` <mimic> and are not on the arm's
-# own FK chain. Its 96 × 149 × 91 mm extent IS the open claw, which is why the
-# box form matters here even more than on the edu6: an isotropic radius over a
-# 149 mm-wide open claw would refuse essentially every table-level grasp.
+# Derived from the full-resolution meshes ``tools/build_v1_urdf_assets.py``
+# generates (the shipped ``physical_ai_manager/public/v1-urdf/`` meshes are
+# decimated and lie INSIDE these boxes) and rounded OUTWARD to 0.1 mm, so a
+# constant here can never be SMALLER than the mesh it stands for.
 #
-# base_link spans z ∈ [0.0000, 0.0481] m, i.e. it is bolted to the table, so
-# z = 0 IS the table surface for this arm too and the model needs no
-# calibration to judge a boot glide.
-EDU1_LINK_BOXES: tuple = (
-    ((-0.0708, -0.0751, +0.0000), (+0.0493, +0.0751, +0.0481)),   # 0 base_link
-    ((-0.0200, -0.0153, -0.0055), (+0.0200, +0.0153, +0.0508)),   # 1 link1
+# Index 5 (link5) is the UNION over the whole claw band [0, 1.5708] of link5 +
+# end_effector + both fingers, at BOTH claw gear ratios (1 and the URDF's
+# 18/19), so the box is valid at every jaw opening — the fingers ride
+# ``RL_joint`` and its ``LF_joint`` <mimic> and are not on the arm's own FK
+# chain. Its extent IS the open claw, which is why the box form matters here:
+# an isotropic radius over the open claw would refuse essentially every
+# table-level grasp.
+#
+# base_link (Base_part.2 + the joint-1 servo + the top cover; the adapter PCB is
+# not modelled) spans z ∈ [0.0000, 0.0521] m, i.e. it is bolted to the table,
+# so z = 0 IS the table surface and the model needs no calibration to judge a
+# boot glide.
+#
+# ``test_arm_geometry_v1.py::test_boxes_contain_every_mesh_vertex`` re-derives
+# containment from the shipped URDF + STLs with an INDEPENDENT parser, so a
+# transcription slip here cannot verify itself; because the shipped meshes are
+# decimated, ``test_boxes_contain_the_full_resolution_extents`` also checks
+# every box against the full-resolution extents in
+# ``test/fixtures/v1_fullres_link_extents.json`` (regenerated by
+# ``tools/v1_fullres_link_extents.py``). The driver carries the same
+# table (``feetech_geometry.V1_LINK_BOXES``), AST-compared by the setup suite.
+V1_LINK_BOXES: tuple = (
+    ((-0.0508, -0.0751, +0.0000), (+0.0493, +0.0751, +0.0521)),   # 0 base_link
+    ((-0.0200, -0.0153, -0.0065), (+0.0200, +0.0153, +0.0518)),   # 1 link1
     ((-0.0097, -0.0420, -0.0244), (+0.1708, +0.0150, +0.0244)),   # 2 link2
     ((-0.0150, -0.0096, -0.0244), (+0.0150, +0.2326, +0.0244)),   # 3 link3
-    ((-0.0126, -0.0097, -0.0244), (+0.0351, +0.0595, +0.0244)),   # 4 link4
-    ((-0.0279, -0.0744, -0.0045), (+0.0678, +0.0744, +0.0869)),   # 5 link5+claw
+    ((-0.0126, -0.0097, -0.0244), (+0.0351, +0.0705, +0.0244)),   # 4 link4
+    ((-0.0286, -0.0966, -0.0045), (+0.0678, +0.0966, +0.1091)),   # 5 link5 + end_effector + both blades
 )
 
 
@@ -127,17 +100,16 @@ EDU1_LINK_BOXES: tuple = (
 # into the LAST index, so the gripper cluster is one rigid body and is never
 # tested against itself.
 #
-# A FUNCTION of the table length, not a module constant: the two supported box
-# tables have different lengths (7 links on the edu6, 6 on the edu1), and a
-# single constant sized off one of them would silently test the wrong pair set
-# for the other — over-testing (an index error) or under-testing (a missed
+# A FUNCTION of the table length, not a module constant: a box table of another
+# length (a future arm, a test double) must never be tested with a pair set sized
+# off this one — over-testing (an index error) or under-testing (a missed
 # self-collision), depending on which way it was sized.
 def _self_pairs(n_links: int) -> tuple:
     return tuple((i, j) for i, j in itertools.combinations(range(n_links), 2)
                  if j - i >= 2)
 
 
-_SELF_PAIRS: tuple = _self_pairs(len(EDU6_LINK_BOXES))
+_SELF_PAIRS: tuple = _self_pairs(len(V1_LINK_BOXES))
 
 # The eight corners of a unit cube, used to expand a (min, max) pair.
 _UNIT_CORNERS = np.array(list(itertools.product([0.0, 1.0], repeat=3)),
@@ -153,8 +125,7 @@ _UNIT_CORNERS = np.array(list(itertools.product([0.0, 1.0], repeat=3)),
 # ``'closed-form'`` (OMX) and is absent from this table, which is the OMX
 # short-circuit.
 _BOXES_BY_BACKEND: dict = {
-    'closed-form-edu6': EDU6_LINK_BOXES,
-    'closed-form-edu1': EDU1_LINK_BOXES,
+    'closed-form-v1': V1_LINK_BOXES,
 }
 
 
@@ -196,7 +167,7 @@ class ArmGeometry:
 
     __slots__ = ('_ik', '_corners', '_pairs')
 
-    def __init__(self, ik, boxes=EDU6_LINK_BOXES) -> None:
+    def __init__(self, ik, boxes=V1_LINK_BOXES) -> None:
         self._ik = ik
         self._corners = _corner_sets(boxes)
         # Sized off THIS arm's table, never the module default (see
@@ -231,8 +202,8 @@ class ArmGeometry:
         ``motion._floor_z_at`` makes for a Cartesian target).
 
         LINK 0 (``base_link``) IS DELIBERATELY EXCLUDED. It is the fixed mount:
-        its underside IS the table (measured span z ∈ [0.0000, 0.0625] m, which
-        is also why z = 0 is the table surface for this arm at all). Including
+        its underside IS the table (span z ∈ [0.0000, 0.0521] m, which is also
+        why z = 0 is the table surface for this arm at all). Including
         it would peg every reading at ≈0 and the guard would judge nothing —
         the pose could not get better and could not get worse. It stays in the
         table for :meth:`self_clearance`, where the gripper reaching the base is
@@ -336,12 +307,11 @@ def resolve_geometry(source) -> Optional[ArmGeometry]:
 
     * there is no IK solver on the object;
     * it does not expose ``link_frames`` (only
-      :class:`~physical_ai_server.workflow.edu6_ik.Edu6IKSolver` and
-      :class:`~physical_ai_server.workflow.edu1_ik.Edu1IKSolver` do; the OMX
+      :class:`~physical_ai_server.workflow.v1_ik.V1IKSolver` does; the OMX
       solver deliberately does not, and that absence is load-bearing);
     * its ``backend`` has no box table — i.e. every arm except the Feetech
-      Roboter-Studio pair (edu6_studio, edu1_studio), including every test
-      double and every ctx built before this module existed.
+      Roboter-Studio arm (v1_studio), including every test double and every
+      ctx built before this module existed.
 
     Callers must treat ``None`` as "run the old path unchanged". Never raises:
     a solver whose ``backend`` property itself throws resolves to ``None``

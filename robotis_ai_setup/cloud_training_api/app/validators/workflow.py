@@ -56,12 +56,11 @@ MAX_TRAJECTORY_POINTS = 5000
 MAX_TRAJECTORY_JSON_BYTES = 256 * 1024
 # Each point is exactly (num_arm_joints + 2) finite numbers: joints + gripper +
 # t_seconds. The width follows the ARM FAMILY the recording was made on — the
-# `robot_profile` column (migrations 035 + 039): 'omx_f' (5 arm joints →
-# 7-wide, the pre-edu6 default for untagged rows/clients), 'edu6_studio'
-# (6 → 8-wide) or 'edu1_studio' (5 → 7-wide).
+# `robot_profile` column (migrations 035, 039, 051): 'omx_f' (5 arm joints →
+# 7-wide, the default for untagged rows/clients) or 'v1_studio' (5 → 7-wide).
 #
-# NOTE 'edu1_studio' and 'omx_f' share a WIDTH and are different arms. The
-# width check therefore cannot separate them and was never meant to: it stops a
+# NOTE 'v1_studio' and 'omx_f' share a WIDTH and are different arms. The width
+# check therefore cannot separate them and was never meant to: it stops a
 # structurally wrong payload, while the TAG is what stops a cross-arm replay
 # (React's RunControls refuses a mismatched tag before it reaches the runtime).
 # Do not "simplify" this map to a width lookup keyed on point length.
@@ -71,9 +70,17 @@ MAX_TRAJECTORY_JSON_BYTES = 256 * 1024
 TRAJECTORY_POINT_LEN = 7
 TRAJECTORY_ROBOT_PROFILES: dict = {
     "omx_f": 7,
-    "edu6_studio": 8,
-    "edu1_studio": 7,
+    "v1_studio": 7,
 }
+# Retired arm ids. The database CHECK (migration 051) still admits them so the
+# rows stored under them stay readable, but they are deliberately NOT in the
+# map above: a new upload carrying one is refused with the ordinary
+# „Unbekanntes Roboterprofil" 400 (no arm with that id exists any more). A
+# workflow clone (routes/workflows.py::clone_workflow) does not pass through
+# this validator: it copies the source's stored rows verbatim, a retired tag
+# included, which the CHECK admits (owner decision: such a recording plays on
+# no current arm either way).
+LEGACY_TRAJECTORY_ROBOT_PROFILES: frozenset = frozenset({"edu6_studio", "edu1_studio"})
 # Sanity ceiling on the recording rate. The recorder runs at 20-30 Hz; a value
 # past this is a client bug and would make replay timing nonsensical.
 TRAJECTORY_FPS_MAX = 1000.0
@@ -328,7 +335,7 @@ def validate_trajectory(points: Any, fps: Any = None,
     each a list of exactly ``point_len`` finite numbers — the width for the
     recording's arm family (``robot_profile``: see
     ``TRAJECTORY_ROBOT_PROFILES``; ``None``/absent = the 7-wide OMX default,
-    what every pre-edu6 client sends). ``bool`` is excluded (an ``int``
+    what every untagged client sends). ``bool`` is excluded (an ``int``
     subclass, never a joint value); ``json.loads`` accepts bare
     ``NaN``/``Infinity`` so a finite-check is required. The total serialised
     size is capped at ``MAX_TRAJECTORY_JSON_BYTES`` (mirrors
@@ -369,8 +376,9 @@ def validate_trajectory(points: Any, fps: Any = None,
 def validate_trajectory_robot_profile(robot_profile: Any) -> int:
     """Validate an optional trajectory ``robot_profile`` tag and return the
     point width it implies. ``None``/empty → the OMX default width (untagged
-    pre-edu6 rows and clients). An unknown id → German HTTP 400 (the allowlist
-    is the small ``TRAJECTORY_ROBOT_PROFILES`` map)."""
+    rows and clients). An unknown id — a retired one in
+    ``LEGACY_TRAJECTORY_ROBOT_PROFILES`` included — → German HTTP 400 (the
+    allowlist is the small ``TRAJECTORY_ROBOT_PROFILES`` map)."""
     if robot_profile is None or (isinstance(robot_profile, str)
                                  and not robot_profile.strip()):
         return TRAJECTORY_POINT_LEN
@@ -385,8 +393,8 @@ def validate_trajectory_robot_profile(robot_profile: Any) -> int:
 
 def _trajectory_point(value: Any, point_len: int = TRAJECTORY_POINT_LEN) -> list[float]:
     """Validate one recorded sample: exactly ``point_len`` finite numbers
-    (``bool`` excluded; 7 for OMX and Edu:1 recordings, 8 for edu6 — joints +
-    gripper + t_s). Raises HTTP 400 in German on any violation. Mirrors ``_corner`` but
+    (``bool`` excluded; 7 for OMX and V1 recordings — joints + gripper +
+    t_s). Raises HTTP 400 in German on any violation. Mirrors ``_corner`` but
     for the Contract-B point."""
     if not isinstance(value, list) or len(value) != point_len:
         raise HTTPException(

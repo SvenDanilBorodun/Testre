@@ -137,7 +137,7 @@ def build_linear_segment(
     (peak = 15/8 × mean) slowed any joint above 0.6·limit·8/15 (1.54 rad/s on
     the OMX) and put a stop-and-go ripple inside every stretched pair: measured
     2026-09-13, a take peaking at 2.0 rad/s replayed 26 % slower, at 2.8 rad/s
-    76 % slower (edu6/edu1 up to 38 % / 46 % on the Feetech audit's takes).
+    76 % slower.
 
     THE FLOOR IS KEPT, only measured correctly: on this line every joint moves at
     exactly ``|Δq| / duration``, so the duration is extended until that is at most

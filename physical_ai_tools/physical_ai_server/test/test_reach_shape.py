@@ -4,17 +4,19 @@ rig, and reach is never widened from IK alone).
 
 The manifest carries the shape per profile: OMX ``reach_inner_m`` 0.10 /
 ``reach_outer_m`` 0.25 (the minimum over bearings at the rig's grasp height,
-rounded down — the drawn 0.28 overstated the forward reach), the Edu:1 its
-``reach_sector_deg`` (−90°, 90°) beside 0.07 / 0.35 (it cannot turn behind
+rounded down — the drawn 0.28 overstated the forward reach), the V1 its
+``reach_sector_deg`` (−90°, 90°) beside 0.10 / 0.34 (it cannot turn behind
 itself). Every point of the advertised shape must be graspable in the simulator
 (whose table now equals the rig's, Q13), and the shape must not understate it:
 on the OMX a point 2 cm outside the rim at bearing 0 is not graspable; on the
-Edu:1 a point outside the sector (bearing ±120°) is not. Radii are measured in
+V1 a point outside the sector (bearing ±120°) is not. Radii are measured in
 the BASE frame, from its origin — where the editor centres the ring.
 
-The Edu:1 rim is deliberately conservative (its profile comment: r = 0.37 still
-solves at the grasp plane but only with a ~19 mm hover, so the advertised outer
-stays 0.35), which is why its „outside" half is the sector, not the rim.
+The V1 ring is deliberately conservative on both edges (its profile comment:
+the grasp plane reaches 0.3665 but the 60 mm hover only 0.3415, so the
+advertised outer is 0.34; the inner 0.10 keeps an open claw off the base tower
+although the solver reaches 0.0555), which is why its „outside" half is the
+sector, not the rim.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ def _graspable(monkeypatch, pid, r, bearing_deg):
     return phase == 'finished' and rig.world.held_key() == 0
 
 
-@pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
+@pytest.mark.parametrize('pid', ['omx_full', 'v1_studio'])
 def test_every_point_of_the_advertised_shape_is_graspable_and_2cm_outside_at_bearing_0_is_not(
         monkeypatch, pid):
     inner, outer, (lo, hi) = _shape(pid)

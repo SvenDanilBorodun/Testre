@@ -4,8 +4,8 @@ Two defects this fences, both measured by rendering the shipped `EduBoticsApp`
 headless against each of the three robot types:
 
   * the two static Modus paragraphs named „OMX – Voll" and „OMX – Roboter Studio
-    (nur Follower)" on EVERY profile — including `edu6_studio`, a 6-axis Feetech
-    arm that is neither — and the second described a leader toggle
+    (nur Follower)" on EVERY profile — including the Feetech arm, which is
+    neither — and the second described a leader toggle
     `_start_rs_control_server` never even constructs on a follower-only profile;
   * `_apply_robot_type_labels`'s follower-only branch hardcoded
     `omx_follower`'s display label and left Schritt A on screen titled
@@ -123,7 +123,7 @@ class HelpTextIsCompleteAndGerman(unittest.TestCase):
     def test_no_help_text_names_a_DIFFERENT_robot_type(self):
         """The defect in one assertion: text shown on A must not describe B.
 
-        `edu6_studio`'s paragraph naming „OMX – Roboter Studio (nur Follower)"
+        The Feetech arm's paragraph naming „OMX – Roboter Studio (nur Follower)"
         is exactly what shipped, and it is how a student ends up reading about
         a robot that is not on their desk.
         """
@@ -165,7 +165,7 @@ class TheScanCardGoesSingularOnALeaderLessType(unittest.TestCase):
     deliberate divergence Windows must not copy; the owner reversed that call
     because the reason it was made — a permanently empty „Leader —" makes a
     Roboter-Studio kit look half-broken — is just as true on Windows, and worse
-    on `edu6_studio`, which has no leader concept at all.
+    on `v1_studio`, which has no leader concept at all.
     """
 
     def _apply(self, profile):
@@ -205,7 +205,7 @@ class TheScanCardGoesSingularOnALeaderLessType(unittest.TestCase):
     # ── the leader-less types: one step, singular ───────────────────────────
 
     def test_a_leaderless_type_hides_the_leader_step_entirely(self):
-        for profile in ("omx_follower", "edu6_studio"):
+        for profile in ("omx_follower", "v1_studio"):
             with self.subTest(profile):
                 owner = self._apply(profile)
                 self.assertFalse(
@@ -215,7 +215,7 @@ class TheScanCardGoesSingularOnALeaderLessType(unittest.TestCase):
                     "scan button the student must press in that very phrase")
 
     def test_the_surviving_step_is_named_Roboterarm_and_scans_singular(self):
-        for profile in ("omx_follower", "edu6_studio"):
+        for profile in ("omx_follower", "v1_studio"):
             with self.subTest(profile):
                 owner = self._apply(profile)
                 self.assertEqual(owner.follower_frame.text,
@@ -226,8 +226,8 @@ class TheScanCardGoesSingularOnALeaderLessType(unittest.TestCase):
                     "student cannot scan at all")
                 self.assertFalse(owner.btn_scan_leader.packed)
 
-    def test_the_hint_no_longer_names_omx_followers_label_on_edu6(self):
-        owner = self._apply("edu6_studio")
+    def test_the_hint_no_longer_names_omx_followers_label_on_v1(self):
+        owner = self._apply("v1_studio")
         self.assertNotIn("Roboter Studio (nur Follower)",
                          owner.follower_hint_label.text or "")
         self.assertIn("Arm scannen", owner.follower_hint_label.text or "")
@@ -236,7 +236,7 @@ class TheScanCardGoesSingularOnALeaderLessType(unittest.TestCase):
         """Schritt C's title, its hint and the scan button all follow
         `camera_roles` — „Schritt C: Kamera" over „Kameras scannen" is exactly
         the half-migrated wording this overhaul exists to remove."""
-        owner = self._apply("edu6_studio")
+        owner = self._apply("v1_studio")
         self.assertEqual(owner.camera_frame.text, "Schritt C: Kamera")
         self.assertEqual(owner.btn_scan_camera.text, "Kamera scannen")
         self.assertTrue((owner.camera_hint_label.text or "").startswith(

@@ -93,7 +93,7 @@ _TAG_EDGE_TOL_FRAC = max(0.0, _motion._safe_float('EDUBOTICS_TAG_EDGE_TOL_FRAC',
 # Feetech driver's own edge/torque tick knobs. (Their shared env-var prefix is
 # deliberately NOT spelled out in this comment: ci.yml::env-forwarding-guard
 # greps `EDUBOTICS_[A-Z0-9_]+` over this whole package and its match stops at a
-# `*`, so a prose "…_EDU6_*" reads as a forwarded-key NAME and fails the build.)
+# `*`, so a prose "…_FEETECH_*" reads as a forwarded-key NAME and fails the build.)
 _TAG_YAW_FRAMES_MAX = 30
 
 

@@ -6,7 +6,7 @@ WHY THIS EXISTS
 Until 2026-09-07 „Umgebung starten" was itself a powered motion. Which motion
 depended on three branches in ``entrypoint_omx.sh`` Phase 3 (quintic sync to
 the leader / follower-only HOME / nothing at all, when the leader read came
-back empty) plus a fourth inside ``edu6_arm_node.start_boot_home``, and on a
+back empty) plus a fourth inside ``feetech_arm_node.start_boot_home``, and on a
 both-arms rig the follower additionally began MIRRORING the leader the instant
 ``joint_trajectory_command_broadcaster`` spawned. All of that happened while
 the container came up: before any browser was open, before anybody had logged
@@ -30,7 +30,7 @@ UNATTENDED motion, which is the actual defect.
 WHAT „ACTIVATION" IS AND IS NOT
 -------------------------------
 It gates MOTION, not POWER. Servo torque still comes up with the container:
-both Feetech arms backdrive and the OMX follower is held only by its servo
+the Feetech arm backdrives and the OMX follower is held only by its servo
 torque, so an un-torqued arm does not wait politely — it falls. This is the
 same call ``start_boot_home`` already makes when its floor guard refuses (the
 refusal LEAVES THE ARM TORQUED, CLAUDE.md Rule §2). Torque-on itself is
@@ -45,7 +45,7 @@ THE CONTRACT (deliberately interfaces-free)
 ``/edubotics/activation_state`` std_msgs/String   — JSON, latched + 1 Hz.
 ``/edubotics/home_arm``        std_srvs/Trigger  — served by the Feetech
                                driver, called by this node. Family-neutral
-                               alias for /edu6/home | /edu1/home.
+                               alias for /v1/home.
 
 Both use stock message types on purpose: ``physical_ai_interfaces`` is built
 only in the SERVER image, and a new .srv there would mean an interfaces
@@ -54,7 +54,7 @@ rebuild, an enum-parity entry and a CMakeLists edit for a two-field message.
 
 THE SEQUENCE, PER RIG
 ---------------------
-Feetech (edu6_studio / edu1_studio)
+Feetech (v1_studio)
     call ``/edubotics/home_arm`` and let the DRIVER home itself. It owns the serial bus,
     the floor pre-check, the torque-on retry ladder and the single-writer
     trajectory rail; publishing a home trajectory at it from outside would walk
@@ -169,15 +169,15 @@ _ALREADY_LOADED = ('already loaded', 'already active', 'already exists')
 
 STATE_TOPIC = '/edubotics/activation_state'
 ACTIVATE_SERVICE = '/edubotics/activate'
-#: The FAMILY-NEUTRAL alias edu6_arm_node.py exposes alongside its own
-#: /edu6/home | /edu1/home. Calling the neutral name keeps the family branch in
-#: exactly one file (the driver) instead of two.
+#: The FAMILY-NEUTRAL alias feetech_arm_node.py exposes alongside its own
+#: /v1/home. Calling the neutral name keeps the family branch in exactly one
+#: file (the driver) instead of two.
 FEETECH_HOME_SERVICE = '/edubotics/home_arm'
 FEETECH_HOME_WAIT_S = 20.0
 
 #: Feetech families. Same `case` split entrypoint_omx.sh makes — one place per
 #: layer, never a chain of `!=` tests that can drift apart.
-FEETECH_ROBOT_TYPES = ('edu6_studio', 'edu1_studio')
+FEETECH_ROBOT_TYPES = ('v1_studio',)
 
 STATE_IDLE = 'idle'
 STATE_ACTIVATING = 'activating'
@@ -716,7 +716,7 @@ def main():
     rclpy.init()
     node = ActivationAgent()
 
-    # Same shape as edu6_arm_node.main(): docker stop sends SIGTERM, and
+    # Same shape as feetech_arm_node.main(): docker stop sends SIGTERM, and
     # without this the interpreter dies where it stands — mid-glide, with a
     # worker thread holding state nobody unwinds. Turning it into a
     # KeyboardInterrupt lets the executor drop out of spin() and the finally

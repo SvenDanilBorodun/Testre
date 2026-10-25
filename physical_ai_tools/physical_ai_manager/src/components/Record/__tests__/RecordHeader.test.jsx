@@ -14,7 +14,7 @@ import RecordHeader from '../RecordHeader';
 
 describe('RecordHeader — the robot pill', () => {
   it.each([
-    ['omx_full', 'omx_full'], ['omx_follower', 'omx_f'], ['edu6_studio', 'edu6'], ['edu1_studio', 'edu1'],
+    ['omx_full', 'omx_full'], ['omx_follower', 'omx_f'], ['v1_studio', 'v1'],
   ])('draws the glyph of %s (%s) beside the robot\'s German name', (profile, glyph) => {
     render(<RecordHeader eyebrow="Aufnahme" title="Würfel" robotName="OMX – Voll" robotProfile={profile} />);
     const pill = screen.getByTestId('rec-robot-pill');

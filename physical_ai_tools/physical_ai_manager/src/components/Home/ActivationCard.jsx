@@ -15,10 +15,10 @@
 // absence of a recording entry point across four capability fixtures. That
 // invariant is about NAVIGATION and about `capabilities.recordable`: the old
 // „Aufnahme starten" hero button sent the student to a tab that is hidden on
-// three of the four shipped profiles, which made the page dead on the whole
+// two of the three shipped profiles, which made the page dead on the whole
 // Roboter-Studio line. This button navigates nowhere and is gated on NO
 // capability — every rig, on every profile, has to be activated before it
-// moves, so it is exactly as useful on an edu6 kit as on a full OMX. The
+// moves, so it is exactly as useful on a V1 kit as on a full OMX. The
 // „Aufnahme starten" assertion stays green and stays in the suite.
 //
 // THE THREE-STATE RULE THIS PAGE LIVES BY APPLIES HERE TOO. `status === null`

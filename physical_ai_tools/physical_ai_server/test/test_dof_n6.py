@@ -17,8 +17,8 @@ import pytest
 from physical_ai_server.workflow import trajectory_builder
 
 
-# The edu6-shaped synthetic: 6 arm joints + gripper = 7-wide full vectors,
-# velocity limit 5.45 (the follower_arm_modified_final1 URDF value).
+# The synthetic 6-DOF shape: 6 arm joints + gripper = 7-wide full vectors,
+# velocity limit 5.45 (a test value, distinct from the OMX 4.8).
 N6 = 6
 N6_VLIMIT = 5.45
 
@@ -79,18 +79,18 @@ from physical_ai_server.workflow.handlers.trajectory import (  # noqa: E402
     resegment_trajectory,
 )
 
-_EDU6_HOME = (0.0, 0.70, -2.40, 0.0, 0.70, 0.0)
+_N6_HOME = (0.0, 0.70, -2.40, 0.0, 0.70, 0.0)
 
 
 def _n6_ctx(**kw):
     """A TEST-LOCAL synthetic 6-arm-joint profile ctx (NOT the registry)."""
     base = dict(
         num_arm_joints=N6,
-        home_joints_rad=_EDU6_HOME,
+        home_joints_rad=_N6_HOME,
         gripper_open_rad=1.75,
         gripper_closed_rad=0.0,
         velocity_limit_rad_s=N6_VLIMIT,
-        last_full_joints=list(_EDU6_HOME) + [1.75],
+        last_full_joints=list(_N6_HOME) + [1.75],
         last_arm_joints=None,
         motion_lock=None,
         should_stop=lambda: False,
@@ -116,7 +116,7 @@ def test_ctx_accessors_read_the_synthetic_profile():
     ctx = _n6_ctx()
     assert _n(ctx) == 6
     assert _roll_idx(ctx) == 5
-    assert _home_joints(ctx) == list(_EDU6_HOME)
+    assert _home_joints(ctx) == list(_N6_HOME)
     assert _gripper_open(ctx) == 1.75
     assert _gripper_closed(ctx) == 0.0
     assert _velocity_limit(ctx) == N6_VLIMIT
@@ -127,27 +127,27 @@ def test_home_handler_emits_7_wide_vectors():
     ctx = _n6_ctx(publisher=lambda chunk: published.extend(chunk))
     ctx.last_full_joints = [0.1, 0.9, -2.0, 0.05, 0.9, 0.1, 0.4]  # 7-wide live
     motion.home(ctx, {})
-    assert ctx.last_full_joints == list(_EDU6_HOME) + [0.4]  # gripper carried
-    assert ctx.last_arm_joints == list(_EDU6_HOME)
+    assert ctx.last_full_joints == list(_N6_HOME) + [0.4]  # gripper carried
+    assert ctx.last_arm_joints == list(_N6_HOME)
     assert all(len(q) == 7 for q, *_ in published)
-    assert published[-1][0] == pytest.approx(list(_EDU6_HOME) + [0.4])
+    assert published[-1][0] == pytest.approx(list(_N6_HOME) + [0.4])
 
 
 def test_gripper_handlers_use_profile_values():
     published: list = []
     ctx = _n6_ctx(publisher=lambda chunk: published.extend(chunk))
-    ctx.last_full_joints = list(_EDU6_HOME) + [0.3]
+    ctx.last_full_joints = list(_N6_HOME) + [0.3]
     motion.open_gripper(ctx, {})
-    assert ctx.last_full_joints == list(_EDU6_HOME) + [1.75]
+    assert ctx.last_full_joints == list(_N6_HOME) + [1.75]
     motion.close_gripper(ctx, {})
-    assert ctx.last_full_joints == list(_EDU6_HOME) + [0.0]
+    assert ctx.last_full_joints == list(_N6_HOME) + [0.0]
     assert ctx.last_commanded_close_rad == 0.0
 
 
 def test_check_grasp_held_reads_index_n():
     ctx = types.SimpleNamespace(
         num_arm_joints=N6,
-        get_follower_joints=lambda: list(_EDU6_HOME) + [0.9],
+        get_follower_joints=lambda: list(_N6_HOME) + [0.9],
         last_commanded_close_rad=None,
     )
     # 7-wide readback: index 6 is the gripper. With the OMX default threshold
@@ -159,7 +159,7 @@ def test_check_grasp_held_reads_index_n():
     try:
         assert motion.check_grasp_held(ctx) is True
         # a 6-wide readback on a 6-arm-joint rig is TOO SHORT → None
-        ctx.get_follower_joints = lambda: list(_EDU6_HOME)
+        ctx.get_follower_joints = lambda: list(_N6_HOME)
         assert motion.check_grasp_held(ctx) is None
     finally:
         motion.GRASP_SETTLE_S = prev
@@ -209,7 +209,7 @@ from physical_ai_server.workflow.workflow_manager import (  # noqa: E402
 
 
 class _FakeIK6:
-    """A 6-joint IK stub for width plumbing (no real edu6 solver until PR 3)."""
+    """A 6-joint IK stub for width plumbing (no shipped arm has 6 joints)."""
 
     def num_joints(self):
         return N6
@@ -226,45 +226,35 @@ class _FakeIK6:
 
 
 def test_sim_arm_n6_home_and_gripper_index():
-    home7 = list(_EDU6_HOME) + [1.75]
+    home7 = list(_N6_HOME) + [1.75]
     arm = SimArm(num_arm_joints=N6, home_full_joints=home7)
     assert arm.get_joints() == pytest.approx(home7)
     # A 7-wide publish caches 7-wide.
-    arm.publish([(list(_EDU6_HOME) + [0.5], 0.5)])
+    arm.publish([(list(_N6_HOME) + [0.5], 0.5)])
     assert len(arm.get_joints()) == 7
 
 
-def test_sim_arm_n6_held_override_lands_on_index_n_and_touches_nothing_else():
-    """The gripper channel of a 7-wide vector is index n=6, and a held override
-    must touch ONLY it.
-
-    MIGRATED off ``_FakeIK6`` to the REAL solver + the REAL edu6 gripper band
-    (2026-07-26). As written before, this test could not fail: it ran on the stub,
-    whose ``fk`` returns a CONSTANT (0.2, 0.0, 0.1) for every pose, and it
-    published an OMX-style NEGATIVE close of −0.5 against the OMX default
-    threshold — a value **outside edu6's legal 0…1.75 band** (the catalog
-    validator refuses a negative close for this family, and the driver clamps a
-    commanded −0.5 to 0.0), so it could never reach a real edu6 arm. Its own
-    comment deferred that to "PR 7", which has since shipped.
-
-    Measured: with the real solver the OLD body FAILS — the cube sat at the stub's
-    constant fk, 150 mm from the real HOME fingertip against a 60 mm capture
-    radius. It was green only because the stub pretended the arm stood on the
-    object. Geometry/held semantics live in
-    ``test_sim_arm_grasp_held_with_the_REAL_edu6_solver``; THIS test keeps the
-    narrow index/width contract, honestly."""
+def test_sim_arm_held_override_lands_on_index_n_and_touches_nothing_else():
+    """The gripper channel of a full vector is index n, and a held override must
+    touch ONLY it — on the REAL V1 solver + the REAL V1 claw band (n = 5, the
+    6-wide vector), with the object placed where the arm's fingertip ACTUALLY
+    is. A constant-``fk`` stub cannot prove this: it would pretend the arm stood
+    on the object. Geometry/held semantics live in
+    ``test_sim_arm_grasp_held_with_the_REAL_v1_solver``; THIS test keeps the
+    narrow index/width contract."""
     from physical_ai_server import robot_profiles
     from physical_ai_server.workflow.object_catalog import fixed_catalog
-    profile = robot_profiles.resolve('edu6_studio')
+    profile = robot_profiles.resolve('v1_studio')
+    n = profile.num_arm_joints
     solver = profile.build_ik()
-    close_rad = fixed_catalog('edu6_studio').recipe_for_type(
+    close_rad = fixed_catalog('v1_studio').recipe_for_type(
         'wuerfel').gripper_close_rad
     # Put the object where the arm's fingertip ACTUALLY is for the pose we publish.
     ox, oy = solver.base_axis_x + 0.16, 0.0
     grasp = solver.solve((ox, oy, 0.015),
                          roll=solver.base_yaw(ox, oy) + motion.GRASP_ROLL_RAD)
-    assert grasp is not None and len(grasp) == N6
-    arm = SimArm(ik=solver, num_arm_joints=N6,
+    assert grasp is not None and len(grasp) == n
+    arm = SimArm(ik=solver, num_arm_joints=n,
                  home_full_joints=list(profile.home_joints_rad)
                  + [profile.gripper_open_rad],
                  objects=[{'type': 'wuerfel', 'tag_id': 20, 'x': ox, 'y': oy,
@@ -274,9 +264,9 @@ def test_sim_arm_n6_held_override_lands_on_index_n_and_touches_nothing_else():
                  held_floor_rad=profile.sim_held_floor_rad)
     arm.publish([(list(grasp) + [close_rad], 0.5)])
     q = arm.get_joints()
-    assert len(q) == N6 + 1                       # gripper index == n
-    assert q[N6] != pytest.approx(close_rad)      # index n WAS overridden
-    assert q[:N6] == pytest.approx(list(grasp))   # ...and nothing else was
+    assert len(q) == n + 1                       # gripper index == n
+    assert q[n] != pytest.approx(close_rad)      # index n WAS overridden
+    assert q[:n] == pytest.approx(list(grasp))   # ...and nothing else was
 
 
 def test_path_guard_segment_blocked_slices_n_joints():
@@ -287,13 +277,13 @@ def test_path_guard_segment_blocked_slices_n_joints():
     the test. The real solver cannot do that — it returns ``None`` for a short
     vector, and ``segment_blocked`` treats ``None`` as "not blocked", so swapping
     the real solver in here would silently WEAKEN the check to a tautology.
-    Real edu6 geometry through ``segment_blocked`` is covered separately by
-    ``test_segment_blocked_is_world_framed_with_the_REAL_edu6_solver``."""
+    Real V1 geometry through ``segment_blocked`` is covered separately by
+    ``test_segment_blocked_is_world_framed_with_the_REAL_v1_solver``."""
     from physical_ai_server.workflow.path_guard import segment_blocked
     ik = _FakeIK6()
     zones = [{'min': [1.0, 1.0, 1.0], 'max': [1.1, 1.1, 1.1]}]  # far away
-    q_a = list(_EDU6_HOME) + [1.75]
-    q_b = [v + 0.05 for v in _EDU6_HOME] + [0.0]
+    q_a = list(_N6_HOME) + [1.75]
+    q_b = [v + 0.05 for v in _N6_HOME] + [0.0]
     # The _FakeIK6 asserts fk/link_points receive EXACTLY 6 joints.
     assert segment_blocked(ik, q_a, q_b, zones) is False
 
@@ -302,7 +292,7 @@ def test_workflow_manager_stamps_profile_onto_ctx():
     class _Profile:
         num_arm_joints = N6
         roll_joint_index = 5
-        home_joints_rad = _EDU6_HOME
+        home_joints_rad = _N6_HOME
         observe_pose_joints = None
         gripper_open_rad = 1.75
         gripper_closed_rad = 0.0
@@ -310,7 +300,7 @@ def test_workflow_manager_stamps_profile_onto_ctx():
 
     mgr = WorkflowManager(publisher=lambda chunk: None, arm_profile=_Profile())
     assert mgr._num_arm_joints == N6
-    assert mgr._home_full_joints == pytest.approx(list(_EDU6_HOME) + [1.75])
+    assert mgr._home_full_joints == pytest.approx(list(_N6_HOME) + [1.75])
     # Default (no profile) stays OMX.
     mgr5 = WorkflowManager(publisher=lambda chunk: None)
     assert mgr5._num_arm_joints == 5
@@ -336,9 +326,9 @@ def test_grep_guard_no_width_literals_in_migrated_modules():
     ``[4]/[5]/[6]/[7]``, ``range(5|6|7)``, and list-replication width
     multiplications ``* 5 / * 6 / * 7``.
 
-    Extended (edu6 audit finding 7) from the original ``[:5]/[:6]/[5]/[6]/[4]/
+    Extended (an audit finding) from the original ``[:5]/[:6]/[5]/[6]/[4]/
     range(5|6)`` to (a) the ``* N`` multiplication family and the ``[:7]/[7]``
-    (edu6 n+1 / n+2) family, and (b) two more migrated modules —
+    (6-DOF n+1 / n+2) family, and (b) two more migrated modules —
     ``handlers/perception_blocks.py`` and ``communication/communicator.py``.
 
     Two allowed survivors, each width-correct-by-construction and documented at
@@ -399,9 +389,9 @@ def test_communicator_follower_joint_order_is_profile_settable():
             "'joint5', 'gripper_joint_1')") in src
 
 
-def test_communicator_reorders_7_joint_message_for_edu6_order():
+def test_communicator_reorders_7_joint_message_for_a_6_dof_order():
     """Behavioral (object.__new__ + module-stub, per test_follower_joint_order_c2):
-    a Communicator carrying a 7-name edu6 follower order reorders a PERMUTED
+    a Communicator carrying a synthetic 7-name follower order reorders a PERMUTED
     7-joint JointState back to canonical order — returning exactly n+1 = 7 values
     (the §16.4 width choke point) — and fails LOUD (None) on a partial message.
     Exercises the real get_latest_follower_joints reorder, not just its source."""
@@ -435,24 +425,23 @@ def test_communicator_reorders_7_joint_message_for_edu6_order():
     assert c_partial.get_latest_follower_joints() is None
 
 
-def test_jog_cartesian_keeps_the_wrist_with_the_REAL_edu6_solver():
-    """REGRESSION GUARD (2026-07-25) — and a deliberate departure from the
-    stub-based n=6 tests around it.
+def test_jog_cartesian_keeps_the_wrist_with_the_REAL_v1_solver():
+    """REGRESSION GUARD — and a deliberate departure from the stub-based n=6
+    tests around it.
 
     ``_FakeIK6`` exists to prove WIDTH plumbing; it has no ``solve()`` at all,
-    so nothing here ever exercised a real edu6 CONVENTION. That gap hid a live
-    bug: the Cartesian jog passed the roll JOINT value into ``solve(roll=...)``,
-    which is the identity on the OMX (``theta5 = roll``) but not on edu6
-    (``q6 = fold(wrap(π − roll))``). Every X/Y/Z jog step MIRRORED the wrist —
-    up to 178°, rotating a held object with it.
+    so it never exercises a real arm CONVENTION. The Cartesian jog once passed
+    the roll JOINT value into ``solve(roll=...)``, which is the identity on the
+    OMX (``theta5 = roll``) but not on the V1 (``q5 = fold(wrap(−roll))``):
+    every X/Y/Z jog step would MIRROR the wrist, rotating a held object with it.
 
-    So this one drives the ast-extracted jog through the REAL ``Edu6IKSolver``
+    So this one drives the ast-extracted jog through the REAL ``V1IKSolver``
     and asserts the contract a Cartesian jog actually owes the student: the tool
     moves by the requested delta, and the wrist does not move at all."""
     import ast as _ast
     import textwrap
     import numpy as np
-    from physical_ai_server.workflow.edu6_ik import Edu6IKSolver
+    from physical_ai_server.workflow.v1_ik import V1IKSolver
 
     src_path = (Path(__file__).resolve().parents[1]
                 / 'physical_ai_server' / 'physical_ai_server.py')
@@ -465,14 +454,15 @@ def test_jog_cartesian_keeps_the_wrist_with_the_REAL_edu6_solver():
             exec(compile(textwrap.dedent(_ast.get_source_segment(source, node)),
                          str(src_path), 'exec'), ns)  # noqa: S102
 
-    real_ik = Edu6IKSolver()
+    real_ik = V1IKSolver()
+    n = 5
 
     class _P:
-        num_arm_joints = N6
-        roll_joint_index = 5
-        gripper_open_rad = 1.75
+        num_arm_joints = n
+        roll_joint_index = 4
+        gripper_open_rad = 0.90
         gripper_closed_rad = 0.0
-        home_joints_rad = _EDU6_HOME
+        home_joints_rad = (0.0, 0.64, 1.48, 0.90, 0.0)
 
     class _Stub:
         _arm_profile = _P()
@@ -493,13 +483,11 @@ def test_jog_cartesian_keeps_the_wrist_with_the_REAL_edu6_solver():
         return math.atan2(v[1], v[0])
 
     # Start from a real grasp pose with a NON-ZERO wrist (zero would hide a
-    # mirror: −0 == +0), including values outside the ±90° jaw-fold window,
-    # which the student can reach with the joint-6 jog.
-    for roll_deg in (50.0, -35.0, 120.0, -150.0):
-        start = list(real_ik.solve((0.15, 0.0, 0.02),
-                                   roll=math.radians(roll_deg)))
-        start[5] = math.radians(roll_deg)      # a jogged wrist, verbatim
-        live = start + [1.0]                   # 7-wide follower readback
+    # mirror: −0 == +0), across the whole ±90° roll window.
+    for wrist_deg in (50.0, -35.0, 80.0, -85.0):
+        start = list(real_ik.solve((0.15, 0.0, 0.02), roll=0.0))
+        start[4] = math.radians(wrist_deg)     # a jogged wrist, verbatim
+        live = start + [0.5]                   # 6-wide follower readback
         _R, t0 = real_ik.fk(start)
         az0 = jaw_azimuth(start)
 
@@ -508,29 +496,34 @@ def test_jog_cartesian_keeps_the_wrist_with_the_REAL_edu6_solver():
                                         delta=delta, target_x=0.0,
                                         target_y=0.0, target_z=0.0)
             q, world = stub._compute_jog_target('cartesian', req, live)
-            assert len(q) == 7
+            assert len(q) == n + 1
 
             # 1. the wrist must not move — the whole point of a Cartesian jog
-            assert q[5] == pytest.approx(start[5], abs=1e-9), (
-                f'wrist moved {math.degrees(q[5] - start[5]):.1f}° on a '
-                f'{"xyz"[axis]} jog from q6={roll_deg}°')
+            assert q[4] == pytest.approx(start[4], abs=1e-9), (
+                f'wrist moved {math.degrees(q[4] - start[4]):.1f}° on a '
+                f'{"xyz"[axis]} jog from q5={wrist_deg}°')
             # 2. the jaw must rotate EXACTLY with the base and not one degree
             #    more. A Y-jog re-aims joint1, and with the wrist joint held the
-            #    tool swings with the arm (χ = q1 + q6 − π/2) — that is the OMX
-            #    behaviour this jog mirrors, not a bug. So the sharp assertion
-            #    is Δχ == Δq1: the wrist contributed NOTHING. Under the old bug
-            #    q6 flipped sign, adding −2·q6 on top of Δq1.
-            d = abs((jaw_azimuth(q[:6]) - az0) - (q[0] - start[0])) % math.pi
-            assert min(d, math.pi - d) < 1e-9, (
+            #    tool swings with the arm — that is the OMX behaviour this jog
+            #    mirrors, not a bug. joint1's axis is (0, 0, −1) on this arm, so
+            #    the base AZIMUTH moves by −Δq1, and the sharp assertion is
+            #    Δχ == −Δq1: the wrist contributed NOTHING. A mirrored wrist
+            #    would add −2·q5 on top (≥ 1.2 rad here). The tolerance is the
+            #    CAD's right-angle rounding (the chain is planar only to ~1e-6;
+            #    see v1_ik._FK_TOL_M), not slack for a mirror.
+            d = abs((jaw_azimuth(q[:n]) - az0) + (q[0] - start[0])) % math.pi
+            assert min(d, math.pi - d) < 1e-6, (
                 'the wrist contributed rotation of its own')
-            # 3. ...and the jog must still actually move the tool
-            _R2, t1 = real_ik.fk(q[:6])
+            # 3. ...and the jog must still actually move the tool — to the
+            #    solver's own acceptance (``v1_ik._FK_TOL_M``, 1e-5 m: the same
+            #    CAD rounding; measured worst 2.4e-6 m).
+            _R2, t1 = real_ik.fk(q[:n])
             moved = np.asarray(t1) - np.asarray(t0)
-            assert moved[axis] == pytest.approx(delta, abs=1e-6), (
+            assert moved[axis] == pytest.approx(delta, abs=1e-5), (
                 f'{"xyz"[axis]} step not achieved: {moved}')
             for other in (0, 1, 2):
                 if other != axis:
-                    assert abs(moved[other]) < 1e-6, 'jog leaked into another axis'
+                    assert abs(moved[other]) < 1e-5, 'jog leaked into another axis'
 
 
 def test_jog_compute_target_n6_profile():
@@ -554,7 +547,7 @@ def test_jog_compute_target_n6_profile():
         roll_joint_index = 5
         gripper_open_rad = 1.75
         gripper_closed_rad = 0.0
-        home_joints_rad = _EDU6_HOME
+        home_joints_rad = _N6_HOME
 
     class _Stub:
         _arm_profile = _P()
@@ -568,14 +561,14 @@ def test_jog_compute_target_n6_profile():
     stub = _Stub()
     stub._compute_jog_target = types.MethodType(ns['_compute_jog_target'], stub)
     stub._jog_solve_floor = types.MethodType(ns['_jog_solve_floor'], stub)
-    live = list(_EDU6_HOME) + [1.0]  # 7-wide
+    live = list(_N6_HOME) + [1.0]  # 7-wide
 
     req = types.SimpleNamespace(mode='joint', index=6, delta=0.5,
                                 target_x=0.0, target_y=0.0, target_z=0.0)
     q, _world = stub._compute_jog_target('joint', req, live)
     assert len(q) == 7
     assert q[6] == pytest.approx(1.5)          # gripper channel moved
-    assert q[:6] == pytest.approx(list(_EDU6_HOME))
+    assert q[:6] == pytest.approx(list(_N6_HOME))
 
     # Gripper band: profile 0..1.75 — a delta past the top REFUSES.
     req_over = types.SimpleNamespace(mode='joint', index=6, delta=1.0,
@@ -600,12 +593,12 @@ def test_n6_end_to_end_widths_through_home_move_gripper_replay(monkeypatch):
     recording. Asserts every emitted arm command is n+1 = 7 wide throughout and
     the recording is n+2 = 8 wide (extract_points accepts it at n=6).
 
-    A minimal fixed 6-DOF fake IK stands in for the geometry (there is no real
-    edu6 solver in the test env until PR 3) — enough for move_to's single solve.
-    The GAP: the grasp corridor / AprilTag perception pipeline is out of scope
-    here because it needs a geometrically-consistent solver (covered separately
-    by the edu6 IK oracle, test_edu6_ik.py); this test's job is the WIDTH
-    plumbing across an assembled multi-block run, not grasp geometry."""
+    A minimal fixed 6-DOF fake IK stands in for the geometry (no shipped arm
+    has 6 joints) — enough for move_to's single solve. The GAP: the grasp
+    corridor / AprilTag perception pipeline is out of scope here because it
+    needs a geometrically-consistent solver (covered on the real arms by their
+    own IK oracles, e.g. test_v1_ik.py); this test's job is the WIDTH plumbing
+    across an assembled multi-block run, not grasp geometry."""
     import json
     import time
 
@@ -631,7 +624,7 @@ def test_n6_end_to_end_widths_through_home_move_gripper_replay(monkeypatch):
             return N6
 
         def solve(self, target_xyz=None, seed=None, free_yaw=True, roll=None):
-            return list(_EDU6_HOME)          # a reachable fixed 6-joint pose
+            return list(_N6_HOME)          # a reachable fixed 6-joint pose
 
         def fk(self, joints):
             import numpy as np
@@ -640,7 +633,7 @@ def test_n6_end_to_end_widths_through_home_move_gripper_replay(monkeypatch):
 
     profile = types.SimpleNamespace(
         num_arm_joints=N6,
-        home_joints_rad=_EDU6_HOME,
+        home_joints_rad=_N6_HOME,
         roll_joint_index=5,
         gripper_open_rad=1.75,
         gripper_closed_rad=0.0,
@@ -650,7 +643,7 @@ def test_n6_end_to_end_widths_through_home_move_gripper_replay(monkeypatch):
     )
 
     captured: list = []
-    home7 = list(_EDU6_HOME) + [1.75]
+    home7 = list(_N6_HOME) + [1.75]
     sim_arm = SimArm(joint_state_sink=captured.append, ik=_IK6(),
                      num_arm_joints=N6, home_full_joints=home7)
 
@@ -714,31 +707,26 @@ def test_n6_end_to_end_widths_through_home_move_gripper_replay(monkeypatch):
     assert len(captured) > 20, 'suspiciously short n6 e2e stream'
 
 
-# ── slice 2e: the reroute ladder + sim on the REAL edu6 solver ────────────────
-# §8.4 blind-spot closure (2026-07-26). ``_FakeIK6`` above has no ``solve()``, so
-# every n=6 test in slices 2a-2d proves WIDTH plumbing and no CONVENTION or
-# GEOMETRY. That gap already hid one live bug (the Cartesian jog wrist mirror,
-# guarded by test_jog_cartesian_keeps_the_wrist_with_the_REAL_edu6_solver).
-# Driving path_guard and SimArm through the REAL Edu6IKSolver + the REAL registry
-# profile found two more, both edu6-only and both invisible to a green suite:
+# ── slice 2e: the reroute ladder + sim on the REAL V1 solver ──────────────────
+# ``_FakeIK6`` above has no ``solve()``, so every n=6 test in slices 2a-2d proves
+# WIDTH plumbing and no CONVENTION or GEOMETRY. Driving path_guard and SimArm
+# through a REAL solver + the REAL registry profile is what catches the two
+# defect classes a stub cannot see:
 #
 #   1. path_guard's four reroute-geometry constants are OMX-SIZED heights and
-#      radii. edu6's top-down TCP ceiling is ~0.065 m (joint5's +110° relief
-#      binds, not the 2R annulus), so ALL THREE swing heights and the 0.18 m
-#      cruise are unreachable: 0/144 base-swing via candidates solved, i.e. BOTH
-#      reroute rungs were structurally dead and every zone-blocked transit fell
-#      through to the German refusal. Now per-profile (ArmProfile.swing_* /
+#      radii; on a shorter arm an unreachable via grid leaves a rung
+#      structurally dead and every zone-blocked transit falls through to the
+#      German refusal. They are per-profile (ArmProfile.swing_* /
 #      safe_travel_z_m / tool_clear_m; None → the module constants → OMX
 #      unchanged).
-#   2. plan_safe_route's roll=None fallback took the roll JOINT as the solver's
-#      ``roll`` argument — the same defect class as the jog mirror, in the one
-#      site that fix did not reach.
+#   2. plan_safe_route's roll=None fallback must convert the roll JOINT into the
+#      solver's ``roll`` argument — the same defect class as the jog mirror.
 
-_PROFILE_ID = 'edu6_studio'
+_PROFILE_ID = 'v1_studio'
 
 
-def _real_edu6_ctx(**kw):
-    """A ctx carrying the REAL Edu6IKSolver and the REAL registry geometry.
+def _real_v1_ctx(**kw):
+    """A ctx carrying the REAL V1IKSolver and the REAL registry geometry.
 
     Deliberately NOT the synthetic ``_n6_ctx``/``_FakeIK6`` pair: the whole point
     of this slice is that the numbers and the conventions are real."""
@@ -806,75 +794,14 @@ def test_path_guard_geometry_defaults_to_the_omx_constants():
         assert path_guard._swing_heights(bare) == path_guard._SWING_HEIGHTS
         assert path_guard._swing_radii(bare) == path_guard._SWING_RADII
     # ...and a profile stamp WINS.
-    ctx = _real_edu6_ctx()
-    assert path_guard._safe_travel_z(ctx) == pytest.approx(0.06)
+    ctx = _real_v1_ctx()
+    assert path_guard._safe_travel_z(ctx) == pytest.approx(0.075)
     assert path_guard._tool_clear(ctx) == pytest.approx(0.0)
-    assert path_guard._swing_heights(ctx) == (0.03, 0.05, 0.02)
-    assert path_guard._swing_radii(ctx) == (0.14, 0.18, 0.10)
+    assert path_guard._swing_heights(ctx) == (0.05, 0.07, 0.03)
+    assert path_guard._swing_radii(ctx) == (0.18, 0.28, 0.14)
 
 
-def test_base_swing_grid_is_unreachable_on_edu6_with_the_omx_heights():
-    """The defect as a number: with the shipped OMX grid NOT ONE of the 3x3x16
-    base-swing via candidates is solvable on edu6, so rung 3 could never return a
-    route however the zones were drawn. The profile grid fixes it, and the OMX
-    grid must stay fully solvable on the OMX."""
-    from physical_ai_server.workflow import path_guard
-    ctx = _real_edu6_ctx()
-    omx_ok, total = _count_solvable_vias(
-        ctx, path_guard._SWING_HEIGHTS, path_guard._SWING_RADII)
-    assert omx_ok == 0, (
-        f'expected the OMX grid to be wholly unreachable on edu6, got '
-        f'{omx_ok}/{total} — re-derive the profile values if the arm changed')
-    prof_ok, prof_total = _count_solvable_vias(
-        ctx, path_guard._swing_heights(ctx), path_guard._swing_radii(ctx))
-    # Tight, not merely non-zero: measured 64/144 (8 of 16 azimuths — joint 1 is
-    # ±90°, so only the front half is ever reachable — × 8 solvable (z, r) pairs
-    # of the 9, since z=0.05 r=0.18 solves 0/16). A loose `>= 24` would let a
-    # degradation to 25 pass silently.
-    assert prof_ok == 64, (
-        f'the edu6 swing grid solves {prof_ok}/{prof_total}, expected 64 — '
-        f're-derive the profile heights/radii against the solver if the arm or '
-        f'the joint limits changed')
-    # OMX control: the module constants are correct FOR THE OMX.
-    omx_ctx = _omx_ctx_for_path_guard()
-    ok, tot = _count_solvable_vias(
-        omx_ctx, path_guard._swing_heights(omx_ctx),
-        path_guard._swing_radii(omx_ctx))
-    assert ok == tot, f'OMX swing grid regressed: {ok}/{tot}'
-
-
-def test_lift_and_travel_cruise_needs_the_profile_tool_clearance_on_edu6():
-    """Rung 2 on edu6: with the OMX 0.05 m tool clearance even a FLAT zone
-    demands a 0.105 m cruise this arm cannot reach — dead for every zone. edu6's
-    EE frame IS its fingertip TCP and its ``link_points`` appends nothing below it
-    (measured: OMX 40 mm of appended tool-tip samples, edu6 0 mm), so the
-    profile's 0.0 makes a flat zone routable again."""
-    from physical_ai_server.workflow import path_guard
-    ctx = _real_edu6_ctx()
-    solver = ctx.ik
-    flat_zone = [{'min': [solver.base_axis_x + 0.15, -0.02, 0.0],
-                  'max': [solver.base_axis_x + 0.19, 0.02, 0.0]}]
-    columns = [(solver.base_axis_x + 0.14, -0.05),
-               (solver.base_axis_x + 0.14, 0.05)]
-    clear_omx = path_guard._zone_clear_top(
-        flat_zone, path_guard.ZONE_MARGIN_M, path_guard.LINK_RADIUS_M)
-    clear_prof = path_guard._zone_clear_top(
-        flat_zone, path_guard.ZONE_MARGIN_M, path_guard.LINK_RADIUS_M,
-        path_guard._tool_clear(ctx))
-    assert clear_prof == pytest.approx(clear_omx - path_guard._TOOL_CLEAR_M)
-    # OMX geometry on the edu6 arm: no reachable cruise at all.
-    assert path_guard._reachable_cruise_z(
-        ctx, columns, clear_omx, path_guard.SAFE_TRAVEL_Z,
-        motion.GRASP_ROLL_RAD) is None
-    # Profile geometry: reachable, and inside the requested band.
-    cruise = path_guard._reachable_cruise_z(
-        ctx, columns, clear_prof, path_guard._safe_travel_z(ctx),
-        motion.GRASP_ROLL_RAD)
-    assert cruise is not None, 'edu6 cannot cruise over even a flat zone'
-    assert clear_prof - 1e-9 <= cruise <= path_guard._safe_travel_z(ctx) + 1e-9
-
-
-def test_edu6_roll_arg_vs_raw_joint_characterises_the_mirror():
+def test_v1_roll_arg_vs_raw_joint_characterises_the_mirror():
     """CHARACTERISATION, not a guard — it documents the SIZE of the wrist mirror
     that the raw-joint fallback produced, so the numbers in CLAUDE.md and the
     handoff doc are pinned to something executable.
@@ -883,28 +810,27 @@ def test_edu6_roll_arg_vs_raw_joint_characterises_the_mirror():
     calls ``plan_safe_route``, so reverting the fallback does NOT fail it. The
     real guard for that is
     ``test_plan_safe_route_roll_none_converts_through_the_solver``, which records
-    what the live ladder asks for. (Verified 2026-07-26: of 12 mutations, this
-    test is killed by none of the call-site reverts — hence the rename.)"""
+    what the live ladder asks for."""
     from physical_ai_server.workflow import path_guard
-    ctx = _real_edu6_ctx()
+    ctx = _real_v1_ctx()
     solver = ctx.ik
     target = (solver.base_axis_x + 0.14, 0.04, 0.03)
     via_xyz = (solver.base_axis_x + 0.10, 0.0, 0.03)
     for wrist_deg in (50.0, -35.0, 20.0):
         q_end = solver.solve(
             target, roll=motion.GRASP_ROLL_RAD + math.radians(wrist_deg))
-        assert q_end is not None and abs(q_end[5]) > 1e-3
+        assert q_end is not None and abs(q_end[4]) > 1e-3
         # what plan_safe_route now computes for roll=None
         via_fixed = path_guard._try_via(ctx, via_xyz, motion._roll_arg(ctx, q_end))
-        # what it used to compute (the raw joint value)
-        via_bug = path_guard._try_via(ctx, via_xyz, float(q_end[5]))
+        # what a raw-joint fallback would compute
+        via_bug = path_guard._try_via(ctx, via_xyz, float(q_end[4]))
         assert via_fixed is not None and via_bug is not None
-        assert via_fixed[5] == pytest.approx(q_end[5], abs=1e-9), (
+        assert via_fixed[4] == pytest.approx(q_end[4], abs=1e-9), (
             'the via wrist must match q_end so the reroute does not spin it')
-        assert abs(via_bug[5] - q_end[5]) == pytest.approx(
-            2 * abs(q_end[5]), abs=1e-9), (
-            'expected the old fallback to MIRROR the wrist — if this no longer '
-            'holds, the edu6 roll↔joint6 mapping changed')
+        assert abs(via_bug[4] - q_end[4]) == pytest.approx(
+            2 * abs(q_end[4]), abs=1e-9), (
+            'expected the raw-joint fallback to MIRROR the wrist — if this no '
+            'longer holds, the V1 roll↔joint5 mapping changed')
     # OMX: roll_from_joints is the identity, so the fallback is unchanged there.
     omx_ctx = _omx_ctx_for_path_guard()
     for wrist in (-3.0, -1.0, 0.0, 1.0, 3.0):
@@ -913,10 +839,10 @@ def test_edu6_roll_arg_vs_raw_joint_characterises_the_mirror():
         assert motion._roll_arg(omx_ctx, q_end) == pytest.approx(wrist, abs=1e-12)
 
 
-def test_sim_arm_grasp_held_with_the_REAL_edu6_solver():
+def test_sim_arm_grasp_held_with_the_REAL_v1_solver():
     """SimArm's held simulation on the real arm: the real FK must land on the
     placed object's world XY (a URDF-framed FK would miss by ~2·x), the RADIAN
-    gripper band must classify a close correctly (edu6 closes DOWNWARD from 1.75,
+    claw band must classify a close correctly (the V1 closes DOWNWARD from 0.90,
     the OMX close is NEGATIVE), and the blocked readback must clear
     ``check_grasp_held``'s per-object threshold."""
     from physical_ai_server import robot_profiles
@@ -929,7 +855,7 @@ def test_sim_arm_grasp_held_with_the_REAL_edu6_solver():
     assert grasp is not None
     # The real FK must agree with the world frame the sim objects live in.
     tcp = solver.fk(grasp)[1]
-    assert math.hypot(float(tcp[0]) - ox, float(tcp[1]) - oy) < 1e-6
+    assert math.hypot(float(tcp[0]) - ox, float(tcp[1]) - oy) < 1e-5   # _FK_TOL_M
 
     def arm_with(objects):
         return SimArm(ik=solver, num_arm_joints=p.num_arm_joints,
@@ -942,7 +868,7 @@ def test_sim_arm_grasp_held_with_the_REAL_edu6_solver():
 
     on_object = [{'type': 'wuerfel', 'tag_id': 20, 'x': ox, 'y': oy, 'yaw': 0.0}]
     # Read the close out of the REAL per-family catalog rather than hardcoding
-    # it: edu6 closes DOWNWARD inside a 0…1.75 rad band (1.0 for `wuerfel`),
+    # it: the V1 closes DOWNWARD inside a 0…0.90 rad band (0.05 for `wuerfel`),
     # where the OMX value for the same object is −0.5. A magic number here would
     # silently stop tracking the catalog.
     from physical_ai_server.workflow.object_catalog import fixed_catalog
@@ -952,18 +878,19 @@ def test_sim_arm_grasp_held_with_the_REAL_edu6_solver():
         f'catalog close {close_rad} is not a close command for this gripper')
     threshold = close_rad + p.grasp_held_margin_rad
 
+    n = p.num_arm_joints
     arm = arm_with(on_object)
     arm.publish([(list(grasp) + [close_rad], 0.5)])
     held = arm.get_joints()
-    assert len(held) == p.num_arm_joints + 1
-    assert held[6] > threshold, (
-        f'blocked jaw {held[6]:.3f} does not clear the per-object held '
+    assert len(held) == n + 1
+    assert held[n] > threshold, (
+        f'blocked jaw {held[n]:.3f} does not clear the per-object held '
         f'threshold {threshold:.3f} — a sim grasp would never report HELD')
-    assert held[:6] == pytest.approx(list(grasp)), 'arm joints must be untouched'
+    assert held[:n] == pytest.approx(list(grasp)), 'arm joints must be untouched'
 
     # An OPEN command is not a close: the readback passes through verbatim.
     arm.publish([(list(grasp) + [p.gripper_open_rad], 0.6)])
-    assert arm.get_joints()[6] == pytest.approx(p.gripper_open_rad)
+    assert arm.get_joints()[n] == pytest.approx(p.gripper_open_rad)
 
     # A close with nothing under the jaws is a MISS, not a phantom hold. Probe
     # just OUTSIDE the capture radius rather than far away: at 0.20 m (3.3× the
@@ -974,23 +901,23 @@ def test_sim_arm_grasp_held_with_the_REAL_edu6_solver():
     just_outside = arm_with([{'type': 'wuerfel', 'tag_id': 20,
                               'x': ox + radius * 1.05, 'y': oy, 'yaw': 0.0}])
     just_outside.publish([(list(grasp) + [close_rad], 0.5)])
-    assert just_outside.get_joints()[6] == pytest.approx(close_rad), (
+    assert just_outside.get_joints()[n] == pytest.approx(close_rad), (
         'an object just outside the capture radius produced a phantom hold')
     # ...and just INSIDE it still holds, so the boundary is pinned from both sides.
     just_inside = arm_with([{'type': 'wuerfel', 'tag_id': 20,
                              'x': ox + radius * 0.95, 'y': oy, 'yaw': 0.0}])
     just_inside.publish([(list(grasp) + [close_rad], 0.5)])
-    assert just_inside.get_joints()[6] > threshold
+    assert just_inside.get_joints()[n] > threshold
 
 
-def test_segment_blocked_is_world_framed_with_the_REAL_edu6_solver():
-    """``path_guard`` tests zone boxes against ``ik.link_points``. edu6 is solved
+def test_segment_blocked_is_world_framed_with_the_REAL_v1_solver():
+    """``path_guard`` tests zone boxes against ``ik.link_points``. The V1 is solved
     in a WORLD frame that is the URDF frame rotated π about Z, so a link_points
     that forgot the rotation would check the mirrored half of the table: zones
     would be missed and phantom zones hit. The π-rotated twin box is the sharp
     assertion — it must NOT block."""
     from physical_ai_server.workflow import path_guard
-    ctx = _real_edu6_ctx()
+    ctx = _real_v1_ctx()
     solver = ctx.ik
     qa = solver.solve((solver.base_axis_x + 0.16, -0.06, 0.03),
                       roll=motion.GRASP_ROLL_RAD)
@@ -1019,7 +946,7 @@ def test_plan_base_swing_asks_the_solver_for_the_PROFILE_heights_and_radii():
     Records every via candidate the real ``_plan_base_swing`` asks for and
     asserts the height/radius SET is the profile's, not the OMX module grid."""
     from physical_ai_server.workflow import path_guard
-    ctx = _real_edu6_ctx()
+    ctx = _real_v1_ctx()
     asked: list[tuple[float, float, float]] = []
     original = path_guard._try_via
     try:
@@ -1049,10 +976,10 @@ def test_plan_base_swing_asks_the_solver_for_the_PROFILE_heights_and_radii():
 def test_plan_lift_and_travel_uses_the_profile_cruise_and_tool_clearance():
     """CALL-SITE guard for rung 2: records the ``(clear_z, ceil_z)`` the real
     ``_plan_lift_and_travel`` hands ``_reachable_cruise_z``. ``ceil_z`` must be
-    the profile cruise (0.06, not the OMX 0.18) and ``clear_z`` must be computed
+    the profile cruise (0.075, not the OMX 0.18) and ``clear_z`` must be computed
     with the profile tool clearance (0.0, not the OMX 0.05)."""
     from physical_ai_server.workflow import path_guard
-    ctx = _real_edu6_ctx()
+    ctx = _real_v1_ctx()
     solver = ctx.ik
     start = solver.solve((solver.base_axis_x + 0.14, -0.05, 0.03),
                          roll=motion.GRASP_ROLL_RAD)
@@ -1077,9 +1004,8 @@ def test_plan_lift_and_travel_uses_the_profile_cruise_and_tool_clearance():
         path_guard._reachable_cruise_z = original
     assert len(seen) == 1, f'expected one cruise query, got {seen}'
     clear_z, ceil_z = seen[0]
-    assert ceil_z == pytest.approx(0.06), (
-        f'lift-and-travel asked to cruise at {ceil_z} — the OMX 0.18 is '
-        f'unreachable on edu6')
+    assert ceil_z == pytest.approx(0.075), (
+        f'lift-and-travel asked to cruise at {ceil_z}, not the profile cruise')
     inflated_top = zone_top + path_guard.LINK_RADIUS_M + path_guard.ZONE_MARGIN_M
     assert clear_z == pytest.approx(inflated_top + path_guard._CLEAR_EPS_M), (
         f'clear_z {clear_z} still carries an OMX tool clearance')
@@ -1094,15 +1020,14 @@ def test_plan_safe_route_roll_none_converts_through_the_solver():
     via code; whether it ultimately routes or refuses is irrelevant — the
     assertion is on the roll it asked for.
 
-    The ±0.06 m endpoint spread this used originally was WIDENED to ±0.09 m on
-    2026-07-26: zones inflate by 50 mm per face, so a ±20 mm box centred between
-    endpoints only 60 mm out actually SWALLOWS both of them, and the ladder now
-    short-circuits that provably-hopeless case with its own German refusal
-    (``path_guard._static_overlap_refusal``) before any via is solved. ±0.09 m
-    keeps the direct rung blocked with both endpoints clear of the inflated box,
-    which is the scenario this test was always trying to describe."""
+    The endpoints sit ±0.09 m out: zones inflate by 50 mm per face, so a ±20 mm
+    box centred between endpoints only 60 mm out would SWALLOW both of them, and
+    the ladder short-circuits that provably-hopeless case with its own German
+    refusal (``path_guard._static_overlap_refusal``) before any via is solved.
+    ±0.09 m keeps the direct rung blocked with both endpoints clear of the
+    inflated box."""
     from physical_ai_server.workflow import path_guard
-    ctx = _real_edu6_ctx()
+    ctx = _real_v1_ctx()
     solver = ctx.ik
     _spread = 0.09
     start = solver.solve((solver.base_axis_x + 0.14, -_spread, 0.03),
@@ -1112,7 +1037,7 @@ def test_plan_safe_route_roll_none_converts_through_the_solver():
             (solver.base_axis_x + 0.14, _spread, 0.03),
             roll=motion.GRASP_ROLL_RAD + math.radians(wrist_deg))
         assert start is not None and end is not None
-        assert abs(end[5]) > 1e-3, 'need a NON-zero wrist or a mirror hides'
+        assert abs(end[4]) > 1e-3, 'need a NON-zero wrist or a mirror hides'
         q_start = list(start) + [ctx.gripper_open_rad]
         q_end = list(end) + [ctx.gripper_open_rad]
         mid = solver.fk([(a + b) / 2.0 for a, b in zip(start, end)])[1]
@@ -1142,8 +1067,8 @@ def test_plan_safe_route_roll_none_converts_through_the_solver():
         assert all(r == pytest.approx(expected, abs=1e-12) for r in rolls), (
             f'vias solved with {sorted(set(rolls))}, expected {expected}')
         # And prove that is NOT the joint value (which is what the bug passed).
-        assert abs(expected - float(q_end[5])) > math.radians(30), (
-            'roll and joint6 must differ here or the test cannot detect the bug')
+        assert abs(expected - float(q_end[4])) > math.radians(30), (
+            'roll and joint5 must differ here or the test cannot detect the bug')
 
 
 def test_workflow_manager_stamps_every_profile_field_onto_the_REAL_ctx(monkeypatch):
@@ -1152,12 +1077,11 @@ def test_workflow_manager_stamps_every_profile_field_onto_the_REAL_ctx(monkeypat
     ``path_guard`` reads its per-arm geometry off ``ctx``, and the ONLY thing that
     puts it there on a real run is the ``WorkflowContext(...)`` construction in
     ``WorkflowManager.start``. Every other test in this file builds its ctx
-    DIRECTLY from the profile (``_real_edu6_ctx``) or from a hand-written
-    namespace, so none of them touches that line. Measured 2026-07-26: replacing
-    all four new stamps with ``None``, or a ONE-CHARACTER typo in a getattr key
-    (``'swing_heights_m'`` → ``'swing_height_m'``), silently reverts the entire
-    reroute fix — edu6's ladder is structurally dead again — and the whole suite
-    stays green at 723 passed.
+    DIRECTLY from the profile (``_real_v1_ctx``) or from a hand-written
+    namespace, so none of them touches that line. Replacing all four geometry
+    stamps with ``None``, or a ONE-CHARACTER typo in a getattr key
+    (``'swing_heights_m'`` → ``'swing_height_m'``), would silently revert the
+    per-arm reroute geometry with the rest of the suite green.
 
     The hole was pre-existing and systemic (``velocity_limit_rad_s`` and
     ``grasp_held_margin_rad`` had it too), so this test covers EVERY
@@ -1228,9 +1152,9 @@ def test_workflow_manager_stamps_every_profile_field_onto_the_REAL_ctx(monkeypat
             f'{expected!r} — the stamp is wired to the wrong field (a typo in a '
             f'getattr key reads as None and silently reverts the behaviour)')
 
-    # The four geometry values must be the REAL edu6 numbers, not None: a None
+    # The four geometry values must be the REAL V1 numbers, not None: a None
     # here resolves to path_guard's OMX module constants, which are exactly the
-    # unreachable values this profile exists to override.
+    # values this profile exists to override.
     assert captured['safe_travel_z_m'] is not None
     assert captured['tool_clear_m'] is not None
     assert captured['swing_heights_m'] is not None
@@ -1267,7 +1191,7 @@ def test_workflow_manager_stamps_every_profile_field_onto_the_REAL_ctx(monkeypat
     assert path_guard._swing_radii(omx_ctx) == path_guard._SWING_RADII
 
 
-# ── slice 2f: the place path on the REAL edu6 arm (2026-07-26 sim-sweep fixes) ─
+# ── slice 2f: the place path on the REAL V1 arm (2026-07-26 sim-sweep fixes) ──
 
 @pytest.fixture()
 def _fast_place_pacing(monkeypatch):
@@ -1288,10 +1212,10 @@ def _fast_place_pacing(monkeypatch):
     yield
 
 
-def _edu6_place_ctx():
+def _v1_place_ctx():
     """A ctx that can actually run `drop_at`: real solver + real profile, a
     recording publisher, a measured table, and a log sink."""
-    ctx = _real_edu6_ctx()
+    ctx = _real_v1_ctx()
     ctx.published = []
     ctx.logs = []
     ctx.publisher = lambda chunk: ctx.published.extend(chunk)
@@ -1308,21 +1232,21 @@ def test_drop_at_carries_the_COMMANDED_close_not_the_profile_full_closed(_fast_p
     """`drop_at` must carry and descend at the close the GRASP commanded.
 
     The two are the same number on the OMX (`gripper_closed_rad` −0.5 == the
-    catalog close −0.5), so carrying at "closed" was a no-op there — but on edu6
-    the catalog closes at +1.0 inside a 0…1.75 band while `gripper_closed_rad` is
-    0.0, so the old code demanded 1.0 rad MORE closure than the grasp: 25.2 mm of
-    extra jaw travel into a 30 mm cube already blocking the jaws at ≈1.19 rad,
-    i.e. a hard stall at `Max_Torque 150` for the whole carry + descend, on EVERY
-    place. Found by the 2026-07-26 sim sweep; invisible on the OMX by
-    construction."""
+    catalog close −0.5), so carrying at "closed" is a no-op there — but on the V1
+    the catalog closes at +0.05 inside a 0…0.90 band while `gripper_closed_rad`
+    is 0.0, so carrying at "closed" would demand more closure than the grasp,
+    into a 30 mm cube already blocking the claw at ≈0.20 rad, i.e. a stall at
+    `Max_Torque` for the whole carry + descend, on EVERY place. Invisible on the
+    OMX by construction."""
     from physical_ai_server.workflow.object_catalog import fixed_catalog
     close_rad = fixed_catalog(_PROFILE_ID).recipe_for_type(
         'wuerfel').gripper_close_rad
-    ctx = _edu6_place_ctx()
+    ctx = _v1_place_ctx()
     ctx.last_commanded_close_rad = close_rad          # as a grasp would leave it
     target = (ctx.ik.base_axis_x + 0.14, 0.0, 0.015)
     motion.drop_at(ctx, {'destination': target})
-    grips = [q[N6] for chunk in [ctx.published] for q, *_ in chunk]
+    n = ctx.num_arm_joints
+    grips = [q[n] for chunk in [ctx.published] for q, *_ in chunk]
     assert grips, 'nothing was published'
     # Nothing may ever command MORE closure than the grasp did.
     assert min(grips) >= close_rad - 1e-9, (
@@ -1332,27 +1256,25 @@ def test_drop_at_carries_the_COMMANDED_close_not_the_profile_full_closed(_fast_p
     # ...and it must still open to release at the end.
     assert max(grips) == pytest.approx(ctx.gripper_open_rad)
     # A `lege ab` with nothing grasped this run keeps the OLD fallback.
-    ctx2 = _edu6_place_ctx()
+    ctx2 = _v1_place_ctx()
     motion.drop_at(ctx2, {'destination': target})
-    g2 = [q[N6] for q, *_ in ctx2.published]
+    g2 = [q[n] for q, *_ in ctx2.published]
     assert min(g2) == pytest.approx(ctx2.gripper_closed_rad)
 
 
-def test_drop_at_bisects_the_release_clearance_instead_of_refusing_on_edu6(_fast_place_pacing):
+def test_drop_at_bisects_the_release_clearance_instead_of_refusing_near_the_rim(_fast_place_pacing):
     """„lege ab bei (Position von X)" must work across the pick band.
 
     `object_position` returns the GRASP height (0.015 m for a 30 mm cube) and the
-    release stacked a further `DROP_HEIGHT_M` (0.05) on top — landing 0.065 m,
-    i.e. 0.5 mm under edu6's absolute top-down ceiling of 0.0655 m. Measured
-    2026-07-26: the place therefore succeeded only for r ∈ [0.108, 0.133] — about
-    13 % of the pick band — and refused everywhere else, on the most natural
-    program a student writes. The clearance is OPTIONAL, so it is now bisected
-    down to whatever is reachable (13 % → 90 %, i.e. the whole pick band)."""
-    ctx = _edu6_place_ctx()
+    release stacks a further `DROP_HEIGHT_M` (0.05) on top. Near the V1's outer
+    rim that +0.05 is out of reach while the grasp height is not — the
+    clearance is OPTIONAL, so it is bisected down to whatever is reachable
+    instead of refusing the place."""
+    ctx = _v1_place_ctx()
     solver = ctx.ik
     grasp_z = 0.015
-    # The full clearance IS reachable at the sweet spot — do not shrink it there.
-    mid = (solver.base_axis_x + 0.12, 0.0, grasp_z)
+    # The full clearance IS reachable mid-band — do not shrink it there.
+    mid = (solver.base_axis_x + 0.20, 0.0, grasp_z)
     got = motion._reachable_release_clearance(
         ctx, mid, motion.DROP_HEIGHT_M, roll=motion.GRASP_ROLL_RAD)
     assert got == pytest.approx(motion.DROP_HEIGHT_M), (
@@ -1361,8 +1283,8 @@ def test_drop_at_bisects_the_release_clearance_instead_of_refusing_on_edu6(_fast
         'no warning belongs on the fast path')
 
     # Out near the rim it must SHRINK and still place, never refuse.
-    for r in (0.16, 0.19, 0.205):
-        c = _edu6_place_ctx()
+    for r in (0.355, 0.36, 0.365):
+        c = _v1_place_ctx()
         t = (c.ik.base_axis_x + r, 0.0, grasp_z)
         clear = motion._reachable_release_clearance(
             c, t, motion.DROP_HEIGHT_M, roll=motion.GRASP_ROLL_RAD)
@@ -1375,8 +1297,8 @@ def test_drop_at_bisects_the_release_clearance_instead_of_refusing_on_edu6(_fast
         assert c.published, f'r={r}: the place did not run'
 
     # The old hard behaviour: target+FULL clearance is genuinely unreachable at
-    # r=0.19, which is exactly why the un-bisected code refused there.
-    assert ctx.ik.solve((ctx.ik.base_axis_x + 0.19, 0.0,
+    # r=0.36, which is exactly why an un-bisected release would refuse there.
+    assert ctx.ik.solve((ctx.ik.base_axis_x + 0.36, 0.0,
                          grasp_z + motion.DROP_HEIGHT_M),
                         roll=motion.GRASP_ROLL_RAD) is None, (
         'if this becomes reachable the arm geometry changed — re-derive the band')
@@ -1408,17 +1330,16 @@ def test_release_clearance_never_exceeds_the_request_and_is_omx_identical():
 
 
 # ── slice 2g: the 2026-07-26 sim-sweep round-2 fixes (F1/F2/F3/F6/F7) ─────────
-# A ~1,273-run sweep through the real WorkflowManager + the real Edu6IKSolver
-# found the solver CLEAN (0 width/finite/limit violations, worst FK error 4e-15 m)
-# and seven defects in the layers around it. These pin the five that live in
-# motion.py / path_guard.py / robot_profiles.py. Every number below was
-# re-measured through the shipped solvers, not copied from the report.
+# A sim sweep through the real WorkflowManager found defects in the layers around
+# the solver. These pin the five that live in motion.py / path_guard.py /
+# robot_profiles.py, on the REAL V1 solver. Every number below was measured
+# through the shipped solver (2026-10-25), not copied from elsewhere.
 
 
-def _edu6_grasp_ctx():
+def _v1_grasp_ctx():
     """A ctx that can run a full grasp corridor: real solver, real profile,
     recording publisher, log sink."""
-    ctx = _real_edu6_ctx()
+    ctx = _real_v1_ctx()
     ctx.published = []
     ctx.logs = []
     ctx.publisher = lambda chunk: ctx.published.extend(chunk)
@@ -1444,14 +1365,15 @@ def _achieved_clearance(ctx, r, grasp_z=0.015, requested=0.06):
 # ── F1: a zero-clearance grasp is a lateral slide, not a grasp ────────────────
 
 def test_zero_clearance_grasp_is_refused_not_reported_as_success():
-    """MEASURED: at r in [0.0325, 0.0335] and r in [0.2075, 0.2082] the approach
-    bisect converges to 0 mm, so ``above_q == grasp_q`` AND ``lift_q == closed_q``
-    — no descend, no lift-out, the TCP pinned at grasp height for the whole
-    „Greife" while the arm travels SIDEWAYS into the cube. ``check_grasp_held``
-    then reads HELD (the jaws ARE blocked — by an object being shoved) and the
-    German success line printed. That must refuse by name instead."""
-    for r in (0.0330, 0.2078):
-        ctx = _edu6_grasp_ctx()
+    """MEASURED: at the outer lip of the V1's grasp plane, r ∈ [0.366, 0.36675],
+    the approach bisect converges to at most one bisect step, so (at 0 mm)
+    ``above_q == grasp_q`` AND ``lift_q == closed_q`` — no descend, no lift-out,
+    the TCP pinned at grasp height for the whole „Greife" while the arm travels
+    SIDEWAYS into the cube. ``check_grasp_held`` would then read HELD (the jaws
+    ARE blocked — by an object being shoved) and the German success line would
+    print. That must refuse by name instead."""
+    for r in (0.3665, 0.3667):
+        ctx = _v1_grasp_ctx()
         got, msg = _achieved_clearance(ctx, r)
         assert got == 'REFUSED', (
             f'r={r}: expected a refusal, got {got} of clearance — if the '
@@ -1471,8 +1393,8 @@ def test_zero_clearance_refusal_does_not_widen_or_narrow_the_useful_band():
     real, non-zero clamped approach must still get the IDENTICAL one."""
     refused = 0
     total = 0
-    for r_um in range(33000, 209001, 500):
-        ctx = _edu6_grasp_ctx()
+    for r_um in range(56000, 366501, 500):
+        ctx = _v1_grasp_ctx()
         got, _ = _achieved_clearance(ctx, r_um / 1e6)
         total += 1
         if got == 'REFUSED':
@@ -1483,11 +1405,13 @@ def test_zero_clearance_refusal_does_not_widen_or_narrow_the_useful_band():
         # the assertion vacuous under the one mutation it should catch (setting
         # the floor to 0.0 keeps every `got > floor` true).
         assert got > 0.002
-        # ...and never more than was asked for.
-        assert got <= 0.06 + 1e-12
+        # ...and never more than was asked for. 1e-9: the clearance is read back
+        # through FK, whose z carries the CAD's right-angle rounding (measured
+        # at most 8.3e-12 m over this sweep).
+        assert got <= 0.06 + 1e-9
     assert total > 300
-    # Measured 2.7 % of the band at 0.25 mm resolution; keep a generous ceiling so
-    # this fails on a real widening, not on sampling noise.
+    # Measured 4 of 1243 radii at 0.25 mm resolution (the outer lip only); keep a
+    # generous ceiling so this fails on a real widening, not on sampling noise.
     assert refused / total < 0.06, f'refused {refused}/{total} — too much band lost'
 
 
@@ -1497,10 +1421,10 @@ def test_a_real_but_sub_floor_rise_is_refused_not_just_an_exactly_zero_one():
     FLOOR ITSELF, so setting ``_MIN_APPROACH_CLEARANCE_M`` to 0.0 changed real
     production behaviour with the whole suite green.
 
-    Measured here (grasp z 0.015, requested 0.06, 0.1 mm sweep over
-    r ∈ [0.032, 0.210]): 23 radii bisect to a rise of EXACTLY 1.875 mm — the
-    bisect's smallest non-zero step, ``0.06 / 32`` — which is strictly positive
-    and strictly below the 2 mm floor. That is the interesting case: a naive
+    Measured here (grasp z 0.015, requested 0.06, 0.25 mm sweep over
+    r ∈ [0.050, 0.370]): r = 0.366 and 0.36625 bisect to a rise of EXACTLY
+    1.875 mm — the bisect's smallest non-zero step, ``0.06 / 32`` — which is
+    strictly positive and strictly below the 2 mm floor. That is the interesting case: a naive
     "refuse only an exactly-zero rise" implementation ACCEPTS it and calls a
     1.9 mm hover an approach.
 
@@ -1516,10 +1440,10 @@ def test_a_real_but_sub_floor_rise_is_refused_not_just_an_exactly_zero_one():
     assert m._APPROACH_BISECT_TOL_M == 0.002
     assert m._MIN_APPROACH_CLEARANCE_M == m._APPROACH_BISECT_TOL_M
 
-    ctx = _edu6_grasp_ctx()
-    got, msg = _achieved_clearance(ctx, 0.0340)
+    ctx = _v1_grasp_ctx()
+    got, msg = _achieved_clearance(ctx, 0.3660)
     assert got == 'REFUSED', (
-        f'r=0.0340 rose {got} — this radius must be refused; if the geometry '
+        f'r=0.3660 rose {got} — this radius must be refused; if the geometry '
         'moved, re-measure the sub-floor band before relaxing this')
     assert 'Kein Platz' in msg and 'von oben anzufahren' in msg
 
@@ -1530,7 +1454,7 @@ def test_a_real_but_sub_floor_rise_is_refused_not_just_an_exactly_zero_one():
     original = m._MIN_APPROACH_CLEARANCE_M
     m._MIN_APPROACH_CLEARANCE_M = 0.0
     try:
-        raw, _ = _achieved_clearance(_edu6_grasp_ctx(), 0.0340)
+        raw, _ = _achieved_clearance(_v1_grasp_ctx(), 0.3660)
     finally:
         m._MIN_APPROACH_CLEARANCE_M = original
     assert raw != 'REFUSED', 'premise: only the FLOOR refuses this radius'
@@ -1552,11 +1476,11 @@ def test_grasp_object_refuses_instead_of_claiming_a_shoved_cube(_fast_place_paci
 
     p = robot_profiles.resolve(_PROFILE_ID)
     cat = fixed_catalog(_PROFILE_ID)
-    ctx = _edu6_grasp_ctx()
+    ctx = _v1_grasp_ctx()
     # A cube exactly in the measured zero-clearance outer band.
-    objs = [{'type': 'wuerfel', 'x': ctx.ik.base_axis_x + 0.2078, 'y': 0.0,
+    objs = [{'type': 'wuerfel', 'x': ctx.ik.base_axis_x + 0.3667, 'y': 0.0,
              'yaw': 0.0}]
-    arm = SimArm(ik=ctx.ik, num_arm_joints=6,
+    arm = SimArm(ik=ctx.ik, num_arm_joints=p.num_arm_joints,
                  home_full_joints=list(p.home_joints_rad) + [p.gripper_open_rad],
                  objects=objs,
                  close_threshold_rad=p.sim_close_threshold_rad,
@@ -1598,11 +1522,11 @@ def test_place_is_NOT_refused_for_a_missing_release_clearance(_fast_place_pacing
     nothing claims a grasp worked — and its clearance is documented OPTIONAL. A
     refusal here would undo the release-clearance bisect (which measured the old
     behaviour as costing the whole place to save 1.6 mm at the OMX outer ring and
-    ~87 % of the edu6 pick band)."""
-    for r in (0.0330, 0.2078):
-        ctx = _edu6_grasp_ctx()
+    most of a low-ceiling arm's pick band)."""
+    for r in (0.3660, 0.3667):
+        ctx = _v1_grasp_ctx()
         ctx.calibration = {'z_table': 0.0}
-        ctx.last_commanded_close_rad = 1.0
+        ctx.last_commanded_close_rad = 0.05
         motion.drop_at(ctx, {'destination': (ctx.ik.base_axis_x + r, 0.0, 0.015)})
         assert ctx.published, f'r={r}: the place must still run'
 
@@ -1642,16 +1566,17 @@ def test_omx_zero_clearance_exposure_is_the_annulus_lip_only():
 # ── F2: „hebe an" after „Greife" ──────────────────────────────────────────────
 
 def test_lift_after_a_grasp_is_a_reported_noop_not_a_wrong_warning(_fast_place_pacing):
-    """MEASURED: ``_execute_pickup`` ends AT the hover, which is already clamped
-    at edu6's top-down ceiling, so a following „hebe an" gains 0 mm at every
-    radius tested (0.06 / 0.10 / 0.13 / 0.16 / 0.19). The old code published a
-    zero-length move and blamed „Ziel liegt am Rand des Greifbereichs" — at
-    r = 0.13, the SWEET SPOT of the pick band."""
-    for r in (0.06, 0.10, 0.13, 0.16, 0.19):
-        ctx = _edu6_grasp_ctx()
+    """MEASURED: ``_execute_pickup`` ends AT the hover, which at the V1's inner
+    and outer ring (r 0.0575–0.07 and 0.345–0.365) is already as high as the arm
+    reaches there, so a following „hebe an" gains 0 mm. A zero-length move that
+    blamed „Ziel liegt am Rand des Greifbereichs" would be the wrong report —
+    it must be a reported no-op. (Mid-band the second lift is reachable and
+    really lifts; that is not this test.)"""
+    for r in (0.06, 0.07, 0.345, 0.355, 0.365):
+        ctx = _v1_grasp_ctx()
         motion._execute_pickup(
             ctx, (ctx.ik.base_axis_x + r, 0.0, 0.015), 0.06,
-            motion.GRASP_ROLL_RAD, 1.0)
+            motion.GRASP_ROLL_RAD, 0.05)
         before = list(ctx.last_full_joints)
         # .clear(), NOT a rebind: ctx.log is bound to THIS list's append.
         ctx.published.clear()
@@ -1698,26 +1623,25 @@ def test_lift_from_an_unsolvable_pose_warns_instead_of_blaming_the_object():
 
     It used to raise ``_solve_or_raise``'s „Position außerhalb des
     Arbeitsbereichs — bitte das Objekt in den markierten Greifbereich legen",
-    which HARD-ABORTS the run and blames an object for the ARM's pose. Both
-    Feetech HOMEs are deliberately outside the solver's image, so that is what a
-    student got for „Heimposition" → „hebe an". Measured 2026-09-07:
+    which HARD-ABORTS the run and blames an object for the ARM's pose. The
+    Feetech HOME is deliberately outside the solver's image, so that is what a
+    student would get for „Heimposition" → „hebe an":
 
         omx_full     fk(HOME) = [0.1582, −0.0016, 0.1390]  solve ok    lift OK
-        edu6_studio  fk(HOME) = [0.0499,  0.0000, 0.4545]  solve None  lift ERROR
-        edu1_studio  fk(HOME) = [0.0181,  0.0000, 0.5193]  solve None  lift ERROR
+        v1_studio    fk(HOME) = [0.0125,  0.0000, 0.5541]  solve None  lift ERROR
 
     reached by home→lift, replay→lift, open_gripper→lift, wait→lift and every
-    ordering where „hebe an" precedes „fahre über"/„senke auf" — 44 of 120
-    orderings per arm. A lift the arm cannot compute is the same verdict as the
-    „already as high as it goes" branch: say so, publish nothing, keep going.
+    ordering where „hebe an" precedes „fahre über"/„senke auf". A lift the arm
+    cannot compute is the same verdict as the „already as high as it goes"
+    branch: say so, publish nothing, keep going.
 
     The table-floor half of the old call is UNCHANGED and still RAISES — that one
     is a genuine Rule §2 refusal and is asserted below."""
-    ctx = _edu6_grasp_ctx()
-    # Reached by a jog/replay: a non-vertical pose whose TCP (0.281, 0, 0.110) the
+    ctx = _v1_grasp_ctx()
+    # Reached by a jog/replay: a non-vertical pose whose TCP (0.346, 0, 0.240) the
     # strict-vertical solver cannot reproduce.
-    ctx.last_full_joints = [0.0, 1.0, -1.0, 0.0, 0.5, 0.0, 1.0]
-    assert ctx.ik.solve((0.2814, 0.0, 0.1099)) is None, 'premise'
+    ctx.last_full_joints = [0.0, 1.0, 1.0, 0.0, 0.0, 0.5]
+    assert ctx.ik.solve((0.3460, 0.0, 0.2401)) is None, 'premise'
     motion.lift(ctx, {})
     assert ctx.published == [], 'a lift it cannot compute must not move the arm'
     assert any('hebe an' in m and 'senkrecht nach oben' in m for m in ctx.logs), (
@@ -1726,11 +1650,11 @@ def test_lift_from_an_unsolvable_pose_warns_instead_of_blaming_the_object():
         'the message must not blame the object')
 
     # ...and the table floor still REFUSES, loudly.
-    below = _edu6_grasp_ctx()
+    below = _v1_grasp_ctx()
     below.z_table = 0.30
     below.last_full_joints = list(below.ik.solve(
         (below.ik.base_axis_x + 0.14, 0.0, 0.015),
-        roll=motion.GRASP_ROLL_RAD)) + [1.0]
+        roll=motion.GRASP_ROLL_RAD)) + [0.05]
     with pytest.raises(WorkflowError) as excinfo:
         motion.lift(below, {})
     assert 'Tischebene' in str(excinfo.value)
@@ -1740,12 +1664,13 @@ def test_lift_from_an_unsolvable_pose_warns_instead_of_blaming_the_object():
 def test_lift_never_raises_the_grasp_clearance_refusal():
     """A maxed-out lift is a legitimate no-op, not a failed grasp. If ``lift``
     could raise ``_solve_grasp_and_approach``'s refusal it would ABORT every
-    „Greife" -> „hebe an" program on edu6."""
-    ctx = _edu6_grasp_ctx()
-    top = ctx.ik.solve((ctx.ik.base_axis_x + 0.113, 0.0, 0.0655),
+    „Greife" -> „hebe an" program that ends at the arm's ceiling."""
+    ctx = _v1_grasp_ctx()
+    # The V1's strict-vertical ceiling (~0.146 m) is reached around r 0.20–0.22.
+    top = ctx.ik.solve((ctx.ik.base_axis_x + 0.209, 0.0, 0.146),
                        roll=motion.GRASP_ROLL_RAD)
     assert top is not None, 'premise: the measured ceiling pose is reachable'
-    ctx.last_full_joints = list(top) + [1.0]
+    ctx.last_full_joints = list(top) + [0.05]
     motion.lift(ctx, {})          # must not raise
     assert ctx.published == []
     assert any('nicht bewegt' in m for m in ctx.logs)
@@ -1754,12 +1679,12 @@ def test_lift_never_raises_the_grasp_clearance_refusal():
 # ── F6: the hover warning must carry information ──────────────────────────────
 
 def test_hover_warning_no_longer_fires_on_every_grasp():
-    """It fired on 100 % of edu6 grasps (936 warnings / 780 swept runs) because
-    the requested 60 mm hover is unreachable at EVERY radius there (max achieved
-    50.6 mm, at r = 0.120). The threshold is now 0.25 x the request = 15 mm for
-    both shipped catalogs, which is exactly ``object_height_m − grasp_depth_m``
+    """A warning on ANY reduction fires on every grasp of an arm whose 60 mm
+    hover is clamped everywhere. The threshold is 0.25 x the request = 15 mm for
+    every shipped catalog, which is exactly ``object_height_m − grasp_depth_m``
     (0.030 − 0.015): the clearance at which the fingertips stop being above the
-    object's top."""
+    object's top. Measured on the V1 (0.5 mm sweep over its grasp band): it fires
+    on the outer ~4 mm lip only."""
     from physical_ai_server.workflow.object_catalog import fixed_catalog
     rec = fixed_catalog(_PROFILE_ID).recipe_for_type('wuerfel')
     # The derivation must actually hold for the shipped recipe, or the threshold
@@ -1769,8 +1694,8 @@ def test_hover_warning_no_longer_fires_on_every_grasp():
 
     warned = 0
     total = 0
-    for r_um in range(34000, 206001, 500):
-        ctx = _edu6_grasp_ctx()
+    for r_um in range(56000, 366501, 500):
+        ctx = _v1_grasp_ctx()
         got, logs = _achieved_clearance(ctx, r_um / 1e6)
         if got == 'REFUSED':
             continue
@@ -1786,14 +1711,14 @@ def test_hover_warning_no_longer_fires_on_every_grasp():
 
 def test_hover_warning_is_silent_mid_band_and_loud_at_the_edge():
     """Both directions, at measured radii."""
-    # Sweet spot: 50.6 mm of 60 asked for — a real clamp, no student impact.
-    mid = _edu6_grasp_ctx()
-    got, logs = _achieved_clearance(mid, 0.120)
-    assert got == pytest.approx(0.0506, abs=0.0005)
+    # Inside the rim: 45.0 mm of 60 asked for — a real clamp, no student impact.
+    mid = _v1_grasp_ctx()
+    got, logs = _achieved_clearance(mid, 0.350)
+    assert got == pytest.approx(0.0450, abs=0.0005)
     assert not [m for m in logs if 'Anfahrhöhe' in m]
     # Near the rim: 11.3 mm — below the cube's own 15 mm top clearance.
-    edge = _edu6_grasp_ctx()
-    got, logs = _achieved_clearance(edge, 0.200)
+    edge = _v1_grasp_ctx()
+    got, logs = _achieved_clearance(edge, 0.363)
     assert got == pytest.approx(0.0113, abs=0.0005)
     hits = [m for m in logs if 'Anfahrhöhe' in m]
     assert hits, 'a consequential clamp must be reported'
@@ -1807,27 +1732,21 @@ def test_hover_warning_is_silent_mid_band_and_loud_at_the_edge():
 def test_path_guard_inflation_is_not_secretly_shrunk():
     """The zone inflation MUST NOT be reduced — not globally, not per profile.
 
-    It looks like an over-conservative OMX value a 0.21 m arm should scale down;
-    measured against the edu6 collision meshes it is the opposite. Largest
-    distance from any MOVING-link mesh vertex to the nearest ``link_points``
-    sample — exactly the inflation the Minkowski argument requires — over 326
-    configurations (HOME + 175 strict-vertical grasp poses + 150 random in-limit
-    poses):
+    It looks like an over-conservative OMX value a shorter arm should scale
+    down; measured against the V1 meshes it is the opposite. ``link_points``
+    samples only the tool axis, so the inflation is what must cover everything
+    off it: with the claw open at 0.90 rad the RL blade reaches 72.9 mm off the
+    tool axis (LF 69.9 mm at the 18/19 gear ratio) and the claw housing
+    (link5 + end_effector) 69.2 mm, against a shipped TOTAL of 50 mm. The guard
+    is already 22.9 mm UNDER-covered on the open claw (46.8 mm for a claw opened
+    by hand to 1.5708 rad), so a shrink widens a real gap. (It is not raised
+    either — see the constant's comment for that trade and its consequence; rig
+    gate VR13.)
 
-        link6 83.6 mm - link2 64.7 mm - link3 48.7 mm - link4 43.3 mm
-        link5 38.7 mm - link1 37.9 mm - End_effector 17.0 mm
-        fingers 44.1 mm at the 1.75 rad command cap (46.6 mm at the URDF limit)
-
-    against a shipped TOTAL of 50 mm. The guard is already 33.6 mm UNDER-covered
-    on the gripper housing, so a shrink widens a real gap. (It is not raised
-    either — see the constant's comment for that trade and its consequence.)
-
-    SCOPE OF THIS TEST, stated honestly because the constant's comment used to
-    overclaim it: this pins the CONSTANTS, the absence of a per-profile override
-    and one source string. It does NOT pin the eight distances — those live in
-    prose here and in the constant's comment, and only a re-measurement against
-    the meshes can falsify them. Two of the numbers above were in fact wrong for
-    a day (fingers, and the earlier 39.7 mm) with this test green throughout."""
+    SCOPE OF THIS TEST, stated honestly: this pins the CONSTANTS, the absence of
+    a per-profile override and one source string. It does NOT pin the distances
+    — those live in prose here and in the constant's comment, and only a
+    re-measurement against the meshes can falsify them."""
     from physical_ai_server.workflow import path_guard
     assert path_guard.LINK_RADIUS_M == 0.03
     assert path_guard.ZONE_MARGIN_M == 0.02
@@ -1864,12 +1783,12 @@ def test_zone_on_the_robot_itself_is_diagnosed_not_blamed_on_the_target():
     target that was never the problem.
 
     Cause: ``link_points`` samples the arm's FIXED base column, whose points do
-    not move with the configuration at all — indices 0-5 on edu6 (base ->
+    not move with the configuration at all — indices 0-5 on the V1 (base ->
     joint-1 origin) and 0-10 on the OMX (base -> shoulder, on the joint-1 axis).
     Inflated by 50 mm, a 10 mm box near the base contains an arm point in EVERY
     pose, so no route can exist."""
     from physical_ai_server.workflow import path_guard
-    ctx = _real_edu6_ctx()
+    ctx = _real_v1_ctx()
     solver = ctx.ik
     q_start = list(ctx.home_joints_rad) + [ctx.gripper_open_rad]
     end = solver.solve((solver.base_axis_x + 0.14, 0.0, 0.015),
@@ -1909,15 +1828,13 @@ def test_static_overlap_shortcircuit_never_takes_a_route_the_ladder_could_find()
     import random
     rng = random.Random(20260726)
     checked = fired = 0
-    for ctx_factory in (_real_edu6_ctx, _omx_ctx_for_path_guard):
+    for ctx_factory, reach, grasp_z in ((_real_v1_ctx, 0.14, 0.015),
+                                        (_omx_ctx_for_path_guard, 0.20, 0.012)):
         ctx = ctx_factory()
         solver = ctx.ik
-        n = solver.num_joints()
-        reach = 0.14 if n == 6 else 0.20
         grip = 0.0
         q_start = list(ctx.home_joints_rad or motion.HOME_JOINTS_RAD) + [grip]
-        end = solver.solve((solver.base_axis_x + reach, 0.0,
-                            0.015 if n == 6 else 0.012),
+        end = solver.solve((solver.base_axis_x + reach, 0.0, grasp_z),
                            roll=motion.GRASP_ROLL_RAD)
         assert end is not None
         q_end = list(end) + [grip]
@@ -1959,7 +1876,7 @@ def test_static_overlap_shortcircuit_never_takes_a_route_the_ladder_could_find()
     assert fired > 5, f'the short-circuit fired only {fired} times — weak coverage'
 
     # PART B — the canonical case, through the REAL rungs, once.
-    ctx = _real_edu6_ctx()
+    ctx = _real_v1_ctx()
     solver = ctx.ik
     grip = float(ctx.gripper_open_rad)
     q_start = list(ctx.home_joints_rad) + [grip]
@@ -1985,14 +1902,12 @@ def test_reroute_still_works_when_the_zone_is_only_in_the_way():
     """The converse: a zone that blocks the PATH but not the ARM still reroutes,
     so the short-circuit did not swallow the working case.
 
-    Geometry chosen by search, not by taste: on edu6 a reroute needs the INFLATED
-    zone top (drawn height + 50 mm) to sit under a cruise the arm can actually
-    reach, and its ceiling is ~0.0655 m — so the drawn zone must be <= ~10 mm tall
-    (matching the sweep's "every zone >= 10 mm tall hard-refused"). reach 0.09 m /
-    endpoints at y = ±0.08 / a 20 mm box 5 mm tall reroutes in 3 legs, with both
-    endpoints clear of the inflated box."""
+    A reroute needs the INFLATED zone top (drawn height + 50 mm) to sit under a
+    cruise the arm can actually reach (the V1's profile cruise is 0.075 m), so
+    the drawn zone stays low: reach 0.09 m / endpoints at y = ±0.08 / a 20 mm
+    box 5 mm tall, with both endpoints clear of the inflated box."""
     from physical_ai_server.workflow import path_guard
-    ctx = _real_edu6_ctx()
+    ctx = _real_v1_ctx()
     solver = ctx.ik
     start = solver.solve((solver.base_axis_x + 0.09, -0.08, 0.02),
                          roll=motion.GRASP_ROLL_RAD)
@@ -2013,19 +1928,20 @@ def test_reroute_still_works_when_the_zone_is_only_in_the_way():
     assert len(legs) >= 2, 'a genuine reroute must still be found'
 
 
-# ── F7: sim_held_floor_rad on edu6 ────────────────────────────────────────────
+# ── F7: sim_held_floor_rad on the V1 ──────────────────────────────────────────
 
-def test_sim_held_floor_is_inert_for_every_legal_edu6_close():
+def test_sim_held_floor_is_inert_for_every_legal_v1_close():
     """``sim_held_floor_rad=0.05`` can never win its own ``max()`` on this arm.
 
     ``sim_arm.get_joints`` reports a blocked jaw as
     ``max(held_floor, commanded + held_block_offset)`` and only treats a command
-    below ``sim_close_threshold_rad`` as a CLOSE. edu6's legal band is 0.0…1.75
-    and ``close_on_object`` clamps into it, so every value that can reach the
-    max() is in [0.0, 1.5) -> commanded + 0.19 in [0.19, 1.69) > 0.05 always.
+    below ``sim_close_threshold_rad`` as a CLOSE. The V1's legal band is
+    0.0…0.90 and ``close_on_object`` clamps into it, so every value that can
+    reach the max() is in [0.0, 0.5) -> commanded + 0.15 in [0.15, 0.65) > 0.05
+    always.
 
     Kept deliberately (see the profile comment): the FIELD is live on the OMX, and
-    dropping edu6's override would inherit the OMX -0.1 — equally inert, but a
+    dropping the V1's override would inherit the OMX -0.1 — equally inert, but a
     negative number on a gripper that never goes negative. This test is what makes
     the claim falsifiable if the band or the threshold ever moves."""
     from physical_ai_server import robot_profiles
@@ -2046,12 +1962,13 @@ def test_sim_held_floor_is_inert_for_every_legal_edu6_close():
     ox, oy = solver.base_axis_x + 0.14, 0.0
     grasp = solver.solve((ox, oy, 0.015), roll=motion.GRASP_ROLL_RAD)
     assert grasp is not None
-    arm = SimArm(ik=solver, num_arm_joints=6,
+    n = p.num_arm_joints
+    arm = SimArm(ik=solver, num_arm_joints=n,
                  home_full_joints=list(p.home_joints_rad) + [p.gripper_open_rad],
                  objects=[{'type': 'wuerfel', 'x': ox, 'y': oy}],
                  close_threshold_rad=p.sim_close_threshold_rad,
                  held_block_offset_rad=offset, held_floor_rad=floor)
-    for close in (0.0, 0.2, 1.0, 1.49):
+    for close in (0.0, 0.05, 0.2, 0.49):
         arm.publish([(list(grasp) + [close], 0.0)])
-        assert arm.get_joints()[6] == pytest.approx(close + offset), (
+        assert arm.get_joints()[n] == pytest.approx(close + offset), (
             'the readback must be offset-driven, never floor-driven')

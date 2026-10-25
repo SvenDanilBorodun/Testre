@@ -597,8 +597,8 @@ def generate_env_file(config: HardwareConfig, output_path: str = ENV_FILE,
                 )
             # SECOND fence: a role this ROBOT TYPE has no topic for. The
             # generic check above only knows the two names that exist at all;
-            # `edu6_studio` declares camera_roles=('scene',) and its
-            # config/edu6_studio_config.yaml subscribes to exactly
+            # `v1_studio` declares camera_roles=('scene',) and its
+            # config/v1_studio_config.yaml subscribes to exactly
             # /scene/image_raw/compressed, so CAMERA_NAME_1="gripper" there
             # publishes a topic nothing reads — and the failure is SILENT AND
             # GREEN, because the compose healthcheck greps

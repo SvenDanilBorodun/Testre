@@ -179,7 +179,7 @@ describe('teachLeaderStatus / resolveTeachMode', () => {
     ['answered leader on', LEADER_ON, { has_leader: true }, 'known', 'leader'],
     ['answered follower only', FOLLOWER, { has_leader: true }, 'known', 'hand'],
     ['answered leader on, caps unknown', LEADER_ON, null, 'known', 'leader'],
-    // Proven leader-less rigs (omx_follower, edu6_studio, edu1_studio) never wait.
+    // Proven leader-less rigs (omx_follower, v1_studio) never wait.
     ['leader-less caps, pending', PENDING, { has_leader: false }, 'known', 'hand'],
     ['leader-less caps, unavailable', DOWN, { has_leader: false }, 'known', 'hand'],
     ['leader-less caps, no bridge', null, { has_leader: false }, 'known', 'hand'],

@@ -36,6 +36,12 @@ const TrainingOptionInput = () => {
   const steps = useSelector((state) => state.training.trainingInfo.steps);
   const logFreq = useSelector((state) => state.training.trainingInfo.logFreq);
   const saveFreq = useSelector((state) => state.training.trainingInfo.saveFreq);
+  const policyType = useSelector((state) => state.training.trainingInfo.policyType);
+  // For ACT the server picks these three itself (RunPod spec §4.11, owner
+  // decisions D4/E3): batch size 8, `num_workers` from the GPU host's cores,
+  // LeRobot's save interval fixed for resume. A field the server ignores is
+  // not offered. Same rule as the API: `model_type.lower() == "act"`.
+  const serverChosen = String(policyType ?? '').toLowerCase() === 'act';
 
   const isTraining = useSelector((state) => state.training.isTraining);
 
@@ -69,35 +75,39 @@ const TrainingOptionInput = () => {
         />
       </div>
 
-      <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
-        <span className={classLabel}>Worker</span>
-        <input
-          className={classTextInput}
-          type="number"
-          step="1"
-          min={0}
-          max={65535}
-          value={numWorkers || ''}
-          onChange={(e) => dispatch(setNumWorkers(Number(e.target.value) || 0))}
-          disabled={isTraining}
-          placeholder="Worker eingeben"
-        />
-      </div>
+      {!serverChosen && (
+        <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
+          <span className={classLabel}>Worker</span>
+          <input
+            className={classTextInput}
+            type="number"
+            step="1"
+            min={0}
+            max={65535}
+            value={numWorkers || ''}
+            onChange={(e) => dispatch(setNumWorkers(Number(e.target.value) || 0))}
+            disabled={isTraining}
+            placeholder="Worker eingeben"
+          />
+        </div>
+      )}
 
-      <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
-        <span className={classLabel}>Batch-Größe</span>
-        <input
-          className={classTextInput}
-          type="number"
-          step="1"
-          min={0}
-          max={65535}
-          value={batchSize || ''}
-          onChange={(e) => dispatch(setBatchSize(Number(e.target.value) || 0))}
-          disabled={isTraining}
-          placeholder="Batch-Größe eingeben"
-        />
-      </div>
+      {!serverChosen && (
+        <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
+          <span className={classLabel}>Batch-Größe</span>
+          <input
+            className={classTextInput}
+            type="number"
+            step="1"
+            min={0}
+            max={65535}
+            value={batchSize || ''}
+            onChange={(e) => dispatch(setBatchSize(Number(e.target.value) || 0))}
+            disabled={isTraining}
+            placeholder="Batch-Größe eingeben"
+          />
+        </div>
+      )}
 
       <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
         <span className={classLabel}>Schritte</span>
@@ -129,20 +139,22 @@ const TrainingOptionInput = () => {
         />
       </div>
 
-      <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
-        <span className={classLabel}>Speicher-Intervall</span>
-        <input
-          className={classTextInput}
-          type="number"
-          step="1"
-          min={0}
-          max={65535}
-          value={saveFreq || ''}
-          onChange={(e) => dispatch(setSaveFreq(Number(e.target.value) || 0))}
-          disabled={isTraining}
-          placeholder="Speicher-Intervall eingeben"
-        />
-      </div>
+      {!serverChosen && (
+        <div className={clsx('flex', 'items-center', 'gap-3', 'mb-2.5')}>
+          <span className={classLabel}>Speicher-Intervall</span>
+          <input
+            className={classTextInput}
+            type="number"
+            step="1"
+            min={0}
+            max={65535}
+            value={saveFreq || ''}
+            onChange={(e) => dispatch(setSaveFreq(Number(e.target.value) || 0))}
+            disabled={isTraining}
+            placeholder="Speicher-Intervall eingeben"
+          />
+        </div>
+      )}
 
       <div className="mb-2 mt-auto" />
       <button type="button" className={classResetButton} onClick={() => dispatch(setDefaultTrainingInfo())}>

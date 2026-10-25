@@ -3,10 +3,11 @@ name: release
 # Top-level release dispatcher. Chains the five CI-driven surface
 # workflows in the golden order:
 #
-#   W1 supabase-migrate
-#       │
-#       ▼
-#   W2 railway-deploy-cloud-api
+#   W1 supabase-migrate          W2a trainer-image (RunPod training image, by digest)
+#       │                            │
+#       │                        W2b trainer-image-var (Railway RUNPOD_TRAINER_IMAGE, --skip-deploys)
+#       ▼                            │
+#   W2 railway-deploy-cloud-api  ◄───┘
 #       │
 #       ▼
 #   W3 railway-deploy-teacher-web
@@ -91,6 +92,7 @@ concurrency:
 #   supabase-migrate.yml   → contents: read + pull-requests: write
 #   railway-deploy-*.yml   → contents: read
 #   docker-publish.yml     → contents: read + packages: write (GHCR push)
+#   trainer-image.yml      → contents: read + packages: write (GHCR push)
 #   release-installer.yml  → contents: write (GH-Release asset upload)
 # The pi-agent-tarball job (W5b) is an INLINE job (not a `uses:` callee), so the
 # superset rule does not apply to it — it simply grants its own contents: write
@@ -127,10 +129,23 @@ jobs:
     # does not apply — it just needs contents: read to check out and read VERSION.
     permissions:
       contents: read
+    outputs:
+      # The VERSION file, for W2a (the trainer image is tagged with it) and W2b.
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
+      - name: Read the VERSION file
+        id: version
+        run: |
+          set -e
+          FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
+          if ! printf '%s' "$FILE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::VERSION file holds '${FILE_VERSION}', not X.Y.Z"
+            exit 1
+          fi
+          echo "version=${FILE_VERSION}" >> "$GITHUB_OUTPUT"
       - name: Assert the pushed tag matches the VERSION file
         # GITHUB_REF is a built-in runner env var (no ${{ }} → no template
         # injection surface). On a tag push it is refs/tags/vX.Y.Z.
@@ -203,6 +218,55 @@ jobs:
     uses: ./.github/workflows/supabase-migrate.yml
     secrets: inherit
 
+  # ── W2a: the RunPod training image (spec §4.12) ──
+  # Built and pushed BEFORE the cloud API: the API this release deploys hashes
+  # the same training lock the image carries (TRAINING_LOCK_SHA256), and W2b
+  # pins the image by digest on Railway first. Needs only GITHUB_TOKEN (GHCR),
+  # which a reusable workflow receives without `secrets: inherit`.
+  trainer-image:
+    name: W2a. Build + push the RunPod trainer image
+    needs: [version-preflight]
+    permissions:
+      contents: read
+      packages: write  # trainer-image.yml pushes to GHCR (caller-superset rule)
+    uses: ./.github/workflows/trainer-image.yml
+    with:
+      version: ${{ needs.version-preflight.outputs.version }}
+
+  # ── W2b: pin RUNPOD_TRAINER_IMAGE on Railway by digest, WITHOUT a deploy ──
+  # ALWAYS --skip-deploys (FR-10): W2's `railway up` deploys right after, and a
+  # deploy triggered by this variable would race W2's /health commit gate.
+  # The value matches the API's boot check
+  # ^ghcr\.io/svendanilborodun/edubotics-trainer(:tag)?@sha256:<64 hex>$.
+  trainer-image-var:
+    name: W2b. Pin RUNPOD_TRAINER_IMAGE (no deploy)
+    needs: [version-preflight, trainer-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}  # talks only to Railway via RAILWAY_TOKEN
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Install Railway CLI via npm
+        run: |
+          npm install -g @railway/cli
+          railway --version
+      - name: Set RUNPOD_TRAINER_IMAGE (--skip-deploys)
+        env:
+          VERSION: ${{ needs.version-preflight.outputs.version }}
+          DIGEST: ${{ needs.trainer-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/svendanilborodun/edubotics-trainer:${VERSION}@${DIGEST}"
+          if ! printf '%s' "$IMAGE" | grep -Eq '^ghcr\.io/svendanilborodun/edubotics-trainer:[A-Za-z0-9._-]{1,128}@sha256:[0-9a-f]{64}$'; then
+            echo "::error::'${IMAGE}' is not a digest-pinned trainer image reference"
+            exit 1
+          fi
+          railway variable set "RUNPOD_TRAINER_IMAGE=${IMAGE}" \
+              --service scintillating-empathy --environment production \
+              --skip-deploys >/dev/null
+          echo "set RUNPOD_TRAINER_IMAGE=${IMAGE} (no redeploy; W2 deploys next)"
+
   # ── W2: Cloud API (after Supabase so the FastAPI sees the new schema) ──
   # Note: if you bumped a Modal-side dependency in this release, run
   # `modal deploy modal_app.py` MANUALLY BEFORE pushing the tag so the
@@ -215,11 +279,13 @@ jobs:
     # chain below it) proceed. Gate on the preflight result explicitly so a
     # tag/VERSION mismatch blocks W2, and W3→W6 cascade the skip via their
     # parent == 'success' gates.
-    needs: [version-preflight, supabase]
+    needs: [version-preflight, supabase, trainer-image, trainer-image-var]
     if: >-
       always()
       && needs.version-preflight.result == 'success'
       && (needs.supabase.result == 'success' || needs.supabase.result == 'skipped')
+      && needs.trainer-image.result == 'success'
+      && needs.trainer-image-var.result == 'success'
     permissions:
       contents: read
     uses: ./.github/workflows/railway-deploy-cloud-api.yml

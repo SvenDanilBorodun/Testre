@@ -149,16 +149,18 @@ const trainingSlice = createSlice({
     setSaveFreq: (state, action) => {
       state.trainingInfo.saveFreq = action.payload;
     },
+    // „Standardwerte": the numbers a fresh form starts with (RunPod spec §4.11),
+    // so the button resets instead of picking a second, different default set.
     setDefaultTrainingInfo: (state) => {
       state.trainingInfo = {
         ...state.trainingInfo,
         seed: 1000,
-        numWorkers: 4,
+        numWorkers: 2,
         batchSize: 8,
-        steps: 100000,
-        evalFreq: 20000,
+        steps: 50000,
+        evalFreq: 0,
         logFreq: 100,
-        saveFreq: 20000,
+        saveFreq: 10000,
       };
     },
     setCurrentStep: (state, action) => {

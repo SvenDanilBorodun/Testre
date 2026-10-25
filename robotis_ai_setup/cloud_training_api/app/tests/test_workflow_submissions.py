@@ -166,6 +166,11 @@ class TestRateLimitRulesUnchanged(unittest.TestCase):
     _EXPECTED = [
         ("*", "/trainings/start", 10, 60.0),
         ("*", "/trainings/cancel", 20, 60.0),
+        ("*", "/trainings/continue", 10, 60.0),
+        # 049 — the managed-training worker API, per worker token. Placed beside
+        # the other /trainings rules (test_inference_routes pins the 048 rules
+        # as the table's last two).
+        ("POST", "/trainings/worker", 120, 60.0),
         ("POST", "/workflows", 10, 60.0),
         ("PATCH", "/workflows", 30, 60.0),
         ("POST", "/teacher/classrooms", 10, 60.0),

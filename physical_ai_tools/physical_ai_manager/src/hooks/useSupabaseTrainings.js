@@ -14,10 +14,15 @@ const ACTIVE_POLL_MS = 6000;
 // Explicit, secret-free column set for the direct live read. Pulling only what
 // the UI needs avoids ever putting worker_token on the wire (the realtime path
 // delivers the whole row and strips it client-side; this is strictly tighter).
-const LIVE_COLUMNS =
+// Never `*`: since migration 047 the request roles may SELECT only the columns
+// granted to them, so `select=*` answers 42501, and a later column (049's
+// `status_note`, the German „GPU-Server ausgefallen …" line) is readable only
+// because its migration grants it. test_managed_training_lockstep.py checks
+// every name here against those GRANT lists.
+export const LIVE_COLUMNS =
   'id,status,model_name,model_type,dataset_name,current_step,total_steps,' +
   'current_loss,loss_history,error_message,requested_at,terminated_at,' +
-  'last_progress_at,workgroup_id';
+  'last_progress_at,workgroup_id,status_note,capped_step,continuable_until,continued_from';
 
 function isActiveJob(j) {
   return j && (j.status === 'queued' || j.status === 'running');
@@ -30,8 +35,11 @@ function stripSecrets(row) {
   return safe;
 }
 
-function mergeJob(prev, incoming) {
+export function mergeJob(prev, incoming) {
   const map = new Map(prev.map((j) => [j.id, j]));
+  // {...existing, ...incoming} keeps an API row's is_mine when a direct-poll or
+  // Realtime row without the key arrives; a Realtime-first row has is_mine
+  // undefined until the next API list, which hides the button (fail-safe).
   map.set(incoming.id, { ...(map.get(incoming.id) || {}), ...incoming });
   return Array.from(map.values()).sort(
     (a, b) => new Date(b.requested_at) - new Date(a.requested_at),

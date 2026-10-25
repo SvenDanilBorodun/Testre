@@ -17,6 +17,53 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/me", tags=["me"])
 
+# GDPR export (E16): every trainings column EXCEPT worker_token (a per-row
+# credential; 047 hides it from the request roles, and the service-role
+# export must not hand it out either). Migration 049's seven columns included.
+_EXPORT_TRAINING_COLUMNS = (
+    "id, user_id, status, dataset_name, model_name, model_type, training_params, cloud_job_id, "
+    "current_step, total_steps, current_loss, requested_at, terminated_at, error_message, "
+    "last_progress_at, loss_history, workgroup_id, cancel_attempted_at, cancel_attempts, log_url, "
+    "managed, current_attempt, train_seconds_used, status_note, step_advanced_at, dataset_fps, unplaced_since, "
+    "capped_step, continuable_until, continued_from"
+)
+_PROVIDER_OF_BACKEND = {
+    "runpod_community": ("runpod", "community"),
+    "runpod_secure": ("runpod", "secure"),
+    "modal": ("modal", None),
+}
+
+
+def _export_attempts(supabase, training_ids: list) -> dict:
+    """Where each attempt of a managed training ran (E16): provider, cloud, data
+    centre, GPU type, start and end — never the cloud_ref (pod / call id) or a
+    token. An attempt that was never placed (no backend) ran nowhere."""
+    if not training_ids:
+        return {}
+    rows = (
+        supabase.table("training_attempts")
+        .select("training_id, attempt_no, backend, data_center, allowed_dcs, gpu_type, started_at, ended_at")
+        .in_("training_id", training_ids)
+        .order("attempt_no", desc=False)
+        .execute()
+    ).data or []
+    out: dict = {}
+    for r in rows:
+        provider = _PROVIDER_OF_BACKEND.get(r.get("backend"))
+        if provider is None:
+            continue
+        out.setdefault(r["training_id"], []).append({
+            "provider": provider[0],
+            "cloud": provider[1],
+            "data_center": r.get("data_center"),
+            # the data centres the create asked for ([] = any region; owner E42/m8)
+            "requested_data_centers": r.get("allowed_dcs") or [],
+            "gpu_type": r.get("gpu_type"),
+            "started_at": r.get("started_at"),
+            "ended_at": r.get("ended_at"),
+        })
+    return out
+
 
 class MyProfile(BaseModel):
     id: str
@@ -221,9 +268,13 @@ async def export_my_data(profile=Depends(get_current_profile)):
     }
 
     trainings = (
-        supabase.table("trainings").select("*").eq("user_id", uid).execute()
+        supabase.table("trainings").select(_EXPORT_TRAINING_COLUMNS).eq("user_id", uid).execute()
     )
     bundle["trainings"] = trainings.data or []
+    managed_ids = [t["id"] for t in bundle["trainings"] if t.get("managed")]
+    attempts = _export_attempts(supabase, managed_ids)
+    for t in bundle["trainings"]:
+        t["attempts"] = attempts.get(t["id"], []) if t.get("managed") else []
 
     # Workgroup memberships audit — current + past, per GDPR Art. 15.
     memberships = (
@@ -348,6 +399,38 @@ async def export_my_data(profile=Depends(get_current_profile)):
     )
 
 
+async def _cancel_managed_for_deletion(supabase, training_id: int, uid: str) -> bool:
+    from app.services import training_dispatch
+
+    try:
+        data = supabase.rpc(
+            "cancel_request_training", {"p_training_id": training_id, "p_user_id": uid}
+        ).execute().data
+    except Exception as exc:
+        code = training_dispatch.pg_code(exc)
+        if code in ("P0050", "P0051", "P0002"):
+            logger.info("/me/delete: managed training %s left as it is (%s)", training_id, code)
+            return False
+        logger.warning("/me/delete: cancel_request_training failed for %s: %s", training_id, type(exc).__name__)
+        return False
+    info = (data or [{}])[0] if isinstance(data, list) else (data or {})
+    try:
+        await training_dispatch.stop_for_cancel(
+            info.get("o_backend"), info.get("o_attempt_state"), info.get("o_cloud_ref")
+        )
+    except Exception as exc:  # best effort: the reaper ends a pod no active row owns
+        logger.warning("/me/delete: stopping training %s failed: %s", training_id, type(exc).__name__)
+    try:
+        supabase.rpc(
+            "complete_cancel_training",
+            {"p_training_id": training_id, "p_final": "canceled", "p_message": None},
+        ).execute()
+    except Exception as exc:
+        logger.warning("/me/delete: complete_cancel_training failed for %s: %s", training_id, type(exc).__name__)
+        return False
+    return True
+
+
 @router.post("/delete")
 async def delete_my_account(profile=Depends(get_current_profile)):
     """GDPR/DSGVO Art. 17 — account deletion request.
@@ -390,13 +473,20 @@ async def delete_my_account(profile=Depends(get_current_profile)):
     # decision — we don't retry Modal here, we just close the row out.
     active = (
         supabase.table("trainings")
-        .select("id, cloud_job_id")
+        .select("id, cloud_job_id, managed")
         .eq("user_id", uid)
         .in_("status", ["queued", "running", "cancel_requested"])
         .execute()
     )
     cancelled_ids: list = []
     for row in active.data or []:
+        if row.get("managed"):
+            # FR-19: a managed row goes through the same compare-and-set as
+            # Cancel; a row whose finished model is being published (P0051) is
+            # left to finish, a row no longer active (P0050) needs nothing.
+            if await _cancel_managed_for_deletion(supabase, row["id"], uid):
+                cancelled_ids.append(row["id"])
+            continue
         if row.get("cloud_job_id"):
             try:
                 await cancel_training_job(row["cloud_job_id"])

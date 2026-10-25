@@ -1,8 +1,11 @@
-"""EduBotics cloud training handler (Modal worker body).
+"""EduBotics cloud training handler (Modal worker body and the RunPod trainer).
 
-Invoked by `modal_app.train`.
+Invoked by `modal_app.train` / `modal_app.train_vla` (legacy mode, `run_training`)
+and by `modal_app.train_managed` and the RunPod trainer image's `entry.py`
+(managed mode, `run_managed`, ACT only; spec §4.7). Managed mode is at the end
+of this file.
 
-Responsibilities:
+Legacy responsibilities:
   - Preflight the HuggingFace dataset (schema, codebase_version, joints, cameras).
   - Spawn `python -m lerobot.scripts.lerobot_train` and stream its stdout.
   - Parse `step: N loss: X.Y` lines and push progress to Supabase via the
@@ -40,6 +43,19 @@ from supabase import create_client
 
 OUTPUT_DIR = Path("/tmp/training_output")
 
+# The device behind --policy.device=. A module constant so the CPU proof harness
+# (runpod_training/e2e/harness_entry.py) can switch it; production never does.
+TRAIN_DEVICE = "cuda"
+
+# S16 (spec §3.7), the one German database sentence of this file: the LEGACY path
+# writes it itself through update_training_progress when the host check fails.
+# Byte-equal to cloud_training_api/app/services/training_texts_de.py::S16.
+# Managed mode writes no German sentence to the database (E11).
+LEGACY_HOST_UNFIT_DE = (
+    "Der Cloud-GPU-Server ist nicht nutzbar (keine passende GPU). "
+    "Das Training wurde nicht gestartet – das Trainingsguthaben wurde erstattet."
+)
+
 # ---------------- ROBOTIS OMX expected schema ----------------
 # LeRobot v0.5.1 ships codebase_version="v3.0" (moved out of lerobot_dataset.py
 # into lerobot/datasets/dataset_metadata.py). v2.1 datasets recorded with the
@@ -73,6 +89,8 @@ _LANGUAGE_CONDITIONED_POLICIES = frozenset({"pi0", "pi05", "pi0_fast", "smolvla"
 # mark the training as failed and clean up before the container is killed.
 # Only ever one job in flight per Modal container invocation.
 _current_job: dict | None = None
+# Managed mode's LeRobot process, killed by the signal handler (no DB write).
+_managed_proc = None
 
 
 # ---------------- Parsing helpers ----------------
@@ -573,7 +591,7 @@ def _build_training_command(
         # is GONE — no back-compat alias.
         "lerobot.scripts.lerobot_train",
         f"--policy.type={model_type}",
-        "--policy.device=cuda",
+        f"--policy.device={TRAIN_DEVICE}",
         f"--dataset.repo_id={dataset_name}",
         f"--output_dir={output_dir}",
         "--policy.push_to_hub=false",
@@ -865,6 +883,15 @@ def _on_shutdown(signum, frame):
     """
     job = _current_job
     if not job:
+        # Managed mode (spec §4.7 step 10): kill LeRobot, exit, NO database
+        # write. The API's sweep decides what happens to the attempt.
+        managed = _managed_proc
+        if managed is not None:
+            try:
+                managed.kill()
+                managed.wait(timeout=5)
+            except Exception:
+                pass
         sys.exit(0)
     print(
         f"[shutdown sig={signum}] marking training {job['training_id']} as failed",
@@ -982,6 +1009,19 @@ def run_training(
                 "failed", str(e),
             )
             return {"status": "failed", "error": str(e)}
+
+        # ----- 1b. Host check (spec §4.7 legacy mode): a GPU-less or too-old host fails
+        # the row with S16 BEFORE it is marked running. No /tmp floor here (V2-2): the
+        # free bytes are only printed, since nobody measured the legacy L4 / A100's /tmp. -----
+        try:
+            _assert_training_host(disk_floor=False)
+        except HostUnfit as e:
+            print(f"Host check failed ({e.reason}): {e.detail}", flush=True)
+            _update_status_with_retry(
+                supabase_url, supabase_anon_key, worker_token, training_id,
+                "failed", LEGACY_HOST_UNFIT_DE,
+            )
+            return {"status": "failed", "error": LEGACY_HOST_UNFIT_DE}
 
         # ----- 2. Mark running -----
         _update_supabase_status(
@@ -1282,3 +1322,1258 @@ def run_training(
                 pass
         _cleanup_output(model_name)
         _current_job = None
+
+
+# =====================================================================
+# Managed mode (spec §3.2, §3.5, §4.7): ACT on a RunPod pod or Modal's
+# train_managed. The worker holds no long-lived secret: it talks to the
+# cloud API's worker endpoints with its per-attempt token, to R2 only
+# through presigned URLs the API mints, and to Supabase only through the
+# scoped update_training_progress RPC (status NULL or 'running', never an
+# error text: E11). It defines no German database sentence and no save or
+# mirror cadence of its own (both come from `start`'s spec).
+#
+# torch, draccus, httpx and every lerobot module are imported inside
+# functions: the deps-free tests stub only huggingface_hub and supabase.
+# =====================================================================
+
+# ---- Checkpoint content (§3.5; lockstep-tested against artifact_validation.py) ----
+PRETRAINED_MODEL_FILES = (
+    "config.json",
+    "model.safetensors",
+    "train_config.json",
+    "policy_preprocessor.json",
+    "policy_preprocessor_step_3_normalizer_processor.safetensors",
+    "policy_postprocessor.json",
+    "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
+)
+TRAINING_STATE_FILES = (
+    "optimizer_param_groups.json",
+    "optimizer_state.safetensors",
+    "rng_state.safetensors",
+    "training_step.json",
+)
+# The final checkpoint (step == total_steps) uploads only these 7.
+FINAL_CHECKPOINT_RELPATHS = tuple(f"pretrained_model/{f}" for f in PRETRAINED_MODEL_FILES)
+# Every other checkpoint uploads exactly these 11.
+CHECKPOINT_RELPATHS = FINAL_CHECKPOINT_RELPATHS + tuple(
+    f"training_state/{f}" for f in TRAINING_STATE_FILES
+)
+ACT_PRE_STEPS = (
+    "rename_observations_processor",
+    "to_batch_processor",
+    "device_processor",
+    "normalizer_processor",
+)
+ACT_POST_STEPS = ("unnormalizer_processor", "device_processor")
+PRE_STATE_FILE = "policy_preprocessor_step_3_normalizer_processor.safetensors"
+POST_STATE_FILE = "policy_postprocessor_step_0_unnormalizer_processor.safetensors"
+PRE_STATE_STEP_INDEX = 3
+POST_STATE_STEP_INDEX = 0
+# The four train_config.json keys LeRobot itself sets on a resume
+# (lerobot/configs/train.py:92-109); everything else must equal the regenerated file.
+RESUME_IGNORED_KEYS = (
+    ("resume",),
+    ("num_workers",),
+    ("checkpoint_path",),
+    ("policy", "pretrained_path"),
+)
+
+
+def step_id(step: int, total_steps: int) -> str:
+    """LeRobot's checkpoint directory name (lerobot/utils/train_utils.py:37-39)."""
+    return f"{step:0{max(6, len(str(total_steps)))}d}"
+
+
+# ---- Worker constants (§3.9) ----
+START_LOOP_MAX = 5
+FINAL_UPLOAD_WAIT_S = 1080
+HEARTBEAT_INTERVAL_S = 15
+UPLOAD_TICK_S = 15
+NUM_WORKERS_MAX = 12
+MIN_FREE_DISK_B = 30 * 1024 ** 3
+MIN_GPU_MEMORY_B = int(9.5e9)
+GPU_CAPABILITY_MIN = (8, 0)
+GPU_CAPABILITY_MAX = (9, 0)
+# "Retry (start class)" of §3.2: back-off 5, 15, 45, 120 s, then every 120 s,
+# give up after 10 min.
+START_RETRY_DELAYS_S = (5, 15, 45, 120)
+START_RETRY_EVERY_S = 120
+START_RETRY_GIVEUP_S = 600
+# ckpt-bad on a 5xx/network: 3 tries (5, 15, 45 s).
+CKPT_BAD_RETRY_DELAYS_S = (5, 15, 45)
+RATE_LIMIT_MAX_WAIT_S = 60
+RATE_LIMIT_MAX_REPEATS = 20
+# HTTP timeouts (impl-notes WP-B 2, TR-9): API calls connect 10 s / read 60 s;
+# ckpt-bad sha256 read 300 s (the API streams and hashes ~620 MB in that request);
+# a PUT to R2 has a 600 s read timeout (§3.2); a presigned GET reads with 60 s.
+API_CONNECT_TIMEOUT_S = 10.0
+API_READ_TIMEOUT_S = 60.0
+CKPT_BAD_SHA256_READ_TIMEOUT_S = 300.0
+PUT_READ_TIMEOUT_S = 600.0
+GET_READ_TIMEOUT_S = 60.0
+PUT_TRIES = 3
+PUT_REASK_MAX = 3
+DOWNLOAD_TRIES = 3
+LOG_MAX_BYTES = 32 * 1024 * 1024 - 64 * 1024
+LOG_HEAD_BYTES = 1024 * 1024
+JSON_READ_CAP_B = 1024 * 1024
+DETAIL_MAX_CHARS = 500
+LOCK_CANDIDATES = (Path("/app/training-lock.txt"), Path("/root/training-lock.txt"))
+# This very file, the handler code the process runs (V2-1): the trainer image COPYs it to
+# /app/training_handler.py, Modal's add_local_python_source mounts it at /root; both are the
+# repo file's bytes, which make_handler_hash.py hashes into the API's TRAINING_HANDLER_SHA256.
+HANDLER_PATH = Path(__file__)
+
+# Test seams: an httpx transport (tests pass httpx.MockTransport) and the clock.
+_HTTP_TRANSPORT = None
+_sleep = time.sleep
+_monotonic = time.monotonic
+
+_STEP_ID_RE = re.compile(r"^\d{6,}$")
+
+
+class HostUnfit(Exception):
+    """The host cannot train (§4.7 step 1). `reason` is a §3.2 host_unfit reason."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
+
+
+def _assert_training_host(*, disk_floor: bool = True) -> None:
+    """CUDA, capability (8,0)-(9,0), >= 9.5 GB, a finite synchronised matmul, >= 30 GiB at /tmp.
+
+    The free /tmp bytes are measured and printed on the "Host check:" line of every host
+    that gets that far (the P2 record, SR-24 i). Only managed mode (`disk_floor`, the
+    default) refuses below MIN_FREE_DISK_B; the legacy Modal functions pass
+    disk_floor=False (V2-2: nobody measured the /tmp of Modal's L4 / A100-80GB, and the
+    floor must not turn a path that works today into S16).
+    """
+    measured = {}
+    try:
+        import torch
+    except Exception as e:  # noqa: BLE001
+        raise HostUnfit("no_cuda", f"torch import failed: {type(e).__name__}")
+    try:
+        available = bool(torch.cuda.is_available())
+    except Exception as e:  # noqa: BLE001
+        raise HostUnfit("no_cuda", f"cuda probe failed: {type(e).__name__}")
+    measured["cuda"] = available
+    if not available:
+        print(f"Host check: {measured}", flush=True)
+        raise HostUnfit("no_cuda", "torch.cuda.is_available() is False")
+    try:
+        cap = tuple(int(x) for x in torch.cuda.get_device_capability(0))
+        props = torch.cuda.get_device_properties(0)
+        total_memory = int(props.total_memory)
+        measured.update(gpu=str(props.name), capability=cap, total_memory_b=total_memory)
+    except Exception as e:  # noqa: BLE001
+        raise HostUnfit("no_cuda", f"device query failed: {type(e).__name__}")
+    if not (GPU_CAPABILITY_MIN <= cap <= GPU_CAPABILITY_MAX):
+        print(f"Host check: {measured}", flush=True)
+        raise HostUnfit("gpu_capability", f"capability {cap[0]}.{cap[1]} outside 8.0-9.0")
+    if total_memory < MIN_GPU_MEMORY_B:
+        print(f"Host check: {measured}", flush=True)
+        raise HostUnfit("gpu_memory", f"total_memory {total_memory} B < {MIN_GPU_MEMORY_B} B")
+    try:
+        a = torch.randn(1024, 1024, device="cuda:0", dtype=torch.float32)
+        b = torch.randn(1024, 1024, device="cuda:0", dtype=torch.float32)
+        c = a @ b
+        torch.cuda.synchronize(0)
+        finite = bool(torch.isfinite(c).all().item())
+    except Exception as e:  # noqa: BLE001
+        print(f"Host check: {measured}", flush=True)
+        raise HostUnfit("matmul", f"matmul failed: {type(e).__name__}")
+    measured["matmul_finite"] = finite
+    if not finite:
+        print(f"Host check: {measured}", flush=True)
+        raise HostUnfit("matmul", "1024x1024 fp32 matmul produced a non-finite value")
+    free = shutil.disk_usage("/tmp").free
+    measured["tmp_free_b"] = int(free)
+    print(f"Host check: {measured}", flush=True)
+    if disk_floor and free < MIN_FREE_DISK_B:
+        raise HostUnfit("disk", f"/tmp free {free} B < {MIN_FREE_DISK_B} B")
+
+
+# ---- small helpers ----
+
+def _short(text, limit: int = DETAIL_MAX_CHARS) -> str:
+    s = "".join(ch if ch.isprintable() else " " for ch in str(text or ""))
+    return s[:limit]
+
+
+def _hash_file(path: Path) -> dict:
+    """{size, sha256 (hex), md5 (base64)} in one pass."""
+    import base64
+    import hashlib
+    sha = hashlib.sha256()
+    md5 = hashlib.md5()
+    size = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            sha.update(chunk)
+            md5.update(chunk)
+            size += len(chunk)
+    return {"size": size, "sha256": sha.hexdigest(),
+            "md5": base64.b64encode(md5.digest()).decode("ascii")}
+
+
+def _hash_bytes(data: bytes) -> dict:
+    import base64
+    import hashlib
+    return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+            "md5": base64.b64encode(hashlib.md5(data).digest()).decode("ascii")}
+
+
+def _read_json_capped(path: Path):
+    with open(path, "rb") as f:
+        data = f.read(JSON_READ_CAP_B + 1)
+    if len(data) > JSON_READ_CAP_B:
+        raise ValueError(f"{path.name} is larger than {JSON_READ_CAP_B} bytes")
+    return json.loads(data.decode("utf-8"))
+
+
+def _find_lock_file() -> Path | None:
+    for p in LOCK_CANDIDATES:
+        if p.is_file():
+            return p
+    return None
+
+
+def _lock_sha256() -> str:
+    """sha256 of the lock file this image was built from (§3.10); 64 zeros when none is found."""
+    import hashlib
+    path = _find_lock_file()
+    if path is None:
+        print("[edubotics-worker] no training-lock.txt found; start will be refused", flush=True)
+        return "0" * 64
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _handler_sha256() -> str:
+    """sha256 of the handler file this process runs (§3.10, V2-1); 64 zeros when unreadable.
+
+    Sent in `start` beside the lock hash, so a stale handler (a forgotten Modal deploy, an
+    older trainer image) is refused as wrong_image even when the lock did not change.
+    """
+    import hashlib
+    try:
+        return hashlib.sha256(HANDLER_PATH.read_bytes()).hexdigest()
+    except OSError:
+        print("[edubotics-worker] training_handler.py is unreadable; start will be refused", flush=True)
+        return "0" * 64
+
+
+def _build_id() -> str:
+    return _short(os.environ.get("EDUBOTICS_BUILD") or "unknown", 64)
+
+
+def _http_client(read_timeout: float = API_READ_TIMEOUT_S):
+    import httpx
+    return httpx.Client(
+        timeout=httpx.Timeout(connect=API_CONNECT_TIMEOUT_S, read=read_timeout,
+                              write=read_timeout, pool=API_CONNECT_TIMEOUT_S),
+        follow_redirects=False,
+        transport=_HTTP_TRANSPORT,
+    )
+
+
+def _spawn_lerobot(cmd: list[str], env: dict):
+    """The one place LeRobot is started (a seam for the tests' fake lerobot_train)."""
+    return subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        bufsize=1, env=env, errors="replace",
+    )
+
+
+def _lerobot_env() -> dict:
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    # LeRobot needs none of the worker's credentials.
+    for key in ("EDUBOTICS_WORKER_TOKEN", "SUPABASE_ANON_KEY", "RUNPOD_API_KEY", "HF_TOKEN"):
+        env.pop(key, None)
+    return env
+
+
+def _num_workers(cpu_budget: int) -> int:
+    try:
+        n = int(cpu_budget)
+    except (TypeError, ValueError):
+        n = 1
+    return max(1, min(n - 1, NUM_WORKERS_MAX))
+
+
+def _fresh_args(spec: dict, num_workers: int) -> list[str]:
+    """The fresh-start LeRobot command (§4.7 step 5). `_build_training_command`'s rmtree runs here."""
+    cmd = _build_training_command(spec["dataset_name"], "act", spec["model_name"],
+                                  spec["training_params"])
+    revision = spec.get("dataset_revision")
+    if revision:
+        cmd.append(f"--dataset.revision={revision}")
+    cmd.append(f"--num_workers={num_workers}")
+    return cmd
+
+
+def _output_path(model_name: str) -> Path:
+    return OUTPUT_DIR / model_name.replace("/", "_")
+
+
+def _regenerate_train_config(fresh_args: list[str]) -> dict:
+    """LeRobot's own TrainPipelineConfig for these CLI args + the dataset's features (§B.4).
+
+    Proven equal to the train_config.json LeRobot writes for a fresh run (dict
+    equality) and to a resumed run's after dropping RESUME_IGNORED_KEYS. Must run
+    while the output directory does NOT exist (validate() refuses an existing one).
+    """
+    import draccus
+    import lerobot.policies.factory  # noqa: F401  (the same choice registry as lerobot_train)
+    from lerobot.configs.train import TrainPipelineConfig
+    from lerobot.configs.types import FeatureType
+    from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+    from lerobot.datasets.feature_utils import dataset_to_policy_features
+
+    args = list(fresh_args)
+    saved = sys.argv
+    sys.argv = ["lerobot_train"] + args
+    try:
+        cfg = draccus.parse(TrainPipelineConfig, None, args=args)
+        cfg.validate()
+    finally:
+        sys.argv = saved
+    meta = LeRobotDatasetMetadata(cfg.dataset.repo_id, root=cfg.dataset.root,
+                                  revision=cfg.dataset.revision)
+    feats = dataset_to_policy_features(meta.features)
+    cfg.policy.output_features = {k: f for k, f in feats.items() if f.type is FeatureType.ACTION}
+    if not cfg.policy.input_features:
+        cfg.policy.input_features = {k: f for k, f in feats.items()
+                                     if k not in cfg.policy.output_features}
+    if hasattr(cfg.policy, "action_feature_names"):
+        names = meta.features.get("action", {}).get("names")
+        if names is not None:
+            cfg.policy.action_feature_names = list(names)
+    with draccus.config_type("json"):
+        return json.loads(draccus.dump(cfg))
+
+
+def _normalise_train_config(doc: dict) -> dict:
+    doc = json.loads(json.dumps(doc))
+    for path in RESUME_IGNORED_KEYS:
+        node = doc
+        for k in path[:-1]:
+            node = node.get(k, {}) if isinstance(node, dict) else {}
+        if isinstance(node, dict):
+            node.pop(path[-1], None)
+    return doc
+
+
+class _CkptBad(Exception):
+    """The handed checkpoint is unusable; `reason` is a §3.2 ckpt-bad reason."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
+
+
+class _DownloadFailed(Exception):
+    """Incomplete bytes or a transport failure after DOWNLOAD_TRIES (-> host_unfit/download)."""
+
+
+def _check_steps(doc, want: tuple, name: str, state_index: int, state_file: str) -> None:
+    if not isinstance(doc, dict) or doc.get("name") != name:
+        raise _CkptBad("steps", f"{name}: wrong name")
+    steps = doc.get("steps")
+    if not isinstance(steps, list) or not all(isinstance(s, dict) for s in steps):
+        raise _CkptBad("steps", f"{name}: steps is not a list of objects")
+    if tuple(s.get("registry_name") for s in steps) != want:
+        raise _CkptBad("steps", f"{name}: unexpected processor steps")
+    for i, s in enumerate(steps):
+        if "class" in s:
+            raise _CkptBad("steps", f"{name}: a step names a class")
+        if i == state_index:
+            if s.get("state_file") != state_file:
+                raise _CkptBad("steps", f"{name}: wrong state_file")
+        elif "state_file" in s:
+            raise _CkptBad("steps", f"{name}: unexpected state_file")
+
+
+def _validate_resume_dir(stage: Path, step: int) -> None:
+    """Exact 11 files, no links, the ACT processor lists and state files, training_step (§4.7 6.3)."""
+    found = []
+    for root, dirs, files in os.walk(stage):
+        for name in dirs + files:
+            if os.path.islink(os.path.join(root, name)):
+                raise _CkptBad("file_list", "the checkpoint contains a link")
+        for name in files:
+            found.append(os.path.relpath(os.path.join(root, name), stage).replace(os.sep, "/"))
+    if sorted(found) != sorted(CHECKPOINT_RELPATHS):
+        raise _CkptBad("file_list", "the checkpoint's file list is not the expected one")
+    pm = stage / "pretrained_model"
+    for fname, want, name, idx, sfile in (
+        ("policy_preprocessor.json", ACT_PRE_STEPS, "policy_preprocessor",
+         PRE_STATE_STEP_INDEX, PRE_STATE_FILE),
+        ("policy_postprocessor.json", ACT_POST_STEPS, "policy_postprocessor",
+         POST_STATE_STEP_INDEX, POST_STATE_FILE),
+    ):
+        try:
+            doc = _read_json_capped(pm / fname)
+        except (OSError, ValueError) as e:
+            raise _CkptBad("steps", f"{fname}: {type(e).__name__}")
+        _check_steps(doc, want, name, idx, sfile)
+    try:
+        ts = _read_json_capped(stage / "training_state" / "training_step.json")
+    except (OSError, ValueError) as e:
+        raise _CkptBad("training_step", f"training_step.json: {type(e).__name__}")
+    if ts != {"step": step}:
+        raise _CkptBad("training_step", "training_step.json does not name the handed step")
+
+
+def _compare_and_overwrite_train_config(stage: Path, ref: dict) -> None:
+    path = stage / "pretrained_model" / "train_config.json"
+    try:
+        host = _read_json_capped(path)
+    except (OSError, ValueError) as e:
+        raise _CkptBad("train_config", f"train_config.json: {type(e).__name__}")
+    if not isinstance(host, dict) or _normalise_train_config(host) != _normalise_train_config(ref):
+        raise _CkptBad("train_config", "train_config.json differs from the regenerated config")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(ref, indent=4))
+
+
+def _download_file(client, url: str, dest: Path, size: int, sha256: str) -> None:
+    """One presigned GET with DOWNLOAD_TRIES tries.
+
+    Raises _DownloadFailed for incomplete bytes / transport errors after the tries,
+    and _CkptBad("sha256") for complete bytes whose size or sha256 differ.
+    """
+    import hashlib
+    import httpx
+    last = "no try"
+    for attempt in range(DOWNLOAD_TRIES):
+        if attempt:
+            _sleep(2 * attempt)
+        h = hashlib.sha256()
+        got = 0
+        too_long = False
+        try:
+            with client.stream("GET", url, timeout=httpx.Timeout(
+                    connect=API_CONNECT_TIMEOUT_S, read=GET_READ_TIMEOUT_S,
+                    write=GET_READ_TIMEOUT_S, pool=API_CONNECT_TIMEOUT_S)) as resp:
+                if resp.status_code != 200:
+                    last = f"HTTP {resp.status_code}"
+                    continue
+                with open(dest, "wb") as f:
+                    for chunk in resp.iter_bytes(1 << 20):
+                        got += len(chunk)
+                        if got > size:
+                            too_long = True
+                            break
+                        h.update(chunk)
+                        f.write(chunk)
+        except (httpx.HTTPError, OSError) as e:
+            last = type(e).__name__
+            continue
+        if too_long or got != size or h.hexdigest() != sha256:
+            raise _CkptBad("sha256", f"{dest.name}: complete bytes differ from the manifest")
+        return
+    raise _DownloadFailed(f"{dest.name}: {last}")
+
+
+def _prepare_resume(resume: dict, fresh_args: list[str], num_workers: int,
+                    model_name: str, total_steps: int, client) -> list[str]:
+    """§4.7 step 6: stage, validate, regenerate + overwrite train_config, move into place.
+
+    Returns the resume command. Raises _CkptBad (ckpt-bad), _DownloadFailed, or
+    any other exception (all -> host_unfit/download, never a checkpoint count).
+    """
+    step = resume.get("step")
+    sid = resume.get("step_id")
+    files = resume.get("files")
+    if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+        raise ValueError("resume.step is not a positive integer")
+    if not isinstance(sid, str) or not _STEP_ID_RE.match(sid) or sid != step_id(step, total_steps):
+        raise ValueError("resume.step_id does not match the step")
+    if not isinstance(files, dict):
+        raise ValueError("resume.files is not an object")
+    if sorted(files) != sorted(CHECKPOINT_RELPATHS):
+        # The API's own hand-out, not the checkpoint's content: host_unfit/download (FR-13).
+        raise ValueError("resume.files does not name exactly the 11 checkpoint files")
+    out = _output_path(model_name)
+    # 0. Nothing of an earlier run may remain (validate() refuses an existing output_dir).
+    if out.exists():
+        shutil.rmtree(out)
+    # 1. Our own config, from the server-built arguments and the dataset's metadata.
+    ref = _regenerate_train_config(fresh_args[3:])
+    # 2. Stage every file.
+    stage = OUTPUT_DIR / f".stage-{sid}"
+    if stage.exists():
+        shutil.rmtree(stage)
+    for rel in CHECKPOINT_RELPATHS:
+        meta = files[rel]
+        if (not isinstance(meta, dict) or not isinstance(meta.get("url"), str)
+                or not isinstance(meta.get("size"), int)
+                or not isinstance(meta.get("sha256"), str)):
+            raise ValueError(f"resume.files[{rel}] is malformed")
+        dest = stage / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _download_file(client, meta["url"], dest, meta["size"], meta["sha256"].lower())
+    # 3. Structure.
+    _validate_resume_dir(stage, step)
+    # 4. train_config.json: equal to ours apart from the 4 resume keys, then replaced by ours.
+    _compare_and_overwrite_train_config(stage, ref)
+    # 5. Into place.
+    ckpt = out / "checkpoints" / sid
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(stage, ckpt)
+    # 6. LeRobot's own resume.
+    return [
+        sys.executable, "-m", "lerobot.scripts.lerobot_train",
+        "--resume=true",
+        f"--config_path={ckpt}/pretrained_model/train_config.json",
+        f"--num_workers={num_workers}",
+    ]
+
+
+class _LogBuffer:
+    """The host's training_log.txt: the first LOG_HEAD_BYTES, then the newest lines."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._head: list[str] = []
+        self._head_bytes = 0
+        self._tail: deque = deque()
+        self._tail_bytes = 0
+        self._dropped = 0
+
+    def add(self, line: str) -> None:
+        if not line.endswith("\n"):
+            line += "\n"
+        n = len(line.encode("utf-8", errors="replace"))
+        with self._lock:
+            if self._head_bytes + n <= LOG_HEAD_BYTES and not self._tail:
+                self._head.append(line)
+                self._head_bytes += n
+                return
+            self._tail.append(line)
+            self._tail_bytes += n
+            while self._tail and self._head_bytes + self._tail_bytes > LOG_MAX_BYTES:
+                old = self._tail.popleft()
+                self._tail_bytes -= len(old.encode("utf-8", errors="replace"))
+                self._dropped += 1
+
+    def to_bytes(self) -> bytes:
+        with self._lock:
+            parts = list(self._head)
+            if self._dropped:
+                parts.append(f"[... {self._dropped} lines omitted ...]\n")
+            parts.extend(self._tail)
+        return "".join(parts).encode("utf-8", errors="replace")
+
+
+class _Answer:
+    """One worker-API answer: status None = network (connect/read timeout, reset)."""
+
+    def __init__(self, status=None, body=None, error=""):
+        self.status = status
+        self.body = body if isinstance(body, dict) else {}
+        self.error = error
+
+    @property
+    def code(self):
+        return self.body.get("code")
+
+    @property
+    def network(self) -> bool:
+        return self.status is None
+
+    def is_5xx_class(self) -> bool:
+        return self.status is None or self.status >= 500
+
+
+_STOP = "stop"
+_GIVEUP = "giveup"
+_RETRY = "retry"
+
+
+class _ManagedRun:
+    """One worker process for one attempt. All state of run_managed lives here."""
+
+    def __init__(self, api_url, supabase_url, supabase_anon_key, training_id, attempt,
+                 worker_token, cpu_budget, on_budget):
+        self.api_url = str(api_url).rstrip("/")
+        self.supabase_url = supabase_url
+        self.supabase_anon_key = supabase_anon_key
+        self.training_id = int(training_id)
+        self.attempt = int(attempt)
+        self.token = str(worker_token)
+        self.cpu_budget = cpu_budget
+        self.on_budget = on_budget
+        self.log = _LogBuffer()
+        self.fenced = threading.Event()        # 401 / P0001 / 409 start|finish: stop everything
+        self.uploader_stop = threading.Event()
+        self.progress_stop = threading.Event()
+        self.state_lock = threading.Lock()
+        self.proc = None
+        self.spec: dict = {}
+        self.total_steps = 0
+        self.resume_step = 0
+        self.resumed = False
+        self.last_step = 0
+        self.new_step_logged = False
+        self.deadline = None
+        self.ck_state: dict[int, str] = {}     # step -> "put" | "uploaded" | "skipped"
+        self.ck_manifest: dict[int, dict] = {}
+        self.points = None
+        self.threads: list[threading.Thread] = []
+        self.client = _http_client()
+
+    # ---------- logging ----------
+    def wlog(self, msg: str) -> None:
+        line = f"[edubotics-worker] {msg}"
+        print(line, flush=True)
+        self.log.add(line)
+
+    # ---------- fence ----------
+    def fence(self, why: str) -> None:
+        if not self.fenced.is_set():
+            self.wlog(f"stopping: {why}")
+        self.fenced.set()
+        self.uploader_stop.set()
+        self.progress_stop.set()
+        self._kill_lerobot()
+
+    def _kill_lerobot(self) -> None:
+        proc = self.proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ---------- the worker API (§3.2) ----------
+    def _url(self, action: str) -> str:
+        return f"{self.api_url}/trainings/worker/{self.training_id}/{self.attempt}/{action}"
+
+    def api(self, action: str, body: dict, *, read_timeout: float = API_READ_TIMEOUT_S,
+            client=None, deadline=None) -> _Answer:
+        """POST one action. A 429 waits min(Retry-After, 60) s and repeats (bounded)."""
+        import httpx
+        client = client or self.client
+        timeout = httpx.Timeout(connect=API_CONNECT_TIMEOUT_S, read=read_timeout,
+                                write=API_READ_TIMEOUT_S, pool=API_CONNECT_TIMEOUT_S)
+        payload = json.dumps(body).encode("utf-8")
+        for _ in range(RATE_LIMIT_MAX_REPEATS + 1):
+            if self.fenced.is_set():
+                return _Answer(status=401, body={"code": "fenced"})
+            try:
+                resp = client.post(self._url(action), content=payload, timeout=timeout, headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                })
+            except httpx.HTTPError as e:
+                return _Answer(None, None, type(e).__name__)
+            try:
+                parsed = resp.json()
+            except ValueError:
+                parsed = None
+            if resp.status_code == 429:
+                wait = _retry_after_s(resp.headers.get("Retry-After"))
+                if deadline is not None and _monotonic() + wait > deadline:
+                    return _Answer(429, parsed)
+                self.wlog(f"{action}: 429, waiting {wait} s")
+                _sleep(wait)
+                continue
+            if resp.status_code == 401:
+                self.fence(f"{action} answered 401")
+            return _Answer(resp.status_code, parsed)
+        return _Answer(429, None)
+
+    def _start_class(self, fn, what: str):
+        """§3.2 'retry (start class)': fn() -> value | _RETRY; returns the value, _STOP or _GIVEUP."""
+        giveup_at = _monotonic() + START_RETRY_GIVEUP_S
+        delays = list(START_RETRY_DELAYS_S)
+        while True:
+            if self.fenced.is_set():
+                return _STOP
+            result = fn(giveup_at)
+            if result is not _RETRY:
+                return result
+            delay = delays.pop(0) if delays else START_RETRY_EVERY_S
+            if _monotonic() + delay > giveup_at:
+                self.wlog(f"{what}: giving up after {START_RETRY_GIVEUP_S} s")
+                return _GIVEUP
+            _sleep(delay)
+
+    def call_start(self):
+        """POST start; returns the 200 body, or _STOP."""
+        body = {"lock_sha256": _lock_sha256(), "handler_sha256": _handler_sha256(), "build": _build_id()}
+
+        def once(deadline):
+            a = self.api("start", body, deadline=deadline)
+            if a.status == 200:
+                if not _valid_start_answer(a.body):
+                    self.wlog("start: ERROR malformed 200 answer")
+                    return _RETRY
+                return a.body
+            if a.status == 401:
+                return _STOP
+            if a.status == 409:
+                self.fence(f"start answered 409 {_short(a.code, 40)}")
+                return _STOP
+            if not a.is_5xx_class():
+                self.wlog(f"start: ERROR unexpected status {a.status}")
+            else:
+                self.wlog(f"start: transient ({a.status or a.error})")
+            return _RETRY
+
+        result = self._start_class(once, "start")
+        if result in (_STOP, _GIVEUP):
+            self.fence("start could not be completed")
+            return _STOP
+        return result
+
+    def call_finish(self, payload: dict) -> str:
+        """POST finish; returns its status string, or _STOP."""
+        if "detail" in payload:
+            payload = {**payload, "detail": _short(payload["detail"])}
+        self.uploader_stop.set()
+        self.progress_stop.set()
+
+        def once(deadline):
+            a = self.api("finish", payload, deadline=deadline)
+            if a.status == 200:
+                return str(a.body.get("status", ""))
+            if a.status in (401, 409):
+                return _STOP
+            if not a.is_5xx_class():
+                self.wlog(f"finish: ERROR unexpected status {a.status}")
+            else:
+                self.wlog(f"finish: transient ({a.status or a.error})")
+            return _RETRY
+
+        result = self._start_class(once, "finish")
+        if result in (_STOP, _GIVEUP):
+            self.fence("finish could not be completed")
+            return _STOP
+        self.wlog(f"finish {payload.get('outcome')}/{payload.get('reason', '-')} -> {result}")
+        return result
+
+    def call_ckpt_bad(self, step: int, reason: str) -> str:
+        """POST ckpt-bad; returns 'refused' | 'kept' | 'ignored' | _STOP | _GIVEUP."""
+        timeout = CKPT_BAD_SHA256_READ_TIMEOUT_S if reason == "sha256" else API_READ_TIMEOUT_S
+        delays = list(CKPT_BAD_RETRY_DELAYS_S)
+        while True:
+            a = self.api("ckpt-bad", {"step": step, "reason": reason}, read_timeout=timeout)
+            if a.status == 200 and a.body.get("state") in ("refused", "kept", "ignored"):
+                return a.body["state"]
+            if a.status == 401:
+                return _STOP
+            self.wlog(f"ckpt-bad: {'ERROR unexpected ' if not a.is_5xx_class() else ''}"
+                      f"answer {a.status or a.error}")
+            if not delays:
+                return _GIVEUP
+            _sleep(delays.pop(0))
+
+    # ---------- the RPC (§3.3) ----------
+    def rpc(self, **kw) -> bool:
+        """update_training_progress; False on a transport error, fences on P0001."""
+        try:
+            _call_progress_rpc(self.supabase_url, self.supabase_anon_key, self.token,
+                               self.training_id, total_steps=self.total_steps or None, **kw)
+            return True
+        except Exception as e:  # noqa: BLE001
+            if _is_terminal_cancel_error(e):
+                self.fence("update_training_progress answered P0001")
+            else:
+                self.wlog(f"update_training_progress failed: {type(e).__name__}")
+            return False
+
+    def first_running_write(self) -> bool:
+        def once(_deadline):
+            if self.rpc(status="running", current_step=self.resume_step):
+                return True
+            return _STOP if self.fenced.is_set() else _RETRY
+
+        result = self._start_class(once, "first running write")
+        if result is not True:
+            self.fence("the first running write failed")
+            return False
+        return True
+
+    def _progress_loop(self) -> None:
+        import queue
+        next_beat = _monotonic() + HEARTBEAT_INTERVAL_S
+        while not self.progress_stop.is_set():
+            wait = max(0.0, next_beat - _monotonic())
+            try:
+                item = self.points.get(timeout=wait)
+            except queue.Empty:
+                item = None
+            if self.progress_stop.is_set():
+                return
+            if item is not None:
+                step, loss = item
+                self.rpc(current_step=step, current_loss=loss)
+            else:
+                with self.state_lock:
+                    step = max(self.last_step, self.resume_step)
+                self.rpc(current_step=step)
+            next_beat = _monotonic() + HEARTBEAT_INTERVAL_S
+
+    def start_progress(self) -> None:
+        import queue
+        self.points = queue.Queue(maxsize=1000)
+        t = threading.Thread(target=self._progress_loop, name="managed-progress", daemon=True)
+        t.start()
+        self.threads.append(t)
+
+    # ---------- LeRobot output ----------
+    def _read_output(self, proc) -> None:
+        step_pattern = re.compile(r"step[:\s]+(\d+\.?\d*[KMBkmb]?)")
+        loss_pattern = re.compile(r"loss[:\s]+([\d.]+(?:e[+-]?\d+)?)")
+        try:
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                self.log.add(line)
+                m = step_pattern.search(line)
+                if not m:
+                    continue
+                step = _parse_abbreviated_number(m.group(1))
+                if step is None:
+                    continue
+                step = min(step, self.total_steps)
+                lm = loss_pattern.search(line)
+                loss = _safe_float(lm.group(1)) if lm else None
+                with self.state_lock:
+                    if step <= self.last_step:
+                        continue
+                    self.last_step = step
+                    if step > self.resume_step:
+                        self.new_step_logged = True
+                try:
+                    self.points.put_nowait((step, loss))
+                except Exception:  # noqa: BLE001  (queue full: the heartbeat still carries the step)
+                    pass
+        except (UnicodeDecodeError, ValueError, OSError):
+            pass
+
+    # ---------- uploader (§4.7 step 8) ----------
+    def _must_upload(self, step: int) -> bool:
+        return step % self.spec["mirror_every"] == 0 or step == self.total_steps
+
+    def _ckpt_root(self) -> Path:
+        return _output_path(self.spec["model_name"]) / "checkpoints"
+
+    def _newest_complete(self):
+        try:
+            target = os.readlink(self._ckpt_root() / "last")
+        except OSError:
+            return None
+        name = os.path.basename(target.rstrip("/"))
+        return int(name) if name.isdigit() else None
+
+    def _present(self) -> dict:
+        out = {}
+        root = self._ckpt_root()
+        try:
+            for entry in os.scandir(root):
+                if entry.name.isdigit() and entry.is_dir(follow_symlinks=False):
+                    out[int(entry.name)] = Path(entry.path)
+        except OSError:
+            pass
+        return out
+
+    def uploader_tick(self, client) -> None:
+        newest = self._newest_complete()
+        if newest is None:
+            return
+        present = self._present()
+        todo = sorted(
+            s for s in present
+            if self.resume_step < s <= newest
+            and self.ck_state.get(s) not in ("uploaded", "skipped")
+            and (self._must_upload(s) or s == newest)
+        )
+        for s in todo:
+            if self.uploader_stop.is_set() or self.fenced.is_set():
+                return
+            self.ck_state[s] = self._upload_step(s, present[s], client) or self.ck_state.get(s)
+        self._prune(newest, present)
+
+    def _prune(self, newest: int, present: dict) -> None:
+        for s, path in present.items():
+            if s >= newest:
+                continue
+            if self.ck_state.get(s) in ("uploaded", "skipped") or not self._must_upload(s) \
+                    or s <= self.resume_step:
+                shutil.rmtree(path, ignore_errors=True)
+
+    def _manifest(self, step: int, path: Path) -> dict | None:
+        if step in self.ck_manifest:
+            return self.ck_manifest[step]
+        rels = FINAL_CHECKPOINT_RELPATHS if step == self.total_steps else CHECKPOINT_RELPATHS
+        manifest = {}
+        for rel in rels:
+            f = path / rel
+            if f.is_symlink() or not f.is_file():
+                self.wlog(f"checkpoint {step}: ERROR {rel} is missing")
+                return None
+            manifest[rel] = _hash_file(f)
+        self.ck_manifest[step] = manifest
+        return manifest
+
+    def _upload_step(self, step: int, path: Path, client):
+        """One step on one tick. Returns the new state, or None to retry next tick."""
+        if self.ck_state.get(step) != "put":
+            manifest = self._manifest(step, path)
+            if manifest is None:
+                return "skipped"
+            done_files: set = set()
+            for _ in range(PUT_REASK_MAX + 1):
+                a = self.api("upload-url", {"kind": "ckpt", "step": step, "files": manifest},
+                             client=client)
+                if a.status == 200:
+                    urls = a.body.get("urls") or {}
+                    headers = a.body.get("headers") or {}
+                    result = self._put_files(client, path, manifest, urls, headers, done_files)
+                    if result == "ok":
+                        break
+                    if result == "403":
+                        continue
+                    return None                        # 5xx/network after PUT_TRIES: next tick
+                if a.status == 401:
+                    return None
+                if a.status == 409 and a.code == "already_ready":
+                    self.wlog(f"checkpoint {step}: already ready")
+                    return "uploaded"
+                if a.status == 409 and a.code == "already_refused":
+                    self.wlog(f"checkpoint {step}: already refused, skipped")
+                    return "skipped"
+                if a.status == 422:
+                    self.wlog(f"checkpoint {step}: upload-url refused the manifest (422), skipped")
+                    return "skipped"
+                if not a.is_5xx_class():
+                    self.wlog(f"checkpoint {step}: upload-url ERROR unexpected status {a.status}")
+                return None                            # 5xx/network: next tick
+            else:
+                return None                            # PUT 403 more than PUT_REASK_MAX times
+            self.ck_state[step] = "put"
+        a = self.api("ckpt-done", {"step": step}, client=client)
+        if a.status == 200:
+            self.wlog(f"checkpoint {step}: ready")
+            return "uploaded"
+        if a.status == 409 and a.code == "not_uploading":
+            self.wlog(f"checkpoint {step}: ckpt-done 409 not_uploading, skipped")
+            return "skipped"
+        if a.status == 422:
+            self.wlog(f"checkpoint {step}: refused by the API (422), skipped")
+            return "skipped"
+        if a.status == 401:
+            return None
+        if not a.is_5xx_class():
+            self.wlog(f"checkpoint {step}: ckpt-done ERROR unexpected status {a.status}")
+        return None                                    # ckpt-done again next tick
+
+    def _put_files(self, client, base: Path, manifest: dict, urls: dict, headers: dict,
+                   done_files: set) -> str:
+        """PUT every file not yet put with exactly the returned headers. 'ok' | '403' | 'fail'."""
+        import httpx
+        for rel in manifest:
+            if rel in done_files:
+                continue
+            url, hdrs = urls.get(rel), headers.get(rel)
+            if not isinstance(url, str) or not isinstance(hdrs, dict):
+                self.wlog(f"upload-url answer lacks {rel}")
+                return "fail"
+            for attempt in range(PUT_TRIES):
+                if self.uploader_stop.is_set() or self.fenced.is_set():
+                    return "fail"
+                try:
+                    resp = client.put(
+                        url, content=_file_chunks(base / rel), headers=dict(hdrs),
+                        timeout=httpx.Timeout(connect=API_CONNECT_TIMEOUT_S,
+                                              read=PUT_READ_TIMEOUT_S, write=PUT_READ_TIMEOUT_S,
+                                              pool=API_CONNECT_TIMEOUT_S))
+                    status = resp.status_code
+                except (httpx.HTTPError, OSError) as e:
+                    status = None
+                    self.wlog(f"PUT {rel}: {type(e).__name__}")
+                if status is not None and 200 <= status < 300:
+                    done_files.add(rel)
+                    break
+                if status == 403:
+                    return "403"
+                if attempt < PUT_TRIES - 1:
+                    _sleep(2 * (attempt + 1))
+            else:
+                return "fail"
+        return "ok"
+
+    def _uploader_loop(self) -> None:
+        client = _http_client()
+        try:
+            while not self.uploader_stop.is_set():
+                try:
+                    self.uploader_tick(client)
+                except Exception as e:  # noqa: BLE001  (an upload failure never stops training)
+                    self.wlog(f"uploader: {type(e).__name__}")
+                if self.uploader_stop.wait(UPLOAD_TICK_S):
+                    return
+        finally:
+            client.close()
+
+    def final_uploaded(self) -> bool:
+        return self.ck_state.get(self.total_steps) == "uploaded"
+
+    def final_given_up(self) -> bool:
+        return self.ck_state.get(self.total_steps) == "skipped"
+
+    # ---------- the log ----------
+    def upload_log(self) -> None:
+        """Best effort: upload-url {kind: log} and one PUT. Never changes the outcome."""
+        try:
+            data = self.log.to_bytes()
+            meta = _hash_bytes(data)
+            a = self.api("upload-url", {"kind": "log", "files": {"training_log.txt": meta}})
+            if a.status != 200:
+                self.wlog(f"log upload-url answered {a.status or a.error}")
+                return
+            url = (a.body.get("urls") or {}).get("training_log.txt")
+            hdrs = (a.body.get("headers") or {}).get("training_log.txt")
+            if not isinstance(url, str) or not isinstance(hdrs, dict):
+                return
+            import httpx
+            for attempt in range(PUT_TRIES):
+                try:
+                    resp = self.client.put(url, content=data, headers=dict(hdrs),
+                                           timeout=httpx.Timeout(
+                                               connect=API_CONNECT_TIMEOUT_S, read=PUT_READ_TIMEOUT_S,
+                                               write=PUT_READ_TIMEOUT_S, pool=API_CONNECT_TIMEOUT_S))
+                    if 200 <= resp.status_code < 300:
+                        return
+                except httpx.HTTPError:
+                    pass
+                if attempt < PUT_TRIES - 1:
+                    _sleep(2 * (attempt + 1))
+        except Exception as e:  # noqa: BLE001
+            self.wlog(f"log upload failed: {type(e).__name__}")
+
+    # ---------- the run ----------
+    def run(self) -> dict:
+        # 1. Host check.
+        try:
+            _assert_training_host()
+        except HostUnfit as e:
+            self.wlog(f"host check failed: {e.reason} ({e.detail})")
+            status = self.call_finish({"outcome": "host_unfit", "reason": e.reason,
+                                       "detail": e.detail})
+            return {"outcome": "host_unfit", "reason": e.reason, "api": status}
+
+        cmd = None
+        for loop in range(1, START_LOOP_MAX + 2):
+            if loop > START_LOOP_MAX:
+                self.wlog(f"no usable checkpoint after {START_LOOP_MAX} start calls")
+                status = self.call_finish({"outcome": "host_unfit", "reason": "download",
+                                           "detail": "start loop exhausted"})
+                return {"outcome": "host_unfit", "reason": "download", "api": status}
+            # 2. start.
+            answer = self.call_start()
+            if answer is _STOP:
+                return {"outcome": "stopped"}
+            self.spec = answer["spec"]
+            self.total_steps = int(self.spec["total_steps"])
+            resume = answer.get("resume")
+            if answer.get("finished"):
+                status = self.call_finish({"outcome": "succeeded"})
+                return {"outcome": "succeeded", "api": status}
+            budget_s = int(answer["budget_s"])
+            self.resume_step = int(resume["step"]) if resume else 0
+            self.resumed = resume is not None
+            with self.state_lock:
+                self.last_step = self.resume_step
+            if loop == 1:
+                expected = str(_output_path(self.spec["model_name"]))
+                if self.spec.get("output_dir") != expected:
+                    self.wlog("spec.output_dir differs from the worker's own; using the worker's")
+                # 3. The process's one first running write, then the heartbeat.
+                if not self.first_running_write():
+                    return {"outcome": "stopped"}
+                self.start_progress()
+            self.deadline = _monotonic() + budget_s
+            if self.on_budget is not None:
+                try:
+                    self.on_budget(budget_s)
+                except Exception:  # noqa: BLE001
+                    pass
+            # 4./5. Workers and the fresh command (its rmtree runs first).
+            try:
+                n = _num_workers(self.cpu_budget)
+                fresh = _fresh_args(self.spec, n)
+                if resume is None:
+                    cmd = fresh
+                    break
+                # 6. Resume.
+                cmd = _prepare_resume(resume, fresh, n, self.spec["model_name"],
+                                      self.total_steps, self.client)
+                break
+            except _CkptBad as bad:
+                self.wlog(f"checkpoint {self.resume_step} is bad: {bad.reason} ({bad.detail})")
+                shutil.rmtree(OUTPUT_DIR / f".stage-{resume['step_id']}", ignore_errors=True)
+                verdict = self.call_ckpt_bad(self.resume_step, bad.reason)
+                if verdict == _STOP:
+                    return {"outcome": "stopped"}
+                if verdict == "refused":
+                    continue
+                status = self.call_finish({"outcome": "host_unfit", "reason": "download",
+                                           "detail": f"ckpt-bad {bad.reason} -> {verdict}"})
+                return {"outcome": "host_unfit", "reason": "download", "api": status}
+            except _DownloadFailed as e:
+                self.wlog(f"download failed: {e}")
+                status = self.call_finish({"outcome": "host_unfit", "reason": "download",
+                                           "detail": f"download: {e}"})
+                return {"outcome": "host_unfit", "reason": "download", "api": status}
+            except Exception as e:  # noqa: BLE001  (FR-13: never counts against the checkpoint)
+                self.wlog(f"preparing the run failed: {type(e).__name__}: {_short(e, 300)}")
+                status = self.call_finish({"outcome": "host_unfit", "reason": "download",
+                                           "detail": f"{type(e).__name__}"})
+                return {"outcome": "host_unfit", "reason": "download", "api": status}
+
+        # 7. LeRobot.
+        global _managed_proc
+        self.wlog(f"running LeRobot ({'resume from ' + str(self.resume_step) if self.resumed else 'fresh'})")
+        try:
+            self.proc = _spawn_lerobot(cmd, _lerobot_env())
+        except Exception as e:  # noqa: BLE001
+            self.wlog(f"LeRobot could not be started: {type(e).__name__}")
+            status = self.call_finish({"outcome": "host_unfit", "reason": "download",
+                                       "detail": f"spawn: {type(e).__name__}"})
+            return {"outcome": "host_unfit", "reason": "download", "api": status}
+        _managed_proc = self.proc
+        reader = threading.Thread(target=self._read_output, args=(self.proc,),
+                                  name="managed-reader", daemon=True)
+        reader.start()
+        uploader = threading.Thread(target=self._uploader_loop, name="managed-uploader",
+                                    daemon=True)
+        uploader.start()
+        self.threads += [reader, uploader]
+
+        timed_out = False
+        while self.proc.poll() is None:
+            if self.fenced.is_set():
+                self._kill_lerobot()
+                return {"outcome": "stopped"}
+            if _monotonic() >= self.deadline:
+                self.wlog("training-time budget reached; stopping LeRobot")
+                timed_out = True
+                self._kill_lerobot()
+                break
+            _sleep(1)
+        rc = self.proc.wait()
+        reader.join(timeout=10)
+        if self.fenced.is_set():
+            return {"outcome": "stopped"}
+
+        if timed_out:
+            self.uploader_stop.set()
+            self.upload_log()
+            status = self.call_finish({"outcome": "failed", "reason": "time_cap"})
+            return {"outcome": "failed", "reason": "time_cap", "api": status}
+
+        # 9. Exit (E12, SR-3).
+        if rc == 0:
+            wait_until = _monotonic() + FINAL_UPLOAD_WAIT_S
+            while (not self.final_uploaded() and not self.final_given_up()
+                   and not self.fenced.is_set() and _monotonic() < wait_until):
+                _sleep(1)
+            if self.fenced.is_set():
+                return {"outcome": "stopped"}
+            if not self.final_uploaded():
+                self.wlog("the final checkpoint was not uploaded in time")
+            self.uploader_stop.set()
+            self.upload_log()
+            status = self.call_finish({"outcome": "succeeded"})
+            return {"outcome": "succeeded", "api": status}
+
+        self.uploader_stop.set()
+        with self.state_lock:
+            progressed = self.new_step_logged
+        self.wlog(f"LeRobot exited with {rc} (new step logged: {progressed})")
+        self.upload_log()
+        detail = f"returncode={rc}"
+        if progressed:
+            payload = {"outcome": "host_unfit", "reason": "lerobot_crash", "detail": detail}
+        elif not self.resumed:
+            payload = {"outcome": "failed", "reason": "lerobot_error", "detail": detail}
+        else:
+            payload = {"outcome": "host_unfit", "reason": "resume_crash", "detail": detail}
+        status = self.call_finish(payload)
+        return {"outcome": payload["outcome"], "reason": payload["reason"], "api": status}
+
+    def close(self) -> None:
+        global _managed_proc
+        self.uploader_stop.set()
+        self.progress_stop.set()
+        self._kill_lerobot()
+        _managed_proc = None
+        for t in self.threads:
+            t.join(timeout=2)
+        if self.proc is not None and self.proc.stdout is not None:
+            try:
+                self.proc.stdout.close()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self.client.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _file_chunks(path: Path):
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            yield chunk
+
+
+def _retry_after_s(value) -> float:
+    try:
+        return float(min(max(int(str(value).strip()), 1), RATE_LIMIT_MAX_WAIT_S))
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def _valid_start_answer(body: dict) -> bool:
+    spec = body.get("spec")
+    if not isinstance(spec, dict) or not isinstance(body.get("finished"), bool):
+        return False
+    if not isinstance(body.get("budget_s"), int) or isinstance(body.get("budget_s"), bool):
+        return False
+    for key in ("dataset_name", "model_name"):
+        if not isinstance(spec.get(key), str) or not spec[key]:
+            return False
+    if not isinstance(spec.get("training_params"), dict):
+        return False
+    for key in ("total_steps", "save_freq", "mirror_every"):
+        v = spec.get(key)
+        if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+            return False
+    if spec.get("dataset_revision") is not None and not isinstance(spec["dataset_revision"], str):
+        return False
+    resume = body.get("resume")
+    return resume is None or (isinstance(resume, dict) and isinstance(resume.get("step"), int))
+
+
+def run_managed(api_url: str, supabase_url: str, supabase_anon_key: str, training_id: int,
+                attempt: int, worker_token: str, cpu_budget: int, *, on_budget=None) -> dict:
+    """Run one managed attempt (§4.7). Returns a small JSON-safe summary.
+
+    `on_budget(budget_s)` is called whenever `start` answers (entry.py's watchdog).
+    Never raises for an API, RPC, R2 or LeRobot failure: every reaction is §3.2's.
+    """
+    run = _ManagedRun(api_url, supabase_url, supabase_anon_key, training_id, attempt,
+                      worker_token, cpu_budget, on_budget)
+    try:
+        return run.run()
+    finally:
+        run.close()

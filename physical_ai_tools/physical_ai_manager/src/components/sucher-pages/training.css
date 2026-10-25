@@ -211,6 +211,19 @@
   animation: su-breathe 2400ms ease-in-out infinite;
 }
 :where([data-ui='sucher']) .su-trn-stat { margin-top: 6px; font-size: 22px; line-height: 1; color: var(--su-scr-ink); }
+/* The API's German line while a training moves between GPU servers or is published
+ * (`trainings.status_note`, RunPod spec §4.11): a quiet amber note under the hero stats. */
+:where([data-ui='sucher']) .su-trn-note {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(245, 165, 36, .10);
+  box-shadow: inset 0 0 0 1px rgba(245, 165, 36, .32);
+  color: var(--su-warn);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
 :where([data-ui='sucher']) .su-trn-stat--ok { color: var(--su-ok); }
 :where([data-ui='sucher']) .su-trn-stat--rec { color: var(--su-rec); }
 :where([data-ui='sucher']) .su-trn-chart {

@@ -95,7 +95,7 @@ jobs:
         run: |
           # The Supabase CLI's `db lint` requires a linked project. For a
           # bare syntax pass we use pglast (PostgreSQL grammar via libpg_query).
-          python -m pip install --quiet 'pglast==6.*'
+          python -m pip install --quiet 'pglast==7.*'
           set -e
           for f in *.sql; do
             echo ">> Parsing $f"

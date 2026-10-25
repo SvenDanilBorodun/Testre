@@ -5,12 +5,28 @@ import toast from 'react-hot-toast';
 import { cancelCloudTraining } from '../services/cloudTrainingApi';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import { setSelectedTrainingId } from '../features/training/trainingSlice';
+import ContinueTrainingButton from './ContinueTrainingButton';
+import { CONTINUE_DE } from '../features/training/continuation';
 import Icon from './icons/Icon';
 import { Led } from './sucher';
 import { releasePointerFocus } from './sucher/pointerFocus';
 
 // The status light of a model card (Sucher: a light + a caption).
 const STATUS_LED = { queued: 'warn', running: 'sig', succeeded: 'ok', failed: 'rec', canceled: 'off' };
+
+// A failed row's error_message is cut on the card only when it is longer than
+// this: a legacy worker writes up to 2 KB of LeRobot output there, while every
+// German sentence of the managed training's S-table (training_texts_de.py, the
+// longest S4 at 178 characters) is shown whole. Fenced by
+// robotis_ai_setup/tests/test_managed_training_lockstep.py (every S sentence fits).
+export const ERROR_MESSAGE_MAX_CHARS = 300;
+
+export function cardErrorText(message) {
+  if (typeof message !== 'string') return '';
+  return message.length > ERROR_MESSAGE_MAX_CHARS
+    ? message.substring(0, ERROR_MESSAGE_MAX_CHARS) + '...'
+    : message;
+}
 
 const STATUS_CONFIG = {
   queued: { icon: 'hourglass', color: 'text-gray-500', bg: 'bg-gray-100', label: 'In Warteschlange' },
@@ -20,7 +36,7 @@ const STATUS_CONFIG = {
   canceled: { icon: 'cancel', color: 'text-gray-400', bg: 'bg-gray-50', label: 'Abgebrochen' },
 };
 
-function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, selected, onSelect }) {
+function ModelCard({ job, jobs, remaining, onContinued, rosConnected, onDownload, downloadingModel, onCancel, selected, onSelect }) {
   const config = STATUS_CONFIG[job.status] || STATUS_CONFIG.queued;
   const isActive = job.status === 'queued' || job.status === 'running';
   const isSucceeded = job.status === 'succeeded';
@@ -75,6 +91,16 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
           </span>
         )}
         <span className="su-lab">{job.model_type}</span>
+        {job.continued_from != null && (
+          <span className="su-lab">
+            {(() => {
+              const parent = (jobs || []).find((j) => j.id === job.continued_from);
+              return parent && Number.isInteger(parent.capped_step)
+                ? CONTINUE_DE.continuedFrom(parent.capped_step)
+                : CONTINUE_DE.continuationChip;
+            })()}
+          </span>
+        )}
       </div>
 
       {/* Dataset */}
@@ -119,7 +145,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
       {job.status === 'failed' && job.error_message && (
         <div className="su-model__error">
           <span className="font-medium">Fehler: </span>
-          <span className="break-all">{job.error_message.length > 150 ? job.error_message.substring(0, 150) + '...' : job.error_message}</span>
+          <span className="break-all">{cardErrorText(job.error_message)}</span>
           <div className="mt-1 italic">Trainingsguthaben wurde erstattet.</div>
         </div>
       )}
@@ -128,6 +154,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
       <div className="su-model__actions" onClick={(e) => e.stopPropagation()}>
         {isSucceeded && (
           <>
+            <ContinueTrainingButton job={job} jobs={jobs} remaining={remaining} onContinued={onContinued} />
             <button
               type="button"
               onClick={(e) => { releasePointerFocus(e); onDownload(job.model_name); }}
@@ -179,7 +206,7 @@ function ModelCard({ job, rosConnected, onDownload, downloadingModel, onCancel, 
   );
 }
 
-export default function MyModels({ jobs = [], loading = false, refetch, isRealtime = false }) {
+export default function MyModels({ jobs = [], loading = false, refetch, isRealtime = false, remaining, onContinued }) {
   const dispatch = useDispatch();
   const session = useSelector((state) => state.auth.session);
   const heartbeatStatus = useSelector((state) => state.tasks.heartbeatStatus);
@@ -325,6 +352,9 @@ export default function MyModels({ jobs = [], loading = false, refetch, isRealti
             <ModelCard
               key={job.id}
               job={job}
+              jobs={jobs}
+              remaining={remaining}
+              onContinued={onContinued}
               rosConnected={rosConnected}
               onDownload={handleDownload}
               downloadingModel={downloadingModel}

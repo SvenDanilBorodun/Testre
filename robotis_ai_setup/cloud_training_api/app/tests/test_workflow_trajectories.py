@@ -1200,11 +1200,12 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertIn("Roboterprofil", ctx.exception.detail)
 
-    def test_a_retired_arm_id_is_refused_on_a_new_write(self):
+    def test_a_retired_arm_id_is_refused_on_a_new_upload(self):
         """The database still admits the retired ids (stored rows stay
-        readable), the API refuses them on every NEW write with the ordinary
+        readable), the API refuses them on every new upload with the ordinary
         German 400 — at any width, so neither the old 7- nor the old 8-wide
-        payload can sneak a row in."""
+        payload can sneak a row in through an upload (a workflow clone copies
+        stored rows verbatim, owner decision)."""
         self.assertEqual(LEGACY_TRAJECTORY_ROBOT_PROFILES,
                          frozenset({"edu6_studio", "edu1_studio"}))
         for pid in sorted(LEGACY_TRAJECTORY_ROBOT_PROFILES):
@@ -1314,7 +1315,7 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
     def test_the_051_check_admits_exactly_the_validator_and_the_retired_ids(self):
         # 051 widens the CHECK; a validator that knows an id the constraint
         # refuses is a 500 on save. The retired ids stay in the CHECK (stored
-        # rows) and out of the validator (new writes).
+        # rows) and out of the validator (new uploads).
         import re as _re
         sql = _sql_file("migrations", "051")
         body = sql.split("ADD CONSTRAINT", 1)[1]

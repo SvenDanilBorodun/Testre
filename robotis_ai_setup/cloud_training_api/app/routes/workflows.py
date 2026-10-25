@@ -576,7 +576,9 @@ def clone_workflow(workflow_id: str, user=Depends(get_current_user)) -> Workflow
     # cloned „spiele Bewegung ab <name>" blocks still resolve. Copied under the
     # CLONER's ownership + the NEW workflow_id (never the source's ids — Rule §4).
     # Bounded to the per-workflow prune cap (16). Best-effort: a clone with no
-    # trajectories is still a valid workflow.
+    # trajectories is still a valid workflow. ``robot_profile`` is copied
+    # verbatim, a retired arm id included (migration 051's CHECK admits it; the
+    # upload validator is deliberately not applied to a copy).
     src_trajectories = (
         supabase.table("workflow_trajectories")
         .select("name, samples, point_count, duration_s, fps, robot_profile")
@@ -728,7 +730,7 @@ class TrajectoryCreate(BaseModel):
     # (an older client) = the 7-wide OMX default. NOTE 'v1_studio' and 'omx_f'
     # SHARE a width, so this tag is the ONLY thing separating those two
     # recordings — the width check cannot, and was never meant to. A retired arm
-    # id is refused on a new write.
+    # id is refused on a new upload (clone_workflow copies stored rows verbatim).
     robot_profile: str | None = None
 
 

@@ -74,8 +74,12 @@ TRAJECTORY_ROBOT_PROFILES: dict = {
 }
 # Retired arm ids. The database CHECK (migration 051) still admits them so the
 # rows stored under them stay readable, but they are deliberately NOT in the
-# map above: a NEW write carrying one is refused with the ordinary
-# „Unbekanntes Roboterprofil" 400 (no arm with that id exists any more).
+# map above: a new upload carrying one is refused with the ordinary
+# „Unbekanntes Roboterprofil" 400 (no arm with that id exists any more). A
+# workflow clone (routes/workflows.py::clone_workflow) does not pass through
+# this validator: it copies the source's stored rows verbatim, a retired tag
+# included, which the CHECK admits (owner decision: such a recording plays on
+# no current arm either way).
 LEGACY_TRAJECTORY_ROBOT_PROFILES: frozenset = frozenset({"edu6_studio", "edu1_studio"})
 # Sanity ceiling on the recording rate. The recorder runs at 20-30 Hz; a value
 # past this is a client bug and would make replay timing nonsensical.

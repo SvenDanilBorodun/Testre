@@ -12,9 +12,11 @@
 --
 -- THE RETIRED IDS STAY ADMITTED ('edu6_studio', 'edu1_studio'): rows already
 -- stored under them must stay readable, and narrowing the CHECK would fail its
--- VALIDATE on any such row. The cloud API refuses those ids on every NEW write
--- (validators/workflow.py::LEGACY_TRAJECTORY_ROBOT_PROFILES), so the database
--- only keeps what it already holds.
+-- VALIDATE on any such row. The cloud API refuses those ids on a new upload
+-- (validators/workflow.py::LEGACY_TRAJECTORY_ROBOT_PROFILES); a workflow clone
+-- copies the source's stored rows verbatim, tag included
+-- (routes/workflows.py::clone_workflow), so a new row carries a retired id only
+-- as a copy of a row the database already holds.
 --
 -- Purely additive: no backfill (NULL stays the documented legacy value, read as
 -- omx_f), no RLS change (the existing owner policies cover the column), no
@@ -33,4 +35,4 @@ ALTER TABLE public.workflow_trajectories
     VALIDATE CONSTRAINT workflow_trajectories_robot_profile_known;
 
 COMMENT ON COLUMN public.workflow_trajectories.robot_profile IS
-    'Arm family the recording was made on (omx_f | v1_studio; edu6_studio and edu1_studio are retired ids kept readable on stored rows and refused on new writes by the cloud API); NULL = legacy row, treated as omx_f. Point width is arm_joints + 2 — 7 for omx_f AND v1_studio (5 arm joints each). Width therefore does NOT identify the arm; this column does.';
+    'Arm family the recording was made on (omx_f | v1_studio; edu6_studio and edu1_studio are retired ids kept readable on stored rows, refused on new uploads by the cloud API and copied verbatim by a workflow clone); NULL = legacy row, treated as omx_f. Point width is arm_joints + 2 — 7 for omx_f AND v1_studio (5 arm joints each). Width therefore does NOT identify the arm; this column does.';

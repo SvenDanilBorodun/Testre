@@ -19,7 +19,7 @@ G-offset identical. `edu1_ik.py` with eight literal edits reproduced an independ
 
 **Owner decisions.** D1 both edu profiles removed; D2 profile `v1_studio`, asset `v1`, „V1 – Roboter Studio";
 D3 joint4 ±110° (`1.9198`, inward; link4 passes link3 at 4.2 mm at +110°); D4 migration 051 keeps the edu ids for
-stored rows, the API refuses them on new writes, `edu6_arm_records` kept; D5 a stored edu id falls back to
+stored rows, the API refuses them on new uploads (a clone copies stored rows verbatim), `edu6_arm_records` kept; D5 a stored edu id falls back to
 `omx_full`; Q1 the adapter PCB left out of the 3D view; Q2 the j2/j3 encoder windows as on the Edu:1; Q3 the board
 origin stays 0.18 / 0.075 with an own printed V1 mat; Q4 no-go coverage as on the Edu:1 (gap G1); Q5 claw open
 0.90; R1 the inner ring drawn at 0.10 with no server guard (gap G5); b1 the goal-edge ceiling 130 for the V1

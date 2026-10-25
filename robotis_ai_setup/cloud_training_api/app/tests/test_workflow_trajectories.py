@@ -1348,6 +1348,32 @@ class TestTrajectoryRobotProfile(unittest.TestCase):
         self.assertTrue(rebuilt.startswith(head + " "), rebuilt)
         self.assertEqual(rebuilt[len(head) + 1:], comment039)
 
+    def test_the_051_rollback_refuses_on_a_single_v1_row(self):
+        """The refusal CONDITION, not just its presence: the 'v1_studio' row
+        count goes into ``offending``, and ``IF offending > 0 THEN RAISE
+        EXCEPTION … END IF`` sits inside the DO block BEFORE the first
+        EXECUTE, so one V1 recording stops the rollback before it changes
+        anything. A loosened threshold (``> 1``, ``> 1000000``) or a
+        ``RAISE NOTICE`` would let it narrow the CHECK over live V1 rows."""
+        import re as _re
+        sql = _sql_file("rollback", "051")
+        code = "\n".join(ln for ln in sql.splitlines()
+                          if not ln.lstrip().startswith("--"))
+        block = _re.search(r"DO \$\$(.*?)\$\$\s*;", code, flags=_re.S)
+        self.assertIsNotNone(block)
+        block = block.group(1)
+        count = _re.search(
+            r"SELECT\s+count\(\*\)\s+INTO\s+offending\s+FROM\s+"
+            r"public\.workflow_trajectories\s+WHERE\s+robot_profile\s*=\s*"
+            r"'v1_studio'\s*;", block)
+        self.assertIsNotNone(count, "the gate must count exactly the v1_studio rows")
+        gate = _re.search(
+            r"IF\s+offending\s*>\s*0\s+THEN\s+RAISE\s+EXCEPTION\b.*?;\s*END\s+IF\s*;",
+            block, flags=_re.S)
+        self.assertIsNotNone(gate, "the gate must be IF offending > 0 THEN RAISE EXCEPTION")
+        self.assertLess(count.end(), gate.start())
+        self.assertLess(gate.end(), block.index("EXECUTE"))
+
     def _assert_rollback_cannot_half_apply(self, label):
         """CLAUDE.md sanctions `psql -f rollback/NNN_*.sql` as an emergency
         path, and a bare psql has NO `ON_ERROR_STOP`: it PRINTS a `RAISE` and

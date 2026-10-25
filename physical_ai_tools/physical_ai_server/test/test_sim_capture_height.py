@@ -5,7 +5,7 @@ Two halves, and only together do they match the rig:
 
 * the sim TABLE sits where a real touch-off puts it — ``z_table`` is the EE
   height with the fingertips on the drawn table, the solver's
-  ``tool_tip_below_ee_m`` (0.04 m on the OMX, 0 on the Feetech arms, whose EE
+  ``tool_tip_below_ee_m`` (0.04 m on the OMX, 0 on the V1, whose EE
   frame IS the closed fingertip);
 * a close CAPTURES only when the fingertips are at or below the top of the
   nearest object (base z = its own ``height_m``), with no extra margin.

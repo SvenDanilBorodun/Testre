@@ -1050,8 +1050,8 @@ class AgentApp:
         wizard's own dropdown uses (``CAMERA_ROLE_LABELS_DE``), so the sentence
         matches the UI rather than the wire ids.
 
-        The remedy is built from ``allowed`` rather than hardcoded: today the two
-        Feetech profiles narrow, each to a single role, but a future profile
+        The remedy is built from ``allowed`` rather than hardcoded: today the V1
+        profile narrows to a single role, but a future profile
         allowing two of three must not produce a sentence naming one. An allowlist that
         is somehow empty degrades to naming no remedy rather than raising — a
         confusing message beats a 500 on a config surface.

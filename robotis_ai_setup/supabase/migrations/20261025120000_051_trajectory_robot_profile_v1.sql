@@ -1,7 +1,7 @@
 -- 051 — allow 'v1_studio' in workflow_trajectories.robot_profile.
 --
 -- WHAT CHANGES. Migrations 035 and 039 pinned the arm-family tag's CHECK to the
--- families that existed then. The V1 replaces both Feetech arms; a „Bewegung"
+-- families that existed then. The V1 replaces both earlier Feetech arms; a „Bewegung"
 -- recorded on it carries the tag 'v1_studio', which the old constraint would
 -- REFUSE (a 500 on save).
 --

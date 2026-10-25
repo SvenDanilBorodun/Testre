@@ -157,7 +157,7 @@ def band_xyz(ctx, z=0.015, dy=0.0):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# RS-06 — „Greifer hält etwas?" was CONSTANT TRUE on the Feetech arms
+# RS-06 — „Greifer hält etwas?" was CONSTANT TRUE on a Feetech arm
 # ══════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize('profile_id', PROFILE_IDS)
@@ -321,7 +321,7 @@ def test_pickup_commands_the_full_hardware_close_on_every_profile(profile_id):
 
     To opt a rig into the bounded squeeze, set EDUBOTICS_PICKUP_CLOSE_RAD to that
     profile's catalog close — NEVER to 0, which means "fully closed" on the
-    Feetech arms but OPENS an OMX gripper by 0.5 rad.
+    V1 but OPENS an OMX gripper by 0.5 rad.
     """
     ctx = Ctx(profile_id)
     assert motion._pickup_close(ctx) == pytest.approx(ctx.gripper_closed_rad)
@@ -1455,13 +1455,14 @@ def test_the_floor_refusal_still_says_handfuehrung():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# RS-21 — „hebe an" from HOME on the Feetech arms
+# RS-21 — „hebe an" from HOME on a Feetech arm
 # ══════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize('profile_id', PROFILE_IDS)
 def test_lift_from_the_grundstellung_never_aborts_a_program(profile_id):
-    """Measured 2026-09-07: fk(HOME) is outside the strict-vertical solver's
-    image on BOTH Feetech arms, and „hebe an" then raised „Position außerhalb
+    """Measured 2026-09-07 on the Feetech arms of that time, and true of the
+    V1's HOME too: fk(HOME) is outside the strict-vertical solver's image, and
+    „hebe an" then raised „Position außerhalb
     des Arbeitsbereichs — bitte das Objekt in den markierten Greifbereich
     legen", blaming an object for the arm's own pose and killing the run. 44 of
     120 block orderings per arm reach it."""

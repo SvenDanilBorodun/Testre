@@ -424,7 +424,7 @@ def self_heal_wsl_serial() -> dict:
 
 # /dev/serial/by-id substring markers per arm family. by-id names are built
 # from the USB descriptor strings (usb-<manufacturer>_<product>_<serial>), so
-# the OMX OpenRB-150 shows ROBOTIS/OPENRB; the Feetech arms' CH343P typically
+# the OMX OpenRB-150 shows ROBOTIS/OPENRB; the V1's CH343P typically
 # shows "1a86_USB_Single_Serial" / WCH strings (rig gate VR2 records the exact
 # form — extend this tuple if a board revision differs). The by-id string says
 # nothing about WHICH Feetech arm is on the adapter — the SERVO COUNT does (see

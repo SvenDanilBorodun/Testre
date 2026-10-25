@@ -62,6 +62,7 @@ HANDLER_PY = MODAL_TRAINING / "training_handler.py"
 MIGRATIONS = SETUP / "supabase" / "migrations"
 MIGRATION_047 = MIGRATIONS / "20261020120000_047_hide_worker_token.sql"
 MIGRATION_049 = MIGRATIONS / "20261020130000_049_managed_training.sql"
+MIGRATION_050 = MIGRATIONS / "20261021120000_050_training_continuation.sql"
 LIVE_JS = (REPO_ROOT / "physical_ai_tools" / "physical_ai_manager" / "src" / "hooks"
            / "useSupabaseTrainings.js")
 MY_MODELS_JS = (REPO_ROOT / "physical_ai_tools" / "physical_ai_manager" / "src" / "components"
@@ -70,6 +71,7 @@ GERMAN_LINT_PY = REPO_ROOT / ".github" / "scripts" / "german_detail_lint.py"
 
 OWNERS = {
     ARTIFACT_VALIDATION_PY: "WP-A", TEXTS_PY: "WP-A", MIGRATION_047: "WP-A", MIGRATION_049: "WP-A",
+    MIGRATION_050: "v2.33.0 WP-B",
     HANDLER_PY: "WP-B", CHUNK_ENGINE_PY: "WP-C", CLOUD_PROTOCOL_PY: "Cloud-Inferenz",
     LIVE_JS: "WP-C", MY_MODELS_JS: "WP-C", GERMAN_LINT_PY: "CI",
 }
@@ -141,6 +143,17 @@ SENTENCES = {
            "nicht zu dem, was der Roboter senden kann.",
     "S21": "Der Abbruch konnte nicht an den GPU-Server übermittelt werden. Das Trainingsguthaben wurde "
            "erstattet – bitte starte das Training neu.",
+    "S22": "Zeitlimit erreicht – der letzte Zwischenstand wird geprüft und veröffentlicht …",
+    "S23": "Nach {hours} Stunden bei Schritt {step} von {total} gestoppt – du kannst das Training fortsetzen.",
+    "S24": "Der gespeicherte Zwischenstand ist abgelaufen oder nicht mehr nutzbar – das Training kann nicht "
+           "mehr fortgesetzt werden. Bitte starte ein neues Training.",
+    "S25": "Dieses Training wird bereits fortgesetzt.",
+    "S26": "Dieses Training kann zurzeit nicht fortgesetzt werden.",
+    "S27": "Der gespeicherte Zwischenstand ist nicht mehr nutzbar. Das Trainingsguthaben wurde erstattet – "
+           "bitte starte das Training neu.",
+    "S28": "Fortsetzung ab Schritt {step} – ein GPU-Server wird dafür gesucht …",
+    "S29": "Das Zeitlimit von 12 Stunden seit dem Start wurde bei Schritt {step} von {total} erreicht – "
+           "du kannst das Training fortsetzen.",
 }
 # The two sentences with neither an umlaut nor a word of german_detail_lint's GERMAN_WORDS. The lint
 # itself classifies such a string as neither language and accepts it (ENGLISH is judged only on
@@ -973,7 +986,7 @@ class TheSentencesAreTheContract(unittest.TestCase):
     def test_every_sentence_is_the_spec_text(self):
         texts = _texts(self)
         numbered = {n for n in texts if re.fullmatch(r"S\d+", n)}
-        self.assertEqual(numbered, set(SENTENCES), "training_texts_de defines exactly S1 … S21")
+        self.assertEqual(numbered, set(SENTENCES), "training_texts_de defines exactly S1 … S29")
         for name, want in SENTENCES.items():
             self.assertEqual(texts[name], want, name)
 
@@ -1004,7 +1017,8 @@ class TheSentencesAreTheContract(unittest.TestCase):
         self.assertEqual(len(found), 1, "MyModels.js defines ERROR_MESSAGE_MAX_CHARS once, as a literal")
         limit = int(found[0])
         for name, text in SENTENCES.items():
-            widest = text.replace("{step}", "500.000").replace("{hours}", "999,5")
+            widest = (text.replace("{step}", "500.000").replace("{hours}", "999,5")
+                      .replace("{total}", "500.000"))
             self.assertNotIn("{", widest, name)
             self.assertLessEqual(len(widest), limit, f"{name} would be cut on the models card")
 
@@ -1079,12 +1093,18 @@ class TheLiveColumnsAreGranted(unittest.TestCase):
     def test_every_live_column_is_granted_and_the_token_never(self):
         live = self._live_columns()
         self.assertNotIn("*", "".join(live))
-        g047, g049 = self._granted(MIGRATION_047), self._granted(MIGRATION_049)
+        g047, g049, g050 = (self._granted(MIGRATION_047), self._granted(MIGRATION_049),
+                            self._granted(MIGRATION_050))
+        granted = g047 | g049 | g050
         self.assertTrue(g047, "047 grants no column list on trainings")
         self.assertIn("status_note", g049, "049 grants status_note")
-        self.assertNotIn("worker_token", g047 | g049)
-        self.assertEqual([c for c in live if c not in g047 | g049], [],
-                         "a column the live read selects is granted by neither 047 nor 049 (42501 for students)")
+        # 050's three continuation columns (owner E32–E37) are granted by name.
+        for col in ("capped_step", "continuable_until", "continued_from"):
+            self.assertIn(col, g050, f"050 grants {col}")
+            self.assertIn(col, live, f"LIVE_COLUMNS selects {col}")
+        self.assertNotIn("worker_token", granted)
+        self.assertEqual([c for c in live if c not in granted], [],
+                         "a column the live read selects is granted by none of 047/049/050 (42501 for students)")
 
 
 class TheMatchersHaveTeeth(unittest.TestCase):

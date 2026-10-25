@@ -51,6 +51,14 @@ export async function cancelCloudTraining(accessToken, trainingId) {
   });
 }
 
+// „Fortsetzen" (owner E32–E37): continue a capped training with a second credit.
+// The thrown error carries err.status and err.detail (the API's German sentence).
+export async function continueCloudTraining(accessToken, trainingId) {
+  return apiRequest('/trainings/continue', 'POST', accessToken, {
+    training_id: trainingId,
+  });
+}
+
 export async function getTrainingJobs(accessToken) {
   return apiRequest('/trainings/list', 'GET', accessToken);
 }

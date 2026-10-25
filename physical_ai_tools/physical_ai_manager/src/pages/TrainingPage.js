@@ -313,7 +313,7 @@ export default function TrainingPage() {
               <TrainingControlPanel />
             </div>
           </div>
-          <TrainingLiveChart jobs={jobs} isRealtime={isRealtime} />
+          <TrainingLiveChart jobs={jobs} isRealtime={isRealtime} remaining={remaining} onContinued={refetchQuota} />
           {remaining <= 0 && (
             <div className="su-trn-monitor__nocredit">
               Kein Guthaben mehr. Kontaktiere deinen Lehrer für mehr Credits.
@@ -328,6 +328,8 @@ export default function TrainingPage() {
             loading={loading}
             refetch={refetch}
             isRealtime={isRealtime}
+            remaining={remaining}
+            onContinued={refetchQuota}
           />
         </Plate>
       </div>

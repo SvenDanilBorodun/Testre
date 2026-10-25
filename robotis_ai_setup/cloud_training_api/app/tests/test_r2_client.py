@@ -42,6 +42,14 @@ class KeyLayout(unittest.TestCase):
         with patch.dict(os.environ, {"R2_KEY_PREFIX": "e2e/"}):
             self.assertEqual(r2_client.log_key(7, 1), "e2e/t7/a1/log/training_log.txt")
 
+    def test_keep_key(self):
+        with patch.dict(os.environ, {"R2_KEEP_PREFIX": ""}, clear=False):
+            os.environ.pop("R2_KEEP_PREFIX")
+            self.assertEqual(r2_client.keep_key(7, 42500, "pretrained_model/config.json"),
+                             "keep/t7/s0042500/pretrained_model/config.json")
+        with patch.dict(os.environ, {"R2_KEEP_PREFIX": "kept/"}):
+            self.assertEqual(r2_client.keep_key(7, 2500, "training_state/x"), "kept/t7/s0002500/training_state/x")
+
     def test_ttls(self):
         self.assertEqual((r2_client.PUT_TTL_S, r2_client.GET_TTL_S), (900, 3600))
 
@@ -114,6 +122,76 @@ class RealBotocore(unittest.TestCase):
         q = parse_qs(urlparse(url).query)
         self.assertEqual(q["X-Amz-Expires"], ["3600"])
         self.assertEqual(q["X-Amz-SignedHeaders"], ["host"])
+
+    def test_copy_object_classifies_unsupported_and_missing(self):
+        c, st = self._stubbed()
+        st.add_response("copy_object", {}, {"Bucket": "edubotics-train", "Key": "keep/x",
+                                            "CopySource": {"Bucket": "edubotics-train", "Key": "train/x"}})
+        for code, status in (("NotImplemented", 501), ("BadRequest", 400), ("NotImplemented", 400)):
+            st.add_client_error("copy_object", service_error_code=code, http_status_code=status)
+        st.add_client_error("copy_object", service_error_code="NoSuchKey", http_status_code=404)
+        st.add_client_error("copy_object", service_error_code="InternalError", http_status_code=500)
+        with st:
+            r2_client.copy_object("train/x", "keep/x")  # a 200 returns
+            for _ in range(3):
+                with self.assertRaises(r2_client.R2CopyUnsupported):
+                    r2_client.copy_object("train/x", "keep/x")
+            with self.assertRaises(r2_client.R2Missing):
+                r2_client.copy_object("train/x", "keep/x")
+            with self.assertRaises(Exception) as ctx:
+                r2_client.copy_object("train/x", "keep/x")
+            self.assertNotIsInstance(ctx.exception, (r2_client.R2CopyUnsupported, r2_client.R2Missing))
+
+    def test_put_file_presigned_sends_the_three_signed_headers(self):
+        import httpx
+
+        data = b"z" * 2048
+        path = os.path.join(self._tmp(), "blob")
+        with open(path, "wb") as fh:
+            fh.write(data)
+        md5 = base64.b64encode(hashlib.md5(data).digest()).decode()
+        seen = {}
+
+        def handler(request):
+            seen["headers"] = dict(request.headers)
+            seen["body_len"] = len(request.read())
+            return httpx.Response(200)
+
+        real_client = httpx.Client
+
+        def fake_client(**kw):
+            return real_client(transport=httpx.MockTransport(handler),
+                               **{k: v for k, v in kw.items() if k != "transport"})
+
+        with patch.object(httpx, "Client", fake_client):
+            r2_client.put_file_presigned("keep/t1/s0002500/pretrained_model/config.json", path)
+        self.assertEqual(seen["headers"]["content-type"], "application/octet-stream")
+        self.assertEqual(seen["headers"]["content-length"], "2048")
+        self.assertEqual(seen["headers"]["content-md5"], md5)
+        self.assertEqual(seen["body_len"], 2048)
+
+    def test_put_file_presigned_raises_on_403(self):
+        import httpx
+
+        path = os.path.join(self._tmp(), "b2")
+        with open(path, "wb") as fh:
+            fh.write(b"x")
+        real_client = httpx.Client
+
+        def fake_client(**kw):
+            return real_client(transport=httpx.MockTransport(lambda r: httpx.Response(403)),
+                               **{k: v for k, v in kw.items() if k != "transport"})
+
+        with patch.object(httpx, "Client", fake_client):
+            with self.assertRaises(RuntimeError):
+                r2_client.put_file_presigned("keep/x", path)
+
+    def _tmp(self):
+        import tempfile
+
+        d = tempfile.mkdtemp(prefix="r2test-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return d
 
     def _stubbed(self):
         from botocore.stub import Stubber

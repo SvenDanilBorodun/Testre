@@ -1,4 +1,5 @@
-"""RunPod REST v2, exactly the calls of spec §3.6 (OpenAPI 2.0.0, 2026-10-18).
+"""RunPod REST v2, exactly the calls of spec §3.6 (OpenAPI 2.0.0, 2026-10-18)
+(the unfiltered data-centre list went with owner E42).
 
 One ``httpx.AsyncClient`` (20 s timeout) for the process, so no call ever
 blocks the event loop. Every call returns a ``RunpodResponse`` (status, parsed
@@ -107,25 +108,23 @@ async def request(method: str, path: str, *, params=None, json_body=None) -> Run
     return RunpodResponse(status=resp.status_code, body=body, retry_after=_retry_after(resp.headers))
 
 
-async def catalog_gpus(cloud: str) -> RunpodResponse:
-    """§3.6 call 1: GPU stock for one cloud, constrained to the EEA and CUDA ≥ 12.6."""
-    return await request("GET", "/v2/catalog/gpus", params={
+async def catalog_gpus(cloud: str, *, worldwide: bool = False) -> RunpodResponse:
+    """§3.6 call 1: GPU stock for one cloud and CUDA ≥ 12.6, scoped to the EEA unless ``worldwide`` (owner E42)."""
+    params = {
         "include": "AVAILABILITY",
         "product": "POD",
         "cloud": cloud,
         "countryCodes": ",".join(EEA_COUNTRY_CODES),
         "minCudaVersion": MIN_CUDA,
-    })
+    }
+    if worldwide:
+        del params["countryCodes"]
+    return await request("GET", "/v2/catalog/gpus", params=params)
 
 
 async def datacenters_gdpr() -> RunpodResponse:
     """§3.6 call 2: Secure's allowed data centres (Europe, GDPR-certified)."""
     return await request("GET", "/v2/catalog/datacenters", params={"regions": "EUROPE", "compliance": "GDPR"})
-
-
-async def datacenters_all() -> RunpodResponse:
-    """§3.6 call 2, unfiltered: every data centre with its region (the known-outside table, E18)."""
-    return await request("GET", "/v2/catalog/datacenters")
 
 
 async def create_pod(body: dict) -> RunpodResponse:

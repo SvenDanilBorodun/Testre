@@ -122,9 +122,10 @@ floors and confirm neither collides; never widen past ±110°.
 ## 7. VR5 — the grasp numbers
 
 With calibration done (VR8 first), grasp the shipped 30 mm cube and read back the achieved claw
-angle. CAD expectation: the jaws BLOCK at 0.193–0.220 rad. The catalog commands **0.05** with a
-**0.10** held margin, so HELD reads ≈0.20 against a 0.15 threshold and an empty close reads
-≈0.05. If the real block angle differs, adjust `_FIXED_CATALOG_V1.gripper_close_rad` (and, if
+angle. CAD expectation: the jaws BLOCK at 0.195 / 0.206 rad (gear ratio 1 / 18/19) at the
+catalog's 15 mm grasp depth; over 10–20 mm a held reading stays ≥ 0.03 rad above the threshold.
+The catalog commands **0.05** with a **0.10** held margin, so HELD reads ≈0.20 against a 0.15
+threshold and an empty close reads ≈0.05. If the real block angle differs, adjust `_FIXED_CATALOG_V1.gripper_close_rad` (and, if
 needed, `grasp_held_margin_rad`) and rebuild the image. Jaw friction is unmeasured; a rubber pad
 on the blades removes the question.
 

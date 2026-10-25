@@ -249,10 +249,10 @@ _FIXED_CATALOG: dict = {
 #
 # Where 0.05 comes from: simulated against the claw meshes, a 30 mm cube held at
 # the 15 mm grasp depth blocks the blades at 0.195 rad (gear ratio 1) / 0.206 rad
-# (the URDF's 18/19), 0.193–0.220 rad over a 10–20 mm depth. Commanding 0.05
-# leaves ≥ 0.14 rad of squeeze, so a HELD grasp reads ≥ 0.193 against the
-# 0.05 + 0.10 = 0.15 threshold while an empty close reaches ≈0.05 and reads
-# below it (bench-tunable at rig gate VR5).
+# (the URDF's 18/19). Over a 10–20 mm depth a HELD grasp is proven to read at
+# least 0.03 rad above the 0.05 + 0.10 = 0.15 threshold (an independent
+# vertex-in-box bound puts the block at ≥ 0.183 rad at 10 mm), while an empty
+# close reaches ≈0.05 and reads below it (bench-tunable at rig gate VR5).
 _FIXED_CATALOG_V1: dict = {
     'types': {
         'wuerfel': {

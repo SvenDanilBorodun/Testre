@@ -396,8 +396,8 @@ _V1_STUDIO = ArmProfile(
     # Rig gate: neither the stall nor the bounded grip is hardware-measured.
     # Sim grasp classifier. A close command is anything below 0.5, which sits
     # between the catalog close (0.05) and open (0.90); a 30 mm cube blocks the
-    # real claw at 0.193–0.220 rad, so commanded 0.05 + 0.15 = 0.20 reproduces
-    # that.
+    # real claw at 0.195 / 0.206 rad (gear ratio 1 / 18/19) at the catalog's
+    # 15 mm grasp depth, so commanded 0.05 + 0.15 = 0.20 reproduces that.
     sim_close_threshold_rad=0.5,
     sim_held_block_offset_rad=0.15,
     # INERT BY CONSTRUCTION, and kept anyway — deliberately, with the proof,

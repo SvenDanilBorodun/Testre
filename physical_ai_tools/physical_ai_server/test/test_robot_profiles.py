@@ -398,9 +398,12 @@ def test_v1_reach_ring_is_inside_what_the_solver_reaches():
 
 def test_no_drift_v1_vs_catalog():
     """The catalog close must sit inside the profile band with enough squeeze
-    left that a HELD grasp reads above the per-object threshold. Measured on the
-    claw meshes: a 30 mm cube blocks the claw at 0.193–0.220 rad (grasp depth
-    10–20 mm, both gear ratios)."""
+    left that a HELD grasp reads above the per-object threshold. On the claw
+    meshes a 30 mm cube blocks the claw at 0.195 / 0.206 rad (gear ratio 1 /
+    18/19) at the catalog's 15 mm grasp depth (simulated band 0.193–0.220 rad
+    over 10–20 mm); the PROVEN lower bound over 10–20 mm is 0.183 rad (an
+    independent vertex-in-box check at 10 mm), which still leaves ≥ 0.03 rad
+    above the threshold."""
     from physical_ai_server.workflow.object_catalog import fixed_catalog
     prof = rp.resolve('v1_studio')
     recipe = fixed_catalog('v1_studio').recipe_for_type('wuerfel')
@@ -408,12 +411,15 @@ def test_no_drift_v1_vs_catalog():
     assert prof.gripper_closed_rad <= recipe.gripper_close_rad < prof.gripper_open_rad
     blocked_at = 0.193
     assert blocked_at > recipe.gripper_close_rad + prof.grasp_held_margin_rad
+    proven_block_lower_bound = 0.183
+    assert (proven_block_lower_bound
+            - (recipe.gripper_close_rad + prof.grasp_held_margin_rad)) >= 0.03
     # A close command must also register as a CLOSE in the simulator, and the
     # open command must NOT.
     assert recipe.gripper_close_rad < prof.sim_close_threshold_rad
     assert prof.gripper_open_rad > prof.sim_close_threshold_rad
     # …and the sim's blocked readback clears the per-object threshold and lands
-    # inside the measured block band.
+    # inside the simulated block band.
     assert prof.sim_held_block_offset_rad > prof.grasp_held_margin_rad
     assert 0.193 <= recipe.gripper_close_rad + prof.sim_held_block_offset_rad <= 0.220
 

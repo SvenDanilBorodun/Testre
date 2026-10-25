@@ -21,8 +21,8 @@ G-offset identical. `edu1_ik.py` with eight literal edits reproduced an independ
 D3 joint4 ±110° (`1.9198`, inward; link4 passes link3 at 4.2 mm at +110°); D4 migration 051 keeps the edu ids for
 stored rows, the API refuses them on new uploads (a clone copies stored rows verbatim), `edu6_arm_records` kept; D5 a stored edu id falls back to
 `omx_full`; Q1 the adapter PCB left out of the 3D view; Q2 the j2/j3 encoder windows as on the Edu:1; Q3 the board
-origin stays 0.18 / 0.075 with an own printed V1 mat; Q4 no-go coverage as on the Edu:1 (gap G1); Q5 claw open
-0.90; R1 the inner ring drawn at 0.10 with no server guard (gap G5); b1 the goal-edge ceiling 130 for the V1
+origin stays 0.18 / 0.075 with an own printed V1 mat; Q4 no-go coverage as on the Edu:1 (gap VG1); Q5 claw open
+0.90; R1 the inner ring drawn at 0.10 with no server guard (gap VG5); b1 the goal-edge ceiling 130 for the V1
 (246 was an edu6 number and latently wrong for the Edu:1 too). Architect decisions: A1 the base frame re-origined
 to the table (joint1 z → 0.0502, base mesh +6 mm), because z = 0 is the table in every consumer and the CAD's
 base bottom sat at −0.006; A4 the claw gear ratio in the URDF (`LF_joint` mimic −18/19, the 18T/19T spur gears)

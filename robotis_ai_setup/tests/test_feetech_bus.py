@@ -241,7 +241,7 @@ class TestBusTransactions(unittest.TestCase):
 
     def test_sync_read_returns_repliers_only(self):
         # servos 1 and 3 answer; 2 is silent → absent from the result (the
-        # CALLER must treat a missing id as a hard stop — §3.3).
+        # CALLER must treat a missing id as a hard stop).
         replies = (_status(1, 0, bytes(6)) + _status(3, fb.ERR_OVERLOAD, bytes(6)))
         bus, fake = _bus(replies)
         out = bus.sync_read(fb.REG_PRESENT_POSITION, 6, [1, 2, 3])
@@ -1595,7 +1595,8 @@ class TestTorqueOnEdgeGuard(unittest.TestCase):
 
 
 class TestPostEnergiseWrongWayAbort(unittest.TestCase):
-    """The measured defect (docs §11.11) is that the STS position loop computes
+    """The defect (CLAUDE.md: "The STS position loop is not wrap-aware"; the
+    V1's bench checks are rig gates VR6/VR14) is that the STS position loop computes
     `goal − present` NAIVELY over 0..4095, so a goal and a position straddling the
     seam make it drive a whole revolution the wrong way. The pre-torque edge guard
     (TestTorqueOnEdgeGuard above) NARROWS that race but cannot close it: the wrap
@@ -2232,12 +2233,11 @@ class TestTorqueSwitchRaiseDeEnergises(unittest.TestCase):
         self.assertNotIn('wurde sofort wieder ausgeschaltet', said[0])
 
     def test_no_German_marker_line_in_the_driver_is_transliterated(self):
-        # Rule §1 wants literal ä/ö/ü/ß. ci.yml::german-strings-lint enforces
-        # that for physical_ai_server/, gui/, installer/ and pi_agent/ — it does
-        # NOT scan robotis_ai_setup/docker/open_manipulator/ (docs §8.4 A8), so
-        # every German string in this driver, including the one added above, is
-        # CI-unguarded. Same marker prefixes and the same word list the CI job
-        # greps for, so this cannot drift away from it silently.
+        # Rule §1 wants literal ä/ö/ü/ß. ci.yml::german-strings-lint's grep
+        # covers robotis_ai_setup/docker/ too; this test runs the same marker
+        # prefixes and the same word list over the driver inside the suite, so
+        # a transliteration fails beside the code and cannot drift away from
+        # the CI job silently.
         src = open(os.path.join(_DOCKER, 'feetech_arm_node.py'),
                    encoding='utf-8').read().splitlines()
         bad = re.compile(
@@ -2702,7 +2702,7 @@ class TestV1ArmSpec(unittest.TestCase):
 
 class TestShippedWiring(unittest.TestCase):
     """The load-bearing packaging assertions (Dockerfile lists, entrypoint
-    branch, compose forward, env-guard list) — the ✎/✎✎ items of plan §4.3/§9."""
+    branch, compose forward, env-guard list)."""
 
     def _read(self, *parts):
         return open(os.path.join(_HERE, '..', *parts), encoding='utf-8').read()
@@ -3283,7 +3283,7 @@ class TestProvisionEndToEnd(unittest.TestCase):
         self.assertEqual(bus._present_raw(1), 2048)
 
     def test_jig_postcondition_catches_offset_skew(self):
-        # The new §8(a) guard: after the offset write, the still-jigged arm must
+        # The jig post-condition guard: after the offset write, the still-jigged arm must
         # READ the designed tick. A wrong-sign offset (the silent 2×-skew) passes
         # the register read-back but doubles Present_Position — caught here.
         class _SkewBus(_ProvFakeBus):
@@ -4215,8 +4215,8 @@ class TestCommandedGoalEdgeClamp(unittest.TestCase):
         self.assertEqual(f('130'), 130)
         self.assertEqual(f('0'), 0)                     # the documented rollback
         # BOTH ends fenced, each with a [WARN] naming 0 as the real disable value.
-        # 131–246 (the inherited ceiling of an earlier arm) fall back to 128
-        # (owner decision b1).
+        # ANY value above the ceiling falls back to 128 — 131 and 246 (the
+        # inherited ceiling of an earlier arm) as much as 2048 (owner decision b1).
         for bad in ('abc', '-1', '1,2', str(ceiling + 1), '131', '200', '246',
                     '2048', '4096'):
             with patch('builtins.print') as printed:

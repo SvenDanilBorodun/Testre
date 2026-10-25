@@ -32,7 +32,7 @@ The ROS contract this node satisfies is exactly what makes
   ``/dynamixel_hardware_interface/set_dxl_torque`` — so a stale client (incl.
   the entrypoint's shutdown trap) can never silently fail to disable torque.
 
-Safety posture (plan §8): the servo has NO host watchdog — it holds its last
+Safety posture: the servo has NO host watchdog — it holds its last
 goal energised forever if we die — so torque-off runs on SIGTERM/SIGINT/atexit.
 Per-joint ``Min/Max_Position_Limit`` live in servo EEPROM (written at vendor
 provisioning), ``Max_Torque_Limit`` is the hardware pinch floor; this node adds
@@ -571,8 +571,10 @@ _TORQUE_OFF_PAYLOAD = {sid: b'\x00' for sid in SERVO_IDS}
 def wrong_way_joints(goal_ticks, present_ticks, threshold=None):
     """``[(servo_id, goal, present, naive_error)]`` for the servos whose freshly
     read position makes the servo's OWN ``Goal_Position − Present_Position``
-    error take the LONG way round the 0..4095 register — the measured defect
-    (docs §11.11). Pure — unit-tested without ROS or a bus.
+    error take the LONG way round the 0..4095 register — the defect CLAUDE.md
+    names under "The STS position loop is not wrap-aware" (the V1's bench
+    checks are rig gates VR6 and VR14 in docs/KNOWN-ISSUES.md). Pure —
+    unit-tested without ROS or a bus.
 
     TWO conditions, and the pair is deliberate. ``naive > threshold`` is the
     tunable "how big before we care"; ``wrapped < naive`` is the structural "and
@@ -875,21 +877,26 @@ PHYSICAL_TORQUE_REFUSALS = tuple(BOOT_PHYSICAL_REMEDY_DE)
 #
 # Doing that to a TORQUED joint holding against `Max_Torque 800` takes real
 # external force, which is the case only a continuous 50 Hz read-loop watchdog can
-# see (docs §8.2, a larger Rule §2 step: it can stop motion mid-trajectory). This
+# see (assessed, not implemented — the residual CLAUDE.md records under "The STS
+# position loop is not wrap-aware"; a larger Rule §2 step: it can stop motion
+# mid-trajectory). This
 # clamp removes the hair trigger; it does not remove the class.
 #
 # WHAT IT CANNOT DO, PROVEN RATHER THAN ARGUED — the load-bearing property, and
-# the one that holds UNCONDITIONALLY. Verified exhaustively over all 4096 park
-# positions × all 4096 requested ticks × margins {1, 40, 128, 246} and BOTH
-# JOINT_SIGNS conventions (the sign only decides which radian maps to which tick,
-# and every tick is covered): the clamp NEVER turns a non-wrapped position error
+# the one that holds UNCONDITIONALLY. Verified exhaustively (a one-off sweep, not
+# a test) over all 4096 park positions × all 4096 requested ticks × margins
+# {1, 40, 128, 130} (130 = the legal ceiling) — which covers BOTH JOINT_SIGNS
+# conventions (the sign only decides which radian maps to which tick, and every
+# tick is covered): the clamp NEVER turns a non-wrapped position error
 # into a wrapped one — ZERO counterexamples — and it grows |goal − present| by at
 # most exactly `m` (≤ 130 ≪ 2048 at any legal margin). Structurally so: the clamp only ever moves a
 # tick TOWARD CENTER_TICK, and by at most `m`. The clamp is therefore
 # mathematically INCAPABLE of producing the runaway it exists to prevent, whatever
 # EDUBOTICS_FEETECH_EDGE_MARGIN_TICKS is set to. It is also net-positive in the other
 # direction: at the default it turns 16,512 (park, requested) pairs from wrapped
-# into non-wrapped.
+# into non-wrapped. What the suite pins is the forced-displacement bound
+# (test_feetech_bus.py::test_the_clamp_raises_the_forced_displacement_from_one_tick_to_margin_plus_one)
+# and the clamp's behaviour at the default and at the ceiling.
 #
 # AND NO, THE SERVO'S OWN EEPROM WINDOW DOES NOT HELP. `Min/Max_Position_Limit`
 # clamps the GOAL register, never the physical PATH — the same lesson the deleted
@@ -914,7 +921,9 @@ _DEFAULT_GOAL_EDGE_MARGIN_TICKS = 128
 # commandable solver tick lies STRICTLY inside [m, 4095 − m], so the fence does
 # not even depend on the clamp's boundary being inclusive. (Owner decision b1:
 # the inherited 246 was a number of an earlier arm and would let a legal override
-# shift real V1 solutions; an override of 131–246 now falls back to the default.)
+# shift real V1 solutions. _parse_goal_edge_margin falls back to the default,
+# with a [WARN], for ANY value above 130, a negative one and a non-integer one;
+# unset or blank is the default without a warning.)
 #
 # The densest MEASURED value agrees: full extension (g = 0) is reachable at z = 0,
 # so the minimum over the operating envelope (target at or above the base plane)
@@ -1246,13 +1255,13 @@ class FeetechArmNode(Node):
         traj_qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,   # NEVER transient-local (§3.2)
+            durability=DurabilityPolicy.VOLATILE,   # NEVER transient-local: it never matches the VOLATILE publishers
         )
         self.create_subscription(
             JointTrajectory, '/leader/joint_trajectory',
             self._trajectory_cb, traj_qos)
 
-        # Torque service + the legacy alias (both must exist — §3.4).
+        # Torque service + the legacy alias (both must exist).
         self.create_service(SetBool, TORQUE_SERVICE, self._torque_cb)
         self.create_service(
             SetBool, '/dynamixel_hardware_interface/set_dxl_torque',
@@ -2184,7 +2193,7 @@ class FeetechArmNode(Node):
             # how that servo happens to be mounted.
             efforts.append(load / PRESENT_LOAD_FULLSCALE * JOINT_SIGNS[i])
             if error:
-                # Free per-reply telemetry (§3.3): a student whose servo
+                # Free per-reply telemetry: a student whose servo
                 # silently dropped to 20 % torque after an overload otherwise
                 # experiences "the robot got weak" with no diagnosis.
                 # Rate-limited to one German line per servo per 5 s.
@@ -2255,7 +2264,7 @@ class FeetechArmNode(Node):
     def shutdown(self) -> None:
         """Torque OFF + stop loops. The STS3215 has no watchdog — it holds its
         last goal energised forever if the host stops talking, so this runs on
-        SIGTERM/SIGINT/atexit (plan §8). Idempotent: guarded so the finally-block
+        SIGTERM/SIGINT/atexit. Idempotent: guarded so the finally-block
         call and the atexit call cannot double-run (and cannot fight over the
         already-closed bus)."""
         if self._shutdown_done:

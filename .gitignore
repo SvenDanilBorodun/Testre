@@ -51,12 +51,15 @@ CRITICAL_FIXES.md
 # permanent invariants belong in CLAUDE.md, not here.
 docs/plans/
 
-# Per-arm edu6 servo calibration records (tools/edu6_provision.py output).
+# Per-arm Feetech servo calibration records (tools/feetech_provision.py output).
 # The Supabase edu6_arm_records table is the durable fleet store; these are
 # local bench artifacts and must not accumulate per-arm files in the repo.
+tools/v1_records/
+# A bench machine may still hold records written by the retired tool; keep them out.
 tools/edu6_records/
+tools/edu1_records/
 
-# Generated classroom-kit artefacts (tools/generate_edu6_mat.py etc.) — the
-# printable mat is derived from the code on demand, never checked in.
-edu6_mat.pdf
-edu6_mat.png
+# Generated classroom-kit artefacts (tools/generate_v1_mat.py) — the printable
+# mat is derived from the code on demand, never checked in.
+v1_mat.pdf
+v1_mat.png

@@ -333,7 +333,8 @@ def test_closing_the_jaws_does_not_DRAG_the_cube_onto_the_gripper():
 
 @pytest.mark.parametrize('profile_id', sorted(robot_profiles.ROBOT_PROFILES))
 def test_every_arm_plays_its_own_width_in_real_time(profile_id):
-    """The player is width-agnostic: an edu6 frame is 7 wide, edu1 and the OMX 6."""
+    """The player is width-agnostic: every arm's frame is n + 1 wide (6 on the
+    OMX and the V1)."""
     prof = robot_profiles.resolve(profile_id)
     n = prof.num_arm_joints
     home = list(prof.home_joints_rad) + [float(prof.gripper_open_rad)]

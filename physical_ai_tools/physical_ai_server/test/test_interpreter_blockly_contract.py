@@ -880,7 +880,7 @@ def test_the_parked_value_allowlist_matches_the_value_evaluator():
     A missing entry re-aborts a parked block with the raw English type id; an
     extra one swallows a genuine typo as a silent no-op. AST-walk the evaluator
     rather than trusting a hand-kept list (house style: cf.
-    test_edu6_geometry.py's AST comparison of the two link tables).
+    test_feetech_geometry.py's AST comparison of the two link tables).
     """
     from physical_ai_server.workflow import interpreter as module
 

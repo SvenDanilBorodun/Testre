@@ -1,16 +1,18 @@
-"""Closed-form IK + exact FK tests for the edu1_studio arm ("Edu:1").
+"""Closed-form IK + exact FK tests for the v1_studio arm ("V1").
 
-Same discipline as ``test_edu6_ik.py``: the INDEPENDENT FK ORACLE parses the
-in-repo URDF copy (``physical_ai_manager/public/edu1-urdf/edu1.urdf``) with a
-generic XML→chain builder — a completely separate code path from the solver's
-baked constants — so a transcription or sign error in ``edu1_ik.py`` cannot
-verify itself. The tool length is checked against the shipped CLAW MESH, which
-is a third independent source (the URDF says where the claw pivots, the STL says
-how long the blade is, and ``_L_TOOL`` is their sum).
+The INDEPENDENT FK ORACLE parses the shipped in-repo URDF
+(``physical_ai_manager/public/v1-urdf/v1.urdf``) with a generic XML→chain
+builder — a completely separate code path from the solver's baked constants —
+so a transcription or sign error in ``v1_ik.py`` cannot verify itself. The tool
+length is checked against the shipped CLAW MESH, which is a third independent
+source (the URDF says where the claw pivots, the STL says how long the blade
+is, and ``_L_TOOL`` is their sum). And the shipped asset files themselves are
+pinned byte-for-byte to the generator's output (``v1_urdf_assets.sha256``).
 """
 
 from __future__ import annotations
 
+import hashlib
 import math
 import random
 import struct
@@ -20,10 +22,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from physical_ai_server.workflow.edu1_ik import (
+from physical_ai_server.workflow.v1_ik import (
     BASE_AXIS_X_WORLD,
-    Edu1IKSolver,
-    _EDU1_JOINT_LIMITS_RAD,
+    V1IKSolver,
+    _V1_JOINT_LIMITS_RAD,
     _FK_TOL_M,
     _L_TOOL,
     _Q4_VERTICAL_OFFSET,
@@ -32,15 +34,16 @@ from physical_ai_server.workflow.edu1_ik import (
 )
 
 _ASSET = (Path(__file__).resolve().parents[2]
-          / 'physical_ai_manager' / 'public' / 'edu1-urdf')
-_URDF = _ASSET / 'edu1.urdf'
+          / 'physical_ai_manager' / 'public' / 'v1-urdf')
+_URDF = _ASSET / 'v1.urdf'
+_CHECKSUMS = Path(__file__).resolve().parent / 'fixtures' / 'v1_urdf_assets.sha256'
 
 _RZ_PI = np.array([[-1.0, 0, 0], [0, -1.0, 0], [0, 0, 1.0]])
 _ARM_JOINTS = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5']
 
 
-def _ik() -> Edu1IKSolver:
-    return Edu1IKSolver()
+def _ik() -> V1IKSolver:
+    return V1IKSolver()
 
 
 # ── the independent oracle: generic URDF chain, parsed from XML ──────────────
@@ -83,6 +86,7 @@ class _Oracle:
             o = el.find('origin')
             ax = el.find('axis')
             lim = el.find('limit')
+            mim = el.find('mimic')
             self.joints[el.get('name')] = {
                 'xyz': np.array([float(v) for v in o.get('xyz').split()]),
                 'rpy': np.array([float(v) for v in o.get('rpy').split()]),
@@ -90,6 +94,9 @@ class _Oracle:
                          if ax is not None else np.array([0.0, 0, 1])),
                 'limits': ((float(lim.get('lower')), float(lim.get('upper')))
                            if lim is not None else None),
+                'mimic': ((mim.get('joint'), float(mim.get('multiplier', 1.0)),
+                           float(mim.get('offset', 0.0)))
+                          if mim is not None else None),
             }
 
     def frames(self, q):
@@ -116,6 +123,25 @@ class _Oracle:
 _ORACLE = _Oracle()
 
 
+def test_shipped_v1_assets_match_the_generator_checksums():
+    """The ten shipped files under ``public/v1-urdf/`` are exactly what
+    ``tools/build_v1_urdf_assets.py`` produced (gmsh 4.15.2 + numpy 2.4.6 from
+    the V1 CAD export and ``Base_part.2.step``, ``--voxel-mm 1.0``). Every
+    number in ``v1_ik.py`` / ``arm_geometry.V1_LINK_BOXES`` and every mesh-derived
+    figure in this suite rests on THESE bytes, so a hand-edited mesh or URDF —
+    or a re-run with another voxel size — fails here instead of silently moving
+    the oracle. Re-generate and update the fixture together, never one alone."""
+    lines = [ln.split() for ln in _CHECKSUMS.read_text(encoding='ascii').splitlines()
+             if ln.strip()]
+    assert len(lines) == 10, lines
+    listed = {rel for _digest, rel in lines}
+    shipped = {str(p.relative_to(_ASSET)) for p in _ASSET.rglob('*') if p.is_file()}
+    assert shipped == listed, (sorted(shipped ^ listed))
+    for digest, rel in lines:
+        got = hashlib.sha256((_ASSET / rel).read_bytes()).hexdigest()
+        assert got == digest, f'{rel} differs from the generator output'
+
+
 def test_the_end_effector_is_fixed_to_link5_at_zero_offset():
     """The whole tool model rests on this: ``_fk_matrix`` composes the TCP off
     LINK5's frame, not off a separate end-effector frame, so a CAD re-export
@@ -128,7 +154,7 @@ def test_the_end_effector_is_fixed_to_link5_at_zero_offset():
 def test_tool_length_matches_the_shipped_claw_mesh():
     """``_L_TOOL`` is claw pivot + blade, and the two halves come from DIFFERENT
     files: the pivot from the URDF (RL_joint's origin), the blade from the STL.
-    Re-derive both here rather than restating 0.08625."""
+    Re-derive both here rather than restating 0.1086."""
     rl = _ORACLE.joints['RL_joint']
     pivot = np.eye(4)
     pivot[:3, :3] = _rpy(*rl['rpy'])
@@ -150,7 +176,7 @@ def test_tool_length_matches_the_shipped_claw_mesh():
 def test_solver_limits_match_the_urdf():
     for i, name in enumerate(_ARM_JOINTS):
         lo, hi = _ORACLE.joints[name]['limits']
-        assert _EDU1_JOINT_LIMITS_RAD[i] == pytest.approx((lo, hi), abs=1e-9)
+        assert _V1_JOINT_LIMITS_RAD[i] == pytest.approx((lo, hi), abs=1e-9)
 
 
 def test_joint4_does_not_exceed_the_owner_stated_physical_ceiling():
@@ -159,49 +185,65 @@ def test_joint4_does_not_exceed_the_owner_stated_physical_ceiling():
 
     Every other check in this repo is RELATIVE — the solver is compared to the
     URDF, the driver's copy to the solver's, the provisioning spec to the
-    driver's. So all four move together happily: measured 2026-09-10, widening
-    joint4 to ±143° across all four cross-pinned sites passes 1398 GUI tests and
-    76 server tests. The register range is no backstop either — ±172° still fits
-    inside the servo's 0…4095 ticks. The four sites agreed with EACH OTHER and
-    with nothing else.
+    driver's — so all four could move together and stay green. The register
+    range is no backstop either: a much wider window still fits inside the
+    servo's 0…4095 ticks.
 
-    115° is the OWNER'S statement about what the hardware physically reaches. It
-    is a CEILING: past it the servo drives into a mechanical stop under
-    ``Max_Torque``, which the EEPROM window is what prevents. Nothing in software
-    can measure it, so it is pinned here as a literal and changed only when the
-    owner states a new number.
+    110° is the OWNER'S decision about the arm (at +110° link4 passes link3 at
+    4.2 mm). It is a CEILING: past it the servo drives toward a mechanical
+    contact under ``Max_Torque``, which the EEPROM window is what prevents. It is
+    pinned here as a literal and changed only when the owner states a new
+    number.
 
-    The literal rounds INWARD (2.0071 rad = 114.99836°), which is the safe
-    direction — 0.019 servo ticks short of the stop rather than past it."""
-    lo, hi = _EDU1_JOINT_LIMITS_RAD[3]
-    assert (lo, hi) == (-2.0071, 2.0071), (
-        f'joint4 ships as ({lo}, {hi}); ±2.0071 rad is the owner-stated ±115°')
-    ceiling = math.radians(115.0)
+    The literal rounds INWARD (1.9198 rad = 109.99643°), which is the safe
+    direction — short of the stop rather than past it."""
+    lo, hi = _V1_JOINT_LIMITS_RAD[3]
+    assert (lo, hi) == (-1.9198, 1.9198), (
+        f'joint4 ships as ({lo}, {hi}); ±1.9198 rad is the owner-stated ±110°')
+    ceiling = math.radians(110.0)
     assert hi <= ceiling, (
         f'joint4 upper {hi} EXCEEDS the physical ceiling {ceiling:.7f} rad '
-        f'(={math.degrees(hi):.3f}° > 115°) — the servo would drive into its stop')
+        f'(={math.degrees(hi):.3f}° > 110°) — the servo would drive into its stop')
     assert lo >= -ceiling, f'joint4 lower {lo} exceeds the physical ceiling'
     # Rounded inward, not outward: strictly inside the stop on both ends.
-    assert ceiling - hi == pytest.approx(2.864e-5, abs=1e-7)
+    assert ceiling - hi == pytest.approx(6.2177e-5, abs=1e-7)
 
 
 def test_the_claw_band_is_zero_closed_and_positive_open():
-    """The shipped URDF FLIPS the CAD's claw axis so open is the numerically
-    larger value — every shared consumer (grasp-held check, catalog band, sim
-    close classifier) assumes it. A re-export that restores the CAD sign would
-    silently invert every grasp verdict."""
-    for name in ('RL_joint', 'LF_joint'):
-        lo, hi = _ORACLE.joints[name]['limits']
-        assert (lo, hi) == pytest.approx((0.0, 1.5708), abs=1e-9), name
-    # The two fingers still counter-rotate: opposite axes, one <mimic>.
-    assert np.allclose(_ORACLE.joints['RL_joint']['axis'],
-                       -_ORACLE.joints['LF_joint']['axis'])
+    """The driven blade (``RL_joint``) runs 0 = closed … +1.5708 = open, so open
+    is the numerically larger value — every shared consumer (grasp-held check,
+    catalog band, sim close classifier) assumes it. A re-export that inverted
+    the sign would silently invert every grasp verdict."""
+    lo, hi = _ORACLE.joints['RL_joint']['limits']
+    assert (lo, hi) == pytest.approx((0.0, 1.5708), abs=1e-9)
+    assert _ORACLE.joints['RL_joint']['mimic'] is None
+    # The second blade rides RL through the claw's 18T/19T gear pair: it
+    # counter-rotates (negative multiplier about the same axis) and stays inside
+    # its own window for every RL value.
+    lf = _ORACLE.joints['LF_joint']
+    assert np.allclose(lf['axis'], _ORACLE.joints['RL_joint']['axis'])
+    assert lf['limits'] == pytest.approx((-1.5708, 0.0), abs=1e-9)
+    joint, multiplier, offset = lf['mimic']
+    assert joint == 'RL_joint'
+    assert offset == 0.0
+    assert multiplier * hi >= lf['limits'][0] - 1e-9
+
+
+def test_the_lf_mimic_multiplier_is_the_claw_gear_ratio():
+    """The claw's gears (CAD: ``Spurgear_18T`` on the driven right finger,
+    ``Spurgear_19T`` on the left, pivots 18.501 mm apart = (18 + 19)/2 × module
+    1) turn the left blade by −18/19 of the right. Read from the URDF itself —
+    the 3D twin (urdf-loader applies ``value · multiplier``) and every mesh test
+    that poses the left blade take it from there, and a re-export that resets
+    it to −1 would show a claw that does not match the arm (rig gate VR16)."""
+    _joint, multiplier, _offset = _ORACLE.joints['LF_joint']['mimic']
+    assert multiplier == pytest.approx(-18.0 / 19.0, abs=1e-6)
 
 
 # ── FK: solver vs oracle ─────────────────────────────────────────────────────
 
 def _random_joints(rng):
-    return [rng.uniform(lo, hi) for lo, hi in _EDU1_JOINT_LIMITS_RAD]
+    return [rng.uniform(lo, hi) for lo, hi in _V1_JOINT_LIMITS_RAD]
 
 
 def test_fk_matches_the_independent_oracle():
@@ -284,11 +326,10 @@ def test_vertical_family_poses_in_front_and_above_the_table_are_recoverable():
         q3 = rng.uniform(0.0, 3.1416)
         q4 = q2 - q3 + _Q4_VERTICAL_OFFSET
         # Read the window from the CONSTANT, never a literal. This is a sample
-        # FILTER (the assertions below are the literals), and when joint4 went
-        # ±90° → ±115° a hardcoded ±1.5708 here kept the sample inside the OLD
-        # window — the test stayed green while covering none of the region the
-        # change opened. Same reason line ~172's pose generator reads the table.
-        _q4_lo, _q4_hi = _EDU1_JOINT_LIMITS_RAD[3]
+        # FILTER (the assertions below are the literals): a hardcoded window
+        # here would keep the sample inside an OLD window after a limit change,
+        # and the test would stay green while covering none of the new region.
+        _q4_lo, _q4_hi = _V1_JOINT_LIMITS_RAD[3]
         if not (_q4_lo <= q4 <= _q4_hi):
             continue
         q = [rng.uniform(-1.5, 1.5), q2, q3, q4, rng.uniform(-1.5, 1.5)]
@@ -335,15 +376,17 @@ def test_solve_refuses_the_unreachable_and_the_non_finite():
 
 
 def test_the_reachable_ring_at_the_grasp_plane_is_a_real_annulus():
-    """The student-facing ring in the ArmProfile (0.09 / 0.35) must sit INSIDE
+    """The student-facing ring in the ArmProfile (0.10 / 0.34) must sit INSIDE
     what the solver actually reaches at the shipped grasp height."""
+    from physical_ai_server import robot_profiles as rp
+    prof = rp.ROBOT_PROFILES['v1_studio']
     ik = _ik()
     z = 0.015
     reach = [r for r in np.arange(0.02, 0.45, 0.002)
              if ik.solve((float(r), 0.0, z)) is not None]
     assert reach, 'nothing is reachable at the grasp plane'
-    assert min(reach) <= 0.09 + 1e-9
-    assert max(reach) >= 0.35 - 1e-9
+    assert min(reach) <= prof.reach_inner_m + 1e-9
+    assert max(reach) >= prof.reach_outer_m - 1e-9
     # …and the hole in the middle is real, not an artefact of the sweep.
     assert ik.solve((0.02, 0.0, z)) is None
 
@@ -352,17 +395,15 @@ def test_the_elbow_down_branch_is_never_selected_but_is_kept_anyway():
     """The arm NEVER adopts an elbow-down posture — the property every clearance
     figure and ``path_guard``'s "no reconfiguration flip" assumption rest on.
 
-    This asserts the PROPERTY, not a proxy for it. Until 2026-09-10 it asserted
-    ``both == 0``, i.e. that elbow-down is never even WITHIN LIMITS — which was
-    true only because joint4 was ±90°, and stopped being true the moment it was
-    widened to ±115° (measured then: ``both`` went 0 → 17 on this very sample).
-    "Never in limits" was always the wrong thing to pin: what matters is which
-    branch ``solve()`` HANDS BACK.
+    This asserts the PROPERTY, not a proxy for it. "Elbow-down is never even
+    WITHIN LIMITS" would be the wrong thing to pin — it depends on joint4's
+    window and is false at ±110° — what matters is which branch ``solve()``
+    HANDS BACK.
 
     The branch stays because it is the correct general form and the rods are
     DESIGNED to be swapped, so a future build could make it live.
     """
-    from physical_ai_server.workflow import edu1_ik as m
+    from physical_ai_server.workflow import v1_ik as m
     ik = _ik()
     rng = random.Random(5)
     returned_down = returned_up = down_in_limits = 0
@@ -399,7 +440,7 @@ def test_the_elbow_down_branch_is_never_selected_but_is_kept_anyway():
     assert returned_down == 0, (
         f'solve() handed back {returned_down} elbow-DOWN postures; every '
         f'clearance figure on this arm was measured elbow-up')
-    # Not an accident of THIS window: at ±115° the down branch IS legal on part
+    # Not an accident of THIS window: at ±110° the down branch IS legal on part
     # of the sample and is still never chosen. Pinning that keeps the test
     # honest about what it proves — if this ever reads 0 the sample has stopped
     # covering the region, and `returned_down == 0` above would be vacuous.
@@ -418,7 +459,7 @@ def test_elbow_up_dominates_elbow_down_on_every_binding_limit():
     bound and on the upper q2/q3 bounds — the three that can bind — and
     elbow-down being in limits therefore IMPLIES elbow-up is too.
     """
-    from physical_ai_server.workflow import edu1_ik as m
+    from physical_ai_server.workflow import v1_ik as m
     rng = random.Random(23)
     checked = 0
     for _ in range(20000):
@@ -486,8 +527,8 @@ def test_the_fold_preserves_the_jaw_axis_modulo_pi():
 
 def test_the_fold_reference_is_zero_and_not_the_seed():
     """Documented contract: ``seed`` does not change the returned solution. A
-    seed-relative fold drifts to the map edge within two grasps (measured on the
-    edu6); keeping the reference at 0 is what keeps the contract true."""
+    seed-relative fold drifts to the map edge within two grasps; keeping the
+    reference at 0 is what keeps the contract true."""
     ik = _ik()
     base = ik.solve((0.20, 0.0, 0.02), roll=2.5)
     for seed in ([0.0] * 5, [0.0, 1.0, 1.0, 0.0, 1.5], [0.0, 1.0, 1.0, 0.0, -1.5]):
@@ -546,9 +587,9 @@ def test_base_yaw_is_the_azimuth_and_theta1_is_its_negative():
 
 def test_identity():
     ik = _ik()
-    assert ik.backend == 'closed-form-edu1'
+    assert ik.backend == 'closed-form-v1'
     assert ik.num_joints() == 5
-    assert ik.joint_limits == tuple(_EDU1_JOINT_LIMITS_RAD)
+    assert ik.joint_limits == tuple(_V1_JOINT_LIMITS_RAD)
 
 
 def test_link_frames_are_world_frame_and_one_per_link():

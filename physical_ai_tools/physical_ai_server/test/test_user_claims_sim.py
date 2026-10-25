@@ -29,7 +29,7 @@ def _find(t='wuerfel'):
 
 # ── D2: a table Ziel is approached from above (Q3, F21) ────────────────────
 
-@pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
+@pytest.mark.parametrize('pid', ['omx_full', 'v1_studio'])
 def test_table_ziel_is_approached_from_above(monkeypatch, pid):
     """„bewege zu <Tisch-Ziel>" with a cube in the jaws stops ABOVE the Ziel at
     the release height: the held cube's bottom never goes below the table (it
@@ -59,7 +59,7 @@ def _hover_z(monkeypatch, pid):
     return rig.ee_z()
 
 
-@pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
+@pytest.mark.parametrize('pid', ['omx_full', 'v1_studio'])
 def test_descend_without_hover_never_swings_low(monkeypatch, pid):
     """F21: „senke auf <Ziel>" from elsewhere first goes to the hover, then
     straight down — the arm never travels sideways below the hover."""
@@ -113,7 +113,7 @@ def _replay(name='Greifen'):
     return B('edubotics_replay_trajectory', fields={'NAME': name})
 
 
-@pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
+@pytest.mark.parametrize('pid', ['omx_full', 'v1_studio'])
 def test_open_gripper_never_holds(monkeypatch, pid):
     """„Ein offener Greifer hält nie etwas": an open gripper with no close this
     run reads falsch, through „Greifer hält etwas?" and „warte bis Greifer hält"
@@ -126,7 +126,7 @@ def test_open_gripper_never_holds(monkeypatch, pid):
     assert 'falsch' in rig.logs()
 
 
-@pytest.mark.parametrize('pid', ['omx_full', 'edu1_studio'])
+@pytest.mark.parametrize('pid', ['omx_full', 'v1_studio'])
 def test_a_replayed_grasp_still_holds_and_an_empty_one_does_not(monkeypatch, pid):
     """There is no close-COMMAND requirement: a replayed grasp onto a cube keeps
     reading wahr; a replayed close on nothing, a close on nothing and a grasp
@@ -240,7 +240,7 @@ def test_wait_still_clamps_a_long_wait(monkeypatch):
     assert lines and lines[0].startswith('[WARNUNG] Warte-Dauer auf 300 s begrenzt')
 
 
-@pytest.mark.parametrize('pid', ['edu1_studio', 'edu6_studio'])
+@pytest.mark.parametrize('pid', ['v1_studio'])
 def test_lift_warning_names_grundstellung_only_at_home(monkeypatch, pid):
     """N8: „hebe an" that cannot rise says „aus der Grundstellung heraus …" only
     when the arm IS in the Grundstellung; anywhere else just the first clause."""

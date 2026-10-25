@@ -7,73 +7,66 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-"""Closed-form analytical inverse kinematics for the edu1_studio arm.
+"""Closed-form analytical inverse kinematics for the v1_studio arm.
 
-The edu1 ("Edu:1") is a 5-DOF Feetech STS arm with a rotating two-blade claw
-(``5dof_assembly_urdf2``, SolidWorks export 2026-09-05):
+The V1 is a 5-DOF Feetech STS arm with a rotating two-blade claw
+(``5dof_assembly_urdf2``, SolidWorks export 2026-10-22, with ``Base_part.2`` as
+the base):
 
 * ``joint1`` — yaw about base z (±90°). Its axis is ``(0, 0, −1)``, so the
   JOINT VALUE is the NEGATIVE of the world azimuth it aims at — see
-  :meth:`Edu1IKSolver.base_yaw`, which returns the AZIMUTH, not the joint.
+  :meth:`V1IKSolver.base_yaw`, which returns the AZIMUTH, not the joint.
 * ``joint2/3/4`` — shoulder / elbow / wrist pitch, all three PARALLEL (a planar
-  3R chain). ``joint2``/``joint3`` are [0, π]; ``joint4`` is ±115°.
+  3R chain). ``joint2``/``joint3`` are [0, π]; ``joint4`` is ±110°.
 * ``joint5`` — tool roll (±90°; the jaw-alignment joint). Its axis is
   collinear with the tool axis, so it never moves the TCP.
 * (``RL_joint`` is the claw servo, not a positioning DOF; ``LF_joint``
-  ``<mimic>``s it.)
+  ``<mimic>``s it through the claw's 18T/19T gear pair, multiplier −18/19.)
 
 WHY THE 3R CHAIN MAKES THIS EXACT. A strict-vertical (top-down) grasp fixes the
 tool direction, which on a planar 3R is ONE scalar equation in
 ``q2 + q3 + q4`` — so ``q4`` is DETERMINED and the remaining 2R
 (shoulder→elbow→wrist) is the textbook two-link problem. There is no wrist
-sphere to decouple and no idealisation: unlike the edu6 (whose axes 4/5/6 had to
-be verified as exactly intersecting) this arm's geometry is planar by
+sphere to decouple and no idealisation: this arm's geometry is planar by
 construction, and the whole solve is one pass, elbow-up preferred.
 
 CONSEQUENCE WORTH KNOWING: the vertical constraint reads
 ``q4 = q2 − q3 + (BETA0 − π)`` with ``BETA0 ≈ +π/2``, i.e. ``q4 ≈ q2 − q3 −
 π/2``. So ``joint4``'s LOWER limit alone sets a floor on ``q2 − q3`` — a
 STRUCTURAL restriction on the strict-vertical family, not a tuning choice, and
-it is why the reachable top-down band is an annulus and not a disc. (The upper
-limit never binds: it would need ``q2 ≥ q3 + 3.578``, and ``q2 ≤ π``.)
-
-At the ±90° this arm shipped with, that floor was exactly ``q2 ≥ q3``. At the
-current **±115°** it relaxes to ``q2 ≥ q3 − 0.43631``. Measured through
-``solve()`` over r ∈ [0.05, 0.40] × z ∈ [0.00, 0.40] at 5 mm (5751 cells,
-2026-09-10): the window admits **2068** cells instead of 902, and the
-strict-vertical TCP ceiling rises **0.100 m → 0.195 m**. Over the 2R-feasible
-set (q2/q3 in limits, n = 3087) the REQUIRED ``q4`` spans −171.21°…−62.86° —
-always negative, so it is only ever the lower limit that clips it: ±90° admitted
-29.2 % of that set, ±115° admits 67.0 %.
+it is why the reachable top-down band is an annulus and not a disc. At ±110°
+the floor is ``q2 ≥ q3 − 0.3490``. (The upper limit never binds: it would need
+``q2 ≥ q3 + 3.4906``, and ``q2 ≤ π``.) The strict-vertical TCP ceiling this
+leaves is ≈0.146 m.
 
 FRAMES — the one thing to keep straight:
 
 * The URDF's reachable half-disc lies on **−x** (``joint1``'s fixed
   ``rpy = (0, 0, −1.5708)`` plus the ``(0, 0, −1)`` axes put it there). The
   solver therefore works in the **WORLD frame = URDF base_link rotated 180°
-  about Z** (front = +x, like the OMX and like edu6), so every Roboter Studio
-  convention (board placement, destinations, zones, German copy) carries over
-  unchanged.
+  about Z** (front = +x, like the OMX), so every Roboter Studio convention
+  (board placement, destinations, zones, German copy) carries over unchanged.
 * ``solve()`` takes WORLD coordinates and returns **URDF-native joints** (what
   ``/joint_states``, the trajectory rail and the web twin speak). ``fk()`` takes
   URDF-native joints and returns the WORLD-frame TCP pose.
-* Unlike the edu6, ``joint1``'s axis passes through the base origin (measured
-  offset 0.0 m), so :attr:`base_axis_x` is 0 and a bearing is measured from the
-  origin. The property exists anyway because ``path_guard`` and ``motion`` read
-  it generically.
-* The TCP is the **CLOSED FINGERTIP** (:data:`_L_TOOL` = 0.08625 m below the
+* ``base_link``'s origin is the base BOTTOM, i.e. the table plane: the shipped
+  URDF re-origins the CAD's base frame by +6 mm (``joint1`` sits 50.2 mm above
+  the table), so z = 0 is the table here exactly as everywhere else.
+* ``joint1``'s axis passes through the base origin, so :attr:`base_axis_x` is
+  0 and a bearing is measured from the origin. The property exists anyway
+  because ``path_guard`` and ``motion`` read it generically.
+* The TCP is the **CLOSED FINGERTIP** (:data:`_L_TOOL` = 0.1086 m below the
   ``end_effector`` origin along the tool axis = the 21.25 mm claw pivot offset +
-  the 65 mm blade). A grasp targets ``z_table + object_height − grasp_depth``
-  exactly like the OMX and the edu6.
+  the 87.35 mm blade). A grasp targets ``z_table + object_height −
+  grasp_depth`` exactly like the OMX.
 
-  TOUCH-OFF NOTE (rig gate E8): this claw ROTATES, so its tip height depends on
-  the jaw opening — 86.25 mm below the EE origin CLOSED, 68.8 mm at 0.9 rad
-  open. „Tisch vermessen" must therefore be taught with the claw CLOSED. NOT
-  everywhere pessimistic, measured on the meshes: opening the claw first moves
-  the tips DOWN, by up to 0.64 mm at 0.14 rad, before they rise past the closed
-  height at ≈0.28 rad (the blade pivots sit 9.25 mm off the tool axis) — small
-  against every floor margin, and :meth:`Edu1IKSolver.tool_tip_rise_m` reports
-  it as a negative rise.
+  TOUCH-OFF NOTE (rig gate VR8): this claw ROTATES, so its tip height depends
+  on the jaw opening. „Tisch vermessen" must therefore be taught with the claw
+  CLOSED. NOT everywhere pessimistic, measured on the meshes: opening the claw
+  first moves the tips DOWN, by up to 0.46 mm, before they rise past the closed
+  height at ≈0.22 rad (the blade pivots sit 9.25 mm off the tool axis) — small
+  against every floor margin, and :meth:`V1IKSolver.tool_tip_rise_m` reports it
+  as a negative rise.
 
 ROLL contract (jaw alignment): motion's shared formula
 ``roll = base_yaw − tag_yaw + GRASP_ROLL_RAD`` is consumed here as
@@ -81,63 +74,29 @@ ROLL contract (jaw alignment): motion's shared formula
 along the world azimuth ``χ = π/2 + φ + q5`` where ``φ`` is the arm-plane
 azimuth (``= base_yaw``), so ``q5 = −roll`` yields ``χ ≡ tag_yaw`` for the
 fleet-wide default ``GRASP_ROLL_RAD = π/2`` — the identical geometric behaviour
-to the OMX, absorbed entirely by this one mapping. (Same trim direction as the
-edu6: ``∂q5/∂GRASP_ROLL = −1``.)
+to the OMX, absorbed entirely by this one mapping (``∂q5/∂GRASP_ROLL = −1``).
 
 THE JAW FOLD IS MANDATORY HERE, not an optimisation. ``joint5`` is limited to
 **±90°** while a tag can present any yaw in 360°, so without folding
 ``q5`` and ``q5 ∓ π`` into the reachable window HALF of all tag orientations
 would simply return ``None``.
 
-IT IS LEGITIMATE, AND THE HONEST NUMBERS ARE THESE (re-measured 2026-09-05 on
-the shipped meshes: exact point-to-triangle over the grasping band z_ee
-40…87 mm, first-hit inner surfaces only — i.e. what an object between the jaws
-can actually reach):
-
-* The two blades ARE mirror images, but **about the claw's own centreline, not
-  about the tool axis.** The blade band spans ``x_ee ∈ [−25.385, +23.785] mm``
-  at the catalog close, i.e. it is centred on **−0.800 mm** — each blade
-  individually, not merely the pair. About THAT axis the contacting profiles
-  agree to **max 0.52 mm** (p99 0.06, mean 0.005).
-* About the **TOOL axis** — which is what "a 180° roll" means, the roll joint's
-  axis passing through the EE origin — they agree to **max 1.74 mm** (p99 1.52,
-  mean 0.23). That is the number this docstring is about, and it is ~4× the one
-  it used to quote.
-* Whole-mesh, tool axis: **5.76 mm**, and the ATTRIBUTION is right — the worst
-  1 % of vertices sit at z_ee 12.7…26.6 mm, straddling the ``RL_joint`` pivot at
-  21.25 mm, i.e. the servo-horn boss on the driven blade. It never touches an
-  object; the contacting band never exceeds 1.74 mm.
-
-CONSEQUENCE, and it is a real 1.6 mm rather than a rounding note: the TCP is
-MODELLED on the roll axis but the physical closed fingertip sits at
-``x_ee = −0.800 mm``, so the two folded twins seat an object
-**2 × 0.800 = 1.600 mm apart along the jaw WIDTH axis** (``x_ee``; the blade is
-48.5 mm wide there, so the object stays well inside the jaw — it is a seating
-bias, not a miss). The jaw CLOSING axis is unaffected: the ``y_ee`` centre
-offset is ≤ 0.06 mm. Either twin also carries a fixed ±0.800 mm TCP model error
-whether or not the fold fires.
+IT IS LEGITIMATE: the two blades are mirror images about the claw's own
+centreline, and on this claw that centreline lies ON the roll axis (blade band
+``x_ee ∈ [−11.045, +11.04] mm`` at the catalog close, i.e. ≈0.00 mm off). A
+180° roll maps the blade pair onto itself to within 0.81 mm, so the two folded
+twins seat an object at the same place to that tolerance.
 
 THE FOLD'S BEHAVIOUR IS EXACT REGARDLESS. A 180° rotation about ANY axis
 parallel to ``z_ee`` maps ±x_ee → ∓x_ee and ±y_ee → ∓y_ee, so both the jaw line
-and the jaw-width line are preserved; only their signs flip. Measured over
-20 000 random poses: a folded twin's jaw azimuth differs from the unfolded one's
-by **0.0 rad exactly** (mod π), and the roll contract ``jaw azimuth ≡ tag_yaw``
-holds to **7.2e-6 rad** — CAD right-angle rounding, the same source as
-``_FK_TOL_M`` below.
+and the jaw-width line are preserved; only their signs flip. A folded twin's jaw
+azimuth equals the unfolded one's mod π (``test_v1_ik.py`` pins it).
 
-HISTORICAL NOTE, because the number is quotable and was quoted: the **0.46 mm**
-this file used to claim came from comparing the two inner faces' ``|y_ee|`` at
-matched ``z_ee``. That metric reads only ``|y|`` and ``z``, so it is
-STRUCTURALLY BLIND to an x offset — translating one blade a full METRE along
-``x_ee`` leaves it bit-for-bit unchanged — and it has no stable value either
-(0.03…0.80 mm depending purely on the z-binning). It was measuring the
-CENTRE-axis symmetry and being read as the TOOL-axis symmetry.
-
-Geometry constants are transcribed from ``5dof_assembly_urdf2.urdf`` (external
-CAD export; an in-repo copy ships at
-``physical_ai_manager/public/edu1-urdf/edu1.urdf`` — the independent FK oracle
-in ``test_edu1_ik.py`` parses THAT file, so a solver-constant transcription
-error cannot verify itself).
+Geometry constants are transcribed from the shipped in-repo URDF
+``physical_ai_manager/public/v1-urdf/v1.urdf`` (generated from the CAD export
+by ``tools/build_v1_urdf_assets.py``) — the independent FK oracle in
+``test_v1_ik.py`` parses THAT file, so a solver-constant transcription error
+cannot verify itself.
 """
 
 from __future__ import annotations
@@ -150,64 +109,65 @@ import numpy as np
 
 # ── Kinematic constants (metres / radians) — URDF parent→child transcription ─
 # joint origins (xyz) + fixed rpy; axes are the URDF's, applied after the rpy.
-_J1_XYZ = (0.0, 0.0, 0.0492)
+# _J1_XYZ is the CAD's 0.0442 + the 6 mm base re-origin (the table plane).
+_J1_XYZ = (0.0, 0.0, 0.0502)
 _J1_RPY = (0.0, 0.0, -1.5708)
-_J2_XYZ = (0.0, 0.0, 0.04075)
+_J2_XYZ = (0.0, 0.0, 0.04175)
 _J2_RPY = (-1.5708, 0.0, 1.5708)
 _J3_XYZ = (0.1555, -0.032, 0.0)
-_J3_RPY = (3.1416, 0.0, -1.5708)
-_J4_XYZ = (0.0, 0.222499999999999, 0.0)
+_J3_RPY = (-3.1416, 0.0, -1.5708)
+_J4_XYZ = (0.0, 0.2225, 0.0)
 _J4_RPY = (0.0, 0.0, 0.0)
-_J5_XYZ = (0.0, 0.0609499999999672, 0.0)
-_J5_RPY = (-1.5707963267949, 0.0, 0.0)
+_J5_XYZ = (0.0, 0.07195, 0.0)
+_J5_RPY = (-1.5708, 0.0, 0.0)
 # Every joint turns about its own frame's −z (SolidWorks exported them that way).
 _AXES = ((0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, -1))
 
-# joint1's axis passes through the base origin on this arm (x = y = 0 exactly),
-# unlike the edu6's 21.3 mm offset. Kept as a named constant because motion and
-# path_guard read ``ik.base_axis_x`` generically.
+# joint1's axis passes through the base origin on this arm (x = y = 0 exactly).
+# Kept as a named constant because motion and path_guard read
+# ``ik.base_axis_x`` generically.
 BASE_AXIS_X_WORLD = 0.0
 
 # Tool: ``end_effector`` is FIXED to link5 at zero offset, and the closed claw
 # tip sits on the tool axis (+z of the end_effector frame) at the joint pivot
-# 0.02125 m plus the 0.065 m blade. Measured on the STLs, the two tips meet at
-# (x_ee −0.8 mm, y_ee 0.0 mm) — 0.8 mm off the axis, which is the same order as
-# the OMX's own ~1.6 mm and is ignored for the same reason. NOTE this is the
-# SAME 0.800 mm the jaw-fold note below is about: on its own it is a fixed TCP
-# model error, and the fold turns it into a 1.600 mm difference BETWEEN the two
-# folded twins.
-_L_TOOL = 0.02125 + 0.065
+# 0.02125 m plus the 0.08735 m blade (measured on the STLs: the closed tips sit
+# at z_ee 108.595 / 108.575 mm, on the roll axis). The claw gear ratio does not
+# move it: both blades are at 0 when closed.
+_L_TOOL = 0.02125 + 0.08735
 # Claw LOWEST-point rise above the closed-tip TCP: (band start rad, min true rise
 # in [start, next start) in m, rounded DOWN to 1e-5). Generated from the shipped
 # finger STLs through RL_joint/LF_joint and the claw housing (link5.STL +
-# end_effector.STL, rigid in the end_effector frame) — see tool_tip_rise_m. It
-# spans the claw's WHOLE window [0, 1.5708], not only the commanded band (0–0.9):
-# a claw opened by hand while the arm is limp stays that wide after the re-lock.
-# Negative near 0.14 rad: the tips dip before they rise. From ≈1.38 rad the tips
-# ride above the housing's own lowest point (43.75 mm), so the last band, which
-# covers [1.40, 1.5708] and everything past it, is the housing's plateau.
+# end_effector.STL, rigid in the end_effector frame) — see tool_tip_rise_m. Each
+# band is the minimum over BOTH claw gear ratios, 1 and the URDF's 18/19: the
+# shipped ratio is a CAD value until rig gate VR16 measures it, and the lower of
+# the two is the one a floor check may credit. It spans the claw's WHOLE window
+# [0, 1.5708], not only the commanded band (0–0.9): a claw opened by hand while
+# the arm is limp stays that wide after the re-lock. Negative near 0.1 rad: the
+# tips dip before they rise. From ≈1.51 rad the tips ride above the housing's
+# own lowest point (42.50 mm below the end_effector origin), so the last band,
+# which covers [1.55, 1.5708] and everything past it, is the housing's plateau.
 _TIP_RISE_TABLE = (
-    (0.00, -0.00038), (0.05, -0.00059), (0.10, -0.00065), (0.15, -0.00064),
-    (0.20, -0.00053), (0.25, -0.00025), (0.30, 0.00019), (0.35, 0.00080),
-    (0.40, 0.00156), (0.45, 0.00249), (0.50, 0.00357), (0.55, 0.00480),
-    (0.60, 0.00618), (0.65, 0.00771), (0.70, 0.00939), (0.75, 0.01120),
-    (0.80, 0.01315), (0.85, 0.01522), (0.90, 0.01742), (0.95, 0.01974),
-    (1.00, 0.02218), (1.05, 0.02472), (1.10, 0.02736), (1.15, 0.03009),
-    (1.20, 0.03291), (1.25, 0.03582), (1.30, 0.03879), (1.35, 0.04183),
-    (1.40, 0.04374),
+    (0.00, -0.00034), (0.05, -0.00046), (0.10, -0.00046), (0.15, -0.00040),
+    (0.20, -0.00015), (0.25, 0.00030), (0.30, 0.00095), (0.35, 0.00179),
+    (0.40, 0.00282), (0.45, 0.00404), (0.50, 0.00545), (0.55, 0.00704),
+    (0.60, 0.00881), (0.65, 0.01076), (0.70, 0.01288), (0.75, 0.01517),
+    (0.80, 0.01762), (0.85, 0.02022), (0.90, 0.02298), (0.95, 0.02588),
+    (1.00, 0.02891), (1.05, 0.03208), (1.10, 0.03538), (1.15, 0.03878),
+    (1.20, 0.04230), (1.25, 0.04592), (1.30, 0.04964), (1.35, 0.05343),
+    (1.40, 0.05731), (1.45, 0.06125), (1.50, 0.06524), (1.55, 0.06609),
 )
 
 # FK∘IK acceptance for a returned solve().
 #
-# 1e-5, NOT the edu6's 1e-6, and the extra decade is a property of the CAD
-# export rather than of this solver: SolidWorks rounded every right angle in
-# this URDF to ``1.5708`` / ``3.1416`` (the edu6 export kept full precision), so
-# the chain is planar only to ~1.5e-6 m while the closed form assumes it is
-# planar exactly. Measured worst residual over a 2000-pose FK→IK→FK round trip:
-# 3.5e-6 m. That is 200× below one servo tick at full reach (4096 ticks/rev over
-# 0.38 m ≈ 0.58 mm), so it is float bookkeeping, not model error — but at 1e-6
-# it silently rejected EVERY solve, which reads as "the whole workspace is
-# unreachable". Do not tighten without re-exporting the URDF at full precision.
+# 1e-5, and the decade above float noise is a property of the CAD export rather
+# than of this solver: SolidWorks rounded every right angle in this URDF to
+# ``1.5708`` / ``3.1416``, so the chain is planar only to ~1e-6 m while the
+# closed form assumes it is planar exactly. Measured worst residual over a
+# 3000-pose FK→IK→FK round trip: 2.39e-6 m. That is far below one servo tick at
+# full reach (4096 ticks/rev over 0.38 m ≈ 0.58 mm), so it is float bookkeeping,
+# not model error — but at 1e-6 it would silently reject solves, which reads as
+# "the workspace is unreachable". Do not tighten without re-exporting the URDF
+# at full precision.
 _FK_TOL_M = 1e-5
 
 
@@ -216,46 +176,37 @@ _FK_TOL_M = 1e-5
 # four decimals (1.5708 / 3.1416) where the raw CAD export wrote two. joint5 is
 # why that matters and not merely tidy: its window IS the jaw-fold window, so at
 # ±1.57 a required roll of exactly ±90° — a cube square-on to the arm's own
-# bearing, which is common, not a corner case — fell 0.0008 rad outside BOTH
-# folded twins and the grasp was refused as unreachable. Half a servo tick;
-# nothing physical changes.
+# bearing, which is common, not a corner case — would fall 0.0008 rad outside
+# BOTH folded twins and the grasp would be refused as unreachable. Half a servo
+# tick; nothing physical changes.
 #
-# joint4 is ±115° (2026-09-10), not the ±90° this arm shipped with. The physical
-# range is the OWNER'S STATEMENT — the arm reaches 115° to each side — and is not
-# something this repo can measure; treat ±115° as a CEILING and never widen past
-# it. ``2.0071`` keeps the file's four-decimal convention and rounds INWARD of
-# 115° (= 2.00712864… rad) by 2.9e-6 rad ≈ 0.002 servo ticks, i.e. below the
-# 115° (= 2.0071286398… rad) by 2.864e-5 rad ≈ 0.019 servo ticks at
-# 4096 ticks/rev, i.e. below the hardware's own resolution — and inward is the
-# safe direction.
+# joint4 is ±110° (owner decision): at +110° link4 passes link3 at 4.2 mm.
+# ``1.9198`` keeps the file's four-decimal convention and rounds INWARD of 110°
+# (= 1.91986217… rad) — inward is the safe direction. Treat ±110° as a CEILING
+# and never widen past it.
 #
 # ⚠ CHANGING ANY VALUE HERE IS A HARDWARE-PROVISIONING CHANGE, NOT A SOFTWARE
 # ONE. The driver's boot probe verifies the servo EEPROM Min/Max_Position_Limit
 # window as a PROVISIONING FINGERPRINT, so a limit that moves here without
-# ``python3 tools/edu6_provision.py --arm edu1`` being re-run on every physical
+# ``python3 tools/feetech_provision.py --arm v1`` being re-run on every physical
 # arm makes that arm refuse to boot, in German, with no hint why. The same pair
 # is declared in FOUR places that must move together — here, the shipped URDF
-# (physical_ai_manager/public/edu1-urdf/edu1.urdf), the driver node
-# (docker/open_manipulator/edu6_arm_node.py::_EDU1_JOINT_LIMITS_RAD) and the
-# provisioning tool (tools/edu6_provision.py::_ARM_SPECS['edu1']).
-_EDU1_JOINT_LIMITS_RAD: list[tuple[float, float]] = [
+# (physical_ai_manager/public/v1-urdf/v1.urdf), the driver node
+# (docker/open_manipulator/feetech_arm_node.py::JOINT_LIMITS_RAD) and the
+# provisioning tool (tools/feetech_provision.py, ``--arm v1``).
+_V1_JOINT_LIMITS_RAD: list[tuple[float, float]] = [
     (-1.5708, 1.5708),     # joint1  base yaw
     (0.0, 3.1416),         # joint2  shoulder
     (0.0, 3.1416),         # joint3  elbow
-    (-2.0071, 2.0071),     # joint4  wrist pitch — ±115°, owner-stated ceiling
+    (-1.9198, 1.9198),     # joint4  wrist pitch — ±110°, owner-stated ceiling
     (-1.5708, 1.5708),     # joint5  tool roll — the jaw-fold window IS ±90°
 ]
 
 # joint5 jaw-symmetry fold. See the module docstring: on this arm the fold is
 # what makes 360° of tag yaw reachable at all through a ±90° roll joint, and it
-# is sound because the CONTACTING blade profiles are mirror-symmetric — about
-# the CLAW'S OWN centreline to ≤0.52 mm, and about the ROLL axis (which is what
-# the fold actually rotates about) to ≤1.74 mm, the difference being the
-# 0.800 mm the claw sits off that axis. A folded grasp therefore seats an object
-# 1.600 mm further along the jaw WIDTH than an unfolded one; the jaw LINE is
-# identical to float noise. Reference is ZERO, never the seed — same conclusion the
-# edu6 reached and for the same reason (a seed-relative choice feeds its own
-# output back in and drifts toward the map edge), and here it additionally keeps
+# is sound because the blade pair is mirror-symmetric about the roll axis (to
+# 0.81 mm). Reference is ZERO, never the seed: a seed-relative choice feeds its
+# own output back in and drifts toward the map edge, and zero additionally keeps
 # solve()'s documented contract that ``seed`` does not change the answer.
 _J5_JAW_FOLD_RAD = math.pi / 2.0
 
@@ -355,18 +306,17 @@ _G_OFFSET = _BETA0 - _ALPHA0
 _WRIST_ABOVE_TCP = _L4 + _L_TOOL
 
 # Strict-vertical reach annulus of the WRIST CENTRE (2R span; the practical
-# authoritative bound is always ``solve(...) is not None``, because the ±115°
-# joint4 window still clips this annulus further — it admits 67.0 % of the
-# 2R-feasible set, not all of it).
+# authoritative bound is always ``solve(...) is not None``, because the ±110°
+# joint4 window still clips this annulus further — it admits only part of the
+# 2R-feasible set).
 _REACH_MIN = abs(_L2 - _L3)
 _REACH_MAX = _L2 + _L3
 
 
-class Edu1IKSolver:
-    """Closed-form Cartesian→joint solver for the edu1_studio arm.
+class V1IKSolver:
+    """Closed-form Cartesian→joint solver for the v1_studio arm.
 
-    Public surface mirrors the OMX :class:`IKSolver` and the
-    :class:`~physical_ai_server.workflow.edu6_ik.Edu6IKSolver` (``solve`` /
+    Public surface mirrors the OMX :class:`IKSolver` (``solve`` /
     ``solve_quat`` / ``fk`` / ``link_frames`` / ``link_points`` /
     ``in_workspace`` / ``base_yaw`` / ``roll_from_joints`` / ``num_joints`` /
     ``backend`` / ``joint_limits`` / ``base_axis_x``) so
@@ -380,13 +330,13 @@ class Edu1IKSolver:
     def __init__(self, urdf_string: Optional[str] = None) -> None:
         # ``urdf_string`` accepted for factory-signature compatibility; the
         # baked constants are verified by the independent URDF-parsing oracle
-        # in test_edu1_ik.py instead of a runtime parse.
-        self._joint_limits = list(_EDU1_JOINT_LIMITS_RAD)
+        # in test_v1_ik.py instead of a runtime parse.
+        self._joint_limits = list(_V1_JOINT_LIMITS_RAD)
 
     # ── identity ─────────────────────────────────────────────────────────────
     @property
     def backend(self) -> str:
-        return 'closed-form-edu1'
+        return 'closed-form-v1'
 
     def num_joints(self) -> int:
         """Number of arm joints solved (joint1..joint5)."""
@@ -453,8 +403,7 @@ class Edu1IKSolver:
         unioned over the full jaw band, because the blades ride ``RL_joint`` /
         the ``LF_joint`` ``<mimic>`` and are not on the arm's own FK chain.
 
-        A PUBLIC method on purpose, for the same reason the edu6 solver's is:
-        ``arm_geometry`` must not reach into ``_fk_chain`` across a module
+        A PUBLIC method on purpose: ``arm_geometry`` must not reach into ``_fk_chain`` across a module
         boundary, and it must not compose the world rotation itself. One owner
         for the frame convention.
 
@@ -480,8 +429,8 @@ class Edu1IKSolver:
     def link_points(self, joints, samples_per_link: int = 5) -> Optional[list[np.ndarray]]:
         """WORLD-frame points along base → joint-1 origin → shoulder → elbow →
         wrist → tool origin → fingertip, plus ``samples_per_link``
-        interpolations per link — the same contract as the OMX and edu6 solvers
-        (consumed by ``path_guard``)."""
+        interpolations per link — the same contract as the OMX solver (consumed
+        by ``path_guard``)."""
         frames = self._fk_chain(joints)
         if frames is None:
             return None
@@ -583,19 +532,10 @@ class Edu1IKSolver:
         #
         # ⟹ elbow-down in limits ⟹ elbow-up in limits, and elbow-up is tried
         # FIRST. Holds for ANY joint4 window ≥ ±0.20295 rad and uses no property
-        # of z, so it does not rot the way its predecessor did.
-        #
-        # WHAT ITS PREDECESSOR CLAIMED, AND WHY THIS IS WRITTEN OUT: until
-        # 2026-09-10 the note here proved the stronger statement that elbow-down
-        # is never even WITHIN LIMITS, via "q4 ≥ −π/2 forces q2 ≥ q3 ≥ 2.94 …
-        # hence r ≥ 0.57 m > ρ's 0.381 m ceiling". That proof consumed the
-        # joint4 bound, and widening joint4 to ±115° killed it: elbow-down IS
-        # now in limits over a real region (measured: 4118 cells of a 900×900
-        # (g, ψ) enumeration at z ≥ 0, and 17 of the 4000 targets the shipped
-        # test samples). It is simply never SELECTED — elbow-up is in limits on
-        # 4118 of those same 4118 cells, and a direct 260×260 solve() sweep
-        # returns elbow-up on 23359 of 23359 solved targets, 0 elbow-down.
-        # So the posture the arm adopts is unchanged, which is what every
+        # of z. Note the weaker claim "elbow-down is never even WITHIN LIMITS"
+        # is FALSE at ±110°: it is legal over a small region (4 of the 4000
+        # targets ``test_v1_ik`` samples) and simply never SELECTED. So the
+        # posture the arm adopts is always elbow-up, which is what every
         # clearance figure and path_guard's "no reconfiguration flip" rely on.
         #
         # It stays because it is the CORRECT general form: delete it and a
@@ -630,7 +570,7 @@ class Edu1IKSolver:
         free_yaw: bool = False,
     ) -> Optional[list[float]]:
         """Position-only solve (orientation argument ignored) — the same
-        call-site-compat contract as the OMX and edu6 solvers."""
+        call-site-compat contract as the OMX solver."""
         return self.solve(target_xyz, seed=seed, free_yaw=free_yaw)
 
     def _fold_jaw(self, theta5: float) -> float:
@@ -642,7 +582,7 @@ class Edu1IKSolver:
         through a ±90° joint at all: ``_wrap`` lands in (−π, π], and for every
         value outside ±90° exactly one of the two twins falls inside, so the
         fold never loses a target. Takes NO seed on purpose (a seed-relative
-        choice drifts; measured on the edu6, same conclusion). ``min`` keeps the
+        choice drifts toward the map edge). ``min`` keeps the
         FIRST minimum, so an exact tie (|theta5| == π/2) leaves ``theta5``
         unfolded."""
         lo, hi = self._joint_limits[4]
@@ -672,8 +612,7 @@ class Edu1IKSolver:
     def base_yaw(self, x: float, y: float) -> float:
         """WORLD AZIMUTH of the table point ``(x, y)`` from the joint-1 axis.
 
-        NOT ``theta1``. On the OMX and the edu6 the two happen to be the same
-        number; here ``joint1``'s axis is ``(0, 0, −1)``, so ``solve`` returns
+        NOT ``theta1``. On the OMX the two happen to be the same number; here ``joint1``'s axis is ``(0, 0, −1)``, so ``solve`` returns
         ``theta1 = −base_yaw(x, y)``. What every caller actually wants is the
         AZIMUTH — ``motion.grasp_joint5`` composes it with the tag yaw in world
         terms (``roll = base_yaw − tag_yaw + GRASP_ROLL``) and never touches a
@@ -692,25 +631,23 @@ class Edu1IKSolver:
 
         Read from :data:`_TIP_RISE_TABLE`, which is DERIVED from the shipped finger
         meshes (``right_finger.STL`` / ``left_finger.STL`` through ``RL_joint`` /
-        ``LF_joint``, the flipped axes and the ``<mimic>``) and the claw housing
-        (``link5.STL`` + ``end_effector.STL``), over the claw's whole window
-        0–1.5708 rad: each 0.05 rad band holds the MINIMUM true rise of the
-        claw's lowest part anywhere inside it, rounded DOWN to 0.01 mm. Up to
-        ≈1.38 rad that part is a blade tip; past it the housing (43.75 mm above
-        the closed tip), so the last band is a plateau and a value past the
-        window is never credited more than the housing allows. A
-        quadratic through the two CAD figures (86.25 mm closed, 68.8 mm at 0.9 rad)
-        was used first and was WRONG: the blade pivots sit 9.25 mm either side of
-        the tool axis, so opening the claw first moves the tips DOWN (−0.64 mm at
-        0.14 rad) and they only climb past the closed height at ≈0.28 rad; the
-        quadratic over-credited by up to 1.88 mm (at 0.42 rad) — i.e. it approved
-        points the floor check should have refused. A negative value therefore
-        makes a check that adds the rise straight up STRICTER, never looser;
-        set back along a tilted or upturned tool axis
-        (``motion.tool_tip_rise_world_z_m``) it is penalised less, by at most
-        twice the 0.65 mm dip, which is the true geometry of that point. ``test_edu1_claw_tip_rise_…``
+        ``LF_joint`` and the ``<mimic>``) and the claw housing (``link5.STL`` +
+        ``end_effector.STL``), over the claw's whole window 0–1.5708 rad: each
+        0.05 rad band holds the MINIMUM true rise of the claw's lowest part
+        anywhere inside it, at BOTH claw gear ratios (1 and the URDF's 18/19),
+        rounded DOWN to 0.01 mm. Up to ≈1.51 rad that part is a blade tip; past
+        it the housing (66.1 mm above the closed tip), so the last band is a
+        plateau and a value past the window is never credited more than the
+        housing allows. The curve is not a simple function of the opening: the
+        blade pivots sit 9.25 mm either side of the tool axis, so opening the
+        claw first moves the tips DOWN (up to 0.46 mm) before they climb past the
+        closed height. A negative value therefore makes a check that adds the
+        rise straight up STRICTER, never looser; set back along a tilted or
+        upturned tool axis (``motion.tool_tip_rise_world_z_m``) it is penalised
+        less, by at most twice that dip, which is the true geometry of that
+        point. ``test_manual_relock_home_glide``'s V1 claw tip-rise test
         recomputes the true curve from the meshes and fails if any band
-        over-credits. Rig gate E8 owns the physical curve."""
+        over-credits. Rig gates VR8/VR16 own the physical curve."""
         try:
             g = float(gripper_rad)
         except (TypeError, ValueError):
@@ -730,8 +667,7 @@ class Edu1IKSolver:
         :meth:`solve` so the wrist comes back where ``joints`` has it.
 
         ``solve`` maps ``q5 = fold(wrap(−roll))``, so the roll argument and the
-        joint value are DIFFERENT NUMBERS on this arm — as on the edu6, and
-        unlike the OMX where ``theta5 = roll`` is the identity. A "move the
+        joint value are DIFFERENT NUMBERS on this arm — unlike the OMX where ``theta5 = roll`` is the identity. A "move the
         tool, KEEP the current wrist" caller that passed ``joints[4]`` straight
         into ``roll=`` would get ``−q5`` back and MIRROR the wrist on every
         Cartesian jog step. Every such call site goes through this method

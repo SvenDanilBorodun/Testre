@@ -360,29 +360,15 @@ def plan_home_route(ctx, q_start, q_home_full, duration_s: float, log=None) -> l
     # to hand-guide the arm, which cannot fix a keep-out box. And because
     # ``plan_home_route`` hands ``safe_move`` PRE-CERTIFIED legs, path_guard's
     # lift-and-travel / base-swing ladder was unreachable from home on every
-    # profile with box geometry. Measured 2026-09-07 over 25 path-only blocking
-    # zones per arm (zone on the line, neither endpoint statically inside):
-    #
-    #   profile        plan_safe_route routed   home REFUSED   routed BUT home refused
-    #   omx_full             10 / 25                 0                  0
-    #   edu6_studio          14 / 25                20                 11
-    #   edu1_studio          19 / 25                14                  9
-    #
-    # — 11 and 9 cases per arm where a safe route provably existed and the
-    # student was told to lift the arm instead. omx_full is unaffected either
-    # way (``resolve_geometry`` → None short-circuits above), which is why this
-    # never showed on the OMX.
-    #
-    # THE ABSOLUTE COUNTS ABOVE ARE NOT REPRODUCIBLE and should not be quoted as
-    # if they were: an independent sweep on 2026-09-08 following the stated
-    # protocol got 24/25 · 25/25 · 25/25 routed and 0/15/6 routed-but-refused.
-    # The gap is entirely the zone-SAMPLING DISTRIBUTION (position, size,
-    # height), which this comment never recorded. What both sweeps agree on —
-    # and what the change rests on — is the DIRECTION and the SHAPE: a
-    # substantial per-arm population of zone-blocked homes that path_guard can
-    # route and the old code refused, zero on omx_full, none in the other
-    # direction. Re-derive the counts with your own distribution, stated, or
-    # cite only the shape.
+    # profile with box geometry. Measured 2026-09-07 over path-only blocking
+    # zones (zone on the line, neither endpoint statically inside): a
+    # substantial per-arm population of zone-blocked homes that path_guard could
+    # route and the old code refused, on every box-geometry arm; zero on
+    # omx_full, which is unaffected either way (``resolve_geometry`` → None
+    # short-circuits above), and none in the other direction. The absolute
+    # counts depend on the zone-SAMPLING DISTRIBUTION (position, size, height);
+    # re-derive them with your own distribution, stated, or cite only the
+    # shape.
     #
     # The floor guard is NOT weakened: every leg path_guard returns is re-checked
     # against the SAME floor allowance, and a route that fails it falls through
@@ -544,7 +530,7 @@ def _table_surface_fn(ctx):
     plane-aware refusal helper — never the ``GRASP_Z_FROM_PLANE`` knob) minus
     the solver's ``tool_tip_below_ee_m``: on the OMX the touch-off's
     ``z_table`` is the END-EFFECTOR frame's height with the fingertips on the
-    table (0.04 m above the surface), on the Feetech arms the EE frame IS the
+    table (0.04 m above the surface), on the Feetech arm the EE frame IS the
     fingertip (0). With no table measurement, the base plane z = 0. So a kit
     whose arm stands on a riser is judged by its own measurement, and on a
     Feetech arm this is exactly :func:`_floor_fn`."""
@@ -573,8 +559,8 @@ def pose_floor_clearance(ctx, q_full) -> Optional[float]:
     (``fk`` plus ``tool_tip_below_ee_m`` along the tool's world approach axis,
     checked here, else ``None``); it is replaced by the tip at the claw opening
     in ``q_full[n]``, set back along that axis by ``motion.tool_tip_rise_m``
-    (0 on the OMX; on the Edu:1 an open claw's tips ride up, slightly down near
-    0.14 rad). Never the box model: it reads a tilted Edu:1 claw tens of
+    (0 on the OMX; on the V1 an open claw's tips ride up, slightly down near
+    0.1 rad). Never the box model: it reads a tilted V1 claw tens of
     millimetres below where its meshes are. Not judged: the link and housing
     surfaces around the centreline (the OMX gripper housing included) and the
     claw's outer blade edges. Used by ``motion._move_to_position`` to refuse a
@@ -616,7 +602,7 @@ def plan_floor_checked_home_route(ctx, q_start, q_home_full, duration_s: float,
     """Legs to HOME for the manual glide and the `home` block, or raise
     ``WorkflowError`` (German).
 
-    Box-table arms (edu6, edu1), a disabled floor rung, or a solver without
+    Box-table arms (V1), a disabled floor rung, or a solver without
     ``link_points`` → exactly :func:`plan_home_route`. Otherwise (the OMX) the
     point-model ladder described above."""
     from physical_ai_server.workflow import arm_geometry as _ag

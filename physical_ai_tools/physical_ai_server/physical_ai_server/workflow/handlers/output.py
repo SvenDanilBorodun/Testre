@@ -332,7 +332,7 @@ def play_tone(ctx, args: dict[str, Any]) -> None:
     except (TypeError, ValueError):
         seconds = 0.25
     # NaN falls through BOTH ends of a min/max clamp and lands on the UPPER
-    # limit — the same limit-seeking pattern CLAUDE.md flags in the edu6 driver.
+    # limit — the same limit-seeking pattern CLAUDE.md flags in the Feetech driver.
     # Measured 2026-09-07: freq=nan and freq=inf both emitted
     # [TONE:4000.0:5.000], i.e. the loudest tone this block can make, for the
     # longest it can make it. toast's int(round(nan)) raises and correctly falls

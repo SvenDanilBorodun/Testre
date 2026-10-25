@@ -323,11 +323,11 @@ TABLE_TOUCH_VS_CAMERA_MAX_M = 0.12
 #
 # WHICH axis that is comes from the SOLVER (``ik.approach_axis_local``), not
 # from a fixed column. This used to hardcode ``R[:, 0]``, which is the OMX
-# answer and 90° wrong on both Feetech arms (their FK frames point the tool
-# along −z and +z respectively) — so on those arms EVERY correct vertical tap
-# was rejected with „Greifer steht schräg (90°)" and the touch-off could not be
-# completed at all. Measured 2026-09-05 on all three solvers; with the axis
-# asked for rather than assumed, all three read 0.0° at a vertical pose.
+# answer and 90° wrong on a Feetech arm (the V1's FK frame points the tool
+# along +z) — so on such an arm EVERY correct vertical tap would be rejected
+# with „Greifer steht schräg (90°)" and the touch-off could not be completed at
+# all. With the axis asked for rather than assumed, every solver reads 0.0° at a
+# vertical pose.
 TABLE_TOUCH_MAX_TILT_DEG = 12.0
 
 
@@ -1269,7 +1269,7 @@ class CalibrationManager:
         """The tool direction in the frame ``get_gripper_pose`` reports, asked
         of the solver. Falls back to the OMX ``+x`` whenever the provider is
         absent or answers with anything unusable — the SAFE direction, because
-        it is what this gate did for its whole life before the Feetech arms."""
+        it is what this gate did for its whole life before the Feetech arm."""
         provider = self._get_approach_axis
         if provider is None:
             return (1.0, 0.0, 0.0)
@@ -1293,8 +1293,7 @@ class CalibrationManager:
 
         ``axis_local`` is the tool direction in the frame the FK rotation ``R``
         is expressed in — the OMX's is local ``+x`` (hence the default, which
-        keeps every old caller identical), the edu6's is ``−z`` and the edu1's
-        is ``+z``. Straight-down is base ``(0, 0, -1)``. Returns ``None`` when
+        keeps every old caller identical), the V1's is ``+z``. Straight-down is base ``(0, 0, -1)``. Returns ``None`` when
         ``R`` is malformed / the axis is degenerate."""
         try:
             rot = np.asarray(R, dtype=np.float64).reshape(3, 3)

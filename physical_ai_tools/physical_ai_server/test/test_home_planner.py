@@ -1,9 +1,7 @@
 """The safe-Grundstellung planner (``workflow/home_planner.py``).
 
-Everything here drives the REAL ``Edu6IKSolver`` and the REAL registry profile.
-CLAUDE.md's standing warning applies: much n=6 coverage in this repo is
-``_FakeIK6`` stub-based, and that is exactly where edu6-only bugs have hidden
-twice. A width stub proves nothing about geometry, so none is used.
+Everything here drives the REAL ``V1IKSolver`` and the REAL registry profile.
+A width stub proves nothing about geometry, so none is used.
 """
 
 from __future__ import annotations
@@ -15,33 +13,34 @@ import pytest
 
 from physical_ai_server import robot_profiles as RP
 from physical_ai_server.workflow import home_planner as HP
-from physical_ai_server.workflow.edu6_ik import Edu6IKSolver
+from physical_ai_server.workflow.v1_ik import V1IKSolver
 from physical_ai_server.workflow.handlers import motion as M
 from physical_ai_server.workflow.ik_solver import IKSolver
 
-_EDU6 = RP.ROBOT_PROFILES['edu6_studio']
+_V1 = RP.ROBOT_PROFILES['v1_studio']
 _OMX = RP.ROBOT_PROFILES['omx_full']
-_HOME = list(_EDU6.home_joints_rad)
-_HOME_FULL = _HOME + [_EDU6.gripper_open_rad]
+_HOME = list(_V1.home_joints_rad)
+_HOME_FULL = _HOME + [_V1.gripper_open_rad]
 
-# Real witnesses from the 2026-07-27 mesh sweep (600 attainable starts, every
-# planned route then verified on the STLs: 588 direct / 4 rescued / 8 refused,
-# worst mesh z +0.98 mm, i.e. zero presses).
+# Real witnesses from a seeded box-model sweep (2026-10-25, seed 727: 1500
+# random in-limit starts whose own floor clearance is ≥ −80 mm — a limp arm
+# cannot stand deeper in the table): 1308 direct / 158 rescued / 34 refused.
 #
-# RESCUED: the direct glide from here presses the table; the planner finds a via.
-_RESCUED_START = [0.075, 1.336, -0.882, -2.109, -1.355, -2.621]
-_RESCUED_FULL = _RESCUED_START + [_EDU6.gripper_open_rad]
-# REFUSED: the deepest press in the whole sweep (a finger 167.9 mm below the
-# table on the direct line) and no via in the lattice rescues it.
-_PRESSING_START = [-0.131, 2.997, -0.020, 1.964, -0.391, 1.898]
-_PRESSING_FULL = _PRESSING_START + [_EDU6.gripper_open_rad]
+# RESCUED: the arm stands 30.7 mm below the table; the direct glide never gets
+# deeper but stays below the allowance, so the planner lifts it over a via.
+_RESCUED_START = [-0.599, 0.269, 0.313, -1.161, 0.957]
+_RESCUED_FULL = _RESCUED_START + [_V1.gripper_open_rad]
+# REFUSED: the arm stands 6.5 mm ABOVE the table, the direct line drives a link
+# 234 mm below it, and no via in the lattice rescues it.
+_PRESSING_START = [0.009, 2.885, 0.047, -1.289, -1.384]
+_PRESSING_FULL = _PRESSING_START + [_V1.gripper_open_rad]
 
 
 class _Ctx:
     """What plan_home_route actually reads: ik, zones, z_table/table_plane, log."""
 
     def __init__(self, ik=None, zones=None, z_table=0.0, table_plane=None):
-        self.ik = Edu6IKSolver() if ik is None else ik
+        self.ik = V1IKSolver() if ik is None else ik
         self.zones = zones or []
         self.z_table = z_table
         self.table_plane = table_plane
@@ -49,7 +48,7 @@ class _Ctx:
         self.log = self.logs.append
 
 
-def _edu6(**kw):
+def _v1(**kw):
     return _Ctx(**kw)
 
 
@@ -60,13 +59,13 @@ def _omx(**kw):
 # ── L0: the 98 % case must stay exactly what it was ──────────────────────────
 
 def test_a_clean_route_is_one_direct_leg_with_untouched_endpoints():
-    """The measured shape of the fix: direct answers 588/600. If the planner
+    """The measured shape of the fix: direct answers 1308/1500. If the planner
     started rerouting the common case it would change the motion students see on
     every single home block."""
-    ctx = _edu6()
-    start = list(Edu6IKSolver().solve(
-        (Edu6IKSolver().base_axis_x + 0.14, 0.0, 0.0),
-        roll=M.GRASP_ROLL_RAD)) + [_EDU6.gripper_open_rad]
+    ctx = _v1()
+    start = list(V1IKSolver().solve(
+        (V1IKSolver().base_axis_x + 0.14, 0.0, 0.0),
+        roll=M.GRASP_ROLL_RAD)) + [_V1.gripper_open_rad]
     legs = HP.plan_home_route(ctx, start, _HOME_FULL, 3.0)
     assert len(legs) == 1
     assert legs[0][0] == start
@@ -75,7 +74,7 @@ def test_a_clean_route_is_one_direct_leg_with_untouched_endpoints():
 
 
 def test_home_to_home_is_direct():
-    legs = HP.plan_home_route(_edu6(), _HOME_FULL, _HOME_FULL, 3.0)
+    legs = HP.plan_home_route(_v1(), _HOME_FULL, _HOME_FULL, 3.0)
     assert len(legs) == 1
 
 
@@ -87,7 +86,7 @@ def test_a_pressing_start_is_rerouted_and_every_leg_clears_the_floor():
     allowance. Fails if the box table, the swept check, or the via search
     regresses."""
     from physical_ai_server.workflow import arm_geometry as AG
-    ctx = _edu6()
+    ctx = _v1()
     geom = AG.resolve_geometry(ctx)
     floor = HP._floor_fn(ctx)
     # the premise: direct really is unsafe here
@@ -116,7 +115,7 @@ def test_a_pressing_start_is_rerouted_and_every_leg_clears_the_floor():
 
 
 def test_a_rerouted_home_starts_and_ends_exactly_where_it_must():
-    legs = HP.plan_home_route(_edu6(), _RESCUED_FULL, _HOME_FULL, 3.0)
+    legs = HP.plan_home_route(_v1(), _RESCUED_FULL, _HOME_FULL, 3.0)
     assert legs[0][0] == _RESCUED_FULL
     assert legs[-1][1] == _HOME_FULL
 
@@ -125,7 +124,7 @@ def test_a_rerouted_home_carries_the_gripper_through_every_via():
     """A held object must survive the detour. The via inherits q_start's gripper,
     so the gripper actuates at most once — on the final leg, exactly like the
     direct path."""
-    ctx = _edu6()
+    ctx = _v1()
     closed = 0.2
     legs = HP.plan_home_route(ctx, list(_RESCUED_START) + [closed],
                               _HOME + [closed], 3.0)
@@ -135,14 +134,16 @@ def test_a_rerouted_home_carries_the_gripper_through_every_via():
         assert q_to[n] == pytest.approx(closed)
 
 
-def test_a_via_keeps_the_students_base_yaw_and_both_rolls():
-    """The lattice varies only the three joints that move the arm in its own
-    plane. Widening it is a real option, but it must be a deliberate, measured
-    change — not something that drifts in."""
-    ctx = _edu6()
+def test_a_via_keeps_every_joint_outside_the_lattice():
+    """The lattice varies exactly three joint INDICES — 1, 2 and 4
+    (``home_planner._via_candidates``) — and keeps the rest. On the V1 that
+    keeps joint1 (base yaw) and joint4 (wrist pitch) and varies the roll
+    joint5. Widening or moving it is a real option, but it must be a
+    deliberate, measured change — not something that drifts in."""
+    ctx = _v1()
     legs = HP.plan_home_route(ctx, _RESCUED_FULL, _HOME_FULL, 3.0)
     via = legs[0][1]
-    for idx in (0, 3, 5):
+    for idx in (0, 3):
         assert via[idx] == pytest.approx(_RESCUED_FULL[idx])
 
 
@@ -156,12 +157,12 @@ def test_the_first_leg_admissibility_is_monotone_not_absolute():
     population; measured, the rung then fires ZERO times.
     """
     from physical_ai_server.workflow import arm_geometry as AG
-    ctx = _edu6()
+    ctx = _v1()
     geom = AG.resolve_geometry(ctx)
     floor = HP._floor_fn(ctx)
     # a start BELOW the allowance: an absolute gate would have nothing to work with
-    start = list(_PRESSING_START)
-    assert geom.floor_clearance(start, floor) < -HP.FLOOR_TOL_M + 0.030
+    start = list(_RESCUED_START)
+    assert geom.floor_clearance(start, floor) < -HP.FLOOR_TOL_M
     # the monotone rule admits standing still; an absolute rule would not
     assert HP._leg_ok(
         geom, ctx, start, start, floor,
@@ -172,10 +173,10 @@ def test_the_first_leg_admissibility_is_monotone_not_absolute():
 # ── L3: the refusal names the remedy that works ──────────────────────────────
 
 def test_an_unrescuable_start_refuses_rather_than_pressing_the_table():
-    """The deepest press in the whole sweep (167.9 mm) and no via rescues it.
-    The planner must REFUSE, not fall back to the direct line. Fails if someone
-    "helpfully" makes the last rung publish something anyway."""
-    ctx = _edu6()
+    """A 234 mm press on the direct line and no via rescues it. The planner
+    must REFUSE, not fall back to the direct line. Fails if someone "helpfully"
+    makes the last rung publish something anyway."""
+    ctx = _v1()
     with pytest.raises(M.WorkflowError) as excinfo:
         HP.plan_home_route(ctx, _PRESSING_FULL, _HOME_FULL, 3.0)
     assert 'Tischebene' in str(excinfo.value)
@@ -202,7 +203,7 @@ def test_geometry_that_cannot_be_judged_is_never_treated_as_safe():
         def swept_floor_clearance(self, *_a, **_k):
             return None
 
-    ctx = _edu6()
+    ctx = _v1()
     blind = _Blind(ctx.ik)
     assert not HP._leg_ok(blind, ctx, _HOME, _HOME, HP._floor_fn(ctx), -0.02)
 
@@ -220,7 +221,7 @@ def test_omx_gets_exactly_one_untouched_direct_leg():
 
 
 def test_a_ctx_without_a_solver_gets_the_direct_leg():
-    ctx = _edu6(ik=None)
+    ctx = _v1(ik=None)
     ctx.ik = None
     legs = HP.plan_home_route(ctx, _PRESSING_FULL, _HOME_FULL, 3.0)
     assert legs == [(_PRESSING_FULL, _HOME_FULL, 3.0)]
@@ -230,7 +231,7 @@ def test_the_floor_tolerance_zero_is_a_full_one_variable_rollback(monkeypatch):
     """``EDUBOTICS_HOME_FLOOR_TOL_M=0`` must restore today's behaviour exactly,
     even for the start that presses the table hardest."""
     monkeypatch.setattr(HP, 'FLOOR_TOL_M', 0.0)
-    legs = HP.plan_home_route(_edu6(), _PRESSING_FULL, _HOME_FULL, 3.0)
+    legs = HP.plan_home_route(_v1(), _PRESSING_FULL, _HOME_FULL, 3.0)
     assert legs == [(_PRESSING_FULL, _HOME_FULL, 3.0)]
 
 
@@ -267,7 +268,7 @@ def test_self_collision_never_blocks_a_route(monkeypatch):
     monkeypatch.setattr(AG.ArmGeometry, 'swept_self_clearance',
                         lambda *_a, **_k: 0.0)
     monkeypatch.setattr(HP, 'SELFCOLL_WARN_M', 0.010)   # ships DISABLED; opt in
-    ctx = _edu6()
+    ctx = _v1()
     legs = HP.plan_home_route(ctx, _HOME_FULL, _HOME_FULL, 3.0)
     assert len(legs) == 1
     assert any('sehr nahe' in m for m in ctx.logs)
@@ -275,23 +276,22 @@ def test_self_collision_never_blocks_a_route(monkeypatch):
 
 def test_the_self_collision_warning_ships_DISABLED(monkeypatch):
     """The default is 0.0 — see the derivation on SELFCOLL_WARN_M. The bound is
-    a separating-axis LOWER bound whose pessimism (19.1 mm at HOME) exceeds its
-    own maximum on this motion (12.30 mm), so every positive threshold fires on
-    model error: 40.5 % of home glides at the previously shipped 10 mm, against
-    0/200 real mesh self-collisions. Pin the default so it cannot drift back on
-    without the derivation being revisited."""
+    a separating-axis LOWER bound whose pessimism can exceed the real clearance,
+    so a positive threshold fires on model error rather than on a real mesh
+    self-collision. Pin the default so it cannot drift back on without the
+    derivation being revisited."""
     assert HP.SELFCOLL_WARN_M == 0.0
     from physical_ai_server.workflow import arm_geometry as AG
     monkeypatch.setattr(AG.ArmGeometry, 'swept_self_clearance',
                         lambda *_a, **_k: 0.0)
-    ctx = _edu6()
+    ctx = _v1()
     HP.plan_home_route(ctx, _HOME_FULL, _HOME_FULL, 3.0)
     assert not any('sehr nahe' in m for m in ctx.logs), (
         'a zero bound must be SILENT at the shipped default')
 
 
 def test_the_self_collision_warning_is_silent_when_the_route_is_clear():
-    ctx = _edu6()
+    ctx = _v1()
     HP.plan_home_route(ctx, _HOME_FULL, _HOME_FULL, 3.0)
     assert not any('sehr nahe' in m for m in ctx.logs)
 
@@ -301,7 +301,7 @@ def test_the_self_collision_warning_can_be_switched_off(monkeypatch):
     monkeypatch.setattr(AG.ArmGeometry, 'swept_self_clearance',
                         lambda *_a, **_k: 0.0)
     monkeypatch.setattr(HP, 'SELFCOLL_WARN_M', 0.0)
-    ctx = _edu6()
+    ctx = _v1()
     HP.plan_home_route(ctx, _HOME_FULL, _HOME_FULL, 3.0)
     assert not any('sehr nahe' in m for m in ctx.logs)
 
@@ -312,12 +312,12 @@ def test_a_zone_across_the_direct_path_is_not_returned_as_direct():
     """The planner must respect Sperrzonen as well as the table — it replaces
     the zone-aware ``safe_move`` call, so losing zones here would be a
     regression in the OTHER guard."""
-    ik = Edu6IKSolver()
+    ik = V1IKSolver()
     start = list(ik.solve((ik.base_axis_x + 0.16, 0.0, 0.0),
-                          roll=M.GRASP_ROLL_RAD)) + [_EDU6.gripper_open_rad]
+                          roll=M.GRASP_ROLL_RAD)) + [_V1.gripper_open_rad]
     wall = [{'min': [ik.base_axis_x + 0.04, -0.08, 0.0],
              'max': [ik.base_axis_x + 0.10, 0.08, 0.25]}]
-    ctx = _edu6(zones=wall)
+    ctx = _v1(zones=wall)
     from physical_ai_server.workflow import path_guard as PG
     assert PG.segment_blocked(ctx.ik, start, _HOME_FULL, wall)
     try:
@@ -334,8 +334,8 @@ def test_a_zone_across_the_direct_path_is_not_returned_as_direct():
 def test_a_tilted_table_plane_raises_the_floor_under_the_arm():
     """``_floor_fn`` must go through ``motion._floor_z_at`` so a touch-off's
     tilted plane is evaluated at each point's own (x, y)."""
-    flat = HP._floor_fn(_edu6(z_table=0.0))
-    tilted = HP._floor_fn(_edu6(table_plane=(0.2, 0.0, 0.01)))
+    flat = HP._floor_fn(_v1(z_table=0.0))
+    tilted = HP._floor_fn(_v1(table_plane=(0.2, 0.0, 0.01)))
     assert flat(0.15, 0.0) == pytest.approx(0.0)
     assert tilted(0.15, 0.0) == pytest.approx(0.2 * 0.15 + 0.01)
 
@@ -343,5 +343,5 @@ def test_a_tilted_table_plane_raises_the_floor_under_the_arm():
 def test_an_uncalibrated_rig_still_gets_a_floor_at_zero():
     """z = 0 is not a guess on this arm — it is where base_link is bolted. So the
     guard works before „Tisch vermessen", unlike the Cartesian floor."""
-    ctx = _edu6(z_table=None)
+    ctx = _v1(z_table=None)
     assert HP._floor_fn(ctx)(0.1, 0.1) == 0.0

@@ -4,7 +4,7 @@ F4 — the split grasp path misdiagnosed every out-of-reach cube as „you never
      finde", and told a TOO-NEAR object to move nearer.
 F5 — the 3rd virtual cube was silently dropped (only ``_logger`` heard about it)
      and the student was then told the cube was not „sichtbar".
-F8 — ``_set_follower_torque`` threw away ``res.message``, so the edu6 driver's
+F8 — ``_set_follower_torque`` threw away ``res.message``, so the Feetech driver's
      specific German refusal never reached the Roboter-Studio toast.
 
 F1/F2/F3/F6/F7 live in ``test_dof_n6.py`` (slice 2g) next to the real-solver
@@ -29,11 +29,11 @@ from physical_ai_server.workflow.handlers.motion import GraspSkip, WorkflowError
 from physical_ai_server.workflow.object_catalog import fixed_catalog
 from physical_ai_server.workflow.sim_perception import SimPerception
 
-_EDU6 = 'edu6_studio'
+_V1 = 'v1_studio'
 _GENERIC = motion._NO_GREIFZIEL_MSG
 
 
-def _sim_ctx(objects, profile_id=_EDU6):
+def _sim_ctx(objects, profile_id=_V1):
     """A ctx wired to synthetic perception + the real solver, with calibration
     ABSENT exactly like a sim run (so ``_attach_named_world`` preserves the
     pre-set world coordinates)."""
@@ -160,7 +160,7 @@ def test_out_of_reach_direction_is_correct(placement, expect, forbid):
     """The old single message said „bitte näher … legen" for ALL of them — the
     exact opposite of the fix for a cube that is too NEAR, and irrelevant for one
     behind the arm (joint 1 cannot aim there at any radius)."""
-    p = robot_profiles.resolve(_EDU6)
+    p = robot_profiles.resolve(_V1)
     axis = p.build_ik().base_axis_x
     xy = {'far': (axis + 0.40, 0.0),
           'near': (axis + 0.004, 0.0),
@@ -175,7 +175,7 @@ def test_out_of_reach_direction_is_correct(placement, expect, forbid):
 def test_composite_grasp_gets_the_same_direction_correct_reason():
     """``grasp_object`` named the right CLASS of failure but still the wrong
     DIRECTION; both paths now share ``_out_of_reach_reason``."""
-    p = robot_profiles.resolve(_EDU6)
+    p = robot_profiles.resolve(_V1)
     axis = p.build_ik().base_axis_x
     ctx = _sim_ctx([{'type': 'wuerfel', 'x': axis + 0.004, 'y': 0.0, 'yaw': 0.0}])
     with pytest.raises(GraspSkip) as excinfo:
@@ -200,7 +200,7 @@ def test_reach_classifier_is_failsafe_and_never_breaks_a_run():
     assert neutral in pb._out_of_reach_reason(
         types.SimpleNamespace(ik=_Boom()), 'Würfel', (0.4, 0.0, 0.0))
     # Degenerate: exactly on the joint-1 axis, so there is no bearing to probe.
-    p = robot_profiles.resolve(_EDU6)
+    p = robot_profiles.resolve(_V1)
     ctx = types.SimpleNamespace(ik=p.build_ik())
     assert neutral in pb._out_of_reach_reason(
         ctx, 'Würfel', (ctx.ik.base_axis_x, 0.0, 0.0))
@@ -268,7 +268,7 @@ def test_third_cube_overflow_reaches_the_student_not_only_the_container_log():
     reach band simply never became a detection, and the student was then told
     „Kein „Würfel" SICHTBAR — bitte das Objekt in den markierten Greifbereich
     legen"."""
-    cat = fixed_catalog(_EDU6)
+    cat = fixed_catalog(_V1)
     node = _CapacityNode(cat)
     _warn_capacity(node, [_cube(0.12), _cube(0.14, 0.04), _cube(0.13, -0.05)])
     assert len(node.emitted) == 1, node.emitted
@@ -282,7 +282,7 @@ def test_third_cube_overflow_reaches_the_student_not_only_the_container_log():
 
 
 def test_no_capacity_warning_when_the_placement_fits():
-    cat = fixed_catalog(_EDU6)
+    cat = fixed_catalog(_V1)
     for objs in ([], [_cube()], [_cube(0.12), _cube(0.15)]):
         node = _CapacityNode(cat)
         _warn_capacity(node, objs)
@@ -292,7 +292,7 @@ def test_no_capacity_warning_when_the_placement_fits():
 def test_capacity_warning_matches_what_sim_perception_actually_drops():
     """The warning's capacity number must be the REAL one, not a guess: exactly
     ``len(recipe.tag_ids)`` detections come out no matter how many are placed."""
-    cat = fixed_catalog(_EDU6)
+    cat = fixed_catalog(_V1)
     placed = [_cube(0.12), _cube(0.14, 0.04), _cube(0.13, -0.05), _cube(0.15, 0.07)]
     got = SimPerception(placed, cat).detect(None, 'scene', 'apriltag')
     capacity = len(cat.recipe_for_type('wuerfel').tag_ids)
@@ -305,7 +305,7 @@ def test_capacity_warning_matches_what_sim_perception_actually_drops():
 
 def test_sim_perception_ignores_the_callers_tag_id():
     """Documented in the warning's rationale — verify it rather than trust it."""
-    cat = fixed_catalog(_EDU6)
+    cat = fixed_catalog(_V1)
     ids = [cat.recipe_for_type('wuerfel').tag_ids[i] for i in (0, 1)]
     forward = SimPerception([_cube(0.12, tag_id=ids[0]),
                              _cube(0.14, 0.04, tag_id=ids[1])],
@@ -335,7 +335,7 @@ def test_capacity_warning_never_blocks_a_run():
     assert node.emitted == []
 
     # Malformed entries (a crafted /workflow/start payload) must not raise.
-    node = _CapacityNode(fixed_catalog(_EDU6))
+    node = _CapacityNode(fixed_catalog(_V1))
     _warn_capacity(node, ['not a dict', {'no_type': 1}, None])
     assert node.emitted == []
 

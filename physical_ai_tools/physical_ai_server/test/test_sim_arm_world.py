@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SimArm × SimWorld — the virtual gripper HOLDS an object, it does not hover near one.
 
-Driven through the REAL IKSolver / Edu6IKSolver and the REAL ArmProfile registry, because
+Driven through the REAL IKSolver / V1IKSolver and the REAL ArmProfile registry, because
 the thing under test IS a geometric convention (where the end-effector is when the jaws
 close) and a stub cannot assert a convention.
 
@@ -210,8 +210,8 @@ def test_set_objects_reseeds_the_arm_to_home_and_clears_the_hold():
     assert (o['x'], o['y']) == pytest.approx((0.20, 0.0)), 'scene must reset too'
 
 
-def test_set_objects_reseeds_to_the_PROFILE_home_on_edu6():
-    prof = robot_profiles.resolve('edu6_studio')
+def test_set_objects_reseeds_to_the_PROFILE_home_on_v1():
+    prof = robot_profiles.resolve('v1_studio')
     home = [float(v) for v in prof.home_joints_rad] + [float(prof.gripper_open_rad)]
     world = _resolved_world([_cube(0.13, 0.0)])
     arm = SimArm(
@@ -226,12 +226,12 @@ def test_set_objects_reseeds_to_the_PROFILE_home_on_edu6():
     assert arm.get_joints() == pytest.approx(home)
 
 
-# ── edu6: the radian-band gripper closes DOWNWARD ────────────────────────────
+# ── V1: the radian-band claw closes DOWNWARD ─────────────────────────────────
 
-def test_edu6_capture_and_release_use_the_profile_close_threshold():
-    """edu6's gripper band is 0…1.75 and closes downward, so the crossing test has to
-    read the profile threshold (1.5), not the OMX sign convention."""
-    prof = robot_profiles.resolve('edu6_studio')
+def test_v1_capture_and_release_use_the_profile_close_threshold():
+    """The V1's claw band is 0…0.90 and closes downward, so the crossing test has to
+    read the profile threshold (0.5), not the OMX sign convention."""
+    prof = robot_profiles.resolve('v1_studio')
     ik = prof.build_ik()
     home = [float(v) for v in prof.home_joints_rad] + [float(prof.gripper_open_rad)]
     world = _resolved_world([_cube(0.13, 0.0)])
@@ -243,8 +243,8 @@ def test_edu6_capture_and_release_use_the_profile_close_threshold():
     )
     grasp_q = ik.solve((0.13, 0.0, WUERFEL_GRASP_Z))
     assert grasp_q is not None
-    # Catalog close for edu6 is 1.0 rad, well under the 1.5 close threshold.
-    arm.publish([(list(grasp_q) + [1.0], 1.0)])
+    # Catalog close for the V1 is 0.05 rad, well under the 0.5 close threshold.
+    arm.publish([(list(grasp_q) + [0.05], 1.0)])
     assert world.is_held() is True
     arm.publish([(list(grasp_q) + [float(prof.gripper_open_rad)], 1.0)])
     assert world.is_held() is False

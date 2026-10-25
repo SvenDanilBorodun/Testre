@@ -242,48 +242,25 @@ _FIXED_CATALOG: dict = {
     },
 }
 
-# edu6_studio variant: the SAME physical objects + tag ids (one printed tag
-# sheet fleet-wide), only the gripper close differs — the edu6 gripper channel
-# is the end_gear servo angle in RADIANS (0 = closed … 1.75 = open command,
-# jaw ≈ 25.2 mm/rad). A 30 mm cube blocks the jaws at ≈ 1.19 rad; commanding
-# 1.0 leaves ≈ 0.19 rad of squeeze — comfortably above the profile's 0.12
-# grasp-held margin (bench-tunable at rig gates R3/R4).
-_FIXED_CATALOG_EDU6: dict = {
-    'types': {
-        'wuerfel': {
-            'label_de': 'Würfel',
-            'tag_ids': [20, 21],
-            'object_height_m': 0.030,
-            'grasp_depth_m': 0.015,
-            'gripper_close_rad': 1.0,
-            'approach_clear_m': 0.06,
-            'object_width_m': 0.030,
-            'color_hex': '#f59e0b',
-        },
-    },
-}
-
-
-# edu1_studio variant: again the SAME physical objects + tag ids, again only the
-# gripper close differs. The edu1 channel is the claw servo angle in RADIANS
-# (0 = jaws closed … 0.90 = open command) — the SAME polarity as the edu6 and
-# the OPPOSITE of the raw CAD export, which the shipped URDF copy flips (see
-# robot_profiles._EDU1_HOME_JOINTS_RAD).
+# v1_studio variant: the SAME physical objects + tag ids (one printed tag sheet
+# fleet-wide), only the gripper close differs. The V1 channel is the claw servo
+# angle in RADIANS (0 = jaws closed … 0.90 = open command; see
+# robot_profiles._V1_HOME_JOINTS_RAD).
 #
-# Where 0.10 comes from: simulated against the shipped claw STLs, a 30 mm cube
-# standing on the table blocks the blades at ≈0.25 rad with the end-effector
-# origin 0.090–0.115 m above the table. Commanding 0.10 leaves ≈0.15 rad of
-# squeeze — comfortably above the profile's 0.10 grasp-held margin, so a HELD
-# grasp reads 0.25 against a 0.20 threshold while a MISS closes to the commanded
-# 0.10 and reads below it (bench-tunable at rig gate E5).
-_FIXED_CATALOG_EDU1: dict = {
+# Where 0.05 comes from: simulated against the claw meshes, a 30 mm cube held at
+# the 15 mm grasp depth blocks the blades at 0.195 rad (gear ratio 1) / 0.206 rad
+# (the URDF's 18/19), 0.193–0.220 rad over a 10–20 mm depth. Commanding 0.05
+# leaves ≥ 0.14 rad of squeeze, so a HELD grasp reads ≥ 0.193 against the
+# 0.05 + 0.10 = 0.15 threshold while an empty close reaches ≈0.05 and reads
+# below it (bench-tunable at rig gate VR5).
+_FIXED_CATALOG_V1: dict = {
     'types': {
         'wuerfel': {
             'label_de': 'Würfel',
             'tag_ids': [20, 21],
             'object_height_m': 0.030,
             'grasp_depth_m': 0.015,
-            'gripper_close_rad': 0.10,
+            'gripper_close_rad': 0.05,
             'approach_clear_m': 0.06,
             'object_width_m': 0.030,
             'color_hex': '#f59e0b',
@@ -297,8 +274,7 @@ _FIXED_CATALOG_EDU1: dict = {
 # — both OMX profiles, ``None``, an unknown id — gets the OMX set on the
 # default (negative-close) rule, byte-identical to before.
 _CATALOG_BY_PROFILE: dict = {
-    'edu6_studio': (_FIXED_CATALOG_EDU6, (0.0, 1.75)),
-    'edu1_studio': (_FIXED_CATALOG_EDU1, (0.0, 0.90)),
+    'v1_studio': (_FIXED_CATALOG_V1, (0.0, 0.90)),
 }
 
 
@@ -309,8 +285,8 @@ def fixed_catalog(profile_id: Optional[str] = None) -> ObjectCatalog:
     from ``EDUBOTICS_TAG_SIZE_M`` on each call (env-tunable, re-read per
     workflow start).
 
-    ``profile_id`` selects through :data:`_CATALOG_BY_PROFILE`: the Feetech arms
-    have radian gripper bands that close UPWARD from zero, everything else —
+    ``profile_id`` selects through :data:`_CATALOG_BY_PROFILE`: the Feetech arm
+    has a radian gripper band that closes UPWARD from zero, everything else —
     both OMX profiles, ``None``, an unknown id — gets the OMX set with its
     negative-close rule, byte-identical to before."""
     entry = _CATALOG_BY_PROFILE.get((profile_id or '').strip())
@@ -431,8 +407,8 @@ def _parse_type(type_name: str, entry, seen_tags: dict[int, str],
     # Close-value validation is PER ARM FAMILY. Default (None) = the OMX rule,
     # verbatim: motion's held threshold + close_on_object's clamp band + the
     # SimArm close-command detection all hard-assume a NEGATIVE close there.
-    # An explicit ``gripper_close_range=(lo, hi)`` (edu6: the radian jaw band
-    # 0…1.75, closes DOWNWARD from open) replaces it with a band check.
+    # An explicit ``gripper_close_range=(lo, hi)`` (V1: the radian claw band
+    # 0…0.90, closes DOWNWARD from open) replaces it with a band check.
     if gripper_close_range is None:
         if gripper_close_rad >= 0.0:
             raise ObjectCatalogError(
@@ -583,8 +559,8 @@ def build_object_catalog_response(profile_id: Optional[str] = None) -> dict:
     ``self._arm_profile.profile_id``) routed through ``_CATALOG_BY_PROFILE``.
     That is LATENT as of 2026-09-07 and not a live wrong answer: the profile
     only changes ``gripper_close_rad``, which is not one of the six wire arrays,
-    so the payload is byte-identical for ``omx_full`` / ``edu6_studio`` /
-    ``edu1_studio`` today (verified by executing all three). It stops being
+    so the payload is byte-identical for ``omx_full`` and ``v1_studio`` today
+    (verified by executing both). It stops being
     latent the moment a per-profile catalog differs in a WIRE field — a
     different ``object_height_m``, ``object_width_m``, ``color_hex``,
     ``max_instances`` (== ``len(tag_ids)``) or type set — at which point the

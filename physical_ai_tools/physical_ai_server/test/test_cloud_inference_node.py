@@ -499,7 +499,7 @@ def test_start_refused_when_busy():
 
 
 def test_start_refuses_non_inferable_profile():
-    node = Node(cams=('scene',), profile='edu6_studio')
+    node = Node(cams=('scene',), profile='v1_studio')
     r = start(node)
     assert (r.success, r.message) == (False, cloud_texts_de.NOT_INFERABLE_DE)
     assert not node.on_inference and FakeCloudClient.instances == []

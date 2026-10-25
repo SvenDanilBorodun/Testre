@@ -6,7 +6,7 @@ and recovered correctly. The Fix-5 hoist moved ``resolve()`` into ``__init__``
 and had ``_init_robot_profile`` REUSE the stash; the degraded-boot fallback then
 overwrote that stash (``self._arm_profile``) with the omx_full default, so a
 bounded retry after a TRANSIENT boot failure resurrected the WRONG profile on an
-edu6 / omx_follower rig (the retry re-read the clobbered ``_arm_profile``). The
+V1 / omx_follower rig (the retry re-read the clobbered ``_arm_profile``). The
 fix keeps the env-resolution in a SEPARATE ``self._resolved_profile_stash`` the
 fallback never touches; the retry reads that.
 
@@ -25,10 +25,10 @@ from physical_ai_server import robot_profiles
 from test_boot_init import _FakeComm, _Node, _success
 
 
-@pytest.mark.parametrize('env_id', ['edu6_studio', 'omx_follower'])
+@pytest.mark.parametrize('env_id', ['v1_studio', 'omx_follower'])
 def test_reinit_retry_recovers_env_profile_not_default(monkeypatch, env_id):
     """A transient boot failure on a NON-default rig, then recovery: the retry
-    must heal to the env-resolved profile (edu6_studio / omx_follower), never
+    must heal to the env-resolved profile (v1_studio / omx_follower), never
     the omx_full default the fallback stamps for degraded reporting."""
     monkeypatch.setenv('EDUBOTICS_ROBOT_TYPE', env_id)
     resolved = robot_profiles.resolve(env_id)
@@ -73,8 +73,8 @@ def test_reinit_stash_survives_repeated_transient_failures(monkeypatch):
     """Even across MULTIPLE failed attempts the stash is never clobbered, so the
     eventual recovery still lands on the env profile (each failed retry re-runs
     the fallback that only touches _arm_profile)."""
-    monkeypatch.setenv('EDUBOTICS_ROBOT_TYPE', 'edu6_studio')
-    resolved = robot_profiles.resolve('edu6_studio')
+    monkeypatch.setenv('EDUBOTICS_ROBOT_TYPE', 'v1_studio')
+    resolved = robot_profiles.resolve('v1_studio')
 
     calls = {'n': 0}
 
@@ -91,9 +91,9 @@ def test_reinit_stash_survives_repeated_transient_failures(monkeypatch):
     node._init_robot_profile()                 # attempt 1 fails
     node._reinit_retry_cb()                     # attempt 2 fails
     assert node.communicator is None
-    assert node._resolved_profile_stash.profile_id == 'edu6_studio'
+    assert node._resolved_profile_stash.profile_id == 'v1_studio'
     node._reinit_retry_cb()                     # attempt 3 succeeds
 
     assert isinstance(node.communicator, _FakeComm)
-    assert node._arm_profile.profile_id == 'edu6_studio'
-    assert node.robot_type == 'edu6_studio'
+    assert node._arm_profile.profile_id == 'v1_studio'
+    assert node.robot_type == 'v1_studio'

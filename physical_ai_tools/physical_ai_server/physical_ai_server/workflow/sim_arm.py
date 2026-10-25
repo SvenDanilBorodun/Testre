@@ -307,8 +307,8 @@ class SimArm:
         # fixture) therefore behaves byte-identically.
         self._world = world
         # Per-profile grasp-classifier values; None → the OMX module constants
-        # (edu6's radian-band gripper 0..1.75 supplies its own: a command below
-        # ~1.5 is a close attempt, a held block reads commanded + 0.19).
+        # (the V1's radian-band claw 0..0.90 supplies its own: a command below
+        # 0.5 is a close attempt, a held block reads commanded + 0.15).
         self._close_threshold = (float(close_threshold_rad)
                                  if close_threshold_rad is not None
                                  else _GRIPPER_CLOSE_THRESHOLD_RAD)
@@ -319,7 +319,7 @@ class SimArm:
                             if held_floor_rad is not None
                             else _HELD_BLOCKED_GRIPPER_RAD)
         # Arm-joint count (gripper index == n). 5 = OMX; an ArmProfile-driven
-        # sim passes its own (edu6: 6) plus the matching HOME vector.
+        # sim passes its own plus the matching HOME vector.
         self._n = int(num_arm_joints) if int(num_arm_joints) > 0 else 5
         # Seeded to HOME so the very first get_joints() (the start-time seed in
         # WorkflowManager.start) returns a realistic pose, not [0]*6.
@@ -489,7 +489,7 @@ class SimArm:
     def _fingertips_reach(self, ee_z: float) -> Callable[[dict[str, Any]], bool]:
         """N3 / Q13: a close only grabs an object the FINGERTIPS are at or below
         the top of. The fingertips sit the solver's ``tool_tip_below_ee_m``
-        under the EE frame (0.04 m on the OMX, 0 on the Feetech arms); the
+        under the EE frame (0.04 m on the OMX, 0 on the Feetech arm); the
         object's top is at base z = its own ``height_m`` (the drawn table is
         z = 0), which ``SimPerception`` binds onto the world entry. No extra
         margin: the simulator holds or misses exactly where the rig would. An

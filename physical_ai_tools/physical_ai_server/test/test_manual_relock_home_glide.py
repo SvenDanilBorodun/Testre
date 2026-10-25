@@ -125,8 +125,7 @@ _RAIL = _load(['_follower_rail_is_ros2_control'], _G)['_follower_rail_is_ros2_co
 @pytest.mark.parametrize('profile_id, expected', [
     ('omx_full', True),
     ('omx_follower', True),
-    ('edu6_studio', False),
-    ('edu1_studio', False),
+    ('v1_studio', False),
 ])
 def test_only_the_dynamixel_rail_is_treated_as_ros2_control(profile_id, expected):
     from physical_ai_server import robot_profiles
@@ -190,7 +189,8 @@ def test_hold_is_skipped_without_a_communicator():
     assert node.published == []
 
 
-def test_hold_uses_the_profile_width_on_edu6():
+def test_hold_uses_the_profile_width():
+    # A synthetic 6-DOF width: the hold reads n from the profile, never 5.
     q = [0.0, 0.7, -2.4, 0.0, 0.7, 0.0, 1.75]
     node = _hold_node(q + [99.0], n=6)               # extra trailing value ignored
     assert _HOLD(node) is True
@@ -281,7 +281,7 @@ def test_omx_torque_on_holds_in_place_before_energising(
     assert node._follower_torque_on is True
 
 
-@pytest.mark.parametrize('profile_id', ['edu6_studio', 'edu1_studio'])
+@pytest.mark.parametrize('profile_id', ['v1_studio'])
 def test_feetech_torque_on_publishes_no_hold(fake_std_srvs, profile_id):
     events, sleeps = [], []
     node, set_torque = _torque_node(profile_id, False, events, sleeps)
@@ -368,9 +368,10 @@ def test_sampler_rounds_joints_to_1e4_rad_and_time_to_1_ms():
 
 
 def test_a_max_length_recording_fits_the_cloud_trajectory_cap():
-    """120 s × 25 Hz of CONTINUOUS motion on the WIDEST arm (edu6, 8-wide) must
-    serialise under validators/workflow.MAX_TRAJECTORY_JSON_BYTES (256 KiB). At
-    full precision it did not (measured 463 KiB); rounded it is 201 KiB."""
+    """120 s × 25 Hz of CONTINUOUS motion at an 8-wide row (a 6-DOF arm, wider
+    than every shipped profile's 7) must serialise under
+    validators/workflow.MAX_TRAJECTORY_JSON_BYTES (256 KiB). At full precision
+    it did not (measured 463 KiB); rounded it is 201 KiB."""
     cap = 256 * 1024
     n = 6
     fps = 25
@@ -491,11 +492,11 @@ def test_a_long_home_leg_is_stretched_to_the_gentle_peak_speed(fake_chunked_publ
 
 
 def test_a_two_leg_route_is_played_back_to_back(fake_chunked_publish):
-    q0 = [0.0, 1.2, -0.3, 0.0, 1.0, 0.0, 0.5]
-    via = [0.0, 0.5, -1.5, 0.0, 0.9, 0.0, 0.5]
-    home = [0.0, 0.70, -2.40, 0.0, 0.70, 0.0, 0.5]
-    node, glide = _glide_node([(q0, via, 1.5), (via, home, 3.0)], n=6,
-                              profile_id='edu6_studio')
+    q0 = [0.0, 1.2, 0.9, 0.3, 0.0, 0.5]
+    via = [0.0, 0.9, 1.2, 0.6, 0.0, 0.5]
+    home = [0.0, 0.64, 1.48, 0.90, 0.0, 0.5]
+    node, glide = _glide_node([(q0, via, 1.5), (via, home, 3.0)], n=5,
+                              profile_id='v1_studio')
     glide(node, q0, 7, _JogResp())
     pts = fake_chunked_publish['points']
     times = [p[1] for p in pts]
@@ -569,7 +570,7 @@ def test_the_jog_callback_routes_mode_home_to_the_glide_and_not_to_the_jog_solve
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. _plan_manual_home_legs — the REAL planner on all four arms
+# 6. _plan_manual_home_legs — the REAL planner on every arm
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _planner_node(profile_id, calib=None):
@@ -587,7 +588,7 @@ def _planner_node(profile_id, calib=None):
 
 
 @pytest.mark.parametrize('profile_id', ['omx_full', 'omx_follower',
-                                        'edu6_studio', 'edu1_studio'])
+                                        'v1_studio'])
 def test_every_arm_plans_to_its_own_home_and_carries_the_gripper(profile_id):
     node, plan = _planner_node(profile_id)
     profile = node._arm_profile
@@ -609,12 +610,12 @@ def test_every_arm_plans_to_its_own_home_and_carries_the_gripper(profile_id):
 
 def test_the_feetech_planner_refuses_or_lifts_rather_than_drive_through_the_table():
     """A start pose whose straight line to HOME presses a link into the table
-    must NOT come back as one direct leg on edu6: the home_planner ladder either
-    lifts over a via or refuses in German. (The OMX has no link-box table; its
-    TCP was measured never to dip on this line.)"""
+    must NOT come back as one direct leg on the V1: the home_planner ladder
+    either lifts over a via or refuses in German. (The OMX has no link-box
+    table; its TCP was measured never to dip on this line.)"""
     from physical_ai_server.workflow import arm_geometry
     from physical_ai_server.workflow.handlers.motion import WorkflowError
-    node, plan = _planner_node('edu6_studio')
+    node, plan = _planner_node('v1_studio')
     ik = node._ik
     geom = arm_geometry.resolve_geometry(ik)
     home = list(node._arm_profile.home_joints_rad)
@@ -631,7 +632,7 @@ def test_the_feetech_planner_refuses_or_lifts_rather_than_drive_through_the_tabl
             continue
         found = True
         try:
-            legs = plan(node, q + [1.0])
+            legs = plan(node, q + [0.5])
         except WorkflowError as e:
             assert 'Grundstellung' in str(e)
             break
@@ -974,10 +975,10 @@ def test_box_table_arms_and_the_rollback_use_the_block_planner_unchanged(monkeyp
     calls = []
     monkeypatch.setattr(hp, 'plan_home_route',
                         lambda ctx, a, b, d: calls.append('block') or [(a, b, d)])
-    edu6 = robot_profiles.ROBOT_PROFILES['edu6_studio']
-    ctx = types.SimpleNamespace(ik=edu6.build_ik(), z_table=None, table_plane=None,
-                                zones=None, log=lambda *a: None, num_arm_joints=6)
-    start = list(edu6.home_joints_rad) + [1.0]
+    v1 = robot_profiles.ROBOT_PROFILES['v1_studio']
+    ctx = types.SimpleNamespace(ik=v1.build_ik(), z_table=None, table_plane=None,
+                                zones=None, log=lambda *a: None, num_arm_joints=5)
+    start = list(v1.home_joints_rad) + [0.5]
     hp.plan_floor_checked_home_route(ctx, start, start, 3.0)
     assert calls == ['block']
     monkeypatch.setattr(hp, 'FLOOR_TOL_M', 0.0)          # EDUBOTICS_HOME_FLOOR_TOL_M=0
@@ -1047,27 +1048,36 @@ def test_a_real_program_start_asserts_torque_before_the_manager_starts():
     assert 'nicht verriegelt' in seg
 
 
-def _edu6_limits():
-    from physical_ai_server import robot_profiles
-    return robot_profiles.ROBOT_PROFILES['edu6_studio'].build_ik().joint_limits
+# No shipped arm has a full-circle joint, and both seam guards stay shipped:
+# a synthetic 5-DOF limit table whose joint4 spans the whole circle.
+_SEAM_LIMITS = ((-math.pi / 2, math.pi / 2), (0.0, math.pi), (0.0, math.pi),
+                (-math.pi, math.pi), (-math.pi / 2, math.pi / 2))
 
 
-def test_a_recording_across_the_joint6_seam_is_refused_in_german():
+class _SeamIK:
+    """A solver double that answers only the limits the seam guards read."""
+    joint_limits = _SEAM_LIMITS
+
+
+def test_a_recording_across_the_full_circle_seam_is_refused_in_german():
     from physical_ai_server.workflow.handlers import trajectory as tr
     from physical_ai_server.workflow.handlers.motion import WorkflowError
-    rows = [[0, 0.7, -2.4, 0, 0.7, 3.128, 1.0, 0.0],
-            [0, 0.7, -2.4, 0, 0.7, -3.116, 1.0, 0.04]]
+    rows = [[0, 0.7, 1.4, 3.128, 0.2, 0.5, 0.0],
+            [0, 0.7, 1.4, -3.116, 0.2, 0.5, 0.04]]
     with pytest.raises(WorkflowError) as e:
-        tr.refuse_wrapped_joint_jumps(rows, _edu6_limits(), num_arm_joints=6)
-    assert 'Gelenk 6' in str(e.value) and '180' in str(e.value)
+        tr.refuse_wrapped_joint_jumps(rows, _SEAM_LIMITS, num_arm_joints=5)
+    assert 'Gelenk 4' in str(e.value) and '180' in str(e.value)
 
 
 def test_normal_motion_and_non_full_circle_joints_are_not_refused():
     from physical_ai_server.workflow.handlers import trajectory as tr
-    rows = [[0, 0.7, -2.4, 0, 0.7, 3.0, 1.0, 0.0],
-            [0, 0.7, -2.4, 0, 0.7, 2.6, 1.0, 0.04]]
-    tr.refuse_wrapped_joint_jumps(rows, _edu6_limits(), num_arm_joints=6)
-    tr.refuse_wrapped_joint_jumps(rows, None, num_arm_joints=6)   # profile-less
+    rows = [[0, 0.7, 1.4, 3.0, 0.2, 0.5, 0.0],
+            [0, 0.7, 1.4, 2.6, 0.2, 0.5, 0.04]]
+    tr.refuse_wrapped_joint_jumps(rows, _SEAM_LIMITS, num_arm_joints=5)
+    tr.refuse_wrapped_joint_jumps(rows, None, num_arm_joints=5)   # profile-less
+    # A > π step on a joint whose window is NOT a full circle is not judged.
+    jump = [[0, 0.1, 1.4, 0.0, 0.2, 0.5, 0.0], [0, 3.1, 1.4, 0.0, 0.2, 0.5, 0.04]]
+    tr.refuse_wrapped_joint_jumps(jump, _SEAM_LIMITS, num_arm_joints=5)
     from physical_ai_server.workflow.ik_solver import IKSolver
     omx = [[0.0, -1.5, 1.5, 0, 0, 0.8, 0.0], [0.1, -1.4, 1.4, 0, 0, 0.8, 0.04]]
     tr.refuse_wrapped_joint_jumps(omx, IKSolver().joint_limits, num_arm_joints=5)
@@ -1076,15 +1086,13 @@ def test_normal_motion_and_non_full_circle_joints_are_not_refused():
 def test_the_blockly_replay_refuses_a_seam_crossing_before_moving(monkeypatch):
     from physical_ai_server.workflow.handlers import trajectory as tr
     from physical_ai_server.workflow.handlers.motion import WorkflowError
-    from physical_ai_server import robot_profiles
     chunks = []
-    ik = robot_profiles.ROBOT_PROFILES['edu6_studio'].build_ik()
     ctx = types.SimpleNamespace(
         trajectories={'B': {'fps': 25, 'points': [
-            [0, 0.7, -2.4, 0, 0.7, 3.128, 1.0, 0.0],
-            [0, 0.7, -2.4, 0, 0.7, -3.116, 1.0, 0.04]]}},
-        last_full_joints=[0, 0.7, -2.4, 0, 0.7, 3.1, 1.0],
-        last_arm_joints=[0, 0.7, -2.4, 0, 0.7, 3.1], num_arm_joints=6, ik=ik,
+            [0, 0.7, 1.4, 3.128, 0.2, 0.5, 0.0],
+            [0, 0.7, 1.4, -3.116, 0.2, 0.5, 0.04]]}},
+        last_full_joints=[0, 0.7, 1.4, 3.1, 0.2, 0.5],
+        last_arm_joints=[0, 0.7, 1.4, 3.1, 0.2], num_arm_joints=5, ik=_SeamIK(),
         z_table=None, table_plane=None, zones=None, motion_lock=threading.RLock(),
         should_stop=lambda: False, tempo=1.0,
         publisher=lambda c: chunks.append(c), log=lambda *a, **k: None)
@@ -1093,16 +1101,23 @@ def test_the_blockly_replay_refuses_a_seam_crossing_before_moving(monkeypatch):
     assert chunks == []
 
 
-def _edu1_true_claw_rise(g):
+# The claw's gear ratio: CAD 18/19 (the URDF's LF <mimic>), unmeasured until rig
+# gate VR16 — the table must hold at 1 as well, so the truth is the min of both.
+_V1_CLAW_RATIOS = (1.0, 18.0 / 19.0)
+
+
+def _v1_true_claw_rise(g):
     """The claw's LOWEST point above the closed-tip TCP, recomputed from the
-    SHIPPED finger meshes through RL_joint / LF_joint (URDF origins, flipped axes,
-    mimic) and the claw housing (link5 + end_effector, rigid in the end_effector
-    frame, which ``end_joint`` puts at link5's origin) — the ground truth
-    tool_tip_rise_m must never exceed. Past ≈1.38 rad the housing, not a blade,
+    SHIPPED finger meshes through RL_joint / LF_joint (URDF origins, both about
+    their own +z, the left blade at −ratio · g) and the claw housing (link5 +
+    end_effector, rigid in the end_effector frame, which ``end_joint`` puts at
+    link5's origin), MINIMISED over both claw gear ratios — the ground truth
+    tool_tip_rise_m must never exceed. Past ≈1.51 rad the housing, not a blade,
     is the lowest part."""
     import struct
+    from physical_ai_server.workflow import v1_ik as V
     meshes = (Path(__file__).resolve().parents[2] / 'physical_ai_manager' / 'public'
-              / 'edu1-urdf' / 'meshes')
+              / 'v1-urdf' / 'meshes')
 
     def _stl(name):
         raw = (meshes / name).read_bytes()
@@ -1119,77 +1134,86 @@ def _edu1_true_claw_rise(g):
 
     def _rotz(a):
         return np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
-    cache = getattr(_edu1_true_claw_rise, '_cache', None)
+    cache = getattr(_v1_true_claw_rise, '_cache', None)
     if cache is None:
         cache = {
-            'right': _stl('right_finger.STL'), 'left': _stl('left_finger.STL'),
+            'right': np.unique(_stl('right_finger.STL'), axis=0),
+            'left': np.unique(_stl('left_finger.STL'), axis=0),
             'R0': _rpy(-1.5708, 0, -1.5708),
             'housing': max(float(_stl(name)[:, 2].max())
                            for name in ('link5.STL', 'end_effector.STL'))}
-        _edu1_true_claw_rise._cache = cache
-    lowest = max(
-        ((cache['R0'] @ _rotz(g * sign) @ cache[key].T).T + np.array(origin))[:, 2].max()
-        for key, origin, sign in (('right', (0.0202, -0.00925, 0.02125), +1),
-                                  ('left', (0.0195, 0.00925, 0.02125), -1)))
-    return 0.08625 - max(lowest, cache['housing'])
+        _v1_true_claw_rise._cache = cache
+
+    def _rise(ratio):
+        lowest = max(
+            ((cache['R0'] @ _rotz(angle) @ cache[key].T).T + np.array(origin))[:, 2].max()
+            for key, origin, angle in (('right', (0.020197, -0.00925, 0.02125), g),
+                                       ('left', (0.02, 0.00925, 0.02125), -ratio * g)))
+        return V._L_TOOL - max(lowest, cache['housing'])
+    return min(_rise(ratio) for ratio in _V1_CLAW_RATIOS)
 
 
-def test_edu1_claw_tip_rise_never_over_credits_the_mesh_derived_truth():
+def test_v1_claw_tip_rise_never_over_credits_the_mesh_derived_truth():
     """Over the claw's WHOLE window (0–1.5708 rad, where a claw opened by hand
     while the arm is limp can stand) and past it, the table never credits more
-    than the meshes allow; inside the window it is pessimistic only by its own
-    rounding and the rise within one 0.05 rad band, and every row is exactly
-    its band's minimum, rounded DOWN to 0.01 mm."""
-    from physical_ai_server.workflow import edu1_ik as E
-    ik = E.Edu1IKSolver()
+    than the meshes allow at either gear ratio; inside the window it is
+    pessimistic only by its own rounding, the rise within one 0.05 rad band and
+    the gap between the two ratios, and every row is exactly its band's
+    minimum, rounded DOWN to 0.01 mm."""
+    from physical_ai_server.workflow import v1_ik as V
+    ik = V.V1IKSolver()
     worst_over = -1.0
     worst_under_band = 0.0
     worst_under = 0.0
     for g in np.linspace(0.0, 1.5708, 400):
-        truth = _edu1_true_claw_rise(float(g))
+        truth = _v1_true_claw_rise(float(g))
         model = ik.tool_tip_rise_m(float(g))
         worst_over = max(worst_over, model - truth)
         worst_under = max(worst_under, truth - model)
         if g <= 0.9:
             worst_under_band = max(worst_under_band, truth - model)
     for g in np.linspace(1.5708, math.pi, 60):          # past the window: the plateau
-        worst_over = max(worst_over, ik.tool_tip_rise_m(float(g)) - _edu1_true_claw_rise(float(g)))
+        worst_over = max(worst_over, ik.tool_tip_rise_m(float(g)) - _v1_true_claw_rise(float(g)))
     assert worst_over <= 1e-6, f'over-credits by {worst_over * 1000:.3f} mm'
-    assert worst_under_band < 0.0025, f'needlessly pessimistic by {worst_under_band * 1000:.2f} mm'
-    # 0.05 rad bands on a curve rising ~6 mm per 0.1 rad: ≤ 3.05 mm (measured 3.04).
-    assert worst_under < 0.0031, f'needlessly pessimistic by {worst_under * 1000:.2f} mm'
+    # Measured densely (every 0.5 mrad): 2.74 mm for g ≤ 0.9, 3.98 mm overall —
+    # 0.05 rad bands on a curve rising up to ~8 mm per 0.1 rad.
+    assert worst_under_band < 0.0028, f'needlessly pessimistic by {worst_under_band * 1000:.2f} mm'
+    assert worst_under < 0.0040, f'needlessly pessimistic by {worst_under * 1000:.2f} mm'
     # Each row IS its band's minimum, floored to 1e-5 (sampled every 0.5 mrad).
-    starts = [row[0] for row in E._TIP_RISE_TABLE]
-    assert starts == pytest.approx([round(0.05 * k, 2) for k in range(29)])
-    for i, (start, rise) in enumerate(E._TIP_RISE_TABLE):
+    starts = [row[0] for row in V._TIP_RISE_TABLE]
+    assert starts == pytest.approx([round(0.05 * k, 2) for k in range(32)])
+    for i, (start, rise) in enumerate(V._TIP_RISE_TABLE):
         end = starts[i + 1] if i + 1 < len(starts) else 1.5708
-        band_min = min(_edu1_true_claw_rise(float(g))
+        band_min = min(_v1_true_claw_rise(float(g))
                        for g in np.arange(start, end + 1e-12, 0.0005) if g < end or end == 1.5708)
         assert band_min - 1.2e-5 <= rise <= band_min + 1e-9, (start, rise, band_min)
     # The dip is real and reported as a NEGATIVE rise (stricter, never looser).
-    assert ik.tool_tip_rise_m(0.14) < 0.0
-    assert ik.tool_tip_rise_m(0.9) == pytest.approx(0.01742)
+    assert ik.tool_tip_rise_m(0.10) < 0.0
+    assert ik.tool_tip_rise_m(0.9) == pytest.approx(0.02298)
     # A claw opened by hand past the commanded band: the blades, then the housing.
-    assert ik.tool_tip_rise_m(1.2) == pytest.approx(0.03291)
-    assert ik.tool_tip_rise_m(1.5708) == pytest.approx(0.04374)
-    assert ik.tool_tip_rise_m(3.0) == pytest.approx(0.04374)
+    assert ik.tool_tip_rise_m(1.2) == pytest.approx(0.04230)
+    assert ik.tool_tip_rise_m(1.5708) == pytest.approx(0.06609)
+    assert ik.tool_tip_rise_m(3.0) == pytest.approx(0.06609)
     assert ik.tool_tip_rise_m(float('nan')) == 0.0
     from physical_ai_server.workflow.handlers import motion as m
     from physical_ai_server.workflow.ik_solver import IKSolver
     assert m.tool_tip_rise_m(IKSolver(), [0] * 5 + [0.8], 5) == 0.0
-    assert m.tool_tip_rise_m(ik, [0] * 5 + [0.9], 5) == pytest.approx(0.01742)
+    assert m.tool_tip_rise_m(ik, [0] * 5 + [0.9], 5) == pytest.approx(0.02298)
+    # motion's cap holds the credit to 60 mm: the housing plateau is credited
+    # less than the meshes allow, never more.
+    assert m.tool_tip_rise_m(ik, [0] * 5 + [1.5708], 5) == 0.06
     bogus = types.SimpleNamespace(tool_tip_rise_m=lambda g: 5.0)
     assert m.tool_tip_rise_m(bogus, [0] * 5 + [0.9], 5) == 0.06      # capped credit
 
 
-def test_an_edu1_take_whose_OPEN_claw_touches_the_table_is_replayable():
-    from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
+def test_a_v1_take_whose_OPEN_claw_touches_the_table_is_replayable():
+    from physical_ai_server.workflow.v1_ik import V1IKSolver
     from physical_ai_server.workflow.handlers import trajectory as tr
     from physical_ai_server.workflow.handlers import motion as m
     from physical_ai_server.workflow.handlers.motion import WorkflowError
-    ik = Edu1IKSolver()
+    ik = V1IKSolver()
     rise = ik.tool_tip_rise_m(0.9)
-    # TCP (closed tip) 17 mm under the table = the open tips exactly on it.
+    # TCP (closed tip) 23 mm under the table = the open tips exactly on it.
     q = ik.solve((0.0, -0.20, -rise + 0.0005), roll=0.0)
     assert q is not None
     ctx = types.SimpleNamespace(z_table=0.0, table_plane=None)
@@ -1222,10 +1246,10 @@ def test_the_world_z_credit_is_the_tip_set_back_along_the_tool_axis():
     ``home_planner.pose_floor_clearance`` judges (the closed tip minus the rise
     along the world approach axis): ``rise · cos(tilt)``, negative for a tool
     pointing up. 0.0 on the OMX (no rise) and when the axis cannot be read."""
-    from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
+    from physical_ai_server.workflow.v1_ik import V1IKSolver
     from physical_ai_server.workflow.handlers import motion as m
     from physical_ai_server.workflow.ik_solver import IKSolver
-    ik = Edu1IKSolver()
+    ik = V1IKSolver()
     rng = np.random.default_rng(1021)
     signs = set()
     for _ in range(300):
@@ -1245,18 +1269,19 @@ def test_the_world_z_credit_is_the_tip_set_back_along_the_tool_axis():
     assert m.tool_tip_rise_world_z_m(blind, [0.0] * 5 + [1.2], 5, np.eye(3)) == 0.0
 
 
-# A tilted (53°), hand-opened (1.5 rad) Edu:1 pose whose claw meshes lie 35 mm
-# under z = 0 (test_arm_geometry_edu1 proves it on the meshes): the TCP 47.7 mm
-# under the table, the rise 43.7 mm. Credited straight up the check judged
-# -3.9 mm and passed; along the tool axis it judges -21.2 mm.
+# A tilted (53°), hand-opened (1.5 rad) V1 pose whose claw meshes lie 41.7 mm
+# under z = 0 (test_arm_geometry_v1 proves it on the meshes): the TCP 65.9 mm
+# under the table, the rise 65.2 mm (credited 60 mm after motion's cap).
+# Credited straight up the check judges -5.9 mm and passes; along the tool axis
+# it judges -29.5 mm.
 _TILTED_OPEN_CLAW_BELOW = ([-0.027, 2.237, 1.491, 0.096, -0.103], 1.5)
 
 
 def test_a_tilted_open_claw_under_the_table_is_refused_by_both_replay_checks(monkeypatch):
-    from physical_ai_server.workflow.edu1_ik import Edu1IKSolver
+    from physical_ai_server.workflow.v1_ik import V1IKSolver
     from physical_ai_server.workflow.handlers import motion as m
     from physical_ai_server.workflow.handlers import trajectory as tr
-    ik = Edu1IKSolver()
+    ik = V1IKSolver()
     q, g = _TILTED_OPEN_CLAW_BELOW
     check = _load(['_build_replay_lead_floor_check'], {})['_build_replay_lead_floor_check'](
         types.SimpleNamespace(_build_ik_solver=lambda: ik,
@@ -1436,13 +1461,13 @@ def test_the_omx_lift_via_never_swaps_branch_or_turns_the_base():
 def test_a_lead_in_of_more_than_half_a_turn_on_a_full_circle_joint_is_refused():
     from physical_ai_server.workflow.handlers import trajectory as tr
     from physical_ai_server.workflow.handlers.motion import WorkflowError
-    limits = _edu6_limits()
-    first = [0, 0.7, -2.4, 0, 0.7, -3.0, 1.0, 0.0]
+    limits = _SEAM_LIMITS
+    first = [0, 0.7, 1.4, -3.0, 0.2, 0.5, 0.0]
     with pytest.raises(WorkflowError) as e:
-        tr.refuse_wrapped_lead_in([0, 0.7, -2.4, 0, 0.7, 3.0, 1.0], first, limits, 6)
-    assert 'Gelenk 6' in str(e.value)
-    tr.refuse_wrapped_lead_in([0, 0.7, -2.4, 0, 0.7, -2.0, 1.0], first, limits, 6)
-    tr.refuse_wrapped_lead_in([0] * 7, first, None, 6)
+        tr.refuse_wrapped_lead_in([0, 0.7, 1.4, 3.0, 0.2, 0.5], first, limits, 5)
+    assert 'Gelenk 4' in str(e.value)
+    tr.refuse_wrapped_lead_in([0, 0.7, 1.4, -2.0, 0.2, 0.5], first, limits, 5)
+    tr.refuse_wrapped_lead_in([0] * 6, first, None, 5)
 
 
 def test_both_replay_paths_check_the_lead_in_against_the_seam():

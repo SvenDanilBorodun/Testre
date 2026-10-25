@@ -143,8 +143,8 @@ def extract_points(traj: Any, num_arm_joints: int = 5) -> list[list[float]]:
 
     Width is asserted EXACTLY ``num_arm_joints + 2`` (§16.4 permanent rail #2):
     a short row was always refused; a WIDE row used to be silently TRUNCATED
-    (``p[:_POINT_LEN]``) — an 8-wide edu6 point on a 5-DOF build would narrow
-    silently into a plausible-but-wrong command. Both directions now refuse.
+    (``p[:_POINT_LEN]``) — an 8-wide point from a 6-DOF arm on a 5-DOF build
+    would narrow silently into a plausible-but-wrong command. Both directions now refuse.
 
     The TIME COLUMN is bounded too — by MONOTONICITY *and* the endpoint span,
     and the pair is the point. Nothing else bounds it: the cloud's
@@ -222,12 +222,14 @@ def refuse_wrapped_joint_jumps(points, joint_limits, num_arm_joints: int = 5) ->
     """Refuse (German ``WorkflowError``) a recording in which a FULL-CIRCLE joint
     jumps by more than half a turn between two consecutive samples.
 
-    That is never a motion: it is the ±180° SEAM. An edu6 joint4/joint6 whose
-    limits span the whole circle reads +3.128 then −3.116 rad when the student's
-    hand turns it 18° across the seam, and the replay interpolates the NUMBERS —
-    measured, a 0.32 s hand motion replayed as a 337° rotation over 3.86 s, with
-    the gripper cable running through joint6. The servo cannot cross the seam,
-    so there is nothing to unwrap to; the take has to be re-recorded.
+    That is never a motion: it is the ±180° SEAM. A joint whose limits span the
+    whole circle reads about +3.13 then −3.12 rad when the student's hand turns
+    it a few degrees across the seam, and the replay interpolates the NUMBERS —
+    a short hand motion replayed as nearly a full rotation, with the gripper
+    cable running through the wrist. The servo cannot cross the seam, so there
+    is nothing to unwrap to; the take has to be re-recorded. (No shipped arm has
+    such a joint today: the check reads ``joint_limits`` and is inert without
+    one.)
 
     Judged only on joints whose limits cover a full turn (every other joint's
     whole range is under 2π, so a > π step in one sample pair cannot occur on it
@@ -266,7 +268,7 @@ def refuse_wrapped_lead_in(current, first_point, joint_limits,
     A joint turned by hand across ±180° AFTER the take (live +3.0 rad, recording
     starting at −3.0) is 16° away physically but 344° away for a servo that cannot
     cross the seam — and the quintic lead-in drives that long way round, the same
-    joint6-cable hazard. Any lead-in of more than π on such a joint is the long
+    wrist-cable hazard. Any lead-in of more than π on such a joint is the long
     way, so it is refused and the student brings the arm closer by hand."""
     if not joint_limits or current is None or first_point is None:
         return

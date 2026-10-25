@@ -58,7 +58,7 @@ def test_the_tag_yaw_frame_count_is_clamped_at_both_ends(raw, expected, warns,
     said = capsys.readouterr().out
     assert bool('[WARNUNG]' in said) is warns, (
         f'{raw!r} → {expected}: an out-of-range knob falls back LOUDLY, '
-        f'mirroring the EDUBOTICS_EDU6_* knobs. said={said!r}')
+        f'mirroring the EDUBOTICS_FEETECH_* knobs. said={said!r}')
 
 
 def test_the_shipped_default_is_seven_frames():

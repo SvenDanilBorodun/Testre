@@ -136,26 +136,28 @@ def test_collision_with_the_built_in_tag_is_a_german_refusal(server):
 
 
 def test_band_is_per_family(server):
-    # -0.4 (negative close) is valid on OMX, refused on both Feetech bands.
-    for pid, ok_neg in (('omx_full', True), ('edu6_studio', False),
-                        ('edu1_studio', False)):
+    # -0.4 (negative close) is valid on OMX, refused on the Feetech band.
+    for pid, ok_neg in (('omx_full', True), ('v1_studio', False)):
         ctx = _ctx(pid)
         session = server.open_run(ctx)
         r = _register(session, 'banane', 'Banane', [30, 31], 0.04, 0.015, close=-0.4)
         assert r['ok'] is ok_neg, (pid, 'neg', r)
         server.close_run(session)
-    # 1.0 (radian close) is valid on edu6 (band 0..1.75), refused on OMX + edu1.
-    for pid, ok_pos in (('omx_full', False), ('edu6_studio', True),
-                        ('edu1_studio', False)):
-        ctx = _ctx(pid)
-        session = server.open_run(ctx)
-        r = _register(session, 'banane', 'Banane', [30, 31], 0.04, 0.015, close=1.0)
-        assert r['ok'] is ok_pos, (pid, 'pos', r)
-        server.close_run(session)
+    # 0.3 (radian close) is valid on the V1 (band 0..0.90), refused on OMX;
+    # 1.0 is past the V1's open end and refused on both.
+    for close, oks in ((0.3, (('omx_full', False), ('v1_studio', True))),
+                       (1.0, (('omx_full', False), ('v1_studio', False)))):
+        for pid, ok_pos in oks:
+            ctx = _ctx(pid)
+            session = server.open_run(ctx)
+            r = _register(session, 'banane', 'Banane', [30, 31], 0.04, 0.015,
+                          close=close)
+            assert r['ok'] is ok_pos, (pid, close, r)
+            server.close_run(session)
 
 
 def test_missing_close_defaults_to_the_profile_wuerfel_close(server):
-    for pid, want in (('omx_full', -0.5), ('edu6_studio', 1.0), ('edu1_studio', 0.10)):
+    for pid, want in (('omx_full', -0.5), ('v1_studio', 0.05)):
         ctx = _ctx(pid)
         session = server.open_run(ctx)
         r = _register(session, 'banane', 'Banane', [30, 31], 0.04, 0.015, close=None)
@@ -332,7 +334,7 @@ def test_sentences_name_student_attributes(server):
     for language, depth, height, close in (
             ('python', 'greiftiefe_m', 'hoehe_m', 'greifer_schliessen_rad'),
             ('java', 'greiftiefeM', 'hoeheM', 'greiferSchliessenRad')):
-        ctx = _ctx('edu6_studio')
+        ctx = _ctx('v1_studio')
         ctx.code_language = language
         session = server.open_run(ctx)
         r = _register(session, 'banane', 'Banane', [30, 31], 0.02, 0.03)

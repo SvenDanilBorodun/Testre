@@ -40,11 +40,11 @@ from physical_ai_server.workflow.handlers.trajectory import (
     extract_points,
     resegment_trajectory,
 )
-from physical_ai_server.workflow.edu6_ik import Edu6IKSolver
 from physical_ai_server.workflow.ik_solver import IKSolver
 from physical_ai_server.workflow.object_catalog import parse_catalog
 from physical_ai_server.workflow.sim_arm import SimArm
 from physical_ai_server.workflow.sim_perception import SimPerception
+from physical_ai_server.workflow.v1_ik import V1IKSolver
 from physical_ai_server.workflow.workflow_manager import WorkflowManager
 
 
@@ -396,17 +396,21 @@ def test_capture_pose_fk_omx_6_element_vector():
     assert list(t5) == pytest.approx(list(t), abs=1e-12)
 
 
-def test_capture_pose_fk_edu6_7_element_vector():
-    # edu6 fk takes joint1..joint6; the 7th (gripper) entry is IGNORED. Vector is
-    # edu6 HOME + gripper-open; fk returns the WORLD-frame fingertip TCP.
-    ik = Edu6IKSolver()
-    full7 = [0.0, 0.70, -2.40, 0.0, 0.70, 0.0, 1.75]
-    R, t = ik.fk(full7)
+def test_capture_pose_fk_v1_6_element_vector():
+    # V1 fk takes joint1..joint5; the 6th (gripper) entry is IGNORED. Vector is
+    # V1 HOME + claw-open; fk returns the WORLD-frame closed-fingertip TCP.
+    ik = V1IKSolver()
+    full6 = [0.0, 0.64, 1.48, 0.90, 0.0, 0.90]
+    R, t = ik.fk(full6)
     assert list(t) == pytest.approx(
-        [0.04990694748239571, 0.0, 0.4545133420264562], abs=1e-9)
+        [0.012491945608610017, -1.2848590024199925e-06, 0.5541352134830164],
+        abs=1e-9)
     assert list(R[0]) == pytest.approx(
-        [0.0, -0.8414709848078965, -0.5403023058681398], abs=1e-9)
-    assert list(R[1]) == pytest.approx([-1.0, 0.0, 0.0], abs=1e-9)
-    # Extra gripper entry ignored: the 6-element solve equals the 7-element one.
-    _R6, t6 = ik.fk(full7[:6])
-    assert list(t6) == pytest.approx(list(t), abs=1e-12)
+        [-0.9857197973723322, -5.273963281722256e-06, -0.16839382720406645],
+        abs=1e-9)
+    assert list(R[1]) == pytest.approx(
+        [5.688118967998976e-06, -0.9999999999818681, -1.9770807544838747e-06],
+        abs=1e-9)
+    # Extra gripper entry ignored: the 5-element solve equals the 6-element one.
+    _R5, t5 = ik.fk(full6[:5])
+    assert list(t5) == pytest.approx(list(t), abs=1e-12)

@@ -1,13 +1,13 @@
 """Regression tests for the 2026-09-07 Roboter-Studio audit, Implementer B half.
 
 Every test here pins a defect that was REPRODUCED by running the real handlers,
-the real IK solvers for all three shipped arm profiles (``omx_full`` /
-``edu6_studio`` / ``edu1_studio``) and the real catalogs, and the observed
-"before" numbers are quoted in the docstring or the code comment of the fix.
+the real IK solvers and the real catalogs, and the observed "before" numbers
+(measured on the OMX unless stated) are quoted in the docstring or the code
+comment of the fix.
 
-The suite is deliberately profile-parameterised wherever the defect was: five of
-these were invisible on the OMX and only appeared on the two Feetech arms whose
-ONLY capability is Roboter Studio.
+The suite is deliberately profile-parameterised (``omx_full`` / ``v1_studio``)
+wherever the defect was: five of these were invisible on the OMX and only
+appear on a Feetech arm whose ONLY capability is Roboter Studio.
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ from physical_ai_server.workflow.handlers.motion import GraspSkip, WorkflowError
 from physical_ai_server.workflow.object_catalog import fixed_catalog
 
 
-PROFILE_IDS = ('omx_full', 'edu6_studio', 'edu1_studio')
+PROFILE_IDS = ('omx_full', 'v1_studio')
 # A radius inside each arm's own pick band, at the grasp plane.
-BAND_R = {'omx_full': 0.20, 'edu6_studio': 0.14, 'edu1_studio': 0.20}
+BAND_R = {'omx_full': 0.20, 'v1_studio': 0.20}
 
 
 @pytest.fixture(autouse=True)
@@ -157,7 +157,7 @@ def band_xyz(ctx, z=0.015, dy=0.0):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# RS-06 — „Greifer hält etwas?" was CONSTANT TRUE on both Feetech arms
+# RS-06 — „Greifer hält etwas?" was CONSTANT TRUE on the Feetech arms
 # ══════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize('profile_id', PROFILE_IDS)
@@ -165,15 +165,14 @@ def test_an_empty_full_close_reads_MISS_on_every_profile(profile_id, monkeypatch
     """The fallback threshold must live INSIDE each arm's gripper band.
 
     ``GRASP_HELD_MAX_RAD`` (−0.35) is an OMX-band number
-    (``gripper_closed_rad + GRASP_HELD_MARGIN_RAD`` = −0.5 + 0.15). Measured
-    2026-09-07 with it used verbatim on every profile, no close commanded:
+    (``gripper_closed_rad + GRASP_HELD_MARGIN_RAD`` = −0.5 + 0.15). Used
+    verbatim on every profile, no close commanded:
 
         omx_full     band [−0.50, 0.80]  OPEN True  CLOSED-EMPTY False  ok
-        edu6_studio  band [ 0.00, 1.75]  OPEN True  CLOSED-EMPTY TRUE   wrong
-        edu1_studio  band [ 0.00, 0.90]  OPEN True  CLOSED-EMPTY TRUE   wrong
+        v1_studio    band [ 0.00, 0.90]  OPEN True  CLOSED-EMPTY TRUE   wrong
 
-    i.e. an EMPTY FULL CLOSE read as a successful grasp on the only two profiles
-    whose sole capability is Roboter Studio.
+    i.e. an EMPTY FULL CLOSE would read as a successful grasp on a profile whose
+    sole capability is Roboter Studio.
 
     Intent kept (an empty close is a MISS on every arm, the threshold inside the
     band); the OPEN row changed on purpose with Q10: an open gripper never holds.
@@ -212,7 +211,7 @@ def test_a_profileless_ctx_still_gets_the_omx_constant():
 
 def test_the_env_override_still_wins_everywhere(monkeypatch):
     monkeypatch.setenv('EDUBOTICS_GRASP_HELD_MAX_RAD', '-0.35')
-    ctx = Ctx('edu6_studio')
+    ctx = Ctx('v1_studio')
     ctx.last_commanded_close_rad = None
     assert motion._held_threshold_rad(ctx) == pytest.approx(motion.GRASP_HELD_MAX_RAD)
 
@@ -293,7 +292,7 @@ def test_a_malformed_plane_falls_back_to_the_scalar_rather_than_failing_open():
 # ══════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize('profile_id', [
-    'omx_full', 'omx_follower', 'edu6_studio', 'edu1_studio',
+    'omx_full', 'omx_follower', 'v1_studio',
 ])
 def test_pickup_commands_the_full_hardware_close_on_every_profile(profile_id):
     """OWNER DECISION 2026-09-08 — RS-19 was REVERTED to the full close.
@@ -301,23 +300,19 @@ def test_pickup_commands_the_full_hardware_close_on_every_profile(profile_id):
     This test previously pinned the opposite. The measured defect is real and
     unchanged; what changed is which side of the trade-off ships.
 
-    The defect (measured 2026-09-07), catalog close vs what ``pickup`` commands:
+    The defect, catalog close vs what ``pickup`` commands:
 
         omx_full      catalog −0.50   pickup −0.50   (identical, no-op)
-        edu6_studio   catalog  1.00   pickup  0.00   (1.00 rad DEEPER)
-        edu1_studio   catalog  0.10   pickup  0.00   (0.10 rad deeper)
+        v1_studio     catalog  0.05   pickup  0.00   (0.05 rad deeper)
 
-    On edu6 that is a ≈1.19 rad position error against a 30 mm cube that already
-    blocks the jaws — saturated PWM at Max_Torque 150, sustained through the
-    close, the lift, the whole carry and the descend, because ``drop_at`` carries
-    at ``last_commanded_close_rad``.
+    On the V1 that is a ≈0.20 rad position error against a 30 mm cube that
+    already blocks the claw — saturated PWM at Max_Torque, sustained through the
+    close, the lift, the whole carry and the descend, because ``drop_at``
+    carries at ``last_commanded_close_rad``.
 
     Why the owner chose it anyway: „aufnehmen" is OBJECT-AGNOSTIC and has no
     catalog to consult, so a bounded close silently stops gripping anything
-    thinner than the jaw gap at that angle — ≈20-25 mm on edu6, ≈13 mm on edu1
-    (measured off the shipped finger meshes; the ≈2 mm first reported came from
-    using CLAUDE.md's 21 mm zero-offset as a slope, and the doc's affine model
-    does not reproduce on the meshes at all). Pens, cards and thin blocks would
+    thinner than the jaw gap at that angle. Pens, cards and thin blocks would
     just fail to grip, with no message. „Greife" and the split blocks are
     unaffected either way — they command the recipe's own close.
 
@@ -337,13 +332,13 @@ def test_the_omx_generic_close_is_still_its_hardware_close():
     assert motion._pickup_close(ctx) == pytest.approx(ctx.gripper_closed_rad)
 
 
-@pytest.mark.parametrize('profile_id', ('edu6_studio', 'edu1_studio'))
+@pytest.mark.parametrize('profile_id', ('v1_studio',))
 def test_pickup_close_rollback_restores_the_full_close(profile_id, monkeypatch):
     """The env override still works — it is now the way to opt IN to the bounded
     squeeze, since the shipped default is the full close.
 
     ``0`` is deliberately exercised here because it is the value an operator
-    types: on the Feetech arms it happens to equal ``gripper_closed_rad``, which
+    types: on the Feetech arm it happens to equal ``gripper_closed_rad``, which
     is why it looks harmless — but on an OMX rig 0 is 0.5 rad OPEN. Use the
     profile's catalog close, never 0."""
     monkeypatch.setenv('EDUBOTICS_PICKUP_CLOSE_RAD', '0')
@@ -370,7 +365,7 @@ def test_the_profile_field_is_the_single_source_of_truth():
     revert visible: a future edit that re-adds a value has to come here and argue
     with the docstring above, rather than silently changing what „aufnehmen"
     squeezes."""
-    for pid in ('edu6_studio', 'edu1_studio'):
+    for pid in ('v1_studio',):
         profile = rp.ROBOT_PROFILES[pid]
         assert motion._profile_for_ctx(Ctx(pid)) is profile
         assert profile.pickup_close_rad is None, (
@@ -388,8 +383,8 @@ def test_the_profile_field_is_the_single_source_of_truth():
 @pytest.mark.parametrize('profile_id', PROFILE_IDS)
 def test_a_gripper_still_at_the_open_command_is_a_MISS(profile_id, monkeypatch):
     """Measured 2026-09-07 with the follower gripper PINNED OPEN: „Greife"
-    returned OK, printed „„Würfel" gegriffen." and CLAIMED the tag on all three
-    profiles — so a „Solange sichtbar" loop marked the object done."""
+    returned OK, printed „„Würfel" gegriffen." and CLAIMED the tag — so a
+    „Solange sichtbar" loop marked the object done."""
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
     ctx = Ctx(profile_id)
     rec = ctx.object_catalog.recipe_for_type('wuerfel')
@@ -413,8 +408,8 @@ def test_a_genuinely_blocked_jaw_is_still_HELD(profile_id, monkeypatch):
 def test_grasp_held_travel_rollback(monkeypatch):
     monkeypatch.setattr(motion, 'GRASP_SETTLE_S', 0.0)
     monkeypatch.setattr(motion, 'GRASP_HELD_MIN_TRAVEL_FRAC', 0.0)
-    ctx = Ctx('edu6_studio')
-    ctx.last_commanded_close_rad = 1.0
+    ctx = Ctx('v1_studio')
+    ctx.last_commanded_close_rad = 0.05
     ctx.gripper_readback = ctx.gripper_open_rad
     assert motion.check_grasp_held(ctx) is True
 
@@ -426,8 +421,8 @@ def test_grasp_held_travel_rollback(monkeypatch):
 @pytest.mark.parametrize('profile_id', PROFILE_IDS)
 def test_close_on_object_refuses_a_non_greifziel(profile_id):
     """Measured 2026-09-07 with a variable holding 42.0: err=None,
-    commanded_close −0.5 / 0.0 / 0.0, logs=[] — the profile's HARDEST close,
-    silently, on all three arms.
+    commanded_close −0.5 on the OMX (0.0 on a Feetech arm), logs=[] — the
+    profile's HARDEST close, silently.
 
     G13: raised as a base ``WorkflowError``, NOT a ``GraspSkip``. A wrongly
     wired value is a PROGRAM error — no loop pass can turn 42.0 into a
@@ -451,20 +446,16 @@ def test_close_on_object_refuses_a_non_greifziel(profile_id):
 ])
 def test_a_greifziel_is_refused_by_the_destination_blocks(
         profile_id, block, handler, key):
-    """Re-measured 2026-09-08 with the real solvers, tag yaw 1.1 rad, object ON
-    each arm's +x axis at its band radius. Split blocks vs pickup(Greifziel),
-    quoting the ROLL JOINT so the three rows are one quantity:
+    """Measured 2026-09-08 with the real OMX solver, tag yaw 1.1 rad, object
+    ON the arm's +x axis at its band radius. Split blocks vs pickup(Greifziel),
+    quoting the ROLL JOINT:
 
         omx_full     correct z 0.0150 q_roll +0.4708  →  z 0.0270 q_roll +1.5708
-        edu6_studio  correct z 0.0150 q_roll −0.4708  →  z 0.0270 q_roll +1.5708
-        edu1_studio  correct z 0.0150 q_roll −0.4708  →  z 0.0270 q_roll −1.5708
 
     i.e. +12.0 mm of descend height and — pickup(Greifziel) never seeing the tag
-    yaw — a wrist error of exactly that yaw, 1.1 rad = 63.03°, on all three arms
-    (raw joint differences 63.03 / 116.97 / 63.03°; edu6's is the same grasp
-    through its jaw fold). On a 30 mm cube that grips 3 mm below its top —
-    reported as success. See ``motion._refuse_greifziel`` for the two figures
-    an earlier revision of both copies carried („roll −2.6708", „56–57°").
+    yaw — a wrist error of exactly that yaw, 1.1 rad = 63.03°. On a 30 mm cube
+    that grips 3 mm below its top — reported as success. See
+    ``motion._refuse_greifziel``.
     """
     ctx = Ctx(profile_id)
     ziel = greifziel(ctx, band_xyz(ctx), tag_yaw=1.1)
@@ -499,12 +490,11 @@ def test_a_position_dict_is_still_accepted_by_bewege_zu(profile_id):
 # RS-28 — „bewege zu" / „ablegen bei" twisted a HELD object
 # ══════════════════════════════════════════════════════════════════════════
 
-@pytest.mark.parametrize('profile_id', ('omx_full', 'edu6_studio'))
+@pytest.mark.parametrize('profile_id', ('omx_full', 'v1_studio'))
 def test_a_carried_object_keeps_its_orientation_across_a_transit(profile_id):
-    """Measured 2026-09-07 after a split grasp at tag yaw 0.7 rad:
-    „bewege zu" travelled the wrist +40.1° on omx_full and drove the roll JOINT
-    −49.9° → +90.0° on edu6_studio, with the object in the jaws the whole way.
-    „hebe an" already pinned the current roll; these two did not."""
+    """Measured 2026-09-07 after a split grasp at tag yaw 0.7 rad: „bewege zu"
+    travelled the wrist +40.1° on omx_full, with the object in the jaws the
+    whole way. „hebe an" already pinned the current roll; these two did not."""
     ctx = Ctx(profile_id)
     ziel = greifziel(ctx, band_xyz(ctx), tag_yaw=0.7)
     motion.move_above(ctx, {'ziel': ziel})
@@ -540,12 +530,9 @@ def test_carry_roll_rollback(monkeypatch):
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_a_place_never_prints_grasp_wording():
-    """Measured 2026-09-07 over 120 radii per arm across the pick band, counting
-    successful places that printed „Anfahrhöhe … über dem Greifpunkt":
-
-        edu6_studio  92 / 120 = 76.7 %   edu1_studio 1 / 120   omx_full 8 / 109
-
-    The text names „Greifpunkt" and „wenn der Greifer das Objekt beim Anfahren
+    """Measured 2026-09-07 across the pick band, counting successful places that
+    printed „Anfahrhöhe … über dem Greifpunkt": omx_full 8 / 109, and on an arm
+    with a low top-down ceiling most of them. The text names „Greifpunkt" and „wenn der Greifer das Objekt beim Anfahren
     berührt" — about arriving at an object that is still on the table, for an
     operation where the object is already in the jaws."""
     for pid in PROFILE_IDS:
@@ -570,9 +557,9 @@ def test_a_real_grasp_still_gets_the_grasp_warning():
     ``ctx.logs`` empty and the second clause True. Proved by mutation
     2026-09-08 — disabling the ``purpose == 'grasp'`` guard fails three tests in
     two OTHER files and did NOT fail this one. The tail is gone."""
-    ctx = Ctx('edu6_studio')
-    # An outer-band grasp whose full 60 mm hover is unreachable.
-    grasp = (ctx.ik.base_axis_x + 0.205, 0.0, 0.015)
+    ctx = Ctx('v1_studio')
+    # An outer-band grasp whose full 60 mm hover is unreachable (11.3 mm left).
+    grasp = (ctx.ik.base_axis_x + 0.363, 0.0, 0.015)
     if ctx.ik.solve(target_xyz=grasp, roll=motion.GRASP_ROLL_RAD) is None:
         pytest.skip('premise: the grasp point itself must be reachable')
     try:
@@ -849,9 +836,8 @@ def test_a_move_and_a_replay_in_one_run_warn_once():
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_the_zone_refusal_names_the_inflated_width():
-    """A 3 cm drawn box is a 13 cm obstacle to the planner. Measured over 20
-    blocked, non-static edu6 transits: 2880 base-swing candidates tried, 1280
-    SOLVED, 426 with leg 1 clear, 417 with leg 2 clear — and ZERO with both."""
+    """A 3 cm drawn box is a 13 cm obstacle to the planner — in a narrow band a
+    single via cannot be on the clear side of both endpoints."""
     msg = path_guard._refusal_message(
         [{'min': [0.14, -0.015, 0.0], 'max': [0.17, 0.015, 0.005]}],
         path_guard.ZONE_MARGIN_M, path_guard.LINK_RADIUS_M)
@@ -867,8 +853,8 @@ def test_the_refusal_degrades_to_the_plain_sentence_with_no_readable_zone():
 
 
 def test_the_inflation_constants_are_not_shrunk():
-    """Rule §2: LINK_RADIUS_M + ZONE_MARGIN_M is already ~34 mm UNDER-covered on
-    edu6. This audit did not touch it, in either direction."""
+    """Rule §2: LINK_RADIUS_M + ZONE_MARGIN_M is already ~23 mm UNDER-covered on
+    the V1's open claw. This audit did not touch it, in either direction."""
     assert path_guard.LINK_RADIUS_M == 0.03
     assert path_guard.ZONE_MARGIN_M == 0.02
 
@@ -1063,7 +1049,7 @@ def test_sage_with_no_text_says_so_instead_of_doing_nothing():
 def test_play_tone_does_not_clamp_nan_to_the_loudest_longest_tone(bad):
     """Measured: freq=nan and freq=inf both emitted [TONE:4000.0:5.000] — a
     min/max clamp sends NaN to the UPPER limit, the same limit-seeking pattern
-    CLAUDE.md flags in the edu6 driver. toast's int(round(nan)) raises and
+    CLAUDE.md flags in the Feetech driver. toast's int(round(nan)) raises and
     correctly falls back."""
     c = _LogCtx()
     out.play_tone(c, {'freq': bad, 'seconds': bad})
@@ -1414,18 +1400,14 @@ def test_a_repeated_frame_is_not_counted_as_an_independent_sample(monkeypatch):
 # RS-13 — „Heimposition" lost the Sperrzone reroute and blamed the table
 # ══════════════════════════════════════════════════════════════════════════
 
-@pytest.mark.parametrize('profile_id', ('edu6_studio', 'edu1_studio'))
+@pytest.mark.parametrize('profile_id', ('v1_studio',))
 def test_home_hands_a_zone_blocked_route_to_the_reroute_ladder(profile_id):
     """``_leg_ok`` returned ONE bool for TWO causes and rung L3 raised only the
     FLOOR message, so a zone-blocked home told the student to hand-guide the arm
     up — about a table that was never in the way — and path_guard's ladder was
-    unreachable from home on every arm with box geometry. Measured 2026-09-07
-    over 25 path-only blocking zones per arm:
-
-        profile        plan_safe_route routed   home REFUSED   both
-        omx_full             10 / 25                 0            0
-        edu6_studio          14 / 25                20           11
-        edu1_studio          19 / 25                14            9
+    unreachable from home on every arm with box geometry (measured 2026-09-07
+    over path-only blocking zones: none on omx_full, a substantial population on
+    every box-geometry arm).
     """
     from physical_ai_server.workflow import home_planner as hp
     ctx = Ctx(profile_id)

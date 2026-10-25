@@ -8,8 +8,8 @@
 loop swallowed the GraspSkip, `_claim_progress_count` never grew, and the loop burned
 its three stall passes before ending on „kein Fortschritt" instead of moving on.
 
-Uses the REAL edu6 solver and profile: the refusal bands are a property of that arm's
-geometry, and a stub cannot produce them.
+Uses the REAL V1 solver and profile: the refusal band is a property of that arm's
+geometry, and a stub cannot produce it.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from physical_ai_server.workflow.handlers.motion import GraspSkip
 from physical_ai_server.workflow.object_catalog import fixed_catalog
 
 
-def _ctx(profile_id='edu6_studio'):
+def _ctx(profile_id='v1_studio'):
     prof = robot_profiles.resolve(profile_id)
     n = prof.num_arm_joints
     return types.SimpleNamespace(
@@ -59,14 +59,15 @@ def _ziel(x, y, tag_id=20, approach=0.06):
         aruco_id=tag_id,
         world_xyz_m=(x, y, 0.015),
         extras={'tag_yaw': 0.0, 'approach_clear_m': approach,
-                'gripper_close_rad': 1.0, 'object_type': 'wuerfel'},
+                'gripper_close_rad': 0.05, 'object_type': 'wuerfel'},
     )
 
 
 def _find_refusing_radius(ctx):
-    """The measured edu6 no-approach-clearance bands are the inner/outer ~2 mm of
-    the pick band. Locate one from the REAL solver rather than hardcoding it."""
-    for k in range(0, 400):
+    """The measured V1 no-approach-clearance band is the outer lip of the pick
+    band (r ≈ 0.366–0.367 m). Locate it from the REAL solver rather than
+    hardcoding it."""
+    for k in range(0, 800):
         r = 0.030 + k * 0.0005
         try:
             motion._solve_grasp_and_approach(ctx, (r, 0.0, 0.015), 0.06, roll=0.0)

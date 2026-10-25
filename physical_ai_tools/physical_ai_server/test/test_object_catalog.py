@@ -245,10 +245,10 @@ def test_the_profile_catalog_table_covers_every_feetech_arm():
         assert (lo, hi) == (profile.gripper_closed_rad, profile.gripper_open_rad)
 
 
-@pytest.mark.parametrize('pid,close', [('edu6_studio', 1.0), ('edu1_studio', 0.10)])
+@pytest.mark.parametrize('pid,close', [('v1_studio', 0.05)])
 def test_feetech_catalogs_share_the_objects_and_differ_only_in_the_close(pid, close):
     """ONE printed tag sheet fleet-wide: the physical objects, their tag ids and
-    every dimension are identical on all three arms. Only the gripper command
+    every dimension are identical on every arm. Only the gripper command
     differs, because only the gripper differs."""
     omx = fixed_catalog().recipe_for_type('wuerfel')
     arm = fixed_catalog(pid).recipe_for_type('wuerfel')

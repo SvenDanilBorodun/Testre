@@ -429,12 +429,12 @@ class IKSolver:
         """The TOOL/approach direction in the frame :meth:`fk` returns, as a
         unit vector. ``R @ approach_axis_local`` is where the gripper points.
 
-        Declared per SOLVER because it is a frame convention, and the three arms
-        do not share one: this OMX FK returns a frame whose local **+x** is the
-        tool axis, ``Edu6IKSolver``'s is **−z** and ``Edu1IKSolver``'s is **+z**.
-        The touch-off verticality gate used to hardcode column 0, which is
-        exactly this arm's answer and 90° wrong on both Feetech arms — it
-        rejected every correct vertical tap with „Greifer steht schräg (90°)".
+        Declared per SOLVER because it is a frame convention, and the arms do
+        not share one: this OMX FK returns a frame whose local **+x** is the
+        tool axis, ``V1IKSolver``'s is **+z**. A touch-off verticality gate that
+        hardcodes column 0 is exactly this arm's answer and 90° wrong on the
+        Feetech arm — it would reject every correct vertical tap with „Greifer
+        steht schräg (90°)".
         One owner for the convention, like ``link_frames`` and
         ``roll_from_joints``."""
         return (1.0, 0.0, 0.0)
@@ -462,10 +462,10 @@ class IKSolver:
         Exists so a caller meaning "move the tool, KEEP the current wrist" can
         never pass the joint value straight into ``roll=``. Here the two happen
         to be the same number (``theta5 = _wrap(roll)``), but they are NOT on
-        every arm — the edu6 solver maps ``q6 = fold(wrap(π − roll))``, so
-        passing the joint value there mirrored the wrist on every Cartesian jog
-        (found 2026-07-25). Every "keep the wrist" call site must go through
-        this method; ``test_roll_from_joints_round_trips`` pins both solvers.
+        every arm — the V1 solver maps ``q5 = fold(wrap(−roll))``, so passing
+        the joint value there would mirror the wrist on every Cartesian jog.
+        Every "keep the wrist" call site must go through this method;
+        ``test_roll_from_joints_round_trips`` pins both solvers.
 
         ``None`` for a short/non-finite joint vector."""
         try:
@@ -490,14 +490,14 @@ def _wrap(a: float) -> float:
     ``base_yaw - tag_yaw + GRASP_ROLL_RAD``), so a marker angle can legitimately
     land it on tick 0. The follower's ``dxl14``/``dxl15`` are Operating Mode 3
     with ``Min/Max Position Limit`` set to the FULL register range (0 / 4095) in
-    ``omx_f.ros2_control.xacro``, i.e. zero clearance from the seam — the same
-    shape that made the edu6 J4/J6 seam-parking hazard (docs
-    ``edu6-hardware-bringup.md`` 3.4). The OMX is saved from a RUNAWAY only by
+    ``omx_f.ros2_control.xacro``, i.e. zero clearance from the seam — the shape
+    of a seam-parking hazard. The OMX is saved from a RUNAWAY only by
     its 100 Hz re-anchored ``ros2_control`` stream, which re-commands a fresh
     goal every 10 ms; what it is NOT saved from is a ~359 deg wrist DETOUR when
     two consecutive grasp rolls straddle the seam, because
     ``trajectory_builder.build_segment`` does a straight joint-space delta with
-    no shortest-path unwrapping. Unmitigated and unmeasured on hardware; the
-    edu6 J6 jaw fold cannot be reused here (asymmetric jaws, 3.3 mm shift).
+    no shortest-path unwrapping. Unmitigated and unmeasured on hardware; a
+    Feetech-style jaw fold cannot be reused here (asymmetric jaws, 3.3 mm
+    shift).
     """
     return (a + math.pi) % (2.0 * math.pi) - math.pi

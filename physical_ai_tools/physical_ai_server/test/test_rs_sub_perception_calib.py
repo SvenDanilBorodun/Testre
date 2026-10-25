@@ -424,11 +424,11 @@ class TestCatalogResponseProfile:
             oc, 'fixed_catalog',
             lambda profile_id=None: (seen.append(profile_id), real(profile_id))[1],
         )
-        oc.build_object_catalog_response('edu6_studio')
-        assert seen == ['edu6_studio']
+        oc.build_object_catalog_response('v1_studio')
+        assert seen == ['v1_studio']
 
     @pytest.mark.parametrize(
-        'profile_id', ['omx_full', 'omx_follower', 'edu6_studio', 'edu1_studio'])
+        'profile_id', ['omx_full', 'omx_follower', 'v1_studio'])
     def test_every_shipped_profile_answers_with_the_six_arrays(self, profile_id):
         from physical_ai_server.workflow.object_catalog import (
             build_object_catalog_response)
@@ -453,9 +453,9 @@ class TestCatalogResponseProfile:
         from physical_ai_server.workflow.object_catalog import (
             build_object_catalog_response, fixed_catalog)
         payloads = [build_object_catalog_response(p)
-                    for p in ('omx_full', 'edu6_studio', 'edu1_studio')]
-        assert payloads[0] == payloads[1] == payloads[2]
+                    for p in ('omx_full', 'v1_studio')]
+        assert payloads[0] == payloads[1]
         # ... while the catalogs themselves genuinely DO differ.
         closes = {fixed_catalog(p).recipe_for_type('wuerfel').gripper_close_rad
-                  for p in ('omx_full', 'edu6_studio', 'edu1_studio')}
-        assert len(closes) == 3
+                  for p in ('omx_full', 'v1_studio')}
+        assert len(closes) == 2

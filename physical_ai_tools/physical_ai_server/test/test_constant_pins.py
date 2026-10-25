@@ -121,7 +121,7 @@ ALLOWLIST: dict[str, str] = {
         'pin would. ' + _TIER2),
     '_FK_TOL_M': (
         'a SOLVER tolerance, exercised by every exact-FK assertion in '
-        'test_edu1_ik / test_edu6_ik. ' + _TIER2),
+        'test_v1_ik. ' + _TIER2),
     '_L_TOOL': (
         'kinematics, pinned by the golden fixtures. ' + _TIER2),
     '_R_MAX_M': (

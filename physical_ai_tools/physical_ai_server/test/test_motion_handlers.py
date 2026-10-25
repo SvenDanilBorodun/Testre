@@ -149,8 +149,8 @@ def test_close_on_object_refuses_a_corrupt_gripper_rad_instead_of_opening():
     #
     # It used to be clamped, and `max(closed, min(open, v))` clamps a too-HIGH
     # value to GRIPPER_OPEN_RAD — so „schließe um" commanded the jaws FULLY OPEN,
-    # the exact opposite of what the block says. Measured 2026-09-07 on edu6:
-    # gripper_close_rad=100 -> commanded 1.75 (its open value), and that value
+    # the exact opposite of what the block says. Measured 2026-09-07 on a
+    # Feetech arm: gripper_close_rad=100 -> commanded its open value, and that value
     # was then stored as ctx.last_commanded_close_rad, which pushed
     # _held_threshold_rad onto its out-of-band fallback and made
     # check_grasp_held answer True unconditionally for the rest of the run.

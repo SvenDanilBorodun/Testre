@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Render the edu1_studio work mat (Arbeits-Matte) for the classroom kit.
+"""Render the v1_studio work mat (Arbeits-Matte) for the classroom kit.
 
-WHY A SEPARATE MAT: the edu6 mat is a half fan of radius ~0.21 m with no camera
-marking at all. Edu:1 is a DIFFERENT problem in three ways:
+WHY A SEPARATE MAT: the V1 is a different problem from the OMX in three ways:
 
-* it reaches 0.35 m, not 0.21 m, so the mat is ~3x the area and the scene
-  camera can no longer see the whole of it at a useful tag size;
+* it reaches 0.34 m over a ±90° fan, so the scene camera can no longer see the
+  whole of it at a useful tag size;
 * the usable PLACEMENT zone is therefore NOT the reach ring - it is the
   INTERSECTION of the reach ring with the region where the scene camera still
   resolves a 24 mm AprilTag above the detector's cliff. This mat prints that
@@ -15,7 +14,14 @@ marking at all. Edu:1 is a DIFFERENT problem in three ways:
 
 Every dimension is READ FROM THE CODE (robot_profiles + the IK solver +
 calibration_manager's board origin + the object catalog) or DERIVED from the
-camera model below - never typed in twice.
+camera model below - never typed in twice. The one exception is the base
+OUTLINE: the shipped base mesh's footprint in the WORLD frame (the URDF base
+rotated 180° about z), traced once from the mesh and written below as
+``V1_BASE_OUTLINE_M``, because the box model only knows the base's bounding box.
+
+The ChArUco origin stays at calibration_manager's BOARD_ORIGIN (0.18, 0.075) in
+the V1 world frame, exactly as ``generate_omx_mat.py`` draws it for the OMX;
+the board's near edge is then 129.25 mm in front of the V1 base's front edge.
 
 The one thing this file cannot read from the code is the scene camera's real
 horizontal field of view, because nothing in the tree measures it. It is a CLI
@@ -23,9 +29,8 @@ argument with a documented default, and the mat prints the assumption it was
 generated under in its own title block. See ``--hfov``.
 
 Usage:
-    python tools/generate_edu1_mat.py                      # -> edu1_mat.pdf
-    python tools/generate_edu1_mat.py --hfov 78 --cam-width 1280 --cam-height 720
-    python tools/generate_edu1_mat.py --tiles a1           # 2 x A1 landscape
+    python tools/generate_v1_mat.py                        # -> classroom_kit/v1_mat.pdf
+    python tools/generate_v1_mat.py --hfov 78 --cam-width 1280 --cam-height 720
 
 Print at 100% scale ("Tatsächliche Größe", never fit-to-page) and check the
 printed 100 mm ruler mark with a real ruler before use.
@@ -55,17 +60,28 @@ _VIOLET = (170, 70, 140)
 
 # ── camera fixture (the thing this mat is FOR) ──────────────────────────────
 # Lens standoff is bounded BELOW by the arm's own swept envelope: measured
-# through the shipped box model (arm_geometry.EDU1_LINK_BOXES via
-# ik.link_frames) over HOME + every solver grasp inside the printed ring + the
-# joint-space glides between them, the arm reaches 480 mm in plan radius and
-# NO body point passes x = 0.50 m. 0.55 m gives 70 mm of margin on a model that
-# is already conservative (AABBs of the meshes).
+# through the shipped box model (arm_geometry.V1_LINK_BOXES via ik.link_frames)
+# over HOME + every solver grasp inside the printed ring + the joint-space
+# glides between them, no body point passes world x = 0.473 m. 0.55 m gives
+# 77 mm of margin on a model that is already conservative (AABBs of the meshes).
 LENS_X_M = 0.55
 LENS_Z_M = 0.45
 TAG_PX_MIN = 20.0     # detector cliff measured at 16 px (92 %) / 18 px (100 %)
 
+# ── the base footprint, WORLD frame (metres) ────────────────────────────────
+# Section of the shipped base_link mesh 0.5 mm above its bottom (the table),
+# rotated into the world frame: a 100 × 150 mm rectangle (x ∈ [−49.25, 50.75]
+# mm, y ±75 mm) with 8 mm × 45° chamfers; the joint-1 axis is the world origin.
+# The two M5 mounting holes are the ones left after the base redesign.
+V1_BASE_OUTLINE_M = (
+    (-0.04925, -0.067), (-0.04925, 0.067), (-0.04125, 0.075), (0.04275, 0.075),
+    (0.05075, 0.067), (0.05075, -0.067), (0.04275, -0.075), (-0.04125, -0.075),
+)
+V1_BASE_HOLES_M = ((-0.03925, 0.0625), (-0.03925, -0.0625))
+V1_BASE_HOLE_D_M = 0.0053
 
-def _load_geometry(profile_id: str = 'edu1_studio'):
+
+def _load_geometry(profile_id: str = 'v1_studio'):
     server = Path(__file__).resolve().parents[1] / 'physical_ai_tools' / 'physical_ai_server'
     sys.path.insert(0, str(server))
     from physical_ai_server import robot_profiles
@@ -90,8 +106,9 @@ def _load_geometry(profile_id: str = 'edu1_studio'):
         'outer_m': float(profile.reach_outer_m),
         'axis_x_m': float(solver.base_axis_x),
         'fan_lo': float(j1_lo), 'fan_hi': float(j1_hi),
-        'base_box': ag.EDU1_LINK_BOXES[0],
-        'link_boxes': ag.EDU1_LINK_BOXES,
+        'base_outline': V1_BASE_OUTLINE_M,
+        'base_holes': V1_BASE_HOLES_M,
+        'link_boxes': ag.V1_LINK_BOXES,
         'home': list(profile.home_joints_rad[:5]),
         'board_origin': (cm.BOARD_ORIGIN_X_M, cm.BOARD_ORIGIN_Y_M),
         'board_yaw_deg': cm.BOARD_YAW_DEG,
@@ -608,9 +625,13 @@ def draw_camera(sh, geom, tilt, aim, lens_x, lens_z):
 
 def draw_robot(sh, geom):
     ax = geom['axis_x_m']
-    (lo, hi) = geom['base_box']
-    sh.poly([(ax + lo[0], hi[1]), (ax + hi[0], hi[1]),
-             (ax + hi[0], lo[1]), (ax + lo[0], lo[1])], INK, 1.1, fill=_c(238, 239, 241))
+    outline = geom['base_outline']
+    xs = [p[0] for p in outline]
+    ys = [p[1] for p in outline]
+    sh.poly([(ax + x, y) for x, y in outline], INK, 1.1, fill=_c(238, 239, 241))
+    for hx, hy in geom['base_holes']:
+        cv2.circle(sh.img, sh.P(ax + hx, hy), sh.mm(V1_BASE_HOLE_D_M * 1000 / 2),
+                   INK, max(1, sh.mm(0.5)), cv2.LINE_AA)
     c0 = sh.P(ax, 0.0)
     cv2.circle(sh.img, c0, sh.mm(7.0), PAPER, -1, cv2.LINE_AA)
     cv2.circle(sh.img, c0, sh.mm(7.0), INK, max(1, sh.mm(0.7)), cv2.LINE_AA)
@@ -618,20 +639,22 @@ def draw_robot(sh, geom):
         sh.line((c0[0] + d * sh.mm(2), c0[1]), (c0[0] + d * sh.mm(12), c0[1]), INK, 0.6)
         sh.line((c0[0], c0[1] + d * sh.mm(2)), (c0[0], c0[1] + d * sh.mm(12)), INK, 0.6)
     cv2.circle(sh.img, c0, sh.mm(1.1), INK, -1, cv2.LINE_AA)
-    a0, a1 = sh.P(ax + hi[0] + 0.006, 0), sh.P(ax + hi[0] + 0.040, 0)
+    front, rear = max(xs), min(xs)
+    a0, a1 = sh.P(ax + front + 0.006, 0), sh.P(ax + front + 0.040, 0)
     cv2.arrowedLine(sh.img, a0, a1, INK, max(1, sh.mm(1.0)), cv2.LINE_AA, tipLength=0.32)
     sh.say((a1[0] + sh.mm(3.5), a1[1]), 'vorne', 5.0, INK, 'lm', halo=ZONE_FILL)
-    rb = sh.P(ax + lo[0] - 0.012, 0)
-    sh.say((rb[0], rb[1]), 'ROBOTER  Edu:1', 7.6, INK, 'mt', bold=True)
+    rb = sh.P(ax + rear - 0.012, 0)
+    sh.say((rb[0], rb[1]), 'ROBOTER  V1', 7.6, INK, 'mt', bold=True)
     sh.say((rb[0], rb[1] + sh.mm(9)),
-           f'Sockel {(hi[0]-lo[0])*1000:.0f} × {(hi[1]-lo[1])*1000:.0f} mm · '
+           f'Sockel {(front - rear)*1000:.0f} × {(max(ys) - min(ys))*1000:.0f} mm · '
            f'Fadenkreuz = Achse Gelenk 1 = Nullpunkt', 4.6, INK_SOFT, 'mt')
     ri = geom['inner_m']
     sh.poly([(ax + ri * math.cos(2 * math.pi * k / 240),
               ri * math.sin(2 * math.pi * k / 240)) for k in range(240)],
             STOP_EDGE, 0.9)
-    lp = sh.P(ax + 0.050, -0.120)
-    sh.line(sh.P(ax + 0.041, -0.0565), lp, STOP_EDGE, 0.4)
+    b = math.radians(-55.0)
+    lp = sh.P(ax + 0.085, -0.165)
+    sh.line(sh.P(ax + ri * math.cos(b), ri * math.sin(b)), lp, STOP_EDGE, 0.4)
     sh.say((lp[0] + sh.mm(2), lp[1]),
            f'Sperrbereich {geom["inner_m"]*1000:.0f} mm', 4.8, STOP_EDGE, 'lm', halo=PAPER)
 
@@ -640,7 +663,7 @@ def draw_header(sh, geom, tilt, aim, hfov, cw, ch, lens_x, lens_z, zone, tag_px_
     G, mask, tag_px, in_ring, step = zone
     area = mask.sum() * step * step * 1e4
     pct = 100.0 * mask.sum() / max(1, in_ring.sum())
-    sh.say(sh.pg(MARGIN_MM, 15.0), 'Arbeits-Matte  Edu:1', 15.0, INK, 'lm', bold=True)
+    sh.say(sh.pg(MARGIN_MM, 15.0), 'Arbeits-Matte  V1', 15.0, INK, 'lm', bold=True)
     sh.say(sh.pg(MARGIN_MM, 27.5), 'EduBotics · Roboter Studio · 1:1 drucken, '
            'nicht „an Seite anpassen“', 5.4, INK_SOFT, 'lm')
     x = sh.w_mm - MARGIN_MM
@@ -740,7 +763,7 @@ def draw_steps(sh, tilt, lens_z):
     sh.say(sh.pg(px0 + PW - 9, py0 + 10), 'einmal pro Klassenraum', 4.4, INK_FAINT, 'rt')
     steps = [
         'Matte flach und faltenfrei auf den Tisch kleben.',
-        'Roboter auf das graue Rechteck stellen — Pfeil zeigt nach vorne,\nFadenkreuz genau auf die Achse von Gelenk 1.',
+        'Roboter auf den grauen Umriss stellen — Pfeil zeigt nach vorne,\nFadenkreuz genau auf die Achse von Gelenk 1.',
         f'Turm mittig auf den violetten Kreis stellen,\nObjektiv {lens_z*1000:.0f} mm über der Tischplatte.',
         f'Kamera neigen (≈ {tilt:.0f}°), bis der Zielpunkt genau\nin der Bildmitte liegt.',
         'Turm und Roboter festschrauben oder festkleben.',
@@ -770,7 +793,7 @@ def draw_legend(sh):
     sh.say(sh.pg(px0 + 9, py0 + 8), 'Zeichenerklärung', 5.8, INK, 'lt', bold=True)
     items = [(ZONE_FILL, ZONE_EDGE, 'Greifzone — Arm erreicht es UND Kamera erkennt es'),
              (RING_FILL, RING_EDGE, 'Arm erreicht es, Kamera sieht den Tag zu klein'),
-             (STOP_FILL, STOP_EDGE, 'Sperrbereich — der Arm faltet auf sich selbst'),
+             (STOP_FILL, STOP_EDGE, 'Sperrbereich — der offene Greifer stößt an den Sockel'),
              (BOARD_FILL, BOARD_EDGE, 'ChArUco-Tafel (nur beim Kalibrieren)'),
              (CAM_FILL, CAM_EDGE, 'Kamera-Turm, Sichtlinie und Zielpunkt')]
     for i, (fill, edge, txt) in enumerate(items):
@@ -804,13 +827,13 @@ def draw_scale(sh):
            'Stimmt sie nicht, wurde skaliert gedruckt — dann ist jeder Radius '
            'falsch.', 4.4, STOP_EDGE, 'lt')
     sh.say(sh.pg(px0 + PW - 9, py0 + PH - 9),
-           'tools/generate_edu1_mat.py', 4.0, INK_FAINT, 'rb')
+           'tools/generate_v1_mat.py', 4.0, INK_FAINT, 'rb')
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--out', type=Path, default=Path('classroom_kit/edu1_mat.pdf'))
+    ap.add_argument('--out', type=Path, default=Path('classroom_kit/v1_mat.pdf'))
     ap.add_argument('--dpi', type=int, default=DPI_DEFAULT)
     ap.add_argument('--hfov', type=float, default=78.0,
                     help='scene-camera HORIZONTAL field of view of the OUTPUT '

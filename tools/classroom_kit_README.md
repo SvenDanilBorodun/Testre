@@ -1,6 +1,6 @@
 # Klassen-Kit für Roboter Studio
 
-Material und Anleitung für die Lehrkraft, um eine OMX-F-Station für das
+Material und Anleitung für die Lehrkraft, um eine Station (OMX-F oder V1) für das
 Roboter-Studio-Modul vorzubereiten. Aufbauzeit: ~15 Minuten.
 
 ## Inhalt des Kits
@@ -90,55 +90,53 @@ Alternativ direkt auf den Tisch mit Klebeband markieren:
   `EDUBOTICS_BOARD_ORIGIN_X_M`, `EDUBOTICS_BOARD_ORIGIN_Y_M` und (falls der Jig
   die Tafel gedreht hält) `EDUBOTICS_BOARD_YAW_DEG` anpassbar.
 
-#### 3b. Arbeits-Matte für den **EduBotics 6-Achs** (edu6_studio)
+#### 3b. Arbeits-Matte für den **V1** (v1_studio)
 
-> ⚠️ **Der OMX-Greif-Ring aus Schritt 3 ist für diesen Arm FALSCH.** Der 6-Achs-Arm
-> dreht sich am Gelenk 1 nur **±90°**, sein Arbeitsbereich ist also ein **Halbkreis
-> vor dem Arm**, kein Ring — und er ist deutlich kleiner. Eine Ring-Matte lädt dazu
-> ein, Objekte hinter den Arm zu legen, wo er sie nie erreicht.
+> ⚠️ **Der OMX-Greif-Ring aus Schritt 3 ist für diesen Arm FALSCH.** Der V1 dreht
+> sich am Gelenk 1 nur **±90°**, sein Arbeitsbereich ist also ein **Halbkreis vor dem
+> Arm**, kein Ring. Eine Ring-Matte lädt dazu ein, Objekte hinter den Arm zu legen,
+> wo er sie nie erreicht.
 
 Matte drucken (maßstabsgetreu, alle Maße kommen direkt aus dem Code):
 
 ```bash
 cd Testre
-python tools/generate_edu6_mat.py --out /tmp/edu6_mat.pdf
+python tools/generate_v1_mat.py            # -> classroom_kit/v1_mat.pdf (+ .png)
 ```
 
-Das Werkzeug gibt die Maße aus und prüft die gedruckte Außengrenze gegen den
-echten IK-Löser, bevor es zeichnet. Für Arm EDU6-0001:
+Das Werkzeug liest Reichweite, Sockel-Umriss, Tafel-Position und Würfel aus dem
+Code und gibt die Maße beim Zeichnen aus. Mit den Standardwerten (Kamera 1280 × 720,
+78° horizontales Sichtfeld — `--hfov`, `--cam-width`, `--cam-height` ändern das):
 
 | Größe | Wert | warum |
 |---|---|---|
 | Fächer | **180°** (±90°) | Grenze von Gelenk 1 |
-| grün — **Greifen** bis | **20,8 cm** | letzter Radius, den der Löser auf **Greifhöhe** (1,5 cm über dem Tisch, bei einem 3-cm-Würfel) noch löst |
-| orange (gestrichelt) — **in einen Behälter** ablegen bis | **17,4 cm** | „lege ab" öffnet den Greifer **5 cm über** dem Ziel (damit die Backen über einen Behälterrand kommen). So hoch reicht der Arm nur bis hierher — weiter außen legt er trotzdem ab, nur aus geringerer Höhe |
-| rot — innere Grenze | **9,0 cm** | **Sperrbereich** — hier rechnet der Löser noch, aber der Arm faltet sich auf sich selbst (Eigenkollision) |
-| Blattgröße | **43,6 × 21,8 cm** | **passt NICHT auf A3** (A3 quer ist nur 42,0 cm breit) — auf **A2** drucken, oder auf zwei A4/A3-Blättern und an der Mittellinie zusammenkleben |
-| Mittelpunkt des Fächers | **21,3 mm** vor dem Basis-Ursprung | die **Drehachse von Gelenk 1**, nicht die Mitte des Basis-Klotzes |
+| Reichweite des Arms | **34 cm** | der äußere Radius, den der Löser auf Greif- **und** Anfahrhöhe noch löst |
+| grün — **Greifzone** | Reichweite **und** Kamera erkennt den 24-mm-Tag (20–36 px) | nur hier Würfel hinlegen; außerhalb erreicht der Arm sie zwar, die Kamera sieht den Tag aber zu klein |
+| rot — **Sperrbereich** | **10 cm** um die Drehachse | der **offene** Greifer stößt hier an den Sockel; der Roboter verweigert ein Ziel darin **nicht** von selbst — deshalb ist es auf der Matte gesperrt |
+| Kamera-Turm | **55 cm** vor der Achse, Objektiv **45 cm** über dem Tisch, ca. **54°** nach unten | gehört zur Halterung: wer den Turm bewegt, muss neu kalibrieren |
+| Blattgröße | ca. **78 × 81 cm** | größer als A1 — auf **A0** drucken lassen oder gekachelt drucken und zusammenkleben |
 
-- Den Arm so stellen, dass seine Drehachse auf dem **schwarzen Punkt an der
-  geraden Kante** steht.
-- Objekte zum **Greifen** nur zwischen dem **roten und dem grünen** Bogen ablegen.
-- **Ablegen geht im ganzen Greifbereich** (zwischen rot und grün). Der orangene
-  Bogen sagt nur, wie weit außen der Arm noch **5 cm hoch** öffnen kann — also wie
-  weit außen ein **Behälter** stehen darf. Weiter außen legt er flach auf den Tisch
-  ab und meldet die verringerte Ablegehöhe im Protokoll.
-  *(Bis 2026-07-26 wurde außerhalb des orangenen Bogens komplett verweigert; das
-  war ein Fehler und ist behoben.)*
+- Den Roboter auf den **grauen Umriss** stellen (Pfeil nach vorne); das Fadenkreuz
+  liegt genau auf der **Achse von Gelenk 1**.
+- Objekte zum **Greifen** nur in die **grüne Greifzone** legen, nie in den roten
+  Sperrbereich.
+- Nach dem Aufbau prüfen, dass alle **sechs grünen Prüfkreuze** im Kamerabild zu sehen
+  sind.
 - **Im 100-%-Maßstab drucken** („Tatsächliche Größe", nie „an Seite anpassen") und
   danach die aufgedruckte **100-mm-Marke mit einem Lineal nachmessen**. Ein
   skalierter Druck verschiebt jeden Radius und der Sperrbereich passt nicht mehr.
 
-Die **ChArUco-Tafel** liegt wie in Schritt 2/3 beschrieben; ihre Ursprungs-Ecke
-ist auf der Matte als `ChArUco-Ecke` markiert. Die Tafel selbst ist 21 × 15 cm
-und reicht damit **über den Rand der Matte hinaus** — das ist richtig, sie ist
-eine Referenz für die **Kamera**, kein Greifziel.
+Die **ChArUco-Tafel** liegt wie beim OMX bei **18 cm** vor der Basis (Ursprungs-Ecke
+bei x = 18 cm, y = 7,5 cm); auf der Matte ist ihr Platz blau gestrichelt und die
+`Ursprungs-Ecke` markiert. Sie ist eine Referenz für die **Kamera**, kein Greifziel,
+und wird nach dem Kalibrieren abgenommen.
 
-> **Noch offen (Rig-Test):** die Standard-Tafelposition (`18 cm` vor der Basis)
-> stammt vom OMX. Beim 6-Achs-Arm ist der Arbeitsbereich kleiner, die Tafel liegt
-> also relativ weiter außen. Falls die Szenen-Kamera nicht **beide** gut im Bild
-> hat (Arbeitsbereich *und* Tafel), `EDUBOTICS_BOARD_ORIGIN_X_M` /
-> `EDUBOTICS_BOARD_ORIGIN_Y_M` einmal pro Klassenraum anpassen — kein Code-Umbau.
+> **Noch offen (Rig-Test VR10):** ob die Tafel-Ursprungsecke auf dem gedruckten Umriss
+> genau dort liegt, wo der Code sie erwartet, ist nur aus dem CAD abgeleitet. Falls
+> die Szenen-Kamera nicht **beide** gut im Bild hat (Greifzone *und* Tafel),
+> `EDUBOTICS_BOARD_ORIGIN_X_M` / `EDUBOTICS_BOARD_ORIGIN_Y_M` einmal pro
+> Klassenraum anpassen — kein Code-Umbau.
 
 ### 4. AprilTags drucken und aufkleben
 

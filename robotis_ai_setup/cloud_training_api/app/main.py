@@ -306,7 +306,7 @@ def _validate_required_schema() -> None:
         "workflows",
         "workflow_versions",  # 015
         "workflow_trajectories",  # 034 — Roboter Studio Batch-2b replay trajectories
-        "edu6_arm_records",  # 036 — edu6 vendor-bench servo calibration records
+        "edu6_arm_records",  # 036 — Feetech vendor-bench servo calibration records (name kept)
         "tutorial_progress",  # 016
         "datasets",
         "progress_entries",
@@ -360,7 +360,7 @@ def _validate_required_schema() -> None:
         # ALTER TABLE would 500 on the sim write — fail the deploy fast (golden
         # order: W1 migration → W2 cloud-API).
         ("workflows", "sim_scene"),
-        # Migration 035 — edu6 arm-family tag on recorded trajectories. Every
+        # Migration 035 — the arm-family tag on recorded trajectories. Every
         # trajectory SELECT list + the insert now name this column; a deploy
         # landing the code before the ALTER TABLE would 500 the whole
         # record/replay surface.

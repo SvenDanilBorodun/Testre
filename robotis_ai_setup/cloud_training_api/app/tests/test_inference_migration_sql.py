@@ -98,11 +98,13 @@ class TestMigration048Shape(unittest.TestCase):
         self.assertGreater(mine, "20261004150000_046_close_direct_student_writes.sql")
         # 048 was the newest migration when it shipped; the only files sorted
         # after it are the RunPod training build's 047 (written later, the
-        # number it had been earmarked), 049 and v2.33.0's 050, in that order.
+        # number it had been earmarked), 049, v2.33.0's 050 and the V1's 051,
+        # in that order.
         self.assertEqual(names[names.index(mine) + 1:], [
             "20261020120000_047_hide_worker_token.sql",
             "20261020130000_049_managed_training.sql",
             "20261021120000_050_training_continuation.sql",
+            "20261025120000_051_trajectory_robot_profile_v1.sql",
         ])
         self.assertTrue(os.path.isfile(ROLLBACK))
         self.assertTrue(os.path.isfile(ASSERTIONS))
